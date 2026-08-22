@@ -318,9 +318,13 @@ Current implementation baseline:
   deterministic revision ops (add/confirm/refute/supersede/amend, all with
   provenance), bounded invocations (working-set budget with deterministic
   elided-work digest and continuation from state), and a Pi `transformContext`
-  adapter. Tool observations are audit-only EventLog records and are never
-  auto-reduced into State. It is a local first implementation, not yet a
-  production durable database or full MetaLoop adapter.
+  adapter. Every invocation ends with a mandatory cognition declaration
+  (fenced `anchor-state-delta` block: state_delta + belief_ops) that is
+  parsed, validated, and committed with revision checks; a missing
+  declaration after real work triggers exactly one nudge. Tool observations
+  are audit-only EventLog records and are never auto-reduced into State.
+  It is a local first implementation, not yet a production durable
+  database or full MetaLoop adapter.
 
 Target Anchor behavior:
 

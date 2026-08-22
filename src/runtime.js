@@ -14,6 +14,7 @@ import { StateStore } from "./state.js";
 export class AnchorRuntime {
   #lastUserIndex = null;
   #turnObservations = [];
+  #declarationNudged = false;
 
   constructor({ session, runtimeHost, store, purpose = "work", capabilities = [], disablePiCompaction = true, turnBudget = {} }) {
     this.runtimeHost = runtimeHost;
@@ -126,7 +127,47 @@ export class AnchorRuntime {
 
   async prompt(text, options) {
     await this.fallback;
-    return this.session.prompt(text, options);
+    const result = await this.session.prompt(text, options);
+    await this.#captureDeclaration();
+    return result;
+  }
+
+  // P1: mandatory cognition declaration. Parse the final assistant message
+  // for an anchor-state-delta block; commit it if valid, nudge once if the
+  // turn did real work but declared nothing.
+  async #captureDeclaration() {
+    const messages = this.session.messages ?? [];
+    const lastAssistant = [...messages].reverse().find((message) => message?.role === "assistant");
+    const parsed = parseStateDelta(messageText(lastAssistant?.content));
+    if (parsed) {
+      await this.#commitDeclaration(parsed);
+      return;
+    }
+    if (this.#turnObservations.length === 0 || this.#declarationNudged) return;
+    this.#declarationNudged = true;
+    await this.session.prompt([
+      "[anchor] Your reply did not include a cognition declaration.",
+      "Before finishing, append a fenced block:\n```anchor-state-delta",
+      '{ "state_delta": { "completed": [], "decisions": [], "open_questions": [], "next_action": "..." }, "belief_ops": [] }',
+      "```",
+      "Report only what you actually established this turn; use empty arrays if nothing changed.",
+    ].join("\n"));
+    const nudgedMessages = this.session.messages ?? [];
+    const nudgedAssistant = [...nudgedMessages].reverse().find((message) => message?.role === "assistant");
+    const nudged = parseStateDelta(messageText(nudgedAssistant?.content));
+    if (nudged) await this.#commitDeclaration(nudged);
+    else await this.store.recordObservation({ kind: "note", summary: "declaration missing: model did not emit anchor-state-delta after nudge" });
+  }
+
+  async #commitDeclaration(parsed) {
+    this.#declarationNudged = false;
+    const state = await this.store.read();
+    const expectedRevision = state.revision;
+    const { state_delta: delta = {}, belief_ops = [] } = parsed;
+    if (belief_ops.length > 0) await this.store.applyBeliefOps(belief_ops, { expectedRevision });
+    const meaningful = delta.completed?.length || delta.failures?.length || delta.decisions?.length || delta.open_questions?.length || delta.next_action !== undefined || delta.artifacts?.length || delta.evidence?.length || delta.phase !== undefined;
+    if (meaningful) await this.store.applyResult({ type: "state_delta", ...delta }, { expectedRevision: expectedRevision + (belief_ops.length > 0 ? 1 : 0) });
+    else if (belief_ops.length === 0) await this.store.recordObservation({ kind: "note", summary: "declaration empty: no state change to commit" });
   }
 
   // Run a task with automatic continuation across bounded invocations:
@@ -200,6 +241,7 @@ export class AnchorRuntime {
           this.#turnObservations = [];
           this.checkpointPending = false;
           this.lastTurnCheckpointed = false;
+          this.#declarationNudged = false;
         }
         this.#lastUserIndex = lastUser;
       }
@@ -237,8 +279,10 @@ export class AnchorRuntime {
           digestLines.length ? digestLines.join("\n") : "(no tool observations recorded)",
           "</elided-work-digest>",
           "",
-          "Continue without repeating elided work. Conclude this phase promptly:",
-          "report confirmed findings, decisions, open questions, and next_action so they can be committed to authoritative state.",
+          "Conclude this phase promptly. End your reply with a cognition declaration:",
+          '```anchor-state-delta',
+          '{ "state_delta": { "completed": [], "decisions": [], "open_questions": [], "next_action": "..." }, "belief_ops": [] }',
+          '```',
         ].join("\n"),
       };
     }
@@ -297,6 +341,25 @@ function estimateMessageChars(message) {
   if (typeof content === "string") return content.length;
   if (!Array.isArray(content)) return 0;
   return content.reduce((sum, item) => sum + (typeof item?.text === "string" ? item.text.length : 0), 0);
+}
+
+function messageText(content) {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content.filter((item) => item?.type === "text").map((item) => item.text).join("\n");
+}
+
+export function parseStateDelta(text) {
+  if (typeof text !== "string") return null;
+  const match = text.match(/```anchor-state-delta\s*([\s\S]*?)```/);
+  if (!match) return null;
+  try {
+    const parsed = JSON.parse(match[1]);
+    if (!parsed || typeof parsed !== "object") return null;
+    return parsed;
+  } catch {
+    return null;
+  }
 }
 
 export { StateStore };
