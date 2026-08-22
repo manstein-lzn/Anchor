@@ -1,9 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { AnchorRuntime, parseStateDelta } from "../src/runtime.js";
+import { AnchorRuntime, normalizeDeclaration, parseStateDelta } from "../src/runtime.js";
 import { StateStore } from "../src/state.js";
 
 const DECLARATION = [
@@ -16,10 +16,13 @@ const DECLARATION = [
   "```",
 ].join("\n");
 
-function makeRuntime(store) {
+function makeRuntime(store, promptImpl) {
   const listeners = [];
   const session = {
     messages: [],
+    // The wrapper installed at bind time delegates to this implementation;
+    // tests fire agent_end through listeners[0] to gate the capture.
+    prompt: async (text) => promptImpl(text),
     agent: {
       transformContext: undefined,
       subscribe(listener) { listeners.push(listener); return () => {}; },
@@ -27,7 +30,8 @@ function makeRuntime(store) {
     dispose() {},
   };
   const runtime = new AnchorRuntime({ session, store, purpose: "work", turnBudget: { maxTurnChars: 1_000_000 } });
-  return { runtime, session, listeners };
+  const endTurn = () => listeners[0]({ type: "agent_end", messages: [] });
+  return { runtime, session, listeners, endTurn };
 }
 
 test("parseStateDelta extracts fenced declarations and rejects malformed ones", () => {
@@ -41,11 +45,13 @@ test("prompt commits a valid declaration into State (delta + beliefs)", async ()
   const dir = await mkdtemp(join(tmpdir(), "anchor-"));
   const store = new StateStore(join(dir, "state.json"));
   await store.init({ goal: "capture cognition" });
-  const { runtime, session } = makeRuntime(store);
-
-  session.prompt = async () => {
+  const { runtime, session, endTurn } = makeRuntime(store, () => {
     session.messages = [{ role: "assistant", content: [{ type: "text", text: DECLARATION }] }];
-  };
+  });
+
+  // Simulate a completed turn, then any post-turn prompt resolution
+  // triggers the gated capture.
+  endTurn();
   await runtime.prompt("investigate");
 
   const state = await store.read();
@@ -54,8 +60,6 @@ test("prompt commits a valid declaration into State (delta + beliefs)", async ()
   assert.equal(state.next_action, "compute mean tau");
   const belief = state.beliefs.find((item) => item.id === "sh:fold13-weak");
   assert.equal(belief.status, "active");
-  // The belief was established by its own commit; the following delta commit
-  // advanced the revision once more.
   assert.equal(belief.established_rev, state.revision - 1);
   runtime.dispose();
 });
@@ -64,22 +68,21 @@ test("prompt nudges once when the turn did work but declared nothing", async () 
   const dir = await mkdtemp(join(tmpdir(), "anchor-"));
   const store = new StateStore(join(dir, "state.json"));
   await store.init({ goal: "enforce declaration" });
-  const { runtime, session, listeners } = makeRuntime(store);
-
   let calls = 0;
   const prompts = [];
-  session.prompt = async (text) => {
+  let toolListener = null;
+  const { runtime, session, listeners } = makeRuntime(store, async (text) => {
     calls += 1;
     prompts.push(text);
     if (calls === 1) {
-      // Simulate tool activity this turn so the nudge condition holds.
-      await listeners[0]({ type: "tool_execution_end", toolName: "bash", isError: false, result: "ls" });
+      await toolListener({ type: "tool_execution_end", toolName: "bash", isError: false, result: "ls" });
       session.messages = [{ role: "assistant", content: [{ type: "text", text: "I looked around but found nothing worth declaring." }] }];
+      listeners[0]({ type: "agent_end", messages: [] });
     } else {
-      // After the nudge, the model declares.
       session.messages = [{ role: "assistant", content: [{ type: "text", text: "Sure.\n```anchor-state-delta\n" + JSON.stringify({ state_delta: { completed: ["declared after nudge"] } }) + "\n```" }] }];
     }
-  };
+  });
+  toolListener = listeners[0];
   await runtime.prompt("do work");
 
   assert.equal(calls, 2);
@@ -94,10 +97,10 @@ test("invalid declaration payloads are rejected without corrupting State", async
   const store = new StateStore(join(dir, "state.json"));
   const initial = await store.init({ goal: "reject bad deltas" });
 
-  const { runtime, session } = makeRuntime(store);
-  session.prompt = async () => {
+  const { runtime, session, endTurn } = makeRuntime(store, () => {
     session.messages = [{ role: "assistant", content: [{ type: "text", text: "```anchor-state-delta\n{\"state_delta\":{\"completed\":\"not-an-array\"},\"belief_ops\":[]}\n```" }] }];
-  };
+  });
+  endTurn();
   await assert.rejects(() => runtime.prompt("bad output"), /must be an array of non-empty strings/);
 
   const state = await store.read();
@@ -110,17 +113,16 @@ test("file changes are auto-captured as hashed evidence without model narration"
   const dir = await mkdtemp(join(tmpdir(), "anchor-"));
   const store = new StateStore(join(dir, "state.json"));
   await store.init({ goal: "auto evidence" });
-  const { runtime, session, listeners } = makeRuntime(store);
-
   const artifactPath = join(dir, "artifact.txt");
-  // Model writes a file and declares ONLY interpretation (slim schema).
-  listeners[0]({ type: "tool_call", toolName: "write", input: { path: artifactPath } });
-  const { writeFile } = await import("node:fs/promises");
   await writeFile(artifactPath, "deterministic content");
 
-  session.prompt = async () => {
+  const { runtime, session, listeners, endTurn } = makeRuntime(store, () => {
     session.messages = [{ role: "assistant", content: [{ type: "text", text: "```anchor-state-delta\n" + JSON.stringify({ learned: "fold13 needs a rerun before aggregation.", next_action: "rerun fold13" }) + "\n```" }] }];
-  };
+  });
+
+  // Model writes a file; the harness captures it - no model mention required.
+  listeners[0]({ type: "tool_call", toolName: "write", input: { path: artifactPath } });
+  endTurn();
   await runtime.prompt("write report");
 
   const state = await store.read();
@@ -132,8 +134,7 @@ test("file changes are auto-captured as hashed evidence without model narration"
   runtime.dispose();
 });
 
-test("normalizeDeclaration maps the slim schema onto state_delta fields", async () => {
-  const { normalizeDeclaration } = await import("../src/runtime.js");
+test("normalizeDeclaration maps the slim schema onto state_delta fields", () => {
   const mapped = normalizeDeclaration({ learned: "L", blocked: "B", next_action: "N" });
   assert.deepEqual(mapped.state_delta.decisions, ["L"]);
   assert.deepEqual(mapped.state_delta.open_questions, ["B"]);

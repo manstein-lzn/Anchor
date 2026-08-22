@@ -18,6 +18,9 @@ export class AnchorRuntime {
   #turnObservations = [];
   #declarationNudged = false;
   #pendingFileWrites = new Set();
+  #pendingCapture = false;
+  #capturing = false;
+  #rawPrompt = null;
 
   constructor({ session, runtimeHost, store, purpose = "work", capabilities = [], disablePiCompaction = true, turnBudget = {} }) {
     this.runtimeHost = runtimeHost;
@@ -130,9 +133,7 @@ export class AnchorRuntime {
 
   async prompt(text, options) {
     await this.fallback;
-    const result = await this.session.prompt(text, options);
-    await this.#captureDeclaration();
-    return result;
+    return this.session.prompt(text, options);
   }
 
   // P1: mandatory cognition declaration. Parse the final assistant message
@@ -148,7 +149,9 @@ export class AnchorRuntime {
     }
     if (this.#turnObservations.length === 0 || this.#declarationNudged) return;
     this.#declarationNudged = true;
-    await this.session.prompt([
+    // Use the raw prompt: going through session.prompt would recurse into
+    // this very capture path.
+    await this.#rawPrompt([
       "[anchor] Your reply did not include a cognition declaration.",
       "Before finishing, append a fenced block:\n```anchor-state-delta",
       '{ "learned": "what this turn established, 1-3 sentences", "blocked": "omit if nothing", "next_action": "...", "belief_ops": [] }',
@@ -239,7 +242,31 @@ export class AnchorRuntime {
     this._session = session;
     if (this.disablePiCompaction) session.settingsManager?.applyOverrides?.({ compaction: { enabled: false } });
     this.#attachContextTransform(session);
+    this.#wrapSessionPrompt(session);
     this.unsubscribe = session.agent.subscribe((event) => this.#observe(session, event));
+  }
+
+  // Wrap session.prompt itself so declaration capture applies to every caller
+  // (interactive mode, runTask, CLI), not just AnchorRuntime.prompt. The
+  // capture fires once per completed turn, gated on agent_end.
+  #wrapSessionPrompt(session) {
+    if (typeof session.prompt !== "function" || session.__anchorPromptWrapped) return;
+    const original = session.prompt.bind(session);
+    this.#rawPrompt = original;
+    session.__anchorPromptWrapped = true;
+    session.prompt = async (text, options) => {
+      const result = await original(text, options);
+      if (this.#pendingCapture && !this.#capturing) {
+        this.#pendingCapture = false;
+        this.#capturing = true;
+        try {
+          await this.#captureDeclaration();
+        } finally {
+          this.#capturing = false;
+        }
+      }
+      return result;
+    };
   }
 
   #attachContextTransform(session) {
@@ -338,6 +365,7 @@ export class AnchorRuntime {
     if (event.type === "agent_end") {
       this.lastTurnCheckpointed = this.checkpointPending;
       this.checkpointPending = false;
+      this.#pendingCapture = true;
     }
     if (event.type === "agent_end" && isOverflow(event.messages) && typeof session.compact === "function") {
       this.fallback = this.fallback
