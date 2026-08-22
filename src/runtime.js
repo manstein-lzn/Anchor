@@ -316,6 +316,11 @@ export class AnchorRuntime {
         kept.unshift(currentTurn[index]);
         keptChars += size;
       }
+      // Head-pinning: the first message of the turn carries the task
+      // contract; losing it makes long invocations drift off-spec. Always
+      // keep it, even at the cost of exceeding the tail budget.
+      const head = currentTurn[0];
+      if (!kept.includes(head)) kept.unshift(head);
       const elidedMessages = currentTurn.length - kept.length;
       const digestLines = this.#turnObservations.slice(-40).map((item) => `- ${item.tool_name || "tool"}${item.isError ? " [error]" : ""}: ${item.summary}`);
       checkpoint = {

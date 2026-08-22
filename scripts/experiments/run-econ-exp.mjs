@@ -46,18 +46,28 @@ const questions = [
 const taskPrompt = [
   `There are ${files} text files at ${fixtureDir}/doc_000.txt ... doc_${String(files - 1).padStart(3, "0")}.txt.`,
   "Read EVERY file with the read tool (all of them, no skipping).",
+  "STRICT PROTOCOL: issue exactly ONE read tool call per assistant turn, in order (doc_000, doc_001, ...). Never batch multiple reads into one turn.",
   "After reading all files, output a section 'ANSWERS' containing exactly three lines:",
   ...questions.map((q) => `- ${q.split("->")[0].trim()} (write the codes you read)`),
   "Do not read anything else. Do not write files.",
 ].join("\n");
 
 // ---------- telemetry ----------
+function textLengthOf(item) {
+  if (typeof item === "string") return item.length;
+  if (!item || typeof item !== "object") return 0;
+  if (typeof item.text === "string") return item.text.length;
+  if (Array.isArray(item.content)) return item.content.reduce((s, c) => s + textLengthOf(c), 0);
+  return 0;
+}
 function estimateChars(messages) {
   return messages.reduce((sum, message) => {
     const content = message?.content;
     if (typeof content === "string") return sum + content.length;
     if (!Array.isArray(content)) return sum;
-    return sum + content.reduce((s, item) => s + (typeof item?.text === "string" ? item.text.length : 0), 0);
+    // Tool results arrive nested as {type:"tool_result", content:[...]}; a
+    // flat .text check would undercount them.
+    return sum + content.reduce((s, item) => s + textLengthOf(item), 0);
   }, 0);
 }
 const calls = [];
@@ -72,18 +82,27 @@ function attachTelemetry(session) {
 }
 
 // ---------- arms ----------
+// Each run gets an isolated cwd: pi auto-resumes the latest session per cwd,
+// and a resumed transcript contaminates the experiment (verified in e4:
+// the model blended fixtures from a previous run after a checkpoint).
+const runCwd = `${WORK}/run-${tag}-${arm}`;
+await mkdir(runCwd, { recursive: true });
 let session;
 let runtime;
 if (arm === "anchor") {
   ({ runtime } = await AnchorRuntime.create({
-    statePath: `${WORK}/state-${tag}.json`,
-    cwd: WORK,
+    statePath: `${WORK}/state-${tag}-${arm}.json`,
+    cwd: runCwd,
     codexHome: CODEX_HOME,
-    goal: "econ experiment",
+    goal: `Read all ${files} fixture docs in order and report their sentinel codes`,
+    acceptance: [
+      "All files doc_000..doc_N read via the read tool, one per turn, in order",
+      "Final reply contains an ANSWERS section listing the exact SENTINEL_FACT codes for documents 000,001,002,mid,mid+1,last-2,last-1",
+    ],
   }));
   session = runtime.session;
 } else if (arm === "baseline") {
-  const codex = await createCodexRuntime({ cwd: WORK, codexHome: CODEX_HOME });
+  const codex = await createCodexRuntime({ cwd: runCwd, codexHome: CODEX_HOME });
   const created = await createAgentSession({
     modelRuntime: codex.modelRuntime,
     settingsManager: codex.settingsManager,
@@ -95,10 +114,11 @@ if (arm === "anchor") {
 
 attachTelemetry(session);
 const started = Date.now();
+let segments = null;
 try {
   if (runtime) {
     // Multi-segment continuation is part of the architecture under test.
-    await runtime.runTask(taskPrompt, { maxSegments: 8 });
+    segments = await runtime.runTask(taskPrompt, { maxSegments: 12 });
   } else {
     await session.prompt(taskPrompt);
   }
@@ -111,7 +131,7 @@ try {
   const foundMid = recall.slice(mid, mid + 2).filter((r) => r.found).length;
   const foundLate = recall.slice(-2).filter((r) => r.found).length;
   const result = {
-    arm, files, fileBytes, tag,
+    arm, files, fileBytes, tag, segments,
     durationMs: Date.now() - started,
     modelCalls: calls.length,
     projectedCharsFirst: calls[0]?.projectedChars ?? null,
