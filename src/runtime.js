@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import {
   createAgentSession,
   createAgentSessionFromServices,
@@ -15,6 +17,7 @@ export class AnchorRuntime {
   #lastUserIndex = null;
   #turnObservations = [];
   #declarationNudged = false;
+  #pendingFileWrites = new Set();
 
   constructor({ session, runtimeHost, store, purpose = "work", capabilities = [], disablePiCompaction = true, turnBudget = {} }) {
     this.runtimeHost = runtimeHost;
@@ -148,9 +151,9 @@ export class AnchorRuntime {
     await this.session.prompt([
       "[anchor] Your reply did not include a cognition declaration.",
       "Before finishing, append a fenced block:\n```anchor-state-delta",
-      '{ "state_delta": { "completed": [], "decisions": [], "open_questions": [], "next_action": "..." }, "belief_ops": [] }',
+      '{ "learned": "what this turn established, 1-3 sentences", "blocked": "omit if nothing", "next_action": "...", "belief_ops": [] }',
       "```",
-      "Report only what you actually established this turn; use empty arrays if nothing changed.",
+      "Interpretation only - do not narrate your work; the harness already captured file changes and tool activity.",
     ].join("\n"));
     const nudgedMessages = this.session.messages ?? [];
     const nudgedAssistant = [...nudgedMessages].reverse().find((message) => message?.role === "assistant");
@@ -161,13 +164,29 @@ export class AnchorRuntime {
 
   async #commitDeclaration(parsed) {
     this.#declarationNudged = false;
+    const declaration = normalizeDeclaration(parsed);
     const state = await this.store.read();
     const expectedRevision = state.revision;
-    const { state_delta: delta = {}, belief_ops = [] } = parsed;
+    const { state_delta: delta, belief_ops } = declaration;
+
+    // Code-derived mechanical facts: file changes become hashed evidence
+    // entries automatically - the model never has to list them.
+    const knownPaths = new Set(state.evidence.map((item) => item.path ?? item.ref ?? item.id));
+    const autoEvidence = [];
+    for (const path of this.#pendingFileWrites) {
+      if (knownPaths.has(path)) continue;
+      const entry = { path, type: "file_change" };
+      const hash = await sha256OfFile(path);
+      if (hash) entry.sha256 = hash;
+      autoEvidence.push(entry);
+    }
+    if (autoEvidence.length > 0) delta.evidence = [...(delta.evidence ?? []), ...autoEvidence];
+
     if (belief_ops.length > 0) await this.store.applyBeliefOps(belief_ops, { expectedRevision });
     const meaningful = delta.completed?.length || delta.failures?.length || delta.decisions?.length || delta.open_questions?.length || delta.next_action !== undefined || delta.artifacts?.length || delta.evidence?.length || delta.phase !== undefined;
     if (meaningful) await this.store.applyResult({ type: "state_delta", ...delta }, { expectedRevision: expectedRevision + (belief_ops.length > 0 ? 1 : 0) });
     else if (belief_ops.length === 0) await this.store.recordObservation({ kind: "note", summary: "declaration empty: no state change to commit" });
+    this.#pendingFileWrites.clear();
   }
 
   // Run a task with automatic continuation across bounded invocations:
@@ -239,6 +258,7 @@ export class AnchorRuntime {
         // recorded before the very first model call of the session).
         if (this.#lastUserIndex !== null) {
           this.#turnObservations = [];
+          this.#pendingFileWrites.clear();
           this.checkpointPending = false;
           this.lastTurnCheckpointed = false;
           this.#declarationNudged = false;
@@ -281,7 +301,7 @@ export class AnchorRuntime {
           "",
           "Conclude this phase promptly. End your reply with a cognition declaration:",
           '```anchor-state-delta',
-          '{ "state_delta": { "completed": [], "decisions": [], "open_questions": [], "next_action": "..." }, "belief_ops": [] }',
+          '{ "learned": "...", "blocked": "omit if nothing", "next_action": "...", "belief_ops": [] }',
           '```',
         ].join("\n"),
       };
@@ -296,6 +316,15 @@ export class AnchorRuntime {
   }
 
   async #observe(session, event) {
+    if (event.type === "tool_call") {
+      // Mechanical fact collection: file-writing tools are recorded by code,
+      // never by model narration.
+      const path = event?.input?.path ?? event?.input?.file_path;
+      if ((event.toolName === "write" || event.toolName === "edit") && typeof path === "string" && path.trim()) {
+        this.#pendingFileWrites.add(path.trim());
+      }
+      return;
+    }
     if (event.type === "tool_execution_end") {
       this.#turnObservations.push({ tool_name: event.toolName ?? "", isError: event.isError === true, summary: summarizeToolResult(event.result).slice(0, 200) });
       await this.store.recordObservation({
@@ -357,6 +386,30 @@ export function parseStateDelta(text) {
     const parsed = JSON.parse(match[1]);
     if (!parsed || typeof parsed !== "object") return null;
     return parsed;
+  } catch {
+    return null;
+  }
+}
+
+// Accept both the full schema ({state_delta, belief_ops}) and the slim
+// interpretation-only schema ({learned, blocked, next_action, belief_ops}).
+// The model only narrates interpretation; mechanical facts are code-derived.
+export function normalizeDeclaration(parsed) {
+  const delta = { ...(parsed.state_delta ?? {}) };
+  if (typeof parsed.learned === "string" && parsed.learned.trim()) {
+    delta.decisions = [...(delta.decisions ?? []), parsed.learned.trim()];
+  }
+  if (typeof parsed.blocked === "string" && parsed.blocked.trim()) {
+    delta.open_questions = [...(delta.open_questions ?? []), parsed.blocked.trim()];
+  }
+  if (typeof parsed.next_action === "string") delta.next_action = parsed.next_action;
+  return { state_delta: delta, belief_ops: Array.isArray(parsed.belief_ops) ? parsed.belief_ops : [] };
+}
+
+async function sha256OfFile(path) {
+  try {
+    const buffer = await readFile(path);
+    return createHash("sha256").update(buffer).digest("hex");
   } catch {
     return null;
   }

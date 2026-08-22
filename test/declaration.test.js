@@ -105,3 +105,41 @@ test("invalid declaration payloads are rejected without corrupting State", async
   assert.deepEqual(state.completed, []);
   runtime.dispose();
 });
+
+test("file changes are auto-captured as hashed evidence without model narration", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "anchor-"));
+  const store = new StateStore(join(dir, "state.json"));
+  await store.init({ goal: "auto evidence" });
+  const { runtime, session, listeners } = makeRuntime(store);
+
+  const artifactPath = join(dir, "artifact.txt");
+  // Model writes a file and declares ONLY interpretation (slim schema).
+  listeners[0]({ type: "tool_call", toolName: "write", input: { path: artifactPath } });
+  const { writeFile } = await import("node:fs/promises");
+  await writeFile(artifactPath, "deterministic content");
+
+  session.prompt = async () => {
+    session.messages = [{ role: "assistant", content: [{ type: "text", text: "```anchor-state-delta\n" + JSON.stringify({ learned: "fold13 needs a rerun before aggregation.", next_action: "rerun fold13" }) + "\n```" }] }];
+  };
+  await runtime.prompt("write report");
+
+  const state = await store.read();
+  assert.deepEqual(state.decisions, ["fold13 needs a rerun before aggregation."]);
+  assert.equal(state.next_action, "rerun fold13");
+  const evidence = state.evidence.find((item) => item.path === artifactPath);
+  assert.equal(evidence.type, "file_change");
+  assert.match(evidence.sha256 ?? "", /^[a-f0-9]{64}$/);
+  runtime.dispose();
+});
+
+test("normalizeDeclaration maps the slim schema onto state_delta fields", async () => {
+  const { normalizeDeclaration } = await import("../src/runtime.js");
+  const mapped = normalizeDeclaration({ learned: "L", blocked: "B", next_action: "N" });
+  assert.deepEqual(mapped.state_delta.decisions, ["L"]);
+  assert.deepEqual(mapped.state_delta.open_questions, ["B"]);
+  assert.equal(mapped.state_delta.next_action, "N");
+  assert.deepEqual(mapped.belief_ops, []);
+  const full = normalizeDeclaration({ state_delta: { completed: ["x"] }, belief_ops: [{ op: "confirm", id: "a" }] });
+  assert.deepEqual(full.state_delta.completed, ["x"]);
+  assert.equal(full.belief_ops.length, 1);
+});
