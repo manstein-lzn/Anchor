@@ -1,0 +1,26 @@
+{
+  "name": "anchor-agent-runtime",
+  "version": "0.1.0",
+  "description": "State as Context runtime built on the Pi agent loop",
+  "type": "module",
+  "bin": {
+    "anchor": "src/cli.js"
+  },
+  "exports": {
+    ".": "./src/index.js",
+    "./state": "./src/state.js",
+    "./context": "./src/context.js",
+    "./runtime": "./src/runtime.js"
+  },
+  "scripts": {
+    "check": "node --check src/state.js && node --check src/context.js && node --check src/codex-config.js && node --check src/runtime.js && node --check src/cli.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "^0.84.2"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.19.0"
+  }
+}
