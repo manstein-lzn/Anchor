@@ -25,6 +25,8 @@ export async function loadCodexConfig({ codexHome = process.env.CODEX_HOME ?? jo
   const streamRetries = nonNegativeInt(provider.stream_max_retries, 0);
   const thinkingLevel = config.model_reasoning_effort ?? "medium";
   if (!Object.hasOwn(THINKING_LEVELS, thinkingLevel)) throw new Error(`Unsupported Codex reasoning effort: ${thinkingLevel}`);
+  const contextWindow = Number.isInteger(config.context_window) && config.context_window > 0 ? config.context_window : null;
+  const maxTokens = Number.isInteger(config.max_tokens) && config.max_tokens > 0 ? config.max_tokens : null;
   return {
     codexHome,
     configPath,
@@ -41,6 +43,8 @@ export async function loadCodexConfig({ codexHome = process.env.CODEX_HOME ?? jo
     requestMaxRetries: requestRetries,
     streamMaxRetries: streamRetries,
     disableResponseStorage: config.disable_response_storage === true,
+    contextWindowOverride: contextWindow,
+    maxTokensOverride: maxTokens,
   };
 }
 
@@ -84,8 +88,10 @@ function modelDefinition(codex) {
     reasoning: true,
     thinkingLevelMap: THINKING_LEVELS,
     input: ["text", "image"],
-    contextWindow: 272000,
-    maxTokens: 128000,
+    // Optional config.toml overrides (context_window / max_tokens): used by
+    // experiments to declare a smaller window than the provider's real one.
+    contextWindow: codex.contextWindowOverride ?? 272000,
+    maxTokens: codex.maxTokensOverride ?? 128000,
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     compat: {
       supportsReasoningEffort: true,
