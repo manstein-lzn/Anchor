@@ -1,10 +1,68 @@
+import { createHash } from "node:crypto";
+import { readFile, stat } from "node:fs/promises";
+
 const PURPOSES = new Set(["work", "resume", "review", "verify", "acceptance"]);
+
+export const DEFAULT_FRESHNESS = { staleDays: 30, staleRevisions: 200 };
+
+// Deterministic staleness: a belief is stale when its own timestamp or its
+// age in revisions exceeds the thresholds. Stale beliefs are still projected,
+// but marked so the model verifies before trusting them.
+export function beliefStaleness(belief, revision, freshness = DEFAULT_FRESHNESS) {
+  const { staleDays, staleRevisions } = { ...DEFAULT_FRESHNESS, ...freshness };
+  if (typeof belief.as_of === "string") {
+    const timestamp = Date.parse(belief.as_of);
+    if (Number.isFinite(timestamp) && Date.now() - timestamp > staleDays * 86_400_000) {
+      return `as_of ${belief.as_of} is older than ${staleDays} days`;
+    }
+  }
+  if (Number.isInteger(belief.established_rev) && Number.isInteger(revision) && revision - belief.established_rev > staleRevisions) {
+    return `aged ${revision - belief.established_rev} revisions (established at r${belief.established_rev}, now r${revision})`;
+  }
+  return null;
+}
+
+// Bounded evidence-drift check: only entries that carry both a path and a
+// sha256 are verified, at most `cap` per compile. Results are cached by
+// path+size+mtime so unchanged files are never re-hashed on the hot path.
+export async function verifyEvidence(state, { cap = 8, cache = new Map() } = {}) {
+  const candidates = (state.evidence ?? []).filter((entry) => typeof entry.path === "string" && typeof entry.sha256 === "string").slice(0, cap);
+  const drifted = [];
+  let verified = 0;
+  for (const entry of candidates) {
+    let size = null;
+    let mtimeMs = null;
+    try {
+      const stats = await stat(entry.path);
+      size = stats.size;
+      mtimeMs = stats.mtimeMs;
+    } catch {
+      // missing file: key still deterministic
+    }
+    const cacheKey = `${entry.path}|${size ?? "missing"}|${mtimeMs ?? "-"}`;
+    let actual = cache.get(cacheKey);
+    if (actual === undefined) {
+      try {
+        const buffer = await readFile(entry.path);
+        actual = createHash("sha256").update(buffer).digest("hex");
+      } catch {
+        actual = null;
+      }
+      cache.set(cacheKey, actual);
+    }
+    verified += 1;
+    if (actual !== entry.sha256.toLowerCase()) {
+      drifted.push({ path: entry.path, expected: entry.sha256, actual: actual ?? "unreadable/missing" });
+    }
+  }
+  return { verified, drifted };
+}
 
 export function activeBeliefs(state) {
   return state.beliefs.filter((belief) => belief.status === "active" || belief.status === "confirmed");
 }
 
-export function compileContext(state, { purpose = "work", capabilities = [], policyVersion = "anchor.context.v1" } = {}) {
+export function compileContext(state, { purpose = "work", capabilities = [], policyVersion = "anchor.context.v1", freshness = DEFAULT_FRESHNESS } = {}) {
   if (!PURPOSES.has(purpose)) throw new TypeError(`unknown context purpose: ${purpose}`);
   const envelope = {
     schema: "anchor.context.v1",
@@ -20,7 +78,10 @@ export function compileContext(state, { purpose = "work", capabilities = [], pol
     decisions: state.decisions,
     open_questions: state.open_questions,
     next_action: state.next_action,
-    cognition: activeBeliefs(state),
+    cognition: activeBeliefs(state).map((belief) => {
+      const stale = beliefStaleness(belief, state.revision, freshness);
+      return stale ? { ...belief, stale: true, stale_reason: stale } : belief;
+    }),
     artifacts: state.artifacts,
     evidence: state.evidence,
     allowed_actions: [...capabilities],
@@ -37,6 +98,7 @@ export function compileContext(state, { purpose = "work", capabilities = [], pol
   envelope.belief_stats = {
     total: state.beliefs.length,
     active: envelope.cognition.length,
+    stale: envelope.cognition.filter((belief) => belief.stale).length,
     superseded: state.beliefs.filter((belief) => belief.status === "superseded").length,
     refuted: state.beliefs.filter((belief) => belief.status === "refuted").length,
   };
@@ -52,8 +114,15 @@ export function renderContext(envelope) {
   }
   const beliefLines = [...byScope.entries()].flatMap(([scope, items]) => [
     `# ${scope}`,
-    ...items.map((belief) => `- [${belief.kind}/${belief.status}] ${belief.text}${belief.source ? ` (source: ${belief.source})` : ""}`),
+    ...items.map((belief) => `- [${belief.kind}/${belief.status}${belief.stale ? " \u26a0stale" : ""}] ${belief.text}${belief.stale ? ` (stale: ${belief.stale_reason})` : ""}${belief.source ? ` (source: ${belief.source})` : ""}`),
   ]);
+  const drift = envelope.evidence_check?.drifted ?? [];
+  const driftLines = drift.length
+    ? [
+        "== EVIDENCE DRIFT WARNINGS ==",
+        ...drift.map((item) => `- ${item.path}: content no longer matches recorded sha256 (${String(item.expected).slice(0, 12)}...) - verify before trusting dependent beliefs`),
+      ]
+    : [];
   return [
     "You are a short-lived invocation operating on authoritative Anchor state.",
     "Treat this context as evidence-backed task state. Do not invent facts or permissions.",
@@ -74,6 +143,7 @@ export function renderContext(envelope) {
     "<anchor-context>",
     "== CURRENT COGNITION ==",
     ...(beliefLines.length ? beliefLines : ["(no accumulated cognition yet)"]),
+    ...driftLines,
     "== STATE ENVELOPE ==",
     JSON.stringify(envelope, null, 2),
     "</anchor-context>",

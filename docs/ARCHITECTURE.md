@@ -321,7 +321,10 @@ Current implementation baseline:
   adapter. Every invocation ends with a mandatory cognition declaration
   (fenced `anchor-state-delta` block: state_delta + belief_ops) that is
   parsed, validated, and committed with revision checks; a missing
-  declaration after real work triggers exactly one nudge. Tool observations
+  declaration after real work triggers exactly one nudge. Compile-time
+  freshness marks beliefs stale by as_of/revision age, and evidence
+  sha256 drift is verified with an mtime-keyed bounded cache (no full
+  re-hash on the hot path). Tool observations
   are audit-only EventLog records and are never auto-reduced into State.
   It is a local first implementation, not yet a production durable
   database or full MetaLoop adapter.

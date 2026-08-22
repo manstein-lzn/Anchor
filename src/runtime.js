@@ -9,7 +9,7 @@ import {
   SessionManager,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
-import { compileContext, projectMessages } from "./context.js";
+import { compileContext, projectMessages, verifyEvidence } from "./context.js";
 import { createCodexRuntime } from "./codex-config.js";
 import { StateStore } from "./state.js";
 
@@ -21,8 +21,9 @@ export class AnchorRuntime {
   #pendingCapture = false;
   #capturing = false;
   #rawPrompt = null;
+  #evidenceCache;
 
-  constructor({ session, runtimeHost, store, purpose = "work", capabilities = [], disablePiCompaction = true, turnBudget = {} }) {
+  constructor({ session, runtimeHost, store, purpose = "work", capabilities = [], disablePiCompaction = true, turnBudget = {}, freshness = {} }) {
     this.runtimeHost = runtimeHost;
     this._session = session ?? runtimeHost?.session;
     this.store = store;
@@ -36,6 +37,8 @@ export class AnchorRuntime {
     // exceeds maxTurnChars, older messages are replaced by a deterministic
     // digest and the model is asked to conclude the phase (checkpoint).
     this.turnBudget = { maxTurnChars: 160_000, tailChars: 40_000, ...turnBudget };
+    this.freshness = freshness;
+    this.#evidenceCache = new Map();
     this.checkpointPending = false;
     this.lastTurnCheckpointed = false;
     this.lastCheckpointInfo = null;
@@ -274,7 +277,8 @@ export class AnchorRuntime {
     session.agent.transformContext = async (messages, signal) => {
       const started = performance.now();
       const state = await this.store.read();
-      const envelope = compileContext(state, { purpose: this.purpose, capabilities: this.capabilities });
+      const envelope = compileContext(state, { purpose: this.purpose, capabilities: this.capabilities, freshness: this.freshness });
+      envelope.evidence_check = await verifyEvidence(state, { cache: this.#evidenceCache });
       this.lastContext = envelope;
       this.metrics.compilations += 1;
       this.metrics.last_compile_ms = performance.now() - started;

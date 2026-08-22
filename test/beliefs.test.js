@@ -61,7 +61,7 @@ test("ContextEngine leads with active cognition and hides superseded beliefs", (
   });
   const envelope = compileContext(state, { purpose: "resume" });
   assert.equal(envelope.cognition.length, 1);
-  assert.deepEqual(envelope.belief_stats, { total: 2, active: 1, superseded: 0, refuted: 1 });
+  assert.deepEqual(envelope.belief_stats, { total: 2, active: 1, stale: 0, superseded: 0, refuted: 1 });
   const rendered = renderContext(envelope);
   assert.match(rendered, /CURRENT COGNITION/);
   assert.match(rendered, /\[negative_result\/active\]/);
