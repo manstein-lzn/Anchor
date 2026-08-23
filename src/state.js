@@ -146,7 +146,8 @@ export function createState({ goal, acceptance = [], constraints = [], beliefs =
 }
 
 export class StateStore {
-  constructor(path = ".anchor/state.json") {
+  constructor(path) {
+    if (typeof path !== "string" || !path.trim()) throw new TypeError("StateStore path is required");
     this.path = resolve(path);
     this.eventsPath = this.path.replace(/\.json$/, ".events.jsonl");
     this.writeQueue = Promise.resolve();

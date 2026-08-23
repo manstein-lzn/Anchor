@@ -23,9 +23,13 @@ workspace checkout when Anchor needs Pi source changes rather than its public
 Anchor's interactive CLI constructs Pi's `AgentSessionRuntime` and mounts the
 official `InteractiveMode` on an Anchor runtime host. This keeps the Pi command
 surface and terminal behavior unchanged while rebinding the State Context
-transform whenever Pi switches, forks, or resumes a session. With the default
-`.anchor/state.json` path, the State store follows the active session's project
-cwd. An explicit `--state` path remains fixed across session switches.
+transform whenever Pi switches, forks, or resumes a session. By default, the
+State store is kept under Pi's agent data directory and follows the active Pi
+session ID, so normal Anchor use does not write runtime metadata into a project.
+An explicit `--state` path remains fixed across session switches. A Pi session
+created before Anchor has no corresponding authoritative Anchor State; its first
+Anchor resume initializes only the task goal from the first user message. Anchor
+does not promote the legacy transcript into durable truth without validation.
 
 ## The narrow replacement
 

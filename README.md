@@ -56,7 +56,9 @@ anchor
 `anchor` opens the same interactive terminal experience as Pi: streaming,
 tools, slash commands, session switching, and keyboard controls. The State
 Context adapter is active only at the model-facing boundary; Pi's normal
-execution loop and UI remain in charge.
+execution loop and UI remain in charge. Anchor's default State is stored under
+Pi's user-level agent data directory and keyed by session ID, so normal use does
+not create runtime files in the project workspace.
 
 For a first task, pass the initial prompt exactly as with Pi:
 
@@ -67,9 +69,9 @@ anchor "inspect the repository and propose the next change"
 The lower-level commands remain available for scripts and diagnostics:
 
 ```bash
-anchor init --state .anchor/state.json "ship a feature"
-anchor context --state .anchor/state.json --purpose resume
-anchor run --state .anchor/state.json --goal "ship a feature" "inspect the repository"
+anchor init --state /tmp/anchor-task-state.json "ship a feature"
+anchor context --state /tmp/anchor-task-state.json --purpose resume
+anchor run --state /tmp/anchor-task-state.json --goal "ship a feature" "inspect the repository"
 ```
 
 ## License

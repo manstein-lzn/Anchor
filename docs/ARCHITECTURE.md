@@ -72,6 +72,14 @@ State contains:
 State should be materialized and incrementally updated. It must not require a
 full EventLog replay for every model call.
 
+By default, a State belongs to a Pi session and is persisted under Pi's agent
+data directory, keyed by the stable Pi session ID. Creating or resuming an
+Anchor session must not write runtime metadata into the project workspace.
+`/resume` reopens the State bound to the resumed session; `/new` creates a new
+State identity; forks receive their Pi session identity and corresponding State.
+A caller may explicitly supply a State path for scripted or externally managed
+workflows, in which case that path remains fixed.
+
 ### 3.2 EventLog
 
 EventLog is append-only history: observations, transitions, tool events,

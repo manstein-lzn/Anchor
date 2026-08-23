@@ -14,6 +14,8 @@ import { compileContext, projectMessages, verifyEvidence } from "./context.js";
 import { createCodexRuntime } from "./codex-config.js";
 import { StateStore } from "./state.js";
 
+const DEFAULT_SESSION_GOAL = "Awaiting first user task";
+
 export class AnchorRuntime {
   #lastUserIndex = null;
   #turnObservations = [];
@@ -24,14 +26,14 @@ export class AnchorRuntime {
   #turnErrored = false;
   #rawPrompt = null;
   #evidenceCache;
-  #statePathFollowsCwd = false;
-  #stateGoal = "Interactive Anchor session";
+  #sessionStateRoot;
+  #stateGoal = DEFAULT_SESSION_GOAL;
 
-  constructor({ session, runtimeHost, store, purpose = "work", capabilities = [], disablePiCompaction = true, turnBudget = {}, freshness = {}, statePathFollowsCwd = false, stateGoal = "Interactive Anchor session" }) {
+  constructor({ session, runtimeHost, store, purpose = "work", capabilities = [], disablePiCompaction = true, turnBudget = {}, freshness = {}, sessionStateRoot, stateGoal = DEFAULT_SESSION_GOAL }) {
     this.runtimeHost = runtimeHost;
     this._session = session ?? runtimeHost?.session;
     this.store = store;
-    this.#statePathFollowsCwd = statePathFollowsCwd;
+    this.#sessionStateRoot = sessionStateRoot;
     this.#stateGoal = stateGoal;
     this.purpose = purpose;
     this.capabilities = capabilities;
@@ -53,9 +55,7 @@ export class AnchorRuntime {
     if (runtimeHost) this.#installHostRebind();
   }
 
-  static async create({ statePath = ".anchor/state.json", goal, acceptance, constraints, purpose, capabilities, disablePiCompaction = true, turnBudget, codexHome, ...piOptions } = {}) {
-    const store = new StateStore(statePath);
-    if (!(await store.exists())) await store.init({ goal, acceptance, constraints });
+  static async create({ statePath, goal, acceptance, constraints, purpose, capabilities, disablePiCompaction = true, turnBudget, codexHome, ...piOptions } = {}) {
     const codex = await createCodexRuntime({ cwd: piOptions.cwd, agentDir: piOptions.agentDir, codexHome });
     const { session, ...runtime } = await createAgentSession({
       ...piOptions,
@@ -64,15 +64,17 @@ export class AnchorRuntime {
       model: codex.model,
       thinkingLevel: codex.modelReasoningEffort,
     });
-    return { runtime: new AnchorRuntime({ session, store, purpose, capabilities, disablePiCompaction, turnBudget }), ...runtime };
+    const sessionStateRoot = statePath ? undefined : defaultSessionStateRoot(piOptions.agentDir ?? getAgentDir());
+    const store = new StateStore(statePath ?? sessionStatePath(sessionStateRoot, session));
+    if (!(await store.exists())) await store.init({ goal: goal ?? inferSessionGoal(session), acceptance, constraints });
+    return { runtime: new AnchorRuntime({ session, store, purpose, capabilities, disablePiCompaction, turnBudget, sessionStateRoot, stateGoal: goal ?? DEFAULT_SESSION_GOAL }), ...runtime };
   }
 
-  static async createInteractive({ statePath = ".anchor/state.json", goal = "Interactive Anchor session", purpose = "work", capabilities = [], disablePiCompaction = true, cwd = process.cwd(), agentDir = getAgentDir(), codexHome } = {}) {
-    const followsCwd = statePath === ".anchor/state.json";
-    const initialStatePath = followsCwd ? join(cwd, ".anchor/state.json") : statePath;
-    const store = new StateStore(initialStatePath);
-    if (!(await store.exists())) await store.init({ goal });
+  static async createInteractive({ statePath, goal, purpose = "work", capabilities = [], disablePiCompaction = true, cwd = process.cwd(), agentDir = getAgentDir(), codexHome } = {}) {
     const sessionManager = SessionManager.create(cwd);
+    const sessionStateRoot = statePath ? undefined : defaultSessionStateRoot(agentDir);
+    const store = new StateStore(statePath ?? sessionStatePath(sessionStateRoot, sessionManager));
+    if (!(await store.exists())) await store.init({ goal: goal ?? inferSessionGoal(sessionManager) });
     const codex = await createCodexRuntime({ cwd, agentDir, codexHome });
     const createRuntime = async ({ cwd: sessionCwd, agentDir: sessionAgentDir, sessionManager: manager, sessionStartEvent }) => {
       const settingsManager = SettingsManager.create(sessionCwd, sessionAgentDir);
@@ -92,7 +94,7 @@ export class AnchorRuntime {
     };
     const runtimeHost = await createAgentSessionRuntime(createRuntime, { cwd, agentDir, sessionManager });
     return {
-      runtime: new AnchorRuntime({ runtimeHost, store, purpose, capabilities, disablePiCompaction, statePathFollowsCwd: followsCwd, stateGoal: goal }),
+      runtime: new AnchorRuntime({ runtimeHost, store, purpose, capabilities, disablePiCompaction, sessionStateRoot, stateGoal: goal ?? DEFAULT_SESSION_GOAL }),
       modelFallbackMessage: runtimeHost.modelFallbackMessage,
     };
   }
@@ -243,17 +245,22 @@ export class AnchorRuntime {
 
   #installHostRebind() {
     this.runtimeHost.setRebindSession(async () => {
-      if (this.#statePathFollowsCwd) await this.#bindStateForCwd(this.runtimeHost.cwd);
+      if (this.#sessionStateRoot) await this.#bindStateForSession(this.runtimeHost.session);
       this.#bindSession(this.runtimeHost.session);
       await this._rebind?.();
     });
   }
 
-  async #bindStateForCwd(cwd) {
-    const statePath = join(cwd, ".anchor/state.json");
+  async #bindStateForSession(session) {
+    const statePath = sessionStatePath(this.#sessionStateRoot, session);
     if (this.store.path === statePath) return;
     const store = new StateStore(statePath);
-    if (!(await store.exists())) await store.init({ goal: this.#stateGoal });
+    if (!(await store.exists())) {
+      const parentSession = session.sessionManager?.getHeader?.()?.parentSession;
+      const parentState = parentSession ? await readSessionState(this.#sessionStateRoot, parentSession) : null;
+      if (parentState) await initStoreFromState(store, parentState);
+      else await store.init({ goal: inferSessionGoal(session) || this.#stateGoal });
+    }
     this.store = store;
     this.#evidenceCache.clear();
   }
@@ -277,6 +284,7 @@ export class AnchorRuntime {
     this.#rawPrompt = original;
     session.__anchorPromptWrapped = true;
     session.prompt = async (text, options) => {
+      await this.#adoptFirstPromptAsGoal(text);
       const result = await original(text, options);
       if (this.#pendingCapture && !this.#capturing) {
         this.#pendingCapture = false;
@@ -289,6 +297,16 @@ export class AnchorRuntime {
       }
       return result;
     };
+  }
+
+  async #adoptFirstPromptAsGoal(prompt) {
+    if (typeof prompt !== "string" || !prompt.trim()) return;
+    const state = await this.store.read();
+    if (state.task.goal !== DEFAULT_SESSION_GOAL) return;
+    await this.store.update((current) => {
+      current.task.goal = prompt.trim().slice(0, 4000);
+      return current;
+    }, { expectedRevision: state.revision, event: "state.goal_adopted" });
   }
 
   #attachContextTransform(session) {
@@ -438,6 +456,56 @@ function estimateContextValue(value) {
   if (value.arguments && typeof value.arguments === "object") return JSON.stringify(value.arguments).length;
   if (Array.isArray(value.content)) return value.content.reduce((sum, item) => sum + estimateContextValue(item), 0);
   return 0;
+}
+
+function defaultSessionStateRoot(agentDir) {
+  return join(agentDir, "anchor", "sessions");
+}
+
+function sessionStatePath(root, sessionOrManager) {
+  const manager = sessionOrManager?.sessionManager ?? sessionOrManager;
+  const sessionId = manager?.getSessionId?.();
+  if (typeof sessionId !== "string" || !sessionId) throw new Error("Pi session ID is required for Anchor State");
+  return join(root, sessionId, "state.json");
+}
+
+function inferSessionGoal(sessionOrManager) {
+  const manager = sessionOrManager?.sessionManager ?? sessionOrManager;
+  const messages = manager?.buildSessionContext?.()?.messages ?? sessionOrManager?.messages ?? [];
+  const firstUser = messages.find((message) => message?.role === "user");
+  const text = messageText(firstUser?.content).trim();
+  return text ? text.slice(0, 4000) : DEFAULT_SESSION_GOAL;
+}
+
+async function readSessionState(root, sessionFile) {
+  try {
+    const [headerLine] = (await readFile(sessionFile, "utf8")).split(/\r?\n/, 1);
+    const sessionId = JSON.parse(headerLine)?.id;
+    if (typeof sessionId !== "string" || !sessionId) return null;
+    const parentStore = new StateStore(join(root, sessionId, "state.json"));
+    return await parentStore.exists() ? parentStore.read() : null;
+  } catch {
+    return null;
+  }
+}
+
+async function initStoreFromState(store, source) {
+  await store.init({
+    goal: source.task.goal,
+    revision: source.revision,
+    updated_at: source.updated_at,
+    acceptance: source.task.acceptance,
+    constraints: source.task.constraints,
+    beliefs: source.beliefs,
+    phase: source.phase,
+    completed: source.completed,
+    failures: source.failures,
+    decisions: source.decisions,
+    open_questions: source.open_questions,
+    next_action: source.next_action,
+    artifacts: source.artifacts,
+    evidence: source.evidence,
+  });
 }
 
 function messageText(content) {

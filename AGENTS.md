@@ -35,6 +35,10 @@ This document is normative for runtime changes.
   interruption, retry, and user-facing session behavior.
 - Anchor is responsible for State, Evidence, Context projection, Result
   validation, and deterministic State reduction.
+- Default Anchor runtime data is session-scoped and stored under Pi's agent data
+  directory, keyed by Pi session identity. Normal `anchor` use must not create
+  or modify files in the project workspace. Project-local State is allowed only
+  when the user explicitly supplies a State path.
 - MetaLoop may provide durable project/task/attempt/evidence/acceptance storage;
   Anchor must not duplicate its truth or create a second writer.
 - Do not add Master, Bubble, Role, scheduler, agent pool, vector memory, or

@@ -1,11 +1,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { compileContext } from "../src/context.js";
 import { AnchorRuntime } from "../src/runtime.js";
 import { StateStore, createState } from "../src/state.js";
+
+test("StateStore requires an explicit persistence path", () => {
+  assert.throws(() => new StateStore(), /path is required/);
+});
 
 test("StateStore persists revisions and deterministic normalization", async () => {
   const dir = await mkdtemp(join(tmpdir(), "anchor-"));
@@ -68,6 +72,26 @@ test("AnchorRuntime replaces only the model-facing context", async () => {
   assert.equal(listeners.length, 0);
 });
 
+test("AnchorRuntime adopts the first user prompt as a new session goal", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "anchor-"));
+  const store = new StateStore(join(dir, "state.json"));
+  await store.init({ goal: "Awaiting first user task" });
+  const listeners = [];
+  const session = {
+    messages: [],
+    agent: {
+      transformContext: undefined,
+      subscribe(listener) { listeners.push(listener); return () => {}; },
+    },
+    prompt: async (text) => { session.messages.push({ role: "user", content: [{ type: "text", text }] }); },
+    dispose() {},
+  };
+  const runtime = new AnchorRuntime({ session, store });
+  await runtime.prompt("research the last two weeks");
+  assert.equal((await store.read()).task.goal, "research the last two weeks");
+  runtime.dispose();
+});
+
 test("AnchorRuntime keeps overflow compact as an explicit fallback", async () => {
   const dir = await mkdtemp(join(tmpdir(), "anchor-"));
   const store = new StateStore(join(dir, "state.json"));
@@ -91,33 +115,107 @@ test("AnchorRuntime keeps overflow compact as an explicit fallback", async () =>
   runtime.dispose();
 });
 
-test("AnchorRuntime follows the session cwd when Pi replaces a session", async () => {
-  const firstDir = await mkdtemp(join(tmpdir(), "anchor-first-"));
-  const secondDir = await mkdtemp(join(tmpdir(), "anchor-second-"));
-  const firstStore = new StateStore(join(firstDir, ".anchor/state.json"));
-  const secondStore = new StateStore(join(secondDir, ".anchor/state.json"));
+test("AnchorRuntime follows Pi session identity without writing project State", async () => {
+  const projectDir = await mkdtemp(join(tmpdir(), "anchor-project-"));
+  const stateRoot = await mkdtemp(join(tmpdir(), "anchor-session-state-"));
+  const firstStore = new StateStore(join(stateRoot, "session-one", "state.json"));
+  const secondStore = new StateStore(join(stateRoot, "session-two", "state.json"));
   await firstStore.init({ goal: "first task" });
-  await secondStore.init({ goal: "statetune research" });
-  const makeSession = () => ({
+  await secondStore.init({ goal: "resumed research" });
+  const makeSession = (id) => ({
+    sessionManager: { getSessionId: () => id, getHeader: () => ({ type: "session", id }) },
     agent: { transformContext: undefined, subscribe() { return () => {}; } },
     settingsManager: { applyOverrides() {} },
     dispose() {},
   });
-  const first = makeSession();
-  const second = makeSession();
+  const first = makeSession("session-one");
+  const second = makeSession("session-two");
   let rebind;
   const host = {
     session: first,
-    cwd: firstDir,
+    cwd: projectDir,
     setRebindSession(callback) { rebind = callback; },
     dispose() {},
   };
-  const runtime = new AnchorRuntime({ runtimeHost: host, store: firstStore, statePathFollowsCwd: true });
+  const runtime = new AnchorRuntime({ runtimeHost: host, store: firstStore, sessionStateRoot: stateRoot });
   host.session = second;
-  host.cwd = secondDir;
   await rebind();
   const projected = await second.agent.transformContext([{ role: "user", content: [{ type: "text", text: "resume" }] }]);
-  assert.match(projected[0].content[0].text, /statetune research/);
+  assert.match(projected[0].content[0].text, /resumed research/);
+  assert.equal(await new StateStore(join(projectDir, ".anchor/state.json")).exists(), false);
+  runtime.dispose();
+});
+
+test("AnchorRuntime initializes a legacy Pi session goal without project writes", async () => {
+  const projectDir = await mkdtemp(join(tmpdir(), "anchor-legacy-project-"));
+  const stateRoot = await mkdtemp(join(tmpdir(), "anchor-legacy-state-"));
+  const bootstrapStore = new StateStore(join(stateRoot, "bootstrap", "state.json"));
+  await bootstrapStore.init({ goal: "bootstrap" });
+  const makeSession = (id, messages = []) => ({
+    sessionManager: {
+      getSessionId: () => id,
+      getHeader: () => ({ type: "session", id }),
+      buildSessionContext: () => ({ messages }),
+    },
+    agent: { transformContext: undefined, subscribe() { return () => {}; } },
+    settingsManager: { applyOverrides() {} },
+    dispose() {},
+  });
+  let rebind;
+  const host = {
+    session: makeSession("bootstrap"),
+    cwd: projectDir,
+    setRebindSession(callback) { rebind = callback; },
+    dispose() {},
+  };
+  const runtime = new AnchorRuntime({ runtimeHost: host, store: bootstrapStore, sessionStateRoot: stateRoot });
+  host.session = makeSession("legacy-session", [
+    { role: "user", content: [{ type: "text", text: "research the last two weeks" }] },
+    { role: "assistant", content: [{ type: "text", text: "working" }] },
+  ]);
+  await rebind();
+  assert.equal((await runtime.state()).task.goal, "research the last two weeks");
+  assert.equal(await new StateStore(join(projectDir, ".anchor/state.json")).exists(), false);
+  runtime.dispose();
+});
+
+test("AnchorRuntime forks inherit State from the Pi parent session", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "anchor-fork-"));
+  const stateRoot = join(dir, "states");
+  const parentId = "parent-session";
+  const childId = "child-session";
+  const parentSessionFile = join(dir, "parent.jsonl");
+  await writeFile(parentSessionFile, `${JSON.stringify({ type: "session", id: parentId, cwd: dir })}\n`);
+  const parentStore = new StateStore(join(stateRoot, parentId, "state.json"));
+  await parentStore.init({ goal: "parent task", acceptance: ["report exists"] });
+  await parentStore.applyResult({ type: "state_delta", decisions: ["parent finding"] }, { expectedRevision: 0 });
+  const bootstrapStore = new StateStore(join(stateRoot, "bootstrap", "state.json"));
+  await bootstrapStore.init({ goal: "bootstrap" });
+  const makeSession = (id, parentSession) => ({
+    sessionManager: {
+      getSessionId: () => id,
+      getHeader: () => ({ type: "session", id, parentSession }),
+      buildSessionContext: () => ({ messages: [] }),
+    },
+    agent: { transformContext: undefined, subscribe() { return () => {}; } },
+    settingsManager: { applyOverrides() {} },
+    dispose() {},
+  });
+  let rebind;
+  const host = {
+    session: makeSession("bootstrap"),
+    cwd: dir,
+    setRebindSession(callback) { rebind = callback; },
+    dispose() {},
+  };
+  const runtime = new AnchorRuntime({ runtimeHost: host, store: bootstrapStore, sessionStateRoot: stateRoot });
+  host.session = makeSession(childId, parentSessionFile);
+  await rebind();
+  const state = await runtime.state();
+  assert.equal(state.task.goal, "parent task");
+  assert.deepEqual(state.task.acceptance, ["report exists"]);
+  assert.deepEqual(state.decisions, ["parent finding"]);
+  assert.equal(runtime.store.path, join(stateRoot, childId, "state.json"));
   runtime.dispose();
 });
 

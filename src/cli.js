@@ -7,18 +7,20 @@ const command = args[0] ?? "";
 
 if (command === "init") {
   const goal = positionalArgs(1).join(" ").trim();
-  if (!goal) throw new Error("usage: anchor init <goal>");
-  const store = new StateStore(args.includes("--state") ? args[args.indexOf("--state") + 1] : ".anchor/state.json");
+  const statePath = option("--state");
+  if (!goal || !statePath) throw new Error("usage: anchor init --state <path> <goal>");
+  const store = new StateStore(statePath);
   console.log(JSON.stringify(await store.init({ goal }), null, 2));
 } else if (command === "context") {
-  const path = option("--state", ".anchor/state.json");
+  const path = option("--state");
+  if (!path) throw new Error("usage: anchor context --state <path>");
   const purpose = option("--purpose", "work");
   const state = await new StateStore(path).read();
   console.log(renderContext(compileContext(state, { purpose })));
 } else if (command === "run") {
   const prompt = positionalArgs(1).join(" ").trim();
   if (!prompt) throw new Error("usage: anchor run <prompt> [--state path]");
-  const { runtime } = await AnchorRuntime.create({ statePath: option("--state", ".anchor/state.json"), goal: option("--goal"), purpose: option("--purpose", "work"), codexHome: configuredCodexHome() });
+  const { runtime } = await AnchorRuntime.create({ statePath: option("--state"), goal: option("--goal"), purpose: option("--purpose", "work"), codexHome: configuredCodexHome() });
   try {
     const outcome = await runtime.runTask(prompt);
     const last = [...(runtime.session.messages ?? [])].reverse().find((message) => message?.role === "assistant");
@@ -31,8 +33,8 @@ if (command === "init") {
 } else {
   const initial = positionalArgs(command === "chat" ? 1 : 0);
   const { runtime, modelFallbackMessage } = await AnchorRuntime.createInteractive({
-    statePath: option("--state", ".anchor/state.json"),
-    goal: option("--goal", "Interactive Anchor session"),
+    statePath: option("--state"),
+    goal: option("--goal"),
     codexHome: configuredCodexHome(),
   });
   if (args.includes("--new-session")) await runtime.newSession();
@@ -73,7 +75,7 @@ Usage:
   anchor run <prompt>             Run one non-interactive prompt
 
 Options:
-  --state <path>                  State file (default: .anchor/state.json)
+  --state <path>                  Explicit fixed State file (default: session-scoped user data)
   --goal <text>                   Initial task goal
   --purpose <purpose>             work, resume, review, verify, acceptance
   --codex-home <path>             Codex/Pi provider config directory
