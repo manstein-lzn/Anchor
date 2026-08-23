@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-import { access } from "node:fs/promises";
 import { InteractiveMode } from "@earendil-works/pi-coding-agent";
 import { AnchorRuntime, StateStore, compileContext, renderContext } from "./index.js";
 
@@ -19,7 +18,7 @@ if (command === "init") {
 } else if (command === "run") {
   const prompt = positionalArgs(1).join(" ").trim();
   if (!prompt) throw new Error("usage: anchor run <prompt> [--state path]");
-  const { runtime } = await AnchorRuntime.create({ statePath: option("--state", ".anchor/state.json"), goal: option("--goal"), purpose: option("--purpose", "work"), codexHome: await defaultCodexHome() });
+  const { runtime } = await AnchorRuntime.create({ statePath: option("--state", ".anchor/state.json"), goal: option("--goal"), purpose: option("--purpose", "work"), codexHome: configuredCodexHome() });
   try {
     const outcome = await runtime.runTask(prompt);
     const last = [...(runtime.session.messages ?? [])].reverse().find((message) => message?.role === "assistant");
@@ -34,7 +33,7 @@ if (command === "init") {
   const { runtime, modelFallbackMessage } = await AnchorRuntime.createInteractive({
     statePath: option("--state", ".anchor/state.json"),
     goal: option("--goal", "Interactive Anchor session"),
-    codexHome: await defaultCodexHome(),
+    codexHome: configuredCodexHome(),
   });
   if (args.includes("--new-session")) await runtime.newSession();
   await new InteractiveMode(runtime, {
@@ -56,6 +55,7 @@ function positionalArgs(start = 1) {
       index += 1;
       continue;
     }
+    if (args[index] === "--new-session") continue;
     values.push(args[index]);
   }
   return values;
@@ -80,14 +80,6 @@ Options:
   --new-session                   Start a fresh Pi session in this directory`);
 }
 
-async function defaultCodexHome() {
-  const configured = option("--codex-home", process.env.ANCHOR_CODEX_HOME ?? process.env.CODEX_HOME);
-  if (configured) return configured;
-  const localTestConfig = "/root/.anchor-openrouter-test/config.toml";
-  try {
-    await access(localTestConfig);
-    return "/root/.anchor-openrouter-test";
-  } catch {
-    return undefined;
-  }
+function configuredCodexHome() {
+  return option("--codex-home", process.env.ANCHOR_CODEX_HOME ?? process.env.CODEX_HOME);
 }
