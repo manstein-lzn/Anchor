@@ -91,6 +91,66 @@ test("AnchorRuntime keeps overflow compact as an explicit fallback", async () =>
   runtime.dispose();
 });
 
+test("AnchorRuntime follows the session cwd when Pi replaces a session", async () => {
+  const firstDir = await mkdtemp(join(tmpdir(), "anchor-first-"));
+  const secondDir = await mkdtemp(join(tmpdir(), "anchor-second-"));
+  const firstStore = new StateStore(join(firstDir, ".anchor/state.json"));
+  const secondStore = new StateStore(join(secondDir, ".anchor/state.json"));
+  await firstStore.init({ goal: "first task" });
+  await secondStore.init({ goal: "statetune research" });
+  const makeSession = () => ({
+    agent: { transformContext: undefined, subscribe() { return () => {}; } },
+    settingsManager: { applyOverrides() {} },
+    dispose() {},
+  });
+  const first = makeSession();
+  const second = makeSession();
+  let rebind;
+  const host = {
+    session: first,
+    cwd: firstDir,
+    setRebindSession(callback) { rebind = callback; },
+    dispose() {},
+  };
+  const runtime = new AnchorRuntime({ runtimeHost: host, store: firstStore, statePathFollowsCwd: true });
+  host.session = second;
+  host.cwd = secondDir;
+  await rebind();
+  const projected = await second.agent.transformContext([{ role: "user", content: [{ type: "text", text: "resume" }] }]);
+  assert.match(projected[0].content[0].text, /statetune research/);
+  runtime.dispose();
+});
+
+test("AnchorRuntime keeps an explicit State path fixed across session replacement", async () => {
+  const firstDir = await mkdtemp(join(tmpdir(), "anchor-first-"));
+  const secondDir = await mkdtemp(join(tmpdir(), "anchor-second-"));
+  const fixedPath = join(firstDir, "shared-state.json");
+  const store = new StateStore(fixedPath);
+  await store.init({ goal: "fixed task" });
+  const makeSession = () => ({
+    agent: { transformContext: undefined, subscribe() { return () => {}; } },
+    settingsManager: { applyOverrides() {} },
+    dispose() {},
+  });
+  const first = makeSession();
+  const second = makeSession();
+  let rebind;
+  const host = {
+    session: first,
+    cwd: firstDir,
+    setRebindSession(callback) { rebind = callback; },
+    dispose() {},
+  };
+  const runtime = new AnchorRuntime({ runtimeHost: host, store });
+  host.session = second;
+  host.cwd = secondDir;
+  await rebind();
+  const projected = await second.agent.transformContext([{ role: "user", content: [{ type: "text", text: "resume" }] }]);
+  assert.match(projected[0].content[0].text, /fixed task/);
+  assert.equal(runtime.store.path, fixedPath);
+  runtime.dispose();
+});
+
 test("AnchorRuntime rebinds State Context when Pi replaces a session", async () => {
   const dir = await mkdtemp(join(tmpdir(), "anchor-"));
   const store = new StateStore(join(dir, "state.json"));

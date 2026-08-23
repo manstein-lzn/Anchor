@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import {
   createAgentSession,
   createAgentSessionFromServices,
@@ -23,11 +24,15 @@ export class AnchorRuntime {
   #turnErrored = false;
   #rawPrompt = null;
   #evidenceCache;
+  #statePathFollowsCwd = false;
+  #stateGoal = "Interactive Anchor session";
 
-  constructor({ session, runtimeHost, store, purpose = "work", capabilities = [], disablePiCompaction = true, turnBudget = {}, freshness = {} }) {
+  constructor({ session, runtimeHost, store, purpose = "work", capabilities = [], disablePiCompaction = true, turnBudget = {}, freshness = {}, statePathFollowsCwd = false, stateGoal = "Interactive Anchor session" }) {
     this.runtimeHost = runtimeHost;
     this._session = session ?? runtimeHost?.session;
     this.store = store;
+    this.#statePathFollowsCwd = statePathFollowsCwd;
+    this.#stateGoal = stateGoal;
     this.purpose = purpose;
     this.capabilities = capabilities;
     this.lastContext = null;
@@ -63,7 +68,9 @@ export class AnchorRuntime {
   }
 
   static async createInteractive({ statePath = ".anchor/state.json", goal = "Interactive Anchor session", purpose = "work", capabilities = [], disablePiCompaction = true, cwd = process.cwd(), agentDir = getAgentDir(), codexHome } = {}) {
-    const store = new StateStore(statePath);
+    const followsCwd = statePath === ".anchor/state.json";
+    const initialStatePath = followsCwd ? join(cwd, ".anchor/state.json") : statePath;
+    const store = new StateStore(initialStatePath);
     if (!(await store.exists())) await store.init({ goal });
     const sessionManager = SessionManager.create(cwd);
     const codex = await createCodexRuntime({ cwd, agentDir, codexHome });
@@ -85,7 +92,7 @@ export class AnchorRuntime {
     };
     const runtimeHost = await createAgentSessionRuntime(createRuntime, { cwd, agentDir, sessionManager });
     return {
-      runtime: new AnchorRuntime({ runtimeHost, store, purpose, capabilities, disablePiCompaction }),
+      runtime: new AnchorRuntime({ runtimeHost, store, purpose, capabilities, disablePiCompaction, statePathFollowsCwd: followsCwd, stateGoal: goal }),
       modelFallbackMessage: runtimeHost.modelFallbackMessage,
     };
   }
@@ -236,9 +243,19 @@ export class AnchorRuntime {
 
   #installHostRebind() {
     this.runtimeHost.setRebindSession(async () => {
+      if (this.#statePathFollowsCwd) await this.#bindStateForCwd(this.runtimeHost.cwd);
       this.#bindSession(this.runtimeHost.session);
       await this._rebind?.();
     });
+  }
+
+  async #bindStateForCwd(cwd) {
+    const statePath = join(cwd, ".anchor/state.json");
+    if (this.store.path === statePath) return;
+    const store = new StateStore(statePath);
+    if (!(await store.exists())) await store.init({ goal: this.#stateGoal });
+    this.store = store;
+    this.#evidenceCache.clear();
   }
 
   #bindSession(session) {
