@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { access } from "node:fs/promises";
 import { InteractiveMode } from "@earendil-works/pi-coding-agent";
 import { AnchorRuntime, StateStore, compileContext, renderContext } from "./index.js";
 
@@ -18,11 +19,11 @@ if (command === "init") {
 } else if (command === "run") {
   const prompt = positionalArgs(1).join(" ").trim();
   if (!prompt) throw new Error("usage: anchor run <prompt> [--state path]");
-  const { runtime } = await AnchorRuntime.create({ statePath: option("--state", ".anchor/state.json"), goal: option("--goal"), purpose: option("--purpose", "work") });
+  const { runtime } = await AnchorRuntime.create({ statePath: option("--state", ".anchor/state.json"), goal: option("--goal"), purpose: option("--purpose", "work"), codexHome: await defaultCodexHome() });
   try {
     const outcome = await runtime.runTask(prompt);
-    const last = runtime.session.messages.at(-1);
-    if (last?.role === "assistant") console.log(last.content.filter((item) => item.type === "text").map((item) => item.text).join("\n"));
+    const last = [...(runtime.session.messages ?? [])].reverse().find((message) => message?.role === "assistant");
+    if (last) console.log(last.content.filter((item) => item.type === "text").map((item) => item.text).join("\n"));
     console.error(`anchor context compile: ${runtime.metrics.last_compile_ms.toFixed(1)}ms`);
     if (outcome.segments > 1) console.error(`anchor segments: ${outcome.segments}${outcome.checkpointed ? " (stopped at checkpoint limit)" : ""}`);
   } finally { runtime.dispose(); }
@@ -33,7 +34,9 @@ if (command === "init") {
   const { runtime, modelFallbackMessage } = await AnchorRuntime.createInteractive({
     statePath: option("--state", ".anchor/state.json"),
     goal: option("--goal", "Interactive Anchor session"),
+    codexHome: await defaultCodexHome(),
   });
+  if (args.includes("--new-session")) await runtime.newSession();
   await new InteractiveMode(runtime, {
     initialMessage: initial[0],
     initialMessages: initial.slice(1),
@@ -49,7 +52,7 @@ function option(name, fallback) {
 function positionalArgs(start = 1) {
   const values = [];
   for (let index = start; index < args.length; index += 1) {
-    if (["--state", "--purpose", "--goal"].includes(args[index])) {
+    if (["--state", "--purpose", "--goal", "--codex-home"].includes(args[index])) {
       index += 1;
       continue;
     }
@@ -72,5 +75,19 @@ Usage:
 Options:
   --state <path>                  State file (default: .anchor/state.json)
   --goal <text>                   Initial task goal
-  --purpose <purpose>             work, resume, review, verify, acceptance`);
+  --purpose <purpose>             work, resume, review, verify, acceptance
+  --codex-home <path>             Codex/Pi provider config directory
+  --new-session                   Start a fresh Pi session in this directory`);
+}
+
+async function defaultCodexHome() {
+  const configured = option("--codex-home", process.env.ANCHOR_CODEX_HOME ?? process.env.CODEX_HOME);
+  if (configured) return configured;
+  const localTestConfig = "/root/.anchor-openrouter-test/config.toml";
+  try {
+    await access(localTestConfig);
+    return "/root/.anchor-openrouter-test";
+  } catch {
+    return undefined;
+  }
 }

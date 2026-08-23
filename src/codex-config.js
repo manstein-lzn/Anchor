@@ -85,7 +85,7 @@ function modelDefinition(codex) {
     id: codex.modelId,
     name: codex.modelId,
     api: codex.api,
-    reasoning: true,
+    reasoning: codex.modelReasoningEffort !== "off",
     thinkingLevelMap: THINKING_LEVELS,
     input: ["text", "image"],
     // Optional config.toml overrides (context_window / max_tokens): used by

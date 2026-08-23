@@ -20,6 +20,7 @@ export class AnchorRuntime {
   #pendingFileWrites = new Set();
   #pendingCapture = false;
   #capturing = false;
+  #turnErrored = false;
   #rawPrompt = null;
   #evidenceCache;
 
@@ -145,6 +146,7 @@ export class AnchorRuntime {
   async #captureDeclaration() {
     const messages = this.session.messages ?? [];
     const lastAssistant = [...messages].reverse().find((message) => message?.role === "assistant");
+    if (lastAssistant?.stopReason === "error" || lastAssistant?.errorMessage) return;
     const parsed = parseStateDelta(messageText(lastAssistant?.content));
     if (parsed) {
       await this.#commitDeclaration(parsed);
@@ -293,6 +295,7 @@ export class AnchorRuntime {
           this.checkpointPending = false;
           this.lastTurnCheckpointed = false;
           this.#declarationNudged = false;
+          this.#turnErrored = false;
         }
         this.#lastUserIndex = lastUser;
       }
@@ -374,7 +377,9 @@ export class AnchorRuntime {
     if (event.type === "agent_end") {
       this.lastTurnCheckpointed = this.checkpointPending;
       this.checkpointPending = false;
-      this.#pendingCapture = true;
+      const lastAssistant = [...(event.messages ?? [])].reverse().find((message) => message?.role === "assistant");
+      this.#turnErrored = lastAssistant?.stopReason === "error" || Boolean(lastAssistant?.errorMessage);
+      this.#pendingCapture = !this.#turnErrored;
     }
     if (event.type === "agent_end" && isOverflow(event.messages) && typeof session.compact === "function") {
       this.fallback = this.fallback
