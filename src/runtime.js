@@ -363,7 +363,10 @@ export class AnchorRuntime {
       kept = keptUnits.flat();
       const keptChars = estimateChars(kept);
       const elidedMessages = currentTurn.length - kept.length;
-      const digestLines = this.#turnObservations.slice(-40).map((item) => `- ${item.tool_name || "tool"}${item.isError ? " [error]" : ""}: ${item.summary}`);
+      const elidedUnits = units.filter((unit) => !keptUnits.includes(unit));
+      const replayDigestLines = elidedUnits.flat().filter((message) => message?.role === "toolResult").slice(-40).map(summarizeReplayToolResult);
+      const observationDigestLines = this.#turnObservations.slice(-40).map((item) => `- ${item.tool_name || "tool"}${item.isError ? " [error]" : ""}: ${item.summary}`);
+      const digestLines = replayDigestLines.length > 0 ? replayDigestLines : observationDigestLines;
       checkpoint = {
         elided_messages: elidedMessages,
         elided_chars: Math.max(0, totalChars - keptChars),
@@ -432,6 +435,13 @@ function isOverflow(messages = []) {
   if (!assistant) return false;
   const error = String(assistant.errorMessage ?? "").toLowerCase();
   return assistant.stopReason === "length" || /context|token|maximum.{0,12}(length|token)/.test(error);
+}
+
+function summarizeReplayToolResult(message) {
+  const summary = Array.isArray(message.content)
+    ? message.content.filter((item) => item?.type === "text").map((item) => item.text).join(" ")
+    : String(message.content ?? "");
+  return `- ${message.toolName || "tool"}${message.isError ? " [error]" : ""}: ${summary.replace(/\s+/g, " ").trim().slice(0, 200)}`;
 }
 
 function summarizeToolResult(result) {

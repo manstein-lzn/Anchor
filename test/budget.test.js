@@ -106,6 +106,7 @@ test("Invocation budget elides an oversized tool replay unit atomically", async 
   assert.equal(projected.some((message) => message.role === "assistant" && message.content.some((item) => item.type === "toolCall" && item.id === callId)), false);
   assert.equal(projected.some((message) => message.role === "toolResult" && message.toolCallId === callId), false);
   assert.match(projected[1].content[0].text, /invocation checkpoint/);
+  assert.match(projected[1].content[0].text, /- bash: y+/);
   runtime.dispose();
 });
 
