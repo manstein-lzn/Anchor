@@ -22,8 +22,10 @@ const arm = opt("--arm", "anchor");
 const files = parseInt(opt("--files", "12"), 10);
 const fileBytes = parseInt(opt("--file-bytes", "2500"), 10);
 const tag = opt("--tag", "run");
-const CODEX_HOME = "/root/.anchor-openrouter-test";
-const WORK = "/tmp/econ-exp";
+const maxSegments = parseInt(opt("--max-segments", "12"), 10);
+const anchorMaxTurnChars = parseInt(opt("--anchor-max-turn-chars", "160000"), 10);
+const CODEX_HOME = process.env.CODEX_HOME ?? "/root/.anchor-openrouter-test";
+const WORK = process.env.ECON_EXP_WORK ?? "/tmp/econ-exp";
 
 // ---------- fixtures ----------
 const fixtureDir = `${WORK}/fixtures-${tag}-${arm}`;
@@ -55,8 +57,12 @@ const taskPrompt = [
 // ---------- telemetry ----------
 function textLengthOf(item) {
   if (typeof item === "string") return item.length;
+  if (Array.isArray(item)) return item.reduce((sum, child) => sum + textLengthOf(child), 0);
   if (!item || typeof item !== "object") return 0;
   if (typeof item.text === "string") return item.text.length;
+  if (typeof item.output === "string") return item.output.length;
+  if (typeof item.arguments === "string") return item.arguments.length;
+  if (item.arguments && typeof item.arguments === "object") return JSON.stringify(item.arguments).length;
   if (Array.isArray(item.content)) return item.content.reduce((s, c) => s + textLengthOf(c), 0);
   return 0;
 }
@@ -71,6 +77,7 @@ function estimateChars(messages) {
   }, 0);
 }
 const calls = [];
+const events = [];
 function attachTelemetry(session) {
   const agent = session.agent;
   const original = agent.transformContext?.bind(agent);
@@ -79,6 +86,11 @@ function attachTelemetry(session) {
     calls.push({ at: Date.now(), projectedChars: estimateChars(projected), projectedMessages: projected.length, inputMessages: messages.length, inputChars: estimateChars(messages) });
     return projected;
   };
+  agent.subscribe?.((event) => {
+    if (["compaction_start", "compaction_end", "agent_end"].includes(event.type)) {
+      events.push({ type: event.type, reason: event.reason, aborted: event.aborted === true, at: Date.now() });
+    }
+  });
 }
 
 // ---------- arms ----------
@@ -94,6 +106,8 @@ if (arm === "anchor") {
     statePath: `${WORK}/state-${tag}-${arm}.json`,
     cwd: runCwd,
     codexHome: CODEX_HOME,
+    disablePiCompaction: true,
+    turnBudget: { maxTurnChars: anchorMaxTurnChars },
     goal: `Read all ${files} fixture docs in order and report their sentinel codes`,
     acceptance: [
       "All files doc_000..doc_N read via the read tool, one per turn, in order",
@@ -118,7 +132,7 @@ let segments = null;
 try {
   if (runtime) {
     // Multi-segment continuation is part of the architecture under test.
-    segments = await runtime.runTask(taskPrompt, { maxSegments: 12 });
+    segments = await runtime.runTask(taskPrompt, { maxSegments });
   } else {
     await session.prompt(taskPrompt);
   }
@@ -132,8 +146,13 @@ try {
   const foundLate = recall.slice(-2).filter((r) => r.found).length;
   const result = {
     arm, files, fileBytes, tag, segments,
+    codexHome: CODEX_HOME,
+    contextWindow: 128000,
+    anchorMaxTurnChars: arm === "anchor" ? anchorMaxTurnChars : null,
     durationMs: Date.now() - started,
     modelCalls: calls.length,
+    events,
+    compactions: events.filter((event) => event.type === "compaction_end" && !event.aborted).length,
     projectedCharsFirst: calls[0]?.projectedChars ?? null,
     projectedCharsLast: calls.at(-1)?.projectedChars ?? null,
     projectedCharsMax: Math.max(0, ...calls.map((c) => c.projectedChars)),
@@ -142,6 +161,9 @@ try {
     recall: { early: `${foundEarly}/3`, mid: `${foundMid}/2`, late: `${foundLate}/2`, details: recall },
     answerTail: answerText.slice(-800),
     calls,
+    assistantUsage: (session.messages ?? [])
+      .filter((message) => message?.role === "assistant" && message.usage)
+      .map((message) => ({ input: message.usage.input, output: message.usage.output, total: message.usage.totalTokens, stopReason: message.stopReason })),
   };
   const outPath = `${WORK}/result-${tag}-${arm}.json`;
   await writeFile(outPath, JSON.stringify(result, null, 2));

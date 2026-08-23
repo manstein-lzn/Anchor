@@ -403,10 +403,19 @@ function estimateChars(messages) {
 }
 
 function estimateMessageChars(message) {
-  const content = message?.content;
-  if (typeof content === "string") return content.length;
-  if (!Array.isArray(content)) return 0;
-  return content.reduce((sum, item) => sum + (typeof item?.text === "string" ? item.text.length : 0), 0);
+  return estimateContextValue(message?.content);
+}
+
+function estimateContextValue(value) {
+  if (typeof value === "string") return value.length;
+  if (Array.isArray(value)) return value.reduce((sum, item) => sum + estimateContextValue(item), 0);
+  if (!value || typeof value !== "object") return 0;
+  if (typeof value.text === "string") return value.text.length;
+  if (typeof value.output === "string") return value.output.length;
+  if (typeof value.arguments === "string") return value.arguments.length;
+  if (value.arguments && typeof value.arguments === "object") return JSON.stringify(value.arguments).length;
+  if (Array.isArray(value.content)) return value.content.reduce((sum, item) => sum + estimateContextValue(item), 0);
+  return 0;
 }
 
 function messageText(content) {
