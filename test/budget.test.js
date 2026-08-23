@@ -12,6 +12,20 @@ const bigMessage = (text, role = "assistant") => ({
   timestamp: Date.now(),
 });
 
+const toolCallMessage = (id, argument = "") => ({
+  role: "assistant",
+  content: [{ type: "toolCall", id, name: "bash", arguments: { command: argument } }],
+  timestamp: Date.now(),
+});
+
+const toolResultMessage = (id, text) => ({
+  role: "toolResult",
+  toolCallId: id,
+  toolName: "bash",
+  content: [{ type: "text", text }],
+  timestamp: Date.now(),
+});
+
 function makeRuntime(store, turnBudget) {
   const listeners = [];
   const session = {
@@ -55,6 +69,43 @@ test("Invocation budget replaces elided traffic with a deterministic digest", as
   assert.equal(projected.at(-1).content[0].text, "most recent tool output");
   // Elided middle traffic is gone.
   assert.equal(projected.some((message) => message.content[0].text === "tool result block 0 xxx"), false);
+  runtime.dispose();
+});
+
+test("Invocation budget keeps tool calls and results as one replay unit", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "anchor-"));
+  const store = new StateStore(join(dir, "state.json"));
+  await store.init({ goal: "paired replay" });
+  const { runtime, session } = makeRuntime(store, { maxTurnChars: 500, tailChars: 400 });
+  const callId = "call_keep|fc_keep";
+  const messages = [
+    bigMessage("initial task", "user"),
+    bigMessage("x".repeat(600)),
+    toolCallMessage(callId, "echo paired"),
+    toolResultMessage(callId, "y".repeat(250)),
+  ];
+  const projected = await session.agent.transformContext(messages);
+  assert.equal(projected.some((message) => message.role === "assistant" && message.content.some((item) => item.type === "toolCall" && item.id === callId)), true);
+  assert.equal(projected.some((message) => message.role === "toolResult" && message.toolCallId === callId), true);
+  runtime.dispose();
+});
+
+test("Invocation budget elides an oversized tool replay unit atomically", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "anchor-"));
+  const store = new StateStore(join(dir, "state.json"));
+  await store.init({ goal: "atomic elision" });
+  const { runtime, session } = makeRuntime(store, { maxTurnChars: 500, tailChars: 200 });
+  const callId = "call_drop|fc_drop";
+  const messages = [
+    bigMessage("initial task", "user"),
+    bigMessage("x".repeat(600)),
+    toolCallMessage(callId, "echo oversized"),
+    toolResultMessage(callId, "y".repeat(800)),
+  ];
+  const projected = await session.agent.transformContext(messages);
+  assert.equal(projected.some((message) => message.role === "assistant" && message.content.some((item) => item.type === "toolCall" && item.id === callId)), false);
+  assert.equal(projected.some((message) => message.role === "toolResult" && message.toolCallId === callId), false);
+  assert.match(projected[1].content[0].text, /invocation checkpoint/);
   runtime.dispose();
 });
 

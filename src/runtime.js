@@ -346,27 +346,30 @@ export class AnchorRuntime {
     let kept = currentTurn;
     let checkpoint = null;
     if (totalChars > maxTurnChars) {
-      kept = [];
-      let keptChars = 0;
-      for (let index = currentTurn.length - 1; index >= 0; index -= 1) {
-        const size = estimateChars([currentTurn[index]]);
-        if (kept.length > 0 && keptChars + size > tailChars) break;
-        kept.unshift(currentTurn[index]);
-        keptChars += size;
+      const units = invocationReplayUnits(currentTurn);
+      const keptUnits = [];
+      let tailSize = 0;
+      for (let index = units.length - 1; index >= 0; index -= 1) {
+        const size = estimateChars(units[index]);
+        if (tailSize + size > tailChars && (keptUnits.length > 0 || units[index].some(hasToolCall))) break;
+        keptUnits.unshift(units[index]);
+        tailSize += size;
       }
       // Head-pinning: the first message of the turn carries the task
       // contract; losing it makes long invocations drift off-spec. Always
-      // keep it, even at the cost of exceeding the tail budget.
-      const head = currentTurn[0];
-      if (!kept.includes(head)) kept.unshift(head);
+      // keep its replay unit, even at the cost of exceeding the tail budget.
+      const headUnit = units[0];
+      if (!keptUnits.includes(headUnit)) keptUnits.unshift(headUnit);
+      kept = keptUnits.flat();
+      const keptChars = estimateChars(kept);
       const elidedMessages = currentTurn.length - kept.length;
       const digestLines = this.#turnObservations.slice(-40).map((item) => `- ${item.tool_name || "tool"}${item.isError ? " [error]" : ""}: ${item.summary}`);
       checkpoint = {
         elided_messages: elidedMessages,
-        elided_chars: totalChars - keptChars,
+        elided_chars: Math.max(0, totalChars - keptChars),
         note: [
           "[anchor invocation checkpoint]",
-          `The earlier part of this invocation (${elidedMessages} messages, ~${totalChars - keptChars} chars of tool traffic) is no longer attached verbatim.`,
+          `The earlier part of this invocation (${elidedMessages} messages, ~${Math.max(0, totalChars - keptChars)} chars of tool traffic) is no longer attached verbatim.`,
           "Raw outputs remain in the session transcript and EventLog for audit.",
           "Deterministic digest of this turn's recent tool activity:",
           "<elided-work-digest>",
@@ -436,6 +439,20 @@ function summarizeToolResult(result) {
   if (!result || typeof result !== "object") return String(result ?? "");
   const text = Array.isArray(result.content) ? result.content.filter((item) => item?.type === "text").map((item) => item.text).join(" ") : JSON.stringify(result.details ?? result);
   return String(text).replace(/\s+/g, " ").trim();
+}
+
+function invocationReplayUnits(messages) {
+  const units = [];
+  for (const message of messages) {
+    const previous = units.at(-1);
+    if (message?.role === "toolResult" && previous?.some(hasToolCall)) previous.push(message);
+    else units.push([message]);
+  }
+  return units;
+}
+
+function hasToolCall(message) {
+  return message?.role === "assistant" && Array.isArray(message.content) && message.content.some((item) => item?.type === "toolCall");
 }
 
 function estimateChars(messages) {

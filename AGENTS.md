@@ -28,6 +28,8 @@ This document is normative for runtime changes.
   revisions, conflicts, and links to the original evidence.
 - Keep Pi's transcript compact as an emergency provider-overflow fallback until
   State Context has passed long-task verification. It is not the normal path.
+- Bounded invocation projection must preserve provider replay invariants. A tool
+  call and its tool result are one indivisible unit for retention or elision.
 
 ## Runtime boundaries
 

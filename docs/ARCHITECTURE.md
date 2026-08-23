@@ -152,7 +152,9 @@ An Invocation binds one Context, State revision, purpose, model configuration,
 and capability view. Pi performs the model and tool loop. Tool calls may have a
 small local turn context while the invocation is active. At the invocation
 boundary, relevant observations are reduced into State and the next Context is
-compiled afresh.
+compiled afresh. If a bounded projection elides local turn traffic, it treats an
+assistant tool-call message and all associated tool results as one replay unit.
+No provider request may contain an orphan tool result or an unmatched tool call.
 
 The runtime therefore preserves Pi's normal abilities:
 
