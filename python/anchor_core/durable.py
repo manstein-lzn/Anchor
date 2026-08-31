@@ -73,14 +73,18 @@ class DurableStore:
         title: str,
         contract: dict[str, Any],
         candidate: dict[str, Any],
+        kind: str = "planning",
     ) -> dict[str, Any]:
         session_id = _text(session_id, "session_id")
         proposal_hash = _sha256(proposal_hash, "proposal_hash")
         title = _text(title, "title")
         contract = _normalize_contract(contract)
-        normalized = _normalize_candidate(candidate, expected_kind="planning", session_id=session_id)
-        if normalized["frontier"]["source_hash"] != proposal_hash:
-            raise ValueError("planning frontier.source_hash must match proposal_hash")
+        if kind not in {"planning", "compact"}:
+            raise ValueError("begin kind must be planning or compact")
+        normalized = _normalize_candidate(candidate, expected_kind=kind, session_id=session_id)
+        frontier_key = "source_hash" if kind == "planning" else "episode_hash"
+        if normalized["frontier"][frontier_key] != proposal_hash:
+            raise ValueError(f"{kind} frontier.{frontier_key} must match proposal_hash")
         fingerprint = _digest({"title": title, "contract": contract, "candidate": normalized})
 
         with self.transaction() as conn:
@@ -342,10 +346,14 @@ class DurableStore:
 def _normalize_contract(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict) or value.get("schema") != "anchor.contract.v1":
         raise ValueError("contract schema must be anchor.contract.v1")
+    status = value.get("status", "confirmed")
+    if status not in {"provisional", "confirmed"}:
+        raise ValueError("contract.status must be provisional or confirmed")
     contract = {
         "schema": "anchor.contract.v1",
+        "status": status,
         "goal": _text(value.get("goal"), "contract.goal"),
-        "execution_plan": _text(value.get("execution_plan"), "contract.execution_plan"),
+        "execution_plan": _text(value.get("execution_plan") or "Not established.", "contract.execution_plan"),
     }
     for field in (
         "rationale",
@@ -356,8 +364,8 @@ def _normalize_contract(value: Any) -> dict[str, Any]:
         "allowed_paths",
         "risks",
     ):
-        contract[field] = _strings(value.get(field), f"contract.{field}")
-    if not contract["acceptance_criteria"]:
+        contract[field] = _strings(value.get(field, []), f"contract.{field}")
+    if status == "confirmed" and not contract["acceptance_criteria"]:
         raise ValueError("contract.acceptance_criteria must not be empty")
     return contract
 

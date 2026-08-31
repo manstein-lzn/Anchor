@@ -30,6 +30,26 @@ Rules:
 }
 {"schema":"anchor.transition.v1","dispositions":[{"item_id":"fact-1","disposition":"carry|revise|resolve|supersede|demote|archive","reason":"string","sources":["episode:..."],"replacement_id":"optional","reference":"optional"}]}`;
 
+export const BOOTSTRAP_SYSTEM = `You are the Anchor Bootstrap Agent.
+
+The user did not explicitly enter Anchor Planning. Create only a provisional
+continuity state from exactly the supplied Pi Episode. Do not invent a goal,
+constraint, acceptance criterion, decision, or fact that the Episode does not
+support. Unknown requirements belong in open_questions. This is not a summary
+and not a planning conversation.
+
+Return JSON only:
+{
+  "schema":"anchor.bootstrap.v1",
+  "title":"short task title",
+  "contract":{"schema":"anchor.contract.v1","status":"provisional","goal":"string","acceptance_criteria":[],"constraints":[],"non_goals":[],"risks":[],"verification_commands":[],"allowed_paths":[],"execution_plan":"string"},
+  "cognition":{"schema":"anchor.cognition.v3","situation":{"current_understanding":"string","confirmed_facts":[],"active_hypotheses":[],"unresolved_conflicts":[],"blockers":[]},"experience":{"decisions":[],"failed_paths":[]},"intent":{"current_directive":"string","accepted_next_action":"string","next_plan":["string"],"open_questions":[]},"knowledge_index":[]}
+}
+
+Every cognition item is an object with stable id, non-empty statement, sources,
+and relevance. Preserve uncertainty explicitly. The Contract is provisional and
+may be corrected later; do not mark it user-confirmed.`;
+
 const ITEM_GROUPS = [
   ["situation", "confirmed_facts"], ["situation", "active_hypotheses"], ["situation", "unresolved_conflicts"], ["situation", "blockers"],
   ["experience", "decisions"], ["experience", "failed_paths"], ["intent", "open_questions"],
@@ -50,6 +70,35 @@ export async function runUpdate(anchor, event, ctx) {
   const normalized = normalizeUpdateResponse(messageText(response.content), recovery.checkpoint.cognition, frontier);
   const committed = await anchor.update({ schema: "anchor.checkpoint-candidate.v1", frontier, cognition: normalized.cognition, transition_certificate: normalized.transition_certificate, provenance: { kind: "compact", model: modelName(ctx.model) } }, recovery.task?.state_version);
   return { compaction: { ...compactionReceipt(recovery.task_id, checkpointFromEvent(committed), event.preparation), usage: response.usage } };
+}
+
+export async function runBootstrap(anchor, event, ctx) {
+  const episode = episodeMessages(event.preparation);
+  const sessionId = ctx.sessionManager.getSessionId();
+  const frontier = compactFrontier(event.preparation, sessionId, episode);
+  if (!ctx.model) throw new Error("Anchor Bootstrap requires an active model");
+  const response = await ctx.modelRegistry.complete(ctx.model, {
+    systemPrompt: BOOTSTRAP_SYSTEM,
+    messages: [...convertToLlm(episode)],
+  }, { signal: event.signal });
+  const parsed = parseJson(messageText(response.content));
+  if (parsed?.schema !== "anchor.bootstrap.v1") throw new Error("Bootstrap Agent must return anchor.bootstrap.v1");
+  const contract = normalizeBootstrapContract(parsed.contract);
+  const cognition = normalizeV3(parsed.cognition);
+  const title = required(parsed.title || contract.goal, "bootstrap.title");
+  const created = await anchor.bootstrap({
+    sessionId,
+    proposalHash: frontier.episode_hash,
+    title,
+    contract,
+    checkpoint: {
+      schema: "anchor.checkpoint-candidate.v1",
+      frontier,
+      cognition,
+      provenance: { kind: "compact", model: modelName(ctx.model), bootstrap: true },
+    },
+  });
+  return { compaction: { ...compactionReceipt(created.task_id, created.checkpoint, event.preparation), usage: response.usage } };
 }
 
 export function episodeMessages(preparation) {
@@ -91,6 +140,17 @@ function normalizeV3(value) {
   cognition.intent.open_questions = itemList(value.intent?.open_questions, "open_questions");
   cognition.knowledge_index = references(value.knowledge_index);
   return cognition;
+}
+
+function normalizeBootstrapContract(value) {
+  if (!value || typeof value !== "object" || value.schema !== "anchor.contract.v1") throw new Error("Bootstrap Contract must use anchor.contract.v1");
+  return {
+    schema: "anchor.contract.v1",
+    status: "provisional",
+    goal: required(value.goal, "contract.goal"),
+    execution_plan: required(value.execution_plan || "Not established.", "contract.execution_plan"),
+    ...Object.fromEntries(["rationale", "acceptance_criteria", "constraints", "non_goals", "verification_commands", "allowed_paths", "risks"].map((field) => [field, stringList(value[field], `contract.${field}`)])),
+  };
 }
 
 function normalizeTransition(value, previous, next) {

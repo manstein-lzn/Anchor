@@ -32,10 +32,65 @@ test("Normal Pi is zero-intrusion and can enter or cancel Planning", async (t) =
   assert.equal(pi.entries.filter((entry) => entry.customType === "anchor.mode").at(-1).data.mode, "normal");
 });
 
-test("proposal seals after the complete turn, then creates one session Anchor", async (t) => {
+test("first compact lazily creates Anchor without Planning", async (t) => {
   const { agentDir, restore } = await isolatedAgentDir();
   t.after(restore);
   const pi = fakePi();
+  anchorExtension(pi.api);
+  const ctx = fakeContext(process.cwd(), pi, "session-lazy", {
+    model: { provider: "test", id: "model" },
+    modelRegistry: { complete: async () => ({ content: [{ type: "text", text: JSON.stringify({
+      schema: "anchor.bootstrap.v1",
+      title: "Lazy task",
+      contract: { schema: "anchor.contract.v1", status: "provisional", goal: "Ship the adapter", acceptance_criteria: [], constraints: [], non_goals: [], risks: [], verification_commands: [], allowed_paths: [], execution_plan: "Not established." },
+      cognition: { schema: "anchor.cognition.v3", situation: { current_understanding: "The task has started.", confirmed_facts: [], active_hypotheses: [], unresolved_conflicts: [], blockers: [] }, experience: { decisions: [], failed_paths: [] }, intent: { current_directive: "Ship the adapter.", accepted_next_action: "Inspect the adapter.", next_plan: ["Inspect the adapter."], open_questions: [] }, knowledge_index: [] },
+    }) }], usage: { input: 1, output: 1 } }) },
+  });
+  await pi.handlers.session_start({ reason: "startup" }, ctx);
+  const result = await pi.handlers.session_before_compact({
+    preparation: { firstKeptEntryId: "entry-kept", messagesToSummarize: [{ role: "user", content: [{ type: "text", text: "Ship the adapter" }] }], turnPrefixMessages: [], isSplitTurn: false, tokensBefore: 100 },
+    signal: new AbortController().signal,
+  }, ctx);
+  assert.equal(result.compaction.details.checkpoint_version, 0);
+  assert.equal(pi.entries.filter((entry) => entry.customType === "anchor.mode").at(-1).data.mode, "active");
+  await access(join(agentDir, "anchor", "sessions", "session-lazy", "anchor.db"));
+
+  const resumed = fakePi(pi.entries);
+  anchorExtension(resumed.api);
+  let resumedContext;
+  const preparation = { firstKeptEntryId: "entry-kept", messagesToSummarize: [{ role: "user", content: [{ type: "text", text: "Ship the adapter" }] }], turnPrefixMessages: [], isSplitTurn: false, tokensBefore: 100 };
+  resumedContext = fakeContext(process.cwd(), resumed, "session-lazy", {
+    compact: async ({ onComplete }) => {
+      const replay = await resumed.handlers.session_before_compact({ preparation, signal: new AbortController().signal }, resumedContext);
+      resumed.appendCompaction(replay.compaction.details);
+      onComplete({});
+    },
+  });
+  await resumed.handlers.session_start({ reason: "resume" }, resumedContext);
+  assert.equal(resumed.entries.filter((entry) => entry.type === "compaction").length, 1);
+});
+
+test("failed lazy bootstrap falls back to native compact without Anchor State", async (t) => {
+  const { agentDir, restore } = await isolatedAgentDir();
+  t.after(restore);
+  const pi = fakePi();
+  anchorExtension(pi.api);
+  const ctx = fakeContext(process.cwd(), pi, "session-bootstrap-failure", {
+    model: { provider: "test", id: "model" },
+    modelRegistry: { complete: async () => { throw new Error("provider unavailable"); } },
+  });
+  await pi.handlers.session_start({ reason: "startup" }, ctx);
+  assert.equal(await pi.handlers.session_before_compact({
+    preparation: { firstKeptEntryId: "entry-kept", messagesToSummarize: [{ role: "user", content: [{ type: "text", text: "work" }] }], turnPrefixMessages: [], isSplitTurn: false },
+    signal: new AbortController().signal,
+  }, ctx), undefined);
+  await assert.rejects(access(join(agentDir, "anchor", "sessions", "session-bootstrap-failure", "anchor.db")));
+});
+
+test("proposal seals after the complete turn, then creates one session Anchor", async (t) => {
+  const { agentDir, restore } = await isolatedAgentDir();
+  t.after(restore);
+  const pi = fakePi([], { anchor: true });
   anchorExtension(pi.api);
   const ctx = fakeContext(process.cwd(), pi, "session-active", {
     select: (title, options) => title.startsWith("How should") ? options[0] : options[0],
@@ -373,6 +428,8 @@ function fakeContext(cwd, pi, sessionId, options = {}) {
   return {
     cwd,
     hasUI: options.hasUI ?? true,
+    model: options.model,
+    modelRegistry: options.modelRegistry,
     ui: {
       select: async (title, values) => options.select ? options.select(title, values) : undefined,
       input: async (title) => options.input ? options.input(title) : undefined,

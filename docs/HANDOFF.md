@@ -1,6 +1,6 @@
 # Development Handoff
 
-Status: cognition v3 and exact Checkpoint recall complete; takeover and churn acceptance remain, 2026-08-26
+Status: cognition v3, exact Checkpoint recall, and lazy first-compact Bootstrap complete; takeover and churn acceptance remain, 2026-08-31
 
 Anchor is now a Pi package. `src/extension.js` owns the public lifecycle;
 `python/anchor_core/` is the embedded durable state implementation. The former
@@ -9,12 +9,13 @@ wrapper runtime and standalone CLI have been removed.
 Current lifecycle:
 
 ```text
-new interactive session -> Anchor / Normal Pi choice
+new interactive session -> Normal Pi (no Anchor prompt)
+Normal -> first Pi compact -> Bootstrap -> provisional Task + Checkpoint 0
 Normal -> /anchor start -> read-only Planning
 Planning -> candidate -> agent-settled seal -> Accept / Revise / Cancel
 Accept -> Task + Checkpoint 0 -> Active
 Active -> Pi Episode -> Checkpoint Update -> next context window
-resume -> same session State; tree -> no rollback; fork -> new choice
+resume -> same session State; tree -> no rollback; fork -> new Normal session
 ```
 
 New-session State defaults to
@@ -22,7 +23,8 @@ New-session State defaults to
 derived from Pi session identity. Mode entries are also identity-bound and read
 from the complete session, so tree navigation cannot change the Task and a fork
 cannot inherit writable State. Normal mode creates no Anchor State or model
-context. Normal use writes no runtime files into the project.
+context until its first compact. Normal use writes no runtime files into the
+project.
 
 SQLite now contains only `meta`, one `task`, and immutable `checkpoints`.
 Contract and Checkpoint hashes fail closed on corruption. The former Project,
@@ -45,6 +47,17 @@ Transition Certificate shape and requires item identity, provenance, and explici
 dispositions. The deterministic
 control envelope carries the immutable Contract and target frontier; only the
 previous Checkpoint and Pi Episode are semantic evidence.
+
+Normal sessions now remain entirely unobtrusive until the first Pi compact. That
+boundary invokes a dedicated Bootstrap Agent over the same Episode and atomically
+creates a provisional Task plus Checkpoint 0. Bootstrap failure falls back to
+Pi's native compact without writing valid Anchor State. A provisional Checkpoint 0
+also participates in crash-window receipt replay.
+
+Known boundary: this slice has no separate provisional-to-confirmed Contract
+upgrade command. Explicit later user corrections are carried by the current
+cognition/Update path; add a Contract revision interaction only when real use
+shows that inferred bootstrap scope needs formal confirmation.
 
 Verified baseline:
 

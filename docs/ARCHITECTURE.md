@@ -141,7 +141,7 @@ pool, or parallel writer protocol.
 
 ### 5.1 Task Contract
 
-One Pi session may own one Anchor Task. Its user-confirmed Contract contains:
+One Pi session may own one Anchor Task. Its Contract contains:
 
 ```text
 goal
@@ -153,9 +153,11 @@ verification
 confirmed execution plan
 ```
 
-Update cannot silently rewrite the Contract. A material scope change requires
-explicit user confirmation through a future Contract revision mechanism; the
-current core treats the accepted Contract as immutable.
+An explicitly planned Contract is user-confirmed and cannot be silently
+rewritten. A first compaction may instead create a `provisional` Contract from
+the exact Pi Episode. Provisional fields may be revised by later explicit user
+corrections or an eventual Planning confirmation; unknown requirements remain
+unknown rather than being invented.
 
 Normal Context projects only the Contract core required for decisions: goal,
 acceptance criteria, constraints, and non-goals. Other Contract material remains
@@ -397,7 +399,9 @@ Pi and the provider continue to own active-window handling and context limits.
 ## 9. Initialization and session lifecycle
 
 ```text
-new interactive session -> choose Anchor or Normal Pi
+new interactive session -> Normal Pi (no State)
+
+Normal -- first Pi compact --> Bootstrap Update -> provisional Task + Checkpoint 0
 
 Normal -- /anchor start --> read-only Planning
                                 |
@@ -432,8 +436,9 @@ new Pi session receives a new identity and does not inherit writable State.
 
 User-visible modes remain only `Normal`, `Planning`, and `Active`. Update is a
 transaction, blocked is a health condition, and completion is Task State.
-Normal mode has no Anchor prompt, model tool, State file, projection, or compact
-behavior.
+Normal mode has no Anchor prompt, model tool, State file, or projection. Its
+first compaction may lazily bootstrap Anchor; if bootstrap fails, Pi's native
+compact proceeds and no Anchor State is written.
 
 ## 10. Compact receipt and recovery
 
@@ -557,6 +562,8 @@ minimal-sufficient-cognition slice:
 
 - Pi Extension modes, read-only Planning, sealed proposal review, and explicit
   user acceptance;
+- lazy first-compaction Bootstrap Update with provisional Task/Checkpoint 0 and
+  native compact fallback;
 - session-scoped SQLite containing one Task and immutable Checkpoints;
 - `anchor.checkpoint.v1` with source frontier, parent hash, and provenance;
 - `anchor.cognition.v3` with Situation, Experience, Intent, Knowledge Index,
@@ -577,6 +584,9 @@ The remaining target gaps are:
   (`checkpoint:<version>:item:<id>`);
 - old v2 compatibility is intentionally permissive at the durable boundary and
   should be removed after pre-release sessions are no longer relevant;
+- provisional Bootstrap has no separate Contract-promotion command yet; later
+  explicit corrections are represented through cognition until that need is
+  demonstrated;
 - focused fresh-Agent takeover and 100-Update projection plateau tests exist;
   real-provider long-task acceptance and production p50/p95 measurements do not
   yet exist;

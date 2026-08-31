@@ -22,6 +22,13 @@ def main(argv: list[str] | None = None) -> int:
     begin.add_argument("--contract-json", required=True)
     begin.add_argument("--checkpoint-json", required=True)
 
+    bootstrap = commands.add_parser("bootstrap")
+    bootstrap.add_argument("--session-id", required=True)
+    bootstrap.add_argument("--proposal-hash", required=True)
+    bootstrap.add_argument("--title", required=True)
+    bootstrap.add_argument("--contract-json", required=True)
+    bootstrap.add_argument("--checkpoint-json", required=True)
+
     recover = commands.add_parser("recover")
     recover.add_argument("--session-id", required=True)
     recover.add_argument("--task-id")
@@ -41,7 +48,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     store: DurableStore | None = None
     try:
-        store = DurableStore(args.state_path, create=args.command == "begin")
+        store = DurableStore(args.state_path, create=args.command in {"begin", "bootstrap"})
         result = _dispatch(store, args)
         print(json.dumps(result, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
         return 0
@@ -61,6 +68,15 @@ def _dispatch(store: DurableStore, args: argparse.Namespace) -> dict[str, Any]:
             title=args.title,
             contract=json.loads(args.contract_json),
             candidate=json.loads(args.checkpoint_json),
+        )
+    if args.command == "bootstrap":
+        return store.begin(
+            session_id=args.session_id,
+            proposal_hash=args.proposal_hash,
+            title=args.title,
+            contract=json.loads(args.contract_json),
+            candidate=json.loads(args.checkpoint_json),
+            kind="compact",
         )
     if args.command == "recover":
         return store.recover(session_id=args.session_id, task_id=args.task_id)

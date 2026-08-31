@@ -3,7 +3,8 @@
 ## Implemented
 
 - Pi package manifest and native Extension entry;
-- one-time Anchor or Normal Pi selection for new interactive sessions;
+- no-prompt Normal startup with lazy first-compaction Anchor bootstrap;
+- lazy first-compaction bootstrap for sessions that did not enter Planning;
 - zero-intrusion Normal mode and explicit `/anchor start` activation;
 - read-only Grill-style Planning with native question input;
 - proposal sealing after the complete assistant turn and explicit review;

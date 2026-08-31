@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { compactFrontier, hashValue, normalizeCognition, runUpdate, UPDATE_SYSTEM } from "../src/update.js";
+import { compactFrontier, hashValue, normalizeCognition, runBootstrap, runUpdate, UPDATE_SYSTEM } from "../src/update.js";
 
 const cognition = (overrides = {}) => ({
   current_understanding: "The provider boundary is stable.",
@@ -134,6 +134,37 @@ test("an already committed frontier replays its receipt without another model ca
   assert.equal(result.compaction.details.event_id, existing.receipt.event_id);
   assert.equal(result.compaction.details.checkpoint_version, 3);
   assert.equal(Object.hasOwn(result.compaction, "usage"), false);
+});
+
+test("first compact bootstraps provisional state from only the Episode", async () => {
+  const preparation = {
+    firstKeptEntryId: "entry-kept",
+    tokensBefore: 321,
+    messagesToSummarize: [{ role: "user", content: [{ type: "text", text: "Ship the adapter without changing the API." }] }],
+    turnPrefixMessages: [],
+    isSplitTurn: false,
+  };
+  const episode = preparation.messagesToSummarize;
+  const frontier = compactFrontier(preparation, "session-bootstrap");
+  let request;
+  let bootstrapped;
+  const anchor = {
+    async bootstrap(value) {
+      bootstrapped = value;
+      return { task_id: "task-bootstrap", checkpoint: { checkpoint_version: 0, ...value.checkpoint, receipt: { event_id: "event-0", content_hash: hashValue(value.checkpoint) } } };
+    },
+  };
+  const result = await runBootstrap(anchor, { preparation, signal: new AbortController().signal }, {
+    model: { provider: "test", id: "model" },
+    sessionManager: { getSessionId: () => "session-bootstrap" },
+    modelRegistry: { complete: async (_model, value) => { request = value; return { content: [{ type: "text", text: JSON.stringify({ schema: "anchor.bootstrap.v1", title: "Ship adapter", contract: { schema: "anchor.contract.v1", status: "provisional", goal: "Ship adapter", acceptance_criteria: [], constraints: ["Do not change the API."], non_goals: [], risks: [], verification_commands: [], allowed_paths: [], execution_plan: "Not established." }, cognition: { schema: "anchor.cognition.v3", situation: { current_understanding: "The adapter must ship without an API change.", confirmed_facts: [], active_hypotheses: [], unresolved_conflicts: [], blockers: [] }, experience: { decisions: [], failed_paths: [] }, intent: { current_directive: "Ship the adapter.", accepted_next_action: "Inspect the adapter.", next_plan: ["Inspect the adapter."], open_questions: [] }, knowledge_index: [] } }) }], usage: { input: 4, output: 4 } }; } },
+  });
+  assert.equal(result.compaction.details.checkpoint_version, 0);
+  assert.equal(bootstrapped.contract.status, "provisional");
+  assert.equal(JSON.stringify(request.messages).includes("Ship the adapter"), true);
+  assert.equal(JSON.stringify(request.messages).includes("full branch"), false);
+  assert.equal(JSON.stringify(request.messages).includes("entry-kept"), false);
+  assert.equal(JSON.stringify(episode).includes("Ship the adapter"), true);
 });
 
 function checkpoint(version, frontier) {

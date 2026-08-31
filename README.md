@@ -1,16 +1,17 @@
 # Anchor
 
 Anchor is a Pi Extension for stable long-running work. It creates one
-user-confirmed Task and turns Pi compaction into versioned cognition Checkpoints.
+session Task, confirmed through Planning or provisionally bootstrapped at the
+first compact, and turns Pi compaction into versioned cognition Checkpoints.
 
 ```text
 new Pi session
       |
-Anchor / Normal Pi choice
+Normal Pi (no prompt)
       |
-read-only Anchor Planning (when selected)
+      +--> first compact -> Bootstrap -> provisional Task
       |
-structured proposal + user confirmation
+      +--> --anchor /anchor start -> Planning -> proposal + confirmation
       |
 Task + Checkpoint 0
       |
@@ -52,8 +53,10 @@ cd <project-directory>
 pi
 ```
 
-An empty interactive session asks once whether to use Anchor or Normal Pi.
-Normal Pi remains unchanged; `/anchor start` can activate Anchor later.
+An empty interactive session starts as normal Pi with no Anchor prompt. Until its
+first compaction boundary it remains unchanged; if it reaches that boundary,
+Anchor can bootstrap a provisional State without interrupting the user.
+`--anchor` and `/anchor start` still activate explicit Planning.
 Non-interactive sessions default to Normal unless started with `--anchor`.
 
 Anchor Planning is read-only. The agent asks focused questions and inspects the
@@ -63,7 +66,7 @@ constraints, verification, risks, execution plan, and initial cognition.
 or Cancel. Nothing becomes durable truth until the user accepts the sealed
 proposal.
 
-After confirmation Anchor creates its database under Pi's agent data directory,
+After confirmation, or after a successful first-compaction Bootstrap, Anchor creates its database under Pi's agent data directory,
 records the Pi session identity on the new Task, restores normal tools, and begins
 execution. It does not write runtime data into the project. Compact, automatic
 threshold compact, and `/update` all run the dedicated Update Agent over only

@@ -7,7 +7,7 @@ export function compileContext(recovery) {
     schema: "anchor.context.v4",
     task_id: recovery.task_id,
     task: { title: recovery.task?.title, lifecycle_status: recovery.task?.lifecycle_status },
-    contract: pick(contract, ["schema", "goal", "acceptance_criteria", "constraints", "non_goals"]),
+    contract: pick(contract, ["schema", "status", "goal", "acceptance_criteria", "constraints", "non_goals"]),
     cognition,
     checkpoint: {
       schema: recovery.checkpoint.schema,

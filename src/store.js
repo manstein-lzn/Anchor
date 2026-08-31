@@ -29,6 +29,21 @@ export class AnchorClient {
     return result;
   }
 
+  async bootstrap({ title, contract, checkpoint, sessionId, proposalHash }) {
+    this.sessionId = requiredText(sessionId, "Anchor sessionId");
+    proposalHash ??= checkpoint?.frontier?.episode_hash;
+    const result = await this.#call([
+      "bootstrap",
+      "--session-id", this.sessionId,
+      "--proposal-hash", requiredText(proposalHash, "Anchor bootstrap hash"),
+      "--title", title,
+      "--contract-json", JSON.stringify(contract),
+      "--checkpoint-json", JSON.stringify(checkpoint),
+    ]);
+    this.taskId = result.task?.task_id ?? this.taskId;
+    return result;
+  }
+
   async recovery(sessionId = this.sessionId) {
     this.sessionId = requiredText(sessionId, "Anchor sessionId");
     const args = ["recover", "--session-id", this.sessionId];

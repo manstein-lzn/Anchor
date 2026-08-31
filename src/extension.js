@@ -4,15 +4,13 @@ import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { projectMessages } from "./context.js";
 import { AnchorClient } from "./store.js";
-import { compactFrontier, hashValue, runUpdate } from "./update.js";
+import { compactFrontier, hashValue, runBootstrap, runUpdate } from "./update.js";
 
 const MODE = "anchor.mode";
 const PROPOSAL = "anchor.proposal";
 const ANCHOR_TOOLS = new Set(["anchor_ask", "anchor_propose", "anchor_recall"]);
 const RECALL_TOOL = "anchor_recall";
 const PLANNING_TOOLS = ["read", "grep", "find", "ls", "anchor_ask", "anchor_propose"];
-const START_ANCHOR = "Anchor - clarify and preserve a long-running task";
-const START_NORMAL = "Normal Pi - work normally";
 const ACCEPT = "Accept and create Anchor";
 const REVISE = "Revise through discussion";
 const CANCEL = "Cancel Anchor Planning";
@@ -374,11 +372,7 @@ export default function anchorExtension(pi) {
 
     const explicitlyEnabled = pi.getFlag("anchor") === true || truthy(process.env.ANCHOR_ENABLED);
     if (explicitlyEnabled) return enterPlanning(ctx);
-    const newInteractiveSession = ctx.hasUI && (event.reason === "new" || event.reason === "fork" || (event.reason === "startup" && !hasConversation(entries)));
-    if (!newInteractiveSession) return enterNormal(ctx);
-    const choice = await ctx.ui.select("How should this Pi session work?", [START_ANCHOR, START_NORMAL]);
-    if (choice === START_ANCHOR) enterPlanning(ctx);
-    else enterNormal(ctx);
+    return enterNormal(ctx);
   });
 
   pi.on("before_agent_start", async (event, ctx) => {
@@ -426,6 +420,18 @@ export default function anchorExtension(pi) {
   });
 
   pi.on("session_before_compact", async (event, ctx) => {
+    if (!anchor && mode === "normal") {
+      try {
+        const client = new AnchorClient({ workspace: ctx.cwd, statePath });
+        const result = await runBootstrap(client, event, ctx);
+        await enterActive(client, ctx);
+        return result;
+      } catch (error) {
+        if (event.signal?.aborted) return { cancel: true };
+        // Bootstrap is opportunistic; Pi's native compact remains the fallback.
+        return;
+      }
+    }
     if (!anchor) return;
     try {
       if (expectedRecoveryFrontier
@@ -442,7 +448,8 @@ export default function anchorExtension(pi) {
 
   async function recoverUndeliveredCheckpoint(recovery, ctx) {
     const branch = () => ctx.sessionManager.getBranch();
-    if (recovery.checkpoint.checkpoint_version === 0 || checkpointDelivered(recovery.checkpoint, branch())) return;
+    if (recovery.checkpoint.checkpoint_version === 0 && recovery.checkpoint.frontier?.kind === "planning") return;
+    if (checkpointDelivered(recovery.checkpoint, branch())) return;
     ctx.ui.setWorkingMessage?.("Recovering Anchor Checkpoint receipt...");
     expectedRecoveryFrontier = recovery.checkpoint.frontier;
     try {
@@ -465,9 +472,6 @@ function lastOwned(entries, customType, sessionId) {
   return [...entries].reverse().find((entry) => entry.type === "custom" && entry.customType === customType && entry.data?.session_id === sessionId);
 }
 
-function hasConversation(entries) {
-  return entries.some((entry) => entry.type === "message" || entry.type === "custom_message");
-}
 
 function checkpointDelivered(checkpoint, entries) {
   return entries.some((entry) => entry.type === "compaction"

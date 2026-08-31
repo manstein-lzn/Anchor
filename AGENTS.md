@@ -11,6 +11,9 @@ This document is normative for runtime changes.
   should follow current task complexity rather than elapsed task history.
 - A Task contains the user-confirmed goal, acceptance criteria, constraints, and
   non-goals for one Pi session.
+- A first compaction may lazily create a provisional Task without Planning;
+  provisional Contract fields are inferred only from the Pi Episode and remain
+  revisable until explicitly confirmed.
 - A Checkpoint is the authoritative current cognition plus the source frontier
   it has absorbed. A Checkpoint without a valid frontier cannot replace history.
 - An Episode is the uncovered work selected by Pi's compaction preparation.
@@ -37,6 +40,9 @@ This document is normative for runtime changes.
 - Never send the complete branch or transcript to the Update Agent.
 - Update produces a complete current cognition snapshot, not prose summary,
   chronology, or a free-form delta.
+- Bootstrap at the first compaction is a separate initialization task. It may
+  create Checkpoint 0 from the exact Pi Episode, but must preserve unknowns and
+  never invent user-confirmed requirements.
 - Update reconstructs the minimum cognition needed for future action. For each
   previously active cognition item it must explicitly choose `carry`, `revise`,
   `resolve`, `supersede`, `demote`, or `archive`; no item may disappear silently.
@@ -94,6 +100,9 @@ This document is normative for runtime changes.
 - Default State is stored under Pi's agent data directory and keyed by Pi
   session identity. Normal Anchor use must not write runtime State into the
   project workspace.
+- Normal sessions remain State-free until the first compaction boundary. A
+  failed bootstrap falls back to Pi's native compaction and writes no Anchor
+  State.
 - Anchor State is session-level external truth. Transcript tree navigation does
   not roll it back. A new Pi session does not inherit writable Anchor State.
 - Do not add writer leases, reviewer authorities, schedulers, agent pools,

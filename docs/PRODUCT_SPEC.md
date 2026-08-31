@@ -172,7 +172,8 @@ Projection 是对权威 State 的确定性读取，不调用 LLM，不扫描完�
    action，再以此前 directive 为支持上下文，不能回退为原始 goal。
 8. Update 失败不得破坏旧 Checkpoint 或 Pi history。
 9. compact 记录缺失不得使已提交 Checkpoint 无法恢复。
-10. Normal Pi 模式没有 Anchor prompt、model tools、State 文件或 compact 行为。
+10. Normal Pi 模式没有 Anchor prompt、model tools、State 文件或 Context 投影；
+    首次 Pi compact 可按需触发一次无感 Bootstrap，失败时回退原生 compact。
 
 ## 7. 用户模式
 
@@ -193,22 +194,17 @@ Blocked 是健康状态，completed 是 Task 属性，不扩张主状态机。
 
 ### 8.1 新 Session
 
-新的空白交互 session 显示一次原生选择：
-
-```text
-Anchor     Clarify and preserve a long-running task
-Normal Pi  Work normally
-```
-
-选择 Normal Pi 后写入一个不可见的 session mode marker，避免 resume 或 Extension
-reload 重复询问。除此之外不创建 Anchor runtime 数据。
+新的空白交互 session 直接以 Normal Pi 启动，不显示 Anchor 选择，也不创建
+Anchor runtime 数据。若用户未通过 `--anchor` 或 `/anchor start` 显式进入
+Planning，首次 Pi compact 时才按需执行 Bootstrap Update，创建 provisional
+Task 和 Checkpoint 0；短任务不会产生 Anchor State。
 
 非交互模式默认 Normal Pi；用户必须通过明确 flag 或命令启用 Anchor。
 
 ### 8.2 随时激活
 
-用户可通过启动选择或 `/anchor start` 进入 Planning。Anchor 不用自然语言猜测
-是否应该激活。
+用户可通过 `--anchor` 或 `/anchor start` 进入 Planning。Anchor 不用自然语言
+猜测是否应该激活。
 
 中途激活时，现有 active window 只是 Planning 材料，不自动成为权威 State。
 Agent 应通过只读检查区分用户陈述、工作区事实和仍未验证的假设。
@@ -250,6 +246,11 @@ proposal 绑定 producing entry 和内容 hash。如果它之后出现新的用�
 
 用户接受后，Anchor 在默认 session State 中原子创建 Task 和 Checkpoint 0。
 proposal identity 是幂等键，重复接受必须得到同一 Task。
+
+未进入 Planning 的普通 session 不会阻塞等待初始化。首次 compact 使用同一
+Episode 调用 Bootstrap Agent，输出 provisional Contract 和 Checkpoint 0。它只
+能保留 Episode 明确支持的目标、约束、事实和下一步；未知内容必须保留为未知
+或 open question。Bootstrap 失败时不写入有效 Anchor State，Pi 继续原生 compact。
 
 默认 State locator 由 Pi session identity 确定：
 
@@ -325,7 +326,7 @@ Anchor State 是 session 级外部事实，不随 transcript tree navigation 回
 导航历史不会撤销已经写入工作区的文件，它也不会撤销已提交 Checkpoint。
 
 创建新的 Pi session 或 fork 到新的 session identity 时，不自动复制可写 Anchor
-State；新 session 重新选择 Normal 或 Anchor。跨 session 共享同一个 Task 不属于
+State；新 session 默认从 Normal 启动，首次 compact 才按需 Bootstrap。跨 session 共享同一个 Task 不属于
 核心版本。
 
 ### 8.10 结束
@@ -396,7 +397,7 @@ CONTROL
 /update           # 调用 Pi compact
 ```
 
-TUI 只增加启动选择、`anchor_ask` 的原生 select/input、proposal review、footer
+TUI 只增加 `anchor_ask` 的原生 select/input、proposal review、footer
 status 和 Update working message。不替换 Pi editor、header、footer 或整体主题。
 
 ## 12. 当前实现与目标差异
@@ -404,7 +405,7 @@ status 和 Update working message。不替换 Pi editor、header、footer 或整
 截至本文日期，仓库已有：
 
 - Pi Extension package；
-- Normal/Planning/Active、零侵入启动选择和 `/anchor start`；
+- Normal/Planning/Active、无感启动和 `/anchor start`；
 - Planning prompt、`anchor_ask` 和只读工具集合；
 - agent-settled proposal seal、review 和幂等 SQLite 初始化；
 - session identity 模式归约，tree 不回滚且 fork 不继承可写 State；
@@ -416,13 +417,14 @@ status 和 Update working message。不替换 Pi editor、header、footer 或整
 - Checkpoint schema 检查、parent hash 和 stale version CAS；
 - compact receipt 及相同 frontier 的无模型重放；
 - session-scoped 默认数据库；
+- 首次 compact 的 provisional Bootstrap 和原生 compact fallback；
 - focused tests。
 
 生命周期、四次真实 Update、threshold auto-compact、restart、fork isolation、
 receipt crash recovery 和 mismatch fail-closed 已完成真实 provider 验收。v0.5
 认知切片也已实现：`anchor.cognition.v3`、stable item/provenance、Transition
 Certificate、demotion reference 校验，以及 Contract-plus-cognition bounded
-projection。剩余工作是 exact recall、fresh-Agent takeover、50–100 次 Update
+projection。剩余工作是 fresh-Agent takeover、50–100 次 Update
 平台期和生产 p50/p95 验收；overflow compact 仍未完成真实 provider 验收。Pi 的
 model/auth 前置检查和 process-wide tool list 仍是 host 限制。
 
@@ -432,9 +434,8 @@ model/auth 前置检查和 process-wide tool list 仍是 host 限制。
 
 剩余工作按认知闭环依赖顺序实现：
 
-1. 优先复用 immutable Checkpoint/Pi evidence 实现 exact recall，不增加检索框架；
-2. 完成 correction、failure、recall、takeover、restart 和 churn 验收；
-3. 在预发布 State reset 窗口结束后移除 v2 兼容路径。
+1. 完成 correction、failure、recall、takeover、restart 和 churn 验收；
+2. 在预发布 State reset 窗口结束后移除 v2 兼容路径。
 
 在真实长任务证明核心机制有效前，不增加并发治理、权限沙箱或多 Agent 能力。
 
@@ -442,9 +443,11 @@ model/auth 前置检查和 process-wide tool list 仍是 host 限制。
 
 ### 14.1 模式与初始化
 
-- Normal Pi 不增加 Anchor prompt、model tools、State 文件或 compact handler 行为；
+- Normal Pi 不增加 Anchor prompt、model tools 或 Context 投影；首次 compact 可执行
+  无感 Bootstrap，失败时回退 Pi 原生 compact；
 - Planning 不能使用写工具；
-- proposal 未经用户确认不能创建 Task；
+- 未经用户确认的 proposal 不能创建 confirmed Task；首次 compact 的 Bootstrap
+  只能创建 provisional Task；
 - 重复确认同一 proposal 不创建第二个 Task；
 - 一个 Pi session 不能创建第二个 Anchor Task。
 
@@ -492,6 +495,6 @@ previous Checkpoint + uncovered Episode
       next invocation's stable Context
 ```
 
-Planning 产生 Checkpoint 0，Update 推进 Checkpoint，Resume 读取 Checkpoint，
+Planning 或首次 compact Bootstrap 产生 Checkpoint 0，Update 推进 Checkpoint，Resume 读取 Checkpoint，
 compact 丢弃 Checkpoint 已覆盖的历史。其余能力都必须证明自己直接改善这个闭环，
 否则不进入核心产品。
