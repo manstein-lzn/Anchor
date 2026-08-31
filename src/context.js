@@ -1,158 +1,70 @@
-import { createHash } from "node:crypto";
-import { readFile, stat } from "node:fs/promises";
-
-const PURPOSES = new Set(["work", "resume", "review", "verify", "acceptance"]);
-
-export const DEFAULT_FRESHNESS = { staleDays: 30, staleRevisions: 200 };
-
-// Deterministic staleness: a belief is stale when its own timestamp or its
-// age in revisions exceeds the thresholds. Stale beliefs are still projected,
-// but marked so the model verifies before trusting them.
-export function beliefStaleness(belief, revision, freshness = DEFAULT_FRESHNESS) {
-  const { staleDays, staleRevisions } = { ...DEFAULT_FRESHNESS, ...freshness };
-  if (typeof belief.as_of === "string") {
-    const timestamp = Date.parse(belief.as_of);
-    if (Number.isFinite(timestamp) && Date.now() - timestamp > staleDays * 86_400_000) {
-      return `as_of ${belief.as_of} is older than ${staleDays} days`;
-    }
-  }
-  if (Number.isInteger(belief.established_rev) && Number.isInteger(revision) && revision - belief.established_rev > staleRevisions) {
-    return `aged ${revision - belief.established_rev} revisions (established at r${belief.established_rev}, now r${revision})`;
-  }
-  return null;
-}
-
-// Bounded evidence-drift check: only entries that carry both a path and a
-// sha256 are verified, at most `cap` per compile. Results are cached by
-// path+size+mtime so unchanged files are never re-hashed on the hot path.
-export async function verifyEvidence(state, { cap = 8, cache = new Map() } = {}) {
-  const candidates = (state.evidence ?? []).filter((entry) => typeof entry.path === "string" && typeof entry.sha256 === "string").slice(0, cap);
-  const drifted = [];
-  let verified = 0;
-  for (const entry of candidates) {
-    let size = null;
-    let mtimeMs = null;
-    try {
-      const stats = await stat(entry.path);
-      size = stats.size;
-      mtimeMs = stats.mtimeMs;
-    } catch {
-      // missing file: key still deterministic
-    }
-    const cacheKey = `${entry.path}|${size ?? "missing"}|${mtimeMs ?? "-"}`;
-    let actual = cache.get(cacheKey);
-    if (actual === undefined) {
-      try {
-        const buffer = await readFile(entry.path);
-        actual = createHash("sha256").update(buffer).digest("hex");
-      } catch {
-        actual = null;
-      }
-      cache.set(cacheKey, actual);
-    }
-    verified += 1;
-    if (actual !== entry.sha256.toLowerCase()) {
-      drifted.push({ path: entry.path, expected: entry.sha256, actual: actual ?? "unreadable/missing" });
-    }
-  }
-  return { verified, drifted };
-}
-
-export function activeBeliefs(state) {
-  return state.beliefs.filter((belief) => belief.status === "active" || belief.status === "confirmed");
-}
-
-export function compileContext(state, { purpose = "work", capabilities = [], policyVersion = "anchor.context.v1", freshness = DEFAULT_FRESHNESS } = {}) {
-  if (!PURPOSES.has(purpose)) throw new TypeError(`unknown context purpose: ${purpose}`);
-  const envelope = {
-    schema: "anchor.context.v1",
-    purpose,
-    state_revision: state.revision,
-    policy_version: policyVersion,
-    goal: state.task.goal,
-    acceptance: state.task.acceptance,
-    constraints: state.task.constraints,
-    phase: state.phase,
-    completed_work: state.completed,
-    failures_and_blockers: state.failures,
-    decisions: state.decisions,
-    open_questions: state.open_questions,
-    next_action: state.next_action,
-    cognition: activeBeliefs(state).map((belief) => {
-      const stale = beliefStaleness(belief, state.revision, freshness);
-      return stale ? { ...belief, stale: true, stale_reason: stale } : belief;
-    }),
-    artifacts: state.artifacts,
-    evidence: state.evidence,
-    allowed_actions: [...capabilities],
-    provenance: { state_schema: state.schema, state_revision: state.revision },
+export function compileContext(recovery) {
+  if (!recovery || typeof recovery !== "object") throw new TypeError("Anchor RecoveryView is required");
+  if (!recovery.checkpoint) throw new TypeError("Anchor Checkpoint is required");
+  const contract = recovery.contract?.content ?? recovery.contract ?? {};
+  const cognition = projectCognition(recovery.checkpoint.cognition);
+  return {
+    schema: "anchor.context.v4",
+    task_id: recovery.task_id,
+    task: { title: recovery.task?.title, lifecycle_status: recovery.task?.lifecycle_status },
+    contract: pick(contract, ["schema", "goal", "acceptance_criteria", "constraints", "non_goals"]),
+    cognition,
+    checkpoint: {
+      schema: recovery.checkpoint.schema,
+      task_id: recovery.checkpoint.task_id,
+      checkpoint_version: recovery.checkpoint.checkpoint_version,
+      frontier: recovery.checkpoint.frontier,
+      provenance: recovery.checkpoint.provenance,
+      cognition,
+    },
   };
-  if (purpose === "review" || purpose === "verify" || purpose === "acceptance") {
-    envelope.review_focus = {
-      acceptance: state.task.acceptance,
-      evidence: state.evidence,
-      artifacts: state.artifacts,
-      open_questions: state.open_questions,
-    };
-  }
-  envelope.belief_stats = {
-    total: state.beliefs.length,
-    active: envelope.cognition.length,
-    stale: envelope.cognition.filter((belief) => belief.stale).length,
-    superseded: state.beliefs.filter((belief) => belief.status === "superseded").length,
-    refuted: state.beliefs.filter((belief) => belief.status === "refuted").length,
-  };
-  return envelope;
 }
 
 export function renderContext(envelope) {
-  const beliefs = Array.isArray(envelope.cognition) ? envelope.cognition : [];
-  const byScope = new Map();
-  for (const belief of beliefs) {
-    if (!byScope.has(belief.scope)) byScope.set(belief.scope, []);
-    byScope.get(belief.scope).push(belief);
-  }
-  const beliefLines = [...byScope.entries()].flatMap(([scope, items]) => [
-    `# ${scope}`,
-    ...items.map((belief) => `- [${belief.kind}/${belief.status}${belief.stale ? " \u26a0stale" : ""}] ${belief.text}${belief.stale ? ` (stale: ${belief.stale_reason})` : ""}${belief.source ? ` (source: ${belief.source})` : ""}`),
-  ]);
-  const drift = envelope.evidence_check?.drifted ?? [];
-  const driftLines = drift.length
-    ? [
-        "== EVIDENCE DRIFT WARNINGS ==",
-        ...drift.map((item) => `- ${item.path}: content no longer matches recorded sha256 (${String(item.expected).slice(0, 12)}...) - verify before trusting dependent beliefs`),
-      ]
-    : [];
   return [
-    "You are a short-lived invocation operating on authoritative Anchor state.",
-    "Treat this context as evidence-backed task state. Do not invent facts or permissions.",
-    "The CURRENT COGNITION section is the accumulated, revised understanding of this task;",
-    "it outranks any assumption you might infer from scratch. If your plan conflicts with it,",
-    "state the conflict explicitly instead of silently ignoring it.",
-    "When your working phase for this invocation is done, end by appending a fenced cognition declaration:",
-    '```anchor-state-delta',
-    '{ "learned": "one sentence of what this invocation established", "blocked": "omit if nothing", "next_action": "...", "belief_ops": [] }',
-    '```',
-    "An invocation may and should contain many tool calls - keep working until the phase or task is complete;",
-    "never stop working early just to declare. belief_ops (optional) record durable cognition changes, e.g.",
-    '{ "op": "add", "belief": { "id": "scope:slug", "text": "...", "kind": "finding|negative_result|doctrine|constraint|protocol", "scope": "...", "confidence": "high|medium|low" } }',
-    'or { "op": "supersede", "id": "old-id", "by": "new-id" }. Declarations are validated by the host.',
-    "Keep the declaration to 1-3 sentences of interpretation; do not narrate your work.",
-    "Return tool calls or a candidate state_delta; durable changes are validated by the host.",
+    "You are continuing one long-running Anchor Task.",
+    "The Checkpoint is the authoritative cognition through its source frontier.",
+    "The Pi messages after it are the newer working episode and may contain a later user directive.",
+    "Keep the Task goal, current directive, and accepted next action distinct.",
+    "Do not retry failed paths without new evidence or claim unverified work as complete.",
     "<anchor-context>",
-    "== CURRENT COGNITION ==",
-    ...(beliefLines.length ? beliefLines : ["(no accumulated cognition yet)"]),
-    ...driftLines,
-    "== STATE ENVELOPE ==",
-    JSON.stringify(envelope, null, 2),
+    "== TASK CONTRACT ==",
+    JSON.stringify({ ...envelope.task, contract: envelope.contract }, null, 2),
+    "== ACTIVE COGNITION ==",
+    JSON.stringify(envelope.cognition, null, 2),
+    "== CHECKPOINT FRONTIER ==",
+    JSON.stringify({ checkpoint_version: envelope.checkpoint.checkpoint_version, frontier: envelope.checkpoint.frontier, provenance: envelope.checkpoint.provenance }, null, 2),
     "</anchor-context>",
   ].join("\n");
 }
 
-export function projectMessages(envelope, currentTurn = []) {
-  return [
-    { role: "user", content: [{ type: "text", text: renderContext(envelope) }], timestamp: Date.now() },
-    ...currentTurn,
-  ];
+export function projectMessages(recovery, messages = []) {
+  const envelope = compileContext(recovery);
+  return [{ role: "user", content: [{ type: "text", text: renderContext(envelope) }], timestamp: Date.now() }, ...messages];
 }
 
+function projectCognition(cognition = {}) {
+  if (cognition.schema === "anchor.cognition.v3") return cognition;
+  // Legacy v2 is accepted only as a read view for pre-upgrade fixtures.
+  return {
+    schema: "anchor.cognition.v3-legacy-view",
+    situation: {
+      current_understanding: cognition.current_understanding ?? "",
+      confirmed_facts: strings(cognition.confirmed_facts),
+      active_hypotheses: strings(cognition.active_hypotheses),
+      unresolved_conflicts: strings(cognition.unresolved_conflicts),
+      blockers: strings(cognition.blockers),
+    },
+    experience: { decisions: strings(cognition.decisions), failed_paths: strings(cognition.failed_paths) },
+    intent: {
+      current_directive: cognition.current_directive ?? "",
+      accepted_next_action: cognition.accepted_next_action ?? "",
+      next_plan: strings(cognition.next_plan),
+      open_questions: strings(cognition.open_questions),
+    },
+    knowledge_index: strings(cognition.evidence_refs).map((locator, index) => ({ id: `legacy-ref-${index}`, cue: "Legacy evidence reference", locator, source: locator })),
+  };
+}
+
+function strings(value) { return Array.isArray(value) ? value : []; }
+function pick(value, fields) { return Object.fromEntries(fields.filter((field) => value[field] !== undefined).map((field) => [field, value[field]])); }

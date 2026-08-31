@@ -1,54 +1,39 @@
 # Roadmap
 
-This is an implementation order, not a promise that every future feature is
-required.
+## Implemented
 
-## Phase 0: contract baseline
+- Pi package manifest and native Extension entry;
+- one-time Anchor or Normal Pi selection for new interactive sessions;
+- zero-intrusion Normal mode and explicit `/anchor start` activation;
+- read-only Grill-style Planning with native question input;
+- proposal sealing after the complete assistant turn and explicit review;
+- atomic, idempotent Task and Checkpoint 0 creation;
+- one Task per Pi session identity, independent of transcript branches;
+- RecoveryView context projection without independent trimming;
+- serial Update at Pi's compact boundary with stale-version rejection;
+- SQLite reduced to Task and immutable Checkpoint truth;
+- `anchor.cognition.v3` Situation/Experience/Intent/Knowledge Index;
+- stable cognition item IDs and provenance;
+- `anchor.transition.v1` coverage and demotion validation;
+- exact `checkpoint:<version>:item:<id>` recall through immutable Checkpoints;
+- Active `anchor_recall` tool and `/anchor recall` command;
+- bounded Contract-plus-cognition Context projection;
+- focused Normal, Planning, resume, fork, projection, persistence, and Update tests.
 
-- keep the current docs and development contract authoritative;
-- choose the Pi fork/workspace source;
-- define the minimal State, Evidence, ContextEnvelope, Result, and revision
-  shapes;
-- add a fixture for a completed task and an interrupted task.
+## Next stage: minimal sufficient cognition
 
-## Phase 1: pure projector
+1. Run correction, failure, conflict, recall, restart, fresh-Agent takeover, and
+   50-to-100-Update plateau acceptance.
+2. Remove the temporary v2 compatibility path after the pre-release State reset
+   window closes.
 
-- implement a deterministic ContextEngine against a read-only State source;
-- support `work` and `resume` purposes first;
-- expose compile latency, source revision, and rendered size;
-- do not change Pi's execution behavior yet.
+## Remaining host acceptance
 
-## Phase 2: shadow runtime
+- trigger overflow Update with a real model;
+- measure projection and Update latency p50/p95.
 
-- compile State Context beside Pi's normal session context;
-- compare goal, completed work, failures, evidence, and next action;
-- measure overhead and identify missing State fields;
-- keep all changes reversible.
+## Deferred until measured
 
-## Phase 3: State Context runtime
-
-- inject the compiled Context at Pi's model-facing boundary;
-- retain the transcript for UI and audit;
-- add deterministic reducers for tool observations and explicit state deltas;
-- persist State revisions and provenance;
-- retain Pi compact only as a diagnosed fallback.
-
-## Phase 4: recovery and correctness
-
-- restart from State without replaying the full transcript;
-- reject stale Result revisions;
-- test failed tools, cancelled work, retry, and duplicate delivery;
-- bind Artifact and Evidence hashes;
-- test capability and path boundaries.
-
-## Phase 5: long-task evaluation
-
-- run the same tasks through traditional Pi and Anchor State Context modes;
-- compare completion quality, recovery quality, context size, compile latency,
-  model calls, and tool calls;
-- include unfinished, failed, and completed tasks;
-- test hundreds or thousands of turns without normal transcript compact.
-
-Only after these checks should the project decide whether to remove any legacy
-session-context or compaction path. Deleting Pi behavior before the State path
-is proven creates an avoidable recovery risk.
+- a long-lived Python process instead of one process per state boundary;
+- asynchronous Update;
+- any scheduler, agent pool, vector index, or custom context budget.

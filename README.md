@@ -1,77 +1,113 @@
 # Anchor
 
-Anchor is a state-driven agent runtime built on top of the Pi execution loop.
-Its central rule is **State as Context**:
-
-> The model does not carry the whole task history. Each invocation receives a
-> context compiled from the current authoritative state and relevant evidence.
-
-Anchor keeps Pi's useful, proven mechanics:
-
-- model and provider adapters;
-- streaming responses;
-- tool execution;
-- interruption and retry;
-- session persistence and terminal interfaces.
-
-Anchor changes the memory boundary. The long-lived object is the task state,
-not an Agent identity or an ever-growing transcript.
+Anchor is a Pi Extension for stable long-running work. It creates one
+user-confirmed Task and turns Pi compaction into versioned cognition Checkpoints.
 
 ```text
-Durable State + Evidence
-          |
-   ContextEngine projection
-          |
-   short-lived invocation
-          |
-       Pi loop
-          |
-  Result + tool observations
-          |
-  validate, reduce, commit
-          |
-   next State revision
+new Pi session
+      |
+Anchor / Normal Pi choice
+      |
+read-only Anchor Planning (when selected)
+      |
+structured proposal + user confirmation
+      |
+Task + Checkpoint 0
+      |
+normal Pi execution
+      |
+Checkpoint Update at each compact boundary
 ```
 
-The repository contains the first minimal runtime implementation. It is
-intentionally a local JSON StateStore and Pi adapter; production database and
-MetaLoop adapters remain separate follow-up work.
+## Requirements
 
-## Documents
+- Pi `0.84.2` or newer;
+- Node.js `22.19` or newer;
+- Python `3.10` or newer.
 
-- [Architecture](docs/ARCHITECTURE.md): the complete State as Context model.
-- [Principles](docs/PRINCIPLES.md): non-negotiable design rules.
-- [Pi Adaptation](docs/PI_ADAPTATION.md): the deliberately small fork boundary.
-- [Experiment](docs/EXPERIMENT.md): the first recovery experiment and its limits.
-- [Roadmap](docs/ROADMAP.md): incremental implementation and verification.
+The Python state core is included in this package and has no third-party Python
+dependencies.
 
-## Quick start
+## Install
+
+From this checkout:
+
+```bash
+pi install /absolute/path/to/Anchor
+```
+
+For only the current project:
+
+```bash
+pi install -l /absolute/path/to/Anchor
+```
+
+After publication, the same package can be installed from its npm or Git source
+with Pi's normal `pi install` command.
+
+## Use
+
+```bash
+cd <project-directory>
+pi
+```
+
+An empty interactive session asks once whether to use Anchor or Normal Pi.
+Normal Pi remains unchanged; `/anchor start` can activate Anchor later.
+Non-interactive sessions default to Normal unless started with `--anchor`.
+
+Anchor Planning is read-only. The agent asks focused questions and inspects the
+project until it can propose a complete goal, acceptance criteria, scope,
+constraints, verification, risks, execution plan, and initial cognition.
+`anchor_propose` ends its turn before a separate review offers Accept, Revise,
+or Cancel. Nothing becomes durable truth until the user accepts the sealed
+proposal.
+
+After confirmation Anchor creates its database under Pi's agent data directory,
+records the Pi session identity on the new Task, restores normal tools, and begins
+execution. It does not write runtime data into the project. Compact, automatic
+threshold compact, and `/update` all run the dedicated Update Agent over only
+the Episode selected by Pi's compaction preparation. The resulting Checkpoint
+records its source frontier, parent hash, provenance, and complete current
+cognition.
+
+Useful commands:
+
+```text
+/anchor start     Enter read-only Planning from Normal Pi
+/anchor status    Show the current mode or Task
+/anchor review    Reopen review for a sealed proposal
+/anchor cancel    Return from Planning to Normal Pi
+/anchor recall checkpoint:<version>:item:<id>
+/update           Run Update explicitly for an Active Anchor
+```
+
+Active Agents also have `anchor_recall` for the same exact Checkpoint item
+lookup. Recall is read-only: its result enters Pi's current work window and is
+eligible for the next Update; it does not mutate the authoritative Checkpoint.
+
+Pi's `/resume` restores the same session Task automatically. Tree navigation
+does not roll back Anchor State. A fork has a new Pi session identity, so it
+chooses Anchor or Normal again and never inherits writable State.
+
+Two Pi host limitations remain. Pi validates the selected model and its
+credentials before invoking Extension compact hooks, so recovery still needs a
+usable model configuration even when Anchor can replay a receipt without a
+provider request. Pi also has no per-Extension active-tool ownership API;
+leaving Planning restores its saved tool list and may overwrite tool changes
+made concurrently by another Extension.
+
+`--anchor-state <path>` selects a non-default database location for the current
+session. `ANCHOR_ENABLED=1` and `ANCHOR_STATE_PATH` are the equivalent environment
+variables. State created by the former pre-release governance schema is not
+migrated; archive it and create a new Anchor.
+
+## Verify
 
 ```bash
 npm install
 npm test
-anchor
-```
-
-`anchor` opens the same interactive terminal experience as Pi: streaming,
-tools, slash commands, session switching, and keyboard controls. The State
-Context adapter is active only at the model-facing boundary; Pi's normal
-execution loop and UI remain in charge. Anchor's default State is stored under
-Pi's user-level agent data directory and keyed by session ID, so normal use does
-not create runtime files in the project workspace.
-
-For a first task, pass the initial prompt exactly as with Pi:
-
-```bash
-anchor "inspect the repository and propose the next change"
-```
-
-The lower-level commands remain available for scripts and diagnostics:
-
-```bash
-anchor init --state /tmp/anchor-task-state.json "ship a feature"
-anchor context --state /tmp/anchor-task-state.json --purpose resume
-anchor run --state /tmp/anchor-task-state.json --goal "ship a feature" "inspect the repository"
+npm run check
 ```
 
 ## License

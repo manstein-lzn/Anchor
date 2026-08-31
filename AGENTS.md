@@ -4,56 +4,109 @@ This document is normative for runtime changes.
 
 ## Core model
 
-- Durable State, Evidence, and Artifacts outlive model invocations.
+- Anchor exists to preserve correct task cognition across compaction, restart,
+  and long-running work. It is not a general Agent runtime or governance layer.
+- Anchor State is the minimal sufficient cognition for correct continuation,
+  not a transcript summary or an inventory of everything once known. Its size
+  should follow current task complexity rather than elapsed task history.
+- A Task contains the user-confirmed goal, acceptance criteria, constraints, and
+  non-goals for one Pi session.
+- A Checkpoint is the authoritative current cognition plus the source frontier
+  it has absorbed. A Checkpoint without a valid frontier cannot replace history.
+- An Episode is the uncovered work selected by Pi's compaction preparation.
+- Context is a bounded projection of the latest Checkpoint plus Pi's current
+  active window. Context is never authoritative State.
+- The transcript records what happened. It remains available for UI, audit, and
+  debugging, but is not the normal long-task oracle.
+- Model output is a candidate Checkpoint. It becomes durable truth only after
+  schema, Task identity, parent version, frontier, and provenance checks.
 - Agent identities are disposable invocation policies, not owners of memory.
-- Context is a bounded, purpose-specific projection compiled from authoritative
-  State. Context is never the authority.
-- EventLog records what happened; it does not answer what is currently true.
-- Model output is a candidate Result. It becomes durable truth only after
-  schema, capability, version, transition, and provenance checks.
-- Authorization comes from validated capability state, never from prompts,
-  role names, or model output.
-- A Bubble, when used, is an isolated disposable execution transaction. It may
-  propose state changes but cannot write global truth directly.
+- Information has three attention levels: Active Cognition is projected,
+  Dormant Knowledge is represented by recoverable references, and Event Archive
+  is retained for audit or recovery without participating in normal cognition.
+- Current cognition preserves a causal model: the Contract and current
+  Situation define the remaining gap; constraints and still-relevant Experience
+  justify current Intent. It is not a chronology grouped into categories.
+
+## Update rules
+
+- The Update Agent's semantic evidence is exactly the previous Checkpoint plus
+  `preparation.messagesToSummarize` and `preparation.turnPrefixMessages`. A
+  deterministic control envelope may also carry the immutable Task Contract
+  and target frontier; neither is an Episode directive or new evidence.
+- Never send the complete branch or transcript to the Update Agent.
+- Update produces a complete current cognition snapshot, not prose summary,
+  chronology, or a free-form delta.
+- Update reconstructs the minimum cognition needed for future action. For each
+  previously active cognition item it must explicitly choose `carry`, `revise`,
+  `resolve`, `supersede`, `demote`, or `archive`; no item may disappear silently.
+- Retention is decided by future behavioral value: keep an item active only when
+  forgetting it could cause a wrong decision, a constraint violation, repeated
+  failed or expensive work, or loss of a currently necessary next step.
+- `demote` requires an exact recovery reference. `revise`, `resolve`,
+  `supersede`, and `archive` require a reason and source. Forgetting removes
+  information from current attention, never from every recovery surface.
+- Update emits a Transition Certificate covering the previous active set. The
+  certificate is validation and audit material, not normal model Context.
+- Newer explicit user corrections supersede older statements. Unresolved
+  conflicts, failed paths and their reasons, and unverified hypotheses remain
+  explicit until evidence resolves them.
+- Tool failure is not successful evidence. Model confidence is not evidence.
+- The Task goal, current directive, accepted next action, and directive history
+  are distinct. An elliptical continuation resolves first against the accepted
+  next action, then the previous directive, never the original goal by default.
+- History is retained as Experience only while it changes future strategy. A
+  failed path records its cause and retry condition, not merely that an event
+  occurred.
+- Checkpoint commit and Pi compaction append are separate durable writes. Use a
+  content-bound receipt and idempotent replay; do not claim cross-file atomicity.
+- Receipt delivery is valid only when Task identity, Checkpoint version and
+  hash, event identity, and the complete frontier all match the Checkpoint.
 
 ## Context rules
 
-- Do not send the complete transcript as the normal long-task memory.
 - Do not call an LLM merely to compile Context on the hot path.
-- Do not use lossy token trimming as the primary quality strategy.
-- Store large evidence as immutable Artifacts and project relevant slices or
-  references into Context.
-- Keep raw transcript for audit, UI, and debugging; it is not the task oracle.
-- State normalization may merge superseded facts, but must preserve provenance,
-  revisions, conflicts, and links to the original evidence.
-- Keep Pi's transcript compact as an emergency provider-overflow fallback until
-  State Context has passed long-task verification. It is not the normal path.
-- Bounded invocation projection must preserve provider replay invariants. A tool
-  call and its tool result are one indivisible unit for retention or elision.
+- Do not use lossy token trimming as Anchor's primary quality strategy.
+- Do not impose private token, tool-count, time, segment, or checkpoint budgets
+  below the selected model's context window. Pi and the provider own window
+  handling and user interruption.
+- Preserve provider replay invariants. A tool call and its tool result are one
+  indivisible replay unit.
+- Store large evidence as immutable Artifacts and project only relevant slices
+  or references.
+- State normalization may remove superseded prose from the current projection,
+  but must preserve revisions, conflicts, provenance, and source links.
+- Projection contains the immutable Contract core, latest Active Cognition, a
+  compact Knowledge Index, and Pi's active window. It excludes the complete
+  Checkpoint object, transition history, resolved detail, and old summary chains.
+- Recall is explicit and targeted. Recovered detail enters Pi's current work and
+  may be promoted by a later Update; recall must not permanently rebloat Context.
 
 ## Runtime boundaries
 
-- Pi remains responsible for model transport, streaming, tool execution,
-  interruption, retry, and user-facing session behavior.
-- Anchor is responsible for State, Evidence, Context projection, Result
-  validation, and deterministic State reduction.
-- Default Anchor runtime data is session-scoped and stored under Pi's agent data
-  directory, keyed by Pi session identity. Normal `anchor` use must not create
-  or modify files in the project workspace. Project-local State is allowed only
-  when the user explicitly supplies a State path.
-- MetaLoop may provide durable project/task/attempt/evidence/acceptance storage;
-  Anchor must not duplicate its truth or create a second writer.
-- Do not add Master, Bubble, Role, scheduler, agent pool, vector memory, or
-  transcript protocol unless a concrete requirement proves it necessary.
+- Pi owns model transport, streaming, tool execution and permissions, retry,
+  interruption, transcript, session tree, TUI, and context thresholds.
+- Anchor owns Planning, Task and Checkpoint persistence, Update, validation,
+  deterministic projection, and compact receipt recovery.
+- Anchor Planning may temporarily restrict model tools to a read-only set.
+  Active mode restores Pi's tools; Anchor does not claim to sandbox project
+  paths, shell commands, or third-party tools.
+- Default State is stored under Pi's agent data directory and keyed by Pi
+  session identity. Normal Anchor use must not write runtime State into the
+  project workspace.
+- Anchor State is session-level external truth. Transcript tree navigation does
+  not roll it back. A new Pi session does not inherit writable Anchor State.
+- Do not add writer leases, reviewer authorities, schedulers, agent pools,
+  roles, vector memory, or a transcript protocol without a proven core need.
 
 ## Performance
 
-- The hot path is: read materialized State, read bounded indexes, compile the
-  requested projection, and invoke Pi.
-- Never rescan the full EventLog or all Artifacts for every model turn.
-- State normalization is incremental or event-triggered, not a full scan per
-  tool call.
-- Measure context compilation latency and input size with p50/p95 metrics.
+- The hot path reads the materialized latest Checkpoint, compiles one bounded
+  projection, and invokes Pi.
+- Never rescan the full EventLog, transcript, or all Artifacts per model turn.
+- Measure projection latency and model-facing input size with p50/p95 metrics.
+- Under stationary task complexity, repeated Updates must make projected Anchor
+  input approach a plateau rather than grow with Checkpoint count.
 
 ## Documentation and verification
 
@@ -62,5 +115,8 @@ This document is normative for runtime changes.
   before implementation.
 - Every non-trivial reducer, projector, or persistence change needs a focused
   runnable test.
-- Long-task acceptance must include process restart, stale Result rejection,
-  tool failure recovery, and evidence provenance checks.
+- Long-task acceptance must include multiple compactions, process restart,
+  stale candidate rejection, tool failure, user correction, and evidence
+  provenance.
+- Long-task acceptance must also test transition coverage, demotion and exact
+  recall, over-forgetting, repeated-failure prevention, and projected-size churn.

@@ -1,23 +1,41 @@
 {
-  "name": "anchor-agent-runtime",
+  "name": "anchor-pi",
   "version": "0.1.0",
-  "description": "State as Context runtime built on the Pi agent loop",
+  "description": "Durable planning and cognition updates for long-running Pi sessions",
   "type": "module",
-  "bin": {
-    "anchor": "src/cli.js"
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "anchor"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/extension.js"
+    ]
   },
   "exports": {
-    ".": "./src/index.js",
-    "./state": "./src/state.js",
+    ".": "./src/extension.js",
     "./context": "./src/context.js",
-    "./runtime": "./src/runtime.js"
+    "./store": "./src/store.js",
+    "./update": "./src/update.js"
   },
+  "files": [
+    "src/*.js",
+    "python/**/*.py",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
-    "check": "node --check src/state.js && node --check src/context.js && node --check src/codex-config.js && node --check src/runtime.js && node --check src/cli.js",
+    "check": "node --check src/context.js && node --check src/store.js && node --check src/update.js && node --check src/extension.js && python3 -m py_compile python/anchor_kernel.py python/anchor_core/*.py",
     "test": "node --test"
   },
-  "dependencies": {
-    "@earendil-works/pi-coding-agent": "^0.84.2"
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.84.2",
+    "typebox": "1.3.7"
   },
   "license": "MIT",
   "engines": {
