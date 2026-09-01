@@ -379,15 +379,14 @@ function normalizeBootstrapProposal(value, frontier) {
     const group = entry.section?.split(".");
     if (!group || group.length !== 2 || !ITEM_GROUPS.some(([section, field]) => section === group[0] && field === group[1])) throw new Error(`invalid bootstrap cognition section ${entry.section}`);
     const statement = required(entry.statement, "bootstrap.item.statement");
-    return { id: `item-${hashValue({ frontier, index, section: entry.section, statement }).slice(-16)}`, statement, sources: stringList(entry.sources, "bootstrap.item.sources"), relevance: required(entry.relevance, "bootstrap.item.relevance") };
+    const sources = stringList(entry.sources, "bootstrap.item.sources");
+    if (!sources.length) throw new Error("bootstrap.item.sources must not be empty");
+    return { section: group[0], field: group[1], id: `item-${hashValue({ frontier, index, section: entry.section, statement }).slice(-16)}`, statement, sources, relevance: required(entry.relevance, "bootstrap.item.relevance") };
   });
   const cognition = { schema: "anchor.cognition.v3", situation: { current_understanding: uncertainties.length ? `${goal} Unknowns remain: ${uncertainties.join("; ")}` : goal, confirmed_facts: [], active_hypotheses: [], unresolved_conflicts: [], blockers: [] }, experience: { decisions: [], failed_paths: [] }, intent: { current_directive: required(value.intent?.current_directive, "bootstrap.intent.current_directive"), accepted_next_action: required(value.intent?.accepted_next_action, "bootstrap.intent.accepted_next_action"), next_plan: stringList(value.intent?.next_plan, "bootstrap.intent.next_plan"), open_questions: openQuestions.map((statement, index) => ({ id: `question-${hashValue({ frontier, index, statement }).slice(-16)}`, statement, sources: [`episode:${frontier.episode_hash}`], relevance: "requires clarification before execution" })) }, knowledge_index: [] };
-  for (const item of items) cognition[itemSection(item, value.new_items)][itemField(item, value.new_items)]?.push(item);
+  for (const item of items) cognition[item.section][item.field].push({ id: item.id, statement: item.statement, sources: item.sources, relevance: item.relevance });
   return { title: required(value.title || goal, "bootstrap.title"), contract: { schema: "anchor.contract.v1", status: "provisional", goal, execution_plan: "Not established.", rationale: [], acceptance_criteria: [], constraints: [], non_goals: [], risks: [], verification_commands: [], allowed_paths: [] }, cognition };
 }
-
-function itemSection(item, entries) { return entries.find((entry) => entry.statement === item.statement)?.section.split(".")[0] || "situation"; }
-function itemField(item, entries) { return entries.find((entry) => entry.statement === item.statement)?.section.split(".")[1] || "confirmed_facts"; }
 
 function normalizeTransition(value, previous, next) {
   const previousItems = activeItems(previous);
@@ -571,7 +570,7 @@ function submissionArguments(response, tool, agent) {
   if (!calls[0].arguments || typeof calls[0].arguments !== "object" || Array.isArray(calls[0].arguments)) {
     throw new Error(`${agent} Agent submitted invalid ${tool.name} arguments`);
   }
-  if (!Check(tool.parameters, calls[0].arguments) && !((tool === UPDATE_PROPOSAL_TOOL || tool === BOOTSTRAP_PROPOSAL_TOOL) && Check(tool === UPDATE_PROPOSAL_TOOL ? UPDATE_SUBMISSION_SCHEMA : BOOTSTRAP_SUBMISSION_SCHEMA, calls[0].arguments))) {
+  if (!Check(tool.parameters, calls[0].arguments)) {
     throw new Error(`${agent} Agent submitted arguments that do not match the ${tool.name} schema`);
   }
   return calls[0].arguments;

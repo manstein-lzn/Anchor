@@ -26,3 +26,20 @@ test("reducer demotion requires exact reference and is deterministic", () => {
   assert.deepEqual(a, b);
   assert.throws(() => reduceUpdateProposal(previous, { ...p, item_decisions: [{ ...p.item_decisions[0], reference: "transcript:1" }, p.item_decisions[1]] }, {}), /exact Checkpoint/);
 });
+
+test("reducer materializes references and preserves open-question operations", () => {
+  const prior = structuredClone(previous);
+  prior.intent.open_questions = [item("question-1", "Is the endpoint stable?")];
+  const result = reduceUpdateProposal(prior, proposal({
+    item_decisions: [
+      { item_id: "fact-1", disposition: "carry" },
+      { item_id: "decision-1", disposition: "archive", reason: "done", sources: ["episode:2"] },
+      { item_id: "question-1", disposition: "revise", reason: "verified", sources: ["episode:2"], replacement: { section: "intent.open_questions", statement: "Is the provider replayable?", sources: ["episode:2"], relevance: "blocks verification" } },
+    ],
+    new_items: [{ section: "experience.decisions", statement: "Use structured submission.", sources: ["episode:2"], relevance: "prevents free-text failure" }],
+    knowledge_index: [{ cue: "Prior evidence", locator: "checkpoint:1:item:decision-1", source: "episode:2" }],
+  }), { episode_hash: "sha256:e" });
+  assert.equal(result.cognition.intent.open_questions[0].statement, "Is the provider replayable?");
+  assert.equal(result.cognition.knowledge_index[0].id.startsWith("ref-"), true);
+  assert.equal(result.cognition.experience.decisions.length, 1);
+});

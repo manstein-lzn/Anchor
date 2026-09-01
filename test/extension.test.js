@@ -40,10 +40,12 @@ test("first compact lazily creates Anchor without Planning", async (t) => {
   const ctx = fakeContext(process.cwd(), pi, "session-lazy", {
     model: { provider: "test", id: "model" },
     modelRegistry: { complete: async () => ({ content: [{ type: "toolCall", id: "bootstrap-call", name: "anchor_submit_bootstrap", arguments: {
-      schema: "anchor.bootstrap.v1",
+      schema: "anchor.bootstrap-proposal.v2",
       title: "Lazy task",
-      contract: { schema: "anchor.contract.v1", status: "provisional", goal: "Ship the adapter", rationale: [], acceptance_criteria: [], constraints: [], non_goals: [], risks: [], verification_commands: [], allowed_paths: [], execution_plan: "Not established." },
-      cognition: { schema: "anchor.cognition.v3", situation: { current_understanding: "The task has started.", confirmed_facts: [], active_hypotheses: [], unresolved_conflicts: [], blockers: [] }, experience: { decisions: [], failed_paths: [] }, intent: { current_directive: "Ship the adapter.", accepted_next_action: "Inspect the adapter.", next_plan: ["Inspect the adapter."], open_questions: [] }, knowledge_index: [] },
+      goal: "Ship the adapter",
+      uncertainties: [],
+      intent: { current_directive: "Ship the adapter.", accepted_next_action: "Inspect the adapter.", next_plan: ["Inspect the adapter."], open_questions: [] },
+      new_items: [],
     } }], usage: { input: 1, output: 1 } }) },
   });
   await pi.handlers.session_start({ reason: "startup" }, ctx);

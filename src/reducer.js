@@ -23,10 +23,19 @@ export function reduceUpdateProposal(previous, proposal, frontier) {
   }
   for (const id of ledger.keys()) if (!decisions.has(id)) throw new Error(`proposal omits ${id}`);
   const next = structuredClone(previous);
+  next.knowledge_index = [];
   const carriedOpenQuestions = [];
   for (const [section, field] of GROUPS) next[section][field] = [];
   const dispositions = [];
-  const add = (section, field, item) => next[section][field].push(item);
+  const usedIds = new Set();
+  const add = (section, field, item) => {
+    if (usedIds.has(item.id)) throw new Error(`duplicate generated item id ${item.id}`);
+    usedIds.add(item.id);
+    next[section][field].push(item);
+  };
+  for (const [section, field] of GROUPS) for (const item of previous[section]?.[field] ?? []) if (item.id) usedIds.add(item.id);
+  for (const [section, field] of GROUPS) next[section][field] = [];
+  usedIds.clear();
   for (const [id, prior] of ledger) {
     const op = decisions.get(id);
     const base = { item_id: id, disposition: op.disposition, reason: op.reason || `Reducer applied ${op.disposition}.`, sources: op.sources?.length ? [...op.sources] : ["reducer"] };
@@ -50,8 +59,14 @@ export function reduceUpdateProposal(previous, proposal, frontier) {
     add(normalized.section, normalized.field, normalized.item);
   }
   next.situation.current_understanding = required(proposal.situation?.current_understanding, "situation.current_understanding");
-  next.intent = normalizeIntent(proposal.intent, carriedOpenQuestions);
-  next.knowledge_index = [...(next.knowledge_index || []), ...(proposal.knowledge_index || []).map((ref) => ({ ...ref }))];
+  const openQuestions = next.intent.open_questions;
+  next.intent = normalizeIntent(proposal.intent, openQuestions.length ? openQuestions : carriedOpenQuestions);
+  const references = new Map((next.knowledge_index || []).map((ref) => [ref.locator, ref]));
+  for (const [index, ref] of (proposal.knowledge_index || []).entries()) {
+    const normalized = normalizeReference(ref, frontier, index);
+    references.set(normalized.locator, normalized);
+  }
+  next.knowledge_index = [...references.values()];
   return { cognition: next, transition_certificate: { schema: "anchor.transition.v1", dispositions } };
 }
 
@@ -71,6 +86,10 @@ function normalizeItem(value, _previous, frontier, index) {
 }
 function normalizeIntent(intent, carriedOpenQuestions) {
   return { current_directive: required(intent?.current_directive, "intent.current_directive"), accepted_next_action: required(intent?.accepted_next_action, "intent.accepted_next_action"), next_plan: intent?.next_plan?.length ? [...intent.next_plan] : [required(intent?.accepted_next_action, "intent.accepted_next_action")], open_questions: carriedOpenQuestions };
+}
+function normalizeReference(value, frontier, index) {
+  if (!value || typeof value !== "object") throw new Error("knowledge reference is required");
+  return { id: deterministicId("ref", `${value.locator}:${index}`, frontier), cue: required(value.cue, "knowledge_index.cue"), locator: required(value.locator, "knowledge_index.locator"), source: required(value.source, "knowledge_index.source") };
 }
 function validateProposal(proposal) {
   if (!proposal || proposal.schema !== "anchor.update-proposal.v2" || !Array.isArray(proposal.item_decisions)) throw new Error("Invalid anchor.update-proposal.v2");

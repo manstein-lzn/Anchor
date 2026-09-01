@@ -39,6 +39,19 @@ const updateSubmission = () => ({
   transition_certificate: { schema: "anchor.transition.v1", dispositions: [] },
 });
 
+const proposalSubmission = (ids = [
+  `confirmed_facts-${hashValue("Tool replay is grouped.").slice(-12)}`,
+  `decisions-${hashValue("Use Pi's compaction boundary.").slice(-12)}`,
+  `failed_paths-${hashValue("Full branch replay overflowed because it grew without bound.").slice(-12)}`,
+]) => ({
+  schema: "anchor.update-proposal.v2",
+  situation: { current_understanding: "The provider boundary is stable." },
+  intent: { current_directive: "Finish the bounded Update path.", accepted_next_action: "Run the focused test.", next_plan: ["Run the focused test."] },
+  item_decisions: ids.map((item_id) => ({ item_id, disposition: "carry" })),
+  new_items: [],
+  knowledge_index: [],
+});
+
 const bootstrapSubmission = () => ({
   schema: "anchor.bootstrap.v1",
   title: "Ship adapter",
@@ -50,6 +63,14 @@ const bootstrapSubmission = () => ({
     intent: { current_directive: "Ship the adapter.", accepted_next_action: "Inspect the adapter.", next_plan: ["Inspect the adapter."], open_questions: [] },
     knowledge_index: [],
   },
+});
+const bootstrapProposalSubmission = () => ({
+  schema: "anchor.bootstrap-proposal.v2",
+  title: "Ship adapter",
+  goal: "Ship adapter",
+  uncertainties: ["Acceptance criteria are not yet confirmed."],
+  intent: { current_directive: "Ship the adapter.", accepted_next_action: "Inspect the adapter.", next_plan: ["Inspect the adapter."], open_questions: [] },
+  new_items: [],
 });
 
 const submissionResponse = (name, arguments_, usage = { input: 10, output: 2 }) => ({
@@ -187,7 +208,7 @@ test("compact Update consumes only Pi's bounded Episode and commits its frontier
       complete: async (_model, request, options) => {
         modelRequest = request;
         modelOptions = options;
-        return submissionResponse(UPDATE_SUBMISSION_TOOL.name, updateSubmission());
+        return submissionResponse(UPDATE_PROPOSAL_TOOL.name, proposalSubmission());
       },
     },
   });
@@ -225,18 +246,11 @@ test("semantic Update rejection gets one deterministic correction attempt", asyn
   const frontier = compactFrontier(preparation, "session-retry");
   const prior = updateSubmission();
   prior.situation.confirmed_facts = [item("old-fact", "The prior fact remains active.")];
-  delete prior.transition_certificate;
+  prior.experience.decisions = [];
   const previous = checkpoint(0, { kind: "planning", session_id: "session-retry", source_hash: hashValue({ proposal: 1 }) });
   previous.cognition = prior;
-  const invalid = updateSubmission();
-  invalid.situation.confirmed_facts = [];
-  invalid.transition_certificate.dispositions = [{ item_id: "old-fact", disposition: "carry", reason: "Still relevant.", sources: ["episode:bounded"], replacement_id: "", reference: "" }];
-  const corrected = updateSubmission();
-  corrected.situation.confirmed_facts = [item("old-fact", "The prior fact remains active.")];
-  corrected.transition_certificate.dispositions = [
-    { item_id: "old-fact", disposition: "carry", reason: "Still relevant after review.", sources: ["episode:bounded"], replacement_id: "", reference: "" },
-    { item_id: "decision-boundary", disposition: "carry", reason: "Still relevant after review.", sources: ["episode:bounded"], replacement_id: "", reference: "" },
-  ];
+  const invalid = proposalSubmission([]);
+  const corrected = proposalSubmission(["old-fact"]);
   const requests = [];
   let writes = 0;
   const result = await runUpdate({
@@ -245,10 +259,10 @@ test("semantic Update rejection gets one deterministic correction attempt", asyn
   }, { preparation, signal: new AbortController().signal }, {
     model: { provider: "test", id: "model" },
     sessionManager: { getSessionId: () => "session-retry" },
-    modelRegistry: { complete: async (_model, request) => { requests.push(request); return submissionResponse(UPDATE_SUBMISSION_TOOL.name, requests.length === 1 ? invalid : corrected); } },
+    modelRegistry: { complete: async (_model, request) => { requests.push(request); return submissionResponse(UPDATE_PROPOSAL_TOOL.name, requests.length === 1 ? invalid : corrected); } },
   });
   assert.equal(requests.length, 2);
-  assert.match(requests[1].messages.at(-1).content[0].text, /carried item is missing from cognition/);
+  assert.match(requests[1].messages.at(-1).content[0].text, /omits old-fact/);
   assert.equal(writes, 1);
   assert.match(result.compaction.summary, /committed/);
 });
@@ -369,7 +383,7 @@ test("first compact bootstraps provisional state from only the Episode", async (
   const result = await runBootstrap(anchor, { preparation, signal: new AbortController().signal }, {
     model: { provider: "test", id: "model" },
     sessionManager: { getSessionId: () => "session-bootstrap" },
-    modelRegistry: { complete: async (_model, value, options) => { request = value; assert.equal(options.toolChoice, "required"); return submissionResponse(BOOTSTRAP_SUBMISSION_TOOL.name, bootstrapSubmission(), { input: 4, output: 4 }); } },
+    modelRegistry: { complete: async (_model, value, options) => { request = value; assert.equal(options.toolChoice, "required"); return submissionResponse(BOOTSTRAP_PROPOSAL_TOOL.name, bootstrapProposalSubmission(), { input: 4, output: 4 }); } },
   });
   assert.equal(result.compaction.details.checkpoint_version, 0);
   assert.equal(bootstrapped.contract.status, "provisional");
