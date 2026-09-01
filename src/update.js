@@ -87,6 +87,37 @@ const BOOTSTRAP_SUBMISSION_SCHEMA = closedObject({
   cognition: COGNITION_SCHEMA,
 });
 
+const PROPOSAL_ITEM_SCHEMA = closedObject({
+  section: nonEmptyString(),
+  statement: nonEmptyString(),
+  sources: stringArraySchema({ minItems: 1 }),
+  relevance: nonEmptyString(),
+});
+const PROPOSAL_DECISION_SCHEMA = closedObject({
+  item_id: nonEmptyString(),
+  disposition: Type.String({ enum: ["carry", "revise", "resolve", "supersede", "demote", "archive"] }),
+  reason: Type.Optional(nonEmptyString()),
+  sources: Type.Optional(stringArraySchema()),
+  replacement: Type.Optional(PROPOSAL_ITEM_SCHEMA),
+  reference: Type.Optional(nonEmptyString()),
+});
+const UPDATE_PROPOSAL_SCHEMA = closedObject({
+  schema: schemaName("anchor.update-proposal.v2"),
+  situation: closedObject({ current_understanding: nonEmptyString() }),
+  intent: closedObject({ current_directive: nonEmptyString(), accepted_next_action: nonEmptyString(), next_plan: stringArraySchema() }),
+  item_decisions: Type.Array(PROPOSAL_DECISION_SCHEMA),
+  new_items: Type.Array(PROPOSAL_ITEM_SCHEMA),
+  knowledge_index: Type.Array(closedObject({ cue: nonEmptyString(), locator: nonEmptyString(), source: nonEmptyString() })),
+});
+const BOOTSTRAP_PROPOSAL_SCHEMA = closedObject({
+  schema: schemaName("anchor.bootstrap-proposal.v2"),
+  title: nonEmptyString(),
+  goal: nonEmptyString(),
+  uncertainties: stringArraySchema(),
+  intent: closedObject({ current_directive: nonEmptyString(), accepted_next_action: nonEmptyString(), next_plan: stringArraySchema(), open_questions: stringArraySchema() }),
+  new_items: Type.Array(PROPOSAL_ITEM_SCHEMA),
+});
+
 export const UPDATE_SUBMISSION_TOOL = Object.freeze({
   name: "anchor_submit_update",
   label: "Submit Anchor Update",
@@ -100,6 +131,22 @@ export const BOOTSTRAP_SUBMISSION_TOOL = Object.freeze({
   label: "Submit Anchor Bootstrap",
   description: "Submit the provisional Anchor Contract and initial cognition. This function records no side effects and is never executed.",
   parameters: BOOTSTRAP_SUBMISSION_SCHEMA,
+  constrainedSampling: { type: "json_schema", strict: "prefer" },
+});
+
+export const UPDATE_PROPOSAL_TOOL = Object.freeze({
+  name: "anchor_submit_update",
+  label: "Submit Anchor Update Proposal",
+  description: "Submit semantic Anchor changes. Anchor deterministically materializes the complete Checkpoint candidate.",
+  parameters: UPDATE_PROPOSAL_SCHEMA,
+  constrainedSampling: { type: "json_schema", strict: "prefer" },
+});
+
+export const BOOTSTRAP_PROPOSAL_TOOL = Object.freeze({
+  name: "anchor_submit_bootstrap",
+  label: "Submit Anchor Bootstrap Proposal",
+  description: "Submit a provisional semantic bootstrap proposal. Anchor owns Contract and Checkpoint materialization.",
+  parameters: BOOTSTRAP_PROPOSAL_SCHEMA,
   constrainedSampling: { type: "json_schema", strict: "prefer" },
 });
 
