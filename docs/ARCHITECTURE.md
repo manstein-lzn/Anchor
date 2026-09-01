@@ -611,7 +611,9 @@ The remaining target gaps are:
 - focused fresh-Agent takeover and 100-Update projection plateau tests exist;
   real-provider long-task acceptance and production p50/p95 measurements do not
   yet exist;
-- overflow compact remains unverified with a real provider.
+- a controlled real-provider overflow compact has now been verified through
+  Bootstrap Checkpoint 0 and Update Checkpoint 1; business-task semantic quality
+  and production latency measurements remain outside this boundary acceptance.
 
 The implementation order is therefore deliberately narrow:
 

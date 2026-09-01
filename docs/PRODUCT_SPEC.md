@@ -430,7 +430,8 @@ receipt crash recovery 和 mismatch fail-closed 已完成真实 provider 验收�
 认知切片也已实现：`anchor.cognition.v3`、stable item/provenance、Transition
 Certificate、demotion reference 校验，以及 Contract-plus-cognition bounded
 projection。剩余工作是 fresh-Agent takeover、50–100 次 Update
-平台期和生产 p50/p95 验收；overflow compact 仍未完成真实 provider 验收。Pi 的
+平台期和生产 p50/p95 验收；受控历史规模 overflow compact 已完成真实
+provider 验收，但这不等同于业务任务语义质量验收。Pi 的
 model/auth 前置检查和 process-wide tool list 仍是 host 限制。
 
 这些是后续实现目标，不应在文档中描述为已完成行为。

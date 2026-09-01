@@ -28,12 +28,16 @@
 - Phase 2, structured Bootstrap/Update submission, is implemented and covered
   by deterministic tests. This includes closed schemas, mandatory tool choice,
   exactly-one-call validation, and no State write for rejected submissions.
-- Phase 1, historical-scale real-provider overflow validation, is partially
-  complete. A controlled 138,137-input-token real-provider Update completed at
-  the provider boundary but was rejected during `response-validation` because
-  the model included an invalid Transition Certificate item; no State write was
-  attempted. This proves the failure path and observability, but successful
-  historical-scale Update continuation remains unproven.
+- Phase 1, historical-scale real-provider overflow validation, is complete for
+  the controlled acceptance probe. In one isolated Pi session, real-provider
+  overflow compact committed Bootstrap Checkpoint 0 at `tokensBefore=188,918`,
+  then a second historical-scale overflow compact committed Update Checkpoint 1
+  at `tokensBefore=191,902`. Both returned complete
+  `anchor.compact-receipt.v1` metadata; Checkpoint 1 persisted with the correct
+  Checkpoint 0 parent hash, and its receipt matched the Pi session frontier,
+  event ID, task ID, version, and content hash. The probe used synthetic Episode
+  evidence, so this validates the Anchor/Pi/provider boundary rather than the
+  semantic quality of a particular business task.
 
 ## Next stage: minimal sufficient cognition
 
@@ -44,10 +48,9 @@
 
 ## Remaining host acceptance
 
-- repeat the historical-scale Update after correcting the provider-facing
-  Transition Certificate behavior, and record request size, stop reason,
-  response-validation result, and persistence/receipt outcome for a successful
-  continuation;
+- retain the historical-scale overflow probe as a regression record, including
+  request size, stop reason, response-validation result, and persistence/receipt
+  outcome;
 - measure projection and Update latency p50/p95.
 
 ## Deferred until measured

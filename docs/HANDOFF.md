@@ -1,6 +1,6 @@
 # Development Handoff
 
-Status: Phase 2 structured submission implemented; Phase 1 historical-scale provider validation remains unproven; takeover and churn acceptance remain, 2026-09-01
+Status: Phase 1 historical-scale real-provider overflow acceptance passed; Phase 2 structured submission implemented; takeover, churn, and latency acceptance remain, 2026-09-01
 
 Anchor is now a Pi package. `src/extension.js` owns the public lifecycle;
 `python/anchor_core/` is the embedded durable state implementation. The former
@@ -73,14 +73,17 @@ npm pack --dry-run
 PI_OFFLINE=1 PI_SKIP_VERSION_CHECK=1 pi --offline -e /home/mansteinl/Anchor --help
 ```
 
-Current repository verification: the deterministic suite passes after the
-Transition Certificate validation fix, syntax checks pass, and the working diff
-passes `git diff --check`. A real full-schema Bootstrap completed and committed
-Checkpoint 0 in temporary SQLite. A controlled historical-scale Update sent
-138,137 input tokens to the real provider, received HTTP 200/completed and one
-`anchor_submit_update` call, then failed at `response-validation` for an unknown
-previous item; `persistence_attempted=false`. Successful historical-scale Update
-continuation remains the open Phase 1 acceptance item.
+Current repository verification: the deterministic suite passes, syntax checks
+pass, and the working tree passes `git diff --check`. A controlled real Pi
+session using the configured `local-codex/gpt-5.6-sol` provider crossed the
+historical-scale overflow boundary twice. Bootstrap committed Checkpoint 0 at
+`tokensBefore=188,918`; the subsequent Update committed Checkpoint 1 at
+`tokensBefore=191,902`. Both Pi compaction entries contain complete
+`anchor.compact-receipt.v1` metadata. SQLite recovery confirms Checkpoint 1 has
+the correct Checkpoint 0 parent hash, and the Pi receipt matches its task,
+version, content hash, event ID, and complete frontier. This was a synthetic
+continuation probe: it validates the runtime boundary and persistence contract,
+not business-task cognition quality.
 
 Local interactive use:
 
@@ -92,10 +95,13 @@ A real `cwiseai/gpt-5.6-sol` audit completed Planning, four Updates, restart,
 fork isolation, tool failure recovery, user correction, evidence provenance,
 crash-window receipt replay, and mismatch failure injection. It exposed the
 control-message and partial-receipt checks fixed above. A real threshold
-auto-compact produced an Anchor receipt and continued normally; historical-scale overflow Bootstrap/Update success remains unverified. The later
-Bootstrap failure that reported `knowledge_index.content_hash` occurred on the
-pre-fix implementation; the current path rejects that value during response
-validation and the focused regression suite covers it. The first post-fix
+auto-compact produced an Anchor receipt and continued normally; a later
+historical-scale overflow Bootstrap/Update probe also committed Checkpoints 0
+and 1 successfully. The earlier Bootstrap failure that reported
+`knowledge_index.content_hash` occurred on the pre-fix implementation; the
+current v2 semantic proposal path materializes hashes and Transition
+Certificates deterministically, and the focused regression suite covers the
+provider-boundary cases. The first post-fix
 historical-scale Update reached the provider and failed closed at response
 validation because of an invalid Transition Certificate item, without a State
 write. Planning currently uses Pi's default
