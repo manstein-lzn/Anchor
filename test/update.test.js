@@ -267,6 +267,35 @@ test("semantic Update rejection gets one deterministic correction attempt", asyn
   assert.match(result.compaction.summary, /committed/);
 });
 
+test("structured Update accepts provider nulls for optional proposal fields", async () => {
+  const preparation = {
+    firstKeptEntryId: "entry-kept",
+    tokensBefore: 123,
+    messagesToSummarize: [{ role: "user", content: [{ type: "text", text: "bounded work" }] }],
+    turnPrefixMessages: [],
+    isSplitTurn: false,
+  };
+  const previous = checkpoint(0, { kind: "planning", session_id: "session-null", source_hash: hashValue({ proposal: 1 }) });
+  const proposal = proposalSubmission();
+  for (const decision of proposal.item_decisions) {
+    decision.reason = null;
+    decision.sources = null;
+    decision.replacement = null;
+    decision.reference = null;
+  }
+  let writes = 0;
+  const result = await runUpdate({
+    recovery: async () => ({ task_id: "task-null", task: { state_version: 1 }, contract: { content: { goal: "test" } }, checkpoint: previous }),
+    update: async (value) => { writes += 1; return { event_id: "event-1", content_hash: hashValue(value), payload: { schema: "anchor.checkpoint.v1", task_id: "task-null", checkpoint_version: 1, parent: { checkpoint_version: 0, content_hash: previous.receipt.content_hash }, ...value } }; },
+  }, { preparation, signal: new AbortController().signal }, {
+    model: { provider: "test", id: "model" },
+    sessionManager: { getSessionId: () => "session-null" },
+    modelRegistry: { complete: async () => submissionResponse(UPDATE_PROPOSAL_TOOL.name, proposal) },
+  });
+  assert.equal(writes, 1);
+  assert.equal(result.compaction.details.schema, "anchor.compact-receipt.v1");
+});
+
 test("Update submission uses one closed schema instead of free-text JSON", () => {
   assert.equal(UPDATE_SUBMISSION_TOOL.name, "anchor_submit_update");
   assert.equal(UPDATE_SUBMISSION_TOOL.parameters.additionalProperties, false);

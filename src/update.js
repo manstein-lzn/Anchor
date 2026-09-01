@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { convertToLlm } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { Check } from "typebox/value";
+import { Check, Errors } from "typebox/value";
 import { reduceUpdateProposal } from "./reducer.js";
 
 const nonEmptyString = () => Type.String({ minLength: 1 });
@@ -572,11 +572,30 @@ function submissionArguments(response, tool, agent) {
   if (!calls[0].arguments || typeof calls[0].arguments !== "object" || Array.isArray(calls[0].arguments)) {
     throw new Error(`${agent} Agent submitted invalid ${tool.name} arguments`);
   }
-  if (!Check(tool.parameters, calls[0].arguments)) {
-    throw new Error(`${agent} Agent submitted arguments that do not match the ${tool.name} schema`);
+  const arguments_ = structuredClone(calls[0].arguments);
+  normalizeOptionalNulls(arguments_, tool.parameters);
+  if (!Check(tool.parameters, arguments_)) {
+    const paths = [...Errors(tool.parameters, arguments_)].slice(0, 8).map((error) => error.path || "/");
+    const suffix = paths.length ? ` at ${paths.join(", ")}` : "";
+    throw new Error(`${agent} Agent submitted arguments that do not match the ${tool.name} schema${suffix}`);
   }
-  return calls[0].arguments;
+  return arguments_;
 }
+
+function normalizeOptionalNulls(value, schema) {
+  if (Array.isArray(value)) {
+    if (schema?.items) for (const item of value) normalizeOptionalNulls(item, schema.items);
+    return;
+  }
+  if (!value || typeof value !== "object" || !schema?.properties) return;
+  const requiredProperties = new Set(schema.required ?? []);
+  for (const [key, propertySchema] of Object.entries(schema.properties)) {
+    if (!(key in value)) continue;
+    if (value[key] === null && !requiredProperties.has(key) && !Check(propertySchema, null)) delete value[key];
+    else normalizeOptionalNulls(value[key], propertySchema);
+  }
+}
+
 function submissionOptions(model, signal) {
   const anyChoiceApis = new Set(["anthropic-messages", "google-generative-ai", "google-vertex", "bedrock-converse"]);
   return { signal, toolChoice: anyChoiceApis.has(model?.api) ? "any" : "required" };
