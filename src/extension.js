@@ -4,7 +4,7 @@ import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { projectMessages } from "./context.js";
 import { AnchorClient } from "./store.js";
-import { compactFrontier, hashValue, runBootstrap, runUpdate } from "./update.js";
+import { ANCHOR_UPDATE_PROTOCOL, compactFrontier, hashValue, runBootstrap, runUpdate } from "./update.js";
 
 const MODE = "anchor.mode";
 const PROPOSAL = "anchor.proposal";
@@ -308,7 +308,7 @@ export default function anchorExtension(pi) {
       if (mode === "normal") return ctx.ui.notify("Normal Pi mode. Use /anchor start for durable long-running work.", "info");
       if (mode === "planning") return ctx.ui.notify(pendingProposal?.status === "sealed" ? "Anchor proposal is ready for /anchor review." : "Anchor Planning is active.", "info");
       const recovery = await anchor.recovery(ctx.sessionManager.getSessionId());
-      ctx.ui.notify(`${recovery.task.task_id}: ${recovery.task.title}\n${recovery.task.lifecycle_status}\nNext: ${nextAction(recovery.checkpoint.cognition)}`, "info");
+      ctx.ui.notify(`${recovery.task.task_id}: ${recovery.task.title}\n${recovery.task.lifecycle_status}\nNext: ${nextAction(recovery.checkpoint.cognition)}\nProtocol: ${ANCHOR_UPDATE_PROTOCOL}`, "info");
     },
   });
 

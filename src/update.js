@@ -142,6 +142,8 @@ export const UPDATE_PROPOSAL_TOOL = Object.freeze({
   constrainedSampling: { type: "json_schema", strict: "required" },
 });
 
+export const ANCHOR_UPDATE_PROTOCOL = "anchor.update-proposal.v2";
+
 export const BOOTSTRAP_PROPOSAL_TOOL = Object.freeze({
   name: "anchor_submit_bootstrap",
   label: "Submit Anchor Bootstrap Proposal",
