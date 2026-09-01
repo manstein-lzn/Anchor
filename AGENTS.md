@@ -39,7 +39,11 @@ This document is normative for runtime changes.
   and target frontier; neither is an Episode directive or new evidence.
 - Never send the complete branch or transcript to the Update Agent.
 - Update produces a complete current cognition snapshot, not prose summary,
-  chronology, or a free-form delta.
+  chronology, or a free-form delta. It must submit that candidate through the
+  request-local `anchor_submit_update` function with JSON-schema constrained
+  arguments; free-text JSON is not an Update runtime protocol. If deterministic
+  validation rejects a candidate, Anchor may send one validation-only correction
+  request; it must still reject the candidate if the correction is invalid.
 - Bootstrap at the first compaction is a separate initialization task. It may
   create Checkpoint 0 from the exact Pi Episode, but must preserve unknowns and
   never invent user-confirmed requirements.
@@ -90,8 +94,12 @@ This document is normative for runtime changes.
 
 ## Runtime boundaries
 
-- Pi owns model transport, streaming, tool execution and permissions, retry,
-  interruption, transcript, session tree, TUI, and context thresholds.
+- Pi owns model transport, streaming, project tool execution and permissions,
+  retry, interruption, transcript, session tree, TUI, and context thresholds.
+- Anchor may attach one request-local, side-effect-free submission function to
+  Bootstrap or Update model transport. Anchor consumes and validates its
+  arguments directly; the function is not registered as a Pi session tool, is
+  never executed, and produces no tool-result transcript entry.
 - Anchor owns Planning, Task and Checkpoint persistence, Update, validation,
   deterministic projection, and compact receipt recovery.
 - Anchor Planning may temporarily restrict model tools to a read-only set.

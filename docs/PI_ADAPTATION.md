@@ -17,8 +17,11 @@ Pi runtime.
 | `appendEntry` | Persist session-owned mode and proposal audit entries |
 | `setActiveTools` | Enforce read-only Planning and restore execution tools |
 
-Pi remains responsible for model selection, streaming, tool execution, terminal
-UI, sessions, interruption, retry, and compaction thresholds.
+Pi remains responsible for model selection, streaming, project tool execution,
+terminal UI, sessions, interruption, retry, and compaction thresholds. Anchor's
+model request may attach one request-local submission function. It is not
+registered through `pi.registerTool`, has no executor, and exists only so the
+provider returns schema-constrained candidate arguments.
 
 ## Planning boundary
 
@@ -35,6 +38,8 @@ entries in a fork are ignored because the new session identity differs.
 ## Update boundary
 
 Manual `/compact`, automatic threshold compact, overflow recovery, and `/update`
-all reach the same hook in Active mode. Update calls the selected model directly,
-so no project tools are available. Failure returns `{ cancel: true }`; Pi retains
-the usable window and does not run ordinary compact as fallback.
+all reach the same hook in Active mode. Update calls the selected model directly
+with exactly one mandatory, side-effect-free `anchor_submit_update` function and
+no project tools. Anchor consumes the call arguments without executing a tool.
+Failure returns `{ cancel: true }`; Pi retains the usable window and does not run
+ordinary compact as fallback.

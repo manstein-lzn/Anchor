@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
@@ -8,6 +8,7 @@ import { compactFrontier, hashValue, runBootstrap, runUpdate } from "./update.js
 
 const MODE = "anchor.mode";
 const PROPOSAL = "anchor.proposal";
+const BOOTSTRAP_FAILURE = "anchor.bootstrap-failure";
 const ANCHOR_TOOLS = new Set(["anchor_ask", "anchor_propose", "anchor_recall"]);
 const RECALL_TOOL = "anchor_recall";
 const PLANNING_TOOLS = ["read", "grep", "find", "ls", "anchor_ask", "anchor_propose"];
@@ -51,6 +52,7 @@ const proposalSchema = Type.Object({
 });
 
 export default function anchorExtension(pi) {
+  const localCodex = registerLocalCodexProvider(pi);
   let mode = "normal";
   let anchor = null;
   let statePath = null;
@@ -319,6 +321,10 @@ export default function anchorExtension(pi) {
   });
 
   pi.on("session_start", async (event, ctx) => {
+    if (localCodex) {
+      const model = ctx.modelRegistry.find("local-codex", "gpt-5.6-sol");
+      if (model) await pi.setModel(model);
+    }
     setNormalTools();
     mode = "normal";
     anchor = null;
@@ -428,6 +434,7 @@ export default function anchorExtension(pi) {
         return result;
       } catch (error) {
         if (event.signal?.aborted) return { cancel: true };
+        recordBootstrapFailure(error, event, ctx);
         // Bootstrap is opportunistic; Pi's native compact remains the fallback.
         return;
       }
@@ -445,6 +452,49 @@ export default function anchorExtension(pi) {
       return { cancel: true };
     }
   });
+
+  function recordBootstrapFailure(error, event, ctx) {
+    const preparation = event.preparation;
+    const messagesToSummarize = Array.isArray(preparation?.messagesToSummarize) ? preparation.messagesToSummarize : [];
+    const turnPrefixMessages = Array.isArray(preparation?.turnPrefixMessages) ? preparation.turnPrefixMessages : [];
+    const details = {
+      schema: "anchor.bootstrap-failure.v1",
+      session_id: ctx.sessionManager.getSessionId(),
+      stage: error?.bootstrapStage ?? "unknown",
+      error_class: error?.bootstrapErrorClass ?? error?.constructor?.name ?? "Error",
+      error_message: redactDiagnostic(error instanceof Error ? error.message : String(error)),
+      model: modelName(ctx.model),
+      message_count: messagesToSummarize.length + turnPrefixMessages.length,
+      messages_to_summarize: messagesToSummarize.length,
+      turn_prefix_messages: turnPrefixMessages.length,
+      ...(typeof preparation?.tokensBefore === "number" ? { tokens_before: preparation.tokensBefore } : {}),
+      ...(typeof preparation?.isSplitTurn === "boolean" ? { is_split_turn: preparation.isSplitTurn } : {}),
+    };
+    try {
+      details.episode_hash = hashValue([...messagesToSummarize, ...turnPrefixMessages]);
+      if (typeof preparation?.firstKeptEntryId === "string" && preparation.firstKeptEntryId) {
+        details.frontier_hash = hashValue({
+          kind: "compact",
+          session_id: details.session_id,
+          first_kept_entry_id: preparation.firstKeptEntryId,
+          episode_hash: details.episode_hash,
+          is_split_turn: Boolean(preparation.isSplitTurn),
+        });
+      }
+    } catch {
+      // The diagnostic must not interfere with Pi's native fallback.
+    }
+    try {
+      pi.appendEntry(BOOTSTRAP_FAILURE, details);
+    } catch {
+      // Transcript observability is best effort; native compaction remains authoritative here.
+    }
+    try {
+      ctx.ui.notify(`Anchor Bootstrap failed at ${details.stage}: ${details.error_message}. Continuing with Pi native compaction.`, "error");
+    } catch {
+      // A UI failure must not prevent native compaction.
+    }
+  }
 
   async function recoverUndeliveredCheckpoint(recovery, ctx) {
     const branch = () => ctx.sessionManager.getBranch();
@@ -464,6 +514,40 @@ export default function anchorExtension(pi) {
   }
 }
 
+function registerLocalCodexProvider(pi) {
+  const codexHome = process.env.CODEX_HOME || join(process.env.HOME || ".", ".codex");
+  const configPath = join(codexHome, "config.toml");
+  const authPath = join(codexHome, "auth.json");
+  const config = readText(configPath);
+  const baseUrl = String(process.env.ANCHOR_CODEX_BASE_URL || config.match(/base_url\s*=\s*"([^"]+)"/)?.[1] || "").trim();
+  const apiKey = String(process.env.ANCHOR_CODEX_API_KEY || readCodexKey(authPath) || "").trim();
+  if (!baseUrl || !apiKey || typeof pi.registerProvider !== "function") return;
+  pi.registerProvider("local-codex", {
+    name: "Local Codex",
+    baseUrl: baseUrl.replace(/\/$/, ""),
+    // Resolved from Codex auth.json (or the explicit override) above; Pi keeps
+    // this credential in its provider runtime and Anchor never persists it.
+    apiKey,
+    api: "openai-responses",
+    models: [{
+      id: "gpt-5.6-sol",
+      name: "GPT-5.6 Sol (local Codex)",
+      reasoning: true,
+      input: ["text", "image"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 200000,
+      maxTokens: 32768,
+      compat: { supportsStrictMode: true },
+    }],
+  });
+  return true;
+}
+
+function readText(path) { try { return readFileSync(path, "utf8"); } catch { return ""; } }
+function readCodexKey(path) {
+  try { const auth = JSON.parse(readFileSync(path, "utf8")); return auth.OPENAI_API_KEY || auth.openai_api_key || ""; } catch { return ""; }
+}
+
 function sessionEntries(ctx) {
   return ctx.sessionManager.getEntries?.() ?? ctx.sessionManager.getBranch();
 }
@@ -472,6 +556,13 @@ function lastOwned(entries, customType, sessionId) {
   return [...entries].reverse().find((entry) => entry.type === "custom" && entry.customType === customType && entry.data?.session_id === sessionId);
 }
 
+
+function redactDiagnostic(message) {
+  return String(message || "Unknown bootstrap failure")
+    .replace(/Bearer\s+\S+/gi, "Bearer [redacted]")
+    .replace(/((?:api[_-]?key|authorization|token)[=: ]+)\S+/gi, "$1[redacted]")
+    .slice(0, 500);
+}
 
 function checkpointDelivered(checkpoint, entries) {
   return entries.some((entry) => entry.type === "compaction"

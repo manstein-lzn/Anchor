@@ -296,7 +296,8 @@ previous Checkpoint
 + preparation.turnPrefixMessages
                  |
                  v
-          tool-less Update Agent
+          Update Agent
+  request-local schema-constrained submission
   assimilate / revise / resolve / forget / index
                  |
                  v
@@ -316,6 +317,16 @@ The Update Agent's semantic evidence is exactly the previous Checkpoint and that
 Episode. A deterministic control envelope may also carry the immutable Contract
 and target frontier. They constrain the transition but are not new evidence or
 Episode directives. Anchor never sends the complete branch or transcript.
+
+The candidate crosses the model boundary only as the arguments of one
+request-local `anchor_submit_update` function. The function has no implementation
+or side effects: Anchor does not register it as a Pi session tool, execute it, or
+append a tool result. Providers that support strict JSON-schema tools constrain
+sampling directly; other supported providers still receive one mandatory
+function choice and Anchor applies the same deterministic validation to its
+arguments. A candidate rejected by deterministic validation may receive one
+validation-only correction request; the second invalid candidate is rejected
+without changing the previous Checkpoint.
 
 Update is not a summary task. It performs five semantic operations:
 
@@ -570,7 +581,8 @@ minimal-sufficient-cognition slice:
   stable item identity, item provenance, and a v2 read/commit compatibility path;
 - `anchor.transition.v1` with complete previous-item coverage, source checks,
   replacement checks, and demotion references;
-- tool-less serial Update over exactly Pi's preparation Episode;
+- request-local schema-constrained serial Update over exactly Pi's preparation
+  Episode, with direct argument validation and no Pi project-tool execution;
 - stale-version CAS, content-bound compact receipt, crash replay, and fail-closed
   mismatch recovery;
 - bounded deterministic projection of Contract core, current cognition, and
@@ -578,6 +590,10 @@ minimal-sufficient-cognition slice:
 - resume, transcript-tree, fork, and Normal-mode isolation.
 
 The remaining target gaps are:
+
+- a pure semantic-proposal reducer is available as an isolated compatibility
+  path (`src/reducer.js`), but the primary provider tool and Bootstrap/Update
+  runtime still use the v1/v3 full-snapshot protocol;
 
 - the runtime has no separate immutable Artifact store; exact recall currently
   supports only immutable Checkpoint item locators

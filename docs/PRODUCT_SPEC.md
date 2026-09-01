@@ -283,7 +283,7 @@ Pi prepares compaction boundary
         |
 Anchor reads previous Checkpoint + Episode
         |
-tool-less Update Agent produces complete candidate
+request-local schema-constrained submission produces complete candidate
         |
 validate schema / identity / parent version / frontier / provenance
         |
@@ -294,7 +294,12 @@ return Pi CompactionResult carrying Checkpoint receipt
 Pi appends compaction entry and keeps its recent suffix
 ```
 
-Update Agent 输出完整的当前 State，而不是聊天摘要或自由 delta。语义证据只能
+Update Agent 通过唯一的请求内 `anchor_submit_update` function call 提交完整的当前
+State，而不是聊天摘要、自由 delta 或自由文本 JSON。该 function 只作为 model
+transport 的类型化返回通道：不注册为 Pi session tool、不执行、不产生 tool result
+或 workspace 副作用。支持 strict tool schema 的 provider 直接约束采样；其他受支持
+provider 仍强制选择这个唯一 function，并由 Anchor 对 arguments 做同一套确定性
+验证。语义证据只能
 来自旧 Checkpoint 和本次 Episode；确定性控制信封可以携带 immutable Task
 Contract 与 target frontier，但二者不是 Episode directive 或新增证据。不得再次
 发送完整 branch。
@@ -455,7 +460,9 @@ model/auth 前置检查和 process-wide tool list 仍是 host 限制。
 
 - Update 输入是 previous Checkpoint 加 Pi preparation Episode，不是完整 branch；
 - tool call/result 在 Episode 和保留 suffix 中均不被拆开；
-- malformed、interrupted、provider-failed 和 stale candidate 不改变旧 Checkpoint；
+- malformed submission arguments、缺失/重复 submission call、语义校验失败时的一次
+  validation-only correction、interrupted、provider-failed 和 stale candidate 不改变旧
+  Checkpoint；第二次校正仍失败时必须取消；
 - committed Checkpoint 准确记录 source frontier 和 provenance；
 - failed path 及原因进入 State，而不是变成成功事实。
 

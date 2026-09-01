@@ -39,12 +39,12 @@ test("first compact lazily creates Anchor without Planning", async (t) => {
   anchorExtension(pi.api);
   const ctx = fakeContext(process.cwd(), pi, "session-lazy", {
     model: { provider: "test", id: "model" },
-    modelRegistry: { complete: async () => ({ content: [{ type: "text", text: JSON.stringify({
+    modelRegistry: { complete: async () => ({ content: [{ type: "toolCall", id: "bootstrap-call", name: "anchor_submit_bootstrap", arguments: {
       schema: "anchor.bootstrap.v1",
       title: "Lazy task",
-      contract: { schema: "anchor.contract.v1", status: "provisional", goal: "Ship the adapter", acceptance_criteria: [], constraints: [], non_goals: [], risks: [], verification_commands: [], allowed_paths: [], execution_plan: "Not established." },
+      contract: { schema: "anchor.contract.v1", status: "provisional", goal: "Ship the adapter", rationale: [], acceptance_criteria: [], constraints: [], non_goals: [], risks: [], verification_commands: [], allowed_paths: [], execution_plan: "Not established." },
       cognition: { schema: "anchor.cognition.v3", situation: { current_understanding: "The task has started.", confirmed_facts: [], active_hypotheses: [], unresolved_conflicts: [], blockers: [] }, experience: { decisions: [], failed_paths: [] }, intent: { current_directive: "Ship the adapter.", accepted_next_action: "Inspect the adapter.", next_plan: ["Inspect the adapter."], open_questions: [] }, knowledge_index: [] },
-    }) }], usage: { input: 1, output: 1 } }) },
+    } }], usage: { input: 1, output: 1 } }) },
   });
   await pi.handlers.session_start({ reason: "startup" }, ctx);
   const result = await pi.handlers.session_before_compact({
@@ -77,13 +77,44 @@ test("failed lazy bootstrap falls back to native compact without Anchor State", 
   anchorExtension(pi.api);
   const ctx = fakeContext(process.cwd(), pi, "session-bootstrap-failure", {
     model: { provider: "test", id: "model" },
-    modelRegistry: { complete: async () => { throw new Error("provider unavailable"); } },
+    modelRegistry: { complete: async () => { throw new Error("provider unavailable token=secret"); } },
   });
   await pi.handlers.session_start({ reason: "startup" }, ctx);
+  const preparation = {
+    firstKeptEntryId: "entry-kept",
+    messagesToSummarize: [{ role: "user", content: [{ type: "text", text: "work" }] }],
+    turnPrefixMessages: [],
+    isSplitTurn: false,
+    tokensBefore: 99,
+  };
   assert.equal(await pi.handlers.session_before_compact({
-    preparation: { firstKeptEntryId: "entry-kept", messagesToSummarize: [{ role: "user", content: [{ type: "text", text: "work" }] }], turnPrefixMessages: [], isSplitTurn: false },
+    preparation,
     signal: new AbortController().signal,
   }, ctx), undefined);
+  const failure = pi.entries.find((entry) => entry.customType === "anchor.bootstrap-failure");
+  assert.deepEqual(failure.data, {
+    schema: "anchor.bootstrap-failure.v1",
+    session_id: "session-bootstrap-failure",
+    stage: "model-transport",
+    error_class: "Error",
+    error_message: "provider unavailable token=[redacted]",
+    model: "test/model",
+    message_count: 1,
+    messages_to_summarize: 1,
+    turn_prefix_messages: 0,
+    tokens_before: 99,
+    is_split_turn: false,
+    episode_hash: hashValue(preparation.messagesToSummarize),
+    frontier_hash: hashValue({
+      kind: "compact",
+      session_id: "session-bootstrap-failure",
+      first_kept_entry_id: "entry-kept",
+      episode_hash: hashValue(preparation.messagesToSummarize),
+      is_split_turn: false,
+    }),
+  });
+  assert.match(ctx.notifications.at(-1).message, /model-transport/);
+  assert.match(ctx.notifications.at(-1).message, /native compaction/);
   await assert.rejects(access(join(agentDir, "anchor", "sessions", "session-bootstrap-failure", "anchor.db")));
 });
 

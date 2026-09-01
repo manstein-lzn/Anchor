@@ -36,6 +36,7 @@ test("v3 Update requires complete transition coverage and preserves only active 
   assert.deepEqual(result.cognition.experience.decisions, []);
   assert.equal(result.transition_certificate.dispositions.length, 2);
   assert.throws(() => normalizeUpdateResponse(JSON.stringify({ ...next, transition_certificate: { schema: "anchor.transition.v1", dispositions: [] } }), previous, {}), /omits|coverage/);
+  assert.throws(() => normalizeUpdateResponse(JSON.stringify({ ...next, transition_certificate: { ...next.transition_certificate, dispositions: [...next.transition_certificate.dispositions, { item_id: "new-item", disposition: "archive", reason: "Invalid extra disposition.", sources: ["episode:2"] }] } }), previous, {}), /unknown previous item/);
 });
 
 test("demotion requires a recoverable reference and replacement dispositions point to live items", () => {

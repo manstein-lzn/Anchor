@@ -53,6 +53,27 @@ cd <project-directory>
 pi
 ```
 
+### Local Codex Responses provider
+
+Anchor can register a local Codex endpoint in Pi when both variables are set
+before starting Pi. The endpoint must expose the OpenAI Responses API (usually
+the URL ending in `/v1`), and the key is never written to Anchor State.
+
+```bash
+export ANCHOR_CODEX_BASE_URL=http://127.0.0.1:8000/v1
+export ANCHOR_CODEX_API_KEY=your-local-codex-key
+pi
+```
+
+Select `local-codex/gpt-5.6-sol` in Pi's model selector (or start with Pi's
+normal model selection option). Anchor's Update Agent then uses the selected
+Pi model, including this Responses provider, for compaction updates.
+
+This registration is optional and does not alter Pi when either variable is
+absent. `ANCHOR_CODEX_BASE_URL` is used as supplied except for one trailing
+slash; do not append `/responses` because Pi's Responses transport adds the
+API path.
+
 An empty interactive session starts as normal Pi with no Anchor prompt. Until its
 first compaction boundary it remains unchanged; if it reaches that boundary,
 Anchor can bootstrap a provisional State without interrupting the user.

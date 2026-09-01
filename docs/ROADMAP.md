@@ -19,7 +19,21 @@
 - exact `checkpoint:<version>:item:<id>` recall through immutable Checkpoints;
 - Active `anchor_recall` tool and `/anchor recall` command;
 - bounded Contract-plus-cognition Context projection;
+- request-local schema-constrained Bootstrap and Update submission;
+- exactly-one-call, closed-schema, malformed-submission, and persistence-boundary tests;
 - focused Normal, Planning, resume, fork, projection, persistence, and Update tests.
+
+## Phase assessment
+
+- Phase 2, structured Bootstrap/Update submission, is implemented and covered
+  by deterministic tests. This includes closed schemas, mandatory tool choice,
+  exactly-one-call validation, and no State write for rejected submissions.
+- Phase 1, historical-scale real-provider overflow validation, is partially
+  complete. A controlled 138,137-input-token real-provider Update completed at
+  the provider boundary but was rejected during `response-validation` because
+  the model included an invalid Transition Certificate item; no State write was
+  attempted. This proves the failure path and observability, but successful
+  historical-scale Update continuation remains unproven.
 
 ## Next stage: minimal sufficient cognition
 
@@ -30,7 +44,10 @@
 
 ## Remaining host acceptance
 
-- trigger overflow Update with a real model;
+- repeat the historical-scale Update after correcting the provider-facing
+  Transition Certificate behavior, and record request size, stop reason,
+  response-validation result, and persistence/receipt outcome for a successful
+  continuation;
 - measure projection and Update latency p50/p95.
 
 ## Deferred until measured

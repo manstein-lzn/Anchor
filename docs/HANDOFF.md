@@ -1,6 +1,6 @@
 # Development Handoff
 
-Status: cognition v3, exact Checkpoint recall, and lazy first-compact Bootstrap complete; takeover and churn acceptance remain, 2026-08-31
+Status: Phase 2 structured submission implemented; Phase 1 historical-scale provider validation remains unproven; takeover and churn acceptance remain, 2026-09-01
 
 Anchor is now a Pi package. `src/extension.js` owns the public lifecycle;
 `python/anchor_core/` is the embedded durable state implementation. The former
@@ -42,11 +42,15 @@ changed Pi frontier instead of creating a duplicate Checkpoint, and an Active
 mode whose Task is missing remains blocked rather than falling back to Normal.
 
 The Update protocol no longer appends a control instruction as a fake user
-message. Its system prompt contains the complete `anchor.cognition.v3` and
+message. Bootstrap and Update now submit through one request-local,
+JSON-Schema-constrained function call each. Anchor requires the matching call
+exactly once, validates closed-schema arguments and cognition semantics before
+State writes, and never registers or executes these functions as Pi session
+tools. The system prompt contains the complete `anchor.cognition.v3` and
 Transition Certificate shape and requires item identity, provenance, and explicit
-dispositions. The deterministic
-control envelope carries the immutable Contract and target frontier; only the
-previous Checkpoint and Pi Episode are semantic evidence.
+dispositions. The deterministic control envelope carries the immutable Contract
+and target frontier; only the previous Checkpoint and Pi Episode are semantic
+evidence.
 
 Normal sessions now remain entirely unobtrusive until the first Pi compact. That
 boundary invokes a dedicated Bootstrap Agent over the same Episode and atomically
@@ -66,25 +70,35 @@ npm test
 npm run check
 git diff --check
 npm pack --dry-run
-PI_OFFLINE=1 PI_SKIP_VERSION_CHECK=1 pi --offline -e /root/Anchor --help
+PI_OFFLINE=1 PI_SKIP_VERSION_CHECK=1 pi --offline -e /home/mansteinl/Anchor --help
 ```
 
-Results on 2026-08-25: 14/14 tests pass, syntax checks pass, the 17,014-byte package
-contains 12 intended source files with no Python bytecode, and Pi discovers
-`--anchor` plus `--anchor-state` from the local Extension.
+Current repository verification: the deterministic suite passes after the
+Transition Certificate validation fix, syntax checks pass, and the working diff
+passes `git diff --check`. A real full-schema Bootstrap completed and committed
+Checkpoint 0 in temporary SQLite. A controlled historical-scale Update sent
+138,137 input tokens to the real provider, received HTTP 200/completed and one
+`anchor_submit_update` call, then failed at `response-validation` for an unknown
+previous item; `persistence_attempted=false`. Successful historical-scale Update
+continuation remains the open Phase 1 acceptance item.
 
 Local interactive use:
 
 ```bash
-pi -e /root/Anchor
+pi -e /home/mansteinl/Anchor
 ```
 
 A real `cwiseai/gpt-5.6-sol` audit completed Planning, four Updates, restart,
 fork isolation, tool failure recovery, user correction, evidence provenance,
 crash-window receipt replay, and mismatch failure injection. It exposed the
 control-message and partial-receipt checks fixed above. A real threshold
-auto-compact produced an Anchor receipt and continued normally; overflow compact
-remains unverified. Planning currently uses Pi's default
+auto-compact produced an Anchor receipt and continued normally; historical-scale overflow Bootstrap/Update success remains unverified. The later
+Bootstrap failure that reported `knowledge_index.content_hash` occurred on the
+pre-fix implementation; the current path rejects that value during response
+validation and the focused regression suite covers it. The first post-fix
+historical-scale Update reached the provider and failed closed at response
+validation because of an invalid Transition Certificate item, without a State
+write. Planning currently uses Pi's default
 compact summary until real use proves a dedicated Planning summary is necessary.
 Pi checks model/auth before its Extension compact hook, so exact receipt replay
 still needs a usable Pi model configuration. Planning restores one process-wide
@@ -93,7 +107,7 @@ tool-list changes by another Extension may be overwritten when Planning exits.
 Do not reintroduce an Anchor wrapper executable, parallel state writer, or
 one-prompt automatic Task creation.
 
-The cognition v3 slice is now implemented. Checkpoints use Situation,
+The cognition v3 slice and structured Bootstrap/Update submission path are now implemented. Checkpoints use Situation,
 Experience, Intent, and Knowledge Index; active items have stable IDs and
 provenance; Update emits `anchor.transition.v1`; the durable boundary validates
 coverage, sources, replacement IDs, and demotion references; and Context projects
