@@ -150,6 +150,26 @@ export const BOOTSTRAP_PROPOSAL_TOOL = Object.freeze({
   constrainedSampling: { type: "json_schema", strict: "prefer" },
 });
 
+export const UPDATE_PROPOSAL_SYSTEM = `You are the Anchor Update Agent.
+
+Submit one anchor.update-proposal.v2 semantic proposal for exactly the supplied
+Checkpoint and Pi Episode. Address every previous active item exactly once in
+item_decisions. Use carry only for unchanged items; changed items require revise
+or supersede with a replacement. Resolve, archive, and demote require explicit
+reason and sources; demote requires an exact immutable Checkpoint reference.
+Anchor materializes the complete Checkpoint and Transition Certificate. Do not
+submit durable metadata, hashes, Task identity, versions, or frontier fields.
+Submit exactly once through anchor_submit_update and do not return free-text JSON.`;
+
+export const BOOTSTRAP_PROPOSAL_SYSTEM = `You are the Anchor Bootstrap Agent.
+
+Submit one anchor.bootstrap-proposal.v2 proposal from exactly the supplied Pi
+Episode. Keep the Contract provisional, preserve unknowns in uncertainties and
+open_questions, and never invent acceptance criteria, constraints, evidence, or
+user confirmation. Anchor owns deterministic materialization. Do not submit
+Checkpoint metadata, frontier, certificates, or content hashes. Submit exactly
+once through anchor_submit_bootstrap and do not return free-text JSON.`;
+
 export const UPDATE_SYSTEM = `You are the Anchor Update Agent.
 
 This is state transition, not conversation summarization. Given one previous
@@ -196,6 +216,7 @@ export async function runUpdate(anchor, event, ctx) {
   const frontier = compactFrontier(event.preparation, ctx.sessionManager.getSessionId(), episode);
   if (sameValue(recovery.checkpoint.frontier, frontier)) return { compaction: compactionReceipt(recovery.task_id, recovery.checkpoint, event.preparation) };
   if (!ctx.model) throw new Error("Anchor Update requires an active model");
+  const submissionTool = UPDATE_PROPOSAL_TOOL;
   const previousActiveItems = activeItems(recovery.checkpoint.cognition);
   const input = {
     schema: "anchor.update-input.v1",
@@ -214,12 +235,12 @@ export async function runUpdate(anchor, event, ctx) {
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const feedback = validationError ? [{ role: "user", content: [{ type: "text", text: `<anchor-validation-feedback>\nThe previous submission was rejected by deterministic validation: ${validationError.message}\nCorrect that issue and submit the complete candidate again through anchor_submit_update.\n</anchor-validation-feedback>` }] }] : [];
     response = await ctx.modelRegistry.complete(ctx.model, {
-      systemPrompt: UPDATE_SYSTEM,
+      systemPrompt: UPDATE_PROPOSAL_SYSTEM,
       messages: [...baseMessages, ...feedback],
-      tools: [UPDATE_SUBMISSION_TOOL],
+      tools: [submissionTool],
     }, submissionOptions(ctx.model, event.signal));
     try {
-      normalized = normalizeUpdateResponse(submissionArguments(response, UPDATE_SUBMISSION_TOOL, "Update"), recovery.checkpoint.cognition, frontier);
+      normalized = normalizeUpdateResponse(submissionArguments(response, submissionTool, "Update"), recovery.checkpoint.cognition, frontier);
       validationError = undefined;
       break;
     } catch (error) {
@@ -245,12 +266,13 @@ export async function runBootstrap(anchor, event, ctx) {
     throw bootstrapStageError(error, "frontier");
   }
   if (!ctx.model) throw bootstrapStageError(new Error("Anchor Bootstrap requires an active model"), "model-transport");
+  const submissionTool = BOOTSTRAP_PROPOSAL_TOOL;
   let response;
   try {
     response = await ctx.modelRegistry.complete(ctx.model, {
-      systemPrompt: BOOTSTRAP_SYSTEM,
+      systemPrompt: BOOTSTRAP_PROPOSAL_SYSTEM,
       messages: [...convertToLlm(episode)],
-      tools: [BOOTSTRAP_SUBMISSION_TOOL],
+      tools: [submissionTool],
     }, submissionOptions(ctx.model, event.signal));
   } catch (error) {
     throw bootstrapStageError(error, "model-transport");
@@ -260,11 +282,8 @@ export async function runBootstrap(anchor, event, ctx) {
   let cognition;
   let title;
   try {
-    parsed = submissionArguments(response, BOOTSTRAP_SUBMISSION_TOOL, "Bootstrap");
-    if (parsed?.schema !== "anchor.bootstrap.v1") throw new Error("Bootstrap Agent must submit anchor.bootstrap.v1");
-    contract = normalizeBootstrapContract(parsed.contract);
-    cognition = normalizeV3(parsed.cognition);
-    title = required(parsed.title || contract.goal, "bootstrap.title");
+    parsed = submissionArguments(response, submissionTool, "Bootstrap");
+    ({ title, contract, cognition } = normalizeBootstrapProposal(parsed, frontier));
   } catch (error) {
     throw bootstrapStageError(error, "response-validation");
   }
@@ -315,10 +334,12 @@ export function normalizeCognition(raw) {
 
 export function normalizeUpdateResponse(raw, previous, frontier) {
   const parsed = structuredCandidate(raw);
-  if (parsed?.schema === "anchor.update-proposal.v2") return reduceUpdateProposal(previous, parsed, frontier);
-  if (parsed?.schema === "anchor.cognition.v3") return { cognition: normalizeV3(parsed), transition_certificate: normalizeTransition(parsed.transition_certificate, previous, parsed) };
+  const legacyPrevious = previous?.schema !== "anchor.cognition.v3";
+  const prior = previous?.schema === "anchor.cognition.v3" ? previous : legacyToV3(normalizeLegacy(previous));
+  if (parsed?.schema === "anchor.update-proposal.v2") return reduceUpdateProposal(prior, parsed, frontier);
+  if (parsed?.schema === "anchor.cognition.v3") return { cognition: normalizeV3(parsed), transition_certificate: legacyPrevious ? legacyTransition(prior, parsed, frontier) : normalizeTransition(parsed.transition_certificate, prior, parsed) };
   const cognition = normalizeLegacy(parsed);
-  return { cognition: legacyToV3(cognition), transition_certificate: legacyTransition(previous, cognition, frontier) };
+  return { cognition: legacyToV3(cognition), transition_certificate: legacyTransition(prior, cognition, frontier) };
 }
 
 export function hashValue(value) { return `sha256:${createHash("sha256").update(canonicalJson(value)).digest("hex")}`; }
@@ -347,6 +368,26 @@ function normalizeBootstrapContract(value) {
     ...Object.fromEntries(["rationale", "acceptance_criteria", "constraints", "non_goals", "verification_commands", "allowed_paths", "risks"].map((field) => [field, stringList(value[field], `contract.${field}`)])),
   };
 }
+
+function normalizeBootstrapProposal(value, frontier) {
+  if (value?.schema === "anchor.bootstrap.v1") return { title: required(value.title, "bootstrap.title"), contract: normalizeBootstrapContract(value.contract), cognition: normalizeV3(value.cognition) };
+  if (!value || value.schema !== "anchor.bootstrap-proposal.v2") throw new Error("Bootstrap Agent must submit anchor.bootstrap-proposal.v2");
+  const goal = required(value.goal, "bootstrap.goal");
+  const openQuestions = stringList(value.intent?.open_questions, "bootstrap.intent.open_questions");
+  const uncertainties = stringList(value.uncertainties, "bootstrap.uncertainties");
+  const items = (value.new_items || []).map((entry, index) => {
+    const group = entry.section?.split(".");
+    if (!group || group.length !== 2 || !ITEM_GROUPS.some(([section, field]) => section === group[0] && field === group[1])) throw new Error(`invalid bootstrap cognition section ${entry.section}`);
+    const statement = required(entry.statement, "bootstrap.item.statement");
+    return { id: `item-${hashValue({ frontier, index, section: entry.section, statement }).slice(-16)}`, statement, sources: stringList(entry.sources, "bootstrap.item.sources"), relevance: required(entry.relevance, "bootstrap.item.relevance") };
+  });
+  const cognition = { schema: "anchor.cognition.v3", situation: { current_understanding: uncertainties.length ? `${goal} Unknowns remain: ${uncertainties.join("; ")}` : goal, confirmed_facts: [], active_hypotheses: [], unresolved_conflicts: [], blockers: [] }, experience: { decisions: [], failed_paths: [] }, intent: { current_directive: required(value.intent?.current_directive, "bootstrap.intent.current_directive"), accepted_next_action: required(value.intent?.accepted_next_action, "bootstrap.intent.accepted_next_action"), next_plan: stringList(value.intent?.next_plan, "bootstrap.intent.next_plan"), open_questions: openQuestions.map((statement, index) => ({ id: `question-${hashValue({ frontier, index, statement }).slice(-16)}`, statement, sources: [`episode:${frontier.episode_hash}`], relevance: "requires clarification before execution" })) }, knowledge_index: [] };
+  for (const item of items) cognition[itemSection(item, value.new_items)][itemField(item, value.new_items)]?.push(item);
+  return { title: required(value.title || goal, "bootstrap.title"), contract: { schema: "anchor.contract.v1", status: "provisional", goal, execution_plan: "Not established.", rationale: [], acceptance_criteria: [], constraints: [], non_goals: [], risks: [], verification_commands: [], allowed_paths: [] }, cognition };
+}
+
+function itemSection(item, entries) { return entries.find((entry) => entry.statement === item.statement)?.section.split(".")[0] || "situation"; }
+function itemField(item, entries) { return entries.find((entry) => entry.statement === item.statement)?.section.split(".")[1] || "confirmed_facts"; }
 
 function normalizeTransition(value, previous, next) {
   const previousItems = activeItems(previous);
@@ -530,7 +571,7 @@ function submissionArguments(response, tool, agent) {
   if (!calls[0].arguments || typeof calls[0].arguments !== "object" || Array.isArray(calls[0].arguments)) {
     throw new Error(`${agent} Agent submitted invalid ${tool.name} arguments`);
   }
-  if (!Check(tool.parameters, calls[0].arguments)) {
+  if (!Check(tool.parameters, calls[0].arguments) && !((tool === UPDATE_PROPOSAL_TOOL || tool === BOOTSTRAP_PROPOSAL_TOOL) && Check(tool === UPDATE_PROPOSAL_TOOL ? UPDATE_SUBMISSION_SCHEMA : BOOTSTRAP_SUBMISSION_SCHEMA, calls[0].arguments))) {
     throw new Error(`${agent} Agent submitted arguments that do not match the ${tool.name} schema`);
   }
   return calls[0].arguments;

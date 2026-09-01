@@ -2,7 +2,7 @@
 
 ## 设计提案：从模型生成完整 State 转向语义操作与确定性物化
 
-状态：Proposal
+状态：Implemented
 目标版本：Anchor Update Protocol v2
 适用范围：Anchor Bootstrap、Update、Checkpoint candidate 生成与验证
 不改变：Pi 的 compaction ownership、Anchor 的 Task/Checkpoint 持久化边界、frontier/CAS/receipt 语义
@@ -776,6 +776,13 @@ This upgrade does not introduce:
 The goal is narrower: reduce the amount of deterministic State assembly performed by the model while preserving strict cognition and transition validation.
 
 ## 16. Design Decision
+
+### Implementation status
+
+The v2 proposal schemas, deterministic reducer, and Bootstrap/Update runtime
+boundary are implemented. Existing v1/v3 cognition is accepted only as a
+read-side migration input and is normalized before a v2 proposal is reduced.
+No legacy full-snapshot submission is advertised to the provider runtime.
 
 Anchor Update Protocol v2 should be adopted as the target architecture.
 

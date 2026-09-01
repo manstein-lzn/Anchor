@@ -591,9 +591,8 @@ minimal-sufficient-cognition slice:
 
 The remaining target gaps are:
 
-- a pure semantic-proposal reducer is available as an isolated compatibility
-  path (`src/reducer.js`), but the primary provider tool and Bootstrap/Update
-  runtime still use the v1/v3 full-snapshot protocol;
+- Update and Bootstrap now use the v2 semantic proposal boundary; v1/v3
+  cognition remains readable only for existing State migration;
 
 - the runtime has no separate immutable Artifact store; exact recall currently
   supports only immutable Checkpoint item locators
