@@ -16,11 +16,11 @@ test("reducer copies carry and emits complete certificate", () => {
 test("reducer rejects omitted, duplicate and unknown decisions", () => {
   assert.throws(() => reduceUpdateProposal(previous, proposal({ item_decisions: [{ item_id: "fact-1", disposition: "carry" }] }), {}), /omits/);
   assert.throws(() => reduceUpdateProposal(previous, proposal({ item_decisions: [...proposal().item_decisions, { item_id: "fact-1", disposition: "carry" }] }), {}), /duplicate/);
-  assert.throws(() => reduceUpdateProposal(previous, proposal({ item_decisions: [{ item_id: "fact-1", disposition: "carry" }, { item_id: "decision-1", disposition: "archive" }, { item_id: "x", disposition: "archive" }] }), {}), /unknown/);
+  assert.throws(() => reduceUpdateProposal(previous, proposal({ item_decisions: [{ item_id: "fact-1", disposition: "carry" }, { item_id: "decision-1", disposition: "archive", reason: "done", sources: ["episode:2"] }, { item_id: "x", disposition: "archive", reason: "unknown", sources: ["episode:2"] }] }), {}), /unknown/);
 });
 
 test("reducer demotion requires exact reference and is deterministic", () => {
-  const p = proposal({ item_decisions: [{ item_id: "fact-1", disposition: "demote", reason: "recoverable", sources: ["episode:2"], reference: "checkpoint:1:item:fact-1" }, { item_id: "decision-1", disposition: "archive" }] });
+  const p = proposal({ item_decisions: [{ item_id: "fact-1", disposition: "demote", reason: "recoverable", sources: ["episode:2"], reference: "checkpoint:1:item:fact-1" }, { item_id: "decision-1", disposition: "archive", reason: "done", sources: ["episode:2"] }] });
   const a = reduceUpdateProposal(previous, p, { episode_hash: "sha256:e" });
   const b = reduceUpdateProposal(previous, p, { episode_hash: "sha256:e" });
   assert.deepEqual(a, b);

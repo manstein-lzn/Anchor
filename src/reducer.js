@@ -23,13 +23,18 @@ export function reduceUpdateProposal(previous, proposal, frontier) {
   }
   for (const id of ledger.keys()) if (!decisions.has(id)) throw new Error(`proposal omits ${id}`);
   const next = structuredClone(previous);
+  const carriedOpenQuestions = [];
   for (const [section, field] of GROUPS) next[section][field] = [];
   const dispositions = [];
   const add = (section, field, item) => next[section][field].push(item);
   for (const [id, prior] of ledger) {
     const op = decisions.get(id);
     const base = { item_id: id, disposition: op.disposition, reason: op.reason || `Reducer applied ${op.disposition}.`, sources: op.sources?.length ? [...op.sources] : ["reducer"] };
-    if (op.disposition === "carry") { add(prior.section, prior.field, structuredClone(prior.item)); }
+    validateOperation(op);
+    if (op.disposition === "carry") {
+      add(prior.section, prior.field, structuredClone(prior.item));
+      if (prior.section === "intent") carriedOpenQuestions.push(structuredClone(prior.item));
+    }
     else if (["revise", "supersede"].includes(op.disposition)) {
       const replacement = replacementItem(op.replacement, previous, frontier, proposal.item_decisions.indexOf(op));
       add(replacement.section, replacement.field, replacement.item); base.replacement_id = replacement.item.id;
@@ -45,7 +50,7 @@ export function reduceUpdateProposal(previous, proposal, frontier) {
     add(normalized.section, normalized.field, normalized.item);
   }
   next.situation.current_understanding = required(proposal.situation?.current_understanding, "situation.current_understanding");
-  next.intent = normalizeIntent(proposal.intent);
+  next.intent = normalizeIntent(proposal.intent, carriedOpenQuestions);
   next.knowledge_index = [...(next.knowledge_index || []), ...(proposal.knowledge_index || []).map((ref) => ({ ...ref }))];
   return { cognition: next, transition_certificate: { schema: "anchor.transition.v1", dispositions } };
 }
@@ -64,11 +69,22 @@ function normalizeItem(value, _previous, frontier, index) {
   if (!item.sources.length) throw new Error("item.sources must not be empty");
   return { section: group, field, item };
 }
-function normalizeIntent(intent) {
-  return { current_directive: required(intent?.current_directive, "intent.current_directive"), accepted_next_action: required(intent?.accepted_next_action, "intent.accepted_next_action"), next_plan: intent?.next_plan?.length ? [...intent.next_plan] : [required(intent?.accepted_next_action, "intent.accepted_next_action")], open_questions: [] };
+function normalizeIntent(intent, carriedOpenQuestions) {
+  return { current_directive: required(intent?.current_directive, "intent.current_directive"), accepted_next_action: required(intent?.accepted_next_action, "intent.accepted_next_action"), next_plan: intent?.next_plan?.length ? [...intent.next_plan] : [required(intent?.accepted_next_action, "intent.accepted_next_action")], open_questions: carriedOpenQuestions };
 }
 function validateProposal(proposal) {
   if (!proposal || proposal.schema !== "anchor.update-proposal.v2" || !Array.isArray(proposal.item_decisions)) throw new Error("Invalid anchor.update-proposal.v2");
+  if (proposal.new_items !== undefined && !Array.isArray(proposal.new_items)) throw new Error("proposal.new_items must be an array");
+  if (proposal.knowledge_index !== undefined && !Array.isArray(proposal.knowledge_index)) throw new Error("proposal.knowledge_index must be an array");
+}
+function validateOperation(operation) {
+  const dispositions = ["carry", "revise", "resolve", "supersede", "demote", "archive"];
+  if (!dispositions.includes(operation.disposition)) throw new Error(`invalid disposition for ${operation.item_id}`);
+  if (operation.disposition === "carry" && (operation.replacement || operation.reference)) throw new Error(`carry ${operation.item_id} cannot include replacement or reference`);
+  if (["revise", "supersede"].includes(operation.disposition) && !operation.replacement) throw new Error(`${operation.disposition} ${operation.item_id} requires replacement`);
+  if (operation.disposition === "demote" && !operation.reference) throw new Error(`demote ${operation.item_id} requires reference`);
+  if (operation.disposition !== "carry" && (!Array.isArray(operation.sources) || !operation.sources.length)) throw new Error(`${operation.disposition} ${operation.item_id} requires sources`);
+  if (operation.disposition !== "carry" && (!operation.reason || !String(operation.reason).trim())) throw new Error(`${operation.disposition} ${operation.item_id} requires reason`);
 }
 function required(value, name) { if (typeof value !== "string" || !value.trim()) throw new Error(`${name} is required`); return value.trim(); }
 function deterministicId(kind, value, frontier) { return `${kind}-${createHash("sha256").update(JSON.stringify([kind, value, frontier])).digest("hex").slice(0, 16)}`; }
