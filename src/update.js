@@ -88,7 +88,7 @@ const BOOTSTRAP_SUBMISSION_SCHEMA = closedObject({
 });
 
 const PROPOSAL_ITEM_SCHEMA = closedObject({
-  section: nonEmptyString(),
+  section: Type.String({ enum: ["situation.confirmed_facts", "situation.active_hypotheses", "situation.unresolved_conflicts", "situation.blockers", "experience.decisions", "experience.failed_paths", "intent.open_questions"] }),
   statement: nonEmptyString(),
   sources: stringArraySchema({ minItems: 1 }),
   relevance: nonEmptyString(),
@@ -139,7 +139,7 @@ export const UPDATE_PROPOSAL_TOOL = Object.freeze({
   label: "Submit Anchor Update Proposal",
   description: "Submit semantic Anchor changes. Anchor deterministically materializes the complete Checkpoint candidate.",
   parameters: UPDATE_PROPOSAL_SCHEMA,
-  constrainedSampling: { type: "json_schema", strict: "prefer" },
+  constrainedSampling: { type: "json_schema", strict: "required" },
 });
 
 export const BOOTSTRAP_PROPOSAL_TOOL = Object.freeze({
@@ -147,7 +147,7 @@ export const BOOTSTRAP_PROPOSAL_TOOL = Object.freeze({
   label: "Submit Anchor Bootstrap Proposal",
   description: "Submit a provisional semantic bootstrap proposal. Anchor owns Contract and Checkpoint materialization.",
   parameters: BOOTSTRAP_PROPOSAL_SCHEMA,
-  constrainedSampling: { type: "json_schema", strict: "prefer" },
+  constrainedSampling: { type: "json_schema", strict: "required" },
 });
 
 export const UPDATE_PROPOSAL_SYSTEM = `You are the Anchor Update Agent.

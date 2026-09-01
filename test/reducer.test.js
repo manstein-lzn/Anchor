@@ -43,3 +43,8 @@ test("reducer materializes references and preserves open-question operations", (
   assert.equal(result.cognition.knowledge_index[0].id.startsWith("ref-"), true);
   assert.equal(result.cognition.experience.decisions.length, 1);
 });
+
+test("reducer rejects model-authored or unbound evidence sources", () => {
+  assert.throws(() => reduceUpdateProposal(previous, proposal({ new_items: [{ section: "situation.confirmed_facts", statement: "Unverified", sources: ["model:confidence"], relevance: "none" }] }), { episode_hash: "sha256:e" }), /allowed evidence references/);
+  assert.throws(() => reduceUpdateProposal(previous, proposal({ knowledge_index: [{ cue: "bad", locator: "x", source: "model:confidence" }] }), { episode_hash: "sha256:e" }), /allowed evidence references/);
+});

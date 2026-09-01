@@ -224,7 +224,7 @@ test("compact Update consumes only Pi's bounded Episode and commits its frontier
   assert.equal(modelRequest.messages.at(-1).content[0].text, "bounded work");
   assert.match(modelRequest.systemPrompt, /Submit exactly once through anchor_submit_update/i);
   assert.deepEqual(modelRequest.tools, [UPDATE_PROPOSAL_TOOL]);
-  assert.equal(modelRequest.tools[0].constrainedSampling.strict, "prefer");
+  assert.equal(modelRequest.tools[0].constrainedSampling.strict, "required");
   assert.equal(modelRequest.tools[0].parameters.properties.schema.enum[0], "anchor.update-proposal.v2");
   assert.equal(modelOptions.toolChoice, "required");
   assert.equal(modelOptions.signal, event.signal);
@@ -391,7 +391,7 @@ test("first compact bootstraps provisional state from only the Episode", async (
   assert.equal(JSON.stringify(request.messages).includes("full branch"), false);
   assert.equal(JSON.stringify(request.messages).includes("entry-kept"), false);
   assert.deepEqual(request.tools, [BOOTSTRAP_PROPOSAL_TOOL]);
-  assert.equal(request.tools[0].constrainedSampling.strict, "prefer");
+  assert.equal(request.tools[0].constrainedSampling.strict, "required");
   assert.equal(JSON.stringify(episode).includes("Ship the adapter"), true);
 });
 

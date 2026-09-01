@@ -62,6 +62,10 @@ This document is normative for runtime changes.
   conflicts, failed paths and their reasons, and unverified hypotheses remain
   explicit until evidence resolves them.
 - Tool failure is not successful evidence. Model confidence is not evidence.
+- Proposal evidence sources must be bound to an allowed immutable surface:
+  `episode:`, `checkpoint:`, `artifact:`, or `pi:`. Carry may preserve legacy
+  source strings, but newly asserted or revised cognition must use an allowed
+  source.
 - The Task goal, current directive, accepted next action, and directive history
   are distinct. An elliptical continuation resolves first against the accepted
   next action, then the previous directive, never the original goal by default.

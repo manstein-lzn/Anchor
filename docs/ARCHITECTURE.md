@@ -260,6 +260,9 @@ No generic relation system or vector representation is part of the core.
 Current facts require evidence provenance. Hypotheses must remain visibly
 unverified. A model's confidence is not evidence. A failed or interrupted tool
 call may support a failure, observation, or blocker; it cannot prove completion.
+New or revised proposal evidence must bind to an allowed immutable surface:
+`episode:`, `checkpoint:`, `artifact:`, or `pi:`. Legacy sources may survive only
+on carried historical items during read-side migration.
 
 ### 5.5 Knowledge references and Artifacts
 
@@ -327,6 +330,9 @@ function choice and Anchor applies the same deterministic validation to its
 arguments. A candidate rejected by deterministic validation may receive one
 validation-only correction request; the second invalid candidate is rejected
 without changing the previous Checkpoint.
+The v2 proposal tools request strict JSON-schema constrained sampling where the
+provider supports it; deterministic validation remains authoritative when a
+provider cannot enforce the constraint.
 
 Update is not a summary task. It performs five semantic operations:
 

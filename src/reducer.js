@@ -6,6 +6,7 @@ const GROUPS = [
   ["experience", "decisions"], ["experience", "failed_paths"],
   ["intent", "open_questions"],
 ];
+const SOURCE_PREFIXES = ["episode:", "checkpoint:", "artifact:", "pi:"];
 
 export function reduceUpdateProposal(previous, proposal, frontier) {
   if (!previous || previous.schema !== "anchor.cognition.v3") throw new Error("Reducer requires anchor.cognition.v3 previous cognition");
@@ -38,8 +39,9 @@ export function reduceUpdateProposal(previous, proposal, frontier) {
   usedIds.clear();
   for (const [id, prior] of ledger) {
     const op = decisions.get(id);
-    const base = { item_id: id, disposition: op.disposition, reason: op.reason || `Reducer applied ${op.disposition}.`, sources: op.sources?.length ? [...op.sources] : ["reducer"] };
+    const base = { item_id: id, disposition: op.disposition, reason: op.reason || `Reducer applied ${op.disposition}.`, sources: op.sources?.length ? [...op.sources] : [...(prior.item.sources || [])] };
     validateOperation(op);
+    if (op.disposition !== "carry") validateSources(base.sources, `decision.${id}.sources`);
     if (op.disposition === "carry") {
       add(prior.section, prior.field, structuredClone(prior.item));
       if (prior.section === "intent") carriedOpenQuestions.push(structuredClone(prior.item));
@@ -80,8 +82,10 @@ function normalizeItem(value, _previous, frontier, index) {
   const [group, field] = section.split(".");
   if (!GROUPS.some(([s, f]) => s === group && f === field)) throw new Error(`invalid cognition section ${section}`);
   const statement = required(value.statement, "item.statement");
-  const item = { id: deterministicId("item", `${section}:${statement}:${index}`, frontier), statement, sources: [...(value.sources || [])], relevance: required(value.relevance, "item.relevance") };
+  const sources = [...(value.sources || [])];
+  const item = { id: deterministicId("item", `${section}:${statement}:${index}`, frontier), statement, sources, relevance: required(value.relevance, "item.relevance") };
   if (!item.sources.length) throw new Error("item.sources must not be empty");
+  validateSources(item.sources, "item.sources");
   return { section: group, field, item };
 }
 function normalizeIntent(intent, carriedOpenQuestions) {
@@ -89,7 +93,9 @@ function normalizeIntent(intent, carriedOpenQuestions) {
 }
 function normalizeReference(value, frontier, index) {
   if (!value || typeof value !== "object") throw new Error("knowledge reference is required");
-  return { id: deterministicId("ref", `${value.locator}:${index}`, frontier), cue: required(value.cue, "knowledge_index.cue"), locator: required(value.locator, "knowledge_index.locator"), source: required(value.source, "knowledge_index.source") };
+  const source = required(value.source, "knowledge_index.source");
+  validateSources([source], "knowledge_index.source");
+  return { id: deterministicId("ref", `${value.locator}:${index}`, frontier), cue: required(value.cue, "knowledge_index.cue"), locator: required(value.locator, "knowledge_index.locator"), source };
 }
 function validateProposal(proposal) {
   if (!proposal || proposal.schema !== "anchor.update-proposal.v2" || !Array.isArray(proposal.item_decisions)) throw new Error("Invalid anchor.update-proposal.v2");
@@ -104,6 +110,9 @@ function validateOperation(operation) {
   if (operation.disposition === "demote" && !operation.reference) throw new Error(`demote ${operation.item_id} requires reference`);
   if (operation.disposition !== "carry" && (!Array.isArray(operation.sources) || !operation.sources.length)) throw new Error(`${operation.disposition} ${operation.item_id} requires sources`);
   if (operation.disposition !== "carry" && (!operation.reason || !String(operation.reason).trim())) throw new Error(`${operation.disposition} ${operation.item_id} requires reason`);
+}
+function validateSources(sources, name) {
+  if (!Array.isArray(sources) || !sources.length || sources.some((source) => typeof source !== "string" || !source.trim() || !SOURCE_PREFIXES.some((prefix) => source.startsWith(prefix)))) throw new Error(`${name} must contain allowed evidence references`);
 }
 function required(value, name) { if (typeof value !== "string" || !value.trim()) throw new Error(`${name} is required`); return value.trim(); }
 function deterministicId(kind, value, frontier) { return `${kind}-${createHash("sha256").update(JSON.stringify([kind, value, frontier])).digest("hex").slice(0, 16)}`; }
