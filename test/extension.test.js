@@ -405,6 +405,58 @@ test("recovery receipts are branch-local and stale recovery frontiers are reject
   assert.equal((await client.recovery()).checkpoint.checkpoint_version, 1);
 });
 
+test("recovery replays a committed receipt when Pi has no compaction work", async (t) => {
+  const { agentDir, restore } = await isolatedAgentDir();
+  t.after(restore);
+  const sessionId = "session-noop-recovery";
+  const statePath = join(agentDir, "anchor", "sessions", sessionId, "anchor.db");
+  const item = proposal();
+  const proposalId = hashValue({ session_id: sessionId, proposal: item });
+  const client = new AnchorClient({ workspace: process.cwd(), statePath });
+  const created = await client.begin({
+    sessionId,
+    proposalHash: proposalId,
+    title: item.title,
+    contract: proposalContract(item),
+    checkpoint: proposalCheckpoint(item, sessionId, proposalId),
+  });
+  client.taskId = created.task.task_id;
+  const frontier = {
+    kind: "compact",
+    session_id: sessionId,
+    first_kept_entry_id: "already-kept",
+    episode_hash: hashValue([{ role: "user", content: "covered work" }]),
+    is_split_turn: false,
+  };
+  const committed = await client.update({
+    schema: "anchor.checkpoint-candidate.v1",
+    frontier,
+    cognition: created.checkpoint.cognition,
+    provenance: { kind: "compact", model: "test/model" },
+  }, created.task.state_version);
+  const pi = fakePi([{
+    type: "custom",
+    customType: "anchor.mode",
+    data: { schema: "anchor.session-mode.v1", session_id: sessionId, mode: "active" },
+  }, {
+    type: "compaction",
+    summary: "Pi native compaction already materialized",
+    firstKeptEntryId: "newer-kept",
+  }]);
+  anchorExtension(pi.api);
+  const ctx = fakeContext(process.cwd(), pi, sessionId, {
+    compact: () => { throw new Error("recovery must not replay an old frontier"); },
+  });
+  await pi.handlers.session_start({ reason: "resume" }, ctx);
+  const receipt = pi.entries.find((entry) => entry.type === "compaction" && entry.details?.schema === "anchor.compact-receipt.v1")?.details;
+  assert.equal(receipt.schema, "anchor.compact-receipt.v1");
+  assert.equal(receipt.task_id, committed.payload.task_id);
+  assert.equal(receipt.checkpoint_version, committed.payload.checkpoint_version);
+  assert.equal(receipt.checkpoint_hash, committed.content_hash);
+  assert.equal(ctx.notifications.length, 0);
+  assert.equal((await client.recovery()).checkpoint.checkpoint_version, 1);
+});
+
 function fakePi(initialEntries = [], flags = {}) {
   let sequence = 0;
   let leafId = null;
@@ -448,8 +500,12 @@ function fakePi(initialEntries = [], flags = {}) {
     sent,
     activeTools: () => active,
     leafId: () => leafId,
-    appendCompaction(details) {
-      const entry = { id: `entry-${++sequence}`, parentId: leafId, type: "compaction", details };
+    appendCompaction(summary, firstKeptEntryId, tokensBefore, details, fromHook, usage) {
+      if (typeof summary === "object") {
+        details = summary;
+        summary = "test compaction";
+      }
+      const entry = { id: `entry-${++sequence}`, parentId: leafId, type: "compaction", summary, firstKeptEntryId, tokensBefore, details, fromHook, usage };
       entries.push(entry);
       leafId = entry.id;
     },
@@ -475,6 +531,7 @@ function fakeContext(cwd, pi, sessionId, options = {}) {
       getBranch: () => options.branch ?? pi.entries,
       getLeafId: () => pi.leafId(),
       getSessionId: () => sessionId,
+      appendCompaction(...args) { return pi.appendCompaction(...args); },
     },
     compact: options.compact ?? (({ onError }) => onError?.(new Error("Unexpected compact"))),
     notifications,

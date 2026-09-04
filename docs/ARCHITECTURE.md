@@ -297,6 +297,7 @@ Pi owns the boundary and supplies the Episode:
 previous Checkpoint
 + preparation.messagesToSummarize
 + preparation.turnPrefixMessages
++ Pi recent suffix from firstKeptEntryId
                  |
                  v
           Update Agent
@@ -316,10 +317,15 @@ previous Checkpoint
        Pi CompactionResult receipt
 ```
 
-The Update Agent's semantic evidence is exactly the previous Checkpoint and that
-Episode. A deterministic control envelope may also carry the immutable Contract
-and target frontier. They constrain the transition but are not new evidence or
-Episode directives. Anchor never sends the complete branch or transcript.
+The Update Agent's semantic evidence is the previous Checkpoint, the Episode,
+and the Pi recent suffix beginning at `firstKeptEntryId`. The suffix preserves
+recent user and assistant continuity, including complete tool call/result
+replay units, but is not covered by the Checkpoint frontier or `episode_hash`.
+Cognition asserted from the suffix uses a `pi:` provenance source. A
+deterministic control envelope may also carry the immutable Contract, target
+frontier, and suffix metadata. These constrain the transition but are not
+Episode directives or new evidence. Anchor never sends the complete branch or
+transcript; it extracts only the exact recent suffix.
 
 The candidate crosses the model boundary only as the arguments of one
 request-local `anchor_submit_update` function. The function has no implementation
@@ -330,9 +336,17 @@ function choice and Anchor applies the same deterministic validation to its
 arguments. A candidate rejected by deterministic validation may receive one
 validation-only correction request; the second invalid candidate is rejected
 without changing the previous Checkpoint.
-The v2 proposal tools request strict JSON-schema constrained sampling where the
-provider supports it; deterministic validation remains authoritative when a
-provider cannot enforce the constraint.
+The Update proposal tool is generated from the current Checkpoint and requests
+strict JSON-schema constrained sampling where the provider supports it. Its
+operation arrays are disposition-specific, and every previous item ID is an
+enum in that request's schema. Deterministic validation remains authoritative
+for coverage, provenance, references, and semantic outcomes.
+
+The submission schema constrains every newly supplied item and knowledge
+reference source to the allowed immutable surfaces `episode:`, `checkpoint:`,
+`artifact:`, or `pi:`. Reducer validation remains authoritative, but invalid
+source prefixes are rejected at the provider boundary instead of being
+accepted as merely non-empty strings and failing only after the model call.
 
 Update is not a summary task. It performs five semantic operations:
 
@@ -481,6 +495,23 @@ Partial metadata matches are not delivery. A changed frontier or receipt fails
 closed and leaves the prior durable State untouched. Pi's compaction entry is a
 readable marker plus receipt metadata, not a second cognition authority.
 
+### No-op Pi recovery
+
+Pi can restart after the compaction boundary has already been materialized. A
+subsequent recovery attempt may therefore find a native compaction already on
+the active branch, or return `Nothing to compact (session too small)` or
+`Already compacted` before the Anchor hook runs. These are not State or
+frontier mismatches. Anchor first rechecks the branch for the exact receipt;
+when it is still absent, it may use Pi's public
+`SessionManager.appendCompaction` to append one receipt-only marker using the
+committed Checkpoint frontier. The marker contains the same task, version,
+content hash, event identity, and complete frontier, and is accepted only after
+the normal delivery predicate passes. No model call, cognition update, or
+cross-file atomicity is claimed by this repair. Any other compaction error, or
+any marker mismatch, remains fail-closed. Anchor never replays an old frontier
+through a new compaction preparation, because doing so would turn unrelated
+active-branch context into a false Update.
+
 ## 11. Recall
 
 Recall is a small capability, not another memory runtime:
@@ -584,7 +615,7 @@ minimal-sufficient-cognition slice:
 - session-scoped SQLite containing one Task and immutable Checkpoints;
 - `anchor.checkpoint.v1` with source frontier, parent hash, and provenance;
 - `anchor.cognition.v3` with Situation, Experience, Intent, Knowledge Index,
-  stable item identity, item provenance, and a v2 read/commit compatibility path;
+  stable item identity, and item provenance;
 - `anchor.transition.v1` with complete previous-item coverage, source checks,
   replacement checks, and demotion references;
 - request-local schema-constrained serial Update over exactly Pi's preparation
@@ -597,29 +628,25 @@ minimal-sufficient-cognition slice:
 
 The remaining target gaps are:
 
-- Update and Bootstrap now use the v2 semantic proposal boundary; v1/v3
-  cognition remains readable only for existing State migration;
-
 - the runtime has no separate immutable Artifact store; exact recall currently
   supports only immutable Checkpoint item locators
   (`checkpoint:<version>:item:<id>`);
-- old v2 compatibility is intentionally permissive at the durable boundary and
-  should be removed after pre-release sessions are no longer relevant;
 - provisional Bootstrap has no separate Contract-promotion command yet; later
   explicit corrections are represented through cognition until that need is
   demonstrated;
 - focused fresh-Agent takeover and 100-Update projection plateau tests exist;
   real-provider long-task acceptance and production p50/p95 measurements do not
   yet exist;
-- a controlled real-provider overflow compact has now been verified through
-  Bootstrap Checkpoint 0 and Update Checkpoint 1; business-task semantic quality
-  and production latency measurements remain outside this boundary acceptance.
+- a controlled real-provider strict-tool probe has verified one dynamic
+  `anchor_submit_update` call, strict wire conversion, reducer validation, and
+  zero persistence before acceptance; business-task semantic quality and
+  production latency measurements remain outside this boundary acceptance.
 
 The implementation order is therefore deliberately narrow:
 
 1. run correction, failure, recall, takeover, restart, and churn acceptance;
-2. remove the v2 compatibility path when the pre-release State reset window is
-   closed.
+2. add a separate Contract-promotion interaction only if provisional Bootstrap
+   scope needs explicit confirmation in real use.
 
 Everything else waits for evidence that this cognitive loop is insufficient.
 

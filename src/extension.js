@@ -503,7 +503,26 @@ export default function anchorExtension(pi) {
     ctx.ui.setWorkingMessage?.("Recovering Anchor Checkpoint receipt...");
     expectedRecoveryFrontier = recovery.checkpoint.frontier;
     try {
-      await new Promise((resolvePromise, reject) => ctx.compact({ onComplete: resolvePromise, onError: reject }));
+      // A branch may already contain a later native compaction without the
+      // Anchor receipt (for example after tree navigation). Replaying the old
+      // frontier through ctx.compact would create a false frontier-mismatch
+      // failure. Deliver the committed receipt on this branch directly.
+      if (branch().some((entry) => entry.type === "compaction"
+        && typeof entry.firstKeptEntryId === "string"
+        && entry.firstKeptEntryId !== recovery.checkpoint.frontier?.first_kept_entry_id)) {
+        appendReceiptOnlyCompaction(recovery.checkpoint, ctx);
+        return;
+      }
+      try {
+        await new Promise((resolvePromise, reject) => ctx.compact({ onComplete: resolvePromise, onError: reject }));
+      } catch (error) {
+        // A restart can reach Pi after its compaction boundary has already been
+        // materialized. In that case Pi has no preparation to replay, but the
+        // committed Checkpoint still needs its content-bound receipt delivered.
+        if (!isNoOpCompactionError(error)) throw error;
+        if (checkpointDelivered(recovery.checkpoint, branch())) return;
+        appendReceiptOnlyCompaction(recovery.checkpoint, ctx);
+      }
     } finally {
       expectedRecoveryFrontier = null;
       ctx.ui.setWorkingMessage?.();
@@ -512,6 +531,36 @@ export default function anchorExtension(pi) {
       throw new Error("Pi did not persist the recovered Anchor Checkpoint receipt");
     }
   }
+}
+
+function isNoOpCompactionError(error) {
+  const message = error instanceof Error ? error.message : String(error);
+  return /Nothing to compact \(session too small\)|Already compacted/.test(message);
+}
+
+function appendReceiptOnlyCompaction(checkpoint, ctx) {
+  const sessionManager = ctx.sessionManager;
+  if (typeof sessionManager?.appendCompaction !== "function") {
+    throw new Error("Pi cannot append a receipt-only Anchor compaction marker");
+  }
+  const frontier = checkpoint.frontier;
+  if (!frontier || typeof frontier.first_kept_entry_id !== "string" || !frontier.first_kept_entry_id) {
+    throw new Error("Anchor Checkpoint has no replayable compaction frontier");
+  }
+  sessionManager.appendCompaction(
+    `Anchor Checkpoint ${checkpoint.checkpoint_version} receipt replay for task ${checkpoint.task_id}.`,
+    frontier.first_kept_entry_id,
+    0,
+    {
+      schema: "anchor.compact-receipt.v1",
+      task_id: checkpoint.task_id,
+      checkpoint_version: checkpoint.checkpoint_version,
+      checkpoint_hash: checkpoint.receipt?.content_hash,
+      event_id: checkpoint.receipt?.event_id,
+      frontier,
+    },
+    true,
+  );
 }
 
 function registerLocalCodexProvider(pi) {

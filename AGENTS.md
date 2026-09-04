@@ -33,20 +33,31 @@ This document is normative for runtime changes.
 
 ## Update rules
 
-- The Update Agent's semantic evidence is exactly the previous Checkpoint plus
-  `preparation.messagesToSummarize` and `preparation.turnPrefixMessages`. A
-  deterministic control envelope may also carry the immutable Task Contract
-  and target frontier; neither is an Episode directive or new evidence.
-- Never send the complete branch or transcript to the Update Agent.
+- The Update Agent's semantic evidence is the previous Checkpoint plus
+  `preparation.messagesToSummarize`, `preparation.turnPrefixMessages`, and the
+  Pi recent suffix beginning at `firstKeptEntryId`. The suffix is contextual
+  evidence for continuity, not covered Episode and not part of `episode_hash`.
+  Cognition asserted from the suffix must use a `pi:` provenance source. A
+  deterministic control envelope may also carry the immutable Task Contract,
+  target frontier, and suffix metadata; the envelope is not an Episode
+  directive or new evidence.
+- Never send the complete branch or transcript to the Update Agent; extract
+  only the suffix from the exact `firstKeptEntryId` boundary.
 - Update produces a complete current cognition snapshot, not prose summary,
   chronology, or a free-form delta. It must submit that candidate through the
   request-local `anchor_submit_update` function with JSON-schema constrained
   arguments; free-text JSON is not an Update runtime protocol. If deterministic
   validation rejects a candidate, Anchor may send one validation-only correction
   request; it must still reject the candidate if the correction is invalid.
+- The Update submission schema is generated for the current Checkpoint. It
+  exposes separate carry, revise, resolve, supersede, demote, and archive
+  operation arrays; every operation item ID is constrained to the previous
+  active set. The model submits one proposal call, while Anchor materializes
+  the complete cognition and certificate.
 - Bootstrap at the first compaction is a separate initialization task. It may
   create Checkpoint 0 from the exact Pi Episode, but must preserve unknowns and
-  never invent user-confirmed requirements.
+  never invent user-confirmed requirements. Bootstrap does not absorb the
+  recent suffix; Pi retains it as the active window.
 - Update reconstructs the minimum cognition needed for future action. For each
   previously active cognition item it must explicitly choose `carry`, `revise`,
   `resolve`, `supersede`, `demote`, or `archive`; no item may disappear silently.
@@ -74,6 +85,12 @@ This document is normative for runtime changes.
   occurred.
 - Checkpoint commit and Pi compaction append are separate durable writes. Use a
   content-bound receipt and idempotent replay; do not claim cross-file atomicity.
+  If restart reaches a branch that already contains a Pi compaction boundary,
+  or Pi explicitly reports `Nothing to compact` or `Already compacted`, Anchor
+  may append one receipt-only Pi compaction marker through the public
+  SessionManager API, then revalidate the complete receipt. This marker carries
+  no new cognition and is only a delivery repair; Anchor must not replay an old
+  frontier as a new Update.
 - Receipt delivery is valid only when Task identity, Checkpoint version and
   hash, event identity, and the complete frontier all match the Checkpoint.
 

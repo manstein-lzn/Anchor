@@ -11,6 +11,7 @@ const SOURCE_PREFIXES = ["episode:", "checkpoint:", "artifact:", "pi:"];
 export function reduceUpdateProposal(previous, proposal, frontier) {
   if (!previous || previous.schema !== "anchor.cognition.v3") throw new Error("Reducer requires anchor.cognition.v3 previous cognition");
   validateProposal(proposal);
+  proposal = expandOperations(proposal);
   const ledger = new Map();
   for (const [section, field] of GROUPS) for (const item of previous[section]?.[field] ?? []) {
     if (ledger.has(item.id)) throw new Error(`duplicate previous item ${item.id}`);
@@ -98,9 +99,21 @@ function normalizeReference(value, frontier, index) {
   return { id: deterministicId("ref", `${value.locator}:${index}`, frontier), cue: required(value.cue, "knowledge_index.cue"), locator: required(value.locator, "knowledge_index.locator"), source };
 }
 function validateProposal(proposal) {
-  if (!proposal || proposal.schema !== "anchor.update-proposal.v2" || !Array.isArray(proposal.item_decisions)) throw new Error("Invalid anchor.update-proposal.v2");
-  if (proposal.new_items !== undefined && !Array.isArray(proposal.new_items)) throw new Error("proposal.new_items must be an array");
-  if (proposal.knowledge_index !== undefined && !Array.isArray(proposal.knowledge_index)) throw new Error("proposal.knowledge_index must be an array");
+  if (!proposal || proposal.schema !== "anchor.update-proposal.v3") throw new Error("Invalid anchor.update-proposal.v3");
+  for (const field of ["carry_ids", "revise", "resolve", "supersede", "demote", "archive", "new_items", "knowledge_index"]) {
+    if (!Array.isArray(proposal[field])) throw new Error(`proposal.${field} must be an array`);
+  }
+}
+function expandOperations(proposal) {
+  const item_decisions = [
+    ...(proposal.carry_ids || []).map((item_id) => ({ item_id, disposition: "carry" })),
+    ...(proposal.revise || []).map((entry) => ({ item_id: entry.item_id, disposition: "revise", reason: entry.reason, sources: entry.replacement.sources, replacement: entry.replacement })),
+    ...(proposal.resolve || []).map((entry) => ({ ...entry, disposition: "resolve" })),
+    ...(proposal.supersede || []).map((entry) => ({ item_id: entry.item_id, disposition: "supersede", reason: entry.reason, sources: entry.replacement.sources, replacement: entry.replacement })),
+    ...(proposal.demote || []).map((entry) => ({ ...entry, disposition: "demote" })),
+    ...(proposal.archive || []).map((entry) => ({ ...entry, disposition: "archive" })),
+  ];
+  return { ...proposal, item_decisions };
 }
 function validateOperation(operation) {
   const dispositions = ["carry", "revise", "resolve", "supersede", "demote", "archive"];

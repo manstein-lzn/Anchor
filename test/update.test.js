@@ -1,6 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { BOOTSTRAP_PROPOSAL_TOOL, BOOTSTRAP_SUBMISSION_TOOL, compactFrontier, hashValue, normalizeCognition, runBootstrap, runUpdate, UPDATE_PROPOSAL_TOOL, UPDATE_SUBMISSION_TOOL, UPDATE_SYSTEM } from "../src/update.js";
+import { BOOTSTRAP_PROPOSAL_TOOL, BOOTSTRAP_SUBMISSION_TOOL, compactFrontier, createUpdateProposalTool, hashValue, normalizeCognition, recentSuffixMessages, runBootstrap, runUpdate, UPDATE_PROPOSAL_TOOL, UPDATE_SUBMISSION_TOOL, UPDATE_SYSTEM } from "../src/update.js";
+
+const piAgentEntry = new URL(await import.meta.resolve("@earendil-works/pi-coding-agent"));
+const piAiBase = new URL("../node_modules/@earendil-works/pi-ai/dist/", piAgentEntry);
+const { makeStrictJsonSchema } = await import(new URL("api/constrained-sampling.js", piAiBase));
+const { convertResponsesTools } = await import(new URL("api/openai-responses-shared.js", piAiBase));
 
 const cognition = (overrides = {}) => ({
   current_understanding: "The provider boundary is stable.",
@@ -39,15 +44,16 @@ const updateSubmission = () => ({
   transition_certificate: { schema: "anchor.transition.v1", dispositions: [] },
 });
 
-const proposalSubmission = (ids = [
-  `confirmed_facts-${hashValue("Tool replay is grouped.").slice(-12)}`,
-  `decisions-${hashValue("Use Pi's compaction boundary.").slice(-12)}`,
-  `failed_paths-${hashValue("Full branch replay overflowed because it grew without bound.").slice(-12)}`,
-]) => ({
-  schema: "anchor.update-proposal.v2",
+const proposalSubmission = (ids = ["fact-provider", "decision-boundary"]) => ({
+  schema: "anchor.update-proposal.v3",
   situation: { current_understanding: "The provider boundary is stable." },
   intent: { current_directive: "Finish the bounded Update path.", accepted_next_action: "Run the focused test.", next_plan: ["Run the focused test."] },
-  item_decisions: ids.map((item_id) => ({ item_id, disposition: "carry" })),
+  carry_ids: ids,
+  revise: [],
+  resolve: [],
+  supersede: [],
+  demote: [],
+  archive: [],
   new_items: [],
   knowledge_index: [],
 });
@@ -159,7 +165,7 @@ test("Update discipline covers corrections, uncertainty, failures, and directive
   }
 });
 
-test("compact Update consumes only Pi's bounded Episode and commits its frontier", async () => {
+test("compact Update consumes the bounded Episode plus Pi's recent suffix and commits its frontier", async () => {
   const calls = [];
   const preparation = {
     firstKeptEntryId: "entry-kept",
@@ -199,7 +205,12 @@ test("compact Update consumes only Pi's bounded Episode and commits its frontier
   const event = {
     signal: new AbortController().signal,
     preparation,
-    branchEntries: [{ role: "user", content: "DO NOT SEND THE FULL BRANCH" }],
+    branchEntries: [
+      { type: "message", id: "entry-old", message: { role: "user", content: [{ type: "text", text: "DO NOT SEND THE FULL BRANCH" }] } },
+      { type: "message", id: "entry-kept", message: { role: "user", content: [{ type: "text", text: "recent user request" }] } },
+      { type: "message", id: "entry-kept-assistant", message: { role: "assistant", content: [{ type: "text", text: "recent assistant output" }, { type: "toolCall", id: "kept-call-1", name: "bash", arguments: { command: "npm test" } }] } },
+      { type: "message", id: "entry-kept-tool", message: { role: "toolResult", toolCallId: "kept-call-1", toolName: "bash", content: [{ type: "text", text: "recent tool result" }] } },
+    ],
   };
   const result = await runUpdate(anchor, event, {
     model: { provider: "test", id: "model" },
@@ -219,13 +230,22 @@ test("compact Update consumes only Pi's bounded Episode and commits its frontier
   assert.deepEqual(calls[0].value.frontier, expectedFrontier);
   assert.equal(JSON.stringify(modelRequest.messages).includes("bounded work"), true);
   assert.equal(JSON.stringify(modelRequest.messages).includes("DO NOT SEND THE FULL BRANCH"), false);
+  assert.equal(JSON.stringify(modelRequest.messages).includes("recent user request"), true);
+  assert.equal(JSON.stringify(modelRequest.messages).includes("recent assistant output"), true);
+  assert.equal(JSON.stringify(modelRequest.messages).includes("recent tool result"), true);
   assert.equal(JSON.stringify(modelRequest.messages).includes("Return the complete anchor.cognition.v2"), false);
   assert.match(modelRequest.messages[0].content[0].text, /previous_active_item_ids/);
-  assert.equal(modelRequest.messages.at(-1).content[0].text, "bounded work");
+  const updateInput = JSON.parse(modelRequest.messages[0].content[0].text.match(/<anchor-update-input>\n([\s\S]+)\n<\/anchor-update-input>/)[1]);
+  assert.equal(updateInput.recent_suffix.first_kept_entry_id, "entry-kept");
+  assert.equal(updateInput.recent_suffix.message_count, 3);
+  assert.equal(updateInput.target_frontier.episode_hash, expectedFrontier.episode_hash);
+  assert.equal(modelRequest.messages.at(-1).content[0].text, "recent tool result");
   assert.match(modelRequest.systemPrompt, /Submit exactly once through anchor_submit_update/i);
-  assert.deepEqual(modelRequest.tools, [UPDATE_PROPOSAL_TOOL]);
-  assert.equal(modelRequest.tools[0].constrainedSampling.strict, "required");
-  assert.equal(modelRequest.tools[0].parameters.properties.schema.enum[0], "anchor.update-proposal.v2");
+  assert.equal(modelRequest.tools.length, 1);
+  assert.equal(modelRequest.tools[0].name, UPDATE_PROPOSAL_TOOL.name);
+  assert.equal(modelRequest.tools[0].constrainedSampling.strict, "require");
+  assert.deepEqual(modelRequest.tools[0].parameters.properties.carry_ids.items.enum, ["fact-provider", "decision-boundary"]);
+  assert.equal(modelRequest.tools[0].parameters.properties.schema.enum[0], "anchor.update-proposal.v3");
   assert.equal(modelOptions.toolChoice, "required");
   assert.equal(modelOptions.signal, event.signal);
   assert.equal(result.compaction.summary, "Anchor Checkpoint 1 committed for task task-1.");
@@ -233,6 +253,20 @@ test("compact Update consumes only Pi's bounded Episode and commits its frontier
   assert.deepEqual(result.compaction.usage, { input: 10, output: 2 });
   assert.equal(result.compaction.details.schema, "anchor.compact-receipt.v1");
   assert.deepEqual(result.compaction.details.frontier, expectedFrontier);
+});
+
+test("recent suffix extraction starts at Pi's boundary and rejects an unaligned branch", () => {
+  const preparation = { firstKeptEntryId: "entry-kept" };
+  const entries = [
+    { type: "model_change", id: "entry-old" },
+    { type: "message", id: "entry-kept", message: { role: "user", content: [{ type: "text", text: "keep this" }] } },
+    { type: "message", id: "entry-assistant", message: { role: "assistant", content: [{ type: "toolCall", id: "call-1", name: "bash", arguments: { command: "true" } }] } },
+    { type: "message", id: "entry-result", message: { role: "toolResult", toolCallId: "call-1", toolName: "bash", content: [{ type: "text", text: "result" }] } },
+  ];
+  const suffix = recentSuffixMessages(preparation, entries);
+  assert.deepEqual(suffix.map((message) => message.role), ["user", "assistant", "toolResult"]);
+  assert.equal(suffix[2].toolCallId, "call-1");
+  assert.throws(() => recentSuffixMessages(preparation, entries.slice(0, 1)), /missing from branchEntries/);
 });
 
 test("semantic Update rejection gets one deterministic correction attempt", async () => {
@@ -267,7 +301,7 @@ test("semantic Update rejection gets one deterministic correction attempt", asyn
   assert.match(result.compaction.summary, /committed/);
 });
 
-test("structured Update accepts provider nulls for optional proposal fields", async () => {
+test("structured Update uses disposition-specific operation fields", async () => {
   const preparation = {
     firstKeptEntryId: "entry-kept",
     tokensBefore: 123,
@@ -277,12 +311,8 @@ test("structured Update accepts provider nulls for optional proposal fields", as
   };
   const previous = checkpoint(0, { kind: "planning", session_id: "session-null", source_hash: hashValue({ proposal: 1 }) });
   const proposal = proposalSubmission();
-  for (const decision of proposal.item_decisions) {
-    decision.reason = null;
-    decision.sources = null;
-    decision.replacement = null;
-    decision.reference = null;
-  }
+  assert.equal(Object.hasOwn(proposal, "item_decisions"), false);
+  assert.deepEqual(proposal.revise, []);
   let writes = 0;
   const result = await runUpdate({
     recovery: async () => ({ task_id: "task-null", task: { state_version: 1 }, contract: { content: { goal: "test" } }, checkpoint: previous }),
@@ -296,13 +326,72 @@ test("structured Update accepts provider nulls for optional proposal fields", as
   assert.equal(result.compaction.details.schema, "anchor.compact-receipt.v1");
 });
 
+test("structured Update accepts JSON-string arguments inside a tool call", async () => {
+  const preparation = {
+    firstKeptEntryId: "entry-kept",
+    tokensBefore: 123,
+    messagesToSummarize: [{ role: "user", content: [{ type: "text", text: "bounded work" }] }],
+    turnPrefixMessages: [],
+    isSplitTurn: false,
+  };
+  const previous = checkpoint(0, { kind: "planning", session_id: "session-string-args", source_hash: hashValue({ proposal: 1 }) });
+  const proposal = proposalSubmission();
+  let writes = 0;
+  const result = await runUpdate({
+    recovery: async () => ({ task_id: "task-string-args", task: { state_version: 1 }, contract: { content: { goal: "test" } }, checkpoint: previous }),
+    update: async (value) => { writes += 1; return { event_id: "event-1", content_hash: hashValue(value), payload: { schema: "anchor.checkpoint.v1", task_id: "task-string-args", checkpoint_version: 1, parent: { checkpoint_version: 0, content_hash: previous.receipt.content_hash }, ...value } }; },
+  }, { preparation, signal: new AbortController().signal }, {
+    model: { provider: "test", id: "model" },
+    sessionManager: { getSessionId: () => "session-string-args" },
+    modelRegistry: { complete: async () => ({ content: [{ type: "toolCall", id: "call-1", name: UPDATE_PROPOSAL_TOOL.name, arguments: JSON.stringify(proposal) }] }) },
+  });
+  assert.equal(writes, 1);
+  assert.match(result.compaction.summary, /committed/);
+});
+
 test("Update submission uses one closed schema instead of free-text JSON", () => {
   assert.equal(UPDATE_SUBMISSION_TOOL.name, "anchor_submit_update");
   assert.equal(UPDATE_SUBMISSION_TOOL.parameters.additionalProperties, false);
   assert.deepEqual(UPDATE_SUBMISSION_TOOL.parameters.required, ["schema", "situation", "experience", "intent", "knowledge_index", "transition_certificate"]);
   assert.equal(UPDATE_SUBMISSION_TOOL.parameters.properties.situation.additionalProperties, false);
   assert.equal(UPDATE_SUBMISSION_TOOL.parameters.properties.transition_certificate.properties.dispositions.items.properties.disposition.enum.length, 6);
+  assert.equal(UPDATE_PROPOSAL_TOOL.parameters.properties.new_items.items.properties.sources.items.pattern, "^(episode:|checkpoint:|artifact:|pi:).+");
+  assert.equal(UPDATE_PROPOSAL_TOOL.parameters.properties.knowledge_index.items.properties.source.pattern, "^(episode:|checkpoint:|artifact:|pi:).+");
+  const dynamic = createUpdateProposalTool(["fact-1"]);
+  assert.deepEqual(dynamic.parameters.properties.carry_ids.items.enum, ["fact-1"]);
+  assert.deepEqual(dynamic.parameters.properties.revise.items.properties.item_id.enum, ["fact-1"]);
   assert.doesNotMatch(UPDATE_SYSTEM, /Return JSON|top-level JSON object/i);
+});
+
+test("Provider strict adapter preserves the dynamic item enum and strict wire flag", () => {
+  const tool = createUpdateProposalTool(["fact-1", "decision-2"]);
+  const strictSchema = makeStrictJsonSchema(tool.parameters);
+  assert.deepEqual(strictSchema.properties.carry_ids.items.enum, ["fact-1", "decision-2"]);
+  assert.deepEqual(strictSchema.properties.revise.items.properties.item_id.enum, ["fact-1", "decision-2"]);
+  const wireTools = convertResponsesTools([tool], { supportsStrictMode: true });
+  assert.equal(wireTools.length, 1);
+  assert.equal(wireTools[0].strict, true);
+  assert.deepEqual(wireTools[0].parameters.properties.carry_ids.items.enum, ["fact-1", "decision-2"]);
+});
+
+test("dynamic Update schema rejects an unknown previous item before reducer execution", async () => {
+  const preparation = {
+    firstKeptEntryId: "entry-kept",
+    tokensBefore: 123,
+    messagesToSummarize: [{ role: "user", content: [{ type: "text", text: "bounded work" }] }],
+    turnPrefixMessages: [],
+    isSplitTurn: false,
+  };
+  const previous = checkpoint(0, { kind: "planning", session_id: "session-dynamic", source_hash: hashValue({ proposal: 1 }) });
+  const invalid = proposalSubmission(["not-a-checkpoint-item", "decision-boundary"]);
+  await assert.rejects(runUpdate({
+    recovery: async () => ({ task_id: "task-dynamic", task: { state_version: 1 }, contract: { content: { goal: "test" } }, checkpoint: previous }),
+    update: async () => assert.fail("schema-invalid item ID must not write State"),
+  }, { preparation, signal: new AbortController().signal }, {
+    model: { provider: "test", id: "model" },
+    sessionManager: { getSessionId: () => "session-dynamic" },
+    modelRegistry: { complete: async () => submissionResponse("anchor_submit_update", invalid) },
+  }), /arguments that do not match the anchor_submit_update schema/);
 });
 
 test("Update rejects schema-invalid and duplicate submissions before State writes", async () => {
@@ -318,11 +407,12 @@ test("Update rejects schema-invalid and duplicate submissions before State write
     recovery: async () => ({ task_id: "task-1", task: { state_version: 7 }, contract: { content: { goal: "test" } }, checkpoint: previous }),
     update: async () => assert.fail("invalid submission must not write State"),
   };
+  const invalidTool = createUpdateProposalTool(["fact-provider", "decision-boundary"]);
   const invalidResponses = [
-    submissionResponse(UPDATE_SUBMISSION_TOOL.name, { ...updateSubmission(), unmodeled_secret: "DO_NOT_ECHO" }),
+    submissionResponse(invalidTool.name, { ...proposalSubmission(), unmodeled_secret: "DO_NOT_ECHO" }),
     { content: [
-      { type: "toolCall", id: "call-1", name: UPDATE_SUBMISSION_TOOL.name, arguments: updateSubmission() },
-      { type: "toolCall", id: "call-2", name: UPDATE_SUBMISSION_TOOL.name, arguments: updateSubmission() },
+      { type: "toolCall", id: "call-1", name: invalidTool.name, arguments: proposalSubmission() },
+      { type: "toolCall", id: "call-2", name: invalidTool.name, arguments: proposalSubmission() },
     ], stopReason: "toolUse" },
   ];
 
@@ -420,7 +510,7 @@ test("first compact bootstraps provisional state from only the Episode", async (
   assert.equal(JSON.stringify(request.messages).includes("full branch"), false);
   assert.equal(JSON.stringify(request.messages).includes("entry-kept"), false);
   assert.deepEqual(request.tools, [BOOTSTRAP_PROPOSAL_TOOL]);
-  assert.equal(request.tools[0].constrainedSampling.strict, "required");
+    assert.equal(request.tools[0].constrainedSampling.strict, "require");
   assert.equal(JSON.stringify(episode).includes("Ship the adapter"), true);
 });
 
@@ -431,7 +521,7 @@ function checkpoint(version, frontier) {
     checkpoint_version: version,
     parent: null,
     frontier,
-    cognition: { schema: "anchor.cognition.v2", ...cognition() },
+    cognition: updateSubmission(),
     provenance: { kind: frontier.kind, model: "test/model", ...(frontier.kind === "planning" ? { confirmed_by: "user" } : {}) },
     receipt: { event_id: `event-${version}`, content_hash: hashValue({ version, frontier }) },
   };

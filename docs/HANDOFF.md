@@ -1,6 +1,6 @@
 # Development Handoff
 
-Status: Phase 1 historical-scale real-provider overflow acceptance passed; Phase 2 structured submission implemented; takeover, churn, and latency acceptance remain, 2026-09-01
+Status: Phase 1 historical-scale real-provider overflow acceptance passed; Phase 2 dynamic v3 structured submission and strict-provider probe passed; takeover, churn, and latency acceptance remain, 2026-09-02
 
 Anchor is now a Pi package. `src/extension.js` owns the public lifecycle;
 `python/anchor_core/` is the embedded durable state implementation. The former
@@ -113,7 +113,9 @@ tool-list changes by another Extension may be overwritten when Planning exits.
 Do not reintroduce an Anchor wrapper executable, parallel state writer, or
 one-prompt automatic Task creation.
 
-The cognition v3 slice and structured Bootstrap/Update submission path are now implemented. Checkpoints use Situation,
+The cognition v3 slice and structured Bootstrap/Update submission path are now implemented. Update uses dynamic active-item
+enums and disposition-specific operations; the Provider strict adapter preserves those enums and emits `strict: true`.
+Checkpoints use Situation,
 Experience, Intent, and Knowledge Index; active items have stable IDs and
 provenance; Update emits `anchor.transition.v1`; the durable boundary validates
 coverage, sources, replacement IDs, and demotion references; and Context projects

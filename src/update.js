@@ -1,18 +1,20 @@
 import { createHash } from "node:crypto";
-import { convertToLlm } from "@earendil-works/pi-coding-agent";
+import { convertToLlm, sessionEntryToContextMessages } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { Check, Errors } from "typebox/value";
 import { reduceUpdateProposal } from "./reducer.js";
 
 const nonEmptyString = () => Type.String({ minLength: 1 });
 const stringArraySchema = (options = {}) => Type.Array(nonEmptyString(), options);
+const evidenceSource = () => Type.String({ pattern: "^(episode:|checkpoint:|artifact:|pi:).+" });
+const evidenceSourceArray = (options = {}) => Type.Array(evidenceSource(), options);
 const schemaName = (value) => Type.String({ enum: [value] });
 const closedObject = (properties) => Type.Object(properties, { additionalProperties: false });
 
 const COGNITION_ITEM_SCHEMA = closedObject({
   id: nonEmptyString(),
   statement: nonEmptyString(),
-  sources: stringArraySchema({ minItems: 1 }),
+  sources: evidenceSourceArray({ minItems: 1 }),
   relevance: nonEmptyString(),
 });
 
@@ -90,25 +92,10 @@ const BOOTSTRAP_SUBMISSION_SCHEMA = closedObject({
 const PROPOSAL_ITEM_SCHEMA = closedObject({
   section: Type.String({ enum: ["situation.confirmed_facts", "situation.active_hypotheses", "situation.unresolved_conflicts", "situation.blockers", "experience.decisions", "experience.failed_paths", "intent.open_questions"] }),
   statement: nonEmptyString(),
-  sources: stringArraySchema({ minItems: 1 }),
+  sources: evidenceSourceArray({ minItems: 1 }),
   relevance: nonEmptyString(),
 });
-const PROPOSAL_DECISION_SCHEMA = closedObject({
-  item_id: nonEmptyString(),
-  disposition: Type.String({ enum: ["carry", "revise", "resolve", "supersede", "demote", "archive"] }),
-  reason: Type.Optional(nonEmptyString()),
-  sources: Type.Optional(stringArraySchema()),
-  replacement: Type.Optional(PROPOSAL_ITEM_SCHEMA),
-  reference: Type.Optional(nonEmptyString()),
-});
-const UPDATE_PROPOSAL_SCHEMA = closedObject({
-  schema: schemaName("anchor.update-proposal.v2"),
-  situation: closedObject({ current_understanding: nonEmptyString() }),
-  intent: closedObject({ current_directive: nonEmptyString(), accepted_next_action: nonEmptyString(), next_plan: stringArraySchema() }),
-  item_decisions: Type.Array(PROPOSAL_DECISION_SCHEMA),
-  new_items: Type.Array(PROPOSAL_ITEM_SCHEMA),
-  knowledge_index: Type.Array(closedObject({ cue: nonEmptyString(), locator: nonEmptyString(), source: nonEmptyString() })),
-});
+const UPDATE_PROPOSAL_SCHEMA = updateProposalSchema([]);
 const BOOTSTRAP_PROPOSAL_SCHEMA = closedObject({
   schema: schemaName("anchor.bootstrap-proposal.v2"),
   title: nonEmptyString(),
@@ -135,30 +122,33 @@ export const BOOTSTRAP_SUBMISSION_TOOL = Object.freeze({
 });
 
 export const UPDATE_PROPOSAL_TOOL = Object.freeze({
-  name: "anchor_submit_update",
-  label: "Submit Anchor Update Proposal",
-  description: "Submit semantic Anchor changes. Anchor deterministically materializes the complete Checkpoint candidate.",
-  parameters: UPDATE_PROPOSAL_SCHEMA,
-  constrainedSampling: { type: "json_schema", strict: "required" },
+  ...createUpdateProposalTool([]),
 });
 
-export const ANCHOR_UPDATE_PROTOCOL = "anchor.update-proposal.v2";
+export const ANCHOR_UPDATE_PROTOCOL = "anchor.update-proposal.v3";
 
 export const BOOTSTRAP_PROPOSAL_TOOL = Object.freeze({
   name: "anchor_submit_bootstrap",
   label: "Submit Anchor Bootstrap Proposal",
   description: "Submit a provisional semantic bootstrap proposal. Anchor owns Contract and Checkpoint materialization.",
   parameters: BOOTSTRAP_PROPOSAL_SCHEMA,
-  constrainedSampling: { type: "json_schema", strict: "required" },
+  constrainedSampling: { type: "json_schema", strict: "require" },
 });
 
 export const UPDATE_PROPOSAL_SYSTEM = `You are the Anchor Update Agent.
 
-Submit one anchor.update-proposal.v2 semantic proposal for exactly the supplied
-Checkpoint and Pi Episode. Address every previous active item exactly once in
-item_decisions. Use carry only for unchanged items; changed items require revise
-or supersede with a replacement. Resolve, archive, and demote require explicit
-reason and sources; demote requires an exact immutable Checkpoint reference.
+Submit one anchor.update-proposal.v3 semantic proposal for exactly the supplied
+Checkpoint, Pi Episode, and Pi recent suffix. Use the suffix to preserve recent
+conversation continuity, but do not treat it as covered by the target frontier.
+When asserting cognition from the suffix, cite pi:recent-suffix:<first_kept_entry_id>.
+Every source must begin with exactly one of episode:, checkpoint:, artifact:, or pi:;
+for example episode:compact:<hash> or pi:recent-suffix:<first_kept_entry_id>.
+Place each previous active item in exactly one of the disposition-specific
+arrays: carry_ids, revise, resolve, supersede, demote, or archive. Use carry_ids
+only for unchanged items. Revised and superseded items require a replacement;
+resolve, archive, and demote require an explicit reason and source; demote also
+requires an exact immutable Checkpoint reference. The item_id enum contains the
+only IDs that may be used for this Checkpoint.
 Anchor materializes the complete Checkpoint and Transition Certificate. Do not
 submit durable metadata, hashes, Task identity, versions, or frontier fields.
 Submit exactly once through anchor_submit_update and do not return free-text JSON.`;
@@ -175,8 +165,10 @@ once through anchor_submit_bootstrap and do not return free-text JSON.`;
 export const UPDATE_SYSTEM = `You are the Anchor Update Agent.
 
 This is state transition, not conversation summarization. Given one previous
-Checkpoint and exactly one newly covered Episode, reconstruct the minimum
-cognition needed for correct future action at the Episode frontier.
+Checkpoint, one newly covered Episode, and the Pi recent suffix that will remain
+in context, reconstruct the minimum cognition needed for correct future action
+at the Episode frontier. The suffix preserves recent conversation continuity;
+it is not part of the covered frontier or episode hash.
 
 Rules:
 - Preserve the Contract; never silently change goal, acceptance, constraints, or non-goals.
@@ -184,6 +176,8 @@ Rules:
 - Apply newer explicit user corrections. Keep hypotheses and unresolved conflicts explicit until evidence resolves them.
 - Tool output can support an observed fact; model confidence cannot. Failure is not success.
 - A failed or interrupted tool call is not success.
+- When a new fact, correction, or directive comes from the recent suffix rather
+  than the Episode, cite pi:recent-suffix:<first_kept_entry_id> as its source.
 - Keep an item active only when forgetting it could cause a wrong decision, constraint violation, repeated failure/expense, or loss of the next action. Preserve failed paths with their causes and retry conditions.
 - Give every previous active item exactly one disposition in the Transition Certificate: carry, revise, resolve, supersede, demote, or archive.
 - The control envelope lists the exact previous active item IDs. The certificate must contain exactly those IDs; do not invent IDs, rename IDs, or mark an item carry unless that same ID is present in the submitted cognition.
@@ -206,6 +200,45 @@ and may be corrected later; never mark it user-confirmed. Submit exactly once
 through anchor_submit_bootstrap. Do not return free-text JSON or call any other
 function.`;
 
+function updateProposalSchema(activeItemIds) {
+  const itemId = activeItemIds.length
+    ? Type.String({ enum: [...activeItemIds] })
+    : Type.String({ minLength: 1 });
+  const sourcedOperation = closedObject({
+    item_id: itemId,
+    reason: nonEmptyString(),
+    sources: evidenceSourceArray({ minItems: 1 }),
+  });
+  const replacementOperation = closedObject({
+    item_id: itemId,
+    reason: nonEmptyString(),
+    replacement: PROPOSAL_ITEM_SCHEMA,
+  });
+  return closedObject({
+    schema: schemaName("anchor.update-proposal.v3"),
+    situation: closedObject({ current_understanding: nonEmptyString() }),
+    intent: closedObject({ current_directive: nonEmptyString(), accepted_next_action: nonEmptyString(), next_plan: stringArraySchema() }),
+    carry_ids: Type.Array(itemId),
+    revise: Type.Array(replacementOperation),
+    resolve: Type.Array(sourcedOperation),
+    supersede: Type.Array(replacementOperation),
+    demote: Type.Array(closedObject({ item_id: itemId, reason: nonEmptyString(), sources: evidenceSourceArray({ minItems: 1 }), reference: Type.String({ pattern: "^checkpoint:[0-9]+:item:[^:]+$" }) })),
+    archive: Type.Array(sourcedOperation),
+    new_items: Type.Array(PROPOSAL_ITEM_SCHEMA),
+    knowledge_index: Type.Array(closedObject({ cue: nonEmptyString(), locator: nonEmptyString(), source: evidenceSource() })),
+  });
+}
+
+export function createUpdateProposalTool(activeItemIds = []) {
+  return {
+    name: "anchor_submit_update",
+    label: "Submit Anchor Update Proposal",
+    description: "Submit one semantic Anchor update. Anchor deterministically materializes the complete Checkpoint candidate.",
+    parameters: updateProposalSchema(activeItemIds),
+    constrainedSampling: { type: "json_schema", strict: "require" },
+  };
+}
+
 const ITEM_GROUPS = [
   ["situation", "confirmed_facts"], ["situation", "active_hypotheses"], ["situation", "unresolved_conflicts"], ["situation", "blockers"],
   ["experience", "decisions"], ["experience", "failed_paths"], ["intent", "open_questions"],
@@ -215,27 +248,34 @@ export async function runUpdate(anchor, event, ctx) {
   const recovery = await anchor.recovery();
   if (!recovery.checkpoint) throw new Error("Anchor Update requires an existing Checkpoint");
   const episode = episodeMessages(event.preparation);
+  const recentSuffix = recentSuffixMessages(event.preparation, event.branchEntries);
+  const recentSuffixLlm = convertToLlm(recentSuffix);
   const frontier = compactFrontier(event.preparation, ctx.sessionManager.getSessionId(), episode);
   if (sameValue(recovery.checkpoint.frontier, frontier)) return { compaction: compactionReceipt(recovery.task_id, recovery.checkpoint, event.preparation) };
   if (!ctx.model) throw new Error("Anchor Update requires an active model");
-  const submissionTool = UPDATE_PROPOSAL_TOOL;
   const previousActiveItems = activeItems(recovery.checkpoint.cognition);
+  const submissionTool = createUpdateProposalTool(previousActiveItems.map((item) => item.id));
   const input = {
     schema: "anchor.update-input.v1",
     task: { task_id: recovery.task_id, title: recovery.task?.title, contract: recovery.contract?.content ?? recovery.contract },
     previous_checkpoint: recovery.checkpoint,
     transition_requirements: {
       previous_active_item_ids: previousActiveItems.map((item) => item.id),
-      certificate_rule: "exactly one disposition for each listed ID and no other ID",
+      operation_rule: "exactly one disposition-specific operation for each listed ID and no other ID",
     },
     target_frontier: frontier,
+    recent_suffix: {
+      first_kept_entry_id: event.preparation.firstKeptEntryId,
+      message_count: recentSuffixLlm.length,
+      content_hash: hashValue(recentSuffixLlm),
+    },
   };
-  const baseMessages = [{ role: "user", content: [{ type: "text", text: `<anchor-update-input>\n${JSON.stringify(input, null, 2)}\n</anchor-update-input>` }] }, ...convertToLlm(episode)];
+  const baseMessages = [{ role: "user", content: [{ type: "text", text: `<anchor-update-input>\n${JSON.stringify(input, null, 2)}\n</anchor-update-input>` }] }, ...convertToLlm(episode), ...recentSuffixLlm];
   let response;
   let normalized;
   let validationError;
   for (let attempt = 0; attempt < 2; attempt += 1) {
-    const feedback = validationError ? [{ role: "user", content: [{ type: "text", text: `<anchor-validation-feedback>\nThe previous submission was rejected by deterministic validation: ${validationError.message}\nCorrect that issue and submit the complete candidate again through anchor_submit_update.\n</anchor-validation-feedback>` }] }] : [];
+    const feedback = validationError ? [{ role: "user", content: [{ type: "text", text: `<anchor-validation-feedback>\nThe previous submission was rejected by deterministic validation: ${validationError.message}\nUse only item IDs present in the current tool schema enum, and place each previous active item in exactly one disposition-specific array. Every item source must match ^(episode:|checkpoint:|artifact:|pi:).+; use the current Episode, an exact checkpoint reference, an artifact locator, or pi:recent-suffix:<first_kept_entry_id>. Correct that issue and submit the complete candidate again through anchor_submit_update.\n</anchor-validation-feedback>` }] }] : [];
     response = await ctx.modelRegistry.complete(ctx.model, {
       systemPrompt: UPDATE_PROPOSAL_SYSTEM,
       messages: [...baseMessages, ...feedback],
@@ -323,6 +363,20 @@ export function episodeMessages(preparation) {
   return episode;
 }
 
+/**
+ * Extract only the Pi context that will survive this compaction. The host owns
+ * the boundary; Anchor preserves the exact entry order and message pairing.
+ */
+export function recentSuffixMessages(preparation, branchEntries) {
+  if (branchEntries === undefined) return [];
+  if (!Array.isArray(branchEntries)) throw new TypeError("Pi compaction branchEntries are required");
+  if (!branchEntries.length) return [];
+  const firstKeptEntryId = preparation?.firstKeptEntryId;
+  const start = branchEntries.findIndex((entry) => entry?.id === firstKeptEntryId);
+  if (start < 0) throw new Error("Pi firstKeptEntryId is missing from branchEntries");
+  return branchEntries.slice(start).flatMap((entry) => sessionEntryToContextMessages(entry));
+}
+
 export function compactFrontier(preparation, sessionId, episode = episodeMessages(preparation)) {
   if (typeof sessionId !== "string" || !sessionId.trim()) throw new TypeError("Pi session identity is required");
   if (typeof preparation?.firstKeptEntryId !== "string" || !preparation.firstKeptEntryId) throw new TypeError("Pi firstKeptEntryId is required");
@@ -338,7 +392,7 @@ export function normalizeUpdateResponse(raw, previous, frontier) {
   const parsed = structuredCandidate(raw);
   const legacyPrevious = previous?.schema !== "anchor.cognition.v3";
   const prior = previous?.schema === "anchor.cognition.v3" ? previous : legacyToV3(normalizeLegacy(previous));
-  if (parsed?.schema === "anchor.update-proposal.v2") return reduceUpdateProposal(prior, parsed, frontier);
+  if (parsed?.schema === "anchor.update-proposal.v3") return reduceUpdateProposal(prior, parsed, frontier);
   if (parsed?.schema === "anchor.cognition.v3") return { cognition: normalizeV3(parsed), transition_certificate: legacyPrevious ? legacyTransition(prior, parsed, frontier) : normalizeTransition(parsed.transition_certificate, prior, parsed) };
   const cognition = normalizeLegacy(parsed);
   return { cognition: legacyToV3(cognition), transition_certificate: legacyTransition(prior, cognition, frontier) };
@@ -569,10 +623,22 @@ function submissionArguments(response, tool, agent) {
   if (calls.length !== 1 || calls[0]?.name !== tool.name) {
     throw new Error(`${agent} Agent must submit exactly one ${tool.name} function call; received ${calls.length} tool calls`);
   }
-  if (!calls[0].arguments || typeof calls[0].arguments !== "object" || Array.isArray(calls[0].arguments)) {
+  const rawArguments = calls[0].arguments;
+  let arguments_;
+  if (typeof rawArguments === "string") {
+    try {
+      arguments_ = JSON.parse(rawArguments);
+    } catch {
+      throw new Error(`${agent} Agent submitted invalid ${tool.name} arguments JSON`);
+    }
+  } else if (rawArguments && typeof rawArguments === "object" && !Array.isArray(rawArguments)) {
+    arguments_ = structuredClone(rawArguments);
+  } else {
     throw new Error(`${agent} Agent submitted invalid ${tool.name} arguments`);
   }
-  const arguments_ = structuredClone(calls[0].arguments);
+  if (!arguments_ || typeof arguments_ !== "object" || Array.isArray(arguments_)) {
+    throw new Error(`${agent} Agent submitted invalid ${tool.name} arguments`);
+  }
   normalizeOptionalNulls(arguments_, tool.parameters);
   if (!Check(tool.parameters, arguments_)) {
     const paths = [...Errors(tool.parameters, arguments_)].slice(0, 8).map((error) => error.path || "/");

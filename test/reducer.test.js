@@ -4,7 +4,7 @@ import { reduceUpdateProposal } from "../src/reducer.js";
 
 const item = (id, statement) => ({ id, statement, sources: ["episode:1"], relevance: "controls next action" });
 const previous = { schema: "anchor.cognition.v3", situation: { current_understanding: "old", confirmed_facts: [item("fact-1", "API exists")], active_hypotheses: [], unresolved_conflicts: [], blockers: [] }, experience: { decisions: [item("decision-1", "Keep adapter narrow")], failed_paths: [] }, intent: { current_directive: "Finish", accepted_next_action: "Test", next_plan: ["Test"], open_questions: [] }, knowledge_index: [] };
-const proposal = (overrides = {}) => ({ schema: "anchor.update-proposal.v2", situation: { current_understanding: "new" }, intent: { current_directive: "Finish", accepted_next_action: "Test", next_plan: ["Test"] }, item_decisions: [{ item_id: "fact-1", disposition: "carry" }, { item_id: "decision-1", disposition: "archive", reason: "implemented", sources: ["episode:2"] }], new_items: [], knowledge_index: [], ...overrides });
+const proposal = (overrides = {}) => ({ schema: "anchor.update-proposal.v3", situation: { current_understanding: "new" }, intent: { current_directive: "Finish", accepted_next_action: "Test", next_plan: ["Test"] }, carry_ids: ["fact-1"], revise: [], resolve: [], supersede: [], demote: [], archive: [{ item_id: "decision-1", reason: "implemented", sources: ["episode:2"] }], new_items: [], knowledge_index: [], ...overrides });
 
 test("reducer copies carry and emits complete certificate", () => {
   const result = reduceUpdateProposal(previous, proposal(), { episode_hash: "sha256:e" });
@@ -14,28 +14,26 @@ test("reducer copies carry and emits complete certificate", () => {
 });
 
 test("reducer rejects omitted, duplicate and unknown decisions", () => {
-  assert.throws(() => reduceUpdateProposal(previous, proposal({ item_decisions: [{ item_id: "fact-1", disposition: "carry" }] }), {}), /omits/);
-  assert.throws(() => reduceUpdateProposal(previous, proposal({ item_decisions: [...proposal().item_decisions, { item_id: "fact-1", disposition: "carry" }] }), {}), /duplicate/);
-  assert.throws(() => reduceUpdateProposal(previous, proposal({ item_decisions: [{ item_id: "fact-1", disposition: "carry" }, { item_id: "decision-1", disposition: "archive", reason: "done", sources: ["episode:2"] }, { item_id: "x", disposition: "archive", reason: "unknown", sources: ["episode:2"] }] }), {}), /unknown/);
+  assert.throws(() => reduceUpdateProposal(previous, proposal({ carry_ids: [], archive: [{ item_id: "decision-1", reason: "done", sources: ["episode:2"] }] }), {}), /omits/);
+  assert.throws(() => reduceUpdateProposal(previous, proposal({ carry_ids: ["fact-1", "fact-1"] }), {}), /duplicate/);
+  assert.throws(() => reduceUpdateProposal(previous, proposal({ carry_ids: ["fact-1", "x"] }), {}), /unknown/);
 });
 
 test("reducer demotion requires exact reference and is deterministic", () => {
-  const p = proposal({ item_decisions: [{ item_id: "fact-1", disposition: "demote", reason: "recoverable", sources: ["episode:2"], reference: "checkpoint:1:item:fact-1" }, { item_id: "decision-1", disposition: "archive", reason: "done", sources: ["episode:2"] }] });
+  const p = proposal({ carry_ids: [], demote: [{ item_id: "fact-1", reason: "recoverable", sources: ["episode:2"], reference: "checkpoint:1:item:fact-1" }] });
   const a = reduceUpdateProposal(previous, p, { episode_hash: "sha256:e" });
   const b = reduceUpdateProposal(previous, p, { episode_hash: "sha256:e" });
   assert.deepEqual(a, b);
-  assert.throws(() => reduceUpdateProposal(previous, { ...p, item_decisions: [{ ...p.item_decisions[0], reference: "transcript:1" }, p.item_decisions[1]] }, {}), /exact Checkpoint/);
+  assert.throws(() => reduceUpdateProposal(previous, { ...p, demote: [{ ...p.demote[0], reference: "transcript:1" }] }, {}), /exact Checkpoint/);
 });
 
 test("reducer materializes references and preserves open-question operations", () => {
   const prior = structuredClone(previous);
   prior.intent.open_questions = [item("question-1", "Is the endpoint stable?")];
   const result = reduceUpdateProposal(prior, proposal({
-    item_decisions: [
-      { item_id: "fact-1", disposition: "carry" },
-      { item_id: "decision-1", disposition: "archive", reason: "done", sources: ["episode:2"] },
-      { item_id: "question-1", disposition: "revise", reason: "verified", sources: ["episode:2"], replacement: { section: "intent.open_questions", statement: "Is the provider replayable?", sources: ["episode:2"], relevance: "blocks verification" } },
-    ],
+    carry_ids: ["fact-1"],
+    archive: [{ item_id: "decision-1", reason: "done", sources: ["episode:2"] }],
+    revise: [{ item_id: "question-1", reason: "verified", replacement: { section: "intent.open_questions", statement: "Is the provider replayable?", sources: ["episode:2"], relevance: "blocks verification" } }],
     new_items: [{ section: "experience.decisions", statement: "Use structured submission.", sources: ["episode:2"], relevance: "prevents free-text failure" }],
     knowledge_index: [{ cue: "Prior evidence", locator: "checkpoint:1:item:decision-1", source: "episode:2" }],
   }), { episode_hash: "sha256:e" });

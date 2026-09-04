@@ -140,8 +140,11 @@ preparation.messagesToSummarize
 + preparation.turnPrefixMessages
 ```
 
-Anchor 不读取完整 branch 重新决定边界，也不把 Pi 决定保留的近期 suffix 重复
-塞给 Update Agent。tool call 和对应 result 必须作为不可分割 replay unit。
+Anchor 不读取完整 branch 重新决定边界；它只依据 `firstKeptEntryId` 从
+Pi 提供的 branch path 提取近期 suffix，并将其作为 Update 的连续性证据。
+该 suffix 不计入 Episode hash 或 Checkpoint 覆盖 frontier。tool call 和对应
+result 必须作为不可分割 replay unit。首次 Bootstrap 仍只消费 Episode，suffix
+由 Pi 作为 active window 保留。
 
 ### 5.4 Projection
 
@@ -281,7 +284,7 @@ manual、threshold 和 overflow compact 使用同一条路径：
 ```text
 Pi prepares compaction boundary
         |
-Anchor reads previous Checkpoint + Episode
+Anchor reads previous Checkpoint + Episode + Pi recent suffix
         |
 request-local schema-constrained submission produces complete candidate
         |
@@ -299,10 +302,11 @@ State，而不是聊天摘要、自由 delta 或自由文本 JSON。该 function
 transport 的类型化返回通道：不注册为 Pi session tool、不执行、不产生 tool result
 或 workspace 副作用。支持 strict tool schema 的 provider 直接约束采样；其他受支持
 provider 仍强制选择这个唯一 function，并由 Anchor 对 arguments 做同一套确定性
-验证。语义证据只能
-来自旧 Checkpoint 和本次 Episode；确定性控制信封可以携带 immutable Task
-Contract 与 target frontier，但二者不是 Episode directive 或新增证据。不得再次
-发送完整 branch。
+验证。语义证据来自旧 Checkpoint、本次 Episode 和从 `firstKeptEntryId` 提取的
+Pi recent suffix。suffix 只用于恢复最近用户/assistant/tool call-result 的连续性，
+不改变 Episode hash 或 frontier。确定性控制信封可以携带 immutable Task
+Contract、target frontier 和 suffix 元数据，但这些不是 Episode directive 或新增
+证据。不得再次发送完整 branch。
 
 Pi compaction summary 只需提供人类可读的 Checkpoint 标识，结构化 `details`
 记录 Checkpoint version、source hash 和 `firstKeptEntryId`。下一次模型请求仍以
@@ -418,7 +422,8 @@ status 和 Update working message。不替换 Pi editor、header、footer 或整
 - State context projection；
 - compact 时的串行 Update；
 - `anchor.checkpoint.v1`、`anchor.cognition.v3`、`anchor.transition.v1` 和 source frontier；
-- Update 只消费 Pi compaction preparation 选出的 Episode；
+- Update 消费 Pi compaction preparation 选出的 Episode，并接收从
+  `firstKeptEntryId` 精确提取的 recent suffix；suffix 不计入 Episode hash；
 - Checkpoint schema 检查、parent hash 和 stale version CAS；
 - compact receipt 及相同 frontier 的无模型重放；
 - session-scoped 默认数据库；
@@ -441,7 +446,7 @@ model/auth 前置检查和 process-wide tool list 仍是 host 限制。
 剩余工作按认知闭环依赖顺序实现：
 
 1. 完成 correction、failure、recall、takeover、restart 和 churn 验收；
-2. 在预发布 State reset 窗口结束后移除 v2 兼容路径。
+2. 继续验证真实长任务中的认知质量、来源纪律和投影延迟。
 
 在真实长任务证明核心机制有效前，不增加并发治理、权限沙箱或多 Agent 能力。
 

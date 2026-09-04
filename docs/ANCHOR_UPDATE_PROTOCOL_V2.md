@@ -1,9 +1,9 @@
-# Anchor Update Protocol v2
+# Anchor Update Protocol v3
 
 ## 设计提案：从模型生成完整 State 转向语义操作与确定性物化
 
 状态：Implemented
-目标版本：Anchor Update Protocol v2
+目标版本：Anchor Update Protocol v3
 适用范围：Anchor Bootstrap、Update、Checkpoint candidate 生成与验证
 不改变：Pi 的 compaction ownership、Anchor 的 Task/Checkpoint 持久化边界、frontier/CAS/receipt 语义
 
@@ -33,7 +33,7 @@ transition.disposition = carry
 carried item is missing from cognition
 ```
 
-Update Protocol v2 改变这个边界：
+Update Protocol v3 改变这个边界：
 
 ```text
 模型提交语义变更意图
@@ -93,7 +93,7 @@ Anchor 负责：
 
 ### 2.3 完整 State 仍然是 Anchor 的 durable truth
 
-v2 不降低 cognition、Transition Certificate 或 provenance 的严格性。变化只在于谁负责生成它们：
+v3 不降低 cognition、Transition Certificate 或 provenance 的严格性。变化只在于谁负责生成它们：
 
 ```text
 模型：semantic proposal
@@ -152,7 +152,7 @@ Checkpoint commit
 
 ### 3.2 目标实现
 
-v2 流程为：
+v3 流程为：
 
 ```text
 previous Checkpoint + selected Episode
@@ -184,25 +184,17 @@ Pi compaction receipt
 
 模型输出不再包含最终 `anchor.checkpoint-candidate.v1`，而是一个版本化的 semantic proposal。
 
-## 4. v2 Semantic Proposal
+## 4. v3 Semantic Proposal
 
 ### 4.1 顶层结构
 
-建议保留现有 tool 名称 `anchor_submit_update`，但改变其 arguments 的语义：
+保留现有 tool 名称 `anchor_submit_update`，其 arguments 使用 v3 semantic proposal 语义：
 
 ```json
 {
-  "schema": "anchor.update-proposal.v2",
+  "schema": "anchor.update-proposal.v3",
   "situation": {
-    "current_understanding": "The adapter now uses the provider boundary.",
-    "new_items": [
-      {
-        "section": "confirmed_facts",
-        "statement": "The provider returns structured tool calls.",
-        "sources": ["episode:compact:abc"],
-        "relevance": "Determines the next verification step."
-      }
-    ]
+    "current_understanding": "The adapter now uses the provider boundary."
   },
   "intent": {
     "current_directive": "Finish provider verification.",
@@ -210,32 +202,34 @@ Pi compaction receipt
     "next_plan": ["Run the focused test."],
     "open_questions": []
   },
-  "item_decisions": [
-    {
-      "item_id": "fact-1",
-      "disposition": "carry"
-    },
-    {
-      "item_id": "decision-2",
-      "disposition": "archive",
-      "reason": "The implementation now embodies this decision.",
-      "sources": ["episode:compact:abc"]
-    },
+  "carry_ids": ["fact-1"],
+  "revise": [
     {
       "item_id": "fact-3",
-      "disposition": "revise",
+      "reason": "The provider contract was clarified.",
       "replacement": {
+        "section": "situation.confirmed_facts",
         "statement": "The provider returns one structured submission call.",
         "sources": ["episode:compact:abc"],
         "relevance": "Controls the next compaction path."
       }
-    },
+    }
+  ],
+  "resolve": [],
+  "supersede": [],
+  "demote": [
     {
       "item_id": "failed-4",
-      "disposition": "demote",
       "reason": "The failed path remains useful for avoiding a repeated mistake.",
       "sources": ["episode:compact:abc"],
       "reference": "checkpoint:2:item:failed-4"
+    }
+  ],
+  "archive": [
+    {
+      "item_id": "decision-2",
+      "reason": "The implementation now embodies this decision.",
+      "sources": ["episode:compact:abc"]
     }
   ],
   "new_items": [
@@ -258,7 +252,8 @@ Pi compaction receipt
 
 The exact field names may change during implementation, but the separation is normative:
 
-- `item_decisions` contains decisions about previous active items;
+- `carry_ids`, `revise`, `resolve`, `supersede`, `demote`, and `archive` contain
+  disposition-specific decisions about previous active items;
 - `new_items` contains genuinely new or replacement cognition;
 - `situation` and `intent` contain fields that are not item-by-item transitions;
 - the model does not repeat the full previous item body for `carry`;
@@ -297,7 +292,7 @@ The reducer must reject:
 ```text
 previous.situation.confirmed_facts[fact-1]
         |
-        +-- item_decisions: { item_id: fact-1, disposition: carry }
+        +-- carry_ids: [fact-1]
         |
         v
 next.situation.confirmed_facts[fact-1] = exact previous item
@@ -553,7 +548,7 @@ A reducer-validation failure means the provider returned a structured proposal b
 
 ## 10. Persistence and Concurrency
 
-The v2 commit boundary remains:
+The v3 commit boundary remains:
 
 ```text
 model response
@@ -612,7 +607,7 @@ The reducer is not allowed to use its mechanical access to previous State as a r
 
 - Mark the current full-snapshot protocol as v1 compatibility behavior.
 - Define proposal schemas independently from durable Checkpoint schemas.
-- Preserve existing v2/v3 State readers and receipt replay.
+- Preserve the existing State reader and receipt replay semantics.
 - Add explicit stage names for submission, reducer and commit failures.
 
 ### Phase 1: Implement pure reducer
@@ -626,7 +621,7 @@ The reducer is not allowed to use its mechanical access to previous State as a r
 
 ### Phase 2: Add proposal tool schema
 
-- Introduce `anchor.update-proposal.v2`.
+- Introduce `anchor.update-proposal.v3` with disposition-specific operation arrays.
 - Remove model-authored `content_hash`.
 - Remove final Checkpoint metadata from model arguments.
 - Keep one request-local structured submission function.
@@ -779,12 +774,12 @@ The goal is narrower: reduce the amount of deterministic State assembly performe
 
 ### Implementation status
 
-The v2 proposal schemas, deterministic reducer, and Bootstrap/Update runtime
-boundary are implemented. Existing v1/v3 cognition is accepted only as a
-read-side migration input and is normalized before a v2 proposal is reduced.
+The v3 Update proposal schema, deterministic reducer, and Bootstrap/Update
+runtime boundary are implemented. Existing cognition is normalized before a
+v3 proposal is reduced.
 No legacy full-snapshot submission is advertised to the provider runtime.
 
-Anchor Update Protocol v2 should be adopted as the target architecture.
+Anchor Update Protocol v3 should be adopted as the target architecture.
 
 The decisive invariant is:
 
