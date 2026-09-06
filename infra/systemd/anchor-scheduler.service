@@ -1,0 +1,18 @@
+[Unit]
+Description=Anchor trigger scheduler
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Anchor
+Environment=ANCHOR_DATABASE_URL=sqlite:///%h/Anchor/.local/api.sqlite
+Environment=ANCHOR_SCHEDULER_INTERVAL=5
+ExecStart=%h/Anchor/.venv/bin/python -m anchor.runtime.scheduler_service
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,19 @@
+[Unit]
+Description=Anchor control-node worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Anchor
+Environment=ANCHOR_DATABASE_URL=sqlite:///%h/Anchor/.local/api.sqlite
+Environment=ANCHOR_ARTIFACT_ROOT=%h/Anchor/.local/artifacts
+Environment=ANCHOR_CONTROL_WORKER_ID=anchor-control-worker-%H
+ExecStart=%h/Anchor/.venv/bin/python -m anchor.runtime.control_service
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

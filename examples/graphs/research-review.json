@@ -1,0 +1,27 @@
+{
+  "definition": {
+    "graph_id": "research-review",
+    "name": "持续研究与证据交付",
+    "entry_node_id": "research",
+    "metadata": { "purpose": "Graph authoring example; agent references are placeholders" },
+    "nodes": [
+      { "id": "research", "type": "agent", "name": "研究员", "agent_ref": "agents.researcher", "progress_signal": "new_evidence_recorded" },
+      { "id": "review", "type": "agent", "name": "交叉审查", "agent_ref": "agents.reviewer", "progress_signal": "review_findings_recorded" },
+      { "id": "verify", "type": "verifier", "name": "证据验证", "verifier_ref": "verifiers.evidence" },
+      { "id": "report", "type": "artifact", "name": "研究报告" }
+    ],
+    "edges": [
+      { "source": "research", "target": "review", "input_mapping": { "evidence": "research.artifact" } },
+      { "source": "review", "target": "verify" },
+      { "source": "verify", "target": "report" }
+    ]
+  },
+  "layout": {
+    "positions": {
+      "research": { "x": 0, "y": 0 },
+      "review": { "x": 300, "y": 0 },
+      "verify": { "x": 600, "y": 0 },
+      "report": { "x": 900, "y": 0 }
+    }
+  }
+}

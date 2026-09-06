@@ -1,0 +1,19 @@
+[Unit]
+Description=Anchor lease supervisor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Anchor
+Environment=ANCHOR_DATABASE_URL=sqlite:///%h/Anchor/.local/api.sqlite
+Environment=ANCHOR_SUPERVISOR_INTERVAL=10
+Environment=ANCHOR_LEASE_STALE_AFTER=30
+ExecStart=%h/Anchor/.venv/bin/python -m anchor.runtime.supervisor_service
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,21 @@
+{
+  "secret_file": "/home/mansteinl/.codex/auth.json",
+  "models": [
+    {
+      "ref": "models.codex.local",
+      "provider": "rightcode",
+      "model": "gpt-5.6-luna",
+      "base_url": "https://api.a6api.com/v1",
+      "wire_api": "responses",
+      "secret_ref": "OPENAI_API_KEY"
+    }
+  ],
+  "agents": [
+    {
+      "ref": "agents.researcher",
+      "model_ref": "models.codex.local",
+      "instructions": "Work from the durable task objective and return concise, verifiable results."
+    }
+  ],
+  "tools": []
+}

@@ -1,0 +1,20 @@
+[Unit]
+Description=Anchor Verifier worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Anchor
+Environment=ANCHOR_DATABASE_URL=sqlite:///%h/Anchor/.local/api.sqlite
+Environment=ANCHOR_RUNTIME_CONFIG=%h/Anchor/.local/runtime.json
+Environment=ANCHOR_ARTIFACT_ROOT=%h/Anchor/.local/artifacts
+Environment=ANCHOR_VERIFIER_WORKER_ID=anchor-verifier-worker-%H
+ExecStart=%h/Anchor/.venv/bin/python -m anchor.runtime.verifier_service
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

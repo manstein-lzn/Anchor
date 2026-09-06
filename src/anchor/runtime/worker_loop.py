@@ -1,0 +1,39 @@
+"""Long-lived worker loop with explicit liveness and failure semantics."""
+from __future__ import annotations
+import asyncio
+import logging
+from collections.abc import Awaitable, Callable
+from uuid import UUID, uuid4
+from anchor.runtime.worker import AgentNodeWorker
+
+logger = logging.getLogger("anchor.worker")
+PromptFactory = Callable[[UUID, str], Awaitable[tuple[str, str, str, dict]]]
+
+async def run_worker_loop(worker: AgentNodeWorker, *, worker_id: str,
+                          resolve_prompt: PromptFactory, interval: float = 1.0,
+                          stop: asyncio.Event | None = None) -> None:
+    if not worker_id or interval <= 0:
+        raise ValueError("worker_id and positive interval are required")
+    stop = stop or asyncio.Event()
+    instance_id = uuid4()
+    while not stop.is_set():
+        claim_id = uuid4()
+        try:
+            worker.store.record_runtime_heartbeat("agent_worker", instance_id)
+            claim = getattr(worker.store, "claim_ready_agent_node", worker.store.claim_ready_node)
+            lease = claim(worker_id, claim_id)
+            if lease is None:
+                try: await asyncio.wait_for(stop.wait(), timeout=interval)
+                except asyncio.TimeoutError: pass
+                continue
+            agent_ref, prompt, expected_node_id, input_snapshot = await resolve_prompt(lease.run_id, lease.node_id)
+            worker.store.heartbeat_node_lease(claim_id, worker_id)
+            await worker.execute_claimed_once(worker_id=worker_id, agent_ref=agent_ref,
+                                              prompt=prompt, lease=lease,
+                                              expected_node_id=expected_node_id,
+                                              input_snapshot=input_snapshot)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("worker iteration failed; lease requires supervision")
+            await asyncio.sleep(0)

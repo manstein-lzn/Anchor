@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "anchor-agent-product"
+version = "0.1.0.dev0"
+description = "Vendor-neutral runtime foundation for long-running Agent products"
+readme = "README.md"
+requires-python = ">=3.12"
+license = {text = "MIT"}
+dependencies = [
+    "jmespath>=1.0,<2",
+    "pydantic>=2.7,<3",
+    "pydantic-settings>=2.5,<3",
+    "sqlalchemy>=2.0,<2.1",
+    "alembic>=1.13,<2",
+]
+
+[project.optional-dependencies]
+storage = [
+    "psycopg[binary]>=3.2,<4",
+]
+dev = [
+    "pytest>=8,<9",
+    "pytest-asyncio>=0.23,<1",
+    "httpx>=0.27,<1",
+]
+api = [
+    "fastapi>=0.115,<1",
+    "uvicorn[standard]>=0.30,<1",
+]
+pydantic-ai = [
+    "pydantic-ai-slim[openai]>=2.40,<3",
+]
+evals = [
+    "pydantic-evals>=2.40,<3",
+]
+scheduler = [
+    "croniter>=2.0,<7",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+addopts = "-q"
+markers = ["postgres: requires ANCHOR_TEST_POSTGRES_URL pointing to a disposable migrated database"]

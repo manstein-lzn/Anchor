@@ -1,0 +1,20 @@
+name: anchor-storage
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: anchor
+      POSTGRES_USER: anchor
+      POSTGRES_PASSWORD: ${ANCHOR_POSTGRES_PASSWORD:?Set a local database password}
+    ports:
+      - "127.0.0.1:${ANCHOR_POSTGRES_PORT:-55432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U anchor -d anchor"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+volumes:
+  postgres_data:
