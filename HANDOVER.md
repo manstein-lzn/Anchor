@@ -724,9 +724,11 @@ completion gate、API 和 Run Console 已写入，但最新 relational rejection
 持久化协议或向后兼容契约的关键架构决策时再停下来询问用户。
 ```
 
-## 完成审计
+## 完成审计（两级门，ADR-017 时代修订）
 
-只有以下证据全部具备，才可以把 Goal 标记为 `complete`：
+MVP complete 只要求可交付的单机产品闭环；生产门按真实部署触发，不 blocking 交付。
+
+### MVP 门（全部具备即可 complete）
 
 - 全部目标节点类型具有真实、持久化、可恢复的执行或等待语义。
 - 手动、定时、内部事件和 webhook 均能固定不可变 Graph Version 并完成真实闭环。
@@ -735,9 +737,16 @@ completion gate、API 和 Run Console 已写入，但最新 relational rejection
 - 健康 Agent 不被用户难以预测的 `max_*` 预算干预。
 - Tool unknown outcome 绝不自动重试，并具有可用 reconciliation 流程。
 - SQLite/PostgreSQL 协议、迁移、并发领取、事务回滚和重开持久化验收一致。
-- context、memory、artifact、operation、verification、edge decision 和事件证据可追溯，并具有 retention/GC 与 backup/restore 策略。
+- context、memory、artifact、operation、verification、edge decision 和事件证据可追溯。
 - Web Builder/Run Console 的状态全部来自持久化 API，支持用户完成编排、发布、触发、观察和人工处置。
-- production auth、权限边界、必要的 tenant isolation、OpenTelemetry 和部署运维达到 MVP 验收标准。
-- 本文“整个 Goal 尚未完成的能力”已逐项关闭并附有自动化或真实运行证据。
+- worker 长期运行指单机常驻进程的 heartbeat、中断与显式恢复（多主机 rolling restart 移入生产门）。
 
-在此之前，Goal 应保持 active/paused，而不是 complete。
+### 生产门（按真实部署触发，不 blocking MVP complete）
+
+- retention/GC 与 backup/restore 策略。
+- production auth、权限边界、tenant isolation、OpenTelemetry 和部署运维。
+- 多主机、rolling restart、长时间 soak、多租户验收。
+- Prefect/Temporal 等 durable 执行 muscle（现有语义被证明不足时）。
+- MCP/A2A、向量检索、对象存储（出现真实消费者时）。
+
+在此之前，Goal 应保持 active/paused，而不是 complete。MVP 门证据（以本轮为准）：230 后端绿 + PG 162 绿 + 前端 19/e2e 8/8；隔离库真实 E2E（verifier 双路径、loop 迭代退出、tool 网关bwrap）；迁移 head 0011；初始提交 `ef94329`。
