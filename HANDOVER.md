@@ -11,6 +11,7 @@
 - 冻结中：eval 相关 PR 必须先出 `pydantic-evals` 适配 spike（仍有效）。
 - 新环境克隆验证：git clone 到 /tmp 后建 venv、装 `.[dev,storage,api]`、migrate 到 head 0011、抽测通过；缺的只有 `.local`（runtime profile 按 README 从 `examples/runtime.codex.json` 重建，文档已有）。
 - Goal 01a071a8 已按用户授权标为 complete（Codex goals 库）。
+- 深度调研 v2 实战（reviewer 独立角色，真实课题）：3 agent 完成，verifier 以具体理由 rejected（人工审批集成未覆盖、部分来源未核实），Run 按设计失败关闭，证据链完整。这是门在正常工作的证明，不是故障。
 - 深度调研图实战：dev 上发布 `deep-research` v1（Web 可见 scount→analyst→critic→verify→gate→report），Bundle 导出后在隔离库导入（hash 一致），四进程 + 真模型跑通：3 agent + verifier passed + 人工 approve + report terminal，27 事件单调。dev 库因有旧 ready 节点未起共享 worker。
 - PG 对等重验（relational 大改后）：一次性 PG17 上 relational+api+admission+approval 共 156 passed，容器已删。dev API 已重启，waits 端点 live，四服务 active。
 - Tool 节点执行器落地（ADR-018）：control 认领 + 网关调用 + owner_agent + snapshot 参数；拒绝/失败 loud；顺手修了 control/tool 认领与恢复集合混淆（tool lease 永不可走 lease 恢复，supervisor 保持 unknown）。真实 Loop E2E（gpt-5.6-luna 三进程）：迭代 + 退出 + 复活 + terminal，26 事件单调。全量 230 绿。
