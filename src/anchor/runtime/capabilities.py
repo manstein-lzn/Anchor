@@ -23,6 +23,7 @@ class ModelProfile(DomainModel):
     base_url: str | None = Field(default=None, max_length=2000)
     wire_api: str = Field(default="responses", pattern=r"^[a-z][a-z0-9_-]*$")
     secret_ref: str = Field(min_length=1, max_length=200)
+    stream: bool = False
 
 
 class AgentCapability(DomainModel):
@@ -31,6 +32,47 @@ class AgentCapability(DomainModel):
     instructions: str = ""
     tool_refs: list[str] = Field(default_factory=list)
     output_format: str = Field(default="text", pattern=r"^[a-z][a-z0-9_-]*$")
+    # Physical node timeout, not a task lifetime budget. It protects a single
+    # model/tool call from hanging forever; healthy runs may exceed this across
+    # many business cycles. The execution policy controls task-level visibility.
+    timeout_seconds: float = Field(default=600, gt=0, le=3600)
+    # Output repair retries are serialization repair only. They never replay
+    # tools, never invent evidence, and never extend a healthy run's lifetime.
+    output_retries: int = Field(default=0, ge=0, le=2)
+    # Bounded retries for transient model/transport failures. Zero keeps the
+    # legacy default: a failed attempt is recorded and the node stays failed
+    # until an operator or supervisor decides to retry. Academic bundles may
+    # opt into bounded retries explicitly; they are not task-round budgets.
+    max_retries: int = Field(default=0, ge=0, le=5)
+    # Tool execution is separately bounded from model turns. Zero keeps the
+    # legacy unlimited total, while per-tool limits constrain expensive or
+    # rate-limited adapters without coupling policy to prompts.
+    max_tool_calls: int = Field(default=0, ge=0, le=200)
+    max_parallel_tools: int = Field(default=4, ge=1, le=16)
+    tool_call_limits: dict[str, int] = Field(default_factory=dict)
+    # Domain hooks resolved by the composition root; the kernel stays generic.
+    behavior_ref: str | None = Field(default=None, max_length=200)
+    # Deprecated migration shim for pre-behavior profiles. The kernel never
+    # reads it; it only derives behavior_ref when that is absent.
+    academic_role: Literal["planner", "researcher", "reviewer"] | None = None
+
+    @model_validator(mode="after")
+    def derive_behavior_reference(self):
+        if self.behavior_ref is None and self.academic_role:
+            self.behavior_ref = f"academic.{self.academic_role}"
+        return self
+
+    @model_validator(mode="after")
+    def validate_tool_limits(self):
+        if any(not ref or limit < 1 or limit > 200
+               for ref, limit in self.tool_call_limits.items()):
+            raise ValueError("tool_call_limits require nonempty refs and values from 1 to 200")
+        if any(ref not in self.tool_refs for ref in self.tool_call_limits):
+            raise ValueError("tool_call_limits may only reference tools assigned to the agent")
+        if self.max_tool_calls and any(limit > self.max_tool_calls
+                                       for limit in self.tool_call_limits.values()):
+            raise ValueError("per-tool limits cannot exceed max_tool_calls")
+        return self
 
 
 class ToolCapability(DomainModel):
@@ -39,6 +81,14 @@ class ToolCapability(DomainModel):
     side_effect: bool = False
     idempotent: bool = False
     operation_kind: str = Field(default="read", pattern=r"^[a-z][a-z0-9_-]*$")
+    # Evidence shaping for tool results returned to the model. The complete
+    # artifact stays durable; only the model-facing excerpt is bounded.
+    evidence_json: bool = False
+    model_excerpt_chars: int | None = Field(default=None, ge=1, le=200_000)
+    retry_excerpt_chars: int | None = Field(default=None, ge=1, le=200_000)
+    excerpt_list_limit: int = Field(default=10, ge=1, le=1000)
+    # Higher priority evidence is preloaded first when the retry context is bounded.
+    evidence_priority: int = Field(default=0, ge=0, le=100)
 
 
 class VerifierCapability(DomainModel):

@@ -1,8 +1,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ApiError, request } from './api';
+import { ApiError, observeServerTime, request, serverNow } from './api';
 
 afterEach(() => vi.unstubAllGlobals());
 describe('API transport', () => {
+  it('uses the server clock for execution elapsed time', () => {
+    const client = Number(new Date('2026-09-08T01:41:03Z'));
+    observeServerTime('2026-09-08T01:34:25Z', client);
+    expect(serverNow(client + 5000)).toBe(Number(new Date('2026-09-08T01:34:30Z')));
+  });
   it('sends credentials only in the authorization header', async () => {
     const fetch = vi.fn().mockResolvedValue(new Response('{"revision":1}'));
     vi.stubGlobal('fetch', fetch);

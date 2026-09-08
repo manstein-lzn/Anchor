@@ -33,7 +33,15 @@ async def run_worker_loop(worker: AgentNodeWorker, *, worker_id: str,
                                               expected_node_id=expected_node_id,
                                               input_snapshot=input_snapshot)
         except asyncio.CancelledError:
-            raise
+            # A provider/runtime cancellation belongs to this iteration. Do
+            # not take down the long-lived worker; supervision can reconcile
+            # the released or stale lease and the next iteration can claim
+            # other ready nodes. Only an explicit loop stop cancels the
+            # service itself.
+            if stop.is_set():
+                raise
+            logger.exception("worker iteration cancelled; continuing loop")
+            await asyncio.sleep(0)
         except Exception:
             logger.exception("worker iteration failed; lease requires supervision")
             await asyncio.sleep(0)

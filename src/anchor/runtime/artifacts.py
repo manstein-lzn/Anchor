@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from pathlib import Path
+import re
+import tempfile
 from typing import Protocol
+from uuid import UUID
 
 
 class ArtifactStore(Protocol):
@@ -42,3 +46,23 @@ class LocalArtifactStore:
             raise ValueError("artifact integrity check failed")
         return text
 
+    def export_markdown(self, run_id: UUID, node_id: str, text: str) -> Path:
+        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,63}", node_id):
+            raise ValueError("invalid export node id")
+        directory = self.root / "reports" / str(UUID(str(run_id)))
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        destination = directory / f"{node_id}.md"
+        # Publish atomically without replacing an earlier, different artifact.
+        with tempfile.NamedTemporaryFile(dir=directory, delete=False) as temporary:
+            temporary.write(text.encode("utf-8"))
+            temporary.flush()
+            os.fsync(temporary.fileno())
+        try:
+            try:
+                os.link(temporary.name, destination)
+            except FileExistsError:
+                if destination.read_text(encoding="utf-8") != text:
+                    raise ValueError("Markdown export already exists with different content") from None
+        finally:
+            Path(temporary.name).unlink()
+        return destination

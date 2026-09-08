@@ -45,6 +45,8 @@ async def run_control_loop(
 async def serve() -> None:
     from anchor.runtime.settings import AnchorSettings
 
+    from anchor.runtime.academic import register_academic_behaviors
+    from anchor.runtime.behaviors import BehaviorRegistry
     from anchor.runtime.capabilities import CapabilityRegistry
     from anchor.runtime.config import load_runtime_config
     from anchor.runtime.tool_gateway import BubblewrapBackend, SubprocessBackend, ToolGateway
@@ -65,9 +67,12 @@ async def serve() -> None:
     except RuntimeError:
         logger.warning("bubblewrap unavailable; tool execution falls back to dev subprocess")
         backend = SubprocessBackend()
+    behaviors = BehaviorRegistry()
+    register_academic_behaviors(behaviors)
     worker = ControlNodeWorker(
         store, artifacts, ArtifactCheckpointSink(store, artifacts, worker_id),
         tools=ToolGateway(store, registry, artifacts, backend), registry=registry,
+        behaviors=behaviors,
     )
     try:
         await run_control_loop(

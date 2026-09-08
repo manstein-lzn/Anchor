@@ -75,7 +75,15 @@ artifact/context checkpoint，并使用持久化 edge decision 推进条件分�
 独立 verifier worker 只领取 Verifier 节点：确定性 JMESPath 或严格 JSON 模型裁决，
 绑定已校验前驱 artifact 与 context hash，持久化 VerificationRecord，只有 persisted
 passed 才能完成节点并打开下游；rejected/error 直接失败关闭。Run Console“验证证据”
-区域展示裁决、证据引用与哈希。Approval、Wait/HumanTask、Loop 和 Tool 仍需要各自的
+区域展示裁决、证据引用与哈希。
+
+监督进程持续写入进展观察（`GET /api/runs/{run_id}/progress`），并在完整循环重复且
+没有已验证进展时登记可追溯诊断（`GET /api/runs/{run_id}/diagnostics`）。Run Console
+的“诊断”与“进展证据”区域展示这些持久化记录；观察不足不会被显示成失败，重复循环
+也不会自动终止 Run。业务循环次数、节点 attempt（含故障重试）和请求重试是三个独立
+计数，界面不混用。
+
+Approval、Wait/HumanTask、Loop 和 Tool 仍需要各自的
 专用 executor 与持久状态语义。边条件使用 JMESPath，并在发布时检查语法；运行时只接受布尔结果。Run
 Console 的“路由决议”区域展示 selected 状态、求值器版本、上下文哈希和证据引用。
 

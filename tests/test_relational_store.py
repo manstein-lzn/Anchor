@@ -101,6 +101,38 @@ def test_admission_roundtrip_and_duplicate_contract(database):
         reopened.close()
 
 
+def test_recovery_preserves_tool_evidence_and_rejects_old_lease(database):
+    store, url = database
+    _, request = seed(store)
+    receipt = store.admit_run(request)
+    store.accept_dispatch(store.pending_dispatches()[0])
+    lease = store.claim_ready_agent_node("original", uuid4())
+    operation = ToolOperation.register(operation_id=uuid4(), claim_id=lease.claim_id,
+        run_id=lease.run_id, node_run_id=lease.node_run_id, tool_ref="scholarly.search", arguments={"query": "test"})
+    store.register_tool_operation(operation)
+    store.start_tool_operation(operation.operation_id, lease.claim_id)
+    store.finish_tool_operation(operation.operation_id, lease.claim_id,
+                                 status=OperationStatus.SUCCEEDED, result_ref="artifact://sha256/" + "a" * 64)
+    # Upgrade with real dependent evidence, not just an empty schema.
+    command.downgrade(migration_config(url), "0011_decision_attempts")
+    command.upgrade(migration_config(url), "head")
+    store.recover_node_lease(lease.claim_id, reason="worker confirmed stopped")
+    replacement = store.claim_ready_agent_node("replacement", uuid4())
+    assert replacement.node_run_id == lease.node_run_id
+    assert replacement.claim_id != lease.claim_id
+    with pytest.raises(ConcurrencyConflict, match="already released"):
+        store.recover_node_lease(lease.claim_id, reason="stale recovery request")
+    assert store.list_tool_operations(receipt.run_id)[0].claim_id == lease.claim_id
+    assert [item.claim_id for item in store.list_active_leases()] == [replacement.claim_id]
+    with store.engine.connect() as connection:
+        assert connection.scalar(sa.select(sa.func.count()).select_from(s.node_leases)) == 2
+        if store.engine.dialect.name == "sqlite":
+            assert connection.exec_driver_sql("PRAGMA foreign_key_check").all() == []
+    with pytest.raises(RuntimeError, match="lease history"):
+        command.downgrade(migration_config(url), "0011_decision_attempts")
+    store.check_schema()
+
+
 def test_complete_node_propagates_and_completes_terminal_graph(database):
     store, _ = database
     version, request = seed(store)

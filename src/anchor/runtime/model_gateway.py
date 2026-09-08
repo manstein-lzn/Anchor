@@ -55,6 +55,7 @@ class PydanticAIModelGateway:
             from pydantic_ai import Agent
             from pydantic_ai.models.openai import OpenAIChatModel, OpenAIResponsesModel
             from pydantic_ai.providers.openai import OpenAIProvider
+            from openai import AsyncOpenAI
             import httpx2
         except ImportError as exc:  # pragma: no cover - exercised in minimal installs
             raise RuntimeError("install Anchor's pydantic-ai extra to use this gateway") from exc
@@ -67,14 +68,37 @@ class PydanticAIModelGateway:
         # Worker processes must not silently inherit a workstation's proxy or
         # credential environment. Operators can provide an explicit transport
         # when a proxy is genuinely required.
-        self._http_client = httpx2.AsyncClient(trust_env=False)
-        provider = OpenAIProvider(base_url=profile.base_url, api_key=api_key, http_client=self._http_client)
+        # httpx's default read timeout is five seconds. That is too short for
+        # a hosted model's time-to-first-token, especially when the provider is
+        # cold-starting or queueing a request. Keep transport timeouts longer
+        # than node budgets; the worker's per-agent timeout remains the
+        # authoritative execution limit.
+        self._http_client = httpx2.AsyncClient(
+            trust_env=False,
+            timeout=httpx2.Timeout(connect=30.0, read=900.0, write=60.0, pool=30.0),
+        )
+        # Retries belong to the durable node layer, where attempts, backoff and
+        # evidence reuse are observable. The OpenAI SDK otherwise retries each
+        # request twice within a single node attempt and amplifies 60-second
+        # upstream gateway failures into several invisible minutes.
+        self._openai_client = AsyncOpenAI(
+            base_url=profile.base_url, api_key=api_key,
+            http_client=self._http_client, max_retries=0,
+        )
+        provider = OpenAIProvider(openai_client=self._openai_client)
         self._model = model if model is not None else model_type(profile.model, provider=provider)
         self._agent = Agent(self._model, output_type=str)
 
     async def generate(self, *, prompt: str, system_prompt: str = "") -> ModelResponse:
-        result = await self._agent.run(prompt, instructions=system_prompt or None)
-        output = result.output
+        return await self._run_agent(self._agent, prompt=prompt, system_prompt=system_prompt)
+
+    async def _run_agent(self, agent, *, prompt: str, system_prompt: str) -> ModelResponse:
+        if self.profile.stream:
+            async with agent.run_stream(prompt, instructions=system_prompt or None) as result:
+                output = await result.get_output()
+        else:
+            result = await agent.run(prompt, instructions=system_prompt or None)
+            output = result.output
         text = output if isinstance(output, str) else str(output)
         response_id = getattr(result, "response_id", None)
         return ModelResponse(text=text, provider=self.profile.provider, model=self.profile.model,
@@ -96,18 +120,16 @@ class PydanticAIModelGateway:
             entry.__name__ = function.name.replace("-", "_").replace(".", "_")
             entry.__doc__ = function.description or f"Call the {function.name} tool."
             agent.tool_plain(entry)
-        result = await agent.run(prompt, instructions=system_prompt or None)
-        output = result.output
-        text = output if isinstance(output, str) else str(output)
-        response_id = getattr(result, "response_id", None)
-        return ModelResponse(text=text, provider=self.profile.provider, model=self.profile.model,
-                             response_id=response_id)
+        return await self._run_agent(agent, prompt=prompt, system_prompt=system_prompt)
 
     async def close(self) -> None:
-        await self._http_client.aclose()
+        await self._openai_client.close()
 
 
 def build_model_gateway(profile: ModelProfile, secrets: SecretProvider) -> ModelGateway:
-    if profile.provider in {"openai", "openai_compatible", "rightcode"}:
+    # Named gateways such as ZenMux expose the OpenAI-compatible wire
+    # contract; their provider label is still useful for configuration and
+    # diagnostics, so accept it without treating the key as an OpenAI key.
+    if profile.provider in {"openai", "openai_compatible", "rightcode", "zenmux", "a6api", "deepseek"}:
         return PydanticAIModelGateway(profile, secrets)
     raise ValueError(f"unsupported model provider: {profile.provider}")

@@ -59,7 +59,7 @@ def resolve_node_context(
         text = item.output_ref
         if artifacts is not None and text.startswith("artifact://"):
             text = artifacts.get_text(text)
-            if len(text) > PREDECESSOR_TEXT_LIMIT:
+            if node.metadata.get("context_mode") != "full" and len(text) > PREDECESSOR_TEXT_LIMIT:
                 text = text[:PREDECESSOR_TEXT_LIMIT] + (
                     f"\n[truncated:{len(text) - PREDECESSOR_TEXT_LIMIT}-chars]"
                 )

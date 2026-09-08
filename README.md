@@ -66,6 +66,16 @@ this profile on another development machine. Copy it to `.local/runtime.json` an
 adjust only the endpoint, model name, and secret file path; never paste the key
 into this repository.
 
+The academic workflow and the final acceptance run use Pi's DeepSeek model
+`deepseek-v4.1-flash-expires-on-0910` (`provider: deepseek`, Responses API).
+`examples/runtime.deepseek.json` is the credential-free template. The key lives
+in Pi's own model config (`/home/mansteinl/.pi/agent/models.json`); bridge it
+into Anchor's secret file without printing it:
+
+```bash
+.venv/bin/python scripts/import_pi_secrets.py
+```
+
 ```python
 from anchor.runtime.config import load_runtime_config
 from anchor.runtime.secrets import JsonFileSecretProvider
@@ -84,6 +94,17 @@ Agent capability registry entry and worker adapter are configured. The worker
 uses an atomic result sink before a model response can advance a NodeRun, so a
 process interruption leaves durable state recoverable instead of implying
 completion.
+
+Agent capabilities may opt into bounded retries with `max_retries`. Transient
+HTTP 408/429/5xx, connection failures and node timeouts create a new NodeRun
+attempt with exponential backoff while preserving the failed attempt as audit
+evidence. The default is zero for backwards compatibility; production bundles
+may enable bounded retries explicitly. JSON repair retries default to zero;
+they are opt-in via `output_retries` and never replay tools or invent evidence.
+Healthy runs are not terminated by preset round counts, cumulative tool-call
+limits, or wall-clock budgets. The supervisor and adaptive watchdog observe
+liveness and verified progress; repeated identical cycles surface diagnostics
+instead of silent failure.
 
 The development artifact implementation is content-addressed under a local
 directory and returns references such as `artifact://sha256/<digest>`. Artifact
@@ -154,6 +175,13 @@ ANCHOR_DATABASE_URL=sqlite:////home/mansteinl/Anchor/.local/api.sqlite \
 control recovery require explicit operator confirmation through the API/Web Console;
 Tool leases with possible external side effects are never automatically retried.
 
+The supervisor also records durable progress observations and raises a
+deduplicated diagnostic request when a completed cycle repeats without verified
+progress. Inspect them through `GET /api/runs/{run_id}/progress` and
+`GET /api/runs/{run_id}/diagnostics`. A diagnostic is not a failure verdict and
+does not stop the run. `ANCHOR_EXPIRE_RUN_BUDGETS` is the only switch that lets
+the supervisor enforce an explicit graph time budget, and it defaults to false.
+
 Long-term facts can be persisted through `LocalMemoryStore` in `.jsonl` form.
 Records include content hashes and optional Run/NodeRun provenance. Deletion is a
 tombstone operation: normal reads omit deleted facts while audit reads retain the
@@ -175,6 +203,11 @@ database/runtime profile paths explicit. Review the generated unit environment
 before enabling them on a production host.
 
 ## Development
+
+An online academic literature-review graph is available with a
+plan/research/review loop, Crossref/arXiv retrieval, source checks and Markdown
+delivery. See [the academic workflow guide](examples/graphs/academic-research.README.md)
+for installation and topic submission.
 
 ```bash
 cd ~/Anchor

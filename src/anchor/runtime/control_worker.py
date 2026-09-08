@@ -15,6 +15,7 @@ from uuid import UUID, uuid4, uuid5
 from anchor.domain.graph import CONTROL_NODE_TYPES, NodeType
 from anchor.domain.operations import OperationStatus
 from anchor.runtime.artifacts import ArtifactStore
+from anchor.runtime.behaviors import BehaviorRegistry
 from anchor.runtime.resolution import resolve_node_context
 from anchor.runtime.sinks import ArtifactCheckpointSink
 from anchor.runtime.tool_gateway import ToolDenied
@@ -35,12 +36,13 @@ class ControlNodeWorker:
     """Execute Router/Parallel/Join/Artifact nodes without invoking a model."""
 
     def __init__(self, store, artifacts: ArtifactStore, sink: ArtifactCheckpointSink,
-                 tools=None, registry=None) -> None:
+                 tools=None, registry=None, behaviors=None) -> None:
         self.store = store
         self.artifacts = artifacts
         self.sink = sink
         self.tools = tools
         self.registry = registry
+        self.behaviors = behaviors or BehaviorRegistry()
 
     async def execute_once(
         self,
@@ -63,6 +65,39 @@ class ControlNodeWorker:
         if resolved.node.type is NodeType.TOOL:
             return await self.execute_tool_once(worker_id=worker_id, lease=lease,
                                                 resolved=resolved)
+        try:
+            budget = resolved.graph.definition.metadata.get("run_timeout_seconds")
+            if budget is not None:
+                from anchor.domain.models import utc_now
+                run = self.store.get_run(lease.run_id)
+                if (utc_now() - run.created_at).total_seconds() >= float(budget):
+                    raise TimeoutError("Run time budget exhausted")
+            return await self.execute_control_once(worker_id=worker_id, lease=lease, resolved=resolved)
+        except (ValueError, KeyError, TypeError, TimeoutError) as exc:
+            self.store.fail_node_and_propagate(lease.claim_id, worker_id,
+                error_code="execution_budget_exceeded" if isinstance(exc, TimeoutError) else "control_input_invalid",
+                phase="control", input_snapshot=resolved.snapshot)
+            raise
+
+    async def execute_control_once(self, *, worker_id: str, lease, resolved) -> ControlOutcome:
+        behavior_ref = (resolved.node.metadata or {}).get("behavior_ref")
+        if behavior_ref:
+            from anchor.domain.conditions import build_condition_context
+
+            output = self.behaviors.get(behavior_ref).execute_control(
+                resolved.snapshot, store=self.store, artifacts=self.artifacts,
+                run_id=lease.run_id, node_id=lease.node_id)
+            if isinstance(output, str):
+                ref = self.artifacts.put_text(output, media_type="text/markdown")
+                self.artifacts.export_markdown(lease.run_id, lease.node_id, output)
+                self.store.complete_node_and_propagate(
+                    lease.claim_id, worker_id, output_ref=ref, input_snapshot=resolved.snapshot,
+                    condition_context=build_condition_context(output, resolved.snapshot))
+                return ControlOutcome(lease.claim_id, lease.node_run_id, lease.node_id, ref)
+            ref = await self.sink.persist_control_result(
+                claim_id=lease.claim_id, node_run_id=lease.node_run_id,
+                output=output, input_snapshot=resolved.snapshot)
+            return ControlOutcome(lease.claim_id, lease.node_run_id, lease.node_id, ref)
         # A control node's output is its fully resolved, selected input. This
         # is a deterministic checkpoint, not a fabricated model response.
         output_ref = await self.sink.persist_control_result(

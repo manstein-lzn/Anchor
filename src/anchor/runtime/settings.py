@@ -33,6 +33,10 @@ class AnchorSettings(BaseSettings):
     scheduler_interval: float = 5.0
     supervisor_interval: float = 10.0
     lease_stale_after: float = 30.0
+    # Explicit operator budgets are opt-in. When false, the supervisor does
+    # not expire runs based on graph metadata budgets; healthy runs may
+    # continue indefinitely without arbitrary numeric limits.
+    expire_run_budgets: bool = False
     log_level: str = "INFO"
 
     def require_database_url(self) -> str:

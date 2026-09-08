@@ -2,14 +2,25 @@ export class ApiError extends Error {
   constructor(public status: number, message: string) { super(message); }
 }
 
-export async function request<T>(token: string, path: string, method = 'GET', body?: unknown): Promise<T> {
+let serverClockOffsetMs = 0;
+
+export function observeServerTime(value: string | null, receivedAt = Date.now()) {
+  if (!value) return;
+  const observed = Number(new Date(value));
+  if (Number.isFinite(observed)) serverClockOffsetMs = observed - receivedAt;
+}
+
+export function serverNow(receivedAt = Date.now()) { return receivedAt + serverClockOffsetMs; }
+
+export async function request<T>(token: string, path: string, method = 'GET', body?: unknown, headers: Record<string, string> = {}): Promise<T> {
   let response: Response;
   try {
     response = await fetch(path, {
-      method, headers: { Authorization: `Bearer ${token}`, ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) },
+      method, headers: { ...headers, Authorization: `Bearer ${token}`, ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) },
       body: body === undefined ? undefined : JSON.stringify(body),
       signal: AbortSignal.timeout(20000),
     });
+    observeServerTime(response.headers.get('X-Anchor-Server-Time'));
   } catch {
     throw new Error('无法连接 API，或请求确认超时。草稿保留在当前页面，请检查连接后重试。');
   }

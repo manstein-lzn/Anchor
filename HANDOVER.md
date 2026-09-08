@@ -2,7 +2,43 @@
 
 这份文档用于把 `/home/mansteinl/Anchor` 交给新的 Codex session 继续开发。它记录的是当前工作区事实、已经获得的测试证据、尚未验收的改动和下一步执行顺序。新 session 应先用代码、迁移、测试和运行状态核对本文，不要只依赖历史对话。
 
-本次交接核对时间：`2026-09-06 21:45 CST`；Verifier 收尾会话于 `2026-09-06 22:30 CST` 左右完成下述验收并更新本文；架构瘦身会话（同日深夜）完成第一刀、第二刀并更新本文。
+本次交接核对时间：`2026-09-08 22:00 CST`；Verifier 收尾与执行策略会话完成下述验收并更新本文。
+
+## 架构精简（2026-09-08，ADR-021）
+
+- `relational.py` 1599 行/81 方法 → 23 行组合门面 + 6 个按事务边界拆分的 mixin
+  （base/graphs/execution/checkpoints/operations/progress），事务核心仍是同一份。
+- 删除 387 行 `execution_policy.py`（约 300 行零消费者）与重复的
+  `ProgressEvidence`/`DiagnosticRequest` 定义；记录归位 `domain/models.py`。
+- `runtime/propagation.py` → `domain/propagation.py`，`state/`/`domain/` 不再依赖
+  `runtime/`，分层约束成立。
+- 删除重复的 `claim_ready_node` 实现与死代码 `checkpoint_node_result`，提取
+  `_locked_running_node` 消除 lease 守卫重复。
+- 内核不再认识学术领域：新增 `runtime/behaviors.py`（`NodeBehavior` + 注册表），
+  学术策略在 composition root 注册；工具证据裁剪改由 `ToolCapability` 声明。
+- 前端共享类型/标签表收敛到 `execution.ts`，去掉 `any[]`；诊断与进展证据同时显示在
+  Run Console 与图上执行面板。
+- 证据：全量 283 passed + 62 skipped；前端 Vitest 28、Playwright 11/11。
+
+## 执行策略落地（2026-09-08，ADR-019）
+
+- `execution_policy.py` 新增限制分类（transport / resource_capacity / operator_policy /
+task_behavior）、观察状态映射、`ProgressEvidence`、`DiagnosticRequest`、故障分类。
+- 默认解除隐藏上限：`run_timeout_seconds` 与 `max_rounds` 不再有隐含默认值；
+  `ANCHOR_EXPIRE_RUN_BUDGETS` 默认 false；`output_retries` 默认 0。
+- 业务循环、节点 attempt（含故障重试）、请求重试三者计数独立，互不消耗。
+- `watchdog.py` 升级为持久化观察器：写 `progress_evidence`，完整循环重复且无已验证
+  进展时登记去重 `diagnostic_requests`，不终止 Run。
+- 故障恢复计划持久化（migration `0014_recovery_schedule`）：失败 attempt 记录
+  `last_error_class`，新 attempt 记录 `next_attempt_at`；claim 在到期前拒绝；尊重
+  Retry-After；worker 不再进程内 sleep，重启不丢失退避。
+- 新迁移 `0013_progress_evidence` / `0014_recovery_schedule`；新 API
+  `/api/runs/{id}/progress`、`/api/runs/{id}/diagnostics`、`.../diagnostics/{id}/supersede`；
+  Run Console 新增“诊断”和“进展证据”区域。
+- 全量后端 283 passed + 62 skipped；PG 参数组 62 passed；前端 Vitest 28 passed、
+  Vite build 通过、Playwright 11/11 通过（需 `ANCHOR_BROWSER_CHANNEL=chrome`，本机
+  已装的 Playwright 浏览器版本与 1.58 期望的 headless shell 不一致）。
+- 隔离库真实进程 E2E 双路径通过（见下文“真实 Verifier 隔离进程 E2E”）。
 
 ## 架构瘦身（2026-09-06 深夜，用户指令：做高级架构师，瘦身优先）
 
@@ -35,10 +71,10 @@ Goal: 01a071a8-98b8-7591-8035-a9924a336424
 Goal state: paused（用户为切换 session 主动暂停，不是 blocked 或 complete）
 Web: http://127.0.0.1:5173
 API: http://127.0.0.1:8090
-Source migration head: 0010_verification_records
-Local development DB revision: 0009_edge_decisions
+Source migration head: 0014_recovery_schedule
+Local development DB revision: 0014_recovery_schedule
 Model profile: rightcode / gpt-5.6-luna / Responses API
-Current P0: 完成独立 Verifier 的关系型、PostgreSQL、全量和真实进程 E2E 验收
+Current P0: Verifier 与执行策略已验收；下一步按优先级推进 Approval/UI、pause/resume 或 Loop 监督
 First test: .venv/bin/pytest -q tests/test_relational_store.py -m 'not postgres' -x
 ```
 
@@ -58,9 +94,10 @@ Graph Version
 -> downstream NodeRun
 -> terminal Run/Task
 -> Web Run Console
+-> persistent progress evidence + diagnostics
 ```
 
-独立 Verifier 垂直切片的主体代码、迁移、API、Web UI 和专项测试已经写入，但最新 relational contract 修复后的测试被 session 暂停打断，尚未完成 PostgreSQL、全量回归和真实 `verifier_service` 进程 E2E。因此不要把 Verifier 或整个 Goal 标记为完成，也不要重新实现已经验收的 Agent/control 基础闭环。
+独立 Verifier 已完成 SQLite/PostgreSQL/全量/真实进程双路径 E2E 验收；执行策略（ADR-019）已完成限制分类、默认解除隐藏上限、独立计数与持久化进展观察。Agent/control 基础闭环与 Verifier 均已验收，不要重新实现。
 
 ## Goal 与产品目标
 
@@ -123,9 +160,9 @@ Goal 当前是 `paused`。这是用户为了整理和新开 session 主动暂停
 - Web Graph Builder 和来自持久化 API 的真实 Run Console，不显示 synthetic progress。
 - Agent/control 独立进程 E2E，以及 Agent 进程中断、stale assessment、人工恢复证据。
 
-## 当前 P0：独立 Verifier
+## 独立 Verifier（已验收）
 
-Verifier 垂直切片正在收尾。主体实现已写入以下文件：
+Verifier 垂直切片已验收。实现文件：
 
 ```text
 src/anchor/domain/models.py
@@ -137,7 +174,7 @@ src/anchor/runtime/verifier_service.py
 src/anchor/runtime/supervisor.py
 src/anchor/state/protocols.py
 src/anchor/state/schema.py
-src/anchor/state/relational.py
+src/anchor/state/execution.py
 src/anchor/api/app.py
 migrations/versions/0010_verification_records.py
 infra/systemd/anchor-verifier-worker.service
@@ -294,7 +331,7 @@ cd /home/mansteinl/Anchor
   -x
 ```
 
-## Verifier 收尾前必须审查的契约
+## Verifier 契约（已逐项验收）
 
 - `VerificationRecord` identity 必须匹配 claim、run、node_run、node 和 `verifier_ref`。
 - `verified_context_hash` 必须等于同一事务即将持久化的 `ContextSnapshot.input_hash`。
@@ -314,31 +351,20 @@ cd /home/mansteinl/Anchor
 
 ## 迁移和开发数据库状态
 
-本次核对结果：
+本次核对结果（2026-09-08）：
 
 ```text
-Source Alembic head: 0010_verification_records
-/home/mansteinl/Anchor/.local/api.sqlite: 0010_verification_records（收尾会话已迁移）
+Source Alembic head: 0014_recovery_schedule
+/home/mansteinl/Anchor/.local/api.sqlite: 0014_recovery_schedule（已迁移）
 ```
 
-`RelationalStateStore.check_schema()` 新代码已经要求 `0010_verification_records`。本地 API 当前仍返回 HTTP 200，但响应仍是旧进程加载的格式：
+`RelationalStateStore.check_schema()` 接受 `0012_lease_history`、`0013_progress_evidence` 与 `0014_recovery_schedule`。开发库已迁移并重启 API，readiness 当前为：
 
 ```json
-{
-  "status":"ready",
-  "execution_connected":true,
-  "worker_connected":false,
-  "control_worker_connected":false
-}
+{"status":"ready","execution_connected":true,"worker_connected":false,"control_worker_connected":true,"verifier_worker_connected":false}
 ```
 
-收尾会话已迁移开发库并重启 API，readiness 现为：
-
-```json
-{"status":"ready","execution_connected":true,"worker_connected":false,"control_worker_connected":false,"verifier_worker_connected":false}
-```
-
-`verifier_worker_connected:false` 是 worker 未启动时的预期值，不要为把它变 true 而启动 worker 消费旧 Run。
+`worker_connected` / `verifier_worker_connected` 为 false 是共享 worker 未启动时的预期值，不要为把它变 true 而启动 worker 消费旧 Run。
 
 正确顺序：
 
@@ -356,17 +382,17 @@ Source Alembic head: 0010_verification_records
 
 ## 当前服务状态
 
-本次核对时间：`2026-09-06 21:45 CST`。
+本次核对时间：`2026-09-08 22:00 CST`。
 
 ```text
 anchor-api-dev.service                   active / loaded
 anchor-receiver-dev.service              active / loaded
 anchor-web-dev.service                   active / loaded
-anchor-supervisor.service                active / loaded
+anchor-supervisor-dev.service            active / loaded（已重启加载新 watchdog 代码）
+anchor-control-worker-dev.service        active / loaded
 anchor-worker.service                    inactive / user unit not found
-anchor-control-worker.service            inactive / loaded
-anchor-verifier-worker.service           inactive / disabled（收尾会话已安装 unit 文件，保持禁用停止）
-anchor-scheduler.service                 inactive / user unit not found
+anchor-verifier-worker.service           inactive / disabled（unit 已安装，保持禁用停止）
+anchor-scheduler-dev.service             active / loaded
 ```
 
 源码中已有：
@@ -398,25 +424,28 @@ systemctl --user is-active anchor-verifier-worker.service || true
 
 ## 模型与 Secret 配置
 
-当前 `/home/mansteinl/Anchor/.local/runtime.json` profile：
+当前 `/home/mansteinl/Anchor/.local/runtime.json` profile（2026-09-08 起）：
 
 ```text
-provider: rightcode
-model: gpt-5.6-luna
-base_url: https://api.a6api.com/v1
-wire_api: responses
-secret_file: /home/mansteinl/.codex/auth.json
-secret_ref: OPENAI_API_KEY
-agent_ref: agents.researcher
-verifier_ref: verifiers.evidence
-verifier version: v1
-verifier adapter: model
-verifier model_ref: models.codex.local
+models.codex.local  provider=openai_compatible  model=gpt-6-astra
+                    base_url=https://apihub.cwise.dev/v1  secret_ref=OPENAI_API_KEY
+models.deepseek     provider=deepseek
+                    model=deepseek-v4.1-flash-expires-on-0910
+                    base_url=https://api.deepseek.com/v1  wire_api=responses
+                    secret_ref=DEEPSEEK_API_KEY
+secret_file: /home/mansteinl/Anchor/.local/anchor-secrets.json
+academic agents: model_ref=models.deepseek
 ```
 
-绝不打印、复制、转存或提交 `/home/mansteinl/.codex/auth.json` 的内容。不要在诊断命令中输出环境变量或请求 Authorization header。Secret 只能由运行时 `SecretProvider` 读取。
+最终验收按用户指令改用 Pi 的 DeepSeek 模型（调用方式在
+`/home/mansteinl/.pi/agent/models.json`，provider `DeepSeek`，OpenAI Responses API），
+不再使用 A6API。桥接脚本：`scripts/import_pi_secrets.py`（只写 secret ref，不打印 key）；
+模板：`examples/runtime.deepseek.json`。已实测：`gateway.generate` 返回 `OK`，
+`generate_with_tools` 能完成一次真实工具调用。
 
-`gpt-5.6-sol` 此前不稳定；真实 E2E 继续使用已经验证可用的 `gpt-5.6-luna`。模型错误不得被测试桩或普通文本改写为成功。
+绝不打印、复制、转存或提交任何 key（`.codex/auth.json`、`.pi/agent/models.json`、
+`.local/anchor-secrets.json`）。不要在诊断命令中输出环境变量或请求 Authorization
+header。Secret 只能由运行时 `SecretProvider` 读取。模型错误不得被测试桩或普通文本改写为成功。
 
 ## 代码地图
 
@@ -433,17 +462,28 @@ State、migration 和协议：
 
 ```text
 src/anchor/state/protocols.py
-src/anchor/state/relational.py
+src/anchor/state/base.py        # 事务/锁/事件/心跳核心
+src/anchor/state/graphs.py      # draft/version/trigger/admission/outbox/inbox
+src/anchor/state/execution.py   # node/lease/claim/verification/edge decision
+src/anchor/state/checkpoints.py # completion/failure/retry tail + waits
+src/anchor/state/operations.py  # tool operation ledger
+src/anchor/state/progress.py    # progress evidence + diagnostics
+src/anchor/state/relational.py  # 组合门面（对外 API）
 src/anchor/state/schema.py
 migrations/versions/0007_webhook_secret.py
 migrations/versions/0008_context_snapshots.py
 migrations/versions/0009_edge_decisions.py
 migrations/versions/0010_verification_records.py
+migrations/versions/0011_decision_attempts.py
+migrations/versions/0012_lease_history.py
+migrations/versions/0013_progress_evidence.py
+migrations/versions/0014_recovery_schedule.py
 ```
 
 Runtime：
 
 ```text
+src/anchor/runtime/behaviors.py     # NodeBehavior 接口 + 引用注册表
 src/anchor/runtime/capabilities.py
 src/anchor/runtime/config.py
 src/anchor/runtime/secrets.py
@@ -465,8 +505,8 @@ src/anchor/runtime/artifacts.py
 src/anchor/runtime/sinks.py
 src/anchor/runtime/context.py
 src/anchor/runtime/memory.py
-src/anchor/runtime/propagation.py
 src/anchor/runtime/resolution.py
+src/anchor/domain/propagation.py    # 纯领域传播逻辑（已从 runtime 归位）
 ```
 
 API 和 Web：
@@ -526,7 +566,7 @@ systemctl --user is-active \
 
 不要先迁移 `.local/api.sqlite`，不要启动常驻 Agent/control/Verifier worker 或 scheduler，也不要用开发库做真实执行验收。
 
-## Verifier 收尾执行顺序
+## Verifier 验收执行顺序（已执行）
 
 严格按以下顺序推进并记录真实输出：
 
@@ -534,15 +574,15 @@ systemctl --user is-active \
 2. 检查 `tests/test_relational_store.py` 中按 `run_id` 选择 rejection dispatch 的修改没有误改其他测试。
 3. 运行 Verifier、API、admission、capability、config、supervisor、SQLite state 相关 Python 测试。
 4. 启动一次性 PostgreSQL 17 容器，不复用任何未知数据库。
-5. 在迁移到 `0010` 的一次性 PostgreSQL 上运行 `tests/test_relational_store.py` 和 `tests/test_api.py`，确认 PostgreSQL 参数组实际执行而非全部 skipped。
+5. 在迁移到 head 的一次性 PostgreSQL 上运行 `tests/test_relational_store.py` 和 `tests/test_api.py`，确认 PostgreSQL 参数组实际执行而非全部 skipped。
 6. 删除一次性 PostgreSQL 容器并确认测试端口释放。
 7. 运行完整非 PostgreSQL Python suite。
 8. 运行 `pip check`、`compileall` 和 `git diff --check`。
 9. 运行前端 unit、build 和 Playwright。
-10. 使用新建 `/tmp` 隔离库运行真实独立 `worker_service` + `verifier_service` 进程 E2E。
+10. 使用新建 `/tmp` 隔离库运行真实独立 `worker_service` + `verifier_service` + `control_service` 进程 E2E。
 11. 核验 artifact/context/verification/event/downstream/terminal state 全部来自 canonical 持久化结果，并终止所有隔离进程。
 12. 更新 `DECISIONS.md`、`STATUS.md`、`API.md`、`WEB.md`、`README.md` 和本文。
-13. 迁移 `.local/api.sqlite` 从 `0009` 到 `0010`。
+13. 迁移 `.local/api.sqlite` 到当前 head。
 14. 重启并核验 API/Web，readiness 应包含 Verifier 字段。
 15. 安装但不要 enable/start Verifier user systemd unit。
 
@@ -565,6 +605,8 @@ npm run test:e2e
 
 Verifier 收尾会话取得的新证据（2026-09-06 深夜）：relational SQLite contract 25 passed；一次性 PostgreSQL 17（`postgres:17`，`127.0.0.1:55433`，已删除）上 `test_relational_store + test_api` 110 passed，relational 单文件 50 passed（SQLite 25 + PG 25，双组都执行）；全量非 PG 套件 170 passed + 55 skipped；`pip check`、`compileall`、`git diff --check` 通过；前端 Vitest 19 passed、Vite build 通过；Playwright 曾出现 1 failed（`real API lifecycle` 在发布处收不到“已发布 v1”），根因是 Verifier P0 新增发布时能力校验后，一次性 e2e API 的 runtime 缺少 `verifiers.evidence`，已在 `scripts/web_test_api.py` 补 model-adapter 测试配置，之后 Playwright 8/8 通过。真实隔离进程 E2E（`/tmp/anchor-verifier-e2e-dDpUDd`，已保留供核查后可删）：`Agent produce -> Verifier verify -> Artifact report`，Run `0738fd2d-a929-4fb3-b145-f033b7238018` COMPLETED，produce artifact 正文 `OK`，VerificationRecord 为 `passed` 且 evidence 与 verify 节点 output 一致，`verified_context_hash` 与 gen2 snapshot 一致，run stream 16 事件单调且 `verification.decided` 先于 `node.completed`；rejection Run `495e58bd-339a-4b79-a3ac-1a5bef7cbe0b` 按预期 `failed`（verify rejected，report 保持 pending，无下游打开）。隔离 receiver/agent/verifier/control 进程已全部终止并确认无残留；期间误杀的瞬时 `anchor-receiver-dev.service` 已按原方式重建，readiness `execution_connected:true` 已恢复。
 
+执行策略会话取得的新证据（2026-09-08）：`tests/test_execution_policy.py` 14 passed；`tests/test_watchdog.py` 5 passed；全量 293 passed + 62 skipped；一次性 PostgreSQL 17（`postgres:17`，`127.0.0.1:55433`，已删除）上 `test_relational_store + test_api` PostgreSQL 参数组 62 passed；`pip check`、`compileall`、`git diff --check` 通过；前端 Vitest 28 passed、Vite build 通过、Playwright 11/11 通过（需 `ANCHOR_BROWSER_CHANNEL=chrome`）；隔离库真实进程 E2E 见上文双路径证据；`.local/api.sqlite` 已迁移至 `0014_recovery_schedule`，API 已重启，readiness 正常；一次性 PG 容器已删除，55433 端口已释放。
+
 ### PostgreSQL 验收要求
 
 先检查本机容器运行时和已有容器，不要复用未知数据库。创建一次性 PostgreSQL 17 容器、选择独立端口、迁移到 head，并设置：
@@ -585,6 +627,31 @@ ANCHOR_TEST_POSTGRES_URL=<disposable-postgres-url> \
 验收输出必须显示 SQLite 和 PostgreSQL 参数组都执行。测试完成后删除一次性容器并确认没有残留监听端口或测试数据库进程。
 
 ## 真实 Verifier 隔离进程 E2E
+
+已验收（2026-09-08）。可复现脚本：`scripts/verifier_e2e_setup.sh` 建立全新
+`/tmp/anchor-verifier-e2e-XXXXXX` 隔离库、两个 Graph（pass 与 reject）并 dispatch；
+随后分别用相同 `ANCHOR_ARTIFACT_ROOT` 启动 agent / verifier / control 三个真实进程。
+
+本轮证据（`/tmp/anchor-verifier-e2e-IvrgOI`）：
+
+```text
+PASS   run feffb3bf-6a17-4f71-8562-7fdc16f4c037  COMPLETED
+       produce artifact://sha256/565339bc…  (content "OK", integrity read OK)
+       verify  passed, evidence == verify.output_ref
+       verified_context_hash == gen snapshot input_hash
+       verified_artifact_hashes == produce digest
+       events: verification.decided(#9) -> node.completed(#10) -> node.ready(#12)
+       report/Run/Task 均 completed；claim 分别为 agent/verifier/control
+REJECT run ddd9c564-f589-4312-b390-71aa847e4c40  FAILED
+       verify failed(verification_rejected)，VerificationRecord 已持久化
+       report 保持 pending，无下游 ready
+       events: verification.decided -> node.failed -> run.failed
+reopen store 后两个 run 的 VerificationRecord 均完整保留
+```
+
+三个隔离进程已全部终止并确认无残留；共享 dev control worker 保持运行。
+
+### 历史验收要点（仍适用）
 
 必须使用全新 `/tmp` 目录：
 
@@ -684,7 +751,7 @@ P2 backup/restore + multi-host/rolling restart/long-running acceptance
 - Approval、HumanTask 和 WaitForEvent 的 durable wait/resume。
 - 完整 ToolGateway、真实工具执行、schema validation、permission/approval 和 MCP。
 - pause/resume/cancel。
-- Loop executor、progress signal、deadlock/repeated-loop/non-progress detection。
+- Loop executor 的进度信号与死锁检测已具备持久化观察与诊断；自动修复、死锁自动处置仍未实现。
 - A2A。
 - 长期 context compaction、memory conflict policy 和 vector retrieval。
 - PostgreSQL memory/artifact projection。
@@ -710,23 +777,20 @@ Goal 不能仅因为 Agent/control E2E、Verifier 单元测试、一次模型成
 .local/api.sqlite；真实执行必须使用新建 /tmp 隔离数据库。
 
 Agent/control durable execution、conditional propagation、edge decisions、skipped、
-join 和 context snapshots 已完成，不要重新实现。当前 P0 是收尾独立 Verifier：
-主体代码、0010 migration、typed claim、deterministic/model adapter、evidence record、
-completion gate、API 和 Run Console 已写入，但最新 relational rejection contract
-修复后的重跑被暂停。
+join、context snapshots、独立 Verifier（0010）与执行策略（0013，ADR-019）已完成并
+验收，不要重新实现。
 
 第一条测试运行：
 .venv/bin/pytest -q tests/test_relational_store.py -m 'not postgres' -x
 
-通过后继续 PostgreSQL contract、全量 Python、前端 unit/build/Playwright 和全新
-/tmp 隔离库中的真实 verifier_service 进程 E2E。只有这些证据通过后，才迁移
-.local/api.sqlite 从 0009 到 0010、重启 API、安装但不启用 Verifier user unit，
-并更新 DECISIONS/STATUS/API/WEB/README/HANDOVER。
+下一步优先级（ADR-019 后）：Approval/HumanTask/Wait 的完整 Web 操作面、pause/resume/
+cancel、ToolGateway/MCP 与审批门、Loop 诊断的自动修复能力（需显式 capability 授权）。
 
-保持核心语义：正常 Agent 不依赖 max_* 预算；Tool outcome_unknown 不盲目重试；
-外部副作用先写 ledger；lease 只能人工确认恢复；Verifier 只有结构化、持久化且
-绑定 artifact/context hash 的 passed verdict 才能完成并传播。遇到改变状态机、
-持久化协议或向后兼容契约的关键架构决策时再停下来询问用户。
+保持核心语义：正常 Agent 不依赖 max_* 预算；默认无隐藏轮数/时长上限；业务循环、
+节点 attempt 与请求重试计数独立；无进展只是未知，重复循环只触发诊断；Tool
+outcome_unknown 不盲目重试；外部副作用先写 ledger；lease 只能人工确认恢复；
+Verifier 只有结构化、持久化且绑定 artifact/context hash 的 passed verdict 才能完成
+并传播。遇到改变状态机、持久化协议或向后兼容契约的关键架构决策时再停下来询问用户。
 ```
 
 ## 完成审计（两级门，ADR-017 时代修订）
@@ -754,4 +818,4 @@ MVP complete 只要求可交付的单机产品闭环；生产门按真实部署�
 - Prefect/Temporal 等 durable 执行 muscle（现有语义被证明不足时）。
 - MCP/A2A、向量检索、对象存储（出现真实消费者时）。
 
-在此之前，Goal 应保持 active/paused，而不是 complete。MVP 门证据（以本轮为准）：230 后端绿 + PG 162 绿 + 前端 19/e2e 8/8；隔离库真实 E2E（verifier 双路径、loop 迭代退出、tool 网关bwrap）；迁移 head 0011；初始提交 `ef94329`。
+在此之前，Goal 应保持 active/paused，而不是 complete。MVP 门证据（以本轮为准）：283 后端绿 + 62 skipped，PG 参数组 62 绿，前端 Vitest 28、Playwright 11/11；隔离库真实进程 E2E 双路径（Verifier pass/reject）；迁移 head `0014_recovery_schedule`。

@@ -10,7 +10,7 @@ from anchor.domain.context import canonical_json
 from anchor.domain.models import VerificationRecord, VerificationVerdict
 from anchor.runtime.artifacts import ArtifactStore
 from anchor.runtime.model_gateway import ModelResponse
-from anchor.runtime.propagation import RoutingDecisionError
+from anchor.domain.propagation import RoutingDecisionError
 from anchor.state.protocols import StateStore
 
 

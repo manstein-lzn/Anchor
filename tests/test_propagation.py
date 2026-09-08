@@ -2,7 +2,7 @@ from uuid import uuid4
 
 from anchor.domain.graph import GraphDefinition, GraphEdge, GraphNode, GraphVersion
 from anchor.domain.models import EdgeDecisionReason, NodeRun, NodeRunStatus
-from anchor.runtime.propagation import decide_outgoing_edges, plan_propagation, plan_ready_nodes
+from anchor.domain.propagation import decide_outgoing_edges, plan_propagation, plan_ready_nodes
 
 
 def version():

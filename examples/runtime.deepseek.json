@@ -1,0 +1,21 @@
+{
+  "secret_file": ".local/anchor-secrets.json",
+  "models": [
+    {
+      "ref": "models.deepseek",
+      "provider": "deepseek",
+      "model": "deepseek-v4.1-flash-expires-on-0910",
+      "base_url": "https://api.deepseek.com/v1",
+      "wire_api": "responses",
+      "secret_ref": "DEEPSEEK_API_KEY"
+    }
+  ],
+  "agents": [
+    {
+      "ref": "agents.researcher",
+      "model_ref": "models.deepseek",
+      "instructions": "Work from the durable task objective and return concise, verifiable results."
+    }
+  ],
+  "tools": []
+}

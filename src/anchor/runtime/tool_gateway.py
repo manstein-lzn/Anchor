@@ -18,6 +18,7 @@ v1 rules:
 from __future__ import annotations
 
 import logging
+import json
 import shutil
 import subprocess
 import tempfile
@@ -33,6 +34,9 @@ from anchor.domain.operations import OperationStatus, ToolOperation
 from anchor.runtime.artifacts import ArtifactStore
 from anchor.state.errors import OperationConflict
 from anchor.runtime.capabilities import CapabilityRegistry, CapabilityRegistryError
+from anchor.runtime.research_tools import (
+    RESEARCH_TOOLS, ResearchRequest, ResearchToolError, execute_research,
+)
 
 
 logger = logging.getLogger("anchor.tool_gateway")
@@ -97,7 +101,6 @@ class BubblewrapBackend:
                 "--proc", "/proc", "--dev", "/dev",
                 "--chdir", WORKSPACE_MOUNT,
                 "--setenv", "TMPDIR", WORKSPACE_MOUNT,
-                "--clearenv",
                 "--setenv", "PATH", "/usr/bin:/bin",
                 "--setenv", "HOME", WORKSPACE_MOUNT,
                 "--", *argv,
@@ -105,7 +108,7 @@ class BubblewrapBackend:
             try:
                 completed = subprocess.run(
                     cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                    timeout=timeout_seconds, check=False)
+                    timeout=timeout_seconds, check=False, env={})
             except subprocess.TimeoutExpired as exc:
                 return SandboxResult(returncode=124, stdout=_capped(exc.stdout or b""),
                                      stderr=_capped(exc.stderr or b""), timed_out=True)
@@ -195,23 +198,36 @@ class ToolGateway:
         if tool.side_effect:
             raise ToolDenied("approval_required",
                              f"side-effect tool {tool_ref} needs tool-level approval (pending)")
+        if not isinstance(arguments, dict):
+            raise ToolDenied("invalid_arguments", "tool arguments must be an object")
         for key in arguments:
             lowered = key.lower()
             if any(hint in lowered for hint in _SECRET_KEY_HINTS):
                 raise ToolDenied("credential_in_arguments",
                                  "credentials must use the secret mechanism, never arguments")
-        if not isinstance(arguments, dict):
-            raise ToolDenied("invalid_arguments", "tool arguments must be an object")
         try:
-            call = ToolCall.model_validate(arguments)
+            call = (ResearchRequest.model_validate(arguments) if tool_ref in RESEARCH_TOOLS
+                    else ToolCall.model_validate(arguments))
         except ValueError as exc:
             raise ToolDenied("invalid_arguments", f"tool arguments rejected: {exc}") from None
-        argv = self._build_argv(tool_ref, call)
+        argv = None if tool_ref in RESEARCH_TOOLS else self._build_argv(tool_ref, call)
 
         operation = ToolOperation.register(
             operation_id=operation_id, claim_id=lease.claim_id,
             node_run_id=lease.node_run_id, run_id=lease.run_id,
             tool_ref=tool_ref, arguments=arguments)
+        # A model retry gets a new NodeRun/lease, but an identical successful
+        # read operation in the same Run is already durable evidence. Reuse
+        # it before registering a second network request. Failed reads are
+        # intentionally not reused so transient 429/5xx errors can recover.
+        prior_node_ids = {str(node.id): node.node_id for node in self.store.list_node_runs(lease.run_id)}
+        for prior in self.store.list_tool_operations(lease.run_id):
+            if (prior_node_ids.get(str(prior.node_run_id)) == lease.node_id
+                    and prior.tool_ref == tool_ref
+                    and prior.request_hash == operation.request_hash
+                    and prior.status is OperationStatus.SUCCEEDED):
+                return ToolCallResult(operation_id=operation_id, status=prior.status,
+                                      result_ref=prior.result_ref, error_code=prior.error_code)
         try:
             stored = self.store.register_tool_operation(operation)
         except OperationConflict:
@@ -227,7 +243,38 @@ class ToolGateway:
             return ToolCallResult(operation_id=operation_id, status=stored.status,
                                   result_ref=stored.result_ref, error_code=stored.error_code)
         self.store.start_tool_operation(operation_id, lease.claim_id)
-        result = self.backend.run(argv, timeout_seconds=timeout_seconds)
+        if tool_ref in RESEARCH_TOOLS:
+            try:
+                text = execute_research(tool_ref, call, timeout_seconds=timeout_seconds)
+                result = SandboxResult(0, text.encode("utf-8"), b"", False)
+            except ResearchToolError as exc:
+                failure_ref = self.artifacts.put_text(json.dumps({
+                    "error": str(exc), "error_code": exc.code,
+                    "retryable": exc.retryable, "tool": tool_ref,
+                    "evidence_available": False,
+                }), media_type="application/json")
+                finished = self.store.finish_tool_operation(
+                    operation_id, lease.claim_id, status=OperationStatus.FAILED,
+                    result_ref=failure_ref, error_code=exc.code)
+                logger.warning("tool %s failed [%s]: %s", tool_ref, exc.code, exc)
+                return ToolCallResult(operation_id=operation_id, status=finished.status,
+                                      result_ref=finished.result_ref,
+                                      error_code=finished.error_code)
+            except Exception as exc:
+                failure_ref = self.artifacts.put_text(json.dumps({
+                    "error": str(exc), "error_code": "retrieval_failed",
+                    "retryable": False, "tool": tool_ref,
+                    "evidence_available": False,
+                }), media_type="application/json")
+                finished = self.store.finish_tool_operation(
+                    operation_id, lease.claim_id, status=OperationStatus.FAILED,
+                    result_ref=failure_ref, error_code="retrieval_failed")
+                logger.warning("tool %s failed [retrieval_failed]: %s", tool_ref, exc)
+                return ToolCallResult(operation_id=operation_id, status=finished.status,
+                                      result_ref=finished.result_ref,
+                                      error_code=finished.error_code)
+        else:
+            result = self.backend.run(argv, timeout_seconds=timeout_seconds)
         if result.timed_out:
             finished = self.store.finish_tool_operation(
                 operation_id, lease.claim_id, status=OperationStatus.FAILED,
@@ -235,15 +282,22 @@ class ToolGateway:
             return ToolCallResult(operation_id=operation_id, status=finished.status,
                                   error_code=finished.error_code)
         if result.returncode != 0:
+            failure_ref = None
+            if tool_ref in RESEARCH_TOOLS:
+                failure_ref = self.artifacts.put_text(json.dumps({
+                    "error": result.stderr.decode("utf-8", "replace")[-1000:],
+                    "tool": tool_ref, "evidence_available": False,
+                }), media_type="application/json")
             finished = self.store.finish_tool_operation(
                 operation_id, lease.claim_id, status=OperationStatus.FAILED,
-                error_code=f"exit_{result.returncode}")
+                result_ref=failure_ref, error_code=f"exit_{result.returncode}")
             logger.warning("tool %s exited %s: %s", tool_ref, result.returncode,
                            result.stderr.decode("utf-8", "replace")[-500:])
             return ToolCallResult(operation_id=operation_id, status=finished.status,
-                                  error_code=finished.error_code)
+                                  result_ref=finished.result_ref, error_code=finished.error_code)
         text = result.stdout.decode("utf-8", "replace")
-        ref = self.artifacts.put_text(text, media_type="text/plain")
+        ref = self.artifacts.put_text(
+            text, media_type="application/json" if tool_ref in RESEARCH_TOOLS else "text/plain")
         finished = self.store.finish_tool_operation(
             operation_id, lease.claim_id, status=OperationStatus.SUCCEEDED,
             result_ref=ref)

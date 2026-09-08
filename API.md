@@ -121,6 +121,25 @@ completed those operations.
 `control_worker_connected` and `verifier_worker_connected` heartbeat states. Heartbeat freshness detects process
 connectivity; it is not an Agent lifetime, step, token, cost, or completion budget.
 
+## Progress and diagnostics
+
+The supervisor records immutable progress observations and raises a durable
+diagnostic request when a completed cycle repeats without verified progress.
+Neither is a failure verdict; healthy work continues while the evidence is
+inconclusive.
+
+```http
+GET  /api/runs/{run_id}/progress
+GET  /api/runs/{run_id}/diagnostics
+POST /api/runs/{run_id}/diagnostics/{diagnostic_id}/supersede
+```
+
+`progress` returns the persisted `ProgressEvidence` stream (state revision, phase,
+artifact refs, verifier passes, tool operation ids, cycle fingerprint). `diagnostics`
+returns only open requests; the supersede endpoint records an operator decision
+without changing Run state. Counters are deliberately separate: business cycles,
+node attempts (including fault retries) and request retries must not be conflated.
+
 ## Verification
 
 `tests/test_api.py` runs against migrated SQLite and isolated PostgreSQL schemas,

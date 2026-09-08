@@ -6,6 +6,7 @@ ledger with store-level leases only — no worker wiring yet by design.
 """
 
 import asyncio
+import json
 import shutil
 from uuid import uuid4
 
@@ -176,6 +177,33 @@ def test_timeout_fails_closed_without_success(tmp_path):
         store.close()
 
 
+def test_research_failure_keeps_structured_error_code(tmp_path, monkeypatch):
+    from anchor.runtime import tool_gateway as module
+    from anchor.runtime.research_tools import ResearchToolError
+
+    store, artifacts, _, lease = leased(tmp_path)
+    try:
+        scholarly_registry = CapabilityRegistry(
+            agents=[AgentCapability(ref="agents.reader", model_ref="models.test",
+                                    tool_refs=["scholarly.search"])],
+            tools=[ToolCapability(ref="scholarly.search", side_effect=False,
+                                  idempotent=True, operation_kind="read")],
+        )
+        monkeypatch.setattr(module, "execute_research", lambda *a, **kw: (_ for _ in ()).throw(
+            ResearchToolError("source_rate_limited", "HTTP 429", retryable=True)))
+        gw = ToolGateway(store, scholarly_registry, artifacts, SubprocessBackend())
+        result = gw.execute(lease, agent_ref="agents.reader", tool_ref="scholarly.search",
+                            arguments={"query": "test"}, operation_id=uuid4())
+        assert result.status is OperationStatus.FAILED
+        assert result.error_code == "source_rate_limited"
+        evidence = json.loads(artifacts.get_text(result.result_ref))
+        assert evidence == {"error": "HTTP 429", "error_code": "source_rate_limited",
+                            "retryable": True, "tool": "scholarly.search",
+                            "evidence_available": False}
+    finally:
+        store.close()
+
+
 def test_real_sleep_timeout_is_killed(tmp_path):
     backend = SubprocessBackend()
     result = backend.run(["/bin/sleep", "30"], timeout_seconds=1)
@@ -190,6 +218,18 @@ def test_bwrap_root_is_read_only_but_workspace_is_writable():
     ok = backend.run(["/bin/sh", "-c", "echo hi > /tmp/out.txt && cat /tmp/out.txt"],
                      timeout_seconds=10)
     assert ok.returncode == 0 and ok.stdout == b"hi\n"
+
+
+@bwrap_only
+def test_bwrap_scrubs_parent_environment(monkeypatch):
+    monkeypatch.setenv("ANCHOR_SANDBOX_TEST_SECRET", "must-not-be-inherited")
+    result = BubblewrapBackend().run(["/usr/bin/env"], timeout_seconds=10)
+    assert result.returncode == 0
+    environment = dict(line.split("=", 1) for line in result.stdout.decode().splitlines())
+    assert "ANCHOR_SANDBOX_TEST_SECRET" not in environment
+    assert environment["PATH"] == "/usr/bin:/bin"
+    assert environment["HOME"] == "/tmp"
+    assert environment["TMPDIR"] == "/tmp"
 
 
 @bwrap_only

@@ -116,6 +116,17 @@ class GraphDefinition(GraphModel):
     entry_node_id: str | None = None
     metadata: dict[str, str] = Field(default_factory=dict)
 
+    @model_validator(mode="after")
+    def validate_execution_budgets(self):
+        # Optional operator policy only. Absence means unbounded; these are not
+        # required fields and must never be silently defaulted by the runtime.
+        for key, maximum in (("run_timeout_seconds", 86400), ("max_rounds", 100)):
+            if key in self.metadata:
+                value = int(self.metadata[key])
+                if not 1 <= value <= maximum:
+                    raise ValueError(f"{key} must be between 1 and {maximum}")
+        return self
+
     def resolved_entry_node_id(self) -> str:
         """Return the explicit entry or the only structural root.
 

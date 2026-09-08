@@ -50,8 +50,11 @@ node_runs = sa.Table("node_runs", metadata,
     sa.Column("node_id", sa.String(64), nullable=False), sa.Column("status", sa.String(32), nullable=False),
     sa.Column("attempt", sa.Integer, nullable=False), sa.Column("revision", sa.Integer, nullable=False),
     sa.Column("input_hash", sa.Text), sa.Column("output_ref", sa.Text), sa.Column("error_code", sa.Text),
+    sa.Column("last_error_class", sa.String(64)),
+    sa.Column("next_attempt_at", sa.DateTime(timezone=True)),
     sa.Column("context_generation", sa.Integer, nullable=False), timestamp("created_at"), timestamp("updated_at"),
     sa.UniqueConstraint("run_id", "node_id", "attempt"))
+sa.Index("ix_node_runs_next_attempt_at", node_runs.c.status, node_runs.c.next_attempt_at)
 
 edge_decisions = sa.Table("edge_decisions", metadata,
     identifier("run_id", sa.ForeignKey(runs.c.id), primary_key=True),
@@ -130,7 +133,7 @@ runtime_heartbeats = sa.Table("runtime_heartbeats", metadata,
 
 node_leases = sa.Table("node_leases", metadata,
     identifier("claim_id", primary_key=True),
-    identifier("node_run_id", sa.ForeignKey(node_runs.c.id), nullable=False, unique=True),
+    identifier("node_run_id", sa.ForeignKey(node_runs.c.id), nullable=False),
     identifier("run_id", sa.ForeignKey(runs.c.id), nullable=False),
     sa.Column("node_id", sa.String(64), nullable=False),
     sa.Column("worker_id", sa.String(128), nullable=False),
@@ -138,6 +141,9 @@ node_leases = sa.Table("node_leases", metadata,
     sa.Column("released_at", sa.DateTime(timezone=True)))
 sa.Index("ix_node_leases_worker_id", node_leases.c.worker_id)
 sa.Index("ix_node_leases_run_id", node_leases.c.run_id)
+sa.Index("uq_node_leases_active", node_leases.c.node_run_id, unique=True,
+         sqlite_where=node_leases.c.released_at.is_(None),
+         postgresql_where=node_leases.c.released_at.is_(None))
 
 tool_operations = sa.Table("tool_operations", metadata,
     identifier("operation_id", primary_key=True),
@@ -164,3 +170,37 @@ draft_publications = sa.Table("draft_publications", metadata,
     sa.Column("graph_id", sa.String(128), sa.ForeignKey(graph_drafts.c.graph_id), primary_key=True),
     sa.Column("draft_revision", sa.Integer, primary_key=True),
     identifier("graph_version_id", sa.ForeignKey(graph_versions.c.graph_version_id), nullable=False, unique=True))
+
+progress_evidence = sa.Table("progress_evidence", metadata,
+    identifier("evidence_id", primary_key=True),
+    identifier("run_id", sa.ForeignKey(runs.c.id), nullable=False),
+    identifier("node_run_id", sa.ForeignKey(node_runs.c.id), nullable=True),
+    sa.Column("state_revision", sa.Integer, nullable=False),
+    sa.Column("phase", sa.String(100), nullable=False),
+    sa.Column("artifact_refs", json_type, nullable=False, server_default="[]"),
+    sa.Column("verifier_passes", sa.Integer, nullable=False, server_default="0"),
+    sa.Column("hypothesis_hash", sa.String(64)),
+    sa.Column("tool_operation_ids", json_type, nullable=False, server_default="[]"),
+    timestamp("heartbeat_at"),
+    sa.Column("waiting_for", sa.String(200)),
+    sa.Column("worker_expected", sa.Boolean, nullable=False, server_default=sa.text("true")),
+    sa.Column("verified_progress_refs", json_type, nullable=False, server_default="[]"),
+    sa.Column("cycle_iteration", sa.Integer, nullable=False, server_default="0"),
+    sa.Column("cycle_fingerprint", sa.String(64)),
+    timestamp("created_at"))
+sa.Index("ix_progress_evidence_run_id", progress_evidence.c.run_id)
+sa.Index("ix_progress_evidence_run_revision", progress_evidence.c.run_id, progress_evidence.c.state_revision)
+
+diagnostic_requests = sa.Table("diagnostic_requests", metadata,
+    identifier("diagnostic_id", primary_key=True),
+    identifier("run_id", sa.ForeignKey(runs.c.id), nullable=False),
+    identifier("node_run_id", sa.ForeignKey(node_runs.c.id)),
+    sa.Column("reason", sa.Text, nullable=False),
+    sa.Column("evidence_refs", json_type, nullable=False, server_default="[]"),
+    sa.Column("suggested_actions", json_type, nullable=False, server_default="[]"),
+    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("superseded_by", sa.String(36)),
+    sa.Column("status", sa.String(32), nullable=False, server_default="open"),
+)
+sa.Index("ix_diagnostic_requests_run_id", diagnostic_requests.c.run_id)
+sa.Index("ix_diagnostic_requests_status", diagnostic_requests.c.status)

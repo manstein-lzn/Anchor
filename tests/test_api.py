@@ -50,7 +50,9 @@ def register(client, version):
 
 def test_authentication_and_host_boundary(client):
     api, store = client
-    assert api.get("/health/live", headers={"Authorization": ""}).status_code == 200
+    live = api.get("/health/live", headers={"Authorization": ""})
+    assert live.status_code == 200
+    assert live.headers["X-Anchor-Server-Time"].endswith("+00:00")
     assert api.get("/api/graphs", headers={"Authorization": ""}).status_code == 401
     assert api.get("/api/runs", headers={"Authorization": "Bearer wrong"}).status_code == 401
     assert api.post("/api/graphs/validate", json=definition(), headers={"Authorization": ""}).status_code == 401
@@ -69,6 +71,19 @@ def test_active_lease_endpoint_returns_serializable_list(client):
     assert isinstance(response.json(), list)
 
 
+def test_graph_run_filter_and_stop_are_scoped_and_idempotent(client):
+    api, store = client
+    version = publish(api)
+    trigger_id = register(api, version)
+    receipt = api.post(f'/api/triggers/{trigger_id}/runs', json={'objective': 'Scoped execution'},
+                      headers={'Idempotency-Key': 'graph-stop-test'}).json()
+    run_id = receipt['run_id']
+    assert [run['id'] for run in api.get('/api/runs?graph_id=review').json()] == [run_id]
+    assert api.get('/api/runs?graph_id=another-graph').json() == []
+    assert api.post(f'/api/runs/{run_id}/stop', json={'reason': 'stop'}).json()['status'] == 'cancelled'
+    assert api.post(f'/api/runs/{run_id}/stop', json={'reason': 'retry'}).json()['status'] == 'cancelled'
+
+
 def test_active_lease_endpoint_run_filter_is_narrow(client):
     api, _ = client
     response = api.get(f'/api/leases/active?run_id={uuid4()}')
@@ -79,12 +94,14 @@ def test_active_lease_endpoint_run_filter_is_narrow(client):
 def test_capability_endpoint_never_returns_secrets(client, monkeypatch, tmp_path):
     api, _ = client
     config = tmp_path / "runtime.json"
-    config.write_text('{"secret_file":"/private/auth.json","models":[{"ref":"m","provider":"rightcode","model":"gpt-6-astra","secret_ref":"OPENAI_API_KEY"}],"agents":[{"ref":"a","model_ref":"m"}],"tools":[],"verifiers":[{"ref":"v","version":"v2","adapter":"model","model_ref":"m"}]}', encoding="utf-8")
+    config.write_text('{"secret_file":"/private/auth.json","models":[{"ref":"m","provider":"rightcode","model":"gpt-6-astra","secret_ref":"OPENAI_API_KEY"}],"agents":[{"ref":"a","model_ref":"m","max_tool_calls":12,"max_parallel_tools":2}],"tools":[],"verifiers":[{"ref":"v","version":"v2","adapter":"model","model_ref":"m"}]}', encoding="utf-8")
     monkeypatch.setenv("ANCHOR_RUNTIME_CONFIG", str(config))
     response = api.get("/api/runtime/capabilities")
     assert response.status_code == 200
     payload = response.json()
     assert payload["agents"][0]["ref"] == "a"
+    assert payload["agents"][0]["max_tool_calls"] == 12
+    assert payload["agents"][0]["max_parallel_tools"] == 2
     assert payload["verifiers"] == [{"ref": "v", "version": "v2", "adapter": "model", "model_ref": "m"}]
     assert "secret_ref" not in response.text and "private/auth" not in response.text
 

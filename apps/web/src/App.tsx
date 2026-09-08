@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import {
-  Background, BackgroundVariant, getViewportForBounds, Handle, MarkerType, Position, ReactFlow,
+  Background, BackgroundVariant, getViewportForBounds, Handle, MarkerType, Position, ReactFlow, ReactFlowProvider,
   useReactFlow, type Connection, type NodeProps,
 } from '@xyflow/react';
 import {
@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import { ApiError, request } from './api';
 import { RunConsole } from './RunConsole';
+import { GraphExecution } from './GraphExecution';
 import {
   kinds, emptyDocument, fingerprint, parseDocument, project, removeSelection,
   downloadDocument, type CanvasNode, type Definition, type Document,
@@ -101,7 +102,7 @@ export function App() {
   const [versions, setVersions] = useState<Version[]>([]);
   const [versionOffset, setVersionOffset] = useState(0);
   const [viewVersion, setViewVersion] = useState<Version | null>(null);
-  const [panel, setPanel] = useState<'canvas' | 'versions'>('canvas');
+  const [panel, setPanel] = useState<'canvas' | 'versions' | 'execution'>('canvas');
   const [mobilePanel, setMobilePanel] = useState<'canvas' | 'library' | 'inspector'>('canvas');
   const [productView, setProductView] = useState<'graphs' | 'runs'>('graphs');
   const [validation, setValidation] = useState<Validation | null>(null);
@@ -120,7 +121,7 @@ export function App() {
   const flow = useReactFlow<CanvasNode>();
   const effective = viewVersion ? { ...doc, definition: viewVersion.definition } : doc;
   const dirty = fingerprint(doc) !== saved;
-  const editable = !busy && !viewVersion;
+  const editable = !busy && !viewVersion && panel !== 'execution';
   const canvas = project(effective, selection, !editable);
   const selectedNode = selection?.startsWith('node:') ? effective.definition.nodes.find(node => node.id === selection.slice(5)) : undefined;
   const edgeIndex = selection?.startsWith('edge:') ? Number(selection.slice(5)) : -1;
@@ -221,6 +222,8 @@ export function App() {
     const next = parseDocument(result);
     reset(next, result.revision);
     await listVersions(id);
+    const runs = await api<unknown[]>(`/api/runs?graph_id=${encodeURIComponent(id)}&limit=1`);
+    if (runs.length) setPanel('execution');
   };
   const saveDraft = async () => {
     if (revision > 0 && !dirty) return revision;
@@ -298,7 +301,7 @@ export function App() {
     <nav className={`mobile-nav ${productView === 'runs' ? 'view-hidden' : ''}`} aria-label="工作区面板">
       {(['library', 'canvas', 'inspector'] as const).map((item, index) => <button key={item} className={mobilePanel === item ? 'active' : ''} onClick={() => setMobilePanel(item)}>{['工作流', '画布', '属性'][index]}</button>)}
     </nav>
-    <div className={`workspace mobile-${mobilePanel} ${productView === 'runs' ? 'view-hidden' : ''}`} inert={!connected || palette || !!jsonTarget} aria-hidden={!connected || palette || !!jsonTarget || productView === 'runs'}>
+    <div className={`workspace mobile-${mobilePanel} ${panel === 'execution' ? 'execution-workspace' : ''} ${productView === 'runs' ? 'view-hidden' : ''}`} inert={!connected || palette || !!jsonTarget} aria-hidden={!connected || palette || !!jsonTarget || productView === 'runs'}>
       <aside className="library">
         <div className="section-heading"><h2>工作流</h2><ToolButton icon={RefreshCw} label="刷新工作流" disabled={!!busy} onClick={() => void perform('刷新', () => listGraphs())} /></div>
         <button className="new-graph" disabled={!!busy} onClick={() => { if (confirmDiscard()) { reset(emptyDocument()); setVersions([]); } }}><Plus size={17} />新建工作流</button>
@@ -313,7 +316,7 @@ export function App() {
       </aside>
       <main className="main">
         <div className="document-header">
-          <div className="document-title"><span className="eyebrow">WORKFLOW</span><h1>{effective.definition.name || '未命名工作流'}</h1><div className="document-state">{viewVersion ? `已发布 v${viewVersion.version} · 只读` : `草稿 ${revision ? `r${revision}` : '未保存'}${dirty ? ' · 有修改' : ''}`}<span>{effective.definition.nodes.length} 节点 · {effective.definition.edges.length} 连线</span></div></div>
+          <div className="document-title"><span className="eyebrow">WORKFLOW</span><h1>{effective.definition.name || '未命名工作流'}</h1><div className="document-state">{panel === 'execution' ? '发布版本执行 · 只读' : viewVersion ? `已发布 v${viewVersion.version} · 只读` : `草稿 ${revision ? `r${revision}` : '未保存'}${dirty ? ' · 有修改' : ''}`}{panel !== 'execution' && <span>{effective.definition.nodes.length} 节点 · {effective.definition.edges.length} 连线</span>}</div></div>
           <div className="document-actions">
             <button disabled={!editable} onClick={() => void perform('校验中', async () => setValidation(await api<Validation>('/api/graphs/validate', 'POST', doc.definition)))}><CheckCheck size={16} />校验</button>
             <button disabled={!editable || (revision > 0 && !dirty)} onClick={() => void perform('保存中', async () => { await saveDraft(); await listGraphs(); })}><Save size={16} />保存</button>
@@ -321,13 +324,13 @@ export function App() {
           </div>
         </div>
         <div className="view-toolbar">
-          <div className="tabs"><button className={panel === 'canvas' ? 'active' : ''} onClick={() => setPanel('canvas')}><GitBranch size={15} />编排</button><button className={panel === 'versions' ? 'active' : ''} disabled={!!busy} onClick={() => { setPanel('versions'); if (revision) void perform('载入版本', () => listVersions(doc.definition.graph_id)); }}><History size={15} />版本</button></div>
+          <div className="tabs"><button className={panel === 'canvas' ? 'active' : ''} onClick={() => setPanel('canvas')}><GitBranch size={15} />编排</button><button className={panel === 'execution' ? 'active' : ''} disabled={!revision || !!busy} onClick={() => setPanel('execution')}><Clock size={15} />执行</button><button className={panel === 'versions' ? 'active' : ''} disabled={!!busy} onClick={() => { setPanel('versions'); if (revision) void perform('载入版本', () => listVersions(doc.definition.graph_id)); }}><History size={15} />版本</button></div>
           <div className="toolbar-tools"><ToolButton icon={Upload} label="导入 Graph JSON" disabled={!editable} onClick={() => input.current?.click()} /><ToolButton icon={Download} label="导出 Graph JSON" onClick={() => downloadDocument(effective)} /><ToolButton icon={Settings2} label="工作流属性" onClick={() => { setSelection(null); setMobilePanel('inspector'); }} /></div>
         </div>
         {(error || notice || busy) && <div className={`message ${error ? 'error' : ''}`} role={error ? 'alert' : 'status'}>{busy && <LoaderCircle className="spin" size={15} />}<span>{error || busy || notice}</span>{!busy && <ToolButton icon={X} label="关闭通知" onClick={() => { setError(''); setNotice(''); }} />}</div>}
         {conflict && <div className="conflict-actions"><button onClick={() => downloadDocument(doc)}><Download size={15} />导出本地草稿</button><button disabled={!!busy} onClick={() => { if (window.confirm('重新载入会替换当前本地修改。已完成导出或比较？')) void perform('重新载入', () => loadDraft(doc.definition.graph_id)); }}><RefreshCw size={15} />重新载入服务器草稿</button></div>}
         {viewVersion && <div className="version-banner"><ShieldCheck size={16} /><span>发布版本 v{viewVersion.version}</span><button onClick={() => void perform('导出 Bundle', async () => { const bundle = await api<unknown>(`/api/graph-versions/${viewVersion.graph_version_id}/bundle`); const url = URL.createObjectURL(new Blob([JSON.stringify(bundle, null, 2)], { type: 'application/json' })); const link = document.createElement('a'); link.href = url; link.download = `${viewVersion.graph_id}-v${viewVersion.version}.bundle.json`; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000); })}>导出 Bundle</button><button onClick={() => { setViewVersion(null); setSelection(null); setValidation(null); }}>返回草稿</button></div>}
-        {panel === 'canvas' ? <div className="canvas" data-testid="canvas">
+        {panel === 'execution' ? <ReactFlowProvider key={doc.definition.graph_id}><GraphExecution token={token} graphId={doc.definition.graph_id} layout={doc.layout} /></ReactFlowProvider> : panel === 'canvas' ? <div className="canvas" data-testid="canvas">
           <ReactFlow<CanvasNode> nodes={canvas.nodes} edges={canvas.edges} nodeTypes={nodeTypes}
             nodesDraggable={editable} nodesConnectable={editable} edgesReconnectable={false}
             deleteKeyCode={null} multiSelectionKeyCode={null} selectionKeyCode={null}
@@ -363,7 +366,7 @@ export function App() {
           }}><span>{issue.code}</span>{issue.message}</button>)}
         </section>}
       </main>
-      <aside className="inspector"><div className="section-heading"><h2>{selectedNode ? '节点属性' : selectedEdge ? '连线属性' : '工作流属性'}</h2>{selection && <ToolButton icon={X} label="取消选择" onClick={() => setSelection(null)} />}</div>
+      <aside className={`inspector ${panel === 'execution' ? 'view-hidden' : ''}`}><div className="section-heading"><h2>{selectedNode ? '节点属性' : selectedEdge ? '连线属性' : '工作流属性'}</h2>{selection && <ToolButton icon={X} label="取消选择" onClick={() => setSelection(null)} />}</div>
         <fieldset disabled={!editable}>
           {selectedNode ? <>
             <div className={`inspector-kind kind-${selectedNode.type}`}>{(() => { const Icon = icons[selectedNode.type]; return <Icon size={20} />; })()}<strong>{kinds[selectedNode.type]}</strong></div>

@@ -39,6 +39,12 @@ evals = [
 scheduler = [
     "croniter>=2.0,<7",
 ]
+research = [
+    "urllib3>=2.2,<3",
+    "trafilatura>=2,<3",
+    "pypdf>=6,<7",
+    "defusedxml>=0.7,<1",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]

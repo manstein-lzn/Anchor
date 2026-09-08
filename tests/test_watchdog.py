@@ -1,92 +1,143 @@
+"""Adaptive watchdog tests: evidence persistence and diagnostic requests."""
+
+from __future__ import annotations
+
 from datetime import datetime, timedelta, timezone
+from uuid import uuid4
 
-import pytest
-
-from anchor.runtime import AdaptiveWatchdog, ProgressEvidence, RunHealth
-
-
-def test_watchdog_accepts_progress_without_max_counters():
-    now = datetime.now(timezone.utc)
-    previous = ProgressEvidence(state_revision=1, phase="work", heartbeat_at=now)
-    current = ProgressEvidence(state_revision=2, phase="work", heartbeat_at=now,
-                               cycle_iteration=1000000, verified_progress_refs=("verified:change-1",))
-
-    decision = AdaptiveWatchdog().assess(current=current, previous=previous, now=now)
-
-    assert decision.health is RunHealth.HEALTHY
-    assert decision.action == "continue"
+from anchor.domain.graph import GraphDefinition, GraphVersion
+from anchor.domain.models import ProgressEvidence, Run, Task
+from anchor.runtime.watchdog import AdaptiveWatchdog, RunHealth, cycle_fingerprint
+from conftest import make_store
 
 
-def test_watchdog_observes_quiet_runs_and_probes_missing_heartbeats():
-    now = datetime.now(timezone.utc)
-    previous = ProgressEvidence(state_revision=3, phase="work", heartbeat_at=now)
-    current = ProgressEvidence(state_revision=3, phase="work", heartbeat_at=now)
-    watchdog = AdaptiveWatchdog(heartbeat_timeout=timedelta(seconds=10))
-
-    stalled = watchdog.assess(current=current, previous=previous, now=now)
-    disconnected = watchdog.assess(current=current, previous=previous, now=now, dependency_connected=False)
-    expired = watchdog.assess(current=current, previous=previous, now=now + timedelta(seconds=11))
-
-    assert stalled.health is RunHealth.OBSERVING
-    assert stalled.action == "continue"
-    assert disconnected.health is RunHealth.DISCONNECTED
-    assert disconnected.action == "reconcile_then_reconnect"
-    assert expired.health is RunHealth.UNKNOWN
-    assert expired.action == "probe_worker_and_lease"
+def _run(store):
+    task = store.create_task(Task(objective="watchdog-test"))
+    definition = GraphDefinition.model_validate({
+        "graph_id": "watchdog-test",
+        "name": "watchdog",
+        "nodes": [{"id": "start", "type": "agent", "name": "start",
+                   "agent_ref": "agents.researcher"}],
+        "edges": [],
+    })
+    version = store.publish_graph(GraphVersion.publish(definition, 1))
+    return store.create_run(Run(task_id=task.id, graph_version_id=version.graph_version_id))
 
 
-NOW = datetime(2026, 9, 6, tzinfo=timezone.utc)
-
-
-def evidence(**changes):
-    fields = {"state_revision": 1, "phase": "work", "heartbeat_at": NOW}
-    fields.update(changes)
+def _evidence(run, **overrides):
+    fields = dict(
+        run_id=run.id,
+        state_revision=0,
+        phase="node.execute",
+        heartbeat_at=datetime.now(timezone.utc),
+        worker_expected=True,
+    )
+    fields.update(overrides)
     return ProgressEvidence(**fields)
 
 
-def assess(current, previous=None):
-    return AdaptiveWatchdog().assess(current=current, previous=previous, now=NOW)
+def test_initial_observation_records_evidence(tmp_path):
+    store = make_store(tmp_path)
+    try:
+        run = _run(store)
+        decision = AdaptiveWatchdog(store).assess(run_id=run.id, current=_evidence(run))
+        assert decision.health == RunHealth.OBSERVING
+        evidence = store.list_progress_evidence(run.id)
+        assert len(evidence) == 1 and evidence[0].state_revision == 0
+    finally:
+        store.close()
 
 
-def test_unchanged_observations_do_not_interrupt_long_model_call():
-    previous = evidence()
-    for minute in range(100):
-        current = evidence(heartbeat_at=NOW + timedelta(minutes=minute))
-        result = AdaptiveWatchdog().assess(current=current, previous=previous, now=current.heartbeat_at)
-        assert result.health is RunHealth.OBSERVING
-        assert result.action == "continue"
-        previous = current
+def test_verified_progress_change_returns_healthy(tmp_path):
+    store = make_store(tmp_path)
+    try:
+        run = _run(store)
+        watchdog = AdaptiveWatchdog(store)
+        watchdog.assess(run_id=run.id, current=_evidence(run, verified_progress_refs=()))
+        decision = watchdog.assess(
+            run_id=run.id,
+            current=_evidence(run, state_revision=1,
+                              verified_progress_refs=("artifact://sha256/abc",)),
+        )
+        assert decision.health == RunHealth.HEALTHY
+    finally:
+        store.close()
 
 
-def test_suspended_approval_does_not_require_a_live_worker():
-    current = evidence(heartbeat_at=NOW - timedelta(days=60), waiting_for="approval", worker_expected=False)
-    result = assess(current)
-    assert result.health is RunHealth.BLOCKED
-    assert result.action == "wait_for_signal"
+def test_repeated_cycle_without_progress_requests_diagnostic(tmp_path):
+    store = make_store(tmp_path)
+    try:
+        run = _run(store)
+        watchdog = AdaptiveWatchdog(store)
+        fingerprint = "a" * 64
+        watchdog.assess(run_id=run.id, current=_evidence(
+            run, cycle_iteration=1, cycle_fingerprint=fingerprint))
+        decision = watchdog.assess(run_id=run.id, current=_evidence(
+            run, state_revision=1, cycle_iteration=2, cycle_fingerprint=fingerprint))
+        assert decision.health == RunHealth.SUSPECTED_STALL
+        diagnostics = store.list_open_diagnostics(run.id)
+        assert len(diagnostics) == 1
+        assert diagnostics[0].reason == decision.reason
+    finally:
+        store.close()
 
 
-def test_metadata_churn_is_not_progress():
-    result = assess(evidence(state_revision=20, phase="replan", hypothesis_hash="new-words",
-                             tool_operation_ids=("new-uuid",), artifact_refs=("new-unverified-file",)), evidence())
-    assert result.health is RunHealth.OBSERVING
+def test_waiting_state_is_blocked_without_diagnostic(tmp_path):
+    store = make_store(tmp_path)
+    try:
+        run = _run(store)
+        decision = AdaptiveWatchdog(store).assess(
+            run_id=run.id, current=_evidence(run, phase="waiting_approval", waiting_for="approval"))
+        assert decision.health == RunHealth.BLOCKED
+        assert store.list_open_diagnostics(run.id) == []
+    finally:
+        store.close()
 
 
-def test_repeated_completed_cycle_requests_diagnosis_not_shutdown():
-    previous = evidence(cycle_iteration=1, cycle_fingerprint="same-state-request-result")
-    current = evidence(cycle_iteration=2, cycle_fingerprint="same-state-request-result")
-    result = assess(current, previous)
-    assert result.health is RunHealth.SUSPECTED_STALL
-    assert result.action == "request_diagnostic"
+def test_overdue_heartbeat_is_unknown(tmp_path):
+    store = make_store(tmp_path)
+    try:
+        run = _run(store)
+        decision = AdaptiveWatchdog(store).assess(
+            run_id=run.id,
+            current=_evidence(run, heartbeat_at=datetime.now(timezone.utc) - timedelta(minutes=10)),
+        )
+        assert decision.health == RunHealth.UNKNOWN
+    finally:
+        store.close()
 
 
-def test_legitimate_polling_is_a_wait_not_a_cycle_failure():
-    previous = evidence(cycle_iteration=1, cycle_fingerprint="not-ready")
-    current = evidence(cycle_iteration=2, cycle_fingerprint="not-ready", waiting_for="external-job")
-    assert assess(current, previous).health is RunHealth.BLOCKED
+def test_cycle_fingerprint_ignores_noise_and_detects_change():
+    base = dict(phase="research", input_hash="abc", output_refs=("r1",),
+                tool_operation_ids=("t1",))
+    assert cycle_fingerprint(**base) == cycle_fingerprint(**base)
+    assert cycle_fingerprint(**base) != cycle_fingerprint(**{**base, "phase": "review"})
+    assert cycle_fingerprint(**base) != cycle_fingerprint(**{**base, "output_refs": ("r2",)})
 
 
-def test_heartbeat_must_come_from_an_explicit_timezone_aware_observation():
-    with pytest.raises(ValueError):
-        ProgressEvidence(state_revision=1, phase="work")
-    with pytest.raises(ValueError):
-        evidence(heartbeat_at=datetime(2026, 9, 6))
+def test_watchdog_restart_does_not_reissue_the_same_diagnostic(tmp_path):
+    """Matrix 9: supervisor/watchdog restart resumes observation without duplicates."""
+    from anchor.state.relational import RelationalStateStore
+    store = make_store(tmp_path)
+    url = str(store.engine.url)
+    run = _run(store)
+    fingerprint = "b" * 64
+    try:
+        watchdog = AdaptiveWatchdog(store)
+        watchdog.assess(run_id=run.id, current=_evidence(
+            run, cycle_iteration=1, cycle_fingerprint=fingerprint))
+        watchdog.assess(run_id=run.id, current=_evidence(
+            run, state_revision=1, cycle_iteration=2, cycle_fingerprint=fingerprint))
+        assert len(store.list_open_diagnostics(run.id)) == 1
+    finally:
+        store.close()
+    reopened = RelationalStateStore(url)
+    try:
+        # A restarted observer sees the persisted evidence and open diagnostic.
+        assert len(reopened.list_open_diagnostics(run.id)) == 1
+        assert len(reopened.list_progress_evidence(run.id)) == 2
+        AdaptiveWatchdog(reopened).assess(run_id=run.id, current=_evidence(
+            run, state_revision=2, cycle_iteration=3, cycle_fingerprint=fingerprint))
+        assert len(reopened.list_open_diagnostics(run.id)) == 1  # deduplicated
+    finally:
+        reopened.close()

@@ -2,7 +2,8 @@
 
 from .protocols import GeneralHarness, HarnessResult, WorkflowService
 from .local import DeterministicHarness, InProcessWorkflowService
-from .watchdog import AdaptiveWatchdog, ProgressEvidence, RunHealth, WatchdogDecision
+from .watchdog import AdaptiveWatchdog, RunHealth, WatchdogDecision
+from anchor.domain.models import DiagnosticRequest, ProgressEvidence
 
 __all__ = [
     "DeterministicHarness",
@@ -11,6 +12,7 @@ __all__ = [
     "InProcessWorkflowService",
     "WorkflowService",
     "AdaptiveWatchdog",
+    "DiagnosticRequest",
     "ProgressEvidence",
     "RunHealth",
     "WatchdogDecision",
@@ -24,7 +26,7 @@ from .config import RuntimeConfig, load_runtime_config
 from .model_gateway import ModelGateway, ModelResponse, build_model_gateway
 from .secrets import ChainedSecretProvider, EnvironmentSecretProvider, JsonFileSecretProvider, SecretProvider
 from .sinks import ArtifactCheckpointSink, VerificationCheckpointSink
-from .propagation import plan_ready_nodes
+from anchor.domain.propagation import plan_ready_nodes
 from .context import build_input_snapshot, canonical_json, input_hash
 from .worker_loop import run_worker_loop
 from .agent_tools import AgentToolLoop

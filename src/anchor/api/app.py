@@ -19,7 +19,7 @@ from anchor.domain.bundle import GraphBundle, build_bundle
 from anchor.domain.drafts import GraphDraft
 from anchor.domain.graph import GraphDefinition, GraphValidationResult, GraphValidator, GraphVersion, Trigger, TriggerType
 from anchor.domain.models import (ContextSnapshot, DomainModel, EdgeDecision, NodeRun, Run, Task,
-                                  VerificationRecord)
+                                  VerificationRecord, utc_now)
 from anchor.domain.operations import ToolOperation
 from anchor.state.errors import AdmissionConflict, ConcurrencyConflict, GraphVersionConflict
 from anchor.state.relational import RelationalStateStore
@@ -29,6 +29,8 @@ from anchor.runtime.settings import AnchorSettings
 from anchor.runtime.secrets import ChainedSecretProvider, EnvironmentSecretProvider, JsonFileSecretProvider, SecretUnavailable
 from anchor.runtime.memory import LocalMemoryStore, MemoryRecord
 from anchor.runtime.artifacts import LocalArtifactStore
+from anchor.runtime.academic import register_academic_behaviors
+from anchor.runtime.behaviors import BehaviorRegistry
 from anchor.runtime.capabilities import CapabilityRegistry, CapabilityRegistryError
 from anchor.runtime.supervisor import assess_leases
 
@@ -145,6 +147,16 @@ def create_app(store: RelationalStateStore | None = None, token: str | None = No
 
     app = FastAPI(title="Anchor API", version="0.1.0", lifespan=lifespan)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost", "[::1]", "testserver"])
+
+    @app.middleware("http")
+    async def expose_server_clock(request: Request, call_next):
+        response = await call_next(request)
+        # Execution timestamps are written by the server. Browsers may run on
+        # a forwarded remote client whose wall clock differs by minutes, so
+        # give the UI an explicit server clock reference for elapsed times.
+        response.headers["X-Anchor-Server-Time"] = utc_now().isoformat()
+        return response
+
     bearer = HTTPBearer(auto_error=False)
 
     def authenticate(credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)]):
@@ -213,10 +225,16 @@ def create_app(store: RelationalStateStore | None = None, token: str | None = No
             "models": [{"ref": item.ref, "provider": item.provider, "model": item.model,
                          "wire_api": item.wire_api, "base_url": item.base_url} for item in config.models],
             "agents": [{"ref": item.ref, "model_ref": item.model_ref, "tool_refs": item.tool_refs,
-                        "output_format": item.output_format} for item in config.agents],
+                        "output_format": item.output_format, "behavior_ref": item.behavior_ref,
+                        "max_retries": item.max_retries,
+                        "max_tool_calls": item.max_tool_calls,
+                        "max_parallel_tools": item.max_parallel_tools,
+                        "tool_call_limits": item.tool_call_limits} for item in config.agents],
             "tools": [{"ref": item.ref, "description": item.description,
                        "side_effect": item.side_effect, "idempotent": item.idempotent,
-                       "operation_kind": item.operation_kind} for item in config.tools],
+                       "operation_kind": item.operation_kind, "evidence_json": item.evidence_json,
+                       "model_excerpt_chars": item.model_excerpt_chars,
+                       "retry_excerpt_chars": item.retry_excerpt_chars} for item in config.tools],
             "verifiers": [{"ref": item.ref, "version": item.version, "adapter": item.adapter,
                            "model_ref": item.model_ref} for item in config.verifiers],
         }
@@ -233,6 +251,9 @@ def create_app(store: RelationalStateStore | None = None, token: str | None = No
                                           verifiers=config.verifiers)
         except RuntimeError:
             return {"valid": False, "issues": [{"code": "runtime_config_missing", "message": "runtime capability configuration is unavailable"}]}
+        behaviors = BehaviorRegistry()
+        register_academic_behaviors(behaviors)
+        known_behaviors = set(behaviors.refs())
         issues = []
         for node in definition.nodes:
             if node.agent_ref:
@@ -259,6 +280,18 @@ def create_app(store: RelationalStateStore | None = None, token: str | None = No
             if node.verifier_ref:
                 try: registry.validate_verifier(node.verifier_ref)
                 except CapabilityRegistryError as exc: issues.append({"code": "missing_verifier_capability", "node_id": node.id, "message": str(exc)})
+            behavior_ref = (node.metadata or {}).get("behavior_ref")
+            if behavior_ref and behavior_ref not in known_behaviors:
+                issues.append({"code": "missing_node_behavior", "node_id": node.id,
+                               "message": f"unknown node behavior: {behavior_ref}"})
+            if node.agent_ref and node.type.value == "agent":
+                try:
+                    agent = registry.agent(node.agent_ref)
+                except CapabilityRegistryError:
+                    agent = None
+                if agent is not None and agent.behavior_ref and agent.behavior_ref not in known_behaviors:
+                    issues.append({"code": "missing_agent_behavior", "node_id": node.id,
+                                   "message": f"unknown agent behavior: {agent.behavior_ref}"})
         return {"valid": not issues, "issues": issues}
 
     @app.get("/api/graph-versions/{version_id}/bundle", dependencies=auth)
@@ -370,12 +403,16 @@ def create_app(store: RelationalStateStore | None = None, token: str | None = No
         return db.admit_run(RunRequest(trigger_id=trigger_id, idempotency_key=key, **body.model_dump()))
 
     @app.get("/api/runs", response_model=list[Run], dependencies=auth)
-    def runs(db: DB, limit: PageSize = 50, offset: Offset = 0):
-        return db.list_runs(limit, offset)
+    def runs(db: DB, limit: PageSize = 50, offset: Offset = 0, graph_id: str | None = None):
+        return db.list_runs(limit, offset, graph_id=graph_id)
 
     @app.get("/api/runs/{run_id}", response_model=Run, dependencies=auth)
     def run(run_id: UUID, db: DB):
         return required(db.get_run(run_id))
+
+    @app.post("/api/runs/{run_id}/stop", response_model=Run, dependencies=auth)
+    def stop_run(run_id: UUID, body: LeaseRecovery, db: DB):
+        return db.stop_run(run_id, reason=body.reason)
 
     @app.get("/api/tasks/{task_id}", response_model=Task, dependencies=auth)
     def task(task_id: UUID, db: DB):
@@ -400,6 +437,23 @@ def create_app(store: RelationalStateStore | None = None, token: str | None = No
     def verifications(run_id: UUID, db: DB):
         required(db.get_run(run_id))
         return db.list_verifications(run_id)
+
+    @app.get("/api/runs/{run_id}/progress", dependencies=auth)
+    def progress_evidence(run_id: UUID, db: DB):
+        required(db.get_run(run_id))
+        items = db.list_progress_evidence(run_id)
+        return [item.model_dump(mode="json") for item in items]
+
+    @app.get("/api/runs/{run_id}/diagnostics", dependencies=auth)
+    def diagnostics(run_id: UUID, db: DB):
+        required(db.get_run(run_id))
+        items = db.list_open_diagnostics(run_id)
+        return [item.model_dump(mode="json") for item in items]
+
+    @app.post("/api/runs/{run_id}/diagnostics/{diagnostic_id}/supersede", dependencies=auth)
+    def supersede_diagnostic(run_id: UUID, diagnostic_id: str, db: DB):
+        required(db.get_run(run_id))
+        return db.supersede_diagnostic(diagnostic_id, superseded_by=f"operator:{run_id}")
 
     @app.get("/api/runs/{run_id}/events", dependencies=auth)
     def events(run_id: UUID, db: DB, after: Offset = 0, limit: PageSize = 100):

@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from enum import StrEnum
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, JsonValue, field_validator
 
 
 def utc_now() -> datetime:
@@ -98,6 +98,11 @@ class NodeRun(DomainModel):
     input_hash: str | None = None
     output_ref: str | None = None
     error_code: str | None = None
+    # Recovery scheduling is separate from business-cycle state. `last_error_class`
+    # classifies the failed attempt; `next_attempt_at` gates re-claiming after a
+    # transient failure so the plan survives a worker restart.
+    last_error_class: str | None = Field(default=None, max_length=64)
+    next_attempt_at: datetime | None = None
     context_generation: int = Field(default=0, ge=0)
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
@@ -176,3 +181,43 @@ class NodeLease(DomainModel):
     acquired_at: datetime = Field(default_factory=utc_now)
     heartbeat_at: datetime = Field(default_factory=utc_now)
     released_at: datetime | None = None
+
+
+class ProgressEvidence(DomainModel):
+    """Immutable observation of one execution unit's durable facts.
+
+    This is an observation record, not a business verdict. It deliberately
+    excludes timestamps and random ids from the progress signal so activity
+    cannot be mistaken for verified progress.
+    """
+
+    evidence_id: UUID = Field(default_factory=uuid4)
+    run_id: UUID
+    node_run_id: UUID | None = None
+    state_revision: int = Field(ge=0)
+    phase: str = Field(min_length=1, max_length=100)
+    artifact_refs: tuple[str, ...] = ()
+    verifier_passes: int = Field(default=0, ge=0)
+    hypothesis_hash: str | None = Field(default=None, min_length=64, max_length=64)
+    tool_operation_ids: tuple[str, ...] = ()
+    heartbeat_at: AwareDatetime
+    waiting_for: str | None = Field(default=None, max_length=200)
+    worker_expected: bool = True
+    verified_progress_refs: tuple[str, ...] = ()
+    cycle_iteration: int = Field(default=0, ge=0)
+    cycle_fingerprint: str | None = Field(default=None, min_length=64, max_length=64)
+    created_at: AwareDatetime = Field(default_factory=utc_now)
+
+
+class DiagnosticRequest(DomainModel):
+    """Durable request for diagnosis; never a failure verdict."""
+
+    diagnostic_id: str = Field(min_length=1, max_length=200)
+    run_id: UUID
+    node_run_id: UUID | None = None
+    reason: str = Field(min_length=1, max_length=4000)
+    evidence_refs: tuple[str, ...] = ()
+    suggested_actions: tuple[str, ...] = ()
+    created_at: AwareDatetime
+    superseded_by: str | None = Field(default=None, max_length=200)
+    status: str = Field(default="open", pattern=r"^(open|superseded)$")

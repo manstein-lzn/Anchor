@@ -320,3 +320,86 @@ stalling. Claimable-by-control and recoverable-like-control are separate
 sets (`CONTROL_NODE_TYPES` vs `RECOVERABLE_CONTROL_TYPES`): an interrupted
 tool lease stays `unknown` for reconciliation and can never be recovered
 through the lease path, no matter which worker claimed it.
+
+## ADR-019: Execution limits are typed; progress is observed, not inferred
+
+ADR-000C said budgets must not govern healthy work. This ADR makes that
+executable and records what actually changed.
+
+Limits are now an explicit taxonomy in `anchor.runtime.execution_policy`:
+transport protection, resource capacity, explicit operator policy, and task
+behavior. Only the last category can affect whether a task is considered
+complete, and even there the default is off. `run_timeout_seconds` and
+`max_rounds` are no longer implicit defaults read from graph metadata: an
+absent value means unbounded, a present value is a visible operator choice.
+`ANCHOR_EXPIRE_RUN_BUDGETS` defaults to false, so the supervisor does not
+sweep runs against a hidden clock. JSON output repair (`output_retries`)
+defaults to zero and never replays tools or invents evidence. Node
+`timeout_seconds` remains a physical per-call guard, not a task lifetime.
+
+Three counters are deliberately independent: business cycles, node attempts
+(including transient-failure retries) and request retries. A new business
+cycle never consumes fault-recovery budget, and a fault retry never counts
+as research progress. Academic review no longer blocks on a round counter;
+repeated identical research records a mechanical issue and stays in
+`revise` so supervision can diagnose it.
+
+Progress is observed, never inferred from activity. The supervisor and
+`AdaptiveWatchdog` collect durable `ProgressEvidence` (state revision, phase,
+artifact refs, verifier passes, tool operation ids, cycle fingerprint) and
+persist it. Fingerprints use completed-cycle inputs, results and tool
+operations, not timestamps or random ids. A repeated complete cycle without
+new verified progress creates a deduplicated `DiagnosticRequest`; it never
+terminates the run. Absence of evidence is uncertainty. Heartbeats and new
+UUIDs prove liveness only.
+
+The watchdog remains advisory. It has no permission to repair, reconcile or
+transfer a lease; `DefaultDiagnosisPermission` grants only continue, wait and
+escalate. Automatic repair requires an explicit capability grant and a
+proven-safe action, which does not exist yet. Consequently this ADR does not
+claim a calibrated adaptive detector — it claims durable observation, typed
+limits and a diagnosis loop that is auditable from the API and Run Console.
+
+## ADR-020: Transient-failure recovery is a persisted schedule
+
+ADR-019 separated business cycles, node attempts and request retries. This ADR
+closes the remaining gap: the recovery plan itself must survive a process
+restart. `retry_node_and_propagate` therefore persists two columns on
+`node_runs`: `last_error_class` on the failed attempt and `next_attempt_at` on
+the fresh attempt. Claim queries only return ready nodes whose
+`next_attempt_at` is null or due, so an early claim is impossible and a restart
+cannot lose the backoff.
+
+The worker no longer sleeps between attempts. It classifies the fault
+(`classify_failure`), honors a provider `Retry-After` within a bounded range,
+persists the schedule and releases the lease. The `node.retrying` event records
+the class and the due time. Backoff remains opt-in through `max_retries`;
+when it is zero the attempt fails and waits for an operator, unchanged.
+
+This is deliberately not automatic repair. Scheduling a retry of a safe,
+idempotent read is recovery; reconciling an unknown side effect or repairing
+canonical state still requires an explicit operator or a future capability
+grant. Retry counts never consume business-cycle budget, and a business cycle
+never consumes the retry allowance.
+
+## ADR-021: Domain policy is a registered behavior; state is a composed facade
+
+Two structural rules keep the kernel small as domains are added.
+
+First, the generic worker and control worker know only `NodeBehavior`
+(preflight, output validation, deterministic control execution) resolved by
+`behavior_ref`. Domain plugins such as the academic workflow implement and
+register behaviors at the composition root. The kernel no longer imports a
+domain module, branches on a role string, or knows tool names: tool evidence
+shaping is declared per `ToolCapability` (`evidence_json`, excerpt limits,
+preload priority). Adding a domain means registering a behavior and declaring
+capabilities, not editing the worker.
+
+Second, `RelationalStateStore` is a facade over cohesive mixins
+(`base/graphs/execution/checkpoints/operations/progress`). This is a file-boundary
+change, not a new abstraction layer: one transaction core, one event append, one
+lock discipline. Persisted records (`ProgressEvidence`, `DiagnosticRequest`) live
+in `domain/models.py`; `domain/` and `state/` never import `runtime/`, and pure
+propagation logic lives in `domain/propagation.py`. Duplicated generic claim and
+lease-guard code was removed, and dead `checkpoint_node_result` was deleted
+rather than kept "for flexibility".

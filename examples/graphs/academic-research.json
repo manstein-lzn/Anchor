@@ -1,0 +1,136 @@
+{
+  "graph_id": "academic-research",
+  "name": "Academic Literature Review",
+  "entry_node_id": "start",
+  "metadata": {
+    "purpose": "Online plan-research-review loop with evidence-backed Markdown delivery"
+  },
+  "nodes": [
+    {
+      "id": "start",
+      "type": "artifact",
+      "name": "Research question"
+    },
+    {
+      "id": "plan",
+      "type": "agent",
+      "name": "Plan and refine",
+      "agent_ref": "agents.academic.planner",
+      "metadata": {
+        "context_mode": "full"
+      }
+    },
+    {
+      "id": "research",
+      "type": "agent",
+      "name": "Search, read and synthesize",
+      "agent_ref": "agents.academic.researcher",
+      "metadata": {
+        "context_mode": "full"
+      }
+    },
+    {
+      "id": "review",
+      "type": "agent",
+      "name": "Independent scholarly review",
+      "agent_ref": "agents.academic.reviewer",
+      "metadata": {
+        "context_mode": "full"
+      }
+    },
+    {
+      "id": "check",
+      "type": "loop",
+      "name": "Evidence and revision gate",
+      "exit_condition": "output.review.verdict == 'pass' || output.review.verdict == 'blocked'",
+      "metadata": {
+        "context_mode": "full",
+        "behavior_ref": "academic.review_gate"
+      }
+    },
+    {
+      "id": "needs_input",
+      "type": "human_task",
+      "name": "Resolve research blockers",
+      "metadata": {
+        "context_mode": "full"
+      }
+    },
+    {
+      "id": "report",
+      "type": "artifact",
+      "name": "Export paper.md",
+      "metadata": {
+        "context_mode": "full",
+        "behavior_ref": "academic.report"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "source": "start",
+      "target": "plan",
+      "input_mapping": {
+        "request": "inputs"
+      }
+    },
+    {
+      "source": "plan",
+      "target": "research",
+      "input_mapping": {
+        "plan": "outputs.plan",
+        "request": "inputs"
+      }
+    },
+    {
+      "source": "research",
+      "target": "review",
+      "input_mapping": {
+        "research": "outputs.research",
+        "plan": "outputs.plan",
+        "request": "inputs"
+      }
+    },
+    {
+      "source": "review",
+      "target": "check",
+      "input_mapping": {
+        "review": "outputs.review",
+        "research": "outputs.research",
+        "request": "inputs"
+      }
+    },
+    {
+      "source": "check",
+      "target": "plan",
+      "condition": "output.review.verdict == 'revise'",
+      "input_mapping": {
+        "feedback": "outputs.check"
+      }
+    },
+    {
+      "source": "check",
+      "target": "needs_input",
+      "condition": "output.review.verdict == 'blocked'",
+      "input_mapping": {
+        "feedback": "outputs.check"
+      }
+    },
+    {
+      "source": "needs_input",
+      "target": "plan",
+      "input_mapping": {
+        "feedback": "outputs.check",
+        "operator_decision": "outputs.needs_input"
+      }
+    },
+    {
+      "source": "check",
+      "target": "report",
+      "condition": "output.review.verdict == 'pass'",
+      "input_mapping": {
+        "approved": "outputs.check"
+      }
+    }
+  ]
+}

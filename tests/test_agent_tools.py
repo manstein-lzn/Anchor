@@ -8,6 +8,9 @@ tool runs for real and its ledger-backed artifact flows into the final text.
 
 import asyncio
 import json
+import threading
+import time
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -144,6 +147,96 @@ def test_denied_tool_returns_message_not_failure(tmp_path):
         assert store.list_tool_operations(receipt.run_id) == []
     finally:
         store.close()
+
+
+def test_tool_budget_denies_calls_before_gateway_execution(tmp_path):
+    store, artifacts, _, lease = leased(tmp_path)
+    try:
+        _, tool_gateway = gateway_for(store, artifacts)
+        loop = AgentToolLoop(tool_gateway, artifacts)
+        agent = registry().agent("agents.reader").model_copy(update={
+            "max_tool_calls": 1, "tool_call_limits": {"echo": 1},
+        })
+        function = loop._functions(lease, agent)[0]
+
+        async def calls():
+            first = await function.call('{"args":["first"]}')
+            second = await function.call('{"args":["second"]}')
+            return first, second
+
+        first, second = asyncio.run(calls())
+        assert first == "first\n"
+        assert "tool_budget_exceeded" in second
+        assert len(store.list_tool_operations(lease.run_id)) == 1
+    finally:
+        store.close()
+
+
+def test_tool_parallelism_is_bounded_before_execution():
+    activity = {"current": 0, "peak": 0}
+    lock = threading.Lock()
+
+    class Registry:
+        def tool(self, ref):
+            return SimpleNamespace(description="test")
+
+    class Tools:
+        registry = Registry()
+
+        def execute(self, *args, **kwargs):
+            with lock:
+                activity["current"] += 1
+                activity["peak"] = max(activity["peak"], activity["current"])
+            time.sleep(0.03)
+            with lock:
+                activity["current"] -= 1
+            return SimpleNamespace(status=OperationStatus.FAILED,
+                                   result_ref=None, error_code="test")
+
+    loop = AgentToolLoop(Tools(), SimpleNamespace())
+    agent = AgentCapability(ref="agents.reader", model_ref="models.test",
+                            tool_refs=["echo"], max_parallel_tools=2)
+    function = loop._functions(SimpleNamespace(claim_id=uuid4()), agent)[0]
+
+    async def calls():
+        await asyncio.gather(*(function.call('{"args":[]}') for _ in range(6)))
+
+    asyncio.run(calls())
+    assert activity["peak"] == 2
+
+
+def _shaper(capability: ToolCapability) -> AgentToolLoop:
+    tools = SimpleNamespace(registry=SimpleNamespace(tool=lambda ref: capability))
+    return AgentToolLoop(tools, None)
+
+
+def test_model_evidence_is_bounded_without_mutating_artifact_contract():
+    search = ToolCapability(ref="search", evidence_json=True, model_excerpt_chars=1500,
+                            excerpt_list_limit=10)
+    evidence = {"papers": [{"abstract": "x" * 2000} for _ in range(12)]}
+    result = _shaper(search)._shape("search", evidence, mode="model")
+    assert len(result["papers"]) == 10
+    assert len(result["papers"][0]["abstract"]) < 1600
+    assert len(evidence["papers"]) == 12  # the durable artifact is untouched
+    reading = ToolCapability(ref="read", evidence_json=True, model_excerpt_chars=12000)
+    bounded = _shaper(reading)._shape("read", {"text": "x" * 24000}, mode="model")
+    assert len(bounded["text"]) == 12000 + len(" [truncated for model context]")
+
+
+def test_retry_evidence_is_more_compact_than_live_tool_context():
+    search = ToolCapability(ref="search", evidence_json=True, retry_excerpt_chars=500)
+    retry = _shaper(search)._shape(
+        "search", {"papers": [{"abstract": "x" * 2000} for _ in range(12)]}, mode="retry")
+    assert len(retry["papers"][0]["abstract"]) < 600
+    reading = ToolCapability(ref="read", evidence_json=True, retry_excerpt_chars=8000)
+    bounded = _shaper(reading)._shape("read", {"text": "x" * 24000}, mode="retry")
+    assert len(bounded["text"]) == 8000 + len(" [truncated for retry context]")
+
+
+def test_non_evidence_tools_are_returned_verbatim():
+    plain = ToolCapability(ref="echo")
+    evidence = {"text": "x" * 5000}
+    assert _shaper(plain)._shape("echo", evidence, mode="model") is evidence
 
 
 def test_worker_uses_plain_path_without_tools_or_loop(tmp_path):

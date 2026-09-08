@@ -27,6 +27,39 @@ sink. A model response alone never advances a NodeRun. If the process dies
 before the sink commits, the lease remains subject to reconciliation rather than
 being silently retried.
 
+## State module layout
+
+`RelationalStateStore` is a composition facade over cohesive mixins; there is
+still exactly one transaction core, so atomicity is unchanged:
+
+```text
+state/base.py         connections, BEGIN IMMEDIATE/advisory locks, append-only
+                      events, heartbeats, decode/values helpers
+state/graphs.py       drafts, immutable versions, triggers, admission/outbox/inbox
+state/execution.py    node runs, leases/claims, verification, edge decisions
+state/checkpoints.py  shared completion/failure/retry tail and human waits
+state/operations.py   tool operation ledger
+state/progress.py     durable progress observations and diagnostics
+state/relational.py   the public store facade
+```
+
+`domain/` never imports `state/` or `runtime/`; `state/` never imports
+`runtime/`. Pure propagation logic lives in `domain/propagation.py`.
+
+## Domain policy boundary
+
+The kernel (worker, control worker, tool loop) knows only interfaces:
+
+- `runtime/behaviors.py` defines `NodeBehavior` (preflight, output validation,
+deterministic control execution) and a reference registry.
+- Domain plugins such as `runtime/academic.py` implement and register behaviors
+at the composition root (`worker_service`, `control_service`, API validation).
+- Tool evidence shaping (JSON evidence, excerpt limits, preload priority) is
+declared per `ToolCapability`, not hardcoded per tool name.
+
+This keeps academic policy a plugin: the generic worker no longer imports a
+domain module or branches on a role string.
+
 ## Build-versus-assemble boundary
 
 ```text

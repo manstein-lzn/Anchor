@@ -13,10 +13,11 @@
   remain mutable and are revalidated at publication
 - Persisted Graph Version and Trigger records
 - Runs require a published Graph Version; NodeRun model is defined
-- Explicit Loop topology checks without required numeric budgets; exit expression
-  evaluation and loop execution are not implemented
-- Advisory watchdog prototype distinguishes liveness, declared waits, verified
+- Explicit Loop topology checks without required numeric budgets; loop execution
+  lands separately from the budget-free supervision semantics
+- Advisory watchdog distinguishes liveness, declared waits, verified
   progress, repeated-cycle suspicion and uncertainty; does not interrupt runs
+- Advisory watchdog backed by persistent progress evidence and diagnostic requests; still does not interrupt runs
 - Initial unit tests
 - Atomic trigger admission: Task, pinned Run, pending nodes, events, outbox and receipt
 - Duplicate occurrence recovery and conflicting-request rejection
@@ -84,6 +85,18 @@
   with the online worker, so scores and verdicts cannot drift
 - Conservative Graph-aware lease supervisor assessment with Agent recovery
   recommendations and Tool unknown-outcome fail-closed semantics
+- Typed execution-limit taxonomy (transport / resource capacity / explicit
+  operator policy / task behavior); no hidden `max_rounds` or
+  `run_timeout_seconds` default, and `ANCHOR_EXPIRE_RUN_BUDGETS` defaults off
+- Independent counters for business cycles, node attempts (including fault
+  retries) and request retries; a new cycle never consumes fault-recovery budget
+- Durable `ProgressEvidence` and deduplicated `DiagnosticRequest` persistence;
+  repeated cycles without verified progress are diagnosed, never auto-failed
+- Persisted transient-failure recovery schedule (`last_error_class`,
+  `next_attempt_at`, Retry-After aware); claim is gated until due, and the plan
+  survives a worker or supervisor restart without an in-process sleep
+- `GET /api/runs/{run_id}/progress`, `GET /api/runs/{run_id}/diagnostics` and
+  operator supersede; Run Console diagnostics and progress-evidence sections
 - Read-only active lease API with optional Run filtering and Web Console lease view
 - Explicit Agent lease failure API and Run Console action; Tool leases cannot
   bypass unknown-outcome reconciliation through this endpoint
@@ -102,11 +115,6 @@
 - Failure fan-out/cancellation of in-flight sibling branches and dispatch supervision
   beyond receiver retry logging
 - Operation reconciliation policies and actual side-effect adapters
-- Independent heartbeat collection, cycle fingerprints, diagnostic execution and
-  watchdog integration; no production adaptive detection yet
-- SSE streaming and multi-user authorization
-- ToolGateway/MCP protocol adapters (execution itself is landed)
-- Prefect adapter
 - PostgreSQL/vector memory projection and worker recovery supervision
 - Context engine and memory policies beyond the durable input snapshot boundary
 - MCP/A2A gateways
@@ -159,6 +167,11 @@ P1 Subgraph composition landed as publish-time materialization (ADR-011):
    explicit owner_agent with snapshot arguments; denials fail closed; tool
    leases stay unknown and unrecoverable via lease path.
    Real loop E2E with gpt-5.6-luna: iteration, exit, revival, terminal Run.
+   Execution policy landed (ADR-019, migration 0013): typed limit taxonomy,
+   no hidden round/wall-clock defaults, independent cycle/attempt/request
+   counters, durable ProgressEvidence + deduplicated DiagnosticRequest,
+   progress/diagnostics API and Run Console views. Automatic repair and
+   calibrated adaptive detection remain explicitly unimplemented.
 P1 Anti-drift context gates: mechanical layer landed; semantic baseline
    landed as offline evals coverage tripwire (LLM judge is the explicit next
    step, same interface). Experience promotion loop landed (ADR-016):

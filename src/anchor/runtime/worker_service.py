@@ -10,7 +10,9 @@ import logging
 from contextlib import suppress
 from uuid import UUID
 
+from anchor.runtime.academic import register_academic_behaviors
 from anchor.runtime.agent_tools import AgentToolLoop
+from anchor.runtime.behaviors import BehaviorRegistry
 from anchor.runtime.artifacts import LocalArtifactStore
 from anchor.runtime.capabilities import CapabilityRegistry
 from anchor.runtime.tool_gateway import BubblewrapBackend, SubprocessBackend, ToolGateway
@@ -79,7 +81,10 @@ async def serve() -> None:
         logger.warning("bubblewrap unavailable; tool execution falls back to dev subprocess")
         backend = SubprocessBackend()
     tool_loop = AgentToolLoop(ToolGateway(store, registry, artifacts, backend), artifacts)
-    worker = AgentNodeWorker(store, registry, gateways, sink, tool_loop=tool_loop)
+    behaviors = BehaviorRegistry()
+    register_academic_behaviors(behaviors)
+    worker = AgentNodeWorker(store, registry, gateways, sink, tool_loop=tool_loop,
+                             behaviors=behaviors)
     stop = asyncio.Event()
     try:
         await run_worker_loop(worker, worker_id=worker_id,
