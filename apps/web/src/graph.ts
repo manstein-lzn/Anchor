@@ -1,4 +1,5 @@
 import type { Edge, Node, XYPosition } from '@xyflow/react';
+import dagre from '@dagrejs/dagre';
 
 export const kinds = {
   agent: 'Agent', tool: '工具', router: '路由', parallel: '并行', join: '汇合',
@@ -32,6 +33,48 @@ export interface Version {
   definition: Definition; content_hash: string; published_at: string;
 }
 export type CanvasNode = Node<{ spec: NodeSpec; entry: boolean }, 'anchor'>;
+
+const NODE_WIDTH = 220;
+const NODE_HEIGHT = 106;
+const layoutCache = new Map<string, Map<string, XYPosition>>();
+
+// Layered DAG layout (dagre) so a graph without saved drag positions never
+// falls back to a naive grid with crossing, overlapping edges. Keyed by
+// topology only, so polling and metadata edits cannot move the canvas.
+export function layeredLayout(definition: Definition, width = NODE_WIDTH, height = NODE_HEIGHT): Map<string, XYPosition> {
+  const key = JSON.stringify({
+    id: definition.graph_id,
+    size: [width, height],
+    nodes: definition.nodes.map(node => node.id),
+    edges: definition.edges.map(edge => `${edge.source}>${edge.target}`),
+  });
+  const cached = layoutCache.get(key);
+  if (cached) return cached;
+  const graph = new dagre.graphlib.Graph().setDefaultEdgeLabel(() => ({}));
+  graph.setGraph({ rankdir: 'LR', nodesep: 56, ranksep: 130, marginx: 40, marginy: 40 });
+  for (const node of definition.nodes) {
+    graph.setNode(node.id, { width, height });
+  }
+  for (const edge of definition.edges) {
+    if (graph.hasNode(edge.source) && graph.hasNode(edge.target)) {
+      graph.setEdge(edge.source, edge.target);
+    }
+  }
+  dagre.layout(graph);
+  const positions = new Map<string, XYPosition>();
+  for (const node of definition.nodes) {
+    const laid = graph.node(node.id);
+    if (laid) {
+      positions.set(node.id, {
+        x: Math.round(laid.x - width / 2),
+        y: Math.round(laid.y - height / 2),
+      });
+    }
+  }
+  if (layoutCache.size > 50) layoutCache.clear();
+  layoutCache.set(key, positions);
+  return positions;
+}
 
 const object = (value: unknown): value is Record<string, unknown> =>
   !!value && typeof value === 'object' && !Array.isArray(value);
@@ -72,18 +115,35 @@ export function parseDocument(value: unknown): Document {
 }
 
 export function project(doc: Document, selected: string | null, readOnly: boolean) {
+  const auto = layeredLayout(doc.definition);
   const nodes: CanvasNode[] = doc.definition.nodes.map((spec, index) => ({
     id: spec.id, type: 'anchor', width: 220, height: 106,
-    position: doc.layout.positions?.[spec.id] ?? { x: 80 + (index % 3) * 280, y: 90 + Math.floor(index / 3) * 170 },
+    // A saved drag position is authoritative; otherwise use the layered layout
+    // so a graph never falls back to a naive grid with crossing edges.
+    position: doc.layout.positions?.[spec.id] ?? auto.get(spec.id) ?? { x: 80 + (index % 3) * 280, y: 90 + Math.floor(index / 3) * 170 },
     data: { spec, entry: doc.definition.entry_node_id === spec.id },
     selected: selected === `node:${spec.id}`, draggable: !readOnly,
   }));
-  const edges: Edge[] = doc.definition.edges.map((edge, index) => ({
-    id: `edge:${index}`, source: edge.source, target: edge.target,
-    label: edge.condition ? '条件' : undefined,
-    ariaLabel: `${edge.source} -> ${edge.target}${edge.condition ? `: ${edge.condition}` : ''}`,
-    type: 'smoothstep', selected: selected === `edge:${index}`,
-  }));
+  const sourceCounts = new Map<string, number>();
+  for (const edge of doc.definition.edges) {
+    sourceCounts.set(edge.source, (sourceCounts.get(edge.source) ?? 0) + 1);
+  }
+  const sourceSeen = new Map<string, number>();
+  const edges: Edge[] = doc.definition.edges.map((edge, index) => {
+    // Bezier curves read more clearly than orthogonal steps on a layered graph.
+    // Edges leaving one node share its source handle, so vary the curvature by
+    // fan-out order to keep them visually separated instead of overlapping.
+    const fanOut = sourceCounts.get(edge.source) ?? 1;
+    const order = sourceSeen.get(edge.source) ?? 0;
+    sourceSeen.set(edge.source, order + 1);
+    const curvature = fanOut > 1 ? 0.25 + 0.35 * (order / (fanOut - 1)) : 0.35;
+    return {
+      id: `edge:${index}`, source: edge.source, target: edge.target,
+      label: edge.condition ? '条件' : undefined,
+      ariaLabel: `${edge.source} -> ${edge.target}${edge.condition ? `: ${edge.condition}` : ''}`,
+      type: 'routed', pathOptions: { curvature }, selected: selected === `edge:${index}`,
+    };
+  });
   return { nodes, edges };
 }
 

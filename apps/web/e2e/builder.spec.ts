@@ -66,6 +66,9 @@ test('real API lifecycle, layout and mapping round-trip, immutable versions', as
   await page.mouse.move(beforeDrag!.x + 50, beforeDrag!.y - 15, { steps: 8 });
   await page.mouse.up();
   await expect.poll(async () => (await node.boundingBox())!.y).toBeLessThan(beforeDrag!.y - 30);
+  // Regression: dragging must never drop connections. Edge types are a
+  // stable module constant so high-frequency drag renders cannot unregister them.
+  await expect(page.locator('.react-flow__edge')).toHaveCount(3);
   await page.getByRole('button', { name: '撤销', exact: true }).click();
   await expect.poll(async () => Math.abs((await node.boundingBox())!.y - beforeDrag!.y)).toBeLessThan(1);
   await page.getByRole('button', { name: '重做', exact: true }).click();

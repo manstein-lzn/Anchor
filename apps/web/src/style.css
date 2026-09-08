@@ -156,6 +156,9 @@ code, .node-reference, .json-editor { font-family: "SFMono-Regular", Consolas, "
 .node-reference { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 10px; color: #8b9992; margin-top: 7px; }
 .react-flow__handle { width: 10px; height: 10px; background: white; border: 2px solid #75a18f; }
 .react-flow__edge-text { font-size: 10px; fill: #637970; }
+.edge-label-badge { position: absolute; pointer-events: all; padding: 1px 6px; border-radius: 8px;
+  background: #ffffff; border: 1px solid #c6d1d6; color: #46606a; font-size: 10px; line-height: 16px;
+  white-space: nowrap; box-shadow: 0 1px 2px rgba(20, 40, 40, .08); }
 .react-flow__edge.selected .react-flow__edge-path { stroke: #167568 !important; stroke-width: 3 !important; }
 .react-flow__attribution { font-size: 9px; }
 .inspector { border-left: 1px solid var(--line); background: #fff; overflow-y: auto; min-width: 0; }

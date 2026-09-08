@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
   Background, BackgroundVariant, getViewportForBounds, Handle, MarkerType, Position, ReactFlow, ReactFlowProvider,
-  useReactFlow, type Connection, type NodeProps,
+  useNodesState, useReactFlow, type Connection, type NodeProps,
 } from '@xyflow/react';
 import {
   Anchor, Bot, Wrench, GitBranch, Split, Merge, ShieldCheck, UserCheck,
@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import { ApiError, request } from './api';
 import { RunConsole } from './RunConsole';
+import { RoutedEdge } from './RoutedEdge';
 import { GraphExecution } from './GraphExecution';
 import {
   kinds, emptyDocument, fingerprint, parseDocument, project, removeSelection,
@@ -48,6 +49,9 @@ function GraphNode({ data, selected }: NodeProps<CanvasNode>) {
   </div>;
 }
 const nodeTypes = { anchor: GraphNode };
+// Stable identity: React Flow re-registers edge types when this object changes,
+// which drops edges during high-frequency drag re-renders.
+const edgeTypes = { routed: RoutedEdge };
 
 function Modal({ title, close, children }: { title: string; close: () => void; children: ReactNode }) {
   const ref = useRef<HTMLDivElement>(null);
@@ -119,10 +123,22 @@ export function App() {
   const bundleInput = useRef<HTMLInputElement>(null);
   const dragging = useRef<Document | null>(null);
   const flow = useReactFlow<CanvasNode>();
-  const effective = viewVersion ? { ...doc, definition: viewVersion.definition } : doc;
+  const effective = useMemo(
+    () => (viewVersion ? { ...doc, definition: viewVersion.definition } : doc), [doc, viewVersion]);
   const dirty = fingerprint(doc) !== saved;
   const editable = !busy && !viewVersion && panel !== 'execution';
-  const canvas = project(effective, selection, !editable);
+  const canvas = useMemo(() => project(effective, selection, !editable), [effective, selection, editable]);
+  // React Flow owns node measurement. `project()` rebuilds node objects from the
+  // document, so the measured flag must be carried over or dragging fails with
+  // "trying to drag a node that is not initialized" (React Flow error #015).
+  const [flowNodes, setFlowNodes, onFlowNodesChange] = useNodesState(canvas.nodes);
+  useLayoutEffect(() => {
+    if (dragging.current) return; // never clobber an in-flight drag
+    setFlowNodes(previous => {
+      const byId = new Map(previous.map(node => [node.id, node]));
+      return canvas.nodes.map(node => ({ ...node, measured: byId.get(node.id)?.measured }));
+    });
+  }, [canvas.nodes, setFlowNodes]);
   const selectedNode = selection?.startsWith('node:') ? effective.definition.nodes.find(node => node.id === selection.slice(5)) : undefined;
   const edgeIndex = selection?.startsWith('edge:') ? Number(selection.slice(5)) : -1;
   const selectedEdge = effective.definition.edges[edgeIndex];
@@ -331,7 +347,8 @@ export function App() {
         {conflict && <div className="conflict-actions"><button onClick={() => downloadDocument(doc)}><Download size={15} />导出本地草稿</button><button disabled={!!busy} onClick={() => { if (window.confirm('重新载入会替换当前本地修改。已完成导出或比较？')) void perform('重新载入', () => loadDraft(doc.definition.graph_id)); }}><RefreshCw size={15} />重新载入服务器草稿</button></div>}
         {viewVersion && <div className="version-banner"><ShieldCheck size={16} /><span>发布版本 v{viewVersion.version}</span><button onClick={() => void perform('导出 Bundle', async () => { const bundle = await api<unknown>(`/api/graph-versions/${viewVersion.graph_version_id}/bundle`); const url = URL.createObjectURL(new Blob([JSON.stringify(bundle, null, 2)], { type: 'application/json' })); const link = document.createElement('a'); link.href = url; link.download = `${viewVersion.graph_id}-v${viewVersion.version}.bundle.json`; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000); })}>导出 Bundle</button><button onClick={() => { setViewVersion(null); setSelection(null); setValidation(null); }}>返回草稿</button></div>}
         {panel === 'execution' ? <ReactFlowProvider key={doc.definition.graph_id}><GraphExecution token={token} graphId={doc.definition.graph_id} layout={doc.layout} /></ReactFlowProvider> : panel === 'canvas' ? <div className="canvas" data-testid="canvas">
-          <ReactFlow<CanvasNode> nodes={canvas.nodes} edges={canvas.edges} nodeTypes={nodeTypes}
+          <ReactFlow<CanvasNode> nodes={flowNodes} edges={canvas.edges} nodeTypes={nodeTypes}
+            edgeTypes={edgeTypes} onNodesChange={onFlowNodesChange}
             nodesDraggable={editable} nodesConnectable={editable} edgesReconnectable={false}
             deleteKeyCode={null} multiSelectionKeyCode={null} selectionKeyCode={null}
             defaultEdgeOptions={{ markerEnd: { type: MarkerType.ArrowClosed, color: '#829b96' }, style: { strokeWidth: 1.7, stroke: '#829b96' } }}

@@ -5,6 +5,7 @@ import {
 } from '@xyflow/react';
 import { Activity, AlertTriangle, Bot, CheckCircle2 } from 'lucide-react';
 import { label } from './execution';
+import { RoutedEdge } from './RoutedEdge';
 
 export type ExecutionFlowNode = Node<{
   name: string;
@@ -27,6 +28,7 @@ function ExecutionNodeView({ data, selected }: NodeProps<ExecutionFlowNode>) {
 }
 
 const nodeTypes = { execution: ExecutionNodeView };
+const edgeTypes = { routed: RoutedEdge };
 
 function FitExecution({ container }: { container: RefObject<HTMLDivElement | null> }) {
   const flow = useReactFlow();
@@ -80,6 +82,7 @@ function MeasuredExecutionCanvas({ nodes, edges, onSelectNode }: CanvasProps) {
       onNodesChange={onNodesChange}
       edges={edges}
       nodeTypes={nodeTypes}
+      edgeTypes={edgeTypes}
       nodesDraggable={false}
       nodesConnectable={false}
       deleteKeyCode={null}

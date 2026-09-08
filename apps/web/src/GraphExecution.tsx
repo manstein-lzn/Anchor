@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { MarkerType } from '@xyflow/react';
 import { CheckCircle2, Download, Play, RefreshCw, X, FileText, Square } from 'lucide-react';
 import { request, serverNow } from './api';
-import { project, type Layout, type Version, type NodeSpec } from './graph';
+import { layeredLayout, project, type Layout, type Version, type NodeSpec } from './graph';
 import { executionAttempt, reviewOutcome, reviewDisplay, type ReviewOutcome } from './execution';
 import { decisionFor, elapsed, label, latestNodes, nodeState, terminal, type ExecutionRun, type ExecutionNode, type ExecutionLease, type ExecutionDecision, type ExecutionOperation, type ExecutionDiagnostic, type ExecutionProgress } from './execution';
 import { ExecutionCanvas, type ExecutionFlowNode } from './ExecutionCanvas';
@@ -99,6 +99,8 @@ export function GraphExecution({ token, graphId, layout }: { token: string; grap
   const stalled = liveSnapshot?.leases.some(item => item.state !== 'healthy') || [...latest.values()].some(node => nodeState(node, liveSnapshot?.leases ?? []) === 'stalled');
   const runState = liveSnapshot ? (liveSnapshot.run.status === 'running' && stalled ? 'stalled' : liveSnapshot.run.status) : '';
   const graph = useMemo(() => version ? project({ definition: version.definition, layout }, null, true) : { nodes: [], edges: [] }, [version, layout]);
+  // Execution nodes are larger than builder nodes, so lay out for their size.
+  const auto = useMemo(() => version ? layeredLayout(version.definition, 240, 146) : new Map<string, { x: number; y: number }>(), [version]);
   const gateId = version?.definition.nodes.find(spec => academicRole(spec) === 'review_gate')?.id;
   const completedChecks = liveSnapshot?.nodes.filter(node => node.node_id === gateId && node.status === 'completed').length ?? 0;
   const plannerId = version?.definition.nodes.find(spec => academicRole(spec) === 'planner')?.id;
@@ -137,7 +139,7 @@ export function GraphExecution({ token, graphId, layout }: { token: string; grap
     const display = displayFor(state, node.data.spec);
     const detail = retrying ? '等待失败后重试' : display.detail || (state?.status === 'failed' ? label(state.error_code || 'failed') : '') || activity || (lease ? `已执行 ${elapsed(lease.lease.acquired_at, now)}` : state ? `更新 ${new Date(state.updated_at).toLocaleTimeString()}` : '等待依赖');
     return { ...node, type: 'execution', width: 240, height: 146, selected: node.id === nodeId,
-      position: layout.positions?.[node.id] ?? { x: 70 + graph.nodes.indexOf(node) % 3 * 300, y: 60 + Math.floor(graph.nodes.indexOf(node) / 3) * 210 },
+      position: layout.positions?.[node.id] ?? auto.get(node.id) ?? node.position,
       data: { name: node.data.spec.name, kind: node.data.spec.type, state: retrying ? 'retrying' : display.state, statusLabel: display.statusLabel, detail,
         attempt: state && !['pending', 'skipped'].includes(state.status) ? state.attempt : undefined } };
   });
@@ -148,7 +150,10 @@ export function GraphExecution({ token, graphId, layout }: { token: string; grap
     // the underlying connection.
     const color = decision?.selected ? '#167568' : decision ? '#8d9e99' : '#829b96';
     return { ...edge, label: decision ? (decision.selected ? '已通过' : '未选择') : edge.label,
-      style: { stroke: color, strokeWidth: decision?.selected ? 2.5 : 1.7, opacity: 1 },
+      // Selection is conveyed by colour, width and dash so the canvas stays
+      // readable; the text badge only appears on hover or selection.
+      style: { stroke: color, strokeWidth: decision?.selected ? 2.5 : 1.7, opacity: 1,
+        strokeDasharray: decision && !decision.selected ? '5 5' : undefined },
       markerEnd: { type: MarkerType.ArrowClosed, color } };
   }), [graph.edges, liveSnapshot?.decisions, latest]);
   const history = (liveSnapshot?.nodes.filter(node => node.node_id === nodeId) ?? []).sort((a, b) => b.attempt - a.attempt);

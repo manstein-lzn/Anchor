@@ -64,3 +64,35 @@ describe('Graph IR document', () => {
     expect(() => parseDocument(value)).toThrow();
   });
 });
+
+describe('layered auto layout', () => {
+  const layered = {
+    graph_id: 'layered', name: 'Layered',
+    nodes: [
+      { id: 'a', type: 'agent' as const, name: 'A' },
+      { id: 'b', type: 'agent' as const, name: 'B' },
+      { id: 'c', type: 'agent' as const, name: 'C' },
+      { id: 'd', type: 'agent' as const, name: 'D' },
+    ],
+    edges: [{ source: 'a', target: 'b' }, { source: 'a', target: 'c' },
+            { source: 'b', target: 'd' }, { source: 'c', target: 'd' }],
+  };
+  it('places graph nodes without saved positions on distinct layered coordinates', () => {
+    const canvas = project(parseDocument(layered), null, true);
+    const seen = new Set(canvas.nodes.map(node => `${node.position.x},${node.position.y}`));
+    expect(seen.size).toBe(4);
+    // a precedes b/c on the x axis; b/c precede d (left-to-right ranks)
+    const at = (id: string) => canvas.nodes.find(node => node.id === id)!.position;
+    expect(at('a').x).toBeLessThan(at('b').x);
+    expect(at('b').x).toBeLessThan(at('d').x);
+  });
+  it('keeps saved drag positions authoritative and is stable across polls', () => {
+    const doc = parseDocument({ definition: layered, layout: { positions: { a: { x: 5, y: 7 } } } });
+    expect(project(doc, null, true).nodes.find(node => node.id === 'a')!.position).toEqual({ x: 5, y: 7 });
+    expect(project(doc, null, true)).toEqual(project(doc, null, true));
+  });
+  it('handles a cyclic graph without throwing', () => {
+    const cyclic = { ...layered, edges: [...layered.edges, { source: 'd', target: 'a' }] };
+    expect(() => project(parseDocument(cyclic), null, true)).not.toThrow();
+  });
+});
