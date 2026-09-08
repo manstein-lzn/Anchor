@@ -131,6 +131,18 @@ generation-numbered snapshot with a SHA-256 hash. The resolver reuses that
 canonical snapshot during replay/recovery; inspect snapshots through
 `GET /api/runs/{run_id}/contexts` or the Run Console.
 
+Side-effect tools are opt-in and gated: `http.post` runs only when the capability
+declares `side_effect`, the node names an `owner_agent`, and a completed approval
+precedes it. A transport failure after the request was sent becomes
+`outcome_unknown`; the node keeps its lease until an operator reconciles the
+operation (`POST /api/operations/{id}/reconcile`), which deterministically
+completes or fails the node without a second attempt.
+
+Runs can be paused and resumed without touching in-flight work or artifacts:
+`POST /api/runs/{id}/pause` fences new claims, `POST /api/runs/{id}/resume`
+returns the run to running. The Web trigger panel registers manual, cron,
+interval, internal-event and webhook triggers against one immutable version.
+
 Run deterministic Router, Parallel/Join and Artifact nodes through the separate
 control worker. It never calls a model and cannot claim Agent/Tool/Verifier nodes:
 

@@ -97,6 +97,15 @@
   survives a worker or supervisor restart without an in-process sleep
 - `GET /api/runs/{run_id}/progress`, `GET /api/runs/{run_id}/diagnostics` and
   operator supersede; Run Console diagnostics and progress-evidence sections
+- Explicit side-effect HTTP tool (`http.post`) with an approval-predecessor gate; the
+  gateway refuses side-effect tools unless the caller proves approval, and agent
+  tool loops can never obtain one
+- `outcome_unknown` is never retried: the operator reconciles the operation with
+  external evidence and the ledger deterministically completes or fails the node
+- Run pause/resume: pause fences new claims while in-flight nodes finish; resume
+  returns the run to running (`POST /api/runs/{id}/pause|resume`)
+- Web trigger management against one immutable published version; webhook triggers
+  carry a secret reference only
 - Dagre layered auto-layout for graphs without saved drag positions; saved positions win
 - Bezier forward edges with per-fan-out curvature, backward edges routed below the graph,
   hover/selection-only labels, and a wide interaction path
@@ -119,7 +128,6 @@
 
 - Failure fan-out/cancellation of in-flight sibling branches and dispatch supervision
   beyond receiver retry logging
-- Operation reconciliation policies and actual side-effect adapters
 - PostgreSQL/vector memory projection and worker recovery supervision
 - Context engine and memory policies beyond the durable input snapshot boundary
 - MCP/A2A gateways

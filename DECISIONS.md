@@ -431,3 +431,29 @@ drops every connection. The canvas therefore keeps nodes in `useNodesState`,
 carries `measured` across document sync, skips syncing during an in-flight drag,
 and declares edge types as a module constant. This is a rendering contract, not
 a cosmetic preference.
+
+## ADR-023: Unknown side effects are reconciled by a human, never retried
+
+A side effect whose outcome cannot be proven must not be retried automatically.
+The ledger already recorded `outcome_unknown`; this ADR closes the loop with a
+usable operator path and a real producer.
+
+The producer is an explicit side-effect tool (`http.post`). It runs only when
+the tool capability declares `side_effect`, the node names an `owner_agent`, and
+the node has a completed `approval`/`human_task` predecessor. The gateway still
+refuses side-effect tools by default, so an agent tool loop can never obtain one.
+Timeouts and transport failures after the request was sent become
+`outcome_unknown` with `transport_unknown`; a definite HTTP error stays `failed`.
+
+The node stays `running` with its lease. The operator reconciles the operation
+with external evidence (`POST /api/operations/{id}/reconcile`), and the ledger
+then deterministically resolves the node: a reconciled success completes it with
+the recorded result artifact, a reconciled failure fails it. Neither path creates
+a second attempt row, so the side effect cannot be silently repeated. The tool
+lease remains unrecoverable through the generic lease-recovery path.
+
+Run control is explicit and reversible: `pause` stops accepting new claims while
+in-flight nodes finish and their downstream stays ready; `resume` returns the run
+to running. `stop` remains the terminal operator action. Triggers are authored in
+the Web UI against one immutable published version, and webhook triggers carry a
+secret reference, never a secret value.

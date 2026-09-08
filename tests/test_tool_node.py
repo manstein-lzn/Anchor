@@ -153,3 +153,60 @@ def test_tool_lease_is_never_recoverable_through_lease_path(tmp_path):
         assert (assessment.state, assessment.recoverable) == ("unknown", False)
     finally:
         store.close()
+
+
+class _SpyGateway:
+    """Records the approval flag without executing anything."""
+
+    def __init__(self):
+        self.approved = None
+
+    def execute(self, lease, **kwargs):
+        self.approved = kwargs.get("approved")
+        from anchor.runtime.tool_gateway import ToolCallResult
+        from anchor.domain.operations import OperationStatus
+        return ToolCallResult(operation_id=kwargs["operation_id"],
+                              status=OperationStatus.FAILED, error_code="spy")
+
+
+def test_side_effect_tool_receives_approval_only_after_a_completed_approval_node(tmp_path):
+    from anchor.domain.graph import GraphDefinition, GraphEdge, GraphNode, GraphVersion, Trigger
+    from anchor.domain.admission import RunRequest
+    from anchor.runtime.dispatch import dispatch_pending
+    from anchor.runtime.receiver import DurableExecutionReceiver
+
+    store = make_store(tmp_path, "approval-gate.sqlite")
+    artifacts = LocalArtifactStore(tmp_path / "artifacts")
+    definition = GraphDefinition(
+        graph_id="approval-gate", name="Approval gate",
+        nodes=[GraphNode(id="start", type="agent", name="Start", agent_ref="agents.reader"),
+               GraphNode(id="g", type="approval", name="Gate"),
+               GraphNode(id="t", type="tool", name="T", tool_ref="db.write",
+                         metadata={"owner_agent": "agents.reader"}),
+               GraphNode(id="end", type="agent", name="End", agent_ref="agents.reader")],
+        edges=[GraphEdge(source="start", target="g"), GraphEdge(source="g", target="t"),
+               GraphEdge(source="t", target="end")])
+    store.publish_graph(GraphVersion.publish(definition, 1))
+    version = store.list_graph_versions("approval-gate")[0]
+    trigger = store.create_trigger(Trigger(graph_version_id=version.graph_version_id,
+                                           type="manual"))
+    receipt = store.admit_run(RunRequest(trigger_id=trigger.id,
+                                         idempotency_key=f"gate-{uuid4().hex}",
+                                         objective="gate", inputs={}))
+    asyncio.run(dispatch_pending(store, DurableExecutionReceiver(store)))
+    spy = _SpyGateway()
+    worker = ControlNodeWorker(store, artifacts,
+                               ArtifactCheckpointSink(store, artifacts, "control"),
+                               tools=spy, registry=registry())
+    try:
+        complete_agent(store, artifacts, "start", json.dumps(["hi"]))
+        # The tool node cannot run before the approval gate is decided.
+        assert store.claim_ready_control_node("control", uuid4()) is None
+        gate = next(item for item in store.list_node_runs(receipt.run_id) if item.node_id == "g")
+        store.decide_approval(gate.id, approved=True, reason="authorised", actor="owner",
+                              output_ref=artifacts.put_text('{"decision":"approved"}'))
+        with pytest.raises(ValueError, match="spy"):
+            asyncio.run(worker.execute_once(worker_id="control"))
+        assert spy.approved is True
+    finally:
+        store.close()

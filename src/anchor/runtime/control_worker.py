@@ -21,6 +21,14 @@ from anchor.runtime.sinks import ArtifactCheckpointSink
 from anchor.runtime.tool_gateway import ToolDenied
 
 
+class ToolOutcomeUnknown(RuntimeError):
+    """A side-effect tool may have executed remotely; reconciliation is required.
+
+    The node deliberately stays running with its lease so the operator can
+    reconcile the operation ledger and then apply the resolved outcome.
+    """
+
+
 logger = logging.getLogger("anchor.control_worker")
 
 
@@ -113,6 +121,21 @@ class ControlNodeWorker:
             output_ref=output_ref,
         )
 
+    def _approved_for_side_effect(self, *, resolved, run_id) -> bool:
+        """A side-effect tool node needs a completed approval/human predecessor."""
+        from anchor.domain.graph import NodeType
+        sources = {edge.source for edge in resolved.graph.definition.edges
+                   if edge.target == resolved.node.id}
+        types = {node.id: node.type for node in resolved.graph.definition.nodes}
+        runs = self.store.list_node_runs(run_id)
+        for source in sources:
+            if types.get(source) not in (NodeType.APPROVAL, NodeType.HUMAN_TASK):
+                continue
+            history = [item for item in runs if item.node_id == source]
+            if history and max(history, key=lambda item: item.attempt).status.value == "completed":
+                return True
+        return False
+
     async def execute_tool_once(self, *, worker_id: str, lease, resolved) -> ControlOutcome:
         """Execute one tool node through the ledger-backed gateway."""
         from anchor.domain.conditions import build_condition_context
@@ -125,17 +148,27 @@ class ControlNodeWorker:
             self.store.fail_node_and_propagate(
                 lease.claim_id, worker_id, error_code="tool_no_owner", phase="tool")
             raise ValueError(f"tool node {node_id!r} declares no owner_agent")
+        tool = self.registry.tool(resolved.node.tool_ref or "") if self.registry is not None else None
+        approved = bool(tool is not None and tool.side_effect
+                        and self._approved_for_side_effect(resolved=resolved, run_id=lease.run_id))
         snapshot = resolved.snapshot if isinstance(resolved.snapshot, dict) else {}
         operation_id = uuid5(lease.claim_id, (resolved.node.tool_ref or "tool") + ":1")
         try:
             result = self.tools.execute(
                 lease, agent_ref=owner, tool_ref=resolved.node.tool_ref or "",
-                arguments=snapshot, operation_id=operation_id)
+                arguments=snapshot, operation_id=operation_id, approved=approved)
         except ToolDenied as exc:
             self.store.fail_node_and_propagate(
                 lease.claim_id, worker_id, error_code="tool_denied", phase="tool")
             logger.warning("tool node %s denied [%s]: %s", node_id, exc.code, exc)
             raise ValueError(f"tool node {node_id!r} denied [{exc.code}]") from exc
+        if result.status is OperationStatus.OUTCOME_UNKNOWN:
+            # Never retry or fail automatically: the remote may have acted. Keep
+            # the lease and let the operator reconcile the ledger, then apply.
+            logger.warning("tool node %s outcome unknown [%s]; reconciliation required",
+                           node_id, result.error_code)
+            raise ToolOutcomeUnknown(
+                f"tool node {node_id!r} outcome unknown [{result.error_code}]")
         if result.status is not OperationStatus.SUCCEEDED or not result.result_ref:
             self.store.fail_node_and_propagate(
                 lease.claim_id, worker_id,

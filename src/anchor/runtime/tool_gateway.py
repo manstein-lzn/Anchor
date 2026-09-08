@@ -43,6 +43,8 @@ logger = logging.getLogger("anchor.tool_gateway")
 
 OUTPUT_LIMIT = 1_000_000
 DEFAULT_TIMEOUT_SECONDS = 30.0
+HTTP_TOOLS = frozenset({"http.post"})
+_HTTP_BODY_LIMIT = 2000
 WORKSPACE_MOUNT = "/tmp"
 # NOTE: bubblewrap creates mount points top-down, so the workspace reuses the
 # existing /tmp (mounted over read-only /) instead of a fresh directory.
@@ -56,6 +58,15 @@ class ToolDenied(RuntimeError):
     def __init__(self, code: str, message: str) -> None:
         self.code = code
         super().__init__(f"{code}: {message}")
+
+
+class HttpOutcomeUnknown(RuntimeError):
+    """The request may have reached the remote; the side effect is unknown.
+
+    Timeouts and transport failures after the request was sent cannot prove the
+    remote did not act, so the operation becomes `outcome_unknown` and requires
+    operator reconciliation instead of an automatic retry.
+    """
 
 
 @dataclass(frozen=True)
@@ -161,6 +172,8 @@ class ToolCall(DomainModel):
 
     args: list[str] = []
     path: str | None = None
+    url: str | None = None
+    body: dict = {}
 
 
 class ToolGateway:
@@ -182,9 +195,41 @@ class ToolGateway:
             return ["/bin/cat", call.path]
         raise ToolDenied("unknown_tool", f"no executable mapping for tool: {tool_ref}")
 
+    @staticmethod
+    def _validate_http(call: ToolCall, *, allow_private: bool) -> None:
+        from urllib.parse import urlsplit
+        if not call.url or urlsplit(call.url).scheme not in ("http", "https"):
+            raise ToolDenied("invalid_url", "http.post requires an http(s) url")
+        host = urlsplit(call.url).hostname or ""
+        if not host:
+            raise ToolDenied("invalid_url", "http.post url has no host")
+        if allow_private:
+            return
+        import ipaddress
+        import socket
+        try:
+            addresses = {item[4][0] for item in socket.getaddrinfo(host, None)}
+        except OSError:
+            raise ToolDenied("unresolved_host", f"http.post cannot resolve {host}") from None
+        for address in addresses:
+            ip = ipaddress.ip_address(address)
+            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+                raise ToolDenied("private_network",
+                                 f"http.post refuses private/loopback host {host}; "
+                                 "set allow_private_network only for a trusted internal endpoint")
+
+    def _execute_http(self, call: ToolCall, *, timeout_seconds: float):
+        import httpx2
+        try:
+            return httpx2.post(call.url, json=call.body or {}, timeout=timeout_seconds,
+                               follow_redirects=False, trust_env=False)
+        except (httpx2.TimeoutException, httpx2.TransportError) as exc:
+            raise HttpOutcomeUnknown(str(exc)) from exc
+
     def execute(self, lease, *, agent_ref: str, tool_ref: str,
                 arguments: dict, operation_id: UUID,
-                timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS) -> ToolCallResult:
+                timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
+                approved: bool = False) -> ToolCallResult:
         try:
             tool = self.registry.tool(tool_ref)
         except CapabilityRegistryError:
@@ -195,9 +240,9 @@ class ToolGateway:
             raise ToolDenied("unknown_agent", f"agent is not registered: {agent_ref}") from None
         if tool_ref not in agent.tool_refs:
             raise ToolDenied("out_of_scope", f"agent {agent_ref} may not use tool {tool_ref}")
-        if tool.side_effect:
+        if tool.side_effect and not approved:
             raise ToolDenied("approval_required",
-                             f"side-effect tool {tool_ref} needs tool-level approval (pending)")
+                             f"side-effect tool {tool_ref} requires an explicit approval gate")
         if not isinstance(arguments, dict):
             raise ToolDenied("invalid_arguments", "tool arguments must be an object")
         for key in arguments:
@@ -210,7 +255,9 @@ class ToolGateway:
                     else ToolCall.model_validate(arguments))
         except ValueError as exc:
             raise ToolDenied("invalid_arguments", f"tool arguments rejected: {exc}") from None
-        argv = None if tool_ref in RESEARCH_TOOLS else self._build_argv(tool_ref, call)
+        if tool_ref in HTTP_TOOLS:
+            self._validate_http(call, allow_private=tool.allow_private_network)
+        argv = None if tool_ref in RESEARCH_TOOLS or tool_ref in HTTP_TOOLS else self._build_argv(tool_ref, call)
 
         operation = ToolOperation.register(
             operation_id=operation_id, claim_id=lease.claim_id,
@@ -243,6 +290,29 @@ class ToolGateway:
             return ToolCallResult(operation_id=operation_id, status=stored.status,
                                   result_ref=stored.result_ref, error_code=stored.error_code)
         self.store.start_tool_operation(operation_id, lease.claim_id)
+        if tool_ref in HTTP_TOOLS:
+            try:
+                response = self._execute_http(call, timeout_seconds=timeout_seconds)
+            except HttpOutcomeUnknown as exc:
+                finished = self.store.finish_tool_operation(
+                    operation_id, lease.claim_id, status=OperationStatus.OUTCOME_UNKNOWN,
+                    error_code="transport_unknown")
+                logger.warning("tool %s outcome unknown [transport_unknown]: %s", tool_ref, exc)
+                return ToolCallResult(operation_id=operation_id, status=finished.status,
+                                      error_code=finished.error_code)
+            body = json.dumps({"status": response.status_code,
+                               "body": response.text[:_HTTP_BODY_LIMIT]})
+            ref = self.artifacts.put_text(body, media_type="application/json")
+            if 200 <= response.status_code < 300:
+                finished = self.store.finish_tool_operation(
+                    operation_id, lease.claim_id, status=OperationStatus.SUCCEEDED,
+                    result_ref=ref)
+            else:
+                finished = self.store.finish_tool_operation(
+                    operation_id, lease.claim_id, status=OperationStatus.FAILED,
+                    result_ref=ref, error_code=f"http_{response.status_code}")
+            return ToolCallResult(operation_id=operation_id, status=finished.status,
+                                  result_ref=finished.result_ref, error_code=finished.error_code)
         if tool_ref in RESEARCH_TOOLS:
             try:
                 text = execute_research(tool_ref, call, timeout_seconds=timeout_seconds)

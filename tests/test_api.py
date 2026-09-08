@@ -1,5 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 import hashlib
@@ -82,6 +82,35 @@ def test_graph_run_filter_and_stop_are_scoped_and_idempotent(client):
     assert api.get('/api/runs?graph_id=another-graph').json() == []
     assert api.post(f'/api/runs/{run_id}/stop', json={'reason': 'stop'}).json()['status'] == 'cancelled'
     assert api.post(f'/api/runs/{run_id}/stop', json={'reason': 'retry'}).json()['status'] == 'cancelled'
+
+
+def test_pause_and_resume_fence_new_claims_without_touching_artifacts(client):
+    api, store = client
+    version = publish(api)
+    trigger_id = register(api, version)
+    receipt = api.post(f'/api/triggers/{trigger_id}/runs', json={'objective': 'Pausable'},
+                      headers={'Idempotency-Key': 'pause-resume-1'}).json()
+    run_id = receipt['run_id']
+    from anchor.runtime.receiver import DurableExecutionReceiver
+    import asyncio
+    asyncio.run(DurableExecutionReceiver(store).accept(store.pending_dispatches()[0]))
+    lease = store.claim_ready_node('worker-a', uuid4())
+    assert lease is not None
+
+    paused = api.post(f'/api/runs/{run_id}/pause', json={'reason': 'operator pause', 'actor': 'tester'}).json()
+    assert paused['status'] == 'paused'
+    # No worker can pick up ready work while paused.
+    assert store.claim_ready_node('worker-b', uuid4()) is None
+    # Pausing is idempotent and cannot run twice.
+    assert api.post(f'/api/runs/{run_id}/pause', json={'reason': 'again'}).json()['status'] == 'paused'
+
+    resumed = api.post(f'/api/runs/{run_id}/resume', json={'reason': 'continue', 'actor': 'tester'}).json()
+    assert resumed['status'] == 'running'
+    # In-flight lease is untouched; the run accepts new work again.
+    assert store.list_active_leases()[0].claim_id == lease.claim_id
+    assert api.post(f'/api/runs/{run_id}/resume', json={'reason': 'again'}).status_code == 409
+    events = [event['event_type'] for event in store.list_events(UUID(run_id))]
+    assert 'run.paused' in events and 'run.resumed' in events
 
 
 def test_active_lease_endpoint_run_filter_is_narrow(client):
@@ -462,11 +491,15 @@ def test_validation_errors_do_not_echo_payload_or_tokens(client):
     assert TOKEN not in response.text
 
 
-def test_openapi_advertises_bearer_and_no_execution_controls(client):
+def test_openapi_advertises_bearer_and_no_arbitrary_execution(client):
     api, _ = client
     spec = api.get("/openapi.json").json()
     assert spec["paths"]["/api/graphs"]["get"]["security"] == [{"HTTPBearer": []}]
-    assert "/api/runs/{run_id}/resume" not in spec["paths"]
+    # Operator controls are explicit and authenticated; no endpoint executes a
+    # model or tool on demand outside the durable claim/lease path.
+    for path in ("/api/runs/{run_id}/stop", "/api/runs/{run_id}/pause", "/api/runs/{run_id}/resume"):
+        assert spec["paths"][path]["post"]["security"] == [{"HTTPBearer": []}]
+    assert not any("execute" in path for path in spec["paths"])
 
 
 def test_concurrent_publication_returns_one_version(client):
@@ -641,3 +674,60 @@ def test_memory_propose_review_and_filters(client, monkeypatch, tmp_path):
     bad = api.post(f"/api/memory/{proposed['memory_id']}/review",
                    json={"status": "promoted", "reviewer": "owner", "reason": "again"})
     assert bad.status_code == 422
+
+
+def test_unknown_operation_reconciliation_completes_or_fails_the_node(client, monkeypatch, tmp_path):
+    from anchor.domain.graph import GraphDefinition, GraphNode, GraphVersion, Trigger
+    from anchor.domain.operations import OperationStatus, ToolOperation
+    from anchor.runtime.artifacts import LocalArtifactStore
+    from anchor.runtime.receiver import DurableExecutionReceiver
+    import asyncio
+
+    api, store = client
+    monkeypatch.setenv("ANCHOR_ARTIFACT_ROOT", str(tmp_path / "artifacts"))
+    artifacts = LocalArtifactStore(str(tmp_path / "artifacts"))
+
+    def unknown_operation(graph_id, key):
+        version = store.publish_graph(GraphVersion.publish(GraphDefinition(
+            graph_id=graph_id, name=graph_id,
+            nodes=[GraphNode(id="notify", type="tool", name="Notify", tool_ref="http.post",
+                             metadata={"owner_agent": "agents.writer"})]), 1))
+        trigger = store.create_trigger(Trigger(graph_version_id=version.graph_version_id,
+                                               type="manual"))
+        receipt = api.post(f"/api/triggers/{trigger.id}/runs", json={"objective": "notify"},
+                           headers={"Idempotency-Key": key}).json()
+        asyncio.run(DurableExecutionReceiver(store).accept(store.pending_dispatches()[-1]))
+        lease = store.claim_ready_node("tool-worker", uuid4())
+        operation_id = uuid4()
+        store.register_tool_operation(ToolOperation.register(
+            operation_id=operation_id, claim_id=lease.claim_id, node_run_id=lease.node_run_id,
+            run_id=lease.run_id, tool_ref="http.post", arguments={"url": "https://example.test"}))
+        store.start_tool_operation(operation_id, lease.claim_id)
+        store.finish_tool_operation(operation_id, lease.claim_id,
+                                    status=OperationStatus.OUTCOME_UNKNOWN,
+                                    error_code="transport_unknown")
+        return receipt, lease, operation_id
+
+    # Success: reconciliation completes the node and opens the terminal run.
+    receipt, lease, operation_id = unknown_operation("reconcile-success", "reconcile-1")
+    result_ref = artifacts.put_text('{"delivered": true}', media_type="application/json")
+    response = api.post(f"/api/operations/{operation_id}/reconcile", json={
+        "status": "succeeded", "reconciliation_ref": "provider://receipt/1",
+        "result_ref": result_ref, "reason": "provider confirms delivery", "actor": "tester"})
+    assert response.status_code == 200, response.text
+    assert response.json()["operation"]["status"] == "succeeded"
+    assert response.json()["node_run"]["status"] == "completed"
+    assert api.get(f"/api/runs/{receipt['run_id']}").json()["status"] == "completed"
+    # Unknown outcomes are never retried automatically: the ledger keeps the
+    # reconciliation evidence and no second attempt row was created.
+    assert len([n for n in store.list_node_runs(receipt["run_id"]) if n.node_id == "notify"]) == 1
+
+    # Failure: reconciliation fails the node and the run, with no downstream work.
+    receipt, lease, operation_id = unknown_operation("reconcile-failure", "reconcile-2")
+    response = api.post(f"/api/operations/{operation_id}/reconcile", json={
+        "status": "failed", "reconciliation_ref": "provider://receipt/2",
+        "error_code": "reconciled_not_delivered", "reason": "provider confirms failure",
+        "actor": "tester"})
+    assert response.status_code == 200, response.text
+    assert response.json()["node_run"]["status"] == "failed"
+    assert api.get(f"/api/runs/{receipt['run_id']}").json()["status"] == "failed"

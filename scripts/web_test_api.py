@@ -1,7 +1,10 @@
 """Disposable real API for browser tests; never opens the development database."""
 
+import asyncio
 import os
 import json
+import threading
+import time
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -10,6 +13,8 @@ from alembic import command
 from alembic.config import Config
 
 from anchor.api.app import create_app
+from anchor.runtime.dispatch import dispatch_pending
+from anchor.runtime.receiver import DurableExecutionReceiver
 
 
 if __name__ == "__main__":
@@ -39,4 +44,23 @@ if __name__ == "__main__":
         config.set_main_option("script_location", str(root / "migrations"))
         command.upgrade(config, "head")
         app = create_app(token="anchor-browser-tests-only-not-a-real-secret")
+
+        def pump():
+            """Accept admitted runs so the browser sees queued/running states.
+
+            There is deliberately no model worker here: nodes stay ready, so the
+            UI exercises real admission and operator controls without any
+            provider call.
+            """
+            while True:
+                time.sleep(0.3)
+                store = getattr(app.state, "store", None)
+                if store is None:
+                    continue
+                try:
+                    asyncio.run(dispatch_pending(store, DurableExecutionReceiver(store)))
+                except Exception:
+                    pass
+
+        threading.Thread(target=pump, daemon=True).start()
         uvicorn.run(app, host="127.0.0.1", port=8091)

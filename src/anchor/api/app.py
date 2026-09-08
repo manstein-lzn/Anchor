@@ -80,6 +80,20 @@ class LeaseRecovery(DomainModel):
     reason: str = Field(min_length=1, max_length=500)
 
 
+class RunControl(DomainModel):
+    reason: str = Field(min_length=1, max_length=2000)
+    actor: str = Field(default="operator", min_length=1, max_length=200)
+
+
+class OperationReconciliation(DomainModel):
+    status: Literal["succeeded", "failed"]
+    reconciliation_ref: str = Field(min_length=1, max_length=1000)
+    result_ref: str | None = Field(default=None, max_length=1000)
+    error_code: str | None = Field(default=None, max_length=200)
+    reason: str = Field(min_length=1, max_length=2000)
+    actor: str = Field(default="operator", min_length=1, max_length=200)
+
+
 class ApprovalDecision(DomainModel):
     reason: str = Field(min_length=1, max_length=2000)
     actor: str = Field(default="operator", min_length=1, max_length=200)
@@ -414,6 +428,14 @@ def create_app(store: RelationalStateStore | None = None, token: str | None = No
     def stop_run(run_id: UUID, body: LeaseRecovery, db: DB):
         return db.stop_run(run_id, reason=body.reason)
 
+    @app.post("/api/runs/{run_id}/pause", response_model=Run, dependencies=auth)
+    def pause_run(run_id: UUID, body: RunControl, db: DB):
+        return db.pause_run(run_id, reason=body.reason, actor=body.actor)
+
+    @app.post("/api/runs/{run_id}/resume", response_model=Run, dependencies=auth)
+    def resume_run(run_id: UUID, body: RunControl, db: DB):
+        return db.resume_run(run_id, reason=body.reason, actor=body.actor)
+
     @app.get("/api/tasks/{task_id}", response_model=Task, dependencies=auth)
     def task(task_id: UUID, db: DB):
         return required(db.get_task(task_id))
@@ -464,6 +486,24 @@ def create_app(store: RelationalStateStore | None = None, token: str | None = No
     def operations(run_id: UUID, db: DB):
         required(db.get_run(run_id))
         return db.list_tool_operations(run_id)
+
+    @app.post("/api/operations/{operation_id}/reconcile", dependencies=auth)
+    def reconcile_operation(operation_id: UUID, body: OperationReconciliation, db: DB):
+        """Resolve an unknown side effect with external evidence, then apply it.
+
+        The operation ledger is the source of truth: reconciliation records the
+        evidence and the node consequence (complete on success, fail on failure)
+        is deterministic. Unknown outcomes are never retried automatically.
+        """
+        from anchor.domain.operations import OperationStatus
+        status = OperationStatus(body.status)
+        operation = required(db.get_tool_operation(operation_id))
+        reconciled = db.reconcile_tool_operation(
+            operation_id, status=status, reconciliation_ref=body.reconciliation_ref,
+            result_ref=body.result_ref, error_code=body.error_code)
+        node_run = db.resolve_reconciled_operation(
+            operation_id, actor=body.actor, reason=body.reason)
+        return {"operation": reconciled, "node_run": node_run}
 
     @app.post("/api/leases/{claim_id}/recover", response_model=NodeRun, dependencies=auth)
     def recover_lease(claim_id: UUID, body: LeaseRecovery, db: DB):

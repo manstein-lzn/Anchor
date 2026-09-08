@@ -143,11 +143,18 @@ test('start and stop a real run on its pinned graph, desktop and mobile', async 
   await expect(page.locator('.execution-summary')).toHaveCount(0);
   await page.getByLabel('研究主题 / 任务目标').fill('编译优化 autotune cost model 研究进展');
   await page.getByRole('button', { name: '确认运行' }).click();
-  await expect(page.locator('.execution-summary')).toContainText('已接纳');
+  await expect(page.locator('.execution-summary')).toContainText(/已接纳|已排队/);
   const runs = await (await page.request.get(`/api/runs?graph_id=${graphId}`, { headers })).json();
   expect(runs).toHaveLength(1);
   expect(runs[0].graph_version_id).toBe(version.graph_version_id);
   await expect(page.locator('.execution-budget')).toContainText('30 分钟');
+  // Operator pause stops new claims; resume returns the run to running.
+  await expect(page.getByRole('button', { name: '暂停运行', exact: true })).toBeVisible();
+  page.once('dialog', dialog => dialog.accept());
+  await page.getByRole('button', { name: '暂停运行', exact: true }).click();
+  await expect(page.locator('.execution-summary')).toContainText('已暂停');
+  await page.getByRole('button', { name: '恢复运行', exact: true }).click();
+  await expect(page.locator('.execution-summary')).toContainText(/执行中|已排队/);
   await page.locator('.execution-node').filter({ hasText: 'Independent scholarly review' }).click();
   await expect(page.getByLabel('执行详情', { exact: true })).toBeVisible();
   await expect(page.getByLabel('执行详情', { exact: true })).toContainText('等待依赖');
@@ -167,7 +174,7 @@ test('start and stop a real run on its pinned graph, desktop and mobile', async 
   await page.getByRole('button', { name: '发起运行' }).click();
   await page.getByLabel('研究主题 / 任务目标').fill('第二次运行用于验证画布实例隔离');
   await page.getByRole('button', { name: '确认运行' }).click();
-  await expect(page.locator('.execution-summary')).toContainText('已接纳');
+  await expect(page.locator('.execution-summary')).toContainText(/已接纳|已排队/);
   await expectRenderedEdges(page, 3);
   await page.setViewportSize({ width: 390, height: 844 });
   await expect(page.getByTestId('execution-canvas')).toBeVisible();
@@ -182,7 +189,7 @@ test('start and stop a real run on its pinned graph, desktop and mobile', async 
   await nav.getByRole('button', { name: '工作流', exact: true }).click();
   await page.getByRole('button', { name: new RegExp(graphId) }).click();
   await expect(page.getByTestId('execution-canvas')).toBeVisible();
-  await expect(page.locator('.execution-summary')).toContainText('已接纳');
+  await expect(page.locator('.execution-summary')).toContainText(/已接纳|已排队/);
   await expectRenderedEdges(page, 3);
 });
 

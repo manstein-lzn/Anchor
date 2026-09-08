@@ -89,8 +89,11 @@ Approval、Wait/HumanTask、Loop 和 Tool 仍需要各自的
 专用 executor 与持久状态语义。边条件使用 JMESPath，并在发布时检查语法；运行时只接受布尔结果。Run
 Console 的“路由决议”区域展示 selected 状态、求值器版本、上下文哈希和证据引用。
 
-后端已有 manual、cron、interval、internal-event 和 webhook trigger/admission 边界，
-但 Web 端尚未提供完整的 trigger 管理和审批执行界面。Run-scoped durable memory 已有
+“版本”面板提供触发器管理：为某个已发布版本注册 manual/cron/interval/内部事件/webhook
+触发器，并启用或停用。Webhook 触发器只保存 secret 引用，浏览器永远看不到密钥值。
+Run Console 与图上执行面板提供暂停/恢复/停止；暂停后不再领取新节点，已运行节点会完成。
+工具操作账本中 `outcome_unknown` 的条目提供“对账并解决节点”：录入外部证据后由账本
+确定性地完成或失败该节点，不会自动重跑。Run-scoped durable memory 已有
 provenance、content hash 和 tombstone 删除能力，完整的长期 context policy、向量检索、
 retention/GC、MCP/skills/A2A 和生产级多用户权限仍待后续里程碑。
 

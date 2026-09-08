@@ -211,9 +211,12 @@ test('run console shows only persisted run, node, event and operation state', as
   await login(page);
   await page.getByLabel('产品视图').getByRole('button', { name: '运行', exact: true }).click();
   await expect(page.getByRole('heading', { name: '追踪多月研究任务的证据状态' })).toBeVisible();
-  await expect(page.locator('.run-header').getByText('已接纳', { exact: true })).toBeVisible();
+  await expect(page.locator('.run-header').getByText(/已接纳|已排队/)).toBeVisible();
   await expect(page.locator('.node-state-row')).toHaveCount(2);
-  await expect(page.locator('.node-state-row').first()).toContainText('等待依赖');
+  // The disposable API accepts the dispatch, so the entry node is ready while
+  // its downstream still waits for dependencies.
+  await expect(page.locator('.node-state-row').filter({ hasText: '研究 Agent' })).toContainText('等待执行');
+  await expect(page.locator('.node-state-row').filter({ hasText: '报告产物' })).toContainText('等待依赖');
   await expect(page.locator('.event-row').first()).toContainText('run.requested');
   await expect(page.getByText('尚无工具副作用操作')).toBeVisible();
   await noHorizontalOverflow(page);
@@ -257,4 +260,40 @@ test('import and export preserve full configuration, and layouts fit small scree
     }
     await page.screenshot({ path: `test-results/builder-${width}.png` });
   }
+});
+
+test('trigger management pins a published version and never shows secrets', async ({ page }) => {
+  const errors: string[] = [];
+  page.on('pageerror', error => errors.push(error.message));
+  await login(page);
+  await create(page, 'browser-triggers');
+  await add(page, 'Agent', '研究员', 'agents.researcher');
+  await save(page);
+  await page.getByRole('button', { name: '发布', exact: true }).click();
+  await expect(page.getByRole('status')).toContainText('已发布 v1');
+  await page.getByRole('button', { name: '版本', exact: true }).click();
+
+  const manager = page.getByRole('region', { name: '触发器管理' });
+  await expect(manager).toBeVisible();
+  await manager.getByLabel('触发器类型').selectOption('cron');
+  await manager.getByLabel('Cron 表达式').fill('0 9 * * 1');
+  await manager.getByRole('button', { name: '注册触发器' }).click();
+  await expect(manager).toContainText('定时 (cron)');
+  await expect(manager).toContainText('0 9 * * 1');
+
+  // A webhook trigger stores only a secret reference, never a value.
+  await manager.getByLabel('触发器类型').selectOption('webhook');
+  await manager.getByLabel('事件类型').fill('paper.ready');
+  await manager.getByLabel('Webhook secret 引用').fill('WEBHOOK_SIGNING_KEY');
+  await manager.getByRole('button', { name: '注册触发器' }).click();
+  await expect(manager).toContainText('Webhook');
+  await expect(manager).toContainText('paper.ready');
+  await expect(manager).toContainText('secret: WEBHOOK_SIGNING_KEY');
+
+  // Disable one trigger; the toggle is persisted through the API.
+  const rows = manager.locator('.ledger-row');
+  await expect(rows).toHaveCount(2);
+  await rows.first().getByRole('button', { name: '停用' }).click();
+  await expect(rows.first()).toContainText('已停用');
+  expect(errors).toEqual([]);
 });

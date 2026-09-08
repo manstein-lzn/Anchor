@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import { ApiError, request } from './api';
 import { RunConsole } from './RunConsole';
+import { TriggerManager } from './TriggerManager';
 import { RoutedEdge } from './RoutedEdge';
 import { GraphExecution } from './GraphExecution';
 import {
@@ -374,6 +375,8 @@ export function App() {
           {!versions.length && <p className="muted">暂无发布版本</p>}
           {versions.map(version => <button className="version-row" key={version.graph_version_id} onClick={() => { setViewVersion(version); setSelection(null); setValidation(null); setPanel('canvas'); window.setTimeout(() => void flow.fitView({ padding: 0.25, maxZoom: 1 }), 80); }}><ShieldCheck size={20} /><span><strong>v{version.version} · {version.definition.name}</strong><small>{new Date(version.published_at).toLocaleString()} · {version.definition.nodes.length} 节点</small><code>{version.content_hash.slice(0, 20)}</code></span><ChevronRight size={17} /></button>)}
           <div className="pagination"><ToolButton icon={ChevronLeft} label="上一页版本" disabled={!!busy || versionOffset === 0} onClick={() => void perform('载入版本', () => listVersions(doc.definition.graph_id, versionOffset - pageSize))} /><span>{versionOffset / pageSize + 1}</span><ToolButton icon={ChevronRight} label="下一页版本" disabled={!!busy || versions.length < pageSize} onClick={() => void perform('载入版本', () => listVersions(doc.definition.graph_id, versionOffset + pageSize))} /></div>
+          <TriggerManager token={token} versions={versions}
+            onUnauthorized={() => { sessionStorage.removeItem('anchor-token'); setToken(''); setConnected(false); }} />
         </section>}
         {validation && <section className={`validation ${validation.valid ? 'valid' : ''}`} aria-label="校验结果"><header><CheckCheck size={16} /><strong>{validation.valid ? '结构校验通过' : `${validation.issues.length} 项待处理`}</strong><ToolButton icon={X} label="关闭校验结果" onClick={() => setValidation(null)} /></header>
           {validation.issues.map((issue, index) => <button key={index} onClick={() => {

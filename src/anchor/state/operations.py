@@ -139,6 +139,57 @@ class OperationStoreMixin:
                 idempotency_key=f"operation:{operation_id}:reconciled")
             self._advance_run_event_pointer(connection, operation.run_id, sequence)
             return candidate
+    def get_tool_operation(self, operation_id: UUID) -> ToolOperation | None:
+        return self._read(s.tool_operations, ToolOperation, operation_id)
+
+    def resolve_reconciled_operation(self, operation_id: UUID, *, actor: str,
+                                     reason: str) -> "NodeRun":
+        """Apply a reconciled operation outcome to its owning node.
+
+        The operator first reconciles the operation with external evidence; this
+        step is the deterministic consequence: a reconciled success completes the
+        node with the operation's result artifact, a reconciled failure fails it.
+        Only an unreleased lease on a running node is eligible, so an active
+        worker can never race the operator.
+        """
+        from anchor.domain.conditions import build_condition_context
+        if not actor or len(actor) > 200:
+            raise ValueError("reconcile actor is required and must be at most 200 characters")
+        if not reason or len(reason) > 2000:
+            raise ValueError("reconcile reason is required and must be at most 2000 characters")
+        operation = self.get_tool_operation(operation_id)
+        if operation is None:
+            raise KeyError(operation_id)
+        if operation.status not in (OperationStatus.SUCCEEDED, OperationStatus.FAILED):
+            raise OperationConflict("only a reconciled operation can be applied to its node")
+        if not operation.reconciliation_ref:
+            raise OperationConflict("operation has no reconciliation evidence")
+        lease = next((item for item in self.list_active_leases()
+                      if item.claim_id == operation.claim_id), None)
+        if lease is None:
+            raise OperationConflict("operation lease is no longer active")
+        if operation.status is OperationStatus.FAILED:
+            return self.fail_node_and_propagate(
+                lease.claim_id, lease.worker_id,
+                error_code=operation.error_code or "reconciled_failure", phase="reconciliation")
+        text = self._read_operation_result(operation)
+        snapshot = self._latest_snapshot(lease.node_run_id)
+        self.complete_node_and_propagate(
+            lease.claim_id, lease.worker_id, output_ref=operation.result_ref,
+            input_snapshot=snapshot,
+            condition_context=build_condition_context(text, snapshot))
+        return next(item for item in self.list_node_runs(operation.run_id)
+                    if item.id == operation.node_run_id)
+
+    def _read_operation_result(self, operation: ToolOperation) -> str:
+        from anchor.runtime.artifacts import LocalArtifactStore
+        from anchor.runtime.settings import AnchorSettings
+        return LocalArtifactStore(AnchorSettings().artifact_root).get_text(operation.result_ref)
+
+    def _latest_snapshot(self, node_run_id: UUID) -> dict:
+        snapshot = self.get_context_snapshot(node_run_id)
+        return dict(snapshot.snapshot) if snapshot is not None else {}
+
     def list_tool_operations(self, run_id: UUID) -> list[ToolOperation]:
         with self.engine.connect() as connection:
             rows = connection.execute(sa.select(s.tool_operations).where(

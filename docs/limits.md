@@ -30,7 +30,9 @@
 | model gateway HTTP timeout | `runtime/model_gateway.py` | connect 30 / read 900 / write 60 / pool 30 | transport | 单次 HTTP | 该请求失败，进入故障分类 |
 | OpenAI SDK `max_retries` | 同上 | 0 | — | 禁用 SDK 隐式重试 | 重试归 durable node 层 |
 | `ToolGateway.OUTPUT_LIMIT` | `runtime/tool_gateway.py` | 1 MB | resource_capacity | 工具 stdout | 截断并标记 |
-| `ToolGateway.DEFAULT_TIMEOUT_SECONDS` | 同上 | 30s | transport | 单次工具执行 | 超时 → `timeout` 失败 |
+| `ToolGateway.DEFAULT_TIMEOUT_SECONDS` | 同上 | 30s | transport | 单次工具执行 | 只读工具超时 → `timeout` 失败 |
+| `http.post` 传输超时/断流 | 同上 | 调用方传入（默认 30s） | transport | 单次副作用请求 | 请求已发出 → `outcome_unknown`，需人工对账；绝不自动重试 |
+| `ToolCapability.allow_private_network` | `runtime/capabilities.py` | false | operator_policy | 副作用 HTTP 目标 | 默认拒绝回环/私有/保留地址 |
 | `ToolCapability.model_excerpt_chars` / `retry_excerpt_chars` | `runtime/capabilities.py` | None | resource_capacity | 送回模型的证据大小 | 截断，durable artifact 不变 |
 | model context window | 供应商 | 依模型 | resource_capacity | 单次请求 | 供应商报错，进入故障分类 |
 | API `PageSize` / `Offset` | `api/app.py` | 1..200 / ≥0 | resource_capacity | 分页 | 422 |

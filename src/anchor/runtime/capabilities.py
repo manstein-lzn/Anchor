@@ -89,6 +89,9 @@ class ToolCapability(DomainModel):
     excerpt_list_limit: int = Field(default=10, ge=1, le=1000)
     # Higher priority evidence is preloaded first when the retry context is bounded.
     evidence_priority: int = Field(default=0, ge=0, le=100)
+    # Side-effect HTTP tools refuse loopback/private/link-local targets unless
+    # the operator explicitly opts in for a trusted internal endpoint.
+    allow_private_network: bool = False
 
 
 class VerifierCapability(DomainModel):

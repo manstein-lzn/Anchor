@@ -20,6 +20,22 @@
   Run Console 与图上执行面板。
 - 证据：全量 293 passed + 62 skipped；前端 Vitest 31、Playwright 11/11。
 
+## MVP 收尾：对账与运行控制（2026-09-09，ADR-023）
+
+- 副作用工具 `http.post`：`side_effect` 声明 + `owner_agent` + 已完成审批前置才执行；
+  网关默认拒绝，agent tool loop 永远拿不到。传输失败（超时/断流）→ `outcome_unknown`
+  （`transport_unknown`），确定的 HTTP 错误 → `failed`。私有/回环地址默认拒绝，需
+  `allow_private_network` 显式开启。
+- 对账闭环：`POST /api/operations/{id}/reconcile`（succeeded/failed + 证据引用）→ 账本
+  确定性完成或失败该节点；节点在未知期间保持 running 与 lease，工具 lease 不可走普通
+  恢复路径；不新增 attempt。Run Console 工具账本提供“对账并解决节点”。
+- Run 暂停/恢复：`POST /api/runs/{id}/pause|resume`。暂停后不再领取新节点，已运行节点
+  完成且下游保持 ready；恢复后继续领取。取消仍为终止操作。
+- 触发器管理 UI：按已发布版本注册/启停 manual、cron、interval、内部事件、webhook；
+  webhook 仅保存 secret 引用。
+- 证据：后端 300 passed + 64 skipped（含 `http.post` 成功/失败/未知/私网拒绝、审批门、
+  对账 API、暂停恢复）；PG 64 passed；前端 Vitest 31、Playwright 12/12（新增触发器管理）。
+
 ## 画布布局与连线（2026-09-09，ADR-022）
 
 - 自动分层布局改用 `@dagrejs/dagre`（MIT，3.1.1）：无保存坐标的图按拓扑分层，
@@ -766,9 +782,7 @@ P2 backup/restore + multi-host/rolling restart/long-running acceptance
 
 ## 整个 Goal 尚未完成的能力
 
-- Approval、HumanTask 和 WaitForEvent 的 durable wait/resume。
-- 完整 ToolGateway、真实工具执行、schema validation、permission/approval 和 MCP。
-- pause/resume/cancel。
+- MCP 协议适配器（ToolGateway 执行、审批门、对账流程已落地）。
 - Loop executor 的进度信号与死锁检测已具备持久化观察与诊断；自动修复、死锁自动处置仍未实现。
 - A2A。
 - 长期 context compaction、memory conflict policy 和 vector retrieval。
@@ -780,6 +794,9 @@ P2 backup/restore + multi-host/rolling restart/long-running acceptance
 - object storage。
 - backup/restore。
 - 多主机、rolling restart 和长时间 soak test。
+
+已从本清单移除（2026-09-09）：Approval/HumanTask/Wait durable（ADR-013）、pause/resume/cancel
+（ADR-023）、真实副作用工具与 reconciliation（ADR-023）、Web 触发器管理（ADR-023）。
 
 Goal 不能仅因为 Agent/control E2E、Verifier 单元测试、一次模型成功返回、全套 service 显示 active 或当前某一阶段测试全绿而标记完成。
 
@@ -822,10 +839,13 @@ MVP complete 只要求可交付的单机产品闭环；生产门按真实部署�
 - 干净隔离库上的模型、工具、验证、等待/恢复和失败路径 E2E 成功。
 - worker 长期运行、heartbeat、进程中断、rolling restart 和显式恢复可证明。
 - 健康 Agent 不被用户难以预测的 `max_*` 预算干预。
-- Tool unknown outcome 绝不自动重试，并具有可用 reconciliation 流程。
+- Tool unknown outcome 绝不自动重试，并具有可用 reconciliation 流程。**已完成**：`http.post`
+  副作用工具 + 审批前置门产生 `outcome_unknown`；`POST /api/operations/{id}/reconcile`
+  录入外部证据后确定性完成/失败节点，不新增 attempt；Run Console 提供对账操作。
 - SQLite/PostgreSQL 协议、迁移、并发领取、事务回滚和重开持久化验收一致。
 - context、memory、artifact、operation、verification、edge decision 和事件证据可追溯。
-- Web Builder/Run Console 的状态全部来自持久化 API，支持用户完成编排、发布、触发、观察和人工处置。
+- Web Builder/Run Console 的状态全部来自持久化 API，支持用户完成编排、发布、触发、观察和人工处置。**已完成**：触发器管理面板（manual/cron/interval/事件/webhook，secret 仅引用）、
+  Run 暂停/恢复/停止、审批/事件恢复、工具对账。
 - worker 长期运行指单机常驻进程的 heartbeat、中断与显式恢复（多主机 rolling restart 移入生产门）。
 
 ### 生产门（按真实部署触发，不 blocking MVP complete）
@@ -836,4 +856,4 @@ MVP complete 只要求可交付的单机产品闭环；生产门按真实部署�
 - Prefect/Temporal 等 durable 执行 muscle（现有语义被证明不足时）。
 - MCP/A2A、向量检索、对象存储（出现真实消费者时）。
 
-在此之前，Goal 应保持 active/paused，而不是 complete。MVP 门证据（以本轮为准）：293 后端绿 + 62 skipped，PG 参数组 62 绿，前端 Vitest 31、Playwright 11/11；隔离库真实进程 E2E 双路径（Verifier pass/reject）；迁移 head `0014_recovery_schedule`。
+在此之前，Goal 应保持 active/paused，而不是 complete。MVP 门证据（以本轮为准）：300 后端绿 + 64 skipped，PG 参数组 64 绿，前端 Vitest 31、Playwright 12/12；隔离库真实进程 E2E 双路径（Verifier pass/reject）；迁移 head `0014_recovery_schedule`。

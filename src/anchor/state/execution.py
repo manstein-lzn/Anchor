@@ -46,6 +46,59 @@ class ExecutionStoreMixin:
             connection.execute(sa.update(s.tasks).where(s.tasks.c.id == row["task_id"]).values(
                 status=status, revision=s.tasks.c.revision + 1, updated_at=now))
             return decode(Run, connection.execute(sa.select(s.runs).where(s.runs.c.id == str(run_id))).mappings().one())
+    def pause_run(self, run_id: UUID, *, reason: str, actor: str) -> Run:
+        """Stop accepting new claims without touching in-flight work or artifacts.
+
+        A paused run cannot be claimed (`claim_*` only accepts queued/running),
+        so already-running nodes finish and their downstream stays ready until
+        the run is resumed. Idempotent per run.
+        """
+        if not reason or len(reason) > 2000:
+            raise ValueError("pause reason is required and must be at most 2000 characters")
+        if not actor or len(actor) > 200:
+            raise ValueError("pause actor is required and must be at most 200 characters")
+        with self._transaction() as connection:
+            row = connection.execute(sa.select(s.runs).where(
+                s.runs.c.id == str(run_id)).with_for_update()).mappings().first()
+            if row is None:
+                raise KeyError(run_id)
+            if row["status"] == RunStatus.PAUSED.value:
+                return decode(Run, row)
+            if row["status"] not in (RunStatus.QUEUED.value, RunStatus.RUNNING.value):
+                raise ConcurrencyConflict("only a queued or running run can be paused")
+            now = utc_now()
+            seq = self._append_event(connection, stream_id=run_id, event_type="run.paused",
+                payload={"reason": reason, "actor": actor},
+                idempotency_key=f"run:{run_id}:paused")
+            connection.execute(sa.update(s.runs).where(s.runs.c.id == str(run_id)).values(
+                status=RunStatus.PAUSED.value, current_phase="paused",
+                revision=row["revision"] + 1, last_event_sequence=seq, updated_at=now))
+            return decode(Run, connection.execute(sa.select(s.runs).where(
+                s.runs.c.id == str(run_id))).mappings().one())
+
+    def resume_run(self, run_id: UUID, *, reason: str, actor: str) -> Run:
+        """Return a paused run to running so workers can claim ready nodes again."""
+        if not reason or len(reason) > 2000:
+            raise ValueError("resume reason is required and must be at most 2000 characters")
+        if not actor or len(actor) > 200:
+            raise ValueError("resume actor is required and must be at most 200 characters")
+        with self._transaction() as connection:
+            row = connection.execute(sa.select(s.runs).where(
+                s.runs.c.id == str(run_id)).with_for_update()).mappings().first()
+            if row is None:
+                raise KeyError(run_id)
+            if row["status"] != RunStatus.PAUSED.value:
+                raise ConcurrencyConflict("only a paused run can be resumed")
+            now = utc_now()
+            seq = self._append_event(connection, stream_id=run_id, event_type="run.resumed",
+                payload={"reason": reason, "actor": actor},
+                idempotency_key=f"run:{run_id}:resumed")
+            connection.execute(sa.update(s.runs).where(s.runs.c.id == str(run_id)).values(
+                status=RunStatus.RUNNING.value, current_phase="node.execute",
+                revision=row["revision"] + 1, last_event_sequence=seq, updated_at=now))
+            return decode(Run, connection.execute(sa.select(s.runs).where(
+                s.runs.c.id == str(run_id))).mappings().one())
+
     def expire_run_budgets(self) -> int:
         with self.engine.connect() as connection:
             rows = list(connection.execute(sa.select(s.runs).where(

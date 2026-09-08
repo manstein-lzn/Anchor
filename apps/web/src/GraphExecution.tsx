@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { MarkerType } from '@xyflow/react';
-import { CheckCircle2, Download, Play, RefreshCw, X, FileText, Square } from 'lucide-react';
+import { CheckCircle2, Download, Pause, Play, RefreshCw, X, FileText, Square } from 'lucide-react';
 import { request, serverNow } from './api';
 import { layeredLayout, project, type Layout, type Version, type NodeSpec } from './graph';
 import { executionAttempt, reviewOutcome, reviewDisplay, type ReviewOutcome } from './execution';
@@ -212,6 +212,13 @@ export function GraphExecution({ token, graphId, layout }: { token: string; grap
       }}><Play size={15} />发起运行</button>
       {liveSnapshot?.run.status === 'completed' && report?.output_ref && <button onClick={() => void download(report.output_ref!, `${selected}.md`)}><Download size={15} />报告</button>}
       {draft?.output_ref && liveSnapshot?.run.status !== 'completed' && <button onClick={() => void download(draft.output_ref!, `${selected}-unapproved.md`, true)}><Download size={15} />未审定草稿</button>}
+      {liveSnapshot?.run.status === 'paused' && <button title="恢复运行" aria-label="恢复运行" disabled={busy} onClick={async () => {
+        setBusy(true); try { const run = await api<ExecutionRun>(`/api/runs/${selected}/resume`, 'POST', { reason: 'Operator resumed from execution graph', actor: 'web-operator' }); setSnapshot(value => value ? { ...value, run } : value); } catch (cause) { setError((cause as Error).message); } finally { setBusy(false); }
+      }}><Play size={15} /></button>}
+      {liveSnapshot && ['queued', 'running'].includes(liveSnapshot.run.status) && <button title="暂停运行" aria-label="暂停运行" disabled={busy} onClick={async () => {
+        if (!window.confirm('暂停后不再领取新节点；已在运行的节点会完成。继续？')) return;
+        setBusy(true); try { const run = await api<ExecutionRun>(`/api/runs/${selected}/pause`, 'POST', { reason: 'Operator paused from execution graph', actor: 'web-operator' }); setSnapshot(value => value ? { ...value, run } : value); } catch (cause) { setError((cause as Error).message); } finally { setBusy(false); }
+      }}><Pause size={15} /></button>}
       {liveSnapshot && !terminal(liveSnapshot.run.status) && <button title="停止运行" aria-label="停止运行" disabled={busy} onClick={async () => {
         if (!window.confirm('停止此运行并保留已有材料？已发出的外部请求可能仍会完成。')) return;
         setBusy(true); try { const run = await api<ExecutionRun>(`/api/runs/${selected}/stop`, 'POST', { reason: 'User stopped from execution graph' }); setSnapshot(value => value ? { ...value, run } : value); } catch (cause) { setError((cause as Error).message); } finally { setBusy(false); }

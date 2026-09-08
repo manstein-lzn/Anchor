@@ -258,3 +258,108 @@ def test_bwrap_echo_end_to_end_through_gateway(tmp_path):
 def test_missing_bwrap_binary_fails_fast():
     with pytest.raises(RuntimeError, match="sandbox binary not found"):
         BubblewrapBackend(binary="definitely-not-a-sandbox")
+
+
+# ---------------------------------------------------------------------------
+# Side-effect HTTP tool: approval gate, known failures, unknown outcomes
+# ---------------------------------------------------------------------------
+
+def http_registry():
+    return CapabilityRegistry(
+        models=[],
+        agents=[AgentCapability(ref="agents.writer", model_ref="models.test",
+                                tool_refs=["http.post"])],
+        tools=[ToolCapability(ref="http.post", description="POST JSON",
+                              side_effect=True, idempotent=False, operation_kind="write",
+                              allow_private_network=True)],
+    )
+
+
+def http_gateway(store, artifacts):
+    return ToolGateway(store, http_registry(), artifacts, SubprocessBackend())
+
+
+def _serve(handler_cls):
+    import http.server
+    import threading
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler_cls)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server, f"http://127.0.0.1:{server.server_port}"
+
+
+def test_side_effect_http_tool_requires_approval(tmp_path):
+    store, artifacts, _, lease = leased(tmp_path)
+    try:
+        gw = http_gateway(store, artifacts)
+        with pytest.raises(ToolDenied, match="approval_required"):
+            gw.execute(lease, agent_ref="agents.writer", tool_ref="http.post",
+                       arguments={"url": "http://127.0.0.1:1/x", "body": {}}, operation_id=uuid4())
+    finally:
+        store.close()
+
+
+def test_approved_http_post_records_success_and_failure(tmp_path):
+    import http.server
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.send_response(200 if self.path == "/ok" else 503)
+            self.end_headers()
+            self.wfile.write(b'{"ok":true}')
+        def log_message(self, *args):
+            pass
+    server, base = _serve(Handler)
+    store, artifacts, receipt, lease = leased(tmp_path)
+    try:
+        gw = http_gateway(store, artifacts)
+        ok = gw.execute(lease, agent_ref="agents.writer", tool_ref="http.post",
+                        arguments={"url": f"{base}/ok", "body": {"x": 1}},
+                        operation_id=uuid4(), approved=True)
+        assert ok.status is OperationStatus.SUCCEEDED and ok.result_ref
+        assert json.loads(artifacts.get_text(ok.result_ref))["status"] == 200
+        bad = gw.execute(lease, agent_ref="agents.writer", tool_ref="http.post",
+                         arguments={"url": f"{base}/fail", "body": {}},
+                         operation_id=uuid4(), approved=True)
+        assert bad.status is OperationStatus.FAILED and bad.error_code == "http_503"
+    finally:
+        store.close()
+        server.shutdown()
+
+
+def test_transport_failure_is_outcome_unknown_not_failed(tmp_path):
+    import http.server
+    import time
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            time.sleep(2)
+        def log_message(self, *args):
+            pass
+    server, base = _serve(Handler)
+    store, artifacts, receipt, lease = leased(tmp_path)
+    try:
+        gw = http_gateway(store, artifacts)
+        result = gw.execute(lease, agent_ref="agents.writer", tool_ref="http.post",
+                            arguments={"url": f"{base}/slow", "body": {}},
+                            operation_id=uuid4(), approved=True, timeout_seconds=0.2)
+        assert result.status is OperationStatus.OUTCOME_UNKNOWN
+        assert result.error_code == "transport_unknown"
+        assert store.list_tool_operations(receipt.run_id)[0].status is OperationStatus.OUTCOME_UNKNOWN
+    finally:
+        store.close()
+        server.shutdown()
+
+
+def test_private_network_is_refused_without_opt_in(tmp_path):
+    store, artifacts, _, lease = leased(tmp_path)
+    try:
+        strict = CapabilityRegistry(
+            agents=[AgentCapability(ref="agents.writer", model_ref="models.test",
+                                    tool_refs=["http.post"])],
+            tools=[ToolCapability(ref="http.post", side_effect=True, operation_kind="write")])
+        gw = ToolGateway(store, strict, artifacts, SubprocessBackend())
+        with pytest.raises(ToolDenied, match="private_network"):
+            gw.execute(lease, agent_ref="agents.writer", tool_ref="http.post",
+                       arguments={"url": "http://127.0.0.1:9/x", "body": {}},
+                       operation_id=uuid4(), approved=True)
+    finally:
+        store.close()

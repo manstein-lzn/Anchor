@@ -108,6 +108,35 @@ export function RunConsole({ token, onUnauthorized }: { token: string; onUnautho
     catch (cause) { fail(cause); }
   }, [api, fail, loadDetail, selected]);
 
+  const controlRun = useCallback(async (action: 'pause' | 'resume' | 'stop') => {
+    const labelText = action === 'pause' ? '暂停' : action === 'resume' ? '恢复' : '停止';
+    const reason = window.prompt(`请输入${labelText}原因：`, `operator ${action}`);
+    if (!reason) return;
+    try {
+      await api(`/api/runs/${selected}/${action}`, 'POST', { reason, actor: 'web-operator' });
+      await loadDetail(selected);
+    } catch (cause) { fail(cause); }
+  }, [api, fail, loadDetail, selected]);
+  const reconcileOperation = useCallback(async (operationId: string) => {
+    const outcome = window.prompt('远程副作用结果（succeeded / failed）：', 'succeeded');
+    if (outcome !== 'succeeded' && outcome !== 'failed') return;
+    const reconciliationRef = window.prompt('对账证据引用（供应商回执 / 人工核查记录）：', '');
+    if (!reconciliationRef) return;
+    const body: Record<string, string> = { status: outcome, reconciliation_ref: reconciliationRef,
+      reason: 'operator reconciled external side effect', actor: 'web-operator' };
+    if (outcome === 'succeeded') {
+      const resultRef = window.prompt('结果 artifact 引用（artifact://sha256/...）：', '');
+      if (!resultRef) return;
+      body.result_ref = resultRef;
+    } else {
+      const errorCode = window.prompt('失败代码：', 'reconciled_failure');
+      if (!errorCode) return;
+      body.error_code = errorCode;
+    }
+    try { await api(`/api/operations/${operationId}/reconcile`, 'POST', body); await loadDetail(selected); }
+    catch (cause) { fail(cause); }
+  }, [api, fail, loadDetail, selected]);
+
   const refresh = useCallback(async () => {
     setBusy(true); setError('');
     try { await loadRuns(); if (selected) await loadDetail(selected, true); }
@@ -140,7 +169,12 @@ export function RunConsole({ token, onUnauthorized }: { token: string; onUnautho
     <main className="run-detail">
       {error && <div className="message error" role="alert"><AlertTriangle size={16} /><span>{error}</span></div>}
       {!run || !task ? <div className="run-placeholder"><TerminalSquare size={36} /><h2>{runs.length ? '载入运行状态' : '尚未提交运行'}</h2></div> : <>
-        <header className="run-header"><div><span className="eyebrow">RUN · {short(run.id)}</span><h1>{task.objective}</h1><div className="run-meta"><span className={`status-pill ${tone(run.status)}`}>{label(run.status)}</span><span>{version?.definition.name ?? 'Graph'} · v{version?.version ?? '?'}</span><span>{run.current_phase}</span></div></div><div className="run-updated"><Clock3 size={14} />{stamp(run.updated_at)}</div></header>
+        <header className="run-header"><div><span className="eyebrow">RUN · {short(run.id)}</span><h1>{task.objective}</h1><div className="run-meta"><span className={`status-pill ${tone(run.status)}`}>{label(run.status)}</span><span>{version?.definition.name ?? 'Graph'} · v{version?.version ?? '?'}</span><span>{run.current_phase}</span></div></div><div className="run-updated"><Clock3 size={14} />{stamp(run.updated_at)}</div>
+          <div className="run-controls">{run.status === 'paused'
+            ? <button type="button" className="inline-link" onClick={() => void controlRun('resume')}>恢复运行</button>
+            : ['queued', 'running'].includes(run.status) && <button type="button" className="inline-link" onClick={() => void controlRun('pause')}>暂停运行</button>}
+            {!['completed', 'failed', 'cancelled'].includes(run.status) && <button type="button" className="inline-link danger-link" onClick={() => void controlRun('stop')}>停止运行</button>}
+          </div></header>
         <div className="run-grid">
           <section className="run-section node-state"><header><h2><GitBranch size={16} />节点状态</h2><span>{nodes.length}</span></header><div className="node-state-list">{orderedNodes.map(node => {
             const definition = names.get(node.node_id); const artifact = node.output_ref?.match(/^artifact:\/\/sha256\/([0-9a-f]{64})$/)?.[1]; return <div className="node-state-row" key={node.id}><span className={`state-icon ${tone(node.status)}`}>{node.status === 'running' ? <LoaderCircle className="spin" size={15} /> : node.status === 'completed' ? <CheckCircle2 size={15} /> : <Bot size={15} />}</span><span><strong>{definition?.name ?? node.node_id}</strong><small>{definition?.type ?? 'node'} · attempt {node.attempt} · context {node.context_generation}{node.input_hash && <> · {node.input_hash.slice(0, 12)}</>}{artifact && <> · <button type="button" className="inline-link" onClick={() => void openArtifact(artifact)}>查看产物</button></>}</small></span><span className={`status-pill ${tone(node.status)}`}>{label(node.status)}</span></div>;
@@ -149,7 +183,7 @@ export function RunConsole({ token, onUnauthorized }: { token: string; onUnautho
         </div>
         <section className="run-section operation-ledger"><header><h2><GitBranch size={16} />路由决议</h2><span>{decisions.length}</span></header>{!decisions.length ? <div className="ledger-empty">尚无已决议的 Graph 边</div> : <div className="ledger-table">{decisions.map(item => <div className="ledger-row" key={item.edge_index}><span><strong>{item.source_node_id} → {item.target_node_id}</strong><small>edge {item.edge_index} · {item.evaluator}@{item.evaluator_version}</small></span><span className={`status-pill ${item.selected ? 'success' : ''}`}>{item.selected ? '已选择' : '未选择'}</span><span className="ledger-result">{item.condition || item.reason}{item.evaluation_context_hash && <small>{item.evaluation_context_hash.slice(0, 16)}</small>}</span><time>{stamp(item.decided_at)}</time></div>)}</div>}</section>
         <section className="run-section operation-ledger"><header><h2><ShieldCheck size={16} />验证证据</h2><span>{verifications.length}</span></header>{!verifications.length ? <div className="ledger-empty">尚无验证决议</div> : <div className="ledger-table">{verifications.map(item => { const evidence = item.evidence_ref.match(/^artifact:\/\/sha256\/([0-9a-f]{64})$/)?.[1]; return <div className="ledger-row" key={item.verification_id}><span><strong>{names.get(item.node_id)?.name ?? item.node_id}</strong><small>{item.verifier_ref}@{item.verifier_version} · {item.adapter}@{item.adapter_version}</small></span><span className={`status-pill ${tone(item.verdict)}`}>{label(item.verdict)}</span><span className="ledger-result">{item.reason}<small>context {item.verified_context_hash.slice(0, 16)} · artifacts {item.verified_artifact_hashes.length}</small>{evidence && <button type="button" className="inline-link" onClick={() => void openArtifact(evidence)}>查看证据</button>}</span><time>{stamp(item.decided_at)}</time></div>; })}</div>}</section>
-        <section className="run-section operation-ledger"><header><h2><Wrench size={16} />工具操作账本</h2><span>{operations.length}</span></header>{!operations.length ? <div className="ledger-empty"><ShieldCheck size={17} />尚无工具副作用操作</div> : <div className="ledger-table">{operations.map(item => <div className="ledger-row" key={item.operation_id}><span><strong>{item.tool_ref}</strong><small>{short(item.operation_id)} · {item.request_hash.slice(0, 12)}</small></span><span className={`status-pill ${tone(item.status)}`}>{label(item.status)}</span><span className="ledger-result">{item.result_ref || item.error_code || '—'}{item.reconciliation_ref && <small>{item.reconciliation_ref}</small>}</span><time>{stamp(item.updated_at)}</time></div>)}</div>}</section>
+        <section className="run-section operation-ledger"><header><h2><Wrench size={16} />工具操作账本</h2><span>{operations.length}</span></header>{!operations.length ? <div className="ledger-empty"><ShieldCheck size={17} />尚无工具副作用操作</div> : <div className="ledger-table">{operations.map(item => <div className="ledger-row" key={item.operation_id}><span><strong>{item.tool_ref}</strong><small>{short(item.operation_id)} · {item.request_hash.slice(0, 12)}</small></span><span className={`status-pill ${tone(item.status)}`}>{label(item.status)}</span><span className="ledger-result">{item.result_ref || item.error_code || '—'}{item.reconciliation_ref && <small>{item.reconciliation_ref}</small>}{item.status === 'outcome_unknown' && <button type="button" className="inline-link" onClick={() => void reconcileOperation(item.operation_id)}>对账并解决节点</button>}</span><time>{stamp(item.updated_at)}</time></div>)}</div>}</section>
         <section className="run-section operation-ledger"><header><h2><ShieldCheck size={16} />长期记忆</h2><span>{memories.length}</span></header>{!memories.length ? <div className="ledger-empty">当前 ExecutionRun 尚无长期记忆</div> : <div className="ledger-table">{memories.map(item => <div className="ledger-row" key={item.memory_id}><span><strong>{item.content}</strong><small>{short(item.memory_id)} · {item.content_hash.slice(0, 12)}</small></span><time>{stamp(item.created_at)}</time></div>)}</div>}</section>
         <section className="run-section operation-ledger"><header><h2><FileClock size={16} />执行上下文</h2><span>{contexts.length}</span></header>{!contexts.length ? <div className="ledger-empty">尚无已持久化的执行上下文</div> : <div className="ledger-table">{contexts.map(item => <div className="ledger-row" key={item.id}><span><strong>generation {item.generation}</strong><small>{short(item.node_run_id)} · {item.input_hash.slice(0, 16)}</small></span><code className="ledger-result">{JSON.stringify(item.snapshot)}</code><time>{stamp(item.created_at)}</time></div>)}</div>}</section>
           <section className="run-section operation-ledger"><header><h2><Clock3 size={16} />等待审批 / 事件</h2><span>{waits.length}</span></header>{!waits.length ? <div className="ledger-empty">当前 ExecutionRun 没有等待中的审批或事件</div> : <div className="ledger-table">{waits.map(item => <div className="ledger-row" key={item.node_run.id}><span><strong>{names.get(item.node_run.node_id)?.name ?? item.node_run.node_id}</strong><small>{item.node_type}</small></span><span className="status-pill">{label(item.node_run.status)}</span><span className="lease-actions">{item.node_run.status === 'waiting_approval' && <><button type="button" className="inline-link" onClick={() => void approveWait(item.node_run.id)}>批准</button><button type="button" className="inline-link danger-link" onClick={() => void rejectWait(item.node_run.id)}>拒绝</button></>}{item.node_run.status === 'waiting_event' && <button type="button" className="inline-link" onClick={() => void resumeWait(item.node_run.id)}>恢复事件</button>}</span></div>)}</div>}</section>
