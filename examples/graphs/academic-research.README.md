@@ -44,8 +44,8 @@ If a provider emits malformed or empty Responses API streaming events, use its
 Chat Completions streaming protocol when supported (`--wire-api
 chat_completions`). Use `--no-stream` only when the provider can keep a long
 non-streaming request alive; the node still checkpoints only one complete response.
-Schema `0012_lease_history` preserves released leases referenced by retrieval
-operations when an interrupted Agent is recovered. Only one active lease per
+The current schema head (`0014_recovery_schedule`) preserves released leases referenced by
+retrieval operations when an interrupted Agent is recovered. Only one active lease per
 node is allowed. Take a database backup before upgrading an existing instance.
 
 ## Start a Topic

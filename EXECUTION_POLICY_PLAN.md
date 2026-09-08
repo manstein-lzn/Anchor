@@ -1,17 +1,27 @@
 # 进展驱动执行与恢复：开发及验收计划
 
-日期：2026-09-08。状态：**阶段 1–3 已实现并验收；阶段 4 部分完成；阶段 5 部分完成**。
+日期：2026-09-08，复核 2026-09-09。状态：**阶段 1–3 已实现并验收；阶段 4 部分完成；
+阶段 5 部分完成；真实联网调研验收已通过**。
 本文件保留为原始计划与验收依据，实现事实以代码、迁移与测试为准。
 
-## 实现状态（2026-09-08）
+## 实现状态（2026-09-09 复核）
 
 | 阶段 | 状态 | 证据 |
 | --- | --- | --- |
-| 1 策略与状态契约 | 完成 | `runtime/execution_policy.py`（限制分类、观察状态、ProgressEvidence、DiagnosticRequest、故障分类）+ `tests/test_execution_policy.py` 14 passed |
+| 1 策略与状态契约 | 完成 | 限制清单 `docs/limits.md`；`ProgressEvidence`/`DiagnosticRequest` 在 `domain/models.py`；观察状态与诊断在 `watchdog.py`；故障分类 `worker.classify_failure`；`tests/test_execution_reliability.py` + `tests/test_watchdog.py`（注：早期 `runtime/execution_policy.py` 在架构精简中删除，只保留有消费者的部分） |
 | 2 解除默认限制、拆分重试 | 完成 | 移除 `max_rounds`/`run_timeout_seconds` 隐藏默认；`expire_run_budgets` 默认 false；`output_retries` 默认 0；migration `0014_recovery_schedule` 持久化 `last_error_class` + `next_attempt_at`，尊重 Retry-After，重启不丢恢复计划 |
-| 3 进展观察与诊断 | 完成（规则层） | `watchdog.py` 写 `progress_evidence`、去重 `diagnostic_requests`；`supervisor_service.py` 接入；migration `0013_progress_evidence`；`tests/test_watchdog.py` 5 passed |
+| 3 进展观察与诊断 | 完成（规则层） | `watchdog.py` 写 `progress_evidence`、去重 `diagnostic_requests`；`supervisor_service.py` 接入；migration `0013_progress_evidence`；`tests/test_watchdog.py` 7 passed |
 | 4 API 与前端说明 | 部分 | 新增 progress/diagnostics API 与 Run Console 两个区域；未新增独立“业务轮数 vs 故障重试”分组表 |
-| 5 迁移与部署交接 | 部分 | 学术示例移除隐藏上限；README/STATUS/API/WEB/DECISIONS(ADR-019)/HANDOVER 已更新；未产出独立迁移报告文件 |
+| 5 迁移与部署交接 | 部分 | 学术示例移除隐藏上限；README/STATUS/API/WEB/DECISIONS(ADR-019/021/022)/HANDOVER 已更新；未产出独立迁移报告文件与发布/回退 runbook |
+
+### 真实联网调研验收（2026-09-09）
+
+使用 Pi 的 DeepSeek `deepseek-v4.1-flash-expires-on-0910` 跑通 academic-research v3：
+Run `39d5db63-a35b-42d3-9510-058fcc3a3c5b` COMPLETED，2 轮修订（review a0=revise →
+a1=pass），158 事件，约 25 分钟；最终 Markdown 报告 29,502 字，
+`.local/artifacts/reports/<run_id>/report.md`（48,080 字节），含 References 与检索溯源。
+检索为真实 Crossref/arXiv 调用（16 次检索、28 项来源、11 篇全文阅读）。
+尚未做的只剩「独立审查者」一项。
 
 ### 仍未实现（诚实边界）
 

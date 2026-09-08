@@ -47,7 +47,9 @@ see `API.md`. Prefect, PydanticAI, MCP and A2A are integration layers that will
 be added behind these boundaries after the recovery semantics are tested.
 
 A React Flow web workspace now edits the same Graph IR, saves optimistic drafts,
-validates and publishes immutable versions. Open <http://127.0.0.1:5173> while the
+validates and publishes immutable versions. Graphs without saved drag positions are
+auto-laid out in layers with dagre; edges are routed (bezier forward, orthogonal
+below the graph when they run backwards) and labelled only on hover or selection. Open <http://127.0.0.1:5173> while the
 local web service is running. See `WEB.md` for connection, examples and development.
 The editor publishes graph definitions; execution is performed by the separate
 worker service. Trigger registration and event ingress are available through the

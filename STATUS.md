@@ -97,6 +97,11 @@
   survives a worker or supervisor restart without an in-process sleep
 - `GET /api/runs/{run_id}/progress`, `GET /api/runs/{run_id}/diagnostics` and
   operator supersede; Run Console diagnostics and progress-evidence sections
+- Dagre layered auto-layout for graphs without saved drag positions; saved positions win
+- Bezier forward edges with per-fan-out curvature, backward edges routed below the graph,
+  hover/selection-only labels, and a wide interaction path
+- React Flow controlled-node fix: `onNodesChange` + preserved `measured` so dragging
+  never drops connections (error #015)
 - Read-only active lease API with optional Run filtering and Web Console lease view
 - Explicit Agent lease failure API and Run Console action; Tool leases cannot
   bypass unknown-outcome reconciliation through this endpoint

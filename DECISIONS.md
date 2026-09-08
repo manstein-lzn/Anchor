@@ -403,3 +403,31 @@ in `domain/models.py`; `domain/` and `state/` never import `runtime/`, and pure
 propagation logic lives in `domain/propagation.py`. Duplicated generic claim and
 lease-guard code was removed, and dead `checkpoint_node_result` was deleted
 rather than kept "for flexibility".
+
+## ADR-022: Canvas layout is layered and edges are routed, not decorated
+
+The graph canvas must stay readable as graphs grow and as runs poll. Three
+decisions follow from that.
+
+Auto-layout is assembled, not hand-rolled: graphs without saved drag positions
+are laid out with dagre (`@dagrejs/dagre`, MIT) in left-to-right layers, keyed
+by topology so polling and metadata edits cannot move the canvas. A user's drag
+position is always authoritative. The execution panel lays out for its own node
+size rather than reusing builder coordinates.
+
+Edges are routed by direction. Forward edges are bezier curves whose curvature
+varies by fan-out order so siblings from one source do not overlap. Backward
+edges (target left of the source) are routed below the graph in two orthogonal
+segments, borrowing the idea from n8n's `getEdgeRenderData` (n8n is fair-code,
+so the algorithm was reimplemented, not copied). Routing state is conveyed by
+colour, width and dash; text labels appear only on hover or selection, because
+labelling every edge is the largest source of visual noise. A wide invisible
+interaction path keeps thin edges clickable.
+
+Controlled React Flow nodes require `onNodesChange` and a stable
+`nodeTypes`/`edgeTypes` identity. Rebuilding node objects on every render drops
+React Flow's `measured` flag, which makes dragging fail with error #015 and
+drops every connection. The canvas therefore keeps nodes in `useNodesState`,
+carries `measured` across document sync, skips syncing during an in-flight drag,
+and declares edge types as a module constant. This is a rendering contract, not
+a cosmetic preference.

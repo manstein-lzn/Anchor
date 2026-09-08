@@ -18,7 +18,25 @@
   学术策略在 composition root 注册；工具证据裁剪改由 `ToolCapability` 声明。
 - 前端共享类型/标签表收敛到 `execution.ts`，去掉 `any[]`；诊断与进展证据同时显示在
   Run Console 与图上执行面板。
-- 证据：全量 283 passed + 62 skipped；前端 Vitest 28、Playwright 11/11。
+- 证据：全量 293 passed + 62 skipped；前端 Vitest 31、Playwright 11/11。
+
+## 画布布局与连线（2026-09-09，ADR-022）
+
+- 自动分层布局改用 `@dagrejs/dagre`（MIT，3.1.1）：无保存坐标的图按拓扑分层，
+  按拓扑缓存，轮询/改名不会移动画布；用户拖动的 `layout.positions` 仍然优先。
+  执行面板按自己的节点尺寸（240×146）单独布局。
+- 连线：前向边用贝塞尔并按同源扇出变化曲率；回边（target 在 source 左侧）拆成两段
+  正交路径从图下方绕行；标签只在 hover/选中显示，未选中的已决边用虚线，选择状态靠
+  颜色/线型而非常驻文字；`interactionWidth` 26 便于点选。
+- 修复 React Flow #015：编排画布此前传受控 `nodes` 却没有 `onNodesChange`，且每次渲染
+  重建节点对象丢掉 `measured`，拖动即报“node is not initialized”并丢连线。现改用
+  `useNodesState` + `onNodesChange`，同步文档时保留 `measured`，拖动期间跳过同步；
+  `edgeTypes` 提升为模块常量（React Flow 要求身份稳定）。
+- 回归：Playwright 新增“拖动后连线不丢”断言；Vitest 31、Playwright 11/11。
+- 真实深度调研 E2E（DeepSeek `deepseek-v4.1-flash-expires-on-0910`，academic-research v3）：
+  Run `39d5db63-a35b-42d3-9510-058fcc3a3c5b` COMPLETED，2 轮修订（review a0=revise →
+  a1=pass），158 事件，耗时约 25 分钟；报告 29,502 字，导出
+  `.local/artifacts/reports/<run_id>/report.md`（48,080 字节）。
 
 ## 执行策略落地（2026-09-08，ADR-019）
 
@@ -35,7 +53,7 @@ task_behavior）、观察状态映射、`ProgressEvidence`、`DiagnosticRequest`
 - 新迁移 `0013_progress_evidence` / `0014_recovery_schedule`；新 API
   `/api/runs/{id}/progress`、`/api/runs/{id}/diagnostics`、`.../diagnostics/{id}/supersede`；
   Run Console 新增“诊断”和“进展证据”区域。
-- 全量后端 283 passed + 62 skipped；PG 参数组 62 passed；前端 Vitest 28 passed、
+- 全量后端 293 passed + 62 skipped；PG 参数组 62 passed；前端 Vitest 31 passed、
   Vite build 通过、Playwright 11/11 通过（需 `ANCHOR_BROWSER_CHANNEL=chrome`，本机
   已装的 Playwright 浏览器版本与 1.58 期望的 headless shell 不一致）。
 - 隔离库真实进程 E2E 双路径通过（见下文“真实 Verifier 隔离进程 E2E”）。
@@ -818,4 +836,4 @@ MVP complete 只要求可交付的单机产品闭环；生产门按真实部署�
 - Prefect/Temporal 等 durable 执行 muscle（现有语义被证明不足时）。
 - MCP/A2A、向量检索、对象存储（出现真实消费者时）。
 
-在此之前，Goal 应保持 active/paused，而不是 complete。MVP 门证据（以本轮为准）：283 后端绿 + 62 skipped，PG 参数组 62 绿，前端 Vitest 28、Playwright 11/11；隔离库真实进程 E2E 双路径（Verifier pass/reject）；迁移 head `0014_recovery_schedule`。
+在此之前，Goal 应保持 active/paused，而不是 complete。MVP 门证据（以本轮为准）：293 后端绿 + 62 skipped，PG 参数组 62 绿，前端 Vitest 31、Playwright 11/11；隔离库真实进程 E2E 双路径（Verifier pass/reject）；迁移 head `0014_recovery_schedule`。

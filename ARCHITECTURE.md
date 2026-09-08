@@ -78,6 +78,7 @@ Reuse through adapters:
   MinIO/S3          artifacts
   MCP/A2A           capability and agent protocols
   React Flow        graph canvas
+  dagre             layered auto-layout for unsaved graphs
   assistant-ui      chat and streaming primitives
   OpenTelemetry     telemetry protocol and backends
 ```
