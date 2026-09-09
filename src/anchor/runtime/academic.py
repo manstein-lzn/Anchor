@@ -97,6 +97,19 @@ PROCESS_PHRASES = ("本轮", "本次检索", "本文检索到", "本文共执行
 # converged on it. The fixed anchors are conventional; the body must be named by
 # the paper's own axes, never by one catch-all "Literature Review" bucket.
 # Measured against 1801.04405 (ACM CSUR), 1304.1002 (SLR), 1808.04836 (survey study).
+# A paper written in Chinese must be allowed Chinese headings. These aliases map
+# the converged English skeleton onto its common Chinese equivalents, so the
+# check judges the structure rather than the language it is written in.
+SECTION_ALIASES = {
+    "Abstract": ("Abstract", "摘要"),
+    "Introduction": ("Introduction", "引言", "导论"),
+    "Survey Methodology": ("Survey Methodology", "综述方法", "调查方法", "研究方法",
+                           "文献检索方法", "方法学"),
+    "Threats to Validity": ("Threats to Validity", "有效性威胁", "效度威胁", "研究局限",
+                            "局限性", "局限"),
+    "Conclusion": ("Conclusion", "结论"),
+    "Literature Review": ("Literature Review", "文献综述"),
+}
 REQUIRED_SECTIONS = ("Abstract", "Introduction", "Survey Methodology", "Conclusion")
 VALIDITY_SECTIONS = ("Threats to Validity", "Limitations")
 FORBIDDEN_SECTIONS = ("Literature Review",)
@@ -111,47 +124,60 @@ def citation_numbers(text: str) -> set[int]:
             for number in group.split(",")}
 
 
-def _section_text(manuscript: str, heading: str) -> str:
-    match = re.search(r"^## " + re.escape(heading) + r"\s*$", manuscript, re.MULTILINE)
-    if not match:
-        return ""
-    rest = manuscript[match.end():]
-    following = re.search(r"^## ", rest, re.MULTILINE)
-    return rest[:following.start()] if following else rest
+def _section_text(manuscript: str, *names: str) -> str:
+    for name in names:
+        match = re.search(r"^## " + re.escape(name) + r"[^\n]*$", manuscript, re.MULTILINE)
+        if match:
+            rest = manuscript[match.end():]
+            following = re.search(r"^## ", rest, re.MULTILINE)
+            return rest[:following.start()] if following else rest
+    return ""
 
 
 def _headings(manuscript: str) -> list[str]:
     return [heading.strip() for heading in re.findall(r"^## (.+?)\s*$", manuscript, re.MULTILINE)]
 
 
+def _canonical_section(heading: str) -> str | None:
+    text = heading.strip()
+    for canonical, aliases in SECTION_ALIASES.items():
+        if any(text == alias or text.startswith(alias) for alias in aliases):
+            return canonical
+    return None
+
+
 def structure_errors(manuscript: str) -> list[str]:
     """Enforce the converged survey skeleton and a thematic, not catch-all, body."""
     headings = _headings(manuscript)
+    canonical = [(_canonical_section(heading), heading) for heading in headings]
+    names = [name for name, _ in canonical if name]
     errors: list[str] = []
     for section in REQUIRED_SECTIONS:
-        if section not in headings:
+        if section not in names:
             errors.append(f"Missing required section: {section}")
-    if not any(section in headings for section in VALIDITY_SECTIONS):
+    if not any(section in names for section in VALIDITY_SECTIONS):
         errors.append("Missing a validity section: Threats to Validity (or Limitations)")
     for section in FORBIDDEN_SECTIONS:
-        if section in headings:
+        if section in names:
             errors.append(f"Do not use a catch-all {section!r} section; name the body by theme")
-    fixed = set(REQUIRED_SECTIONS) | set(VALIDITY_SECTIONS) | set(FORBIDDEN_SECTIONS)
-    if len([heading for heading in headings if heading not in fixed]) < MIN_THEMATIC_SECTIONS:
+    if len([heading for name, heading in canonical if name is None]) < MIN_THEMATIC_SECTIONS:
         errors.append(f"The body needs at least {MIN_THEMATIC_SECTIONS} thematic sections, "
                       f"each named by an axis of the field, not one catch-all section")
-    positions = {heading: index for index, heading in enumerate(headings)}
+    positions: dict[str, int] = {}
+    for index, (name, _) in enumerate(canonical):
+        if name and name not in positions:
+            positions[name] = index
     if {"Abstract", "Introduction"} <= set(positions) \
             and positions["Abstract"] > positions["Introduction"]:
         errors.append("Abstract must precede Introduction")
     if {"Survey Methodology", "Introduction"} <= set(positions) \
             and positions["Survey Methodology"] < positions["Introduction"]:
         errors.append("Survey Methodology must follow the Introduction")
-    validity = [heading for heading in headings if heading in VALIDITY_SECTIONS]
+    validity = [name for name in names if name in VALIDITY_SECTIONS]
     if validity and "Conclusion" in positions \
             and positions[validity[0]] > positions["Conclusion"]:
         errors.append("Threats to Validity (or Limitations) must precede the Conclusion")
-    abstract = _section_text(manuscript, "Abstract")
+    abstract = _section_text(manuscript, "Abstract", "摘要")
     if len(abstract) > MAX_ABSTRACT_CHARS:
         errors.append(f"Abstract must stay under {MAX_ABSTRACT_CHARS} characters; "
                       f"found {len(abstract)}")
@@ -174,7 +200,8 @@ def craft_errors(manuscript: str) -> list[str]:
     if oversized:
         errors.append(f"Paragraphs must stay under {MAX_PARAGRAPH_CHARS} characters; "
                       f"found {max(len(block) for block in oversized)}")
-    methods = _section_text(manuscript, "Survey Methodology") or _section_text(manuscript, "Methods")
+    methods = (_section_text(manuscript, "Survey Methodology", "综述方法", "调查方法",
+                             "研究方法", "文献检索方法", "方法学", "Methods"))
     if len(methods) > MAX_METHODS_CHARS:
         errors.append(f"Survey Methodology must stay under {MAX_METHODS_CHARS} characters and leave "
                       f"the search log to the appendix; found {len(methods)}")

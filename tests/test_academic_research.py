@@ -258,6 +258,16 @@ def test_structure_follows_the_converged_survey_skeleton():
     assert VALIDITY_SECTIONS[0] in manuscript()
 
 
+def test_chinese_headings_satisfy_the_skeleton():
+    """A Chinese paper must pass: the check judges structure, not language."""
+    chinese = ("# 标题\n\n## 摘要\n\n摘要内容 [1]。\n\n## 引言\n\n引言内容 [1]。\n\n"
+               "## 综述方法\n\n检索方法 [1]。\n\n## 主题一\n\n内容 [1]。\n\n"
+               "## 主题二\n\n内容 [1]。\n\n## 有效性威胁\n\n威胁 [1]。\n\n## 结论\n\n结论 [1]。")
+    assert not structure_errors(chinese)
+    english = chinese.replace("## 摘要", "## Abstract（摘要）").replace("## 引言", "## Introduction（引言）")
+    assert not structure_errors(english)
+
+
 def test_target_separates_evidence_gaps_from_writing_defects(tmp_path):
     artifacts = LocalArtifactStore(tmp_path)
     ref = artifacts.put_text(json.dumps({"papers": [{"id": "fake"}]}))
