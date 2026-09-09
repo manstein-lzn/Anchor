@@ -918,3 +918,38 @@ attention, where it displaces the work that only a writer can do.
 Result on the same topic: 7.2 minutes instead of 25.8, 38 KB instead of 91 KB,
 three rounds instead of five, `gather` ran once instead of three times, and zero
 audit terms in the body.
+
+## ADR-041: The section skeleton is measured, not invented
+
+The previous section list (Abstract, Introduction, Methods, Literature Review,
+Discussion, Limitations, Conclusion) was assembled by hand. It is an IMRaD tail
+bolted onto a survey body, and it matches no real paper: "Literature Review" is
+the whole paper, "Methods" is ambiguous, and "Limitations" is not where survey
+papers put validity.
+
+The skeleton is now taken from published practice instead of invented. Measured
+by fetching the papers and reading their headings:
+
+- `1801.04405` (ACM Computing Surveys, compiler autotuning): Introduction →
+  domain background → thematic axes (characterization, models, prediction types,
+  search, target domain) → influential papers → Discussion & Conclusion. No
+  Methods section, no "Literature Review" section.
+- `1304.1002` (literature survey): Introduction → Methodology → Results →
+  Related work → Threats to validity → Conclusion.
+- `1808.04836` (survey study): Introduction → background → Study Design →
+  Results → Threats to Validity → Related Work → Conclusion.
+- `2002.12418` (systems paper): Introduction → Related Work → System →
+  Evaluation → Conclusion.
+
+Three regularities hold across all of them: there is no catch-all "Literature
+Review" section; survey methodology is short and separate; validity is stated as
+"Threats to Validity" before the conclusion.
+
+The writer now follows that skeleton — Abstract, Introduction, Survey
+Methodology, 2-6 thematic sections named by the field's own axes, optional
+Comparative Analysis and Open Problems, Threats to Validity, Conclusion — and
+`structure_errors` enforces it: required anchors, at least two thematic
+sections, no catch-all bucket, anchor order, and an abstract cap. The body of the
+resulting paper uses four axes (representation, supervision signal, decision
+granularity, integration point), each with the same internal shape: problem,
+approaches, evidence, judgment.

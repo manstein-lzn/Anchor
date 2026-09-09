@@ -4,6 +4,19 @@
 
 本次交接核对时间：`2026-09-08 22:00 CST`；Verifier 收尾与执行策略会话完成下述验收并更新本文。
 
+## 论文结构改为实测而非发明（2026-09-09，ADR-041）
+
+- 旧结构是我手拼的 IMRaD 尾巴 + 综述正文，不对应任何真实论文。
+- 用项目自己的 `scholarly.read` 抓了四篇论文的目录作为依据：
+  `1801.04405`(ACM CSUR)、`1304.1002`(SLR)、`1808.04836`(survey study)、`2002.12418`(systems)。
+- 三条规律：**没有** catch-all "Literature Review" 节；Survey Methodology 短且独立；
+  **Threats to Validity 在 Conclusion 之前**。
+- 新骨架：Abstract → Introduction → Survey Methodology → 2–6 个按领域轴命名的主题节 →
+  (Comparative Analysis) → (Open Problems) → Threats to Validity → Conclusion。
+  `structure_errors` 强制：必需锚点、≥2 个主题节、禁止 catch-all、锚点顺序、摘要上限。
+- 效果：正文按四个轴组织（表示 / 监督信号 / 决策粒度 / 集成点），每节统一为
+  问题→方法→证据→判断。报告 `.local/reports/3078043c-6d4d-499a-b952-19c636e3dddc.md`（11 分钟）。
+
 ## Deep Research 重构：读者优先（2026-09-09，ADR-040）
 
 - **问题**：首个 deep-research run 产出的是审计报告——正文 57% 段落含审计语言、116 个证据级别标签、

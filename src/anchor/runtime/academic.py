@@ -86,10 +86,6 @@ def preflight_review(snapshot: dict, *, store, artifacts, run_id) -> dict | None
             "review_origin": "deterministic_preflight"}
 
 
-SECTIONS = ("Abstract", "Introduction", "Methods", "Literature Review", "Discussion",
-            "Limitations", "Conclusion")
-
-
 # The paper is the reader-facing deliverable. Verification is a background
 # property of the pipeline, so audit language in the body is a defect, not a
 # virtue: it spends the reader's attention on how we know rather than on what we
@@ -97,6 +93,15 @@ SECTIONS = ("Abstract", "Introduction", "Methods", "Literature Review", "Discuss
 EVIDENCE_TAG = re.compile(r"（\s*(?:全文级|摘要级|题录级)[^）]{0,16}）")
 PROCESS_PHRASES = ("本轮", "本次检索", "本文检索到", "本文共执行", "工具预算",
                    "未在本次", "本次未执行")
+# Section skeleton. This is not invented: survey and systematic-review papers have
+# converged on it. The fixed anchors are conventional; the body must be named by
+# the paper's own axes, never by one catch-all "Literature Review" bucket.
+# Measured against 1801.04405 (ACM CSUR), 1304.1002 (SLR), 1808.04836 (survey study).
+REQUIRED_SECTIONS = ("Abstract", "Introduction", "Survey Methodology", "Conclusion")
+VALIDITY_SECTIONS = ("Threats to Validity", "Limitations")
+FORBIDDEN_SECTIONS = ("Literature Review",)
+MIN_THEMATIC_SECTIONS = 2
+MAX_ABSTRACT_CHARS = 1800
 MAX_PARAGRAPH_CHARS = 1200
 MAX_METHODS_CHARS = 2500
 
@@ -115,6 +120,44 @@ def _section_text(manuscript: str, heading: str) -> str:
     return rest[:following.start()] if following else rest
 
 
+def _headings(manuscript: str) -> list[str]:
+    return [heading.strip() for heading in re.findall(r"^## (.+?)\s*$", manuscript, re.MULTILINE)]
+
+
+def structure_errors(manuscript: str) -> list[str]:
+    """Enforce the converged survey skeleton and a thematic, not catch-all, body."""
+    headings = _headings(manuscript)
+    errors: list[str] = []
+    for section in REQUIRED_SECTIONS:
+        if section not in headings:
+            errors.append(f"Missing required section: {section}")
+    if not any(section in headings for section in VALIDITY_SECTIONS):
+        errors.append("Missing a validity section: Threats to Validity (or Limitations)")
+    for section in FORBIDDEN_SECTIONS:
+        if section in headings:
+            errors.append(f"Do not use a catch-all {section!r} section; name the body by theme")
+    fixed = set(REQUIRED_SECTIONS) | set(VALIDITY_SECTIONS) | set(FORBIDDEN_SECTIONS)
+    if len([heading for heading in headings if heading not in fixed]) < MIN_THEMATIC_SECTIONS:
+        errors.append(f"The body needs at least {MIN_THEMATIC_SECTIONS} thematic sections, "
+                      f"each named by an axis of the field, not one catch-all section")
+    positions = {heading: index for index, heading in enumerate(headings)}
+    if {"Abstract", "Introduction"} <= set(positions) \
+            and positions["Abstract"] > positions["Introduction"]:
+        errors.append("Abstract must precede Introduction")
+    if {"Survey Methodology", "Introduction"} <= set(positions) \
+            and positions["Survey Methodology"] < positions["Introduction"]:
+        errors.append("Survey Methodology must follow the Introduction")
+    validity = [heading for heading in headings if heading in VALIDITY_SECTIONS]
+    if validity and "Conclusion" in positions \
+            and positions[validity[0]] > positions["Conclusion"]:
+        errors.append("Threats to Validity (or Limitations) must precede the Conclusion")
+    abstract = _section_text(manuscript, "Abstract")
+    if len(abstract) > MAX_ABSTRACT_CHARS:
+        errors.append(f"Abstract must stay under {MAX_ABSTRACT_CHARS} characters; "
+                      f"found {len(abstract)}")
+    return errors
+
+
 def craft_errors(manuscript: str) -> list[str]:
     """Reader-facing defects: audit language, walls of text, runaway Methods."""
     errors: list[str] = []
@@ -131,10 +174,10 @@ def craft_errors(manuscript: str) -> list[str]:
     if oversized:
         errors.append(f"Paragraphs must stay under {MAX_PARAGRAPH_CHARS} characters; "
                       f"found {max(len(block) for block in oversized)}")
-    methods = _section_text(manuscript, "Methods")
+    methods = _section_text(manuscript, "Survey Methodology") or _section_text(manuscript, "Methods")
     if len(methods) > MAX_METHODS_CHARS:
-        errors.append(f"Methods must stay under {MAX_METHODS_CHARS} characters and leave the "
-                      f"search log to the appendix; found {len(methods)}")
+        errors.append(f"Survey Methodology must stay under {MAX_METHODS_CHARS} characters and leave "
+                      f"the search log to the appendix; found {len(methods)}")
     return errors
 
 
@@ -156,9 +199,7 @@ def validate_manuscript(work: dict, *, operations, artifacts, minimum_sources: i
     manuscript = work.get("manuscript", "")
     if not isinstance(manuscript, str) or not manuscript.startswith("# "):
         return ["Manuscript must be Markdown with a paper title"], [], "manuscript"
-    for section in SECTIONS:
-        if not re.search(r"^## " + re.escape(section) + r"\s*$", manuscript, re.MULTILINE):
-            craft.append(f"Missing paper section: {section}")
+    craft.extend(structure_errors(manuscript))
     if re.search(r"^## References\s*$", manuscript, re.MULTILINE):
         craft.append("Do not write References manually; they are generated from retrieved metadata")
     craft.extend(craft_errors(manuscript))

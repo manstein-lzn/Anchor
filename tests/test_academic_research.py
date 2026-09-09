@@ -8,7 +8,8 @@ import pytest
 from anchor.domain.admission import RunRequest
 from anchor.domain.conditions import build_condition_context
 from anchor.domain.graph import GraphDefinition, GraphVersion, Trigger
-from anchor.runtime.academic import (SECTIONS, craft_errors, register_academic_behaviors,
+from anchor.runtime.academic import (REQUIRED_SECTIONS, VALIDITY_SECTIONS, craft_errors,
+                                     register_academic_behaviors, structure_errors,
                                      validate_agent_output, validate_manuscript)
 from anchor.runtime.behaviors import BehaviorRegistry
 from anchor.runtime.artifacts import LocalArtifactStore
@@ -99,9 +100,16 @@ def ledger(sources=None):
             "coverage": [], "tensions": [], "unresolved": []}
 
 
+THEMES = ("Cost Models by Granularity", "Modeling Approaches", "Target Systems")
+
+
 def manuscript():
+    """The converged survey skeleton: fixed anchors plus a thematic body."""
+    paragraph = "Supported analysis [1]. " * 40
+    sections = ("Abstract", "Introduction", "Survey Methodology", *THEMES,
+                "Comparative Analysis", "Threats to Validity", "Conclusion")
     return "# A literature review\n\n" + "\n\n".join(
-        "## " + section + "\n\n" + ("Supported analysis [1]. " * 45) for section in SECTIONS)
+        "## " + section + "\n\n" + paragraph for section in sections)
 
 
 def write_output(text=None, thesis="Cost models moved from analytic to learned"):
@@ -121,7 +129,7 @@ def test_craft_gate_routes_a_writing_defect_back_to_the_writer(tmp_path, monkeyp
         write_lease = claim(store, "write")
         resolved = resolve_node_context(store, receipt.run_id, "write", artifacts)
         assert resolved.snapshot["evidence"] == evidence
-        complete(store, artifacts, write_lease, write_output(manuscript().replace("## Methods", "## Missing")))
+        complete(store, artifacts, write_lease, write_output(manuscript().replace("## Threats to Validity", "## Extra")))
 
         review_lease = claim(store, "review")
         resolved = resolve_node_context(store, receipt.run_id, "review", artifacts)
@@ -134,7 +142,9 @@ def test_craft_gate_routes_a_writing_defect_back_to_the_writer(tmp_path, monkeyp
         feedback = resolve_node_context(store, receipt.run_id, "write", artifacts).snapshot["feedback"]
         assert feedback["review"]["verdict"] == "revise"
         assert feedback["review"]["target"] == "manuscript"
-        assert "Missing paper section: Methods" in feedback["review"]["mechanical_issues"]
+        assert "Missing a validity section" in feedback["review"]["mechanical_issues"][0] or any(
+            "Missing a validity section" in issue
+            for issue in feedback["review"]["mechanical_issues"])
         assert feedback["evidence"]["sources"] == evidence["sources"]
 
         complete(store, artifacts, rewrite_lease, write_output())
@@ -219,8 +229,29 @@ def test_audit_language_in_the_body_is_a_defect_not_a_virtue():
         assert any(expected in error for error in errors), (defect, errors)
     wall = "# Title\n\n## Abstract\n\n" + ("x" * 1300)
     assert any("Paragraphs must stay under" in error for error in craft_errors(wall))
-    long_methods = "# Title\n\n## Methods\n\n" + ("search " * 500) + "\n\n## Discussion\n\nok"
-    assert any("Methods must stay under" in error for error in craft_errors(long_methods))
+    long_methods = ("# Title\n\n## Survey Methodology\n\n" + ("search " * 500)
+                    + "\n\n## Conclusion\n\nok")
+    assert any("Survey Methodology must stay under" in error for error in craft_errors(long_methods))
+
+
+def test_structure_follows_the_converged_survey_skeleton():
+    """The body must be thematic, not one catch-all 'Literature Review' bucket."""
+    assert not structure_errors(manuscript())
+    catch_all = ("# Title\n\n## Abstract\n\nok\n\n## Introduction\n\nok\n\n"
+                 "## Survey Methodology\n\nok\n\n## Literature Review\n\n" + ("x " * 200)
+                 + "\n\n## Threats to Validity\n\nok\n\n## Conclusion\n\nok")
+    errors = structure_errors(catch_all)
+    assert any("catch-all" in error for error in errors), errors
+    assert any("thematic sections" in error for error in errors), errors
+    missing_validity = manuscript().replace("## Threats to Validity", "## Extra")
+    assert any("validity section" in error for error in structure_errors(missing_validity))
+    misordered = (manuscript().replace("## Threats to Validity", "## TEMP")
+                  .replace("## Conclusion", "## Threats to Validity")
+                  .replace("## TEMP", "## Conclusion"))
+    assert any("precede the Conclusion" in error for error in structure_errors(misordered))
+    for section in REQUIRED_SECTIONS:
+        assert section in manuscript()
+    assert VALIDITY_SECTIONS[0] in manuscript()
 
 
 def test_target_separates_evidence_gaps_from_writing_defects(tmp_path):
@@ -231,7 +262,7 @@ def test_target_separates_evidence_gaps_from_writing_defects(tmp_path):
         operations=[], artifacts=artifacts, minimum_sources=1, minimum_reads=0)
     assert evidence_target == "evidence"
     _, _, craft_target = validate_manuscript(
-        {"manuscript": manuscript().replace("## Methods", "## Missing"), "sources": []},
+        {"manuscript": manuscript().replace("## Threats to Validity", "## Extra"), "sources": []},
         operations=[], artifacts=artifacts, minimum_sources=0, minimum_reads=0)
     assert craft_target in ("evidence", "manuscript")
 
