@@ -40,11 +40,14 @@ class AnchorApiError(RuntimeError):
 class AnchorClient:
     """Synchronous HTTP client for orchestration, execution and observation."""
 
-    def __init__(self, base_url: str = "http://127.0.0.1:8090", token: str | None = None,
+    def __init__(self, base_url: str | None = None, token: str | None = None,
                  *, timeout: float = 30.0, token_file: str | os.PathLike | None = None,
                  transport: httpx.BaseTransport | None = None) -> None:
         if token is None:
             token = self._read_token(token_file)
+        # An MCP client configures the server through the environment, so the
+        # default must come from the environment before the built-in address.
+        base_url = base_url or os.environ.get("ANCHOR_API_URL") or "http://127.0.0.1:8090"
         self.base_url = base_url.rstrip("/")
         self._client = httpx.Client(base_url=self.base_url, timeout=timeout, trust_env=False,
                                     transport=transport,

@@ -867,3 +867,25 @@ its output reference.
 Parallel *automatic* forking (a `parallel` behavior that creates branches) is
 deliberately not implemented: explicit forks keep the topology, the workspaces
 and the merge point visible in the graph.
+
+## ADR-039: The MCP server is an adapter, not a backdoor
+
+`anchor-mcp` exposes the operation surface to agents over stdio JSON-RPC. It is
+a thin adapter over `AnchorClient`, so every call goes through the authenticated
+HTTP API, the same guards and the same audit trail. It has no database access,
+no third-party dependency, and no privileged path.
+
+- One tool per client operation, each with a **closed** JSON Schema
+  (`additionalProperties: false`), so an agent cannot invent fields.
+- Human-only operations (`approve_wait`, `reject_wait`, `resume_wait`) and
+  operator-only operations (`retention_sweep`, `set_budget`) are refused with
+  `error: "human_only_operation"` unless the operator starts the server with
+  `ANCHOR_MCP_AGENT_CAN_APPROVE=1`. An approval an agent can grant is not an
+  approval.
+- Every failure becomes an `isError: true` result carrying the stable code, HTTP
+  status, path and `retryable`, so an agent branches on data, not prose.
+- `AnchorClient` now resolves its base URL from `ANCHOR_API_URL` so an MCP client
+  configures the server through the environment.
+- Transport is newline-delimited JSON-RPC (`initialize`, `tools/list`,
+  `tools/call`, `ping`). The official SDK was declined: the needed protocol
+  surface is small and stable, and the project keeps its dependency set minimal.

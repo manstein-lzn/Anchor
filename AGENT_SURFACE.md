@@ -101,6 +101,40 @@ reference for the running instance:
 This is the single highest-leverage piece: it turns "the agent must reverse
 engineer the DSL" into "the agent reads the contract".
 
+## MCP server
+
+`anchor-mcp` speaks newline-delimited JSON-RPC 2.0 over stdio and exposes the
+whole operation surface as MCP tools. It has no third-party dependency and no
+privileged path: every tool calls `AnchorClient`, which calls the authenticated
+HTTP API.
+
+```jsonc
+// e.g. Claude Code / any MCP client config
+{
+  "mcpServers": {
+    "anchor": {
+      "command": "/path/to/Anchor/.venv/bin/anchor-mcp",
+      "env": {
+        "ANCHOR_API_URL": "http://127.0.0.1:8090",
+        "ANCHOR_API_TOKEN": "<token>"          // or ANCHOR_TOKEN_FILE
+      }
+    }
+  }
+}
+```
+
+- **Tools**: one per client operation, grouped by intent, each with a closed
+  JSON Schema (`additionalProperties: false`) so an agent cannot invent fields.
+- **Refusal**: `approve_wait`, `reject_wait`, `resume_wait` (human decision) and
+  `retention_sweep`, `set_budget` (operator-only) return
+  `isError: true` with `error: "human_only_operation"` unless the server starts
+  with `ANCHOR_MCP_AGENT_CAN_APPROVE=1`.
+- **Errors**: every failure becomes an `isError: true` result carrying the
+  stable code, HTTP status, path and `retryable`, so an agent branches on data
+  rather than prose.
+- **Context discipline**: `run_digest` and `wait_for_run` are the intended entry
+  points; drill-down tools are separate and bounded.
+
 ## Error model
 
 Every API failure becomes `AnchorApiError` with a stable `code`, the HTTP
@@ -133,9 +167,9 @@ All output is JSON by default.
 | Slice | Content | Status |
 |---|---|---|
 | S1 | `anchor.client`, `anchor.cli`, `GET /api/graphs/ir`, tests | **done** |
-| S2 | MCP server over stdio, human-only refusal, tool schemas | next |
+| S2 | MCP server over stdio, human-only refusal, tool schemas | **done** |
 | S3 | observation ergonomics (resources, richer digests), authoring help | partial (`ir`, `run_digest`, `wait_for_run`) |
-| S4 | docs, PRODUCT_VISION alignment, MCP client e2e | in progress |
+| S4 | docs, PRODUCT_VISION alignment, MCP client e2e | **done** (`tests/test_mcp.py` drives the live API) |
 
 ## Non-goals (for now)
 

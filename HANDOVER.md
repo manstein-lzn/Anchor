@@ -4,6 +4,16 @@
 
 本次交接核对时间：`2026-09-08 22:00 CST`；Verifier 收尾与执行策略会话完成下述验收并更新本文。
 
+## Agent Surface S2/S4：MCP server（2026-09-09，ADR-039）
+
+- `src/anchor/mcp.py`：stdio JSON-RPC（`initialize`/`tools/list`/`tools/call`/`ping`），零新依赖。
+- 工具 = `AnchorClient` 操作的薄适配；每个 schema 封闭（`additionalProperties: false`）。
+- 人类专属（approve/reject/resume waits）与运维专属（retention_sweep/set_budget）默认拒绝，
+  返回 `error: "human_only_operation"`；`ANCHOR_MCP_AGENT_CAN_APPROVE=1` 才放开。
+- 失败 → `isError: true` + 稳定 code/status/path/retryable。
+- `AnchorClient` 支持 `ANCHOR_API_URL`（MCP 客户端用环境变量配置）。
+- 入口：`anchor-mcp`；证据：`tests/test_mcp.py` 9 passed（含 live API 端到端）。
+
 ## W3.2 并行分支（2026-09-09，ADR-038）
 
 - `fork`：从源工作区 revision 创建独立 worktree（记 `fork` 账本项）；并行写者永不共享工作树。
