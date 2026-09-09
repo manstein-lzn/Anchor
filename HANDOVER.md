@@ -4,6 +4,18 @@
 
 本次交接核对时间：`2026-09-08 22:00 CST`；Verifier 收尾与执行策略会话完成下述验收并更新本文。
 
+## W3.2 并行分支（2026-09-09，ADR-038）
+
+- `fork`：从源工作区 revision 创建独立 worktree（记 `fork` 账本项）；并行写者永不共享工作树。
+- `merge`：唯一策略 `require_clean`；冲突 `git merge --abort` 后抛错，目标保持不变；合并本身是账本项 + commit。
+- `anchor.join_merge` 核心行为：目标取自节点**自己声明的输入**（`snapshot["workspace"]`），
+  合并快照中所有分支 revision；写声明用 `uuid5(run_id, "join:<node>")`。
+- **验证发现的缺口**：控制节点改工作区后不发布 revision（join 输出是 JSON artifact 而工作区已移动）。
+  修复：`ControlNodeWorker` 复用 prepare/commit 协议，控制节点声明 `workspace_id` 时输出工作区 revision，
+  行为结果作为 artifact 放进完成事件。
+- 证据：`tests/test_workspace_merge.py` 5 passed；`scripts/validate_workspace_parallel.sh` 7/7
+  （并行两分支各自写入 → join 合并 → 两个文件都在、base 存活、账本含 fork/merge）。
+
 ## W3.1 并发最小模型（2026-09-09，ADR-037）
 
 - **单写者**：workspace 记录写者；首次写入以 `expected_revision`（节点声明的 revision）声明，

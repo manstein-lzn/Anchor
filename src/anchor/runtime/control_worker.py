@@ -44,13 +44,30 @@ class ControlNodeWorker:
     """Execute Router/Parallel/Join/Artifact nodes without invoking a model."""
 
     def __init__(self, store, artifacts: ArtifactStore, sink: ArtifactCheckpointSink,
-                 tools=None, registry=None, behaviors=None) -> None:
+                 tools=None, registry=None, behaviors=None, committer=None) -> None:
         self.store = store
         self.artifacts = artifacts
         self.sink = sink
         self.tools = tools
         self.registry = registry
         self.behaviors = behaviors or BehaviorRegistry()
+        self.committer = committer
+
+    def _workspace_output(self, lease, resolved):
+        """A control node that declares a workspace publishes its revision."""
+        if self.committer is None:
+            return None, {}, None
+        workspace_id = (resolved.node.metadata or {}).get("workspace_id")
+        if not workspace_id:
+            return None, {}, None
+        node_run = self.store.get_node_run(lease.node_run_id)
+        attempt = node_run.attempt if node_run is not None else 0
+        prepared = self.committer.prepare(run_id=lease.run_id, node_run_id=lease.node_run_id,
+                                          attempt=attempt, workspace_id=workspace_id)
+        prepared = self.committer.record_verification(prepared, {"kind": "control", "valid": True})
+        return prepared.content_ref, {"workspace_id": workspace_id,
+                                      "workspace_revision": prepared.revision,
+                                      "manifest_digest": prepared.manifest_digest}, prepared
 
     async def execute_once(
         self,
@@ -95,17 +112,25 @@ class ControlNodeWorker:
             output = self.behaviors.get(behavior_ref).execute_control(
                 resolved.snapshot, store=self.store, artifacts=self.artifacts,
                 run_id=lease.run_id, node_id=lease.node_id)
+            output_ref, event_payload, prepared = self._workspace_output(lease, resolved)
             if isinstance(output, str):
                 ref = self.artifacts.put_text(output, media_type="text/markdown")
                 self.artifacts.export_markdown(lease.run_id, lease.node_id, output)
+                payload = {"response_ref": ref, **event_payload}
                 self.store.complete_node_and_propagate(
-                    lease.claim_id, worker_id, output_ref=ref, input_snapshot=resolved.snapshot,
-                    condition_context=build_condition_context(output, resolved.snapshot))
-                return ControlOutcome(lease.claim_id, lease.node_run_id, lease.node_id, ref)
-            ref = await self.sink.persist_control_result(
-                claim_id=lease.claim_id, node_run_id=lease.node_run_id,
-                output=output, input_snapshot=resolved.snapshot)
-            return ControlOutcome(lease.claim_id, lease.node_run_id, lease.node_id, ref)
+                    lease.claim_id, worker_id, output_ref=output_ref or ref,
+                    input_snapshot=resolved.snapshot,
+                    condition_context=build_condition_context(output, resolved.snapshot),
+                    event_payload=payload)
+                final = output_ref or ref
+            else:
+                final = await self.sink.persist_control_result(
+                    claim_id=lease.claim_id, node_run_id=lease.node_run_id,
+                    output=output, input_snapshot=resolved.snapshot,
+                    output_ref=output_ref, event_payload=event_payload)
+            if prepared is not None:
+                self.committer.store.clear_prepared_revision(prepared.node_run_id, prepared.attempt)
+            return ControlOutcome(lease.claim_id, lease.node_run_id, lease.node_id, final)
         # A control node's output is its fully resolved, selected input. This
         # is a deterministic checkpoint, not a fabricated model response.
         output_ref = await self.sink.persist_control_result(

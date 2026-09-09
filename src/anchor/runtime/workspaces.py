@@ -145,6 +145,52 @@ class WorkspaceManager:
             after_revision=base_revision, actor=actor))
         return workspace
 
+    def fork(self, source_workspace_id: str, *, new_workspace_id: str | None = None,
+             base_revision: str | None = None, actor: str = "operator") -> Workspace:
+        """Create an independent worktree from a source workspace's revision.
+
+        Parallel writers need separate trees; forking is explicit so the graph
+        author decides where parallelism happens.
+        """
+        source = self.store.get_workspace(source_workspace_id)
+        if source is None:
+            raise WorkspaceError(f"unknown workspace: {source_workspace_id}")
+        revision = base_revision or source.current_revision or source.base_revision
+        forked = self.create(project_id=source.project_id, base_revision=revision,
+                             workspace_id=new_workspace_id, actor=actor)
+        self.store.record_workspace_operation(WorkspaceOperation(
+            workspace_id=forked.workspace_id, kind=WorkspaceOperationKind.FORK,
+            before_revision=revision, after_revision=revision, actor=actor))
+        return forked
+
+    def merge(self, target_workspace_id: str, source_revision: str, *,
+              policy: str = "require_clean", actor: str = "operator",
+              claimant=None, expected_revision: str | None = None) -> WorkspaceOperation:
+        """Merge an immutable revision into a workspace.
+
+        ``require_clean`` is the only policy: a conflict aborts the merge and
+        fails closed, because silently choosing one side would lose work.
+        """
+        if policy != "require_clean":
+            raise WorkspaceError(f"unsupported merge policy: {policy}")
+        workspace = self._writable(target_workspace_id, claimant, expected_revision)
+        worktree = self._worktree(workspace)
+        worktree.verify()
+        before = worktree.head()
+        result = _run_git(str(worktree.path), "merge", "--no-ff", "--no-commit",
+                          source_revision, timeout=self.timeout)
+        if result.returncode != 0:
+            _run_git(str(worktree.path), "merge", "--abort", timeout=self.timeout)
+            message = result.stderr.decode("utf-8", errors="replace").strip()
+            raise WorkspaceError(f"merge_conflict: {message or 'merge refused'}")
+        revision = worktree.commit(f"anchor: merge {source_revision[:12]}")
+        operation = self.store.record_workspace_operation(WorkspaceOperation(
+            workspace_id=target_workspace_id, kind=WorkspaceOperationKind.MERGE,
+            before_revision=before, after_revision=revision, actor=actor))
+        self.store.update_workspace_state(target_workspace_id, state=workspace.state,
+                                          current_revision=revision)
+        return operation
+
     def write_text(self, workspace_id: str, path: str, content: str, *,
                    actor: str = "operator", claimant=None,
                    expected_revision: str | None = None) -> WorkspaceOperation:

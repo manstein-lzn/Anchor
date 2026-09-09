@@ -374,6 +374,7 @@ agent × {
 | **W1.3** | 原生工作区工具：`read/write/list/exec` + 工具循环路由（ADR-032） | ✅ 已完成 |
 | **W1.4** | 节点输出 = 工作区 revision + supervisor 保守对账（ADR-033） | ✅ 已完成 |
 | **W3.1** | 并发最小模型：单写者声明 + pin 读 + 失败即消息（ADR-037） | ✅ 已完成 |
+| **W3.2** | 并行分支：显式 fork + `require_clean` 合并 + join 行为（ADR-038） | ✅ 已完成 |
 | ~~W2~~ | 沙箱强化（容器/microVM）：**不做**。保持 bubblewrap 唯一后端，缺失即禁用 `exec`（ADR-034） | — |
 | **W1** | 单写者 + 冻结/提交协议（operation/commit/event） | 中 |
 | **W2** | exec 沙箱（网络白名单、资源上限、密钥注入） | 中高 |

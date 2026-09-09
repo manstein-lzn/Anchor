@@ -44,6 +44,18 @@ class WorkspaceControl(DomainModel):
     actor: str = Field(default="operator", min_length=1, max_length=200)
 
 
+class WorkspaceFork(DomainModel):
+    new_workspace_id: str | None = Field(default=None, max_length=200)
+    base_revision: str | None = Field(default=None, max_length=200)
+    actor: str = Field(default="operator", min_length=1, max_length=200)
+
+
+class WorkspaceMerge(DomainModel):
+    source_revision: str = Field(min_length=1, max_length=200)
+    policy: str = Field(default="require_clean", pattern=r"^[a-z_]+$")
+    actor: str = Field(default="operator", min_length=1, max_length=200)
+
+
 def register_content_routes(app: FastAPI, *, auth, db, required) -> None:
     """Register the content-plane routes; ``db`` is the store dependency type."""
     _register_projects(app, auth=auth, db=db, required=required)
@@ -114,6 +126,20 @@ def _register_workspaces(app: FastAPI, *, auth, db, required) -> None:
               response_model=WorkspaceOperation, dependencies=auth)
     def workspace_delete(workspace_id: str, body: WorkspacePathWrite, store: db):
         return _refuse(lambda: _manager(store).delete(workspace_id, body.path, actor=body.actor))
+
+    @app.post("/api/workspaces/{workspace_id}/fork", response_model=Workspace, dependencies=auth)
+    def workspace_fork(workspace_id: str, body: WorkspaceFork, store: db):
+        """Fork an independent worktree; parallel writers must not share one."""
+        return _refuse(lambda: _manager(store).fork(
+            workspace_id, new_workspace_id=body.new_workspace_id,
+            base_revision=body.base_revision, actor=body.actor))
+
+    @app.post("/api/workspaces/{workspace_id}/merge",
+              response_model=WorkspaceOperation, dependencies=auth)
+    def workspace_merge(workspace_id: str, body: WorkspaceMerge, store: db):
+        """Merge an immutable revision; a conflict fails closed."""
+        return _refuse(lambda: _manager(store).merge(
+            workspace_id, body.source_revision, policy=body.policy, actor=body.actor))
 
     @app.post("/api/workspaces/{workspace_id}/freeze",
               response_model=Workspace, dependencies=auth)

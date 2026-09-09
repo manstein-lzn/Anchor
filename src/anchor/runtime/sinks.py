@@ -61,18 +61,24 @@ class ArtifactCheckpointSink:
         node_run_id: UUID,
         output: Mapping[str, object],
         input_snapshot: Mapping[str, object],
+        output_ref: str | None = None,
+        event_payload: Mapping[str, object] | None = None,
     ) -> str:
         """Checkpoint deterministic control output without a model response."""
         text = canonical_json(dict(output))
         ref = self.artifacts.put_text(text, media_type="application/json")
+        payload: dict[str, object] = {"response_ref": ref}
+        if event_payload:
+            payload.update(event_payload)
         snapshot = dict(input_snapshot)
         try:
             self.store.complete_node_and_propagate(
                 claim_id,
                 self.worker_id,
-                output_ref=ref,
+                output_ref=output_ref or ref,
                 input_snapshot=snapshot,
                 condition_context={"output": dict(output), "inputs": snapshot},
+                event_payload=payload,
             )
         except RoutingDecisionError:
             self.store.fail_node_and_propagate(
@@ -82,7 +88,7 @@ class ArtifactCheckpointSink:
                 phase="routing",
             )
             raise
-        return ref
+        return output_ref or ref
 
 
 class VerificationCheckpointSink:

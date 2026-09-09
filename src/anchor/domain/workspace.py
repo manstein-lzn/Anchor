@@ -25,9 +25,11 @@ class WorkspaceState(StrEnum):
 
 class WorkspaceOperationKind(StrEnum):
     CREATE = "create"
+    FORK = "fork"
     WRITE = "write"
     DELETE = "delete"
     FREEZE = "freeze"
+    MERGE = "merge"
     ARCHIVE = "archive"
 
 

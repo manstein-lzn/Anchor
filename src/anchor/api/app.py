@@ -283,7 +283,8 @@ def create_app(store: RelationalStateStore | None = None, token: str | None = No
             return {"valid": False, "issues": [{"code": "runtime_config_missing", "message": "runtime capability configuration is unavailable"}]}
         behaviors = BehaviorRegistry()
         register_academic_behaviors(behaviors)
-        known_behaviors = set(behaviors.refs())
+        from anchor.runtime.join_merge import JOIN_MERGE_REF
+        known_behaviors = set(behaviors.refs()) | {JOIN_MERGE_REF}
         issues = []
         for node in definition.nodes:
             if node.agent_ref:

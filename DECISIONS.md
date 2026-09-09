@@ -836,3 +836,34 @@ Two structural fixes came out of the same investigation:
 
 Parallel *writing* nodes still need separate workspaces; the fork/merge model
 remains W3.2.
+
+## ADR-038: Parallel branches fork explicitly; a join merges under require_clean
+
+Concurrency is expressed as data, not as a lock. A graph author forks a
+workspace for each parallel writer and names a join workspace:
+
+- `WorkspaceManager.fork` creates an independent worktree from a source
+  workspace's revision and records a `fork` operation. Two writers never share a
+  tree, so the single-writer claim is never contended.
+- `WorkspaceManager.merge` merges an immutable revision into a workspace with
+  `require_clean` as the only policy. A conflict aborts the merge
+  (`git merge --abort`) and raises, leaving the target at its previous revision;
+  choosing a side silently would lose work. The merge itself is a ledger entry
+  and a commit.
+- `anchor.join_merge` is a core behavior registered by the composition root. It
+  takes the target from the node's own declared input (`snapshot["workspace"]`),
+  collects every branch workspace revision in the snapshot, and merges each. A
+  stable `uuid5(run_id, "join:<node>")` gives the merge a write claimant without
+  changing the behavior protocol.
+
+The parallel validation found one more gap: a **control** node that mutates a
+workspace did not publish its revision, so a join's output was a JSON artifact
+while its workspace had moved. `ControlNodeWorker` now uses the same
+prepared/commit protocol as the agent worker: a control node that declares
+`metadata.workspace_id` freezes the workspace, records the behavior result as an
+artifact in the completion event, and completes with the workspace revision as
+its output reference.
+
+Parallel *automatic* forking (a `parallel` behavior that creates branches) is
+deliberately not implemented: explicit forks keep the topology, the workspaces
+and the merge point visible in the graph.

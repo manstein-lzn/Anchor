@@ -69,10 +69,15 @@ async def serve() -> None:
         backend = SubprocessBackend()
     behaviors = BehaviorRegistry()
     register_academic_behaviors(behaviors)
+    from anchor.runtime.content_commit import ContentCommitter
+    from anchor.runtime.join_merge import register_core_behaviors
+    from anchor.runtime.workspaces import WorkspaceManager
+    workspaces = WorkspaceManager(store, root=settings.workspace_root)
+    register_core_behaviors(behaviors, store, workspaces)
     worker = ControlNodeWorker(
         store, artifacts, ArtifactCheckpointSink(store, artifacts, worker_id),
         tools=ToolGateway(store, registry, artifacts, backend), registry=registry,
-        behaviors=behaviors,
+        behaviors=behaviors, committer=ContentCommitter(store, workspaces),
     )
     try:
         await run_control_loop(
