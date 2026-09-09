@@ -790,3 +790,49 @@ def test_storage_budget_is_adjustable_at_runtime(client):
 
     negative = api.put("/api/storage/budget", json={"graphs": {"graph-a": -1}})
     assert negative.status_code == 422
+
+
+def test_retention_preview_sweep_and_audit_api(client, monkeypatch, tmp_path):
+    from anchor.domain.admission import RunRequest
+    from anchor.domain.graph import GraphDefinition, GraphNode, GraphVersion, Trigger
+    from anchor.runtime.artifacts import LocalArtifactStore
+    from anchor.runtime.dispatch import dispatch_pending
+    from anchor.runtime.receiver import DurableExecutionReceiver
+    import asyncio
+
+    api, store = client
+    monkeypatch.setenv("ANCHOR_ARTIFACT_ROOT", str(tmp_path / "artifacts"))
+    artifacts = LocalArtifactStore(str(tmp_path / "artifacts"))
+    version = store.publish_graph(GraphVersion.publish(GraphDefinition(
+        graph_id="retention-api", name="Retention API",
+        nodes=[GraphNode(id="a", type="agent", name="A", agent_ref="a")]), 1))
+    trigger = store.create_trigger(Trigger(graph_version_id=version.graph_version_id,
+                                           type="manual"))
+    receipts = []
+    for index in range(2):
+        receipt = store.admit_run(RunRequest(
+            trigger_id=trigger.id, idempotency_key=f"retention-api-{index}",
+            objective=f"run {index}", inputs={}))
+        receipts.append(receipt)
+        asyncio.run(dispatch_pending(store, DurableExecutionReceiver(store)))
+        lease = store.claim_ready_node("worker", uuid4())
+        ref = artifacts.put_text(f"retention body {index}")
+        store.complete_node_and_propagate(lease.claim_id, "worker", output_ref=ref,
+                                          input_snapshot={"inputs": {}})
+
+    # No budget: preview is available but nothing is eligible for eviction.
+    preview = api.get("/api/retention/preview").json()
+    assert preview["needed"] is False and len(preview["candidates"]) == 2
+    assert api.post("/api/retention/sweep").json()["evicted"] == 0
+
+    # Set an impossible budget, preview, then sweep and audit.
+    api.put("/api/storage/budget", json={"global_bytes": 1})
+    preview = api.get("/api/retention/preview").json()
+    assert preview["needed"] is True and preview["over_global_budget"] is True
+    assert [item["run_id"] for item in preview["candidates"]] == [
+        str(receipts[0].run_id), str(receipts[1].run_id)]
+
+    swept = api.post("/api/retention/sweep").json()
+    assert swept["evicted"] == 2 and swept["freed_bytes"] > 0
+    assert api.get("/api/retention/audit").json()[0]["evicted_runs"] == 2
+    assert api.get("/api/runs").json() == []

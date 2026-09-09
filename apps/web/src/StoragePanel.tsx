@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Database, HardDrive, RefreshCw, Save } from 'lucide-react';
+import { Database, HardDrive, RefreshCw, Save, ShieldAlert, Trash2 } from 'lucide-react';
 import { ApiError, request } from './api';
 
 type StorageGraph = {
@@ -13,6 +13,12 @@ type StorageReport = {
   graphs: StorageGraph[]; runs_total: number; runs_terminal: number;
 };
 type Budgets = { global_bytes: number | null; graphs: Record<string, number | null> };
+type Candidate = { run_id: string; graph_id: string | null; created_at: string; exclusive_bytes: number };
+type Preview = {
+  needed: boolean; reason?: string; total_bytes: number; over_global_budget: boolean;
+  graphs: StorageGraph[]; candidates: Candidate[]; protected_runs: number;
+};
+type Audit = { audit_id: string; created_at: string; trigger: string; evicted_runs: number; freed_bytes: number };
 
 const GB = 1024 ** 3;
 const human = (bytes: number | null | undefined) => {
@@ -34,6 +40,8 @@ export function StoragePanel({ token, onUnauthorized }: { token: string; onUnaut
   const [report, setReport] = useState<StorageReport | null>(null);
   const [globalInput, setGlobalInput] = useState('');
   const [graphInputs, setGraphInputs] = useState<Record<string, string>>({});
+  const [plan, setPlan] = useState<Preview | null>(null);
+  const [audit, setAudit] = useState<Audit[]>([]);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState('');
   const [error, setError] = useState('');
@@ -46,10 +54,11 @@ export function StoragePanel({ token, onUnauthorized }: { token: string; onUnaut
   }, [onUnauthorized]);
 
   const load = useCallback(async () => {
-    const [nextReport, nextBudgets] = await Promise.all([
+    const [nextReport, nextBudgets, nextAudit] = await Promise.all([
       api<StorageReport>('/api/storage'), api<Budgets>('/api/storage/budget'),
+      api<Audit[]>('/api/retention/audit?limit=5'),
     ]);
-    setReport(nextReport);
+    setReport(nextReport); setAudit(nextAudit);
     setGlobalInput(toGb(nextBudgets.global_bytes));
     setGraphInputs(Object.fromEntries(nextReport.graphs.map(item => [
       item.graph_id, toGb(nextBudgets.graphs[item.graph_id] ?? item.budget_bytes)])));
@@ -74,6 +83,22 @@ export function StoragePanel({ token, onUnauthorized }: { token: string; onUnaut
     } catch (cause) { fail(cause); } finally { setBusy(false); }
   }, [api, fail, graphInputs, load]);
 
+  const previewRetention = useCallback(async () => {
+    setError(''); setNotice('');
+    try { setPlan(await api<Preview>('/api/retention/preview')); }
+    catch (cause) { fail(cause); }
+  }, [api, fail]);
+
+  const runSweep = useCallback(async () => {
+    if (!window.confirm('滚动清理会永久删除最老的已结束运行及其产物，且不可恢复。继续？')) return;
+    setBusy(true); setError(''); setNotice('');
+    try {
+      const result = await api<{ evicted: number; freed_bytes: number }>('/api/retention/sweep', 'POST');
+      await load(); setPlan(null);
+      setNotice(result.evicted ? `已清理 ${result.evicted} 条运行，释放 ${human(result.freed_bytes)}` : '当前没有需要清理的运行');
+    } catch (cause) { fail(cause); } finally { setBusy(false); }
+  }, [api, fail, load]);
+
   if (!report) return <div className="storage-panel"><p className="muted">正在读取存储占用…</p></div>;
   const usage = report.budget.global_bytes ? Math.min(100, (report.total_bytes / report.budget.global_bytes) * 100) : 0;
   return <div className="storage-panel">
@@ -95,6 +120,23 @@ export function StoragePanel({ token, onUnauthorized }: { token: string; onUnaut
       <label>全局预算（GB）<input aria-label="全局存储预算" type="number" min="0" step="0.5" value={globalInput} onChange={event => setGlobalInput(event.target.value)} placeholder="留空表示不限制" /></label>
       <button className="primary" disabled={busy} onClick={() => void saveGlobal()}><Save size={15} />保存全局预算</button>
       <small className="muted">预算只用于监控和提示，不会终止正在运行的节点。</small>
+    </section>
+
+    <section className="storage-retention">
+      <div className="section-heading"><h2><ShieldAlert size={16} />滚动清理</h2><span className="muted">仅淘汰已结束的运行 · 不终止在跑节点</span></div>
+      <div className="retention-actions">
+        <button type="button" disabled={busy} onClick={() => void previewRetention()}>预览清理</button>
+        <button type="button" className="danger-link" disabled={busy} onClick={() => void runSweep()}><Trash2 size={14} />立即清理</button>
+      </div>
+      {plan && <div className="retention-plan">
+        {!plan.needed && <span>当前未超出预算，无需清理。</span>}
+        {plan.needed && <span>已超出预算：候选 <strong>{plan.candidates.length}</strong> 条（最老优先），受保护 <strong>{plan.protected_runs}</strong> 条不会删除。</span>}
+        {plan.needed && plan.candidates.length > 0 && <small>最老：{new Date(plan.candidates[0].created_at).toLocaleString()} · 最近：{new Date(plan.candidates[plan.candidates.length - 1].created_at).toLocaleString()}</small>}
+      </div>}
+      {!!audit.length && <div className="ledger-table">{audit.map(item => <div className="ledger-row" key={item.audit_id}>
+        <span><strong>{item.evicted_runs} 条运行</strong><small>{item.trigger} · {new Date(item.created_at).toLocaleString()}</small></span>
+        <span>释放 {human(item.freed_bytes)}</span>
+      </div>)}</div>}
     </section>
 
     <section className="storage-graphs">

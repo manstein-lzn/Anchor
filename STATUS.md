@@ -110,6 +110,9 @@
   queryable by id) and run-list filtering by status/id
 - Runtime-adjustable storage budgets (install-wide + per graph) with a read-only
   `GET /api/storage` footprint report and a Web 存储 view
+- Rolling retention sweep (scheduler): evicts oldest finished runs over budget,
+  skips in-flight/waiting/unknown runs, garbage-collects orphan artifacts, vacuums,
+  and audits every sweep; no budget means no deletion
 - Dagre layered auto-layout for graphs without saved drag positions; saved positions win
 - Bezier forward edges with per-fan-out curvature, backward edges routed below the graph,
   hover/selection-only labels, and a wide interaction path

@@ -535,6 +535,25 @@ def create_app(store: RelationalStateStore | None = None, token: str | None = No
         return {"global_bytes": stored.get(db.GLOBAL_SCOPE),
                 "graphs": _graph_budgets(db)}
 
+    @app.get("/api/retention/preview", dependencies=auth)
+    def retention_preview(db: DB):
+        """Dry run of the rolling sweep; deletes nothing."""
+        from anchor.runtime.artifacts import LocalArtifactStore
+        from anchor.runtime.retention import plan_storage_budgets
+        return plan_storage_budgets(db, LocalArtifactStore(AnchorSettings().artifact_root))
+
+    @app.post("/api/retention/sweep", dependencies=auth)
+    def retention_sweep(db: DB):
+        """Run the rolling sweep now: evict oldest finished runs over budget."""
+        from anchor.runtime.artifacts import LocalArtifactStore
+        from anchor.runtime.retention import enforce_storage_budgets
+        return enforce_storage_budgets(db, LocalArtifactStore(AnchorSettings().artifact_root),
+                                       trigger="api")
+
+    @app.get("/api/retention/audit", dependencies=auth)
+    def retention_audit(db: DB, limit: PageSize = 50):
+        return db.list_retention_audit(limit)
+
     @app.get("/api/runs/{run_id}/operations", response_model=list[ToolOperation], dependencies=auth)
     def operations(run_id: UUID, db: DB):
         required(db.get_run(run_id))

@@ -479,3 +479,24 @@ including shared artifact bytes separately, because artifacts are content
 addressed across runs and graphs. Automatic eviction, garbage collection and
 retention windows remain deliberate future work; when they arrive they must be
 policy-driven, audited, and never destroy a run that is still in flight.
+
+## ADR-025: Rolling retention evicts finished history under a storage budget
+
+Storage budgets are enforced by a rolling sweep, not by a manual button: the
+scheduler periodically evicts the oldest finished runs until the install is
+under its budgets, so disk use stays bounded without operator attention.
+
+The sweep is deliberately narrow. It only ever touches terminal runs, never
+terminates a running node, and skips a protected set: non-terminal runs, runs
+holding an active lease, runs waiting on an approval/event, and runs with an
+unresolved `outcome_unknown` operation. Candidates are ordered oldest-first.
+
+Artifacts are content addressed and shared, so reclaiming disk is a
+mark-and-sweep pass over surviving references (including references embedded in
+context-snapshot JSON), never a per-run file delete. Rows are deleted
+child-first in one transaction, then the database is vacuumed (SQLite needs it
+to shrink the file; PostgreSQL reclaims internally). Every sweep writes a
+`retention_audit` row with counts and freed bytes and stores no run content.
+With no budget configured the sweep is a no-op, so retention can never surprise
+an install that has not opted in. `ANCHOR_STORAGE_ENFORCE=false` turns
+enforcement off entirely, leaving budgets advisory.

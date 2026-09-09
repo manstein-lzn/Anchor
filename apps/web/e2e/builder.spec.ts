@@ -397,3 +397,49 @@ test('storage budgets are adjustable at runtime from the web', async ({ page }) 
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   expect(errors).toEqual([]);
 });
+
+test('rolling cleanup previews and evicts finished runs', async ({ page }) => {
+  const errors: string[] = [];
+  page.on('pageerror', error => errors.push(error.message));
+  const graphId = 'browser-retention';
+  const definition = { graph_id: graphId, name: '滚动清理图', nodes: [
+    { id: 'a', name: '研究', type: 'agent', agent_ref: 'agents.researcher' },
+  ], edges: [] };
+  expect((await page.request.put(`/api/graphs/${graphId}/draft`, { headers, data: { expected_revision: 0, definition, layout: {} } })).ok()).toBe(true);
+  const version = await (await page.request.post(`/api/graphs/${graphId}/publish`, { headers, data: { expected_revision: 1 } })).json();
+  const trigger = crypto.randomUUID();
+  expect((await page.request.put(`/api/triggers/${trigger}`, { headers, data: {
+    graph_version_id: version.graph_version_id, type: 'manual', enabled: true,
+  }})).ok()).toBe(true);
+  const admitted = await (await page.request.post(`/api/triggers/${trigger}/runs`, {
+    headers: { ...headers, 'Idempotency-Key': 'retention-e2e-1' }, data: { objective: '清理目标', inputs: {} },
+  })).json();
+  // Only terminal runs are evictable, so finish ours first.
+  expect((await page.request.post(`/api/runs/${admitted.run_id}/stop`, { headers, data: { reason: 'e2e finish' } })).ok()).toBe(true);
+
+  await login(page);
+  await page.getByLabel('产品视图').getByRole('button', { name: '存储', exact: true }).click();
+  await expect(page.getByRole('heading', { name: '存储预算' })).toBeVisible();
+
+  // A budget below the current footprint makes the preview actionable.
+  await page.getByLabel('全局存储预算').fill('0.000000001');
+  await page.getByRole('button', { name: '保存全局预算' }).click();
+  await expect(page.getByRole('status')).toContainText('全局预算已更新');
+  await page.getByRole('button', { name: '预览清理' }).click();
+  await expect(page.locator('.retention-plan')).toContainText('已超出预算');
+  await expect(page.locator('.retention-plan')).toContainText('最老优先');
+
+  // Confirming the sweep permanently removes the finished runs.
+  page.once('dialog', dialog => dialog.accept());
+  await page.getByRole('button', { name: '立即清理' }).click();
+  await expect(page.getByRole('status')).toContainText('已清理');
+  await expect(page.locator('.storage-retention .ledger-row').first()).toContainText('条运行');
+  // Our finished run is gone; still-running runs stay protected.
+  expect((await page.request.get(`/api/runs/${admitted.run_id}`, { headers })).status()).toBe(404);
+
+  // Leave the shared test database without a budget so later specs start clean.
+  await page.getByLabel('全局存储预算').fill('');
+  await page.getByRole('button', { name: '保存全局预算' }).click();
+  await expect(page.getByRole('status')).toContainText('全局预算已更新');
+  expect(errors).toEqual([]);
+});

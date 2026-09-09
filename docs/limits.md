@@ -27,6 +27,9 @@
 | `ANCHOR_EXPIRE_RUN_BUDGETS` | `runtime/settings.py` | `false` | operator_policy | 监督进程预算清扫 | 关闭时不扫描 |
 | `ANCHOR_STORAGE_GLOBAL_BYTES` | `runtime/settings.py` | `None` | operator_policy | 整个安装的存储监控目标 | 仅报告/提示；不终止节点、不自动删除 |
 | `ANCHOR_STORAGE_PER_GRAPH_BYTES` | `runtime/settings.py` | `None` | operator_policy | 每个图的存储监控目标 | 同上；运行时可经 `PUT /api/storage/budget` 调整 |
+| `ANCHOR_STORAGE_ENFORCE` | `runtime/settings.py` | `true` | operator_policy | 滚动清理开关 | 关闭后预算仅提示；无预算时始终不删 |
+| `ANCHOR_STORAGE_SWEEP_INTERVAL` | `runtime/settings.py` | 60s | operator_policy | 清理扫描间隔 | 由 scheduler 服务执行 |
+| `ANCHOR_STORAGE_SWEEP_BATCH` / `_MAX_ROUNDS` | `runtime/settings.py` | 25 / 40 | operator_policy | 每轮淘汰条数与最大轮数 | 限制单次清理工作量 |
 | `ANCHOR_LEASE_STALE_AFTER` | 同上 | 30s | transport | lease 心跳评估 | 只报告 stale，不偷取 lease |
 | `ANCHOR_SUPERVISOR_INTERVAL` | 同上 | 10s | resource_capacity | 观察频率 | — |
 | model gateway HTTP timeout | `runtime/model_gateway.py` | connect 30 / read 900 / write 60 / pool 30 | transport | 单次 HTTP | 该请求失败，进入故障分类 |

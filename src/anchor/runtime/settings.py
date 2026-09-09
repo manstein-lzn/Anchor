@@ -41,6 +41,12 @@ class AnchorSettings(BaseSettings):
     # evicts finished history, and never terminates a running node.
     storage_global_bytes: int | None = None
     storage_per_graph_bytes: int | None = None
+    # Rolling retention. It only ever evicts finished history; nothing happens
+    # while no budget is configured. Disable to keep budgets advisory only.
+    storage_enforce: bool = True
+    storage_sweep_interval: float = 60.0
+    storage_sweep_batch: int = 25
+    storage_sweep_max_rounds: int = 40
     log_level: str = "INFO"
 
     def require_database_url(self) -> str:

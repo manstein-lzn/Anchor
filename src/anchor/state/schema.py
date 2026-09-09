@@ -37,6 +37,14 @@ triggers = sa.Table("triggers", metadata,
     sa.Column("timezone", sa.Text, nullable=False), sa.Column("filter_expression", sa.Text),
     sa.Column("idempotency_field", sa.Text), sa.Column("webhook_secret_ref", sa.String(200)))
 
+retention_audit = sa.Table("retention_audit", metadata,
+    identifier("audit_id", primary_key=True),
+    timestamp("created_at"),
+    sa.Column("trigger", sa.String(64), nullable=False),
+    sa.Column("evicted_runs", sa.Integer, nullable=False),
+    sa.Column("freed_bytes", sa.BigInteger, nullable=False),
+    sa.Column("detail", json_type, nullable=False))
+
 storage_budgets = sa.Table("storage_budgets", metadata,
     sa.Column("scope", sa.String(200), primary_key=True),
     sa.Column("bytes", sa.BigInteger),

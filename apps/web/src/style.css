@@ -355,3 +355,9 @@ code, .node-reference, .json-editor { font-family: "SFMono-Regular", Consolas, "
 .storage-row.head { font-size: 11px; color: #6b7c84; text-transform: uppercase; letter-spacing: 0.04em; }
 .storage-row input { width: 110px; padding: 5px 7px; font-size: 12px; }
 .storage-row .over-text { color: #b23b3b; }
+
+.storage-retention { display: flex; flex-direction: column; gap: 10px; }
+.retention-actions { display: flex; gap: 10px; }
+.retention-actions button { display: inline-flex; align-items: center; gap: 5px; padding: 6px 12px; font-size: 12px; border-radius: 7px; border: 1px solid #cfdbe0; background: #fff; cursor: pointer; }
+.retention-actions button.danger-link { border-color: #e0b4b4; color: #b23b3b; }
+.retention-plan { display: flex; flex-direction: column; gap: 4px; padding: 10px 12px; border-radius: 8px; background: #f4f8fa; font-size: 12px; }

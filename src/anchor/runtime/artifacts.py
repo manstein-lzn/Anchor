@@ -14,6 +14,7 @@ from uuid import UUID
 class ArtifactStore(Protocol):
     def put_text(self, text: str, *, media_type: str = "text/plain") -> str: ...
     def get_text(self, ref: str) -> str: ...
+    def delete(self, ref: str) -> bool: ...
 
 
 class LocalArtifactStore:
@@ -45,6 +46,20 @@ class LocalArtifactStore:
         if hashlib.sha256(text.encode("utf-8")).hexdigest() != digest:
             raise ValueError("artifact integrity check failed")
         return text
+
+    def delete(self, ref: str) -> bool:
+        """Remove one blob. Callers must prove it is unreferenced first."""
+        prefix = "artifact://sha256/"
+        if not ref.startswith(prefix):
+            raise ValueError("unsupported artifact reference")
+        digest = ref[len(prefix):]
+        if len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
+            raise ValueError("invalid artifact reference")
+        path = self.root / digest
+        if not path.exists():
+            return False
+        path.unlink()
+        return True
 
     def export_markdown(self, run_id: UUID, node_id: str, text: str) -> Path:
         if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,63}", node_id):

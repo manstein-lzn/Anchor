@@ -52,7 +52,10 @@ anchor-api-dev`; read logs with `journalctl --user -u anchor-api-dev`; stop it w
 | Archive run | `POST /api/runs/{id}/archive`, `POST /api/runs/{id}/unarchive` | Reversible; only terminal runs; evidence stays queryable by id |
 | Filter runs | `GET /api/runs?status=cancelled&include_archived=true` | Operator view; archived runs are hidden by default |
 | Storage report | `GET /api/storage` | Read-only: database bytes + artifact bytes, per-graph attribution (exclusive/shared) |
-| Storage budgets | `GET/PUT /api/storage/budget` | Runtime-adjustable global and per-graph monitoring targets; never terminate a running node |
+| Storage budgets | `GET/PUT /api/storage/budget` | Runtime-adjustable global and per-graph targets; never terminate a running node |
+| Retention preview | `GET /api/retention/preview` | Dry run: candidates oldest-first, protected count, over-budget graphs; deletes nothing |
+| Retention sweep | `POST /api/retention/sweep` | Evict oldest finished runs over budget, garbage-collect orphan artifacts, vacuum |
+| Retention audit | `GET /api/retention/audit` | Counts and freed bytes per sweep; stores no run content |
 | Read/delete memory | `GET /api/memory`, `DELETE /api/memory/{id}` | Provenance-bearing memory with tombstone deletion; audit reads use `include_deleted=true`; filters `status`/`domain` |
 | Propose lesson | `POST /api/memory/propose` | Candidate experience with domain and provenance; enters review, not prompts |
 | Review lesson | `POST /api/memory/{id}/review` | Promote/reject with reviewer and reason; only promoted knowledge enters future prompts |
