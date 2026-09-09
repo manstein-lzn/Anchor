@@ -16,6 +16,7 @@ from enum import StrEnum
 from typing import Mapping, Protocol
 from uuid import UUID, uuid4
 
+from anchor.domain.propagation import RoutingDecisionError
 from anchor.runtime.behaviors import BehaviorRegistry
 from anchor.runtime.capabilities import CapabilityRegistry, CapabilityRegistryError
 from anchor.runtime.context import input_hash
@@ -259,7 +260,8 @@ class AgentNodeWorker:
                         if self.tool_loop is not None and agent.tool_refs:
                             response = await self.tool_loop.run(
                                 gateway, lease=lease, agent=agent, prompt=prompt,
-                                system_prompt=system_prompt or agent.instructions)
+                                system_prompt=system_prompt or agent.instructions,
+                                input_snapshot=input_snapshot)
                         else:
                             response = await gateway.generate(prompt=prompt, system_prompt=system_prompt or agent.instructions)
                     if agent.output_format == "json":
@@ -328,7 +330,15 @@ class AgentNodeWorker:
             if rejected_refs:
                 input_snapshot = {**dict(input_snapshot or {}), "output_repair": {"rejected_output_refs": rejected_refs}}
             snapshot_hash = input_hash(dict(input_snapshot)) if input_snapshot is not None else None
-            output_ref, event_payload, prepared = self._workspace_output(lease, agent)
+            try:
+                output_ref, event_payload, prepared = self._workspace_output(lease, agent)
+            except Exception:  # noqa: BLE001 - content failure must fail the node
+                # A content-plane failure must not leave the node running with a
+                # live lease: record it and let supervision see a terminal node.
+                self.store.fail_node_and_propagate(
+                    lease.claim_id, worker_id, error_code="content_commit_failed",
+                    phase="content", input_snapshot=dict(input_snapshot or {}))
+                raise
             result = {"claim_id": lease.claim_id, "node_run_id": lease.node_run_id,
                       "response": response, "input_hash": snapshot_hash}
             if input_snapshot is not None:
@@ -337,7 +347,15 @@ class AgentNodeWorker:
                 result["output_ref"] = output_ref
             if event_payload:
                 result["event_payload"] = event_payload
-            await self.result_sink.persist_model_result(**result)
+            try:
+                await self.result_sink.persist_model_result(**result)
+            except RoutingDecisionError:
+                raise  # the sink already failed the node
+            except Exception:  # noqa: BLE001 - the completion transaction rolled back
+                self.store.fail_node_and_propagate(
+                    lease.claim_id, worker_id, error_code="result_commit_failed",
+                    phase="agent", input_snapshot=dict(input_snapshot or {}))
+                raise
             if prepared is not None:
                 # The control commit above is the commit; the prepared marker is
                 # cleared only after it succeeded.

@@ -17,11 +17,21 @@ STAMP="$(date +%s)"
 PROJECT_ID="lineage-${STAMP}"
 WORKSPACE_ID="ws-lineage-${STAMP}"
 GRAPH_ID="workspace-lineage"
-TIMEOUT="${ANCHOR_VALIDATE_TIMEOUT:-420}"
+TIMEOUT="${ANCHOR_VALIDATE_TIMEOUT:-600}"
 KEEP="${KEEP:-0}"
 
 TMP="$(mktemp -d)"
-cleanup() { if [ "$KEEP" = "1" ]; then echo "kept: $TMP"; else rm -rf "$TMP"; fi; }
+RUN=""
+AUTH=()
+cleanup() {
+  # Never delete a repository out from under a run that is still executing:
+  # stop it first, otherwise the workspace worktree loses its git directory.
+  if [ -n "$RUN" ] && [ "${#AUTH[@]}" -gt 0 ]; then
+    curl -sf -X POST "${AUTH[@]}" -d '{"reason":"validation script exiting"}' \
+      "$API/api/runs/$RUN/stop" >/dev/null 2>&1 || true
+  fi
+  if [ "$KEEP" = "1" ]; then echo "kept: $TMP"; else rm -rf "$TMP"; fi
+}
 trap cleanup EXIT
 
 fail() { echo "FAIL: $*" >&2; exit 1; }

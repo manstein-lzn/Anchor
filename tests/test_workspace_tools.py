@@ -216,3 +216,41 @@ def test_node_input_snapshot_records_the_consumed_workspace_revision(bound):
     updated = resolve_node_context(store, lease.run_id, lease.node_id, artifacts)
     assert updated.snapshot["workspace"].endswith(store.get_workspace("ws-1").current_revision)
     assert updated.snapshot["workspace"] != resolved.snapshot["workspace"]
+
+
+def test_reads_are_pinned_to_the_declared_revision(bound):
+    """A concurrent writer must not change what a node observes (I2/B1)."""
+    from anchor.runtime.resolution import resolve_node_context
+
+    store, artifacts, manager, _, lease, toolset = bound
+    declared = resolve_node_context(store, lease.run_id, lease.node_id, artifacts).snapshot
+    assert declared["workspace"].startswith("workspace://ws-1@")
+
+    manager.write_text("ws-1", "readme.md", "changed by someone else\n", actor="other")
+
+    pinned = toolset.execute(lease=lease, tool_ref="workspace.read",
+                             arguments={"path": "readme.md"}, input_snapshot=declared)
+    assert pinned == "base\n", "the node must read the revision it declared"
+    live = toolset.execute(lease=lease, tool_ref="workspace.read",
+                           arguments={"path": "readme.md"})
+    assert live == "changed by someone else\n", "without a declared revision the live head is used"
+
+
+def test_a_second_node_cannot_write_the_same_workspace(bound):
+    from uuid import uuid4
+    from anchor.runtime.workspace import WorkspaceError
+
+    store, _, _, _, lease, toolset = bound
+    toolset.execute(lease=lease, tool_ref="workspace.write",
+                    arguments={"path": "a.txt", "content": "a\n"})
+    workspace = store.get_workspace("ws-1")
+    assert workspace.writer_node_run_id == lease.node_run_id
+
+    other = lease.model_copy(update={"node_run_id": uuid4()})
+    with pytest.raises(WorkspaceError, match="being written by node"):
+        toolset.execute(lease=other, tool_ref="workspace.write",
+                        arguments={"path": "b.txt", "content": "b\n"})
+    # The same node may keep writing.
+    toolset.execute(lease=lease, tool_ref="workspace.write",
+                    arguments={"path": "b.txt", "content": "b\n"})
+    assert store.get_workspace("ws-1").current_revision

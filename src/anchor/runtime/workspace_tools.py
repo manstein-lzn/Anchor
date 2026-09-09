@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 from collections.abc import Sequence
 
-from anchor.domain.content import workspace_ref
+from anchor.domain.content import parse, workspace_ref
 from anchor.runtime.workspace import (
     WorkspaceError,
     WorkspaceResolver,
@@ -46,39 +46,65 @@ class WorkspaceToolset:
                 f"node {lease.node_id!r} does not declare metadata.workspace_id")
         return workspace_id
 
-    def execute(self, *, lease, tool_ref: str, arguments: dict) -> str:
+    def execute(self, *, lease, tool_ref: str, arguments: dict, input_snapshot=None) -> str:
         if not self.handles(tool_ref):
             raise WorkspaceError(f"not a workspace tool: {tool_ref}")
         workspace_id = self.workspace_id_for(lease)
         if tool_ref == "workspace.read":
-            return self._read(workspace_id, arguments)
+            return self._read(lease, workspace_id, arguments, input_snapshot)
         if tool_ref == "workspace.write":
-            return self._write(workspace_id, arguments)
+            return self._write(lease, workspace_id, arguments, input_snapshot)
         if tool_ref == "workspace.list":
-            return self._list(workspace_id, arguments)
-        return self._exec(workspace_id, arguments)
+            return self._list(lease, workspace_id, arguments, input_snapshot)
+        return self._exec(lease, workspace_id, arguments, input_snapshot)
+
+    def declared_revision(self, lease, workspace_id: str, input_snapshot=None) -> str | None:
+        """The revision the node declared in its input snapshot (I2/B1)."""
+        candidates = [input_snapshot]
+        persisted = self.store.get_context_snapshot(lease.node_run_id)
+        candidates.append(persisted.snapshot if persisted is not None else None)
+        for candidate in candidates:
+            recorded = (candidate or {}).get("workspace") if isinstance(candidate, dict) else None
+            if isinstance(recorded, str):
+                ref = parse(recorded)
+                if ref.workspace_id == workspace_id and ref.revision:
+                    return ref.revision
+        return None
+
+    def pinned_revision(self, lease, workspace_id: str, input_snapshot=None) -> str:
+        """What this node may observe.
+
+        Its own writes are visible, because it owns the write claim and its
+        lineage starts at the declared revision. Another node's in-flight writes
+        are not: without the claim, the declared revision is authoritative.
+        """
+        workspace = self._workspace(workspace_id)
+        if workspace.writer_node_run_id == str(lease.node_run_id) and workspace.current_revision:
+            return workspace.current_revision
+        declared = self.declared_revision(lease, workspace_id, input_snapshot)
+        return declared or workspace.current_revision or workspace.base_revision
 
     # -- operations --------------------------------------------------------
-    def _read(self, workspace_id: str, arguments: dict) -> str:
+    def _read(self, lease, workspace_id: str, arguments: dict, input_snapshot=None) -> str:
         path = self._path(arguments)
-        workspace = self._workspace(workspace_id)
-        revision = workspace.current_revision or workspace.base_revision
+        revision = self.pinned_revision(lease, workspace_id, input_snapshot)
         return self.resolver.read_text(workspace_ref(workspace_id, revision, path))
 
-    def _write(self, workspace_id: str, arguments: dict) -> str:
+    def _write(self, lease, workspace_id: str, arguments: dict, input_snapshot=None) -> str:
         path = self._path(arguments)
         content = arguments.get("content")
         if not isinstance(content, str):
             raise WorkspaceError("workspace.write requires a string 'content'")
-        operation = self.workspaces.write_text(workspace_id, path, content,
-                                               actor=f"agent:{workspace_id}")
+        operation = self.workspaces.write_text(
+            workspace_id, path, content, actor=f"node:{lease.node_run_id}",
+            claimant=lease.node_run_id,
+            expected_revision=self.declared_revision(lease, workspace_id, input_snapshot))
         return json.dumps({"path": path, "revision": operation.after_revision},
                           ensure_ascii=False)
 
-    def _list(self, workspace_id: str, arguments: dict) -> str:
+    def _list(self, lease, workspace_id: str, arguments: dict, input_snapshot=None) -> str:
         from anchor.runtime.workspace import GitWorkspaceBackend, resolve_source
-        workspace = self._workspace(workspace_id)
-        revision = workspace.current_revision or workspace.base_revision
+        revision = self.pinned_revision(lease, workspace_id, input_snapshot)
         root, backend_name = resolve_source(self.store, workspace_id)
         if backend_name != "git":
             raise WorkspaceError(f"unsupported backend: {backend_name}")
@@ -86,14 +112,13 @@ class WorkspaceToolset:
         paths = GitWorkspaceBackend(root).list_paths(revision, prefix if isinstance(prefix, str) else None)
         return json.dumps({"revision": revision, "paths": paths}, ensure_ascii=False)
 
-    def _exec(self, workspace_id: str, arguments: dict) -> str:
+    def _exec(self, lease, workspace_id: str, arguments: dict, input_snapshot=None) -> str:
         if self.sandbox is None:
             raise WorkspaceError("workspace.exec requires a configured sandbox")
         command = arguments.get("command")
         if not isinstance(command, Sequence) or isinstance(command, str) or not command:
             raise WorkspaceError("workspace.exec requires a non-empty 'command' list")
-        workspace = self._workspace(workspace_id)
-        revision = workspace.current_revision or workspace.base_revision
+        revision = self.pinned_revision(lease, workspace_id, input_snapshot)
         result = execute_in_workspace(
             self.store, workspace_ref(workspace_id, revision),
             [str(item) for item in command], sandbox=self.sandbox)

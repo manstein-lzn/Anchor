@@ -146,21 +146,23 @@ class WorkspaceManager:
         return workspace
 
     def write_text(self, workspace_id: str, path: str, content: str, *,
-                   actor: str = "operator") -> WorkspaceOperation:
+                   actor: str = "operator", claimant=None,
+                   expected_revision: str | None = None) -> WorkspaceOperation:
         if not isinstance(content, str):
             raise WorkspaceError("workspace content must be a string")
         encoded = content.encode("utf-8")
         if len(encoded) > self.max_file_bytes:
             raise WorkspaceError(f"content is {len(encoded)} bytes, over the {self.max_file_bytes} limit")
-        workspace = self._active(workspace_id)
+        workspace = self._writable(workspace_id, claimant, expected_revision)
         target = self._target(workspace, path)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
         return self._commit(workspace, WorkspaceOperationKind.WRITE, path=path,
                             content_hash=hashlib.sha256(encoded).hexdigest(), actor=actor)
 
-    def delete(self, workspace_id: str, path: str, *, actor: str = "operator") -> WorkspaceOperation:
-        workspace = self._active(workspace_id)
+    def delete(self, workspace_id: str, path: str, *, actor: str = "operator",
+               claimant=None, expected_revision: str | None = None) -> WorkspaceOperation:
+        workspace = self._writable(workspace_id, claimant, expected_revision)
         target = self._target(workspace, path)
         if not target.exists():
             raise WorkspaceError(f"path does not exist in workspace: {path}")
@@ -178,6 +180,8 @@ class WorkspaceManager:
         self.store.record_workspace_operation(WorkspaceOperation(
             workspace_id=workspace_id, kind=WorkspaceOperationKind.FREEZE,
             before_revision=workspace.current_revision, after_revision=revision, actor=actor))
+        if workspace.writer_node_run_id is not None:
+            self.store.release_workspace_writer(workspace_id, workspace.writer_node_run_id)
         return self.store.update_workspace_state(
             workspace_id, state=WorkspaceState.FROZEN, current_revision=revision)
 
@@ -195,6 +199,21 @@ class WorkspaceManager:
             current_revision=workspace.current_revision)
 
     # -- internals ---------------------------------------------------------
+    def _writable(self, workspace_id: str, claimant, expected_revision=None) -> Workspace:
+        """The workspace must be active and either claimed by this node or free."""
+        workspace = self._active(workspace_id)
+        if claimant is not None:
+            from anchor.state.errors import ConcurrencyConflict
+            try:
+                return self.store.claim_workspace_writer(
+                    workspace_id, claimant, expected_revision=expected_revision)
+            except ConcurrencyConflict as exc:
+                raise WorkspaceError(str(exc)) from exc
+        if workspace.writer_node_run_id is not None:
+            raise WorkspaceError(
+                f"workspace {workspace_id} is owned by node {workspace.writer_node_run_id}")
+        return workspace
+
     def _active(self, workspace_id: str) -> Workspace:
         workspace = self.store.get_workspace(workspace_id)
         if workspace is None:

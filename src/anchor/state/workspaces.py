@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+from uuid import UUID
+
 import sqlalchemy as sa
 
 from anchor.domain.workspace import Workspace, WorkspaceOperation, WorkspaceState
 
 from . import schema as s
 from .base import _StoreHost, decode, utc_now
+from .errors import ConcurrencyConflict
 
 
 class WorkspaceStoreMixin(_StoreHost):
@@ -32,6 +35,45 @@ class WorkspaceStoreMixin(_StoreHost):
                 query = query.where(s.workspaces.c.state == state.value)
             rows = connection.execute(query.order_by(s.workspaces.c.created_at)).mappings()
             return [decode(Workspace, row) for row in rows]
+
+    def claim_workspace_writer(self, workspace_id: str, node_run_id: UUID, *,
+                               expected_revision: str | None = None) -> Workspace:
+        """Claim the single write slot; a different holder fails closed.
+
+        The first claim may pin ``expected_revision``: if the workspace moved
+        since this node's input was resolved, writing would silently mix
+        lineages, so the claim is refused instead.
+        """
+        with self._transaction() as connection:
+            row = connection.execute(sa.select(s.workspaces).where(
+                s.workspaces.c.workspace_id == workspace_id).with_for_update()).mappings().first()
+            if row is None:
+                raise KeyError(workspace_id)
+            holder = row["writer_node_run_id"]
+            if holder is None and expected_revision is not None \
+                    and row["current_revision"] != expected_revision:
+                raise ConcurrencyConflict(
+                    f"workspace {workspace_id} moved to {row['current_revision']} since this "
+                    f"node's input was resolved at {expected_revision}")
+            if holder is not None and holder != str(node_run_id):
+                raise ConcurrencyConflict(
+                    f"workspace {workspace_id} is being written by node {holder}")
+            connection.execute(sa.update(s.workspaces).where(
+                s.workspaces.c.workspace_id == workspace_id).values(
+                writer_node_run_id=str(node_run_id), updated_at=utc_now()))
+        return self.get_workspace(workspace_id)  # type: ignore[return-value]
+
+    def release_workspace_writer(self, workspace_id: str, node_run_id: UUID) -> Workspace:
+        with self._transaction() as connection:
+            row = connection.execute(sa.select(s.workspaces).where(
+                s.workspaces.c.workspace_id == workspace_id).with_for_update()).mappings().first()
+            if row is None:
+                raise KeyError(workspace_id)
+            if row["writer_node_run_id"] == str(node_run_id):
+                connection.execute(sa.update(s.workspaces).where(
+                    s.workspaces.c.workspace_id == workspace_id).values(
+                    writer_node_run_id=None, updated_at=utc_now()))
+        return self.get_workspace(workspace_id)  # type: ignore[return-value]
 
     def update_workspace_state(self, workspace_id: str, *, state: WorkspaceState,
                                current_revision: str | None = None) -> Workspace:

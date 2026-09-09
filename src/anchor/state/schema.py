@@ -63,6 +63,7 @@ workspaces = sa.Table("workspaces", metadata,
     sa.Column("path", sa.String(1000), nullable=False),
     sa.Column("state", sa.String(32), nullable=False),
     sa.Column("current_revision", sa.String(200)),
+    identifier("writer_node_run_id"),
     timestamp("created_at"), timestamp("updated_at"))
 
 workspace_operations = sa.Table("workspace_operations", metadata,

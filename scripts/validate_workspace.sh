@@ -19,7 +19,7 @@ STAMP="$(date +%s)"
 PROJECT_ID="validate-${STAMP}"
 WORKSPACE_ID="ws-validate-${STAMP}"
 GRAPH_ID="workspace-validation"
-TIMEOUT="${ANCHOR_VALIDATE_TIMEOUT:-360}"
+TIMEOUT="${ANCHOR_VALIDATE_TIMEOUT:-600}"
 KEEP="${KEEP:-0}"
 
 TMP="$(mktemp -d)"

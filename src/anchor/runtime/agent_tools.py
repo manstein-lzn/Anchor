@@ -20,6 +20,8 @@ from uuid import uuid5
 from anchor.runtime.capabilities import CapabilityRegistryError, AgentCapability, ToolCapability
 from anchor.runtime.model_gateway import ModelGateway, ModelResponse, ToolFunction
 from anchor.runtime.tool_gateway import ToolDenied, ToolGateway
+from anchor.runtime.content import ContentUnavailable
+from anchor.runtime.sandbox import SandboxDenied
 from anchor.runtime.workspace import WorkspaceError
 
 RETRY_CONTEXT_CHAR_BUDGET = 80_000
@@ -70,7 +72,7 @@ class AgentToolLoop:
         limit = getattr(capability, "excerpt_list_limit", 10)
         return _truncate(evidence, chars=chars, list_limit=limit, note=note)
 
-    def _functions(self, lease, agent: AgentCapability) -> list[ToolFunction]:
+    def _functions(self, lease, agent: AgentCapability, input_snapshot=None) -> list[ToolFunction]:
         state = {"seq": 0, "total": 0, "by_tool": {}}
         state_lock = asyncio.Lock()
         concurrency = asyncio.Semaphore(agent.max_parallel_tools)
@@ -105,8 +107,11 @@ class AgentToolLoop:
                         async with concurrency:
                             return await asyncio.to_thread(
                                 self.native.execute, lease=lease, tool_ref=_ref,
-                                arguments=arguments)
-                    except WorkspaceError as exc:
+                                arguments=arguments, input_snapshot=input_snapshot)
+                    except (WorkspaceError, ContentUnavailable, SandboxDenied) as exc:
+                        # A tool failure is a message to the model, never a node
+                        # crash: the model may adapt (for example, write a file
+                        # before reading it back).
                         return "TOOL FAILED [workspace_error]: " + str(exc)
                 try:
                     async with concurrency:
@@ -175,7 +180,7 @@ class AgentToolLoop:
         return prior, prior_evidence
 
     async def run(self, model: ModelGateway, *, lease, agent: AgentCapability,
-                  prompt: str, system_prompt: str = "") -> ModelResponse:
+                  prompt: str, system_prompt: str = "", input_snapshot=None) -> ModelResponse:
         generate = getattr(model, "generate_with_tools", None)
         if generate is None or not agent.tool_refs:
             return await model.generate(prompt=prompt, system_prompt=system_prompt)
@@ -198,4 +203,4 @@ class AgentToolLoop:
                      "the requested output directly from this evidence:\n"
                      + json.dumps(prior_evidence, ensure_ascii=False) if prior_evidence else "")).strip()
         return await generate(prompt=prompt, system_prompt=system,
-                              tools=self._functions(lease, agent))
+                              tools=self._functions(lease, agent, input_snapshot))

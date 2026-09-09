@@ -39,6 +39,7 @@ class Workspace(DomainModel):
     path: str = Field(min_length=1, max_length=1000)
     state: WorkspaceState = WorkspaceState.ACTIVE
     current_revision: str | None = Field(default=None, max_length=200)
+    writer_node_run_id: UUID | None = None
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 

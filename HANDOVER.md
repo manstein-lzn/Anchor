@@ -4,6 +4,19 @@
 
 本次交接核对时间：`2026-09-08 22:00 CST`；Verifier 收尾与执行策略会话完成下述验收并更新本文。
 
+## W3.1 并发最小模型（2026-09-09，ADR-037）
+
+- **单写者**：workspace 记录写者；首次写入以 `expected_revision`（节点声明的 revision）声明，
+  若工作区已移动则拒绝（否则会静默混合血缘）；其它节点写入失败关闭；freeze 释放。
+- **pin 读**：节点读自己声明的 revision（隔离其它节点的在途写入）；一旦持有写声明，读跟随自己的
+  血缘（否则读不到自己刚写的文件）。
+- **失败即消息**：`WorkspaceError`/`ContentUnavailable`/`SandboxDenied` 返回 `TOOL FAILED [...]`
+  给模型，不再穿透导致节点挂起。
+- **两个结构性修复**：`_workspace_output` 与结果提交纳入失败处理（否则节点留在 running +
+  陈旧 lease）；验证脚本清理前先停止运行（否则删掉仓库导致 worktree 失效）。
+- 证据：`tests/test_workspace_tools.py` 11 passed、`test_workspaces.py` 11 passed；
+  两个端到端脚本全过（6/6 与 7/7）。
+
 ## 血缘验证 + I2/B1 修复（2026-09-09，ADR-036）
 
 - 第二个验证脚本 `scripts/validate_workspace_lineage.sh`：4 文件包 bug + 已有失败测试 +

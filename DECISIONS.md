@@ -802,3 +802,37 @@ This is the recording half of B1. Enforcing that the tools cannot read a
 different revision than the one recorded requires the concurrency work (W3): with
 one writer per workspace the window is currently closed by construction, but the
 snapshot is what makes a violation detectable.
+
+## ADR-037: One writer per workspace; reads see the declared revision plus own writes
+
+Concurrency is enforced by isolation plus a single-writer claim, not by locking
+the whole run. Three rules, each with a test:
+
+- **One writer.** A workspace records the node that owns its write slot. The
+  first write claims it with `expected_revision`, which must equal the revision
+  the node declared in its input snapshot; if the workspace moved in between,
+  the claim is refused because committing would silently mix lineages. A
+  different node's write fails closed. `freeze` releases the claim.
+- **Pinned reads.** A node reads the revision recorded in its input snapshot, so
+  another node's in-flight writes cannot change what it observes (I2/B1). Once
+  the node owns the claim, its reads follow its own lineage, because otherwise it
+  could not read back a file it just wrote.
+- **Failures are messages, not crashes.** A workspace tool failure
+  (`WorkspaceError`, `ContentUnavailable`, `SandboxDenied`) is returned to the
+  model as `TOOL FAILED [...]`, so it can adapt — for example write a file
+  before reading it back. Previously such an exception escaped the tool loop and
+  left the node running with a live lease.
+
+Two structural fixes came out of the same investigation:
+
+- `_workspace_output` and the result sink now run inside the failure handling
+  that fails the node. A content or completion error used to escape
+  `execute_claimed_once` entirely, leaving the node `running` and the lease
+  stale — the worst state, because supervision sees a live node that will never
+  finish.
+- The validation scripts stop the run before deleting their throwaway
+  repository. Deleting it while a run was still executing destroyed the
+  workspace worktree's git directory and produced a confusing failure.
+
+Parallel *writing* nodes still need separate workspaces; the fork/merge model
+remains W3.2.

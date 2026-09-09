@@ -159,3 +159,23 @@ def test_worktree_verification_rejects_a_path_in_another_repository(tmp_path):
     nested.mkdir()
     with pytest.raises(WorkspaceError, match="different repository"):
         GitWorktree(str(repo_a), nested, "anchor/foreign").verify()
+
+
+def test_the_write_claim_has_one_holder_and_is_released_on_freeze(managed):
+    from uuid import uuid4
+
+    store, manager, _, sha = managed
+    manager.create(project_id="proj-1", base_revision=sha, workspace_id="ws-1")
+    first, second = uuid4(), uuid4()
+
+    manager.write_text("ws-1", "a.txt", "a\n", actor="n1", claimant=first)
+    assert store.get_workspace("ws-1").writer_node_run_id == first
+
+    with pytest.raises(WorkspaceError, match="being written by node"):
+        manager.write_text("ws-1", "b.txt", "b\n", actor="n2", claimant=second)
+    with pytest.raises(WorkspaceError, match="owned by node"):
+        manager.write_text("ws-1", "c.txt", "c\n", actor="operator")
+
+    frozen = manager.freeze("ws-1", actor="n1")
+    assert frozen.writer_node_run_id is None
+    assert frozen.state is WorkspaceState.FROZEN
