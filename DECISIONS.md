@@ -548,3 +548,30 @@ Evidence: `docs/deep-research-report.md` (external research). Its conclusions
 agree with this decision; its citations were delivered as internal markers
 without URLs, so it is treated as directional evidence, not as a verifiable
 source, until an appendix with URLs is supplied.
+
+## ADR-027: A content reference is an immutable boundary type
+
+The control plane records which content a node consumed and produced; the content
+plane owns the bytes. `domain/content.py` is the single place where those two
+meet: `ContentRef` parses, validates and serializes both reference kinds
+(`artifact://sha256/<digest>` and `workspace://<id>@<immutable-revision>[/<path>]`),
+and no other module may parse the prefixes (enforced by `tests/test_architecture.py`).
+
+Two properties are enforced at parse time rather than at read time:
+
+- **Immutability.** A workspace revision must not be a mutable name. `main`,
+  `HEAD`, `latest`, `refs/...` and any branch-style ref are refused, because a
+  reference that can move later makes replay depend on the environment rather
+  than on the recorded history. This is what keeps I2 and I9 honest.
+- **Fail closed.** `runtime/content.py` resolves references through injected
+  resolvers keyed by content kind. An unregistered kind raises
+  `ContentUnavailable` instead of guessing, and a missing artifact raises rather
+  than returning empty text. There is no fallback to a live workspace.
+
+`ContentRefError` is deliberately not a `ValueError`: pydantic converts a
+`ValueError` raised inside a validator into a generic `ValidationError`, which
+would hide the precise reason a reference was refused.
+
+This ADR defines the boundary only. It does not add a workspace backend, a
+migration, or an API endpoint; those are W1+. The artifact side of the resolver
+is implemented and tested so the fail-closed path is real, not aspirational.

@@ -22,7 +22,9 @@ FREE_TOP_LEVEL = {"client.py", "cli.py", "__init__.py"}
 # Content-reference prefixes must be parsed in one place, not sprinkled around.
 CONTENT_REF_PREFIXES = ("artifact://", "workspace://")
 CONTENT_REF_OWNERS = {
-    "runtime/artifacts.py",   # the boundary itself
+    "domain/content.py",      # the boundary type itself
+    "runtime/content.py",     # the resolver boundary
+    "runtime/artifacts.py",   # the artifact store
     "state/storage.py",       # reference scanning for the storage report
     "runtime/integrity.py",   # evidence readability check
     "runtime/resolution.py",  # predecessor artifact resolution

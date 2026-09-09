@@ -4,6 +4,20 @@
 
 本次交接核对时间：`2026-09-08 22:00 CST`；Verifier 收尾与执行策略会话完成下述验收并更新本文。
 
+## W0.1：content_ref 边界类型（2026-09-09，ADR-027）
+
+- `domain/content.py`：唯一的边界类型。`ContentRef` 解析/校验/序列化两类引用
+  （`artifact://sha256/<digest>`、`workspace://<id>@<immutable-revision>[/<path>]`）。
+- **可变 revision 在解析期即拒绝**：`main`/`HEAD`/`latest`/`refs/...`/分支名一律拒绝，
+  因为它们会让重放依赖环境而非记录历史（I2/I9）。
+- `runtime/content.py`：按 kind 注入 resolver；未注册 kind → `ContentUnavailable`；
+  产物缺失 → 抛错而非返回空。**没有回退到 live workspace 的路径。**
+- `ContentRefError` 故意不是 `ValueError`：pydantic 会把 validator 里的 ValueError 包成
+  `ValidationError`，掩盖拒绝原因。
+- 架构测试已把前缀所有权收紧到 `domain/content.py` / `runtime/content.py`。
+- 证据：`tests/test_content_ref.py` 21 passed（往返、可变 revision 拒绝、路径穿越、
+  缺失失败关闭、未注册 kind 失败关闭）；全量测试见下。
+
 ## 质量门禁（2026-09-09）
 
 - 现状：有分层纪律，但**零自动强制**（无 ruff/mypy/架构测试/依赖契约）。
