@@ -283,6 +283,12 @@ class ExecutionStoreMixin(_StoreHost):
             rows = connection.execute(sa.select(s.node_leases).where(
                 s.node_leases.c.released_at.is_(None)).order_by(s.node_leases.c.heartbeat_at)).mappings().all()
             return [decode(NodeLease, row) for row in rows]
+    def get_node_run(self, node_run_id: UUID) -> NodeRun | None:
+        with self.engine.connect() as connection:
+            row = connection.execute(sa.select(s.node_runs).where(
+                s.node_runs.c.id == str(node_run_id))).mappings().first()
+        return decode(NodeRun, row) if row is not None else None
+
     def claim_ready_node(self, worker_id: str, claim_id: UUID) -> NodeLease | None:
         """Generic claim across every executable node type (tests, admin paths)."""
         return self._claim_ready_typed_node(worker_id, claim_id, frozenset(NodeType))

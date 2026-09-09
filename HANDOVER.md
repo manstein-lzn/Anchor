@@ -4,6 +4,19 @@
 
 本次交接核对时间：`2026-09-08 22:00 CST`；Verifier 收尾与执行策略会话完成下述验收并更新本文。
 
+## W1.4：节点输出 = 工作区 revision（2026-09-09，ADR-033）
+
+- 声明 `metadata.workspace_id` 的节点，其输出是**不可变工作区 revision**，不是模型文本：
+  模型响应后走 prepare → 记录 output_format 验证结果 → 完成（`output_ref = workspace://…`）→
+  清除 prepared 标记。
+- 模型文本仍作为 artifact 保存，并在 `node.completed` 事件 payload 的 `response_ref` 中引用；
+  **artifact GC 现在会扫描事件 payload**（否则该 artifact 会被当孤儿回收）。
+- `complete_node_and_propagate` 支持 `event_payload` 合并，无需发明第二个事件。
+- supervisor 每轮做保守对账：节点终止 → 清除标记；内容不可读 → 记 `inconsistent` 且不动；
+  节点未完成 → 留给节点自身恢复。**supervisor 绝不代替 worker 完成节点。**
+- 证据：`tests/test_workspace_tools.py` 6 passed（含 worker 端到端）、
+  `tests/test_content_commit.py` 9 passed；门禁绿（ruff C901 13、mypy 97）。
+
 ## W1.3：原生工作区工具（2026-09-09，ADR-032）
 
 - `WorkspaceToolset`：`workspace.read/write/list/exec`，节点通过 `metadata.workspace_id` 绑定；

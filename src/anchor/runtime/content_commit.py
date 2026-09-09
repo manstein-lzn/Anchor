@@ -29,7 +29,7 @@ class ContentCommitError(RuntimeError):
 @dataclass(frozen=True)
 class ReconcileOutcome:
     prepared: PreparedRevision
-    action: str  # already_committed | verified | committed | inconsistent
+    action: str  # already_committed | verified | committed | awaiting_node | inconsistent
 
     @property
     def consistent(self) -> bool:
@@ -101,6 +101,26 @@ class ContentCommitter:
                 continue
             self.commit(prepared, commit_fn=commit_fn)
             outcomes.append(ReconcileOutcome(prepared, "committed"))
+        return outcomes
+
+    def sweep_orphans(self, *, is_terminal: Callable[[PreparedRevision], bool],
+                      limit: int = 200) -> list[ReconcileOutcome]:
+        """Conservative supervisor pass over prepared revisions.
+
+        A marker is cleared once its node is terminal. If the content is gone the
+        outcome is ``inconsistent`` and nothing changes. Otherwise the marker is
+        left for the node's own recovery or retry, which is the only actor that
+        can legitimately complete the node.
+        """
+        outcomes: list[ReconcileOutcome] = []
+        for prepared in self.store.list_prepared_revisions(limit):
+            if is_terminal(prepared):
+                self.store.clear_prepared_revision(prepared.node_run_id, prepared.attempt)
+                outcomes.append(ReconcileOutcome(prepared, "already_committed"))
+            elif not self.content_readable(prepared):
+                outcomes.append(ReconcileOutcome(prepared, "inconsistent"))
+            else:
+                outcomes.append(ReconcileOutcome(prepared, "awaiting_node"))
         return outcomes
 
     def content_readable(self, prepared: PreparedRevision) -> bool:

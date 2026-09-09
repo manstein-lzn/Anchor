@@ -66,7 +66,7 @@ def _workspace_toolset(store, settings):
             "bubblewrap unavailable; workspace.exec falls back to dev subprocess")
         sandbox = SubprocessWorkspaceSandbox()
     manager = WorkspaceManager(store, root=settings.workspace_root)
-    return WorkspaceToolset(store, manager, sandbox=sandbox)
+    return manager, WorkspaceToolset(store, manager, sandbox=sandbox)
 
 
 async def serve() -> None:
@@ -95,13 +95,15 @@ async def serve() -> None:
         logger = logging.getLogger("anchor.worker")
         logger.warning("bubblewrap unavailable; tool execution falls back to dev subprocess")
         backend = SubprocessBackend()
-    workspace_tools = _workspace_toolset(store, settings)
+    workspace_manager, workspace_tools = _workspace_toolset(store, settings)
     tool_loop = AgentToolLoop(ToolGateway(store, registry, artifacts, backend), artifacts,
                               native=workspace_tools)
+    from anchor.runtime.content_commit import ContentCommitter
+    committer = ContentCommitter(store, workspace_manager)
     behaviors = BehaviorRegistry()
     register_academic_behaviors(behaviors)
     worker = AgentNodeWorker(store, registry, gateways, sink, tool_loop=tool_loop,
-                             behaviors=behaviors)
+                             behaviors=behaviors, committer=committer)
     stop = asyncio.Event()
     try:
         await run_worker_loop(worker, worker_id=worker_id,

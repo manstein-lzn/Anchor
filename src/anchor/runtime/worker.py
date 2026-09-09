@@ -145,16 +145,40 @@ class AgentNodeWorker:
     def __init__(self, store: StateStore, registry: CapabilityRegistry,
                  gateways: dict[str, ModelGateway], result_sink: NodeResultSink,
                  tool_loop=None, behaviors: BehaviorRegistry | None = None,
+                 committer=None,
                  retry_backoff_seconds: tuple[float, ...] = (15.0, 45.0, 120.0)) -> None:
         self.store = store
         self.registry = registry
         self.gateways = gateways
         self.result_sink = result_sink
         self.tool_loop = tool_loop
+        self.committer = committer
         self.behaviors = behaviors or BehaviorRegistry()
         if any(delay < 0 for delay in retry_backoff_seconds):
             raise ValueError("retry backoff values must be non-negative")
         self.retry_backoff_seconds = retry_backoff_seconds
+
+    def _workspace_output(self, lease, agent):
+        """Freeze a workspace-bound node's output as an immutable revision.
+
+        Returns (output_ref, event_payload, prepared); a node without a declared
+        workspace returns (None, {}, None) and keeps the model text as output.
+        """
+        if self.committer is None:
+            return None, {}, None
+        from anchor.runtime.workspaces import node_workspace_id
+        workspace_id = node_workspace_id(self.store, lease)
+        if not workspace_id:
+            return None, {}, None
+        node_run = self.store.get_node_run(lease.node_run_id)
+        attempt = node_run.attempt if node_run is not None else 0
+        prepared = self.committer.prepare(run_id=lease.run_id, node_run_id=lease.node_run_id,
+                                          attempt=attempt, workspace_id=workspace_id)
+        prepared = self.committer.record_verification(prepared, {
+            "kind": "output_format", "output_format": agent.output_format, "valid": True})
+        return prepared.content_ref, {"workspace_id": workspace_id,
+                                      "workspace_revision": prepared.revision,
+                                      "manifest_digest": prepared.manifest_digest}, prepared
 
     async def execute_once(self, *, worker_id: str, agent_ref: str, prompt: str,
                            system_prompt: str = "", claim_id: UUID | None = None,
@@ -304,11 +328,21 @@ class AgentNodeWorker:
             if rejected_refs:
                 input_snapshot = {**dict(input_snapshot or {}), "output_repair": {"rejected_output_refs": rejected_refs}}
             snapshot_hash = input_hash(dict(input_snapshot)) if input_snapshot is not None else None
+            output_ref, event_payload, prepared = self._workspace_output(lease, agent)
             result = {"claim_id": lease.claim_id, "node_run_id": lease.node_run_id,
                       "response": response, "input_hash": snapshot_hash}
             if input_snapshot is not None:
                 result["input_snapshot"] = input_snapshot
+            if output_ref is not None:
+                result["output_ref"] = output_ref
+            if event_payload:
+                result["event_payload"] = event_payload
             await self.result_sink.persist_model_result(**result)
+            if prepared is not None:
+                # The control commit above is the commit; the prepared marker is
+                # cleared only after it succeeded.
+                self.committer.store.clear_prepared_revision(prepared.node_run_id,
+                                                             prepared.attempt)
         finally:
             heartbeat_task.cancel()
             try:

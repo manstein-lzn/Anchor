@@ -20,7 +20,7 @@ from anchor.runtime.workspace import (
     WorkspaceResolver,
     execute_in_workspace,
 )
-from anchor.runtime.workspaces import WorkspaceManager
+from anchor.runtime.workspaces import WorkspaceManager, node_workspace_id
 
 WORKSPACE_TOOLS = frozenset({
     "workspace.read", "workspace.write", "workspace.list", "workspace.exec",
@@ -40,11 +40,7 @@ class WorkspaceToolset:
         return tool_ref in WORKSPACE_TOOLS
 
     def workspace_id_for(self, lease) -> str:
-        run = self.store.get_run(lease.run_id)
-        graph = self.store.get_graph_version(run.graph_version_id) if run else None
-        node = next((item for item in graph.definition.nodes if item.id == lease.node_id),
-                    None) if graph else None
-        workspace_id = (node.metadata or {}).get("workspace_id") if node else None
+        workspace_id = node_workspace_id(self.store, lease)
         if not workspace_id:
             raise WorkspaceError(
                 f"node {lease.node_id!r} does not declare metadata.workspace_id")

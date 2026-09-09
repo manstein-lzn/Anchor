@@ -167,7 +167,8 @@ class CheckpointStoreMixin(_StoreHost):
                                     node_input_hash: str | None = None,
                                     input_snapshot: dict[str, object] | None = None,
                                     condition_context: dict[str, object] | None = None,
-                                    verification: VerificationRecord | None = None) -> list[NodeRun]:
+                                    verification: VerificationRecord | None = None,
+                                    event_payload: dict[str, object] | None = None) -> list[NodeRun]:
         if not output_ref: raise ValueError("output_ref is required")
         input_hashes = input_hashes or {}
         with self._transaction() as connection:
@@ -215,10 +216,15 @@ class CheckpointStoreMixin(_StoreHost):
                 if verification.evidence_ref != output_ref:
                     raise ConcurrencyConflict("passed verifier output must be its evidence artifact")
                 self._persist_verification(connection, verification)
-            seq = self._append_event(connection, stream_id=run_id, event_type="node.completed", payload={
+            payload: dict[str, object] = {
                 "node_id": lease["node_id"], "claim_id": str(claim_id), "output_ref": output_ref,
                 "input_hash": node_input_hash, "context_generation": generation,
-            }, idempotency_key=f"claim:{claim_id}:completed")
+            }
+            if event_payload:
+                payload.update(event_payload)
+            seq = self._append_event(connection, stream_id=run_id, event_type="node.completed",
+                                     payload=payload,
+                                     idempotency_key=f"claim:{claim_id}:completed")
             connection.execute(sa.update(s.node_runs).where(s.node_runs.c.id == lease["node_run_id"]).values(status="completed", output_ref=output_ref, input_hash=node_input_hash, revision=node["revision"]+1, updated_at=now))
             connection.execute(sa.update(s.node_leases).where(s.node_leases.c.claim_id == str(claim_id)).values(released_at=now))
             # A failed/cancelled Run may still have workers finishing already

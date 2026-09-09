@@ -165,3 +165,30 @@ def test_concurrent_reconcilers_commit_once(committed):
     committer.reconcile(is_committed=is_committed,
                         verify_fn=lambda item: {"verdict": "pass"}, commit_fn=commit_fn)
     assert calls == [prepared.revision]
+
+
+def test_sweep_clears_terminal_nodes_and_leaves_pending_ones(committed):
+    store, _, committer, _, run_id, node_run_id = committed
+    prepared = committer.prepare(run_id=run_id, node_run_id=node_run_id, attempt=0,
+                                 workspace_id="ws-1")
+
+    pending = committer.sweep_orphans(is_terminal=lambda item: False)
+    assert [item.action for item in pending] == ["awaiting_node"]
+    assert store.get_prepared_revision(node_run_id, 0) is not None, \
+        "a pending node's prepared revision must be left for its own recovery"
+
+    terminal = committer.sweep_orphans(is_terminal=lambda item: True)
+    assert [item.action for item in terminal] == ["already_committed"]
+    assert store.get_prepared_revision(node_run_id, 0) is None
+    assert prepared.revision
+
+
+def test_sweep_reports_inconsistent_without_changing_anything(committed):
+    store, _, committer, _, run_id, node_run_id = committed
+    store.record_prepared_revision(PreparedRevision(
+        node_run_id=node_run_id, attempt=0, run_id=run_id, workspace_id="ws-1",
+        revision="0" * 40, manifest_digest="a" * 64))
+
+    outcomes = committer.sweep_orphans(is_terminal=lambda item: False)
+    assert [item.action for item in outcomes] == ["inconsistent"]
+    assert store.get_prepared_revision(node_run_id, 0) is not None

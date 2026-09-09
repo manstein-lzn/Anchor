@@ -24,15 +24,24 @@ class ArtifactCheckpointSink:
 
     async def persist_model_result(self, *, claim_id: UUID, node_run_id: UUID,
                                    response: ModelResponse, input_hash: str | None = None,
-                                   input_snapshot: Mapping[str, object] | None = None) -> None:
-        ref = self.artifacts.put_text(response.text)
+                                   input_snapshot: Mapping[str, object] | None = None,
+                                   output_ref: str | None = None,
+                                   event_payload: Mapping[str, object] | None = None) -> None:
+        # The model text is always persisted; when the node's output is a
+        # workspace revision the artifact is referenced from the completion
+        # event instead of becoming the output reference.
+        response_ref = self.artifacts.put_text(response.text)
+        payload: dict[str, object] = {"response_ref": response_ref}
+        if event_payload:
+            payload.update(event_payload)
         snapshot = dict(input_snapshot) if input_snapshot is not None else None
         try:
             self.store.complete_node_and_propagate(
-                claim_id, self.worker_id, output_ref=ref,
+                claim_id, self.worker_id, output_ref=output_ref or response_ref,
                 node_input_hash=input_hash,
                 input_snapshot=snapshot,
                 condition_context=build_condition_context(response.text, snapshot),
+                event_payload=payload,
             )
         except RoutingDecisionError:
             # Evaluation is local and the completion transaction rolled back,

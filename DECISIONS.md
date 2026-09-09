@@ -707,3 +707,29 @@ This is the agent-visible capability. Committing a node's *output* as a workspac
 revision through the prepared/commit protocol, and reconciling that window in
 the supervisor, is the next slice; the tools already produce audited revisions
 today.
+
+## ADR-033: A workspace-bound node's output is its revision
+
+A node that declares `metadata.workspace_id` does not publish the model's text as
+its output. Its output is the immutable workspace revision the node produced, so
+downstream nodes consume a pinned tree rather than prose about one.
+
+- After the model response, the worker runs the prepared/commit protocol:
+  `prepare` freezes the workspace and records the revision, the output-format
+  check is recorded as the verification result, the node completes with
+  `output_ref = workspace://<workspace_id>@<revision>`, and only then is the
+  prepared marker cleared.
+- The model's text is still persisted as an artifact and referenced from the
+  `node.completed` event payload (`response_ref`), so nothing is lost. Artifact
+  GC now scans event payloads, otherwise that artifact would be collected as an
+  orphan.
+- `complete_node_and_propagate` accepts an `event_payload` merge, so extra
+  content references are recorded without inventing a second event.
+- The supervisor runs a conservative reconciliation pass every cycle: a prepared
+  marker is cleared once its node is terminal, an unavailable revision is logged
+  as `inconsistent` and left untouched, and a pending node's marker is left for
+  that node's own recovery. The supervisor never completes a node on the
+  worker's behalf.
+
+A node without a declared workspace keeps the previous behaviour: the model text
+artifact is the output.

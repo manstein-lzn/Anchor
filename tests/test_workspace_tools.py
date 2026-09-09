@@ -17,7 +17,8 @@ from anchor.domain.graph import GraphDefinition, GraphNode, GraphVersion, Trigge
 from anchor.domain.project import Project
 from anchor.runtime.agent_tools import AgentToolLoop
 from anchor.runtime.artifacts import LocalArtifactStore
-from anchor.runtime.capabilities import AgentCapability, CapabilityRegistry, CapabilityRegistryError
+from anchor.runtime.capabilities import (AgentCapability, CapabilityRegistry,
+                                          CapabilityRegistryError, ModelProfile, ToolCapability)
 from anchor.runtime.dispatch import dispatch_pending
 from anchor.runtime.model_gateway import ModelResponse
 from anchor.runtime.receiver import DurableExecutionReceiver
@@ -157,3 +158,45 @@ def test_agent_tool_loop_routes_workspace_tools_natively(bound):
     assert results[1] == "print('out')\n"
     # The write went through the workspace ledger, not the tool-operation ledger.
     assert store.list_tool_operations(lease.run_id) == []
+
+
+def test_worker_commits_a_workspace_bound_node_output(bound):
+    from anchor.runtime.content_commit import ContentCommitter
+    from anchor.runtime.sinks import ArtifactCheckpointSink
+    from anchor.runtime.worker import AgentNodeWorker
+
+    store, artifacts, manager, root, lease, toolset = bound
+    agent_registry = CapabilityRegistry(
+        models=[ModelProfile(ref="models.test", provider="rightcode", model="test",
+                             secret_ref="TEST_KEY")],
+        agents=[AgentCapability(ref="agents.reader", model_ref="models.test",
+                                tool_refs=["workspace.write"])],
+        tools=[ToolCapability(ref="workspace.write", description="write a workspace file")])
+    gateway = _ScriptedGateway([
+        ("workspace.write", {"path": "src/out.py", "content": "print('out')\n"})])
+    sink = ArtifactCheckpointSink(store, artifacts, "worker")
+    committer = ContentCommitter(store, manager)
+    loop = AgentToolLoop(_StubTools(store), artifacts, native=toolset)
+    worker = AgentNodeWorker(store, agent_registry, {"models.test": gateway}, sink,
+                             tool_loop=loop, committer=committer)
+
+    asyncio.run(worker.execute_claimed_once(
+        worker_id="worker", agent_ref="agents.reader", prompt="edit", lease=lease,
+        expected_node_id="a"))
+
+    node_run = store.get_node_run(lease.node_run_id)
+    assert node_run.status.value == "completed"
+    assert node_run.output_ref.startswith("workspace://ws-1@")
+    revision = node_run.output_ref.split("@", 1)[1]
+    from anchor.runtime.workspace import GitWorkspaceBackend
+    assert GitWorkspaceBackend(str(root)).read_text(revision, "src/out.py") == "print('out')\n"
+
+    # The prepared window is closed, and the model text survives as an artifact.
+    assert store.get_prepared_revision(lease.node_run_id, node_run.attempt) is None
+    completed = [event for event in store.list_events(lease.run_id)
+                 if event["event_type"] == "node.completed"][-1]
+    assert completed["payload"]["workspace_revision"] == revision
+    response_ref = completed["payload"]["response_ref"]
+    assert response_ref.startswith("artifact://sha256/")
+    # Event payloads are part of the reachability graph for artifact GC.
+    assert response_ref in {ref for _, ref in store.list_artifact_references()}

@@ -61,9 +61,20 @@ class StorageStoreMixin(_StoreHost):
                             if isinstance(ref, str) and ref.startswith("artifact://sha256/"))
             snapshots = connection.execute(sa.select(
                 s.context_snapshots.c.run_id, s.context_snapshots.c.snapshot)).all()
+            event_rows = connection.execute(sa.select(
+                s.events.c.stream_id, s.events.c.payload)).all()
         for run_id, snapshot in snapshots:
             text = snapshot if isinstance(snapshot, str) else json.dumps(snapshot, sort_keys=True)
             refs.extend((UUID(run_id), ref) for ref in set(ARTIFACT_PATTERN.findall(text)))
+        # Event payloads can reference artifacts that no column points at (for
+        # example a node's model text when its output is a workspace revision).
+        for stream_id, payload in event_rows:
+            text = payload if isinstance(payload, str) else json.dumps(payload, sort_keys=True)
+            for ref in set(ARTIFACT_PATTERN.findall(text)):
+                try:
+                    refs.append((UUID(stream_id), ref))
+                except ValueError:
+                    continue
         return refs
 
     def database_bytes(self) -> int | None:

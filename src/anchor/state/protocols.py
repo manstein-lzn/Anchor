@@ -160,7 +160,8 @@ class StateStore(Protocol):
                                     node_input_hash: str | None = None,
                                     input_snapshot: dict[str, object] | None = None,
                                     condition_context: dict[str, object] | None = None,
-                                    verification: VerificationRecord | None = None) -> list[NodeRun]: ...
+                                    verification: VerificationRecord | None = None,
+                                    event_payload: dict[str, object] | None = None) -> list[NodeRun]: ...
 
     def fail_node_and_propagate(self, claim_id: UUID, worker_id: str, *, error_code: str,
                                 phase: str = "execute",

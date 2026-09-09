@@ -200,3 +200,14 @@ class WorkspaceManager:
         self.store.update_workspace_state(workspace.workspace_id, state=workspace.state,
                                           current_revision=revision)
         return operation
+
+
+def node_workspace_id(store, lease) -> str | None:
+    """The workspace a node declares through ``metadata.workspace_id``."""
+    run = store.get_run(lease.run_id)
+    graph = store.get_version_for_run(run) if hasattr(store, "get_version_for_run") else None
+    if graph is None:
+        graph = store.get_graph_version(run.graph_version_id) if run else None
+    node = next((item for item in graph.definition.nodes if item.id == lease.node_id),
+                None) if graph else None
+    return (node.metadata or {}).get("workspace_id") if node else None

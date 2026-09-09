@@ -70,6 +70,9 @@ async def run_supervisor(store, *, interval: float = 10.0, stale_after: float = 
         raise ValueError("interval and stale_after must be positive")
     stop = stop or asyncio.Event()
     settings = AnchorSettings()
+    from anchor.runtime.content_commit import ContentCommitter
+    from anchor.runtime.workspaces import WorkspaceManager
+    committer = ContentCommitter(store, WorkspaceManager(store, root=settings.workspace_root))
     reported: dict[str, tuple[str, str]] = {}
     while not stop.is_set():
         expire = getattr(store, "expire_run_budgets", None)
@@ -98,6 +101,22 @@ async def run_supervisor(store, *, interval: float = 10.0, stale_after: float = 
         for key in list(reported):
             if key not in active:
                 del reported[key]
+
+        # Content-plane reconciliation: clear markers whose node is terminal,
+        # report revisions whose bytes vanished. Never guess content.
+        def _is_terminal(prepared) -> bool:
+            node = store.get_node_run(prepared.node_run_id)
+            return node is not None and node.status.value in {
+                "completed", "failed", "cancelled", "skipped"}
+
+        try:
+            for outcome in committer.sweep_orphans(is_terminal=_is_terminal):
+                if outcome.action == "inconsistent":
+                    log.error("prepared revision %s@%s for node %s is unavailable",
+                              outcome.prepared.workspace_id, outcome.prepared.revision,
+                              outcome.prepared.node_run_id)
+        except (RuntimeError, AttributeError):
+            log.exception("prepared-revision reconciliation failed")
 
         # Observation + persistent diagnostics via adaptive watchdog.
         active_leases = [item for item in assessments if item.state != "healthy"]
