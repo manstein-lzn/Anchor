@@ -55,6 +55,22 @@ The editor publishes graph definitions; execution is performed by the separate
 worker service. Trigger registration and event ingress are available through the
 authenticated API, while richer trigger authoring UI remains under development.
 
+## Workspace validation
+
+`scripts/validate_workspace.sh` is the end-to-end check for the content plane.
+It creates a throwaway repository with a bug, asks a real agent to fix it inside
+a workspace, and then asserts the whole chain: the node output is an immutable
+workspace revision, the audit ledger is complete, the source repository is
+untouched, and the fixed code passes its assertions when executed in the
+read-only sandbox.
+
+```bash
+./scripts/validate_workspace.sh
+```
+
+It requires the dev services and a real model profile. It is the check that
+found a silent path-resolution defect that unit tests could not.
+
 ## Quality gates
 
 Architecture and implementation quality are enforced, not assumed. A dependency

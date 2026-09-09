@@ -4,6 +4,14 @@
 
 本次交接核对时间：`2026-09-08 22:00 CST`；Verifier 收尾与执行策略会话完成下述验收并更新本文。
 
+## 可重复验证脚本（2026-09-09）
+
+- `scripts/validate_workspace.sh`：临时仓库带 bug → 真实 agent 在工作区内修复 → 校验
+  节点输出为 revision、账本完整、源仓库未改、**修复后的代码在只读沙箱内通过断言**。
+- 首次运行即通过全部 6 项检查。
+- 沙箱白名单加入 `python3`（`PYTHONDONTWRITEBYTECODE=1`）：只读 + 无网络使解释器只能
+  在 pin 的 revision 上计算，无法改写或外传；这让验证是**行为级**而非字符串匹配。
+
 ## 真实验证 + 严重缺陷修复（2026-09-09，ADR-035）
 
 **验证**：真实 DeepSeek 运行完成。agent 读 README → 写 `hello.py`（内容精确）→ 追加 README →

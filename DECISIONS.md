@@ -751,6 +751,11 @@ silently reduce safety.
 This mirrors ADR-029: the sandbox is read-only and has no network, so `exec` is
 inspection rather than mutation.
 
+The allowlist includes `python3` with `PYTHONDONTWRITEBYTECODE=1`. An interpreter
+in a read-only, network-less sandbox can compute over the pinned revision but
+cannot mutate it or exfiltrate data, and running the code under test is what
+makes workspace validation behavioural rather than string matching.
+
 ## ADR-035: Workspace paths are absolute and verified against their repository
 
 Real-model validation found a severe defect: `WorkspaceManager` accepted a

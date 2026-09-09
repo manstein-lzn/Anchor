@@ -14,11 +14,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-# Conservative by default: reading and inspecting, not arbitrary execution.
-# A caller may widen this, but the sandbox is read-only and has no network.
+# Reading, inspecting and running a script. The sandbox is read-only and has no
+# network, so an interpreter cannot mutate the workspace or exfiltrate data; it
+# can only compute over the pinned revision. A caller may narrow this further.
 DEFAULT_ALLOWED_COMMANDS = frozenset({
-    "cat", "cut", "file", "find", "git", "grep", "head", "ls", "sort",
-    "tail", "uniq", "wc",
+    "cat", "cut", "file", "find", "git", "grep", "head", "ls", "python3",
+    "sort", "tail", "uniq", "wc",
 })
 DEFAULT_TIMEOUT_SECONDS = 30.0
 DEFAULT_MAX_OUTPUT_BYTES = 1_000_000
@@ -107,6 +108,7 @@ class BubblewrapWorkspaceSandbox:
             "--setenv", "PATH", "/usr/bin:/bin",
             "--setenv", "HOME", "/tmp",
             "--setenv", "TMPDIR", "/tmp",
+            "--setenv", "PYTHONDONTWRITEBYTECODE", "1",
             "--", *spec.command,
         ]
         try:
