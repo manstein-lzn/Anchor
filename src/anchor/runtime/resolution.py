@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
+from anchor.domain.content import workspace_ref
 from anchor.domain.graph import GraphNode, GraphVersion
 from anchor.domain.models import Task
 from anchor.runtime.artifacts import ArtifactStore
@@ -117,4 +118,13 @@ def resolve_node_context(
             edges=edges,
             predecessor_outputs=outputs,
         )
+    # I2/B1: the declared input must record which workspace revision this node
+    # consumes, so the control plane can always prove what it saw.
+    workspace_id = (node.metadata or {}).get("workspace_id")
+    if workspace_id:
+        get_workspace = getattr(store, "get_workspace", None)
+        workspace = get_workspace(workspace_id) if get_workspace is not None else None
+        if workspace is not None:
+            revision = workspace.current_revision or workspace.base_revision
+            snapshot = {**snapshot, "workspace": str(workspace_ref(workspace_id, revision))}
     return ResolvedNodeContext(task=task, graph=graph, node=node, snapshot=snapshot)

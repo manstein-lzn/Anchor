@@ -65,7 +65,8 @@ untouched, and the fixed code passes its assertions when executed in the
 read-only sandbox.
 
 ```bash
-./scripts/validate_workspace.sh
+./scripts/validate_workspace.sh          # single node: fix a bug, run its test
+./scripts/validate_workspace_lineage.sh  # two nodes: coder -> reviewer, lineage
 ```
 
 It requires the dev services and a real model profile. It is the check that

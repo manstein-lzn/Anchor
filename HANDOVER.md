@@ -4,6 +4,16 @@
 
 本次交接核对时间：`2026-09-08 22:00 CST`；Verifier 收尾与执行策略会话完成下述验收并更新本文。
 
+## 血缘验证 + I2/B1 修复（2026-09-09，ADR-036）
+
+- 第二个验证脚本 `scripts/validate_workspace_lineage.sh`：4 文件包 bug + 已有失败测试 +
+  两节点 `coder → reviewer`。7 项检查全过（含"修复后的代码在沙箱内通过仓库既有测试"）。
+- **发现 I2/B1 缺口**：节点声明的输入快照是 `{"inputs": {}}`，**没有记录它消费的 revision**；
+  唯一的 revision 证据是节点输出。读取 R、产出 R' 的节点无法证明自己读了什么。
+- 修复：`resolve_node_context` 为声明 `workspace_id` 的节点在快照中加入
+  `workspace: workspace://<id>@<revision>`（快照被哈希，故进入复现记录）。
+- 这是 B1 的"记录"一半；"强制工具只能读记录的 revision"需要 W3 的并发工作。
+
 ## 可重复验证脚本（2026-09-09）
 
 - `scripts/validate_workspace.sh`：临时仓库带 bug → 真实 agent 在工作区内修复 → 校验

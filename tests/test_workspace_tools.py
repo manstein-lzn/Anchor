@@ -200,3 +200,19 @@ def test_worker_commits_a_workspace_bound_node_output(bound):
     assert response_ref.startswith("artifact://sha256/")
     # Event payloads are part of the reachability graph for artifact GC.
     assert response_ref in {ref for _, ref in store.list_artifact_references()}
+
+
+def test_node_input_snapshot_records_the_consumed_workspace_revision(bound):
+    """I2/B1: the declared input must prove which revision the node consumed."""
+    from anchor.runtime.resolution import resolve_node_context
+
+    store, artifacts, manager, _, lease, _ = bound
+    resolved = resolve_node_context(store, lease.run_id, lease.node_id, artifacts)
+    workspace = store.get_workspace("ws-1")
+    assert resolved.snapshot["workspace"] == f"workspace://ws-1@{workspace.current_revision}"
+
+    # A write moves the revision, and a later resolution records the new one.
+    manager.write_text("ws-1", "src/later.py", "x\n", actor="agent")
+    updated = resolve_node_context(store, lease.run_id, lease.node_id, artifacts)
+    assert updated.snapshot["workspace"].endswith(store.get_workspace("ws-1").current_revision)
+    assert updated.snapshot["workspace"] != resolved.snapshot["workspace"]

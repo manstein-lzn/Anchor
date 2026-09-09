@@ -784,3 +784,21 @@ Three fixes, each closing one link in the chain:
 No damage occurred: the stray writes were under a gitignored directory and the
 repository stayed clean. The lesson is that a filesystem-backed content plane
 must treat paths as untrusted input and prove ownership before mutating.
+
+## ADR-036: A node's declared input records the workspace revision it consumes
+
+B1 in `WORKSPACE.md` requires the control plane to prove which revision a node
+saw. The lineage validation found that it could not: both nodes' declared input
+snapshots were `{"inputs": {}}`, and the only revision on record was the node's
+*output*. A node that read revision R and produced revision R' would leave no
+evidence of what it read.
+
+`resolve_node_context` now adds `workspace: workspace://<id>@<revision>` to the
+snapshot of any node that declares `metadata.workspace_id`, using the workspace's
+current revision at resolution time. Because the snapshot is hashed, the consumed
+revision becomes part of the node's reproducibility record.
+
+This is the recording half of B1. Enforcing that the tools cannot read a
+different revision than the one recorded requires the concurrency work (W3): with
+one writer per workspace the window is currently closed by construction, but the
+snapshot is what makes a violation detectable.
