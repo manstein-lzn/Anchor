@@ -24,7 +24,7 @@ from anchor.domain.models import DomainModel
 
 
 MAX_RESPONSE_BYTES = 8_000_000
-RESEARCH_TOOLS = frozenset({"scholarly.search", "scholarly.read"})
+RESEARCH_TOOLS = frozenset({"scholarly.search", "scholarly.read", "scholarly.citations"})
 _ARXIV_LOCK = threading.Lock()
 _ARXIV_LAST_REQUEST = 0.0
 _CROSSREF_LOCK = threading.Lock()
@@ -102,6 +102,10 @@ class ResearchRequest(DomainModel):
     limit: int = Field(default=8, ge=1, le=20)
     offset: int = Field(default=0, ge=0)
     page_start: int = Field(default=0, ge=0)
+    # Citation chasing: follow the graph a scholar follows, backwards (what a
+    # paper cites) and forwards (what cites it).
+    identifier: str | None = Field(default=None, min_length=1, max_length=300)
+    direction: str = Field(default="cited_by", pattern="^(cites|cited_by)$")
 
 
 def public_address(hostname: str, port: int) -> str:
@@ -301,9 +305,90 @@ def read(request: ResearchRequest, *, timeout_seconds: float) -> dict:
             "caution": "Retrieved text may be a landing page, abstract, or partial full text. Inspect it before making claims."}
 
 
+def _openalex_abstract(item: dict) -> str:
+    """OpenAlex stores abstracts as an inverted index; rebuild the prose."""
+    index = item.get("abstract_inverted_index") or {}
+    if not isinstance(index, dict):
+        return ""
+    positions: dict[int, str] = {}
+    for word, offsets in index.items():
+        for offset in offsets or []:
+            positions[offset] = word
+    return " ".join(positions[key] for key in sorted(positions))
+
+
+def _openalex_paper(item: dict) -> dict:
+    doi = (item.get("doi") or "").removeprefix("https://doi.org/")
+    abstract = _openalex_abstract(item)
+    location = item.get("best_oa_location") or {}
+    urls = [url for url in (location.get("pdf_url"), location.get("landing_page_url")) if url]
+    return {
+        "id": ("doi:" + doi) if doi else "openalex:" + str(item.get("id", "")).rsplit("/", 1)[-1],
+        "doi": doi or None,
+        "title": item.get("title") or "",
+        "authors": [entry["author"]["display_name"] for entry in item.get("authorships", [])
+                    if entry.get("author", {}).get("display_name")],
+        "year": item.get("publication_year"),
+        "venue": ((item.get("primary_location") or {}).get("source") or {}).get("display_name") or "",
+        "publication_type": item.get("type"),
+        "url": ("https://doi.org/" + doi) if doi else item.get("id"),
+        "abstract": abstract,
+        "fulltext_urls": [_normalize_source_url(url) for url in urls],
+        "evidence_level": "abstract" if abstract else "metadata_only",
+        "cited_by_count": item.get("cited_by_count"),
+    }
+
+
+def _openalex_work(identifier: str, *, timeout_seconds: float) -> dict:
+    if identifier.startswith("openalex:"):
+        url = "https://api.openalex.org/works/" + identifier.removeprefix("openalex:")
+    elif identifier.startswith("doi:"):
+        url = "https://api.openalex.org/works/doi:" + identifier.removeprefix("doi:")
+    elif identifier.startswith("arxiv:"):
+        url = "https://api.openalex.org/works/doi:10.48550/arXiv." + identifier.removeprefix("arxiv:")
+    else:
+        raise ResearchToolError("unsupported_identifier",
+                                "identifier must be doi:<doi>, arxiv:<id> or openalex:<work id>")
+    _, _, body = fetch_public(url, timeout_seconds=timeout_seconds)
+    return json.loads(body)
+
+
+def citations(request: ResearchRequest, *, timeout_seconds: float) -> dict:
+    """Follow the citation graph from a seed paper, in either direction."""
+    if not request.identifier:
+        raise ValueError("scholarly.citations requires identifier")
+    seed = _openalex_work(request.identifier, timeout_seconds=timeout_seconds)
+    seed_id = str(seed.get("id", "")).rsplit("/", 1)[-1]
+    if request.direction == "cited_by":
+        url = "https://api.openalex.org/works?" + urlencode({
+            "filter": f"cites:{seed_id}", "per-page": request.limit,
+            "sort": "cited_by_count:desc"})
+        _, _, body = fetch_public(url, timeout_seconds=timeout_seconds)
+        data = json.loads(body)
+        papers = [_openalex_paper(item) for item in data.get("results", [])]
+        total = data.get("meta", {}).get("count")
+    else:
+        referenced = [str(item).rsplit("/", 1)[-1] for item in (seed.get("referenced_works") or [])]
+        papers = []
+        total = len(referenced)
+        for start in range(0, min(len(referenced), 200), 50):
+            chunk = referenced[start:start + 50]
+            url = "https://api.openalex.org/works?" + urlencode({
+                "filter": "openalex_id:" + "|".join(chunk), "per-page": 50})
+            _, _, body = fetch_public(url, timeout_seconds=timeout_seconds)
+            papers.extend(_openalex_paper(item) for item in json.loads(body).get("results", []))
+        papers = papers[:request.limit]
+    return {"source": "openalex", "identifier": request.identifier,
+            "direction": request.direction, "total_results": total, "papers": papers}
+
+
 def execute_research(tool_ref: str, request: ResearchRequest, *, timeout_seconds: float) -> str:
-    result = (search(request, timeout_seconds=timeout_seconds) if tool_ref == "scholarly.search"
-              else read(request, timeout_seconds=timeout_seconds))
+    if tool_ref == "scholarly.search":
+        result = search(request, timeout_seconds=timeout_seconds)
+    elif tool_ref == "scholarly.citations":
+        result = citations(request, timeout_seconds=timeout_seconds)
+    else:
+        result = read(request, timeout_seconds=timeout_seconds)
     result["retrieved_at"] = datetime.now(timezone.utc).isoformat()
     result["untrusted_source_content"] = True
     return json.dumps(result, ensure_ascii=False)

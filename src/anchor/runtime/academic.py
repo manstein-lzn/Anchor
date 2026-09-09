@@ -276,8 +276,9 @@ def validate_manuscript(work: dict, *, operations, artifacts, minimum_sources: i
             continue
         used_ids.add(identity)
         used_numbers.add(number)
-        if successful.get(evidence_ref) != "scholarly.search":
-            errors.append(f"Citation [{number}] has no successful scholarly search in this Run")
+        if successful.get(evidence_ref) not in ("scholarly.search", "scholarly.citations"):
+            errors.append(f"Citation [{number}] has no successful scholarly search or citation "
+                          f"lookup in this Run")
             continue
         try:
             evidence = json.loads(artifacts.get_text(evidence_ref))
