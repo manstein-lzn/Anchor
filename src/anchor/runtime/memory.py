@@ -1,11 +1,10 @@
 """Durable memory boundary with provenance and tombstone deletion."""
 from __future__ import annotations
 import hashlib
-import json
 from threading import RLock
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Protocol
 from uuid import UUID, uuid4
 from pydantic import BaseModel, ConfigDict, Field
 

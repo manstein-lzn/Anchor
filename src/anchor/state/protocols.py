@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime
+from collections.abc import Callable
 from typing import Protocol
 from uuid import UUID
 
@@ -150,7 +152,8 @@ class StateStore(Protocol):
 
     def get_tool_operation(self, operation_id: UUID) -> ToolOperation | None: ...
 
-    def resolve_reconciled_operation(self, operation_id: UUID, *, actor: str, reason: str) -> NodeRun: ...
+    def resolve_reconciled_operation(self, operation_id: UUID, *, actor: str, reason: str,
+                                     read_artifact: Callable[[str], str] | None = None) -> NodeRun: ...
 
     def append_progress_evidence(self, evidence: ProgressEvidence) -> ProgressEvidence: ...
     def list_progress_evidence(self, run_id: UUID) -> list[ProgressEvidence]: ...

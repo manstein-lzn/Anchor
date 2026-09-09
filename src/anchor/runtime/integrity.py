@@ -77,7 +77,6 @@ def check_run(store, run_id: UUID,
     if generations != list(range(1, len(snapshots) + 1)):
         issues.append(IntegrityIssue(code="generation_gap",
                                      message=f"context generations are not dense from 1: {generations}"))
-    by_generation = {item.generation: item for item in snapshots}
     for item in snapshots:
         if item.input_hash != input_hash(item.snapshot):
             issues.append(IntegrityIssue(code="snapshot_hash_mismatch",
@@ -133,7 +132,7 @@ def check_run(store, run_id: UUID,
                 continue
             try:
                 read_artifact(node.output_ref)
-            except Exception as exc:
+            except (OSError, ValueError) as exc:
                 issues.append(IntegrityIssue(code="evidence_missing",
                                              message=f"predecessor evidence unreadable: {exc}",
                                              node_id=node.node_id))

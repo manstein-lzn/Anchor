@@ -26,8 +26,6 @@ class InProcessWorkflowService:
         self.harness = harness
 
     async def start(self, task_id: UUID, graph_version_id: UUID) -> UUID:
-        from anchor.domain.models import Run
-
         graph_version = self.store.get_graph_version(graph_version_id)
         if graph_version is None:
             raise KeyError(graph_version_id)

@@ -87,7 +87,6 @@ def enforce_storage_budgets(store, artifacts, *, trigger: str = "scheduler",
     if global_budget is None and not graph_budgets:
         return {"evicted": 0, "freed_bytes": 0, "reason": "no_budget"}
 
-    before = _report(store, artifacts, global_budget, graph_budgets)
     evicted: list[str] = []
     reclaimed = 0
     for _ in range(max_rounds):

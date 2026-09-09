@@ -55,6 +55,21 @@ The editor publishes graph definitions; execution is performed by the separate
 worker service. Trigger registration and event ingress are available through the
 authenticated API, while richer trigger authoring UI remains under development.
 
+## Quality gates
+
+Architecture and implementation quality are enforced, not assumed. A dependency
+direction violation, a new silent `except: pass`, a content reference parsed
+outside its boundary type, or any increase in the ratcheted lint/type/size
+budget fails the gate.
+
+```bash
+.venv/bin/pytest -q tests/test_architecture.py
+.venv/bin/python scripts/quality_gate.py
+```
+
+See `QUALITY_GATES.md` for the rules, the ratchet policy and the Definition of
+Done every change must satisfy.
+
 ## Agent surface
 
 Anchor is driven by agents as well as by humans. The `anchor` CLI and the planned

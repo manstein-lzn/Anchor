@@ -1,0 +1,14 @@
+{
+  "largest_modules": {
+    "api/app.py": 708,
+    "domain/graph.py": 423,
+    "runtime/tool_gateway.py": 375,
+    "state/checkpoints.py": 524,
+    "state/execution.py": 442
+  },
+  "max_module_lines": 708,
+  "mypy_errors": 233,
+  "ruff": {
+    "C901": 13
+  }
+}

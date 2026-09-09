@@ -7,7 +7,6 @@ an Agent framework or a provider SDK.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Literal, Mapping, Protocol, Sequence
 
 from pydantic import Field, model_validator

@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import timedelta, timezone
-from uuid import UUID, uuid4
+from uuid import UUID
 
 import sqlalchemy as sa
 
@@ -13,7 +12,7 @@ from anchor.domain.models import (ContextSnapshot, EdgeDecision, NodeLease, Node
                                   Run, RunStatus, TaskStatus, VerificationRecord,
                                   VerificationVerdict, utc_now)
 from . import schema as s
-from .base import decode, values
+from .base import decode
 from .errors import ConcurrencyConflict
 
 

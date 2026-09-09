@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from dataclasses import asdict
 from typing import Any
 from uuid import UUID
 
@@ -22,7 +21,7 @@ log = logging.getLogger("anchor.supervisor")
 def _safe_model_dump(model) -> dict[str, Any]:
     try:
         return model.model_dump(mode="json")
-    except Exception:
+    except Exception:  # noqa: BLE001 - a maintenance loop must survive any cycle
         return {}
 
 

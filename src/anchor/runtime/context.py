@@ -4,8 +4,11 @@ from __future__ import annotations
 
 from typing import Any, Mapping, Sequence
 
-from anchor.domain.graph import GraphEdge
 from anchor.domain.context import canonical_json, input_hash
+from anchor.domain.graph import GraphEdge
+
+# Re-exported for the runtime package surface; callers import them from here.
+__all__ = ["build_input_snapshot", "canonical_json", "input_hash"]
 
 
 def build_input_snapshot(*, run_inputs: Mapping[str, Any], edges: Sequence[GraphEdge] | None = None,

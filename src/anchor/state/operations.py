@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
+from typing import Callable
 from uuid import UUID
 
 import sqlalchemy as sa
 
-from anchor.domain.models import utc_now
+from anchor.domain.models import NodeRun, utc_now
 from anchor.domain.operations import OperationStatus, ToolOperation
 from . import schema as s
-from .base import decode, values
+from .base import decode
 from .errors import OperationConflict
 
 
@@ -143,7 +144,8 @@ class OperationStoreMixin:
         return self._read(s.tool_operations, ToolOperation, operation_id)
 
     def resolve_reconciled_operation(self, operation_id: UUID, *, actor: str,
-                                     reason: str) -> "NodeRun":
+                                     reason: str,
+                                     read_artifact: Callable[[str], str] | None = None) -> "NodeRun":
         """Apply a reconciled operation outcome to its owning node.
 
         The operator first reconciles the operation with external evidence; this
@@ -172,7 +174,7 @@ class OperationStoreMixin:
             return self.fail_node_and_propagate(
                 lease.claim_id, lease.worker_id,
                 error_code=operation.error_code or "reconciled_failure", phase="reconciliation")
-        text = self._read_operation_result(operation)
+        text = self._read_operation_result(operation, read_artifact)
         snapshot = self._latest_snapshot(lease.node_run_id)
         self.complete_node_and_propagate(
             lease.claim_id, lease.worker_id, output_ref=operation.result_ref,
@@ -181,10 +183,18 @@ class OperationStoreMixin:
         return next(item for item in self.list_node_runs(operation.run_id)
                     if item.id == operation.node_run_id)
 
-    def _read_operation_result(self, operation: ToolOperation) -> str:
-        from anchor.runtime.artifacts import LocalArtifactStore
-        from anchor.runtime.settings import AnchorSettings
-        return LocalArtifactStore(AnchorSettings().artifact_root).get_text(operation.result_ref)
+    def _read_operation_result(self, operation: ToolOperation,
+                               read_artifact: Callable[[str], str] | None) -> str:
+        """Read the reconciled result through an injected reader.
+
+        The state layer must not know about artifact storage or settings; the
+        composition root (API/worker) supplies the reader.
+        """
+        if read_artifact is None:
+            raise ValueError("resolving a reconciled success requires an artifact reader")
+        if not operation.result_ref:
+            raise ValueError("reconciled operation has no result reference")
+        return read_artifact(operation.result_ref)
 
     def _latest_snapshot(self, node_run_id: UUID) -> dict:
         snapshot = self.get_context_snapshot(node_run_id)

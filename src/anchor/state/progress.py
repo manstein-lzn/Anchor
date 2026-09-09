@@ -8,7 +8,7 @@ import sqlalchemy as sa
 
 from anchor.domain.models import DiagnosticRequest, ProgressEvidence
 from . import schema as s
-from .base import decode, values
+from .base import decode
 
 
 class ProgressStoreMixin:

@@ -17,7 +17,7 @@ import json
 from typing import Any
 from uuid import uuid5
 
-from anchor.runtime.capabilities import AgentCapability, ToolCapability
+from anchor.runtime.capabilities import CapabilityRegistryError, AgentCapability, ToolCapability
 from anchor.runtime.model_gateway import ModelGateway, ModelResponse, ToolFunction
 from anchor.runtime.tool_gateway import ToolDenied, ToolGateway
 
@@ -50,7 +50,7 @@ class AgentToolLoop:
     def _capability(self, tool_ref: str) -> ToolCapability | None:
         try:
             return self.tools.registry.tool(tool_ref)
-        except Exception:
+        except CapabilityRegistryError:
             return None
 
     def _shape(self, tool_ref: str, evidence: dict, *, mode: str) -> dict:
@@ -75,7 +75,8 @@ class AgentToolLoop:
             capability = self._capability(tool_ref)
             description = getattr(capability, "description", "") if capability else ""
 
-            async def call(arguments_json: str, _ref: str = tool_ref) -> str:
+            async def call(arguments_json: str, _ref: str = tool_ref,
+                           _capability=capability) -> str:
                 try:
                     arguments = json.loads(arguments_json)
                 except (json.JSONDecodeError, TypeError):
@@ -102,7 +103,7 @@ class AgentToolLoop:
                             arguments=arguments, operation_id=operation_id)
                 except ToolDenied as exc:
                     return "TOOL DENIED [" + exc.code + "]: " + str(exc)
-                is_evidence = capability is not None and getattr(capability, "evidence_json", False)
+                is_evidence = _capability is not None and getattr(_capability, "evidence_json", False)
                 if result.status.value == "succeeded" and result.result_ref:
                     try:
                         text = self.artifacts.get_text(result.result_ref)

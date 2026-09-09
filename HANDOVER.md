@@ -4,6 +4,20 @@
 
 本次交接核对时间：`2026-09-08 22:00 CST`；Verifier 收尾与执行策略会话完成下述验收并更新本文。
 
+## 质量门禁（2026-09-09）
+
+- 现状：有分层纪律，但**零自动强制**（无 ruff/mypy/架构测试/依赖契约）。
+- 新增四道门：`tests/test_architecture.py`（依赖方向、边界所有权、反模式棘轮）、
+  `scripts/quality_gate.py` + `quality-baseline.json`（指标只减不增）、ruff、mypy（棘轮）。
+- 基线：ruff `C901: 13`、mypy `238`、最大模块 `api/app.py 708`（单独预算 750）。
+- **门禁直接发现并修复的存量缺陷**：
+  - `state/operations.py` 导入 `runtime.artifacts/settings`（分层违规）→ 改为注入 `read_artifact`；
+  - `runtime/agent_tools.py` 闭包捕获循环变量 `capability`（潜在错配 bug）→ 绑定默认参数；
+  - `checkpoints.py`/`protocols.py` 注解缺 `datetime`、`operations.py` 缺 `NodeRun`；
+  - 3 处死赋值、14 处未使用导入。
+- 负向测试已验证：注入违规文件时架构门禁确实失败。
+- 规则与 DoD 见 `QUALITY_GATES.md`。
+
 ## 内容面架构决策（2026-09-09，ADR-026）
 
 - 现状：控制面约 3077 行、内容面约 242 行（12.7:1）。工作区从未被建模，原因是

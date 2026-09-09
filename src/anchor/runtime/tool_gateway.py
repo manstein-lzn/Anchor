@@ -23,7 +23,6 @@ import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Protocol
 from uuid import UUID
 
@@ -330,7 +329,8 @@ class ToolGateway:
                 return ToolCallResult(operation_id=operation_id, status=finished.status,
                                       result_ref=finished.result_ref,
                                       error_code=finished.error_code)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - a tool boundary must turn any
+                # failure into a structured result instead of crashing the worker.
                 failure_ref = self.artifacts.put_text(json.dumps({
                     "error": str(exc), "error_code": "retrieval_failed",
                     "retryable": False, "tool": tool_ref,

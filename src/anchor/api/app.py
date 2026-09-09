@@ -575,12 +575,13 @@ def create_app(store: RelationalStateStore | None = None, token: str | None = No
         """
         from anchor.domain.operations import OperationStatus
         status = OperationStatus(body.status)
-        operation = required(db.get_tool_operation(operation_id))
+        required(db.get_tool_operation(operation_id))
         reconciled = db.reconcile_tool_operation(
             operation_id, status=status, reconciliation_ref=body.reconciliation_ref,
             result_ref=body.result_ref, error_code=body.error_code)
         node_run = db.resolve_reconciled_operation(
-            operation_id, actor=body.actor, reason=body.reason)
+            operation_id, actor=body.actor, reason=body.reason,
+            read_artifact=LocalArtifactStore(AnchorSettings().artifact_root).get_text)
         return {"operation": reconciled, "node_run": node_run}
 
     @app.post("/api/leases/{claim_id}/recover", response_model=NodeRun, dependencies=auth)

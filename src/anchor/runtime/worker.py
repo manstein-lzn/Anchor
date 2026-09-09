@@ -200,7 +200,7 @@ class AgentNodeWorker:
                 await asyncio.sleep(heartbeat_interval)
                 try:
                     self.store.heartbeat_node_lease(lease.claim_id, worker_id)
-                except Exception:
+                except Exception:  # noqa: BLE001 - one bad iteration must not stop the worker
                     execution_task.cancel()
                     return
         heartbeat_task = asyncio.create_task(heartbeat())
