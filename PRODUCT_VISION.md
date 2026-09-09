@@ -19,6 +19,22 @@ contract, durable state semantics, context/memory policy, quality gates, and pro
 experience. Reusing a component is acceptable only when its failure, upgrade, and
 license behavior are explicit.
 
+## Two first-class operators: a human and an agent
+
+The graph kernel is operated through two equivalent surfaces over the same
+durable state, guards and audit trail:
+
+- the **web console**, where a domain engineer composes, publishes, observes and
+  intervenes visually;
+- the **agent surface** (`anchor` CLI and an MCP server), where an agent
+  authoring and running graphs on the user's behalf gets the same capabilities
+  and the same limits.
+
+The agent surface is a client of the authenticated API, never a privileged
+shortcut: it cannot bypass an approval gate, steal a lease, or write evidence
+directly. Human-only decisions stay human-only by default, because an approval
+gate the agent can open itself is not a gate. See `AGENT_SURFACE.md`.
+
 ## Product promise
 
 For every published graph, Anchor must make it possible to answer:

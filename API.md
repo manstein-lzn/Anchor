@@ -38,6 +38,7 @@ anchor-api-dev`; read logs with `journalctl --user -u anchor-api-dev`; stop it w
 | Validate | `POST /api/graphs/validate` | Pydantic/schema and static topology validation; no execution or model call |
 | Publish | `POST /api/graphs/{graph_id}/publish` | Requires draft revision, assigns version number server-side, retries reuse publication |
 | Read versions | `GET /api/graphs/{graph_id}/versions`, `GET /api/graph-versions/{id}` | Published content is separate from mutable drafts |
+| Graph IR reference | `GET /api/graphs/ir` | Machine-readable authoring contract: node types, condition DSL, input mapping, template |
 | Register trigger | `PUT /api/triggers/{id}` | Client-generated UUID makes registration retries idempotent; supports manual, interval, cron, internal-event and webhook configuration |
 | Enable/disable | `PATCH /api/triggers/{id}` | Does not cancel previously admitted runs |
 | Submit run | `POST /api/triggers/{id}/runs` | Requires `Idempotency-Key`; returns 202 and a durable receipt |

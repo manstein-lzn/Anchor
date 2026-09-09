@@ -260,6 +260,12 @@ def create_app(store: RelationalStateStore | None = None, token: str | None = No
                            "model_ref": item.model_ref} for item in config.verifiers],
         }
 
+    @app.get("/api/graphs/ir", dependencies=auth)
+    def graph_ir():
+        """Authoring reference for the Graph IR: node contract, DSL, template."""
+        from anchor.domain.ir import describe_ir
+        return describe_ir()
+
     @app.post("/api/graphs/validate", response_model=GraphValidationResult, dependencies=auth)
     def validate(definition: GraphDefinition):
         return GraphValidator().validate(definition)

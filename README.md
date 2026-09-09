@@ -55,6 +55,25 @@ The editor publishes graph definitions; execution is performed by the separate
 worker service. Trigger registration and event ingress are available through the
 authenticated API, while richer trigger authoring UI remains under development.
 
+## Agent surface
+
+Anchor is driven by agents as well as by humans. The `anchor` CLI and the planned
+MCP server share one typed operation layer (`anchor.client`) over the same
+authenticated API, so orchestration, execution, observation and reconciliation
+are available to an agent without becoming a privileged backdoor.
+
+```bash
+anchor ir                                   # machine-readable Graph IR contract
+anchor capabilities                         # available agent/tool/verifier refs
+anchor graph install --file graph.json      # validate, save, publish
+anchor run start --trigger <id> --objective "..." --idempotency-key k1
+anchor run watch <run_id> --timeout 300     # compact digest
+anchor waits                                # what needs a human
+```
+
+See `AGENT_SURFACE.md` for the operation surface, the agent-vs-human safety
+policy and the observation model.
+
 ## Local model profile
 
 The development profile in `.local/runtime.json` points at the same OpenAI
