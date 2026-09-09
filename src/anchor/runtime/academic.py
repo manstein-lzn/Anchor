@@ -5,12 +5,15 @@ from __future__ import annotations
 import json
 import re
 
+from anchor.domain.content import ARTIFACT_PREFIX
 from anchor.domain.context import canonical_json
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from typing import Literal
 
 
 class ResearchOutput(BaseModel):
+    """Legacy single-agent output: evidence and manuscript in one response."""
+
     model_config = ConfigDict(strict=True)
     manuscript: str = Field(min_length=1)
     sources: list[dict]
@@ -19,9 +22,32 @@ class ResearchOutput(BaseModel):
     unresolved: list[str]
 
 
+class GatherOutput(BaseModel):
+    """The evidence ledger. It carries no prose; the writer owns the paper."""
+
+    model_config = ConfigDict(strict=True)
+    sources: list[dict]
+    search_log: list[dict]
+    evidence_notes: list[dict]
+    coverage: list[dict]
+    tensions: list[dict]
+    unresolved: list[str]
+
+
+class WriteOutput(BaseModel):
+    """The reader-facing deliverable. It cites the ledger; it never audits it."""
+
+    model_config = ConfigDict(strict=True)
+    manuscript: str = Field(min_length=1)
+    thesis: str = Field(min_length=1)
+
+
 class ReviewOutput(BaseModel):
     model_config = ConfigDict(strict=True)
     verdict: Literal["pass", "revise", "blocked"]
+    # Where the fix belongs: more evidence, or better writing. This keeps the
+    # revision loop pointed at the real deficiency instead of redoing both.
+    target: Literal["evidence", "manuscript", "none"] = "none"
     summary: str
     issues: list[dict]
     strengths: list[str]
@@ -32,7 +58,8 @@ def validate_agent_output(text: str, role: str | None = None) -> dict:
     value = json.loads(text)
     if not isinstance(value, dict):
         raise ValueError("Output must be a JSON object")
-    schema = {"researcher": ResearchOutput, "reviewer": ReviewOutput}.get(role)
+    schema = {"researcher": ResearchOutput, "gatherer": GatherOutput,
+              "writer": WriteOutput, "reviewer": ReviewOutput}.get(role)
     if schema:
         try:
             schema.model_validate(value)
@@ -42,18 +69,19 @@ def validate_agent_output(text: str, role: str | None = None) -> dict:
 
 
 def preflight_review(snapshot: dict, *, store, artifacts, run_id) -> dict | None:
-    work = snapshot.get("research")
+    work = _extract_work(snapshot)
     request = snapshot.get("request", {})
-    if not isinstance(work, dict):
-        errors = ["Research output must be a complete JSON object"]
+    if not isinstance(work, dict) or not work.get("manuscript"):
+        errors, target = ["Research output must be a complete JSON object"], "manuscript"
     else:
-        errors, _ = validate_manuscript(work, operations=store.list_tool_operations(run_id),
+        errors, _, target = validate_manuscript(work, operations=store.list_tool_operations(run_id),
             artifacts=artifacts, minimum_sources=request.get("minimum_sources", 8),
             minimum_reads=request.get("minimum_reads", 3))
     if not errors:
         return None
-    return {"verdict": "revise", "summary": "Mechanical preflight failed; scholarly review was not invoked",
-            "issues": [{"severity": "major", "location": "research", "problem": error,
+    return {"verdict": "revise", "target": target,
+            "summary": "Mechanical preflight failed; scholarly review was not invoked",
+            "issues": [{"severity": "major", "location": "manuscript", "problem": error,
                         "required_action": error} for error in errors], "strengths": [], "blockers": [],
             "review_origin": "deterministic_preflight"}
 
@@ -62,25 +90,81 @@ SECTIONS = ("Abstract", "Introduction", "Methods", "Literature Review", "Discuss
             "Limitations", "Conclusion")
 
 
+# The paper is the reader-facing deliverable. Verification is a background
+# property of the pipeline, so audit language in the body is a defect, not a
+# virtue: it spends the reader's attention on how we know rather than on what we
+# know. These checks make "reader-facing" judgeable instead of decorative.
+EVIDENCE_TAG = re.compile(r"（\s*(?:全文级|摘要级|题录级)[^）]{0,16}）")
+PROCESS_PHRASES = ("本轮", "本次检索", "本文检索到", "本文共执行", "工具预算",
+                   "未在本次", "本次未执行")
+MAX_PARAGRAPH_CHARS = 1200
+MAX_METHODS_CHARS = 2500
+
+
 def citation_numbers(text: str) -> set[int]:
     return {int(number) for group in re.findall(r"\[(\d+(?:\s*,\s*\d+)*)\]", text)
             for number in group.split(",")}
 
 
-def validate_manuscript(work: dict, *, operations, artifacts, minimum_sources: int = 8,
-                        minimum_reads: int = 3) -> tuple[list[str], list[dict]]:
+def _section_text(manuscript: str, heading: str) -> str:
+    match = re.search(r"^## " + re.escape(heading) + r"\s*$", manuscript, re.MULTILINE)
+    if not match:
+        return ""
+    rest = manuscript[match.end():]
+    following = re.search(r"^## ", rest, re.MULTILINE)
+    return rest[:following.start()] if following else rest
+
+
+def craft_errors(manuscript: str) -> list[str]:
+    """Reader-facing defects: audit language, walls of text, runaway Methods."""
     errors: list[str] = []
+    if EVIDENCE_TAG.search(manuscript):
+        errors.append("Remove evidence-level tags from the body; they belong in the appendix")
+    for phrase in PROCESS_PHRASES:
+        if phrase in manuscript:
+            errors.append(f"Remove process language from the body: {phrase!r}")
+    if ARTIFACT_PREFIX in manuscript:
+        errors.append("Remove evidence hashes from the body; they belong in the appendix")
+    blocks = [block.strip() for block in re.split(r"\n\s*\n", manuscript)]
+    oversized = [block for block in blocks
+                 if not block.startswith(("#", "|")) and len(block) > MAX_PARAGRAPH_CHARS]
+    if oversized:
+        errors.append(f"Paragraphs must stay under {MAX_PARAGRAPH_CHARS} characters; "
+                      f"found {max(len(block) for block in oversized)}")
+    methods = _section_text(manuscript, "Methods")
+    if len(methods) > MAX_METHODS_CHARS:
+        errors.append(f"Methods must stay under {MAX_METHODS_CHARS} characters and leave the "
+                      f"search log to the appendix; found {len(methods)}")
+    return errors
+
+
+def _extract_work(snapshot: dict) -> dict:
+    """Combine the writer's manuscript with the gatherer's evidence ledger."""
+    manuscript, evidence = snapshot.get("manuscript"), snapshot.get("evidence")
+    if isinstance(manuscript, dict) and isinstance(evidence, dict):
+        return {**evidence, "manuscript": manuscript.get("manuscript", ""),
+                "thesis": manuscript.get("thesis", "")}
+    legacy = snapshot.get("research")
+    return legacy if isinstance(legacy, dict) else {}
+
+
+def validate_manuscript(work: dict, *, operations, artifacts, minimum_sources: int = 8,
+                        minimum_reads: int = 3) -> tuple[list[str], list[dict], str]:
+    """Return (errors, verified sources, where the fix belongs)."""
+    errors: list[str] = []
+    craft: list[str] = []
     manuscript = work.get("manuscript", "")
     if not isinstance(manuscript, str) or not manuscript.startswith("# "):
-        return ["Manuscript must be Markdown with a paper title"], []
+        return ["Manuscript must be Markdown with a paper title"], [], "manuscript"
     for section in SECTIONS:
         if not re.search(r"^## " + re.escape(section) + r"\s*$", manuscript, re.MULTILINE):
-            errors.append(f"Missing paper section: {section}")
+            craft.append(f"Missing paper section: {section}")
     if re.search(r"^## References\s*$", manuscript, re.MULTILINE):
-        errors.append("Do not write References manually; they are generated from retrieved metadata")
+        craft.append("Do not write References manually; they are generated from retrieved metadata")
+    craft.extend(craft_errors(manuscript))
     records = work.get("sources")
     if not isinstance(records, list):
-        return errors + ["Research output must contain a sources array"], []
+        return craft + ["Research output must contain a sources array"], [], "evidence"
     successful = {item.result_ref: item.tool_ref for item in operations
                   if item.status.value == "succeeded" and item.result_ref}
     canonical_sources = []
@@ -135,14 +219,17 @@ def validate_manuscript(work: dict, *, operations, artifacts, minimum_sources: i
         errors.append(f"Need at least {minimum_sources} distinct cited and retrieved sources")
     if len(read_ids) < minimum_reads:
         errors.append(f"Need at least {minimum_reads} source documents read beyond the search listing")
-    return errors, sorted(canonical_sources, key=lambda source: source["citation"])
+    target = "evidence" if errors else ("manuscript" if craft else "none")
+    return (errors + craft, sorted(canonical_sources, key=lambda source: source["citation"]),
+            target)
 
 
 def evaluate_review(snapshot: dict, *, store, artifacts, run_id, node_id: str) -> dict:
-    review, work = snapshot.get("review"), snapshot.get("research")
+    review, work = snapshot.get("review"), _extract_work(snapshot)
     if not isinstance(review, dict):
-        review = {"verdict": "revise", "summary": "Review output must be a JSON object"}
-    malformed = not isinstance(work, dict)
+        review = {"verdict": "revise", "target": "manuscript",
+                  "summary": "Review output must be a JSON object"}
+    malformed = not isinstance(work, dict) or not work.get("manuscript")
     verdict = review.get("verdict")
     if not isinstance(verdict, str) or verdict not in {"pass", "revise", "blocked"}:
         raise ValueError("Academic review verdict must be pass, revise, or blocked")
@@ -152,12 +239,17 @@ def evaluate_review(snapshot: dict, *, store, artifacts, run_id, node_id: str) -
     if (type(minimum_sources) is not int or minimum_sources < 1
             or type(minimum_reads) is not int or not 0 <= minimum_reads <= minimum_sources):
         raise ValueError("Invalid academic source requirements")
-    errors, sources = validate_manuscript(
+    errors, sources, deterministic_target = validate_manuscript(
         work if not malformed else {}, operations=store.list_tool_operations(run_id), artifacts=artifacts,
         minimum_sources=minimum_sources, minimum_reads=minimum_reads,
     )
     if errors and verdict == "pass":
         verdict = "revise"
+    target = review.get("target")
+    if target not in ("evidence", "manuscript", "none"):
+        target = "none"
+    if errors and target == "none":
+        target = deterministic_target
     prior_nodes = [n for n in store.list_node_runs(run_id)
                    if n.node_id == node_id and n.status.value == "completed" and n.output_ref]
     run = store.get_run(run_id)
@@ -175,21 +267,22 @@ def evaluate_review(snapshot: dict, *, store, artifacts, run_id, node_id: str) -
         errors.append(f"Revision budget exhausted after {max_rounds} rounds; draft is not approved")
     elif verdict == "revise" and len(prior_nodes) > 0:
         prior = json.loads(artifacts.get_text(max(prior_nodes, key=lambda n: n.attempt).output_ref))
-        if canonical_json(prior.get("research", {})) == canonical_json(work):
+        if canonical_json(_extract_work(prior)) == canonical_json(work):
             # Repeated identical research without verified progress: record
             # evidence and surface to supervisor/watchdog for diagnosis,
             # instead of silently blocking the run.
             errors.append("A completed cycle repeated the same research; operator input or diagnosis is required")
             review["verdict"] = "revise"
             review.setdefault("mechanical_issues", []).append(errors[-1])
-    return {**snapshot, "review": {**review, "verdict": verdict, "mechanical_issues": errors},
+    return {**snapshot, "review": {**review, "verdict": verdict, "target": target,
+                                   "mechanical_issues": errors},
             "verified_sources": sources}
 
 
 def render_paper(snapshot: dict, *, run_id) -> str:
     if snapshot.get("review", {}).get("verdict") != "pass":
         raise ValueError("Only an approved academic review can publish a manuscript")
-    text = snapshot["research"]["manuscript"].rstrip()
+    text = _extract_work(snapshot)["manuscript"].rstrip()
     references = []
     provenance = []
     for source in snapshot["verified_sources"]:
@@ -262,6 +355,8 @@ class MarkdownReportBehavior:
 ACADEMIC_BEHAVIORS = {
     "academic.planner": AcademicAgentBehavior("planner"),
     "academic.researcher": AcademicAgentBehavior("researcher"),
+    "academic.gatherer": AcademicAgentBehavior("gatherer"),
+    "academic.writer": AcademicAgentBehavior("writer"),
     "academic.reviewer": AcademicAgentBehavior("reviewer"),
     "academic.review_gate": ReviewGateBehavior(),
     "academic.report": MarkdownReportBehavior(),

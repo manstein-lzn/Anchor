@@ -4,6 +4,18 @@
 
 本次交接核对时间：`2026-09-08 22:00 CST`；Verifier 收尾与执行策略会话完成下述验收并更新本文。
 
+## Deep Research 重构：读者优先（2026-09-09，ADR-040）
+
+- **问题**：首个 deep-research run 产出的是审计报告——正文 57% 段落含审计语言、116 个证据级别标签、
+  35.5% 篇幅是文献器械。系统精确执行了契约，是契约错了。
+- **重构**：拆角色。`gather`（有工具，只出结构化证据账本）→ `write`（无工具，出读者向论文，只按编号引用）
+  → `review`（同时评实质与表达，并给出 `target`）→ `check`（按 target 路由：只重跑真正有缺陷的那一环）。
+- **可判定**：确定性 craft 检查拒绝正文中的证据级别标签、过程语言、内容哈希、>1200 字符的段落、
+  >2500 字符的 Methods。判不了的规则=不存在。
+- **效果**（同课题）：7.2 分钟 vs 25.8；38KB vs 91KB；3 轮 vs 5 轮；`gather` 只跑 1 次；正文审计词 0。
+- 证据：`tests/test_academic_research.py` 10 passed（含 craft 门禁与 target 路由）；报告
+  `.local/reports/c6356fec-d116-412c-a470-977272ae5901.md`。
+
 ## Agent Surface S2/S4：MCP server（2026-09-09，ADR-039）
 
 - `src/anchor/mcp.py`：stdio JSON-RPC（`initialize`/`tools/list`/`tools/call`/`ping`），零新依赖。

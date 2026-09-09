@@ -3,7 +3,7 @@
   "name": "Academic Literature Review",
   "entry_node_id": "start",
   "metadata": {
-    "purpose": "Online plan-research-review loop with evidence-backed Markdown delivery"
+    "purpose": "Plan, gather evidence, write a reader-facing survey, then review substance and craft"
   },
   "nodes": [
     {
@@ -21,10 +21,19 @@
       }
     },
     {
-      "id": "research",
+      "id": "gather",
       "type": "agent",
-      "name": "Search, read and synthesize",
-      "agent_ref": "agents.academic.researcher",
+      "name": "Search, read and record evidence",
+      "agent_ref": "agents.academic.gatherer",
+      "metadata": {
+        "context_mode": "full"
+      }
+    },
+    {
+      "id": "write",
+      "type": "agent",
+      "name": "Write the reader-facing paper",
+      "agent_ref": "agents.academic.writer",
       "metadata": {
         "context_mode": "full"
       }
@@ -32,7 +41,7 @@
     {
       "id": "review",
       "type": "agent",
-      "name": "Independent scholarly review",
+      "name": "Review substance and craft",
       "agent_ref": "agents.academic.reviewer",
       "metadata": {
         "context_mode": "full"
@@ -41,17 +50,17 @@
     {
       "id": "check",
       "type": "loop",
-      "name": "Evidence and revision gate",
-      "exit_condition": "output.review.verdict == 'pass' || output.review.verdict == 'blocked'",
+      "name": "Evidence and craft gate",
       "metadata": {
         "context_mode": "full",
         "behavior_ref": "academic.review_gate"
-      }
+      },
+      "exit_condition": "output.review.verdict == 'pass' || output.review.verdict == 'blocked'"
     },
     {
       "id": "needs_input",
       "type": "human_task",
-      "name": "Resolve research blockers",
+      "name": "Operator decision",
       "metadata": {
         "context_mode": "full"
       }
@@ -59,7 +68,7 @@
     {
       "id": "report",
       "type": "artifact",
-      "name": "Export paper.md",
+      "name": "Export paper",
       "metadata": {
         "context_mode": "full",
         "behavior_ref": "academic.report"
@@ -76,17 +85,27 @@
     },
     {
       "source": "plan",
-      "target": "research",
+      "target": "gather",
       "input_mapping": {
         "plan": "outputs.plan",
         "request": "inputs"
       }
     },
     {
-      "source": "research",
+      "source": "gather",
+      "target": "write",
+      "input_mapping": {
+        "evidence": "outputs.gather",
+        "plan": "outputs.plan",
+        "request": "inputs"
+      }
+    },
+    {
+      "source": "write",
       "target": "review",
       "input_mapping": {
-        "research": "outputs.research",
+        "manuscript": "outputs.write",
+        "evidence": "outputs.gather",
         "plan": "outputs.plan",
         "request": "inputs"
       }
@@ -96,16 +115,31 @@
       "target": "check",
       "input_mapping": {
         "review": "outputs.review",
-        "research": "outputs.research",
+        "manuscript": "outputs.write",
+        "evidence": "outputs.gather",
+        "plan": "outputs.plan",
         "request": "inputs"
       }
     },
     {
       "source": "check",
-      "target": "plan",
-      "condition": "output.review.verdict == 'revise'",
+      "target": "gather",
+      "condition": "output.review.verdict == 'revise' && output.review.target == 'evidence'",
       "input_mapping": {
-        "feedback": "outputs.check"
+        "feedback": "outputs.check",
+        "plan": "outputs.check.plan",
+        "request": "outputs.check.request"
+      }
+    },
+    {
+      "source": "check",
+      "target": "write",
+      "condition": "output.review.verdict == 'revise' && output.review.target == 'manuscript'",
+      "input_mapping": {
+        "feedback": "outputs.check",
+        "evidence": "outputs.check.evidence",
+        "plan": "outputs.check.plan",
+        "request": "outputs.check.request"
       }
     },
     {
@@ -121,7 +155,8 @@
       "target": "plan",
       "input_mapping": {
         "feedback": "outputs.check",
-        "operator_decision": "outputs.needs_input"
+        "operator_decision": "outputs.needs_input",
+        "request": "outputs.check.request"
       }
     },
     {

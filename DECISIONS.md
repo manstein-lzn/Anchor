@@ -889,3 +889,32 @@ no third-party dependency, and no privileged path.
 - Transport is newline-delimited JSON-RPC (`initialize`, `tools/list`,
   `tools/call`, `ping`). The official SDK was declined: the needed protocol
   surface is small and stable, and the project keeps its dependency set minimal.
+
+## ADR-040: The paper is for the reader; verification is a pipeline property
+
+The first deep-research run produced a defensible audit: 57% of body paragraphs
+carried audit language, 116 evidence-level tags, 16 process references, and
+35.5% of the document was apparatus (references plus a hash appendix). It was
+not a paper. The system had executed its contract exactly — the contract was
+wrong.
+
+A paper format is a Pareto-frontier communication device, not an audit trail.
+Verification belongs in the pipeline, where it is automatic, not in the writer's
+attention, where it displaces the work that only a writer can do.
+
+- **Split the roles.** `gather` (tools) produces a structured evidence ledger
+  and no prose. `write` (no tools) produces the reader-facing manuscript from
+  that ledger and cites by number. `review` judges substance *and* craft and
+  names a `target` (`evidence` | `manuscript`), so the loop redoes only what is
+  actually deficient. `check` routes on that target.
+- **Make "reader-facing" judgeable.** Deterministic craft checks reject
+  evidence-level tags, process language, content hashes, paragraphs over 1200
+  characters, and Methods over 2500 characters in the body. A rule that cannot
+  be checked does not exist.
+- **Keep provenance, move it backstage.** References and the retrieval-evidence
+  appendix are generated from verified sources, as before. The writer never
+  narrates them.
+
+Result on the same topic: 7.2 minutes instead of 25.8, 38 KB instead of 91 KB,
+three rounds instead of five, `gather` ran once instead of three times, and zero
+audit terms in the body.

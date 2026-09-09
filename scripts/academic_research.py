@@ -79,8 +79,11 @@ def install(client, args) -> None:
     saved = draft.json()
     if GraphDefinition.model_validate(saved["definition"]) != definition:
         old = GraphDefinition.model_validate(saved["definition"])
-        if not args.upgrade_budgets or old.model_copy(update={"metadata": definition.metadata}) != definition:
-            raise ValueError("An edited academic-research draft already exists; preserve or reconcile it before installation")
+        budget_only = old.model_copy(update={"metadata": definition.metadata}) == definition
+        if not args.replace and not (args.upgrade_budgets and budget_only):
+            raise ValueError(
+                "An edited academic-research draft already exists; preserve or reconcile it "
+                "before installation, or pass --replace to replace it deliberately")
         updated = client.put(f"/api/graphs/{graph_id}/draft", json={
             "expected_revision": saved["revision"], "definition": definition.model_dump(mode="json"),
             "layout": saved.get("layout", {}),
@@ -171,6 +174,8 @@ def main() -> None:
                        help="Override the selected model's OpenAI-compatible wire protocol")
     setup.add_argument("--no-stream", action="store_true", help="Use a complete non-streaming response for long review prompts")
     setup.add_argument("--upgrade-budgets", action="store_true", help="Upgrade only the unchanged example graph's budget metadata")
+    setup.add_argument("--replace", action="store_true",
+                       help="Deliberately replace an existing draft whose structure differs from the example graph")
     start = commands.add_parser("run")
     start.add_argument("--topic", required=True)
     start.add_argument("--language", default="Chinese")

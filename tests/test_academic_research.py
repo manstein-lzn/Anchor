@@ -8,7 +8,8 @@ import pytest
 from anchor.domain.admission import RunRequest
 from anchor.domain.conditions import build_condition_context
 from anchor.domain.graph import GraphDefinition, GraphVersion, Trigger
-from anchor.runtime.academic import SECTIONS, register_academic_behaviors, validate_manuscript
+from anchor.runtime.academic import (SECTIONS, craft_errors, register_academic_behaviors,
+                                     validate_agent_output, validate_manuscript)
 from anchor.runtime.behaviors import BehaviorRegistry
 from anchor.runtime.artifacts import LocalArtifactStore
 from anchor.runtime.capabilities import AgentCapability, CapabilityRegistry, ToolCapability
@@ -65,14 +66,31 @@ def source_evidence(store, artifacts, lease, monkeypatch):
         calls.append(1)
         return json.dumps(result)
     monkeypatch.setattr(tool_gateway, "execute_research", search)
-    registry = CapabilityRegistry(agents=[AgentCapability(ref="research", model_ref="m", tool_refs=["scholarly.search"])],
+    registry = CapabilityRegistry(agents=[AgentCapability(ref="gather", model_ref="m", tool_refs=["scholarly.search"])],
                                  tools=[ToolCapability(ref="scholarly.search")])
     gateway = ToolGateway(store, registry, artifacts, SubprocessBackend())
     operation = uuid4()
-    first = gateway.execute(lease, agent_ref="research", tool_ref="scholarly.search", arguments={"query": "test"}, operation_id=operation)
-    again = gateway.execute(lease, agent_ref="research", tool_ref="scholarly.search", arguments={"query": "test"}, operation_id=operation)
+    first = gateway.execute(lease, agent_ref="gather", tool_ref="scholarly.search", arguments={"query": "test"}, operation_id=operation)
+    again = gateway.execute(lease, agent_ref="gather", tool_ref="scholarly.search", arguments={"query": "test"}, operation_id=operation)
     assert first == again and len(calls) == 1
     return {"citation": 1, "id": "doi:10.1234/test", "evidence_ref": first.result_ref}
+
+
+def gather_output(store, artifacts, lease, monkeypatch):
+    """A complete evidence ledger: sources, notes, coverage, tensions, gaps."""
+    return {
+        "sources": [source_evidence(store, artifacts, lease, monkeypatch)],
+        "search_log": [{"query": "compiler cost model", "source": "crossref", "inclusion_decisions": "included"}],
+        "evidence_notes": [{"citation": 1, "title": "Real metadata title", "year": 2024,
+                            "venue_or_status": "Test Journal", "problem": "predicts cost",
+                            "method": "learned model", "key_findings": ["beats the baseline"],
+                            "numbers": [], "limitations": ["abstract only"],
+                            "evidence_level": "abstract"}],
+        "coverage": [{"question": "How did cost models evolve?", "evidence_ids": [1],
+                      "answer": "From analytic to learned", "uncertainty": "abstract level"}],
+        "tensions": [],
+        "unresolved": [],
+    }
 
 
 def manuscript():
@@ -80,51 +98,87 @@ def manuscript():
         "## " + section + "\n\n" + ("Supported analysis [1]. " * 45) for section in SECTIONS)
 
 
-def test_revision_loop_keeps_full_manuscript_and_exports_verified_markdown(tmp_path, monkeypatch):
+def write_output(text=None, thesis="Cost models moved from analytic to learned"):
+    return {"manuscript": text if text is not None else manuscript(), "thesis": thesis}
+
+
+def test_craft_gate_routes_a_writing_defect_back_to_the_writer(tmp_path, monkeypatch):
+    """A deterministic craft defect must route to `write`, not redo the search."""
     store, artifacts, receipt, worker = setup(tmp_path)
     try:
         assert asyncio.run(worker.execute_once(worker_id="control")).node_id == "start"
         complete(store, artifacts, claim(store, "plan"), {"round": 1})
-        lease = claim(store, "research")
-        source = source_evidence(store, artifacts, lease, monkeypatch)
-        work = {"manuscript": manuscript().replace("## Methods", "## Missing"), "sources": [source]}
-        complete(store, artifacts, lease, work)
+        lease = claim(store, "gather")
+        evidence = gather_output(store, artifacts, lease, monkeypatch)
+        complete(store, artifacts, lease, evidence)
+
+        write_lease = claim(store, "write")
+        resolved = resolve_node_context(store, receipt.run_id, "write", artifacts)
+        assert resolved.snapshot["evidence"] == evidence
+        complete(store, artifacts, write_lease, write_output(manuscript().replace("## Methods", "## Missing")))
+
         review_lease = claim(store, "review")
         resolved = resolve_node_context(store, receipt.run_id, "review", artifacts)
-        assert resolved.snapshot["research"] == work
-        assert len(resolved.snapshot["research"]["manuscript"]) > 4000
-        complete(store, artifacts, review_lease, {"verdict": "pass", "issues": []})
-        asyncio.run(worker.execute_once(worker_id="control"))
-        planner = claim(store, "plan")
-        feedback = resolve_node_context(store, receipt.run_id, "plan", artifacts).snapshot["feedback"]
+        assert resolved.snapshot["manuscript"]["manuscript"].startswith("# A literature review")
+        complete(store, artifacts, review_lease, {"verdict": "pass", "target": "none", "issues": []})
+
+        assert asyncio.run(worker.execute_once(worker_id="control")).node_id == "check"
+        rewrite_lease = claim(store, "write")
+        assert rewrite_lease.node_id == "write", "craft defect must return to the writer"
+        feedback = resolve_node_context(store, receipt.run_id, "write", artifacts).snapshot["feedback"]
         assert feedback["review"]["verdict"] == "revise"
+        assert feedback["review"]["target"] == "manuscript"
         assert "Missing paper section: Methods" in feedback["review"]["mechanical_issues"]
-        assert feedback["research"] == work
-        complete(store, artifacts, planner, {"round": 2, "previous_work": work})
-        revised = {"manuscript": manuscript(), "sources": [source]}
-        complete(store, artifacts, claim(store, "research"), revised)
-        complete(store, artifacts, claim(store, "review"), {"verdict": "pass", "issues": []})
+        assert feedback["evidence"]["sources"] == evidence["sources"]
+
+        complete(store, artifacts, rewrite_lease, write_output())
+        complete(store, artifacts, claim(store, "review"), {"verdict": "pass", "target": "none", "issues": []})
         assert asyncio.run(worker.execute_once(worker_id="control")).node_id == "check"
         report = asyncio.run(worker.execute_once(worker_id="control"))
         assert report.node_id == "report"
         assert store.get_run(receipt.run_id).status.value == "completed"
         text = artifacts.get_text(report.output_ref)
-        assert text.startswith(revised["manuscript"].rstrip())
+        assert text.startswith(manuscript().rstrip())
         assert "## References" in text and "Real metadata title" in text
-        assert "## Retrieval Evidence" in text and source["evidence_ref"] in text
+        assert "## Retrieval Evidence" in text and evidence["sources"][0]["evidence_ref"] in text
         assert (artifacts.root / "reports" / str(receipt.run_id) / "report.md").read_text() == text
-        assert len([n for n in store.list_node_runs(receipt.run_id) if n.node_id == "plan"]) == 2
     finally:
         store.close()
 
 
-def test_blocked_review_parks_for_human_and_approval_resumes_planning(tmp_path):
+def test_evidence_target_routes_back_to_the_gatherer(tmp_path, monkeypatch):
+    """A missing-evidence verdict must route to `gather`, not to the writer."""
     store, artifacts, receipt, worker = setup(tmp_path)
     try:
         asyncio.run(worker.execute_once(worker_id="control"))
         complete(store, artifacts, claim(store, "plan"), {"round": 1})
-        complete(store, artifacts, claim(store, "research"), {"manuscript": manuscript(), "sources": []})
-        complete(store, artifacts, claim(store, "review"), {"verdict": "blocked", "blockers": ["Access unavailable"]})
+        lease = claim(store, "gather")
+        complete(store, artifacts, lease, gather_output(store, artifacts, lease, monkeypatch))
+        complete(store, artifacts, claim(store, "write"), write_output())
+        complete(store, artifacts, claim(store, "review"),
+                 {"verdict": "revise", "target": "evidence", "issues": [
+                     {"severity": "major", "location": "3.3", "problem": "unsupported claim",
+                      "required_action": "find a source that measures it"}]})
+        assert asyncio.run(worker.execute_once(worker_id="control")).node_id == "check"
+        regather_lease = claim(store, "gather")
+        assert regather_lease.node_id == "gather", "evidence defect must return to the gatherer"
+        feedback = resolve_node_context(store, receipt.run_id, "gather", artifacts).snapshot["feedback"]
+        assert feedback["review"]["target"] == "evidence"
+        assert feedback["evidence"]["sources"]
+    finally:
+        store.close()
+
+
+def test_blocked_review_parks_for_human_and_approval_resumes_planning(tmp_path, monkeypatch):
+    store, artifacts, receipt, worker = setup(tmp_path)
+    try:
+        asyncio.run(worker.execute_once(worker_id="control"))
+        complete(store, artifacts, claim(store, "plan"), {"round": 1})
+        lease = claim(store, "gather")
+        complete(store, artifacts, lease, gather_output(store, artifacts, lease, monkeypatch))
+        complete(store, artifacts, claim(store, "write"), write_output())
+        complete(store, artifacts, claim(store, "review"),
+                 {"verdict": "blocked", "target": "none", "blockers": ["Access unavailable"]})
         asyncio.run(worker.execute_once(worker_id="control"))
         waits = store.list_waiting_nodes(receipt.run_id)
         assert len(waits) == 1 and waits[0].node_id == "needs_input"
@@ -139,21 +193,67 @@ def test_blocked_review_parks_for_human_and_approval_resumes_planning(tmp_path):
 def test_citations_cannot_use_artifacts_without_run_bound_network_operations(tmp_path):
     artifacts = LocalArtifactStore(tmp_path)
     ref = artifacts.put_text(json.dumps({"papers": [{"id": "fake"}]}))
-    errors, verified = validate_manuscript({"manuscript": manuscript(),
+    errors, verified, target = validate_manuscript({"manuscript": manuscript(),
         "sources": [{"citation": 1, "id": "fake", "evidence_ref": ref}]},
         operations=[], artifacts=artifacts, minimum_sources=1, minimum_reads=0)
     assert not verified
+    assert target == "evidence"
     assert any("successful scholarly search" in error for error in errors)
 
 
-def test_identical_completed_revision_cycles_surface_to_supervisor_and_continue(tmp_path):
+def test_audit_language_in_the_body_is_a_defect_not_a_virtue():
+    """Verification is a pipeline property, so narrating it is a writing defect."""
+    assert not craft_errors(manuscript())
+    for defect, expected in (
+        ("正文提到（全文级）证据", "evidence-level tags"),
+        ("如本轮所读", "process language"),
+        ("证据见 artifact://sha256/abc", "evidence hashes"),
+    ):
+        errors = craft_errors(manuscript() + "\n\n" + defect)
+        assert any(expected in error for error in errors), (defect, errors)
+    wall = "# Title\n\n## Abstract\n\n" + ("x" * 1300)
+    assert any("Paragraphs must stay under" in error for error in craft_errors(wall))
+    long_methods = "# Title\n\n## Methods\n\n" + ("search " * 500) + "\n\n## Discussion\n\nok"
+    assert any("Methods must stay under" in error for error in craft_errors(long_methods))
+
+
+def test_target_separates_evidence_gaps_from_writing_defects(tmp_path):
+    artifacts = LocalArtifactStore(tmp_path)
+    ref = artifacts.put_text(json.dumps({"papers": [{"id": "fake"}]}))
+    _, _, evidence_target = validate_manuscript(
+        {"manuscript": manuscript(), "sources": [{"citation": 1, "id": "fake", "evidence_ref": ref}]},
+        operations=[], artifacts=artifacts, minimum_sources=1, minimum_reads=0)
+    assert evidence_target == "evidence"
+    _, _, craft_target = validate_manuscript(
+        {"manuscript": manuscript().replace("## Methods", "## Missing"), "sources": []},
+        operations=[], artifacts=artifacts, minimum_sources=0, minimum_reads=0)
+    assert craft_target in ("evidence", "manuscript")
+
+
+def test_role_output_schemas_reject_a_missing_paper_or_thesis():
+    with pytest.raises(ValueError):
+        validate_agent_output(json.dumps({"sources": [], "search_log": [], "evidence_notes": [],
+                                          "coverage": [], "tensions": [], "unresolved": []}), "writer")
+    validate_agent_output(json.dumps({"manuscript": "# T", "thesis": "t"}), "writer")
+    validate_agent_output(json.dumps({"sources": [], "search_log": [], "evidence_notes": [],
+                                      "coverage": [], "tensions": [], "unresolved": []}), "gatherer")
+    review = validate_agent_output(json.dumps({"verdict": "revise", "target": "evidence",
+                                               "summary": "s", "issues": [], "strengths": [],
+                                               "blockers": []}), "reviewer")
+    assert review["target"] == "evidence"
+
+
+def test_identical_completed_revision_cycles_surface_to_supervisor_and_continue(tmp_path, monkeypatch):
     store, artifacts, receipt, worker = setup(tmp_path)
     try:
         asyncio.run(worker.execute_once(worker_id="control"))
-        for round_number in (1, 2):
-            complete(store, artifacts, claim(store, "plan"), {"round": round_number})
-            complete(store, artifacts, claim(store, "research"), {"manuscript": manuscript(), "sources": []})
-            complete(store, artifacts, claim(store, "review"), {"verdict": "revise", "issues": []})
+        complete(store, artifacts, claim(store, "plan"), {"round": 1})
+        lease = claim(store, "gather")
+        complete(store, artifacts, lease, gather_output(store, artifacts, lease, monkeypatch))
+        for _ in range(2):
+            complete(store, artifacts, claim(store, "write"), write_output())
+            complete(store, artifacts, claim(store, "review"),
+                     {"verdict": "revise", "target": "manuscript", "issues": []})
             asyncio.run(worker.execute_once(worker_id="control"))
         # The run is no longer auto-blocked by a round counter. Repeated
         # identical cycles surface mechanical issues and remain in revise
@@ -189,8 +289,8 @@ def test_retrieval_failure_is_audited_and_returned_to_the_model(tmp_path, monkey
     try:
         asyncio.run(worker.execute_once(worker_id="control"))
         complete(store, artifacts, claim(store, "plan"), {"round": 1})
-        lease = claim(store, "research")
-        agent = AgentCapability(ref="research", model_ref="m", tool_refs=["scholarly.search"])
+        lease = claim(store, "gather")
+        agent = AgentCapability(ref="gather", model_ref="m", tool_refs=["scholarly.search"])
         registry = CapabilityRegistry(agents=[agent], tools=[ToolCapability(ref="scholarly.search", evidence_json=True)])
         def unavailable(*args, **kwargs):
             raise ValueError("HTTP 429: retry later")
