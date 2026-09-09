@@ -7,6 +7,7 @@ from uuid import UUID
 
 from anchor.domain.admission import RunDispatch, RunReceipt, RunRequest
 from anchor.domain.graph import GraphVersion, Trigger
+from anchor.domain.project import Project
 from anchor.domain.models import (ContextSnapshot, EdgeDecision, NodeLease, NodeRun, Run, RunStatus,
                                   Task, VerificationRecord)
 from anchor.domain.models import DiagnosticRequest, ProgressEvidence
@@ -58,6 +59,12 @@ class StateStore(Protocol):
     def list_artifact_references(self) -> list[tuple[UUID, str]]: ...
 
     def database_bytes(self) -> int | None: ...
+
+    def create_project(self, project: Project) -> Project: ...
+
+    def get_project(self, project_id: str) -> Project | None: ...
+
+    def list_projects(self) -> list[Project]: ...
 
     def get_storage_budgets(self) -> dict[str, int | None]: ...
 

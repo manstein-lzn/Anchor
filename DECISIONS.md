@@ -575,3 +575,28 @@ would hide the precise reason a reference was refused.
 This ADR defines the boundary only. It does not add a workspace backend, a
 migration, or an API endpoint; those are W1+. The artifact side of the resolver
 is implemented and tested so the fail-closed path is real, not aspirational.
+
+## ADR-028: A project is a read-only content source, never a workspace
+
+Registering a project grants the content plane read access to a repository at
+immutable revisions. It does not grant a worktree: a workspace is run-scoped and
+is W1 work. Keeping the two apart means read access can ship before write access
+without any path that could mutate a user's repository.
+
+- `POST /api/projects` validates the root with `git rev-parse` and refuses a
+  directory that is not a git repository, so a bad registration fails at the
+  boundary instead of at first read.
+- `GitWorkspaceBackend` reads blobs with `git cat-file` and lists with
+  `git ls-tree`. It never checks out, never runs hooks and never writes to the
+  repository.
+- Only full hexadecimal commit ids are accepted. The `ContentRef` boundary
+  already refuses mutable names; the backend repeats the check as defence in
+  depth and verifies the object is a commit.
+- Reading a tree without a path, a directory, a missing blob, a non-UTF-8 file
+  and a file over the size limit all raise. Nothing falls back to a working tree.
+- The default revision on a project is a convenience for operators and is never
+  recorded in a content reference.
+
+The store mixins now declare the members the composition root supplies through
+`_StoreHost`, which removed 140 pre-existing mypy errors and keeps new mixins
+type-checked.

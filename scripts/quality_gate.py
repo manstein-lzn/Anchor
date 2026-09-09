@@ -73,10 +73,8 @@ def compare(current: dict, baseline: dict) -> list[str]:
         allowed = baseline.get("mypy_errors")
         if allowed is not None and current["mypy_errors"] > allowed:
             regressions.append(f"mypy errors: {current['mypy_errors']} > {allowed}")
-    if current["max_module_lines"] > baseline.get("max_module_lines", 0):
-        regressions.append(
-            f"largest module: {current['max_module_lines']} lines > "
-            f"{baseline.get('max_module_lines')} (split it, do not raise the budget)")
+    # Module size is owned by tests/test_architecture.py, which applies the
+    # documented per-module cap; here it is reported for visibility only.
     return regressions
 
 
@@ -101,8 +99,8 @@ def main() -> int:
     print("quality gate")
     print(f"  ruff:              {current['ruff']}")
     print(f"  mypy errors:       {current['mypy_errors']}")
-    print(f"  largest module:    {current['max_module_lines']} lines")
-    print(f"  baseline:          {json.dumps({k: baseline.get(k) for k in ('ruff', 'mypy_errors', 'max_module_lines')})}")
+    print(f"  largest module:    {current['max_module_lines']} lines (cap enforced by the architecture test)")
+    print(f"  baseline:          {json.dumps({k: baseline.get(k) for k in ('ruff', 'mypy_errors')})}")
     if regressions:
         print("\nREGRESSIONS:")
         for item in regressions:

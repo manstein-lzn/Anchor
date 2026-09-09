@@ -17,13 +17,13 @@ from uuid import UUID
 
 import sqlalchemy as sa
 
-from .base import utc_now
+from .base import _StoreHost, utc_now
 from . import schema as s
 
 ARTIFACT_PATTERN = re.compile(r"artifact://sha256/[0-9a-f]{64}")
 
 
-class StorageStoreMixin:
+class StorageStoreMixin(_StoreHost):
     """Read-only footprint queries shared by the report and eviction planner."""
 
     def run_graph_index(self) -> dict[UUID, str]:

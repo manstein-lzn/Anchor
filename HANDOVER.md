@@ -4,6 +4,18 @@
 
 本次交接核对时间：`2026-09-08 22:00 CST`；Verifier 收尾与执行策略会话完成下述验收并更新本文。
 
+## W0.2：只读内容源（2026-09-09，ADR-028）
+
+- `projects` 表（migration `0018_projects`）+ `POST/GET /api/projects`；注册时用
+  `git rev-parse` 校验，非 git 仓库直接 422。
+- `GitWorkspaceBackend`：`git cat-file`/`git ls-tree` 读取，**不 checkout、不跑 hook、不写仓库**；
+  只接受完整十六进制 commit id，并再次校验对象类型。
+- `WorkspaceResolver` 实现 `ContentResolver`：未知 project / 缺文件 / 目录 / 非 UTF-8 / 超限
+  全部失败关闭，无回退。
+- 顺带修复存量：store mixin 通过 `_StoreHost` 声明宿主成员，**mypy 从 233 降到 97**。
+- 证据：`tests/test_workspace.py` 10 passed；`test_api` 项目注册 1 passed；
+  架构测试与门禁绿（ruff C901 13、mypy 97）。
+
 ## W0.1：content_ref 边界类型（2026-09-09，ADR-027）
 
 - `domain/content.py`：唯一的边界类型。`ContentRef` 解析/校验/序列化两类引用

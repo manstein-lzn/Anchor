@@ -45,6 +45,14 @@ retention_audit = sa.Table("retention_audit", metadata,
     sa.Column("freed_bytes", sa.BigInteger, nullable=False),
     sa.Column("detail", json_type, nullable=False))
 
+projects = sa.Table("projects", metadata,
+    sa.Column("project_id", sa.String(200), primary_key=True),
+    sa.Column("name", sa.String(200), nullable=False),
+    sa.Column("backend", sa.String(32), nullable=False),
+    sa.Column("root", sa.String(1000), nullable=False),
+    sa.Column("default_revision", sa.String(200)),
+    timestamp("created_at"), timestamp("updated_at"))
+
 storage_budgets = sa.Table("storage_budgets", metadata,
     sa.Column("scope", sa.String(200), primary_key=True),
     sa.Column("bytes", sa.BigInteger),

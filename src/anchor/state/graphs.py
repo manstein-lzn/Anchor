@@ -13,12 +13,12 @@ from anchor.domain.graph import (GraphDefinition, GraphVersion, GraphVersionStat
                                  NodeType, Trigger)
 from anchor.domain.models import NodeRun, Run, RunStatus, Task, TaskStatus, utc_now
 from . import schema as s
-from .base import decode, values, wait_status_for
+from .base import _StoreHost, decode, values, wait_status_for
 from .errors import (AdmissionConflict, ConcurrencyConflict, DuplicateEvent,
                      GraphVersionConflict)
 
 
-class GraphStoreMixin:
+class GraphStoreMixin(_StoreHost):
     """Drafts, publications, triggers and admission/outbox/inbox."""
     def create_task(self, task: Task) -> Task:
         with self._transaction() as connection:

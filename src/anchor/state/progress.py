@@ -8,10 +8,10 @@ import sqlalchemy as sa
 
 from anchor.domain.models import DiagnosticRequest, ProgressEvidence
 from . import schema as s
-from .base import decode
+from .base import _StoreHost, decode
 
 
-class ProgressStoreMixin:
+class ProgressStoreMixin(_StoreHost):
     """Observation records; never a failure verdict."""
     def append_progress_evidence(self, evidence: ProgressEvidence) -> ProgressEvidence:
         with self._transaction() as connection:

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, Any, Protocol
+
 import hashlib
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -40,6 +42,25 @@ def decode(model, row):
         if isinstance(value, datetime) and value.tzinfo is None:
             data[key] = value.replace(tzinfo=timezone.utc)
     return model.model_validate(data)
+
+
+if TYPE_CHECKING:
+    class _StoreHost(Protocol):
+        """Members every store mixin may assume the composition root provides."""
+
+        engine: Any
+
+        def _transaction(self) -> Any: ...
+
+        def _insert(self, connection: Any, table: Any, model: Any) -> Any: ...
+
+        def _lock(self, connection: Any, key: str) -> None: ...
+
+        def _append_event(self, connection: Any, *, stream_id: Any, event_type: str,
+                          payload: dict, idempotency_key: str) -> int: ...
+else:
+    class _StoreHost:
+        """Runtime placeholder; ``StoreBase`` supplies these at composition."""
 
 
 class StoreBase:
@@ -109,6 +130,7 @@ class StoreBase:
                 "0015_run_archive",
                 "0016_storage_budgets",
                 "0017_retention_audit",
+                "0018_projects",
             }:
                 raise RuntimeError("database schema is not at the supported revision")
     def _append_event(self, connection, *, stream_id, event_type, payload, idempotency_key):

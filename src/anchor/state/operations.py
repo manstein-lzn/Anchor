@@ -10,11 +10,11 @@ import sqlalchemy as sa
 from anchor.domain.models import NodeRun, utc_now
 from anchor.domain.operations import OperationStatus, ToolOperation
 from . import schema as s
-from .base import decode
+from .base import _StoreHost, decode
 from .errors import OperationConflict
 
 
-class OperationStoreMixin:
+class OperationStoreMixin(_StoreHost):
     """Ledger-first external side-effect records."""
     def register_tool_operation(self, operation: ToolOperation) -> ToolOperation:
         operation = ToolOperation.model_validate(operation.model_dump(mode="json"))

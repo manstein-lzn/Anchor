@@ -14,11 +14,11 @@ from anchor.domain.models import (ContextSnapshot, EdgeDecision, NodeRun, RunSta
                                   utc_now)
 from anchor.domain.propagation import decide_outgoing_edges, plan_propagation
 from . import schema as s
-from .base import decode, wait_status_for
+from .base import _StoreHost, decode, wait_status_for
 from .errors import ConcurrencyConflict
 
 
-class CheckpointStoreMixin:
+class CheckpointStoreMixin(_StoreHost):
     """The shared completion/failure/retry tail and human wait decisions."""
     def _propagate_completion(self, connection, *, run, graph: GraphVersion, run_id: UUID,
                                 now, seq: int, outgoing_decisions=(),

@@ -24,6 +24,7 @@ CONTENT_REF_PREFIXES = ("artifact://", "workspace://")
 CONTENT_REF_OWNERS = {
     "domain/content.py",      # the boundary type itself
     "runtime/content.py",     # the resolver boundary
+    "runtime/workspace.py",   # the workspace backend
     "runtime/artifacts.py",   # the artifact store
     "state/storage.py",       # reference scanning for the storage report
     "runtime/integrity.py",   # evidence readability check

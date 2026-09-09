@@ -13,7 +13,7 @@ from uuid import UUID, uuid4
 import sqlalchemy as sa
 
 from . import schema as s
-from .base import utc_now
+from .base import _StoreHost, utc_now
 from .errors import ConcurrencyConflict
 
 TERMINAL_STATUSES = ("completed", "failed", "cancelled")
@@ -29,7 +29,7 @@ PURGE_ORDER = (
 )
 
 
-class RetentionStoreMixin:
+class RetentionStoreMixin(_StoreHost):
     def protected_run_ids(self) -> set[UUID]:
         """Runs a sweep must never touch, because work or a human is pending."""
         protected: set[UUID] = set()

@@ -12,11 +12,11 @@ from anchor.domain.models import (ContextSnapshot, EdgeDecision, NodeLease, Node
                                   Run, RunStatus, TaskStatus, VerificationRecord,
                                   VerificationVerdict, utc_now)
 from . import schema as s
-from .base import decode
+from .base import _StoreHost, decode
 from .errors import ConcurrencyConflict
 
 
-class ExecutionStoreMixin:
+class ExecutionStoreMixin(_StoreHost):
     """Run/node state machine queries, leases and verification persistence."""
     def stop_run(self, run_id: UUID, *, reason: str, budget_exceeded: bool = False) -> Run:
         """Fence further execution without deleting artifacts or operation history."""

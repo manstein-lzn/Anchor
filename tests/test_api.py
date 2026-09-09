@@ -836,3 +836,30 @@ def test_retention_preview_sweep_and_audit_api(client, monkeypatch, tmp_path):
     assert swept["evicted"] == 2 and swept["freed_bytes"] > 0
     assert api.get("/api/retention/audit").json()[0]["evicted_runs"] == 2
     assert api.get("/api/runs").json() == []
+
+
+def test_project_registration_is_read_only_and_validated(client, tmp_path):
+    import subprocess
+
+    api, store = client
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "readme.md").write_text("hi\n", encoding="utf-8")
+    for args in (["init", "-q"], ["config", "user.email", "t@example.com"],
+                 ["config", "user.name", "Test"], ["add", "-A"], ["commit", "-qm", "init"]):
+        subprocess.run(["git", "-C", str(root), *args], check=True, capture_output=True)
+
+    created = api.post("/api/projects", json={
+        "project_id": "api-proj", "name": "API project", "root": str(root)})
+    assert created.status_code == 200, created.text
+    assert created.json()["backend"] == "git"
+    assert [item["project_id"] for item in api.get("/api/projects").json()] == ["api-proj"]
+    assert api.get("/api/projects/api-proj").json()["root"] == str(root)
+    assert api.get("/api/projects/unknown").status_code == 404
+
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    refused = api.post("/api/projects", json={
+        "project_id": "bad", "name": "Bad", "root": str(plain)})
+    assert refused.status_code == 422
+    assert "not a git repository" in refused.text
