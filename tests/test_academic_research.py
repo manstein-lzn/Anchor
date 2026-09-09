@@ -93,6 +93,12 @@ def gather_output(store, artifacts, lease, monkeypatch):
     }
 
 
+def ledger(sources=None):
+    """A minimal well-formed evidence ledger for tests that do not exercise search."""
+    return {"sources": sources or [], "search_log": [], "evidence_notes": [],
+            "coverage": [], "tensions": [], "unresolved": []}
+
+
 def manuscript():
     return "# A literature review\n\n" + "\n\n".join(
         "## " + section + "\n\n" + ("Supported analysis [1]. " * 45) for section in SECTIONS)

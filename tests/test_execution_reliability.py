@@ -13,7 +13,7 @@ from anchor.runtime.model_gateway import ModelResponse
 from anchor.runtime.worker import AgentNodeWorker, FailureClass, classify_failure, is_retryable_model_error
 from anchor.runtime.sinks import ArtifactCheckpointSink
 from anchor.state.relational import RelationalStateStore
-from test_academic_research import setup, complete, claim, manuscript
+from test_academic_research import setup, complete, claim, ledger, manuscript
 
 
 class Gateway:
@@ -103,14 +103,16 @@ def test_preflight_skips_expensive_reviewer_and_enters_revision(tmp_path):
     try:
         asyncio.run(control.execute_once(worker_id="control"))
         complete(store, artifacts, claim(store, 'plan'), {'round': 1})
-        work = {'manuscript': manuscript(), 'sources': []}
-        complete(store, artifacts, claim(store, 'research'), work)
+        complete(store, artifacts, claim(store, 'gather'), ledger())
+        work = {'manuscript': manuscript(), 'thesis': 't'}
+        complete(store, artifacts, claim(store, 'write'), work)
         gateway = Gateway([])
         execute(agent_worker(store, artifacts, gateway, role='reviewer'), claim(store, 'review'),
-                {'research': work, 'request': {'minimum_sources': 1, 'minimum_reads': 0}})
+                {'manuscript': work, 'evidence': ledger(),
+                 'request': {'minimum_sources': 1, 'minimum_reads': 0}})
         assert gateway.calls == 0
         asyncio.run(control.execute_once(worker_id="control"))
-        assert claim(store, 'plan')
+        assert claim(store, 'gather').node_id == 'gather'
     finally:
         store.close()
 
@@ -120,7 +122,8 @@ def test_control_validation_error_becomes_failed_state(tmp_path):
     try:
         asyncio.run(control.execute_once(worker_id="control"))
         complete(store, artifacts, claim(store, 'plan'), {'round': 1})
-        complete(store, artifacts, claim(store, 'research'), {'manuscript': manuscript(), 'sources': []})
+        complete(store, artifacts, claim(store, 'gather'), ledger())
+        complete(store, artifacts, claim(store, 'write'), {'manuscript': manuscript(), 'thesis': 't'})
         complete(store, artifacts, claim(store, 'review'), {'verdict': 'invalid'})
         with pytest.raises(ValueError):
             asyncio.run(control.execute_once(worker_id="control"))
@@ -166,11 +169,13 @@ def test_revision_budget_parks_changing_drafts_after_three_rounds(tmp_path):
     store, artifacts, receipt, control = setup(tmp_path, metadata={"max_rounds": "3"})
     try:
         asyncio.run(control.execute_once(worker_id='control'))
+        complete(store, artifacts, claim(store, 'plan'), {'round': 1})
+        complete(store, artifacts, claim(store, 'gather'), ledger())
         for round_number in range(3):
-            complete(store, artifacts, claim(store, 'plan'), {'round': round_number + 1})
-            complete(store, artifacts, claim(store, 'research'), {
-                'manuscript': manuscript() + str(round_number), 'sources': []})
-            complete(store, artifacts, claim(store, 'review'), {'verdict': 'revise'})
+            complete(store, artifacts, claim(store, 'write'), {
+                'manuscript': manuscript() + str(round_number), 'thesis': 't'})
+            complete(store, artifacts, claim(store, 'review'),
+                     {'verdict': 'revise', 'target': 'manuscript'})
             asyncio.run(control.execute_once(worker_id='control'))
         assert store.list_waiting_nodes(receipt.run_id)[0].node_id == 'needs_input'
         gate = max((n for n in store.list_node_runs(receipt.run_id) if n.node_id == 'check'), key=lambda n: n.attempt)
@@ -342,17 +347,19 @@ def test_more_than_three_revision_rounds_continue_without_hidden_cap(tmp_path):
     store, artifacts, receipt, control = setup(tmp_path)  # no max_rounds in metadata
     try:
         asyncio.run(control.execute_once(worker_id="control"))
+        complete(store, artifacts, claim(store, "plan"), {"round": 1})
+        complete(store, artifacts, claim(store, "gather"), ledger())
         for round_number in range(4):
-            complete(store, artifacts, claim(store, "plan"), {"round": round_number + 1})
-            complete(store, artifacts, claim(store, "research"),
-                     {"manuscript": manuscript() + str(round_number), "sources": []})
-            complete(store, artifacts, claim(store, "review"), {"verdict": "revise", "issues": []})
+            complete(store, artifacts, claim(store, "write"),
+                     {"manuscript": manuscript() + str(round_number), "thesis": "t"})
+            complete(store, artifacts, claim(store, "review"),
+                     {"verdict": "revise", "target": "manuscript", "issues": []})
             asyncio.run(control.execute_once(worker_id="control"))
         run = store.get_run(receipt.run_id)
         assert run.status.value == "running"
         assert store.list_waiting_nodes(receipt.run_id) == []
-        # The 4th planning attempt is queued; nothing auto-failed or auto-blocked.
-        assert claim(store, "plan").node_id == "plan"
+        # A 5th writing attempt is queued; nothing auto-failed or auto-blocked.
+        assert claim(store, "write").node_id == "write"
     finally:
         store.close()
 
@@ -449,28 +456,31 @@ def test_transient_error_after_many_cycles_uses_same_recovery_semantics(tmp_path
             self.calls += 1
             if self.calls == 1:
                 raise RuntimeError("HTTP 504 Gateway Time-out")
-            return ModelResponse(text='{"round": 9}', provider="test", model="test")
+            return ModelResponse(text=json.dumps({"manuscript": manuscript(), "thesis": "t"}),
+                                 provider="test", model="test")
 
     store, artifacts, receipt, control = setup(tmp_path)
     try:
         asyncio.run(control.execute_once(worker_id="control"))
+        complete(store, artifacts, claim(store, "plan"), {"round": 1})
+        complete(store, artifacts, claim(store, "gather"), ledger())
         # several completed business cycles first
         for round_number in range(3):
-            complete(store, artifacts, claim(store, "plan"), {"round": round_number + 1})
-            complete(store, artifacts, claim(store, "research"),
-                     {"manuscript": manuscript() + str(round_number), "sources": []})
-            complete(store, artifacts, claim(store, "review"), {"verdict": "revise", "issues": []})
+            complete(store, artifacts, claim(store, "write"),
+                     {"manuscript": manuscript() + str(round_number), "thesis": "t"})
+            complete(store, artifacts, claim(store, "review"),
+                     {"verdict": "revise", "target": "manuscript", "issues": []})
             asyncio.run(control.execute_once(worker_id="control"))
         gateway = Flaky()
-        worker = agent_worker(store, artifacts, gateway, max_retries=2)
+        worker = agent_worker(store, artifacts, gateway, role="writer", max_retries=2)
         worker.retry_backoff_seconds = (0,)
         with pytest.raises(RuntimeError, match="HTTP 504"):
-            execute(worker, claim(store, "plan"))
+            execute(worker, claim(store, "write"))
         attempts = sorted((n for n in store.list_node_runs(receipt.run_id)
-                           if n.node_id == "plan"), key=lambda n: n.attempt)
+                           if n.node_id == "write"), key=lambda n: n.attempt)
         assert attempts[-2].last_error_class == "transient_http"
         assert attempts[-1].status.value == "ready"
-        execute(worker, claim(store, "plan"))
+        execute(worker, claim(store, "write"))
         assert store.get_run(receipt.run_id).status.value == "running"
     finally:
         store.close()
