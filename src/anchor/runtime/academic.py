@@ -6,6 +6,7 @@ import json
 import re
 
 from anchor.domain.content import ARTIFACT_PREFIX
+from anchor.runtime.academic_rounds import CoverageGateBehavior
 from anchor.domain.context import canonical_json
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from typing import Literal
@@ -23,7 +24,12 @@ class ResearchOutput(BaseModel):
 
 
 class GatherOutput(BaseModel):
-    """The evidence ledger. It carries no prose; the writer owns the paper."""
+    """One round of the evidence ledger. It carries no prose; the writer owns the paper.
+
+    A round reports only what it added. The coverage gate merges rounds, so the
+    gatherer never has to reproduce earlier work and the ledger can grow past
+    what one context window could hold.
+    """
 
     model_config = ConfigDict(strict=True)
     sources: list[dict]
@@ -32,6 +38,9 @@ class GatherOutput(BaseModel):
     coverage: list[dict]
     tensions: list[dict]
     unresolved: list[str]
+    # The gatherer's own judgment that the picture will not change further. It
+    # is one of two stopping signals; the other is a round that adds nothing.
+    saturation: bool = False
 
 
 class WriteOutput(BaseModel):
@@ -472,6 +481,7 @@ ACADEMIC_BEHAVIORS = {
     "academic.gatherer": AcademicAgentBehavior("gatherer"),
     "academic.writer": AcademicAgentBehavior("writer"),
     "academic.reviewer": AcademicAgentBehavior("reviewer"),
+    "academic.coverage_gate": CoverageGateBehavior(),
     "academic.review_gate": ReviewGateBehavior(),
     "academic.report": MarkdownReportBehavior(),
 }

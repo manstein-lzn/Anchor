@@ -92,7 +92,15 @@ def gather_output(store, artifacts, lease, monkeypatch):
                       "answer": "From analytic to learned", "uncertainty": "abstract level"}],
         "tensions": [],
         "unresolved": [],
+        "saturation": True,
     }
+
+
+def settle_coverage(worker):
+    """Run the deterministic coverage gate after a gather round."""
+    outcome = asyncio.run(worker.execute_once(worker_id="control"))
+    assert outcome is not None and outcome.node_id == "coverage", outcome
+    return outcome
 
 
 def ledger(sources=None):
@@ -123,13 +131,16 @@ def test_craft_gate_routes_a_writing_defect_back_to_the_writer(tmp_path, monkeyp
     try:
         assert asyncio.run(worker.execute_once(worker_id="control")).node_id == "start"
         complete(store, artifacts, claim(store, "plan"), {"round": 1})
+        settle_coverage(worker)  # seed the campaign
         lease = claim(store, "gather")
         evidence = gather_output(store, artifacts, lease, monkeypatch)
         complete(store, artifacts, lease, evidence)
+        settle_coverage(worker)
 
         write_lease = claim(store, "write")
         resolved = resolve_node_context(store, receipt.run_id, "write", artifacts)
-        assert resolved.snapshot["evidence"] == evidence
+        assert [s["id"] for s in resolved.snapshot["evidence"]["sources"]] == \
+               [s["id"] for s in evidence["sources"]]
         complete(store, artifacts, write_lease, write_output(manuscript().replace("## Threats to Validity", "## Extra")))
 
         review_lease = claim(store, "review")
@@ -173,19 +184,21 @@ def test_evidence_target_routes_back_to_the_gatherer(tmp_path, monkeypatch):
     try:
         asyncio.run(worker.execute_once(worker_id="control"))
         complete(store, artifacts, claim(store, "plan"), {"round": 1})
+        settle_coverage(worker)  # seed the campaign
         lease = claim(store, "gather")
         complete(store, artifacts, lease, gather_output(store, artifacts, lease, monkeypatch))
+        settle_coverage(worker)
         complete(store, artifacts, claim(store, "write"), write_output())
         complete(store, artifacts, claim(store, "review"),
                  {"verdict": "revise", "target": "evidence", "issues": [
                      {"severity": "major", "location": "3.3", "problem": "unsupported claim",
                       "required_action": "find a source that measures it"}]})
         assert asyncio.run(worker.execute_once(worker_id="control")).node_id == "check"
-        regather_lease = claim(store, "gather")
-        assert regather_lease.node_id == "gather", "evidence defect must return to the gatherer"
-        feedback = resolve_node_context(store, receipt.run_id, "gather", artifacts).snapshot["feedback"]
-        assert feedback["review"]["target"] == "evidence"
-        assert feedback["evidence"]["sources"]
+        replan_lease = claim(store, "plan")
+        assert replan_lease.node_id == "plan", "evidence defect returns to planning, then research"
+        complete(store, artifacts, replan_lease, {"round": 2})
+        settle_coverage(worker)
+        assert claim(store, "gather").node_id == "gather"
     finally:
         store.close()
 
@@ -195,8 +208,10 @@ def test_blocked_review_parks_for_human_and_approval_resumes_planning(tmp_path, 
     try:
         asyncio.run(worker.execute_once(worker_id="control"))
         complete(store, artifacts, claim(store, "plan"), {"round": 1})
+        settle_coverage(worker)  # seed the campaign
         lease = claim(store, "gather")
         complete(store, artifacts, lease, gather_output(store, artifacts, lease, monkeypatch))
+        settle_coverage(worker)
         complete(store, artifacts, claim(store, "write"), write_output())
         complete(store, artifacts, claim(store, "review"),
                  {"verdict": "blocked", "target": "none", "blockers": ["Access unavailable"]})
@@ -259,6 +274,43 @@ def test_structure_follows_the_converged_survey_skeleton():
     assert VALIDITY_SECTIONS[0] in manuscript()
 
 
+def test_coverage_gate_continues_then_stops_on_convergence(tmp_path, monkeypatch):
+    """No round cap: research continues while rounds add evidence, and ends when a
+    round adds nothing. Convergence is not a budget."""
+    store, artifacts, receipt, worker = setup(tmp_path)
+    try:
+        asyncio.run(worker.execute_once(worker_id="control"))
+        complete(store, artifacts, claim(store, "plan"), {"round": 1})
+        settle_coverage(worker)  # seed the campaign
+        lease = claim(store, "gather")
+        first = gather_output(store, artifacts, lease, monkeypatch)
+        first["saturation"] = False
+        complete(store, artifacts, lease, first)
+        output = json.loads(artifacts.get_text(settle_coverage(worker).output_ref))
+        assert output["decision"] == "continue" and output["round"] == 1 and output["added"] == 1
+
+        repeat = dict(first, saturation=False)
+        complete(store, artifacts, claim(store, "gather"), repeat)
+        output = json.loads(artifacts.get_text(settle_coverage(worker).output_ref))
+        assert output["decision"] == "write", "a round that adds nothing ends research"
+        assert output["round"] == 2 and output["added"] == 0
+        assert len(output["ledger"]["sources"]) == len(first["sources"])
+    finally:
+        store.close()
+
+
+def test_ledger_merge_renumbers_citations_across_rounds():
+    from anchor.runtime.academic_rounds import merge_ledger
+    first = {"sources": [{"id": "x", "citation": 1}, {"id": "y", "citation": 2}],
+             "evidence_notes": [{"citation": 2, "title": "Y"}]}
+    second = {"sources": [{"id": "y", "citation": 1}, {"id": "z", "citation": 2}],
+              "evidence_notes": [{"citation": 2, "title": "Z"}]}
+    merged = merge_ledger(first, second)
+    assert [source["id"] for source in merged["sources"]] == ["x", "y", "z"]
+    assert [source["citation"] for source in merged["sources"]] == [1, 2, 3]
+    assert [(note["citation"], note["title"]) for note in merged["evidence_notes"]] == [(2, "Y"), (3, "Z")]
+
+
 def test_result_numbers_must_rest_on_a_full_text_reading():
     """An abstract reports a number without the detail that makes it checkable."""
     claim = "# T\n\n## Abstract\n\nThe method is 1.85x faster [1].\n"
@@ -316,8 +368,10 @@ def test_identical_completed_revision_cycles_surface_to_supervisor_and_continue(
     try:
         asyncio.run(worker.execute_once(worker_id="control"))
         complete(store, artifacts, claim(store, "plan"), {"round": 1})
+        settle_coverage(worker)  # seed the campaign
         lease = claim(store, "gather")
         complete(store, artifacts, lease, gather_output(store, artifacts, lease, monkeypatch))
+        settle_coverage(worker)
         for _ in range(2):
             complete(store, artifacts, claim(store, "write"), write_output())
             complete(store, artifacts, claim(store, "review"),
@@ -357,6 +411,7 @@ def test_retrieval_failure_is_audited_and_returned_to_the_model(tmp_path, monkey
     try:
         asyncio.run(worker.execute_once(worker_id="control"))
         complete(store, artifacts, claim(store, "plan"), {"round": 1})
+        settle_coverage(worker)  # seed the campaign
         lease = claim(store, "gather")
         agent = AgentCapability(ref="gather", model_ref="m", tool_refs=["scholarly.search"])
         registry = CapabilityRegistry(agents=[agent], tools=[ToolCapability(ref="scholarly.search", evidence_json=True)])

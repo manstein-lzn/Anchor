@@ -103,7 +103,9 @@ def test_preflight_skips_expensive_reviewer_and_enters_revision(tmp_path):
     try:
         asyncio.run(control.execute_once(worker_id="control"))
         complete(store, artifacts, claim(store, 'plan'), {'round': 1})
+        asyncio.run(control.execute_once(worker_id="control"))  # coverage seed
         complete(store, artifacts, claim(store, 'gather'), ledger())
+        asyncio.run(control.execute_once(worker_id="control"))  # coverage -> write
         work = {'manuscript': manuscript(), 'thesis': 't'}
         complete(store, artifacts, claim(store, 'write'), work)
         gateway = Gateway([])
@@ -112,7 +114,7 @@ def test_preflight_skips_expensive_reviewer_and_enters_revision(tmp_path):
                  'request': {'minimum_sources': 1, 'minimum_reads': 0}})
         assert gateway.calls == 0
         asyncio.run(control.execute_once(worker_id="control"))
-        assert claim(store, 'gather').node_id == 'gather'
+        assert claim(store, 'plan').node_id == 'plan', 'an evidence gap returns to planning'
     finally:
         store.close()
 
@@ -122,7 +124,9 @@ def test_control_validation_error_becomes_failed_state(tmp_path):
     try:
         asyncio.run(control.execute_once(worker_id="control"))
         complete(store, artifacts, claim(store, 'plan'), {'round': 1})
+        asyncio.run(control.execute_once(worker_id="control"))  # coverage seed
         complete(store, artifacts, claim(store, 'gather'), ledger())
+        asyncio.run(control.execute_once(worker_id="control"))  # coverage -> write
         complete(store, artifacts, claim(store, 'write'), {'manuscript': manuscript(), 'thesis': 't'})
         complete(store, artifacts, claim(store, 'review'), {'verdict': 'invalid'})
         with pytest.raises(ValueError):
@@ -170,7 +174,9 @@ def test_revision_budget_parks_changing_drafts_after_three_rounds(tmp_path):
     try:
         asyncio.run(control.execute_once(worker_id='control'))
         complete(store, artifacts, claim(store, 'plan'), {'round': 1})
+        asyncio.run(control.execute_once(worker_id="control"))  # coverage seed
         complete(store, artifacts, claim(store, 'gather'), ledger())
+        asyncio.run(control.execute_once(worker_id="control"))  # coverage -> write
         for round_number in range(3):
             complete(store, artifacts, claim(store, 'write'), {
                 'manuscript': manuscript() + str(round_number), 'thesis': 't'})
@@ -348,7 +354,9 @@ def test_more_than_three_revision_rounds_continue_without_hidden_cap(tmp_path):
     try:
         asyncio.run(control.execute_once(worker_id="control"))
         complete(store, artifacts, claim(store, "plan"), {"round": 1})
+        asyncio.run(control.execute_once(worker_id="control"))  # coverage seed
         complete(store, artifacts, claim(store, "gather"), ledger())
+        asyncio.run(control.execute_once(worker_id="control"))  # coverage -> write
         for round_number in range(4):
             complete(store, artifacts, claim(store, "write"),
                      {"manuscript": manuscript() + str(round_number), "thesis": "t"})
@@ -463,7 +471,9 @@ def test_transient_error_after_many_cycles_uses_same_recovery_semantics(tmp_path
     try:
         asyncio.run(control.execute_once(worker_id="control"))
         complete(store, artifacts, claim(store, "plan"), {"round": 1})
+        asyncio.run(control.execute_once(worker_id="control"))  # coverage seed
         complete(store, artifacts, claim(store, "gather"), ledger())
+        asyncio.run(control.execute_once(worker_id="control"))  # coverage -> write
         # several completed business cycles first
         for round_number in range(3):
             complete(store, artifacts, claim(store, "write"),

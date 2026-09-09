@@ -3,7 +3,7 @@
   "name": "Academic Literature Review",
   "entry_node_id": "start",
   "metadata": {
-    "purpose": "Plan, gather evidence, write a reader-facing survey, then review substance and craft"
+    "purpose": "Plan, gather evidence in rounds until saturation, write a reader-facing survey, review substance and craft"
   },
   "nodes": [
     {
@@ -21,9 +21,19 @@
       }
     },
     {
+      "id": "coverage",
+      "type": "loop",
+      "name": "Merge rounds and decide saturation",
+      "exit_condition": "output.decision == 'write'",
+      "metadata": {
+        "context_mode": "full",
+        "behavior_ref": "academic.coverage_gate"
+      }
+    },
+    {
       "id": "gather",
       "type": "agent",
-      "name": "Search, read and record evidence",
+      "name": "Search, chase citations, read, record one round",
       "agent_ref": "agents.academic.gatherer",
       "metadata": {
         "context_mode": "full"
@@ -51,11 +61,11 @@
       "id": "check",
       "type": "loop",
       "name": "Evidence and craft gate",
+      "exit_condition": "output.review.verdict == 'pass' || output.review.verdict == 'blocked'",
       "metadata": {
         "context_mode": "full",
         "behavior_ref": "academic.review_gate"
-      },
-      "exit_condition": "output.review.verdict == 'pass' || output.review.verdict == 'blocked'"
+      }
     },
     {
       "id": "needs_input",
@@ -85,7 +95,7 @@
     },
     {
       "source": "plan",
-      "target": "gather",
+      "target": "coverage",
       "input_mapping": {
         "plan": "outputs.plan",
         "request": "inputs"
@@ -93,11 +103,32 @@
     },
     {
       "source": "gather",
-      "target": "write",
+      "target": "coverage",
       "input_mapping": {
-        "evidence": "outputs.gather",
+        "round_ledger": "outputs.gather",
         "plan": "outputs.plan",
         "request": "inputs"
+      }
+    },
+    {
+      "source": "coverage",
+      "target": "gather",
+      "condition": "output.decision == 'continue'",
+      "input_mapping": {
+        "covered": "outputs.coverage.covered",
+        "feedback": "outputs.coverage",
+        "plan": "outputs.coverage.plan",
+        "request": "outputs.coverage.request"
+      }
+    },
+    {
+      "source": "coverage",
+      "target": "write",
+      "condition": "output.decision == 'write'",
+      "input_mapping": {
+        "evidence": "outputs.coverage.ledger",
+        "plan": "outputs.coverage.plan",
+        "request": "outputs.coverage.request"
       }
     },
     {
@@ -105,7 +136,7 @@
       "target": "review",
       "input_mapping": {
         "manuscript": "outputs.write",
-        "evidence": "outputs.gather",
+        "evidence": "outputs.coverage.ledger",
         "plan": "outputs.plan",
         "request": "inputs"
       }
@@ -116,18 +147,17 @@
       "input_mapping": {
         "review": "outputs.review",
         "manuscript": "outputs.write",
-        "evidence": "outputs.gather",
+        "evidence": "outputs.coverage.ledger",
         "plan": "outputs.plan",
         "request": "inputs"
       }
     },
     {
       "source": "check",
-      "target": "gather",
+      "target": "plan",
       "condition": "output.review.verdict == 'revise' && output.review.target == 'evidence'",
       "input_mapping": {
         "feedback": "outputs.check",
-        "plan": "outputs.check.plan",
         "request": "outputs.check.request"
       }
     },
