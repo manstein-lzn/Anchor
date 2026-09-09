@@ -60,6 +60,20 @@ declared per `ToolCapability`, not hardcoded per tool name.
 This keeps academic policy a plugin: the generic worker no longer imports a
 domain module or branches on a role string.
 
+## Content plane (design proposal)
+
+Anchor today has one source of truth: Canonical State and its projections, where
+node output is an immutable artifact blob. Supporting code-development work
+requires a second plane — a durable, versioned, executable workspace — without
+losing replayability or audit.
+
+`WORKSPACE.md` defines the proposed two-plane boundary: the control plane owns
+"what happened" (events, leases, decisions, operations), the content plane owns
+"what exists" (git-versioned workspace, immutable artifacts), and the two are
+linked by a pinned `content_ref`. That document is a design proposal awaiting the
+external research in `docs/AGENT_ARCHITECTURE_RESEARCH_BRIEF.md`; no
+implementation starts before the boundary is agreed.
+
 ## Build-versus-assemble boundary
 
 ```text

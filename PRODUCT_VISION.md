@@ -55,6 +55,11 @@ For every published graph, Anchor must make it possible to answer:
 - A run is pinned to graph, runtime, policy, model, skill, and tool versions.
 - Canonical State and append-only events are the recovery source; context and memory
   are projections with provenance and retention rules.
+  > **Under revision (see `WORKSPACE.md`).** Introducing a durable content plane
+  > (a versioned, executable workspace) means "what happened" and "what exists"
+  > need separate recovery sources linked by a pinned content reference. The
+  > exact wording is pending the architecture research; the requirement that any
+  > unresolvable reference fails closed rather than degrading silently is not.
 - Every side effect has an operation id, idempotency semantics, authorization, and an
   audit record.
 - Long waits release workers and resume from durable state; UI disconnects do not
