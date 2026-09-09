@@ -54,6 +54,21 @@ async def _resolver(store, run_id: UUID, node_id: str, memory: MemoryStore | Non
     return resolved.node.agent_ref, prompt, resolved.node.id, resolved.snapshot
 
 
+def _workspace_toolset(store, settings):
+    """Native workspace tools, with a sandbox for workspace.exec."""
+    from anchor.runtime.sandbox import BubblewrapWorkspaceSandbox, SubprocessWorkspaceSandbox
+    from anchor.runtime.workspace_tools import WorkspaceToolset
+    from anchor.runtime.workspaces import WorkspaceManager
+    try:
+        sandbox = BubblewrapWorkspaceSandbox()
+    except RuntimeError:
+        logging.getLogger("anchor.worker").warning(
+            "bubblewrap unavailable; workspace.exec falls back to dev subprocess")
+        sandbox = SubprocessWorkspaceSandbox()
+    manager = WorkspaceManager(store, root=settings.workspace_root)
+    return WorkspaceToolset(store, manager, sandbox=sandbox)
+
+
 async def serve() -> None:
     from anchor.runtime.settings import AnchorSettings
 
@@ -80,7 +95,9 @@ async def serve() -> None:
         logger = logging.getLogger("anchor.worker")
         logger.warning("bubblewrap unavailable; tool execution falls back to dev subprocess")
         backend = SubprocessBackend()
-    tool_loop = AgentToolLoop(ToolGateway(store, registry, artifacts, backend), artifacts)
+    workspace_tools = _workspace_toolset(store, settings)
+    tool_loop = AgentToolLoop(ToolGateway(store, registry, artifacts, backend), artifacts,
+                              native=workspace_tools)
     behaviors = BehaviorRegistry()
     register_academic_behaviors(behaviors)
     worker = AgentNodeWorker(store, registry, gateways, sink, tool_loop=tool_loop,

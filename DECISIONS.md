@@ -684,3 +684,26 @@ refinement and is recorded as such in `WORKSPACE.md`.
 Fault injection for all five windows runs in `tests/test_content_commit.py`; the
 two invariants it pins are that a control commit never runs twice and an
 unavailable revision is never committed.
+
+## ADR-032: Workspace tools are native, not gateway tools
+
+An agent needs to read and write the workspace it is bound to. Routing those
+operations through the sandbox gateway would either couple the gateway to the
+workspace manager or bypass the workspace ledger, so they are *native* tools:
+the kernel executes them and the workspace manager commits and audits every
+mutation.
+
+- `WorkspaceToolset` provides `workspace.read`, `workspace.write`,
+  `workspace.list` and `workspace.exec`. A node binds a workspace through
+  `metadata.workspace_id`; a node without one cannot use the tools.
+- `AgentToolLoop` consults native handlers before the gateway. Gateway tools are
+  external commands recorded in the tool-operation ledger; native tools are
+  in-process mutations recorded in the workspace ledger. The two ledgers stay
+  separate on purpose, and a workspace write never appears as a tool operation.
+- `workspace.exec` materializes the current revision and runs an allowlisted
+  command read-only (ADR-029), so inspection cannot mutate the workspace.
+
+This is the agent-visible capability. Committing a node's *output* as a workspace
+revision through the prepared/commit protocol, and reconciling that window in
+the supervisor, is the next slice; the tools already produce audited revisions
+today.

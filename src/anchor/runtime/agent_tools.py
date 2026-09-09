@@ -20,6 +20,7 @@ from uuid import uuid5
 from anchor.runtime.capabilities import CapabilityRegistryError, AgentCapability, ToolCapability
 from anchor.runtime.model_gateway import ModelGateway, ModelResponse, ToolFunction
 from anchor.runtime.tool_gateway import ToolDenied, ToolGateway
+from anchor.runtime.workspace import WorkspaceError
 
 RETRY_CONTEXT_CHAR_BUDGET = 80_000
 PRIOR_EVIDENCE_LIMIT = 30
@@ -43,9 +44,12 @@ def _truncate(value: Any, *, chars: int | None, list_limit: int, note: str) -> A
 class AgentToolLoop:
     """Binds model tool calls to gateway execution for one worker process."""
 
-    def __init__(self, tools: ToolGateway, artifacts) -> None:
+    def __init__(self, tools: ToolGateway, artifacts, *, native=None) -> None:
         self.tools = tools
         self.artifacts = artifacts
+        # Native tools run in the kernel (for example workspace mutations) and
+        # keep their own ledger; gateway tools run in a sandbox.
+        self.native = native
 
     def _capability(self, tool_ref: str) -> ToolCapability | None:
         try:
@@ -96,6 +100,14 @@ class AgentToolLoop:
                     state["total"] += 1
                     state["by_tool"][_ref] = tool_count + 1
                     operation_id = uuid5(lease.claim_id, _ref + ":" + str(state["seq"]))
+                if self.native is not None and self.native.handles(_ref):
+                    try:
+                        async with concurrency:
+                            return await asyncio.to_thread(
+                                self.native.execute, lease=lease, tool_ref=_ref,
+                                arguments=arguments)
+                    except WorkspaceError as exc:
+                        return "TOOL FAILED [workspace_error]: " + str(exc)
                 try:
                     async with concurrency:
                         result = await asyncio.to_thread(self.tools.execute,

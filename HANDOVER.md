@@ -4,6 +4,17 @@
 
 本次交接核对时间：`2026-09-08 22:00 CST`；Verifier 收尾与执行策略会话完成下述验收并更新本文。
 
+## W1.3：原生工作区工具（2026-09-09，ADR-032）
+
+- `WorkspaceToolset`：`workspace.read/write/list/exec`，节点通过 `metadata.workspace_id` 绑定；
+  未声明的节点拒绝使用。
+- `AgentToolLoop` 优先走 native handler，再走网关；**工作区写入进工作区账本，不进工具操作账本**
+  （两者刻意分离，测试断言 `list_tool_operations == []`）。
+- `workspace.exec` 复用 ADR-029 的只读沙箱。
+- worker_service 已接线（含 bwrap 缺失时的开发回退）。
+- 证据：`tests/test_workspace_tools.py` 5 passed（读/写/列/执行、无绑定拒绝、工具循环路由）；
+  门禁绿（ruff C901 13、mypy 97）；架构测试绿。
+
 ## W1.2：提交/对账协议（2026-09-09，ADR-031）
 
 - `prepared_revisions`（migration `0020_prepared_revisions`）：freeze 与事件提交之间的持久窗口。
