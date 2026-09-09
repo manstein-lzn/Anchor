@@ -21,6 +21,7 @@ class AnchorSettings(BaseSettings):
     database_url: str | None = None
     runtime_config: str = ".local/runtime.json"
     artifact_root: str = ".local/artifacts"
+    workspace_root: str = ".local/workspaces"
     memory_path: str = ".local/memory.jsonl"
     api_token: str | None = None
     worker_id: str = "anchor-worker"

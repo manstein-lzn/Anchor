@@ -25,7 +25,7 @@ from anchor.state.errors import AdmissionConflict, ConcurrencyConflict, GraphVer
 from anchor.state.relational import RelationalStateStore
 from anchor.runtime.config import load_runtime_config
 from anchor.runtime.context import canonical_json
-from anchor.domain.project import Project
+from anchor.api.routes_content import register_content_routes
 from anchor.runtime.settings import AnchorSettings
 from anchor.runtime.secrets import ChainedSecretProvider, EnvironmentSecretProvider, JsonFileSecretProvider, SecretUnavailable
 from anchor.runtime.memory import LocalMemoryStore, MemoryRecord
@@ -84,14 +84,6 @@ class LeaseRecovery(DomainModel):
 class RunControl(DomainModel):
     reason: str = Field(min_length=1, max_length=2000)
     actor: str = Field(default="operator", min_length=1, max_length=200)
-
-
-class ProjectWrite(DomainModel):
-    project_id: str = Field(min_length=1, max_length=200)
-    name: str = Field(min_length=1, max_length=200)
-    root: str = Field(min_length=1, max_length=1000)
-    backend: str = Field(default="git", pattern=r"^[a-z][a-z0-9_-]*$")
-    default_revision: str | None = Field(default=None, max_length=200)
 
 
 class StorageBudget(DomainModel):
@@ -269,25 +261,7 @@ def create_app(store: RelationalStateStore | None = None, token: str | None = No
                            "model_ref": item.model_ref} for item in config.verifiers],
         }
 
-    @app.post("/api/projects", response_model=Project, dependencies=auth)
-    def register_project(body: ProjectWrite, db: DB):
-        """Register a read-only content source; registration never writes to it."""
-        from anchor.domain.project import Project as ProjectModel
-        from anchor.runtime.workspace import WorkspaceError, validate_project_root
-        project = ProjectModel(**body.model_dump())
-        try:
-            validate_project_root(project.root, project.backend)
-        except WorkspaceError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-        return db.create_project(project)
-
-    @app.get("/api/projects", response_model=list[Project], dependencies=auth)
-    def projects(db: DB):
-        return db.list_projects()
-
-    @app.get("/api/projects/{project_id}", response_model=Project, dependencies=auth)
-    def project(project_id: str, db: DB):
-        return required(db.get_project(project_id))
+    register_content_routes(app, auth=auth, db=DB, required=required)
 
     @app.get("/api/graphs/ir", dependencies=auth)
     def graph_ir():

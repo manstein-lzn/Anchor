@@ -13,11 +13,13 @@ from .graphs import GraphStoreMixin
 from .operations import OperationStoreMixin
 from .progress import ProgressStoreMixin
 from .projects import ProjectStoreMixin
+from .workspaces import WorkspaceStoreMixin
 from .retention import RetentionStoreMixin
 from .storage import StorageStoreMixin
 
 
 class RelationalStateStore(RetentionStoreMixin, StorageStoreMixin, ProjectStoreMixin,
+                           WorkspaceStoreMixin,
                            ProgressStoreMixin, OperationStoreMixin,
                            CheckpointStoreMixin, ExecutionStoreMixin,
                            GraphStoreMixin, StoreBase):

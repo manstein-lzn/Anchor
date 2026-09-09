@@ -76,7 +76,7 @@ class ContentRef(BaseModel):
             if not _REVISION_RE.match(self.revision):
                 raise ContentRefError(f"revision {self.revision!r} is not a valid immutable id")
             if self.path is not None:
-                _validate_path(self.path)
+                validate_workspace_path(self.path)
             if self.artifact_digest is not None:
                 raise ContentRefError("workspace reference must not carry an artifact digest")
         return self
@@ -96,7 +96,7 @@ class ContentRef(BaseModel):
         return f"{base}/{self.path}" if self.path else base
 
 
-def _validate_path(path: str) -> None:
+def validate_workspace_path(path: str) -> None:
     if not path or path.startswith("/") or "\x00" in path or len(path) > 1000:
         raise ContentRefError("workspace path must be a non-empty relative path")
     parts = path.split("/")

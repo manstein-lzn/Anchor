@@ -45,6 +45,29 @@ retention_audit = sa.Table("retention_audit", metadata,
     sa.Column("freed_bytes", sa.BigInteger, nullable=False),
     sa.Column("detail", json_type, nullable=False))
 
+workspaces = sa.Table("workspaces", metadata,
+    sa.Column("workspace_id", sa.String(200), primary_key=True),
+    sa.Column("project_id", sa.String(200), nullable=False),
+    sa.Column("base_revision", sa.String(200), nullable=False),
+    sa.Column("branch", sa.String(300), nullable=False),
+    sa.Column("path", sa.String(1000), nullable=False),
+    sa.Column("state", sa.String(32), nullable=False),
+    sa.Column("current_revision", sa.String(200)),
+    timestamp("created_at"), timestamp("updated_at"))
+
+workspace_operations = sa.Table("workspace_operations", metadata,
+    identifier("operation_id", primary_key=True),
+    sa.Column("workspace_id", sa.String(200), nullable=False),
+    sa.Column("kind", sa.String(32), nullable=False),
+    sa.Column("path", sa.String(1000)),
+    sa.Column("before_revision", sa.String(200)),
+    sa.Column("after_revision", sa.String(200)),
+    sa.Column("content_hash", sa.String(64)),
+    sa.Column("actor", sa.String(200), nullable=False),
+    timestamp("created_at"))
+sa.Index("ix_workspace_operations_workspace_id", workspace_operations.c.workspace_id,
+         workspace_operations.c.created_at)
+
 projects = sa.Table("projects", metadata,
     sa.Column("project_id", sa.String(200), primary_key=True),
     sa.Column("name", sa.String(200), nullable=False),

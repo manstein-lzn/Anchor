@@ -863,3 +863,45 @@ def test_project_registration_is_read_only_and_validated(client, tmp_path):
         "project_id": "bad", "name": "Bad", "root": str(plain)})
     assert refused.status_code == 422
     assert "not a git repository" in refused.text
+
+
+def test_workspace_api_forks_writes_freezes_and_archives(client, tmp_path, monkeypatch):
+    import subprocess
+
+    api, store = client
+    monkeypatch.setenv("ANCHOR_WORKSPACE_ROOT", str(tmp_path / "worktrees"))
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "readme.md").write_text("base\n", encoding="utf-8")
+    for args in (["init", "-q"], ["config", "user.email", "t@example.com"],
+                 ["config", "user.name", "Test"], ["add", "-A"], ["commit", "-qm", "init"]):
+        subprocess.run(["git", "-C", str(root), *args], check=True, capture_output=True)
+    sha = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"],
+                         capture_output=True, text=True, check=True).stdout.strip()
+    assert api.post("/api/projects", json={
+        "project_id": "p1", "name": "P", "root": str(root)}).status_code == 200
+
+    created = api.post("/api/workspaces", json={
+        "project_id": "p1", "base_revision": sha, "workspace_id": "ws-api"})
+    assert created.status_code == 200, created.text
+    assert created.json()["state"] == "active"
+
+    written = api.post("/api/workspaces/ws-api/write", json={
+        "path": "src/app.py", "content": "print('x')\n", "actor": "agent"})
+    assert written.status_code == 200, written.text
+    revision = written.json()["after_revision"]
+    assert revision != sha
+
+    current = api.get("/api/workspaces/ws-api").json()
+    assert current["current_revision"] == revision
+    operations = api.get("/api/workspaces/ws-api/operations").json()
+    assert [item["kind"] for item in operations] == ["create", "write"]
+
+    frozen = api.post("/api/workspaces/ws-api/freeze", json={"actor": "operator"})
+    assert frozen.status_code == 200 and frozen.json()["state"] == "frozen"
+    refused = api.post("/api/workspaces/ws-api/write", json={
+        "path": "late.txt", "content": "x", "actor": "agent"})
+    assert refused.status_code == 422
+
+    archived = api.post("/api/workspaces/ws-api/archive", json={"actor": "operator"})
+    assert archived.status_code == 200 and archived.json()["state"] == "archived"

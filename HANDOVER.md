@@ -4,6 +4,19 @@
 
 本次交接核对时间：`2026-09-08 22:00 CST`；Verifier 收尾与执行策略会话完成下述验收并更新本文。
 
+## W1.1：可写工作区（2026-09-09，ADR-030）
+
+- `workspaces` + `workspace_operations`（migration `0019_workspaces`）：生命周期
+  （active/frozen/archived）+ 操作账本 + 事件流。
+- `WorkspaceManager` 是唯一写入口：`create` 用 `git worktree add -b anchor/<id>` fork；
+  `write_text`/`delete` **立即提交**并原子写入 ledger + `workspace.*` 事件；`freeze` 提交剩余
+  变更并 pin `current_revision`；`archive` 移除 worktree 但保留分支（revision 仍可达）。
+- 路径校验防穿越与符号链接逃逸；内容有大小上限；冻结/归档后拒绝写入。
+- 源仓库只增加一个分支，工作树不变。
+- `api/routes_content.py`：project/workspace 路由从组合根拆出（保持模块与复杂度预算）。
+- 证据：`tests/test_workspaces.py` 7 passed、workspace API 1 passed；门禁绿
+  （ruff C901 13、mypy 97）；架构测试绿。
+
 ## W0.3：只读沙箱执行（2026-09-09，ADR-029）
 
 - `GitWorkspaceBackend.materialize`：`git archive` 抽取到临时目录，**不碰工作树/索引/config**；

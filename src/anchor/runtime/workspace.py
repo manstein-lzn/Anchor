@@ -147,8 +147,23 @@ class GitWorkspaceBackend:
             raise WorkspaceError(f"path {path!r} is not a file at {revision}") from exc
 
 
+def resolve_source(store, workspace_id: str) -> tuple[str, str]:
+    """Map a reference id to a repository root and backend.
+
+    An id may name a run-scoped workspace (which belongs to a project) or a
+    project directly, so a read-only project and a workspace share one reference
+    form.
+    """
+    workspace = store.get_workspace(workspace_id)
+    project_id = workspace.project_id if workspace is not None else workspace_id
+    project = store.get_project(project_id)
+    if project is None:
+        raise WorkspaceError(f"unknown workspace/project {workspace_id!r}")
+    return project.root, project.backend
+
+
 class WorkspaceResolver:
-    """Resolve ``workspace://`` references against registered projects."""
+    """Resolve ``workspace://`` references against workspaces or projects."""
 
     kind = ContentKind.WORKSPACE
 
@@ -157,12 +172,13 @@ class WorkspaceResolver:
         self.max_bytes = max_bytes
 
     def _backend(self, ref: ContentRef) -> GitWorkspaceBackend:
-        project = self.store.get_project(ref.workspace_id or "")
-        if project is None:
-            raise ContentUnavailable(ref, f"unknown workspace/project {ref.workspace_id!r}")
-        if project.backend != "git":
-            raise ContentUnavailable(ref, f"unsupported backend {project.backend!r}")
-        return GitWorkspaceBackend(project.root, max_bytes=self.max_bytes)
+        try:
+            root, backend = resolve_source(self.store, ref.workspace_id or "")
+        except WorkspaceError as exc:
+            raise ContentUnavailable(ref, str(exc)) from exc
+        if backend != "git":
+            raise ContentUnavailable(ref, f"unsupported backend {backend!r}")
+        return GitWorkspaceBackend(root, max_bytes=self.max_bytes)
 
     def exists(self, ref: ContentRef) -> bool:
         if ref.kind is not self.kind or not ref.path:
@@ -198,12 +214,13 @@ def execute_in_workspace(store, ref: ContentRef, command: Sequence[str], *,
     """
     if ref.kind is not ContentKind.WORKSPACE:
         raise ContentUnavailable(ref, "execute_in_workspace requires a workspace reference")
-    project = store.get_project(ref.workspace_id or "")
-    if project is None:
-        raise ContentUnavailable(ref, f"unknown workspace/project {ref.workspace_id!r}")
-    if project.backend != "git":
-        raise ContentUnavailable(ref, f"unsupported backend {project.backend!r}")
-    backend = GitWorkspaceBackend(project.root)
+    try:
+        root, backend_name = resolve_source(store, ref.workspace_id or "")
+    except WorkspaceError as exc:
+        raise ContentUnavailable(ref, str(exc)) from exc
+    if backend_name != "git":
+        raise ContentUnavailable(ref, f"unsupported backend {backend_name!r}")
+    backend = GitWorkspaceBackend(root)
     with tempfile.TemporaryDirectory(prefix="anchor-workspace-") as directory:
         backend.materialize(ref.revision or "", Path(directory))
         spec = SandboxSpec(workspace=Path(directory), command=tuple(command),

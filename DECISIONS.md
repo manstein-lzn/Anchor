@@ -625,3 +625,31 @@ the network and runs an allowlisted command with a timeout and an output cap.
 This is deliberately narrower than the W1 write path: it proves the
 `SandboxProvider` boundary with zero mutation risk before any workspace can be
 written.
+
+## ADR-030: Writable workspaces are run-scoped worktrees with a full ledger
+
+A workspace is where work happens, never a source of truth. Only the revisions it
+produces, once a control event references them, enter the recovery closure (I2).
+The workspace record therefore tracks a lifecycle and a lineage, not the bytes.
+
+- `workspaces` and `workspace_operations` (0019) hold the lifecycle and the
+  audit trail. A workspace is `active`, `frozen` or `archived`; only `active`
+  accepts writes.
+- `WorkspaceManager` is the only write path. `create` forks a git worktree on a
+  dedicated `anchor/<workspace_id>` branch; `write_text` and `delete` commit
+  immediately and record an operation plus a `workspace.*` event in one
+  transaction; `freeze` commits any remaining change and pins
+  `current_revision`; `archive` removes the worktree while keeping the branch so
+  the revisions stay reachable.
+- Paths are validated against traversal and symlink escape, and content has a
+  size cap. A frozen or archived workspace refuses writes.
+- The ledger row and its event are written atomically, so a mutation cannot be
+  half-audited. If the process dies between the git commit and the ledger write,
+  the revision is an orphan that the W1.2 reconciler will resolve; the workspace
+  revision is never guessed from the live tree.
+- Creating a worktree adds a branch to the source repository but never touches
+  its working tree.
+
+The content-plane routes moved to `api/routes_content.py` to keep the
+composition root inside its module budget, and were split into project and
+workspace registrars to stay inside the complexity budget.
