@@ -68,6 +68,7 @@ read-only sandbox.
 ./scripts/validate_workspace.sh          # single node: fix a bug, run its test
 ./scripts/validate_workspace_lineage.sh  # two nodes: coder -> reviewer, lineage
 ./scripts/validate_workspace_parallel.sh # parallel branches, explicit fork + join merge
+.venv/bin/python scripts/validate_mcp.py  # MCP client: author, run, observe, gate
 ```
 
 It requires the dev services and a real model profile. It is the check that

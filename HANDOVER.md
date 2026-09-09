@@ -13,6 +13,8 @@
 - 失败 → `isError: true` + 稳定 code/status/path/retryable。
 - `AnchorClient` 支持 `ANCHOR_API_URL`（MCP 客户端用环境变量配置）。
 - 入口：`anchor-mcp`；证据：`tests/test_mcp.py` 9 passed（含 live API 端到端）。
+- **真实 MCP 客户端验证**：`scripts/validate_mcp.py` 18/18 —— 子进程启动 `anchor-mcp`，
+  走 stdio JSON-RPC：握手 → 装图 → 注册触发器 → 起 run → 等到完成 → 读事件/节点 → 拒绝审批 → 干净退出。零模型成本。
 
 ## W3.2 并行分支（2026-09-09，ADR-038）
 
