@@ -600,3 +600,28 @@ without any path that could mutate a user's repository.
 The store mixins now declare the members the composition root supplies through
 `_StoreHost`, which removed 140 pre-existing mypy errors and keeps new mixins
 type-checked.
+
+## ADR-029: Workspace execution is a read-only observation
+
+Running a command at a revision must not be able to change it, or "run the
+tests at the revision I verified" would stop being repeatable. Workspace
+execution therefore materializes the pinned tree, mounts it read-only, removes
+the network and runs an allowlisted command with a timeout and an output cap.
+
+- `GitWorkspaceBackend.materialize` uses `git archive` into a temporary
+  directory. It reads the object database and never touches the working tree,
+  the index or the config, so materializing cannot mutate the source repository.
+- `runtime/sandbox.py` defines the `WorkspaceSandbox` contract with a
+  bubblewrap implementation (no network via `--unshare-all`, read-only workspace
+  bind, scrubbed environment) and a clearly labelled subprocess fallback for
+  development. Writes fail with a read-only filesystem error rather than being
+  silently discarded.
+- Commands are an explicit allowlist checked before execution, never a shell
+  string. The default set is read-only inspection; a caller may widen it, and
+  the sandbox still has no network and no write access.
+- `execute_in_workspace` resolves the project, materializes, runs and removes the
+  temporary tree. Nothing about the run survives in the repository.
+
+This is deliberately narrower than the W1 write path: it proves the
+`SandboxProvider` boundary with zero mutation risk before any workspace can be
+written.

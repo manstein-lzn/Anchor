@@ -4,6 +4,16 @@
 
 本次交接核对时间：`2026-09-08 22:00 CST`；Verifier 收尾与执行策略会话完成下述验收并更新本文。
 
+## W0.3：只读沙箱执行（2026-09-09，ADR-029）
+
+- `GitWorkspaceBackend.materialize`：`git archive` 抽取到临时目录，**不碰工作树/索引/config**；
+  测试断言 materialize 前后 `git status --porcelain` 不变。
+- `runtime/sandbox.py`：`WorkspaceSandbox` 契约 + bubblewrap 实现（`--unshare-all` 无网络、
+  只读绑定、净化环境）+ 明确标注的 subprocess 开发回退。写入返回 read-only 错误而非静默丢弃。
+- 命令白名单在**执行前**校验，永不用 shell 字符串；默认仅只读检查命令。
+- `execute_in_workspace`：解析项目 → materialize → 运行 → 删除临时树，仓库无残留。
+- 证据：`tests/test_sandbox.py` 7 passed，其中 2 个真实 bubblewrap 用例验证只读与无网络。
+
 ## W0.2：只读内容源（2026-09-09，ADR-028）
 
 - `projects` 表（migration `0018_projects`）+ `POST/GET /api/projects`；注册时用

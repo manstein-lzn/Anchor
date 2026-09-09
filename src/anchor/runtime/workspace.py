@@ -8,14 +8,25 @@ live tree.
 
 from __future__ import annotations
 
+import io
 import os
 import re
 import subprocess
+import tarfile
+import tempfile
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Protocol
 
 from anchor.domain.content import ContentKind, ContentRef
 from anchor.runtime.content import ContentUnavailable
+from anchor.runtime.sandbox import (
+    DEFAULT_MAX_OUTPUT_BYTES,
+    DEFAULT_TIMEOUT_SECONDS,
+    SandboxResult,
+    SandboxSpec,
+    WorkspaceSandbox,
+)
 
 _HEX_REVISION_RE = re.compile(r"^[0-9a-f]{40}$|^[0-9a-f]{64}$")
 DEFAULT_MAX_BYTES = 1_000_000
@@ -31,6 +42,8 @@ class WorkspaceBackend(Protocol):
     def resolve_revision(self, revision: str) -> str: ...
 
     def list_paths(self, revision: str, prefix: str | None = None) -> list[str]: ...
+
+    def materialize(self, revision: str, destination: Path) -> None: ...
 
     def read_text(self, revision: str, path: str) -> str: ...
 
@@ -98,6 +111,19 @@ class GitWorkspaceBackend:
         except UnicodeDecodeError as exc:
             raise WorkspaceError(f"file {path!r} is not UTF-8 text") from exc
 
+    def materialize(self, revision: str, destination: Path) -> None:
+        """Extract a clean tree at ``revision`` into ``destination``.
+
+        ``git archive`` reads the object database and never touches the working
+        tree or the index, so materializing a revision cannot mutate the source
+        repository.
+        """
+        self.resolve_revision(revision)
+        data = self._git_bytes("archive", "--format=tar", revision)
+        destination.mkdir(parents=True, exist_ok=True)
+        with tarfile.open(fileobj=io.BytesIO(data)) as archive:
+            archive.extractall(destination, filter="data")
+
     def _git(self, *args: str) -> str:
         return self._git_bytes(*args).decode("utf-8", errors="strict").strip()
 
@@ -158,3 +184,28 @@ class WorkspaceResolver:
             if isinstance(exc, ContentUnavailable):
                 raise
             raise ContentUnavailable(ref, str(exc)) from exc
+
+
+def execute_in_workspace(store, ref: ContentRef, command: Sequence[str], *,
+                         sandbox: WorkspaceSandbox,
+                         timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
+                         max_output_bytes: int = DEFAULT_MAX_OUTPUT_BYTES) -> SandboxResult:
+    """Materialize ``ref`` and run an allowlisted command against it, read-only.
+
+    The materialized tree is temporary and removed afterwards, so executing a
+    command leaves no trace in the source repository and cannot mutate a
+    revision.
+    """
+    if ref.kind is not ContentKind.WORKSPACE:
+        raise ContentUnavailable(ref, "execute_in_workspace requires a workspace reference")
+    project = store.get_project(ref.workspace_id or "")
+    if project is None:
+        raise ContentUnavailable(ref, f"unknown workspace/project {ref.workspace_id!r}")
+    if project.backend != "git":
+        raise ContentUnavailable(ref, f"unsupported backend {project.backend!r}")
+    backend = GitWorkspaceBackend(project.root)
+    with tempfile.TemporaryDirectory(prefix="anchor-workspace-") as directory:
+        backend.materialize(ref.revision or "", Path(directory))
+        spec = SandboxSpec(workspace=Path(directory), command=tuple(command),
+                           timeout_seconds=timeout_seconds, max_output_bytes=max_output_bytes)
+        return sandbox.run(spec)
