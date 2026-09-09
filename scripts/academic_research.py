@@ -181,7 +181,7 @@ def main() -> None:
     start.add_argument("--language", default="Chinese")
     start.add_argument("--scope", default="")
     start.add_argument("--minimum-sources", type=int, default=8)
-    start.add_argument("--minimum-reads", type=int, default=3)
+    start.add_argument("--minimum-reads", type=int, default=8)
     start.add_argument("--idempotency-key", default=None)
     start.add_argument("--wait", action="store_true")
     status = commands.add_parser("status")

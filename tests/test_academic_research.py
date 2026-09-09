@@ -10,7 +10,8 @@ from anchor.domain.conditions import build_condition_context
 from anchor.domain.graph import GraphDefinition, GraphVersion, Trigger
 from anchor.runtime.academic import (REQUIRED_SECTIONS, VALIDITY_SECTIONS, craft_errors,
                                      register_academic_behaviors, structure_errors,
-                                     validate_agent_output, validate_manuscript)
+                                     unsupported_number_claims, validate_agent_output,
+                                     validate_manuscript)
 from anchor.runtime.behaviors import BehaviorRegistry
 from anchor.runtime.artifacts import LocalArtifactStore
 from anchor.runtime.capabilities import AgentCapability, CapabilityRegistry, ToolCapability
@@ -256,6 +257,22 @@ def test_structure_follows_the_converged_survey_skeleton():
     for section in REQUIRED_SECTIONS:
         assert section in manuscript()
     assert VALIDITY_SECTIONS[0] in manuscript()
+
+
+def test_result_numbers_must_rest_on_a_full_text_reading():
+    """An abstract reports a number without the detail that makes it checkable."""
+    claim = "# T\n\n## Abstract\n\nThe method is 1.85x faster [1].\n"
+    assert unsupported_number_claims(claim, set())
+    assert not unsupported_number_claims(claim, {1})
+    assert not unsupported_number_claims("# T\n\n## Abstract\n\nThe field grew after 2018 [1].", set())
+    assert not unsupported_number_claims("# T\n\n## Abstract\n\nThe method is 1.85x faster.", set())
+
+
+def test_abstract_page_reads_are_refused():
+    """An arXiv /abs/ page is the abstract the search already returned."""
+    from anchor.runtime.research_tools import ResearchRequest, ResearchToolError, read
+    with pytest.raises(ResearchToolError, match="abstract page"):
+        read(ResearchRequest(url="https://arxiv.org/abs/2104.04955v1"), timeout_seconds=5)
 
 
 def test_chinese_headings_satisfy_the_skeleton():

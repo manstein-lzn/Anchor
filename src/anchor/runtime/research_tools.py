@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from io import BytesIO
 import ipaddress
 import json
+import re
 import socket
 import threading
 import time
@@ -253,6 +254,14 @@ def search(request: ResearchRequest, *, timeout_seconds: float) -> dict:
 def read(request: ResearchRequest, *, timeout_seconds: float) -> dict:
     if not request.url:
         raise ValueError("scholarly.read requires url")
+    # An arXiv /abs/ page is the abstract, which the search result already
+    # contains. Reading it spends the read budget without adding evidence, so
+    # the adapter refuses it and points at the full text instead.
+    if re.match(r"https?://(?:www\.)?arxiv\.org/abs/", request.url):
+        raise ResearchToolError(
+            "abstract_page",
+            "arXiv /abs/ is the abstract page, not the paper; read "
+            "https://arxiv.org/pdf/<id> for the full text")
     url, content_type, body = fetch_public(request.url, timeout_seconds=timeout_seconds)
     page_count = None
     if "application/pdf" in content_type or body.startswith(b"%PDF-"):

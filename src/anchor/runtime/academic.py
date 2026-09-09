@@ -118,6 +118,11 @@ MAX_ABSTRACT_CHARS = 1800
 MAX_PARAGRAPH_CHARS = 1200
 MAX_METHODS_CHARS = 2500
 
+# A result number is a finding, not a year or a section index. An abstract
+# reports a number without the baseline, benchmark or measurement detail that
+# makes it checkable, so a numeric claim may only rest on a source read in full.
+RESULT_NUMBER = re.compile(r"\d+(?:\.\d+)?\s*(?:[x×倍]|%|个百分点)")
+
 
 def citation_numbers(text: str) -> set[int]:
     return {int(number) for group in re.findall(r"\[(\d+(?:\s*,\s*\d+)*)\]", text)
@@ -208,6 +213,23 @@ def craft_errors(manuscript: str) -> list[str]:
     return errors
 
 
+def unsupported_number_claims(manuscript: str, full_text: set[int]) -> list[str]:
+    """Every result number must rest on at least one source read in full."""
+    problems: list[str] = []
+    for sentence in re.split(r"(?<=[。；;\n])", manuscript):
+        cited = citation_numbers(sentence)
+        if not cited:
+            continue
+        prose = re.sub(r"\[\d+(?:\s*,\s*\d+)*\]", "", sentence)
+        if not RESULT_NUMBER.search(prose):
+            continue
+        if not cited & full_text:
+            problems.append(
+                "A result number rests only on sources read at abstract level; read the source "
+                f"in full or drop the number: {prose.strip()[:120]}")
+    return problems
+
+
 def _extract_work(snapshot: dict) -> dict:
     """Combine the writer's manuscript with the gatherer's evidence ledger."""
     manuscript, evidence = snapshot.get("manuscript"), snapshot.get("evidence")
@@ -239,6 +261,7 @@ def validate_manuscript(work: dict, *, operations, artifacts, minimum_sources: i
     used_ids: set[str] = set()
     used_numbers: set[int] = set()
     read_ids: set[str] = set()
+    read_numbers: set[int] = set()
     for source in records:
         if not isinstance(source, dict):
             errors.append("Source entries must be objects")
@@ -274,6 +297,7 @@ def validate_manuscript(work: dict, *, operations, artifacts, minimum_sources: i
                 canonical["read_ref"] = read_ref
                 canonical["read_truncated"] = reading.get("truncated", False)
                 read_ids.add(identity)
+                read_numbers.add(number)
             canonical_sources.append(canonical)
         except (OSError, ValueError, KeyError, TypeError) as exc:
             errors.append(f"Citation [{number}] evidence rejected: {exc}")
@@ -287,6 +311,7 @@ def validate_manuscript(work: dict, *, operations, artifacts, minimum_sources: i
         errors.append(f"Need at least {minimum_sources} distinct cited and retrieved sources")
     if len(read_ids) < minimum_reads:
         errors.append(f"Need at least {minimum_reads} source documents read beyond the search listing")
+    errors.extend(unsupported_number_claims(manuscript, read_numbers))
     target = "evidence" if errors else ("manuscript" if craft else "none")
     return (errors + craft, sorted(canonical_sources, key=lambda source: source["citation"]),
             target)
