@@ -733,3 +733,20 @@ downstream nodes consume a pinned tree rather than prose about one.
 
 A node without a declared workspace keeps the previous behaviour: the model text
 artifact is the output.
+
+## ADR-034: bubblewrap is the only sandbox backend; missing means disabled
+
+Isolation is a security boundary, not a feature to grow. bubblewrap is the
+smallest stable enforcement available: one unprivileged binary, no daemon, no
+container runtime to operate. Anchor therefore keeps exactly one backend and
+does not add containers, gVisor or microVMs until a concrete threat requires it.
+
+The important consequence is what happens when bubblewrap is absent. Previously
+`worker_service` fell back to an unisolated subprocess with a warning, which is a
+silent security downgrade. Now `workspace.exec` is disabled and reading/writing
+continues; the fallback backend remains in the tree labelled TEST ONLY and is
+never selected by production code. A missing sandbox must reduce capability, not
+silently reduce safety.
+
+This mirrors ADR-029: the sandbox is read-only and has no network, so `exec` is
+inspection rather than mutation.

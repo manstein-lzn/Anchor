@@ -373,7 +373,7 @@ agent × {
 | **W1.2** | 提交/对账协议 + prepared 窗口 + 故障注入（ADR-031） | ✅ 已完成 |
 | **W1.3** | 原生工作区工具：`read/write/list/exec` + 工具循环路由（ADR-032） | ✅ 已完成 |
 | **W1.4** | 节点输出 = 工作区 revision + supervisor 保守对账（ADR-033） | ✅ 已完成 |
-| **W2** | 执行沙箱强化（容器/microVM、网络白名单、密钥注入） | 中高 |
+| ~~W2~~ | 沙箱强化（容器/microVM）：**不做**。保持 bubblewrap 唯一后端，缺失即禁用 `exec`（ADR-034） | — |
 | **W1** | 单写者 + 冻结/提交协议（operation/commit/event） | 中 |
 | **W2** | exec 沙箱（网络白名单、资源上限、密钥注入） | 中高 |
 | **W3** | 并行 fork/merge（`require_clean`） | 高 |

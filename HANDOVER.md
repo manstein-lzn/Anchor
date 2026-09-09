@@ -4,6 +4,13 @@
 
 本次交接核对时间：`2026-09-08 22:00 CST`；Verifier 收尾与执行策略会话完成下述验收并更新本文。
 
+## 沙箱最小化（2026-09-09，ADR-034）
+
+- **不引入容器/microVM**。bubblewrap 是唯一后端（单二进制、无守护进程、无需运维）。
+- 关键修正：bwrap 缺失时**不再静默回退到无隔离 subprocess**，而是禁用 `workspace.exec`，
+  读写继续可用。`SubprocessWorkspaceSandbox` 明确标注 TEST ONLY，生产代码永不选择。
+- 原则：**缺失沙箱应降低能力，而不是降低安全性。**
+
 ## W1.4：节点输出 = 工作区 revision（2026-09-09，ADR-033）
 
 - 声明 `metadata.workspace_id` 的节点，其输出是**不可变工作区 revision**，不是模型文本：

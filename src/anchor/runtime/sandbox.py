@@ -121,10 +121,11 @@ class BubblewrapWorkspaceSandbox:
 
 
 class SubprocessWorkspaceSandbox:
-    """Development fallback: cwd and timeout only, NO isolation.
+    """TEST ONLY: cwd and timeout, NO isolation.
 
-    Never use it for untrusted commands. It exists so the sandbox contract is
-    testable where bubblewrap is unavailable.
+    It exists so the sandbox *contract* is testable where bubblewrap is not
+    available. Production code never selects it: `worker_service` disables
+    workspace.exec instead of degrading to an unisolated subprocess.
     """
 
     name = "subprocess"

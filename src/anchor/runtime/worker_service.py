@@ -55,16 +55,22 @@ async def _resolver(store, run_id: UUID, node_id: str, memory: MemoryStore | Non
 
 
 def _workspace_toolset(store, settings):
-    """Native workspace tools, with a sandbox for workspace.exec."""
-    from anchor.runtime.sandbox import BubblewrapWorkspaceSandbox, SubprocessWorkspaceSandbox
+    """Native workspace tools, with a sandbox for workspace.exec.
+
+    bubblewrap is the only enforcement backend: it is a single unprivileged
+    binary with no daemon, which is the smallest stable isolation available.
+    If it is missing, workspace.exec is disabled rather than silently degrading
+    to an unisolated subprocess; reading and writing still work.
+    """
+    from anchor.runtime.sandbox import BubblewrapWorkspaceSandbox
     from anchor.runtime.workspace_tools import WorkspaceToolset
     from anchor.runtime.workspaces import WorkspaceManager
     try:
         sandbox = BubblewrapWorkspaceSandbox()
     except RuntimeError:
         logging.getLogger("anchor.worker").warning(
-            "bubblewrap unavailable; workspace.exec falls back to dev subprocess")
-        sandbox = SubprocessWorkspaceSandbox()
+            "bubblewrap unavailable; workspace.exec is disabled (read/write remain available)")
+        sandbox = None
     manager = WorkspaceManager(store, root=settings.workspace_root)
     return manager, WorkspaceToolset(store, manager, sandbox=sandbox)
 
