@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from anchor.client import AnchorApiError, AnchorClient
+from anchor.domain.content import ARTIFACT_PREFIX
 
 PROTOCOL_VERSION = "2024-11-05"
 SERVER_NAME = "anchor"
@@ -193,8 +194,9 @@ def build_tools() -> list[Tool]:
         Tool("run_progress", "Progress observations for the run.", {"run_id": RUN_ID}, ("run_id",),
              lambda c, a: c.run_progress(a["run_id"])),
         Tool("list_waits", "Everything waiting for a human.", {}, (), lambda c, a: c.list_waits()),
-        Tool("read_artifact", "Read an artifact by content reference.",
-             {"ref": _str("artifact://sha256/<digest>")}, ("ref",),
+        Tool("read_artifact", "Read an artifact by the content reference a node "
+                              "output returned.",
+             {"ref": _str(f"content reference, e.g. {ARTIFACT_PREFIX}<digest>")}, ("ref",),
              lambda c, a: c.read_artifact(a["ref"])),
         # -- reconcile -----------------------------------------------------
         Tool("reconcile_operation", "Resolve an outcome_unknown side effect. Requires "

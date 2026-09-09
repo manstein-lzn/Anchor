@@ -17,7 +17,7 @@ SRC = ROOT / "src" / "anchor"
 # Layer index: a module may import its own layer or lower layers, never higher.
 LAYERS = {"domain": 0, "state": 1, "runtime": 2, "api": 3}
 # Top-level modules that are composition roots and may import anything.
-FREE_TOP_LEVEL = {"client.py", "cli.py", "__init__.py"}
+FREE_TOP_LEVEL = {"client.py", "cli.py", "mcp.py", "__init__.py"}
 
 # Content-reference prefixes must be parsed in one place, not sprinkled around.
 CONTENT_REF_PREFIXES = ("artifact://", "workspace://")
