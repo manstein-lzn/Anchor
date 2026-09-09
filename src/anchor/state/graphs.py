@@ -136,12 +136,17 @@ class GraphStoreMixin:
             if not updated.rowcount:
                 raise KeyError(trigger_id)
             return decode(Trigger, connection.execute(sa.select(s.triggers).where(s.triggers.c.id == str(trigger_id))).mappings().one())
-    def list_runs(self, limit: int = 50, offset: int = 0, *, graph_id: str | None = None) -> list[Run]:
+    def list_runs(self, limit: int = 50, offset: int = 0, *, graph_id: str | None = None,
+                  include_archived: bool = False, statuses: list[str] | None = None) -> list[Run]:
         with self.engine.connect() as connection:
             query = sa.select(s.runs)
             if graph_id is not None:
                 query = query.join(s.graph_versions, s.runs.c.graph_version_id == s.graph_versions.c.graph_version_id).where(
                     s.graph_versions.c.graph_id == graph_id)
+            if not include_archived:
+                query = query.where(s.runs.c.archived_at.is_(None))
+            if statuses:
+                query = query.where(s.runs.c.status.in_(statuses))
             rows = connection.execute(query.order_by(s.runs.c.created_at.desc(), s.runs.c.id)
                                       .limit(limit).offset(offset)).mappings()
             return [decode(Run, row) for row in rows]

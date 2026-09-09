@@ -37,12 +37,18 @@ triggers = sa.Table("triggers", metadata,
     sa.Column("timezone", sa.Text, nullable=False), sa.Column("filter_expression", sa.Text),
     sa.Column("idempotency_field", sa.Text), sa.Column("webhook_secret_ref", sa.String(200)))
 
+storage_budgets = sa.Table("storage_budgets", metadata,
+    sa.Column("scope", sa.String(200), primary_key=True),
+    sa.Column("bytes", sa.BigInteger),
+    timestamp("updated_at"))
+
 runs = sa.Table("runs", metadata,
     identifier(primary_key=True), identifier("task_id", sa.ForeignKey(tasks.c.id), nullable=False),
     identifier("graph_version_id", sa.ForeignKey(graph_versions.c.graph_version_id), nullable=False),
     sa.Column("status", sa.String(32), nullable=False), sa.Column("current_phase", sa.Text, nullable=False),
     sa.Column("revision", sa.Integer, nullable=False), sa.Column("last_event_sequence", sa.Integer, nullable=False),
     sa.Column("workflow_version", sa.Text, nullable=False), sa.Column("context_generation", sa.Integer, nullable=False),
+    sa.Column("archived_at", sa.DateTime(timezone=True)),
     timestamp("created_at"), timestamp("updated_at"))
 
 node_runs = sa.Table("node_runs", metadata,

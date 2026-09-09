@@ -20,6 +20,19 @@
   Run Console 与图上执行面板。
 - 证据：全量 293 passed + 62 skipped；前端 Vitest 31、Playwright 11/11。
 
+## 存储预算与历史整理（2026-09-09，ADR-024）
+
+- Run 归档：`archived_at` 可逆标记，仅终止态可归档；默认列表隐藏，按 id 与所有子集合仍可查；
+  `POST /api/runs/{id}/archive|unarchive`；列表支持 `status` / `include_archived` / 前端搜索。
+- 存储预算：`storage_budgets` 表（migration `0016_storage_budgets`）保存全局与每图预算，
+  `GET/PUT /api/storage/budget` 运行时可调，无需重启。`GET /api/storage` 只读报告真实占用
+  （数据库文件 + 产物目录），产物按图归因并区分 exclusive/shared（内容寻址跨图共享）。
+- 预算只是监控目标，**绝不终止正在运行的节点**，也**不会自动删除**；自动淘汰、产物 GC 与
+  保留窗口留待后续，且必须策略化、可审计。
+- Web 新增“存储”视图：实时调整全局/每图预算并查看占用。
+- 证据：后端 307 passed + 66 skipped；PG 66 passed；前端 Vitest 31、Playwright 14/14；
+  迁移 head `0016_storage_budgets`。
+
 ## MVP 收尾：对账与运行控制（2026-09-09，ADR-023）
 
 - 副作用工具 `http.post`：`side_effect` 声明 + `owner_agent` + 已完成审批前置才执行；
@@ -105,8 +118,8 @@ Goal: 01a071a8-98b8-7591-8035-a9924a336424
 Goal state: paused（用户为切换 session 主动暂停，不是 blocked 或 complete）
 Web: http://127.0.0.1:5173
 API: http://127.0.0.1:8090
-Source migration head: 0014_recovery_schedule
-Local development DB revision: 0014_recovery_schedule
+Source migration head: 0016_storage_budgets
+Local development DB revision: 0016_storage_budgets
 Model profile: rightcode / gpt-5.6-luna / Responses API
 Current P0: Verifier 与执行策略已验收；下一步按优先级推进 Approval/UI、pause/resume 或 Loop 监督
 First test: .venv/bin/pytest -q tests/test_relational_store.py -m 'not postgres' -x
@@ -388,11 +401,11 @@ cd /home/mansteinl/Anchor
 本次核对结果（2026-09-08）：
 
 ```text
-Source Alembic head: 0014_recovery_schedule
-/home/mansteinl/Anchor/.local/api.sqlite: 0014_recovery_schedule（已迁移）
+Source Alembic head: 0016_storage_budgets
+/home/mansteinl/Anchor/.local/api.sqlite: 0016_storage_budgets（已迁移）
 ```
 
-`RelationalStateStore.check_schema()` 接受 `0012_lease_history`、`0013_progress_evidence` 与 `0014_recovery_schedule`。开发库已迁移并重启 API，readiness 当前为：
+`RelationalStateStore.check_schema()` 接受 `0012_lease_history`、`0013_progress_evidence`、`0014_recovery_schedule`、`0015_run_archive` 与 `0016_storage_budgets`。开发库已迁移并重启 API，readiness 当前为：
 
 ```json
 {"status":"ready","execution_connected":true,"worker_connected":false,"control_worker_connected":true,"verifier_worker_connected":false}
@@ -512,6 +525,8 @@ migrations/versions/0011_decision_attempts.py
 migrations/versions/0012_lease_history.py
 migrations/versions/0013_progress_evidence.py
 migrations/versions/0014_recovery_schedule.py
+migrations/versions/0015_run_archive.py
+migrations/versions/0016_storage_budgets.py
 ```
 
 Runtime：
@@ -856,4 +871,4 @@ MVP complete 只要求可交付的单机产品闭环；生产门按真实部署�
 - Prefect/Temporal 等 durable 执行 muscle（现有语义被证明不足时）。
 - MCP/A2A、向量检索、对象存储（出现真实消费者时）。
 
-在此之前，Goal 应保持 active/paused，而不是 complete。MVP 门证据（以本轮为准）：300 后端绿 + 64 skipped，PG 参数组 64 绿，前端 Vitest 31、Playwright 12/12；隔离库真实进程 E2E 双路径（Verifier pass/reject）；迁移 head `0014_recovery_schedule`。
+在此之前，Goal 应保持 active/paused，而不是 complete。MVP 门证据（以本轮为准）：307 后端绿 + 66 skipped，PG 参数组 66 绿，前端 Vitest 31、Playwright 14/14；隔离库真实进程 E2E 双路径（Verifier pass/reject）；迁移 head `0016_storage_budgets`。

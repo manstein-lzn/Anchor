@@ -84,6 +84,7 @@ class Run(DomainModel):
     last_event_sequence: int = Field(default=0, ge=0)
     workflow_version: str = "v0.1"
     context_generation: int = Field(default=0, ge=0)
+    archived_at: datetime | None = None
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 

@@ -12,9 +12,10 @@ from .execution import ExecutionStoreMixin
 from .graphs import GraphStoreMixin
 from .operations import OperationStoreMixin
 from .progress import ProgressStoreMixin
+from .storage import StorageStoreMixin
 
 
-class RelationalStateStore(ProgressStoreMixin, OperationStoreMixin,
+class RelationalStateStore(StorageStoreMixin, ProgressStoreMixin, OperationStoreMixin,
                            CheckpointStoreMixin, ExecutionStoreMixin,
                            GraphStoreMixin, StoreBase):
     """Canonical state store used by every worker, service and the API."""

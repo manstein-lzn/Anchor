@@ -85,6 +85,13 @@ class RunControl(DomainModel):
     actor: str = Field(default="operator", min_length=1, max_length=200)
 
 
+class StorageBudget(DomainModel):
+    """Adjustable monitoring targets. Omit a field to leave it unchanged."""
+
+    global_bytes: int | None = None
+    graphs: dict[str, int | None] | None = None
+
+
 class OperationReconciliation(DomainModel):
     status: Literal["succeeded", "failed"]
     reconciliation_ref: str = Field(min_length=1, max_length=1000)
@@ -417,8 +424,10 @@ def create_app(store: RelationalStateStore | None = None, token: str | None = No
         return db.admit_run(RunRequest(trigger_id=trigger_id, idempotency_key=key, **body.model_dump()))
 
     @app.get("/api/runs", response_model=list[Run], dependencies=auth)
-    def runs(db: DB, limit: PageSize = 50, offset: Offset = 0, graph_id: str | None = None):
-        return db.list_runs(limit, offset, graph_id=graph_id)
+    def runs(db: DB, limit: PageSize = 50, offset: Offset = 0, graph_id: str | None = None,
+             include_archived: bool = False, status: list[str] | None = Query(None)):
+        return db.list_runs(limit, offset, graph_id=graph_id,
+                            include_archived=include_archived, statuses=status)
 
     @app.get("/api/runs/{run_id}", response_model=Run, dependencies=auth)
     def run(run_id: UUID, db: DB):
@@ -435,6 +444,14 @@ def create_app(store: RelationalStateStore | None = None, token: str | None = No
     @app.post("/api/runs/{run_id}/resume", response_model=Run, dependencies=auth)
     def resume_run(run_id: UUID, body: RunControl, db: DB):
         return db.resume_run(run_id, reason=body.reason, actor=body.actor)
+
+    @app.post("/api/runs/{run_id}/archive", response_model=Run, dependencies=auth)
+    def archive_run(run_id: UUID, db: DB):
+        return db.set_run_archived(run_id, archived=True)
+
+    @app.post("/api/runs/{run_id}/unarchive", response_model=Run, dependencies=auth)
+    def unarchive_run(run_id: UUID, db: DB):
+        return db.set_run_archived(run_id, archived=False)
 
     @app.get("/api/tasks/{task_id}", response_model=Task, dependencies=auth)
     def task(task_id: UUID, db: DB):
@@ -481,6 +498,42 @@ def create_app(store: RelationalStateStore | None = None, token: str | None = No
     def events(run_id: UUID, db: DB, after: Offset = 0, limit: PageSize = 100):
         required(db.get_run(run_id))
         return db.event_page(run_id, after, limit)
+
+    def _graph_budgets(db) -> dict[str, int | None]:
+        stored = db.get_storage_budgets()
+        stored.pop(db.GLOBAL_SCOPE, None)
+        return stored
+
+    @app.get("/api/storage", dependencies=auth)
+    def storage(db: DB):
+        """Read-only footprint: real on-disk total plus per-graph attribution."""
+        from anchor.state.storage import storage_report
+        settings = AnchorSettings()
+        stored = db.get_storage_budgets()
+        return storage_report(
+            db, artifact_root=settings.artifact_root,
+            global_budget=stored.get(db.GLOBAL_SCOPE),
+            graph_budgets=_graph_budgets(db))
+
+    @app.get("/api/storage/budget", dependencies=auth)
+    def storage_budget(db: DB):
+        stored = db.get_storage_budgets()
+        return {"global_bytes": stored.get(db.GLOBAL_SCOPE),
+                "graphs": _graph_budgets(db)}
+
+    @app.put("/api/storage/budget", dependencies=auth)
+    def set_storage_budget(body: StorageBudget, db: DB):
+        """Set budgets at runtime; a null value clears that budget."""
+        fields = body.model_fields_set
+        if "global_bytes" in fields:
+            db.set_storage_budget(db.GLOBAL_SCOPE, body.global_bytes)
+        for graph_id, value in (body.graphs or {}).items():
+            if not graph_id or len(graph_id) > 200:
+                raise HTTPException(status_code=422, detail="invalid graph id")
+            db.set_storage_budget(graph_id, value)
+        stored = db.get_storage_budgets()
+        return {"global_bytes": stored.get(db.GLOBAL_SCOPE),
+                "graphs": _graph_budgets(db)}
 
     @app.get("/api/runs/{run_id}/operations", response_model=list[ToolOperation], dependencies=auth)
     def operations(run_id: UUID, db: DB):

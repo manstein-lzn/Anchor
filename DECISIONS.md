@@ -457,3 +457,25 @@ in-flight nodes finish and their downstream stays ready; `resume` returns the ru
 to running. `stop` remains the terminal operator action. Triggers are authored in
 the Web UI against one immutable published version, and webhook triggers carry a
 secret reference, never a secret value.
+
+## ADR-024: History is curated, never silently destroyed
+
+Operators need a clean run list and a bounded disk, but runs are the root of the
+evidence chain. Two separate, deliberately simple mechanisms cover that:
+
+- **Archive** is a reversible `archived_at` flag on terminal runs. The default
+  `GET /api/runs` hides archived runs; `include_archived=true`, `GET
+  /api/runs/{id}` and every child collection keep working. Only terminal runs can
+  be archived so an active lease can never be hidden from supervision. The
+  change appends a `run.archived`/`run.unarchived` event.
+- **Storage budgets** are two adjustable monitoring targets stored in the
+  database (`storage_budgets`): one for the whole install (database file plus
+  artifact directory) and one per graph (attributed artifact bytes). They are
+  retunable at runtime through `PUT /api/storage/budget` with no restart.
+
+A budget is never an execution budget: it cannot terminate a running node, and
+nothing is deleted automatically. `GET /api/storage` reports the real footprint,
+including shared artifact bytes separately, because artifacts are content
+addressed across runs and graphs. Automatic eviction, garbage collection and
+retention windows remain deliberate future work; when they arrive they must be
+policy-driven, audited, and never destroy a run that is still in flight.

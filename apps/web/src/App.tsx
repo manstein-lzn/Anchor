@@ -8,12 +8,13 @@ import {
   Clock, UserRound, FileBox, Repeat2, Boxes, Plus, Save, Upload, Download,
   CheckCheck, Send, History, Undo2, Redo2, Trash2, Copy, X, Settings2,
   ChevronLeft, ChevronRight, LogOut, ZoomIn, ZoomOut,
-  Maximize, RefreshCw, KeyRound, Circle, Code2, ArrowRight, LoaderCircle,
+  Maximize, RefreshCw, KeyRound, Circle, Code2, ArrowRight, LoaderCircle, HardDrive,
   type LucideIcon,
 } from 'lucide-react';
 import { ApiError, request } from './api';
 import { RunConsole } from './RunConsole';
 import { TriggerManager } from './TriggerManager';
+import { StoragePanel } from './StoragePanel';
 import { RoutedEdge } from './RoutedEdge';
 import { GraphExecution } from './GraphExecution';
 import {
@@ -109,7 +110,7 @@ export function App() {
   const [viewVersion, setViewVersion] = useState<Version | null>(null);
   const [panel, setPanel] = useState<'canvas' | 'versions' | 'execution'>('canvas');
   const [mobilePanel, setMobilePanel] = useState<'canvas' | 'library' | 'inspector'>('canvas');
-  const [productView, setProductView] = useState<'graphs' | 'runs'>('graphs');
+  const [productView, setProductView] = useState<'graphs' | 'runs' | 'storage'>('graphs');
   const [validation, setValidation] = useState<Validation | null>(null);
   const [notice, setNotice] = useState('');
   const [error, setError] = useState('');
@@ -311,14 +312,14 @@ export function App() {
   return <div className="app-shell">
     <header className="topbar">
       <div className="brand"><Anchor size={25} /><span>Anchor</span><span className="environment">LOCAL</span></div>
-      <div className="product-switch" aria-label="产品视图"><button className={productView === 'graphs' ? 'active' : ''} onClick={() => setProductView('graphs')}><GitBranch size={15} />编排</button><button className={productView === 'runs' ? 'active' : ''} onClick={() => setProductView('runs')}><History size={15} />运行</button></div>
+      <div className="product-switch" aria-label="产品视图"><button className={productView === 'graphs' ? 'active' : ''} onClick={() => setProductView('graphs')}><GitBranch size={15} />编排</button><button className={productView === 'runs' ? 'active' : ''} onClick={() => setProductView('runs')}><History size={15} />运行</button><button className={productView === 'storage' ? 'active' : ''} onClick={() => setProductView('storage')}><HardDrive size={15} />存储</button></div>
       <div className="connection"><span className={`status-dot ${connected ? 'online' : ''}`} /><span>{connected ? 'API 已连接' : '未连接'}</span><span className="execution-state">接收器{execution ? '已连接' : '未连接'}</span></div>
       <ToolButton icon={LogOut} label="断开连接" disabled={!!busy || !connected} onClick={() => { sessionStorage.removeItem('anchor-token'); setToken(''); setCredential(''); setConnected(false); }} />
     </header>
-    <nav className={`mobile-nav ${productView === 'runs' ? 'view-hidden' : ''}`} aria-label="工作区面板">
+    <nav className={`mobile-nav ${productView !== 'graphs' ? 'view-hidden' : ''}`} aria-label="工作区面板">
       {(['library', 'canvas', 'inspector'] as const).map((item, index) => <button key={item} className={mobilePanel === item ? 'active' : ''} onClick={() => setMobilePanel(item)}>{['工作流', '画布', '属性'][index]}</button>)}
     </nav>
-    <div className={`workspace mobile-${mobilePanel} ${panel === 'execution' ? 'execution-workspace' : ''} ${productView === 'runs' ? 'view-hidden' : ''}`} inert={!connected || palette || !!jsonTarget} aria-hidden={!connected || palette || !!jsonTarget || productView === 'runs'}>
+    <div className={`workspace mobile-${mobilePanel} ${panel === 'execution' ? 'execution-workspace' : ''} ${productView !== 'graphs' ? 'view-hidden' : ''}`} inert={!connected || palette || !!jsonTarget || productView !== 'graphs'} aria-hidden={!connected || palette || !!jsonTarget || productView !== 'graphs'}>
       <aside className="library">
         <div className="section-heading"><h2>工作流</h2><ToolButton icon={RefreshCw} label="刷新工作流" disabled={!!busy} onClick={() => void perform('刷新', () => listGraphs())} /></div>
         <button className="new-graph" disabled={!!busy} onClick={() => { if (confirmDiscard()) { reset(emptyDocument()); setVersions([]); } }}><Plus size={17} />新建工作流</button>
@@ -418,6 +419,7 @@ export function App() {
       </aside>
     </div>
     {productView === 'runs' && connected && <RunConsole token={token} onUnauthorized={() => { sessionStorage.removeItem('anchor-token'); setToken(''); setConnected(false); }} />}
+    {productView === 'storage' && connected && <StoragePanel token={token} onUnauthorized={() => { sessionStorage.removeItem('anchor-token'); setToken(''); setConnected(false); }} />}
     <input ref={bundleInput} type="file" accept="application/json,.json" aria-label="导入 Bundle" hidden onChange={event => {
       const file = event.target.files?.[0]; event.target.value = ''; if (!file) return;
       void perform('导入 Bundle', async () => {

@@ -297,3 +297,103 @@ test('trigger management pins a published version and never shows secrets', asyn
   await expect(rows.first()).toContainText('已停用');
   expect(errors).toEqual([]);
 });
+
+test('run console filters and archives runs without deleting evidence', async ({ page }) => {
+  const errors: string[] = [];
+  page.on('pageerror', error => errors.push(error.message));
+  const graphId = 'browser-run-archive';
+  const definition = { graph_id: graphId, name: '归档验证图', nodes: [
+    { id: 'a', name: '研究', type: 'agent', agent_ref: 'agents.researcher' },
+  ], edges: [] };
+  expect((await page.request.put(`/api/graphs/${graphId}/draft`, { headers, data: { expected_revision: 0, definition, layout: {} } })).ok()).toBe(true);
+  const version = await (await page.request.post(`/api/graphs/${graphId}/publish`, { headers, data: { expected_revision: 1 } })).json();
+  const trigger = crypto.randomUUID();
+  expect((await page.request.put(`/api/triggers/${trigger}`, { headers, data: {
+    graph_version_id: version.graph_version_id, type: 'manual', enabled: true,
+  }})).ok()).toBe(true);
+  const first = await (await page.request.post(`/api/triggers/${trigger}/runs`, {
+    headers: { ...headers, 'Idempotency-Key': 'archive-e2e-1' },
+    data: { objective: '归档目标 A', inputs: {} },
+  })).json();
+  const second = await (await page.request.post(`/api/triggers/${trigger}/runs`, {
+    headers: { ...headers, 'Idempotency-Key': 'archive-e2e-2' },
+    data: { objective: '归档目标 B', inputs: {} },
+  })).json();
+  expect((await page.request.post(`/api/runs/${first.run_id}/stop`, { headers, data: { reason: 'e2e stop' } })).ok()).toBe(true);
+
+  await login(page);
+  await page.getByLabel('产品视图').getByRole('button', { name: '运行', exact: true }).click();
+  const items = page.locator('.run-list-item');
+
+  // The database is shared with earlier tests, so isolate our own runs by id.
+  await page.getByLabel('搜索运行 ID').fill(first.run_id.slice(0, 8));
+  await expect(items).toHaveCount(1);
+  await expect(items.first()).toContainText('已取消');
+  await page.getByLabel('按状态筛选运行').selectOption('active');
+  await expect(items).toHaveCount(0);
+  await page.getByLabel('按状态筛选运行').selectOption('all');
+  await expect(items).toHaveCount(1);
+
+  await items.first().click();
+  await expect(page.getByRole('heading', { name: '归档目标 A' })).toBeVisible();
+
+  // Archiving hides the run from the default list; the evidence stays readable.
+  await page.getByRole('button', { name: '归档', exact: true }).click();
+  await expect(items).toHaveCount(0);
+  expect((await page.request.get(`/api/runs/${first.run_id}`, { headers })).ok()).toBe(true);
+  await expect(page.getByRole('heading', { name: '归档目标 A' })).toBeVisible();
+
+  await page.getByLabel('显示已归档').check();
+  await expect(items).toHaveCount(1);
+  await expect(items.first()).toContainText('已归档');
+  await page.getByRole('button', { name: '取消归档', exact: true }).click();
+  await expect(items.first()).not.toContainText('已归档');
+
+  // The sibling run is untouched by archiving.
+  await page.getByLabel('搜索运行 ID').fill(second.run_id.slice(0, 8));
+  await expect(items).toHaveCount(1);
+  await expect(items.first()).toContainText('已排队');
+  expect(errors).toEqual([]);
+});
+
+test('storage budgets are adjustable at runtime from the web', async ({ page }) => {
+  const errors: string[] = [];
+  page.on('pageerror', error => errors.push(error.message));
+  const graphId = 'browser-storage-budget';
+  const definition = { graph_id: graphId, name: '预算验证图', nodes: [
+    { id: 'a', name: '研究', type: 'agent', agent_ref: 'agents.researcher' },
+  ], edges: [] };
+  expect((await page.request.put(`/api/graphs/${graphId}/draft`, { headers, data: { expected_revision: 0, definition, layout: {} } })).ok()).toBe(true);
+  const version = await (await page.request.post(`/api/graphs/${graphId}/publish`, { headers, data: { expected_revision: 1 } })).json();
+  const trigger = crypto.randomUUID();
+  expect((await page.request.put(`/api/triggers/${trigger}`, { headers, data: {
+    graph_version_id: version.graph_version_id, type: 'manual', enabled: true,
+  }})).ok()).toBe(true);
+  expect((await page.request.post(`/api/triggers/${trigger}/runs`, {
+    headers: { ...headers, 'Idempotency-Key': 'storage-e2e-1' }, data: { objective: '预算目标', inputs: {} },
+  })).status()).toBe(202);
+
+  await login(page);
+  await page.getByLabel('产品视图').getByRole('button', { name: '存储', exact: true }).click();
+  await expect(page.getByRole('heading', { name: '存储预算' })).toBeVisible();
+  await expect(page.locator('.storage-card').first()).toContainText('总占用');
+
+  // Global knob: takes effect immediately and shows the usage ratio.
+  await page.getByLabel('全局存储预算').fill('0.5');
+  await page.getByRole('button', { name: '保存全局预算' }).click();
+  await expect(page.getByRole('status')).toContainText('全局预算已更新');
+  await expect(page.locator('.storage-card').filter({ hasText: '全局预算' })).toContainText('已用');
+  expect((await (await page.request.get('/api/storage/budget', { headers })).json()).global_bytes).toBe(Math.round(0.5 * 1024 ** 3));
+
+  // Per-graph knob: the graph appears once it has runs, and persists.
+  const row = page.locator('.storage-row').filter({ hasText: graphId });
+  await expect(row).toBeVisible();
+  await row.getByLabel(`${graphId} 存储预算`).fill('0.25');
+  await row.getByRole('button', { name: '保存' }).click();
+  await expect(page.getByRole('status')).toContainText('预算已更新');
+  const budgets = await (await page.request.get('/api/storage/budget', { headers })).json();
+  expect(budgets.graphs[graphId]).toBe(Math.round(0.25 * 1024 ** 3));
+
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  expect(errors).toEqual([]);
+});

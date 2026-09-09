@@ -106,6 +106,8 @@ class StoreBase:
                 "0012_lease_history",
                 "0013_progress_evidence",
                 "0014_recovery_schedule",
+                "0015_run_archive",
+                "0016_storage_budgets",
             }:
                 raise RuntimeError("database schema is not at the supported revision")
     def _append_event(self, connection, *, stream_id, event_type, payload, idempotency_key):

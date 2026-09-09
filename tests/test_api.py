@@ -731,3 +731,62 @@ def test_unknown_operation_reconciliation_completes_or_fails_the_node(client, mo
     assert response.status_code == 200, response.text
     assert response.json()["node_run"]["status"] == "failed"
     assert api.get(f"/api/runs/{receipt['run_id']}").json()["status"] == "failed"
+
+
+def test_run_archive_hides_and_restores_without_destroying_evidence(client):
+    from anchor.domain.graph import GraphDefinition, GraphNode, GraphVersion, Trigger
+    api, store = client
+    version = store.publish_graph(GraphVersion.publish(GraphDefinition(
+        graph_id="archive-api", name="Archive API",
+        nodes=[GraphNode(id="a", type="agent", name="A", agent_ref="a")]), 1))
+    trigger = store.create_trigger(Trigger(graph_version_id=version.graph_version_id,
+                                           type="manual"))
+    receipt = api.post(f"/api/triggers/{trigger.id}/runs", json={"objective": "archive"},
+                       headers={"Idempotency-Key": "archive-api-1"}).json()
+    run_id = receipt["run_id"]
+
+    # Active runs stay visible to supervision.
+    refused = api.post(f"/api/runs/{run_id}/archive")
+    assert refused.status_code == 409
+    assert api.get("/api/runs").json()[0]["id"] == run_id
+
+    api.post(f"/api/runs/{run_id}/stop", json={"reason": "operator stop"})
+    archived = api.post(f"/api/runs/{run_id}/archive")
+    assert archived.status_code == 200, archived.text
+    assert archived.json()["archived_at"] is not None
+    assert api.get("/api/runs").json() == []
+    assert [item["id"] for item in api.get("/api/runs?include_archived=true").json()] == [run_id]
+    assert [item["id"] for item in api.get("/api/runs?status=cancelled").json()] == []
+
+    # Evidence stays fully queryable by id.
+    assert api.get(f"/api/runs/{run_id}").status_code == 200
+    assert api.get(f"/api/runs/{run_id}/nodes").status_code == 200
+    event_types = [item["event_type"] for item in api.get(f"/api/runs/{run_id}/events").json()]
+    assert "run.archived" in event_types
+
+    restored = api.post(f"/api/runs/{run_id}/unarchive")
+    assert restored.status_code == 200
+    assert restored.json()["archived_at"] is None
+    assert [item["id"] for item in api.get("/api/runs").json()] == [run_id]
+
+
+def test_storage_budget_is_adjustable_at_runtime(client):
+    api, store = client
+    assert api.get("/api/storage/budget").json() == {"global_bytes": None, "graphs": {}}
+
+    response = api.put("/api/storage/budget", json={
+        "global_bytes": 5 * 1024 ** 3,
+        "graphs": {"graph-a": 1024 ** 3, "graph-b": None},
+    })
+    assert response.status_code == 200, response.text
+    assert response.json() == {"global_bytes": 5 * 1024 ** 3, "graphs": {"graph-a": 1024 ** 3}}
+
+    report = api.get("/api/storage").json()
+    assert report["budget"] == {"global_bytes": 5 * 1024 ** 3}
+
+    # Omitting a field leaves it unchanged; null clears a single budget.
+    api.put("/api/storage/budget", json={"graphs": {"graph-a": None}})
+    assert api.get("/api/storage/budget").json() == {"global_bytes": 5 * 1024 ** 3, "graphs": {}}
+
+    negative = api.put("/api/storage/budget", json={"graphs": {"graph-a": -1}})
+    assert negative.status_code == 422

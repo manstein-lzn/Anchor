@@ -47,6 +47,12 @@ anchor-api-dev`; read logs with `journalctl --user -u anchor-api-dev`; stop it w
 | Read routing decisions | `GET /api/runs/{id}/decisions` | Selected/rejected edge decisions with evaluator version, context hash and evidence reference |
 | Read events | `GET /api/runs/{id}/events?after=0&limit=100` | Incremental polling by sequence; not SSE yet |
 | Read operations | `GET /api/runs/{id}/operations` | Audit view of registered tool requests and explicit outcomes |
+| Reconcile unknown outcome | `POST /api/operations/{id}/reconcile` | Records external evidence; deterministically completes or fails the node without a new attempt |
+| Pause/resume run | `POST /api/runs/{id}/pause`, `POST /api/runs/{id}/resume` | Pause fences new claims; in-flight nodes finish and downstream stays ready |
+| Archive run | `POST /api/runs/{id}/archive`, `POST /api/runs/{id}/unarchive` | Reversible; only terminal runs; evidence stays queryable by id |
+| Filter runs | `GET /api/runs?status=cancelled&include_archived=true` | Operator view; archived runs are hidden by default |
+| Storage report | `GET /api/storage` | Read-only: database bytes + artifact bytes, per-graph attribution (exclusive/shared) |
+| Storage budgets | `GET/PUT /api/storage/budget` | Runtime-adjustable global and per-graph monitoring targets; never terminate a running node |
 | Read/delete memory | `GET /api/memory`, `DELETE /api/memory/{id}` | Provenance-bearing memory with tombstone deletion; audit reads use `include_deleted=true`; filters `status`/`domain` |
 | Propose lesson | `POST /api/memory/propose` | Candidate experience with domain and provenance; enters review, not prompts |
 | Review lesson | `POST /api/memory/{id}/review` | Promote/reject with reviewer and reason; only promoted knowledge enters future prompts |

@@ -37,6 +37,10 @@ class AnchorSettings(BaseSettings):
     # not expire runs based on graph metadata budgets; healthy runs may
     # continue indefinitely without arbitrary numeric limits.
     expire_run_budgets: bool = False
+    # Retention is a storage budget, never an execution budget: it only ever
+    # evicts finished history, and never terminates a running node.
+    storage_global_bytes: int | None = None
+    storage_per_graph_bytes: int | None = None
     log_level: str = "INFO"
 
     def require_database_url(self) -> str:

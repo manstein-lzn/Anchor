@@ -3,7 +3,7 @@ import { Activity, AlertTriangle, Bot, CheckCircle2, Circle, Clock3, FileClock,
   GitBranch, LoaderCircle, RefreshCw, ShieldCheck, TerminalSquare, Wrench } from 'lucide-react';
 import { ApiError, request } from './api';
 import {
-  label, tone,
+  label, terminal, tone,
   type ExecutionContext, type ExecutionDecision, type ExecutionDiagnostic,
   type ExecutionEvent, type ExecutionLease, type ExecutionMemory, type ExecutionNode,
   type ExecutionOperation, type ExecutionProgress, type ExecutionRun,
@@ -11,12 +11,19 @@ import {
 } from './execution';
 import type { Version } from './graph';
 
+const statusGroups: Record<'all' | 'active' | 'completed' | 'failed' | 'cancelled', string[]> = {
+  all: [], active: ['created', 'queued', 'running', 'paused'], completed: ['completed'],
+  failed: ['failed'], cancelled: ['cancelled'],
+};
 const stamp = (value: string) => new Date(value).toLocaleString();
 const short = (value: string) => value.slice(0, 8);
 
 export function RunConsole({ token, onUnauthorized }: { token: string; onUnauthorized: () => void }) {
   const [runs, setRuns] = useState<ExecutionRun[]>([]);
   const [selected, setSelected] = useState('');
+  const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'completed' | 'failed' | 'cancelled'>('all');
+  const [showArchived, setShowArchived] = useState(false);
+  const [query, setQuery] = useState('');
   const [run, setRun] = useState<ExecutionRun | null>(null);
   const [task, setTask] = useState<ExecutionTask | null>(null);
   const [version, setVersion] = useState<Version | null>(null);
@@ -48,11 +55,17 @@ export function RunConsole({ token, onUnauthorized }: { token: string; onUnautho
     } catch (cause) { fail(cause); }
   }, [api, fail]);
 
+  // The run list is an operator view over immutable evidence, so it filters and
+  // hides archived runs instead of deleting anything.
   const loadRuns = useCallback(async () => {
-    const list = await api<ExecutionRun[]>('/api/runs?limit=100&offset=0');
+    const params = new URLSearchParams({ limit: '100', offset: '0' });
+    if (showArchived) params.set('include_archived', 'true');
+    for (const status of statusGroups[statusFilter]) params.append('status', status);
+    const list = await api<ExecutionRun[]>(`/api/runs?${params.toString()}`);
     setRuns(list);
-    setSelected(current => current && list.some(item => item.id === current) ? current : list[0]?.id ?? '');
-  }, [api]);
+    // Keep the operator's current selection even when a filter hides it.
+    setSelected(current => current || list[0]?.id || '');
+  }, [api, showArchived, statusFilter]);
 
   const loadDetail = useCallback(async (runId: string, incremental = false) => {
     if (!runId) { setRun(null); return; }
@@ -137,6 +150,13 @@ export function RunConsole({ token, onUnauthorized }: { token: string; onUnautho
     catch (cause) { fail(cause); }
   }, [api, fail, loadDetail, selected]);
 
+  const setArchived = useCallback(async (archived: boolean) => {
+    try {
+      await api(`/api/runs/${selected}/${archived ? 'archive' : 'unarchive'}`, 'POST');
+      await loadRuns(); await loadDetail(selected);
+    } catch (cause) { fail(cause); }
+  }, [api, fail, loadDetail, loadRuns, selected]);
+
   const refresh = useCallback(async () => {
     setBusy(true); setError('');
     try { await loadRuns(); if (selected) await loadDetail(selected, true); }
@@ -154,6 +174,9 @@ export function RunConsole({ token, onUnauthorized }: { token: string; onUnautho
     return () => window.clearInterval(interval);
   }, [fail, loadDetail, selected]);
 
+  const visibleRuns = query
+    ? runs.filter(item => item.id.toLowerCase().includes(query.trim().toLowerCase()))
+    : runs;
   const names = new Map(version?.definition.nodes.map(node => [node.id, node]) ?? []);
   const graphOrder = new Map(version?.definition.nodes.map((node, index) => [node.id, index]) ?? []);
   const orderedNodes = [...nodes].sort((left, right) =>
@@ -161,9 +184,16 @@ export function RunConsole({ token, onUnauthorized }: { token: string; onUnautho
   return <div className="run-console">
     <aside className="run-list">
       <div className="section-heading"><h2>运行</h2><button className="icon-button" title="刷新运行" aria-label="刷新运行" disabled={busy} onClick={() => void refresh()}>{busy ? <LoaderCircle className="spin" size={17} /> : <RefreshCw size={17} />}</button></div>
-      <div className="run-list-items">{runs.map(item => <button key={item.id} className={`run-list-item ${selected === item.id ? 'active' : ''}`} onClick={() => setSelected(item.id)}>
-        <span className={`run-status-mark ${tone(item.status)}`}><Circle size={9} /></span><span><strong>{label(item.status)}</strong><small>{short(item.id)} · {stamp(item.created_at)}</small></span><code>r{item.revision}</code>
-      </button>)}{!runs.length && <div className="run-empty"><FileClock size={28} /><span>暂无运行记录</span></div>}</div>
+      <div className="run-filters">
+        <input aria-label="搜索运行 ID" placeholder="搜索运行 ID" value={query} onChange={event => setQuery(event.target.value)} />
+        <select aria-label="按状态筛选运行" value={statusFilter} onChange={event => setStatusFilter(event.target.value as typeof statusFilter)}>
+          <option value="all">全部状态</option><option value="active">活跃</option><option value="completed">已完成</option><option value="failed">失败</option><option value="cancelled">已取消</option>
+        </select>
+        <label className="run-filter-toggle"><input type="checkbox" checked={showArchived} onChange={event => setShowArchived(event.target.checked)} />显示已归档</label>
+      </div>
+      <div className="run-list-items">{visibleRuns.map(item => <button key={item.id} className={`run-list-item ${selected === item.id ? 'active' : ''} ${item.archived_at ? 'archived' : ''}`} onClick={() => setSelected(item.id)}>
+        <span className={`run-status-mark ${tone(item.status)}`}><Circle size={9} /></span><span><strong>{label(item.status)}{item.archived_at && ' · 已归档'}</strong><small>{short(item.id)} · {stamp(item.created_at)}</small></span><code>r{item.revision}</code>
+      </button>)}{!visibleRuns.length && <div className="run-empty"><FileClock size={28} /><span>{runs.length ? '没有匹配的运行' : '暂无运行记录'}</span></div>}</div>
       <div className="library-footer"><Activity size={13} />真实状态 · 5 秒轮询</div>
     </aside>
     <main className="run-detail">
@@ -173,7 +203,8 @@ export function RunConsole({ token, onUnauthorized }: { token: string; onUnautho
           <div className="run-controls">{run.status === 'paused'
             ? <button type="button" className="inline-link" onClick={() => void controlRun('resume')}>恢复运行</button>
             : ['queued', 'running'].includes(run.status) && <button type="button" className="inline-link" onClick={() => void controlRun('pause')}>暂停运行</button>}
-            {!['completed', 'failed', 'cancelled'].includes(run.status) && <button type="button" className="inline-link danger-link" onClick={() => void controlRun('stop')}>停止运行</button>}
+            {!terminal(run.status) && <button type="button" className="inline-link danger-link" onClick={() => void controlRun('stop')}>停止运行</button>}
+            {terminal(run.status) && <button type="button" className="inline-link" onClick={() => void setArchived(!run.archived_at)}>{run.archived_at ? '取消归档' : '归档'}</button>}
           </div></header>
         <div className="run-grid">
           <section className="run-section node-state"><header><h2><GitBranch size={16} />节点状态</h2><span>{nodes.length}</span></header><div className="node-state-list">{orderedNodes.map(node => {

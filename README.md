@@ -143,6 +143,12 @@ Runs can be paused and resumed without touching in-flight work or artifacts:
 returns the run to running. The Web trigger panel registers manual, cron,
 interval, internal-event and webhook triggers against one immutable version.
 
+Operators curate history without destroying evidence: terminal runs can be
+archived (hidden from the default list, still readable by id), and two
+runtime-adjustable storage budgets — one for the install, one per graph — are
+reported through `GET /api/storage` and set with `PUT /api/storage/budget`. A
+budget is monitoring only and never terminates a running node.
+
 Run deterministic Router, Parallel/Join and Artifact nodes through the separate
 control worker. It never calls a model and cannot claim Agent/Tool/Verifier nodes:
 

@@ -99,6 +99,35 @@ class ExecutionStoreMixin:
             return decode(Run, connection.execute(sa.select(s.runs).where(
                 s.runs.c.id == str(run_id))).mappings().one())
 
+    def set_run_archived(self, run_id: UUID, *, archived: bool) -> Run:
+        """Hide or restore a terminal run in operator listings.
+
+        Evidence is never destroyed: the run, its nodes, events, decisions,
+        verifications, operations and memory all stay queryable by id. Only a
+        terminal run can be archived so an active lease cannot be hidden from
+        supervision. Idempotent in both directions.
+        """
+        with self._transaction() as connection:
+            row = connection.execute(sa.select(s.runs).where(
+                s.runs.c.id == str(run_id)).with_for_update()).mappings().first()
+            if row is None:
+                raise KeyError(run_id)
+            if archived and row["status"] not in ("completed", "failed", "cancelled"):
+                raise ConcurrencyConflict("only a terminal run can be archived")
+            if (row["archived_at"] is not None) == archived:
+                return decode(Run, row)
+            now = utc_now()
+            revision = row["revision"] + 1
+            event_type = "run.archived" if archived else "run.unarchived"
+            seq = self._append_event(connection, stream_id=run_id, event_type=event_type,
+                payload={"archived": archived},
+                idempotency_key=f"run:{run_id}:{event_type}:{revision}")
+            connection.execute(sa.update(s.runs).where(s.runs.c.id == str(run_id)).values(
+                archived_at=now if archived else None, revision=revision,
+                last_event_sequence=seq, updated_at=now))
+            return decode(Run, connection.execute(sa.select(s.runs).where(
+                s.runs.c.id == str(run_id))).mappings().one())
+
     def expire_run_budgets(self) -> int:
         with self.engine.connect() as connection:
             rows = list(connection.execute(sa.select(s.runs).where(

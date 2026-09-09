@@ -25,6 +25,8 @@
 | graph `run_timeout_seconds` | `domain/graph.py` 校验；`worker.py`/`control_worker.py`/`state/execution.py` 读取 | **无默认** | operator_policy | 整个 Run | 仅当显式配置且 `ANCHOR_EXPIRE_RUN_BUDGETS=true` 时失败关闭 |
 | graph `max_rounds` | `domain/graph.py` 校验；`runtime/academic.py` 读取 | **无默认** | operator_policy | 学术修订轮数 | 仅当显式配置时 `blocked`；否则记录机械问题并继续 |
 | `ANCHOR_EXPIRE_RUN_BUDGETS` | `runtime/settings.py` | `false` | operator_policy | 监督进程预算清扫 | 关闭时不扫描 |
+| `ANCHOR_STORAGE_GLOBAL_BYTES` | `runtime/settings.py` | `None` | operator_policy | 整个安装的存储监控目标 | 仅报告/提示；不终止节点、不自动删除 |
+| `ANCHOR_STORAGE_PER_GRAPH_BYTES` | `runtime/settings.py` | `None` | operator_policy | 每个图的存储监控目标 | 同上；运行时可经 `PUT /api/storage/budget` 调整 |
 | `ANCHOR_LEASE_STALE_AFTER` | 同上 | 30s | transport | lease 心跳评估 | 只报告 stale，不偷取 lease |
 | `ANCHOR_SUPERVISOR_INTERVAL` | 同上 | 10s | resource_capacity | 观察频率 | — |
 | model gateway HTTP timeout | `runtime/model_gateway.py` | connect 30 / read 900 / write 60 / pool 30 | transport | 单次 HTTP | 该请求失败，进入故障分类 |
