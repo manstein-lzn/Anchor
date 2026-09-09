@@ -58,16 +58,22 @@ def _run_git(root: str, *args: str, timeout: float = 10.0) -> subprocess.Complet
                           timeout=timeout, check=False, env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
 
 
-def validate_project_root(root: str, backend: str = "git") -> None:
-    """Fail registration when the root is not a usable read-only source."""
+def validate_project_root(root: str, backend: str = "git") -> str:
+    """Validate a read-only source and return its absolute path.
+
+    Returning the resolved path is deliberate: a relative root would resolve
+    differently in each process, and `git -C <relative>` can walk up into an
+    unrelated repository.
+    """
     if backend != "git":
         raise WorkspaceError(f"unsupported project backend: {backend}")
-    path = Path(root).expanduser()
+    path = Path(root).expanduser().resolve()
     if not path.is_dir():
         raise WorkspaceError(f"project root is not a directory: {root}")
     result = _run_git(str(path), "rev-parse", "--git-dir")
     if result.returncode != 0:
         raise WorkspaceError(f"project root is not a git repository: {root}")
+    return str(path)
 
 
 class GitWorkspaceBackend:
@@ -77,7 +83,9 @@ class GitWorkspaceBackend:
 
     def __init__(self, root: str, *, timeout: float = 10.0,
                  max_bytes: int = DEFAULT_MAX_BYTES) -> None:
-        self.root = root
+        # Always absolute: a relative root resolves differently per process and
+        # `git -C <relative>` can walk up into an unrelated repository.
+        self.root = str(Path(root).expanduser().resolve())
         self.timeout = timeout
         self.max_bytes = max_bytes
 

@@ -58,7 +58,7 @@ def _register_projects(app: FastAPI, *, auth, db, required) -> None:
         from anchor.runtime.workspace import WorkspaceError, validate_project_root
         project = ProjectModel(**body.model_dump())
         try:
-            validate_project_root(project.root, project.backend)
+            project.root = validate_project_root(project.root, project.backend)
         except WorkspaceError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         return store.create_project(project)

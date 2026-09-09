@@ -750,3 +750,32 @@ silently reduce safety.
 
 This mirrors ADR-029: the sandbox is read-only and has no network, so `exec` is
 inspection rather than mutation.
+
+## ADR-035: Workspace paths are absolute and verified against their repository
+
+Real-model validation found a severe defect: `WorkspaceManager` accepted a
+relative `root`, stored a relative worktree path, and `GitWorktree` ran
+`git -C <relative path>`. Because git resolves a relative `-C` against the
+process working directory and then walks up to find `.git`, the workspace write
+landed inside the Anchor repository itself; `git add -A` added nothing (the path
+was gitignored), so `commit()` silently returned the Anchor HEAD as the
+"revision". The failure surfaced later as `could not get object info` when the
+manifest digest was computed against the intended project repository.
+
+Three fixes, each closing one link in the chain:
+
+- **Absolute paths.** `WorkspaceManager` resolves its root, `GitWorkspaceBackend`
+  resolves the project root, and `validate_project_root` returns the resolved
+  path so the API stores an absolute root. A relative path resolves differently
+  in every process and cannot be persisted safely.
+- **Worktree verification.** `GitWorktree.verify()` requires
+  `rev-parse --show-toplevel` to equal the worktree path and
+  `rev-parse --git-common-dir` to equal the project's common dir. It runs after
+  `worktree add` and before every commit, so a path that resolves into another
+  repository fails loudly instead of committing into unrelated history.
+- **Regression tests** cover a relative root, a path inside a foreign repository,
+  and absolute-root project registration.
+
+No damage occurred: the stray writes were under a gitignored directory and the
+repository stayed clean. The lesson is that a filesystem-backed content plane
+must treat paths as untrusted input and prove ownership before mutating.

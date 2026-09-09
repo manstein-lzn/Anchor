@@ -51,6 +51,32 @@ class GitWorktree:
                           str(self.path), base_revision, timeout=self.timeout)
         if result.returncode != 0:
             raise WorkspaceError(result.stderr.decode("utf-8", errors="replace").strip())
+        self.verify()
+
+    def verify(self) -> None:
+        """Fail unless this path is a worktree of exactly this repository.
+
+        Without this check a relative or wrong path can resolve into a different
+        repository, where `git commit` would silently succeed against unrelated
+        history.
+        """
+        path = self.path.resolve()
+        if not path.is_dir():
+            raise WorkspaceError(f"workspace path does not exist: {path}")
+        toplevel = Path(self._git("rev-parse", "--show-toplevel").strip()).resolve()
+        if toplevel != path:
+            raise WorkspaceError(
+                f"workspace path {path} is inside a different repository: {toplevel}")
+        actual = Path(self._git("rev-parse", "--git-common-dir").strip())
+        if not actual.is_absolute():
+            actual = (path / actual).resolve()
+        expected = Path(_run_git(self.repo_root, "rev-parse", "--git-common-dir",
+                                 timeout=self.timeout).stdout.decode().strip())
+        if not expected.is_absolute():
+            expected = (Path(self.repo_root).resolve() / expected).resolve()
+        if actual.resolve() != expected.resolve():
+            raise WorkspaceError(
+                f"workspace path {path} belongs to {actual}, not {expected}")
 
     def head(self) -> str:
         return self._git("rev-parse", "HEAD").strip()
@@ -60,6 +86,7 @@ class GitWorktree:
 
     def commit(self, message: str) -> str:
         """Commit the whole tree; returns the current head when nothing changed."""
+        self.verify()
         self._git("add", "-A")
         if not self.is_dirty():
             return self.head()
@@ -88,7 +115,9 @@ class WorkspaceManager:
                  timeout: float = DEFAULT_TIMEOUT_SECONDS,
                  max_file_bytes: int = DEFAULT_MAX_FILE_BYTES) -> None:
         self.store = store
-        self.root = Path(root).expanduser()
+        # Absolute for the same reason as the project root: a relative path
+        # resolves per process and can point at an unrelated repository.
+        self.root = Path(root).expanduser().resolve()
         self.timeout = timeout
         self.max_file_bytes = max_file_bytes
 

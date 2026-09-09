@@ -905,3 +905,19 @@ def test_workspace_api_forks_writes_freezes_and_archives(client, tmp_path, monke
 
     archived = api.post("/api/workspaces/ws-api/archive", json={"actor": "operator"})
     assert archived.status_code == 200 and archived.json()["state"] == "archived"
+
+
+def test_project_registration_stores_an_absolute_root(client, tmp_path):
+    import subprocess
+
+    api, _ = client
+    root = tmp_path / "repo"
+    root.mkdir()
+    for args in (["init", "-q"], ["config", "user.email", "t@example.com"],
+                 ["config", "user.name", "Test"]):
+        subprocess.run(["git", "-C", str(root), *args], check=True, capture_output=True)
+    created = api.post("/api/projects", json={
+        "project_id": "abs", "name": "Abs", "root": str(root)})
+    assert created.status_code == 200, created.text
+    from pathlib import Path
+    assert Path(created.json()["root"]).is_absolute()

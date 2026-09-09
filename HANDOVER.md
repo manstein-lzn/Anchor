@@ -4,6 +4,18 @@
 
 本次交接核对时间：`2026-09-08 22:00 CST`；Verifier 收尾与执行策略会话完成下述验收并更新本文。
 
+## 真实验证 + 严重缺陷修复（2026-09-09，ADR-035）
+
+**验证**：真实 DeepSeek 运行完成。agent 读 README → 写 `hello.py`（内容精确）→ 追加 README →
+节点输出 `workspace://ws-validate@9085703...`；审计账本 create/write/write/freeze 完整；
+源仓库工作树 0 改动；模型文本 artifact 保留并在事件 payload 引用；manifest_digest 已记录。
+
+**发现并修复的严重缺陷**：相对工作区路径 + `git -C <相对路径>` 向上查找 `.git` →
+写入落到 **Anchor 仓库本身**；`.local` 被 gitignore → `commit()` 静默返回 Anchor HEAD 当 revision。
+修复三条：① 路径全部绝对化（manager root / project root / API 存储）；② `GitWorktree.verify()`
+校验 `--show-toplevel` 与 `--git-common-dir` 必须属于目标仓库，create 后与每次 commit 前执行；
+③ 回归测试覆盖相对 root、异仓库路径、绝对 root 注册。**无实际损坏**（写入在 gitignore 目录内）。
+
 ## 沙箱最小化（2026-09-09，ADR-034）
 
 - **不引入容器/microVM**。bubblewrap 是唯一后端（单二进制、无守护进程、无需运维）。

@@ -20,6 +20,7 @@ from anchor.runtime.workspaces import WorkspaceError, WorkspaceManager
 
 def make_repo(tmp_path):
     root = tmp_path / "repo"
+    root.parent.mkdir(parents=True, exist_ok=True)
     (root / "src").mkdir(parents=True)
     (root / "readme.md").write_text("base readme\n", encoding="utf-8")
     for args in (["init", "-q"], ["config", "user.email", "t@example.com"],
@@ -128,3 +129,33 @@ def test_content_size_limit_is_enforced(managed, tmp_path):
     small.create(project_id="proj-1", base_revision=sha, workspace_id="ws-small")
     with pytest.raises(WorkspaceError, match="over the 4 limit"):
         small.write_text("ws-small", "big.txt", "12345", actor="agent-a")
+
+
+def test_workspace_root_and_path_are_absolute(tmp_path, store, monkeypatch):
+    """A relative root must not leak into the record or the worktree path.
+
+    Regression: a relative path resolved per process, and `git -C <relative>`
+    walked up into an unrelated repository, committing into the wrong history.
+    """
+    root, sha = make_repo(tmp_path)
+    store.create_project(Project(project_id="p", name="P", root=str(root)))
+    monkeypatch.chdir(tmp_path)
+    manager = WorkspaceManager(store, root="relative/worktrees")
+    workspace = manager.create(project_id="p", base_revision=sha, workspace_id="ws-rel")
+    assert Path(workspace.path).is_absolute()
+    assert Path(workspace.path).is_relative_to(tmp_path.resolve())
+
+    operation = manager.write_text("ws-rel", "a.txt", "x\n", actor="t")
+    assert operation.after_revision != sha
+    assert (Path(workspace.path) / "a.txt").read_text(encoding="utf-8") == "x\n"
+
+
+def test_worktree_verification_rejects_a_path_in_another_repository(tmp_path):
+    from anchor.runtime.workspaces import GitWorktree
+
+    repo_a, _ = make_repo(tmp_path / "a")
+    repo_b, _ = make_repo(tmp_path / "b")
+    nested = repo_b / "sub"
+    nested.mkdir()
+    with pytest.raises(WorkspaceError, match="different repository"):
+        GitWorktree(str(repo_a), nested, "anchor/foreign").verify()
