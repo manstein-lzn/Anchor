@@ -8,6 +8,7 @@ live tree.
 
 from __future__ import annotations
 
+import hashlib
 import io
 import os
 import re
@@ -42,6 +43,10 @@ class WorkspaceBackend(Protocol):
     def resolve_revision(self, revision: str) -> str: ...
 
     def list_paths(self, revision: str, prefix: str | None = None) -> list[str]: ...
+
+    def manifest(self, revision: str) -> list[tuple[str, str, str]]: ...
+
+    def tree_digest(self, revision: str) -> str: ...
 
     def materialize(self, revision: str, destination: Path) -> None: ...
 
@@ -96,6 +101,35 @@ class GitWorkspaceBackend:
         if prefix:
             paths = [item for item in paths if item.startswith(prefix)]
         return paths
+
+    def manifest(self, revision: str) -> list[tuple[str, str, str]]:
+        """(mode, blob id, path) for every blob, sorted by raw path bytes."""
+        self.resolve_revision(revision)
+        raw = self._git_bytes("ls-tree", "-r", "-z", revision)
+        entries: list[tuple[str, str, str]] = []
+        for item in raw.split(b"\x00"):
+            if not item:
+                continue
+            header, _, path = item.partition(b"\t")
+            mode, object_type, object_id = header.split(b" ", 2)
+            if object_type != b"blob":
+                continue
+            entries.append((mode.decode(), object_id.decode(), path.decode("utf-8")))
+        entries.sort(key=lambda entry: entry[2].encode("utf-8"))
+        return entries
+
+    def tree_digest(self, revision: str) -> str:
+        """Deterministic digest over the tree's canonical manifest.
+
+        The digest covers paths, modes and blob ids, so two materializations of
+        the same revision produce the same value. Hashing blob *contents* rather
+        than git's object ids (to remove the object-format dependency) is a
+        later refinement; the manifest records which object format was used.
+        """
+        hasher = hashlib.sha256()
+        for mode, object_id, path in self.manifest(revision):
+            hasher.update(f"{path}\x00{mode}\x00{object_id}\n".encode("utf-8"))
+        return hasher.hexdigest()
 
     def read_text(self, revision: str, path: str) -> str:
         self.resolve_revision(revision)

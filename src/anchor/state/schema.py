@@ -45,6 +45,16 @@ retention_audit = sa.Table("retention_audit", metadata,
     sa.Column("freed_bytes", sa.BigInteger, nullable=False),
     sa.Column("detail", json_type, nullable=False))
 
+prepared_revisions = sa.Table("prepared_revisions", metadata,
+    identifier("node_run_id", primary_key=True),
+    sa.Column("attempt", sa.Integer, primary_key=True),
+    identifier("run_id", nullable=False),
+    sa.Column("workspace_id", sa.String(200), nullable=False),
+    sa.Column("revision", sa.String(200), nullable=False),
+    sa.Column("manifest_digest", sa.String(64), nullable=False),
+    sa.Column("verifier_result", json_type),
+    timestamp("created_at"))
+
 workspaces = sa.Table("workspaces", metadata,
     sa.Column("workspace_id", sa.String(200), primary_key=True),
     sa.Column("project_id", sa.String(200), nullable=False),

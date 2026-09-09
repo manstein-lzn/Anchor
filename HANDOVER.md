@@ -4,6 +4,17 @@
 
 本次交接核对时间：`2026-09-08 22:00 CST`；Verifier 收尾与执行策略会话完成下述验收并更新本文。
 
+## W1.2：提交/对账协议（2026-09-09，ADR-031）
+
+- `prepared_revisions`（migration `0020_prepared_revisions`）：freeze 与事件提交之间的持久窗口。
+- `ContentCommitter`：`prepare`（幂等冻结+记录 digest）→ `record_verification` → `commit`
+  （幂等控制提交后清除标记）→ `reconcile`（收敛 5 个崩溃窗口）。
+- **内容不可读时报告 `inconsistent` 且不改动**，绝不从 live workspace 猜测（I2）。
+- `GitWorkspaceBackend.manifest/tree_digest`：对 `(path, mode, blob id)` 规范化求 sha256；
+  内容寻址而非对象 id 的版本留待后续（已在 WORKSPACE.md 记录）。
+- 证据：`tests/test_content_commit.py` 7 passed，覆盖 W1–W5 崩溃窗口、幂等、并发对账；
+  门禁绿（ruff C901 13、mypy 97）；架构测试绿。
+
 ## W1.1：可写工作区（2026-09-09，ADR-030）
 
 - `workspaces` + `workspace_operations`（migration `0019_workspaces`）：生命周期

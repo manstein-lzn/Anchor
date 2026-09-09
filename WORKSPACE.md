@@ -370,7 +370,8 @@ agent × {
 | **W0.2** | 只读内容源：Project 注册 + git 只读读取（ADR-028） | ✅ 已完成 |
 | **W0.3** | 只读沙箱执行：materialize + 只读挂载 + 命令白名单（ADR-029） | ✅ 已完成 |
 | **W1.1** | 可写工作区：worktree fork + 写入网关 + 冻结/归档（ADR-030） | ✅ 已完成 |
-| **W1.2** | 提交/对账协议 + 故障注入 | 中高 |
+| **W1.2** | 提交/对账协议 + prepared 窗口 + 故障注入（ADR-031） | ✅ 已完成 |
+| **W1.3** | 节点级接线：输入 revision → 输出 revision + 对账接入 supervisor | 中高 |
 | **W1** | 单写者 + 冻结/提交协议（operation/commit/event） | 中 |
 | **W2** | exec 沙箱（网络白名单、资源上限、密钥注入） | 中高 |
 | **W3** | 并行 fork/merge（`require_clean`） | 高 |

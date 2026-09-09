@@ -653,3 +653,34 @@ The workspace record therefore tracks a lifecycle and a lineage, not the bytes.
 The content-plane routes moved to `api/routes_content.py` to keep the
 composition root inside its module budget, and were split into project and
 workspace registrars to stay inside the complexity budget.
+
+## ADR-031: The content commit is a protocol with an explicit prepared window
+
+The content store and the control store cannot share a transaction, so a content
+commit is a sequence of idempotent steps with a recorded window between them:
+freeze the bytes, record the prepared revision, run the verifier, commit the
+control event, then clear the marker. `prepared_revisions` (0020) makes that
+window durable instead of in-process.
+
+`ContentCommitter` owns the protocol:
+
+- `prepare` freezes the workspace and records `(node_run_id, attempt, revision,
+  manifest_digest)`; it is idempotent, so a retry cannot overwrite the revision a
+  reconciler is already working from.
+- `record_verification` persists the verdict into the prepared record, so the
+  reconciler can finish the commit without re-running a non-deterministic
+  verifier.
+- `commit` runs the caller's idempotent control commit and clears the marker.
+- `reconcile` converges every crash window: already committed -> clear; verified
+  -> commit; not yet verified -> verify then commit; content unavailable ->
+  report `inconsistent` and change nothing. A revision whose bytes vanished is
+  never guessed from a live workspace (I2).
+
+The manifest digest is Anchor-computed over the canonical `(path, mode, blob id)`
+listing, so two materializations of a revision agree. Hashing blob contents
+rather than git object ids (to remove the object-format dependency) is a later
+refinement and is recorded as such in `WORKSPACE.md`.
+
+Fault injection for all five windows runs in `tests/test_content_commit.py`; the
+two invariants it pins are that a control commit never runs twice and an
+unavailable revision is never committed.
