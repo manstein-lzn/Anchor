@@ -500,3 +500,51 @@ to shrink the file; PostgreSQL reclaims internally). Every sweep writes a
 With no budget configured the sweep is a no-op, so retention can never surprise
 an install that has not opted in. `ANCHOR_STORAGE_ENFORCE=false` turns
 enforcement off entirely, leaving budgets advisory.
+
+## ADR-026: A content plane, joined to the control plane by a recovery closure
+
+Anchor needs a durable, versioned, executable workspace to support code work. The
+previous absence was not an oversight of tools but a modelling gap: ADR-012's
+"private workspace" is the ephemeral per-tool-call sandbox directory, so the
+durable shared workspace was never a first-class entity. Sandbox (a security
+boundary) and workspace (a persistence entity) must be modelled separately.
+
+The architecture adds a content plane without making it a second source of truth.
+The model is a **Recovery Closure**: the immutable control event history decides
+which revisions belong to a run; the content store owns their bytes; the two are
+linked by an immutable `content_ref` (`artifact://sha256/...` or
+`workspace://<id>@<immutable-revision>/<path>`). A referenced revision that
+cannot be resolved or verified fails the run closed. Mutable workspaces, sandbox
+state, caches, memory, vector indexes and summaries stay non-canonical
+projections. I2 is rewritten accordingly and I9 is split into R0-R3 replay levels.
+
+Decisions that were previously open and are now settled:
+
+- **Git-first for code, CAS-backed for generic trees**, unified by one
+  `WorkspaceRevision` abstraction with an Anchor-computed `tree_digest` so the
+  semantics do not depend on git's object format.
+- **A graph declares the workspace contract; a run instantiates an isolated
+  worktree.** A graph never owns a mutable workspace, so concurrent runs of the
+  same graph cannot collide.
+- **Node-level revision lineage**: each node consumes declared input revisions
+  and produces its own output revision. Concurrency safety comes from immutable
+  inputs plus explicit merge, so a workspace write lock is resource control, not a
+  correctness mechanism.
+- **`merge_policy: require_clean`** for v1: a merge conflict fails closed and
+  escalates to a human task with both revisions as evidence.
+- **Verification runs against the frozen revision** (read-only workspace, separate
+  scratch); a rejected revision stays referenced by the failure event and is not
+  garbage-collected.
+- **Revision content set is the `git add -A` tree**; ignored dependencies and
+  build outputs live in a shared cache, and evidence-producing outputs go to
+  artifacts.
+
+Commit ordering across the two stores uses prepare/freeze/commit/reconcile with
+idempotency keys, because the event store and content store cannot share a
+transaction. See `WORKSPACE.md`, `CONTENT_COMMIT_PROTOCOL.md` and
+`WORKSPACE_STORAGE.md`.
+
+Evidence: `docs/deep-research-report.md` (external research). Its conclusions
+agree with this decision; its citations were delivered as internal markers
+without URLs, so it is treated as directional evidence, not as a verifiable
+source, until an appendix with URLs is supplied.

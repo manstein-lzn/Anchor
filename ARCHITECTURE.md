@@ -67,11 +67,18 @@ node output is an immutable artifact blob. Supporting code-development work
 requires a second plane — a durable, versioned, executable workspace — without
 losing replayability or audit.
 
-`WORKSPACE.md` defines the proposed two-plane boundary: the control plane owns
-"what happened" (events, leases, decisions, operations), the content plane owns
-"what exists" (git-versioned workspace, immutable artifacts), and the two are
-linked by a pinned `content_ref`. That document is a design proposal awaiting the
-external research in `docs/AGENT_ARCHITECTURE_RESEARCH_BRIEF.md`; no
+`WORKSPACE.md` defines the boundary. The model is not "two sources of truth" but
+a **Recovery Closure**: the control event history decides which revisions belong
+to a run, the content store owns their bytes, and the two are linked by an
+immutable `content_ref`. Supporting documents:
+
+- `CONTENT_COMMIT_PROTOCOL.md` — prepare/freeze/commit/reconcile and its crash windows
+- `WORKSPACE_STORAGE.md` — copy-on-write hydration, quotas and reachability GC
+
+A graph only *declares* a workspace contract; a run *instantiates* an isolated
+worktree; each node consumes declared input revisions and produces its own output
+revision. Concurrency safety comes from immutable inputs plus explicit merge, so a
+workspace write lock is a resource control, not a correctness mechanism. No
 implementation starts before the boundary is agreed.
 
 ## Build-versus-assemble boundary

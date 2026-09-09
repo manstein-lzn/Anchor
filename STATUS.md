@@ -110,6 +110,10 @@
   queryable by id) and run-list filtering by status/id
 - Runtime-adjustable storage budgets (install-wide + per graph) with a read-only
   `GET /api/storage` footprint report and a Web 存储 view
+- Content-plane architecture decided (ADR-026): Recovery Closure model, Git-first +
+  CAS-backed `WorkspaceRevision`, per-run workspace with node-level revision lineage,
+  `require_clean` merge, verification against a frozen revision
+- Design docs: `WORKSPACE.md`, `CONTENT_COMMIT_PROTOCOL.md`, `WORKSPACE_STORAGE.md`
 - Rolling retention sweep (scheduler): evicts oldest finished runs over budget,
   skips in-flight/waiting/unknown runs, garbage-collects orphan artifacts, vacuums,
   and audits every sweep; no budget means no deletion

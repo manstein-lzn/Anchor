@@ -4,6 +4,22 @@
 
 本次交接核对时间：`2026-09-08 22:00 CST`；Verifier 收尾与执行策略会话完成下述验收并更新本文。
 
+## 内容面架构决策（2026-09-09，ADR-026）
+
+- 现状：控制面约 3077 行、内容面约 242 行（12.7:1）。工作区从未被建模，原因是
+  ADR-012 的 "private workspace" 指**每次工具调用的临时沙箱目录**，同名词掩盖了缺口。
+- 决策：新增内容面，但**不引入第二真相来源**。模型是 **Recovery Closure**——控制事件历史
+  决定"哪些 revision 属于该 run"，内容存储拥有其字节，两者由不可变 `content_ref` 连接。
+- I2 已改写为 Canonical Recovery Closure；I9 拆分为 R0–R3 复现等级（只有 R0/R1 是保证）。
+- 已收敛、不再讨论：Git-first（代码）+ CAS-backed（通用树），统一 `WorkspaceRevision` 且
+  Anchor 自算 `tree_digest`；graph **声明**契约、run **实例化**工作树、节点级 revision 血缘；
+  `merge_policy: require_clean`；验证器只读冻结 revision；并发靠不可变性而非写锁。
+- 文档：`WORKSPACE.md`（v2 边界）、`CONTENT_COMMIT_PROTOCOL.md`（提交/对账 + 故障注入矩阵）、
+  `WORKSPACE_STORAGE.md`（CoW/配额/可达性 GC）、`docs/deep-research-report.md`（外部调研）。
+- 证据声明：调研报告结论与本决策一致，但其引用以内部标记交付、无可点击 URL，暂作方向性证据，
+  待补引用附录后方可作为可核查依据。
+- 下一步：W0（只读工作区 + `content_ref`）设计细化；调研引用附录；两份工程文档的 benchmark。
+
 ## 架构精简（2026-09-08，ADR-021）
 
 - `relational.py` 1599 行/81 方法 → 23 行组合门面 + 6 个按事务边界拆分的 mixin

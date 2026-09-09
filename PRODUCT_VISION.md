@@ -50,29 +50,44 @@ For every published graph, Anchor must make it possible to answer:
 
 ## Non-negotiable requirements
 
-- Graph definitions are declarative, validated, versioned, and immutable after
-  publication.
-- A run is pinned to graph, runtime, policy, model, skill, and tool versions.
-- Canonical State and append-only events are the recovery source; context and memory
-  are projections with provenance and retention rules.
-  > **Under revision (see `WORKSPACE.md`).** Introducing a durable content plane
-  > (a versioned, executable workspace) means "what happened" and "what exists"
-  > need separate recovery sources linked by a pinned content reference. The
-  > exact wording is pending the architecture research; the requirement that any
-  > unresolvable reference fails closed rather than degrading silently is not.
-- Every side effect has an operation id, idempotency semantics, authorization, and an
-  audit record.
-- Long waits release workers and resume from durable state; UI disconnects do not
-  terminate work.
-- Completion requires deterministic or domain-specific verification, not a model's
-  natural-language claim.
-- Normal Agent progress should not be interrupted by guessed numeric limits. Safety
-  comes from an adaptive watchdog that detects stalls, disconnected workers,
-  repeated side effects, and non-progressing cycles.
-- Manual, scheduled, and event triggers all pass through the same idempotent task/run
-  creation path.
-- The product remains usable without a specific model provider, workflow engine,
-  vector database, or observability vendor.
+Numbered I1-I9; `WORKSPACE.md`, `AGENT_SURFACE.md` and the architecture research
+brief refer to these labels.
+
+- **I1 — Immutable plan, pinned run.** Graph definitions are declarative, validated,
+  versioned, and immutable after publication. A run is pinned to graph, runtime,
+  policy, model, skill, and tool versions.
+- **I2 — Canonical Recovery Closure.** A run's canonical recovery state is the closure
+  of the immutable control event history together with the content revisions it
+  references through immutable `content_ref` values, each integrity-verified. The
+  event history is the sole canonical source of execution state, decisions,
+  authorization, side-effect intent and state transitions; a content revision is only
+  the immutable byte fact that history references. Mutable workspaces, sandbox/VM
+  state, caches, memory, vector indexes and summaries are rebuildable or discardable
+  projections and must never independently determine recovery. A referenced revision
+  that cannot be resolved or verified fails the run closed rather than degrading
+  silently.
+- **I3 — Side-effect ledger.** Every side effect has an operation id, idempotency
+  semantics, authorization, and an audit record. Manual, scheduled, and event triggers
+  all pass through the same idempotent task/run creation path.
+- **I4 — Verification gate.** Completion requires deterministic or domain-specific
+  verification, not a model's natural-language claim.
+- **I5 — Durable waits.** Long waits release workers and resume from durable state;
+  UI disconnects do not terminate work.
+- **I6 — No guessed limits.** Normal Agent progress should not be interrupted by
+  guessed numeric limits. Safety comes from an adaptive watchdog that detects stalls,
+  disconnected workers, repeated side effects, and non-progressing cycles.
+- **I7 — Vendor neutrality.** The product remains usable without a specific model
+  provider, workflow engine, vector database, or observability vendor.
+- **I8 — Declarative inputs.** A node sees only the inputs its incoming edges declare.
+  Shared physical state (a workspace, a cache, a memory store) never implies shared
+  visibility.
+- **I9 — Forensic replay.** Given the pinned graph/runtime/tool/policy versions, the
+  declared inputs, the recorded non-deterministic call results and the immutable
+  content references, the same state transitions and decision path can be replayed.
+  Levels: **R0** event-history forensic replay; **R1** deterministic simulation at the
+  same revision/runtime with stubbed model results; **R2** fresh re-execution pinned
+  to the same model version; **R3** re-execution on the current model. Only R0 and R1
+  are guarantees; R2/R3 are recorded and diffed, never claimed identical.
 
 ## Acceptance scenarios
 
