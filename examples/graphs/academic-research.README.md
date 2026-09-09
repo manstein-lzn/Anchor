@@ -90,9 +90,13 @@ The CLI can also be used against another API with `--api-url` and `--token-file`
 - A source must match an actual search result and successful tool operation in
   the same Run. Reading evidence must match a retrieved URL for that source.
   Numeric citations and source coverage are checked before exporting.
-- The reference list is generated from retrieved metadata. The paper includes
-  Abstract, Introduction, Methods, Literature Review, Discussion, Limitations,
-  Conclusion, References and a retrieval-evidence appendix.
+- The reference list is generated from retrieved metadata. The paper follows the
+  converged survey skeleton (Abstract, Introduction, Survey Methodology, a
+  thematic body of 2-6 sections named by the field's own axes, Threats to
+  Validity, Conclusion) and ends with References. The retrieval-evidence record
+  (evidence level and content hashes per source) is exported beside the paper as
+  `provenance.md`, not inside it: a reader cannot resolve a content hash, and an
+  operator can already query the run's operation ledger.
 - `context_mode: full` explicitly preserves long manuscript and JSON inputs for
   these nodes. Other existing graphs retain their compact context behavior.
 

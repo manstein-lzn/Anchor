@@ -156,8 +156,12 @@ def test_craft_gate_routes_a_writing_defect_back_to_the_writer(tmp_path, monkeyp
         text = artifacts.get_text(report.output_ref)
         assert text.startswith(manuscript().rstrip())
         assert "## References" in text and "Real metadata title" in text
-        assert "## Retrieval Evidence" in text and evidence["sources"][0]["evidence_ref"] in text
-        assert (artifacts.root / "reports" / str(receipt.run_id) / "report.md").read_text() == text
+        assert "Retrieval Evidence" not in text, "provenance must not ship inside the paper"
+        assert "artifact://" not in text
+        report_dir = artifacts.root / "reports" / str(receipt.run_id)
+        assert report_dir.joinpath("report.md").read_text() == text
+        provenance = report_dir.joinpath("provenance.md").read_text()
+        assert evidence["sources"][0]["evidence_ref"] in provenance
     finally:
         store.close()
 

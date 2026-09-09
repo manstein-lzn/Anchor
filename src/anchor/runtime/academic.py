@@ -320,24 +320,40 @@ def evaluate_review(snapshot: dict, *, store, artifacts, run_id, node_id: str) -
             "verified_sources": sources}
 
 
-def render_paper(snapshot: dict, *, run_id) -> str:
-    if snapshot.get("review", {}).get("verdict") != "pass":
-        raise ValueError("Only an approved academic review can publish a manuscript")
-    text = _extract_work(snapshot)["manuscript"].rstrip()
+def _references(snapshot: dict) -> list[str]:
     references = []
-    provenance = []
     for source in snapshot["verified_sources"]:
         authors = ", ".join(source.get("authors", [])) or "Author unavailable"
         label = "Preprint" if source.get("publication_type") == "preprint" else source.get("venue", "")
         references.append(f"[{source['citation']}] {authors} ({source.get('year') or 'n.d.'}). "
                           f"{source['title']}. {label}. <{source['url']}>")
-        level = "document retrieved" if source.get("read_ref") else source.get("evidence_level", "metadata_only")
-        provenance.append(f"- [{source['citation']}] {source['retrieved_at']}; {level}; "
-                          f"search evidence: `{source['evidence_ref']}`" +
-                          (f"; reading evidence: `{source['read_ref']}`" if source.get("read_ref") else ""))
-    return (text + "\n\n## References\n\n" + "\n\n".join(references)
-            + "\n\n## Retrieval Evidence\n\nRun: `" + str(run_id) + "`\n\n"
-            + "\n".join(provenance) + "\n")
+    return references
+
+
+def render_paper(snapshot: dict, *, run_id) -> str:
+    """The reader-facing deliverable: the manuscript and its references.
+
+    Provenance is a machine artifact. It stays out of the paper and is exported
+    separately, because a reader cannot resolve a content hash and an operator
+    can already query the run's operation ledger.
+    """
+    if snapshot.get("review", {}).get("verdict") != "pass":
+        raise ValueError("Only an approved academic review can publish a manuscript")
+    text = _extract_work(snapshot)["manuscript"].rstrip()
+    return text + "\n\n## References\n\n" + "\n\n".join(_references(snapshot)) + "\n"
+
+
+def render_provenance(snapshot: dict, *, run_id) -> str:
+    """The audit record: evidence level and content hashes per source."""
+    lines = ["# Retrieval evidence", "", f"Run: `{run_id}`", ""]
+    for source in snapshot["verified_sources"]:
+        level = ("document retrieved" if source.get("read_ref")
+                 else source.get("evidence_level", "metadata_only"))
+        lines.append(f"- [{source['citation']}] {source['retrieved_at']}; {level}; "
+                     f"search evidence: `{source['evidence_ref']}`"
+                     + (f"; reading evidence: `{source['read_ref']}`"
+                        if source.get("read_ref") else ""))
+    return "\n".join(lines) + "\n"
 
 
 # ---------------------------------------------------------------------------
@@ -390,7 +406,11 @@ class MarkdownReportBehavior:
         return None
 
     def execute_control(self, snapshot: dict, *, store, artifacts, run_id, node_id) -> str:
-        return render_paper(snapshot["approved"], run_id=run_id)
+        approved = snapshot["approved"]
+        # The audit record ships beside the paper, not inside it.
+        artifacts.export_markdown(run_id, "provenance",
+                                  render_provenance(approved, run_id=run_id))
+        return render_paper(approved, run_id=run_id)
 
 
 ACADEMIC_BEHAVIORS = {
