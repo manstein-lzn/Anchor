@@ -373,7 +373,11 @@ def validate_manuscript(work: dict, *, operations, artifacts, minimum_sources: i
         errors.append(f"Need at least {minimum_sources} distinct cited and retrieved sources")
     if len(read_ids) < minimum_reads:
         errors.append(f"Need at least {minimum_reads} source documents read beyond the search listing")
-    errors.extend(unsupported_number_claims(manuscript, read_numbers))
+    # A number whose source was only read at abstract level is the author's to
+    # fix: drop the number, or point it at a source that was read in full. Left
+    # as an evidence defect it restarts the whole campaign for one sentence,
+    # because the gatherer cannot always obtain the full text.
+    writing.extend(unsupported_number_claims(manuscript, read_numbers))
     target = "evidence" if errors else ("manuscript" if writing or craft else "none")
     return (errors + writing + craft, sorted(canonical_sources, key=lambda source: source["citation"]),
             target)
