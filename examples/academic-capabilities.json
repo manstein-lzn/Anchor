@@ -60,7 +60,8 @@
         "scholarly.search": 4,
         "scholarly.read": 4
       },
-      "max_parallel_tools": 2
+      "max_parallel_tools": 2,
+      "output_retries": 1
     }
   ],
   "tools": [
