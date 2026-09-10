@@ -8,6 +8,7 @@ validated IP address while retaining the original TLS hostname.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 import ipaddress
 import json
@@ -24,7 +25,10 @@ from anchor.domain.models import DomainModel
 
 
 MAX_RESPONSE_BYTES = 8_000_000
-RESEARCH_TOOLS = frozenset({"scholarly.search", "scholarly.read", "scholarly.citations"})
+RESEARCH_TOOLS = frozenset({"scholarly.search", "scholarly.read", "scholarly.read_many",
+                           "scholarly.citations"})
+# Documents per batch read. Bounded so one call cannot monopolise a round.
+BATCH_READ_LIMIT = 8
 _ARXIV_LOCK = threading.Lock()
 _ARXIV_LAST_REQUEST = 0.0
 _CROSSREF_LOCK = threading.Lock()
@@ -106,6 +110,9 @@ class ResearchRequest(DomainModel):
     # paper cites) and forwards (what cites it).
     identifier: str | None = Field(default=None, min_length=1, max_length=300)
     direction: str = Field(default="cited_by", pattern="^(cites|cited_by)$")
+    # Batch reads: fetching a group in one call keeps the model out of the I/O
+    # loop, which is where a research campaign spends most of its wall clock.
+    urls: list[str] | None = Field(default=None, max_length=BATCH_READ_LIMIT)
 
 
 def public_address(hostname: str, port: int) -> str:
@@ -255,34 +262,45 @@ def search(request: ResearchRequest, *, timeout_seconds: float) -> dict:
     return {"source": "arxiv", "query": request.query, "request_url": final_url, "papers": papers}
 
 
-def read(request: ResearchRequest, *, timeout_seconds: float) -> dict:
-    if not request.url:
-        raise ValueError("scholarly.read requires url")
-    # An arXiv /abs/ page is the abstract, which the search result already
-    # contains. Reading it spends the read budget without adding evidence, so
-    # the adapter refuses it and points at the full text instead.
-    if re.match(r"https?://(?:www\.)?arxiv\.org/abs/", request.url):
+def _fetch_document(url: str, *, offset: int, page_start: int, timeout_seconds: float) -> dict:
+    """Fetch one document and extract a bounded excerpt.
+
+    Shared by the single and batch read paths so their provenance, HTML
+    preference and extraction behave identically.
+    """
+    if re.match(r"https?://(?:www\.)?arxiv\.org/abs/", url):
         raise ResearchToolError(
             "abstract_page",
             "arXiv /abs/ is the abstract page, not the paper; read "
             "https://arxiv.org/pdf/<id> for the full text")
-    url, content_type, body = fetch_public(request.url, timeout_seconds=timeout_seconds)
+    # Ask for the arXiv HTML rendering first: it is smaller and cleaner than the
+    # PDF, and going straight to it costs one request instead of two. Each source
+    # request is paced, so a wasted probe doubles the wall clock of a batch.
+    if re.match(r"https?://(?:www\.)?arxiv\.org/pdf/", url):
+        html_url = re.sub(r"/pdf/", "/html/", url).removesuffix(".pdf")
+        try:
+            final, content_type, body = fetch_public(html_url, timeout_seconds=timeout_seconds)
+        except ResearchToolError:
+            final, content_type, body = fetch_public(url, timeout_seconds=timeout_seconds)
+    else:
+        final, content_type, body = fetch_public(url, timeout_seconds=timeout_seconds)
     page_count = None
     if "application/pdf" in content_type or body.startswith(b"%PDF-"):
         from pypdf import PdfReader
 
         pdf = PdfReader(BytesIO(body))
         page_count = len(pdf.pages)
-        if request.page_start >= page_count:
+        if page_start >= page_count:
             raise ValueError("page_start is beyond the document")
-        text = "\n\n".join(page.extract_text() or "" for page in pdf.pages[request.page_start:request.page_start + 40])
+        text = "\n\n".join(page.extract_text() or ""
+                           for page in pdf.pages[page_start:page_start + 40])
         title = (pdf.metadata.title if pdf.metadata else None) or ""
-        truncated = page_count > request.page_start + 40
+        truncated = page_count > page_start + 40
     elif "html" in content_type or body.lstrip().startswith((b"<!", b"<html")):
         import trafilatura
 
-        text = trafilatura.extract(body, url=url, include_tables=True, include_links=True) or ""
-        metadata = trafilatura.extract_metadata(body, default_url=url)
+        text = trafilatura.extract(body, url=final, include_tables=True, include_links=True) or ""
+        metadata = trafilatura.extract_metadata(body, default_url=final)
         title = metadata.title if metadata else ""
         truncated = False
     elif content_type.startswith("text/plain"):
@@ -291,18 +309,55 @@ def read(request: ResearchRequest, *, timeout_seconds: float) -> dict:
         raise ValueError("source is not a supported HTML, PDF, or text document")
     if len(text.strip()) < 100:
         raise ValueError("source contains no extractable article text; it may require access or OCR")
-    if request.offset >= len(text):
+    if offset >= len(text):
         raise ValueError("offset is beyond the extracted document text")
-    excerpt = text[request.offset:request.offset + 24000]
-    next_offset = request.offset + len(excerpt) if request.offset + len(excerpt) < len(text) else None
-    return {"url": url, "requested_url": request.url, "title": title,
+    excerpt = text[offset:offset + 24000]
+    next_offset = offset + len(excerpt) if offset + len(excerpt) < len(text) else None
+    return {"url": final, "requested_url": url, "title": title,
             "content_type": content_type, "text": excerpt,
-            "truncated": truncated or next_offset is not None or request.offset > 0 or request.page_start > 0,
-            "pages": page_count, "page_start": request.page_start, "offset": request.offset,
+            "truncated": (truncated or next_offset is not None or offset > 0 or page_start > 0),
+            "pages": page_count, "page_start": page_start, "offset": offset,
             "next_offset": next_offset,
-            "next_page_start": request.page_start + 40 if truncated and page_count else None,
-            "evidence_level": "retrieved_text", "extracted_characters": len(text),
-            "caution": "Retrieved text may be a landing page, abstract, or partial full text. Inspect it before making claims."}
+            **({"next_page_start": page_start + 40} if truncated else {})}
+
+
+def read_many(request: ResearchRequest, *, timeout_seconds: float) -> dict:
+    """Read several documents in one call, one bounded excerpt per document.
+
+    The adapter still paces each source, so this does not evade a rate limit; it
+    removes the model from the inner I/O loop. One model turn can now cover a
+    group of papers instead of one paper per turn.
+    """
+    urls = list(request.urls or [])
+    if not urls:
+        raise ValueError("scholarly.read_many requires urls")
+    documents: list[dict] = []
+    with ThreadPoolExecutor(max_workers=min(len(urls), BATCH_READ_LIMIT)) as pool:
+        futures = {
+            pool.submit(_fetch_document, url, offset=0, page_start=0,
+                        timeout_seconds=timeout_seconds): url
+            for url in urls
+        }
+        for future in futures:
+            url = futures[future]
+            try:
+                documents.append(future.result())
+            except Exception as exc:  # noqa: BLE001 - one bad document must not fail the batch
+                documents.append({"requested_url": url, "url": None, "title": "",
+                                  "content_type": None, "text": "",
+                                  "error": f"{type(exc).__name__}: {str(exc)[:200]}",
+                                  "evidence_available": False})
+    documents.sort(key=lambda item: urls.index(item["requested_url"]))
+    return {"requested_urls": urls, "documents": documents,
+            "retrieved": sum(1 for item in documents if item.get("text"))}
+
+
+def read(request: ResearchRequest, *, timeout_seconds: float) -> dict:
+    if not request.url:
+        raise ValueError("scholarly.read requires url")
+    return _fetch_document(request.url, offset=request.offset,
+                           page_start=request.page_start,
+                           timeout_seconds=timeout_seconds)
 
 
 def _openalex_abstract(item: dict) -> str:
@@ -385,6 +440,8 @@ def citations(request: ResearchRequest, *, timeout_seconds: float) -> dict:
 def execute_research(tool_ref: str, request: ResearchRequest, *, timeout_seconds: float) -> str:
     if tool_ref == "scholarly.search":
         result = search(request, timeout_seconds=timeout_seconds)
+    elif tool_ref == "scholarly.read_many":
+        result = read_many(request, timeout_seconds=timeout_seconds)
     elif tool_ref == "scholarly.citations":
         result = citations(request, timeout_seconds=timeout_seconds)
     else:

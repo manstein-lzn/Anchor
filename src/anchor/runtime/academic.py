@@ -310,11 +310,18 @@ def validate_manuscript(work: dict, *, operations, artifacts, minimum_sources: i
                          "retrieved_at": evidence["retrieved_at"], "read_ref": None}
             read_ref = source.get("read_ref")
             if read_ref:
-                if not isinstance(read_ref, str) or successful.get(read_ref) != "scholarly.read":
+                if (not isinstance(read_ref, str)
+                        or successful.get(read_ref) not in ("scholarly.read", "scholarly.read_many")):
                     raise ValueError("read_ref is not a successful document read in this Run")
                 reading = json.loads(artifacts.get_text(read_ref))
+                # A batch read records one entry per requested document, so the
+                # match is against every URL the batch actually asked for.
+                if isinstance(reading.get("documents"), list):
+                    requested = {item.get("requested_url") for item in reading["documents"]}
+                else:
+                    requested = {reading.get("requested_url")}
                 allowed_urls = {observed.get("url"), *observed.get("fulltext_urls", [])}
-                if reading.get("requested_url") not in allowed_urls:
+                if not (requested & allowed_urls):
                     raise ValueError("document read does not match the retrieved source URLs")
                 canonical["read_ref"] = read_ref
                 canonical["read_truncated"] = reading.get("truncated", False)
