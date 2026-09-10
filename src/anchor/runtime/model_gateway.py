@@ -23,6 +23,12 @@ class ModelResponse:
     output_tokens: int = 0
     requests: int = 0
     cost: float | None = None
+    # `input_tokens` is the gross prompt size. A tool loop re-sends its whole
+    # conversation every call, so most of that is a prefix the provider serves
+    # from cache at a fraction of the price. Recording the cached share is what
+    # separates a frightening token counter from the amount actually charged.
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
 
 
 @dataclass(frozen=True)
@@ -120,6 +126,8 @@ class PydanticAIModelGateway:
             input_tokens=int(getattr(usage, "input_tokens", 0) or 0),
             output_tokens=int(getattr(usage, "output_tokens", 0) or 0),
             requests=int(getattr(usage, "requests", 0) or 0),
+            cache_read_tokens=int(getattr(usage, "cache_read_tokens", 0) or 0),
+            cache_write_tokens=int(getattr(usage, "cache_write_tokens", 0) or 0),
             cost=float(raw_cost) if raw_cost is not None else None)
 
     async def generate_with_tools(self, *, prompt: str, system_prompt: str = "",

@@ -261,6 +261,8 @@ def create_app(store: RelationalStateStore | None = None, token: str | None = No
                            "model_ref": item.model_ref} for item in config.verifiers],
         }
 
+    from anchor.api.routes_usage import register_usage_routes
+    register_usage_routes(app, auth=auth, db=DB, required=required)
     register_content_routes(app, auth=auth, db=DB, required=required)
 
     @app.get("/api/graphs/ir", dependencies=auth)
@@ -568,37 +570,6 @@ def create_app(store: RelationalStateStore | None = None, token: str | None = No
     def operations(run_id: UUID, db: DB):
         required(db.get_run(run_id))
         return db.list_tool_operations(run_id)
-
-    @app.get("/api/runs/{run_id}/usage", dependencies=auth)
-    def run_usage(run_id: UUID, db: DB):
-        """Token spend for the run, per node.
-
-        An agent tool loop re-sends its conversation on every call, so a node
-        attempt can cost millions of input tokens. This endpoint exists so that
-        spend is visible while it happens instead of on the provider invoice.
-        """
-        required(db.get_run(run_id))
-        by_node: dict[str, dict] = {}
-        total = {"input_tokens": 0, "output_tokens": 0, "requests": 0, "cost": 0.0, "calls": 0}
-        for event in db.list_events(run_id):
-            if event.get("event_type") != "model.usage":
-                continue
-            payload = event.get("payload") or {}
-            node = str(payload.get("node_id") or "?")
-            entry = by_node.setdefault(node, {"node_id": node, "input_tokens": 0,
-                                              "output_tokens": 0, "requests": 0,
-                                              "cost": 0.0, "calls": 0})
-            for key in ("input_tokens", "output_tokens", "requests"):
-                value = int(payload.get(key) or 0)
-                entry[key] += value
-                total[key] += value
-            if payload.get("cost") is not None:
-                entry["cost"] += float(payload["cost"])
-                total["cost"] += float(payload["cost"])
-            entry["calls"] += 1
-            total["calls"] += 1
-        return {"run_id": str(run_id), "total": total,
-                "by_node": sorted(by_node.values(), key=lambda item: -item["input_tokens"])}
 
     @app.post("/api/operations/{operation_id}/reconcile", dependencies=auth)
     def reconcile_operation(operation_id: UUID, body: OperationReconciliation, db: DB):

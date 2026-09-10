@@ -276,7 +276,9 @@ class AgentNodeWorker:
                                      "model": response.model, "provider": response.provider,
                                      "input_tokens": response.input_tokens,
                                      "output_tokens": response.output_tokens,
-                                     "requests": response.requests, "cost": response.cost},
+                                     "requests": response.requests, "cost": response.cost,
+                                     "cache_read_tokens": response.cache_read_tokens,
+                                     "cache_write_tokens": response.cache_write_tokens},
                             idempotency_key=f"usage:{lease.node_run_id}:{response.response_id or 'x'}")
                     if agent.output_format == "json":
                         for retry in range(agent.output_retries + 1):
