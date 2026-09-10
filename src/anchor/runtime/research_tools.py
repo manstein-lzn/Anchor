@@ -375,8 +375,17 @@ def _openalex_abstract(item: dict) -> str:
 def _openalex_paper(item: dict) -> dict:
     doi = (item.get("doi") or "").removeprefix("https://doi.org/")
     abstract = _openalex_abstract(item)
-    location = item.get("best_oa_location") or {}
-    urls = [url for url in (location.get("pdf_url"), location.get("landing_page_url")) if url]
+    # Every location, not just the best open-access one: a paper is routinely
+    # available as a publisher record and as an arXiv preprint, and a reader that
+    # studies the preprint is reading the same work. Recording only one URL made
+    # that read look like a provenance mismatch.
+    urls: list[str] = []
+    for location in [item.get("best_oa_location"), *(item.get("locations") or [])]:
+        if not isinstance(location, dict):
+            continue
+        for url in (location.get("pdf_url"), location.get("landing_page_url")):
+            if url and url not in urls:
+                urls.append(url)
     return {
         "id": ("doi:" + doi) if doi else "openalex:" + str(item.get("id", "")).rsplit("/", 1)[-1],
         "doi": doi or None,

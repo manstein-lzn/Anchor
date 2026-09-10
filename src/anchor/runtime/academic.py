@@ -133,6 +133,40 @@ MAX_METHODS_CHARS = 2500
 RESULT_NUMBER = re.compile(r"\d+(?:\.\d+)?\s*(?:[x×倍]|%|个百分点)")
 
 
+def _title_tokens(value: object) -> set[str]:
+    """Lower-cased alphanumeric words of a title, for same-document checks."""
+    if not isinstance(value, str):
+        return set()
+    return {word for word in re.findall(r"[a-z0-9]{2,}", value.lower())}
+
+
+def _same_document(observed: dict, reading: dict) -> bool:
+    """Whether a read studied the source, by URL or by title.
+
+    One work is routinely reachable as a publisher record and as a preprint at a
+    different URL: a reader who studies the preprint is reading the same paper.
+    A title match is accepted as evidence of that, and never as evidence of a
+    different paper.
+    """
+    allowed = {url for url in [observed.get("url"), *(observed.get("fulltext_urls") or [])]
+               if isinstance(url, str)}
+    documents = reading.get("documents")
+    entries: list = list(documents) if isinstance(documents, list) else [reading]
+    requested = {item.get("requested_url") for item in entries if isinstance(item, dict)}
+    if allowed & requested:
+        return True
+    wanted = _title_tokens(observed.get("title"))
+    if len(wanted) < 4:
+        return False
+    for item in entries:
+        if not isinstance(item, dict):
+            continue
+        got = _title_tokens(item.get("title"))
+        if got and len(wanted & got) / len(wanted) >= 0.8:
+            return True
+    return False
+
+
 def citation_numbers(text: str) -> set[int]:
     return {int(number) for group in re.findall(r"\[(\d+(?:\s*,\s*\d+)*)\]", text)
             for number in group.split(",")}
@@ -314,14 +348,7 @@ def validate_manuscript(work: dict, *, operations, artifacts, minimum_sources: i
                         or successful.get(read_ref) not in ("scholarly.read", "scholarly.read_many")):
                     raise ValueError("read_ref is not a successful document read in this Run")
                 reading = json.loads(artifacts.get_text(read_ref))
-                # A batch read records one entry per requested document, so the
-                # match is against every URL the batch actually asked for.
-                if isinstance(reading.get("documents"), list):
-                    requested = {item.get("requested_url") for item in reading["documents"]}
-                else:
-                    requested = {reading.get("requested_url")}
-                allowed_urls = {observed.get("url"), *observed.get("fulltext_urls", [])}
-                if not (requested & allowed_urls):
+                if not _same_document(observed, reading):
                     raise ValueError("document read does not match the retrieved source URLs")
                 canonical["read_ref"] = read_ref
                 canonical["read_truncated"] = reading.get("truncated", False)
