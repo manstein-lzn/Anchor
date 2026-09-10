@@ -8,6 +8,8 @@ node when the process crashes.
 
 from __future__ import annotations
 
+import logging
+
 from dataclasses import dataclass
 import asyncio
 import json
@@ -20,6 +22,11 @@ from anchor.domain.propagation import RoutingDecisionError
 from anchor.runtime.behaviors import BehaviorRegistry
 from anchor.runtime.capabilities import CapabilityRegistry, CapabilityRegistryError
 from anchor.runtime.context import input_hash
+
+logger = logging.getLogger("anchor.worker")
+
+# Consecutive lease-heartbeat failures tolerated before the attempt is failed.
+HEARTBEAT_FAILURE_LIMIT = 3
 from anchor.runtime.model_gateway import ModelGateway, ModelResponse
 from anchor.state.protocols import StateStore
 
@@ -221,11 +228,29 @@ class AgentNodeWorker:
             raise ValueError("heartbeat_interval must be positive")
         execution_task = asyncio.current_task()
         async def heartbeat() -> None:
+            failures = 0
             while True:
                 await asyncio.sleep(heartbeat_interval)
                 try:
                     self.store.heartbeat_node_lease(lease.claim_id, worker_id)
-                except Exception:  # noqa: BLE001 - one bad iteration must not stop the worker
+                    failures = 0
+                except Exception as exc:  # noqa: BLE001 - decided below
+                    failures += 1
+                    logger.exception(
+                        "node lease heartbeat failed for %s (attempt %d): %s: %s",
+                        lease.node_id, failures, type(exc).__name__, exc)
+                    if failures < HEARTBEAT_FAILURE_LIMIT:
+                        continue
+                    # Give up on this attempt, but leave a terminal node and a
+                    # released lease: a silent cancellation here used to strand
+                    # the node as `running` forever, with the run stuck behind it.
+                    try:
+                        self.store.fail_node_and_propagate(
+                            lease.claim_id, worker_id, error_code="lease_heartbeat_failed",
+                            phase="lease", input_snapshot=dict(input_snapshot or {}))
+                    except Exception:  # noqa: BLE001 - the cancel below is the backstop
+                        logger.exception("could not fail node %s after heartbeat loss",
+                                         lease.node_id)
                     execution_task.cancel()
                     return
         heartbeat_task = asyncio.create_task(heartbeat())
