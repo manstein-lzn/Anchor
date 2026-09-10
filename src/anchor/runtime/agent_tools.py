@@ -24,7 +24,10 @@ from anchor.runtime.content import ContentUnavailable
 from anchor.runtime.sandbox import SandboxDenied
 from anchor.runtime.workspace import WorkspaceError
 
-RETRY_CONTEXT_CHAR_BUDGET = 80_000
+# Bounded context for a genuine retry of an interrupted attempt. It is
+# re-sent on every model call, so it must stay small; a campaign round
+# carries its own coverage index and does not replay prior evidence.
+RETRY_CONTEXT_CHAR_BUDGET = 12_000
 PRIOR_EVIDENCE_LIMIT = 30
 
 
@@ -141,11 +144,24 @@ class AgentToolLoop:
         return functions
 
     def _prior_evidence(self, lease) -> tuple[list[dict], list[dict]]:
-        """Durable successful evidence from earlier attempts, for retry context."""
+        """Durable successful evidence from earlier attempts, for retry context.
+
+        Only an interrupted attempt needs its evidence replayed. When the
+        preceding attempt of this node completed, this is a fresh campaign round
+        rather than a retry: it already receives the coverage index, and
+        replaying the accumulated evidence would put tens of thousands of tokens
+        into the prompt of every model call for no new information.
+        """
         if not hasattr(self.tools.store, "list_tool_operations"):
             return [], []
-        node_ids = {str(node.id): node.node_id
-                    for node in self.tools.store.list_node_runs(lease.run_id)}
+        runs = self.tools.store.list_node_runs(lease.run_id)
+        current = next((item for item in runs if item.id == lease.node_run_id), None)
+        if current is not None:
+            earlier = [item for item in runs
+                       if item.node_id == lease.node_id and item.attempt < current.attempt]
+            if earlier and max(earlier, key=lambda item: item.attempt).status.value == "completed":
+                return [], []
+        node_ids = {str(node.id): node.node_id for node in runs}
         successful = [operation for operation in self.tools.store.list_tool_operations(lease.run_id)
                       if (node_ids.get(str(operation.node_run_id)) == lease.node_id
                           and operation.status.value == "succeeded" and operation.result_ref)]
