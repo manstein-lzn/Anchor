@@ -107,6 +107,44 @@ def unverifiable_sources(ledger: dict, operations) -> list[dict]:
     return bad
 
 
+def drop_unverifiable(ledger: dict, operations) -> tuple[dict, list[dict]]:
+    """Remove sources whose provenance cannot be verified in this Run.
+
+    The ledger is what the writer must cite in full, so a source whose evidence
+    or reading does not resolve makes the contract unsatisfiable: cite it and the
+    citation fails, omit it and the source is uncited. Such a source cannot be
+    evidence, so it is removed here and reported, never left to stall the loop.
+    """
+    successful = {item.result_ref: item.tool_ref for item in operations
+                  if item.status.value == "succeeded" and item.result_ref}
+    kept: list[dict] = []
+    dropped: list[dict] = []
+    for source in ledger.get("sources", []) or []:
+        evidence, reading = source.get("evidence_ref"), source.get("read_ref")
+        if successful.get(evidence) not in ("scholarly.search", "scholarly.citations"):
+            dropped.append({"id": source.get("id"),
+                            "problem": "evidence_ref is not a successful search or citation lookup"})
+            continue
+        if reading and successful.get(reading) not in ("scholarly.read", "scholarly.read_many"):
+            dropped.append({"id": source.get("id"),
+                            "problem": "read_ref is not a successful document read"})
+            continue
+        kept.append(source)
+    if not dropped:
+        return ledger, []
+    renumber = {source["id"]: index for index, source in enumerate(kept, start=1)}
+    return ({"sources": [{**source, "citation": renumber[source["id"]]} for source in kept],
+             "evidence_notes": [{**note, "citation": renumber[source["id"]]}
+                                for note in ledger.get("evidence_notes", []) or []
+                                for source in [next((s for s in ledger["sources"]
+                                                     if s.get("citation") == note.get("citation")), None)]
+                                if source and source["id"] in renumber],
+             "search_log": ledger.get("search_log", []),
+             "coverage": ledger.get("coverage", []),
+             "tensions": ledger.get("tensions", []),
+             "unresolved": ledger.get("unresolved", [])}, dropped)
+
+
 def evaluate_coverage(snapshot: dict, *, store, artifacts, run_id, node_id: str) -> dict:
     """Merge this round and decide whether research continues.
 
@@ -129,8 +167,14 @@ def evaluate_coverage(snapshot: dict, *, store, artifacts, run_id, node_id: str)
     # Re-entering after a published paper means the reviewer asked for more
     # evidence: start another campaign rather than re-deciding saturation.
     seed = not isinstance(prior, dict) or prior.get("decision") == "write"
+    operations = store.list_tool_operations(run_id)
     previous = prior.get("ledger") if isinstance(prior, dict) else None
+    if previous:
+        # Growth is measured against verifiable evidence only, so a dropped
+        # source neither counts as progress nor keeps a round alive.
+        previous, _ = drop_unverifiable(previous, operations)
     ledger = merge_ledger(previous, round_ledger)
+    ledger, removed = drop_unverifiable(ledger, operations)
     before = len((previous or {}).get("sources", []) or [])
     added = len(ledger["sources"]) - before
     gains = [float(gain) for gain in (prior.get("gains") or [])] if isinstance(prior, dict) else []
@@ -145,7 +189,7 @@ def evaluate_coverage(snapshot: dict, *, store, artifacts, run_id, node_id: str)
     converged = saturation or marginal or added <= 0
     rounds = (int(prior.get("round", 0)) if isinstance(prior, dict) else 0) + (0 if seed else 1)
     decision = "continue" if seed else ("write" if converged else "continue")
-    bad = unverifiable_sources(ledger, store.list_tool_operations(run_id))
+    bad = unverifiable_sources(ledger, operations)
     index = ledger_index(ledger)
     if bad:
         # Surface them to the next round and to the operator instead of
@@ -154,7 +198,7 @@ def evaluate_coverage(snapshot: dict, *, store, artifacts, run_id, node_id: str)
     return {**snapshot, "ledger": ledger, "covered": index,
             "decision": decision, "round": rounds, "added": added,
             "gains": gains, "marginal": marginal, "saturation": saturation,
-            "unverifiable": bad}
+            "unverifiable": bad, "dropped_unverifiable": removed}
 
 
 class CoverageGateBehavior:
