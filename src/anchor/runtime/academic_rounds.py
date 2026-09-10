@@ -132,16 +132,21 @@ def drop_unverifiable(ledger: dict, operations) -> tuple[dict, list[dict]]:
         kept.append(source)
     if not dropped:
         return ledger, []
-    renumber = {source["id"]: index for index, source in enumerate(kept, start=1)}
-    return ({"sources": [{**source, "citation": renumber[source["id"]]} for source in kept],
-             "evidence_notes": [{**note, "citation": renumber[source["id"]]}
-                                for note in ledger.get("evidence_notes", []) or []
-                                for source in [next((s for s in ledger["sources"]
-                                                     if s.get("citation") == note.get("citation")), None)]
-                                if source and source["id"] in renumber],
+    # Citation numbers are deliberately NOT reassigned. Renumbering shifts every
+    # number after a dropped source, while the writer is revising a manuscript
+    # that already cites the old numbers: the manuscript then points at the wrong
+    # sources and no revision can repair it. Numbers stay stable, and a gap is
+    # left where a source was removed.
+    survivors = {source.get("citation") for source in kept}
+    removed_ids = {source.get("id") for source in ledger.get("sources", []) or []} - {
+        source.get("id") for source in kept}
+    return ({"sources": kept,
+             "evidence_notes": [note for note in ledger.get("evidence_notes", []) or []
+                                if note.get("citation") in survivors],
              "search_log": ledger.get("search_log", []),
              "coverage": ledger.get("coverage", []),
-             "tensions": ledger.get("tensions", []),
+             "tensions": [entry for entry in ledger.get("tensions", []) or []
+                          if not (set(entry.get("evidence_ids") or []) & removed_ids)],
              "unresolved": ledger.get("unresolved", [])}, dropped)
 
 

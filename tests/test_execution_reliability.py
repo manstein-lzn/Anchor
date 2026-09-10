@@ -357,9 +357,13 @@ def test_more_than_three_revision_rounds_continue_without_hidden_cap(tmp_path):
         asyncio.run(control.execute_once(worker_id="control"))  # coverage seed
         complete(store, artifacts, claim(store, "gather"), ledger())
         asyncio.run(control.execute_once(worker_id="control"))  # coverage -> write
-        for round_number in range(4):
+        sections = ["Abstract", "Introduction", "Survey Methodology", "Comparative Analysis"]
+        for index, section in enumerate(sections):
+            # Each round carries a different defect, so the revisions are genuine
+            # progress; an unchanged defect is a separate case and does block.
             complete(store, artifacts, claim(store, "write"),
-                     {"manuscript": manuscript() + str(round_number), "thesis": "t"})
+                     {"manuscript": manuscript().replace(f"## {section}", f"## Missing{index}"),
+                      "thesis": "t"})
             complete(store, artifacts, claim(store, "review"),
                      {"verdict": "revise", "target": "manuscript", "issues": []})
             asyncio.run(control.execute_once(worker_id="control"))

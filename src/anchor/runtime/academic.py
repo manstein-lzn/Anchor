@@ -127,6 +127,8 @@ MIN_THEMATIC_SECTIONS = 2
 MAX_ABSTRACT_CHARS = 1800
 MAX_PARAGRAPH_CHARS = 1200
 MAX_METHODS_CHARS = 2500
+# Consecutive revisions allowed to carry the identical mechanical finding.
+MECHANICAL_REPEAT_LIMIT = 3
 
 # A result number is a finding, not a year or a section index. An abstract
 # reports a number without the baseline, benchmark or measurement detail that
@@ -411,9 +413,26 @@ def evaluate_review(snapshot: dict, *, store, artifacts, run_id, node_id: str) -
         target = deterministic_target
     prior_nodes = [n for n in store.list_node_runs(run_id)
                    if n.node_id == node_id and n.status.value == "completed" and n.output_ref]
+    # A revision that cannot remove the defect it was asked to remove will repeat
+    # forever: the writer keeps producing a manuscript with the same mechanical
+    # finding. The signature is taken before any diagnostic note is appended, so
+    # it records the defect itself and not the narration around it.
+    signature = canonical_json(sorted(errors)) if errors else None
+    repeats = 0
+    if signature and prior_nodes:
+        prior_gate = json.loads(artifacts.get_text(
+            max(prior_nodes, key=lambda item: item.attempt).output_ref))
+        # The gate stores the review under "review"; the signature is not top level.
+        prior_review = prior_gate.get("review") or {}
+        if prior_review.get("mechanical_signature") == signature:
+            repeats = int(prior_review.get("mechanical_repeats") or 0) + 1
     run = store.get_run(run_id)
     graph = store.get_graph_version(run.graph_version_id)
     max_rounds = graph.definition.metadata.get("max_rounds") if graph else None
+    if repeats >= MECHANICAL_REPEAT_LIMIT:
+        verdict = "blocked"
+        errors.append(f"The same mechanical defect survived {repeats} revisions unchanged; "
+                      f"operator input is required")
     if max_rounds is not None:
         max_rounds = int(max_rounds)
         if max_rounds < 1:
@@ -424,6 +443,7 @@ def evaluate_review(snapshot: dict, *, store, artifacts, run_id, node_id: str) -
         # watchdog diagnose repeated cycles instead of terminating silently.
         verdict = "blocked"
         errors.append(f"Revision budget exhausted after {max_rounds} rounds; draft is not approved")
+
     elif verdict == "revise" and len(prior_nodes) > 0:
         prior = json.loads(artifacts.get_text(max(prior_nodes, key=lambda n: n.attempt).output_ref))
         if canonical_json(_extract_work(prior)) == canonical_json(work):
@@ -434,7 +454,9 @@ def evaluate_review(snapshot: dict, *, store, artifacts, run_id, node_id: str) -
             review["verdict"] = "revise"
             review.setdefault("mechanical_issues", []).append(errors[-1])
     return {**snapshot, "review": {**review, "verdict": verdict, "target": target,
-                                   "mechanical_issues": errors},
+                                   "mechanical_issues": errors,
+                                   "mechanical_signature": signature,
+                                   "mechanical_repeats": repeats},
             "verified_sources": sources}
 
 

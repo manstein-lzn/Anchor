@@ -499,6 +499,35 @@ def test_identical_completed_revision_cycles_surface_to_supervisor_and_continue(
         store.close()
 
 
+def test_an_unchanged_mechanical_defect_stops_for_a_human(tmp_path, monkeypatch):
+    """A revision that cannot remove the defect must not repeat forever."""
+    store, artifacts, receipt, worker = setup(tmp_path)
+    try:
+        asyncio.run(worker.execute_once(worker_id="control"))
+        complete(store, artifacts, claim(store, "plan"), {"round": 1})
+        settle_coverage(worker)
+        lease = claim(store, "gather")
+        complete(store, artifacts, lease, gather_output(store, artifacts, lease, monkeypatch))
+        settle_coverage(worker)
+        broken = write_output(manuscript().replace("## Threats to Validity", "## Extra"))
+        verdicts = []
+        for _ in range(4):
+            complete(store, artifacts, claim(store, "write"), broken)
+            complete(store, artifacts, claim(store, "review"),
+                     {"verdict": "pass", "target": "none", "issues": []})
+            outcome = asyncio.run(worker.execute_once(worker_id="control"))
+            assert outcome.node_id == "check"
+            reviewed = json.loads(artifacts.get_text(outcome.output_ref))["review"]
+            verdicts.append(reviewed["verdict"])
+            assert reviewed["mechanical_repeats"] >= 0
+        assert verdicts[:3] == ["revise", "revise", "revise"], verdicts
+        assert verdicts[3] == "blocked", verdicts
+        assert any("survived" in issue for issue in
+                   json.loads(artifacts.get_text(outcome.output_ref))["review"]["mechanical_issues"])
+    finally:
+        store.close()
+
+
 def test_export_is_idempotent_and_cannot_overwrite_or_escape(tmp_path):
     artifacts = LocalArtifactStore(tmp_path)
     run_id = uuid4()
