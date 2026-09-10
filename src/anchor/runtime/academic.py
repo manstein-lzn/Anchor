@@ -140,7 +140,8 @@ def citation_numbers(text: str) -> set[int]:
 
 def _section_text(manuscript: str, *names: str) -> str:
     for name in names:
-        match = re.search(r"^## " + re.escape(name) + r"[^\n]*$", manuscript, re.MULTILINE)
+        match = re.search(r"^## (?:\d+(?:\.\d+)*[.、):]?\s*)?" + re.escape(name) + r"[^\n]*$",
+                          manuscript, re.MULTILINE)
         if match:
             rest = manuscript[match.end():]
             following = re.search(r"^## ", rest, re.MULTILINE)
@@ -153,7 +154,10 @@ def _headings(manuscript: str) -> list[str]:
 
 
 def _canonical_section(heading: str) -> str | None:
-    text = heading.strip()
+    # Papers number their sections ("1. Introduction", "2.1 Survey Methodology",
+    # "三、结论"). The numbering is presentation, so strip it before matching.
+    text = re.sub(r"^\s*(?:\d+(?:\.\d+)*[.、):]?|[一二三四五六七八九十]+[、.]?|"
+                  r"[（(]\d+[)）])\s*", "", heading.strip())
     for canonical, aliases in SECTION_ALIASES.items():
         if any(text == alias or text.startswith(alias) for alias in aliases):
             return canonical
@@ -251,8 +255,16 @@ def _extract_work(snapshot: dict) -> dict:
 
 def validate_manuscript(work: dict, *, operations, artifacts, minimum_sources: int = 8,
                         minimum_reads: int = 3) -> tuple[list[str], list[dict], str]:
-    """Return (errors, verified sources, where the fix belongs)."""
+    """Return (errors, verified sources, where the fix belongs).
+
+    Evidence defects need the gatherer (a source whose provenance is broken, too
+    few sources or reads). Writing defects need the author (a citation that does
+    not resolve, a source left uncited, a number resting on an abstract). Sending
+    a writing defect to the gatherer grows the ledger without fixing the paper,
+    which is how a campaign fails to converge.
+    """
     errors: list[str] = []
+    writing: list[str] = []
     craft: list[str] = []
     manuscript = work.get("manuscript", "")
     if not isinstance(manuscript, str) or not manuscript.startswith("# "):
@@ -314,16 +326,16 @@ def validate_manuscript(work: dict, *, operations, artifacts, minimum_sources: i
     citations = citation_numbers(manuscript)
     verified_numbers = {source["citation"] for source in canonical_sources}
     if citations - verified_numbers:
-        errors.append("Citations without verified sources: " + str(sorted(citations - verified_numbers)))
+        writing.append("Citations without verified sources: " + str(sorted(citations - verified_numbers)))
     if verified_numbers - citations:
-        errors.append("Sources not cited in manuscript: " + str(sorted(verified_numbers - citations)))
+        writing.append("Sources not cited in manuscript: " + str(sorted(verified_numbers - citations)))
     if len(citations & verified_numbers) < minimum_sources:
         errors.append(f"Need at least {minimum_sources} distinct cited and retrieved sources")
     if len(read_ids) < minimum_reads:
         errors.append(f"Need at least {minimum_reads} source documents read beyond the search listing")
     errors.extend(unsupported_number_claims(manuscript, read_numbers))
-    target = "evidence" if errors else ("manuscript" if craft else "none")
-    return (errors + craft, sorted(canonical_sources, key=lambda source: source["citation"]),
+    target = "evidence" if errors else ("manuscript" if writing or craft else "none")
+    return (errors + writing + craft, sorted(canonical_sources, key=lambda source: source["citation"]),
             target)
 
 

@@ -347,6 +347,33 @@ def test_abstract_page_reads_are_refused():
         read(ResearchRequest(url="https://arxiv.org/abs/2104.04955v1"), timeout_seconds=5)
 
 
+def test_numbered_headings_satisfy_the_skeleton():
+    """Papers number their sections; numbering is presentation, not structure."""
+    numbered = ("# 标题\n\n## Abstract\n\nok [1]\n\n## 1. Introduction\n\nok [1]\n\n"
+                "## 2. Survey Methodology\n\nok [1]\n\n"
+                "## 3. Representation\n\nok [1]\n\n## 4. Supervision\n\nok [1]\n\n"
+                "## 11. Threats to Validity\n\nok [1]\n\n## 12. Conclusion\n\nok [1]")
+    assert not structure_errors(numbered)
+    chinese = numbered.replace("## 1. Introduction", "## 一、引言").replace(
+        "## 2. Survey Methodology", "## 二、调查方法")
+    assert not structure_errors(chinese)
+
+
+def test_writing_defects_route_to_the_author_not_the_gatherer(tmp_path):
+    """A citation that cannot resolve or a source left uncited is a writing fix."""
+    artifacts = LocalArtifactStore(tmp_path)
+    ref = artifacts.put_text(json.dumps({"papers": [{"id": "p", "title": "T", "url": "u"}],
+                                         "retrieved_at": "2026-01-01T00:00:00Z"}))
+    operations = [type("Op", (), {"result_ref": ref, "tool_ref": "scholarly.search",
+                                  "status": type("S", (), {"value": "succeeded"})()})()]
+    manuscript_with_extra = manuscript() + "\n\nUncited analysis [7].\n"
+    _, _, target = validate_manuscript(
+        {"manuscript": manuscript_with_extra,
+         "sources": [{"citation": 1, "id": "p", "evidence_ref": ref}]},
+        operations=operations, artifacts=artifacts, minimum_sources=1, minimum_reads=0)
+    assert target == "manuscript"
+
+
 def test_chinese_headings_satisfy_the_skeleton():
     """A Chinese paper must pass: the check judges structure, not language."""
     chinese = ("# 标题\n\n## 摘要\n\n摘要内容 [1]。\n\n## 引言\n\n引言内容 [1]。\n\n"

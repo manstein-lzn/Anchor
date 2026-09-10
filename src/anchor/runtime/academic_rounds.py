@@ -32,6 +32,12 @@ def merge_ledger(previous: dict | None, new: dict) -> dict:
             if identity not in by_id:
                 by_id[identity] = dict(source)
                 order.append(identity)
+            else:
+                # A later round may repair a source, for example by reading the
+                # URL that matches its search result. Freezing the first version
+                # would make a defective source permanently uncorrectable and the
+                # campaign could never converge.
+                by_id[identity].update(source)
             remap[source.get("citation")] = identity
         for note in ledger.get("evidence_notes", []) or []:
             identity = remap.get(note.get("citation"))
