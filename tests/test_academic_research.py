@@ -347,6 +347,43 @@ def test_abstract_page_reads_are_refused():
         read(ResearchRequest(url="https://arxiv.org/abs/2104.04955v1"), timeout_seconds=5)
 
 
+def _round_ledger(start, count, *, saturation=False):
+    """A minimal round that adds `count` fresh sources."""
+    return {"sources": [{"citation": index, "id": f"doi:{index}",
+                         "evidence_ref": f"artifact://round-{index}"}
+                        for index in range(start, start + count)],
+            "search_log": [], "evidence_notes": [], "coverage": [], "tensions": [],
+            "unresolved": [], "saturation": saturation}
+
+
+def test_campaign_ends_on_diminishing_returns_not_on_a_round_count(tmp_path):
+    """No round budget: a campaign ends when consecutive rounds stop paying."""
+    store, artifacts, receipt, worker = setup(tmp_path)
+    try:
+        asyncio.run(worker.execute_once(worker_id="control"))
+        complete(store, artifacts, claim(store, "plan"), {"round": 1})
+        settle_coverage(worker)  # seed
+
+        complete(store, artifacts, claim(store, "gather"), _round_ledger(0, 20))
+        decision = json.loads(artifacts.get_text(settle_coverage(worker).output_ref))
+        assert decision["decision"] == "continue" and decision["gains"] == [1.0]
+
+        start = 20
+        for step in range(2):
+            complete(store, artifacts, claim(store, "gather"), _round_ledger(start, 1))
+            start += 1
+            decision = json.loads(artifacts.get_text(settle_coverage(worker).output_ref))
+            assert decision["decision"] == "continue", decision
+        complete(store, artifacts, claim(store, "gather"), _round_ledger(start, 1))
+        decision = json.loads(artifacts.get_text(settle_coverage(worker).output_ref))
+        assert decision["decision"] == "write", decision
+        assert decision["marginal"] is True
+        assert len(decision["gains"]) == 3 and all(g < 0.05 for g in decision["gains"])
+        assert decision["ledger"]["sources"][0]["citation"] == 1
+    finally:
+        store.close()
+
+
 def test_numbered_headings_satisfy_the_skeleton():
     """Papers number their sections; numbering is presentation, not structure."""
     numbered = ("# 标题\n\n## Abstract\n\nok [1]\n\n## 1. Introduction\n\nok [1]\n\n"

@@ -11,6 +11,15 @@ from __future__ import annotations
 import json
 
 
+# A campaign has no round budget, but it must be able to end. Research stops when
+# further rounds stop paying: when the last few rounds each added less than this
+# share of the corpus, the field's load-bearing work is already covered and more
+# searching only adds marginal references. This is a convergence criterion, not
+# a budget: it fires on diminishing returns, never on a pre-set count.
+MIN_MARGINAL_GAIN = 0.05
+SATURATION_WINDOW = 3
+
+
 def merge_ledger(previous: dict | None, new: dict) -> dict:
     """Merge evidence rounds, renumbering citations by first appearance.
 
@@ -124,9 +133,18 @@ def evaluate_coverage(snapshot: dict, *, store, artifacts, run_id, node_id: str)
     ledger = merge_ledger(previous, round_ledger)
     before = len((previous or {}).get("sources", []) or [])
     added = len(ledger["sources"]) - before
+    gains = [float(gain) for gain in (prior.get("gains") or [])] if isinstance(prior, dict) else []
+    if seed:
+        gains = []
+    elif ledger["sources"]:
+        gains.append(round(added / len(ledger["sources"]), 4))
+    gains = gains[-SATURATION_WINDOW:]
+    marginal = len(gains) >= SATURATION_WINDOW and all(
+        gain < MIN_MARGINAL_GAIN for gain in gains)
     saturation = bool(round_ledger.get("saturation"))
+    converged = saturation or marginal or added <= 0
     rounds = (int(prior.get("round", 0)) if isinstance(prior, dict) else 0) + (0 if seed else 1)
-    decision = "continue" if seed else ("write" if saturation or added <= 0 else "continue")
+    decision = "continue" if seed else ("write" if converged else "continue")
     bad = unverifiable_sources(ledger, store.list_tool_operations(run_id))
     index = ledger_index(ledger)
     if bad:
@@ -135,7 +153,8 @@ def evaluate_coverage(snapshot: dict, *, store, artifacts, run_id, node_id: str)
         index["unverified_provenance"] = bad
     return {**snapshot, "ledger": ledger, "covered": index,
             "decision": decision, "round": rounds, "added": added,
-            "saturation": saturation, "unverifiable": bad}
+            "gains": gains, "marginal": marginal, "saturation": saturation,
+            "unverifiable": bad}
 
 
 class CoverageGateBehavior:
