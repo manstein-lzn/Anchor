@@ -332,8 +332,12 @@ def validate_manuscript(work: dict, *, operations, artifacts, minimum_sources: i
         used_ids.add(identity)
         used_numbers.add(number)
         if successful.get(evidence_ref) not in ("scholarly.search", "scholarly.citations"):
-            errors.append(f"Citation [{number}] has no successful scholarly search or citation "
-                          f"lookup in this Run")
+            # A source whose provenance does not verify is the author's problem:
+            # the citation, and any claim resting on it, must go. Sending this to
+            # the gatherer instead makes the campaign grow while the paper keeps
+            # the same broken citation.
+            writing.append(f"Citation [{number}] has no successful scholarly search or citation "
+                           f"lookup in this Run; drop it")
             continue
         try:
             evidence = json.loads(artifacts.get_text(evidence_ref))
@@ -356,7 +360,8 @@ def validate_manuscript(work: dict, *, operations, artifacts, minimum_sources: i
                 read_numbers.add(number)
             canonical_sources.append(canonical)
         except (OSError, ValueError, KeyError, TypeError) as exc:
-            errors.append(f"Citation [{number}] evidence rejected: {exc}")
+            writing.append(f"Citation [{number}] evidence rejected: {exc}; drop it or cite "
+                           f"a source whose reading matches")
     citations = citation_numbers(manuscript)
     verified_numbers = {source["citation"] for source in canonical_sources}
     if citations - verified_numbers:
