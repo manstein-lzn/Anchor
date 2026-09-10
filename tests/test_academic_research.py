@@ -299,6 +299,26 @@ def test_coverage_gate_continues_then_stops_on_convergence(tmp_path, monkeypatch
         store.close()
 
 
+def test_a_document_read_is_not_valid_source_provenance():
+    """A read proves the text was fetched, not that the paper has an identity."""
+    from anchor.runtime.academic_rounds import unverifiable_sources
+
+    class Operation:
+        def __init__(self, ref, tool):
+            self.result_ref, self.tool_ref = ref, tool
+            self.status = type("S", (), {"value": "succeeded"})()
+
+    ledger = {"sources": [{"citation": 1, "id": "a", "evidence_ref": "artifact://read"},
+                          {"citation": 2, "id": "b", "evidence_ref": "artifact://search"},
+                          {"citation": 3, "id": "c", "evidence_ref": "artifact://cited"}]}
+    operations = [Operation("artifact://read", "scholarly.read"),
+                  Operation("artifact://search", "scholarly.search"),
+                  Operation("artifact://cited", "scholarly.citations")]
+    bad = unverifiable_sources(ledger, operations)
+    assert [item["citation"] for item in bad] == [1]
+    assert bad[0]["retrieved_by"] == "scholarly.read"
+
+
 def test_ledger_merge_renumbers_citations_across_rounds():
     from anchor.runtime.academic_rounds import merge_ledger
     first = {"sources": [{"id": "x", "citation": 1}, {"id": "y", "citation": 2}],

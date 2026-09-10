@@ -73,6 +73,25 @@ def ledger_index(ledger: dict) -> dict:
             "unresolved": ledger.get("unresolved", [])}
 
 
+def unverifiable_sources(ledger: dict, operations) -> list[dict]:
+    """Round sources whose provenance cannot be checked in this Run.
+
+    A source must come from a search or citation lookup: those operations return
+    the metadata and the id. A document read proves the text was fetched, not
+    that the paper was retrieved with an identity, so it cannot be a source's
+    evidence_ref.
+    """
+    successful = {item.result_ref: item.tool_ref for item in operations
+                  if item.status.value == "succeeded" and item.result_ref}
+    bad: list[dict] = []
+    for source in ledger.get("sources", []) or []:
+        reference = source.get("evidence_ref")
+        if successful.get(reference) not in ("scholarly.search", "scholarly.citations"):
+            bad.append({"citation": source.get("citation"), "id": source.get("id"),
+                        "evidence_ref": reference, "retrieved_by": successful.get(reference)})
+    return bad
+
+
 def evaluate_coverage(snapshot: dict, *, store, artifacts, run_id, node_id: str) -> dict:
     """Merge this round and decide whether research continues.
 
@@ -102,9 +121,15 @@ def evaluate_coverage(snapshot: dict, *, store, artifacts, run_id, node_id: str)
     saturation = bool(round_ledger.get("saturation"))
     rounds = (int(prior.get("round", 0)) if isinstance(prior, dict) else 0) + (0 if seed else 1)
     decision = "continue" if seed else ("write" if saturation or added <= 0 else "continue")
-    return {**snapshot, "ledger": ledger, "covered": ledger_index(ledger),
+    bad = unverifiable_sources(ledger, store.list_tool_operations(run_id))
+    index = ledger_index(ledger)
+    if bad:
+        # Surface them to the next round and to the operator instead of
+        # letting an unverifiable source poison the paper's citations.
+        index["unverified_provenance"] = bad
+    return {**snapshot, "ledger": ledger, "covered": index,
             "decision": decision, "round": rounds, "added": added,
-            "saturation": saturation}
+            "saturation": saturation, "unverifiable": bad}
 
 
 class CoverageGateBehavior:
