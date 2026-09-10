@@ -100,7 +100,21 @@ class PydanticAIModelGateway:
         )
         provider = OpenAIProvider(openai_client=self._openai_client)
         self._model = model if model is not None else model_type(profile.model, provider=provider)
-        self._agent = Agent(self._model, output_type=str)
+        self._agent = Agent(self._model, output_type=str,
+                            model_settings=self._settings())
+
+    def _settings(self) -> Any:
+        """Explicit output budget, when the profile sets one.
+
+        A reasoning model spends part of the budget on thinking before it emits
+        the answer, so without a generous explicit value a structured response
+        can be truncated mid-string.
+        """
+        from pydantic_ai.settings import ModelSettings
+
+        if not self.profile.max_tokens:
+            return None
+        return ModelSettings(max_tokens=self.profile.max_tokens)
 
     async def generate(self, *, prompt: str, system_prompt: str = "") -> ModelResponse:
         return await self._run_agent(self._agent, prompt=prompt, system_prompt=system_prompt)
@@ -140,7 +154,8 @@ class PydanticAIModelGateway:
                 return await call(arguments_json)
             return tool_entry
 
-        agent: Any = PydanticAgent(self._model, output_type=str)
+        agent: Any = PydanticAgent(self._model, output_type=str,
+                                   model_settings=self._settings())
         for function in tools:
             entry = make_entry(function.call)
             entry.__name__ = function.name.replace("-", "_").replace(".", "_")

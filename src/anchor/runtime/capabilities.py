@@ -23,6 +23,10 @@ class ModelProfile(DomainModel):
     wire_api: str = Field(default="responses", pattern=r"^[a-z][a-z0-9_-]*$")
     secret_ref: str = Field(min_length=1, max_length=200)
     stream: bool = False
+    # Output budget for one model call. A reasoning model spends part of this on
+    # thinking before it emits the answer, so a modest default can truncate a
+    # structured response mid-string even when the answer itself is short.
+    max_tokens: int | None = Field(default=None, ge=256, le=131_072)
 
 
 class AgentCapability(DomainModel):
