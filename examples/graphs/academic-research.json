@@ -116,7 +116,6 @@
       "condition": "output.decision == 'continue'",
       "input_mapping": {
         "covered": "outputs.coverage.covered",
-        "feedback": "outputs.coverage",
         "plan": "outputs.coverage.plan",
         "request": "outputs.coverage.request"
       }
