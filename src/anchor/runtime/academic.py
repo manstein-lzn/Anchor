@@ -7,6 +7,7 @@ import re
 
 from anchor.domain.content import ARTIFACT_PREFIX
 from anchor.runtime.academic_rounds import CoverageGateBehavior
+from anchor.runtime.json_output import extract_json_object
 from anchor.domain.context import canonical_json
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from typing import Literal
@@ -64,8 +65,8 @@ class ReviewOutput(BaseModel):
 
 
 def validate_agent_output(text: str, role: str | None = None) -> dict:
-    value = json.loads(text)
-    if not isinstance(value, dict):
+    value = extract_json_object(text)
+    if value is None:
         raise ValueError("Output must be a JSON object")
     schema = {"researcher": ResearchOutput, "gatherer": GatherOutput,
               "writer": WriteOutput, "reviewer": ReviewOutput}.get(role)

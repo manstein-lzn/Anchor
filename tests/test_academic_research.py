@@ -434,6 +434,19 @@ def test_target_separates_evidence_gaps_from_writing_defects(tmp_path):
     assert craft_target in ("evidence", "manuscript")
 
 
+def test_a_json_answer_with_a_prose_prefix_is_still_an_answer():
+    """A model that explains itself before the JSON still answered correctly."""
+    from anchor.runtime.json_output import extract_json_object, normalise_json_text
+    review = {"verdict": "pass", "target": "none", "summary": "ok", "issues": [],
+              "strengths": [], "blockers": []}
+    prefixed = "I have enough to judge. Verified three citations.\n\n" + json.dumps(review)
+    assert extract_json_object(prefixed) == review
+    assert validate_agent_output(prefixed, "reviewer")["verdict"] == "pass"
+    fenced = "```json\n" + json.dumps(review) + "\n```"
+    assert extract_json_object(fenced) == review
+    assert json.loads(normalise_json_text(prefixed))["verdict"] == "pass"
+
+
 def test_role_output_schemas_reject_a_missing_paper_or_thesis():
     with pytest.raises(ValueError):
         validate_agent_output(json.dumps({"sources": [], "search_log": [], "evidence_notes": [],

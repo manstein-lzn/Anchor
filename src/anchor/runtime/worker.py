@@ -9,6 +9,7 @@ node when the process crashes.
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 
 from dataclasses import dataclass
 import asyncio
@@ -22,6 +23,7 @@ from anchor.domain.propagation import RoutingDecisionError
 from anchor.runtime.behaviors import BehaviorRegistry
 from anchor.runtime.capabilities import CapabilityRegistry, CapabilityRegistryError
 from anchor.runtime.context import input_hash
+from anchor.runtime.json_output import normalise_json_text
 
 logger = logging.getLogger("anchor.worker")
 
@@ -310,6 +312,10 @@ class AgentNodeWorker:
                                      "cache_write_tokens": response.cache_write_tokens},
                             idempotency_key=f"usage:{lease.node_run_id}:{response.response_id or 'x'}")
                     if agent.output_format == "json":
+                        # A model that prefixes its JSON with a sentence still
+                        # answered correctly; normalise it once, here, so every
+                        # downstream reader sees an object rather than prose.
+                        response = replace(response, text=normalise_json_text(response.text))
                         for retry in range(agent.output_retries + 1):
                             try:
                                 behavior.validate_output(response.text)
