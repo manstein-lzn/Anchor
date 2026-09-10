@@ -22,11 +22,11 @@
         "scholarly.citations",
         "scholarly.read"
       ],
-      "max_tool_calls": 24,
+      "max_tool_calls": 12,
       "tool_call_limits": {
-        "scholarly.search": 6,
-        "scholarly.citations": 6,
-        "scholarly.read": 12
+        "scholarly.search": 3,
+        "scholarly.citations": 3,
+        "scholarly.read": 6
       },
       "max_parallel_tools": 2,
       "output_retries": 1
@@ -69,9 +69,9 @@
       "idempotent": true,
       "operation_kind": "read",
       "evidence_json": true,
-      "model_excerpt_chars": 1500,
-      "retry_excerpt_chars": 500,
-      "excerpt_list_limit": 10,
+      "model_excerpt_chars": 500,
+      "retry_excerpt_chars": 300,
+      "excerpt_list_limit": 5,
       "evidence_priority": 0
     },
     {
@@ -81,8 +81,8 @@
       "idempotent": true,
       "operation_kind": "read",
       "evidence_json": true,
-      "model_excerpt_chars": 12000,
-      "retry_excerpt_chars": 8000,
+      "model_excerpt_chars": 2000,
+      "retry_excerpt_chars": 1200,
       "excerpt_list_limit": 1,
       "evidence_priority": 1
     },
@@ -93,9 +93,9 @@
       "idempotent": true,
       "operation_kind": "read",
       "evidence_json": true,
-      "model_excerpt_chars": 1500,
-      "retry_excerpt_chars": 500,
-      "excerpt_list_limit": 20,
+      "model_excerpt_chars": 400,
+      "retry_excerpt_chars": 250,
+      "excerpt_list_limit": 5,
       "evidence_priority": 0
     }
   ]

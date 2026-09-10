@@ -91,7 +91,7 @@ def build_parser() -> argparse.ArgumentParser:
     start.add_argument("--input", action="append", metavar="KEY=VALUE")
     start.add_argument("--idempotency-key")
     for name in ("show", "nodes", "decisions", "verifications", "operations",
-                 "diagnostics", "progress"):
+                 "diagnostics", "progress", "usage"):
         item = run_sub.add_parser(name); item.add_argument("run_id")
     events = run_sub.add_parser("events")
     events.add_argument("run_id"); events.add_argument("--after", type=int, default=0)
@@ -213,6 +213,8 @@ def dispatch(client: AnchorClient, args: argparse.Namespace) -> Any:
             return client.run_diagnostics(args.run_id)
         if args.run_command == "progress":
             return client.run_progress(args.run_id)
+        if args.run_command == "usage":
+            return client.run_usage(args.run_id)
         if args.run_command == "watch":
             return client.wait_for_run(args.run_id, timeout=args.timeout,
                                        interval=args.interval)

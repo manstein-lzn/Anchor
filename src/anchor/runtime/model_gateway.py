@@ -16,6 +16,13 @@ class ModelResponse:
     provider: str
     model: str
     response_id: str | None = None
+    # Token accounting. An agent tool loop re-sends its whole conversation on
+    # every call, so a single node attempt can cost millions of input tokens;
+    # without this the spend is invisible until the provider bill arrives.
+    input_tokens: int = 0
+    output_tokens: int = 0
+    requests: int = 0
+    cost: float | None = None
 
 
 @dataclass(frozen=True)
@@ -101,8 +108,19 @@ class PydanticAIModelGateway:
             output = result.output
         text = output if isinstance(output, str) else str(output)
         response_id = getattr(result, "response_id", None)
-        return ModelResponse(text=text, provider=self.profile.provider, model=self.profile.model,
-                             response_id=response_id)
+        usage = None
+        try:
+            usage = result.usage() if callable(getattr(result, "usage", None)) else result.usage
+        except Exception:  # noqa: BLE001 - usage is reporting, never a node failure
+            usage = None
+        raw_cost = getattr(usage, "cost", None)
+        return ModelResponse(
+            text=text, provider=self.profile.provider, model=self.profile.model,
+            response_id=response_id,
+            input_tokens=int(getattr(usage, "input_tokens", 0) or 0),
+            output_tokens=int(getattr(usage, "output_tokens", 0) or 0),
+            requests=int(getattr(usage, "requests", 0) or 0),
+            cost=float(raw_cost) if raw_cost is not None else None)
 
     async def generate_with_tools(self, *, prompt: str, system_prompt: str = "",
                                   tools: list[ToolFunction]) -> ModelResponse:

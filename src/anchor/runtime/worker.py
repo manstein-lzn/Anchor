@@ -231,6 +231,8 @@ class AgentNodeWorker:
         heartbeat_task = asyncio.create_task(heartbeat())
         try:
             rejected_refs = []
+            attempt_row = self.store.get_node_run(lease.node_run_id)
+            node_attempt = attempt_row.attempt if attempt_row is not None else 0
             behavior = self.behaviors.get(agent.behavior_ref)
             timeout = agent.timeout_seconds
             if agent.behavior_ref:
@@ -264,6 +266,18 @@ class AgentNodeWorker:
                                 input_snapshot=input_snapshot)
                         else:
                             response = await gateway.generate(prompt=prompt, system_prompt=system_prompt or agent.instructions)
+                    if response.input_tokens or response.output_tokens:
+                        # Spend is recorded at the moment it happens. An agent tool
+                        # loop re-sends its conversation on every call, so the number
+                        # is large and must never be invisible.
+                        self.store.append_event(
+                            stream_id=lease.run_id, event_type="model.usage",
+                            payload={"node_id": lease.node_id, "attempt": node_attempt,
+                                     "model": response.model, "provider": response.provider,
+                                     "input_tokens": response.input_tokens,
+                                     "output_tokens": response.output_tokens,
+                                     "requests": response.requests, "cost": response.cost},
+                            idempotency_key=f"usage:{lease.node_run_id}:{response.response_id or 'x'}")
                     if agent.output_format == "json":
                         for retry in range(agent.output_retries + 1):
                             try:

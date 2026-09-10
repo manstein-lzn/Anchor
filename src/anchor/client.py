@@ -214,6 +214,11 @@ class AnchorClient:
     def run_operations(self, run_id: str) -> list[dict]:
         return self._request("GET", f"/api/runs/{run_id}/operations")
 
+    def run_usage(self, run_id: str) -> dict:
+        """Token spend per node. A tool loop re-sends its conversation on every
+        call, so this is the number that decides whether a run is affordable."""
+        return self._request("GET", f"/api/runs/{run_id}/usage")
+
     def run_diagnostics(self, run_id: str) -> list[dict]:
         return self._request("GET", f"/api/runs/{run_id}/diagnostics")
 

@@ -126,6 +126,8 @@ class StateStore(Protocol):
         idempotency_key: str,
     ) -> Run: ...
 
+    def get_node_run(self, node_run_id: UUID) -> NodeRun | None: ...
+
     def append_event(
         self,
         *,
