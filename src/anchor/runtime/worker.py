@@ -256,7 +256,11 @@ class AgentNodeWorker:
         heartbeat_task = asyncio.create_task(heartbeat())
         try:
             rejected_refs = []
-            attempt_row = self.store.get_node_run(lease.node_run_id)
+            # Minimal stores used in tests may not expose the run history; the
+            # attempt number is only reporting metadata on the usage event.
+            lister = getattr(self.store, "list_node_runs", None)
+            attempt_row = next((item for item in lister(lease.run_id)
+                                if item.id == lease.node_run_id), None) if lister else None
             node_attempt = attempt_row.attempt if attempt_row is not None else 0
             behavior = self.behaviors.get(agent.behavior_ref)
             timeout = agent.timeout_seconds
