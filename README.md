@@ -322,6 +322,19 @@ done yet.
 Development uses the same relational store on SQLite. Production deployments must use PostgreSQL and a
 durable workflow receiver; SQLite is not a distributed coordination system.
 
+## The cognition layer (design in progress)
+
+Long-running agent work fails in four ways: the context explodes, attention is
+diluted, the agent is led astray by whatever is most recent, and repeated
+compaction drifts its understanding of the task. `docs/COGNITION_ARCHITECTURE.md`
+is a working white paper on addressing all four with state rather than with
+summarisation — including the measurements that motivate it (a revision round whose
+prompt was **60% literal duplication**; two identical calls producing different
+output), the model it builds on, and the three questions it does **not** yet answer.
+
+`contextengine/` holds the archived earlier project those ideas come from, kept
+byte-identical. Its `PROVENANCE.md` explains what it is and why it is here.
+
 ## Planned boundaries
 
 - `anchor.domain`: durable business models and state transitions

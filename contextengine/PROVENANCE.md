@@ -74,6 +74,11 @@ current project has been exploring:
 `docs/PRODUCT_SPEC.md` defines the objects; `docs/ANCHOR_UPDATE_PROTOCOL_V2.md`
 (internally v3) is the mechanism.
 
+The thinking drawn from it for this repository is written up in
+[`../docs/COGNITION_ARCHITECTURE.md`](../docs/COGNITION_ARCHITECTURE.md) —
+including what it answers, what it leaves open, and the gaps it has when applied
+to a graph rather than to a single session.
+
 ## Status
 
 Unmodified and unread beyond its documentation. It runs on Node 22.19+ and Pi
