@@ -272,7 +272,7 @@ output tokens         214,368
 步骤 1  RecordingModel + 工件格式 + model.call 事件          ✅ 完成
 步骤 2  ReplayModel + 显式分歧                              ⬜ 未做
 步骤 3  电闸与配置（off / record / replay）+ 保留策略接入      🟡 配置已有；保留策略未接
-步骤 4  （独立评估）节点级测试台                              ⬜ 未做
+步骤 4  节点级测试台                                          ✅ 完成
 ```
 
 ### 步骤 1 的落点
@@ -359,3 +359,69 @@ worker 是长驻进程，一次 campaign 约一千个节点尝试。若按 attem
 3. **分歧显式失败**，定位到具体调用。静默继续会让"回放成功"变成假信号。
 
 包装层在 PydanticAI 的 `Model`，而非 Anchor 的 `ModelGateway`，理由见上文第 3 节。
+
+
+---
+
+## 12. 步骤 4：节点级测试台（已完成）
+
+回放只能复现已有的 run，不能回答一个**改变过的** prompt（ADR-044 的边界）。真正让上下文实验
+便宜的是这一项：把**一个节点的一次尝试**对着它当时真实收到的输入重跑。
+
+实测（真实 run `f4eb8ac7` 的 write 节点）：
+
+```
+测试台重跑一次 write 节点   40 秒      （原 campaign 31 分钟）→ 46 倍
+prompt                      403,340 字符  ← 写作者的上下文约 10 万 token
+缓存命中                    173,312 / 173,519（99.9%）
+```
+
+### 三条性质
+
+| 性质 | 如何保证 |
+|---|---|
+| **测的是真实 prompt** | 提示词组装抽成共享函数 `runtime/node_prompt.py`，worker 与测试台调用同一个；有测试断言 worker 里不再存在第二份文本 |
+| **输入是当时那份** | 读节点自己持久化的 `context_snapshots`，**不从当前状态重新推导**——否则一个已经前进的 run 会拿"现在会看到什么"冒充"当时看到了什么" |
+| **不污染被研究的证据** | 只读；有测试断言 run 的 node_runs 前后一致 |
+
+### 工具节点被拒绝，而不是被假装执行
+
+带工具的节点（如 `gather`）需要账本才能让调用可审计，那意味着一个 scratch run，是另一个设计
+决定。请求时**报错**，而不是静默地在账本之外执行工具。查看它的 prompt 仍然允许（免费）。
+
+### 可变的策略面
+
+`snapshot` 与 `include_memory` 是当前的两个策略旋钮，默认值与 worker 完全一致——所以默认情况下
+测试台跑的就是真实 prompt，只有实验刻意改变时才有差异。
+
+### 一个实测到的真相
+
+同一次调用连跑两遍：
+
+```
+prompt_delta:     0            （记忆块本来就是空的）
+identical_output: false        （14,544 vs 14,573 字符）
+input_tokens:     [173519, 173519]
+```
+
+**同一输入，不同输出。** 这就是为什么"跑一次 campaign 看结果好不好"无法判断策略优劣——
+它同时也是测试台存在的理由。
+
+### 使用
+
+```bash
+# 看看节点到底收到了什么（免费，不调模型）
+.venv/bin/python scripts/node_harness.py prompt RUN_UUID write
+
+# 重跑一次，报告花费
+.venv/bin/python scripts/node_harness.py run RUN_UUID write
+
+# 变一个部分并对比（两次实调用）
+.venv/bin/python scripts/node_harness.py compare RUN_UUID write --drop-memory
+```
+
+### 关于重试
+
+网关刻意设 `max_retries=0`（重试属于 durable node 层，那里有可观测的 attempt 与退避）。
+测试台没有那一层，所以它自己带一次有界重试，并复用同一套故障分类——**生产路径的规则没有
+被改动**。

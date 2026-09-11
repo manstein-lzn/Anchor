@@ -208,8 +208,14 @@
   context policy, which can only be judged by controlled comparison. See
   `docs/RECORDING_AND_REPLAY.md`.
 - Context engine and memory policies beyond the durable input snapshot boundary
-- Running a single node in isolation, with a frozen input snapshot: today
-  `run_nodes` is a read, so a context experiment costs a whole campaign
+- **A node-scoped harness** (done): re-run one node attempt against the input it
+  actually received, read from its own persisted context snapshot and assembled by
+  the same function the worker uses. Measured on a real run: re-running the writer
+  takes 40 seconds instead of a 31-minute campaign, and two calls of the same node
+  produce different outputs, which is why a campaign cannot judge a context policy.
+  A tool-using node is refused rather than executed outside a ledger, so `gather`
+  still needs a whole run; giving the harness scratch-run ledgering is the next step
+  there. See `runtime/node_harness.py` and `scripts/node_harness.py`.
 - A2A gateway (MCP is implemented; see ADR-039)
 - OpenTelemetry integration
 - Automatic worker/service startup after a host reboot: the dev services are

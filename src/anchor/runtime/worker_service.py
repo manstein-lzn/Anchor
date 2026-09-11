@@ -24,7 +24,7 @@ from anchor.runtime.sinks import ArtifactCheckpointSink
 from anchor.runtime.worker import AgentNodeWorker
 from anchor.runtime.worker_loop import run_worker_loop
 from anchor.runtime.memory import LocalMemoryStore, MemoryStore
-from anchor.runtime.context import canonical_json
+from anchor.runtime.node_prompt import PromptParts, assemble_prompt
 from anchor.runtime.resolution import resolve_node_context
 from anchor.state.relational import RelationalStateStore
 
@@ -45,13 +45,14 @@ async def _resolver(store, run_id: UUID, node_id: str, memory: MemoryStore | Non
     seen = {item.memory_id for item in run_memories}
     promoted = [item for item in (memory.list(status="promoted") if memory is not None else [])
                 if item.memory_id not in seen]
-    run_block = "\n".join(f"- {item.content}" for item in run_memories)
-    promoted_block = "\n".join(f"- [{item.domain or 'general'}] {item.content}"
-                                  for item in promoted)
-    prompt = (f"Task objective:\n{resolved.task.objective}\n\nExecute graph node: {resolved.node.name}\n"
-              f"\nDurable input snapshot:\n{canonical_json(resolved.snapshot)}"
-              f"\n\nRun memory:\n{run_block or '(none)'}"
-              f"\n\nPromoted organizational knowledge:\n{promoted_block or '(none)'}")
+    # The prompt is assembled by the shared function the node harness also uses, so
+    # an experiment there measures this prompt rather than a lookalike.
+    prompt = assemble_prompt(PromptParts(
+        objective=resolved.task.objective,
+        node_name=resolved.node.name,
+        snapshot=resolved.snapshot,
+        run_memory=[item.content for item in run_memories],
+        promoted_memory=[(item.domain or "general", item.content) for item in promoted]))
     return resolved.node.agent_ref, prompt, resolved.node.id, resolved.snapshot
 
 
