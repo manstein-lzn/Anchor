@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import json
 
+from anchor.runtime.evidence import successful_operations, verify_source
+
 
 # A campaign has no round budget, but it must be able to end. Research stops when
 # further rounds stop paying: when the last few rounds each added less than this
@@ -107,7 +109,7 @@ def unverifiable_sources(ledger: dict, operations) -> list[dict]:
     return bad
 
 
-def drop_unverifiable(ledger: dict, operations) -> tuple[dict, list[dict]]:
+def drop_unverifiable(ledger: dict, operations, artifacts=None) -> tuple[dict, list[dict]]:
     """Remove sources whose provenance cannot be verified in this Run.
 
     The ledger is what the writer must cite in full, so a source whose evidence
@@ -115,19 +117,27 @@ def drop_unverifiable(ledger: dict, operations) -> tuple[dict, list[dict]]:
     citation fails, omit it and the source is uncited. Such a source cannot be
     evidence, so it is removed here and reported, never left to stall the loop.
     """
-    successful = {item.result_ref: item.tool_ref for item in operations
-                  if item.status.value == "succeeded" and item.result_ref}
+    successful = successful_operations(operations)
     kept: list[dict] = []
     dropped: list[dict] = []
     for source in ledger.get("sources", []) or []:
-        evidence, reading = source.get("evidence_ref"), source.get("read_ref")
-        if successful.get(evidence) not in ("scholarly.search", "scholarly.citations"):
-            dropped.append({"id": source.get("id"),
-                            "problem": "evidence_ref is not a successful search or citation lookup"})
+        number = source.get("citation")
+        identity, evidence = source.get("id"), source.get("evidence_ref")
+        if not isinstance(identity, str) or not isinstance(evidence, str):
+            dropped.append({"id": identity, "problem": "source has no id or evidence_ref"})
             continue
-        if reading and successful.get(reading) not in ("scholarly.read", "scholarly.read_many"):
-            dropped.append({"id": source.get("id"),
-                            "problem": "read_ref is not a successful document read"})
+        if artifacts is None:
+            # Without artifacts the full check is impossible; the cheap check is
+            # still better than none, and callers in production always pass them.
+            verdict_ok = successful.get(evidence) in ("scholarly.search", "scholarly.citations")
+            reason = None if verdict_ok else "evidence_ref is not a successful lookup"
+        else:
+            verdict = verify_source(source, number=number, identity=identity,
+                                    evidence_ref=evidence, successful=successful,
+                                    artifacts=artifacts)
+            verdict_ok, reason = verdict.ok, verdict.reason
+        if not verdict_ok:
+            dropped.append({"id": identity, "problem": reason})
             continue
         kept.append(source)
     if not dropped:
@@ -177,9 +187,9 @@ def evaluate_coverage(snapshot: dict, *, store, artifacts, run_id, node_id: str)
     if previous:
         # Growth is measured against verifiable evidence only, so a dropped
         # source neither counts as progress nor keeps a round alive.
-        previous, _ = drop_unverifiable(previous, operations)
+        previous, _ = drop_unverifiable(previous, operations, artifacts)
     ledger = merge_ledger(previous, round_ledger)
-    ledger, removed = drop_unverifiable(ledger, operations)
+    ledger, removed = drop_unverifiable(ledger, operations, artifacts)
     before = len((previous or {}).get("sources", []) or [])
     added = len(ledger["sources"]) - before
     gains = [float(gain) for gain in (prior.get("gains") or [])] if isinstance(prior, dict) else []

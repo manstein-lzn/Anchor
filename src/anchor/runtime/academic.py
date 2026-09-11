@@ -7,6 +7,7 @@ import re
 
 from anchor.domain.content import ARTIFACT_PREFIX
 from anchor.runtime.academic_rounds import CoverageGateBehavior
+from anchor.runtime.evidence import successful_operations, verify_source
 from anchor.runtime.json_output import extract_json_object
 from anchor.domain.context import canonical_json
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -134,40 +135,6 @@ MECHANICAL_REPEAT_LIMIT = 3
 # reports a number without the baseline, benchmark or measurement detail that
 # makes it checkable, so a numeric claim may only rest on a source read in full.
 RESULT_NUMBER = re.compile(r"\d+(?:\.\d+)?\s*(?:[x×倍]|%|个百分点)")
-
-
-def _title_tokens(value: object) -> set[str]:
-    """Lower-cased alphanumeric words of a title, for same-document checks."""
-    if not isinstance(value, str):
-        return set()
-    return {word for word in re.findall(r"[a-z0-9]{2,}", value.lower())}
-
-
-def _same_document(observed: dict, reading: dict) -> bool:
-    """Whether a read studied the source, by URL or by title.
-
-    One work is routinely reachable as a publisher record and as a preprint at a
-    different URL: a reader who studies the preprint is reading the same paper.
-    A title match is accepted as evidence of that, and never as evidence of a
-    different paper.
-    """
-    allowed = {url for url in [observed.get("url"), *(observed.get("fulltext_urls") or [])]
-               if isinstance(url, str)}
-    documents = reading.get("documents")
-    entries: list = list(documents) if isinstance(documents, list) else [reading]
-    requested = {item.get("requested_url") for item in entries if isinstance(item, dict)}
-    if allowed & requested:
-        return True
-    wanted = _title_tokens(observed.get("title"))
-    if len(wanted) < 4:
-        return False
-    for item in entries:
-        if not isinstance(item, dict):
-            continue
-        got = _title_tokens(item.get("title"))
-        if got and len(wanted & got) / len(wanted) >= 0.8:
-            return True
-    return False
 
 
 def citation_numbers(text: str) -> set[int]:
@@ -313,8 +280,7 @@ def validate_manuscript(work: dict, *, operations, artifacts, minimum_sources: i
     records = work.get("sources")
     if not isinstance(records, list):
         return craft + ["Research output must contain a sources array"], [], "evidence"
-    successful = {item.result_ref: item.tool_ref for item in operations
-                  if item.status.value == "succeeded" and item.result_ref}
+    successful = successful_operations(operations)
     canonical_sources = []
     used_ids: set[str] = set()
     used_numbers: set[int] = set()
@@ -334,37 +300,20 @@ def validate_manuscript(work: dict, *, operations, artifacts, minimum_sources: i
             continue
         used_ids.add(identity)
         used_numbers.add(number)
-        if successful.get(evidence_ref) not in ("scholarly.search", "scholarly.citations"):
-            # A source whose provenance does not verify is the author's problem:
-            # the citation, and any claim resting on it, must go. Sending this to
-            # the gatherer instead makes the campaign grow while the paper keeps
-            # the same broken citation.
-            writing.append(f"Citation [{number}] has no successful scholarly search or citation "
-                           f"lookup in this Run; drop it")
+        # The gate admits sources through the same policy, so a source here that
+        # does not verify means the ledger and the manuscript disagree.
+        verdict = verify_source(source, number=number, identity=identity,
+                                evidence_ref=evidence_ref, successful=successful,
+                                artifacts=artifacts)
+        if not verdict.ok:
+            writing.append(f"Citation [{number}] {verdict.reason}; drop it or cite a source "
+                           f"whose reading matches")
             continue
-        try:
-            evidence = json.loads(artifacts.get_text(evidence_ref))
-            observed = next((item for item in evidence["papers"] if item["id"] == identity), None)
-            if observed is None:
-                raise ValueError("source id not present in search results")
-            canonical = {**observed, "citation": number, "evidence_ref": evidence_ref,
-                         "retrieved_at": evidence["retrieved_at"], "read_ref": None}
-            read_ref = source.get("read_ref")
-            if read_ref:
-                if (not isinstance(read_ref, str)
-                        or successful.get(read_ref) not in ("scholarly.read", "scholarly.read_many")):
-                    raise ValueError("read_ref is not a successful document read in this Run")
-                reading = json.loads(artifacts.get_text(read_ref))
-                if not _same_document(observed, reading):
-                    raise ValueError("document read does not match the retrieved source URLs")
-                canonical["read_ref"] = read_ref
-                canonical["read_truncated"] = reading.get("truncated", False)
-                read_ids.add(identity)
-                read_numbers.add(number)
-            canonical_sources.append(canonical)
-        except (OSError, ValueError, KeyError, TypeError) as exc:
-            writing.append(f"Citation [{number}] evidence rejected: {exc}; drop it or cite "
-                           f"a source whose reading matches")
+        canonical = verdict.canonical or {}
+        if canonical.get("read_ref"):
+            read_ids.add(identity)
+            read_numbers.add(number)
+        canonical_sources.append(canonical)
     citations = citation_numbers(manuscript)
     verified_numbers = {source["citation"] for source in canonical_sources}
     if citations - verified_numbers:

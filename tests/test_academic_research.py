@@ -347,45 +347,55 @@ def test_abstract_page_reads_are_refused():
         read(ResearchRequest(url="https://arxiv.org/abs/2104.04955v1"), timeout_seconds=5)
 
 
-def _round_ledger(start, count, *, saturation=False):
-    """A minimal round that adds `count` fresh sources."""
-    return {"sources": [{"citation": index, "id": f"doi:{index}",
-                         "evidence_ref": f"artifact://round-{index}"}
-                        for index in range(start, start + count)],
-            "search_log": [], "evidence_notes": [], "coverage": [], "tensions": [],
-            "unresolved": [], "saturation": saturation}
+def _round_ledger(start, count, *, saturation=False, artifacts=None):
+    """A minimal round of real, verifiable sources."""
+    sources = []
+    for index in range(start, start + count):
+        identity = f"doi:10.{index}"
+        evidence_ref = artifacts.put_text(json.dumps(
+            {"papers": [{"id": identity, "title": f"Paper {index}"}],
+             "retrieved_at": "2026-09-07T00:00:00Z"}))
+        sources.append({"citation": index, "id": identity, "evidence_ref": evidence_ref})
+    return {"sources": sources, "search_log": [], "evidence_notes": [], "coverage": [],
+            "tensions": [], "unresolved": [], "saturation": saturation}
 
 
-def _verified_operations(store, refs):
-    """Stand in for the ledger: every fabricated source has a successful lookup."""
+def _verified_operations(store, rounds):
+    """Stand in for the tool ledger: every recorded lookup succeeded."""
     class Operation:
         def __init__(self, ref):
             self.result_ref, self.tool_ref = ref, "scholarly.search"
             self.status = type("S", (), {"value": "succeeded"})()
-    operations = [Operation(ref) for ref in refs]
+
+    operations = [Operation(source["evidence_ref"])
+                  for round_ledger in rounds for source in round_ledger["sources"]]
     store.list_tool_operations = lambda run_id: operations
 
 
 def test_campaign_ends_on_diminishing_returns_not_on_a_round_count(tmp_path):
     """No round budget: a campaign ends when consecutive rounds stop paying."""
     store, artifacts, receipt, worker = setup(tmp_path)
-    _verified_operations(store, [f"artifact://round-{index}" for index in range(0, 30)])
+    rounds = [_round_ledger(0, 20, artifacts=artifacts)]
+    rounds += [_round_ledger(start, 1, artifacts=artifacts) for start in range(20, 24)]
+    _verified_operations(store, rounds)
     try:
         asyncio.run(worker.execute_once(worker_id="control"))
         complete(store, artifacts, claim(store, "plan"), {"round": 1})
         settle_coverage(worker)  # seed
 
-        complete(store, artifacts, claim(store, "gather"), _round_ledger(0, 20))
+        complete(store, artifacts, claim(store, "gather"), rounds[0])
         decision = json.loads(artifacts.get_text(settle_coverage(worker).output_ref))
         assert decision["decision"] == "continue" and decision["gains"] == [1.0]
 
         start = 20
         for step in range(2):
-            complete(store, artifacts, claim(store, "gather"), _round_ledger(start, 1))
+            complete(store, artifacts, claim(store, "gather"),
+                     _round_ledger(start, 1, artifacts=artifacts))
             start += 1
             decision = json.loads(artifacts.get_text(settle_coverage(worker).output_ref))
             assert decision["decision"] == "continue", decision
-        complete(store, artifacts, claim(store, "gather"), _round_ledger(start, 1))
+        complete(store, artifacts, claim(store, "gather"),
+                 _round_ledger(start, 1, artifacts=artifacts))
         decision = json.loads(artifacts.get_text(settle_coverage(worker).output_ref))
         assert decision["decision"] == "write", decision
         assert decision["marginal"] is True
