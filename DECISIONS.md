@@ -1002,3 +1002,48 @@ reports only minor findings and the deterministic checks pass, the gate approves
 and records `approved_with`. That is "accept with minor revisions" — the decision
 an editor makes so a thorough reviewer cannot block a paper that already meets the
 stated standard. Major findings, and every deterministic finding, still block.
+
+## ADR-044: Model calls are recorded as a projection, and replay matches by position
+
+Context management is the product's core: which content reaches an agent, how it is
+compressed, how it is recalled. A context policy is a *policy*, and a policy can
+only be judged by comparison, which requires the variable to be controlled. Today
+one campaign costs 31 minutes and 2.21 CNY and is entirely non-deterministic — the
+model decides what to search, what to read, what to conclude. Change a context
+policy and the outcome moves, and there is no way to tell whether the policy acted
+or the model simply behaved differently this time. The improvement cannot be
+attributed, so it cannot be measured, so it cannot be developed. `PRODUCT_VISION.md`
+already promised R0 (event-history forensic replay) and R1 (deterministic
+simulation with stubbed model results) under I9 and called them the only replay
+levels that are guarantees. Neither was implemented.
+
+Therefore every model call's request and response is recorded, and a recorded run
+can be replayed deterministically. Three constraints make it work:
+
+- **A recording is a projection, never state.** I2 already says caches, memory,
+  vector indexes and summaries must never independently determine recovery. A
+  recording is evidence for inspection and comparison; deleting one changes no
+  recovery semantics. Without this stated, a recording would drift into being
+  treated as the authority on what a model said.
+- **Replay matches by structural position** `(node, attempt, sequence)`, not by a
+  prompt hash. The whole point is to change the prompt; matching on it would make
+  replay fail on exactly the change being studied.
+- **Divergence fails loudly and located.** A replay whose call sequence does not
+  match stops and names the call that diverged. Silently continuing would turn
+  "replay succeeded" into a false signal, which is worse than no signal.
+
+The wrapper goes on PydanticAI's `Model`, not on Anchor's `ModelGateway`. One
+`generate_with_tools()` call covers an entire agent turn because PydanticAI runs
+the tool loop inside `agent.run()`, so recording at the gateway would capture one
+final answer and lose the growing context inside the loop — the very thing context
+work needs to observe. `WrapperModel` is the library's own extension point, and all
+three `durable_exec` backends use it.
+
+The boundary is explicit: **replay cannot A/B a context policy that changes the
+prompt.** The prompt changed, so the model must be called for real; serving the old
+response measures nothing. This ADR buys observability and deterministic
+reproduction. Cutting iteration cost needs a node-scoped harness — a frozen input
+snapshot plus the ability to run one node, which does not exist today — and that is
+a larger, separate decision.
+
+Plan and acceptance criteria: `docs/RECORDING_AND_REPLAY.md`.

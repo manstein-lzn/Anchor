@@ -194,7 +194,17 @@
 - Failure fan-out/cancellation of in-flight sibling branches and dispatch supervision
   beyond receiver retry logging
 - PostgreSQL/vector memory projection and worker recovery supervision
+- **Model call recording and replay** (ADR-044, project established): every model
+  call's request and response recorded as a projection, with positional replay that
+  fails loudly on divergence. This is I9's R0/R1, which were promised but never
+  implemented. It is the prerequisite for developing context policy, because a
+  policy can only be judged by controlled comparison and today one campaign is 31
+  minutes and non-deterministic. Steps 1-3 are planned in
+  `docs/RECORDING_AND_REPLAY.md`; the node-scoped harness that would make context
+  iteration cheap is a separate, larger decision.
 - Context engine and memory policies beyond the durable input snapshot boundary
+- Running a single node in isolation, with a frozen input snapshot: today
+  `run_nodes` is a read, so a context experiment costs a whole campaign
 - A2A gateway (MCP is implemented; see ADR-039)
 - OpenTelemetry integration
 - Automatic worker/service startup after a host reboot: the dev services are
