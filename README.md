@@ -339,6 +339,13 @@ To have another agent review the thinking rather than the code, hand it
 `docs/COGNITION_REVIEW_BRIEF.md` — a reading order, the background that is not
 in the documents, the misreadings to avoid, and the questions worth answering.
 
+That thinking has since been reviewed (`docs/COGNITION_ARCHITECTURE_REVIEW.md`) and
+measured (`experiments/cognition_takeover/`). The measurements are worth reading before
+the design, because they undercut part of it: the handoff criterion does not predict
+whether a successor can do the work, the material's shape does not change the artefact,
+and the cost question turns out to be about prefix cache stability rather than context
+size. Each experiment's design flaws are recorded alongside its results.
+
 ## Planned boundaries
 
 - `anchor.domain`: durable business models and state transitions
