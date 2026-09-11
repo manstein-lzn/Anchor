@@ -1,0 +1,48 @@
+{
+  "baseline": {
+    "result": {
+      "node_id": "write",
+      "attempt": 1,
+      "model": "deepseek-flash",
+      "prompt_chars": 403340,
+      "output_chars": 14379,
+      "input_tokens": 173519,
+      "cached_tokens": 173312,
+      "output_tokens": 12934,
+      "cost": null,
+      "seconds": 48.47
+    },
+    "exit_code": 1,
+    "partial_checks": {
+      "scope": "Structure, craft, citation IDs ONLY; not quality or full verification",
+      "structure_errors": [],
+      "craft_errors": [],
+      "missing_citations": [],
+      "unknown_citations": []
+    }
+  },
+  "dedup": {
+    "result": {
+      "node_id": "write",
+      "attempt": 1,
+      "model": "deepseek-flash",
+      "prompt_chars": 262492,
+      "output_chars": 14667,
+      "input_tokens": 105238,
+      "cached_tokens": 67456,
+      "output_tokens": 9650,
+      "cost": null,
+      "seconds": 34.71
+    },
+    "exit_code": 1,
+    "partial_checks": {
+      "scope": "Structure, craft, citation IDs ONLY; not quality or full verification",
+      "structure_errors": [],
+      "craft_errors": [],
+      "missing_citations": [],
+      "unknown_citations": []
+    }
+  },
+  "source_node_runs_unchanged": true,
+  "source_snapshot_unchanged": true
+}

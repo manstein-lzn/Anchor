@@ -38,7 +38,6 @@ from anchor.runtime.node_harness import (  # noqa: E402
     FrozenAttempt,
     HarnessUnsupported,
     NodeHarness,
-    NodeRunResult,
     compare,
 )
 from anchor.runtime.secrets import (  # noqa: E402
@@ -54,40 +53,52 @@ def _emit(value: Any) -> None:
     print(json.dumps(value, ensure_ascii=False, indent=2, sort_keys=False))
 
 
-def _harness(settings: AnchorSettings, model_ref: str) -> tuple[NodeHarness, Any, Any]:
+def _harness(settings: AnchorSettings, model_ref: str, *,
+             with_gateway: bool = True) -> tuple[NodeHarness, Any, Any]:
+    """Build the harness. ``prompt`` needs no gateway, so it builds none.
+
+    That is not only an optimisation: an httpx client constructed for a command
+    that never calls a model still has to be closed, and closing it requires the
+    loop it was built in. Not building it removes the problem.
+    """
     store = RelationalStateStore(settings.require_database_url())
     config = load_runtime_config(settings.runtime_config)
     providers: list[Any] = [EnvironmentSecretProvider()]
     if config.secret_file:
         providers.append(JsonFileSecretProvider(config.secret_file))
-    profile = next((item for item in config.models if item.ref == model_ref), None)
-    if profile is None:
-        raise SystemExit(f"no model profile {model_ref!r} in {settings.runtime_config}")
     registry = CapabilityRegistry(models=config.models, agents=config.agents,
                                   tools=config.tools, verifiers=config.verifiers)
-    gateway = build_model_gateway(profile, ChainedSecretProvider(*providers))
+    gateway = None
+    if with_gateway:
+        profile = next((item for item in config.models if item.ref == model_ref), None)
+        if profile is None:
+            raise SystemExit(f"no model profile {model_ref!r} in {settings.runtime_config}")
+        gateway = build_model_gateway(profile, ChainedSecretProvider(*providers))
     harness = NodeHarness(store, LocalArtifactStore(settings.artifact_root),
                           gateway=gateway, registry=registry)
     return harness, gateway, store
 
 
-async def _run(harness: NodeHarness, attempt: FrozenAttempt,
-               snapshot: dict[str, Any] | None, include_memory: bool) -> NodeRunResult:
-    return await harness.run(attempt, snapshot=snapshot, include_memory=include_memory)
+async def _execute(harness: NodeHarness, gateway: Any, attempt: FrozenAttempt,
+                   snapshot: dict[str, Any] | None, include_memory: bool,
+                   *, second: bool = False, drop_memory: bool = False) -> Any:
+    """One call, or two, inside a single event loop, closing the client in it.
 
-
-async def _compare(harness: NodeHarness, attempt: FrozenAttempt,
-                   snapshot: dict[str, Any] | None,
-                   drop_memory: bool) -> tuple[NodeRunResult, NodeRunResult]:
-    """Both sides in one event loop.
-
-    Not two ``asyncio.run`` calls: the gateway's HTTP client binds to the loop it
-    was first used in, so a second loop would fail with a connection error that
-    looks like a provider fault and is not one.
+    Everything async happens here on purpose. The gateway's HTTP client binds to
+    the loop it is first used in, so a second ``asyncio.run`` — even for closing —
+    fails with an error that looks like a provider fault and is not one.
     """
-    before = await _run(harness, attempt, snapshot, True)
-    after = await _run(harness, attempt, snapshot, not drop_memory)
-    return before, after
+    try:
+        if not second:
+            return await harness.run(attempt, snapshot=snapshot,
+                                     include_memory=include_memory)
+        before = await harness.run(attempt, snapshot=snapshot, include_memory=True)
+        after = await harness.run(attempt, snapshot=snapshot,
+                                  include_memory=not drop_memory)
+        return before, after
+    finally:
+        if gateway is not None:
+            await gateway.close()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -104,7 +115,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--snapshot", help="replace the snapshot with this JSON file")
     args = parser.parse_args(argv)
 
-    harness, gateway, store = _harness(settings, args.model_ref)
+    needs_model = args.command in ("run", "compare")
+    harness, gateway, store = _harness(settings, args.model_ref,
+                                       with_gateway=needs_model)
     try:
         if args.command == "attempts":
             _emit({args.node_id or "*": [
@@ -131,12 +144,14 @@ def main(argv: list[str] | None = None) -> int:
             # The point of the harness: one attempt, two policies, two live calls,
             # and a report that says whether the answer moved without judging it.
             before, after = asyncio.run(
-                _compare(harness, attempt, snapshot, args.drop_memory))
+                _execute(harness, gateway, attempt, snapshot, True, second=True,
+                         drop_memory=args.drop_memory))
             _emit({"before": before.summary(), "after": after.summary(),
                    "comparison": compare(before, after),
                    "after_text": after.text})
             return 0
-        result = asyncio.run(_run(harness, attempt, snapshot, not args.drop_memory))
+        result = asyncio.run(_execute(harness, gateway, attempt, snapshot,
+                                      not args.drop_memory))
         _emit({"result": result.summary(), "text": result.text})
         return 0
     except HarnessUnsupported as exc:
@@ -153,7 +168,6 @@ def main(argv: list[str] | None = None) -> int:
                           "detail": f"{type(exc).__name__}: {exc}"}})
         return 1
     finally:
-        asyncio.run(gateway.close())
         store.close()
 
 

@@ -1,0 +1,223 @@
+{
+  "run_id": "f4eb8ac7-3418-4e8d-8be5-8eaede46e02a",
+  "node_run_count": 37,
+  "node_runs_digest": "7340395367d3661e6df6b67c03cb0667bc68945bb3172e6384eda9fbf968aea0",
+  "source_snapshot_digest": "c1e73bed75c80f0175e9f2200d6b0e9c68e9bcfd7b90a80c7f8a2c6ae1dde473",
+  "prompt_chars": {
+    "1": 403340,
+    "0": 141033
+  },
+  "prompt_sha256": "9b7113ba4c7a4f0ce63970b85e8d152b299d660cace52db868d58a0f408d40f3",
+  "prompt_utf8_bytes": 688792,
+  "evidence_chars": 137094,
+  "evidence_utf8_bytes": 266144,
+  "evidence_exact_occurrences_in_prompt": 2,
+  "evidence_fraction": 0.33989686120890567,
+  "duplicate_fields": [
+    "evidence",
+    "plan",
+    "request"
+  ],
+  "duplicate_payload_chars": 140817,
+  "dedup_prompt_chars": 262492,
+  "dedup_saved_chars": 140848,
+  "dedup_saved_fraction": 0.34920414538602673,
+  "slim_prompt_chars": 155800,
+  "slim_saved_fraction": 0.6137253929687112,
+  "slim_warning": "Also removes unique verified metadata; NOT a lossless deduplication",
+  "source_count": 59,
+  "verified_source_count": 59,
+  "source_ids_equal": true,
+  "source_shared_fields": [
+    "citation",
+    "evidence_ref",
+    "id",
+    "read_ref"
+  ],
+  "source_shared_values_equal": true,
+  "verified_unique_fields": [
+    "abstract",
+    "authors",
+    "evidence_level",
+    "fulltext_urls",
+    "publication_type",
+    "read_truncated",
+    "retrieved_at",
+    "title",
+    "url",
+    "year"
+  ],
+  "evidence_sources_chars": 13249,
+  "verified_sources_chars": 106672,
+  "whitepaper_60_numerator": 243766,
+  "write_usage": [
+    {
+      "node_id": "write",
+      "attempt": 1,
+      "model": "deepseek-flash",
+      "provider": "deepseek",
+      "input_tokens": 173519,
+      "output_tokens": 10382,
+      "requests": 1,
+      "cost": null,
+      "cache_read_tokens": 67456,
+      "cache_write_tokens": 0
+    },
+    {
+      "node_id": "write",
+      "attempt": 0,
+      "model": "deepseek-flash",
+      "provider": "deepseek",
+      "input_tokens": 69135,
+      "output_tokens": 31731,
+      "requests": 1,
+      "cost": null,
+      "cache_read_tokens": 640,
+      "cache_write_tokens": 0
+    }
+  ],
+  "model_call_recordings": 0,
+  "run_elapsed_seconds": 1844.552516,
+  "task_fields": {
+    "objective": "编译器优化中的代价模型（cost model）近年的发展",
+    "constraints": "[]",
+    "success_criteria": "[\"Evidence-backed scholarly review with verified citations and a Markdown file\"]"
+  },
+  "frozen_feedback_edges": [
+    {
+      "source": "check",
+      "target": "write",
+      "condition": "output.review.verdict == 'revise' && output.review.target == 'manuscript'",
+      "input_mapping": {
+        "feedback": "outputs.check",
+        "evidence": "outputs.check.evidence",
+        "plan": "outputs.check.plan",
+        "request": "outputs.check.request"
+      }
+    }
+  ],
+  "reviews": [
+    {
+      "attempt": 1,
+      "output": {
+        "verdict": "revise",
+        "target": "manuscript",
+        "summary": "这是一篇结构成熟、论证明晰且对证据强度诚实的综述：它按指令级、张量/循环、编译遍决策三层建立「表示—目标—信号—耦合」坐标系，明确提出并一贯坚持「不是学习型取代解析式，而是三轴重新分工」的论点，把账本中的主要张力（协议混淆、静态 vs 实测、代理型 vs 预测型、TLP 与 TCL 对迁移失败的竞争性归因）都摆出来并给出可操作开放问题。我用真实来源核对了若干载荷点：GRANITE 的 arXiv 页面确认平均测试误差 6.9 与训练/推理吞吐约 3×，uiCA/CesASMe/AnICA 的摘要确认「协议与依赖假设决定排名」的论证，arXiv:2302.11405（MLIR 代价模型）、arXiv:2311.09690（CDMPP）、arXiv:2211.03578（TLP）题录身份均与正文一致，未发现编造数字或错误书目身份。但正文存在一组可具体修正的引用实践缺陷：摘要与引言把解析式模型（Facile/uiCA）当作「学习标签来源」，同一工作以两个编号重复出现（会导致导出参考文献重复条目），个别引用指向不支持该句的来源（[41]、[58]）。因此不需要新检索，也不宜要求全文级补搜，只需在写作层面完成若干精确修正。",
+        "issues": [
+          {
+            "severity": "minor",
+            "location": "Abstract（第2段）与 Introduction（第3段）：「解析式模型退守到的位置，是已知微架构上的精度、可解释性，以及作为学习标签的来源[26][51][8]」",
+            "problem": "引用与主张错配：Facile[26] 与 uiCA[51] 是解析式吞吐模型，其输出不构成学习型模型的训练标签；真正被当作标签/真值来源的是 Mind Mappings 的参考解析模型（[8]，可单独支持「解析模型作标注源」）、uops.info[48]、PMEvo[49]、PALMED[56]，公共测量底座为 nanoBench[7] 与 BHive[57]。正文第5节已用正确的引用集合（[8][48][49][56]），摘要/引言因此与该处自相矛盾。",
+            "required_action": "把该句拆成两部分并重新分配引用：精度、可解释性、零训练成本 → [26][51]；作为学习标签/参考真值的来源 → [8][48][49][56]。摘要与引言两处同步修改。"
+          },
+          {
+            "severity": "minor",
+            "location": "第5节开头：「早期综述…[10][36]」与「立场论文…[18][35]」",
+            "problem": "同一部工作以两个编号并列引用：Ashouri 等 CSUR 综述与其 arXiv 版本（账本引用 10 与 36 明示「为同一工作」），Wang & O'Boyle 的 Proc. IEEE 版本与 arXiv:1805.03441（引用 18 与 35 同文）。导出节点按 sources 生成参考文献时会产生两条实质重复的条目，读者也会误以为存在四项独立综述。",
+            "required_action": "每部工作只保留一个编号用于正文与参考文献：例如 Ashouri 统一用 [10]、Wang & O'Boyle 统一用 [18]（或在首次引用处以同一编号注明已取用其公开 arXiv 版本），删除 [35][36] 的并列引用。"
+          },
+          {
+            "severity": "minor",
+            "location": "Abstract（第3段）：「解析式路线在精度、可解释性与零训练成本上仍有结构性优势[26][51][58]」",
+            "problem": "[58] Concorde 是「解析骨架 + 学习组件」的融合式建模工作，且账本记录其全文不可得（仅有截断摘要，dl.acm 403 / DSpace 405），无法支撑「解析式路线的结构性优势」这一判断；正文中 [58] 的用法（作为混合路线示例）才是恰当的。",
+            "required_action": "摘要该句改引 [26][51]（如需第三方佐证可加 [47]），把 [58] 只保留在正文第5节作为「解析—学习融合」路线示例，并保留其摘要级证据的限定。"
+          },
+          {
+            "severity": "minor",
+            "location": "第2节判断句：「「可迁移的表示」比「更强的模型」更接近问题本质[40][41]」",
+            "problem": "[41] 是 Laukemann 等对 Grace/Sapphire Rapids/Genoa 的解析式微架构建模（OSACA 扩展），与本句「可迁移表示」的主张无关；支持该句的是 [40]（可泛化的程序与架构表示，账本亦标注仅摘要级），如欲补强可加 [33]（CDMPP 的设备无关表示）。",
+            "required_action": "改为 [40]（或 [40][33]）；同时按账本对该来源的摘要级状态作一句限定（例如「以可迁移表示为命题的工作已出现，但其评测细节不可核验」）。"
+          },
+          {
+            "severity": "minor",
+            "location": "Threats to Validity「时间窗与成熟度」；Comparative Analysis 表格缺少状态列",
+            "problem": "仅提示 2026 年预印本待验证，但账本显示多篇载荷来源同属预印本/未确认同行评审：MLGOPerf[30]、LoopTune[31]、CDMPP[33]、Pruner[34]、PALMED[56]、uiCA[51]、AnICA[52]、CesASMe[53]、MLIR 代价模型[50]、TLP[25] 等。读者无法从正文分辨哪些数字来自正式会议/期刊、哪些来自预印本。",
+            "required_action": "在对比表增加「状态」列（会议/期刊 或 预印本），或在各层首次引用处统一标注证据状态；不改变任何数值，只补足来源成熟度信息。"
+          },
+          {
+            "severity": "minor",
+            "location": "第4节「路径（续）」整段（四种耦合形态 + 工程折中 + 可复现性基础设施 + 张量侧早期工作）",
+            "problem": "该段把至少六个不同论题压进一段长文，接近 wall-of-text，读者难以定位「抽取型／代理型／奖励源／策略」的边界，而这恰是本文核心辨析之一。",
+            "required_action": "拆为 2–3 段（① 抽取型与评分/过滤型；② 奖励源与直接策略；③ 代理型与工程折中、可复现性基础设施），保持叙述文风，不改动论点与引用。"
+          },
+          {
+            "severity": "minor",
+            "location": "Survey Methodology「证据强度分三档…本文所有具体数值一律取自强档证据」；Comparative Analysis 表下注「最后一列只填可核验数值」",
+            "problem": "面向读者的正文中出现内部账本式的过程语言（强/中/弱档、「可核验数值」反复出现），削弱可读性，也把证据分级方法讲成了流程说明而非研究限制。",
+            "required_action": "改写为读者导向的表述，例如「本文只报告可在原文中核对的具体数字；原文无法核对的维度（端到端收益、编译开销、泛化评估）在表中留空并说明原因」，保留同等诚实信息而去掉分级与账本措辞。"
+          }
+        ],
+        "strengths": [
+          "论证主线清晰且自洽：摘要、引言、结论三处表述同一论点——近年代价模型的演化是表示、监督信号与搜索耦合三轴上的重新分工，解析式模型退守到已知微架构的精度/可解释性与标注源角色；并且解释了「为什么」（决策空间随异构硬件、高层 IR、动态形状扩大；标注信号有价格），而不止罗列「是什么」。",
+          "结构符合收敛骨架：Abstract → Introduction → Survey Methodology → 六个按领域自身轴线命名的主题节（粒度、表示、监督信号、耦合、路线、泛化）→ 对比表 → 开放问题 → Threats to Validity → Conclusion，未出现单一「文献综述」桶式章节。",
+          "账本张力被真实处理而非回避：协议混淆（吞吐定义、基准版本、依赖假设改变模型排名）[51][52][53]；静态分析与实测互有胜负[37]；预测型与代理型代价模型的目标函数不同[8][9]；TLP 与 TCL 对迁移失败的竞争性归因被并列为两种待裁决解释，并给出交叉实验设计。",
+          "关键数字经抽样核对与来源一致：GRANITE 的平均测试误差 6.9 与约 3× 吞吐提升（arXiv 页面）、uiCA 摘要的「既有模型 9%–36%」与 Facile 摘要的「uiCA 约 1%」、AnICA/CesASMe 的差异来源主张均可回溯；arXiv:2302.11405 / 2311.09690 / 2211.03578 的题录身份与正文所指一致，未发现虚构或错配的书目身份。",
+          "对不可核验数值主动克制：AutoTVM 的 1.2–3.8 倍被弃用（单位在抽取文本中丢失）、GRANITE 的 1.7 只作方向性引用、Crop[21] 仅以「存在该路线」的题录级方式出现；对比表以空白列如实呈现证据缺口，而不是用二手数字填满。",
+          "开放问题可操作：误差传播的噪声注入曲线、统一测量与评估协议、区间/不确定性代价、主动采样与测量预算的联合最优、代理与预测型代价模型的边界、动态形状下符号代价、负结果与审计，均给出了具体实验形态，符合读者（懂 ML 与系统但非编译器细分领域）的可执行预期。"
+        ],
+        "blockers": []
+      }
+    },
+    {
+      "attempt": 0,
+      "output": {
+        "verdict": "revise",
+        "target": "manuscript",
+        "summary": "Mechanical preflight failed; scholarly review was not invoked",
+        "issues": [
+          {
+            "severity": "major",
+            "location": "manuscript",
+            "problem": "Sources not cited in manuscript: [15]",
+            "required_action": "Sources not cited in manuscript: [15]"
+          }
+        ],
+        "strengths": [],
+        "blockers": [],
+        "review_origin": "deterministic_preflight"
+      }
+    }
+  ],
+  "all_run_review_anomalies": [
+    {
+      "run_id": "3078043c-6d4d-499a-b952-19c636e3dddc",
+      "attempt": 0,
+      "output_ref": "artifact://sha256/48d13d2efe94aa721f1b56fdb815a9601d49c4f50297caaca7dd377a1591daf7",
+      "issue_counts": {
+        "minor": 8
+      }
+    },
+    {
+      "run_id": "b8fdfc5d-97af-4094-975b-0153e9c43149",
+      "attempt": 2,
+      "output_ref": "artifact://sha256/44b22b7592eaa07ef0ed8263b88ee040ef329621e72deb903a3ccab6d0017771",
+      "issue_counts": {
+        "minor": 6
+      }
+    },
+    {
+      "run_id": "b8fdfc5d-97af-4094-975b-0153e9c43149",
+      "attempt": 6,
+      "output_ref": "artifact://sha256/4da56bd4059c0754a80492c87f75e2c99f41fb4340951564190cb63e92c334b7",
+      "issue_counts": {
+        "minor": 6
+      }
+    },
+    {
+      "run_id": "b8fdfc5d-97af-4094-975b-0153e9c43149",
+      "attempt": 8,
+      "output_ref": "artifact://sha256/849fa30b7773fb8e3bd53278676479c84d48558fc7279a03b6e7c101d9b0ad79",
+      "issue_counts": {
+        "minor": 4
+      }
+    },
+    {
+      "run_id": "f4eb8ac7-3418-4e8d-8be5-8eaede46e02a",
+      "attempt": 1,
+      "output_ref": "artifact://sha256/1c2a91831f92c1b178255a9dddc62460ba010131d3d06f0cff6964c0d046d373",
+      "issue_counts": {
+        "minor": 7
+      }
+    }
+  ]
+}
