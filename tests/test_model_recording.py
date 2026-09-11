@@ -648,3 +648,70 @@ def test_a_worker_replay_reproduces_a_node_exactly(tmp_path):
     assert types.count("model.call") == recorder.recorded, \
         "a replay does not write new recordings over the ones it is reading"
     assert "model.call_replayed" in types
+
+
+def test_per_process_bookkeeping_stays_bounded(tmp_path):
+    """A worker is long-lived: counters that never release would leak.
+
+    One campaign runs about a thousand node attempts, and a service is expected to
+    stay up for weeks, so unbounded per-attempt bookkeeping is a real defect rather
+    than a style question.
+    """
+    from anchor.runtime.model_recording import MAX_TRACKED_ATTEMPTS, MAX_TRACKED_REFS
+
+    artifacts = LocalArtifactStore(tmp_path / "artifacts")
+    recorder = ModelRecorder(artifacts, mode=RecordingMode.RECORD)
+    for _ in range(MAX_TRACKED_ATTEMPTS * 3):
+        recorder._next_sequence(context())
+    assert len(recorder._sequences) <= MAX_TRACKED_ATTEMPTS
+
+    for index in range(MAX_TRACKED_REFS * 3):
+        recorder._remember(f"ref-{index}")
+    assert len(recorder.written) <= MAX_TRACKED_REFS
+    # The most recent entries survive: the log is for inspecting what just happened.
+    assert recorder.written[-1] == f"ref-{MAX_TRACKED_REFS * 3 - 1}"
+
+
+def test_a_replay_plan_keeps_a_bounded_number_of_runs(tmp_path):
+    """The same reasoning as the recorder's counters, on the replay side."""
+    from anchor.runtime.model_replay import MAX_PLANNED_RUNS
+
+    artifacts = LocalArtifactStore(tmp_path / "artifacts")
+    recorder = ModelRecorder(artifacts, mode=RecordingMode.RECORD)
+    ctx = context()
+    run_call(recorder, "hello", ctx=ctx)
+    payload = read_recording(artifacts, recorder.written[0])
+
+    plan = ReplayPlan(artifacts)
+    for index in range(MAX_PLANNED_RUNS * 2):
+        plan._index({**payload, "run_id": str(uuid4())})
+    assert len(plan._by_run) <= MAX_PLANNED_RUNS
+    assert len(plan._loaded) <= MAX_PLANNED_RUNS
+
+
+def test_a_different_run_does_not_match_an_old_recording(tmp_path):
+    """Pins a real limitation, so it is a known boundary and not a surprise.
+
+    The replay key contains `node_run_id`, which a new run generates afresh.
+    Replaying therefore reproduces an *existing* run's attempts — a resume, a retry,
+    a forensic re-execution — and cannot serve a freshly admitted run of the same
+    graph. That is deliberate: matching a new run to an old one by node name and
+    order would risk silently pairing a call with the wrong recorded answer, which
+    is the failure mode the loud divergence exists to prevent.
+
+    A different run of the same graph is reproduced by the graph itself being
+    deterministic, not by replay; see `docs/RECORDING_AND_REPLAY.md`.
+    """
+    artifacts = LocalArtifactStore(tmp_path / "artifacts")
+    recorder = ModelRecorder(artifacts, mode=RecordingMode.RECORD)
+    original = context(node_id="write")
+    run_call(recorder, "Write the paper.", ctx=original)
+
+    plan = ReplayPlan.from_recordings(artifacts, recorder.written)
+    replay, _ = replay_gateway(artifacts, plan)
+
+    # Same node, same attempt number, same prompt — but a new run's identifiers.
+    fresh = context(node_id="write", attempt=0)
+    with recording_scope(fresh), pytest.raises(ReplayDivergence, match="were recorded"):
+        asyncio.run(replay.generate(prompt="Write the paper.",
+                                    system_prompt="Answer plainly."))

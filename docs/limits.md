@@ -69,6 +69,10 @@
 | `ANCHOR_STORAGE_ENFORCE` | 同上 | `true` | operator_policy | 滚动清理开关 | 关闭后预算仅提示；无预算时始终不删 |
 | `ANCHOR_STORAGE_SWEEP_INTERVAL` | 同上 | 60s | operator_policy | 清理扫描间隔 | 由 scheduler 服务执行 |
 | `ANCHOR_STORAGE_SWEEP_BATCH` / `_MAX_ROUNDS` | 同上 | 25 / 40 | operator_policy | 每轮淘汰条数与最大轮数 | 限制单次清理工作量 |
+| `ANCHOR_MODEL_RECORDING` | `runtime/settings.py` | `off` | operator_policy | 模型调用的录制/回放（ADR-044） | `off` 不安装 wrapper，零开销；`record` 写投影；`replay` 按位置提供录制答案并拒绝越界 |
+| `MAX_TRACKED_ATTEMPTS` | `runtime/model_recording.py` | 4096 | resource_capacity | 常驻进程的调用计数器上限 | 淘汰最旧；一个早已结束的 attempt 被淘汰不会被误解 |
+| `MAX_TRACKED_REFS` | 同上 | 4096 | resource_capacity | 录制引用检查日志上限 | 同上，保留最近条目 |
+| `MAX_PLANNED_RUNS` | `runtime/model_replay.py` | 64 | resource_capacity | 回放计划缓存的 run 数 | 淘汰最旧 |
 | `ANCHOR_LEASE_STALE_AFTER` | 同上 | 30s | transport | lease 心跳评估 | 只报告 stale，不偷取 lease |
 | `ANCHOR_SUPERVISOR_INTERVAL` | 同上 | 10s | resource_capacity | 观察频率 | — |
 | model gateway HTTP timeout | `runtime/model_gateway.py` | connect 30 / read 900 / write 60 / pool 30 | transport | 单次 HTTP | 该请求失败，进入故障分类 |

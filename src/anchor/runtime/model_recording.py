@@ -63,6 +63,15 @@ logger = logging.getLogger(__name__)
 #: silently read as if it were current.
 RECORDING_FORMAT = 1
 
+#: A worker is a long-lived process, and one campaign can run a thousand node
+#: attempts. Bookkeeping that is never released would therefore grow for as long as
+#: the process lives — the kind of leak that only shows up weeks later, in a service
+#: whose entire promise is staying up for weeks. Counters are bounded by count
+#: rather than released per attempt because eviction is safe: an attempt that long
+#: stopped issuing calls cannot be confused by its counter being dropped.
+MAX_TRACKED_ATTEMPTS = 4096
+MAX_TRACKED_REFS = 4096
+
 #: Obvious credential shapes. This is a backstop, not the guard: the guard is the
 #: literal secret values the caller passes as `forbidden`.
 _SECRET_PATTERNS = (
@@ -288,8 +297,9 @@ class ModelRecorder:
         # them, so it is the only place that can supply them.
         self._forbidden = tuple(value for value in forbidden if value)
         self._sequences: dict[tuple[UUID, int], int] = {}
-        #: References of the recordings written during this process, in order. Step
-        #: two will read them back to replay; tests use them to inspect a prompt.
+        #: References of the most recent recordings, for inspection and tests. The
+        #: bounded log is a debugging aid, not an index: a replay reads its plan from
+        #: the run's events.
         self.written: list[str] = []
         self.refused = 0
         self.recorded = 0
@@ -311,8 +321,18 @@ class ModelRecorder:
     def _next_sequence(self, context: CallContext) -> int:
         key = (context.node_run_id, context.attempt)
         sequence = self._sequences.get(key, 0)
+        if key not in self._sequences and len(self._sequences) >= MAX_TRACKED_ATTEMPTS:
+            # Drop the oldest entry. Insertion order is the order attempts started,
+            # so the one evicted is the least likely to still be running.
+            self._sequences.pop(next(iter(self._sequences)), None)
         self._sequences[key] = sequence + 1
         return sequence
+
+    def _remember(self, ref: str) -> None:
+        """Append a reference to the bounded inspection log."""
+        if len(self.written) >= MAX_TRACKED_REFS:
+            del self.written[:len(self.written) - MAX_TRACKED_REFS + 1]
+        self.written.append(ref)
 
     def _emit(self, context: CallContext, event_type: str, payload: dict[str, Any],
               *, key: str) -> None:
@@ -365,7 +385,7 @@ class ModelRecorder:
             return None
 
         self.recorded += 1
-        self.written.append(ref)
+        self._remember(ref)
         self._emit(context, "model.call",
                    {"node_id": context.node_id, "attempt": context.attempt,
                     "sequence": sequence, "recording_ref": ref,

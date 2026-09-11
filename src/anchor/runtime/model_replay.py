@@ -40,6 +40,7 @@ from pydantic_ai.settings import ModelSettings
 
 from anchor.runtime.artifacts import ArtifactStore
 from anchor.runtime.model_recording import (
+    MAX_TRACKED_ATTEMPTS,
     CallContext,
     EventStore,
     _active,
@@ -50,6 +51,10 @@ from anchor.runtime.model_recording import (
 
 
 logger = logging.getLogger(__name__)
+
+#: How many runs' plans one process keeps. A replay is a bounded activity, so this
+#: only prevents unbounded growth in a process that replays many runs.
+MAX_PLANNED_RUNS = 64
 
 
 @dataclass(frozen=True)
@@ -108,6 +113,12 @@ class ReplayPlan:
             node_id=str(payload["node_id"]), node_run_id=str(payload["node_run_id"]),
             attempt=int(payload["attempt"]), sequence=int(payload["sequence"]),
             request_digest=str(payload["request_digest"]), payload=payload)
+        if run_id not in self._by_run and len(self._by_run) >= MAX_PLANNED_RUNS:
+            # A long-lived process replays a bounded number of runs; keeping every
+            # plan it ever built would grow without limit. Evict the oldest.
+            oldest = next(iter(self._by_run))
+            self._by_run.pop(oldest, None)
+            self._loaded.discard(oldest)
         self._by_run.setdefault(run_id, {})[(
             entry.node_run_id, entry.attempt, entry.sequence)] = entry
 
@@ -178,6 +189,8 @@ class ReplayModel(WrapperModel):
                 "nothing to look it up by", node_id="?")
         key = (context.node_run_id, context.attempt)
         sequence = self._positions.get(key, 0)
+        if key not in self._positions and len(self._positions) >= MAX_TRACKED_ATTEMPTS:
+            self._positions.pop(next(iter(self._positions)), None)
         self._positions[key] = sequence + 1
 
         entry = self.plan.entry(context, sequence)

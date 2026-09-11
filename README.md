@@ -295,6 +295,15 @@ installation and topic submission.
 .venv/bin/anchor run usage RUN_UUID          # what the run actually cost
 ```
 
+To capture what a model was actually asked — the literal messages and instructions —
+run a worker with `ANCHOR_MODEL_RECORDING=record`. Each call is written as an
+immutable projection and attributed to its node attempt by a `model.call` event; the
+same run can then be replayed with `ANCHOR_MODEL_RECORDING=replay`, which serves the
+recorded answers or fails loudly at the first call that was never recorded. It is
+off by default, so production installs nothing. See
+[docs/RECORDING_AND_REPLAY.md](docs/RECORDING_AND_REPLAY.md) for the boundary —
+replay reproduces an existing run's attempts, it does not re-run a graph.
+
 A representative run — thirteen gather rounds, 59 sources, 39 read in full — took
 31 minutes and about 2.2 CNY, and produced a 279-line paper with 59 references.
 
