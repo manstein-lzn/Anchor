@@ -139,7 +139,9 @@ async def write_paper(gateway: Any, system: str, text: str,
     return {"seconds": round(elapsed, 1), "prompt_chars": len(prompt),
             "manuscript": manuscript, "thesis": str(payload.get("thesis") or ""),
             "response_chars": len(response.text),
-            "input_tokens": response.input_tokens, "output_tokens": response.output_tokens,
+            "input_tokens": response.input_tokens,
+            "cached_tokens": response.cache_read_tokens,
+            "output_tokens": response.output_tokens,
             "raw": response.text[:500] if not manuscript else ""}
 
 
@@ -231,11 +233,14 @@ async def main() -> int:
         for label in arms:
             r = results[label]
             j = r["judgement"]
+            p = r["paper"]
+            billed = p["input_tokens"] - p["cached_tokens"]
             print(f"  {label}: 要求 {j.get('met')}/{j.get('of')} | "
-                  f"正文 {len(r['paper']['manuscript']):>6,} 字符 | "
+                  f"正文 {len(p['manuscript']):>6,} 字符 | "
                   f"结构错 {len(r['deterministic']['structure_errors'])} "
                   f"行文错 {len(r['deterministic']['craft_errors'])} | "
-                  f"表 {r['deterministic'].get('has_table')}")
+                  f"gross {p['input_tokens']:>8,} | cached {p['cached_tokens']:>8,} | "
+                  f"billed {billed:>8,} | out {p['output_tokens']:>7,}")
         return 0
     finally:
         await gateway.close()
