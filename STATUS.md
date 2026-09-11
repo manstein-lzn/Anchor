@@ -135,14 +135,73 @@
 - Responsive Graph Builder viewport fitting uses declared node dimensions and the
   measured canvas; desktop/mobile Playwright coverage is stable across breakpoints
 
+### Content plane (ADR-027 … ADR-038)
+
+- `domain/content.py` defines `ContentRef` (`artifact://` | `workspace://`), the
+  single boundary type; a mutable revision is rejected at parse time and an
+  unregistered kind or missing blob fails closed
+- Read-only content sources: projects, `GitWorkspaceBackend` (`cat-file`/`ls-tree`,
+  never a checkout), materialize plus read-only execution under bubblewrap
+- Writable workspaces: run-level worktrees, write/delete/freeze/archive, and a
+  complete operation ledger; bubblewrap is the only sandbox backend, and its
+  absence disables `workspace.exec` rather than degrading isolation
+- Content-commit protocol with an explicit prepared window, five injected crash
+  windows, and `inconsistent` (never a guess) when content cannot be read
+- Native workspace tools (`workspace.read/write/list/exec`) with their own ledger,
+  separate from the gateway tool ledger
+- A node's output is its workspace revision; the model text is stored as an
+  artifact in the event payload
+- Single-writer claim per workspace with pinned reads; failures return as
+  messages rather than leaving a node `running` on a stale lease
+- Explicit fork and `require_clean` merge for parallel branches, with
+  `anchor.join_merge` as the join behavior; a conflict aborts and fails closed
+- `scripts/validate_workspace.sh` (6/6), `validate_workspace_lineage.sh` (7/7) and
+  `validate_workspace_parallel.sh` (7/7) drive real runs over real repositories
+
+### Agent surface (ADR-039)
+
+- `anchor.client` — one typed operation layer; `anchor.cli` and `anchor.mcp` are
+  thin adapters over it, so their semantics cannot drift
+- `GET /api/graphs/ir` — the machine-readable authoring reference, so an agent does
+  not have to reverse engineer the IR
+- `anchor-mcp` — MCP server over stdio (newline-delimited JSON-RPC), one tool per
+  operation with a closed schema; human-only and operator-only operations are
+  refused by default
+- `scripts/validate_mcp.py` — a real stdio client authors, runs and observes a run
+  end to end (18/18)
+
+### Deep research (ADR-040 … ADR-043)
+
+- The paper is for the reader and verification is a pipeline property: `gather`
+  produces the evidence ledger, `write` produces the manuscript, `review` judges
+  substance and craft and names where the fix belongs
+- The section skeleton is measured from published surveys, not invented, and the
+  deterministic gates enforce it along with craft rules (no audit language, no
+  process language, no hashes, bounded paragraphs)
+- Research is a campaign with a convergence criterion and no round cap; the ledger
+  is what the writer must cite in full, so unverifiable sources are removed rather
+  than admitted
+- Approval follows the reviewer's own bar: only minor findings plus clean
+  deterministic checks approve the paper
+- Token accounting: `ModelResponse` carries input/output/cache tokens, the worker
+  emits a `model.usage` event per call, and `GET /api/runs/{id}/usage` reports
+  gross, cached and billed input per node
+- `scholarly.citations` (citation chasing) and `scholarly.read_many` (batch reads)
+  keep the model's turn count down, which is what a run's cost is made of
+
 ## Not yet implemented
 
 - Failure fan-out/cancellation of in-flight sibling branches and dispatch supervision
   beyond receiver retry logging
 - PostgreSQL/vector memory projection and worker recovery supervision
 - Context engine and memory policies beyond the durable input snapshot boundary
-- MCP/A2A gateways
+- A2A gateway (MCP is implemented; see ADR-039)
 - OpenTelemetry integration
+- Automatic worker/service startup after a host reboot: the dev services are
+  transient systemd units, so a long run stalls until an operator restarts them
+- A revision bound as an explicit operator policy: the system detects an unchanged
+  defect and a paper that meets the bar, but there is no configured ceiling on how
+  many times a paper may be revised
 - Production identity/authorization, approval UI, and artifact service
 
 ## Current risks
@@ -158,60 +217,47 @@
 7. Local API is single-user development only; HTTP 202 means persisted admission,
    not active Agent execution. Live API uses .local/api.sqlite, not the test container.
 8. The Web editor authors/publishes Graphs and the Run Console monitors canonical
-   execution, but trigger management, approvals and pause/resume are not complete.
+   execution, including pause/resume/stop, approvals and trigger management.
    Unsaved browser edits are memory-only. See WEB.md for exact limits.
 9. The local worker service is intentionally explicit: it requires a runtime
    profile with matching Agent capabilities and does not invent missing references.
+10. A tool loop re-sends its whole conversation on every model call, so a run's cost
+    is turns times context. Most re-sent tokens are a cached prefix, but the gross
+    counter is several times the charge; budget against `billed_input_tokens`.
+11. The scholarly adapter paces each source (arXiv 1 request per 3 s, Crossref per
+    second). Reading N papers costs at least 3N seconds of wall clock no matter how
+    the code is arranged, so a deep run is bounded by the sources' terms, not by us.
 
 ## Next milestone
 
-```text
-P0 Sandbox/ToolGateway v1 landed (ADR-012): deny-by-default policy +
-   BubblewrapBackend (no net, read-only root, private workspace, scrubbed
-   env) + ledger-first execution with replay-safe outcomes; side-effect
-   tools refused pending tool-level approval.
-   Approval/HumanTask/Wait durable states landed (ADR-013): waiting states
-   block terminals, no worker claims them, decide/resume share the
-   propagation tail; `GET /api/waits` + approve/reject/resume endpoints +
-   Run Console actions.
-   Agent tool-use loop landed (ADR-014): pydantic-ai function tools bound to
-   ledger-backed gateway execution with deterministic operation identities;
-   denials return as messages; TestModel proves the loop offline.
-P1 Subgraph composition landed as publish-time materialization (ADR-011):
-   pinned child expanded inline with namespaced IDs, zero execution changes,
-   provenance in version metadata. Web Builder authors subgraph nodes.
-   Remaining: independent child runs (needs durable wait states).
-   Graph Bundle file tier landed (ADR-015): export/import endpoints with
-   hash verification and trigger rebinding + Web export/import; layout
-   stays local, secrets never travel.
-   Loop execution landed (ADR-017, migration 0011): control pass-through,
-   per-attempt re-arming, attempt-scoped decisions, skipped revival,
-   deterministic recency mapping. No iteration budgets.
-   Tool node execution landed (ADR-018): control-claimed gateway calls under
-   explicit owner_agent with snapshot arguments; denials fail closed; tool
-   leases stay unknown and unrecoverable via lease path.
-   Real loop E2E with gpt-5.6-luna: iteration, exit, revival, terminal Run.
-   Execution policy landed (ADR-019, migration 0013): typed limit taxonomy,
-   no hidden round/wall-clock defaults, independent cycle/attempt/request
-   counters, durable ProgressEvidence + deduplicated DiagnosticRequest,
-   progress/diagnostics API and Run Console views. Automatic repair and
-   calibrated adaptive detection remain explicitly unimplemented.
-P1 Anti-drift context gates: mechanical layer landed; semantic baseline
-   landed as offline evals coverage tripwire (LLM judge is the explicit next
-   step, same interface). Experience promotion loop landed (ADR-016):
-   propose -> review -> promoted knowledge enters prompts, write-back
-   explicitly deferred. (`runtime/integrity.py`:
-   snapshot hash recompute, dense generations, pin hash, decision structure,
-   evidence readability, verification binding; prompt resolver refuses corrupt
-   context with the lease left for supervision). Semantic judge layer next.
-   (Prefect stays the considered durable-execution option for later; rejected
-   pydantic-graph: no persistence, no skipped-cascade/join-wait, no audit
-   records, subgraphs explicitly TODO. See HANDOVER spike record.)
-P2 Experience promotion loop: run memory -> review -> versioned organizational
-   knowledge -> write-back into graphs/capabilities, audited and reversible.
-P2 Single-graph deployment (Docker per scenario) + embedded trigger/artifact SDK.
-Later Minimal-binary runner, vector retrieval, full production hardening.
-```
+The core product is complete end to end: author a graph, run it durably, watch it,
+intervene, and (for the academic graph) receive a reviewed paper. What remains is
+consolidation rather than new capability.
 
-See API.md and WEB.md for current limits. Product direction details live in
-PRODUCT_VISION.md (Composable graphs, Modular delivery, Runtime kernel).
+```text
+P0 Harden what exists
+   - A2A gateway alongside MCP, over the same anchor.client operation layer.
+   - Memory projection so cross-run memory is reachable from a node's context,
+     not only from the API.
+   - Make the runtime services survive a host reboot (persistent systemd units
+     rather than transient ones), so a long run is not lost to a restart.
+   - A configurable ceiling on revision rounds, expressed as operator policy.
+
+P1 Cost and verification economics
+   - A cross-run content cache so a second run on one topic reuses retrieved
+     evidence instead of re-fetching it (W4 in WORKSPACE.md).
+   - A soft budget alert on a run, so an unexpected burn is visible while it
+     happens rather than on the invoice.
+
+P2 Quality infrastructure
+   - Run the deterministic validation scripts (workspace, lineage, parallel, MCP)
+     against recorded model responses so they can run in CI without a provider.
+   - Extend the architecture gates with the deep-research invariants that proved
+     load-bearing: one source-verification policy, stable citation numbers, and
+     approval following the reviewer's stated bar.
+
+P3 Known limitations to revisit only if a real run demands it
+   - Parallel research lanes (research sub-topics concurrently) to shorten wall
+     clock; the sources' rate limits remain the floor.
+   - `tree_digest` is built on git blob ids; a content-addressed object format
+     would decouple it.

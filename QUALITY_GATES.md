@@ -5,7 +5,7 @@
 
 ---
 
-## 1. 四道门
+## 1. 五道门
 
 | 门 | 位置 | 判定 |
 |---|---|---|
@@ -13,11 +13,31 @@
 | **复杂度/体积** | `scripts/quality_gate.py` + `quality-baseline.json` | 指标只减不增 |
 | **Lint** | `ruff`（`pyproject.toml`） | 正确性与架构规则 |
 | **类型** | `mypy`（棘轮） | 错误数不增加 |
+| **交付物门禁** | `runtime/academic.py` + `runtime/evidence.py` | 论文的骨架、行文、数字与引用可核验性 |
 
 ```bash
 .venv/bin/pytest -q tests/test_architecture.py
 .venv/bin/python scripts/quality_gate.py          # 加 --fast 跳过 mypy
 ```
+
+### 交付物门禁（第五道）
+
+代码的门禁只管代码。学术图的产出是一篇论文，它同样需要能被自动判定，否则
+「面向读者」只是一句口号。判据全部是确定性的，失败即退回重做：
+
+| 判据 | 位置 | 失败结果 |
+|---|---|---|
+| 必需章节、锚点顺序、≥2 个主题节、禁止 catch-all 章节 | `structure_errors` | 退回作者 |
+| 正文禁止证据级别标签、过程语言、内容哈希 | `craft_errors` | 退回作者 |
+| 段落 ≤1200 字符、Survey Methodology ≤2500 字符、摘要 ≤1800 字符 | 同上 | 退回作者 |
+| 每个结果型数字至少 1 篇**读过全文**的来源 | `unsupported_number_claims` | 退回作者 |
+| 引用必须可验证（id 在检索结果中、读取为同一篇） | `verify_source` | 退回作者 |
+| 来源数 / 全文阅读数下限 | 同上 | 退回**采集** |
+| 只报 minor 且确定性检查通过 | `evaluate_review` | **批准**（ADR-043） |
+| 同一机械缺陷连续 3 次未改 | 同上 | `blocked`，交人工 |
+
+这套门禁在真实运行中抓出过：章节编号不匹配、中英文标题、JSON 前缀、同篇论文的
+两个 URL、引用编号漂移、把摘要数字当全文数字。**单元测试一个都没抓到这些。**
 
 ---
 

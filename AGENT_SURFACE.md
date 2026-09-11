@@ -45,7 +45,7 @@ Grouped by intent, not by REST resource.
 | Discover | `health`, `capabilities`, `ir`, `list_graphs`, `get_draft`, `list_versions` |
 | Author | `validate`, `validate_capabilities`, `save_draft`, `publish`, `install`, `export_bundle`, `import_bundle` |
 | Execute | `register_trigger`, `set_trigger_enabled`, `start_run`, `pause_run`, `resume_run`, `stop_run` |
-| Observe | `run_digest`, `run_events`, `iter_events`, `run_nodes`, `run_decisions`, `run_verifications`, `run_operations`, `run_diagnostics`, `run_progress`, `list_waits`, `read_artifact`, `wait_for_run` |
+| Observe | `run_digest`, `run_events`, `iter_events`, `run_nodes`, `run_decisions`, `run_verifications`, `run_operations`, `run_usage`, `run_diagnostics`, `run_progress`, `list_waits`, `read_artifact`, `wait_for_run` |
 | Reconcile | `reconcile_operation` |
 | Storage | `storage_report`, `get_budget`, `set_budget`, `retention_preview`, `retention_sweep`, `retention_audit` |
 | Human-in-the-loop | `approve_wait`, `reject_wait`, `resume_wait` |
@@ -61,7 +61,7 @@ could call `approve_wait`, the gate would be theatre. Therefore:
 
 | Class | Operations | Agent (MCP) | Human (CLI/web) |
 |---|---|---|---|
-| Read-only | discover, observe, storage report | ✅ | ✅ |
+| Read-only | discover, observe (including `run_usage`), storage report | ✅ | ✅ |
 | Authoring | validate, save draft, publish | ✅ | ✅ |
 | Execution | start, pause, resume, stop, archive | ✅ | ✅ |
 | Reconciliation | `reconcile_operation` (requires external evidence) | ✅ | ✅ |
@@ -79,6 +79,10 @@ its context window.
 
 - `run_digest(run_id)` returns a **compact** view: status, phase, node-status
   counts, waiting nodes, failed nodes, last event sequence. No raw history.
+- `run_usage(run_id)` reports `input_tokens` (gross), `cached_tokens` and
+  `billed_input_tokens` per node. A tool loop re-sends its conversation on every
+  call, so the gross counter is several times the charged amount; budget against
+  the billed figure.
 - `run_events(run_id, after=sequence)` and `iter_events` page the append-only
   log incrementally; the agent resumes from the last sequence it saw.
 - `wait_for_run(run_id, timeout, interval)` is a bounded long-poll. It returns a
@@ -154,6 +158,7 @@ anchor trigger add --version <id>           # manual trigger
 anchor run start --trigger <id> --objective "..." --idempotency-key k1
 anchor run watch <run_id> --timeout 300     # compact digest, bounded
 anchor run events <run_id> --after 42
+anchor run usage <run_id>                   # gross, cached and billed tokens per node
 anchor waits                                # what needs a human
 anchor wait approve <node_run_id> --reason "..."   # human action
 anchor operation reconcile <op_id> --status succeeded --reconciliation-ref provider://...

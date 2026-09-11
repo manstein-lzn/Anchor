@@ -282,10 +282,21 @@ before enabling them on a production host.
 
 ## Development
 
-An online academic literature-review graph is available with a
-plan/research/review loop, Crossref/arXiv retrieval, source checks and Markdown
-delivery. See [the academic workflow guide](examples/graphs/academic-research.README.md)
-for installation and topic submission.
+An online academic literature-review graph is available: it researches a topic in
+convergent rounds, follows the citation graph, writes a reader-facing survey, and
+has it independently reviewed before publication. See
+[the academic workflow guide](examples/graphs/academic-research.README.md) for
+installation and topic submission.
+
+```bash
+.venv/bin/python scripts/academic_research.py install --model-ref models.deepseek
+.venv/bin/python scripts/academic_research.py run --topic '...' --language Chinese \
+  --scope '...' --minimum-sources 24 --minimum-reads 14
+.venv/bin/anchor run usage RUN_UUID          # what the run actually cost
+```
+
+A representative run — thirteen gather rounds, 59 sources, 39 read in full — took
+31 minutes and about 2.2 CNY, and produced a 279-line paper with 59 references.
 
 ```bash
 cd ~/Anchor
@@ -293,6 +304,11 @@ python3 -m venv .venv
 .venv/bin/pip install -e '.[dev]'
 .venv/bin/pytest
 ```
+
+Reading order for the design: `README.md` (this file) → `ARCHITECTURE.md` →
+`WORKSPACE.md` and `AGENT_SURFACE.md` for the two planes → `DECISIONS.md` for why
+→ `docs/limits.md` for every limit and its default → `STATUS.md` for what is not
+done yet.
 
 Development uses the same relational store on SQLite. Production deployments must use PostgreSQL and a
 durable workflow receiver; SQLite is not a distributed coordination system.

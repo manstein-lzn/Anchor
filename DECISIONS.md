@@ -954,6 +954,40 @@ resulting paper uses four axes (representation, supervision signal, decision
 granularity, integration point), each with the same internal shape: problem,
 approaches, evidence, judgment.
 
+## ADR-042: A research campaign has no round cap and must still end
+
+A literature review is not one search. The gather step is now a campaign: each
+round runs searches and citation lookups, reads a batch of documents, and reports
+only what it added; a deterministic coverage gate merges the rounds into one
+ledger and decides whether to research again or write. `plan -> coverage ->
+gather -> coverage -> ... -> write`, with an evidence gap returning to planning,
+which re-enters the gate and resumes from the accumulated ledger.
+
+There is no round cap. Research continues while a round adds evidence and the
+gatherer does not report saturation, and it ends when a round adds nothing or the
+last three rounds each added less than 5% of the corpus. That is a convergence
+criterion: it fires on diminishing returns, never on a pre-set count. Exhausting
+a field's literature is not the goal and is not reachable; covering its
+load-bearing work is.
+
+Three supporting rules keep the campaign honest:
+
+- **The ledger is what the writer must cite in full.** A source whose evidence or
+  reading cannot be verified makes that contract unsatisfiable — cite it and the
+  citation fails, omit it and a source is uncited — so the gate removes it and
+  reports it as `dropped_unverifiable`. Growth is measured against the verified
+  ledger, so a dropped source neither counts as progress nor keeps a round alive.
+- **Citation numbers never shift.** Removing a source leaves a gap rather than
+  renumbering, because the writer is revising a manuscript that already cites the
+  old numbers; a renumber made the manuscript point at the wrong sources, and
+  eighteen write attempts could not repair it.
+- **The gate and the validator share one source policy** (`runtime/evidence.py`).
+  When admission and citation disagree, a source can be admitted and be
+  uncitable, which is the same dead end from the other side.
+
+Measured on one topic: thirteen rounds, 59 sources, 39 read in full, 24 pairs of
+contradictory evidence, 31 minutes, 2.21 CNY.
+
 ## ADR-043: Approve a paper that meets the stated bar
 
 The reviewer's instructions say `pass` requires "no unresolved major issues on both

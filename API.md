@@ -150,6 +150,62 @@ returns only open requests; the supersede endpoint records an operator decision
 without changing Run state. Counters are deliberately separate: business cycles,
 node attempts (including fault retries) and request retries must not be conflated.
 
+## Token spend
+
+```http
+GET  /api/runs/{run_id}/usage
+```
+
+```json
+{"run_id": "…", "total": {"input_tokens": 2011654, "cached_tokens": 1508740,
+  "billed_input_tokens": 502914, "output_tokens": 214368, "requests": 69,
+  "calls": 69, "cost": 0.0},
+ "by_node": [{"node_id": "gather", "input_tokens": …, "cached_tokens": …,
+              "billed_input_tokens": …, "output_tokens": …, "requests": …, "calls": …}]}
+```
+
+An agent tool loop re-sends its whole conversation on every model call, so
+`input_tokens` grows with turns times context and most of it is a prefix the
+provider serves from cache. **`billed_input_tokens` is the number to budget
+against**; the gross counter is typically several times larger. Values come from a
+`model.usage` event emitted per model call, so the report is complete only for runs
+started after that event was introduced.
+
+## Content plane
+
+The content-plane routes live in `api/routes_content.py` and are registered by the
+same composition root.
+
+```http
+POST /api/projects                                  register a read-only source
+GET  /api/projects
+GET  /api/workspaces?project_id=…
+POST /api/workspaces                                create from a project revision
+GET  /api/workspaces/{workspace_id}
+POST /api/workspaces/{workspace_id}/write
+POST /api/workspaces/{workspace_id}/delete
+POST /api/workspaces/{workspace_id}/fork            an independent worktree
+POST /api/workspaces/{workspace_id}/merge           require_clean; conflict fails closed
+POST /api/workspaces/{workspace_id}/freeze | /archive
+GET  /api/workspaces/{workspace_id}/operations      the workspace ledger
+GET  /api/runs/{run_id}/workspace-operations
+```
+
+A workspace write is a commit: every mutation is in the operation ledger, and a
+merge conflict aborts and returns 422 rather than choosing a side. See
+`WORKSPACE.md` and `CONTENT_COMMIT_PROTOCOL.md`.
+
+```http
+GET  /api/storage                       database and artifact footprint, per graph
+GET  /api/storage/budget
+PUT  /api/storage/budget                operator-only; retunable at runtime
+GET  /api/retention/preview             what a sweep would evict
+POST /api/retention/sweep               operator-only
+GET  /api/retention/audit               eviction decisions
+```
+
+No budget configured means retention is a no-op: it can never surprise a run.
+
 ## Verification
 
 `tests/test_api.py` runs against migrated SQLite and isolated PostgreSQL schemas,
