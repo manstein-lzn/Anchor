@@ -953,3 +953,18 @@ sections, no catch-all bucket, anchor order, and an abstract cap. The body of th
 resulting paper uses four axes (representation, supervision signal, decision
 granularity, integration point), each with the same internal shape: problem,
 approaches, evidence, judgment.
+
+## ADR-043: Approve a paper that meets the stated bar
+
+The reviewer's instructions say `pass` requires "no unresolved major issues on both
+dimensions". Measured over nine revisions of one paper, it reported zero major
+issues on three separate rounds and still returned `revise` with six, six and four
+minor findings. The paper met the bar the reviewer was given; the reviewer
+withheld approval anyway. A careful reviewer will always find something minor, so
+the revision loop could not end, and it cost 4.6 CNY to discover that.
+
+Approval is therefore not left to the model's self-restraint. When the model
+reports only minor findings and the deterministic checks pass, the gate approves
+and records `approved_with`. That is "accept with minor revisions" — the decision
+an editor makes so a thorough reviewer cannot block a paper that already meets the
+stated standard. Major findings, and every deterministic finding, still block.

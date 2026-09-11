@@ -509,6 +509,38 @@ def test_identical_completed_revision_cycles_surface_to_supervisor_and_continue(
         store.close()
 
 
+def test_minor_only_findings_are_approved(tmp_path, monkeypatch):
+    """A thorough reviewer must not be able to withhold approval forever.
+
+    The reviewer's stated bar is "no unresolved major issues". When it reports
+    only minor findings and the deterministic checks are clean, the gate approves
+    the paper, which is what "accept with minor revisions" means in practice.
+    """
+    store, artifacts, receipt, worker = setup(tmp_path)
+    try:
+        asyncio.run(worker.execute_once(worker_id="control"))
+        complete(store, artifacts, claim(store, "plan"), {"round": 1})
+        settle_coverage(worker)
+        lease = claim(store, "gather")
+        complete(store, artifacts, lease, gather_output(store, artifacts, lease, monkeypatch))
+        settle_coverage(worker)
+        complete(store, artifacts, claim(store, "write"), write_output())
+        complete(store, artifacts, claim(store, "review"),
+                 {"verdict": "revise", "target": "manuscript",
+                  "issues": [{"severity": "minor", "location": "§3",
+                              "problem": "a sourcing nuance could be phrased better",
+                              "required_action": "tighten the wording"}]})
+        outcome = asyncio.run(worker.execute_once(worker_id="control"))
+        reviewed = json.loads(artifacts.get_text(outcome.output_ref))["review"]
+        assert reviewed["verdict"] == "pass", reviewed
+        assert "minor findings" in reviewed["approved_with"]
+        report = asyncio.run(worker.execute_once(worker_id="control"))
+        assert report.node_id == "report"
+        assert store.get_run(receipt.run_id).status.value == "completed"
+    finally:
+        store.close()
+
+
 def test_an_unchanged_mechanical_defect_stops_for_a_human(tmp_path, monkeypatch):
     """A revision that cannot remove the defect must not repeat forever."""
     store, artifacts, receipt, worker = setup(tmp_path)

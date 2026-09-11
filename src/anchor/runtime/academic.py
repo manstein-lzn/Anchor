@@ -360,6 +360,18 @@ def evaluate_review(snapshot: dict, *, store, artifacts, run_id, node_id: str) -
         target = "none"
     if errors and target == "none":
         target = deterministic_target
+    # The reviewer's own bar is "no unresolved major issues". When it reports only
+    # minor findings while the deterministic checks are clean, the paper is
+    # approvable and the rest is polish: that is "accept with minor revisions",
+    # the decision an editor makes so a thorough reviewer cannot withhold approval
+    # from a paper that already meets the stated bar. Without this the loop cannot
+    # end, because a careful reviewer will always find something minor.
+    reported = [item for item in (review.get("issues") or []) if isinstance(item, dict)]
+    severities = {str(item.get("severity", "")).lower() for item in reported}
+    if verdict == "revise" and not errors and severities == {"minor"}:
+        verdict = "pass"
+        review["approved_with"] = (f"approved with {len(reported)} minor findings left "
+                                   f"to the author; the reviewer reported no major issue")
     prior_nodes = [n for n in store.list_node_runs(run_id)
                    if n.node_id == node_id and n.status.value == "completed" and n.output_ref]
     # A revision that cannot remove the defect it was asked to remove will repeat
