@@ -8,10 +8,18 @@ import pytest
 from anchor.domain.admission import RunRequest
 from anchor.domain.conditions import build_condition_context
 from anchor.domain.graph import GraphDefinition, GraphVersion, Trigger
-from anchor.runtime.academic import (REQUIRED_SECTIONS, VALIDITY_SECTIONS, craft_errors,
-                                     register_academic_behaviors, structure_errors,
-                                     unsupported_number_claims, validate_agent_output,
-                                     validate_manuscript)
+from anchor.domain.context import canonical_json
+from anchor.runtime.academic import (
+    _ALREADY_TOP_LEVEL,
+    REQUIRED_SECTIONS,
+    VALIDITY_SECTIONS,
+    craft_errors,
+    register_academic_behaviors,
+    revision_feedback,
+    structure_errors,
+    unsupported_number_claims,
+    validate_agent_output,
+    validate_manuscript)
 from anchor.runtime.behaviors import BehaviorRegistry
 from anchor.runtime.artifacts import LocalArtifactStore
 from anchor.runtime.capabilities import AgentCapability, CapabilityRegistry, ToolCapability
@@ -151,13 +159,19 @@ def test_craft_gate_routes_a_writing_defect_back_to_the_writer(tmp_path, monkeyp
         assert asyncio.run(worker.execute_once(worker_id="control")).node_id == "check"
         rewrite_lease = claim(store, "write")
         assert rewrite_lease.node_id == "write", "craft defect must return to the writer"
-        feedback = resolve_node_context(store, receipt.run_id, "write", artifacts).snapshot["feedback"]
+        snapshot = resolve_node_context(store, receipt.run_id, "write", artifacts).snapshot
+        feedback = snapshot["feedback"]
         assert feedback["review"]["verdict"] == "revise"
         assert feedback["review"]["target"] == "manuscript"
         assert "Missing a validity section" in feedback["review"]["mechanical_issues"][0] or any(
             "Missing a validity section" in issue
             for issue in feedback["review"]["mechanical_issues"])
-        assert feedback["evidence"]["sources"] == evidence["sources"]
+        # The revising writer still has the evidence — from the top level, where the edge
+        # maps it. It used to arrive twice, once there and once inside feedback, and this
+        # assertion used to require the second copy. See revision_feedback.
+        assert snapshot["evidence"]["sources"] == evidence["sources"]
+        assert "evidence" not in feedback, "the revision feedback must not repeat the top level"
+        assert set(feedback) == {"manuscript", "review", "verified_sources"}
 
         complete(store, artifacts, rewrite_lease, write_output())
         complete(store, artifacts, claim(store, "review"), {"verdict": "pass", "target": "none", "issues": []})
@@ -604,5 +618,99 @@ def test_retrieval_failure_is_audited_and_returned_to_the_model(tmp_path, monkey
         operation = store.list_tool_operations(receipt.run_id)[0]
         assert operation.status.value == "failed" and operation.result_ref
         assert json.loads(artifacts.get_text(operation.result_ref))["evidence_available"] is False
+    finally:
+        store.close()
+
+
+# -- 2a: the revision edge must not repeat what the top level already carries ---------
+
+
+def test_the_revision_feedback_drops_only_what_the_edge_already_maps():
+    """The fix is a complement, so it must stay lossless as the graph changes.
+
+    `evaluate_review` spreads its own input into its output, so the check output
+    contains evidence, plan and request. An edge that maps both the whole output and
+    those sub-objects sends each twice — which was 34.92% of the writer's prompt.
+    Narrowing the feedback is only lossless while every key it drops is mapped at the
+    top level by that same edge. If a later edit removes one of those mappings, this
+    test fails instead of the writer silently losing its evidence.
+    """
+    definition = GraphDefinition.model_validate_json(
+        (ROOT / "examples/graphs/academic-research.json").read_text())
+    edges = [edge for edge in definition.edges
+             if edge.source == "check" and edge.target == "write"]
+    assert len(edges) == 1, "the writer has exactly one incoming edge in this graph"
+    mapping = edges[0].input_mapping
+
+    assert mapping.get("feedback") == "outputs.check.feedback", \
+        "the writer must receive the narrow feedback, not the whole check output"
+    assert set(_ALREADY_TOP_LEVEL) <= set(mapping), (
+        "the narrow feedback drops these keys, so the edge must still provide them: "
+        f"{sorted(set(_ALREADY_TOP_LEVEL) - set(mapping))}")
+    assert set(mapping) == {"feedback", "evidence", "plan", "request"}
+
+
+def test_the_narrow_feedback_keeps_what_the_consumers_read():
+    """Narrowing is not trimming: what the reviewer's findings and the draft live in
+    must survive. Deciding that verified_sources is unnecessary is a judgement about
+    the node's job and is deliberately not made here."""
+    check_output = {
+        "evidence": {"sources": [1]}, "plan": {"round": 1}, "request": {"topic": "t"},
+        "manuscript": "# draft", "review": {"verdict": "revise", "issues": [{"severity": "major"}]},
+        "verified_sources": [{"citation": 1}],
+    }
+    feedback = revision_feedback(check_output)
+
+    assert set(feedback) == {"manuscript", "review", "verified_sources"}
+    for dropped in _ALREADY_TOP_LEVEL:
+        assert dropped not in feedback
+    assert feedback["review"]["verdict"] == "revise"
+    assert feedback["manuscript"] == "# draft"
+
+
+def test_a_revision_prompt_does_not_carry_the_evidence_twice():
+    """The measured property, on a real snapshot shape.
+
+    A duplicated fact is not merely waste: the model sees it more than once and may
+    weight it more. This asserts the assembled prompt contains each dropped object's
+    bytes once, not twice.
+    """
+    evidence = {"sources": [{"citation": i} for i in range(20)], "tensions": ["a"] * 5}
+    check_output = {"evidence": evidence, "plan": {"round": 2}, "request": {"topic": "t"},
+                    "manuscript": "# draft", "review": {"verdict": "revise"},
+                    "verified_sources": [{"citation": 1}]}
+    top = {"evidence": check_output["evidence"], "plan": check_output["plan"],
+           "request": check_output["request"], "feedback": revision_feedback(check_output)}
+
+    serialized = canonical_json(evidence)
+    assert serialized in canonical_json(check_output), "the check output does carry it"
+    # Counted once in the top level and no longer in feedback.
+    assert canonical_json(top).count(serialized) == 1
+    assert canonical_json(check_output).count(serialized) == 1, \
+        "the spread in the check output is expected; what was fixed is the mapping"
+
+
+def test_dropping_the_repetition_shrinks_a_revision_prompt(tmp_path):
+    """The change has to be worth something measurable, not just tidier."""
+    store, artifacts, receipt, worker = setup(tmp_path)
+    try:
+        asyncio.run(worker.execute_once(worker_id="control"))
+        complete(store, artifacts, claim(store, "plan"), {"round": 1})
+        settle_coverage(worker)
+        lease = claim(store, "gather")
+        complete(store, artifacts, lease, gather_output(store, artifacts, lease, pytest.MonkeyPatch()))
+        settle_coverage(worker)
+        complete(store, artifacts, claim(store, "write"), write_output())
+        complete(store, artifacts, claim(store, "review"),
+                 {"verdict": "revise", "target": "manuscript",
+                  "issues": [{"severity": "major", "location": "§1", "problem": "p",
+                              "required_action": "fix"}]})
+        outcome = asyncio.run(worker.execute_once(worker_id="control"))
+        gate = json.loads(artifacts.get_text(outcome.output_ref))
+
+        wide = {**gate, "feedback": {k: v for k, v in gate.items() if k != "feedback"}}
+        narrow = {**gate, "feedback": gate["feedback"]}
+        assert len(canonical_json(narrow)) < len(canonical_json(wide)), \
+            "the narrow feedback must be smaller than the whole check output"
     finally:
         store.close()

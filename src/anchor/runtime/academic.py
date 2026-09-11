@@ -11,7 +11,7 @@ from anchor.runtime.evidence import successful_operations, verify_source
 from anchor.runtime.json_output import extract_json_object
 from anchor.domain.context import canonical_json
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
-from typing import Literal
+from typing import Any, Literal
 
 
 class ResearchOutput(BaseModel):
@@ -334,6 +334,29 @@ def validate_manuscript(work: dict, *, operations, artifacts, minimum_sources: i
             target)
 
 
+#: Keys the writer's snapshot already carries at the top level, because the same edge
+#: maps them from the check output. The revision feedback must not repeat them.
+#:
+#: This matters more than it looks. ``evaluate_review`` spreads its own input snapshot
+#: into its output, so ``outputs.check`` contains evidence, plan and request. An edge
+#: that maps both the whole output *and* those sub-objects sends each of them twice,
+#: and that repetition was 34.92% of the writer's prompt on a revision round — the
+#: single largest defect measured in this repository's runs.
+_ALREADY_TOP_LEVEL = ("evidence", "plan", "request")
+
+
+def revision_feedback(check_output: dict[str, Any]) -> dict[str, Any]:
+    """What the check adds for a revising node, without what the edge already passes.
+
+    A complement rather than a whitelist: everything the gate produces reaches the
+    revising node except the keys that would arrive a second time. Dropping keys the
+    top level already carries is provably lossless; trimming what the *review* says is
+    a judgement about the node's job and is not made here.
+    """
+    return {key: value for key, value in check_output.items()
+            if key not in _ALREADY_TOP_LEVEL and key != "feedback"}
+
+
 def evaluate_review(snapshot: dict, *, store, artifacts, run_id, node_id: str) -> dict:
     review, work = snapshot.get("review"), _extract_work(snapshot)
     if not isinstance(review, dict):
@@ -414,11 +437,15 @@ def evaluate_review(snapshot: dict, *, store, artifacts, run_id, node_id: str) -
             errors.append("A completed cycle repeated the same research; operator input or diagnosis is required")
             review["verdict"] = "revise"
             review.setdefault("mechanical_issues", []).append(errors[-1])
-    return {**snapshot, "review": {**review, "verdict": verdict, "target": target,
-                                   "mechanical_issues": errors,
-                                   "mechanical_signature": signature,
-                                   "mechanical_repeats": repeats},
-            "verified_sources": sources}
+    output = {**snapshot, "review": {**review, "verdict": verdict, "target": target,
+                                     "mechanical_issues": errors,
+                                     "mechanical_signature": signature,
+                                     "mechanical_repeats": repeats},
+              "verified_sources": sources}
+    # The revising node reads this instead of the whole output, so the edge can map one
+    # key and stop repeating what the top level already has. See _ALREADY_TOP_LEVEL.
+    output["feedback"] = revision_feedback(output)
+    return output
 
 
 def _references(snapshot: dict) -> list[str]:

@@ -165,7 +165,7 @@
       "target": "write",
       "condition": "output.review.verdict == 'revise' && output.review.target == 'manuscript'",
       "input_mapping": {
-        "feedback": "outputs.check",
+        "feedback": "outputs.check.feedback",
         "evidence": "outputs.check.evidence",
         "plan": "outputs.check.plan",
         "request": "outputs.check.request"
