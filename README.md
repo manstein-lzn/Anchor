@@ -335,6 +335,10 @@ output), the model it builds on, and the three questions it does **not** yet ans
 `contextengine/` holds the archived earlier project those ideas come from, kept
 byte-identical. Its `PROVENANCE.md` explains what it is and why it is here.
 
+To have another agent review the thinking rather than the code, hand it
+`docs/COGNITION_REVIEW_BRIEF.md` — a reading order, the background that is not
+in the documents, the misreadings to avoid, and the questions worth answering.
+
 ## Planned boundaries
 
 - `anchor.domain`: durable business models and state transitions
