@@ -32,7 +32,32 @@ from uuid import UUID
 
 from anchor.runtime.artifacts import ArtifactStore
 from anchor.runtime.model_gateway import ModelGateway
+from anchor.runtime.model_recording import CallContext
+from anchor.runtime.model_replay import ReplayPlan
 from anchor.runtime.node_prompt import PromptParts, assemble_prompt
+
+
+def recorded_user_prompt(payload: dict[str, Any]) -> str | None:
+    """The user prompt the model actually received, read back from a recording.
+
+    This is what a fidelity check has to compare against: the assembled prompt is
+    the *user* text of the request, not the whole rendered transcript.
+    """
+    for message in reversed(payload.get("messages") or []):
+        for part in reversed(message.get("parts") or []):
+            if part.get("part_kind") == "user-prompt":
+                content = part.get("content")
+                if isinstance(content, str):
+                    return content
+    return None
+
+
+def _first_difference(left: str, right: str) -> dict[str, Any]:
+    """Where two texts first diverge, so a mismatch is locatable."""
+    limit = min(len(left), len(right))
+    index = next((i for i in range(limit) if left[i] != right[i]), limit)
+    return {"index": index, "recorded": left[index:index + 60],
+            "reassembled": right[index:index + 60]}
 
 
 class HarnessUnsupported(RuntimeError):
@@ -43,9 +68,25 @@ class HarnessUnsupported(RuntimeError):
     """
 
 
+#: The request came from a recording of the call itself, so it is what the model
+#: was actually given.
+PROVENANCE_RECORDED = "recording"
+#: The request was rebuilt from the persisted input snapshot plus *today's*
+#: capability configuration. Faithful to the inputs, not provably to the request.
+PROVENANCE_RECONSTRUCTED = "reconstructed-from-current-configuration"
+
+
 @dataclass(frozen=True)
 class FrozenAttempt:
-    """A node attempt as durable state recorded it."""
+    """A node attempt as durable state recorded it.
+
+    ``provenance`` says how much the request can be trusted. A run made after model
+    call recording was introduced has one: its instructions, tools and messages are
+    the ones the model received. A run made before it, or one whose call was not
+    recorded, is *reconstructed* from the frozen snapshot and the current
+    configuration — which is not the same claim, and a caller that does not know the
+    difference would report the second as the first. See ``fidelity``.
+    """
 
     run_id: UUID
     node_id: str
@@ -57,6 +98,8 @@ class FrozenAttempt:
     instructions: str
     snapshot: dict[str, Any]
     tools: tuple[str, ...]
+    provenance: str = PROVENANCE_RECONSTRUCTED
+    model: str | None = None
 
 
 @dataclass(frozen=True)
@@ -140,12 +183,73 @@ class NodeHarness:
             raise HarnessUnsupported(
                 f"node {node_id!r} is not an agent node; the harness runs agents only")
 
-        agent = self._agent(node.agent_ref)
+        context = CallContext(run_id=run_id, node_id=node_id, node_run_id=row.id,
+                              attempt=row.attempt)
+        recorded = self.recording(context)
+        if recorded is not None:
+            # A recording is the request the model actually received. Prefer it, and
+            # say so, rather than rebuilding one that merely resembles it.
+            instructions = "\n".join(recorded.get("instructions") or [])
+            tools = tuple(recorded.get("tools") or [])
+            provenance = PROVENANCE_RECORDED
+            model = recorded.get("model")
+        else:
+            agent = self._agent(node.agent_ref)
+            instructions, tools = agent.instructions, tuple(agent.tool_refs)
+            provenance = PROVENANCE_RECONSTRUCTED
+            model = None
         return FrozenAttempt(
             run_id=run_id, node_id=node_id, node_run_id=row.id, attempt=row.attempt,
             objective=task.objective, node_name=node.name, agent_ref=node.agent_ref,
-            instructions=agent.instructions, snapshot=dict(stored.snapshot),
-            tools=tuple(agent.tool_refs))
+            instructions=instructions, snapshot=dict(stored.snapshot),
+            tools=tools, provenance=provenance, model=model)
+
+    def recording(self, context: CallContext,
+                  sequence: int = 0) -> dict[str, Any] | None:
+        """The recorded request at this position, if this attempt has one."""
+        entry = ReplayPlan(self.artifacts, store=self.store).entry(context, sequence)
+        return None if entry is None else entry.payload
+
+    def fidelity(self, attempt: FrozenAttempt) -> dict[str, Any]:
+        """Whether the re-assembled prompt matches what the model actually received.
+
+        A reconstruction is only useful if someone can tell how far it is from the
+        original. When a recording exists this compares the two and reports the
+        difference; when it does not, it says so rather than implying equivalence.
+
+        The check is narrow on purpose: it compares the rendered text, so a faithful
+        reconstruction passes and an unfaithful one fails, but passing does not prove
+        the request was identical at the wire level.
+        """
+        context = CallContext(run_id=attempt.run_id, node_id=attempt.node_id,
+                              node_run_id=attempt.node_run_id, attempt=attempt.attempt)
+        payload = self.recording(context)
+        report: dict[str, Any] = {
+            "provenance": attempt.provenance,
+            "memory_available_to_harness": self.memory is not None,
+        }
+        if payload is None:
+            report["recorded"] = False
+            report["note"] = ("no recording for this attempt: the prompt is rebuilt from "
+                              "the frozen snapshot and the current configuration")
+            return report
+        replayed = self.prompt_for(attempt)
+        sent = recorded_user_prompt(payload)
+        report["recorded"] = True
+        report["recorded_chars"] = None if sent is None else len(sent)
+        report["reassembled_chars"] = len(replayed)
+        report["matches"] = sent == replayed
+        if sent is None:
+            report["note"] = ("the recording has no user prompt to compare against; "
+                              "fidelity is unknown for this attempt")
+        elif sent != replayed:
+            # The reconstruction is not the request. Say which way it differs, so the
+            # difference is a measured fact rather than a caveat in a comment.
+            report["note"] = ("the re-assembled prompt differs from the recorded one: "
+                              "the inputs are the attempt's, but the way they are "
+                              "rendered is today's")
+            report["first_difference_at"] = _first_difference(sent, replayed)
+        return report
 
     def _agent(self, agent_ref: str) -> Any:
         """The capability the node names, which holds its instructions and tools."""

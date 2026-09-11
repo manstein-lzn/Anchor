@@ -34,6 +34,7 @@ from anchor.runtime.artifacts import LocalArtifactStore  # noqa: E402
 from anchor.runtime.capabilities import CapabilityRegistry  # noqa: E402
 from anchor.runtime.config import load_runtime_config  # noqa: E402
 from anchor.runtime.model_gateway import build_model_gateway  # noqa: E402
+from anchor.runtime.model_recording import CallContext, text_of
 from anchor.runtime.node_harness import (  # noqa: E402
     FrozenAttempt,
     HarnessUnsupported,
@@ -135,10 +136,20 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "prompt":
             prompt = harness.prompt_for(attempt, snapshot=snapshot,
                                         include_memory=not args.drop_memory)
-            _emit({"node_id": attempt.node_id, "attempt": attempt.attempt,
+            fidelity = harness.fidelity(attempt)
+            out = {"node_id": attempt.node_id, "attempt": attempt.attempt,
                    "agent_ref": attempt.agent_ref, "tools": list(attempt.tools),
                    "instructions_chars": len(attempt.instructions),
-                   "prompt_chars": len(prompt), "prompt": prompt})
+                   "prompt_chars": len(prompt), "provenance": attempt.provenance,
+                   "fidelity": fidelity, "prompt": prompt}
+            recorded = harness.recording(CallContext(
+                run_id=attempt.run_id, node_id=attempt.node_id,
+                node_run_id=attempt.node_run_id, attempt=attempt.attempt))
+            if recorded is not None:
+                # The literal request, when one was recorded. This is the answer to
+                # "what did the node actually see", as opposed to the reconstruction.
+                out["recorded_prompt"] = text_of(recorded)
+            _emit(out)
             return 0
         if args.command == "compare":
             # The point of the harness: one attempt, two policies, two live calls,

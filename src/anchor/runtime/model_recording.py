@@ -101,6 +101,10 @@ class EventStore(Protocol):
     def list_events(self, stream_id: UUID) -> list[dict[str, Any]]: ...
 
 
+def _as_uuid(value: UUID | str) -> UUID:
+    return value if isinstance(value, UUID) else UUID(str(value))
+
+
 @dataclass(frozen=True)
 class CallContext:
     """Which node attempt is executing, so a call can be attributed."""
@@ -109,6 +113,15 @@ class CallContext:
     node_id: str
     node_run_id: UUID
     attempt: int
+
+    def __post_init__(self) -> None:
+        # Identifiers arrive as strings from a CLI or a JSON payload. Normalising
+        # them here rather than at each use matters because these are dictionary
+        # keys: a string and a UUID for the same attempt would be two different
+        # keys, and a lookup would miss silently instead of failing. That is how
+        # the harness came to report "no recording" for a recording it had.
+        object.__setattr__(self, "run_id", _as_uuid(self.run_id))
+        object.__setattr__(self, "node_run_id", _as_uuid(self.node_run_id))
 
 
 _active: ContextVar[CallContext | None] = ContextVar("anchor_model_call_context",

@@ -272,3 +272,105 @@ def test_prompt_assembly_is_shared_with_the_worker(tmp_path):
     assert "assemble_prompt" in source
     assert "Durable input snapshot" not in source, \
         "the worker must not keep its own copy of the prompt text"
+
+
+def test_the_harness_says_how_much_to_trust_the_request(tmp_path):
+    """A reconstruction and a recording are different claims.
+
+    A run made before model call recording existed can only be rebuilt from its
+    frozen snapshot plus today's configuration. That is still useful, and it is not
+    the same as the request the model received — so the harness labels which it is
+    instead of leaving the reader to assume.
+    """
+    store, artifacts, receipt, gateway = executed_run(tmp_path)
+    try:
+        harness = harness_for(store, artifacts, gateway)
+        attempt = harness.frozen_attempt(receipt.run_id, "write")
+
+        assert attempt.provenance == "reconstructed-from-current-configuration"
+        report = harness.fidelity(attempt)
+        assert report["recorded"] is False, "the fixture makes no recordings"
+        assert "no recording" in report["note"]
+        assert report["memory_available_to_harness"] is False
+        assert "matches" not in report, "there is nothing to compare against"
+    finally:
+        store.close()
+
+
+def test_a_recorded_request_is_reported_as_such_and_compared(tmp_path):
+    """With a recording, the harness checks its own reconstruction.
+
+    The comparison is against the user prompt the model actually received, not
+    against the whole rendered transcript: the assembled prompt is the user text of
+    the request, and comparing anything else would never match.
+    """
+    pytest.importorskip("pydantic_ai")
+    from pydantic_ai.models.test import TestModel
+
+    from anchor.runtime.model_recording import CallContext, ModelRecorder, RecordingMode, bind_call, unbind_call
+    from anchor.runtime.model_gateway import PydanticAIModelGateway
+
+    store, artifacts, receipt, gateway = executed_run(tmp_path)
+    try:
+        row = next(item for item in store.list_node_runs(receipt.run_id)
+                   if item.node_id == "write")
+        context_ = CallContext(run_id=receipt.run_id, node_id="write",
+                               node_run_id=row.id, attempt=row.attempt)
+        recorder = ModelRecorder(artifacts, mode=RecordingMode.RECORD, store=store)
+        model = PydanticAIModelGateway(profile(), StaticSecrets(), model=TestModel(),
+                                       recorder=recorder)
+
+        harness = harness_for(store, artifacts, gateway)
+        prompt = harness.prompt_for(harness.frozen_attempt(receipt.run_id, "write"))
+
+        # Record the call the harness would make, at that attempt's position.
+        token = bind_call(context_)
+        try:
+            asyncio.run(model.generate(prompt=prompt, system_prompt="Answer plainly."))
+        finally:
+            unbind_call(token)
+        assert recorder.recorded == 1
+
+        attempt = harness.frozen_attempt(receipt.run_id, "write")
+        assert attempt.provenance == "recording"
+        assert attempt.instructions == "Answer plainly.", \
+            "instructions come from the recording, not from today's configuration"
+        report = harness.fidelity(attempt)
+        assert report["recorded"] is True
+        assert report["matches"] is True, report
+        assert report["recorded_chars"] == report["reassembled_chars"]
+    finally:
+        store.close()
+
+
+def test_a_diverging_reconstruction_is_located_not_hand_waved(tmp_path):
+    """If the rebuild stops matching, say where — do not report it as faithful."""
+    pytest.importorskip("pydantic_ai")
+    from pydantic_ai.models.test import TestModel
+
+    from anchor.runtime.model_recording import CallContext, ModelRecorder, RecordingMode, bind_call, unbind_call
+    from anchor.runtime.model_gateway import PydanticAIModelGateway
+
+    store, artifacts, receipt, gateway = executed_run(tmp_path)
+    try:
+        row = next(item for item in store.list_node_runs(receipt.run_id)
+                   if item.node_id == "write")
+        context_ = CallContext(run_id=receipt.run_id, node_id="write",
+                               node_run_id=row.id, attempt=row.attempt)
+        recorder = ModelRecorder(artifacts, mode=RecordingMode.RECORD, store=store)
+        model = PydanticAIModelGateway(profile(), StaticSecrets(), model=TestModel(),
+                                       recorder=recorder)
+        token = bind_call(context_)
+        try:
+            asyncio.run(model.generate(prompt="something else entirely",
+                                       system_prompt="Answer plainly."))
+        finally:
+            unbind_call(token)
+
+        harness = harness_for(store, artifacts, gateway)
+        report = harness.fidelity(harness.frozen_attempt(receipt.run_id, "write"))
+        assert report["matches"] is False
+        assert "first_difference_at" in report
+        assert report["first_difference_at"]["index"] >= 0
+    finally:
+        store.close()

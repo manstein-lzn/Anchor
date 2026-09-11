@@ -817,3 +817,47 @@ def test_every_node_attempt_of_a_completed_run_replays(tmp_path):
                                          attempt=gather_row.attempt)) == 1
     finally:
         store.close()
+
+
+def test_call_context_normalises_string_identifiers():
+    """A string and a UUID must not be two keys for one attempt.
+
+    Identifiers arrive as strings from a CLI or a JSON payload, and the replay plan
+    indexes by UUID. Without normalising at construction the same attempt has two
+    identities, the string lookup misses, and the harness reports "no recording" for
+    a recording it just wrote — a wrong answer delivered as a confident one.
+    """
+    from uuid import UUID as _UUID
+
+    run_id, node_run_id = uuid4(), uuid4()
+    from_strings = CallContext(run_id=str(run_id), node_run_id=str(node_run_id),  # type: ignore[arg-type]
+                               node_id="write", attempt=1)
+    from_uuids = CallContext(run_id=run_id, node_run_id=node_run_id,
+                             node_id="write", attempt=1)
+
+    assert isinstance(from_strings.run_id, _UUID)
+    assert isinstance(from_strings.node_run_id, _UUID)
+    assert from_strings == from_uuids
+    assert hash(from_strings) == hash(from_uuids), "they must key one dictionary entry"
+
+
+def test_a_recording_is_found_when_the_caller_passed_strings(tmp_path):
+    """The CLI passes strings; the recording must still be found."""
+    pytest.importorskip("pydantic_ai")
+    from pydantic_ai.models.test import TestModel
+
+    from anchor.runtime.model_gateway import PydanticAIModelGateway
+    from anchor.runtime.model_replay import ReplayPlan
+
+    artifacts = LocalArtifactStore(tmp_path / "artifacts")
+    recorder = ModelRecorder(artifacts, mode=RecordingMode.RECORD)
+    ctx = context(node_id="write")
+    run_call(recorder, "Write the paper.", ctx=ctx)
+
+    plan = ReplayPlan(artifacts)
+    for ref in recorder.written:
+        plan._index(read_recording(artifacts, ref))
+    # A plan keyed by UUID must answer a context built from the same values as text.
+    stringly = CallContext(run_id=str(ctx.run_id), node_run_id=str(ctx.node_run_id),  # type: ignore[arg-type]
+                           node_id=ctx.node_id, attempt=ctx.attempt)
+    assert plan.entry(stringly, 0) is not None
