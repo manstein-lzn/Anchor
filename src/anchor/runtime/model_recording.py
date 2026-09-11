@@ -47,6 +47,7 @@ from enum import StrEnum
 from typing import Any, Protocol
 from uuid import UUID
 
+from pydantic_ai import ModelMessagesTypeAdapter
 from pydantic_ai.messages import ModelMessage
 from pydantic_ai.models import ModelRequestParameters
 from pydantic_ai.models.wrapper import WrapperModel
@@ -78,11 +79,17 @@ class RecordingMode(StrEnum):
     REPLAY = "replay"
 
 
-class EventSink(Protocol):
-    """The narrow slice of the state store a recorder needs."""
+class EventStore(Protocol):
+    """The narrow slice of the state store recording and replay need.
+
+    One protocol rather than two, because a recorder that cannot read the events it
+    wrote cannot serve a replay, and in production there is one store either way.
+    """
 
     def append_event(self, *, stream_id: UUID, event_type: str, payload: dict[str, Any],
                      idempotency_key: str) -> Any: ...
+
+    def list_events(self, stream_id: UUID) -> list[dict[str, Any]]: ...
 
 
 @dataclass(frozen=True)
@@ -198,6 +205,46 @@ def _instructions(parameters: ModelRequestParameters | None) -> list[str]:
     return rendered
 
 
+def _serialize_messages(messages: Sequence[ModelMessage]) -> list[dict[str, Any]]:
+    """Serialize messages with the library's own tagged-union adapter.
+
+    Hand-rolling this would be a second format to keep in step with the library,
+    and replay depends on reading the format back exactly.
+    """
+    return list(ModelMessagesTypeAdapter.dump_python(list(messages), mode="json"))
+
+
+def _request_digest(messages: Sequence[ModelMessage],
+                    parameters: ModelRequestParameters | None,
+                    settings: ModelSettings | None) -> str:
+    """What was asked, independent of when it was asked.
+
+    Used when recording and when replaying, so a changed prompt is detected rather
+    than assumed.
+    """
+    return hashlib.sha256(canonical_json({
+        "instructions": _stable(_instructions(parameters)),
+        "messages": _stable(_serialize_messages(messages)),
+        "settings": _stable(_jsonable(settings)),
+        "tools": _tool_names(parameters)}).encode("utf-8")).hexdigest()
+
+
+def _serialize_response(response: Any) -> dict[str, Any]:
+    """Serialize one response through the same adapter, as a single-element list."""
+    dumped = ModelMessagesTypeAdapter.dump_python([response], mode="json")
+    return dict(dumped[0])
+
+
+def _deserialize_response(payload: dict[str, Any]) -> Any:
+    """Rebuild a response, or raise if the payload cannot be read back.
+
+    A part the tagged union cannot validate (an image, say) must fail loudly: a
+    replay that silently returned something else would be worse than no replay.
+    """
+    restored = ModelMessagesTypeAdapter.validate_python([payload])
+    return restored[0]
+
+
 def _tool_names(parameters: ModelRequestParameters | None) -> list[str]:
     """The tools visible to this call, by name only.
 
@@ -233,7 +280,7 @@ class ModelRecorder:
     """
 
     def __init__(self, artifacts: ArtifactStore, *, mode: RecordingMode = RecordingMode.OFF,
-                 forbidden: Sequence[str] = (), store: EventSink | None = None) -> None:
+                 forbidden: Sequence[str] = (), store: EventStore | None = None) -> None:
         self.artifacts = artifacts
         self.mode = mode
         self.store = store
@@ -269,7 +316,6 @@ class ModelRecorder:
 
     def _emit(self, context: CallContext, event_type: str, payload: dict[str, Any],
               *, key: str) -> None:
-        """Emit an attribution event, never at the cost of the run."""
         if self.store is None:
             return
         try:
@@ -291,34 +337,13 @@ class ModelRecorder:
         if not self.enabled or context is None:
             return None
         sequence = self._next_sequence(context)
-        requests = _jsonable(list(messages))
-        instructions = _instructions(parameters)
-        tools = _tool_names(parameters)
-        request_digest = hashlib.sha256(
-            canonical_json({"instructions": _stable(instructions),
-                            "messages": _stable(requests),
-                            "settings": _stable(_jsonable(settings)),
-                            "tools": tools}).encode("utf-8")).hexdigest()
-        payload = {
-            "format": RECORDING_FORMAT,
-            "run_id": str(context.run_id),
-            "node_id": context.node_id,
-            "node_run_id": str(context.node_run_id),
-            "attempt": context.attempt,
-            "sequence": sequence,
-            "model": getattr(response, "model_name", None),
-            "provider": getattr(response, "provider_name", None),
-            "response_id": getattr(response, "provider_response_id", None),
-            "settings": _jsonable(settings),
-            "tools": tools,
-            # The digest explains a divergence during replay; it is deliberately
-            # not the replay key, because the point is to change the prompt.
-            "request_digest": request_digest,
-            "instructions": instructions,
-            "messages": requests,
-            "response": _jsonable(response),
-        }
-        text = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        try:
+            payload = self._payload(context, sequence, messages, response, settings,
+                                   parameters)
+            text = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        except Exception:  # noqa: BLE001 - a projection must not fail a run (I2)
+            logger.exception("could not build a recording for node %s", context.node_id)
+            return None
 
         found = _detect_secret(text, self._forbidden)
         if found is not None:
@@ -344,10 +369,48 @@ class ModelRecorder:
         self._emit(context, "model.call",
                    {"node_id": context.node_id, "attempt": context.attempt,
                     "sequence": sequence, "recording_ref": ref,
-                    "request_digest": request_digest,
-                    "messages": len(requests)},
+                    "request_digest": payload["request_digest"],
+                    "messages": len(payload["messages"])},
                    key=str(sequence))
         return ref
+
+    def _payload(self, context: CallContext, sequence: int,
+                 messages: Sequence[ModelMessage], response: Any,
+                 settings: ModelSettings | None,
+                 parameters: ModelRequestParameters | None) -> dict[str, Any]:
+        """Build the recorded document for one call.
+
+        Serialization uses the library's own tagged-union adapter, which replay also
+        reads, so there is one format rather than a hand-rolled second one kept in
+        step by hand.
+        """
+        requests = _serialize_messages(messages)
+        instructions = _instructions(parameters)
+        tools = _tool_names(parameters)
+        request_digest = hashlib.sha256(
+            canonical_json({"instructions": _stable(instructions),
+                            "messages": _stable(requests),
+                            "settings": _stable(_jsonable(settings)),
+                            "tools": tools}).encode("utf-8")).hexdigest()
+        return {
+            "format": RECORDING_FORMAT,
+            "run_id": str(context.run_id),
+            "node_id": context.node_id,
+            "node_run_id": str(context.node_run_id),
+            "attempt": context.attempt,
+            "sequence": sequence,
+            "model": getattr(response, "model_name", None),
+            "provider": getattr(response, "provider_name", None),
+            "response_id": getattr(response, "provider_response_id", None),
+            "settings": _jsonable(settings),
+            "tools": tools,
+            # The digest explains a divergence during replay; it is deliberately
+            # not the replay key, because the point is to change the prompt.
+            "request_digest": request_digest,
+            "instructions": instructions,
+            "messages": requests,
+            "response": _serialize_response(response),
+        }
 
 
 class RecordingModel(WrapperModel):
@@ -426,3 +489,5 @@ def text_of(recording: dict[str, Any]) -> str:
             else:
                 lines.append(f"[{part_kind}] {json.dumps(content, ensure_ascii=False)}")
     return "\n".join(lines)
+
+

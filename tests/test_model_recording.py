@@ -40,6 +40,7 @@ from anchor.runtime.model_recording import (
     text_of,
     unbind_call,
 )
+from anchor.runtime.model_replay import ReplayDivergence, ReplayPlan
 from anchor.runtime.secrets import EnvironmentSecretProvider
 
 from conftest import make_store
@@ -413,3 +414,237 @@ def test_a_tool_loop_records_each_model_call_not_just_the_answer(tmp_path):
     # The tools on offer, and the instructions, are part of what the agent saw.
     assert payloads[0]["tools"] == ["echo"]
     assert "Use tools." in text_of(payloads[0])
+
+
+# -- step 2: replay serves recorded answers by position, or fails loudly ----------
+
+
+def replay_gateway(artifacts, plan, *, live_text="LIVE-MODEL-WAS-CALLED", store=None):
+    """A replay wired to a model that would answer differently if it were reached."""
+    pytest.importorskip("pydantic_ai")
+    from pydantic_ai.models.test import TestModel
+    from anchor.runtime.model_replay import ReplayModel
+
+    recorder = ModelRecorder(artifacts, mode=RecordingMode.REPLAY, store=store)
+    gateway = PydanticAIModelGateway(profile(), StaticSecrets(),
+                                     model=TestModel(custom_output_text=live_text),
+                                     recorder=recorder)
+    model = gateway._model
+    assert isinstance(model, ReplayModel), "replay mode must install a ReplayModel"
+    # Swap in the plan under test. The production plan comes from the same store the
+    # run recorded into, which is what `store=` above makes possible.
+    model.plan = plan
+    model.store = store
+    return gateway, model
+
+
+def test_a_recording_replays_to_the_same_answer(tmp_path):
+    artifacts = LocalArtifactStore(tmp_path / "artifacts")
+    recorder = ModelRecorder(artifacts, mode=RecordingMode.RECORD)
+    ctx = context(node_id="write")
+    recorded = run_call(recorder, "Write the paper.", ctx=ctx)
+
+    plan = ReplayPlan.from_recordings(artifacts, recorder.written)
+    gateway, model = replay_gateway(artifacts, plan)
+    with recording_scope(ctx):
+        replayed = asyncio.run(gateway.generate(prompt="Write the paper.",
+                                                system_prompt="Answer plainly."))
+
+    assert replayed.text == recorded.text
+    assert model.replayed == 1
+    assert model.changed == [], "the same prompt is not a change"
+
+
+def test_replay_never_falls_through_to_the_live_model(tmp_path):
+    """The dangerous failure would be a replay that quietly called the real model."""
+    artifacts = LocalArtifactStore(tmp_path / "artifacts")
+    recorder = ModelRecorder(artifacts, mode=RecordingMode.RECORD)
+    ctx = context()
+    recorded = run_call(recorder, "original question", ctx=ctx)
+
+    plan = ReplayPlan.from_recordings(artifacts, recorder.written)
+    gateway, _ = replay_gateway(artifacts, plan, live_text="LIVE-MODEL-WAS-CALLED")
+    with recording_scope(ctx):
+        # A completely different prompt: without replay this would reach TestModel
+        # and come back as LIVE-MODEL-WAS-CALLED.
+        replayed = asyncio.run(gateway.generate(prompt="something else entirely",
+                                                system_prompt="Answer plainly."))
+    assert replayed.text == recorded.text
+    assert "LIVE-MODEL-WAS-CALLED" not in replayed.text
+
+
+def test_a_changed_prompt_is_reported_rather_than_rejected(tmp_path):
+    """Matching by position is the design: changing the prompt is the point."""
+    artifacts = LocalArtifactStore(tmp_path / "artifacts")
+    recorder = ModelRecorder(artifacts, mode=RecordingMode.RECORD)
+    ctx = context()
+    run_call(recorder, "the original prompt", ctx=ctx)
+
+    plan = ReplayPlan.from_recordings(artifacts, recorder.written)
+    gateway, model = replay_gateway(artifacts, plan)
+    with recording_scope(ctx):
+        asyncio.run(gateway.generate(prompt="a shorter prompt",
+                                     system_prompt="Answer plainly."))
+
+    assert model.replayed == 1, "the change does not stop the replay"
+    assert len(model.changed) == 1
+    change = model.changed[0]
+    assert change["node_id"] == ctx.node_id
+    assert change["sequence"] == 0
+    assert change["recorded_digest"] != change["actual_digest"]
+    assert model.summary()["prompt_changed"] == 1
+
+
+def test_a_missing_recording_fails_with_a_located_divergence(tmp_path):
+    """Acceptance: divergence fails loudly and says exactly which call."""
+    artifacts = LocalArtifactStore(tmp_path / "artifacts")
+    recorder = ModelRecorder(artifacts, mode=RecordingMode.RECORD)
+    ctx = context(node_id="gather", attempt=1)
+    with recording_scope(ctx):
+        model = gateway(recorder)
+        asyncio.run(model.generate(prompt="one", system_prompt="S."))
+        asyncio.run(model.generate(prompt="two", system_prompt="S."))
+
+    plan = ReplayPlan.from_recordings(artifacts, recorder.written)
+    replay, _ = replay_gateway(artifacts, plan)
+    with recording_scope(ctx):
+        asyncio.run(replay.generate(prompt="one", system_prompt="S."))
+        asyncio.run(replay.generate(prompt="two", system_prompt="S."))
+        with pytest.raises(ReplayDivergence) as caught:
+            # A third call was never recorded: there is nothing honest to answer with.
+            asyncio.run(replay.generate(prompt="three", system_prompt="S."))
+
+    error = caught.value
+    assert "gather" in str(error)
+    assert error.node_id == "gather"
+    assert error.attempt == 1
+    assert error.sequence == 2, "the divergence names the call that was missing"
+    assert "2 call(s) were recorded" in str(error)
+
+
+def test_a_replay_outside_a_node_attempt_refuses_to_guess(tmp_path):
+    artifacts = LocalArtifactStore(tmp_path / "artifacts")
+    recorder = ModelRecorder(artifacts, mode=RecordingMode.RECORD)
+    ctx = context()
+    run_call(recorder, "hello", ctx=ctx)
+
+    plan = ReplayPlan.from_recordings(artifacts, recorder.written)
+    gateway, _ = replay_gateway(artifacts, plan)
+    with pytest.raises(ReplayDivergence, match="outside a node attempt"):
+        asyncio.run(gateway.generate(prompt="hello", system_prompt="S."))
+
+
+def test_a_plan_loads_recordings_from_the_run_events(tmp_path):
+    """The production path: a plan is built from what the run recorded."""
+    store = make_store(tmp_path, "replay.sqlite")
+    artifacts = LocalArtifactStore(tmp_path / "artifacts")
+    try:
+        recorder = ModelRecorder(artifacts, mode=RecordingMode.RECORD, store=store)
+        ctx = context(node_id="write")
+        recorded = run_call(recorder, "Write the paper.", ctx=ctx)
+
+        plan = ReplayPlan(artifacts, store=store)
+        gateway, model = replay_gateway(artifacts, plan, store=store)
+        with recording_scope(ctx):
+            replayed = asyncio.run(gateway.generate(prompt="Write the paper.",
+                                                    system_prompt="Answer plainly."))
+
+        assert replayed.text == recorded.text
+        assert model.replayed == 1
+        assert [e["event_type"] for e in store.list_events(ctx.run_id)] == [
+            "model.call", "model.call_replayed"]
+    finally:
+        store.close()
+
+
+def test_streaming_replay_refuses_instead_of_going_live(tmp_path):
+    artifacts = LocalArtifactStore(tmp_path / "artifacts")
+    recorder = ModelRecorder(artifacts, mode=RecordingMode.RECORD)
+    ctx = context()
+    run_call(recorder, "hello", ctx=ctx)
+
+    plan = ReplayPlan.from_recordings(artifacts, recorder.written)
+    gateway, model = replay_gateway(artifacts, plan)
+
+    async def stream() -> None:
+        async with model.request_stream([], None, None):  # type: ignore[arg-type]
+            pass
+
+    with recording_scope(ctx), pytest.raises(ReplayDivergence, match="streaming"):
+        asyncio.run(stream())
+
+
+def test_a_worker_replay_reproduces_a_node_exactly(tmp_path):
+    """End to end: run a node, then replay it and get the same answer back."""
+    pytest.importorskip("pydantic_ai")
+    from pydantic_ai.models.test import TestModel
+
+    from anchor.domain.models import NodeLease
+    from anchor.runtime.model_replay import ReplayModel
+    from anchor.runtime.worker import AgentNodeWorker
+
+    class Store:
+        def __init__(self) -> None:
+            self.events: list[dict] = []
+
+        def heartbeat_node_lease(self, claim_id, worker_id) -> None: ...
+        def list_node_runs(self, run_id):  # noqa: ANN001, ANN201
+            return []
+
+        def append_event(self, **kwargs) -> int:
+            self.events.append(kwargs)
+            return len(self.events)
+
+        def list_events(self, stream_id):  # noqa: ANN001, ANN201
+            return [e for e in self.events if e["stream_id"] == stream_id]
+
+    class Sink:
+        def __init__(self) -> None:
+            self.responses: list[object] = []
+
+        async def persist_model_result(self, **kwargs) -> None:
+            self.responses.append(kwargs.get("response"))
+
+    run_id, node_run_id = uuid4(), uuid4()
+    lease = NodeLease(claim_id=uuid4(), node_run_id=node_run_id, run_id=run_id,
+                      node_id="gather", worker_id="w")
+    artifacts = LocalArtifactStore(tmp_path / "artifacts")
+
+    # 1. A real node attempt records what the model said.
+    #    One store throughout: the replay plan is built from the same run events the
+    #    recording wrote, which is how a real replay finds its answers.
+    store = Store()
+    recorder = ModelRecorder(artifacts, mode=RecordingMode.RECORD, store=store)
+    first = Sink()
+    worker = AgentNodeWorker(
+        store, registry(),
+        {"models.test": PydanticAIModelGateway(profile(), StaticSecrets(),
+                                               model=TestModel(), recorder=recorder)},
+        first)
+    asyncio.run(worker.execute_claimed_once(worker_id="w", agent_ref="agents.reader",
+                                            prompt="record one round",
+                                            expected_node_id="gather", lease=lease,
+                                            heartbeat_interval=0.01))
+    assert recorder.recorded >= 1
+
+    # 2. The same node replays against a model that would answer differently.
+    replay_recorder = ModelRecorder(artifacts, mode=RecordingMode.REPLAY, store=store)
+    gateway = PydanticAIModelGateway(profile(), StaticSecrets(),
+                                     model=TestModel(custom_output_text="LIVE"),
+                                     recorder=replay_recorder)
+    assert isinstance(gateway._model, ReplayModel), \
+        "replay mode installs a replay model rather than a recording one"
+    second = Sink()
+    worker2 = AgentNodeWorker(store, registry(), {"models.test": gateway}, second)
+    asyncio.run(worker2.execute_claimed_once(worker_id="w", agent_ref="agents.reader",
+                                             prompt="record one round",
+                                             expected_node_id="gather", lease=lease,
+                                             heartbeat_interval=0.01))
+
+    assert first.responses and second.responses
+    assert second.responses[0].text == first.responses[0].text
+    assert "LIVE" not in second.responses[0].text
+    types = [e["event_type"] for e in store.events]
+    assert types.count("model.call") == recorder.recorded, \
+        "a replay does not write new recordings over the ones it is reading"
+    assert "model.call_replayed" in types

@@ -7,7 +7,8 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from anchor.runtime.capabilities import ModelProfile
-from anchor.runtime.model_recording import ModelRecorder, RecordingModel
+from anchor.runtime.model_recording import ModelRecorder, RecordingMode, RecordingModel
+from anchor.runtime.model_replay import ReplayModel, ReplayPlan
 from anchor.runtime.secrets import SecretProvider
 
 
@@ -113,7 +114,13 @@ class PydanticAIModelGateway:
                 # The recorder refuses to persist a call whose text contains a
                 # resolved secret, and only this object holds the value.
                 recorder.forbid(api_key)
-            self._model = RecordingModel(self._model, recorder)
+            if recorder.mode is RecordingMode.REPLAY:
+                # Replay serves recorded answers by position and never falls through
+                # to the wrapped model, so a replay cannot quietly become live.
+                plan = ReplayPlan(recorder.artifacts, store=recorder.store)
+                self._model = ReplayModel(self._model, plan, store=recorder.store)
+            else:
+                self._model = RecordingModel(self._model, recorder)
         self._agent = Agent(self._model, output_type=str,
                             model_settings=self._settings())
 

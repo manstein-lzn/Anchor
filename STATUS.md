@@ -194,16 +194,19 @@
 - Failure fan-out/cancellation of in-flight sibling branches and dispatch supervision
   beyond receiver retry logging
 - PostgreSQL/vector memory projection and worker recovery supervision
-- **Model call replay** (ADR-044). Recording is done (step 1): every model call is
-  written as an immutable projection with a `model.call` event, the model wrapper
-  sits on PydanticAI's `Model` so tool-loop calls are captured, instructions are
-  recorded separately (they do not appear in `messages`), `ANCHOR_MODEL_RECORDING`
-  defaults to `off`, and a call that would persist a secret is refused without
-  failing the run. Verified against a live `deepseek-flash` call. **Replay itself
-  is not implemented** — `REPLAY` currently behaves as `off` — nor is retention of
-  recordings. This is I9's R0/R1, promised and until now absent; it is the
-  prerequisite for developing context policy, which can only be judged by
-  controlled comparison. See `docs/RECORDING_AND_REPLAY.md`.
+- **Model call recording and replay** (ADR-044). Steps 1-2 are done. Every model
+  call is written as an immutable projection with a `model.call` event; the wrapper
+  sits on PydanticAI's `Model`, so tool-loop calls are captured and instructions are
+  recorded separately (they do not appear in `messages`); `ANCHOR_MODEL_RECORDING`
+  defaults to `off`. Replay serves recorded answers by `(node_run_id, attempt,
+  sequence)`, reports a changed prompt instead of rejecting it, fails loudly and
+  located when a call has no recording behind it, and never falls through to the
+  live model — not for a missing recording and not for a streaming call. Verified
+  against live `deepseek-flash` calls. **Not done**: recordings are not yet part of
+  retention, and a whole-campaign replay has not been run end to end. This is I9's
+  R0/R1, promised and until now absent; it is the prerequisite for developing
+  context policy, which can only be judged by controlled comparison. See
+  `docs/RECORDING_AND_REPLAY.md`.
 - Context engine and memory policies beyond the durable input snapshot boundary
 - Running a single node in isolation, with a frozen input snapshot: today
   `run_nodes` is a read, so a context experiment costs a whole campaign
