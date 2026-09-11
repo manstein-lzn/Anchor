@@ -122,7 +122,8 @@ adjust only the endpoint, model name, and secret file path; never paste the key
 into this repository.
 
 The academic workflow and the final acceptance run use Pi's DeepSeek model
-`deepseek-v4.1-flash-expires-on-0910` (`provider: deepseek`, Responses API).
+`deepseek-flash` (`provider: deepseek`, Responses API). The previous name carried an
+`expires-on-0910` suffix and stopped being accepted on 2026-09-10.
 `examples/runtime.deepseek.json` is the credential-free template. The key lives
 in Pi's own model config (`/home/mansteinl/.pi/agent/models.json`); bridge it
 into Anchor's secret file without printing it:
