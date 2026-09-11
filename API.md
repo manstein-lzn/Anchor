@@ -179,6 +179,7 @@ same composition root.
 ```http
 POST /api/projects                                  register a read-only source
 GET  /api/projects
+GET  /api/projects/{project_id}
 GET  /api/workspaces?project_id=…
 POST /api/workspaces                                create from a project revision
 GET  /api/workspaces/{workspace_id}
@@ -186,9 +187,9 @@ POST /api/workspaces/{workspace_id}/write
 POST /api/workspaces/{workspace_id}/delete
 POST /api/workspaces/{workspace_id}/fork            an independent worktree
 POST /api/workspaces/{workspace_id}/merge           require_clean; conflict fails closed
-POST /api/workspaces/{workspace_id}/freeze | /archive
+POST /api/workspaces/{workspace_id}/freeze
+POST /api/workspaces/{workspace_id}/archive
 GET  /api/workspaces/{workspace_id}/operations      the workspace ledger
-GET  /api/runs/{run_id}/workspace-operations
 ```
 
 A workspace write is a commit: every mutation is in the operation ledger, and a
