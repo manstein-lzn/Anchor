@@ -1,0 +1,1512 @@
+{
+  "run_id": "f4eb8ac7-3418-4e8d-8be5-8eaede46e02a",
+  "instructions_chars": 3834,
+  "sizes": {
+    "A": 141033,
+    "S": 5045,
+    "B": 4762
+  },
+  "A": {
+    "material_chars": 141033,
+    "runs": [
+      {
+        "seconds": 53.1,
+        "prompt_chars": 141372,
+        "answer": "1. **长期目标与范围外**\n- **长期目标**：执行图节点“Write the reader-facing paper”，产出一篇面向读者的中文综述论文，主题是“编译器优化中的代价模型（cost model）近年的发展”。读者定位是“懂机器学习与系统但不在编译器优化细分领域的工程师和研究者”。最终交付是 JSON：`{thesis, manuscript}`；manuscript 必须是 Markdown，以真实标题开头，按固定骨架写，包含摘要、引言、Survey Methodology、2–6 个主题章节、可选 Comparative Analysis、Open Problems、Threats to Validity、Conclusion，且不得包含 References。\n- **明确范围外**：数据库查询优化代价模型、纯硬件功耗模型、网络代价模型，除非其方法明确迁移到编译器优化并给出编译器场景实验；仅讨论 ML 模型架构、未集成到编译器决策或自动调优的论文；无可验证实验的观点或演示系统；无法获取全文且无公开版本的关键内容；非英文论文，除非不可替代且可获取可靠翻译；纯博客、技术报告、产品文档、新闻稿，除非包含可独立验证的新机制或数据且被后续学术工作引用；与编译器代价模型仅边缘关联的宽泛 ML 编译器综述，除非有专门章节并给出可追溯证据。\n\n2. **当前已确立、尚不确定/冲突、受阻的内容**\n- **已确立**：指令级代价模型的表示与监督信号已较清楚——基本块表示为指令序列或依赖图，监督来自真机微基准测量，目标是稳态吞吐；Ithemal 的 74% Haswell block 优于 llvm-mca/IACA 是全文级数字；GRANITE 的平均测试误差 6.91、改进 1.7、训练/推理吞吐约 3× 是全文级数字；白盒/解析谱系也在推进，如 uops.info、PMEvo、OSACA、PALMED，PALMED 的 754 条指令、567762 次测量、9 个等价类为全文级数字。张量程序层已确立 schedule primitive 序列等表示、真实硬件测量或静态分析信号、模型作为搜索排序器的基本图景；TLP 的 TenSet 规模 8.65M、8.56M、重复率 1.0430% 等为全文级数字。编译遍决策层已有 MLGO、MLGOPerf、LoopTune 等全文级证据，如 MLGO 的 -Oz 最多减少 7% 二进制体积、MLGOPerf 的 370K 内联配置、LoopTune 的 APEX_DQN 约 200 步收敛等。评估协议问题也已确立：BHive 类公共测量底座重要，但不同测量工具导致数据集不可混合，吞吐定义与测量协议会改变模型排名。\n- **尚不确定或相互冲突**：学习型与解析式谁更优没有同基准、同协议的可核对表；uiCA 的“约 1%”与“既有模型 9%–36%”是摘要级陈述，Facile 的“快近两个数量级”也是摘要级；GRANITE 的 1.7 口径在 HTML 渲染中丢失；AutoTVM 的 1.2–3.8 单位在抽取中截断，不能作为可引用数字。跨硬件泛化归因冲突：TLP 归因于表示层，TCL 归因于数据与更新方式。代理型代价模型与预测型代价模型的目标不同，Mind Mappings 用解析参考模型训练可微代理，CompilerGym 用代码大小代理奖励，均与真实运行时间目标存在张力。模型误差如何传播到最终代码质量完全没有量化证据；“学习型不如解析式”“误差被搜索放大”“目标硬件过拟合/数据泄漏”缺可引用实验。Tuna 显示静态分析与动态实测在 4 个模型上交替胜负，但仅覆盖有限模型与设置。\n- **受阻**：BHive 基准论文全文、uiCA 评估表、llvm-mca/IACA 机制与精度对照、Gematria 全文、Concorde 全文、Bada 正文、NeuroVectorizer、Halide 自动调度器、MLGO 家族部分评测细节、LLM/基础模型用于代价建模的对照实验均受阻或缺失。许多 IEEE PDF 返回 HTTP 202，dl.acm 返回 403，arXiv HTML 抽取系统性剥离公式与评测表。OpenAlex 的 cites/cited_by 对 Ithemal、AutoTVM、MLGO 等种子常返回 ML 基础文献或硬件热点，不指向同主题近邻；带版本号 arXiv 标识做 citations 还会 404 并耗尽预算。\n\n3. **用户当前想要什么**\n- **立即**：作为新接手 agent，只依据给定内容回答这七个问题；要具体；如果内容不足以回答某一问，直接说“无法从给定内容确定”，不要猜测，不要泛泛谈学术综述通常怎么做。\n- **最终**：写出那篇中文读者面向综述，满足指定范围、引用规则、数值规则、骨架、对比表、冲突证据和开放问题要求；不得请求或添加 References；不得在正文出现证据级别、检索过程、hash、DOI/venue 核验讨论、查询列表；数值只能取自 `evidence_notes.numbers`。除此之外的个人偏好无法从给定内容确定。\n\n4. **哪些决策与约束仍然主导着选择**\n- **出版契约**：无 References，系统后续从 verified sources 生成；只评估来源与 inline citation 是否完整；引用只用数字 [1]、[2]；引用所有 ledger 来源且不得引用 ledger 外来源。\n- **数值规则**：结果数字只在 `evidence_notes.numbers` 中可用；不得从摘要级来源、key_findings prose 或记忆里取数。摘要级数字如 uiCA 约 1%、TCL 约 10%、Bada 13.5%–23.1% 等不能作为 manuscript 数字。\n- **骨架与文风**：固定章节；摘要 <1800 字符，Survey Methodology <2500 字符，每段 <1200 字符；主题章节 2–6 个；不得有“Literature Review”；正文不得含证据级别标签、流程语言、hash、DOI/venue 核验、查询列表。\n- **范围与纳入/排除**：优先 2018 年后；少量经典解析式模型可纳入；必须能获取全文或足够公开版本；优先顶会/期刊/高质量 arXiv；必须纳入冲突、失败案例、负结果、综述与立场论文。\n- **检索策略**：已被证明有效的是 arXiv `abs:`/`ti:` 精确短语加领域术语，以及对基准类论文做 cited_by；已被证明低效的是 Crossref 搜系统名、OpenAlex 对 Ithemal/AutoTVM/MLGO 做 cites、宽泛 LLM+cost model 组合。下一轮应优先系统名/数据集名精确直检、论文参考文献表人工抽取、公开 PDF/会议官方 PDF。\n- **最低量与饱和判断**：最初要求来源 ≥24、精读 ≥14；累计约 59 来源、精读约 26，但特定空洞未缩小，saturation 明确为 false。对比表统一维度仍需回填。\n\n5. **哪些失败路径不可重复，什么条件下才允许重试**\n- **不可重复的失败路径**：\n  - 宽泛 Crossref `query.bibliographic`，如 “basic block throughput prediction machine learning cost model” 产生 749 万条且几乎全是无线网络、药物、材料等噪声；“learning to optimize tensor programs” 在 Crossref 返回跨域噪声；搜系统名 “Gematria”“MLGO” 也无效。\n  - arXiv 全库宽泛组合，如 “large language model cost model compiler optimization”“LLM + compiler + cost model” 被 LLM 微调/量化等占满，零相关。\n  - OpenAlex 的 cites 方向对 Ithemal、AutoTVM、MLGO、Facile 返回 LSTM、GloVe、ImageNet、gem5、LLVM 等背景文献，不用于同主题近邻。\n  - 对 Ithemal、AutoTVM、MLGO 做 cited_by 返回硬件热点、加速器映射、量子编译等，不指向同主题后继。\n  - 带版本号 arXiv 标识做 citations，如 `arxiv:1808.07412v2`，会 404 并耗尽预算。\n  - 依赖 arXiv HTML 抽取评测表：系统性剥离公式与表格，导致 uiCA Table 3、AutoTVM 方法/表格、TLP/TCL 评估章节等丢失。\n  - 反复直接抓 IEEE/dl.acm 付费墙 PDF：多次 HTTP 202/403；作者主页、IR、unpaywall/OpenAlex JSON API 在本适配器下也失败或无可抽取文本。\n- **允许重试的条件**：\n  - 改成 arXiv `abs:`/`ti:` 精确短语加领域术语，如 `abs:\"throughput\" AND abs:\"basic block\" AND abs:\"prediction\"`、`abs:\"MLGO\" OR abs:\"LoopTune\"`、`abs:\"tensor program\" AND abs:\"cost model\"`，这些已被证明高产。\n  - 对基准类/IISWC/CGO/PLDI 论文做 cited_by，如 GRANITE、BHive、Facile 的 cited_by 曾返回同主题近邻；但不要对 Ithemal/AutoTVM/MLGO 做。\n  - 对数据集名用 Crossref 偶发可重试，如 “BHive benchmark suite basic block throughput” 曾命中；可复刻去取 uiCA/GRANITE/BHive 公开版本。\n  - 改用不带版本号标识或 DOI 重做引用查询，但仅限可能有效的种子；且已证明对部分种子仍无效。\n  - 优先作者主页/机构仓库/会议官方 PDF/Springer 可读 PDF；对 arXiv HTML 按 offset 续读或改用非 HTML 版本。\n  - LLM 分支改用系统名/数据集名直检，如 LOOPRAG、Autocomp、LightCode，并直读评估章节取数。\n\n6. **当前缺口与下一个具体动作**\n- **缺口**：指令级评估数字未闭合：uiCA 的 1% vs 9%–36% 仍摘要级，BHive 规模/划分、Ithemal/GRANITE/Facile 同基准误差对照、llvm-mca/IACA 机制与精度全部缺失；Gematria 全文缺失。编译遍决策层的“策略模型 vs 代价模型”经典证据仍缺，LLVM TTI 与内联/展开/向量化代价模型的学习型替代未检索到。LLM/基础模型用于代价建模无对照实验，只有机制性对立。负结果与冲突量化仍为零：学习型不如解析式、误差在搜索中被放大或被实测兜底、目标硬件过拟合/数据泄漏均无证据。对比表的端到端收益、编译开销、泛化评估三列无任何可核验数字；程序表示/模型族/训练信号也只能部分定性填充。数据信号来源偏差与可重复性无定量。\n- **下一个具体动作**：下一轮把全部检索预算投向编译遍决策层（MLGO 家族）与 LLM 分支；用系统名/数据集名精确直检 LOOPRAG、Autocomp、LightCode、MLGO、LoopTune、NeuroVectorizer、TensorIR、meta-schedule、Heron、TenSet、uiCA、BHive、Gematria、GRANITE、Facile；对基准类论文做 cited_by；优先取公开 PDF/会议官方 PDF，回补 uiCA Table 3、BHive 规模与训练/测试划分、Ithemal/GRANITE/Facile 同基准误差、AutoTVM 方法/表格、TLP/TCL 评估、Concorde、Bada、PALMED 评测、LOOPRAG/Autocomp/LightCode 评估数字；同时专项找负结果、数据泄漏与目标硬件过拟合证据，并按统一维度回填对比表。\n\n7. **昂贵而已被省略的细节，可以在哪里被精确恢复**\n- **uiCA**：评估表、Table 3 逐模型误差、约 1% 与 9%–36% 的核验，在会议/IEEE 官方 PDF 或作者主页 PDF；arXiv HTML 已剥离表格，且 IEEE 多次 HTTP 202。\n- **BHive**：基准规模、训练/测试划分、测量协议，在 doi:10.1109/iiswc47752.2019.9042166 的作者公开版或机构仓库；IEEE ielx7 PDF 返回 HTTP 202。\n- **GRANITE**：1.7 的口径、3× 的对照基线，在会议版 PDF 复核；arXiv:2210.03894v2 已读到结论章，但单位丢失。\n- **Facile**：精度表、加速比、跨微架构误差分布，在 doi:10.1109/iiswc59245.2023.00023 的会议版 PDF；arXiv HTML 抽取剥离数值。\n- **AutoTVM**：方法章节、代价模型特征、学习器族、迁移协议与实验表格，在 NeurIPS 2018 官方 PDF 或作者 PDF；arXiv HTML 抽取约 4.8 万字符，方法/表格被剥离。\n- **MLGOPerf**：IR2Perf 具体特征表与预测误差，在其预印本评估章节；目前只读到设置与部分数字。\n- **Nimble**：评估段与调优/代价模型相关表述，在 MLSys 2021 公开版本 arXiv:2006.03031 续读评估与讨论小节。\n- **Tuna**：两组表对应的目标设备与采样预算定义，在 arXiv:2104.14641v3 原文或公开 PDF；抽取文本丢失硬件平台对应关系。\n- **TLP/TCL**：评估章节、精度指标、调优加速比、跨硬件迁移实验，在作者主页/机构仓库 PDF，或按 offset 续读 arXiv HTML；二者 HTML 只取到 0–48k 字符。\n- **Concorde**：解析-ML 融合机制、误差、加速比、目标微架构，在 doi:10.1145/3695053.3731037 的公开版本；dl.acm PDF 403、MIT DSpace 405，hdl.handle.net 未试。\n- **Bada**：Mape 下降 13.5%–23.1%、四分之一数据达到可比 Mape 的核验，在 Springer 正文或作者版；目前仅摘要可读。\n- **PALMED**：资源映射正确率、与 Intel 官方端口映射差异、吞吐预测误差，在非 HTML 版本；arXiv HTML 抽取在约 72k 字符处终止于附录证明。\n- **LOOPRAG/Autocomp/LightCode**：加速比、正确率、能耗数字与评测表，在 arXiv 预印本评估章节或官方 PDF；HTML 抽取剥离公式与表格。\n- **NeuroVectorizer/Halide 自动调度器**：实验设置与收益数字，在公开版本；目前分别只有 dl.acm 403 与 escholarship/dl.acm 403 下的摘要。\n- **编译遍决策层经典对照**：LLVM TTI、内联/展开/向量化代价模型的学习型替代，需从 MLGO 家族论文的参考文献表人工抽取，或对 MLGO/MLGOPerf/LoopTune 的参考文献逐条回检索。",
+        "input_tokens": 69320,
+        "output_tokens": 10142,
+        "grading": {
+          "1": {
+            "facts": [
+              {
+                "fact": "产出一篇**面向读者的中文学术综述**（不是检索报告、不是审计台账）",
+                "stated": true
+              },
+              {
+                "fact": "主题是**编译器优化中的代价模型（cost model）近年的发展**",
+                "stated": true
+              },
+              {
+                "fact": "读者是懂机器学习/系统、但不在编译器优化细分领域的人",
+                "stated": true
+              },
+              {
+                "fact": "范围之外至少提到一项：非编译器领域的代价模型（数据库/网络/纯硬件功耗）",
+                "stated": true
+              },
+              {
+                "fact": "范围之外至少再提到一项：无定量实验的观点/演示类文献，或非英文文献",
+                "stated": true
+              }
+            ]
+          },
+          "2": {
+            "facts": [
+              {
+                "fact": "已确立：**59 篇来源**通过验证",
+                "stated": false
+              },
+              {
+                "fact": "已确立：其中**24 篇读过全文**（其余为摘要级或题录级）",
+                "stated": false
+              },
+              {
+                "fact": "已确立：演化在**三个层次**上都成立（指令级 / 张量·循环程序 / 编译遍决策）",
+                "stated": true
+              },
+              {
+                "fact": "冲突的核心是**学习型 vs 解析式**代价模型",
+                "stated": true
+              },
+              {
+                "fact": "该冲突的具体形态：学习型精度占优但依赖逐微架构大规模真机测量与长时训练、跨平台迁移差",
+                "stated": false
+              },
+              {
+                "fact": "受阻或薄弱：**编译遍决策层次证据最薄**，或有谱系尚未完成前向追踪",
+                "stated": false
+              }
+            ]
+          },
+          "3": {
+            "facts": [
+              {
+                "fact": "**现在开始写作**（不是继续检索、不是再做一轮规划）",
+                "stated": false
+              }
+            ]
+          },
+          "4": {
+            "facts": [
+              {
+                "fact": "来源数下限 **24 篇**、全文阅读下限 **14 篇**（均已满足）",
+                "stated": true
+              },
+              {
+                "fact": "只用数字引用编号，**不得包含参考文献章节**（由系统生成）",
+                "stated": true
+              },
+              {
+                "fact": "正文**不得出现过程语言**（如「本轮检索」「本次共执行」这类句子）",
+                "stated": true
+              },
+              {
+                "fact": "正文**不得出现证据级别标签**（如全文级/摘要级/题录级）",
+                "stated": true
+              },
+              {
+                "fact": "段落长度受限（约 1200 字符）",
+                "stated": true
+              },
+              {
+                "fact": "结果型数字必须有**读过全文**的来源支撑",
+                "stated": true
+              },
+              {
+                "fact": "不得复述摘要，必须基于论文正文",
+                "stated": false
+              }
+            ]
+          },
+          "5": {
+            "facts": [
+              {
+                "fact": "有一轮检索因**返回结果全部无关**而被整轮否决（宽泛关键词在全文索引上噪声极高）",
+                "stated": false
+              },
+              {
+                "fact": "该失败的重试条件：**改用机制性关键词**（工具名/数据集名，如 Ithemal / BHive / AutoTVM / MLGO）",
+                "stated": true
+              },
+              {
+                "fact": "仅有摘要级证据的来源**不得用于支撑结果型数字**，需要先取得全文",
+                "stated": true
+              },
+              {
+                "fact": "完整检索与纳排记录在**检索日志**中（74 条）",
+                "stated": false
+              }
+            ]
+          },
+          "6": {
+            "facts": [
+              {
+                "fact": "缺口：**账本已饱和**（13 轮，边际收益递减），但**正文尚未写出**",
+                "stated": false
+              },
+              {
+                "fact": "下一个动作：**依据账本写出综述正文**",
+                "stated": false
+              },
+              {
+                "fact": "**不是**先补检索 / 先扩大来源（账本已足够继续）",
+                "stated": false
+              }
+            ]
+          },
+          "7": {
+            "facts": [
+              {
+                "fact": "每篇来源有**内容寻址的引用**（可精确取回）",
+                "stated": false
+              },
+              {
+                "fact": "59 篇的**结构化笔记**按引用编号对应（问题/方法/数字/结论/局限）",
+                "stated": false
+              },
+              {
+                "fact": "**读过全文的来源**另有全文读取位置，可精确取回全文而非摘要",
+                "stated": false
+              },
+              {
+                "fact": "24 组**对立证据**带证据编号与解决状态",
+                "stated": false
+              },
+              {
+                "fact": "123 条**未解决清单**",
+                "stated": false
+              }
+            ]
+          }
+        },
+        "stated": 15,
+        "expected": 31
+      },
+      {
+        "seconds": 64.3,
+        "prompt_chars": 141372,
+        "answer": "## 1. 长期目标与范围之外\n\n**长期目标**：产出一篇中文的、面向「懂机器学习与系统、但不在编译器优化细分领域」的工程师与研究者的综述论文，主题为「编译器优化中的代价模型近年的发展」，最终交付一个 JSON 对象 `{thesis, manuscript}`：`thesis` 是一句话的中心论断，`manuscript` 是以真实标题开头的 Markdown，遵守固定骨架（Abstract < 1800 字符、Survey Methodology < 2500 字符、2–6 个以领域实际轴命名的主题节、可选 Comparative Analysis、Open Problems、Threats to Validity、Conclusion），每段 < 1200 字符，论证主线清晰、有机制层演化解释、有一张对比表、摆出冲突证据、结尾给可操作开放问题。\n\n**明确在范围之外**（plan.exclusion_criteria）：数据库查询优化代价模型、纯硬件功耗模型、网络代价模型（除非方法被明确迁移到编译器并给出编译器场景实验）；只讨论 ML 架构、未把代价模型集成进编译决策或自动调优的论文；无定量证据的观点/演示系统；无法获取全文且无公开版本的关键内容；非英文（除非不可替代且有可靠翻译）；博客、技术报告、产品文档、新闻稿（除非含可独立验证的新机制并被后续学术工作引用）；与代价模型只有边缘关联的宽泛 ML 编译器综述。\n\n**另有 publication contract 排除项**：不得包含 References 节（由系统从 verified sources 生成）；正文不得出现证据级标签、过程语言（本轮/本次检索/本文共执行）、内容哈希、DOI 或 venue 核验讨论、检索式清单——这些属于生成的附录。\n\n## 2. 已确立 / 不确定 / 受阻\n\n**已确立**：(a) 组织轴是「三个层次 × 四个维度」——指令级、循环/张量程序、编译遍决策三个层次，每个层次用程序表示、学习目标、监督信号、搜索集成方式四个维度描述。(b) 指令级谱系覆盖最完整：Ithemal[1]、GRANITE[2]、Facile[26]、uiCA[51]、AnICA[52]、CesASMe/Staticdeps[53]、BHive[57]、nanoBench[7]、uops.info[48]、PMEvo[49]、PALMED[56]。(c) 张量/循环层：AutoTVM[23]、Ansor[3]、Transfer-Tuning[4]、TLP[25]、TCL[5]、Tuna[37]、FamilySeer[38]、CDMPP[33]、Pruner[34]、world model[6]。(d) 编译遍决策层：MLGO[29]、MLGOPerf[30]、LoopTune[31]、Offline IL[32]、RL4ReAl[43]、NeuroVectorizer[54]。(e) 框架/锚点：Wang & O'Boyle[35][18]、Ashouri[36][10]、McGovern 等[39]、egg[20]、CompilerGym[9]、Mind Mappings[8]、Crop[21]。(f) 账本已把冲突整理成十余组张力，其中一组（GRANITE 的 6.91 / 1.7 / 3× 对 Facile 与 uiCA 的主张）带 evidence_ids。\n\n**不确定或冲突**：「学习型 vs 解析式谁更准」无同基准同协议数字——uiCA 的「通常约 1%」与「既有模型 9%–36%」是摘要级陈述，Facile 的「快近两个数量级」是摘要级，GRANITE 的 1.7 在 HTML 渲染中丢单位。泛化的三个维度（跨程序、跨目标硬件、跨优化阶段）几乎无数字。模型误差如何传播到最终代码质量：零可引用实验。数据泄漏与目标硬件过拟合无任何正面检验。LLM 分支只有机制性对立（LightCode 仍用参数化解析代价模型、LOOPRAG 改用符号打分、Autocomp 不涉及代价预测），无对照实验。负结果为零。\n\n**受阻**：GRANITE[24][2]、BHive[57]、Crop[21]、Concorde[58] 的公开全文（IEEE 202 / dl.acm 403 / 付费墙）；Gematria 检索零命中；arXiv HTML 抽取在约 24k–72k 字符处剥离公式与评测表；OpenAlex 对 Ithemal、AutoTVM、MLGO、Facile 的后向引用全返回 ML 基础文献；对 Ithemal 的前向引用无同主题近邻。\n\n## 3. 用户当前想要什么\n\n用户此刻要执行的是图节点 **Write the reader-facing paper**：不再检索，直接依据给定 ledger 写出最终论文。具体要求就是第 1 问列出的骨架＋风格＋引用约束，其中最容易违反的三条是：数值只能取自 `evidence_notes.numbers`（即 full_text 核验过的字段）；只允许 `[n]` 形式引用且要覆盖 ledger 全部来源、不引其他；不得出现过程语言、证据级标签、DOI/venue 核验讨论与检索式清单。**run memory 与 promoted organizational knowledge 均为空，即没有 feedback 需要逐条回应**，因此不存在「不得回退已通过部分」的具体条目。\n\n## 4. 仍然主导选择的决策与约束\n\n1. 骨架固定，不得自创；不得出现名为「Literature Review」的节——整篇论文就是文献综述。\n2. 引用的唯一编号体系是最终生成的 References，`manuscript` 内只用 `[1]`、`[2]` 这类数字。\n3. 数字白名单是 `evidence_notes` 中 `evidence_level = full_text` 且 `numbers` 非空的条目，目前是 [1]、[2]、[9]、[13]、[25]、[29]、[30]、[31]、[37]、[51]、[56]；摘要级条目的 key_findings 里出现的数字（如 Tuna 之外的「1.2–3.8 倍」、TCL 的「约 10% 样本」、Facile 的「近两个数量级」、Bada 的「13.5%–23.1%」）一律不得写成结果。\n5. 对比表必须让读者一眼可比：维度取自领域实际使用的轴（程序表示、模型族、监督信号、搜索/决策集成、目标硬件、端到端收益、编译开销、泛化评估）；填不满的格子宁留空或写定性，也不得编数。\n6. 中文散文、保留原始论文标题；每段 < 1200 字符。\n7. 冲突必须写成「竞争性解释 + 哪一侧证据支持什么 + 哪里证据不足」，而不是简单罗列两派。\n\n## 5. 不可重复的失败路径与重试条件\n\n**不可重复（已多次验证无效）**：Crossref `query.bibliographic` 搜系统名/品牌名（「Gematria」「MLGO」「learned cost model compiler optimization」类）——返回无线吞吐、教育数据挖掘、材料预测等跨域同名噪声；arXiv 全库宽泛组合词（`\"cost model\" AND \"large language model\"`）——返回 LLM 系统自身的成本、LoRA 缓存、微调教材；OpenAlex 的 **cites（后向）** 对 Ithemal、AutoTVM、MLGO、Facile——全返回 LSTM/GloVe/Cybenko/Robbins-Monro/ResNet/ImageNet/gem5 等背景文献；**cited_by** 对 Ithemal（返回 Edge TPU、nanoBench、CompilerGym）、对 Ansor（返回移动端基准、GMLake）；`ti:MLGO`、`ti:\"BHive\" OR ti:\"Gematria\"`；用带版本号的 arXiv 标识做引用查询（返回 404）。\n\n**允许重试的条件（已验证可用）**：arXiv 的 `abs:`/`ti:` 精确短语＋领域术语组合（`abs:\"throughput\" AND abs:\"basic block\" AND abs:\"prediction\"`、`ti:\"machine learning\" AND ti:\"compiler\"`、`abs:\"tensor program\" AND abs:\"cost model\"`、`abs:\"MLGO\" OR abs:\"LoopTune\"`）；Crossref 用**数据集名**（「BHive」benchmark suite…）一次命中；OpenAlex 的 **cited_by 只对基准/系统类论文有效**——对 GRANITE（doi:10.1109/iiswc55918.2022.00012、arXiv:2210.03894）与 Facile 的 DOI 做前向引用，返回了 Facile、可泛化程序与架构表示、NN GCC 代价模型、RL4ReAl、Concorde、Bada；引用查询去掉版本号；读取改用作者主页/机构仓库/会议官方或出版社 PDF（经验：Springer PDF 可读，IEEE 直链多次 HTTP 202）。\n\n## 6. 当前缺口与下一个具体动作\n\n**两个缺口。** 第一个是**账本内部的编号冲突**，这是接手后最先必须处理的：`evidence_notes` 的 `citation` 与 `sources` 的 `citation` 不是同一套编号。最清楚的证据在 21–24 区间——`evidence_notes` 的第 21 条是 Mind Mappings、第 23 条是 TASO、第 24 条是 ConfuciuX，而 `sources` 的第 21 条是 Crop（doi:10.1145/3649329.3658249）、第 23 条是 AutoTVM（arXiv:1805.08166v4）、第 24 条是 GRANITE 题录（doi:10.1109/iiswc55918.2022.00012）；此外 Mind Mappings 在 `evidence_notes` 里出现两次（第 8 与第 21 条），unresolved 还提到「重录 GRANITE（60）与 Facile（61）」而 `sources` 只到 59。若按 `evidence_notes` 的编号直接写 `[n]`，会把 A 论文的机制/数字挂到 B 论文名下。\n\n第二个是**内容缺口**（不阻止本次写作，但要写进 Threats to Validity 与 Open Problems）：跨硬件/跨程序/跨阶段的泛化数字、误差传播链条、数据泄漏与目标硬件过拟合审计、LLM 用于代价建模的对照实验、负结果。\n\n**下一个具体动作**：产出那一个 JSON。执行顺序建议为——①以 `sources[].id`（DOI 或 arXiv 号）为权威，用标题把 `evidence_notes` 的每一条重新绑定到 `sources` 的编号上，建立「账本条目 → 引用编号」映射表，并核对 `tensions` 与 `search_log` 中出现的编号；②从映射后的 full_text 且 `numbers` 非空的条目抽取全部可写数字；③按三个层次写主题节，每节统一为「问题 → 方法 → 证据 → 我的判断」；④在 Comparative Analysis 放对比表，只填定性列与白名单数字；⑤以冲突组（学习型 vs 解析式、静态 vs 动态信号、精度 vs 调用预算、表示迁移 vs 持续更新、代理目标 vs 真实性能）逐条写出竞争性解释与证据强度；⑥确保 59 条来源条条被引、无外部引用。\n\n## 7. 昂贵而已被省略的细节可在何处精确恢复\n\n- **正文被截断处**：`sources[i].read_ref`（`artifact://sha256/...`）是各篇的全文读取产物；证据笔记反复记载截断位置（uiCA 在约 24k 字符处、PALMED 在约 72k 处终止于附录证明、Facile/AnICA/CesASMe/Nimble/TASO 的评测表被剥离）。按 offset 续读这些 artifact 是拿回评测章节的最短路径；`read_ref` 为 `null` 的条目（10、11、12、15、16、17、18、19、21、22、24、27、28、40、41、42、54、55、57、58）则是从未取到全文者。\n- **数字白名单**：`evidence_notes[i].numbers`——只有它的内容可以写成结果，且必须与 `evidence_level = full_text` 同时成立；`.method` 供给机制叙述，`.limitations` 供给威胁与偏差。\n- **冲突的原始锚点**：`tensions` 中唯一带 `evidence_ids` 的一组（arXiv:2210.03894v2 与 doi:10.1109/iiswc59245.2023.00023）标出了「协议混淆」而非「胜负」的正确表述位置。\n- **检索与排除的理由**：`search_log` 的 `inclusion_decisions` 逐条记有纳入/排除判断与失败原因，可直接避免重复已排除的跨域候选（Edge TPU 评估、稀疏张量硬件综述、CAMP Ada 基准、Register Allocation 教材章节等）。\n- **付费墙清单与替代来源**：`unresolved` 与各条 `limitations` 记录了失败的访问方式与应替换的版本类型（会议/IEEE 官方 PDF、作者主页、机构仓库、unpaginated HTML、Springer PDF）。",
+        "input_tokens": 69320,
+        "output_tokens": 14695,
+        "grading": {
+          "1": {
+            "facts": [
+              {
+                "fact": "产出一篇**面向读者的中文学术综述**（不是检索报告、不是审计台账）",
+                "stated": true
+              },
+              {
+                "fact": "主题是**编译器优化中的代价模型（cost model）近年的发展**",
+                "stated": true
+              },
+              {
+                "fact": "读者是懂机器学习/系统、但不在编译器优化细分领域的人",
+                "stated": true
+              },
+              {
+                "fact": "范围之外至少提到一项：非编译器领域的代价模型（数据库/网络/纯硬件功耗）",
+                "stated": true
+              },
+              {
+                "fact": "范围之外至少再提到一项：无定量实验的观点/演示类文献，或非英文文献",
+                "stated": true
+              }
+            ]
+          },
+          "2": {
+            "facts": [
+              {
+                "fact": "已确立：**59 篇来源**通过验证",
+                "stated": true
+              },
+              {
+                "fact": "已确立：其中**24 篇读过全文**（其余为摘要级或题录级）",
+                "stated": false
+              },
+              {
+                "fact": "已确立：演化在**三个层次**上都成立（指令级 / 张量·循环程序 / 编译遍决策）",
+                "stated": true
+              },
+              {
+                "fact": "冲突的核心是**学习型 vs 解析式**代价模型",
+                "stated": true
+              },
+              {
+                "fact": "该冲突的具体形态：学习型精度占优但依赖逐微架构大规模真机测量与长时训练、跨平台迁移差",
+                "stated": false
+              },
+              {
+                "fact": "受阻或薄弱：**编译遍决策层次证据最薄**，或有谱系尚未完成前向追踪",
+                "stated": false
+              }
+            ]
+          },
+          "3": {
+            "facts": [
+              {
+                "fact": "**现在开始写作**（不是继续检索、不是再做一轮规划）",
+                "stated": true
+              }
+            ]
+          },
+          "4": {
+            "facts": [
+              {
+                "fact": "来源数下限 **24 篇**、全文阅读下限 **14 篇**（均已满足）",
+                "stated": false
+              },
+              {
+                "fact": "只用数字引用编号，**不得包含参考文献章节**（由系统生成）",
+                "stated": true
+              },
+              {
+                "fact": "正文**不得出现过程语言**（如「本轮检索」「本次共执行」这类句子）",
+                "stated": true
+              },
+              {
+                "fact": "正文**不得出现证据级别标签**（如全文级/摘要级/题录级）",
+                "stated": true
+              },
+              {
+                "fact": "段落长度受限（约 1200 字符）",
+                "stated": true
+              },
+              {
+                "fact": "结果型数字必须有**读过全文**的来源支撑",
+                "stated": true
+              },
+              {
+                "fact": "不得复述摘要，必须基于论文正文",
+                "stated": false
+              }
+            ]
+          },
+          "5": {
+            "facts": [
+              {
+                "fact": "有一轮检索因**返回结果全部无关**而被整轮否决（宽泛关键词在全文索引上噪声极高）",
+                "stated": true
+              },
+              {
+                "fact": "该失败的重试条件：**改用机制性关键词**（工具名/数据集名，如 Ithemal / BHive / AutoTVM / MLGO）",
+                "stated": true
+              },
+              {
+                "fact": "仅有摘要级证据的来源**不得用于支撑结果型数字**，需要先取得全文",
+                "stated": true
+              },
+              {
+                "fact": "完整检索与纳排记录在**检索日志**中（74 条）",
+                "stated": false
+              }
+            ]
+          },
+          "6": {
+            "facts": [
+              {
+                "fact": "缺口：**账本已饱和**（13 轮，边际收益递减），但**正文尚未写出**",
+                "stated": false
+              },
+              {
+                "fact": "下一个动作：**依据账本写出综述正文**",
+                "stated": true
+              },
+              {
+                "fact": "**不是**先补检索 / 先扩大来源（账本已足够继续）",
+                "stated": true
+              }
+            ]
+          },
+          "7": {
+            "facts": [
+              {
+                "fact": "每篇来源有**内容寻址的引用**（可精确取回）",
+                "stated": false
+              },
+              {
+                "fact": "59 篇的**结构化笔记**按引用编号对应（问题/方法/数字/结论/局限）",
+                "stated": false
+              },
+              {
+                "fact": "**读过全文的来源**另有全文读取位置，可精确取回全文而非摘要",
+                "stated": true
+              },
+              {
+                "fact": "24 组**对立证据**带证据编号与解决状态",
+                "stated": false
+              },
+              {
+                "fact": "123 条**未解决清单**",
+                "stated": false
+              }
+            ]
+          }
+        },
+        "stated": 20,
+        "expected": 31
+      },
+      {
+        "seconds": 59.7,
+        "prompt_chars": 141372,
+        "answer": "# 1. 长期目标与明确的范围外\n\n**长期目标**：产出一篇面向\"懂机器学习与系统、但不在编译器优化细分领域\"的工程师与研究者的中文综述论文《编译器优化中的代价模型（cost model）近年的发展》。交付形态已被固定：可执行图节点 `Execute graph node: Write the reader-facing paper`，最终产物是一个 JSON 对象 `{thesis, manuscript}`，manuscript 的首行必须是真实论文标题，随后走固定骨架（Abstract → Introduction → Survey Methodology → 2–6 个主题节 → 可选 Comparative Analysis → Open Problems → Threats to Validity → Conclusion）。实质要求：清晰论证主线、机制层面的演化解释、代表性方法对比表、把相互冲突的证据摆出来、结尾给可操作开放问题。计划里还有量化底线：来源 ≥ 24、精读 ≥ 14。\n\n**明确在范围之外**（来自 plan 的排除标准）：\n- 数据库查询优化代价模型、纯硬件功耗模型、网络代价模型——除非方法被明确迁移到编译器优化并给出编译器场景实验。\n- 仅讨论 ML 模型架构、未把代价模型集成进编译决策或自动调优的论文。这解释了为什么模拟退火、梯度提升、LSTM、ResNet 等条目只以\"搜索算子/学习器族谱系基础\"的身份存在。\n- 无可验证实验、只有观点或演示系统介绍。\n- 无公开版本、只能付费墙访问的关键内容。\n- 非英文论文；纯博客、技术报告、产品文档、新闻稿；与编译器代价模型仅边缘关联的宽泛 ML 编译器综述（除非含专门章节并可追溯）。\n\n**出版合约层面的范围外**（与学术范围无关但同样硬）：不写 References 节（系统从 verified sources 数组生成）；不设 `Literature Review` 节；正文不得出现证据级标签（全文级/摘要级/题录级）、\"本轮/本次检索\"类过程语言、内容 hash、DOI 与 venue 核验讨论、检索式列表——这些归生成的附录。\n\n# 2. 已确立 / 冲突 / 受阻\n\n**已确立（有全文级片段或台账记录的数字）**\n- 指令级：Ithemal 用层次化 LSTM 从真机微基准测量直接回归吞吐，Haswell 测试集上 74% 的 basic block 比 IACA 与 LLVM 更接近真实吞吐 [1]。GRANITE 换成图表示 + 多任务，跨多种 x86-64 微架构平均测试误差 6.91，报称相对前一 SOTA 改进 1.7，训练/推理吞吐约 3× [2]。白盒侧同样在推进：uiCA 的参数化流水线模型给出 DSB↔MS 往返切换停顿 2 周期（Skylake 及后继）/4 周期（更早），译码器↔MS 合计 2 周期 [51]；PALMED 仅靠运行时间测量就能重建资源映射，Skylake 上 754 条可基准测试指令、567762 次测量、归并为 9 个行为等价类 [56]。\n- 张量层：TLP 把 schedule primitive 序列当作表示，TenSet CPU 库 8.65M 个 tensor programs 中 8.56M 序列互不相同（重复率 1.0430%），并指出 Ansor 只有 14 种 primitive 且 CPU/GPU 共用 [25]。AutoTVM 确立\"统计代价模型 + 跨工作负载模型迁移\"的范式，端到端改进 1.2–3.8（单位在抽取中截断，作者明确标注不可作可引用数值）[23]。Tuna 给出静态分析式与动态实测式在 4 个模型上交替胜负的完整延迟表 [37]。\n- 编译遍决策层：MLGO 把策略模型集成进 LLVM 主干，`-Oz` 下最多减少 7% 二进制体积 [29]；MLGOPerf 用二级模型 IR2Perf 生成奖励，370K 内联配置、10 个 SPEC CPU2006 基准、采集约 5 天、速度比排除阈值 3、过滤 perf 报出 <1% 的函数开销 [30]；LoopTune 不用显式代价模型，RL 直接输出循环变换，1757/440 划分、APEX_DQN 约 200 步收敛到峰值的 30%（峰值 114.204 GFLOPS）、PPO 需 1000+ 步才到 8%、训练 17.5 小时 [31]。\n- 基础设施：CompilerGym 把编译器优化任务标准化为 Gym 环境，GCC 11.2.0 上动作集 2281 [9]；egg 用 e-class analyses 把代价域分析嵌进等价类，抽取阶段在等价类里取代价最小者 [20]。\n\n**不确定或相互冲突**\n- 学习型 vs 解析式谁更准：uiCA 摘要称既有模型（含 Ithemal）平均误差 9%–36%、自身通常约 1%；Facile 反过来主张解析式可同时做到快、准、可解释，并称比现有模型快近两个数量级。但两侧的关键数字都只在摘要层面，评测表在读取中被剥离 [26][51]，GRANITE 的 1.7 口径不明 [2]，**无法对表**。\n- 误差来源归因：是表示/模型容量（GRANITE 单模型覆盖多微架构），还是训练信号与部署时吞吐定义错配（按展开方式采集训练测量的 Ithemal/DiffTune 在 BHiveL 上相对表现变差；Facile 消融显示分量重要性随微架构与基准漂移）[51][26]。\n- 精度归因于预测器还是输入分析：CesASMe 称内存携带依赖是主要不精确源 [53]；AnICA 称工具间差异含真实 bug 与从未文档化的建模假设 [52]。两者都指向\"精度排名本身依赖未公开假设\"。\n- 表示论 vs 数据论：TLP 把跨硬件不可用归因于特征绑定硬件 [25]；TCL 归因于数据集成本与更新方式，用主动采样（据摘要约 10% 样本）与持续学习回应 [5]。\n- 代理型 vs 预测型代价模型目标不同：Mind Mappings 用解析参考模型当训练的**真值**，只为把搜索变可微 [8]；CompilerGym 刻意用确定性代码大小替代真实运行时间作奖励 [9]。二者与\"学实测换精度\"不是同一场比赛。\n- **完全空白**：模型误差 → 搜索排序 → 最终代码质量的传播链，任何轮次都没有量化证据；负结果（\"学习型不如解析式\"）为零；数据泄漏与目标硬件过拟合无任何可核验检验；跨硬件泛化只有定性（CDMPP 以设备模型无关为目标、Pruner 命名 cross-platform online unawareness、LoopTune 单平台）[33][34][31]。\n- LLM 分支只有机制性对立：LightCode 在 LLM 推理编译中仍用参数化解析延迟/能耗模型做硬件分配 [44]，LOOPRAG 用循环属性符号特征 + BM25 打分约束 LLM 决策 [45]，NN GCC 代价模型之所以存在是为绕开\"每次评估都调下游编译器\"的瓶颈 [42]——没有一条 LLM 与显式代价模型的同基准误差对照。\n\n**受阻（明确记录了访问失败）**：BHive 数据集论文（doi:10.1109/iiswc47752.2019.9042166，IEEE PDF HTTP 202）——它是 Ithemal/GRANITE/Facile/uiCA/CesASMe 的公共测量底座，缺失导致基准规模、训练/测试划分与泄漏检查无法核验 [57]；Gematria 在 Crossref 与 arXiv 多形态检索下零命中；Crop [21]（dl.acm 403）、Concorde [58]（dl.acm 403 + MIT DSpace 405）、Bada [59]（Springer 付费墙）、NeuroVectorizer [54]、Halide 自动调度 [55]、SCW 2024 [41]、NN-based GCC 代价模型 [42]、可泛化程序/架构表示 [40]、COMPOFF [11]、量子编译选项预测 [22] 均只能停在摘要或题录。读取端还有一个系统性障碍：arXiv HTML 抽取在约 24k/48k/72k 字符处截断，公式与评测表被剥离。\n\n# 3. 用户当前想要什么\n\n用户要的是**这一节点的交付物本身**，不是继续检索的报告：恰好一个 JSON 对象、不带代码围栏，字段为 `thesis` 与 `manuscript`。`thesis` 是一句话的中心主张；`manuscript` 是 Markdown，首行 `# ` 加真实标题，然后走固定骨架，Abstract < 1800 字符（含 thesis 与主要发现），Survey Methodology < 2500 字符（数据库、查询数、纳入/排除标准、证据强度分级、检索的诚实局限，且查询日志归附录），2–6 个按领域真实使用的轴命名的主题节（每节同构：问题 → 方法 → 证据 → 判断），可选 Comparative Analysis（含跨切表）、Open Problems、Threats to Validity、Conclusion。语言继承请求语言（中文），保留原始论文标题。每段 < 1200 字符。不要 References。\n\n# 4. 仍然主导选择的决策与约束\n\n1. **引用完整性而非\"有没有 References\"**：合约明确规定 References 由系统从 verified sources 数组生成，manuscript 不得包含，也不得因此请求、添加或拒稿——评审只应检查来源与行内引用是否完整。引用只能用 `[1]`、`[2]` 形式，且必须覆盖台账里的每个来源、不得引用台账之外的任何东西。\n2. **数字合法性**：只有 `evidence_notes.numbers` 里记录过的数字才是已核验的。这直接决定了：AutoTVM 的 1.2–3.8（单位截断，作者自带免责）、Bada 的 13.5%–23.1%、TCL 的\"约 10%\"、uiCA 的 1% 与 9%–36%、Facile 的\"近两个数量级\"、GRANITE 的 1.7，**都不能作为数字断言**写入手稿，只能作为\"作者主张/协议不可比\"的定性陈述。\n3. **正文与附录的分工**：证据级标签、过程语言、hash、DOI/venue 核验讨论、检索式一律不得进入正文。\n4. **骨架与节名的固定**，每个主题节内部同构，不允许出现 `Literature Review` 这一类整体性节名。\n5. **范围与纳入/排除标准**（见 Q1）以及 ≥24 来源 / ≥14 精读的量化底线。\n6. 交付格式：一个 JSON 对象，无代码围栏，只含两个字段。\n\n# 5. 不可重复的失败路径与重试条件\n\n**已被证明无效，不应重跑**：\n- 宽泛的 arXiv 全库关键词（\"learned cost model compiler optimization deep learning\"、\"large language model cost model compiler optimization\"、\"machine learning guided compiler optimization LLVM reinforcement learning inlining register allocation\"）——返回深度学习理论、空气质量预测、LLM 量化/微调教材章节，零相关。\n- Crossref `query.bibliographic` 搜系统名（\"Gematria\"、\"MLGO\"）——全为跨域同名噪声（环境化学、野火泥石流、地下水管理、分子致毒事件）。\n- OpenAlex 的 **cites（后向）** 对 Ithemal / AutoTVM / MLGO / Facile——返回 LSTM、GloVe、Cybenko、Robbins–Monro、Hogwild、ResNet、ImageNet，与本主题无关。\n- OpenAlex 的 **cited_by（前向）** 对 Ithemal / AutoTVM / Ansor / MLGO / doi:10.1145/3445814.3446762——返回硬件评估、移动端部署、量子编译等热点，不指向同主题近邻。\n- 用**带版本号**的 arXiv id 做 `scholarly.citations`（如 `arxiv:1808.07412v2`）——直接 404 并耗掉整轮预算。\n- 用 arXiv HTML 版读取并期望拿到评测表——公式与表格被系统性剥离且中途截断。\n- 试图读作者主页、unpaywall、OpenAlex JSON API——非 HTML/PDF/text 源被适配器拒绝，作者主页 404 或无可抽取文本。\n\n**允许重试的条件（台账自己给出的例外）**：\n- **对基准/基准数据集类论文做 cited_by**：对 GRANITE（doi:10.1109/iiswc55918.2022.00012）与 Facile（doi:10.1109/iiswc59245.2023.00023）的前向引用首次返回了同主题近邻（Facile、可泛化表示、GCC 代价模型、RL4ReAl、Concorde、Bada）。这条结论已被修正为\"取决于种子论文选择\"，但 BHive 的 cited_by 已被判定饱和。\n- **arXiv `abs:` 精确短语 + 领域术语**：这是唯一稳定高产的形态（`abs:\"MLGO\" OR abs:\"LoopTune\"`、`abs:\"tensor program\" AND abs:\"cost model\"`、`abs:\"throughput\" AND abs:\"basic block\" AND abs:\"prediction\"`）。\n- Crossref `query.bibliographic` 对**数据集名**（\"BHive\" benchmark suite basic block throughput）意外命中一次，台账明确写着\"值得在后续轮次重试\"，与\"系统名无效\"并不矛盾。\n- 引用图查询改用**不带版本号**的 arXiv id 或 DOI。\n- 全文获取优先 arXiv 与**出版社开放 PDF**（经验：Springer 的 McGovern 2002 PDF 可读；IEEE 多次 202），或按 offset 续读 HTML 越过截断点。\n\n# 6. 当前缺口与下一个具体动作\n\n**缺口（按严重度）**\n1. **对比表的数字列仍然是空的**：端到端收益、编译开销、泛化评估三列无任何可核验数字；只有\"程序表示／模型族／训练信号\"三列可以定性填写。\n2. **指令级同协议对照为零**：uiCA 的逐模型误差表、Facile 的加速比与误差表、GRANITE 的 1.7 口径、Ithemal/GRANITE/Facile/uiCA 在同一 BHiveU/BHiveL 上的误差对照，全部缺失。\n3. **BHive 本体**（规模、目标微架构清单、测量方法、训练/测试划分）仍不可得，评估协议一节无法写出可核验细节。\n4. **Gematria 全文**从未命中，其数据流特征与可移植性主张只能靠二手转述。\n5. **误差传播链**（模型误差 → 搜索步数/排序 → 最终代码质量）零证据，\"被真机测量兜底\"还是\"被搜索放大\"没有实验。\n6. **负结果与冲突的量化**：没有\"学习型不如解析式\"的可引用来源；数据泄漏与目标硬件过拟合无检验；跨硬件迁移后的精度下降幅度、所需新样本数均无数字。\n7. **LLM 分支缺数字**：LOOPRAG、Autocomp、LightCode 的评测数值未取到。\n8. 台账的 `unresolved` 列表里多条\"编译遍决策层零新增\"\"张量谱系完全缺失\"是**早期轮次的记录，已经过时**——后期轮次已收入 MLGO [29]、MLGOPerf [30]、LoopTune [31]、RL4ReAl [43]、AutoTVM [23]、TLP [25]、TCL [5]、Tuna [37] 等。写手稿时须以 `sources`/`evidence_notes` 为准，不要照抄过时的 unresolved 条目。\n\n**下一个具体动作**：本节点就是**写论文**。具体地，把主线定为\"演化不是替代而是分工——驱动力来自测量与数据成本、IR 层次上移、以及搜索循环内的评估预算\"，把对比表只填有依据的定性列，把所有量化分歧显式标注为协议不可比（吞吐定义、基准版本、目标微架构集合不同），Open Problems 落在可行动项上（误差传播的测量方法、公共测量与评估协议、可迁移表示、区间/不确定性输出、LLM 与显式代价模型的分工边界）。\n\n若继续检索（非当前节点），动作是：用 `abs:` 精确短语取回 uiCA/Facile/GRANITE/TLP/TCL/PALMED/Mind Mappings/CompilerGym/AutoTVM 的**评测章节**（改用会议或作者 PDF，或按 offset 续读），并对未饱和的基准类论文做 cited_by。\n\n# 7. 昂贵而已被省略的细节，可在哪里精确恢复\n\n| 来源 | 被省略的东西 | 精确恢复入口 |\n|---|---|---|\n| uiCA [51] | Table 3 逐模型误差（1% 与 9%–36% 的验证）、与各模型的误差对比 | IISWC/会议官方 PDF，或按 offset 续读 arXiv:2107.14210v3（抽取约 24k 处截断） |\n| Facile [26] | 跨微架构误差表、\"近两个数量级\"加速比的实测依据、与 Ithemal/GRANITE/uiCA/llvm-mca/OSACA/CQA 的同台对照 | IISWC 2023 官方 PDF 或 arXiv:2310.13212（HTML 剥离表格） |\n| GRANITE [2] | 1.7 的度量口径（倍数 vs 百分点）、3× 的对照基线、跨 ISA 结论 | arXiv:2210.03894 的会议版 PDF |\n| AutoTVM [23] | 代价模型特征表、基学习器、迁移协议、全部实验表 | NeurIPS 2018 官方 PDF 或作者 PDF（arXiv HTML 抽取仅约 4.8 万字符） |\n| TLP [25] / TCL [5] | 精度指标、调优加速比、跨硬件迁移实验、\"约 10%\" 采样对应的精度损失曲线 | arXiv:2211.03578v2 / 2604.12891v1 的评估章节（0–48k 截断） |\n| Tuna [37] | 两组推理表各自的目标设备、Partial/Full 的采样预算定义、单位标注不一致的澄清 | arXiv:2104.14641v3 的方法与表格 |\n| MLGOPerf [30] | IR2Perf 的完整特征表与预测误差、跨语料泛化 | arXiv:2207.08389v2 |\n| LoopTune [31] | 与 TVM/MetaSchedule/AutoTVM 的加速比实验表 | arXiv:2309.01825v3 |\n| Mind Mappings [8] | 与黑箱优化器对比的量化结果、problem identifier 的跨问题泛化评估 | arXiv:2103.01489 评测章 |\n| CompilerGym [9] | 各环境上的实际搜索收益、是否被后续工作采纳为标准协议 | arXiv:2109.08267 评测章 + 引用追踪 |\n| PALMED [56] | 资源映射正确率、与 Intel 官方端口映射的差异、吞吐预测误差、测量鲁棒性讨论 | arXiv:2012.11473v4 评测章（抽取在 ~72k 处终止于附录证明） |\n| BHive [57] | 基准规模、目标微架构清单、测量方法、训练/测试划分 | IEEE 链接返回 202，需作者/机构仓库版 |\n| Gematria | 全文（数据流特征与跨微架构可移植性主张） | 从未命中；只能从 GRANITE/uiCA/Facile 的参考文献表人工抽取后用 arXiv/作者公开版取回 |\n| Crop [21]、Concorde [58]、Bada [59]、NeuroVectorizer [54]、Halide 自动调度 [55]、SCW 2024 [41]、NN GCC 代价模型 [42]、可泛化表示 [40]、COMPOFF [11]、量子编译选项预测 [22] | 机制细节与全部评测数值 | 分别从 dl.acm、MIT DSpace、Springer、DAC/HPEC/SCW/IISWC 官方 PDF 或作者主页恢复 |\n\n还有一条跨来源的通用恢复路径：arXiv HTML 抽取会在 24k/48k/72k 处截断并剥离公式与表格，因此**改读会议/出版社官方 PDF（Springer 类已被证明可读，IEEE 多次 202）或按 offset 续读**，是把上述被省略细节一次性拿回的最有效手段；引用图侧则需改用不带版本号的 arXiv id / DOI，并只对 IISWC/CGO/PLDI 类基准论文做 cited_by。",
+        "input_tokens": 69320,
+        "output_tokens": 13465,
+        "grading": {
+          "1": {
+            "facts": [
+              {
+                "fact": "产出一篇**面向读者的中文学术综述**（不是检索报告、不是审计台账）",
+                "stated": true
+              },
+              {
+                "fact": "主题是**编译器优化中的代价模型（cost model）近年的发展**",
+                "stated": true
+              },
+              {
+                "fact": "读者是懂机器学习/系统、但不在编译器优化细分领域的人",
+                "stated": true
+              },
+              {
+                "fact": "范围之外至少提到一项：非编译器领域的代价模型（数据库/网络/纯硬件功耗）",
+                "stated": true
+              },
+              {
+                "fact": "范围之外至少再提到一项：无定量实验的观点/演示类文献，或非英文文献",
+                "stated": true
+              }
+            ]
+          },
+          "2": {
+            "facts": [
+              {
+                "fact": "已确立：**59 篇来源**通过验证",
+                "stated": false
+              },
+              {
+                "fact": "已确立：其中**24 篇读过全文**（其余为摘要级或题录级）",
+                "stated": false
+              },
+              {
+                "fact": "已确立：演化在**三个层次**上都成立（指令级 / 张量·循环程序 / 编译遍决策）",
+                "stated": true
+              },
+              {
+                "fact": "冲突的核心是**学习型 vs 解析式**代价模型",
+                "stated": true
+              },
+              {
+                "fact": "该冲突的具体形态：学习型精度占优但依赖逐微架构大规模真机测量与长时训练、跨平台迁移差",
+                "stated": false
+              },
+              {
+                "fact": "受阻或薄弱：**编译遍决策层次证据最薄**，或有谱系尚未完成前向追踪",
+                "stated": false
+              }
+            ]
+          },
+          "3": {
+            "facts": [
+              {
+                "fact": "**现在开始写作**（不是继续检索、不是再做一轮规划）",
+                "stated": true
+              }
+            ]
+          },
+          "4": {
+            "facts": [
+              {
+                "fact": "来源数下限 **24 篇**、全文阅读下限 **14 篇**（均已满足）",
+                "stated": false
+              },
+              {
+                "fact": "只用数字引用编号，**不得包含参考文献章节**（由系统生成）",
+                "stated": true
+              },
+              {
+                "fact": "正文**不得出现过程语言**（如「本轮检索」「本次共执行」这类句子）",
+                "stated": true
+              },
+              {
+                "fact": "正文**不得出现证据级别标签**（如全文级/摘要级/题录级）",
+                "stated": true
+              },
+              {
+                "fact": "段落长度受限（约 1200 字符）",
+                "stated": true
+              },
+              {
+                "fact": "结果型数字必须有**读过全文**的来源支撑",
+                "stated": true
+              },
+              {
+                "fact": "不得复述摘要，必须基于论文正文",
+                "stated": false
+              }
+            ]
+          },
+          "5": {
+            "facts": [
+              {
+                "fact": "有一轮检索因**返回结果全部无关**而被整轮否决（宽泛关键词在全文索引上噪声极高）",
+                "stated": true
+              },
+              {
+                "fact": "该失败的重试条件：**改用机制性关键词**（工具名/数据集名，如 Ithemal / BHive / AutoTVM / MLGO）",
+                "stated": true
+              },
+              {
+                "fact": "仅有摘要级证据的来源**不得用于支撑结果型数字**，需要先取得全文",
+                "stated": true
+              },
+              {
+                "fact": "完整检索与纳排记录在**检索日志**中（74 条）",
+                "stated": false
+              }
+            ]
+          },
+          "6": {
+            "facts": [
+              {
+                "fact": "缺口：**账本已饱和**（13 轮，边际收益递减），但**正文尚未写出**",
+                "stated": false
+              },
+              {
+                "fact": "下一个动作：**依据账本写出综述正文**",
+                "stated": true
+              },
+              {
+                "fact": "**不是**先补检索 / 先扩大来源（账本已足够继续）",
+                "stated": true
+              }
+            ]
+          },
+          "7": {
+            "facts": [
+              {
+                "fact": "每篇来源有**内容寻址的引用**（可精确取回）",
+                "stated": false
+              },
+              {
+                "fact": "59 篇的**结构化笔记**按引用编号对应（问题/方法/数字/结论/局限）",
+                "stated": false
+              },
+              {
+                "fact": "**读过全文的来源**另有全文读取位置，可精确取回全文而非摘要",
+                "stated": false
+              },
+              {
+                "fact": "24 组**对立证据**带证据编号与解决状态",
+                "stated": false
+              },
+              {
+                "fact": "123 条**未解决清单**",
+                "stated": false
+              }
+            ]
+          }
+        },
+        "stated": 18,
+        "expected": 31
+      }
+    ],
+    "scores": [
+      15,
+      20,
+      18
+    ],
+    "mean": 17.7,
+    "expected": 31
+  },
+  "S": {
+    "material_chars": 5045,
+    "runs": [
+      {
+        "seconds": 39.3,
+        "prompt_chars": 5384,
+        "answer": "1. **长期目标是什么？什么明确在范围之外？**  \n长期目标是写出一篇面向读者的综述论文，读者是“懂机器学习与系统、但不熟悉编译器优化细分领域”的人。论文必须有清晰论证主线，解释机制层面的演化（不得复述摘要，必须基于正文），包含一张代表性方法对比表，摆出冲突证据，结尾给出可操作的开放问题。方法学约束是从种子论文出发、沿引用关系逐步扩展，来源总数 ≥24、精读 ≥14。交付物是论文本身，不是选题报告。明确在范围之外的只有：它不是选题报告；除此之外的范围外边界，无法从给定内容确定。\n\n2. **当前什么是已经确立的？什么是尚不确定或相互冲突的？什么是受阻的？**  \n已确立：证据框架覆盖 8 个研究问题，累积约 59 条来源、精读约 26 条，含部分全文分段精读；每条记录机制、数值、局限与不确定性。三层次方法对比骨架已成型；约 17 组冲突证据已分组并标注“能主张什么、不能主张什么”；开放问题清单已区分“有证据支撑”与“仅文献缺口”。若干机制判断已可复用：监督信号来自真实硬件测量；模型嵌入搜索循环充当过滤/排序器；信号必须实测且昂贵，研究重心从模型结构转向样本选择与表示压缩；分界在 IR 层次，机器码层解析占优，MLIR/张量层解析维护成本过高而转向学习型；搜索集成有三类；指令级已有初步协议共识；LLM 目前是优化机会的发现器/判别器，不是可校准的代价模型。  \n尚不确定或相互冲突：驱动力中“精度瓶颈 vs 工程成本”谁占主导，尚无全文级因果证据，只能表述为机制性推断；跨硬件不迁移的归因无共识，TLP 归因于特征绑定硬件，TCL 当作数据/更新问题；学习型 vs 解析式没有同台口径，所有对比数字口径不一，只能写“协议混淆 + 分工”，不是胜负；对比表多数列仍无法填数；误差传播证据为零；偏差与可重复性无量化数字；跨阶段泛化零证据；负结果为零；数据泄漏与目标硬件过拟合无任何审计。  \n受阻：访问是最大瓶颈，IEEE 大量返回 202、ACM DL 大量 403，关键工作只有摘要/题录级，不能进对比表数字列；arXiv HTML 系统性剥离公式与评测表；OpenAlex/Crossref 引用图对本主题基本失效；缺编译遍决策层全文、指令级同台对照数字、张量域经典与后继、负结果与误差传播专项检索。\n\n3. **用户当前想要什么？**  \n用户当前想要的是推进这篇综述论文本身，而不是继续做选题报告。具体包括：按“下一步”优先级补齐关键全文与机制细节，争取表格所需的同台数字，补张量域经典与后继，专项检索负结果与误差传播，统一对比表维度后全文回补并一次性回填；撰写立场要定为“分工与协议，而非替代”，冲突证据按“协议混淆 vs 真实胜负”分类呈现，并把 LLM 定位为“决策生成/机会发现”而非代价模型。若问的是本条消息的即时要求，则是依据给定内容回答这七个问题。\n\n4. **哪些决策与约束仍然主导着选择？**  \n写作约束主导：必须基于正文而非复述摘要；要有机制层面的演化解释；要有代表性方法对比表；要摆出冲突证据；结尾开放问题必须可操作；读者画像固定为“懂 ML 与系统、不熟悉编译器优化细分领域”。证据约束主导：来源 ≥24、精读 ≥14；从种子论文沿引用扩展；摘要/题录级内容不能进对比表数字列；宁缺勿造，缺的格子标“证据不足”；材料里的数字与来源编号可复用，但写作时须逐条回填引文，并去重重复条目。检索与访问约束主导：优先作者主页/机构仓库/出版社开放 PDF；不要依赖 arXiv HTML 取公式与评测表；OpenAlex/Crossref 引用图基本失效，有效检索形态是 arXiv `abs:`/`ti:` 精确短语加领域术语、对数据集名做 Crossref、对 IISWC/CGO/PLDI 类基准论文做 cited_by。立场约束主导：主线为“分工与协议，而非替代”；误差传播与不确定性量化作为可操作研究入口。\n\n5. **哪些失败路径不可重复？在什么条件下才允许重试？**  \n不可重复的失败路径包括：直接依赖 IEEE/ACM DL 获取关键全文，因为 IEEE 多次 202、ACM DL 多次 403；用 arXiv HTML 抽取公式与评测表，因为会系统性剥离；用 OpenAlex/Crossref 引用图做本主题扩展，因为对 Ithemal 之类只返回 ML 基础文献，cited_by 偏向硬件热点；从摘要/题录级数字填对比表数字列；混合不同工具构建的数据集做对比；期待已有负结果或误差传播可引用来源；把重复条目计入引文。  \n允许重试的条件：获取全文时改用作者主页/机构仓库/出版社开放 PDF，Springer PDF 成功过，IEEE 多次失败；引用图只用于对 IISWC/CGO/PLDI 类基准论文做 cited_by，例如对 GRANITE 做 cited_by 才拿到 Facile/RL4ReAl，并用 arXiv `abs:`/`ti:` 精确短语与数据集名 Crossref 检索；对比表数字必须来自全文并核验后再填；指令级对照须以 BHive 系公共基准统一协议；负结果与误差传播必须先做专项检索，关键词聚焦“模型误差→搜索→代码质量”传播链、“学习型不如解析式”失败案例、数据泄漏/过拟合审计；回填引文时对 GRANITE citation 2 与 24、Facile 26 与 61 等同 id 条目，以及 Round 1 题录与后来全文版本去重。\n\n6. **当前的缺口是什么？下一个具体动作是什么？**  \n当前缺口：编译遍决策层全文与机制细节，尤其 MLGO 评测章节中“策略 vs 代价模型”这一关键辨析点，以及 NeuroVectorizer、LLVM TTI、内联/展开/向量化的学习型替代；指令级同台对照数字，即以 BHive 系公共基准统一协议，拿 uiCA、Facile、GRANITE、Ithemal 在同一测试集上的误差表；张量域经典与后继，包括 AutoTVM/Ansor 方法章节与迁移协议、TenSet/Heron/TensorIR(meta-schedule)、LLM 驱动的张量代价模型，专项直检 LOOPRAG/Autocomp/LightCode 评估章节取数字；负结果与误差传播专项检索，这是最大缺口；对比表端到端收益、编译开销、泛化评估三列几乎没有可核验数字；数据泄漏与目标硬件过拟合无审计。  \n下一个具体动作：按优先级第 1 条，补齐编译遍决策层全文与机制细节，重点是 MLGO 评测章节、NeuroVectorizer、LLVM TTI 与内联/展开/向量化的学习型替代；找公开 PDF，不要依赖 arXiv HTML。\n\n7. **昂贵而已被省略的细节，可以在哪里被精确恢复？**  \n被 arXiv HTML 剥离的公式与评测表，可在作者主页、机构仓库、出版社开放 PDF 中精确恢复；其中 Springer PDF 成功过，IEEE 多次失败。编译遍决策层机制细节可在 MLGO 评测章节、NeuroVectorizer、LLVM TTI 与内联/展开/向量化的学习型替代文献的公开 PDF 中恢复。指令级同台误差表可用 BHive 系公共基准统一协议，在 uiCA、Facile、GRANITE、Ithemal 同一测试集上恢复。张量域方法与评估数字可在 AutoTVM/Ansor 方法章节与迁移协议、TenSet/Heron/TensorIR(meta-schedule)、LOOPRAG/Autocomp/LightCode 评估章节中恢复。负结果、误差传播、数据泄漏/过拟合审计可通过专项检索恢复，关键词聚焦“模型误差→搜索→代码质量”传播链、“学习型不如解析式”失败案例、数据泄漏/过拟合审计。引用扩展可通过 arXiv `abs:`/`ti:` 精确短语、数据集名 Crossref、以及对基准论文做 cited_by 恢复。对比表空格须在全文回补后一次性回填，无数字格标注证据不足。",
+        "input_tokens": 3859,
+        "output_tokens": 7260,
+        "grading": {
+          "1": {
+            "facts": [
+              {
+                "fact": "产出一篇**面向读者的中文学术综述**（不是检索报告、不是审计台账）",
+                "stated": false
+              },
+              {
+                "fact": "主题是**编译器优化中的代价模型（cost model）近年的发展**",
+                "stated": false
+              },
+              {
+                "fact": "读者是懂机器学习/系统、但不在编译器优化细分领域的人",
+                "stated": true
+              },
+              {
+                "fact": "范围之外至少提到一项：非编译器领域的代价模型（数据库/网络/纯硬件功耗）",
+                "stated": false
+              },
+              {
+                "fact": "范围之外至少再提到一项：无定量实验的观点/演示类文献，或非英文文献",
+                "stated": false
+              }
+            ]
+          },
+          "2": {
+            "facts": [
+              {
+                "fact": "已确立：**59 篇来源**通过验证",
+                "stated": false
+              },
+              {
+                "fact": "已确立：其中**24 篇读过全文**（其余为摘要级或题录级）",
+                "stated": false
+              },
+              {
+                "fact": "已确立：演化在**三个层次**上都成立（指令级 / 张量·循环程序 / 编译遍决策）",
+                "stated": false
+              },
+              {
+                "fact": "冲突的核心是**学习型 vs 解析式**代价模型",
+                "stated": true
+              },
+              {
+                "fact": "该冲突的具体形态：学习型精度占优但依赖逐微架构大规模真机测量与长时训练、跨平台迁移差",
+                "stated": false
+              },
+              {
+                "fact": "受阻或薄弱：**编译遍决策层次证据最薄**，或有谱系尚未完成前向追踪",
+                "stated": false
+              }
+            ]
+          },
+          "3": {
+            "facts": [
+              {
+                "fact": "**现在开始写作**（不是继续检索、不是再做一轮规划）",
+                "stated": false
+              }
+            ]
+          },
+          "4": {
+            "facts": [
+              {
+                "fact": "来源数下限 **24 篇**、全文阅读下限 **14 篇**（均已满足）",
+                "stated": true
+              },
+              {
+                "fact": "只用数字引用编号，**不得包含参考文献章节**（由系统生成）",
+                "stated": false
+              },
+              {
+                "fact": "正文**不得出现过程语言**（如「本轮检索」「本次共执行」这类句子）",
+                "stated": false
+              },
+              {
+                "fact": "正文**不得出现证据级别标签**（如全文级/摘要级/题录级）",
+                "stated": false
+              },
+              {
+                "fact": "段落长度受限（约 1200 字符）",
+                "stated": false
+              },
+              {
+                "fact": "结果型数字必须有**读过全文**的来源支撑",
+                "stated": true
+              },
+              {
+                "fact": "不得复述摘要，必须基于论文正文",
+                "stated": true
+              }
+            ]
+          },
+          "5": {
+            "facts": [
+              {
+                "fact": "有一轮检索因**返回结果全部无关**而被整轮否决（宽泛关键词在全文索引上噪声极高）",
+                "stated": false
+              },
+              {
+                "fact": "该失败的重试条件：**改用机制性关键词**（工具名/数据集名，如 Ithemal / BHive / AutoTVM / MLGO）",
+                "stated": false
+              },
+              {
+                "fact": "仅有摘要级证据的来源**不得用于支撑结果型数字**，需要先取得全文",
+                "stated": true
+              },
+              {
+                "fact": "完整检索与纳排记录在**检索日志**中（74 条）",
+                "stated": false
+              }
+            ]
+          },
+          "6": {
+            "facts": [
+              {
+                "fact": "缺口：**账本已饱和**（13 轮，边际收益递减），但**正文尚未写出**",
+                "stated": false
+              },
+              {
+                "fact": "下一个动作：**依据账本写出综述正文**",
+                "stated": false
+              },
+              {
+                "fact": "**不是**先补检索 / 先扩大来源（账本已足够继续）",
+                "stated": false
+              }
+            ]
+          },
+          "7": {
+            "facts": [
+              {
+                "fact": "每篇来源有**内容寻址的引用**（可精确取回）",
+                "stated": false
+              },
+              {
+                "fact": "59 篇的**结构化笔记**按引用编号对应（问题/方法/数字/结论/局限）",
+                "stated": false
+              },
+              {
+                "fact": "**读过全文的来源**另有全文读取位置，可精确取回全文而非摘要",
+                "stated": false
+              },
+              {
+                "fact": "24 组**对立证据**带证据编号与解决状态",
+                "stated": false
+              },
+              {
+                "fact": "123 条**未解决清单**",
+                "stated": false
+              }
+            ]
+          }
+        },
+        "stated": 6,
+        "expected": 31
+      },
+      {
+        "seconds": 25.2,
+        "prompt_chars": 5384,
+        "answer": "## 1. 长期目标与范围之外\n\n**长期目标**（交接\"任务目标\"节 + \"下一步\"节）：交付一篇**面向读者的综述论文本体**——读者是懂机器学习与系统、但不熟悉编译器优化细分领域的人。论文必须做到：\n\n- 有清晰论证主线，并解释**机制层面的演化**（明确要求\"不得复述摘要，必须基于正文\"）；\n- 含一张代表性方法对比表；\n- 把相互冲突的证据摆出来、说清能主张什么与不能主张什么；\n- 结尾给出**可操作**的开放问题；\n- 方法学约束：从种子论文出发、沿引用关系逐步扩展；来源总数 ≥24、精读 ≥14。\n\n**明确在范围之外**：交接只明确排除了**选题报告**——\"交付物是论文本身（`Write the reader-facing paper` 节点），不是选题报告\"。其余边界（例如是否允许把某些只有摘要级的来源写入正文定性描述）交接未直接规定，只能从\"证据等级决定能否进对比表数字列\"这一条间接推出；是否有其他硬性排除项，**无法从给定内容确定**。\n\n## 2. 已确立 / 不确定或冲突 / 受阻\n\n**已确立（可作为写作骨架）**\n\n- 演化不是单向\"学习型取代解析式\"，而是三条咬合的线索：微架构复杂度逼解析模型逐代重写（Ithemal 在 Haswell 上 74% 的 basic block 优于 llvm-mca/IACA）→ 表示能力竞争性迭代（Ithemal 的 token+层次 LSTM → GRANITE 的图表示+GNN，跨多微架构单模型）→ 张量域动机不同（\"少量真机测量覆盖巨大搜索空间\"，Ansor），近期转向数据高效（TCL 主动学习取约 10% 样本）与轨迹感知。\n- **机制共性**：监督信号来自真实硬件测量，模型嵌入搜索循环充当过滤/排序器。\n- **策略模型 vs 代价模型的辨析**已立住：可立即计算的目标（体积）能端到端学策略（MLGO，最多减 7%）；不可立即计算的延迟目标**迫使**引入学习型代价模型当奖励代理（MLGOPerf 的 IR2Perf）。\n- 信号获取谱系（真机测量 → perf 剖析 → 模拟器 → 静态分析 → 离线轨迹）与因果链已清晰：**因信号必须实测且昂贵，研究重心从\"模型结构\"转向\"样本选择与表示压缩\"**。TLP 用 TenSet（8.65M 程序、重复率 1.04%）证明表示层冗余低。\n- 搜索集成的三类嵌入方式（打分器 / 决策即策略 / 可微解析代理）。\n- 评估协议现状：指令级已有初步公共测量底座（BHive 系，30 万级 basic block），张量域缺统一协议，CompilerGym 是对 pass/flag 层缺标准环境的直接回应。\n- LLM 目前是**优化机会的发现器/判别器**，不是可校准的代价模型（LLM 差分测试报出 4 个流水线级 + 12 个跨版本 bug；LOOPRAG 承认 LLM 在循环变换上频繁出错；LightCode 仍用参数化解析代价模型）。\n\n**不确定或相互冲突**\n\n- 驱动力中\"精度瓶颈 vs 工程成本\"**谁占主导无全文级因果证据**，只能表述为机制性推断。\n- 学习型 vs 解析式：所有对比数字**口径不一、从未同台**（吞吐定义、BHiveU/BHiveL 版本、微架构集合都不同）。可写的只是\"协议混淆 + 分工\"，**不是胜负**；分界在 IR 层次（机器码层解析占优、MLIR/张量层学习型）这一结论本身也是推断而非直接对照证据。\n- 跨硬件不迁移的**归因无共识**：TLP 诊断为特征绑定了硬件架构，TCL 当作数据/更新问题——两条路线归因不同。\n- 跨测量协议是隐蔽陷阱：uiCA 显示按展开方式采集训练的模型（Ithemal、DiffTune）在含循环的 BHiveL 上排名变差。\n- **误差传播完全为零证据**（预测误差→搜索排序颠倒→端到端退化）；**偏差与可重复性无任何量化数字**；**数据泄漏与目标硬件过拟合无任何审计**。\n\n**受阻**\n\n- **访问是最大瓶颈**：IEEE 大量返回 202、ACM DL 大量 403，GRANITE、Facile、BHive、Crop、NeuroVectorizer、Halide 自动调度器等关键工作只有摘要/题录级，**不能进对比表数字列**。\n- arXiv HTML 抽取**系统性剥离公式与评测表**。\n- OpenAlex/Crossref 的引用图对本主题**基本失效**。\n- **负结果为零**：没有\"学习型不如解析式\"\"误差被放大\"\"目标硬件过拟合\"的可引用来源——冲突一节只能靠协议层证据支撑。\n- 对比表的端到端收益、编译开销、泛化评估三列**几乎无可核验数字**。\n\n## 3. 用户当前想要什么\n\n交接未记录用户的直接诉求，但从任务目标与\"下一步\"可确定当前所求是：**写出那篇面向读者的综述论文本身**（`Write the reader-facing paper` 节点），而**不是**更多检索、不是选题报告、不是方法学报告。\n\n需要说明：交接里也留了若干**写之前的补证据动作**（第五节优先级 1–4），因此当前诉求实际是\"在补齐关键全文/数字后交付论文\"；哪一个精确在前，**无法从给定内容确定**。\n\n## 4. 仍然主导选择的决策与约束\n\n- **交付物约束**：交付论文本身，不是选题报告；且（按出版契约）手稿**不含 References 章节**，不得因缺该节而请求补充或拒稿，引用完整性通过正文引文与来源数组体现。\n- **证据使用约束**：只有*正文级*来源的数字/机制才可写；摘要级来源不得进对比表数字列；**宁缺勿造，无数字的格子标注\"证据不足\"或证据等级**。驱动力归因、学习型 vs 解析式的胜负判断都必须降级为推断表述。\n- **写作立场（已定主线）**：\"分工与协议，而非替代\"——解析式追求可在搜索循环内高频调用且可解释的白盒分解，学习型追求跨微架构可迁移的表示，二者分界随 IR 层次移动。冲突证据按\"协议混淆 vs 真实胜负\"分类呈现。\n- **方法学约束**：种子论文出发、沿引用关系扩展；来源 ≥24、精读 ≥14。\n- **检索形态约束**：arXiv `abs:`/`ti:` 精确短语 + 领域术语；对数据集名（\"BHive\"）做 Crossref 检索；引用图只对 IISWC/CGO/PLDI 类基准论文做 `cited_by`。\n- **表格维度统一**：程序表示、模型族、训练信号、搜索集成、目标硬件、端到端收益、编译开销、泛化评估——全文回补后一次性回填。\n- **引文回填与去重**：材料里的数字与来源编号可直接复用、逐条回填引文；必须处理重复条目（GRANITE 的 2 与 24、Facile 的 26 与 61 同 id；Round 1 题录与后来取得的全文版本）。\n- **开放问题的定位约束**：LLM 定位为\"决策生成/机会发现\"而非代价模型；误差传播与不确定性量化作为可操作研究入口。\n\n## 5. 不可重复的失败路径与允许重试的条件\n\n**已被证明不可重复的路径**\n\n- 直接依赖 IEEE / ACM DL 去取关键全文（IEEE 返回 202、ACM DL 大量 403）——多次失败。\n- 依赖 arXiv HTML 抽取来拿评测表与公式——系统性剥离，\"读到的方法章节多、评测数字少\"。\n- 用 OpenAlex / Crossref 的引用图做本主题扩展——Ithemal 的 cites 只返回 LSTM/GloVe 等 ML 基础文献，cited_by 偏向硬件热点，基本失效。\n- 把仅摘要级的来源数字填进对比表数字列（属于被明确禁止的做法）。\n\n**允许重试的条件**\n\n- **换成可公开访问的 PDF 源后**才重试取全文：优先作者主页 / 机构仓库 / 出版社开放 PDF（Springer PDF 成功过）。也就是说，路径本身要换，而不是对 IEEE/ACM 原样重试。\n- 引用图**仅在**对 IISWC/CGO/PLDI 类基准论文做 `cited_by` 时才允许重试（交接记载：对 GRANITE 做 cited_by 才拿到 Facile/RL4ReAl）。\n- 检索改为 arXiv `abs:`/`ti:` 精确短语 + 领域术语，或对数据集名（\"BHive\"）做 Crossref 检索——这是交接认定的**唯一有效检索形态**。\n\n## 6. 当前缺口与下一个具体动作\n\n**缺口（交接第五节，按给定优先级）**\n\n1. 编译遍决策层的全文与机制细节：MLGO 评测章节（\"策略 vs 代价模型\"是全文最关键辨析点）、NeuroVectorizer、LLVM TTI 与内联/展开/向量化的学习型替代。\n2. 指令级**同台对照数字**：以 BHive 系公共基准统一协议，取 uiCA、Facile、GRANITE、Ithemal 在同一测试集上的误差表——这是\"学习型 vs 解析式\"冲突能否量化的关键。\n3. 张量域经典与后继的方法章节与迁移协议：AutoTVM/Ansor、TenSet/Heron/TensorIR(meta-schedule)，以及 LLM 驱动的张量代价模型（LOOPRAG/Autocomp/LightCode）的评估数字。\n4. 负结果与误差传播的专项检索：聚焦\"模型误差→搜索→代码质量\"的传播链条、\"学习型不如解析式\"的失败案例、数据泄漏/过拟合审计——**这是目前最大缺口**。\n5. 对比表多数列仍无法填数：表示/模型族/训练信号三列可定性填；端到端收益、编译开销、泛化评估三列几乎没有可核验数字。\n\n**下一个具体动作**：按优先级 1，补齐**编译遍决策层全文与机制细节**，重点是 MLGO 的评测章节，路径必须是公开 PDF，不得依赖 arXiv HTML。\n\n## 7. 昂贵而已被省略的细节可在何处精确恢复\n\n- **关键全文（GRANITE、Facile、BHive、Crop、NeuroVectorizer、Halide 自动调度器、MLGO 评测章节、AutoTVM/Ansor 方法章节）**：在作者主页 / 机构仓库 / 出版社开放 PDF 处精确恢复；Springer PDF 已验证可行，IEEE 路径多次失败。\n- **被 arXiv HTML 剥离的公式与评测表**：同样从上述公开 PDF 原文恢复。\n- **引文扩展（Facile、RL4ReAl 等）**：对 GRANITE 做 `cited_by`（即对 IISWC/CGO/PLDI 类基准论文做 cited_by）这一条路径可精确恢复。\n- **数据集层面的细节**：对数据集名（\"BHive\"）做 Crossref 检索；TenSet 的规模/重复率等属性亦属该层。\n- **同台对照数字（uiCA/Facile/GRANITE/Ithemal 在同一 BHive 系测试集上的误差表）**：只能通过\"以 BHive 系公共基准统一协议\"重取原文数字来精确恢复；交接未给出该表已经存在于任何地方，这部分**无法从给定内容确定**其可直接取用的位置。",
+        "input_tokens": 3859,
+        "output_tokens": 5092,
+        "grading": {
+          "1": {
+            "facts": [
+              {
+                "fact": "产出一篇**面向读者的中文学术综述**（不是检索报告、不是审计台账）",
+                "stated": false
+              },
+              {
+                "fact": "主题是**编译器优化中的代价模型（cost model）近年的发展**",
+                "stated": true
+              },
+              {
+                "fact": "读者是懂机器学习/系统、但不在编译器优化细分领域的人",
+                "stated": true
+              },
+              {
+                "fact": "范围之外至少提到一项：非编译器领域的代价模型（数据库/网络/纯硬件功耗）",
+                "stated": false
+              },
+              {
+                "fact": "范围之外至少再提到一项：无定量实验的观点/演示类文献，或非英文文献",
+                "stated": false
+              }
+            ]
+          },
+          "2": {
+            "facts": [
+              {
+                "fact": "已确立：**59 篇来源**通过验证",
+                "stated": false
+              },
+              {
+                "fact": "已确立：其中**24 篇读过全文**（其余为摘要级或题录级）",
+                "stated": false
+              },
+              {
+                "fact": "已确立：演化在**三个层次**上都成立（指令级 / 张量·循环程序 / 编译遍决策）",
+                "stated": false
+              },
+              {
+                "fact": "冲突的核心是**学习型 vs 解析式**代价模型",
+                "stated": true
+              },
+              {
+                "fact": "该冲突的具体形态：学习型精度占优但依赖逐微架构大规模真机测量与长时训练、跨平台迁移差",
+                "stated": false
+              },
+              {
+                "fact": "受阻或薄弱：**编译遍决策层次证据最薄**，或有谱系尚未完成前向追踪",
+                "stated": false
+              }
+            ]
+          },
+          "3": {
+            "facts": [
+              {
+                "fact": "**现在开始写作**（不是继续检索、不是再做一轮规划）",
+                "stated": false
+              }
+            ]
+          },
+          "4": {
+            "facts": [
+              {
+                "fact": "来源数下限 **24 篇**、全文阅读下限 **14 篇**（均已满足）",
+                "stated": false
+              },
+              {
+                "fact": "只用数字引用编号，**不得包含参考文献章节**（由系统生成）",
+                "stated": false
+              },
+              {
+                "fact": "正文**不得出现过程语言**（如「本轮检索」「本次共执行」这类句子）",
+                "stated": false
+              },
+              {
+                "fact": "正文**不得出现证据级别标签**（如全文级/摘要级/题录级）",
+                "stated": false
+              },
+              {
+                "fact": "段落长度受限（约 1200 字符）",
+                "stated": false
+              },
+              {
+                "fact": "结果型数字必须有**读过全文**的来源支撑",
+                "stated": true
+              },
+              {
+                "fact": "不得复述摘要，必须基于论文正文",
+                "stated": true
+              }
+            ]
+          },
+          "5": {
+            "facts": [
+              {
+                "fact": "有一轮检索因**返回结果全部无关**而被整轮否决（宽泛关键词在全文索引上噪声极高）",
+                "stated": false
+              },
+              {
+                "fact": "该失败的重试条件：**改用机制性关键词**（工具名/数据集名，如 Ithemal / BHive / AutoTVM / MLGO）",
+                "stated": false
+              },
+              {
+                "fact": "仅有摘要级证据的来源**不得用于支撑结果型数字**，需要先取得全文",
+                "stated": true
+              },
+              {
+                "fact": "完整检索与纳排记录在**检索日志**中（74 条）",
+                "stated": false
+              }
+            ]
+          },
+          "6": {
+            "facts": [
+              {
+                "fact": "缺口：**账本已饱和**（13 轮，边际收益递减），但**正文尚未写出**",
+                "stated": false
+              },
+              {
+                "fact": "下一个动作：**依据账本写出综述正文**",
+                "stated": false
+              },
+              {
+                "fact": "**不是**先补检索 / 先扩大来源（账本已足够继续）",
+                "stated": false
+              }
+            ]
+          },
+          "7": {
+            "facts": [
+              {
+                "fact": "每篇来源有**内容寻址的引用**（可精确取回）",
+                "stated": false
+              },
+              {
+                "fact": "59 篇的**结构化笔记**按引用编号对应（问题/方法/数字/结论/局限）",
+                "stated": false
+              },
+              {
+                "fact": "**读过全文的来源**另有全文读取位置，可精确取回全文而非摘要",
+                "stated": false
+              },
+              {
+                "fact": "24 组**对立证据**带证据编号与解决状态",
+                "stated": false
+              },
+              {
+                "fact": "123 条**未解决清单**",
+                "stated": false
+              }
+            ]
+          }
+        },
+        "stated": 6,
+        "expected": 31
+      },
+      {
+        "seconds": 25.7,
+        "prompt_chars": 5384,
+        "answer": "1. **长期目标是什么？什么明确在范围之外？**  \n   长期目标是写一篇面向读者的综述论文，主题是“编译器优化中的代价模型（近年发展）”。读者懂机器学习与系统，但不熟悉编译器优化细分领域。论文必须有论证主线、机制层面的演化解释（不得复述摘要，必须基于正文）、一张代表性方法对比表、对冲突证据的呈现、以及可操作的开放问题。方法学上要求从种子论文出发、沿引用关系逐步扩展，来源总数 ≥24，精读 ≥14。交付物是论文本身（`Write the reader-facing paper` 节点），不是选题报告。  \n   **明确在范围之外**：选题报告。除此之外，给定内容没有明确列出其他范围边界，无法从给定内容确定。\n\n2. **当前什么是已经确立的？什么是尚不确定或相互冲突的？什么是受阻的？**  \n   **已确立**：证据框架已搭好，含 8 个研究问题，累积约 59 条来源、精读约 26 条（含部分全文分段精读）；每条记录机制、数值、局限与不确定性。三层次方法对比骨架已成型，但仍缺评测数字。约 17 组冲突证据已分组，并标注“能主张什么、不能主张什么”。开放问题清单已区分“有证据支撑”与“仅文献缺口”。核心发现已形成：演化有三条咬合线索；监督信号来自真实硬件测量，模型嵌入搜索循环充当过滤/排序器；指令级、循环/张量、编译遍决策三层表示/目标/信号已有材料；跨硬件泛化是张量域中心问题；信号获取从准到便宜成谱系；学习型 vs 解析式存在证据冲突；搜索集成有三类；评估协议在指令级有初步共识、张量域缺统一协议。  \n   **尚不确定或相互冲突**：驱动力中“精度瓶颈 vs 工程成本”谁占主导，尚无全文级因果证据，只能作机制性推断。跨硬件不迁移的原因，TLP 归因于特征绑定硬件架构，TCL 归因于数据/更新问题，领域无共识。学习型 vs 解析式的对比数字口径不一、从未同台，结论只能是“协议混淆 + 分工”，不是胜负。误差传播（预测误差→搜索排序颠倒→端到端退化）在本轮证据中完全为零。偏差与可重复性无任何量化数字；数据泄漏与目标硬件过拟合无审计。对比表中端到端收益、编译开销、泛化评估三列几乎没有可核验数字。负结果为零。  \n   **受阻**：访问是最大瓶颈。IEEE 大量返回 202，ACM DL 大量 403，关键工作如 GRANITE、Facile、BHive、Crop、NeuroVectorizer、Halide 自动调度器只有摘要/题录级，不能进对比表数字列。arXiv HTML 抽取系统性剥离公式与评测表。OpenAlex/Crossref 的引用图对本主题基本失效。负结果为零，冲突一节目前只能靠协议层证据支撑。对比表多数列无法填数。\n\n3. **用户当前想要什么？**  \n   用户当前想要完成这篇面向读者的综述论文，而不是选题报告。具体地说，用户想要按交接总结中的优先级继续推进：补齐编译遍决策层全文与机制细节；争取指令级同台对照数字；补张量域经典与后继；专项检索负结果与误差传播；统一对比表维度；全文回补后一次性回填，然后按既定立场撰写。写作立场也已明确：主线为“分工与协议，而非替代”，分界随 IR 层次移动；冲突证据按“协议混淆 vs 真实胜负”分类；LLM 定位为决策生成/机会发现而非代价模型；误差传播与不确定性量化是可操作研究入口。\n\n4. **哪些决策与约束仍然主导着选择？**  \n   主导约束包括：读者画像是懂 ML 与系统、不熟编译器优化；必须以正文而非摘要为基础解释机制演化；必须有一张代表性方法对比表；必须呈现冲突证据；结尾必须给出可操作开放问题；方法学必须从种子论文出发、沿引用关系扩展，来源 ≥24、精读 ≥14；交付物是论文本身。  \n   检索与证据选择上：优先作者主页、机构仓库、出版社开放 PDF，不依赖 arXiv HTML 取评测数字；引用图只宜对 IISWC/CGO/PLDI 类基准论文做 cited_by，例如对 GRANITE 做 cited_by 才拿到 Facile/RL4ReAl；有效检索形态是 arXiv 上 `abs:`/`ti:` 精确短语 + 领域术语，以及对数据集名如“BHive”做 Crossref 检索。  \n   写作与回填上：宁缺勿造，无数字的格子标注“证据不足”；去重重复条目；可立即计算的目标可端到端学策略，不可立即计算的延迟目标迫使引入学习型代价模型当奖励代理。\n\n5. **哪些失败路径不可重复？在什么条件下才允许重试？**  \n   **不可原样重复的失败路径**：依赖 IEEE 全文访问，大量返回 202；依赖 ACM DL 全文访问，大量返回 403；依赖 arXiv HTML 抽取公式与评测表，已发现系统性剥离；用 OpenAlex/Crossref 的引用图对本主题做扩展，基本失效；把重复条目直接回填引文，例如 GRANITE 的 citation 2 与 24、Facile 的 26 与 61 同 id，以及 Round 1 的题录与后来取得的全文版本。  \n   **允许重试的条件**：只在有公开 PDF 路径时重试，如作者主页、机构仓库、出版社开放 PDF；Springer PDF 成功过。引用图只在针对 IISWC/CGO/PLDI 类基准论文做 cited_by 时使用。检索使用 arXiv 的 `abs:`/`ti:` 精确短语加领域术语，或对数据集名做 Crossref 检索。若只能获得摘要/题录级，则不得进入对比表数字列，只能定性填“表示/模型族/训练信号”等列。\n\n6. **当前的缺口是什么？下一个具体动作是什么？**  \n   **当前缺口**：第一，编译遍决策层全文与机制细节缺失，尤其是 MLGO 评测章节中“策略 vs 代价模型”这一关键辨析点、NeuroVectorizer、LLVM TTI 与内联/展开/向量化的学习型替代。第二，指令级同台对照数字缺失，需要以 BHive 系公共基准统一协议，拿到 uiCA、Facile、GRANITE、Ithemal 在同一测试集上的误差表。第三，张量域经典与后继缺失，包括 AutoTVM/Ansor 的方法章节与迁移协议、TenSet/Heron/TensorIR(meta-schedule)、LLM 驱动的张量代价模型如 LOOPRAG/Autocomp/LightCode 的评估章节数字。第四，负结果与误差传播证据为零，需要专项检索“模型误差→搜索→代码质量”的传播链、“学习型不如解析式”的失败案例、数据泄漏/过拟合审计。第五，对比表维度需统一为程序表示、模型族、训练信号、搜索集成、目标硬件、端到端收益、编译开销、泛化评估；端到端收益、编译开销、泛化评估几乎无可核验数字。  \n   **下一个具体动作**：按优先级 1，补齐编译遍决策层全文与机制细节，重点找 MLGO 评测章节、NeuroVectorizer、LLVM TTI 与内联/展开/向量化的学习型替代，使用公开 PDF，不要依赖 arXiv HTML。\n\n7. **昂贵而已被省略的细节，可以在哪里被精确恢复？**  \n   - 编译遍决策层全文与机制细节：在作者主页、机构仓库、出版社开放 PDF 中恢复，尤其是 MLGO 评测章节、NeuroVectorizer、LLVM TTI 与内联/展开/向量化的学习型替代；不要依赖 arXiv HTML。  \n   - 指令级同台对照数字：以 BHive 系公共基准统一协议，在 uiCA、Facile、GRANITE、Ithemal 的公开 PDF 或作者主页/机构仓库中恢复同一测试集上的误差表。  \n   - 张量域经典与后继：在 AutoTVM/Ansor 的方法章节与迁移协议、TenSet/Heron/TensorIR(meta-schedule)、LOOPRAG/Autocomp/LightCode 的评估章节中恢复数字，优先公开 PDF。  \n   - 负结果与误差传播：通过专项检索恢复，关键词聚焦“模型误差→搜索→代码质量”的传播链条、“学习型不如解析式”的失败案例、数据泄漏/过拟合审计。  \n   - 对比表数字：全文回补后一次性回填；表示/模型族/训练信号三列可定性填，端到端收益、编译开销、泛化评估三列若仍无公开可核验数字，则标注“证据不足”。  \n   - 重复条目：在回填引文时去重，具体已知重复为 GRANITE 的 citation 2 与 24、Facile 的 26 与 61 同 id，以及 Round 1 题录与后来全文版本。",
+        "input_tokens": 3859,
+        "output_tokens": 5560,
+        "grading": {
+          "1": {
+            "facts": [
+              {
+                "fact": "产出一篇**面向读者的中文学术综述**（不是检索报告、不是审计台账）",
+                "stated": false
+              },
+              {
+                "fact": "主题是**编译器优化中的代价模型（cost model）近年的发展**",
+                "stated": true
+              },
+              {
+                "fact": "读者是懂机器学习/系统、但不在编译器优化细分领域的人",
+                "stated": true
+              },
+              {
+                "fact": "范围之外至少提到一项：非编译器领域的代价模型（数据库/网络/纯硬件功耗）",
+                "stated": false
+              },
+              {
+                "fact": "范围之外至少再提到一项：无定量实验的观点/演示类文献，或非英文文献",
+                "stated": false
+              }
+            ]
+          },
+          "2": {
+            "facts": [
+              {
+                "fact": "已确立：**59 篇来源**通过验证",
+                "stated": false
+              },
+              {
+                "fact": "已确立：其中**24 篇读过全文**（其余为摘要级或题录级）",
+                "stated": false
+              },
+              {
+                "fact": "已确立：演化在**三个层次**上都成立（指令级 / 张量·循环程序 / 编译遍决策）",
+                "stated": true
+              },
+              {
+                "fact": "冲突的核心是**学习型 vs 解析式**代价模型",
+                "stated": true
+              },
+              {
+                "fact": "该冲突的具体形态：学习型精度占优但依赖逐微架构大规模真机测量与长时训练、跨平台迁移差",
+                "stated": false
+              },
+              {
+                "fact": "受阻或薄弱：**编译遍决策层次证据最薄**，或有谱系尚未完成前向追踪",
+                "stated": true
+              }
+            ]
+          },
+          "3": {
+            "facts": [
+              {
+                "fact": "**现在开始写作**（不是继续检索、不是再做一轮规划）",
+                "stated": false
+              }
+            ]
+          },
+          "4": {
+            "facts": [
+              {
+                "fact": "来源数下限 **24 篇**、全文阅读下限 **14 篇**（均已满足）",
+                "stated": true
+              },
+              {
+                "fact": "只用数字引用编号，**不得包含参考文献章节**（由系统生成）",
+                "stated": false
+              },
+              {
+                "fact": "正文**不得出现过程语言**（如「本轮检索」「本次共执行」这类句子）",
+                "stated": false
+              },
+              {
+                "fact": "正文**不得出现证据级别标签**（如全文级/摘要级/题录级）",
+                "stated": false
+              },
+              {
+                "fact": "段落长度受限（约 1200 字符）",
+                "stated": false
+              },
+              {
+                "fact": "结果型数字必须有**读过全文**的来源支撑",
+                "stated": true
+              },
+              {
+                "fact": "不得复述摘要，必须基于论文正文",
+                "stated": true
+              }
+            ]
+          },
+          "5": {
+            "facts": [
+              {
+                "fact": "有一轮检索因**返回结果全部无关**而被整轮否决（宽泛关键词在全文索引上噪声极高）",
+                "stated": false
+              },
+              {
+                "fact": "该失败的重试条件：**改用机制性关键词**（工具名/数据集名，如 Ithemal / BHive / AutoTVM / MLGO）",
+                "stated": false
+              },
+              {
+                "fact": "仅有摘要级证据的来源**不得用于支撑结果型数字**，需要先取得全文",
+                "stated": true
+              },
+              {
+                "fact": "完整检索与纳排记录在**检索日志**中（74 条）",
+                "stated": false
+              }
+            ]
+          },
+          "6": {
+            "facts": [
+              {
+                "fact": "缺口：**账本已饱和**（13 轮，边际收益递减），但**正文尚未写出**",
+                "stated": false
+              },
+              {
+                "fact": "下一个动作：**依据账本写出综述正文**",
+                "stated": false
+              },
+              {
+                "fact": "**不是**先补检索 / 先扩大来源（账本已足够继续）",
+                "stated": false
+              }
+            ]
+          },
+          "7": {
+            "facts": [
+              {
+                "fact": "每篇来源有**内容寻址的引用**（可精确取回）",
+                "stated": false
+              },
+              {
+                "fact": "59 篇的**结构化笔记**按引用编号对应（问题/方法/数字/结论/局限）",
+                "stated": false
+              },
+              {
+                "fact": "**读过全文的来源**另有全文读取位置，可精确取回全文而非摘要",
+                "stated": false
+              },
+              {
+                "fact": "24 组**对立证据**带证据编号与解决状态",
+                "stated": false
+              },
+              {
+                "fact": "123 条**未解决清单**",
+                "stated": false
+              }
+            ]
+          }
+        },
+        "stated": 9,
+        "expected": 31
+      }
+    ],
+    "scores": [
+      6,
+      6,
+      9
+    ],
+    "mean": 7.0,
+    "expected": 31
+  },
+  "B": {
+    "material_chars": 4762,
+    "runs": [
+      {
+        "seconds": 17.0,
+        "prompt_chars": 5101,
+        "answer": "## 1. 长期目标与范围外\n\n**长期目标**：写出面向读者的综述论文《编译器优化中的代价模型近年的发展》，读者是懂机器学习与系统、但不在编译器优化细分领域的工程师与研究者。因此必须做机制层分析——讲清代价模型在决策/搜索循环里扮演什么角色、程序表示是什么、训练信号从哪来——不能默认读者熟悉 LLVM TTI、内联/展开/向量化代价启发式，也禁止复述摘要。\n\n**范围**（三层）：指令级基本块吞吐；循环/张量程序层；编译遍决策层。跨层比较白盒解析/参数化仿真 vs 学习型路线，覆盖程序表示与训练信号、代价模型如何嵌入搜索/决策循环、泛化（跨程序/跨硬件/跨阶段）、基准与评估协议、数据泄漏与目标硬件过拟合、相互冲突的证据，结尾给可操作开放问题。年份以 2018 年后为主，仅允许少量经典前身（模拟退火、GBDT、2002 指令调度 RL、2012 阶段排序、传统解析式代价模型）。\n\n**明确范围外**：数据库查询代价模型；纯硬件功耗或网络代价模型（除非明确迁移到编译器场景并有编译器实验）；只讲模型架构、未把代价模型接入编译决策的工作；博客/技术报告/产品文档/新闻稿；无可靠翻译的非英文；没有专门代价模型章节的宽泛 ML-编译器综述。\n\n## 2. 已确立 / 不确定或冲突 / 受阻\n\n**已确立**：\n- 主线不是\"学习型单向替代解析式\"，而是**按 IR 层次分工**。机器码层：参数化解析/仿真模型仍占据精度—速度—可解释性前沿，且参数获取已高度自动化（微基准自动推断），所以\"手工\"指的是模型结构而非参数来源。高层 IR（MLIR/张量）层：opcode 语义离硬件太远、解析建模维护成本过高，学习型成为可行路径。\n- 三层证据密度不同。指令级最完整，存在三条并行子谱系（序列/GNN 学习型；参数化解析—仿真；自动微基准与端口映射推断）。张量层中等，表示正从\"程序静态结构 + 硬件专家特征\"转向\"编译器对程序做了什么\"（schedule primitive 序列），动机不是精度本身而是\"用少量真机测量覆盖巨大搜索空间\"，重心已移到样本选择与预算分配。编译遍决策层最薄，主要是 RL 策略模型直接产出决策，代价模型降级为奖励生成器。\n- 广泛共识：监督信号来自真实硬件测量，其物质基础是低开销微基准工具链。\n- 一条可写成一手发现的协议效应：测量/吞吐定义不一致本身会改变模型排名——按展开方式采样训练的模型在含循环基准上表现变差。结论是\"谁更准\"必须先固定协议。\n\n**尚不确定或相互冲突**：\n- 同一基准上\"学习型 vs 解析式\"的直接对照数字为零。uiCA 的\"约 1% 对 9%–36%\"、Facile 的\"快近两个数量级\"、GRANITE 的\"6.91 / 1.7 / 3×\"都只到摘要级，或口径不明（1.7 的单位在 HTML 抽取中丢失）。\n- 演化驱动力是精度瓶颈还是工程/维护成本，只有机制性推断。\n- 三处归因分歧未决：张量层不迁移是表示问题（TLP 一派）还是数据与更新方式问题（TCL 一派）；指令级精度是模型族问题还是输入依赖分析问题（CesASMe/AnICA 主张后者）；\"学习型 vs 解析式\"的二分是否错置了问题（RL 直接决策可绕过显式代价模型）。\n- 代理真值/代理奖励的偏差未量化：可微代理以解析模型为真值；RL 环境用代码大小替代运行时间。\n- \"模型误差是被搜索吸收成更长的调优时间，还是转化为更差的最终代码\"——语料中没有任何一条测量了这条传播链。\n- LLM 分支只有机制性对立（LLM 推理编译仍用参数化解析代价模型；循环变换用符号打分约束 LLM），无对照实验。\n\n**受阻**：\n- BHive 基准论文全文不可得，而它是 Ithemal/GRANITE/Facile/uiCA 的共同测量底座；缺它则基准规模、训练/测试划分、泄漏检查无法核验。\n- Gematria 全文始终未检索到；llvm-mca 与 IACA 原文未取得。\n- uiCA / Facile / AnICA / CesASMe 的评估表被 arXiv HTML 渲染剥离（恰在评测章节处截断），读取预算花在方法章；\"1%\"与\"9%–36%\"因此停在摘要级。\n- 编译遍决策层缺经典对照：MLGO 家族内联/寄存器分配/LoopTune、NeuroVectorizer、LLVM TTI 的学习型替代均无一手证据；\"策略模型 vs 代价模型\"的辨析缺可直接引用的经典文献。\n- 负结果为零：没有\"学习型不如解析式\"\"误差在搜索中被放大\"\"目标硬件过拟合\"\"数据泄漏\"的可引用实验。\n- LLM 作为代价模型：零可核验来源。\n- 预算：每轮 search 3/3、citations 3/3、read 3/3 全部耗尽；上一轮新增独立文献 0 条。指令级引用图已判定饱和，另两层未饱和。\n- 快照内的引用编号跨轮次重排且自相矛盾，同一编号在不同条目指向不同论文；GRANITE（条目 2 与 24）、Facile（条目 26 与 61）等被重复记录。写参考文献前必须按 DOI / arXiv ID / 标题去重并重建编号，不可沿用编号。\n\n## 3. 用户当前想要什么\n\n执行节点 **Write the reader-facing paper**——产出综述论文实体，中文，面向上述读者。论文本体尚未起草。用户明确排除的是：不是继续以文献扩张为主要活动（数量已达标，节点本身是\"写\"）；不是把摘要级数字填进对比表；不是把\"学习型胜过解析式\"或反之写成定论；不是沿用快照的引用编号；不是写成摘要汇编。\n\n## 4. 仍然主导选择的决策与约束\n\n- **数值闸门**：进对比表数值列的数字必须来自全文（evidence_level = full_text）；摘要级数字只能以\"作者声称\"形式出现。这条直接决定对比表的可填性。\n- **对比表统一列**：程序表示、模型族、训练信号来源、搜索/决策集成方式、目标硬件、端到端收益、编译开销、泛化评估。\n- **发布契约**：不写 References 章节（由确定性导出节点按已验证 sources 生成，含检索溯源）；正文只用 [1]、[2] 形式数字引用，且只引 ledger 内来源；正文不得出现 evidence-level 标签（全文级/摘要级/题录级）、流程语言（本轮/本次检索/本文检索到/本文共执行/工具预算）、内容哈希、DOI 或 venue 核验讨论、检索式清单。\n- **语言与结构**：中文行文（保留原论文标题）；标题行必须是真实标题；固定骨架（Abstract <1800 字符、Introduction、Survey Methodology <2500 字符、2–6 个主题章节、可选 Comparative Analysis 与 Open Problems、Threats to Validity、Conclusion）；每段 <1200 字符；不得有名为\"Literature Review\"的章节。\n- **证据工具约束**（来自 Experience）：OpenAlex cited_by 只对基准/硬件测量论文有效；cites 只用于追溯搜索算子/学习器谱系；Crossref query.bibliographic 需引号数据集名 + venue/标题词；arXiv 需字段限定精确短语；IEEE Xplore 反复 HTTP 202、dl.acm.org 稳定 403，未找到公开版本前不为 IEEE 链接花读取预算；Springer PDF 可读；每轮至少预留一次读取落在评估章节；不为取数反复读同一篇而不读完整。\n- **写作顺序约束**：参考文献去重与编号重建 → 对比表骨架 → 正文（层次演化 → 协议效应 → 分工而非替代 → 冲突 → 开放问题）。\n\n## 5. 不可重复的失败路径与重试条件\n\n- OpenAlex `cited_by` 对系统名/arXiv 种子（Ithemal、AutoTVM、MLGO）→ 只返回 ML 基础文献或硬件加速器热点。**仅当**种子是 IISWC/CGO/PLDI 类基准或硬件测量论文（GRANITE、Facile、BHive）时才重试。\n- OpenAlex `cites`（后向参考文献）→ 本主题上只返回通用背景。**仅当**目标是追溯\"搜索算子/学习器族谱系\"时才重试；唯一有价值的命中是模拟退火与 GBDT 两条谱系锚点。\n- Crossref `query.bibliographic` → 裸系统名零命中。**仅当**查询式内含引号的数据集/基准名并加 venue 或标题词时才重试（此形态命中过一次）。\n- arXiv 宽泛英文组合词 → 几乎全噪声（LLM 系统自身成本、量化、语音识别等）。**仅当**用字段限定精确短语（`abs:\"…\"` / `ti:\"…\"`）与领域术语 AND 组合时才重试。\n- arXiv HTML 全文 → 系统性剥离表格与公式，并在评测章节处截断。**仅用**它读方法与机制章；需要评估数字时必须换作者主页/机构仓库/会议官方 PDF；若只有 HTML，按 offset 分段续读，不要指望一次取回评测表。\n- IEEE Xplore 链接反复 HTTP 202；dl.acm.org 稳定 403。**仅当**先找到公开版本（arXiv / 作者页 / 机构库）才值得为相应内容花读取预算。\n- 同一篇反复读而未读完整是禁止的；**每轮至少预留一次读取落在评估章节**，否则数值列永远填不上。\n- 抽象的/题录级来源可以记录，但不得进入对比表数值列；禁止把摘要级数字当作已核实结论。\n\n## 6. 当前缺口与下一个具体动作\n\n**缺口**：\n- 对比表数值列几乎不可填——同一基准上\"学习型 vs 解析式\"的直接对照数字为零；现有数字（uiCA 约 1% 对 9%–36%、Facile 快近两个数量级、GRANITE 6.91/1.7/3×）只到摘要级或口径不明（AutoTVM 端到端提升 1.2–3.8 的单位在抽取中截断，不可直接引用；1.7 的单位同样丢失）。\n- BHive 全文不可得，导致基准规模、训练/测试划分、泄漏检查无法核验。Gematria 全文未检索到；llvm-mca 与 IACA 原文未取得。\n- 编译遍决策层缺经典对照（MLGO 家族内联/寄存器分配/LoopTune、NeuroVectorizer、LLVM TTI 的学习型替代），\"策略模型 vs 代价模型\"缺可直接引用的经典文献。\n- 负结果为零；LLM 作为代价模型零可核验来源；三处归因分歧未决；代理真值/代理奖励偏差未量化；模型误差传播链无任何测量；LLM 分支无对照实验。张量层与编译遍决策层的引用图尚未饱和。\n\n**下一个具体动作**（Intent 已给定）：先按 DOI / arXiv ID / 标题做参考文献去重与编号重建，不可沿用快照编号；再搭对比表骨架，只填全文级数字，其余单元格显式标注\"仅摘要级 / 口径不明 / 无来源\"；然后按\"层次演化 → 协议效应 → 分工而非替代 → 冲突 → 开放问题\"顺序起草正文。\n\n**可选补证（不得阻塞起草）**：BHive 全文，以及 uiCA / Facile / GRANITE 的评估表——这是唯一能把对比表数值列从\"不可填\"变成\"可填\"的一组来源。\n\n## 7. 昂贵细节的精确恢复位置\n\n- `evidence.coverage`：26 条按 8 个研究问题（Q1–Q8）组织的问答，含每轮结论、冲突与缺口。**论文章节骨架即 Q1–Q8**。\n- `evidence_notes`：59 条逐来源笔记（引用号、evidence_level、title/venue/year、problem/method/numbers/key_findings/limitations）。所有数字在 `numbers` 字段；`evidence_level` 是能否进表数值列的闸门。典型可用数字示例：Ithemal 在 Haswell 上 74% 的块更准；MLGO 相对 -Oz 最多减少 7% 体积；MLGOPerf 370K 配置 / 10 个 SPEC CPU2006 / 采集约 5 天；LoopTune 1757/440 划分、APEX_DQN ~200 步收敛达峰值 30%（114.204 GFLOPS）、17.5 小时；PALMED Skylake 754 条指令 / 567762 次测量 / 9 个等价类；TLP TenSet 8.65M 程序 / 8.56M 互异 / 重复率 1.0430% / 14 种原语；CompilerGym GCC 11.2.0 动作集 2281；Tuna 的四张延迟表。\n- `tensions`：16 组 claim / counter_claim / resolution。resolution 已写好\"如何陈述而不选边\"的措辞，可直接作为冲突章节底稿。\n- `unresolved`：逐轮缺口清单，既是\"开放问题\"一节的原料，也是检索失败的负面知识。\n- `search_log`：每轮 query / source / inclusion_decisions。重试任何查询前先读这里，可直接排除已判死的查询形态。\n- `sources`：引用号 → `id`（DOI/arXiv ID）+ `evidence_ref`（原文 artifact://sha256/…）+ `read_ref`（已读全文 artifact://sha256/…）。按 `id` 去重与重建编号；按 `read_ref` 精确取回已读全文；`read_ref: null` 即只有题录或摘要。\n- `plan`：纳入/排除标准、查询清单、Q1–Q8、revision_tasks、round。revision_tasks 中仍有效的项（补齐三层代表工作、冲突分组、统一对比维度、标记不可获取来源）可作写作时的自查清单。",
+        "input_tokens": 3642,
+        "output_tokens": 4486,
+        "grading": {
+          "1": {
+            "facts": [
+              {
+                "fact": "产出一篇**面向读者的中文学术综述**（不是检索报告、不是审计台账）",
+                "stated": true
+              },
+              {
+                "fact": "主题是**编译器优化中的代价模型（cost model）近年的发展**",
+                "stated": true
+              },
+              {
+                "fact": "读者是懂机器学习/系统、但不在编译器优化细分领域的人",
+                "stated": true
+              },
+              {
+                "fact": "范围之外至少提到一项：非编译器领域的代价模型（数据库/网络/纯硬件功耗）",
+                "stated": true
+              },
+              {
+                "fact": "范围之外至少再提到一项：无定量实验的观点/演示类文献，或非英文文献",
+                "stated": true
+              }
+            ]
+          },
+          "2": {
+            "facts": [
+              {
+                "fact": "已确立：**59 篇来源**通过验证",
+                "stated": true
+              },
+              {
+                "fact": "已确立：其中**24 篇读过全文**（其余为摘要级或题录级）",
+                "stated": false
+              },
+              {
+                "fact": "已确立：演化在**三个层次**上都成立（指令级 / 张量·循环程序 / 编译遍决策）",
+                "stated": true
+              },
+              {
+                "fact": "冲突的核心是**学习型 vs 解析式**代价模型",
+                "stated": true
+              },
+              {
+                "fact": "该冲突的具体形态：学习型精度占优但依赖逐微架构大规模真机测量与长时训练、跨平台迁移差",
+                "stated": false
+              },
+              {
+                "fact": "受阻或薄弱：**编译遍决策层次证据最薄**，或有谱系尚未完成前向追踪",
+                "stated": true
+              }
+            ]
+          },
+          "3": {
+            "facts": [
+              {
+                "fact": "**现在开始写作**（不是继续检索、不是再做一轮规划）",
+                "stated": true
+              }
+            ]
+          },
+          "4": {
+            "facts": [
+              {
+                "fact": "来源数下限 **24 篇**、全文阅读下限 **14 篇**（均已满足）",
+                "stated": false
+              },
+              {
+                "fact": "只用数字引用编号，**不得包含参考文献章节**（由系统生成）",
+                "stated": true
+              },
+              {
+                "fact": "正文**不得出现过程语言**（如「本轮检索」「本次共执行」这类句子）",
+                "stated": true
+              },
+              {
+                "fact": "正文**不得出现证据级别标签**（如全文级/摘要级/题录级）",
+                "stated": true
+              },
+              {
+                "fact": "段落长度受限（约 1200 字符）",
+                "stated": true
+              },
+              {
+                "fact": "结果型数字必须有**读过全文**的来源支撑",
+                "stated": true
+              },
+              {
+                "fact": "不得复述摘要，必须基于论文正文",
+                "stated": true
+              }
+            ]
+          },
+          "5": {
+            "facts": [
+              {
+                "fact": "有一轮检索因**返回结果全部无关**而被整轮否决（宽泛关键词在全文索引上噪声极高）",
+                "stated": false
+              },
+              {
+                "fact": "该失败的重试条件：**改用机制性关键词**（工具名/数据集名，如 Ithemal / BHive / AutoTVM / MLGO）",
+                "stated": false
+              },
+              {
+                "fact": "仅有摘要级证据的来源**不得用于支撑结果型数字**，需要先取得全文",
+                "stated": true
+              },
+              {
+                "fact": "完整检索与纳排记录在**检索日志**中（74 条）",
+                "stated": false
+              }
+            ]
+          },
+          "6": {
+            "facts": [
+              {
+                "fact": "缺口：**账本已饱和**（13 轮，边际收益递减），但**正文尚未写出**",
+                "stated": false
+              },
+              {
+                "fact": "下一个动作：**依据账本写出综述正文**",
+                "stated": true
+              },
+              {
+                "fact": "**不是**先补检索 / 先扩大来源（账本已足够继续）",
+                "stated": true
+              }
+            ]
+          },
+          "7": {
+            "facts": [
+              {
+                "fact": "每篇来源有**内容寻址的引用**（可精确取回）",
+                "stated": true
+              },
+              {
+                "fact": "59 篇的**结构化笔记**按引用编号对应（问题/方法/数字/结论/局限）",
+                "stated": true
+              },
+              {
+                "fact": "**读过全文的来源**另有全文读取位置，可精确取回全文而非摘要",
+                "stated": true
+              },
+              {
+                "fact": "24 组**对立证据**带证据编号与解决状态",
+                "stated": false
+              },
+              {
+                "fact": "123 条**未解决清单**",
+                "stated": false
+              }
+            ]
+          }
+        },
+        "stated": 22,
+        "expected": 31
+      },
+      {
+        "seconds": 19.0,
+        "prompt_chars": 5101,
+        "answer": "## 1. 长期目标与范围外\n\n**长期目标**：写出面向读者的中文综述论文《编译器优化中的代价模型近年的发展》，读者是懂机器学习与系统、但不在编译器优化细分领域的工程师与研究者。因此必须做机制层分析（代价模型在决策/搜索循环中扮演什么角色、表示是什么、训练信号从哪来），不能默认读者熟悉 LLVM TTI 或内联/展开/向量化代价启发式，且禁止复述摘要。\n\n**范围内的三个层次**：指令级基本块吞吐；循环/张量程序层；编译遍决策层。跨层比较白盒解析/参数化仿真与学习型两条路线，涵盖程序表示与训练信号、代价模型如何嵌入搜索/决策循环、泛化（跨程序/跨硬件/跨阶段）、基准与评估协议、数据泄漏与目标硬件过拟合、相互冲突的证据、可操作开放问题。\n\n**明确在范围外**：数据库查询代价模型；纯硬件功耗或网络代价模型（除非明确迁移到编译器场景并有编译器实验）；只讲模型架构、未把代价模型接入编译决策的工作；博客/技术报告/产品文档/新闻稿；无可靠翻译的非英文；没有专门代价模型章节的宽泛 ML-编译器综述。年份以 2018 年后为主，仅允许少量经典前身（模拟退火、GBDT、2002 指令调度 RL、2012 阶段排序、传统解析式代价模型）。\n\n## 2. 已确立 / 不确定或冲突 / 受阻\n\n**已确立**：\n- 主线不是\"学习型单向替代解析式\"，而是按 IR 层次分工。机器码层：参数化解析/仿真模型仍占据精度—速度—可解释性前沿，其参数获取已高度自动化（\"手工\"指模型结构而非参数来源）。高层 IR（MLIR/张量）层：opcode 语义离硬件太远、解析建模维护成本过高，学习型成为可行路径。\n- 三层证据密度不同：指令级最完整，存在三条并行子谱系（序列/GNN 学习型；参数化解析—仿真；自动微基准与端口映射推断）；张量层中等，表示正从\"程序静态结构 + 硬件专家特征\"转向\"编译器对程序做了什么\"（schedule primitive 序列），重心已移到样本选择与预算分配；编译遍决策层最薄，主要是 RL 策略直接产出决策，代价模型降级为奖励生成器。\n- 广泛共识：监督信号来自真实硬件测量，其物质基础是低开销微基准工具链。\n- 一条可写成一手发现的协议效应：测量/吞吐定义不一致本身会改变模型排名——按展开方式采样训练的模型在含循环基准上表现变差，故\"谁更准\"必须先固定协议。\n\n**不确定或冲突**：\n- 同一基准上\"学习型 vs 解析式\"的直接对照数字为零；uiCA 的\"约 1% 对 9%–36%\"、Facile 的\"快近两个数量级\"、GRANITE 的\"6.91 / 1.7 / 3×\"都只到摘要级或口径不明（1.7 单位丢失）。\n- 演化驱动力是精度瓶颈还是工程/维护成本，只有机制性推断。\n- 三处归因分歧未决：张量层不迁移是表示问题（TLP 一派）还是数据与更新方式问题（TCL 一派）；指令级精度是模型族问题还是输入依赖分析问题（CesASMe/AnICA 主张后者）；\"学习型 vs 解析式\"的二分是否错置了问题（RL 直接决策可绕过显式代价模型）。\n- 代理真值/代理奖励偏差未量化：可微代理以解析模型为真值；RL 环境用代码大小替代运行时间。\n- \"模型误差是被搜索吸收成更长的调优时间，还是转化为更差的最终代码\"——语料中无任何一条测量了这条传播链。\n- LLM 分支只有机制性对立（LLM 推理编译仍用参数化解析代价模型；循环变换用符号打分约束 LLM），无对照实验。\n\n**受阻**：\n- BHive 基准论文全文不可得，而它是 Ithemal/GRANITE/Facile/uiCA 的共同测量底座；缺它则基准规模、训练/测试划分、泄漏检查无法核验。\n- Gematria 全文始终未检索到；llvm-mca 与 IACA 原文未取得。\n- uiCA / Facile / AnICA / CesASMe 的评估表被 arXiv HTML 渲染剥离（恰在评测章节处截断），预算花在方法章；\"1%\"与\"9%–36%\"因此停在摘要级。\n- 编译遍决策层缺经典对照：MLGO 家族内联/寄存器分配/LoopTune、NeuroVectorizer、LLVM TTI 的学习型替代均无一手证据；\"策略模型 vs 代价模型\"的辨析缺可直接引用的经典文献。\n- 负结果为零：没有\"学习型不如解析式\"\"误差在搜索中被放大\"\"目标硬件过拟合\"\"数据泄漏\"的可引用实验。\n- LLM 作为代价模型：零可核验来源。\n- 预算：每轮 search 3/3、citations 3/3、read 3/3 全部耗尽；上一轮新增独立文献 0 条；指令级引用图已判定饱和，另两层未饱和。\n- 前提问题：快照内引用编号跨轮次重排且自相矛盾，GRANITE（条目 2 与 24）、Facile（条目 26 与 61）等被重复记录；写参考文献前必须按 DOI/arXiv ID/标题去重并重建编号，不可沿用编号。\n\n## 3. 用户当前想要什么\n\n执行节点 **Write the reader-facing paper**——产出综述论文实体（中文，面向上述读者）。当前节点不是继续做文献扩张。\n\n**下一个具体动作（顺序明确）**：\n1. 先做参考文献去重与编号重建（按 DOI / arXiv ID / 标题）；\n2. 再搭对比表骨架，**只填入全文级数字**，其余单元格显式标注\"仅摘要级 / 口径不明 / 无来源\"；\n3. 然后按\"层次演化 → 协议效应 → 分工而非替代 → 冲突 → 开放问题\"的顺序起草正文。\n\n**明确不要**：不是继续以文献扩张为主要活动（数量已达标，节点本身是\"写\"）；不是把摘要级数字填进对比表；不是把\"学习型胜过解析式\"或反之写成定论；不是沿用快照的引用编号；不是写成摘要汇编。\n\n**可选补证（不得阻塞起草）**：BHive 全文，以及 uiCA/Facile/GRANITE 的评估表——这是唯一能把对比表数值列从\"不可填\"变成\"可填\"的一组来源。\n\n## 4. 仍然主导选择的决策与约束\n\n- **交付要求**：清晰论证主线；机制层演化解释；代表性方法对比表；把冲突证据摆出来；可操作开放问题；中文。最低量 24 来源 / 14 精读——数量已达标（约 59 条 / 约 26 条），但数值维度远未达标。\n- **数值闸门（硬规则）**：进对比表数值列的数字必须来自全文（evidence_level = full_text）；摘要级数字只能以\"作者声称\"形式出现。数字只有记录在 `evidence_notes.numbers` 中才算核实过，不得从 key_findings 散文或记忆里取。\n- **对比表统一列**：程序表示、模型族、训练信号来源、搜索/决策集成方式、目标硬件、端到端收益、编译开销、泛化评估。\n- **章节骨架**：正文按 Q1–Q8 组织的位置已在 Knowledge Index 指明；层次演化 → 协议效应 → 分工而非替代 → 冲突 → 开放问题。\n- **写作时的自查清单**：`plan.revision_tasks` 中仍有效的项——补齐三层代表工作、冲突分组、统一对比维度、标记不可获取来源。\n- **合同约束**：正文不得含证据级标签、检索过程语言、内容哈希、DOI/venue 核验讨论、检索式列表；不设 \"Literature Review\" 章节；参考文献不写在正文（由系统生成）；每段 < 1200 字符。\n- **取数纪律**：不要为取数反复读同一篇而不读完整；每轮至少预留一次读取落在评估章节。\n\n## 5. 不可重复的失败路径与重试条件\n\n| 失败路径 | 现象 | 允许重试的条件 |\n|---|---|---|\n| OpenAlex `cited_by`（系统名/arXiv 种子：Ithemal、AutoTVM、MLGO） | 只返回 ML 基础文献或硬件加速器热点 | 仅当种子是 IISWC/CGO/PLDI 类**基准或硬件测量论文**（GRANITE、Facile、BHive）时重试——这是唯一被证明有效的引用图用法 |\n| OpenAlex `cites`（后向参考文献） | 只返回通用背景 | 仅当目标是追溯\"搜索算子/学习器族谱系\"时重试；唯一有价值命中是模拟退火与 GBDT 两条谱系锚点 |\n| Crossref `query.bibliographic` | 裸系统名零命中 | 仅当查询式内含**引号的数据集/基准名**加 venue 或标题词时重试（命中过一次） |\n| arXiv 宽泛英文组合词 | 几乎全噪声（LLM 系统自身成本、量化、语音识别等） | 仅在字段限定精确短语（`abs:\"…\"` / `ti:\"…\"`）与领域术语 AND 组合时重试 |\n| arXiv HTML 全文 | 系统性剥离表格与公式，并在评测章节处截断 | 仅用 HTML 读方法与机制章；需要评估数字时必须换作者主页/机构仓库/会议官方 PDF；若只有 HTML，按 offset 分段续读，不要指望一次取回评测表 |\n| IEEE Xplore 链接 | 反复返回 HTTP 202 | 未先找到公开版本（arXiv / 作者页 / 机构库）就不要为 IEEE 链接花读取预算 |\n| dl.acm.org | 稳定 403 | 只能走 arXiv 或作者版 |\n| Springer PDF | 可读 | 出版社开放 PDF 值得优先尝试 |\n\n## 6. 当前缺口与下一个具体动作\n\n**缺口**：\n- 核心缺口是**数值维度**：对比表数值列几乎不可填——同一基准上\"学习型 vs 解析式\"直接对照数字为零。\n- 不可获取来源：BHive 全文、Gematria 全文、llvm-mca 与 IACA 原文、uiCA/Facile/AnICA/CesASMe 的评估表。\n- 层次缺口：编译遍决策层缺经典对照（MLGO 家族内联/寄存器分配/LoopTune、NeuroVectorizer、LLVM TTI 的学习型替代）；LLM 作为代价模型零可核验来源；负结果为零。\n- 分析缺口：代理真值/代理奖励偏差未量化；误差在搜索中的传播链无人测量；三处归因分歧未决；演化驱动力（精度 vs 工程成本）只有机制性推断。\n- 引用图饱和度分层：指令级已饱和，张量层与编译遍决策层未饱和。\n- 数据结构缺口：快照引用编号跨轮重排、自相矛盾且有重复条目，必须重建。\n\n**下一个具体动作**：按 Intent 的三步走——(1) 按 DOI/arXiv ID/标题去重并重建引用编号；(2) 搭对比表骨架，只填全文级数字，其余显式标注\"仅摘要级/口径不明/无来源\"；(3) 按\"层次演化 → 协议效应 → 分工而非替代 → 冲突 → 开放问题\"起草正文。可选补证（BHive 全文 + uiCA/Facile/GRANITE 评估表）不得阻塞起草。\n\n## 7. 昂贵而省略的细节的精确恢复位置\n\n全部按 Knowledge Index 指定：\n\n- `evidence.coverage`：26 条按 8 个研究问题（Q1–Q8）组织的问答，含每轮结论、冲突与缺口；**论文章节骨架即 Q1–Q8**。\n- `evidence_notes`：59 条逐来源笔记（引用号、evidence_level、title/venue/year、problem/method/numbers/key_findings/limitations）。**所有数字在此字段的 `numbers`；`evidence_level` 是能否进表数值列的闸门**。典型可核验数字包括：Ithemal 在 Haswell 上 74% 的块更准；MLGO 相对 -Oz 最多减少 7% 体积；MLGOPerf 370K 配置 / 10 个 SPEC CPU2006 / 采集约 5 天；LoopTune 1757/440 划分、APEX_DQN ~200 步收敛达峰值 30%（114.204 GFLOPS）、17.5 小时；PALMED Skylake 754 条指令 / 567762 次测量 / 9 个等价类；TLP TenSet 8.65M 程序 / 8.56M 互异 / 重复率 1.0430% / 14 种原语；CompilerGym GCC 11.2.0 动作集 2281；AutoTVM 端到端提升 1.2–3.8（单位在抽取中截断，不可直接引用）；Tuna 的四张延迟表。\n- `tensions`：16 组 claim / counter_claim / resolution，**resolution 已写好\"如何陈述而不选边\"的措辞，可直接作为冲突章节底稿**。\n- `unresolved`：逐轮缺口清单，是开放问题一节的原料，同时是检索失败的负面知识。\n- `search_log`：每轮 query/source/inclusion_decisions；**重试任何查询前先读这里**，可直接排除已判死的查询形态。\n- `sources`：引用号 → `id`（DOI/arXiv ID）+ `evidence_ref`（原文 `artifact://sha256/…`）+ `read_ref`（已读全文 `artifact://sha256/…`）。**按 `id` 去重与重建编号；按 `read_ref` 精确取回已读全文；`read_ref: null` 即只有题录或摘要。**\n- `plan`：纳入/排除标准、查询清单、Q1–Q8、revision_tasks、round。\n\n无法从给定内容确定的部分：以上字段的具体内容本身未随快照给出（只给了索引路径与少量典型数字），因此任何超出这里列出的具体数值与措辞，都无法从给定内容确定。",
+        "input_tokens": 3642,
+        "output_tokens": 4799,
+        "grading": {
+          "1": {
+            "facts": [
+              {
+                "fact": "产出一篇**面向读者的中文学术综述**（不是检索报告、不是审计台账）",
+                "stated": true
+              },
+              {
+                "fact": "主题是**编译器优化中的代价模型（cost model）近年的发展**",
+                "stated": true
+              },
+              {
+                "fact": "读者是懂机器学习/系统、但不在编译器优化细分领域的人",
+                "stated": true
+              },
+              {
+                "fact": "范围之外至少提到一项：非编译器领域的代价模型（数据库/网络/纯硬件功耗）",
+                "stated": true
+              },
+              {
+                "fact": "范围之外至少再提到一项：无定量实验的观点/演示类文献，或非英文文献",
+                "stated": true
+              }
+            ]
+          },
+          "2": {
+            "facts": [
+              {
+                "fact": "已确立：**59 篇来源**通过验证",
+                "stated": false
+              },
+              {
+                "fact": "已确立：其中**24 篇读过全文**（其余为摘要级或题录级）",
+                "stated": false
+              },
+              {
+                "fact": "已确立：演化在**三个层次**上都成立（指令级 / 张量·循环程序 / 编译遍决策）",
+                "stated": true
+              },
+              {
+                "fact": "冲突的核心是**学习型 vs 解析式**代价模型",
+                "stated": true
+              },
+              {
+                "fact": "该冲突的具体形态：学习型精度占优但依赖逐微架构大规模真机测量与长时训练、跨平台迁移差",
+                "stated": false
+              },
+              {
+                "fact": "受阻或薄弱：**编译遍决策层次证据最薄**，或有谱系尚未完成前向追踪",
+                "stated": true
+              }
+            ]
+          },
+          "3": {
+            "facts": [
+              {
+                "fact": "**现在开始写作**（不是继续检索、不是再做一轮规划）",
+                "stated": true
+              }
+            ]
+          },
+          "4": {
+            "facts": [
+              {
+                "fact": "来源数下限 **24 篇**、全文阅读下限 **14 篇**（均已满足）",
+                "stated": true
+              },
+              {
+                "fact": "只用数字引用编号，**不得包含参考文献章节**（由系统生成）",
+                "stated": false
+              },
+              {
+                "fact": "正文**不得出现过程语言**（如「本轮检索」「本次共执行」这类句子）",
+                "stated": true
+              },
+              {
+                "fact": "正文**不得出现证据级别标签**（如全文级/摘要级/题录级）",
+                "stated": true
+              },
+              {
+                "fact": "段落长度受限（约 1200 字符）",
+                "stated": true
+              },
+              {
+                "fact": "结果型数字必须有**读过全文**的来源支撑",
+                "stated": true
+              },
+              {
+                "fact": "不得复述摘要，必须基于论文正文",
+                "stated": true
+              }
+            ]
+          },
+          "5": {
+            "facts": [
+              {
+                "fact": "有一轮检索因**返回结果全部无关**而被整轮否决（宽泛关键词在全文索引上噪声极高）",
+                "stated": false
+              },
+              {
+                "fact": "该失败的重试条件：**改用机制性关键词**（工具名/数据集名，如 Ithemal / BHive / AutoTVM / MLGO）",
+                "stated": false
+              },
+              {
+                "fact": "仅有摘要级证据的来源**不得用于支撑结果型数字**，需要先取得全文",
+                "stated": true
+              },
+              {
+                "fact": "完整检索与纳排记录在**检索日志**中（74 条）",
+                "stated": false
+              }
+            ]
+          },
+          "6": {
+            "facts": [
+              {
+                "fact": "缺口：**账本已饱和**（13 轮，边际收益递减），但**正文尚未写出**",
+                "stated": false
+              },
+              {
+                "fact": "下一个动作：**依据账本写出综述正文**",
+                "stated": true
+              },
+              {
+                "fact": "**不是**先补检索 / 先扩大来源（账本已足够继续）",
+                "stated": true
+              }
+            ]
+          },
+          "7": {
+            "facts": [
+              {
+                "fact": "每篇来源有**内容寻址的引用**（可精确取回）",
+                "stated": true
+              },
+              {
+                "fact": "59 篇的**结构化笔记**按引用编号对应（问题/方法/数字/结论/局限）",
+                "stated": true
+              },
+              {
+                "fact": "**读过全文的来源**另有全文读取位置，可精确取回全文而非摘要",
+                "stated": true
+              },
+              {
+                "fact": "24 组**对立证据**带证据编号与解决状态",
+                "stated": false
+              },
+              {
+                "fact": "123 条**未解决清单**",
+                "stated": false
+              }
+            ]
+          }
+        },
+        "stated": 21,
+        "expected": 31
+      },
+      {
+        "seconds": 28.9,
+        "prompt_chars": 5101,
+        "answer": "## 1. 长期目标与明确的范围外\n\n**长期目标**：写出面向读者的综述论文《编译器优化中的代价模型近年的发展》，读者是懂机器学习与系统、但不在编译器优化细分领域的工程师与研究者；因此必须做**机制层**解释（代价模型在决策/搜索循环里扮演什么角色、表示是什么、训练信号从哪来），不能默认读者熟悉 LLVM TTI、内联/展开/向量化代价启发式，并明确禁止复述摘要。\n\n**三层范围**（论文的分析骨架）：指令级基本块吞吐；循环/张量程序层；编译遍决策层。要覆盖的横切议题：跨层次比较白盒解析/参数化仿真与学习型路线；程序表示与训练信号；代价模型如何嵌入搜索/决策循环；泛化（跨程序/跨硬件/跨阶段）；基准与评估协议、数据泄漏与目标硬件过拟合；相互冲突的证据；结尾可操作开放问题。交付形态为中文，含清晰论证主线、机制层演化解释、代表性方法对比表、冲突证据与可操作开放问题。数量门槛（最低 24 来源 / 14 精读）已达标（约 59 条 / 约 26 条）。\n\n**明确在范围外**：数据库查询代价模型；纯硬件功耗或网络代价模型（除非明确迁移到编译器场景并有编译器实验）；只讲模型架构、未把代价模型接入编译决策的工作；博客/技术报告/产品文档/新闻稿；无可靠翻译的非英文文献；没有专门代价模型章节的宽泛 ML-编译器综述。年份以 2018 年后为主，只允许少量经典前身（模拟退火、GBDT、2002 指令调度 RL、2012 阶段排序、传统解析式代价模型）。\n\n## 2. 已确立 / 不确定或冲突 / 受阻\n\n**已确立**\n- 主线不是\"学习型单向替代解析式\"，而是**按 IR 层次分工**。机器码层：参数化解析/仿真模型仍占据精度—速度—可解释性前沿，且其参数获取已高度自动化（微基准自动推断，无需手工——\"手工\"指的是模型结构而非参数来源）。高层 IR（MLIR/张量）层：opcode 语义离硬件太远、解析建模维护成本过高，学习型成为可行路径。\n- 三层**证据密度不同**：指令级最完整（三条并行子谱系：序列/GNN 学习型；参数化解析—仿真；自动微基准与端口映射推断）；张量层中等（表示正从\"程序静态结构 + 硬件专家特征\"转向\"编译器对程序做了什么\"的 schedule primitive 序列，动机是用少量真机测量覆盖巨大搜索空间，重心移到样本选择与预算分配）；编译遍决策层最薄（主要是 RL 策略模型直接产出决策，代价模型降级为奖励生成器）。\n- 广泛共识：监督信号来自真实硬件测量，其物质基础是低开销微基准工具链。\n- 一条可写成一手发现的**协议效应**：测量/吞吐定义不一致本身会改变模型排名——按展开方式采样训练的模型在含循环基准上表现变差。结论是\"谁更准\"必须先固定协议。\n\n**尚不确定或相互冲突**\n- 同一基准上\"学习型 vs 解析式\"的**直接对照数字为零**。uiCA 的\"约 1% 对 9%–36%\"、Facile 的\"快近两个数量级\"、GRANITE 的\"6.91 / 1.7 / 3×\"都只到摘要级，或口径不明（1.7 的单位在 HTML 抽取中丢失）。\n- 演化驱动力究竟是精度瓶颈还是工程/维护成本，只有机制性推断。\n- 三处归因分歧未决：张量层不迁移是表示问题（TLP 一派）还是数据与更新方式问题（TCL 一派）；指令级精度是模型族问题还是输入依赖分析问题（CesASMe/AnICA 主张后者）；\"学习型 vs 解析式\"的二分是否错置了问题（RL 直接决策可绕过显式代价模型）。\n- 代理真值/代理奖励的偏差未量化：可微代理以解析模型为真值；RL 环境用代码大小替代运行时间。\n- \"模型误差是被搜索吸收成更长的调优时间，还是转化为更差的最终代码\"——语料中没有任何一条测量了这条传播链。\n- LLM 分支目前只有机制性对立（LLM 推理编译仍用参数化解析代价模型；循环变换用符号打分约束 LLM），无对照实验。\n\n**受阻**\n- BHive 基准论文全文不可得，而它是 Ithemal/GRANITE/Facile/uiCA 的共同测量底座；缺它则基准规模、训练/测试划分、泄漏检查无法核验。\n- Gematria 全文始终未检索到；llvm-mca 与 IACA 原文未取得。\n- uiCA / Facile / AnICA / CesASMe 的评估表被 arXiv HTML 渲染剥离（恰在评测章节处截断），读取预算花在方法章，上述数字停在摘要级。\n- 编译遍决策层缺经典对照：MLGO 家族内联/寄存器分配/LoopTune、NeuroVectorizer、LLVM TTI 的学习型替代均无一手证据；\"策略模型 vs 代价模型\"的辨析缺可直接引用的经典文献。\n- 负结果为零；LLM 作为代价模型零可核验来源。\n- 预算：每轮 search 3/3、citations 3/3、read 3/3 全部耗尽；上一轮新增独立文献 0 条。指令级引用图已判定饱和，另两层未饱和。\n- 引用编号跨轮次重排且自相矛盾，同一编号在不同条目指向不同论文；GRANITE（条目 2 与 24）、Facile（条目 26 与 61）等被重复记录。写参考文献前必须按 DOI / arXiv ID / 标题去重并重建编号。\n\n## 3. 用户当前想要什么\n\n当前节点是 **Write the reader-facing paper**——论文本体尚未起草，要产出中文综述论文实体。用户明确给出的**下一个具体动作**是：\n\n1. 先做参考文献去重与编号重建（按 DOI/arXiv ID/标题）；\n2. 再搭对比表骨架，只填入全文级数字，其余单元格显式标注\"仅摘要级 / 口径不明 / 无来源\"；\n3. 然后按\"层次演化 → 协议效应 → 分工而非替代 → 冲突 → 开放问题\"的顺序起草正文。\n\n**明确不是**：不是继续以文献扩张为主要活动（数量已达标，节点本身是\"写\"）；不是把摘要级数字填进对比表；不是把\"学习型胜过解析式\"或反之写成定论；不是沿用快照的引用编号；不是写成摘要汇编。\n\n## 4. 仍主导选择的决策与约束\n\n**进表硬规则**：进对比表数值列的数字必须来自全文（`evidence_level = full_text`）；摘要级数字只能以\"作者声称\"形式出现。对比表统一列：程序表示、模型族、训练信号来源、搜索/决策集成方式、目标硬件、端到端收益、编译开销、泛化评估。\n\n**写作约束**：中文；解释机制而不预设读者熟悉 LLVM TTI 等；基于论文正文做机制层分析，禁止复述摘要；三层范围与横切议题如上；年份以 2018 后为主。\n\n**检索纪律约束**：抽象级/题录级来源可记录，但不得进入对比表数值列；禁止把摘要级数字当作已核实结论。\n\n**流程约束**：每轮 search/citations/read 各 3 次且已耗尽；指令级引用图已饱和，继续扩张的边际收益低。\n\n**补证决策**：BHive 全文与 uiCA/Facile/GRANITE 的评估表是唯一能把对比表数值列从\"不可填\"变成\"可填\"的一组来源，但**不得阻塞起草**。\n\n## 5. 不可重复的失败路径与重试条件\n\n| 失败路径 | 才允许重试的条件 |\n|---|---|\n| OpenAlex `cited_by` 对 Ithemal / AutoTVM / MLGO 这类系统名或 arXiv 种子——只返回 ML 基础文献或硬件加速器热点 | 仅当种子是 IISWC/CGO/PLDI 类基准或硬件测量论文（GRANITE、Facile、BHive）时重试。这是唯一被证明有效的引用图用法 |\n| OpenAlex `cites`（后向参考文献）——本主题上只返回通用背景 | 仅当目标是追溯\"搜索算子/学习器族谱系\"时重试；唯一有价值命中是模拟退火与 GBDT 两条谱系锚点 |\n| Crossref `query.bibliographic`——裸系统名零命中 | 仅当查询式内含引号的数据集/基准名加 venue 或标题词时重试（含引号的数据集名命中过一次） |\n| arXiv 宽泛英文组合词——几乎全噪声（LLM 系统自身成本、量化、语音识别等） | 仅当用字段限定精确短语（`abs:\"…\"` / `ti:\"…\"`）与领域术语 AND 组合时重试 |\n| arXiv HTML 全文——系统性剥离表格与公式，并在评测章节处截断 | 读方法与机制章可用 HTML；取评估数字必须换作者主页/机构仓库/会议官方 PDF；若只有 HTML，按 offset 分段续读，不要指望一次取回评测表 |\n| IEEE Xplore 链接反复返回 HTTP 202 | 未先找到公开版本（arXiv / 作者页 / 机构库）就不要为 IEEE 链接花读取预算 |\n| dl.acm.org 稳定 403 | 只能走 arXiv 或作者版。Springer PDF 可读，出版社开放 PDF 值得优先尝试 |\n| 为取数反复读同一篇而不读完整 | 每轮至少预留一次读取落在评估章节，否则数值列永远填不上 |\n\n## 6. 当前缺口与下一个具体动作\n\n**缺口**\n- 对比表数值维度远未达标：同一基准上\"学习型 vs 解析式\"的直接对照数字为零；uiCA/Facile/GRANITE 的数字停在摘要级或口径不明（1.7 单位丢失）。\n- 编译遍决策层缺经典对照（MLGO 家族、NeuroVectorizer、LLVM TTI 的学习型替代），\"策略模型 vs 代价模型\"辨析无可引经典。\n- 负结果为零；LLM 作为代价模型零可核验来源。\n- 代理真值/代理奖励偏差未量化；模型误差 → 调优时间 vs 最终代码质量的传播链无人测量。\n- BHive、Gematria、llvm-mca、IACA 原文不可得，基准规模/划分/泄漏检查无法核验。\n- 张量层与编译遍决策层引用图未饱和（但扩文献不是本节点任务）。\n\n**下一个具体动作**：先按 DOI/arXiv ID/标题做参考文献去重与编号重建；再搭对比表骨架，只填全文级数字，其余单元格显式标注\"仅摘要级 / 口径不明 / 无来源\"；随后按\"层次演化 → 协议效应 → 分工而非替代 → 冲突 → 开放问题\"起草正文。\n\n**可选的补证（不得阻塞起草）**：BHive 全文，以及 uiCA / Facile / GRANITE 的评估表——这是唯一能把对比表数值列从\"不可填\"变成\"可填\"的一组来源。\n\n## 7. 昂贵而已被省略的细节在哪里精确恢复\n\n| 位置 | 内容 |\n|---|---|\n| `evidence.coverage` | 26 条按 8 个研究问题（Q1–Q8）组织的问答，含每轮结论、冲突与缺口。论文章节骨架即 Q1–Q8 |\n| `evidence_notes` | 59 条逐来源笔记（引用号、`evidence_level`、title/venue/year、problem/method/`numbers`/key_findings/limitations）。**所有数字在此字段的 `numbers`**；`evidence_level` 是能否进表数值列的闸门。可用数字示例：Ithemal 在 Haswell 上 74% 的块更准；MLGO 相对 -Oz 最多减少 7% 体积；MLGOPerf 370K 配置 / 10 个 SPEC CPU2006 / 采集约 5 天；LoopTune 1757/440 划分、APEX_DQN ~200 步收敛达峰值 30%（114.204 GFLOPS）、17.5 小时；PALMED Skylake 754 条指令 / 567762 次测量 / 9 个等价类；TLP TenSet 8.65M 程序 / 8.56M 互异 / 重复率 1.0430% / 14 种原语；CompilerGym GCC 11.2.0 动作集 2281；Tuna 的四张延迟表。注意 AutoTVM 端到端提升 1.2–3.8 的单位在抽取中截断，**不可直接引用** |\n| `tensions` | 16 组 claim / counter_claim / resolution；resolution 已写好\"如何陈述而不选边\"的措辞，可直接作为冲突章节底稿 |\n| `unresolved` | 逐轮缺口清单，是\"开放问题\"一节的原料，同时是检索失败的负面知识 |\n| `search_log` | 每轮 query / source / inclusion_decisions；重试任何查询前先读这里，可直接排除已判死的查询形态 |\n| `sources` | 引用号 → `id`（DOI/arXiv ID）+ `evidence_ref`（原文 artifact://sha256/…）+ `read_ref`（已读全文 artifact://sha256/…）。按 `id` 去重与重建编号；按 `read_ref` 精确取回已读全文；`read_ref: null` 即只有题录或摘要 |\n| `plan` | 纳入/排除标准、查询清单、Q1–Q8、revision_tasks、round。revision_tasks 中仍有效的项（补齐三层代表工作、冲突分组、统一对比维度、标记不可获取来源）可作写作时的自查清单 |\n\n**无法从给定内容确定**：论文的具体 thesis 表述、各来源的最终去重后编号清单、对比表中哪些单元格最终能填上全文级数字——这些需要读取 `sources` / `evidence_notes` 后才能确定，当前内容只给出了字段位置与部分示例数字。",
+        "input_tokens": 3642,
+        "output_tokens": 6708,
+        "grading": {
+          "1": {
+            "facts": [
+              {
+                "fact": "产出一篇**面向读者的中文学术综述**（不是检索报告、不是审计台账）",
+                "stated": true
+              },
+              {
+                "fact": "主题是**编译器优化中的代价模型（cost model）近年的发展**",
+                "stated": true
+              },
+              {
+                "fact": "读者是懂机器学习/系统、但不在编译器优化细分领域的人",
+                "stated": true
+              },
+              {
+                "fact": "范围之外至少提到一项：非编译器领域的代价模型（数据库/网络/纯硬件功耗）",
+                "stated": true
+              },
+              {
+                "fact": "范围之外至少再提到一项：无定量实验的观点/演示类文献，或非英文文献",
+                "stated": true
+              }
+            ]
+          },
+          "2": {
+            "facts": [
+              {
+                "fact": "已确立：**59 篇来源**通过验证",
+                "stated": false
+              },
+              {
+                "fact": "已确立：其中**24 篇读过全文**（其余为摘要级或题录级）",
+                "stated": false
+              },
+              {
+                "fact": "已确立：演化在**三个层次**上都成立（指令级 / 张量·循环程序 / 编译遍决策）",
+                "stated": true
+              },
+              {
+                "fact": "冲突的核心是**学习型 vs 解析式**代价模型",
+                "stated": true
+              },
+              {
+                "fact": "该冲突的具体形态：学习型精度占优但依赖逐微架构大规模真机测量与长时训练、跨平台迁移差",
+                "stated": false
+              },
+              {
+                "fact": "受阻或薄弱：**编译遍决策层次证据最薄**，或有谱系尚未完成前向追踪",
+                "stated": true
+              }
+            ]
+          },
+          "3": {
+            "facts": [
+              {
+                "fact": "**现在开始写作**（不是继续检索、不是再做一轮规划）",
+                "stated": true
+              }
+            ]
+          },
+          "4": {
+            "facts": [
+              {
+                "fact": "来源数下限 **24 篇**、全文阅读下限 **14 篇**（均已满足）",
+                "stated": true
+              },
+              {
+                "fact": "只用数字引用编号，**不得包含参考文献章节**（由系统生成）",
+                "stated": false
+              },
+              {
+                "fact": "正文**不得出现过程语言**（如「本轮检索」「本次共执行」这类句子）",
+                "stated": false
+              },
+              {
+                "fact": "正文**不得出现证据级别标签**（如全文级/摘要级/题录级）",
+                "stated": false
+              },
+              {
+                "fact": "段落长度受限（约 1200 字符）",
+                "stated": false
+              },
+              {
+                "fact": "结果型数字必须有**读过全文**的来源支撑",
+                "stated": true
+              },
+              {
+                "fact": "不得复述摘要，必须基于论文正文",
+                "stated": true
+              }
+            ]
+          },
+          "5": {
+            "facts": [
+              {
+                "fact": "有一轮检索因**返回结果全部无关**而被整轮否决（宽泛关键词在全文索引上噪声极高）",
+                "stated": false
+              },
+              {
+                "fact": "该失败的重试条件：**改用机制性关键词**（工具名/数据集名，如 Ithemal / BHive / AutoTVM / MLGO）",
+                "stated": false
+              },
+              {
+                "fact": "仅有摘要级证据的来源**不得用于支撑结果型数字**，需要先取得全文",
+                "stated": true
+              },
+              {
+                "fact": "完整检索与纳排记录在**检索日志**中（74 条）",
+                "stated": false
+              }
+            ]
+          },
+          "6": {
+            "facts": [
+              {
+                "fact": "缺口：**账本已饱和**（13 轮，边际收益递减），但**正文尚未写出**",
+                "stated": false
+              },
+              {
+                "fact": "下一个动作：**依据账本写出综述正文**",
+                "stated": true
+              },
+              {
+                "fact": "**不是**先补检索 / 先扩大来源（账本已足够继续）",
+                "stated": true
+              }
+            ]
+          },
+          "7": {
+            "facts": [
+              {
+                "fact": "每篇来源有**内容寻址的引用**（可精确取回）",
+                "stated": true
+              },
+              {
+                "fact": "59 篇的**结构化笔记**按引用编号对应（问题/方法/数字/结论/局限）",
+                "stated": true
+              },
+              {
+                "fact": "**读过全文的来源**另有全文读取位置，可精确取回全文而非摘要",
+                "stated": true
+              },
+              {
+                "fact": "24 组**对立证据**带证据编号与解决状态",
+                "stated": false
+              },
+              {
+                "fact": "123 条**未解决清单**",
+                "stated": false
+              }
+            ]
+          }
+        },
+        "stated": 18,
+        "expected": 31
+      }
+    ],
+    "scores": [
+      22,
+      21,
+      18
+    ],
+    "mean": 20.3,
+    "expected": 31
+  }
+}
