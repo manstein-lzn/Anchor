@@ -715,3 +715,105 @@ def test_a_different_run_does_not_match_an_old_recording(tmp_path):
     with recording_scope(fresh), pytest.raises(ReplayDivergence, match="were recorded"):
         asyncio.run(replay.generate(prompt="Write the paper.",
                                     system_prompt="Answer plainly."))
+
+
+# -- acceptance 1: every attempt of a completed run replays identically ----------
+
+
+def test_every_node_attempt_of_a_completed_run_replays(tmp_path):
+    """Acceptance: a whole run's model calls come back from the recording.
+
+    A real store, a real worker, two agent nodes, and the real gateway: the run is
+    executed, recorded, and then every attempt it made is replayed against a model
+    that would answer differently. Replay matches by position, so each attempt is
+    asked a freshly worded prompt and must still return what was recorded.
+    """
+    pytest.importorskip("pydantic_ai")
+    from pydantic_ai.models.test import TestModel
+
+    from anchor.domain.admission import RunRequest
+    from anchor.domain.graph import (GraphDefinition, GraphEdge, GraphNode, GraphVersion,
+                                     Trigger)
+    from anchor.runtime.dispatch import dispatch_pending
+    from anchor.runtime.receiver import DurableExecutionReceiver
+    from anchor.runtime.model_replay import ReplayModel
+    from anchor.runtime.sinks import ArtifactCheckpointSink
+    from anchor.runtime.worker import AgentNodeWorker
+
+    store = make_store(tmp_path, "campaign.sqlite")
+    artifacts = LocalArtifactStore(tmp_path / "artifacts")
+    try:
+        definition = GraphDefinition(
+            graph_id="campaign", name="Campaign", entry_node_id="gather",
+            nodes=[GraphNode(id="gather", type="agent", name="Gather",
+                             agent_ref="agents.reader"),
+                   GraphNode(id="write", type="agent", name="Write",
+                             agent_ref="agents.reader")],
+            edges=[GraphEdge(source="gather", target="write")])
+        version = store.publish_graph(GraphVersion.publish(definition, 1))
+        trigger = store.create_trigger(
+            Trigger(graph_version_id=version.graph_version_id, type="manual"))
+        receipt = store.admit_run(RunRequest(trigger_id=trigger.id,
+                                             idempotency_key=f"campaign-{uuid4().hex}",
+                                             objective="Campaign", inputs={}))
+        asyncio.run(dispatch_pending(store, DurableExecutionReceiver(store)))
+
+        # 1. Execute every ready agent node for real, recording as it goes.
+        recorder = ModelRecorder(artifacts, mode=RecordingMode.RECORD, store=store)
+        gateway = PydanticAIModelGateway(profile(), StaticSecrets(), model=TestModel(),
+                                         recorder=recorder)
+        worker = AgentNodeWorker(
+            store, registry(),
+            {"models.test": gateway},
+            ArtifactCheckpointSink(store, artifacts, "worker"))
+
+        executed: list[tuple[str, str]] = []
+        for _ in range(6):  # bounded so a stuck fixture fails instead of hanging
+            lease = store.claim_ready_agent_node("worker", uuid4())
+            if lease is None:
+                break
+            outcome = asyncio.run(worker.execute_claimed_once(
+                worker_id="worker", agent_ref="agents.reader",
+                prompt=f"work on {lease.node_id}",
+                expected_node_id=lease.node_id, lease=lease,
+                heartbeat_interval=0.01))
+            executed.append((lease.node_id, outcome.response.text))
+        assert [node for node, _ in executed] == ["gather", "write"], executed
+        assert recorder.recorded == len(executed)
+        assert len({ref for ref in recorder.written}) == len(executed)
+
+        # 2. Build the plan the way production does: from the run's own events.
+        plan = ReplayPlan(artifacts, store=store)
+        replay_recorder = ModelRecorder(artifacts, mode=RecordingMode.REPLAY,
+                                        store=store)
+        replay_gateway = PydanticAIModelGateway(
+            profile(), StaticSecrets(), model=TestModel(custom_output_text="LIVE"),
+            recorder=replay_recorder)
+        assert isinstance(replay_gateway._model, ReplayModel)
+        replay_gateway._model.plan = plan
+
+        # 3. Replay each node attempt. A different prompt is deliberate: it proves
+        #    the answer comes from the recording rather than from the model.
+        for node_id, recorded_text in executed:
+            attempt = next(item for item in store.list_node_runs(receipt.run_id)
+                           if item.node_id == node_id)
+            context_ = CallContext(run_id=receipt.run_id, node_id=node_id,
+                                   node_run_id=attempt.id, attempt=attempt.attempt)
+            with recording_scope(context_):
+                replayed = asyncio.run(replay_gateway.generate(
+                    prompt="a completely different question", system_prompt="Answer."))
+            assert replayed.text == recorded_text, f"{node_id} did not replay identically"
+            assert "LIVE" not in replayed.text
+
+        assert replay_gateway._model.replayed == len(executed)
+        assert replay_gateway._model.summary()["prompt_changed"] == len(executed), \
+            "every replayed call was asked something different, and that is reported"
+        # The plan reports what a given attempt recorded, which is what a divergence
+        # message would quote back at an operator.
+        gather_row = next(item for item in store.list_node_runs(receipt.run_id)
+                          if item.node_id == "gather")
+        assert plan.recorded(CallContext(run_id=receipt.run_id, node_id="gather",
+                                         node_run_id=gather_row.id,
+                                         attempt=gather_row.attempt)) == 1
+    finally:
+        store.close()

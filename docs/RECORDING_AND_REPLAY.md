@@ -257,7 +257,7 @@ output tokens         214,368
 
 | # | 标准 | 结果 |
 |---|---|---|
-| **1** | 一次 campaign 可回放，节点输出与终态一致 | 🟡 单节点端到端已验证（真实 worker + 真实 lease + 真实模型）；整轮回放未跑 |
+| **1** | 一次 campaign 可回放，节点输出与终态一致 | ✅ **整轮已验证**：真实 store、真实 worker、真实 gateway；两个 agent 节点跑完后，其全部 attempt 用**不同的 prompt** 回放，全部返回录制答案。注意回放复现的是**同一个 run 的尝试**，跨 run 不匹配（见第 10 节） |
 | **2** | 分歧以定位到具体调用的错误失败，绝不静默成功 | ✅ **真实模型验证**：越界调用报 `node=plan attempt=0 sequence=1` |
 | **3** | 任意节点的实际 prompt 可以按文本读回 | ✅ **真实 `deepseek-flash` 调用验证**：instructions + user prompt 完整读回 |
 | **4** | 录制一次 campaign 对工件库的增长 <5% | 🟡 估算约 1.4%；保留策略未接 |
@@ -284,7 +284,7 @@ output tokens         214,368
 | `runtime/worker.py` | 在节点执行的 `try/finally` 上绑定/解绑调用上下文 |
 | `runtime/worker_service.py`、`verifier_service.py` | 构造 recorder 并传给 gateway 工厂 |
 | `runtime/settings.py` | `ANCHOR_MODEL_RECORDING`，默认 `off` |
-| `tests/test_model_recording.py` | 13 个测试，含真实 worker 端到端与真实模型验证 |
+| `tests/test_model_recording.py` | 25 个测试：录制、回放、真实 worker 端到端、整轮回放、内存上限 |
 
 ### 步骤 1 验证到的三件事
 
