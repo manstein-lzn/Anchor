@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from anchor.runtime.capabilities import ModelProfile
+from anchor.runtime.model_recording import ModelRecorder, RecordingModel
 from anchor.runtime.secrets import SecretProvider
 
 
@@ -60,8 +61,12 @@ class PydanticAIModelGateway:
     """
 
     def __init__(self, profile: ModelProfile, secrets: SecretProvider,
-                 model: Any | None = None) -> None:
-        """`model` accepts a prebuilt pydantic-ai model (tests use TestModel)."""
+                 model: Any | None = None, recorder: ModelRecorder | None = None) -> None:
+        """`model` accepts a prebuilt pydantic-ai model (tests use TestModel).
+
+        `recorder` is optional and does nothing unless recording is enabled; when
+        it is, the model is wrapped here so every call it forwards is recorded.
+        """
         self.profile = profile
         api_key = secrets.get(profile.secret_ref)
         try:
@@ -100,6 +105,15 @@ class PydanticAIModelGateway:
         )
         provider = OpenAIProvider(openai_client=self._openai_client)
         self._model = model if model is not None else model_type(profile.model, provider=provider)
+        if recorder is not None and recorder.enabled:
+            # Wrap the model, not this gateway: one generate_with_tools call covers
+            # a whole agent turn, so recording here would keep one final answer and
+            # lose the growing context inside the tool loop.
+            if api_key:
+                # The recorder refuses to persist a call whose text contains a
+                # resolved secret, and only this object holds the value.
+                recorder.forbid(api_key)
+            self._model = RecordingModel(self._model, recorder)
         self._agent = Agent(self._model, output_type=str,
                             model_settings=self._settings())
 
@@ -167,10 +181,11 @@ class PydanticAIModelGateway:
         await self._openai_client.close()
 
 
-def build_model_gateway(profile: ModelProfile, secrets: SecretProvider) -> ModelGateway:
+def build_model_gateway(profile: ModelProfile, secrets: SecretProvider,
+                        *, recorder: ModelRecorder | None = None) -> ModelGateway:
     # Named gateways such as ZenMux expose the OpenAI-compatible wire
     # contract; their provider label is still useful for configuration and
     # diagnostics, so accept it without treating the key as an OpenAI key.
     if profile.provider in {"openai", "openai_compatible", "rightcode", "zenmux", "a6api", "deepseek"}:
-        return PydanticAIModelGateway(profile, secrets)
+        return PydanticAIModelGateway(profile, secrets, recorder=recorder)
     raise ValueError(f"unsupported model provider: {profile.provider}")

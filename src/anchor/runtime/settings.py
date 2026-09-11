@@ -23,6 +23,12 @@ class AnchorSettings(BaseSettings):
     artifact_root: str = ".local/artifacts"
     workspace_root: str = ".local/workspaces"
     memory_path: str = ".local/memory.jsonl"
+    # Model call recording: "off", "record" or "replay" (ADR-044). Kept as a
+    # plain string because the recording module imports pydantic-ai at module
+    # scope, and the API must remain usable in an install without that extra. The
+    # worker service converts it to RecordingMode and rejects an unknown value.
+    # Default off: a recording is a projection and production pays nothing for it.
+    model_recording: str = "off"
     api_token: str | None = None
     worker_id: str = "anchor-worker"
     control_worker_id: str = "anchor-control-worker"

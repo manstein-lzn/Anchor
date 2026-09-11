@@ -11,6 +11,7 @@ from anchor.runtime.artifacts import LocalArtifactStore
 from anchor.runtime.capabilities import CapabilityRegistry
 from anchor.runtime.config import load_runtime_config
 from anchor.runtime.model_gateway import build_model_gateway
+from anchor.runtime.model_recording import ModelRecorder, RecordingMode
 from anchor.runtime.secrets import ChainedSecretProvider, EnvironmentSecretProvider, JsonFileSecretProvider
 from anchor.runtime.sinks import VerificationCheckpointSink
 from anchor.runtime.verifier import VerifierNodeWorker
@@ -68,11 +69,15 @@ async def serve() -> None:
     required_models = {
         item.model_ref for item in config.verifiers if item.model_ref is not None
     }
+    artifacts = LocalArtifactStore(settings.artifact_root)
+    # Verifier nodes call models too, so they record on the same terms as agent
+    # nodes: any node's actual prompt should be readable afterwards.
+    recorder = ModelRecorder(artifacts, mode=RecordingMode(settings.model_recording),
+                             store=store)
     gateways = {
-        profile.ref: build_model_gateway(profile, secrets)
+        profile.ref: build_model_gateway(profile, secrets, recorder=recorder)
         for profile in config.models if profile.ref in required_models
     }
-    artifacts = LocalArtifactStore(settings.artifact_root)
     worker = VerifierNodeWorker(
         store,
         registry,

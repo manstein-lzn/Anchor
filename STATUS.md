@@ -194,14 +194,16 @@
 - Failure fan-out/cancellation of in-flight sibling branches and dispatch supervision
   beyond receiver retry logging
 - PostgreSQL/vector memory projection and worker recovery supervision
-- **Model call recording and replay** (ADR-044, project established): every model
-  call's request and response recorded as a projection, with positional replay that
-  fails loudly on divergence. This is I9's R0/R1, which were promised but never
-  implemented. It is the prerequisite for developing context policy, because a
-  policy can only be judged by controlled comparison and today one campaign is 31
-  minutes and non-deterministic. Steps 1-3 are planned in
-  `docs/RECORDING_AND_REPLAY.md`; the node-scoped harness that would make context
-  iteration cheap is a separate, larger decision.
+- **Model call replay** (ADR-044). Recording is done (step 1): every model call is
+  written as an immutable projection with a `model.call` event, the model wrapper
+  sits on PydanticAI's `Model` so tool-loop calls are captured, instructions are
+  recorded separately (they do not appear in `messages`), `ANCHOR_MODEL_RECORDING`
+  defaults to `off`, and a call that would persist a secret is refused without
+  failing the run. Verified against a live `deepseek-flash` call. **Replay itself
+  is not implemented** — `REPLAY` currently behaves as `off` — nor is retention of
+  recordings. This is I9's R0/R1, promised and until now absent; it is the
+  prerequisite for developing context policy, which can only be judged by
+  controlled comparison. See `docs/RECORDING_AND_REPLAY.md`.
 - Context engine and memory policies beyond the durable input snapshot boundary
 - Running a single node in isolation, with a frozen input snapshot: today
   `run_nodes` is a read, so a context experiment costs a whole campaign

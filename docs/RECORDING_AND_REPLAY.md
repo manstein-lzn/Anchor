@@ -1,6 +1,6 @@
 # Model call recording and replay
 
-**状态：已立项（ADR-044）。步骤 1–3 为本文范围；步骤 4 另行决定。**
+**状态：已立项（ADR-044）。步骤 1 已完成并验证；步骤 2–3 未做；步骤 4 另行决定。**
 
 本文回答一个问题：上下文管理是 Anchor 产品的核心，但今天还无法开发它。
 本文说明为什么，以及第一步该做什么。
@@ -258,22 +258,34 @@ output tokens         214,368
 ## 10. 实施顺序
 
 ```text
-步骤 1  RecordingModel + 工件格式 + model.call 事件
-        验收 1、3、6；可用最后一个真实 run 验证
-
-步骤 2  ReplayModel + 显式分歧
-        验收 2
-
-步骤 3  电闸与配置（off / record / replay）+ 保留策略接入
-        验收 4、5
-
-步骤 4  （独立评估）节点级测试台
-        冻结输入快照 + 单节点运行 → 把 31 分钟压到分钟级
-        这是真正让上下文实验可行的东西，建议单独立项
+步骤 1  RecordingModel + 工件格式 + model.call 事件          ✅ 完成
+步骤 2  ReplayModel + 显式分歧                              ⬜ 未做
+步骤 3  电闸与配置（off / record / replay）+ 保留策略接入      🟡 配置已有；保留策略未接
+步骤 4  （独立评估）节点级测试台                              ⬜ 未做
 ```
 
-**步骤 1–3 是本文范围。步骤 4 我建议单独决定**，因为它比前三步加起来都大，
-而且它才是上下文管理的真实工作台。
+### 步骤 1 的落点
+
+| 文件 | 内容 |
+|---|---|
+| `runtime/model_recording.py` | `RecordingModel(WrapperModel)`、`ModelRecorder`、`CallContext` + `bind_call`/`unbind_call`、`read_recording`、`text_of` |
+| `runtime/model_gateway.py` | 录制开启时包 `Model`；把解析出的 secret 作为 forbidden 交给 recorder |
+| `runtime/worker.py` | 在节点执行的 `try/finally` 上绑定/解绑调用上下文 |
+| `runtime/worker_service.py`、`verifier_service.py` | 构造 recorder 并传给 gateway 工厂 |
+| `runtime/settings.py` | `ANCHOR_MODEL_RECORDING`，默认 `off` |
+| `tests/test_model_recording.py` | 13 个测试，含真实 worker 端到端与真实模型验证 |
+
+### 步骤 1 验证到的三件事
+
+1. **真实模型**：`deepseek-flash` 一次实调用，录制 1 条、`text_of` 完整读回 instructions + user prompt（验收 3）。
+2. **instructions 必须单独记**：PydanticAI 把 `instructions` 放在 `ModelRequestParameters.instruction_parts`，不进入 `messages`；只记 messages 会静默丢掉 agent 最大的那块文本。
+3. **digest 必须剔除易变字段**：消息 part 带墙上时钟 `timestamp`，直接哈希会让每次调用都不同、digest 失去意义。
+
+### 步骤 1 未做的事（诚实记录）
+
+- **回放**（步骤 2）未实现：录制只写不读，`RecordingMode.REPLAY` 目前等价于 `off`。
+- **保留策略未接入**：录制作为投影应当被优先淘汰，但现在没有接入 `retention`。
+- **`model.call` 事件参与恢复吗？** 不参与，但也没有任何机制**阻止**它被读成权威——那是一条纪律，不是一条门禁。若要变成门禁，需要一个类似 `test_architecture.py` 的断言。
 
 ---
 

@@ -30,6 +30,7 @@ logger = logging.getLogger("anchor.worker")
 # Consecutive lease-heartbeat failures tolerated before the attempt is failed.
 HEARTBEAT_FAILURE_LIMIT = 3
 from anchor.runtime.model_gateway import ModelGateway, ModelResponse
+from anchor.runtime.model_recording import CallContext, bind_call, unbind_call
 from anchor.state.protocols import StateStore
 
 
@@ -256,14 +257,22 @@ class AgentNodeWorker:
                     execution_task.cancel()
                     return
         heartbeat_task = asyncio.create_task(heartbeat())
+        # Read the attempt number out here so it can label the recording context
+        # below. Minimal stores used in tests may not expose the run history; the
+        # attempt number is only reporting metadata.
+        lister = getattr(self.store, "list_node_runs", None)
+        attempt_row = next((item for item in lister(lease.run_id)
+                            if item.id == lease.node_run_id), None) if lister else None
+        node_attempt = attempt_row.attempt if attempt_row is not None else 0
+        # Every model call in this attempt is attributed to this node, so a
+        # recording can be found later by (node, attempt, sequence) and the prompt
+        # a node actually received can be read back. Recording is off by default,
+        # so this costs one ContextVar write when nothing is being recorded.
+        call_token = bind_call(CallContext(run_id=lease.run_id, node_id=lease.node_id,
+                                           node_run_id=lease.node_run_id,
+                                           attempt=node_attempt))
         try:
             rejected_refs = []
-            # Minimal stores used in tests may not expose the run history; the
-            # attempt number is only reporting metadata on the usage event.
-            lister = getattr(self.store, "list_node_runs", None)
-            attempt_row = next((item for item in lister(lease.run_id)
-                                if item.id == lease.node_run_id), None) if lister else None
-            node_attempt = attempt_row.attempt if attempt_row is not None else 0
             behavior = self.behaviors.get(agent.behavior_ref)
             timeout = agent.timeout_seconds
             if agent.behavior_ref:
@@ -413,6 +422,7 @@ class AgentNodeWorker:
                 self.committer.store.clear_prepared_revision(prepared.node_run_id,
                                                              prepared.attempt)
         finally:
+            unbind_call(call_token)
             heartbeat_task.cancel()
             try:
                 await heartbeat_task

@@ -18,6 +18,7 @@ from anchor.runtime.capabilities import CapabilityRegistry
 from anchor.runtime.tool_gateway import BubblewrapBackend, SubprocessBackend, ToolGateway
 from anchor.runtime.config import load_runtime_config
 from anchor.runtime.model_gateway import build_model_gateway
+from anchor.runtime.model_recording import ModelRecorder, RecordingMode
 from anchor.runtime.secrets import ChainedSecretProvider, EnvironmentSecretProvider, JsonFileSecretProvider
 from anchor.runtime.sinks import ArtifactCheckpointSink
 from anchor.runtime.worker import AgentNodeWorker
@@ -91,8 +92,18 @@ async def serve() -> None:
     secrets = ChainedSecretProvider(*secret_providers)
     registry = CapabilityRegistry(models=config.models, agents=config.agents, tools=config.tools,
                                   verifiers=config.verifiers)
-    gateways = {profile.ref: build_model_gateway(profile, secrets) for profile in config.models}
     artifacts = LocalArtifactStore(settings.artifact_root)
+    # One recorder for every profile: the node attempt is carried in a ContextVar
+    # by the worker, not by the gateway, because a gateway is built once and one
+    # shared model serves every node. The mode is validated here so a typo fails
+    # at startup rather than silently recording nothing.
+    recorder = ModelRecorder(artifacts, mode=RecordingMode(settings.model_recording),
+                             store=store)
+    gateways = {profile.ref: build_model_gateway(profile, secrets, recorder=recorder)
+                for profile in config.models}
+    if recorder.enabled:
+        logging.getLogger("anchor.worker").info("model call recording is %s",
+                                                recorder.mode.value)
     memory = LocalMemoryStore(settings.memory_path)
     sink = ArtifactCheckpointSink(store, artifacts, worker_id)
     try:
