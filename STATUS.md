@@ -1,6 +1,6 @@
 # Anchor Implementation Status
 
-## Completed
+## 已实现
 
 - Repository baseline and MIT project metadata
 - Domain `Task` and `Run` models with explicit revisions and workflow version
@@ -189,7 +189,7 @@
 - `scholarly.citations` (citation chasing) and `scholarly.read_many` (batch reads)
   keep the model's turn count down, which is what a run's cost is made of
 
-## Not yet implemented
+## 未实现
 
 - **Failure fan-out** (done, DEVELOPMENT_PLAN P0.2, ADR-045): a node failure that fails
   its run ends every non-terminal node with `error_code="run_failed"`, releases the
