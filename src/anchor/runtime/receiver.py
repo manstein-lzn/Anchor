@@ -52,12 +52,14 @@ async def pump(store, receiver: DurableExecutionReceiver, *, interval: float = 1
 def main() -> None:
     from anchor.state.relational import RelationalStateStore
 
+    from anchor.runtime.preflight import require_environment
     from anchor.runtime.settings import AnchorSettings
 
     settings = AnchorSettings()
     logging.basicConfig(level=settings.log_level)
-    if not settings.database_url:
-        raise SystemExit("set ANCHOR_DATABASE_URL explicitly")
+    # Was a bare string on stderr, which a journal reader could not tell from any other
+    # failure, and which did not check the schema this process is about to write to.
+    require_environment(role="receiver", database_url=settings.database_url)
     store = RelationalStateStore(settings.database_url)
     receiver = DurableExecutionReceiver(store)
     try:

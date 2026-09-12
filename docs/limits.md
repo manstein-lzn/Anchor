@@ -69,6 +69,8 @@
 | `ANCHOR_STORAGE_ENFORCE` | 同上 | `true` | operator_policy | 滚动清理开关 | 关闭后预算仅提示；无预算时始终不删 |
 | `ANCHOR_STORAGE_SWEEP_INTERVAL` | 同上 | 60s | operator_policy | 清理扫描间隔 | 由 scheduler 服务执行 |
 | `ANCHOR_STORAGE_SWEEP_BATCH` / `_MAX_ROUNDS` | 同上 | 25 / 40 | operator_policy | 每轮淘汰条数与最大轮数 | 限制单次清理工作量 |
+| 服务启动 preflight | `runtime/preflight.py` | 总是执行 | task_behavior | 每个服务进入主循环之前 | 退出码 2 + stderr 上一行 JSON：`database_url_missing` / `database_unreachable` / `schema_not_migrated` / `runtime_config_missing` / `runtime_config_invalid` / `runtime_config_empty` / `artifact_root_unwritable`。**没有静默回落** |
+| `systemd StartLimitIntervalSec` / `Burst` | `infra/systemd/*.service` | 60s / 5 | task_behavior | 崩溃循环 | 超过后 systemd 标记 `failed`，不再无限重试成 `activating` |
 | `ANCHOR_MODEL_RECORDING` | `runtime/settings.py` | `off` | operator_policy | 模型调用的录制/回放（ADR-044） | `off` 不安装 wrapper，零开销；`record` 写投影；`replay` 按位置提供录制答案并拒绝越界 |
 | `MAX_TRACKED_ATTEMPTS` | `runtime/model_recording.py` | 4096 | resource_capacity | 常驻进程的调用计数器上限 | 淘汰最旧；一个早已结束的 attempt 被淘汰不会被误解 |
 | `MAX_TRACKED_REFS` | 同上 | 4096 | resource_capacity | 录制引用检查日志上限 | 同上，保留最近条目 |

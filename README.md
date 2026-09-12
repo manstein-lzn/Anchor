@@ -270,15 +270,39 @@ The worker service reads `.local/memory.jsonl` (override with
 Run in the reconstructed Agent context. Memory is supplementary evidence; the
 Task, Run, Graph Version, events, and artifact references remain canonical.
 
-For a long-lived user-level deployment, copy the included units and enable them:
+For a long-lived user-level deployment, install the persistent units and let the script
+check them:
 
 ```bash
 ANCHOR_ROOT=/home/mansteinl/Anchor bash scripts/install_user_services.sh
 ```
 
-The units use `Restart=on-failure`, do not embed credentials, and keep the
-database/runtime profile paths explicit. Review the generated unit environment
-before enabling them on a production host.
+Seven units are installed and enabled, and the script refuses to report success unless all
+seven are `active`: a unit that cannot start exits with code 2, prints a JSON reason to its
+journal, and is reported by systemd as `failed` rather than retrying forever as
+`activating`. Every unit declares its database, artifact, workspace, memory and runtime
+profile paths explicitly instead of relying on the working directory, and sets
+`StartLimitIntervalSec`/`StartLimitBurst` so a crash loop becomes a visible failure.
+
+Each service checks its environment before entering its loop
+(`anchor.runtime.preflight`): the database URL is configured with no silent fallback, the
+schema is migrated, the runtime profile parses, and the artifact root is writable. A
+missing URL and an unmigrated database are reported as themselves, because telling an
+operator to run migrations against a path they mistyped sends them the wrong way.
+
+To check that a run survives losing the process that holds its lease:
+
+```bash
+.venv/bin/python scripts/validate_service_recovery.py
+```
+
+It stops the worker mid-node, waits past the stale threshold, asserts the lease is reported
+stale rather than silently reclaimed, recovers it explicitly, and waits for the run to
+close — asserting a terminal status, a continuous event sequence, and no duplicated
+operation. Evidence is written to `.local/reports/recovery-<run_id>.json`.
+
+Credentials are never embedded: secrets resolve from the file named by `secret_file` in the
+runtime profile.
 
 ## Development
 

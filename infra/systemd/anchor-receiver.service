@@ -1,5 +1,5 @@
 [Unit]
-Description=Anchor Agent worker
+Description=Anchor run receiver (admits dispatched runs)
 After=network-online.target
 Wants=network-online.target
 
@@ -16,9 +16,8 @@ Environment=ANCHOR_DATABASE_URL=sqlite:///%h/Anchor/.local/api.sqlite
 Environment=ANCHOR_ARTIFACT_ROOT=%h/Anchor/.local/artifacts
 Environment=ANCHOR_WORKSPACE_ROOT=%h/Anchor/.local/workspaces
 Environment=ANCHOR_MEMORY_PATH=%h/Anchor/.local/memory.jsonl
-Environment=ANCHOR_RUNTIME_CONFIG=%h/Anchor/.local/runtime.json
-Environment=ANCHOR_WORKER_ID=anchor-worker-%H
-ExecStart=%h/Anchor/.venv/bin/python -m anchor.runtime.worker_service
+Environment=ANCHOR_DISPATCH_INTERVAL=1
+ExecStart=%h/Anchor/.venv/bin/python -m anchor.runtime.receiver
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=true

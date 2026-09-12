@@ -13,8 +13,15 @@ def main():
     parser.add_argument("--port", type=int, default=8090)
     parser.add_argument("--token-file", type=Path, default=Path(".local/api-token"))
     args = parser.parse_args()
-    if not os.environ.get("ANCHOR_DATABASE_URL"):
-        parser.error("set ANCHOR_DATABASE_URL and apply migrations first")
+    from anchor.runtime.preflight import require_environment
+    from anchor.runtime.settings import AnchorSettings
+
+    # This used to check only that the variable was *set*, so the API would start against an
+    # unmigrated database and fail later, per request, with a 503 nobody could explain.
+    # Artifacts are required too: the storage report reads them.
+    startup = AnchorSettings()
+    require_environment(role="api", database_url=startup.database_url,
+                        artifact_root=startup.artifact_root)
     if not os.environ.get("ANCHOR_API_TOKEN"):
         args.token_file.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         try:

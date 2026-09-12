@@ -138,9 +138,16 @@ async def serve() -> None:
 
 
 def main() -> None:
+    from anchor.runtime.preflight import require_environment
     from anchor.runtime.settings import AnchorSettings
 
-    logging.basicConfig(level=AnchorSettings().log_level)
+    settings = AnchorSettings()
+    logging.basicConfig(level=settings.log_level)
+    # Before the loop, not inside it: a worker that starts against a broken environment
+    # either crash-loops invisibly or runs and does nothing, and both look healthy.
+    require_environment(role="agent_worker", database_url=settings.database_url,
+                        runtime_config=settings.runtime_config,
+                        artifact_root=settings.artifact_root)
     try:
         asyncio.run(serve())
     except KeyboardInterrupt:

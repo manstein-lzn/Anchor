@@ -3,12 +3,20 @@ Description=Anchor Verifier worker
 After=network-online.target
 Wants=network-online.target
 
+# A crash loop is a visible failure, not a permanent 'activating'. A unit that
+# cannot start because its environment is wrong should stop trying quickly and
+# be reported by `systemctl --user status` as failed, not retry forever.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
 [Service]
 Type=simple
 WorkingDirectory=%h/Anchor
 Environment=ANCHOR_DATABASE_URL=sqlite:///%h/Anchor/.local/api.sqlite
-Environment=ANCHOR_RUNTIME_CONFIG=%h/Anchor/.local/runtime.json
 Environment=ANCHOR_ARTIFACT_ROOT=%h/Anchor/.local/artifacts
+Environment=ANCHOR_WORKSPACE_ROOT=%h/Anchor/.local/workspaces
+Environment=ANCHOR_MEMORY_PATH=%h/Anchor/.local/memory.jsonl
+Environment=ANCHOR_RUNTIME_CONFIG=%h/Anchor/.local/runtime.json
 Environment=ANCHOR_VERIFIER_WORKER_ID=anchor-verifier-worker-%H
 ExecStart=%h/Anchor/.venv/bin/python -m anchor.runtime.verifier_service
 Restart=on-failure

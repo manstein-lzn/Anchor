@@ -9,6 +9,7 @@ from typing import Any
 from uuid import UUID
 
 from anchor.domain.models import ProgressEvidence
+from anchor.runtime.preflight import require_environment
 from anchor.runtime.supervisor import assess_leases
 from anchor.runtime.settings import AnchorSettings
 from anchor.runtime.watchdog import AdaptiveWatchdog, cycle_fingerprint
@@ -140,8 +141,12 @@ async def run_supervisor(store, *, interval: float = 10.0, stale_after: float = 
 def main() -> None:
     settings = AnchorSettings()
     logging.basicConfig(level=settings.log_level)
-    url = settings.database_url or "sqlite:///./.local/api.sqlite"
-    asyncio.run(run_supervisor(RelationalStateStore(url), interval=settings.supervisor_interval,
+    # This used to fall back to a developer's local SQLite file when the URL was unset, so
+    # a misconfigured unit watched an empty database and reported nothing wrong. An
+    # environment a supervisor cannot read is exactly the one it must refuse to observe.
+    require_environment(role="supervisor", database_url=settings.database_url)
+    asyncio.run(run_supervisor(RelationalStateStore(settings.require_database_url()),
+                               interval=settings.supervisor_interval,
                                stale_after=settings.lease_stale_after))
 
 

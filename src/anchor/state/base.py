@@ -120,6 +120,17 @@ class StoreBase:
             return [dict(row) for row in connection.execute(sa.select(s.events).where(
                 s.events.c.stream_id == str(run_id), s.events.c.sequence > after)
                 .order_by(s.events.c.sequence).limit(limit)).mappings()]
+    def ping(self) -> None:
+        """Prove the database can be reached, without asking anything about its contents.
+
+        Separate from ``check_schema`` on purpose: a service that cannot open its database
+        at all and one whose database has not been migrated need different fixes, and
+        reporting the second for the first sends an operator to run migrations against a
+        path they mistyped. Raises whatever the driver raises.
+        """
+        with self.engine.connect() as connection:
+            connection.execute(sa.text("SELECT 1"))
+
     def check_schema(self) -> None:
         with self.engine.connect() as connection:
             version = connection.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one()

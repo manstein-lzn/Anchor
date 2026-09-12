@@ -192,7 +192,7 @@
 ## Not yet implemented
 
 - Failure fan-out/cancellation of in-flight sibling branches and dispatch supervision
-  beyond receiver retry logging
+  beyond receiver retry logging (DEVELOPMENT_PLAN P0.2, the next slice)
 - PostgreSQL/vector memory projection and worker recovery supervision
 - **Model call recording and replay** (ADR-044). Steps 1-2 are done. Every model
   call is written as an immutable projection with a `model.call` event; the wrapper
@@ -208,6 +208,18 @@
   context policy, which can only be judged by controlled comparison. See
   `docs/RECORDING_AND_REPLAY.md`.
 - Context engine and memory policies beyond the durable input snapshot boundary
+- **Persistent services and restart recovery** (done, DEVELOPMENT_PLAN P0.1): seven
+  user-level units (api, receiver, worker, control, verifier, scheduler, supervisor) are
+  installed and enabled, each declaring every path explicitly and carved with
+  `StartLimitIntervalSec`/`StartLimitBurst` so a crash loop is a visible failure rather
+  than a permanent `activating`. Every service runs `anchor.runtime.preflight` before its
+  loop: no silent database URL fallback, schema migrated, runtime profile parseable,
+  artifact root writable, with an unmigrated database distinguished from an unreachable
+  one. Verified by `scripts/validate_service_recovery.py`: a worker is stopped mid-node,
+  the lease is reported `stale` and `recoverable` rather than silently reclaimed, explicit
+  recovery re-queues the node, and the run closes with a continuous event sequence and no
+  duplicated operation. **Not done**: lease observation and recovery have no
+  `anchor.client` method, so an agent cannot do what this acceptance does.
 - **A node-scoped harness** (done): re-run one node attempt against the input it
   actually received, read from its own persisted context snapshot and assembled by
   the same function the worker uses. Measured on a real run: re-running the writer
@@ -252,33 +264,32 @@
 ## Next milestone
 
 The core product is complete end to end: author a graph, run it durably, watch it,
-intervene, and (for the academic graph) receive a reviewed paper. What remains is
-consolidation rather than new capability.
+intervene, and (for the academic graph) receive a reviewed paper. The next phase is
+hardening and provider-free verification, not RSI or a broad cognition expansion.
+
+The authoritative execution plan is [`docs/DEVELOPMENT_PLAN.md`](docs/DEVELOPMENT_PLAN.md).
+It separates the current product runtime, optional continuity experiments, and future
+RSI. No task is complete until its normal, failure, restart and audit evidence is
+reported.
 
 ```text
-P0 Harden what exists
-   - A2A gateway alongside MCP, over the same anchor.client operation layer.
-   - Memory projection so cross-run memory is reachable from a node's context,
-     not only from the API.
-   - Make the runtime services survive a host reboot (persistent systemd units
-     rather than transient ones), so a long run is not lost to a restart.
-   - A configurable ceiling on revision rounds, expressed as operator policy.
+P0 Runtime hardening
+   - Persistent services and host-restart recovery.
+   - Failure fan-out/cancellation and dispatch supervision.
+   - Explicit production-boundary failures and diagnostics.
 
-P1 Cost and verification economics
-   - A cross-run content cache so a second run on one topic reuses retrieved
-     evidence instead of re-fetching it (W4 in WORKSPACE.md).
-   - A soft budget alert on a run, so an unexpected burn is visible while it
-     happens rather than on the invoice.
+P1 Replay and economics
+   - Whole-campaign model recording/replay and retention.
+   - Stable-prefix, working-set and billed-token telemetry.
+   - Cross-run immutable content cache.
 
-P2 Quality infrastructure
-   - Run the deterministic validation scripts (workspace, lineage, parallel, MCP)
-     against recorded model responses so they can run in CI without a provider.
-   - Extend the architecture gates with the deep-research invariants that proved
-     load-bearing: one source-verification policy, stable citation numbers, and
-     approval following the reviewer's stated bar.
+P2 Quality and product completion
+   - Provider-free end-to-end CI from recorded model responses.
+   - Revision policy, approval surface and protocol stabilization.
 
-P3 Known limitations to revisit only if a real run demands it
-   - Parallel research lanes (research sub-topics concurrently) to shorten wall
-     clock; the sources' rate limits remain the floor.
-   - `tree_digest` is built on git blob ids; a content-addressed object format
-     would decouple it.
+P3 Optional continuity experiments
+   - Only after P0-P2: behavioral takeover and controlled working-set selection.
+
+P4 Future RSI
+   - Offline attribution, candidate strategy evaluation and approved versioned changes.
+```

@@ -44,7 +44,14 @@ async def serve():
         stop.set(); store.close()
 
 def main():
-    logging.basicConfig(level=AnchorSettings().log_level)
+    from anchor.runtime.preflight import require_environment
+
+    settings = AnchorSettings()
+    logging.basicConfig(level=settings.log_level)
+    # Artifacts too: this service is what enforces retention, so it is the one that must be
+    # able to find the artifacts it is measuring.
+    require_environment(role="scheduler", database_url=settings.database_url,
+                        artifact_root=settings.artifact_root)
     try: asyncio.run(serve())
     except KeyboardInterrupt: logging.getLogger("anchor.scheduler").info("scheduler stopped")
 

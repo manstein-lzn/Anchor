@@ -101,9 +101,14 @@ async def serve() -> None:
 
 
 def main() -> None:
+    from anchor.runtime.preflight import require_environment
     from anchor.runtime.settings import AnchorSettings
 
-    logging.basicConfig(level=AnchorSettings().log_level)
+    settings = AnchorSettings()
+    logging.basicConfig(level=settings.log_level)
+    require_environment(role="verifier_worker", database_url=settings.database_url,
+                        runtime_config=settings.runtime_config,
+                        artifact_root=settings.artifact_root)
     try:
         asyncio.run(serve())
     except KeyboardInterrupt:

@@ -1,5 +1,5 @@
 [Unit]
-Description=Anchor Agent worker
+Description=Anchor API and web console backend
 After=network-online.target
 Wants=network-online.target
 
@@ -17,8 +17,7 @@ Environment=ANCHOR_ARTIFACT_ROOT=%h/Anchor/.local/artifacts
 Environment=ANCHOR_WORKSPACE_ROOT=%h/Anchor/.local/workspaces
 Environment=ANCHOR_MEMORY_PATH=%h/Anchor/.local/memory.jsonl
 Environment=ANCHOR_RUNTIME_CONFIG=%h/Anchor/.local/runtime.json
-Environment=ANCHOR_WORKER_ID=anchor-worker-%H
-ExecStart=%h/Anchor/.venv/bin/python -m anchor.runtime.worker_service
+ExecStart=%h/Anchor/.venv/bin/python -m anchor.api
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=true
