@@ -34,6 +34,14 @@ class AnchorSettings(BaseSettings):
     # reproducible without a provider, and what separates "the model is nondeterministic"
     # from "our engine is". Empty means serve live.
     replay_of: str = ""
+    # Cross-run cache for fetched research content. A projection, not canonical state: it lives
+    # in its own directory, deleting it is supported, and nothing about a run's completion
+    # depends on it. Empty disables it, which is the default because a cache that is on by
+    # default is a cache nobody decided to have.
+    content_cache_root: str = ""
+    # Optional expiry. Unset means an entry never goes stale, which is right for immutable
+    # published papers and wrong for anything that changes; the caller decides.
+    content_cache_ttl_seconds: float | None = None
     api_token: str | None = None
     worker_id: str = "anchor-worker"
     control_worker_id: str = "anchor-control-worker"

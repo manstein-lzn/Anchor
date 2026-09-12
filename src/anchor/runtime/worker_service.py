@@ -17,6 +17,7 @@ from anchor.runtime.artifacts import LocalArtifactStore
 from anchor.runtime.capabilities import CapabilityRegistry
 from anchor.runtime.tool_gateway import BubblewrapBackend, SubprocessBackend, ToolGateway
 from anchor.runtime.config import load_runtime_config
+from anchor.runtime.content_cache import ContentCache
 from anchor.runtime.model_gateway import build_model_gateway
 from anchor.runtime.model_recording import ModelRecorder, RecordingMode
 from anchor.runtime.secrets import ChainedSecretProvider, EnvironmentSecretProvider, JsonFileSecretProvider
@@ -122,8 +123,13 @@ async def serve() -> None:
         logger.warning("bubblewrap unavailable; tool execution falls back to dev subprocess")
         backend = SubprocessBackend()
     workspace_manager, workspace_tools = _workspace_toolset(store, settings)
-    tool_loop = AgentToolLoop(ToolGateway(store, registry, artifacts, backend), artifacts,
-                              native=workspace_tools)
+    tool_gateway = ToolGateway(store, registry, artifacts, backend)
+    if settings.content_cache_root:
+        # Off unless configured: a cache that is on by default is a cache nobody decided to have,
+        # and its whole cost model depends on what is being fetched.
+        tool_gateway.content_cache = ContentCache(
+            settings.content_cache_root, ttl_seconds=settings.content_cache_ttl_seconds)
+    tool_loop = AgentToolLoop(tool_gateway, artifacts, native=workspace_tools)
     from anchor.runtime.content_commit import ContentCommitter
     committer = ContentCommitter(store, workspace_manager)
     behaviors = BehaviorRegistry()

@@ -7,6 +7,10 @@ validated IP address while retaining the original TLS hostname.
 
 from __future__ import annotations
 
+import logging
+from contextlib import contextmanager
+from typing import Any
+
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
@@ -99,6 +103,9 @@ def _normalize_source_url(value: str) -> str:
                        netloc or parsed.netloc, parsed.path, parsed.query, parsed.fragment))
 
 
+logger = logging.getLogger("anchor.research_tools")
+
+
 class ResearchRequest(DomainModel):
     query: str | None = Field(default=None, min_length=1, max_length=1000)
     url: str | None = Field(default=None, min_length=1, max_length=3000)
@@ -113,6 +120,61 @@ class ResearchRequest(DomainModel):
     # Batch reads: fetching a group in one call keeps the model out of the I/O
     # loop, which is where a research campaign spends most of its wall clock.
     urls: list[str] | None = Field(default=None, max_length=BATCH_READ_LIMIT)
+
+
+#: The cache a fetch may consult, and the context that scopes its keys. Set by the tool gateway
+#: around a tool call, because `fetch_public` is per-URL and knows nothing about which run,
+#: which graph version or which task asked — and a key that omitted those would serve one task's
+#: content to another. A module-level holder rather than a threaded parameter because the fetch
+#: call sits behind retry and redirect logic that has no business carrying a cache key.
+_CACHE: Any = None
+_CACHE_CONTEXT: tuple[str, str] | None = None
+
+
+@contextmanager
+def content_cache_scope(cache: Any, *, graph_version_id: str, scope: str):
+    """Make ``cache`` available to fetches made inside this block, keyed by that context.
+
+    The graph version and the task scope are part of the key because the *decision* to fetch
+    belongs to a version's policy and a task's purpose, even though the bytes at a URL do not.
+    """
+    global _CACHE, _CACHE_CONTEXT
+    previous = (_CACHE, _CACHE_CONTEXT)
+    _CACHE, _CACHE_CONTEXT = cache, (graph_version_id, scope)
+    try:
+        yield cache
+    finally:
+        _CACHE, _CACHE_CONTEXT = previous
+
+
+def _cached_fetch(url: str, fetch: Any) -> tuple[str, str, bytes]:
+    """Consult the cache, fetch if it does not have it, and store what came back.
+
+    Returns ``(content_type, final_url, body)`` so the caller cannot tell a hit from a fetch —
+    the point is to avoid the request, not to change the result. Every non-hit outcome falls
+    through to the real fetch, including ``corrupt``: a damaged entry is reported and then
+    replaced, rather than being returned or left in place.
+    """
+    cache, context = _CACHE, _CACHE_CONTEXT
+    if cache is None or context is None:
+        return fetch()
+    from anchor.runtime.content_cache import CacheKey
+
+    key = CacheKey(url=url, graph_version_id=context[0], scope=context[1])
+    lookup = cache.get(key)
+    if lookup.hit and lookup.entry is not None:
+        return lookup.entry.content_type, lookup.entry.final_url, lookup.entry.body
+    content_type, final_url, body = fetch()
+    try:
+        cache.put(key, content_type=content_type, final_url=final_url, body=body,
+                  replacement=lookup.outcome == "corrupt")
+    except FileExistsError:
+        # Another process wrote it between the lookup and now. Its bytes are as good as ours.
+        pass
+    except OSError as exc:
+        # A cache that cannot be written must not fail a fetch that already succeeded.
+        logger.warning("could not store a content cache entry for %s: %s", url, exc)
+    return content_type, final_url, body
 
 
 def public_address(hostname: str, port: int) -> str:
@@ -214,7 +276,8 @@ def search(request: ResearchRequest, *, timeout_seconds: float) -> dict:
         url = "https://api.crossref.org/works?" + urlencode({
             "query.bibliographic": request.query, "rows": request.limit,
         })
-        final_url, _, body = fetch_public(url, timeout_seconds=timeout_seconds)
+        final_url, _, body = _cached_fetch(
+            url, lambda: fetch_public(url, timeout_seconds=timeout_seconds))
         data = json.loads(body)["message"]
         papers = []
         for item in data.get("items", []):
@@ -279,9 +342,11 @@ def _fetch_document(url: str, *, offset: int, page_start: int, timeout_seconds: 
     if re.match(r"https?://(?:www\.)?arxiv\.org/pdf/", url):
         html_url = re.sub(r"/pdf/", "/html/", url).removesuffix(".pdf")
         try:
-            final, content_type, body = fetch_public(html_url, timeout_seconds=timeout_seconds)
+            final, content_type, body = _cached_fetch(
+                html_url, lambda: fetch_public(html_url, timeout_seconds=timeout_seconds))
         except ResearchToolError:
-            final, content_type, body = fetch_public(url, timeout_seconds=timeout_seconds)
+            final, content_type, body = _cached_fetch(
+                url, lambda: fetch_public(url, timeout_seconds=timeout_seconds))
     else:
         final, content_type, body = fetch_public(url, timeout_seconds=timeout_seconds)
     page_count = None

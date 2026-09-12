@@ -230,6 +230,13 @@
   recovery re-queues the node, and the run closes with a continuous event sequence and no
   duplicated operation. **Not done**: lease observation and recovery have no
   `anchor.client` method, so an agent cannot do what this acceptance does.
+- **Cross-run content cache** (done, DEVELOPMENT_PLAN P1.3, ADR-050): fetched research
+  content is cached in its own directory, outside the database and the artifact store, so
+  deleting it is supported and its loss is never a recovery failure. Every read reports
+  `hit`/`miss`/`expired`/`corrupt`, the hash is recomputed rather than trusted, the key includes
+  the graph version and the task scope, and overwriting requires saying why. Off unless
+  `ANCHOR_CONTENT_CACHE_ROOT` is set. 18 tests. **Not done**: no remote backend, and the cache is
+  not consulted by workspace materialisation, only by research fetches.
 - **Production boundaries** (done, DEVELOPMENT_PLAN P0.3, ADR-049): a URL-shaped
   `ANCHOR_ARTIFACT_ROOT` is refused at startup with `artifact_backend_unsupported` instead of
   becoming a local directory called `s3:/bucket/artifacts` — measured, not hypothesised.

@@ -72,6 +72,8 @@
 | 失败扇出 | `state/checkpoints.py` | 总是执行 | task_behavior | 节点失败导致 run 失败时 | 该 run 全部非终态节点 → `cancelled` + `error_code=run_failed`；剩余 lease 释放；`run.failed` 记录 `abandoned_nodes`。重复投递幂等 |
 | `FencedAttempt` | `state/errors.py` | — | task_behavior | lease 在执行中被释放 | 抛给 worker，worker 安静停止；**不**再试图失败一个已有终态的节点 |
 | dispatch 逐条隔离 | `runtime/dispatch.py` | 总是执行 | resource_capacity | 一条消息不可投递 | 该条留在 pending 重试，**不再中止整批**；记录 `run.dispatch_failed`（幂等键固定，重复重试只记一次） |
+| `ANCHOR_CONTENT_CACHE_ROOT` | `runtime/content_cache.py` | 空（关闭） | resource_capacity | 抓取研究内容 | 未设置即不缓存。设置了则是四选一结果：`hit`/`miss`/`expired`/`corrupt`；后三者都回落到真实抓取。损坏由**每次读取重算 sha256** 检出 |
+| `ANCHOR_CONTENT_CACHE_TTL_SECONDS` | 同上 | 未设（不过期） | resource_capacity | 缓存条目老化 | 不设适用于不可变已发表论文；设了则过期等价于 miss |
 | 服务启动 preflight | `runtime/preflight.py` | 总是执行 | task_behavior | 每个服务进入主循环之前 | 退出码 2 + stderr 上一行 JSON：`database_url_missing` / `database_unreachable` / `schema_not_migrated` / `runtime_config_missing` / `runtime_config_invalid` / `runtime_config_empty` / `artifact_root_unwritable`。**没有静默回落** |
 | `systemd StartLimitIntervalSec` / `Burst` | `infra/systemd/*.service` | 60s / 5 | task_behavior | 崩溃循环 | 超过后 systemd 标记 `failed`，不再无限重试成 `activating` |
 | `ANCHOR_MODEL_RECORDING` | `runtime/settings.py` | `off` | operator_policy | 模型调用的录制/回放（ADR-044） | `off` 不安装 wrapper，零开销；`record` 写投影；`replay` 按位置提供录制答案并拒绝越界 |

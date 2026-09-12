@@ -17,6 +17,8 @@ v1 rules:
 
 from __future__ import annotations
 
+from typing import Any
+
 import logging
 import json
 import shutil
@@ -34,7 +36,8 @@ from anchor.runtime.artifacts import ArtifactStore
 from anchor.state.errors import OperationConflict
 from anchor.runtime.capabilities import CapabilityRegistry, CapabilityRegistryError
 from anchor.runtime.research_tools import (
-    RESEARCH_TOOLS, ResearchRequest, ResearchToolError, execute_research,
+    RESEARCH_TOOLS, ResearchRequest, ResearchToolError, content_cache_scope,
+    execute_research,
 )
 
 
@@ -184,6 +187,23 @@ class ToolGateway:
         self.registry = registry
         self.artifacts = artifacts
         self.backend = backend
+        #: Optional cross-run cache for fetched research content. Declared rather than attached
+        #: by whoever remembers to, so a reader can see it exists and a type checker can too.
+        self.content_cache: Any = None
+
+    def _research(self, tool_ref: str, call: ResearchRequest, lease, *,
+                  timeout_seconds: float) -> str:
+        """Run a research tool, with the content cache scoped if one is configured."""
+        cache = getattr(self, "content_cache", None)
+        if cache is None:
+            return execute_research(tool_ref, call, timeout_seconds=timeout_seconds)
+        run = self.store.get_run(lease.run_id)
+        task = self.store.get_task(run.task_id) if run is not None else None
+        if run is None or task is None:
+            return execute_research(tool_ref, call, timeout_seconds=timeout_seconds)
+        with content_cache_scope(cache, graph_version_id=str(run.graph_version_id),
+                                 scope=task.objective):
+            return execute_research(tool_ref, call, timeout_seconds=timeout_seconds)
 
     def _build_argv(self, tool_ref: str, call: ToolCall) -> list[str]:
         if tool_ref == "echo":
@@ -254,6 +274,9 @@ class ToolGateway:
                     else ToolCall.model_validate(arguments))
         except ValueError as exc:
             raise ToolDenied("invalid_arguments", f"tool arguments rejected: {exc}") from None
+        # Narrowed by a check rather than asserted to the type checker: the research path needs
+        # the typed request, and a cast here would hide a genuine mismatch as a silent one.
+        research_call = call if isinstance(call, ResearchRequest) else None
         if tool_ref in HTTP_TOOLS:
             self._validate_http(call, allow_private=tool.allow_private_network)
         argv = None if tool_ref in RESEARCH_TOOLS or tool_ref in HTTP_TOOLS else self._build_argv(tool_ref, call)
@@ -314,7 +337,13 @@ class ToolGateway:
                                   result_ref=finished.result_ref, error_code=finished.error_code)
         if tool_ref in RESEARCH_TOOLS:
             try:
-                text = execute_research(tool_ref, call, timeout_seconds=timeout_seconds)
+                if research_call is None:  # the validation above would have raised first
+                    raise ToolDenied("invalid_arguments", "research call was not a ResearchRequest")
+                # The cache is scoped to the graph version and the task's objective, so content
+                # fetched under one version's policy or for one task is never served to another.
+                # A missing scope or cache simply means no caching.
+                text = self._research(tool_ref, research_call, lease,
+                                      timeout_seconds=timeout_seconds)
                 result = SandboxResult(0, text.encode("utf-8"), b"", False)
             except ResearchToolError as exc:
                 failure_ref = self.artifacts.put_text(json.dumps({

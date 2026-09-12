@@ -1211,3 +1211,44 @@ the CLI something the console refuses to show.
 
 A limitation that is only written down is not a boundary, and a refusal at startup is worth
 more than a failure at use.
+
+## ADR-050: The content cache is a directory that can be deleted, and every read says why it was not a hit
+
+Re-running a literature review re-fetches the same papers. `ContentCache` avoids that, and the
+design is mostly about what it refuses to do, because a cache is where a system starts lying to
+itself.
+
+**It is a projection, and that is structural rather than promised.** It lives in its own
+directory, outside the database and outside the artifact store, so deleting it is supported and
+its loss can never be a recovery failure — the bytes it holds are also reachable through the
+run's own artifacts, and losing every entry can cost a fetch and nothing else. It is off unless
+`ANCHOR_CONTENT_CACHE_ROOT` is set, because a cache that is on by default is a cache nobody
+decided to have and whose cost model nobody chose.
+
+**Every read reports one of four outcomes**: `hit`, `miss`, `expired`, `corrupt`. A caller that
+only cares about avoiding a fetch treats the last three the same, but an operator can see which
+one it was, and that distinction is the difference between a disk problem being visible and
+being hidden behind a miss.
+
+**The hash is recomputed on every read**, not trusted from the metadata. That is what makes a
+truncated or edited body *detected* rather than returned, and it is the check that stops a
+damaged entry from becoming evidence. Metadata that does not match the key, or a format this
+build does not understand, is likewise corrupt: a file that appeared under the wrong name may
+not be served as the right answer.
+
+**The key includes the graph version and the task scope.** The bytes at a URL do not depend on
+either, but the *decision* to fetch them does: timeouts, allowed hosts and extraction belong to
+a graph version, and a task's scope decides what was being looked for. Serving one version's
+fetch to another would let an older policy bypass a newer one; serving one scope to another
+would move content between tasks with no edge declaring it, which is the same thing the
+declared-input rule exists to prevent.
+
+**Overwriting an existing entry requires saying why.** `put` refuses unless the caller passes
+`replacement=True`, which it does only after a lookup found the entry unusable. Silently
+overwriting would erase the evidence of whatever damaged it. This is what makes the refusal
+safe rather than obstructive: a corrupt entry is reported, then replaced after a real fetch.
+
+The context travels through a `content_cache_scope` block rather than as a parameter, because
+`fetch_public` is per-URL and sits behind retry and redirect logic that has no business carrying
+a cache key. Outside a scope nothing is cached, so a key can never be assembled with an
+incomplete context — the failure mode a threaded-but-optional parameter invites.
