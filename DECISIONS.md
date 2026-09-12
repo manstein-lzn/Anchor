@@ -1252,3 +1252,29 @@ The context travels through a `content_cache_scope` block rather than as a param
 `fetch_public` is per-URL and sits behind retry and redirect logic that has no business carrying
 a cache key. Outside a scope nothing is cached, so a key can never be assembled with an
 incomplete context — the failure mode a threaded-but-optional parameter invites.
+
+## ADR-051: `max_rounds` is enforced where the loop turns, not merely validated
+
+`max_rounds` passed graph validation and was read by no code. That is worse than an absent
+option: an operator sets a ceiling, sees no error, and believes there is one. The mapping table
+in `domain/ir.py` went further and said `run_timeout_seconds` was "the only recognized key" while
+the validator accepted two — the documentation and the code disagreed, and the documentation was
+the one an operator would read.
+
+It is now honored where a back-edge would start another revision: past the ceiling the edge is
+not selected, and the decision records `reason=revision_ceiling`. A reason of its own rather
+than `condition_false`, because a reader should not have to work out whether the loop stopped
+because an operator capped it or because a condition was false.
+
+Absence still means unbounded, deliberately. A healthy task must not be stopped by a round count
+nobody chose, so the ceiling exists only when someone sets it, and the runtime never supplies a
+default.
+
+The ceiling belongs to the pinned graph version, which is what makes "changing the policy does
+not affect a running task" true rather than intended: a run pins a version, and editing the
+graph publishes a new one. Propagation re-reads the key rather than trusting validation, because
+a run can be pinned to a version published before that rule existed.
+
+Approval surface consistency and the Run Console's states were already in place and are now
+asserted instead of assumed: the CLI, the console and the API all carry approve and reject, they
+share `anchor.client`, and the console surfaces every state a run can wait or stop in.

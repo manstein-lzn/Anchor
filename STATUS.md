@@ -230,6 +230,14 @@
   recovery re-queues the node, and the run closes with a continuous event sequence and no
   duplicated operation. **Not done**: lease observation and recovery have no
   `anchor.client` method, so an agent cannot do what this acceptance does.
+- **Operator policy** (done, DEVELOPMENT_PLAN P2.2, ADR-051): `max_rounds` was validated and
+  read by nothing — an operator could set a ceiling, see no error, and believe there was one.
+  It is now enforced where a back-edge would start another revision, recorded as its own reason
+  (`revision_ceiling`) rather than looking like a condition that came out false, and it belongs
+  to the pinned graph version so editing a graph cannot change what a running task may do.
+  Approval surface consistency and the Run Console's wait/pause/unknown states were already in
+  place and are now asserted. **Not done**: `max_rounds` caps revisions per node attempt, not a
+  total across a run; the plan's phrase "revision ceiling" is satisfied per loop, not globally.
 - **Cross-run content cache** (done, DEVELOPMENT_PLAN P1.3, ADR-050): fetched research
   content is cached in its own directory, outside the database and the artifact store, so
   deleting it is supported and its loss is never a recovery failure. Every read reports
