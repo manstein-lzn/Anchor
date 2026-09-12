@@ -15,7 +15,7 @@ from anchor.domain.models import (ContextSnapshot, EdgeDecision, NodeRun, RunSta
 from anchor.domain.propagation import decide_outgoing_edges, plan_propagation
 from . import schema as s
 from .base import _StoreHost, decode, wait_status_for
-from .errors import ConcurrencyConflict
+from .errors import ConcurrencyConflict, FencedAttempt
 
 
 class CheckpointStoreMixin(_StoreHost):
@@ -237,6 +237,63 @@ class CheckpointStoreMixin(_StoreHost):
             if generation is not None:
                 connection.execute(sa.update(s.node_runs).where(s.node_runs.c.id == lease["node_run_id"]).values(context_generation=generation))
             return created
+    def _fail_run_and_task(self, connection, *, lease, run, error_code: str, phase: str,
+                           now, generation) -> None:
+        """Mark the run and its task failed, ending everything they will never reach.
+
+        The two guards are the same decision made twice — a run and its task are terminal
+        together or not at all — so they live here rather than inline.
+        """
+        if run["status"] in ("failed", "cancelled", "completed"):
+            return
+        # Before announcing the failure, so the event can say how many nodes it ended.
+        abandoned = self._abandon_unreachable_nodes(connection, lease["run_id"], now)
+        run_sequence = self._append_event(
+            connection, stream_id=UUID(lease["run_id"]), event_type="run.failed",
+            payload={"node_id": lease["node_id"], "claim_id": str(lease["claim_id"]),
+                     "error_code": error_code, "phase": phase,
+                     "abandoned_nodes": abandoned},
+            idempotency_key=f"run:{lease['run_id']}:failed")
+        connection.execute(sa.update(s.runs).where(s.runs.c.id == lease["run_id"]).values(
+            status="failed", current_phase=phase, revision=run["revision"] + 1,
+            last_event_sequence=run_sequence,
+            context_generation=generation if generation is not None else run["context_generation"],
+            updated_at=now))
+        task = connection.execute(sa.select(s.tasks).where(
+            s.tasks.c.id == run["task_id"]).with_for_update()).mappings().one()
+        if task["status"] in (TaskStatus.FAILED.value, TaskStatus.CANCELLED.value,
+                              TaskStatus.COMPLETED.value):
+            return
+        self._append_event(
+            connection, stream_id=UUID(run["task_id"]), event_type="task.failed",
+            payload={"run_id": lease["run_id"], "node_id": lease["node_id"],
+                     "error_code": error_code},
+            idempotency_key=f"run:{lease['run_id']}:task-failed")
+        connection.execute(sa.update(s.tasks).where(s.tasks.c.id == run["task_id"]).values(
+            status=TaskStatus.FAILED.value, revision=task["revision"] + 1, updated_at=now))
+
+    def _abandon_unreachable_nodes(self, connection, run_id: str, now) -> int:
+        """End every node this run will never reach, and release their leases.
+
+        The shape is copied from ``stop_run``, which already did this for operator stops;
+        failure was the path that had been left out. Without it those nodes stay ``pending``
+        forever with nothing recording why, which from outside is indistinguishable from a run
+        still waiting for a worker.
+
+        Releasing the leases is what fences an in-flight sibling: completion requires an
+        unreleased lease, so it cannot write a result into a run that has already failed.
+        Returns how many nodes were ended, so the ``run.failed`` event can record it.
+        """
+        abandoned = connection.execute(sa.update(s.node_runs).where(
+            s.node_runs.c.run_id == run_id,
+            s.node_runs.c.status.not_in(("completed", "failed", "cancelled", "skipped")),
+        ).values(status="cancelled", error_code="run_failed",
+                 revision=s.node_runs.c.revision + 1, updated_at=now)).rowcount
+        connection.execute(sa.update(s.node_leases).where(
+            s.node_leases.c.run_id == run_id,
+            s.node_leases.c.released_at.is_(None)).values(released_at=now))
+        return abandoned
+
     def fail_node_and_propagate(self, claim_id: UUID, worker_id: str, *, error_code: str,
                                 phase: str = "execute",
                                 verification: VerificationRecord | None = None,
@@ -258,11 +315,19 @@ class CheckpointStoreMixin(_StoreHost):
             node = connection.execute(sa.select(s.node_runs).where(s.node_runs.c.id == lease["node_run_id"])).mappings().first()
             if node is None:
                 raise KeyError(lease["node_run_id"])
-            if node["status"] == "failed" and lease["released_at"] is not None:
-                if node["error_code"] != error_code:
-                    raise ConcurrencyConflict("failed node already has a different error")
-                return decode(NodeRun, node)
-            if lease["released_at"] is not None or node["status"] != "running":
+            if lease["released_at"] is not None:
+                if node["status"] == "failed":
+                    if node["error_code"] != error_code:
+                        # Still a conflict: one node failed for two different reasons is an
+                        # inconsistency, not a replay. Only the same reason is idempotent.
+                        raise ConcurrencyConflict("failed node already has a different error")
+                    return decode(NodeRun, node)
+                # Not failed and not running: the failure fan-out ended it, so a worker
+                # arriving here is fenced. That is the run ending under it, not a fault.
+                raise FencedAttempt(
+                    f"lease {claim_id} was released while its worker held it; the node has "
+                    f"already been ended by whoever released it")
+            if node["status"] != "running":
                 raise ConcurrencyConflict("node is not running")
             run = connection.execute(sa.select(s.runs).where(s.runs.c.id == lease["run_id"])).mappings().one()
             if run["status"] in ("cancelled", "completed"):
@@ -305,25 +370,9 @@ class CheckpointStoreMixin(_StoreHost):
                 context_generation=generation if generation is not None else node["context_generation"],
                 revision=node["revision"] + 1, updated_at=now))
             connection.execute(sa.update(s.node_leases).where(s.node_leases.c.claim_id == str(claim_id)).values(released_at=now))
-            if run["status"] not in ("failed", "cancelled", "completed"):
-                run_sequence = self._append_event(
-                    connection, stream_id=UUID(lease["run_id"]), event_type="run.failed",
-                    payload={"node_id": lease["node_id"], "claim_id": str(claim_id), "error_code": error_code, "phase": phase},
-                    idempotency_key=f"run:{lease['run_id']}:failed")
-                connection.execute(sa.update(s.runs).where(s.runs.c.id == lease["run_id"]).values(
-                    status="failed", current_phase=phase, revision=run["revision"] + 1,
-                    last_event_sequence=run_sequence,
-                    context_generation=generation if generation is not None else run["context_generation"],
-                    updated_at=now))
-                task = connection.execute(sa.select(s.tasks).where(
-                    s.tasks.c.id == run["task_id"]).with_for_update()).mappings().one()
-                if task["status"] not in (TaskStatus.FAILED.value, TaskStatus.CANCELLED.value, TaskStatus.COMPLETED.value):
-                    self._append_event(
-                        connection, stream_id=UUID(run["task_id"]), event_type="task.failed",
-                        payload={"run_id": lease["run_id"], "node_id": lease["node_id"], "error_code": error_code},
-                        idempotency_key=f"run:{lease['run_id']}:task-failed")
-                    connection.execute(sa.update(s.tasks).where(s.tasks.c.id == run["task_id"]).values(
-                        status=TaskStatus.FAILED.value, revision=task["revision"] + 1, updated_at=now))
+            self._fail_run_and_task(connection, lease={**lease, "claim_id": str(claim_id)},
+                                    run=run, error_code=error_code, phase=phase, now=now,
+                                    generation=generation)
             return decode(NodeRun, connection.execute(sa.select(s.node_runs).where(s.node_runs.c.id == lease["node_run_id"])).mappings().one())
     def retry_node_and_propagate(self, claim_id: UUID, worker_id: str, *, error_code: str,
                                  phase: str = "agent",

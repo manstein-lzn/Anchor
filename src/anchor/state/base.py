@@ -13,7 +13,7 @@ import sqlalchemy as sa
 
 from anchor.domain.models import utc_now
 from . import schema as s
-from .errors import ConcurrencyConflict, DuplicateEvent
+from .errors import ConcurrencyConflict, DuplicateEvent, FencedAttempt
 
 
 WAITING_NODE_TYPES = frozenset({"approval", "human_task", "wait_for_event"})
@@ -104,7 +104,13 @@ class StoreBase:
             s.node_leases.c.claim_id == str(claim_id)).with_for_update()).mappings().first()
         if lease is None:
             raise KeyError(claim_id)
-        if lease["worker_id"] != worker_id or lease["released_at"] is not None:
+        if lease["released_at"] is not None:
+            # Released while held: the run ended and this node was ended with it. Raised as
+            # its own condition so the worker can stop quietly instead of reporting a fault.
+            raise FencedAttempt(
+                f"lease {claim_id} was released while its worker held it; the node has "
+                f"already been ended by whoever released it")
+        if lease["worker_id"] != worker_id:
             raise ConcurrencyConflict("lease is not owned by worker")
         node = connection.execute(sa.select(s.node_runs).where(
             s.node_runs.c.id == lease["node_run_id"]).with_for_update()).mappings().one()

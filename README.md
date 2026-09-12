@@ -304,6 +304,10 @@ operation. Evidence is written to `.local/reports/recovery-<run_id>.json`.
 Credentials are never embedded: secrets resolve from the file named by `secret_file` in the
 runtime profile.
 
+Services run the code that was on disk when they started. After changing anything under
+`src/`, restart the units — an acceptance can otherwise pass or fail against a
+process running yesterday's code, which is how a fan-out fix appeared not to work.
+
 ## Development
 
 An online academic literature-review graph is available: it researches a topic in

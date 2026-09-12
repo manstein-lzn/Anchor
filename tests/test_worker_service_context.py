@@ -178,7 +178,10 @@ def test_result_sink_marks_invalid_condition_result_as_known_failure(tmp_path):
         nodes = {item.node_id: item for item in store.list_node_runs(receipt.run_id)}
         assert nodes["route"].status.value == "failed"
         assert nodes["route"].error_code == "routing_condition_invalid"
-        assert nodes["next"].status.value == "pending"
+        # `cancelled`, not `pending`: the run failed, so the unreachable node is ended with a
+        # recorded reason instead of being left to look like it is still waiting for a worker.
+        assert nodes["next"].status.value == "cancelled"
+        assert nodes["next"].error_code == "run_failed"
         assert store.get_run(receipt.run_id).status.value == "failed"
         assert store.list_edge_decisions(receipt.run_id) == []
     finally:

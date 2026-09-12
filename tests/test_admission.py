@@ -10,6 +10,8 @@ from uuid import uuid4
 
 import pytest
 
+from anchor.state.errors import FencedAttempt
+
 sa = pytest.importorskip("sqlalchemy")
 
 from anchor.domain.admission import RunRequest
@@ -226,9 +228,18 @@ def test_transport_failure_does_not_acknowledge_message(seeded):
     class Offline:
         async def accept(self, message):
             raise ConnectionError("offline")
-    with pytest.raises(ConnectionError):
-        asyncio.run(dispatch_pending(store, Offline()))
-    assert len(store.pending_dispatches()) == 1
+    # A message that cannot be accepted is retried on the next pass rather than aborting the
+    # batch: one undeliverable message used to stall every dispatch queued behind it. It is
+    # not acknowledged, and the failure is recorded durably — a transport outage now produces
+    # one queryable event per affected run instead of a line in a journal.
+    delivered = asyncio.run(dispatch_pending(store, Offline()))
+    assert delivered == 0
+    pending = store.pending_dispatches()
+    assert len(pending) == 1, "an undelivered message must stay pending"
+    events = [item for item in store.list_events(pending[0].run_id)
+              if item["event_type"] == "run.dispatch_failed"]
+    assert len(events) == 1
+    assert events[0]["payload"]["error_class"] == "ConnectionError"
 
 
 def test_receiver_accepts_dispatch_once_and_replay_is_safe(seeded):
@@ -447,12 +458,19 @@ def test_failed_run_never_revives_or_opens_downstream(seeded):
     right = store.claim_ready_node("worker-b", uuid4())
     assert left is not None and right is not None
     store.fail_node_and_propagate(left.claim_id, "worker-a", error_code="verification_failed", phase="verify")
-    store.complete_node_and_propagate(right.claim_id, "worker-b", output_ref="artifact://right")
+    # The sibling was in flight, so the fan-out ended it and released its lease. Completing
+    # is refused: a result must not be committed into a run that has already failed.
+    with pytest.raises(FencedAttempt):
+        store.complete_node_and_propagate(right.claim_id, "worker-b", output_ref="artifact://right")
     assert store.get_run(receipt.run_id).status.value == "failed"
     nodes = {node.node_id: node for node in store.list_node_runs(receipt.run_id)}
     assert nodes["left"].status.value == "failed"
-    assert nodes["right"].status.value == "completed"
-    assert nodes["join"].status.value == "pending"
+    assert nodes["left"].error_code == "verification_failed"
+    # Terminal with a recorded reason rather than left looking like it is still waiting.
+    assert nodes["right"].status.value == "cancelled"
+    assert nodes["right"].error_code == "run_failed"
+    assert nodes["join"].status.value == "cancelled"
+    assert nodes["join"].error_code == "run_failed"
     assert "run.completed" not in [event["event_type"] for event in store.list_events(receipt.run_id)]
 
 

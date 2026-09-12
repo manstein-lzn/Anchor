@@ -31,6 +31,7 @@ logger = logging.getLogger("anchor.worker")
 HEARTBEAT_FAILURE_LIMIT = 3
 from anchor.runtime.model_gateway import ModelGateway, ModelResponse
 from anchor.runtime.model_recording import CallContext, bind_call, unbind_call
+from anchor.state.errors import FencedAttempt
 from anchor.state.protocols import StateStore
 
 
@@ -411,6 +412,15 @@ class AgentNodeWorker:
                 await self.result_sink.persist_model_result(**result)
             except RoutingDecisionError:
                 raise  # the sink already failed the node
+            except FencedAttempt as exc:
+                # The lease was released while this node was executing: the run failed or was
+                # stopped, and the fan-out ended this node and fenced its result. That is the
+                # design working, not a fault, so stop quietly — trying to fail a node that
+                # already has a terminal state would raise a second time and put a stack trace
+                # in the journal for a run that behaved correctly.
+                logger.info("node %s was fenced while executing: %s", lease.node_id, exc)
+                return WorkerOutcome(lease.claim_id, lease.node_run_id,
+                                     ModelResponse(text="", provider="anchor", model="fenced"))
             except Exception:  # noqa: BLE001 - the completion transaction rolled back
                 self.store.fail_node_and_propagate(
                     lease.claim_id, worker_id, error_code="result_commit_failed",

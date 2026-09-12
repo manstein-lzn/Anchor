@@ -9,6 +9,8 @@ from uuid import uuid4
 
 import pytest
 
+from anchor.state.errors import FencedAttempt
+
 sa = pytest.importorskip("sqlalchemy")
 pytest.importorskip("alembic")
 from alembic import command
@@ -209,12 +211,24 @@ def test_failed_run_never_revives_or_opens_downstream(database):
     right = store.claim_ready_node("worker-b", uuid4())
     assert left is not None and right is not None
     store.fail_node_and_propagate(left.claim_id, "worker-a", error_code="verification_failed", phase="verify")
-    store.complete_node_and_propagate(right.claim_id, "worker-b", output_ref="artifact://right")
+    # The sibling was in flight when the branch failed, so the fan-out ended it and released
+    # its lease. Completing now is refused: a result must not be committed into a run that
+    # has already failed, and the refusal is reported as fencing rather than as a conflict,
+    # because a run ending under a worker is not a fault.
+    with pytest.raises(FencedAttempt):
+        store.complete_node_and_propagate(right.claim_id, "worker-b", output_ref="artifact://right")
     assert store.get_run(receipt.run_id).status is RunStatus.FAILED
+    assert store.list_active_leases() == []
     nodes = {node.node_id: node for node in store.list_node_runs(receipt.run_id)}
     assert nodes["left"].status.value == "failed"
-    assert nodes["right"].status.value == "completed"
-    assert nodes["join"].status.value == "pending"
+    assert nodes["left"].error_code == "verification_failed"
+    # Ended rather than left waiting, and each records why. `join` was `pending` and the
+    # sibling was in flight; both are now terminal, which is what makes a failed run
+    # distinguishable from a stalled one.
+    assert nodes["right"].status.value == "cancelled"
+    assert nodes["right"].error_code == "run_failed"
+    assert nodes["join"].status.value == "cancelled"
+    assert nodes["join"].error_code == "run_failed"
     assert "run.completed" not in [event["event_type"] for event in store.list_events(receipt.run_id)]
 
 

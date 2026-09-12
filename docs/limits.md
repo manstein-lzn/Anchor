@@ -69,6 +69,9 @@
 | `ANCHOR_STORAGE_ENFORCE` | 同上 | `true` | operator_policy | 滚动清理开关 | 关闭后预算仅提示；无预算时始终不删 |
 | `ANCHOR_STORAGE_SWEEP_INTERVAL` | 同上 | 60s | operator_policy | 清理扫描间隔 | 由 scheduler 服务执行 |
 | `ANCHOR_STORAGE_SWEEP_BATCH` / `_MAX_ROUNDS` | 同上 | 25 / 40 | operator_policy | 每轮淘汰条数与最大轮数 | 限制单次清理工作量 |
+| 失败扇出 | `state/checkpoints.py` | 总是执行 | task_behavior | 节点失败导致 run 失败时 | 该 run 全部非终态节点 → `cancelled` + `error_code=run_failed`；剩余 lease 释放；`run.failed` 记录 `abandoned_nodes`。重复投递幂等 |
+| `FencedAttempt` | `state/errors.py` | — | task_behavior | lease 在执行中被释放 | 抛给 worker，worker 安静停止；**不**再试图失败一个已有终态的节点 |
+| dispatch 逐条隔离 | `runtime/dispatch.py` | 总是执行 | resource_capacity | 一条消息不可投递 | 该条留在 pending 重试，**不再中止整批**；记录 `run.dispatch_failed`（幂等键固定，重复重试只记一次） |
 | 服务启动 preflight | `runtime/preflight.py` | 总是执行 | task_behavior | 每个服务进入主循环之前 | 退出码 2 + stderr 上一行 JSON：`database_url_missing` / `database_unreachable` / `schema_not_migrated` / `runtime_config_missing` / `runtime_config_invalid` / `runtime_config_empty` / `artifact_root_unwritable`。**没有静默回落** |
 | `systemd StartLimitIntervalSec` / `Burst` | `infra/systemd/*.service` | 60s / 5 | task_behavior | 崩溃循环 | 超过后 systemd 标记 `failed`，不再无限重试成 `activating` |
 | `ANCHOR_MODEL_RECORDING` | `runtime/settings.py` | `off` | operator_policy | 模型调用的录制/回放（ADR-044） | `off` 不安装 wrapper，零开销；`record` 写投影；`replay` 按位置提供录制答案并拒绝越界 |

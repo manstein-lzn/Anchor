@@ -1047,3 +1047,34 @@ snapshot plus the ability to run one node, which does not exist today — and th
 a larger, separate decision.
 
 Plan and acceptance criteria: `docs/RECORDING_AND_REPLAY.md`.
+
+## ADR-045: A failed branch ends every node the run will never reach, by marking
+
+A failed run left its unreachable nodes in `pending`. Measured before the fix: 76 such
+nodes across the failed runs in one database, with no terminal state and nothing recording
+why. From outside that is indistinguishable from a run still waiting for a worker, which is
+the worst property a stalled run can have.
+
+When a node failure fails its run, the run's non-terminal nodes are now set to `cancelled`
+with `error_code="run_failed"`, the run's remaining leases are released, and the `run.failed`
+event records how many nodes it ended. The shape is copied from `stop_run`, which already
+did exactly this for operator stops; failure was the path that had been left out.
+
+Two consequences worth stating:
+
+- **Marking, not cancelling.** There is no channel to cancel a model call a worker is already
+  making, and building one is a larger change than this defect justifies. Releasing the
+  lease is what fences the attempt: completion requires an unreleased lease, so a fenced
+  worker cannot commit a result into a failed run. A `FencedAttempt` is raised for that case
+  specifically — distinct from `ConcurrencyConflict` — so a worker stops quietly instead of
+  trying to fail a node that already has a terminal state, which would raise again and leave
+  a traceback describing a run that behaved correctly.
+- **A completed sibling is untouched.** It is evidence that work really happened, and a
+  failed run legitimately contains completed nodes. Only non-terminal nodes are ended, and a
+  duplicate delivery of the same failure is idempotent rather than a second fan-out.
+
+One dispatch defect came with it: `dispatch_pending` aborted its whole batch when a message
+could not be accepted, so a single row nobody could accept stalled every dispatch queued
+behind it, forever, with only a log line to show for it. Each message is now attempted
+independently and a failure records a durable `run.dispatch_failed` event keyed by the
+stream the dispatch names — the run usually does not exist yet, which is often what failed.

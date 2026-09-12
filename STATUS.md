@@ -191,8 +191,18 @@
 
 ## Not yet implemented
 
-- Failure fan-out/cancellation of in-flight sibling branches and dispatch supervision
-  beyond receiver retry logging (DEVELOPMENT_PLAN P0.2, the next slice)
+- **Failure fan-out** (done, DEVELOPMENT_PLAN P0.2, ADR-045): a node failure that fails
+  its run ends every non-terminal node with `error_code="run_failed"`, releases the
+  run's remaining leases, and records `abandoned_nodes` on the `run.failed` event.
+  Marking rather than cancelling, because there is no channel to cancel a model call in
+  flight and releasing the lease already fences the attempt; a fenced worker raises
+  `FencedAttempt` and stops quietly rather than reporting a run that behaved correctly.
+  `dispatch_pending` no longer aborts its batch on one undeliverable message, and records
+  a durable `run.dispatch_failed` event instead of only a log line. Verified by unit
+  tests over the four sibling timings plus
+  `scripts/validate_failure_fanout.py` against the running services. **Not done**: 76
+  historical `pending` nodes from before the fix are deliberately not backfilled —
+  rewriting them would make the event history stop being the truth about what happened.
 - PostgreSQL/vector memory projection and worker recovery supervision
 - **Model call recording and replay** (ADR-044). Steps 1-2 are done. Every model
   call is written as an immutable projection with a `model.call` event; the wrapper
