@@ -425,3 +425,37 @@ input_tokens:     [173519, 173519]
 网关刻意设 `max_retries=0`（重试属于 durable node 层，那里有可观测的 attempt 与退避）。
 测试台没有那一层，所以它自己带一次有界重试，并复用同一套故障分类——**生产路径的规则没有
 被改动**。
+
+## 让 workspace 类验收也无 provider 运行
+
+`scripts/validate_workspace*.sh` 会起真实 coder agent，所以它们需要有模型可用。用录制可以去掉这个前提——
+**并且实测可行**：并行 workspace 验收在回放模式下通过，`model.call` 为 0、`model.call_replayed` 为 10。
+
+步骤（一次性录制，之后可反复回放）：
+
+```bash
+# 1. 以录制模式跑一次，让 coder 的调用落进账本
+systemctl --user set-environment ANCHOR_MODEL_RECORDING=record
+systemctl --user restart anchor-worker.service
+bash scripts/validate_workspace_parallel.sh        # 记下输出的 run id
+
+# 2. 切到回放，绑定刚录的那次 run
+RUN=<上一步的 run id>
+systemctl --user set-environment ANCHOR_MODEL_RECORDING=replay ANCHOR_REPLAY_OF=$RUN
+systemctl --user restart anchor-worker.service
+
+# 3. 再跑一次：这次不需要模型
+bash scripts/validate_workspace_parallel.sh
+
+# 4. 验证确实没有真实调用，然后务必恢复
+sqlite3 .local/api.sqlite \
+  "select event_type, count(*) from events where stream_id='<新 run id>' group by 1"
+systemctl --user unset-environment ANCHOR_MODEL_RECORDING ANCHOR_REPLAY_OF
+systemctl --user restart anchor-worker.service
+```
+
+**为什么回放能通过**：新 run 走同一张图，所以第 N 次调用对应录制的第 N 次；coder 的输出是录下来的，
+于是文件编辑也一致，merge 机制照样被完整验证。
+
+**第 4 步不是可选的。** 一个留在回放模式的 worker 会对任何别的 run 报
+`ReplayDivergence`——它会拒绝工作，而不是静默地答错，但那时你会去查图而不是查 worker 的环境变量。
