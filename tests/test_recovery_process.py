@@ -35,7 +35,7 @@ from anchor.runtime.capabilities import AgentCapability, CapabilityRegistry, Mod
 from anchor.runtime.model_gateway import ModelResponse
 from anchor.runtime.sinks import ArtifactCheckpointSink
 from anchor.runtime.worker import AgentNodeWorker
-from anchor.runtime.worker_loop import run_worker_loop
+from anchor.runtime.worker_loop import ResolvedPrompt, run_worker_loop
 from anchor.state.relational import RelationalStateStore
 
 class Gateway:
@@ -55,7 +55,9 @@ async def main():
     worker = AgentNodeWorker(store, registry, {"models.recovery": Gateway()},
                              ArtifactCheckpointSink(store, artifacts, worker_id))
     async def resolve(run_id, node_id):
-        return "agents.recovery", "recover this run", node_id, {"inputs": {"mode": os.environ["ANCHOR_RECOVERY_MODE"]}}
+        return ResolvedPrompt(
+            agent_ref="agents.recovery", prompt="recover this run", expected_node_id=node_id,
+            input_snapshot={"inputs": {"mode": os.environ["ANCHOR_RECOVERY_MODE"]}})
     try:
         await run_worker_loop(worker, worker_id=worker_id, resolve_prompt=resolve, interval=0.02)
     finally:

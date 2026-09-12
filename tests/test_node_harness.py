@@ -269,7 +269,11 @@ def test_prompt_assembly_is_shared_with_the_worker(tmp_path):
     from anchor.runtime import worker_service
 
     source = inspect.getsource(worker_service._resolver)
-    assert "assemble_prompt" in source
+    # The property is that the worker renders through the shared module, not that it calls a
+    # particular function: the module is what the harness shares, and pinning a name here
+    # would fail on a rename that changed nothing.
+    assert "node_prompt" in inspect.getsource(worker_service) or "PromptParts" in source
+    assert "PromptParts" in source, "the worker must build the prompt from the shared parts"
     assert "Durable input snapshot" not in source, \
         "the worker must not keep its own copy of the prompt text"
 

@@ -22,15 +22,15 @@ from anchor.runtime.model_recording import ModelRecorder, RecordingMode
 from anchor.runtime.secrets import ChainedSecretProvider, EnvironmentSecretProvider, JsonFileSecretProvider
 from anchor.runtime.sinks import ArtifactCheckpointSink
 from anchor.runtime.worker import AgentNodeWorker
-from anchor.runtime.worker_loop import run_worker_loop
+from anchor.runtime.worker_loop import ResolvedPrompt, run_worker_loop
 from anchor.runtime.memory import LocalMemoryStore, MemoryStore
-from anchor.runtime.node_prompt import PromptParts, assemble_prompt
+from anchor.runtime.node_prompt import PromptParts, prompt_segments, render
 from anchor.runtime.resolution import resolve_node_context
 from anchor.state.relational import RelationalStateStore
 
 
 async def _resolver(store, run_id: UUID, node_id: str, memory: MemoryStore | None = None,
-                    artifacts: LocalArtifactStore | None = None) -> tuple[str, str, str, dict]:
+                    artifacts: LocalArtifactStore | None = None) -> ResolvedPrompt:
     from anchor.runtime.integrity import require_clean
 
     # Mechanical anti-drift gate: refuse to build a prompt from corrupt
@@ -47,13 +47,21 @@ async def _resolver(store, run_id: UUID, node_id: str, memory: MemoryStore | Non
                 if item.memory_id not in seen]
     # The prompt is assembled by the shared function the node harness also uses, so
     # an experiment there measures this prompt rather than a lookalike.
-    prompt = assemble_prompt(PromptParts(
+    parts = PromptParts(
         objective=resolved.task.objective,
         node_name=resolved.node.name,
         snapshot=resolved.snapshot,
         run_memory=[item.content for item in run_memories],
-        promoted_memory=[(item.domain or "general", item.content) for item in promoted]))
-    return resolved.node.agent_ref, prompt, resolved.node.id, resolved.snapshot
+        promoted_memory=[(item.domain or "general", item.content) for item in promoted])
+    # The segments travel with the prompt so the spend report can say which part moved. A
+    # stable prefix is served from the provider's cache and is nearly free; one that changes
+    # on every call is billed in full, and the token counts cannot tell the two apart.
+    # The prefix is left empty here because the instructions come from the capability, which
+    # the worker resolves and is what actually sends the system prompt.
+    segments = prompt_segments(parts)
+    return ResolvedPrompt(agent_ref=resolved.node.agent_ref, prompt=render(segments),
+                          expected_node_id=resolved.node.id,
+                          input_snapshot=resolved.snapshot, segments=segments)
 
 
 def _workspace_toolset(store, settings):

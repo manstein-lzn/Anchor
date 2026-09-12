@@ -45,11 +45,11 @@ def test_resolver_merges_predecessor_artifact_content(tmp_path):
         lease = store.claim_ready_node("worker", uuid4())
         assert lease is not None and lease.node_id == "a"
         store.complete_node_and_propagate(lease.claim_id, "worker", output_ref=ref)
-        agent_ref, prompt, node_id, snapshot = asyncio.run(
+        resolved = asyncio.run(
             _resolver(store, receipt.run_id, "b", artifacts=artifacts))
-        assert (agent_ref, node_id) == ("agents.b", "b")
-        assert snapshot == {"prior": "ALPHA"}
-        assert "ALPHA" in prompt
+        assert (resolved.agent_ref, resolved.expected_node_id) == ("agents.b", "b")
+        assert resolved.input_snapshot == {"prior": "ALPHA"}
+        assert "ALPHA" in resolved.prompt
     finally:
         store.close()
 
@@ -61,9 +61,9 @@ def test_resolver_truncates_large_predecessor_text(tmp_path):
         ref = artifacts.put_text("x" * 5000)
         lease = store.claim_ready_node("worker", uuid4())
         store.complete_node_and_propagate(lease.claim_id, "worker", output_ref=ref)
-        _, _, _, snapshot = asyncio.run(_resolver(store, receipt.run_id, "b", artifacts=artifacts))
-        assert snapshot["prior"].endswith("[truncated:1000-chars]")
-        assert len(snapshot["prior"]) == 4000 + len("\n[truncated:1000-chars]")
+        resolved = asyncio.run(_resolver(store, receipt.run_id, "b", artifacts=artifacts))
+        assert resolved.input_snapshot["prior"].endswith("[truncated:1000-chars]")
+        assert len(resolved.input_snapshot["prior"]) == 4000 + len("\n[truncated:1000-chars]")
     finally:
         store.close()
 
@@ -74,8 +74,8 @@ def test_resolver_without_artifacts_keeps_reference(tmp_path):
         lease = store.claim_ready_node("worker", uuid4())
         store.complete_node_and_propagate(lease.claim_id, "worker",
                                           output_ref="artifact://sha256/" + "a" * 64)
-        _, _, _, snapshot = asyncio.run(_resolver(store, receipt.run_id, "b"))
-        assert snapshot == {"prior": "artifact://sha256/" + "a" * 64}
+        resolved = asyncio.run(_resolver(store, receipt.run_id, "b"))
+        assert resolved.input_snapshot == {"prior": "artifact://sha256/" + "a" * 64}
     finally:
         store.close()
 
@@ -92,11 +92,10 @@ def test_resolver_reuses_canonical_snapshot_on_replay(tmp_path):
         # A replay must use the persisted generation even if a mutable artifact
         # projection now contains a different value.
         artifacts.put_text("MUTATED")
-        _, prompt, node_id, snapshot = asyncio.run(_resolver(
-            store, receipt.run_id, "a", artifacts=artifacts))
-        assert node_id == "a"
-        assert snapshot == {"inputs": {"fixed": "canonical"}}
-        assert "canonical" in prompt and "MUTATED" not in prompt
+        resolved = asyncio.run(_resolver(store, receipt.run_id, "a", artifacts=artifacts))
+        assert resolved.expected_node_id == "a"
+        assert resolved.input_snapshot == {"inputs": {"fixed": "canonical"}}
+        assert "canonical" in resolved.prompt and "MUTATED" not in resolved.prompt
     finally:
         store.close()
 
@@ -138,10 +137,10 @@ def test_result_sink_routes_json_and_resolver_uses_selected_conditional_mapping(
         nodes = {item.node_id: item for item in store.list_node_runs(receipt.run_id)}
         assert nodes["accepted"].status.value == "ready"
         assert nodes["rejected"].status.value == "skipped"
-        _, _, _, snapshot = asyncio.run(_resolver(
+        resolved = asyncio.run(_resolver(
             store, receipt.run_id, "accepted", artifacts=artifacts,
         ))
-        assert snapshot == {"decision": {"approved": True, "summary": "ALPHA"}}
+        assert resolved.input_snapshot == {"decision": {"approved": True, "summary": "ALPHA"}}
     finally:
         store.close()
 

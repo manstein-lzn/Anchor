@@ -62,8 +62,8 @@ def test_promoted_knowledge_enters_future_prompts(tmp_path):
         receipt = store.admit_run(RunRequest(trigger_id=trigger.id, idempotency_key="promo-1",
                                              objective="promo", inputs={}))
         asyncio.run(dispatch_pending(store, DurableExecutionReceiver(store)))
-        _, prompt, _, _ = asyncio.run(_resolver(store, receipt.run_id, "a", memory=memory))
-        assert "[evidence] verify hashes first" in prompt
-        assert "Promoted organizational knowledge" in prompt
+        resolved = asyncio.run(_resolver(store, receipt.run_id, "a", memory=memory))
+        assert "[evidence] verify hashes first" in resolved.prompt
+        assert "Promoted organizational knowledge" in resolved.prompt
     finally:
         store.close()

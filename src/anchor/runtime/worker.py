@@ -31,6 +31,7 @@ logger = logging.getLogger("anchor.worker")
 HEARTBEAT_FAILURE_LIMIT = 3
 from anchor.runtime.model_gateway import ModelGateway, ModelResponse
 from anchor.runtime.model_recording import CallContext, bind_call, unbind_call
+from anchor.runtime.node_prompt import PromptSegments
 from anchor.state.errors import FencedAttempt
 from anchor.state.protocols import StateStore
 
@@ -214,7 +215,8 @@ class AgentNodeWorker:
                                    lease, expected_node_id: str | None = None,
                                    system_prompt: str = "",
                                    input_snapshot: Mapping[str, object] | None = None,
-                                   heartbeat_interval: float = 5.0) -> WorkerOutcome:
+                                   heartbeat_interval: float = 5.0,
+                                   prompt_segments: PromptSegments | None = None) -> WorkerOutcome:
         """Execute a lease already acquired by the worker loop."""
         agent = self.registry.validate_agent(agent_ref)
         gateway = self.gateways.get(agent.model_ref)
@@ -311,6 +313,16 @@ class AgentNodeWorker:
                         # Spend is recorded at the moment it happens. An agent tool
                         # loop re-sends its conversation on every call, so the number
                         # is large and must never be invisible.
+                        # The segment hashes are what make the bill answerable: a stable
+                        # prefix is served from the provider's cache and is nearly free,
+                        # while anything that moves invalidates it and is billed at the full
+                        # rate. Token counts alone cannot say which segment moved. When the
+                        # caller did not supply segments this says so, rather than implying
+                        # that the prompt had no parts.
+                        # The prefix is the instructions this worker actually sends, which is
+                        # what the provider caches. Hashing anything else would report a
+                        # stable prefix for a prompt that never had one.
+                        sent_prefix = system_prompt or agent.instructions or ""
                         self.store.append_event(
                             stream_id=lease.run_id, event_type="model.usage",
                             payload={"node_id": lease.node_id, "attempt": node_attempt,
@@ -319,7 +331,10 @@ class AgentNodeWorker:
                                      "output_tokens": response.output_tokens,
                                      "requests": response.requests, "cost": response.cost,
                                      "cache_read_tokens": response.cache_read_tokens,
-                                     "cache_write_tokens": response.cache_write_tokens},
+                                     "cache_write_tokens": response.cache_write_tokens,
+                                     "prompt_chars": len(prompt),
+                                     **(replace(prompt_segments, prefix=sent_prefix).hashes()
+                                        if prompt_segments else {"segments": "unavailable"})},
                             idempotency_key=f"usage:{lease.node_run_id}:{response.response_id or 'x'}")
                     if agent.output_format == "json":
                         # A model that prefixes its JSON with a sentence still

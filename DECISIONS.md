@@ -1120,3 +1120,33 @@ The consequence is worth stating because of how it presents: an instant `Connect
 is a client-side symptom, not a network one, and it is indistinguishable in a journal from a
 provider outage. Any script that builds a gateway and then calls `asyncio.run` per attempt
 has this bug. The services do not: each runs `asyncio.run(serve())` once.
+
+## ADR-047: The prompt reports what it was made of, because its size does not decide its cost
+
+Measured on our provider: a cached input token costs 1/50th of an uncached one, and two thirds
+of a real campaign's bill was output rather than input. So the alarming gross prompt counter is
+not the bill, and the size of a prompt is not what makes it expensive — whether its prefix is
+*stable* is. Nothing recorded that, so the question could not be asked.
+
+Each model call now reports three hashes: the prefix (the instructions actually sent as the
+system prompt), the declared input (the task frame plus the snapshot), and the working set (run
+memory and promoted knowledge). A segment whose hash never changes is one the provider could
+cache; one that changes on every call could not, and the token counts cannot tell the two
+apart. When a caller assembles its own prompt the report says the segments are unavailable
+rather than implying the prompt had no parts.
+
+The split into new and re-sent content comes from consecutive input counts, using the fact that
+each call re-sends every earlier prompt: of the tokens in a call, `min(this, previous)` were
+already sent and the excess is growth. Written that way it sums to the gross count exactly,
+including when a prompt shrinks — memory gets trimmed and a snapshot gets corrected, and a
+decomposition assuming monotonic growth would stop adding up while still looking plausible. A
+first attempt used `max(delta, 0)`, which failed exactly that way; a test caught it.
+
+The segments come from the assembler rather than being reconstructed from the rendered text,
+because a reconstruction would eventually measure something other than what was sent. This
+made `PromptFactory` return a `ResolvedPrompt` dataclass instead of a widening tuple: it was
+already at four positional fields, and a fifth read by position is a silent bug waiting.
+
+The prefix is filled in by the worker, not the resolver, because the instructions come from the
+capability the worker resolves and the worker is what sends them. Hashing anything else would
+report a stable prefix for a prompt that never had one.

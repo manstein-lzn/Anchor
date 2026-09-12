@@ -230,6 +230,12 @@
   recovery re-queues the node, and the run closes with a continuous event sequence and no
   duplicated operation. **Not done**: lease observation and recovery have no
   `anchor.client` method, so an agent cannot do what this acceptance does.
+- **Prompt shape telemetry** (done, DEVELOPMENT_PLAN P1.2, ADR-047): every model call
+  records the prefix, declared-input and working-set hashes beside the token counts, and
+  `/api/runs/{id}/usage` reports which of the three moved, whether each was stable, and how the
+  gross count splits into new and re-sent content. Gross versus billed and cache hit/miss were
+  already reported. The split sums to the gross count exactly, including when a prompt shrinks.
+  Verified on a real run: all three hashes recorded, `prefix_stable` reported.
 - **Whole-run replay** (done, DEVELOPMENT_PLAN P1.1, ADR-046): a process told which run it
   replays (`ANCHOR_REPLAY_OF`) serves its Nth model call from that run's Nth recording,
   checking the recorded node rather than assuming it. Verified by
