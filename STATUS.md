@@ -230,6 +230,13 @@
   recovery re-queues the node, and the run closes with a continuous event sequence and no
   duplicated operation. **Not done**: lease observation and recovery have no
   `anchor.client` method, so an agent cannot do what this acceptance does.
+- **Production boundaries** (done, DEVELOPMENT_PLAN P0.3, ADR-049): a URL-shaped
+  `ANCHOR_ARTIFACT_ROOT` is refused at startup with `artifact_backend_unsupported` instead of
+  becoming a local directory called `s3:/bucket/artifacts` — measured, not hypothesised.
+  Authorization is one shared bearer token with no per-user identity, now asserted rather than
+  described; the approval surface is asserted to exist in the CLI, the console and the API
+  together. `docs/limits.md` carries the table. **Not done**: no remote artifact backend, no
+  identity or roles, no per-user audit attribution.
 - **Provider-free end-to-end CI** (done, DEVELOPMENT_PLAN P2.1, ADR-048):
   `scripts/ci_e2e.py` drives author-over-MCP, admit, execute, verify, human gate, approve and
   observe against its own temporary API, with the agent step served from a checked-in

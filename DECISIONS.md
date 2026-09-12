@@ -1187,3 +1187,27 @@ server; a runtime profile rejected by `load_runtime_config` is reported by the A
 "capability configuration unavailable", which reads as a missing file; and a driver that waits
 for a terminal status before looking at an approval gate waits forever on a run that is
 behaving correctly, because a parked node is not terminal.
+
+## ADR-049: A remote artifact root is refused, not imitated
+
+`ANCHOR_ARTIFACT_ROOT=s3://bucket/artifacts` was accepted and became a local directory
+literally called `s3:/bucket/artifacts`. An operator who configured remote storage got local
+storage in an unexpected place, and nothing said so; the mistake would have surfaced later as
+missing evidence, which is the worst way to learn it. The single-slash form is listed
+separately in the refusal because path resolution collapses `s3://x` into `s3:/x` before
+anything else can notice, so refusing only `://` would still admit the silent version.
+
+`ArtifactStore` is already a Protocol, so production may substitute any backend. What it may
+not do is configure one and have the local store pretend: the refusal names the variable and
+says the build does not implement remote backends. It happens in `LocalArtifactStore.__init__`,
+so every caller inherits it, and `runtime/preflight.check_artifacts` asks that store rather than
+re-deriving the rule — a rule written twice drifts, and the check has to agree with what runs.
+
+The same shape was applied to the other production boundaries: authorization is one shared
+bearer token with no per-user identity, and that is asserted (no token and wrong token are
+refused) rather than described; the approval surface is asserted to exist in the CLI, the
+console and the API together, since a surface that disagreed would let an operator approve over
+the CLI something the console refuses to show.
+
+A limitation that is only written down is not a boundary, and a refusal at startup is worth
+more than a failure at use.

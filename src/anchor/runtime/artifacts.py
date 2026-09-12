@@ -10,6 +10,30 @@ import tempfile
 from typing import Protocol
 from uuid import UUID
 
+#: A URL-shaped root names a backend this build does not implement. Refusing it is the whole
+#: point: `s3://bucket/artifacts` used to be accepted and became a local directory literally
+#: called `s3:/bucket/artifacts`, so an operator who configured remote storage got local
+#: storage in a surprising place and no signal at all. The single-slash form is listed
+#: separately because path resolution collapses `s3://x` into `s3:/x` before anything else
+#: can notice, and that is exactly how the silent version would arrive.
+_REMOTE_SCHEMES = ("az", "abfs", "abfss", "file", "ftp", "gs", "gcs", "http", "https",
+                   "minio", "s3", "sftp", "ssh", "swift")
+_REMOTE_ROOT = re.compile(
+    r"^(?:[A-Za-z][A-Za-z0-9+.\-]*://|(?:" + "|".join(_REMOTE_SCHEMES) + r"):)",
+    re.IGNORECASE)
+
+
+class ArtifactBackendUnsupported(ValueError):
+    """The configured artifact root names a backend this build does not have.
+
+    A distinct type so a service can report *why* it will not start, rather than failing later
+    with an ENOENT inside a worker. Production can substitute any backend implementing
+    :class:`ArtifactStore`; what it cannot do is configure one and have the local store
+    quietly imitate it.
+    """
+
+    code = "artifact_backend_unsupported"
+
 
 class ArtifactStore(Protocol):
     def put_text(self, text: str, *, media_type: str = "text/plain") -> str: ...
@@ -18,10 +42,20 @@ class ArtifactStore(Protocol):
 
 
 class LocalArtifactStore:
-    """Small development store; production can substitute S3/MinIO."""
+    """Development store: a directory of content-addressed files.
+
+    Production substitutes anything implementing :class:`ArtifactStore`. It does not
+    substitute this one pointed at a remote URL, which is why that is refused below.
+    """
 
     def __init__(self, root: str | Path) -> None:
-        self.root = Path(root).expanduser()
+        selected = str(root)
+        if _REMOTE_ROOT.match(selected):
+            raise ArtifactBackendUnsupported(
+                f"ANCHOR_ARTIFACT_ROOT={selected!r} names a remote backend, which this build "
+                f"does not implement; only a local directory is supported. Point it at a path "
+                f"and supply a backend for anything else.")
+        self.root = Path(selected).expanduser()
         self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
 
     def put_text(self, text: str, *, media_type: str = "text/plain") -> str:

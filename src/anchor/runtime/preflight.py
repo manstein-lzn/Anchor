@@ -107,15 +107,30 @@ def check_runtime_config(path: str) -> list[Problem]:
 
 
 def check_artifacts(root: str) -> list[Problem]:
-    """The artifact root can be created and written to."""
-    target = Path(root).expanduser()
+    """The artifact root is one this build can actually write to.
+
+    Shape first, then writability. A URL-shaped root used to be accepted and became a local
+    directory called `s3:/bucket/artifacts`, so an operator who configured remote storage got
+    local storage in a surprising place with no signal at all — which is worse than a refusal,
+    because the mistake surfaces later as missing evidence rather than at startup.
+    """
+    from anchor.runtime.artifacts import ArtifactBackendUnsupported, LocalArtifactStore
+
+    selected = Path(root).expanduser()
+    # Build the store the services will build. Asking it rather than re-deriving its rules means
+    # the check cannot disagree with what actually runs, and a rule written twice drifts.
     try:
-        target.mkdir(mode=0o700, parents=True, exist_ok=True)
-        probe = target / ".preflight"
+        store = LocalArtifactStore(root)
+    except ArtifactBackendUnsupported as exc:
+        return [Problem("artifact_backend_unsupported", str(exc))]
+    except OSError as exc:
+        return [Problem("artifact_root_unwritable", f"{selected}: {exc}")]
+    try:
+        probe = store.root / ".preflight"
         probe.write_text("ok", encoding="utf-8")
         probe.unlink()
     except OSError as exc:
-        return [Problem("artifact_root_unwritable", f"{target}: {exc}")]
+        return [Problem("artifact_root_unwritable", f"{selected}: {exc}")]
     return []
 
 

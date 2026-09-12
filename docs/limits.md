@@ -132,3 +132,19 @@ operator_policy：必须由用户在图或 capability 中显式声明，可见�
 - `model_excerpt_chars` × `excerpt_list_limit` 用于压低**每次调用新增的上下文**。
 - `GET /api/runs/{id}/usage` 分别报告 gross / cached / billed input；只看 gross 会高估
   账单数倍，因为工具循环重发的绝大部分是供应商前缀缓存命中的内容。
+
+## 生产边界（P0.3）
+
+以下是**未实现**的能力。每一项都是显式拒绝或明确记录，不留静默回落。
+
+| 能力 | 现状 | 行为 |
+| --- | --- | --- |
+| **远程 artifact 后端**（S3/MinIO/GCS…） | 未实现 | `ANCHOR_ARTIFACT_ROOT` 若是 URL 形状（`s3://…`、`s3:/…`、`minio:…`）→ **启动即拒绝**，退出码 2，错误码 `artifact_backend_unsupported`。生产可替换任何实现 `ArtifactStore` 协议的后端，**但本地 store 不会去模仿它** |
+| **身份与授权** | 单一共享 bearer token（`ANCHOR_API_TOKEN`） | 无按用户身份、无角色、无认证的 actor。审计里的 `actor` 是调用方自报的字符串。边界是：**无 token 或错 token → 401/403**；`/health/live` 故意不鉴权（探针需要密钥就无法在密钥有问题时报告任何事） |
+| **PostgreSQL 路径** | 已实现，按标记验证 | `tests/test_relational_store.py` 参数化 sqlite/postgresql，无 PG 时跳过而非静默通过 |
+| **人工门（approval）** | 已实现且三面一致 | CLI `waits`/`approve`/`reject`、Run Console、API 路由三处都覆盖，且共用 `anchor.client` 一条路径 |
+| **未知 `ANCHOR_MODEL_RECORDING`** | 拒绝 | 服务启动时转换枚举，未知值即失败，不落回 `off` / `record` |
+
+**判据**：一个只在文档里写着的限制不是边界。上表每一行都有测试（`tests/test_production_boundaries.py`），
+且拒绝发生在**启动时**而不是使用时——因为一个启动后就静默放错工件位置的服务，问题会在一小时后以
+「证据不见了」的形式浮出来。
