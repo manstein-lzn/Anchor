@@ -230,6 +230,13 @@
   recovery re-queues the node, and the run closes with a continuous event sequence and no
   duplicated operation. **Not done**: lease observation and recovery have no
   `anchor.client` method, so an agent cannot do what this acceptance does.
+- **Provider-free end-to-end CI** (done, DEVELOPMENT_PLAN P2.1, ADR-048):
+  `scripts/ci_e2e.py` drives author-over-MCP, admit, execute, verify, human gate, approve and
+  observe against its own temporary API, with the agent step served from a checked-in
+  recording, so the job needs no API key and cannot pass by reaching the network. Wired into
+  `.github/workflows/ci.yml` beside the quality ratchet and the unit suite. **Not covered**:
+  workspace validation, lineage and parallel merge are exercised by their own scripts, which
+  still start real agent nodes and so still need a provider; they are not part of this job.
 - **Prompt shape telemetry** (done, DEVELOPMENT_PLAN P1.2, ADR-047): every model call
   records the prefix, declared-input and working-set hashes beside the token counts, and
   `/api/runs/{id}/usage` reports which of the three moved, whether each was stable, and how the

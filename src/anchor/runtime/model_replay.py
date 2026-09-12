@@ -144,7 +144,7 @@ class ReplayPlan:
         return self._calls(context.run_id).get(
             (str(context.node_run_id), context.attempt, sequence))
 
-    def ordered(self, run_id: UUID) -> list[ReplayEntry]:
+    def ordered(self, run_id: UUID | str) -> list[ReplayEntry]:
         """Every recorded call of a run, in the order the run made them.
 
         The recordings are loaded from the run's `model.call` events, which the store returns
@@ -152,8 +152,13 @@ class ReplayPlan:
         the Nth call of the parent run for the Nth call it makes; nothing has to be counted or
         guessed, and a flow that diverges shows up as a node mismatch rather than as a
         silently wrong answer.
+
+        The argument is normalised because a run id arrives as a string from JSON and as a
+        UUID from code, and indexing a UUID-keyed map with the wrong one returns empty rather
+        than raising — which reads as "this run recorded nothing" and sends the reader after
+        the recording instead of after the caller. The same mistake has been made twice.
         """
-        by_position = self._calls(run_id)
+        by_position = self._calls(UUID(str(run_id)))
         # Insertion order, not a sort: the recordings were indexed in the order the run's
         # `model.call` events were read, and that *is* the order the calls happened. Sorting by
         # (attempt, sequence) would group each node's calls together and lose the interleaving

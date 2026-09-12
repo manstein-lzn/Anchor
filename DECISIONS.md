@@ -1150,3 +1150,40 @@ already at four positional fields, and a fifth read by position is a silent bug 
 The prefix is filled in by the worker, not the resolver, because the instructions come from the
 capability the worker resolves and the worker is what sends them. Hashing anything else would
 report a stable prefix for a prompt that never had one.
+
+## ADR-048: The seam is checked provider-free, from a recording that is never written to
+
+Unit tests cover the parts of the chain an agent host drives. They cannot cover the seam
+between them, which is where integration defects live — and checking the seam the obvious way
+means a live provider, which makes CI expensive, flaky and dependent on a secret. Worse, it
+makes it possible to pass by reaching the network, which is exactly the thing a check should
+make impossible.
+
+`scripts/ci_e2e.py` runs the chain in a temporary environment: its own database, artifact
+root, token and runtime profile, its own API on an ephemeral port, and MCP driven as a
+subprocess the way an agent host drives it. The agent step is served from
+`tests/fixtures/replay/planner.json`, so the graph authors over MCP, admits, executes,
+verifies, parks at a human gate, is approved, observes, and completes with **no provider
+reachable**.
+
+Three details make it a check rather than a demonstration:
+
+- **The fixture is registered as what its run recorded**, by writing a `model.call` event
+  pointing at it, rather than the check having a private way to load recordings the runtime
+  does not use. The path exercised is the real one.
+- **The fixture is hashed before and after.** A check that rewrote the thing it measures
+  against would pass forever while measuring nothing.
+- **A live call is a failure, not a warning.** The run's events may contain
+  `model.call_replayed` and must not contain `model.call`, so a replay that fell through to the
+  network would fail the job rather than quietly cost money.
+
+A deterministic verifier is added to the runtime profile in the temporary environment only,
+because it exists to exercise the verifier seam without a model, not because the deployment
+wants one.
+
+Three defects in the check itself are worth recording, because each looked like something
+else: reading a response for a JSON-RPC *notification*, which has none, presents as a hung
+server; a runtime profile rejected by `load_runtime_config` is reported by the API as
+"capability configuration unavailable", which reads as a missing file; and a driver that waits
+for a terminal status before looking at an approval gate waits forever on a run that is
+behaving correctly, because a parked node is not terminal.
