@@ -1278,3 +1278,33 @@ a run can be pinned to a version published before that rule existed.
 Approval surface consistency and the Run Console's states were already in place and are now
 asserted instead of assumed: the CLI, the console and the API all carry approve and reject, they
 share `anchor.client`, and the console surfaces every state a run can wait or stop in.
+
+## ADR-052: The cognition schema stops growing, on the plan's own exit criterion
+
+`DEVELOPMENT_PLAN.md` P3 is an optional experiment whose criterion is its own fifth item: if
+there is no independent behavioural benefit, stop expanding the cognition schema. The experiment
+was run before the plan formalised it, and there is no independent benefit, so the criterion is
+applied. `docs/COGNITION_DECISION.md` records the evidence and, more importantly, what would
+reverse the decision — a conclusion that cannot be falsified is not a decision.
+
+Three measurements, one real run at one real point: the seven-question quiz (schema matters at
+equal size, threefold, and a small state reaches or beats the raw material at 3.4% of it), the
+behavioural test that replaced the quiz with the deliverable's requirements (all three conditions
+passed, including the one that scored 7/31 on the quiz — so the quiz does not predict the job),
+and the retrieval comparison (non-accumulating retrieval was not enough; an interface without the
+ability to *select* made the successor enumerate the whole ledger).
+
+The reason the shape does not matter is structural rather than a finding about states: an Anchor
+node is already a fresh projection, accumulating in artifacts rather than in context, and does
+not replay history on retry. The cognition layer's proposal is what the engine already does, at a
+coarser granularity of declaration.
+
+What would reverse it: a task with many handoffs where a state holds and a summary chain degrades
+(the experiments tested one handoff, while the original claim is about accumulation); a
+controlled selector showing that choosing before reading reduces wrong decisions or repeated
+failures; or a task whose detail cannot be retrieved on demand, making a self-sufficient state
+necessary. Until one of those exists, extending the schema adds surface with no evidence behind
+it.
+
+This blocks nothing already built. P0 through P2 are independent of the cognition layer, which
+was never a runtime dependency, and this decision confirms that rather than changing it.

@@ -189,6 +189,13 @@
 - `scholarly.citations` (citation chasing) and `scholarly.read_many` (batch reads)
   keep the model's turn count down, which is what a run's cost is made of
 
+## 已决定不做
+
+**认知 schema 停止扩展**（P3 的退出判据，ADR-052）。证据与**什么会推翻它**写在
+`docs/COGNITION_DECISION.md`。P0–P2 全部与认知层无关，本决定不阻塞任何已完成切片。
+
+**RSI 层**（P4）按 `DEVELOPMENT_PLAN.md` §7 排除在当前批次之外。
+
 ## 未实现
 
 - **Failure fan-out** (done, DEVELOPMENT_PLAN P0.2, ADR-045): a node failure that fails
