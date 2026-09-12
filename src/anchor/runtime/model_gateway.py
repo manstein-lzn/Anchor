@@ -115,10 +115,11 @@ class PydanticAIModelGateway:
                 # resolved secret, and only this object holds the value.
                 recorder.forbid(api_key)
             if recorder.mode is RecordingMode.REPLAY:
-                # Replay serves recorded answers by position and never falls through
-                # to the wrapped model, so a replay cannot quietly become live.
+                # Replay serves recorded answers and never falls through to the wrapped
+                # model, so a replay cannot quietly become live.
                 plan = ReplayPlan(recorder.artifacts, store=recorder.store)
-                self._model = ReplayModel(self._model, plan, store=recorder.store)
+                self._model = ReplayModel(self._model, plan, store=recorder.store,
+                                          replay_of=recorder.replay_of)
             else:
                 self._model = RecordingModel(self._model, recorder)
         self._agent = Agent(self._model, output_type=str,

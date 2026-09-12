@@ -99,7 +99,7 @@ async def serve() -> None:
     # shared model serves every node. The mode is validated here so a typo fails
     # at startup rather than silently recording nothing.
     recorder = ModelRecorder(artifacts, mode=RecordingMode(settings.model_recording),
-                             store=store)
+                             store=store, replay_of=settings.replay_of or None)
     gateways = {profile.ref: build_model_gateway(profile, secrets, recorder=recorder)
                 for profile in config.models}
     if recorder.enabled:

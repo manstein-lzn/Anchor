@@ -73,7 +73,7 @@ async def serve() -> None:
     # Verifier nodes call models too, so they record on the same terms as agent
     # nodes: any node's actual prompt should be readable afterwards.
     recorder = ModelRecorder(artifacts, mode=RecordingMode(settings.model_recording),
-                             store=store)
+                             store=store, replay_of=settings.replay_of or None)
     gateways = {
         profile.ref: build_model_gateway(profile, secrets, recorder=recorder)
         for profile in config.models if profile.ref in required_models

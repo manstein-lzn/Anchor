@@ -1078,3 +1078,45 @@ could not be accepted, so a single row nobody could accept stalled every dispatc
 behind it, forever, with only a log line to show for it. Each message is now attempted
 independently and a failure records a durable `run.dispatch_failed` event keyed by the
 stream the dispatch names — the run usually does not exist yet, which is often what failed.
+
+## ADR-046: A run declares which run it replays, and substitutes by call ordinal
+
+Replay matched recordings by `(node_run_id, attempt, sequence)`, which ties it to an existing
+run's attempts. A freshly admitted run generates new node run ids, so it could never be
+replayed — which is exactly what "record a campaign, replay it in a process with no provider"
+requires.
+
+A replay is now a run of the same graph executed by a process told which run it replays
+(`ANCHOR_REPLAY_OF`). Its Nth model call is served by the recorded run's Nth call. The ordinal
+is free: recordings are loaded from `model.call` events, and the store returns events in
+sequence order, so the position in that list *is* the call order. The recorded `node_id` is
+**checked**, not assumed — a call made by a different node than the recording belongs to is a
+located divergence naming both sides, because serving one node another node's answer and
+calling it a successful replay is the failure this guards against.
+
+The premise is that the engine's path is a pure function of the graph, the inputs and the
+model's answers. Replay substitutes the last of the three. That is why it is worth building:
+if the path reproduces, then a change in behaviour is attributable to a prompt or a context
+policy rather than to the engine, and without it every comparison of context strategies rests
+on an unverified assumption. `scripts/validate_replay_run.py` demonstrates it — a recorded run
+and a replay driven against a profile pointed at a dead port produce the same status, the same
+node path and the same execution events, differing only in `model.call` versus
+`model.call_replayed`, which is required so a replay never overwrites what it reads.
+
+`request_digest` is recorded and compared, but a mismatch is *reported*, not fatal: changing
+the prompt is the point of the exercise. Only a missing recording or a node mismatch fails.
+
+### A cross-loop HTTP client looks exactly like a provider fault
+
+The acceptance initially "failed" with `ModelAPIError: Connection error.` on every second
+call, alternating reliably, which invited the conclusion that the provider was flaky. It was
+not. `build_model_gateway` holds one `httpx.AsyncClient`, which binds to the event loop it is
+first used in; driving a gateway built outside the loop with a fresh `asyncio.run` per node
+makes every other call fail instantly. `scripts/node_harness.py` documents this in a
+docstring and gets it right by doing all its async work inside one `_execute` coroutine. The
+acceptance ignored its own project's note.
+
+The consequence is worth stating because of how it presents: an instant `Connection error`
+is a client-side symptom, not a network one, and it is indistinguishable in a journal from a
+provider outage. Any script that builds a gateway and then calls `asyncio.run` per attempt
+has this bug. The services do not: each runs `asyncio.run(serve())` once.

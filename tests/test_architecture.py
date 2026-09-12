@@ -146,3 +146,31 @@ def test_modules_stay_within_the_size_budget():
         if lines > cap:
             oversized.append(f"{relative}={lines} (cap {cap})")
     assert not oversized, "modules over budget: " + ", ".join(oversized)
+
+
+def test_replay_and_memory_never_become_canonical_recovery_state():
+    """Projections must not be readable as the truth about what happened.
+
+    The rule is stated in several documents — recovery is events plus immutable content
+    references, and a recording, a summary or a memory entry is not part of it. A rule that
+    cannot be checked does not exist, so it is checked here from the module graph: nothing
+    that decides whether a node has run may import a projection.
+
+    `runtime/model_replay.py` reads recordings, so it may not be imported by the state layer
+    or by the worker's completion path. The same holds for memory.
+    """
+    projection_modules = {"model_replay", "model_recording"}
+    offenders: list[str] = []
+    for path in sorted((SRC / "state").rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module:
+                if any(name in node.module for name in projection_modules):
+                    offenders.append(f"{path.relative_to(ROOT)} imports {node.module}")
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    if any(name in alias.name for name in projection_modules):
+                        offenders.append(f"{path.relative_to(ROOT)} imports {alias.name}")
+    assert not offenders, (
+        "the state layer decides what happened and must not read a projection: "
+        + "; ".join(offenders))

@@ -302,10 +302,14 @@ class ModelRecorder:
     """
 
     def __init__(self, artifacts: ArtifactStore, *, mode: RecordingMode = RecordingMode.OFF,
-                 forbidden: Sequence[str] = (), store: EventStore | None = None) -> None:
+                 forbidden: Sequence[str] = (), store: EventStore | None = None,
+                 replay_of: str | None = None) -> None:
         self.artifacts = artifacts
         self.mode = mode
         self.store = store
+        #: The run this process replays, when it is replaying one. Kept here because the
+        #: recorder is what the composition root already builds and hands to the gateways.
+        self.replay_of = UUID(replay_of) if replay_of else None
         # Literal secret values that must never reach disk. The gateway resolves
         # them, so it is the only place that can supply them.
         self._forbidden = tuple(value for value in forbidden if value)

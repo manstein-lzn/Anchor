@@ -29,6 +29,11 @@ class AnchorSettings(BaseSettings):
     # worker service converts it to RecordingMode and rejects an unknown value.
     # Default off: a recording is a projection and production pays nothing for it.
     model_recording: str = "off"
+    # When set, this process is a *replay* of that run: every model call it makes is
+    # served by call ordinal from the recorded run. That is what makes a whole campaign
+    # reproducible without a provider, and what separates "the model is nondeterministic"
+    # from "our engine is". Empty means serve live.
+    replay_of: str = ""
     api_token: str | None = None
     worker_id: str = "anchor-worker"
     control_worker_id: str = "anchor-control-worker"

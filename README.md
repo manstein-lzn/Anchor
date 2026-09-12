@@ -304,6 +304,26 @@ operation. Evidence is written to `.local/reports/recovery-<run_id>.json`.
 Credentials are never embedded: secrets resolve from the file named by `secret_file` in the
 runtime profile.
 
+To replay a recorded run without a provider, point the worker at the run it should
+reproduce:
+
+```bash
+ANCHOR_MODEL_RECORDING=replay ANCHOR_REPLAY_OF=<run_id> \
+  .venv/bin/python -m anchor.runtime.worker_service
+```
+
+Its Nth model call is served from that run's Nth recording, and a call made by a different
+node than the recording belongs to fails as a located divergence rather than being paired
+silently. Recording is off unless `ANCHOR_MODEL_RECORDING=record` is set, and a recording is
+an artifact of its run, so retention reclaims it with the run and never on its own.
+
+```bash
+.venv/bin/python scripts/validate_replay_run.py
+```
+
+records a run live and replays it against a profile pointed at a port nothing listens on,
+then compares the two paths.
+
 Services run the code that was on disk when they started. After changing anything under
 `src/`, restart the units — an acceptance can otherwise pass or fail against a
 process running yesterday's code, which is how a fan-out fix appeared not to work.

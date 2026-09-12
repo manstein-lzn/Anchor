@@ -144,6 +144,22 @@ class ReplayPlan:
         return self._calls(context.run_id).get(
             (str(context.node_run_id), context.attempt, sequence))
 
+    def ordered(self, run_id: UUID) -> list[ReplayEntry]:
+        """Every recorded call of a run, in the order the run made them.
+
+        The recordings are loaded from the run's `model.call` events, which the store returns
+        in sequence order, so the ordinal is the position in this list. A replay substitutes
+        the Nth call of the parent run for the Nth call it makes; nothing has to be counted or
+        guessed, and a flow that diverges shows up as a node mismatch rather than as a
+        silently wrong answer.
+        """
+        by_position = self._calls(run_id)
+        # Insertion order, not a sort: the recordings were indexed in the order the run's
+        # `model.call` events were read, and that *is* the order the calls happened. Sorting by
+        # (attempt, sequence) would group each node's calls together and lose the interleaving
+        # between nodes, which is exactly the order a replay has to follow.
+        return list(by_position.values())
+
     def recorded(self, context: CallContext) -> int:
         """How many calls were recorded for this node attempt."""
         return sum(1 for (node_run_id, attempt, _) in self._calls(context.run_id)
@@ -160,14 +176,45 @@ class ReplayModel(WrapperModel):
     """
 
     def __init__(self, wrapped: Any, plan: ReplayPlan, *,
-                 store: EventStore | None = None) -> None:
+                 store: EventStore | None = None,
+                 replay_of: UUID | None = None) -> None:
         super().__init__(wrapped)
         self.plan = plan
         self.store = store
         self._positions: dict[tuple[UUID, int], int] = {}
+        #: When set, this process is replaying *that* run: every model call it makes is served
+        #: by call ordinal from the recorded run, which is what makes a whole run reproducible.
+        self.replay_of = replay_of
+        self._ordinal = 0
         #: Positions where the prompt asked something different from the recording.
         self.changed: list[dict[str, Any]] = []
         self.replayed = 0
+
+    def _by_ordinal(self, context: CallContext) -> ReplayEntry:
+        """The recording this call substitutes, or a located divergence.
+
+        A replay substitutes the Nth call of the recorded run for the Nth call it makes. The
+        recorded node is *checked*, not assumed: if the flow has diverged, the mismatch names
+        the node that made the call and the node the recording belongs to, rather than serving
+        one node's answer to another and calling it a successful replay.
+        """
+        entries = self.plan.ordered(self.replay_of)  # type: ignore[arg-type]
+        sequence = self._ordinal
+        if sequence >= len(entries):
+            raise ReplayDivergence(
+                f"node {context.node_id!r} asked for model call #{sequence}, but the recorded "
+                f"run made only {len(entries)} call(s): the replay's flow has diverged and "
+                f"there is nothing left to substitute",
+                node_id=context.node_id, sequence=sequence)
+        entry = entries[sequence]
+        self._ordinal += 1
+        if entry.node_id != context.node_id:
+            raise ReplayDivergence(
+                f"model call #{sequence} belongs to node {entry.node_id!r} in the recorded "
+                f"run, but node {context.node_id!r} is making it now: the replay's flow has "
+                f"diverged from the recorded one",
+                node_id=context.node_id, sequence=sequence)
+        return entry
 
     def _emit(self, context: CallContext, payload: dict[str, Any], *, key: str) -> None:
         if self.store is None:
@@ -187,6 +234,9 @@ class ReplayModel(WrapperModel):
             raise ReplayDivergence(
                 "a replayed model call happened outside a node attempt, so there is "
                 "nothing to look it up by", node_id="?")
+        if self.replay_of is not None:
+            return await self._serve(self._by_ordinal(context), context, messages,
+                                     model_settings, model_request_parameters)
         key = (context.node_run_id, context.attempt)
         sequence = self._positions.get(key, 0)
         if key not in self._positions and len(self._positions) >= MAX_TRACKED_ATTEMPTS:
@@ -200,29 +250,37 @@ class ReplayModel(WrapperModel):
                 f"#{sequence}, but {self.plan.recorded(context)} call(s) were recorded "
                 f"for that attempt", node_id=context.node_id, attempt=context.attempt,
                 sequence=sequence)
+        return await self._serve(entry, context, messages, model_settings,
+                                 model_request_parameters)
 
+    async def _serve(self, entry: ReplayEntry, context: CallContext,
+                     messages: list[ModelMessage],
+                     model_settings: ModelSettings | None,
+                     model_request_parameters: ModelRequestParameters) -> Any:
+        """Rebuild the recorded response and report whether the prompt still matches."""
         try:
             response = _deserialize_response(entry.payload["response"])
         except Exception as exc:
             raise ReplayDivergence(
-                f"the recording of node {context.node_id!r} attempt {context.attempt} "
-                f"call #{sequence} cannot be read back ({type(exc).__name__}); refusing "
+                f"the recording of node {entry.node_id!r} attempt {entry.attempt} "
+                f"call #{entry.sequence} cannot be read back ({type(exc).__name__}); refusing "
                 f"to substitute anything for it", node_id=context.node_id,
-                attempt=context.attempt, sequence=sequence) from exc
+                attempt=entry.attempt, sequence=entry.sequence) from exc
 
         digest = _request_digest(messages, model_request_parameters, model_settings)
         changed = digest != entry.request_digest
         if changed:
-            self.changed.append({"node_id": context.node_id, "attempt": context.attempt,
-                                 "sequence": sequence,
+            self.changed.append({"node_id": context.node_id, "attempt": entry.attempt,
+                                 "sequence": entry.sequence,
                                  "recorded_digest": entry.request_digest,
                                  "actual_digest": digest})
         self.replayed += 1
         self._emit(context, {
-            "node_id": context.node_id, "attempt": context.attempt, "sequence": sequence,
+            "node_id": context.node_id, "attempt": entry.attempt,
+            "sequence": entry.sequence, "recorded_node_id": entry.node_id,
             "recording_ref": entry.payload.get("response_id"),
             "recorded_digest": entry.request_digest, "actual_digest": digest,
-            "prompt_changed": changed}, key=str(sequence))
+            "prompt_changed": changed}, key=f"{entry.node_id}:{entry.attempt}:{entry.sequence}")
         return response
 
     @asynccontextmanager

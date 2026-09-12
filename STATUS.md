@@ -230,6 +230,16 @@
   recovery re-queues the node, and the run closes with a continuous event sequence and no
   duplicated operation. **Not done**: lease observation and recovery have no
   `anchor.client` method, so an agent cannot do what this acceptance does.
+- **Whole-run replay** (done, DEVELOPMENT_PLAN P1.1, ADR-046): a process told which run it
+  replays (`ANCHOR_REPLAY_OF`) serves its Nth model call from that run's Nth recording,
+  checking the recorded node rather than assuming it. Verified by
+  `scripts/validate_replay_run.py`: a recorded run and a replay driven against a profile
+  pointed at a dead port produce the same status, node path and execution events,
+  differing only in `model.call` versus `model.call_replayed`. Recordings were already
+  attributed to their run by `list_artifact_references`, so retention reclaims them with
+  it; an architecture test now enforces that the state layer never imports a projection.
+  **Not built**: selective eviction of recordings while keeping their run — nothing
+  produces recordings unless explicitly enabled, so it would have had no user.
 - **A node-scoped harness** (done): re-run one node attempt against the input it
   actually received, read from its own persisted context snapshot and assembled by
   the same function the worker uses. Measured on a real run: re-running the writer

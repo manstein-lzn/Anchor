@@ -843,10 +843,6 @@ def test_call_context_normalises_string_identifiers():
 
 def test_a_recording_is_found_when_the_caller_passed_strings(tmp_path):
     """The CLI passes strings; the recording must still be found."""
-    pytest.importorskip("pydantic_ai")
-    from pydantic_ai.models.test import TestModel
-
-    from anchor.runtime.model_gateway import PydanticAIModelGateway
     from anchor.runtime.model_replay import ReplayPlan
 
     artifacts = LocalArtifactStore(tmp_path / "artifacts")
@@ -861,3 +857,182 @@ def test_a_recording_is_found_when_the_caller_passed_strings(tmp_path):
     stringly = CallContext(run_id=str(ctx.run_id), node_run_id=str(ctx.node_run_id),  # type: ignore[arg-type]
                            node_id=ctx.node_id, attempt=ctx.attempt)
     assert plan.entry(stringly, 0) is not None
+
+
+# -- run-level replay: the Nth call of a run comes from the Nth recording -----------
+
+
+def two_node_run(tmp_path, *, other_run=False):
+    """One run whose two nodes each recorded a call, in flow order."""
+    from anchor.runtime.model_replay import ReplayPlan
+
+    artifacts = LocalArtifactStore(tmp_path / "artifacts")
+    recorder = ModelRecorder(artifacts, mode=RecordingMode.RECORD)
+    recorded_under = uuid4() if other_run else None
+    plain_first, plain_second = context(node_id="gather"), context(node_id="write")
+    # Both calls belong to one run, which is the thing a whole-run replay substitutes.
+    shared = recorded_under or plain_first.run_id
+    first = CallContext(run_id=shared, node_id="gather",
+                        node_run_id=plain_first.node_run_id, attempt=0)
+    second = CallContext(run_id=shared, node_id="write",
+                         node_run_id=plain_second.node_run_id, attempt=0)
+    with recording_scope(first):
+        asyncio.run(gateway(recorder).generate(prompt="gather please",
+                                               system_prompt="S."))
+    with recording_scope(second):
+        asyncio.run(gateway(recorder).generate(prompt="write please",
+                                               system_prompt="S."))
+    plan = ReplayPlan(artifacts)
+    for ref in recorder.written:
+        plan._index(read_recording(artifacts, ref))
+    return artifacts, recorder, plan, first, second
+
+
+def run_replay_gateway(artifacts, plan, parent):
+    """A replay bound to a recorded run, with a model that would answer differently."""
+    pytest.importorskip("pydantic_ai")
+    from pydantic_ai.models.test import TestModel
+    from anchor.runtime.model_gateway import PydanticAIModelGateway
+    from anchor.runtime.model_replay import ReplayModel
+
+    recorder = ModelRecorder(artifacts, mode=RecordingMode.REPLAY)
+    gateway = PydanticAIModelGateway(profile(), StaticSecrets(),
+                                     model=TestModel(custom_output_text="LIVE"),
+                                     recorder=recorder)
+    model = gateway._model
+    assert isinstance(model, ReplayModel)
+    model.plan = plan
+    model.replay_of = parent
+    return gateway, model
+
+
+def test_a_whole_run_replays_by_call_order(tmp_path):
+    """A run's calls, in the order it made them, are what a replay substitutes."""
+    artifacts, _recorder, plan, first, second = two_node_run(tmp_path)
+    gateway, model = run_replay_gateway(artifacts, plan, first.run_id)
+
+    with recording_scope(first):
+        one = asyncio.run(gateway.generate(prompt="gather please", system_prompt="S."))
+    with recording_scope(second):
+        two = asyncio.run(gateway.generate(prompt="write please", system_prompt="S."))
+
+    assert one.text and two.text
+    assert "LIVE" not in one.text and "LIVE" not in two.text
+    assert model.replayed == 2
+    assert model.changed == [], "the same prompts in the same order are not a change"
+
+
+def test_a_diverged_flow_fails_located_rather_than_mispairing(tmp_path):
+    """The guard that makes ordinal substitution safe.
+
+    If the replay reaches for the second call from the wrong node, serving it anyway would
+    give one node another node's answer and report a successful replay. The recorded node is
+    checked instead, and the error names both sides.
+    """
+    artifacts, _recorder, plan, first, second = two_node_run(tmp_path)
+    gateway, model = run_replay_gateway(artifacts, plan, first.run_id)
+
+    with recording_scope(second), pytest.raises(ReplayDivergence) as caught:
+        # The recorded run made `gather`'s call first; making `write`'s call first is a
+        # different flow.
+        asyncio.run(gateway.generate(prompt="write please", system_prompt="S."))
+
+    assert caught.value.node_id == "write"
+    assert caught.value.sequence == 0
+    assert "gather" in str(caught.value) and "write" in str(caught.value)
+    assert model.replayed == 0, "nothing may be served from a mispaired position"
+
+
+def test_a_replay_that_outlasts_the_recording_fails(tmp_path):
+    """A longer flow than the recording cannot be invented."""
+    artifacts, _recorder, plan, first, second = two_node_run(tmp_path)
+    gateway, _model = run_replay_gateway(artifacts, plan, first.run_id)
+
+    with recording_scope(first):
+        asyncio.run(gateway.generate(prompt="gather please", system_prompt="S."))
+    with recording_scope(second):
+        asyncio.run(gateway.generate(prompt="write please", system_prompt="S."))
+        with pytest.raises(ReplayDivergence, match="made only 2 call"):
+            asyncio.run(gateway.generate(prompt="one more", system_prompt="S."))
+
+
+def test_a_changed_prompt_in_a_whole_run_replay_is_reported(tmp_path):
+    """Still reported rather than rejected: changing the prompt is the point."""
+    artifacts, _recorder, plan, first, second = two_node_run(tmp_path)
+    gateway, model = run_replay_gateway(artifacts, plan, first.run_id)
+
+    with recording_scope(first):
+        asyncio.run(gateway.generate(prompt="a different question", system_prompt="S."))
+    assert model.replayed == 1
+    assert len(model.changed) == 1
+    assert model.changed[0]["node_id"] == "gather"
+
+
+def test_recordings_from_another_run_do_not_serve_this_one(tmp_path):
+    """A plan is per run: replaying one run must not borrow another's answers."""
+    artifacts, _recorder, plan, _first, _second = two_node_run(tmp_path, other_run=True)
+    # A run that recorded nothing: a plan is per run, so it has nothing to substitute.
+    stranger = CallContext(run_id=uuid4(), node_id="gather", node_run_id=uuid4(), attempt=0)
+    gateway, _model = run_replay_gateway(artifacts, plan, stranger.run_id)
+    with recording_scope(stranger), pytest.raises(ReplayDivergence, match="made only 0 call"):
+        asyncio.run(gateway.generate(prompt="gather please", system_prompt="S."))
+
+
+# -- retention and the provider-free path -------------------------------------------
+
+
+def test_a_recording_belongs_to_its_run_so_retention_reclaims_it(tmp_path):
+    """Recordings are a projection of a run, and they must not outlive it.
+
+    Retention decides what is reclaimable by asking the store which run each artifact belongs
+    to. A recording is referenced from a `model.call` event payload rather than from a column,
+    so this asserts the event scan attributes it — which is what makes "recordings are
+    evicted with their run" a fact rather than a hope. Without it they would accumulate
+    outside every budget, invisible and unreclaimable.
+    """
+    from anchor.runtime.model_replay import ReplayPlan
+
+    artifacts = LocalArtifactStore(tmp_path / "artifacts")
+    store = make_store(tmp_path)
+    try:
+        recorder = ModelRecorder(artifacts, mode=RecordingMode.RECORD, store=store)
+        ctx = context(node_id="gather")
+        with recording_scope(ctx):
+            asyncio.run(gateway(recorder).generate(prompt="gather please",
+                                                   system_prompt="S."))
+        assert recorder.written, "nothing was recorded"
+
+        refs = {ref for run_id, ref in store.list_artifact_references()
+                if str(run_id) == str(ctx.run_id)}
+        for written in recorder.written:
+            assert written in refs, (
+                "the recording is not attributed to its run, so retention would never "
+                "reclaim it")
+        # And the run's plan can still be built from what the store reports.
+        assert len(ReplayPlan(artifacts, store=store).ordered(ctx.run_id)) == 1
+    finally:
+        store.close()
+
+
+def test_a_replay_runs_with_no_provider_reachable(tmp_path):
+    """The CI path: a recording stands in for a provider that is not there.
+
+    The wrapped model here is a TestModel that answers "LIVE" and *would succeed* if it were
+    reached — a stronger check than an unreachable address, because an unreachable one proves
+    only that something failed. Nothing carrying "LIVE" is evidence that the live model was
+    never called at all. `scripts/validate_replay_run.py` proves the same property end to end
+    against a real profile pointed at a dead port; this keeps it from regressing unnoticed.
+    """
+    artifacts, _recorder, plan, first, second = two_node_run(tmp_path)
+    gateway, model = run_replay_gateway(artifacts, plan, first.run_id)
+
+    with recording_scope(first):
+        one = asyncio.run(gateway.generate(prompt="gather please", system_prompt="S."))
+    with recording_scope(second):
+        two = asyncio.run(gateway.generate(prompt="write please", system_prompt="S."))
+
+    assert model.replayed == 2
+    assert one.text and two.text
+    assert model.changed == []
+    # The live model answers "LIVE" if it is ever reached; nothing may carry that.
+    assert "LIVE" not in one.text and "LIVE" not in two.text
