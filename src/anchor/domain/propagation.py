@@ -57,8 +57,21 @@ def decide_outgoing_edges(
     if any(edge.condition is not None for _, edge in outgoing) and evaluation_context is None:
         raise RoutingDecisionError("conditional outgoing edges require an evaluation context")
     context_hash = input_hash(evaluation_context) if evaluation_context is not None else None
+    # An operator-set revision ceiling, honored where a back-edge would start another revision.
+    # Enforced rather than merely validated: `max_rounds` used to pass graph validation and be
+    # read by nothing, which is worse than absent because it looks like a policy.
+    ceiling = _revision_ceiling(version)
+    back_edges = cycle_back_edges(version)
     decisions: list[EdgeDecision] = []
     for index, edge in outgoing:
+        if ceiling is not None and index in back_edges and source_attempt + 1 >= ceiling:
+            decisions.append(EdgeDecision(
+                run_id=run_id, edge_index=index, source_attempt=source_attempt,
+                source_node_id=edge.source, target_node_id=edge.target, selected=False,
+                reason=EdgeDecisionReason.REVISION_CEILING, condition=edge.condition,
+                evaluator=ROUTING_EVALUATOR, evaluator_version=ROUTING_EVALUATOR_VERSION,
+                evaluation_context_hash=None, evidence_ref=evidence_ref))
+            continue
         if edge.condition is None:
             selected = True
             reason = EdgeDecisionReason.UNCONDITIONAL
@@ -93,6 +106,23 @@ def decide_outgoing_edges(
             evidence_ref=evidence_ref,
         ))
     return tuple(decisions)
+
+
+def _revision_ceiling(version: GraphVersion) -> int | None:
+    """The operator's revision ceiling for this graph version, or ``None`` for unbounded.
+
+    Absence means unbounded, deliberately: a healthy task must not be stopped by a round count
+    nobody chose. A present value is an explicit policy on the pinned version, so it applies to
+    runs of that version and cannot change under a run that is already going.
+    """
+    raw = version.definition.metadata.get("max_rounds")
+    if raw is None:
+        return None
+    try:
+        value = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise PropagationError(f"max_rounds is not an integer: {raw!r}") from exc
+    return value if value > 0 else None
 
 
 def _validate_decision(version: GraphVersion, run_id: UUID, decision: EdgeDecision) -> None:

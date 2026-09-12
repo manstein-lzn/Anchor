@@ -63,7 +63,9 @@ METADATA_KEYS = {
     "behavior_ref": "binds a registered node behavior (for example academic.report)",
     "context_mode": "'full' disables predecessor text truncation for this node",
     "run_timeout_seconds": "graph-level metadata only; an opt-in wall clock budget",
-    "max_rounds": "graph-level metadata only; an opt-in revision cap for examples",
+    "max_rounds": ("graph-level metadata only; an opt-in revision ceiling. A back-edge that "
+                   "would start a revision past it is not taken, and the decision records "
+                   "reason=revision_ceiling"),
 }
 
 CONDITION_REFERENCE = {
@@ -103,7 +105,8 @@ DEFINITION_FIELDS = {
     "nodes": "at least one node",
     "edges": "optional list of edges",
     "entry_node_id": "optional explicit entry; defaults to nodes with no incoming edge",
-    "metadata": "optional string map; run_timeout_seconds is the only recognized key",
+    "metadata": ("optional string map; run_timeout_seconds and max_rounds are the recognized "
+                 "keys, both optional, neither defaulted"),
 }
 
 AUTHORING_FLOW = [

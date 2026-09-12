@@ -51,6 +51,10 @@ class EdgeDecisionReason(StrEnum):
     CONDITION_TRUE = "condition_true"
     CONDITION_FALSE = "condition_false"
     UPSTREAM_SKIPPED = "upstream_skipped"
+    #: A back-edge that would start a revision past the ceiling an operator set on the graph.
+    #: Its own reason so the record says the loop was capped rather than that a condition came
+    #: out false — an operator reading the decision should not have to guess which happened.
+    REVISION_CEILING = "revision_ceiling"
 
 
 class VerificationVerdict(StrEnum):
