@@ -187,6 +187,35 @@ def _next_step(graph: graph_module.Graph, state: RunState, decided: dict, run_di
                  _task(graph, node_id, state.objective, [item for item in incoming if item]), False)
 
 
+def _ready(graph: graph_module.Graph, state: RunState, decided: dict,
+           back: frozenset, entry: str, node_id: str) -> bool:
+    """Whether this node's inputs have arrived since it last ran, and at least one is selected.
+
+    An undecided edge holds it back — except a back-edge whose source has never run, which is a cycle
+    that has not started rather than an input still to come. Without that exception the node just
+    after the entry waits forever for an edge its own downstream has not had the chance to decide,
+    and the run reports success having done one node.
+    """
+    if node_id == entry and node_id not in state.passes:
+        return True
+    sources = graph.in_edges[node_id]
+    if not sources:
+        return node_id not in state.passes
+    since = state.last_seq.get(node_id, -1)
+    selected = []
+    for source in sources:
+        key = (source, node_id)
+        if key in decided:
+            if decided[key][1] <= since:
+                return False                        # nothing new since this node last ran
+            selected.append(decided[key][0])
+        elif key in back and source not in state.passes:
+            continue                                # the cycle it belongs to has not started
+        else:
+            return False
+    return any(selected)
+
+
 def _record(state: RunState, graph: graph_module.Graph, run_dir: Path,
             decided: dict, result: NodeResult) -> bool:
     """Store what a node left behind and resolve its ways out.
@@ -284,19 +313,11 @@ def run(workspace: str | Path, *, objective: str | None = None, config_path: str
 
     decided = {tuple(key.split("|")): tuple(value) for key, value in state.decided.items()}
     entry = graph.entry()
+    back = graph_module.back_edges(graph)
     order = list(graph.nodes)
 
     def ready(node_id: str) -> bool:
-        if node_id == entry and node_id not in state.passes:
-            return True
-        sources = graph.in_edges[node_id]
-        if not sources:
-            return node_id not in state.passes
-        keys = [(source, node_id) for source in sources]
-        since = state.last_seq.get(node_id, -1)
-        if not all(key in decided and decided[key][1] > since for key in keys):
-            return False
-        return any(decided[key][0] for key in keys)
+        return _ready(graph, state, decided, back, entry, node_id)
 
     def settle(node_id: str, chosen: str | None) -> None:
         for target in graph.routes(node_id):

@@ -73,6 +73,36 @@ class Graph:
         return self.out_edges.get(node_id, ())
 
 
+def back_edges(graph: Graph) -> frozenset[tuple[str, str]]:
+    """Edges that close a structural cycle, found by walking from the entry.
+
+    A pending node must not wait for an edge whose source has never run: on a first arrival the cycle
+    it belongs to has not started, and waiting for it deadlocks the graph at the first node after the
+    entry. Once that source has run, its decision exists and gates normally — which is what makes a
+    loop fire on the second pass and not the first.
+
+    This was missing, and its absence looked like a working pipeline: `gather` had edges in from
+    `gather` and `review`, neither of which could have decided anything yet, so `gather` never became
+    ready and the run reported `finished` having done one node.
+    """
+    colour: dict[str, int] = {graph.entry(): 1}          # 1 = on the current path
+    found: set[tuple[str, str]] = set()
+    stack: list[tuple[str, list[str]]] = [(graph.entry(), list(graph.out_edges.get(graph.entry(), ())))]
+    while stack:
+        node, targets = stack[-1]
+        if not targets:
+            colour[node] = 2
+            stack.pop()
+            continue
+        target = targets.pop(0)
+        if colour.get(target) == 1:
+            found.add((node, target))
+        elif colour.get(target) is None:
+            colour[target] = 1
+            stack.append((target, list(graph.out_edges.get(target, ()))))
+    return frozenset(found)
+
+
 def load(path: str | Path) -> Graph:
     raw = json.loads(Path(path).read_text(encoding="utf-8"))
     agents = {
