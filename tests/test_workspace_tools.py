@@ -191,7 +191,8 @@ def test_worker_commits_a_workspace_bound_node_output(bound):
 
     node_run = store.get_node_run(lease.node_run_id)
     assert node_run.status.value == "completed"
-    assert node_run.output_ref.startswith("workspace://ws-1@")
+    derived = manager.derived_workspace_id(lease)
+    assert node_run.output_ref.startswith(f"workspace://{derived}@"), node_run.output_ref
     revision = node_run.output_ref.split("@", 1)[1]
     from anchor.runtime.workspace import GitWorkspaceBackend
     assert GitWorkspaceBackend(str(root)).read_text(revision, "src/out.py") == "print('out')\n"
@@ -243,21 +244,32 @@ def test_a_node_reads_and_revises_its_own_tree(bound):
         "the node must be able to reread and revise what it wrote"
 
 
-def test_a_second_node_cannot_write_the_same_workspace(bound):
+def test_two_nodes_get_their_own_trees(bound):
+    """ADR-054: the declared workspace is a base, and each node derives its own tree from it.
+
+    This used to assert that the declared workspace was claimed by whichever node arrived first and
+    that a second one was refused. Deriving the tree makes that automatic and removes the
+    contention: two nodes of one run never name the same workspace, so nothing has to enforce the
+    separation. The attempt is part of the name for the same reason — a retry must start clean
+    rather than inherit what the previous attempt left behind.
+    """
     from uuid import uuid4
-    from anchor.runtime.workspace import WorkspaceError
 
     store, _, _, _, lease, toolset = bound
     toolset.execute(lease=lease, tool_ref="workspace.write",
                     arguments={"path": "a.txt", "content": "a\n"})
-    workspace = store.get_workspace("ws-1")
-    assert workspace.writer_node_run_id == lease.node_run_id
+    mine = toolset.workspace_id_for(lease)
+    assert mine != "ws-1", "the node works in its own tree, not in the declared base"
+    assert store.get_workspace(mine).project_id == store.get_workspace("ws-1").project_id
+    assert toolset.execute(lease=lease, tool_ref="workspace.read",
+                           arguments={"path": "a.txt"}) == "a\n"
 
     other = lease.model_copy(update={"node_run_id": uuid4()})
-    with pytest.raises(WorkspaceError, match="being written by node"):
-        toolset.execute(lease=other, tool_ref="workspace.write",
-                        arguments={"path": "b.txt", "content": "b\n"})
-    # The same node may keep writing.
-    toolset.execute(lease=lease, tool_ref="workspace.write",
-                    arguments={"path": "b.txt", "content": "b\n"})
+    theirs = toolset.workspace_id_for(other)
+    assert theirs != mine, "two executions must not share a tree"
+    toolset.execute(lease=other, tool_ref="workspace.write",
+                    arguments={"path": "a.txt", "content": "b\n"})
+    assert toolset.execute(lease=lease, tool_ref="workspace.read",
+                           arguments={"path": "a.txt"}) == "a\n", \
+        "one node's work must not be visible in another's tree"
     assert store.get_workspace("ws-1").current_revision

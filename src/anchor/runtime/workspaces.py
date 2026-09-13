@@ -215,6 +215,36 @@ class WorkspaceManager:
         target.unlink()
         return self._commit(workspace, WorkspaceOperationKind.DELETE, path=path, actor=actor)
 
+    def tree_for(self, lease) -> str:
+        """The workspace this node works in: a per-run fork of the base its graph node declares.
+
+        The declaration names a *base* — the workspace is created first and the graph refers to it.
+        A node does not work in the base itself, because two runs of one graph would then share a
+        tree and a retry would inherit whatever the previous attempt left behind. Deriving the tree
+        from (run, node, attempt) keeps one mechanism and one key: the declaration says where the
+        lineage starts, and nothing else has to be configured.
+        """
+        base_id = node_workspace_id(self.store, lease)
+        if not base_id:
+            raise WorkspaceError(f"node {lease.node_id!r} does not declare metadata.workspace_id")
+        derived = self.derived_workspace_id(lease)
+        if self.store.get_workspace(derived) is None:
+            self.fork(base_id, new_workspace_id=derived, actor=f"node:{lease.node_run_id}")
+        return derived
+
+    def derived_workspace_id(self, lease) -> str:
+        """The node's own tree, named from what identifies it. Deterministic, so no lookup table.
+
+        The node run is in the name as well as the attempt: two node runs for one (run, node) pair
+        can both be at attempt zero, and a name built from the pair alone would collide. With both,
+        every execution gets a tree of its own and a retry gets a fresh one.
+        """
+        run = str(lease.run_id).split("-")[0]
+        node = str(lease.node_id)[:24]
+        attempt = _attempt_of(self.store, lease)
+        node_run = str(lease.node_run_id).split("-")[0]
+        return f"ws-{run}-{node}-{node_run}-{attempt}"
+
     def claim(self, workspace_id: str, claimant) -> Workspace:
         """Claim the workspace for this node and return it, with its live tree at ``path``.
 
@@ -308,6 +338,12 @@ class WorkspaceManager:
         self.store.update_workspace_state(workspace.workspace_id, state=workspace.state,
                                           current_revision=revision)
         return operation
+
+
+def _attempt_of(store, lease) -> int:
+    """Which attempt of this node is running, so a retry gets a clean tree rather than a dirty one."""
+    node_run = store.get_node_run(lease.node_run_id)
+    return int(getattr(node_run, "attempt", 0) or 0)
 
 
 def node_workspace_id(store, lease) -> str | None:

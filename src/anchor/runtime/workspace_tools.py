@@ -20,7 +20,7 @@ from pathlib import Path
 from anchor.domain.content import parse
 from anchor.runtime.sandbox import SandboxSpec
 from anchor.runtime.workspace import WorkspaceError, WorkspaceResolver
-from anchor.runtime.workspaces import WorkspaceManager, node_workspace_id
+from anchor.runtime.workspaces import WorkspaceManager
 
 WORKSPACE_TOOLS = frozenset({
     "workspace.read", "workspace.write", "workspace.list", "workspace.exec",
@@ -40,11 +40,8 @@ class WorkspaceToolset:
         return tool_ref in WORKSPACE_TOOLS
 
     def workspace_id_for(self, lease) -> str:
-        workspace_id = node_workspace_id(self.store, lease)
-        if not workspace_id:
-            raise WorkspaceError(
-                f"node {lease.node_id!r} does not declare metadata.workspace_id")
-        return workspace_id
+        """The node's own tree, derived from the base its graph node declares (ADR-054)."""
+        return self.workspaces.tree_for(lease)
 
     def execute(self, *, lease, tool_ref: str, arguments: dict, input_snapshot=None) -> str:
         if not self.handles(tool_ref):

@@ -122,19 +122,27 @@ def check(name, condition, detail=""):
 
 node = next(item for item in get(f"/api/runs/{run_id}/nodes") if item["node_id"] == "coder")
 output_ref = node.get("output_ref") or ""
-check("node output is a workspace revision", output_ref.startswith(f"workspace://{workspace_id}@"), output_ref)
+# ADR-054: the declared workspace is a *base*. The node works in its own tree, derived from it, so
+# the output is a revision of that tree rather than of the base — and the base is left alone.
+derived_id = output_ref.split("://", 1)[-1].split("@", 1)[0] if "@" in output_ref else ""
+check("the node produced a revision of its own tree, not of the declared base",
+      bool(derived_id) and derived_id != workspace_id, output_ref)
 revision = output_ref.split("@", 1)[1] if "@" in output_ref else ""
 
-workspace = get(f"/api/workspaces/{workspace_id}")
-check("workspace frozen at that revision",
-      workspace["state"] == "frozen" and workspace["current_revision"] == revision, workspace)
+derived = get(f"/api/workspaces/{derived_id}")
+check("the node's tree is frozen at the revision it produced",
+      derived["state"] == "frozen" and derived["current_revision"] == revision, derived)
 
-kinds = [item["kind"] for item in get(f"/api/workspaces/{workspace_id}/operations")]
-# ADR-054: a node works in its tree, and the freeze is the one revision. The absence of per-write
-# operations is the property now, not an oversight — a node at work is not a sequence of auditable
-# transactions, and recording each edit as one would make the ledger a text editor's undo history.
-check("ledger records create and freeze, and no per-write operation",
-      kinds[:1] == ["create"] and kinds[-1] == "freeze" and "write" not in kinds, kinds)
+derived_kinds = [item["kind"] for item in get(f"/api/workspaces/{derived_id}/operations")]
+# The absence of per-write operations is the property now, not an oversight: a node at work is not a
+# sequence of auditable transactions, and the freeze at the end is the one revision.
+check("its lineage records the fork and one freeze, with no per-write operation",
+      derived_kinds[:2] == ["create", "fork"] and derived_kinds[-1] == "freeze"
+      and "write" not in derived_kinds, derived_kinds)
+
+base = get(f"/api/workspaces/{workspace_id}")
+check("the declared base is untouched and still active",
+      base["state"] == "active" and base["current_revision"] == base["base_revision"], base)
 
 events = get(f"/api/runs/{run_id}/events?after=0&limit=200")
 completed = [event for event in events if event["event_type"] == "node.completed"]
@@ -154,7 +162,7 @@ from anchor.state.relational import RelationalStateStore
 
 store = RelationalStateStore(f"sqlite:///{Path(root) / '.local' / 'api.sqlite'}")
 result = execute_in_workspace(
-    store, workspace_ref(workspace_id, revision),
+    store, workspace_ref(derived_id, revision),
     ["python3", "-B", "-c",
      "import calc; assert calc.add(2,3)==5; assert calc.add(-1,1)==0; print('tests pass')"],
     sandbox=BubblewrapWorkspaceSandbox())

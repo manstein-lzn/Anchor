@@ -180,15 +180,18 @@ class AgentNodeWorker:
     def _workspace_output(self, lease, agent):
         """Freeze a workspace-bound node's output as an immutable revision.
 
-        Returns (output_ref, event_payload, prepared); a node without a declared
-        workspace returns (None, {}, None) and keeps the model text as output.
+        Returns (output_ref, event_payload, prepared); a node whose graph node declares no workspace
+        returns (None, {}, None) and keeps the model text as output.
+
+        The tree is the node's own, derived from the declared base, so two runs of one graph never
+        share a tree and a retry starts clean rather than inheriting the previous attempt's mess.
         """
         if self.committer is None:
             return None, {}, None
         from anchor.runtime.workspaces import node_workspace_id
-        workspace_id = node_workspace_id(self.store, lease)
-        if not workspace_id:
+        if not node_workspace_id(self.store, lease):
             return None, {}, None
+        workspace_id = self.committer.workspaces.tree_for(lease)
         node_run = self.store.get_node_run(lease.node_run_id)
         attempt = node_run.attempt if node_run is not None else 0
         prepared = self.committer.prepare(run_id=lease.run_id, node_run_id=lease.node_run_id,
