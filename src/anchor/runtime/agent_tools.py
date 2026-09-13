@@ -49,12 +49,18 @@ def _truncate(value: Any, *, chars: int | None, list_limit: int, note: str) -> A
 class AgentToolLoop:
     """Binds model tool calls to gateway execution for one worker process."""
 
-    def __init__(self, tools: ToolGateway, artifacts, *, native=None) -> None:
+    def __init__(self, tools: ToolGateway, artifacts, *, native=None,
+                 recall: bool = False) -> None:
         self.tools = tools
         self.artifacts = artifacts
         # Native tools run in the kernel (for example workspace mutations) and
         # keep their own ledger; gateway tools run in a sandbox.
         self.native = native
+        #: Whether the recall tool is offered. Only meaningful with compression on: recall exists
+        #: to follow the references a state leaves behind, and without compression nothing writes
+        #: one. Offering it otherwise would add a tool to every agent's surface in exchange for
+        #: answering questions nobody can ask.
+        self.recall = recall
 
     def _capability(self, tool_ref: str) -> ToolCapability | None:
         try:
@@ -79,7 +85,7 @@ class AgentToolLoop:
         state = {"seq": 0, "total": 0, "by_tool": {}}
         state_lock = asyncio.Lock()
         concurrency = asyncio.Semaphore(agent.max_parallel_tools)
-        functions: list[ToolFunction] = []
+        functions: list[ToolFunction] = ([self._recall_function(lease)] if self.recall else [])
         for tool_ref in agent.tool_refs:
             capability = self._capability(tool_ref)
             description = getattr(capability, "description", "") if capability else ""
@@ -142,6 +148,33 @@ class AgentToolLoop:
 
             functions.append(ToolFunction(name=tool_ref, description=description, call=call))
         return functions
+
+    def _recall_function(self, lease) -> ToolFunction:
+        """Reading back what the state points at, on the same footing as every other tool.
+
+        Added alongside the capability-declared tools rather than given a privileged path, and it is
+        read-only with no ledger entry because it changes nothing — the reason a ledger exists is to
+        account for side effects, and this has none.
+
+        The permission is evaluated per call rather than here, because the state that names the
+        references is written part-way through the attempt: a set computed now would not contain the
+        references a compression is about to create.
+        """
+        import anchor.runtime.recall as recall
+
+        async def call(arguments_json: str) -> str:
+            reference = recall.reference_of(arguments_json)
+            if reference is None:
+                return "REFUSED: recall takes {\"ref\": \"<reference>\"}"
+            return await asyncio.to_thread(recall.resolve, self.tools.store, self.artifacts,
+                                           run_id=lease.run_id, reference=reference)
+
+        return ToolFunction(
+            name="anchor_recall",
+            description=("Read stored content by reference. The state names its detail by "
+                         "reference; this returns what one points at. Only references this run "
+                         "already holds are readable."),
+            call=call)
 
     def _prior_evidence(self, lease) -> tuple[list[dict], list[dict]]:
         """Durable successful evidence from earlier attempts, for retry context.

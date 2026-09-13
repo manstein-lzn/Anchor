@@ -139,7 +139,10 @@ async def serve() -> None:
         # and its whole cost model depends on what is being fetched.
         tool_gateway.content_cache = ContentCache(
             settings.content_cache_root, ttl_seconds=settings.content_cache_ttl_seconds)
-    tool_loop = AgentToolLoop(tool_gateway, artifacts, native=workspace_tools)
+    # Recall is offered exactly when compression is: it is what follows the references a state
+    # leaves behind, and without a state there is nothing to follow.
+    tool_loop = AgentToolLoop(tool_gateway, artifacts, native=workspace_tools,
+                              recall=settings.context_compaction)
     from anchor.runtime.content_commit import ContentCommitter
     committer = ContentCommitter(store, workspace_manager)
     behaviors = BehaviorRegistry()
