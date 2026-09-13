@@ -31,6 +31,11 @@ class ModelResponse:
     # separates a frightening token counter from the amount actually charged.
     cache_read_tokens: int = 0
     cache_write_tokens: int = 0
+    # The conversation this call produced, in order: what was asked, what the model said, which
+    # tools it called and what they returned. Carried out so a caller can append it to a trace
+    # instead of reconstructing behaviour by re-running experiments — which is what happens when
+    # this is missing, and it is much slower than reading a file.
+    messages: tuple[dict, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -171,15 +176,53 @@ class PydanticAIModelGateway:
     async def generate(self, *, prompt: str, system_prompt: str = "") -> ModelResponse:
         return await self._run_agent(self._agent, prompt=prompt, system_prompt=system_prompt)
 
-    async def _run_agent(self, agent, *, prompt: str, system_prompt: str) -> ModelResponse:
+    async def _run_agent(self, agent, *, prompt: str, system_prompt: str,
+                         request_limit: int | None = None,
+                         message_history: tuple[dict, ...] | None = None) -> ModelResponse:
+        # Pydantic AI caps an agent run at 50 requests by default. A node that works until a goal is
+        # met is not a chat turn and can legitimately need more, so the caller sets this — and 50 is
+        # low enough that a real gather loop reaches it, which is how the default was found.
+        limits = None
+        if request_limit:
+            from pydantic_ai.usage import UsageLimits
+            limits = UsageLimits(request_limit=request_limit)
+        history = None
+        if message_history:
+            # Handed back as the library's own message type; a dict is not a message.
+            from pydantic_ai.messages import ModelMessagesTypeAdapter
+            history = ModelMessagesTypeAdapter.validate_python(
+                [{key: value for key, value in record.items() if key != "class_"}
+                 for record in message_history])
         if self.profile.stream:
-            async with agent.run_stream(prompt, instructions=system_prompt or None) as result:
+            async with agent.run_stream(prompt, instructions=system_prompt or None,
+                                        usage_limits=limits,
+                                        message_history=history) as result:
                 output = await result.get_output()
         else:
-            result = await agent.run(prompt, instructions=system_prompt or None)
+            result = await agent.run(prompt, instructions=system_prompt or None,
+                                     usage_limits=limits, message_history=history)
             output = result.output
         text = output if isinstance(output, str) else str(output)
         return self._response_from(result, text=text)
+
+    @staticmethod
+    def _messages_of(result) -> tuple[dict, ...]:
+        """The conversation as plain JSON, so a trace is readable without the library to hand.
+
+        Through the library's own adapter, not `model_dump`: these messages are not pydantic models,
+        and guessing at their shape produced a trace of `repr` strings. The adapter also round-trips,
+        which is what lets a caller hand the history back to continue the same conversation.
+        """
+        messages = list(getattr(result, "all_messages", lambda: [])())
+        if not messages:
+            return ()
+        from pydantic_ai.messages import ModelMessagesTypeAdapter
+        dumped = ModelMessagesTypeAdapter.dump_python(messages, mode="json")
+        # `class_`, not `kind`: the record already carries `kind` as the library's discriminator,
+        # and a field of mine under that name overwrote it — which is why handing the history back
+        # then failed to validate.
+        return tuple({"class_": type(message).__name__, **record}
+                     for message, record in zip(messages, dumped))
 
     def _response_from(self, result, *, text: str) -> ModelResponse:
         """The spend and identity of one call, shared by every shape of answer."""
@@ -198,7 +241,8 @@ class PydanticAIModelGateway:
             requests=int(getattr(usage, "requests", 0) or 0),
             cache_read_tokens=int(getattr(usage, "cache_read_tokens", 0) or 0),
             cache_write_tokens=int(getattr(usage, "cache_write_tokens", 0) or 0),
-            cost=float(raw_cost) if raw_cost is not None else None)
+            cost=float(raw_cost) if raw_cost is not None else None,
+            messages=self._messages_of(result))
 
     async def generate_structured(self, *, prompt: str, system_prompt: str,
                                   output_type: Any) -> tuple[Any, ModelResponse]:
@@ -232,8 +276,19 @@ class PydanticAIModelGateway:
         return output, self._response_from(result, text=_as_text(output))
 
     async def generate_with_tools(self, *, prompt: str, system_prompt: str = "",
-                                  tools: list[ToolFunction]) -> ModelResponse:
-        """Run the model with function tools; each call is ledger-bound by the caller."""
+                                  tools: list[ToolFunction],
+                                  request_limit: int | None = None,
+                                  message_history: tuple[dict, ...] | None = None
+                                  ) -> ModelResponse:
+        """Run the model with function tools until it stops calling them.
+
+        `request_limit` bounds how many model calls one such run may make; unset keeps Pydantic AI's
+        own default, which is 50 and too low for a node that works until its goal is met.
+
+        `message_history` continues an earlier call rather than starting a new conversation. Without
+        it a caller that asks the model to keep going throws away what it just did, and the model
+        cannot see its own tool calls from the turn before.
+        """
         from pydantic_ai import Agent as PydanticAgent
 
         def make_entry(call: Callable[[str], Awaitable[str]]):
@@ -249,7 +304,9 @@ class PydanticAIModelGateway:
             entry.__name__ = function.name.replace("-", "_").replace(".", "_")
             entry.__doc__ = function.description or f"Call the {function.name} tool."
             agent.tool_plain(entry)
-        return await self._run_agent(agent, prompt=prompt, system_prompt=system_prompt)
+        return await self._run_agent(agent, prompt=prompt, system_prompt=system_prompt,
+                                     request_limit=request_limit,
+                                     message_history=message_history)
 
     async def close(self) -> None:
         await self._openai_client.close()
