@@ -29,6 +29,18 @@ DEFAULT_ALLOWED_COMMANDS = frozenset({
 DEFAULT_TIMEOUT_SECONDS = 30.0
 DEFAULT_MAX_OUTPUT_BYTES = 1_000_000
 SANDBOX_WORKSPACE = "/tmp/ws"
+#: The parts of the system a shell needs to exist at all. Everything not named here — other
+#: projects, the operator's home, this repository's own state — is not visible to a node.
+SANDBOX_SYSTEM = ("/usr", "/bin", "/lib", "/lib64", "/sbin")
+SANDBOX_FILES = (
+    # Name resolution, and the certificate authorities, or a node that reaches the literature
+    # cannot verify what it reaches. `/etc/ssl` covers Debian-family systems and `/etc/pki` the
+    # Red Hat family; both are tried, because the node should not fail on which distribution it is.
+    ("/etc/resolv.conf", "/etc/resolv.conf"), ("/etc/ssl", "/etc/ssl"), ("/etc/pki", "/etc/pki"),
+    ("/etc/ca-certificates.conf", "/etc/ca-certificates.conf"), ("/etc/hosts", "/etc/hosts"),
+    ("/etc/passwd", "/etc/passwd"), ("/etc/group", "/etc/group"),
+    ("/etc/nsswitch.conf", "/etc/nsswitch.conf"), ("/etc/localtime", "/etc/localtime"),
+)
 
 
 class SandboxDenied(RuntimeError):
@@ -49,10 +61,12 @@ class SandboxSpec:
     # refusing it costs nothing. Per node, because the two kinds of work are not the same kind of
     # risk and a single global answer would be the wrong one for half of them.
     network: bool = False
-    # Directories added to the sandbox's PATH, for tools the node is meant to have. The whole
-    # filesystem is already bound read-only, so a directory here is reachable either way; what it
-    # changes is whether a command can be found by name, which is the only way a shell can use it.
+    # Directories added to the sandbox's PATH, for tools the node is meant to have.
     tool_dirs: tuple[str, ...] = ()
+    # ("source", "destination") pairs mounted read-only, for the tools to exist at all. At their real
+    # paths, because a virtual environment's interpreter and scripts carry absolute paths and moving
+    # them breaks both.
+    readonly_binds: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -120,7 +134,18 @@ class BubblewrapWorkspaceSandbox:
             # `--unshare-all` takes the network away, and `--share-net` gives it back for the nodes
             # whose work is reaching the literature. Nothing else is shared either way.
             *(["--share-net"] if spec.network else []),
-            "--ro-bind", "/", "/",
+            # Named parts of the system, not the whole thing. Binding `/` read-only looked harmless
+            # and was not: a node could read the operator's home, this repository's state, and a
+            # database left over from a system that no longer exists — and one did. Its plan filled
+            # with `tool_operations` and `result_ref`, vocabulary it could only have learned by
+            # looking, and a research step wrote a script to query that database. A node's behaviour
+            # then depends on what happens to be on the disk, which is the opposite of reproducible.
+            *(item for path in SANDBOX_SYSTEM if Path(path).exists()
+              for item in ("--ro-bind", path, path)),
+            *(item for source, destination in SANDBOX_FILES if Path(source).exists()
+              for item in ("--ro-bind-try", source, destination)),
+            *(item for source, destination in spec.readonly_binds
+              for item in ("--ro-bind", source, destination)),
             "--tmpfs", "/tmp",
             "--dir", SANDBOX_WORKSPACE,
             # Read-write, unlike the rest of the tree, because a node that can only read cannot

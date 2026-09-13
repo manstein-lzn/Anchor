@@ -16,7 +16,9 @@ so the submission sentinel stays theirs and cannot drift from the loop that read
 
 from __future__ import annotations
 
+import os
 import shutil
+import sys
 from pathlib import Path
 
 from minisweagent.environments.local import LocalEnvironment
@@ -75,6 +77,52 @@ def system_prompt(instructions: str) -> str:
     return f"{instructions.strip()}\n\n{RULES.strip()}\n" if instructions.strip() else RULES
 
 
+def _console_script(name: str) -> str | None:
+    """Where a console script of *this* installation is.
+
+    Next to the interpreter, not looked up on PATH. The runner is started as `python -m …`, which
+    does not put its own environment's `bin` on PATH, so a lookup there finds nothing — and then the
+    node is told about a tool that is not on its PATH and cannot be called.
+    """
+    # Not resolved. `sys.executable` is `<venv>/bin/python`, which is a symlink to whatever
+    # interpreter the environment was built from — and following it walks out of the environment,
+    # where the console scripts are not.
+    candidate = Path(sys.executable).parent / name
+    if candidate.is_file():
+        return str(candidate)
+    return shutil.which(name)
+
+
+def _tool_binds(console_script: str | None) -> tuple[tuple[str, str], ...]:
+    """What has to be visible for the literature tool to run: its interpreter and its package.
+
+    Both at their real paths. A virtual environment is not relocatable — the interpreter looks for
+    its libraries relative to itself, and the console script's shebang names the interpreter — so a
+    bind at some tidier location would produce a tool that cannot start.
+    """
+    if not console_script:
+        return ()
+    venv = Path(console_script).parents[1]
+    package = Path(__file__).resolve().parents[2]
+    binds = [(str(venv), str(venv))]
+    if package.is_dir():
+        binds.append((str(package), str(package)))
+    # And the Python the environment is built on, which is not inside it: `<venv>/bin/python` is a
+    # symlink into an installed interpreter, and a console script's shebang names the symlink. There
+    # are two links in that chain — the environment points at a stable alias like `cpython-3.12`,
+    # which points at the versioned directory actually on disk — so both have to be present or the
+    # script cannot start. Binding only the resolved one produced
+    # `bad interpreter: No such file or directory`, which is what a missing alias looks like.
+    for candidate in (sys.executable, os.readlink(sys.executable) if os.path.islink(sys.executable) else None):
+        if not candidate:
+            continue
+        prefix = Path(candidate).parent
+        prefix = prefix.parent if prefix.name == "bin" else prefix
+        if prefix.is_dir() and str(prefix) != str(venv):
+            binds.append((str(prefix), str(prefix)))
+    return tuple(dict.fromkeys(binds))
+
+
 class SandboxEnvironment(LocalEnvironment):
     """Their local environment, with bwrap between it and the machine.
 
@@ -94,15 +142,22 @@ class SandboxEnvironment(LocalEnvironment):
         # Found on *this* process's PATH and handed to the sandbox, so the node can call the tool by
         # name. The sandbox does not inherit an environment, which is deliberate — a node should get
         # what it was given and not what happened to be lying around.
-        found = shutil.which("anchor-scholarly")
+        found = _console_script("anchor-scholarly")
         self.tool_dirs = (str(Path(found).parent),) if found else ()
+        # The literature tool is a console script in a virtual environment, so it needs that
+        # environment and the package it imports to exist inside the sandbox — at their real paths,
+        # because the interpreter and its scripts carry absolute ones. This is our own code, which is
+        # the point: it is read-only and it is the only thing of ours the node can see. The
+        # repository root is deliberately not bound, because the secrets file and the old state
+        # live under it.
+        self.readonly_binds = _tool_binds(found)
 
     def execute(self, action, cwd: str = "", *, timeout: int | None = None) -> dict:
         command = action.get("command", "")
         result = self.sandbox.run(SandboxSpec(
             workspace=self.tree, command=("sh", "-c", command),
             timeout_seconds=float(timeout or self.timeout_seconds), network=self.network,
-            tool_dirs=self.tool_dirs))
+            tool_dirs=self.tool_dirs, readonly_binds=self.readonly_binds))
         output = {"output": result.stdout + result.stderr, "returncode": result.returncode,
                   "exception_info": "the command timed out" if result.timed_out else ""}
         self._check_finished(output)
