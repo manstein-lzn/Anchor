@@ -34,7 +34,10 @@ class Agent:
     # finishing will otherwise spend the whole wall-clock budget saying so. Sixty is generous for
     # work that is already describing itself in minutes.
     max_steps: int = 0
-    wall_time_limit_seconds: int = 1800
+    # An hour, not half of one. A real literature search with a rate-limited source spends most of
+    # its clock waiting, and the first version of this cut off a gathering step that was still
+    # working and had sixty result files to show for it.
+    wall_time_limit_seconds: int = 3600
 
 
 @dataclass(frozen=True)
@@ -109,7 +112,7 @@ def load(path: str | Path) -> Graph:
         name: Agent(model=spec["model"], instructions=spec.get("instructions", ""),
                     network=bool(spec.get("network", False)),
                     max_steps=int(spec.get("max_steps", 0)),
-                    wall_time_limit_seconds=int(spec.get("wall_time_limit_seconds", 1800)))
+                    wall_time_limit_seconds=int(spec.get("wall_time_limit_seconds", 3600)))
         for name, spec in raw["agents"].items()
     }
     nodes = {item["id"]: item["agent"] for item in raw["nodes"]}

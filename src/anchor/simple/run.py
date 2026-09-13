@@ -31,6 +31,15 @@ IGNORED = shutil.ignore_patterns(".git", "__pycache__")
 #: announcing completion instead of achieving it is stopped in minutes rather than in half an hour.
 DEFAULT_MAX_STEPS = 60
 
+#: Ways a node can run out of budget rather than get the work wrong. Running out of clock is not a
+#: failed attempt: the conversation is good and continuing it is exactly the right response, so these
+#: leave the run resumable instead of ending it.
+BUDGET_EXITS = frozenset({"TimeExceeded", "LimitsExceeded"})
+
+#: How many times one pass of one node may be started, counting resumes. Each is given a fresh
+#: budget, so without a ceiling a node that never finishes would be resumed forever.
+MAX_ATTEMPTS = 4
+
 
 @dataclass(frozen=True)
 class NodeResult:
@@ -63,6 +72,8 @@ class RunState:
     executed: list[str] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)
     seq: int = 0
+    # keyed "{node}|{pass}" — how many times that pass has been started, resumes included.
+    attempts: dict[str, int] = field(default_factory=dict)
     error: str = ""
 
     def save(self, run_dir: Path) -> None:
@@ -166,6 +177,19 @@ def _next_step(graph: graph_module.Graph, state: RunState, decided: dict, run_di
     """
     cursor = state.cursor
     if cursor is not None:
+        key = f"{cursor['node']}|{cursor['pass']}"
+        state.attempts[key] = state.attempts.get(key, 0) + 1
+        if state.attempts[key] > MAX_ATTEMPTS:
+            # Continued as far as it is worth continuing. Each attempt had a fresh budget, so this
+            # is a node that cannot finish rather than one that needs longer, and saying so beats
+            # resuming it until somebody notices.
+            state.status = "failed"
+            state.error = (f"{cursor['node']} pass {cursor['pass']} was started "
+                           f"{state.attempts[key] - 1} times without finishing")
+            state.cursor = None
+            state.save(run_dir)
+            return None
+        state.save(run_dir)
         return _Step(cursor["node"], cursor["pass"], Path(cursor["dir"]), None, True)
     pending = [node for node in order if ready(node)]
     if not pending:
@@ -175,6 +199,7 @@ def _next_step(graph: graph_module.Graph, state: RunState, decided: dict, run_di
     if number > graph.max_rounds:
         return _Step(node_id, number, Path(), None, False)
     directory = run_dir / (node_id if number == 1 else f"{node_id}-{number}")
+    state.attempts[f"{node_id}|{number}"] = state.attempts.get(f"{node_id}|{number}", 0) + 1
     incoming = [state.result(source) for source in graph.in_edges[node_id]
                 if decided.get((source, node_id), (False, -1))[0]]
     _seed(directory, [Path(item.tree) for item in incoming if item])
@@ -225,6 +250,18 @@ def _record(state: RunState, graph: graph_module.Graph, run_dir: Path,
     shape of a success. That mistake is what this whole rework is about, so it is checked here rather
     than left to be noticed.
     """
+    if not result.submitted and result.exit_status in BUDGET_EXITS:
+        # Out of clock, not out of ideas. The node keeps its cursor so a resume re-enters the same
+        # pass and continues the same conversation, and the edges stay undecided so nothing
+        # downstream moves on the strength of work that did not happen.
+        state.executed.append(result.node_id)
+        state.error = f"{result.node_id} ran out of budget: {result.exit_status}"
+        state.save(run_dir)
+        print(json.dumps({"node": result.node_id, "pass": result.pass_number,
+                          "agent": result.agent, "ran_out": result.exit_status,
+                          "resumable": True}, ensure_ascii=False), flush=True)
+        return True
+
     state.nodes[result.node_id] = {**asdict(result), "files": list(result.files)}
     state.executed.append(result.node_id)
     state.cursor = None
@@ -353,7 +390,10 @@ def run(workspace: str | Path, *, objective: str | None = None, config_path: str
                 return state
 
         state.skipped = [node for node in order if node not in state.passes]
-        state.status = "finished"
+        if state.status == "running":
+            # Only if nothing else has already decided otherwise: a node that used up its attempts
+            # sets `failed`, and the end of the loop is not the place to disagree with it.
+            state.status = "finished"
     except Exception as exc:  # noqa: BLE001 - recorded, so a restart can pick the run up
         state.status = "interrupted"
         state.error = f"{type(exc).__name__}: {exc}"
