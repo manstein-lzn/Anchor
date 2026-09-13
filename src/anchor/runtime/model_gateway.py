@@ -46,6 +46,18 @@ async def _unavailable(arguments: str) -> str:  # pragma: no cover - defensive d
     raise RuntimeError("tool function has no implementation")
 
 
+def _as_text(output: Any) -> str:
+    """A readable string form of a structured answer, for the spend record.
+
+    The caller wants the object; a `ModelResponse` carries text, and it should be something a
+    person can read in a report rather than a `repr` of a pydantic model.
+    """
+    if isinstance(output, str):
+        return output
+    dump = getattr(output, "model_dump_json", None)
+    return dump() if callable(dump) else str(output)
+
+
 class ModelGateway(Protocol):
     async def generate(self, *, prompt: str, system_prompt: str = "") -> ModelResponse: ...
 
