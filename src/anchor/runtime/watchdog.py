@@ -96,25 +96,45 @@ class AdaptiveWatchdog:
         if observed_at.tzinfo is None or observed_at.utcoffset() is None:
             raise ValueError("now must be timezone-aware")
         previous = self._latest_evidence(run_id)
-        if (previous is not None and previous.heartbeat_at == current.heartbeat_at
-                and previous.state_revision == current.state_revision):
+        same_state = (previous is not None
+                      and previous.heartbeat_at == current.heartbeat_at
+                      and previous.state_revision == current.state_revision)
+        # The same state does not mean the same decision, because some conditions develop with time
+        # while the state sits still: a heartbeat that was fresh when the evidence was recorded can be
+        # overdue by now. Returning early on `same_state` alone made the watchdog decide once per
+        # state and never again, so a run could sit stalled for half an hour while the supervisor
+        # assessed it every ten seconds and concluded nothing every time. That is why
+        # `diagnostic_requests` stayed empty.
+        overdue = self._heartbeat_is_overdue(current, observed_at)
+        if same_state and not overdue:
             return WatchdogDecision(
                 health=RunHealth.OBSERVING, action="continue",
                 reason="evidence already recorded for this state revision",
             )
         decision = self._decide(current=current, previous=previous, now=observed_at,
                                 dependency_connected=dependency_connected)
-        self.store.append_progress_evidence(current)
+        # Recorded once per state, so a condition that only ripens does not append a row every ten
+        # seconds for as long as it lasts.
+        if not same_state:
+            self.store.append_progress_evidence(current)
         # Every decision that needs a human is recorded as one. Only `request_diagnostic` used to
         # produce a diagnostic, so `probe_worker_and_lease` — which is what a stale heartbeat yields,
         # and is the one that fires when a worker dies mid-node — was computed and then dropped: the
         # supervisor reads `assess` for its side effects and ignores the return value, so nothing
-        # acted on it. A run therefore waited for an operator nobody had told, and `diagnostic_requests`
-        # was empty while a lease sat stale for 28.6 hours. Deduplicated by reason, so this cannot
-        # accumulate one diagnostic per observation of the same condition.
+        # acted on it. Deduplicated by reason, so this cannot accumulate one diagnostic per
+        # observation of the same condition.
         if decision.action in OPERATOR_ACTIONS:
             self._request_diagnostic(run_id, current, decision, observed_at)
         return decision
+
+    def _heartbeat_is_overdue(self, current: ProgressEvidence, now: datetime) -> bool:
+        """Whether the worker's heartbeat is late enough to need an operator.
+
+        It does not prove the worker stopped — which is exactly why the decision belongs to an
+        operator rather than to this service.
+        """
+        return bool(current.worker_expected
+                    and now - current.heartbeat_at > self.heartbeat_timeout)
 
     def _request_diagnostic(self, run_id: UUID, current: ProgressEvidence,
                             decision: WatchdogDecision, observed_at: datetime) -> None:

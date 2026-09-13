@@ -176,3 +176,29 @@ def test_the_same_condition_does_not_accumulate_diagnostics(tmp_path):
         watchdog.assess(run_id=run.id, current=stale)
 
     assert len(store.list_open_diagnostics(run.id)) == 1
+
+
+def test_a_condition_that_ripens_is_decided_again(tmp_path):
+    """The same state does not mean the same decision.
+
+    The guard that keeps evidence from being recorded twice per state also stopped the watchdog from
+    deciding again, so a heartbeat that was fresh when the evidence was written and is overdue now
+    was never re-examined. The supervisor assessed every ten seconds, reached no decision every time,
+    and a stalled run asked nobody for anything.
+    """
+    store = make_store(tmp_path)
+    run = _run(store)
+    watchdog = AdaptiveWatchdog(store, heartbeat_timeout=timedelta(minutes=5))
+    fresh = _evidence(run)
+
+    first = watchdog.assess(run_id=run.id, current=fresh)
+    assert first.action == "continue" and first.health is RunHealth.OBSERVING
+    assert store.list_open_diagnostics(run.id) == []
+
+    # The same evidence, observed after the heartbeat has aged past the timeout.
+    aged = watchdog.assess(run_id=run.id, current=fresh,
+                           now=fresh.heartbeat_at + timedelta(minutes=30))
+    assert aged.action == "probe_worker_and_lease"
+    assert len(store.list_open_diagnostics(run.id)) == 1
+    # And the evidence is not appended again for a state that has not changed.
+    assert len(store.list_progress_evidence(run.id)) == 1
