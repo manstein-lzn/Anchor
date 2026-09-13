@@ -300,3 +300,25 @@ def test_a_bad_path_is_a_message_to_the_model_not_a_node_crash(bound):
     assert result.startswith("TOOL FAILED [workspace_error]:"), (
         "the model must be told so it can try a path that exists, not have the node taken down: "
         f"got {result!r}")
+
+
+def test_a_freeze_records_anchor_as_the_author(bound):
+    """Anchor commits as itself; its freeze is not the operator's commit.
+
+    Distinguishing "given" from "inherited" is the whole test: the repository here is configured as
+    `Test <t@example.com>`, so an inherited identity would show up as that. It never came up because
+    every test repository in this file sets `user.email` with `git config` — until a graph whose
+    repository was configured with `-c` on its own commit gave its worktrees none, and the freeze
+    failed with `作者身份未知` while a writer had already produced a 24 KB paper.
+    """
+    store, _, manager, _, lease, toolset = bound
+    toolset.execute(lease=lease, tool_ref="workspace.write",
+                    arguments={"path": "paper.md", "content": "# A paper\n"})
+    workspace_id = toolset.workspace_id_for(lease)
+    frozen = manager.freeze(workspace_id, actor=f"node:{lease.node_run_id}")
+
+    author = subprocess.run(
+        ["git", "-C", frozen.path, "log", "-1", "--format=%an <%ae>"],
+        check=True, capture_output=True, text=True).stdout.strip()
+    assert author == "Anchor <anchor@localhost>", (
+        f"the freeze must not depend on the machine's git configuration; got {author!r}")

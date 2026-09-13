@@ -35,6 +35,10 @@ def _run_git(cwd: str, *args: str, timeout: float) -> subprocess.CompletedProces
                           check=False, env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
 
 
+COMMIT_AUTHOR = ("Anchor", "anchor@localhost")
+"""Who Anchor commits as. Its own identity, not the operator's machine configuration."""
+
+
 class GitWorktree:
     """Git primitives for exactly one worktree; no policy lives here."""
 
@@ -85,12 +89,21 @@ class GitWorktree:
         return bool(self._git("status", "--porcelain").strip())
 
     def commit(self, message: str) -> str:
-        """Commit the whole tree; returns the current head when nothing changed."""
+        """Commit the whole tree; returns the current head when nothing changed.
+
+        The identity is given rather than inherited. This commit is Anchor's — it is the freeze that
+        records a node's work — so it must not depend on the machine's git configuration. It did, and
+        a repository whose identity was set with `-c` on its own commit rather than with `git config`
+        gave its worktrees none: the freeze then failed with `作者身份未知`, taking down a writer that
+        had already produced a 24 KB paper.
+        """
         self.verify()
         self._git("add", "-A")
         if not self.is_dirty():
             return self.head()
-        result = _run_git(str(self.path), "commit", "-q", "-m", message, timeout=self.timeout)
+        result = _run_git(str(self.path), "-c", f"user.name={COMMIT_AUTHOR[0]}", "-c",
+                          f"user.email={COMMIT_AUTHOR[1]}", "commit", "-q", "-m", message,
+                          timeout=self.timeout)
         if result.returncode != 0:
             raise WorkspaceError(result.stderr.decode("utf-8", errors="replace").strip())
         return self.head()
