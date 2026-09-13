@@ -19,8 +19,10 @@ from __future__ import annotations
 import os
 import shutil
 import sys
+import json
 from pathlib import Path
 
+from minisweagent.agents.default import DefaultAgent
 from minisweagent.environments.local import LocalEnvironment
 
 from anchor.runtime.sandbox import BubblewrapWorkspaceSandbox, SandboxSpec
@@ -164,11 +166,47 @@ class SandboxEnvironment(LocalEnvironment):
         return output
 
 
+class TracingAgent(DefaultAgent):
+    """Their loop, with every message written to the trace as it arrives.
+
+    `add_messages` is where each message enters the conversation, so overriding it is the whole of
+    it. Writing the trace once the node has finished would mean a node that runs for half an hour is
+    completely opaque for half an hour, which is the opposite of what a trace is for.
+
+    The trace sits beside the node's directory, never inside it. Inside it is a file the agent can
+    read, and one did: it found its own conversation, concluded "nothing prior exists except the
+    trace file itself", and reasoned about that instead of its task. The directory holds the
+    deliverable; the trace is for whoever is watching.
+    """
+
+    def __init__(self, *args, trace: Path, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        # An instance attribute, not a class one: two nodes could otherwise be pointed at each
+        # other's trace, which is the kind of bug that only shows up when something runs twice.
+        self._trace = Path(trace)
+
+    def add_messages(self, *messages):
+        added = super().add_messages(*messages)
+        with self._trace.open("a", encoding="utf-8") as handle:
+            for message in added:
+                handle.write(json.dumps(_readable(message), ensure_ascii=False) + "\n")
+        return added
+
+
+def _readable(message: dict) -> dict:
+    """A message as one line a person can read, without needing to know the library's shape."""
+    content = message.get("content")
+    if isinstance(content, list):
+        content = " | ".join(str(part.get("text", part)) for part in content)
+    return {"role": message.get("role"), "text": str(content or "")[:4000],
+            "extra": {key: value for key, value in (message.get("extra") or {}).items()
+                      if key in {"exit_status", "submission", "cost", "timestamp"}}}
+
+
 def build_agent(*, tree: Path, instructions: str, model_name: str, model_kwargs: dict,
                 network: bool, timeout_seconds: float, max_steps: int,
                 wall_time_limit_seconds: int):
     """A node's agent: their loop, their model client, our environment."""
-    from minisweagent.agents.default import DefaultAgent
     from minisweagent.models.litellm_model import LitellmModel
 
     model = LitellmModel(
@@ -179,8 +217,9 @@ def build_agent(*, tree: Path, instructions: str, model_name: str, model_kwargs:
         # are bounds we set ourselves and can reason about.
         cost_tracking="ignore_errors",
     )
-    return DefaultAgent(
+    return TracingAgent(
         model, SandboxEnvironment(tree=tree, network=network, timeout_seconds=timeout_seconds),
+        trace=Path(tree).parent / f"{Path(tree).name}.trace.jsonl",
         system_template=system_prompt(instructions),
         instance_template=INSTANCE_TEMPLATE,
         step_limit=max_steps,

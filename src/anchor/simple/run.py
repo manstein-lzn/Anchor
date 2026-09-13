@@ -51,7 +51,7 @@ def _seed(target: Path, sources: list[Path]) -> None:
         if not source.is_dir():
             continue
         for item in sorted(source.iterdir()):
-            if item.name in {".git", "__pycache__", "trace.jsonl"}:
+            if item.name in {".git", "__pycache__"}:
                 continue
             destination = target / item.name
             if item.is_dir():
@@ -62,8 +62,7 @@ def _seed(target: Path, sources: list[Path]) -> None:
 
 def _files(tree: Path) -> tuple[str, ...]:
     return tuple(sorted(str(item.relative_to(tree)) for item in tree.rglob("*")
-                        if item.is_file() and ".git" not in item.relative_to(tree).parts
-                        and item.name != "trace.jsonl"))
+                        if item.is_file() and ".git" not in item.relative_to(tree).parts))
 
 
 def _task(graph: graph_module.Graph, node_id: str, objective: str, done: dict) -> str:
@@ -79,25 +78,6 @@ def _task(graph: graph_module.Graph, node_id: str, objective: str, done: dict) -
                 lines.append("Its files are already in your directory:\n"
                              + "\n".join(f"  {name}" for name in result.files))
     return "\n\n".join(lines)
-
-
-def _trace(tree: Path, messages: list) -> None:
-    """The conversation, one line per message, written where it happened.
-
-    This is the debugging surface: without it, what an agent did has to be inferred by re-running
-    it, which is slow and produces guesses. With it, "it searched 47 times and adapted around a
-    source that kept refusing" is a thing you read.
-    """
-    with (tree / "trace.jsonl").open("w", encoding="utf-8") as handle:
-        for index, message in enumerate(messages):
-            role = message.get("role")
-            parts = message.get("content")
-            if isinstance(parts, list):
-                parts = " | ".join(str(part.get("text", part))[:400] for part in parts)
-            handle.write(json.dumps({"i": index, "role": role,
-                                     "text": str(parts or "")[:4000],
-                                     "extra": message.get("extra") or {}},
-                                    ensure_ascii=False) + "\n")
 
 
 def run(path: str | Path, objective: str | None = None, *, work: str | Path,
@@ -135,7 +115,6 @@ def run(path: str | Path, objective: str | None = None, *, work: str | Path,
         # run ends only when a command asks for submission.
         outcome = agent.run(task=task_override or _task(graph, node_id,
                                                         objective or graph.objective, done))
-        _trace(tree, agent.messages)
         result = NodeResult(node_id=node_id, agent=graph.nodes[node_id], tree=tree,
                             submission=str(outcome.get("submission") or ""),
                             files=_files(tree),
