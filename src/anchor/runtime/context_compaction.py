@@ -40,6 +40,12 @@ from anchor.context_engine.update import (
     UpdateRejected,
     run_update,
 )
+# Imported at runtime, not under TYPE_CHECKING: this module uses `from __future__ import
+# annotations`, and Pydantic AI resolves the signature at runtime to decide whether to pass a run
+# context. A string annotation whose name is not importable is not a hint to it — it is an error,
+# and the failure mode without the import is the processor being called with the message list where
+# its context should be.
+from pydantic_ai import RunContext
 
 logger = logging.getLogger("anchor.context_compaction")
 
@@ -74,12 +80,22 @@ class Compactor:
         self.compressions = 0
         self.failures = 0
 
-    async def __call__(self, ctx: Any, messages: list[Any]) -> list[Any]:
-        """The `ProcessHistory` processor. Returns what the next model request should send."""
+    async def __call__(self, ctx: "RunContext[Any]", messages: list[Any]) -> list[Any]:
+        """The `ProcessHistory` processor. Returns what the next model request should send.
+
+        The first parameter is annotated `RunContext` and not merely documented as one: the
+        framework decides whether to pass a context by inspecting that annotation, and a second
+        parameter named `messages` is no help if the first says `Any`. Getting it wrong is silent
+        until the first request of a real run, where it surfaces as the processor receiving the
+        message list as its context and the message list being missing.
+        """
         ours = tuple(to_message(item) for item in messages)
         decision = decide(messages=ours, context_window_used=_window_fraction(ctx),
                           keep_recent=self.keep_recent, threshold=self.threshold)
         if not decision.compressing:
+            # Logged because the fraction is otherwise invisible, and a threshold that can never be
+            # reached looks exactly like one that is working: nothing happens either way.
+            logger.info("no compression for %s: %s", self.node_id, decision.reason)
             return messages
         try:
             cognition = await self._compress(decision)
@@ -96,7 +112,16 @@ class Compactor:
             return messages
         self.cognition = cognition
         self.compressions += 1
-        return [from_message(item) for item in projected(decision, cognition)]
+        result = [from_message(item) for item in projected(decision, cognition)]
+        # Logged because nothing durable records a compression otherwise: the call goes through a
+        # different gateway path than the one the worker reports usage for, and the counter is in
+        # memory. An operator asking "did it compress, and did the history get shorter" would
+        # otherwise have no answer.
+        logger.info(
+            "compressed %s: %d messages -> %d, %d characters folded away, %d items carried",
+            self.node_id, len(messages), len(result),
+            sum(len(m.text) for m in decision.leaving), len(cognition.item_ids()))
+        return result
 
     async def _compress(self, decision: Any) -> Cognition:
         first = self.cognition is None
@@ -196,8 +221,26 @@ class CompactionSettings:
     keep_recent: int = DEFAULT_KEEP_RECENT
     threshold: float = DEFAULT_THRESHOLD
 
+    def safe_threshold(self, *, window: int, reservation: int) -> float:
+        """The highest fraction at which compressing can still happen before the provider refuses.
+
+        The reservation counts against the window — the provider subtracts it too — so the largest
+        input that will be accepted is ``window - reservation``. A threshold above that fraction is
+        not merely late: it is unreachable, because the request that would have crossed it is
+        rejected first. A default of 0.8 is fine against a half-million-token window and wrong
+        against a hundred-and-thirty-thousand one, so the number has to be derived rather than
+        chosen.
+        """
+        if window <= 0:
+            raise ValueError("window must be positive")
+        if reservation < 0 or reservation >= window:
+            raise ValueError("the output reservation must be smaller than the window")
+        return (window - reservation) / window
+
     def install(self, gateway: Any, *, run_id: Any, node_id: str) -> "Compactor":
         compactor = Compactor(gateway, run_id=run_id, node_id=node_id,
                               keep_recent=self.keep_recent, threshold=self.threshold)
         install(gateway, compactor)
         return compactor
+
+

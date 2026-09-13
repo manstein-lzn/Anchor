@@ -153,6 +153,22 @@ async def serve() -> None:
     if settings.context_compaction:
         compaction = CompactionSettings(keep_recent=settings.context_compaction_keep_recent,
                                         threshold=settings.context_compaction_threshold)
+        # Checked against every profile before the loop starts, because a threshold above the
+        # usable fraction is unreachable rather than merely late: the request that would have
+        # crossed it is refused by the provider first, so compression would never once run and
+        # nothing would say why.
+        for profile in config.models:
+            if not profile.context_window:
+                continue
+            ceiling = compaction.safe_threshold(window=profile.context_window,
+                                                reservation=profile.max_tokens or 0)
+            if compaction.threshold > ceiling:
+                raise RuntimeError(
+                    f"context compaction threshold {compaction.threshold:.0%} is above the "
+                    f"{ceiling:.0%} a {profile.context_window:,}-token window allows once the "
+                    f"{profile.max_tokens or 0:,}-token output reservation is subtracted, for "
+                    f"{profile.ref}; a compression could never trigger before the provider "
+                    f"refused the request")
         logging.getLogger("anchor.worker").info(
             "context compression is on: threshold %.0f%%, keeping %d recent messages",
             compaction.threshold * 100, compaction.keep_recent)

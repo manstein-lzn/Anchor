@@ -64,6 +64,9 @@ class ModelGateway(Protocol):
     async def generate_with_tools(self, *, prompt: str, system_prompt: str = "",
                                   tools: list[ToolFunction]) -> ModelResponse: ...
 
+    async def generate_structured(self, *, prompt: str, system_prompt: str = "",
+                                  output_type: Any) -> tuple[Any, ModelResponse]: ...
+
 
 class PydanticAIModelGateway:
     """One-shot Responses API gateway built on PydanticAI.
@@ -117,7 +120,16 @@ class PydanticAIModelGateway:
             http_client=self._http_client, max_retries=0,
         )
         provider = OpenAIProvider(openai_client=self._openai_client)
-        self._model = model if model is not None else model_type(profile.model, provider=provider)
+        # The window is told to PydanticAI as well as kept here, and it has to be: the framework
+        # computes `context_window_used` from *its* `context_window`, so a window only this code
+        # knows leaves that fraction permanently unknown, and a compressor that reads it can never
+        # choose a moment. It looked exactly like a compressor that was working — nothing happened,
+        # either way.
+        model_kwargs: dict[str, Any] = {}
+        if profile.context_window:
+            model_kwargs["profile"] = {"context_window": profile.context_window}
+        self._model = (model if model is not None
+                       else model_type(profile.model, provider=provider, **model_kwargs))
         if recorder is not None and recorder.enabled:
             # Wrap the model, not this gateway: one generate_with_tools call covers
             # a whole agent turn, so recording here would keep one final answer and
@@ -167,6 +179,10 @@ class PydanticAIModelGateway:
             result = await agent.run(prompt, instructions=system_prompt or None)
             output = result.output
         text = output if isinstance(output, str) else str(output)
+        return self._response_from(result, text=text)
+
+    def _response_from(self, result, *, text: str) -> ModelResponse:
+        """The spend and identity of one call, shared by every shape of answer."""
         response_id = getattr(result, "response_id", None)
         usage = None
         try:
@@ -183,6 +199,37 @@ class PydanticAIModelGateway:
             cache_read_tokens=int(getattr(usage, "cache_read_tokens", 0) or 0),
             cache_write_tokens=int(getattr(usage, "cache_write_tokens", 0) or 0),
             cost=float(raw_cost) if raw_cost is not None else None)
+
+    async def generate_structured(self, *, prompt: str, system_prompt: str,
+                                  output_type: Any) -> tuple[Any, ModelResponse]:
+        """One call whose answer the provider validates against ``output_type``.
+
+        Distinct from asking for JSON in a prompt and parsing it afterwards. The schema is sent, so
+        a constraint in it is one the model cannot violate rather than one this code notices
+        afterwards — which is the whole reason the proposal schema enumerates the ids an operation
+        may name. An answer that is parsed and then checked has already had its chance to be wrong.
+
+        Streaming is refused rather than silently downgraded: a streamed structured answer is a
+        different feature, and returning a partial object that validates against nothing would be
+        worse than saying so.
+        """
+        from pydantic_ai import Agent as PydanticAgent
+        from pydantic_ai import NativeOutput
+
+        if self.profile.stream:
+            raise RuntimeError(
+                "a structured answer cannot be streamed through this gateway; use a profile with "
+                "stream=False for calls whose result is validated against a schema")
+        # `NativeOutput`, not the default tool-based output. The default forces a tool choice, and
+        # a thinking model refuses that outright: `400 Thinking mode does not support this
+        # tool_choice`. The native path sends the JSON schema as the response format instead, which
+        # the provider supports, and the schema still travels — including the id enumeration that
+        # makes a fabricated id impossible, which is the reason this call is structured at all.
+        agent: Any = PydanticAgent(self._model, output_type=NativeOutput(output_type),
+                                   model_settings=self._settings())
+        result = await agent.run(prompt, instructions=system_prompt or None)
+        output = result.output
+        return output, self._response_from(result, text=_as_text(output))
 
     async def generate_with_tools(self, *, prompt: str, system_prompt: str = "",
                                   tools: list[ToolFunction]) -> ModelResponse:

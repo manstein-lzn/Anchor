@@ -78,4 +78,7 @@ warn_unused_ignores = true
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 addopts = "-q"
-markers = ["postgres: requires ANCHOR_TEST_POSTGRES_URL pointing to a disposable migrated database"]
+markers = [
+    "postgres: requires ANCHOR_TEST_POSTGRES_URL pointing to a disposable migrated database",
+    "provider: makes one real model call; requires a configured runtime profile and its secret. Skips when the profile or the secret is absent, so a checkout without credentials still runs the suite.",
+]
