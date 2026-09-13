@@ -178,7 +178,11 @@ def fetch_public(url: str, *, timeout_seconds: float = 30) -> tuple[str, str, by
             blocked = _HOST_BLOCKED_UNTIL.get(parsed.hostname, 0) - time.monotonic()
             if blocked > 0:
                 raise ResearchToolError("source_rate_limited",
-                    f"source cooldown is active for another {blocked:.1f} seconds", retryable=True)
+                    # No countdown. The pacing this reflects is enforced here, so a number tells the
+                    # agent nothing it can act on except how long to sleep — and sleeping is what it
+                    # chose to do, for twenty and thirty and forty-five seconds at a time, because a
+                    # source it could not use had told it exactly how long to wait.
+                    "this source is rate limited and is not available right now", retryable=True)
             for request_attempt in range(2):
                 pace_arxiv(parsed.hostname)
                 pace_crossref(parsed.hostname)
@@ -281,8 +285,22 @@ def search(request: ResearchRequest, *, timeout_seconds: float) -> dict:
         "search_query": request.query, "start": 0, "max_results": request.limit,
         "sortBy": "relevance",
     })
-    final_url, _, body = fetch_public(url, timeout_seconds=timeout_seconds)
-    root = ElementTree.fromstring(body)
+    try:
+        final_url, _, body = fetch_public(url, timeout_seconds=timeout_seconds)
+        root = ElementTree.fromstring(body)
+        papers = _arxiv_atom_papers(root)
+        return {"source": "arxiv", "query": request.query, "request_url": final_url,
+                "papers": papers}
+    except Exception as exc:  # noqa: BLE001 - the API is the thing that fails, not the search
+        logger.info("arxiv atom search failed (%s); trying the web search", exc)
+
+    # The Atom endpoint rate-limits an address hard and for long, while the search page on the same
+    # host answers normally. An agent found that, worked around it by reading the page, and spent
+    # twenty minutes waiting before it did — so the fallback belongs here, not in its judgement.
+    return _arxiv_web_search(request, timeout_seconds=timeout_seconds)
+
+
+def _arxiv_atom_papers(root) -> list[dict]:
     ns = {"a": "http://www.w3.org/2005/Atom"}
     papers = []
     for entry in root.findall("a:entry", ns):
@@ -298,7 +316,77 @@ def search(request: ResearchRequest, *, timeout_seconds: float) -> dict:
                               for link in entry.findall("a:link", ns)
                               if link.attrib.get("title") == "pdf"],
         })
-    return {"source": "arxiv", "query": request.query, "request_url": final_url, "papers": papers}
+    return papers
+
+
+def _announced_year(listing) -> str:
+    """The year a listing says it was announced in.
+
+    Looked for in the whole entry rather than in the element that carries it, because `is-size-7` is
+    also the class of the "More/Less" toggle, and that link comes first.
+    """
+    match = re.search(r"announced\s+[A-Za-z]+\s+((?:19|20)\d{2})",
+                      " ".join(listing.itertext()))
+    return match.group(1) if match else ""
+
+
+def _arxiv_web_search(request: ResearchRequest, *, timeout_seconds: float) -> dict:
+    """Search arXiv through its own search page, used when the Atom endpoint will not answer.
+
+    Fewer fields than the API: the page lists identifiers, titles and authors, and the abstract only
+    as it is printed there. The evidence level says `listing` rather than `abstract` so a caller can
+    tell where the bytes came from, which is the same distinction the atom path draws.
+    """
+    from lxml import html as lxml_html
+
+    def text_of(node, *names: str) -> str:
+        """The text of the first descendant whose class contains every name, exactly.
+
+        Exact tokens, not substring: the identification line carries `list-title`, so matching on
+        `title` alone returns the arXiv id and the format links as the paper's title, which is what
+        the first version of this did.
+        """
+        for name in names:
+            found = node.xpath(f".//*[contains(concat(' ', normalize-space(@class), ' '), "
+                               f"' {name} ')]")
+            if found:
+                return " ".join(" ".join(found[0].itertext()).split())
+        return ""
+
+    url = "https://arxiv.org/search/?" + urlencode({
+        "searchtype": "all", "query": request.query, "size": max(request.limit, 25),
+        # Empty, not the page's `-announced_date_first`. Its own default is newest-first, which is
+        # how a search for compiler cost models returns quantum error correction: the newest papers
+        # matching any of the words. Empty ordering is measurably more relevant, and still less so
+        # than the atom endpoint's.
+        "order": ""})
+    final_url, _, body = fetch_public(url, timeout_seconds=timeout_seconds)
+    tree = lxml_html.fromstring(body)
+    papers = []
+    for result in tree.xpath("//li[contains(concat(' ', normalize-space(@class), ' '), "
+                            "' arxiv-result ')]"):
+        # The identification line also carries links to the formats, so the identifier is taken by
+        # shape rather than by splitting on the first colon.
+        match = re.search(r"arXiv:\s*([\w.-]+)", text_of(result, "list-title"))
+        identifier = match.group(1) if match else ""
+        if not identifier:
+            continue
+        authors = [name.strip() for name in text_of(result, "authors").split(",")
+                   if name.strip() and not name.strip().lower().startswith("authors:")]
+        papers.append({
+            "id": f"arxiv:{identifier}", "url": f"https://arxiv.org/abs/{identifier}",
+            "title": text_of(result, "title"),
+            "authors": authors, "year": _announced_year(result),
+            "abstract": text_of(result, "abstract-full"),
+            "publication_type": "preprint", "evidence_level": "listing",
+            "fulltext_urls": [f"https://arxiv.org/pdf/{identifier}"],
+        })
+        if len(papers) >= request.limit:
+            break
+    return {"source": "arxiv", "query": request.query, "request_url": final_url,
+            "papers": papers, "note": "the API endpoint was unavailable; these came from the search "
+                                      "page, so they carry less metadata and are ordered less "
+                                      "sharply than a relevance-ranked API response would be"}
 
 
 def _fetch_document(url: str, *, offset: int, page_start: int, timeout_seconds: float) -> dict:
