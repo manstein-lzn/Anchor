@@ -50,7 +50,14 @@ Run traces -> metrics/outcomes -> candidate lesson/strategy
 
 RSI 初期只能提出候选变更，不能自动修改生产图、质量门、Contract 或运行时策略。
 
+RSI 设计参考记录在 [`docs/RSI_DESIGN_REFERENCES.md`](RSI_DESIGN_REFERENCES.md)，其中 WikiSkill 仅作为未来经验演化的参考，不是当前 Context Engine 或 Agent Node 的依赖。
+
 ## 3. 执行顺序
+
+Context Engine 第一阶段已作为独立的 Anchor 内置模块落地：它统一节点调用前的
+`ContextRequest`、`ContextPlan`、segments、容量状态和 plan hash，并由 worker 与 harness
+共同使用。它不接管 PydanticAI tool loop，不改变 canonical recovery，也不引入 cognition
+或 RSI。后续 Context Engine 工作必须先通过本计划 P3 的真实行为证据再扩展。
 
 ### P0：运行时硬化
 

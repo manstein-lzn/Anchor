@@ -32,6 +32,7 @@ HEARTBEAT_FAILURE_LIMIT = 3
 from anchor.runtime.model_gateway import ModelGateway, ModelResponse
 from anchor.runtime.model_recording import CallContext, bind_call, unbind_call
 from anchor.runtime.node_prompt import PromptSegments
+from anchor.context_engine import ContextPlan
 from anchor.state.errors import FencedAttempt
 from anchor.state.protocols import StateStore
 
@@ -216,7 +217,7 @@ class AgentNodeWorker:
                                    system_prompt: str = "",
                                    input_snapshot: Mapping[str, object] | None = None,
                                    heartbeat_interval: float = 5.0,
-                                   prompt_segments: PromptSegments | None = None) -> WorkerOutcome:
+                                   prompt_segments: PromptSegments | ContextPlan | None = None) -> WorkerOutcome:
         """Execute a lease already acquired by the worker loop."""
         agent = self.registry.validate_agent(agent_ref)
         gateway = self.gateways.get(agent.model_ref)
@@ -333,8 +334,17 @@ class AgentNodeWorker:
                                      "cache_read_tokens": response.cache_read_tokens,
                                      "cache_write_tokens": response.cache_write_tokens,
                                      "prompt_chars": len(prompt),
-                                     **(replace(prompt_segments, prefix=sent_prefix).hashes()
-                                        if prompt_segments else {"segments": "unavailable"})},
+                                     **(prompt_segments.hashes(prefix=sent_prefix)
+                                        if prompt_segments else {"segments": "unavailable"}),
+                                     # The plan's own verdict and identity. Computed and then
+                                     # discarded was the previous behaviour, which made the one
+                                     # judgement that guards the hard wall invisible in a run.
+                                     **({"capacity": prompt_segments.capacity,
+                                         "capacity_scope": prompt_segments.capacity_scope,
+                                         "estimated_input_tokens": prompt_segments.estimated_input_tokens,
+                                         "reserved_output_tokens": prompt_segments.reserved_output_tokens,
+                                         "plan_hash": prompt_segments.plan_hash}
+                                        if isinstance(prompt_segments, ContextPlan) else {})},
                             idempotency_key=f"usage:{lease.node_run_id}:{response.response_id or 'x'}")
                     if agent.output_format == "json":
                         # A model that prefixes its JSON with a sentence still

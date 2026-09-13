@@ -921,3 +921,44 @@ def test_project_registration_stores_an_absolute_root(client, tmp_path):
     assert created.status_code == 200, created.text
     from pathlib import Path
     assert Path(created.json()["root"]).is_absolute()
+
+
+# -- the runtime capability projection ----------------------------------------------
+
+
+def test_the_capability_projection_exposes_every_operational_budget(client):
+    """A hand-written projection makes every new field invisible by default.
+
+    `max_tokens` was absent, and then `context_window` was added and was absent too, and nothing
+    said so — an operator could not see the budget the runtime was working to, or notice that a
+    window was missing. Only the field that names a credential is meant to stay out.
+    """
+    current, _store = client
+    body = current.get("/api/runtime/capabilities").json()
+    if not body.get("configured"):
+        pytest.skip("no runtime profile is configured in this environment")
+    for model in body["models"]:
+        for field in ("ref", "provider", "model", "wire_api", "base_url",
+                      "max_tokens", "context_window"):
+            assert field in model, f"models[].{field} is not exposed"
+        assert "secret_ref" not in model, "a credential reference must not cross this boundary"
+    for agent in body["agents"]:
+        for field in ("ref", "model_ref", "output_format", "max_retries", "max_tool_calls",
+                      "tool_call_limits"):
+            assert field in agent, f"agents[].{field} is not exposed"
+
+
+def test_the_projection_reflects_the_profile_rather_than_a_default(client):
+    """The budgets have to come from the profile. A value invented here would be worse than one
+    missing, because it would look authoritative."""
+    from anchor.runtime.config import load_runtime_config
+
+    current, _store = client
+    body = current.get("/api/runtime/capabilities").json()
+    if not body.get("configured"):
+        pytest.skip("no runtime profile is configured in this environment")
+    profile = {item.ref: item for item in load_runtime_config().models}
+    for model in body["models"]:
+        declared = profile[model["ref"]]
+        assert model["max_tokens"] == declared.max_tokens
+        assert model["context_window"] == declared.context_window

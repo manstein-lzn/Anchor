@@ -34,7 +34,8 @@ from anchor.runtime.artifacts import ArtifactStore
 from anchor.runtime.model_gateway import ModelGateway
 from anchor.runtime.model_recording import CallContext
 from anchor.runtime.model_replay import ReplayPlan
-from anchor.runtime.node_prompt import PromptParts, assemble_prompt
+from anchor.runtime.node_prompt import PromptParts
+from anchor.context_engine import ContextRequest, plan_prompt
 
 
 def recorded_user_prompt(payload: dict[str, Any]) -> str | None:
@@ -267,19 +268,28 @@ class NodeHarness:
         exactly what the worker does, so a harness run is the real prompt until an
         experiment deliberately changes it.
         """
-        run_memory: list[str] = []
-        promoted: list[tuple[str, str]] = []
+        # Tuples, because PromptParts is frozen: the shape is part of the value, so an
+        # accidentally shared list cannot be mutated by a later step.
+        run_memory: tuple[str, ...] = ()
+        promoted: tuple[tuple[str, str], ...] = ()
         if include_memory and self.memory is not None:
             rows = self.memory.list(run_id=attempt.run_id)
             seen = {item.memory_id for item in rows}
-            run_memory = [item.content for item in rows]
-            promoted = [(item.domain or "general", item.content)
-                        for item in self.memory.list(status="promoted")
-                        if item.memory_id not in seen]
-        return assemble_prompt(PromptParts(
-            objective=attempt.objective, node_name=attempt.node_name,
-            snapshot=attempt.snapshot if snapshot is None else snapshot,
-            run_memory=run_memory, promoted_memory=promoted))
+            run_memory = tuple(item.content for item in rows)
+            promoted = tuple((item.domain or "general", item.content)
+                             for item in self.memory.list(status="promoted")
+                             if item.memory_id not in seen)
+        current_snapshot = attempt.snapshot if snapshot is None else snapshot
+        plan = plan_prompt(ContextRequest(
+            run_id=attempt.run_id, node_run_id=attempt.node_run_id,
+            node_id=attempt.node_id, node_name=attempt.node_name,
+            attempt=attempt.attempt, model_ref=attempt.model,
+            objective=attempt.objective, instructions=attempt.instructions,
+            declared_input=current_snapshot, allowed_tools=attempt.tools),
+            PromptParts(objective=attempt.objective, node_name=attempt.node_name,
+                        snapshot=current_snapshot, run_memory=run_memory,
+                        promoted_memory=promoted))
+        return plan.user_prompt
 
     # -- executing ----------------------------------------------------------
 

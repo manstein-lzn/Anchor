@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src" / "anchor"
 
 # Layer index: a module may import its own layer or lower layers, never higher.
-LAYERS = {"domain": 0, "state": 1, "runtime": 2, "api": 3}
+LAYERS = {"domain": 0, "state": 1, "context_engine": 2, "runtime": 3, "api": 4}
 # Top-level modules that are composition roots and may import anything.
 FREE_TOP_LEVEL = {"client.py", "cli.py", "mcp.py", "__init__.py"}
 

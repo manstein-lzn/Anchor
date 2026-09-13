@@ -27,6 +27,14 @@ class ModelProfile(DomainModel):
     # thinking before it emits the answer, so a modest default can truncate a
     # structured response mid-string even when the answer itself is short.
     max_tokens: int | None = Field(default=None, ge=256, le=131_072)
+    # The model's own input limit in tokens, completion reserve included. Declared rather than
+    # guessed: the provider rejects an over-long request with a 400, and no retry can turn that
+    # into a success, so the number has to be known before the call.
+    #
+    # Absence means the window is unknown, and unknown is reported as `unknown` rather than
+    # assumed. A default here would be a guessed budget, which is the one thing this runtime
+    # refuses to invent: a healthy task must never be stopped by a number nobody chose.
+    context_window: int | None = Field(default=None, ge=1024, le=2_097_152)
 
 
 class AgentCapability(DomainModel):

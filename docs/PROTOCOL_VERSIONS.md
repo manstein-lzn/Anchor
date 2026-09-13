@@ -20,6 +20,10 @@ Anchor 对外暴露若干协议。**每一个都自带版本号，且每个版�
 | **MCP** | `protocolVersion` | `mcp.py`（上线时为 `2024-11-05`） | 由 MCP 规范决定，不由本仓库决定。本仓库随规范走 |
 | **HTTP API** | **无版本前缀** | `api/app.py` | 见下 |
 
+Context Engine 的 `policy_version`（当前 `anchor.context.v1`）属于节点调用的派生计划标识，
+不是新的恢复协议。改变其组装或容量语义时，必须更新版本并同步 Context Engine 测试；已
+持久化的 NodeRun 输入快照仍以 Anchor 的事件和内容引用为准。
+
 ## 为什么 HTTP API 没有版本
 
 **没有稳定的第三方消费者。** 唯一的客户端是 `anchor.client`，它与 API 同仓库、同发布。

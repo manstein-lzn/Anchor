@@ -196,6 +196,8 @@
 
 **RSI 层**（P4）按 `DEVELOPMENT_PLAN.md` §7 排除在当前批次之外。
 
+WikiSkill 已记录为 P4 RSI 设计参考，见 [`docs/RSI_DESIGN_REFERENCES.md`](docs/RSI_DESIGN_REFERENCES.md)；当前不作为 Runtime 或 Context Engine 依赖。
+
 ## 未实现
 
 - **Failure fan-out** (done, DEVELOPMENT_PLAN P0.2, ADR-045): a node failure that fails
@@ -237,6 +239,13 @@
   recovery re-queues the node, and the run closes with a continuous event sequence and no
   duplicated operation. **Not done**: lease observation and recovery have no
   `anchor.client` method, so an agent cannot do what this acceptance does.
+- **Context window declared** (done, ADR-053): `ModelProfile.context_window` exists and is set
+  to 524288 for the models in use, so `capacity` is a real judgement rather than `unknown`. A
+  token estimator calibrated from two real prompts (conservative by 1.14x to 1.92x) supplies the
+  estimate, and `capacity` / `plan_hash` / the estimate and reservation are recorded in
+  `model.usage`. The capability endpoint exposes the budgets. **Not done**: the estimate is an
+  estimate, not the provider's own count; nothing yet reacts to `capacity=exceeded` by
+  decomposing the work.
 - **Operator policy** (done, DEVELOPMENT_PLAN P2.2, ADR-051): `max_rounds` was validated and
   read by nothing — an operator could set a ceiling, see no error, and believe there was one.
   It is now enforced where a back-edge would start another revision, recorded as its own reason

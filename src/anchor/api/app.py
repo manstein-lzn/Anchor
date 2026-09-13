@@ -244,8 +244,17 @@ def create_app(store: RelationalStateStore | None = None, token: str | None = No
             return {"configured": False, "models": [], "agents": [], "tools": [], "verifiers": []}
         return {
             "configured": True,
+            # The budgets are here on purpose. They are not credentials — `secret_ref` is the only
+            # field that names one field and it stays out — and they are the numbers that decide
+            # whether a request can be made at all. Without them an operator cannot see what
+            # budget the runtime is working to, or notice that a window is missing.
+            # A hand-written projection means every new field is invisible by default, which is
+            # how `max_tokens` and then `context_window` came to be absent; tests/test_api.py
+            # asserts the operational fields stay present.
             "models": [{"ref": item.ref, "provider": item.provider, "model": item.model,
-                         "wire_api": item.wire_api, "base_url": item.base_url} for item in config.models],
+                         "wire_api": item.wire_api, "base_url": item.base_url,
+                         "max_tokens": item.max_tokens,
+                         "context_window": item.context_window} for item in config.models],
             "agents": [{"ref": item.ref, "model_ref": item.model_ref, "tool_refs": item.tool_refs,
                         "output_format": item.output_format, "behavior_ref": item.behavior_ref,
                         "max_retries": item.max_retries,

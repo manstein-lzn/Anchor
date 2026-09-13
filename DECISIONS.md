@@ -1308,3 +1308,35 @@ it.
 
 This blocks nothing already built. P0 through P2 are independent of the cognition layer, which
 was never a runtime dependency, and this decision confirms that rather than changing it.
+
+## ADR-053: The context window is declared, estimated against, and visible
+
+The provider's input limit was 1,048,576 tokens and nothing in this repository knew it. An
+over-long request is rejected with a 400 after the whole payload has been uploaded, so the
+question "does this fit" has to be answered before the call rather than discovered from the
+response. `ModelProfile` now carries `context_window`, the profile sets 524288 for the models we
+use, and the plan reports `capacity` and `plan_hash` in `model.usage` — previously both were
+computed and discarded, which made the one judgement guarding the hard wall invisible in a run.
+
+**Absence means unknown, not a default.** A default here would be a guessed budget, and this
+runtime does not stop healthy work with a number nobody chose. An undeclared window is reported
+as `unknown`, which is honest and useless, and that is the correct failure for a missing
+declaration.
+
+**The estimate leans high, and it was calibrated from our own prompts after getting it wrong.**
+The first version used the plain-ASCII ratio, one token per eight characters, and under-estimated
+real prompts by thirteen to twenty percent — the dangerous direction, because an under-estimate
+uploads a payload that is then rejected. Solving two real measurements for a per-class ratio gives
+0.735 tokens per CJK character and 0.211 per other character; with a safety factor those become
+0.85 and 0.24, above every measured point including the ASCII ones. Punctuation, numbers and code
+tokenize worse than prose, which is why `other` sits well above the ASCII figure.
+
+Worth recording because it was mistaken for a calibration source first: `prompt_chars` is the
+*user* prompt while `input_tokens` counts every call the tool loop has made, so their ratio is a
+loop amplification factor ranging from 0.5 to 25 across recorded events, and not a token ratio.
+
+**The capability endpoint is a hand-written projection, so every new field is invisible by
+default.** `max_tokens` had never been exposed, and `context_window` was added and was absent too,
+with nothing to say so — an operator could not see the budget the runtime was working to. Both are
+now in the projection, `secret_ref` stays out because it names a credential, and a test asserts
+the operational fields are present so the next one cannot disappear silently.

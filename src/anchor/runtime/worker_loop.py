@@ -6,6 +6,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from uuid import UUID, uuid4
 from anchor.runtime.node_prompt import PromptSegments
+from anchor.context_engine import ContextPlan
 from anchor.runtime.worker import AgentNodeWorker
 
 logger = logging.getLogger("anchor.worker")
@@ -26,7 +27,7 @@ class ResolvedPrompt:
     input_snapshot: dict = field(default_factory=dict)
     #: The parts the prompt was built from, for the spend report. `None` when a caller
     #: assembled its own prompt, which the report says out loud rather than assuming zero.
-    segments: PromptSegments | None = None
+    segments: PromptSegments | ContextPlan | None = None
 
 
 PromptFactory = Callable[[UUID, str], Awaitable[ResolvedPrompt]]

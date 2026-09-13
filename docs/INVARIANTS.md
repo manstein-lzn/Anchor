@@ -41,3 +41,10 @@
 `test_memory.py` 覆盖，保留规则由 `test_retention.py` 覆盖——但**"投影永不参与恢复"这条
 在两者里都没有断言**，它由 `test_architecture.py::test_replay_and_memory_never_become_canonical_recovery_state`
 从模块图层面强制（`state` 层不得 import 投影模块）。三条合起来才是完整的 I2。
+
+## Context Engine
+
+`anchor.context_engine` 是 Anchor 的图感知节点调用规划模块。它只负责纯值对象、确定性
+prompt 规划、segment 描述和容量状态；PydanticAI 仍负责模型/tool loop，Runtime 仍负责
+事件、提交和恢复。Context Engine 不得成为 canonical recovery state，也不得扩大 I8 的
+节点可见性。
