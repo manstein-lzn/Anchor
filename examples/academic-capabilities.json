@@ -142,7 +142,7 @@
     {
       "ref": "workspace.write",
       "description": "Write a file into your workspace. Nothing is committed until the node finishes; the freeze at the end is the one revision, so revise freely. Arguments: {path, content}",
-      "side_effect": true,
+      "side_effect": false,
       "idempotent": true,
       "operation_kind": "write"
     },
@@ -155,7 +155,7 @@
     {
       "ref": "workspace.exec",
       "description": "Run an allowlisted command in your workspace. No network, and only this workspace is writable. Arguments: {command}",
-      "side_effect": true,
+      "side_effect": false,
       "idempotent": false,
       "operation_kind": "exec"
     }
