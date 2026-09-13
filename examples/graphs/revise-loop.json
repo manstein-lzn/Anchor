@@ -1,0 +1,50 @@
+{
+  "entry": "draft",
+  "max_rounds": 4,
+  "objective": "用一句话说明编译器为什么需要代价模型。",
+  "agents": {
+    "drafter": {
+      "model": "models.academic",
+      "network": false,
+      "instructions": "Write one sentence about compiler cost models into `draft.md`. If `review.md` is in your directory, rewrite the sentence to address what it asks for."
+    },
+    "reviewer": {
+      "model": "models.academic",
+      "network": false,
+      "instructions": "Count the words in `draft.md`. Decide where this goes next:\n\n  route to `draft` if `review.md` is not in your directory yet — write `review.md` first, asking for one concrete example.\n  route to `done` if `review.md` is already there.\n\nFinish with `anchor-route --to <draft|done> --reason \"…\"` and nothing after it."
+    },
+    "finisher": {
+      "model": "models.academic",
+      "network": false,
+      "instructions": "Copy `draft.md` into `final.md`, with a one-line heading above it. Then finish with `anchor-done --summary \"…\"`."
+    }
+  },
+  "nodes": [
+    {
+      "id": "draft",
+      "agent": "drafter"
+    },
+    {
+      "id": "review",
+      "agent": "reviewer"
+    },
+    {
+      "id": "done",
+      "agent": "finisher"
+    }
+  ],
+  "edges": [
+    {
+      "from": "draft",
+      "to": "review"
+    },
+    {
+      "from": "review",
+      "to": "draft"
+    },
+    {
+      "from": "review",
+      "to": "done"
+    }
+  ]
+}
