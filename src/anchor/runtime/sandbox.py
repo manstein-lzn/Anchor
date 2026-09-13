@@ -67,6 +67,10 @@ class SandboxSpec:
     # paths, because a virtual environment's interpreter and scripts carry absolute paths and moving
     # them breaks both.
     readonly_binds: tuple[tuple[str, str], ...] = ()
+    # Variables handed to the node, on top of the fixed set below. This is how a command learns
+    # something only the runner knows — which node it is, and where it may route to — without the
+    # runner having to write a file into the node's own directory to say so.
+    env: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -158,6 +162,7 @@ class BubblewrapWorkspaceSandbox:
             "--setenv", "HOME", "/tmp",
             "--setenv", "TMPDIR", "/tmp",
             "--setenv", "PYTHONDONTWRITEBYTECODE", "1",
+            *(item for key, value in spec.env for item in ("--setenv", key, value)),
             "--", *spec.command,
         ]
         try:

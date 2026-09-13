@@ -24,6 +24,7 @@ from pathlib import Path
 
 from minisweagent.agents.default import DefaultAgent
 from minisweagent.environments.local import LocalEnvironment
+from minisweagent.exceptions import Submitted
 
 from anchor.runtime.sandbox import BubblewrapWorkspaceSandbox, SandboxSpec
 
@@ -59,13 +60,10 @@ query, or move on — and never claim a source was read when it was not.
 INSTANCE_TEMPLATE = """\
 {{task}}
 
-You work in a directory that already contains everything the previous step produced. When you are
-finished, run this exact command and nothing after it:
+You work in a directory that already contains everything the previous step produced.
 
-echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
-
-Then, on the following lines, write your summary. It is the only thing that leaves this step, so it
-must say what you did and what you could not do.
+After the completion command, on the following lines, write your summary. It is the only thing that
+leaves this step, so it must say what you did and what you could not do.
 """
 
 
@@ -126,32 +124,29 @@ def _tool_binds(console_script: str | None) -> tuple[tuple[str, str], ...]:
 
 
 class SandboxEnvironment(LocalEnvironment):
-    """Their local environment, with bwrap between it and the machine.
+    """Their local environment, with bwrap between it and the machine, and the way out.
 
-    A real subclass, not a copy: `_check_finished` is inherited, and that method is where the
-    submission sentinel is recognised. Reimplementing it would work until the day it did not.
+    A real subclass, not a copy: `_check_finished` is theirs, and it is where the completion sentinel
+    is recognised. Overriding it is how a node's way out becomes a property of the graph rather than
+    a sentence in a prompt.
     """
 
-    def __init__(self, *, tree: Path, network: bool, timeout_seconds: float, **kwargs) -> None:
+    def __init__(self, *, tree: Path, node_id: str, routes: tuple[str, ...] = (),
+                 network: bool, timeout_seconds: float, **kwargs) -> None:
         super().__init__(cwd=str(tree), **kwargs)
         self.tree = Path(tree)
+        self.node_id = node_id
+        # The nodes this one may hand to. Empty means it has a single way out and does not choose.
+        self.routes = tuple(routes)
+        self.route: str | None = None
         self.network = network
         self.timeout_seconds = timeout_seconds
         # The command arrives as one shell string, so the shell is the entry point and the sandbox is
         # the boundary. An allowlist of commands would be a second, weaker boundary that the shell
         # can step around anyway.
         self.sandbox = BubblewrapWorkspaceSandbox(allowed_commands=frozenset({"sh"}))
-        # Found on *this* process's PATH and handed to the sandbox, so the node can call the tool by
-        # name. The sandbox does not inherit an environment, which is deliberate — a node should get
-        # what it was given and not what happened to be lying around.
         found = _console_script("anchor-scholarly")
         self.tool_dirs = (str(Path(found).parent),) if found else ()
-        # The literature tool is a console script in a virtual environment, so it needs that
-        # environment and the package it imports to exist inside the sandbox — at their real paths,
-        # because the interpreter and its scripts carry absolute ones. This is our own code, which is
-        # the point: it is read-only and it is the only thing of ours the node can see. The
-        # repository root is deliberately not bound, because the secrets file and the old state
-        # live under it.
         self.readonly_binds = _tool_binds(found)
 
     def execute(self, action, cwd: str = "", *, timeout: int | None = None) -> dict:
@@ -159,11 +154,46 @@ class SandboxEnvironment(LocalEnvironment):
         result = self.sandbox.run(SandboxSpec(
             workspace=self.tree, command=("sh", "-c", command),
             timeout_seconds=float(timeout or self.timeout_seconds), network=self.network,
-            tool_dirs=self.tool_dirs, readonly_binds=self.readonly_binds))
+            tool_dirs=self.tool_dirs, readonly_binds=self.readonly_binds,
+            env=(("ANCHOR_NODE", self.node_id), ("ANCHOR_ROUTES", ",".join(self.routes)))))
         output = {"output": result.stdout + result.stderr, "returncode": result.returncode,
                   "exception_info": "the command timed out" if result.timed_out else ""}
         self._check_finished(output)
         return output
+
+    def _check_finished(self, output: dict) -> None:
+        """Recognise the way out, which depends on how many ways out there are.
+
+        A node with one edge out finishes the ordinary way. A node with more than one cannot finish
+        that way at all: the ordinary sentinel is not accepted, so the loop keeps going and the only
+        exit is `anchor-route`, which names a target. Submitting and routing are then the same act,
+        and a node cannot leave the graph without having chosen where it goes — which is the failure
+        a separate route command would have had.
+        """
+        text = output.get("output", "")
+        first = next((line.strip() for line in text.lstrip().splitlines() if line.strip()), "")
+        if not self.routes:
+            super()._check_finished(output)
+            return
+        if not first.startswith("ANCHOR_ROUTE:"):
+            if first == "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT":
+                # Told, not merely refused: the next turn should be a correction, not a guess.
+                output["output"] = (
+                    f"{text}\n\n[This node does not finish that way. It has more than one way out, "
+                    f"so it must name one: `anchor-route --to <{'|'.join(self.routes)}>`. The "
+                    f"ordinary completion command is not accepted here.]")
+            return
+        target = first.split(":", 1)[1].strip()
+        if target not in self.routes:
+            output["output"] = (
+                f"{text}\n\n[{target!r} is not a way out of this node. Choose one of: "
+                f"{', '.join(self.routes)}]")
+            return
+        self.route = target
+        submission = "\n".join(text.lstrip().splitlines()[1:]).strip()
+        raise Submitted({"role": "exit", "content": submission,
+                         "extra": {"exit_status": "Submitted", "submission": submission,
+                                   "route": target}})
 
 
 class TracingAgent(DefaultAgent):
@@ -203,9 +233,9 @@ def _readable(message: dict) -> dict:
                       if key in {"exit_status", "submission", "cost", "timestamp"}}}
 
 
-def build_agent(*, tree: Path, instructions: str, model_name: str, model_kwargs: dict,
-                network: bool, timeout_seconds: float, max_steps: int,
-                wall_time_limit_seconds: int):
+def build_agent(*, tree: Path, node_id: str, instructions: str, routes: tuple[str, ...],
+                model_name: str, model_kwargs: dict, network: bool, timeout_seconds: float,
+                max_steps: int, wall_time_limit_seconds: int):
     """A node's agent: their loop, their model client, our environment."""
     from minisweagent.models.litellm_model import LitellmModel
 
@@ -218,7 +248,8 @@ def build_agent(*, tree: Path, instructions: str, model_name: str, model_kwargs:
         cost_tracking="ignore_errors",
     )
     return TracingAgent(
-        model, SandboxEnvironment(tree=tree, network=network, timeout_seconds=timeout_seconds),
+        model, SandboxEnvironment(tree=tree, node_id=node_id, routes=routes, network=network,
+                                  timeout_seconds=timeout_seconds),
         trace=Path(tree).parent / f"{Path(tree).name}.trace.jsonl",
         system_template=system_prompt(instructions),
         instance_template=INSTANCE_TEMPLATE,
