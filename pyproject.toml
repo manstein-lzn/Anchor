@@ -26,6 +26,8 @@ dependencies = [
 [project.scripts]
 anchor-scholarly = "anchor.scholarly.__main__:main"
 anchor-graph = "anchor.simple.__main__:main"
+anchor-done = "anchor.done.__main__:main"
+anchor-route = "anchor.route.__main__:main"
 
 [project.optional-dependencies]
 dev = [

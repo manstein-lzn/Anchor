@@ -24,12 +24,16 @@ from pathlib import Path
 
 from minisweagent.agents.default import DefaultAgent
 from minisweagent.environments.local import LocalEnvironment
-from minisweagent.exceptions import Submitted
+from minisweagent.exceptions import FormatError, InterruptAgentFlow, Submitted
 
 from anchor.runtime.sandbox import BubblewrapWorkspaceSandbox, SandboxSpec
 
 RULES = """\
 A node works in one directory and hands back what it leaves there.
+
+You are finished only when you run one of the completion commands below. Saying that you are done is
+not finishing, and neither is any other command that looks like it: the loop reads the exact output
+of those two commands and nothing else.
 
 Your response must contain exactly ONE bash code block with ONE command (or commands joined with &&
 or ||). Put a short THOUGHT section before it saying what you are doing and why.
@@ -197,16 +201,19 @@ class SandboxEnvironment(LocalEnvironment):
 
 
 class TracingAgent(DefaultAgent):
-    """Their loop, with every message written to the trace as it arrives.
+    """Their loop, with every message written to the trace as it arrives, and a way back in.
 
-    `add_messages` is where each message enters the conversation, so overriding it is the whole of
-    it. Writing the trace once the node has finished would mean a node that runs for half an hour is
-    completely opaque for half an hour, which is the opposite of what a trace is for.
+    The trace holds the messages *whole*, not a summary of them. A readable projection would be
+    nicer to read and would throw away the structure a resume needs — the tool calls, their
+    arguments, the results — so the record is the thing itself and reading it is a separate problem.
 
-    The trace sits beside the node's directory, never inside it. Inside it is a file the agent can
-    read, and one did: it found its own conversation, concluded "nothing prior exists except the
-    trace file itself", and reasoned about that instead of its task. The directory holds the
-    deliverable; the trace is for whoever is watching.
+    It sits beside the node's directory, never inside it. Inside it is a file the agent can read, and
+    one did: it found its own conversation, concluded "nothing prior exists except the trace file
+    itself", and reasoned about that instead of its task. The directory holds the deliverable; the
+    trace is for whoever is watching.
+
+    `resume` is the one place a loop of theirs is written out here rather than called, because
+    `run()` starts by clearing `self.messages` and there is no parameter that says otherwise.
     """
 
     def __init__(self, *args, trace: Path, **kwargs) -> None:
@@ -219,18 +226,36 @@ class TracingAgent(DefaultAgent):
         added = super().add_messages(*messages)
         with self._trace.open("a", encoding="utf-8") as handle:
             for message in added:
-                handle.write(json.dumps(_readable(message), ensure_ascii=False) + "\n")
+                handle.write(json.dumps(message, ensure_ascii=False, default=str) + "\n")
+            handle.flush()
         return added
 
+    def resume(self, messages: list[dict]) -> dict:
+        """Continue a conversation that a previous process left unfinished.
 
-def _readable(message: dict) -> dict:
-    """A message as one line a person can read, without needing to know the library's shape."""
-    content = message.get("content")
-    if isinstance(content, list):
-        content = " | ".join(str(part.get("text", part)) for part in content)
-    return {"role": message.get("role"), "text": str(content or "")[:4000],
-            "extra": {key: value for key, value in (message.get("extra") or {}).items()
-                      if key in {"exit_status", "submission", "cost", "timestamp"}}}
+        Mirrors the body of `run()` deliberately, minus the part that resets `self.messages` and
+        minus the parts that only make sense at a beginning. `Submitted` arrives as an
+        `InterruptAgentFlow`, exactly as it does there, and the exit message it carries is what ends
+        the loop.
+        """
+        self.messages = list(messages)
+        while True:
+            try:
+                self.step()
+                self.n_consecutive_format_errors = 0
+            except FormatError as exc:
+                self.n_consecutive_format_errors += 1
+                if 0 < self.config.max_consecutive_format_errors <= self.n_consecutive_format_errors:
+                    self.add_messages(*exc.messages, {
+                        "role": "exit", "content": "RepeatedFormatError",
+                        "extra": {"exit_status": "RepeatedFormatError", "submission": ""}})
+                else:
+                    self.add_messages(*exc.messages)
+            except InterruptAgentFlow as exc:
+                self.add_messages(*exc.messages)
+            if self.messages and self.messages[-1].get("role") == "exit":
+                break
+        return self.messages[-1].get("extra", {})
 
 
 def build_agent(*, tree: Path, node_id: str, instructions: str, routes: tuple[str, ...],

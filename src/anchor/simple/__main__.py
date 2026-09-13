@@ -25,10 +25,14 @@ def main() -> None:
                         help="the task; defaults to the graph's own objective")
     parser.add_argument("--config", default=str(ROOT / ".local" / "runtime.json"),
                         help="runtime config, for model profiles and the secret file")
+    parser.add_argument("--resume", default=None, metavar="RUN_DIR",
+                        help="pick up a run that a previous process left unfinished")
     args = parser.parse_args()
 
-    results = runner.run(args.workspace, objective=args.objective, config_path=args.config)
-    print(json.dumps({"executed": [item.node_id for item in results]}, ensure_ascii=False))
+    state = runner.run(args.workspace, objective=args.objective, config_path=args.config,
+                       resume=args.resume)
+    print(json.dumps({"status": state.status, "executed": state.executed,
+                      "skipped": state.skipped}, ensure_ascii=False))
 
 
 if __name__ == "__main__":

@@ -30,6 +30,9 @@ class Agent:
     # Whether this node's commands may reach the network. A node whose work is reading the
     # literature needs it; a node that writes a file does not, and refusing it costs nothing.
     network: bool = False
+    # A bound on the model's turns, because a node that keeps deciding it is finished without
+    # finishing will otherwise spend the whole wall-clock budget saying so. Sixty is generous for
+    # work that is already describing itself in minutes.
     max_steps: int = 0
     wall_time_limit_seconds: int = 1800
 
