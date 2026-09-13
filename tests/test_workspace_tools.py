@@ -280,13 +280,23 @@ def test_a_bad_path_is_a_message_to_the_model_not_a_node_crash(bound):
 
     `validate_workspace_path` raises `ContentRefError`, and the native-tool guard caught only
     `WorkspaceError`, `ContentUnavailable` and `SandboxDenied`. So a `workspace.read` of "." went
-    past the guard whose own comment says a tool failure is "a message to the model, never a node
-    crash", and killed the gather step of a live run. The rest of those tools handle this correctly,
-    which is why the omission was invisible until a model tried it.
-    """
-    from anchor.domain.content import ContentRefError
+    past the guard whose own comment reads "a tool failure is a message to the model, never a node
+    crash", and killed the gather step of a live run: one search succeeded, the next call ended the
+    node and the run, and five nodes were cancelled behind it.
 
-    store, _, _, _, lease, toolset = bound
-    for path in (".", "", "src/../etc", "a//b"):
-        with pytest.raises(ContentRefError):
-            toolset.execute(lease=lease, tool_ref="workspace.read", arguments={"path": path})
+    Checked through the loop rather than on the toolset, because the loop is where the conversion
+    happens and the conversion is the property. A toolset that raises is fine; a loop that lets it
+    out is not.
+    """
+    store, artifacts, _, _, lease, toolset = bound
+    agent = AgentCapability(ref="agents.reader", model_ref="models.test",
+                            tool_refs=["workspace.read"])
+    loop = AgentToolLoop(_StubTools(store), artifacts, native=toolset)
+    gateway = _ScriptedGateway([("workspace.read", {"path": "."})])
+
+    response = asyncio.run(loop.run(gateway, lease=lease, agent=agent, prompt="read it"))
+
+    result = json.loads(response.text)[0]
+    assert result.startswith("TOOL FAILED [workspace_error]:"), (
+        "the model must be told so it can try a path that exists, not have the node taken down: "
+        f"got {result!r}")
