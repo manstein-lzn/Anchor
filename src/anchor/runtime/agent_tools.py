@@ -17,6 +17,7 @@ import json
 from typing import Any
 from uuid import uuid5
 
+from anchor.domain.content import ContentRefError
 from anchor.runtime.capabilities import CapabilityRegistryError, AgentCapability, ToolCapability
 from anchor.runtime.model_gateway import ModelGateway, ModelResponse, ToolFunction
 from anchor.runtime.tool_gateway import ToolDenied, ToolGateway
@@ -117,10 +118,14 @@ class AgentToolLoop:
                             return await asyncio.to_thread(
                                 self.native.execute, lease=lease, tool_ref=_ref,
                                 arguments=arguments, input_snapshot=input_snapshot)
-                    except (WorkspaceError, ContentUnavailable, SandboxDenied) as exc:
+                    except (WorkspaceError, ContentUnavailable, ContentRefError,
+                            SandboxDenied) as exc:
                         # A tool failure is a message to the model, never a node
                         # crash: the model may adapt (for example, write a file
-                        # before reading it back).
+                        # before reading it back). ContentRefError belongs here
+                        # for the same reason and was missing: a path the model
+                        # got wrong — `"."` or an empty segment — arrives as one,
+                        # and it killed the node instead of telling the model.
                         return "TOOL FAILED [workspace_error]: " + str(exc)
                 try:
                     async with concurrency:

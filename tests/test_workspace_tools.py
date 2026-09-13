@@ -273,3 +273,20 @@ def test_two_nodes_get_their_own_trees(bound):
                            arguments={"path": "a.txt"}) == "a\n", \
         "one node's work must not be visible in another's tree"
     assert store.get_workspace("ws-1").current_revision
+
+
+def test_a_bad_path_is_a_message_to_the_model_not_a_node_crash(bound):
+    """A mistake the model can correct must be correctable.
+
+    `validate_workspace_path` raises `ContentRefError`, and the native-tool guard caught only
+    `WorkspaceError`, `ContentUnavailable` and `SandboxDenied`. So a `workspace.read` of "." went
+    past the guard whose own comment says a tool failure is "a message to the model, never a node
+    crash", and killed the gather step of a live run. The rest of those tools handle this correctly,
+    which is why the omission was invisible until a model tried it.
+    """
+    from anchor.domain.content import ContentRefError
+
+    store, _, _, _, lease, toolset = bound
+    for path in (".", "", "src/../etc", "a//b"):
+        with pytest.raises(ContentRefError):
+            toolset.execute(lease=lease, tool_ref="workspace.read", arguments={"path": path})
