@@ -8,7 +8,7 @@ editing this file.
       "objective": "what this graph is for, as the default task text",
       "root": ".local/graphs/academic-research",
       "agents": {
-        "planner": {"model": "models.academic", "instructions": "…", "tools": []}
+        "planner": {"model": "models.academic", "instructions": "…", "network": false}
       },
       "nodes": [{"id": "plan", "agent": "planner"}],
       "edges": [{"from": "plan", "to": "gather"}]
@@ -27,9 +27,11 @@ class Agent:
     model: str
     instructions: str = ""
     tools: tuple[str, ...] = ()
-    timeout_seconds: float = 900.0
-    max_turns: int = 0
-    request_limit: int = 300
+    # Whether this node's commands may reach the network. A node that reads the literature needs
+    # it; a node that only writes a file does not, and refusing it costs nothing.
+    network: bool = False
+    max_steps: int = 0
+    wall_time_limit_seconds: int = 1800
 
 
 @dataclass(frozen=True)
@@ -61,9 +63,9 @@ def load(path: str | Path) -> Graph:
     agents = {
         name: Agent(model=spec["model"], instructions=spec.get("instructions", ""),
                     tools=tuple(spec.get("tools") or ()),
-                    timeout_seconds=float(spec.get("timeout_seconds", 900.0)),
-                    max_turns=int(spec.get("max_turns", 0)),
-                    request_limit=int(spec.get("request_limit", 300)))
+                    network=bool(spec.get("network", False)),
+                    max_steps=int(spec.get("max_steps", 0)),
+                    wall_time_limit_seconds=int(spec.get("wall_time_limit_seconds", 1800)))
         for name, spec in raw["agents"].items()
     }
     nodes = {item["id"]: item["agent"] for item in raw["nodes"]}

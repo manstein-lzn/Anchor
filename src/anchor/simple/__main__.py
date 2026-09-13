@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import asyncio
 import json
 from pathlib import Path
 
@@ -23,7 +22,7 @@ def main() -> None:
     args = parser.parse_args()
 
     work = Path(args.work) if args.work else runner.new_work_dir(ROOT / ".local" / "runs")
-    results = asyncio.run(runner.run(args.graph, args.objective, work=work, config_path=args.config))
+    results = runner.run(args.graph, args.objective, work=work, config_path=args.config)
     print(json.dumps({"work": str(work), "nodes": [item.node_id for item in results]}))
 
 

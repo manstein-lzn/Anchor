@@ -45,6 +45,14 @@ class SandboxSpec:
     command: tuple[str, ...]
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
     max_output_bytes: int = DEFAULT_MAX_OUTPUT_BYTES
+    # A node that must reach the literature needs the network; a node that only writes does not, and
+    # refusing it costs nothing. Per node, because the two kinds of work are not the same kind of
+    # risk and a single global answer would be the wrong one for half of them.
+    network: bool = False
+    # Directories added to the sandbox's PATH, for tools the node is meant to have. The whole
+    # filesystem is already bound read-only, so a directory here is reachable either way; what it
+    # changes is whether a command can be found by name, which is the only way a shell can use it.
+    tool_dirs: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -109,6 +117,9 @@ class BubblewrapWorkspaceSandbox:
         _validate(spec, self.allowed_commands)
         argv = [
             self.binary, "--unshare-all", "--die-with-parent",
+            # `--unshare-all` takes the network away, and `--share-net` gives it back for the nodes
+            # whose work is reaching the literature. Nothing else is shared either way.
+            *(["--share-net"] if spec.network else []),
             "--ro-bind", "/", "/",
             "--tmpfs", "/tmp",
             "--dir", SANDBOX_WORKSPACE,
@@ -118,7 +129,7 @@ class BubblewrapWorkspaceSandbox:
             "--bind", str(spec.workspace), SANDBOX_WORKSPACE,
             "--chdir", SANDBOX_WORKSPACE,
             "--proc", "/proc", "--dev", "/dev",
-            "--setenv", "PATH", "/usr/bin:/bin",
+            "--setenv", "PATH", ":".join([*spec.tool_dirs, "/usr/bin:/bin"]),
             "--setenv", "HOME", "/tmp",
             "--setenv", "TMPDIR", "/tmp",
             "--setenv", "PYTHONDONTWRITEBYTECODE", "1",

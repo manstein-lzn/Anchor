@@ -125,19 +125,17 @@ class ResearchRequest(DomainModel):
 #: The cache a fetch may consult, and the context that scopes its keys. Set by the tool gateway
 #: around a tool call, because `fetch_public` is per-URL and knows nothing about which run,
 #: which graph version or which task asked — and a key that omitted those would serve one task's
-#: content to another. A module-level holder rather than a threaded parameter because the fetch
-#: call sits behind retry and redirect logic that has no business carrying a cache key.
+#: Fetching is the expensive, rate-limited part, and a cache here would help. It was keyed by the
+#: graph version and the task scope — concepts this build no longer has — and re-keying it is a
+#: change to make when fetching is measured as the bottleneck rather than assumed to be. The seam
+#: is left as it was so the call sites below did not have to move.
 _CACHE: Any = None
 _CACHE_CONTEXT: tuple[str, str] | None = None
 
 
 @contextmanager
-def content_cache_scope(cache: Any, *, graph_version_id: str, scope: str):
-    """Make ``cache`` available to fetches made inside this block, keyed by that context.
-
-    The graph version and the task scope are part of the key because the *decision* to fetch
-    belongs to a version's policy and a task's purpose, even though the bytes at a URL do not.
-    """
+def content_cache_scope(cache: Any, *, graph_version_id: str, scope: str):  # pragma: no cover
+    """Present for callers that still configure a cache; nothing sets one today."""
     global _CACHE, _CACHE_CONTEXT
     previous = (_CACHE, _CACHE_CONTEXT)
     _CACHE, _CACHE_CONTEXT = cache, (graph_version_id, scope)
@@ -148,33 +146,8 @@ def content_cache_scope(cache: Any, *, graph_version_id: str, scope: str):
 
 
 def _cached_fetch(url: str, fetch: Any) -> tuple[str, str, bytes]:
-    """Consult the cache, fetch if it does not have it, and store what came back.
-
-    Returns ``(content_type, final_url, body)`` so the caller cannot tell a hit from a fetch —
-    the point is to avoid the request, not to change the result. Every non-hit outcome falls
-    through to the real fetch, including ``corrupt``: a damaged entry is reported and then
-    replaced, rather than being returned or left in place.
-    """
-    cache, context = _CACHE, _CACHE_CONTEXT
-    if cache is None or context is None:
-        return fetch()
-    from anchor.runtime.content_cache import CacheKey
-
-    key = CacheKey(url=url, graph_version_id=context[0], scope=context[1])
-    lookup = cache.get(key)
-    if lookup.hit and lookup.entry is not None:
-        return lookup.entry.content_type, lookup.entry.final_url, lookup.entry.body
-    content_type, final_url, body = fetch()
-    try:
-        cache.put(key, content_type=content_type, final_url=final_url, body=body,
-                  replacement=lookup.outcome == "corrupt")
-    except FileExistsError:
-        # Another process wrote it between the lookup and now. Its bytes are as good as ours.
-        pass
-    except OSError as exc:
-        # A cache that cannot be written must not fail a fetch that already succeeded.
-        logger.warning("could not store a content cache entry for %s: %s", url, exc)
-    return content_type, final_url, body
+    """Fetch. Returns ``(content_type, final_url, body)``."""
+    return fetch()
 
 
 def public_address(hostname: str, port: int) -> str:
@@ -183,10 +156,13 @@ def public_address(hostname: str, port: int) -> str:
     if not addresses or any(not ipaddress.ip_address(value).is_global
                             or ipaddress.ip_address(value).is_multicast for value in addresses):
         raise ValueError("research URLs must resolve exclusively to public Internet addresses")
-    return sorted(addresses, key=lambda address: (":" in address, address))[0]
+    # `getaddrinfo` hands back a host and a port, and only the host is wanted here; the port is
+    # always an int, which is why this is not simply a list of strings.
+    hosts = [str(value) for value in addresses]
+    return sorted(hosts, key=lambda address: (":" in address, address))[0]
 
 
-def fetch_public(url: str, *, timeout_seconds: float = 30) -> tuple[str, str, bytes]:
+def fetch_public(url: str, *, timeout_seconds: float = 30) -> tuple[str, str, bytes]:  # noqa: C901
     import urllib3
 
     for _ in range(6):
@@ -366,7 +342,7 @@ def _fetch_document(url: str, *, offset: int, page_start: int, timeout_seconds: 
 
         text = trafilatura.extract(body, url=final, include_tables=True, include_links=True) or ""
         metadata = trafilatura.extract_metadata(body, default_url=final)
-        title = metadata.title if metadata else ""
+        title = (metadata.title or "") if metadata else ""
         truncated = False
     elif content_type.startswith("text/plain"):
         text, title, truncated = body.decode("utf-8", "replace"), "", False
