@@ -54,6 +54,18 @@ def cycle_fingerprint(*, phase: str, input_hash: str | None, output_refs: tuple[
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+OPERATOR_ACTIONS = frozenset({
+    # A cycle repeated with no verified progress.
+    "request_diagnostic",
+    # Heartbeat overdue. It does not prove the worker stopped, which is exactly why the decision
+    # belongs to an operator rather than to this service.
+    "probe_worker_and_lease",
+    # A dependency went away with a side-effect outcome unknown.
+    "reconcile_then_reconnect",
+})
+"""Decisions that no automation here may act on, and that an operator must therefore be told about."""
+
+
 class AdaptiveWatchdog:
     """Persistent progress observer with durable evidence and diagnostics."""
 
@@ -93,7 +105,14 @@ class AdaptiveWatchdog:
         decision = self._decide(current=current, previous=previous, now=observed_at,
                                 dependency_connected=dependency_connected)
         self.store.append_progress_evidence(current)
-        if decision.action == "request_diagnostic":
+        # Every decision that needs a human is recorded as one. Only `request_diagnostic` used to
+        # produce a diagnostic, so `probe_worker_and_lease` — which is what a stale heartbeat yields,
+        # and is the one that fires when a worker dies mid-node — was computed and then dropped: the
+        # supervisor reads `assess` for its side effects and ignores the return value, so nothing
+        # acted on it. A run therefore waited for an operator nobody had told, and `diagnostic_requests`
+        # was empty while a lease sat stale for 28.6 hours. Deduplicated by reason, so this cannot
+        # accumulate one diagnostic per observation of the same condition.
+        if decision.action in OPERATOR_ACTIONS:
             self._request_diagnostic(run_id, current, decision, observed_at)
         return decision
 

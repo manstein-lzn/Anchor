@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from uuid import uuid4
 
 from anchor.domain.graph import GraphDefinition, GraphVersion
 from anchor.domain.models import ProgressEvidence, Run, Task
@@ -141,3 +140,39 @@ def test_watchdog_restart_does_not_reissue_the_same_diagnostic(tmp_path):
         assert len(reopened.list_open_diagnostics(run.id)) == 1  # deduplicated
     finally:
         reopened.close()
+
+
+def test_an_overdue_heartbeat_asks_an_operator(tmp_path):
+    """A decision nobody acts on is not supervision.
+
+    Only `request_diagnostic` used to produce a diagnostic, so the action a stale heartbeat yields —
+    `probe_worker_and_lease` — was computed and then dropped, because the supervisor reads `assess`
+    for its side effects and ignores what it returns. A worker that died mid-node therefore left the
+    run waiting for an operator nobody had told, and `diagnostic_requests` stayed empty while a lease
+    sat stale for 28.6 hours. The decision itself is right: an overdue heartbeat does not prove the
+    worker stopped, which is exactly why an operator decides rather than this service.
+    """
+    store = make_store(tmp_path)
+    run = _run(store)
+    watchdog = AdaptiveWatchdog(store, heartbeat_timeout=timedelta(minutes=5))
+
+    decision = watchdog.assess(run_id=run.id, current=_evidence(
+        run, heartbeat_at=datetime.now(timezone.utc) - timedelta(minutes=30)))
+
+    assert decision.action == "probe_worker_and_lease"
+    open_now = store.list_open_diagnostics(run.id)
+    assert [item.reason for item in open_now] == [decision.reason], \
+        "the operator must be told; this is the request the run was waiting for"
+
+
+def test_the_same_condition_does_not_accumulate_diagnostics(tmp_path):
+    """Deduplicated by reason, so an observer that runs every ten seconds cannot flood the operator."""
+    store = make_store(tmp_path)
+    run = _run(store)
+    watchdog = AdaptiveWatchdog(store, heartbeat_timeout=timedelta(minutes=5))
+    stale = _evidence(run, heartbeat_at=datetime.now(timezone.utc) - timedelta(minutes=30))
+
+    for _ in range(5):
+        watchdog.assess(run_id=run.id, current=stale)
+
+    assert len(store.list_open_diagnostics(run.id)) == 1

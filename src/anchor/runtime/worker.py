@@ -433,6 +433,24 @@ class AgentNodeWorker:
                     self.store.fail_node_and_propagate(lease.claim_id, worker_id, error_code=code,
                         phase="agent", input_snapshot={**dict(input_snapshot or {}), "failure": {
                             "error_code": code, "rejected_output_refs": rejected_refs}})
+                else:
+                    # Neither the retry nor the safe-failure branch applied, and this branch is why a
+                    # run could stop without saying so. A failure that is not retryable and not safe
+                    # to declare left the lease owned by nobody, the node `running`, and the run
+                    # waiting for an operator nobody had told — `supervisor_service` observes stale
+                    # leases and logs them, it does not recover one, so that wait had no end. One was
+                    # recovered by hand with a heartbeat 28.6 hours old.
+                    #
+                    # An unknown outcome is still an outcome. Naming it failed is what lets the
+                    # content plane reconcile (`sweep_orphans` only looks at terminal nodes) and what
+                    # turns a silent stop into a legible failure an operator can act on.
+                    self.store.fail_node_and_propagate(
+                        lease.claim_id, worker_id, error_code="unreconciled_side_effect",
+                        phase="agent", input_snapshot={**dict(input_snapshot or {}), "failure": {
+                            "error_code": "unreconciled_side_effect",
+                            "outcome": ("unknown: a tool that may have had an effect ran, and its "
+                                        f"result was not established: {type(exc).__name__}: {exc}"),
+                            "rejected_output_refs": rejected_refs}})
                 raise
             if rejected_refs:
                 input_snapshot = {**dict(input_snapshot or {}), "output_repair": {"rejected_output_refs": rejected_refs}}
