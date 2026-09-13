@@ -26,7 +26,14 @@ class ModelProfile(DomainModel):
     # Output budget for one model call. A reasoning model spends part of this on
     # thinking before it emits the answer, so a modest default can truncate a
     # structured response mid-string even when the answer itself is short.
-    max_tokens: int | None = Field(default=None, ge=256, le=131_072)
+    #
+    # The bound is the provider's, measured rather than guessed: an endpoint that caps output
+    # rejects a larger value outright — `Invalid max_tokens value, the valid range of max_tokens
+    # is [1, 393216]`. It was previously 131_072, which is below what this workload needs: 256
+    # recorded calls reached 46_660 output tokens, and eight hit the 32_768 the profile then
+    # carried. A ceiling under the real requirement does not bound cost, it truncates answers —
+    # and a truncated structured response is not a short answer, it is no answer at all.
+    max_tokens: int | None = Field(default=None, ge=256, le=393_216)
     # The model's own input limit in tokens, completion reserve included. Declared rather than
     # guessed: the provider rejects an over-long request with a 400, and no retry can turn that
     # into a success, so the number has to be known before the call.

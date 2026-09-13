@@ -1036,3 +1036,31 @@ def test_a_replay_runs_with_no_provider_reachable(tmp_path):
     assert model.changed == []
     # The live model answers "LIVE" if it is ever reached; nothing may carry that.
     assert "LIVE" not in one.text and "LIVE" not in two.text
+
+
+def test_the_output_budget_bound_admits_what_the_provider_admits():
+    """The output ceiling has to be at least the provider's, or a valid answer is truncated by us.
+
+    Measured against the endpoint rather than guessed: `max_output_tokens` up to 393_216 is
+    accepted, and a larger value is refused with `Invalid max_tokens value, the valid range of
+    max_tokens is [1, 393216]`. This field previously stopped at 131_072 while the profile carried
+    32_768, and 256 recorded calls reached 46_660 output tokens — eight of them hitting that
+    ceiling. A cap under the real requirement does not bound cost; it turns an answer into no
+    answer, because a truncated structured response parses as nothing.
+
+    The test exists so the number is not quietly lowered again by someone reading it as a generous
+    default rather than as the provider's own limit.
+    """
+    from pydantic import ValidationError
+
+    from anchor.runtime.capabilities import ModelProfile
+
+    def profile_with(max_tokens: int) -> ModelProfile:
+        return ModelProfile(ref="m", provider="deepseek", model="deepseek-flash",
+                            secret_ref="k", max_tokens=max_tokens)
+
+    assert profile_with(393_216).max_tokens == 393_216, (
+        "the provider accepts this and refuses more, so a tighter bound here truncates answers "
+        "the endpoint would have completed")
+    with pytest.raises(ValidationError):
+        profile_with(393_217)
