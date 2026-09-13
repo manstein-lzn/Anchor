@@ -71,6 +71,11 @@ Rules:
 
 Answer once, through the schema. Do not return prose."""
 
+#: Used when there is no previous cognition. The first compression is an update from an empty
+#: state rather than a separate mechanism: `materialize` already handles a previous state with no
+#: items, and the ids an operation may name fall back from an enumeration to a plain string. The
+#: archived project kept a separate Bootstrap because it also established a Contract; a graph has
+#: no such object to establish, since acceptance criteria are a verifier.
 BOOTSTRAP_SYSTEM = """You are the Anchor Bootstrap Agent.
 
 There is no previous cognition, so there is nothing to carry, revise or resolve. Build the initial
@@ -215,7 +220,8 @@ class Episode:
 
 
 async def run_update(gateway: Any, previous: Cognition, episode: Episode, *, run_id: str = "",
-                     node_id: str = "", model_ref: str | None = None) -> UpdateOutcome:
+                     node_id: str = "", model_ref: str | None = None,
+                     system_prompt: str | None = None) -> UpdateOutcome:
     """One compression: propose operations, materialize the result, derive the certificate.
 
     The model's answer is validated against a schema whose ids are enumerated, so a fabricated one
@@ -227,7 +233,8 @@ async def run_update(gateway: Any, previous: Cognition, episode: Episode, *, run
     active = tuple(sorted(previous.item_ids()))
     prompt = _update_prompt(previous, episode)
     answer, response = await gateway.generate_structured(
-        prompt=prompt, system_prompt=UPDATE_SYSTEM, output_type=proposal_model(active))
+        prompt=prompt, system_prompt=system_prompt or UPDATE_SYSTEM,
+        output_type=proposal_model(active))
     proposal = to_proposal(answer)
     materialized = materialize(previous, proposal, run_id=run_id, node_id=node_id)
     problems = validate_transition(materialized.certificate, previous, materialized.cognition)
