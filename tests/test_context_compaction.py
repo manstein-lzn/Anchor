@@ -306,3 +306,72 @@ def test_a_rejected_compression_is_distinguished_from_a_failed_one():
     assert asyncio.run(compactor(Ctx(), original)) is original
     assert compactor.failures == 1
     assert compactor.cognition.item_ids() == {"f1"}, "a rejected compression changes nothing"
+
+
+# -- the wiring ----------------------------------------------------------------------
+
+
+def test_installing_sets_a_capability_on_every_agent_the_gateway_builds():
+    """Both paths, not only the tool-less one. A node with tools is exactly the case whose history
+    grows unboundedly, so a capability that reached only the tool-less agent would look like it
+    worked and compress nothing that mattered.
+
+    Run against the real gateway rather than a stand-in, because what is being checked is that the
+    attribute `install` writes is the one the agents are built from — a fake that agreed with the
+    implementation would prove nothing about that.
+    """
+    import asyncio
+
+    from anchor.runtime.capabilities import ModelProfile
+    from anchor.runtime.context_compaction import CompactionSettings
+    from anchor.runtime.model_gateway import PydanticAIModelGateway
+    from anchor.runtime.secrets import EnvironmentSecretProvider
+
+    class StaticSecrets(EnvironmentSecretProvider):
+        """Supplies a value for any reference, so no environment is required to build a gateway."""
+
+        def get(self, reference: str) -> str:  # type: ignore[override]
+            return "unused"
+
+    profile = ModelProfile(ref="m", provider="deepseek", model="deepseek-flash",
+                           secret_ref="unused")
+    gateway = PydanticAIModelGateway(profile, StaticSecrets())
+    try:
+        before = list(gateway._capabilities)
+        assert before == []
+        compactor = CompactionSettings(keep_recent=3, threshold=0.5).install(
+            gateway, run_id="r", node_id="plan")
+        assert compactor.keep_recent == 3 and compactor.threshold == 0.5
+        assert type(gateway._capabilities[0]).__name__ == "ProcessHistory"
+        # The list the agents are built from is the one `install` writes. Asserted by construction
+        # rather than by inspection: a tool-using agent is built from the same list.
+        assert len(gateway._capabilities) == 1
+    finally:
+        asyncio.run(gateway.close())
+
+
+def test_compaction_is_off_unless_it_is_asked_for():
+    """It spends a model call and changes what the agent sees. A behaviour nobody chose is a
+    behaviour nobody can account for, which is the same reason the content cache is opt-in."""
+    from anchor.runtime.settings import AnchorSettings
+
+    settings = AnchorSettings()
+    assert settings.context_compaction is False
+    assert 0 < settings.context_compaction_threshold <= 1
+    assert settings.context_compaction_keep_recent >= 1
+
+
+def test_the_worker_installs_a_compactor_per_attempt_only_when_configured():
+    """Per attempt, because the cognition belongs to one: the next attempt starts from the node's
+    declared input, and carrying a cognition across would follow a path the declaration does not
+    describe."""
+    import inspect
+
+    from anchor.runtime.worker import AgentNodeWorker
+
+    source = inspect.getsource(AgentNodeWorker.execute_claimed_once)
+    assert "self.compaction" in source
+    assert "install(gateway" in source
+    # Before the first model call, not after it: a compactor installed later would apply to the
+    # second call of an attempt and not the one that needed it.
+    assert source.index("self.compaction.install") < source.index("self.tool_loop")

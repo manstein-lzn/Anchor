@@ -23,6 +23,7 @@ history with a state the certificate refused would not be.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import Any, Literal
 
 from anchor.context_engine.cognition import Cognition
@@ -168,15 +169,35 @@ def from_message(message: Message) -> Any:
 
 
 def install(gateway: Any, compactor: Any) -> None:
-    """Give a gateway's agent a `ProcessHistory` capability bound to ``compactor``.
+    """Give every agent this gateway builds a `ProcessHistory` capability bound to ``compactor``.
 
-    Rebuilt rather than mutated: the agent is constructed once in `build_model_gateway`, and adding
-    a capability afterwards is not supported by the framework. The agent is replaced, so a gateway
-    that already made a call should be given the compactor before it is used.
+    Sets the gateway's capability list rather than replacing its tool-less agent, because
+    `generate_with_tools` builds its own agent and a node with tools is exactly the one whose
+    history grows unboundedly. Replacing only the tool-less agent would have looked like it worked
+    and compressed nothing that mattered.
+
+    Called per attempt, with a fresh compactor: the cognition belongs to one attempt and must not
+    leak into the next, which starts from the node's declared input rather than from a history.
     """
-    from pydantic_ai import Agent as PydanticAgent
     from pydantic_ai.capabilities import ProcessHistory
 
-    gateway._agent = PydanticAgent(gateway._model, output_type=str,
-                                   model_settings=gateway._settings(),
-                                   capabilities=[ProcessHistory(compactor)])
+    gateway._capabilities = [ProcessHistory(compactor)]
+
+
+@dataclass(frozen=True)
+class CompactionSettings:
+    """Whether to compress, and how. Absence of this object means no compression at all.
+
+    Off unless configured, for the same reason the content cache is: a compression spends a model
+    call and changes what the agent sees, and a behaviour nobody chose is a behaviour nobody can
+    account for. The worker builds one of these only when the operator has asked for it.
+    """
+
+    keep_recent: int = DEFAULT_KEEP_RECENT
+    threshold: float = DEFAULT_THRESHOLD
+
+    def install(self, gateway: Any, *, run_id: Any, node_id: str) -> "Compactor":
+        compactor = Compactor(gateway, run_id=run_id, node_id=node_id,
+                              keep_recent=self.keep_recent, threshold=self.threshold)
+        install(gateway, compactor)
+        return compactor

@@ -16,7 +16,7 @@ import asyncio
 import json
 import re
 from enum import StrEnum
-from typing import Mapping, Protocol
+from typing import TYPE_CHECKING, Mapping, Protocol
 from uuid import UUID, uuid4
 
 from anchor.domain.propagation import RoutingDecisionError
@@ -35,6 +35,9 @@ from anchor.runtime.node_prompt import PromptSegments
 from anchor.context_engine import ContextPlan
 from anchor.state.errors import FencedAttempt
 from anchor.state.protocols import StateStore
+
+if TYPE_CHECKING:  # noqa: TC004 - a type used in a signature only
+    from anchor.runtime.context_compaction import CompactionSettings
 
 
 class FailureClass(StrEnum):
@@ -160,11 +163,13 @@ class AgentNodeWorker:
                  gateways: dict[str, ModelGateway], result_sink: NodeResultSink,
                  tool_loop=None, behaviors: BehaviorRegistry | None = None,
                  committer=None,
-                 retry_backoff_seconds: tuple[float, ...] = (15.0, 45.0, 120.0)) -> None:
+                 retry_backoff_seconds: tuple[float, ...] = (15.0, 45.0, 120.0),
+                 compaction: "CompactionSettings | None" = None) -> None:
         self.store = store
         self.registry = registry
         self.gateways = gateways
         self.result_sink = result_sink
+        self.compaction = compaction
         self.tool_loop = tool_loop
         self.committer = committer
         self.behaviors = behaviors or BehaviorRegistry()
@@ -223,6 +228,19 @@ class AgentNodeWorker:
         gateway = self.gateways.get(agent.model_ref)
         if gateway is None:
             raise RuntimeError(f"no model gateway configured: {agent.model_ref}")
+        if self.compaction is not None:
+            # A fresh compactor per attempt, installed before this attempt's first model call.
+            # The cognition belongs to one attempt: the next starts from the node's declared input,
+            # so carrying one across attempts would follow a path the declaration does not
+            # describe. Installed on the gateway rather than passed down, because the tool loop
+            # builds its own agent and is the case whose history actually grows.
+            self.compaction.install(gateway, run_id=lease.run_id, node_id=lease.node_id)
+        if self.compaction is not None:
+            # A fresh compactor per attempt, installed before the first model call of that attempt.
+            # The cognition belongs to one attempt: the next one starts from the node's declared
+            # input, so reusing a cognition across attempts would carry state along a path the
+            # declaration does not describe.
+            self.compaction.install(gateway, run_id=lease.run_id, node_id=lease.node_id)
         # The claim API intentionally selects the oldest ready node. Callers
         # must verify that the resolved Agent capability matches that node
         # before invoking a model; otherwise a misconfigured worker could run

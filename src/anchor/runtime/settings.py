@@ -42,6 +42,13 @@ class AnchorSettings(BaseSettings):
     # Optional expiry. Unset means an entry never goes stale, which is right for immutable
     # published papers and wrong for anything that changes; the caller decides.
     content_cache_ttl_seconds: float | None = None
+    # Context compression, off unless asked for. It spends one model call per compression and it
+    # changes what the agent sees, so a behaviour nobody chose would be a behaviour nobody can
+    # account for. The threshold is a fraction of the model's window, read from the framework's own
+    # measurement rather than estimated here.
+    context_compaction: bool = False
+    context_compaction_threshold: float = 0.8
+    context_compaction_keep_recent: int = 6
     api_token: str | None = None
     worker_id: str = "anchor-worker"
     control_worker_id: str = "anchor-control-worker"

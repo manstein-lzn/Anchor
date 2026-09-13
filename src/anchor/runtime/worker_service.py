@@ -144,8 +144,17 @@ async def serve() -> None:
     committer = ContentCommitter(store, workspace_manager)
     behaviors = BehaviorRegistry()
     register_academic_behaviors(behaviors)
+    from anchor.runtime.context_compaction import CompactionSettings
+
+    compaction = None
+    if settings.context_compaction:
+        compaction = CompactionSettings(keep_recent=settings.context_compaction_keep_recent,
+                                        threshold=settings.context_compaction_threshold)
+        logging.getLogger("anchor.worker").info(
+            "context compression is on: threshold %.0f%%, keeping %d recent messages",
+            compaction.threshold * 100, compaction.keep_recent)
     worker = AgentNodeWorker(store, registry, gateways, sink, tool_loop=tool_loop,
-                             behaviors=behaviors, committer=committer)
+                             behaviors=behaviors, committer=committer, compaction=compaction)
     stop = asyncio.Event()
     try:
         await run_worker_loop(worker, worker_id=worker_id,

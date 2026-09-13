@@ -134,8 +134,14 @@ class PydanticAIModelGateway:
                                           replay_of=recorder.replay_of)
             else:
                 self._model = RecordingModel(self._model, recorder)
+        #: Capabilities every agent this gateway builds must carry. Held here rather than baked
+        #: into `self._agent`, because `generate_with_tools` builds its own agent — and a node with
+        #: tools is exactly the one whose history grows unboundedly, so a capability that reached
+        #: only the tool-less path would miss the case it exists for.
+        self._capabilities: list[Any] = []
         self._agent = Agent(self._model, output_type=str,
-                            model_settings=self._settings())
+                            model_settings=self._settings(),
+                            capabilities=list(self._capabilities))
 
     def _settings(self) -> Any:
         """Explicit output budget, when the profile sets one.
@@ -189,7 +195,8 @@ class PydanticAIModelGateway:
             return tool_entry
 
         agent: Any = PydanticAgent(self._model, output_type=str,
-                                   model_settings=self._settings())
+                                   model_settings=self._settings(),
+                                   capabilities=list(self._capabilities))
         for function in tools:
             entry = make_entry(function.call)
             entry.__name__ = function.name.replace("-", "_").replace(".", "_")
