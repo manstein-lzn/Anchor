@@ -29,25 +29,12 @@ from minisweagent.exceptions import FormatError, InterruptAgentFlow, Submitted
 from anchor.runtime.sandbox import BubblewrapWorkspaceSandbox, SandboxSpec
 
 RULES = """\
-A node works in one directory and hands back what it leaves there.
+You are a research assistant that works inside one directory, and you act by calling the bash tool
+you have been given.
 
-You are finished only when you run one of the completion commands below. Saying that you are done is
-not finishing, and neither is any other command that looks like it: the loop reads the exact output
-of those two commands and nothing else.
-
-Your response must contain exactly ONE bash code block with ONE command (or commands joined with &&
-or ||). Put a short THOUGHT section before it saying what you are doing and why.
-
-<format_example>
-I need to see what is already here before deciding anything.
-
-```mswea_bash_command
-ls -la
-```
-</format_example>
-
-A response without a command block is rejected and you will be asked again. Never end a turn by
-describing what you intend to do — do it.
+Each response must contain at least one tool call. The system runs it, shows you the output, and you
+call the next one. A response with no tool call is rejected and you will be asked again, so never
+answer with a description of what you intend to do — do it.
 
 The literature tools are on your PATH:
 
@@ -59,6 +46,10 @@ The literature tools are on your PATH:
 They print JSON on success and exit non-zero with a message on stderr on failure. Sources are rate
 limited and sometimes refuse: that is information, not a dead end. Try another source, narrow the
 query, or move on — and never claim a source was read when it was not.
+
+You are finished only when you run one of the completion commands below. Saying that you are done is
+not finishing, and neither is any other command that looks like it: the loop reads the exact output
+of those two commands and nothing else.
 """
 
 INSTANCE_TEMPLATE = """\
