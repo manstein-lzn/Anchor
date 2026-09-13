@@ -16,6 +16,7 @@ history, no reconciliation, nothing to prove about what did or did not happen.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 from dataclasses import asdict, dataclass, field, replace
@@ -320,7 +321,14 @@ def _agent_for(graph, node_id: str, directory: Path, models: dict, secret_file, 
 def run(workspace: str | Path, *, objective: str | None = None, config_path: str | Path,
         run_id: str | None = None, resume: str | Path | None = None) -> RunState:
     workspace = Path(workspace).resolve()
-    graph = graph_module.load(workspace / "graph.json")
+    graph_path = workspace / "graph.json"
+    graph = graph_module.load(graph_path)
+    # Which graph this run is actually reading, as a digest. A workspace owns its own copy, so
+    # editing the one in the repository changes nothing about a workspace that already has one —
+    # which cost a long run and a wrong conclusion about the model before anyone thought to look.
+    digest = hashlib.sha256(graph_path.read_bytes()).hexdigest()[:12]
+    print(json.dumps({"graph": str(graph_path), "digest": digest,
+                      "entry": graph.entry(), "nodes": len(graph.nodes)}), flush=True)
     models, secret_file = _config(config_path)
 
     if resume is not None:
