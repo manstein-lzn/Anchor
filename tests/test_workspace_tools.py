@@ -80,17 +80,23 @@ def test_read_returns_the_current_revision_content(bound):
                            arguments={"path": "readme.md"}) == "base\n"
 
 
-def test_write_commits_and_is_then_readable(bound):
+def test_a_write_lands_in_the_nodes_own_tree_without_committing(bound):
+    """ADR-054: a node works in its tree, and the freeze at the end is the one revision.
+
+    This asserted the opposite until then — that every write commits a revision and records an
+    operation — which turned a node's work into a sequence of auditable transactions. What has to
+    hold now is that the node sees what it wrote and that nothing is committed yet.
+    """
     store, _, _, _, lease, toolset = bound
+    before = store.get_workspace("ws-1").current_revision
     written = json.loads(toolset.execute(lease=lease, tool_ref="workspace.write",
-                                         arguments={"path": "src/app.py",
-                                                    "content": "print('hi')\n"}))
-    assert written["path"] == "src/app.py" and written["revision"]
+                                        arguments={"path": "src/app.py",
+                                                   "content": "print('hi')\n"}))
+    assert written["path"] == "src/app.py" and "revision" not in written
     assert toolset.execute(lease=lease, tool_ref="workspace.read",
                            arguments={"path": "src/app.py"}) == "print('hi')\n"
-    assert store.get_workspace("ws-1").current_revision == written["revision"]
-    assert [item.kind.value for item in store.list_workspace_operations("ws-1")] == [
-        "create", "write"]
+    assert store.get_workspace("ws-1").current_revision == before, "a write commits nothing"
+    assert [item.kind.value for item in store.list_workspace_operations("ws-1")] == ["create"]
 
 
 def test_list_and_exec_run_against_the_pinned_revision(bound):
@@ -154,9 +160,8 @@ def test_agent_tool_loop_routes_workspace_tools_natively(bound):
     ])
     response = asyncio.run(loop.run(gateway, lease=lease, agent=agent, prompt="edit"))
     results = json.loads(response.text)
-    assert json.loads(results[0])["revision"]
-    assert results[1] == "print('out')\n"
-    # The write went through the workspace ledger, not the tool-operation ledger.
+    assert results[1] == "print('out')\n", "the write is readable back through the loop"
+    # The write went through the workspace tools, not the tool-operation ledger.
     assert store.list_tool_operations(lease.run_id) == []
 
 
@@ -218,22 +223,24 @@ def test_node_input_snapshot_records_the_consumed_workspace_revision(bound):
     assert updated.snapshot["workspace"] != resolved.snapshot["workspace"]
 
 
-def test_reads_are_pinned_to_the_declared_revision(bound):
-    """A concurrent writer must not change what a node observes (I2/B1)."""
-    from anchor.runtime.resolution import resolve_node_context
+def test_a_node_reads_and_revises_its_own_tree(bound):
+    """ADR-054 replaces revision pinning with tree separation.
 
-    store, artifacts, manager, _, lease, toolset = bound
-    declared = resolve_node_context(store, lease.run_id, lease.node_id, artifacts).snapshot
-    assert declared["workspace"].startswith("workspace://ws-1@")
-
-    manager.write_text("ws-1", "readme.md", "changed by someone else\n", actor="other")
-
-    pinned = toolset.execute(lease=lease, tool_ref="workspace.read",
-                             arguments={"path": "readme.md"}, input_snapshot=declared)
-    assert pinned == "base\n", "the node must read the revision it declared"
-    live = toolset.execute(lease=lease, tool_ref="workspace.read",
-                           arguments={"path": "readme.md"})
-    assert live == "changed by someone else\n", "without a declared revision the live head is used"
+    The old rule pinned a node's reads to a declared revision so that another node's in-flight
+    writes stayed invisible. That is exactly what stopped `workspace.read` from seeing the node's own
+    work — a writer could not reread its own paragraph, let alone revise it. Isolation now comes
+    from each node having its own workspace, so a node reads its own live tree.
+    """
+    store, _, _, _, lease, toolset = bound
+    toolset.execute(lease=lease, tool_ref="workspace.write",
+                    arguments={"path": "note.txt", "content": "first\n"})
+    assert toolset.execute(lease=lease, tool_ref="workspace.read",
+                           arguments={"path": "note.txt"}) == "first\n"
+    toolset.execute(lease=lease, tool_ref="workspace.write",
+                    arguments={"path": "note.txt", "content": "second\n"})
+    assert toolset.execute(lease=lease, tool_ref="workspace.read",
+                           arguments={"path": "note.txt"}) == "second\n", \
+        "the node must be able to reread and revise what it wrote"
 
 
 def test_a_second_node_cannot_write_the_same_workspace(bound):

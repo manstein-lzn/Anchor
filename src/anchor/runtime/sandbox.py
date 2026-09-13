@@ -1,9 +1,14 @@
-"""Read-only workspace execution.
+"""Workspace-confined execution, with no network.
 
-A sandbox runs an allowlisted command against a materialized, immutable revision
-with no network and a read-only workspace. It cannot write to the tree, which is
-what makes "run a command at revision R" a repeatable observation rather than a
-mutation. Commands are an explicit allowlist, never a shell string.
+A sandbox runs an allowlisted command with its workspace bound read-write and everything else bound
+read-only. The confinement is the point: no network, no path out of the bound tree, no privileged
+operation. Commands are an explicit allowlist, never a shell string.
+
+Whether the bound tree is ephemeral or a node's own workspace is the caller's decision, and the two
+mean different things. ``execute_in_workspace`` materializes a pinned revision into a temporary
+directory, so a command there is still an observation — it cannot mutate a revision and the tree is
+gone afterwards. Binding a node's live worktree makes writes persist, which is what ADR-054 gives a
+node so it can produce a paper incrementally instead of in one response.
 """
 
 from __future__ import annotations
@@ -14,9 +19,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-# Reading, inspecting and running a script. The sandbox is read-only and has no
-# network, so an interpreter cannot mutate the workspace or exfiltrate data; it
-# can only compute over the pinned revision. A caller may narrow this further.
+# Reading, inspecting and running a script. With no network and everything outside the bound
+# workspace read-only, an interpreter can compute over the tree it is given and reach nothing else.
+# A caller may narrow this further.
 DEFAULT_ALLOWED_COMMANDS = frozenset({
     "cat", "cut", "file", "find", "git", "grep", "head", "ls", "python3",
     "sort", "tail", "uniq", "wc",
@@ -84,7 +89,12 @@ def _decode(data: bytes, limit: int) -> str:
 
 
 class BubblewrapWorkspaceSandbox:
-    """Unprivileged isolation: no network, read-only workspace, no writes."""
+    """Unprivileged isolation: no network, and writes confined to the workspace.
+
+    The workspace is bound read-write and everything else read-only, so a node may do anything to
+    its own tree and nothing to anything else. That is the whole boundary: no network, no path out
+    of the workspace, no privileged operation. ADR-054.
+    """
 
     name = "bubblewrap"
 
@@ -102,7 +112,10 @@ class BubblewrapWorkspaceSandbox:
             "--ro-bind", "/", "/",
             "--tmpfs", "/tmp",
             "--dir", SANDBOX_WORKSPACE,
-            "--ro-bind", str(spec.workspace), SANDBOX_WORKSPACE,
+            # Read-write, unlike the rest of the tree, because a node that can only read cannot
+            # write a paper. The isolation is unchanged: the bind is the one path it may mutate,
+            # and it is the node's own workspace.
+            "--bind", str(spec.workspace), SANDBOX_WORKSPACE,
             "--chdir", SANDBOX_WORKSPACE,
             "--proc", "/proc", "--dev", "/dev",
             "--setenv", "PATH", "/usr/bin:/bin",

@@ -1340,3 +1340,51 @@ default.** `max_tokens` had never been exposed, and `context_window` was added a
 with nothing to say so — an operator could not see the budget the runtime was working to. Both are
 now in the projection, `secret_ref` stays out because it names a credential, and a test asserts
 the operational fields are present so the next one cannot disappear silently.
+
+## ADR-054: A node works in its own sandbox and hands back a value or a path
+
+Every agent node gets a workspace. Inside it the node is free: it reads, writes, runs allowlisted
+commands against its own files, and revises what it wrote. When it stops it reports a result —
+either a value, or a path to one. This replaces the assumption that a node's whole deliverable
+arrives inside a single response.
+
+**Why that assumption had to go.** ADR-040 removed the writer's tools, on the argument that
+verification belongs in the pipeline rather than in the writer's attention. That argument is right
+about the *contract*, and the ADR says so itself: the first run "executed its contract exactly —
+the contract was wrong". What actually enforces the property is the craft checks ADR-040 added,
+and those run on the finished manuscript wherever it came from. Removing the tools as well cost
+something the ADR never accounted for: **a tool loop is the only mechanism a node has for making
+more than one model call.** Without it the writer has exactly one output buffer, and that buffer is
+a `max_tokens` window. The paper's length was therefore bounded by the output cap — and a survey is
+long by nature, not by choice.
+
+The recorded failures are one consequence wearing three faces:
+
+- `b557eb66` wrote a complete 13,512-character Markdown survey, and the node failed because the
+  contract wanted it wrapped in a JSON object. A correct paper, worth nothing.
+- A 3,571-character answer was cut off mid-object after the model explained it had exhausted its
+  retrieval budget. A truncated object parses as *nothing*, so the paper was lost rather than
+  shortened.
+- `agent_output_invalid` fired eight times. Each was read as a parsing problem, and a more tolerant
+  extractor was written twice — once on 09-10, once on 09-13. Neither asked why the answer kept
+  arriving at the edge of the limit. A fix that works ends the enquiry, which is how the cause
+  survived two repairs.
+
+**What stays.** The checks. `structure_errors` and `craft_errors` take a string, and a file and a
+JSON field are the same input to them. Provenance keeps coming from the operation ledger, which
+records what the tools returned and is independent of any node's output format. Recording and
+replay sit at the model-call layer and are unaffected. Every property ADR-040 wanted is still
+enforced; none of them needed the tool removal.
+
+**What the sandbox is.** Unprivileged isolation, unchanged except where the rule requires it: the
+workspace is bound read-write, everything outside it stays read-only, and there is no network. A
+node can do anything to its own workspace and nothing to anything else.
+
+**A path is a revision.** Output given as a path resolves to a frozen workspace revision, so it is
+immutable and a later write cannot change what a downstream node already read. This is what makes
+"the agent revised its own work" safe to record rather than something to hope did not happen.
+
+**The cost, stated rather than discovered.** One workspace per node per run is more state and more
+git worktrees, which is what `archive` exists for. A node that writes freely can also write badly,
+and the answer is the checks — which now run on something that persists instead of on a response
+that would otherwise have been discarded, which is an improvement in its own right.

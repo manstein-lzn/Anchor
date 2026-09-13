@@ -215,6 +215,20 @@ class WorkspaceManager:
         target.unlink()
         return self._commit(workspace, WorkspaceOperationKind.DELETE, path=path, actor=actor)
 
+    def claim(self, workspace_id: str, claimant) -> Workspace:
+        """Claim the workspace for this node and return it, with its live tree at ``path``.
+
+        The tree is where a node works under ADR-054: files written there persist until ``freeze``,
+        which is what lets a node produce a paper the way an agent does — incrementally, revising
+        what it wrote — instead of emitting the whole thing in one response. There is no revision
+        per write; the freeze at the end is the one revision.
+        """
+        return self._writable(workspace_id, claimant)
+
+    def target(self, workspace_id: str, path: str, *, claimant) -> Path:
+        """A path inside the claimed tree, refusing anything that escapes it."""
+        return self._target(self._writable(workspace_id, claimant), path)
+
     def freeze(self, workspace_id: str, *, actor: str = "operator") -> Workspace:
         workspace = self.store.get_workspace(workspace_id)
         if workspace is None:

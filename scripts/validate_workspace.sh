@@ -130,8 +130,11 @@ check("workspace frozen at that revision",
       workspace["state"] == "frozen" and workspace["current_revision"] == revision, workspace)
 
 kinds = [item["kind"] for item in get(f"/api/workspaces/{workspace_id}/operations")]
-check("ledger records create, write and freeze",
-      kinds[:1] == ["create"] and "write" in kinds and kinds[-1] == "freeze", kinds)
+# ADR-054: a node works in its tree, and the freeze is the one revision. The absence of per-write
+# operations is the property now, not an oversight — a node at work is not a sequence of auditable
+# transactions, and recording each edit as one would make the ledger a text editor's undo history.
+check("ledger records create and freeze, and no per-write operation",
+      kinds[:1] == ["create"] and kinds[-1] == "freeze" and "write" not in kinds, kinds)
 
 events = get(f"/api/runs/{run_id}/events?after=0&limit=200")
 completed = [event for event in events if event["event_type"] == "node.completed"]

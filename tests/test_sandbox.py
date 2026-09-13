@@ -75,14 +75,34 @@ def test_bubblewrap_reads_the_pinned_revision(project):
 
 
 @bwrap_only
-def test_bubblewrap_workspace_is_read_only_and_has_no_network(project):
-    store, _, sha = project
-    sandbox = BubblewrapWorkspaceSandbox(allowed_commands=frozenset({"ls", "cat", "sh"}))
-    write_attempt = execute_in_workspace(
-        store, parse(f"workspace://proj-1@{sha}/readme.md"),
-        ["sh", "-c", "echo x > new.txt"], sandbox=sandbox)
-    assert not write_attempt.ok
-    assert "read-only" in write_attempt.stderr.lower()
+def test_bubblewrap_confines_writes_to_the_bound_workspace(project):
+    """The bind is the boundary: a node may write its own tree and nothing else.
+
+    This test asserted the opposite until ADR-054 — that the workspace was read-only — which is what
+    made a node unable to write a paper. What has to hold now is narrower and more useful: writes
+    land inside the bound tree, and are refused everywhere else. It also asserts that executing
+    against a *revision* is still an observation, because `execute_in_workspace` binds a temporary
+    copy: a write there cannot reach the revision or dirty the source repository.
+    """
+    store, root, sha = project
+    sandbox = BubblewrapWorkspaceSandbox(allowed_commands=frozenset({"sh", "cat", "ls"}))
+
+    inside = execute_in_workspace(store, parse(f"workspace://proj-1@{sha}/readme.md"),
+                                  ["sh", "-c", "echo written > new.txt && cat new.txt"],
+                                  sandbox=sandbox)
+    assert inside.ok, inside.stderr
+    assert inside.stdout.strip() == "written"
+
+    # The tree was a temporary copy, so the revision and the repository are untouched.
+    status = subprocess.run(["git", "-C", str(root), "status", "--porcelain"],
+                            capture_output=True, text=True, check=True).stdout
+    assert status == "", "a sandbox write must not reach the source repository"
+
+    outside = execute_in_workspace(store, parse(f"workspace://proj-1@{sha}/readme.md"),
+                                   ["sh", "-c", "echo escape > /etc/anchor-sandbox-test"],
+                                   sandbox=sandbox)
+    assert not outside.ok, "a write outside the bound workspace must be refused"
+    assert not Path("/etc/anchor-sandbox-test").exists()
 
 
 def test_disallowed_command_is_refused_before_execution(project, tmp_path):
