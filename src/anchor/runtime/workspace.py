@@ -19,7 +19,13 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Protocol
 
-from anchor.domain.content import ContentKind, ContentRef
+from anchor.domain.content import (
+    ContentKind,
+    ContentRef,
+    ContentRefError,
+    parse,
+    workspace_ref,
+)
 from anchor.runtime.content import ContentUnavailable
 from anchor.runtime.sandbox import (
     DEFAULT_MAX_OUTPUT_BYTES,
@@ -268,3 +274,35 @@ def execute_in_workspace(store, ref: ContentRef, command: Sequence[str], *,
         spec = SandboxSpec(workspace=Path(directory), command=tuple(command),
                            timeout_seconds=timeout_seconds, max_output_bytes=max_output_bytes)
         return sandbox.run(spec)
+
+
+def is_workspace_reference(value: object) -> bool:
+    """Whether a value is a reference to a workspace rather than text.
+
+    Asked of the boundary type rather than by looking for the prefix: the prefix belongs to
+    ``domain.content`` and an architecture test enforces that it is spelled nowhere else. The same
+    rule applies here as everywhere else in the runtime — go through the type, not around it.
+    """
+    if not isinstance(value, str):
+        return False
+    try:
+        return parse(value).kind is ContentKind.WORKSPACE
+    except ContentRefError:
+        return False
+
+
+def read_workspace_text(store, ref: str, path: str) -> str:
+    """Read ``path`` out of the workspace revision ``ref`` points at.
+
+    A node's output is a value or a path (ADR-054), and this is how a path is read. One function for
+    the one new shape of reference, so whatever consumes a node's output never has to learn where it
+    came from — it is handed a string either way.
+    """
+    parsed = parse(ref)
+    if parsed.kind is not ContentKind.WORKSPACE or not parsed.workspace_id or not parsed.revision:
+        raise ValueError(f"not a resolvable workspace reference: {ref}")
+    try:
+        return WorkspaceResolver(store).read_text(
+            workspace_ref(parsed.workspace_id, parsed.revision, path))
+    except (ContentUnavailable, WorkspaceError) as exc:
+        raise ValueError(f"the workspace at {ref} has no {path}: {exc}") from exc

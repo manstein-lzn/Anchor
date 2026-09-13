@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import subprocess
 import tempfile
 import time
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
@@ -29,6 +30,62 @@ def write_json(path: Path, value: dict) -> None:
         out.write("\n")
         temporary = out.name
     os.replace(temporary, path)
+
+
+def ensure_workspace(client, graph_id: str) -> str:
+    """Create the graph's workspace before the graph that refers to it.
+
+    A workspace is a git worktree, so it needs a repository to be a tree of, and the graph gets one
+    of its own: the paper, its notes and its revisions live there. The storage scope is already
+    keyed by ``graph_id``, so the capacity accounting the graph already had covers this work too.
+
+    Idempotent, because installation is: the ids are derived from the graph id and nothing is
+    recreated if it is already there.
+    """
+    root = LOCAL / "graphs" / graph_id
+    project_id = f"project-{graph_id}"
+    base_workspace_id = f"ws-{graph_id}-base"
+
+    if not (root / ".git").exists():
+        root.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["git", "init", "-q", str(root)], check=True)
+        (root / "README.md").write_text(
+            f"# {graph_id}\n\nThe repository the `{graph_id}` graph works in. Every node gets its "
+            "own tree forked from this revision; nothing is written here directly, so this stays "
+            "a base rather than becoming someone's working copy.\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(root), "-c", "user.email=anchor@localhost",
+                        "-c", "user.name=Anchor", "commit", "-qm", "graph workspace base"],
+                       check=True)
+
+    base = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], check=True,
+                          capture_output=True, text=True).stdout.strip()
+
+    project = client.post("/api/projects", json={"project_id": project_id, "name": graph_id,
+                                                  "root": str(root)})
+    if project.status_code >= 400 and project.status_code != 409:
+        project.raise_for_status()
+    if client.get(f"/api/workspaces/{base_workspace_id}").status_code == 404:
+        created = client.post("/api/workspaces", json={"project_id": project_id,
+                                                        "base_revision": base,
+                                                        "workspace_id": base_workspace_id})
+        created.raise_for_status()
+    return base_workspace_id
+
+
+def bind_workspace(definition: GraphDefinition, workspace_id: str) -> GraphDefinition:
+    """Bind the base to every agent node, so each one derives its own tree from it (ADR-054).
+
+    Control nodes are left alone: they are deterministic, they run no agent, and there is nothing
+    for them to work on. Declaring a workspace for them would be a workspace nobody uses.
+    """
+    nodes = [
+        node.model_copy(update={"metadata": {**(node.metadata or {}),
+                                             "workspace_id": workspace_id}})
+        if node.type == "agent" else node
+        for node in definition.nodes
+    ]
+    return definition.model_copy(update={"nodes": nodes})
 
 
 def install(client, args) -> None:
@@ -66,8 +123,10 @@ def install(client, args) -> None:
         write_json(backup, json.loads(config_path.read_text()))
     write_json(config_path, config)
 
-    definition = GraphDefinition.model_validate_json(
-        (ROOT / "examples/graphs/academic-research.json").read_text())
+    definition = bind_workspace(
+        GraphDefinition.model_validate_json(
+            (ROOT / "examples/graphs/academic-research.json").read_text()),
+        ensure_workspace(client, "academic-research"))
     version = GraphVersion.publish(definition, 1)
     graph_id = definition.graph_id
     draft = client.get(f"/api/graphs/{graph_id}/draft")

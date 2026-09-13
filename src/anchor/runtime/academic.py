@@ -6,6 +6,7 @@ import json
 import re
 
 from anchor.domain.content import ARTIFACT_PREFIX
+from anchor.runtime.workspace import is_workspace_reference, read_workspace_text
 from anchor.runtime.academic_rounds import CoverageGateBehavior
 from anchor.runtime.evidence import successful_operations, verify_source
 from anchor.runtime.json_output import extract_json_object
@@ -80,7 +81,7 @@ def validate_agent_output(text: str, role: str | None = None) -> dict:
 
 
 def preflight_review(snapshot: dict, *, store, artifacts, run_id) -> dict | None:
-    work = _extract_work(snapshot)
+    work = _extract_work(snapshot, store=store)
     request = snapshot.get("request", {})
     if not isinstance(work, dict) or not work.get("manuscript"):
         errors, target = ["Research output must be a complete JSON object"], "manuscript"
@@ -247,9 +248,22 @@ def unsupported_number_claims(manuscript: str, full_text: set[int]) -> list[str]
     return problems
 
 
-def _extract_work(snapshot: dict) -> dict:
-    """Combine the writer's manuscript with the gatherer's evidence ledger."""
+MANUSCRIPT_PATH = "paper.md"
+"""Where the writer leaves the paper. The one place its name is spelled in code."""
+
+
+def _extract_work(snapshot: dict, *, store=None) -> dict:
+    """Combine the writer's manuscript with the gatherer's evidence ledger.
+
+    The writer's deliverable is a file in its own workspace, not a field in a response, so the
+    snapshot carries a reference to the writer's output rather than its text. Resolving it here is
+    what keeps every check below unchanged: they all take a string, and a string is what they get.
+    """
     manuscript, evidence = snapshot.get("manuscript"), snapshot.get("evidence")
+    if is_workspace_reference(manuscript):
+        if store is None:
+            raise ValueError("reading a manuscript out of a workspace needs a store")
+        manuscript = {"manuscript": read_workspace_text(store, str(manuscript), MANUSCRIPT_PATH)}
     if isinstance(manuscript, dict) and isinstance(evidence, dict):
         return {**evidence, "manuscript": manuscript.get("manuscript", ""),
                 "thesis": manuscript.get("thesis", "")}
@@ -358,7 +372,7 @@ def revision_feedback(check_output: dict[str, Any]) -> dict[str, Any]:
 
 
 def evaluate_review(snapshot: dict, *, store, artifacts, run_id, node_id: str) -> dict:
-    review, work = snapshot.get("review"), _extract_work(snapshot)
+    review, work = snapshot.get("review"), _extract_work(snapshot, store=store)
     if not isinstance(review, dict):
         review = {"verdict": "revise", "target": "manuscript",
                   "summary": "Review output must be a JSON object"}
@@ -430,7 +444,7 @@ def evaluate_review(snapshot: dict, *, store, artifacts, run_id, node_id: str) -
 
     elif verdict == "revise" and len(prior_nodes) > 0:
         prior = json.loads(artifacts.get_text(max(prior_nodes, key=lambda n: n.attempt).output_ref))
-        if canonical_json(_extract_work(prior)) == canonical_json(work):
+        if canonical_json(_extract_work(prior, store=store)) == canonical_json(work):
             # Repeated identical research without verified progress: record
             # evidence and surface to supervisor/watchdog for diagnosis,
             # instead of silently blocking the run.
@@ -458,7 +472,7 @@ def _references(snapshot: dict) -> list[str]:
     return references
 
 
-def render_paper(snapshot: dict, *, run_id) -> str:
+def render_paper(snapshot: dict, *, run_id, store) -> str:
     """The reader-facing deliverable: the manuscript and its references.
 
     Provenance is a machine artifact. It stays out of the paper and is exported
@@ -467,7 +481,7 @@ def render_paper(snapshot: dict, *, run_id) -> str:
     """
     if snapshot.get("review", {}).get("verdict") != "pass":
         raise ValueError("Only an approved academic review can publish a manuscript")
-    text = _extract_work(snapshot)["manuscript"].rstrip()
+    text = _extract_work(snapshot, store=store)["manuscript"].rstrip()
     return text + "\n\n## References\n\n" + "\n\n".join(_references(snapshot)) + "\n"
 
 
@@ -538,7 +552,7 @@ class MarkdownReportBehavior:
         # The audit record ships beside the paper, not inside it.
         artifacts.export_markdown(run_id, "provenance",
                                   render_provenance(approved, run_id=run_id))
-        return render_paper(approved, run_id=run_id)
+        return render_paper(approved, run_id=run_id, store=store)
 
 
 ACADEMIC_BEHAVIORS = {
