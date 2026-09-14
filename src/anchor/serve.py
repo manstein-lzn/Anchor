@@ -27,6 +27,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
 from urllib.parse import unquote, urlparse
 
+from anchor.simple import graph as graph_module
 from anchor.simple import run as runner
 
 #: How much of a node's conversation an observer is given. Enough to see what it is doing, not so
@@ -52,7 +53,19 @@ class Scheduler:
                       if item.is_dir() and (item / "graph.json").is_file()) if base.is_dir() else []
 
     def workspace(self, name: str) -> Path | None:
+        """A graph that exists — that is, a workspace with a definition in it.
+
+        Deliberately stricter than the directory check below: listing graphs should not show a
+        directory somebody made and did not fill in.
+        """
         return next((item for item in self.workspaces() if item.name == name), None)
+
+    def _directory(self, name: str) -> Path | None:
+        """The workspace directory, whether or not it has a definition yet."""
+        if not name or "/" in name or name.startswith("."):
+            return None
+        candidate = self.root / "workspaces" / name
+        return candidate if candidate.is_dir() else None
 
     def trigger(self, graph: str, objective: str | None) -> tuple[str, int]:
         """Start a run, or say why not. Returns (body, status)."""
@@ -71,6 +84,42 @@ class Scheduler:
         threading.Thread(target=self._run, args=(workspace, run_id, objective),
                          daemon=True).start()
         return json.dumps({"run": run_id, "graph": graph}), 202
+
+    def save(self, name: str, definition: dict) -> tuple[str, int]:
+        """Validate a graph and write it, or say why not.
+
+        Validated with the same function a run uses, so a graph this accepts is a graph that runs —
+        a page that saved something the runner then refused would be worse than no page. The file is
+        replaced whole rather than edited, because `graph.json` is the graph and a half-written one is
+        not a smaller graph, it is a broken one.
+        """
+        # The directory, not `workspace`: creating a graph makes the directory and then saves into
+        # it, and looking it up by the stricter rule would report the graph it had just made as
+        # missing.
+        workspace = self._directory(name)
+        if workspace is None:
+            return json.dumps({"error": f"no such graph: {name}"}), 404
+        if self.running.get(name):
+            return json.dumps({"error": "this graph is running; changing it now would change what "
+                                       "the run reads", "running": self.running[name]}), 409
+        try:
+            graph_module.parse(definition)
+        except Exception as exc:  # noqa: BLE001 - the message is the point
+            return json.dumps({"error": f"{type(exc).__name__}: {exc}"}), 400
+        target = workspace / "graph.json"
+        staged = target.with_suffix(".json.incoming")
+        staged.write_text(json.dumps(definition, ensure_ascii=False, indent=2) + "\n",
+                          encoding="utf-8")
+        staged.replace(target)                 # rename, so a reader never sees a partial file
+        return json.dumps({"graph": name, "saved": True}), 200
+
+    def create(self, name: str, definition: dict | None) -> tuple[str, int]:
+        if not name or "/" in name or name.startswith("."):
+            return json.dumps({"error": "a graph name may not be empty or contain a slash"}), 400
+        if self._directory(name) is not None:
+            return json.dumps({"error": f"a graph called {name!r} already exists"}), 409
+        (self.root / "workspaces" / name).mkdir(parents=True, exist_ok=True)
+        return self.save(name, definition or _starter_graph(name))
 
     def resume_all(self) -> None:
         """Pick up anything a previous process left running. The whole of recovery."""
@@ -133,6 +182,25 @@ class Scheduler:
                 "nodes": sorted(item.name for item in base.iterdir() if item.is_dir())}
 
 
+def _starter_graph(name: str) -> dict:
+    """A graph that runs, as the starting point for a new one.
+
+    Small enough to read in one screen and complete enough to be a real graph: two nodes, one edge,
+    and an objective. Anyone editing it will replace all of it, which is easier from something that
+    works than from an empty file that fails validation for reasons they have to look up.
+    """
+    return {
+        "entry": "first",
+        "objective": f"{name}: 说明这个图要做什么。",
+        "agents": {
+            "worker": {"model": "models.academic", "network": False,
+                       "instructions": "在一句话里说明这个节点要做什么。"},
+        },
+        "nodes": [{"id": "first", "agent": "worker"}],
+        "edges": [],
+    }
+
+
 def _readable(line: str) -> dict:
     """A message as something a person can read, without knowing the library's shape."""
     message = json.loads(line)
@@ -156,6 +224,15 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):        # quieter: one line per request is enough
         print(json.dumps({"request": self.path, "status": args[1] if len(args) > 1 else ""}),
               flush=True)
+
+    def _body(self) -> dict | None:
+        """The request body, or None after answering that it was not usable."""
+        length = int(self.headers.get("Content-Length") or 0)
+        try:
+            return json.loads(self.rfile.read(length) or b"{}")
+        except json.JSONDecodeError:
+            self._send(json.dumps({"error": "body must be JSON"}), 400)
+            return None
 
     def _serve_built(self, parts: list[str]) -> bool:
         """The built interface, if there is one.
@@ -217,15 +294,31 @@ class Handler(BaseHTTPRequestHandler):
                               else json.dumps({"error": "no such run"}), 200 if found else 404)
         self._send(json.dumps({"error": "not found"}), 404)
 
+    def do_PUT(self) -> None:
+        parts = [part for part in PurePosixPath(unquote(urlparse(self.path).path)).parts
+                 if part != "/"]
+        if len(parts) != 2 or parts[0] != "graphs":
+            return self._send(json.dumps({"error": "not found"}), 404)
+        body = self._body()
+        if body is None:
+            return
+        response, status = self.scheduler.save(parts[1], body.get("definition") or {})
+        self._send(response, status)
+
     def do_POST(self) -> None:
         parts = [part for part in PurePosixPath(unquote(urlparse(self.path).path)).parts if part != "/"]
+        if parts == ["graphs"]:
+            body = self._body()
+            if body is None:
+                return
+            response, status = self.scheduler.create(str(body.get("name") or ""),
+                                                     body.get("definition"))
+            return self._send(response, status)
         if parts != ["trigger"]:
             return self._send(json.dumps({"error": "not found"}), 404)
-        length = int(self.headers.get("Content-Length") or 0)
-        try:
-            body = json.loads(self.rfile.read(length) or b"{}")
-        except json.JSONDecodeError:
-            return self._send(json.dumps({"error": "body must be JSON"}), 400)
+        body = self._body()
+        if body is None:
+            return
         if not body.get("graph"):
             return self._send(json.dumps({"error": "graph is required"}), 400)
         response, status = self.scheduler.trigger(str(body["graph"]), body.get("objective"))

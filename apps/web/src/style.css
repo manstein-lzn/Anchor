@@ -1,140 +1,188 @@
-/* The shell, and the node and edge styles the canvas needs.
+/* The base is the one the previous interface used — 13px, Inter, the teal accent — because the
+ * complaint was that this one looked thinner, and it did: the palette, the type scale and the panel
+ * density were thrown out along with the endpoints, and only the endpoints needed to go.
  *
- * Everything else the previous interface carried — the version banner, the storage panel, the
- * trigger forms, the auth backdrop — belonged to a backend that no longer exists and went with it.
+ * What is not here is anything for a screen that no longer exists: version banners, storage budgets,
+ * the auth backdrop, the trigger forms.
  */
 
 :root {
-  --ink: #1f2a26;
-  --muted: #6b7a74;
-  --line: #d8e0dc;
-  --paper: #f6f8f7;
-  --green: #2f7d5f;
+  font-family: Inter, "Noto Sans CJK SC", "Microsoft YaHei", system-ui, sans-serif;
+  color: #263b37;
+  background: #f6f8f7;
+  font-size: 13px;
+  font-synthesis: none;
+  --accent: #167568;
+  --line: #dfe6e3;
+  --muted: #73817d;
+  --green: #167568;
   --red: #b4453c;
-  --amber: #a9822f;
-  font-family: ui-sans-serif, system-ui, "Noto Sans CJK SC", sans-serif;
+  --amber: #9a7a24;
+  --paper: #f6f8f7;
+  --ink: #263b37;
 }
 
 * { box-sizing: border-box; }
-body { margin: 0; background: var(--paper); color: var(--ink); }
+body { margin: 0; }
 
-.shell { display: flex; flex-direction: column; height: 100vh; }
+.app-shell { display: flex; flex-direction: column; height: 100vh; }
 
-.shell-top {
-  display: flex; align-items: center; gap: 14px; padding: 10px 16px;
+.topbar {
+  display: flex; align-items: center; gap: 12px; padding: 9px 16px;
   background: #fff; border-bottom: 1px solid var(--line);
 }
-.brand { font-size: 17px; letter-spacing: .04em; }
-.shell-top select, .shell-top button {
-  font: inherit; padding: 5px 10px; border-radius: 6px;
-  border: 1px solid var(--line); background: #fff; color: inherit;
+.brand { font-size: 15px; letter-spacing: .04em; color: var(--accent); }
+.topbar select, .topbar button {
+  font: inherit; padding: 4px 10px; border-radius: 6px;
+  border: 1px solid var(--line); background: #fff; color: inherit; cursor: pointer;
 }
-.shell-top button { cursor: pointer; border-color: var(--green); color: var(--green); }
-.shell-top button:disabled { opacity: .45; cursor: default; }
-.problem { color: var(--red); font-size: 13px; }
+.topbar button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.topbar button:disabled { opacity: .45; cursor: default; }
+.problem { color: var(--red); font-size: 12px; }
 
-.shell-body { flex: 1; display: grid; grid-template-columns: 240px 1fr 380px; min-height: 0; }
-
-.runs, .trace {
-  overflow-y: auto; background: #fff; padding: 12px;
+.tabs { display: flex; gap: 2px; }
+.tabs button { border: none; background: transparent; color: var(--muted); padding: 4px 12px; }
+.tabs button.chosen {
+  color: var(--accent); background: #eaf3f1; border-radius: 6px; font-weight: 600;
 }
-.runs { border-right: 1px solid var(--line); }
+
+.app-body { flex: 1; display: grid; min-height: 0; }
+.app-body.running { grid-template-columns: 250px 1fr 380px; }
+.app-body.editing { grid-template-columns: 210px 1fr 1fr; }
+
+/* ── the library ───────────────────────────────────────────────────────── */
+.library, .runs, .trace { overflow-y: auto; background: #fff; padding: 12px; }
+.library, .runs { border-right: 1px solid var(--line); }
 .trace { border-left: 1px solid var(--line); }
-.runs h3, .trace h3 {
-  margin: 2px 0 10px; font-size: 12px; font-weight: 600;
-  color: var(--muted); text-transform: uppercase; letter-spacing: .06em;
+.library h3, .runs h3, .trace h3, .editor-head .eyebrow, .preview .eyebrow {
+  margin: 0 0 10px; font-size: 11px; font-weight: 600; color: var(--muted);
+  text-transform: uppercase; letter-spacing: .07em;
 }
+
+.library-row {
+  display: flex; align-items: center; gap: 6px; width: 100%; text-align: left;
+  padding: 7px 9px; margin-bottom: 3px; font: inherit; color: inherit; cursor: pointer;
+  background: transparent; border: 1px solid transparent; border-radius: 7px;
+}
+.library-row:hover { background: var(--paper); }
+.library-row.chosen { border-color: var(--accent); background: #eaf3f1; }
+.library-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .run-row {
-  display: grid; grid-template-columns: 8px 1fr auto; gap: 6px 8px;
-  align-items: center; width: 100%; text-align: left; padding: 8px 9px; margin-bottom: 4px;
-  font: inherit; font-size: 13px; color: inherit; cursor: pointer;
+  display: grid; grid-template-columns: 8px 1fr auto; gap: 5px 8px; align-items: center;
+  width: 100%; text-align: left; padding: 7px 9px; margin-bottom: 3px;
+  font: inherit; color: inherit; cursor: pointer;
   background: transparent; border: 1px solid transparent; border-radius: 7px;
 }
 .run-row:hover { background: var(--paper); }
-.run-row.chosen { border-color: var(--green); background: #f0f7f3; }
-.run-when { font-variant-numeric: tabular-nums; }
-.run-nodes { grid-column: 2 / 4; color: var(--muted); font-size: 12px; }
+.run-row.chosen { border-color: var(--accent); background: #eaf3f1; }
+.run-when { font-variant-numeric: tabular-nums; font-size: 12px; }
+.run-nodes { grid-column: 2 / 4; color: var(--muted); font-size: 11px; }
 
-.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+.dot { width: 7px; height: 7px; border-radius: 50%; background: var(--line); }
 .dot.running { background: var(--amber); }
-.dot.finished { background: var(--green); }
+.dot.finished { background: var(--accent); }
 .dot.failed { background: var(--red); }
 
 .pill {
-  font-size: 11px; padding: 1px 7px; border-radius: 999px;
-  border: 1px solid var(--line); color: var(--muted); white-space: nowrap;
+  font-size: 11px; padding: 1px 7px; border-radius: 999px; white-space: nowrap;
+  border: 1px solid var(--line); color: var(--muted);
 }
 .pill.running { color: var(--amber); border-color: var(--amber); }
-.pill.finished { color: var(--green); border-color: var(--green); }
+.pill.finished { color: var(--accent); border-color: var(--accent); }
 .pill.failed { color: var(--red); border-color: var(--red); }
 
-.hint { color: var(--muted); font-size: 13px; line-height: 1.6; }
+.hint { color: var(--muted); line-height: 1.65; }
 
-.canvas { display: flex; flex-direction: column; min-width: 0; }
+/* ── the editor ────────────────────────────────────────────────────────── */
+.editor, .preview, .canvas { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.preview { border-left: 1px solid var(--line); }
+.editor-head {
+  display: flex; align-items: center; gap: 10px; padding: 10px 14px 0;
+}
+.editor-head .eyebrow { margin: 0; }
+.editor-head .spacer { flex: 1; }
+.editor-head button {
+  font: inherit; padding: 3px 12px; border-radius: 6px; cursor: pointer;
+  border: 1px solid var(--line); background: #fff; color: inherit;
+}
+.editor-head button.primary { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+.editor-head button:disabled { opacity: .45; cursor: default; }
+.dirty { font-size: 11px; color: var(--amber); }
+
+.notice {
+  margin: 9px 14px 0; padding: 7px 11px; border-radius: 7px; font-size: 12px; line-height: 1.5;
+}
+.notice.ok { background: #eaf3f1; color: var(--accent); }
+.notice.bad { background: #fbeeed; color: var(--red); }
+
+.json-editor {
+  flex: 1; margin: 9px 14px 14px; padding: 12px; resize: none;
+  border: 1px solid var(--line); border-radius: 8px; background: #fcfdfd; color: inherit;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; line-height: 1.65;
+}
+.json-editor:focus { outline: none; border-color: var(--accent); }
+.preview .execution-canvas { flex: 1; min-height: 0; }
+.canvas-empty { padding: 14px; }
+
+/* ── a run ─────────────────────────────────────────────────────────────── */
 .canvas-head {
   display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
   padding: 9px 14px; border-bottom: 1px solid var(--line); background: #fff;
 }
-.objective { font-size: 13px; }
-.canvas-empty { padding: 14px; }
-
-/* ── the canvas ─────────────────────────────────────────────────────────── */
+.objective { font-size: 12px; }
 .execution-canvas { flex: 1; min-height: 0; }
+
 .execution-node {
   width: 220px; padding: 10px 12px; border-radius: 10px; background: #fff;
-  border: 1px solid var(--line); box-shadow: 0 1px 3px rgb(31 42 38 / 8%);
+  border: 1px solid var(--line); box-shadow: 0 1px 3px rgb(38 59 55 / 8%);
   font-size: 12px; color: var(--ink);
 }
-.execution-node.selected { border-color: var(--green); box-shadow: 0 0 0 2px #2f7d5f33; }
+.execution-node.selected { border-color: var(--accent); box-shadow: 0 0 0 2px #16756833; }
 .execution-node-kind {
   display: flex; align-items: center; gap: 5px; color: var(--muted);
   font-size: 11px; margin-bottom: 3px;
 }
 .execution-node-kind span { margin-left: auto; }
-.execution-node strong { display: block; font-size: 14px; margin-bottom: 4px; }
+.execution-node strong { display: block; font-size: 13px; margin-bottom: 4px; }
 .execution-node-status { display: flex; align-items: center; gap: 5px; font-size: 12px; }
 .execution-node small {
-  display: block; margin-top: 5px; color: var(--muted); font-size: 11px;
+  margin-top: 5px; color: var(--muted); font-size: 11px;
   overflow: hidden; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;
 }
 .execution-node.state-running { border-color: var(--amber); }
 .execution-node.state-running .execution-node-status { color: var(--amber); }
-.execution-node.state-completed { border-color: var(--green); }
-.execution-node.state-completed .execution-node-status { color: var(--green); }
+.execution-node.state-completed { border-color: var(--accent); }
+.execution-node.state-completed .execution-node-status { color: var(--accent); }
 .execution-node.state-stalled, .execution-node.state-failed { border-color: var(--red); }
 .execution-node.state-stalled .execution-node-status,
 .execution-node.state-failed .execution-node-status { color: var(--red); }
-.execution-node.state-skipped, .execution-node.state-pending { opacity: .62; }
-.execution-node.state-skipped .execution-node-status,
-.execution-node.state-pending .execution-node-status { color: var(--muted); }
+.execution-node.state-skipped, .execution-node.state-pending { opacity: .6; }
 
 .react-flow__handle { width: 6px; height: 6px; background: var(--line); border: none; }
 .react-flow__edge-text { font-size: 11px; }
 .edge-label-badge {
-  padding: 1px 6px; border-radius: 999px; background: #fff; border: 1px solid var(--line);
-  font-size: 11px; color: var(--muted);
+  padding: 1px 6px; border-radius: 999px; background: #fff;
+  border: 1px solid var(--line); font-size: 11px; color: var(--muted);
 }
-.react-flow__edge.selected .react-flow__edge-path { stroke: var(--green); }
 .react-flow__attribution { display: none; }
 
+/* ── the conversation ──────────────────────────────────────────────────── */
 .passes { display: flex; gap: 5px; margin-bottom: 10px; }
 .passes button {
-  font: inherit; font-size: 12px; padding: 3px 9px; border-radius: 999px; cursor: pointer;
+  font: inherit; font-size: 11px; padding: 2px 9px; border-radius: 999px; cursor: pointer;
   border: 1px solid var(--line); background: #fff; color: var(--muted);
 }
-.passes button.chosen { border-color: var(--green); color: var(--green); }
+.passes button.chosen { border-color: var(--accent); color: var(--accent); }
 
-/* ── the conversation ───────────────────────────────────────────────────── */
 .messages { list-style: none; margin: 0; padding: 0; }
 .message { margin-bottom: 12px; border-left: 2px solid var(--line); padding-left: 9px; }
-.message.assistant { border-color: var(--green); }
-.message.tool { border-color: var(--muted); }
+.message.assistant { border-color: var(--accent); }
 .message .role {
-  display: block; font-size: 11px; color: var(--muted);
-  text-transform: uppercase; letter-spacing: .05em; margin-bottom: 3px;
+  display: block; font-size: 10px; color: var(--muted);
+  text-transform: uppercase; letter-spacing: .06em; margin-bottom: 3px;
 }
 .message pre {
   margin: 0; white-space: pre-wrap; word-break: break-word;
-  font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; line-height: 1.55;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; line-height: 1.6;
 }

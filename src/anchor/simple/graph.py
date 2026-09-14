@@ -107,7 +107,30 @@ def back_edges(graph: Graph) -> frozenset[tuple[str, str]]:
 
 
 def load(path: str | Path) -> Graph:
-    raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    return parse(json.loads(Path(path).read_text(encoding="utf-8")))
+
+
+def parse(raw: dict) -> Graph:
+    """Validate a graph, whether it came from a file or from someone typing it into a page.
+
+    Raises with the reason rather than returning something half-built, so an editor can show the
+    message next to what the author wrote. The same function guards both, so a graph the page accepts
+    is a graph a run will accept.
+    """
+
+    if not isinstance(raw, dict):
+        raise ValueError("a graph must be a JSON object")
+    for key in ("agents", "nodes"):
+        if key not in raw:
+            raise ValueError(f"a graph needs an \"{key}\" key")
+    if not raw["agents"]:
+        raise ValueError("a graph needs at least one agent")
+    if not raw["nodes"]:
+        raise ValueError("a graph needs at least one node")
+
+    for name, spec in raw["agents"].items():
+        if "model" not in spec:
+            raise ValueError(f"agent {name!r} needs a \"model\"")
     agents = {
         name: Agent(model=spec["model"], instructions=spec.get("instructions", ""),
                     network=bool(spec.get("network", False)),
@@ -115,6 +138,9 @@ def load(path: str | Path) -> Graph:
                     wall_time_limit_seconds=int(spec.get("wall_time_limit_seconds", 3600)))
         for name, spec in raw["agents"].items()
     }
+    for item in raw["nodes"]:
+        if "id" not in item or "agent" not in item:
+            raise ValueError(f"every node needs an \"id\" and an \"agent\": {item}")
     nodes = {item["id"]: item["agent"] for item in raw["nodes"]}
     missing = {agent for agent in nodes.values() if agent not in agents}
     if missing:
