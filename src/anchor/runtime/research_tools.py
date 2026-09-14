@@ -30,7 +30,7 @@ from anchor.domain.models import DomainModel
 
 MAX_RESPONSE_BYTES = 8_000_000
 RESEARCH_TOOLS = frozenset({"scholarly.search", "scholarly.read", "scholarly.read_many",
-                           "scholarly.search_many", "scholarly.citations"})
+                           "scholarly.search_many", "scholarly.citations", "scholarly.sources"})
 # Documents per batch read. Bounded so one call cannot monopolise a round.
 BATCH_READ_LIMIT = 8
 #: Queries one batch search may carry. A plan with two dozen query strings is normal, so this is
@@ -675,7 +675,45 @@ def citations(request: ResearchRequest, *, timeout_seconds: float) -> dict:
             "direction": request.direction, "total_results": total, "papers": papers}
 
 
+#: One cheap probe per source, and what a caller should do with the answer. Kept to a single
+#: request each so asking is not itself expensive — the point is to spend one call learning which
+#: sources are usable instead of a node spending half an hour finding out one failure at a time.
+SOURCE_PROBES = (
+    ("crossref", ResearchRequest(query="cost model compiler", source="crossref", limit=1)),
+    ("openalex", ResearchRequest(query="cost model compiler", source="openalex", limit=1)),
+    ("arxiv", ResearchRequest(query="cost model compiler", source="arxiv", limit=1)),
+)
+
+
+def check_sources(*, timeout_seconds: float = 30) -> dict:
+    """Ask each source one question and report which answered.
+
+    A node that has to discover a rate limit by failing learns it one turn at a time, and in one run
+    spent thirty minutes doing exactly that — smaller batches, background processes, smaller batches
+    again. The limits are real and they move; what should not be real is the cost of finding out.
+    """
+    sources = []
+    for name, request in SOURCE_PROBES:
+        entry: dict = {"source": name, "usable": False, "detail": ""}
+        try:
+            result = search(request, timeout_seconds=timeout_seconds)
+            entry["usable"] = True
+            entry["detail"] = f"{len(result.get('papers', []))} result(s) for a probe query"
+        except Exception as exc:  # noqa: BLE001 - a source being down is the answer
+            entry["detail"] = f"{type(exc).__name__}: {str(exc)[:120]}"
+        sources.append(entry)
+    usable = [entry["source"] for entry in sources if entry["usable"]]
+    return {"sources": sources, "usable": usable,
+            "note": ("use the ones that answered; a source that refused is not a dead end, it is a "
+                     "source to leave alone for a while") if usable else
+                    ("none answered; report that rather than working around it")}
+
+
 def execute_research(tool_ref: str, request: ResearchRequest, *, timeout_seconds: float) -> str:
+    if tool_ref == "scholarly.sources":
+        result = check_sources(timeout_seconds=min(timeout_seconds, 30))
+        result["retrieved_at"] = datetime.now(timezone.utc).isoformat()
+        return json.dumps(result, ensure_ascii=False)
     if tool_ref == "scholarly.search":
         result = search(request, timeout_seconds=timeout_seconds)
     elif tool_ref == "scholarly.search_many":

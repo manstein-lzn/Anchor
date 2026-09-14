@@ -43,6 +43,11 @@ The literature tools are on your PATH:
   anchor-scholarly read        --url "https://..." [--offset N] [--page-start N]
   anchor-scholarly read-many   --urls "u1,u2" [--offset N]
   anchor-scholarly citations   --identifier "doi:…|arxiv:…|openalex:…" [--direction cites|cited_by]
+  anchor-scholarly sources     ask each source whether it will answer, and say which did
+
+Start with `anchor-scholarly sources`. Which sources answer changes from hour to hour, and one call
+tells you which to use — far better than discovering it one failure at a time. A source that refuses
+is one to leave alone for now, not a dead end to work around: use the ones that answered.
 
 `search-many` takes a file with one query per line (blank lines and lines starting with # are
 ignored) and runs them all in one call. Use it for a list of queries rather than one call each.

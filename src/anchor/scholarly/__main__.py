@@ -18,6 +18,7 @@ from pathlib import Path
 from anchor.runtime.research_tools import ResearchRequest, execute_research
 
 COMMANDS = {
+    "sources": "scholarly.sources",
     "search": "scholarly.search",
     "search-many": "scholarly.search_many",
     "read": "scholarly.read",
@@ -46,6 +47,8 @@ def _request(args: argparse.Namespace) -> dict:
                 "offset": args.offset}
     if args.command == "read":
         return {"url": args.url, "offset": args.offset, "page_start": args.page_start}
+    if args.command == "sources":
+        return {}
     if args.command == "search-many":
         lines = Path(args.queries_file).read_text(encoding="utf-8").splitlines()
         return {"queries": [line.strip() for line in lines
@@ -67,6 +70,8 @@ def main() -> int:
     search.add_argument("--source", default="crossref", choices=("crossref", "arxiv", "openalex"))
     search.add_argument("--limit", type=int, default=8)
     search.add_argument("--offset", type=int, default=0)
+
+    subs.add_parser("sources", help="ask each source whether it will answer, and say which did")
 
     many_searches = subs.add_parser("search-many", help="several queries in one call")
     many_searches.add_argument("--queries-file", required=True,
