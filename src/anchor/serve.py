@@ -33,6 +33,9 @@ from anchor.simple import run as runner
 #: much that the endpoint becomes a way to download a run's whole history one request at a time.
 TAIL_LINES = 40
 
+#: Where `vite build` leaves the interface. Its absence is not an error.
+BUILT = Path(__file__).resolve().parents[2] / "apps" / "web" / "dist"
+
 
 class Scheduler:
     """Which graphs are running, and the runs that finished."""
@@ -154,6 +157,32 @@ class Handler(BaseHTTPRequestHandler):
         print(json.dumps({"request": self.path, "status": args[1] if len(args) > 1 else ""}),
               flush=True)
 
+    def _serve_built(self, parts: list[str]) -> bool:
+        """The built interface, if there is one.
+
+        Served from the same process as the API so a deployment is one thing to start and one thing to
+        reach. Absent until someone has run `npm --prefix apps/web run build`, and absent is fine —
+        the API is the whole of the system and the page is a way of looking at it.
+        """
+        index = BUILT / "index.html"
+        if not index.is_file():
+            return False
+        target = (BUILT.joinpath(*parts) if parts else index).resolve()
+        if BUILT.resolve() not in target.parents and target != index.resolve():
+            return False                       # never serve outside the built directory
+        if not target.is_file():
+            target = index                     # a client-side path; hand back the page
+        kinds = {".html": "text/html", ".js": "text/javascript", ".css": "text/css",
+                 ".svg": "image/svg+xml", ".json": "application/json",
+                 ".woff2": "font/woff2", ".png": "image/png"}
+        payload = target.read_bytes()
+        self.send_response(200)
+        self.send_header("Content-Type", kinds.get(target.suffix, "application/octet-stream"))
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+        return True
+
     def _send(self, body: str, status: int = 200) -> None:
         payload = body.encode("utf-8")
         self.send_response(status)
@@ -165,10 +194,21 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         path = PurePosixPath(unquote(urlparse(self.path).path))
         parts = [part for part in path.parts if part != "/"]
+        if not parts or parts[0] == "assets" or (len(parts) == 1 and "." in parts[0]):
+            if self._serve_built(parts):
+                return
         if parts == ["graphs"]:
             names = [{"graph": item.name, "running": self.scheduler.running.get(item.name)}
                      for item in self.scheduler.workspaces()]
             return self._send(json.dumps({"graphs": names}, ensure_ascii=False))
+        if len(parts) == 2 and parts[0] == "graphs":
+            # The graph itself, so a view can draw the topology and not only a run through it.
+            workspace = self.scheduler.workspace(parts[1])
+            if workspace is None:
+                return self._send(json.dumps({"error": "no such graph"}), 404)
+            graph = json.loads((workspace / "graph.json").read_text(encoding="utf-8"))
+            return self._send(json.dumps({"graph": parts[1], "definition": graph},
+                                         ensure_ascii=False))
         if parts == ["runs"]:
             return self._send(json.dumps({"runs": self.scheduler.runs()}, ensure_ascii=False))
         if len(parts) == 2 and parts[0] == "runs":
