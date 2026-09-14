@@ -40,6 +40,8 @@ _ARXIV_LOCK = threading.Lock()
 _ARXIV_LAST_REQUEST = 0.0
 _CROSSREF_LOCK = threading.Lock()
 _CROSSREF_LAST_REQUEST = 0.0
+_OPENALEX_LOCK = threading.Lock()
+_OPENALEX_LAST_REQUEST = 0.0
 _HOST_STATE_LOCK = threading.Lock()
 _HOST_REQUEST_LOCKS: dict[str, threading.Lock] = {}
 _HOST_BLOCKED_UNTIL: dict[str, float] = {}
@@ -74,6 +76,23 @@ def pace_crossref(hostname: str) -> None:
         if delay:
             time.sleep(delay)
         _CROSSREF_LAST_REQUEST = time.monotonic()
+
+
+def pace_openalex(hostname: str) -> None:
+    """OpenAlex asks for at most ten requests a second and one a second politely.
+
+    One a second, because the point of pacing is to stay inside the limit rather than to find its
+    edge. This was missing when `--source openalex` was added: the source worked when tried alone and
+    answered 429 to the second call of a batch, so a node spent its turns sleeping instead.
+    """
+    global _OPENALEX_LAST_REQUEST
+    if hostname != "api.openalex.org":
+        return
+    with _OPENALEX_LOCK:
+        delay = max(0, 1 - (time.monotonic() - _OPENALEX_LAST_REQUEST))
+        if delay:
+            time.sleep(delay)
+        _OPENALEX_LAST_REQUEST = time.monotonic()
 
 
 def _request_lock(hostname: str) -> threading.Lock:
@@ -197,6 +216,7 @@ def fetch_public(url: str, *, timeout_seconds: float = 30) -> tuple[str, str, by
             for request_attempt in range(2):
                 pace_arxiv(parsed.hostname)
                 pace_crossref(parsed.hostname)
+                pace_openalex(parsed.hostname)
                 pool = urllib3.HTTPSConnectionPool(
                     address, port=443, server_hostname=parsed.hostname,
                     assert_hostname=parsed.hostname, cert_reqs="CERT_REQUIRED",
