@@ -13,11 +13,13 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 
 from anchor.runtime.research_tools import ResearchRequest, execute_research
 
 COMMANDS = {
     "search": "scholarly.search",
+    "search-many": "scholarly.search_many",
     "read": "scholarly.read",
     "read-many": "scholarly.read_many",
     "citations": "scholarly.citations",
@@ -44,6 +46,11 @@ def _request(args: argparse.Namespace) -> dict:
                 "offset": args.offset}
     if args.command == "read":
         return {"url": args.url, "offset": args.offset, "page_start": args.page_start}
+    if args.command == "search-many":
+        lines = Path(args.queries_file).read_text(encoding="utf-8").splitlines()
+        return {"queries": [line.strip() for line in lines
+                            if line.strip() and not line.strip().startswith("#")],
+                "source": args.source, "limit": args.limit, "offset": args.offset}
     if args.command == "read-many":
         return {"urls": [item.strip() for item in args.urls.split(",") if item.strip()],
                 "offset": args.offset, "page_start": args.page_start}
@@ -56,9 +63,17 @@ def main() -> int:
 
     search = subs.add_parser("search")
     search.add_argument("--query", required=True)
-    search.add_argument("--source", default="crossref", choices=("crossref", "arxiv"))
+    search.add_argument("--source", default="crossref", choices=("crossref", "arxiv", "openalex"))
     search.add_argument("--limit", type=int, default=8)
     search.add_argument("--offset", type=int, default=0)
+
+    many_searches = subs.add_parser("search-many", help="several queries in one call")
+    many_searches.add_argument("--queries-file", required=True,
+                               help="a file with one query per line; blank lines and # are ignored")
+    many_searches.add_argument("--source", default="crossref",
+                               choices=("crossref", "arxiv", "openalex"))
+    many_searches.add_argument("--limit", type=int, default=8)
+    many_searches.add_argument("--offset", type=int, default=0)
 
     read = subs.add_parser("read")
     read.add_argument("--url", required=True)

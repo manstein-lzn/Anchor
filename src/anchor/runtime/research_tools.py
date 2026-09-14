@@ -30,9 +30,12 @@ from anchor.domain.models import DomainModel
 
 MAX_RESPONSE_BYTES = 8_000_000
 RESEARCH_TOOLS = frozenset({"scholarly.search", "scholarly.read", "scholarly.read_many",
-                           "scholarly.citations"})
+                           "scholarly.search_many", "scholarly.citations"})
 # Documents per batch read. Bounded so one call cannot monopolise a round.
 BATCH_READ_LIMIT = 8
+#: Queries one batch search may carry. A plan with two dozen query strings is normal, so this is
+#: generous; it exists so a runaway list cannot hold a node for an hour.
+BATCH_SEARCH_LIMIT = 40
 _ARXIV_LOCK = threading.Lock()
 _ARXIV_LAST_REQUEST = 0.0
 _CROSSREF_LOCK = threading.Lock()
@@ -109,7 +112,11 @@ logger = logging.getLogger("anchor.research_tools")
 class ResearchRequest(DomainModel):
     query: str | None = Field(default=None, min_length=1, max_length=1000)
     url: str | None = Field(default=None, min_length=1, max_length=3000)
-    source: str = Field(default="crossref", pattern="^(crossref|arxiv)$")
+    # openalex as well as the two the CLI first offered. Its index is the broadest of the three and
+    # the plumbing was already here — `citations` has been querying it all along — while an agent
+    # that needed it wrote its own client against the API. That is a tool that existed and was not
+    # offered.
+    source: str = Field(default="crossref", pattern="^(crossref|arxiv|openalex)$")
     # A hundred, not twenty. Twenty is a number nobody asks for by accident but plenty ask for on
     # purpose — arXiv's own search page offers 25 — and rejecting it costs a turn to learn a rule
     # that does not protect anything at these sizes.
@@ -123,6 +130,7 @@ class ResearchRequest(DomainModel):
     # Batch reads: fetching a group in one call keeps the model out of the I/O
     # loop, which is where a research campaign spends most of its wall clock.
     urls: list[str] | None = Field(default=None, max_length=BATCH_READ_LIMIT)
+    queries: list[str] | None = Field(default=None, max_length=BATCH_SEARCH_LIMIT)
 
 
 #: The cache a fetch may consult, and the context that scopes its keys. Set by the tool gateway
@@ -281,6 +289,21 @@ def search(request: ResearchRequest, *, timeout_seconds: float) -> dict:
             })
         return {"source": "crossref", "query": request.query, "request_url": final_url,
                 "total_results": data.get("total-results"), "papers": papers}
+
+    if request.source == "openalex":
+        # `title_and_abstract.search`, not `search`: the latter is a full-text index and matches a
+        # paper because the phrase occurs somewhere in its body, which for "learned cost model
+        # compiler optimization" returns hyperparameter search and handwritten digit recognition.
+        # Restricting it to the title and abstract is what a literature search means.
+        url = "https://api.openalex.org/works?" + urlencode({
+            "filter": f"title_and_abstract.search:{request.query}",
+            "per-page": min(request.limit, 100),
+            "page": request.offset // max(request.limit, 1) + 1})
+        final_url, _, body = fetch_public(url, timeout_seconds=timeout_seconds)
+        data = json.loads(body)
+        return {"source": "openalex", "query": request.query, "request_url": final_url,
+                "total_results": data.get("meta", {}).get("count"),
+                "papers": [_openalex_paper(item) for item in data.get("results", [])]}
 
     from defusedxml import ElementTree
 
@@ -457,6 +480,32 @@ def _fetch_document(url: str, *, offset: int, page_start: int, timeout_seconds: 
             **({"next_page_start": page_start + 40} if truncated else {})}
 
 
+def search_many(request: ResearchRequest, *, timeout_seconds: float) -> dict:
+    """Run several searches in one call, each bounded so one bad query cannot fail the batch.
+
+    A node's plan usually names a dozen or more queries, and running them one per turn spends the
+    node's budget on round trips rather than on searching — an agent worked around that by writing its
+    own batch script, which is a tool the system should have offered. Pacing still applies per
+    request, so this does not evade a rate limit; it removes the model from the inner loop.
+    """
+    queries = [item.strip() for item in (request.queries or []) if item.strip()]
+    if not queries:
+        raise ValueError("scholarly.search_many requires queries")
+    results = []
+    for query in queries:
+        item: dict = {"query": query}
+        try:
+            single = ResearchRequest(query=query, source=request.source, limit=request.limit,
+                                     offset=request.offset)
+            item.update(search(single, timeout_seconds=timeout_seconds))
+        except Exception as exc:  # noqa: BLE001 - one query failing is information, not a stop
+            item["error"] = f"{type(exc).__name__}: {str(exc)[:200]}"
+            item["papers"] = []
+        results.append(item)
+    return {"source": request.source, "queries": queries, "results": results,
+            "with_results": sum(1 for item in results if item.get("papers"))}
+
+
 def read_many(request: ResearchRequest, *, timeout_seconds: float) -> dict:
     """Read several documents in one call, one bounded excerpt per document.
 
@@ -589,6 +638,8 @@ def citations(request: ResearchRequest, *, timeout_seconds: float) -> dict:
 def execute_research(tool_ref: str, request: ResearchRequest, *, timeout_seconds: float) -> str:
     if tool_ref == "scholarly.search":
         result = search(request, timeout_seconds=timeout_seconds)
+    elif tool_ref == "scholarly.search_many":
+        result = search_many(request, timeout_seconds=timeout_seconds)
     elif tool_ref == "scholarly.read_many":
         result = read_many(request, timeout_seconds=timeout_seconds)
     elif tool_ref == "scholarly.citations":

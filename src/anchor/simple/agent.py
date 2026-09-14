@@ -38,14 +38,21 @@ answer with a description of what you intend to do — do it.
 
 The literature tools are on your PATH:
 
-  anchor-scholarly search     --query "..." [--source crossref|arxiv] [--limit N] [--offset N]
-  anchor-scholarly read       --url "https://..." [--offset N]
-  anchor-scholarly read-many  --urls "u1,u2" [--offset N]
+  anchor-scholarly search      --query "..." [--source crossref|arxiv|openalex] [--limit N] [--offset N]
+  anchor-scholarly search-many --queries-file q.txt [--source …] [--limit N]
+  anchor-scholarly read        --url "https://..." [--offset N] [--page-start N]
+  anchor-scholarly read-many   --urls "u1,u2" [--offset N]
+  anchor-scholarly citations   --identifier "doi:…|arxiv:…|openalex:…" [--direction cites|cited_by]
 
-A read returns the first part of a document and a `next_offset`. Pass it back to read the next part:
-`read --url X --offset 24000`. A long paper takes several calls and that is expected — do not report a
-paper as read when you have only read the beginning of it.
-  anchor-scholarly citations  --identifier "..." [--direction cited_by|cites]
+`search-many` takes a file with one query per line (blank lines and lines starting with # are
+ignored) and runs them all in one call. Use it for a list of queries rather than one call each.
+
+A `read` returns the first part of a document and a `next_offset`. Pass it back to read the next
+part: `read --url X --offset 24000`. A long paper takes several calls and that is expected — do not
+call a paper read when you have only read the beginning of it.
+
+`--source crossref` is the most precise for bibliographic text, `openalex` the broadest and the only
+one that reliably returns abstracts, `arxiv` covers preprints and is often rate limited.
 
 They print JSON on success and exit non-zero with a message on stderr on failure. Sources are rate
 limited and sometimes refuse: that is information, not a dead end. Try another source, narrow the
