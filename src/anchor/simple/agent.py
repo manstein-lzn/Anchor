@@ -39,8 +39,12 @@ answer with a description of what you intend to do — do it.
 The literature tools are on your PATH:
 
   anchor-scholarly search     --query "..." [--source crossref|arxiv] [--limit N] [--offset N]
-  anchor-scholarly read       --url "https://..."
-  anchor-scholarly read-many  --urls "u1,u2"
+  anchor-scholarly read       --url "https://..." [--offset N]
+  anchor-scholarly read-many  --urls "u1,u2" [--offset N]
+
+A read returns the first part of a document and a `next_offset`. Pass it back to read the next part:
+`read --url X --offset 24000`. A long paper takes several calls and that is expected — do not report a
+paper as read when you have only read the beginning of it.
   anchor-scholarly citations  --identifier "..." [--direction cited_by|cites]
 
 They print JSON on success and exit non-zero with a message on stderr on failure. Sources are rate

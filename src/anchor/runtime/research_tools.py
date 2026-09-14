@@ -469,8 +469,12 @@ def read_many(request: ResearchRequest, *, timeout_seconds: float) -> dict:
         raise ValueError("scholarly.read_many requires urls")
     documents: list[dict] = []
     with ThreadPoolExecutor(max_workers=min(len(urls), BATCH_READ_LIMIT)) as pool:
+        # The request's position, not zero. A caller reading a long paper needs the second half, and
+        # hardcoding the start here is what made `read-many` only ever return each document's first
+        # twenty-four thousand characters — a limit an agent noticed and recorded, and could do
+        # nothing about, because no way to ask for the next part was reachable from its shell.
         futures = {
-            pool.submit(_fetch_document, url, offset=0, page_start=0,
+            pool.submit(_fetch_document, url, offset=request.offset, page_start=request.page_start,
                         timeout_seconds=timeout_seconds): url
             for url in urls
         }

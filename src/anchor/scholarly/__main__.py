@@ -24,14 +24,29 @@ COMMANDS = {
 }
 
 
+def _add_position(parser: argparse.ArgumentParser) -> None:
+    """Where in the document to start.
+
+    A long paper does not fit in one answer: `read` returns twenty-four thousand characters and a
+    `next_offset` saying where the next one begins. Passing it back is how the rest of the paper is
+    reached, and without these two flags there was no way to pass it back at all — which turned
+    "read the full text" into "read the first part, four times".
+    """
+    parser.add_argument("--offset", type=int, default=0,
+                        help="character offset to start from; pass a document's `next_offset` here")
+    parser.add_argument("--page-start", type=int, default=0,
+                        help="page to start from, for PDFs; pass `next_page_start` here")
+
+
 def _request(args: argparse.Namespace) -> dict:
     if args.command == "search":
         return {"query": args.query, "source": args.source, "limit": args.limit,
                 "offset": args.offset}
     if args.command == "read":
-        return {"url": args.url}
+        return {"url": args.url, "offset": args.offset, "page_start": args.page_start}
     if args.command == "read-many":
-        return {"urls": [item.strip() for item in args.urls.split(",") if item.strip()]}
+        return {"urls": [item.strip() for item in args.urls.split(",") if item.strip()],
+                "offset": args.offset, "page_start": args.page_start}
     return {"identifier": args.identifier, "direction": args.direction}
 
 
@@ -47,9 +62,11 @@ def main() -> int:
 
     read = subs.add_parser("read")
     read.add_argument("--url", required=True)
+    _add_position(read)
 
     many = subs.add_parser("read-many")
     many.add_argument("--urls", required=True, help="comma-separated")
+    _add_position(many)
 
     cites = subs.add_parser("citations")
     cites.add_argument("--identifier", required=True)
