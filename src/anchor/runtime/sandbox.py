@@ -28,7 +28,14 @@ DEFAULT_ALLOWED_COMMANDS = frozenset({
 })
 DEFAULT_TIMEOUT_SECONDS = 30.0
 DEFAULT_MAX_OUTPUT_BYTES = 1_000_000
-SANDBOX_WORKSPACE = "/tmp/ws"
+#: Where the node's directory is mounted inside the sandbox, and what `HOME` points at.
+#:
+#: Not under `/tmp`. It was `/tmp/ws` with `HOME=/tmp`, which put the workspace's parent and the
+#: node's home in the same place as a tmpfs that is emptied between commands — so `cd ~` left the
+#: workspace, files written there vanished, and one node spent several turns working out that it was
+#: looking in the wrong directory. A path of its own, with `HOME` pointing at it, removes the
+#: question entirely.
+SANDBOX_WORKSPACE = "/workspace"
 #: The parts of the system a shell needs to exist at all. Everything not named here — other
 #: projects, the operator's home, this repository's own state — is not visible to a node.
 SANDBOX_SYSTEM = ("/usr", "/bin", "/lib", "/lib64", "/sbin")
@@ -159,7 +166,7 @@ class BubblewrapWorkspaceSandbox:
             "--chdir", SANDBOX_WORKSPACE,
             "--proc", "/proc", "--dev", "/dev",
             "--setenv", "PATH", ":".join([*spec.tool_dirs, "/usr/bin:/bin"]),
-            "--setenv", "HOME", "/tmp",
+            "--setenv", "HOME", SANDBOX_WORKSPACE,
             "--setenv", "TMPDIR", "/tmp",
             "--setenv", "PYTHONDONTWRITEBYTECODE", "1",
             *(item for key, value in spec.env for item in ("--setenv", key, value)),

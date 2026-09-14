@@ -312,7 +312,10 @@ def _agent_for(graph, node_id: str, directory: Path, models: dict, secret_file, 
         model_name=f"openai/{model['model']}" if model.get("base_url") else model["model"],
         model_kwargs={"api_base": model["base_url"], "api_key": _secret(secret_file, model),
                       "max_tokens": model.get("max_tokens", 8192)},
-        network=spec.network, timeout_seconds=300.0,
+        # Ten minutes for one command, not five. A batch of literature searches is legitimately
+        # slow — a dozen queries at twenty seconds each is already four minutes — and a batch that
+        # is killed at five throws away everything it had done.
+        network=spec.network, timeout_seconds=600.0,
         max_steps=spec.max_steps or DEFAULT_MAX_STEPS,
         wall_time_limit_seconds=spec.wall_time_limit_seconds,
     )

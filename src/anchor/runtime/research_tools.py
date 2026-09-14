@@ -110,7 +110,10 @@ class ResearchRequest(DomainModel):
     query: str | None = Field(default=None, min_length=1, max_length=1000)
     url: str | None = Field(default=None, min_length=1, max_length=3000)
     source: str = Field(default="crossref", pattern="^(crossref|arxiv)$")
-    limit: int = Field(default=8, ge=1, le=20)
+    # A hundred, not twenty. Twenty is a number nobody asks for by accident but plenty ask for on
+    # purpose — arXiv's own search page offers 25 — and rejecting it costs a turn to learn a rule
+    # that does not protect anything at these sizes.
+    limit: int = Field(default=8, ge=1, le=100)
     offset: int = Field(default=0, ge=0)
     page_start: int = Field(default=0, ge=0)
     # Citation chasing: follow the graph a scholar follows, backwards (what a
