@@ -215,12 +215,20 @@ def _next_step(graph: graph_module.Graph, state: RunState, decided: dict, run_di
 
 def _ready(graph: graph_module.Graph, state: RunState, decided: dict,
            back: frozenset, entry: str, node_id: str) -> bool:
-    """Whether this node's inputs have arrived since it last ran, and at least one is selected.
+    """Whether this node should run now.
 
-    An undecided edge holds it back — except a back-edge whose source has never run, which is a cycle
-    that has not started rather than an input still to come. Without that exception the node just
-    after the entry waits forever for an edge its own downstream has not had the chance to decide,
-    and the run reports success having done one node.
+    Two separate questions, and conflating them cost a loop that silently did not happen:
+
+      is anything still to come?  Every incoming edge must be decided, except a back-edge whose
+        source has never run — that is a cycle that has not started rather than an input pending.
+      is there anything new?      At least one incoming edge must be selected by an execution newer
+        than this node's own last run.
+
+    The second question cannot be asked of every edge the way the first can. Once a node has run, its
+    other inputs are necessarily older than it is, so requiring them all to be newer means a node can
+    never run twice. And a node that routes to itself has an incoming edge written by its own
+    execution, which is why a decision is stamped strictly after the execution that made it rather
+    than at the same moment.
     """
     if node_id == entry and node_id not in state.passes:
         return True
@@ -228,18 +236,17 @@ def _ready(graph: graph_module.Graph, state: RunState, decided: dict,
     if not sources:
         return node_id not in state.passes
     since = state.last_seq.get(node_id, -1)
-    selected = []
+    fresh = False
     for source in sources:
         key = (source, node_id)
-        if key in decided:
-            if decided[key][1] <= since:
-                return False                        # nothing new since this node last ran
-            selected.append(decided[key][0])
-        elif key in back and source not in state.passes:
-            continue                                # the cycle it belongs to has not started
-        else:
-            return False
-    return any(selected)
+        if key not in decided:
+            if key in back and source not in state.passes:
+                continue                            # the cycle it belongs to has not started
+            return False                            # an input still to come
+        selected, when = decided[key]
+        if selected and when > since:
+            fresh = True
+    return fresh
 
 
 def _record(state: RunState, graph: graph_module.Graph, run_dir: Path,
@@ -368,6 +375,11 @@ def run(workspace: str | Path, *, objective: str | None = None, config_path: str
         return _ready(graph, state, decided, back, entry, node_id)
 
     def settle(node_id: str, chosen: str | None) -> None:
+        # Stamped after this execution, not with it. A node that routes to itself writes an edge into
+        # itself, and stamping it with the same number as the run that produced it makes it look like
+        # an input older than the node — which is how a review that asked for another round got
+        # skipped instead, and the run reported success having quietly dropped the loop.
+        state.seq += 1
         for target in graph.routes(node_id):
             decided[(node_id, target)] = (target == chosen, state.seq)
         state.decided = {f"{source}|{target}": [value[0], value[1]]
