@@ -356,8 +356,12 @@ def _arxiv_web_search(request: ResearchRequest, *, timeout_seconds: float) -> di
                 return " ".join(" ".join(found[0].itertext()).split())
         return ""
 
+    # The page accepts 25, 50, 100 or 200 and answers 400 to anything else. Asking for thirty
+    # results is entirely reasonable and produced a batch in which every arXiv query failed, because
+    # the request was forwarded as `size=30`.
+    size = next((value for value in (25, 50, 100, 200) if value >= request.limit), 200)
     url = "https://arxiv.org/search/?" + urlencode({
-        "searchtype": "all", "query": request.query, "size": max(request.limit, 25),
+        "searchtype": "all", "query": request.query, "size": size,
         # Empty, not the page's `-announced_date_first`. Its own default is newest-first, which is
         # how a search for compiler cost models returns quantum error correction: the newest papers
         # matching any of the words. Empty ordering is measurably more relevant, and still less so
