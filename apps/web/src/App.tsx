@@ -12,11 +12,11 @@
  */
 
 import {
-  CheckCheck, Download, GitBranch, Maximize, Plus, Redo2, Save, Trash2, Undo2,
-  Upload, ZoomIn, ZoomOut,
+  CheckCheck, Copy, Download, GitBranch, Plus, Redo2, Save, Trash2, Undo2, Upload,
 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ExecutionCanvas, type CanvasControls } from './ExecutionCanvas';
+import { ExecutionCanvas } from './ExecutionCanvas';
+import { GraphCanvas } from './GraphCanvas';
 import { label } from './execution';
 import { toFlowEdges, toFlowNodes, type OurGraph, type OurRun, type OurRunDetail } from './model';
 
@@ -94,7 +94,6 @@ export function App() {
   const nameRef = useRef(name); nameRef.current = name;
   const runRef = useRef(run); runRef.current = run;
   const upload = useRef<HTMLInputElement>(null);
-  const flow = useRef<CanvasControls | null>(null);
 
   const dirty = doc !== null && JSON.stringify(doc, null, 2) + '\n' !== savedDoc;
   const editable = doc !== null && !busy;
@@ -222,6 +221,19 @@ export function App() {
     patch({ ...doc, agents: { ...doc.agents,
       [id]: { model: 'models.academic', network: false, instructions: '' } } });
     setPick({ kind: 'agent', id });
+  };
+
+  const duplicateNode = () => {
+    if (!doc || !selectedNode) return;
+    let id = `${selectedNode.id}-copy`;
+    let suffix = 2;
+    while (doc.nodes.some(item => item.id === id)) id = `${selectedNode.id}-copy${suffix++}`;
+    const at = doc.layout?.positions?.[selectedNode.id];
+    patch({ ...doc,
+      nodes: [...doc.nodes, { id, agent: selectedNode.agent }],
+      layout: at ? { ...doc.layout,
+        positions: { ...doc.layout?.positions, [id]: { x: at.x + 45, y: at.y + 140 } } } : doc.layout });
+    setPick({ kind: 'node', id });
   };
 
   const removePicked = () => {
@@ -422,18 +434,21 @@ export function App() {
 
             <div className="canvas">
               {doc
-                ? <ExecutionCanvas instanceKey={`edit-${name}-${past.length}`} nodes={nodes} edges={edges}
-                                   controls={flow}
-                                   onSelectNode={id => setPick({ kind: 'node', id })} />
+                ? <GraphCanvas graph={doc} name={name} editable={editable}
+                               onPick={setPick}
+                               onMove={(id, position) => patch({ ...doc,
+                                 layout: { ...doc.layout,
+                                   positions: { ...doc.layout?.positions, [id]: position } } })}
+                               onConnect={(from, to) => {
+                                 if (doc.edges.some(edge => edge.from === from && edge.to === to)) {
+                                   setNotice({ kind: 'bad', text: '这条连线已经有了。' }); return;
+                                 }
+                                 patch({ ...doc, edges: [...doc.edges, { from, to }] });
+                               }} />
                 : <p className="hint canvas-empty">选一个图，或者新建一个。</p>}
             </div>
 
             <div className="canvas-bottom">
-              <div className="tool-group">
-                <ToolButton icon={ZoomOut} label="缩小" onClick={() => flow.current?.zoomOut()} />
-                <ToolButton icon={Maximize} label="适应画布" onClick={() => flow.current?.fitView()} />
-                <ToolButton icon={ZoomIn} label="放大" onClick={() => flow.current?.zoomIn()} />
-              </div>
               <span className="canvas-caption">
                 graph.json · {doc?.nodes.length ?? 0} 个节点 · {doc?.edges.length ?? 0} 条边 ·{' '}
                 {Object.keys(doc?.agents ?? {}).length} 个角色
@@ -470,6 +485,9 @@ export function App() {
                   这个节点有多条出边，所以它必须用 <code>anchor-route</code> 结束，
                   不能用 <code>anchor-done</code>。这一点要写进它的指令里。
                 </p>}
+                <div className="selection-tools">
+                  <ToolButton icon={Copy} label="复制节点" onClick={duplicateNode} />
+                </div>
                 <button className="full-button" onClick={() => setPick({ kind: 'agent', id: selectedNode.agent })}>
                   编辑它的角色</button>
                 <button className="full-button" onClick={() => setJson('node')}>完整节点 JSON</button>

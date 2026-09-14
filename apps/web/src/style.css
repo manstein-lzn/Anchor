@@ -214,6 +214,30 @@ h2, h3 { margin: 0; font-weight: 600; }
 .execution-node.state-failed .execution-node-status { color: var(--red); }
 .execution-node.state-skipped, .execution-node.state-pending { opacity: .6; }
 
+/* the editing canvas: a node you can drag and connect from */
+.graph-node {
+  width: 200px; padding: 9px 12px; border-radius: 10px; background: #fff;
+  border: 1px solid var(--line); box-shadow: 0 1px 3px rgb(38 59 55 / 8%); color: var(--ink);
+}
+.graph-node.selected { border-color: var(--accent); box-shadow: 0 0 0 2px #16756833; }
+.node-kind {
+  display: flex; align-items: center; gap: 5px; color: var(--muted);
+  font-size: 11px; margin-bottom: 3px;
+}
+.node-kind svg { color: var(--accent); }
+.entry-tag {
+  margin-left: auto; padding: 0 6px; border-radius: 999px; font-size: 10px;
+  background: #eaf3f1; color: var(--accent); border: 1px solid #bcd8d3;
+}
+.graph-node strong { display: block; font-size: 13px; margin-bottom: 3px; }
+.node-reference { color: var(--muted); font-size: 11px; }
+.selection-tools { display: flex; gap: 4px; margin-bottom: 8px; }
+.selection-tools button {
+  display: flex; align-items: center; padding: 5px 8px; cursor: pointer;
+  border: 1px solid var(--line); border-radius: 6px; background: #fff; color: var(--muted);
+}
+.selection-tools button:hover { border-color: var(--accent); color: var(--accent); }
+
 .react-flow__handle { width: 6px; height: 6px; background: var(--line); border: none; }
 .react-flow__edge-text { font-size: 11px; }
 .edge-label-badge {

@@ -17,6 +17,9 @@ export type OurGraph = {
   agents: Record<string, { model: string; instructions?: string; network?: boolean }>;
   nodes: { id: string; agent: string }[];
   edges: { from: string; to: string }[];
+  /** Where nodes were dragged to. Beside the definition, not part of it: a node's position is not
+   *  something the graph means, and a run must not be affected by it. */
+  layout?: { positions?: Record<string, { x: number; y: number }> };
 };
 
 export type OurNodeResult = {
@@ -119,10 +122,12 @@ function nodeState(nodeId: string, graph: OurGraph, state: OurRunState | null): 
 export function toFlowNodes(graph: OurGraph, name: string,
                             state: OurRunState | null): FlowNode[] {
   const spec = asDefinition(graph, name);
-  const positions = layeredLayout(spec);
+  // Stored positions win, so a run's picture is laid out the way its author arranged it rather than
+  // the way dagre would. Falling back to dagre covers a graph nobody has dragged yet.
+  const auto = layeredLayout(spec);
   return spec.nodes.map(node => ({
     ...nodeState(node.id, graph, state),
-    position: positions.get(node.id) ?? { x: 0, y: 0 },
+    position: graph.layout?.positions?.[node.id] ?? auto.get(node.id) ?? { x: 0, y: 0 },
   }));
 }
 
