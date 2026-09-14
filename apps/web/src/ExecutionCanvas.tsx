@@ -54,19 +54,34 @@ function FitExecution({ container }: { container: RefObject<HTMLDivElement | nul
   return null;
 }
 
+/** What the toolbars around the canvas need from it. */
+export type CanvasControls = { zoomIn: () => void; zoomOut: () => void; fitView: () => void };
+
 type CanvasProps = {
   instanceKey: string;
   nodes: ExecutionFlowNode[];
   edges: Edge[];
   onSelectNode: (nodeId: string) => void;
+  /** Filled with zoom and fit, so the toolbars can sit outside the canvas without owning it. */
+  controls?: RefObject<CanvasControls | null>;
 };
 
 export function ExecutionCanvas(props: CanvasProps) {
   return <ReactFlowProvider key={props.instanceKey}><MeasuredExecutionCanvas {...props} /></ReactFlowProvider>;
 }
 
-function MeasuredExecutionCanvas({ nodes, edges, onSelectNode }: CanvasProps) {
+function MeasuredExecutionCanvas({ nodes, edges, onSelectNode, controls }: CanvasProps) {
   const container = useRef<HTMLDivElement>(null);
+  const flow = useReactFlow();
+  useEffect(() => {
+    if (!controls) return;
+    controls.current = {
+      zoomIn: () => void flow.zoomIn(),
+      zoomOut: () => void flow.zoomOut(),
+      fitView: () => void flow.fitView({ padding: 0.25, maxZoom: 1 }),
+    };
+    return () => { controls.current = null; };
+  }, [controls, flow]);
   const [canvasNodes, setCanvasNodes, onNodesChange] = useNodesState(nodes);
   useLayoutEffect(() => {
     // Polling updates business data, not React Flow's measured geometry.
