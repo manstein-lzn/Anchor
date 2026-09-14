@@ -50,7 +50,8 @@ def _request(args: argparse.Namespace) -> dict:
         lines = Path(args.queries_file).read_text(encoding="utf-8").splitlines()
         return {"queries": [line.strip() for line in lines
                             if line.strip() and not line.strip().startswith("#")],
-                "source": args.source, "limit": args.limit, "offset": args.offset}
+                "source": args.source, "limit": args.limit, "offset": args.offset,
+                "budget_seconds": args.budget}
     if args.command == "read-many":
         return {"urls": [item.strip() for item in args.urls.split(",") if item.strip()],
                 "offset": args.offset, "page_start": args.page_start}
@@ -74,6 +75,8 @@ def main() -> int:
                                choices=("crossref", "arxiv", "openalex"))
     many_searches.add_argument("--limit", type=int, default=8)
     many_searches.add_argument("--offset", type=int, default=0)
+    many_searches.add_argument("--budget", type=int, default=420,
+                               help="seconds to spend; returns what it has and names the rest")
 
     read = subs.add_parser("read")
     read.add_argument("--url", required=True)

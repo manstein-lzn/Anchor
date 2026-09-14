@@ -36,6 +36,9 @@ BATCH_READ_LIMIT = 8
 #: Queries one batch search may carry. A plan with two dozen query strings is normal, so this is
 #: generous; it exists so a runaway list cannot hold a node for an hour.
 BATCH_SEARCH_LIMIT = 40
+#: Seconds one batch search may take before it returns what it has. Below the command timeout a node
+#: runs under, so a slow batch ends by finishing rather than by being killed.
+BATCH_BUDGET_SECONDS = 420.0
 _ARXIV_LOCK = threading.Lock()
 _ARXIV_LAST_REQUEST = 0.0
 _CROSSREF_LOCK = threading.Lock()
@@ -150,6 +153,8 @@ class ResearchRequest(DomainModel):
     # loop, which is where a research campaign spends most of its wall clock.
     urls: list[str] | None = Field(default=None, max_length=BATCH_READ_LIMIT)
     queries: list[str] | None = Field(default=None, max_length=BATCH_SEARCH_LIMIT)
+    #: How long a batch search may take before returning what it has. Zero means the default.
+    budget_seconds: float = Field(default=BATCH_BUDGET_SECONDS, ge=0, le=3600)
 
 
 #: The cache a fetch may consult, and the context that scopes its keys. Set by the tool gateway
@@ -500,19 +505,31 @@ def _fetch_document(url: str, *, offset: int, page_start: int, timeout_seconds: 
             **({"next_page_start": page_start + 40} if truncated else {})}
 
 
-def search_many(request: ResearchRequest, *, timeout_seconds: float) -> dict:
+def search_many(request: ResearchRequest, *, timeout_seconds: float,
+                budget_seconds: float = BATCH_BUDGET_SECONDS) -> dict:
     """Run several searches in one call, each bounded so one bad query cannot fail the batch.
 
     A node's plan usually names a dozen or more queries, and running them one per turn spends the
     node's budget on round trips rather than on searching — an agent worked around that by writing its
     own batch script, which is a tool the system should have offered. Pacing still applies per
     request, so this does not evade a rate limit; it removes the model from the inner loop.
+
+    The batch stops at `budget_seconds` and returns what it has. Without that, a batch of two dozen
+    queries against a source that answers 429 — each one costing a pacing interval and then a retry
+    of up to thirty seconds — runs long enough for the caller's own command timeout to kill it, and
+    a killed batch returns nothing at all: the results were being written once, at the end, so the
+    file was empty. A batch that returns six answers and says twenty-two were not reached is useful;
+    a batch that returns an empty file is not.
     """
     queries = [item.strip() for item in (request.queries or []) if item.strip()]
     if not queries:
         raise ValueError("scholarly.search_many requires queries")
-    results = []
+    started = time.monotonic()
+    results: list[dict] = []
+    reached = 0
     for query in queries:
+        if time.monotonic() - started >= budget_seconds:
+            break
         item: dict = {"query": query}
         try:
             single = ResearchRequest(query=query, source=request.source, limit=request.limit,
@@ -522,8 +539,11 @@ def search_many(request: ResearchRequest, *, timeout_seconds: float) -> dict:
             item["error"] = f"{type(exc).__name__}: {str(exc)[:200]}"
             item["papers"] = []
         results.append(item)
+        reached += 1
     return {"source": request.source, "queries": queries, "results": results,
-            "with_results": sum(1 for item in results if item.get("papers"))}
+            "with_results": sum(1 for item in results if item.get("papers")),
+            "attempted": reached, "not_attempted": queries[reached:],
+            "ran_out_of_time": reached < len(queries)}
 
 
 def read_many(request: ResearchRequest, *, timeout_seconds: float) -> dict:
@@ -659,7 +679,8 @@ def execute_research(tool_ref: str, request: ResearchRequest, *, timeout_seconds
     if tool_ref == "scholarly.search":
         result = search(request, timeout_seconds=timeout_seconds)
     elif tool_ref == "scholarly.search_many":
-        result = search_many(request, timeout_seconds=timeout_seconds)
+        result = search_many(request, timeout_seconds=timeout_seconds,
+                             budget_seconds=request.budget_seconds or BATCH_BUDGET_SECONDS)
     elif tool_ref == "scholarly.read_many":
         result = read_many(request, timeout_seconds=timeout_seconds)
     elif tool_ref == "scholarly.citations":
