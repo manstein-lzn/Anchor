@@ -136,7 +136,12 @@ h2, h3 { margin: 0; font-weight: 600; }
 .tool-group button:disabled { opacity: .4; cursor: default; }
 .canvas-caption { margin-left: auto; color: var(--muted); font-size: 11px; }
 
-.canvas { flex: 1; min-height: 0; position: relative; }
+/* React Flow does not size itself — its `.react-flow` rule sets variables and direction, not width
+ * or height — so the container has to. A `flex: 1` box is taller than nothing but its child still
+ * collapses to zero, which renders every node inside a zero-height frame and shows an empty canvas.
+ * Making the container a flex box and letting the flow stretch inside it gives both dimensions. */
+.canvas { flex: 1; min-height: 0; display: flex; }
+.canvas > .react-flow { flex: 1; min-height: 0; }
 .canvas-empty { padding: 18px; }
 .hint { color: var(--muted); line-height: 1.65; }
 
@@ -187,7 +192,8 @@ h2, h3 { margin: 0; font-weight: 600; }
 .connections h3, .agents-list h3 { margin-bottom: 9px; }
 
 /* ── the canvas ────────────────────────────────────────────────────────── */
-.execution-canvas { width: 100%; height: 100%; }
+.execution-canvas { flex: 1; min-height: 0; display: flex; }
+.execution-canvas > .react-flow { flex: 1; min-height: 0; }
 .execution-node {
   width: 220px; padding: 10px 12px; border-radius: 10px; background: #fff;
   border: 1px solid var(--line); box-shadow: 0 1px 3px rgb(38 59 55 / 8%);
