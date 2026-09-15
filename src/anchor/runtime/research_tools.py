@@ -1,8 +1,11 @@
 """Public scholarly retrieval with pinned DNS and durable tool evidence.
 
-Network access is confined to this read-only adapter, never granted to the
-subprocess sandbox. Every redirect is validated and every connection uses the
-validated IP address while retaining the original TLS hostname.
+These are a command, not a tool bound into an agent's body, so the pacing, the 429 handling and the
+redirect validation live in a process we control rather than inside the sandbox. A node reaches them
+through the shell like any other command, which is also why the same tools work from a terminal.
+
+Every redirect is validated and every connection uses the validated IP address while retaining the
+original TLS hostname.
 """
 
 from __future__ import annotations

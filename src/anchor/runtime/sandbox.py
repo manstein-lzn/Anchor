@@ -1,14 +1,17 @@
-"""Workspace-confined execution, with no network.
+"""Workspace-confined execution.
 
-A sandbox runs an allowlisted command with its workspace bound read-write and everything else bound
-read-only. The confinement is the point: no network, no path out of the bound tree, no privileged
-operation. Commands are an explicit allowlist, never a shell string.
+A sandbox runs one command with the node's directory bound read-write and the named parts of the
+system bound read-only. That is the whole boundary: no network unless the node's agent asked for it,
+no path out of the bound tree, no privileged operation.
 
-Whether the bound tree is ephemeral or a node's own workspace is the caller's decision, and the two
-mean different things. ``execute_in_workspace`` materializes a pinned revision into a temporary
-directory, so a command there is still an observation — it cannot mutate a revision and the tree is
-gone afterwards. Binding a node's live worktree makes writes persist, which is what ADR-054 gives a
-node so it can produce a paper incrementally instead of in one response.
+The command is what the loop runs through a shell — `sh -c "<string>"` — so the allowlist gates the
+*entry point*, not the programs a node may name inside it. That is deliberate: an allowlist in front
+of a shell is a second, weaker boundary that the shell steps around, and the confinement that holds
+is the bound tree and the namespace.
+
+Whether the sandbox can isolate is checked when it is constructed, not assumed from the binary being
+installed: a `bwrap` that cannot create a namespace is refused rather than trusted, because otherwise
+every command fails and the node spends its whole budget finding out. ADR-034.
 """
 
 from __future__ import annotations
@@ -121,6 +124,29 @@ def _decode(data: bytes, limit: int) -> str:
     return text
 
 
+def _probe(binary: str, timeout_seconds: float = 10.0) -> None:
+    """Confirm the sandbox can create a namespace, not merely that its binary is installed.
+
+    Presence is not capability. Under a container whose AppArmor profile denies namespace creation,
+    `bwrap` is on PATH with the right version and every command still fails with `No permissions to
+    create new namespace`. Checking only for the binary let that through, and the first thing to
+    notice was a node: it retried, produced a directory of nothing, and spent its whole step budget
+    and real money finding out — 60 steps and two attempts in one measured run.
+
+    Refusing here keeps ADR-034's promise: a sandbox that cannot isolate is unavailable, and
+    unavailable is refused rather than degraded to something unisolated.
+    """
+    argv = [binary, "--unshare-all", "--ro-bind", "/", "/", "--", "true"]
+    try:
+        completed = subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                   timeout=timeout_seconds, check=False, env={})
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError(f"sandbox binary {binary} could not be run: {exc}") from exc
+    if completed.returncode != 0:
+        detail = completed.stderr.decode("utf-8", errors="replace").strip() or "no stderr"
+        raise RuntimeError(f"sandbox binary {binary} cannot create a namespace: {detail}")
+
+
 class BubblewrapWorkspaceSandbox:
     """Unprivileged isolation: no network, and writes confined to the workspace.
 
@@ -137,6 +163,7 @@ class BubblewrapWorkspaceSandbox:
             raise RuntimeError(f"sandbox binary not found: {binary}")
         self.binary = binary
         self.allowed_commands = allowed_commands
+        _probe(binary)
 
     def run(self, spec: SandboxSpec) -> SandboxResult:
         _validate(spec, self.allowed_commands)
@@ -186,9 +213,9 @@ class BubblewrapWorkspaceSandbox:
 class SubprocessWorkspaceSandbox:
     """TEST ONLY: cwd and timeout, NO isolation.
 
-    It exists so the sandbox *contract* is testable where bubblewrap is not
-    available. Production code never selects it: `worker_service` disables
-    workspace.exec instead of degrading to an unisolated subprocess.
+    It exists so the sandbox *contract* is testable where bubblewrap is not available. Nothing
+    selects it in a real run: a sandbox that cannot isolate is refused at construction rather than
+    degraded to an unisolated subprocess. ADR-034.
     """
 
     name = "subprocess"

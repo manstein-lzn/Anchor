@@ -245,7 +245,14 @@ class TracingAgent(DefaultAgent):
         `InterruptAgentFlow`, exactly as it does there, and the exit message it carries is what ends
         the loop.
         """
+        # `role: exit` is mini-swe-agent's own record of why a loop stopped — the submission on the
+        # way out, or `LimitsExceeded` on the way to one — and not something the model said. Sending
+        # it back is what the provider refuses (`unknown variant 'exit'`), and it is stale besides:
+        # this attempt is continuing, so the reason the last one stopped is not part of the
+        # conversation. Dropped rather than rewritten, so nothing is put in the model's mouth.
         self.messages = list(messages)
+        while self.messages and self.messages[-1].get("role") == "exit":
+            self.messages.pop()
         while True:
             try:
                 self.step()

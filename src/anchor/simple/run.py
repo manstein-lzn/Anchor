@@ -42,6 +42,15 @@ BUDGET_EXITS = frozenset({"TimeExceeded", "LimitsExceeded"})
 MAX_ATTEMPTS = 4
 
 
+class InputCollision(RuntimeError):
+    """Two upstream nodes produced the same path, so copying both would drop one of them.
+
+    Raised instead of choosing an order. Which of two nodes' `notes.md` a third node should see is
+    the graph author's question, and answering it silently is how a node comes to work from half of
+    what it was given and submit anyway.
+    """
+
+
 @dataclass(frozen=True)
 class NodeResult:
     node_id: str
@@ -76,6 +85,13 @@ class RunState:
     # keyed "{node}|{pass}" — how many times that pass has been started, resumes included.
     attempts: dict[str, int] = field(default_factory=dict)
     error: str = ""
+    # Why a run that stopped did not simply finish. A run a node's round ceiling cut short did not
+    # carry out the graph's intent, and calling that `finished` is the silent stop this rework exists
+    # to stop making. Empty means the run ended for the ordinary reason: nothing was ready.
+    reason: str = ""
+    # One "{node}@{ceiling}" entry per pass the ceiling turned away, so a reader can see which loop
+    # was cut off and not merely that something was.
+    ceased: list[str] = field(default_factory=list)
 
     def save(self, run_dir: Path) -> None:
         self.updated = _now()
@@ -95,15 +111,49 @@ def _now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _seed(target: Path, sources: list[Path]) -> None:
+def _seed(target: Path, sources: list[tuple[str, Path]]) -> None:
     """A copy of what this node's selected inputs produced, in the order the edges declare.
 
     A copy, so the node sees the whole deliverable so far and can revise it, and nothing it does can
     reach back and damage an earlier node's work. That is what makes "its own workspace" true without
     needing revisions to say so.
+
+    Flat, and not namespaced under a directory per source. A node's directory is its inputs plus its
+    own work, so the loop that revises a draft depends on `draft.md` and `review.md` arriving side by
+    side; nesting each input under its source would deepen by a level every round.
+
+    Which is why two sources claiming the same path is refused instead of resolved — but only when
+    the contents differ. Identical bytes are not a conflict: a node's directory carries its inputs
+    forward, so two branches that share an ancestor legitimately hold the same file, and refusing
+    that would reject the pass-through the loop depends on.
     """
+    first: dict[str, tuple[str, bytes]] = {}
+    collisions: list[str] = []
+    for label, source in sources:
+        if not source.is_dir():
+            continue
+        for item in sorted(source.rglob("*")):
+            if not item.is_file():
+                continue
+            relative = item.relative_to(source)
+            if any(part in {".git", "__pycache__"} for part in relative.parts):
+                continue
+            with item.open("rb") as handle:
+                digest = hashlib.file_digest(handle, "sha256").digest()
+            key = str(relative)
+            previous = first.get(key)
+            if previous is None:
+                first[key] = (label, digest)
+            elif previous[1] != digest:
+                collisions.append(f"{key} ({previous[0]} and {label})")
+    if collisions:
+        raise InputCollision(
+            f"{target.name}: two inputs claim the same path with different contents: "
+            f"{'; '.join(sorted(collisions))}; rename one of them, so this node does not silently "
+            "work from whichever was copied last")
+
     target.mkdir(parents=True, exist_ok=True)
-    for source in sources:
+    for _label, source in sources:
         if not source.is_dir():
             continue
         for item in sorted(source.iterdir()):
@@ -203,7 +253,7 @@ def _next_step(graph: graph_module.Graph, state: RunState, decided: dict, run_di
     state.attempts[f"{node_id}|{number}"] = state.attempts.get(f"{node_id}|{number}", 0) + 1
     incoming = [state.result(source) for source in graph.in_edges[node_id]
                 if decided.get((source, node_id), (False, -1))[0]]
-    _seed(directory, [Path(item.tree) for item in incoming if item])
+    _seed(directory, [(item.node_id, Path(item.tree)) for item in incoming if item])
     state.passes[node_id] = number
     state.seq += 1
     state.last_seq[node_id] = state.seq
@@ -250,7 +300,7 @@ def _ready(graph: graph_module.Graph, state: RunState, decided: dict,
 
 
 def _record(state: RunState, graph: graph_module.Graph, run_dir: Path,
-            decided: dict, result: NodeResult) -> bool:
+            decided: dict, result: NodeResult, settle) -> bool:
     """Store what a node left behind and resolve its ways out.
 
     Returns whether the run may continue. A node that never submitted stops it: carrying on would
@@ -275,10 +325,11 @@ def _record(state: RunState, graph: graph_module.Graph, run_dir: Path,
     state.cursor = None
     ways = graph.routes(result.node_id)
     chosen = result.route if len(ways) > 1 else (ways[0] if ways else None)
-    for target in ways:
-        decided[(result.node_id, target)] = (target == chosen, state.seq)
-    state.decided = {f"{source}|{target}": [value[0], value[1]]
-                     for (source, target), value in decided.items()}
+    # Through `settle`, not by stamping `state.seq` here. That was a second copy of the same rule and
+    # it stamped with the sequence the execution *started* at, so a node routing to itself wrote an
+    # edge that looked older than itself: the loop was dropped and the run said `finished`. The
+    # ceiling path had the fix and this one did not.
+    settle(result.node_id, chosen)
     if not result.submitted:
         state.status = "failed"
         state.error = (f"{result.node_id} did not submit: {result.exit_status}")
@@ -392,6 +443,7 @@ def run(workspace: str | Path, *, objective: str | None = None, config_path: str
                 break
             if not step.resuming and step.number > graph.max_rounds:
                 settle(step.node_id, None)
+                state.ceased.append(f"{step.node_id}@{graph.max_rounds}")
                 state.save(run_dir)
                 print(json.dumps({"node": step.node_id, "stopped": "max_rounds",
                                   "limit": graph.max_rounds}), flush=True)
@@ -407,7 +459,7 @@ def run(workspace: str | Path, *, objective: str | None = None, config_path: str
             result = _result_of(step.node_id, graph.nodes[step.node_id], step.directory,
                                 step.number, outcome)
             result = replace(result, route=getattr(agent.env, "route", None))
-            if not _record(state, graph, run_dir, decided, result):
+            if not _record(state, graph, run_dir, decided, result, settle):
                 print(json.dumps({"run": str(run_dir), "status": state.status,
                                   "stopped_at": result.node_id}, ensure_ascii=False), flush=True)
                 return state
@@ -416,7 +468,26 @@ def run(workspace: str | Path, *, objective: str | None = None, config_path: str
         if state.status == "running":
             # Only if nothing else has already decided otherwise: a node that used up its attempts
             # sets `failed`, and the end of the loop is not the place to disagree with it.
-            state.status = "finished"
+            if state.ceased:
+                # A ceiling that turned a pass away means the graph's intent was not carried out, so
+                # this is not `finished`. The distinction is the whole point: the earlier halves of
+                # this runtime stopped runs and said nothing about it.
+                state.status = "stopped"
+                state.reason = "max_rounds"
+            else:
+                state.status = "finished"
+    except InputCollision as exc:
+        # A graph authoring error, not a node failure, and not something a resume can get past: the
+        # same two directories would be seeded again. Recorded and returned rather than raised, so
+        # the reason reaches `run.json` and the caller gets a status instead of a traceback.
+        state.status = "failed"
+        state.reason = "input_collision"
+        state.error = str(exc)
+        state.save(run_dir)
+        print(json.dumps({"run": str(run_dir), "status": state.status,
+                          "reason": state.reason, "error": state.error}, ensure_ascii=False),
+              flush=True)
+        return state
     except Exception as exc:  # noqa: BLE001 - recorded, so a restart can pick the run up
         state.status = "interrupted"
         state.error = f"{type(exc).__name__}: {exc}"
@@ -424,6 +495,7 @@ def run(workspace: str | Path, *, objective: str | None = None, config_path: str
         raise
     state.save(run_dir)
     print(json.dumps({"run": str(run_dir), "status": state.status,
+                      "reason": state.reason,
                       "executed": state.executed, "skipped": state.skipped},
                      ensure_ascii=False), flush=True)
     return state
