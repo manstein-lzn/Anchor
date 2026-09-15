@@ -30,6 +30,53 @@ the result to the next one.
 }
 ```
 
+## A graph can contain graphs
+
+A file declares its agents once, declares any number of graphs beside them, and a node runs one of
+those graphs instead of an agent:
+
+```json
+{
+  "agents": {"drafter": {"model": "models.academic", "instructions": "…"}},
+  "graphs": {
+    "revise-a-draft": {
+      "entry": "draft", "exit": "settle", "max_rounds": 4,
+      "nodes": [{"id": "draft", "agent": "drafter"}, {"id": "settle", "agent": "drafter"}],
+      "edges": [{"from": "draft", "to": "settle"}]
+    }
+  },
+  "nodes": [{"id": "write", "graph": "revise-a-draft"}],
+  "edges": [{"from": "gather", "to": "write"}]
+}
+```
+
+**What a run reads is the expansion**, not the file: every module inlined, its nodes named for the
+module they came from. `write/draft` and `write/settle` are ordinary nodes, so an edge into `write`
+attaches to `write/draft` and an edge out of it leaves from `write/settle` — the module's `entry` and
+`exit`.
+
+Expansion rather than nesting at run time, for one reason above the others: **a node id is a directory
+name**, so `write/draft` lands in `runs/<run>/write/draft/` and the filesystem mirrors the structure
+the author drew. Nothing in the runner knows a module exists. It also settles identity without a
+version to declare — a module is inlined into the file, so the file's own digest covers which module
+it was.
+
+Three things are refused, each because the alternative is a name meaning two things:
+
+- **A graph containing itself.** No finite expansion, and no finite identity: its content would
+  include its own content. Execution cycles stay allowed — a node may route back to an earlier one,
+  and does.
+- **`/` in a node id**, when the file declares graphs. `a/b` written by hand and "node b of module a"
+  would otherwise be the same string. A file with no `graphs` block does not expand, so it may use
+  the separator — which is what lets a run write out the expansion it read.
+- **A module declaring `agents`, `objective` or `graphs`.** There is one agent pool per file, so a
+  role is defined once and referenced from anywhere; and one objective per run, because that is the
+  task every node is answering.
+
+A node may also carry `"with": "…"`, appended to its role's own instructions. That is what makes
+declaring a role separately from its nodes worth doing: two nodes can share one and still be asked
+for different things.
+
 ## What is ours and what is not
 
 **Ours:** the graph, the directories, the sandbox, and the literature tools.

@@ -49,7 +49,11 @@ function Inner({ graph, name, editable, onMove, onConnect, onPick }:
 
   const laid = useMemo(() => layeredLayout({
     graph_id: name, name,
-    nodes: graph.nodes.map(item => ({ id: item.id, type: 'agent' as const, name: item.id })),
+    nodes: graph.nodes.map(item => ({
+      id: item.id,
+      type: item.graph ? 'subgraph' as const : 'agent' as const,
+      name: item.graph ? `${item.id} · ${item.graph}` : item.id,
+    })),
     edges: graph.edges.map(item => ({ source: item.from, target: item.to })),
   }), [graph, name]);
 
@@ -59,7 +63,9 @@ function Inner({ graph, name, editable, onMove, onConnect, onPick }:
     // A declared position wins, so a node stays where it was put. Without this the drag would move
     // it and the next render would put it straight back.
     position: graph.layout?.positions?.[item.id] ?? laid.get(item.id) ?? { x: 0, y: 0 },
-    data: { label: item.id, agent: item.agent, entry: item.id === graph.entry },
+    data: { label: item.graph ? `${item.id} · ${item.graph}` : item.id,
+            agent: item.graph ?? item.agent ?? '',
+            entry: item.id === graph.entry },
   })), [graph, laid]);
 
   const edges: Edge[] = useMemo(() => graph.edges.map((item, index) => ({

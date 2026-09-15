@@ -231,3 +231,49 @@ def test_a_node_that_does_not_submit_still_fails(tmp_path, monkeypatch):
     state = runner.run(workspace, config_path=tmp_path / "unused.json")
 
     assert state.status == "failed"
+
+
+def test_a_module_runs_as_directories_named_for_its_scope(tmp_path, monkeypatch):
+    """The scope prefix is a directory name, which is why the runtime needs no change for this.
+
+    A node is `use/a`, so its directory is `runs/<run>/use/a/` and the filesystem mirrors what the
+    author drew. Nothing in the scheduler knows a module was involved.
+    """
+    graph = {
+        "entry": "in",
+        "objective": "test",
+        "agents": {"w": {"model": "models.academic"}},
+        "graphs": {"mod": {"entry": "a", "exit": "b",
+                           "nodes": [{"id": "a", "agent": "w"}, {"id": "b", "agent": "w"}],
+                           "edges": [{"from": "a", "to": "b"}]}},
+        "nodes": [{"id": "in", "agent": "w"},
+                  {"id": "use", "graph": "mod"},
+                  {"id": "out", "agent": "w"}],
+        "edges": [{"from": "in", "to": "use"}, {"from": "use", "to": "out"}],
+    }
+    workspace = _workspace(tmp_path, graph)
+    handed: list[str] = []
+
+    def fake_agent_for(_graph, node_id, directory, _models, _secret, _config):
+        handed.append(str(Path(directory).relative_to(workspace)))
+        return _StubAgent(Path(directory), {f"{node_id.replace('/', '_')}.md": node_id},
+                          "Submitted", None)
+
+    monkeypatch.setattr(runner, "_config", lambda path: ({}, None))
+    monkeypatch.setattr(runner, "_agent_for", fake_agent_for)
+
+    state = runner.run(workspace, config_path=tmp_path / "unused.json")
+
+    run_dir = next((workspace / "runs").glob("*"))
+    assert state.status == "finished"
+    assert state.executed == ["in", "use/a", "use/b", "out"]
+    # What the agent was handed is a path that mirrors the scope, so the trace the real agent writes
+    # beside it (`agent.py`, `<tree>.trace.jsonl`) lands outside the node's own directory.
+    assert handed == [f"runs/{run_dir.name}/in", f"runs/{run_dir.name}/use/a",
+                      f"runs/{run_dir.name}/use/b", f"runs/{run_dir.name}/out"]
+    for node in ("in", "use/a", "use/b", "out"):
+        assert (run_dir / node).is_dir(), f"{node} should have its own directory"
+    # And the run records the graph it actually read, modules already inlined.
+    written = json.loads((run_dir / "graph.json").read_text(encoding="utf-8"))
+    assert [item["id"] for item in written["nodes"]] == ["in", "use/a", "use/b", "out"]
+    assert {"from": "use/b", "to": "out"} in written["edges"]

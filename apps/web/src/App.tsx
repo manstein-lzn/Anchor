@@ -187,7 +187,7 @@ export function App() {
   const selectedAgent = pick?.kind === 'agent' && doc ? doc.agents[pick.id] : undefined;
   const selectedEdge = pick?.kind === 'edge' && doc ? doc.edges[Number(pick.id)] : undefined;
 
-  const patchNode = (fields: Partial<{ id: string; agent: string }>) => {
+  const patchNode = (fields: Partial<{ id: string; agent: string; with: string }>) => {
     if (!doc || !selectedNode) return;
     patch({ ...doc, nodes: doc.nodes.map(item =>
       item.id === selectedNode.id ? { ...item, ...fields } : item) });
@@ -460,7 +460,9 @@ export function App() {
             <div className="section-heading"><h3>属性</h3></div>
             <fieldset disabled={!editable}>
               {selectedNode && doc && <>
-                <div className="inspector-kind">节点 · {selectedNode.agent}</div>
+                <div className="inspector-kind">
+                  节点 · {selectedNode.graph ? `模块 ${selectedNode.graph}` : selectedNode.agent}
+                </div>
                 <label>节点 ID
                   <input value={selectedNode.id} maxLength={64}
                          onChange={event => {
@@ -474,6 +476,11 @@ export function App() {
                                to: edge.to === selectedNode.id ? next : edge.to })) });
                          }} />
                 </label>
+                {selectedNode.graph ? <p className="inspector-note">
+                  这个节点运行的是文件里声明的 <code>{selectedNode.graph}</code>。展开之后它的节点
+                  以 <code>{selectedNode.id}/…</code> 命名，各自在自己的目录里，父图只看得到它的
+                  <code>exit</code> 节点。
+                </p> : <>
                 <label>使用角色
                   <select value={selectedNode.agent}
                           onChange={event => patchNode({ agent: event.target.value })}>
@@ -481,6 +488,12 @@ export function App() {
                       <option key={agent} value={agent}>{agent}</option>))}
                   </select>
                 </label>
+                <label>这一步额外要求
+                  <input value={selectedNode.with ?? ''} maxLength={2000}
+                         placeholder="附加在这个角色自己的指令之后"
+                         onChange={event => patchNode({ with: event.target.value })} />
+                </label>
+                </>}
                 {routing.has(selectedNode.id) && <p className="inspector-note">
                   这个节点有多条出边，所以它必须用 <code>anchor-route</code> 结束，
                   不能用 <code>anchor-done</code>。这一点要写进它的指令里。
@@ -488,8 +501,9 @@ export function App() {
                 <div className="selection-tools">
                   <ToolButton icon={Copy} label="复制节点" onClick={duplicateNode} />
                 </div>
-                <button className="full-button" onClick={() => setPick({ kind: 'agent', id: selectedNode.agent })}>
-                  编辑它的角色</button>
+                <button className="full-button" disabled={Boolean(selectedNode.graph)}
+                        onClick={() => setPick({ kind: 'agent', id: selectedNode.agent ?? '' })}>
+                  {selectedNode.graph ? '模块的角色在它自己的图里' : '编辑它的角色'}</button>
                 <button className="full-button" onClick={() => setJson('node')}>完整节点 JSON</button>
               </>}
 

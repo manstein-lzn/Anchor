@@ -247,7 +247,7 @@ def _next_step(graph: graph_module.Graph, state: RunState, decided: dict, run_di
         return None
     node_id = pending[0]
     number = state.passes.get(node_id, 0) + 1
-    if number > graph.max_rounds:
+    if number > graph.ceiling(node_id):
         return _Step(node_id, number, Path(), None, False)
     directory = run_dir / (node_id if number == 1 else f"{node_id}-{number}")
     state.attempts[f"{node_id}|{number}"] = state.attempts.get(f"{node_id}|{number}", 0) + 1
@@ -360,13 +360,18 @@ def _secret(secret_file: str | None, model: dict) -> str:
 
 
 def _agent_for(graph, node_id: str, directory: Path, models: dict, secret_file, config_path):
-    spec = graph.agents[graph.nodes[node_id]]
+    node = graph.nodes[node_id]
+    spec = graph.agents[node.agent]
     model = models.get(spec.model)
     if model is None:
         raise ValueError(f"no model named {spec.model!r} in {config_path}")
+    # What this use adds to what the role already says. A role is declared once so it can be used
+    # more than once, and two uses that differ only in their framing differ here.
+    instructions = (f"{spec.instructions}\n\n{node.with_}" if spec.instructions and node.with_
+                    else spec.instructions or node.with_)
     return build_agent(
         tree=directory, node_id=node_id, routes=graph.routes(node_id),
-        instructions=spec.instructions,
+        instructions=instructions,
         model_name=f"openai/{model['model']}" if model.get("base_url") else model["model"],
         model_kwargs={"api_base": model["base_url"], "api_key": _secret(secret_file, model),
                       "max_tokens": model.get("max_tokens", 8192)},
@@ -401,6 +406,11 @@ def run(workspace: str | Path, *, objective: str | None = None, config_path: str
         run_dir.mkdir(parents=True, exist_ok=True)
         state = RunState(objective=objective or graph.objective, started=_now())
         state.save(run_dir)
+    # The graph as this run read it — every module already inlined, every node naming its agent.
+    # Written rather than referenced, so a run can be read without the workspace still holding the
+    # file it came from, and so which module a node belongs to is answerable from the record alone.
+    (run_dir / "graph.json").write_text(
+        json.dumps(graph_module.to_dict(graph), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
     # A node that is already recorded as not having submitted means the run stopped without
     # finishing. Checked before anything runs, because afterwards the scheduler has no reason to
@@ -441,12 +451,12 @@ def run(workspace: str | Path, *, objective: str | None = None, config_path: str
             step = _next_step(graph, state, decided, run_dir, order, ready)
             if step is None:
                 break
-            if not step.resuming and step.number > graph.max_rounds:
+            if not step.resuming and step.number > graph.ceiling(step.node_id):
                 settle(step.node_id, None)
-                state.ceased.append(f"{step.node_id}@{graph.max_rounds}")
+                state.ceased.append(f"{step.node_id}@{graph.ceiling(step.node_id)}")
                 state.save(run_dir)
                 print(json.dumps({"node": step.node_id, "stopped": "max_rounds",
-                                  "limit": graph.max_rounds}), flush=True)
+                                  "limit": graph.ceiling(step.node_id)}), flush=True)
                 continue
 
             agent = _agent_for(graph, step.node_id, step.directory, models, secret_file, config_path)
@@ -456,7 +466,7 @@ def run(workspace: str | Path, *, objective: str | None = None, config_path: str
             else:
                 outcome = agent.run(task=step.task)
 
-            result = _result_of(step.node_id, graph.nodes[step.node_id], step.directory,
+            result = _result_of(step.node_id, graph.nodes[step.node_id].agent, step.directory,
                                 step.number, outcome)
             result = replace(result, route=getattr(agent.env, "route", None))
             if not _record(state, graph, run_dir, decided, result, settle):

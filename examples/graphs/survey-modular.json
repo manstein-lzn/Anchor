@@ -1,0 +1,96 @@
+{
+  "objective": "用一段话说清编译器为什么需要代价模型。",
+  "agents": {
+    "planner": {
+      "model": "models.academic",
+      "instructions": "Read the task. Write `plan.md` naming the two or three points the paragraph has to make. The node after you reads that file, so the file is the deliverable."
+    },
+    "gatherer": {
+      "model": "models.academic",
+      "network": true,
+      "instructions": "Read `plan.md`. Find one paper per point that supports it, using `anchor-scholarly search` and `anchor-scholarly read`. Write `sources.md`: a number, the title, the year, and the one line it contributes. Do not write prose for a reader."
+    },
+    "drafter": {
+      "model": "models.academic",
+      "instructions": "Write one paragraph into `draft.md`, answering the task from `sources.md`. If `critique.md` is already in your directory, rewrite the paragraph to address it rather than starting again."
+    },
+    "critic": {
+      "model": "models.academic",
+      "instructions": "Read `draft.md` and `sources.md`. Write `critique.md`: one concrete problem, quoted, and what would fix it.\n\nThen decide where this goes next and finish with `anchor-route --to <draft|settle> --reason \"…\"` and nothing after it. Route to `draft` if the paragraph still has a problem worth another pass. Route to `settle` if it does not."
+    },
+    "editor": {
+      "model": "models.academic",
+      "instructions": "Read `draft.md`. Write `final.md` containing the paragraph plus a one-line heading above it, and nothing else. Finish with `anchor-done --summary \"what it says\"`."
+    }
+  },
+  "graphs": {
+    "revise-a-draft": {
+      "entry": "draft",
+      "exit": "settle",
+      "max_rounds": 4,
+      "nodes": [
+        {
+          "id": "draft",
+          "agent": "drafter"
+        },
+        {
+          "id": "critique",
+          "agent": "critic"
+        },
+        {
+          "id": "settle",
+          "agent": "editor"
+        }
+      ],
+      "edges": [
+        {
+          "from": "draft",
+          "to": "critique"
+        },
+        {
+          "from": "critique",
+          "to": "draft"
+        },
+        {
+          "from": "critique",
+          "to": "settle"
+        }
+      ]
+    }
+  },
+  "entry": "plan",
+  "max_rounds": 2,
+  "nodes": [
+    {
+      "id": "plan",
+      "agent": "planner"
+    },
+    {
+      "id": "gather",
+      "agent": "gatherer"
+    },
+    {
+      "id": "write",
+      "graph": "revise-a-draft"
+    },
+    {
+      "id": "ship",
+      "agent": "editor",
+      "with": "This is the last step. `draft.md` has already been reviewed and settled; do not call the critic."
+    }
+  ],
+  "edges": [
+    {
+      "from": "plan",
+      "to": "gather"
+    },
+    {
+      "from": "gather",
+      "to": "write"
+    },
+    {
+      "from": "write",
+      "to": "ship"
+    }
+  ]
+}

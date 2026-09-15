@@ -5,7 +5,7 @@
       runs/
         2026-09-13T22-30-00/
           plan/  gather/  write/  review/
-        2026-09-13T23-10-00/
+        2026-09-13T22-30-00/
 
 The graph lives in the workspace rather than beside it, because the workspace is the unit: point at
 one and everything a run needs is there. Runs accumulate beside each other and are never merged —
@@ -14,13 +14,36 @@ there is no state carried from one to the next, so the history is a record rathe
 An edge says where the graph may go, not when. A node with one way out follows it; a node with more
 than one names its choice, and the edge is selected or rejected accordingly. Routing is a decision
 the node makes, so it does not have to express it as data.
+
+**A graph can contain graphs.** A file declares agents once, declares any number of graphs beside
+them, and a node may be one of those graphs instead of an agent. What a run executes is the
+*expansion* of that: every module inlined, its nodes named for the module they came from
+(`review/draft`), one flat graph with no modules left in it. The file stays the thing a person edits
+and the expansion is the thing a run reads.
+
+Expansion rather than nesting at run time, for one reason above the others: a node id is a directory
+name, so `review/draft` lands in `runs/<run>/review/draft/` and the filesystem mirrors the structure
+the author drew. Nothing in the runner has to know a module exists. It also makes identity immediate —
+a module is inlined into the file, so the file's own digest covers which module it was, with no
+version to declare.
+
+A module is not a namespace for agents. There is one agent pool per file, so a role is defined once
+and referenced from anywhere, which is the whole point of declaring it separately from the nodes.
 """
 
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+
+#: Separates a module's name from the name of a node inside it, once the module is inlined. A name
+#: an author writes may not contain it: `a/b` written by hand and "node b of module a" would be the
+#: same string, and nothing downstream could tell them apart.
+SEP = "/"
+
+#: How many times a node may run in one pass when nothing says otherwise.
+DEFAULT_MAX_ROUNDS = 3
 
 
 @dataclass(frozen=True)
@@ -41,39 +64,50 @@ class Agent:
 
 
 @dataclass(frozen=True)
+class Node:
+    """One node: a role, in a scope, and whatever this use adds to what the role already says."""
+
+    id: str
+    agent: str
+    # Appended to the role's instructions. Two nodes may share a role and differ here, which is what
+    # makes a role worth declaring separately from the nodes that use it.
+    with_: str = ""
+
+
+@dataclass(frozen=True)
 class Graph:
-    nodes: dict[str, str]                       # node id -> agent name
+    nodes: dict[str, Node]
     agents: dict[str, Agent]
     out_edges: dict[str, tuple[str, ...]]
     in_edges: dict[str, tuple[str, ...]]
     objective: str = ""
-    # Where a run starts. Declared, because a graph with a loop has no node that nothing leads to:
-    # the revision edge means every node has an incoming edge, so "the one with none" is not a rule
-    # that can be inferred — it only looks like one until the first graph that loops.
+    # Where a run starts, already resolved through any modules.
     entry_node: str = ""
-    # How many times a node may run in one pass. Only loops can exceed one, and without a bound a
-    # graph that revises can revise forever.
-    max_rounds: int = 3
+    # Each node carries the ceiling of the graph that declared it: a module's bound belongs to the
+    # module, not to whoever includes it.
+    max_rounds: dict[str, int] = field(default_factory=dict)
 
     def entry(self) -> str:
         """Where a run starts.
 
-        Declared, or inferred only when it is unambiguous. A graph with a loop has no node without an
+        Declared, or inferred when it is unambiguous. A graph with a loop has no node without an
         incoming edge, and one that does not loop usually has exactly one — so the inference is a
-        convenience, not the rule.
+        convenience, not the rule. Resolved while the graph was expanded, so this cannot fail here.
         """
-        if self.entry_node:
-            return self.entry_node
-        starts = [node for node, sources in self.in_edges.items() if not sources]
-        if len(starts) != 1:
-            raise ValueError(
-                "a graph needs an explicit \"entry\" node when it has a loop or several starts; "
-                f"nodes with no incoming edge: {sorted(starts)}")
-        return starts[0]
+        return self.entry_node
 
     def routes(self, node_id: str) -> tuple[str, ...]:
         """The ways out of a node. More than one means the node must choose."""
         return self.out_edges.get(node_id, ())
+
+    def ceiling(self, node_id: str) -> int:
+        """How many times this node may run in one pass."""
+        return self.max_rounds.get(node_id, DEFAULT_MAX_ROUNDS)
+
+
+def edges(graph: Graph) -> list[tuple[str, str]]:
+    """Every edge, in the order the nodes and their targets were declared."""
+    return [(node, target) for node, targets in graph.out_edges.items() for target in targets]
 
 
 def back_edges(graph: Graph) -> frozenset[tuple[str, str]]:
@@ -110,14 +144,245 @@ def load(path: str | Path) -> Graph:
     return parse(json.loads(Path(path).read_text(encoding="utf-8")))
 
 
+# -- naming ------------------------------------------------------------------------------------
+
+
+def _check_name(name: object, kind: str, where: str) -> str:
+    if not isinstance(name, str) or not name:
+        raise ValueError(f"{where}: a {kind} name must be a non-empty string, not {name!r}")
+    return name
+
+
+def _check_node_id(node_id: object, where: str, *, allow_sep: bool) -> str:
+    """A node id is a directory name once the graph runs, and a scope prefix once it expands.
+
+    `SEP` is therefore reserved — except in a file that declares no graphs, which cannot be expanded
+    into anything and so has nothing for one name to collide with. That is exactly the shape an
+    already-expanded graph has, which is what lets a run write the graph it read back out as a file
+    and have that file be a real one.
+    """
+    name = _check_name(node_id, "node", where)
+    if SEP in name and not allow_sep:
+        raise ValueError(
+            f"{where}: the node name {name!r} contains {SEP!r}, which separates a module from its "
+            f"contents once a graph is expanded — here that could be the same string as another "
+            f"graph's node, and nothing downstream could tell them apart")
+    return name
+
+
+def _agent(name: str, spec: dict) -> Agent:
+    if "model" not in spec:
+        raise ValueError(f"agent {name!r} needs a \"model\"")
+    return Agent(model=spec["model"], instructions=spec.get("instructions", ""),
+                 network=bool(spec.get("network", False)),
+                 max_steps=int(spec.get("max_steps", 0)),
+                 wall_time_limit_seconds=int(spec.get("wall_time_limit_seconds", 3600)))
+
+
+def _check_node(item: object, where: str, *, allow_sep: bool) -> dict:
+    if not isinstance(item, dict) or "id" not in item:
+        raise ValueError(f"{where}: every node needs an \"id\": {item}")
+    _check_node_id(item["id"], where, allow_sep=allow_sep)
+    has_agent, has_graph = "agent" in item, "graph" in item
+    if has_agent and has_graph:
+        raise ValueError(f"{where}: node {item['id']!r} has both \"agent\" and \"graph\"; a node is "
+                         f"one or the other")
+    if not has_agent and not has_graph:
+        raise ValueError(f"{where}: node {item['id']!r} needs an \"agent\" or a \"graph\"")
+    if has_graph:
+        # Both of these would be read by nothing: a module has no instructions of its own to add to,
+        # and its nodes carry the ceilings of the graph that declared them.
+        for key in ("with", "max_rounds"):
+            if key in item:
+                raise ValueError(
+                    f"{where}: node {item['id']!r} is a graph, so {key!r} would have nothing to "
+                    f"apply to — it belongs on the nodes inside that graph")
+    if "with" in item and not isinstance(item["with"], str):
+        raise ValueError(f"{where}: node {item['id']!r} has a non-string \"with\"")
+    if "max_rounds" in item and int(item["max_rounds"]) < 1:
+        raise ValueError(f"{where}: node {item['id']!r} has a \"max_rounds\" below 1")
+    return item
+
+
+def _infer_entry(body: dict, where: str) -> str:
+    targets = {edge["to"] for edge in body.get("edges") or ()}
+    starts = [item["id"] for item in body["nodes"] if item["id"] not in targets]
+    if len(starts) != 1:
+        raise ValueError(
+            f"{where}: a graph needs an explicit \"entry\" node when it has a loop or several "
+            f"starts; nodes with no incoming edge: {sorted(starts)}")
+    return starts[0]
+
+
+def _check_body(body: object, where: str, *, module: bool) -> dict:
+    """One graph body: the file's own, or one declared in its `graphs` block.
+
+    The two differ in exactly one direction. A module may not declare what the file declares, and
+    must say where its result comes from, because that is where its parent's edges attach.
+    """
+    if not isinstance(body, dict):
+        raise ValueError(f"{where} must be a JSON object")
+    if module:
+        for key in ("agents", "objective", "graphs"):
+            if key in body:
+                raise ValueError(
+                    f"{where} declares {key!r}, and only the file does. There is one agent pool per "
+                    f"file so a role is defined once and referenced from anywhere, and one objective "
+                    f"per run because that is the task every node is answering — a module that "
+                    f"carried its own would have nowhere to put it.")
+        if not body.get("exit"):
+            raise ValueError(
+                f"{where} needs an \"exit\": it names the node whose directory is this module's "
+                f"result, and the parent's edges leaving this module attach to it.")
+    if not body.get("nodes"):
+        raise ValueError(f"{where} needs at least one node")
+    # A file with a `graphs` block expands, so its own node ids share one namespace with the
+    # modules' and may not contain the separator. A file without one does not expand.
+    allow_sep = not body.get("graphs") and not module
+    ids = [_check_node(item, where, allow_sep=allow_sep)["id"] for item in body["nodes"]]
+    if len(set(ids)) != len(ids):
+        raise ValueError(f"{where} declares the same node id twice: {sorted(ids)}")
+    seen: set[tuple[str, str]] = set()
+    for edge in body.get("edges") or ():
+        for end in ("from", "to"):
+            if edge.get(end) not in ids:
+                raise ValueError(f"{where}: edge names an unknown node: {edge}")
+        pair = (edge["from"], edge["to"])
+        if pair in seen:
+            raise ValueError(f"{where}: the same edge is declared twice: {edge}")
+        seen.add(pair)
+    return body
+
+
+def _require_known(references: list[tuple[str, str]], pool: dict[str, dict], where: str) -> None:
+    for source, target in references:
+        if target not in pool:
+            raise ValueError(f"{where}: {source} refers to {target!r}, which this file does not "
+                             f"declare: {sorted(pool)}")
+
+
+def _reject_reference_cycles(pool: dict[str, dict], root: dict) -> None:
+    """Which graph contains which, checked before anything is inlined.
+
+    A graph that contains itself has no finite expansion, and no finite identity either: its content
+    would include its own content. Execution cycles are a different thing and stay allowed — a node
+    may route back to an earlier node, and does.
+
+    The root is checked for references but not for cycles: it is not in the pool, so nothing can
+    refer back to it.
+    """
+    state: dict[str, int] = {}          # 1 = on the current path, 2 = finished
+    refers = {name: [item["graph"] for item in body["nodes"] if "graph" in item]
+              for name, body in pool.items()}
+    _require_known([(f"node {item['id']!r}", item["graph"])
+                    for item in root["nodes"] if "graph" in item], pool, "graph")
+
+    def visit(name: str, path: list[str]) -> None:
+        state[name] = 1
+        _require_known([(f"graph {name!r}", target) for target in refers[name]], pool, "graph")
+        for target in refers[name]:
+            if state.get(target) == 1:
+                raise ValueError(
+                    "graphs contain each other in a cycle: "
+                    + " -> ".join([*path, name, target])
+                    + ". A graph that contains itself has no finite expansion.")
+            if state.get(target) is None:
+                visit(target, [*path, name])
+        state[name] = 2
+
+    for name in pool:
+        if state.get(name) is None:
+            visit(name, [])
+
+
+# -- expansion -----------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _Expansion:
+    nodes: dict[str, Node]
+    edges: list[tuple[str, str]]
+    max_rounds: dict[str, int]
+    entry: str
+    exit: str | None
+
+
+def _expand(body: dict, pool: dict[str, dict], prefix: str) -> _Expansion:
+    """Inline every module in one graph body, naming what comes from one after the module.
+
+    `sides` is the whole trick: a local node contributes a pair of flattened names — where an edge
+    arriving at it should attach, and where an edge leaving it should depart. For an agent node both
+    are itself; for a module they are the module's own entry and exit. Edges are then rewritten to
+    the right side of whatever they point at, and nothing downstream knows a module was there.
+    """
+    nodes: dict[str, Node] = {}
+    max_rounds: dict[str, int] = {}
+    edges: list[tuple[str, str]] = []
+    sides: dict[str, tuple[str, str]] = {}
+    ceiling = int(body.get("max_rounds", DEFAULT_MAX_ROUNDS))
+
+    for item in body["nodes"]:
+        flat = f"{prefix}{item['id']}"
+        if "graph" in item:
+            inner = _expand(pool[item["graph"]], pool, flat + SEP)
+            nodes.update(inner.nodes)
+            max_rounds.update(inner.max_rounds)
+            edges.extend(inner.edges)
+            assert inner.exit is not None, "a module declares an exit, checked before expansion"
+            sides[item["id"]] = (inner.entry, inner.exit)
+        else:
+            nodes[flat] = Node(id=flat, agent=item["agent"], with_=item.get("with", ""))
+            max_rounds[flat] = int(item.get("max_rounds", ceiling))
+            sides[item["id"]] = (flat, flat)
+
+    for edge in body.get("edges") or ():
+        # Leaving the source: its exit side. Arriving at the target: its entry side.
+        edges.append((sides[edge["from"]][1], sides[edge["to"]][0]))
+
+    entry = body.get("entry") or _infer_entry(body, "graph")
+    exit_node = sides[body["exit"]][1] if body.get("exit") else None
+    return _Expansion(nodes, edges, max_rounds, sides[entry][0], exit_node)
+
+
 def parse(raw: dict) -> Graph:
     """Validate a graph, whether it came from a file or from someone typing it into a page.
 
     Raises with the reason rather than returning something half-built, so an editor can show the
     message next to what the author wrote. The same function guards both, so a graph the page accepts
     is a graph a run will accept.
-    """
 
+    The result is the expanded graph: one flat set of nodes, each already naming its agent. Callers
+    that want to draw what the author wrote read the file, not this.
+    """
+    where = "graph"
+    body = _check_body(_root(raw), where, module=False)
+    pool: dict[str, dict] = {}
+    for name, module in (raw.get("graphs") or {}).items():
+        _check_name(name, "graph", where)
+        pool[name] = _check_body(module, f"graph {name!r}", module=True)
+    _reject_reference_cycles(pool, body)
+
+    expansion = _expand(body, pool, "")
+    out_edges: dict[str, list[str]] = {node: [] for node in expansion.nodes}
+    in_edges: dict[str, list[str]] = {node: [] for node in expansion.nodes}
+    for source, target in expansion.edges:
+        out_edges[source].append(target)
+        in_edges[target].append(source)
+
+    graph = Graph(nodes=expansion.nodes,
+                  agents={name: _agent(name, spec) for name, spec in raw["agents"].items()},
+                  out_edges={node: tuple(targets) for node, targets in out_edges.items()},
+                  in_edges={node: tuple(sources) for node, sources in in_edges.items()},
+                  objective=raw.get("objective", ""), entry_node=expansion.entry,
+                  max_rounds=expansion.max_rounds)
+    missing = {node.agent for node in graph.nodes.values() if node.agent not in graph.agents}
+    if missing:
+        raise ValueError(f"nodes name unknown agents: {sorted(missing)}")
+    graph.entry()          # fail at load rather than at the first step of a run
+    return graph
+
+
+def _root(raw: object) -> dict:
     if not isinstance(raw, dict):
         raise ValueError("a graph must be a JSON object")
     for key in ("agents", "nodes"):
@@ -127,38 +392,25 @@ def parse(raw: dict) -> Graph:
         raise ValueError("a graph needs at least one agent")
     if not raw["nodes"]:
         raise ValueError("a graph needs at least one node")
+    return raw
 
-    for name, spec in raw["agents"].items():
-        if "model" not in spec:
-            raise ValueError(f"agent {name!r} needs a \"model\"")
-    agents = {
-        name: Agent(model=spec["model"], instructions=spec.get("instructions", ""),
-                    network=bool(spec.get("network", False)),
-                    max_steps=int(spec.get("max_steps", 0)),
-                    wall_time_limit_seconds=int(spec.get("wall_time_limit_seconds", 3600)))
-        for name, spec in raw["agents"].items()
+
+def to_dict(graph: Graph) -> dict:
+    """The expanded graph as JSON: what a run actually read, in the shape a graph file has.
+
+    Written into a run's directory so the run says which graph it ran without depending on the
+    workspace still holding the file it came from.
+    """
+    return {
+        "objective": graph.objective,
+        "entry": graph.entry_node,
+        "agents": {name: {"model": agent.model, "instructions": agent.instructions,
+                          "network": agent.network, "max_steps": agent.max_steps,
+                          "wall_time_limit_seconds": agent.wall_time_limit_seconds}
+                   for name, agent in graph.agents.items()},
+        "nodes": [{"id": node.id, "agent": node.agent,
+                   **({"with": node.with_} if node.with_ else {}),
+                   "max_rounds": graph.ceiling(node.id)}
+                  for node in graph.nodes.values()],
+        "edges": [{"from": source, "to": target} for source, target in edges(graph)],
     }
-    for item in raw["nodes"]:
-        if "id" not in item or "agent" not in item:
-            raise ValueError(f"every node needs an \"id\" and an \"agent\": {item}")
-    nodes = {item["id"]: item["agent"] for item in raw["nodes"]}
-    missing = {agent for agent in nodes.values() if agent not in agents}
-    if missing:
-        raise ValueError(f"nodes name unknown agents: {sorted(missing)}")
-    out_edges: dict[str, list[str]] = {node: [] for node in nodes}
-    in_edges: dict[str, list[str]] = {node: [] for node in nodes}
-    for edge in raw.get("edges") or ():
-        source, target = edge["from"], edge["to"]
-        if source not in nodes or target not in nodes:
-            raise ValueError(f"edge names an unknown node: {edge}")
-        if target in out_edges[source]:
-            raise ValueError(f"the same edge is declared twice: {edge}")
-        out_edges[source].append(target)
-        in_edges[target].append(source)
-    graph = Graph(nodes=nodes, agents=agents,
-                  out_edges={node: tuple(targets) for node, targets in out_edges.items()},
-                  in_edges={node: tuple(sources) for node, sources in in_edges.items()},
-                  objective=raw.get("objective", ""), entry_node=raw.get("entry", ""),
-                  max_rounds=int(raw.get("max_rounds", 3)))
-    graph.entry()          # fail at load rather than at the first step of a run
-    return graph

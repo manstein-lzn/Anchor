@@ -15,12 +15,22 @@ export type OurGraph = {
   objective?: string;
   max_rounds?: number;
   agents: Record<string, { model: string; instructions?: string; network?: boolean }>;
-  nodes: { id: string; agent: string }[];
+  /** Graphs this file declares, which a node may run instead of an agent. The canvas shows one as a
+   *  module; a run never sees this shape — it reads the expansion, where every module is inlined. */
+  graphs?: Record<string, unknown>;
+  nodes: OurNode[];
   edges: { from: string; to: string }[];
   /** Where nodes were dragged to. Beside the definition, not part of it: a node's position is not
    *  something the graph means, and a run must not be affected by it. */
   layout?: { positions?: Record<string, { x: number; y: number }> };
 };
+
+/** A node runs an agent or a graph, never both and never neither.
+ *
+ * `with` is what this use adds to what the role already says, which is what makes declaring a role
+ * separately from its nodes worth doing: two nodes can share one and still be asked for different
+ * things. */
+export type OurNode = { id: string; agent?: string; graph?: string; with?: string };
 
 export type OurNodeResult = {
   node_id: string;
@@ -77,7 +87,13 @@ export function asDefinition(graph: OurGraph, name: string): Definition {
   return {
     graph_id: name,
     name,
-    nodes: graph.nodes.map(node => ({ id: node.id, type: 'agent' as const, name: node.id })),
+    nodes: graph.nodes.map(node => ({
+      id: node.id,
+      type: node.graph ? 'subgraph' as const : 'agent' as const,
+      // A module is named for the graph it runs, so the canvas says which module rather than
+      // printing the node's own id twice.
+      name: node.graph ? `${node.id} · ${node.graph}` : node.id,
+    })),
     edges: graph.edges.map(edge => ({ source: edge.from, target: edge.to })),
     entry_node_id: graph.entry,
   };
