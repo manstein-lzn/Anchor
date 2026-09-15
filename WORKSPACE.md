@@ -1,5 +1,11 @@
 # Workspace 设计 v2：控制面 + 内容面 = 恢复闭包
 
+> **Historical.** This describes the runtime as it was before commit `9a7497f` ("Remove what was
+> built before anything ran, and keep what runs"), which deleted the canonical state store, the
+> seven services, the leases, the operation ledger, the graph versions, the API and the console.
+> The product intent here may still be a backlog; the implementation it describes is not in this
+> branch. `README.md` says what is.
+
 > **状态**：设计提案（v2），已纳入外部调研结论与五轮评审。
 > **配套**：`CONTENT_COMMIT_PROTOCOL.md`（提交/对账协议）、`WORKSPACE_STORAGE.md`（物理存储与回收）。
 > **本文件只定义架构边界与不变量，不含实现计划。**

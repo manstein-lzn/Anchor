@@ -1,5 +1,9 @@
 # deep-research-loop.bundle.json
 
+> **Historical.** It documents a Graph Bundle, a concept removed in commit `9a7497f`.
+> `deep-research-loop.bundle.json` no longer loads: it has no `agents` key, which every graph now
+> requires.
+
 Anchor 第一个官方 Graph Bundle：`plan → research → review → check(loop) → report`。
 
 - `review` 拿双份输入：`research` 的 work（含 `addressed` 回应链）+ `plan` 直连的

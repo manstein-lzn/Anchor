@@ -1,5 +1,11 @@
 # 内容提交与对账协议
 
+> **Historical.** This describes the runtime as it was before commit `9a7497f` ("Remove what was
+> built before anything ran, and keep what runs"), which deleted the canonical state store, the
+> seven services, the leases, the operation ledger, the graph versions, the API and the console.
+> The product intent here may still be a backlog; the implementation it describes is not in this
+> branch. `README.md` says what is.
+
 > **配套**：`WORKSPACE.md`（架构边界）。本文件只解决一个问题：
 > **内容已冻结、控制事件尚未提交时崩溃，如何保证恢复闭包不被破坏。**
 

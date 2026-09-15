@@ -42,7 +42,6 @@ where = ["src"]
 [tool.ruff]
 target-version = "py312"
 line-length = 120
-extend-exclude = ["migrations"]
 
 [tool.ruff.lint]
 # Correctness and architecture rules only; style noise is out of scope.
@@ -62,6 +61,5 @@ warn_unused_ignores = true
 pythonpath = ["src"]
 addopts = "-q"
 markers = [
-    "postgres: requires ANCHOR_TEST_POSTGRES_URL pointing to a disposable migrated database",
     "provider: makes one real model call; requires a configured runtime profile and its secret. Skips when the profile or the secret is absent, so a checkout without credentials still runs the suite.",
 ]

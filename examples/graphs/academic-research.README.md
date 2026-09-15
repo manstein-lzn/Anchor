@@ -1,5 +1,11 @@
 # Academic Literature Review
 
+> **Historical.** The graph it documents, `academic-research.json`, is from before commit `9a7497f`
+> and no longer loads: it has no `agents` key, which every graph now requires. The install and run
+> instructions below name `scripts/academic_research.py`, `alembic` and the worker services, none of
+> which are in this branch. `academic.json` and `academic-simple.json` are the current versions of
+> this workflow.
+
 A reusable online literature-review workflow. It researches a topic in rounds,
 writes a reader-facing survey, and has the result independently reviewed:
 

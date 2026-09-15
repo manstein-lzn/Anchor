@@ -4,8 +4,12 @@ Define an agent graph, run it, and each node works in its own directory inside a
 the whole thing.
 
 ```bash
-anchor-graph examples/graphs/academic-simple.json --objective "写一篇综述" --work /tmp/run
+mkdir -p /tmp/survey && cp examples/graphs/academic-simple.json /tmp/survey/graph.json
+anchor-graph /tmp/survey --objective "写一篇综述"
 ```
+
+`anchor-graph` takes the directory holding `graph.json`, not the graph file itself, and leaves its
+runs in a `runs/` beside it.
 
 A graph is a JSON file. A node is an agent with a directory. An edge says which nodes' work a node
 starts from. A run seeds each node's directory with its inputs' directories, lets it work, and hands
@@ -70,19 +74,30 @@ body, and from ours.
 ## Where a run leaves things
 
 ```
-<work>/<node>/
-  …                 whatever the node produced
-  trace.jsonl       the conversation: every message, in order
+<workspace>/graph.json
+<workspace>/runs/<run id>/
+  run.json              where the run got to, and what each node said when it finished
+  <node>/               whatever the node produced
+  <node>.trace.jsonl    the conversation: every message, in order
 ```
 
-`trace.jsonl` is the debugging surface. Without it, what an agent did has to be inferred by
+The trace sits beside its node's directory, never inside it. Inside it is a file the agent can read,
+and one did: it found its own conversation, concluded that nothing prior existed except the trace
+file, and reasoned about that instead of its task.
+
+`<node>.trace.jsonl` is the debugging surface. Without it, what an agent did has to be inferred by
 re-running it; with it, "it searched 47 times and adapted around a source that kept refusing" is a
 thing you read.
 
 ## What is not here
 
-No runs database, no leases, no recovery, no graph versions, no approval gates, no evidence
-ledger, no context engine, no web console, no services. Those existed and were removed: they were
-built before anything ran end to end, and what they mostly did was make runs stop without saying so.
+No runs database, no leases, no graph versions, no approval gates, no evidence ledger, no context
+engine, no services. Those existed and were removed: they were built before anything ran end to end,
+and what they mostly did was make runs stop without saying so.
+
+What survives of recovery is reading `run.json` back and stepping again — `--resume`, and
+`anchor-serve` restarting the runs it finds unfinished. The canvas in `apps/web` is a view of the same
+`graph.json` a run reads, and `anchor-serve` publishes it and the runs together. Neither is the
+machinery that was removed: there is no lease to reconcile and no version to publish.
 
 `DECISIONS.md` keeps the record of that, including the parts that were mistakes.
