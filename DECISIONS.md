@@ -1388,3 +1388,39 @@ immutable and a later write cannot change what a downstream node already read. T
 git worktrees, which is what `archive` exists for. A node that writes freely can also write badly,
 and the answer is the checks — which now run on something that persists instead of on a response
 that would otherwise have been discarded, which is an improvement in its own right.
+
+## ADR-055: A provider test skips on an absent profile or secret, and fails on an invalid one
+
+`tests/test_context_compaction.py` holds the only two tests that make a real model call, and the
+`provider` marker in `pyproject.toml` states what they owe a checkout without credentials: they
+"skip when the profile or the secret is absent, so a checkout without credentials still runs the
+suite". The `_live_gateway` helper kept that promise in neither case.
+
+**Both gaps were measured, not reasoned about.** With `ANCHOR_RUNTIME_CONFIG` pointed at a path
+that does not exist, the two tests failed with `RuntimeError: runtime config not found`: the raise
+happens inside `load_runtime_config`, before the helper's guards, which covered only "no profile
+with a declared window" and "the model could not be constructed". With a profile present whose
+`secret_file` names a file that does not exist, they failed with `SecretUnavailable:
+DEEPSEEK_API_KEY`, because nothing resolved the secret until the call itself — so an absent secret
+surfaced as a failed assertion rather than as a skip. A fresh clone is the first case, and is how
+this was found; the guard that was missing for it had been missing since the helper was written.
+
+**What the helper does now.** The profile path is checked for existence before the load, and the
+secret is resolved through the same `ChainedSecretProvider` the gateway uses before the call is
+made. Absence skips; being wrong still fails. Verified by running the two tests against three
+configurations: a missing profile skips, a missing secret skips, and a profile that exists but does
+not parse still fails.
+
+**What it deliberately does not do.** It does not catch `RuntimeError` around the load. That would
+have been one line and would have been wrong: `load_runtime_config` raises the same type for "not
+found" and "invalid", so a broad catch reports a mistyped or malformed profile as a machine without
+credentials. Those need different actions from an operator, and a suite that cannot tell them apart
+is a suite that teaches the wrong lesson. This is B4 applied to a test.
+
+**A document literal that had drifted with it.** `API.md` stated the current schema revision was
+`0009_edge_decisions` while the migrations had reached `0021_workspace_writer`, twelve revisions
+later — so a reader following the setup instructions could not tell whether the database they had
+just migrated was the current one. The literal is corrected, and
+`test_the_api_document_states_the_revision_alembic_actually_has` reads the head from alembic's
+`ScriptDirectory` and fails on any future drift. A sentence in a document is a claim about code;
+the ones that can be checked should be, because the ones that cannot are read as decoration.
