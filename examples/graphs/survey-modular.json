@@ -8,19 +8,19 @@
     "gatherer": {
       "model": "models.academic",
       "network": true,
-      "instructions": "The planner's workspace is mounted read-only at `/in/plan`. Read `/in/plan/plan.md` and copy it into your own directory — the drafter is given your directory, not the planner's, and it needs the plan. Find one paper per point that supports it, using `anchor-scholarly search` and `anchor-scholarly read`. Write `sources.md`: a number, the title, the year, and the one line it contributes. Do not write prose for a reader."
+      "instructions": "Read the plan you were given. Find one paper per point that supports it, using `anchor-scholarly search` and `anchor-scholarly read`. Write `sources.md`: a number, the title, the year, and the one line it contributes. Do not write prose for a reader."
     },
     "drafter": {
       "model": "models.academic",
-      "instructions": "The gatherer's workspace is mounted read-only at `/in/gather` and the critic's at `/in/write/critique`. Copy `/in/gather/sources.md` into your own directory — the critic reads `sources.md` from yours — then write one paragraph into `draft.md` answering the task from it. If `/in/write/critique/critique.md` is there, it is a critique of what you wrote: rewrite the paragraph to address it rather than starting again."
+      "instructions": "Write one paragraph into `draft.md`, answering the task from `sources.md` — the sources are mounted read-only with what you are given. If a critique is among them, it is of what you wrote: rewrite the paragraph to address it rather than starting again."
     },
     "critic": {
       "model": "models.academic",
-      "instructions": "The drafter's workspace is mounted read-only at `/in/write/draft`. Copy its `draft.md` into your own directory — the editor reads the draft from yours, never from the drafter's. Read it and your own `sources.md`. Write `critique.md`: one concrete problem, quoted, and what would fix it.\n\nThen decide where this goes next and finish with `anchor-route --to <draft|settle> --reason \"…\"` and nothing after it. Route to `draft` if the paragraph still has a problem worth another pass. Route to `settle` if it does not."
+      "instructions": "Read the draft you were given, and the sources behind it. Write `critique.md`: one concrete problem, quoted, and what would fix it.\n\nThen decide where this goes next and finish with `anchor-route --to <draft|settle> --reason \"…\"` and nothing after it. Route to `draft` if the paragraph still has a problem worth another pass. Route to `settle` if it does not."
     },
     "editor": {
       "model": "models.academic",
-      "instructions": "The critic's workspace is mounted read-only at `/in/write/critique`. Read its `draft.md`. Write `final.md` containing the paragraph plus a one-line heading above it, and nothing else. Finish with `anchor-done --summary \"what it says\"`."
+      "instructions": "Read the draft, which is reachable through the critique you were given. Write `final.md` containing the paragraph plus a one-line heading above it, and nothing else. Finish with `anchor-done --summary \"what it says\"`."
     }
   },
   "graphs": {

@@ -295,8 +295,8 @@ def test_a_module_runs_as_directories_named_for_its_scope(tmp_path, monkeypatch)
         assert (run_dir / node).is_dir(), f"{node} should have its own directory"
     # The scope travels in the pointer too, so a module's node is not confused with one of the same
     # name elsewhere in the graph.
-    assert [(g.node_id, g.mount) for g in seen["use/b"]] == [("use/a", "/in/use/a")]
-    assert [(g.node_id, g.mount) for g in seen["out"]] == [("use/b", "/in/use/b")]
+    assert [(g.node_id, g.mount) for g in seen["use/b"] if g.direct] == [("use/a", "/in/use/a")]
+    assert [(g.node_id, g.mount) for g in seen["out"] if g.direct] == [("use/b", "/in/use/b")]
     # And the run records the graph it actually read, modules already inlined.
     written = json.loads((run_dir / "graph.json").read_text(encoding="utf-8"))
     assert [item["id"] for item in written["nodes"]] == ["in", "use/a", "use/b", "out"]
@@ -565,3 +565,68 @@ def test_a_snapshot_keeps_a_symlink_a_node_left_behind(tmp_path):
     # And what the node chose not to commit is not handed on: that is the honest reading of
     # `.gitignore`, and it is what makes the pointer a snapshot rather than an approximation.
     assert not (view / "scratch.txt").exists()
+
+
+# -- what a node can reach, and what it must not grow into ---------------------------------------
+
+
+def _chain(edges, nodes=("a", "b", "c")):
+    return {"entry": nodes[0], "objective": "test",
+            "agents": {"w": {"model": "models.academic"}},
+            "nodes": [{"id": n, "agent": "w"} for n in nodes],
+            "edges": [{"from": s, "to": t} for s, t in edges]}
+
+
+def test_a_node_reaches_the_work_behind_its_inputs(tmp_path, monkeypatch):
+    """An output is only what a node left in its own workspace, so nothing carries a plan down a chain.
+
+    Under copying, `c` would have received `a`'s file for free. Under pointers it receives a pointer
+    to `b` and nothing else — so either `b` copies `a` forward, by hand and by memory, or the work
+    behind an input is mounted as well. This is the second, and it is the whole reason the examples
+    stopped needing those copying instructions.
+    """
+    workspace = _workspace(tmp_path, _chain([("a", "b"), ("b", "c")]))
+    seen: dict[str, tuple] = {}
+
+    def fake_agent_for(_g, node_id, directory, _m, _s, _c, inputs=(), trace=None, script=None):
+        seen[node_id] = inputs
+        return _StubAgent(Path(directory), {f"{node_id}.md": node_id}, "Submitted", None)
+
+    monkeypatch.setattr(runner, "_config", lambda path: ({}, None))
+    monkeypatch.setattr(runner, "_agent_for", fake_agent_for)
+
+    runner.run(workspace, config_path=tmp_path / "unused.json")
+
+    assert [g.node_id for g in seen["a"]] == []
+    assert [g.node_id for g in seen["b"] if g.direct] == ["a"]
+    assert [g.node_id for g in seen["c"] if g.direct] == ["b"]
+    assert [g.node_id for g in seen["c"] if not g.direct] == ["a"], \
+        "c has an edge from b, and b was built from a — that is what it can reach"
+    # Reached rather than given: the difference is only what the prompt pushes.
+    assert all(not g.direct for g in seen["c"] if g.node_id == "a")
+
+
+def test_what_a_node_is_handed_does_not_grow_with_the_loop(tmp_path, monkeypatch):
+    """A back edge carries the loop's current state, which has already superseded the round before.
+
+    Following one pulls in every earlier round, so what a node is handed would grow with how long the
+    run had been going rather than with the shape of the graph: measured on a loop like this one, three
+    commits in the first round, nine by the third and thirty by the tenth. It is a constant here.
+    """
+    graph = _chain([("a", "b"), ("b", "a")], nodes=("a", "b"))
+    graph["max_rounds"] = 2
+    workspace = _workspace(tmp_path, graph)
+    sizes: list[int] = []
+
+    def fake_agent_for(_g, node_id, directory, _m, _s, _c, inputs=(), trace=None, script=None):
+        sizes.append(len(inputs))
+        return _StubAgent(Path(directory), {f"{node_id}.md": node_id}, "Submitted",
+                          "b" if node_id == "a" else "a")
+
+    monkeypatch.setattr(runner, "_config", lambda path: ({}, None))
+    monkeypatch.setattr(runner, "_agent_for", fake_agent_for)
+
+    state = runner.run(workspace, config_path=tmp_path / "unused.json")
+
+    assert state.executed == ["a", "b", "a", "b"], "the loop should have gone round twice"
+    assert sizes == [0, 1, 1, 1], f"the third and fourth passes reach no further than the second: {sizes}"

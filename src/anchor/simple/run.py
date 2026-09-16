@@ -130,7 +130,12 @@ class RunState:
     activations: dict[str, int] = field(default_factory=dict)
     last_seq: dict[str, int] = field(default_factory=dict)
     decided: dict[str, list] = field(default_factory=dict)
+    # The latest pass of each node, which is what an edge resolves to.
     nodes: dict[str, dict] = field(default_factory=dict)
+    # Every pass, keyed "{node}|{commit}". `nodes` overwrites, so without this a pointer to an
+    # earlier pass could name a commit and nothing could say what that commit was handed — which is
+    # exactly what following a line of work needs.
+    history: dict[str, dict] = field(default_factory=dict)
     executed: list[str] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)
     seq: int = 0
@@ -155,9 +160,24 @@ class RunState:
     def load(cls, run_dir: Path) -> "RunState":
         return cls(**json.loads((run_dir / "run.json").read_text(encoding="utf-8")))
 
+    @staticmethod
+    def _as_result(data: dict) -> NodeResult:
+        return NodeResult(**{**data, "files": tuple(data["files"]),
+                             "inputs": tuple(tuple(item) for item in data.get("inputs", ()))})
+
     def result(self, node_id: str) -> NodeResult | None:
         data = self.nodes.get(node_id)
-        return NodeResult(**{**data, "files": tuple(data["files"])}) if data else None
+        return self._as_result(data) if data else None
+
+    def pass_result(self, node_id: str, commit: str) -> NodeResult:
+        """One named pass, or a refusal. A pointer that cannot be resolved is not a missing file:
+        it means the record and the pointer disagree, and carrying on would mount nothing and say
+        nothing."""
+        data = self.history.get(f"{node_id}|{commit}")
+        if data is None:
+            raise RuntimeError(f"no record of {node_id} at commit {commit[:12]}, so the pointer to "
+                               f"it cannot be resolved")
+        return self._as_result(data)
 
 
 def _now() -> str:
@@ -172,6 +192,8 @@ def _files(tree: Path) -> tuple[str, ...]:
 def _task(graph: graph_module.Graph, node_id: str, objective: str,
           sources: list[NodeResult], inputs: tuple[_Given, ...]) -> str:
     lines = [f"# Task\n\n{objective}"]
+    reached = [item for item in inputs if not item.direct]
+    inputs = tuple(item for item in inputs if item.direct)
     if inputs:
         lines.append(
             "# What you were given\n\n"
@@ -191,6 +213,15 @@ def _task(graph: graph_module.Graph, node_id: str, objective: str,
                          f"given is {item.commit[:12]}:\n\n"
                          f"    git --git-dir={item.mount}/.git log --oneline\n"
                          f"    git --git-dir={item.mount}/.git show <commit>")
+    if reached:
+        lines.append(
+            "# What you can reach\n\n"
+            "The work those were built from is mounted read-only as well. **You are not expected to "
+            "read it** — it is there so that you can look when the task calls for it:\n\n"
+            + "\n".join(f"    {item.mount}   ({item.node_id} at {item.commit[:12]})"
+                        for item in reached)
+            + "\n\nEach is at the commit it had when it fed this line of work, not its latest. "
+              "`git --git-dir=<mount>/.git log` reads the rest of that node's history.")
     lines.append(
         "# Your own workspace\n\n"
         "You work in `/workspace`, which is yours alone. It is kept between your passes, so if you "
@@ -258,6 +289,9 @@ class _Given:
     commit: str
     mount: str
     tree: Path
+    # Given by an edge this node selected, rather than reached by following the work back. The
+    # distinction is only about what the prompt pushes: both are mounted and both are readable.
+    direct: bool = True
 
     def binds(self) -> tuple[tuple[str, str], ...]:
         """The tree at that commit, and the repository behind it so the history stays readable."""
@@ -309,7 +343,7 @@ def _materialize(repo: Path, commit: str, into: Path) -> Path:
     return into
 
 
-def _given(run_dir: Path, result: NodeResult) -> _Given:
+def _given(run_dir: Path, result: NodeResult, *, direct: bool = True) -> _Given:
     """Where a pointer lands, and what it points at."""
     if not result.commit:
         raise RuntimeError(f"{result.node_id} has no commit, so there is nothing to point at")
@@ -318,7 +352,55 @@ def _given(run_dir: Path, result: NodeResult) -> _Given:
     # The mount is named for the node, so a module's nodes keep their scope: `/in/write/draft` is the
     # draft node of the `write` module, not a node called `draft` somewhere else.
     return _Given(node_id=result.node_id, commit=result.commit,
-                  mount=f"/in/{result.node_id}", tree=tree)
+                  mount=f"/in/{result.node_id}", tree=tree, direct=direct)
+
+
+def _handed(run_dir: Path, graph: graph_module.Graph, state: RunState, node_id: str,
+            direct: list[NodeResult]) -> tuple[_Given, ...]:
+    """Everything a node is handed: its inputs, and what those inputs were themselves built from.
+
+    A node downstream of a pipeline needs the plan as well as the draft, and under pointers nothing
+    carries it along the chain — the node in the middle would have to copy it forward, which is the
+    pass-through this design removed, done by hand and by memory.
+
+    The following stops at a **back edge**. A back edge says the loop came round again, so what it
+    carries is the loop's *current* state, and that state has already superseded the round it came
+    from. Following one pulls in every earlier round: measured on a three-node loop, what a node is
+    handed was 3 commits in round one, 9 by round three and 30 by round ten — unbounded in how long
+    the run has been going, which is not a property anyone wants the prompt to have. Stopping at the
+    back edge makes it constant, and what remains is bounded by the shape of the graph instead.
+    """
+    back = graph_module.back_edges(graph)
+    position = {key: index for index, key in enumerate(state.history)}
+
+    # One mount per node, and the newest pass wins. A later pass supersedes an earlier one, and two
+    # bindings at the same path leave whichever bubblewrap applied last: the first run of this had
+    # `work/check` handed `work/draft@2` and also reaching `work/draft@1` through the critique it
+    # wrote the round before, so it read v1, asked for another pass, and the loop never converged.
+    out: dict[str, _Given] = {}
+    stack: list[NodeResult] = []
+    for result in direct:
+        out[result.node_id] = _given(run_dir, result, direct=True)
+        stack.append(result)
+    while stack:
+        current = stack.pop()
+        for source, commit in current.inputs:
+            if source == node_id:
+                # Its own earlier pass. The node is standing in that workspace, and the passes before
+                # this one are in its own history, so a pointer to itself would be a second, older
+                # copy of the thing it is already working on.
+                continue
+            if (source, current.node_id) in back:
+                continue                    # the loop's current state, not a line of work to re-read
+            existing = out.get(source)
+            if existing is not None and (
+                    existing.direct
+                    or position.get(f"{source}|{existing.commit}", -1) >= position.get(f"{source}|{commit}", -1)):
+                continue
+            upstream = state.pass_result(source, commit)
+            out[source] = _given(run_dir, upstream, direct=False)
+            stack.append(upstream)
+    return tuple(out.values())
 
 
 def _incoming(graph: graph_module.Graph, state: RunState, decided: dict,
@@ -407,8 +489,8 @@ def _next_step(graph: graph_module.Graph, state: RunState, decided: dict, run_di
         node_id = cursor["node"]
         return _Step(node_id, cursor["pass"], Path(cursor["dir"]), None, True,
                      trace=_trace_path(run_dir, node_id, cursor["run"]),
-                     inputs=tuple(_given(run_dir, item)
-                                  for item in _incoming(graph, state, decided, node_id)))
+                     inputs=_handed(run_dir, graph, state, node_id,
+                                    _incoming(graph, state, decided, node_id)))
     # A node the ceiling already turned away stays turned away. Settling its out-edges is not enough
     # on its own: in a cycle of two or more, the node is still "fresh" through the edge coming back
     # into it, so it is chosen again, turned away again, and the run spins printing `stopped` forever.
@@ -449,8 +531,10 @@ def _next_step(graph: graph_module.Graph, state: RunState, decided: dict, run_di
     run_number = state.runs.get(node_id, 0) + 1
     state.attempts[f"{node_id}|{run_number}"] = \
         state.attempts.get(f"{node_id}|{run_number}", 0) + 1
+    # `handed` is what the edges gave, which is what the prompt pushes; `inputs` is everything
+    # mounted, which is what it can reach.
     handed = _incoming(graph, state, decided, node_id)
-    inputs = tuple(_given(run_dir, item) for item in handed)
+    inputs = _handed(run_dir, graph, state, node_id, handed)
     state.passes[node_id] = number
     state.runs[node_id] = run_number
     state.seq += 1
@@ -518,6 +602,7 @@ def _record(state: RunState, graph: graph_module.Graph, run_dir: Path,
     # it would file it as a result — the next attempt continues from the same directory instead.
     result = replace(result, commit=_freeze(Path(result.tree), result.submission))
     state.nodes[result.node_id] = {**asdict(result), "files": list(result.files)}
+    state.history[f"{result.node_id}|{result.commit}"] = state.nodes[result.node_id]
     state.executed.append(result.node_id)
     state.cursor = None
     ways = graph.routes(result.node_id)

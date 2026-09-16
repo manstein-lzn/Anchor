@@ -69,15 +69,16 @@ SCRIPT = {
     ],
     "review": [
         "test -f /in/draft/draft.md || { echo 'the pointer to draft was not there'; exit 1; }; "
-        "cp /in/draft/draft.md ./draft.md; "
         "if [ -f review.md ]; then "
         "anchor-route --to done --reason 'the sentence is fine now'; "
         "else printf 'asks for one concrete example\\n' > review.md; "
         "anchor-route --to draft --reason 'one more pass'; fi",
     ],
     "done": [
-        "test -f /in/review/draft.md || { echo 'review did not carry the draft forward'; exit 1; }; "
-        "cp /in/review/draft.md final.md",
+        # Nothing was carried: the reviewer wrote only the review, and the draft is reachable
+        # behind the work this node was given.
+        "test -f /in/draft/draft.md || { echo 'the draft was out of reach'; exit 1; }; "
+        "cp /in/draft/draft.md final.md",
         'anchor-done --summary "produced final.md"',
     ],
 }
@@ -126,10 +127,10 @@ def test_a_loop_runs_end_to_end_without_a_provider(tmp_path):
         "the record has to say which commit this pass read"
     assert len(list((run_dir / ".views").glob("draft-*"))) == 2, \
         "a view per commit, or the first pass would have been read through the second's"
-    # And what a node produced is its own: `review` holds the critique and the draft it carried
-    # forward, and nothing else — not a copy of everything before it.
+    # And what a node produced is its own: `review` holds its critique and nothing else. It did not
+    # carry the draft, and `done` reached the draft anyway.
     assert sorted(item.name for item in (run_dir / "review").iterdir() if item.is_file()) == \
-        ["draft.md", "review.md"]
+        ["review.md"]
     assert sorted(item.name for item in (run_dir / "done").iterdir() if item.is_file()) == \
         ["final.md"]
 
@@ -177,7 +178,8 @@ NESTED_SCRIPT = {
         "grep -q v2 /in/work/draft/draft.md 2>/dev/null && "
         "anchor-route --to work/done --reason 'good' || "
         "anchor-route --to work/draft --reason 'again'"],
-    "work/done": ["cp /in/work/check/draft.md final.md", 'anchor-done --summary "refined"'],
+    "work/done": ["test -f /in/work/draft/draft.md || exit 1; "
+                  "cp /in/work/draft/draft.md final.md", 'anchor-done --summary "refined"'],
     # Its own workspace is what tells it which visit it is on, exactly as it would for a model.
     "review": ["if [ -f asked ]; then anchor-route --to ship --reason 'accepted'; "
                "else touch asked; anchor-route --to work/draft --reason 'once more'; fi"],

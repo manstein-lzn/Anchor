@@ -60,14 +60,16 @@ REVISE_SCRIPT = {
     ],
     "review": [
         "test -f /in/draft/draft.md || { echo 'the draft was not mounted where it was said to be'; "
-        "exit 1; }; cp /in/draft/draft.md ./draft.md; "
+        "exit 1; }; "
         "if [ -f review.md ]; then anchor-route --to done --reason 'the sentence holds'; "
         "else printf 'asks for one concrete example\\n' > review.md; "
         "anchor-route --to draft --reason 'one more pass'; fi",
     ],
     "done": [
-        "test -f /in/review/draft.md || { echo 'the reviewer did not carry the draft forward'; exit 1; }; "
-        "cp /in/review/draft.md final.md",
+        # The reviewer wrote only the review. The draft is here because it is behind what `done`
+        # was given, which is the thing that used to need the reviewer to copy it forward by hand.
+        "test -f /in/draft/draft.md || { echo 'the draft was out of reach'; exit 1; }; "
+        "cp /in/draft/draft.md final.md",
         'anchor-done --summary "finished"',
     ],
 }
@@ -95,5 +97,7 @@ def test_the_revise_loop_actually_revises(tmp_path):
     # The second draft is the first one revised, which is the whole of what the loop is for.
     assert (run_dir / "done" / "final.md").read_text(encoding="utf-8").strip() == \
         "addresses what the review asked for"
-    # And the reviewer's commit carries the draft it was handed, which is how `done` can read it.
-    assert (run_dir / "review" / "draft.md").is_file(), "the middle node did not carry it forward"
+    # The reviewer copied nothing: its workspace is its own work, and `done` reached the draft
+    # anyway, which is the whole of what used to need the middle node to carry it along.
+    assert sorted(item.name for item in (run_dir / "review").iterdir() if item.is_file()) == \
+        ["review.md"], "the reviewer carried something forward instead of pointing at it"
