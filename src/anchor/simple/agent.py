@@ -221,15 +221,22 @@ class SandboxEnvironment(LocalEnvironment):
     def _check_finished(self, output: dict) -> None:
         """Recognise the way out, which depends on how many ways out there are.
 
-        A node with one edge out finishes the ordinary way. A node with more than one cannot finish
-        that way at all: the ordinary sentinel is not accepted, so the loop keeps going and the only
-        exit is `anchor-route`, which names a target. Submitting and routing are then the same act,
-        and a node cannot leave the graph without having chosen where it goes — which is the failure
-        a separate route command would have had.
+        A node with one edge out finishes the ordinary way: the edge follows from the graph and the
+        node has nothing to decide, which is the rule the README states and `_task` writes into the
+        prompt. A node with more than one cannot finish that way at all: the ordinary sentinel is not
+        accepted, so the loop keeps going and the only exit is `anchor-route`, which names a target.
+        Submitting and routing are then the same act, and a node cannot leave the graph without
+        having chosen where it goes.
+
+        This read `if not self.routes`, which meant only a node with *no* way out could finish the
+        ordinary way — so every non-terminal node in every graph was told by its prompt to run
+        `anchor-done` and then refused for doing it, one wasted turn each. A model that reads the
+        correction recovers, which is why it survived: the pointer run's log shows `route: "b"` where
+        its instruction said `anchor-done`.
         """
         text = output.get("output", "")
         first = next((line.strip() for line in text.lstrip().splitlines() if line.strip()), "")
-        if not self.routes:
+        if len(self.routes) <= 1:
             super()._check_finished(output)
             return
         if not first.startswith("ANCHOR_ROUTE:"):
@@ -318,21 +325,40 @@ class TracingAgent(DefaultAgent):
         return self.messages[-1].get("extra", {})
 
 
-def build_agent(*, tree: Path, node_id: str, instructions: str, routes: tuple[str, ...],
-                model_name: str, model_kwargs: dict, network: bool, timeout_seconds: float,
-                max_steps: int, wall_time_limit_seconds: int,
-                inputs: tuple[tuple[str, str], ...] = (), trace: Path | None = None):
-    """A node's agent: their loop, their model client, our environment."""
-    from minisweagent.models.litellm_model import LitellmModel
+def scripted_model(commands: list[str]):
+    """A model that answers with the commands a script wrote down, in order.
 
-    model = LitellmModel(
-        model_name=model_name,
-        model_kwargs=model_kwargs,
-        # litellm has no price for every model, and mini raises rather than reporting an unknown
-        # cost. Ignoring it costs the cost limit — a node is bounded by turns and wall-clock, which
-        # are bounds we set ourselves and can reason about.
-        cost_tracking="ignore_errors",
-    )
+    Only the model is replaced. The loop, the sandbox, the mounts, the commits and the record are all
+    the real ones, so a run against this is evidence about the runtime rather than about a model — and
+    it costs nothing, which matters when the alternative is paying a provider to find out whether an
+    accounting change broke the scheduler. `DeterministicModel` is mini-swe-agent's own test double.
+    """
+    from minisweagent.models.test_models import DeterministicModel, make_output
+
+    return DeterministicModel(
+        outputs=[make_output(content="", actions=[{"command": command}]) for command in commands],
+        cost_per_call=0.0)
+
+
+def build_agent(*, tree: Path, node_id: str, instructions: str, routes: tuple[str, ...],
+                network: bool, timeout_seconds: float, max_steps: int, wall_time_limit_seconds: int,
+                model_name: str = "", model_kwargs: dict | None = None,
+                inputs: tuple[tuple[str, str], ...] = (), trace: Path | None = None,
+                script: list[str] | None = None):
+    """A node's agent: their loop, their model client (or a scripted one), our environment."""
+    if script is not None:
+        model = scripted_model(script)
+    else:
+        from minisweagent.models.litellm_model import LitellmModel
+
+        model = LitellmModel(
+            model_name=model_name,
+            model_kwargs=model_kwargs or {},
+            # litellm has no price for every model, and mini raises rather than reporting an unknown
+            # cost. Ignoring it costs the cost limit — a node is bounded by turns and wall-clock, which
+            # are bounds we set ourselves and can reason about.
+            cost_tracking="ignore_errors",
+        )
     return TracingAgent(
         model, SandboxEnvironment(tree=tree, node_id=node_id, routes=routes, network=network,
                                   timeout_seconds=timeout_seconds, inputs=inputs),

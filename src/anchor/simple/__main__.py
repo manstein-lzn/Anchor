@@ -5,12 +5,17 @@
 
 A workspace holds `graph.json` and a `runs/` directory. Each run makes a new directory there, named
 for the moment it started, and leaves it: the history is a record, not something a later run reads.
+
+`ANCHOR_MODEL_SCRIPT` names a JSON file mapping a node id to the commands it should be given, one per
+turn. It replaces the model and nothing else — the loop, the sandbox, the mounts and the commits are
+the real ones — so a run can be exercised end to end without a provider. Off unless set.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 
 from anchor.simple import run as runner
@@ -29,8 +34,11 @@ def main() -> None:
                         help="pick up a run that a previous process left unfinished")
     args = parser.parse_args()
 
+    written = os.environ.get("ANCHOR_MODEL_SCRIPT")
+    model_script = json.loads(Path(written).read_text(encoding="utf-8")) if written else None
+
     state = runner.run(args.workspace, objective=args.objective, config_path=args.config,
-                       resume=args.resume)
+                       resume=args.resume, model_script=model_script)
     print(json.dumps({"status": state.status, "executed": state.executed,
                       "skipped": state.skipped}, ensure_ascii=False))
 

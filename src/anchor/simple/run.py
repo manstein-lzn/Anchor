@@ -102,6 +102,9 @@ class NodeResult:
     # readable after a later one has written over it — and what a downstream node reads the history
     # through.
     commit: str = ""
+    # What this pass was handed, as (node, commit). The pointers are pinned, so naming them here is
+    # what makes "what did this node read" answerable rather than reconstructable.
+    inputs: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass
@@ -203,9 +206,11 @@ def _task(graph: graph_module.Graph, node_id: str, objective: str,
     return "\n\n".join(lines)
 
 
-def _result_of(node_id: str, agent, directory: Path, number: int, outcome: dict) -> NodeResult:
+def _result_of(node_id: str, agent, directory: Path, number: int, outcome: dict,
+               given: tuple[_Given, ...] = ()) -> NodeResult:
     """What a node leaves behind: its words, its files, and how it got out."""
     return NodeResult(node_id=node_id, agent=agent, tree=str(directory), pass_number=number,
+                      inputs=tuple((item.node_id, item.commit) for item in given),
                       submission=str(outcome.get("submission") or ""), files=_files(directory),
                       submitted=outcome.get("exit_status") == "Submitted",
                       route=getattr(agent, "route", None),
@@ -452,12 +457,19 @@ def _secret(secret_file: str | None, model: dict) -> str:
 
 
 def _agent_for(graph, node_id: str, directory: Path, models: dict, secret_file, config_path,
-               inputs: tuple[_Given, ...] = (), trace: Path | None = None):
+               inputs: tuple[_Given, ...] = (), trace: Path | None = None,
+               script: list[str] | None = None):
     node = graph.nodes[node_id]
     spec = graph.agents[node.agent]
-    model = models.get(spec.model)
-    if model is None:
-        raise ValueError(f"no model named {spec.model!r} in {config_path}")
+    # A scripted node needs no model profile and no secret: nothing is being called.
+    model_name, model_kwargs = "", {}
+    if script is None:
+        model = models.get(spec.model)
+        if model is None:
+            raise ValueError(f"no model named {spec.model!r} in {config_path}")
+        model_name = f"openai/{model['model']}" if model.get("base_url") else model["model"]
+        model_kwargs = {"api_base": model["base_url"], "api_key": _secret(secret_file, model),
+                        "max_tokens": model.get("max_tokens", 8192)}
     # What this use adds to what the role already says. A role is declared once so it can be used
     # more than once, and two uses that differ only in their framing differ here.
     instructions = (f"{spec.instructions}\n\n{node.with_}" if spec.instructions and node.with_
@@ -465,21 +477,22 @@ def _agent_for(graph, node_id: str, directory: Path, models: dict, secret_file, 
     return build_agent(
         tree=directory, node_id=node_id, routes=graph.routes(node_id),
         instructions=instructions,
-        model_name=f"openai/{model['model']}" if model.get("base_url") else model["model"],
-        model_kwargs={"api_base": model["base_url"], "api_key": _secret(secret_file, model),
-                      "max_tokens": model.get("max_tokens", 8192)},
+        model_name=model_name, model_kwargs=model_kwargs,
         # Ten minutes for one command, not five. A batch of literature searches is legitimately
         # slow — a dozen queries at twenty seconds each is already four minutes — and a batch that
         # is killed at five throws away everything it had done.
         network=spec.network, timeout_seconds=600.0,
         max_steps=spec.max_steps or DEFAULT_MAX_STEPS,
         wall_time_limit_seconds=spec.wall_time_limit_seconds,
-        inputs=tuple(bind for item in inputs for bind in item.binds()), trace=trace,
+        inputs=tuple(bind for item in inputs for bind in item.binds()), trace=trace, script=script,
     )
 
 
 def run(workspace: str | Path, *, objective: str | None = None, config_path: str | Path,
-        run_id: str | None = None, resume: str | Path | None = None) -> RunState:
+        run_id: str | None = None, resume: str | Path | None = None,
+        model_script: dict[str, list[str]] | None = None) -> RunState:
+    """Walk the graph. `model_script` replaces the model with written-down commands, per node."""
+
     workspace = Path(workspace).resolve()
     graph_path = workspace / "graph.json"
     graph = graph_module.load(graph_path)
@@ -549,13 +562,14 @@ def run(workspace: str | Path, *, objective: str | None = None, config_path: str
                                   "limit": graph.ceiling(step.node_id)}), flush=True)
                 continue
             agent = _agent_for(graph, step.node_id, step.directory, models, secret_file, config_path,
-                               inputs=step.inputs, trace=step.trace)
+                               inputs=step.inputs, trace=step.trace,
+                               script=None if model_script is None else model_script.get(step.node_id))
             if step.resuming:
                 outcome = agent.resume(_messages(step.trace))
             else:
                 outcome = agent.run(task=step.task)
             result = _result_of(step.node_id, graph.nodes[step.node_id].agent, step.directory,
-                                step.number, outcome)
+                                step.number, outcome, step.inputs)
             result = replace(result, route=getattr(agent.env, "route", None))
             if not _record(state, graph, run_dir, decided, result, settle):
                 print(json.dumps({"run": str(run_dir), "status": state.status,
