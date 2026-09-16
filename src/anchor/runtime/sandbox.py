@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -164,10 +165,20 @@ class BubblewrapWorkspaceSandbox:
         self.binary = binary
         self.allowed_commands = allowed_commands
         _probe(binary)
+        # Whether this host will mount a fresh procfs inside the sandbox. Measured rather than
+        # assumed, because a host can deny it while allowing everything else: a user namespace may
+        # create a mount, and the kernel still refuses a procfs mount there — and then the whole
+        # sandbox fails to start over a mount that only adds convenience. That procfs would belong to
+        # this sandbox's own pid namespace, showing the node its own processes and nothing else, so
+        # leaving it out costs functionality and no isolation at all.
+        self._proc = self._can_mount_proc()
 
-    def run(self, spec: SandboxSpec) -> SandboxResult:
-        _validate(spec, self.allowed_commands)
-        argv = [
+    def _argv(self, spec: SandboxSpec) -> list[str]:
+        """The bubblewrap command line for one execution.
+
+        One place, so the probe below cannot certify a sandbox that differs from the one that runs.
+        """
+        return [
             self.binary, "--unshare-all", "--die-with-parent",
             # `--unshare-all` takes the network away, and `--share-net` gives it back for the nodes
             # whose work is reaching the literature. Nothing else is shared either way.
@@ -185,13 +196,14 @@ class BubblewrapWorkspaceSandbox:
             *(item for source, destination in spec.readonly_binds
               for item in ("--ro-bind", source, destination)),
             "--tmpfs", "/tmp",
+            *(("--proc", "/proc") if self._proc else ()),
             "--dir", SANDBOX_WORKSPACE,
             # Read-write, unlike the rest of the tree, because a node that can only read cannot
             # write a paper. The isolation is unchanged: the bind is the one path it may mutate,
             # and it is the node's own workspace.
             "--bind", str(spec.workspace), SANDBOX_WORKSPACE,
             "--chdir", SANDBOX_WORKSPACE,
-            "--proc", "/proc", "--dev", "/dev",
+            "--dev", "/dev",
             "--setenv", "PATH", ":".join([*spec.tool_dirs, "/usr/bin:/bin"]),
             "--setenv", "HOME", SANDBOX_WORKSPACE,
             "--setenv", "TMPDIR", "/tmp",
@@ -199,9 +211,33 @@ class BubblewrapWorkspaceSandbox:
             *(item for key, value in spec.env for item in ("--setenv", key, value)),
             "--", *spec.command,
         ]
+
+    def _can_mount_proc(self) -> bool:
+        """Run the real command line once with `/proc`, and see whether this host allows it."""
+        workspace = Path(tempfile.mkdtemp(prefix="anchor-proc-probe-"))
+        self._proc = True
         try:
-            completed = subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                       timeout=spec.timeout_seconds, check=False, env={})
+            argv = self._argv(SandboxSpec(workspace=workspace, command=("true",)))
+            try:
+                completed = subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                           timeout=10.0, check=False, env={})
+            except (OSError, subprocess.SubprocessError) as exc:
+                raise RuntimeError(f"sandbox binary {self.binary} could not be run: {exc}") from exc
+        finally:
+            shutil.rmtree(workspace, ignore_errors=True)
+        if completed.returncode == 0:
+            return True
+        detail = completed.stderr.decode("utf-8", errors="replace").strip()
+        if "proc" in detail.lower():
+            return False
+        raise RuntimeError(f"sandbox cannot start: {detail or 'no stderr'}")
+
+    def run(self, spec: SandboxSpec) -> SandboxResult:
+        _validate(spec, self.allowed_commands)
+        try:
+            completed = subprocess.run(self._argv(spec), stdout=subprocess.PIPE,
+                                       stderr=subprocess.PIPE, timeout=spec.timeout_seconds,
+                                       check=False, env={})
         except subprocess.TimeoutExpired as exc:
             return SandboxResult(124, _decode(exc.stdout or b"", spec.max_output_bytes),
                                  _decode(exc.stderr or b"", spec.max_output_bytes), True)

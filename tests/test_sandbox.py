@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from anchor.runtime.sandbox import BubblewrapWorkspaceSandbox
+from anchor.runtime.sandbox import BubblewrapWorkspaceSandbox, SandboxSpec
 
 
 def _fake_bwrap(tmp_path, *, exit_code: int, stderr: str = ""):
@@ -47,3 +47,41 @@ def test_a_missing_binary_is_still_reported_as_missing(tmp_path):
         BubblewrapWorkspaceSandbox(binary=str(tmp_path / "no-such-bwrap"))
 
     assert "not found" in str(caught.value)
+
+
+def _fake_bwrap_py(tmp_path, script: str):
+    """A stand-in written in Python, so the shell quoting of the argv inspection stays readable."""
+    path = tmp_path / "bwrap"
+    path.write_text(f"#!/usr/bin/env python3\n{script}", encoding="utf-8")
+    path.chmod(0o755)
+    return str(path)
+
+
+def test_a_host_that_refuses_procfs_still_gets_a_sandbox(tmp_path):
+    """A host can allow every mount but procfs, and the sandbox should not die over a convenience.
+
+    Measured on a container that creates namespaces and tmpfs mounts happily, and answers
+    `Operation not permitted` to a procfs mount inside a user namespace. Anchor's nodes run there;
+    they simply cannot see /proc, which is a fresh procfs for this sandbox's own pid namespace and
+    so costs functionality rather than isolation.
+    """
+    binary = _fake_bwrap_py(tmp_path, (
+        "import sys\n"
+        "if '--proc' in sys.argv:\n"
+        "    print('bwrap: Can\\'t mount proc on /newroot/proc: Operation not permitted',"
+        " file=sys.stderr)\n"
+        "    sys.exit(1)\n"
+        "sys.exit(0)\n"))
+
+    sandbox = BubblewrapWorkspaceSandbox(binary=binary)
+
+    assert sandbox._proc is False
+    assert "--proc" not in sandbox._argv(SandboxSpec(workspace=tmp_path, command=("sh",))), \
+        "the flag is left out rather than the sandbox being refused"
+
+
+def test_a_host_that_allows_procfs_keeps_it(tmp_path):
+    """The other direction, so the fallback is not simply always on."""
+    sandbox = BubblewrapWorkspaceSandbox(binary=_fake_bwrap_py(tmp_path, "import sys\nsys.exit(0)\n"))
+
+    assert sandbox._proc is True
