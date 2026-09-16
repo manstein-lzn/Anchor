@@ -56,6 +56,13 @@ module they came from. `write/draft` and `write/settle` are ordinary nodes, so a
 attaches to `write/draft` and an edge out of it leaves from `write/settle` — the module's `entry` and
 `exit`.
 
+**Rounds are counted per level.** A scope is a node at the level above — which is exactly what a
+module node becomes when it is expanded — so a module node carries a `max_rounds` like any other, and
+there it means how many times its parent may enter it. The `max_rounds` inside means how many rounds
+each of the module's nodes may take *within one visit*. Both restart at each entry, which is what lets
+a loop of modules and a loop inside one compose: an outer loop does not spend the inner loop's budget.
+A graph whose inner loop needs both of its rounds and whose outer loop comes back still finishes.
+
 Expansion rather than nesting at run time, for one reason above the others: **a node id is a directory
 name**, so `write/draft` lands in `runs/<run>/write/draft/` and the filesystem mirrors the structure
 the author drew. Nothing in the runner knows a module exists. It also settles identity without a
