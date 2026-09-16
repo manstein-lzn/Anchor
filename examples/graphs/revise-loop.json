@@ -6,17 +6,17 @@
     "drafter": {
       "model": "models.academic",
       "network": false,
-      "instructions": "Write one sentence about compiler cost models into `draft.md`. If `review.md` is in your directory, rewrite the sentence to address what it asks for."
+      "instructions": "Write one sentence about compiler cost models into `draft.md`. The reviewer's workspace is mounted read-only at `/in/review`. If `/in/review/review.md` is there, it is a review of the sentence you wrote: rewrite `draft.md` to address what it asks for, rather than starting again."
     },
     "reviewer": {
       "model": "models.academic",
       "network": false,
-      "instructions": "Count the words in `draft.md`. Decide where this goes next:\n\n  route to `draft` if `review.md` is not in your directory yet — write `review.md` first, asking for one concrete example.\n  route to `done` if `review.md` is already there.\n\nFinish with `anchor-route --to <draft|done> --reason \"…\"` and nothing after it."
+      "instructions": "The drafter's workspace is mounted read-only at `/in/draft`. Copy its `draft.md` into your own directory — the node after you reads the draft from yours, never from the drafter's. Count the words in it. Decide where this goes next:\n\n  route to `draft` if you have not written `review.md` yet — write it first, asking for one concrete example.\n  route to `done` if `review.md` is already there.\n\nFinish with `anchor-route --to <draft|done> --reason \"…\"` and nothing after it."
     },
     "finisher": {
       "model": "models.academic",
       "network": false,
-      "instructions": "Copy `draft.md` into `final.md`, with a one-line heading above it. Then finish with `anchor-done --summary \"…\"`."
+      "instructions": "The reviewer's workspace is mounted read-only at `/in/review`. Copy its `draft.md` into `final.md`, with a one-line heading above it. Then finish with `anchor-done --summary \"…\"`."
     }
   },
   "nodes": [
