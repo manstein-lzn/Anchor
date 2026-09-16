@@ -1,23 +1,18 @@
-"""The two ways this runtime could report success for work it did not do.
+"""What a run records, and what it refuses to call success.
 
 Neither needs a model. The scheduler is the thing under test, so the node is replaced by a stub that
-does exactly what a test says and nothing else — the point is what the run records, not what a model
-would have written.
+does exactly what a test says and nothing else — the point is the record, not what a model would have
+written. Everything here runs git for real, because the commit is part of the record.
 """
 
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
-import pytest
-
 from anchor.simple import run as runner
-from anchor.simple.run import InputCollision, _seed
-
-
-# -- seeding: two inputs claiming one path ----------------------------------------------------
 
 
 def _tree(root: Path, files: dict[str, str]) -> Path:
@@ -28,52 +23,11 @@ def _tree(root: Path, files: dict[str, str]) -> Path:
     return root
 
 
-def test_two_inputs_claiming_the_same_path_are_refused(tmp_path):
-    """The node would otherwise work from whichever was copied last, and submit anyway."""
-    a = _tree(tmp_path / "a", {"notes.md": "from a", "data/shared.json": '{"from": "a"}'})
-    b = _tree(tmp_path / "b", {"notes.md": "from b", "data/shared.json": '{"from": "b"}'})
-
-    with pytest.raises(InputCollision) as caught:
-        _seed(tmp_path / "target", [("a", a), ("b", b)])
-
-    message = str(caught.value)
-    assert "notes.md" in message and "data/shared.json" in message
-    assert "a" in message and "b" in message
-    assert not (tmp_path / "target" / "notes.md").exists(), "nothing is copied before the refusal"
-
-
-def test_two_inputs_holding_the_same_bytes_are_not_a_collision(tmp_path):
-    """A node carries its inputs forward, so two branches sharing an ancestor hold the same file.
-
-    Refusing that would reject the pass-through the revise loop is built on; only different contents
-    mean something would actually be lost.
-    """
-    a = _tree(tmp_path / "a", {"base.md": "the same", "a.md": "from a"})
-    b = _tree(tmp_path / "b", {"base.md": "the same", "b.md": "from b"})
-
-    target = tmp_path / "target"
-    _seed(target, [("a", a), ("b", b)])
-
-    assert (target / "base.md").read_text() == "the same"
-    assert (target / "a.md").exists() and (target / "b.md").exists()
-
-
-def test_inputs_that_do_not_collide_still_merge_flat(tmp_path):
-    """A node's directory is its inputs plus its own work, side by side — not one directory each.
-
-    The revise loop depends on this: `draft.md` and `review.md` have to arrive at the same level, or
-    nesting would deepen by one directory every round.
-    """
-    a = _tree(tmp_path / "a", {"draft.md": "draft", "data/one.json": "1"})
-    b = _tree(tmp_path / "b", {"review.md": "review", "data/two.json": "2"})
-
-    target = tmp_path / "target"
-    _seed(target, [("a", a), ("b", b)])
-
-    assert (target / "draft.md").read_text() == "draft"
-    assert (target / "review.md").read_text() == "review"
-    assert (target / "data" / "one.json").read_text() == "1"
-    assert (target / "data" / "two.json").read_text() == "2"
+def _commits(workspace: Path) -> list[str]:
+    """The messages in a node's history, newest first."""
+    completed = subprocess.run(["git", "-C", str(workspace), "log", "--format=%s"],
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    return [line for line in completed.stdout.splitlines() if line.strip()]
 
 
 # -- the scheduler, with a stub node -----------------------------------------------------------
@@ -110,7 +64,8 @@ def _stub_nodes(monkeypatch, behaviour):
     """Replace the model-backed node with one whose behaviour the test dictates."""
     monkeypatch.setattr(runner, "_config", lambda path: ({}, None))
 
-    def fake_agent_for(graph, node_id, directory, models, secret_file, config_path):
+    def fake_agent_for(graph, node_id, directory, models, secret_file, config_path,
+                       inputs=(), trace=None):
         writes, status, route = behaviour(node_id)
         return _StubAgent(Path(directory), writes, status, route)
 
@@ -127,22 +82,122 @@ def _agent_graph() -> dict:
     }
 
 
+def _self_loop(ceiling: int) -> dict:
+    return {
+        "entry": "spin",
+        "max_rounds": ceiling,
+        "objective": "test",
+        "agents": {"w": {"model": "models.academic"}},
+        "nodes": [{"id": "spin", "agent": "w"}],
+        "edges": [{"from": "spin", "to": "spin"}],
+    }
+
+
+# -- pointers rather than copies -----------------------------------------------------------------
+
+
+def test_what_a_node_is_given_is_mounted_and_not_copied(tmp_path, monkeypatch):
+    """An edge carries a pointer. Nothing is copied, so a large predecessor costs nothing to hand on.
+
+    The corollary is the one that matters for reading a run: a node's directory holds exactly what
+    that node produced, so its files can be attributed to it without keeping a list of what it was
+    handed. The old design copied the whole lineage in, which is how a node came to be told that its
+    predecessor had written files three nodes earlier.
+    """
+    graph = _agent_graph()
+    graph["nodes"] = [{"id": "a", "agent": "w"}, {"id": "b", "agent": "w"}]
+    graph["edges"] = [{"from": "a", "to": "b"}]
+    workspace = _workspace(tmp_path, graph)
+    seen: dict[str, dict] = {}
+
+    def fake_agent_for(_graph, node_id, directory, _models, _secret, _config, inputs=(), trace=None):
+        seen[node_id] = {"directory": Path(directory), "inputs": inputs, "trace": trace}
+        return _StubAgent(Path(directory), {f"{node_id}.md": node_id}, "Submitted", None)
+
+    monkeypatch.setattr(runner, "_config", lambda path: ({}, None))
+    monkeypatch.setattr(runner, "_agent_for", fake_agent_for)
+
+    state = runner.run(workspace, config_path=tmp_path / "unused.json")
+
+    run_dir = next((workspace / "runs").glob("*"))
+    assert state.status == "finished"
+    assert seen["a"]["inputs"] == (), "the entry node was given nothing"
+    assert seen["b"]["inputs"] == ((str(run_dir / "a"), "/in/a"),), \
+        "the upstream is handed over as a path, not as content"
+    assert (run_dir / "b" / "b.md").is_file()
+    assert not (run_dir / "b" / "a.md").exists(), "the input was copied into the node's workspace"
+    assert (run_dir / "a" / "a.md").is_file(), "it is still where it was, which is what is pointed at"
+
+
+def test_each_pass_is_frozen_as_a_commit(tmp_path, monkeypatch):
+    """The workspace is reused across passes, so the commit is what makes one pass readable later."""
+    workspace = _workspace(tmp_path, _self_loop(3))
+    _stub_nodes(monkeypatch, lambda node_id: ({"spin.txt": node_id}, "Submitted", "spin"))
+
+    state = runner.run(workspace, config_path=tmp_path / "unused.json")
+
+    run_dir = next((workspace / "runs").glob("*"))
+    assert [state.nodes["spin"]["commit"]] and state.nodes["spin"]["commit"]
+    # `start` from the empty first commit, then one per pass.
+    assert _commits(run_dir / "spin") == ["done", "done", "done", "start"]
+    saved = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+    assert saved["nodes"]["spin"]["commit"] == state.nodes["spin"]["commit"], \
+        "the run points at the commit it recorded"
+
+
+def test_a_node_keeps_its_workspace_between_passes(tmp_path, monkeypatch):
+    """A node revising its own work needs to still have it, and it does: the same directory.
+
+    Nothing seeds it on the second pass. What the node wrote is simply still there, which is what the
+    loop that revises a draft is built on.
+    """
+    workspace = _workspace(tmp_path, _self_loop(3))
+    found: list[list[str]] = []
+
+    def fake_agent_for(_graph, node_id, directory, _models, _secret, _config, inputs=(), trace=None):
+        found.append(sorted(item.name for item in Path(directory).iterdir() if item.is_file()))
+        return _StubAgent(Path(directory), {f"pass{len(found)}.md": "x"}, "Submitted", "spin")
+
+    monkeypatch.setattr(runner, "_config", lambda path: ({}, None))
+    monkeypatch.setattr(runner, "_agent_for", fake_agent_for)
+
+    runner.run(workspace, config_path=tmp_path / "unused.json")
+
+    assert found[0] == [], "the first pass starts empty"
+    assert found[1] == ["pass1.md"], "the second sees what the first left, with no seeding step"
+    assert found[2] == ["pass1.md", "pass2.md"]
+
+
+def test_each_pass_gets_its_own_conversation(tmp_path, monkeypatch):
+    """One trace per pass. Two passes appended to one file would replay as two conversations."""
+    workspace = _workspace(tmp_path, _self_loop(3))
+    traces: list[Path | None] = []
+
+    def fake_agent_for(_graph, node_id, directory, _models, _secret, _config, inputs=(), trace=None):
+        traces.append(trace)
+        return _StubAgent(Path(directory), {f"pass{len(traces)}.md": "x"}, "Submitted", "spin")
+
+    monkeypatch.setattr(runner, "_config", lambda path: ({}, None))
+    monkeypatch.setattr(runner, "_agent_for", fake_agent_for)
+
+    runner.run(workspace, config_path=tmp_path / "unused.json")
+
+    assert len(set(traces)) == 3, f"expected one per pass, got {traces}"
+    run_dir = next((workspace / "runs").glob("*"))
+    assert (run_dir / "spin.trace.jsonl") == traces[0]
+    assert (run_dir / "spin-2.trace.jsonl") == traces[1]
+
+
+# -- the ways a run could report success for work it did not do -----------------------------------
+
+
 def test_a_node_stopped_by_the_round_ceiling_is_not_finished(tmp_path, monkeypatch):
     """`max_rounds` turning a pass away means the graph's intent was not carried out.
 
     A run cut short here used to be reported as `finished`, with the only trace of it a line on
     stdout — the silent stop this runtime exists to stop making.
     """
-    graph = {
-        "entry": "spin",
-        "max_rounds": 2,
-        "objective": "test",
-        "agents": {"w": {"model": "models.academic"}},
-        "nodes": [{"id": "spin", "agent": "w"}],
-        "edges": [{"from": "spin", "to": "spin"}],
-    }
-    workspace = _workspace(tmp_path, graph)
-    # Every pass routes to itself, so the ceiling is the only thing that can end this run.
+    workspace = _workspace(tmp_path, _self_loop(2))
     _stub_nodes(monkeypatch, lambda node_id: ({"spin.txt": node_id}, "Submitted", "spin"))
 
     state = runner.run(workspace, config_path=tmp_path / "unused.json")
@@ -162,49 +217,13 @@ def test_a_node_that_routes_to_itself_runs_again(tmp_path, monkeypatch):
     looked older than the node it pointed back to. The node ran once, nothing was ready, and the run
     reported `finished` — a loop the graph asked for and did not get.
     """
-    graph = {
-        "entry": "spin",
-        "max_rounds": 3,
-        "objective": "test",
-        "agents": {"w": {"model": "models.academic"}},
-        "nodes": [{"id": "spin", "agent": "w"}],
-        "edges": [{"from": "spin", "to": "spin"}],
-    }
-    workspace = _workspace(tmp_path, graph)
+    workspace = _workspace(tmp_path, _self_loop(3))
     _stub_nodes(monkeypatch, lambda node_id: ({"spin.txt": node_id}, "Submitted", "spin"))
 
     state = runner.run(workspace, config_path=tmp_path / "unused.json")
 
     assert state.passes["spin"] == 3, "the ceiling is what stopped it, so it ran three times"
     assert state.executed == ["spin"] * 3
-
-
-def test_an_input_collision_fails_the_run_and_says_why(tmp_path, monkeypatch, capsys):
-    """Two branches feeding one node with the same filename is a graph error, not a node failure.
-
-    It is caught when the node is seeded, recorded in `run.json`, and returned as a status instead of
-    raised as a traceback — a resume cannot get past it, because the same two directories would be
-    seeded again.
-    """
-    graph = {
-        "entry": "a",
-        "objective": "test",
-        "agents": {"w": {"model": "models.academic"}},
-        "nodes": [{"id": "a", "agent": "w"}, {"id": "b", "agent": "w"}, {"id": "c", "agent": "w"}],
-        # Both `a` and `b` have no selected input of their own, and both point at `c`.
-        "edges": [{"from": "a", "to": "c"}, {"from": "b", "to": "c"}],
-    }
-    workspace = _workspace(tmp_path, graph)
-    _stub_nodes(monkeypatch, lambda node_id: ({"notes.md": f"from {node_id}"}, "Submitted", None))
-
-    state = runner.run(workspace, config_path=tmp_path / "unused.json")
-    capsys.readouterr()
-
-    assert state.status == "failed"
-    assert state.reason == "input_collision"
-    assert "notes.md" in state.error and "a" in state.error and "b" in state.error
-    saved = json.loads(next((workspace / "runs").glob("*/run.json")).read_text())
-    assert saved["status"] == "failed" and saved["reason"] == "input_collision"
 
 
 def test_a_run_that_merely_runs_out_of_nodes_is_finished(tmp_path, monkeypatch):
@@ -252,10 +271,10 @@ def test_a_module_runs_as_directories_named_for_its_scope(tmp_path, monkeypatch)
         "edges": [{"from": "in", "to": "use"}, {"from": "use", "to": "out"}],
     }
     workspace = _workspace(tmp_path, graph)
-    handed: list[str] = []
+    seen: dict[str, tuple] = {}
 
-    def fake_agent_for(_graph, node_id, directory, _models, _secret, _config):
-        handed.append(str(Path(directory).relative_to(workspace)))
+    def fake_agent_for(_graph, node_id, directory, _models, _secret, _config, inputs=(), trace=None):
+        seen[node_id] = inputs
         return _StubAgent(Path(directory), {f"{node_id.replace('/', '_')}.md": node_id},
                           "Submitted", None)
 
@@ -267,12 +286,12 @@ def test_a_module_runs_as_directories_named_for_its_scope(tmp_path, monkeypatch)
     run_dir = next((workspace / "runs").glob("*"))
     assert state.status == "finished"
     assert state.executed == ["in", "use/a", "use/b", "out"]
-    # What the agent was handed is a path that mirrors the scope, so the trace the real agent writes
-    # beside it (`agent.py`, `<tree>.trace.jsonl`) lands outside the node's own directory.
-    assert handed == [f"runs/{run_dir.name}/in", f"runs/{run_dir.name}/use/a",
-                      f"runs/{run_dir.name}/use/b", f"runs/{run_dir.name}/out"]
     for node in ("in", "use/a", "use/b", "out"):
         assert (run_dir / node).is_dir(), f"{node} should have its own directory"
+    # The scope travels in the pointer too, so a module's node is not confused with one of the same
+    # name elsewhere in the graph.
+    assert seen["use/b"] == ((str(run_dir / "use/a"), "/in/use/a"),)
+    assert seen["out"] == ((str(run_dir / "use/b"), "/in/use/b"),)
     # And the run records the graph it actually read, modules already inlined.
     written = json.loads((run_dir / "graph.json").read_text(encoding="utf-8"))
     assert [item["id"] for item in written["nodes"]] == ["in", "use/a", "use/b", "out"]

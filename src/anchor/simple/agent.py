@@ -124,13 +124,30 @@ def _tool_binds(console_script: str | None) -> tuple[tuple[str, str], ...]:
     # which points at the versioned directory actually on disk — so both have to be present or the
     # script cannot start. Binding only the resolved one produced
     # `bad interpreter: No such file or directory`, which is what a missing alias looks like.
-    for candidate in (sys.executable, os.readlink(sys.executable) if os.path.islink(sys.executable) else None):
-        if not candidate:
-            continue
-        prefix = Path(candidate).parent
+    # Both ends of the chain, because either may be the directory that is not inside the environment:
+    # `python` points at the alias `python3`, which points at the interpreter actually on disk.
+    #
+    # The target is resolved against the link's own directory, and that is the whole point of this
+    # loop. `os.readlink` may answer with a relative path — `<venv>/bin/python` points at `python3` —
+    # and `Path("python3").parent` is `.`, so the bind became `--ro-bind . .`: bubblewrap's working
+    # directory mounted over the sandbox root, making every mount after it fail. What a node saw was
+    # `Can't mkdir /tmp: Read-only file system` on every command, and it retried for two thousand
+    # turns before anything said so.
+    link = Path(sys.executable)
+    targets = [link]
+    if link.is_symlink():
+        target = Path(os.readlink(link))
+        targets.append(target if target.is_absolute() else link.parent / target)
+    for candidate in targets:
+        prefix = candidate.parent
         prefix = prefix.parent if prefix.name == "bin" else prefix
-        if prefix.is_dir() and str(prefix) != str(venv):
-            binds.append((str(prefix), str(prefix)))
+        if not prefix.is_dir() or str(prefix) == str(venv):
+            continue
+        if prefix in (Path("."), Path("/")):
+            # Never the sandbox root, whatever a link resolves to: a bind there takes the whole
+            # filesystem away from everyone after it.
+            continue
+        binds.append((str(prefix), str(prefix)))
     return tuple(dict.fromkeys(binds))
 
 
@@ -143,7 +160,8 @@ class SandboxEnvironment(LocalEnvironment):
     """
 
     def __init__(self, *, tree: Path, node_id: str, routes: tuple[str, ...] = (),
-                 network: bool, timeout_seconds: float, **kwargs) -> None:
+                 network: bool, timeout_seconds: float,
+                 inputs: tuple[tuple[str, str], ...] = (), **kwargs) -> None:
         super().__init__(cwd=str(tree), **kwargs)
         self.tree = Path(tree)
         self.node_id = node_id
@@ -152,6 +170,9 @@ class SandboxEnvironment(LocalEnvironment):
         self.route: str | None = None
         self.network = network
         self.timeout_seconds = timeout_seconds
+        # What this node was given, as (where it lives, where it is visible). Read-only, and never
+        # copied: a pointer to a predecessor's workspace, which is also why its history comes with it.
+        self.inputs = tuple(inputs)
         # The command arrives as one shell string, so the shell is the entry point and the sandbox is
         # the boundary. An allowlist of commands would be a second, weaker boundary that the shell
         # can step around anyway.
@@ -159,13 +180,38 @@ class SandboxEnvironment(LocalEnvironment):
         found = _console_script("anchor-scholarly")
         self.tool_dirs = (str(Path(found).parent),) if found else ()
         self.readonly_binds = _tool_binds(found)
+        self._require_working()
+
+    def _require_working(self) -> None:
+        """Run one trivial command with this node's real mounts, before the loop starts.
+
+        The sandbox is probed when it is constructed, but that probe knows nothing about the mounts
+        this node will actually have. A bind whose path resolved to `.` mounted bubblewrap's working
+        directory over the sandbox root, so every command after it failed with `Can't mkdir /tmp:
+        Read-only file system` — and the node retried for two thousand turns before anything said so.
+        One command here refuses it in the first second. The same principle as the probes below this
+        one: a sandbox that cannot run a command is unavailable, not slow.
+        """
+        probe = ".anchor-sandbox-probe"
+        result = self.sandbox.run(SandboxSpec(
+            workspace=self.tree, command=("sh", "-c", f"touch {probe} && rm -f {probe}"),
+            timeout_seconds=60.0, network=self.network, tool_dirs=self.tool_dirs,
+            readonly_binds=(*self.readonly_binds, *self.inputs),
+            workspace_readonly=(".git",)))
+        if result.returncode != 0:
+            raise RuntimeError(
+                "the sandbox cannot run a command in this node's workspace: "
+                + ((result.stderr or result.stdout).strip()[:500] or "no output"))
 
     def execute(self, action, cwd: str = "", *, timeout: int | None = None) -> dict:
         command = action.get("command", "")
         result = self.sandbox.run(SandboxSpec(
             workspace=self.tree, command=("sh", "-c", command),
             timeout_seconds=float(timeout or self.timeout_seconds), network=self.network,
-            tool_dirs=self.tool_dirs, readonly_binds=self.readonly_binds,
+            tool_dirs=self.tool_dirs, readonly_binds=(*self.readonly_binds, *self.inputs),
+            # Its own history is readable and not rewritable. A record the recorded thing can edit is
+            # not a record, and the commit that makes one is made outside this sandbox.
+            workspace_readonly=(".git",),
             env=(("ANCHOR_NODE", self.node_id), ("ANCHOR_ROUTES", ",".join(self.routes)))))
         output = {"output": result.stdout + result.stderr, "returncode": result.returncode,
                   "exception_info": "the command timed out" if result.timed_out else ""}
@@ -274,7 +320,8 @@ class TracingAgent(DefaultAgent):
 
 def build_agent(*, tree: Path, node_id: str, instructions: str, routes: tuple[str, ...],
                 model_name: str, model_kwargs: dict, network: bool, timeout_seconds: float,
-                max_steps: int, wall_time_limit_seconds: int):
+                max_steps: int, wall_time_limit_seconds: int,
+                inputs: tuple[tuple[str, str], ...] = (), trace: Path | None = None):
     """A node's agent: their loop, their model client, our environment."""
     from minisweagent.models.litellm_model import LitellmModel
 
@@ -288,8 +335,11 @@ def build_agent(*, tree: Path, node_id: str, instructions: str, routes: tuple[st
     )
     return TracingAgent(
         model, SandboxEnvironment(tree=tree, node_id=node_id, routes=routes, network=network,
-                                  timeout_seconds=timeout_seconds),
-        trace=Path(tree).parent / f"{Path(tree).name}.trace.jsonl",
+                                  timeout_seconds=timeout_seconds, inputs=inputs),
+        # One per pass, beside the workspace rather than in it. The workspace is reused across passes
+        # and the conversation is not: two passes appended to one file would replay as a conversation
+        # with two beginnings, which is not the one either of them had.
+        trace=trace or Path(tree).parent / f"{Path(tree).name}.trace.jsonl",
         system_template=system_prompt(instructions),
         instance_template=INSTANCE_TEMPLATE,
         step_limit=max_steps,

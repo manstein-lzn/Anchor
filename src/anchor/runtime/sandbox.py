@@ -78,6 +78,10 @@ class SandboxSpec:
     # paths, because a virtual environment's interpreter and scripts carry absolute paths and moving
     # them breaks both.
     readonly_binds: tuple[tuple[str, str], ...] = ()
+    # Paths inside the workspace bound read-only *after* it is bound read-write, so a node can read
+    # them and not rewrite them. Its own repository is the one that matters: the history of its work
+    # is the record of it, and a record the recorded thing can edit is not one.
+    workspace_readonly: tuple[str, ...] = ()
     # Variables handed to the node, on top of the fixed set below. This is how a command learns
     # something only the runner knows — which node it is, and where it may route to — without the
     # runner having to write a file into the node's own directory to say so.
@@ -202,6 +206,11 @@ class BubblewrapWorkspaceSandbox:
             # write a paper. The isolation is unchanged: the bind is the one path it may mutate,
             # and it is the node's own workspace.
             "--bind", str(spec.workspace), SANDBOX_WORKSPACE,
+            # After the workspace, so these win. The other order would have the read-write bind
+            # covering them again and the boundary would be a comment.
+            *(item for relative in spec.workspace_readonly
+              for item in ("--ro-bind", str(spec.workspace / relative),
+                           f"{SANDBOX_WORKSPACE}/{relative}")),
             "--chdir", SANDBOX_WORKSPACE,
             "--dev", "/dev",
             "--setenv", "PATH", ":".join([*spec.tool_dirs, "/usr/bin:/bin"]),
