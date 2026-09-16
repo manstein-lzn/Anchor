@@ -11,9 +11,10 @@ anchor-graph /tmp/survey --objective "写一篇综述"
 `anchor-graph` takes the directory holding `graph.json`, not the graph file itself, and leaves its
 runs in a `runs/` beside it.
 
-A graph is a JSON file. A node is an agent with a directory. An edge says which nodes' work a node
-starts from. A run seeds each node's directory with its inputs' directories, lets it work, and hands
-the result to the next one.
+A graph is a JSON file. A node is an agent with a workspace of its own. An edge says which nodes' work
+a node starts from, and what it carries is **a pointer**: the predecessor's workspace, mounted
+read-only in the sandbox at `/in/<node>`, its history included. Nothing is copied. A node writes into
+its own workspace and whatever is in it when it finishes is what the next node is pointed at.
 
 ```json
 {
@@ -123,14 +124,25 @@ body, and from ours.
 ```
 <workspace>/graph.json
 <workspace>/runs/<run id>/
-  run.json              where the run got to, and what each node said when it finished
-  <node>/               whatever the node produced
-  <node>.trace.jsonl    the conversation: every message, in order
+  run.json              where the run got to, what each node said, and the commit it left
+  <node>/               the node's own workspace — and its own git repository
+  <node>.trace.jsonl    the conversation of the node's first pass
+  <node>-2.trace.jsonl  and of its second, if it ran again
 ```
 
-The trace sits beside its node's directory, never inside it. Inside it is a file the agent can read,
-and one did: it found its own conversation, concluded that nothing prior existed except the trace
-file, and reasoned about that instead of its task.
+A node's workspace is kept across the passes of a loop, so a node revising its own work finds it still
+there. Each pass is frozen as a commit in that node's repository, made by Anchor rather than by the
+node: the history is the record of the node's work, and a node can read it — `git log`, `git show`,
+`git diff HEAD~1` — but `.git` is mounted read-only, so it cannot rewrite it. The commit message is the
+node's own summary, so its log is the chain of what it said it was doing.
+
+`run.json` names each pass's commit, which is what makes a pass readable after a later one has written
+over it.
+
+The trace sits beside its node's workspace, never inside it, and there is one per pass. Inside it is a
+file the agent can read, and one did: it found its own conversation, concluded that nothing prior
+existed except the trace file, and reasoned about that instead of its task. Two passes in one file
+would replay as a conversation with two beginnings, which is not the one either of them had.
 
 `<node>.trace.jsonl` is the debugging surface. Without it, what an agent did has to be inferred by
 re-running it; with it, "it searched 47 times and adapted around a source that kept refusing" is a
