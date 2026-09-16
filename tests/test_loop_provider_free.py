@@ -132,3 +132,112 @@ def test_a_loop_runs_end_to_end_without_a_provider(tmp_path):
         ["draft.md", "review.md"]
     assert sorted(item.name for item in (run_dir / "done").iterdir() if item.is_file()) == \
         ["final.md"]
+
+
+# -- a loop inside a loop, and a module looped over by its parent ---------------------------------
+
+
+def _nested(module_rounds: int, module_node_rounds: int | None = None) -> dict:
+    """`review` routes back into the whole `refine` module, whose own nodes form a loop.
+
+    Counting is per level: `refine.max_rounds` bounds its nodes' rounds on each visit, and the
+    `work` node's bounds how many times this graph may visit it at all.
+    """
+    work: dict = {"id": "work", "graph": "refine"}
+    if module_node_rounds is not None:
+        work["max_rounds"] = module_node_rounds
+    return {
+        "entry": "plan",
+        "max_rounds": 6,
+        "objective": "一个模块里有循环，外层又循环回这个模块。",
+        "agents": {name: {"model": "models.academic", "instructions": name}
+                   for name in ("planner", "drafter", "critic", "editor", "shipper")},
+        "graphs": {"refine": {
+            "entry": "draft", "exit": "done", "max_rounds": module_rounds,
+            "nodes": [{"id": "draft", "agent": "drafter"},
+                      {"id": "check", "agent": "critic"},
+                      {"id": "done", "agent": "editor"}],
+            "edges": [{"from": "draft", "to": "check"}, {"from": "check", "to": "draft"},
+                      {"from": "check", "to": "done"}]}},
+        "nodes": [{"id": "plan", "agent": "planner"}, work,
+                  {"id": "review", "agent": "critic"}, {"id": "ship", "agent": "shipper"}],
+        "edges": [{"from": "plan", "to": "work"}, {"from": "work", "to": "review"},
+                  {"from": "review", "to": "work"}, {"from": "review", "to": "ship"}],
+    }
+
+
+NESTED_SCRIPT = {
+    "plan": ["printf 'plan\\n' > plan.md", 'anchor-done --summary "planned"'],
+    # The first pass writes v1 and the second v2, which is what gives the inner loop something to
+    # stop on — and both read the upstream through its pointer, not out of their own directory.
+    "work/draft": [
+        "if [ -f draft.md ]; then printf 'v2\\n' > draft.md; else printf 'v1\\n' > draft.md; fi",
+        'anchor-done --summary "drafted"'],
+    "work/check": [
+        "grep -q v2 /in/work/draft/draft.md 2>/dev/null && "
+        "anchor-route --to work/done --reason 'good' || "
+        "anchor-route --to work/draft --reason 'again'"],
+    "work/done": ["cp /in/work/check/draft.md final.md", 'anchor-done --summary "refined"'],
+    # Its own workspace is what tells it which visit it is on, exactly as it would for a model.
+    "review": ["if [ -f asked ]; then anchor-route --to ship --reason 'accepted'; "
+               "else touch asked; anchor-route --to work/draft --reason 'once more'; fi"],
+    "ship": ['anchor-done --summary "shipped"'],
+}
+
+
+def _nested_run(tmp_path, graph: dict):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "graph.json").write_text(json.dumps(graph), encoding="utf-8")
+    config = tmp_path / "runtime.json"
+    config.write_text('{"models": []}', encoding="utf-8")
+    state = runner.run(workspace, config_path=config, model_script=NESTED_SCRIPT)
+    return state, next((workspace / "runs").glob("*"))
+
+
+def test_a_loop_inside_a_loop_runs_to_the_end(tmp_path):
+    """The outer loop re-enters the module, and the module's own bound is per visit.
+
+    With the module's ceiling at 2 and an inner loop that needs both rounds, an outer loop that comes
+    back would previously find the module's entry already turned away: the outer loop spent the inner
+    loop's budget, `done` never ran, and the run stopped with `ship` skipped. Counting per level is
+    what stops one loop paying for another.
+    """
+    state, run_dir = _nested_run(tmp_path, _nested(module_rounds=2))
+
+    assert state.status == "finished", (state.status, state.reason, state.ceased)
+    assert state.ceased == [], "no ceiling should have been reached"
+    assert state.executed == ["plan", "work/draft", "work/check", "work/draft", "work/check",
+                              "work/done", "review", "work/draft", "work/check", "work/done",
+                              "review", "ship"]
+    # Three runs, but never a third round within one visit: the visit it belongs to restarted.
+    assert state.runs["work/draft"] == 3
+    assert state.passes["work/draft"] == 1, "the last visit's own counting, not the total"
+    assert state.activations["work"] == 2
+    # One conversation per run, named by the run rather than the round, or the third would have
+    # overwritten the first's.
+    assert len(list(run_dir.glob("work/draft*.trace.jsonl"))) == 3
+    assert len(_commits(run_dir / "work" / "draft")) == 4, "start, then one commit per run"
+
+
+def test_a_module_can_run_out_of_entries(tmp_path):
+    """The other ceiling: how many times the parent may visit a module at all.
+
+    At the level above, a module is a node, so it has a `max_rounds` like any other — and refusing is
+    the same refusal, so the module produces no exit and nothing after it becomes ready.
+    """
+    state, _ = _nested_run(tmp_path, _nested(module_rounds=2, module_node_rounds=1))
+
+    assert state.status == "stopped" and state.reason == "max_rounds"
+    assert state.ceased == ["work@1"], "named by the module, not by a node inside it"
+    assert state.activations["work"] == 1
+    assert "ship" not in state.executed, "the run stopped at the module, as a ceiling does"
+
+
+def test_the_outer_ceiling_and_the_inner_one_are_separate(tmp_path):
+    """Raising the parent's visits lets the same module go round again, with the same inner bound."""
+    state, _ = _nested_run(tmp_path, _nested(module_rounds=2, module_node_rounds=3))
+
+    assert state.status == "finished", (state.status, state.ceased)
+    assert state.activations["work"] == 2
+    assert state.runs["work/draft"] == 3

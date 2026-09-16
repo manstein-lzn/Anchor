@@ -119,7 +119,15 @@ class RunState:
     # Set while a node is running and cleared when it finishes, so a restart knows both that
     # something was in flight and exactly what it was.
     cursor: dict | None = None
+    # Rounds within the current entry into this node's scope, which is what the ceiling compares
+    # against: counting is per level, so re-entering a module starts its nodes' rounds again.
     passes: dict[str, int] = field(default_factory=dict)
+    # Every run of every node, never reset. Names this pass's conversation, because a number that
+    # restarts would name the same trace file twice and the second would overwrite the first.
+    runs: dict[str, int] = field(default_factory=dict)
+    # How many times each module has been entered, keyed by scope. A module's `max_rounds` is how
+    # many times its parent may enter it, and at that level the module is just a node.
+    activations: dict[str, int] = field(default_factory=dict)
     last_seq: dict[str, int] = field(default_factory=dict)
     decided: dict[str, list] = field(default_factory=dict)
     nodes: dict[str, dict] = field(default_factory=dict)
@@ -230,6 +238,10 @@ class _Step:
     trace: Path = Path()
     # What this node was given: predecessors' work, each pinned to the commit it was frozen at.
     inputs: tuple[_Given, ...] = ()
+    # Set when a ceiling turned this pass away. The step carries it rather than the loop re-deriving
+    # it: there are two ceilings now — the node's own, and the one its parent put on entering the
+    # module it belongs to — and a sentinel the loop had to recognise twice was one it got wrong once.
+    refused: str = ""
 
 
 @dataclass(frozen=True)
@@ -318,10 +330,51 @@ def _incoming(graph: graph_module.Graph, state: RunState, decided: dict,
     return results
 
 
-def _trace_path(run_dir: Path, node_id: str, number: int) -> Path:
-    """One conversation per pass. The workspace is reused; the conversation is not."""
-    return run_dir / (f"{node_id}.trace.jsonl" if number == 1
-                      else f"{node_id}-{number}.trace.jsonl")
+def _trace_path(run_dir: Path, node_id: str, run_number: int) -> Path:
+    """One conversation per run. The workspace is reused; the conversation is not.
+
+    Keyed by how many times the node has run, not by its round within the current entry: a round
+    number restarts when a module is re-entered, and the second run would have overwritten the
+    first's conversation under the same name.
+    """
+    return run_dir / (f"{node_id}.trace.jsonl" if run_number == 1
+                      else f"{node_id}-{run_number}.trace.jsonl")
+
+
+def _enters_scope(graph: graph_module.Graph, state: RunState, decided: dict, node_id: str) -> bool:
+    """Whether this run is an entry into the node's module from outside it.
+
+    An edge from a sibling is the same visit; a crossing edge is a new one, and a new entry is what
+    starts the module's counting again. It has to be a crossing edge *newer than this node's last
+    run*: an edge is selected once and stays selected, so the edge that first led in here is still
+    selected on every later pass, and counting it every time would make every pass a new visit.
+
+    The root scope is entered once and nothing can cross into it, which is what makes its ceiling
+    bound the whole run.
+    """
+    scope = graph_module.scope_of(node_id)
+    inside = scope + graph_module.SEP
+    since = state.last_seq.get(node_id, -1)
+    for source in graph.in_edges[node_id]:
+        selected, when = decided.get((source, node_id), (False, -1))
+        if selected and when > since and not source.startswith(inside):
+            return True
+    return False
+
+
+def _restart_scope(state: RunState, scope: str) -> None:
+    """Start this module's counting again, and every module inside it.
+
+    A module entered twice is two visits, and the inner ones are new visits too — otherwise the outer
+    loop spends the inner loop's budget, which is the shape a nested loop fails in.
+    """
+    inside = scope + graph_module.SEP
+    for node_id in state.passes:
+        if node_id.startswith(inside):
+            state.passes[node_id] = 0
+    for nested in state.activations:
+        if nested.startswith(inside):
+            state.activations[nested] = 0
 
 
 def _next_step(graph: graph_module.Graph, state: RunState, decided: dict, run_dir: Path,
@@ -334,14 +387,14 @@ def _next_step(graph: graph_module.Graph, state: RunState, decided: dict, run_di
     """
     cursor = state.cursor
     if cursor is not None:
-        key = f"{cursor['node']}|{cursor['pass']}"
+        key = f"{cursor['node']}|{cursor['run']}"
         state.attempts[key] = state.attempts.get(key, 0) + 1
         if state.attempts[key] > MAX_ATTEMPTS:
             # Continued as far as it is worth continuing. Each attempt had a fresh budget, so this
             # is a node that cannot finish rather than one that needs longer, and saying so beats
             # resuming it until somebody notices.
             state.status = "failed"
-            state.error = (f"{cursor['node']} pass {cursor['pass']} was started "
+            state.error = (f"{cursor['node']} run {cursor['run']} was started "
                            f"{state.attempts[key] - 1} times without finishing")
             state.cursor = None
             state.save(run_dir)
@@ -349,7 +402,7 @@ def _next_step(graph: graph_module.Graph, state: RunState, decided: dict, run_di
         state.save(run_dir)
         node_id = cursor["node"]
         return _Step(node_id, cursor["pass"], Path(cursor["dir"]), None, True,
-                     trace=_trace_path(run_dir, node_id, cursor["pass"]),
+                     trace=_trace_path(run_dir, node_id, cursor["run"]),
                      inputs=tuple(_given(run_dir, item)
                                   for item in _incoming(graph, state, decided, node_id)))
     # A node the ceiling already turned away stays turned away. Settling its out-edges is not enough
@@ -358,28 +411,50 @@ def _next_step(graph: graph_module.Graph, state: RunState, decided: dict, run_di
     # A self-loop happens to escape this because settling its edge is what makes it unready.
     turned_away = set(state.ceased)
     pending = [node for node in order
-               if ready(node) and f"{node}@{graph.ceiling(node)}" not in turned_away]
+               if ready(node)
+               and f"{node}@{graph.ceiling(node)}" not in turned_away
+               and f"{graph_module.scope_of(node)}@{graph.module_rounds.get(graph_module.scope_of(node), -1)}"
+               not in turned_away]
     if not pending:
         return None
     node_id = pending[0]
+    if _enters_scope(graph, state, decided, node_id):
+        scope = graph_module.scope_of(node_id)
+        entry = state.activations.get(scope, 0) + 1
+        allowed = graph.module_rounds.get(scope)
+        if allowed is not None and entry > allowed:
+            # The parent has entered this module as often as it said it might. Refused the way any
+            # other ceiling refuses: the entry node is turned away, so nothing inside runs and the
+            # module produces no exit for whatever comes after it.
+            state.cursor = None
+            return _Step(node_id, state.passes.get(node_id, 0) + 1, Path(), None, False,
+                         refused=f"{scope}@{allowed}")
+        # Counted only once it is allowed, so the number is visits that happened rather than visits
+        # that were asked for.
+        state.activations[scope] = entry
+        _restart_scope(state, scope)
     number = state.passes.get(node_id, 0) + 1
     if number > graph.ceiling(node_id):
-        return _Step(node_id, number, Path(), None, False)
+        return _Step(node_id, number, Path(), None, False,
+                     refused=f"{node_id}@{graph.ceiling(node_id)}")
     # One directory per node, kept across its passes. A node revising its own work needs to see what
     # it wrote last time, and that is simply the directory it is already standing in.
     directory = run_dir / node_id
     directory.mkdir(parents=True, exist_ok=True)
     _init_history(directory)
-    state.attempts[f"{node_id}|{number}"] = state.attempts.get(f"{node_id}|{number}", 0) + 1
+    run_number = state.runs.get(node_id, 0) + 1
+    state.attempts[f"{node_id}|{run_number}"] = \
+        state.attempts.get(f"{node_id}|{run_number}", 0) + 1
     handed = _incoming(graph, state, decided, node_id)
     inputs = tuple(_given(run_dir, item) for item in handed)
     state.passes[node_id] = number
+    state.runs[node_id] = run_number
     state.seq += 1
     state.last_seq[node_id] = state.seq
-    state.cursor = {"node": node_id, "pass": number, "dir": str(directory)}
+    state.cursor = {"node": node_id, "pass": number, "run": run_number, "dir": str(directory)}
     state.save(run_dir)             # written before the work starts, not after
     return _Step(node_id, number, directory, _task(graph, node_id, state.objective, handed, inputs),
-                 False, trace=_trace_path(run_dir, node_id, number), inputs=inputs)
+                 False, trace=_trace_path(run_dir, node_id, run_number), inputs=inputs)
 
 
 def _ready(graph: graph_module.Graph, state: RunState, decided: dict,
@@ -574,12 +649,12 @@ def run(workspace: str | Path, *, objective: str | None = None, config_path: str
             step = _next_step(graph, state, decided, run_dir, order, ready)
             if step is None:
                 break
-            if not step.resuming and step.number > graph.ceiling(step.node_id):
+            if step.refused:
                 settle(step.node_id, None)
-                state.ceased.append(f"{step.node_id}@{graph.ceiling(step.node_id)}")
+                state.ceased.append(step.refused)
                 state.save(run_dir)
                 print(json.dumps({"node": step.node_id, "stopped": "max_rounds",
-                                  "limit": graph.ceiling(step.node_id)}), flush=True)
+                                  "what": step.refused}), flush=True)
                 continue
             agent = _agent_for(graph, step.node_id, step.directory, models, secret_file, config_path,
                                inputs=step.inputs, trace=step.trace,

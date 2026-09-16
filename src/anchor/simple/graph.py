@@ -86,6 +86,11 @@ class Graph:
     # Each node carries the ceiling of the graph that declared it: a module's bound belongs to the
     # module, not to whoever includes it.
     max_rounds: dict[str, int] = field(default_factory=dict)
+    # How many times each module may be entered, keyed by the scope its node id became. Counting is
+    # per level: a graph's `max_rounds` bounds its own nodes' rounds, and a module node's bounds how
+    # many times its parent enters it. Both restart at each entry, which is what makes a loop of
+    # modules and a loop inside one compose without either spending the other's budget.
+    module_rounds: dict[str, int] = field(default_factory=dict)
 
     def entry(self) -> str:
         """Where a run starts.
@@ -147,6 +152,15 @@ def load(path: str | Path) -> Graph:
 # -- naming ------------------------------------------------------------------------------------
 
 
+def scope_of(node_id: str) -> str:
+    """Which module a node belongs to. The empty string is the graph the run started from.
+
+    A scope is a node at the level above — that is what a module node becomes when it is expanded —
+    so a node id is a path and its scope is that path without its last segment.
+    """
+    return node_id.rsplit(SEP, 1)[0] if SEP in node_id else ""
+
+
 def _check_name(name: object, kind: str, where: str) -> str:
     if not isinstance(name, str) or not name:
         raise ValueError(f"{where}: a {kind} name must be a non-empty string, not {name!r}")
@@ -189,14 +203,13 @@ def _check_node(item: object, where: str, *, allow_sep: bool) -> dict:
                          f"one or the other")
     if not has_agent and not has_graph:
         raise ValueError(f"{where}: node {item['id']!r} needs an \"agent\" or a \"graph\"")
-    if has_graph:
-        # Both of these would be read by nothing: a module has no instructions of its own to add to,
-        # and its nodes carry the ceilings of the graph that declared them.
-        for key in ("with", "max_rounds"):
-            if key in item:
-                raise ValueError(
-                    f"{where}: node {item['id']!r} is a graph, so {key!r} would have nothing to "
-                    f"apply to — it belongs on the nodes inside that graph")
+    if has_graph and "with" in item:
+        # Read by nothing: a module has no instructions of its own to add to. `max_rounds` is a
+        # different matter and is allowed here — at this level the module *is* a node, so it has a
+        # ceiling like any other, and its ceiling is how many times this graph may enter it.
+        raise ValueError(
+            f"{where}: node {item['id']!r} is a graph, so 'with' would have nothing to apply to — "
+            f"it belongs on the nodes inside that graph")
     if "with" in item and not isinstance(item["with"], str):
         raise ValueError(f"{where}: node {item['id']!r} has a non-string \"with\"")
     if "max_rounds" in item and int(item["max_rounds"]) < 1:
@@ -303,6 +316,7 @@ class _Expansion:
     nodes: dict[str, Node]
     edges: list[tuple[str, str]]
     max_rounds: dict[str, int]
+    module_rounds: dict[str, int]
     entry: str
     exit: str | None
 
@@ -317,6 +331,7 @@ def _expand(body: dict, pool: dict[str, dict], prefix: str) -> _Expansion:
     """
     nodes: dict[str, Node] = {}
     max_rounds: dict[str, int] = {}
+    module_rounds: dict[str, int] = {}
     edges: list[tuple[str, str]] = []
     sides: dict[str, tuple[str, str]] = {}
     ceiling = int(body.get("max_rounds", DEFAULT_MAX_ROUNDS))
@@ -327,8 +342,12 @@ def _expand(body: dict, pool: dict[str, dict], prefix: str) -> _Expansion:
             inner = _expand(pool[item["graph"]], pool, flat + SEP)
             nodes.update(inner.nodes)
             max_rounds.update(inner.max_rounds)
+            module_rounds.update(inner.module_rounds)
             edges.extend(inner.edges)
             assert inner.exit is not None, "a module declares an exit, checked before expansion"
+            # At this level the module is a node, so it carries a ceiling like any other: how many
+            # times this graph may enter it. Defaulted from this body's, as every node's is.
+            module_rounds[flat] = int(item.get("max_rounds", ceiling))
             sides[item["id"]] = (inner.entry, inner.exit)
         else:
             nodes[flat] = Node(id=flat, agent=item["agent"], with_=item.get("with", ""))
@@ -341,7 +360,7 @@ def _expand(body: dict, pool: dict[str, dict], prefix: str) -> _Expansion:
 
     entry = body.get("entry") or _infer_entry(body, "graph")
     exit_node = sides[body["exit"]][1] if body.get("exit") else None
-    return _Expansion(nodes, edges, max_rounds, sides[entry][0], exit_node)
+    return _Expansion(nodes, edges, max_rounds, module_rounds, sides[entry][0], exit_node)
 
 
 def parse(raw: dict) -> Graph:
@@ -374,7 +393,7 @@ def parse(raw: dict) -> Graph:
                   out_edges={node: tuple(targets) for node, targets in out_edges.items()},
                   in_edges={node: tuple(sources) for node, sources in in_edges.items()},
                   objective=raw.get("objective", ""), entry_node=expansion.entry,
-                  max_rounds=expansion.max_rounds)
+                  max_rounds=expansion.max_rounds, module_rounds=expansion.module_rounds)
     missing = {node.agent for node in graph.nodes.values() if node.agent not in graph.agents}
     if missing:
         raise ValueError(f"nodes name unknown agents: {sorted(missing)}")

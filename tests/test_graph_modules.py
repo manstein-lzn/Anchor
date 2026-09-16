@@ -219,13 +219,37 @@ def test_a_flat_file_may_use_the_separator():
     assert list(G.parse(flat).nodes) == ["a/b"]
 
 
-@pytest.mark.parametrize("key,value", [("with", "text"), ("max_rounds", 5)])
-def test_a_module_node_may_not_carry_what_would_be_ignored(key, value):
-    """A field nothing reads is worse than a field that is refused, so it is refused."""
+def test_a_module_node_may_not_carry_instructions_of_its_own():
+    """`with` would be read by nothing: a module has no instructions to add to, only nodes inside it."""
     raw = _file()
-    raw["nodes"][1][key] = value
+    raw["nodes"][1]["with"] = "text"
 
     with pytest.raises(ValueError) as caught:
         G.parse(raw)
 
-    assert key in str(caught.value)
+    assert "with" in str(caught.value)
+
+
+def test_a_module_node_carries_its_own_ceiling():
+    """At the level above, a module *is* a node, so it has a `max_rounds` like any other.
+
+    There it means something different from the one inside: how many times this graph may enter the
+    module. Counting is per level, and both restart at each entry — which is what lets a loop of
+    modules and a loop inside one compose without either spending the other's budget.
+    """
+    raw = _file()
+    raw["nodes"][1]["max_rounds"] = 5
+
+    assert G.parse(raw).module_rounds == {"use": 5}
+
+
+def test_a_module_nodes_ceiling_defaults_to_its_graphs():
+    """Every node's does, and a module node is a node of the graph that declares it."""
+    assert G.parse(_file(max_rounds=7)).module_rounds == {"use": 7}
+
+
+def test_scope_of_reads_a_node_id_as_a_path():
+    """A module node becomes the scope of what it contains, so a scope is an id without its last part."""
+    assert G.scope_of("plan") == ""
+    assert G.scope_of("work/draft") == "work"
+    assert G.scope_of("outer/inner/leaf") == "outer/inner"
