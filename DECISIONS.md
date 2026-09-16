@@ -1424,3 +1424,170 @@ just migrated was the current one. The literal is corrected, and
 `test_the_api_document_states_the_revision_alembic_actually_has` reads the head from alembic's
 `ScriptDirectory` and fails on any future drift. A sentence in a document is a claim about code;
 the ones that can be checked should be, because the ones that cannot are read as decoration.
+
+---
+
+> **Everything above this line describes the design commit `9a7497f` deleted.** It is kept because
+> the product intent may still be a backlog, and because several of the current decisions are shaped
+> by having tried it — the rejected alternative is often the point of the decision.
+>
+> What follows describes the branch that exists. `README.md` is the entry point. **A decision here is
+> a statement about the running code**, verified by the tests named with it, not a plan.
+
+## ADR-056: A node has one workspace, and an edge carries a pointer to a commit
+
+A node works in a directory of its own, kept across its passes. An edge copies nothing into it: the
+predecessor's workspace is mounted read-only inside the sandbox at `/in/<node>`, pinned to the commit
+that pass was frozen at, with the repository mounted behind it so its history is readable as well.
+
+**Why a commit and not a directory.** A directory is a live thing. Its owner writes to it again on its
+next pass, and once nodes may run at the same time it can change while a neighbour is reading it. A
+commit cannot move, so what a node read stays answerable afterwards and the same input gives the same
+run. `run.json` already named those commits, so the pointer now means what the record already said.
+
+**Read-only was measured, not assumed.** `mount_setattr(2)` makes `MOUNT_ATTR_RDONLY` *locked* when a
+mount and user namespace pair is created, explicitly so that a new user namespace cannot remount it
+writable. `scripts/verify_sandbox_readonly.py` runs the real sandbox and checks that a write is
+refused, that `mount -o remount,rw` is refused, that a second bind inside the sandbox is refused, that
+`unshare -Ur` does not help, that a file behind a bind is unchanged afterwards, and that `git log`
+still reads the history.
+
+**What a snapshot is.** The tracked files at that commit, their exec bits, and their symlinks. Not the
+files a node chose not to commit — `.gitignore` is the node's own statement about what it is handing
+on — and not empty directories, which git does not record at all. A symlink is kept even when it is
+absolute: `tarfile`'s strictest filter refuses one outright, so a node leaving `ln -s /usr/bin/python3 .`
+behind made the next node fail to start, reported as a tar error about a commit that was fine.
+
+**What it removed.** `_seed`, which copied every input's directory in, and with it the collision check
+for two inputs claiming one path. Under copying, one silently replaced the other and the check existed
+only because the copy did. A node's directory is now exactly what that node produced, so its files can
+be attributed to it without keeping a list of what it was handed.
+
+**The workspace is reused across passes**, because a node revising its own work needs to see what it
+wrote last time, and that is simply the directory it is already standing in. What keeps one pass
+readable after a later one has written over it is the commit: the history is the record of the node's
+work, made by Anchor outside the sandbox rather than by the node, because a record the recorded thing
+can edit is not one. `.git` is bound read-only over the read-write workspace, and a later bind wins.
+
+## ADR-057: A node reaches the work behind its inputs, and the following stops at a back edge
+
+An output is only what a node left in its own workspace, so nothing travels along a chain. In a
+`plan → gather → write → review` graph the reviewer could not see the plan, and the only way to fix it
+was for the node in the middle to copy it forward: the pass-through ADR-056 deleted, done again by
+hand and by memory, and forgotten silently when it was not done. Three of the four example graphs were
+written that way and none of them worked.
+
+So a node is mounted its selected inputs **and**, following forward edges, the work those inputs were
+built from.
+
+**The following stops at a back edge.** A back edge says the loop came round again, so what it carries
+is the loop's *current* state, and that state has already superseded the round it came from. Following
+one re-mounts every earlier round: measured on a three-node loop, what a node was handed was 3 commits
+in the first round, 9 by the third and 30 by the tenth — unbounded in how long the run had been going
+rather than bounded by the shape of the graph. Stopping at the back edge makes it constant, and what
+remains is bounded by the graph. `back_edges()` already computed exactly that set for loop detection.
+
+**One mount per node, and the newest pass wins.** The same node reached twice at two commits is two
+bindings at one path, and bubblewrap leaves whichever it applied last. `work/check` was handed
+`work/draft@2` and also reached `work/draft@1` through the critique it had written the round before, so
+it read v1, asked for another pass, and the loop never converged. A later pass supersedes an earlier
+one; a node is also not mounted its own earlier pass, because it is standing in that workspace and
+those passes are in its own history.
+
+**The prompt pushes the inputs and merely makes the rest reachable.** The inputs are listed with their
+commits and quoted in full. The lineage is an index with the sentence that a node is not expected to
+read it — otherwise a node a hundred deep would be handed a hundred ancestors as if they were all its
+business. What a node must understand is what the previous hand gave it; everything before that is
+findable rather than required, which is the same distinction the mounted history makes.
+
+**What was considered instead.** *Mounting every ancestor* has no silent failure but is unbounded, for
+the reason above. *A `reads` field naming the extra nodes* is minimal but fails the same way the
+copying did: an author who forgets to declare one gets a node that reads nothing and produces
+something anyway, and the run reports `finished`. The rule that needs no authoring cannot be forgotten.
+
+## ADR-058: A scope is a node one level up, and rounds are counted per level
+
+A graph may declare graphs, and a node may run one of them instead of an agent. What a run reads is the
+**expansion**: every module inlined, its nodes named for the module they came from, so `write/draft` is
+an ordinary node id and therefore an ordinary directory name. Nothing in the runner knows a module
+exists.
+
+**A scope is a node at the level above**, which is what a module node becomes when it is expanded. It
+follows that a module node has a `max_rounds` like any other, and there it means how many times its
+parent may enter it; the `max_rounds` inside means how many rounds each of the module's nodes may take
+*within one visit*. Both restart at each entry. This is the sense in which nested graphs compose
+uniformly at every level: the rule for a module is the rule for a node.
+
+**Without it an outer loop spends the inner loop's budget.** With `refine.max_rounds` at 2 and an inner
+loop that needs both rounds, the outer loop's second entry found the module already turned away, `done`
+never ran, and the run stopped with `ship` skipped. The same graph now finishes.
+
+**Two counters are needed where there was one.** `passes` is the round within the current entry, which
+is what the ceiling compares against and what restarts. `runs` is every run, never reset, and names the
+trace: a round number restarts when a module is re-entered, so the second visit's first pass would have
+been written over the first visit's conversation under the same name. `activations` counts visits.
+
+**Two bugs were found by running it, not by reading it.** A crossing edge is selected once and stays
+selected, so testing only for a crossing edge made every pass look like a new visit; a visit is a
+crossing edge *newer than the node's last run*, which is the freshness `_ready` already uses. And the
+refusal for an exhausted module was a sentinel the main loop re-tested against the *node's* ceiling, so
+it was treated as an ordinary step and the node ran anyway.
+
+## ADR-059: The runtime is exercised end to end with no provider
+
+`ANCHOR_MODEL_SCRIPT` names a JSON file mapping a node id to the commands it should be given, one per
+turn. Only the model is replaced — the loop, the sandbox, the mounts, the commits and the record are
+the real ones — so a run against it is evidence about the runtime rather than about a model, and it
+costs nothing. Off unless set.
+
+**This is what finds the bugs that matter.** Everything else in the suite replaces the agent, so the
+real sandbox flags, the real commit, the real pinned views and the real completion contract were never
+exercised together. Two failures came from closing that gap, and neither was reachable by reading:
+
+- `_check_finished` read `if not self.routes`, so only a node with *no* way out could finish the
+  ordinary way. Every non-terminal node in every graph was told by `_task` to run `anchor-done` for one
+  edge out and then refused for doing it, one wasted turn each. It survived because a model reads the
+  correction and routes instead; the run log from the pointer test says `route: "b"` where its
+  instruction said `anchor-done`.
+- The runtime had been unable to run a single command on this machine: `_tool_binds` passed
+  `os.readlink`'s answer to `Path`, and for `<venv>/bin/python` that answer is `python3` — relative —
+  so `Path("python3").parent` was `.` and the sandbox got `--ro-bind . .`, bubblewrap's working
+  directory over the sandbox root. Every command answered `Can't mkdir /tmp: Read-only file system`,
+  and a node retried for two thousand turns before anything said so.
+
+**The other half of the same lesson.** A construction-time probe checks that a namespace can be made,
+not that this node's mounts work, so a node now runs one trivial command with its real binds before its
+loop starts. `tests/test_sandbox_live.py` runs real bubblewrap against real mounts and skips where the
+kernel forbids namespaces rather than reporting a pass.
+
+**The rule this pins down:** when a run is in flight, follow the node's trace. Two thousand wasted
+turns happened because nobody was watching `runs/<id>/<node>.trace.jsonl`, which said what was wrong
+from the second turn.
+
+## ADR-060: A shared workspace with one owner at a time was rejected
+
+The proposal was a main workspace, one node holding ownership of it at a time, with every other node
+working in a private one. It is coherent and the sandbox can express it — read-write for the owner,
+read-only for everyone else — and it was refused.
+
+**It is a lock, not a pointer.** Exclusive ownership needs acquisition, release, and an answer for who
+releases it when the holder dies. Those are the leases, recovery and reconciliation the earlier design
+carried — ADR-018 has a node's tools executing under explicit owners, with leases that never recover
+them — and `README.md` states `no runs database, no leases, no recovery` as a property of what is here.
+
+**It makes what a node can see depend on runtime ownership rather than on the graph.** Today the
+question "what was this node given" is answered by the edges, and the answer is recorded. With a shared
+owned workspace it becomes "whatever was there when you got the lock", which is a channel the graph
+does not describe.
+
+**A crash corrupts shared state.** A node that dies mid-write leaves a half-written shared tree, and
+the record cannot say what it was before — unless commits are used to reconstruct it, which is
+ADR-056's per-node history arrived at from the other direction.
+
+**And it brings back the merge problem.** Two nodes writing `notes.md` in one mutable directory is not
+a conflict but a silent overwrite, and it cannot be detected, because that is where they were both
+meant to write.
+
+**What it would have bought** is an artefact edited in place instead of read through a pointer, saving
+a `cp` for a node that wants to modify what it was given. ADR-057 removes the case that made that
+expensive.

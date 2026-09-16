@@ -85,6 +85,48 @@ A node may also carry `"with": "…"`, appended to its role's own instructions. 
 declaring a role separately from its nodes worth doing: two nodes can share one and still be asked
 for different things.
 
+## The model, in one place
+
+Six statements. Each is a decision with a reason and a rejected alternative, and `DECISIONS.md` has
+them from ADR-056 on; this is the shape they add up to.
+
+**A node has one workspace, kept across its passes.** It is a directory of its own, and a node that
+runs again finds what it left. Its own passes are in its own git history, so a node can read how its
+work got to where it is.
+
+**An edge carries a pointer to a commit, never a copy.** The predecessor's workspace is mounted
+read-only at `/in/<node>`, at the commit that pass was frozen at, with the repository behind it. A
+commit cannot move, so what a node read stays answerable and the same input gives the same run.
+Nothing in the design requires an author to move a file from one node to another.
+
+**A node can reach the work behind its inputs, and the following stops at a back edge.** A back edge
+says the loop came round again, and the state it carries has already superseded the round it came
+from; following one would re-mount every earlier round, so what a node is handed would grow with how
+long the run had been going. What it is handed is therefore bounded by the shape of the graph. The
+prompt pushes the inputs and merely indexes the rest: a node must understand what the previous hand
+gave it, and everything before that is findable rather than required.
+
+**A scope is a node one level up, and rounds are counted per level.** A module node's `max_rounds` is
+how many times its parent may enter it; the `max_rounds` inside is how many rounds each of its nodes
+may take within one visit. Nested loops therefore compose without either spending the other's budget.
+
+**Completion is an action, not a sentence.** A node cannot stop by talking. `anchor-done`, or
+`anchor-route` when it chooses where the graph goes, is the only way a pass ends, so a turn that
+merely says it is finished leaves the run resumable instead of recording a success.
+
+**A run is exercised end to end with no provider.** `ANCHOR_MODEL_SCRIPT` replaces the model and
+nothing else — the loop, the sandbox, the mounts, the commits and the record stay real — so a change
+to any of them can be checked without paying a provider for it. `tests/test_loop_provider_free.py`
+runs a loop inside a module inside a loop that way.
+
+Two habits come with these, and both were learned by getting them wrong:
+
+- **A field, a file or a promise that nothing reads is worse than one that is refused.** Several of
+  the bugs here were things that were written and never consulted, or consulted in two places that
+  disagreed with each other.
+- **When a run is in flight, follow the node's trace.** `runs/<id>/<node>.trace.jsonl` says what a
+  node is doing from its first turn. Two thousand wasted model turns happened while nobody watched it.
+
 ## What is ours and what is not
 
 **Ours:** the graph, the directories, the sandbox, and the literature tools.
@@ -167,3 +209,17 @@ What survives of recovery is reading `run.json` back and stepping again — `--r
 machinery that was removed: there is no lease to reconcile and no version to publish.
 
 `DECISIONS.md` keeps the record of that, including the parts that were mistakes.
+
+**Not built yet, as against deliberately absent**, and worth keeping apart when deciding what to do
+next:
+
+- **A node never caches.** Every pass runs. The commit is the record of what a pass produced, not a key
+  for skipping one — so a graph re-run from the top redoes everything.
+- **Nodes run one at a time.** The design admits parallel ones: a pointer names a commit rather than a
+  live directory, so a node cannot be disturbed by a neighbour writing while it reads. The scheduler
+  walks one node at a time and does not use that yet.
+- **A run starts from a call, not from an event.** `anchor-serve` has `POST /trigger` and answers `409`
+  while that graph is already running; nothing watches for a change and starts one.
+
+- **The canvas shows a module and does not let you open it.** A module node draws as a subgraph and the
+  inspector says what it is; there is no drill-in editing.
