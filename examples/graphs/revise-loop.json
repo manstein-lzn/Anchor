@@ -5,18 +5,36 @@
   "agents": {
     "drafter": {
       "model": "models.academic",
+      "instructions": "Write one sentence about compiler cost models into `draft.md`. The reviewer's workspace is mounted read-only at `/in/review`. If a review is among what you were given, it is of the sentence you wrote: rewrite `draft.md` to address what it asks for, rather than starting again.",
       "network": false,
-      "instructions": "Write one sentence about compiler cost models into `draft.md`. The reviewer's workspace is mounted read-only at `/in/review`. If a review is among what you were given, it is of the sentence you wrote: rewrite `draft.md` to address what it asks for, rather than starting again."
+      "reads": [
+        "review.md"
+      ],
+      "writes": [
+        "draft.md"
+      ]
     },
     "reviewer": {
       "model": "models.academic",
+      "instructions": "Count the words in the draft you were given. Decide where this goes next:\n\n  route to `draft` if you have not written `review.md` yet — write it first, asking for one concrete example.\n  route to `done` if `review.md` is already there.\n\nFinish with `anchor-route --to <draft|done> --reason \"…\"` and nothing after it.",
       "network": false,
-      "instructions": "Count the words in the draft you were given. Decide where this goes next:\n\n  route to `draft` if you have not written `review.md` yet — write it first, asking for one concrete example.\n  route to `done` if `review.md` is already there.\n\nFinish with `anchor-route --to <draft|done> --reason \"…\"` and nothing after it."
+      "reads": [
+        "draft.md"
+      ],
+      "writes": [
+        "review.md"
+      ]
     },
     "finisher": {
       "model": "models.academic",
+      "instructions": "The draft is mounted read-only with what you were given, reachable through the review. Copy it into `final.md`, with a one-line heading above it. Then finish with `anchor-done --summary \"…\"`.",
       "network": false,
-      "instructions": "The draft is mounted read-only with what you were given, reachable through the review. Copy it into `final.md`, with a one-line heading above it. Then finish with `anchor-done --summary \"…\"`."
+      "reads": [
+        "draft.md"
+      ],
+      "writes": [
+        "final.md"
+      ]
     }
   },
   "nodes": [

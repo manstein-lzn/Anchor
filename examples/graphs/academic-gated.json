@@ -1,0 +1,106 @@
+{
+  "entry": "plan",
+  "max_rounds": 4,
+  "objective": "用一份带证据的简短综述回答一个技术问题，并且只有通过机器检查之后才算完成。",
+  "agents": {
+    "planner": {
+      "model": "models.academic",
+      "network": false,
+      "reads": [],
+      "writes": [
+        "plan.md"
+      ],
+      "instructions": "You plan a short, evidence-backed survey. Read the task.\n\nDecide the question, the search strings, the databases (Crossref and arXiv), what counts as evidence, and the shape of the answer.\n\nWrite the plan into `plan.md`. The node after you is given your directory read-only, so that file is the whole of what it receives: be specific enough that someone could execute it without asking you anything."
+    },
+    "gatherer": {
+      "model": "models.academic",
+      "network": true,
+      "reads": [
+        "plan.md"
+      ],
+      "writes": [
+        "sources.md",
+        "notes.md"
+      ],
+      "instructions": "You gather academic evidence. Read the plan you were given first, then search, read what you find, and write down what you learned.\n\nWrite these two files and keep them current as you go:\n\n  sources.md   one entry per source you actually retrieved: a number, the title, the authors, the year, the venue, the DOI or arXiv id, the URL you read, and whether you read the abstract or the full text.\n  notes.md     what each source says, in your own words, with its number. Mark which numbers you verified in the full text and which you only saw in an abstract.\n\nUse read-many for bulk reading rather than one read per document. You do not write prose for a reader."
+    },
+    "writer": {
+      "model": "models.academic",
+      "network": false,
+      "reads": [
+        "plan.md",
+        "sources.md",
+        "notes.md",
+        "check.txt"
+      ],
+      "writes": [
+        "paper.md"
+      ],
+      "instructions": "You are the author of a short, reader-facing survey. The plan and the evidence are mounted read-only with what you are given: read `plan.md`, `sources.md` and `notes.md` first. If a check has sent the work back, its note is in `check.txt` — read that and fix what it says is wrong rather than starting again.\n\nWrite `paper.md`: Markdown starting with '# ' and the real title, then '## Summary', 2 to 4 sections named by an axis the field actually uses, then '## References' numbered to match `sources.md`. Cite with the numbers in `sources.md` and nothing else; cite nothing that is not there. Where the evidence is thin, say so. Write in the request's language.\n\nA program checks two things when you finish — that `paper.md` starts with a title and contains a '## References' section — and sends the work back to you if either is missing. It is not a critic and it cannot be argued with: satisfy it."
+    }
+  },
+  "ops": {
+    "structure": {
+      "reads": [
+        "paper.md"
+      ],
+      "writes": [
+        "check.txt"
+      ],
+      "run": "if grep -q '^# ' /in/write/paper.md && grep -q '^## References' /in/write/paper.md; then printf 'title and references present\\n' > check.txt; anchor-route --to publish --reason 'structure is sound'; else printf 'missing the title line or the ## References section\\n' > check.txt; anchor-route --to write --reason 'structure check failed'; fi"
+    },
+    "assemble": {
+      "reads": [
+        "paper.md"
+      ],
+      "writes": [
+        "final.md"
+      ],
+      "run": "cp /in/write/paper.md final.md && printf 'assembled final.md from the checked manuscript\\n'"
+    }
+  },
+  "nodes": [
+    {
+      "id": "plan",
+      "agent": "planner"
+    },
+    {
+      "id": "gather",
+      "agent": "gatherer"
+    },
+    {
+      "id": "write",
+      "agent": "writer"
+    },
+    {
+      "id": "structure",
+      "op": "structure"
+    },
+    {
+      "id": "publish",
+      "op": "assemble"
+    }
+  ],
+  "edges": [
+    {
+      "from": "plan",
+      "to": "gather"
+    },
+    {
+      "from": "gather",
+      "to": "write"
+    },
+    {
+      "from": "write",
+      "to": "structure"
+    },
+    {
+      "from": "structure",
+      "to": "write"
+    },
+    {
+      "from": "structure",
+      "to": "publish"
+    }
+  ]
+}

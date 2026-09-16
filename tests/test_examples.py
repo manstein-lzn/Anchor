@@ -41,6 +41,13 @@ def test_the_only_unloadable_examples_are_where_they_say_they_are():
             graph_module.parse(json.loads(path.read_text(encoding="utf-8")))
 
 
+def _commits_text(workspace: Path) -> list[str]:
+    import subprocess
+    completed = subprocess.run(["git", "-C", str(workspace), "log", "--format=%s"],
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    return [line for line in completed.stdout.splitlines() if line.strip()]
+
+
 @pytest.fixture(scope="module", autouse=True)
 def needs_a_sandbox():
     try:
@@ -101,3 +108,51 @@ def test_the_revise_loop_actually_revises(tmp_path):
     # anyway, which is the whole of what used to need the middle node to carry it along.
     assert sorted(item.name for item in (run_dir / "review").iterdir() if item.is_file()) == \
         ["review.md"], "the reviewer carried something forward instead of pointing at it"
+
+
+#: The commands `academic-gated.json`'s roles would give. The first pass deliberately leaves out the
+#: `## References` section, so the op in the middle has something real to refuse — and refusing is
+#: the point: a program decides whether the work is done, and the writer cannot argue with it.
+GATED_SCRIPT = {
+    "plan": ["printf 'one question, two databases\\n' > plan.md",
+             'anchor-done --summary "planned it"'],
+    "gather": ["printf '1. A paper\\n' > sources.md && printf '1. says a thing\\n' > notes.md",
+               'anchor-done --summary "gathered it"'],
+    "write": [
+        # On the second pass the check's note is among what it was given, so it writes the paper the
+        # check asked for. Nothing about that decision is a model's: the file is either there or not.
+        "if [ -f /in/structure/check.txt ]; then "
+        "printf '# Cost models\\n\\n## Summary\\n\\nx\\n\\n## References\\n\\n1. A paper\\n' > paper.md; "
+        "else printf '# Cost models\\n\\n## Summary\\n\\nx\\n' > paper.md; fi",
+        'anchor-done --summary "wrote the paper"',
+    ],
+}
+
+
+def test_a_gate_of_deterministic_checks_drives_an_agent_loop(tmp_path):
+    """An op decides whether the work is done, and the loop goes round because of that decision.
+
+    This is what a second kind of node is for. The writer cannot talk its way past the check: the
+    check is `grep`, its verdict is an exit code, and the branch it takes is a real one. The parts
+    that need judgement are agents and the part that must not be is not.
+    """
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "graph.json").write_bytes((EXAMPLES / "academic-gated.json").read_bytes())
+    config = tmp_path / "runtime.json"
+    config.write_text('{"models": []}', encoding="utf-8")
+
+    state = runner.run(workspace, config_path=config, model_script=GATED_SCRIPT)
+    run_dir = next((workspace / "runs").glob("*"))
+
+    assert state.status == "finished", (state.status, state.error, state.ceased)
+    assert state.executed == ["plan", "gather", "write", "structure", "write", "structure", "publish"]
+    # The op's note is the reason the loop went round, and it is a file the writer could read.
+    assert (run_dir / "structure" / "check.txt").read_text(encoding="utf-8") == \
+        "title and references present\n"
+    # The gate's own commits say what it decided, in its own words — the reason it gave when it
+    # routed, which is the same thing an agent's commit message is.
+    assert _commits_text(run_dir / "structure") == [
+        "structure is sound", "structure check failed", "start"]
+    # And the deliverable was assembled by an op out of the checked manuscript, not out of any store.
+    assert "## References" in (run_dir / "publish" / "final.md").read_text(encoding="utf-8")

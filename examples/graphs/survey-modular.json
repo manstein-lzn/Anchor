@@ -3,24 +3,53 @@
   "agents": {
     "planner": {
       "model": "models.academic",
-      "instructions": "Read the task. Write `plan.md` naming the two or three points the paragraph has to make. The node after you is given your directory read-only, so that file is the whole of what it receives."
+      "instructions": "Read the task. Write `plan.md` naming the two or three points the paragraph has to make. The node after you is given your directory read-only, so that file is the whole of what it receives.",
+      "writes": [
+        "plan.md"
+      ]
     },
     "gatherer": {
       "model": "models.academic",
+      "instructions": "Read the plan you were given. Find one paper per point that supports it, using `anchor-scholarly search` and `anchor-scholarly read`. Write `sources.md`: a number, the title, the year, and the one line it contributes. Do not write prose for a reader.",
       "network": true,
-      "instructions": "Read the plan you were given. Find one paper per point that supports it, using `anchor-scholarly search` and `anchor-scholarly read`. Write `sources.md`: a number, the title, the year, and the one line it contributes. Do not write prose for a reader."
+      "reads": [
+        "plan.md"
+      ],
+      "writes": [
+        "sources.md"
+      ]
     },
     "drafter": {
       "model": "models.academic",
-      "instructions": "Write one paragraph into `draft.md`, answering the task from `sources.md` — the sources are mounted read-only with what you are given. If a critique is among them, it is of what you wrote: rewrite the paragraph to address it rather than starting again."
+      "instructions": "Write one paragraph into `draft.md`, answering the task from `sources.md` — the sources are mounted read-only with what you are given. If a critique is among them, it is of what you wrote: rewrite the paragraph to address it rather than starting again.",
+      "reads": [
+        "sources.md",
+        "critique.md"
+      ],
+      "writes": [
+        "draft.md"
+      ]
     },
     "critic": {
       "model": "models.academic",
-      "instructions": "Read the draft you were given, and the sources behind it. Write `critique.md`: one concrete problem, quoted, and what would fix it.\n\nThen decide where this goes next and finish with `anchor-route --to <draft|settle> --reason \"…\"` and nothing after it. Route to `draft` if the paragraph still has a problem worth another pass. Route to `settle` if it does not."
+      "instructions": "Read the draft you were given, and the sources behind it. Write `critique.md`: one concrete problem, quoted, and what would fix it.\n\nThen decide where this goes next and finish with `anchor-route --to <draft|settle> --reason \"…\"` and nothing after it. Route to `draft` if the paragraph still has a problem worth another pass. Route to `settle` if it does not.",
+      "reads": [
+        "draft.md",
+        "sources.md"
+      ],
+      "writes": [
+        "critique.md"
+      ]
     },
     "editor": {
       "model": "models.academic",
-      "instructions": "Read the draft, which is reachable through the critique you were given. Write `final.md` containing the paragraph plus a one-line heading above it, and nothing else. Finish with `anchor-done --summary \"what it says\"`."
+      "instructions": "Read the draft, which is reachable through the critique you were given. Write `final.md` containing the paragraph plus a one-line heading above it, and nothing else. Finish with `anchor-done --summary \"what it says\"`.",
+      "reads": [
+        "draft.md"
+      ],
+      "writes": [
+        "final.md"
+      ]
     }
   },
   "graphs": {
