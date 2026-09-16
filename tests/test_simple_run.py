@@ -12,6 +12,8 @@ import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from anchor.simple import run as runner
 
 
@@ -296,3 +298,117 @@ def test_a_module_runs_as_directories_named_for_its_scope(tmp_path, monkeypatch)
     written = json.loads((run_dir / "graph.json").read_text(encoding="utf-8"))
     assert [item["id"] for item in written["nodes"]] == ["in", "use/a", "use/b", "out"]
     assert {"from": "use/b", "to": "out"} in written["edges"]
+
+
+# -- and the claim that a run survives the process holding it -------------------------------------
+
+
+class _DiedHere(RuntimeError):
+    """What a killed process leaves: a cursor, a conversation, and nothing else."""
+
+
+class _CrashingStub:
+    """Writes a conversation, then dies. That is the shape `--resume` exists to pick up."""
+
+    def __init__(self, directory: Path, trace: Path):
+        self.directory = Path(directory)
+        self.trace = Path(trace)
+        self.env = SimpleNamespace(route=None)
+
+    def run(self, task: str) -> dict:
+        self.trace.parent.mkdir(parents=True, exist_ok=True)
+        self.trace.write_text(json.dumps({"role": "user", "content": task}) + "\n", encoding="utf-8")
+        raise _DiedHere("the process died here")
+
+    def resume(self, messages: list) -> dict:
+        raise AssertionError("a crashed attempt does not resume itself")
+
+
+class _ResumingStub:
+    """Continues a conversation that exists, and refuses to start over instead."""
+
+    def __init__(self, directory: Path):
+        self.directory = Path(directory)
+        self.env = SimpleNamespace(route=None)
+
+    def run(self, task: str) -> dict:
+        raise AssertionError("a resumed node must be continued, not started again")
+
+    def resume(self, messages: list) -> dict:
+        assert messages and messages[0].get("role") == "user", \
+            "the conversation a previous process left was not read back"
+        _tree(self.directory, {"b.md": "finished after the restart"})
+        return {"submission": "continued", "exit_status": "Submitted"}
+
+
+def test_a_run_continues_where_a_dead_process_left_it(tmp_path, monkeypatch):
+    """The layout changed underneath this and nothing tested it.
+
+    One workspace per node, one trace per pass — `resume` has to find both, from a `run.json` written
+    before either existed in that shape. A resume that cannot find its conversation is a run that
+    silently starts the node over, which is the failure this runtime is built to refuse.
+    """
+    graph = _agent_graph()
+    graph["nodes"] = [{"id": "a", "agent": "w"}, {"id": "b", "agent": "w"}]
+    graph["edges"] = [{"from": "a", "to": "b"}]
+    workspace = _workspace(tmp_path, graph)
+    state = {"crashed": False}
+
+    def fake_agent_for(_graph, node_id, directory, _models, _secret, _config, inputs=(), trace=None):
+        if node_id == "b":
+            if not state["crashed"]:
+                state["crashed"] = True
+                return _CrashingStub(Path(directory), trace)
+            return _ResumingStub(Path(directory))
+        return _StubAgent(Path(directory), {"a.md": "from a"}, "Submitted", None)
+
+    monkeypatch.setattr(runner, "_config", lambda path: ({}, None))
+    monkeypatch.setattr(runner, "_agent_for", fake_agent_for)
+
+    # A crash is loud *and* durable: it reaches the caller as an exception, and `run.json` says
+    # `interrupted` with a cursor, so the run can be picked up by a process that was not there.
+    with pytest.raises(_DiedHere):
+        runner.run(workspace, config_path=tmp_path / "unused.json")
+    run_dir = next((workspace / "runs").glob("*"))
+    first = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+
+    assert first["status"] == "interrupted", first["error"]
+    assert first["cursor"]["node"] == "b" and first["cursor"]["pass"] == 1
+    assert (run_dir / "b.trace.jsonl").is_file(), "the trace is where resume will look for it"
+
+    second = runner.run(workspace, config_path=tmp_path / "unused.json", resume=run_dir)
+
+    assert second.status == "finished", second.error
+    assert second.executed == ["a", "b"]
+    assert (run_dir / "b" / "b.md").read_text(encoding="utf-8") == "finished after the restart"
+    assert second.nodes["b"]["commit"], "the resumed pass was frozen like any other"
+    assert _commits(run_dir / "b")[0] == "continued"
+
+
+def test_the_task_names_where_what_it_was_given_is_mounted():
+    """The prompt is the only place a node learns the pointer exists, so it has to name the path.
+
+    A node that does not know where its inputs are looks for them in its own workspace, finds
+    nothing, and writes something anyway — which is the failure the pointer design is meant to make
+    impossible to reach by accident.
+    """
+    from anchor.simple.run import NodeResult, _task
+
+    graph = runner.graph_module.parse({
+        "entry": "in",
+        "objective": "test",
+        "agents": {"w": {"model": "m"}},
+        "nodes": [{"id": "in", "agent": "w"}, {"id": "out", "agent": "w"}],
+        "edges": [{"from": "in", "to": "out"}],
+    })
+    upstream = NodeResult(node_id="in", agent="w", tree="/somewhere/in", pass_number=1,
+                          submission="wrote notes", files=("notes.md",), submitted=True,
+                          exit_status="Submitted")
+
+    task = _task(graph, "out", "the objective", [upstream], (("/somewhere/in", "/in/in"),))
+
+    assert "/in/in" in task, "the mount point has to be named"
+    assert "read-only" in task, "and that it cannot be written to"
+    assert "wrote notes" in task and "notes.md" in task, "and what is behind it"
+    assert "git --git-dir=/in/in/.git log" in task, "and that the history is there too"
+    assert "/workspace" in task, "and which directory is its own"
