@@ -297,7 +297,11 @@ def _materialize(repo: Path, commit: str, into: Path) -> Path:
         if archive.returncode != 0:
             raise RuntimeError(failed(archive))
         with tarfile.open(fileobj=io.BytesIO(archive.stdout)) as tar:
-            tar.extractall(staging, filter="data")
+            # `tar` and not `data`: the stricter filter refuses a symlink to an absolute path
+            # outright, so one node leaving `ln -s /usr/bin/python3 .` behind would make the next
+            # node fail to start, reported as a tar error about a link. A symlink is part of the
+            # snapshot and is kept; the archive-level guards (`..`, absolute member paths) stay.
+            tar.extractall(staging, filter="tar")
     # Made here, not by the sandbox: a mount point cannot be created inside a read-only bind, and the
     # history is mounted over this.
     (staging / ".git").mkdir(exist_ok=True)

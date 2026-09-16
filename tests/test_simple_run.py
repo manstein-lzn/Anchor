@@ -8,6 +8,7 @@ written. Everything here runs git for real, because the commit is part of the re
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -526,3 +527,41 @@ def test_a_view_that_failed_to_build_is_not_reused(tmp_path):
         with pytest.raises(RuntimeError, match="cannot read commit"):
             _materialize(repo, "0" * 40, into)
         assert not into.exists(), f"attempt {attempt} left something behind for the next call to use"
+
+
+def test_a_snapshot_keeps_a_symlink_a_node_left_behind(tmp_path):
+    """The tree at a commit is the snapshot, and a symlink is part of it.
+
+    `tarfile`'s strictest filter refuses a link to an absolute path, so one node leaving
+    `ln -s /usr/bin/python3 .` behind made the next node fail to start — reported as a tar error about
+    a link in a commit that was perfectly fine. Inside the sandbox the link resolves to the sandbox's
+    own `/usr`, which is bound read-only, so keeping it grants nothing that was not already there.
+    """
+    from anchor.simple.run import _materialize
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (repo / "notes.md").write_text("kept\n", encoding="utf-8")
+    (repo / "run.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+    (repo / "run.sh").chmod(0o755)
+    os.symlink("notes.md", repo / "rel")
+    os.symlink("/usr/bin/python3", repo / "abs")
+    (repo / ".gitignore").write_text("scratch.txt\n", encoding="utf-8")
+    (repo / "scratch.txt").write_text("not committed\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "-c", "user.name=A", "-c", "user.email=a@b",
+                    "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(repo), "-c", "user.name=A", "-c", "user.email=a@b",
+                    "commit", "-q", "-m", "one"], check=True)
+    commit = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
+                            capture_output=True, text=True).stdout.strip()
+
+    view = _materialize(repo, commit, tmp_path / "view")
+
+    assert (view / "notes.md").read_text(encoding="utf-8") == "kept\n"
+    assert os.readlink(view / "rel") == "notes.md"
+    assert os.readlink(view / "abs") == "/usr/bin/python3", "an absolute link is still the snapshot"
+    assert (view / "run.sh").stat().st_mode & 0o111, "the exec bit is part of it too"
+    # And what the node chose not to commit is not handed on: that is the honest reading of
+    # `.gitignore`, and it is what makes the pointer a snapshot rather than an approximation.
+    assert not (view / "scratch.txt").exists()
