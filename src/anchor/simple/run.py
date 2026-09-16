@@ -24,8 +24,10 @@ stepping again — no event history, no reconciliation, nothing to prove about w
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import subprocess
+import tarfile
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -156,26 +158,27 @@ def _files(tree: Path) -> tuple[str, ...]:
 
 
 def _task(graph: graph_module.Graph, node_id: str, objective: str,
-          sources: list[NodeResult], inputs: tuple[tuple[str, str], ...]) -> str:
+          sources: list[NodeResult], inputs: tuple[_Given, ...]) -> str:
     lines = [f"# Task\n\n{objective}"]
     if inputs:
         lines.append(
             "# What you were given\n\n"
-            "Nothing was copied to you. These are the workspaces of the nodes before you, mounted "
-            "read-only, one per node:\n\n"
-            + "\n".join(f"    {mount}   ({node})" for (_, mount), node in
-                        zip(inputs, (result.node_id for result in sources)))
-            + "\n\nRead them with `cat`, `grep`, `find` or `git`. You cannot write to them — if you "
-              "want to change something in one, copy it into your own workspace first.")
-        for (_, mount), result in zip(inputs, sources):
+            "Nothing was copied to you. Each of these is another node's work at one exact commit, "
+            "mounted read-only:\n\n"
+            + "\n".join(f"    {item.mount}   ({item.node_id} at {item.commit[:12]})"
+                        for item in inputs)
+            + "\n\nRead them with `cat`, `grep` or `find`. You cannot write to them — if you want to "
+              "change something in one, copy it into your own workspace first.")
+        for result, item in zip(sources, inputs):
             mark = "" if result.submitted else "  (this node did not submit)\n"
             lines.append(f"## {result.node_id}\n\n{mark}"
                          f"{result.submission.strip() or '(nothing said)'}")
             if result.files:
                 lines.append("What it produced:\n" + "\n".join(f"  {name}" for name in result.files))
-            lines.append(f"Its whole history is there too, one commit per pass:\n\n"
-                         f"    git --git-dir={mount}/.git log --oneline\n"
-                         f"    git --git-dir={mount}/.git show <commit>")
+            lines.append(f"Its whole history is there too, one commit per pass — what you were "
+                         f"given is {item.commit[:12]}:\n\n"
+                         f"    git --git-dir={item.mount}/.git log --oneline\n"
+                         f"    git --git-dir={item.mount}/.git show <commit>")
     lines.append(
         "# Your own workspace\n\n"
         "You work in `/workspace`, which is yours alone. It is kept between your passes, so if you "
@@ -219,16 +222,62 @@ class _Step:
     resuming: bool
     # This pass's conversation, beside a workspace that is reused across passes.
     trace: Path = Path()
-    # (where it lives, where it is visible) for everything this node was given, read-only.
-    inputs: tuple[tuple[str, str], ...] = ()
+    # What this node was given: predecessors' work, each pinned to the commit it was frozen at.
+    inputs: tuple[_Given, ...] = ()
 
 
-def _mount_for(node_id: str) -> str:
-    """Where a predecessor's workspace is visible inside this node's sandbox.
-    Named for the node, so a module's nodes keep their scope: `/in/write/draft` is the draft node of
-    the `write` module and not a node called `draft` somewhere else.
+@dataclass(frozen=True)
+class _Given:
+    """One predecessor's work, pinned to the commit it was frozen at.
+
+    A pointer to a commit rather than to a directory. A directory is a live thing that its owner will
+    write to again — on its next pass, or, once nodes may run at the same time, while this one is
+    reading it. A commit cannot move, so what a node read stays answerable afterwards and the same
+    input gives the same run.
     """
-    return f"/in/{node_id}"
+
+    node_id: str
+    commit: str
+    mount: str
+    tree: Path
+
+    def binds(self) -> tuple[tuple[str, str], ...]:
+        """The tree at that commit, and the repository behind it so the history stays readable."""
+        return ((str(self.tree), self.mount), (str(self.tree / ".git"), f"{self.mount}/.git"))
+
+
+def _materialize(repo: Path, commit: str, into: Path) -> Path:
+    """Write one commit's tree out, so what gets mounted is that commit and not the live directory.
+
+    From the commit rather than the working tree, which is also the honest reading of `.gitignore`: a
+    file a node chose not to commit is a file it chose not to hand on.
+    """
+    if into.is_dir():
+        return into
+    into.mkdir(parents=True)
+    archive = subprocess.run(["git", "-C", str(repo), "archive", "--format=tar", commit],
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    if archive.returncode != 0:
+        detail = archive.stderr.decode("utf-8", errors="replace").strip() or "no stderr"
+        raise RuntimeError(f"cannot read commit {commit[:12]} of {repo}: {detail}")
+    with tarfile.open(fileobj=io.BytesIO(archive.stdout)) as tar:
+        tar.extractall(into, filter="data")
+    # Made here, not by the sandbox: a mount point cannot be created inside a read-only bind, and the
+    # history is mounted over this.
+    (into / ".git").mkdir(exist_ok=True)
+    return into
+
+
+def _given(run_dir: Path, result: NodeResult) -> _Given:
+    """Where a pointer lands, and what it points at."""
+    if not result.commit:
+        raise RuntimeError(f"{result.node_id} has no commit, so there is nothing to point at")
+    name = f"{result.node_id.replace('/', '_')}-{result.commit[:12]}"
+    tree = _materialize(Path(result.tree), result.commit, run_dir / ".views" / name)
+    # The mount is named for the node, so a module's nodes keep their scope: `/in/write/draft` is the
+    # draft node of the `write` module, not a node called `draft` somewhere else.
+    return _Given(node_id=result.node_id, commit=result.commit,
+                  mount=f"/in/{result.node_id}", tree=tree)
 
 
 def _incoming(graph: graph_module.Graph, state: RunState, decided: dict,
@@ -276,9 +325,15 @@ def _next_step(graph: graph_module.Graph, state: RunState, decided: dict, run_di
         node_id = cursor["node"]
         return _Step(node_id, cursor["pass"], Path(cursor["dir"]), None, True,
                      trace=_trace_path(run_dir, node_id, cursor["pass"]),
-                     inputs=tuple((item.tree, _mount_for(item.node_id))
+                     inputs=tuple(_given(run_dir, item)
                                   for item in _incoming(graph, state, decided, node_id)))
-    pending = [node for node in order if ready(node)]
+    # A node the ceiling already turned away stays turned away. Settling its out-edges is not enough
+    # on its own: in a cycle of two or more, the node is still "fresh" through the edge coming back
+    # into it, so it is chosen again, turned away again, and the run spins printing `stopped` forever.
+    # A self-loop happens to escape this because settling its edge is what makes it unready.
+    turned_away = set(state.ceased)
+    pending = [node for node in order
+               if ready(node) and f"{node}@{graph.ceiling(node)}" not in turned_away]
     if not pending:
         return None
     node_id = pending[0]
@@ -292,7 +347,7 @@ def _next_step(graph: graph_module.Graph, state: RunState, decided: dict, run_di
     _init_history(directory)
     state.attempts[f"{node_id}|{number}"] = state.attempts.get(f"{node_id}|{number}", 0) + 1
     handed = _incoming(graph, state, decided, node_id)
-    inputs = tuple((item.tree, _mount_for(item.node_id)) for item in handed)
+    inputs = tuple(_given(run_dir, item) for item in handed)
     state.passes[node_id] = number
     state.seq += 1
     state.last_seq[node_id] = state.seq
@@ -397,7 +452,7 @@ def _secret(secret_file: str | None, model: dict) -> str:
 
 
 def _agent_for(graph, node_id: str, directory: Path, models: dict, secret_file, config_path,
-               inputs: tuple[tuple[str, str], ...] = (), trace: Path | None = None):
+               inputs: tuple[_Given, ...] = (), trace: Path | None = None):
     node = graph.nodes[node_id]
     spec = graph.agents[node.agent]
     model = models.get(spec.model)
@@ -419,7 +474,7 @@ def _agent_for(graph, node_id: str, directory: Path, models: dict, secret_file, 
         network=spec.network, timeout_seconds=600.0,
         max_steps=spec.max_steps or DEFAULT_MAX_STEPS,
         wall_time_limit_seconds=spec.wall_time_limit_seconds,
-        inputs=inputs, trace=trace,
+        inputs=tuple(bind for item in inputs for bind in item.binds()), trace=trace,
     )
 
 

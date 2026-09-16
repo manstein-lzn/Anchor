@@ -124,8 +124,10 @@ def test_what_a_node_is_given_is_mounted_and_not_copied(tmp_path, monkeypatch):
     run_dir = next((workspace / "runs").glob("*"))
     assert state.status == "finished"
     assert seen["a"]["inputs"] == (), "the entry node was given nothing"
-    assert seen["b"]["inputs"] == ((str(run_dir / "a"), "/in/a"),), \
-        "the upstream is handed over as a path, not as content"
+    given = seen["b"]["inputs"][0]
+    assert (given.node_id, given.mount) == ("a", "/in/a")
+    assert given.commit == state.nodes["a"]["commit"], "the pointer names the commit it was frozen at"
+    assert given.tree != run_dir / "a", "what is mounted is a view of that commit, not the directory"
     assert (run_dir / "b" / "b.md").is_file()
     assert not (run_dir / "b" / "a.md").exists(), "the input was copied into the node's workspace"
     assert (run_dir / "a" / "a.md").is_file(), "it is still where it was, which is what is pointed at"
@@ -292,8 +294,8 @@ def test_a_module_runs_as_directories_named_for_its_scope(tmp_path, monkeypatch)
         assert (run_dir / node).is_dir(), f"{node} should have its own directory"
     # The scope travels in the pointer too, so a module's node is not confused with one of the same
     # name elsewhere in the graph.
-    assert seen["use/b"] == ((str(run_dir / "use/a"), "/in/use/a"),)
-    assert seen["out"] == ((str(run_dir / "use/b"), "/in/use/b"),)
+    assert [(g.node_id, g.mount) for g in seen["use/b"]] == [("use/a", "/in/use/a")]
+    assert [(g.node_id, g.mount) for g in seen["out"]] == [("use/b", "/in/use/b")]
     # And the run records the graph it actually read, modules already inlined.
     written = json.loads((run_dir / "graph.json").read_text(encoding="utf-8"))
     assert [item["id"] for item in written["nodes"]] == ["in", "use/a", "use/b", "out"]
@@ -392,7 +394,7 @@ def test_the_task_names_where_what_it_was_given_is_mounted():
     nothing, and writes something anyway — which is the failure the pointer design is meant to make
     impossible to reach by accident.
     """
-    from anchor.simple.run import NodeResult, _task
+    from anchor.simple.run import NodeResult, _Given, _task
 
     graph = runner.graph_module.parse({
         "entry": "in",
@@ -403,12 +405,82 @@ def test_the_task_names_where_what_it_was_given_is_mounted():
     })
     upstream = NodeResult(node_id="in", agent="w", tree="/somewhere/in", pass_number=1,
                           submission="wrote notes", files=("notes.md",), submitted=True,
-                          exit_status="Submitted")
+                          exit_status="Submitted", commit="abc123def456789")
+    given = _Given(node_id="in", commit="abc123def456789", mount="/in/in", tree=Path("/views/in"))
 
-    task = _task(graph, "out", "the objective", [upstream], (("/somewhere/in", "/in/in"),))
+    task = _task(graph, "out", "the objective", [upstream], (given,))
 
     assert "/in/in" in task, "the mount point has to be named"
+    assert "abc123def456" in task, "and which commit it is, because that is what the pointer names"
     assert "read-only" in task, "and that it cannot be written to"
     assert "wrote notes" in task and "notes.md" in task, "and what is behind it"
     assert "git --git-dir=/in/in/.git log" in task, "and that the history is there too"
     assert "/workspace" in task, "and which directory is its own"
+
+
+def test_a_pointer_is_a_commit_and_not_a_directory_that_moved_since(tmp_path, monkeypatch):
+    """In a loop the same node runs again and its directory changes under whoever read it.
+
+    A directory is live. `a@2` writes over `a@1`, so a node handed "a" would read whichever pass
+    happened to be current — neither reproducible nor answerable afterwards. What `b` was handed the
+    first time has to still say `v1` when the run is over and `a` says `v2`.
+    """
+    graph = {
+        "entry": "a",
+        "max_rounds": 2,
+        "objective": "test",
+        "agents": {"w": {"model": "models.academic"}},
+        "nodes": [{"id": "a", "agent": "w"}, {"id": "b", "agent": "w"}],
+        "edges": [{"from": "a", "to": "b"}, {"from": "b", "to": "a"}],
+    }
+    workspace = _workspace(tmp_path, graph)
+    handed: list = []
+    passes = {"a": 0}
+
+    def fake_agent_for(_graph, node_id, directory, _models, _secret, _config, inputs=(), trace=None):
+        if node_id == "b":
+            handed.append(inputs[0])
+            return _StubAgent(Path(directory), {"b.md": "seen"}, "Submitted", "a")
+        passes["a"] += 1
+        return _StubAgent(Path(directory), {"a.md": f"v{passes['a']}"}, "Submitted", "b")
+
+    monkeypatch.setattr(runner, "_config", lambda path: ({}, None))
+    monkeypatch.setattr(runner, "_agent_for", fake_agent_for)
+
+    runner.run(workspace, config_path=tmp_path / "unused.json")
+
+    run_dir = next((workspace / "runs").glob("*"))
+    assert len(handed) == 2, "the loop should have gone round twice"
+    assert handed[0].commit != handed[1].commit, "each pass is its own commit"
+    assert (handed[0].tree / "a.md").read_text(encoding="utf-8") == "v1", \
+        "what b was given first changed underneath it"
+    assert (handed[1].tree / "a.md").read_text(encoding="utf-8") == "v2"
+    assert (run_dir / "a" / "a.md").read_text(encoding="utf-8") == "v2", \
+        "and the node's own workspace is still the live one it is standing in"
+
+
+def test_a_loop_of_two_that_exceeds_its_ceiling_stops_instead_of_spinning(tmp_path, monkeypatch):
+    """Settling the turned-away node's out-edges is not enough on its own.
+
+    In a cycle of two or more the node stays "fresh" through the edge coming back into it, so it was
+    chosen again, turned away again, and the run printed `stopped` forever without ending. A self-loop
+    escapes this by accident — settling its own edge is what makes it unready — which is why the test
+    above passed while this shape hung the suite.
+    """
+    graph = {
+        "entry": "a",
+        "max_rounds": 2,
+        "objective": "test",
+        "agents": {"w": {"model": "models.academic"}},
+        "nodes": [{"id": "a", "agent": "w"}, {"id": "b", "agent": "w"}],
+        "edges": [{"from": "a", "to": "b"}, {"from": "b", "to": "a"}],
+    }
+    workspace = _workspace(tmp_path, graph)
+    _stub_nodes(monkeypatch, lambda node_id: ({f"{node_id}.md": "x"}, "Submitted",
+                                              "b" if node_id == "a" else "a"))
+
+    state = runner.run(workspace, config_path=tmp_path / "unused.json")
+
+    assert state.executed == ["a", "b", "a", "b"], "each ran to its ceiling and no further"
+    assert state.ceased == ["a@2"], "the pass that was turned away is on the record"
+    assert state.status == "stopped" and state.reason == "max_rounds"
