@@ -26,6 +26,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import shutil
 import subprocess
 import tarfile
 from dataclasses import asdict, dataclass, field, replace
@@ -259,17 +260,36 @@ def _materialize(repo: Path, commit: str, into: Path) -> Path:
     """
     if into.is_dir():
         return into
-    into.mkdir(parents=True)
-    archive = subprocess.run(["git", "-C", str(repo), "archive", "--format=tar", commit],
+    # Built beside the name it will take, and moved into place only once it is whole. A half-written
+    # view left under the real name is returned by the guard above on the next call and mounted as if
+    # it were that commit, which is the one way this can go wrong without saying so.
+    staging = into.with_name(into.name + ".building")
+    shutil.rmtree(staging, ignore_errors=True)
+    staging.mkdir(parents=True)
+
+    def failed(completed: subprocess.CompletedProcess) -> str:
+        shutil.rmtree(staging, ignore_errors=True)
+        detail = completed.stderr.decode("utf-8", errors="replace").strip() or "no stderr"
+        return f"cannot read commit {commit[:12]} of {repo}: {detail}"
+
+    listing = subprocess.run(["git", "-C", str(repo), "ls-tree", "-r", "--name-only", commit],
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
-    if archive.returncode != 0:
-        detail = archive.stderr.decode("utf-8", errors="replace").strip() or "no stderr"
-        raise RuntimeError(f"cannot read commit {commit[:12]} of {repo}: {detail}")
-    with tarfile.open(fileobj=io.BytesIO(archive.stdout)) as tar:
-        tar.extractall(into, filter="data")
+    if listing.returncode != 0:
+        raise RuntimeError(failed(listing))
+    # An empty tree is not an empty tar. `git archive` answers one that Python's `tarfile` refuses
+    # outright (`end of file header`), so the archive is asked for only when there is something in it.
+    # A node that wrote nothing is an ordinary node — one that only routed — and it still gets a view.
+    if listing.stdout.strip():
+        archive = subprocess.run(["git", "-C", str(repo), "archive", "--format=tar", commit],
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+        if archive.returncode != 0:
+            raise RuntimeError(failed(archive))
+        with tarfile.open(fileobj=io.BytesIO(archive.stdout)) as tar:
+            tar.extractall(staging, filter="data")
     # Made here, not by the sandbox: a mount point cannot be created inside a read-only bind, and the
     # history is mounted over this.
-    (into / ".git").mkdir(exist_ok=True)
+    (staging / ".git").mkdir(exist_ok=True)
+    staging.rename(into)
     return into
 
 

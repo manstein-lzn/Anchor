@@ -484,3 +484,45 @@ def test_a_loop_of_two_that_exceeds_its_ceiling_stops_instead_of_spinning(tmp_pa
     assert state.executed == ["a", "b", "a", "b"], "each ran to its ceiling and no further"
     assert state.ceased == ["a@2"], "the pass that was turned away is on the record"
     assert state.status == "stopped" and state.reason == "max_rounds"
+
+
+# -- materializing a commit's tree ---------------------------------------------------------------
+
+
+def test_a_node_that_wrote_nothing_still_has_a_view(tmp_path, monkeypatch):
+    """A node that only routed is an ordinary node: empty commit, empty tree, and a real pointer.
+
+    `git archive` answers an empty tree with an archive Python's `tarfile` refuses outright
+    (`end of file header`), so a graph with a node that wrote nothing failed at the next node's
+    startup — reported as a tar error about a commit that was perfectly fine.
+    """
+    from anchor.simple.run import _materialize
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "-c", "user.name=A", "-c", "user.email=a@b",
+                    "commit", "-q", "--allow-empty", "-m", "nothing"], check=True)
+    commit = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
+                            capture_output=True, text=True).stdout.strip()
+
+    view = _materialize(repo, commit, tmp_path / "view")
+
+    assert view.is_dir()
+    assert [item.name for item in view.iterdir()] == [".git"], "an empty tree, and the mount point"
+
+
+def test_a_view_that_failed_to_build_is_not_reused(tmp_path):
+    """The guard returns an existing view, so a half-written one under the real name is mounted as
+    if it were the commit — which is the one way this can go wrong without saying so."""
+    from anchor.simple.run import _materialize
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    into = tmp_path / "view"
+
+    for attempt in range(2):
+        with pytest.raises(RuntimeError, match="cannot read commit"):
+            _materialize(repo, "0" * 40, into)
+        assert not into.exists(), f"attempt {attempt} left something behind for the next call to use"
