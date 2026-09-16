@@ -11,10 +11,11 @@ anchor-graph /tmp/survey --objective "写一篇综述"
 `anchor-graph` takes the directory holding `graph.json`, not the graph file itself, and leaves its
 runs in a `runs/` beside it.
 
-A graph is a JSON file. A node is an agent with a workspace of its own. An edge says which nodes' work
-a node starts from, and what it carries is **a pointer**: the predecessor's workspace, mounted
-read-only in the sandbox at `/in/<node>`, its history included. Nothing is copied. A node writes into
-its own workspace and whatever is in it when it finishes is what the next node is pointed at.
+A graph is a JSON file. A node is an **agent** or an **op**, and it has a workspace of its own.
+An edge says which nodes' work a node starts from, and what it carries is **a pointer**: the
+predecessor's workspace, mounted read-only in the sandbox at `/in/<node>`, its history included.
+Nothing is copied. A node writes into its own workspace and whatever is in it when it finishes is what
+the next node is pointed at.
 
 ```json
 {
@@ -23,13 +24,27 @@ its own workspace and whatever is in it when it finishes is what the next node i
     "gatherer": {
       "model": "models.academic",
       "network": true,
+      "reads": ["plan.md"],
+      "writes": ["sources.md", "notes.md"],
       "instructions": "You gather academic evidence…"
     }
   },
-  "nodes": [{"id": "gather", "agent": "gatherer"}],
-  "edges": [{"from": "plan", "to": "gather"}]
+  "ops": {
+    "has-references": {
+      "run": "grep -q '^## References' /in/write/paper.md",
+      "reads": ["paper.md"]
+    }
+  },
+  "nodes": [{"id": "gather", "agent": "gatherer"},
+            {"id": "check", "op": "has-references"}],
+  "edges": [{"from": "plan", "to": "gather"}, {"from": "gather", "to": "check"}]
 }
 ```
+
+An agent is a model loop that finishes by running `anchor-done` or `anchor-route`. An op is one
+command and no model at all: **its exit code is the verdict**, and its output is what it says. Both
+are nodes in every other respect — the same workspace, the same pointer, the same commit, the same
+record — which is what makes an op a second kind of node rather than a second way of running one.
 
 ## A graph can contain graphs
 
@@ -109,6 +124,20 @@ gave it, and everything before that is findable rather than required.
 **A scope is a node one level up, and rounds are counted per level.** A module node's `max_rounds` is
 how many times its parent may enter it; the `max_rounds` inside is how many rounds each of its nodes
 may take within one visit. Nested loops therefore compose without either spending the other's budget.
+
+**A node is an agent or an op, and both declare the same interface.** An agent is a model loop; an
+op is one command whose exit code is the verdict. Everything else is shared — the workspace, the
+pointer, the commit, the record — so an op is the same mechanism with a program deciding instead of a
+model. Both declare `reads` and `writes`, and the reason is not documentation: a declaration can be
+**checked**. At load, every file a node says it reads must be one that something it can be handed
+writes. That is the class of failure the runtime cannot report — a node wired to nothing reads
+nothing, does the work anyway, and submits — and it is refused where the author is, with the message
+saying what would have worked.
+
+An op is a command rather than a function because everything a node runs has to run inside the sandbox.
+What the command is written in is the author's business: a console script, a python file and a line of
+shell are the same thing here. `examples/graphs/academic-gated.json` is the shape — agents write, an
+op decides, and the op's exit code is what sends the work back.
 
 **Completion is an action, not a sentence.** A node cannot stop by talking. `anchor-done`, or
 `anchor-route` when it chooses where the graph goes, is the only way a pass ends, so a turn that
@@ -213,6 +242,10 @@ machinery that was removed: there is no lease to reconcile and no version to pub
 **Not built yet, as against deliberately absent**, and worth keeping apart when deciding what to do
 next:
 
+- **Nothing waits for the outside world.** A node's files all come from inside the graph, so a run is
+  either working or over. An **input op** — one whose workspace is filled by a trigger, and whose run
+  is therefore `waiting` rather than finished — is the next step, and it is what a graph that answers
+  a question or answers an alert needs.
 - **A node never caches.** Every pass runs. The commit is the record of what a pass produced, not a key
   for skipping one — so a graph re-run from the top redoes everything.
 - **Nodes run one at a time.** The design admits parallel ones: a pointer names a commit rather than a
@@ -222,4 +255,9 @@ next:
   while that graph is already running; nothing watches for a change and starts one.
 
 - **The canvas shows a module and does not let you open it.** A module node draws as a subgraph and the
-  inspector says what it is; there is no drill-in editing.
+  inspector says what it is; there is no drill-in editing, and it does not know about ops yet.
+- **A graph's size is whatever its author drew.** Work whose *number of pieces* is unknown until the
+  data arrives has to be absorbed by a node looping over it, one pass per item with a fresh context
+  and a commit each — which is most of what fanning out would give, minus doing it at the same time.
+  Running many pieces at once would need node instances created at run time, and node identity is
+  static today (`id` → directory → counters → trace name). Worth knowing before designing toward it.

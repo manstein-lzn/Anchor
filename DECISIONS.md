@@ -1591,3 +1591,52 @@ meant to write.
 **What it would have bought** is an artefact edited in place instead of read through a pointer, saving
 a `cp` for a node that wants to modify what it was given. ADR-057 removes the case that made that
 expensive.
+
+## ADR-061: A node is an agent or an op, and both declare the same interface
+
+A node is one of two things. An **agent** is a model loop. An **op** is one command whose exit code is
+the verdict. Everything else is shared, and that is the point: the same workspace, the same read-only
+pointer to what came before, the same commit per run, the same completion contract, the same record.
+An op is not a second mechanism — it is the same mechanism with a program deciding instead of a model.
+
+**An op must be a command, and not for convenience.** Everything a node runs has to run *inside the
+sandbox*, and an in-process function would run outside it with the host in reach — past the boundary
+`verify_sandbox_readonly.py` exists to measure. What the command is written in is the author's
+business: a console script, a python file and a line of shell are the same thing to the graph. So
+there is no tool registry and no verifier registry, which were the previous design's two ways of
+turning the same distinction into a second kind of thing with its own lifecycle and its own bundle
+fields.
+
+**Both kinds declare `reads` and `writes`** — the files a node expects and the files it promises. The
+reason is not documentation; it is that a declaration can be **checked**, and the check is the class
+of failure the runtime cannot report, because nothing about it looks wrong while it happens: a node
+whose input is wired to nothing reads nothing, does the work anyway, and submits. `revise-loop` was
+exactly that — `done` was told to copy `draft.md`, its only edge came from `review`, and the reviewer
+wrote only `review.md`. The graph loaded, the run finished, and the loop inside it had never read
+anything.
+
+**So at load**, every file a node says it reads must be one that something it can be handed writes.
+"Can be handed" is the static form of what `_handed` does at run time (ADR-057) and a superset of it —
+a run selects one way out of each node, this follows all of them — so the check refuses only graphs
+that cannot work, and the message names what would have worked instead.
+
+**An op finishes by its exit code**: 0 finishes the pass and its output is what it says, anything else
+fails the pass outright. It is not a budget exit, so a resume does not pick it up and the run does not
+carry on as if the work had been done. A non-zero exit is a failure that cannot be argued with, which
+is the property an agent does not have: a model can talk itself into believing it has finished. Exit
+127 is named separately — "the op's command is not on the sandbox PATH" is a diagnosis, a bare 127 is
+not, and it is the failure an author hits most often.
+
+**`with` on an op is refused.** It appends to what a role says; an op is a command and anything that
+varies per use is written in that command. A field read by nothing is the thing this file refuses
+rather than accepts quietly — the same rule that once rejected `max_rounds` on a module node, until
+ADR-058 made it mean something.
+
+**What this is for.** Once a node can be a program, the deterministic half of a graph becomes a
+library rather than a set of prompts, and the agents are only the steps that need judgement. The parts
+a model must not decide — whether the references resolve, whether the sections are there, whether the
+count matches — are the parts a program decides. `examples/graphs/academic-gated.json` is the shape:
+agents write, an op decides, and the op's exit code is what sends the work back.
+
+**What is not here yet.** An input op — a node whose files come from outside the graph and whose run
+is therefore `waiting` rather than finished — is the next step and is deliberately not in this one.
