@@ -191,6 +191,10 @@ def _files(tree: Path) -> tuple[str, ...]:
 
 def _task(graph: graph_module.Graph, node_id: str, objective: str,
           sources: list[NodeResult], inputs: tuple[_Given, ...]) -> str:
+    # Empty for an agent node. Its presence is what makes the two kinds one function: everything
+    # above this line — the task, what was given, what can be reached — is the same for both.
+    node = graph.nodes[node_id]
+    node_op = graph.ops[node.op].run if node.op else ""
     lines = [f"# Task\n\n{objective}"]
     reached = [item for item in inputs if not item.direct]
     inputs = tuple(item for item in inputs if item.direct)
@@ -222,6 +226,23 @@ def _task(graph: graph_module.Graph, node_id: str, objective: str,
                         for item in reached)
             + "\n\nEach is at the commit it had when it fed this line of work, not its latest. "
               "`git --git-dir=<mount>/.git log` reads the rest of that node's history.")
+    if node_op:
+        lines.append(
+            "# What this node is\n\n"
+            "An **op**, not an agent: it runs one command and nothing else, and there is no model "
+            "in this pass. The command is\n\n"
+            f"    {node_op}\n\n"
+            "It runs in `/workspace`. **Its exit code is the verdict**: 0 finishes this pass and its "
+            "output is what the pass says it did, and anything else fails the pass outright — there "
+            "is nothing to correct and no turns to spend. What it was given is mounted read-only as "
+            "described above, so it reads its inputs where they are rather than looking for them in "
+            "its own directory.")
+        if len(graph.routes(node_id)) > 1:
+            lines.append(
+                "This node chooses where the graph goes, so the command has to name it: finish by "
+                f"running `anchor-route --to <{'|'.join(graph.routes(node_id))}> --reason \"…\"`, "
+                "or by printing that line itself.")
+        return "\n\n".join(lines)
     lines.append(
         "# Your own workspace\n\n"
         "You work in `/workspace`, which is yours alone. It is kept between your passes, so if you "
@@ -644,6 +665,16 @@ def _agent_for(graph, node_id: str, directory: Path, models: dict, secret_file, 
                inputs: tuple[_Given, ...] = (), trace: Path | None = None,
                script: list[str] | None = None):
     node = graph.nodes[node_id]
+    if node.op:
+        # An op is a command. No model profile, no secret, one turn, and its exit code is the
+        # verdict — everything else about the node is what it is for an agent.
+        op = graph.ops[node.op]
+        return build_agent(
+            tree=directory, node_id=node_id, routes=graph.routes(node_id), instructions="",
+            network=op.network, timeout_seconds=600.0, max_steps=1,
+            wall_time_limit_seconds=op.wall_time_limit_seconds,
+            inputs=tuple(bind for item in inputs for bind in item.binds()), trace=trace,
+            op=op.run)
     spec = graph.agents[node.agent]
     # A scripted node needs no model profile and no secret: nothing is being called.
     model_name, model_kwargs = "", {}

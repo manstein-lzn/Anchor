@@ -260,6 +260,53 @@ class SandboxEnvironment(LocalEnvironment):
                                    "route": target}})
 
 
+class OpEnvironment(SandboxEnvironment):
+    """The same sandbox and the same mounts, with a program deciding instead of a model.
+
+    Nothing here is a second mechanism. The op is given the same read-only pointers, runs in the same
+    sandbox, leaves the same commit, and is recorded the same way; what changes is one thing, and this
+    class is that one thing. A model can talk itself into believing it has finished — a command
+    cannot, so its exit code is taken as the verdict and its output as what it says.
+    """
+
+    def _check_finished(self, output: dict) -> None:
+        from minisweagent.exceptions import InterruptAgentFlow
+
+        text = output.get("output", "")
+        code = int(output.get("returncode") or 0)
+        first = next((line.strip() for line in text.lstrip().splitlines() if line.strip()), "")
+
+        def end(status: str, said: str) -> None:
+            raise InterruptAgentFlow({"role": "exit", "content": said,
+                                      "extra": {"exit_status": status, "submission": said}})
+
+        if code == 127:
+            # Not a failed check: a command that is not there. Saying which one beats a bare 127.
+            end("CommandNotFound",
+                f"the op's command is not on the sandbox PATH (exit 127):\n{text.strip()}")
+            return
+        if code != 0:
+            # A failed pass, and named as one. It is not a budget exit, so a resume does not pick it
+            # up and the run does not carry on as if the work had been done.
+            end("Failed", text.strip() or f"the op's command exited {code}")
+            return
+        if first.startswith("ANCHOR_ROUTE:"):
+            target = first.split(":", 1)[1].strip()
+            if target not in self.routes:
+                end("Failed", f"the op routed to {target!r}, which is not a way out of this node. "
+                              f"Choose one of: {', '.join(self.routes)}")
+                return
+            self.route = target
+            end("Submitted", "\n".join(text.lstrip().splitlines()[1:]).strip())
+            return
+        if len(self.routes) > 1:
+            # Same rule as an agent's: a node that chooses where the graph goes has to choose.
+            end("Failed", f"this node has more than one way out and did not route. Finish by running "
+                          f"`anchor-route --to <{'|'.join(self.routes)}> --reason \"…\"`")
+            return
+        end("Submitted", text.strip())
+
+
 class TracingAgent(DefaultAgent):
     """Their loop, with every message written to the trace as it arrives, and a way back in.
 
@@ -344,8 +391,16 @@ def build_agent(*, tree: Path, node_id: str, instructions: str, routes: tuple[st
                 network: bool, timeout_seconds: float, max_steps: int, wall_time_limit_seconds: int,
                 model_name: str = "", model_kwargs: dict | None = None,
                 inputs: tuple[tuple[str, str], ...] = (), trace: Path | None = None,
-                script: list[str] | None = None):
-    """A node's agent: their loop, their model client (or a scripted one), our environment."""
+                script: list[str] | None = None, op: str | None = None):
+    """A node's agent: their loop, their model client (or a scripted one or an op), our environment.
+
+    An op is one command and no model at all, so it is the scripted model's own mechanism with a
+    single written-down action. That is not a shortcut: the loop, the sandbox, the mounts, the commit
+    and the record stay exactly what they are for an agent node, which is what makes `op` a second
+    kind of node rather than a second way of running one.
+    """
+    if op is not None:
+        script = [op]
     if script is not None:
         model = scripted_model(script)
     else:
@@ -359,9 +414,13 @@ def build_agent(*, tree: Path, node_id: str, instructions: str, routes: tuple[st
             # are bounds we set ourselves and can reason about.
             cost_tracking="ignore_errors",
         )
+    environment = (OpEnvironment(tree=tree, node_id=node_id, routes=routes, network=network,
+                                 timeout_seconds=timeout_seconds, inputs=inputs)
+                   if op is not None else
+                   SandboxEnvironment(tree=tree, node_id=node_id, routes=routes, network=network,
+                                      timeout_seconds=timeout_seconds, inputs=inputs))
     return TracingAgent(
-        model, SandboxEnvironment(tree=tree, node_id=node_id, routes=routes, network=network,
-                                  timeout_seconds=timeout_seconds, inputs=inputs),
+        model, environment,
         # One per pass, beside the workspace rather than in it. The workspace is reused across passes
         # and the conversation is not: two passes appended to one file would replay as a conversation
         # with two beginnings, which is not the one either of them had.

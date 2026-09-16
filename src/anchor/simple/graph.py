@@ -47,8 +47,19 @@ DEFAULT_MAX_ROUNDS = 3
 
 
 @dataclass(frozen=True)
-class Agent:
-    model: str
+class Interface:
+    """What a node says it reads and what it promises to write, in file names inside its workspace.
+
+    The only interface there is. A node is handed files and leaves files, whether a model or a
+    program did the work, so the same declaration describes both and the same check applies to both.
+    """
+    reads: tuple[str, ...] = ()
+    writes: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class Agent(Interface):
+    model: str = ""
     instructions: str = ""
     # Whether this node's commands may reach the network. A node whose work is reading the
     # literature needs it; a node that writes a file does not, and refusing it costs nothing.
@@ -64,11 +75,31 @@ class Agent:
 
 
 @dataclass(frozen=True)
+class Op(Interface):
+    """A node's work when no model is involved: one command, and its exit code is the verdict.
+
+    The same thing as an agent in every way the graph can see — a workspace of its own, a read-only
+    pointer to what came before, one commit per run, one action that finishes it — and different in
+    exactly one: what decides the work is done is a program rather than a model. A model can talk
+    itself into believing it has finished. `grep -q '^## References' paper.md` cannot.
+
+    A command rather than a function, and not for convenience: everything a node runs has to run
+    *inside the sandbox*, and an in-process function would run outside it, with the host in reach.
+    What the command is written in is the author's business — a console script, a python file, a line
+    of shell are the same thing here.
+    """
+    run: str = ""
+    network: bool = False
+    wall_time_limit_seconds: int = 3600
+
+
+@dataclass(frozen=True)
 class Node:
-    """One node: a role, in a scope, and whatever this use adds to what the role already says."""
+    """One node: a role or an op, in a scope, and whatever this use adds to what it already says."""
 
     id: str
-    agent: str
+    agent: str = ""
+    op: str = ""
     # Appended to the role's instructions. Two nodes may share a role and differ here, which is what
     # makes a role worth declaring separately from the nodes that use it.
     with_: str = ""
@@ -78,6 +109,7 @@ class Node:
 class Graph:
     nodes: dict[str, Node]
     agents: dict[str, Agent]
+    ops: dict[str, Op]
     out_edges: dict[str, tuple[str, ...]]
     in_edges: dict[str, tuple[str, ...]]
     objective: str = ""
@@ -108,6 +140,17 @@ class Graph:
     def ceiling(self, node_id: str) -> int:
         """How many times this node may run in one pass."""
         return self.max_rounds.get(node_id, DEFAULT_MAX_ROUNDS)
+
+    def definition(self, node_id: str) -> Interface:
+        """What this node runs: an agent or an op. One question, whichever it is."""
+        node = self.nodes[node_id]
+        return self.ops[node.op] if node.op else self.agents[node.agent]
+
+    def reads(self, node_id: str) -> tuple[str, ...]:
+        return self.definition(node_id).reads
+
+    def writes(self, node_id: str) -> tuple[str, ...]:
+        return self.definition(node_id).writes
 
 
 def edges(graph: Graph) -> list[tuple[str, str]]:
@@ -184,25 +227,63 @@ def _check_node_id(node_id: object, where: str, *, allow_sep: bool) -> str:
     return name
 
 
+def _files(value: object, where: str, what: str) -> tuple[str, ...]:
+    """File names an interface declares. Inside the workspace, and nothing else.
+
+    A path that could point outside would make the declaration uncheckable and the check worthless:
+    an interface that can name anything describes nothing.
+    """
+    if value is None:
+        return ()
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise ValueError(f"{where}: {what} must be a list of file names")
+    for name in value:
+        if not name or name.startswith("/") or ".." in name.split("/"):
+            raise ValueError(
+                f"{where}: {what} names {name!r}, which is not a path inside the workspace. A node "
+                f"is handed files where it stands and leaves files where it stands.")
+    return tuple(dict.fromkeys(value))
+
+
 def _agent(name: str, spec: dict) -> Agent:
+    where = f"agent {name!r}"
     if "model" not in spec:
-        raise ValueError(f"agent {name!r} needs a \"model\"")
+        raise ValueError(f"{where} needs a \"model\"")
     return Agent(model=spec["model"], instructions=spec.get("instructions", ""),
                  network=bool(spec.get("network", False)),
                  max_steps=int(spec.get("max_steps", 0)),
-                 wall_time_limit_seconds=int(spec.get("wall_time_limit_seconds", 3600)))
+                 wall_time_limit_seconds=int(spec.get("wall_time_limit_seconds", 3600)),
+                 reads=_files(spec.get("reads"), where, "\"reads\""),
+                 writes=_files(spec.get("writes"), where, "\"writes\""))
+
+
+def _op(name: str, spec: dict) -> Op:
+    where = f"op {name!r}"
+    if not isinstance(spec, dict):
+        raise ValueError(f"{where} must be a JSON object")
+    run = spec.get("run")
+    if not isinstance(run, str) or not run.strip():
+        raise ValueError(
+            f"{where} needs a \"run\": the command this node executes. An op is a command, so a "
+            f"node that runs one without a command has nothing to do and would finish having done it.")
+    return Op(run=run, network=bool(spec.get("network", False)),
+              wall_time_limit_seconds=int(spec.get("wall_time_limit_seconds", 3600)),
+              reads=_files(spec.get("reads"), where, "\"reads\""),
+              writes=_files(spec.get("writes"), where, "\"writes\""))
 
 
 def _check_node(item: object, where: str, *, allow_sep: bool) -> dict:
     if not isinstance(item, dict) or "id" not in item:
         raise ValueError(f"{where}: every node needs an \"id\": {item}")
     _check_node_id(item["id"], where, allow_sep=allow_sep)
-    has_agent, has_graph = "agent" in item, "graph" in item
-    if has_agent and has_graph:
-        raise ValueError(f"{where}: node {item['id']!r} has both \"agent\" and \"graph\"; a node is "
-                         f"one or the other")
-    if not has_agent and not has_graph:
-        raise ValueError(f"{where}: node {item['id']!r} needs an \"agent\" or a \"graph\"")
+    kinds = [key for key in ("agent", "op", "graph") if key in item]
+    if len(kinds) > 1:
+        raise ValueError(f"{where}: node {item['id']!r} has {', '.join(repr(k) for k in kinds)}; a "
+                         f"node is one of them, and which one it is is the whole of what it is")
+    if not kinds:
+        raise ValueError(f"{where}: node {item['id']!r} needs an \"agent\", an \"op\" or a "
+                         f"\"graph\"")
+    has_graph = "graph" in item
     if has_graph and "with" in item:
         # Read by nothing: a module has no instructions of its own to add to. `max_rounds` is a
         # different matter and is allowed here — at this level the module *is* a node, so it has a
@@ -210,6 +291,13 @@ def _check_node(item: object, where: str, *, allow_sep: bool) -> dict:
         raise ValueError(
             f"{where}: node {item['id']!r} is a graph, so 'with' would have nothing to apply to — "
             f"it belongs on the nodes inside that graph")
+    if "with" in item and "op" in item:
+        # An op has no instructions to add to, and its parameters are written in its command. A
+        # `with` here would be read by nothing, which is the thing this file refuses rather than
+        # accepts quietly.
+        raise ValueError(
+            f"{where}: node {item['id']!r} is an op, so 'with' would have nothing to apply to — an "
+            f"op is a command, and anything that varies per use is written in that command")
     if "with" in item and not isinstance(item["with"], str):
         raise ValueError(f"{where}: node {item['id']!r} has a non-string \"with\"")
     if "max_rounds" in item and int(item["max_rounds"]) < 1:
@@ -236,7 +324,7 @@ def _check_body(body: object, where: str, *, module: bool) -> dict:
     if not isinstance(body, dict):
         raise ValueError(f"{where} must be a JSON object")
     if module:
-        for key in ("agents", "objective", "graphs"):
+        for key in ("agents", "ops", "objective", "graphs"):
             if key in body:
                 raise ValueError(
                     f"{where} declares {key!r}, and only the file does. There is one agent pool per "
@@ -350,7 +438,8 @@ def _expand(body: dict, pool: dict[str, dict], prefix: str) -> _Expansion:
             module_rounds[flat] = int(item.get("max_rounds", ceiling))
             sides[item["id"]] = (inner.entry, inner.exit)
         else:
-            nodes[flat] = Node(id=flat, agent=item["agent"], with_=item.get("with", ""))
+            nodes[flat] = Node(id=flat, agent=item.get("agent", ""), op=item.get("op", ""),
+                               with_=item.get("with", ""))
             max_rounds[flat] = int(item.get("max_rounds", ceiling))
             sides[item["id"]] = (flat, flat)
 
@@ -361,6 +450,58 @@ def _expand(body: dict, pool: dict[str, dict], prefix: str) -> _Expansion:
     entry = body.get("entry") or _infer_entry(body, "graph")
     exit_node = sides[body["exit"]][1] if body.get("exit") else None
     return _Expansion(nodes, edges, max_rounds, module_rounds, sides[entry][0], exit_node)
+
+
+def feeders(graph: Graph, node_id: str) -> set[str]:
+    """Every node whose output this one can be handed: its in-edges, and their forward lineage.
+
+    The static form of what `_handed` does at run time, and a superset of it — a run selects one way
+    out of each node, this follows all of them. So a file that is not here cannot arrive, and the
+    check built on it refuses only graphs that cannot work.
+    """
+    back = back_edges(graph)
+    out: set[str] = set()
+    stack = list(graph.in_edges.get(node_id, ()))
+    while stack:
+        current = stack.pop()
+        if current in out or current == node_id:
+            continue
+        out.add(current)
+        for source in graph.in_edges.get(current, ()):
+            if (source, current) in back:
+                continue
+            stack.append(source)
+    return out
+
+
+def _check_interfaces(graph: Graph) -> None:
+    """A file a node says it reads has to be one that something it can be handed writes.
+
+    This is the class of failure the runtime cannot report, because there is nothing wrong with it:
+    a node whose input is wired to nothing reads nothing, does the work anyway, and submits. The
+    `revise-loop` example was exactly that — `done` was told to copy `draft.md`, its only edge came
+    from `review`, and the reviewer wrote only `review.md`. The graph loaded, the run finished, and
+    the loop inside it had never read anything at all.
+
+    Refused at load, where the author is, rather than left to be noticed in a transcript.
+    """
+    for node_id in graph.nodes:
+        wanted = set(graph.reads(node_id))
+        if not wanted:
+            continue
+        # Its own writes count: a node keeps its workspace between passes, so what it left last time
+        # is there for it this time.
+        produced = set(graph.writes(node_id)) | {name for source in feeders(graph, node_id)
+                                                 for name in graph.writes(source)}
+        missing = sorted(wanted - produced)
+        if not missing:
+            continue
+        reachable = sorted(feeders(graph, node_id))
+        handed = "; ".join(f"{name} writes {', '.join(graph.writes(name)) or 'nothing'}"
+                           for name in reachable) or "nothing"
+        raise ValueError(
+            f"node {node_id!r} reads {', '.join(missing)}, and nothing it can be handed writes "
+            f"{'them' if len(missing) > 1 else 'it'}. It can be handed: {handed}")
 
 
 def parse(raw: dict) -> Graph:
@@ -389,26 +530,33 @@ def parse(raw: dict) -> Graph:
         in_edges[target].append(source)
 
     graph = Graph(nodes=expansion.nodes,
-                  agents={name: _agent(name, spec) for name, spec in raw["agents"].items()},
+                  agents={name: _agent(name, spec) for name, spec in (raw.get("agents") or {}).items()},
+                  ops={name: _op(name, spec) for name, spec in (raw.get("ops") or {}).items()},
                   out_edges={node: tuple(targets) for node, targets in out_edges.items()},
                   in_edges={node: tuple(sources) for node, sources in in_edges.items()},
                   objective=raw.get("objective", ""), entry_node=expansion.entry,
                   max_rounds=expansion.max_rounds, module_rounds=expansion.module_rounds)
-    missing = {node.agent for node in graph.nodes.values() if node.agent not in graph.agents}
-    if missing:
-        raise ValueError(f"nodes name unknown agents: {sorted(missing)}")
+    # Only the one it actually has: an agent node's `op` is empty and an op node's `agent` is, so
+    # checking both unconditionally would report the empty string as an undeclared name.
+    unknown = sorted(
+        node.id for node in graph.nodes.values()
+        if (node.agent and node.agent not in graph.agents)
+        or (node.op and node.op not in graph.ops)
+        or not (node.agent or node.op))
+    if unknown:
+        raise ValueError(f"nodes name an agent or an op that is not declared: {unknown}")
     graph.entry()          # fail at load rather than at the first step of a run
+    _check_interfaces(graph)
     return graph
 
 
 def _root(raw: object) -> dict:
     if not isinstance(raw, dict):
         raise ValueError("a graph must be a JSON object")
-    for key in ("agents", "nodes"):
-        if key not in raw:
-            raise ValueError(f"a graph needs an \"{key}\" key")
-    if not raw["agents"]:
-        raise ValueError("a graph needs at least one agent")
+    if "nodes" not in raw:
+        raise ValueError("a graph needs a \"nodes\" key")
+    if not raw.get("agents") and not raw.get("ops"):
+        raise ValueError("a graph needs an \"agents\" or an \"ops\" key with something in it")
     if not raw["nodes"]:
         raise ValueError("a graph needs at least one node")
     return raw
@@ -425,9 +573,16 @@ def to_dict(graph: Graph) -> dict:
         "entry": graph.entry_node,
         "agents": {name: {"model": agent.model, "instructions": agent.instructions,
                           "network": agent.network, "max_steps": agent.max_steps,
-                          "wall_time_limit_seconds": agent.wall_time_limit_seconds}
+                          "wall_time_limit_seconds": agent.wall_time_limit_seconds,
+                          **({"reads": list(agent.reads)} if agent.reads else {}),
+                          **({"writes": list(agent.writes)} if agent.writes else {})}
                    for name, agent in graph.agents.items()},
-        "nodes": [{"id": node.id, "agent": node.agent,
+        "ops": {name: {"run": op.run, "network": op.network,
+                       "wall_time_limit_seconds": op.wall_time_limit_seconds,
+                       **({"reads": list(op.reads)} if op.reads else {}),
+                       **({"writes": list(op.writes)} if op.writes else {})}
+                for name, op in graph.ops.items()},
+        "nodes": [{"id": node.id, **({"agent": node.agent} if node.agent else {"op": node.op}),
                    **({"with": node.with_} if node.with_ else {}),
                    "max_rounds": graph.ceiling(node.id)}
                   for node in graph.nodes.values()],
