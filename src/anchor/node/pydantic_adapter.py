@@ -49,7 +49,9 @@ from pydantic_ai.messages import ModelMessagesTypeAdapter, ModelRequest
 from pydantic_ai.models.wrapper import WrapperModel
 from pydantic_ai.exceptions import ModelRetry, UsageLimitExceeded
 
-from anchor.node import BUDGET_EXHAUSTED, COMPLETED, FAILED, NodeOutcome, NodeRequest
+from anchor.node import (BUDGET_EXHAUSTED, COMPLETED, FAILED, UNCERTAIN, NodeOutcome,
+                         NodeRequest)
+from anchor.node.recovery import budget_path, load_budget, open_store
 from anchor.runtime.execenv import Executed, NodeSandbox
 
 #: The two commands that finish a node, and the exact strings they print. Both are the runtime's
@@ -271,6 +273,52 @@ def build_agent(model: Any, *, instructions: str = "",
     return agent
 
 
+async def _next_run_id(store: Any, agent_name: str) -> str:
+    """A run id that has not been used for this logical node before.
+
+    The framework refuses a repeated `run_id` outright — `run_id is single-shot; pass conversation_id=`
+    — so the sequence is carried by the conversation and each attempt is numbered. Derived from what the
+    store already holds rather than from a counter in memory, because the whole point is that a *new
+    process* has to be able to continue without colliding with the attempts before it.
+    """
+    used = [item.run_id for item in await store.list_runs() if item.agent_name == agent_name]
+    return f"{agent_name}-a{len(used) + 1}"
+
+
+async def _reference(recovery_store: Path | None, request: NodeRequest, store: Any,
+                     ref: Any, *, spent: int) -> str:
+    """The token for the attempt that just finished, so a caller can ask about it later.
+
+    Handed out even when the attempt failed: what a caller needs in order to ask "can this be picked up"
+    is a name, and making it invent one would put the store's shape into the Graph. The framework's run
+    id is read back from the store rather than guessed, because the capability derives its own when it is
+    not given one and a guessed id would name a run that does not exist.
+    """
+    from anchor.node.recovery import Budget, RecoveryRef, save_budget
+    if ref is not None and store is not None:
+        # Continuing an attempt: same run, and the allowance it had is now smaller by what was spent.
+        budget = ref.budget.after(spent)
+        save_budget(Path(ref.store), budget)
+        return RecoveryRef(node=request.execution_id, run=ref.run, store=ref.store,
+                           budget=budget).encode()
+    if recovery_store is None:
+        return ""
+    control = Path(recovery_store)
+    store = open_store(control)
+    runs = [item for item in await store.list_runs() if item.agent_name == request.execution_id]
+    if not runs:
+        return ""
+    newest = sorted(runs, key=lambda item: item.started_at)[-1]
+    # **The allowance carries over, it does not restart.** The framework is explicit that it does not
+    # restore retry counters, so what was spent is kept beside the run — a node killed three times would
+    # otherwise spend its whole budget three times.
+    budget = load_budget(control).after(spent) if budget_path(control).exists() else Budget(
+        requests_used=spent, requests_allowed=request.max_requests)
+    save_budget(control, budget)
+    return RecoveryRef(node=request.execution_id, run=newest.run_id, store=str(control),
+                       budget=budget).encode()
+
+
 def _write_trace(path: Path | None, messages: list[Any], wiring: _Wiring | None,
                  outcome: NodeOutcome, formed: Any = None) -> str:
     """The record: what the model was told, what it called, what came back, and why it stopped.
@@ -328,7 +376,8 @@ def _files(workspace: Path) -> tuple[str, ...]:
 
 
 async def run_node(request: NodeRequest, *, model: Any,
-                   capabilities: tuple[Any, ...] = ()) -> NodeOutcome:
+                   capabilities: tuple[Any, ...] = (),
+                   recovery_store: Path | None = None) -> NodeOutcome:
     """Run one node to a result. The entry point the Graph would call.
 
     The model is a parameter rather than something built here: which provider, and whether there is a
@@ -341,10 +390,70 @@ async def run_node(request: NodeRequest, *, model: Any,
     conversation — `AgentRun.all_messages()` is readable from the handler for an exception, and a
     result, which is where `run` keeps them, does not exist on that path.
     """
+    # ── What a previous attempt left, before anything is started. ──
+    #
+    # **A token that cannot be resolved stops the attempt before a model is built.** That is the whole
+    # point of §38: a reference that does not check out must not become a fresh run of the task, because
+    # a fresh run would repeat whatever the previous attempt managed to do and call it progress. The
+    # adapter decides here, and the Graph never sees why — it gets a status and a reason.
+    resumed: list[Any] = []
+    history: list[Any] | None = None
+    ref = None
+    store = None
+    spending = request.max_requests
+    #: The **logical** node execution, stable across attempts, and the framework's `conversation_id`.
+    #: A retry is a *new* `Agent.run` — the framework refuses to reuse a `run_id`, measured — so the
+    #: sequence is the conversation and each attempt gets its own run.
+    conversation = request.execution_id
+    #: Whether the caller has already arranged persistence. **Where it sits among the capabilities
+    #: decides which side of a write a hook lands on**, and the two directions are not the same — a
+    #: `before_*` hook registered after it sees the framework's `started` write, while an `after_*` hook
+    #: registered before it sees the terminal write. A caller testing a specific boundary has to place
+    #: it; the adapter's job is to not add a second one.
+    from pydantic_ai_harness import StepPersistence as _StepPersistence
+    has_persistence = any(isinstance(item, _StepPersistence) for item in capabilities)
+
+    if request.recovery:
+        from anchor.node.recovery import RecoveryRef, assess, continued_messages
+        try:
+            ref = RecoveryRef.decode(request.recovery)
+        except Exception as exc:                              # noqa: BLE001 - a status, not a raise
+            return NodeOutcome(status=FAILED, reason=f"the recovery reference is not usable: {exc}",
+                               model_requests=0, files=_files(request.workspace))
+        store = open_store(Path(ref.store))
+        verdict = await assess(store, ref)
+        # **Silence on this path, deliberately.** An uncertain attempt asks the model nothing and runs
+        # no command: the effect may already have happened, and doing anything with that uncertainty
+        # other than reporting it is how a side effect happens twice.
+        if verdict.action == "uncertain":
+            return NodeOutcome(status=UNCERTAIN, reason=verdict.because, model_requests=0,
+                               files=_files(request.workspace), recovery=request.recovery)
+        if verdict.action == "invalid":
+            return NodeOutcome(status=FAILED, reason=verdict.because, model_requests=0,
+                               files=_files(request.workspace), recovery=request.recovery)
+        # `replayable` means nothing entered a tool, so the attempt is the first one in effect.
+        if verdict.action == "continuable":
+            history = await continued_messages(store, ref)
+            spending = max(ref.budget.remaining, 0) or request.max_requests
+        if store is not None and not has_persistence:
+            conversation = ref.node
+            resumed.append(_StepPersistence(store=store, agent_name=ref.node,
+                                            run_id=await _next_run_id(store, ref.node)))
+
+    elif recovery_store is not None and not has_persistence:
+        # A fresh attempt still records itself, so that a later process can be told about it — and so
+        # that the second attempt's run id does not collide with the first's. The framework refuses a
+        # repeated `run_id` outright, which is what made this necessary rather than convenient.
+        from pydantic_ai_harness import StepPersistence
+        store = open_store(Path(recovery_store))
+        resumed.append(StepPersistence(store=store, agent_name=request.execution_id,
+                                       run_id=await _next_run_id(store, request.execution_id)))
+
     counted = _CountingModel(model)
     agent = build_agent(counted, instructions=request.instructions,
-                        max_retries=request.max_requests, capabilities=capabilities)
-    limits = UsageLimits(request_limit=request.max_requests)
+                        max_retries=spending,
+                        capabilities=(*capabilities, *resumed))
+    limits = UsageLimits(request_limit=spending)
     wiring: _Wiring | None = None
     run: Any = None
     messages: list[Any] = []
@@ -360,7 +469,9 @@ async def run_node(request: NodeRequest, *, model: Any,
         # it was promised a result.
         wiring.sandbox.require_working()
 
-        async with agent.iter(request.task, deps=wiring, usage_limits=limits) as run:
+        async with agent.iter(request.task, deps=wiring, usage_limits=limits,
+                              message_history=history,
+                              conversation_id=conversation) as run:
             async for node in run:
                 # **The boundary after the tools, not the tools themselves.** A node is yielded when it
                 # is entered, so at `CallToolsNode` the commands have not run yet and nothing has been
@@ -396,5 +507,6 @@ async def run_node(request: NodeRequest, *, model: Any,
             status=FAILED, model_requests=counted.requests,
             reason=f"{type(exc).__name__}: {exc}", files=_files(request.workspace))
 
-    return replace(outcome,
-                   trace_ref=_write_trace(request.trace, messages, wiring, outcome, formed))
+    return replace(outcome, trace_ref=_write_trace(request.trace, messages, wiring, outcome, formed),
+                   recovery=await _reference(recovery_store, request, store, ref,
+                                             spent=outcome.model_requests))

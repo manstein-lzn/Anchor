@@ -239,3 +239,37 @@ effect** ✗。修好覆盖检查后 C4 **仍然**是 `continuable` ✓（那一
 
 C2（`started` 无终态 → `uncertain` ✓）、C3（副作用已发生但无终态 → `uncertain` ✓）、C7（坏引用有解释地
 拒绝 ✓）、C8（预算不因重启清零 ✓）、C9（沙箱不随宿主存活 ✓）**没有**被推翻 ✓，A 门槛下会再验一遍 ✓。
+
+### 6.5 「C1 的边界够不到」同样是错的 —— 也是 capability 顺序造成的
+
+**原文（§2.1）说**：`model_request_completed` 写在 `after_model_request` 之后，所以「模型调用已持久化、
+工具还没开始」这个瞬间没有公开钩子 ✓。**那也是错的** ✗——测量的是**钩子顺序**，不是框架的能力 ✓。
+
+**实测的规律**（本 build）：
+
+| 钩子方向 | 顺序 |
+| --- | --- |
+| `before_*` | 按**注册顺序** |
+| `after_*` | 按**逆序** |
+
+所以把屏障 capability 注册在 `StepPersistence` **之前** ✓，它的 `after_model_request` 就跑在框架写
+`model_request_completed` **之后** ✓✓——C1 于是给出 **`replayable`** ✓，正是计划期望的 K1 ✓：
+
+```
+C1  killed=True exit=-9  barrier='after_model_request, before the tool cycle'
+    counter: 0 -> 0
+    verdict: replayable — 没有工具调用开始过，请求可以发出一次
+```
+
+**两处「够不到」和一处「不存在」全部是同一个原因** ✗：03 当时把屏障注册在 `StepPersistence` **之后** ✓，
+于是所有 `after_*` 钩子都落在框架写入**之前** ✓。这不是框架的边界问题，是我的接线问题 ✓。
+
+### 6.6 修正后的窗口表
+
+| 窗口 | 需要的注册位置 | 结果 |
+| --- | --- | --- |
+| C1 | 屏障在**前** | `replayable` ✓（K1 成立）|
+| C2 | 屏障在**后** | `uncertain` ✓ |
+| C3 | 无关 | `uncertain` ✓ |
+| C4 | 屏障在**前** | `continuable` ✓ |
+| C5 | 屏障在**前** | `uncertain` ✓（旧快照不覆盖）|

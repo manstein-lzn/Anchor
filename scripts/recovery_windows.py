@@ -172,24 +172,43 @@ def _barrier(window: str):
     return Barrier()
 
 
-async def _run_child(window: str, control: Path, workspace: Path, script: dict) -> None:
+async def _next_free_run_id(control: Path, agent_name: str) -> str:
+    """The next unused run id for this logical node — the adapter would derive one, and this is the same
+    rule applied where the child can see it."""
+    from anchor.node.recovery import open_store
+    used = [item.run_id for item in await open_store(control).list_runs()
+            if item.agent_name == agent_name]
+    return f"{agent_name}-a{len(used) + 1}"
+
+
+async def _run_child(window: str, control: Path, workspace: Path, script: dict,
+                     recover: str = "") -> None:
     """One node, with the barrier attached, expected never to return for the killed windows."""
     from pydantic_ai.models.function import FunctionModel
     from pydantic_ai.messages import ModelResponse, ToolCallPart
-    from pydantic_ai_harness import StepPersistence
 
     from anchor.node import NodeRequest
     from anchor.node.pydantic_adapter import run_node
-    from anchor.node.recovery import open_store, save_budget, Budget, RecoveryRef
+    from anchor.node.recovery import save_budget, Budget
 
-    store = open_store(control)
-    ref = RecoveryRef(node=script["node"], run=script["run_id"], store=str(control))
-    (control / "reference").write_text(ref.encode(), encoding="utf-8")
-    save_budget(control, Budget(requests_used=0, requests_allowed=8))
+    if not (control / "budget.json").exists():
+        save_budget(control, Budget(requests_used=0, requests_allowed=8))
 
     turn = {"n": 0}
 
     def model(messages, info):
+        """What to do next, decided from **the history this process was handed**.
+
+        §77 asks for a double driven by evidence another process can check, and not by a per-process
+        counter that compaction can silently reset. So the marker is looked for in the tool results
+        already in the history: a resumed process sees the completed command's output and moves on, and
+        a process that sees nothing does the work. Which is also what a real model would do.
+        """
+        if script.get("history_driven"):
+            seen = any(script["marker"] in str(getattr(part, "content", ""))
+                       for message in messages for part in (getattr(message, "parts", ()) or ()))
+            command = script["then"] if seen else script["first"]
+            return ModelResponse(parts=[ToolCallPart(tool_name="bash", args={"command": command})])
         index = turn["n"]
         turn["n"] += 1
         command = script["commands"][index] if index < len(script["commands"]) else None
@@ -198,18 +217,38 @@ async def _run_child(window: str, control: Path, workspace: Path, script: dict) 
                 tool_name="bash", args={"command": 'anchor-done --summary "finished"'})])
         return ModelResponse(parts=[ToolCallPart(tool_name="bash", args={"command": command})])
 
-    # Order matters, and only for one window: `after_tool_execute` is where C5 pauses, and it has to
-    # land *after* the framework's own so the terminal record is there. Hooks run in registration order,
-    # so the barrier goes first for C5 and last for everything else — measured, not assumed.
-    persistence = StepPersistence(store=store, agent_name="anchor-node", run_id=script["run_id"])
-    barrier = _barrier(window)
-    capabilities = (barrier, persistence) if window == "C5" else (persistence, barrier)
-
-    await run_node(
+    # **The capability order decides which side of a write a hook lands on, and the two directions
+    # are not the same.** Measured on this build:
+    #
+    #   `before_*` hooks run in registration order    → registered last, a barrier sees the framework's
+    #                                                   `started` write already done (C2 needs this)
+    #   `after_*`  hooks run in reverse order          → registered first, a barrier sees the framework's
+    #                                                   terminal write already done (C5 needs this)
+    #
+    # `run_node` appends step persistence to whatever the caller passes, so "before persistence" is
+    # "first in the caller's tuple" and "after persistence" is "last". Making this one order for every
+    # window quietly moved two of them to the wrong side of a write — C2 started reporting the state
+    # before `tool_call_started`, which reads as replayable when it is not.
+    # The child places persistence itself so the barrier can sit on either side of it; the adapter
+    # notices and does not add a second one.
+    from pydantic_ai_harness import StepPersistence
+    from anchor.node.recovery import open_store
+    here = StepPersistence(store=open_store(control), agent_name=script["node"],
+                           run_id=await _next_free_run_id(control, script["node"]))
+    barrier_first = window in BEFORE_PERSISTENCE_WINDOWS
+    outcome = await run_node(
         NodeRequest(execution_id=script["node"], task=script["task"], workspace=workspace,
-                    max_requests=8, trace=control / "trace.jsonl"),
+                    max_requests=8, trace=control / "trace.jsonl", recovery=recover),
         model=FunctionModel(model),
-        capabilities=capabilities)
+        capabilities=((_barrier(window), here) if barrier_first else (here, _barrier(window))),
+        recovery_store=control)
+    # The outcome's own account, written where the parent can read it. A resumed attempt that only
+    # fetched history and did nothing would have nothing to put here.
+    (control / f"outcome-{os.getpid()}.json").write_text(json.dumps({
+        "status": outcome.status, "submission": outcome.submission, "route": outcome.route,
+        "model_requests": outcome.model_requests, "reason": outcome.reason,
+        "recovery": outcome.recovery, "files": list(outcome.files)}, ensure_ascii=False),
+        encoding="utf-8")
 
 
 # ── the parent ────────────────────────────────────────────────────────────────────────────────────
@@ -223,14 +262,21 @@ async def _run_child(window: str, control: Path, workspace: Path, script: dict) 
 #: sandbox: `bwrap` does not pass an inherited pipe in, and the whole question is whether this
 #: process keeps going after the process that started it is gone. The parent waits for that file
 #: — a handshake, not a sleep — and kills the host the moment it appears.
+#: Windows whose barrier has to land **after** the framework's own write, which means registering it
+#: **before** step persistence. See the note in `_run_child`: the two hook directions differ.
+BEFORE_PERSISTENCE_WINDOWS = frozenset({"C1", "C4", "C5"})
+
 SURVIVOR_SECONDS = 8
 SURVIVOR = ("printf 'started\\n' > started.log; sleep %d; "
             "printf 'SURVIVED\\n' >> survived.log; echo finished" % SURVIVOR_SECONDS)
 
+#: The marker goes to **stdout** as well as to the log. It is the evidence a model reads back out of
+#: the history to decide whether the work is done, and a marker that only reached a file left a
+#: resumed process unable to tell that anything had happened — measured, by it running the command
+#: nine times.
 COUNTER = ("n=$(cat counter.txt 2>/dev/null || echo 0); n=$((n+1)); "
            "printf '%s\\n' \"$n\" > counter.tmp && mv counter.tmp counter.txt && "
-           "printf 'EFFECT-%s\\n' \"$n\" >> effects.log && echo \"counted $n\"")
-
+           "printf 'EFFECT-%s\\n' \"$n\" >> effects.log && echo \"EFFECT-$n counted\"")
 
 @dataclass
 class Window:
@@ -262,6 +308,9 @@ def windows() -> list[Window]:
         Window("C5", [COUNTER, COUNTER, 'anchor-done --summary "done"'],
                "terminal effect record written, snapshot not yet",
                "counter=2; an older complete snapshot exists and does NOT cover it — uncertain"),
+        Window("A1", [COUNTER, 'anchor-done --summary "done"'],
+               "two processes, the second of which finishes the work",
+               "counter stays 1 and the second process reaches a valid submission"),
         Window("C9", [SURVIVOR, 'anchor-done --summary "done"'],
                "side effect done, terminal record not written",
                "did the sandbox's own process outlive the host that started it?"),
@@ -320,12 +369,18 @@ def select_with_timeout(fd: int, timeout: float) -> tuple[bool, bool, bool]:
 
 
 async def _verdict(control: Path) -> tuple[str, str, list[list[str]], list[str], str, str]:
-    from anchor.node.recovery import RecoveryRef, assess, open_store
+    from anchor.node.recovery import Budget, RecoveryRef, assess, open_store
 
-    token = (control / "reference").read_text(encoding="utf-8")
-    store_dir = control
-    ref = RecoveryRef.decode(token)
-    store = open_store(store_dir)
+    # **Derived from what actually happened**, not from a file the child wrote before it started: the
+    # attempt that exists is the attempt the store recorded, and a reference built any other way could
+    # name a run that was never made.
+    store = open_store(control)
+    runs = await store.list_runs()
+    if not runs:
+        return ("invalid", "no run was recorded at all", [], [], "", "")
+    newest = sorted(runs, key=lambda item: item.started_at)[-1]
+    ref = RecoveryRef(node=newest.agent_name, run=newest.run_id, store=str(control),
+                      budget=Budget())
     verdict = await assess(store, ref)
     return (verdict.action, verdict.because, [list(item) for item in verdict.effects],
             list(verdict.events), verdict.snapshot,
@@ -358,6 +413,61 @@ def _processes_touching(root: Path) -> list[str]:
     except OSError:                                           # pragma: no cover - defensive
         return []
     return [line.strip() for line in listing.splitlines() if str(root) in line]
+
+
+def run_a1(root: Path, timeout: float) -> Evidence:
+    """**A1: two processes, and the second one finishes the work.**
+
+    The first is killed at C4 — the counter command has completed, its snapshot is in the store, and the
+    run has not ended. The second is a **new operating system process** that is handed the recovery
+    reference and nothing else about the first: it has to decide what to do from the history the store
+    gives it. Fetching that history is not recovery; reaching a valid submission without repeating the
+    command is.
+    """
+    control = root / "A1" / "control"
+    workspace = root / "A1" / "workspace"
+    shutil.rmtree(root / "A1", ignore_errors=True)
+    control.mkdir(parents=True, exist_ok=True)
+    workspace.mkdir(parents=True, exist_ok=True)
+    marker = "EFFECT-"
+    script = {"window": "A1", "node": "node-A1", "run_id": f"run-A1-{os.getpid()}",
+              "task": "count once, then finish", "history_driven": True, "marker": marker,
+              "first": COUNTER, "then": 'anchor-done --summary "finished after resuming"'}
+    started = time.monotonic()
+
+    # ── the first process, killed once its command has settled ──
+    killed, code, said, errors = _kill_at(control, workspace, dict(script, window="C4"),
+                                          "after the settled cycle, before the run ends", timeout)
+    after_first = _counter(workspace)
+
+    # ── the second process, handed the reference ──
+    # The run id is the adapter's to choose; read back what it actually used rather than assuming one.
+    from anchor.node.recovery import RecoveryRef, open_store
+    runs = asyncio.run(open_store(control).list_runs())
+    assert runs, "the first process left no run in the store"
+    first_run = sorted(runs, key=lambda item: item.started_at)[-1].run_id
+    token = RecoveryRef(node=script["node"], run=first_run, store=str(control)).encode()
+    before_outcomes = {item.name for item in control.glob("outcome-*.json")}
+    second = subprocess.run(
+        [sys.executable, __file__, "--child", "--window", "A1", "--control", str(control),
+         "--workspace", str(workspace), "--script", json.dumps(script), "--recover", token],
+        capture_output=True, text=True, timeout=max(timeout, 120))
+    after_second = _counter(workspace)
+    outcomes = [item for item in control.glob("outcome-*.json") if item.name not in before_outcomes]
+    outcome = json.loads(outcomes[-1].read_text(encoding="utf-8")) if outcomes else {}
+
+    evidence = Evidence(window="A1", control=str(control), workspace=str(workspace),
+                        killed=killed, exit_code=second.returncode,
+                        barrier=(said or "(the first process reported no barrier)"),
+                        counter_before=0, counter_after=after_second, verdict="", because="",
+                        seconds=time.monotonic() - started, traceback=(errors + second.stderr)[-2000:])
+    evidence.verdict = outcome.get("status", "no-outcome")
+    evidence.because = (
+        f"first process killed at C4 with counter={after_first}; the second process, given only the "
+        f"reference, ended {outcome.get('status')!r} with submission {outcome.get('submission')!r} "
+        f"after {outcome.get('model_requests')} model request(s); counter is now {after_second}")
+    evidence.budget = str(outcome.get("recovery", ""))[:60]
+    return evidence
 
 
 def run_c9(root: Path, timeout: float) -> Evidence:
@@ -419,6 +529,8 @@ def run_c9(root: Path, timeout: float) -> Evidence:
 
 def run_window(window: Window, root: Path, timeout: float) -> Evidence:
     """One window, start to finish, with its own directories and its own cleanup."""
+    if window.name == "A1":
+        return run_a1(root, timeout)
     if window.name == "C9":
         return run_c9(root, timeout)
     # **Isolated, every time.** §42 asks for an isolated temporary workspace, and this was learned the
@@ -463,6 +575,7 @@ def main() -> int:
     parser.add_argument("--control", default="", help=argparse.SUPPRESS)
     parser.add_argument("--workspace", default="", help=argparse.SUPPRESS)
     parser.add_argument("--script", default="", help=argparse.SUPPRESS)
+    parser.add_argument("--recover", default="", help=argparse.SUPPRESS)
     parser.add_argument("--only", default="", help="comma-separated windows, default all")
     parser.add_argument("--root", default=".local/recovery-windows")
     parser.add_argument("--timeout", type=float, default=120.0,
@@ -472,7 +585,7 @@ def main() -> int:
 
     if args.child:
         asyncio.run(_run_child(args.window, Path(args.control), Path(args.workspace),
-                               json.loads(args.script)))
+                               json.loads(args.script), recover=args.recover))
         return 0                                             # pragma: no cover - killed before this
 
     every = {item.name for item in windows()} | {"C6", "C7", "C8"}
@@ -515,8 +628,10 @@ async def _recovered(control: Path) -> tuple[str, int]:
     The number is read from the workspace the command wrote to, so "it did not run again" is a fact
     about the disk rather than about the code that decided not to run it.
     """
-    from anchor.node.recovery import RecoveryRef, assess, continued_messages, open_store
-    ref = RecoveryRef.decode((control / "reference").read_text(encoding="utf-8"))
+    from anchor.node.recovery import assess, continued_messages, open_store
+    ref = await _newest_ref(control)
+    if ref is None:
+        return "no-run", 0
     store = open_store(control)
     verdict = await assess(store, ref)
     if verdict.action == "continuable":
@@ -525,19 +640,37 @@ async def _recovered(control: Path) -> tuple[str, int]:
     return verdict.action, len(verdict.effects)
 
 
+async def _newest_ref(control: Path):
+    """The reference for the attempt the store actually recorded.
+
+    Built by asking the store, not by reading a file written beforehand: what exists is what was
+    recorded, and a reference made up any other way can name a run that never happened.
+    """
+    from anchor.node.recovery import Budget, RecoveryRef, open_store
+    runs = await open_store(control).list_runs()
+    if not runs:
+        return None
+    newest = sorted(runs, key=lambda item: item.started_at)[-1]
+    return RecoveryRef(node=newest.agent_name, run=newest.run_id, store=str(control),
+                       budget=Budget())
+
+
 def run_windows_without_killing(root: Path, names: list[str]) -> list[Evidence]:
     """C6, C7 and C8: nothing is killed, so these can be checked in one process.
 
     They are here rather than in the unit tests because they are about the **store**, and a store that
     was never written to by a real killed run is a different object from the one this package makes.
     """
-    from anchor.node.recovery import Budget, InvalidReference, RecoveryRef, assess, open_store, save_budget
+    from anchor.node.recovery import (Budget, InvalidReference, RecoveryRef, assess, open_store,
+                                      save_budget)
     out: list[Evidence] = []
 
     # ── C6: the same reference twice ──
     if "C6" in names:
         control = root / "C3" / "control"          # the C3 kill left a started, unresolved effect
-        evidence = Evidence(window="C6", killed=None, exit_code=None, barrier="(no kill)",
+        evidence = Evidence(window="C6", control=str(control),
+                            workspace=str(root / "C3" / "workspace"),
+                            killed=None, exit_code=None, barrier="(no kill)",
                             counter_before=0, counter_after=_counter(root / "C3" / "workspace"),
                             verdict="", because="")
         try:
@@ -554,12 +687,14 @@ def run_windows_without_killing(root: Path, names: list[str]) -> list[Evidence]:
     # ── C7: a reference that does not check out ──
     if "C7" in names:
         control = root / "C4" / "control"
-        good = (control / "reference").read_text(encoding="utf-8")
+        ref = asyncio.run(_newest_ref(control))
+        good = ref.encode() if ref else ""
         cases = {
             "truncated": good[: len(good) // 2],
             "edited": good[:-4] + "AAAA",
             "not-an-anchor-token": "sp-something-else",
-            "unknown-run": RecoveryRef(node="n", run="run-that-never-existed", store=str(control)).encode(),
+            "unknown-run": RecoveryRef(node="n", run="run-that-never-existed",
+                                       store=str(control)).encode(),
         }
         problems = []
         for label, token in cases.items():
@@ -569,7 +704,9 @@ def run_windows_without_killing(root: Path, names: list[str]) -> list[Evidence]:
                 problems.append(f"{label} -> {verdict.action} ({verdict.because[:60]})")
             except InvalidReference as exc:
                 problems.append(f"{label} -> refused: {str(exc)[:60]}")
-        evidence = Evidence(window="C7", killed=None, exit_code=None, barrier="(no kill)",
+        evidence = Evidence(window="C7", control=str(control),
+                            workspace=str(root / "C4" / "workspace"),
+                            killed=None, exit_code=None, barrier="(no kill)",
                             counter_before=0, counter_after=_counter(root / "C4" / "workspace"),
                             verdict="", because="")
         # A refused reference and an invalid verdict are both acceptable; silently starting a fresh task
@@ -595,7 +732,8 @@ def run_windows_without_killing(root: Path, names: list[str]) -> list[Evidence]:
             effects = [list(item) for item in verdict.effects]
         from anchor.node.recovery import load_budget
         reloaded = load_budget(control)
-        evidence = Evidence(window="C8", killed=None, exit_code=None, barrier="(no kill)",
+        evidence = Evidence(window="C8", control=str(control), workspace=str(root / "C8"),
+                            killed=None, exit_code=None, barrier="(no kill)",
                             counter_before=0, counter_after=0, verdict="", because="",
                             budget=f"{reloaded.requests_used}/{reloaded.requests_allowed}")
         evidence.verdict = "carried" if reloaded.requests_used == 6 else "RESET"

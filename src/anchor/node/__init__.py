@@ -23,8 +23,13 @@ COMPLETED = "completed"
 BUDGET_EXHAUSTED = "budget_exhausted"
 #: The work went wrong, or the node said it was finished without finishing. Terminal.
 FAILED = "failed"
+#: A previous attempt was interrupted, and **what it managed to do cannot be established**. The side
+#: effect may or may not have happened, so this attempt did nothing at all. Its own status because the
+#: two things a caller might do — retry, or give up — are both wrong: retrying may repeat a side effect,
+#: and giving up discards work that may be finished. §35 of the G2 plan calls this a correct result.
+UNCERTAIN = "uncertain"
 
-STATUSES = (COMPLETED, BUDGET_EXHAUSTED, FAILED)
+STATUSES = (COMPLETED, BUDGET_EXHAUSTED, FAILED, UNCERTAIN)
 
 
 @dataclass(frozen=True)
@@ -68,6 +73,14 @@ class NodeRequest:
     """How many times the model may be asked before the pass is out of budget. Counted **for this
     execution only**; nothing here claims a budget carries across a resume."""
 
+    recovery: str = ""
+    """An opaque token for a previous attempt of this same node, or empty to start fresh.
+
+    **The Graph carries this and cannot read it** (§21): what is inside — the framework's run id, the
+    store's location, the allowance already spent — is the node's business. A caller that resumes passes
+    back what the last outcome handed it; a caller that does not gets a fresh attempt.
+    """
+
     trace: Path | None = None
     """Where the record of this execution goes. **Outside the workspace**: inside it is a file the
     node can read, and one did, and reasoned about its own conversation instead of its task."""
@@ -103,6 +116,13 @@ class NodeOutcome:
     files: tuple[str, ...] = field(default=())
     """What it left in its workspace, relative, sorted. A convenience for a caller that would
     otherwise walk the tree; the workspace is the authority."""
+
+    recovery: str = ""
+    """The token for this attempt, for a caller that wants to resume it. Empty when nothing was recorded.
+
+    Handed out with every outcome, including a failed one: what a caller needs in order to ask "can this
+    be picked up" is a name for the attempt, and making it guess one would put the store's shape in the
+    Graph."""
 
     def __post_init__(self) -> None:
         if self.status not in STATUSES:
