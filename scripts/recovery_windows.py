@@ -301,11 +301,25 @@ async def _run_child(window: str, control: Path, workspace: Path, script: dict,
     here = StepPersistence(store=open_store(control), agent_name=script["node"],
                            run_id=await _next_free_run_id(control, script["node"]))
     barrier_first = window in BEFORE_PERSISTENCE_WINDOWS
+    # **The context capabilities, when the case is about them.** §57 asks for both things switched on
+    # in the same execution, and a fixture that only claimed to would be measuring the plain path.
+    context: tuple[Any, ...] = ()
+    if script.get("with_context"):
+        from anchor.node.context import Budget as ContextBudget, Record, context_capabilities, remember
+        record = Record(control / "kept")
+        if script.get("budget"):
+            context = context_capabilities(ContextBudget(**script["budget"]), record=record)
+            remember(context, script["task"], "")
+        else:
+            context = context_capabilities(ContextBudget(), record=record)
+            remember(context, script["task"], "")
+
     outcome = await run_node(
         NodeRequest(execution_id=script["node"], task=script["task"], workspace=workspace,
                     max_requests=8, trace=control / "trace.jsonl", recovery=recover),
         model=FunctionModel(model),
-        capabilities=((_barrier(window), here) if barrier_first else (here, _barrier(window))),
+        capabilities=((_barrier(window), *context, here) if barrier_first
+                      else (*context, here, _barrier(window))),
         recovery_store=control)
     _write_outcome(control, outcome)
 

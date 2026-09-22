@@ -190,16 +190,17 @@ def test_b1_a_compacted_run_recovers_with_limited_context(tmp_path):
     workspace = tmp_path / "ws"
     workspace.mkdir()
     control.mkdir()
-    record = Record(control / "kept")
-    budget = Budget(window=8_000, output_reserve=500, input_target=3_000, keep_messages=2)
-    marker = "EFFECT-"
     noisy = "for i in $(seq 1 300); do echo a-fairly-long-line-number-$i; done"
 
-    # A first attempt with the context capabilities on, killed once its command has settled.
+    # A first attempt with the context capabilities **on** — same execution, both things switched on —
+    # killed once its command has settled.
     from scripts.recovery_windows import _kill_at  # noqa: PLC0415 - the fault machinery lives there
 
     script = {"window": "C4", "node": "b1", "run_id": "b1-run", "task": "long then finish",
-              "commands": [noisy, 'anchor-done --summary "done"']}
+              "commands": [noisy, 'anchor-done --summary "done"'],
+              "with_context": True,
+              "budget": {"window": 8_000, "output_reserve": 500, "input_target": 3_000,
+                         "keep_messages": 2}}
     killed, code, said, errors = _kill_at(control, workspace, script,
                                           "after the settled cycle, before the run ends", 120)
     assert killed and said, f"the first process was not held at its barrier: {errors[-400:]}"
