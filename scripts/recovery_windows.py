@@ -432,7 +432,24 @@ async def _run_child(window: str, control: Path, workspace: Path, script: dict,
                 "pid": os.getpid(), "messages": len(messages), "chars": len(rendered),
                 "constraint": bool(script.get("constraint")) and script["constraint"] in rendered,
                 "marker": bool(script.get("original")) and script["original"] in rendered,
+                # **Whether the runtime told the model its output was a fragment.** Read from the messages
+                # the model was handed, because that is the only place the wording actually matters — the
+                # record keeps the command's raw text, not the observation built from it.
+                "cut_notice": ("was not kept whole" in rendered
+                               or "could NOT be kept whole" in rendered),
             }) + "\n")
+        if script.get("phases"):
+            # A short, ordered set of commands chosen by what the history already shows — the same rule
+            # as `staged`, applied to a handful of steps rather than a counted one.
+            rendered = "\n".join(str(getattr(part, "content", ""))
+                                 for message in messages
+                                 for part in (getattr(message, "parts", ()) or ()))
+            # **A default, not a bare `next`.** With every phase already in the history there is nothing
+            # left to ask for, and a `StopIteration` raised out of a coroutine arrives as a
+            # `RuntimeError` — measured, by the recovery failing with exactly that.
+            command = next((item["command"] for item in script["phases"]
+                            if item["until"] not in rendered), script["then"])
+            return ModelResponse(parts=[ToolCallPart(tool_name="bash", args={"command": command})])
         if script.get("staged"):
             # **Driven by a monotonic stage signal**, read out of the history. The largest `STEP-n` the
             # model can see is how far the work has got — a number that compaction can shorten the
@@ -574,6 +591,12 @@ def windows() -> list[Window]:
         Window("B3-terminal", [STEP, 'anchor-done --summary "done"'],
                "after a compaction: the terminal record written and no snapshot",
                "uncertain — an older snapshot must not cover it"),
+        Window("B4", [STEP, 'anchor-done --summary "done"'],
+               "a large output saved, then read back by a later process",
+               "the tail is there and writing is refused"),
+        Window("B4-partial", [STEP, 'anchor-done --summary "done"'],
+               "an output larger than the store, read back by a later process",
+               "the cut is said out loud rather than left to be discovered"),
         Window("B1", [STEP, 'anchor-done --summary "done"'],
                "a real compaction, killed after it, continued by a new process",
                "the resumed input is bounded, the constraint survives, no step runs twice"),
@@ -820,6 +843,8 @@ def run_window(window: Window, root: Path, timeout: float) -> Evidence:
         return run_a4(root, timeout)
     if window.name.startswith(("B2-", "B3-")):
         return run_compaction_window(root, timeout, window.name)
+    if window.name in ("B4", "B4-partial"):
+        return run_b4(root, timeout, window.name)
     if window.name == "B1":
         return run_b1(root, timeout)
     if window.name == "A5":
@@ -1181,6 +1206,113 @@ def run_b1(root: Path, timeout: float) -> Evidence:
     evidence.control = str(control)
     evidence.workspace = str(workspace)
     evidence.counter_after = len(steps_after)
+    return evidence
+
+
+#: A unique tail so "the whole output is really there" is a fact about this run and not about a shape.
+TAIL_MARKER = "END-OF-THE-WHOLE-OUTPUT-7f3a"
+
+
+def run_b4(root: Path, timeout: float, name: str = "B4") -> Evidence:
+    """**B4: the saved output is readable, is read-only, and says when it is not whole.**
+
+    A large output with a unique tail is produced, the process is killed, and a **new process** — through
+    the node's own entry point, with a real sandbox — pages it back with `cat`. Three things have to hold
+    in that process: the tail is really there, the node cannot write to the store, and a command whose
+    output was cut says so.
+    """
+    from anchor.node.recovery import RecoveryRef, open_store
+
+    started = time.monotonic()
+    control = root / name / "control"
+    workspace = root / name / "workspace"
+    shutil.rmtree(root / name, ignore_errors=True)
+    control.mkdir(parents=True, exist_ok=True)
+    workspace.mkdir(parents=True, exist_ok=True)
+    # 300 KB with a marker at the very end: far past the preview, so it is the *store* being read here and
+    # not the observation the model was shown.
+    partial = name.endswith("partial")
+    big = (f"head -c 300000 /dev/zero | tr '\\0' 'x'; printf '{TAIL_MARKER}\\n'")
+    script = {"window": "C4", "node": f"node-{name}", "task": "produce a large output, then finish",
+              "with_context": True,
+              # **A store too small to hold it**, for the case where the answer is "this is not whole".
+              "record_bytes": 20_000 if partial else 4_000_000,
+              "budget": {"window": 200000, "output_reserve": 1000, "input_target": 150000},
+              "commands": [big, 'anchor-done --summary "produced"']}
+
+    killed, code, said, errors = _kill_at(control, workspace, script,
+                                          "after 2 settled request(s), before the run ends", timeout)
+    # What the first process kept, and what it told the model it could not keep whole.
+    kept = sorted((control / "kept").rglob("*.txt"))
+    sizes = {item.name: item.stat().st_size for item in kept}
+    # **The append-only record, not the trace.** A trace belongs to one attempt and the resumed process
+    # writes its own over it; the record is written as things happen and never rewritten, so what the
+    # first process told the model is still there afterwards.
+    told = ""
+    for item in sorted((control / "kept").rglob("*.jsonl")):
+        told += item.read_text(encoding="utf-8", errors="replace")
+
+    runs = asyncio.run(open_store(control).list_runs())
+    ours = [item for item in runs if item.agent_name == script["node"]]
+    out: dict = {}
+    if ours:
+        # **The run this case created**, which is the oldest: the store was cleared at the start, so the
+        # first one is the attempt that was killed. Taking the newest would read whatever a later run left
+        # behind — which is how a stray debugging attempt turned this case into 'uncertain' once.
+        this = sorted(ours, key=lambda item: item.started_at)[0]
+        ref = RecoveryRef(node=this.agent_name, run=this.run_id, store=str(control))
+        # **The recovered process does the reading**, in a real sandbox, with its own commands.
+        out = _ask_once(control, ref.encode(), {
+            "window": "B4-resumed", "node": script["node"], "task": "read back what was produced",
+            "then": 'anchor-done --summary "read the whole output back"',
+            "with_context": True, "record_bytes": 4_000_000,
+            "budget": {"window": 200000, "output_reserve": 1000, "input_target": 150000},
+            "phases": [
+                {"until": TAIL_MARKER, "command": "tail -c 80 /kept/*.txt 2>&1"},
+                # Named after a file that exists when the store was big enough, and otherwise after one
+                # that does not: either way the mount is read-only and the write is refused.
+                {"until": "READONLY",
+                 "command": f"echo tampered > /kept/{kept[0].name if kept else 'anything.txt'} 2>&1; "
+                            f"echo READONLY-$?"},
+                {"until": "DONE", "command": "ls /kept/../ | head -5; echo DONE"},
+            ]})
+
+    # **Read out of the append-only record**, not out of the outcome: what the recovered process saw is
+    # in its command results, and the record is where every attempt's results are written and never
+    # rewritten. The outcome only carries the submission.
+    record_text = "\n".join(
+        item.read_text(encoding="utf-8", errors="replace")
+        for item in (control / "kept").rglob("*.jsonl")) if (control / "kept").exists() else ""
+    everything = record_text + json.dumps(out, ensure_ascii=False)
+    tail_seen = TAIL_MARKER in everything
+    # A write into the read-only mount fails with a non-zero status and the sandbox's own message.
+    readonly = "READONLY-1" in everything or "READONLY-2" in everything or \
+        "Read-only file system" in everything
+    evidence = Evidence(window=name, control=str(control), workspace=str(workspace),
+                        killed=bool(killed), exit_code=code, barrier=said or "(no barrier)",
+                        counter_before=0, counter_after=len(kept), verdict="", because="",
+                        seconds=time.monotonic() - started, traceback=errors[-1200:])
+    # Two wordings, two layers: the sandbox says "could NOT be kept whole" when it refused to keep a
+    # stream, and the observation says "was not kept whole" when the preview it hands the model is not the
+    # whole output. Either is the runtime telling the node that what it is reading is a fragment.
+    # **From the model's own view of what it was handed**, which is where a missing notice does its
+    # damage — a node shown a fragment without being told reads it as the whole result.
+    inputs_seen = _model_inputs(control)
+    cut_and_said = any(item.get("cut_notice") for item in inputs_seen)
+    if partial:
+        # **The small-store case**: the answer is not "the tail is here" but "this is not whole", said
+        # out loud rather than left for the model to discover by finding the end missing.
+        evidence.verdict = "cut-and-said" if cut_and_said else "BAD(cut-but-not-said)"
+    else:
+        evidence.verdict = ("readable-and-read-only" if tail_seen and readonly
+                            else f"BAD(tail={tail_seen} read_only={readonly})")
+    evidence.because = (
+        f"kept {len(kept)} file(s) {sizes}; the runtime told the model its output was a fragment: "
+        f"{any(item.get('cut_notice') for item in inputs_seen)}; "
+        f"the resumed process read the tail back: {tail_seen}; writing to the store was refused: "
+        f"{readonly}; it ended {out.get('status')!r} after {out.get('model_requests')} request(s)")
+    evidence.note = ("the store is readable from inside the sandbox, write-refused, and the whole output "
+                     "is there for a later process")
     return evidence
 
 

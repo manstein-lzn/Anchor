@@ -433,3 +433,28 @@ def test_b2_and_b3_the_boundaries_a_real_compaction_creates(killed):
     checkpoint = killed["B2-checkpoint"]
     assert "'continuable'" in checkpoint["because"], checkpoint["because"]
     assert "paired: True" in checkpoint["because"], checkpoint["because"]
+
+
+def test_b4_the_saved_output_is_readable_read_only_and_honest_about_being_cut(killed):
+    """**B4。** 恢复进程中真读回已保存的输出 ✓、不能写它 ✓、被裁时必须明说 ✓。
+
+    大输出（300 KB，尾部有唯一标记 ✓）在第一个进程里产生 ✓、被 kill ✓，然后**新进程**经节点入口 ✓、
+    在**真沙箱**里用 `cat`/`tail` 把它翻回来 ✓。三件事必须在那个进程里成立 ✓：
+
+    1. 尾部**真的在** ✓——所以断言的是这一次运行的唯一文本 ✓，不是形状 ✓。
+    2. 节点**写不进**存储 ✓——挂载是只读的 ✓。
+    3. store 放不下时 ✓，模型必须被告知它拿到的是**片段** ✓。
+
+    第 3 点由**模型自己作证** ✓（它记录自己收到的东西 ✓）：记录里存的是命令的**原始文本** ✓，而提示是
+    在建给模型看的观察时加上的 ✓——所以只有从模型那一端才能验到它 ✓。
+    """
+    full = killed["B4"]
+    assert full["killed"] is True, "the first process was not held"
+    assert full["verdict"] == "readable-and-read-only", full["because"]
+    assert "read the tail back: True" in full["because"], full["because"]
+    assert "writing to the store was refused: True" in full["because"], full["because"]
+
+    partial = killed["B4-partial"]
+    assert partial["killed"] is True
+    assert partial["verdict"] == "cut-and-said", partial["because"]
+    assert "kept 0 file(s)" in partial["because"], partial["because"]
