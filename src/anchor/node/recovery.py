@@ -273,12 +273,29 @@ async def assess(store: FileStepStore, ref: RecoveryRef) -> Verdict:
             "recorded anywhere. Nothing to replay from.",
             effects=every, events=kinds, budget=ref.budget)
 
-    # ── 3. Everything settled. Continue if there is a point to continue from. ──
+    # ── 3. Everything settled. Continue only if the snapshot actually covers it. ──
+    #
+    # **"A complete snapshot exists" is not enough.** The framework writes a tool's terminal record in
+    # `after_tool_execute` and the snapshot in `after_node_run` — two hooks, two writes, not one step
+    # (`step_persistence/_capability.py`, the pinned 0.32.0). So a kill between them leaves a settled
+    # effect that the newest complete snapshot does not contain, and continuing from that snapshot
+    # **re-runs the command whose effect already happened**. Found by the G2 plan refusing to accept the
+    # earlier "that window does not exist" reading, and it does exist; it is reached by registering the
+    # barrier before `StepPersistence`, whose hooks then run first.
     if snapshot is not None and getattr(snapshot, "state", None) == "complete":
+        covered = _covers(snapshot, every)
+        if covered:
+            return Verdict(
+                "continuable",
+                "every tool call reached a terminal state and the newest complete snapshot contains the "
+                "result of each one; continue from it without repeating anything.",
+                effects=every, events=kinds, snapshot=where, budget=ref.budget)
+        missing = [call_id for call_id in _settled_ids(every) if call_id not in _snapshot_ids(snapshot)]
         return Verdict(
-            "continuable",
-            "every tool call reached a terminal state and a complete snapshot exists; continue from it "
-            "without repeating anything.",
+            "uncertain",
+            f"{len(missing)} settled tool call(s) are not covered by the newest complete snapshot "
+            f"(step {getattr(snapshot, 'step_index', '?')}): the snapshot predates an effect that has "
+            f"already happened, so continuing from it would repeat that command. Not replaying.",
             effects=every, events=kinds, snapshot=where, budget=ref.budget)
 
     return Verdict(
@@ -302,6 +319,33 @@ async def continued_messages(store: FileStepStore, ref: RecoveryRef) -> list[Any
     except LookupError as exc:
         raise InvalidReference(
             f"{ref.run!r} has no complete snapshot to continue from: {exc}") from exc
+
+
+def _settled_ids(effects: tuple[tuple[str, str, str], ...]) -> list[str]:
+    """The calls that finished — the ones a snapshot has to contain for it to be a place to continue."""
+    return [call_id for call_id, _, status in effects if status == "completed"]
+
+
+def _snapshot_ids(snapshot: Any) -> set[str]:
+    """Every tool call the snapshot's history has a result for.
+
+    Read out of the messages rather than inferred from the snapshot's step index: a step number says
+    when it was taken, and what has to be shown is *which* calls it already accounts for.
+    """
+    found: set[str] = set()
+    for message in getattr(snapshot, "messages", ()) or ():
+        for part in getattr(message, "parts", ()) or ():
+            if getattr(part, "part_kind", "") == "tool-return":
+                call_id = getattr(part, "tool_call_id", None)
+                if call_id:
+                    found.add(call_id)
+    return found
+
+
+def _covers(snapshot: Any, effects: tuple[tuple[str, str, str], ...]) -> bool:
+    """Whether the snapshot accounts for every call that has finished."""
+    settled = _settled_ids(effects)
+    return not settled or set(settled) <= _snapshot_ids(snapshot)
 
 
 def _kind(event: Any) -> str:

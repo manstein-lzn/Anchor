@@ -149,13 +149,17 @@ def _barrier(window: str):
             self.seen_tools += 1
             if window == "C2" and self.seen_tools == 1:
                 _wait_for_a_kill("tool_call_started persisted, command not executed")
-            if window == "C5":
-                # **Is there a window between the terminal effect record and the snapshot?** Checked at
-                # every reachable hook rather than argued about: this one runs before the second tool
-                # call, so the first one's terminal record is already written — and whether the snapshot
-                # is also already written decides whether the window exists at all.
-                _report_window("C5", "before the second tool call")
             return args                                     # must be returned; None breaks the call
+
+        async def after_tool_execute(self, ctx, *, call, tool_def, args, result):
+            # **Reached only because this capability is registered before `StepPersistence`.** Hooks run
+            # in a fixed order and the framework's own runs after this one when it is registered later:
+            # measured both ways, and registering it after gave a hook where the terminal record had not
+            # been written yet. Registered first, this is the instant the plan's C5 asks about — the
+            # tool's terminal record is in the ledger and the snapshot for this cycle is not.
+            if window == "C5" and self.seen_tools == 2:
+                _wait_for_a_kill("terminal effect record written, snapshot not yet")
+            return result
 
         async def wrap_tool_execute(self, ctx, *, call, tool_def, args, handler):
             result = await handler(args)
@@ -194,13 +198,18 @@ async def _run_child(window: str, control: Path, workspace: Path, script: dict) 
                 tool_name="bash", args={"command": 'anchor-done --summary "finished"'})])
         return ModelResponse(parts=[ToolCallPart(tool_name="bash", args={"command": command})])
 
+    # Order matters, and only for one window: `after_tool_execute` is where C5 pauses, and it has to
+    # land *after* the framework's own so the terminal record is there. Hooks run in registration order,
+    # so the barrier goes first for C5 and last for everything else — measured, not assumed.
+    persistence = StepPersistence(store=store, agent_name="anchor-node", run_id=script["run_id"])
+    barrier = _barrier(window)
+    capabilities = (barrier, persistence) if window == "C5" else (persistence, barrier)
+
     await run_node(
         NodeRequest(execution_id=script["node"], task=script["task"], workspace=workspace,
                     max_requests=8, trace=control / "trace.jsonl"),
         model=FunctionModel(model),
-        capabilities=(StepPersistence(store=store, agent_name="anchor-node",
-                                      run_id=script["run_id"]),
-                      _barrier(window)))
+        capabilities=capabilities)
 
 
 # ── the parent ────────────────────────────────────────────────────────────────────────────────────
@@ -246,9 +255,13 @@ def windows() -> list[Window]:
         Window("C4", [COUNTER, 'anchor-done --summary "done"'],
                "after the settled cycle, before the run ends",
                "counter=1; continuable from the settled snapshot, without redoing the work"),
-        Window("C5", [COUNTER, 'anchor-done --summary "done"'],
-               "before the second tool call",
-               "does the window between the terminal record and the snapshot exist at all?"),
+        # **Two commands on purpose.** The first cycle settles and its snapshot is written; the second
+        # command then completes and the kill lands before *its* snapshot. So a complete snapshot exists
+        # — an older one — and the effect that just happened is not in it. That is the case the plan asks
+        # for: an old snapshot must not be taken as covering a later side effect.
+        Window("C5", [COUNTER, COUNTER, 'anchor-done --summary "done"'],
+               "terminal effect record written, snapshot not yet",
+               "counter=2; an older complete snapshot exists and does NOT cover it — uncertain"),
         Window("C9", [SURVIVOR, 'anchor-done --summary "done"'],
                "side effect done, terminal record not written",
                "did the sandbox's own process outlive the host that started it?"),
@@ -270,7 +283,6 @@ def _kill_at(control: Path, workspace: Path, script: dict, barrier: str,
     Returns (was_killed, exit_code, what_the_child_said, traceback_text). The wait is a **read** on a
     pipe: no polling, no sleeping, and nothing about the machine's speed enters into when the kill lands.
     """
-    probe = script["window"] in ("C5",)
     read_fd, write_fd = os.pipe()
     environment = dict(os.environ, **{READY_FD_ENV: str(write_fd)})
     child = subprocess.Popen(
@@ -288,10 +300,7 @@ def _kill_at(control: Path, workspace: Path, script: dict, barrier: str,
             # **A byte, or nothing.** End of file also makes the pipe readable — and reading that as a
             # signal would report a kill at a barrier the child never reached, which is how four windows
             # looked correct while proving nothing.
-            if said and probe:
-                # A question, not a kill: take what the ledger says here and let the child run on.
-                killed = None
-            elif said:
+            if said:
                 os.kill(child.pid, signal.SIGKILL)
                 killed = True
             else:
@@ -300,8 +309,6 @@ def _kill_at(control: Path, workspace: Path, script: dict, barrier: str,
             child.kill()
     finally:
         os.close(read_fd)
-    if killed is None:
-        child.wait(timeout=120)
     _, errors = child.communicate(timeout=30)
     return killed, child.returncode, said, errors or ""
 

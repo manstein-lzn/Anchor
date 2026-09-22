@@ -186,3 +186,56 @@ note: the shell did NOT continue after its host was killed;
 - **C9 只测了 `bwrap --die-with-parent` 这一种配置** ✓——换沙箱或去掉该选项，结论要重测 ✓。
 - **真实 provider 与真实费用**不在本包内 ✓（§38 ✓）。
 - 摘要质量、压缩策略不是本包的事 ✓（03 不检验摘要内容 ✓）。
+
+---
+
+## 6. G2 的 A 门槛推翻的结论（2026-09-22 修正）
+
+> **本节由 G2 补验写入。** 03 原文的两条结论被反例推翻，保留原文以便对照，并注明适用 commit。
+> 修正依据：`AGENT_NODE_PLAN_G2.md` 的 A2；证据在 `AGENT_NODE_G2_RESULT.md`。
+
+### 6.1 「C5 窗口不存在」是错的 —— 窗口存在，而且可达
+
+**原文（§2.2）说**：在有 `tool_call_completed` 的同一瞬间 `complete` 快照已经在，所以那个窗口不存在 ✓。
+**那是错的** ✗，错在**探测点取晚了** ✓：我探的是**第二轮**工具调用的 `before_tool_execute` ✓，那时第一轮的
+`after_node_run` 早就把快照写完了 ✓。
+
+**固定版本源码**（`pydantic_ai_harness/step_persistence/_capability.py`，0.32.0）的写入位置：
+
+| 步骤 | 钩子 | 写入 |
+| --- | --- | --- |
+| 1 | `after_tool_execute`（第 622 行） | `_finish_tool_effect(...)` → `store.record_tool_effect(...)` + `tool_call_completed` 事件 |
+| 2 | `after_node_run`（第 661 行） | `_save_snapshot(...)` → `store.save_snapshot(...)` |
+
+**两个不同的钩子、两次独立写入** ✓——**不是**一个事务 ✓。真实 kill 落在两者之间：
+
+```
+C5  killed=True exit=-9 barrier='terminal effect record written, snapshot not yet'
+    counter: 0 -> 2
+    effect ...464146c4 bash = completed
+    effect ...b43b4738 bash = completed
+    snapshot: snapshot step 1 (complete)      ← 旧的 complete 快照存在
+    verdict: uncertain — 1 settled tool call(s) are not covered by the newest complete snapshot
+```
+
+**怎么够到这个窗口**：把屏障 capability 注册在 `StepPersistence` **之前** ✓——钩子按注册顺序跑 ✓，
+所以它的 `after_tool_execute` 落在框架的**之后** ✓。注册在之后则落在之前 ✓（两种都实测过 ✓）。
+
+### 6.2 由此暴露的本模块缺陷（已修）
+
+原文的 `assess` **只要有 complete 快照就返回 `continuable`** ✗——而那个快照可能是**上一轮**的 ✓，
+从它继续会**重跑已经发生过的命令** ✗✓——正是计划 §36 点名的「旧快照掩盖之后的副作用」✓。
+
+**修法**：快照必须**覆盖每一个终态 effect** ✓——逐个 `tool_call_id` 在快照历史里找得到 ✓。
+上面那次 kill 因此报 `uncertain` ✓ 而不是 `continuable` ✓。
+
+### 6.3 「C4 已证明可继续」需要收窄
+
+原文 §1 的 C4 是 `continuable` ✓，但当时只检查了「存在 complete 快照」✗，**没有检查它覆盖了已完成的
+effect** ✗。修好覆盖检查后 C4 **仍然**是 `continuable` ✓（那一轮的快照确实覆盖了它的 effect ✓），
+但**结论的依据换了** ✓：现在是「快照含每个终态调用的结果」✓，不是「快照存在」✓。
+
+### 6.4 仍然成立的部分
+
+C2（`started` 无终态 → `uncertain` ✓）、C3（副作用已发生但无终态 → `uncertain` ✓）、C7（坏引用有解释地
+拒绝 ✓）、C8（预算不因重启清零 ✓）、C9（沙箱不随宿主存活 ✓）**没有**被推翻 ✓，A 门槛下会再验一遍 ✓。
