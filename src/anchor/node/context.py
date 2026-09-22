@@ -467,6 +467,15 @@ class WithinBudget(AbstractCapability):
                 preserve_first_user_message=True,
                 receipts=True))
 
+    def cost(self, messages: list[ModelMessage]) -> int:
+        """What one request costs, history included.
+
+        `request_overhead` covers the instructions and the tool schemas — charged to **every** request
+        and part of why a provider refuses one. Adding the field was not enough: the comparisons went on
+        calling the estimator without it, so the budget still only described the history.
+        """
+        return estimate_tokens(messages, instructions=self.budget.request_overhead)
+
     async def _compact_once(self, messages: list[ModelMessage], ctx: Any) -> list[ModelMessage]:
         """Run the first strategy that actually reduces the history, and say which one did.
 
@@ -475,7 +484,7 @@ class WithinBudget(AbstractCapability):
         one. A strategy that returned the history unchanged has not compacted anything, and recording
         it as though it had would make the record claim a bound it did not achieve.
         """
-        before, size = len(messages), estimate_tokens(messages)
+        before, size = len(messages), self.cost(messages)
         # **The summariser goes first when there is one.** The order used to be "window, then summary if
         # the window did not help" — which means the old history is dropped, and only then is the
         # question asked whether anything needed summarising. The answer is always no by then, because
@@ -517,7 +526,7 @@ class WithinBudget(AbstractCapability):
         this: the request is what failed, so the request is what is repeated.
         """
         messages = list(getattr(request_context, "messages", ()) or ())
-        if self.force or estimate_tokens(messages) > self.budget.input_target:
+        if self.force or self.cost(messages) > self.budget.input_target:
             messages = await self._compact_once(messages, ctx)
             request_context = _replace_messages(request_context, messages)
 
@@ -528,12 +537,12 @@ class WithinBudget(AbstractCapability):
         # the provider or costs more than the budget says; failing here says which and why, once.
         if self.record is not None:
             item = {"request": len(self.record.sent) + 1, "messages": len(messages),
-                    "tokens": estimate_tokens(messages), "estimator": self.budget.estimator}
+                    "tokens": self.cost(messages), "estimator": self.budget.estimator}
             self.record.sent.append(item)
             self.record.note("sent", **item)
 
         ceiling = self.budget.window - self.budget.output_reserve
-        over = estimate_tokens(messages)
+        over = self.cost(messages)
         if over > ceiling:
             if self.record is not None:
                 self.record.note("uncompactable", tokens=over, ceiling=ceiling,
