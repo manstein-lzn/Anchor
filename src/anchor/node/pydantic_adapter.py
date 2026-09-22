@@ -6,24 +6,35 @@ pass, routing the Graph still owns, and a sandbox that is really the boundary? I
 against the real sandbox, the real completion CLIs and the real mounts, driven by a deterministic model
 so the answer costs nothing and does not depend on a provider.
 
-**One tool, and it is the output tool.** PydanticAI distinguishes an *output* tool — whose successful
-return becomes the run's final result — from a *function* tool, which merely reports back. Anchor's
-protocol needs both at once: the completion is a bash command (`anchor-done`), so the tool the model
-calls is `bash`, and the moment it recognises a completion the run must end. Registering `bash` as the
-output tool is what makes that one act instead of two, and `end_strategy='early'` is what makes the
-remaining calls in the same response never run.
+**`bash` is an ordinary function tool, and the stopping is done in two places rather than by the
+framework.** That took a wrong turn to arrive at and the turn is worth recording, because the wrong
+version passed its own tests:
 
-**What that costs, and it is worth stating plainly.** An output tool ends the run the moment it
-*returns*, so every command that is not a completion must not return. The only exit the framework leaves
-from an output tool is `ModelRetry`, so that is what an ordinary command raises — which means **an
-ordinary `ls` reaches the model as a retry prompt rather than as a plain tool result**, with whatever
-correction framing the framework attaches to one. `ToolFailed` reads the way this should read — a failed
-result with no correction instructions — and it does **not** work here: raised from an output tool it
-escapes the run and fails the whole execution. That was measured, not assumed, and it is recorded in
-`AGENT_NODE_PLAN_01_RESULT.md` as the one place the framework's shape shows through.
+    An *output* tool is the framework's own way to end a run from a tool — its successful return is the
+    result, and `end_strategy='early'` stubs the rest of the response. It satisfies "a submission stops
+    the pass" exactly, and it records every ordinary command as a `RetryPromptPart`, because an output
+    tool that does not return has to raise. `pydantic-ai-harness`'s `ClearToolResults` — the capability
+    a long node depends on to stop its context growing — finds what to clear through `iter_tool_pairs`,
+    which matches `ToolReturnPart` alone. So that version would have made the context machinery blind to
+    every command's output, and package 3 would have found it.
 
-The retry budget is therefore the request budget: every non-completion spends one, so it is set from
-`max_requests` rather than left at the framework's default of one.
+    A function tool records a normal `ToolReturnPart`, and then nothing ends the run — which is the part
+    that looked fatal. It is not: **the framework dispatching a call is not the same as the call having
+    to do anything.** So
+
+      1. an ordinary command returns its observation as a normal tool result, which is what the record
+         and the context machinery expect;
+      2. a recognised submission is stored on the node's wiring, and the command that carried it does
+         not need the run to end there;
+      3. a later call in the same response **is dispatched and does not run** — the tool checks whether
+         the node has already finished and returns without touching the sandbox, which is what the
+         acceptance matrix asks for: the *effect* must not happen, not the dispatch;
+      4. and after the tool batch, the public iteration boundary is where the pass ends: the adapter
+         leaves `agent.iter` there and never asks the model again.
+
+    Four small pieces, no private API, and all three requirements hold at once — one tool, the effect
+    stopped at the submission, and a record the harness can read. The measurements are in
+    `AGENT_NODE_PLAN_01_RESULT.md` §5.9.
 """
 
 from __future__ import annotations
@@ -33,8 +44,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel
-from pydantic_ai import Agent, RunContext, ToolOutput, UsageLimits
+from pydantic_ai import Agent, ModelRequestNode, RunContext, UsageLimits
 from pydantic_ai.messages import ModelMessagesTypeAdapter
 from pydantic_ai.models.wrapper import WrapperModel
 from pydantic_ai.exceptions import ModelRetry, UsageLimitExceeded
@@ -45,6 +55,10 @@ from anchor.runtime.execenv import Executed, NodeSandbox
 #: The two commands that finish a node, and the exact strings they print. Both are the runtime's
 #: existing protocol, not this adapter's: `done/__main__.py` and `route/__main__.py` print them, and
 #: the mini path recognises the same two.
+#: How much of one command's output the record keeps. Generous, because an ordinary command's output
+#: is the evidence a failure is read from — and bounded, because a node can read a large file.
+TAIL_OUTPUT = 20000
+
 DONE_SENTINEL = "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
 ROUTE_SENTINEL = "ANCHOR_ROUTE:"
 
@@ -68,17 +82,6 @@ nothing else.
 """
 
 
-class Submission(BaseModel):
-    """What the node produced, as the output the run ends with.
-
-    The tool's declared return type, so PydanticAI knows what a successful `bash` means. Only a
-    completion ever constructs one; everything else raises.
-    """
-
-    submission: str = ""
-    route: str | None = None
-
-
 class _CountingModel(WrapperModel):
     """A model that counts how many times it was asked.
 
@@ -99,15 +102,29 @@ class _CountingModel(WrapperModel):
 
 
 @dataclass
+class _Done:
+    """A submission the node made, kept so the pass can end at a boundary the framework offers."""
+
+    submission: str
+    route: str | None
+    command: str
+
+
+@dataclass
 class _Wiring:
     """What the tool needs to run a command: the sandbox, and the ways out."""
 
     sandbox: NodeSandbox
     routes: tuple[str, ...]
+    #: Set by the command that submitted. Its presence is what stops everything after it — the later
+    #: calls in the same response, and the pass itself.
+    done: _Done | None = None
     commands: int = 0
-    #: (command, exit code, first line of output) in the order they ran, for the record and for the
-    #: tests that assert ordering rather than believing a claim about it.
-    ran: list[tuple[str, int, str]] = None      # type: ignore[assignment]
+    #: (command, exit code, first line, full output) in the order they were dispatched, for the
+    #: record and for the tests that assert ordering rather than believing a claim about it. A skipped
+    #: call is in here too, with no exit code — it was dispatched and it did not run, and both halves
+    #: of that are worth keeping.
+    ran: list[tuple] = None                      # type: ignore[assignment]
 
     def __post_init__(self) -> None:
         if self.ran is None:
@@ -176,54 +193,83 @@ def _observation(ran: Executed, extra: str = "") -> str:
     return "\n".join(parts)
 
 
-def _bash(ctx: RunContext[_Wiring], command: str) -> Submission:
-    """The one tool the model has. Returning ends the run; raising asks it again.
+def one_line(text: str, width: int = 70) -> str:
+    flat = " ".join(text.split())
+    return flat if len(flat) <= width else flat[:width] + "…"
 
-    There is no third behaviour available from an output tool, which is why an ordinary command and a
-    refused completion travel the same way and differ only in what they say.
+
+def _bash(ctx: RunContext[_Wiring], command: str) -> str:
+    """The one tool the model has. Ordinary commands return; a submission is remembered.
+
+    **The guard is the point.** A later call in the same response is dispatched by the framework and
+    must not reach the sandbox: once the node has submitted, everything after it in that response is
+    something the node did not ask for and must not do. The framework's own way of stopping a batch
+    exists only for output tools, and an output tool's records are the wrong shape for the context
+    machinery — so the check is here, where it costs one comparison and no framework cooperation, and
+    what the skipped call reports is a result rather than a failure.
     """
     wiring = ctx.deps
+    if wiring.done is not None:
+        # Recorded as well as refused. The framework's history stops at the node that would carry
+        # this batch's results, so what a skipped call was is only in the record if it is put there.
+        wiring.ran.append((command, None, "skipped: the node had already submitted", ""))
+        return (f"<skipped>not run: this node finished in this same response, at "
+                f"`{one_line(wiring.done.command)}`. Nothing after a submission executes.</skipped>")
+
     ran = wiring.sandbox.run(command)
     wiring.commands += 1
-    wiring.ran.append((command, ran.returncode, _first_line(ran.output)))
+    wiring.ran.append((command, ran.returncode, _first_line(ran.output), ran.output))
 
     kind, message, route = read_completion(ran, wiring.routes)
     if kind == "done":
-        return Submission(submission=message)
-    if kind == "routed":
-        assert route is not None
-        return Submission(submission=message, route=route)
-    # Either an ordinary command's result, or a completion this node may not accept — a marker on a
-    # command that failed, a `done` where the node has to choose, a target that is not a way out. All
-    # three are things for the model to see and act on, so all three go back to it.
-    raise ModelRetry(_observation(ran, message))
+        wiring.done = _Done(submission=message, route=None, command=command)
+    elif kind == "routed":
+        wiring.done = _Done(submission=message, route=route, command=command)
+    # A refusal and an ordinary result travel the same way — back to the model as a plain tool result,
+    # which is also what the harness can read and clear. `ModelRetry` is used for neither: it would
+    # attach correction instructions to a command's ordinary output and record it as a retry.
+    return _observation(ran, message if kind == "refused" else "")
 
 
 def build_agent(model: Any, *, instructions: str = "",
-                max_retries: int = 60) -> Agent[_Wiring, Submission]:
+                max_retries: int = 60) -> Agent[_Wiring, str]:
     """One Agent per execution, with one tool and no room for a second.
 
-    `end_strategy='early'` is the load-bearing argument. Under it, output calls run in the order the
-    model emitted them and stop at the first success, and **the calls after that success never run** —
-    which is what makes "the completion command is the last thing that happens in a response" true
-    rather than hoped for. The default in v2 is `'graceful'`, under which the rest of the response
-    still executes.
+    `output_type=str` with a validator that always refuses is not a completion mechanism — the tool
+    holds that — it is the answer to *a model that replies with words instead of acting*. The rules say
+    a response without a tool call is rejected, and the framework is what makes that true: the validator
+    turns a text answer into a retry, so the node is asked again rather than ending with a sentence and
+    no work. Bounded by `retries`, set from the request budget so a node that only talks stops at the
+    same ceiling as one that only works.
     """
-    return Agent(
+    agent: Agent[_Wiring, str] = Agent(
         model,
-        output_type=ToolOutput(_bash, name="bash", description="Execute a bash command",
-                               # A barrier, so two calls in one response cannot overlap. The protocol
-                               # says they run in order, and `True` is what makes that the framework's
-                               # behaviour rather than the sandbox's good luck.
-                               sequential=True,
-                               # Every non-completion spends one, so this is the request budget —
-                               # not the framework's default of one, which stops a node on its
-                               # second command.
-                               max_retries=max_retries),
-        end_strategy="early",
+        # **Not `end_strategy='early'`.** Under it a function tool runs only when every *output* tool
+        # has failed — and there is no output tool here, so nothing would ever run. `'early'` is the
+        # right setting for the design this one replaced, where the tool *was* the output tool; with an
+        # ordinary tool the default is the one that runs it.
         deps_type=_Wiring,
+        output_type=str,
+        retries=max_retries,
         instructions=f"{instructions.strip()}\n\n{RULES}".strip(),
     )
+    # One tool, and a barrier: the protocol says the commands in one response run in order, and this is
+    # what makes that the framework's behaviour rather than the sandbox's good luck. It also makes the
+    # skip guard decisive — without it a later call could already be in the sandbox when the submission
+    # is recognised.
+    # Registered through the decorator rather than by passing the function, because that is the form
+    # the overloads match. `tool` and not `tool_plain`: the tool needs the node's wiring, which arrives
+    # on the run context.
+    agent.tool(name="bash", description="Execute a bash command", sequential=True)(_bash)
+
+    @agent.output_validator
+    def _not_words(value: str) -> str:
+        raise ModelRetry(
+            "You answered with words. This node is finished only by running one of the completion "
+            "commands, and it acts by calling the bash tool — call it. Saying that you are done is "
+            "not finishing.")
+
+    return agent
 
 
 def _write_trace(path: Path | None, messages: list[Any], wiring: _Wiring | None,
@@ -244,13 +290,20 @@ def _write_trace(path: Path | None, messages: list[Any], wiring: _Wiring | None,
     with path.open("w", encoding="utf-8") as handle:
         for message in encoded:
             handle.write(json.dumps(message, ensure_ascii=False, default=str) + "\n")
+        # The commands are written out whole, and not left to the framework's history. A pass that
+        # submits leaves the loop at the node *after* its last batch — the node whose running is what
+        # would put that batch's results into `all_messages` — so the last batch, which is the one
+        # carrying the submission, is not in the messages at all. The adapter ran those commands and
+        # knows exactly what they did; the record would be missing the most important part of the pass
+        # without this.
         handle.write(json.dumps({
             "role": "exit", "content": outcome.reason or outcome.submission,
             "extra": {"status": outcome.status, "route": outcome.route,
                       "submission": outcome.submission, "model_requests": outcome.model_requests,
                       "commands": [] if wiring is None else
-                                  [{"command": c, "returncode": r, "first_line": f}
-                                   for c, r, f in wiring.ran]},
+                                  [{"command": c, "returncode": r, "first_line": f,
+                                    "output": (o or "")[:TAIL_OUTPUT]}
+                                   for c, r, f, o in wiring.ran]},
         }, ensure_ascii=False) + "\n")
     return str(path)
 
@@ -270,11 +323,11 @@ async def run_node(request: NodeRequest, *, model: Any) -> NodeOutcome:
     provider at all, is the caller's business, and a runner that built its own would be a runner that
     cannot be tested without one.
 
-    Driven through `agent.iter` rather than `agent.run` for one reason: the conversation has to survive
-    a failure. `run()` hands back a result, and on the two paths where the record matters most there is
-    no result to hand back — so the record was a single exit line and everything the node had said and
-    been told was gone. `AgentRun.all_messages()` is readable at any point, including from the handler
-    for an exception, so both paths write the whole thing.
+    Driven through `agent.iter` rather than `agent.run`, because the pass has to end at a place the
+    framework offers rather than where a framework feature decides. Two things need that boundary: a
+    pass that submitted must not ask the model again, and a pass that failed must still have its
+    conversation — `AgentRun.all_messages()` is readable from the handler for an exception, and a
+    result, which is where `run` keeps them, does not exist on that path.
     """
     counted = _CountingModel(model)
     agent = build_agent(counted, instructions=request.instructions,
@@ -294,12 +347,25 @@ async def run_node(request: NodeRequest, *, model: Any) -> NodeOutcome:
         wiring.sandbox.require_working()
 
         async with agent.iter(request.task, deps=wiring, usage_limits=limits) as run:
-            async for _node in run:
-                pass
+            async for node in run:
+                # **The boundary after the tools, not the tools themselves.** A node is yielded when it
+                # is entered, so at `CallToolsNode` the commands have not run yet and nothing has been
+                # submitted; breaking there does nothing and the pass goes on to ask the model again —
+                # measured, by a third request appearing in the record. The node that asks the model is
+                # exactly the one to leave on: a submission is already in hand, so asking again is the
+                # thing this is here to prevent.
+                if isinstance(node, ModelRequestNode) and wiring.done is not None:
+                    break
+
         messages = list(run.all_messages())
-        produced = run.result.output
+        done = wiring.done
+        if done is None:
+            # The loop ended without a submission. The validator turns a spoken answer into a retry,
+            # so this is a pass that stopped for a reason that is not a completion — and calling it
+            # one is the failure this whole design exists to refuse.
+            raise RuntimeError("the run ended without a submission")
         outcome = NodeOutcome(
-            status=COMPLETED, submission=produced.submission, route=produced.route,
+            status=COMPLETED, submission=done.submission, route=done.route,
             model_requests=counted.requests, files=_files(request.workspace))
     except UsageLimitExceeded as exc:
         # Out of turns, nothing submitted. Not a failure of the work, and not a route: the graph must

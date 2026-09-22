@@ -104,8 +104,10 @@ def test_a1_the_model_is_offered_exactly_one_tool(tmp_path):
 
     asyncio.run(run_node(request(workspace, max_requests=2), model=FunctionModel(watching)))
 
-    assert seen["function_tools"] == [], "a function tool would be a second tool the model can see"
-    assert seen["output_tools"] == ["bash"], f"found {seen['output_tools']}"
+    assert seen["function_tools"] == ["bash"], f"found {seen['function_tools']}"
+    assert seen["output_tools"] == [], \
+        "an output tool would be a second way out, and its records are the wrong shape for the " \
+        "context machinery"
 
 
 # ── A2 · plain text is not a submission, and the loop can recover ────────────────────────────────
@@ -744,18 +746,18 @@ def test_a12b_the_route_the_adapter_returns_drives_a_real_branch(tmp_path, monke
 
 # ── the compatibility question the reviewer said must be settled before freezing ──────────────────
 
-def test_the_harness_compaction_cannot_see_an_ordinary_observation(tmp_path):
-    """**The finding this package would otherwise have left for package 3 to discover.**
+def test_the_harness_compaction_can_see_an_ordinary_observation(tmp_path):
+    """**The compatibility the earlier design broke, now kept.**
 
     `pydantic-ai-harness`'s `ClearToolResults` — the capability that exists to stop a long node's
     context growing without bound — finds what to clear through `iter_tool_pairs`, and that matches
-    `ToolReturnPart` alone. Every ordinary command in this adapter is recorded as a `RetryPromptPart`,
-    because an output tool that does not return must raise. So the compaction would clear the one
-    submission and none of the output it was built to reclaim: **the tool record mechanism does not
-    fit the context mechanism**, and that is a design problem rather than a wording difference.
+    `ToolReturnPart` alone. An earlier version of this adapter registered `bash` as an *output* tool, so
+    every ordinary command was a `RetryPromptPart` and the compaction would have been blind to all of
+    them: package 3 would have found that its context machinery reclaimed nothing.
 
-    Asserted against the harness's own pairing function rather than a copy of its rule, so this fails
-    if either side changes.
+    `bash` is an ordinary function tool now, and an ordinary command is a `ToolReturnPart` — asserted
+    through the harness's own pairing function rather than a copy of its rule, so this fails if either
+    side changes.
     """
     shared = pytest.importorskip("pydantic_ai_harness.compaction._shared",
                                  reason="the harness is not installed here")
@@ -774,14 +776,17 @@ def test_the_harness_compaction_cannot_see_an_ordinary_observation(tmp_path):
                   ModelRequest(parts=[ToolReturnPart(tool_name="bash", content="done",
                                                      tool_call_id="call-1")])]
 
-    assert shared.iter_tool_pairs(submission), "a normal tool return is a pair the harness can clear"
-    assert not shared.iter_tool_pairs(ordinary), (
-        "an ordinary observation is a pair after all — then the adapter's record does fit the harness, "
-        "and this test's premise is wrong")
+    assert shared.iter_tool_pairs(submission), "a tool return is a pair the harness can clear"
+    assert not shared.iter_tool_pairs(ordinary), \
+        "a retry prompt is still not a pair — which is why the adapter does not use one"
 
 
 def test_what_an_ordinary_command_is_recorded_as(tmp_path):
-    """The premise of the test above, taken from a real run rather than from reading the adapter."""
+    """A real run, rather than reading the adapter: an ordinary command is a tool return.
+
+    This is the canary for the whole design. If a change makes ordinary output a retry prompt again,
+    the harness's compaction goes blind to it and this fails here rather than in package 3.
+    """
     workspace = tmp_path / "ws"
     workspace.mkdir()
 
@@ -793,7 +798,46 @@ def test_what_an_ordinary_command_is_recorded_as(tmp_path):
     kinds = [part.get("part_kind")
              for line in lines for part in (line.get("parts") or [])]
     assert "tool-call" in kinds, "the command is not in the record"
-    assert "retry-prompt" in kinds, f"an ordinary command was not recorded as a retry: {kinds}"
-    assert "tool-return" not in kinds, (
-        "an ordinary command produced a ToolReturnPart — then the adapter changed and the harness "
-        "could clear it after all")
+    assert "tool-return" in kinds, f"an ordinary command was not recorded as a tool return: {kinds}"
+    assert "retry-prompt" not in kinds, (
+        f"an ordinary command is a retry prompt again: {kinds} — the harness's ClearToolResults would "
+        f"be blind to every command's output, which is the whole of what it exists to reclaim")
+
+
+def test_a4b_a_later_call_is_dispatched_and_does_not_reach_the_sandbox(tmp_path):
+    """The distinction the design rests on: the framework handling a call is not the call happening.
+
+    A function tool cannot stop the rest of a response the way an output tool can — and an output tool
+    is the wrong shape for the context machinery. So the framework *does* dispatch the calls after a
+    submission, and the tool refuses them. Both halves are asserted here, because only the first one
+    distinguishes this from "the framework never saw them": the record shows a call for the command
+    after the submission, and its result says it was skipped, and the sandbox never ran it.
+    """
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    trace = tmp_path / "trace.jsonl"
+    model = model_from(["printf 'before\\n' > before.txt",
+                        'anchor-done --summary "submitted here"',
+                        "printf 'after\\n' > after.txt"])
+
+    outcome = asyncio.run(run_node(request(workspace, trace=trace), model=model))
+
+    assert outcome.status == COMPLETED
+    # The effect did not happen.
+    assert (workspace / "before.txt").is_file()
+    assert not (workspace / "after.txt").exists(), "the command after the submission ran"
+    # And it was dispatched, and refused, rather than never seen. Read from the record's own account of
+    # the commands, because a pass that submits leaves the loop before the framework puts its last
+    # batch into the message history.
+    lines = [json.loads(line) for line in trace.read_text(encoding="utf-8").splitlines()]
+    calls = [part.get("args", {}).get("command")
+             for line in lines for part in (line.get("parts") or [])
+             if part.get("part_kind") == "tool-call"]
+    commands = lines[-1]["extra"]["commands"]
+    assert "printf 'after\\n' > after.txt" in calls, \
+        "the framework did not dispatch the later call, so this test is not about the guard"
+    skipped = [item for item in commands if item["returncode"] is None]
+    assert len(skipped) == 1, f"the later call was not recorded as refused: {commands}"
+    assert "already submitted" in skipped[0]["first_line"]
+    # No model request after the submission, and the record says so.
+    assert outcome.model_requests == 1, "the model was asked again after the submission"
