@@ -308,6 +308,9 @@ def windows() -> list[Window]:
         Window("C5", [COUNTER, COUNTER, 'anchor-done --summary "done"'],
                "terminal effect record written, snapshot not yet",
                "counter=2; an older complete snapshot exists and does NOT cover it — uncertain"),
+        Window("A3", [COUNTER, 'anchor-done --summary "done"'],
+               "the real recovery entry, in sequence, over three kinds of reference",
+               "uncertain does nothing; continuable continues; finished hands back its result"),
         Window("A1", [COUNTER, 'anchor-done --summary "done"'],
                "two processes, the second of which finishes the work",
                "counter stays 1 and the second process reaches a valid submission"),
@@ -531,6 +534,8 @@ def run_window(window: Window, root: Path, timeout: float) -> Evidence:
     """One window, start to finish, with its own directories and its own cleanup."""
     if window.name == "A1":
         return run_a1(root, timeout)
+    if window.name == "A3":
+        return run_a3(root, timeout)
     if window.name == "C9":
         return run_c9(root, timeout)
     # **Isolated, every time.** §42 asks for an isolated temporary workspace, and this was learned the
@@ -638,6 +643,82 @@ async def _recovered(control: Path) -> tuple[str, int]:
         # Fetching the history is the act a caller would take; it must not run anything by itself.
         await continued_messages(store, ref)
     return verdict.action, len(verdict.effects)
+
+
+def _ask_once(control: Path, token: str, script: dict) -> dict:
+    """One **real recovery entry**, in a new process, and what it decided.
+
+    Not `assess` called twice: this runs the node's own entry point with the token, so what is measured
+    is what a caller would get — including the model and tool calls it did or did not make.
+    """
+    work = control.parent / "again"
+    work.mkdir(parents=True, exist_ok=True)
+    before = {item.name for item in control.glob("outcome-*.json")}
+    subprocess.run(
+        [sys.executable, __file__, "--child", "--window", "A3", "--control", str(control),
+         "--workspace", str(work), "--script", json.dumps(script), "--recover", token],
+        capture_output=True, text=True, timeout=180, check=False)
+    new = [item for item in control.glob("outcome-*.json") if item.name not in before]
+    return json.loads(new[-1].read_text(encoding="utf-8")) if new else {}
+
+
+def run_a3(root: Path, timeout: float) -> Evidence:
+    """**A3: the real recovery entry, in sequence, over three kinds of reference.**
+
+    An uncertain reference must do nothing; a continuable one must continue; a finished one must hand
+    back the result it already has. In all three the original run's history stays as it was, and nothing
+    is confirmed twice.
+    """
+    from anchor.node.recovery import RecoveryRef, open_store
+    script = {"window": "A3", "node": "node-A3", "task": "count, then finish",
+              "history_driven": True, "marker": "EFFECT-", "first": COUNTER,
+              "then": 'anchor-done --summary "resumed to a submission"'}
+    started = time.monotonic()
+    steps: list[str] = []
+
+    def control_for(name: str) -> Path:
+        make = root / "A3" / name
+        shutil.rmtree(make, ignore_errors=True)
+        (make / "workspace").mkdir(parents=True, exist_ok=True)
+        (make / "control").mkdir(parents=True, exist_ok=True)
+        return make / "control"
+
+    # ── an uncertain reference: a call started and never finished ──
+    uncertain_control = control_for("uncertain")
+    _kill_at(uncertain_control, uncertain_control.parent / "workspace", dict(script, window="C3"),
+             "side effect done, terminal record not written", timeout)
+    runs = asyncio.run(open_store(uncertain_control).list_runs())
+    ref = RecoveryRef(node=script["node"], run=runs[-1].run_id, store=str(uncertain_control))
+    out = _ask_once(uncertain_control, ref.encode(), script)
+    steps.append(f"uncertain -> {out.get('status')} with {out.get('model_requests')} model request(s)")
+    assert out.get("status") == "uncertain", steps
+    assert out.get("model_requests") == 0, steps
+
+    # ── a continuable reference: settled, with a snapshot that covers it ──
+    live_control = control_for("continuable")
+    _kill_at(live_control, live_control.parent / "workspace", dict(script, window="C4"),
+             "after the settled cycle, before the run ends", timeout)
+    runs = asyncio.run(open_store(live_control).list_runs())
+    ref = RecoveryRef(node=script["node"], run=runs[-1].run_id, store=str(live_control))
+    first = _ask_once(live_control, ref.encode(), script)
+    steps.append(f"continuable -> {first.get('status')} submitting {first.get('submission')!r}")
+    assert first.get("status") == "completed", steps
+
+    # ── and now the same reference again: it has submitted, so nothing may run ──
+    finished_ref = first.get("recovery") or ref.encode()
+    second = _ask_once(live_control, finished_ref, script)
+    steps.append(f"finished -> {second.get('status')} with {second.get('model_requests')} model "
+                 f"request(s), submission {second.get('submission')!r}")
+    assert second.get("model_requests") == 0, f"a finished run was asked again: {steps}"
+    assert second.get("submission") == first.get("submission"),         f"the submission was not carried over unchanged: {steps}"
+
+    evidence = Evidence(window="A3", control=str(live_control),
+                        workspace=str(live_control.parent / "workspace"),
+                        killed=None, exit_code=None, barrier="(sequenced, no kill)",
+                        counter_before=0, counter_after=_counter(live_control.parent / "workspace"),
+                        verdict="no-repeat" if second.get("model_requests") == 0 else "REPEATED",
+                        because="; ".join(steps), seconds=time.monotonic() - started)
+    return evidence
 
 
 async def _newest_ref(control: Path):

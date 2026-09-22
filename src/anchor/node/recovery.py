@@ -13,8 +13,16 @@ whether a tool call had started, whether it had returned — and from that, whic
                   twice;
     continuable   every call reached a terminal state and a settled snapshot exists, so the work can
                   carry on from there without repeating anything;
+    finished      **the run already submitted.** Continuing would ask the model again and stand a chance
+                  of running the submission a second time, so there is nothing to resume — the result is
+                  in the history and the caller should read it rather than restart the work;
     invalid       the reference does not check out, so there is nothing to recover from and starting
                   fresh would silently discard whatever did happen.
+
+`finished` is not the framework's `run_completed`: on this node's success path that event never appears,
+because the pass leaves `agent.iter` at the boundary after a submission and the framework records the run
+as cancelled — measured. So "it already submitted" is read from the history, where the completion
+command's own output is.
 
 **Not exactly-once.** This decides what is *knowable*; it does not make a command idempotent, and it does
 not reconcile anything. A caller that wants a repeated command to be harmless has to make it harmless.
@@ -45,7 +53,7 @@ PREFIX = "anchor1."
 
 #: What a caller may do, and nothing finer. The distinction between the last two is the whole point of
 #: the package, so it is the type and not a comment.
-Action = Literal["replayable", "uncertain", "continuable", "invalid"]
+Action = Literal["replayable", "uncertain", "continuable", "finished", "invalid"]
 
 #: How many lines of the record a verdict carries back for a person to read. The evidence itself is in
 #: the store; this is what makes a report say why rather than only what.
@@ -187,6 +195,9 @@ def save_budget(control: Path, budget: Budget) -> None:
     failure this exists to prevent.
     """
     path = budget_path(control)
+    # Made here rather than assumed: a caller that has not written anything yet has no control
+    # directory, and a budget that cannot be recorded is worse than one that is recorded late.
+    path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(".writing")
     temporary.write_text(json.dumps(asdict(budget), sort_keys=True), encoding="utf-8")
     temporary.replace(path)
@@ -273,7 +284,16 @@ async def assess(store: FileStepStore, ref: RecoveryRef) -> Verdict:
             "recorded anywhere. Nothing to replay from.",
             effects=every, events=kinds, budget=ref.budget)
 
-    # ── 3. Everything settled. Continue only if the snapshot actually covers it. ──
+    # ── 3. It already submitted. Nothing to resume, and asking again is the thing to avoid. ──
+    if snapshot is not None and _submitted(snapshot):
+        return Verdict(
+            "finished",
+            "the newest complete snapshot's history already contains a completion command's result, so "
+            "the work finished: resuming would ask the model again and could run the submission a second "
+            "time. Read the result rather than restarting.",
+            effects=every, events=kinds, snapshot=where, budget=ref.budget)
+
+    # ── 4. Everything settled. Continue only if the snapshot actually covers it. ──
     #
     # **"A complete snapshot exists" is not enough.** The framework writes a tool's terminal record in
     # `after_tool_execute` and the snapshot in `after_node_run` — two hooks, two writes, not one step
@@ -319,6 +339,63 @@ async def continued_messages(store: FileStepStore, ref: RecoveryRef) -> list[Any
     except LookupError as exc:
         raise InvalidReference(
             f"{ref.run!r} has no complete snapshot to continue from: {exc}") from exc
+
+
+def already_finished(snapshot: Any) -> tuple[str, str | None]:
+    """What an attempt that already submitted produced: `(submission, route)`.
+
+    Read out of the history rather than by running anything. A caller handed a `finished` verdict has a
+    result already and needs no model call to collect it — which is the point: the submission is the one
+    action that must not happen twice.
+    """
+    from anchor.node.pydantic_adapter import DONE_SENTINEL, ROUTE_SENTINEL
+    for message in getattr(snapshot, "messages", ()) or ():
+        for part in getattr(message, "parts", ()) or ():
+            if getattr(part, "part_kind", "") != "tool-return":
+                continue
+            content = str(getattr(part, "content", ""))
+            lines = content.splitlines()
+            for index, line in enumerate(lines):
+                stripped = line.strip()
+                if stripped == DONE_SENTINEL:
+                    return _after(lines[index + 1:]), None
+                if stripped.startswith(ROUTE_SENTINEL):
+                    return (_after(lines[index + 1:]),
+                            stripped.split(":", 1)[1].strip() or None)
+    return "", None
+
+
+def _after(lines: list[str]) -> str:
+    """The summary that follows a completion marker, without the observation's closing tag.
+
+    The tool result is wrapped as `<returncode>…</returncode><output>…</output>`, so the last line after
+    the marker is the wrapper and not part of what the node said. The live path takes the summary from
+    the CLI's own output; this path takes it from the history, and the two have to agree or a resumed
+    attempt reports a different submission from the one it actually made.
+    """
+    kept = [line for line in lines]
+    while kept and (not kept[-1].strip() or kept[-1].strip().startswith("</")):
+        kept.pop()
+    return "\n".join(kept).strip()
+
+
+def _submitted(snapshot: Any) -> bool:
+    """Whether the history shows a completion command that was accepted.
+
+    Read from the tool results in the snapshot, which is where the sentinel the CLI printed ends up. The
+    framework's own `run_completed` is not usable here: this node's success path leaves the run before it
+    can be emitted, and a check that waited for it would call every finished run unfinished.
+    """
+    from anchor.node.pydantic_adapter import DONE_SENTINEL, ROUTE_SENTINEL
+    for message in getattr(snapshot, "messages", ()) or ():
+        for part in getattr(message, "parts", ()) or ():
+            if getattr(part, "part_kind", "") != "tool-return":
+                continue
+            content = str(getattr(part, "content", ""))
+            for line in content.splitlines():
+                if line.strip() == DONE_SENTINEL or line.strip().startswith(ROUTE_SENTINEL):
+                    return True
+    return False
 
 
 def _settled_ids(effects: tuple[tuple[str, str, str], ...]) -> list[str]:

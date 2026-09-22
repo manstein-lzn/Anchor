@@ -286,7 +286,7 @@ async def _next_run_id(store: Any, agent_name: str) -> str:
 
 
 async def _reference(recovery_store: Path | None, request: NodeRequest, store: Any,
-                     ref: Any, *, spent: int) -> str:
+                     ref: Any, *, spent: int, ran: str = "") -> str:
     """The token for the attempt that just finished, so a caller can ask about it later.
 
     Handed out even when the attempt failed: what a caller needs in order to ask "can this be picked up"
@@ -296,10 +296,20 @@ async def _reference(recovery_store: Path | None, request: NodeRequest, store: A
     """
     from anchor.node.recovery import Budget, RecoveryRef, save_budget
     if ref is not None and store is not None:
-        # Continuing an attempt: same run, and the allowance it had is now smaller by what was spent.
+        # Continuing: the attempt that just finished is a **new** run, so the reference has to name it
+        # rather than the one it was given. When the caller supplied its own persistence the adapter
+        # never chose that id, so it is read back from the store — the newest run for this logical node,
+        # which is the one that just ended.
+        newest = ""
+        if not ran:
+            try:
+                runs = [item for item in await store.list_runs() if item.agent_name == ref.node]
+                newest = sorted(runs, key=lambda item: item.started_at)[-1].run_id if runs else ""
+            except Exception:                                 # noqa: BLE001 - naming is best effort
+                newest = ""
         budget = ref.budget.after(spent)
         save_budget(Path(ref.store), budget)
-        return RecoveryRef(node=request.execution_id, run=ref.run, store=ref.store,
+        return RecoveryRef(node=ref.node, run=ran or newest or ref.run, store=ref.store,
                            budget=budget).encode()
     if recovery_store is None:
         return ""
@@ -397,6 +407,8 @@ async def run_node(request: NodeRequest, *, model: Any,
     # a fresh run would repeat whatever the previous attempt managed to do and call it progress. The
     # adapter decides here, and the Graph never sees why — it gets a status and a reason.
     resumed: list[Any] = []
+    #: The framework run this attempt will use, when it is a continuation and therefore a *new* run.
+    this_run = ""
     history: list[Any] | None = None
     ref = None
     store = None
@@ -431,14 +443,26 @@ async def run_node(request: NodeRequest, *, model: Any,
         if verdict.action == "invalid":
             return NodeOutcome(status=FAILED, reason=verdict.because, model_requests=0,
                                files=_files(request.workspace), recovery=request.recovery)
+        # **It already submitted.** Nothing is run and no model is asked: the result is in the history,
+        # and the one action that must never happen twice is the submission.
+        if verdict.action == "finished":
+            from anchor.node.recovery import already_finished
+            snapshot = await store.latest_snapshot(run_id=ref.run)
+            submission, route = already_finished(snapshot)
+            return NodeOutcome(status=COMPLETED, submission=submission, route=route,
+                               model_requests=0, files=_files(request.workspace),
+                               recovery=request.recovery)
         # `replayable` means nothing entered a tool, so the attempt is the first one in effect.
         if verdict.action == "continuable":
             history = await continued_messages(store, ref)
             spending = max(ref.budget.remaining, 0) or request.max_requests
         if store is not None and not has_persistence:
             conversation = ref.node
-            resumed.append(_StepPersistence(store=store, agent_name=ref.node,
-                                            run_id=await _next_run_id(store, ref.node)))
+            # **A continuation is a new run**, so the attempt that ends up in the store is this one and
+            # not the one the reference named. Reporting the old id would make the next caller assess
+            # the *previous* attempt — which is settled and already submitted — and start the work over.
+            this_run = await _next_run_id(store, ref.node)
+            resumed.append(_StepPersistence(store=store, agent_name=ref.node, run_id=this_run))
 
     elif recovery_store is not None and not has_persistence:
         # A fresh attempt still records itself, so that a later process can be told about it — and so
@@ -509,4 +533,4 @@ async def run_node(request: NodeRequest, *, model: Any,
 
     return replace(outcome, trace_ref=_write_trace(request.trace, messages, wiring, outcome, formed),
                    recovery=await _reference(recovery_store, request, store, ref,
-                                             spent=outcome.model_requests))
+                                             spent=outcome.model_requests, ran=this_run))

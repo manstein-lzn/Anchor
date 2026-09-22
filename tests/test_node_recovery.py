@@ -143,14 +143,55 @@ def test_every_kill_window_really_reached_its_barrier(killed):
 def test_c1_and_c2_never_ran_the_command(killed):
     """**C1/C2。** 计数器必须是 0：命令确实没有执行 ✓。
 
-    C2 的账本里有 `started`、没有终态 ✓——而 `assess` 仍然返回 `uncertain` ✓，不是「因为看起来只读就
-    重放」✓。
+    两者的**判定不同**，而且这个区别是实测出来的 ✓——取决于屏障注册在 `StepPersistence` 的哪一侧 ✓：
+
+    - **C1** 在 `after_model_request` ✓。框架的 `model_request_completed` 已经写下 ✓，没有任何工具调用
+      开始 ✓ → `replayable` ✓（计划期望的 K1 ✓）。
+    - **C2** 在 `before_tool_execute` ✓。账本里有 `started`、没有终态 ✓ → `uncertain` ✓——**不重放** ✓，
+      不是「看起来只读就重放」✗。
     """
-    for name in ("C1", "C2"):
-        evidence = killed[name]
-        assert evidence["counter_before"] == 0
-        assert evidence["counter_after"] == 0, f"{name} ran the command"
-        assert evidence["verdict"] == "uncertain", f"{name} gave {evidence['verdict']}"
+    assert killed["C1"]["counter_after"] == 0, "C1 ran the command"
+    assert killed["C1"]["verdict"] == "replayable", killed["C1"]["because"]
+    assert "model_request_completed" in killed["C1"]["events"], killed["C1"]["events"]
+
+    assert killed["C2"]["counter_after"] == 0, "C2 ran the command"
+    assert killed["C2"]["verdict"] == "uncertain", killed["C2"]["because"]
+    assert any(status == "started" for _, _, status in killed["C2"]["effects"]), killed["C2"]
+
+
+def test_a1_a_second_process_finishes_the_work_without_repeating_anything(killed):
+    """**A1。** 进程一完成副作用后被 SIGKILL ✓；进程二只拿到恢复引用 ✓，用**同一执行实现**继续到
+    **有效提交** ✓。
+
+    计数器仍是 1 ✓、剩余动作确实执行 ✓、调用数可查 ✓。**只读取 messages 不算恢复成功** ✗——所以这里
+    断言的是一个提交，不是一个历史。
+    """
+    evidence = killed["A1"]
+
+    assert evidence["killed"] is True, "the first process was not killed at C4"
+    assert evidence["barrier"], "the first process never reached its barrier"
+    assert evidence["counter_after"] == 1, (
+        f"the command ran {evidence['counter_after']} times — recovery repeated a settled side effect")
+    assert evidence["verdict"] == "completed", evidence["because"]
+    assert "finished after resuming" in evidence["because"], evidence["because"]
+    assert "1 model request" in evidence["because"], evidence["because"]
+
+
+def test_a2_the_old_snapshot_does_not_cover_a_later_side_effect(killed):
+    """**A2。** 已有**旧的** complete 快照，而之后发生了一个未被它覆盖的副作用 ✓——必须报 `uncertain` ✓，
+    **不能**从旧快照继续并重跑那条命令 ✓。
+
+    这是本包从 03 手里接过的那条：03 说这个窗口不存在 ✗，源码与应用都表明它存在 ✓。
+    """
+    evidence = killed["C5"]
+
+    assert evidence["killed"] is True, "C5 was not killed at its barrier"
+    assert evidence["barrier"], "C5 never reached its barrier"
+    assert evidence["counter_after"] == 2, "both commands should have run"
+    assert "complete" in evidence["snapshot"], "no older complete snapshot was present"
+    assert evidence["verdict"] == "uncertain", (
+        f"continuing from the old snapshot would repeat a settled command: {evidence['because']}")
+    assert "not covered" in evidence["because"], evidence["because"]
 
 
 def test_c3_ran_the_command_and_still_refuses_to_replay(killed):
@@ -222,11 +263,14 @@ def test_c8_the_allowance_is_carried_across_recoveries(killed):
 
 def test_continuing_fetches_history_and_runs_nothing(tmp_path, killed):
     """从 C4 的产物继续：拿得到历史 ✓，而且**不因为「拿历史」就跑任何命令** ✓。"""
-    control = Path(killed["C4"]["control"]) if "control" in killed["C4"] else None
-    if control is None or not (control / "reference").exists():
-        pytest.skip("the C4 evidence does not carry its control directory on this run")
-    ref = RecoveryRef.decode((control / "reference").read_text(encoding="utf-8"))
+    control = Path(killed["C4"]["control"])
     store = open_store(control)
+    # **Derived from the store**, which is where the attempt exists — not from a file written before the
+    # attempt started, which could name a run that never happened.
+    runs = asyncio.run(store.list_runs())
+    assert runs, "the C4 window recorded no run"
+    newest = sorted(runs, key=lambda item: item.started_at)[-1]
+    ref = RecoveryRef(node=newest.agent_name, run=newest.run_id, store=str(control))
     before = _counter(control.parent / "workspace")
 
     messages = asyncio.run(continued_messages(store, ref))
@@ -250,3 +294,23 @@ def _counter(workspace: Path) -> int:
         return int((workspace / "counter.txt").read_text(encoding="utf-8").strip() or 0)
     except (OSError, ValueError):
         return 0
+
+
+def test_a3_the_real_recovery_entry_over_three_kinds_of_reference(killed):
+    """**A3。** 顺序调用**真实恢复入口**三次 ✓，覆盖三类引用 ✓。
+
+    - `uncertain` → 什么都不做 ✓（0 次模型请求 ✓）
+    - `continuable` → 确实继续到提交 ✓
+    - `finished` → 把已有的结果交回 ✓（0 次模型请求 ✓）——**已确认的提交不能重跑** ✓
+
+    这不是把 `assess` 调两次 ✓：每一步都是一个新进程跑节点的入口 ✓，所以量到的是调用方真正会得到的
+    东西 ✓。它抓出两个真 bug ✓：引用曾指向**上一次**的 run ✗（下一次调用会去评估错的那次 ✓）；从历史
+    取回的提交与实时路径报出的**不一致** ✗。
+    """
+    evidence = killed["A3"]
+
+    assert evidence["verdict"] == "no-repeat", evidence["because"]
+    assert "uncertain -> uncertain with 0 model request(s)" in evidence["because"], evidence["because"]
+    assert "continuable -> completed" in evidence["because"], evidence["because"]
+    assert "finished -> completed with 0 model request(s)" in evidence["because"], evidence["because"]
+    assert evidence["counter_after"] == 1, "the command ran more than once across three recoveries"
