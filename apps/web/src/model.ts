@@ -197,7 +197,7 @@ function nodeState(nodeId: string, graph: OurGraph, state: OurRunState | null): 
       kind: nodeKindLabel(graph, nodeId),
       state: status,
       detail,
-      nodeKind: node?.op ? 'op' : 'agent',
+      nodeKind: graph.nodes.find(item => item.id === nodeId)?.op ? 'op' : 'agent',
       // The canvas renders `attempt + 1` as "第 N 次执行", so zero means the first pass.
       attempt: passes ? passes - 1 : undefined,
       statusLabel,
@@ -240,7 +240,6 @@ export function toFlowEdges(graph: OurGraph, state: OurRunState | null): Edge[] 
       target: edge.to,
       type: 'routed',
       style,
-      label: decided ? (selected ? '选中' : '拒绝') : undefined,
       animated: Boolean(selected) && state?.cursor?.node === edge.to,
     } as Edge;
   });

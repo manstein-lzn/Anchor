@@ -1,75 +1,53 @@
-/** The renderer, and mostly the one property that matters about it.
- *
- * What it renders is model output and command output — untrusted text that arrived from a provider, a
- * page on the internet, or a program. The reason this is hand-written rather than a Markdown library is
- * that libraries produce HTML and HTML needs a sanitiser, and a sanitiser is a promise that a parser is
- * correct. These tests hold it to the other arrangement: there is no HTML, so there is nothing to
- * sanitise, and a link that should not be followed is not a link.
- */
-
 import { describe, expect, it } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { Markdown, parse, saferHref } from './markdown';
+import { Markdown, saferHref } from './markdown';
 
 const shown = (text: string) => renderToStaticMarkup(<Markdown text={text} />);
 
-describe('what may be rendered as markup', () => {
-  it('refuses a link that would run a script', () => {
-    const html = shown('[click me](javascript:alert(1))');
-
-    expect(html).not.toContain('javascript:');
-    expect(html).not.toContain('<a ');
-    expect(html).toContain('click me'), 'the words survive; only the link does not';
-  });
-
-  it('refuses the other schemes that are an injection point', () => {
-    for (const url of ['data:text/html,<script>1</script>', 'vbscript:x', 'file:///etc/passwd']) {
-      expect(saferHref(url)).toBeUndefined();
+describe('Markdown documents', () => {
+  it('renders tables, task lists, nested lists, quotes, deletion and reference links', () => {
+    const html = shown('# Title\n\n| Name | Value |\n| :--- | ---: |\n| **A** | 2 |\n\n- [x] done\n- [ ] pending\n  - nested\n\n> quote\n\n~~old~~ [reference][ref]\n\n[ref]: https://example.com');
+    for (const fragment of ['<h1>Title</h1>', '<table>', '<th', '<td', 'text-align:right',
+      'type="checkbox"', 'checked=""', 'nested', '<blockquote>', '<del>old</del>', 'href="https://example.com"']) {
+      expect(html).toContain(fragment);
     }
   });
-
-  it('keeps the ones a trace actually contains', () => {
-    expect(saferHref('https://arxiv.org/abs/2401.1')).toBe('https://arxiv.org/abs/2401.1');
-    expect(saferHref('/runs/1/files/a')).toBe('/runs/1/files/a');
-    expect(saferHref('#anchor')).toBe('#anchor');
+  it('supports fenced and indented code and leaves unterminated fences readable', () => {
+    expect(shown('~~~python\nprint(1)\n~~~')).toContain('hljs');
+    expect(shown('    <b>code</b>')).toContain('&lt;b&gt;code&lt;/b&gt;');
+    expect(shown('```\nstill going')).toContain('still going');
   });
-
-  it('escapes rather than executes what a model wrote', () => {
-    const html = shown('<script>fetch("/steal")</script> and <img onerror=alert(1)>');
-
-    expect(html).not.toContain('<script');
-    expect(html).not.toContain('<img');
-    expect(html).toContain('&lt;script&gt;');
+  it('renders math and preserves Mermaid source while the browser loads its renderer', () => {
+    expect(shown('$x^2$')).toContain('katex');
+    const html = shown('```mermaid\ngraph LR\n A-->B\n```');
+    expect(html).toContain('正在绘制图表');
+    expect(html).toContain('A--&gt;B');
+  });
+  it('connects footnotes to their sanitized identifiers', () => {
+    const html = shown('Text[^a]\n\n[^a]: Footnote');
+    const target = /href="#([^"]+)"/.exec(html)?.[1];
+    expect(target).toBeTruthy();
+    expect(html).toContain(`id="${target}"`);
+  });
+  it('resolves relative images against the document directory', () => {
+    const html = renderToStaticMarkup(<Markdown text="![plot](images/plot.png)"
+      fileBase="/runs/r/files/w/reports/paper.md" />);
+    expect(html).toContain('src="/runs/r/files/w/reports/images/plot.png?download=1"');
   });
 });
 
-describe('the subset it does render', () => {
-  it('fences code and does not read markup inside it', () => {
-    const blocks = parse('before\n\n```sh\ngrep -q x <f>\n```\n\nafter');
-
-    expect(blocks).toEqual([
-      { kind: 'paragraph', text: 'before' },
-      { kind: 'code', lang: 'sh', text: 'grep -q x <f>' },
-      { kind: 'paragraph', text: 'after' },
-    ]);
-    expect(shown('```\n<b>bold</b>\n```')).toContain('&lt;b&gt;');
+describe('untrusted content', () => {
+  it('refuses executable URL schemes while keeping normal links', () => {
+    for (const url of ['javascript:alert(1)', 'data:text/html,x', 'vbscript:x', 'file:///etc/passwd']) {
+      expect(saferHref(url)).toBeUndefined();
+    }
+    expect(shown('[click](javascript:alert%281%29)')).not.toContain('<a ');
+    expect(saferHref('https://example.com')).toBe('https://example.com');
+    expect(saferHref('image.png')).toBe('image.png');
   });
-
-  it('reads headings, lists and inline spans', () => {
-    const blocks = parse('# Title\n\n- one\n- two\n\n1. first');
-
-    expect(blocks[0]).toEqual({ kind: 'heading', level: 1, text: 'Title' });
-    expect(blocks[1]).toEqual({ kind: 'list', ordered: false, items: ['one', 'two'] });
-    expect(blocks[2]).toEqual({ kind: 'list', ordered: true, items: ['first'] });
-    expect(shown('a `code` and **bold** and *italic*'))
-      .toBe('<div class="markdown"><p>a <code>code</code> and <strong>bold</strong> and <em>italic</em></p></div>');
-  });
-
-  it('leaves an unterminated fence as code rather than swallowing the rest as prose', () => {
-    expect(parse('```\nstill going')).toEqual([{ kind: 'code', lang: '', text: 'still going' }]);
-  });
-
-  it('reads a numbered list item as a list, not as a paragraph that starts with a digit', () => {
-    expect(parse('1. first')[0]).toEqual({ kind: 'list', ordered: true, items: ['first'] });
+  it('keeps safe inline HTML while removing scripts and event handlers', () => {
+    const html = shown('<strong>safe</strong><script>alert(1)</script><img src="x" onerror="alert(1)">');
+    expect(html).toContain('<strong>safe</strong>');
+    expect(html).not.toMatch(/<script|onerror|alert\(1\)/);
   });
 });

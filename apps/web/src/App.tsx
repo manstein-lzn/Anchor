@@ -1,18 +1,9 @@
-/** The graph is a document you edit and a run is something you watch.
- *
- * The editing is laid out the way the previous interface laid it out, because that was not the part
- * that needed changing: a library on the left, the canvas in the middle with its toolbars above and
- * below, and an inspector on the right that shows the fields of whatever is selected — a node, an
- * edge, an agent, or the graph itself when nothing is. Adding a node opens a chooser; connecting two
- * is two selects and a button; anything can be opened as JSON in a dialog. None of it needs dragging,
- * and a revision loop is easier to add with two selects than with a gesture.
- *
- * What is gone is what belonged to the previous backend: versions, publishing, the read-only view of
- * a published snapshot, the capability check and the bearer token.
- */
+/** Workbench composition and graph editing. Run inspection and shared dialogs own their local UI
+ * state; the model adapter and canvas layout stay independent of the page. */
 
 import {
-  CheckCheck, Copy, Download, GitBranch, Plus, Redo2, Save, Trash2, Undo2, Upload,
+  Anchor, Activity, CheckCheck, Copy, Download, GitBranch, Plus, Redo2, Save, Trash2, Undo2, Upload,
+  Play, Search, SlidersHorizontal, FolderOpen, PanelLeftClose, PanelRightClose,
 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ExecutionCanvas } from './ExecutionCanvas';
@@ -21,9 +12,10 @@ import { label } from './execution';
 import {
   toFlowEdges, toFlowNodes, type OurAgent, type OurGraph, type OurRun, type OurRunDetail,
 } from './model';
-import { Transcript } from './Transcript';
-import { Files } from './Files';
+import { RunInspector } from './RunInspector';
+import { Workspace } from './Workspace';
 import { api } from './api';
+import { EmptyState, JsonDialog, Modal, ToolButton } from './ui';
 
 const POLL_MS = 3000;
 type Pick = { kind: 'node' | 'edge' | 'agent'; id: string } | null;
@@ -31,41 +23,10 @@ type Pick = { kind: 'node' | 'edge' | 'agent'; id: string } | null;
 
 const when = (iso: string) => (iso ? iso.replace('T', ' ').replace('Z', '') : '');
 
-function ToolButton({ icon: Icon, label: text, ...rest }:
-  { icon: typeof Plus; label: string } & React.ButtonHTMLAttributes<HTMLButtonElement>) {
-  return <button type="button" aria-label={text} title={text} {...rest}><Icon size={16} /></button>;
-}
-
-function Modal({ title, close, children }:
-  { title: string; close: () => void; children: React.ReactNode }) {
-  return (
-    <div className="modal-backdrop" onClick={close}>
-      <div className="modal" onClick={event => event.stopPropagation()}>
-        <header><h2>{title}</h2><button onClick={close}>关闭</button></header>
-        {children}
-      </div>
-    </div>
-  );
-}
-
-function JsonDialog({ title, value, apply, close }:
-  { title: string; value: unknown; apply: (value: unknown) => void; close: () => void }) {
-  const [text, setText] = useState(() => JSON.stringify(value, null, 2));
-  const [error, setError] = useState('');
-  return <Modal title={title} close={close}>
-    <textarea className="json-editor" spellCheck={false} value={text}
-              onChange={event => { setText(event.target.value); setError(''); }} />
-    {error && <p className="notice bad">{error}</p>}
-    <div className="modal-actions">
-      <button onClick={() => {
-        try { apply(JSON.parse(text)); close(); }
-        catch (problem) { setError(`JSON 语法错误：${(problem as Error).message}`); }
-      }}>应用</button>
-    </div>
-  </Modal>;
-}
-
 export function App() {
+  const [search, setSearch] = useState('');
+  const [libraryOpen, setLibraryOpen] = useState(true);
+  const [inspectorOpen, setInspectorOpen] = useState(true);
   const [view, setView] = useState<'graph' | 'runs'>('graph');
   const [graphs, setGraphs] = useState<{ graph: string; running: string | null }[]>([]);
   const [runs, setRuns] = useState<OurRun[]>([]);
@@ -75,24 +36,35 @@ export function App() {
   const [past, setPast] = useState<OurGraph[]>([]);
   const [future, setFuture] = useState<OurGraph[]>([]);
   const [pick, setPick] = useState<Pick>(null);
-  // What the inspector is showing about the selected node: what it said, or what it left behind.
-  const [tab, setTab] = useState<'talk' | 'files'>('talk');
   const [palette, setPalette] = useState(false);
   const [json, setJson] = useState<'graph' | 'node' | 'edge' | 'agent' | null>(null);
   const [connect, setConnect] = useState({ source: '', target: '' });
   const [run, setRun] = useState('');
   const [detail, setDetail] = useState<OurRunDetail | null>(null);
   const [node, setNode] = useState('');
-  const [pass, setPass] = useState('');
   const [notice, setNotice] = useState<{ kind: 'ok' | 'bad'; text: string } | null>(null);
   const [problem, setProblem] = useState('');
   const [busy, setBusy] = useState(false);
   const nameRef = useRef(name); nameRef.current = name;
-  const runRef = useRef(run); runRef.current = run;
   const upload = useRef<HTMLInputElement>(null);
 
   const dirty = doc !== null && JSON.stringify(doc, null, 2) + '\n' !== savedDoc;
   const editable = doc !== null && !busy;
+
+  useEffect(() => {
+    if (!dirty) return;
+    const warn = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ''; };
+    window.addEventListener('beforeunload', warn);
+    return () => window.removeEventListener('beforeunload', warn);
+  }, [dirty]);
+
+  const selectGraph = (next: string) => {
+    if (next === name) return;
+    if (dirty && !window.confirm('当前工作流有未保存的修改，确定切换并放弃修改吗？')) return;
+    setName(next);
+    setRun(runs.find(item => item.graph === next)?.run ?? '');
+    setNode('');
+  };
 
   const refresh = useCallback(async () => {
     try {
@@ -103,10 +75,13 @@ export function App() {
       setGraphs(graphList.graphs);
       setRuns(runList.runs);
       setProblem('');
-      if (!nameRef.current && graphList.graphs.length) setName(graphList.graphs[0].graph);
-      const live = runList.runs.find(item => item.running);
-      if (live && !runRef.current) { setRun(live.run); setName(live.graph); }
-      if (!runRef.current && runList.runs.length) setRun(runList.runs[0].run);
+      if (!nameRef.current) {
+        const initial = runList.runs.find(item => item.running)?.graph ?? graphList.graphs[0]?.graph;
+        if (initial) {
+          setName(initial);
+          setRun(runList.runs.find(item => item.graph === initial)?.run ?? '');
+        }
+      }
     } catch (error) {
       setProblem(`服务未连接：${(error as Error).message}`);
     }
@@ -120,19 +95,24 @@ export function App() {
 
   useEffect(() => {
     if (!name) { setDoc(null); return; }
+    let active = true;
     void api<{ definition: OurGraph }>(`/graphs/${encodeURIComponent(name)}`)
       .then(value => {
+        if (!active) return;
         setDoc(value.definition);
         setSavedDoc(JSON.stringify(value.definition, null, 2) + '\n');
         setPast([]); setFuture([]); setPick(null); setNotice(null);
       })
-      .catch(() => setDoc(null));
+      .catch(() => { if (active) setDoc(null); });
+    return () => { active = false; };
   }, [name]);
 
   useEffect(() => {
     if (!run) { setDetail(null); return; }
-    void api<OurRunDetail>(`/runs/${encodeURIComponent(run)}`).then(setDetail)
-      .catch(() => setDetail(null));
+    let active = true;
+    void api<OurRunDetail>(`/runs/${encodeURIComponent(run)}`).then(value => { if (active) setDetail(value); })
+      .catch(() => { if (active) setDetail(null); });
+    return () => { active = false; };
   }, [run, runs]);
 
   /** Every edit goes through here, which is what makes undo one place instead of thirty. */
@@ -158,12 +138,12 @@ export function App() {
     setNotice({ kind: 'ok', text: '已保存。' });
   });
 
-  // The same call as saving, minus the part that remembers it was saved — the server is the only
-  // thing that knows whether a graph runs, so asking it is the check.
+  // The server validates on PUT; this action also saves and must say so.
   const check = () => perform('校验', async () => {
     if (!doc) return;
     await api(`/graphs/${encodeURIComponent(name)}`, 'PUT', { definition: doc });
-    setNotice({ kind: 'ok', text: '校验通过：这个图能跑。' });
+    setSavedDoc(JSON.stringify(doc, null, 2) + '\n');
+    setNotice({ kind: 'ok', text: '校验通过，工作流已保存。' });
   });
 
   const create = () => perform('新建', async () => {
@@ -234,7 +214,7 @@ export function App() {
     while (doc.nodes.some(item => item.id === id)) id = `${selectedNode.id}-copy${suffix++}`;
     const at = doc.layout?.positions?.[selectedNode.id];
     patch({ ...doc,
-      nodes: [...doc.nodes, { id, agent: selectedNode.agent }],
+      nodes: [...doc.nodes, { ...selectedNode, id }],
       layout: at ? { ...doc.layout,
         positions: { ...doc.layout?.positions, [id]: { x: at.x + 45, y: at.y + 140 } } } : doc.layout });
     setPick({ kind: 'node', id });
@@ -264,15 +244,6 @@ export function App() {
     () => (doc ? toFlowEdges(doc, view === 'runs' ? detail?.state ?? null : null) : []),
     [doc, detail, view]);
 
-  const passes = useMemo(() => {
-    const names = Object.keys(detail?.traces ?? {})
-      .filter(item => item === node || item.startsWith(`${node}-`))
-      .filter(item => item === node || /^\d+$/.test(item.slice(node.length + 1)));
-    return names.sort((a, b) => (a === node ? 0 : Number(a.slice(node.length + 1)))
-                             - (b === node ? 0 : Number(b.slice(node.length + 1))));
-  }, [detail, node]);
-  const shown = passes.includes(pass) ? pass : passes[0] ?? '';
-  const messages = detail?.traces?.[shown] ?? [];
   const entry = doc?.entry ?? '';
   const routing = useMemo(() => {
     if (!doc) return new Set<string>();
@@ -282,30 +253,36 @@ export function App() {
   }, [doc]);
 
   return (
-    <div className="app-shell">
+    <div className={`app-shell ${libraryOpen ? '' : 'hide-library'} ${inspectorOpen ? '' : 'hide-inspector'}`}>
       <header className="topbar">
-        <div className="brand">Anchor</div>
-        <div className="product-switch">
-          <button className={view === 'graph' ? 'chosen' : ''} onClick={() => setView('graph')}>图</button>
-          <button className={view === 'runs' ? 'chosen' : ''} onClick={() => setView('runs')}>运行</button>
-        </div>
-        <select value={name} onChange={event => setName(event.target.value)}>
+        <div className="brand"><span className="brand-mark"><Anchor size={22} /></span>Anchor<span className="brand-caption">WORKSPACE</span></div>
+        <nav className="product-switch" aria-label="工作台">
+          <button aria-pressed={view === 'graph'} className={view === 'graph' ? 'chosen' : ''} onClick={() => setView('graph')}><GitBranch size={15} />图编排</button>
+          <button aria-pressed={view === 'runs'} className={view === 'runs' ? 'chosen' : ''} onClick={() => setView('runs')}><Activity size={15} />运行记录</button>
+        </nav>
+        <select aria-label="当前工作流" value={name} onChange={event => selectGraph(event.target.value)}>
           {graphs.map(item => (
             <option key={item.graph} value={item.graph}>
               {item.graph}{item.running ? '（执行中）' : ''}
             </option>
           ))}
         </select>
-        <button onClick={() => void trigger()} disabled={busy || !name}>触发运行</button>
-        <div className="connection"><span className={`status-dot ${problem ? 'bad' : ''}`} />
-          {problem || '已连接'}
+        <div className="connection" title={problem || '服务已连接'}><span className={`status-dot ${problem ? 'bad' : ''}`} />
+          {problem ? '连接中断' : '服务在线'}
+        </div>
+        <button className="primary" title={dirty ? '请先保存工作流' : '运行已保存的工作流'} onClick={() => void trigger()} disabled={busy || !name || dirty}><Play size={14} fill="currentColor" />运行工作流</button>
+        <div className="panel-toggles">
+          <ToolButton icon={PanelLeftClose} label="切换侧边栏" aria-pressed={libraryOpen} onClick={() => setLibraryOpen(!libraryOpen)} />
+          <ToolButton icon={PanelRightClose} label="切换详情面板" aria-pressed={inspectorOpen} onClick={() => setInspectorOpen(!inspectorOpen)} />
         </div>
       </header>
+      {problem && <div className="connection-error" role="alert">{problem}</div>}
+      {view === 'runs' && notice && <p className={`notice ${notice.kind}`} role="status">{notice.text}</p>}
 
       {view === 'runs' ? (
-        <div className="workspace running">
+        <Workspace running>
           <aside className="runs">
-            <div className="section-heading"><h3>运行历史</h3></div>
+            <div className="section-heading"><h3><Activity size={15} />运行历史</h3><span className="count">{runs.filter(item => item.graph === name).length}</span></div>
             {runs.filter(item => !name || item.graph === name).map(item => (
               <button key={`${item.graph}-${item.run}`}
                       className={`run-row ${item.run === run ? 'chosen' : ''}`}
@@ -315,12 +292,14 @@ export function App() {
                 <span className={`pill ${item.status}`}>
                   {item.running ? '执行中' : label(item.status)}
                 </span>
-                <span className="run-nodes">{item.executed.length} 步</span>
+                <span className="run-nodes">{item.objective || '未设置目标'}</span>
+                <span className="run-meta">{item.executed.length} 步执行 · {item.run}</span>
               </button>
             ))}
-            {!runs.length && <p className="hint">还没有运行过。</p>}
+            {!runs.some(item => item.graph === name) && <EmptyState icon={Activity} title="还没有运行记录">运行这个工作流后，可以在这里追踪每一步。</EmptyState>}
           </aside>
           <main className="main">
+            <div className="document-header"><div className="document-title"><span className="eyebrow">EXECUTION</span><h2>{name || '运行概览'}</h2></div><span className="hint">每一步，都有迹可循</span></div>
             <div className="canvas-head">
               {detail ? <>
                 <span className={`pill ${detail.state.status}`}>
@@ -347,49 +326,31 @@ export function App() {
               </> : <span className="hint">选一次运行，或触发一次。</span>}
             </div>
             <ExecutionCanvas instanceKey={`run-${name}-${run}`} nodes={nodes} edges={edges}
-                             onSelectNode={id => { setNode(id); setPass(''); }} />
+                             onSelectNode={id => { setNode(id); setInspectorOpen(true); }} />
+            <div className="canvas-bottom"><span className="legend"><i className="dot running" />执行中<i className="dot finished" />已完成<i className="dot failed" />失败</span><span className="canvas-caption">点击节点查看对话与产物</span></div>
           </main>
-          <aside className="inspector">
-            <div className="section-heading">
-              <h3>{node || '节点'}</h3>
-              {node && <div className="product-switch inspector-tabs">
-                <button className={tab === 'talk' ? 'chosen' : ''}
-                        onClick={() => setTab('talk')}>对话</button>
-                <button className={tab === 'files' ? 'chosen' : ''}
-                        onClick={() => setTab('files')}>文件</button>
-              </div>}
-            </div>
-            {node && tab === 'files' && <Files run={run} node={node} />}
-            {(!node || tab === 'talk') && <>
-            {passes.length > 1 && <div className="passes">
-              {passes.map((item, index) => (
-                <button key={item} className={item === shown ? 'chosen' : ''}
-                        onClick={() => setPass(item)}>第 {index + 1} 轮</button>
-              ))}
-            </div>}
-            {!node && <p className="hint">点一个节点看它说过什么、执行过什么。</p>}
-            {node && !messages.length && <p className="hint">这次运行里它还没有留下消息。</p>}
-            <Transcript messages={messages} />
-            </>}
-          </aside>
-        </div>
+          <RunInspector key={`${run}/${node}`} run={run} node={node} detail={detail} />
+        </Workspace>
       ) : (
-        <div className="workspace">
+        <Workspace>
           <aside className="library">
-            <div className="section-heading"><h3>图库</h3></div>
+            <div className="section-heading"><h3><FolderOpen size={15} />工作流</h3><span className="count">{graphs.length}</span></div>
+            <label className="search-field"><Search size={15} /><input aria-label="搜索工作流" placeholder="搜索工作流…" value={search} onChange={event => setSearch(event.target.value)} /></label>
             <button className="new-graph" onClick={() => void create()} disabled={busy}>
               <Plus size={16} />新建图
             </button>
             <div className="library-list">
-              {graphs.map(item => (
+              {graphs.filter(item => item.graph.toLowerCase().includes(search.toLowerCase())).map(item => (
                 <button key={item.graph}
                         className={`library-row ${item.graph === name ? 'chosen' : ''}`}
-                        onClick={() => setName(item.graph)}>
-                  <span className="library-name">{item.graph}</span>
+                        onClick={() => selectGraph(item.graph)}>
+                  <GitBranch size={16} /><span className="library-name" title={item.graph}>{item.graph}</span>
                   {item.running && <span className="pill running">执行中</span>}
                 </button>
               ))}
             </div>
+            {!graphs.length && <EmptyState icon={GitBranch} title="从一个想法开始">新建工作流，连接你的第一个节点。</EmptyState>}
+            {graphs.length > 0 && !graphs.some(item => item.graph.toLowerCase().includes(search.toLowerCase())) && <p className="hint">没有匹配的工作流。</p>}
             <div className="library-footer">
               <input ref={upload} type="file" accept="application/json,.json" hidden
                      aria-label="导入 Graph JSON"
@@ -418,13 +379,14 @@ export function App() {
           <main className="main">
             <div className="document-header">
               <div className="document-title">
+                <span className="eyebrow">WORKFLOW / EDITOR</span>
                 <h2>{name || '未选择图'}</h2>
-                {dirty && <span className="document-state">有未保存的改动</span>}
+                <span className={`document-state ${dirty ? 'unsaved' : ''}`}>{dirty ? '● 未保存' : doc ? '所有更改已保存' : '选择或创建工作流'}</span>
               </div>
               <div className="document-actions">
                 <button disabled={!editable} onClick={() => void check()}>
-                  <CheckCheck size={16} />校验</button>
-                <button disabled={!editable || !dirty} onClick={() => void save()}>
+                  <CheckCheck size={16} />校验并保存</button>
+                <button className="primary" disabled={!editable || !dirty} onClick={() => void save()}>
                   <Save size={16} />保存</button>
               </div>
             </div>
@@ -453,7 +415,7 @@ export function App() {
             <div className="canvas">
               {doc
                 ? <GraphCanvas graph={doc} name={name} editable={editable}
-                               onPick={setPick}
+                               onPick={value => { setPick(value); if (value) setInspectorOpen(true); }}
                                onMove={(id, position) => patch({ ...doc,
                                  layout: { ...doc.layout,
                                    positions: { ...doc.layout?.positions, [id]: position } } })}
@@ -463,10 +425,11 @@ export function App() {
                                  }
                                  patch({ ...doc, edges: [...doc.edges, { from, to }] });
                                }} />
-                : <p className="hint canvas-empty">选一个图，或者新建一个。</p>}
+                : <EmptyState icon={GitBranch} title="编排你的下一个工作流">从左侧选择一个工作流，或新建图开始连接节点。</EmptyState>}
             </div>
 
             <div className="canvas-bottom">
+              <span className="canvas-help">拖动节点 · 连接端点 · 滚轮缩放</span>
               <span className="canvas-caption">
                 graph.json · {doc?.nodes.length ?? 0} 个节点 · {doc?.edges.length ?? 0} 条边 ·{' '}
                 {Object.keys(doc?.agents ?? {}).length} 个角色
@@ -475,11 +438,11 @@ export function App() {
           </main>
 
           <aside className="inspector">
-            <div className="section-heading"><h3>属性</h3></div>
+            <div className="section-heading"><h3><SlidersHorizontal size={15} />{pick ? '选中项属性' : '工作流设置'}</h3></div>
             <fieldset disabled={!editable}>
               {selectedNode && doc && <>
                 <div className="inspector-kind">
-                  节点 · {selectedNode.graph ? `模块 ${selectedNode.graph}` : selectedNode.agent}
+                  节点 · {selectedNode.graph ? `模块 ${selectedNode.graph}` : selectedNode.op ?? selectedNode.agent}
                 </div>
                 <label>节点 ID
                   <input value={selectedNode.id} maxLength={64}
@@ -590,7 +553,7 @@ export function App() {
 
               {!pick && doc && <>
                 <label>目标
-                  <textarea value={doc.objective ?? ''} maxLength={2000}
+                  <textarea aria-label="目标" value={doc.objective ?? ''} maxLength={2000}
                             onChange={event => patch({ ...doc, objective: event.target.value })} />
                 </label>
                 <label>入口节点
@@ -648,7 +611,7 @@ export function App() {
               {pick ? `已选中 ${pick.kind} ${pick.id}` : '未选中 · 显示图本身的字段'}
             </div>
           </aside>
-        </div>
+        </Workspace>
       )}
 
       {palette && doc && <Modal title="添加节点" close={() => setPalette(false)}>

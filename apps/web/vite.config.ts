@@ -8,8 +8,9 @@ export default defineConfig({
     port: 5173,
     strictPort: true,
     proxy: {
-      '/api': { target: process.env.ANCHOR_WEB_API_URL || 'http://127.0.0.1:8090', changeOrigin: true },
-      '/health': { target: process.env.ANCHOR_WEB_API_URL || 'http://127.0.0.1:8090', changeOrigin: true },
+      '/graphs': { target: process.env.ANCHOR_WEB_API_URL || 'http://127.0.0.1:8077', changeOrigin: true },
+      '/runs': { target: process.env.ANCHOR_WEB_API_URL || 'http://127.0.0.1:8077', changeOrigin: true },
+      '/trigger': { target: process.env.ANCHOR_WEB_API_URL || 'http://127.0.0.1:8077', changeOrigin: true },
     },
   },
 });

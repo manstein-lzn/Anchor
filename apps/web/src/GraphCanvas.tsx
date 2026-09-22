@@ -16,7 +16,7 @@ import {
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import { useEffect, useMemo, useRef } from 'react';
-import { Bot, Terminal } from 'lucide-react';
+import { Bot, Terminal, Layers } from 'lucide-react';
 import { RoutedEdge } from './RoutedEdge';
 import { layeredLayout } from './graph';
 import { kindOf, type OurGraph } from './model';
@@ -25,16 +25,16 @@ export type AnchorNode = Node<{ label: string; agent: string; entry: boolean;
                                   kind: 'agent' | 'op' | 'subgraph' }, 'anchor'>;
 
 function AnchorNodeView({ data, selected }: NodeProps<AnchorNode>) {
-  return <div className={`graph-node ${selected ? 'selected' : ''}`}>
+  return <div className={`graph-node kind-${data.kind} ${selected ? 'selected' : ''}`}>
     <Handle type="target" position={Position.Left} />
     <div className="node-kind">
       {/* Three shapes, because there are three as written. An op is a command and no model, so a
           picture that said only "node" would be saying the one thing that is not true of it. */}
-      {data.kind === 'op' ? <Terminal size={15} /> : <Bot size={15} />}
-      <span>{data.kind === 'subgraph' ? '模块' : data.kind === 'op' ? 'Op' : '节点'}</span>
+      {data.kind === 'op' ? <Terminal size={15} /> : data.kind === 'subgraph' ? <Layers size={15} /> : <Bot size={15} />}
+      <span>{data.kind === 'subgraph' ? '子图模块' : data.kind === 'op' ? '命令 · OP' : '智能体 · AGENT'}</span>
       {data.entry && <span className="entry-tag">入口</span>}
     </div>
-    <strong>{data.label}</strong>
+    <strong title={data.label}>{data.label}</strong>
     <span className="node-reference">{data.agent}</span>
     <Handle type="source" position={Position.Right} />
   </div>;
@@ -91,7 +91,8 @@ function Inner({ graph, name, editable, onMove, onConnect, onPick }:
     const key = `${name}:${graph.nodes.length}`;
     if (fitted.current === key) return;
     fitted.current = key;
-    window.setTimeout(() => void flow.fitView({ padding: 0.25, maxZoom: 1 }), 60);
+    const timer = window.setTimeout(() => void flow.fitView({ padding: 0.08, maxZoom: 1 }), 60);
+    return () => { window.clearTimeout(timer); fitted.current = ''; };
   }, [name, graph.nodes.length, flow]);
 
   const handleConnect = (connection: Connection) => {

@@ -49,7 +49,7 @@ function FitExecution({ container }: { container: RefObject<HTMLDivElement | nul
         const area = element.getBoundingClientRect();
         const nodes = flow.getNodes();
         if (nodes.length && area.width > 0 && area.height > 0) void flow.setViewport(
-          getViewportForBounds(flow.getNodesBounds(nodes), area.width, area.height, 0.1, 1, 0.15));
+          getViewportForBounds(flow.getNodesBounds(nodes), area.width, area.height, 0.1, 1, 0.08));
       }, 100);
     };
     const observer = new ResizeObserver(fit);
@@ -84,7 +84,7 @@ function MeasuredExecutionCanvas({ nodes, edges, onSelectNode, controls }: Canva
     controls.current = {
       zoomIn: () => void flow.zoomIn(),
       zoomOut: () => void flow.zoomOut(),
-      fitView: () => void flow.fitView({ padding: 0.25, maxZoom: 1 }),
+        fitView: () => void flow.fitView({ padding: 0.08, maxZoom: 1 }),
     };
     return () => { controls.current = null; };
   }, [controls, flow]);
@@ -108,7 +108,7 @@ function MeasuredExecutionCanvas({ nodes, edges, onSelectNode, controls }: Canva
       nodesConnectable={false}
       deleteKeyCode={null}
       fitView
-      fitViewOptions={{ padding: 0.15, maxZoom: 1 }}
+      fitViewOptions={{ padding: 0.08, maxZoom: 1 }}
       minZoom={0.1}
       onNodeClick={(_, value) => onSelectNode(value.id)}
     >
