@@ -202,6 +202,11 @@ def _capture(spec: SandboxSpec, argv: list[str], staging: Path) -> tuple[
     staged: dict[str, Path] = {}
     sizes: dict[str, int] = {}
     written: dict[str, int] = {}
+    # **Two threads share the budget, so it needs a lock.** Each stream's reader took `sum(written)` and
+    # added to it without one: both could read the same total and both spend it, which is how the same
+    # test passed three times and failed once. The dictionaries are small and the critical section is
+    # three arithmetic operations, so the lock costs nothing worth measuring.
+    lock = threading.Lock()
     process = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env={})
     assert process.stdout is not None and process.stderr is not None
 
@@ -212,12 +217,16 @@ def _capture(spec: SandboxSpec, argv: list[str], staging: Path) -> tuple[
                 chunk = pipe.read(1 << 16)
                 if not chunk:
                     break
-                sizes[name] = sizes.get(name, 0) + len(chunk)
-                room = max(keep - sum(written.values()), 0)
-                if room > 0:
-                    piece = chunk[:room]
+                with lock:
+                    sizes[name] = sizes.get(name, 0) + len(chunk)
+                    room = max(keep - sum(written.values()), 0)
+                    piece = chunk[:room] if room > 0 else b""
+                    if piece:
+                        written[name] = written.get(name, 0) + len(piece)
+                # Written outside the lock: the file belongs to this thread alone, and holding the lock
+                # across a disk write would serialise the two streams for no reason.
+                if piece:
                     handle.write(piece)
-                    written[name] = written.get(name, 0) + len(piece)
         staged[name] = path
 
     threads = [threading.Thread(target=drain, args=(name, pipe), daemon=True)
@@ -231,8 +240,13 @@ def _capture(spec: SandboxSpec, argv: list[str], staging: Path) -> tuple[
         process.kill()
         process.wait()
         returncode, timed_out = 124, True
+    # **Waited for, without closing anything and without a short timeout.** A reader ends when its pipe
+    # reaches end of file, which happens when the process is gone; closing the pipe instead discards
+    # whatever is still buffered in it — and that was measured, as a result whose stdout was empty, a
+    # digest that differed between identical runs, and a spill that never happened. All three were the
+    # same mistake: the data was thrown away on the way out.
     for thread in threads:
-        thread.join(timeout=5)
+        thread.join()
     lost = sum(sizes.values()) - sum(written.values())
     return staged, {name: sizes.get(name, 0) for name in ("stdout", "stderr")}, lost, returncode, \
         timed_out

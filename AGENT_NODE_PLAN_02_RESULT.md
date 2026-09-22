@@ -47,8 +47,8 @@ remember(capabilities, task, instructions, routes, workspace)   ← 开工前写
 
 | | |
 | --- | --- |
-| 本包测试 | **50 passed**（B1–B10 + R1–R5 + 判定器规则正反例 + T1–T3）|
-| 全量 `tests/` | **195 passed**，无 skip |
+| 本包测试 | **51 passed**（B1–B10 + R1–R5 + 判定器规则正反例 + T1–T3）|
+| 全量 `tests/` | **196 passed**，无 skip，连续 11 次稳定 |
 | `ruff` / `mypy` | 通过（25 个源文件）|
 | 环境 | Python 3.12.3 · Linux 7.0.0-31-generic x86_64 · bubblewrap 0.9.0 |
 | 依赖 | `pydantic-ai-slim==2.46.0`、`pydantic-ai-harness==0.32.0` |
@@ -640,12 +640,18 @@ instructions/schema ✗——**固定余量不能声称覆盖任意实际指令*
 **复核确认**：`before_model_request` 只存 `arriving` 的数量 ✗——仅凭 `record.jsonl` **无法还原「模型被
 要求做什么」** ✓。
 
-**修法**：`Watching.remember_input` + `remember(capabilities, task, instructions, routes, workspace)` ✓
-在开工前**写一次**：`execution`（task / instructions / routes / workspace）与 `tools`（名字与说明）✓。
+**修法（前半）**：`Watching.remember_input` + `remember(capabilities, task, instructions, routes,
+workspace)` ✓ 在开工前**写一次**：`execution`（task / instructions / routes / workspace）与 `tools` ✓。
 **只写一次**而不是每轮重复整段历史 ✓。
 
-**回归**：唯一标记的任务与指令都能从记录取回 ✓，且 `execution` 只出现一次 ✓（不重复写）✓；JSON 字符串形
-式的参数能从追加的 `model_response` 里**完整**取回 ✓。
+**修法（后半：实际上下文引用）**：每轮的 `arriving` 现在多一个对**实际到达的历史**的 sha256 摘要 ✓——
+同样长度的两段对话是同一个数字，计数无法关联 ✗；第一轮另存**历史本身一次** ✓（那一轮没被任何压缩动过）✓，
+以后各轮只留摘要 ✓，不重复整段历史 ✓。
+
+**回归**：唯一标记的任务与指令都能从记录取回 ✓，且 `execution` 只出现一次 ✓；JSON 字符串参数能从追加的
+`model_response` 里**完整**取回 ✓；`test_t3_the_record_holds_a_reference_to_the_history_that_was_sent`
+断言每轮都有摘要、初始上下文只写一次、**并用保存的历史重算摘要，必须与当轮记录的值相同** ✓（可关联，
+而不是「有个字段」✓）。
 
 ### 9.4 T4：实验判定与结论范围 —— 已修
 
@@ -663,12 +669,24 @@ instructions/schema ✗——**固定余量不能声称覆盖任意实际指令*
 **结论范围**：首页已按此改写 ✓——只说「在这些具体条件下，`constraint` 与 `tail` 在两臂每次尝试里都成立」✓，
 **不再声称「两臂没有可测量差异」** ✓，也不从少量样本推断性能因果 ✓。
 
-### 9.5 本轮状态
+### 9.5 顺带发现并修掉的一处竞态
+
+补 T3 后半时加的两处收尾各自引入/暴露了问题，都是**测试抓到的**：
+
+- 两条读取流**共享调用方预算**，却各自 `sum(written)` 再相加 ✗——两个线程可能读到同一个总数、各自花掉
+  它 ✓。加锁 ✓（临界区只有三次算术，文件写入留在锁外 ✓）。
+- 更严重的是我自己加的：超时后**先 `stream.close()` 再 join** ✗——**关掉管道会丢掉里面还缓冲着的数据** ✓。
+  症状是三个不同测试轮流失败 ✓：`stdout` 空、同样内容两次摘要不同、沙箱根本没落盘 ✓——同一个错误：
+  数据在出口被扔掉了 ✓。进程已经死了，管道会自然 EOF，**根本不需要关** ✓；join 也不该有短超时 ✓。
+
+改完**连续 11 次全量干净通过** ✓（此前约 5 次里失败 2 次 ✓）。
+
+### 9.6 本轮状态
 
 | | |
 | --- | --- |
-| 本包测试 | **50 passed** |
-| 全量 `tests/` | **195 passed**，无 skip |
+| 本包测试 | **51 passed** |
+| 全量 `tests/` | **196 passed**，无 skip，连续 11 次稳定 |
 | `ruff` / `mypy` | 通过（25 个源文件）|
 | 真实实验 | **未新增任何付费样本** ✓；三组已有产物用最终判定器重新判定 ✓ |
 | 共享层 patch | 待主集成复核 ✓ |

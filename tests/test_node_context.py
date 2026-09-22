@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -1524,3 +1525,44 @@ def test_t4_every_task_says_what_needs_a_person():
     for name, spec in judge.TASKS.items():
         assert spec.get("human_review"), f"{name} 没有标出需要人工核验的部分"
         assert isinstance(spec["human_review"], list)
+
+
+def test_t3_the_record_holds_a_reference_to_the_history_that_was_sent(tmp_path):
+    """**T3 的后半：实际上下文引用。**
+
+    每轮只记数量是不够的——同样长度的两段对话是同一个数字 ✗。现在每轮有一个对**实际到达的历史**的摘要，
+    第一轮还留有历史本身一次（那一轮没有被任何压缩动过）。
+    """
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    record = Record(tmp_path / "record")
+    task = "TASK-FOR-THE-CONTEXT-REFERENCE"
+
+    outcome = asyncio.run(run_node(
+        request(workspace, task=task), model=Counting(*[[noisy(200)] for _ in range(4)]),
+        capabilities=context_capabilities(small_budget(), record=record)))
+
+    assert outcome.status == COMPLETED, outcome.reason
+    entries = [json.loads(line) for line in (record.directory / "record.jsonl").read_text(
+        encoding="utf-8").splitlines()]
+
+    arriving = [item for item in entries if item.get("kind") == "arriving"]
+    assert arriving, "没有记录到达的历史"
+    assert all(re.fullmatch(r"[0-9a-f]{16}", item.get("sha256", "")) for item in arriving), \
+        f"到达的记录没有可关联的摘要: {arriving[:2]}"
+
+    # 第一轮的完整历史留了一次，从那以后只有摘要——不重复整段历史。
+    initial = [item for item in entries if item.get("kind") == "initial_context"]
+    assert len(initial) == 1, f"初始上下文写了 {len(initial)} 次"
+    rendered = json.dumps(initial[0], ensure_ascii=False)
+    assert task in rendered, "初始上下文里没有任务本身"
+
+    # **而且这个摘要是可核对的**：用同一段历史重算，必须得到同一个值。
+    from pydantic_ai.messages import ModelMessagesTypeAdapter
+    from anchor.node.context import _messages_json
+    import hashlib
+    recomputed = hashlib.sha256(
+        _messages_json(ModelMessagesTypeAdapter.validate_python(initial[0]["messages"]))
+        .encode("utf-8")).hexdigest()[:16]
+    assert recomputed == arriving[0]["sha256"], \
+        "第一轮的摘要与它自己保存的历史对不上，记录不可关联"

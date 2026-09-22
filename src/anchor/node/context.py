@@ -316,10 +316,19 @@ class Watching(AbstractCapability):
         # place the exact history is visible, and its size over the pass is what B1 is about.
         self._ask_the_sandbox_to_keep_what_it_would_cut(ctx)
         messages = list(getattr(request_context, "messages", ()) or ())
+        # **A reference to the history that actually arrived**, not just its size. §T3 wants the record
+        # to reach "what was the model asked to do", and counts cannot: two different conversations of
+        # the same length are one number. Every round gets a digest of the exact messages — cheap, and
+        # enough to correlate a round with anything else that recorded the same history — and the first
+        # round gets the messages themselves, once, because that is the one no compaction has touched.
+        payload = _messages_json(messages)
         item = {"request": len(self.record.arriving) + 1, "messages": len(messages),
-                "tokens": estimate_tokens(messages)}
+                "tokens": estimate_tokens(messages),
+                "sha256": hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]}
         self.record.arriving.append(item)
         self.record.note("arriving", **item)
+        if len(self.record.arriving) == 1:
+            self.record.note("initial_context", messages=json.loads(payload))
         return request_context
 
     def _ask_the_sandbox_to_keep_what_it_would_cut(self, ctx: Any) -> None:
@@ -663,6 +672,18 @@ def _replace_messages(request_context: Any, messages: list[ModelMessage]) -> Any
     """
     from dataclasses import replace
     return replace(request_context, messages=messages)
+
+
+def _messages_json(messages: list[ModelMessage]) -> str:
+    """The history as JSON, through the framework's own adapter.
+
+    Its shape is the framework's business, so the encoding is asked for rather than guessed — a guess
+    here would break on an upgrade without saying so, and the record would silently stop describing
+    what was sent.
+    """
+    from pydantic_ai.messages import ModelMessagesTypeAdapter
+    return json.dumps(ModelMessagesTypeAdapter.dump_python(messages, mode="json"),
+                      ensure_ascii=False, default=str)
 
 
 def _overhead(request_context: Any) -> int:
