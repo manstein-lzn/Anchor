@@ -159,13 +159,13 @@ def _run_mini(spec: dict, workspace: Path, config_path: str):
     — is the real one, and it is handed the same task text the other arm gets.
     """
     import json as _json
-    from anchor.simple import run as runner
+    from anchor.simple.run import run as run_graph
     (workspace / "graph.json").write_text(_json.dumps({
         "entry": "only", "objective": spec["task"],
         "agents": {"w": {"model": "models.deepseek", "writes": ["*"]}},
         "nodes": [{"id": "only", "agent": "w"}], "edges": [],
     }), encoding="utf-8")
-    state = runner.run(workspace, config_path=config_path)
+    state = run_graph(workspace, config_path=config_path)
     node = state.nodes.get("only", {})
     return (NodeOutcome(status="completed" if state.status == "finished" else state.status,
                         submission=node.get("submission", ""), route=None,
