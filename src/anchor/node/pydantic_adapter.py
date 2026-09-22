@@ -45,7 +45,7 @@ from pathlib import Path
 from typing import Any
 
 from pydantic_ai import Agent, ModelRequestNode, RunContext, UsageLimits
-from pydantic_ai.messages import ModelMessagesTypeAdapter
+from pydantic_ai.messages import ModelMessagesTypeAdapter, ModelRequest
 from pydantic_ai.models.wrapper import WrapperModel
 from pydantic_ai.exceptions import ModelRetry, UsageLimitExceeded
 
@@ -55,10 +55,6 @@ from anchor.runtime.execenv import Executed, NodeSandbox
 #: The two commands that finish a node, and the exact strings they print. Both are the runtime's
 #: existing protocol, not this adapter's: `done/__main__.py` and `route/__main__.py` print them, and
 #: the mini path recognises the same two.
-#: How much of one command's output the record keeps. Generous, because an ordinary command's output
-#: is the evidence a failure is read from — and bounded, because a node can read a large file.
-TAIL_OUTPUT = 20000
-
 DONE_SENTINEL = "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
 ROUTE_SENTINEL = "ANCHOR_ROUTE:"
 
@@ -232,7 +228,7 @@ def _bash(ctx: RunContext[_Wiring], command: str) -> str:
 
 
 def build_agent(model: Any, *, instructions: str = "",
-                max_retries: int = 60) -> Agent[_Wiring, str]:
+                max_retries: int = 60, capabilities: tuple[Any, ...] = ()) -> Agent[_Wiring, str]:
     """One Agent per execution, with one tool and no room for a second.
 
     `output_type=str` with a validator that always refuses is not a completion mechanism — the tool
@@ -244,6 +240,9 @@ def build_agent(model: Any, *, instructions: str = "",
     """
     agent: Agent[_Wiring, str] = Agent(
         model,
+        # Where a later package's capabilities attach — context compaction, step persistence. A seam
+        # rather than a hook list, so what a node's runner is made of stays in one place.
+        capabilities=list(capabilities),
         # **Not `end_strategy='early'`.** Under it a function tool runs only when every *output* tool
         # has failed — and there is no output tool here, so nothing would ever run. `'early'` is the
         # right setting for the design this one replaced, where the tool *was* the output tool; with an
@@ -273,7 +272,7 @@ def build_agent(model: Any, *, instructions: str = "",
 
 
 def _write_trace(path: Path | None, messages: list[Any], wiring: _Wiring | None,
-                 outcome: NodeOutcome) -> str:
+                 outcome: NodeOutcome, formed: Any = None) -> str:
     """The record: what the model was told, what it called, what came back, and why it stopped.
 
     Written whole rather than projected. A readable summary would be nicer and would throw away the
@@ -286,7 +285,17 @@ def _write_trace(path: Path | None, messages: list[Any], wiring: _Wiring | None,
     # Through the library's own adapter rather than a hand-rolled encoder: the messages are a tagged
     # union whose exact shape is the framework's business, and a shape guessed here is a shape that
     # breaks on an upgrade without saying so.
-    encoded = ModelMessagesTypeAdapter.dump_python(messages, mode="json") if messages else []
+    # **The batch the loop left on.** A pass that submits leaves at the node whose *running* would put
+    # its last batch into the message history — but that node is constructed with the results already
+    # in it, so they are readable without running it and without asking the model anything. Read, not
+    # re-executed: this is the framework's own `ToolReturnPart`s, with their `tool_call_id`s, so the
+    # record can be correlated and the batch is complete.
+    recorded = list(messages)
+    if formed is not None:
+        parts = list(getattr(formed, "parts", ()) or ())
+        if parts:
+            recorded.append(ModelRequest(parts=parts))
+    encoded = ModelMessagesTypeAdapter.dump_python(recorded, mode="json") if recorded else []
     with path.open("w", encoding="utf-8") as handle:
         for message in encoded:
             handle.write(json.dumps(message, ensure_ascii=False, default=str) + "\n")
@@ -300,9 +309,11 @@ def _write_trace(path: Path | None, messages: list[Any], wiring: _Wiring | None,
             "role": "exit", "content": outcome.reason or outcome.submission,
             "extra": {"status": outcome.status, "route": outcome.route,
                       "submission": outcome.submission, "model_requests": outcome.model_requests,
+                      # The full output, uncapped. The sandbox already bounds what one command may
+                      # produce; a second, smaller bound here would drop evidence that was inside the
+                      # bound it was allowed — silently, which is the part that made it a defect.
                       "commands": [] if wiring is None else
-                                  [{"command": c, "returncode": r, "first_line": f,
-                                    "output": (o or "")[:TAIL_OUTPUT]}
+                                  [{"command": c, "returncode": r, "first_line": f, "output": o}
                                    for c, r, f, o in wiring.ran]},
         }, ensure_ascii=False) + "\n")
     return str(path)
@@ -316,7 +327,8 @@ def _files(workspace: Path) -> tuple[str, ...]:
         if item.is_file() and ".git" not in item.relative_to(workspace).parts))
 
 
-async def run_node(request: NodeRequest, *, model: Any) -> NodeOutcome:
+async def run_node(request: NodeRequest, *, model: Any,
+                   capabilities: tuple[Any, ...] = ()) -> NodeOutcome:
     """Run one node to a result. The entry point the Graph would call.
 
     The model is a parameter rather than something built here: which provider, and whether there is a
@@ -331,11 +343,13 @@ async def run_node(request: NodeRequest, *, model: Any) -> NodeOutcome:
     """
     counted = _CountingModel(model)
     agent = build_agent(counted, instructions=request.instructions,
-                        max_retries=request.max_requests)
+                        max_retries=request.max_requests, capabilities=capabilities)
     limits = UsageLimits(request_limit=request.max_requests)
     wiring: _Wiring | None = None
     run: Any = None
     messages: list[Any] = []
+    #: The last batch's already-formed results, read off the node the pass left on.
+    formed: Any = None
     try:
         wiring = _Wiring(sandbox=NodeSandbox(
             tree=request.workspace, node_id=request.roles or request.execution_id,
@@ -355,6 +369,7 @@ async def run_node(request: NodeRequest, *, model: Any) -> NodeOutcome:
                 # exactly the one to leave on: a submission is already in hand, so asking again is the
                 # thing this is here to prevent.
                 if isinstance(node, ModelRequestNode) and wiring.done is not None:
+                    formed = node.request
                     break
 
         messages = list(run.all_messages())
@@ -381,4 +396,5 @@ async def run_node(request: NodeRequest, *, model: Any) -> NodeOutcome:
             status=FAILED, model_requests=counted.requests,
             reason=f"{type(exc).__name__}: {exc}", files=_files(request.workspace))
 
-    return replace(outcome, trace_ref=_write_trace(request.trace, messages, wiring, outcome))
+    return replace(outcome,
+                   trace_ref=_write_trace(request.trace, messages, wiring, outcome, formed))

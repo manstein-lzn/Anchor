@@ -1,20 +1,65 @@
 # 第一包实施结果：PydanticAI Node 最小适配与控制流验证
 
-状态：实施完成，可审阅。**本包结论不等于迁移决策**——按计划第 8 节，只有主验收 Agent 复核并通过
-完成语义、真实沙箱、图集成三项后，此入口才冻结给第二、三包并行使用。
+状态：实施完成，两轮修订已按主验收记录（`AGENT_NODE_PLAN_01_ACCEPTANCE.md`）处理。**本包结论不等于
+迁移决策**，入口的冻结由主验收 Agent 决定。
 
-**结论一句话：PydanticAI 能保住 Anchor 的五条执行语义，只用公开 API，而且不复用任何框架的终止特性
-——`bash` 是普通函数工具，停止由两处自己做（工具内的完成状态检查 + 公开迭代边界），三条要求同时成立。
-这修正了本报第二轮的结论，见 §5.9。**
+## 0. 最终实现摘要
 
-> **第二轮修订（审阅后）。** 审阅指出四处基础问题，已全部修复并补测试：请求计数在失败路径上错误
-> （§5.7）、失败时完整对话记录丢失（§5.7）、沙箱构造与探针在异常处理之外（§5.7）、真实图只验证了
-> 直线（§4 的 A12b）。
->
-> **第三轮修订。** 第二轮把「`ToolOutput + ModelRetry` 会让 Harness 压缩失明」报为需主验收 Agent
-> 决定的首要问题，并称「三个要求不可兼得」。**这个结论是错的**，审阅给出了正确设计：`bash` 保持普通
-> 函数工具，停止由工具内的完成状态检查 + 公开迭代边界完成。已按此重写并通过全部验收（§5.9）。
-> §5.6 保留原样，作为「为什么不是那条路」的记录。
+**第二、三包请从这里开始读。** 本文件后半部分是历史——被否定的方案、走错的路、旧计数——保留它是为了
+说明为什么是现在这个形状，**不要按它们理解入口**。
+
+### 设计：`bash` 是普通函数工具，停止由 Node 自己做
+
+不复用任何框架的终止特性。四小块：
+
+1. **普通命令正常返回** —— `ToolReturnPart`，带 `tool_call_id`；这是记录与 Harness 上下文机制都认的形态。
+2. **识别提交后把完成结果存在节点状态里**（`_Wiring.done`）——命令本身不需要 run 在那里结束。
+3. **同响应后续调用即使被框架派发，也在进入沙箱前检查完成状态并跳过** —— 计划 A4 的要求是「必须观察
+   实际副作用」；**框架处理了后续调用，不等于后续命令必须执行**。
+4. **在工具处理结束后的公开迭代边界返回 Node 结果**（`agent.iter` + 在 `ModelRequestNode` 上 break），
+   不再请求模型。
+
+**`end_strategy` 保持默认值。** 在 `'early'` 之下函数工具只在「所有输出工具都失败」时才运行——这里没有
+输出工具，于是一件都不跑。那是被替换掉的设计需要的设置。
+
+### 入口（第二、三包复用的就是这些）
+
+| 入口 | 作用 |
+| --- | --- |
+| `anchor.node.NodeRequest` / `NodeOutcome` | 请求与结果。**非 `completed` 不得带 `route`**，由 `__post_init__` 强制 |
+| `anchor.node.pydantic_adapter.run_node(request, *, model, capabilities=())` | 异步入口。`capabilities` 是**给后续包挂真实 Harness capability 的接缝**，已实测可用 |
+| `anchor.node.pydantic_adapter.build_agent(model, *, instructions, max_retries, capabilities)` | 只造 Agent |
+| `anchor.node.pydantic_adapter.read_completion(Executed, routes)` | 完成协议，纯函数 |
+| `anchor.runtime.execenv.NodeSandbox` | 沙箱接线。**任何新 runner 都应经由它** |
+
+### 实测结果
+
+| | |
+| --- | --- |
+| 本包测试 | **43 passed**，0 失败，0 skip |
+| 全量 `tests/` | **145 passed** |
+| `ruff check src/ tests/` | 通过 |
+| `mypy src/anchor/` | 通过（23 个源文件）|
+| 环境 | Python 3.12.3 · Linux 7.0.0-31-generic x86_64 · bubblewrap 0.9.0 |
+| 依赖 | `pydantic-ai-slim==2.46.0`、`pydantic-ai-harness==0.32.0`（后者现由本包用于 R2 验证）|
+
+复现命令见 §3。
+
+### 已成立
+
+单 bash、真实沙箱复用、提交后停止（含同响应后续命令不执行）、命令顺序、多出口路由与非法目标纠正、
+假完成拒绝、退出码与超时不得提交、请求预算、两次执行隔离、真实图集成（直线 A12 与分叉 A12b）、默认
+路径不依赖可选依赖。逐条证据在 §4。
+
+### 已知边界（交接给后续包）
+
+- **提前退出在框架眼里是被取消，不是完成**（§R2）。`wrap_run` 的 handler 收到 `CancelledError`，不产生
+  `AgentRunResult`。第三包若用 `StepPersistence` 这类 run 级能力，**必须处理这个不一致**——不能拿 Node
+  的 `completed` 当框架证据。
+- 记录的最后一批来自**读取**提前退出所在节点的 `request`，不是执行它（§R1）。完整、带 `tool_call_id`、
+  **无任何新增截断**。
+- 本包不实现：自动压缩、大输出落盘、StepPersistence、崩溃恢复、WAITING/人工输入、前端事件流、生产切换。
+
 
 ---
 
@@ -490,3 +535,99 @@ skipped 和提交自身的观察。
 
 **本包验收状态：四条控制流声明全部实测成立，Harness 兼容性问题已消除，入口可以交主验收 Agent 复核。**
 §5.8 里「重试预算 ≠ 请求预算」那处观察随之作废：`ModelRetry` 已不用于普通观察。
+
+---
+
+## R1 与 R2：主验收两项阻塞的修订结果
+
+验收版本 `014b528`，两项均为阻塞。
+
+### R1：最后一批记录不完整 —— 已修
+
+**验收的复现**：同一响应先输出 25,000 字符及末尾标记，再调用真实 `anchor-done`。trace 的框架部分只有
+`user-prompt`、`tool-call`、`tool-call`，**没有 `tool-return`**；而本报新增的 `exit.commands` 备用
+`output` 被**截为 20,000 字符**，末尾标记因此消失。
+
+**两处都是我的错**：① 提前退出使最后一批进不了框架 history（已知，但只做了降级处理）；② 我加了一个
+**新的、比沙箱限额更小的静默截断**——沙箱单命令上限是 **1,000,000 字节**，被我砍到 20,000。
+
+**修法**（采纳验收给的线索）：**读**提前退出所在的那个 `ModelRequestNode` 的 `request`——它在被交出时
+**已经握着本批形成的标准工具结果**，带 `tool_call_id`，且**读它不执行任何东西、不请求模型**。这些
+`ToolReturnPart` 原样写入记录。`exit.commands` 的备用账**去掉截断，保留完整输出**。
+
+**回归**：`test_a4c_the_last_batch_is_recorded_whole_even_when_it_is_large` —— 同批 普通命令 + done +
+skipped，输出 > 25,000 字符；断言末尾标记存活、**每个 call_id 都有对应的 return**、skipped 状态、
+`after.txt` 不存在、`model_requests == 1`。
+
+### R2：真实 Harness 生命周期兼容性 —— 已验证
+
+验收指出此前的兼容性测试是**手工构造消息 + 调用内部 `iter_tool_pairs`** ✗，没有在真实执行器上启用真实
+capability。现在补上：`run_node` 增加 `capabilities` 接缝，实验在**真实组合**上挂载真实的
+`pydantic_ai_harness.compaction.ClearToolResults`。
+
+**① 压缩确实处理本执行器的历史**（`test_r2_a_real_harness_capability_works_on_this_executor_history`）：
+一次 5 条命令 + 提交的真实运行里，`compact()` 被调用 4 次，**累计清理了 1/2/3/4 个 `tool-return`**——
+即 Harness 能读到并清理本执行器的普通命令输出。换成旧的输出工具方案，这里会一个都清不掉。
+
+**② 框架生命周期对四种情况都可见**（`test_r2_the_frameworks_own_view_of_each_kind_of_command`），
+用框架自己的执行钩子 `wrap_tool_execute` 观察，四种情况**全部到达钩子**，按顺序：
+
+```
+('bash', '<returncode>0</returncode><output>fine</output>')                ← 普通成功
+('bash', '<returncode>9</returncode><output>broken</output>')              ← 非零失败
+('bash', '<returncode>0</returncode><output>COMPLETE_TASK_AND_SUBMIT…')    ← 提交
+('bash', '<skipped>not run: this node finished in this same response…')    ← 跳过
+```
+
+**框架没有盲区**——包括被跳过的那次调用。这是第二、三包可以依赖的形态。
+
+**③ 提前退出 = 取消，不是完成**（`test_r2_leaving_the_iteration_early_is_visible_to_the_run_level_hook`）
+——**这是本项最重要的发现，也是必须交接的不一致**：
+
+| 观察 | 结果 |
+| --- | --- |
+| `wrap_run` 是否被进入 | ✅ 进入 1 次 |
+| wrapper 的 `finally` 是否运行 | ✅ 运行 1 次（所以 run 级观察点可用）|
+| `handler()` 是否返回 `AgentRunResult` | ❌ **抛出 `CancelledError`** |
+
+**框架眼里这次 pass 是「被取消」，不是「完成」。** 第三包若在 run 级能力（如 `StepPersistence`）上记录
+pass 结果，**不能拿 Node 的 `completed` 代替框架证据**——需要的最小适配边界是：由适配器在退出处
+（此刻已握着成形结果）向 run 级能力补一次明确信号，而不是指望框架的 run 级钩子。本包**不实现**这个
+边界，只把它测出来并记录。
+
+### 报告整理
+
+已按验收要求：开头改为最终实现摘要与入口清单（§0），`ToolOutput`/`ModelRetry`、旧测试计数与已否定的
+判断全部移入下方历史部分。
+
+---
+
+## 历史：被否定的方案与走错的路
+
+**本节不代表当前实现，请勿据它理解入口。**
+
+### 曾经的方案：`bash` 作为输出工具（`ToolOutput` + `ModelRetry`）
+
+曾用 `ToolOutput(_bash, ...)` + `end_strategy='early'` 做终止，普通命令靠 `ModelRetry` 返回。它能满足
+「提交即停」，但**普通命令被记成 `RetryPromptPart`**，而 Harness 的 `iter_tool_pairs` 只认
+`ToolReturnPart`——**压缩会对每一条命令输出失明**（详见 §5.6）。
+
+曾被本报称为「三个要求不可兼得」（单工具 / 提交即停 / 记录形态正确）。**那个判断是错的**：它把「框架
+不能停止这一批」等同于「这一批的命令必须执行」。正确设计见 §0 与 §5.9。
+
+### 曾走过的其他死路（均为实测）
+
+| 写法 | 结果 |
+| --- | --- |
+| 输出工具 + `ToolFailed` | ❌ 异常逃逸，整个 run 失败 |
+| 函数工具 + `ToolFailed` | ❌ 被计为重试，耗尽后 `UnexpectedModelBehavior` |
+| 函数工具 + `CallDeferred` | ❌ 提交后同响应剩余命令**照跑** |
+| 函数工具 + `SkipToolExecution` | ❌ 同样照跑 |
+| `end_strategy='early'` + 函数工具 | ❌ 函数工具一件都不跑（冒烟即耗尽 60 次请求）|
+
+### 已作废的观察
+
+- **「重试预算 ≠ 请求预算」**：`ModelRetry` 已不用于普通观察，此观察作废。
+- **旧测试计数**：本包 32 → 38 → 39 → **43**；全量 134 → 140 → 141 → **145**。
+- **两条兼容性测试的断言方向**：曾断言「普通命令是 `retry-prompt`」（记录当时的缺陷），现已反转为
+  「普通命令是 `tool-return`」并作为 canary。

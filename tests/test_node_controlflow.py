@@ -841,3 +841,197 @@ def test_a4b_a_later_call_is_dispatched_and_does_not_reach_the_sandbox(tmp_path)
     assert "already submitted" in skipped[0]["first_line"]
     # No model request after the submission, and the record says so.
     assert outcome.model_requests == 1, "the model was asked again after the submission"
+
+
+def test_a4c_the_last_batch_is_recorded_whole_even_when_it_is_large(tmp_path):
+    """The acceptance's regression: a big ordinary command, a submission, and a skipped call in one
+    batch.
+
+    Two things were wrong and both were this package's. The record's framework half stopped at the
+    node before the results were in the history, so a submitting pass had tool calls and no results.
+    And the fallback account of the commands was capped at 20,000 characters — a *new* bound, smaller
+    than the sandbox's own, so output that the sandbox was allowed to produce was dropped again, and
+    dropped silently. What the batch produced is read off the node the pass leaves on, which already
+    holds the framework's own results, so nothing is re-run and nothing is asked of the model.
+    """
+    from anchor.runtime.sandbox import DEFAULT_MAX_OUTPUT_BYTES
+
+    assert DEFAULT_MAX_OUTPUT_BYTES > 25_000, "this test's premise is that the sandbox allows this much"
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    trace = tmp_path / "trace.jsonl"
+    marker = "THE-END-OF-A-LONG-OUTPUT"
+    # 25,000 characters, then the marker — inside what the sandbox allows, past the cap that was here.
+    model = model_from([
+        f"head -c 25000 /dev/zero | tr '\\0' 'x'; echo; echo {marker}",
+        'anchor-done --summary "submitted after a long command"',
+        "printf 'after\\n' > after.txt",
+    ])
+
+    outcome = asyncio.run(run_node(request(workspace, trace=trace), model=model))
+
+    assert outcome.status == COMPLETED
+    assert outcome.model_requests == 1, "the model was asked again after the submission"
+    assert not (workspace / "after.txt").exists(), "the command after the submission ran"
+
+    lines = [json.loads(line) for line in trace.read_text(encoding="utf-8").splitlines()]
+    returned = [part for line in lines for part in (line.get("parts") or [])
+                if part.get("part_kind") == "tool-return"]
+    assert returned, "the last batch's results are not in the record at all"
+
+    # Every call has an id, and every id in the response is answered — this is what makes the record
+    # correlatable rather than a list of text.
+    calls = [part for line in lines for part in (line.get("parts") or [])
+             if part.get("part_kind") == "tool-call"]
+    assert len(calls) == 3, f"expected three dispatched calls, found {len(calls)}"
+    call_ids = {part.get("tool_call_id") for part in calls}
+    return_ids = {part.get("tool_call_id") for part in returned}
+    assert return_ids == call_ids, f"unanswered calls: {call_ids - return_ids}"
+
+    # The tail of a long output survives, and the skipped call says that it was skipped.
+    long_one = next(part for part in returned if marker in json.dumps(part.get("content")))
+    assert len(json.dumps(long_one["content"])) > 25_000, "the output was truncated again"
+
+    skipped = [part for part in returned
+               if part.get("tool_call_id") in call_ids
+               and "skipped" in json.dumps(part.get("content"))]
+    assert len(skipped) == 1, "the call after the submission is not recorded as skipped"
+    # And the commands' own account agrees, uncapped.
+    commands = lines[-1]["extra"]["commands"]
+    ran = [item for item in commands if item["returncode"] is not None]
+    assert len(ran[0]["output"]) > 25_000, "the commands' own account was truncated"
+    assert marker in ran[0]["output"], "the tail of a long output is missing from the record"
+
+
+# ── R2 · the real harness on the real seam ───────────────────────────────────────────────────────
+
+def test_r2_a_real_harness_capability_works_on_this_executor_history(tmp_path):
+    """The acceptance asked for a real capability at the real seam, not a hand-built message pair.
+
+    `ClearToolResults` is the capability a long node depends on. Mounted on `run_node` itself, over a
+    run of several commands, it must actually find and clear **this executor's** ordinary command
+    output — which it can only do because an ordinary command is recorded as a `ToolReturnPart`. The
+    earlier output-tool design recorded them as retry prompts and this cleanup would have cleared
+    nothing at all.
+    """
+    compaction = pytest.importorskip("pydantic_ai_harness.compaction",
+                                     reason="the harness is not installed here")
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    cleared: list[int] = []
+
+    class Watching(compaction.ClearToolResults):
+        async def compact(self, messages, ctx):
+            out = await super().compact(messages, ctx)
+            cleared.append(sum(
+                1 for message in out for part in getattr(message, "parts", [])
+                if getattr(part, "part_kind", "") == "tool-return"
+                and str(getattr(part, "content", "")) == self.placeholder))
+            return out
+
+    model = model_from(*[[f"echo command-{n}"] for n in range(5)],
+                       ['anchor-done --summary "five commands, then a submission"'])
+    outcome = asyncio.run(run_node(
+        request(workspace, trace=tmp_path / "trace.jsonl"), model=model,
+        capabilities=(Watching(max_messages=4, keep_pairs=1),)))
+
+    assert outcome.status == COMPLETED, outcome.reason
+    assert cleared, "the compaction never ran, so this proves nothing about compatibility"
+    assert max(cleared) >= 3, \
+        f"the compaction cleared at most {max(cleared)} tool results — it is not seeing this " \
+        f"executor's command output"
+
+
+def test_r2_the_frameworks_own_view_of_each_kind_of_command(tmp_path):
+    """What the framework sees for the four cases, taken from its event stream rather than from the
+    adapter's account of itself.
+
+    An ordinary command's success, a command that fails, a submission and a skipped call all look
+    different to the lifecycle hooks, and the next packages are written against those hooks. Recorded
+    here so the answer is evidence rather than an assumption.
+    """
+    from pydantic_ai.capabilities import AbstractCapability
+
+    # `wrap_tool_execute` and not `on_event`: an event observer puts the run on the streamed path,
+    # which a deterministic `FunctionModel` does not implement — and a tool execution hook is the more
+    # direct answer to "what does the framework see when a command runs".
+    seen: list[tuple[str, str]] = []
+
+    class Watching(AbstractCapability):
+        async def wrap_tool_execute(self, ctx, *, call, tool_def, args, handler):
+            result = await handler(args)
+            seen.append((call.tool_name, str(result)[:60]))
+            return result
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    model = model_from(["printf 'fine\\n'", "echo broken >&2; exit 9",
+                        'anchor-done --summary "submitted"', "printf 'after\\n' > after.txt"])
+    outcome = asyncio.run(run_node(
+        request(workspace, trace=tmp_path / "trace.jsonl"), model=model,
+        capabilities=(Watching(),)))
+
+    assert outcome.status == COMPLETED, outcome.reason
+    # **All four reach the hook**, in order: the ordinary success, the command that failed, the
+    # submission, and the call that was skipped. The framework's lifecycle therefore sees everything
+    # this executor does — there is no case it is blind to, which is what the next packages need.
+    assert len(seen) == 4, f"expected four executions to reach the hook, got {seen}"
+    assert all(name == "bash" for name, _ in seen), f"a command is not a bash call: {seen}"
+    assert "fine" in seen[0][1], f"the ordinary success is not visible: {seen[0]}"
+    assert "<returncode>9</returncode>" in seen[1][1] and "broken" in seen[1][1], \
+        f"the failing command's return code and output are not both visible: {seen[1]}"
+    assert "COMPLETE_TASK_AND_SUBMIT" in seen[2][1], \
+        f"the submission does not reach the hook as an execution: {seen[2]}"
+    assert "skipped" in seen[3][1], f"the skipped call is not visible to the hooks: {seen[3]}"
+
+
+def test_r2_leaving_the_iteration_early_is_visible_to_the_run_level_hook(tmp_path):
+    """The mismatch the acceptance asked to have stated rather than papered over.
+
+    `wrap_run` wraps the whole run and its handler returns an `AgentRunResult`. This adapter leaves the
+    iteration at a boundary instead, and the framework's answer to that is measured here: **the run is
+    cancelled, not completed** — `handler()` raises `CancelledError`. So a run-level capability, which
+    is where step persistence would live, sees a cancelled pass rather than a finished one.
+
+    The wrapper's own teardown still runs, which is what makes a run-level observation point usable at
+    all, and the batch the pass left on is readable from the node (which is how this adapter records
+    it). Both halves are asserted, because the mismatch is the finding and the usable part is what a
+    later package may rely on.
+    """
+    from pydantic_ai.capabilities import AbstractCapability
+
+    seen: dict[str, object] = {"entered": 0, "exited": 0, "result": None, "error": None}
+
+    class Watching(AbstractCapability):
+        async def wrap_run(self, ctx, *, handler):
+            seen["entered"] = int(seen["entered"]) + 1
+            try:
+                result = await handler()
+                seen["result"] = type(result).__name__
+                return result
+            except BaseException as exc:                      # noqa: BLE001 - observing, not handling
+                seen["error"] = type(exc).__name__
+                raise
+            finally:
+                # Reached even when this adapter leaves the iteration early: the wrapper's own teardown
+                # is not skipped. That is what makes a run-level observation point usable.
+                seen["exited"] = int(seen["exited"]) + 1
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    model = model_from(["printf 'x\\n' > out.txt", 'anchor-done --summary "submitted"'])
+    outcome = asyncio.run(run_node(
+        request(workspace, trace=tmp_path / "trace.jsonl"), model=model,
+        capabilities=(Watching(),)))
+
+    assert outcome.status == COMPLETED
+    assert seen["entered"] == 1 and seen["exited"] == 1, f"the run wrapper did not run: {seen}"
+    # The finding, asserted so that it cannot quietly change: **no `AgentRunResult` is produced**,
+    # because the pass left before the run ended. A package wanting a framework-level record of the
+    # pass has to read the node it left on (which is what this adapter does) rather than expect a
+    # result. If this ever starts producing one, that is news and this test should fail.
+    assert seen["result"] is None, \
+        f"an early exit produced a run result ({seen['result']}) — the note in the report is stale"
+    assert seen["error"] == "CancelledError", (
+        f"leaving early did not look like a cancellation ({seen['error']}) — if the framework now "
+        f"reports a completed run here, that is news and the report's note is stale")
