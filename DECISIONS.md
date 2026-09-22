@@ -1754,3 +1754,39 @@ findable: `read_completion` lives in `node/agent_runtime.py` and is the only par
 This is recorded because the alternative reading (delete it now, keep mini importable anyway) produces
 a tree where the default executor cannot finish a node, and that failure would look like a migration
 bug rather than a sequencing one.
+
+### Where the migration has got to: M3 lands, and two of its steps move to M5
+
+**Status as of M3: the executor is switched, the deletion is not.** The graph's agent nodes go through
+`run_agent_node` and its op nodes through `run_op_node`; `simple/node_bridge.py` is the only thing the
+scheduler touches, and it no longer imports mini at all. `simple/agent.py` is still in the tree and
+still imported by the tests that exercise it — mini is off every path the scheduler *takes*, which is
+what M3 asked for, and it is deleted at M5, after the path that replaced it has been accepted.
+
+Three things about M3 are worth recording, because two of them move work to M5 and the third is a
+sharpening of what M3 itself meant:
+
+- **The second parser goes at M5, not at M3.** The sequencing note above says the parser goes in the
+  same commit that stops the scheduler calling mini. That is where it goes — and the same commit does
+  not delete the file, because a parser with no caller and a runner with no parser are two different
+  things and only the first is safe to leave lying around for one milestone. What M3 does is what M1
+  did for the surviving parser: make it findable. `read_completion` in `node/agent_runtime.py` is now
+  the only one on a live path.
+- **pydantic-ai moves into `pyproject.toml` at M5, not at M3.** The dependency matrix above says M3.
+  M3 is the commit that makes it *correct* to move, and moving it is a packaging change with a
+  reinstall behind it; doing it in the same commit as the scheduler switch would put a dependency
+  resolution failure in the same bisect window as a runtime one. It goes with the mini removal, in the
+  M5 commit that deletes what it replaces.
+- **"Completed" at the seam is a fact the graph reads, not a status the node is told.** §9's
+  `already_submitted` was a test argument, a callable the harness handed in; M3 makes it the
+  scheduler's own read of the node's control record, and a resume reads both the graph's pass record
+  and the node's completion fact and stops if they disagree rather than choosing. A node killed
+  between returning and being recorded looks like a node that never started, and guessing which of the
+  two it is costs a pass run twice or a pass never run.
+
+**M4 adds no code.** Historical runs are read-only and are not converted; the compatibility boundary is
+a statement about what the new control directory and event format mean for old ones, and it is the
+`### Deliberately refused` list above that already holds it — no conversion, no old trace dressed up as
+a `RecoveryRef`. What M4 does carry is the small correctness debt of the split: a docstring in
+`node/__init__.py` still names the two runners as they were before M1, and it is fixed where it is
+found rather than given a milestone of its own.

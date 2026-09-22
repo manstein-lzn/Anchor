@@ -14,15 +14,24 @@ that reads like a conclusion is a proposal.
 
 ## In flight: the agent node runtime is being replaced
 
-ADR-062 is accepted as a target and is **not** the default executor. The graph today runs
-mini-swe-agent (`simple/agent.py`); the verified replacement is `node/pydantic_adapter.py`, which the
-graph does not call yet. `ARCHITECTURE_AGENT_NODE_MIGRATION.md` is the implementation plan (M0–M5) and
-`AGENT_NODE_VALIDATION_RESULT.md` is what has actually been measured — structurally, not in production.
+ADR-062 is **the executor**. Since M3 the graph's AI nodes go through
+`run_agent_node`/`run_op_node`, behind `NodeRequest`/`NodeOutcome` in `src/anchor/node/__init__.py`, and
+mini-swe-agent is no longer on any path the scheduler takes. `ARCHITECTURE_AGENT_NODE_MIGRATION.md` is
+the plan (M0–M5) and `AGENT_NODE_VALIDATION_RESULT.md` is what has been measured; the fault matrix runs
+against the new seam and passes, B1–B8 and C1–C9 included.
 
-Two things may be assumed by the migration and are true today: the candidate runner exists and is
-exercised by `scripts/recovery_windows.py` and `tests/test_node_*`, and the seam between graph and node
-is `NodeRequest`/`NodeOutcome` in `src/anchor/node/__init__.py`. Everything else about the switch is
-open until M3 lands and M5 accepts it.
+What is still open, and it is the point of M5:
+
+- `simple/agent.py` is **still in the tree and still imported by the tests**, and the second completion
+  parser (`_check_finished`) goes with it. Both are deleted at M5, not at M3 — the order is deliberate
+  and ADR-062 records why: the parser belonged to the path that was being removed, and removing it
+  before the replacement was accepted would have left the default executor unable to finish a node.
+- pydantic-ai moves from `requirements/node-verification.txt` into `pyproject.toml` at M5, with
+  `mini-swe-agent` leaving it.
+- `tests/test_agent_resume.py` and the mini-only assertions elsewhere are deleted at M5 and replaced
+  by tests of the new Node API.
+- Historical runs are read-only and are not converted; an old trace is not dressed up as a
+  `RecoveryRef` (M4). Old `runs/` records keep being shown by the view and are not re-run.
 
 ---
 
@@ -85,9 +94,9 @@ ReAct:   reason → act → observe → reason → …
                     where does the observation come from?
 ```
 
-An agent node *is* a ReAct loop (mini-swe-agent today, PydanticAI after ADR-062), so the loop already
+An agent node *is* a ReAct loop (PydanticAI with `pydantic-ai-harness` since M3), so the loop already
 exists — but inside a node it is invisible to the graph: not checkpointed, not attributable, not
-gateable.
+gateable. The harness changed what is behind that; the observation the graph reads is still a file.
 
 Expressing it as a cycle makes the observation a **file**, and a file can be written by a program or by
 a person instead of by the model's own reading of a tool result. `examples/graphs/academic-gated.json`

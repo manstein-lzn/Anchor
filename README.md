@@ -160,14 +160,14 @@ Two habits come with these, and both were learned by getting them wrong:
 
 **Ours:** the graph, the directories, the sandbox, and the literature tools.
 
-**Not ours:** the agent loop. Today that is
-[mini-swe-agent](https://github.com/SWE-agent/mini-swe-agent) (MIT); it is being replaced by
-[PydanticAI](https://github.com/pydantic/pydantic-ai) with `pydantic-ai-harness`, and the migration is
-ADR-062. Either way the reason is the same: a loop that cannot be stopped by talking is a property of
-the loop, and writing one that has that property is harder than it looks. Both have it — a response
-without a command is a format error and is retried, and a run ends only when a command asks for
-submission. In a CLI, someone follows up when an agent stops halfway. In a node, nobody does — so the
-node must not be able to stop that way.
+**Not ours:** the agent loop. That is [PydanticAI](https://github.com/pydantic/pydantic-ai) with
+`pydantic-ai-harness` (MIT), which has been the runtime since M3 of ADR-062's migration; the loop it
+replaced, [mini-swe-agent](https://github.com/SWE-agent/mini-swe-agent), is still in the tree and is
+deleted at M5, after the new path is accepted. The reason for either is the same: a loop that cannot be
+stopped by talking is a property of the loop, and writing one that has that property is harder than it
+looks. Both have it — a response without a command is a format error and is retried, and a run ends
+only when a command asks for submission. In a CLI, someone follows up when an agent stops halfway. In
+a node, nobody does — so the node must not be able to stop that way.
 
 The loop is behind `run_agent_node(request, *, model, capabilities=())`, which returns a
 `NodeOutcome`: the graph hands over a request and reads back a status, and never sees a harness
