@@ -118,7 +118,7 @@ def _report_window(window: str, where: str) -> None:
         os.write(fd, f"{window}@{where}\n".encode("utf-8"))
 
 
-def _barrier(window: str, script: dict, record: Any = None):
+def _barrier(window: str, script: dict, record: Any = None, control: Path | None = None):
     """The capability that stops the node at the chosen boundary.
 
     The four tool-related hooks are not interchangeable and the boundaries they give are not the same
@@ -147,13 +147,12 @@ def _barrier(window: str, script: dict, record: Any = None):
         async def after_model_request(self, ctx, *, request_context, response):
             self.seen_models += 1
             if window == "A6":
-                # **After a valid submission is in the history, before the graph records anything.**
-                # Found by looking for the sentinel rather than by counting turns: what makes this the
-                # window A6 asks about is the submission having happened, not which request this is.
-                from anchor.node.pydantic_adapter import DONE_SENTINEL
-                messages = list(getattr(request_context, "messages", ()) or ())
-                if any(DONE_SENTINEL in str(getattr(part, "content", ""))
-                       for message in messages for part in (getattr(message, "parts", ()) or ())):
+                # **After the protocol has accepted a submission, before the graph records anything.**
+                # Read from the recorded **fact** rather than from the history's text: the marker is in
+                # the history whether or not the protocol accepted it, which is the mistake R1 was.
+                from anchor.node.recovery import read_completion_fact
+                node_id = script.get("node", "")
+                if control is not None and read_completion_fact(control, node_id) is not None:
                     _wait_for_a_kill("submission persisted, the graph has not finalised")
             if window == "B1" and record is not None and len(record.compactions) > 0:
                 # **Stage evidence, not a turn count.** The pause has to land after a **real**
@@ -223,35 +222,75 @@ async def _next_free_run_id(control: Path, agent_name: str) -> str:
 
 
 def _run_graph_child(window: str, control: Path, workspace: Path, script: dict) -> None:
-    """A real graph run, held at the instant its node has submitted and the graph has not recorded it.
+    """**A real graph, with the candidate Node doing the agent step.**
 
-    The graph runs the **runtime's own** agent here — no bridge — and the pause is patched into the place
-    the mini path recognises a submission, so the scheduler, the sandbox, the Git commit and the record
-    are all untouched. What the barrier is for is the gap A6 asks about, and where it has to be put says
-    something in itself: the moment a node has submitted is inside the agent, and nothing outside it is
-    told until the node returns.
+    The scheduler, the sandbox, the Git commits, the record and the ops are the runtime's own; only
+    `_agent_for`'s answer for an **agent** node is this package's entry point. That is the seam the
+    scheduler itself dispatches through, and it is the one R5 asks for: the earlier attempt ran the mini
+    default path, which has no step store at all, so "no run was recorded" said nothing about the
+    candidate architecture — only that that path is not wired to it.
+
+    `run(task=...)` is called with a keyword, and the result is read for `submission`,
+    `exit_status == "Submitted"`, and `route` — off both `agent.route` and `agent.env.route`, which are
+    the two places `_result_of` looks.
     """
-    from anchor.simple import agent as agent_module
+    from types import SimpleNamespace
+
+    from pydantic_ai.messages import ModelResponse, ToolCallPart
+    from pydantic_ai.models.function import FunctionModel
+
+    from anchor.node import NodeRequest
+    from anchor.node.pydantic_adapter import run_node
     from anchor.simple import run as runner
 
-    real_check = agent_module.SandboxEnvironment._check_finished
+    def model(messages, info):
+        seen = any(script["marker"] in str(getattr(part, "content", ""))
+                   for message in messages for part in (getattr(message, "parts", ()) or ()))
+        command = script["then"] if seen else script["first"]
+        return ModelResponse(parts=[ToolCallPart(tool_name="bash", args={"command": command})])
 
-    def patched_check(self, output):
-        # The mini path says "submitted" by **raising**, so the pause is in the except: the submission has
-        # been recognised and nothing above this knows it yet — which is exactly the gap between a node
-        # having submitted and the graph recording it.
-        try:
-            real_check(self, output)
-        except agent_module.Submitted:
-            # **Only the submission.** Catching everything fired the barrier on the first ordinary
-            # command, where the counter was still zero and nothing had been submitted.
-            if window == "A6":
-                _wait_for_a_kill("submission recognised, the graph has not finalised")
-            raise
+    class Bridged:
+        """What the scheduler is handed for an agent node, backed by `run_node`."""
 
-    agent_module.SandboxEnvironment._check_finished = patched_check
-    runner.run(workspace, config_path=str(control / "runtime.json"),
-               model_script={script["node"]: script["commands"]})
+        def __init__(self, node_id: str, directory: Path, given: tuple, trace: Any,
+                     routes: tuple) -> None:
+            self.node_id = node_id
+            self.directory = Path(directory)
+            self.given = given
+            self.trace = trace
+            self.routes = routes
+            self.env = SimpleNamespace(route=None)
+            self.route: str | None = None
+
+        def run(self, task: str) -> dict:
+            outcome = asyncio.run(run_node(
+                NodeRequest(execution_id=self.node_id, task=task or "", workspace=self.directory,
+                            inputs=tuple(bind for item in self.given for bind in item.binds()),
+                            routes=self.routes, max_requests=int(script.get("max_requests", 8)),
+                            trace=Path(self.trace) if self.trace else None),
+                model=FunctionModel(model),
+                capabilities=(_barrier(window, script, control=control),),
+                recovery_store=control))
+            self.route = outcome.route
+            self.env.route = outcome.route
+            return {"submission": outcome.submission,
+                    "exit_status": "Submitted" if outcome.status == "completed" else outcome.status}
+
+        def resume(self, messages: list) -> dict:
+            raise AssertionError("this bridge does not implement resuming a node")
+
+    real_for = runner._agent_for
+
+    def patched(graph, node_id, directory, models, secret, config_path, inputs=(), trace=None,
+                script=None):
+        if graph.nodes[node_id].op:
+            # An op is the runtime's own, through the real factory: only the agent step is bridged.
+            return real_for(graph, node_id, directory, models, secret, config_path,
+                            inputs=inputs, trace=trace, script=script)
+        return Bridged(node_id, Path(directory), tuple(inputs), trace, graph.routes(node_id))
+
+    runner._agent_for = patched
+    runner.run(workspace, config_path=str(control / "runtime.json"))
     _write_outcome(control)
 
 
@@ -366,9 +405,9 @@ async def _run_child(window: str, control: Path, workspace: Path, script: dict,
                     max_requests=int(script.get("max_requests", 8)),
                     trace=control / "trace.jsonl", recovery=recover),
         model=FunctionModel(model),
-        capabilities=((_barrier(window, script, got.get("record")), *context, here)
+        capabilities=((_barrier(window, script, got.get("record"), control), *context, here)
                       if barrier_first
-                      else (*context, here, _barrier(window, script, got.get("record")))),
+                      else (*context, here, _barrier(window, script, got.get("record"), control))),
         recovery_store=control)
     _write_outcome(control, outcome)
 
@@ -873,18 +912,24 @@ def run_a3(root: Path, timeout: float) -> Evidence:
 
 
 def run_a6(root: Path, timeout: float) -> Evidence:
-    """**A6: a valid submission exists and the graph has recorded nothing yet.**
+    """**A6/R5: the candidate Node in a real graph, and where the graph's half cannot be reached.**
 
-    A real one-node graph through the runtime's own runner, held inside the agent at the instant it
-    recognises a submission and killed there. The node's own trace has the submission; the graph's commit
-    does not exist, because the graph's finalise step is what makes it and it never ran.
+    A three-node graph — agent, op, agent — run by the runtime's own scheduler, with only the agent step
+    routed through `run_node`. The kill is aimed at the instant a submission has been accepted and the
+    graph has recorded nothing.
 
-    **What this is really about is who can be told.** The step store — the thing a *node* recovers from —
-    is not in this path at all: the graph runs the mini agent, which keeps a trace and no step records.
-    So there is nothing for a node-level recovery to hand back to the graph, and the graph has no seam to
-    receive it. Reported as blocked rather than worked around: substituting an ordinary command for the
-    commit would be a different task, and the plan says so.
+    **That instant is not on any hook, and this is the measurement.** A node that submits makes no further
+    model request — the pass ends — so the last agent-side hook is *before* the submission and the next one
+    belongs to the *next* node, by which time the graph has already recorded the pass it was supposed to be
+    interrupted in the middle of. The barrier therefore fires late, and says so; the node's own recovery
+    still works, which is the half that can be picked up.
+
+    The earlier attempt ran the mini default path, which has no step store at all, so "no run was recorded"
+    said nothing about the candidate architecture. This one has the candidate: a run in the store, a
+    completed fact, and a result handed back with no model call.
     """
+    from anchor.node.recovery import RecoveryRef, assess, open_store
+
     started = time.monotonic()
     control = root / "A6" / "control"
     workspace = root / "A6" / "workspace"
@@ -892,43 +937,68 @@ def run_a6(root: Path, timeout: float) -> Evidence:
     control.mkdir(parents=True, exist_ok=True)
     workspace.mkdir(parents=True, exist_ok=True)
     (workspace / "graph.json").write_text(json.dumps({
-        "entry": "only", "objective": "submit, then be interrupted before the graph records it",
-        "agents": {"w": {"model": "models.deterministic", "writes": ["*"]}},
-        "nodes": [{"id": "only", "agent": "w"}], "edges": [],
+        "entry": "write",
+        "objective": "submit in the first node, then be interrupted before the graph records it",
+        "agents": {"w": {"model": "models.deterministic", "writes": ["note.md"]},
+                   "f": {"model": "models.deterministic"}},
+        "ops": {"count": {"run": "wc -c < /in/write/note.md > size.txt", "reads": ["note.md"],
+                          "writes": ["size.txt"]}},
+        "nodes": [{"id": "write", "agent": "w"}, {"id": "count", "op": "count"},
+                  {"id": "finish", "agent": "f"}],
+        "edges": [{"from": "write", "to": "count"}, {"from": "count", "to": "finish"}],
     }), encoding="utf-8")
     (control / "runtime.json").write_text(json.dumps({"models": [], "agents": [], "tools": []}),
                                           encoding="utf-8")
-    script = {"window": "A6", "node": "only", "through_graph": True,
-              "task": "count once and submit",
-              "commands": [COUNTER, 'anchor-done --summary "submitted"']}
+    script = {"window": "A6", "node": "write", "through_graph": True, "max_requests": 8,
+              "task": "write a note and submit", "marker": "EFFECT-",
+              "first": "printf 'four\\n' > note.md; echo EFFECT-1",
+              "then": 'anchor-done --summary "wrote it"'}
 
     killed, code, said, errors = _kill_at(control, workspace, script,
-                                          "submission recognised, the graph has not finalised", timeout)
-    commits = _commits(workspace)
-    # **Read from where the graph actually puts them.** A node's files live under `runs/<id>/<node>/`,
-    # so looking in the workspace root found no counter and no trace, and reported a run that had never
-    # started as one that had done nothing.
-    counters = sorted(workspace.rglob("counter.txt"))
-    ran = _counter(counters[-1].parent) if counters else 0
-    traces = sorted(workspace.rglob("*.trace.jsonl"))
-    recorded = "".join(item.read_text(encoding="utf-8", errors="replace") for item in traces)
+                                          "submission persisted, the graph has not finalised", timeout)
+    store = open_store(control)
+    runs = asyncio.run(store.list_runs())
+    # **The node the case is about**, not whichever run happens to be newest: the graph carries on into
+    # the next node, so the newest run belongs to that one and reading its completion finds nothing.
+    ours = [item for item in runs if item.agent_name == script["node"]]
+    verdict_action, submission, requests = "", "", -1
+    if ours:
+        this = sorted(ours, key=lambda item: item.started_at)[-1]
+        ref = RecoveryRef(node=this.agent_name, run=this.run_id, store=str(control))
+        verdict_action = asyncio.run(assess(store, ref)).action
+        # **Not through the graph again** — this is the node's own entry point with the reference, which
+        # is the half A6 says can be picked up.
+        out = _ask_once(control, ref.encode(),
+                        dict(script, window="A6-recovered", through_graph=False))
+        submission, requests = str(out.get("submission", "")), int(out.get("model_requests", -1))
+
+    # What the graph had recorded by the time the kill landed.
+    graph_state = {}
+    for record in workspace.rglob("run.json"):
+        with contextlib.suppress(json.JSONDecodeError):
+            graph_state = json.loads(record.read_text(encoding="utf-8"))
+    recorded = sorted(graph_state.get("passes", {}))
 
     evidence = Evidence(window="A6", control=str(control), workspace=str(workspace),
-                        killed=killed, exit_code=code, barrier=said or "(no barrier)",
-                        counter_before=0, counter_after=ran, verdict="", because="",
+                        killed=bool(killed), exit_code=code, barrier=said or "(no barrier)",
+                        counter_before=0, counter_after=len(ours), verdict="", because="",
                         seconds=time.monotonic() - started, traceback=errors[-1200:])
-    # The graph's own "start" commit is not the node's, so its presence is not a bridge.
-    evidence.verdict = "blocked" if set(commits) <= {"start"} else "bridged"
+    # **`blocked` because the window itself is unreachable**, not because a commit is missing: the kill
+    # could only land after the graph had already recorded the node it was aimed at.
+    in_window = script["node"] not in recorded
+    evidence.verdict = "in-window" if in_window else "blocked"
     evidence.because = (
-        f"the barrier fired where the node **recognised** its submission (that is where it is placed), "
-        f"with counter={ran} already written; the trace exists ({len(traces)} file(s), "
-        f"{len(recorded)} bytes) but has no exit entry yet because the kill lands before the node "
-        f"finishes; the graph had recorded {len(commits)} commit(s) ({commits or 'none'}); and the step "
-        f"store has no runs at all")
+        f"the **candidate** node left {len(ours)} run(s) in the step store; assessing one says "
+        f"{verdict_action!r} and handing the reference back returns submission {submission!r} with "
+        f"{requests} model request(s); by the time the kill landed the graph had recorded {recorded} "
+        f"(status {graph_state.get('status')!r})")
     evidence.note = (
-        "the graph's finalise step never ran and nothing in this path can be told that the node has "
-        "already submitted: the node keeps a trace and no step records, and the graph has no seam to "
-        "receive one — the graph-level coupling is BLOCKED")
+        "the graph's half could not be interrupted where the case wants it: a node that submits makes no "
+        "further model request, so the last agent-side hook is *before* the submission and the next one "
+        "belongs to the next node — the gap between `agent.run(task=...)` returning and "
+        "`_record(state, graph, run_dir, decided, result, settle)` in src/anchor/simple/run.py has no hook "
+        "at all. Node-level recovery works; the graph-level coupling is BLOCKED for want of that seam."
+        if not in_window else "the kill landed inside the intended window")
     return evidence
 
 

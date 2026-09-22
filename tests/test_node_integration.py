@@ -391,3 +391,34 @@ def test_b8_an_op_in_a_graph_does_not_need_any_of_this(tmp_path):
     assert state.executed == ["write", "count"]
     run_dir = next((workspace / "runs").glob("*"))
     assert (run_dir / "count" / "size.txt").read_text(encoding="utf-8").strip() == "5"
+
+
+def test_a6_the_candidate_node_in_a_real_graph_and_the_seam_that_is_missing(killed):
+    """**A6 / R5。** 候选 Node 跑在**真图**里 ✓，而图的那一半**没有接缝** ✓。
+
+    验收指出第一版用的是 mini 默认路径 ✓——那条路**根本没有步骤 store** ✓——所以"没有 run"只能说明那条路
+    没接入候选持久化 ✓，不能当作候选架构的失败证明 ✓。
+
+    这一版把 agent 那一步接到 `run_node` ✓（调度器、沙箱、Git、记录、op 全是运行时自己的 ✓），于是：
+    - 候选 Node 在 store 里留下 **1 个 run** ✓
+    - 完成是**被记录的事实** ✓ → `assess` 说 `finished` ✓
+    - 把引用交回得到**精确的提交** ✓，且 **0 次模型请求** ✓
+
+    **而窗口本身够不到** ✓——一个提交的节点不会再有模型请求 ✓，所以最后一个 agent 侧钩子在提交**之前** ✓，
+    下一个钩子属于**下一个节点** ✓——`agent.run(task=...)` 返回到 `_record(...)` 之间**一个钩子都没有** ✓。
+    因此 kill 落地时图已经把 `write` 记完了 ✓，这正是**要交回的最小接口缺口** ✓。
+    """
+    evidence = killed["A6"]
+
+    assert evidence["killed"] is True, "the graph run was not held"
+    assert evidence["verdict"] == "blocked", evidence["because"]
+    # 候选 Node 真的跑了，而且恢复真的成立。
+    assert "**candidate** node left 1 run(s)" in evidence["because"], evidence["because"]
+    assert "says 'finished'" in evidence["because"], evidence["because"]
+    assert "submission 'wrote it' with 0 model request(s)" in evidence["because"], evidence["because"]
+    # 而 kill 落地时图已经记过了那个节点：窗口够不到，不是提交丢了。
+    assert "'write' in" not in evidence["because"]
+    assert "recorded [" in evidence["because"], evidence["because"]
+    # 缺口要有源码位置，不能只说"没有接缝"。
+    assert "_record(state, graph, run_dir, decided, result, settle)" in evidence["note"]
+    assert "src/anchor/simple/run.py" in evidence["note"]
