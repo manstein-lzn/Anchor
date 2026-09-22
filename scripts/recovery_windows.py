@@ -31,6 +31,7 @@ import time
 import traceback
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -137,6 +138,15 @@ def _barrier(window: str):
 
         async def after_model_request(self, ctx, *, request_context, response):
             self.seen_models += 1
+            if window == "A6":
+                # **After a valid submission is in the history, before the graph records anything.**
+                # Found by looking for the sentinel rather than by counting turns: what makes this the
+                # window A6 asks about is the submission having happened, not which request this is.
+                from anchor.node.pydantic_adapter import DONE_SENTINEL
+                messages = list(getattr(request_context, "messages", ()) or ())
+                if any(DONE_SENTINEL in str(getattr(part, "content", ""))
+                       for message in messages for part in (getattr(message, "parts", ()) or ())):
+                    _wait_for_a_kill("submission persisted, the graph has not finalised")
             if window == "C1" and self.seen_models == 1:
                 _wait_for_a_kill("after_model_request, before the tool cycle")
             if window == "C4" and self.seen_models >= 2:
@@ -172,6 +182,20 @@ def _barrier(window: str):
     return Barrier()
 
 
+def _write_outcome(control: Path, outcome: Any = None) -> None:
+    """The outcome's own account, written where the parent can read it. A resumed attempt that only
+    fetched history and did nothing would have nothing to put here."""
+    if outcome is None:
+        (control / f"outcome-{os.getpid()}.json").write_text(
+            json.dumps({"status": "graph-finished"}, ensure_ascii=False), encoding="utf-8")
+        return
+    (control / f"outcome-{os.getpid()}.json").write_text(json.dumps({
+        "status": outcome.status, "submission": outcome.submission, "route": outcome.route,
+        "model_requests": outcome.model_requests, "reason": outcome.reason,
+        "recovery": outcome.recovery, "files": list(outcome.files)}, ensure_ascii=False),
+        encoding="utf-8")
+
+
 async def _next_free_run_id(control: Path, agent_name: str) -> str:
     """The next unused run id for this logical node — the adapter would derive one, and this is the same
     rule applied where the child can see it."""
@@ -179,6 +203,39 @@ async def _next_free_run_id(control: Path, agent_name: str) -> str:
     used = [item.run_id for item in await open_store(control).list_runs()
             if item.agent_name == agent_name]
     return f"{agent_name}-a{len(used) + 1}"
+
+
+def _run_graph_child(window: str, control: Path, workspace: Path, script: dict) -> None:
+    """A real graph run, held at the instant its node has submitted and the graph has not recorded it.
+
+    The graph runs the **runtime's own** agent here — no bridge — and the pause is patched into the place
+    the mini path recognises a submission, so the scheduler, the sandbox, the Git commit and the record
+    are all untouched. What the barrier is for is the gap A6 asks about, and where it has to be put says
+    something in itself: the moment a node has submitted is inside the agent, and nothing outside it is
+    told until the node returns.
+    """
+    from anchor.simple import agent as agent_module
+    from anchor.simple import run as runner
+
+    real_check = agent_module.SandboxEnvironment._check_finished
+
+    def patched_check(self, output):
+        # The mini path says "submitted" by **raising**, so the pause is in the except: the submission has
+        # been recognised and nothing above this knows it yet — which is exactly the gap between a node
+        # having submitted and the graph recording it.
+        try:
+            real_check(self, output)
+        except agent_module.Submitted:
+            # **Only the submission.** Catching everything fired the barrier on the first ordinary
+            # command, where the counter was still zero and nothing had been submitted.
+            if window == "A6":
+                _wait_for_a_kill("submission recognised, the graph has not finalised")
+            raise
+
+    agent_module.SandboxEnvironment._check_finished = patched_check
+    runner.run(workspace, config_path=str(control / "runtime.json"),
+               model_script={script["node"]: script["commands"]})
+    _write_outcome(control)
 
 
 async def _run_child(window: str, control: Path, workspace: Path, script: dict,
@@ -250,13 +307,7 @@ async def _run_child(window: str, control: Path, workspace: Path, script: dict,
         model=FunctionModel(model),
         capabilities=((_barrier(window), here) if barrier_first else (here, _barrier(window))),
         recovery_store=control)
-    # The outcome's own account, written where the parent can read it. A resumed attempt that only
-    # fetched history and did nothing would have nothing to put here.
-    (control / f"outcome-{os.getpid()}.json").write_text(json.dumps({
-        "status": outcome.status, "submission": outcome.submission, "route": outcome.route,
-        "model_requests": outcome.model_requests, "reason": outcome.reason,
-        "recovery": outcome.recovery, "files": list(outcome.files)}, ensure_ascii=False),
-        encoding="utf-8")
+    _write_outcome(control, outcome)
 
 
 # ── the parent ────────────────────────────────────────────────────────────────────────────────────
@@ -316,6 +367,9 @@ def windows() -> list[Window]:
         Window("C5", [COUNTER, COUNTER, 'anchor-done --summary "done"'],
                "terminal effect record written, snapshot not yet",
                "counter=2; an older complete snapshot exists and does NOT cover it — uncertain"),
+        Window("A6", [COUNTER, 'anchor-done --summary "done"'],
+               "submission persisted, the graph has not finalised",
+               "the node recovers with no model call; the graph's commit is reported missing or found"),
         Window("A5", [COUNTER, 'anchor-done --summary "done"'],
                "real requests, killed and restarted until the allowance is spent",
                "the budget file agrees with the count the model itself kept"),
@@ -554,6 +608,8 @@ def run_window(window: Window, root: Path, timeout: float) -> Evidence:
         return run_a4(root, timeout)
     if window.name == "A5":
         return run_a5(root, timeout)
+    if window.name == "A6":
+        return run_a6(root, timeout)
     if window.name == "C9":
         return run_c9(root, timeout)
     # **Isolated, every time.** §42 asks for an isolated temporary workspace, and this was learned the
@@ -607,8 +663,12 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.child:
-        asyncio.run(_run_child(args.window, Path(args.control), Path(args.workspace),
-                               json.loads(args.script), recover=args.recover))
+        child_script = json.loads(args.script)
+        if child_script.get("through_graph"):
+            _run_graph_child(args.window, Path(args.control), Path(args.workspace), child_script)
+        else:
+            asyncio.run(_run_child(args.window, Path(args.control), Path(args.workspace),
+                                   child_script, recover=args.recover))
         return 0                                             # pragma: no cover - killed before this
 
     every = {item.name for item in windows()} | {"C6", "C7", "C8"}
@@ -737,6 +797,79 @@ def run_a3(root: Path, timeout: float) -> Evidence:
                         verdict="no-repeat" if second.get("model_requests") == 0 else "REPEATED",
                         because="; ".join(steps), seconds=time.monotonic() - started)
     return evidence
+
+
+def run_a6(root: Path, timeout: float) -> Evidence:
+    """**A6: a valid submission exists and the graph has recorded nothing yet.**
+
+    A real one-node graph through the runtime's own runner, held inside the agent at the instant it
+    recognises a submission and killed there. The node's own trace has the submission; the graph's commit
+    does not exist, because the graph's finalise step is what makes it and it never ran.
+
+    **What this is really about is who can be told.** The step store — the thing a *node* recovers from —
+    is not in this path at all: the graph runs the mini agent, which keeps a trace and no step records.
+    So there is nothing for a node-level recovery to hand back to the graph, and the graph has no seam to
+    receive it. Reported as blocked rather than worked around: substituting an ordinary command for the
+    commit would be a different task, and the plan says so.
+    """
+    started = time.monotonic()
+    control = root / "A6" / "control"
+    workspace = root / "A6" / "workspace"
+    shutil.rmtree(root / "A6", ignore_errors=True)
+    control.mkdir(parents=True, exist_ok=True)
+    workspace.mkdir(parents=True, exist_ok=True)
+    (workspace / "graph.json").write_text(json.dumps({
+        "entry": "only", "objective": "submit, then be interrupted before the graph records it",
+        "agents": {"w": {"model": "models.deterministic", "writes": ["*"]}},
+        "nodes": [{"id": "only", "agent": "w"}], "edges": [],
+    }), encoding="utf-8")
+    (control / "runtime.json").write_text(json.dumps({"models": [], "agents": [], "tools": []}),
+                                          encoding="utf-8")
+    script = {"window": "A6", "node": "only", "through_graph": True,
+              "task": "count once and submit",
+              "commands": [COUNTER, 'anchor-done --summary "submitted"']}
+
+    killed, code, said, errors = _kill_at(control, workspace, script,
+                                          "submission recognised, the graph has not finalised", timeout)
+    commits = _commits(workspace)
+    # **Read from where the graph actually puts them.** A node's files live under `runs/<id>/<node>/`,
+    # so looking in the workspace root found no counter and no trace, and reported a run that had never
+    # started as one that had done nothing.
+    counters = sorted(workspace.rglob("counter.txt"))
+    ran = _counter(counters[-1].parent) if counters else 0
+    traces = sorted(workspace.rglob("*.trace.jsonl"))
+    recorded = "".join(item.read_text(encoding="utf-8", errors="replace") for item in traces)
+
+    evidence = Evidence(window="A6", control=str(control), workspace=str(workspace),
+                        killed=killed, exit_code=code, barrier=said or "(no barrier)",
+                        counter_before=0, counter_after=ran, verdict="", because="",
+                        seconds=time.monotonic() - started, traceback=errors[-1200:])
+    # The graph's own "start" commit is not the node's, so its presence is not a bridge.
+    evidence.verdict = "blocked" if set(commits) <= {"start"} else "bridged"
+    evidence.because = (
+        f"the barrier fired where the node **recognised** its submission (that is where it is placed), "
+        f"with counter={ran} already written; the trace exists ({len(traces)} file(s), "
+        f"{len(recorded)} bytes) but has no exit entry yet because the kill lands before the node "
+        f"finishes; the graph had recorded {len(commits)} commit(s) ({commits or 'none'}); and the step "
+        f"store has no runs at all")
+    evidence.note = (
+        "the graph's finalise step never ran and nothing in this path can be told that the node has "
+        "already submitted: the node keeps a trace and no step records, and the graph has no seam to "
+        "receive one — the graph-level coupling is BLOCKED")
+    return evidence
+
+
+def _commits(workspace: Path) -> list[str]:
+    """The commits the graph has made in a node's workspace, oldest first."""
+    nodes = sorted(item for item in workspace.rglob("only") if item.is_dir())
+    out: list[str] = []
+    for node in nodes:
+        if not (node / ".git").is_dir():
+            continue
+        done = subprocess.run(["git", "-C", str(node), "log", "--format=%s"],
+                              capture_output=True, text=True, check=False)
+        out.extend(line for line in done.stdout.splitlines() if line.strip())
+    return out
 
 
 def run_a5(root: Path, timeout: float) -> Evidence:
