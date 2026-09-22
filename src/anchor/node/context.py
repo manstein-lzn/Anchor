@@ -174,13 +174,16 @@ class Record:
     summaries: list[dict[str, Any]] = field(default_factory=list)
     commands: list[dict[str, Any]] = field(default_factory=list)
     spilled: dict[str, Path] = field(default_factory=dict)
+    #: Where every kept output goes, and the one directory mounted read-only into the sandbox.
+    outputs: Path = field(default=Path())
     spill_bytes: int = 0
     limit_bytes: int = DEFAULT_SPILL_BYTES
     problems: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         self.directory = Path(self.directory)
-        self.directory.mkdir(parents=True, exist_ok=True)
+        self.outputs = self.directory / "outputs"
+        self.outputs.mkdir(parents=True, exist_ok=True)
         self._handle = (self.directory / "record.jsonl").open("a", encoding="utf-8")
 
     def note(self, kind: str, **fields: Any) -> None:
@@ -220,6 +223,7 @@ class Record:
         silent hole, and the difference is the whole of §35.
         """
         blob = text.encode("utf-8")
+        self.outputs.mkdir(parents=True, exist_ok=True)
         if self.spill_bytes + len(blob) > self.limit_bytes:
             self.problems.append(
                 f"refused to keep {name}: {len(blob)} bytes would take the store past its "
@@ -228,7 +232,11 @@ class Record:
                       limit=self.limit_bytes)
             return None
         digest = hashlib.sha256(blob).hexdigest()[:16]
-        path = self.directory / f"output-{digest}.txt"
+        # **Inside the mounted directory.** Written to the record's root, a medium-sized output — too
+        # big to show, small enough that the sandbox did not cut it — was stored where the read-only
+        # mount does not reach, so the model was handed a path it could not open, exactly as with the
+        # host paths before it.
+        path = self.outputs / f"output-{digest}.txt"
         if not path.exists():
             path.write_bytes(blob)
         self.spilled[name] = path
@@ -397,8 +405,16 @@ class Watching(AbstractCapability):
                 f"output is at {seen or kept}, read it with head/sed/tail]\n\n{text[-tail:]}")
 
     async def after_model_request(self, ctx: Any, *, request_context: Any, response: Any) -> Any:
-        parts = [getattr(part, "part_kind", "") for part in getattr(response, "parts", ()) or ()]
-        self.record.note("response", parts=parts)
+        """The model's own words, appended before anything can rewrite them.
+
+        `keep_message` existed and **was never called**: the record kept a list of `part_kind`s, so a
+        later package asking "what did the model actually say, and with which arguments" had no answer.
+        The response goes in whole, through the framework's adapter, so its shape is the framework's.
+        """
+        self.record.keep_message("model_response", response)
+        self.record.note("response", parts=[getattr(part, "part_kind", "")
+                                            for part in getattr(response, "parts", ()) or ()],
+                         usage=_usage_of(response))
         return response
 
     async def on_model_request_error(self, ctx: Any, *, request_context: Any,
@@ -494,7 +510,10 @@ class WithinBudget(AbstractCapability):
                          + [s for s in self.strategies
                             if type(s).__name__ != "SummarizingCompaction"]):
             out = await strategy.compact(messages, ctx)
-            after = estimate_tokens(out)
+            # **The same measure on both sides.** `before` included the request overhead and `after`
+            # did not, so a strategy that changed nothing could look like it had shortened the history
+            # by exactly the overhead — and "did it help?" is what decides whether to escalate.
+            after = self.cost(out)
             if self.record is not None:
                 self.record.note("compaction", strategy=type(strategy).__name__, messages_before=before,
                                  messages_after=len(out), tokens_before=size, tokens_after=after,
@@ -572,6 +591,20 @@ def _replace_messages(request_context: Any, messages: list[ModelMessage]) -> Any
     """
     from dataclasses import replace
     return replace(request_context, messages=messages)
+
+
+def _usage_of(response: Any) -> dict[str, Any] | None:
+    """The provider's own token counts, when it reported any.
+
+    Kept beside the estimate rather than instead of it: the record has to let a reader tell which of the
+    two a figure came from, and a run whose estimate disagrees with the provider is the run worth
+    looking at.
+    """
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return None
+    return {name: getattr(usage, name, None)
+            for name in ("input_tokens", "output_tokens", "requests", "total_tokens")}
 
 
 def _is_window_overflow(error: BaseException) -> bool:

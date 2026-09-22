@@ -69,30 +69,49 @@ TASKS: dict[str, dict] = {
 }
 
 
-def _holds(spec: dict, directory: Path, produced: list[str], body: str) -> bool:
+def artifacts(attempt: Path, node: str) -> Path:
+    """Where an executor actually puts what the node wrote.
+
+    **The two do not agree, and that is the whole of the acceptance's first finding.** The mini path
+    works inside a run directory of its own — `runs/<run>/<node>/` — while the new entry point is given
+    a workspace directly. A judge that filters out everything under `runs/` therefore sees nothing from
+    the baseline at all, and reports it as having failed every requirement. Found by the acceptance
+    after this experiment had already been reported once with the wrong conclusion on it.
+    """
+    if node != "mini":
+        return attempt
+    runs = sorted((attempt / "runs").glob("*")) if (attempt / "runs").is_dir() else []
+    if not runs:
+        return attempt
+    latest = runs[-1]
+    inside = [item for item in latest.iterdir() if item.is_dir()]
+    return inside[0] if inside else latest
+
+
+def _holds(spec: dict, root: Path, produced: list[str], body: str) -> bool:
     """Whether the task's own requirement is met — exactly where it can be, and said so where it cannot.
 
     One keyword test over everything would let "the constraint survived" mean "the word appears
     somewhere in any markdown file", which is how a run that dropped the requirement twice could be
-    reported as keeping it. Where the requirement is mechanically checkable it is checked mechanically;
-    where it is a judgement about prose the proxy is named in `TASKS` rather than dressed up.
+    reported as keeping it. Where the requirement is mechanically checkable it is checked mechanically,
+    from the files themselves; where it is a judgement about prose the proxy is named in `TASKS` rather
+    than dressed up.
     """
     kind = spec.get("check_is", "contains")
     if kind == "every_file_ends":
-        named = [item for item in produced if item.endswith(".md")
-                 and not item.startswith("runs/")]
-        if len(named) < spec.get("files", 3):
+        named = sorted(root.rglob("*.md")) if root.is_dir() else []
+        # The top-level files only: a node that leaves notes in a subdirectory has not written one of
+        # the three files the task asked for.
+        top = [item for item in named if item.parent == root]
+        if len(top) < spec.get("files", 3):
             return False
-        for item in named[:spec.get("files", 3)]:
-            lines = [line for line in (directory / item).read_text(
-                encoding="utf-8", errors="replace").splitlines() if line.strip()]
+        for item in top[:spec.get("files", 3)]:
+            lines = [line for line in item.read_text(encoding="utf-8", errors="replace").splitlines()
+                     if line.strip()]
             if not lines or lines[-1].strip() != spec["check"]:
                 return False
         return True
     if kind == "file":
-        # By **basename**: the two arms do not put their artefacts in the same place — the mini path
-        # works inside a run directory of its own — so a full-path test compares the layouts rather
-        # than whether the file was written. It reported every mini run as having produced nothing.
         return any(Path(item).name == spec["check"] for item in produced)
     return spec["check"] in body
 
@@ -205,11 +224,8 @@ async def one(node: str, name: str, spec: dict, attempt: int, workspace: Path,
             model=_model(model_spec, secret), capabilities=capabilities)
     seconds = time.monotonic() - started
 
-    produced = sorted(str(item.relative_to(directory)) for item in directory.rglob("*")
-                      if item.is_file() and ".git" not in item.relative_to(directory).parts
-                      and item.name not in ("trace.jsonl",))
-    body = "\n".join((directory / item).read_text(encoding="utf-8", errors="replace")
-                     for item in produced if (directory / item).suffix == ".md")
+    root = artifacts(directory, node)
+    produced, body = measure(root)
     return Attempt(
         node=node, task=name, attempt=attempt, status=outcome.status, reason=outcome.reason[:200],
         model_requests=outcome.model_requests,
@@ -222,7 +238,37 @@ async def one(node: str, name: str, spec: dict, attempt: int, workspace: Path,
         # A filename check or a content check, said which. "Did it write the file it was told to"
         # and "does what it wrote still carry the requirement" are different questions and a single
         # substring test answers neither reliably.
-        constraint_present=_holds(spec, directory, produced, body))
+        constraint_present=_holds(spec, root, produced, body))
+
+
+def measure(root: Path) -> tuple[list[str], str]:
+    """What a finished attempt left behind, read from the executor's own artefact root."""
+    produced = sorted(str(item.relative_to(root)) for item in root.rglob("*")
+                      if item.is_file() and ".git" not in item.relative_to(root).parts
+                      and item.name not in ("trace.jsonl",))
+    body = "\n".join(item.read_text(encoding="utf-8", errors="replace")
+                     for item in sorted(root.rglob("*.md")) if item.is_file())
+    return produced, body
+
+
+def rejudge(results: Path, workspace: Path) -> int:
+    """Re-apply the judge to a run that has already happened, and call nothing."""
+    rows = json.loads(results.read_text(encoding="utf-8"))
+    print(f"re-judging {len(rows)} attempts from {results} — no model is called\n")
+    for row in rows:
+        directory = workspace / f"{row['node']}-{row['task']}-{row['attempt']}"
+        root = artifacts(directory, row["node"])
+        produced, body = measure(root)
+        row["constraint_present"] = _holds(TASKS[row["task"]], root, produced, body)
+        row["decided_from"] = str(root)
+    print(f"{'node':10s} {'task':12s} {'run':3s} {'status':16s} {'constraint':10s} decided from")
+    for row in rows:
+        print(f"{row['node']:10s} {row['task']:12s} {row['attempt']:3d} {row['status']:16s} "
+              f"{'kept' if row['constraint_present'] else 'ABSENT':10s} {row['decided_from']}")
+    out = results.with_name(results.stem + "-rejudged.json")
+    out.write_text(json.dumps(rows, indent=2, ensure_ascii=False), encoding="utf-8")
+    print(f"\nwrote {out}")
+    return 0
 
 
 async def main() -> int:
@@ -234,11 +280,19 @@ async def main() -> int:
     parser.add_argument("--runs", type=int, default=2)
     parser.add_argument("--tasks", default=",".join(TASKS), help=f"any of: {', '.join(TASKS)}")
     parser.add_argument("--workspace", default=".local/context-experiment")
+    parser.add_argument("--rejudge", default="",
+                        help="re-apply the judge to a finished run's artefacts; no model is called")
     parser.add_argument("--window", type=int, default=0,
                         help="default: the configured model's own context_window")
     parser.add_argument("--input-target", type=int, default=0,
                         help="default: three quarters of the window, leaving room for the answer")
     args = parser.parse_args()
+
+    if args.rejudge:
+        # **No credentials, no model, no cost.** The judge reads what is already on disk, because the
+        # acceptance asked for the existing results to be re-judged rather than for more paid samples
+        # to be bought against a judge that was wrong.
+        return rejudge(Path(args.rejudge), Path(args.workspace))
 
     try:
         models, secrets = _project_config(args.config)

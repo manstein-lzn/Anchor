@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -213,9 +214,12 @@ def test_b3_a_huge_output_is_shown_bounded_and_kept_whole(tmp_path):
     ], observe_chars=2_000)
 
     assert outcome.status == COMPLETED, outcome.reason
-    kept = list((record.directory / "outputs").glob("*.txt"))
+    # The biggest file in the mounted directory: the sandbox's copy of the whole output. The record's
+    # own copy of what the model was shown is in there too — deliberately, because the mount has to
+    # cover every output the model might need to read — and it is the bounded one.
+    kept = sorted((record.directory / "outputs").glob("*.txt"), key=lambda p: p.stat().st_size)
     assert kept, "nothing was kept before the sandbox cut the output"
-    blob = kept[0].read_bytes()
+    blob = kept[-1].read_bytes()
     assert len(blob) > DEFAULT_MAX_OUTPUT_BYTES, "what was kept is the truncated text, not the output"
     assert marker.encode() in blob, "the marker is not in what was kept"
     assert blob.rstrip().endswith(marker.encode()), "the marker is not at the end of what was kept"
@@ -237,8 +241,9 @@ def test_b3_a_command_that_fits_is_not_put_on_disk(tmp_path):
 
     assert outcome.status == COMPLETED
     assert record.commands[0]["complete"] is False, "a small command was treated as a cut one"
-    assert not list((record.directory / "outputs").glob("*.txt")) \
-        if (record.directory / "outputs").is_dir() else True
+    # The record still keeps its own copy of what the model was shown — that is the record's job — but
+    # **the sandbox spilled nothing**, which is what "a command that fits is not put on disk" means.
+    assert record.commands[0]["seen_by_node"] is None, "a small command's output was spilled"
 
 
 # ── B4 · one tool, and the record is not the node's to touch ─────────────────────────────────────
@@ -709,3 +714,96 @@ def test_r5_the_summariser_runs_before_the_window_drops_the_history(tmp_path):
     assert any("a-fairly-long-line-of-output" in item for item in seen_inputs), \
         "the summariser was given nothing that had been dropped"
     assert record.summaries, "the record has no line for the summary calls that were made"
+
+
+# ── 实验判定器：主验收第二轮第 1 条 ─────────────────────────────────────────────────────────────
+
+def _judge():
+    import importlib.util
+    path = Path(__file__).resolve().parents[1] / "scripts" / "context_experiment.py"
+    spec = importlib.util.spec_from_file_location("context_experiment", path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["context_experiment"] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _three_files(directory: Path, *, ending: str | None) -> None:
+    directory.mkdir(parents=True, exist_ok=True)
+    for name in ("first.md", "second.md", "third.md"):
+        tail = f"\n{ending}\n" if ending is not None else "\nsomething else\n"
+        (directory / name).write_text(f"# {name}{tail}", encoding="utf-8")
+
+
+def test_the_judge_says_kept_only_when_every_file_ends_with_the_line(tmp_path):
+    """The positive and negative cases, because the first version of this judge answered False for
+    correctly written files and the conclusion drawn from that was reported before anyone checked."""
+    judge = _judge()
+    spec = judge.TASKS["constraint"]
+
+    good = tmp_path / "good"
+    _three_files(good, ending="REVIEWED-BY-ALPHA")
+    produced, body = judge.measure(good)
+    assert judge._holds(spec, good, produced, body) is True, "correct files judged as failing"
+
+    bad = tmp_path / "bad"
+    _three_files(bad, ending=None)
+    produced, body = judge.measure(bad)
+    assert judge._holds(spec, bad, produced, body) is False, "files without the line judged as passing"
+
+    # One file of three is enough to fail it: the requirement is every file, not most of them.
+    mixed = tmp_path / "mixed"
+    _three_files(mixed, ending="REVIEWED-BY-ALPHA")
+    (mixed / "third.md").write_text("# third.md\nno line here\n", encoding="utf-8")
+    produced, body = judge.measure(mixed)
+    assert judge._holds(spec, mixed, produced, body) is False, "two of three files was judged as all"
+
+    # Two files is not three.
+    partial = tmp_path / "partial"
+    partial.mkdir()
+    for name in ("first.md", "second.md"):
+        (partial / name).write_text("x\nREVIEWED-BY-ALPHA\n", encoding="utf-8")
+    produced, body = judge.measure(partial)
+    assert judge._holds(spec, partial, produced, body) is False, "two files was judged as three"
+
+
+def test_the_judge_reads_the_mini_paths_own_artefact_root(tmp_path):
+    """**The acceptance's finding, as a regression.** The mini path writes inside `runs/<run>/<node>/`,
+    and the first judge skipped every path beginning with `runs/` — so it saw nothing from the baseline
+    and reported that the baseline had failed requirements it had in fact met.
+
+    Constructed exactly as the acceptance did: a mini-layout directory holding three correct files.
+    """
+    judge = _judge()
+    spec = judge.TASKS["constraint"]
+
+    mini = tmp_path / "mini-constraint-1"
+    inside = mini / "runs" / "20260922T113843" / "only"
+    _three_files(inside, ending="REVIEWED-BY-ALPHA")
+
+    root = judge.artifacts(mini, "mini")
+    assert root == inside, f"the mini root was resolved to {root}"
+    produced, body = judge.measure(root)
+    assert judge._holds(spec, root, produced, body) is True, \
+        "a correctly written mini run is still judged as failing — the acceptance's finding"
+
+    # And a mini run that genuinely did not write them is still caught.
+    wrong = tmp_path / "mini-constraint-2"
+    _three_files(wrong / "runs" / "20260922T113942" / "only", ending=None)
+    root = judge.artifacts(wrong, "mini")
+    produced, body = judge.measure(root)
+    assert judge._holds(spec, root, produced, body) is False
+
+
+def test_the_judge_reads_the_new_entry_points_own_root(tmp_path):
+    """The other arm is given its workspace directly, so its root is the attempt directory."""
+    judge = _judge()
+    spec = judge.TASKS["constraint"]
+
+    direct = tmp_path / "pydantic-constraint-1"
+    _three_files(direct, ending="REVIEWED-BY-ALPHA")
+
+    root = judge.artifacts(direct, "pydantic")
+    assert root == direct
+    produced, body = judge.measure(root)
+    assert judge._holds(spec, root, produced, body) is True

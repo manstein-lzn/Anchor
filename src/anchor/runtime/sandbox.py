@@ -186,16 +186,18 @@ def _spill(spec: SandboxSpec, stdout: bytes, stderr: bytes) -> tuple[tuple[Path,
         return (), 0
     written: list[Path] = []
     lost = 0
+    # **One budget for both streams.** Each stream used to be checked against the caller's full
+    # remaining allowance, so two streams of 1,100,000 bytes against a 50,000-byte bound wrote two
+    # 50,000-byte files — a hundred thousand bytes under a bound of fifty.
+    remaining = spec.spill_limit_bytes
     for stream, data in (("stdout", stdout), ("stderr", stderr)):
         if len(data) <= spec.max_output_bytes:
             continue
-        if spec.spill_limit_bytes is not None and len(data) > spec.spill_limit_bytes:
-            # **Checked before writing, not after.** Accumulating the whole thing and then discovering
-            # there is no room is how a bound becomes a crash; the caller gets a partial file and the
-            # count of what it does not have.
-            keep = max(spec.spill_limit_bytes, 0)
-            lost += len(data) - keep
-            data = data[:keep]
+        if remaining is not None:
+            kept_bytes = min(len(data), max(remaining, 0))
+            lost += len(data) - kept_bytes
+            remaining -= kept_bytes
+            data = data[:kept_bytes]
             if not data:
                 continue
         digest = hashlib.sha256(data).hexdigest()[:16]
