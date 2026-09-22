@@ -196,14 +196,22 @@ async def _run_child(window: str, control: Path, workspace: Path, script: dict,
 
     turn = {"n": 0}
 
+    calls_log = control / "model-calls.log"
+
     def model(messages, info):
         """What to do next, decided from **the history this process was handed**.
 
-        §77 asks for a double driven by evidence another process can check, and not by a per-process
-        counter that compaction can silently reset. So the marker is looked for in the tool results
-        already in the history: a resumed process sees the completed command's output and moves on, and
-        a process that sees nothing does the work. Which is also what a real model would do.
+        And **counted here**, in the place the request actually arrives, appending to a file so the count
+        survives the process. §39 asks for the persisted budget to be checked against an independent
+        count at the model's end rather than against a number the test decided in advance.
+
+        §77 also asks for a double driven by evidence another process can check, and not by a
+        per-process counter that compaction can silently reset. So the marker is looked for in the tool
+        results already in the history: a resumed process sees the completed command's output and moves
+        on, and a process that sees nothing does the work — which is what a real model would do.
         """
+        with calls_log.open("a", encoding="utf-8") as handle:
+            handle.write("call\n")
         if script.get("history_driven"):
             seen = any(script["marker"] in str(getattr(part, "content", ""))
                        for message in messages for part in (getattr(message, "parts", ()) or ()))
@@ -308,6 +316,9 @@ def windows() -> list[Window]:
         Window("C5", [COUNTER, COUNTER, 'anchor-done --summary "done"'],
                "terminal effect record written, snapshot not yet",
                "counter=2; an older complete snapshot exists and does NOT cover it — uncertain"),
+        Window("A5", [COUNTER, 'anchor-done --summary "done"'],
+               "real requests, killed and restarted until the allowance is spent",
+               "the budget file agrees with the count the model itself kept"),
         Window("A4", [COUNTER, 'anchor-done --summary "done"'],
                "references that decode but do not belong, and files that are broken",
                "every one refused with a reason, and no command run"),
@@ -541,6 +552,8 @@ def run_window(window: Window, root: Path, timeout: float) -> Evidence:
         return run_a3(root, timeout)
     if window.name == "A4":
         return run_a4(root, timeout)
+    if window.name == "A5":
+        return run_a5(root, timeout)
     if window.name == "C9":
         return run_c9(root, timeout)
     # **Isolated, every time.** §42 asks for an isolated temporary workspace, and this was learned the
@@ -723,6 +736,72 @@ def run_a3(root: Path, timeout: float) -> Evidence:
                         counter_before=0, counter_after=_counter(live_control.parent / "workspace"),
                         verdict="no-repeat" if second.get("model_requests") == 0 else "REPEATED",
                         because="; ".join(steps), seconds=time.monotonic() - started)
+    return evidence
+
+
+def run_a5(root: Path, timeout: float) -> Evidence:
+    """**A5: a real request budget, spent by real requests, across real interruptions.**
+
+    Three attempts, each killed after its command settled, each continuing the last. What is asserted is
+    not a number this test chose: the budget file is compared against the count the **model** kept, in the
+    place requests actually arrive, so the two have to agree on their own.
+    """
+    from anchor.node.recovery import Budget, RecoveryRef, load_budget, open_store, save_budget
+
+    started = time.monotonic()
+    control = root / "A5" / "control"
+    workspace = root / "A5" / "workspace"
+    shutil.rmtree(root / "A5", ignore_errors=True)
+    control.mkdir(parents=True, exist_ok=True)
+    workspace.mkdir(parents=True, exist_ok=True)
+    allowed = 5
+    save_budget(control, Budget(requests_used=0, requests_allowed=allowed))
+    script = {"window": "A5", "node": "node-A5", "task": "finish eventually",
+              "history_driven": True, "marker": "EFFECT-", "first": COUNTER,
+              "then": 'anchor-done --summary "finished"'}
+    steps: list[str] = []
+    token = ""
+
+    for attempt in (1, 2, 3):
+        if attempt == 1:
+            killed, _, _, _ = _kill_at(control, workspace, dict(script, window="C4"),
+                                       "after the settled cycle, before the run ends", timeout)
+        else:
+            killed = True
+            # A real restart: `_ask_once` runs the entry point in a new process with the reference.
+            before = {item.name for item in control.glob("outcome-*.json")}
+            subprocess.run(
+                [sys.executable, __file__, "--child", "--window", "A5", "--control", str(control),
+                 "--workspace", str(workspace), "--script", json.dumps(script), "--recover", token],
+                capture_output=True, text=True, timeout=180, check=False)
+            new = [item for item in control.glob("outcome-*.json") if item.name not in before]
+            outcome = json.loads(new[-1].read_text(encoding="utf-8")) if new else {}
+            steps.append(f"attempt {attempt} ended {outcome.get('status')!r} "
+                         f"with {outcome.get('model_requests')} request(s) of its own")
+            token = outcome.get("recovery", "")
+            if outcome.get("status") == "completed":
+                break
+        if attempt == 1:
+            runs = asyncio.run(open_store(control).list_runs())
+            ref = RecoveryRef(node=script["node"], run=runs[-1].run_id, store=str(control),
+                              budget=load_budget(control))
+            token = ref.encode()
+            steps.append(f"attempt 1 killed at C4 with counter={_counter(workspace)}")
+
+    counted = len((control / "model-calls.log").read_text(encoding="utf-8").splitlines()) \
+        if (control / "model-calls.log").exists() else 0
+    persisted = load_budget(control)
+    steps.append(f"the model counted {counted} request(s); the budget file says "
+                 f"{persisted.requests_used}/{persisted.requests_allowed}")
+
+    evidence = Evidence(window="A5", control=str(control), workspace=str(workspace),
+                        killed=killed, exit_code=None, barrier="(killed, then restarted)",
+                        counter_before=0, counter_after=_counter(workspace), verdict="", because="",
+                        budget=f"{persisted.requests_used}/{persisted.requests_allowed}",
+                        seconds=time.monotonic() - started)
+    # **The assertion is the agreement**, not a number chosen here.
+    evidence.verdict = "agrees" if persisted.requests_used == counted else "DISAGREES"
+    evidence.because = "; ".join(steps)
     return evidence
 
 

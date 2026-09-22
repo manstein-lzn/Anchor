@@ -338,3 +338,23 @@ def test_a4_every_bad_reference_and_broken_file_is_refused_with_a_reason(killed)
         assert expected in evidence["because"], f"{expected!r} missing: {evidence['because']}"
     # 引用里的预算不能把控制目录已经花掉的额度还回来。
     assert "remaining 2" in evidence["because"], evidence["because"]
+
+
+def test_a5_the_budget_agrees_with_the_models_own_count(killed):
+    """**A5。** 真请求、真中断、真重启之后，持久化的预算必须与**模型接收端自己的计数**相符 ✓。
+
+    断言的不是本测试预先选定的数字 ✓——那正是 §39 禁止的 ✓——而是**两份独立账目的一致** ✓：
+    模型在请求真正到达的地方自己记一份 ✓（跨进程 ✓），持久化预算记另一份 ✓。
+
+    它抓到两处重复计数 ✓：被 kill 的那次尝试的消耗**从未被记录** ✗（预算只在结束时写 ✓）；修好之后，
+    `model_requests` 又报的是**累计**而非本次 ✗，而 `_reference` 把已经记过的再加一遍 ✗——八次请求
+    对一个起始为二的预算，最后记成了八 ✓。
+    """
+    evidence = killed["A5"]
+
+    assert evidence["verdict"] == "agrees", evidence["because"]
+    # 两份账目相等，且都不是 0——否则「一致」是空的。
+    counted = int(evidence["because"].split("counted ")[1].split(" ")[0])
+    persisted = int(evidence["budget"].split("/")[0])
+    assert counted == persisted, evidence["because"]
+    assert counted > 0, f"nothing was spent, so nothing was checked: {evidence['because']}"

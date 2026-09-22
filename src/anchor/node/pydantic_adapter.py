@@ -93,10 +93,35 @@ class _CountingModel(WrapperModel):
     """
 
     requests: int = 0
+    #: Where to write the allowance down **as it is spent**. A budget recorded only when an attempt
+    #: ends is a budget a killed attempt never pays into — measured, by a node that had made three
+    #: requests reporting one, because two of them belonged to the attempt that was killed.
+    control: Any = None
+    allowed: int = 0
 
     async def request(self, messages: Any, model_settings: Any, model_request_parameters: Any) -> Any:
         self.requests += 1
+        self._record()
         return await super().request(messages, model_settings, model_request_parameters)
+
+    def _record(self) -> None:
+        """Write down what has been spent, keeping whatever the store already says.
+
+        Merged rather than overwritten: the point of the count is that it survives a process that dies
+        mid-request, so the larger of the two accounts is the true one. A response that never arrives
+        still cost a request, and §38 asks for that to be counted conservatively rather than forgiven.
+        """
+        if self.control is None:
+            return
+        try:
+            from anchor.node.recovery import Budget, load_budget, save_budget
+            here = Path(str(self.control))
+            on_disk = load_budget(here)
+            spent = max(self.requests, on_disk.requests_used)
+            save_budget(here, Budget(requests_used=spent,
+                                     requests_allowed=self.allowed or on_disk.requests_allowed))
+        except Exception:                                     # noqa: BLE001 - never fail a request
+            pass
 
 
 @dataclass
@@ -295,6 +320,9 @@ async def _reference(recovery_store: Path | None, request: NodeRequest, store: A
     not given one and a guessed id would name a run that does not exist.
     """
     from anchor.node.recovery import Budget, RecoveryRef, save_budget
+    # **Nothing is added up here.** The allowance was written down as each request was made, so the file
+    # already holds the total; adding this attempt's count again double-counted it — measured, by a budget
+    # of eight from four requests against a starting two.
     if ref is not None and store is not None:
         # Continuing: the attempt that just finished is a **new** run, so the reference has to name it
         # rather than the one it was given. When the caller supplied its own persistence the adapter
@@ -307,7 +335,7 @@ async def _reference(recovery_store: Path | None, request: NodeRequest, store: A
                 newest = sorted(runs, key=lambda item: item.started_at)[-1].run_id if runs else ""
             except Exception:                                 # noqa: BLE001 - naming is best effort
                 newest = ""
-        budget = ref.budget.after(spent)
+        budget = load_budget(Path(ref.store))
         save_budget(Path(ref.store), budget)
         return RecoveryRef(node=ref.node, run=ran or newest or ref.run, store=ref.store,
                            budget=budget).encode()
@@ -487,10 +515,19 @@ async def run_node(request: NodeRequest, *, model: Any,
                                        run_id=await _next_run_id(store, request.execution_id)))
 
     counted = _CountingModel(model)
+    if recovery_store is not None:
+        # Whatever was already spent counts against this attempt too, so the cap is a cap on the whole
+        # logical execution and not on each process it happens to run in.
+        already = load_budget(Path(recovery_store)).requests_used
+        counted.control = recovery_store
+        counted.allowed = request.max_requests
+        counted.requests = already
     agent = build_agent(counted, instructions=request.instructions,
                         max_retries=spending,
                         capabilities=(*capabilities, *resumed))
-    limits = UsageLimits(request_limit=spending)
+    # **What this process may still spend**, not what the whole execution may: the requests already
+    # made in earlier processes are counted against the same allowance, so the cap survives a restart.
+    limits = UsageLimits(request_limit=max(spending - already, 1))
     wiring: _Wiring | None = None
     run: Any = None
     messages: list[Any] = []
@@ -529,19 +566,19 @@ async def run_node(request: NodeRequest, *, model: Any,
             raise RuntimeError("the run ended without a submission")
         outcome = NodeOutcome(
             status=COMPLETED, submission=done.submission, route=done.route,
-            model_requests=counted.requests, files=_files(request.workspace))
+            model_requests=counted.requests - already, files=_files(request.workspace))
     except UsageLimitExceeded as exc:
         # Out of turns, nothing submitted. Not a failure of the work, and not a route: the graph must
         # not move on the strength of a pass that did not happen.
         messages = list(run.all_messages()) if run is not None else []
         outcome = NodeOutcome(
-            status=BUDGET_EXHAUSTED, model_requests=counted.requests,
+            status=BUDGET_EXHAUSTED, model_requests=counted.requests - already,
             reason=f"out of requests after {counted.requests} model requests: {exc}",
             files=_files(request.workspace))
     except Exception as exc:                      # noqa: BLE001 - every failure is a recorded status
         messages = list(run.all_messages()) if run is not None else []
         outcome = NodeOutcome(
-            status=FAILED, model_requests=counted.requests,
+            status=FAILED, model_requests=counted.requests - already,
             reason=f"{type(exc).__name__}: {exc}", files=_files(request.workspace))
 
     return replace(outcome, trace_ref=_write_trace(request.trace, messages, wiring, outcome, formed),
