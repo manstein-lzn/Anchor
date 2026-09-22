@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 
 from anchor.runtime.sandbox import BubblewrapWorkspaceSandbox, SandboxSpec
-from anchor.simple.agent import _console_script, _tool_binds
+from anchor.runtime.execenv import console_script, tool_binds
 
 
 @pytest.fixture(scope="module")
@@ -44,7 +44,7 @@ def test_no_bind_is_a_relative_path():
     That is not a broken mount, which is what makes it dangerous: it succeeds, and then everything
     after it fails.
     """
-    binds = _tool_binds(_console_script("anchor-scholarly"))
+    binds = tool_binds(console_script("anchor-scholarly"))
 
     for source, destination in binds:
         assert Path(source).is_absolute(), f"{source!r} would be resolved against bubblewrap's cwd"
@@ -55,7 +55,7 @@ def test_no_bind_is_a_relative_path():
 def test_a_node_can_run_a_command_in_its_workspace(sandbox, workspace):
     """The one command that would have caught the above in the first second instead of the 2000th."""
     result = sandbox.run(SandboxSpec(workspace=workspace, command=("sh", "-c", "echo alive"),
-                                     readonly_binds=_tool_binds(_console_script("anchor-scholarly")),
+                                     readonly_binds=tool_binds(console_script("anchor-scholarly")),
                                      workspace_readonly=(".git",)))
 
     assert result.ok, result.stderr
@@ -105,7 +105,7 @@ def test_an_input_is_readable_and_not_writable(sandbox, workspace, tmp_path):
 
 def test_the_interpreter_the_tool_needs_is_visible(sandbox, workspace):
     """The reason those binds exist at all: a console script's shebang names a path, not a program."""
-    found = _console_script("anchor-scholarly")
+    found = console_script("anchor-scholarly")
     if not found:
         pytest.skip("anchor-scholarly is not installed here")
 
@@ -114,7 +114,7 @@ def test_the_interpreter_the_tool_needs_is_visible(sandbox, workspace):
         command=("sh", "-c", f"{found} sources >/dev/null 2>&1; echo rc=$?"),
         timeout_seconds=120.0,
         tool_dirs=(str(Path(found).parent),),
-        readonly_binds=_tool_binds(found)))
+        readonly_binds=tool_binds(found)))
 
     assert result.ok, result.stderr
     assert "rc=0" in result.stdout or "rc=1" in result.stdout, \

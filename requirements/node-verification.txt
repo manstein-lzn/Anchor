@@ -1,0 +1,3 @@
+# 第一包的精确验证依赖。只用于验证，不进默认运行依赖。
+pydantic-ai-slim==2.46.0
+pydantic-ai-harness==0.32.0

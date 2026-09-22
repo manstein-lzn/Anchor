@@ -16,9 +16,6 @@ so the submission sentinel stays theirs and cannot drift from the loop that read
 
 from __future__ import annotations
 
-import os
-import shutil
-import sys
 import json
 from pathlib import Path
 
@@ -26,7 +23,7 @@ from minisweagent.agents.default import DefaultAgent
 from minisweagent.environments.local import LocalEnvironment
 from minisweagent.exceptions import FormatError, InterruptAgentFlow, Submitted
 
-from anchor.runtime.sandbox import BubblewrapWorkspaceSandbox, SandboxSpec
+from anchor.runtime.execenv import NodeSandbox
 
 RULES = """\
 You are a research assistant that works inside one directory, and you act by calling the bash tool
@@ -88,69 +85,6 @@ def system_prompt(instructions: str) -> str:
     return f"{instructions.strip()}\n\n{RULES.strip()}\n" if instructions.strip() else RULES
 
 
-def _console_script(name: str) -> str | None:
-    """Where a console script of *this* installation is.
-
-    Next to the interpreter, not looked up on PATH. The runner is started as `python -m …`, which
-    does not put its own environment's `bin` on PATH, so a lookup there finds nothing — and then the
-    node is told about a tool that is not on its PATH and cannot be called.
-    """
-    # Not resolved. `sys.executable` is `<venv>/bin/python`, which is a symlink to whatever
-    # interpreter the environment was built from — and following it walks out of the environment,
-    # where the console scripts are not.
-    candidate = Path(sys.executable).parent / name
-    if candidate.is_file():
-        return str(candidate)
-    return shutil.which(name)
-
-
-def _tool_binds(console_script: str | None) -> tuple[tuple[str, str], ...]:
-    """What has to be visible for the literature tool to run: its interpreter and its package.
-
-    Both at their real paths. A virtual environment is not relocatable — the interpreter looks for
-    its libraries relative to itself, and the console script's shebang names the interpreter — so a
-    bind at some tidier location would produce a tool that cannot start.
-    """
-    if not console_script:
-        return ()
-    venv = Path(console_script).parents[1]
-    package = Path(__file__).resolve().parents[2]
-    binds = [(str(venv), str(venv))]
-    if package.is_dir():
-        binds.append((str(package), str(package)))
-    # And the Python the environment is built on, which is not inside it: `<venv>/bin/python` is a
-    # symlink into an installed interpreter, and a console script's shebang names the symlink. There
-    # are two links in that chain — the environment points at a stable alias like `cpython-3.12`,
-    # which points at the versioned directory actually on disk — so both have to be present or the
-    # script cannot start. Binding only the resolved one produced
-    # `bad interpreter: No such file or directory`, which is what a missing alias looks like.
-    # Both ends of the chain, because either may be the directory that is not inside the environment:
-    # `python` points at the alias `python3`, which points at the interpreter actually on disk.
-    #
-    # The target is resolved against the link's own directory, and that is the whole point of this
-    # loop. `os.readlink` may answer with a relative path — `<venv>/bin/python` points at `python3` —
-    # and `Path("python3").parent` is `.`, so the bind became `--ro-bind . .`: bubblewrap's working
-    # directory mounted over the sandbox root, making every mount after it fail. What a node saw was
-    # `Can't mkdir /tmp: Read-only file system` on every command, and it retried for two thousand
-    # turns before anything said so.
-    link = Path(sys.executable)
-    targets = [link]
-    if link.is_symlink():
-        target = Path(os.readlink(link))
-        targets.append(target if target.is_absolute() else link.parent / target)
-    for candidate in targets:
-        prefix = candidate.parent
-        prefix = prefix.parent if prefix.name == "bin" else prefix
-        if not prefix.is_dir() or str(prefix) == str(venv):
-            continue
-        if prefix in (Path("."), Path("/")):
-            # Never the sandbox root, whatever a link resolves to: a bind there takes the whole
-            # filesystem away from everyone after it.
-            continue
-        binds.append((str(prefix), str(prefix)))
-    return tuple(dict.fromkeys(binds))
-
-
 class SandboxEnvironment(LocalEnvironment):
     """Their local environment, with bwrap between it and the machine, and the way out.
 
@@ -173,48 +107,27 @@ class SandboxEnvironment(LocalEnvironment):
         # What this node was given, as (where it lives, where it is visible). Read-only, and never
         # copied: a pointer to a predecessor's workspace, which is also why its history comes with it.
         self.inputs = tuple(inputs)
-        # The command arrives as one shell string, so the shell is the entry point and the sandbox is
-        # the boundary. An allowlist of commands would be a second, weaker boundary that the shell
-        # can step around anyway.
-        self.sandbox = BubblewrapWorkspaceSandbox(allowed_commands=frozenset({"sh"}))
-        found = _console_script("anchor-scholarly")
-        self.tool_dirs = (str(Path(found).parent),) if found else ()
-        self.readonly_binds = _tool_binds(found)
-        self._require_working()
+        # What a node's sandbox is wired with is decided in `runtime/execenv.py`, because a second
+        # node runner needs the same wiring and must not restate it.
+        self.wiring = NodeSandbox(tree=self.tree, node_id=node_id, network=network,
+                                  timeout_seconds=timeout_seconds, routes=self.routes, inputs=self.inputs)
+        self.sandbox = self.wiring.sandbox
+        self.tool_dirs = self.wiring.dirs
+        self.readonly_binds = self.wiring.binds
+        self.wiring.require_working()
 
     def _require_working(self) -> None:
         """Run one trivial command with this node's real mounts, before the loop starts.
 
-        The sandbox is probed when it is constructed, but that probe knows nothing about the mounts
-        this node will actually have. A bind whose path resolved to `.` mounted bubblewrap's working
-        directory over the sandbox root, so every command after it failed with `Can't mkdir /tmp:
-        Read-only file system` — and the node retried for two thousand turns before anything said so.
-        One command here refuses it in the first second. The same principle as the probes below this
-        one: a sandbox that cannot run a command is unavailable, not slow.
+        Delegated, so that two runners cannot disagree about what a working sandbox is.
         """
-        probe = ".anchor-sandbox-probe"
-        result = self.sandbox.run(SandboxSpec(
-            workspace=self.tree, command=("sh", "-c", f"touch {probe} && rm -f {probe}"),
-            timeout_seconds=60.0, network=self.network, tool_dirs=self.tool_dirs,
-            readonly_binds=(*self.readonly_binds, *self.inputs),
-            workspace_readonly=(".git",)))
-        if result.returncode != 0:
-            raise RuntimeError(
-                "the sandbox cannot run a command in this node's workspace: "
-                + ((result.stderr or result.stdout).strip()[:500] or "no output"))
+        self.wiring.require_working()
 
     def execute(self, action, cwd: str = "", *, timeout: int | None = None) -> dict:
         command = action.get("command", "")
-        result = self.sandbox.run(SandboxSpec(
-            workspace=self.tree, command=("sh", "-c", command),
-            timeout_seconds=float(timeout or self.timeout_seconds), network=self.network,
-            tool_dirs=self.tool_dirs, readonly_binds=(*self.readonly_binds, *self.inputs),
-            # Its own history is readable and not rewritable. A record the recorded thing can edit is
-            # not a record, and the commit that makes one is made outside this sandbox.
-            workspace_readonly=(".git",),
-            env=(("ANCHOR_NODE", self.node_id), ("ANCHOR_ROUTES", ",".join(self.routes)))))
-        output = {"output": result.stdout + result.stderr, "returncode": result.returncode,
-                  "exception_info": "the command timed out" if result.timed_out else ""}
+        ran = self.wiring.run(command, timeout=timeout)
+        output = {"output": ran.output, "returncode": ran.returncode,
+                  "exception_info": "the command timed out" if ran.timed_out else ""}
         self._check_finished(output)
         return output
 
