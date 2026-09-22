@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any
 
 from pydantic_ai.capabilities import AbstractCapability
+from pydantic_ai.models.wrapper import WrapperModel
 from pydantic_ai.messages import ModelMessage
 from pydantic_ai_harness.compaction import SlidingWindowCompaction, SummarizingCompaction
 
@@ -75,6 +76,10 @@ class Budget:
     #: Kept regardless of size, because these are the things whose loss is not recoverable by reading
     #: anything: the task itself and the rules of the loop.
     keep_messages: int = 8
+    #: Characters charged to every request that are not messages: the instructions and the tool
+    #: schemas. Left at zero a budget is a claim about the history only, which is not what the provider
+    #: is billed for or refuses.
+    request_overhead: int = 4_000
     estimator: str = f"chars/{CHARS_PER_TOKEN}"
 
     def __post_init__(self) -> None:
@@ -89,25 +94,51 @@ class Budget:
         """The budget as it should appear in a record: what was configured, and how it was counted."""
         return {"window": self.window, "output_reserve": self.output_reserve,
                 "input_target": self.input_target, "keep_messages": self.keep_messages,
-                "estimator": self.estimator}
+                "request_overhead": self.request_overhead, "estimator": self.estimator}
 
 
-def estimate_tokens(messages: list[ModelMessage]) -> int:
-    """A cheap, honest estimate — not a tokeniser.
+def estimate_tokens(messages: list[ModelMessage], *, tools: int = 0,
+                    instructions: int = 0) -> int:
+    """A cheap estimate of what a request costs — **not** a tokeniser, and not a counter of message text.
 
-    Deliberately the same shape as the framework's, so that the number this module reports and the
-    number a strategy acts on are comparable. It will disagree with a provider's count in both
-    directions; the budget above leaves room for that rather than pretending otherwise.
+    The first version of this counted `part.content` and nothing else, which put a 100,000-character
+    `bash` command at **zero tokens**: the command lives in `ToolCallPart.args`, and a request's size is
+    mostly the parts that are not prose. So it is not only an underestimate, it is an underestimate
+    that gets worse exactly as the commands get bigger — and it was both the implementation of the
+    budget and the only thing checking the budget, which is how a broken counter passes its own tests.
+
+    Every part kind is walked: text, tool arguments, tool results, retry prompts. Instructions and tool
+    schemas are passed in as characters because they are not messages and are charged to every request.
+    A provider's own count will differ; the budget leaves room for that, and the report says which of
+    the two numbers any figure came from.
     """
-    total = 0
+    total = max(instructions, 0) // CHARS_PER_TOKEN + max(tools, 0) // CHARS_PER_TOKEN
     for message in messages:
         for part in getattr(message, "parts", ()) or ():
-            content = getattr(part, "content", None)
-            if isinstance(content, str):
-                total += len(content) // CHARS_PER_TOKEN + 1
-            elif content is not None:
-                total += len(str(content)) // CHARS_PER_TOKEN + 1
+            total += _part_tokens(part)
     return total
+
+
+def _part_tokens(part: Any) -> int:
+    """One part's size, whatever kind it is.
+
+    `args` is counted as JSON rather than as its `repr`: a dict's repr and its wire form are not the
+    same length, and the wire form is what the provider is sent.
+    """
+    size = 0
+    content = getattr(part, "content", None)
+    if isinstance(content, str):
+        size += len(content)
+    elif content is not None:
+        size += len(str(content))
+    args = getattr(part, "args", None)
+    if args is not None:
+        try:
+            size += len(args if isinstance(args, str) else json.dumps(args, ensure_ascii=False,
+                                                                    default=str))
+        except (TypeError, ValueError):                       # pragma: no cover - defensive
+            size += len(str(args))
+    return size // CHARS_PER_TOKEN + (1 if size else 0)
 
 
 # ── the record ───────────────────────────────────────────────────────────────────────────────────
@@ -154,6 +185,28 @@ class Record:
 
     def note(self, kind: str, **fields: Any) -> None:
         line = json.dumps({"kind": kind, **fields}, ensure_ascii=False, default=str)
+        self._handle.write(line + "\n")
+        self._handle.flush()
+
+    def keep_message(self, kind: str, message: Any, **fields: Any) -> None:
+        """Append one message **as the framework has it**, before anything is allowed to rewrite it.
+
+        §41 asks for the raw responses and tool results, and §46 asks for them to be kept apart from
+        what the model is shown. Counts are not that: "nine commands" cannot answer "what did the
+        command that was summarised away actually print", and a record that cannot answer it is not the
+        complete record this package promises. The framework's own adapter does the encoding, so the
+        shape is its business and not a guess made here.
+        """
+        from pydantic_ai.messages import ModelMessagesTypeAdapter
+        try:
+            encoded = ModelMessagesTypeAdapter.dump_python([message], mode="json")[0]
+        except Exception as exc:                              # noqa: BLE001 - a record must not fail a run
+            self.note("record_error", what=kind, error=f"{type(exc).__name__}: {exc}")
+            return
+        # Written directly rather than through `note`, because `note` takes `**fields` and mypy cannot
+        # rule out that one of them is its own first parameter.
+        line = json.dumps({"kind": kind, "message": encoded, **fields}, ensure_ascii=False,
+                          default=str)
         self._handle.write(line + "\n")
         self._handle.flush()
 
@@ -222,6 +275,12 @@ class Watching(AbstractCapability):
     single-bash rule survives: the model pages through a file rather than through a framework tool.
     """
 
+    #: Where the kept outputs are mounted inside the sandbox. Fixed, because the model is told this
+    #: path and a path that moves between commands is a path it cannot rely on. Read-only, and only
+    #: this directory — mounting the whole record directory would put the audit trail inside the
+    #: sandbox, where the node could rewrite what is said about it.
+    MOUNT = "/kept"
+
     def __init__(self, record: Record, observe_chars: int = 8_000) -> None:
         self.record = record
         # How much of one command's output the model is shown. Bounded by characters rather than
@@ -255,9 +314,22 @@ class Watching(AbstractCapability):
         target = self.record.directory / "outputs"
         target.mkdir(parents=True, exist_ok=True)
         sandbox.spill_dir = target
+        # And the same directory made visible where the command can reach it. Without this the model
+        # is handed a host path it cannot open: the sandbox's `/tmp` is a private tmpfs, so the read
+        # fails, the pipeline still exits zero, and a test that checks the host copy says everything is
+        # fine while the node never saw the file.
+        sandbox.spill_mount = self.MOUNT
 
     async def wrap_tool_execute(self, ctx: Any, *, call: Any, tool_def: Any, args: Any,
                                 handler: Any) -> Any:
+        sandbox = getattr(getattr(ctx, "deps", None), "sandbox", None)
+        if sandbox is not None:
+            # Cleared per call. Read after the fact without this, a call that never reached the sandbox
+            # — a command after a submission, which the guard refuses — is credited with whatever the
+            # command before it spilled.
+            sandbox.spilled = ()
+            sandbox.incomplete = False
+            sandbox.spill_limit_bytes = max(self.record.limit_bytes - self.record.spill_bytes, 0)
         result = await handler(args)
         name = getattr(call, "tool_name", "")
         command = ""
@@ -265,20 +337,42 @@ class Watching(AbstractCapability):
         if isinstance(raw, dict):
             command = str(raw.get("command", ""))
         text = result if isinstance(result, str) else str(result)
+        full = tuple(getattr(sandbox, "spilled", ()) or ())
+        visible = tuple(getattr(sandbox, "visible", ()) or ())
         # What the sandbox kept before cutting, when it did. This is the lossless copy; the text in
         # hand is a prefix of it, and a record that cited only the text would be citing the truncation.
-        sandbox = getattr(getattr(ctx, "deps", None), "sandbox", None)
-        full = tuple(getattr(sandbox, "spilled", ()) or ())
-        kept = full[0] if full else self.record.keep_output(
+        kept: Path | None = full[0] if full else self.record.keep_output(
             f"{len(self.record.commands) + 1}", text)
+        # **The sandbox's writes are charged to the same bound as this record's own.** They used to be
+        # invisible to it: `Record(limit_bytes=1000)` reported 88 bytes held while the directory on disk
+        # had 1,100,000, because the limit lived only in `keep_output` and the spill went round it.
+        if full:
+            for path in full:
+                try:
+                    self.record.spill_bytes += path.stat().st_size
+                except OSError as exc:                        # pragma: no cover - defensive
+                    self.record.problems.append(f"cannot account for {path}: {exc}")
+        incomplete = bool(getattr(sandbox, "incomplete", False))
         item = {"command": command, "chars": len(text), "sha256": hashlib.sha256(
             text.encode("utf-8")).hexdigest()[:16], "kept": None if kept is None else str(kept),
-                "complete": bool(full), "shown": min(len(text), self.observe_chars)}
+                "seen_by_node": visible[0] if visible else None, "complete": bool(full) and not incomplete,
+                "incomplete": incomplete, "shown": min(len(text), self.observe_chars)}
         self.record.commands.append(item)
         self.record.note("command", tool=name, **item)
-        return self._bounded(text, kept)
+        # The raw result and the id it answers, recorded as they are. Not wrapped in a synthesized
+        # framework message: the adapter would try to serialise a shape it does not own, and what a
+        # later package needs is the text and the id, not a plausible-looking envelope.
+        self.record.note("tool_result", tool=name, content=text,
+                         tool_call_id=getattr(call, "tool_call_id", None),
+                         bytes=len(text.encode("utf-8")),
+                         sha256=hashlib.sha256(text.encode("utf-8")).hexdigest()[:16])
+        if incomplete:
+            self.record.problems.append(
+                f"command {len(self.record.commands)} produced more than the store could keep; the "
+                f"model is being told its preview is not the whole output")
+        return self._bounded(text, kept if not visible else Path(visible[0]), visible[0] if visible else "")
 
-    def _bounded(self, text: str, kept: Path | None) -> str:
+    def _bounded(self, text: str, kept: Path | None, seen: str = "") -> str:
         """What the model sees of one command's output.
 
         Head and tail, with the middle elided and the whole thing named. Both ends matter: a command's
@@ -297,8 +391,10 @@ class Watching(AbstractCapability):
             return (f"{text[:head]}\n\n[the rest of this output was not kept: the store is at its "
                     f"bound, so there is nowhere to read it from — this preview is all there is]"
                     f"\n\n{text[-tail:]}")
+        # **The path the command can open**, not the host's. Quoted in full so a model that has to
+        # escape it in a shell does not have to guess.
         return (f"{text[:head]}\n\n[{len(text) - self.observe_chars} characters elided — the whole "
-                f"output is at {kept}, read it with head/sed/tail]\n\n{text[-tail:]}")
+                f"output is at {seen or kept}, read it with head/sed/tail]\n\n{text[-tail:]}")
 
     async def after_model_request(self, ctx: Any, *, request_context: Any, response: Any) -> Any:
         parts = [getattr(part, "part_kind", "") for part in getattr(response, "parts", ()) or ()]
@@ -311,6 +407,22 @@ class Watching(AbstractCapability):
         # treating every failure as one is how a provider outage becomes a compaction loop.
         self.record.note("model_error", error=type(error).__name__, detail=str(error)[:500])
         raise error
+
+
+class _CountedSummariser(WrapperModel):
+    """Counts the summariser's own calls, so they can be recorded apart from the node's model.
+
+    `record.summaries` had **no write path at all** — it was a list that stayed empty, and a test whose
+    assertion was conditional on it passed for that reason. A count of the calls is the least it has to
+    hold; the tokens are on the same wrapper because a summary is a model call with a price.
+    """
+
+    calls: int = 0
+
+    async def request(self, messages: Any, model_settings: Any,
+                      model_request_parameters: Any) -> Any:
+        self.calls += 1
+        return await super().request(messages, model_settings, model_request_parameters)
 
 
 class WithinBudget(AbstractCapability):
@@ -335,6 +447,9 @@ class WithinBudget(AbstractCapability):
         self.budget = budget
         self.record = record
         self.force = force
+        self.summariser: _CountedSummariser | None = None
+        if summarizer is not None:
+            self.summariser = _CountedSummariser(summarizer)
         self.strategies: list[Any] = [SlidingWindowCompaction(
             max_tokens=budget.input_target,
             max_messages=max(budget.keep_messages * 4, 32),
@@ -343,9 +458,9 @@ class WithinBudget(AbstractCapability):
             # dropped the assignment.
             preserve_first_user_message=True,
             receipts=True)]
-        if summarizer is not None:
+        if self.summariser is not None:
             self.strategies.append(SummarizingCompaction(
-                model=summarizer,
+                model=self.summariser,
                 max_tokens=budget.input_target,
                 keep_tokens=max(budget.input_target // 3, 1),
                 keep_messages=budget.keep_messages,
@@ -361,7 +476,14 @@ class WithinBudget(AbstractCapability):
         it as though it had would make the record claim a bound it did not achieve.
         """
         before, size = len(messages), estimate_tokens(messages)
-        for strategy in self.strategies:
+        # **The summariser goes first when there is one.** The order used to be "window, then summary if
+        # the window did not help" — which means the old history is dropped, and only then is the
+        # question asked whether anything needed summarising. The answer is always no by then, because
+        # what would have been summarised is already gone: measured, with the summariser never called at
+        # all. What must be retained is decided before history is discarded, not after.
+        for strategy in ([s for s in self.strategies if type(s).__name__ == "SummarizingCompaction"]
+                         + [s for s in self.strategies
+                            if type(s).__name__ != "SummarizingCompaction"]):
             out = await strategy.compact(messages, ctx)
             after = estimate_tokens(out)
             if self.record is not None:
@@ -371,6 +493,17 @@ class WithinBudget(AbstractCapability):
                 self.record.compactions.append(
                     {"strategy": type(strategy).__name__, "messages_before": before,
                      "messages_after": len(out), "tokens_before": size, "tokens_after": after})
+            if self.summariser is not None and self.record is not None:
+                # One line per call, whether or not it helped: a call that did not reduce the history
+                # still cost money, and a record that counted only the helpful ones would understate
+                # what compaction spent.
+                while len(self.record.summaries) < self.summariser.calls:
+                    entry = {"call": len(self.record.summaries) + 1,
+                             "strategy": type(strategy).__name__, "messages_in": before,
+                             "tokens_in": size, "tokens_out": after}
+                    self.record.summaries.append(entry)
+                    self.record.note("summary", call=entry["call"], strategy=entry["strategy"],
+                                     messages_in=before, tokens_in=size, tokens_out=after)
             if after < size:
                 return out
         return messages

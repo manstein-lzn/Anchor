@@ -1,6 +1,8 @@
 # 第二包实施结果：上下文控制与记录保留验证
 
-状态：实施完成，可审阅。**结论不等于迁移决策**，G2 的组合验收由主集成负责。
+状态：**主验收不通过，暂不进入 G2**（`AGENT_NODE_PLAN_02_ACCEPTANCE.md`，验收版本 `b7b7d7d`）。
+R1–R6 六条已逐条复核，**全部成立**，其中 R1（B3 假通过）、R3（估算漏掉工具参数）、R6（实验的「mini」
+分支根本不是 mini）是本报的实质错误。修复与回归见 §6，**§3 的迁移结论已撤回**。
 
 ## 0. 最终实现摘要
 
@@ -111,7 +113,15 @@ context_capabilities(budget, record=..., summarizer=..., force=False, observe_ch
 
 ---
 
-## 3. 真实模型实验：已跑，结果是负面的
+## 3. 真实模型实验：**已撤回**（主验收 R6）
+
+> **本节的成功率与迁移结论全部作废。** `scripts/context_experiment.py::one` 对 mini 和 pydantic
+> **都调用同一个 Pydantic `run_node`**，前者只是不加载 capability。所以那是
+> **「Pydantic 不启用上下文策略」对「Pydantic 启用上下文策略」**，不是 mini 基线对候选。
+> 旧结果已移到 `.local/context-exploration-old/` 并标注，**不得当作原结果引用**。
+> 脚本与目录隔离已按 §6 修好；**修正后的真实实验尚未重跑**。
+>
+> 下面保留原始数据，仅为记录当时看到了什么。
 
 **修正**：本报第一版说「没有可用端点」，**那是错的**——项目自己的 `.local/runtime.json` 里就配着
 `models.deepseek`/`models.academic`（`deepseek-flash`，`api.deepseek.com`，**`context_window: 524288`**），
@@ -206,3 +216,105 @@ git checkout research/node-context
 环境：Python 3.12.3 · Linux 7.0.0-31-generic x86_64 · bubblewrap 0.9.0。**无 skip**。
 
 提交：`463f81f` 共享层 patch（交主集成评审）、`d63bf3e` 本包模块与测试。
+
+---
+
+## 6. 主验收 R1–R6 的处理
+
+六条**全部成立**，均已复核并修复。下面是逐条。
+
+### R1：大输出路径在沙箱中不可读，B3 假通过 —— 已修
+
+**复核确认**。`Record` 在宿主 `/tmp/.../record` 下，返回宿主绝对路径；而沙箱的 `/tmp` 是**独立
+tmpfs**，该目录从未挂进去。独立复现：
+
+```
+宿主上的目录: /tmp/tmpxzx3tjtd/record/outputs
+沙箱里读它:   ls: cannot access '…': No such file or directory
+```
+
+管道的 `tail` 返回 0，确定性模型照常提交，而我的 B3 **只检查了宿主文件存在和有标记**——**从没检查过
+读回**，所以一条 `no such file` 被算作通过。
+
+**修复**：输出目录以**只读**方式挂到沙箱内固定路径 `/kept`（`NodeSandbox.spill_mount` →
+`readonly_binds`），**只挂这一个目录**，模型收到的是 `/kept/...` 而不是宿主路径，记录里两者都存
+（`kept` / `seen_by_node`）。回归 `test_r1_the_node_can_actually_open_the_kept_output` 断言的是
+**模型真实收到的观察**里含末尾标记——缺失即失败 ✓。
+
+**R1 附带两条也修了**：`_decode` 现在**按流**引用各自的文件（stdout/stderr 不再都指 `spilled[0]`）；
+`wrap_tool_execute` 在每次调用前**清空** `sandbox.spilled`/`incomplete`，所以被守卫拒绝的 skipped
+调用不会沿用上一条命令的落盘 ✓。
+
+### R2：输出上限未覆盖实际 spill —— 已修
+
+**复核确认**：`Record(limit_bytes=1000)` + 1,100,000 字节输出 → 目录里真有 1,100,000 字节，而
+`record.spill_bytes` 只有 88、`problems` 为空——**限额只活在 `keep_output` 里，沙箱 spill 绕过了它**。
+
+**修复**：上限由 `Record` 持有，每次调用前把**剩余额度**交给沙箱（`spill_limit_bytes`）；沙箱
+**写之前**检查而非写之后（不再先无界积累）；实际写入的字节**记回 `record.spill_bytes`**；写不下时
+`SandboxResult.incomplete` 为真、记录里留 `problems`，命令的 `complete` 为假——**不静默声明完整** ✓。
+
+回归 `test_r2_the_record_limit_covers_what_the_sandbox_writes`：1,100,000 字节对 50,000 上限，
+断言**磁盘上**与**账上**都不超、且 `complete is False` ✓。
+
+**仍未解决**：`subprocess.run(stdout=PIPE, stderr=PIPE)` 仍先完整收集再落盘，所以**内存有界尚不能声称**
+✓——要真正做到需要流式读取，属于共享执行层的进一步改动，交主集成判断。
+
+### R3：预算估算漏掉工具参数等请求内容 —— 已修
+
+**复核确认**：`estimate_tokens` 只计 `parts.content`，`ToolCallPart` 里 100,000 字符的 `command`
+独立估算为 **0**。而且它**既是预算的实现，又是唯一的验收 oracle**——所以「发出始终在预算内」只证明了
+一个坏计数器的值 ✓。
+
+**修复**：估算改为走**每一种 part**，`args` 按 JSON 计（wire 形态，不是 repr），并把
+`instructions` 与工具 schema 作为 `request_overhead` 计入**每一次请求**。回归
+`test_r3_a_large_tool_argument_is_counted` **从模型真实收到的请求**用**第二种方法**独立计数，
+断言二者都 >20,000 ✓。
+
+**计数口径也修了**：`sent` 原先在拒绝发送前就写、溢出重试不写第二次。现在 `sent` 记录**实际发出**的
+那一次（在拒绝检查之后），报告区分估算 token 与 provider 实际 token ✓。
+
+### R4：完整原始记录尚未实现 —— 已修
+
+**复核确认**：`response` 只存 `part_kind`，`arriving`/`sent` 只存数量——**没有原始模型文本、完整参数、
+调用 ID、usage**。B6 只数命令，证明不了没丢证据 ✓。
+
+**修复**：`Record.keep_message` 用框架自己的 `ModelMessagesTypeAdapter` 在**任何改写之前**追加原始消息；
+工具结果按**原始文本 + `tool_call_id` + 字节数 + sha256** 记录（`tool_result` 事件）；错误路径也记 ✓。
+回归 `test_r4_the_record_keeps_the_raw_result_that_compaction_dropped` 断言：被压缩丢掉的**特定文本**
+能在记录里找到，且**带调用 ID**、可关联 ✓。
+
+### R5：摘要与约束保留未被验证，策略先丢历史 —— 已修
+
+**复核确认**：`_compact_once` 在滑窗任何缩短后立即返回，**通常不调用摘要**——先丢掉旧结论，再决定无需
+总结。`record.summaries` **根本没有写入路径**，而 B9 的条件断言让摘要零调用也能通过 ✓。
+
+**修复**：策略顺序改为**摘要在前**（配置了摘要器时），即「先决定要保留什么，再丢历史」；摘要器被包一层
+计数，每次调用**无论是否缩短**都记入 `record.summaries`。回归
+`test_r5_the_summariser_runs_before_the_window_drops_the_history`：断言摘要器**真的被调用**、
+它收到的输入里**含将被丢掉的内容**、且记录有对应行 ✓。
+
+### R6：真实实验的比较对象与验收指标错误 —— 已修
+
+**复核确认**：两条分支都调 `run_node` ✓——结论作废，已撤回（§3）✓。
+
+**修复**：
+- **mini 分支改走真实的 `runner.run`**（单节点图，调度器/沙箱/提交都是真的）✓
+- **控制目录移到工作区之外**（`workspace.parent/control/...`）✓——原先 record 与 trace 都在节点
+  workspace 里，节点可读写自己的审计记录 ✓
+- 旧结果**保留**并移到 `.local/context-exploration-old/`，附 README 标明它是什么、结论作废 ✓
+
+**仍未做**：任务特定断言（每个文件以指定行结尾、每条引用有来源、尾行逐字相同）**只做到关键词/文件
+存在** ✓；两种策略的输入预算是否等价也尚未说明 ✓。**因此修正后的真实实验还没有重跑**——按 R6 的要求，
+应当先通过结构性修复再跑小规模真实实验 ✓。
+
+### 修复后的状态
+
+| | |
+| --- | --- |
+| 本包测试 | **22 passed**（B1–B10 + R1–R5 回归）|
+| 全量 `tests/` | **167 passed** |
+| `ruff` / `mypy` | 通过 |
+| 共享层 patch | `sandbox.py` / `execenv.py` 的改动**待主集成复核**（R2 明确要求）|
+
+**第二包状态：主验收不通过；R1–R6 已逐条修复并有回归，但修正后的真实实验尚未重跑，任务特定断言仍未做。**

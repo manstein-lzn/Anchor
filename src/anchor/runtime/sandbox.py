@@ -75,6 +75,13 @@ class SandboxSpec:
     #: ask for them. A path rather than a return value because a command may print a great deal, and
     #: holding it all in memory to hand it back would be the same problem one layer up.
     spill_dir: Path | None = None
+    #: How many bytes the caller is still willing to have written. A spill that ignores this is a bound
+    #: that does not bound: the caller's own accounting said one thing and the disk did another.
+    spill_limit_bytes: int | None = None
+    #: Where to make the spill visible to the command, as a path **inside** the sandbox. The host path
+    #: is not reachable from in there — `/tmp` is a private tmpfs — so a model told the host path is
+    #: told about a file it cannot open, and a test that only checks the host copy passes falsely.
+    spill_mount: str | None = None
     # A node that must reach the literature needs the network; a node that only writes does not, and
     # refusing it costs nothing. Per node, because the two kinds of work are not the same kind of
     # risk and a single global answer would be the wrong one for half of them.
@@ -105,6 +112,12 @@ class SandboxResult:
     #: when there was nothing to spill or nowhere to put it — a caller that needs the whole of a large
     #: output has to check rather than assume.
     spilled: tuple[Path, ...] = ()
+    #: The same files as the command can reach them, when a mount was named.
+    visible: tuple[str, ...] = ()
+    #: True when the output was cut and **could not be kept whole** — the store's bound was reached,
+    #: or there was nowhere to put it. Said out loud because the alternative is a caller that believes
+    #: it holds a complete output, which is the failure this whole path exists to avoid.
+    incomplete: bool = False
 
     @property
     def complete(self) -> bool:
@@ -142,22 +155,27 @@ def _validate(spec: SandboxSpec, allowed: frozenset[str]) -> None:
             raise SandboxDenied("invalid_argument", "command arguments must not contain NUL")
 
 
-def _decode(data: bytes, limit: int, spilled: tuple[Path, ...] = ()) -> str:
+def _decode(data: bytes, limit: int, visible: str | None = None) -> str:
     """The output as far as the model may see it, and **where the rest is when there is a rest**.
 
     A truncation notice that does not say where the rest went is a dead end: the model is told its
-    output was cut and given no way to read the rest, which is worse than not cutting it. The paths
-    come from `_spill`, which ran before this and kept the whole thing.
+    output was cut and given no way to read the rest, which is worse than not cutting it. And the path
+    it is given is the one **it** can open — the sandbox's view, not the host's, which is a private
+    tmpfs away and reads as a missing file.
     """
     text = data[:limit].decode("utf-8", errors="replace")
     if len(data) > limit:
-        rest = f" the whole output is at {spilled[0]}" if spilled else ""
-        text += f"\n[truncated:{len(data) - limit}-bytes;{rest or ' and was not kept'}]"
+        where = f" the whole output is at {visible}" if visible else " and was not kept"
+        text += f"\n[truncated:{len(data) - limit}-bytes;{where}]"
     return text
 
 
-def _spill(spec: SandboxSpec, stdout: bytes, stderr: bytes) -> tuple[Path, ...]:
+def _spill(spec: SandboxSpec, stdout: bytes, stderr: bytes) -> tuple[tuple[Path, ...], int]:
     """Put the whole of a command's output where a caller can read it, before it is cut.
+
+    Returns what was written **and how much of what was cut could not be written**. The second number
+    is the one that matters: a caller that is told "the rest is at <path>" when the rest is partly
+    missing has been told something false, and it will act on it.
 
     Only when the spec asked and only when something would actually be lost — a file per command with
     nothing in it is a directory that fills up for no reason. The name is a digest of the content, so
@@ -165,18 +183,28 @@ def _spill(spec: SandboxSpec, stdout: bytes, stderr: bytes) -> tuple[Path, ...]:
     thing.
     """
     if spec.spill_dir is None:
-        return ()
+        return (), 0
     written: list[Path] = []
+    lost = 0
     for stream, data in (("stdout", stdout), ("stderr", stderr)):
         if len(data) <= spec.max_output_bytes:
             continue
+        if spec.spill_limit_bytes is not None and len(data) > spec.spill_limit_bytes:
+            # **Checked before writing, not after.** Accumulating the whole thing and then discovering
+            # there is no room is how a bound becomes a crash; the caller gets a partial file and the
+            # count of what it does not have.
+            keep = max(spec.spill_limit_bytes, 0)
+            lost += len(data) - keep
+            data = data[:keep]
+            if not data:
+                continue
         digest = hashlib.sha256(data).hexdigest()[:16]
         path = Path(spec.spill_dir) / f"{stream}-{digest}.txt"
         if not path.exists():
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(data)
         written.append(path)
-    return tuple(written)
+    return tuple(written), lost
 
 
 def _probe(binary: str, timeout_seconds: float = 10.0) -> None:
@@ -298,14 +326,36 @@ class BubblewrapWorkspaceSandbox:
                                        stderr=subprocess.PIPE, timeout=spec.timeout_seconds,
                                        check=False, env={})
         except subprocess.TimeoutExpired as exc:
-            spilled = _spill(spec, exc.stdout or b"", exc.stderr or b"")
-            return SandboxResult(124, _decode(exc.stdout or b"", spec.max_output_bytes, spilled),
-                                 _decode(exc.stderr or b"", spec.max_output_bytes, spilled), True,
-                                 spilled)
-        spilled = _spill(spec, completed.stdout, completed.stderr)
-        return SandboxResult(completed.returncode,
-                             _decode(completed.stdout, spec.max_output_bytes, spilled),
-                             _decode(completed.stderr, spec.max_output_bytes, spilled), False, spilled)
+            return self._result(124, exc.stdout or b"", exc.stderr or b"", spec, True)
+        return self._result(completed.returncode, completed.stdout, completed.stderr, spec, False)
+
+    @staticmethod
+    def _result(returncode: int, stdout: bytes, stderr: bytes, spec: SandboxSpec,
+                timed_out: bool) -> SandboxResult:
+        """One place that decides what a caller is told, so the two streams cannot be confused.
+
+        Each stream cites **its own** file. Citing the first one for both is how a model is sent to
+        stdout's copy to look for a stderr message that is not in it.
+        """
+        spilled, lost = _spill(spec, stdout, stderr)
+        # What the command can actually open, per stream. The host path is a private tmpfs away from
+        # the sandbox, so a model told the host path is told about a file it cannot read — and a test
+        # that checks the host copy passes while the node never saw it.
+        seen: dict[str, str] = {}
+        for path in spilled:
+            stream = path.name.split("-", 1)[0]
+            seen.setdefault(stream, f"{spec.spill_mount}/{path.name}" if spec.spill_mount
+                            else str(path))
+        cut = len(stdout) > spec.max_output_bytes or len(stderr) > spec.max_output_bytes
+        return SandboxResult(
+            returncode,
+            _decode(stdout, spec.max_output_bytes, seen.get("stdout")),
+            _decode(stderr, spec.max_output_bytes, seen.get("stderr")),
+            timed_out, spilled,
+            tuple(seen[name] for name in ("stdout", "stderr") if name in seen),
+            # Cut, and either nothing was kept or part of it was not. A caller that is told "the rest
+            # is at <path>" when part of the rest is missing has been told something false.
+            incomplete=bool(cut and (lost or not spilled)))
 
 
 class SubprocessWorkspaceSandbox:

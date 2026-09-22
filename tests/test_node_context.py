@@ -16,12 +16,13 @@ import pytest
 
 pytest.importorskip("pydantic_ai", reason="the optional adapter dependency is not installed")
 
+from pydantic_ai.capabilities import AbstractCapability                        # noqa: E402
 from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart          # noqa: E402
 from pydantic_ai.models.function import FunctionModel                          # noqa: E402
 
 from anchor.node import COMPLETED, NodeRequest                     # noqa: E402
 from anchor.node.context import (                                               # noqa: E402
-    Budget, Record, Uncompactable, context_capabilities, estimate_tokens,
+    Budget, Record, Uncompactable, Watching, context_capabilities, estimate_tokens,
 )
 from anchor.node.pydantic_adapter import run_node                               # noqa: E402
 from anchor.runtime.sandbox import BubblewrapWorkspaceSandbox                   # noqa: E402
@@ -136,7 +137,7 @@ def test_b1_the_budget_says_which_numbers_it_used(tmp_path):
     described = small_budget().describe()
 
     assert described == {"window": 8_000, "output_reserve": 500, "input_target": 3_000,
-                         "keep_messages": 2, "estimator": "chars/4"}
+                         "keep_messages": 2, "request_overhead": 4_000, "estimator": "chars/4"}
     with pytest.raises(ValueError, match="no room"):
         Budget(window=1_000, output_reserve=400, input_target=700)
     with pytest.raises(ValueError, match="at least one message"):
@@ -491,7 +492,9 @@ def test_b9_the_summariser_is_counted_separately_from_the_main_model(tmp_path):
     what compaction spent. Recorded as its own list, and only when one was configured."""
     workspace = tmp_path / "ws"
     workspace.mkdir()
-    summariser = Counting("a summary of the earlier work")
+    # Enough turns: the summariser now runs **before** the window rather than after it, so a double
+    # that answers once is asked more than once — which is the fix, not a test problem.
+    summariser = Counting(*["a summary of the earlier work"] * 12)
     outcome, record, main = ran(workspace, tmp_path, [[noisy(400)] for _ in range(6)],
                                summarizer=summariser)
 
@@ -531,3 +534,175 @@ def test_b10_reaching_the_store_bound_is_visible_and_never_called_complete(tmp_p
     refused = [item for item in record.commands if item["kept"] is None]
     assert refused, "no command was recorded as unkept"
     assert all(item["complete"] is False for item in refused)
+
+
+# ── 主验收 R1–R5 要求的回归 ─────────────────────────────────────────────────────────────────────
+
+def test_r1_the_node_can_actually_open_the_kept_output(tmp_path):
+    """**The acceptance's R1.** B3 passed falsely: the record lived in a host `/tmp` directory, the
+    sandbox's `/tmp` is a private tmpfs, and the read back was `No such file or directory` — while the
+    pipeline's last command exited zero and the test only looked at the host copy.
+
+    So this asserts the **observation the model received**, not a file on the host: the marker has to
+    appear in the output of a command the node ran.
+    """
+    from anchor.runtime.sandbox import DEFAULT_MAX_OUTPUT_BYTES
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    marker = "MARKER-ONLY-IN-THE-FULL-OUTPUT"
+    size = DEFAULT_MAX_OUTPUT_BYTES + 400_000
+    seen: list[str] = []
+
+    class Eyes(AbstractCapability):
+        async def wrap_tool_execute(self, ctx, *, call, tool_def, args, handler):
+            result = await handler(args)
+            seen.append(result if isinstance(result, str) else str(result))
+            return result
+
+    record = Record(tmp_path / "record")
+    model = Counting(
+        [f"head -c {size} /dev/zero | tr '\\0' 'x'; echo; echo {marker}"],
+        # Reads it back through the path the model was actually given, in the sandbox.
+        ["tail -c 200 " + Watching.MOUNT + "/*.txt"],
+        ['anchor-done --summary "read it back"'])
+    outcome = asyncio.run(run_node(
+        request(workspace), model=model,
+        # `Eyes` first, so it wraps the context capabilities and sees the observation **as the model
+        # receives it**. Placed last it would be the innermost wrapper and would see the raw result —
+        # which is how the first version of this test measured the wrong thing.
+        capabilities=(Eyes(), *context_capabilities(small_budget(), record=record))))
+
+    assert outcome.status == COMPLETED, outcome.reason
+    # The first observation is a bounded preview that names a path the sandbox can open.
+    assert f"{Watching.MOUNT}/" in seen[0], f"the preview names no readable path: {seen[0][-300:]}"
+    assert len(seen[0]) < 20_000, "the first observation of a huge output was not bounded"
+    # And the tail of the real output is in what the node was TOLD, from the sandbox.
+    assert marker in seen[1], (
+        f"the node could not read back what was kept — the acceptance's R1, still broken.\n"
+        f"read back: {seen[1][:300]!r}")
+    assert record.commands[0]["complete"] is True
+    assert record.commands[0]["seen_by_node"], "the record does not say where the node could read it"
+
+
+def test_r2_the_record_limit_covers_what_the_sandbox_writes(tmp_path):
+    """**The acceptance's R2.** `Record(limit_bytes=1000)` used to report 88 bytes held while the
+    directory on disk had 1,100,000: the limit lived in one write path and the sandbox's spill went
+    round it."""
+    import shutil
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    small = Record(tmp_path / "record", limit_bytes=50_000)
+    model = Counting(["head -c 1100000 /dev/zero | tr '\\0' 'x'"],
+                     ['anchor-done --summary "done"'])
+    outcome = asyncio.run(run_node(
+        request(workspace), model=model,
+        capabilities=context_capabilities(small_budget(), record=small)))
+
+    assert outcome.status == COMPLETED, outcome.reason
+    on_disk = sum(item.stat().st_size for item in (small.directory / "outputs").glob("*.txt")) \
+        if (small.directory / "outputs").is_dir() else 0
+    assert on_disk <= small.limit_bytes, \
+        f"{on_disk} bytes on disk against a {small.limit_bytes}-byte bound"
+    assert small.spill_bytes <= small.limit_bytes, \
+        f"the record accounts {small.spill_bytes} bytes against a {small.limit_bytes}-byte bound"
+    # And a cut it could not keep whole says so, rather than reporting a complete output.
+    assert small.commands[0]["complete"] is False, "an unkeepable output was called complete"
+    assert small.commands[0]["incomplete"] is True
+    assert small.problems, "nothing recorded that the store could not keep it"
+    shutil.rmtree(tmp_path / "record", ignore_errors=True)
+
+
+def test_r3_a_large_tool_argument_is_counted(tmp_path):
+    """**The acceptance's R3.** The estimator counted `part.content` only, so a 100,000-character
+    `bash` command — which lives in `ToolCallPart.args` — cost zero tokens. It was also both the
+    implementation of the budget and the only thing checking it.
+
+    Checked against the request the model was **handed**, counted a second way, so the oracle is not the
+    function under test.
+    """
+    from pydantic_ai.models.function import FunctionModel as FM
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    huge = "echo " + "x" * 100_000
+    counted: list[int] = []
+
+    def model_fn(messages, info):
+        # The model's own view: serialise what it was given and measure that.
+        import json as _json
+        counted.append(len(_json.dumps(
+            [getattr(part, "args", None) or getattr(part, "content", "")
+             for message in messages for part in getattr(message, "parts", ())],
+            default=str)) // 4)
+        return ModelResponse(parts=[ToolCallPart(tool_name="bash", args={"command": huge})])
+
+    record = Record(tmp_path / "record")
+    outcome = asyncio.run(run_node(
+        request(workspace, max_requests=4), model=FM(model_fn),
+        capabilities=context_capabilities(small_budget(window=400_000, input_target=300_000,
+                                                       keep_messages=2), record=record)))
+
+    assert outcome.status in ("completed", "failed", "budget_exhausted"), outcome.reason
+    # The second request carries the 100,000-character command, so its estimate must not be a handful.
+    assert record.sent, "no request was recorded"
+    assert max(item["tokens"] for item in record.sent) > 20_000, (
+        f"a 100,000-character command was estimated at "
+        f"{max(item['tokens'] for item in record.sent)} tokens")
+    # And an independent count agrees it is large.
+    assert max(counted) > 20_000, f"the model saw {max(counted)} estimated tokens"
+
+
+def test_r4_the_record_keeps_the_raw_result_that_compaction_dropped(tmp_path):
+    """**The acceptance's R4.** The record held `part_kind`s and counts, so "what did the command that
+    was summarised away actually print" had no answer — and B6 only counted commands."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    needle = "A-SPECIFIC-LINE-THAT-COMPACTION-WILL-DROP"
+    outcome, record, _ = ran(workspace, tmp_path,
+                             [["echo " + needle], [noisy(400)], [noisy(400)], [noisy(400)]])
+
+    assert outcome.status == COMPLETED, outcome.reason
+    assert record.compactions, "no compaction, so nothing was dropped"
+    raw = (record.directory / "record.jsonl").read_text(encoding="utf-8")
+    assert needle in raw, "the text that compaction dropped is not in the record at all"
+    # With the call it answered, so the record can be correlated rather than merely searched.
+    entries = [json.loads(line) for line in raw.splitlines()]
+    results = [item for item in entries if item.get("kind") == "tool_result"]
+    assert results, "no raw tool results were recorded"
+    assert any(item.get("tool_call_id") for item in results), \
+        "the raw results carry no call id, so they cannot be correlated"
+    assert all("bytes" in item and "sha256" in item for item in results)
+
+
+def test_r5_the_summariser_runs_before_the_window_drops_the_history(tmp_path):
+    """**The acceptance's R5.** The window ran first and returned as soon as it had shortened anything,
+    so the summariser was never called — the history it would have summarised was already gone, and
+    `record.summaries` had no write path at all."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    Counting(*["SUMMARY-OF-THE-EARLIER-WORK"] * 20)
+    seen_inputs: list[str] = []
+
+    class Nosey(Counting):
+        def _answer(self, messages, info):
+            seen_inputs.append(" ".join(
+                str(getattr(part, "content", "")) for message in messages
+                for part in (getattr(message, "parts", ()) or ())))
+            return super()._answer(messages, info)
+
+    nosey = Nosey(*["SUMMARY-OF-THE-EARLIER-WORK"] * 20)
+    record = Record(tmp_path / "record")
+    outcome = asyncio.run(run_node(
+        request(workspace),
+        model=Counting(*[[noisy(400)] for _ in range(6)]),
+        capabilities=context_capabilities(small_budget(), record=record, summarizer=nosey)))
+
+    assert outcome.status == COMPLETED, outcome.reason
+    assert nosey.asked > 0, (
+        "the summariser was never called — the window dropped the history it would have summarised, "
+        "which is the acceptance's R5")
+    assert any("a-fairly-long-line-of-output" in item for item in seen_inputs), \
+        "the summariser was given nothing that had been dropped"
+    assert record.summaries, "the record has no line for the summary calls that were made"

@@ -117,24 +117,57 @@ def _model(model: dict, secret: str):
     return chosen(model["model"], provider=provider)
 
 
+def _run_mini(spec: dict[str, str], workspace: Path, config_path: str):
+    """One pass of the mini path, through the graph runner rather than through the new entry point.
+
+    It gets a one-node graph so that the surrounding machinery — the scheduler, the sandbox, the commit
+    — is the real one, and it is handed the same task text the other arm gets.
+    """
+    import json as _json
+    from anchor.simple import run as runner
+    (workspace / "graph.json").write_text(_json.dumps({
+        "entry": "only", "objective": spec["task"],
+        "agents": {"w": {"model": "models.deepseek", "writes": ["*"]}},
+        "nodes": [{"id": "only", "agent": "w"}], "edges": [],
+    }), encoding="utf-8")
+    state = runner.run(workspace, config_path=config_path)
+    node = state.nodes.get("only", {})
+    return (NodeOutcome(status="completed" if state.status == "finished" else state.status,
+                        submission=node.get("submission", ""), route=None,
+                        model_requests=0, reason=state.error or ""),
+            Record(workspace.parent / "control"))
+
+
 async def one(node: str, name: str, spec: dict[str, str], attempt: int, workspace: Path,
               model_spec: dict, summariser_spec: dict | None, secret: str,
-              budget: Budget) -> Attempt:
+              budget: Budget, config_path: str) -> Attempt:
     import shutil
 
     directory = workspace / f"{node}-{name}-{attempt}"
     shutil.rmtree(directory, ignore_errors=True)
     directory.mkdir(parents=True, exist_ok=True)
-    record = Record(directory / "record")
+    # **The control directory is a sibling of the node's workspace, never inside it.** Inside, the node
+    # can read and write the record of itself, and the audit trail becomes something the audited thing
+    # can edit.
+    control = workspace.parent / "control" / f"{node}-{name}-{attempt}"
+    control.mkdir(parents=True, exist_ok=True)
+    record = Record(control)
     summarizer = _model(summariser_spec, secret) if summariser_spec else None
     capabilities = (context_capabilities(budget, record=record, summarizer=summarizer)
                     if node == "pydantic" else ())
 
     started = time.monotonic()
-    outcome: NodeOutcome = await run_node(
-        NodeRequest(execution_id=f"{node}-{name}-{attempt}", task=spec["task"], workspace=directory,
-                    max_requests=40, trace=directory / "trace.jsonl"),
-        model=_model(model_spec, secret), capabilities=capabilities)
+    if node == "mini":
+        # **The real mini path.** The first version of this script called the same Pydantic `run_node`
+        # for both arms with the capabilities left off, which compares "Pydantic without a context
+        # strategy" against "Pydantic with one" — not a baseline against a candidate. Its numbers said
+        # nothing about mini and the conclusion drawn from them has been withdrawn.
+        outcome, record = _run_mini(spec, directory, config_path)
+    else:
+        outcome = await run_node(
+            NodeRequest(execution_id=f"{node}-{name}-{attempt}", task=spec["task"],
+                        workspace=directory, max_requests=40, trace=directory / "trace.jsonl"),
+            model=_model(model_spec, secret), capabilities=capabilities)
     seconds = time.monotonic() - started
 
     produced = sorted(str(item.relative_to(directory)) for item in directory.rglob("*")
@@ -215,7 +248,8 @@ async def main() -> int:
                 # The mini node does not take the context capabilities; that is the comparison.
                 print(f"  {node:9s} {name:11s} run {attempt} …", flush=True)
                 attempts.append(await one(node, name, TASKS[name], attempt, workspace,
-                                          model_spec, summariser_spec, secret, budget))
+                                          model_spec, summariser_spec, secret, budget,
+                                          args.config))
 
     out = workspace / "results.json"
     out.write_text(json.dumps([asdict(item) for item in attempts], indent=2, ensure_ascii=False),

@@ -118,6 +118,13 @@ class Executed:
     #: caller needs to know is whether it can get the rest, and after `output` has been cut this is the
     #: only thing that answers it.
     spilled: tuple[Path, ...] = ()
+    #: The same files as the **command** could open them, when a mount was named. The host path is a
+    #: private tmpfs away from the sandbox, so telling the node the host path tells it about a file it
+    #: cannot read.
+    visible: tuple[str, ...] = ()
+    #: The output was cut and could not be kept whole. Said out loud rather than left for a caller to
+    #: infer from an empty `spilled`, which is also what "nothing was cut" looks like.
+    incomplete: bool = False
 
 
 @dataclass
@@ -143,9 +150,15 @@ class NodeSandbox:
     #: because who wants the whole output is an upper layer's business — a node that is bounding its
     #: context does, and one that is not should not be writing files for nothing.
     spill_dir: Path | None = None
-    #: What the last command spilled. Read by an upper layer that must cite the full output rather
-    #: than guess at it from the truncated text.
+    #: How many bytes may still be written, and where the spill becomes visible **inside** the sandbox.
+    spill_limit_bytes: int | None = None
+    spill_mount: str | None = None
+    #: What the last command spilled, and whether anything was cut that could not be kept. Both are per
+    #: command: read after the fact they describe the command that just ran, not the one before it.
     spilled: tuple[Path, ...] = ()
+    #: The same files as the command could open them, when a mount was named.
+    visible: tuple[str, ...] = ()
+    incomplete: bool = False
 
     def __post_init__(self) -> None:
         if self.sandbox is None:
@@ -165,18 +178,32 @@ class NodeSandbox:
         # before a node starts, and a runner that refused a fresh directory would be refusing the
         # ordinary case to catch an unusual one.
         present = tuple(name for name in readonly if (self.tree / name).exists())
+        # **The mount, not just a path in a message.** A spill the command cannot open is a spill the
+        # model is told about and cannot use: the host directory is a private tmpfs away, so the read
+        # fails, a pipeline's last command still exits zero, and a test that checks the host copy says
+        # everything is fine. Only this one directory, read-only — mounting the record's parent would
+        # put the audit trail inside the sandbox where the node could rewrite what is said about it.
+        binds = self.readonly()
+        if self.spill_dir is not None and self.spill_mount:
+            binds = (*binds, (str(self.spill_dir), self.spill_mount))
         return SandboxSpec(
             workspace=self.tree, command=(*SHELL, "-c", command),
             timeout_seconds=float(timeout if timeout is not None else self.timeout_seconds),
-            network=self.network, tool_dirs=self.dirs, readonly_binds=self.readonly(),
+            network=self.network, tool_dirs=self.dirs, readonly_binds=binds,
             workspace_readonly=present, spill_dir=self.spill_dir,
+            spill_limit_bytes=self.spill_limit_bytes, spill_mount=self.spill_mount,
             env=(("ANCHOR_NODE", self.node_id), ("ANCHOR_ROUTES", ",".join(self.routes))))
 
     def run(self, command: str, *, timeout: float | None = None) -> Executed:
         result = self.sandbox.run(self.spec(command, timeout=timeout))
+        # Assigned before the result is built, so a caller reading them after `run` gets this command's
+        # and not the previous one's.
         self.spilled = tuple(result.spilled)
+        self.visible = tuple(result.visible)
+        self.incomplete = bool(result.incomplete)
         return Executed(output=result.stdout + result.stderr, returncode=result.returncode,
-                        timed_out=bool(result.timed_out), spilled=tuple(result.spilled))
+                        timed_out=bool(result.timed_out), spilled=tuple(result.spilled),
+                        visible=tuple(result.visible), incomplete=bool(result.incomplete))
 
     def require_working(self) -> None:
         """Run one trivial command with this node's real mounts, before anything else does.
