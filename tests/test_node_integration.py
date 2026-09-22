@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import subprocess
 import sys
 from pathlib import Path
@@ -21,12 +20,12 @@ import pytest
 pytest.importorskip("pydantic_ai", reason="the optional adapter dependency is not installed")
 pytest.importorskip("pydantic_ai_harness", reason="the harness is not installed here")
 
-from anchor.node import COMPLETED, NodeRequest, NodeOutcome                        # noqa: E402
+from anchor.node import COMPLETED, NodeRequest                        # noqa: E402
 from anchor.node.context import (                                                  # noqa: E402
-    Budget, Record, context_capabilities, remember,
+    Budget, Record, context_capabilities,
 )
 from anchor.node.pydantic_adapter import run_node                                  # noqa: E402
-from anchor.node.recovery import Budget as Spend, open_store, save_budget           # noqa: E402
+from anchor.node.recovery import open_store           # noqa: E402
 from anchor.runtime.sandbox import (                                               # noqa: E402
     DEFAULT_MAX_OUTPUT_BYTES, BubblewrapWorkspaceSandbox, SandboxSpec,
 )
@@ -268,7 +267,6 @@ def test_b8_an_op_in_a_graph_does_not_need_any_of_this(tmp_path):
     这条断言的是 op 旁边没有任何框架类型的管道：图照跑 ✓，op 只看到它的挂载 ✓。
     另一半（压缩后中断再恢复的闭环）记在 `AGENT_NODE_G2_RESULT.md` 里，连同它为什么还是阻塞 ✓。
     """
-    from anchor.simple import graph as graph_module
     from anchor.simple import run as runner
 
     graph = {
