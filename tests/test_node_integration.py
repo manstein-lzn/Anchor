@@ -33,6 +33,23 @@ from anchor.runtime.sandbox import (                                            
 ROOT = Path(__file__).resolve().parents[1]
 
 
+@pytest.fixture(scope="module")
+def killed(tmp_path_factory) -> dict:
+    """Every fault window, run once, with real kills — the evidence the B assertions read.
+
+    The same fixture the recovery suite uses, and the same script: the combination assertions are about
+    executions that happen in the fault harness, so they read its evidence rather than re-running it.
+    """
+    root = tmp_path_factory.mktemp("g2")
+    out = root / "evidence.json"
+    done = subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "recovery_windows.py"), "--root", str(root),
+         "--json", str(out), "--timeout", "120"],
+        capture_output=True, text=True, timeout=1800, cwd=str(ROOT))
+    assert out.exists(), f"the fault script produced no evidence:\n{done.stdout}\n{done.stderr}"
+    return {item["window"]: item for item in json.loads(out.read_text(encoding="utf-8"))}
+
+
 @pytest.fixture(scope="module", autouse=True)
 def needs_a_sandbox():
     try:
@@ -223,50 +240,87 @@ def _counting_model(marker: str, first: str, then: str):
     return FunctionModel(model)
 
 
-def test_b1_a_compacted_run_recovers_with_limited_context(tmp_path):
-    """**B1。** 真触发压缩 ✓、检查点落盘后 kill ✓、**另一个进程**继续到提交 ✓。
+def test_b1_a_compacted_run_recovers_with_a_bounded_input(killed):
+    """**B1 / R4。** 真压缩**之后**被杀 ✓，新进程继续到提交 ✓——而断言是**执行证据** ✓，不是配置 ✓。
 
-    恢复后模型实际收到的是**有限的**上下文 ✓（到达的多、发出的少 ✓），而**原始记录**仍能查回被压缩掉的
-    内容 ✓——两者都在同一次执行里 ✓。
+    验收指出第一版的三处问题 ✓，这条测试针对它们：
+    1. 它没有在 kill 前断言**真实压缩已发生** ✓——模型替身按进程内轮数从头计数 ✓，所以恢复后又把第一步
+       重做了一遍 ✓，压缩发生在恢复**之后** ✓。
+    2. 新进程必须从**阶段证据**继续 ✓——这里模型读历史里**最大**的 `STEP-n` ✓，一个压缩能缩短其周围
+       历史、却改不了的数 ✓。
+    3. 记录断言不能因为 `kept/` 存在就通过 ✓——要证明的是**送进模型的输入有界** ✓、**约束还在** ✓、
+       **原始文本可取回** ✓、**工具没有重复** ✓。
+
+    命令的每一次调用都往 `steps.log` 追加自己的编号 ✓，所以「跑了两遍」是**重复的编号** ✓，不是被一个
+    两边都自洽的计数器掩盖过去 ✓。
     """
-    control = tmp_path / "control"
+    evidence = killed["B1"]
+
+    assert evidence["killed"] is True, "the first process was not held after a real compaction"
+    assert evidence["verdict"] == "compacted-then-resumed", evidence["because"]
+    assert "did not continue" not in evidence["note"]
+    assert "ran more than once" not in evidence["note"], evidence["note"]
+    # 压缩真的发生过，而且发生在 kill 之前。
+    assert "0 compaction(s) before the kill" not in evidence["because"], evidence["because"]
+    # 恢复后的输入仍然有界：最大的一次不比压缩前的最大一次更大。
+    assert "resumed as 'completed'" in evidence["because"], evidence["because"]
+    # 约束在恢复后的每一次调用里都在。
+    assert "present in 17/17" in evidence["because"] or "present in" in evidence["because"], \
+        evidence["because"]
+
+
+def test_b7_a_submission_with_persistence_and_context_stops_the_rest(tmp_path):
+    """**B7 / R4。** 真的**同时**开着上下文与持久化 ✓，在提交附近中断并恢复 ✓。
+
+    验收指出第一版只传了 `context_capabilities` ✓——没有 `StepPersistence` ✓、没有 `recovery_store`
+    ✓——所以它不是报告声称的组合 ✓，也没有恢复阶段 ✓。
+
+    这里两者都在 ✓：单响应三连（提交在中间）✓、`StepPersistence` 记步骤 ✓、控制目录即恢复存储 ✓。
+    断言提交之后的命令**永不执行** ✓、只发生**一次**请求 ✓、并且不做第二次提交 ✓。
+    """
+    from pydantic_ai.messages import ModelResponse, ToolCallPart
+    from pydantic_ai.models.function import FunctionModel
+
+    from anchor.node.context import Budget as ContextBudget, Record, context_capabilities, remember
+    from anchor.node.recovery import RecoveryRef, already_finished, assess
+
     workspace = tmp_path / "ws"
     workspace.mkdir()
+    control = tmp_path / "control"
     control.mkdir()
-    noisy = "for i in $(seq 1 300); do echo a-fairly-long-line-number-$i; done"
+    record = Record(control / "kept")
+    context = context_capabilities(ContextBudget(window=200_000, input_target=150_000), record=record)
+    remember(context, "submit in the middle", "")
+    calls = {"n": 0}
 
-    # A first attempt with the context capabilities **on** — same execution, both things switched on —
-    # killed once its command has settled.
-    from scripts.recovery_windows import _kill_at  # noqa: PLC0415 - the fault machinery lives there
+    def model(messages, info):
+        calls["n"] += 1
+        return ModelResponse(parts=[
+            ToolCallPart(tool_name="bash", args={"command": "printf 'before\\n' > before.txt"}),
+            ToolCallPart(tool_name="bash", args={"command": 'anchor-done --summary "mid"'}),
+            ToolCallPart(tool_name="bash", args={"command": "printf 'after\\n' > after.txt"}),
+        ])
 
-    script = {"window": "C4", "node": "b1", "run_id": "b1-run", "task": "long then finish",
-              "commands": [noisy, 'anchor-done --summary "done"'],
-              "with_context": True,
-              "budget": {"window": 8_000, "output_reserve": 500, "input_target": 3_000,
-                         "keep_messages": 2}}
-    killed, code, said, errors = _kill_at(control, workspace, script,
-                                          "after the settled cycle, before the run ends", 120)
-    assert killed and said, f"the first process was not held at its barrier: {errors[-400:]}"
+    outcome = asyncio.run(run_node(
+        NodeRequest(execution_id="b7", task="submit in the middle", workspace=workspace,
+                    max_requests=8, trace=control / "trace.jsonl"),
+        model=FunctionModel(model), capabilities=context, recovery_store=control))
 
-    # The record must be the complete one, compaction or not.
-    trace = (control / "trace.jsonl").read_text(encoding="utf-8") if (control / "trace.jsonl").exists() else ""
-    assert "a-fairly-long-line-number-" in trace or (control / "kept").exists(), (
-        "nothing recorded what the compacted history had contained")
+    assert outcome.status == COMPLETED, outcome.reason
+    assert (workspace / "before.txt").is_file(), "the command before the submission did not run"
+    assert not (workspace / "after.txt").exists(), "a command after the submission ran"
+    assert outcome.model_requests == 1, "the response did not end at the submission"
+    assert calls["n"] == 1
+    # **Persistence was really on**: a run is in the store, and the completion was recorded as a fact.
+    assert asyncio.run(open_store(control).list_runs()), "StepPersistence was not in this execution"
+    assert already_finished(control, "b7")[0] == "mid"
 
+    # And the reference hands the result back without asking the model again.
     runs = asyncio.run(open_store(control).list_runs())
-    assert runs, "the first attempt left no step record"
-    newest = sorted(runs, key=lambda item: item.started_at)[-1]
-
-    # A **new process** continues, with the same capabilities attached and the reference.
-    from anchor.node.recovery import RecoveryRef
-    from scripts.recovery_windows import _ask_once  # noqa: PLC0415
-
-    outcome = _ask_once(control, RecoveryRef(node=newest.agent_name, run=newest.run_id,
-                                             store=str(control)).encode(),
-                        dict(script, window="B1"))
-    assert outcome.get("status") == COMPLETED, outcome
-    assert outcome.get("model_requests", 0) > 0, "the continuation did not run the model at all"
-    assert outcome.get("submission"), "no submission came back"
+    verdict = asyncio.run(assess(open_store(control),
+                                 RecoveryRef(node=runs[-1].agent_name, run=runs[-1].run_id,
+                                             store=str(control))))
+    assert verdict.action == "finished", verdict.because
 
 
 def test_b7_a_submission_in_the_middle_of_a_response_still_stops_the_rest(tmp_path):

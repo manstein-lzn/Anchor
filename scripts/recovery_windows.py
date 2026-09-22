@@ -20,6 +20,8 @@ and its only job is to say when it has arrived somewhere.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import re
 import asyncio
 import json
 import os
@@ -116,7 +118,7 @@ def _report_window(window: str, where: str) -> None:
         os.write(fd, f"{window}@{where}\n".encode("utf-8"))
 
 
-def _barrier(window: str, script: dict):
+def _barrier(window: str, script: dict, record: Any = None):
     """The capability that stops the node at the chosen boundary.
 
     The four tool-related hooks are not interchangeable and the boundaries they give are not the same
@@ -140,6 +142,7 @@ def _barrier(window: str, script: dict):
         def __init__(self) -> None:
             self.seen_models = 0
             self.seen_tools = 0
+            self.since_compaction = 0
 
         async def after_model_request(self, ctx, *, request_context, response):
             self.seen_models += 1
@@ -152,6 +155,14 @@ def _barrier(window: str, script: dict):
                 if any(DONE_SENTINEL in str(getattr(part, "content", ""))
                        for message in messages for part in (getattr(message, "parts", ()) or ())):
                     _wait_for_a_kill("submission persisted, the graph has not finalised")
+            if window == "B1" and record is not None and len(record.compactions) > 0:
+                # **Stage evidence, not a turn count.** The pause has to land after a **real**
+                # compaction and after a checkpoint that postdates it — so it waits for a summariser call
+                # to appear in the record, then lets one more settled cycle through. A barrier that
+                # counted requests instead fired on a history that had not been compacted at all.
+                self.since_compaction += 1
+                if self.since_compaction >= 2:
+                    _wait_for_a_kill("compaction done, a later checkpoint is on disk")
             if window == "C1" and self.seen_models == 1:
                 _wait_for_a_kill("after_model_request, before the tool cycle")
             if window == "C4" and self.seen_models >= kill_after:
@@ -255,11 +266,15 @@ async def _run_child(window: str, control: Path, workspace: Path, script: dict,
     from anchor.node.recovery import save_budget, Budget
 
     if not (control / "budget.json").exists():
-        save_budget(control, Budget(requests_used=0, requests_allowed=8))
+        # The declared allowance follows the request the child is about to make, so a case with more
+        # work to do is not silently capped at the default.
+        save_budget(control, Budget(requests_used=0,
+                                    requests_allowed=int(script.get("max_requests", 8))))
 
     turn = {"n": 0}
 
     calls_log = control / "model-calls.log"
+    seen_log = control / "model-input.jsonl"
 
     def model(messages, info):
         """What to do next, decided from **the history this process was handed**.
@@ -275,6 +290,34 @@ async def _run_child(window: str, control: Path, workspace: Path, script: dict,
         """
         with calls_log.open("a", encoding="utf-8") as handle:
             handle.write("call\n")
+        # **What the model actually received**, written by the model itself. `chars` is the whole
+        # rendered history, so "the input was bounded" is a fact about this process rather than about
+        # the configuration that was supposed to bound it; `constraint` is whether the task's own
+        # distinctive text is still in there after compaction.
+        rendered = "\n".join(str(getattr(part, "content", ""))
+                             for message in messages
+                             for part in (getattr(message, "parts", ()) or ()))
+        with seen_log.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({
+                "pid": os.getpid(), "messages": len(messages), "chars": len(rendered),
+                "constraint": bool(script.get("constraint")) and script["constraint"] in rendered,
+                "marker": bool(script.get("original")) and script["original"] in rendered,
+            }) + "\n")
+        if script.get("staged"):
+            # **Driven by a monotonic stage signal**, read out of the history. The largest `STEP-n` the
+            # model can see is how far the work has got — a number that compaction can shorten the
+            # history around but cannot change, unlike a per-process turn counter, which restarts at one
+            # in a new process and made the resumed attempt redo the first step.
+            rendered = "\n".join(str(getattr(part, "content", ""))
+                                 for message in messages
+                                 for part in (getattr(message, "parts", ()) or ()))
+            steps_seen = [int(hit) for hit in re.findall(r"STEP-(\d+)", rendered)]
+            reached = max(steps_seen) if steps_seen else 0
+            if reached >= int(script["until"]):
+                command = script["then"]
+            else:
+                command = script["step"].format(n=reached + 1)
+            return ModelResponse(parts=[ToolCallPart(tool_name="bash", args={"command": command})])
         if script.get("history_driven"):
             seen = any(script["marker"] in str(getattr(part, "content", ""))
                        for message in messages for part in (getattr(message, "parts", ()) or ()))
@@ -310,22 +353,22 @@ async def _run_child(window: str, control: Path, workspace: Path, script: dict,
     # **The context capabilities, when the case is about them.** §57 asks for both things switched on
     # in the same execution, and a fixture that only claimed to would be measuring the plain path.
     context: tuple[Any, ...] = ()
+    got: dict[str, Any] = {}
     if script.get("with_context"):
         from anchor.node.context import Budget as ContextBudget, Record, context_capabilities, remember
-        record = Record(control / "kept")
-        if script.get("budget"):
-            context = context_capabilities(ContextBudget(**script["budget"]), record=record)
-            remember(context, script["task"], "")
-        else:
-            context = context_capabilities(ContextBudget(), record=record)
-            remember(context, script["task"], "")
+        record = Record(control / "kept", limit_bytes=int(script.get("record_bytes", 1000000)))
+        got["record"] = record
+        context = context_capabilities(ContextBudget(**script.get("budget", {})), record=record)
+        remember(context, script["task"], "", script.get("instructions", ""))
 
     outcome = await run_node(
         NodeRequest(execution_id=script["node"], task=script["task"], workspace=workspace,
-                    max_requests=8, trace=control / "trace.jsonl", recovery=recover),
+                    max_requests=int(script.get("max_requests", 8)),
+                    trace=control / "trace.jsonl", recovery=recover),
         model=FunctionModel(model),
-        capabilities=((_barrier(window, script), *context, here) if barrier_first
-                      else (*context, here, _barrier(window, script))),
+        capabilities=((_barrier(window, script, got.get("record")), *context, here)
+                      if barrier_first
+                      else (*context, here, _barrier(window, script, got.get("record")))),
         recovery_store=control)
     _write_outcome(control, outcome)
 
@@ -390,6 +433,9 @@ def windows() -> list[Window]:
         Window("A6", [COUNTER, 'anchor-done --summary "done"'],
                "submission persisted, the graph has not finalised",
                "the node recovers with no model call; the graph's commit is reported missing or found"),
+        Window("B1", [STEP, 'anchor-done --summary "done"'],
+               "a real compaction, killed after it, continued by a new process",
+               "the resumed input is bounded, the constraint survives, no step runs twice"),
         Window("A5", [COUNTER, 'anchor-done --summary "done"'],
                "real requests, killed and restarted until the allowance is spent",
                "the budget file agrees with the count the model itself kept"),
@@ -631,6 +677,8 @@ def run_window(window: Window, root: Path, timeout: float) -> Evidence:
         return run_a3(root, timeout)
     if window.name == "A4":
         return run_a4(root, timeout)
+    if window.name == "B1":
+        return run_b1(root, timeout)
     if window.name == "A5":
         return run_a5(root, timeout)
     if window.name == "A6":
@@ -895,6 +943,159 @@ def _commits(workspace: Path) -> list[str]:
                               capture_output=True, text=True, check=False)
         out.extend(line for line in done.stdout.splitlines() if line.strip())
     return out
+
+
+#: One unit of work that announces how far it got **and records every invocation**, so a step that runs
+#: twice is visible as a repeated number rather than hidden by a counter that looks correct either way.
+STEP = ("n=$(cat n.txt 2>/dev/null || echo 0); n=$((n+1)); printf '%s\\n' \"$n\" > n.txt; "
+        "printf 'STEP-%s\\n' \"$n\" >> steps.log; "
+        "for i in $(seq 1 40); do printf 'filler-for-step-%s-line-%s\\n' \"$n\" \"$i\"; done; "
+        "echo \"STEP-$n counted\"")
+
+
+def run_b1(root: Path, timeout: float) -> Evidence:
+    """**B1: a real compaction, killed after it, continued by a new process.**
+
+    The comparison that matters is between what happened *before* the kill and what the resumed process
+    was sent. The first version of this case counted turns inside the process, so the resumed attempt
+    restarted at step one and redid work; the model now reads the largest `STEP-n` out of its own history,
+    which compaction can shorten around but not change, and each invocation appends its number to a log so
+    a repeated step shows up as a duplicate.
+    """
+    from anchor.node.recovery import RecoveryRef, open_store
+
+    started = time.monotonic()
+    control = root / "B1" / "control"
+    workspace = root / "B1" / "workspace"
+    shutil.rmtree(root / "B1", ignore_errors=True)
+    control.mkdir(parents=True, exist_ok=True)
+    workspace.mkdir(parents=True, exist_ok=True)
+    constraint = "the constraint that must survive compaction"
+    script = {"window": "B1", "node": "node-B1", "task": f"do the work. {constraint}. finish",
+              "instructions": f"{constraint}: never drop a step", "with_context": True,
+              "budget": {"window": 4000, "output_reserve": 400, "input_target": 1500,
+                         "keep_messages": 2},
+              # Enough for the work twice over, so the continuation finishes rather than running out
+              # half way and making the assertion about a budget that was never the subject here.
+              "max_requests": 40, "record_bytes": 60000,
+              "staged": True, "until": 10, "step": STEP,
+              "constraint": constraint,
+              "then": 'anchor-done --summary "all steps done"'}
+
+    killed, code, said, errors = _kill_at(control, workspace, script,
+                                          "compaction done, a later checkpoint is on disk", timeout)
+    steps_before = _step_numbers(workspace)
+    compactions = _compactions(control)
+    inputs_before = _model_inputs(control)
+
+    # **A new process**, with the same capabilities attached and the reference, continuing the work.
+    runs = asyncio.run(open_store(control).list_runs())
+    if not runs:
+        return _b1_evidence(root, started, killed, said, errors, [], [], [], [],
+                            "no run was recorded, so there is nothing to continue")
+    newest = sorted(runs, key=lambda item: item.started_at)[-1]
+    token = RecoveryRef(node=newest.agent_name, run=newest.run_id, store=str(control)).encode()
+    outcome = _ask_once(control, token, dict(script, window="B1-resumed", kill_after_models=99))
+    steps_after = _step_numbers(workspace)
+    inputs_after = _model_inputs(control)
+
+    evidence = _b1_evidence(root, started, killed, said, errors, steps_before, compactions,
+                            inputs_before, inputs_after,
+                            f"resumed as {outcome.get('status')!r} with "
+                            f"{outcome.get('model_requests')} request(s), submission "
+                            f"{outcome.get('submission')!r}")
+    evidence.control = str(control)
+    evidence.workspace = str(workspace)
+    evidence.counter_after = len(steps_after)
+    return evidence
+
+
+def _step_numbers(workspace: Path) -> list[int]:
+    """Every invocation of the step command, in order. A repeat is a duplicate number."""
+    logs = sorted(workspace.rglob("steps.log"))
+    out: list[int] = []
+    for log in logs:
+        for line in log.read_text(encoding="utf-8", errors="replace").splitlines():
+            if line.strip().startswith("STEP-"):
+                with contextlib.suppress(ValueError):
+                    out.append(int(line.strip().split("-", 1)[1]))
+    return out
+
+
+def _compactions(control: Path) -> list[dict]:
+    """Every compaction the record shows, with the strategy that actually did it.
+
+    **Any strategy counts as a real compaction** — what B1 asserts is that the history the model was sent
+    had been reduced before the kill, and by which mechanism is reported rather than assumed. It is worth
+    reading: in this configuration only `SlidingWindowCompaction` fires, because `_compact_once` stops at
+    the first strategy that reduces and sliding is first in the list.
+    """
+    out: list[dict] = []
+    for item in (control / "kept").rglob("*.jsonl"):
+        if item.name != "record.jsonl":
+            continue
+        for line in item.read_text(encoding="utf-8", errors="replace").splitlines():
+            with contextlib.suppress(json.JSONDecodeError):
+                payload = json.loads(line)
+                if payload.get("kind") == "compaction":
+                    out.append(payload)
+    for item in (control / "kept").rglob("*.jsonl"):
+        if item.name == "record.jsonl":
+            continue
+        for line in item.read_text(encoding="utf-8", errors="replace").splitlines():
+            with contextlib.suppress(json.JSONDecodeError):
+                payload = json.loads(line)
+                if payload.get("kind") == "compaction":
+                    out.append(payload)
+    return out
+
+
+def _model_inputs(control: Path) -> list[dict]:
+    """What the model was actually handed, call by call, written by the model itself."""
+    path = control / "model-input.jsonl"
+    if not path.exists():
+        return []
+    out = []
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        with contextlib.suppress(json.JSONDecodeError):
+            out.append(json.loads(line))
+    return out
+
+
+def _b1_evidence(root: Path, started: float, killed: Any, said: str, errors: str,
+                 steps_before: list[int], compactions: list[dict], inputs_before: list[dict],
+                 inputs_after: list[dict], note: str) -> Evidence:
+    evidence = Evidence(window="B1", control=str(root / "B1" / "control"),
+                        workspace=str(root / "B1" / "workspace"), killed=bool(killed),
+                        exit_code=None, barrier=said or "(no barrier)", counter_before=0,
+                        counter_after=len(steps_before), verdict="", because="",
+                        seconds=time.monotonic() - started, traceback=errors[-1200:])
+    biggest = max((item.get("chars", 0) for item in inputs_after), default=0)
+    constrained = [item for item in inputs_after if item.get("constraint")]
+    strategies = sorted({item.get("strategy", "?") for item in compactions})
+    evidence.verdict = (
+        "compacted-then-resumed" if compactions and killed and not _duplicated(steps_before)
+        else f"BAD(compactions={len(compactions)} killed={killed} "
+             f"duplicates={_duplicated(steps_before)})")
+    evidence.because = (
+        f"{len(compactions)} compaction(s) before the kill by {strategies}; "
+        f"steps before the kill {steps_before}; "
+        f"model input sizes before {[item.get('chars') for item in inputs_before]}; "
+        f"after the continuation {[item.get('chars') for item in inputs_after]} (largest {biggest}); "
+        f"the constraint was present in {len(constrained)}/{len(inputs_after)} resumed call(s); {note}")
+    evidence.note = (
+        "steps recorded exactly once each" if not _duplicated(steps_before)
+        else f"these steps ran more than once: {_duplicated(steps_before)}")
+    return evidence
+
+
+def _duplicated(numbers: list[int]) -> list[int]:
+    seen, twice = set(), []
+    for number in numbers:
+        if number in seen and number not in twice:
+            twice.append(number)
+        seen.add(number)
+    return twice
 
 
 def run_a5(root: Path, timeout: float) -> Evidence:
