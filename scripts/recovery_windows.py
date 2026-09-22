@@ -120,6 +120,22 @@ def _report_window(window: str, where: str) -> None:
         os.write(fd, f"{window}@{where}\n".encode("utf-8"))
 
 
+def _charge(control: Path, allowed: int) -> None:
+    """One more request spent, written down before it is made.
+
+    Kept here rather than inside the runtime because the seam belongs to the caller: the adapter owns the
+    persisted allowance, the context capabilities own the summariser, and this is the line that joins
+    them. Losing it is exactly the under-count B5 is looking for.
+    """
+    from anchor.node.recovery import Budget, load_budget, save_budget
+    on_disk = load_budget(control)
+    save_budget(control, Budget(requests_used=on_disk.requests_used + 1,
+                                requests_allowed=min(value for value in (allowed,
+                                                                        on_disk.requests_allowed)
+                                                     if value) if on_disk.requests_allowed
+                                else allowed))
+
+
 def _summariser(control: Path, constraint: str):
     """A deterministic summariser: it summarises **only what is in its input**, and counts itself.
 
@@ -150,7 +166,7 @@ def _summariser(control: Path, constraint: str):
 
 #: Windows whose barrier has to land **after** the framework's own write, which means registering it
 #: **before** step persistence. See the note in `_run_child`: the two hook directions differ.
-BEFORE_PERSISTENCE_WINDOWS = frozenset({"C1", "C4", "C5", "B1", "B2-checkpoint", "B3-terminal"})
+BEFORE_PERSISTENCE_WINDOWS = frozenset({"C1", "C4", "C5", "B1", "B5", "B2-checkpoint", "B3-terminal"})
 
 
 class Barrier(AbstractCapability[Any]):
@@ -238,7 +254,9 @@ class Barrier(AbstractCapability[Any]):
                 _wait_for_a_kill("submission persisted, the graph has not finalised")
         if self.window == "C1" and self.seen_models == 1:
             _wait_for_a_kill("after_model_request, before the tool cycle")
-        if self.window == "C4" and self.seen_models >= self.kill_after:
+        # C4 and B5 are the same shape — let some settled cycles through, then pause before the run ends —
+        # and differ only in how many and in what is switched on around them.
+        if self.window in ("C4", "B5") and self.seen_models >= self.kill_after:
             # The snapshot for the cycle that just settled has been written by now; what has not happened
             # is the run ending. How many cycles to let through is the case's business: a kill that has to
             # land *after* a submission needs more than the first one.
@@ -510,7 +528,13 @@ async def _run_child(window: str, control: Path, workspace: Path, script: dict,
             # A summariser only when the case is about it: B2/B3/B5 and the compaction cases need the
             # summarising path, and a case without one is measuring the window fallback on purpose.
             summarizer=(_summariser(control, str(script.get("constraint", "")))
-                        if script.get("summariser") else None))
+                        if script.get("summariser") else None),
+            # **A summary is a paid request and is charged against the same allowance.** B5 asks for the
+            # kinds to be counted apart and share one declared total; this is the seam that makes it so,
+            # and it is charged before the call rather than after because a summary that never comes back
+            # still cost one.
+            charge=((lambda: _charge(control, int(script.get("max_requests", 8))))
+                    if script.get("charge_summaries") else None))
         remember(context, script["task"], "", script.get("instructions", ""))
 
     outcome = await run_node(
@@ -591,6 +615,9 @@ def windows() -> list[Window]:
         Window("B3-terminal", [STEP, 'anchor-done --summary "done"'],
                "after a compaction: the terminal record written and no snapshot",
                "uncertain — an older snapshot must not cover it"),
+        Window("B5", [STEP, 'anchor-done --summary "done"'],
+               "the node's model, the summariser and the retry share one total",
+               "both kinds counted apart, one allowance, and nothing sent once it is spent"),
         Window("B4", [STEP, 'anchor-done --summary "done"'],
                "a large output saved, then read back by a later process",
                "the tail is there and writing is refused"),
@@ -843,6 +870,8 @@ def run_window(window: Window, root: Path, timeout: float) -> Evidence:
         return run_a4(root, timeout)
     if window.name.startswith(("B2-", "B3-")):
         return run_compaction_window(root, timeout, window.name)
+    if window.name == "B5":
+        return run_b5(root, timeout)
     if window.name in ("B4", "B4-partial"):
         return run_b4(root, timeout, window.name)
     if window.name == "B1":
@@ -1211,6 +1240,95 @@ def run_b1(root: Path, timeout: float) -> Evidence:
 
 #: A unique tail so "the whole output is really there" is a fact about this run and not about a shape.
 TAIL_MARKER = "END-OF-THE-WHOLE-OUTPUT-7f3a"
+
+
+def run_b5(root: Path, timeout: float) -> Evidence:
+    """**B5: the node's model, the summariser and the overflow retry share one declared total.**
+
+    The kinds are counted apart — the node's own calls in one log, the summariser's in another, both kept
+    where the requests actually arrive — and the persisted allowance has to cover both and never be handed
+    back by a restart. The case that matters is the one A5 never reached: an attempt that runs **after**
+    the allowance is gone, which must make no request of either kind.
+    """
+    from anchor.node.recovery import Budget, RecoveryRef, load_budget, open_store, save_budget
+
+    started = time.monotonic()
+    control = root / "B5" / "control"
+    workspace = root / "B5" / "workspace"
+    shutil.rmtree(root / "B5", ignore_errors=True)
+    control.mkdir(parents=True, exist_ok=True)
+    workspace.mkdir(parents=True, exist_ok=True)
+    # **Enough rounds for the history to need compacting**, which is when the summariser is charged: a
+    # kill at the first request measures the node's own model and never reaches a summary.
+    allowed = 16
+    save_budget(control, Budget(requests_used=0, requests_allowed=allowed))
+    constraint = "the constraint the summary has to carry"
+    script = {"window": "B5", "kill_after_models": 7, "node": "node-B5",
+              "task": f"finish eventually. {constraint}", "instructions": constraint,
+              "with_context": True, "summariser": True, "charge_summaries": True,
+              "constraint": constraint,
+              "budget": {"window": 4000, "output_reserve": 400, "input_target": 1500,
+                         "keep_messages": 2},
+              "max_requests": allowed, "record_bytes": 60000,
+              "staged": True, "until": 60, "step": STEP, "then": 'anchor-done --summary "done"'}
+    node_log, summary_log = control / "model-calls.log", control / "summariser-calls.log"
+
+    def counts() -> tuple[int, int]:
+        node = len(node_log.read_text(encoding="utf-8").splitlines()) if node_log.exists() else 0
+        summary = (len(summary_log.read_text(encoding="utf-8").splitlines())
+                   if summary_log.exists() else 0)
+        return node, summary
+
+    steps: list[str] = []
+    token, rounds = "", 0
+    for _ in range(allowed + 2):
+        killed, code, said, errors = _kill_at(control, workspace, script, "B5 barrier", timeout,
+                                              recover=token)
+        rounds += 1
+        node, summary = counts()
+        budget = load_budget(control)
+        steps.append(f"round {rounds}: killed={killed} budget={budget.requests_used}/"
+                     f"{budget.requests_allowed} node_calls={node} summary_calls={summary}")
+        assert budget.requests_allowed <= allowed, f"the allowance was raised: {budget}"
+        # **A round that was not held is the end, not a failure** — once the summaries have charged the
+        # allowance down, the next attempt makes no request at all and there is no barrier to reach. That
+        # is the state the case is driving towards.
+        if not (killed and said) or budget.remaining <= 0:
+            steps.append(f"round {rounds} sent nothing: the allowance was already spent")
+            break
+        runs = asyncio.run(open_store(control).list_runs())
+        ours = [item for item in runs if item.agent_name == script["node"]]
+        if ours:
+            newest = sorted(ours, key=lambda item: item.started_at)[-1]
+            token = RecoveryRef(node=newest.agent_name, run=newest.run_id,
+                                store=str(control)).encode()
+
+    before = counts()
+    out = _ask_once(control, token, script)
+    after = counts()
+    persisted = load_budget(control)
+    steps.append(f"one more attempt at {persisted.requests_used}/{persisted.requests_allowed}: "
+                 f"{out.get('status')!r}; node calls {before[0]}->{after[0]}, "
+                 f"summaries {before[1]}->{after[1]}")
+
+    evidence = Evidence(window="B5", control=str(control), workspace=str(workspace),
+                        killed=True, exit_code=None, barrier=f"(killed {rounds} time(s))",
+                        counter_before=0, counter_after=len(_step_numbers(workspace)), verdict="",
+                        because="", budget=f"{persisted.requests_used}/{persisted.requests_allowed}",
+                        seconds=time.monotonic() - started)
+    total = after[0] + after[1]
+    # **All three, and the third is the one that matters**: both kinds are counted, they share the total,
+    # and an attempt after the allowance is gone makes no request of either kind.
+    # **Exact, not "at least".** The point of the case is that the persisted allowance is the sum of the
+    # kinds, and '>=' would call a double-count a pass — which is what it did: the direct measurement
+    # below showed the file at 24 against 12 node calls and 7 summaries.
+    agree = persisted.requests_used == total
+    stopped = out.get("status") == "budget_exhausted" and after == before
+    evidence.verdict = ("shared-and-stops" if agree and stopped and rounds >= 2
+                        else f"BAD(agree={agree} stopped={stopped} rounds={rounds})")
+    evidence.because = "; ".join(steps + [f"totals: node {after[0]} + summaries {after[1]} = {total} "
+                                          f"against a persisted {persisted}"])
+    return evidence
 
 
 def run_b4(root: Path, timeout: float, name: str = "B4") -> Evidence:

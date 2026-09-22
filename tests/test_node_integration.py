@@ -458,3 +458,28 @@ def test_b4_the_saved_output_is_readable_read_only_and_honest_about_being_cut(ki
     assert partial["killed"] is True
     assert partial["verdict"] == "cut-and-said", partial["because"]
     assert "kept 0 file(s)" in partial["because"], partial["because"]
+
+
+def test_b5_the_summariser_is_not_charged_consistently(killed):
+    """**B5 未通过。** 摘要的调用**没有**被一致地计入同一份额度 ✓——这是测出来的 ✓，不是推的 ✓。
+
+    三类调用都被**独立计数** ✓（节点自己的在一个日志 ✓、摘要的在另一个 ✓，都写在请求真正到达的地方 ✓）。
+    但持久化额度与它们的和**不相等** ✗，而且**偏差方向不一致** ✗：
+
+    - 走完整流程时：节点 13 + 摘要 9 = **22** ✓，持久化只记了 **13** ✗（**少记** ✓）。
+    - 一次直接测量（12 次节点调用 + 7 次摘要 ✓）里：持久化记了 **24** ✗（**多记** ✓）。
+
+    所以问题不是"漏了一类" ✓，而是**口径本身没有定义好** ✗：`charge` 接缝存在且被调用 ✓（摘要替身确实
+    自增了 ✓），而它与适配器按请求记的账**互相覆盖** ✓。
+
+    验收第 4 条要求的正是"明确策略顺序和摘要预算口径" ✓——**顺序已定** ✓（先摘要 ✓，见前一个 commit ✓），
+    **口径未定** ✗。所以这条测试断言的是**发现被记录下来** ✓，而不是它通过 ✗。
+    """
+    evidence = killed["B5"]
+
+    assert evidence["verdict"].startswith("BAD"), (
+        f"B5 started passing; check whether the accounting was actually fixed: {evidence['because']}")
+    assert "totals: node" in evidence["because"], evidence["because"]
+    # 两类调用确实都被独立计数了——所以缺口在口径，不在采集。
+    assert "summary_calls=" in evidence["because"], evidence["because"]
+    assert "node_calls=" in evidence["because"], evidence["because"]
