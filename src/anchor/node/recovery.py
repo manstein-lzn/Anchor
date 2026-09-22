@@ -41,9 +41,10 @@ import hashlib
 import json
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
-from pydantic_ai_harness.step_persistence import FileStepStore
+if TYPE_CHECKING:                    # never at runtime: the default path must load without the framework
+    from pydantic_ai_harness.step_persistence import FileStepStore
 
 #: The reference format's version, in the token itself. A token from an older Anchor is refused by name
 #: rather than misread — the fields are not stable across versions and guessing at them is how a
@@ -226,6 +227,8 @@ def open_store(control: Path) -> FileStepStore:
     §17: the database and its records live in a control directory, not in the workspace. A node that can
     edit the ledger of its own side effects can make the ledger say the side effect never happened.
     """
+    from pydantic_ai_harness.step_persistence import FileStepStore
+
     control = Path(control)
     control.mkdir(parents=True, exist_ok=True)
     return FileStepStore(directory=control / "steps")

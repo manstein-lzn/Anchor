@@ -114,6 +114,11 @@ class Executed:
     output: str
     returncode: int
     timed_out: bool = False
+    #: The command line that was dispatched. Carried on the result rather than remembered by the
+    #: caller because a verdict read against a line the caller supplied is a verdict about the
+    #: caller's memory — an op runtime reading exit 127 needs the name that actually ran, and this is
+    #: the only place it is known for certain.
+    command: str = ""
     #: Where the *whole* output went, when something would have been cut and a place was named. What a
     #: caller needs to know is whether it can get the rest, and after `output` has been cut this is the
     #: only thing that answers it.
@@ -202,7 +207,8 @@ class NodeSandbox:
         self.visible = tuple(result.visible)
         self.incomplete = bool(result.incomplete)
         return Executed(output=result.stdout + result.stderr, returncode=result.returncode,
-                        timed_out=bool(result.timed_out), spilled=tuple(result.spilled),
+                        command=command, timed_out=bool(result.timed_out),
+                        spilled=tuple(result.spilled),
                         visible=tuple(result.visible), incomplete=bool(result.incomplete))
 
     def require_working(self) -> None:

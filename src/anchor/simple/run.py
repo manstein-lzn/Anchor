@@ -36,7 +36,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from anchor.simple import graph as graph_module
-from anchor.simple.agent import build_agent
+from anchor.node.model_bridge import model_for, scripted_models
+from anchor.simple.node_bridge import Node
 
 #: Turns a node may take before it is stopped. Not a target — a ceiling, so that a node which keeps
 #: announcing completion instead of achieving it is stopped in minutes rather than in half an hour.
@@ -45,7 +46,11 @@ DEFAULT_MAX_STEPS = 60
 #: Ways a node can run out of budget rather than get the work wrong. Running out of clock is not a
 #: failed attempt: the conversation is good and continuing it is exactly the right response, so these
 #: leave the run resumable instead of ending it.
-BUDGET_EXITS = frozenset({"TimeExceeded", "LimitsExceeded"})
+#:
+#: `budget_exhausted` is the node runtime's own name for the same thing (ADR-062), and it is here
+#: rather than translated because translating it would mean the scheduler minting an exit status the
+#: node never produced — one vocabulary on both sides of the seam is the point of the switch.
+BUDGET_EXITS = frozenset({"TimeExceeded", "LimitsExceeded", "budget_exhausted"})
 
 #: How many times one pass of one node may be started, counting resumes. Each is given a fresh
 #: budget, so without a ceiling a node that never finishes would be resumed forever.
@@ -665,44 +670,48 @@ def _secret(secret_file: str | None, model: dict) -> str:
 
 def _agent_for(graph, node_id: str, directory: Path, models: dict, secret_file, config_path,
                inputs: tuple[_Given, ...] = (), trace: Path | None = None,
-               script: list[str] | None = None):
+               scripted_model: Any = None, control: Path | None = None):
+    """The node about to run, built around the runtime ADR-062 names.
+
+    **One factory for both kinds of node**, because the difference between an agent and an op is what
+    decides the work and not how it is scheduled — and after the switch it is also not how it is run:
+    `Node` dispatches to `run_agent_node` or `run_op_node` and the scheduler sees the same interface
+    either way.
+
+    `control` is the node's own directory for its record, budget and completion; the scheduler names
+    the run directory and this derives it, because where a node keeps its state is the node's business.
+
+    A `scripted_model` is a node whose commands are written down: it needs no model profile and no
+    secret, because nothing is being called. That is the provider-free path, and it is why the whole
+    suite runs without a credential. It is a model rather than a list of commands, because which loop
+    the commands are fed to is not the scheduler's business either.
+    """
     node = graph.nodes[node_id]
     if node.op:
-        # An op is a command. No model profile, no secret, one turn, and its exit code is the
-        # verdict — everything else about the node is what it is for an agent.
+        # An op is a command. No model profile, no secret, and its exit code is the verdict.
         op = graph.ops[node.op]
-        return build_agent(
-            tree=directory, node_id=node_id, routes=graph.routes(node_id), instructions="",
-            network=op.network, timeout_seconds=600.0, max_steps=1,
-            wall_time_limit_seconds=op.wall_time_limit_seconds,
-            inputs=tuple(bind for item in inputs for bind in item.binds()), trace=trace,
-            op=op.run)
+        return Node(node_id=node_id, directory=directory, routes=graph.routes(node_id),
+                    inputs=inputs, trace=trace, model=None, instructions="", network=op.network,
+                    timeout_seconds=600.0, max_requests=1, command=op.run, control=control)
     spec = graph.agents[node.agent]
-    # A scripted node needs no model profile and no secret: nothing is being called.
-    model_name, model_kwargs = "", {}
-    if script is None:
-        model = models.get(spec.model)
-        if model is None:
+    if scripted_model is not None:
+        model: Any = scripted_model
+    else:
+        profile = models.get(spec.model)
+        if profile is None:
             raise ValueError(f"no model named {spec.model!r} in {config_path}")
-        model_name = f"openai/{model['model']}" if model.get("base_url") else model["model"]
-        model_kwargs = {"api_base": model["base_url"], "api_key": _secret(secret_file, model),
-                        "max_tokens": model.get("max_tokens", 8192)}
+        model = model_for(profile, secret=_secret(secret_file, profile))
     # What this use adds to what the role already says. A role is declared once so it can be used
     # more than once, and two uses that differ only in their framing differ here.
     instructions = (f"{spec.instructions}\n\n{node.with_}" if spec.instructions and node.with_
                     else spec.instructions or node.with_)
-    return build_agent(
-        tree=directory, node_id=node_id, routes=graph.routes(node_id),
-        instructions=instructions,
-        model_name=model_name, model_kwargs=model_kwargs,
-        # Ten minutes for one command, not five. A batch of literature searches is legitimately
-        # slow — a dozen queries at twenty seconds each is already four minutes — and a batch that
-        # is killed at five throws away everything it had done.
-        network=spec.network, timeout_seconds=600.0,
-        max_steps=spec.max_steps or DEFAULT_MAX_STEPS,
-        wall_time_limit_seconds=spec.wall_time_limit_seconds,
-        inputs=tuple(bind for item in inputs for bind in item.binds()), trace=trace, script=script,
-    )
+    return Node(node_id=node_id, directory=directory, routes=graph.routes(node_id), inputs=inputs,
+                trace=trace, model=model, instructions=instructions,
+                # Ten minutes for one command, not five. A batch of literature searches is legitimately
+                # slow — a dozen queries at twenty seconds each is already four minutes — and a batch
+                # that is killed at five throws away everything it had done.
+                network=spec.network, timeout_seconds=600.0,
+                max_requests=spec.max_steps or DEFAULT_MAX_STEPS, control=control)
 
 
 def _cease(state: RunState, step: _Step, settle: Any, run_dir: Path) -> None:
@@ -865,18 +874,33 @@ def run(workspace: str | Path, *, objective: str | None = None, config_path: str
                                       "stopped_at": settled.node_id}, ensure_ascii=False), flush=True)
                     return state
                 continue
+            # **Where a node keeps its record is the node's business, and this is the whole of what
+            # the scheduler knows about it**: control/<node>, derived rather than configured. Each node
+            # gets its own, which is what makes a completion fact unreadable under the wrong identity.
+            control = run_dir / "control" / step.node_id
+            # A node the script does not name is a node whose model comes from the config, which is
+            # what `models.get` did before this switch: a partial script is a partial script, and
+            # demanding an entry for every node would make the script a second copy of the graph.
+            commands = model_script.get(step.node_id) if model_script else None
+            scripted_model = scripted_models({step.node_id: commands}).get(step.node_id) if commands \
+                else None
             agent = _agent_for(graph, step.node_id, step.directory, models, secret_file, config_path,
-                               inputs=step.inputs, trace=step.trace,
-                               script=None if model_script is None else model_script.get(step.node_id))
+                               inputs=step.inputs, trace=step.trace, control=control,
+                               scripted_model=scripted_model)
             # **A cursor without a trace means the node never actually started.** The scheduler writes
             # the cursor before dispatching, so a kill in between leaves a node marked as interrupted
             # with nothing to continue from — and resuming reads a trace file that was never written,
             # which fails the whole run rather than running the node. Started fresh is the honest reading:
             # nothing of it happened.
+            #
+            # **How many attempts of this pass are gone decides which question to ask.** With the trace
+            # still there it was interrupted mid-conversation and the node continues; with the trace gone
+            # this process is the one that interrupted it, and asking the node directly is what turns a
+            # write that landed before the record into `uncertain` instead of a rerun.
             if step.resuming and step.trace is not None and Path(step.trace).exists():
                 outcome = agent.resume(_messages(step.trace))
             else:
-                outcome = agent.run(task=step.task)
+                outcome = agent.run(task=step.task, resume_mark=step.resuming)
             result = _result_of(step.node_id, graph.nodes[step.node_id].agent, step.directory,
                                 step.number, outcome, step.inputs)
             result = replace(result, route=getattr(agent.env, "route", None))

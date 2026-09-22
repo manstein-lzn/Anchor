@@ -76,7 +76,7 @@ async def _reference(recovery_store: Path | None, request: NodeRequest, store: A
         return ""
     control = Path(recovery_store)
     store = open_store(control)
-    runs = [item for item in await store.list_runs() if item.agent_name == request.execution_id]
+    runs = [item for item in await store.list_runs() if item.agent_name == request.node_key]
     if not runs:
         return ""
     newest = sorted(runs, key=lambda item: item.started_at)[-1]
@@ -86,7 +86,7 @@ async def _reference(recovery_store: Path | None, request: NodeRequest, store: A
     budget = load_budget(control).after(spent) if budget_path(control).exists() else Budget(
         requests_used=spent, requests_allowed=request.max_requests)
     save_budget(control, budget)
-    return RecoveryRef(node=request.execution_id, run=newest.run_id, store=str(control),
+    return RecoveryRef(node=request.node_key, run=newest.run_id, store=str(control),
                        workspace=str(Path(request.workspace).resolve()),
                        budget=budget).encode()
 
@@ -179,7 +179,12 @@ async def _what_a_previous_attempt_left(request: NodeRequest, capabilities: tupl
     fresh run would repeat whatever the previous attempt managed to do and call it progress (§38). The
     adapter decides here and the Graph never sees why — it gets a status and a reason.
     """
-    started = _Started(conversation=request.execution_id, spending=request.max_requests)
+    # **The store's spelling of this node, and every id built from it.** A node called `work/draft`
+    # is refused by the framework's step store, which interpolates an identifier into a path; the one
+    # name that is legal and stable is `request.node_key`, and both the conversation and the run ids
+    # below are that name and not `execution_id` — two spellings in one store is a node that cannot
+    # find its own last attempt.
+    started = _Started(conversation=request.node_key, spending=request.max_requests)
     # **What earlier processes already spent.** Counted against this attempt too, so the cap is a cap on
     # the whole logical execution rather than a fresh allowance per process — a node killed three times
     # would otherwise spend its budget three times over.
@@ -273,9 +278,9 @@ async def _what_a_previous_attempt_left(request: NodeRequest, capabilities: tupl
         # repeated `run_id` outright, which is what made this necessary rather than convenient.
         from pydantic_ai_harness import StepPersistence
         started.store = open_store(Path(recovery_store))
-        started.resumed.append(StepPersistence(store=started.store, agent_name=request.execution_id,
+        started.resumed.append(StepPersistence(store=started.store, agent_name=request.node_key,
                                                run_id=await _next_run_id(started.store,
-                                                                         request.execution_id)))
+                                                                         request.node_key)))
 
     return started
 
@@ -343,7 +348,7 @@ async def run_node(request: NodeRequest, *, model: Any,
             tree=request.workspace, node_id=request.roles or request.execution_id,
             network=request.network, timeout_seconds=request.timeout_seconds,
             routes=request.routes, inputs=request.inputs), routes=request.routes,
-            control=recovery_store, execution_id=request.execution_id,
+            control=recovery_store, execution_id=request.node_key,
             framework_run=this_run or (ref.run if ref is not None else ""))
         # Inside the try. A sandbox that cannot start is a failed execution and the contract has a
         # status for it; raising out of the entry point would leave the caller with an exception where

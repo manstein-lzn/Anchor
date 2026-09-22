@@ -16,9 +16,10 @@ than a re-use of them, deliberately: those rules live behind the framework the m
 
 **The protocol it implements, which is the one `OpEnvironment` implements:**
 
-    exit 0, one way out        the pass finished; stdout is what it says
+    exit 0, one way out        the pass finished; stdout is what it says, stripped of its newline
     exit 0, more than one way  it must route: first line `ANCHOR_ROUTE: <target>`
-    exit 127                   the command is not on the sandbox PATH, named as such
+    exit 127                   the command is not on the sandbox PATH, named as such; the output is
+                               still the reason, and `command_missing` is how it is named
     exit non-zero              the pass failed, and the output is the reason
     a marker with non-zero     refused — a command that printed the marker and failed did not finish
 
@@ -51,14 +52,20 @@ class OpResult:
     """
 
     output: str
+    #: The code the command ended with. Carried beside the status because the two are not the same
+    #: thing: several exit codes map to one status, and 127 is one of them — a caller re-reading the
+    #: verdict needs the code, and a mapping from status back to a code would be a guess.
     returncode: int
     timed_out: bool = False
     route: str | None = None
     #: Why this is not a completion, when it is not.
     refused: str = ""
-    #: Set when the command could not be run at all, which is different from one that ran and failed:
-    #: a sandbox that would not start is not evidence about the command.
-    unreachable: str = ""
+    #: Whether the command was there at all. Exit 127 is not a failed check but a missing command, and
+    #: it is the **runner's** job to know which of its own exit codes means that: mini-swe-agent
+    #: reports a command it cannot execute as exit 127 through `LocalEnvironment`, and the rule is kept
+    #: rather than re-derived from output a shell may have written. Exit 127 is refused like any other
+    #: non-zero code — it just carries this as well.
+    command_missing: bool = False
 
 
 def _first_line(text: str) -> str:
@@ -93,12 +100,30 @@ def read_op_result(ran: Any, routes: tuple[str, ...]) -> OpResult:
                         refused="the command did not finish inside its timeout")
 
     if code == 127:
-        # Not a failed check: a command that is not there. Saying which one beats a bare 127, and it
-        # is the failure an author hits most often.
-        return OpResult(output=output, returncode=code, unreachable="")
-    if code != 0:
-        return OpResult(output=output, returncode=code,
+        # Not a failed check: a command that is not there, which `OpEnvironment` named as such rather
+        # than as a failed pass. The output is still the reason — the shell's `not found` line is the
+        # most useful thing anyone has about this failure — and `command_missing` is what lets the
+        # scheduler call it `CommandNotFound` without parsing that line back.
+        #
+        # **Guarded, because 127 is not only a missing command.** A command that is there and exits 127
+        # itself is a failure like any other, and the only thing that separates the two is the shell's
+        # own line: `sh: 1: <name>: not found` names the command it could not find. The **first word** of
+        # the line that was run is what is looked for, because that is the name a shell writes and the
+        # rest of the command line is not in the message. A caller with no command line to offer is not
+        # second-guessed — it is the one caller that cannot be wrong about its own runner, so its exit
+        # code stands, and losing a real missing-command to a differently worded shell would lose the
+        # distinction in the direction that matters.
+        # **From the evidence, never from the caller.** `run_op_node` labels the result it read with
+        # the line it ran, so the name below is the name that was dispatched — a caller cannot hand
+        # this function a command line that disagrees with the output it is being read against.
+        command = str(getattr(ran, "command", "") or "")
+        name = command.split()[0] if command.split() else ""
+        missing = (not name) or (name in output)
+        return OpResult(output=output.strip(), returncode=code, command_missing=missing,
                         refused=output.strip() or f"the op's command exited {code}")
+    if code != 0:
+        return OpResult(output=output.strip(), returncode=code, refused=output.strip()
+                        or f"the op's command exited {code}")
 
     if first.startswith(ROUTE_SENTINEL):
         target = first.split(":", 1)[1].strip()
@@ -106,15 +131,24 @@ def read_op_result(ran: Any, routes: tuple[str, ...]) -> OpResult:
             return OpResult(output=output, returncode=code,
                             refused=f"{target!r} is not a way out of this node. Choose one of: "
                                     f"{', '.join(routes)}")
-        return OpResult(output=output, returncode=code, route=target)
-    if first == DONE_SENTINEL and len(routes) == 1:
-        return OpResult(output=output, returncode=code)
+        # **The reason, not the sentinel line.** `anchor-route` prints `ANCHOR_ROUTE: <target>` and
+        # then the reason on the lines after it, exactly as the ordinary completion puts its summary
+        # under the marker — so what a routed op submits is the second part, and a commit message that
+        # began `ANCHOR_ROUTE: publish` would be the protocol leaking into the record a person reads.
+        # Same rule as the agent runtime's, from the same output shape.
+        return OpResult(output=_after_first(output), returncode=code, route=target)
     if len(routes) > 1:
         # Same rule as an agent's: a node that chooses where the graph goes has to choose.
         return OpResult(output=output, returncode=code,
                         refused=f"this node has more than one way out and did not route. Finish by "
                                 f"running `anchor-route --to <{'|'.join(routes)}> --reason \"…\"`")
-    return OpResult(output=output, returncode=code)
+    # **The whole output, and finished the way `OpEnvironment` finished it.** A node with one way out
+    # has nothing to decide, so exit 0 is the submission and stdout is what it says — and what an op's
+    # run record has always held is that output with its surrounding whitespace trimmed (`text.strip()`
+    # there, and the field is read by people and by the next node's commands). Reproduced exactly rather
+    # than re-derived: a migration that quietly changed what a record says would make every run before
+    # it unreadable in comparison, for a newline nobody asked for.
+    return OpResult(output=output.strip(), returncode=code)
 
 
 def run_op_node(request: NodeRequest, *, command: str | None = None) -> NodeOutcome:
@@ -141,10 +175,20 @@ def run_op_node(request: NodeRequest, *, command: str | None = None) -> NodeOutc
         return NodeOutcome(status=FAILED, reason=f"the op's command could not be run: "
                                                  f"{type(exc).__name__}: {exc}",
                            files=_files(request.workspace))
+    # **The line that ran comes with the evidence**, from `NodeSandbox`, which is the code that
+    # dispatched it: exit 127 is read against the command's own name, and a name the caller supplied
+    # would be a second, unchecked copy of what was run.
     result = read_op_result(ran, request.routes)
     if result.refused:
-        return NodeOutcome(status=FAILED, reason=result.refused, files=_files(request.workspace))
+        # **A failure keeps its output as a submission, deliberately.** An op's run record has always
+        # held what the command printed as what the pass said — `OpEnvironment` ended a failed op with
+        # `submission = text.strip()` — and that is not a wart to fix in a migration: it is the whole
+        # diagnosis, and the field a person reads. The route is none, because nothing was decided.
+        return NodeOutcome(status=FAILED, reason=result.refused, submission=result.output,
+                           command_missing=result.command_missing, invocation=op_command,
+                           returncode=result.returncode, files=_files(request.workspace))
     return NodeOutcome(status=COMPLETED, submission=result.output, route=result.route,
+                       invocation=op_command, returncode=result.returncode,
                        files=_files(request.workspace))
 
 

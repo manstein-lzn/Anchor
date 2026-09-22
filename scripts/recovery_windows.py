@@ -347,7 +347,7 @@ def _run_graph_child(window: str, control: Path, workspace: Path, script: dict) 
     from pydantic_ai.models.function import FunctionModel
 
     from anchor.node import NodeRequest
-    from anchor.node.pydantic_adapter import run_node
+    from anchor.node.adapter import run_node
     from anchor.simple import run as runner
 
     def model(messages, info):
@@ -369,7 +369,10 @@ def _run_graph_child(window: str, control: Path, workspace: Path, script: dict) 
             self.env = SimpleNamespace(route=None)
             self.route: str | None = None
 
-        def run(self, task: str) -> dict:
+        def run(self, task: str, **kwargs) -> dict:
+            # `**kwargs` and not the names: the production factory passes `control` and
+            # `scripted_model`, and neither is this bridge's business — the model here is the one
+            # written for this window, and the control directory is passed explicitly below.
             # **Paused before this node runs, which is the graph's own boundary**: everything the scheduler
             # has decided and recorded up to here is on disk, and nothing about this node is. That is what
             # a graph closure case needs to interrupt — a kill *inside* a node the graph has not recorded
@@ -389,17 +392,18 @@ def _run_graph_child(window: str, control: Path, workspace: Path, script: dict) 
             return {"submission": outcome.submission,
                     "exit_status": "Submitted" if outcome.status == "completed" else outcome.status}
 
-        def resume(self, messages: list) -> dict:
+        def resume(self, messages: list, **kwargs) -> dict:
             raise AssertionError("this bridge does not implement resuming a node")
 
     real_for = runner._agent_for
 
     def patched(graph, node_id, directory, models, secret, config_path, inputs=(), trace=None,
-                script=None):
+                scripted_model=None, control=None):
         if graph.nodes[node_id].op:
             # An op is the runtime's own, through the real factory: only the agent step is bridged.
             return real_for(graph, node_id, directory, models, secret, config_path,
-                            inputs=inputs, trace=trace, script=script)
+                            inputs=inputs, trace=trace, scripted_model=scripted_model,
+                            control=control)
         return Bridged(node_id, Path(directory), tuple(inputs), trace, graph.routes(node_id))
 
     runner._agent_for = patched
@@ -420,7 +424,7 @@ def install_graph_bridge(window: str, control: Path, script: dict) -> None:
     from pydantic_ai.models.function import FunctionModel
 
     from anchor.node import NodeRequest
-    from anchor.node.pydantic_adapter import run_node
+    from anchor.node.adapter import run_node
 
     def model(messages, info):
         seen = any(script["marker"] in str(getattr(part, "content", ""))
@@ -439,7 +443,7 @@ def install_graph_bridge(window: str, control: Path, script: dict) -> None:
             self.env = SimpleNamespace(route=None)
             self.route: str | None = None
 
-        def run(self, task: str) -> dict:
+        def run(self, task: str, **kwargs) -> dict:
             if window == "B8" and script.get("pause_at") == self.node_id:
                 _wait_for_a_kill(f"before {self.node_id}: the graph's earlier passes are recorded")
             outcome = asyncio.run(run_node(
@@ -455,16 +459,17 @@ def install_graph_bridge(window: str, control: Path, script: dict) -> None:
             return {"submission": outcome.submission,
                     "exit_status": "Submitted" if outcome.status == "completed" else outcome.status}
 
-        def resume(self, messages: list) -> dict:
+        def resume(self, messages: list, **kwargs) -> dict:
             raise AssertionError("this bridge does not implement resuming a node")
 
     real_for = runner._agent_for
 
     def patched(graph, node_id, directory, models, secret, config_path, inputs=(), trace=None,
-                script=None):
+                scripted_model=None, control=None):
         if graph.nodes[node_id].op:
             return real_for(graph, node_id, directory, models, secret, config_path,
-                            inputs=inputs, trace=trace, script=script)
+                            inputs=inputs, trace=trace, scripted_model=scripted_model,
+                            control=control)
         return Bridged(node_id, Path(directory), tuple(inputs), trace, graph.routes(node_id))
 
     runner._agent_for = patched
@@ -477,7 +482,7 @@ async def _run_child(window: str, control: Path, workspace: Path, script: dict,
     from pydantic_ai.messages import ModelResponse, ToolCallPart
 
     from anchor.node import NodeRequest
-    from anchor.node.pydantic_adapter import run_node
+    from anchor.node.adapter import run_node
     from anchor.node.recovery import save_budget, Budget
 
     if not (control / "budget.json").exists():

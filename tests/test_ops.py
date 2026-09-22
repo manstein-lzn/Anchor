@@ -91,6 +91,7 @@ def test_a_command_that_fails_fails_the_pass(tmp_path):
     assert "did not submit" in state.error
     assert state.nodes["check"]["exit_status"] == "Failed"
     assert "the references do not resolve" in state.nodes["check"]["submission"]
+    assert state.nodes["check"]["submission"] == "the references do not resolve"
 
 
 def test_a_command_that_is_not_there_says_which_one(tmp_path):
@@ -106,7 +107,8 @@ def test_a_command_that_is_not_there_says_which_one(tmp_path):
 
     assert state.status == "failed"
     assert state.nodes["check"]["exit_status"] == "CommandNotFound"
-    assert "not on the sandbox PATH" in state.nodes["check"]["submission"]
+    # The shell's own `not found` line, which is the diagnosis: the name it could not find is in it.
+    assert "anchor-verify-that-does-not-exist" in state.nodes["check"]["submission"]
 
 
 def test_an_op_that_chooses_has_to_choose(tmp_path):
@@ -124,6 +126,8 @@ def test_an_op_that_chooses_has_to_choose(tmp_path):
 
     assert state.status == "failed"
     assert "did not route" in state.nodes["check"]["submission"]
+    # Named as a failure rather than as a missing command: the program ran and chose not to choose.
+    assert state.nodes["check"]["exit_status"] == "Failed"
 
 
 def test_an_op_routes_by_its_exit_code(tmp_path):

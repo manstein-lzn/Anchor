@@ -45,7 +45,7 @@ class _StubAgent:
         self.status = status
         self.env = SimpleNamespace(route=route)
 
-    def run(self, task: str) -> dict:
+    def run(self, task: str, **_kwargs: object) -> dict:
         return self._finish()
 
     def resume(self, messages: list) -> dict:
@@ -68,7 +68,7 @@ def _stub_nodes(monkeypatch, behaviour):
     monkeypatch.setattr(runner, "_config", lambda path: ({}, None))
 
     def fake_agent_for(graph, node_id, directory, models, secret_file, config_path,
-                       inputs=(), trace=None, script=None):
+                       inputs=(), trace=None, script=None, **kwargs):
         writes, status, route = behaviour(node_id)
         return _StubAgent(Path(directory), writes, status, route)
 
@@ -113,7 +113,7 @@ def test_what_a_node_is_given_is_mounted_and_not_copied(tmp_path, monkeypatch):
     workspace = _workspace(tmp_path, graph)
     seen: dict[str, dict] = {}
 
-    def fake_agent_for(_graph, node_id, directory, _models, _secret, _config, inputs=(), trace=None, script=None):
+    def fake_agent_for(_graph, node_id, directory, _models, _secret, _config, inputs=(), trace=None, script=None, **kwargs):
         seen[node_id] = {"directory": Path(directory), "inputs": inputs, "trace": trace}
         return _StubAgent(Path(directory), {f"{node_id}.md": node_id}, "Submitted", None)
 
@@ -159,7 +159,7 @@ def test_a_node_keeps_its_workspace_between_passes(tmp_path, monkeypatch):
     workspace = _workspace(tmp_path, _self_loop(3))
     found: list[list[str]] = []
 
-    def fake_agent_for(_graph, node_id, directory, _models, _secret, _config, inputs=(), trace=None, script=None):
+    def fake_agent_for(_graph, node_id, directory, _models, _secret, _config, inputs=(), trace=None, script=None, **kwargs):
         found.append(sorted(item.name for item in Path(directory).iterdir() if item.is_file()))
         return _StubAgent(Path(directory), {f"pass{len(found)}.md": "x"}, "Submitted", "spin")
 
@@ -178,7 +178,7 @@ def test_each_pass_gets_its_own_conversation(tmp_path, monkeypatch):
     workspace = _workspace(tmp_path, _self_loop(3))
     traces: list[Path | None] = []
 
-    def fake_agent_for(_graph, node_id, directory, _models, _secret, _config, inputs=(), trace=None, script=None):
+    def fake_agent_for(_graph, node_id, directory, _models, _secret, _config, inputs=(), trace=None, script=None, **kwargs):
         traces.append(trace)
         return _StubAgent(Path(directory), {f"pass{len(traces)}.md": "x"}, "Submitted", "spin")
 
@@ -278,7 +278,7 @@ def test_a_module_runs_as_directories_named_for_its_scope(tmp_path, monkeypatch)
     workspace = _workspace(tmp_path, graph)
     seen: dict[str, tuple] = {}
 
-    def fake_agent_for(_graph, node_id, directory, _models, _secret, _config, inputs=(), trace=None, script=None):
+    def fake_agent_for(_graph, node_id, directory, _models, _secret, _config, inputs=(), trace=None, script=None, **kwargs):
         seen[node_id] = inputs
         return _StubAgent(Path(directory), {f"{node_id.replace('/', '_')}.md": node_id},
                           "Submitted", None)
@@ -318,7 +318,7 @@ class _CrashingStub:
         self.trace = Path(trace)
         self.env = SimpleNamespace(route=None)
 
-    def run(self, task: str) -> dict:
+    def run(self, task: str, **_kwargs: object) -> dict:
         self.trace.parent.mkdir(parents=True, exist_ok=True)
         self.trace.write_text(json.dumps({"role": "user", "content": task}) + "\n", encoding="utf-8")
         raise _DiedHere("the process died here")
@@ -334,7 +334,7 @@ class _ResumingStub:
         self.directory = Path(directory)
         self.env = SimpleNamespace(route=None)
 
-    def run(self, task: str) -> dict:
+    def run(self, task: str, **_kwargs: object) -> dict:
         raise AssertionError("a resumed node must be continued, not started again")
 
     def resume(self, messages: list) -> dict:
@@ -357,7 +357,7 @@ def test_a_run_continues_where_a_dead_process_left_it(tmp_path, monkeypatch):
     workspace = _workspace(tmp_path, graph)
     state = {"crashed": False}
 
-    def fake_agent_for(_graph, node_id, directory, _models, _secret, _config, inputs=(), trace=None, script=None):
+    def fake_agent_for(_graph, node_id, directory, _models, _secret, _config, inputs=(), trace=None, script=None, **kwargs):
         if node_id == "b":
             if not state["crashed"]:
                 state["crashed"] = True
@@ -438,7 +438,7 @@ def test_a_pointer_is_a_commit_and_not_a_directory_that_moved_since(tmp_path, mo
     handed: list = []
     passes = {"a": 0}
 
-    def fake_agent_for(_graph, node_id, directory, _models, _secret, _config, inputs=(), trace=None, script=None):
+    def fake_agent_for(_graph, node_id, directory, _models, _secret, _config, inputs=(), trace=None, script=None, **kwargs):
         if node_id == "b":
             handed.append(inputs[0])
             return _StubAgent(Path(directory), {"b.md": "seen"}, "Submitted", "a")
@@ -588,7 +588,7 @@ def test_a_node_reaches_the_work_behind_its_inputs(tmp_path, monkeypatch):
     workspace = _workspace(tmp_path, _chain([("a", "b"), ("b", "c")]))
     seen: dict[str, tuple] = {}
 
-    def fake_agent_for(_g, node_id, directory, _m, _s, _c, inputs=(), trace=None, script=None):
+    def fake_agent_for(_g, node_id, directory, _m, _s, _c, inputs=(), trace=None, script=None, **kwargs):
         seen[node_id] = inputs
         return _StubAgent(Path(directory), {f"{node_id}.md": node_id}, "Submitted", None)
 
@@ -618,7 +618,7 @@ def test_what_a_node_is_handed_does_not_grow_with_the_loop(tmp_path, monkeypatch
     workspace = _workspace(tmp_path, graph)
     sizes: list[int] = []
 
-    def fake_agent_for(_g, node_id, directory, _m, _s, _c, inputs=(), trace=None, script=None):
+    def fake_agent_for(_g, node_id, directory, _m, _s, _c, inputs=(), trace=None, script=None, **kwargs):
         sizes.append(len(inputs))
         return _StubAgent(Path(directory), {f"{node_id}.md": node_id}, "Submitted",
                           "b" if node_id == "a" else "a")

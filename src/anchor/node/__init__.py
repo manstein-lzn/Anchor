@@ -88,6 +88,23 @@ class NodeRequest:
     roles: str = ""
     """A label for the trace, not a behaviour."""
 
+    @property
+    def node_key(self) -> str:
+        """The node's name in the framework's own vocabulary, and **not always `execution_id`**.
+
+        A node inside a module is legitimately called `work/draft` — that is its name in the graph, in
+        the run directory and in a person's sentence about it — and the framework's step store refuses a
+        `/` in an identifier, because it interpolates one into a path. So a name that has to be legal
+        *and* stable is derived once, here, and used for every identity the framework sees: the store's
+        `agent_name`, the run ids built from it, and the conversation. Deriving it in one place is the
+        point — two spellings of the same node in one store is a node that cannot find its own attempt.
+
+        Kept beside `execution_id` rather than replacing it because they answer different questions:
+        `execution_id` is the Graph's name for this node and is what a caller reads in a record;
+        `node_key` is only ever a name for the store.
+        """
+        return self.execution_id.replace("/", "__")
+
 
 @dataclass(frozen=True)
 class NodeOutcome:
@@ -116,6 +133,25 @@ class NodeOutcome:
     files: tuple[str, ...] = field(default=())
     """What it left in its workspace, relative, sorted. A convenience for a caller that would
     otherwise walk the tree; the workspace is the authority."""
+
+    command_missing: bool = False
+    """Whether the command this node was to run was not on the sandbox PATH at all, which is not the
+    same failure as one that ran and did not pass. Only an op sets it, and it is **the runner saying
+    so rather than the caller working it out**: the meaning of an exit code belongs to whoever runs the
+    command — a later op runtime on a different scaffold may report the same thing differently, and a
+    caller that parsed output for it would be the caller that breaks when it does."""
+
+    returncode: int = 0
+    """The exit code the node's command ended with, for the runtimes that run one. Zero for an agent,
+    which has no single command to point at. A **fact about the attempt**, not a status: the same
+    status covers several codes, and a caller that wants the code has to be given it."""
+
+    invocation: str = ""
+    """The command as it was actually dispatched, or empty when the shape of the call was not a
+    command's. Kept because a failure is read against what was run: the runtime answered "there is no
+    such command" about *this* text, and a caller that had to remember what it asked for would be
+    holding half of the evidence for a verdict it is given in full. A label here, not a resume token —
+    nothing may be reconstructed from it."""
 
     recovery: str = ""
     """The token for this attempt, for a caller that wants to resume it. Empty when nothing was recorded.

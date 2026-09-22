@@ -469,7 +469,11 @@ class AdapterAgent:
             routes=tuple(routes), trace=Path(trace) if trace else None)
         self.env = type("Env", (), {"route": None})()
 
-    def run(self, task: str) -> dict:
+    def run(self, task: str, **kwargs) -> dict:
+        # `**kwargs` and not the two names: after the switch the production seam passes `control` and
+        # `scripted_model`, neither of which this bridge wants — the model is the test's, and where a
+        # node keeps its record is the real bridge's business. Ignoring them is what keeps this a test
+        # of the *graph* and not a copy of the switch.
         self.request = replace_request(self.request, task=task)
         outcome = asyncio.run(run_node(self.request, model=self.model))
         self.env.route = outcome.route
@@ -477,7 +481,7 @@ class AdapterAgent:
         return {"submission": outcome.submission,
                 "exit_status": "Submitted" if outcome.status == COMPLETED else outcome.status}
 
-    def resume(self, messages: list) -> dict:
+    def resume(self, messages: list, **kwargs) -> dict:
         # Not this package's business, and saying so is better than a bridge that pretends.
         raise AssertionError("this package does not implement resuming a node")
 
@@ -527,12 +531,12 @@ def test_a12_a_real_graph_runs_agent_op_agent_through_the_new_entry_point(tmp_pa
     real = runner._agent_for
 
     def factory(graph, node_id, directory, models_, secret, config, inputs=(), trace=None,
-                script=None):
+                scripted_model=None, control=None):
         # **Only the agent path.** An op is dispatched by the real factory, so the run's op really is
         # the runtime's op — a bridge that took those over would be testing itself.
         if graph.nodes[node_id].op:
             return real(graph, node_id, directory, models_, secret, config, inputs=inputs,
-                        trace=trace, script=script)
+                        trace=trace, scripted_model=scripted_model, control=control)
         calls.append(node_id)
         return AdapterAgent(Path(directory), node_id, inputs, trace, models[node_id],
                             graph_module.Graph.routes(graph, node_id))
@@ -610,17 +614,28 @@ print('STATUS', state.status, state.executed)
     assert (workspace / "runs").is_dir()
 
 
-def test_a13_nothing_on_the_default_path_imports_the_adapter():
-    """A static check as well as the dynamic one above: the adapter is imported where it is used and
-    not by a module the runtime always loads."""
-    default = ["src/anchor/simple/run.py", "src/anchor/simple/agent.py",
-               "src/anchor/simple/graph.py", "src/anchor/runtime/execenv.py",
-               "src/anchor/serve.py"]
+def test_a13_nothing_on_the_default_path_names_the_framework():
+    """A static check as well as the dynamic one above: **the framework is named only inside the
+    runtime that needs it**, and never at module scope on the path a graph run loads first.
+
+    Naming `anchor.node` used to be part of this and no longer is: ADR-062 removed the second path, so
+    `run.py` reaching the node runtime is the design rather than the accident this was written to catch.
+    What survives is the half with teeth — a module-scope `pydantic_ai` import anywhere on the default
+    path would make an op-only graph need the harness installed, and that is what the run above proves
+    by executing a graph in an interpreter that cannot import it.
+    """
+    default = ["src/anchor/simple/run.py", "src/anchor/simple/node_bridge.py",
+               "src/anchor/node/model_bridge.py", "src/anchor/node/recovery.py",
+               "src/anchor/simple/agent.py", "src/anchor/simple/graph.py",
+               "src/anchor/runtime/execenv.py", "src/anchor/serve.py"]
 
     for name in default:
-        text = (Path("/root/Anchor") / name).read_text(encoding="utf-8")
-        assert "pydantic_ai" not in text, f"{name} names the optional dependency"
-        assert "anchor.node" not in text, f"{name} imports the adapter's package"
+        for at, line in enumerate((Path("/root/Anchor") / name).read_text(encoding="utf-8")
+                                  .splitlines(), start=1):
+            # Indented `import`s are inside a function or a `TYPE_CHECKING` block, which is exactly
+            # where a call-time import is allowed to be.
+            if line.startswith(("from pydantic_ai", "import pydantic_ai")):
+                raise AssertionError(f"{name}:{at} imports the framework at module scope: {line}")
 
 
 # ── the reviewer's findings, as regressions ──────────────────────────────────────────────────────
@@ -724,10 +739,11 @@ def test_a12b_the_route_the_adapter_returns_drives_a_real_branch(tmp_path, monke
                        ['anchor-route --to right --reason "the right arm is the one"'])
     real = runner._agent_for
 
-    def factory(g, node_id, directory, models_, secret, cfg, inputs=(), trace=None, script=None):
+    def factory(g, node_id, directory, models_, secret, cfg, inputs=(), trace=None,
+                scripted_model=None, control=None):
         if g.nodes[node_id].op:
             return real(g, node_id, directory, models_, secret, cfg, inputs=inputs, trace=trace,
-                        script=script)
+                        scripted_model=scripted_model, control=control)
         return AdapterAgent(Path(directory), node_id, inputs, trace, model,
                             graph_module.Graph.routes(g, node_id))
 
