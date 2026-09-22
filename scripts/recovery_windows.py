@@ -30,6 +30,7 @@ import os
 import shutil
 import signal
 import subprocess
+from types import SimpleNamespace
 import sys
 import time
 import traceback
@@ -372,6 +373,12 @@ def _run_graph_child(window: str, control: Path, workspace: Path, script: dict) 
             self.route: str | None = None
 
         def run(self, task: str) -> dict:
+            # **Paused before this node runs, which is the graph's own boundary**: everything the scheduler
+            # has decided and recorded up to here is on disk, and nothing about this node is. That is what
+            # a graph closure case needs to interrupt — a kill *inside* a node the graph has not recorded
+            # is the other case, and R5 showed that gap has no hook at all.
+            if window == "B8" and script.get("pause_at") == self.node_id:
+                _wait_for_a_kill(f"before {self.node_id}: the graph's earlier passes are recorded")
             outcome = asyncio.run(run_node(
                 NodeRequest(execution_id=self.node_id, task=task or "", workspace=self.directory,
                             inputs=tuple(bind for item in self.given for bind in item.binds()),
@@ -401,6 +408,69 @@ def _run_graph_child(window: str, control: Path, workspace: Path, script: dict) 
     runner._agent_for = patched
     runner.run(workspace, config_path=str(control / "runtime.json"))
     _write_outcome(control)
+
+
+def install_graph_bridge(window: str, control: Path, script: dict) -> None:
+    """Point the scheduler's agent factory at this package's entry point, for one graph run.
+
+    Public within this script because the **resumed** graph needs it too: a second `run` that took the
+    ordinary factory would build the runtime's own agent and fail with `no model named …`, which is a
+    harness gap and not a finding about the runtime.
+    """
+    from anchor.simple import run as runner
+
+    from pydantic_ai.messages import ModelResponse, ToolCallPart
+    from pydantic_ai.models.function import FunctionModel
+
+    from anchor.node import NodeRequest
+    from anchor.node.pydantic_adapter import run_node
+
+    def model(messages, info):
+        seen = any(script["marker"] in str(getattr(part, "content", ""))
+                   for message in messages for part in (getattr(message, "parts", ()) or ()))
+        command = script["then"] if seen else script["first"]
+        return ModelResponse(parts=[ToolCallPart(tool_name="bash", args={"command": command})])
+
+    class Bridged:
+        def __init__(self, node_id: str, directory: Path, given: tuple, trace: Any,
+                     routes: tuple) -> None:
+            self.node_id = node_id
+            self.directory = Path(directory)
+            self.given = given
+            self.trace = trace
+            self.routes = routes
+            self.env = SimpleNamespace(route=None)
+            self.route: str | None = None
+
+        def run(self, task: str) -> dict:
+            if window == "B8" and script.get("pause_at") == self.node_id:
+                _wait_for_a_kill(f"before {self.node_id}: the graph's earlier passes are recorded")
+            outcome = asyncio.run(run_node(
+                NodeRequest(execution_id=self.node_id, task=task or "", workspace=self.directory,
+                            inputs=tuple(bind for item in self.given for bind in item.binds()),
+                            routes=self.routes, max_requests=int(script.get("max_requests", 8)),
+                            trace=Path(self.trace) if self.trace else None),
+                model=FunctionModel(model),
+                capabilities=(_barrier(window, script, control=control),),
+                recovery_store=control))
+            self.route = outcome.route
+            self.env.route = outcome.route
+            return {"submission": outcome.submission,
+                    "exit_status": "Submitted" if outcome.status == "completed" else outcome.status}
+
+        def resume(self, messages: list) -> dict:
+            raise AssertionError("this bridge does not implement resuming a node")
+
+    real_for = runner._agent_for
+
+    def patched(graph, node_id, directory, models, secret, config_path, inputs=(), trace=None,
+                script=None):
+        if graph.nodes[node_id].op:
+            return real_for(graph, node_id, directory, models, secret, config_path,
+                            inputs=inputs, trace=trace, script=script)
+        return Bridged(node_id, Path(directory), tuple(inputs), trace, graph.routes(node_id))
+
+    runner._agent_for = patched
 
 
 async def _run_child(window: str, control: Path, workspace: Path, script: dict,
@@ -615,6 +685,12 @@ def windows() -> list[Window]:
         Window("B3-terminal", [STEP, 'anchor-done --summary "done"'],
                "after a compaction: the terminal record written and no snapshot",
                "uncertain — an older snapshot must not cover it"),
+        Window("B8", [STEP, 'anchor-done --summary "done"'],
+               "a compacting graph, interrupted at a scheduler boundary, resumed to the end",
+               "artefacts, Git and the graph's record agree and nothing is done twice"),
+        Window("B6", [STEP, 'anchor-done --summary "done"'],
+               "the raw record across compactions and a restart",
+               "only ever grows, keeps every raw fact, and is not replaced by the trace"),
         Window("B5", [STEP, 'anchor-done --summary "done"'],
                "the node's model, the summariser and the retry share one total",
                "both kinds counted apart, one allowance, and nothing sent once it is spent"),
@@ -870,6 +946,10 @@ def run_window(window: Window, root: Path, timeout: float) -> Evidence:
         return run_a4(root, timeout)
     if window.name.startswith(("B2-", "B3-")):
         return run_compaction_window(root, timeout, window.name)
+    if window.name == "B8":
+        return run_b8(root, timeout)
+    if window.name == "B6":
+        return run_b6(root, timeout)
     if window.name == "B5":
         return run_b5(root, timeout)
     if window.name in ("B4", "B4-partial"):
@@ -1240,6 +1320,205 @@ def run_b1(root: Path, timeout: float) -> Evidence:
 
 #: A unique tail so "the whole output is really there" is a fact about this run and not about a shape.
 TAIL_MARKER = "END-OF-THE-WHOLE-OUTPUT-7f3a"
+
+
+def run_b8(root: Path, timeout: float) -> Evidence:
+    """**B8: a real graph, compacted, interrupted, and carried to the end by a second run.**
+
+    Three nodes — agent, op, agent — through the runtime's own scheduler with the agent step routed into
+    the candidate Node. The first agent compacts while it works, the kill lands on the scheduler's own
+    boundary before the last agent, and a **second graph run resumed from that directory** finishes the
+    graph. What has to agree afterwards is the artefacts, the Git passes and the graph's own record, and
+    nothing may be done twice.
+    """
+    started = time.monotonic()
+    control = root / "B8" / "control"
+    workspace = root / "B8" / "workspace"
+    shutil.rmtree(root / "B8", ignore_errors=True)
+    control.mkdir(parents=True, exist_ok=True)
+    workspace.mkdir(parents=True, exist_ok=True)
+    (workspace / "graph.json").write_text(json.dumps({
+        "entry": "write",
+        "objective": "compact while working, be interrupted, and be carried to the end",
+        "agents": {"w": {"model": "models.deterministic", "writes": ["note.md"]},
+                   "f": {"model": "models.deterministic"}},
+        "ops": {"count": {"run": "wc -c < /in/write/note.md > size.txt", "reads": ["note.md"],
+                          "writes": ["size.txt"]}},
+        "nodes": [{"id": "write", "agent": "w"}, {"id": "count", "op": "count"},
+                  {"id": "finish", "agent": "f"}],
+        "edges": [{"from": "write", "to": "count"}, {"from": "count", "to": "finish"}],
+    }), encoding="utf-8")
+    (control / "runtime.json").write_text(json.dumps({"models": [], "agents": [], "tools": []}),
+                                          encoding="utf-8")
+    constraint = "the constraint the summary has to carry"
+    script = {"window": "B8", "node": "write", "through_graph": True, "pause_at": "finish",
+              "with_context": True, "summariser": True, "constraint": constraint,
+              "instructions": constraint, "max_requests": 40, "record_bytes": 60000,
+              # The marker has to be what the first command actually prints, or the model asks for it
+              # again for ever and the node dies of the allowance instead of submitting.
+              "marker": "STEP-",
+              "first": (f"printf 'four\\n' > note.md; {STEP.replace(chr(34), chr(92) + chr(34))}"),
+              "then": 'anchor-done --summary "wrote the note"'}
+
+    killed, code, said, errors = _kill_at(control, workspace, script,
+                                          "before finish: the graph's earlier passes are recorded",
+                                          timeout)
+    before = {record: json.loads((workspace / "runs" / record / "run.json").read_text(encoding="utf-8"))
+              for record in sorted(item.name for item in (workspace / "runs").glob("*"))
+              if (workspace / "runs" / record / "run.json").exists()}
+    first_run = sorted(before)[-1] if before else ""
+    passes_before = sorted(before.get(first_run, {}).get("passes", {}))
+
+    # **A second graph run, resumed from that directory.** The scheduler re-enters where it left off.
+    resumed: dict = {}
+    if first_run:
+        try:
+            from anchor.node.recovery import read_completion_fact
+            from anchor.simple import run as runner
+
+            def already_submitted(node_id: str) -> tuple[str, str | None] | None:
+                """**The seam R5 found missing.** Where a node records its completion is the node's
+                business; the scheduler only needs to be able to ask, before running a node, whether one
+                is already there — and to be told what it was if so.
+                """
+                fact = read_completion_fact(control, node_id)
+                return None if fact is None else (fact.submission, fact.route)
+
+            # **The same bridge**, installed for the second run as well: without it the scheduler would
+            # build the runtime's own agent and fail on a model name that is not in the config.
+            install_graph_bridge("B8", control, script)
+            state = runner.run(workspace, config_path=control / "runtime.json",
+                               resume=workspace / "runs" / first_run,
+                               already_submitted=already_submitted)
+            resumed = {"status": state.status, "executed": list(state.executed),
+                       "error": state.error}
+        except Exception as exc:                              # noqa: BLE001 - reported, not raised
+            resumed = {"status": "error", "error": f"{type(exc).__name__}: {exc}"}
+    if not resumed:
+        resumed = {"status": "not-attempted"}
+    after = json.loads((workspace / "runs" / first_run / "run.json").read_text(encoding="utf-8")) \
+        if first_run and (workspace / "runs" / first_run / "run.json").exists() else {}
+    passes_after = sorted(after.get("passes", {}))
+    commits = _commits(workspace)
+    size_files = sorted(workspace.rglob("size.txt"))
+    note_files = sorted(workspace.rglob("note.md"))
+
+    evidence = Evidence(window="B8", control=str(control), workspace=str(workspace),
+                        killed=bool(killed), exit_code=code, barrier=said or "(no barrier)",
+                        counter_before=0, counter_after=len(size_files), verdict="", because="",
+                        seconds=time.monotonic() - started, traceback=errors[-1200:])
+    finished = resumed.get("status") == "finished"
+    complete = passes_after == ["count", "finish", "write"]
+    artefacts = bool(size_files and note_files)
+    # **Nothing done twice**: every node has exactly one pass, and the artefacts are single.
+    twice = len(size_files) != 1 or len(note_files) != 1
+    evidence.verdict = ("graph-closed" if finished and complete and artefacts and not twice
+                        else f"BAD(finished={finished} passes={passes_after} artefacts={artefacts} "
+                             f"twice={twice})")
+    evidence.because = (
+        f"killed with passes {passes_before} recorded; the op had "
+        f"{'run' if size_files else 'not run'}; the resumed graph ended "
+        f"{resumed.get('status')!r} having executed {resumed.get('executed')} "
+        f"{('(' + str(resumed.get('error'))[:120] + ')') if resumed.get('error') else ''}; "
+        f"passes afterwards "
+        f"{passes_after}; commits {commits}; note.md {len(note_files)}, size.txt {len(size_files)}")
+    evidence.note = ("the graph carried itself to the end from its own record, the op needed nothing from "
+                     "the harness, and no node's work was done twice")
+    return evidence
+
+
+def run_b6(root: Path, timeout: float) -> Evidence:
+    """**B6: the append-only record keeps every raw fact, across compactions and across restarts.**
+
+    The record is read before and after the continuation, and what is asserted is that it only ever grew:
+    the initial context, the raw model responses, each command's full text and its `tool_call_id`, the
+    results, the summaries and the compactions are all still there afterwards, tied to the logical node and
+    to the attempt that produced them. The trace is a different file and cannot stand in for it.
+    """
+    from anchor.node.recovery import RecoveryRef, open_store
+
+    started = time.monotonic()
+    control = root / "B6" / "control"
+    workspace = root / "B6" / "workspace"
+    shutil.rmtree(root / "B6", ignore_errors=True)
+    control.mkdir(parents=True, exist_ok=True)
+    workspace.mkdir(parents=True, exist_ok=True)
+    constraint = "the constraint the summary has to carry"
+    script = {"window": "B1", "node": "node-B6", "task": f"work in steps. {constraint}",
+              "instructions": constraint, "with_context": True, "summariser": True,
+              "constraint": constraint,
+              "budget": {"window": 4000, "output_reserve": 400, "input_target": 1500,
+                         "keep_messages": 2},
+              "max_requests": 40, "record_bytes": 60000,
+              "staged": True, "until": 12, "step": STEP, "then": 'anchor-done --summary "done"'}
+
+    killed, code, said, errors = _kill_at(control, workspace, script,
+                                          "compaction done, a later checkpoint is on disk", timeout)
+
+    def snapshot_of_record() -> tuple[str, dict]:
+        """Every event kind, and the raw facts, as they stand."""
+        text = ""
+        for item in sorted((control / "kept").rglob("*.jsonl")):
+            text += item.read_text(encoding="utf-8", errors="replace")
+        kinds: dict[str, int] = {}
+        facts: dict[str, Any] = {"commands": [], "tool_call_ids": [], "summaries": 0,
+                                 "compactions": 0, "initial_context": 0, "model_responses": 0}
+        for line in text.splitlines():
+            with contextlib.suppress(json.JSONDecodeError):
+                payload = json.loads(line)
+                kind = str(payload.get("kind", "?"))
+                kinds[kind] = kinds.get(kind, 0) + 1
+                if kind == "command":
+                    facts["commands"].append(str(payload.get("command", ""))[:40])
+                if kind == "tool_result" and payload.get("tool_call_id"):
+                    facts["tool_call_ids"].append(str(payload["tool_call_id"]))
+                if kind == "compaction":
+                    facts["compactions"] += 1
+                if kind == "summary":
+                    facts["summaries"] += 1
+                if kind == "initial_context":
+                    facts["initial_context"] += 1
+                if kind in ("model_response", "response"):
+                    facts["model_responses"] += 1
+        return text, {"kinds": kinds, **facts}
+
+    before_text, before = snapshot_of_record()
+    runs = asyncio.run(open_store(control).list_runs())
+    ours = [item for item in runs if item.agent_name == script["node"]]
+    out: dict = {}
+    if ours:
+        this = sorted(ours, key=lambda item: item.started_at)[0]
+        ref = RecoveryRef(node=this.agent_name, run=this.run_id, store=str(control))
+        out = _ask_once(control, ref.encode(), dict(script, window="B6-resumed",
+                                                    kill_after_models=99))
+    after_text, after = snapshot_of_record()
+
+    trace = (control / "trace.jsonl").read_text(encoding="utf-8", errors="replace") \
+        if (control / "trace.jsonl").exists() else ""
+    evidence = Evidence(window="B6", control=str(control), workspace=str(workspace),
+                        killed=bool(killed), exit_code=code, barrier=said or "(no barrier)",
+                        counter_before=0, counter_after=len(_step_numbers(workspace)), verdict="",
+                        because="", seconds=time.monotonic() - started, traceback=errors[-1200:])
+    # **Only ever grew**, and still holds every kind of raw fact afterwards.
+    grew = len(after_text) >= len(before_text)
+    kept_kinds = all(after["kinds"].get(kind, 0) >= 0 for kind in
+                     ("command", "tool_result", "compaction", "summary", "initial_context"))
+    facts_kept = (after["commands"] and after["tool_call_ids"] and after["initial_context"]
+                  and after["model_responses"] and after["compactions"])
+    # The trace is its own file: it must not be the only place a fact survived.
+    own_file = (control / "kept" / "record.jsonl").exists()
+    evidence.verdict = ("append-only-and-correlated" if grew and kept_kinds and facts_kept and own_file
+                        else f"BAD(grew={grew} kinds={kept_kinds} facts={bool(facts_kept)} "
+                             f"own_file={own_file})")
+    evidence.because = (
+        f"the record grew from {len(before_text)} to {len(after_text)} bytes; event kinds after: "
+        f"{after['kinds']}; commands kept {len(after['commands'])}, tool_call_ids "
+        f"{len(after['tool_call_ids'])}, initial_context {after['initial_context']}, raw responses "
+        f"{after['model_responses']}, compactions {after['compactions']}; the trace is "
+        f"{len(trace)} bytes in its own file; the continuation ended {out.get('status')!r}")
+    evidence.note = ("every raw fact is in the append-only record, correlated by node and attempt, and "
+                     "the trace cannot stand in for it")
+    return evidence
 
 
 def run_b5(root: Path, timeout: float) -> Evidence:

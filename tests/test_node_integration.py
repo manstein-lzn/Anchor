@@ -483,3 +483,45 @@ def test_b5_the_summariser_is_not_charged_consistently(killed):
     # 两类调用确实都被独立计数了——所以缺口在口径，不在采集。
     assert "summary_calls=" in evidence["because"], evidence["because"]
     assert "node_calls=" in evidence["because"], evidence["because"]
+
+
+def test_b6_the_raw_record_is_append_only_across_compactions_and_restarts(killed):
+    """**B6。** 原始记录只增不减 ✓，跨多次压缩与一次恢复后仍然保留每一类原始事实 ✓。
+
+    断言的是记录**自己**的内容 ✓，而且**不**用最终 trace 代替它 ✗——trace 属于单次尝试 ✓（恢复进程会写
+    自己的 ✓），而记录是随事发生写入、从不重写的 ✓。所以"事实还在"必须从记录里读到 ✓。
+
+    关联的锚点是：逻辑节点与尝试 ✓（`run` ✓）、每次命令的**完整文本** ✓、结果上的 `tool_call_id` ✓、
+    初始输入 ✓、原始模型响应 ✓、摘要与压缩事件 ✓。
+    """
+    evidence = killed["B6"]
+
+    assert evidence["verdict"] == "append-only-and-correlated", evidence["because"]
+    assert "the record grew from" in evidence["because"], evidence["because"]
+    # 每一类原始事实都在。
+    for fact in ("initial_context 2", "compactions 15", "commands kept 18", "tool_call_ids 18"):
+        assert fact in evidence["because"], f"{fact!r} missing: {evidence['because']}"
+    # trace 是另一个文件，不能代替记录。
+    assert "the trace is" in evidence["because"] and "in its own file" in evidence["because"], \
+        evidence["because"]
+
+
+def test_b8_the_graph_resume_does_not_consult_the_node_record(killed):
+    """**B8 未通过。** 图用自己的记录重新进入 ✓，但**不看节点已经提交的事实** ✗——所以工作做了两遍 ✓。
+
+    这一条把 R5 的结论推到底 ✓：候选 Node 在真图里跑完了三个节点 ✓（`write` 含压缩 ✓、op ✓、`finish` ✓），
+    也在调度器自己的边界上被 kill 了 ✓。但**第二个图运行**没有把节点记录当成"这个节点已经做过" ✓——恢复后
+    `note.md` 与 `size.txt` 各**两份** ✓，即 `write` 与 op 都**被重复执行** ✗。
+
+    节点层可以问"这个节点是否已经提交" ✓（`already_submitted` 接缝 ✓，见 `run.py` ✓），而**它没有被用来
+    阻止重复** ✗。所以图级闭环**不成立** ✓——不是因为没有接缝 ✓，而是因为接缝还不足以让 `resume=` 跳过
+    已经完成的节点 ✗。
+    """
+    evidence = killed["B8"]
+
+    assert evidence["killed"] is True, "the graph was not held at its boundary"
+    assert evidence["barrier"], "the graph never reached the boundary"
+    assert evidence["verdict"].startswith("BAD"), (
+        f"B8 started passing; check whether the resume really stopped repeating work: {evidence['because']}")
+    # 重复执行的证据是磁盘上的文件数，不是某个判断。
+    assert "note.md 2" in evidence["because"] and "size.txt 2" in evidence["because"], evidence["because"]

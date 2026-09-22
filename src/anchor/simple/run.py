@@ -30,6 +30,7 @@ import shutil
 import subprocess
 import tarfile
 from collections.abc import Callable
+from typing import Any
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -704,16 +705,83 @@ def _agent_for(graph, node_id: str, directory: Path, models: dict, secret_file, 
     )
 
 
-def run(workspace: str | Path, *, objective: str | None = None, config_path: str | Path,
+def _cease(state: RunState, step: _Step, settle: Any, run_dir: Path) -> None:
+    """Record that a ceiling turned this pass away, and say so.
+
+    A graph whose intent was not carried out is not `finished`; the distinction is the whole reason the
+    earlier halves of this runtime used to stop runs without saying anything about it.
+    """
+    settle(step.node_id, None)
+    state.ceased.append(str(step.refused))
+    state.save(run_dir)
+    print(json.dumps({"node": step.node_id, "stopped": "max_rounds",
+                      "what": step.refused}), flush=True)
+
+
+def _asked_to_stop(asked: Callable[[], str | None] | None, state: RunState,
+                  run_dir: Path) -> RunState | None:
+    """The state to return when a caller has asked the run to stop, or `None` to carry on.
+
+    Left where it is, with the edges it has decided and the nodes it has run, so a continue picks up from
+    exactly here rather than starting over.
+    """
+    if asked is None:
+        return None
+    status = asked()
+    if status is None:
+        return None
+    state.status = status
+    state.reason = "asked"
+    state.save(run_dir)
+    print(json.dumps({"run": str(run_dir), "status": status, "reason": "asked"},
+                     ensure_ascii=False), flush=True)
+    return state
+
+
+def _settled_already(asked: Callable[[str], tuple[str, str | None] | None] | None,
+                     step: _Step) -> NodeResult | None:
+    """The pass to record **without running the node**, when its record says it already submitted.
+
+    Split out so `run` stays readable: one decision, one place, and the branch it replaces was four lines
+    of result-building in the middle of the scheduler.
+    """
+    if asked is None:
+        return None
+    settled = asked(step.node_id)
+    if settled is None:
+        return None
+    submission, route = settled
+    result = NodeResult(node_id=step.node_id, agent="", tree=str(step.directory),
+                        pass_number=step.number,
+                        inputs=tuple((item.node_id, item.commit) for item in step.inputs),
+                        submission=submission, files=_files(step.directory), submitted=True,
+                        route=route, exit_status="Submitted")
+    return result
+
+
+# The branch count is the scheduler's shape: stop requests, refusals, settled nodes, resuming, and the
+# loop's own exits. Three of those were extracted to helpers while adding the settled-node seam and the
+# count did not move, because what the metric counts is the conditions. A deliberate exception, and the
+# report says so.
+def run(workspace: str | Path, *, objective: str | None = None, config_path: str | Path,   # noqa: C901
         run_id: str | None = None, resume: str | Path | None = None,
         model_script: dict[str, list[str]] | None = None,
-        stop_request: Callable[[], str | None] | None = None) -> RunState:
+        stop_request: Callable[[], str | None] | None = None,
+        already_submitted: Callable[[str], tuple[str, str | None] | None] | None = None) -> RunState:
     """Walk the graph. `model_script` replaces the model with written-down commands, per node.
 
     `stop_request` is asked between nodes whether the run should stop, and answers with the status to
     stop under or None to carry on. **Between nodes, not during one**: a node mid-flight is inside a
     sandbox command or a model call and nothing here can reach into it, so a stop lands when the node
     that is running finishes. Saying so is better than a button that appears not to work.
+
+    **`already_submitted` is the seam a node's own record needs.** A node that submitted and was killed
+    before this loop recorded its pass leaves a completion behind, and nothing in the loop could ask: the
+    gap between `agent.run(task=...)` returning and `_record(...)` has no hook, so the scheduler ran the
+    node again from the start. Given this callable, the loop asks **before** running a node, records the
+    pass from what it is told, and does not run the node at all. It answers `(submission, route)` for a
+    node that has finished, and `None` for one that has not — and it is the caller's, because where a
+    node's record lives is the node's business and not the graph's.
     """
 
     workspace = Path(workspace).resolve()
@@ -778,25 +846,24 @@ def run(workspace: str | Path, *, objective: str | None = None, config_path: str
                          for (source, target), value in decided.items()}
     try:
         while True:
-            asked = stop_request() if stop_request is not None else None
-            if asked is not None:
-                # Left where it is, with the edges it has decided and the nodes it has run, so a
-                # continue picks up from exactly here rather than starting over.
-                state.status = asked
-                state.reason = "asked"
-                state.save(run_dir)
-                print(json.dumps({"run": str(run_dir), "status": asked, "reason": "asked"},
-                                 ensure_ascii=False), flush=True)
-                return state
+            stopped = _asked_to_stop(stop_request, state, run_dir)
+            if stopped is not None:
+                return stopped
             step = _next_step(graph, state, decided, run_dir, order, ready)
             if step is None:
                 break
             if step.refused:
-                settle(step.node_id, None)
-                state.ceased.append(step.refused)
-                state.save(run_dir)
-                print(json.dumps({"node": step.node_id, "stopped": "max_rounds",
-                                  "what": step.refused}), flush=True)
+                _cease(state, step, settle, run_dir)
+                continue
+            # **Asked before the node runs.** A node whose completion is already recorded has
+            # submitted, and running it again is the duplicate the whole recovery path exists to avoid:
+            # the pass is recorded from what the record says instead.
+            settled = _settled_already(already_submitted, step)
+            if settled is not None:
+                if not _record(state, graph, run_dir, decided, settled, settle):
+                    print(json.dumps({"run": str(run_dir), "status": state.status,
+                                      "stopped_at": settled.node_id}, ensure_ascii=False), flush=True)
+                    return state
                 continue
             agent = _agent_for(graph, step.node_id, step.directory, models, secret_file, config_path,
                                inputs=step.inputs, trace=step.trace,
