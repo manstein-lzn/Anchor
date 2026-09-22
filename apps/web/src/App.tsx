@@ -21,6 +21,7 @@ import { label } from './execution';
 import {
   toFlowEdges, toFlowNodes, type OurAgent, type OurGraph, type OurRun, type OurRunDetail,
 } from './model';
+import { Transcript } from './Transcript';
 
 const POLL_MS = 3000;
 type Pick = { kind: 'node' | 'edge' | 'agent'; id: string } | null;
@@ -365,18 +366,7 @@ export function App() {
             </div>}
             {!node && <p className="hint">点一个节点看它说过什么、执行过什么。</p>}
             {node && !messages.length && <p className="hint">这次运行里它还没有留下消息。</p>}
-            <ol className="messages">
-              {messages.map((message, index) => (
-                <li key={index} className={`message ${message.role}`}>
-                  <span className="role">
-                    {message.role === 'assistant' ? '它' : message.role === 'tool' ? '结果' : message.role}
-                    {message.tools?.length ? ` · ${message.tools.join(' ')}` : ''}
-                    {message.exit_status ? ` · ${label(message.exit_status)}` : ''}
-                  </span>
-                  <pre>{message.text}</pre>
-                </li>
-              ))}
-            </ol>
+            <Transcript messages={messages} />
           </aside>
         </div>
       ) : (

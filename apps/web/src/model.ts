@@ -107,7 +107,17 @@ export type OurRun = {
   objective: string;
 };
 
-export type TraceMessage = { role: string; text: string; tools?: string[]; exit_status?: string };
+export type TraceMessage = {
+  role: string;
+  text: string;
+  /** What the node ran. The projection carries these whole, not only the tool's name: a command is
+   *  the most informative thing in a trace and the view has nothing to show without it. */
+  commands?: string[];
+  /** Whether the text was cut before it got here, so a reader is never shown part of a result
+   *  believing it is all of it. */
+  truncated?: boolean;
+  exit_status?: string;
+};
 
 export type OurRunDetail = {
   graph: string;

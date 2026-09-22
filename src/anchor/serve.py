@@ -252,16 +252,41 @@ def _starter_graph(name: str) -> dict:
     }
 
 
+#: How much of one message a view is given. Generous, because the view collapses what it does not
+#: need and a command's output is often the whole point — but not unbounded, because a node can read a
+#: large file and the payload would carry it on every poll. What was cut is said rather than silently
+#: dropped, so a reader is never shown a truncated result believing it is the whole one.
+TAIL_TEXT = 20000
+
+
 def _readable(line: str) -> dict:
-    """A message as something a person can read, without knowing the library's shape."""
+    """A message as something a person can read, without knowing the library's shape.
+
+    The **commands** are carried, not just the tool names. They are the most informative thing in a
+    trace and the previous projection threw them away, which is most of why the conversation view had
+    nothing to show but a wall of text.
+    """
     message = json.loads(line)
     content = message.get("content")
     if isinstance(content, list):
         content = " | ".join(str(part.get("text", part)) for part in content)
-    calls = message.get("tool_calls") or []
-    return {"role": message.get("role"), "text": str(content or "")[:2000],
-            "tools": [item.get("function", {}).get("name") for item in calls],
-            "exit_status": (message.get("extra") or {}).get("exit_status")}
+    text = str(content or "")
+    commands = []
+    for item in message.get("tool_calls") or []:
+        arguments = (item.get("function") or {}).get("arguments")
+        try:
+            parsed = json.loads(arguments) if isinstance(arguments, str) else arguments
+            command = (parsed or {}).get("command") if isinstance(parsed, dict) else arguments
+        except (TypeError, ValueError):
+            command = arguments
+        commands.append(str(command) if command else "")
+    return {
+        "role": message.get("role"),
+        "text": text[:TAIL_TEXT],
+        "truncated": len(text) > TAIL_TEXT,
+        "commands": commands,
+        "exit_status": (message.get("extra") or {}).get("exit_status"),
+    }
 
 
 def _stamp() -> str:
