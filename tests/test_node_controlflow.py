@@ -23,7 +23,7 @@ pydantic_ai = pytest.importorskip("pydantic_ai", reason="the optional adapter de
 from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart          # noqa: E402
 from pydantic_ai.models.function import FunctionModel                          # noqa: E402
 
-from anchor.node import BUDGET_EXHAUSTED, COMPLETED, NodeRequest, NodeOutcome  # noqa: E402
+from anchor.node import BUDGET_EXHAUSTED, COMPLETED, FAILED, NodeRequest, NodeOutcome  # noqa: E402
 from anchor.node.pydantic_adapter import (                                      # noqa: E402
     DONE_SENTINEL, ROUTE_SENTINEL, read_completion, run_node,
 )
@@ -619,3 +619,181 @@ def test_a13_nothing_on_the_default_path_imports_the_adapter():
         text = (Path("/root/Anchor") / name).read_text(encoding="utf-8")
         assert "pydantic_ai" not in text, f"{name} names the optional dependency"
         assert "anchor.node" not in text, f"{name} imports the adapter's package"
+
+
+# ── the reviewer's findings, as regressions ──────────────────────────────────────────────────────
+
+def test_the_request_count_is_the_model_request_count_and_not_the_command_count(tmp_path):
+    """Reported wrong on both failure paths, and in opposite directions.
+
+    The count came from `wiring.commands`, which is how many *commands* ran. One request can carry
+    three commands — reported as three — and a request that only answers with text carries none —
+    reported as zero, on a run that had asked once. Package 3's cumulative budget would have been
+    built on a number that is wrong whenever a pass does not end in a submission.
+    """
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+
+    # Three commands in one response: one request.
+    three = asyncio.run(run_node(
+        request(workspace, max_requests=1),
+        model=model_from(["echo a", "echo b", "echo c"])))
+    assert three.status == BUDGET_EXHAUSTED
+    assert three.model_requests == 1, f"three commands in one response reported {three.model_requests}"
+
+    # A single request that only answers with text: one request, not none.
+    text = asyncio.run(run_node(
+        request(workspace, max_requests=1), model=model_from("I am finished")))
+    assert text.status != COMPLETED
+    assert text.model_requests == 1, f"one text answer reported {text.model_requests}"
+
+
+def test_the_conversation_is_in_the_record_when_the_pass_does_not_finish(tmp_path):
+    """The record used to be one exit line on every failure, because the messages were only taken off
+    a result and a failed pass has no result. That is the evidence a failure is diagnosed from, and it
+    was not there."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    trace = tmp_path / "trace.jsonl"
+
+    # One command per response, so the budget is what stops it. Many commands in one response spend
+    # the *output retry* budget instead and end in the framework's own error — a separate finding,
+    # asserted in its own test below.
+    outcome = asyncio.run(run_node(
+        request(workspace, max_requests=2, trace=trace),
+        model=model_from(["echo one"], ["echo two"], ["echo three"])))
+
+    assert outcome.status == BUDGET_EXHAUSTED, outcome.reason
+    lines = [json.loads(line) for line in trace.read_text(encoding="utf-8").splitlines()]
+    kinds = [line.get("kind") or line.get("role") for line in lines]
+    assert "response" in kinds and kinds.count("request") >= 1, \
+        f"the conversation is not in the record: {kinds}"
+    assert kinds[-1] == "exit"
+    # And the exit line still carries what a failure is read for.
+    assert lines[-1]["extra"]["commands"], "the commands that ran are not in the record"
+
+
+def test_a_sandbox_that_cannot_start_is_a_failed_result_and_not_an_exception(tmp_path, monkeypatch):
+    """Construction and the working probe used to sit outside the exception handling, so a sandbox
+    that could not start raised out of the entry point — where the contract promises a result."""
+    from anchor.runtime import execenv
+
+    def refuse(self) -> None:
+        raise RuntimeError("this machine will not make a namespace")
+
+    monkeypatch.setattr(execenv.NodeSandbox, "require_working", refuse)
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+
+    outcome = asyncio.run(run_node(request(workspace), model=model_from("never asked")))
+
+    assert outcome.status == FAILED, outcome.status
+    assert "namespace" in outcome.reason
+    assert outcome.route is None
+    assert outcome.model_requests == 0, "the model was asked before the sandbox was known to work"
+
+
+def test_a12b_the_route_the_adapter_returns_drives_a_real_branch(tmp_path, monkeypatch):
+    """A straight line does not test routing. This one has a fork, and which arm runs is decided by
+    what the adapter handed back — not by anything stubbed."""
+    from anchor.simple import graph as graph_module
+    from anchor.simple import run as runner
+
+    graph = {
+        "entry": "decide",
+        "objective": "one agent chooses between two arms",
+        "agents": {"w": {"model": "models.academic", "writes": ["note.md"]}},
+        "ops": {"left": {"run": "printf 'went left\\n' > arm.txt && echo left",
+                         "writes": ["arm.txt"]},
+                "right": {"run": "printf 'went right\\n' > arm.txt && echo right",
+                          "writes": ["arm.txt"]}},
+        "nodes": [{"id": "decide", "agent": "w"}, {"id": "left", "op": "left"},
+                  {"id": "right", "op": "right"}],
+        "edges": [{"from": "decide", "to": "left"}, {"from": "decide", "to": "right"}],
+    }
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "graph.json").write_text(json.dumps(graph), encoding="utf-8")
+    config = tmp_path / "runtime.json"
+    config.write_text('{"models": []}', encoding="utf-8")
+
+    # The adapter is told both ways out and chooses `right`, through the real anchor-route.
+    model = model_from(["printf 'note\\n' > note.md"],
+                       ['anchor-route --to right --reason "the right arm is the one"'])
+    real = runner._agent_for
+
+    def factory(g, node_id, directory, models_, secret, cfg, inputs=(), trace=None, script=None):
+        if g.nodes[node_id].op:
+            return real(g, node_id, directory, models_, secret, cfg, inputs=inputs, trace=trace,
+                        script=script)
+        return AdapterAgent(Path(directory), node_id, inputs, trace, model,
+                            graph_module.Graph.routes(g, node_id))
+
+    monkeypatch.setattr(runner, "_config", lambda path: ({}, None))
+    monkeypatch.setattr(runner, "_agent_for", factory)
+
+    state = runner.run(workspace, config_path=config)
+    run_dir = next((workspace / "runs").glob("*"))
+
+    assert state.status == "finished", (state.status, state.error, state.ceased)
+    assert state.executed == ["decide", "right"], f"the branch taken was {state.executed}"
+    assert state.skipped == ["left"]
+    assert (run_dir / "right" / "arm.txt").read_text(encoding="utf-8") == "went right\n"
+    assert state.nodes["decide"]["route"] == "right", "the route the adapter returned is the record's"
+
+
+# ── the compatibility question the reviewer said must be settled before freezing ──────────────────
+
+def test_the_harness_compaction_cannot_see_an_ordinary_observation(tmp_path):
+    """**The finding this package would otherwise have left for package 3 to discover.**
+
+    `pydantic-ai-harness`'s `ClearToolResults` — the capability that exists to stop a long node's
+    context growing without bound — finds what to clear through `iter_tool_pairs`, and that matches
+    `ToolReturnPart` alone. Every ordinary command in this adapter is recorded as a `RetryPromptPart`,
+    because an output tool that does not return must raise. So the compaction would clear the one
+    submission and none of the output it was built to reclaim: **the tool record mechanism does not
+    fit the context mechanism**, and that is a design problem rather than a wording difference.
+
+    Asserted against the harness's own pairing function rather than a copy of its rule, so this fails
+    if either side changes.
+    """
+    shared = pytest.importorskip("pydantic_ai_harness.compaction._shared",
+                                 reason="the harness is not installed here")
+    from pydantic_ai.messages import (ModelRequest, ModelResponse, RetryPromptPart,
+                                      ToolCallPart, ToolReturnPart)
+
+    call = ToolCallPart(tool_name="bash", args={"command": "ls"},
+                        tool_call_id="call-1")
+
+    # A call lives in a ModelResponse and its result in the ModelRequest that follows — which is
+    # where the harness looks for both.
+    ordinary = [ModelResponse(parts=[call]),
+                ModelRequest(parts=[RetryPromptPart(content="<output>a file</output>",
+                                                    tool_name="bash", tool_call_id="call-1")])]
+    submission = [ModelResponse(parts=[call]),
+                  ModelRequest(parts=[ToolReturnPart(tool_name="bash", content="done",
+                                                     tool_call_id="call-1")])]
+
+    assert shared.iter_tool_pairs(submission), "a normal tool return is a pair the harness can clear"
+    assert not shared.iter_tool_pairs(ordinary), (
+        "an ordinary observation is a pair after all — then the adapter's record does fit the harness, "
+        "and this test's premise is wrong")
+
+
+def test_what_an_ordinary_command_is_recorded_as(tmp_path):
+    """The premise of the test above, taken from a real run rather than from reading the adapter."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+
+    outcome = asyncio.run(run_node(
+        request(workspace, max_requests=1, trace=tmp_path / "t.jsonl"),
+        model=model_from(["echo hello"])))
+
+    lines = [json.loads(line) for line in Path(outcome.trace_ref).read_text().splitlines()]
+    kinds = [part.get("part_kind")
+             for line in lines for part in (line.get("parts") or [])]
+    assert "tool-call" in kinds, "the command is not in the record"
+    assert "retry-prompt" in kinds, f"an ordinary command was not recorded as a retry: {kinds}"
+    assert "tool-return" not in kinds, (
+        "an ordinary command produced a ToolReturnPart — then the adapter changed and the harness "
+        "could clear it after all")

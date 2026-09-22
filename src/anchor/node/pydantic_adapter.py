@@ -29,13 +29,14 @@ The retry budget is therefore the request budget: every non-completion spends on
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel
 from pydantic_ai import Agent, RunContext, ToolOutput, UsageLimits
 from pydantic_ai.messages import ModelMessagesTypeAdapter
+from pydantic_ai.models.wrapper import WrapperModel
 from pydantic_ai.exceptions import ModelRetry, UsageLimitExceeded
 
 from anchor.node import BUDGET_EXHAUSTED, COMPLETED, FAILED, NodeOutcome, NodeRequest
@@ -76,6 +77,25 @@ class Submission(BaseModel):
 
     submission: str = ""
     route: str | None = None
+
+
+class _CountingModel(WrapperModel):
+    """A model that counts how many times it was asked.
+
+    The adapter cannot read this off the framework afterwards: `usage` lives on a result, and on the
+    two paths where the count matters most — a failure and a spent budget — there is no result. The
+    number is also not the command count. One request can carry three commands, and a request that
+    only answers with text carries none, so reporting commands gets both cases wrong in opposite
+    directions: a plain-text turn reported zero requests, and a three-command turn reported three.
+
+    Counted where it happens, so every path reports the same thing.
+    """
+
+    requests: int = 0
+
+    async def request(self, messages: Any, model_settings: Any, model_request_parameters: Any) -> Any:
+        self.requests += 1
+        return await super().request(messages, model_settings, model_request_parameters)
 
 
 @dataclass
@@ -206,7 +226,8 @@ def build_agent(model: Any, *, instructions: str = "",
     )
 
 
-def _write_trace(path: Path | None, messages: list[Any], wiring: _Wiring, outcome: NodeOutcome) -> str:
+def _write_trace(path: Path | None, messages: list[Any], wiring: _Wiring | None,
+                 outcome: NodeOutcome) -> str:
     """The record: what the model was told, what it called, what came back, and why it stopped.
 
     Written whole rather than projected. A readable summary would be nicer and would throw away the
@@ -227,7 +248,8 @@ def _write_trace(path: Path | None, messages: list[Any], wiring: _Wiring, outcom
             "role": "exit", "content": outcome.reason or outcome.submission,
             "extra": {"status": outcome.status, "route": outcome.route,
                       "submission": outcome.submission, "model_requests": outcome.model_requests,
-                      "commands": [{"command": c, "returncode": r, "first_line": f}
+                      "commands": [] if wiring is None else
+                                  [{"command": c, "returncode": r, "first_line": f}
                                    for c, r, f in wiring.ran]},
         }, ensure_ascii=False) + "\n")
     return str(path)
@@ -247,35 +269,50 @@ async def run_node(request: NodeRequest, *, model: Any) -> NodeOutcome:
     The model is a parameter rather than something built here: which provider, and whether there is a
     provider at all, is the caller's business, and a runner that built its own would be a runner that
     cannot be tested without one.
-    """
-    wiring = _Wiring(sandbox=NodeSandbox(
-        tree=request.workspace, node_id=request.roles or request.execution_id,
-        network=request.network, timeout_seconds=request.timeout_seconds,
-        routes=request.routes, inputs=request.inputs), routes=request.routes)
-    wiring.sandbox.require_working()
 
-    agent = build_agent(model, instructions=request.instructions,
+    Driven through `agent.iter` rather than `agent.run` for one reason: the conversation has to survive
+    a failure. `run()` hands back a result, and on the two paths where the record matters most there is
+    no result to hand back — so the record was a single exit line and everything the node had said and
+    been told was gone. `AgentRun.all_messages()` is readable at any point, including from the handler
+    for an exception, so both paths write the whole thing.
+    """
+    counted = _CountingModel(model)
+    agent = build_agent(counted, instructions=request.instructions,
                         max_retries=request.max_requests)
     limits = UsageLimits(request_limit=request.max_requests)
+    wiring: _Wiring | None = None
+    run: Any = None
     messages: list[Any] = []
     try:
-        result = await agent.run(request.task, deps=wiring, usage_limits=limits)
-        messages = list(result.all_messages())
-        produced = result.output
+        wiring = _Wiring(sandbox=NodeSandbox(
+            tree=request.workspace, node_id=request.roles or request.execution_id,
+            network=request.network, timeout_seconds=request.timeout_seconds,
+            routes=request.routes, inputs=request.inputs), routes=request.routes)
+        # Inside the try. A sandbox that cannot start is a failed execution and the contract has a
+        # status for it; raising out of the entry point would leave the caller with an exception where
+        # it was promised a result.
+        wiring.sandbox.require_working()
+
+        async with agent.iter(request.task, deps=wiring, usage_limits=limits) as run:
+            async for _node in run:
+                pass
+        messages = list(run.all_messages())
+        produced = run.result.output
         outcome = NodeOutcome(
             status=COMPLETED, submission=produced.submission, route=produced.route,
-            model_requests=int(result.usage.requests), files=_files(request.workspace))
+            model_requests=counted.requests, files=_files(request.workspace))
     except UsageLimitExceeded as exc:
         # Out of turns, nothing submitted. Not a failure of the work, and not a route: the graph must
         # not move on the strength of a pass that did not happen.
+        messages = list(run.all_messages()) if run is not None else []
         outcome = NodeOutcome(
-            status=BUDGET_EXHAUSTED, model_requests=wiring.commands,
-            reason=f"out of requests after {wiring.commands} commands: {exc}",
+            status=BUDGET_EXHAUSTED, model_requests=counted.requests,
+            reason=f"out of requests after {counted.requests} model requests: {exc}",
             files=_files(request.workspace))
     except Exception as exc:                      # noqa: BLE001 - every failure is a recorded status
+        messages = list(run.all_messages()) if run is not None else []
         outcome = NodeOutcome(
-            status=FAILED, model_requests=wiring.commands,
+            status=FAILED, model_requests=counted.requests,
             reason=f"{type(exc).__name__}: {exc}", files=_files(request.workspace))
 
-    trace = _write_trace(request.trace, messages, wiring, outcome)
-    return NodeOutcome(**{**outcome.__dict__, "trace_ref": trace})
+    return replace(outcome, trace_ref=_write_trace(request.trace, messages, wiring, outcome))

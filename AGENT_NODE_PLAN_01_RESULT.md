@@ -3,8 +3,14 @@
 状态：实施完成，可审阅。**本包结论不等于迁移决策**——按计划第 8 节，只有主验收 Agent 复核并通过
 完成语义、真实沙箱、图集成三项后，此入口才冻结给第二、三包并行使用。
 
-**结论一句话：PydanticAI 能保住 Anchor 的五条执行语义，且只用公开 API；代价是普通命令的观察以
-「重试提示」的形式到达模型，以及一个被实测否定的写法（`ToolFailed`）。**
+**结论一句话：PydanticAI 能保住 Anchor 的五条执行语义，且只用公开 API；但「普通观察以重试提示形式
+到达模型」不是措辞差异——它使 Harness 的上下文压缩对本适配器的工具输出完全失明。这一点在审阅后被
+实测确认（§5.6），是本包交给主验收 Agent 决定的首要问题。**
+
+> **第二轮修订（审阅后）。** 审阅指出四处基础问题，已全部修复并补测试：请求计数在失败路径上错误
+> （§5.7）、失败时完整对话记录丢失（§5.7）、沙箱构造与探针在异常处理之外（§5.7）、真实图只验证了
+> 直线（§4 的 A12b）。同时审阅要求把「`ToolOutput + ModelRetry` 是否可接受」用真实 Harness 生命周期
+> 观察验证——**验证结果是不可接受**（§5.6）。
 
 ---
 
@@ -219,8 +225,7 @@ PydanticAI v2 的默认是 `'graceful'`，在它之下**输出成功之后同一
 因此 **重试预算就是请求预算**：`max_requests` 同时传给 `UsageLimits(request_limit=…)` 与
 `ToolOutput(max_retries=…)`，而不是留框架默认的 1（默认值会让节点在第二条命令上停住）。
 
-**这条是否可接受，需要主验收 Agent 判断。** 它不影响完成语义、路由、权限与预算，影响的是模型看到的
-观察的语气。
+**这条不能只当作措辞差异接受——见 §5.6，它与 Harness 的压缩机制不兼容。** 
 
 ### 5.4 记录
 
@@ -295,3 +300,123 @@ mini-swe-agent**。第二个 runner 要复用同一套沙箱接线，就必然�
 - **并发与取消**：未测。计划第 5 节明确「主动取消与完整进程树治理不在本包完成声明内」。
 - **真实图上的多轮循环与路由分支**：A12 只跑了一条 `Agent→op→Agent` 直线；计划第 6 节允许在图路由分支上
   另补小图，本包未补。
+
+---
+
+## 5.6 审阅后新增的决定性发现：工具记录与 Harness 压缩不兼容
+
+审阅要求「启用真实 Harness 生命周期观察，确认普通 bash 成功、命令失败和显式提交分别如何被记录」。
+**结果是不可接受，而且比审阅预判的更严重：不是记录形态不好看，是第三包要用的压缩机制根本看不到我们的
+工具输出。**
+
+### 机制
+
+`pydantic-ai-harness` 的 `compaction` 提供 `ClearToolResults`——**长节点上下文不无限增长所依赖的那个
+能力**。它靠 `iter_tool_pairs` 找出可清理的工具结果，而该函数的判据是（`compaction/_shared.py:761`）：
+
+```python
+if isinstance(part, ToolReturnPart) and part.tool_call_id in calls:
+```
+
+**只认 `ToolReturnPart`。**
+
+而本适配器的普通命令是 `RetryPromptPart`——因为输出工具不返回就必须抛 `ModelRetry`（§5.3）。
+
+**后果**：`ClearToolResults` 能清掉的只有那一条提交（它是输出工具的返回，是 `ToolReturnPart`），
+**清不掉任何一条普通命令的输出**——也就是它本来要回收的全部东西。第三包的上下文治理会在接入后才发现
+自己什么也没清。
+
+由真实运行的 trace 佐证（§5.7 的测试把这条钉住）：
+
+```
+1: response [call(bash: echo one), call(bash: echo two), call(bash: echo three)]
+2: request  [RETRY(one), RETRY(two), RETRY(three)]     ← 三条 exit 0 的成功命令，全是 RetryPromptPart
+```
+
+### 三个要求不可兼得（均为实测）
+
+| 机制 | ① 模型只看到一个工具 | ② 提交后同响应剩余调用不执行 | ③ 普通观察是 `ToolReturnPart` |
+| --- | --- | --- | --- |
+| 输出工具 + `ModelRetry`（当前实现） | ✅ | ✅ | ❌ `RetryPromptPart` |
+| 函数工具 + `CallDeferred` | ✅ | ❌ 剩余照跑（实测 `after` 执行了） | ✅ |
+| 函数工具 + `SkipToolExecution` | ✅ | ❌ 剩余照跑 | ✅ |
+| 输出工具 + `ToolFailed` | ✅ | — 整个 run 失败 | — |
+
+① 来自协议（单 bash），②来自计划第 5 节，③来自 Harness 的压缩实现。**公开 API 下没有组合能同时满足。**
+
+### 交给主验收 Agent 的三个候选
+
+1. **接受现状并承担第三包的成本**：自己在压缩前把 `RetryPromptPart` 归一化为 `ToolReturnPart`。这是
+   把框架的形状差异补在 Anchor 里，与本包「减少自研」的目标相抵。
+2. **放弃 ②，改用函数工具 + `CallDeferred`**：记录形态正确、压缩可用，代价是**同响应内提交之后的命令
+   仍会执行**（`anchor-done; rm -rf x` 会把 `rm` 跑掉）。这是协议语义的实质放宽，不能默默做。
+3. **把提交做成第二个模型可见工具**：记录与停止都正确，代价是**破坏单 bash**。与协议冲突，但最少自研。
+
+本包**不替主验收 Agent 选择**，按计划第 7 节停在此处的具体失败证据上。
+
+---
+
+## 5.7 第二轮修复
+
+四处，全部有回归测试。
+
+### 请求计数：已修
+
+原实现在失败与预算退出路径上把 `wiring.commands`（**命令数**）填进 `model_requests`。审阅的复现：
+
+| 实际行为 | 修复前 | 修复后 |
+| --- | ---: | ---: |
+| 1 次模型请求，只回复文本 | 0 | **1** |
+| 1 次模型请求，包含 3 条命令 | 3 | **1** |
+
+两个方向都错，而第三包的累计预算正要建在这个数上。修法：在模型外面套一层 `WrapperModel` 子类
+（`_CountingModel`）在 `request()` 处计数——**在发生的地方数**，于是成功、失败、预算三条路径报的是
+同一个东西。之所以不能事后从框架读：`usage` 挂在 result 上，而这两个路径恰恰没有 result。
+
+测试：`test_the_request_count_is_the_model_request_count_and_not_the_command_count`。
+
+### 失败时的完整对话记录：已修
+
+原实现只在成功返回后取 `messages`，异常路径的 trace 只有一行退出记录——**失败后诊断所需的证据实际上
+不存在**。修法：改用 `agent.iter()`，因为 `AgentRun.all_messages()` 在任何时刻可读，**包括异常处理器
+里**；两条路径都写完整对话。
+
+测试：`test_the_conversation_is_in_the_record_when_the_pass_does_not_finish`。
+
+### 沙箱构造与探针在异常之外：已修
+
+`NodeSandbox` 构造与 `require_working()` 原本在 `try` 之前，沙箱起不来会直接抛出，而契约承诺的是返回
+一个结果。已移入 `try`，现在返回明确的 `failed` 与原因。
+
+测试：`test_a_sandbox_that_cannot_start_is_a_failed_result_and_not_an_exception`。
+
+### 真实图只验证了直线：已补
+
+新增 A12b：一张带分叉的图（`decide → left | right`），**走哪条臂由适配器返回的 route 决定**，通过真实
+`anchor-route` 选择。断言 `executed == ["decide", "right"]`、`skipped == ["left"]`、真实 op 产物内容、
+以及记录里的 `route`。
+
+测试：`test_a12b_the_route_the_adapter_returns_drives_a_real_branch`。
+
+### 修复过程中暴露的第五处：重试预算 ≠ 请求预算
+
+一个响应里如果有**多于剩余预算**的命令，框架会先以 `UnexpectedModelBehavior: Exceeded maximum output
+retries` 失败，而不是返回 `budget_exhausted`。也就是说 A10 的「预算是自己的状态」在「一响应多命令」这个
+形状下不成立。**本包未修**——它取决于 §5.6 的选择：若保留 `ModelRetry` 路线，`max_retries` 与
+`request_limit` 的关系需要重新定义并单独验证。
+
+---
+
+## 5.8 第二轮后的计数与状态
+
+| | 第一轮 | 第二轮 |
+| --- | ---: | ---: |
+| 本包测试 | 32 | **38** |
+| 全量 `tests/` | 134 | **140** |
+| 失败 / skip | 0 / 0 | **0 / 0** |
+| `ruff` / `mypy` | 干净 | **干净** |
+
+**仍然没有 skip**：本机 bubblewrap 可用，全部真实执行。
+
+**本包的验收状态：控制流已证明可实现；入口在 §5.6 的问题解决前不宜冻结。** 按审阅意见，记录、计数与
+Harness 兼容性三项已分别有结论，其中兼容性一项是**否定的**。
