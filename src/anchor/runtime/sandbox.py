@@ -16,6 +16,8 @@ every command fails and the node spends its whole budget finding out. ADR-034.
 
 from __future__ import annotations
 
+import hashlib
+
 import shutil
 import subprocess
 import tempfile
@@ -68,6 +70,11 @@ class SandboxSpec:
     command: tuple[str, ...]
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
     max_output_bytes: int = DEFAULT_MAX_OUTPUT_BYTES
+    #: Where to put the full output before `max_output_bytes` cuts it. **The bytes are in hand at the
+    #: moment the cut happens and are gone immediately after**, so this is the only place a caller can
+    #: ask for them. A path rather than a return value because a command may print a great deal, and
+    #: holding it all in memory to hand it back would be the same problem one layer up.
+    spill_dir: Path | None = None
     # A node that must reach the literature needs the network; a node that only writes does not, and
     # refusing it costs nothing. Per node, because the two kinds of work are not the same kind of
     # risk and a single global answer would be the wrong one for half of them.
@@ -94,6 +101,19 @@ class SandboxResult:
     stdout: str
     stderr: str
     timed_out: bool
+    #: Where the *untruncated* output was put, when the spec asked for it. Empty otherwise, and empty
+    #: when there was nothing to spill or nowhere to put it — a caller that needs the whole of a large
+    #: output has to check rather than assume.
+    spilled: tuple[Path, ...] = ()
+
+    @property
+    def complete(self) -> bool:
+        """Whether `stdout`/`stderr` are everything the command produced.
+
+        True when nothing was cut, and also true when what was cut is somewhere else. The distinction
+        that matters to a caller is "can I get the rest", not "was it cut".
+        """
+        return bool(self.spilled) or "[truncated:" not in self.stdout + self.stderr
 
     @property
     def ok(self) -> bool:
@@ -122,11 +142,41 @@ def _validate(spec: SandboxSpec, allowed: frozenset[str]) -> None:
             raise SandboxDenied("invalid_argument", "command arguments must not contain NUL")
 
 
-def _decode(data: bytes, limit: int) -> str:
+def _decode(data: bytes, limit: int, spilled: tuple[Path, ...] = ()) -> str:
+    """The output as far as the model may see it, and **where the rest is when there is a rest**.
+
+    A truncation notice that does not say where the rest went is a dead end: the model is told its
+    output was cut and given no way to read the rest, which is worse than not cutting it. The paths
+    come from `_spill`, which ran before this and kept the whole thing.
+    """
     text = data[:limit].decode("utf-8", errors="replace")
     if len(data) > limit:
-        text += f"\n[truncated:{len(data) - limit}-bytes]"
+        rest = f" the whole output is at {spilled[0]}" if spilled else ""
+        text += f"\n[truncated:{len(data) - limit}-bytes;{rest or ' and was not kept'}]"
     return text
+
+
+def _spill(spec: SandboxSpec, stdout: bytes, stderr: bytes) -> tuple[Path, ...]:
+    """Put the whole of a command's output where a caller can read it, before it is cut.
+
+    Only when the spec asked and only when something would actually be lost — a file per command with
+    nothing in it is a directory that fills up for no reason. The name is a digest of the content, so
+    the same output twice is one file and a caller can tell whether two commands produced the same
+    thing.
+    """
+    if spec.spill_dir is None:
+        return ()
+    written: list[Path] = []
+    for stream, data in (("stdout", stdout), ("stderr", stderr)):
+        if len(data) <= spec.max_output_bytes:
+            continue
+        digest = hashlib.sha256(data).hexdigest()[:16]
+        path = Path(spec.spill_dir) / f"{stream}-{digest}.txt"
+        if not path.exists():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+        written.append(path)
+    return tuple(written)
 
 
 def _probe(binary: str, timeout_seconds: float = 10.0) -> None:
@@ -248,11 +298,14 @@ class BubblewrapWorkspaceSandbox:
                                        stderr=subprocess.PIPE, timeout=spec.timeout_seconds,
                                        check=False, env={})
         except subprocess.TimeoutExpired as exc:
-            return SandboxResult(124, _decode(exc.stdout or b"", spec.max_output_bytes),
-                                 _decode(exc.stderr or b"", spec.max_output_bytes), True)
+            spilled = _spill(spec, exc.stdout or b"", exc.stderr or b"")
+            return SandboxResult(124, _decode(exc.stdout or b"", spec.max_output_bytes, spilled),
+                                 _decode(exc.stderr or b"", spec.max_output_bytes, spilled), True,
+                                 spilled)
+        spilled = _spill(spec, completed.stdout, completed.stderr)
         return SandboxResult(completed.returncode,
-                             _decode(completed.stdout, spec.max_output_bytes),
-                             _decode(completed.stderr, spec.max_output_bytes), False)
+                             _decode(completed.stdout, spec.max_output_bytes, spilled),
+                             _decode(completed.stderr, spec.max_output_bytes, spilled), False, spilled)
 
 
 class SubprocessWorkspaceSandbox:

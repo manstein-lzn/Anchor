@@ -114,6 +114,10 @@ class Executed:
     output: str
     returncode: int
     timed_out: bool = False
+    #: Where the *whole* output went, when something would have been cut and a place was named. What a
+    #: caller needs to know is whether it can get the rest, and after `output` has been cut this is the
+    #: only thing that answers it.
+    spilled: tuple[Path, ...] = ()
 
 
 @dataclass
@@ -135,6 +139,13 @@ class NodeSandbox:
     sandbox: BubblewrapWorkspaceSandbox = field(default=None)      # type: ignore[assignment]
     dirs: tuple[str, ...] = ()
     binds: tuple[tuple[str, str], ...] = ()
+    #: Where to put output that would otherwise be cut, before it is cut. Settable after construction
+    #: because who wants the whole output is an upper layer's business — a node that is bounding its
+    #: context does, and one that is not should not be writing files for nothing.
+    spill_dir: Path | None = None
+    #: What the last command spilled. Read by an upper layer that must cite the full output rather
+    #: than guess at it from the truncated text.
+    spilled: tuple[Path, ...] = ()
 
     def __post_init__(self) -> None:
         if self.sandbox is None:
@@ -158,13 +169,14 @@ class NodeSandbox:
             workspace=self.tree, command=(*SHELL, "-c", command),
             timeout_seconds=float(timeout if timeout is not None else self.timeout_seconds),
             network=self.network, tool_dirs=self.dirs, readonly_binds=self.readonly(),
-            workspace_readonly=present,
+            workspace_readonly=present, spill_dir=self.spill_dir,
             env=(("ANCHOR_NODE", self.node_id), ("ANCHOR_ROUTES", ",".join(self.routes))))
 
     def run(self, command: str, *, timeout: float | None = None) -> Executed:
         result = self.sandbox.run(self.spec(command, timeout=timeout))
+        self.spilled = tuple(result.spilled)
         return Executed(output=result.stdout + result.stderr, returncode=result.returncode,
-                        timed_out=bool(result.timed_out))
+                        timed_out=bool(result.timed_out), spilled=tuple(result.spilled))
 
     def require_working(self) -> None:
         """Run one trivial command with this node's real mounts, before anything else does.
