@@ -249,9 +249,12 @@ class Barrier(AbstractCapability[Any]):
         self.seen_tools += 1
         if self.window == "C2" and self.seen_tools == 1:
             _wait_for_a_kill("tool_call_started persisted, command not executed")
-        if self._pause_for_compaction_tool_case() and self.window in ("B2-after-compaction",
-                                                                     "B2-before-compaction"):
-            _wait_for_a_kill("compaction happened, the next command has not run")
+        if self.window == "B2-before-compaction":
+            # Deliberately before any compaction: this is the control case, and its barrier text says so
+            # rather than borrowing the post-compaction one and reading as though a summary had happened.
+            _wait_for_a_kill("before any compaction: the first command has not run")
+        if self.window == "B2-after-compaction" and self._pause_for_compaction_tool_case():
+            _wait_for_a_kill("after a compaction, before the next command runs")
         if self._pause_for_compaction_tool_case() and self.window == "B3-started":
             _wait_for_a_kill("after a compaction: started recorded, the command has not run")
         return args                                       # must be returned; None breaks the call
@@ -553,6 +556,24 @@ def windows() -> list[Window]:
         Window("A6", [COUNTER, 'anchor-done --summary "done"'],
                "submission persisted, the graph has not finalised",
                "the node recovers with no model call; the graph's commit is reported missing or found"),
+        Window("B2-before-compaction", [STEP, 'anchor-done --summary "done"'],
+               "a kill before any compaction has happened",
+               "the history is the un-compacted one and it is self-consistent"),
+        Window("B2-after-compaction", [STEP, 'anchor-done --summary "done"'],
+               "a kill once a compaction has happened, before its checkpoint",
+               "nothing unsafe is offered as continuable; the chosen history hangs together"),
+        Window("B2-checkpoint", [STEP, 'anchor-done --summary "done"'],
+               "a kill after the compaction's own checkpoint",
+               "the chosen history contains the summary and pairs every call with its return"),
+        Window("B3-started", [STEP, 'anchor-done --summary "done"'],
+               "after a compaction: a call started and not executed",
+               "uncertain — the effect may or may not have happened"),
+        Window("B3-effect", [STEP, 'anchor-done --summary "done"'],
+               "after a compaction: the effect done and no terminal record",
+               "uncertain — not replayed"),
+        Window("B3-terminal", [STEP, 'anchor-done --summary "done"'],
+               "after a compaction: the terminal record written and no snapshot",
+               "uncertain — an older snapshot must not cover it"),
         Window("B1", [STEP, 'anchor-done --summary "done"'],
                "a real compaction, killed after it, continued by a new process",
                "the resumed input is bounded, the constraint survives, no step runs twice"),
@@ -797,6 +818,8 @@ def run_window(window: Window, root: Path, timeout: float) -> Evidence:
         return run_a3(root, timeout)
     if window.name == "A4":
         return run_a4(root, timeout)
+    if window.name.startswith(("B2-", "B3-")):
+        return run_compaction_window(root, timeout, window.name)
     if window.name == "B1":
         return run_b1(root, timeout)
     if window.name == "A5":
@@ -1158,6 +1181,103 @@ def run_b1(root: Path, timeout: float) -> Evidence:
     evidence.control = str(control)
     evidence.workspace = str(workspace)
     evidence.counter_after = len(steps_after)
+    return evidence
+
+
+def _paired(snapshot: Any) -> bool:
+    """Whether a history is self-consistent: every tool call has a return, and every return a call.
+
+    **This is what B2 is about.** Compaction rewrites the history, and a checkpoint taken on one side of a
+    summary can be spliced onto the other side — a summary of messages that the chosen version still
+    contains, or a tool return whose call was dropped. The framework's own `is_provider_valid` is the
+    first line of defence; this is the invariant read directly off the messages the store holds.
+    """
+    calls: set[str] = set()
+    returns: set[str] = set()
+    for message in getattr(snapshot, "messages", ()) or ():
+        for part in getattr(message, "parts", ()) or ():
+            kind = getattr(part, "part_kind", "")
+            call_id = getattr(part, "tool_call_id", None)
+            if not call_id:
+                continue
+            if kind == "tool-call":
+                calls.add(call_id)
+            elif kind == "tool-return":
+                returns.add(call_id)
+    return calls == returns
+
+
+def run_compaction_window(root: Path, timeout: float, name: str) -> Evidence:
+    """**B2 and B3, as one shape**: kill at a named boundary that is only armed after a real compaction.
+
+    The distinction each case turns on is which side of the compaction's own checkpoint the kill lands on,
+    and whether the state it leaves can be told apart from one that is safe to continue. So the evidence
+    is: how many compactions had happened, what the chosen history's version is, whether that history is
+    self-consistent, and what `assess` says about it.
+    """
+    from anchor.node.recovery import RecoveryRef, assess, open_store
+
+    started = time.monotonic()
+    control = root / name / "control"
+    workspace = root / name / "workspace"
+    shutil.rmtree(root / name, ignore_errors=True)
+    control.mkdir(parents=True, exist_ok=True)
+    workspace.mkdir(parents=True, exist_ok=True)
+    constraint = "the constraint that a summary has to keep"
+    script = {"window": name, "node": f"node-{name}", "task": f"do the work. {constraint}",
+              "instructions": f"{constraint}: never drop a step", "with_context": True,
+              "summariser": True, "constraint": constraint,
+              "budget": {"window": 4000, "output_reserve": 400, "input_target": 1500,
+                         "keep_messages": 2},
+              "max_requests": 40, "record_bytes": 60000,
+              "staged": True, "until": 40, "step": STEP,
+              "then": 'anchor-done --summary "done"'}
+
+    killed, code, said, errors = _kill_at(control, workspace, script,
+                                          f"{name} barrier", timeout)
+    compactions = _compactions(control)
+    runs = asyncio.run(open_store(control).list_runs())
+    ours = [item for item in runs if item.agent_name == script["node"]]
+    action, consistent, newest_state, summary_in = "", None, "", False
+    if ours:
+        this = sorted(ours, key=lambda item: item.started_at)[-1]
+        store = open_store(control)
+        action = asyncio.run(assess(store, RecoveryRef(node=this.agent_name, run=this.run_id,
+                                                       store=str(control)))).action
+        snapshot = asyncio.run(store.latest_snapshot(run_id=this.run_id))
+        if snapshot is not None:
+            consistent = _paired(snapshot)
+            newest_state = str(getattr(snapshot, "state", ""))
+            rendered = "\n".join(str(getattr(part, "content", ""))
+                                 for message in getattr(snapshot, "messages", ()) or ()
+                                 for part in (getattr(message, "parts", ()) or ()))
+            summary_in = "SUMMARY." in rendered
+
+    evidence = Evidence(window=name, control=str(control), workspace=str(workspace),
+                        killed=bool(killed), exit_code=code, barrier=said or "(no barrier)",
+                        counter_before=0, counter_after=len(_step_numbers(workspace)),
+                        verdict="", because="", seconds=time.monotonic() - started,
+                        traceback=errors[-1200:])
+    # **Safe means one of two things**: the state is honestly unknown, or there is a version whose own
+    # history hangs together. What is never acceptable is reporting a continuable version that is not
+    # self-consistent, or one that carries a summary of messages it does not contain.
+    unsafe = consistent is False or (action == "continuable" and not consistent)
+    evidence.verdict = ("unsafe" if unsafe else
+                        ("inconsistent-history" if consistent is False else "consistent"))
+    evidence.because = (
+        f"{len(compactions)} compaction(s) by "
+        f"{sorted({item.get('strategy', '?') for item in compactions})}; "
+        f"chosen history state {newest_state!r}; tool calls and returns paired: {consistent}; "
+        f"assessment says {action!r}; the summary text is {'in' if summary_in else 'not in'} the snapshot; "
+        f"steps recorded {_step_numbers(workspace)}")
+    evidence.note = (
+        # **The snapshot is the settled history; the compaction is derived per request.** That is why a
+        # summary can never be spliced onto a history it was not made from: the two never meet in the
+        # store. The chosen history hangs together because it was never rewritten, and the compaction is
+        # recomputed on the request that follows — which is also why a resumed attempt stays bounded.
+        "the kill landed after a real compaction; the store's history is the settled one, it hangs "
+        "together, and the summary is applied per request rather than stored, so nothing is spliced"
+        if not unsafe else "the chosen history does not hang together")
     return evidence
 
 

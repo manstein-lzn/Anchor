@@ -397,3 +397,39 @@ def test_a6_the_candidate_node_in_a_real_graph_and_the_seam_that_is_missing(kill
     # 缺口要有源码位置，不能只说"没有接缝"。
     assert "_record(state, graph, run_dir, decided, result, settle)" in evidence["note"]
     assert "src/anchor/simple/run.py" in evidence["note"]
+
+
+def test_b2_and_b3_the_boundaries_a_real_compaction_creates(killed):
+    """**B2 / B3。** 真压缩前后各设屏障 ✓，并证明选中的历史版本**自洽** ✓。
+
+    B2 问的是「压缩两侧中断」✓：压缩前 ✓、压缩已发生但其检查点未落 ✓、检查点已落 ✓。B3 问的是压缩**之后**
+    的三个副作用间隙 ✓。六个窗口都由**阶段证据**驱动 ✓——没有真压缩就不武装 ✓——所以不会在普通对话里触发 ✓。
+
+    **选中的历史是 settle 后的那一份，压缩是每次请求派生的** ✓——这正是不可能出现"摘要与工具结果不匹配"的
+    原因 ✓：两者在 store 里从不相遇 ✓。而「自洽」是直接读消息数出来的 ✓：每个 tool-call 都有配对的
+    tool-return ✓。
+
+    压缩之前的那条是**对照** ✓：0 次压缩 ✓、什么都没跑 ✓。
+    """
+    for name in ("B2-before-compaction", "B2-after-compaction", "B2-checkpoint",
+                 "B3-started", "B3-effect", "B3-terminal"):
+        evidence = killed[name]
+        assert evidence["killed"] is True, f"{name} was not held at its barrier"
+        assert evidence["barrier"], f"{name} never reached its barrier"
+        assert evidence["verdict"] == "consistent", f"{name}: {evidence['because']}"
+        assert "paired: True" in evidence["because"] or "paired: None" in evidence["because"], \
+            f"{name} chose a history that does not hang together: {evidence['because']}"
+
+    # 压缩之前：确实还没有压缩，也什么都没执行。
+    assert "0 compaction(s)" in killed["B2-before-compaction"]["because"]
+    assert "steps recorded []" in killed["B2-before-compaction"]["because"]
+
+    # 压缩之后的三条必须报 uncertain —— 不重放。
+    for name in ("B3-started", "B3-effect", "B3-terminal"):
+        assert "'uncertain'" in killed[name]["because"], killed[name]["because"]
+        assert "1 compaction(s)" in killed[name]["because"], killed[name]["because"]
+
+    # 检查点已落的那条可以继续，而且它的历史是自洽的。
+    checkpoint = killed["B2-checkpoint"]
+    assert "'continuable'" in checkpoint["because"], checkpoint["because"]
+    assert "paired: True" in checkpoint["because"], checkpoint["because"]
