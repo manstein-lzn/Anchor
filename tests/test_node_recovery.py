@@ -314,3 +314,27 @@ def test_a3_the_real_recovery_entry_over_three_kinds_of_reference(killed):
     assert "continuable -> completed" in evidence["because"], evidence["because"]
     assert "finished -> completed with 0 model request(s)" in evidence["because"], evidence["because"]
     assert evidence["counter_after"] == 1, "the command ran more than once across three recoveries"
+
+
+def test_a4_every_bad_reference_and_broken_file_is_refused_with_a_reason(killed):
+    """**A4。** 能解码的引用不等于身份成立 ✓；损坏的文件也不能把异常抛出入口 ✓。
+
+    覆盖：错 store ✓、错 node ✓（**绑定检查** ✓——同一个 store 装着每个节点的每次尝试 ✓，不匹配的引用
+    会恢复别人的工作 ✓）、未知 run ✓、版本不符 ✓、负预算 ✓、字段类型错 ✓、以及**真实损坏**的
+    `run.json` / 快照 / `events.jsonl` / 预算文件 ✓。**每一次都零命令执行** ✓。
+
+    它抓出两处真泄漏 ✓：损坏的快照与 events 会抛 `ValidationError` ✗ 并逃出 `run_node` ✗——而入口承诺
+    的是返回一个状态 ✓。
+    """
+    evidence = killed["A4"]
+
+    assert evidence["verdict"] == "explicit", evidence["because"]
+    assert evidence["counter_after"] == 0, "a refused reference ran a command"
+    for expected in ("wrong store -> failed", "wrong node -> failed", "unknown run -> failed",
+                     "future version -> refused", "negative budget -> refused",
+                     "budget as text -> refused", "corrupt run.json -> invalid",
+                     "corrupt 0.json -> invalid", "corrupt events.jsonl -> invalid",
+                     "corrupt budget -> refused"):
+        assert expected in evidence["because"], f"{expected!r} missing: {evidence['because']}"
+    # 引用里的预算不能把控制目录已经花掉的额度还回来。
+    assert "remaining 2" in evidence["because"], evidence["because"]

@@ -432,8 +432,16 @@ async def run_node(request: NodeRequest, *, model: Any,
         except Exception as exc:                              # noqa: BLE001 - a status, not a raise
             return NodeOutcome(status=FAILED, reason=f"the recovery reference is not usable: {exc}",
                                model_requests=0, files=_files(request.workspace))
-        store = open_store(Path(ref.store))
-        verdict = await assess(store, ref)
+        try:
+            store = open_store(Path(ref.store))
+            verdict = await assess(store, ref)
+        except Exception as exc:                              # noqa: BLE001 - a status, not a raise
+            # The entry point promised a result; a store it cannot read is a failed attempt with a
+            # reason, not an exception for the caller to catch.
+            return NodeOutcome(status=FAILED,
+                               reason=f"the recovery records cannot be read: {type(exc).__name__}: {exc}",
+                               model_requests=0, files=_files(request.workspace),
+                               recovery=request.recovery)
         # **Silence on this path, deliberately.** An uncertain attempt asks the model nothing and runs
         # no command: the effect may already have happened, and doing anything with that uncertainty
         # other than reporting it is how a side effect happens twice.
@@ -455,7 +463,12 @@ async def run_node(request: NodeRequest, *, model: Any,
         # `replayable` means nothing entered a tool, so the attempt is the first one in effect.
         if verdict.action == "continuable":
             history = await continued_messages(store, ref)
-            spending = max(ref.budget.remaining, 0) or request.max_requests
+            # **The allowance is the smaller of the two accounts, and the spending the larger.** §38: a
+            # token must not be able to hand back a budget a control directory says was already spent —
+            # replaying an old reference would otherwise reset the allowance it had used up, which is
+            # exactly what persisting a budget exists to prevent.
+            on_disk = load_budget(Path(ref.store))
+            spending = max(ref.budget.at_most(on_disk).remaining, 0) or request.max_requests
         if store is not None and not has_persistence:
             conversation = ref.node
             # **A continuation is a new run**, so the attempt that ends up in the store is this one and

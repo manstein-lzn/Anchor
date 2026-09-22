@@ -72,9 +72,28 @@ class Budget:
     requests_used: int = 0
     requests_allowed: int = 0
 
+    def __post_init__(self) -> None:
+        # A negative count is not a smaller allowance, it is a corrupted file — and treating it as an
+        # allowance would hand back a budget nobody granted.
+        if self.requests_used < 0:
+            raise InvalidReference(f"a budget cannot have spent {self.requests_used} requests")
+        if self.requests_allowed < 0:
+            raise InvalidReference(f"a budget cannot allow {self.requests_allowed} requests")
+
     @property
     def remaining(self) -> int:
         return max(self.requests_allowed - self.requests_used, 0)
+
+    def at_most(self, other: Budget) -> Budget:
+        """The **larger** of two accounts of what has been spent, and the smaller allowance.
+
+        §38: a reference must not be able to hand back an allowance that a control directory already
+        says was used. A caller replaying an old token would otherwise reset the budget it had spent,
+        which is the one thing a persisted budget exists to prevent.
+        """
+        return Budget(requests_used=max(self.requests_used, other.requests_used),
+                      requests_allowed=min(self.requests_allowed, other.requests_allowed)
+                      if other.requests_allowed else self.requests_allowed)
 
     def after(self, more: int) -> Budget:
         return Budget(requests_used=self.requests_used + more,
@@ -230,20 +249,40 @@ async def assess(store: FileStepStore, ref: RecoveryRef) -> Verdict:
     """
     try:
         run = await store.get_run(run_id=ref.run)
-    except LookupError:
-        return Verdict("invalid", f"no run {ref.run!r} in this store — nothing to recover from",
+    except (LookupError, FileNotFoundError, ValueError, TypeError) as exc:
+        # A store whose files are unreadable is a refusal with a reason, not a traceback out of the
+        # entry point — and never a quiet decision to start the task again.
+        return Verdict("invalid", f"the store cannot be read for {ref.run!r}: {exc}",
                        budget=ref.budget)
-    except FileNotFoundError as exc:
-        return Verdict("invalid", f"the store cannot be read: {exc}", budget=ref.budget)
     if run is None:
         return Verdict("invalid", f"no run {ref.run!r} in this store — nothing to recover from",
                        budget=ref.budget)
+    # **The reference has to belong to the run it names.** A token that decodes and points at a real run
+    # is not thereby a token for *this* node: the same store holds every attempt of every node, and a
+    # mismatched reference would resume somebody else's work. `§38` asks for the binding, and this is it.
+    if getattr(run, "agent_name", ref.node) != ref.node:
+        return Verdict(
+            "invalid",
+            f"run {ref.run!r} belongs to {run.agent_name!r}, not to {ref.node!r} — a reference that "
+            f"does not name its own run is refused rather than used.",
+            budget=ref.budget)
 
-    events = await store.list_events(run_id=ref.run)
-    kinds = tuple(_kind(event) for event in events)
-    effects = await store.list_unresolved_tool_effects(run_id=ref.run)
-    all_effects = await _every_effect(store, ref.run)
-    snapshot = await store.latest_snapshot(run_id=ref.run)
+    # **A store whose files are broken is a refusal with a reason.** Corrupt events or a corrupt
+    # snapshot raise inside the backend — `ValidationError`, in the pinned version — and letting that out
+    # of here would take it out of the entry point too, where the contract promises a status. Found by
+    # breaking the files on purpose: two of the three leaked.
+    try:
+        events = await store.list_events(run_id=ref.run)
+        kinds = tuple(_kind(event) for event in events)
+        effects = await store.list_unresolved_tool_effects(run_id=ref.run)
+        all_effects = await _every_effect(store, ref.run)
+        snapshot = await store.latest_snapshot(run_id=ref.run)
+    except Exception as exc:                                  # noqa: BLE001 - explained, not raised
+        return Verdict(
+            "invalid",
+            f"the records for {ref.run!r} cannot be read ({type(exc).__name__}: {exc}) — refusing "
+            f"rather than starting the task again over a broken checkpoint",
+            budget=ref.budget)
     where = f"snapshot step {getattr(snapshot, 'step_index', '?')} ({getattr(snapshot, 'state', '?')})"
 
     unresolved = tuple((item.tool_call_id, item.tool_name, item.status) for item in effects)

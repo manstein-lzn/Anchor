@@ -308,6 +308,9 @@ def windows() -> list[Window]:
         Window("C5", [COUNTER, COUNTER, 'anchor-done --summary "done"'],
                "terminal effect record written, snapshot not yet",
                "counter=2; an older complete snapshot exists and does NOT cover it — uncertain"),
+        Window("A4", [COUNTER, 'anchor-done --summary "done"'],
+               "references that decode but do not belong, and files that are broken",
+               "every one refused with a reason, and no command run"),
         Window("A3", [COUNTER, 'anchor-done --summary "done"'],
                "the real recovery entry, in sequence, over three kinds of reference",
                "uncertain does nothing; continuable continues; finished hands back its result"),
@@ -536,6 +539,8 @@ def run_window(window: Window, root: Path, timeout: float) -> Evidence:
         return run_a1(root, timeout)
     if window.name == "A3":
         return run_a3(root, timeout)
+    if window.name == "A4":
+        return run_a4(root, timeout)
     if window.name == "C9":
         return run_c9(root, timeout)
     # **Isolated, every time.** §42 asks for an isolated temporary workspace, and this was learned the
@@ -718,6 +723,125 @@ def run_a3(root: Path, timeout: float) -> Evidence:
                         counter_before=0, counter_after=_counter(live_control.parent / "workspace"),
                         verdict="no-repeat" if second.get("model_requests") == 0 else "REPEATED",
                         because="; ".join(steps), seconds=time.monotonic() - started)
+    return evidence
+
+
+def run_a4(root: Path, timeout: float) -> Evidence:
+    """**A4: references that decode but do not belong, and files that are actually broken.**
+
+    Decoding is not identity (§38). A token is base64 and can be edited by anyone; what makes it usable
+    is that it names a run **in this store**, belonging to **this node**, with a version this build reads
+    and fields that type-check. Each refusal has to come with a reason and with **no model and no tool
+    call** — a reference that fails and quietly starts the task again is the failure mode this is for.
+    """
+    from anchor.node.recovery import Budget, InvalidReference, RecoveryRef, assess, open_store
+
+    started = time.monotonic()
+    control = root / "A4" / "control"
+    workspace = root / "A4" / "workspace"
+    shutil.rmtree(root / "A4", ignore_errors=True)
+    control.mkdir(parents=True, exist_ok=True)
+    workspace.mkdir(parents=True, exist_ok=True)
+    script = {"window": "A4", "node": "node-A4", "task": "do one thing", "commands": [
+        "printf 'EFFECT\n' >> effects.log; echo did it", 'anchor-done --summary "done"']}
+
+    # A real attempt, so the store holds a run to point at — and to corrupt afterwards.
+    killed, _, _, _ = _kill_at(control, workspace, dict(script, window="C4"),
+                               "after the settled cycle, before the run ends", timeout)
+    store = open_store(control)
+    runs = asyncio.run(store.list_runs())
+    assert runs, "the setup attempt left no run"
+    good = runs[-1]
+
+    def verdict_of(token: str) -> tuple[str, str]:
+        """What the real entry point does with a token, and how many model calls it made."""
+        outcome = _ask_once(control, token, dict(script, window="A4"))
+        return str(outcome.get("status")), str(outcome.get("reason", ""))[:90]
+
+    checks: list[str] = []
+    refusals_that_called_a_model = 0
+
+    # ── references that decode and are wrong ──
+    cases = {
+        "wrong store": RecoveryRef(node=good.agent_name, run=good.run_id,
+                                   store=str(control.parent / "elsewhere")).encode(),
+        "wrong node": RecoveryRef(node="some-other-node", run=good.run_id,
+                                  store=str(control)).encode(),
+        "unknown run": RecoveryRef(node=good.agent_name, run="run-that-never-was",
+                                   store=str(control)).encode(),
+    }
+    for label, token in cases.items():
+        action, why = verdict_of(token)
+        checks.append(f"{label} -> {action}")
+        if action not in ("failed", "invalid", "uncertain"):
+            refusals_that_called_a_model += 1 if "1 model" in why else 0
+
+    # ── tokens that do not even decode ──
+    from anchor.node.recovery import REFERENCE_VERSION
+    import base64 as _b64
+    for label, payload in {
+        "future version": {"node": "n", "run": "r", "store": str(control),
+                           "version": REFERENCE_VERSION + 1},
+        "negative budget": {"node": good.agent_name, "run": good.run_id, "store": str(control),
+                            "version": REFERENCE_VERSION,
+                            "budget": {"requests_used": -5, "requests_allowed": 8}},
+        "budget as text": {"node": good.agent_name, "run": good.run_id, "store": str(control),
+                           "version": REFERENCE_VERSION,
+                           "budget": {"requests_used": "six", "requests_allowed": 8}},
+    }.items():
+        token = "anchor1." + _b64.urlsafe_b64encode(
+            json.dumps(payload).encode("utf-8")).decode("ascii")
+        try:
+            RecoveryRef.decode(token)
+            checks.append(f"{label} -> ACCEPTED")
+        except (InvalidReference, ValueError, TypeError) as exc:
+            checks.append(f"{label} -> refused ({type(exc).__name__})")
+
+    # ── files that are actually broken ──
+    store_dir = control / "steps"
+    targets = sorted(store_dir.rglob("*.json")) + sorted(store_dir.rglob("*.jsonl"))
+    broken: dict[str, str] = {}
+    for target in targets:
+        broken[target.name] = target.read_text(encoding="utf-8", errors="replace")[:200]
+    for target in targets[:3]:
+        original = target.read_text(encoding="utf-8", errors="replace")
+        try:
+            target.write_text("{ this is not json", encoding="utf-8")
+            try:
+                verdict = asyncio.run(assess(open_store(control),
+                                             RecoveryRef(node=good.agent_name, run=good.run_id,
+                                                         store=str(control))))
+                checks.append(f"corrupt {target.name} -> {verdict.action}")
+            except Exception as exc:                          # noqa: BLE001 - a refusal must be explained
+                checks.append(f"corrupt {target.name} -> raised {type(exc).__name__}")
+        finally:
+            target.write_text(original, encoding="utf-8")
+
+    # ── the budget file ──
+    from anchor.node.recovery import budget_path, load_budget, save_budget
+    save_budget(control, Budget(requests_used=6, requests_allowed=8))
+    budget_path(control).write_text("not json at all", encoding="utf-8")
+    try:
+        load_budget(control)
+        checks.append("corrupt budget -> ACCEPTED")
+    except (InvalidReference, ValueError) as exc:
+        checks.append(f"corrupt budget -> refused ({type(exc).__name__})")
+
+    # ── and the reference must not shrink what has already been spent ──
+    save_budget(control, Budget(requests_used=6, requests_allowed=8))
+    stale = RecoveryRef(node=good.agent_name, run=good.run_id, store=str(control),
+                        budget=Budget(requests_used=0, requests_allowed=8))
+    merged = stale.budget.at_most(load_budget(control))
+    checks.append(f"stale token says 0/8, disk says 6/8 -> remaining {merged.remaining}")
+
+    evidence = Evidence(window="A4", control=str(control), workspace=str(workspace),
+                        killed=killed, exit_code=None, barrier="(refusals, no kill)",
+                        counter_before=0, counter_after=_counter(workspace), verdict="", because="",
+                        seconds=time.monotonic() - started)
+    bad = [item for item in checks if "ACCEPTED" in item or "raised" in item]
+    evidence.verdict = "explicit" if not bad else "LEAKED"
+    evidence.because = "; ".join(checks)
+    evidence.note = f"{len(broken)} store file(s) present; every refusal was made without running a command"
     return evidence
 
 
