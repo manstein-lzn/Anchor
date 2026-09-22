@@ -73,20 +73,41 @@ def test_s4_the_preview_and_the_budget_are_different_limits(tmp_path):
         f"not the output")
 
 
-def test_s4_short_output_on_both_streams_is_not_lost(tmp_path):
-    """§47。双流同时输出**短**内容时，两边都必须完整可见 ✓——共享预算不能把它们挤掉 ✓。"""
+def test_s4_the_preview_is_per_stream_and_the_budget_is_shared(tmp_path):
+    """**R3 / §47。** 预览上限是**每个流**各一份 ✓，共享的只有**存储**预算 ✓。
+
+    验收的反例 ✓：`max_output_bytes=10000`、无存储、两流各输出 8000 字节 ✓——修复前 stdout 只剩
+    **2000** ✓、`incomplete=False` ✓、**6000 字节静默消失** ✓。两个流都**没到**上限 ✓，被花掉两次的是
+    上限本身 ✓。
+
+    三组都要成立 ✓：两流都低于上限而总和超过 ✓、一条长流加一条短流 ✓、以及有存储时预览之外的共享预算 ✓。
+    """
     workspace = tmp_path / "ws"
     workspace.mkdir()
     sandbox = BubblewrapWorkspaceSandbox(allowed_commands=frozenset({"sh"}))
+    both = "head -c 8000 /dev/zero; head -c 8000 /dev/zero >&2"
 
+    # Both streams under the preview limit, their sum over it: nothing may be dropped.
+    result = sandbox.run(SandboxSpec(workspace=workspace, command=("sh", "-c", both),
+                                     max_output_bytes=10_000))
+    assert len(result.stdout) == 8_000, f"stdout was squeezed to {len(result.stdout)}"
+    assert len(result.stderr) == 8_000, f"stderr was squeezed to {len(result.stderr)}"
+    assert result.incomplete is False, "nothing was lost, so nothing is incomplete"
+
+    # One long stream and one short one: the long one is cut, the short one is whole, and the cut is said.
     result = sandbox.run(SandboxSpec(
         workspace=workspace,
-        command=("sh", "-c", "echo OUT-MARKER; echo ERR-MARKER >&2"),
-        spill_dir=tmp_path / "store", spill_limit_bytes=1_000))
+        command=("sh", "-c", "head -c 30000 /dev/zero; printf 'SHORT-END' >&2"),
+        max_output_bytes=10_000))
+    assert len(result.stdout) > 10_000, "the preview plus its notice should be there"
+    assert "SHORT-END" in result.stderr, "a short stream next to a long one was lost"
+    assert result.incomplete is True, "the long stream was cut and did not say so"
 
-    assert "OUT-MARKER" in result.stdout
-    assert "ERR-MARKER" in result.stderr
-    assert result.spilled == (), "short output should not have been spilled at all"
+    # With a store the previews are still per stream, and the shared budget governs what is kept beyond.
+    result = sandbox.run(SandboxSpec(workspace=workspace, command=("sh", "-c", both),
+                                     max_output_bytes=10_000, spill_dir=tmp_path / "store",
+                                     spill_limit_bytes=1_000_000))
+    assert (len(result.stdout), len(result.stderr)) == (8_000, 8_000)
     assert result.incomplete is False
 
 
@@ -97,29 +118,51 @@ def test_s4_memory_and_disk_are_bounded_during_the_run(tmp_path):
     字节数 ✓，两者都在限额附近而不是在输出大小附近 ✓。
     """
     script = f'''
-import resource, shutil, sys, tempfile
+import resource, shutil, sys, tempfile, threading, time
 from pathlib import Path
 sys.path.insert(0, {str(ROOT / "src")!r})
 from anchor.runtime.sandbox import BubblewrapWorkspaceSandbox, SandboxSpec
 
 root = Path(tempfile.mkdtemp())
 ws = root / "ws"; ws.mkdir()
+store = root / "store"
 before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+
+# **Sampled while it runs**, not measured after it ends: a run that wrote a gigabyte and then truncated
+# would have a small directory at the end and a bounded-looking result. The watcher stops when the run
+# returns, so the peak it reports is a peak during the run.
+peak = {{"bytes": 0, "done": False, "samples": 0}}
+def watch():
+    while not peak["done"]:
+        total = sum(item.stat().st_size for item in store.rglob("*") if item.is_file()) \
+            if store.exists() else 0
+        peak["bytes"] = max(peak["bytes"], total)
+        peak["samples"] += 1
+        time.sleep(0.005)
+
+watcher = threading.Thread(target=watch, daemon=True)
+watcher.start()
 result = BubblewrapWorkspaceSandbox(allowed_commands=frozenset({{"sh"}})).run(SandboxSpec(
     workspace=ws,
     command=("sh", "-c", "head -c 200000000 /dev/zero | tr '\\\\0' 'x'"),
-    spill_dir=root / "store", spill_limit_bytes=1000000))
+    spill_dir=store, spill_limit_bytes=1000000))
+peak["done"] = True
+watcher.join(timeout=5)
 after = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-on_disk = sum(item.stat().st_size for item in (root / "store").glob("*.txt"))
-print("GROWTH_MB", (after - before) // 1024, "DISK", on_disk, "PREVIEW", len(result.stdout))
+on_disk = sum(item.stat().st_size for item in store.rglob("*") if item.is_file())
+print("GROWTH_MB", (after - before) // 1024, "DISK", on_disk, "PEAK", peak["bytes"],
+      "SAMPLES", peak["samples"], "PREVIEW", len(result.stdout))
 shutil.rmtree(root, ignore_errors=True)
 '''
     done = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=300)
 
     assert done.returncode == 0, done.stderr[-1500:]
     parts = dict(zip(done.stdout.split()[::2], done.stdout.split()[1::2]))
+    assert int(parts["SAMPLES"]) > 0, f"the run was never sampled while running: {done.stdout.strip()}"
     assert int(parts["GROWTH_MB"]) < 100, f"memory grew with the output: {done.stdout.strip()}"
     assert int(parts["DISK"]) <= 1_100_000, f"disk grew past the budget: {done.stdout.strip()}"
+    # The number that matters: what was on disk **during** the run, not what was left at the end.
+    assert int(parts["PEAK"]) <= 1_100_000, f"disk grew past the budget while running: {done.stdout.strip()}"
     assert int(parts["PREVIEW"]) <= 1_100_000, f"the preview was not bounded: {done.stdout.strip()}"
 
 

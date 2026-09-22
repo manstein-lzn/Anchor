@@ -187,18 +187,18 @@ def _capture(spec: SandboxSpec, argv: list[str], staging: Path) -> tuple[
     caller did not ask for, and the total size is still known exactly.
     """
     limit = spec.max_output_bytes
-    # **Two different numbers, and conflating them is what broke this.** `max_output_bytes` is how much
-    # the *model* is shown; the caller's budget is how much may be *kept*. Keeping only the shown part
-    # makes the kept file a copy of the truncation and the "read the rest at <path>" notice a lie — the
-    # whole point of spilling is that the rest is somewhere. The budget is spent down across both
-    # streams so two large ones cannot each take the full allowance.
+    # **Three numbers, and conflating two of them is what broke this.** `max_output_bytes` is how much of
+    # a stream the *model* is shown; the caller's budget is how much may be *kept* in total. The preview
+    # is **per stream** — each of stdout and stderr may show `limit` bytes — and only what is kept
+    # *beyond* the previews comes out of the shared budget, so two large streams cannot each take the
+    # whole allowance.
+    #
+    # Sharing the preview was the bug: with stdout and stderr each printing 8000 bytes against a 10000
+    # limit and no store, one stream got 2000, the other 8000, `incomplete` was False, and 6000 bytes
+    # vanished with nothing said. Both streams were under the limit; the limit was being spent twice.
     budget: int = spec.spill_limit_bytes if spec.spill_limit_bytes is not None else 0
     if spec.spill_dir is None:
         budget = 0
-    # The head is captured whatever the budget says, because it is what the caller is *shown*; the
-    # budget only decides how much beyond the head is worth keeping as a file. With no store the two
-    # are the same number and there is nothing to spill.
-    keep = max(limit, budget)
     staged: dict[str, Path] = {}
     sizes: dict[str, int] = {}
     written: dict[str, int] = {}
@@ -219,7 +219,12 @@ def _capture(spec: SandboxSpec, argv: list[str], staging: Path) -> tuple[
                     break
                 with lock:
                     sizes[name] = sizes.get(name, 0) + len(chunk)
-                    room = max(keep - sum(written.values()), 0)
+                    # Each stream's own preview first, then whatever the shared budget has left for
+                    # keeping beyond the previews.
+                    preview_room = max(limit - written.get(name, 0), 0)
+                    kept_beyond = sum(max(0, count - limit) for count in written.values())
+                    spill_room = max(budget - kept_beyond, 0)
+                    room = preview_room + spill_room
                     piece = chunk[:room] if room > 0 else b""
                     if piece:
                         written[name] = written.get(name, 0) + len(piece)
