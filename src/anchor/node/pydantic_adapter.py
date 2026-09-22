@@ -40,7 +40,7 @@ version passed its own tests:
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -413,6 +413,118 @@ def _files(workspace: Path) -> tuple[str, ...]:
         if item.is_file() and ".git" not in item.relative_to(workspace).parts))
 
 
+@dataclass
+class _Started:
+    """What this attempt starts from.
+
+    Either an `outcome` — the attempt stops here, because a previous one cannot be safely continued — or
+    the state the run needs: whose history to continue, which framework run to record under, what has
+    already been spent. A dataclass rather than a tuple because eight positional values is a thing
+    nobody reads correctly, and this is the code that decides what a caller receives.
+    """
+
+    outcome: NodeOutcome | None = None
+    resumed: list[Any] = field(default_factory=list)
+    history: list[Any] | None = None
+    conversation: str = ""
+    spending: int = 0
+    already: int = 0
+    this_run: str = ""
+    ref: Any = None
+    store: Any = None
+
+
+async def _what_a_previous_attempt_left(request: NodeRequest, capabilities: tuple[Any, ...],
+                                       recovery_store: Path | None) -> _Started:
+    """Decide what a previous attempt left behind, **before a model is built**.
+
+    A token that cannot be resolved stops the attempt rather than becoming a fresh run of the task: a
+    fresh run would repeat whatever the previous attempt managed to do and call it progress (§38). The
+    adapter decides here and the Graph never sees why — it gets a status and a reason.
+    """
+    started = _Started(conversation=request.execution_id, spending=request.max_requests)
+    # **What earlier processes already spent.** Counted against this attempt too, so the cap is a cap on
+    # the whole logical execution rather than a fresh allowance per process — a node killed three times
+    # would otherwise spend its budget three times over.
+    if recovery_store is not None:
+        started.already = load_budget(Path(recovery_store)).requests_used
+    #: Whether the caller has already arranged persistence. **Where it sits among the capabilities
+    #: decides which side of a write a hook lands on**, and the two directions are not the same — a
+    #: `before_*` hook registered after it sees the framework's `started` write, while an `after_*` hook
+    #: registered before it sees the terminal write. A caller testing a specific boundary has to place
+    #: it; the adapter's job is to not add a second one.
+    from pydantic_ai_harness import StepPersistence as _StepPersistence
+    has_persistence = any(isinstance(item, _StepPersistence) for item in capabilities)
+
+    if request.recovery:
+        from anchor.node.recovery import RecoveryRef, assess, continued_messages
+        try:
+            started.ref = RecoveryRef.decode(request.recovery)
+        except Exception as exc:                              # noqa: BLE001 - a status, not a raise
+            return _Started(outcome=NodeOutcome(
+                status=FAILED, reason=f"the recovery reference is not usable: {exc}",
+                model_requests=0, files=_files(request.workspace)))
+        try:
+            started.store = open_store(Path(started.ref.store))
+            verdict = await assess(started.store, started.ref)
+        except Exception as exc:                              # noqa: BLE001 - a status, not a raise
+            # The entry point promised a result; a store it cannot read is a failed attempt with a
+            # reason, not an exception for the caller to catch.
+            return _Started(outcome=NodeOutcome(
+                status=FAILED,
+                reason=f"the recovery records cannot be read: {type(exc).__name__}: {exc}",
+                model_requests=0, files=_files(request.workspace), recovery=request.recovery))
+        # **Silence on this path, deliberately.** An uncertain attempt asks the model nothing and runs
+        # no command: the effect may already have happened, and doing anything with that uncertainty
+        # other than reporting it is how a side effect happens twice.
+        if verdict.action == "uncertain":
+            return _Started(outcome=NodeOutcome(
+                status=UNCERTAIN, reason=verdict.because, model_requests=0,
+                files=_files(request.workspace), recovery=request.recovery))
+        if verdict.action == "invalid":
+            return _Started(outcome=NodeOutcome(
+                status=FAILED, reason=verdict.because, model_requests=0,
+                files=_files(request.workspace), recovery=request.recovery))
+        # **It already submitted.** Nothing is run and no model is asked: the result is in the history,
+        # and the one action that must never happen twice is the submission.
+        if verdict.action == "finished":
+            from anchor.node.recovery import already_finished
+            snapshot = await started.store.latest_snapshot(run_id=started.ref.run)
+            submission, route = already_finished(snapshot)
+            return _Started(outcome=NodeOutcome(
+                status=COMPLETED, submission=submission, route=route, model_requests=0,
+                files=_files(request.workspace), recovery=request.recovery))
+        # `replayable` means nothing entered a tool, so the attempt is the first one in effect.
+        if verdict.action == "continuable":
+            started.history = await continued_messages(started.store, started.ref)
+            # **The allowance is the smaller of the two accounts, and the spending the larger.** §38: a
+            # token must not be able to hand back a budget a control directory says was already spent —
+            # replaying an old reference would otherwise reset the allowance it had used up, which is
+            # exactly what persisting a budget exists to prevent.
+            on_disk = load_budget(Path(started.ref.store))
+            started.spending = max(started.ref.budget.at_most(on_disk).remaining, 0) or request.max_requests
+        if started.store is not None and not has_persistence:
+            started.conversation = started.ref.node
+            # **A continuation is a new run**, so the attempt that ends up in the store is this one and
+            # not the one the reference named. Reporting the old id would make the next caller assess
+            # the *previous* attempt — which is settled and already submitted — and start the work over.
+            started.this_run = await _next_run_id(started.store, started.ref.node)
+            started.resumed.append(_StepPersistence(store=started.store, agent_name=started.ref.node,
+                                                   run_id=started.this_run))
+
+    elif recovery_store is not None and not has_persistence:
+        # A fresh attempt still records itself, so that a later process can be told about it — and so
+        # that the second attempt's run id does not collide with the first's. The framework refuses a
+        # repeated `run_id` outright, which is what made this necessary rather than convenient.
+        from pydantic_ai_harness import StepPersistence
+        started.store = open_store(Path(recovery_store))
+        started.resumed.append(StepPersistence(store=started.store, agent_name=request.execution_id,
+                                               run_id=await _next_run_id(started.store,
+                                                                         request.execution_id)))
+
+    return started
+
+
 async def run_node(request: NodeRequest, *, model: Any,
                    capabilities: tuple[Any, ...] = (),
                    recovery_store: Path | None = None) -> NodeOutcome:
@@ -428,106 +540,28 @@ async def run_node(request: NodeRequest, *, model: Any,
     conversation — `AgentRun.all_messages()` is readable from the handler for an exception, and a
     result, which is where `run` keeps them, does not exist on that path.
     """
-    # ── What a previous attempt left, before anything is started. ──
-    #
-    # **A token that cannot be resolved stops the attempt before a model is built.** That is the whole
-    # point of §38: a reference that does not check out must not become a fresh run of the task, because
-    # a fresh run would repeat whatever the previous attempt managed to do and call it progress. The
-    # adapter decides here, and the Graph never sees why — it gets a status and a reason.
-    resumed: list[Any] = []
-    #: The framework run this attempt will use, when it is a continuation and therefore a *new* run.
-    this_run = ""
-    history: list[Any] | None = None
-    ref = None
-    store = None
-    spending = request.max_requests
-    #: The **logical** node execution, stable across attempts, and the framework's `conversation_id`.
-    #: A retry is a *new* `Agent.run` — the framework refuses to reuse a `run_id`, measured — so the
-    #: sequence is the conversation and each attempt gets its own run.
-    conversation = request.execution_id
-    #: Whether the caller has already arranged persistence. **Where it sits among the capabilities
-    #: decides which side of a write a hook lands on**, and the two directions are not the same — a
-    #: `before_*` hook registered after it sees the framework's `started` write, while an `after_*` hook
-    #: registered before it sees the terminal write. A caller testing a specific boundary has to place
-    #: it; the adapter's job is to not add a second one.
-    from pydantic_ai_harness import StepPersistence as _StepPersistence
-    has_persistence = any(isinstance(item, _StepPersistence) for item in capabilities)
-
-    if request.recovery:
-        from anchor.node.recovery import RecoveryRef, assess, continued_messages
-        try:
-            ref = RecoveryRef.decode(request.recovery)
-        except Exception as exc:                              # noqa: BLE001 - a status, not a raise
-            return NodeOutcome(status=FAILED, reason=f"the recovery reference is not usable: {exc}",
-                               model_requests=0, files=_files(request.workspace))
-        try:
-            store = open_store(Path(ref.store))
-            verdict = await assess(store, ref)
-        except Exception as exc:                              # noqa: BLE001 - a status, not a raise
-            # The entry point promised a result; a store it cannot read is a failed attempt with a
-            # reason, not an exception for the caller to catch.
-            return NodeOutcome(status=FAILED,
-                               reason=f"the recovery records cannot be read: {type(exc).__name__}: {exc}",
-                               model_requests=0, files=_files(request.workspace),
-                               recovery=request.recovery)
-        # **Silence on this path, deliberately.** An uncertain attempt asks the model nothing and runs
-        # no command: the effect may already have happened, and doing anything with that uncertainty
-        # other than reporting it is how a side effect happens twice.
-        if verdict.action == "uncertain":
-            return NodeOutcome(status=UNCERTAIN, reason=verdict.because, model_requests=0,
-                               files=_files(request.workspace), recovery=request.recovery)
-        if verdict.action == "invalid":
-            return NodeOutcome(status=FAILED, reason=verdict.because, model_requests=0,
-                               files=_files(request.workspace), recovery=request.recovery)
-        # **It already submitted.** Nothing is run and no model is asked: the result is in the history,
-        # and the one action that must never happen twice is the submission.
-        if verdict.action == "finished":
-            from anchor.node.recovery import already_finished
-            snapshot = await store.latest_snapshot(run_id=ref.run)
-            submission, route = already_finished(snapshot)
-            return NodeOutcome(status=COMPLETED, submission=submission, route=route,
-                               model_requests=0, files=_files(request.workspace),
-                               recovery=request.recovery)
-        # `replayable` means nothing entered a tool, so the attempt is the first one in effect.
-        if verdict.action == "continuable":
-            history = await continued_messages(store, ref)
-            # **The allowance is the smaller of the two accounts, and the spending the larger.** §38: a
-            # token must not be able to hand back a budget a control directory says was already spent —
-            # replaying an old reference would otherwise reset the allowance it had used up, which is
-            # exactly what persisting a budget exists to prevent.
-            on_disk = load_budget(Path(ref.store))
-            spending = max(ref.budget.at_most(on_disk).remaining, 0) or request.max_requests
-        if store is not None and not has_persistence:
-            conversation = ref.node
-            # **A continuation is a new run**, so the attempt that ends up in the store is this one and
-            # not the one the reference named. Reporting the old id would make the next caller assess
-            # the *previous* attempt — which is settled and already submitted — and start the work over.
-            this_run = await _next_run_id(store, ref.node)
-            resumed.append(_StepPersistence(store=store, agent_name=ref.node, run_id=this_run))
-
-    elif recovery_store is not None and not has_persistence:
-        # A fresh attempt still records itself, so that a later process can be told about it — and so
-        # that the second attempt's run id does not collide with the first's. The framework refuses a
-        # repeated `run_id` outright, which is what made this necessary rather than convenient.
-        from pydantic_ai_harness import StepPersistence
-        store = open_store(Path(recovery_store))
-        resumed.append(StepPersistence(store=store, agent_name=request.execution_id,
-                                       run_id=await _next_run_id(store, request.execution_id)))
+    started = await _what_a_previous_attempt_left(request, capabilities, recovery_store)
+    if started.outcome is not None:
+        return started.outcome
+    resumed, already = started.resumed, started.already
+    history, conversation = started.history, started.conversation
+    ref, store, spending = started.ref, started.store, started.spending
+    this_run = started.this_run
 
     counted = _CountingModel(model)
     if recovery_store is not None:
         # Whatever was already spent counts against this attempt too, so the cap is a cap on the whole
         # logical execution and not on each process it happens to run in.
-        already = load_budget(Path(recovery_store)).requests_used
         counted.control = recovery_store
         counted.allowed = request.max_requests
         counted.requests = already
     agent = build_agent(counted, instructions=request.instructions,
                         max_retries=spending,
                         capabilities=(*capabilities, *resumed))
-    # **What this process may still spend**, not what the whole execution may: the requests already
-    # made in earlier processes are counted against the same allowance, so the cap survives a restart.
+    # **What this process may still spend**, not what the whole execution may: the requests already made
+    # in earlier processes are counted against the same allowance, so the cap survives a restart.
     limits = UsageLimits(request_limit=max(spending - already, 1))
+
     wiring: _Wiring | None = None
     run: Any = None
     messages: list[Any] = []
