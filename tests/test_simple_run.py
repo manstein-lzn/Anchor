@@ -48,7 +48,7 @@ class _StubAgent:
     def run(self, task: str, **_kwargs: object) -> dict:
         return self._finish()
 
-    def resume(self, messages: list) -> dict:
+    def resume(self) -> dict:
         return self._finish()
 
     def _finish(self) -> dict:
@@ -323,7 +323,7 @@ class _CrashingStub:
         self.trace.write_text(json.dumps({"role": "user", "content": task}) + "\n", encoding="utf-8")
         raise _DiedHere("the process died here")
 
-    def resume(self, messages: list) -> dict:
+    def resume(self) -> dict:
         raise AssertionError("a crashed attempt does not resume itself")
 
 
@@ -337,9 +337,9 @@ class _ResumingStub:
     def run(self, task: str, **_kwargs: object) -> dict:
         raise AssertionError("a resumed node must be continued, not started again")
 
-    def resume(self, messages: list) -> dict:
-        assert messages and messages[0].get("role") == "user", \
-            "the conversation a previous process left was not read back"
+    def resume(self) -> dict:
+        # Nothing is handed in and nothing is read here: what a node continues from is its own step
+        # store, and a stub that wanted the conversation would be asserting a coupling that is gone.
         _tree(self.directory, {"b.md": "finished after the restart"})
         return {"submission": "continued", "exit_status": "Submitted"}
 

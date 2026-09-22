@@ -431,7 +431,7 @@ class CompletionFact:
     not: a command that printed the marker and exited 1, which `read_completion` refuses and the model is
     told about, was reported by recovery as `finished` with the refusal text as its submission.
 
-    So the fact is recorded **where the protocol accepts it** (`pydantic_adapter`'s bash tool) and read
+    So the fact is recorded **where the protocol accepts it** (`agent_runtime`'s bash tool) and read
     back whole. One implementation of the protocol, and recovery reads its output rather than guessing at
     it from a string.
     """

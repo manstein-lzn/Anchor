@@ -1,8 +1,11 @@
 """Running one node, with Anchor's own types on both sides of the seam.
 
 A Node is asked to do one pass of work in one workspace and to say how it went. What it runs is not
-this module's business: `pydantic_adapter` is one runner, `simple/agent.py` is another, and the Graph
-scheduler is written against neither. Nothing here names a framework, and nothing here imports one.
+this module's business. Since M3 of ADR-062's migration there is one runner behind this and it is two
+modules rather than one: `agent_runtime.py` is the harness half, `adapter.py` is the runtime half, and
+`adapter.py`'s `run_agent_node` is the entry point. `op_runtime.py`'s `run_op_node` is the other kind of
+node and reaches none of it. The Graph scheduler is written against none of them. Nothing here names a
+framework, and nothing here imports one.
 
 **The contract is the semantics, not the classes.** These dataclasses may change shape. What must not
 change is in `NodeRequest`'s and `NodeOutcome`'s field docs: an execution identifier that does not

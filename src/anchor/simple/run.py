@@ -949,7 +949,7 @@ def run(workspace: str | Path, *, objective: str | None = None, config_path: str
             # this process is the one that interrupted it, and asking the node directly is what turns a
             # write that landed before the record into `uncertain` instead of a rerun.
             if step.resuming and step.trace is not None and Path(step.trace).exists():
-                outcome = agent.resume(_messages(step.trace))
+                outcome = agent.resume()
             else:
                 outcome = agent.run(task=step.task, resume_mark=step.resuming)
             result = _result_of(step.node_id, graph.nodes[step.node_id].agent, step.directory,
@@ -983,7 +983,3 @@ def run(workspace: str | Path, *, objective: str | None = None, config_path: str
                      ensure_ascii=False), flush=True)
     return state
 
-
-def _messages(trace: Path) -> list[dict]:
-    """The conversation a previous process left, read back whole."""
-    return [json.loads(line) for line in trace.read_text(encoding="utf-8").splitlines() if line]

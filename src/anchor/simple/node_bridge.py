@@ -2,15 +2,16 @@
 
 `_agent_for` used to return mini's `TracingAgent` for every node: an agent built around a model, and an
 op built around a scripted model of one command. After ADR-062 it returns one of these, which is the
-same thing the scheduler asked for — `run(task)` / `resume(messages)`, and a `route` to read afterwards
-— coming from `run_agent_node` and `run_op_node` instead. The scheduler is otherwise untouched: it still
+same thing the scheduler asked for — `run(task)` / `resume()`, and a `route` to read afterwards —
+coming from `run_agent_node` and `run_op_node` instead. The scheduler is otherwise untouched: it still
 writes the cursor, still freezes the commit, still decides the edges, and still knows nothing about
 which loop ran the work.
 
 **The dict this returns is the interface that existed, not a new one.** `_result_of` reads
-`exit_status == "Submitted"` and `submission`; the resume path reads `_messages(trace)`. Those are the
-seam the scheduler was written against in package 01, so they are what this produces and the reason the
-switch is one file rather than a rewrite of the loop.
+`exit_status == "Submitted"`, `submission` and the `route` beside it. Those are the seam the scheduler
+was written against in package 01, so they are what this produces and the reason the switch is one file
+rather than a rewrite of the loop. Nothing here reads a trace: what a node continues from is its own
+step store, which is the one thing that can answer whether repeating the work is safe.
 
 **A node's control directory is derived here and not passed in.** Where a node keeps its record, its
 budget and its completion is the node's business (ADR-062 invariant 1). The scheduler names the run
@@ -21,7 +22,6 @@ run's layout.
 from __future__ import annotations
 
 import asyncio
-import json
 from pathlib import Path
 from typing import Any
 
@@ -69,12 +69,12 @@ class Node:
         """
         return self._dispatch(task=task, recovery=False, resume_mark=resume_mark)
 
-    def resume(self, messages: list[dict]) -> dict:
-        """Continue a previous attempt whose conversation is still on disk. `messages` is not read.
+    def resume(self) -> dict:
+        """Continue a previous attempt whose record is still on disk.
 
-        The argument stays because it is the interface the scheduler was written against; what the node
-        continues from is the step store, and the trace is only what tells the scheduler this node was
-        interrupted in the middle rather than never started.
+        Nothing is passed in, because there is nothing a caller knows about an interrupted attempt that
+        the node does not: what it continues from is the step store, and a trace is only what tells the
+        scheduler this node was interrupted in the middle rather than never started.
         """
         return self._dispatch(task=None, recovery=True)
 
@@ -193,10 +193,3 @@ def _binds(inputs: tuple[Any, ...]) -> tuple[tuple[str, str], ...]:
     """A step's given inputs, as the `(host path, mount point)` pairs a request carries."""
     return tuple(bind for item in inputs for bind in item.binds())
 
-
-def read_trace_messages(trace: Path | None) -> list[dict]:
-    """The messages a previous process left in a trace, read back whole."""
-    if trace is None or not Path(trace).exists():
-        return []
-    return [json.loads(line) for line in Path(trace).read_text(encoding="utf-8").splitlines()
-            if line]

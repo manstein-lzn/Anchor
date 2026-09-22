@@ -9,10 +9,11 @@ one a import makes checkable: `pydantic_ai` and `pydantic_ai_harness` must not a
 imports, because an op that pulled them in would make "ops do not depend on the harness" unverifiable
 by construction rather than by test. `tests/test_ops.py` asserts it.
 
-**Why this exists at all, when mini already runs ops.** Today the op path goes through
-`simple/agent.py`'s `OpEnvironment`, which means an op node imports `minisweagent` to run one command.
-After M3 that import is gone and this is what is left. It is a mirror of `OpEnvironment`'s rules rather
-than a re-use of them, deliberately: those rules live behind the framework the migration is removing.
+**Why this exists at all, when mini already ran ops.** Before M3 the op path went through
+`simple/agent.py`'s `OpEnvironment`, which meant an op node imported `minisweagent` to run one command.
+That import is gone from the path, and this is what is left. Its rules were written as a mirror of
+`OpEnvironment`'s rather than as a re-use of them, deliberately: those rules lived behind the framework
+the migration was removing, and a shared helper would have had to outlive the thing it was shared with.
 
 **The protocol it implements, which is the one `OpEnvironment` implements:**
 

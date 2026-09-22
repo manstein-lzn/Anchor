@@ -74,13 +74,17 @@ mapping a node id to the commands it should be given; only the model is replaced
 a loop inside a module inside a loop, for a gate whose branch is taken by `grep`, and for an agent and
 an op in one graph (ADR-059).
 
-**84 tests.** `pytest tests/ -q`, `ruff check src/ tests/ scripts/`, `mypy src/anchor/simple/
-src/anchor/runtime/`.
+**238 tests.** `pytest tests/ -q`, `ruff check src/ tests/ scripts/`, `mypy src/anchor/`.
 
 Where things live: `src/anchor/simple/graph.py` (schema, expansion, the interface check),
-`src/anchor/simple/agent.py` (the sandbox environment, the op environment, `build_agent`),
-`src/anchor/simple/run.py` (the scheduler, `_handed`, the prompt, the record),
+`src/anchor/simple/run.py` (the scheduler, the prompt, the record, the commit),
+`src/anchor/simple/node_bridge.py` (the scheduler's node: an agent node to `run_agent_node`, an op node
+to `run_op_node`), `src/anchor/node/` (the node runtime — `__init__.py` is the contract, `agent_runtime`
+and `adapter` are the agent half, `op_runtime` the op half, `recovery` the node's own state machine),
 `src/anchor/serve.py` (the service), `examples/graphs/` (five checked graphs plus one gated example).
+
+`src/anchor/simple/agent.py` is still there and is nothing the scheduler reaches: it is mini's loop and
+the sandbox helpers, and it is deleted at M5.
 
 ---
 
