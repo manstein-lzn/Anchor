@@ -119,7 +119,8 @@ context_capabilities(budget, record=..., summarizer=..., force=False, observe_ch
 > **都调用同一个 Pydantic `run_node`**，前者只是不加载 capability。所以那是
 > **「Pydantic 不启用上下文策略」对「Pydantic 启用上下文策略」**，不是 mini 基线对候选。
 > 旧结果已移到 `.local/context-exploration-old/` 并标注，**不得当作原结果引用**。
-> 脚本与目录隔离已按 §6 修好；**修正后的真实实验尚未重跑**。
+>
+> **修正后的实验已重跑**，结果见 §6 末尾——与作废那版**完全不同**。
 >
 > 下面保留原始数据，仅为记录当时看到了什么。
 
@@ -318,3 +319,33 @@ tmpfs**，该目录从未挂进去。独立复现：
 | 共享层 patch | `sandbox.py` / `execenv.py` 的改动**待主集成复核**（R2 明确要求）|
 
 **第二包状态：主验收不通过；R1–R6 已逐条修复并有回归，但修正后的真实实验尚未重跑，任务特定断言仍未做。**
+
+### R6 之后：修正实验的**重跑结果**
+
+`scripts/context_experiment.py` 的 mini 分支现在走**真实的 `runner.run`**（单节点图，调度器、沙箱、
+提交都是真的），控制目录在工作区之外。真实窗口 **524,288**，3 任务 × 2 次 × 2 臂 = 12 次真实运行。
+
+| 节点 | 任务 | 次 | 状态 | 用时 | 约束 |
+| --- | --- | ---: | --- | ---: | --- |
+| mini | constraint | 1 / 2 | ✅ / ✅ | 41.1 / 43.2s | kept / kept |
+| pydantic | constraint | 1 / 2 | ✅ / ✅ | 94.9 / 32.2s | kept / kept |
+| mini | evidence | 1 / 2 | ✅ / ✅ | 99.5 / 199.6s | kept / kept |
+| pydantic | evidence | 1 / 2 | ✅ / **budget_exhausted** | 114.5 / 136.8s | kept / kept |
+| mini | tail | 1 / 2 | ✅ / ✅ | 45.9 / 8.9s | kept / kept |
+| pydantic | tail | 1 / 2 | ✅ / ✅ | 25.7 / 40.5s | kept / kept |
+
+**与作废那版的关键差别**：修正后 **mini 6/6 完成、pydantic 5/6**（一次撞上请求预算），而 old 数据里
+「mini」的失败根本不属于 mini。**用时互有胜负，没有一致方向**；`constraint` 与 `tail` 两任务的约束
+两臂都保住 ✓。
+
+**因此对真实窗口这一组，正确的说法是：两臂大体相当，pydantic 多了一次预算退出。** 原先那句
+「pydantic 更少调用、指向迁移」**不成立**，已撤回 ✓。
+
+**未重跑**：**强制压缩那组（窗口 12,000）没有重跑** ✓。那一组才是压缩信息损失的证据，而作废版的数字
+不能用 ✓——**这是本包明确留下的空缺** ✓。
+
+**仍在的两处不足**（R6 要求过）：
+- **mini 臂的模型调用数没有采集** ✗（表格里是 0）——mini 的调用发生在 `LitellmModel` 内部，
+  没有计数接缝 ✓。所以「调用数」这一列**只能看 pydantic 一侧** ✓。
+- **`evidence` 与 `tail` 的判定仍是代理指标** ✓（见 §6 R6）：`constraint` 是精确判定（每个 `.md`
+  以指定行结尾，实测两臂都过 ✓），另两个只检查词/文件存在 ✓。

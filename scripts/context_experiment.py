@@ -35,14 +35,16 @@ from anchor.node.pydantic_adapter import run_node                             # 
 
 #: §70's three tasks. Each states a constraint **early** and then asks for work that buries it, because
 #: the thing being measured is whether an early constraint survives the compaction that follows.
-TASKS: dict[str, dict[str, str]] = {
+TASKS: dict[str, dict] = {
     "constraint": {
         "task": (
             "Write exactly three files into your workspace: `first.md`, `second.md`, `third.md`.\n"
             "**The constraint: every file must end with the line `REVIEWED-BY-ALPHA`.** This is the "
             "requirement you will be judged on, and it must hold for all three files.\n"
             "Then, for each file, write four paragraphs explaining its purpose."),
-        "check": "REVIEWED-BY-ALPHA",
+        # **Exactly checkable**, and checked exactly: every one of the three files has to end with the
+        # line, not merely contain it somewhere.
+        "check": "REVIEWED-BY-ALPHA", "check_is": "every_file_ends", "files": 3,
     },
     "evidence": {
         "task": (
@@ -50,16 +52,49 @@ TASKS: dict[str, dict[str, str]] = {
             "each one.\n"
             "**The constraint: every quotation must be followed by the source it came from.** "
             "Then write a short synthesis that does not introduce any fact not already quoted."),
-        "check": "source",
+        # A proxy, and named as one: whether a quotation is *followed by* its source is a judgement
+        # about prose. What is checked is that the word appears at all, which finds the runs where the
+        # requirement was plainly dropped and says nothing about the ones where it was met badly.
+        "check": "source", "check_is": "contains",
     },
     "tail": {
         "task": (
             "Run a command that prints a long listing (at least two thousand lines) and write "
             "`summary.md` with the **last line** of that listing quoted exactly.\n"
             "**The constraint: the last line must be quoted verbatim, not paraphrased.**"),
+        # Also a proxy: "quoted verbatim" needs the listing itself, and the node produced it inside a
+        # command whose output only the node saw. That the file exists is what can be checked from here.
         "check": "summary.md", "check_is": "file",
     },
 }
+
+
+def _holds(spec: dict, directory: Path, produced: list[str], body: str) -> bool:
+    """Whether the task's own requirement is met — exactly where it can be, and said so where it cannot.
+
+    One keyword test over everything would let "the constraint survived" mean "the word appears
+    somewhere in any markdown file", which is how a run that dropped the requirement twice could be
+    reported as keeping it. Where the requirement is mechanically checkable it is checked mechanically;
+    where it is a judgement about prose the proxy is named in `TASKS` rather than dressed up.
+    """
+    kind = spec.get("check_is", "contains")
+    if kind == "every_file_ends":
+        named = [item for item in produced if item.endswith(".md")
+                 and not item.startswith("runs/")]
+        if len(named) < spec.get("files", 3):
+            return False
+        for item in named[:spec.get("files", 3)]:
+            lines = [line for line in (directory / item).read_text(
+                encoding="utf-8", errors="replace").splitlines() if line.strip()]
+            if not lines or lines[-1].strip() != spec["check"]:
+                return False
+        return True
+    if kind == "file":
+        # By **basename**: the two arms do not put their artefacts in the same place — the mini path
+        # works inside a run directory of its own — so a full-path test compares the layouts rather
+        # than whether the file was written. It reported every mini run as having produced nothing.
+        return any(Path(item).name == spec["check"] for item in produced)
+    return spec["check"] in body
 
 
 @dataclass
@@ -117,7 +152,7 @@ def _model(model: dict, secret: str):
     return chosen(model["model"], provider=provider)
 
 
-def _run_mini(spec: dict[str, str], workspace: Path, config_path: str):
+def _run_mini(spec: dict, workspace: Path, config_path: str):
     """One pass of the mini path, through the graph runner rather than through the new entry point.
 
     It gets a one-node graph so that the surrounding machinery — the scheduler, the sandbox, the commit
@@ -138,7 +173,7 @@ def _run_mini(spec: dict[str, str], workspace: Path, config_path: str):
             Record(workspace.parent / "control"))
 
 
-async def one(node: str, name: str, spec: dict[str, str], attempt: int, workspace: Path,
+async def one(node: str, name: str, spec: dict, attempt: int, workspace: Path,
               model_spec: dict, summariser_spec: dict | None, secret: str,
               budget: Budget, config_path: str) -> Attempt:
     import shutil
@@ -187,8 +222,7 @@ async def one(node: str, name: str, spec: dict[str, str], attempt: int, workspac
         # A filename check or a content check, said which. "Did it write the file it was told to"
         # and "does what it wrote still carry the requirement" are different questions and a single
         # substring test answers neither reliably.
-        constraint_present=(spec["check"] in produced if spec.get("check_is") == "file"
-                            else spec["check"] in body))
+        constraint_present=_holds(spec, directory, produced, body))
 
 
 async def main() -> int:
