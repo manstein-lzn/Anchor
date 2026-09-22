@@ -142,6 +142,12 @@ class _Wiring:
     #: Set by the command that submitted. Its presence is what stops everything after it — the later
     #: calls in the same response, and the pass itself.
     done: _Done | None = None
+    #: Where an accepted completion is recorded, and under what identity. The control directory is the
+    #: node's own record, outside the workspace it can write (§17); the two ids bind the fact to this
+    #: node and to the framework run that produced it.
+    control: Any = None
+    execution_id: str = ""
+    framework_run: str = ""
     commands: int = 0
     #: (command, exit code, first line, full output) in the order they were dispatched, for the
     #: record and for the tests that assert ordering rather than believing a claim about it. A skipped
@@ -248,6 +254,18 @@ def _bash(ctx: RunContext[_Wiring], command: str) -> str:
         wiring.done = _Done(submission=message, route=None, command=command)
     elif kind == "routed":
         wiring.done = _Done(submission=message, route=route, command=command)
+    if kind in ("done", "routed") and wiring.control is not None:
+        # **Written here, where the protocol says yes.** Recovery reads this fact rather than looking for
+        # the marker in a rendering of the output: before it existed, a command that printed the marker
+        # and exited 1 — which this very call refuses, and tells the model so — was reported by recovery
+        # as a finished node, with the refusal text as its submission.
+        from datetime import datetime, timezone
+
+        from anchor.node.recovery import CompletionFact, record_completion
+        record_completion(Path(wiring.control), CompletionFact(
+            node=wiring.execution_id, run=wiring.framework_run or "",
+            kind=kind, submission=message, route=route, command=command,
+            at=datetime.now(timezone.utc).isoformat()))
     # A refusal and an ordinary result travel the same way — back to the model as a plain tool result,
     # which is also what the harness can read and clear. `ModelRetry` is used for neither: it would
     # attach correction instructions to a command's ordinary output and record it as a retry.
@@ -485,12 +503,23 @@ async def _what_a_previous_attempt_left(request: NodeRequest, capabilities: tupl
             return _Started(outcome=NodeOutcome(
                 status=FAILED, reason=verdict.because, model_requests=0,
                 files=_files(request.workspace), recovery=request.recovery))
-        # **It already submitted.** Nothing is run and no model is asked: the result is in the history,
-        # and the one action that must never happen twice is the submission.
+        # **It already submitted.** Nothing is run and no model is asked: the result is recorded, and
+        # the one action that must never happen twice is the submission.
+        #
+        # Read from the **fact the protocol wrote**, not from the history's text. The history holds the
+        # observation the model was shown, and the marker is in it whether or not the protocol accepted
+        # it — a command that printed the marker and exited 1, which is refused on the normal path, was
+        # reported here as a finished node with the refusal as its submission.
         if verdict.action == "finished":
             from anchor.node.recovery import already_finished
-            snapshot = await started.store.latest_snapshot(run_id=started.ref.run)
-            submission, route = already_finished(snapshot)
+            submission, route = already_finished(Path(started.ref.store), started.ref.node)
+            if not submission:
+                return _Started(outcome=NodeOutcome(
+                    status=FAILED,
+                    reason="a completion is recorded for this node but cannot be read back — refusing "
+                           "rather than reporting a result that is not there",
+                    model_requests=0, files=_files(request.workspace),
+                    recovery=request.recovery))
             return _Started(outcome=NodeOutcome(
                 status=COMPLETED, submission=submission, route=route, model_requests=0,
                 files=_files(request.workspace), recovery=request.recovery))
@@ -571,7 +600,9 @@ async def run_node(request: NodeRequest, *, model: Any,
         wiring = _Wiring(sandbox=NodeSandbox(
             tree=request.workspace, node_id=request.roles or request.execution_id,
             network=request.network, timeout_seconds=request.timeout_seconds,
-            routes=request.routes, inputs=request.inputs), routes=request.routes)
+            routes=request.routes, inputs=request.inputs), routes=request.routes,
+            control=recovery_store, execution_id=request.execution_id,
+            framework_run=this_run or (ref.run if ref is not None else ""))
         # Inside the try. A sandbox that cannot start is a failed execution and the contract has a
         # status for it; raising out of the entry point would leave the caller with an exception where
         # it was promised a result.

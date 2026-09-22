@@ -116,7 +116,7 @@ def _report_window(window: str, where: str) -> None:
         os.write(fd, f"{window}@{where}\n".encode("utf-8"))
 
 
-def _barrier(window: str):
+def _barrier(window: str, script: dict):
     """The capability that stops the node at the chosen boundary.
 
     The four tool-related hooks are not interchangeable and the boundaries they give are not the same
@@ -130,6 +130,11 @@ def _barrier(window: str):
     Which is why C1 pauses in the first, C2 in the second, and C3 between the handler and its return.
     """
     from pydantic_ai.capabilities import AbstractCapability
+
+    # How many settled cycles to let through before pausing. Two by default — one command's turn and the
+    # request that follows it — and a case whose kill has to land **after** a submission says so rather
+    # than hoping the boundary falls in the right place.
+    kill_after = int(script.get("kill_after_models", 2))
 
     class Barrier(AbstractCapability):
         def __init__(self) -> None:
@@ -149,10 +154,11 @@ def _barrier(window: str):
                     _wait_for_a_kill("submission persisted, the graph has not finalised")
             if window == "C1" and self.seen_models == 1:
                 _wait_for_a_kill("after_model_request, before the tool cycle")
-            if window == "C4" and self.seen_models >= 2:
+            if window == "C4" and self.seen_models >= kill_after:
                 # The snapshot for the cycle that just settled has been written by now; what has not
-                # happened is the run ending.
-                _wait_for_a_kill("after the settled cycle, before the run ends")
+                # happened is the run ending. How many cycles to let through is the case's business: a
+                # kill that has to land **after** a submission needs more than the first one.
+                _wait_for_a_kill(f"after {kill_after} settled request(s), before the run ends")
             return response
 
         async def before_tool_execute(self, ctx, *, call, tool_def, args):
@@ -318,8 +324,8 @@ async def _run_child(window: str, control: Path, workspace: Path, script: dict,
         NodeRequest(execution_id=script["node"], task=script["task"], workspace=workspace,
                     max_requests=8, trace=control / "trace.jsonl", recovery=recover),
         model=FunctionModel(model),
-        capabilities=((_barrier(window), *context, here) if barrier_first
-                      else (*context, here, _barrier(window))),
+        capabilities=((_barrier(window, script), *context, here) if barrier_first
+                      else (*context, here, _barrier(window, script))),
         recovery_store=control)
     _write_outcome(control, outcome)
 

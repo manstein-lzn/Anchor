@@ -324,12 +324,21 @@ async def assess(store: FileStepStore, ref: RecoveryRef) -> Verdict:
             effects=every, events=kinds, budget=ref.budget)
 
     # ── 3. It already submitted. Nothing to resume, and asking again is the thing to avoid. ──
-    if snapshot is not None and _submitted(snapshot):
+    #
+    # **The recorded fact, not the history's text.** The history holds the observation the model saw, and
+    # the marker appears in it whether or not the protocol accepted it: a command that printed the marker
+    # and exited 1 was reported as finished here, with the refusal as its submission.
+    try:
+        fact = read_completion_fact(Path(ref.store), ref.node)
+    except InvalidReference as exc:
+        return Verdict("invalid", str(exc), effects=every, events=kinds, snapshot=where,
+                       budget=ref.budget)
+    if fact is not None:
         return Verdict(
             "finished",
-            "the newest complete snapshot's history already contains a completion command's result, so "
-            "the work finished: resuming would ask the model again and could run the submission a second "
-            "time. Read the result rather than restarting.",
+            f"the completion protocol accepted a {fact.kind} for this node in run {fact.run!r}, so the "
+            f"work finished: resuming would ask the model again and could run the submission a second "
+            f"time. Read the result rather than restarting.",
             effects=every, events=kinds, snapshot=where, budget=ref.budget)
 
     # ── 4. Everything settled. Continue only if the snapshot actually covers it. ──
@@ -380,61 +389,82 @@ async def continued_messages(store: FileStepStore, ref: RecoveryRef) -> list[Any
             f"{ref.run!r} has no complete snapshot to continue from: {exc}") from exc
 
 
-def already_finished(snapshot: Any) -> tuple[str, str | None]:
+@dataclass(frozen=True)
+class CompletionFact:
+    """**The completion the normal protocol accepted**, written down as a fact rather than as text.
+
+    Exists because recovery cannot re-derive this. A snapshot's history holds a *rendered observation* —
+    `<returncode>1</returncode><output>COMPLETE_TASK…</output>` — and a scanner looking for the marker in
+    it cannot tell an accepted completion from a command that printed the marker and then failed. It did
+    not: a command that printed the marker and exited 1, which `read_completion` refuses and the model is
+    told about, was reported by recovery as `finished` with the refusal text as its submission.
+
+    So the fact is recorded **where the protocol accepts it** (`pydantic_adapter`'s bash tool) and read
+    back whole. One implementation of the protocol, and recovery reads its output rather than guessing at
+    it from a string.
+    """
+
+    node: str
+    run: str
+    kind: str
+    submission: str
+    route: str | None
+    command: str
+    at: str
+
+
+def completion_path(control: Path) -> Path:
+    """Where an accepted completion is written: beside the step store, outside the node's workspace."""
+    return Path(control) / "completion.json"
+
+
+def record_completion(control: Path, fact: CompletionFact) -> None:
+    """Write the accepted completion down, atomically, before anything else can happen.
+
+    Called from inside the tool, at the instant `read_completion` says yes — which is what makes it
+    durable before a kill can land. A node cannot write here: it is the control directory (§17).
+    """
+    path = completion_path(control)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".writing")
+    temporary.write_text(json.dumps(asdict(fact), sort_keys=True), encoding="utf-8")
+    temporary.replace(path)
+
+
+def read_completion_fact(control: Path, node: str) -> CompletionFact | None:
+    """The accepted completion for a logical node, if the protocol recorded one.
+
+    Returns `None` when there is no fact, and raises `InvalidReference` when the file is unreadable: a
+    completion that cannot be read is not the same as one that never happened.
+    """
+    path = completion_path(control)
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise InvalidReference(f"the recorded completion cannot be read: {exc}") from exc
+    try:
+        fact = CompletionFact(**payload)
+    except TypeError as exc:
+        raise InvalidReference(f"the recorded completion is not a completion: {exc}") from exc
+    # **Bound to the node it names.** One control directory holds one node's record, but the check is
+    # what stops a fact being read under the wrong identity — the same reason references carry a node.
+    return fact if fact.node == node else None
+
+
+def already_finished(control: Path, node: str) -> tuple[str, str | None]:
     """What an attempt that already submitted produced: `(submission, route)`.
 
-    Read out of the history rather than by running anything. A caller handed a `finished` verdict has a
-    result already and needs no model call to collect it — which is the point: the submission is the one
-    action that must not happen twice.
+    From the **recorded fact**, never from the history's text. A caller handed a `finished` verdict has a
+    result already and needs no model call to collect it, which is the point: the submission is the one
+    action that must not happen twice — and handing back a refused command's output as if it were a
+    submission is the other half of the same mistake.
     """
-    from anchor.node.pydantic_adapter import DONE_SENTINEL, ROUTE_SENTINEL
-    for message in getattr(snapshot, "messages", ()) or ():
-        for part in getattr(message, "parts", ()) or ():
-            if getattr(part, "part_kind", "") != "tool-return":
-                continue
-            content = str(getattr(part, "content", ""))
-            lines = content.splitlines()
-            for index, line in enumerate(lines):
-                stripped = line.strip()
-                if stripped == DONE_SENTINEL:
-                    return _after(lines[index + 1:]), None
-                if stripped.startswith(ROUTE_SENTINEL):
-                    return (_after(lines[index + 1:]),
-                            stripped.split(":", 1)[1].strip() or None)
-    return "", None
-
-
-def _after(lines: list[str]) -> str:
-    """The summary that follows a completion marker, without the observation's closing tag.
-
-    The tool result is wrapped as `<returncode>…</returncode><output>…</output>`, so the last line after
-    the marker is the wrapper and not part of what the node said. The live path takes the summary from
-    the CLI's own output; this path takes it from the history, and the two have to agree or a resumed
-    attempt reports a different submission from the one it actually made.
-    """
-    kept = [line for line in lines]
-    while kept and (not kept[-1].strip() or kept[-1].strip().startswith("</")):
-        kept.pop()
-    return "\n".join(kept).strip()
-
-
-def _submitted(snapshot: Any) -> bool:
-    """Whether the history shows a completion command that was accepted.
-
-    Read from the tool results in the snapshot, which is where the sentinel the CLI printed ends up. The
-    framework's own `run_completed` is not usable here: this node's success path leaves the run before it
-    can be emitted, and a check that waited for it would call every finished run unfinished.
-    """
-    from anchor.node.pydantic_adapter import DONE_SENTINEL, ROUTE_SENTINEL
-    for message in getattr(snapshot, "messages", ()) or ():
-        for part in getattr(message, "parts", ()) or ():
-            if getattr(part, "part_kind", "") != "tool-return":
-                continue
-            content = str(getattr(part, "content", ""))
-            for line in content.splitlines():
-                if line.strip() == DONE_SENTINEL or line.strip().startswith(ROUTE_SENTINEL):
-                    return True
-    return False
+    fact = read_completion_fact(Path(control), node)
+    if fact is None:
+        return "", None
+    return fact.submission, fact.route
 
 
 def _settled_ids(effects: tuple[tuple[str, str, str], ...]) -> list[str]:
