@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+
+from pydantic_ai.capabilities import AbstractCapability
 import re
 import asyncio
 import json
@@ -118,11 +120,44 @@ def _report_window(window: str, where: str) -> None:
         os.write(fd, f"{window}@{where}\n".encode("utf-8"))
 
 
-def _barrier(window: str, script: dict, record: Any = None, control: Path | None = None):
+def _summariser(control: Path, constraint: str):
+    """A deterministic summariser: it summarises **only what is in its input**, and counts itself.
+
+    §78 asks for a double that gives a deterministic summary for the constraints actually present, and
+    forbids hard-coding the right answer — so the summary is assembled out of the input's own lines and
+    nothing else. Its calls are appended to a file, because a summary is a paid request and the budget
+    question (B5) is whether it is counted against the same allowance as the node's own model.
+    """
+    from pydantic_ai.messages import ModelResponse
+    from pydantic_ai.messages import TextPart
+    from pydantic_ai.models.function import FunctionModel
+
+    log = control / "summariser-calls.log"
+
+    def summarise(messages: Any, info: Any) -> Any:
+        with log.open("a", encoding="utf-8") as handle:
+            handle.write("call\n")
+        text = "\n".join(str(getattr(part, "content", ""))
+                         for message in messages
+                         for part in (getattr(message, "parts", ()) or ()))
+        kept = [line.strip() for line in text.splitlines()
+                if constraint and constraint in line]
+        body = "SUMMARY. " + (" ".join(kept[:4]) if kept else "no constraint present in the input")
+        return ModelResponse(parts=[TextPart(content=body)])
+
+    return FunctionModel(summarise)
+
+
+#: Windows whose barrier has to land **after** the framework's own write, which means registering it
+#: **before** step persistence. See the note in `_run_child`: the two hook directions differ.
+BEFORE_PERSISTENCE_WINDOWS = frozenset({"C1", "C4", "C5", "B1", "B2-checkpoint", "B3-terminal"})
+
+
+class Barrier(AbstractCapability[Any]):
     """The capability that stops the node at the chosen boundary.
 
-    The four tool-related hooks are not interchangeable and the boundaries they give are not the same
-    ones people assume. Measured on this build:
+    The four tool-related hooks are not interchangeable and the boundaries they give are not the same ones
+    people assume. Measured on this build:
 
         after_model_request   tool_call_started is NOT yet in the ledger
         before_tool_execute   tool_call_started IS in the ledger, the command has not run
@@ -130,72 +165,125 @@ def _barrier(window: str, script: dict, record: Any = None, control: Path | None
                               no terminal record
 
     Which is why C1 pauses in the first, C2 in the second, and C3 between the handler and its return.
+
+    **The capability's position decides which side of a write a hook lands on**, because `before_*` hooks
+    run in registration order and `after_*` hooks run in reverse. A case that needs to see the framework's
+    own write goes first in the tuple; one that needs to see the state before it goes last.
+
+    The compaction-shaped cases carry an extra condition: they are armed only once the record shows a
+    **real** compaction, because a pause that lands in an ordinary conversation proves nothing about
+    compaction — which is what the first version of B1 did.
     """
-    from pydantic_ai.capabilities import AbstractCapability
 
-    # How many settled cycles to let through before pausing. Two by default — one command's turn and the
-    # request that follows it — and a case whose kill has to land **after** a submission says so rather
-    # than hoping the boundary falls in the right place.
-    kill_after = int(script.get("kill_after_models", 2))
+    def __init__(self, window: str, script: dict, record: Any = None,
+                 control: Path | None = None) -> None:
+        self.window = window
+        self.script = script
+        self.record = record
+        self.control = control
+        self.seen_models = 0
+        self.seen_tools = 0
+        self.since_compaction = 0
+        self.models_at_compaction = 0
+        #: How many settled cycles to let through before pausing. Two by default — one command's turn and
+        #: the request that follows it — and a case whose kill has to land *after* a submission says so
+        #: rather than hoping the boundary falls in the right place.
+        self.kill_after = int(script.get("kill_after_models", 2))
 
-    class Barrier(AbstractCapability):
-        def __init__(self) -> None:
-            self.seen_models = 0
-            self.seen_tools = 0
-            self.since_compaction = 0
+    # ── compaction-shaped cases ──────────────────────────────────────────────────────────────────
 
-        async def after_model_request(self, ctx, *, request_context, response):
-            self.seen_models += 1
-            if window == "A6":
-                # **After the protocol has accepted a submission, before the graph records anything.**
-                # Read from the recorded **fact** rather than from the history's text: the marker is in
-                # the history whether or not the protocol accepted it, which is the mistake R1 was.
-                from anchor.node.recovery import read_completion_fact
-                node_id = script.get("node", "")
-                if control is not None and read_completion_fact(control, node_id) is not None:
-                    _wait_for_a_kill("submission persisted, the graph has not finalised")
-            if window == "B1" and record is not None and len(record.compactions) > 0:
-                # **Stage evidence, not a turn count.** The pause has to land after a **real**
-                # compaction and after a checkpoint that postdates it — so it waits for a summariser call
-                # to appear in the record, then lets one more settled cycle through. A barrier that
-                # counted requests instead fired on a history that had not been compacted at all.
-                self.since_compaction += 1
-                if self.since_compaction >= 2:
-                    _wait_for_a_kill("compaction done, a later checkpoint is on disk")
-            if window == "C1" and self.seen_models == 1:
-                _wait_for_a_kill("after_model_request, before the tool cycle")
-            if window == "C4" and self.seen_models >= kill_after:
-                # The snapshot for the cycle that just settled has been written by now; what has not
-                # happened is the run ending. How many cycles to let through is the case's business: a
-                # kill that has to land **after** a submission needs more than the first one.
-                _wait_for_a_kill(f"after {kill_after} settled request(s), before the run ends")
-            return response
+    def _compacted(self) -> bool:
+        """Whether a real compaction has happened, remembering where the request count stood."""
+        if self.record is None or not self.record.compactions:
+            return False
+        if not self.models_at_compaction:
+            self.models_at_compaction = self.seen_models
+        return True
 
-        async def before_tool_execute(self, ctx, *, call, tool_def, args):
-            self.seen_tools += 1
-            if window == "C2" and self.seen_tools == 1:
-                _wait_for_a_kill("tool_call_started persisted, command not executed")
-            return args                                     # must be returned; None breaks the call
+    def _pause_for_compaction_case(self) -> bool:
+        """The model-side compaction windows, in one place so the hook stays readable."""
+        if self.window == "B3-started" or self.window == "B2-before-compaction" or \
+                self.window == "B3-effect":
+            return False                                      # armed in the tool hooks instead
+        if not self._compacted():
+            return False
+        if self.window == "B2-checkpoint":
+            return self.seen_models >= self.models_at_compaction + 2
+        if self.window == "B1":
+            self.since_compaction += 1
+            return self.since_compaction >= 2
+        return False
 
-        async def after_tool_execute(self, ctx, *, call, tool_def, args, result):
-            # **Reached only because this capability is registered before `StepPersistence`.** Hooks run
-            # in a fixed order and the framework's own runs after this one when it is registered later:
-            # measured both ways, and registering it after gave a hook where the terminal record had not
-            # been written yet. Registered first, this is the instant the plan's C5 asks about — the
-            # tool's terminal record is in the ledger and the snapshot for this cycle is not.
-            if window == "C5" and self.seen_tools == 2:
-                _wait_for_a_kill("terminal effect record written, snapshot not yet")
-            return result
+    def _pause_for_compaction_tool_case(self) -> bool:
+        """The tool-side compaction windows: armed only once a real compaction has happened."""
+        if self.window in ("B2-before-compaction",):
+            return True                                       # deliberately before any compaction
+        if self.window in ("B2-after-compaction", "B3-started", "B3-effect", "B3-terminal"):
+            return self._compacted()
+        return False
 
-        async def wrap_tool_execute(self, ctx, *, call, tool_def, args, handler):
-            result = await handler(args)
-            if window == "C3" and self.seen_tools == 2:
-                # The counter command is the first call; this is the pause after *its* effect and
-                # before the framework writes the terminal record for it.
-                _wait_for_a_kill("side effect done, terminal record not written")
-            return result
+    # ── the hooks ─────────────────────────────────────────────────────────────────────────────────
 
-    return Barrier()
+    async def after_model_request(self, ctx, *, request_context, response):
+        self.seen_models += 1
+        if self._pause_for_compaction_case():
+            _wait_for_a_kill("compaction done, a later checkpoint is on disk")
+        if self.window == "A6":
+            # **After the protocol has accepted a submission, before the graph records anything.** Read
+            # from the recorded **fact** rather than from the history's text: the marker is in the history
+            # whether or not the protocol accepted it, which is the mistake R1 was.
+            from anchor.node.recovery import read_completion_fact
+            node_id = self.script.get("node", "")
+            if self.control is not None and read_completion_fact(self.control, node_id) is not None:
+                _wait_for_a_kill("submission persisted, the graph has not finalised")
+        if self.window == "C1" and self.seen_models == 1:
+            _wait_for_a_kill("after_model_request, before the tool cycle")
+        if self.window == "C4" and self.seen_models >= self.kill_after:
+            # The snapshot for the cycle that just settled has been written by now; what has not happened
+            # is the run ending. How many cycles to let through is the case's business: a kill that has to
+            # land *after* a submission needs more than the first one.
+            _wait_for_a_kill(f"after {self.kill_after} settled request(s), before the run ends")
+        return response
+
+    async def before_tool_execute(self, ctx, *, call, tool_def, args):
+        self.seen_tools += 1
+        if self.window == "C2" and self.seen_tools == 1:
+            _wait_for_a_kill("tool_call_started persisted, command not executed")
+        if self._pause_for_compaction_tool_case() and self.window in ("B2-after-compaction",
+                                                                     "B2-before-compaction"):
+            _wait_for_a_kill("compaction happened, the next command has not run")
+        if self._pause_for_compaction_tool_case() and self.window == "B3-started":
+            _wait_for_a_kill("after a compaction: started recorded, the command has not run")
+        return args                                       # must be returned; None breaks the call
+
+    async def after_tool_execute(self, ctx, *, call, tool_def, args, result):
+        # **Reached only because this capability is registered before `StepPersistence`.** Hooks run in a
+        # fixed order and the framework's own runs after this one when it is registered later: measured
+        # both ways, and registering it after gave a hook where the terminal record had not been written.
+        # Registered first, this is the instant C5 asks about — the terminal record is in the ledger and
+        # the snapshot for this cycle is not.
+        if self.window == "C5" and self.seen_tools == 2:
+            _wait_for_a_kill("terminal effect record written, snapshot not yet")
+        if self.window == "B3-terminal" and self._pause_for_compaction_tool_case():
+            _wait_for_a_kill("after a compaction: terminal record written, snapshot not yet")
+        return result
+
+    async def wrap_tool_execute(self, ctx, *, call, tool_def, args, handler):
+        result = await handler(args)
+        if self.window == "C3" and self.seen_tools == 2:
+            # The counter command is the first call; this is the pause after *its* effect and before the
+            # framework writes the terminal record for it.
+            _wait_for_a_kill("side effect done, terminal record not written")
+        if self.window == "B3-effect" and self._pause_for_compaction_tool_case():
+            _wait_for_a_kill("after a compaction: effect done, terminal record not written")
+        return result
+
+
+def _barrier(window: str, script: dict, record: Any = None, control: Path | None = None) -> Any:
+    """The barrier for one window. A factory so the class itself is not a closure with a dozen branches."""
+    return Barrier(window, script, record, control)
+
+
 
 
 def _write_outcome(control: Path, outcome: Any = None) -> None:
@@ -397,7 +485,12 @@ async def _run_child(window: str, control: Path, workspace: Path, script: dict,
         from anchor.node.context import Budget as ContextBudget, Record, context_capabilities, remember
         record = Record(control / "kept", limit_bytes=int(script.get("record_bytes", 1000000)))
         got["record"] = record
-        context = context_capabilities(ContextBudget(**script.get("budget", {})), record=record)
+        context = context_capabilities(
+            ContextBudget(**script.get("budget", {})), record=record,
+            # A summariser only when the case is about it: B2/B3/B5 and the compaction cases need the
+            # summarising path, and a case without one is measuring the window fallback on purpose.
+            summarizer=(_summariser(control, str(script.get("constraint", "")))
+                        if script.get("summariser") else None))
         remember(context, script["task"], "", script.get("instructions", ""))
 
     outcome = await run_node(
@@ -414,18 +507,6 @@ async def _run_child(window: str, control: Path, workspace: Path, script: dict,
 
 # ── the parent ────────────────────────────────────────────────────────────────────────────────────
 
-#: The counter command: atomic, in the sandbox, and it writes a marker so the effect is visible even
-#: without reading the number. `>>` after a `flock` is not needed for a test that runs one command.
-#: A command that is still running when the host dies, and says so afterwards if it survived.
-#: A command that is still running when the host dies, and says so afterwards **if it survived**.
-#:
-#: It announces itself by writing a file, because the handshake has to come from inside the
-#: sandbox: `bwrap` does not pass an inherited pipe in, and the whole question is whether this
-#: process keeps going after the process that started it is gone. The parent waits for that file
-#: — a handshake, not a sleep — and kills the host the moment it appears.
-#: Windows whose barrier has to land **after** the framework's own write, which means registering it
-#: **before** step persistence. See the note in `_run_child`: the two hook directions differ.
-BEFORE_PERSISTENCE_WINDOWS = frozenset({"C1", "C4", "C5"})
 
 SURVIVOR_SECONDS = 8
 SURVIVOR = ("printf 'started\\n' > started.log; sleep %d; "
@@ -1047,7 +1128,7 @@ def run_b1(root: Path, timeout: float) -> Evidence:
                          "keep_messages": 2},
               # Enough for the work twice over, so the continuation finishes rather than running out
               # half way and making the assertion about a budget that was never the subject here.
-              "max_requests": 40, "record_bytes": 60000,
+              "max_requests": 40, "record_bytes": 60000, "summariser": True,
               "staged": True, "until": 10, "step": STEP,
               "constraint": constraint,
               "then": 'anchor-done --summary "all steps done"'}

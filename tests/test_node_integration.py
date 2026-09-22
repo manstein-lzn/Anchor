@@ -22,7 +22,7 @@ pytest.importorskip("pydantic_ai_harness", reason="the harness is not installed 
 
 from anchor.node import COMPLETED, NodeRequest                        # noqa: E402
 from anchor.node.context import (                                                  # noqa: E402
-    Budget, Record, context_capabilities,
+    Record, context_capabilities,
 )
 from anchor.node.pydantic_adapter import run_node                                  # noqa: E402
 from anchor.node.recovery import open_store           # noqa: E402
@@ -281,7 +281,7 @@ def test_b7_a_submission_with_persistence_and_context_stops_the_rest(tmp_path):
     from pydantic_ai.messages import ModelResponse, ToolCallPart
     from pydantic_ai.models.function import FunctionModel
 
-    from anchor.node.context import Budget as ContextBudget, Record, context_capabilities, remember
+    from anchor.node.context import Budget as ContextBudget, remember
     from anchor.node.recovery import RecoveryRef, already_finished, assess
 
     workspace = tmp_path / "ws"
@@ -315,48 +315,23 @@ def test_b7_a_submission_with_persistence_and_context_stops_the_rest(tmp_path):
     assert asyncio.run(open_store(control).list_runs()), "StepPersistence was not in this execution"
     assert already_finished(control, "b7")[0] == "mid"
 
-    # And the reference hands the result back without asking the model again.
+    # And the reference hands the result back without asking the model again — through a **new process**
+    # running the node's own entry point, which is what "recovery" means here rather than a second call
+    # to the assessment.
     runs = asyncio.run(open_store(control).list_runs())
-    verdict = asyncio.run(assess(open_store(control),
-                                 RecoveryRef(node=runs[-1].agent_name, run=runs[-1].run_id,
-                                             store=str(control))))
+    this = runs[-1]
+    ref = RecoveryRef(node=this.agent_name, run=this.run_id, store=str(control))
+    verdict = asyncio.run(assess(open_store(control), ref))
     assert verdict.action == "finished", verdict.because
 
+    from scripts.recovery_windows import _ask_once  # noqa: PLC0415
 
-def test_b7_a_submission_in_the_middle_of_a_response_still_stops_the_rest(tmp_path):
-    """**B7。** 单响应多工具调用、中途有效提交、随后还有命令 ✓——提交后命令**永不执行** ✓，
-    串行 ✓，恢复不额外请求模型 ✓、不重复提交 ✓。
-
-    这一条在 01 已经有测试 ✓；这里要的是它在**开着上下文与持久化**时仍然成立 ✓。
-    """
-    from pydantic_ai.messages import ModelResponse, ToolCallPart
-    from pydantic_ai.models.function import FunctionModel
-
-    workspace = tmp_path / "ws"
-    workspace.mkdir()
-    record = Record(tmp_path / "control" / "kept")
-    capabilities = context_capabilities(Budget(window=200_000, input_target=150_000),
-                                        record=record)
-    calls = {"n": 0}
-
-    def model(messages, info):
-        calls["n"] += 1
-        return ModelResponse(parts=[
-            ToolCallPart(tool_name="bash", args={"command": "printf 'before\\n' > before.txt"}),
-            ToolCallPart(tool_name="bash", args={"command": 'anchor-done --summary "mid"'}),
-            ToolCallPart(tool_name="bash", args={"command": "printf 'after\\n' > after.txt"}),
-        ])
-
-    outcome = asyncio.run(run_node(
-        NodeRequest(execution_id="b7", task="submit in the middle", workspace=workspace,
-                    max_requests=4, trace=tmp_path / "trace.jsonl"),
-        model=FunctionModel(model), capabilities=capabilities))
-
-    assert outcome.status == COMPLETED, outcome.reason
-    assert (workspace / "before.txt").is_file(), "the command before the submission did not run"
-    assert not (workspace / "after.txt").exists(), "a command after the submission ran"
-    assert outcome.model_requests == 1, "the response did not end at the submission"
-    assert calls["n"] == 1
+    script = {"window": "B7", "node": "b7", "run_id": "b7", "task": "t", "commands": []}
+    recovered = _ask_once(control, ref.encode(), script)
+    assert recovered.get("status") == COMPLETED, recovered
+    assert recovered.get("model_requests") == 0, "recovery asked the model again"
+    assert recovered.get("submission") == "mid", "recovery did not hand back the submission"
+    assert calls["n"] == 1, "the model was called a second time"
 
 
 def test_b8_an_op_in_a_graph_does_not_need_any_of_this(tmp_path):

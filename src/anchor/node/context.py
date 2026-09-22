@@ -483,10 +483,18 @@ class _CountedSummariser(WrapperModel):
     #: paid request and an estimate of its size is not an invoice — the record has to let a reader tell
     #: the two apart.
     usage: list[dict[str, Any]] = field(default_factory=list)
+    #: Called **before** each summariser request, so the cost can be charged against the same allowance as
+    #: the node's own model. §65's B5 asks for the kinds to be counted apart and share one declared total;
+    #: a summary is a paid request, and a budget that does not see it is not a total.
+    charge: Any = None
 
     async def request(self, messages: Any, model_settings: Any,
                       model_request_parameters: Any) -> Any:
         self.calls += 1
+        if self.charge is not None:
+            # Charged before the request, not after: a summary that never comes back still cost one, and
+            # discovering that afterwards is how a spent allowance gets overspent.
+            self.charge()
         try:
             response = await super().request(messages, model_settings, model_request_parameters)
         except Exception as exc:                              # noqa: BLE001 - recorded, then re-raised
@@ -503,12 +511,18 @@ class WithinBudget(AbstractCapability):
 
     Two strategies, in this order and only these two:
 
-    - `SlidingWindowCompaction`, which costs nothing and preserves tool-call/return pairing;
-    - `SummarizingCompaction`, which costs a model call and keeps the gist of what was dropped.
+    - `SummarizingCompaction` — **first, when one is configured** — which costs a model call and keeps the
+      gist of what was dropped;
+    - `SlidingWindowCompaction`, which costs nothing and preserves tool-call/return pairing.
 
-    The deterministic one goes first so that the common case — a long conversation of ordinary turns —
-    never pays for a summary. The summary is for the case that matters: constraints stated early, whose
-    loss is not recoverable by reading anything later.
+    **The order is the whole decision**, because `_compact_once` stops at the first strategy that actually
+    reduces the history. This used to be the other way round, on the reasoning that the common case should
+    not pay for a summary — and the measured consequence was that the summariser **never ran at all**: a
+    full G2 run's record showed four compactions and every one of them `SlidingWindowCompaction`, so the
+    constraints stated early — the thing the summary exists for, whose loss is not recoverable by reading
+    anything later — were simply dropped. A caller that does not want to pay does not configure a
+    summariser; a caller that does has said the gist matters, and the window is then the fallback for
+    when summarising does not reduce enough on its own.
 
     `receipts` is on for both. A receipt tells the model that its memory before some point is
     secondhand, which is both more honest than a silent cut and more useful — a model that knows it may
@@ -516,29 +530,37 @@ class WithinBudget(AbstractCapability):
     """
 
     def __init__(self, budget: Budget, record: Record | None = None,
-                 summarizer: Any = None, force: bool = False) -> None:
+                 summarizer: Any = None, force: bool = False, charge: Any = None) -> None:
         self.budget = budget
         self.record = record
         self.force = force
         self.summariser: _CountedSummariser | None = None
         if summarizer is not None:
-            self.summariser = _CountedSummariser(summarizer)
-        self.strategies: list[Any] = [SlidingWindowCompaction(
-            max_tokens=budget.input_target,
-            max_messages=max(budget.keep_messages * 4, 32),
-            keep_messages=budget.keep_messages,
-            # The task and the rules arrive in the first user message; a window that drops it has
-            # dropped the assignment.
-            preserve_first_user_message=True,
-            receipts=True)]
+            self.summariser = _CountedSummariser(summarizer, charge=charge)
+        # **The summariser goes first, and the window is the fallback.**
+        #
+        # `_compact_once` stops at the first strategy that actually reduces the history, so the order is
+        # the whole decision. With the window first it always won — it reduces more or less anything — and
+        # the summariser never ran at all: a G2 record over a full run showed four compactions and every
+        # one of them `SlidingWindowCompaction`. Dropping work is the fallback; summarising it first is
+        # what keeps the constraints and the stage results that a window would have discarded.
+        self.strategies: list[Any] = []
         if self.summariser is not None:
             self.strategies.append(SummarizingCompaction(
                 model=self.summariser,
                 max_tokens=budget.input_target,
                 keep_tokens=max(budget.input_target // 3, 1),
                 keep_messages=budget.keep_messages,
+                # The task and the rules arrive in the first user message; a window that drops it has
+                # dropped the assignment.
                 preserve_first_user_message=True,
                 receipts=True))
+        self.strategies.append(SlidingWindowCompaction(
+            max_tokens=budget.input_target,
+            max_messages=max(budget.keep_messages * 4, 32),
+            keep_messages=budget.keep_messages,
+            preserve_first_user_message=True,
+            receipts=True))
 
     def cost(self, messages: list[ModelMessage], request_context: Any = None) -> int:
         """What one request costs: the history, plus what goes with every request.
@@ -765,7 +787,8 @@ def remember(capabilities: tuple[Any, ...], task: str, instructions: str,
 
 
 def context_capabilities(budget: Budget, record: Record | None = None, summarizer: Any = None,
-                         force: bool = False, observe_chars: int = 8_000) -> tuple[Any, ...]:
+                         force: bool = False, observe_chars: int = 8_000,
+                         charge: Any = None) -> tuple[Any, ...]:
     """The composition, in one place: what a bound context node is made of.
 
     Two capabilities and no more.
@@ -777,7 +800,8 @@ def context_capabilities(budget: Budget, record: Record | None = None, summarize
     `record.arriving`. The two numbers together are the evidence — one says the model was sent a
     bounded history, the other says what that history used to be.
     """
-    chosen: list[Any] = [WithinBudget(budget, record=record, summarizer=summarizer, force=force)]
+    chosen: list[Any] = [WithinBudget(budget, record=record, summarizer=summarizer, force=force,
+                                      charge=charge)]
     if record is not None:
         chosen.append(Watching(record, observe_chars=observe_chars))
     return tuple(chosen)
