@@ -25,7 +25,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from anchor.node import NodeRequest
+from anchor.node import NodeRequest, node_key
 from anchor.node.op_runtime import run_op_node
 from anchor.node.recovery import RecoveryRef, open_store
 
@@ -165,18 +165,14 @@ def _resumed_token(control: Path | None, node_id: str) -> str:
         return ""
     try:
         runs = [item for item in asyncio.run(open_store(Path(control)).list_runs())
-                if item.agent_name == _key(node_id)]
+                if item.agent_name == node_key(node_id)]
     except Exception:                                    # noqa: BLE001 - no store, so nothing to point at
         return ""
     if not runs:
         return ""
     newest = sorted(runs, key=lambda item: item.started_at)[-1]
-    return RecoveryRef(node=_key(node_id), run=newest.run_id, store=str(control)).encode()
+    return RecoveryRef(node=node_key(node_id), run=newest.run_id, store=str(control)).encode()
 
-
-def _key(node_id: str) -> str:
-    """A node's name as the store spells it. One rule, and it lives on the contract that defines it."""
-    return NodeRequest(execution_id=node_id, task="").node_key
 
 
 def _spelled(status: str, command_missing: bool) -> str:

@@ -36,6 +36,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from anchor.simple import graph as graph_module
+from anchor.node import node_key
 from anchor.node.model_bridge import model_for, scripted_models
 from anchor.simple.node_bridge import Node
 
@@ -747,16 +748,40 @@ def _asked_to_stop(asked: Callable[[], str | None] | None, state: RunState,
     return state
 
 
-def _settled_already(asked: Callable[[str], tuple[str, str | None] | None] | None,
-                     step: _Step) -> NodeResult | None:
+def _completion_of(control: Path, node_id: str) -> tuple[str, str | None] | None:
+    """What this node's record says it submitted, or None when it says nothing.
+
+    A completion that cannot be **read** is not the same as one that never happened: `read_completion_fact`
+    raises for a corrupt file, and that must stop the run rather than look like "no fact, run it again" —
+    which is the one reading that would repeat work.
+    """
+    from anchor.node.recovery import read_completion_fact
+
+    control = Path(control)
+    # The store's spelling, which is not always the graph's (`work/draft` is refused by the framework).
+    key = node_key(node_id)
+    if not (control / key).exists():
+        return None
+    fact = read_completion_fact(control / key, key)
+    return None if fact is None else (fact.submission, fact.route)
+
+
+def _settled_already(step: _Step, control: Path,
+                     asked: Callable[[str], tuple[str, str | None] | None] | None = None,
+                     ) -> NodeResult | None:
     """The pass to record **without running the node**, when its record says it already submitted.
 
     Split out so `run` stays readable: one decision, one place, and the branch it replaces was four lines
     of result-building in the middle of the scheduler.
+
+    **The node's own completion is read here, not handed in.** §9 asks for this to be the scheduler's
+    read rather than a test argument: a node that submitted and was killed before the graph recorded its
+    pass leaves a completion fact behind, and the only thing that knows where is the node — which is why
+    the path is `control/<node>` and the fact is looked for by the name the *store* uses for it. A caller
+    that cannot be reached this way (no control directory) is still supported through `asked`, which is
+    what a test harness uses; production callers pass neither and get the read.
     """
-    if asked is None:
-        return None
-    settled = asked(step.node_id)
+    settled = asked(step.node_id) if asked is not None else _completion_of(control, step.node_id)
     if settled is None:
         return None
     submission, route = settled
@@ -784,13 +809,17 @@ def run(workspace: str | Path, *, objective: str | None = None, config_path: str
     sandbox command or a model call and nothing here can reach into it, so a stop lands when the node
     that is running finishes. Saying so is better than a button that appears not to work.
 
-    **`already_submitted` is the seam a node's own record needs.** A node that submitted and was killed
-    before this loop recorded its pass leaves a completion behind, and nothing in the loop could ask: the
-    gap between `agent.run(task=...)` returning and `_record(...)` has no hook, so the scheduler ran the
-    node again from the start. Given this callable, the loop asks **before** running a node, records the
-    pass from what it is told, and does not run the node at all. It answers `(submission, route)` for a
-    node that has finished, and `None` for one that has not — and it is the caller's, because where a
-    node's record lives is the node's business and not the graph's.
+    **A node that already submitted is not run again.** The gap between a node returning and this loop
+    recording its pass has no hook, so a kill in that gap used to leave a finished node looking like it
+    had never started. Before a node is run, its own completion fact is read from `control/<node>` and the
+    pass is recorded from what the fact says (§9). `already_submitted` overrides that read for a caller
+    whose nodes are not on this filesystem — a test harness, and until now the only caller — and
+    production passes neither.
+
+    **And a resume reads both records.** The graph's pass record is what this loop wrote; the node's
+    completion fact is what the node wrote. When they disagree about whether a node finished, the
+    disagreement is not resolved in the graph's favour: the run stops and says so, because the two
+    readings lead to opposite actions and guessing between them is how a pass gets run twice.
     """
 
     workspace = Path(workspace).resolve()
@@ -835,6 +864,25 @@ def run(workspace: str | Path, *, objective: str | None = None, config_path: str
                           "stopped_at": unfinished[0], "error": state.error},
                          ensure_ascii=False), flush=True)
         return state
+    # **Both records, and neither trusted over the other.** The graph's pass record says a node had not
+    # submitted — a process that died mid-node, in the ordinary case. The node's own completion fact says
+    # it had. Both cannot be true, and the two readings lead to opposite actions: one would run the node
+    # again, and one would not run it at all. So this stops and says which node, rather than picking — a
+    # guess here is a pass run twice or a pass never run, and the disagreement is worth more than either.
+    disagreement = [node for node in sorted(state.nodes)
+                    if not state.nodes[node].get("submitted")
+                    and _completion_of(run_dir / "control" / node, node) is not None]
+    if disagreement:
+        state.status = "failed"
+        state.error = (f"{', '.join(disagreement)} has a completion fact on disk but the graph's "
+                       f"record says it did not submit. One of the two records is wrong and the two "
+                       f"readings disagree about whether to run the node again, so this run stops "
+                       f"instead of choosing.")
+        state.save(run_dir)
+        print(json.dumps({"run": str(run_dir), "status": state.status,
+                          "stopped_at": disagreement[0], "error": state.error},
+                         ensure_ascii=False), flush=True)
+        return state
     decided = {tuple(key.split("|")): tuple(value) for key, value in state.decided.items()}
     entry = graph.entry()
     back = graph_module.back_edges(graph)
@@ -867,7 +915,10 @@ def run(workspace: str | Path, *, objective: str | None = None, config_path: str
             # **Asked before the node runs.** A node whose completion is already recorded has
             # submitted, and running it again is the duplicate the whole recovery path exists to avoid:
             # the pass is recorded from what the record says instead.
-            settled = _settled_already(already_submitted, step)
+            # **Before the node runs, and with its own directory already known.** A completion fact
+            # left by a killed process is what stops the node being run a second time — the duplicate
+            # the recovery path exists to avoid — so this is read before anything is built.
+            settled = _settled_already(step, run_dir / "control" / step.node_id, already_submitted)
             if settled is not None:
                 if not _record(state, graph, run_dir, decided, settled, settle):
                     print(json.dumps({"run": str(run_dir), "status": state.status,

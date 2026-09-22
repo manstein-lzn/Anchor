@@ -103,7 +103,18 @@ class NodeRequest:
         `execution_id` is the Graph's name for this node and is what a caller reads in a record;
         `node_key` is only ever a name for the store.
         """
-        return self.execution_id.replace("/", "__")
+        return node_key(self.execution_id)
+
+
+def node_key(execution_id: str) -> str:
+    """The one rule, for the callers that have a name and not a request.
+
+    The Graph and the store both need this before a request exists — the scheduler reads a node's
+    completion fact before it builds anything — so the rule is a function and the property is a
+    convenience over it. Two copies of `replace("/", "__")` would be two chances to disagree about what
+    a node is called.
+    """
+    return execution_id.replace("/", "__")
 
 
 @dataclass(frozen=True)
