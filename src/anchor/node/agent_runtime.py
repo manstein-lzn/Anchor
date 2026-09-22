@@ -168,10 +168,9 @@ def read_completion(ran: Executed, routes: tuple[str, ...]) -> tuple[str, str, s
     Returns `(kind, message, route)` where kind is `'done'`, `'routed'`, `'refused'` or `''`.
 
     **A command that did not succeed cannot finish a node.** A non-zero exit or a timeout carrying the
-    marker is refused, and that check is the whole reason this is written out rather than shared with
-    the mini path: `SandboxEnvironment._check_finished` tests neither for a route, so a `anchor-route`
-    that exited non-zero still routes there. Changing that is not this package's business — the
-    difference is recorded instead, and this side does it the way the protocol says.
+    marker is refused, and that check is the whole reason this is written out rather than shared.
+    The parser it replaced read the markers and never looked at the exit code first, so an
+    `anchor-route` that died mid-write still routed there; this side does it the way the protocol says.
 
     The marker has to be the **first non-empty line**, exactly. A mention of it halfway through a
     command's output is text the node printed, not a completion.

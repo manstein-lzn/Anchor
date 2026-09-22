@@ -12,8 +12,10 @@ license = {text = "MIT"}
 dependencies = [
     # The agent loop and its model client. Ours is the graph, the workspace and the sandbox; the
     # loop is theirs (MIT), because a loop that cannot be stopped by talking is a property of the
-    # loop and theirs has it.
-    "mini-swe-agent>=2.4,<3",
+    # loop and theirs has it. Pinned to the pair the migration was verified against (ADR-062); the
+    # matrix is in DECISIONS.md and a change to it re-verifies.
+    "pydantic-ai-slim==2.46.0",
+    "pydantic-ai-harness==0.32.0",
     # The literature tools: fetching, and turning what comes back into text.
     "pydantic>=2.7,<3",
     "httpx>=0.27,<1",

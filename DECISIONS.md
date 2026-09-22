@@ -1790,3 +1790,42 @@ a statement about what the new control directory and event format mean for old o
 a `RecoveryRef`. What M4 does carry is the small correctness debt of the split: a docstring in
 `node/__init__.py` still names the two runners as they were before M1, and it is fixed where it is
 found rather than given a milestone of its own.
+
+### M5: the migration is finished, and what it left standing
+
+**Status: complete.** Graph agent nodes run `run_agent_node`, op nodes run `run_op_node`,
+`simple/node_bridge.py` is the whole of what the scheduler knows about either, and
+`src/anchor/simple/agent.py` is deleted together with `mini-swe-agent` in `pyproject.toml`. The
+second completion parser went with the file that held it, which is where the sequencing note above
+said it would.
+
+`pydantic-ai-slim==2.46.0` and `pydantic-ai-harness==0.32.0` moved from
+`requirements/node-verification.txt` into `pyproject.toml`'s runtime dependencies, and
+`requirements/` is gone. The dependency matrix above is now the runtime's own; a change to it
+re-verifies against it rather than against a requirements file beside it.
+
+Two things about the deletion are worth recording because both were deliberate:
+
+- **`tests/test_agent_resume.py` was deleted rather than ported.** It asserted mini's resume
+  semantics — a stale `exit` marker must not be replayed into the model. The mechanism that produced
+  the marker is gone, and the node runtime's answer to that whole class of question is the step
+  store's assessment, which is what `tests/test_node_recovery.py` and `tests/test_node_context.py`
+  cover. Porting the test would have ported a claim about mini.
+- **The comments that name mini stayed.** `op_runtime.py` and `agent_runtime.py` still say what their
+  rules mirror and where those rules came from. That is provenance for code that is still here, not a
+  claim about what runs; deleting the history to look tidy would have made the one deliberate
+  divergence — an op refusing to route on a marker whose command exited non-zero — look arbitrary.
+
+**What the acceptance run left open, and it is not work.** `scripts/recovery_windows.py`'s A6 reports
+`blocked`: the graph's half of "the node submitted but the graph had not recorded it" cannot be
+interrupted where that window wants to interrupt it, because a node that submits makes no further model
+request and the harness gives no hook between `agent.run(...)` returning and `_record(...)`. The seam
+§9 asked for exists regardless — it is `_settled_already`, the scheduler's own read of
+`control/<node>` — and B8 exercises it in a real graph, ending `finished` with `write` and `count` never
+even offered. A6 stays `blocked` because it is honest about where the hook is, not because the read is
+missing.
+
+`AGENT_NODE_MIGRATION_ACCEPTANCE.md` holds the §12 matrix item by item with what each one ran, and the
+boundaries this ADR does not retract: no exactly-once, no power-loss durability, no provider
+window-error coverage beyond a deterministic model, no automatic reconciliation of arbitrary external
+side effects.

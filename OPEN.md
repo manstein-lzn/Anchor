@@ -20,18 +20,19 @@ mini-swe-agent is no longer on any path the scheduler takes. `ARCHITECTURE_AGENT
 the plan (M0–M5) and `AGENT_NODE_VALIDATION_RESULT.md` is what has been measured; the fault matrix runs
 against the new seam and passes, B1–B8 and C1–C9 included.
 
-What is still open, and it is the point of M5:
+**The migration is finished.** M5 landed and `simple/agent.py` is gone, with the second completion
+parser (`_check_finished`) that lived in it, `tests/test_agent_resume.py`, and `mini-swe-agent` out of
+`pyproject.toml`; `pydantic-ai-slim` and `pydantic-ai-harness` moved from
+`requirements/node-verification.txt` into it, at the versions ADR-062 pins. The acceptance run is
+`AGENT_NODE_MIGRATION_ACCEPTANCE.md` — the §12 matrix, 238 tests, and the 26-window fault matrix.
 
-- `simple/agent.py` is **still in the tree and still imported by the tests**, and the second completion
-  parser (`_check_finished`) goes with it. Both are deleted at M5, not at M3 — the order is deliberate
-  and ADR-062 records why: the parser belonged to the path that was being removed, and removing it
-  before the replacement was accepted would have left the default executor unable to finish a node.
-- pydantic-ai moves from `requirements/node-verification.txt` into `pyproject.toml` at M5, with
-  `mini-swe-agent` leaving it.
-- `tests/test_agent_resume.py` and the mini-only assertions elsewhere are deleted at M5 and replaced
-  by tests of the new Node API.
+What is left as a stated boundary rather than as work:
+
 - Historical runs are read-only and are not converted; an old trace is not dressed up as a
   `RecoveryRef` (M4). Old `runs/` records keep being shown by the view and are not re-run.
+- `scripts/recovery_windows.py`'s A6 still reports `blocked`. It is a limit of where the harness lets a
+  hook sit, not a missing seam — §9's read is `_settled_already` and B8 exercises it in a real graph.
+  `AGENT_NODE_MIGRATION_ACCEPTANCE.md` §4 keeps the argument.
 
 ---
 
@@ -83,8 +84,8 @@ to `run_op_node`), `src/anchor/node/` (the node runtime — `__init__.py` is the
 and `adapter` are the agent half, `op_runtime` the op half, `recovery` the node's own state machine),
 `src/anchor/serve.py` (the service), `examples/graphs/` (five checked graphs plus one gated example).
 
-`src/anchor/simple/agent.py` is still there and is nothing the scheduler reaches: it is mini's loop and
-the sandbox helpers, and it is deleted at M5.
+There is no `simple/agent.py` any more; it was mini's loop, and it and `mini-swe-agent` were deleted at
+M5. The sandbox helpers it used to hold live in `src/anchor/runtime/`.
 
 ---
 

@@ -601,7 +601,6 @@ for gone in [m for m in sys.modules if m.split('.')[0] in ('pydantic_ai', 'pydan
     del sys.modules[gone]
 
 from anchor.simple import run as runner
-from anchor.simple import agent as agent_module
 from anchor.runtime import execenv
 
 state = runner.run({str(workspace)!r}, config_path={str(config)!r})
@@ -626,8 +625,7 @@ def test_a13_nothing_on_the_default_path_names_the_framework():
     """
     default = ["src/anchor/simple/run.py", "src/anchor/simple/node_bridge.py",
                "src/anchor/node/model_bridge.py", "src/anchor/node/recovery.py",
-               "src/anchor/simple/agent.py", "src/anchor/simple/graph.py",
-               "src/anchor/runtime/execenv.py", "src/anchor/serve.py"]
+               "src/anchor/simple/graph.py", "src/anchor/runtime/execenv.py", "src/anchor/serve.py"]
 
     for name in default:
         for at, line in enumerate((Path("/root/Anchor") / name).read_text(encoding="utf-8")
