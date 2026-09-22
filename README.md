@@ -237,7 +237,9 @@ What survives of recovery is reading `run.json` back and stepping again — `--r
 `graph.json` a run reads, and `anchor-serve` publishes it and the runs together. Neither is the
 machinery that was removed: there is no lease to reconcile and no version to publish.
 
-`DECISIONS.md` keeps the record of that, including the parts that were mistakes.
+`DECISIONS.md` keeps the record of that, including the parts that were mistakes, and `OPEN.md` holds
+what is still undecided — with the arguments on each side and with what has already been refused, so
+none of it has to be worked out twice.
 
 **Not built yet, as against deliberately absent**, and worth keeping apart when deciding what to do
 next:
