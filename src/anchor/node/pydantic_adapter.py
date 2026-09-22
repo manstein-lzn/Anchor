@@ -97,6 +97,9 @@ class _CountingModel(WrapperModel):
     #: ends is a budget a killed attempt never pays into — measured, by a node that had made three
     #: requests reporting one, because two of them belonged to the attempt that was killed.
     control: Any = None
+    #: The **total** allowance for the logical execution, not this process's share of it. One notion,
+    #: used the same way everywhere, because mixing a remaining figure with a cumulative one is how the
+    #: allowance came to be raised instead of spent.
     allowed: int = 0
 
     async def request(self, messages: Any, model_settings: Any, model_request_parameters: Any) -> Any:
@@ -105,23 +108,25 @@ class _CountingModel(WrapperModel):
         return await super().request(messages, model_settings, model_request_parameters)
 
     def _record(self) -> None:
-        """Write down what has been spent, keeping whatever the store already says.
+        """Write down what has been spent, **keeping the smaller allowance**.
 
-        Merged rather than overwritten: the point of the count is that it survives a process that dies
-        mid-request, so the larger of the two accounts is the true one. A response that never arrives
-        still cost a request, and §38 asks for that to be counted conservatively rather than forgiven.
+        The spending is merged — larger wins, because a process that dies mid-request still spent it —
+        and the allowance is merged the other way, smaller wins. Raising it would let a replay of an old
+        reference, or a request that simply asks for more, buy turns that nobody granted.
+
+        **A failure here propagates.** Recording is the only thing standing between a spent budget and
+        another request, so a store that cannot be written means the request must not be made. Swallowing
+        it, as this did, is how a budget file went to 9/8.
         """
         if self.control is None:
             return
-        try:
-            from anchor.node.recovery import Budget, load_budget, save_budget
-            here = Path(str(self.control))
-            on_disk = load_budget(here)
-            spent = max(self.requests, on_disk.requests_used)
-            save_budget(here, Budget(requests_used=spent,
-                                     requests_allowed=self.allowed or on_disk.requests_allowed))
-        except Exception:                                     # noqa: BLE001 - never fail a request
-            pass
+        from anchor.node.recovery import Budget, load_budget, save_budget
+        here = Path(str(self.control))
+        on_disk = load_budget(here)
+        spent = max(self.requests, on_disk.requests_used)
+        allowed = min(value for value in (self.allowed, on_disk.requests_allowed) if value) \
+            if (self.allowed or on_disk.requests_allowed) else 0
+        save_budget(here, Budget(requests_used=spent, requests_allowed=allowed))
 
 
 @dataclass
@@ -445,6 +450,9 @@ class _Started:
     resumed: list[Any] = field(default_factory=list)
     history: list[Any] | None = None
     conversation: str = ""
+    #: The **total** allowance for the whole logical execution, and what earlier processes spent of it.
+    #: Two cumulative figures, so what is left is a subtraction and never a figure of its own — mixing a
+    #: remaining count with a cumulative one is how `remaining=0` turned into a fresh allowance.
     spending: int = 0
     already: int = 0
     this_run: str = ""
@@ -465,7 +473,13 @@ async def _what_a_previous_attempt_left(request: NodeRequest, capabilities: tupl
     # the whole logical execution rather than a fresh allowance per process — a node killed three times
     # would otherwise spend its budget three times over.
     if recovery_store is not None:
-        started.already = load_budget(Path(recovery_store)).requests_used
+        on_disk = load_budget(Path(recovery_store))
+        started.already = on_disk.requests_used
+        # **The smaller allowance wins**, and the larger spending. A reference must not be able to hand
+        # back an allowance the control directory already says was used, and a directory that has no
+        # allowance of its own takes the caller's.
+        started.spending = (min(value for value in (request.max_requests, on_disk.requests_allowed)
+                                if value) if on_disk.requests_allowed else request.max_requests)
     #: Whether the caller has already arranged persistence. **Where it sits among the capabilities
     #: decides which side of a write a hook lands on**, and the two directions are not the same — a
     #: `before_*` hook registered after it sees the framework's `started` write, while an `after_*` hook
@@ -526,12 +540,13 @@ async def _what_a_previous_attempt_left(request: NodeRequest, capabilities: tupl
         # `replayable` means nothing entered a tool, so the attempt is the first one in effect.
         if verdict.action == "continuable":
             started.history = await continued_messages(started.store, started.ref)
-            # **The allowance is the smaller of the two accounts, and the spending the larger.** §38: a
-            # token must not be able to hand back a budget a control directory says was already spent —
-            # replaying an old reference would otherwise reset the allowance it had used up, which is
-            # exactly what persisting a budget exists to prevent.
-            on_disk = load_budget(Path(started.ref.store))
-            started.spending = max(started.ref.budget.at_most(on_disk).remaining, 0) or request.max_requests
+            # The reference's own figures are merged into the same two cumulative numbers: larger
+            # spending, smaller allowance. Checked **again** here because a reference can arrive with a
+            # spent budget even when the directory looked fine a moment ago.
+            merged = started.ref.budget.at_most(load_budget(Path(started.ref.store)))
+            started.already = max(started.already, merged.requests_used)
+            started.spending = min(value for value in (started.spending, merged.requests_allowed)
+                                   if value) if merged.requests_allowed else started.spending
         if started.store is not None and not has_persistence:
             started.conversation = started.ref.node
             # **A continuation is a new run**, so the attempt that ends up in the store is this one and
@@ -577,19 +592,35 @@ async def run_node(request: NodeRequest, *, model: Any,
     ref, store, spending = started.ref, started.store, started.spending
     this_run = started.this_run
 
+    # **Spent is spent.** The allowance is a total for the logical execution, so what is left is the
+    # subtraction and there is no minimum: a spent budget means this attempt makes no request at all
+    # rather than one more. The old expression both gave a minimum of one and, when the remaining figure
+    # reached zero, replaced the whole allowance with a fresh one — measured, by a budget of 8/8 that
+    # came back 9/8 with a completed status.
+    remaining = max(spending - already, 0)
+    if recovery_store is not None and remaining <= 0:
+        return NodeOutcome(
+            status=BUDGET_EXHAUSTED, model_requests=0, files=_files(request.workspace),
+            reason=f"the allowance for this node is spent ({already}/{spending} requests) — no request "
+                   f"was made and none will be, because a budget that can be exceeded is not a budget",
+            recovery=request.recovery)
+
     counted = _CountingModel(model)
-    if recovery_store is not None:
+    # **A caller that passes only a reference still gets its spending recorded.** The reference names the
+    # control directory; requiring the caller to pass the path as well meant an attempt made through a
+    # reference alone spent requests nobody wrote down.
+    where = recovery_store if recovery_store is not None else (
+        started.ref.store if started.ref is not None else None)
+    if where is not None:
         # Whatever was already spent counts against this attempt too, so the cap is a cap on the whole
         # logical execution and not on each process it happens to run in.
-        counted.control = recovery_store
-        counted.allowed = request.max_requests
+        counted.control = where
+        counted.allowed = spending
         counted.requests = already
     agent = build_agent(counted, instructions=request.instructions,
                         max_retries=spending,
                         capabilities=(*capabilities, *resumed))
-    # **What this process may still spend**, not what the whole execution may: the requests already made
-    # in earlier processes are counted against the same allowance, so the cap survives a restart.
-    limits = UsageLimits(request_limit=max(spending - already, 1))
+    limits = UsageLimits(request_limit=remaining)
 
     wiring: _Wiring | None = None
     run: Any = None

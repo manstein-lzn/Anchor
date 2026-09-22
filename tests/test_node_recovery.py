@@ -19,7 +19,7 @@ pytest.importorskip("pydantic_ai", reason="the optional adapter dependency is no
 pytest.importorskip("pydantic_ai_harness", reason="the harness is not installed here")
 
 from anchor.node.recovery import (                                              # noqa: E402
-    Budget, InvalidReference, RecoveryRef, already_finished, assess, budget_path,
+    Budget, InvalidReference, RecoveryRef, assess, budget_path,
     continued_messages, load_budget, open_store, save_budget,
 )
 from anchor.runtime.sandbox import BubblewrapWorkspaceSandbox                   # noqa: E402
@@ -340,127 +340,61 @@ def test_a4_every_bad_reference_and_broken_file_is_refused_with_a_reason(killed)
     assert "remaining 2" in evidence["because"], evidence["because"]
 
 
-def test_a5_the_budget_agrees_with_the_models_own_count(killed):
-    """**A5。** 真请求、真中断、真重启之后，持久化的预算必须与**模型接收端自己的计数**相符 ✓。
+def test_a5_the_budget_agrees_and_stops_when_spent(killed):
+    """**A5。** 真请求、真中断、真重启，直到额度**耗尽** ✓——两份独立账目逐轮相符 ✓，而耗尽后**零请求** ✓。
 
-    断言的不是本测试预先选定的数字 ✓——那正是 §39 禁止的 ✓——而是**两份独立账目的一致** ✓：
-    模型在请求真正到达的地方自己记一份 ✓（跨进程 ✓），持久化预算记另一份 ✓。
+    断言的不是本测试预先选定的数字 ✓（§39 禁止 ✓），而是**两份独立账目的一致** ✓：模型在请求真正到达的
+    地方自己记一份 ✓（跨进程 ✓），持久化预算记另一份 ✓——**并且**耗尽后的那一次不得再发请求 ✓。
 
-    它抓到两处重复计数 ✓：被 kill 的那次尝试的消耗**从未被记录** ✗（预算只在结束时写 ✓）；修好之后，
-    `model_requests` 又报的是**累计**而非本次 ✗，而 `_reference` 把已经记过的再加一遍 ✗——八次请求
-    对一个起始为二的预算，最后记成了八 ✓。
+    第一版只 kill 一次、遇到 completed 就 break ✓，所以"耗尽"从未被走到 ✓；一个 8/8 的预算会变成 9/8 ✓。
     """
     evidence = killed["A5"]
 
-    assert evidence["verdict"] == "agrees", evidence["because"]
-    # 两份账目相等，且都不是 0——否则「一致」是空的。
-    counted = int(evidence["because"].split("counted ")[1].split(" ")[0])
-    persisted = int(evidence["budget"].split("/")[0])
-    assert counted == persisted, evidence["because"]
-    assert counted > 0, f"nothing was spent, so nothing was checked: {evidence['because']}"
+    assert evidence["verdict"] == "agrees-and-stops", evidence["because"]
+    assert evidence["because"].count("killed=True") >= 2, "fewer than two real kills: " + evidence["because"]
+    assert "budget_exhausted' with 0 request(s)" in evidence["because"], evidence["because"]
+    assert evidence["budget"].split("/")[0] == evidence["budget"].split("/")[1], (
+        f"the allowance was not spent to the end: {evidence['budget']}")
 
 
-# ── R1 · the completion protocol has one implementation, and recovery reads its output ────────────
+def test_r2_a_spent_allowance_makes_no_request_at_all(tmp_path):
+    """**R2。** 额度为 8/8 时，恢复**一次请求都不能发** ✓，也不能把额度变大 ✓。
 
-def _executed(output: str, returncode: int = 0, timed_out: bool = False):
-    """A command's result, shaped the way the sandbox hands one over."""
-    from anchor.runtime.execenv import Executed
-
-    return Executed(output=output, returncode=returncode, timed_out=timed_out)
-
-
-def test_r1_the_protocol_refuses_everything_that_is_not_a_completion():
-    """**R1。** 完成协议只有一个实现 ✓，而它拒绝的东西比"看到标记"多得多 ✓。
-
-    验收用一条「打印标记然后 `exit 1`」的命令复现了恢复把**被拒绝**的提交当成完成 ✓。这组断言把协议
-    该拒绝的每一类都钉住 ✓：非零退出 ✓、超时 ✓、标记出现在输出中间 ✓、非法 route ✓、多出口下的
-    `anchor-done` ✓——以及**有效完成的精确文本** ✓。
+    验收的真实反例 ✓：C4 kill 留下可继续快照 ✓，引用与控制目录都设为 8/8 ✓，新进程调用真实恢复入口 ——
+    修复前模型端新增 **1** 次调用 ✓、结果 `completed` ✓、预算文件变成 **9/8** ✓。
     """
-    from anchor.node.pydantic_adapter import (
-        DONE_SENTINEL, ROUTE_SENTINEL, read_completion,
-    )
+    from scripts.recovery_windows import _ask_once, _kill_at  # noqa: PLC0415
 
-    routes = ("left", "right")
-    marker = f"{DONE_SENTINEL}\nnot a valid submission\n"
-
-    assert read_completion(_executed(marker, returncode=1), ())[0] == "refused", "exit 1 is not a finish"
-    assert read_completion(_executed(marker, timed_out=True), ())[0] == "refused", "a timeout is not one"
-    assert read_completion(_executed(f"noise\n{marker}"), ())[0] == "", "the marker must be the first line"
-    assert read_completion(_executed(f"{ROUTE_SENTINEL}nowhere\nx"), routes)[0] == "refused"
-    assert read_completion(_executed(DONE_SENTINEL + "\nx"), routes)[0] == "refused", \
-        "a node with more than one way out cannot finish with done"
-
-    # And the accepted case, exactly: the submission is what followed the marker and nothing else.
-    kind, submission, route = read_completion(_executed(f"{DONE_SENTINEL}\nthe real summary\n"), ())
-    assert (kind, submission, route) == ("done", "the real summary", None)
-    kind, submission, route = read_completion(_executed(f"{ROUTE_SENTINEL}left\nthe real summary"), routes)
-    assert (kind, submission, route) == ("routed", "the real summary", "left")
-
-
-def test_r1_a_refused_submission_is_not_recovered_as_a_finish(tmp_path):
-    """**R1。** 被协议拒绝的提交，恢复**不得**当成完成 ✓。
-
-    这是验收的复现配方 ✓：一条打印标记、随后 `exit 1` 的命令 ✓。kill 落在它之后、有效的 `anchor-done`
-    之前 ✓。正常路径已经拒绝它 ✓（上面那条测试 ✓），恢复也必须拒绝 ✓——修复前它返回 `finished` ✓，并把
-    拒绝说明当成提交文本交回 ✓。
-    """
-    from scripts.recovery_windows import _kill_at  # noqa: PLC0415
-
-    from anchor.node.pydantic_adapter import DONE_SENTINEL
+    from anchor.node.recovery import Budget
 
     control, workspace = tmp_path / "control", tmp_path / "workspace"
     control.mkdir()
     workspace.mkdir()
-    bad = f'printf "{DONE_SENTINEL}\nnot a valid submission\n"; exit 1'
-    # Two requests: the model's first answer, then the request after the bad command's result. The
-    # submission that follows it never runs, which is what makes this the window the plan asks about.
-    script = {"window": "C4", "node": "r1", "run_id": "r1", "task": "t",
-              "kill_after_models": 2,
-              "commands": [bad, 'anchor-done --summary "the real one"']}
+    script = {"window": "C4", "node": "r2", "run_id": "r2", "task": "t",
+              "history_driven": True, "marker": "EFFECT-", "first": "echo EFFECT-1",
+              "then": 'anchor-done --summary "done"'}
+    killed, _, said, errors = _kill_at(control, workspace, script,
+                                       "after 2 settled request(s), before the run ends", 60)
+    assert killed and said, errors[-400:]
 
-    killed, _, said, errors = _kill_at(control, workspace, script, "x", 60)
-    assert killed and said, f"the process was not held at its barrier: {errors[-400:]}"
-
+    # Spent to the last request, in both places the two accounts live.
+    save_budget(control, Budget(requests_used=8, requests_allowed=8))
+    log = control / "model-calls.log"
+    before = len(log.read_text(encoding="utf-8").splitlines()) if log.exists() else 0
     runs = asyncio.run(open_store(control).list_runs())
     newest = sorted(runs, key=lambda item: item.started_at)[-1]
-    verdict = asyncio.run(assess(open_store(control),
-                                 RecoveryRef(node=newest.agent_name, run=newest.run_id,
-                                             store=str(control))))
-    assert verdict.action != "finished", (
-        f"a refused submission was recovered as a finish: {verdict.because}")
-    # Nothing was written down as a completion, so no refusal text can pretend to be one.
-    assert not (control / "completion.json").exists(), \
-        "a refusal was recorded as an accepted completion"
+    token = RecoveryRef(node=newest.agent_name, run=newest.run_id, store=str(control),
+                        budget=Budget(requests_used=8, requests_allowed=8)).encode()
 
+    outcome = _ask_once(control, token, script)
+    after = len(log.read_text(encoding="utf-8").splitlines()) if log.exists() else 0
+    persisted = load_budget(control)
 
-def test_r1_a_valid_completion_recovers_exactly(tmp_path):
-    """**R1。** 有效完成必须**精确**恢复 ✓——提交文本逐字相同 ✓、不带 observation 包装 ✓。
-
-    这条**不 kill**：提交之后本就不会有下一个模型请求 ✓，所以"被杀的完成"不是一个存在的状态 ✓。要证明的
-    是恢复把**协议接受的**事实原样交回 ✓。
-    """
-    from scripts.recovery_windows import _kill_at  # noqa: PLC0415
-
-    control, workspace = tmp_path / "control", tmp_path / "workspace"
-    control.mkdir()
-    workspace.mkdir()
-    script = {"window": "C4", "node": "r1", "run_id": "r1", "task": "t",
-              "commands": ['anchor-done --summary "line one\\nline two"']}
-
-    # No kill: the run finishes, and the fact it wrote is what recovery has to reproduce.
-    _kill_at(control, workspace, dict(script, window="none", kill_after_models=99), "y", 60)
-
-    runs = asyncio.run(open_store(control).list_runs())
-    newest = sorted(runs, key=lambda item: item.started_at)[-1]
-    verdict = asyncio.run(assess(open_store(control),
-                                 RecoveryRef(node=newest.agent_name, run=newest.run_id,
-                                             store=str(control))))
-    assert verdict.action == "finished", verdict.because
-    # The shell hands over a literal backslash-n inside double quotes, so the exact submission is
-    # that literal — which is the point: what recovery returns is what the protocol accepted, byte for
-    # byte, and not something re-rendered on the way back.
-    assert already_finished(control, "r1") == ("line one\\nline two", None)
-    assert "</output>" not in already_finished(control, "r1")[0], "the wrapper leaked into the summary"
-
+    assert after == before, f"a spent allowance made {after - before} request(s)"
+    assert outcome.get("model_requests") == 0, outcome
+    assert outcome.get("status") == "budget_exhausted", outcome
+    # **Not 9/8.** The file is the record of what was spent, and nothing was.
+    assert persisted.requests_used == 8, f"the budget became {persisted}"
+    assert persisted.requests_allowed <= 8, f"the allowance was raised: {persisted}"
 
 

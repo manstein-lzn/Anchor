@@ -417,7 +417,7 @@ def _counter(workspace: Path) -> int:
 
 
 def _kill_at(control: Path, workspace: Path, script: dict, barrier: str,
-             timeout: float) -> tuple[bool | None, int | None, str, str]:
+             timeout: float, recover: str = "") -> tuple[bool | None, int | None, str, str]:
     """Spawn the child, wait for its barrier byte, and kill it there.
 
     Returns (was_killed, exit_code, what_the_child_said, traceback_text). The wait is a **read** on a
@@ -425,9 +425,14 @@ def _kill_at(control: Path, workspace: Path, script: dict, barrier: str,
     """
     read_fd, write_fd = os.pipe()
     environment = dict(os.environ, **{READY_FD_ENV: str(write_fd)})
+    argv = [sys.executable, __file__, "--child", "--window", script["window"], "--control",
+            str(control), "--workspace", str(workspace), "--script", json.dumps(script)]
+    if recover:
+        # How a budget case kills a **continuation**: the same handshake, but the child is handed the
+        # reference first, so "killed and restarted, again and again" is a real loop.
+        argv += ["--recover", recover]
     child = subprocess.Popen(
-        [sys.executable, __file__, "--child", "--window", script["window"], "--control", str(control),
-         "--workspace", str(workspace), "--script", json.dumps(script)],
+        argv,
         pass_fds=(write_fd,), env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         text=True)
     os.close(write_fd)
@@ -893,11 +898,13 @@ def _commits(workspace: Path) -> list[str]:
 
 
 def run_a5(root: Path, timeout: float) -> Evidence:
-    """**A5: a real request budget, spent by real requests, across real interruptions.**
+    """**A5: real requests, killed and restarted, until the allowance is spent.**
 
-    Three attempts, each killed after its command settled, each continuing the last. What is asserted is
-    not a number this test chose: the budget file is compared against the count the **model** kept, in the
-    place requests actually arrive, so the two have to agree on their own.
+    The assertion is not a number this test chose. The model counts its own invocations where requests
+    actually arrive, appending to a file so the count survives the process, and the budget file has to
+    agree with it — and then the last attempt has to make **no request at all**, which is the half the
+    first version of this case never reached: it stopped as soon as an attempt completed, so a spent
+    allowance was never exercised, and an allowance of 8/8 came back 9/8.
     """
     from anchor.node.recovery import Budget, RecoveryRef, load_budget, open_store, save_budget
 
@@ -907,53 +914,67 @@ def run_a5(root: Path, timeout: float) -> Evidence:
     shutil.rmtree(root / "A5", ignore_errors=True)
     control.mkdir(parents=True, exist_ok=True)
     workspace.mkdir(parents=True, exist_ok=True)
-    allowed = 5
+    allowed = 6
     save_budget(control, Budget(requests_used=0, requests_allowed=allowed))
-    script = {"window": "A5", "node": "node-A5", "task": "finish eventually",
-              "history_driven": True, "marker": "EFFECT-", "first": COUNTER,
-              "then": 'anchor-done --summary "finished"'}
+    # **One request per attempt, kill, repeat.** The barrier has to be reachable in *every* attempt, and
+    # a continuation whose history already shows the work submits on its first request — so a window that
+    # waits for two settled cycles is only reachable in the first attempt. What A5 is about is the
+    # accounting across restarts, and a kill after the first request is a real interruption of a real
+    # request.
+    script = {"window": "C4", "kill_after_models": 1, "node": "node-A5",
+              "task": "finish eventually", "history_driven": True, "marker": "EFFECT-",
+              "first": COUNTER, "then": 'anchor-done --summary "finished"'}
+    log = control / "model-calls.log"
     steps: list[str] = []
     token = ""
+    rounds = 0
 
-    for attempt in (1, 2, 3):
-        if attempt == 1:
-            killed, _, _, _ = _kill_at(control, workspace, dict(script, window="C4"),
-                                       "after the settled cycle, before the run ends", timeout)
-        else:
-            killed = True
-            # A real restart: `_ask_once` runs the entry point in a new process with the reference.
-            before = {item.name for item in control.glob("outcome-*.json")}
-            subprocess.run(
-                [sys.executable, __file__, "--child", "--window", "A5", "--control", str(control),
-                 "--workspace", str(workspace), "--script", json.dumps(script), "--recover", token],
-                capture_output=True, text=True, timeout=180, check=False)
-            new = [item for item in control.glob("outcome-*.json") if item.name not in before]
-            outcome = json.loads(new[-1].read_text(encoding="utf-8")) if new else {}
-            steps.append(f"attempt {attempt} ended {outcome.get('status')!r} "
-                         f"with {outcome.get('model_requests')} request(s) of its own")
-            token = outcome.get("recovery", "")
-            if outcome.get("status") == "completed":
-                break
-        if attempt == 1:
-            runs = asyncio.run(open_store(control).list_runs())
-            ref = RecoveryRef(node=script["node"], run=runs[-1].run_id, store=str(control),
-                              budget=load_budget(control))
-            token = ref.encode()
-            steps.append(f"attempt 1 killed at C4 with counter={_counter(workspace)}")
+    def counted() -> int:
+        return len(log.read_text(encoding="utf-8").splitlines()) if log.exists() else 0
 
-    counted = len((control / "model-calls.log").read_text(encoding="utf-8").splitlines()) \
-        if (control / "model-calls.log").exists() else 0
-    persisted = load_budget(control)
-    steps.append(f"the model counted {counted} request(s); the budget file says "
-                 f"{persisted.requests_used}/{persisted.requests_allowed}")
+    def reference() -> str:
+        runs = asyncio.run(open_store(control).list_runs())
+        newest = sorted(runs, key=lambda item: item.started_at)[-1]
+        return RecoveryRef(node=newest.agent_name, run=newest.run_id,
+                           store=str(control)).encode()
+
+    # **Kill, restart, kill again** — until the allowance runs out. Bounded, so a bug in the accounting
+    # shows up as a round limit rather than as a test that never finishes.
+    for _ in range(allowed + 2):
+        killed, code, said, errors = _kill_at(control, workspace, script,
+                                              "after 2 settled request(s), before the run ends",
+                                              timeout, recover=token)
+        rounds += 1
+        budget = load_budget(control)
+        steps.append(f"round {rounds}: killed={killed} barrier={bool(said)} "
+                     f"budget={budget.requests_used}/{budget.requests_allowed} "
+                     f"model_count={counted()}")
+        assert killed and said, f"round {rounds} was not held at its barrier: {errors[-300:]}"
+        # **The allowance is never raised**, whatever a reference or a caller asks for.
+        assert budget.requests_allowed <= allowed, (
+            f"the allowance was raised to {budget.requests_allowed} from {allowed}")
+        if budget.remaining <= 0:
+            break
+        token = reference()
+
+    spent_budget = load_budget(control)
+    out = _ask_once(control, token or reference(), script)
+    spent_model_count = counted()
+    steps.append(f"one more attempt with the allowance at {spent_budget.requests_used}/"
+                 f"{spent_budget.requests_allowed}: {out.get('status')!r} with "
+                 f"{out.get('model_requests')} request(s), model count still {spent_model_count}")
 
     evidence = Evidence(window="A5", control=str(control), workspace=str(workspace),
-                        killed=killed, exit_code=None, barrier="(killed, then restarted)",
+                        killed=True, exit_code=None, barrier=f"(killed {rounds} time(s))",
                         counter_before=0, counter_after=_counter(workspace), verdict="", because="",
-                        budget=f"{persisted.requests_used}/{persisted.requests_allowed}",
+                        budget=f"{spent_budget.requests_used}/{spent_budget.requests_allowed}",
                         seconds=time.monotonic() - started)
-    # **The assertion is the agreement**, not a number chosen here.
-    evidence.verdict = "agrees" if persisted.requests_used == counted else "DISAGREES"
+    agree = spent_budget.requests_used == spent_model_count
+    exhausted = str(out.get("status")) == "budget_exhausted" and out.get("model_requests") == 0
+    # **All three, not just agreement.** Two accounting systems can agree on a wrong number, and the
+    # failure that matters is an attempt that runs *after* the allowance is gone.
+    evidence.verdict = ("agrees-and-stops" if agree and exhausted and rounds >= 2
+                        else f"BAD(agree={agree} exhausted={exhausted} rounds={rounds})")
     evidence.because = "; ".join(steps)
     return evidence
 
