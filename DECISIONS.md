@@ -1736,3 +1736,21 @@ retract them by moving the code.
 - Converting historical runs. Old runs are read-only; an old trace is not dressed up as a
   `RecoveryRef`.
 - Keeping mini as a fallback behind a flag. A flag nobody sets is a path nobody tests.
+
+### Sequencing: the second completion parser goes last, not first
+
+M1 asks for "one completion parser" and "no branch that only serves mini". Taken literally that is a
+M1 change, and it would break production: `simple/agent.py`'s `_check_finished` and
+`OpEnvironment._check_finished` are not dead duplication — they are the parser the **live** path uses,
+and mini's `execute()` calls them. Deleting them in M1 leaves the scheduler it still dispatches to
+without a completion protocol.
+
+So the ordering is inverted from the plan's wording and the reason is mechanical: **the parser is
+deleted in M3, in the same commit that stops the scheduler calling mini.** Until then there are
+deliberately two parsers, one per live runner, and the migration's own rule — one source of truth per
+responsibility — is satisfied at M3 rather than at M1. What M1 does instead is make the surviving one
+findable: `read_completion` lives in `node/agent_runtime.py` and is the only parser in `node/`.
+
+This is recorded because the alternative reading (delete it now, keep mini importable anyway) produces
+a tree where the default executor cannot finish a node, and that failure would look like a migration
+bug rather than a sequencing one.
