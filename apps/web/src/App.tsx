@@ -22,21 +22,12 @@ import {
   toFlowEdges, toFlowNodes, type OurAgent, type OurGraph, type OurRun, type OurRunDetail,
 } from './model';
 import { Transcript } from './Transcript';
+import { Files } from './Files';
+import { api } from './api';
 
 const POLL_MS = 3000;
 type Pick = { kind: 'node' | 'edge' | 'agent'; id: string } | null;
 
-async function api<T>(path: string, method = 'GET', body?: unknown): Promise<T> {
-  const response = await fetch(path, {
-    method,
-    headers: body === undefined ? { Accept: 'application/json' }
-      : { Accept: 'application/json', 'Content-Type': 'application/json' },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
-  const data = await response.json().catch(() => null);
-  if (!response.ok) throw new Error(data?.error ?? `${method} ${path} → ${response.status}`);
-  return data as T;
-}
 
 const when = (iso: string) => (iso ? iso.replace('T', ' ').replace('Z', '') : '');
 
@@ -84,6 +75,8 @@ export function App() {
   const [past, setPast] = useState<OurGraph[]>([]);
   const [future, setFuture] = useState<OurGraph[]>([]);
   const [pick, setPick] = useState<Pick>(null);
+  // What the inspector is showing about the selected node: what it said, or what it left behind.
+  const [tab, setTab] = useState<'talk' | 'files'>('talk');
   const [palette, setPalette] = useState(false);
   const [json, setJson] = useState<'graph' | 'node' | 'edge' | 'agent' | null>(null);
   const [connect, setConnect] = useState({ source: '', target: '' });
@@ -357,7 +350,17 @@ export function App() {
                              onSelectNode={id => { setNode(id); setPass(''); }} />
           </main>
           <aside className="inspector">
-            <div className="section-heading"><h3>{node ? `${node} 的对话` : '节点对话'}</h3></div>
+            <div className="section-heading">
+              <h3>{node || '节点'}</h3>
+              {node && <div className="product-switch inspector-tabs">
+                <button className={tab === 'talk' ? 'chosen' : ''}
+                        onClick={() => setTab('talk')}>对话</button>
+                <button className={tab === 'files' ? 'chosen' : ''}
+                        onClick={() => setTab('files')}>文件</button>
+              </div>}
+            </div>
+            {node && tab === 'files' && <Files run={run} node={node} />}
+            {(!node || tab === 'talk') && <>
             {passes.length > 1 && <div className="passes">
               {passes.map((item, index) => (
                 <button key={item} className={item === shown ? 'chosen' : ''}
@@ -367,6 +370,7 @@ export function App() {
             {!node && <p className="hint">点一个节点看它说过什么、执行过什么。</p>}
             {node && !messages.length && <p className="hint">这次运行里它还没有留下消息。</p>}
             <Transcript messages={messages} />
+            </>}
           </aside>
         </div>
       ) : (

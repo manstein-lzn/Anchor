@@ -25,7 +25,7 @@ import threading
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from anchor.simple import graph as graph_module
 from anchor.simple import run as runner
@@ -113,6 +113,69 @@ class Scheduler:
             return self._resume_cold(run_id) if what == "resume" else (
                 json.dumps({"error": "that run is not running", "run": run_id}), 409)
         return json.dumps({"run": run_id, "asked": what}), 202
+
+    def run_dir(self, run_id: str) -> Path | None:
+        """Where a run lives, whichever graph it belongs to.
+
+        A run id is unique across the root, so the graph does not have to be named to find one — which
+        matters because a caller holding a run id from a trigger is not holding a graph name.
+        """
+        for workspace in self.workspaces():
+            candidate = workspace / "runs" / run_id
+            if (candidate / "run.json").is_file():
+                return candidate
+        return None
+
+    def files(self, run_id: str, node: str) -> tuple[str, int]:
+        """What a node left in its workspace. Returns (body, status)."""
+        run_dir = self.run_dir(run_id)
+        if run_dir is None:
+            return json.dumps({"error": "no such run"}), 404
+        workspace = _inside(run_dir, node) if _node_name(node) else None
+        if workspace is None or not workspace.is_dir():
+            return json.dumps({"error": f"no such node: {node}"}), 404
+        found: list[dict] = []
+        for item in sorted(workspace.rglob("*")):
+            if ".git" in item.relative_to(workspace).parts or not item.is_file():
+                continue
+            found.append({"path": str(item.relative_to(workspace)), "size": item.stat().st_size})
+            if len(found) >= FILE_LIST_CAP:
+                break
+        return json.dumps({"node": node, "files": found,
+                           "truncated": len(found) >= FILE_LIST_CAP}, ensure_ascii=False), 200
+
+    def locate(self, run_id: str, node: str, name: str) -> Path | None:
+        """One file inside a node's workspace, or None if that is not where it is.
+
+        Two methods rather than one returning either a dict or a path: a preview and a download want
+        different things from the same file, and a return value whose type is its own mode is how a
+        caller ends up sending a dict as bytes.
+        """
+        run_dir = self.run_dir(run_id)
+        if run_dir is None:
+            return None
+        workspace = _inside(run_dir, node) if _node_name(node) else None
+        if workspace is None or not workspace.is_dir():
+            return None
+        target = _inside(workspace, name)
+        return target if target is not None and target.is_file() else None
+
+    def read_file(self, run_id: str, node: str, name: str) -> tuple[str, int]:
+        """One file's contents, as text, if it is text. Returns (body, status)."""
+        target = self.locate(run_id, node, name)
+        if target is None:
+            return json.dumps({"error": f"no such file: {name}"}), 404
+        size = target.stat().st_size
+        try:
+            text = target.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, ValueError):
+            # Not text. A mangled decode of it would be worse than saying so, and downloading is where
+            # a binary belongs anyway.
+            return json.dumps({"path": name, "size": size, "binary": True, "text": "",
+                               "truncated": False}, ensure_ascii=False), 200
+        return json.dumps({"path": name, "size": size, "binary": False,
+                           "text": text[:FILE_TEXT_CAP], "truncated": len(text) > FILE_TEXT_CAP},
+                          ensure_ascii=False), 200
 
     def _resume_cold(self, run_id: str) -> tuple[str, int]:
         """Continue a run that is not in this process — one a restart left, or one paused earlier."""
@@ -259,6 +322,43 @@ def _starter_graph(name: str) -> dict:
 TAIL_TEXT = 20000
 
 
+#: How many files one listing returns. A node can write a great many, and a listing is only ever
+#: something a person scrolls.
+FILE_LIST_CAP = 3000
+#: How much of one text file the view is given. The rest is reachable by downloading it.
+FILE_TEXT_CAP = 200000
+
+
+def _node_name(name: str) -> bool:
+    """Whether this could be a node id at all.
+
+    A node id is a path of ordinary segments — a module's nodes are named `write/draft` — and no
+    segment is `.`, `..` or empty. Checked as a name rather than by resolving, because resolving lets
+    `notes/../..` land on the run's own directory: inside it, allowed, and not a node. That would turn
+    "list this node's files" into "list every node's files", which the test for it found.
+    """
+    return bool(name) and all(part not in ("", ".", "..") for part in name.split("/"))
+
+
+def _inside(base: Path, name: str) -> Path | None:
+    """`base / name`, if that is inside `base`. Otherwise None.
+
+    `name` comes from a URL, so this is the one place that decides whether a request can read something
+    it should not. It **resolves** rather than looking for `..` in the string: `a/../../b`, an absolute
+    name, and a symlink all reach elsewhere by different spellings, and a check that reads the text of
+    the name catches none of them reliably. Resolving follows symlinks, so a link pointing out of the
+    workspace is refused too — which is also what the sandbox does with one.
+    """
+    if not name or "\x00" in name:
+        return None
+    try:
+        root = base.resolve(strict=True)
+        candidate = (base / name).resolve(strict=True)
+    except OSError:
+        return None
+    return candidate if candidate == root or root in candidate.parents else None
+
+
 def _readable(line: str) -> dict:
     """A message as something a person can read, without knowing the library's shape.
 
@@ -344,8 +444,25 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(payload)
 
+    def _send_file(self, path: Path) -> None:
+        """The bytes as they are, and as a download rather than something a browser renders.
+
+        `attachment` and `application/octet-stream` on purpose: a node's workspace holds whatever the
+        node wrote, and a browser that rendered it would be rendering text this program did not write
+        inside a page this program does serve. A download has no such question.
+        """
+        payload = path.read_bytes()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Disposition", f"attachment; filename*=UTF-8''{quote(path.name)}")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
     def do_GET(self) -> None:
-        path = PurePosixPath(unquote(urlparse(self.path).path))
+        parsed = urlparse(self.path)
+        query = parse_qs(parsed.query)
+        path = PurePosixPath(unquote(parsed.path))
         parts = [part for part in path.parts if part != "/"]
         if not parts or parts[0] == "assets" or (len(parts) == 1 and "." in parts[0]):
             if self._serve_built(parts):
@@ -364,6 +481,16 @@ class Handler(BaseHTTPRequestHandler):
                                          ensure_ascii=False))
         if parts == ["runs"]:
             return self._send(json.dumps({"runs": self.scheduler.runs()}, ensure_ascii=False))
+        if len(parts) == 4 and parts[0] == "runs" and parts[2] == "files":
+            return self._send(*self.scheduler.files(parts[1], parts[3]))
+        if len(parts) >= 5 and parts[0] == "runs" and parts[2] == "files":
+            name = "/".join(parts[4:])
+            if query.get("download"):
+                target = self.scheduler.locate(parts[1], parts[3], name)
+                if target is None:
+                    return self._send(json.dumps({"error": f"no such file: {name}"}), 404)
+                return self._send_file(target)
+            return self._send(*self.scheduler.read_file(parts[1], parts[3], name))
         if len(parts) == 2 and parts[0] == "runs":
             found = self.scheduler.run(_graph_of(self.scheduler, parts[1]), parts[1])
             return self._send(json.dumps(found, ensure_ascii=False) if found

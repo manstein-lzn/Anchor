@@ -119,6 +119,20 @@ export type TraceMessage = {
   exit_status?: string;
 };
 
+/** One file in a node's workspace, as the listing reports it. */
+export type OurFile = { path: string; size: number };
+export type OurFileList = { node: string; files: OurFile[]; truncated: boolean };
+
+/** One file's contents. `binary` is the difference between "this is the text" and "download it": a
+ *  mangled decode would be worse than saying so. */
+export type OurFileBody = {
+  path: string;
+  size: number;
+  binary: boolean;
+  text: string;
+  truncated: boolean;
+};
+
 export type OurRunDetail = {
   graph: string;
   run: string;

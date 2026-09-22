@@ -387,3 +387,48 @@ details.note .markdown { padding: 8px 10px; }
 }
 .node-palette button:hover { border-color: var(--accent); background: #eaf3f1; }
 .node-palette small { color: var(--muted); font-size: 11px; }
+
+/* ── what a node left behind ───────────────────────────────────────────────
+ * Grouped by directory, because a workspace is a tree and ninety flat paths are not read. The listing
+ * is deliberately plain: name, size, and two actions.
+ */
+.inspector-tabs button { font-size: 11px; padding: 1px 8px; }
+.files { display: flex; flex-direction: column; gap: 6px; min-height: 0; overflow-y: auto; }
+.files-head { display: flex; align-items: center; justify-content: space-between; }
+.file-groups { display: flex; flex-direction: column; gap: 2px; }
+.file-directory {
+  font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .05em;
+  padding: 6px 2px 2px; font-family: ui-monospace, "SF Mono", Menlo, monospace;
+}
+.file-row { display: flex; align-items: center; gap: 2px; border-radius: 6px; }
+.file-row:hover { background: #eef3f1; }
+.file-row.open { background: #e7f0ed; }
+.file-name {
+  flex: 1; min-width: 0; display: flex; align-items: center; gap: 5px;
+  background: none; border: 0; padding: 3px 4px; cursor: pointer; text-align: left;
+  color: var(--ink); font: inherit;
+}
+.file-name span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-name small { flex: none; color: var(--muted); font-size: 10px; }
+.file-get {
+  flex: none; display: inline-flex; padding: 3px 5px; color: var(--muted);
+  border-radius: 5px; text-decoration: none;
+}
+.file-get:hover { color: var(--accent); background: #fff; }
+.file-open { border-top: 1px solid var(--line); padding-top: 7px; }
+.file-open-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 5px;
+}
+.file-open-head code {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11px; color: var(--muted);
+}
+.file-preview {
+  margin: 0; max-height: 42vh; overflow: auto; padding: 8px 10px; border-radius: 7px;
+  background: #fafcfb; border: 1px solid var(--line);
+  white-space: pre-wrap; word-break: break-word;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; line-height: 1.6;
+}
+.file-preview.markdown-body {
+  white-space: normal; font-family: inherit; font-size: 13px;
+}
