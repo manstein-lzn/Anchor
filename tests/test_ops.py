@@ -190,3 +190,95 @@ def test_an_agent_and_an_op_are_the_same_kind_of_thing_to_the_graph(tmp_path):
     # The op read the paper through a pointer, so its own workspace never held it.
     assert not (run_dir / "verify" / "paper.md").exists()
     assert _commits(run_dir / "write") == ["wrote the paper", "start"]
+
+
+# ── the op runtime, on its own ────────────────────────────────────────────────────────────────────
+#
+# The tests above drive ops through the scheduler, which today is the mini path. These are about the
+# runtime M3 will dispatch to, so they call it directly and do not go through a graph: an op verdict is
+# one command and one exit code, and a test that needs a scheduler to observe that is testing the
+# scheduler.
+
+from anchor.node import COMPLETED, FAILED, NodeRequest                      # noqa: E402
+from anchor.node.op_runtime import DONE_SENTINEL, read_op_result, run_op_node  # noqa: E402
+
+
+class _Ran:
+    """What `NodeSandbox.run` returns, as the reader sees it."""
+
+    def __init__(self, output: str = "", returncode: int = 0, timed_out: bool = False) -> None:
+        self.output, self.returncode, self.timed_out = output, returncode, timed_out
+
+
+def test_the_verdict_is_the_exit_code_and_nothing_in_the_output_outranks_it():
+    # The whole point of an op, and the one place this deliberately differs from mini's reading: a
+    # command that printed the routing marker and died must not move the graph.
+    assert read_op_result(_Ran(f"{DONE_SENTINEL}\ndone", returncode=1), ("b",)).refused
+    assert read_op_result(_Ran("ANCHOR_ROUTE: b\nwhy", returncode=1), ("a", "b")).refused
+    assert read_op_result(_Ran("ANCHOR_ROUTE: b\nwhy", returncode=0), ("a", "b")).route == "b"
+    # A marker that is not the first non-empty line is text the command printed, not a route.
+    assert read_op_result(_Ran("note\nANCHOR_ROUTE: b", returncode=0), ("a", "b")).refused
+    # And a timeout is not a pass, marker or no marker.
+    assert read_op_result(_Ran(f"{DONE_SENTINEL}\ndone", timed_out=True), ("only",)).refused
+
+
+def test_one_way_out_needs_no_choice_and_more_than_one_requires_it():
+    # With one way out the exit code decides and the output is what it says — the marker is not
+    # required, which is `OpEnvironment`'s existing rule and not a stricter one invented here.
+    settled = read_op_result(_Ran("anything at all", returncode=0), ("only",))
+    assert settled.route is None and not settled.refused
+    assert read_op_result(_Ran("anything", returncode=0), ("a", "b")).refused
+    # A route that is not a way out of this node is refused by name, not silently followed.
+    assert "not a way out" in read_op_result(_Ran("ANCHOR_ROUTE: c", returncode=0), ("a", "b")).refused
+
+
+def test_the_op_runtime_runs_one_command_in_a_real_sandbox(tmp_path):
+    workspace = tmp_path / "w"
+    workspace.mkdir()
+    outcome = run_op_node(
+        NodeRequest(execution_id="check", task="printf 'hello from the op\\n'", workspace=workspace,
+                    routes=("next",), network=False),
+        command="printf 'hello from the op\\n'")
+    assert outcome.status == COMPLETED, outcome.reason
+    assert "hello from the op" in outcome.submission
+
+    failed = run_op_node(
+        NodeRequest(execution_id="check", task="false", workspace=workspace, routes=("next",)),
+        command="exit 3")
+    assert failed.status == FAILED and failed.reason
+
+
+def test_an_op_does_not_import_the_agent_harness():
+    """ADR-062's invariant, made checkable rather than merely written down.
+
+    An op that pulled in pydantic_ai would make "ops do not depend on the harness" true only by
+    convention. Parsed rather than imported, so the check does not depend on what happens to be
+    installed on the machine running it.
+    """
+    import ast
+
+    source = (Path(__file__).resolve().parents[1] / "src/anchor/node/op_runtime.py").read_text(
+        encoding="utf-8")
+    tree = ast.parse(source)
+    imported = {alias.name.split(".")[0] for node in ast.walk(tree) if isinstance(node, ast.Import)
+                for alias in node.names}
+    imported |= {(node.module or "").split(".")[0]
+                 for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)}
+    assert not {name for name in imported if name in {"pydantic_ai", "pydantic_ai_harness",
+                                                      "minisweagent", "mini_swe_agent"}}, \
+        f"the op runtime imported the agent harness: {sorted(imported)}"
+
+
+def test_a_command_that_runs_too_long_is_a_failure_and_not_a_verdict(tmp_path):
+    """The timeout is the op's own bound, and time does not turn a command into a success.
+
+    Run for real: a command that sleeps past a one-second timeout, in the real sandbox.
+    """
+    workspace = tmp_path / "w"
+    workspace.mkdir()
+    outcome = run_op_node(
+        NodeRequest(execution_id="slow", task="sleep 30", workspace=workspace, routes=("next",),
+                    timeout_seconds=1.0),
+        command="sleep 30")
+    assert outcome.status == FAILED, outcome
+    assert "timeout" in outcome.reason or "did not finish" in outcome.reason, outcome.reason
