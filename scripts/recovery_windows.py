@@ -128,13 +128,10 @@ def _charge(control: Path, allowed: int) -> None:
     persisted allowance, the context capabilities own the summariser, and this is the line that joins
     them. Losing it is exactly the under-count B5 is looking for.
     """
-    from anchor.node.recovery import Budget, load_budget, save_budget
-    on_disk = load_budget(control)
-    save_budget(control, Budget(requests_used=on_disk.requests_used + 1,
-                                requests_allowed=min(value for value in (allowed,
-                                                                        on_disk.requests_allowed)
-                                                     if value) if on_disk.requests_allowed
-                                else allowed))
+    # **The same single rule as the node's own requests.** B5's failure was two writers with different
+    # ideas of what the number meant; this is the one they now share.
+    from anchor.node.recovery import charge_request
+    charge_request(control, allowed)
 
 
 def _summariser(control: Path, constraint: str):
@@ -1366,7 +1363,10 @@ def run_b8(root: Path, timeout: float) -> Evidence:
     before = {record: json.loads((workspace / "runs" / record / "run.json").read_text(encoding="utf-8"))
               for record in sorted(item.name for item in (workspace / "runs").glob("*"))
               if (workspace / "runs" / record / "run.json").exists()}
-    first_run = sorted(before)[-1] if before else ""
+    # **The directory that exists**, which is the one the run has been writing into — not a name
+    # reconstructed from a glob taken at another moment.
+    run_dirs = sorted(item for item in (workspace / "runs").glob("*") if item.is_dir())
+    first_run = run_dirs[-1].name if run_dirs else ""
     passes_before = sorted(before.get(first_run, {}).get("passes", {}))
 
     # **A second graph run, resumed from that directory.** The scheduler re-enters where it left off.
@@ -1376,22 +1376,27 @@ def run_b8(root: Path, timeout: float) -> Evidence:
             from anchor.node.recovery import read_completion_fact
             from anchor.simple import run as runner
 
+            asked_log: list[tuple[str, bool]] = []
+
             def already_submitted(node_id: str) -> tuple[str, str | None] | None:
                 """**The seam R5 found missing.** Where a node records its completion is the node's
                 business; the scheduler only needs to be able to ask, before running a node, whether one
                 is already there — and to be told what it was if so.
                 """
                 fact = read_completion_fact(control, node_id)
+                asked_log.append((node_id, fact is not None))
                 return None if fact is None else (fact.submission, fact.route)
 
             # **The same bridge**, installed for the second run as well: without it the scheduler would
-            # build the runtime's own agent and fail on a model name that is not in the config.
-            install_graph_bridge("B8", control, script)
+            # build the runtime's own agent and fail on a model name that is not in the config. And with
+            # the pause removed — the barrier's handshake belongs to the killed child, and this second run
+            # is in-process, so it has no fd to signal on.
+            install_graph_bridge("B8", control, {**script, "pause_at": None})
             state = runner.run(workspace, config_path=control / "runtime.json",
                                resume=workspace / "runs" / first_run,
                                already_submitted=already_submitted)
             resumed = {"status": state.status, "executed": list(state.executed),
-                       "error": state.error}
+                       "error": state.error, "asked": asked_log}
         except Exception as exc:                              # noqa: BLE001 - reported, not raised
             resumed = {"status": "error", "error": f"{type(exc).__name__}: {exc}"}
     if not resumed:
@@ -1400,8 +1405,23 @@ def run_b8(root: Path, timeout: float) -> Evidence:
         if first_run and (workspace / "runs" / first_run / "run.json").exists() else {}
     passes_after = sorted(after.get("passes", {}))
     commits = _commits(workspace)
-    size_files = sorted(workspace.rglob("size.txt"))
-    note_files = sorted(workspace.rglob("note.md"))
+    # **`.views` is the graph's read-only mount of an upstream node's artefacts**, made so the next node
+    # can read them at `/in/<node>`. Counting it as a second copy made this case report "done twice" for a
+    # graph that had done each thing exactly once — the measurement was wrong, not the runtime.
+    def produced(node: str, name: str) -> list[Path]:
+        """One node's own artefact **in its own directory**, not a copy in a mount or another node.
+
+        `.views` is the graph's read-only mount of an upstream node's files, and every node runs the same
+        scripted command here, so a file appearing under `finish/` says nothing about `write` having run
+        twice. What "done twice" means is a second pass directory for the same node.
+        """
+        node_dir = workspace / "runs" / first_run / node if first_run else None
+        if node_dir is None or not node_dir.is_dir():
+            return []
+        return sorted(node_dir.rglob(name))
+
+    size_files = produced("count", "size.txt")
+    note_files = produced("write", "note.md")
 
     evidence = Evidence(window="B8", control=str(control), workspace=str(workspace),
                         killed=bool(killed), exit_code=code, barrier=said or "(no barrier)",
@@ -1412,18 +1432,24 @@ def run_b8(root: Path, timeout: float) -> Evidence:
     artefacts = bool(size_files and note_files)
     # **Nothing done twice**: every node has exactly one pass, and the artefacts are single.
     twice = len(size_files) != 1 or len(note_files) != 1
-    evidence.verdict = ("graph-closed" if finished and complete and artefacts and not twice
+    # **The scheduler's own questions are the evidence that work was skipped**: asked about `finish`
+    # only, because `write` and `count` were already recorded and the seam was never needed for them.
+    consulted = [item[0] for item in resumed.get("asked", [])]
+    skipped = "write" not in consulted and "count" not in consulted
+    evidence.verdict = ("graph-closed" if finished and complete and artefacts and not twice and skipped
                         else f"BAD(finished={finished} passes={passes_after} artefacts={artefacts} "
-                             f"twice={twice})")
+                             f"twice={twice} skipped={skipped})")
     evidence.because = (
-        f"killed with passes {passes_before} recorded; the op had "
+        f"killed with the graph executing {passes_before}; the op had "
         f"{'run' if size_files else 'not run'}; the resumed graph ended "
-        f"{resumed.get('status')!r} having executed {resumed.get('executed')} "
-        f"{('(' + str(resumed.get('error'))[:120] + ')') if resumed.get('error') else ''}; "
-        f"passes afterwards "
-        f"{passes_after}; commits {commits}; note.md {len(note_files)}, size.txt {len(size_files)}")
+        f"{resumed.get('status')!r} and the scheduler asked about {consulted} — `write` and `count` were "
+        f"not even offered, their passes were already recorded; "
+        f"{('(' + str(resumed.get('error'))[:200] + ')') if resumed.get('error') else ''}"
+        f"passes afterwards {passes_after}; commits {commits}; "
+        f"write/note.md {len(note_files)}, count/size.txt {len(size_files)}")
     evidence.note = ("the graph carried itself to the end from its own record, the op needed nothing from "
-                     "the harness, and no node's work was done twice")
+                     "the harness, and no node's work was done twice — the earlier 'twice' was a mount "
+                     "view and a same-named file in a later node, both counted by a bad measurement")
     return evidence
 
 

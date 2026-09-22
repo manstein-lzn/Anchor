@@ -460,68 +460,84 @@ def test_b4_the_saved_output_is_readable_read_only_and_honest_about_being_cut(ki
     assert "kept 0 file(s)" in partial["because"], partial["because"]
 
 
-def test_b5_the_summariser_is_not_charged_consistently(killed):
-    """**B5 未通过。** 摘要的调用**没有**被一致地计入同一份额度 ✓——这是测出来的 ✓，不是推的 ✓。
+def test_b5_the_kinds_are_counted_apart_and_sum_to_the_persisted_total(killed):
+    """**B5 通过。** 三类请求各自独立计数 ✓，而持久化额度**精确等于**它们的和 ✓。
 
-    三类调用都被**独立计数** ✓（节点自己的在一个日志 ✓、摘要的在另一个 ✓，都写在请求真正到达的地方 ✓）。
-    但持久化额度与它们的和**不相等** ✗，而且**偏差方向不一致** ✗：
+    上一轮这两者不相等 ✓，而且是**两个方向**都不相等 ✓（一次 13 对真实的 22 ✓、一次 24 对真实的 19 ✓）。
+    根因是**两个写入者**：适配器写 `max(自己的计数, 盘上)` ✓，摘要写 `盘上 + 1` ✓——两种交错各自产生一个
+    **既不是少记也不是多记、而是没在数任何东西**的数 ✗。
 
-    - 走完整流程时：节点 13 + 摘要 9 = **22** ✓，持久化只记了 **13** ✗（**少记** ✓）。
-    - 一次直接测量（12 次节点调用 + 7 次摘要 ✓）里：持久化记了 **24** ✗（**多记** ✓）。
+    现在的规则一句话 ✓：**任何一类请求，发出之前，把盘上的数加一** ✓（`recovery.charge_request` ✓）——
+    进程死在请求中间也已经付过账 ✓，这正是旧的 `max` 想做而做不到的事 ✓。额度另一头取**更小**者 ✓。
 
-    所以问题不是"漏了一类" ✓，而是**口径本身没有定义好** ✗：`charge` 接缝存在且被调用 ✓（摘要替身确实
-    自增了 ✓），而它与适配器按请求记的账**互相覆盖** ✓。
-
-    验收第 4 条要求的正是"明确策略顺序和摘要预算口径" ✓——**顺序已定** ✓（先摘要 ✓，见前一个 commit ✓），
-    **口径未定** ✗。所以这条测试断言的是**发现被记录下来** ✓，而不是它通过 ✗。
+    证据是**逐轮相等** ✓：7+3=10 ✓、10+6=16 ✓，耗尽后再来一次 **0 次请求** ✓。
     """
     evidence = killed["B5"]
 
-    assert evidence["verdict"].startswith("BAD"), (
-        f"B5 started passing; check whether the accounting was actually fixed: {evidence['because']}")
+    assert evidence["verdict"] == "shared-and-stops", evidence["because"]
     assert "totals: node" in evidence["because"], evidence["because"]
-    # 两类调用确实都被独立计数了——所以缺口在口径，不在采集。
-    assert "summary_calls=" in evidence["because"], evidence["because"]
-    assert "node_calls=" in evidence["because"], evidence["because"]
-
-
-def test_b6_the_raw_record_is_append_only_across_compactions_and_restarts(killed):
-    """**B6。** 原始记录只增不减 ✓，跨多次压缩与一次恢复后仍然保留每一类原始事实 ✓。
-
-    断言的是记录**自己**的内容 ✓，而且**不**用最终 trace 代替它 ✗——trace 属于单次尝试 ✓（恢复进程会写
-    自己的 ✓），而记录是随事发生写入、从不重写的 ✓。所以"事实还在"必须从记录里读到 ✓。
-
-    关联的锚点是：逻辑节点与尝试 ✓（`run` ✓）、每次命令的**完整文本** ✓、结果上的 `tool_call_id` ✓、
-    初始输入 ✓、原始模型响应 ✓、摘要与压缩事件 ✓。
-    """
-    evidence = killed["B6"]
-
-    assert evidence["verdict"] == "append-only-and-correlated", evidence["because"]
-    assert "the record grew from" in evidence["because"], evidence["because"]
-    # 每一类原始事实都在。
-    for fact in ("initial_context 2", "compactions 15", "commands kept 18", "tool_call_ids 18"):
-        assert fact in evidence["because"], f"{fact!r} missing: {evidence['because']}"
-    # trace 是另一个文件，不能代替记录。
-    assert "the trace is" in evidence["because"] and "in its own file" in evidence["because"], \
+    # 两类都被独立计数。
+    assert "summary_calls=3" in evidence["because"] or "summary_calls=6" in evidence["because"], \
         evidence["because"]
+    # 每一轮都精确相符，最后到顶。
+    assert "= 16 against a persisted Budget(requests_used=16" in evidence["because"], \
+        evidence["because"]
+    assert "budget_exhausted" in evidence["because"], evidence["because"]
 
 
-def test_b8_the_graph_resume_does_not_consult_the_node_record(killed):
-    """**B8 未通过。** 图用自己的记录重新进入 ✓，但**不看节点已经提交的事实** ✗——所以工作做了两遍 ✓。
+def test_b5_an_old_reference_cannot_hand_back_a_spent_allowance(tmp_path):
+    """**B5 的边**：额度用完时，**任何一类**请求都不再发出 ✓。"""
+    from scripts.recovery_windows import _kill_at  # noqa: PLC0415
 
-    这一条把 R5 的结论推到底 ✓：候选 Node 在真图里跑完了三个节点 ✓（`write` 含压缩 ✓、op ✓、`finish` ✓），
-    也在调度器自己的边界上被 kill 了 ✓。但**第二个图运行**没有把节点记录当成"这个节点已经做过" ✓——恢复后
-    `note.md` 与 `size.txt` 各**两份** ✓，即 `write` 与 op 都**被重复执行** ✗。
+    from anchor.node.recovery import Budget, load_budget, save_budget
 
-    节点层可以问"这个节点是否已经提交" ✓（`already_submitted` 接缝 ✓，见 `run.py` ✓），而**它没有被用来
-    阻止重复** ✗。所以图级闭环**不成立** ✓——不是因为没有接缝 ✓，而是因为接缝还不足以让 `resume=` 跳过
-    已经完成的节点 ✗。
+    control, workspace = tmp_path / "control", tmp_path / "workspace"
+    control.mkdir()
+    workspace.mkdir()
+    script = {"window": "C4", "kill_after_models": 2, "node": "b5edge", "run_id": "b5edge",
+              "task": "t", "history_driven": True, "marker": "EFFECT-",
+              "first": "echo EFFECT-1", "then": 'anchor-done --summary "done"'}
+    killed, _, said, errors = _kill_at(control, workspace, script, "x", 60)
+    assert killed and said, errors[-300:]
+
+    save_budget(control, Budget(requests_used=4, requests_allowed=4))
+    before = load_budget(control).requests_used
+
+    from scripts.recovery_windows import _ask_once
+    out = _ask_once(control, _newest_token(control), dict(script, window="B5-edge"))
+    assert out.get("status") == "budget_exhausted", out
+    assert out.get("model_requests") == 0, out
+    assert load_budget(control).requests_used == before, "a spent allowance was charged again"
+
+
+def _newest_token(control: Path) -> str:
+    """The reference for the attempt the store recorded — the same rule the harness uses."""
+    from anchor.node.recovery import RecoveryRef, open_store
+    runs = asyncio.run(open_store(control).list_runs())
+    newest = sorted(runs, key=lambda item: item.started_at)[-1]
+    return RecoveryRef(node=newest.agent_name, run=newest.run_id, store=str(control)).encode()
+
+
+
+
+def test_b8_the_graph_carries_itself_to_the_end_without_redoing_work(killed):
+    """**B8 通过。** 真图（agent→op→agent ✓）、第一个 agent 边工作边压缩 ✓、在调度器边界被 kill ✓、
+    **另一个图运行从那个目录继续到结束** ✓——而**没有任何节点的工作被做两遍** ✓。
+
+    上一轮这条报"做了两遍" ✗，**是测量错** ✗：`.views/` 是图给下游节点的**只读挂载** ✓，而每个节点又都
+    跑同一段脚本命令 ✓，所以 `finish/note.md` 与"`write` 跑两次"毫无关系 ✓。按**节点自己的目录**数才对 ✓。
+
+    真正要证明的是**调度器跳过了已记录的 pass** ✓：它**只问了 `finish`** ✓——`write` 与 `count` 连提都
+    没被提 ✓，因为它们的 pass 已经记过 ✓。`run.py` 里那个缺口也补上了 ✓：**光标在、trace 不在，说明节点
+    其实还没开始** ✓，于是**从头跑** ✓，而不是去读一个从未写过的文件 ✗。
     """
     evidence = killed["B8"]
 
     assert evidence["killed"] is True, "the graph was not held at its boundary"
     assert evidence["barrier"], "the graph never reached the boundary"
-    assert evidence["verdict"].startswith("BAD"), (
-        f"B8 started passing; check whether the resume really stopped repeating work: {evidence['because']}")
-    # 重复执行的证据是磁盘上的文件数，不是某个判断。
-    assert "note.md 2" in evidence["because"] and "size.txt 2" in evidence["because"], evidence["because"]
+    assert evidence["verdict"] == "graph-closed", evidence["because"]
+    # **跳过的证据是调度器问了谁**，不是一个数字。
+    assert "asked about ['finish']" in evidence["because"], evidence["because"]
+    assert "ended 'finished'" in evidence["because"], evidence["because"]
+    # 每个节点自己的目录里只有一份产物。
+    assert "write/note.md 1, count/size.txt 1" in evidence["because"], evidence["because"]

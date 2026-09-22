@@ -868,7 +868,12 @@ def run(workspace: str | Path, *, objective: str | None = None, config_path: str
             agent = _agent_for(graph, step.node_id, step.directory, models, secret_file, config_path,
                                inputs=step.inputs, trace=step.trace,
                                script=None if model_script is None else model_script.get(step.node_id))
-            if step.resuming:
+            # **A cursor without a trace means the node never actually started.** The scheduler writes
+            # the cursor before dispatching, so a kill in between leaves a node marked as interrupted
+            # with nothing to continue from — and resuming reads a trace file that was never written,
+            # which fails the whole run rather than running the node. Started fresh is the honest reading:
+            # nothing of it happened.
+            if step.resuming and step.trace is not None and Path(step.trace).exists():
                 outcome = agent.resume(_messages(step.trace))
             else:
                 outcome = agent.run(task=step.task)

@@ -108,25 +108,17 @@ class _CountingModel(WrapperModel):
         return await super().request(messages, model_settings, model_request_parameters)
 
     def _record(self) -> None:
-        """Write down what has been spent, **keeping the smaller allowance**.
+        """Charge this request against the logical execution's allowance.
 
-        The spending is merged — larger wins, because a process that dies mid-request still spent it —
-        and the allowance is merged the other way, smaller wins. Raising it would let a replay of an old
-        reference, or a request that simply asks for more, buy turns that nobody granted.
-
-        **A failure here propagates.** Recording is the only thing standing between a spent budget and
-        another request, so a store that cannot be written means the request must not be made. Swallowing
-        it, as this did, is how a budget file went to 9/8.
+        **One increment, one writer.** This used to write `max(my own count, what is on disk)`, which is
+        not a count of anything once a second kind of request — a summary — charges the same file: the two
+        interleavings produced an under-count and an over-count in the same wiring, both measured. The
+        increment lives in `recovery.charge_request` so every kind of request goes through one rule.
         """
         if self.control is None:
             return
-        from anchor.node.recovery import Budget, load_budget, save_budget
-        here = Path(str(self.control))
-        on_disk = load_budget(here)
-        spent = max(self.requests, on_disk.requests_used)
-        allowed = min(value for value in (self.allowed, on_disk.requests_allowed) if value) \
-            if (self.allowed or on_disk.requests_allowed) else 0
-        save_budget(here, Budget(requests_used=spent, requests_allowed=allowed))
+        from anchor.node.recovery import charge_request
+        charge_request(Path(str(self.control)), self.allowed)
 
 
 @dataclass

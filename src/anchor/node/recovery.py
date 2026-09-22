@@ -482,6 +482,31 @@ def read_completion_fact(control: Path, node: str) -> CompletionFact | None:
     return fact if fact.node == node else None
 
 
+def charge_request(control: Path, allowed: int | None = None) -> Budget:
+    """**One more request, written down before it is made.** The only writer of `requests_used`.
+
+    B5's failure was two writers: the adapter recorded `max(my count, what is on disk)` while the
+    summariser incremented `what is on disk + 1`. Depending on how the two interleaved the file came out
+    under one total or over the other — 13 against a real 22, and 24 against a real 19, measured both
+    ways. Neither is a count of anything.
+
+    So the rule is one sentence: **every request from any kind charges one, exactly once, before it is
+    sent, by incrementing what is on disk.** A process that dies mid-request has already paid, which is
+    what the old `max` was trying to achieve and could not do consistently. The allowance is merged the
+    other way — smaller wins — so a replayed reference or a caller asking for more cannot buy turns.
+
+    Charging is not optional: a failure here propagates, because the record is the only thing between a
+    spent allowance and the next request.
+    """
+    here = Path(control)
+    on_disk = load_budget(here)
+    merged = min(value for value in (allowed, on_disk.requests_allowed) if value) \
+        if (allowed or on_disk.requests_allowed) else 0
+    charged = Budget(requests_used=on_disk.requests_used + 1, requests_allowed=merged)
+    save_budget(here, charged)
+    return charged
+
+
 def already_finished(control: Path, node: str) -> tuple[str, str | None]:
     """What an attempt that already submitted produced: `(submission, route)`.
 
