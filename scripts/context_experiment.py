@@ -55,7 +55,11 @@ TASKS: dict[str, dict] = {
         # A proxy, and named as one: whether a quotation is *followed by* its source is a judgement
         # about prose. What is checked is that the word appears at all, which finds the runs where the
         # requirement was plainly dropped and says nothing about the ones where it was met badly.
-        "check": "source", "check_is": "contains",
+        # **Structural, and checked line by line**: every quoted block is followed by a line carrying
+        # a source (a URL or a DOI). Whether the source is the *right* one is a judgement about the
+        # work; whether there is one at all is not, and it is the part an agent dropping the
+        # requirement fails.
+        "check": "source", "check_is": "quotes_cited",
     },
     "tail": {
         "task": (
@@ -64,7 +68,9 @@ TASKS: dict[str, dict] = {
             "**The constraint: the last line must be quoted verbatim, not paraphrased.**"),
         # Also a proxy: "quoted verbatim" needs the listing itself, and the node produced it inside a
         # command whose output only the node saw. That the file exists is what can be checked from here.
-        "check": "summary.md", "check_is": "file",
+        # **Exact**: the last line of the listing the node itself produced has to appear verbatim in
+        # `summary.md`. The listing is a file on disk, so this needs no judgement at all.
+        "check": "summary.md", "check_is": "last_line_verbatim",
     },
 }
 
@@ -91,29 +97,99 @@ def artifacts(attempt: Path, node: str) -> Path:
 def _holds(spec: dict, root: Path, produced: list[str], body: str) -> bool:
     """Whether the task's own requirement is met — exactly where it can be, and said so where it cannot.
 
-    One keyword test over everything would let "the constraint survived" mean "the word appears
-    somewhere in any markdown file", which is how a run that dropped the requirement twice could be
-    reported as keeping it. Where the requirement is mechanically checkable it is checked mechanically,
-    from the files themselves; where it is a judgement about prose the proxy is named in `TASKS` rather
-    than dressed up.
+    One rule per function, because each is a claim about a task that has to be checked against its own
+    examples. This dispatcher used to be one long function, and a rule inside it was wrong three times
+    in a row without anything noticing.
     """
     kind = spec.get("check_is", "contains")
+    if kind == "contains":
+        return spec["check"] in body
     if kind == "every_file_ends":
-        named = sorted(root.rglob("*.md")) if root.is_dir() else []
-        # The top-level files only: a node that leaves notes in a subdirectory has not written one of
-        # the three files the task asked for.
-        top = [item for item in named if item.parent == root]
-        if len(top) < spec.get("files", 3):
-            return False
-        for item in top[:spec.get("files", 3)]:
-            lines = [line for line in item.read_text(encoding="utf-8", errors="replace").splitlines()
-                     if line.strip()]
-            if not lines or lines[-1].strip() != spec["check"]:
-                return False
-        return True
+        return _every_file_ends(spec, root, produced)
+    if kind == "last_line_verbatim":
+        return _last_line_verbatim(spec, root, produced)
+    if kind == "quotes_cited":
+        return _quotes_cited(spec, root, produced, body)
     if kind == "file":
-        return any(Path(item).name == spec["check"] for item in produced)
-    return spec["check"] in body
+        return _file_written(spec, root, produced)
+    raise ValueError(f"unknown check in {spec!r}")
+
+
+def _file_written(spec: dict, root: Path, produced: list[str]) -> bool:
+    """By **basename**: the two arms do not put their artefacts in the same place, so a full-path test
+    compares the layouts rather than whether the file was written."""
+    del root
+    return any(Path(item).name == spec["check"] for item in produced)
+
+
+def _every_file_ends(spec: dict, root: Path, produced: list[str]) -> bool:
+    """Every one of the files the task named ends with the line it named."""
+    del produced
+    top = [item for item in sorted(root.rglob("*.md")) if item.parent == root] if root.is_dir() else []
+    if len(top) < spec.get("files", 3):
+        return False
+    for item in top[:spec.get("files", 3)]:
+        lines = [line for line in item.read_text(encoding="utf-8", errors="replace").splitlines()
+                 if line.strip()]
+        if not lines or lines[-1].strip() != spec["check"]:
+            return False
+    return True
+
+
+def _last_line_verbatim(spec: dict, root: Path, produced: list[str]) -> bool:
+    """The last line of the listing the node produced appears **exactly** in its summary."""
+    del spec, produced
+    listings = [item for item in sorted(root.rglob("*.txt")) if "listing" in item.name]
+    summaries = list(root.rglob("summary.md"))
+    if not listings or not summaries:
+        return False
+    lines = [line.strip() for line in listings[0].read_text(
+        encoding="utf-8", errors="replace").splitlines() if line.strip()]
+    return bool(lines) and lines[-1] in summaries[0].read_text(encoding="utf-8", errors="replace")
+
+
+def _quote_blocks(lines: list[str]) -> list[int]:
+    """Where each quotation starts, in either of the two shapes Markdown has for one.
+
+    Two rounds of this being wrong says how easy it is: every `>` line counted separately reported a
+    correct file as failing 22 times, on the continuation lines of eleven multi-line quotations; and
+    counting only `>` reported a file that quoted inside fenced blocks as having quoted nothing. The
+    task asks for quotations followed by their source, not for a markdown construct.
+    """
+    starts: list[int] = []
+    fenced = False
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            fenced = not fenced
+            if fenced:
+                starts.append(index)
+            continue
+        if not fenced and stripped.startswith(">") and (
+                index == 0 or not lines[index - 1].strip().startswith(">")):
+            starts.append(index)
+    return starts
+
+
+def _quotes_cited(spec: dict, root: Path, produced: list[str], body: str) -> bool:
+    """Every quotation is followed by the source it came from."""
+    del spec, root, produced
+    lines = body.splitlines()
+    starts = _quote_blocks(lines)
+    if not starts:
+        return False
+    for start in starts:
+        end = start
+        if lines[start].strip().startswith("```"):
+            while end + 1 < len(lines) and not lines[end + 1].strip().startswith("```"):
+                end += 1
+        else:
+            while end + 1 < len(lines) and lines[end + 1].strip().startswith(">"):
+                end += 1
+        following = " ".join(lines[end + 1:end + 6]).lower()
+        if not any(key in following for key in ("source", "http", "doi")):
+            return False
+    return True
 
 
 @dataclass
@@ -171,7 +247,7 @@ def _model(model: dict, secret: str):
     return chosen(model["model"], provider=provider)
 
 
-def _run_mini(spec: dict, workspace: Path, config_path: str):
+def _run_mini(spec: dict, workspace: Path, config_path: str, model_ref: str):
     """One pass of the mini path, through the graph runner rather than through the new entry point.
 
     It gets a one-node graph so that the surrounding machinery — the scheduler, the sandbox, the commit
@@ -181,14 +257,22 @@ def _run_mini(spec: dict, workspace: Path, config_path: str):
     from anchor.simple.run import run as run_graph
     (workspace / "graph.json").write_text(_json.dumps({
         "entry": "only", "objective": spec["task"],
-        "agents": {"w": {"model": "models.deepseek", "writes": ["*"]}},
+        "agents": {"w": {"model": model_ref, "writes": ["*"]}},
         "nodes": [{"id": "only", "agent": "w"}], "edges": [],
     }), encoding="utf-8")
     state = run_graph(workspace, config_path=config_path)
     node = state.nodes.get("only", {})
+    # **From its own trace.** The mini path's calls happen inside its client, where there is no seam to
+    # count them — but it writes a trace, one entry per model response, so the number is readable
+    # rather than reported as zero.
+    traces = sorted(workspace.rglob("*.trace.jsonl")) if workspace.is_dir() else []
+    requests = 0
+    if traces:
+        requests = sum(1 for line in traces[-1].read_text(encoding="utf-8").splitlines()
+                       if json.loads(line).get("role") == "assistant")
     return (NodeOutcome(status="completed" if state.status == "finished" else state.status,
                         submission=node.get("submission", ""), route=None,
-                        model_requests=0, reason=state.error or ""),
+                        model_requests=requests, reason=state.error or ""),
             Record(workspace.parent / "control"))
 
 
@@ -216,7 +300,7 @@ async def one(node: str, name: str, spec: dict, attempt: int, workspace: Path,
         # for both arms with the capabilities left off, which compares "Pydantic without a context
         # strategy" against "Pydantic with one" — not a baseline against a candidate. Its numbers said
         # nothing about mini and the conclusion drawn from them has been withdrawn.
-        outcome, record = _run_mini(spec, directory, config_path)
+        outcome, record = _run_mini(spec, directory, config_path, model_spec.get("ref", ""))
     else:
         outcome = await run_node(
             NodeRequest(execution_id=f"{node}-{name}-{attempt}", task=spec["task"],

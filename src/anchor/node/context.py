@@ -336,6 +336,7 @@ class Watching(AbstractCapability):
             # — a command after a submission, which the guard refuses — is credited with whatever the
             # command before it spilled.
             sandbox.spilled = ()
+            sandbox.visible = ()
             sandbox.incomplete = False
             sandbox.spill_limit_bytes = max(self.record.limit_bytes - self.record.spill_bytes, 0)
         result = await handler(args)
@@ -378,9 +379,11 @@ class Watching(AbstractCapability):
             self.record.problems.append(
                 f"command {len(self.record.commands)} produced more than the store could keep; the "
                 f"model is being told its preview is not the whole output")
-        return self._bounded(text, kept if not visible else Path(visible[0]), visible[0] if visible else "")
+        return self._bounded(text, kept if not visible else Path(visible[0]),
+                             visible[0] if visible else "", complete=not incomplete)
 
-    def _bounded(self, text: str, kept: Path | None, seen: str = "") -> str:
+    def _bounded(self, text: str, kept: Path | None, seen: str = "",
+                 complete: bool = True) -> str:
         """What the model sees of one command's output.
 
         Head and tail, with the middle elided and the whole thing named. Both ends matter: a command's
@@ -395,10 +398,13 @@ class Watching(AbstractCapability):
             return text
         head = self.observe_chars * 3 // 4
         tail = self.observe_chars - head
-        if kept is None:
-            return (f"{text[:head]}\n\n[the rest of this output was not kept: the store is at its "
-                    f"bound, so there is nowhere to read it from — this preview is all there is]"
-                    f"\n\n{text[-tail:]}")
+        if kept is None or complete is False:
+            # **Says what it is.** A preview with a path the model cannot use, or a path holding only
+            # part of the output, is worse than no path: the model reads it, believes it has the whole
+            # thing, and answers from a fragment.
+            return (f"{text[:head]}\n\n[the rest of this output was not kept whole — the store is at "
+                    f"its bound or the output was too large, so there is nowhere to read the rest "
+                    f"from. This preview is all there is.]\n\n{text[-tail:]}")
         # **The path the command can open**, not the host's. Quoted in full so a model that has to
         # escape it in a shell does not have to guess.
         return (f"{text[:head]}\n\n[{len(text) - self.observe_chars} characters elided — the whole "
@@ -434,11 +440,22 @@ class _CountedSummariser(WrapperModel):
     """
 
     calls: int = 0
+    #: What the provider reported for each summary call. Kept because a summary is a paid request and
+    #: an estimate of its size is not an invoice — the record has to let a reader tell the two apart.
+    usage: list[dict[str, Any]] = []
 
     async def request(self, messages: Any, model_settings: Any,
                       model_request_parameters: Any) -> Any:
         self.calls += 1
-        return await super().request(messages, model_settings, model_request_parameters)
+        try:
+            response = await super().request(messages, model_settings, model_request_parameters)
+        except Exception as exc:                              # noqa: BLE001 - recorded, then re-raised
+            # A summary that failed still happened, and a run whose compaction failed needs to say so
+            # rather than look like one that never tried.
+            self.usage.append({"failed": f"{type(exc).__name__}: {exc}"[:200]})
+            raise
+        self.usage.append(_usage_of(response) or {"reported": None})
+        return response
 
 
 class WithinBudget(AbstractCapability):
@@ -483,16 +500,18 @@ class WithinBudget(AbstractCapability):
                 preserve_first_user_message=True,
                 receipts=True))
 
-    def cost(self, messages: list[ModelMessage]) -> int:
-        """What one request costs, history included.
+    def cost(self, messages: list[ModelMessage], request_context: Any = None) -> int:
+        """What one request costs: the history, plus what goes with every request.
 
-        `request_overhead` covers the instructions and the tool schemas — charged to **every** request
-        and part of why a provider refuses one. Adding the field was not enough: the comparisons went on
-        calling the estimator without it, so the budget still only described the history.
+        **Measured from the request, not assumed.** A fixed allowance cannot cover "any actual
+        instruction" — a node with a long prompt and a node with a short one would be charged the same,
+        and the one with the long prompt would be the one that overflows. The instruction parts and the
+        tool schemas are in the request parameters, so they are counted where they are.
         """
-        return estimate_tokens(messages, instructions=self.budget.request_overhead)
+        return estimate_tokens(messages, instructions=_overhead(request_context))
 
-    async def _compact_once(self, messages: list[ModelMessage], ctx: Any) -> list[ModelMessage]:
+    async def _compact_once(self, messages: list[ModelMessage], ctx: Any,
+                            request_context: Any = None) -> list[ModelMessage]:
         """Run the first strategy that actually reduces the history, and say which one did.
 
         `compact` applies its transform unconditionally — the threshold check is the capability's, not
@@ -500,7 +519,7 @@ class WithinBudget(AbstractCapability):
         one. A strategy that returned the history unchanged has not compacted anything, and recording
         it as though it had would make the record claim a bound it did not achieve.
         """
-        before, size = len(messages), self.cost(messages)
+        before, size = len(messages), self.cost(messages, request_context)
         # **The summariser goes first when there is one.** The order used to be "window, then summary if
         # the window did not help" — which means the old history is dropped, and only then is the
         # question asked whether anything needed summarising. The answer is always no by then, because
@@ -513,7 +532,7 @@ class WithinBudget(AbstractCapability):
             # **The same measure on both sides.** `before` included the request overhead and `after`
             # did not, so a strategy that changed nothing could look like it had shortened the history
             # by exactly the overhead — and "did it help?" is what decides whether to escalate.
-            after = self.cost(out)
+            after = self.cost(out, request_context)
             if self.record is not None:
                 self.record.note("compaction", strategy=type(strategy).__name__, messages_before=before,
                                  messages_after=len(out), tokens_before=size, tokens_after=after,
@@ -528,10 +547,14 @@ class WithinBudget(AbstractCapability):
                 while len(self.record.summaries) < self.summariser.calls:
                     entry = {"call": len(self.record.summaries) + 1,
                              "strategy": type(strategy).__name__, "messages_in": before,
-                             "tokens_in": size, "tokens_out": after}
+                             "tokens_in": size, "tokens_out": after,
+                             "usage": (self.summariser.usage[len(self.record.summaries)]
+                                       if len(self.summariser.usage) > len(self.record.summaries)
+                                       else None)}
                     self.record.summaries.append(entry)
                     self.record.note("summary", call=entry["call"], strategy=entry["strategy"],
-                                     messages_in=before, tokens_in=size, tokens_out=after)
+                                     messages_in=before, tokens_in=size, tokens_out=after,
+                                     usage=entry["usage"])
             if after < size:
                 return out
         return messages
@@ -544,33 +567,9 @@ class WithinBudget(AbstractCapability):
         everything would turn an outage into a compaction loop, and re-running the tools is not part of
         this: the request is what failed, so the request is what is repeated.
         """
-        messages = list(getattr(request_context, "messages", ()) or ())
-        if self.force or self.cost(messages) > self.budget.input_target:
-            messages = await self._compact_once(messages, ctx)
-            request_context = _replace_messages(request_context, messages)
+        request_context = await self._prepare(request_context, ctx)
+        self._send(request_context, attempt=1)
 
-        # **And then refuse if it still does not fit.** A single message larger than the target — one
-        # command that printed a great deal, a pinned constraint that is itself oversized — cannot be
-        # compacted away, because the strategies here drop or summarise *older* history and this is the
-        # newest and most load-bearing part of it. Continuing would send a request that either fails at
-        # the provider or costs more than the budget says; failing here says which and why, once.
-        if self.record is not None:
-            item = {"request": len(self.record.sent) + 1, "messages": len(messages),
-                    "tokens": self.cost(messages), "estimator": self.budget.estimator}
-            self.record.sent.append(item)
-            self.record.note("sent", **item)
-
-        ceiling = self.budget.window - self.budget.output_reserve
-        over = self.cost(messages)
-        if over > ceiling:
-            if self.record is not None:
-                self.record.note("uncompactable", tokens=over, ceiling=ceiling,
-                                 messages=len(messages), estimator=self.budget.estimator)
-            raise Uncompactable(
-                f"the history is {over} tokens (by {self.budget.estimator}) and the ceiling is "
-                f"{ceiling}; compaction cannot reduce it further because what exceeds the budget is "
-                f"the most recent history, which cannot be dropped or summarised without losing the "
-                f"work in progress. Refusing to send a request that does not fit.")
         try:
             return await handler(request_context)
         except Exception as error:                       # noqa: BLE001 - re-raised unless it is a window
@@ -580,7 +579,49 @@ class WithinBudget(AbstractCapability):
                 self.record.note("overflow", error=type(error).__name__, detail=str(error)[:300])
             reduced = await self._compact_once(
                 list(getattr(request_context, "messages", ()) or ()), ctx)
-            return await handler(_replace_messages(request_context, reduced))
+            # **The retry is a request too**, so it is checked and counted like one. Cutting the corner
+            # here is how a retry sends something larger than the ceiling that was just enforced.
+            retried = _replace_messages(request_context, reduced)
+            self._send(retried, attempt=2)
+            return await handler(retried)
+
+    async def _prepare(self, request_context: Any, ctx: Any) -> Any:
+        """Compact if needed, and refuse if that did not make it fit."""
+        messages = list(getattr(request_context, "messages", ()) or ())
+        if self.force or self.cost(messages, request_context) > self.budget.input_target:
+            messages = await self._compact_once(messages, ctx, request_context)
+            request_context = _replace_messages(request_context, messages)
+        # **And then refuse if it still does not fit.** A message larger than the target cannot be
+        # compacted away: the strategies here drop or summarise *older* history and this is the newest
+        # and most load-bearing part of it. Continuing would send a request that either fails at the
+        # provider or costs more than the budget says; failing here says which and why, once.
+        return request_context
+
+    def _send(self, request_context: Any, *, attempt: int) -> None:
+        """Record **the request that is about to go out**, and refuse it if it does not fit.
+
+        Written here and not earlier: a request that was refused never went out, and a record that
+        counted it would say the model was sent something it never saw. The refusal is its own event
+        beside it, so the numbers and the reasons can be read together.
+        """
+        messages = list(getattr(request_context, "messages", ()) or ())
+        over = self.cost(messages, request_context)
+        ceiling = self.budget.window - self.budget.output_reserve
+        if over > ceiling:
+            if self.record is not None:
+                self.record.note("refused", tokens=over, ceiling=ceiling, attempt=attempt,
+                                 messages=len(messages), estimator=self.budget.estimator)
+            raise Uncompactable(
+                f"the request is {over} tokens (by {self.budget.estimator}) and the ceiling is "
+                f"{ceiling}; compaction cannot reduce it further because what exceeds the budget is "
+                f"the most recent history, which cannot be dropped or summarised without losing the "
+                f"work in progress. Refusing to send a request that does not fit.")
+        if self.record is not None:
+            item = {"request": len(self.record.sent) + 1, "attempt": attempt,
+                    "messages": len(messages), "tokens": over,
+                    "estimator": self.budget.estimator}
+            self.record.sent.append(item)
+            self.record.note("sent", **item)
 
 
 def _replace_messages(request_context: Any, messages: list[ModelMessage]) -> Any:
@@ -591,6 +632,38 @@ def _replace_messages(request_context: Any, messages: list[ModelMessage]) -> Any
     """
     from dataclasses import replace
     return replace(request_context, messages=messages)
+
+
+def _overhead(request_context: Any) -> int:
+    """The characters every request carries that are not messages.
+
+    Instructions and tool schemas. Read off the request being made, so a large prompt is charged as a
+    large prompt and a budget built on a fixed guess cannot pass by being wrong in the safe direction.
+    """
+    params = getattr(request_context, "model_request_parameters", None)
+    if params is None:
+        return 0
+    size = 0
+    for part in getattr(params, "instruction_parts", ()) or ():
+        content = getattr(part, "content", part)
+        size += len(content if isinstance(content, str) else str(content))
+    for tool in (getattr(params, "function_tools", ()) or []):
+        size += _schema_chars(tool)
+    for tool in (getattr(params, "output_tools", ()) or []):
+        size += _schema_chars(tool)
+    return size
+
+
+def _schema_chars(tool: Any) -> int:
+    """One tool definition's size, as JSON, which is how it is sent."""
+    for name in ("parameters_json_schema", "schema"):
+        schema = getattr(tool, name, None)
+        if schema is not None:
+            try:
+                return len(json.dumps(schema, ensure_ascii=False, default=str))
+            except (TypeError, ValueError):                   # pragma: no cover - defensive
+                return len(str(schema))
+    return len(str(getattr(tool, "name", ""))) + len(str(getattr(tool, "description", "")))
 
 
 def _usage_of(response: Any) -> dict[str, Any] | None:

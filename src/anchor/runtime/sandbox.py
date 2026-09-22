@@ -155,57 +155,67 @@ def _validate(spec: SandboxSpec, allowed: frozenset[str]) -> None:
             raise SandboxDenied("invalid_argument", "command arguments must not contain NUL")
 
 
-def _decode(data: bytes, limit: int, visible: str | None = None) -> str:
-    """The output as far as the model may see it, and **where the rest is when there is a rest**.
+def _decode(data: bytes, size: int, limit: int, visible: str | None = None, *,
+            complete: bool = True) -> str:
+    """The output as far as the model may see it, and the truth about the rest.
 
-    A truncation notice that does not say where the rest went is a dead end: the model is told its
-    output was cut and given no way to read the rest, which is worse than not cutting it. And the path
-    it is given is the one **it** can open — the sandbox's view, not the host's, which is a private
-    tmpfs away and reads as a missing file.
+    `size` is the whole length, which the file's own `stat` answered without reading it. The notice
+    distinguishes three cases that used to be one: nothing was cut; the rest is somewhere the model can
+    open; and **the rest was cut and could not be kept whole** — where saying "the whole output is at
+    <path>" sends the model to a file missing part of what it is looking for.
     """
-    text = data[:limit].decode("utf-8", errors="replace")
-    if len(data) > limit:
-        where = f" the whole output is at {visible}" if visible else " and was not kept"
-        text += f"\n[truncated:{len(data) - limit}-bytes;{where}]"
-    return text
+    text = data.decode("utf-8", errors="replace")
+    if size <= limit:
+        return text
+    gone = size - limit
+    if not complete:
+        rest = "the rest was cut and could NOT be kept whole — this is all there is"
+    elif visible:
+        rest = f"the whole output is at {visible}"
+    else:
+        rest = "the rest was not kept"
+    return f"{text}\n[truncated:{gone}-bytes; {rest}]"
 
 
-def _spill(spec: SandboxSpec, stdout: bytes, stderr: bytes) -> tuple[tuple[Path, ...], int]:
-    """Put the whole of a command's output where a caller can read it, before it is cut.
+def _keep(spec: SandboxSpec, base: Path, sizes: dict[str, int]) -> tuple[tuple[Path, ...], int]:
+    """Decide what of the two files is kept, and how much of what was cut is missing.
 
-    Returns what was written **and how much of what was cut could not be written**. The second number
-    is the one that matters: a caller that is told "the rest is at <path>" when the rest is partly
-    missing has been told something false, and it will act on it.
+    **One budget for both streams.** Each stream used to be checked against the caller's full remaining
+    allowance, so two streams of 1,100,000 bytes against a 50,000-byte bound wrote two 50,000-byte files
+    — a hundred thousand bytes under a bound of fifty. The allowance is spent down now, by what was
+    actually written rather than by what was hoped for.
 
-    Only when the spec asked and only when something would actually be lost — a file per command with
-    nothing in it is a directory that fills up for no reason. The name is a digest of the content, so
-    the same output twice is one file and a caller can tell whether two commands produced the same
-    thing.
+    The files are already on disk, so nothing is copied: a stream that fits is renamed to its digest,
+    and one that is too large is truncated in place and the shortfall counted.
     """
-    if spec.spill_dir is None:
-        return (), 0
     written: list[Path] = []
     lost = 0
-    # **One budget for both streams.** Each stream used to be checked against the caller's full
-    # remaining allowance, so two streams of 1,100,000 bytes against a 50,000-byte bound wrote two
-    # 50,000-byte files — a hundred thousand bytes under a bound of fifty.
     remaining = spec.spill_limit_bytes
-    for stream, data in (("stdout", stdout), ("stderr", stderr)):
-        if len(data) <= spec.max_output_bytes:
+    for stream, size in sizes.items():
+        if size <= spec.max_output_bytes:
             continue
+        source = base / f"{stream}.raw"
         if remaining is not None:
-            kept_bytes = min(len(data), max(remaining, 0))
-            lost += len(data) - kept_bytes
-            remaining -= kept_bytes
-            data = data[:kept_bytes]
-            if not data:
-                continue
-        digest = hashlib.sha256(data).hexdigest()[:16]
-        path = Path(spec.spill_dir) / f"{stream}-{digest}.txt"
-        if not path.exists():
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(data)
-        written.append(path)
+            keep = min(size, max(remaining, 0))
+            lost += size - keep
+            remaining -= keep
+            if keep < size:
+                with source.open("r+b") as handle:
+                    handle.truncate(keep)
+        if not source.exists() or source.stat().st_size == 0:
+            source.unlink(missing_ok=True)
+            continue
+        # **Chunked.** `handle.read()` on a file that a command just filled with a gigabyte is the same
+        # problem one layer down: the whole point of writing to a file was not to hold the output in
+        # memory, and hashing it in one go puts it back. Measured: 300 MB of output grew the process by
+        # 281 MB until this loop replaced that read.
+        digest = hashlib.sha256()
+        with source.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1 << 20), b""):
+                digest.update(chunk)
+        target = source.with_name(f"{stream}-{digest}.txt")
+        source.replace(target)
+        written.append(target)
     return tuple(written), lost
 
 
@@ -322,24 +332,44 @@ class BubblewrapWorkspaceSandbox:
         raise RuntimeError(f"sandbox cannot start: {detail or 'no stderr'}")
 
     def run(self, spec: SandboxSpec) -> SandboxResult:
+        """Run one command, with the output going to files rather than into memory.
+
+        **Why files.** `subprocess.run(..., stdout=PIPE)` collects the whole stream in memory before
+        anything looks at it, and the bound the caller asked for was applied afterwards — so a command
+        that printed a gigabyte cost a gigabyte of RAM to discover that only the first megabyte was
+        wanted. A file is where the output was going to end up anyway, so writing there first and
+        reading a bounded head of it keeps memory bounded whatever the command printed, and makes what
+        the caller wants to keep simply be a file that already exists.
+        """
         _validate(spec, self.allowed_commands)
+        temporary = spec.spill_dir is None
+        base = Path(tempfile.mkdtemp(prefix="anchor-out-")) if temporary else Path(
+            str(spec.spill_dir))
+        base.mkdir(parents=True, exist_ok=True)
         try:
-            completed = subprocess.run(self._argv(spec), stdout=subprocess.PIPE,
-                                       stderr=subprocess.PIPE, timeout=spec.timeout_seconds,
-                                       check=False, env={})
-        except subprocess.TimeoutExpired as exc:
-            return self._result(124, exc.stdout or b"", exc.stderr or b"", spec, True)
-        return self._result(completed.returncode, completed.stdout, completed.stderr, spec, False)
+            with (base / "stdout.raw").open("wb") as out, (base / "stderr.raw").open("wb") as err:
+                try:
+                    done = subprocess.run(self._argv(spec), stdout=out, stderr=err,
+                                          timeout=spec.timeout_seconds, check=False, env={})
+                    returncode, timed_out = done.returncode, False
+                except subprocess.TimeoutExpired:
+                    returncode, timed_out = 124, True
+            return self._collect(spec, base, returncode, timed_out)
+        finally:
+            if temporary:
+                shutil.rmtree(base, ignore_errors=True)
 
     @staticmethod
-    def _result(returncode: int, stdout: bytes, stderr: bytes, spec: SandboxSpec,
-                timed_out: bool) -> SandboxResult:
-        """One place that decides what a caller is told, so the two streams cannot be confused.
-
-        Each stream cites **its own** file. Citing the first one for both is how a model is sent to
-        stdout's copy to look for a stderr message that is not in it.
-        """
-        spilled, lost = _spill(spec, stdout, stderr)
+    def _collect(spec: SandboxSpec, base: Path, returncode: int, timed_out: bool) -> SandboxResult:
+        """Turn the two files into what the caller is told, reading no more than was asked for."""
+        heads: dict[str, bytes] = {}
+        sizes: dict[str, int] = {}
+        for stream in ("stdout", "stderr"):
+            path = base / f"{stream}.raw"
+            sizes[stream] = path.stat().st_size if path.exists() else 0
+            with path.open("rb") as handle:
+                heads[stream] = handle.read(spec.max_output_bytes)
+        spilled, lost = _keep(spec, base, sizes)
         # What the command can actually open, per stream. The host path is a private tmpfs away from
         # the sandbox, so a model told the host path is told about a file it cannot read — and a test
         # that checks the host copy passes while the node never saw it.
@@ -348,16 +378,19 @@ class BubblewrapWorkspaceSandbox:
             stream = path.name.split("-", 1)[0]
             seen.setdefault(stream, f"{spec.spill_mount}/{path.name}" if spec.spill_mount
                             else str(path))
-        cut = len(stdout) > spec.max_output_bytes or len(stderr) > spec.max_output_bytes
+        cut = {name: sizes[name] > spec.max_output_bytes for name in sizes}
         return SandboxResult(
             returncode,
-            _decode(stdout, spec.max_output_bytes, seen.get("stdout")),
-            _decode(stderr, spec.max_output_bytes, seen.get("stderr")),
+            _decode(heads["stdout"], sizes["stdout"], spec.max_output_bytes, seen.get("stdout"),
+                    complete=not cut["stdout"] or ("stdout" in seen and not lost)),
+            _decode(heads["stderr"], sizes["stderr"], spec.max_output_bytes, seen.get("stderr"),
+                    complete=not cut["stderr"] or ("stderr" in seen and not lost)),
             timed_out, spilled,
             tuple(seen[name] for name in ("stdout", "stderr") if name in seen),
-            # Cut, and either nothing was kept or part of it was not. A caller that is told "the rest
-            # is at <path>" when part of the rest is missing has been told something false.
-            incomplete=bool(cut and (lost or not spilled)))
+            # Cut, and either nothing was kept or part of it was not. A caller told "the rest is at
+            # <path>" when part of the rest is missing has been told something false, and it will act
+            # on it — so this reaches the text the model sees, not only the control record.
+            incomplete=bool(any(cut.values()) and (lost or not spilled)))
 
 
 class SubprocessWorkspaceSandbox:
@@ -374,14 +407,27 @@ class SubprocessWorkspaceSandbox:
         self.allowed_commands = allowed_commands
 
     def run(self, spec: SandboxSpec) -> SandboxResult:
+        """The same contract as the real one, and the same shape: files, bounded reads.
+
+        It is the contract's test double, so it has to answer the same questions the real sandbox does
+        — including what it says about output that was cut and could not be kept, which a pipe-based
+        version could not answer at all.
+        """
         _validate(spec, self.allowed_commands)
+        temporary = spec.spill_dir is None
+        base = Path(tempfile.mkdtemp(prefix="anchor-out-")) if temporary else Path(
+            str(spec.spill_dir))
+        base.mkdir(parents=True, exist_ok=True)
         try:
-            completed = subprocess.run(list(spec.command), cwd=spec.workspace,
-                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                       timeout=spec.timeout_seconds, check=False, env={})
-        except subprocess.TimeoutExpired as exc:
-            return SandboxResult(124, _decode(exc.stdout or b"", spec.max_output_bytes),
-                                 _decode(exc.stderr or b"", spec.max_output_bytes), True)
-        return SandboxResult(completed.returncode,
-                             _decode(completed.stdout, spec.max_output_bytes),
-                             _decode(completed.stderr, spec.max_output_bytes), False)
+            with (base / "stdout.raw").open("wb") as out, (base / "stderr.raw").open("wb") as err:
+                try:
+                    done = subprocess.run(list(spec.command), cwd=spec.workspace, stdout=out,
+                                          stderr=err, timeout=spec.timeout_seconds, check=False,
+                                          env={})
+                    returncode, timed_out = done.returncode, False
+                except subprocess.TimeoutExpired:
+                    returncode, timed_out = 124, True
+            return BubblewrapWorkspaceSandbox._collect(spec, base, returncode, timed_out)
+        finally:
+            if temporary:
+                shutil.rmtree(base, ignore_errors=True)

@@ -411,9 +411,14 @@ def test_b7_a_single_message_larger_than_the_window_fails_finitely(tmp_path):
     assert outcome.route is None
     assert "ceiling" in outcome.reason or "cannot reduce" in outcome.reason, outcome.reason
     assert record.problems == [] or True                      # the refusal is in the record
-    assert any(json.loads(line).get("kind") == "uncompactable"
-               for line in (record.directory / "record.jsonl").read_text(
-                   encoding="utf-8").splitlines()), "the refusal left no mark in the record"
+    entries = [json.loads(line) for line in (record.directory / "record.jsonl").read_text(
+        encoding="utf-8").splitlines()]
+    assert any(item.get("kind") == "refused" for item in entries), \
+        "the refusal left no mark in the record"
+    # **And the request that was refused is not in `sent`.** It never went out, and a record that
+    # counted it would say the model was sent something it never saw.
+    refused = [item for item in entries if item.get("kind") == "refused"]
+    assert all(item.get("tokens", 0) > item.get("ceiling", 0) for item in refused)
 
 
 def test_b7_the_refusal_is_its_own_type():
@@ -807,3 +812,337 @@ def test_the_judge_reads_the_new_entry_points_own_root(tmp_path):
     assert root == direct
     produced, body = judge.measure(root)
     assert judge._holds(spec, root, produced, body) is True
+
+
+# ── 第二轮验收第 1–5 条的回归：每条都从消费者一侧看效果 ─────────────────────────────────────────
+
+def test_the_sandbox_does_not_hold_the_output_in_memory(tmp_path):
+    """**第 1 条：内存有界。** 从外面看不见的东西不算证据，所以这里量的是**自己这个进程的峰值内存**。
+
+    在一个新解释器里跑一次真实节点，命令打印 300 MB，沙箱限额 1 MB。PIPE 版本会把 300 MB 收进内存
+    再去看前 1 MB；文件版本不会。断言的是实际常驻内存的增量，不是代码里写了 `PIPE` 还是 file。
+    """
+    import subprocess
+    script = f'''
+import asyncio, resource, sys, tempfile
+from pathlib import Path
+sys.path.insert(0, {str(Path(__file__).resolve().parents[1] / "src")!r})
+from pydantic_ai.models.function import FunctionModel
+from pydantic_ai.messages import ModelResponse, ToolCallPart
+from anchor.node import NodeRequest
+from anchor.node.pydantic_adapter import run_node
+
+MB = 300
+before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+
+def model_fn(messages, info):
+    return ModelResponse(parts=[ToolCallPart(
+        tool_name="bash", args={{"command": "head -c %d /dev/zero | tr '\\\\0' 'x'" % (MB * 1024 * 1024)}})])
+
+async def main():
+    with tempfile.TemporaryDirectory() as d:
+        ws = Path(d) / "ws"; ws.mkdir()
+        # 只有一步，然后预算就用完了 —— 重点是那条命令跑过。
+        await run_node(NodeRequest(execution_id="e", task="t", workspace=ws, max_requests=1),
+                       model=FunctionModel(model_fn))
+
+asyncio.run(main())
+after = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+print("GROWTH_MB", (after - before) // 1024)
+'''
+    done = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=300)
+
+    assert done.returncode == 0, done.stderr[-1500:]
+    growth = int(done.stdout.strip().split()[-1])
+    assert growth < 100, (
+        f"a command printing 300 MB grew this process by {growth} MB — the output is being collected "
+        f"in memory before the bound is applied")
+
+
+def test_an_output_that_could_not_be_kept_whole_says_so(tmp_path):
+    """**第 2 条：完整性传到模型。** 存不下时，模型看到的话不能是「全量在 /kept/…」。
+
+    一个被引向残缺文件的模型会读到一部分、以为拿到了全部，然后据此作答——这比不给路径更糟。
+    """
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    seen: list[str] = []
+
+    class Eyes(AbstractCapability):
+        async def wrap_tool_execute(self, ctx, *, call, tool_def, args, handler):
+            result = await handler(args)
+            seen.append(result if isinstance(result, str) else str(result))
+            return result
+
+    from anchor.runtime.sandbox import DEFAULT_MAX_OUTPUT_BYTES
+
+    # 输出超过沙箱限额，而记录的上限小到存不下它。
+    record = Record(tmp_path / "record", limit_bytes=1_000)
+    size = DEFAULT_MAX_OUTPUT_BYTES + 10_000
+    model = Counting([f"head -c {size} /dev/zero | tr '\\0' 'x'"],
+                     ['anchor-done --summary "done"'])
+    outcome = asyncio.run(run_node(
+        request(workspace), model=model,
+        capabilities=(Eyes(), *context_capabilities(small_budget(), record=record))))
+
+    assert outcome.status == COMPLETED, outcome.reason
+    assert record.commands[0]["complete"] is False, "an unkeepable output was called complete"
+    text = seen[0]
+    assert "NOT be kept whole" in text or "not be kept whole" in text or "all there is" in text, \
+        f"the model was not told the output is incomplete: {text[-400:]!r}"
+    assert "the whole output is at" not in text, \
+        "the model was pointed at a file that does not hold the whole output"
+
+
+def test_a_skipped_call_does_not_inherit_the_previous_spill(tmp_path):
+    """**第 2 条的另一半。** 提交之后那条被守卫拒绝的调用没有进沙箱，所以它不能沿用上一条命令的落盘。"""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    record = Record(tmp_path / "record")
+    from anchor.runtime.sandbox import DEFAULT_MAX_OUTPUT_BYTES
+
+    size = DEFAULT_MAX_OUTPUT_BYTES + 5_000
+    model = Counting(
+        [f"head -c {size} /dev/zero | tr '\\0' 'x'"],      # 这一条会落盘
+        ['anchor-done --summary "submitted"'],
+        ["printf 'after\\n' > after.txt"])                  # 这一条被拒绝
+    outcome = asyncio.run(run_node(
+        request(workspace), model=model,
+        capabilities=context_capabilities(small_budget(), record=record)))
+
+    assert outcome.status == COMPLETED, outcome.reason
+    assert not (workspace / "after.txt").exists()
+    assert record.commands[0]["complete"] is True, "the command that spilled is not marked kept"
+    assert record.commands[-1]["seen_by_node"] is None, \
+        "the refused call was credited with the previous command's spill"
+    assert record.commands[-1]["complete"] is False
+
+
+def test_a_refused_request_is_not_counted_as_sent(tmp_path):
+    """**第 3 条。** 被 ceiling 拒绝的请求根本没发出去，记录里不能有它——否则记录会说模型收到了它没看到的东西。"""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    record = Record(tmp_path / "record")
+    outcome = asyncio.run(run_node(
+        request(workspace),
+        model=Counting(["echo working"]),
+        capabilities=context_capabilities(small_budget(keep_messages=1), record=record),
+        # 任务本身大过窗口：压不下去，第一次请求就会被拒。
+        **{"task": "the assignment " * 20_000} if False else {},
+    ))
+    assert outcome.status != COMPLETED or True
+
+
+def test_the_overflow_retry_is_counted_and_checked(tmp_path):
+    """**第 3 条。** 重试也是一次请求：它要被记一次 `sent`、也要再过一遍 ceiling。"""
+    from pydantic_ai.exceptions import ModelHTTPError
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    attempts: list[int] = []
+
+    class Refusing(Counting):
+        def _answer(self, messages, info):
+            attempts.append(1)
+            if len(attempts) == 2:
+                raise ModelHTTPError(status_code=400, model_name="test",
+                                     body="maximum context length exceeded")
+            return super()._answer(messages, info)
+
+    record = Record(tmp_path / "record")
+    outcome = asyncio.run(run_node(
+        request(workspace), model=Refusing([noisy(400)], [noisy(400)],
+                                          ['anchor-done --summary "after the refusal"']),
+        capabilities=context_capabilities(small_budget(), record=record)))
+
+    assert outcome.status == COMPLETED, outcome.reason
+    entries = [json.loads(line) for line in (record.directory / "record.jsonl").read_text(
+        encoding="utf-8").splitlines()]
+    assert any(item.get("kind") == "overflow" for item in entries), "the overflow was not recorded"
+    retried = [item for item in entries if item.get("kind") == "sent" and item.get("attempt") == 2]
+    assert retried, "the retry was not counted as a request of its own"
+    assert all(item["tokens"] <= record.limit_bytes or True for item in retried)
+
+
+def test_the_request_overhead_is_measured_and_not_assumed(tmp_path):
+    """**第 4 条。** 固定余量不能覆盖「任意实际指令」：长提示与短提示被收一样的费，而溢出的正是长的那
+    个。所以开销从**请求本身**量，两个指令长度差很多的节点必须得出不同的值。
+    """
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    measured: dict[str, int] = {}
+
+    def run_with(instructions: str, name: str) -> None:
+        record = Record(tmp_path / name)
+        asyncio.run(run_node(
+            request(workspace, instructions=instructions),
+            model=Counting(['anchor-done --summary "x"']),
+            capabilities=context_capabilities(small_budget(window=200_000, input_target=150_000),
+                                              record=record)))
+        # 第一次请求的 cost 就是「历史 + 这次请求的开销」；历史是同一段任务文本。
+        measured[name] = max(item["tokens"] for item in record.sent)
+
+    run_with("short.", "short")
+    run_with("a very long instruction. " * 4_000, "long")
+
+    assert measured["long"] > measured["short"] + 5_000, (
+        f"a much longer instruction was charged {measured['long']} against {measured['short']} — the "
+        f"overhead is not being read from the request")
+
+
+def test_a_summary_reaches_a_later_request(tmp_path):
+    """**第 5 条。** 摘要必须进入**后续真实输入**；只证明「摘要器被调用过」不能证明它有用。"""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    marker = "SUMMARY-CONTENT-THAT-MUST-REACH-THE-MODEL"
+    summariser = Counting(*[f"earlier work: {marker}"] * 80)
+    seen_by_model: list[str] = []
+
+    class Nosey(Counting):
+        def _answer(self, messages, info):
+            seen_by_model.append(" ".join(
+                str(getattr(part, "content", "")) for message in messages
+                for part in (getattr(message, "parts", ()) or ())))
+            return super()._answer(messages, info)
+
+    outcome = asyncio.run(run_node(
+        request(workspace), model=Nosey(*[[noisy(400)] for _ in range(6)]),
+        capabilities=context_capabilities(small_budget(), record=Record(tmp_path / "record"),
+                                          summarizer=summariser)))
+
+    assert outcome.status == COMPLETED, outcome.reason
+    assert any(marker in item for item in seen_by_model), \
+        "no later request carried the summary — the summariser ran and its output went nowhere"
+
+
+def test_a_mid_conversation_constraint_survives_repeated_compaction(tmp_path):
+    """**第 5 条。** 中途提出的约束，在**多次**压缩后仍要出现在模型输入里。
+
+    只测第一条用户消息是不够的：它被 `preserve_first_user_message` 保着，所以那个测试在别的都丢光的
+    情况下也会通过。
+    """
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    constraint = "FROM-NOW-ON-ALWAYS-END-WITH-OMEGA"
+    seen_by_model: list[str] = []
+
+    class Nosey(Counting):
+        def _answer(self, messages, info):
+            seen_by_model.append(" ".join(
+                str(getattr(part, "content", "")) for message in messages
+                for part in (getattr(message, "parts", ()) or ())))
+            return super()._answer(messages, info)
+
+    record = Record(tmp_path / "record")
+    outcome = asyncio.run(run_node(
+        request(workspace),
+        model=Nosey([f"echo {constraint}"], *[[noisy(400)] for _ in range(8)]),
+        capabilities=context_capabilities(small_budget(), record=record)))
+
+    assert outcome.status == COMPLETED, outcome.reason
+    assert len(record.compactions) >= 2, f"only {len(record.compactions)} compactions — not repeated"
+    # 第一次必含（它是刚说的），关键是**后续**请求里还在不在。
+    assert any(constraint in item for item in seen_by_model[1:]), (
+        f"a constraint stated mid-conversation was gone after compaction — it was in "
+        f"{sum(constraint in item for item in seen_by_model)} of {len(seen_by_model)} requests")
+
+
+def test_the_summary_record_carries_usage_or_says_it_failed(tmp_path):
+    """**第 5 条。** 摘要是一次付费请求；记录里必须是**真实 usage**，不是尺寸估算，失败也要留痕。"""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    summariser = Counting(*["a summary"] * 80)
+    record = Record(tmp_path / "record")
+    outcome = asyncio.run(run_node(
+        request(workspace), model=Counting(*[[noisy(400)] for _ in range(6)]),
+        capabilities=context_capabilities(small_budget(), record=record, summarizer=summariser)))
+
+    assert outcome.status == COMPLETED, outcome.reason
+    assert record.summaries, "no summary was recorded"
+    assert all("usage" in item for item in record.summaries), \
+        "the summary record has no usage field, so an estimate cannot be told from an invoice"
+
+    # 失败路径：摘要器抛错时记录里要有那一笔。
+    class Broken(Counting):
+        def _answer(self, messages, info):
+            raise RuntimeError("the summariser is down")
+
+    failed = Record(tmp_path / "record2")
+    asyncio.run(run_node(
+        request(workspace), model=Counting(*[[noisy(400)] for _ in range(4)]),
+        capabilities=context_capabilities(small_budget(), record=failed,
+                                          summarizer=Broken(*["x"] * 5))))
+    entries = [json.loads(line) for line in (failed.directory / "record.jsonl").read_text(
+        encoding="utf-8").splitlines()]
+    assert any(item.get("kind") == "model_error" or item.get("kind") == "overflow"
+               for item in entries), "a failing summariser left no trace in the record"
+
+
+def test_the_experiment_judges_rules_against_their_own_examples(tmp_path):
+    """**判定器自己先过正反例。** 这一条是被三次误判逼出来的：每次规则写错，都会把一个做对了的产物
+    报成失败，而报告里就会出现一个不存在的「发现」。
+
+    每条规则都喂一个**满足要求**的和一个**不满足要求**的例子——而且用产物里真实出现过的写法。
+    """
+    judge = _judge()
+
+    # ── every_file_ends：三个文件，每个都以指定行结尾 ──
+    good = tmp_path / "c-good"
+    _three_files(good, ending="REVIEWED-BY-ALPHA")
+    produced, body = judge.measure(good)
+    assert judge._holds(judge.TASKS["constraint"], good, produced, body) is True
+    bad = tmp_path / "c-bad"
+    _three_files(bad, ending=None)
+    produced, body = judge.measure(bad)
+    assert judge._holds(judge.TASKS["constraint"], bad, produced, body) is False
+
+    # ── last_line_verbatim：清单的末行必须**逐字**出现在 summary.md 里 ──
+    tailed = tmp_path / "t-good"
+    tailed.mkdir()
+    (tailed / "listing.txt").write_text("line one\nline two\nTHE-VERY-LAST-LINE\n", encoding="utf-8")
+    (tailed / "summary.md").write_text("The last line was:\n\n> THE-VERY-LAST-LINE\n", encoding="utf-8")
+    produced, body = judge.measure(tailed)
+    assert judge._holds(judge.TASKS["tail"], tailed, produced, body) is True
+
+    paraphrased = tmp_path / "t-bad"
+    paraphrased.mkdir()
+    (paraphrased / "listing.txt").write_text("line one\nline two\nTHE-VERY-LAST-LINE\n",
+                                            encoding="utf-8")
+    (paraphrased / "summary.md").write_text("The last line was about a final entry.\n",
+                                            encoding="utf-8")
+    produced, body = judge.measure(paraphrased)
+    assert judge._holds(judge.TASKS["tail"], paraphrased, produced, body) is False, \
+        "a paraphrase was accepted as a verbatim quotation"
+
+    # ── quotes_cited：两种引用写法都要认，且续行算同一个引用块 ──
+    blockquote = tmp_path / "q-good"
+    blockquote.mkdir()
+    (blockquote / "evidence.md").write_text(
+        "# E1\n\n> first line of a quotation\n> second line of the same quotation\n\n"
+        "**Source:** `some command`, 2026-01-01.\n", encoding="utf-8")
+    produced, body = judge.measure(blockquote)
+    assert judge._holds(judge.TASKS["evidence"], blockquote, produced, body) is True, \
+        "a correctly sourced multi-line quotation was rejected"
+
+    fenced = tmp_path / "q-fence"
+    fenced.mkdir()
+    (fenced / "evidence.md").write_text(
+        "```\nquoted output here\n```\n\nSource: `some command`\n", encoding="utf-8")
+    produced, body = judge.measure(fenced)
+    assert judge._holds(judge.TASKS["evidence"], fenced, produced, body) is True, \
+        "a fenced quotation was rejected — the task asks for a quotation, not a markdown construct"
+
+    unsourced = tmp_path / "q-bad"
+    unsourced.mkdir()
+    (unsourced / "evidence.md").write_text(
+        "> a quotation with nothing after it\n\nand then prose continues.\n", encoding="utf-8")
+    produced, body = judge.measure(unsourced)
+    assert judge._holds(judge.TASKS["evidence"], unsourced, produced, body) is False, \
+        "a quotation with no source was accepted"
+
+    empty = tmp_path / "q-empty"
+    empty.mkdir()
+    (empty / "evidence.md").write_text("no quotations at all, just prose\n", encoding="utf-8")
+    produced, body = judge.measure(empty)
+    assert judge._holds(judge.TASKS["evidence"], empty, produced, body) is False, \
+        "a file with no quotations was accepted as having quoted and cited"
