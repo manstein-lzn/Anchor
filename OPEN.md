@@ -12,6 +12,20 @@ that reads like a conclusion is a proposal.
 
 ---
 
+## In flight: the agent node runtime is being replaced
+
+ADR-062 is accepted as a target and is **not** the default executor. The graph today runs
+mini-swe-agent (`simple/agent.py`); the verified replacement is `node/pydantic_adapter.py`, which the
+graph does not call yet. `ARCHITECTURE_AGENT_NODE_MIGRATION.md` is the implementation plan (M0–M5) and
+`AGENT_NODE_VALIDATION_RESULT.md` is what has actually been measured — structurally, not in production.
+
+Two things may be assumed by the migration and are true today: the candidate runner exists and is
+exercised by `scripts/recovery_windows.py` and `tests/test_node_*`, and the seam between graph and node
+is `NodeRequest`/`NodeOutcome` in `src/anchor/node/__init__.py`. Everything else about the switch is
+open until M3 lands and M5 accepts it.
+
+---
+
 ## Where the runtime is
 
 Verified, tested, and in the working tree. Nothing below needs re-litigating.
@@ -71,8 +85,9 @@ ReAct:   reason → act → observe → reason → …
                     where does the observation come from?
 ```
 
-An agent node *is* a ReAct loop (mini-swe-agent), so the loop already exists — but inside a node it is
-invisible to the graph: not checkpointed, not attributable, not gateable.
+An agent node *is* a ReAct loop (mini-swe-agent today, PydanticAI after ADR-062), so the loop already
+exists — but inside a node it is invisible to the graph: not checkpointed, not attributable, not
+gateable.
 
 Expressing it as a cycle makes the observation a **file**, and a file can be written by a program or by
 a person instead of by the model's own reading of a tool result. `examples/graphs/academic-gated.json`

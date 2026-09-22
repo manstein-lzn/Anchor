@@ -1640,3 +1640,99 @@ agents write, an op decides, and the op's exit code is what sends the work back.
 
 **What is not here yet.** An input op — a node whose files come from outside the graph and whose run
 is therefore `waiting` rather than finished — is the next step and is deliberately not in this one.
+
+## ADR-062: One Agent Node runtime, with the PydanticAI loop inside it and the contract outside
+
+**Status: accepted as the migration target. Not yet the default executor.** ADR-061 says a node is an
+agent or an op. This says *what runs an agent node*, and it settles a question the earlier design left
+open by having two answers: the production graph runs `mini-swe-agent` (`simple/agent.py`), while
+`node/pydantic_adapter.py` is a second, verified runner that the graph does not call. Two runners is
+two completion protocols, two budget stories and two recovery stories, and the verification packages
+were written against the one that is not in production.
+
+The migration is one-way: the PydanticAI harness becomes the only body of an agent node, and
+mini-swe-agent is deleted rather than kept as a fallback. It is one-way because a fallback that is
+never exercised is a second implementation that rots, and the point of the exercise was to stop having
+two.
+
+**The seam is the product.** Graph hands over a `NodeRequest`, gets back a `NodeOutcome`, and carries a
+`RecoveryRef` it cannot read. Graph never reads a harness message, a checkpoint or a summary; Node never
+reads a scheduler's internals. This is what makes the runner replaceable, and it is why the frozen parts
+below are field *semantics* rather than class shapes.
+
+### The contract, frozen
+
+- `NodeRequest.execution_id` — which execution this is. **Not a resume token.** The resume token is
+  `NodeRequest.recovery`, which is opaque to the graph. (This corrects the field's earlier docstring,
+  which said nothing would ever promise to resume from it; `recovery` does now.)
+- `NodeRequest.recovery` — an encoded `RecoveryRef` for a previous attempt of this same node, or `""`.
+  The graph carries it and cannot read it.
+- `NodeRequest.{workspace, inputs, routes, network, timeout_seconds, max_requests, trace, roles}` —
+  as they are. `inputs` are already resolved `(host_path, mount_point)` pairs; the runner does not know
+  what an edge is. `routes` are node ids the node may choose among; the graph keeps the final say.
+- `NodeOutcome.{status, submission, route, model_requests, trace_ref, reason, files, recovery}` — as
+  they are, with the two validations already enforced in `__post_init__`: a status outside `STATUSES`
+  is refused, and a non-`completed` execution may not name a route. `budget_exhausted` is a status and
+  never a route.
+- Statuses: `completed`, `budget_exhausted`, `failed`, `uncertain`. The migration adds one thing the
+  ADR fixes by name: **an exception must be mapped to `failed` or `uncertain` before it leaves the
+  runner.** The graph may not be handed a traceback and be asked to guess a status from its type.
+
+### What the graph may depend on
+
+- `run_agent_node(request, *, model, capabilities=())` — the only harness entry point.
+- `run_op_node(request, *, command, ...)` — never receives a model or capabilities, and its module
+  must not import `pydantic_ai` or `pydantic_ai_harness`.
+- `assess(...)` / `continued_messages(...)` via the recovery module, and
+  `read_completion_fact(control, node)` — the structured completion, which is the only thing that makes
+  a node `finished`.
+
+### Invariants that outrank the class shapes
+
+1. The control directory, the step store, the budget, the append-only record and the output store live
+   **outside** the node workspace and are mounted read-only.
+2. The agent's only tool is `bash`. Output is read back through `bash`; no second harness tool.
+3. Task, instructions, tool schema, model responses, tool arguments, `tool_call_id`, tool results,
+   summaries and budget events are appended. Compaction changes only the projection the model sees.
+4. Completion is a fact, not prose: only what `read_completion` accepts produces a `CompletionFact`.
+5. An unknown side effect is never replayed. `uncertain` is a normal terminal state and the graph must
+   surface it rather than resolve it.
+6. A node with a completion fact resumes with zero model requests, zero tool executions, zero
+   duplicate submissions.
+7. The request budget is the whole logical execution's budget: main model, summariser and window retry
+   share one persisted counter, charged once before a request is sent, and a spent budget sends none.
+8. Ops depend on none of the agent runtime's types.
+
+### The dependency matrix, pinned
+
+The versions this migration is verified against, and the ones a change must re-verify:
+
+| package | pinned | role |
+| --- | --- | --- |
+| `pydantic-ai-slim` | `2.46.0` | the model loop |
+| `pydantic-ai-harness` | `0.32.0` | capabilities, `StepPersistence`/`FileStepStore` |
+| `pydantic` | `2.13.5` | messages, validation |
+| `mini-swe-agent` | `2.4.6` | **removed by M3.** Present only until then |
+| `bubblewrap` | `0.9.0` (host) | the sandbox boundary |
+
+`pydantic-ai-slim` and `pydantic-ai-harness` move from `requirements/` (verification-only) to
+`pyproject.toml`'s runtime dependencies at M3, when they become the only path. `mini-swe-agent` is
+deleted from `pyproject.toml` in the same change that deletes `simple/agent.py`, and not before.
+
+### What this does not promise
+
+Not exactly-once. Not power-loss durability. Not provider window-error coverage beyond what a
+deterministic model exercises. Not automatic reconciliation of arbitrary external side effects. A
+`rename` being atomic is not several files being one transaction, and a `SIGKILL` is not a power cut.
+These are the same limits `AGENT_NODE_VALIDATION_RESULT.md` already states, and the migration does not
+retract them by moving the code.
+
+### Deliberately refused
+
+- A plugin bus, a second scheduler, a second completion parser, a second store abstraction. One source
+  of truth per responsibility; §3 of `ARCHITECTURE_AGENT_NODE_MIGRATION.md` lists the end state.
+- Rewriting the graph IR. The external `agents`/`ops` tables stay; `NodeDefinition` is an internal
+  normalisation, not a file format change.
+- Converting historical runs. Old runs are read-only; an old trace is not dressed up as a
+  `RecoveryRef`.
+- Keeping mini as a fallback behind a flag. A flag nobody sets is a path nobody tests.
