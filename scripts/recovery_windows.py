@@ -1,0 +1,626 @@
+#!/usr/bin/env python3
+"""Kill a node at a chosen instant, and see what can honestly be said afterwards.
+
+Each window is a real node, in a real bubblewrap sandbox, running a command that really writes a
+counter — and the kill is a real `SIGKILL` of the process from outside it.
+
+**The instant is chosen by the node, not guessed by the parent.** The node reaches the window, writes
+one byte down a pipe, and blocks; the parent is reading that pipe and kills the moment the byte
+arrives. Sleeping for "about long enough" would make every window a statement about the machine's speed
+rather than about the boundary, and the same test would pass or fail depending on the load.
+
+**Two modes, one file.** Without `--child` it runs every window and reports; with `--child` it runs one
+node and is expected to be killed. The child never decides anything — it is the thing being interrupted,
+and its only job is to say when it has arrived somewhere.
+
+    scripts/recovery_windows.py                     # every window, with a bounded timeout
+    scripts/recovery_windows.py --only C3           # one of them
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import os
+import shutil
+import signal
+import subprocess
+import sys
+import time
+import traceback
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+#: Where the child says it has arrived. The parent reads this and nothing else decides the moment.
+READY_FD_ENV = "ANCHOR_READY_FD"
+
+
+@dataclass
+class Evidence:
+    """What one window produced, in the terms §61 asks for.
+
+    `killed` is `None` for the windows that are not about a kill at all — C6, C7 and C8 check what a
+    recovery does and what a reference means, and calling them "never reached the barrier" would be the
+    runner mistaking its own shape for a result.
+    """
+
+    window: str
+    killed: bool | None
+    exit_code: int | None
+    barrier: str
+    counter_before: int
+    counter_after: int
+    verdict: str
+    because: str
+    effects: list[list[str]] = field(default_factory=list)
+    events: list[str] = field(default_factory=list)
+    snapshot: str = ""
+    budget: str = ""
+    seconds: float = 0.0
+    note: str = ""
+    traceback: str = ""
+    #: Where the store and the workspace are, so the evidence can be re-read and re-checked rather than
+    #: trusted. §61 asks for the ledger, the snapshot and the git state; these are how to reach them.
+    control: str = ""
+    workspace: str = ""
+
+    def lines(self) -> list[str]:
+        out = [f"=== {self.window} ===",
+               f"  killed={self.killed} exit={self.exit_code} barrier={self.barrier!r} "
+               f"({self.seconds:.2f}s)",
+               f"  counter: {self.counter_before} -> {self.counter_after}",
+               f"  verdict: {self.verdict} — {self.because}"]
+        for call_id, name, status in self.effects:
+            out.append(f"    effect {call_id} {name} = {status}")
+        if self.events:
+            out.append("    events: " + ", ".join(self.events))
+        if self.snapshot:
+            out.append(f"    snapshot: {self.snapshot}")
+        if self.budget:
+            out.append(f"    budget: {self.budget}")
+        if self.note:
+            out.append(f"  note: {self.note}")
+        if self.traceback:
+            out.append("  child traceback:\n" + "\n".join(
+                "    " + line for line in self.traceback.splitlines()[-12:]))
+        return out
+
+
+# ── the child ────────────────────────────────────────────────────────────────────────────────────
+
+def _wait_for_a_kill(where: str) -> None:
+    """Say we have arrived, then block until the parent kills us.
+
+    Written as bytes down a pipe because a pipe is a handshake: the parent is blocked on the read, so
+    the kill lands as soon as this returns rather than at the next time somebody looks. `signal.pause`
+    blocks until a signal arrives, and the signal that arrives is `SIGKILL`, which does not return.
+    """
+    fd = int(os.environ.get(READY_FD_ENV, "-1"))
+    if fd < 0:
+        raise RuntimeError(f"{READY_FD_ENV} is not set — the child cannot signal its window")
+    os.write(fd, f"{where}\n".encode("utf-8"))
+    os.close(fd)
+    while True:                                              # pragma: no cover - killed here
+        signal.pause()
+
+
+def _report_window(window: str, where: str) -> None:
+    """Say a hook was reached without pausing. The parent reads the ledger at that instant and lets the
+    child run on — for the windows that are questions about the framework rather than kills."""
+    fd = int(os.environ.get(READY_FD_ENV, "-1"))
+    if fd >= 0:
+        os.write(fd, f"{window}@{where}\n".encode("utf-8"))
+
+
+def _barrier(window: str):
+    """The capability that stops the node at the chosen boundary.
+
+    The four tool-related hooks are not interchangeable and the boundaries they give are not the same
+    ones people assume. Measured on this build:
+
+        after_model_request   tool_call_started is NOT yet in the ledger
+        before_tool_execute   tool_call_started IS in the ledger, the command has not run
+        wrap_tool_execute     entered after both, so a pause after its handler has the effect done and
+                              no terminal record
+
+    Which is why C1 pauses in the first, C2 in the second, and C3 between the handler and its return.
+    """
+    from pydantic_ai.capabilities import AbstractCapability
+
+    class Barrier(AbstractCapability):
+        def __init__(self) -> None:
+            self.seen_models = 0
+            self.seen_tools = 0
+
+        async def after_model_request(self, ctx, *, request_context, response):
+            self.seen_models += 1
+            if window == "C1" and self.seen_models == 1:
+                _wait_for_a_kill("after_model_request, before the tool cycle")
+            if window == "C4" and self.seen_models >= 2:
+                # The snapshot for the cycle that just settled has been written by now; what has not
+                # happened is the run ending.
+                _wait_for_a_kill("after the settled cycle, before the run ends")
+            return response
+
+        async def before_tool_execute(self, ctx, *, call, tool_def, args):
+            self.seen_tools += 1
+            if window == "C2" and self.seen_tools == 1:
+                _wait_for_a_kill("tool_call_started persisted, command not executed")
+            if window == "C5":
+                # **Is there a window between the terminal effect record and the snapshot?** Checked at
+                # every reachable hook rather than argued about: this one runs before the second tool
+                # call, so the first one's terminal record is already written — and whether the snapshot
+                # is also already written decides whether the window exists at all.
+                _report_window("C5", "before the second tool call")
+            return args                                     # must be returned; None breaks the call
+
+        async def wrap_tool_execute(self, ctx, *, call, tool_def, args, handler):
+            result = await handler(args)
+            if window == "C3" and self.seen_tools == 2:
+                # The counter command is the first call; this is the pause after *its* effect and
+                # before the framework writes the terminal record for it.
+                _wait_for_a_kill("side effect done, terminal record not written")
+            return result
+
+    return Barrier()
+
+
+async def _run_child(window: str, control: Path, workspace: Path, script: dict) -> None:
+    """One node, with the barrier attached, expected never to return for the killed windows."""
+    from pydantic_ai.models.function import FunctionModel
+    from pydantic_ai.messages import ModelResponse, ToolCallPart
+    from pydantic_ai_harness import StepPersistence
+
+    from anchor.node import NodeRequest
+    from anchor.node.pydantic_adapter import run_node
+    from anchor.node.recovery import open_store, save_budget, Budget, RecoveryRef
+
+    store = open_store(control)
+    ref = RecoveryRef(node=script["node"], run=script["run_id"], store=str(control))
+    (control / "reference").write_text(ref.encode(), encoding="utf-8")
+    save_budget(control, Budget(requests_used=0, requests_allowed=8))
+
+    turn = {"n": 0}
+
+    def model(messages, info):
+        index = turn["n"]
+        turn["n"] += 1
+        command = script["commands"][index] if index < len(script["commands"]) else None
+        if command is None:
+            return ModelResponse(parts=[ToolCallPart(
+                tool_name="bash", args={"command": 'anchor-done --summary "finished"'})])
+        return ModelResponse(parts=[ToolCallPart(tool_name="bash", args={"command": command})])
+
+    await run_node(
+        NodeRequest(execution_id=script["node"], task=script["task"], workspace=workspace,
+                    max_requests=8, trace=control / "trace.jsonl"),
+        model=FunctionModel(model),
+        capabilities=(StepPersistence(store=store, agent_name="anchor-node",
+                                      run_id=script["run_id"]),
+                      _barrier(window)))
+
+
+# ── the parent ────────────────────────────────────────────────────────────────────────────────────
+
+#: The counter command: atomic, in the sandbox, and it writes a marker so the effect is visible even
+#: without reading the number. `>>` after a `flock` is not needed for a test that runs one command.
+#: A command that is still running when the host dies, and says so afterwards if it survived.
+#: A command that is still running when the host dies, and says so afterwards **if it survived**.
+#:
+#: It announces itself by writing a file, because the handshake has to come from inside the
+#: sandbox: `bwrap` does not pass an inherited pipe in, and the whole question is whether this
+#: process keeps going after the process that started it is gone. The parent waits for that file
+#: — a handshake, not a sleep — and kills the host the moment it appears.
+SURVIVOR_SECONDS = 8
+SURVIVOR = ("printf 'started\\n' > started.log; sleep %d; "
+            "printf 'SURVIVED\\n' >> survived.log; echo finished" % SURVIVOR_SECONDS)
+
+COUNTER = ("n=$(cat counter.txt 2>/dev/null || echo 0); n=$((n+1)); "
+           "printf '%s\\n' \"$n\" > counter.tmp && mv counter.tmp counter.txt && "
+           "printf 'EFFECT-%s\\n' \"$n\" >> effects.log && echo \"counted $n\"")
+
+
+@dataclass
+class Window:
+    name: str
+    commands: list[str]
+    barrier: str
+    expect: str
+
+
+def windows() -> list[Window]:
+    """The kill windows this package is asked about, with what each one should show afterwards."""
+    return [
+        Window("C1", [COUNTER, 'anchor-done --summary "done"'],
+               "after_model_request, before the tool cycle",
+               "counter=0; the tool never began, so the call can be made once"),
+        Window("C2", [COUNTER, 'anchor-done --summary "done"'],
+               "tool_call_started persisted, command not executed",
+               "counter=0; started with no terminal state — uncertain, not replayed"),
+        Window("C3", [COUNTER, 'anchor-done --summary "done"'],
+               "side effect done, terminal record not written",
+               "counter=1; uncertain; a second recovery must not make it 2"),
+        Window("C4", [COUNTER, 'anchor-done --summary "done"'],
+               "after the settled cycle, before the run ends",
+               "counter=1; continuable from the settled snapshot, without redoing the work"),
+        Window("C5", [COUNTER, 'anchor-done --summary "done"'],
+               "before the second tool call",
+               "does the window between the terminal record and the snapshot exist at all?"),
+        Window("C9", [SURVIVOR, 'anchor-done --summary "done"'],
+               "side effect done, terminal record not written",
+               "did the sandbox's own process outlive the host that started it?"),
+    ]
+
+
+def _counter(workspace: Path) -> int:
+    path = workspace / "counter.txt"
+    try:
+        return int(path.read_text(encoding="utf-8").strip() or 0)
+    except (OSError, ValueError):
+        return 0
+
+
+def _kill_at(control: Path, workspace: Path, script: dict, barrier: str,
+             timeout: float) -> tuple[bool | None, int | None, str, str]:
+    """Spawn the child, wait for its barrier byte, and kill it there.
+
+    Returns (was_killed, exit_code, what_the_child_said, traceback_text). The wait is a **read** on a
+    pipe: no polling, no sleeping, and nothing about the machine's speed enters into when the kill lands.
+    """
+    probe = script["window"] in ("C5",)
+    read_fd, write_fd = os.pipe()
+    environment = dict(os.environ, **{READY_FD_ENV: str(write_fd)})
+    child = subprocess.Popen(
+        [sys.executable, __file__, "--child", "--window", script["window"], "--control", str(control),
+         "--workspace", str(workspace), "--script", json.dumps(script)],
+        pass_fds=(write_fd,), env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True)
+    os.close(write_fd)
+    said = ""
+    killed: bool | None = False
+    try:
+        ready, _, _ = select_with_timeout(read_fd, timeout)
+        if ready:
+            said = os.read(read_fd, 200).decode("utf-8", "replace").strip()
+            # **A byte, or nothing.** End of file also makes the pipe readable — and reading that as a
+            # signal would report a kill at a barrier the child never reached, which is how four windows
+            # looked correct while proving nothing.
+            if said and probe:
+                # A question, not a kill: take what the ledger says here and let the child run on.
+                killed = None
+            elif said:
+                os.kill(child.pid, signal.SIGKILL)
+                killed = True
+            else:
+                child.kill()
+        else:
+            child.kill()
+    finally:
+        os.close(read_fd)
+    if killed is None:
+        child.wait(timeout=120)
+    _, errors = child.communicate(timeout=30)
+    return killed, child.returncode, said, errors or ""
+
+
+def select_with_timeout(fd: int, timeout: float) -> tuple[bool, bool, bool]:
+    import select
+    ready, writable, exceptional = select.select([fd], [], [], timeout)
+    return bool(ready), bool(writable), bool(exceptional)
+
+
+async def _verdict(control: Path) -> tuple[str, str, list[list[str]], list[str], str, str]:
+    from anchor.node.recovery import RecoveryRef, assess, open_store
+
+    token = (control / "reference").read_text(encoding="utf-8")
+    store_dir = control
+    ref = RecoveryRef.decode(token)
+    store = open_store(store_dir)
+    verdict = await assess(store, ref)
+    return (verdict.action, verdict.because, [list(item) for item in verdict.effects],
+            list(verdict.events), verdict.snapshot,
+            f"{verdict.budget.requests_used}/{verdict.budget.requests_allowed}")
+
+
+def _wait_for_file(path: Path, timeout: float, interval: float = 0.02) -> bool:
+    """Wait for a file to appear, up to a bound.
+
+    The bound is what keeps this from hanging; the interval is not how the moment is chosen. The command
+    writes the file and the parent reacts — a handshake, however it happens to be implemented.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if path.exists():
+            return True
+        time.sleep(interval)
+    return path.exists()
+
+
+def _processes_touching(root: Path) -> list[str]:
+    """Anything still running that mentions this window's directories.
+
+    §44 asks the test to clean up what it started, and a sandboxed command that outlived its host is
+    exactly where a leak is possible — so whether one exists is measured rather than assumed.
+    """
+    try:
+        listing = subprocess.run(["ps", "-eo", "pid,args"], capture_output=True, text=True,
+                                 check=False).stdout
+    except OSError:                                           # pragma: no cover - defensive
+        return []
+    return [line.strip() for line in listing.splitlines() if str(root) in line]
+
+
+def run_c9(root: Path, timeout: float) -> Evidence:
+    """Kill the host while its sandbox's shell is still running, and see which survived.
+
+    This is the window where "the host process died" and "the command did not continue" are different
+    claims, and the only way to tell them apart is to look afterwards.
+    """
+    control = root / "C9" / "control"
+    workspace = root / "C9" / "workspace"
+    shutil.rmtree(root / "C9", ignore_errors=True)
+    control.mkdir(parents=True, exist_ok=True)
+    workspace.mkdir(parents=True, exist_ok=True)
+    script = {"window": "C9", "node": "node-C9", "run_id": f"run-C9-{os.getpid()}",
+              "task": "the C9 window", "commands": [SURVIVOR, 'anchor-done --summary "done"']}
+    started = time.monotonic()
+    read_fd, write_fd = os.pipe()
+    try:
+        child = subprocess.Popen(
+            [sys.executable, __file__, "--child", "--window", "C9", "--control", str(control),
+             "--workspace", str(workspace), "--script", json.dumps(script)],
+            pass_fds=(write_fd,), env=dict(os.environ, **{READY_FD_ENV: str(write_fd)}),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        os.close(write_fd)
+        _wait_for_file(workspace / "started.log", timeout)
+        os.kill(child.pid, signal.SIGKILL)
+        child.communicate(timeout=30)
+        exit_code = child.returncode
+    finally:
+        os.close(read_fd)
+
+    survived = _wait_for_file(workspace / "survived.log", SURVIVOR_SECONDS + 5)
+    left = _processes_touching(workspace)
+    action, because, snapshot, budget = "", "", "", ""
+    effects: list[list[str]] = []
+    events: list[str] = []
+    try:
+        action, because, effects, events, snapshot, budget = asyncio.run(_verdict(control))
+    except Exception as exc:                                  # noqa: BLE001 - reported, not raised
+        action, because = "error", f"{type(exc).__name__}: {exc}"
+
+    evidence = Evidence(window="C9", control=str(control), workspace=str(workspace),
+                        killed=True, exit_code=exit_code,
+                        barrier="the command announced itself from inside the sandbox",
+                        counter_before=0, counter_after=0, verdict=action, because=because,
+                        effects=effects, events=events, snapshot=snapshot, budget=budget,
+                        seconds=time.monotonic() - started)
+    evidence.note = (
+        f"the shell {'DID continue' if survived else 'did NOT continue'} after its host was killed; "
+        f"{len(left)} process(es) mentioning this window still running"
+        + (": " + "; ".join(left[:3]) if left else ""))
+    for line in left:                                         # cleanup; the leak is in the evidence
+        try:
+            os.kill(int(line.split(None, 1)[0]), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):         # pragma: no cover - already gone
+            pass
+    return evidence
+
+
+def run_window(window: Window, root: Path, timeout: float) -> Evidence:
+    """One window, start to finish, with its own directories and its own cleanup."""
+    if window.name == "C9":
+        return run_c9(root, timeout)
+    # **Isolated, every time.** §42 asks for an isolated temporary workspace, and this was learned the
+    # hard way: leaving a previous attempt's store behind makes the framework refuse to reuse the same
+    # explicit run id, the child exits before its barrier, and the window reports a kill it never made.
+    control = root / window.name / "control"
+    workspace = root / window.name / "workspace"
+    shutil.rmtree(root / window.name, ignore_errors=True)
+    control.mkdir(parents=True, exist_ok=True)
+    workspace.mkdir(parents=True, exist_ok=True)
+    script = {"window": window.name, "node": f"node-{window.name}",
+              "run_id": f"run-{window.name}-{os.getpid()}", "task": f"the {window.name} window",
+              "commands": window.commands}
+    before = _counter(workspace)
+    started = time.monotonic()
+    killed, code, said, errors = _kill_at(control, workspace, script, window.barrier, timeout)
+    elapsed = time.monotonic() - started
+    after = _counter(workspace)
+
+    evidence = Evidence(window=window.name, control=str(control), workspace=str(workspace),
+                        killed=killed, exit_code=code, barrier=said,
+                        counter_before=before, counter_after=after, verdict="", because="",
+                        seconds=elapsed, traceback=errors)
+    try:
+        action, because, effects, events, snapshot, budget = asyncio.run(_verdict(control))
+        evidence.verdict, evidence.because = action, because
+        evidence.effects, evidence.events = effects, events
+        evidence.snapshot, evidence.budget = snapshot, budget
+    except Exception as exc:                                  # noqa: BLE001 - reported, not raised
+        evidence.verdict, evidence.because = "error", f"{type(exc).__name__}: {exc}"
+        evidence.traceback = (evidence.traceback + "\n" + traceback.format_exc()).strip()
+    if killed is False:
+        evidence.note = "the child never reached its barrier — this window proved nothing"
+    return evidence
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--child", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--window", default="", help=argparse.SUPPRESS)
+    parser.add_argument("--control", default="", help=argparse.SUPPRESS)
+    parser.add_argument("--workspace", default="", help=argparse.SUPPRESS)
+    parser.add_argument("--script", default="", help=argparse.SUPPRESS)
+    parser.add_argument("--only", default="", help="comma-separated windows, default all")
+    parser.add_argument("--root", default=".local/recovery-windows")
+    parser.add_argument("--timeout", type=float, default=120.0,
+                       help="how long to wait for a child to reach its barrier")
+    parser.add_argument("--json", default="", help="write the evidence here as JSON")
+    args = parser.parse_args()
+
+    if args.child:
+        asyncio.run(_run_child(args.window, Path(args.control), Path(args.workspace),
+                               json.loads(args.script)))
+        return 0                                             # pragma: no cover - killed before this
+
+    every = {item.name for item in windows()} | {"C6", "C7", "C8"}
+    asked = {name.strip() for name in args.only.split(",")} if args.only else every
+    chosen = [item for item in windows() if item.name in asked]
+    without_killing = sorted(asked & {"C6", "C7", "C8"})
+    root = Path(args.root)
+    root.mkdir(parents=True, exist_ok=True)
+    results: list[Evidence] = []
+    try:
+        for window in chosen:
+            print(f"running {window.name}: {window.expect}", flush=True)
+            results.append(run_window(window, root, args.timeout))
+        if without_killing:
+            results.extend(run_windows_without_killing(root, without_killing))
+    finally:
+        # No child outlives this. The killed ones are gone; a child that never reached its barrier was
+        # killed by the wait itself, and anything still holding the directory is reported rather than
+        # left running.
+        _reap(root)
+    for evidence in results:
+        for line in evidence.lines():
+            print(line)
+        print()
+    if args.json:
+        Path(args.json).write_text(
+            json.dumps([asdict(item) for item in results], indent=2, ensure_ascii=False),
+            encoding="utf-8")
+        print(f"wrote {args.json}")
+    missed = [item.window for item in results if item.killed is False]
+    if missed:
+        print(f"these windows never reached their barrier: {', '.join(missed)}")
+        return 1
+    return 0
+
+
+async def _recovered(control: Path) -> tuple[str, int]:
+    """What a second recovery would do, and how many times the effect has run.
+
+    The number is read from the workspace the command wrote to, so "it did not run again" is a fact
+    about the disk rather than about the code that decided not to run it.
+    """
+    from anchor.node.recovery import RecoveryRef, assess, continued_messages, open_store
+    ref = RecoveryRef.decode((control / "reference").read_text(encoding="utf-8"))
+    store = open_store(control)
+    verdict = await assess(store, ref)
+    if verdict.action == "continuable":
+        # Fetching the history is the act a caller would take; it must not run anything by itself.
+        await continued_messages(store, ref)
+    return verdict.action, len(verdict.effects)
+
+
+def run_windows_without_killing(root: Path, names: list[str]) -> list[Evidence]:
+    """C6, C7 and C8: nothing is killed, so these can be checked in one process.
+
+    They are here rather than in the unit tests because they are about the **store**, and a store that
+    was never written to by a real killed run is a different object from the one this package makes.
+    """
+    from anchor.node.recovery import Budget, InvalidReference, RecoveryRef, assess, open_store, save_budget
+    out: list[Evidence] = []
+
+    # ── C6: the same reference twice ──
+    if "C6" in names:
+        control = root / "C3" / "control"          # the C3 kill left a started, unresolved effect
+        evidence = Evidence(window="C6", killed=None, exit_code=None, barrier="(no kill)",
+                            counter_before=0, counter_after=_counter(root / "C3" / "workspace"),
+                            verdict="", because="")
+        try:
+            first = asyncio.run(_recovered(control))
+            second = asyncio.run(_recovered(control))
+            evidence.verdict = "no-repeat" if first == second else "CHANGED"
+            evidence.because = (
+                f"assessing the same reference twice gave {first} then {second}; a second recovery does "
+                f"not overwrite the history or confirm a side effect twice")
+        except Exception as exc:                              # noqa: BLE001
+            evidence.verdict, evidence.because = "error", f"{type(exc).__name__}: {exc}"
+        out.append(evidence)
+
+    # ── C7: a reference that does not check out ──
+    if "C7" in names:
+        control = root / "C4" / "control"
+        good = (control / "reference").read_text(encoding="utf-8")
+        cases = {
+            "truncated": good[: len(good) // 2],
+            "edited": good[:-4] + "AAAA",
+            "not-an-anchor-token": "sp-something-else",
+            "unknown-run": RecoveryRef(node="n", run="run-that-never-existed", store=str(control)).encode(),
+        }
+        problems = []
+        for label, token in cases.items():
+            try:
+                ref = RecoveryRef.decode(token)
+                verdict = asyncio.run(assess(open_store(control), ref))
+                problems.append(f"{label} -> {verdict.action} ({verdict.because[:60]})")
+            except InvalidReference as exc:
+                problems.append(f"{label} -> refused: {str(exc)[:60]}")
+        evidence = Evidence(window="C7", killed=None, exit_code=None, barrier="(no kill)",
+                            counter_before=0, counter_after=_counter(root / "C4" / "workspace"),
+                            verdict="", because="")
+        # A refused reference and an invalid verdict are both acceptable; silently starting a fresh task
+        # is not, and neither is an exception with no explanation.
+        evidence.verdict = ("explicit" if all("refused" in item or "invalid" in item
+                                             for item in problems) else "SILENT")
+        evidence.because = "; ".join(problems)
+        out.append(evidence)
+
+    # ── C8: killed twice, and the budget does not reset ──
+    if "C8" in names:
+        control = root / "C8" / "control"
+        shutil.rmtree(root / "C8", ignore_errors=True)
+        control.mkdir(parents=True, exist_ok=True)
+        save_budget(control, Budget(requests_used=3, requests_allowed=8))
+        effects: list[list[str]] = []
+        for attempt in (1, 2):
+            save_budget(control, Budget(requests_used=3 * attempt, requests_allowed=8))
+            store = open_store(control)
+            ref = RecoveryRef(node="node-C8", run=f"run-C8-{attempt}", store=str(control))
+            (control / "reference").write_text(ref.encode(), encoding="utf-8")
+            verdict = asyncio.run(assess(store, ref))
+            effects = [list(item) for item in verdict.effects]
+        from anchor.node.recovery import load_budget
+        reloaded = load_budget(control)
+        evidence = Evidence(window="C8", killed=None, exit_code=None, barrier="(no kill)",
+                            counter_before=0, counter_after=0, verdict="", because="",
+                            budget=f"{reloaded.requests_used}/{reloaded.requests_allowed}")
+        evidence.verdict = "carried" if reloaded.requests_used == 6 else "RESET"
+        evidence.because = (
+            f"two assessments with two ids left the allowance at {reloaded.requests_used} of "
+            f"{reloaded.requests_allowed} — a restart does not hand back what was spent")
+        evidence.effects = effects
+        out.append(evidence)
+
+    return out
+
+
+def _reap(root: Path) -> None:
+    """Nothing this script started is still running.
+
+    A window whose child never reported is killed by the wait, but a straggler is possible — the kill
+    and the report are not atomic — so the process table is checked rather than assumed.
+    """
+    marker = str(root)
+    try:
+        listing = subprocess.run(["ps", "-eo", "pid,args"], capture_output=True, text=True,
+                                 check=False).stdout
+    except OSError:                                           # pragma: no cover - defensive
+        return
+    for line in listing.splitlines():
+        if marker in line and "--child" in line:
+            pid = int(line.split(None, 1)[0])
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):     # pragma: no cover - already gone
+                pass
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
