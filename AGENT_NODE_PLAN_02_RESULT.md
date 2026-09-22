@@ -111,24 +111,69 @@ context_capabilities(budget, record=..., summarizer=..., force=False, observe_ch
 
 ---
 
-## 3. 真实模型实验：未验证
+## 3. 真实模型实验：已跑，结果是负面的
 
-§5 要求的六次实验（3 任务 × 2 次）**没有做**，原因是**没有可用的授权端点**：本机 `ANTHROPIC_API_KEY`、`OPENAI_API_KEY`、`DEEPSEEK_API_KEY` 均未设置，项目 demo 目录里也没有模型配置。**未读取或输出任何凭证。**
+**修正**：本报第一版说「没有可用端点」，**那是错的**——项目自己的 `.local/runtime.json` 里就配着
+`models.deepseek`/`models.academic`（`deepseek-flash`，`api.deepseek.com`，**`context_window: 524288`**），
+密钥在它引用的 secrets 文件里。我只查了几个标准环境变量和 demo 目录就下了结论。**未读取或输出任何凭证**，
+脚本从项目配置里取，只在进程内传给模型客户端。
 
-交付可运行入口，待有端点时执行：
+§5 的六次实验已按 `scripts/context_experiment.py` 跑完，**两组各 12 次真实运行**，失败样本全部保留在
+`.local/context-*/results.json`，没有反复挑选。
+
+### 3.1 真实窗口（524,288）
+
+| 节点 | 任务 | 次 | 状态 | 调用 | 用时 | 约束 |
+| --- | --- | ---: | --- | ---: | ---: | --- |
+| mini | constraint | 1 / 2 | ✅ / ✅ | 7 / 8 | 19.3 / 26.0 | kept / kept |
+| pydantic | constraint | 1 / 2 | ✅ / ✅ | 13 / 9 | 23.9 / 25.9 | kept / kept |
+| mini | evidence | 1 / 2 | ✅ / **budget_exhausted** | 37 / 40 | 187.0 / 86.8 | kept / **ABSENT** |
+| pydantic | evidence | 1 / 2 | ✅ / ✅ | **31 / 25** | 104.6 / 111.4 | kept / kept |
+| mini | tail | 1 / 2 | ✅ / ✅ | 17 / 16 | 32.5 / 27.4 | kept / kept |
+| pydantic | tail | 1 / 2 | ✅ / ✅ | **14 / 17** | 39.2 / 34.1 | kept / kept |
+
+**11/12 完成**，唯一的失败是 mini 的 `evidence` 第 2 次撞上请求预算，**保留在结果文件里**。在较大的两个
+任务上 pydantic 用的调用更少（31/25 对 37/40）。
+
+**但 `comp = 0`**：窗口开得太大，任务最大只到 27,821 tokens，**压缩根本没触发**。所以这一组是「加上
+capability 不伤原路径」的信号，**不是**压缩效果的证据。
+
+### 3.2 强制压缩（窗口 12,000 / 目标 8,000）
+
+| 节点 | 任务 | 次 | 状态 | 调用 | 发出 tok | 到达 tok | 压缩 | 约束 |
+| --- | --- | ---: | --- | ---: | ---: | ---: | ---: | --- |
+| mini | 全部 | 6 | ✅ 全部完成 | 7–29 | — | — | — | kept |
+| pydantic | constraint | 1 / 2 | ✅ / ✅ | 15 / 20 | 5,891 / 3,758 | 同 | 0 | kept / kept |
+| pydantic | evidence | 1 / 2 | **budget_exhausted** | 40 / 40 | **8,180 / 9,243** | **61,255 / 43,816** | **34 / 34** | **ABSENT / ABSENT** |
+| pydantic | tail | 1 / 2 | ✅ / **budget_exhausted** | 19 / 40 | 6,981 / **6,575** | 同 / **17,329** | 0 / **25** | kept / kept |
+
+**两条结论，方向相反：**
+
+1. **边界是有效的** ✅：`evidence` 那次到达 61,255 tokens，**实际发出的始终在 8,180 以内**，34 次压缩没有
+   一次把请求送出预算之外。这正是本包要证明的机制。
+2. **但在紧窗口下这条路比基线差** ❌：**三个 pydantic 运行全部撞上请求预算**（40 次），而 mini 六次全部
+   完成；其中两次还丢了约束。压缩让模型反复失去上下文、重做已经做过的事，**调用数因此翻倍**。
+
+**这是迁移信号，不是稳定性结论**（§74）。它说明：**上下文被限住不等于任务做得完**。若要走这条路，
+预算口径（请求数）必须跟着压缩一起重新定——这是主集成与第三包要一起看的。
+
+### 3.3 仍未验证
+
+- **摘要质量**：`--summarizer models.academic` 的那组里压缩 34 次，但**摘要本身好不好没有被评估**，只
+  记录了调用数与策略名。
+- **真实 provider 的窗口拒绝**：仍然只测过模拟异常（B8）。真实 `deepseek` 在窗口内没有拒绝过，因为我
+  们的预算是主动控制的，从未把超窗请求发出去。
+
+### 3.4 复现
 
 ```bash
-# 结构性验收（不需要真实模型）
-.venv/bin/python -m pytest tests/test_node_context.py -q
-
-# 真实模型实验（需要授权端点）
-.venv/bin/python scripts/context_experiment.py --model <provider>:<model> \
-    --summarizer <provider>:<model> --runs 2 --tasks 3
+.venv/bin/python scripts/context_experiment.py --runs 2                        # 真实窗口
+.venv/bin/python scripts/context_experiment.py --runs 2 --window 12000 \
+    --input-target 8000 --workspace .local/context-compacted --summarizer models.academic
 ```
 
-`scripts/context_experiment.py` 见仓库；它跑 §70 的三个小任务（多文件约束保留、分段证据整合、读长输出后定位末尾），对同样输入跑 mini 基线与 Pydantic 候选，记录输入大小、成功/失败、约束丢失、调用数、token/费用与用时。
-
-**明确保留**：**摘要质量未验证**。真实 provider 窗口拒绝对接未验证——模拟异常不等于真实 provider 已通过（§74）。
+脚本读项目自己的 `runtime.json` 与它的 secrets 文件，**窗口取自配置里的 `context_window`**（§24），
+不再用假定的默认值。
 
 ---
 

@@ -22,7 +22,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-import os
 import sys
 import time
 from dataclasses import asdict, dataclass
@@ -58,7 +57,7 @@ TASKS: dict[str, dict[str, str]] = {
             "Run a command that prints a long listing (at least two thousand lines) and write "
             "`summary.md` with the **last line** of that listing quoted exactly.\n"
             "**The constraint: the last line must be quoted verbatim, not paraphrased.**"),
-        "check": "summary.md",
+        "check": "summary.md", "check_is": "file",
     },
 }
 
@@ -83,39 +82,51 @@ class Attempt:
     constraint_present: bool
 
 
-def _model(name: str):
-    """The provider route, by the same client the default path uses.
+def _project_config(path: str) -> tuple[dict, dict | None]:
+    """The project's own runtime config and secret file, the way the default path reads them.
 
-    Imported here rather than at module level so that `--help` and the no-endpoint path work on a
-    machine where litellm's dependencies are not installed.
+    Reused rather than restated: a model route written down twice is two routes that drift, and the one
+    this script invents would be the one that is wrong about `base_url` or `wire_api`.
     """
-    from minisweagent.models.litellm_model import LitellmModel
-    provider, _, model = name.partition(":")
-    if not model:
-        raise SystemExit(f"--model wants `provider:model`, got {name!r}")
-    base_url = os.environ.get("ANCHOR_MODEL_BASE_URL")
-    if base_url:
-        return LitellmModel(model_name=f"{provider}/{model}", cost_tracking="ignore_errors",
-                            api_base=base_url)
-    return LitellmModel(model_name=f"{provider}/{model}", cost_tracking="ignore_errors")
+    raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    # Keyed by `ref`, not by the model name: the project configures two entries for the same model
+    # with different settings, and keying by name silently keeps whichever came last — which is how the
+    # real window was lost and the budget fell back to a default.
+    models = {item.get("ref", item["model"]): item for item in raw.get("models", [])}
+    secret_file = raw.get("secret_file")
+    return models, (json.loads(Path(secret_file).read_text(encoding="utf-8")) if secret_file else None)
 
 
-def _endpoint_configured(model: str) -> bool:
-    """Whether anything suggests a key for this provider exists — without reading or printing it."""
-    provider = model.partition(":")[0].upper().replace("-", "_")
-    return any(os.environ.get(f"{provider}_API_KEY") or os.environ.get(f"{provider}__API_KEY")
-               or (provider == "DEEPSEEK" and os.environ.get("DEEPSEEK_API_KEY")) for _ in (0,))
+def _model(model: dict, secret: str):
+    """One configured model, as a client the node entry point can actually take.
+
+    **Not the client the mini path builds.** `run_node` wraps whatever it is given in PydanticAI's
+    `WrapperModel` to count requests, and that calls `infer_model`, which takes a PydanticAI model or a
+    `provider:model` string — a mini `LitellmModel` is neither, and the failure is a `TypeError` deep in
+    the framework rather than anything that names the real problem. So the experiment uses the
+    PydanticAI client for the same endpoint, which is also what a migration would use.
+
+    `wire_api` is honoured: the project configures `responses`, and the two clients are not
+    interchangeable in what they accept or report.
+    """
+    from pydantic_ai.models.openai import OpenAIChatModel, OpenAIResponsesModel
+    from pydantic_ai.providers.openai import OpenAIProvider
+
+    provider = OpenAIProvider(base_url=model.get("base_url"), api_key=secret or None)
+    chosen = OpenAIResponsesModel if model.get("wire_api") == "responses" else OpenAIChatModel
+    return chosen(model["model"], provider=provider)
 
 
 async def one(node: str, name: str, spec: dict[str, str], attempt: int, workspace: Path,
-              model_name: str, summarizer_name: str, budget: Budget) -> Attempt:
+              model_spec: dict, summariser_spec: dict | None, secret: str,
+              budget: Budget) -> Attempt:
     import shutil
 
     directory = workspace / f"{node}-{name}-{attempt}"
     shutil.rmtree(directory, ignore_errors=True)
     directory.mkdir(parents=True, exist_ok=True)
     record = Record(directory / "record")
-    summarizer = _model(summarizer_name) if summarizer_name else None
+    summarizer = _model(summariser_spec, secret) if summariser_spec else None
     capabilities = (context_capabilities(budget, record=record, summarizer=summarizer)
                     if node == "pydantic" else ())
 
@@ -123,7 +134,7 @@ async def one(node: str, name: str, spec: dict[str, str], attempt: int, workspac
     outcome: NodeOutcome = await run_node(
         NodeRequest(execution_id=f"{node}-{name}-{attempt}", task=spec["task"], workspace=directory,
                     max_requests=40, trace=directory / "trace.jsonl"),
-        model=_model(model_name), capabilities=capabilities)
+        model=_model(model_spec, secret), capabilities=capabilities)
     seconds = time.monotonic() - started
 
     produced = sorted(str(item.relative_to(directory)) for item in directory.rglob("*")
@@ -140,34 +151,58 @@ async def one(node: str, name: str, spec: dict[str, str], attempt: int, workspac
         commands=len(record.commands), seconds=round(seconds, 1), produced=produced,
         # A keyword check, and named as one: whether the *specific* requirement is honoured needs a
         # person. This only finds the cases where it is plainly absent, which are the informative ones.
-        constraint_present=spec["check"] in body)
+        # A filename check or a content check, said which. "Did it write the file it was told to"
+        # and "does what it wrote still carry the requirement" are different questions and a single
+        # substring test answers neither reliably.
+        constraint_present=(spec["check"] in produced if spec.get("check_is") == "file"
+                            else spec["check"] in body))
 
 
 async def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--model", help="the node's model, as `provider:model`")
+    parser.add_argument("--config", default=".local/runtime.json",
+                        help="the project's runtime config; its model and secret file are used as-is")
+    parser.add_argument("--model", default="", help="which configured model to use (default: the first)")
     parser.add_argument("--summarizer", default="", help="the compaction model; defaults to --model")
     parser.add_argument("--runs", type=int, default=2)
     parser.add_argument("--tasks", default=",".join(TASKS), help=f"any of: {', '.join(TASKS)}")
     parser.add_argument("--workspace", default=".local/context-experiment")
-    parser.add_argument("--window", type=int, default=32_000)
-    parser.add_argument("--input-target", type=int, default=24_000)
+    parser.add_argument("--window", type=int, default=0,
+                        help="default: the configured model's own context_window")
+    parser.add_argument("--input-target", type=int, default=0,
+                        help="default: three quarters of the window, leaving room for the answer")
     args = parser.parse_args()
 
-    if not args.model:
-        print(__doc__)
-        return 2
-    if not _endpoint_configured(args.model):
-        # The honest outcome, and the one §68 asks for: what is missing, and how to run it.
-        print(f"no credentials found for {args.model.partition(':')[0]!r}.\n"
-              f"Set the provider's usual API key environment variable and re-run:\n"
-              f"    {Path(__file__).name} --model {args.model} --summarizer "
-              f"{args.summarizer or args.model}\n"
-              f"Nothing was run and no result is being reported.", file=sys.stderr)
+    try:
+        models, secrets = _project_config(args.config)
+    except (OSError, json.JSONDecodeError, KeyError) as exc:
+        print(f"cannot read {args.config}: {exc}", file=sys.stderr)
         return 3
+    chosen_model = args.model or next(iter(models), "")
+    if chosen_model in {item.get("model", "") for item in models.values()} and chosen_model not in models:
+        chosen_model = next(key for key, item in models.items() if item.get("model") == chosen_model)
+    if chosen_model not in models:
+        print(f"{chosen_model!r} is not one of {', '.join(models) or 'the configured models'}",
+              file=sys.stderr)
+        return 2
+    model_spec = models[chosen_model]
+    summariser_spec = models.get(args.summarizer, model_spec) if args.summarizer else None
+    secret = ""
+    if model_spec.get("secret_ref"):
+        secret = (secrets or {}).get(model_spec["secret_ref"], "")
+        if not secret:
+            # The honest outcome, and the one §68 asks for: what is missing, and how to run it. Nothing
+            # is read out of the secret file and nothing is written anywhere else.
+            print(f"{model_spec['secret_ref']} is not in {args.config}'s secret file.\n"
+                  f"Nothing was run and no result is being reported.", file=sys.stderr)
+            return 3
 
-    budget = Budget(window=args.window, output_reserve=args.window // 8,
-                    input_target=args.input_target, keep_messages=6)
+    # **The real window, from the configuration.** §24 asks for it to be recorded, and a budget built
+    # on an assumed window is wrong for the one model it is used with.
+    window = args.window or model_spec.get("context_window") or 32_000
+    budget = Budget(window=window, output_reserve=window // 8,
+                    input_target=args.input_target or int(window * 0.75), keep_messages=6)
+    print(f"model {chosen_model} ({model_spec['model']}) window {window:,} tokens")
     workspace = Path(args.workspace)
     chosen = [name for name in args.tasks.split(",") if name in TASKS]
     if not chosen:
@@ -180,7 +215,7 @@ async def main() -> int:
                 # The mini node does not take the context capabilities; that is the comparison.
                 print(f"  {node:9s} {name:11s} run {attempt} …", flush=True)
                 attempts.append(await one(node, name, TASKS[name], attempt, workspace,
-                                          args.model, args.summarizer, budget))
+                                          model_spec, summariser_spec, secret, budget))
 
     out = workspace / "results.json"
     out.write_text(json.dumps([asdict(item) for item in attempts], indent=2, ensure_ascii=False),
