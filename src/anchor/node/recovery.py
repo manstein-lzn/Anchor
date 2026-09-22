@@ -113,6 +113,10 @@ class RecoveryRef:
     node: str
     run: str
     store: str
+    #: The workspace this attempt was working in. Carried so a reference can be checked against the
+    #: **request that presents it**, not only against itself: a token that decodes and names a real run is
+    #: still the wrong token if it was made for another node, another workspace, or another store.
+    workspace: str = ""
     budget: Budget = field(default_factory=Budget)
     version: int = REFERENCE_VERSION
 
@@ -189,6 +193,31 @@ class Verdict:
             out.append(f"  snapshot: {self.snapshot}")
         out.append(f"  budget: {self.budget.requests_used}/{self.budget.requests_allowed} used")
         return out
+
+
+def verify(ref: RecoveryRef, request_node: str, request_workspace: Path | None,
+           configured_store: Path | None) -> str:
+    """Whether a reference belongs to the request presenting it. Returns the reason it does not, or `""`.
+
+    **Self-consistency is not identity.** R1's checking of a token was internal — does it decode, does it
+    name a run — and a token made for a different node, a different workspace, or a different control
+    directory passes all of that. §65 asks for the binding to the request, and this is it.
+
+    The store check is the one that matters most operationally: a caller that configured one control
+    directory and presented a reference to another would otherwise be reading and writing two different
+    records of the same work.
+    """
+    if ref.node != request_node:
+        return (f"the reference is for node {ref.node!r}, not for the {request_node!r} that presented it")
+    if ref.workspace and request_workspace is not None:
+        if str(Path(ref.workspace).resolve()) != str(Path(request_workspace).resolve()):
+            return (f"the reference is for workspace {ref.workspace!r}, not for the one this request "
+                    f"is running in")
+    if configured_store is not None:
+        if str(Path(ref.store).resolve()) != str(Path(configured_store).resolve()):
+            return (f"the reference names the store {ref.store!r}, not the control directory this request "
+                    f"configured")
+    return ""
 
 
 def open_store(control: Path) -> FileStepStore:

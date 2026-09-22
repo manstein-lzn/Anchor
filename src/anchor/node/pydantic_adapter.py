@@ -361,6 +361,8 @@ async def _reference(recovery_store: Path | None, request: NodeRequest, store: A
         budget = load_budget(Path(ref.store))
         save_budget(Path(ref.store), budget)
         return RecoveryRef(node=ref.node, run=ran or newest or ref.run, store=ref.store,
+                           workspace=ref.workspace
+                           or str(Path(request.workspace).resolve()),
                            budget=budget).encode()
     if recovery_store is None:
         return ""
@@ -377,6 +379,7 @@ async def _reference(recovery_store: Path | None, request: NodeRequest, store: A
         requests_used=spent, requests_allowed=request.max_requests)
     save_budget(control, budget)
     return RecoveryRef(node=request.execution_id, run=newest.run_id, store=str(control),
+                       workspace=str(Path(request.workspace).resolve()),
                        budget=budget).encode()
 
 

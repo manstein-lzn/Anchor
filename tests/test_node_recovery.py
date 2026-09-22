@@ -398,3 +398,24 @@ def test_r2_a_spent_allowance_makes_no_request_at_all(tmp_path):
     assert persisted.requests_allowed <= 8, f"the allowance was raised: {persisted}"
 
 
+
+
+def test_the_reference_is_bound_to_the_request_that_presents_it(tmp_path):
+    """**§65。** 引用必须与**提出它的那次请求**匹配 ✓——不只是自洽 ✓。
+
+    R1 的检查是**内部**的 ✓（能不能解码、指不指得到一次真 run ✓），而一个为**别的节点**、**别的
+    workspace**、**别的控制目录**做的 token 全都通过 ✓。验收明确要求补这一层 ✓：控制目录那条最要紧 ✓——
+    否则调用方会在两份不同的记录之间读写同一件事 ✓。
+    """
+    from anchor.node.recovery import verify
+
+    here, elsewhere = tmp_path / "store", tmp_path / "other"
+    workspace, another = tmp_path / "ws", tmp_path / "ws2"
+    ref = RecoveryRef(node="n1", run="r", store=str(here), workspace=str(workspace))
+
+    assert verify(ref, "n1", workspace, here) == ""
+    assert "not for the" in verify(ref, "n2", workspace, here)
+    assert "workspace" in verify(ref, "n1", another, here)
+    assert "control directory" in verify(ref, "n1", workspace, elsewhere)
+    # 没带 workspace 的旧引用仍然可用：绑定是**补充**，不是把已有的引用作废。
+    assert verify(RecoveryRef(node="n1", run="r", store=str(here)), "n1", workspace, here) == ""
