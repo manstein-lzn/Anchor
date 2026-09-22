@@ -174,6 +174,8 @@ class Record:
     summaries: list[dict[str, Any]] = field(default_factory=list)
     commands: list[dict[str, Any]] = field(default_factory=list)
     spilled: dict[str, Path] = field(default_factory=dict)
+    #: Which files its byte count already includes, so the same content twice is charged once.
+    accounted: set[Path] = field(default_factory=set)
     #: Where every kept output goes, and the one directory mounted read-only into the sandbox.
     outputs: Path = field(default=Path())
     spill_bytes: int = 0
@@ -295,6 +297,20 @@ class Watching(AbstractCapability):
         # tokens because it is a preview of a file, and the file is measured in bytes.
         self.observe_chars = observe_chars
 
+    def remember_input(self, task: str, instructions: str, routes: tuple[str, ...],
+                       workspace: Path) -> None:
+        """Append what this execution was asked to do, **once**, at the start.
+
+        §41 wants the record to be the complete record, and every other entry is a count — so "what was
+        the model asked to do" was not answerable from it. Written once rather than per request: the
+        task and the rules do not change between rounds, and repeating them each round would make the
+        record large in exactly the way it exists to avoid.
+        """
+        self.record.note("execution", task=task, instructions=instructions,
+                         routes=list(routes), workspace=str(workspace))
+        self.record.note("tools", names=["bash"],
+                         note="one tool, always; the completion is a command it runs")
+
     async def before_model_request(self, ctx: Any, request_context: Any) -> Any:
         # The request about to go out. Recorded here and not after the fact because this is the only
         # place the exact history is visible, and its size over the pass is what B1 is about.
@@ -357,8 +373,15 @@ class Watching(AbstractCapability):
         # had 1,100,000, because the limit lived only in `keep_output` and the spill went round it.
         if full:
             for path in full:
+                # **Once per file.** The sandbox names a kept file after its content, so the same output
+                # twice is the same file — and charging the store again for it would make the bound
+                # shrink for a reason the caller cannot see. Deduplicated by path, which is the only
+                # thing the two cases can differ by.
+                if path in self.record.accounted:
+                    continue
                 try:
                     self.record.spill_bytes += path.stat().st_size
+                    self.record.accounted.add(path)
                 except OSError as exc:                        # pragma: no cover - defensive
                     self.record.problems.append(f"cannot account for {path}: {exc}")
         incomplete = bool(getattr(sandbox, "incomplete", False))
@@ -431,18 +454,26 @@ class Watching(AbstractCapability):
         raise error
 
 
+@dataclass
 class _CountedSummariser(WrapperModel):
     """Counts the summariser's own calls, so they can be recorded apart from the node's model.
 
     `record.summaries` had **no write path at all** — it was a list that stayed empty, and a test whose
     assertion was conditional on it passed for that reason. A count of the calls is the least it has to
     hold; the tokens are on the same wrapper because a summary is a model call with a price.
+
+    **`@dataclass` and not a plain class body.** `WrapperModel` is a dataclass, so a subclass without
+    the decorator keeps its `field(...)` as the `Field` object itself — and a mutable default without
+    it is a class attribute. Either way one list was shared by every summariser ever built, so a second
+    node's record read the first node's usage and two executions of the same graph reported each
+    other's spending. Measured both ways before this was written.
     """
 
     calls: int = 0
-    #: What the provider reported for each summary call. Kept because a summary is a paid request and
-    #: an estimate of its size is not an invoice — the record has to let a reader tell the two apart.
-    usage: list[dict[str, Any]] = []
+    #: What the provider reported for each summary call **for this node**. Kept because a summary is a
+    #: paid request and an estimate of its size is not an invoice — the record has to let a reader tell
+    #: the two apart.
+    usage: list[dict[str, Any]] = field(default_factory=list)
 
     async def request(self, messages: Any, model_settings: Any,
                       model_request_parameters: Any) -> Any:
@@ -696,6 +727,20 @@ def _is_window_overflow(error: BaseException) -> bool:
         return any(word in text for word in ("context length", "context_length", "too long",
                                              "maximum context", "token limit"))
     return False
+
+
+def remember(capabilities: tuple[Any, ...], task: str, instructions: str,
+             routes: tuple[str, ...] = (), workspace: Path = Path()) -> None:
+    """Write this execution's own inputs into the record, once, before the first request.
+
+    Called by whoever starts the pass, because the task is the caller's and no capability ever sees it.
+    Separate from the composition so that a caller which forgets it gets a record missing its first
+    entry rather than a run that does not start.
+    """
+    for capability in capabilities:
+        if isinstance(capability, Watching):
+            capability.remember_input(task, instructions, routes, workspace)
+            return
 
 
 def context_capabilities(budget: Budget, record: Record | None = None, summarizer: Any = None,

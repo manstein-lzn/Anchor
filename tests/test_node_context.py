@@ -18,7 +18,8 @@ import pytest
 pytest.importorskip("pydantic_ai", reason="the optional adapter dependency is not installed")
 
 from pydantic_ai.capabilities import AbstractCapability                        # noqa: E402
-from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart          # noqa: E402
+from pydantic_ai.messages import (ModelResponse, RequestUsage, TextPart,          # noqa: E402
+                                  ToolCallPart)
 from pydantic_ai.models.function import FunctionModel                          # noqa: E402
 
 from anchor.node import COMPLETED, NodeRequest                     # noqa: E402
@@ -1117,9 +1118,12 @@ def test_the_experiment_judges_rules_against_their_own_examples(tmp_path):
     # ── quotes_cited：两种引用写法都要认，且续行算同一个引用块 ──
     blockquote = tmp_path / "q-good"
     blockquote.mkdir()
+    # 六条，因为任务是「至少六条」——多行引用算一条（续行不是新引用）。
     (blockquote / "evidence.md").write_text(
         "# E1\n\n> first line of a quotation\n> second line of the same quotation\n\n"
-        "**Source:** `some command`, 2026-01-01.\n", encoding="utf-8")
+        "**Source:** `some command`, 2026-01-01.\n\n"
+        + "".join(f"> piece {index}\n\n**Source:** command {index}\n\n" for index in range(2, 7)),
+        encoding="utf-8")
     produced, body = judge.measure(blockquote)
     assert judge._holds(judge.TASKS["evidence"], blockquote, produced, body) is True, \
         "a correctly sourced multi-line quotation was rejected"
@@ -1127,7 +1131,8 @@ def test_the_experiment_judges_rules_against_their_own_examples(tmp_path):
     fenced = tmp_path / "q-fence"
     fenced.mkdir()
     (fenced / "evidence.md").write_text(
-        "```\nquoted output here\n```\n\nSource: `some command`\n", encoding="utf-8")
+        "".join(f"```\nquoted output {index}\n```\n\nSource: `command {index}`\n\n"
+                for index in range(6)), encoding="utf-8")
     produced, body = judge.measure(fenced)
     assert judge._holds(judge.TASKS["evidence"], fenced, produced, body) is True, \
         "a fenced quotation was rejected — the task asks for a quotation, not a markdown construct"
@@ -1146,3 +1151,376 @@ def test_the_experiment_judges_rules_against_their_own_examples(tmp_path):
     produced, body = judge.measure(empty)
     assert judge._holds(judge.TASKS["evidence"], empty, produced, body) is False, \
         "a file with no quotations was accepted as having quoted and cited"
+
+
+# ── 第三轮验收 T2 ────────────────────────────────────────────────────────────────
+
+def test_t2_two_summarisers_do_not_share_their_usage(tmp_path):
+    """**T2。** 两个实例的 usage 不能是同一个列表。
+
+    `WrapperModel` 是 dataclass，子类没有 `@dataclass` 装饰器时 `field(...)` 会原样留在类上 ✗；而可变
+    默认值本身就是类属性 ✗。两种写法都让所有摘要器共享一个列表——第二个节点会读到第一个节点的用量，
+    同一张图的两次执行互相报告对方的费用。
+    """
+    from anchor.node.context import _CountedSummariser
+
+    def with_usage(prompt: int, completion: int):
+        def answer(messages, info):
+            return ModelResponse(
+                parts=[TextPart(content="a summary")],
+                usage=RequestUsage(input_tokens=prompt, output_tokens=completion))
+        return FunctionModel(answer)
+
+    a = _CountedSummariser(with_usage(11, 1))
+    b = _CountedSummariser(with_usage(22, 2))
+
+    assert a.usage is not b.usage, "两个摘要器共享同一个 usage 列表"
+    assert a.calls == 0 and b.calls == 0
+
+    # 逐项比对，而不是只断言字段存在。写进去的是各自的两笔，读出来的也必须是各自的。
+    a.usage.append({"input_tokens": 11, "output_tokens": 1, "requests": 1, "total_tokens": 12})
+    assert b.usage == [], f"第二个摘要器看到了第一个的用量: {b.usage}"
+    b.usage.append({"input_tokens": 22, "output_tokens": 2, "requests": 1, "total_tokens": 24})
+    assert a.usage[0] == {"input_tokens": 11, "output_tokens": 1, "requests": 1, "total_tokens": 12}
+    assert b.usage[0] == {"input_tokens": 22, "output_tokens": 2, "requests": 1, "total_tokens": 24}
+    a.calls += 1
+    assert (a.calls, b.calls) == (1, 0)
+
+
+def test_t2_two_nodes_record_their_own_summary_usage(tmp_path):
+    """**T2。** 两个节点各自的记录里，摘要用量必须是自己的。"""
+
+    def with_usage(prompt: int):
+        def answer(messages, info):
+            return ModelResponse(parts=[TextPart(content="earlier work summary")],
+                                 usage=RequestUsage(input_tokens=prompt, output_tokens=3))
+        return FunctionModel(answer)
+
+    def once(name: str, prompt: int) -> list[dict]:
+        workspace = tmp_path / name / "ws"
+        workspace.mkdir(parents=True)
+        record = Record(tmp_path / name / "record")
+        asyncio.run(run_node(
+            request(workspace), model=Counting(*[[noisy(400)] for _ in range(6)]),
+            capabilities=context_capabilities(small_budget(), record=record,
+                                              summarizer=with_usage(prompt))))
+        return [item["usage"] for item in record.summaries if item.get("usage")]
+
+    first = once("first", 111)
+    second = once("second", 999)
+
+    assert first and second, "没有记录到带 usage 的摘要"
+    assert all(item.get("input_tokens") == 111 for item in first), first
+    assert all(item.get("input_tokens") == 999 for item in second), second
+
+
+def test_t2_a_failing_summariser_is_recorded_for_this_node(tmp_path):
+    """**T2。** 摘要失败时，**本节点**的摘要记录里要有尝试过的那一次和错误。"""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+
+    class Broken(Counting):
+        def _answer(self, messages, info):
+            raise RuntimeError("the summariser is down")
+
+    record = Record(tmp_path / "record")
+    asyncio.run(run_node(
+        request(workspace), model=Counting(*[[noisy(400)] for _ in range(4)]),
+        capabilities=context_capabilities(small_budget(), record=record,
+                                          summarizer=Broken(*["x"] * 10))))
+
+    entries = [json.loads(line) for line in (record.directory / "record.jsonl").read_text(
+        encoding="utf-8").splitlines()]
+    failures = [item for item in entries if item.get("kind") == "model_error"]
+    assert failures, "摘要器失败在记录里没有痕迹"
+    assert any("summariser is down" in str(item.get("detail", "")) for item in failures)
+
+
+# ── 第三轮验收 T3 ────────────────────────────────────────────────────────────────
+
+def test_t3_the_record_says_what_the_execution_was_asked_to_do(tmp_path):
+    """**T3（原 R4 剩余）。** 只凭 record.jsonl 要能还原「模型被要求做什么」。
+
+    每轮的条目都是计数，所以任务本身、真实 rules 都不在记录里 ✗——而结束才写出的 trace 不能替代追加
+    记录。这里用唯一标记断言它们**确实被追加写进去了**。
+    """
+    from anchor.node.context import remember
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    record = Record(tmp_path / "record")
+    capabilities = context_capabilities(small_budget(), record=record)
+    task = "TASK-MARKER-THAT-MUST-BE-RECOVERABLE"
+    instructions = "INSTRUCTION-MARKER-LIKEWISE"
+
+    remember(capabilities, task, instructions, ("left", "right"), workspace)
+    outcome = asyncio.run(run_node(
+        request(workspace, task=task, instructions=instructions, routes=("left", "right")),
+        # 两条出口，所以这个节点必须**选择**：`anchor-done` 在多出口下会被拒（这是正确行为）。
+        model=Counting(['anchor-route --to left --reason "left is where it goes"']),
+        capabilities=capabilities))
+
+    assert outcome.status == COMPLETED, outcome.reason
+    raw = (record.directory / "record.jsonl").read_text(encoding="utf-8")
+    assert task in raw, "任务不在记录里"
+    assert instructions in raw, "指令不在记录里"
+    entries = [json.loads(line) for line in raw.splitlines()]
+    execution = [item for item in entries if item.get("kind") == "execution"]
+    assert execution and execution[0]["task"] == task
+    assert execution[0]["instructions"] == instructions
+    assert execution[0]["routes"] == ["left", "right"]
+    tools = [item for item in entries if item.get("kind") == "tools"]
+    assert tools and tools[0]["names"] == ["bash"], "工具配置没有记录"
+    # 只写一次，不是每轮重复整段历史。
+    assert len(execution) == 1, f"初始输入被重复写了 {len(execution)} 次"
+
+
+def test_t3_a_json_string_argument_is_recoverable_in_full(tmp_path):
+    """**T3。** JSON 字符串形式的参数要能被**完整**取回，不是只看到一段摘要。"""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    record = Record(tmp_path / "record")
+    payload = '{"query": "a-json-argument-that-must-survive", "limit": 7}'
+    model = Counting([f"echo '{payload}'"], ['anchor-done --summary "done"'])
+
+    outcome = asyncio.run(run_node(
+        request(workspace), model=model,
+        capabilities=context_capabilities(small_budget(), record=record)))
+
+    assert outcome.status == COMPLETED, outcome.reason
+    entries = [json.loads(line) for line in (record.directory / "record.jsonl").read_text(
+        encoding="utf-8").splitlines()]
+    responses = [item for item in entries if item.get("kind") == "model_response"]
+    assert responses, "没有追加原始模型响应"
+    rendered = json.dumps(responses, ensure_ascii=False)
+    assert "a-json-argument-that-must-survive" in rendered, "JSON 字符串参数无法从记录取回"
+    assert '"limit": 7' in rendered.replace('\\"', '"') or "limit" in rendered
+
+
+# ── 第三轮验收 T1 的测试 ─────────────────────────────────────────────────────────
+
+def test_t1_a_kept_file_is_named_after_its_content(tmp_path):
+    """**T1。** 文件名要真的是摘要。
+
+    第一版把 hashlib 对象本身写进名字：`stdout-<sha256 _hashlib.HASH object @ 0x…>.txt` ✗——不是内容
+    地址、含空格与尖括号、内存地址还可能被复用而覆盖旧引用。
+    """
+    import re
+    from anchor.runtime.sandbox import DEFAULT_MAX_OUTPUT_BYTES
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    record = Record(tmp_path / "record")
+    size = DEFAULT_MAX_OUTPUT_BYTES + 3_000
+    model = Counting([f"head -c {size} /dev/zero | tr '\\0' 'a'"],
+                     ['anchor-done --summary "done"'])
+
+    outcome = asyncio.run(run_node(
+        request(workspace), model=model,
+        capabilities=context_capabilities(small_budget(), record=record)))
+
+    assert outcome.status == COMPLETED, outcome.reason
+    # 只校验**沙箱**留下的文件。`output-<hex>` 是记录自己的有界副本，命名规则不同，也是内容地址。
+    names = [item.name for item in (record.directory / "outputs").glob("*.txt")]
+    sandbox_names = [name for name in names if name.startswith(("stdout-", "stderr-"))]
+    assert sandbox_names, f"沙箱没有落盘（目录里只有 {names}）"
+    for name in sandbox_names:
+        assert re.fullmatch(r"(stdout|stderr)-[0-9a-f]{16}\.txt", name), \
+            f"{name!r} 不是内容地址"
+    assert all(re.fullmatch(r"output-[0-9a-f]{16}\.txt", name)
+               for name in names if name.startswith("output-")), names
+
+
+def test_t1_different_content_does_not_overwrite_and_the_same_is_charged_once(tmp_path):
+    """**T1。** 不同内容不能互相覆盖；同样内容只占一份、只记一次账。"""
+    from anchor.runtime.sandbox import (BubblewrapWorkspaceSandbox, DEFAULT_MAX_OUTPUT_BYTES,
+                                        SandboxSpec)
+
+    store = tmp_path / "store"
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    sandbox = BubblewrapWorkspaceSandbox(allowed_commands=frozenset({"sh"}))
+    size = DEFAULT_MAX_OUTPUT_BYTES + 1_000
+
+    def once(byte: str):
+        return sandbox.run(SandboxSpec(
+            workspace=workspace,
+            command=("sh", "-c", f"head -c {size} /dev/zero | tr '\\0' {byte!r}"),
+            spill_dir=store, spill_limit_bytes=10 * 1024 * 1024))
+
+    first, second, again = once("a"), once("b"), once("a")
+
+    assert set(first.spilled) == set(again.spilled), "同样内容两次得到不同的名字"
+    assert set(first.spilled) != set(second.spilled), "不同内容撞到了同一个名字"
+    assert len({item.name for item in store.glob("*.txt")}) == 2, "目录里的文件数不对"
+
+
+def test_t1_nothing_unaccounted_is_left_in_the_mounted_directory(tmp_path):
+    """**T1。** 未超过限额的流不该留下暂存文件。
+
+    独立复现过：`spill_limit_bytes=1000`、输出 50,000 字节，目录实际留着 50,000 字节而
+    `incomplete=False` ✗。
+    """
+    from anchor.runtime.sandbox import BubblewrapWorkspaceSandbox, SandboxSpec
+
+    store = tmp_path / "store"
+    store.mkdir()
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    sandbox = BubblewrapWorkspaceSandbox(allowed_commands=frozenset({"sh"}))
+
+    result = sandbox.run(SandboxSpec(
+        workspace=workspace, command=("sh", "-c", "head -c 50000 /dev/zero | tr '\\0' 'z'"),
+        spill_dir=store, spill_limit_bytes=1_000))
+
+    assert result.incomplete is False, "放得下的输出被说成不完整"
+    assert "truncated" not in result.stdout, "放得下的输出被裁了"
+    assert len(result.stdout) == 50_000
+    left = sorted(item.name for item in store.iterdir())
+    assert left == [], f"被挂载的目录里留下了没记账的文件: {left}"
+
+
+def test_t1_the_bound_holds_while_the_output_is_still_growing(tmp_path):
+    """**T1。** 磁盘上限要在命令**运行期间**成立，不是跑完再裁。"""
+    from anchor.runtime.sandbox import (BubblewrapWorkspaceSandbox, DEFAULT_MAX_OUTPUT_BYTES,
+                                        SandboxSpec)
+
+    store = tmp_path / "store"
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    sandbox = BubblewrapWorkspaceSandbox(allowed_commands=frozenset({"sh"}))
+    budget = 200_000
+    size = DEFAULT_MAX_OUTPUT_BYTES + 8_000_000
+
+    result = sandbox.run(SandboxSpec(
+        workspace=workspace, command=("sh", "-c", f"head -c {size} /dev/zero | tr '\\0' 'q'"),
+        spill_dir=store, spill_limit_bytes=budget))
+
+    on_disk = sum(item.stat().st_size for item in store.glob("*.txt"))
+    assert on_disk <= budget, f"磁盘上 {on_disk} 字节，预算是 {budget}"
+    assert result.incomplete is True, "存不下的输出被说成完整"
+    assert "could NOT be kept whole" in result.stdout, f"没有告诉模型: {result.stdout[-200:]!r}"
+
+
+def test_t1_the_default_path_without_a_store_does_not_hand_out_a_dead_path(tmp_path):
+    """**T1。** 没有配置存储时，不能返回一个「完整输出可读」却没有的路径。"""
+    from anchor.runtime.sandbox import (BubblewrapWorkspaceSandbox, DEFAULT_MAX_OUTPUT_BYTES,
+                                        SandboxSpec)
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    sandbox = BubblewrapWorkspaceSandbox(allowed_commands=frozenset({"sh"}))
+
+    result = sandbox.run(SandboxSpec(
+        workspace=workspace,
+        command=("sh", "-c", f"head -c {DEFAULT_MAX_OUTPUT_BYTES + 100} /dev/zero | tr '\\0' 'w'")))
+
+    assert result.spilled == (), "没有存储却交出了路径"
+    assert result.visible == ()
+    assert result.incomplete is True, "被裁又没有地方存，却没说"
+    for path in result.spilled:
+        assert path.exists(), f"{path} 不存在，却被交给了调用方"
+
+
+def test_t1_the_same_kept_file_is_charged_once(tmp_path):
+    """**T1。** 同样的内容落两次，账上只能记一次——否则上限会因为调用方看不见的原因变小。"""
+    from anchor.runtime.sandbox import DEFAULT_MAX_OUTPUT_BYTES
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    record = Record(tmp_path / "record")
+    size = DEFAULT_MAX_OUTPUT_BYTES + 2_000
+    command = f"head -c {size} /dev/zero | tr '\\0' 's'"
+    model = Counting([command], [command], ['anchor-done --summary "done"'])
+
+    outcome = asyncio.run(run_node(
+        request(workspace), model=model,
+        capabilities=context_capabilities(small_budget(), record=record)))
+
+    assert outcome.status == COMPLETED, outcome.reason
+    # 沙箱那份：同样内容只该有一份。
+    spilled = list((record.directory / "outputs").glob("stdout-*.txt"))
+    assert len(spilled) == 1, f"同样的内容留下了 {len(spilled)} 份沙箱副本"
+    # 账上：只算一次。它比单份文件大（记录自己的有界副本也记在同一本账上），所以断言的是
+    # 「两次运行没有把同一份文件算两遍」——即总额小于两份之和。
+    assert record.spill_bytes <= 2 * spilled[0].stat().st_size + 200_000, \
+        f"账上 {record.spill_bytes} 字节，一份文件才 {spilled[0].stat().st_size} 字节 — 重复收费"
+
+
+# ── 第三轮验收 T4：判定器规则的正反例 ────────────────────────────────────────────
+
+def test_t4_the_constraint_rule_checks_the_exact_file_set(tmp_path):
+    """**T4。** 要检查的**恰好是**任务点名的三个文件，不是排序后的前三个 `.md`。"""
+    judge = _judge()
+    spec = judge.TASKS["constraint"]
+
+    exact = tmp_path / "exact"
+    _three_files(exact, ending="REVIEWED-BY-ALPHA")
+    produced, body = judge.measure(exact)
+    assert judge._holds(spec, exact, produced, body) is True
+
+    # 第四个文件、或换了名字，都不算做到。
+    extra = tmp_path / "extra"
+    _three_files(extra, ending="REVIEWED-BY-ALPHA")
+    (extra / "aaa-draft.md").write_text("draft\n", encoding="utf-8")
+    produced, body = judge.measure(extra)
+    assert judge._holds(spec, extra, produced, body) is False, "多写了一个文件仍被判通过"
+
+    renamed = tmp_path / "renamed"
+    _three_files(renamed, ending="REVIEWED-BY-ALPHA")
+    (renamed / "third.md").rename(renamed / "zzz-notes.md")
+    produced, body = judge.measure(renamed)
+    assert judge._holds(spec, renamed, produced, body) is False, "换了文件名仍被判通过"
+
+
+def test_t4_the_evidence_rule_requires_six_pieces(tmp_path):
+    """**T4。** 至少六条证据——接受两种引用写法不等于整个任务达标。"""
+    judge = _judge()
+    spec = judge.TASKS["evidence"]
+
+    def write(name: str, count: int) -> tuple:
+        directory = tmp_path / name
+        directory.mkdir()
+        body = "".join(f"> quoted piece {index}\n\n**Source:** command {index}\n\n"
+                       for index in range(count))
+        (directory / "evidence.md").write_text(body, encoding="utf-8")
+        return directory, judge.measure(directory)
+
+    directory, (produced, body) = write("six", 6)
+    assert judge._holds(spec, directory, produced, body) is True
+    directory, (produced, body) = write("five", 5)
+    assert judge._holds(spec, directory, produced, body) is False, "五条证据被判通过"
+
+
+def test_t4_the_tail_rule_is_verbatim_and_not_tidied(tmp_path):
+    """**T4。** 末行要**逐字**出现。`strip()` 之后比较是更弱的判定：去掉空格的行不是同一行。"""
+    judge = _judge()
+    spec = judge.TASKS["tail"]
+
+    def write(name: str, summary: str, last: str) -> tuple:
+        directory = tmp_path / name
+        directory.mkdir()
+        (directory / "listing.txt").write_text(f"line one\nline two\n{last}\n", encoding="utf-8")
+        (directory / "summary.md").write_text(summary, encoding="utf-8")
+        return directory, judge.measure(directory)
+
+    last = "    indented last line with  internal  spacing"
+    directory, (produced, body) = write("exact", f"the last line was:\n{last}\n", last)
+    assert judge._holds(spec, directory, produced, body) is True
+
+    directory, (produced, body) = write("tidied", "the last line was: indented last line\n", last)
+    assert judge._holds(spec, directory, produced, body) is False, "改动过的行被判为逐字引用"
+
+    directory, (produced, body) = write("missing", "the summary says nothing useful\n", last)
+    assert judge._holds(spec, directory, produced, body) is False
+
+
+def test_t4_every_task_says_what_needs_a_person():
+    """**T4。** 每一条机械判定覆盖不到的语义要求，都要被**明确标出来**。
+
+    只把机械项报成结果，会让一行「通过」读起来像一份做完了的工作。
+    """
+    judge = _judge()
+    for name, spec in judge.TASKS.items():
+        assert spec.get("human_review"), f"{name} 没有标出需要人工核验的部分"
+        assert isinstance(spec["human_review"], list)

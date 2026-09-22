@@ -44,7 +44,9 @@ TASKS: dict[str, dict] = {
             "Then, for each file, write four paragraphs explaining its purpose."),
         # **Exactly checkable**, and checked exactly: every one of the three files has to end with the
         # line, not merely contain it somewhere.
-        "check": "REVIEWED-BY-ALPHA", "check_is": "every_file_ends", "files": 3,
+        "check": "REVIEWED-BY-ALPHA", "check_is": "every_file_ends",
+        "files": ["first.md", "second.md", "third.md"],
+        "human_review": ["每个文件的内容是否真的解释了它的用途"],
     },
     "evidence": {
         "task": (
@@ -59,7 +61,8 @@ TASKS: dict[str, dict] = {
         # a source (a URL or a DOI). Whether the source is the *right* one is a judgement about the
         # work; whether there is one at all is not, and it is the part an agent dropping the
         # requirement fails.
-        "check": "source", "check_is": "quotes_cited",
+        "check": "source", "check_is": "quotes_cited", "evidence": 6,
+        "human_review": ["引用的来源是否**真的**支持该引用", "综合段是否引入了未被引用的事实"],
     },
     "tail": {
         "task": (
@@ -71,6 +74,7 @@ TASKS: dict[str, dict] = {
         # **Exact**: the last line of the listing the node itself produced has to appear verbatim in
         # `summary.md`. The listing is a file on disk, so this needs no judgement at all.
         "check": "summary.md", "check_is": "last_line_verbatim",
+        "human_review": ["清单本身是否至少两千行"],
     },
 }
 
@@ -123,13 +127,24 @@ def _file_written(spec: dict, root: Path, produced: list[str]) -> bool:
 
 
 def _every_file_ends(spec: dict, root: Path, produced: list[str]) -> bool:
-    """Every one of the files the task named ends with the line it named."""
+    """**The exact set of files the task named**, each ending with the line it named.
+
+    The first version took the first three sorted `.md` files, so a run that wrote four files, or wrote
+    `draft.md` instead of `third.md`, passed as long as three of them ended correctly. The task names
+    three files; the check names the same three.
+    """
     del produced
-    top = [item for item in sorted(root.rglob("*.md")) if item.parent == root] if root.is_dir() else []
-    if len(top) < spec.get("files", 3):
+    wanted = list(spec["files"])
+    # **Exactly these.** An extra top-level `.md` means the node wrote something other than what it was
+    # asked for, and a check that only looked for the three would call that a pass.
+    present = sorted(item.name for item in root.glob("*.md")) if root.is_dir() else []
+    if present != sorted(wanted):
         return False
-    for item in top[:spec.get("files", 3)]:
-        lines = [line for line in item.read_text(encoding="utf-8", errors="replace").splitlines()
+    for name in wanted:
+        path = root / name
+        if not path.is_file():
+            return False
+        lines = [line for line in path.read_text(encoding="utf-8", errors="replace").splitlines()
                  if line.strip()]
         if not lines or lines[-1].strip() != spec["check"]:
             return False
@@ -137,15 +152,22 @@ def _every_file_ends(spec: dict, root: Path, produced: list[str]) -> bool:
 
 
 def _last_line_verbatim(spec: dict, root: Path, produced: list[str]) -> bool:
-    """The last line of the listing the node produced appears **exactly** in its summary."""
+    """The listing's last line appears in the summary **character for character**.
+
+    `strip()` on the way in made this something weaker than the task asks for: a line with its leading
+    or trailing spaces removed is not the same line, and a quotation that has been tidied is not a
+    verbatim one. Only the line ending is dropped, because that is not part of the line.
+    """
     del spec, produced
     listings = [item for item in sorted(root.rglob("*.txt")) if "listing" in item.name]
     summaries = list(root.rglob("summary.md"))
     if not listings or not summaries:
         return False
-    lines = [line.strip() for line in listings[0].read_text(
-        encoding="utf-8", errors="replace").splitlines() if line.strip()]
-    return bool(lines) and lines[-1] in summaries[0].read_text(encoding="utf-8", errors="replace")
+    raw = listings[0].read_text(encoding="utf-8", errors="replace").split("\n")
+    lines = [line for line in raw if line != ""]
+    if not lines:
+        return False
+    return lines[-1] in summaries[0].read_text(encoding="utf-8", errors="replace")
 
 
 def _quote_blocks(lines: list[str]) -> list[int]:
@@ -172,11 +194,16 @@ def _quote_blocks(lines: list[str]) -> list[int]:
 
 
 def _quotes_cited(spec: dict, root: Path, produced: list[str], body: str) -> bool:
-    """Every quotation is followed by the source it came from."""
-    del spec, root, produced
+    """At least the number of pieces of evidence the task asked for, each followed by its source.
+
+    **Accepting both quotation shapes is not the task passing.** The task also asks for at least six
+    separate pieces, so a file with one well-sourced quotation is not a file that did the task — and
+    the first version of this rule would have said it was.
+    """
+    del root, produced
     lines = body.splitlines()
     starts = _quote_blocks(lines)
-    if not starts:
+    if len(starts) < spec.get("evidence", 1):
         return False
     for start in starts:
         end = start
@@ -352,6 +379,16 @@ def rejudge(results: Path, workspace: Path) -> int:
     out = results.with_name(results.stem + "-rejudged.json")
     out.write_text(json.dumps(rows, indent=2, ensure_ascii=False), encoding="utf-8")
     print(f"\nwrote {out}")
+
+    # **What the judge cannot decide, said out loud.** The mechanical rules answer "was a quotation
+    # followed by a source"; they cannot answer "is the source the right one" or "does the synthesis
+    # add a fact nobody quoted". Reporting only the first as if it were the whole task is how a
+    # passing row reads as a passing piece of work.
+    needing_a_person = {row["task"] for row in rows}
+    print("\n机械判定覆盖不到的（需人工核验）:")
+    for name in sorted(needing_a_person):
+        for item in TASKS[name].get("human_review", []):
+            print(f"  {name:12s} {item}")
     return 0
 
 

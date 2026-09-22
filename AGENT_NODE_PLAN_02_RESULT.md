@@ -1,11 +1,10 @@
 # 第二包实施结果：上下文控制与记录保留验证
 
-状态：第二轮六条已逐条处理完毕，见 §8。
-第一轮 R1–R6 与第二轮六条已逐条复核，**全部成立**。修复与回归见 §6、§7。
+**状态：第一轮 R1–R6、第二轮六条、第三轮 T1–T4 均已逐条处理。最终数字与结论见本节；§5 之后是历史，
+不要据它们理解入口。**
 
-> **本报又一次把结论写反了，这次是「mini 没保住约束」。** §7 末尾那条结论基于一个排除 `runs/` 路径的
-> 判定器，而真实 mini 的产物**恰好在 `runs/<run>/only/` 下**——于是基线被判成每次都失败。
-> **判定器已修，已有产物已重新判定（零 API 调用），结论撤回**，见 §7.1。
+**未通过主验收的项逐条列在 §7（第二轮）与 §9（第三轮），未完成的写在每条的「仍未做」里。共享执行层
+（`sandbox.py` / `execenv.py`）的改动仍待主集成复核。**
 
 ## 0. 最终实现摘要
 
@@ -18,39 +17,72 @@
 | **模型上下文** | 有限的工作集，随 pass 推进被重写 | 压缩策略 |
 | **记录** | 发生过的一切，追加式，**从不重写** | 谁都不能 |
 
-计划把这个区分说了两遍，因为最诱人的捷径——**让记录等于框架当前的历史**——会让两者变成同一个东西，于是每一次压缩都在安静地销毁证据，而且是没人会注意到的方向。
+计划把这个区分说了两遍，因为最诱人的捷径——让记录等于框架当前的历史——会让两者变成同一个东西，于是
+每一次压缩都在安静地销毁证据，而且是没人会注意到的方向。
 
 ### 组成
 
 ```
 context_capabilities(budget, record=..., summarizer=..., force=False, observe_chars=8000)
-    ├── WithinBudget   预算、压缩（滑窗 → 摘要）、超上限有限拒绝
-    └── Watching       记录、单条命令输出限界与落盘
+    ├── WithinBudget   预算、压缩（**摘要先于滑窗**）、超上限有限拒绝
+    └── Watching       追加记录、单条命令输出的限界与落盘
+remember(capabilities, task, instructions, routes, workspace)   ← 开工前写一次初始输入
 ```
 
-- **策略是 Harness 的，本包只配置。** `SlidingWindowCompaction` 在前（零成本、保配对），`SummarizingCompaction` 在后（早期约束是它存在的理由）。
-- **未启用**：`DeduplicateFileReads`（要猜 shell 语义，猜错的方向是丢证据）、默认 spill 模式（会注册第二个工具）。本包的落盘是**文件**，模型用已有的 `head`/`sed`/`tail` 读。
-- **一个数字是量出来的，不是假设的**：观察者的 `before_model_request` 跑在压缩 wrapper **之前**，所以在那里记录的是**到达**的历史，与 capability 顺序无关——本模块第一版就是记的那个，看起来像压缩没起作用。现在预算记「实际发出」，观察者记「到达」，两者合起来才是证据。
+**策略顺序是「摘要在前」**：滑窗先跑会在决定要不要总结之前就把旧结论丢掉——而那时已经没有东西可总结
+了（实测：摘要器零调用）。**未启用** `DeduplicateFileReads`（要猜 shell 语义）与默认 spill 模式（会注册
+第二个工具）。
+
+### 入口（第三包复用的就是这些）
+
+| 入口 | 作用 |
+| --- | --- |
+| `anchor.node.NodeRequest` / `NodeOutcome` | 请求与结果。非 `completed` 不得带 `route`，由 `__post_init__` 强制 |
+| `anchor.node.pydantic_adapter.run_node(request, *, model, capabilities=())` | 异步入口；`capabilities` 是挂载接缝 |
+| `anchor.node.pydantic_adapter.build_agent(model, *, instructions, max_retries, capabilities)` | 只造 Agent |
+| `anchor.node.pydantic_adapter.read_completion(Executed, routes)` | 完成协议，纯函数 |
+| `anchor.runtime.execenv.NodeSandbox` | 沙箱接线。**任何新 runner 都应经由它** |
 
 ### 实测
 
 | | |
 | --- | --- |
-| 本包测试 | **17 passed**（B1–B10），0 失败，0 skip |
-| 全量 `tests/` | **162 passed** |
-| `ruff check src/ tests/` | 通过 |
-| `mypy src/anchor/` | 通过（24 个源文件）|
-| 依赖 | `pydantic-ai-slim==2.46.0`、`pydantic-ai-harness==0.32.0`（与 G1 相同，未变）|
-| G1 基线 | `b9aae105d2ab0beb24afa93272a9d0186e4aa70f` |
+| 本包测试 | **50 passed**（B1–B10 + R1–R5 + 判定器规则正反例 + T1–T3）|
+| 全量 `tests/` | **195 passed**，无 skip |
+| `ruff` / `mypy` | 通过（25 个源文件）|
+| 环境 | Python 3.12.3 · Linux 7.0.0-31-generic x86_64 · bubblewrap 0.9.0 |
+| 依赖 | `pydantic-ai-slim==2.46.0`、`pydantic-ai-harness==0.32.0` |
 
-### 已知边界（交接）
+### 真实模型实验：已跑，结论限于已验证条件
 
-- **真实模型实验未做**（§5）：本机无任何授权端点或凭证，见 §3。结构性验收不依赖它，但**摘要质量未验证**。
-- **两处共享层 patch 待主集成评审**，见 §2——它们是 B3「无损」成立的前提。
-- 本包**不**声称记录可用于 crash resume（第三包的职责）。
-- 大输出落盘的**清理是显式操作**，本包执行期间不删（§37：03 可能引用）。
+三组共 **34 次真实运行**（真实窗口 524,288 两组、强制压缩窗口 12,000 一组），用真实 `anchor-scholar`/
+沙箱/提交，模型两臂各跑同一批任务。
 
----
+**用最终判定器重新判定同一批已有产物（零付费样本）的结果：**
+
+| 任务 | mini | pydantic |
+| --- | --- | --- |
+| `constraint`（**精确文件集合**，每个都以指定行结尾）| 4/4 kept | 4/4 kept |
+| `tail`（清单末行**逐字**出现在 summary.md）| 6/6 kept | 6/6 kept |
+| `evidence`（≥6 条引用，每条后跟来源）| 4/4 kept | 2 次中 1 次 kept；**1 次 ABSENT** |
+
+**可以说的**：在上述这些具体条件下，`constraint` 与 `tail` 两项要求在**两臂的每一次**尝试里都成立；
+唯一的两处 ABSENT 是同一个候选运行 `pydantic-evidence-2`（一次是 `budget_exhausted` 没跑完，另一次有文件
+但未通过规则，**我没有裁定它是真失败还是规则不认的第三种写法**）。
+
+**不可以说的**：不能由此声称「两臂约束保留没有可测量差异」——样本量小、任务只有三个、`evidence` 的语义
+项（来源是否真的支持引用、综合段是否引入新事实）**机械判定覆盖不到，需人工核验**。也不能从这些样本
+推断性能因果。
+
+### 已知边界（交接给后续包）
+
+- **提前退出在框架眼里是被取消，不是完成**：`wrap_run` 的 handler 收到 `CancelledError`，不产生
+  `AgentRunResult`。第三包若用 run 级能力（如 `StepPersistence`），不能拿 Node 的 `completed` 当框架证据。
+- 记录的最后一批来自**读取**提前退出所在节点的 `request`，不是执行它；完整、带 `tool_call_id`、无新增截断。
+- **摘要调用计入节点的请求预算**（框架的 `UsageLimits` 数所有请求）——记录里分开了，预算里没分。
+- 本包不实现：自动压缩之外的持久化、崩溃恢复、WAITING/人工输入、前端事件流、生产切换。
+- **`PIPE`/文件的三次数值分离**：模型看到的（`max_output_bytes`）、允许保留的（调用方预算）、能被读到的
+  （命名了存储时才有）——第三处此前会交出一个已被删除的路径。
 
 ## 1. B1–B10 验收结果
 
@@ -555,3 +587,88 @@ instructions/schema ✗——**固定余量不能声称覆盖任意实际指令*
 | `ruff` / `mypy` | 通过 |
 | 真实实验 | 本轮**未新增任何付费样本** ✓；三组已有产物全部重新判定 ✓ |
 | 共享层 patch | `sandbox.py` / `execenv.py` **待主集成复核** ✓ |
+
+---
+
+## 9. 第三轮 T1–T4 的处理
+
+### 9.1 T1：输出存储的正确性 —— 已修
+
+**① 文件名不是摘要。** 实测确认：`_keep` 用了 `hashlib` 对象本身，**调了 `update` 却从未调
+`hexdigest`** ✗——文件名是 `stdout-<sha256 _hashlib.HASH object @ 0x…>.txt`，不是内容地址、含空格与
+尖括号、内存地址还可能被复用而覆盖旧引用。
+
+**② 未超限额的流留下暂存文件。** 复核确认：`spill_limit_bytes=1000`、输出 50,000 字节，目录里真的留着
+50,000 字节而 `incomplete=False` ✗。暂存与可读的持久输出没有分开 ✓。
+
+**③ 上限在跑完之后才生效。** 先无界写 raw 再 truncate ✗——磁盘上限在运行期间不成立 ✓。
+
+**④ 没有配置存储时会交出死路径。** 先记下 `spilled`，再在 `finally` 里删掉临时目录 ✗——返回的路径已经
+不存在 ✓。
+
+**修法（重写 `run`）**：每条流一个**读取线程**，边读边判——头部按 `max_output_bytes` 保留、其余只**计数
+不落盘** ✓。于是内存与磁盘**在命令运行期间**都有界 ✓。暂存放在自己的临时目录里，只有被裁过的流才以
+**内容摘要命名**搬进持久目录，其余一律不落 ✓；命令结束暂存即清 ✓。没有存储时**不交出任何路径**，并
+明确说「余下没保留」✓。
+
+**三个数从此分开**：模型看到的（`max_output_bytes`）、允许保留的（调用方预算，两流**共用一份递减额度**）、
+能被读到的（命名了存储时才有）✓。
+
+**回归**（`test_t1_*`）：文件名匹配 `(stdout|stderr)-[0-9a-f]{16}\.txt` ✓；不同内容不覆盖、同内容不重复
+计费 ✓；放得下的输出**不留下任何文件**且不被裁 ✓；8 MB 输出对 200 KB 预算，**磁盘上 ≤ 预算**且
+`incomplete=True`、明说「could NOT be kept whole」 ✓；无存储时不交出任何路径 ✓。
+
+**仍未做**：持久目录与记录目录仍在同一棵树下（挂载只覆盖 `outputs/` ✓）；`_capture` 的线程用阻塞读 ✓，
+超时后 `join(timeout=5)` 后可能仍有线程在读 ✓。
+
+### 9.2 T2：摘要用量跨实例共享 —— 已修
+
+**复核确认**：`usage = []` 是**类属性** ✗。而且根因比表面深一层：`WrapperModel` **是 dataclass** ✓，
+子类**没有 `@dataclass` 装饰器**时 `field(...)` 会原样留在类上（实测 `a.usage` 就是 `Field` 对象，
+`AttributeError: 'Field' object has no attribute 'append'` ✗）；而可变默认值本身就是类属性 ✗。两种写法
+都让**所有**摘要器共享一个列表 ✓。
+
+**修法**：`@dataclass` + `field(default_factory=list)` ✓——实测两个实例的 `usage is` 为 **False** ✓、
+互不干扰 ✓、构造照常可用 ✓。
+
+**回归**：`test_t2_two_summarisers_do_not_share_their_usage` 逐项比对两个实例的 usage ✓（不是只断言字段
+存在 ✓）；`test_t2_two_nodes_record_their_own_summary_usage` 断言两个节点的记录里各是自己的值
+（111 / 999）✓；`test_t2_a_failing_summariser_is_recorded_for_this_node` 断言失败在本节点记录里留痕 ✓。
+
+### 9.3 T3：完整记录补齐初始输入 —— 已修
+
+**复核确认**：`before_model_request` 只存 `arriving` 的数量 ✗——仅凭 `record.jsonl` **无法还原「模型被
+要求做什么」** ✓。
+
+**修法**：`Watching.remember_input` + `remember(capabilities, task, instructions, routes, workspace)` ✓
+在开工前**写一次**：`execution`（task / instructions / routes / workspace）与 `tools`（名字与说明）✓。
+**只写一次**而不是每轮重复整段历史 ✓。
+
+**回归**：唯一标记的任务与指令都能从记录取回 ✓，且 `execution` 只出现一次 ✓（不重复写）✓；JSON 字符串形
+式的参数能从追加的 `model_response` 里**完整**取回 ✓。
+
+### 9.4 T4：实验判定与结论范围 —— 已修
+
+**三条机械判定改严**：
+
+- `every_file_ends` 现在检查**恰好**是 `first.md`/`second.md`/`third.md` ✓——多了文件、或换了名字，都不
+  算做到 ✓（此前取排序后的前三个 `.md` ✗）
+- `quotes_cited` 现在要求**至少六条**证据 ✓——接受两种引用写法**不等于**整个任务达标 ✓
+- `last_line_verbatim` 现在去掉了 `strip()` ✓——去掉空格的行不是同一行 ✓，只有行尾换行被丢掉 ✓
+
+**语义项明确标出**：每个任务新增 `human_review` ✓，`--rejudge` 会打印出来 ✓——「来源是否真的支持该引用」
+「综合段是否引入未被引用的事实」「每个文件的内容是否真的解释了它的用途」「清单是否至少两千行」**机械
+判定覆盖不到** ✓。回归 `test_t4_every_task_says_what_needs_a_person` 断言每个任务都标了 ✓。
+
+**结论范围**：首页已按此改写 ✓——只说「在这些具体条件下，`constraint` 与 `tail` 在两臂每次尝试里都成立」✓，
+**不再声称「两臂没有可测量差异」** ✓，也不从少量样本推断性能因果 ✓。
+
+### 9.5 本轮状态
+
+| | |
+| --- | --- |
+| 本包测试 | **50 passed** |
+| 全量 `tests/` | **195 passed**，无 skip |
+| `ruff` / `mypy` | 通过（25 个源文件）|
+| 真实实验 | **未新增任何付费样本** ✓；三组已有产物用最终判定器重新判定 ✓ |
+| 共享层 patch | 待主集成复核 ✓ |
