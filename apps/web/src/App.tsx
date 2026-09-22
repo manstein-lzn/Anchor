@@ -18,7 +18,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ExecutionCanvas } from './ExecutionCanvas';
 import { GraphCanvas } from './GraphCanvas';
 import { label } from './execution';
-import { toFlowEdges, toFlowNodes, type OurGraph, type OurRun, type OurRunDetail } from './model';
+import {
+  toFlowEdges, toFlowNodes, type OurAgent, type OurGraph, type OurRun, type OurRunDetail,
+} from './model';
 
 const POLL_MS = 3000;
 type Pick = { kind: 'node' | 'edge' | 'agent'; id: string } | null;
@@ -184,7 +186,7 @@ export function App() {
   });
 
   const selectedNode = pick?.kind === 'node' ? doc?.nodes.find(item => item.id === pick.id) : undefined;
-  const selectedAgent = pick?.kind === 'agent' && doc ? doc.agents[pick.id] : undefined;
+  const selectedAgent = pick?.kind === 'agent' && doc ? doc.agents?.[pick.id] : undefined;
   const selectedEdge = pick?.kind === 'edge' && doc ? doc.edges[Number(pick.id)] : undefined;
 
   const patchNode = (fields: Partial<{ id: string; agent: string; with: string }>) => {
@@ -194,7 +196,8 @@ export function App() {
   };
   const patchAgent = (fields: Partial<{ model: string; network: boolean; instructions: string }>) => {
     if (!doc || pick?.kind !== 'agent') return;
-    patch({ ...doc, agents: { ...doc.agents, [pick.id]: { ...doc.agents[pick.id], ...fields } } });
+    const current = doc.agents?.[pick.id] ?? { model: '' };
+    patch({ ...doc, agents: { ...doc.agents, [pick.id]: { ...current, ...fields } } });
   };
   const patchEdge = (fields: Partial<{ from: string; to: string }>) => {
     if (!doc || pick?.kind !== 'edge') return;
@@ -217,7 +220,7 @@ export function App() {
     if (!doc) return;
     let id = 'agent';
     let suffix = 2;
-    while (doc.agents[id]) id = `agent${suffix++}`;
+    while (doc.agents?.[id]) id = `agent${suffix++}`;
     patch({ ...doc, agents: { ...doc.agents,
       [id]: { model: 'models.academic', network: false, instructions: '' } } });
     setPick({ kind: 'agent', id });
@@ -476,7 +479,29 @@ export function App() {
                                to: edge.to === selectedNode.id ? next : edge.to })) });
                          }} />
                 </label>
-                {selectedNode.graph ? <p className="inspector-note">
+                {selectedNode.op ? <>
+                <div className="inspector-kind">Op</div>
+                <p className="inspector-note">
+                  这个节点跑的是 <code>{selectedNode.op}</code>，<strong>没有模型</strong>：
+                  退出码就是判定，0 完成、非 0 失败。它和 agent 节点共用同一套沙箱、工作区、
+                  每轮一个 commit 和同一份 <code>reads</code>/<code>writes</code> 契约。
+                </p>
+                <label>命令
+                  <textarea className="instructions" readOnly
+                            value={doc.ops?.[selectedNode.op]?.run ?? ''} />
+                </label>
+                <label>读
+                  <input readOnly
+                         value={(doc.ops?.[selectedNode.op]?.reads ?? []).join(', ')} />
+                </label>
+                <label>写
+                  <input readOnly
+                         value={(doc.ops?.[selectedNode.op]?.writes ?? []).join(', ')} />
+                </label>
+                <p className="inspector-note">
+                  界面还不能编辑 op 的定义——这一版只让图能画出来、跑起来、看得见。
+                </p>
+                </> : selectedNode.graph ? <p className="inspector-note">
                   这个节点运行的是文件里声明的 <code>{selectedNode.graph}</code>。展开之后它的节点
                   以 <code>{selectedNode.id}/…</code> 命名，各自在自己的目录里，父图只看得到它的
                   <code>exit</code> 节点。
@@ -484,7 +509,7 @@ export function App() {
                 <label>使用角色
                   <select value={selectedNode.agent}
                           onChange={event => patchNode({ agent: event.target.value })}>
-                    {Object.keys(doc.agents).map(agent => (
+                    {Object.keys(doc.agents ?? {}).map(agent => (
                       <option key={agent} value={agent}>{agent}</option>))}
                   </select>
                 </label>
@@ -494,16 +519,18 @@ export function App() {
                          onChange={event => patchNode({ with: event.target.value })} />
                 </label>
                 </>}
-                {routing.has(selectedNode.id) && <p className="inspector-note">
+                {!selectedNode.op && routing.has(selectedNode.id) && <p className="inspector-note">
                   这个节点有多条出边，所以它必须用 <code>anchor-route</code> 结束，
                   不能用 <code>anchor-done</code>。这一点要写进它的指令里。
                 </p>}
                 <div className="selection-tools">
                   <ToolButton icon={Copy} label="复制节点" onClick={duplicateNode} />
                 </div>
-                <button className="full-button" disabled={Boolean(selectedNode.graph)}
+                <button className="full-button"
+                        disabled={Boolean(selectedNode.graph) || Boolean(selectedNode.op)}
                         onClick={() => setPick({ kind: 'agent', id: selectedNode.agent ?? '' })}>
-                  {selectedNode.graph ? '模块的角色在它自己的图里' : '编辑它的角色'}</button>
+                  {selectedNode.graph ? '模块的角色在它自己的图里'
+                    : selectedNode.op ? 'Op 没有角色' : '编辑它的角色'}</button>
                 <button className="full-button" onClick={() => setJson('node')}>完整节点 JSON</button>
               </>}
 
@@ -611,7 +638,7 @@ export function App() {
 
       {palette && doc && <Modal title="添加节点" close={() => setPalette(false)}>
         <div className="node-palette">
-          {Object.keys(doc.agents).map(agent => (
+          {Object.keys(doc.agents ?? {}).map(agent => (
             <button key={agent} onClick={() => addNode(agent)}>
               <strong>{agent}</strong><small>用这个角色</small>
             </button>
@@ -626,7 +653,7 @@ export function App() {
         title={json === 'graph' ? '完整 Graph JSON' : json === 'node' ? '完整节点 JSON'
           : json === 'edge' ? '连线 JSON' : '角色 JSON'}
         value={json === 'graph' ? doc : json === 'node' ? selectedNode
-          : json === 'edge' ? selectedEdge : doc.agents[pick?.id ?? '']}
+          : json === 'edge' ? selectedEdge : doc.agents?.[pick?.id ?? '']}
         close={() => setJson(null)}
         apply={value => {
           if (json === 'graph') patch(value as OurGraph);
@@ -635,7 +662,7 @@ export function App() {
           else if (json === 'edge' && selectedEdge) patch({ ...doc,
             edges: doc.edges.map((item, index) => index === Number(pick?.id) ? value as typeof item : item) });
           else if (pick?.kind === 'agent') patch({ ...doc,
-            agents: { ...doc.agents, [pick.id]: value as typeof doc.agents[string] } });
+            agents: { ...doc.agents, [pick.id]: value as OurAgent } });
         }} />}
     </div>
   );

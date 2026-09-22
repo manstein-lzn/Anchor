@@ -10,11 +10,35 @@ import type { Edge, Node, XYPosition } from '@xyflow/react';
 import { layeredLayout, type Definition } from './graph';
 import { label } from './execution';
 
+/** An agent: a model loop. `reads`/`writes` are the files it expects and the files it promises,
+ *  which the loader checks against what the graph can actually hand it. */
+export type OurAgent = {
+  model: string;
+  instructions?: string;
+  network?: boolean;
+  reads?: string[];
+  writes?: string[];
+};
+
+/** An op: one command and no model at all, whose **exit code is the verdict**. Everything else about
+ *  it is what it is for an agent — the same sandbox, the same workspace, a commit per pass, the same
+ *  `reads`/`writes` — so the canvas draws it as a node like any other and only says which kind it is. */
+export type OurOp = {
+  run: string;
+  reads?: string[];
+  writes?: string[];
+  network?: boolean;
+  wall_time_limit_seconds?: number;
+};
+
 export type OurGraph = {
   entry: string;
   objective?: string;
   max_rounds?: number;
-  agents: Record<string, { model: string; instructions?: string; network?: boolean }>;
+  /** A file declares agents, ops, or both. A graph of nothing but ops has no `agents` key at all,
+   *  and one of nothing but agents has no `ops` — so neither is required. */
+  agents?: Record<string, OurAgent>;
+  ops?: Record<string, OurOp>;
   /** Graphs this file declares, which a node may run instead of an agent. The canvas shows one as a
    *  module; a run never sees this shape — it reads the expansion, where every module is inlined. */
   graphs?: Record<string, unknown>;
@@ -29,8 +53,15 @@ export type OurGraph = {
  *
  * `with` is what this use adds to what the role already says, which is what makes declaring a role
  * separately from its nodes worth doing: two nodes can share one and still be asked for different
- * things. */
-export type OurNode = { id: string; agent?: string; graph?: string; with?: string };
+ * things. It belongs to agents: an op has no instructions to add to, and the loader refuses it there.
+ */
+export type OurNode = { id: string; agent?: string; op?: string; graph?: string; with?: string };
+
+/** Which of the three a node is as written. A module is the third: it disappears when the graph is
+ *  expanded, so a run only ever sees agents and ops. */
+export function kindOf(node: OurNode): 'agent' | 'op' | 'subgraph' {
+  return node.graph ? 'subgraph' : node.op ? 'op' : 'agent';
+}
 
 export type OurNodeResult = {
   node_id: string;
@@ -40,6 +71,13 @@ export type OurNodeResult = {
   submitted: boolean;
   exit_status: string;
   route: string | null;
+  /** This pass, frozen. The workspace is reused across passes, so the commit is what makes one pass
+   *  readable after a later one has written over it — and what a downstream node reads the history
+   *  through. */
+  commit?: string;
+  /** What this pass was handed, as `[node, commit]`. The pointers are pinned, so this is what makes
+   *  "what did this node read" answerable rather than reconstructable. */
+  inputs?: [string, string][];
 };
 
 export type OurRunState = {
@@ -79,6 +117,8 @@ export type OurRunDetail = {
 
 export type FlowNode = Node<{
   name: string; kind: string; state: string; detail: string;
+  /** Which of the two it is, so a component can choose an icon without parsing the label. */
+  nodeKind: 'agent' | 'op';
   attempt?: number; statusLabel?: string;
 }, 'execution'>;
 
@@ -89,7 +129,7 @@ export function asDefinition(graph: OurGraph, name: string): Definition {
     name,
     nodes: graph.nodes.map(node => ({
       id: node.id,
-      type: node.graph ? 'subgraph' as const : 'agent' as const,
+      type: kindOf(node),
       // A module is named for the graph it runs, so the canvas says which module rather than
       // printing the node's own id twice.
       name: node.graph ? `${node.id} · ${node.graph}` : node.id,
@@ -125,14 +165,26 @@ function nodeState(nodeId: string, graph: OurGraph, state: OurRunState | null): 
     position: { x: 0, y: 0 },
     data: {
       name: node.name,
-      kind: graph.nodes.find(item => item.id === nodeId)?.agent ?? 'agent',
+      // Which definition it points at, and which kind that is. An op and an agent are the same thing
+      // to everything the canvas draws — a node with a workspace and a state — so the difference is
+      // said in words rather than drawn as a different shape.
+      kind: nodeKindLabel(graph, nodeId),
       state: status,
       detail,
+      nodeKind: node?.op ? 'op' : 'agent',
       // The canvas renders `attempt + 1` as "第 N 次执行", so zero means the first pass.
       attempt: passes ? passes - 1 : undefined,
       statusLabel,
     },
   };
+}
+
+function nodeKindLabel(graph: OurGraph, nodeId: string): string {
+  const node = graph.nodes.find(item => item.id === nodeId);
+  if (!node) return '';
+  if (node.graph) return `${node.graph} · 模块`;
+  if (node.op) return `${node.op} · op`;
+  return `${node.agent} · agent`;
 }
 
 export function toFlowNodes(graph: OurGraph, name: string,

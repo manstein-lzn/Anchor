@@ -3,13 +3,15 @@ import {
   Background, Controls, Handle, ReactFlow, getViewportForBounds,
   Position, ReactFlowProvider, useNodesState, useNodesInitialized, useReactFlow, type Edge, type Node, type NodeProps,
 } from '@xyflow/react';
-import { Activity, AlertTriangle, Bot, CheckCircle2 } from 'lucide-react';
+import { Activity, AlertTriangle, Bot, CheckCircle2, Terminal } from 'lucide-react';
 import { label } from './execution';
 import { RoutedEdge } from './RoutedEdge';
 
 export type ExecutionFlowNode = Node<{
   name: string;
   kind: string;
+  /** Which of the two it is, so the icon can say it without the label being parsed. */
+  nodeKind?: 'agent' | 'op';
   state: string;
   detail: string;
   attempt?: number;
@@ -19,7 +21,11 @@ export type ExecutionFlowNode = Node<{
 function ExecutionNodeView({ data, selected }: NodeProps<ExecutionFlowNode>) {
   return <div className={`execution-node state-${data.state} ${selected ? 'selected' : ''}`}>
     <Handle type="target" position={Position.Left} />
-    <div className="execution-node-kind"><Bot size={14} />{data.kind}<span>{data.attempt === undefined ? '' : `第 ${data.attempt + 1} 次执行`}</span></div>
+    <div className="execution-node-kind">
+      {data.nodeKind === 'op' ? <Terminal size={14} /> : <Bot size={14} />}
+      {data.kind}
+      <span>{data.attempt === undefined ? '' : `第 ${data.attempt + 1} 次执行`}</span>
+    </div>
     <strong title={data.name}>{data.name}</strong>
     <div className="execution-node-status">{data.state === 'completed' ? <CheckCircle2 size={14} /> : ['stalled', 'failed', 'revise', 'blocked'].includes(data.state) ? <AlertTriangle size={14} /> : <Activity size={14} />} {data.statusLabel || label(data.state)}</div>
     <small title={data.detail}>{data.detail || '尚无执行记录'}</small>

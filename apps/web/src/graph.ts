@@ -2,7 +2,7 @@ import type { Edge, Node, XYPosition } from '@xyflow/react';
 import dagre from '@dagrejs/dagre';
 
 export const kinds = {
-  agent: 'Agent', tool: '工具', router: '路由', parallel: '并行', join: '汇合',
+  agent: 'Agent', op: 'Op', tool: '工具', router: '路由', parallel: '并行', join: '汇合',
   verifier: '验证', approval: '审批', wait_for_event: '等待事件',
   human_task: '人工任务', artifact: '产物', loop: '循环', subgraph: '子图',
 } as const;

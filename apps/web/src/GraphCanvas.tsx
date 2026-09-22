@@ -16,18 +16,22 @@ import {
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import { useEffect, useMemo, useRef } from 'react';
-import { Bot } from 'lucide-react';
+import { Bot, Terminal } from 'lucide-react';
 import { RoutedEdge } from './RoutedEdge';
 import { layeredLayout } from './graph';
-import type { OurGraph } from './model';
+import { kindOf, type OurGraph } from './model';
 
-export type AnchorNode = Node<{ label: string; agent: string; entry: boolean }, 'anchor'>;
+export type AnchorNode = Node<{ label: string; agent: string; entry: boolean;
+                                  kind: 'agent' | 'op' | 'subgraph' }, 'anchor'>;
 
 function AnchorNodeView({ data, selected }: NodeProps<AnchorNode>) {
   return <div className={`graph-node ${selected ? 'selected' : ''}`}>
     <Handle type="target" position={Position.Left} />
     <div className="node-kind">
-      <Bot size={15} /><span>节点</span>
+      {/* Three shapes, because there are three as written. An op is a command and no model, so a
+          picture that said only "node" would be saying the one thing that is not true of it. */}
+      {data.kind === 'op' ? <Terminal size={15} /> : <Bot size={15} />}
+      <span>{data.kind === 'subgraph' ? '模块' : data.kind === 'op' ? 'Op' : '节点'}</span>
       {data.entry && <span className="entry-tag">入口</span>}
     </div>
     <strong>{data.label}</strong>
@@ -51,7 +55,7 @@ function Inner({ graph, name, editable, onMove, onConnect, onPick }:
     graph_id: name, name,
     nodes: graph.nodes.map(item => ({
       id: item.id,
-      type: item.graph ? 'subgraph' as const : 'agent' as const,
+      type: kindOf(item),
       name: item.graph ? `${item.id} · ${item.graph}` : item.id,
     })),
     edges: graph.edges.map(item => ({ source: item.from, target: item.to })),
@@ -64,8 +68,9 @@ function Inner({ graph, name, editable, onMove, onConnect, onPick }:
     // it and the next render would put it straight back.
     position: graph.layout?.positions?.[item.id] ?? laid.get(item.id) ?? { x: 0, y: 0 },
     data: { label: item.graph ? `${item.id} · ${item.graph}` : item.id,
-            agent: item.graph ?? item.agent ?? '',
-            entry: item.id === graph.entry },
+            agent: item.graph ?? item.op ?? item.agent ?? '',
+            entry: item.id === graph.entry,
+            kind: kindOf(item) },
   })), [graph, laid]);
 
   const edges: Edge[] = useMemo(() => graph.edges.map((item, index) => ({
