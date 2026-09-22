@@ -185,6 +185,13 @@ export function App() {
     setRun(body.run); setView('runs');
   });
 
+  // Asked between nodes, not during one: a node in flight is inside a sandbox command or a model
+  // call, and nothing here can reach into it. The button says so rather than appearing not to work.
+  const controlRun = (what: 'pause' | 'stop' | 'resume') => perform(what, async () => {
+    await api(`/runs/${run}/${what}`, 'POST');
+    await refresh();
+  });
+
   const selectedNode = pick?.kind === 'node' ? doc?.nodes.find(item => item.id === pick.id) : undefined;
   const selectedAgent = pick?.kind === 'agent' && doc ? doc.agents?.[pick.id] : undefined;
   const selectedEdge = pick?.kind === 'edge' && doc ? doc.edges[Number(pick.id)] : undefined;
@@ -328,6 +335,20 @@ export function App() {
                 <span className="objective">{detail.state.objective}</span>
                 {detail.state.cursor && <span className="hint">
                   正在执行 {detail.state.cursor.node}（第 {detail.state.cursor.pass} 轮）</span>}
+                {['running', 'paused'].includes(detail.state.status) &&
+                  <span className="run-controls">
+                    {detail.state.status === 'running' ? <>
+                      <button onClick={() => void controlRun('pause')} disabled={busy}>暂停</button>
+                      <button className="danger-link" onClick={() => void controlRun('stop')}
+                              disabled={busy}>停止</button>
+                    </> : <button onClick={() => void controlRun('resume')} disabled={busy}>
+                      继续
+                    </button>}
+                    <small>在当前节点结束后生效</small>
+                  </span>}
+                {detail.state.reason === 'asked' && <span className="hint">
+                  {detail.state.status === 'paused' ? '已按请求暂停' : '已按请求停止'}
+                </span>}
                 {detail.state.error && <span className="problem">{detail.state.error}</span>}
               </> : <span className="hint">选一次运行，或触发一次。</span>}
             </div>

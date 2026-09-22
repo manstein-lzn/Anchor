@@ -92,6 +92,8 @@ export type OurRunState = {
   executed: string[];
   skipped: string[];
   error: string;
+  /** Why a run that stopped did not simply finish. `asked` means somebody pressed the button. */
+  reason?: string;
 };
 
 export type OurRun = {

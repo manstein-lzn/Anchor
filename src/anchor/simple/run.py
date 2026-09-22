@@ -29,6 +29,7 @@ import json
 import shutil
 import subprocess
 import tarfile
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -705,8 +706,15 @@ def _agent_for(graph, node_id: str, directory: Path, models: dict, secret_file, 
 
 def run(workspace: str | Path, *, objective: str | None = None, config_path: str | Path,
         run_id: str | None = None, resume: str | Path | None = None,
-        model_script: dict[str, list[str]] | None = None) -> RunState:
-    """Walk the graph. `model_script` replaces the model with written-down commands, per node."""
+        model_script: dict[str, list[str]] | None = None,
+        stop_request: Callable[[], str | None] | None = None) -> RunState:
+    """Walk the graph. `model_script` replaces the model with written-down commands, per node.
+
+    `stop_request` is asked between nodes whether the run should stop, and answers with the status to
+    stop under or None to carry on. **Between nodes, not during one**: a node mid-flight is inside a
+    sandbox command or a model call and nothing here can reach into it, so a stop lands when the node
+    that is running finishes. Saying so is better than a button that appears not to work.
+    """
 
     workspace = Path(workspace).resolve()
     graph_path = workspace / "graph.json"
@@ -722,6 +730,10 @@ def run(workspace: str | Path, *, objective: str | None = None, config_path: str
         run_dir = Path(resume).resolve()
         state = RunState.load(run_dir)
         state.status = "running"
+        # Why the *previous* attempt stopped is not why this one might. A pause sets `reason` so the
+        # record says why it left off, and without clearing it here a run that paused, resumed and
+        # finished kept saying `asked` — which the view reads as "stopped on request".
+        state.reason = ""
     else:
         run_dir = workspace / "runs" / (run_id or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S"))
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -766,6 +778,16 @@ def run(workspace: str | Path, *, objective: str | None = None, config_path: str
                          for (source, target), value in decided.items()}
     try:
         while True:
+            asked = stop_request() if stop_request is not None else None
+            if asked is not None:
+                # Left where it is, with the edges it has decided and the nodes it has run, so a
+                # continue picks up from exactly here rather than starting over.
+                state.status = asked
+                state.reason = "asked"
+                state.save(run_dir)
+                print(json.dumps({"run": str(run_dir), "status": asked, "reason": "asked"},
+                                 ensure_ascii=False), flush=True)
+                return state
             step = _next_step(graph, state, decided, run_dir, order, ready)
             if step is None:
                 break

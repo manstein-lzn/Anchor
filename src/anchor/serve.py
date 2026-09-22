@@ -45,6 +45,10 @@ class Scheduler:
         self.root = root
         self.config = config
         self.running: dict[str, str] = {}         # graph -> run id
+        # What a run has been asked to do next, by run id: "paused" or "stopped". Asked between
+        # nodes, because a node in flight is inside a sandbox command or a model call and nothing
+        # here can reach into it — so the request lands when the running node finishes.
+        self.control: dict[str, str] = {}
         self.lock = threading.Lock()
 
     def workspaces(self) -> list[Path]:
@@ -84,6 +88,47 @@ class Scheduler:
         threading.Thread(target=self._run, args=(workspace, run_id, objective),
                          daemon=True).start()
         return json.dumps({"run": run_id, "graph": graph}), 202
+
+    def control_run(self, run_id: str, what: str) -> tuple[str, int]:
+        """Ask a run to pause, stop or carry on. Returns (body, status).
+
+        Pause and stop are the same request — the loop leaves off between nodes — and differ only in
+        the status the run keeps, which is what decides whether it is picked up again on restart.
+        Neither cancels the node that is running: nothing outside a sandbox command can stop it, and
+        a button that appeared to would be lying.
+        """
+        if what not in ("pause", "stop", "resume"):
+            return json.dumps({"error": f"unknown control: {what}"}), 400
+        graph = next((name for name, current in self.running.items() if current == run_id), None)
+        with self.lock:
+            if what == "resume":
+                self.control.pop(run_id, None)
+            else:
+                self.control[run_id] = "paused" if what == "pause" else "stopped"
+                # The graph stays claimed until the loop actually leaves, which is not now: the node
+                # in flight has to finish first. Releasing it here would let a second trigger start
+                # while the first is still inside a node — and would make "is it still running" lie
+                # to whoever is watching for it to stop.
+        if graph is None:
+            return self._resume_cold(run_id) if what == "resume" else (
+                json.dumps({"error": "that run is not running", "run": run_id}), 409)
+        return json.dumps({"run": run_id, "asked": what}), 202
+
+    def _resume_cold(self, run_id: str) -> tuple[str, int]:
+        """Continue a run that is not in this process — one a restart left, or one paused earlier."""
+        for workspace in self.workspaces():
+            run_dir = workspace / "runs" / run_id
+            if not (run_dir / "run.json").is_file():
+                continue
+            with self.lock:
+                if workspace.name in self.running:
+                    return json.dumps({"error": "this graph is already running",
+                                       "running": self.running[workspace.name]}), 409
+                self.running[workspace.name] = run_id
+            threading.Thread(target=self._run, args=(workspace, run_id, None, True),
+                             daemon=True).start()
+            return json.dumps({"run": run_id, "graph": workspace.name, "resumed": True}), 202
+        return json.dumps({"error": "no such run"}), 404
 
     def save(self, name: str, definition: dict) -> tuple[str, int]:
         """Validate a graph and write it, or say why not.
@@ -141,14 +186,20 @@ class Scheduler:
 
     def _run(self, workspace: Path, run_id: str, objective: str | None,
              resume: bool = False) -> None:
+        def asked() -> str | None:
+            with self.lock:
+                return self.control.get(run_id)
+
         try:
             runner.run(workspace, objective=objective, config_path=self.config, run_id=run_id,
-                       resume=(workspace / "runs" / run_id) if resume else None)
+                       resume=(workspace / "runs" / run_id) if resume else None,
+                       stop_request=asked)
         except Exception:  # noqa: BLE001 - the run already recorded its own failure
             traceback.print_exc()
         finally:
             with self.lock:
                 self.running.pop(workspace.name, None)
+                self.control.pop(run_id, None)
 
     def runs(self) -> list[dict]:
         found = []
@@ -313,6 +364,12 @@ class Handler(BaseHTTPRequestHandler):
                 return
             response, status = self.scheduler.create(str(body.get("name") or ""),
                                                      body.get("definition"))
+            return self._send(response, status)
+        if len(parts) == 3 and parts[0] == "runs":
+            # Every verb under a run goes to `control_run`, which names the ones it knows. Matching
+            # the known ones here instead would answer "not found" for a typo, which reads as "no such
+            # run" rather than "no such request".
+            response, status = self.scheduler.control_run(parts[1], parts[2])
             return self._send(response, status)
         if parts != ["trigger"]:
             return self._send(json.dumps({"error": "not found"}), 404)
