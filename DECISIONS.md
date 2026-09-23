@@ -1712,11 +1712,11 @@ The versions this migration is verified against, and the ones a change must re-v
 | `pydantic-ai-slim` | `2.46.0` | the model loop |
 | `pydantic-ai-harness` | `0.32.0` | capabilities, `StepPersistence`/`FileStepStore` |
 | `pydantic` | `2.13.5` | messages, validation |
-| `mini-swe-agent` | `2.4.6` | **removed by M3.** Present only until then |
+| `mini-swe-agent` | `2.4.6` | **removed by M5.** Present only until then |
 | `bubblewrap` | `0.9.0` (host) | the sandbox boundary |
 
 `pydantic-ai-slim` and `pydantic-ai-harness` move from `requirements/` (verification-only) to
-`pyproject.toml`'s runtime dependencies at M3, when they become the only path. `mini-swe-agent` is
+`pyproject.toml`'s runtime dependencies at M5, when they become the only path. `mini-swe-agent` is
 deleted from `pyproject.toml` in the same change that deletes `simple/agent.py`, and not before.
 
 ### What this does not promise
