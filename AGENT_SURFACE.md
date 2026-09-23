@@ -180,7 +180,7 @@ All output is JSON by default.
 | S1 | `anchor.client`, `anchor.cli`, `GET /api/graphs/ir`, tests | **done** |
 | S2 | MCP server over stdio, human-only refusal, tool schemas | **done** |
 | S3 | observation ergonomics (resources, richer digests), authoring help | partial (`ir`, `run_digest`, `wait_for_run`) |
-| S4 | docs, PRODUCT_VISION alignment, MCP client e2e | **done** (`tests/test_mcp.py` drives the live API) |
+| S4 | docs, MCP client e2e | **done** (`tests/test_mcp.py` drives the live API) |
 
 ## Non-goals (for now)
 

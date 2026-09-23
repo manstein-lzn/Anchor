@@ -24,7 +24,7 @@ against the new seam and passes, B1–B8 and C1–C9 included.
 parser (`_check_finished`) that lived in it, `tests/test_agent_resume.py`, and `mini-swe-agent` out of
 `pyproject.toml`; `pydantic-ai-slim` and `pydantic-ai-harness` moved from
 `requirements/node-verification.txt` into it, at the versions ADR-062 pins. The acceptance run is
-`AGENT_NODE_MIGRATION_ACCEPTANCE.md` — the §12 matrix, 238 tests, and the 26-window fault matrix.
+`AGENT_NODE_MIGRATION_ACCEPTANCE.md` — the §12 matrix, 235 tests, and the 26-window fault matrix.
 
 What is left as a stated boundary rather than as work:
 
@@ -75,7 +75,7 @@ mapping a node id to the commands it should be given; only the model is replaced
 a loop inside a module inside a loop, for a gate whose branch is taken by `grep`, and for an agent and
 an op in one graph (ADR-059).
 
-**238 tests.** `pytest tests/ -q`, `ruff check src/ tests/ scripts/`, `mypy src/anchor/`.
+**235 tests.** `pytest tests/ -q`, `ruff check src/ tests/ scripts/`, `mypy src/anchor/`.
 
 Where things live: `src/anchor/simple/graph.py` (schema, expansion, the interface check),
 `src/anchor/simple/run.py` (the scheduler, the prompt, the record, the commit),
@@ -289,8 +289,9 @@ The thing to record is the declaration; the status is computed.
 ### Also in scope, and not yet built
 
 - **Idempotency of the trigger itself**: a retried `POST` starts a second run.
-- **The adapter layer.** `apps/web` does not know about ops, and it draws a module without letting you
-  open it. `serve.py`'s `trigger` takes only `{"graph", "objective"}`.
+- **The adapter layer.** `apps/web` draws a module without letting you open it, and shows an op's
+  command and its `reads`/`writes` without letting you edit them. `serve.py`'s `trigger` takes only
+  `{"graph", "objective"}`.
 
 ---
 

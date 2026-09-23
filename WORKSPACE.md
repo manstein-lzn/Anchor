@@ -59,7 +59,7 @@ Canonical Control State  +  Canonical Content Store  =  Recovery Closure
 
 ### 2.1 与 I2 的关系
 
-`PRODUCT_VISION.md` 的 I2 已修订为 **Canonical Recovery Closure**（见该文件）。本设计的所有决策都服从该表述。
+旧版愿景的 I2 曾修订为 **Canonical Recovery Closure**。本设计当时的决策服从该表述。
 
 ---
 

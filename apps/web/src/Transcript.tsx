@@ -11,7 +11,7 @@
  * it opens before anything has hydrated.
  */
 
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { CheckCircle2, ChevronRight, Terminal, XCircle } from 'lucide-react';
 import { Markdown } from './markdown';
 import type { TraceMessage } from './model';
@@ -35,8 +35,15 @@ export function toEntries(messages: TraceMessage[]): Entry[] {
   let pending: string[] = [];
   let at = 0;
 
+  const showPending = () => {
+    for (const command of pending.slice(at)) {
+      entries.push({ kind: 'call', command, output: '', truncated: false });
+    }
+  };
+
   for (const message of messages) {
     if (message.role === 'assistant') {
+      showPending();
       if (message.text?.trim()) entries.push({ kind: 'said', text: message.text });
       pending = message.commands?.length ? [...message.commands] : [];
       at = 0;
@@ -63,6 +70,7 @@ export function toEntries(messages: TraceMessage[]): Entry[] {
       });
     }
   }
+  showPending();
   return entries;
 }
 
@@ -80,6 +88,7 @@ function fold(text: string): { shown: string; hidden: number } {
 }
 
 function Call({ entry }: { entry: Extract<Entry, { kind: 'call' }> }) {
+  const [expanded, setExpanded] = useState(false);
   const { shown, hidden } = fold(entry.output);
   const failed = Boolean(entry.exit) && !['Submitted', 'succeeded'].includes(entry.exit ?? '');
   return <details className="call">
@@ -94,9 +103,11 @@ function Call({ entry }: { entry: Extract<Entry, { kind: 'call' }> }) {
       </span>}
     </summary>
     <pre className="call-command">{entry.command}</pre>
-    {entry.output.trim() && <pre className="call-output">{shown}</pre>}
+    {entry.output.trim() && <pre className="call-output">{expanded ? entry.output : shown}</pre>}
     {hidden > 0 && <p className="folded">
-      还有 {hidden} 行{entry.truncated ? '，更长的部分没有传给界面' : ''}
+      <button className="inline-action" onClick={() => setExpanded(value => !value)}>
+        {expanded ? '收起输出' : `展开全部（还有 ${hidden} 行）`}
+      </button>{entry.truncated ? '，更长的部分没有传给界面' : ''}
     </p>}
   </details>;
 }

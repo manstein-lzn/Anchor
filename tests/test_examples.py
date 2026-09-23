@@ -41,6 +41,12 @@ def test_the_only_unloadable_examples_are_where_they_say_they_are():
             graph_module.parse(json.loads(path.read_text(encoding="utf-8")))
 
 
+def test_deep_research_review_can_return_to_the_work_that_is_missing():
+    graph = graph_module.parse(json.loads(
+        (EXAMPLES / "deep-academic-research.json").read_text(encoding="utf-8")))
+    assert set(graph.routes("review-gate")) == {"synthesize", "investigate", "frame", "report"}
+
+
 def _commits_text(workspace: Path) -> list[str]:
     import subprocess
     completed = subprocess.run(["git", "-C", str(workspace), "log", "--format=%s"],
@@ -156,3 +162,132 @@ def test_a_gate_of_deterministic_checks_drives_an_agent_loop(tmp_path):
         "structure is sound", "structure check failed", "start"]
     # And the deliverable was assembled by an op out of the checked manuscript, not out of any store.
     assert "## References" in (run_dir / "publish" / "final.md").read_text(encoding="utf-8")
+
+
+DEEP_RESEARCH_SCRIPT = {
+    "frame": [
+        "if [ -f /in/challenge/critique.md ]; then "
+        "grep -q 'reframe' /in/challenge/critique.md && "
+        "test -f /in/investigate/research.md || exit 1; "
+        "printf 'revised after evidence\n' > framing.md; "
+        "else printf 'initial question\n' > framing.md; fi",
+        'anchor-done --summary "framed the question"',
+    ],
+    "investigate": [
+        "test -f /in/frame/framing.md || exit 1; "
+        "if [ -f /in/challenge/critique.md ]; then "
+        "printf 'tested a counterexample\n' >> research.md; "
+        "elif grep -q revised /in/frame/framing.md; then "
+        "printf 'followed revised frame\n' >> research.md; "
+        "else printf 'mapped the field\n' > research.md; fi; "
+        "printf 'retrieved source\n' > sources.md",
+        'anchor-done --summary "updated the evidence"',
+    ],
+    "challenge": [
+        "test -f /in/frame/framing.md && test -f /in/investigate/research.md && "
+        "test -f /in/investigate/sources.md || exit 1; "
+        "if [ ! -f critique.md ]; then "
+        "printf 'first critique\nDECISION: investigate\n' > critique.md; "
+        "else grep -q 'tested a counterexample' /in/investigate/research.md || exit 1; "
+        "printf 'revised understanding after counterexample\nDECISION: synthesize\n' > critique.md; fi",
+        'anchor-done --summary "challenged the interpretation"',
+    ],
+    "synthesize": [
+        "test -f /in/frame/framing.md && test -f /in/investigate/research.md && "
+        "test -f /in/investigate/sources.md && test -f /in/challenge/critique.md && "
+        "if [ -f /in/review/review.md ]; then test -f /in/review-gate/review-gate.md || exit 1; "
+        "printf '# Paper\\n## Abstract\\nA revised explanation.\\n## Introduction\\nQuestion.\\n' > answer.md; "
+        "else printf '# Paper\\n## Abstract\\nAn initial explanation.\\n## Introduction\\nQuestion.\\n' > answer.md; fi; "
+        "printf '## Survey Methodology\\nSources.\\n## Mechanisms\\nEvidence.\\n' >> answer.md; "
+        "printf '## Comparative Analysis\\nContrast.\\n## Open Problems\\nLimits.\\n' >> answer.md; "
+        "printf '## Threats to Validity\\nSampling.\\n## Conclusion\\nBounded answer.\\n' >> answer.md; "
+        "printf '## References\\n[1] Source.\\n' >> answer.md",
+        'anchor-done --summary "wrote a paper"',
+    ],
+    "review": [
+        "test -f /in/synthesize/answer.md || exit 1; "
+        "if grep -q 'revised explanation' /in/synthesize/answer.md; then "
+        "printf 'DECISION: pass\\n' > review.md; "
+        "else printf 'DECISION: writing\\n' > review.md; fi",
+        'anchor-done --summary "reviewed the paper"',
+    ],
+}
+
+
+def test_deep_research_requires_feedback_and_paper_review(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "graph.json").write_bytes((EXAMPLES / "deep-academic-research.json").read_bytes())
+    config = tmp_path / "runtime.json"
+    config.write_text('{"models": []}', encoding="utf-8")
+
+    state = runner.run(workspace, config_path=config, model_script=DEEP_RESEARCH_SCRIPT)
+    run_dir = next((workspace / "runs").glob("*"))
+
+    assert state.status == "finished", (state.status, state.error, state.ceased)
+    assert state.executed == ["frame", "investigate", "challenge", "feedback", "investigate",
+                              "challenge", "feedback", "synthesize", "review", "review-gate",
+                              "synthesize", "review", "review-gate", "report"]
+    paper = (run_dir / "report" / "paper.md").read_text(encoding="utf-8")
+    assert "revised explanation" in paper
+    assert "## References" in paper
+
+
+def test_deep_research_reframes_when_evidence_overturns_question(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "graph.json").write_bytes((EXAMPLES / "deep-academic-research.json").read_bytes())
+    config = tmp_path / "runtime.json"
+    config.write_text('{"models": []}', encoding="utf-8")
+    script = {**DEEP_RESEARCH_SCRIPT, "challenge": [
+        "if [ ! -f critique.md ]; then "
+        "printf 'reframe the question\\nDECISION: frame\\n' > critique.md; "
+        "else printf 'reframed question survived the counterexample\\n' > critique.md; "
+        "printf 'DECISION: synthesize\\n' >> critique.md; fi",
+        'anchor-done --summary "challenged the frame"',
+    ]}
+
+    state = runner.run(workspace, config_path=config, model_script=script)
+    run_dir = next((workspace / "runs").glob("*"))
+
+    assert state.status == "finished", (state.status, state.error, state.ceased)
+    assert state.executed[:8] == ["frame", "investigate", "challenge", "feedback",
+                                  "frame", "investigate", "challenge", "feedback"]
+    assert (run_dir / "frame" / "framing.md").read_text(encoding="utf-8") == \
+        "revised after evidence\n"
+
+
+@pytest.mark.parametrize("decision,target", [("research", "investigate"), ("frame", "frame")])
+def test_paper_feedback_reaches_research_and_converges_beyond_old_ceiling(tmp_path, decision, target):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "graph.json").write_bytes((EXAMPLES / "deep-academic-research.json").read_bytes())
+    config = tmp_path / "runtime.json"
+    config.write_text('{"models": []}')
+    script = {**DEEP_RESEARCH_SCRIPT,
+        "frame": [
+            "if [ -f /in/review/review.md ]; then "
+            "test -f /in/review-gate/review-gate.md || exit 1; "
+            "cp /in/review/review.md received.md; fi; printf 'question\\n' > framing.md",
+            'anchor-done --summary "framed"'],
+        "investigate": [
+            "test -f /in/frame/framing.md || exit 1; "
+            "if [ -f /in/review/review.md ]; then "
+            "test -f /in/synthesize/answer.md || exit 1; "
+            "cp /in/review/review.md received.md; fi; "
+            "printf 'new evidence\\n' >> research.md; printf 'source\\n' > sources.md",
+            'anchor-done --summary "investigated"'],
+        "challenge": ["printf 'DECISION: synthesize\\n' > critique.md",
+                      'anchor-done --summary "checked evidence"'],
+        "review": [
+            "n=0; if [ -f count ]; then n=$(cat count); fi; n=$((n+1)); echo $n > count; "
+            "if [ $n -le 7 ]; then "
+            f"printf 'resolve evidence issue %s\\nDECISION: {decision}\\n' $n > review.md; "
+            "else printf 'DECISION: pass\\n' > review.md; fi",
+            'anchor-done --summary "reviewed"']}
+    state = runner.run(workspace, config_path=config, model_script=script)
+    run_dir = next((workspace / "runs").iterdir())
+    assert state.status == "finished", (state.reason, state.error)
+    assert state.passes["review"] == 8
+    assert "resolve evidence issue 7" in (run_dir / target / "received.md").read_text()
+    assert (run_dir / "report" / "paper.md").is_file()

@@ -1,9 +1,4 @@
-"""Pausing and stopping a run, asked between nodes.
-
-A node in flight is inside a sandbox command or a model call, and nothing outside can reach into it.
-So a pause or a stop lands when the node that is running finishes — which is a real limitation and is
-why it is the first thing the docstrings say, rather than something an operator discovers by pressing
-a button that appears not to work.
+"""Pausing between nodes and stopping the current node.
 
 Driven through the scheduler directly rather than over HTTP: the mechanism is the thing under test,
 and a test that needed a port would be a test of the port.
@@ -29,13 +24,13 @@ def needs_a_sandbox():
         pytest.skip(f"no usable sandbox on this machine: {exc}")
 
 
-def _scheduler(tmp_path: Path, steps: int = 4) -> Scheduler:
+def _scheduler(tmp_path: Path, steps: int = 4, delay: float = 1.5) -> Scheduler:
     """A graph slow enough to catch in the middle, and free: one op per step, each sleeping."""
     names = [f"step{i}" for i in range(steps)]
     graph = {
         "entry": names[0],
         "objective": "a run that takes long enough to be interrupted",
-        "ops": {name: {"run": f"printf '{name}\\n' > {name}.txt && sleep 1.5 && echo '{name} done'",
+        "ops": {name: {"run": f"printf '{name}\\n' > {name}.txt && sleep {delay} && echo '{name} done'",
                        "writes": [f"{name}.txt"]} for name in names},
         "nodes": [{"id": name, "op": name} for name in names],
         "edges": [{"from": names[i], "to": names[i + 1]} for i in range(steps - 1)],
@@ -64,23 +59,24 @@ def _state(scheduler: Scheduler, run_id: str) -> dict:
     return json.loads((workspace / "runs" / run_id / "run.json").read_text(encoding="utf-8"))
 
 
-def test_stopping_lands_between_nodes_and_is_not_resumed_on_restart(tmp_path):
-    """`stopped` is terminal: a restart must not pick it up, which is the whole difference from
-    pausing. The node that was running when the request arrived finished first — that is stated, not
-    discovered."""
-    scheduler = _scheduler(tmp_path)
+def test_stopping_cancels_the_current_command_and_is_terminal(tmp_path):
+    scheduler = _scheduler(tmp_path, delay=30)
     _, status = scheduler.trigger("slow", None)
     assert status == 202
     run_id = scheduler.running["slow"]
 
-    time.sleep(2.2)                       # let the first node finish and the second start
+    first = scheduler.workspace("slow") / "runs" / run_id / "step0" / "step0.txt"
+    deadline = time.monotonic() + 5
+    while not first.exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert first.exists(), "the command did not begin"
     response, code = scheduler.control_run(run_id, "stop")
     assert code == 202, response
-    _settle(scheduler)
+    _settle(scheduler, timeout=3)
 
     state = _state(scheduler, run_id)
     assert state["status"] == "stopped" and state["reason"] == "asked"
-    assert 1 <= len(state["executed"]) < 4, "stopped in the middle, not at either end"
+    assert state["executed"] == [], "the cancelled node was recorded as completed"
 
 
 def test_pausing_leaves_the_run_where_it_was_and_resuming_carries_on(tmp_path):

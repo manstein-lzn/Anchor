@@ -16,6 +16,7 @@ import shutil
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 
 from anchor.runtime.sandbox import BubblewrapWorkspaceSandbox, SandboxSpec
 
@@ -148,6 +149,7 @@ class NodeSandbox:
     # What this node was given, as (where it lives, where it is visible). Read-only, and never
     # copied: a pointer to a predecessor's workspace, which is also why its history comes with it.
     inputs: tuple[tuple[str, str], ...] = ()
+    cancelled: Callable[[], bool] | None = None
     sandbox: BubblewrapWorkspaceSandbox = field(default=None)      # type: ignore[assignment]
     dirs: tuple[str, ...] = ()
     binds: tuple[tuple[str, str], ...] = ()
@@ -197,6 +199,7 @@ class NodeSandbox:
             network=self.network, tool_dirs=self.dirs, readonly_binds=binds,
             workspace_readonly=present, spill_dir=self.spill_dir,
             spill_limit_bytes=self.spill_limit_bytes, spill_mount=self.spill_mount,
+            cancelled=self.cancelled,
             env=(("ANCHOR_NODE", self.node_id), ("ANCHOR_ROUTES", ",".join(self.routes))))
 
     def run(self, command: str, *, timeout: float | None = None) -> Executed:

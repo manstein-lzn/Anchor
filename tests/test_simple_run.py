@@ -96,6 +96,22 @@ def _self_loop(ceiling: int) -> dict:
     }
 
 
+def test_spent_node_budget_stops_without_retrying(tmp_path, monkeypatch):
+    workspace = _workspace(tmp_path, _agent_graph())
+    calls = []
+
+    def behaviour(node_id):
+        calls.append(node_id)
+        return {}, "budget_exhausted", None
+
+    _stub_nodes(monkeypatch, behaviour)
+    state = runner.run(workspace, config_path=tmp_path / "unused.json")
+
+    assert calls == ["a"]
+    assert state.status == "stopped" and state.reason == "budget_exhausted"
+    assert state.cursor is not None and state.cursor["node"] == "a"
+
+
 # -- pointers rather than copies -----------------------------------------------------------------
 
 
@@ -177,9 +193,11 @@ def test_each_pass_gets_its_own_conversation(tmp_path, monkeypatch):
     """One trace per pass. Two passes appended to one file would replay as two conversations."""
     workspace = _workspace(tmp_path, _self_loop(3))
     traces: list[Path | None] = []
+    controls: list[Path] = []
 
     def fake_agent_for(_graph, node_id, directory, _models, _secret, _config, inputs=(), trace=None, script=None, **kwargs):
         traces.append(trace)
+        controls.append(kwargs["control"])
         return _StubAgent(Path(directory), {f"pass{len(traces)}.md": "x"}, "Submitted", "spin")
 
     monkeypatch.setattr(runner, "_config", lambda path: ({}, None))
@@ -191,6 +209,18 @@ def test_each_pass_gets_its_own_conversation(tmp_path, monkeypatch):
     run_dir = next((workspace / "runs").glob("*"))
     assert (run_dir / "spin.trace.jsonl") == traces[0]
     assert (run_dir / "spin-2.trace.jsonl") == traces[1]
+    assert controls == [run_dir / "control" / name for name in ("spin", "spin-2", "spin-3")]
+
+
+def test_a_completion_fact_is_read_from_its_control_directory(tmp_path):
+    from anchor.node.recovery import CompletionFact, record_completion
+
+    control = tmp_path / "control" / "spin"
+    record_completion(control, CompletionFact(node="spin", run="spin-a1", kind="done",
+                                              submission="finished", route=None,
+                                              command="anchor-done", at="now"))
+
+    assert runner._completion_of(control, "spin") == ("finished", None)
 
 
 # -- the ways a run could report success for work it did not do -----------------------------------

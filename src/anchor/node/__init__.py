@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 
 #: Done. The pass produced what it was asked for and named a way out if it had to.
 COMPLETED = "completed"
@@ -72,9 +73,9 @@ class NodeRequest:
     timeout_seconds: float = 600.0
     """One command. Not the pass — a pass is bounded by `max_requests` and the caller's own clock."""
 
-    max_requests: int = 60
-    """How many times the model may be asked before the pass is out of budget. Counted **for this
-    execution only**; nothing here claims a budget carries across a resume."""
+    max_requests: int | None = None
+    """Optional cumulative request budget, preserved across recovery. None means unbounded;
+    zero permits no requests."""
 
     recovery: str = ""
     """An opaque token for a previous attempt of this same node, or empty to start fresh.
@@ -90,6 +91,9 @@ class NodeRequest:
 
     roles: str = ""
     """A label for the trace, not a behaviour."""
+
+    cancelled: Callable[[], bool] | None = None
+    """Whether the caller has asked to stop this pass now."""
 
     @property
     def node_key(self) -> str:

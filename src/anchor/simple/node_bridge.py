@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from anchor.node import NodeRequest, node_key
 from anchor.node.op_runtime import run_op_node
@@ -35,9 +35,10 @@ class Node:
 
     def __init__(self, *, node_id: str, directory: Path, routes: tuple[str, ...],
                  inputs: tuple[Any, ...], trace: Path | None, model: Any, instructions: str,
-                 network: bool, timeout_seconds: float, max_requests: int,
+                 network: bool, timeout_seconds: float, max_requests: int | None,
                  command: str | None = None, control: Path | None = None,
-                 capabilities: tuple[Any, ...] = ()) -> None:
+                 capabilities: tuple[Any, ...] = (),
+                 cancelled: Callable[[], bool] | None = None) -> None:
         self.node_id = node_id
         self.directory = Path(directory)
         self.routes = tuple(routes)
@@ -51,6 +52,7 @@ class Node:
         self._timeout = timeout_seconds
         self._max_requests = max_requests
         self._capabilities = tuple(capabilities)
+        self._cancelled = cancelled
         # Read by `_result_of` through `agent.env.route`. Kept as an object rather than a bare
         # attribute so the shape the scheduler reads does not change with the loop behind it.
         self.env = _Route()
@@ -95,7 +97,8 @@ class Node:
             outcome = run_op_node(
                 NodeRequest(execution_id=self.node_id, task=self.command, workspace=self.directory,
                             inputs=_binds(self.inputs), routes=self.routes, network=self._network,
-                            timeout_seconds=self._timeout, roles=self.node_id),
+                            timeout_seconds=self._timeout, roles=self.node_id,
+                            cancelled=self._cancelled),
                 command=self.command)
             # **The runtime's own answer, and nothing re-derived from it.** It already read the exit
             # code against the command line it dispatched — the one fact a caller could not supply and
@@ -126,7 +129,7 @@ class Node:
                             instructions=self._instructions, inputs=_binds(self.inputs),
                             routes=self.routes, network=self._network,
                             timeout_seconds=self._timeout, max_requests=self._max_requests,
-                            trace=self.trace, roles=self.node_id,
+                            trace=self.trace, roles=self.node_id, cancelled=self._cancelled,
                             # **A write that landed before the record is what `recovery` is for.** The
                             # adapter refuses a reference whose node, workspace, store or budget does not
                             # match, and a bare name is not one — so the node says `uncertain` instead,
@@ -192,4 +195,3 @@ def _spelled(status: str, command_missing: bool) -> str:
 def _binds(inputs: tuple[Any, ...]) -> tuple[tuple[str, str], ...]:
     """A step's given inputs, as the `(host path, mount point)` pairs a request carries."""
     return tuple(bind for item in inputs for bind in item.binds())
-

@@ -1,5 +1,8 @@
 # Anchor Architecture Decisions
 
+ADR-000 through ADR-055 describe the removed architecture and are historical, not current requirements.
+ADR-056 onward records the running design; `README.md` describes the current implementation.
+
 ## ADR-000: Product goal is visual long-running multi-agent graphs
 
 The primary acceptance target is a web product that lets users define, publish,
@@ -1012,8 +1015,8 @@ one campaign costs 31 minutes and 2.21 CNY and is entirely non-deterministic —
 model decides what to search, what to read, what to conclude. Change a context
 policy and the outcome moves, and there is no way to tell whether the policy acted
 or the model simply behaved differently this time. The improvement cannot be
-attributed, so it cannot be measured, so it cannot be developed. `PRODUCT_VISION.md`
-already promised R0 (event-history forensic replay) and R1 (deterministic
+attributed, so it cannot be measured, so it cannot be developed. The former vision
+promised R0 (event-history forensic replay) and R1 (deterministic
 simulation with stubbed model results) under I9 and called them the only replay
 levels that are guarantees. Neither was implemented.
 
@@ -1643,12 +1646,13 @@ is therefore `waiting` rather than finished — is the next step and is delibera
 
 ## ADR-062: One Agent Node runtime, with the PydanticAI loop inside it and the contract outside
 
-**Status: accepted as the migration target. Not yet the default executor.** ADR-061 says a node is an
+**Status: complete at M5 — the default executor, and the only one.** ADR-061 says a node is an
 agent or an op. This says *what runs an agent node*, and it settles a question the earlier design left
-open by having two answers: the production graph runs `mini-swe-agent` (`simple/agent.py`), while
-`node/pydantic_adapter.py` is a second, verified runner that the graph does not call. Two runners is
-two completion protocols, two budget stories and two recovery stories, and the verification packages
-were written against the one that is not in production.
+open by having two answers: at the time this was written the production graph ran `mini-swe-agent`
+(`simple/agent.py`), while `node/pydantic_adapter.py` was a second, verified runner the graph did not
+call. Two runners is two completion protocols, two budget stories and two recovery stories, and the
+verification packages were written against the one that was not in production. The migration's own
+milestones below are the record of how the two became one.
 
 The migration is one-way: the PydanticAI harness becomes the only body of an agent node, and
 mini-swe-agent is deleted rather than kept as a fallback. It is one-way because a fallback that is

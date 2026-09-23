@@ -3,9 +3,9 @@
     <workspace>/
       graph.json          the nodes, the edges between them, and what each agent may do
       runs/
-        2026-09-13T22-30-00/
+        20260913T223000/
           plan/  gather/  write/  review/
-        2026-09-13T22-30-00/
+        20260913T223010/
 
 The graph lives in the workspace rather than beside it, because the workspace is the unit: point at
 one and everything a run needs is there. Runs accumulate beside each other and are never merged —
@@ -42,8 +42,8 @@ from pathlib import Path
 #: same string, and nothing downstream could tell them apart.
 SEP = "/"
 
-#: How many times a node may run in one pass when nothing says otherwise.
-DEFAULT_MAX_ROUNDS = 3
+#: No implicit limit on healthy graph cycles.
+DEFAULT_MAX_ROUNDS = None
 
 
 @dataclass(frozen=True)
@@ -64,10 +64,8 @@ class Agent(Interface):
     # Whether this node's commands may reach the network. A node whose work is reading the
     # literature needs it; a node that writes a file does not, and refusing it costs nothing.
     network: bool = False
-    # A bound on the model's turns, because a node that keeps deciding it is finished without
-    # finishing will otherwise spend the whole wall-clock budget saying so. Sixty is generous for
-    # work that is already describing itself in minutes.
-    max_steps: int = 0
+    # Optional operator budget. None is unbounded; zero permits no requests.
+    max_steps: int | None = None
     # An hour, not half of one. A real literature search with a rate-limited source spends most of
     # its clock waiting, and the first version of this cut off a gathering step that was still
     # working and had sixty result files to show for it.
@@ -137,7 +135,7 @@ class Graph:
         """The ways out of a node. More than one means the node must choose."""
         return self.out_edges.get(node_id, ())
 
-    def ceiling(self, node_id: str) -> int:
+    def ceiling(self, node_id: str) -> int | None:
         """How many times this node may run in one pass."""
         return self.max_rounds.get(node_id, DEFAULT_MAX_ROUNDS)
 
@@ -249,9 +247,12 @@ def _agent(name: str, spec: dict) -> Agent:
     where = f"agent {name!r}"
     if "model" not in spec:
         raise ValueError(f"{where} needs a \"model\"")
+    if spec.get("max_steps") is not None and (
+            type(spec["max_steps"]) is not int or spec["max_steps"] < 0):
+        raise ValueError(f"{where}: max_steps must be a non-negative integer or null")
     return Agent(model=spec["model"], instructions=spec.get("instructions", ""),
                  network=bool(spec.get("network", False)),
-                 max_steps=int(spec.get("max_steps", 0)),
+                 max_steps=int(spec["max_steps"]) if spec.get("max_steps") is not None else None,
                  wall_time_limit_seconds=int(spec.get("wall_time_limit_seconds", 3600)),
                  reads=_files(spec.get("reads"), where, "\"reads\""),
                  writes=_files(spec.get("writes"), where, "\"writes\""))
@@ -323,6 +324,9 @@ def _check_body(body: object, where: str, *, module: bool) -> dict:
     """
     if not isinstance(body, dict):
         raise ValueError(f"{where} must be a JSON object")
+    if "max_rounds" in body and (
+            type(body["max_rounds"]) is not int or body["max_rounds"] < 1):
+        raise ValueError(f"{where}: max_rounds must be a positive integer when specified")
     if module:
         for key in ("agents", "ops", "objective", "graphs"):
             if key in body:
@@ -422,7 +426,7 @@ def _expand(body: dict, pool: dict[str, dict], prefix: str) -> _Expansion:
     module_rounds: dict[str, int] = {}
     edges: list[tuple[str, str]] = []
     sides: dict[str, tuple[str, str]] = {}
-    ceiling = int(body.get("max_rounds", DEFAULT_MAX_ROUNDS))
+    ceiling = body.get("max_rounds", DEFAULT_MAX_ROUNDS)
 
     for item in body["nodes"]:
         flat = f"{prefix}{item['id']}"
@@ -435,12 +439,14 @@ def _expand(body: dict, pool: dict[str, dict], prefix: str) -> _Expansion:
             assert inner.exit is not None, "a module declares an exit, checked before expansion"
             # At this level the module is a node, so it carries a ceiling like any other: how many
             # times this graph may enter it. Defaulted from this body's, as every node's is.
-            module_rounds[flat] = int(item.get("max_rounds", ceiling))
+            if item.get("max_rounds", ceiling) is not None:
+                module_rounds[flat] = int(item.get("max_rounds", ceiling))
             sides[item["id"]] = (inner.entry, inner.exit)
         else:
             nodes[flat] = Node(id=flat, agent=item.get("agent", ""), op=item.get("op", ""),
                                with_=item.get("with", ""))
-            max_rounds[flat] = int(item.get("max_rounds", ceiling))
+            if item.get("max_rounds", ceiling) is not None:
+                max_rounds[flat] = int(item.get("max_rounds", ceiling))
             sides[item["id"]] = (flat, flat)
 
     for edge in body.get("edges") or ():
@@ -584,7 +590,8 @@ def to_dict(graph: Graph) -> dict:
                 for name, op in graph.ops.items()},
         "nodes": [{"id": node.id, **({"agent": node.agent} if node.agent else {"op": node.op}),
                    **({"with": node.with_} if node.with_ else {}),
-                   "max_rounds": graph.ceiling(node.id)}
+                   **({"max_rounds": graph.ceiling(node.id)}
+                      if graph.ceiling(node.id) is not None else {})}
                   for node in graph.nodes.values()],
         "edges": [{"from": source, "to": target} for source, target in edges(graph)],
     }

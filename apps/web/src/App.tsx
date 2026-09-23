@@ -159,11 +159,17 @@ export function App() {
     setRun(body.run); setView('runs');
   });
 
-  // Asked between nodes, not during one: a node in flight is inside a sandbox command or a model
-  // call, and nothing here can reach into it. The button says so rather than appearing not to work.
   const controlRun = (what: 'pause' | 'stop' | 'resume') => perform(what, async () => {
     await api(`/runs/${run}/${what}`, 'POST');
     await refresh();
+  });
+
+  const deleteRun = () => perform('删除运行记录', async () => {
+    if (!run || !window.confirm(`确定彻底删除运行记录 ${run} 及其所有文件吗？此操作不可恢复。`)) return;
+    await api(`/runs/${encodeURIComponent(run)}`, 'DELETE');
+    setRun(''); setDetail(null); setNode('');
+    await refresh();
+    setNotice({ kind: 'ok', text: '运行记录及其文件已删除。' });
   });
 
   const selectedNode = pick?.kind === 'node' ? doc?.nodes.find(item => item.id === pick.id) : undefined;
@@ -307,22 +313,28 @@ export function App() {
                 </span>
                 <span className="objective">{detail.state.objective}</span>
                 {detail.state.cursor && <span className="hint">
-                  正在执行 {detail.state.cursor.node}（第 {detail.state.cursor.pass} 轮）</span>}
+                  {detail.state.status === 'running' ? '正在执行' :
+                    detail.state.status === 'stopped' ? '停止于' : '中断于'} {detail.state.cursor.node}
+                  （第 {detail.state.cursor.pass} 轮）</span>}
                 {['running', 'paused'].includes(detail.state.status) &&
                   <span className="run-controls">
                     {detail.state.status === 'running' ? <>
-                      <button onClick={() => void controlRun('pause')} disabled={busy}>暂停</button>
+                      <button onClick={() => void controlRun('pause')} disabled={busy}
+                              title="当前节点完成后暂停">暂停</button>
                       <button className="danger-link" onClick={() => void controlRun('stop')}
-                              disabled={busy}>停止</button>
+                              disabled={busy} title="立即停止当前节点">停止</button>
                     </> : <button onClick={() => void controlRun('resume')} disabled={busy}>
                       继续
                     </button>}
-                    <small>在当前节点结束后生效</small>
                   </span>}
                 {detail.state.reason === 'asked' && <span className="hint">
                   {detail.state.status === 'paused' ? '已按请求暂停' : '已按请求停止'}
                 </span>}
                 {detail.state.error && <span className="problem">{detail.state.error}</span>}
+                {detail.state.status !== 'running' ?
+                  <button className="danger-link" onClick={() => void deleteRun()} disabled={busy}>
+                    <Trash2 size={14} />删除运行记录
+                  </button> : null}
               </> : <span className="hint">选一次运行，或触发一次。</span>}
             </div>
             <ExecutionCanvas instanceKey={`run-${name}-${run}`} nodes={nodes} edges={edges}
@@ -562,9 +574,14 @@ export function App() {
                     {doc.nodes.map(item => <option key={item.id} value={item.id}>{item.id}</option>)}
                   </select>
                 </label>
-                <label>单个节点最多跑几轮
-                  <input type="number" min={1} max={20} value={doc.max_rounds ?? 3}
-                         onChange={event => patch({ ...doc, max_rounds: Number(event.target.value) })} />
+                <label>节点轮数上限（可选，留空不限制）
+                  <input type="number" min={1} placeholder="不限制" value={doc.max_rounds ?? ''}
+                         onChange={event => {
+                           const next = { ...doc };
+                           if (event.target.value === '') delete next.max_rounds;
+                           else next.max_rounds = Number(event.target.value);
+                           patch(next);
+                         }} />
                 </label>
                 <button className="full-button" onClick={() => setJson('graph')}>完整 Graph JSON</button>
               </>}

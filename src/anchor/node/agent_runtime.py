@@ -93,7 +93,7 @@ class _CountingModel(WrapperModel):
     #: The **total** allowance for the logical execution, not this process's share of it. One notion,
     #: used the same way everywhere, because mixing a remaining figure with a cumulative one is how the
     #: allowance came to be raised instead of spent.
-    allowed: int = 0
+    allowed: int | None = None
 
     async def request(self, messages: Any, model_settings: Any, model_request_parameters: Any) -> Any:
         self.requests += 1
@@ -303,5 +303,4 @@ def build_agent(model: Any, *, instructions: str = "",
             "not finishing.")
 
     return agent
-
 

@@ -15,10 +15,13 @@ Each pass is frozen as a commit in the node's own repository, made here rather t
 the history is the record of the node's work, and a record the recorded thing can edit is not one. The
 commit is what makes one pass readable after a later pass has written over it.
 
-`run.json` is the whole of what a restart needs: where the run had got to, which edges it had decided,
-what each node said when it finished, and which commit that was. The conversations are written beside
-their workspaces as they happen, one per pass, so resuming a node means reading its messages back and
-stepping again — no event history, no reconciliation, nothing to prove about what did not happen.
+`run.json` is the graph's half of what a restart needs: where the run had got to, which edges it had
+decided, what each node said when it finished, and which commit that was. The conversations are written
+beside their workspaces as they happen, one per pass, so resuming a node means reading its messages back
+and stepping again — no event history, and nothing to prove about what did not happen. The other half is
+the node's own record under `control/<node>`, and the two are **read and compared rather than assumed to
+agree**: a resume that finds a node the graph recorded as unfinished carrying a completion fact stops
+and says so, because the two readings lead to opposite actions and guessing runs a pass twice or never.
 """
 
 from __future__ import annotations
@@ -39,10 +42,6 @@ from anchor.simple import graph as graph_module
 from anchor.node import node_key
 from anchor.node.model_bridge import model_for, scripted_models
 from anchor.simple.node_bridge import Node
-
-#: Turns a node may take before it is stopped. Not a target — a ceiling, so that a node which keeps
-#: announcing completion instead of achieving it is stopped in minutes rather than in half an hour.
-DEFAULT_MAX_STEPS = 60
 
 #: Ways a node can run out of budget rather than get the work wrong. Running out of clock is not a
 #: failed attempt: the conversation is good and continuing it is exactly the right response, so these
@@ -549,7 +548,7 @@ def _next_step(graph: graph_module.Graph, state: RunState, decided: dict, run_di
         state.activations[scope] = entry
         _restart_scope(state, scope)
     number = state.passes.get(node_id, 0) + 1
-    if number > graph.ceiling(node_id):
+    if graph.ceiling(node_id) is not None and number > graph.ceiling(node_id):
         return _Step(node_id, number, Path(), None, False,
                      refused=f"{node_id}@{graph.ceiling(node_id)}")
     # One directory per node, kept across its passes. A node revising its own work needs to see what
@@ -620,12 +619,14 @@ def _record(state: RunState, graph: graph_module.Graph, run_dir: Path,
         # pass and continues the same conversation, and the edges stay undecided so nothing
         # downstream moves on the strength of work that did not happen.
         state.executed.append(result.node_id)
+        state.status = "stopped"
+        state.reason = "budget_exhausted"
         state.error = f"{result.node_id} ran out of budget: {result.exit_status}"
         state.save(run_dir)
         print(json.dumps({"node": result.node_id, "pass": result.pass_number,
                           "agent": result.agent, "ran_out": result.exit_status,
                           "resumable": True}, ensure_ascii=False), flush=True)
-        return True
+        return False
     # Frozen before it is recorded, so what `run.json` points at exists by the time it says so. A
     # budget exit above returns before this: what it left is partial work in progress, and committing
     # it would file it as a result — the next attempt continues from the same directory instead.
@@ -671,7 +672,8 @@ def _secret(secret_file: str | None, model: dict) -> str:
 
 def _agent_for(graph, node_id: str, directory: Path, models: dict, secret_file, config_path,
                inputs: tuple[_Given, ...] = (), trace: Path | None = None,
-               scripted_model: Any = None, control: Path | None = None):
+               scripted_model: Any = None, control: Path | None = None,
+               cancelled: Callable[[], bool] | None = None):
     """The node about to run, built around the runtime ADR-062 names.
 
     **One factory for both kinds of node**, because the difference between an agent and an op is what
@@ -693,7 +695,8 @@ def _agent_for(graph, node_id: str, directory: Path, models: dict, secret_file, 
         op = graph.ops[node.op]
         return Node(node_id=node_id, directory=directory, routes=graph.routes(node_id),
                     inputs=inputs, trace=trace, model=None, instructions="", network=op.network,
-                    timeout_seconds=600.0, max_requests=1, command=op.run, control=control)
+                    timeout_seconds=600.0, max_requests=1, command=op.run, control=control,
+                    cancelled=cancelled)
     spec = graph.agents[node.agent]
     if scripted_model is not None:
         model: Any = scripted_model
@@ -712,7 +715,8 @@ def _agent_for(graph, node_id: str, directory: Path, models: dict, secret_file, 
                 # slow — a dozen queries at twenty seconds each is already four minutes — and a batch
                 # that is killed at five throws away everything it had done.
                 network=spec.network, timeout_seconds=600.0,
-                max_requests=spec.max_steps or DEFAULT_MAX_STEPS, control=control)
+                max_requests=spec.max_steps, control=control,
+                cancelled=cancelled)
 
 
 def _cease(state: RunState, step: _Step, settle: Any, run_dir: Path) -> None:
@@ -729,15 +733,16 @@ def _cease(state: RunState, step: _Step, settle: Any, run_dir: Path) -> None:
 
 
 def _asked_to_stop(asked: Callable[[], str | None] | None, state: RunState,
-                  run_dir: Path) -> RunState | None:
+                  run_dir: Path, status: str | None = None) -> RunState | None:
     """The state to return when a caller has asked the run to stop, or `None` to carry on.
 
     Left where it is, with the edges it has decided and the nodes it has run, so a continue picks up from
     exactly here rather than starting over.
     """
-    if asked is None:
-        return None
-    status = asked()
+    if status is None:
+        if asked is None:
+            return None
+        status = asked()
     if status is None:
         return None
     state.status = status
@@ -758,11 +763,9 @@ def _completion_of(control: Path, node_id: str) -> tuple[str, str | None] | None
     from anchor.node.recovery import read_completion_fact
 
     control = Path(control)
-    # The store's spelling, which is not always the graph's (`work/draft` is refused by the framework).
-    key = node_key(node_id)
-    if not (control / key).exists():
+    if not control.exists():
         return None
-    fact = read_completion_fact(control / key, key)
+    fact = read_completion_fact(control, node_key(node_id))
     return None if fact is None else (fact.submission, fact.route)
 
 
@@ -804,10 +807,8 @@ def run(workspace: str | Path, *, objective: str | None = None, config_path: str
         already_submitted: Callable[[str], tuple[str, str | None] | None] | None = None) -> RunState:
     """Walk the graph. `model_script` replaces the model with written-down commands, per node.
 
-    `stop_request` is asked between nodes whether the run should stop, and answers with the status to
-    stop under or None to carry on. **Between nodes, not during one**: a node mid-flight is inside a
-    sandbox command or a model call and nothing here can reach into it, so a stop lands when the node
-    that is running finishes. Saying so is better than a button that appears not to work.
+    `stop_request` is asked between nodes. A stop also cancels the active model call or sandbox
+    command; pause still waits for the current node to finish.
 
     **A node that already submitted is not run again.** The gap between a node returning and this loop
     recording its pass has no hook, so a kill in that gap used to leave a finished node looking like it
@@ -840,6 +841,7 @@ def run(workspace: str | Path, *, objective: str | None = None, config_path: str
         # record says why it left off, and without clearing it here a run that paused, resumed and
         # finished kept saying `asked` — which the view reads as "stopped on request".
         state.reason = ""
+        state.error = ""
     else:
         run_dir = workspace / "runs" / (run_id or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S"))
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -918,17 +920,18 @@ def run(workspace: str | Path, *, objective: str | None = None, config_path: str
             # **Before the node runs, and with its own directory already known.** A completion fact
             # left by a killed process is what stops the node being run a second time — the duplicate
             # the recovery path exists to avoid — so this is read before anything is built.
-            settled = _settled_already(step, run_dir / "control" / step.node_id, already_submitted)
+            # Each visit is a separate execution with its own allowance and completion fact. Retried
+            # attempts of that visit keep the same directory; the first visit retains its old path.
+            run_number = state.runs[step.node_id]
+            control = run_dir / "control" / (step.node_id if run_number == 1
+                                             else f"{step.node_id}-{run_number}")
+            settled = _settled_already(step, control, already_submitted)
             if settled is not None:
                 if not _record(state, graph, run_dir, decided, settled, settle):
                     print(json.dumps({"run": str(run_dir), "status": state.status,
                                       "stopped_at": settled.node_id}, ensure_ascii=False), flush=True)
                     return state
                 continue
-            # **Where a node keeps its record is the node's business, and this is the whole of what
-            # the scheduler knows about it**: control/<node>, derived rather than configured. Each node
-            # gets its own, which is what makes a completion fact unreadable under the wrong identity.
-            control = run_dir / "control" / step.node_id
             # A node the script does not name is a node whose model comes from the config, which is
             # what `models.get` did before this switch: a partial script is a partial script, and
             # demanding an entry for every node would make the script a second copy of the graph.
@@ -937,7 +940,9 @@ def run(workspace: str | Path, *, objective: str | None = None, config_path: str
                 else None
             agent = _agent_for(graph, step.node_id, step.directory, models, secret_file, config_path,
                                inputs=step.inputs, trace=step.trace, control=control,
-                               scripted_model=scripted_model)
+                               scripted_model=scripted_model,
+                               **({"cancelled": lambda: stop_request() == "stopped"}
+                                  if stop_request is not None else {}))
             # **A cursor without a trace means the node never actually started.** The scheduler writes
             # the cursor before dispatching, so a kill in between leaves a node marked as interrupted
             # with nothing to continue from — and resuming reads a trace file that was never written,
@@ -952,6 +957,8 @@ def run(workspace: str | Path, *, objective: str | None = None, config_path: str
                 outcome = agent.resume()
             else:
                 outcome = agent.run(task=step.task, resume_mark=step.resuming)
+            if stop_request is not None and stop_request() == "stopped":
+                return _asked_to_stop(stop_request, state, run_dir, "stopped") or state
             result = _result_of(step.node_id, graph.nodes[step.node_id].agent, step.directory,
                                 step.number, outcome, step.inputs)
             result = replace(result, route=getattr(agent.env, "route", None))
@@ -982,4 +989,3 @@ def run(workspace: str | Path, *, objective: str | None = None, config_path: str
                       "executed": state.executed, "skipped": state.skipped},
                      ensure_ascii=False), flush=True)
     return state
-

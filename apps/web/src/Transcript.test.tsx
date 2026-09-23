@@ -51,6 +51,14 @@ describe('a command and its result', () => {
     expect(entries[0]).toMatchObject({ kind: 'call', command: 'first', output: 'a' });
     expect(entries[1]).toMatchObject({ kind: 'note', text: 'b' });
   });
+
+  it('shows a command before its result arrives', () => {
+    expect(toEntries([said('', ['long-running search'])])).toEqual([
+      { kind: 'call', command: 'long-running search', output: '', truncated: false },
+    ]);
+    expect(toEntries([said('', ['first', 'second']), result('done')])[1])
+      .toMatchObject({ kind: 'call', command: 'second', output: '' });
+  });
 });
 
 describe('what it said and what it was told', () => {

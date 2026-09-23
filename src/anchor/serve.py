@@ -21,6 +21,7 @@ The state is files. There is no database, and nothing here reads anything but th
 from __future__ import annotations
 
 import json
+import shutil
 import threading
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -45,9 +46,7 @@ class Scheduler:
         self.root = root
         self.config = config
         self.running: dict[str, str] = {}         # graph -> run id
-        # What a run has been asked to do next, by run id: "paused" or "stopped". Asked between
-        # nodes, because a node in flight is inside a sandbox command or a model call and nothing
-        # here can reach into it — so the request lands when the running node finishes.
+        # A pause lands between nodes; a stop also cancels the current model call or command.
         self.control: dict[str, str] = {}
         self.lock = threading.Lock()
 
@@ -92,10 +91,7 @@ class Scheduler:
     def control_run(self, run_id: str, what: str) -> tuple[str, int]:
         """Ask a run to pause, stop or carry on. Returns (body, status).
 
-        Pause and stop are the same request — the loop leaves off between nodes — and differ only in
-        the status the run keeps, which is what decides whether it is picked up again on restart.
-        Neither cancels the node that is running: nothing outside a sandbox command can stop it, and
-        a button that appeared to would be lying.
+        A pause leaves off between nodes. A stop cancels the current node and is terminal.
         """
         if what not in ("pause", "stop", "resume"):
             return json.dumps({"error": f"unknown control: {what}"}), 400
@@ -105,10 +101,7 @@ class Scheduler:
                 self.control.pop(run_id, None)
             else:
                 self.control[run_id] = "paused" if what == "pause" else "stopped"
-                # The graph stays claimed until the loop actually leaves, which is not now: the node
-                # in flight has to finish first. Releasing it here would let a second trigger start
-                # while the first is still inside a node — and would make "is it still running" lie
-                # to whoever is watching for it to stop.
+                # The graph stays claimed until the worker exits; cancellation is asynchronous.
         if graph is None:
             return self._resume_cold(run_id) if what == "resume" else (
                 json.dumps({"error": "that run is not running", "run": run_id}), 409)
@@ -125,6 +118,19 @@ class Scheduler:
             if (candidate / "run.json").is_file():
                 return candidate
         return None
+
+    def delete_run(self, run_id: str) -> tuple[str, int]:
+        """Remove a run and everything it left behind, unless it is still running."""
+        if not run_id or "/" in run_id or run_id in (".", ".."):
+            return json.dumps({"error": "no such run"}), 404
+        with self.lock:
+            if run_id in self.running.values():
+                return json.dumps({"error": "that run is still running", "run": run_id}), 409
+            run_dir = self.run_dir(run_id)
+            if run_dir is None:
+                return json.dumps({"error": "no such run"}), 404
+            shutil.rmtree(run_dir)
+        return json.dumps({"run": run_id, "deleted": True}), 200
 
     def files(self, run_id: str, node: str) -> tuple[str, int]:
         """What a node left in its workspace. Returns (body, status)."""
@@ -291,7 +297,8 @@ class Scheduler:
         traces = {}
         for trace in sorted(base.glob("*.trace.jsonl")):
             lines = trace.read_text(encoding="utf-8").splitlines()[-TAIL_LINES:]
-            traces[trace.name.removesuffix(".trace.jsonl")] = [_readable(item) for item in lines]
+            traces[trace.name.removesuffix(".trace.jsonl")] = [message for line in lines
+                                                                 for message in _readable(line)]
         return {"graph": workspace.name, "run": run_id, "state": state, "traces": traces,
                 "nodes": sorted(item.name for item in base.iterdir() if item.is_dir())}
 
@@ -359,7 +366,7 @@ def _inside(base: Path, name: str) -> Path | None:
     return candidate if candidate == root or root in candidate.parents else None
 
 
-def _readable(line: str) -> dict:
+def _readable(line: str) -> list[dict]:  # noqa: C901 - both trace formats are projected here
     """A message as something a person can read, without knowing the library's shape.
 
     The **commands** are carried, not just the tool names. They are the most informative thing in a
@@ -367,6 +374,52 @@ def _readable(line: str) -> dict:
     nothing to show but a wall of text.
     """
     message = json.loads(line)
+    if message.get("kind") in ("request", "response"):
+        def view(role: str, content: str, *, commands: list[str] | None = None,
+                 exit_status: str | None = None) -> dict:
+            return {"role": role, "text": content[:TAIL_TEXT],
+                    "truncated": len(content) > TAIL_TEXT, "commands": commands or [],
+                    "exit_status": exit_status}
+
+        if message["kind"] == "response":
+            words = [str(part.get("content") or "") for part in message.get("parts", [])
+                     if part.get("part_kind") == "text"]
+            commands = []
+            for part in message.get("parts", []):
+                if part.get("part_kind") != "tool-call":
+                    continue
+                arguments = part.get("args")
+                try:
+                    arguments = json.loads(arguments) if isinstance(arguments, str) else arguments
+                except (TypeError, ValueError):
+                    pass
+                command = arguments.get("command") if isinstance(arguments, dict) else arguments
+                commands.append(str(command or part.get("tool_name") or ""))
+            return [view("assistant", "\n\n".join(words), commands=commands)] if words or commands else []
+
+        result = []
+        for part in message.get("parts", []):
+            kind = part.get("part_kind")
+            if kind in ("user-prompt", "system-prompt", "retry-prompt"):
+                result.append(view("system" if kind == "system-prompt" else "user",
+                                   str(part.get("content") or "")))
+            elif kind == "tool-return":
+                content = str(part.get("content") or "")
+                status = None
+                if content.startswith("<returncode>"):
+                    code, separator, rest = content.partition("</returncode>\n")
+                    if separator:
+                        status = code.removeprefix("<returncode>")
+                        content = rest
+                        if content.startswith("<output>\n"):
+                            content = content.removeprefix("<output>\n")
+                            output, end, extra = content.rpartition("\n</output>")
+                            if end:
+                                content = output + extra
+                        status = "succeeded" if status == "0" else f"exit {status}"
+                result.append(view("tool", content, exit_status=status))
+        return result
+
     content = message.get("content")
     if isinstance(content, list):
         content = " | ".join(str(part.get("text", part)) for part in content)
@@ -380,13 +433,13 @@ def _readable(line: str) -> dict:
         except (TypeError, ValueError):
             command = arguments
         commands.append(str(command) if command else "")
-    return {
+    return [{
         "role": message.get("role"),
         "text": text[:TAIL_TEXT],
         "truncated": len(text) > TAIL_TEXT,
         "commands": commands,
         "exit_status": (message.get("extra") or {}).get("exit_status"),
-    }
+    }]
 
 
 def _stamp() -> str:
@@ -531,6 +584,14 @@ class Handler(BaseHTTPRequestHandler):
         if not body.get("graph"):
             return self._send(json.dumps({"error": "graph is required"}), 400)
         response, status = self.scheduler.trigger(str(body["graph"]), body.get("objective"))
+        self._send(response, status)
+
+    def do_DELETE(self) -> None:
+        parts = [part for part in PurePosixPath(unquote(urlparse(self.path).path)).parts
+                 if part != "/"]
+        if len(parts) != 2 or parts[0] != "runs":
+            return self._send(json.dumps({"error": "not found"}), 404)
+        response, status = self.scheduler.delete_run(parts[1])
         self._send(response, status)
 
 

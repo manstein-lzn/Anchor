@@ -60,6 +60,22 @@ test('edit a graph, inspect a run and read its files across screen sizes', async
     await expect.poll(async () => (await page.locator(panel).boundingBox())!.width).toBe(before);
   }
   await page.screenshot({ path: 'test-results/editor-desktop.png' });
+  const wideHandle = page.getByRole('separator', { name: '调整详情面板宽度' });
+  const wideBox = (await wideHandle.boundingBox())!;
+  await page.mouse.move(wideBox.x + 4, wideBox.y + 100);
+  await page.mouse.down();
+  await page.mouse.move(500, wideBox.y + 100, { steps: 5 });
+  await page.mouse.up();
+  const wideWidth = (await page.locator('.inspector').boundingBox())!.width;
+  expect(wideWidth).toBeGreaterThan(720);
+  await page.reload();
+  await expect.poll(async () => (await page.locator('.inspector').boundingBox())!.width).toBe(wideWidth);
+  await page.getByRole('button', { name: '最大化详情面板', exact: true }).click();
+  await expect(page.locator('.main')).not.toBeVisible();
+  await expect.poll(async () => (await page.locator('.inspector').boundingBox())!.width).toBe(1440);
+  await page.getByRole('button', { name: '恢复详情面板', exact: true }).click();
+  await expect.poll(async () => (await page.locator('.inspector').boundingBox())!.width).toBe(wideWidth);
+  await wideHandle.dblclick();
   await page.getByLabel('搜索工作流').fill('one-search');
   await expect(page.locator('.library-list .library-row')).toHaveCount(1);
   await page.getByLabel('搜索工作流').fill('');

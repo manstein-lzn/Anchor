@@ -17,16 +17,69 @@ predecessor's workspace, mounted read-only in the sandbox at `/in/<node>`, its h
 Nothing is copied. A node writes into its own workspace and whatever is in it when it finishes is what
 the next node is pointed at.
 
+## Start the development services
+
+Use the repository script from a terminal or dialog:
+
+```bash
+./scripts/dev.sh              # start in the background
+./scripts/dev.sh status
+./scripts/dev.sh stop
+./scripts/dev.sh restart
+```
+
+The script starts `anchor-serve` on `127.0.0.1:8077` and Vite on `127.0.0.1:5173`, detaches both from
+the terminal, and keeps their PIDs and logs under `.local/dev/`. Closing the terminal or dialog does
+not stop them. Future development should use this script rather than launching either process in the
+foreground; use `status` before starting another copy.
+
+## Deep academic research
+
+`examples/graphs/deep-academic-research.json` maintains research in each node's workspace:
+framing → investigation → independent challenge → writing → peer review → paper.
+Challenge can return to investigation or framing. Peer review routes evidence gaps back to
+investigation, invalid framing back to framing, and writing defects back to the author. Returning
+nodes read the actual feedback under `/in/`; the reviewer first verifies its previous objections.
+Optional improvements do not block delivery. The final artifact is `report/paper.md`, a scholarly
+review with methods, mechanism-based analysis, limitations and traceable references.
+
+There is no prescribed number of searches, research cycles or manuscript revisions. Omitted
+`max_rounds` and omitted/null agent `max_steps` mean no execution-count budget; explicit limits
+remain operator choices. `max_steps: 0` permits no model requests. Persisted explicit budgets
+remain binding on recovery, even if the graph later omits a limit. Tool timeouts and invalid-output
+retry handling remain separate from healthy research progress. Manual Stop remains available.
+
+Run tests with the project interpreter, not system Python:
+
+```bash
+./.venv/bin/python -m pytest -q tests/test_examples.py tests/test_node_controlflow.py
+```
+
+The tests exercise feedback delivery and completion beyond the old limits using scripted models
+in the real sandbox. They do not establish the quality of a real research paper. In WebUI, select
+`deep-academic-research`, enter the research objective, and start a new run manually.
+
 ```json
 {
   "objective": "what this graph is for, as the default task text",
   "agents": {
+    "planner": {
+      "model": "models.academic",
+      "writes": ["plan.md"],
+      "instructions": "You decide what to look for…"
+    },
     "gatherer": {
       "model": "models.academic",
       "network": true,
       "reads": ["plan.md"],
       "writes": ["sources.md", "notes.md"],
       "instructions": "You gather academic evidence…"
+    },
+    "writer": {
+      "model": "models.academic",
+      "reads": ["notes.md"],
+      "writes": ["paper.md"],
+      "instructions": "You write the paper, References section included…"
     }
   },
   "ops": {
@@ -35,9 +88,13 @@ the next node is pointed at.
       "reads": ["paper.md"]
     }
   },
-  "nodes": [{"id": "gather", "agent": "gatherer"},
+  "nodes": [{"id": "plan", "agent": "planner"},
+            {"id": "gather", "agent": "gatherer"},
+            {"id": "write", "agent": "writer"},
             {"id": "check", "op": "has-references"}],
-  "edges": [{"from": "plan", "to": "gather"}, {"from": "gather", "to": "check"}]
+  "edges": [{"from": "plan", "to": "gather"},
+            {"from": "gather", "to": "write"},
+            {"from": "write", "to": "check"}]
 }
 ```
 
@@ -53,7 +110,8 @@ those graphs instead of an agent:
 
 ```json
 {
-  "agents": {"drafter": {"model": "models.academic", "instructions": "…"}},
+  "agents": {"drafter": {"model": "models.academic", "instructions": "…"},
+             "gatherer": {"model": "models.academic", "instructions": "…"}},
   "graphs": {
     "revise-a-draft": {
       "entry": "draft", "exit": "settle", "max_rounds": 4,
@@ -61,7 +119,7 @@ those graphs instead of an agent:
       "edges": [{"from": "draft", "to": "settle"}]
     }
   },
-  "nodes": [{"id": "write", "graph": "revise-a-draft"}],
+  "nodes": [{"id": "gather", "agent": "gatherer"}, {"id": "write", "graph": "revise-a-draft"}],
   "edges": [{"from": "gather", "to": "write"}]
 }
 ```
@@ -92,9 +150,9 @@ Three things are refused, each because the alternative is a name meaning two thi
 - **`/` in a node id**, when the file declares graphs. `a/b` written by hand and "node b of module a"
   would otherwise be the same string. A file with no `graphs` block does not expand, so it may use
   the separator — which is what lets a run write out the expansion it read.
-- **A module declaring `agents`, `objective` or `graphs`.** There is one agent pool per file, so a
-  role is defined once and referenced from anywhere; and one objective per run, because that is the
-  task every node is answering.
+- **A module declaring `agents`, `ops`, `objective` or `graphs`.** There is one agent pool per file,
+  so a role is defined once and referenced from anywhere; and one objective per run, because that is
+  the task every node is answering.
 
 A node may also carry `"with": "…"`, appended to its role's own instructions. That is what makes
 declaring a role separately from its nodes worth doing: two nodes can share one and still be asked
@@ -102,7 +160,7 @@ for different things.
 
 ## The model, in one place
 
-Six statements. Each is a decision with a reason and a rejected alternative, and `DECISIONS.md` has
+Seven statements. Each is a decision with a reason and a rejected alternative, and `DECISIONS.md` has
 them from ADR-056 on; this is the shape they add up to.
 
 **A node has one workspace, kept across its passes.** It is a directory of its own, and a node that
@@ -181,7 +239,8 @@ Every command a node runs goes through `bwrap`:
 
 - the node's own directory is writable, everything else is read-only
 - the network is off unless the node's agent says `"network": true`
-- the node's PATH carries `anchor-scholarly` and nothing else of ours
+- the node's PATH carries our console scripts — `anchor-scholarly` among them, and `anchor-done` /
+  `anchor-route`, which are how a node finishes
 
 An allowlist of commands was considered and rejected: the loop runs commands through a shell, so the
 shell is the entry point and the sandbox is the boundary. An allowlist in front of a shell is a
@@ -190,16 +249,19 @@ second, weaker boundary that the shell steps around.
 ## The literature tools
 
 ```bash
-anchor-scholarly search   --query "learned cost models" [--source crossref|arxiv] [--limit 8]
-anchor-scholarly read     --url "https://arxiv.org/pdf/2401.00001"
-anchor-scholarly read-many --urls "u1,u2,u3"
-anchor-scholarly citations --identifier 2401.00001 [--direction cited_by|cites]
+anchor-scholarly search      --query "learned cost models" [--source crossref|arxiv|openalex] [--limit 8] [--offset 0]
+anchor-scholarly search-many --queries-file queries.txt [--budget 420]
+anchor-scholarly sources
+anchor-scholarly read        --url "https://arxiv.org/pdf/2401.00001" [--offset 0] [--page-start 0]
+anchor-scholarly read-many   --urls "u1,u2,u3"
+anchor-scholarly citations   --identifier 2401.00001 [--direction cited_by|cites]
 ```
 
 JSON on stdout; a failure exits non-zero and says why on stderr, which is the only failure signal a
 shell-using agent can act on. Sources are rate limited and sometimes refuse, and that is information
 rather than a dead end — an agent that hits a 429 can try another source, and the trace will show it
-did.
+did. A long document does not fit in one answer: `read` returns a `next_offset` (and, for a PDF, a
+`next_page_start`), and passing it back is how the rest of the paper is reached.
 
 They are a command on purpose. It keeps keys, rate limiting and the SSRF check inside a process we
 control rather than inside a sandbox, and it means the same tools work from a shell, from any agent
@@ -211,7 +273,10 @@ body, and from ours.
 <workspace>/graph.json
 <workspace>/runs/<run id>/
   run.json              where the run got to, what each node said, and the commit it left
+  graph.json            the graph this run actually read, every module already inlined
   <node>/               the node's own workspace — and its own git repository
+  control/<node>/       the node's own record: its step store, its budget, its completion fact
+  .views/<node>-<c>/    one predecessor's tree, written out at the commit it was pinned to
   <node>.trace.jsonl    the conversation of the node's first pass
   <node>-2.trace.jsonl  and of its second, if it ran again
 ```
@@ -223,7 +288,9 @@ node: the history is the record of the node's work, and a node can read it — `
 node's own summary, so its log is the chain of what it said it was doing.
 
 `run.json` names each pass's commit, which is what makes a pass readable after a later one has written
-over it.
+over it. The run directory carries the graph it read for the same reason: the run can be read without
+the workspace still holding the file it came from. `control/` is the node's own business — the
+scheduler knows one path (`control/<node>`) and nothing about what is inside it.
 
 The trace sits beside its node's workspace, never inside it, and there is one per pass. Inside it is a
 file the agent can read, and one did: it found its own conversation, concluded that nothing prior
@@ -240,10 +307,14 @@ No runs database, no leases, no graph versions, no approval gates, no evidence l
 engine, no services. Those existed and were removed: they were built before anything ran end to end,
 and what they mostly did was make runs stop without saying so.
 
-What survives of recovery is reading `run.json` back and stepping again — `--resume`, and
-`anchor-serve` restarting the runs it finds unfinished. The canvas in `apps/web` is a view of the same
-`graph.json` a run reads, and `anchor-serve` publishes it and the runs together. Neither is the
-machinery that was removed: there is no lease to reconcile and no version to publish.
+What survives of recovery is reading the run back and stepping again — `--resume`, and `anchor-serve`
+restarting the runs it finds unfinished. Two records are read rather than one: `run.json` says what the
+scheduler recorded, and `control/<node>` says what the node itself recorded, and when they disagree
+about whether a node finished the run **stops and says so** instead of choosing — the two readings lead
+to opposite actions, and guessing between them runs a pass twice or never runs it. The canvas in
+`apps/web` is a view of the same `graph.json` a run reads, and `anchor-serve` publishes it and the runs
+together. None of this is the machinery that was removed: there is no lease to reconcile and no version
+to publish.
 
 `DECISIONS.md` keeps the record of that, including the parts that were mistakes, and `OPEN.md` holds
 what is still undecided — with the arguments on each side and with what has already been refused, so
@@ -264,8 +335,9 @@ next:
 - **A run starts from a call, not from an event.** `anchor-serve` has `POST /trigger` and answers `409`
   while that graph is already running; nothing watches for a change and starts one.
 
-- **The canvas shows a module and does not let you open it.** A module node draws as a subgraph and the
-  inspector says what it is; there is no drill-in editing, and it does not know about ops yet.
+- **The canvas knows about a module and does not let you open one.** A module node draws as a subgraph
+  and the inspector says what it is, with no drill-in editing. An op is drawn and its command and
+  `reads`/`writes` are shown, but they are read-only: op definitions are edited in the file.
 - **A graph's size is whatever its author drew.** Work whose *number of pieces* is unknown until the
   data arrives has to be absorbed by a node looping over it, one pass per item with a fresh context
   and a commit each — which is most of what fanning out would give, minus doing it at the same time.

@@ -14,7 +14,9 @@ made the caller responsible for guessing a scheduler state from an exception typ
 
 from __future__ import annotations
 
+import asyncio
 import json
+import os
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -80,10 +82,9 @@ async def _reference(recovery_store: Path | None, request: NodeRequest, store: A
     if not runs:
         return ""
     newest = sorted(runs, key=lambda item: item.started_at)[-1]
-    # **The allowance carries over, it does not restart.** The framework is explicit that it does not
-    # restore retry counters, so what was spent is kept beside the run — a node killed three times would
-    # otherwise spend its whole budget three times.
-    budget = load_budget(control).after(spent) if budget_path(control).exists() else Budget(
+    # Model and summary requests already charged the file before they were sent. The fallback is for
+    # a caller whose model did not have a control directory to charge during execution.
+    budget = load_budget(control) if budget_path(control).exists() else Budget(
         requests_used=spent, requests_allowed=request.max_requests)
     save_budget(control, budget)
     return RecoveryRef(node=request.node_key, run=newest.run_id, store=str(control),
@@ -92,7 +93,7 @@ async def _reference(recovery_store: Path | None, request: NodeRequest, store: A
 
 
 def _write_trace(path: Path | None, messages: list[Any], wiring: _Wiring | None,
-                 outcome: NodeOutcome, formed: Any = None) -> str:
+                 outcome: NodeOutcome | None = None, formed: Any = None) -> str:
     """The record: what the model was told, what it called, what came back, and why it stopped.
 
     Written whole rather than projected. A readable summary would be nicer and would throw away the
@@ -116,7 +117,8 @@ def _write_trace(path: Path | None, messages: list[Any], wiring: _Wiring | None,
         if parts:
             recorded.append(ModelRequest(parts=parts))
     encoded = ModelMessagesTypeAdapter.dump_python(recorded, mode="json") if recorded else []
-    with path.open("w", encoding="utf-8") as handle:
+    temporary = path.with_name(path.name + ".tmp")
+    with temporary.open("w", encoding="utf-8") as handle:
         for message in encoded:
             handle.write(json.dumps(message, ensure_ascii=False, default=str) + "\n")
         # The commands are written out whole, and not left to the framework's history. A pass that
@@ -125,17 +127,19 @@ def _write_trace(path: Path | None, messages: list[Any], wiring: _Wiring | None,
         # carrying the submission, is not in the messages at all. The adapter ran those commands and
         # knows exactly what they did; the record would be missing the most important part of the pass
         # without this.
-        handle.write(json.dumps({
-            "role": "exit", "content": outcome.reason or outcome.submission,
-            "extra": {"status": outcome.status, "route": outcome.route,
-                      "submission": outcome.submission, "model_requests": outcome.model_requests,
-                      # The full output, uncapped. The sandbox already bounds what one command may
-                      # produce; a second, smaller bound here would drop evidence that was inside the
-                      # bound it was allowed — silently, which is the part that made it a defect.
-                      "commands": [] if wiring is None else
-                                  [{"command": c, "returncode": r, "first_line": f, "output": o}
-                                   for c, r, f, o in wiring.ran]},
-        }, ensure_ascii=False) + "\n")
+        if outcome is not None:
+            handle.write(json.dumps({
+                "role": "exit", "content": outcome.reason or outcome.submission,
+                "extra": {"status": outcome.status, "route": outcome.route,
+                          "submission": outcome.submission, "model_requests": outcome.model_requests,
+                          # The full output, uncapped. The sandbox already bounds what one command may
+                          # produce; a second, smaller bound here would drop evidence that was inside the
+                          # bound it was allowed — silently, which is the part that made it a defect.
+                          "commands": [] if wiring is None else
+                                      [{"command": c, "returncode": r, "first_line": f, "output": o}
+                                       for c, r, f, o in wiring.ran]},
+            }, ensure_ascii=False) + "\n")
+    os.replace(temporary, path)
     return str(path)
 
 
@@ -164,7 +168,7 @@ class _Started:
     #: The **total** allowance for the whole logical execution, and what earlier processes spent of it.
     #: Two cumulative figures, so what is left is a subtraction and never a figure of its own — mixing a
     #: remaining count with a cumulative one is how `remaining=0` turned into a fresh allowance.
-    spending: int = 0
+    spending: int | None = None
     already: int = 0
     this_run: str = ""
     ref: Any = None
@@ -194,8 +198,9 @@ async def _what_a_previous_attempt_left(request: NodeRequest, capabilities: tupl
         # **The smaller allowance wins**, and the larger spending. A reference must not be able to hand
         # back an allowance the control directory already says was used, and a directory that has no
         # allowance of its own takes the caller's.
-        started.spending = (min(value for value in (request.max_requests, on_disk.requests_allowed)
-                                if value) if on_disk.requests_allowed else request.max_requests)
+        started.spending = min((value for value in
+                               (request.max_requests, on_disk.requests_allowed)
+                               if value is not None), default=None)
     #: Whether the caller has already arranged persistence. **Where it sits among the capabilities
     #: decides which side of a write a hook lands on**, and the two directions are not the same — a
     #: `before_*` hook registered after it sees the framework's `started` write, while an `after_*` hook
@@ -261,8 +266,9 @@ async def _what_a_previous_attempt_left(request: NodeRequest, capabilities: tupl
             # spent budget even when the directory looked fine a moment ago.
             merged = started.ref.budget.at_most(load_budget(Path(started.ref.store)))
             started.already = max(started.already, merged.requests_used)
-            started.spending = min(value for value in (started.spending, merged.requests_allowed)
-                                   if value) if merged.requests_allowed else started.spending
+            started.spending = min((value for value in
+                                   (started.spending, merged.requests_allowed)
+                                   if value is not None), default=None)
         if started.store is not None and not has_persistence:
             started.conversation = started.ref.node
             # **A continuation is a new run**, so the attempt that ends up in the store is this one and
@@ -313,8 +319,8 @@ async def run_node(request: NodeRequest, *, model: Any,
     # rather than one more. The old expression both gave a minimum of one and, when the remaining figure
     # reached zero, replaced the whole allowance with a fresh one — measured, by a budget of 8/8 that
     # came back 9/8 with a completed status.
-    remaining = max(spending - already, 0)
-    if recovery_store is not None and remaining <= 0:
+    remaining = max(spending - already, 0) if spending is not None else None
+    if remaining is not None and remaining <= 0:
         return NodeOutcome(
             status=BUDGET_EXHAUSTED, model_requests=0, files=_files(request.workspace),
             reason=f"the allowance for this node is spent ({already}/{spending} requests) — no request "
@@ -334,7 +340,8 @@ async def run_node(request: NodeRequest, *, model: Any,
         counted.allowed = spending
         counted.requests = already
     agent = build_agent(counted, instructions=request.instructions,
-                        max_retries=spending,
+                        # Malformed tool/output retries are separate from healthy research turns.
+                        max_retries=spending if spending is not None else 3,
                         capabilities=(*capabilities, *resumed))
     limits = UsageLimits(request_limit=remaining)
 
@@ -343,11 +350,21 @@ async def run_node(request: NodeRequest, *, model: Any,
     messages: list[Any] = []
     #: The last batch's already-formed results, read off the node the pass left on.
     formed: Any = None
+    current = asyncio.current_task()
+
+    async def stop_when_asked() -> None:
+        while request.cancelled is not None and not request.cancelled():
+            await asyncio.sleep(0.1)
+        if current is not None:
+            current.cancel()
+
+    watcher = asyncio.create_task(stop_when_asked()) if request.cancelled is not None else None
     try:
         wiring = _Wiring(sandbox=NodeSandbox(
             tree=request.workspace, node_id=request.roles or request.execution_id,
             network=request.network, timeout_seconds=request.timeout_seconds,
-            routes=request.routes, inputs=request.inputs), routes=request.routes,
+            routes=request.routes, inputs=request.inputs, cancelled=request.cancelled),
+            routes=request.routes,
             control=recovery_store, execution_id=request.node_key,
             framework_run=this_run or (ref.run if ref is not None else ""))
         # Inside the try. A sandbox that cannot start is a failed execution and the contract has a
@@ -359,6 +376,11 @@ async def run_node(request: NodeRequest, *, model: Any,
                               message_history=history,
                               conversation_id=conversation) as run:
             async for node in run:
+                if request.trace is not None:
+                    pending = (node.request if isinstance(node, ModelRequestNode) and
+                               any(getattr(part, "part_kind", "") in ("tool-return", "retry-prompt")
+                                   for part in node.request.parts) else None)
+                    _write_trace(request.trace, list(run.all_messages()), wiring, formed=pending)
                 # **The boundary after the tools, not the tools themselves.** A node is yielded when it
                 # is entered, so at `CallToolsNode` the commands have not run yet and nothing has been
                 # submitted; breaking there does nothing and the pass goes on to ask the model again —
@@ -379,6 +401,11 @@ async def run_node(request: NodeRequest, *, model: Any,
         outcome = NodeOutcome(
             status=COMPLETED, submission=done.submission, route=done.route,
             model_requests=counted.requests - already, files=_files(request.workspace))
+    except asyncio.CancelledError:
+        messages = list(run.all_messages()) if run is not None else []
+        outcome = NodeOutcome(status=FAILED, reason="stopped on request",
+                              model_requests=counted.requests - already,
+                              files=_files(request.workspace))
     except UsageLimitExceeded as exc:
         # Out of turns, nothing submitted. Not a failure of the work, and not a route: the graph must
         # not move on the strength of a pass that did not happen.
@@ -392,6 +419,9 @@ async def run_node(request: NodeRequest, *, model: Any,
         outcome = NodeOutcome(
             status=FAILED, model_requests=counted.requests - already,
             reason=f"{type(exc).__name__}: {exc}", files=_files(request.workspace))
+    finally:
+        if watcher is not None:
+            watcher.cancel()
 
     return replace(outcome, trace_ref=_write_trace(request.trace, messages, wiring, outcome, formed),
                    recovery=await _reference(recovery_store, request, store, ref,

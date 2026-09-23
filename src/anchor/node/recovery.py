@@ -71,19 +71,20 @@ class Budget:
     """
 
     requests_used: int = 0
-    requests_allowed: int = 0
+    requests_allowed: int | None = None
 
     def __post_init__(self) -> None:
         # A negative count is not a smaller allowance, it is a corrupted file — and treating it as an
         # allowance would hand back a budget nobody granted.
         if self.requests_used < 0:
             raise InvalidReference(f"a budget cannot have spent {self.requests_used} requests")
-        if self.requests_allowed < 0:
+        if self.requests_allowed is not None and self.requests_allowed < 0:
             raise InvalidReference(f"a budget cannot allow {self.requests_allowed} requests")
 
     @property
-    def remaining(self) -> int:
-        return max(self.requests_allowed - self.requests_used, 0)
+    def remaining(self) -> int | None:
+        return (max(self.requests_allowed - self.requests_used, 0)
+                if self.requests_allowed is not None else None)
 
     def at_most(self, other: Budget) -> Budget:
         """The **larger** of two accounts of what has been spent, and the smaller allowance.
@@ -93,8 +94,9 @@ class Budget:
         which is the one thing a persisted budget exists to prevent.
         """
         return Budget(requests_used=max(self.requests_used, other.requests_used),
-                      requests_allowed=min(self.requests_allowed, other.requests_allowed)
-                      if other.requests_allowed else self.requests_allowed)
+                      requests_allowed=min((v for v in
+                          (self.requests_allowed, other.requests_allowed) if v is not None),
+                          default=None))
 
     def after(self, more: int) -> Budget:
         return Budget(requests_used=self.requests_used + more,
@@ -503,8 +505,8 @@ def charge_request(control: Path, allowed: int | None = None) -> Budget:
     """
     here = Path(control)
     on_disk = load_budget(here)
-    merged = min(value for value in (allowed, on_disk.requests_allowed) if value) \
-        if (allowed or on_disk.requests_allowed) else 0
+    merged = min((value for value in (allowed, on_disk.requests_allowed)
+                  if value is not None), default=None)
     charged = Budget(requests_used=on_disk.requests_used + 1, requests_allowed=merged)
     save_budget(here, charged)
     return charged

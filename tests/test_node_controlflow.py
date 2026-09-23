@@ -14,6 +14,8 @@ import asyncio
 import json
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -70,6 +72,28 @@ def request(workspace: Path, **overrides) -> NodeRequest:
 
 def ran(workspace: Path, *, routes: tuple[str, ...] = ()) -> NodeOutcome:
     return asyncio.run(run_node(request(workspace, routes=routes), model=model_from()))
+
+
+def test_unlimited_requests_pass_old_default_and_persist_spending(tmp_path):
+    from anchor.node.recovery import load_budget
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    control = tmp_path / "control"
+    model = model_from(*([["true"]] * 61), ['anchor-done --summary "finished"'])
+    outcome = asyncio.run(run_node(request(workspace), model=model, recovery_store=control))
+    assert outcome.status == COMPLETED
+    budget = load_budget(control)
+    assert budget.requests_used == 62
+    assert budget.requests_allowed is None
+
+
+def test_zero_budget_sends_no_model_request(tmp_path):
+    def unexpected(messages, info):
+        pytest.fail("a zero budget must not contact the model")
+    outcome = asyncio.run(run_node(request(tmp_path, max_requests=0),
+                                   model=FunctionModel(unexpected)))
+    assert outcome.status == BUDGET_EXHAUSTED
+    assert outcome.model_requests == 0
 
 
 # ── A1 · one bash tool, a real artefact, and a submission that came from the CLI ─────────────────
@@ -686,6 +710,90 @@ def test_the_conversation_is_in_the_record_when_the_pass_does_not_finish(tmp_pat
     assert kinds[-1] == "exit"
     # And the exit line still carries what a failure is read for.
     assert lines[-1]["extra"]["commands"], "the commands that ran are not in the record"
+
+
+def test_a_fresh_persisted_pass_charges_each_model_request_once(tmp_path):
+    from anchor.node.recovery import RecoveryRef, load_budget
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    control = tmp_path / "control"
+    outcome = asyncio.run(run_node(
+        request(workspace, max_requests=3),
+        model=model_from(['anchor-done --summary "done"']), recovery_store=control))
+
+    assert outcome.status == COMPLETED, outcome.reason
+    assert outcome.model_requests == 1
+    assert load_budget(control).requests_used == 1
+    assert RecoveryRef.decode(outcome.recovery).budget.requests_used == 1
+
+
+def test_trace_is_visible_while_the_node_is_still_running(tmp_path):
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    trace = tmp_path / "trace.jsonl"
+    observed = []
+
+    def watching(messages, info):
+        if sum(getattr(item, "kind", "") == "response" for item in messages):
+            observed.extend(json.loads(line) for line in trace.read_text().splitlines())
+            return ModelResponse(parts=[ToolCallPart(tool_name="bash",
+                                                    args={"command": 'anchor-done --summary "done"'})])
+        return ModelResponse(parts=[ToolCallPart(tool_name="bash", args={"command": "echo visible"})])
+
+    outcome = asyncio.run(run_node(request(workspace, trace=trace), model=FunctionModel(watching)))
+
+    assert outcome.status == COMPLETED, outcome.reason
+    kinds = [part.get("part_kind") for item in observed for part in item.get("parts", [])]
+    assert "tool-call" in kinds and "tool-return" in kinds, kinds
+    assert not any(item.get("role") == "exit" for item in observed)
+
+
+def test_stop_cancels_a_waiting_model_call(tmp_path):
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+
+    async def scenario():
+        entered = asyncio.Event()
+        stopped = False
+
+        async def waiting(messages, info):
+            entered.set()
+            await asyncio.sleep(30)
+            return ModelResponse(parts=[TextPart(content="too late")])
+
+        task = asyncio.create_task(run_node(
+            request(workspace, cancelled=lambda: stopped, trace=tmp_path / "trace.jsonl"),
+            model=FunctionModel(waiting), recovery_store=tmp_path / "control"))
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        stopped = True
+        done, _ = await asyncio.wait({task}, timeout=2)
+        assert task in done, "the model call did not stop promptly"
+        return task.result()
+
+    outcome = asyncio.run(scenario())
+    assert outcome.status == FAILED and outcome.reason == "stopped on request"
+    assert (tmp_path / "trace.jsonl").is_file() and outcome.recovery
+
+
+def test_stop_cancels_an_agent_tool_command(tmp_path):
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    stopped = threading.Event()
+    results = []
+
+    worker = threading.Thread(target=lambda: results.append(asyncio.run(run_node(
+        request(workspace, cancelled=stopped.is_set),
+        model=model_from(["touch started; sleep 30"])))), daemon=True)
+    worker.start()
+    deadline = time.monotonic() + 5
+    while not (workspace / "started").exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert (workspace / "started").exists(), "the tool command did not begin"
+    stopped.set()
+    worker.join(timeout=3)
+    assert not worker.is_alive(), "the agent tool did not stop promptly"
+    assert results[0].status == FAILED and results[0].reason == "stopped on request"
 
 
 def test_a_sandbox_that_cannot_start_is_a_failed_result_and_not_an_exception(tmp_path, monkeypatch):

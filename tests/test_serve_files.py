@@ -137,3 +137,56 @@ def test_a_run_that_is_not_there_is_not_a_500(tmp_path):
     assert scheduler.read_file("nope", "notes", "summary.md")[1] == 404
     assert scheduler.files("r1", "no-such-node")[1] == 404
     assert scheduler.read_file("r1", "notes", "no-such-file")[1] == 404
+
+
+def test_deleting_a_run_removes_its_complete_history(tmp_path):
+    scheduler, _ = _scheduler(tmp_path)
+    run_dir = tmp_path / "workspaces" / "demo" / "runs" / "r1"
+
+    response, status = scheduler.delete_run("r1")
+
+    assert status == 200 and json.loads(response) == {"run": "r1", "deleted": True}
+    assert not run_dir.exists()
+    assert scheduler.run_dir("r1") is None
+
+
+def test_deleting_a_missing_run_returns_not_found(tmp_path):
+    scheduler, _ = _scheduler(tmp_path)
+
+    response, status = scheduler.delete_run("no-such-run")
+
+    assert status == 404 and "no such run" in response
+
+
+def test_deleting_a_running_run_is_refused(tmp_path):
+    scheduler, _ = _scheduler(tmp_path)
+    scheduler.running["demo"] = "r1"
+    run_dir = tmp_path / "workspaces" / "demo" / "runs" / "r1"
+
+    response, status = scheduler.delete_run("r1")
+
+    assert status == 409 and "still running" in response
+    assert run_dir.exists()
+
+
+def test_pydantic_trace_is_readable_as_calls_and_results(tmp_path):
+    scheduler, _ = _scheduler(tmp_path)
+    trace = tmp_path / "workspaces" / "demo" / "runs" / "r1" / "notes.trace.jsonl"
+    records = [
+        {"kind": "request", "parts": [{"part_kind": "user-prompt", "content": "research"}]},
+        {"kind": "response", "parts": [
+            {"part_kind": "text", "content": "Checking evidence"},
+            {"part_kind": "tool-call", "tool_name": "bash", "args": '{"command":"ls notes"}'}]},
+        {"kind": "request", "parts": [{"part_kind": "tool-return", "tool_name": "bash",
+                                       "content": "<returncode>0</returncode>\n<output>\npaper.md\n</output>"}]},
+        {"role": "exit", "content": "finished", "extra": {}},
+    ]
+    trace.write_text("".join(json.dumps(item) + "\n" for item in records), encoding="utf-8")
+
+    messages = scheduler.run("demo", "r1")["traces"]["notes"]
+
+    assert [item["role"] for item in messages] == ["user", "assistant", "tool", "exit"]
+    assert messages[1]["text"] == "Checking evidence"
+    assert messages[1]["commands"] == ["ls notes"]
+    assert messages[2]["text"] == "paper.md"
+    assert messages[2]["exit_status"] == "succeeded"

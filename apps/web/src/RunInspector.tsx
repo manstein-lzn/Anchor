@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { FolderOpen, MessageSquare, SlidersHorizontal } from 'lucide-react';
 import { Files } from './Files';
 import { Transcript } from './Transcript';
@@ -14,8 +14,11 @@ export function RunInspector({ run, node, detail }:
     .filter(item => item === node || (item.startsWith(`${node}-`) && /^\d+$/.test(item.slice(node.length + 1))))
     .sort((a, b) => (a === node ? 0 : Number(a.slice(node.length + 1)))
       - (b === node ? 0 : Number(b.slice(node.length + 1)))), [detail, node]);
-  const shown = passes.includes(pass) ? pass : passes[0] ?? '';
+  const latest = passes[passes.length - 1] ?? '';
+  const shown = passes.includes(pass) ? pass : latest;
   const messages = detail?.traces?.[shown] ?? [];
+  const result = detail?.state.nodes[node];
+  useEffect(() => { setPass(''); }, [node, detail?.run]);
 
   return <aside className="inspector">
     <div className="section-heading">
@@ -29,13 +32,22 @@ export function RunInspector({ run, node, detail }:
     </div>
     {!node ? <EmptyState icon={MessageSquare} title="探索一次执行">
       在画布中选择节点，查看它的思考、执行过程和生成的文件。
-    </EmptyState> : tab === 'files' ? <Files run={run} node={node} /> : <>
+    </EmptyState> : tab === 'files' ? <><p className="inspector-note">显示 {node} 当前工作区的文件；历史轮次的对话不会改变这里的最新文件。</p><Files run={run} node={node} /></> : <>
+      <div className="node-summary">
+        <span className={`pill ${detail?.state.cursor?.node === node ? 'running' : result?.submitted ? 'finished' : result ? 'failed' : 'pending'}`}>
+          {detail?.state.cursor?.node === node ? '执行中' : result ? (result.submitted ? '已提交' : '失败') : '未执行'}
+        </span>
+        <span>已执行 {detail?.state.passes[node] ?? 0} 轮</span>
+        {result?.submission && <span className="node-summary-text" title={result.submission}>{result.submission.split('\n').find(line => line.trim())}</span>}
+        {result?.route && <span>下一步：{result.route}</span>}
+      </div>
       {passes.length > 1 && <div className="passes">
         {passes.map((item, index) => <button key={item} className={item === shown ? 'chosen' : ''}
           aria-pressed={item === shown} onClick={() => setPass(item)}>第 {index + 1} 轮</button>)}
       </div>}
-      {!messages.length && <EmptyState icon={MessageSquare} title="等待执行记录">
-        节点开始执行后，对话会自动出现在这里。
+      {!messages.length && <EmptyState icon={MessageSquare}
+        title={result ? '该节点没有对话记录' : detail?.state.status === 'running' ? '等待执行记录' : '节点尚未执行'}>
+        {result ? '它可能是确定性操作节点，或只留下了文件结果。' : detail?.state.status === 'running' ? '节点开始执行后，对话会自动出现在这里。' : '选择已执行的节点查看过程。'}
       </EmptyState>}
       <Transcript messages={messages} />
     </>}

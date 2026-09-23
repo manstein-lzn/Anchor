@@ -17,14 +17,17 @@ every command fails and the node spends its whole budget finding out. ADR-034.
 from __future__ import annotations
 
 import hashlib
+import os
+import signal
 
 import shutil
 import subprocess
 import tempfile
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 # Reading, inspecting and running a script. With no network and everything outside the bound
 # workspace read-only, an interpreter can compute over the tree it is given and reach nothing else.
@@ -101,6 +104,7 @@ class SandboxSpec:
     # something only the runner knows — which node it is, and where it may route to — without the
     # runner having to write a file into the node's own directory to say so.
     env: tuple[tuple[str, str], ...] = ()
+    cancelled: Callable[[], bool] | None = None
 
 
 @dataclass(frozen=True)
@@ -207,7 +211,8 @@ def _capture(spec: SandboxSpec, argv: list[str], staging: Path) -> tuple[
     # test passed three times and failed once. The dictionaries are small and the critical section is
     # three arithmetic operations, so the lock costs nothing worth measuring.
     lock = threading.Lock()
-    process = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env={})
+    process = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                               env={}, start_new_session=True)
     assert process.stdout is not None and process.stderr is not None
 
     def drain(name: str, pipe: Any) -> None:
@@ -239,12 +244,28 @@ def _capture(spec: SandboxSpec, argv: list[str], staging: Path) -> tuple[
     for thread in threads:
         thread.start()
     timed_out = False
-    try:
-        returncode = process.wait(timeout=spec.timeout_seconds)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        process.wait()
-        returncode, timed_out = 124, True
+    deadline = time.monotonic() + spec.timeout_seconds
+    while True:
+        if spec.cancelled is not None and spec.cancelled() and process.poll() is None:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait()
+            returncode = 130 if process.returncode == -signal.SIGKILL else process.returncode
+            break
+        try:
+            returncode = process.wait(timeout=min(0.1, max(0, deadline - time.monotonic())))
+            break
+        except subprocess.TimeoutExpired:
+            if time.monotonic() >= deadline:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.wait()
+                returncode, timed_out = 124, True
+                break
     # **Waited for, without closing anything and without a short timeout.** A reader ends when its pipe
     # reaches end of file, which happens when the process is gone; closing the pipe instead discards
     # whatever is still buffered in it — and that was measured, as a result whose stdout was empty, a

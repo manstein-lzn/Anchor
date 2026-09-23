@@ -227,11 +227,24 @@ export function toFlowNodes(graph: OurGraph, name: string,
 
 /** An edge carries what the run decided about it, which is the whole point of drawing one. */
 export function toFlowEdges(graph: OurGraph, state: OurRunState | null): Edge[] {
+  // `decided` stores the latest settlement for an edge. When a routed node has several exits,
+  // the runner deliberately settles the exits it did not choose to false; that must not erase a
+  // true traversal from an earlier feedback cycle. The execution sequence is the durable history
+  // of which adjacent node transition actually happened.
+  const traversed = new Set<string>();
+  for (let index = 1; index < (state?.executed.length ?? 0); index += 1) {
+    traversed.add(`${state!.executed[index - 1]}|${state!.executed[index]}`);
+  }
   return graph.edges.map((edge, index) => {
     const decision = state?.decided?.[`${edge.from}|${edge.to}`];
     const selected = decision?.[0];
     const decided = decision !== undefined;
-    const style = !decided ? { stroke: '#c8d4d0', strokeDasharray: '4 4' }
+    const walked = traversed.has(`${edge.from}|${edge.to}`)
+      // Ops can be scheduled between a source and its routed target, so the persisted decision
+      // is the fallback evidence for a selected edge when adjacency is not visible in the list.
+      || selected === true && decision?.[1] !== undefined;
+    const style = walked ? { stroke: '#2f7d5f', strokeWidth: 2.5 }
+      : !decided ? { stroke: '#c8d4d0', strokeDasharray: '4 4' }
       : selected ? { stroke: '#2f7d5f', strokeWidth: 2.5 }
       : { stroke: '#d6d6d6', strokeDasharray: '4 4' };
     return {

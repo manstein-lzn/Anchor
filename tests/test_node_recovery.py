@@ -112,10 +112,16 @@ def test_the_budget_survives_a_restart_and_is_not_handed_back(tmp_path):
     assert load_budget(tmp_path).requests_used == 6
 
     # 没有文件 = 还没被重启过 ✓；损坏的文件**不能**被当成满额 ✓。
-    assert load_budget(tmp_path / "elsewhere").requests_allowed == 0
+    assert load_budget(tmp_path / "elsewhere").requests_allowed is None
     budget_path(tmp_path).write_text("{not json", encoding="utf-8")
     with pytest.raises(InvalidReference, match="unreadable"):
         load_budget(tmp_path)
+
+
+def test_unbounded_budget_never_erases_an_explicit_cap():
+    assert Budget().at_most(Budget(requests_used=8, requests_allowed=8)).remaining == 0
+    assert Budget(requests_allowed=0).at_most(Budget()).remaining == 0
+    assert Budget().at_most(Budget()).remaining is None
 
 
 def test_a_budget_is_written_atomically(tmp_path):

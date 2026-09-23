@@ -165,7 +165,8 @@ def run_op_node(request: NodeRequest, *, command: str | None = None) -> NodeOutc
                            files=_files(request.workspace))
     sandbox = NodeSandbox(tree=request.workspace, node_id=request.roles or request.execution_id,
                           network=request.network, timeout_seconds=request.timeout_seconds,
-                          routes=request.routes, inputs=request.inputs)
+                          routes=request.routes, inputs=request.inputs,
+                          cancelled=request.cancelled)
     try:
         sandbox.require_working()
         ran = sandbox.run(op_command)
