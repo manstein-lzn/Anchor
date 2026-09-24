@@ -11,7 +11,7 @@ export interface Definition {
 
 export const NODE_WIDTH = 200;
 export const NODE_HEIGHT = 108;
-export type Port = XYPosition & { id: string; type: 'source' | 'target'; side: 'EAST' | 'WEST' | 'SOUTH' };
+export type Port = XYPosition & { id: string; type: 'source' | 'target'; side: 'EAST' | 'NORTH' | 'SOUTH' };
 export type Route = { points: XYPosition[]; feedback: boolean; label?: string; labelPosition?: XYPosition };
 export type Layout = {
   positions: Record<string, XYPosition>;
@@ -87,13 +87,13 @@ async function calculateLayout(definition: Definition, saved: Layout['positions'
   const ports: Layout['ports'] = Object.fromEntries(definition.nodes.map(n => [n.id, []]));
   definition.edges.forEach((edge, index) => {
     if (!ports[edge.source] || !ports[edge.target]) throw new Error('连线引用了不存在的节点，请检查连线起点和终点。');
-    ports[edge.source].push({ id: `e${index}-out`, type: 'source', side: back.has(index) ? 'SOUTH' : 'EAST', x: 0, y: 0 });
-    ports[edge.target].push({ id: `e${index}-in`, type: 'target', side: back.has(index) ? 'SOUTH' : 'WEST', x: 0, y: 0 });
+    ports[edge.source].push({ id: `e${index}-out`, type: 'source', side: back.has(index) ? 'EAST' : 'SOUTH', x: 0, y: 0 });
+    ports[edge.target].push({ id: `e${index}-in`, type: 'target', side: back.has(index) ? 'EAST' : 'NORTH', x: 0, y: 0 });
   });
   const result = await elk.layout({
     id: 'workflow',
     layoutOptions: {
-      'elk.algorithm': 'layered', 'elk.direction': 'RIGHT', 'elk.edgeRouting': 'ORTHOGONAL',
+      'elk.algorithm': 'layered', 'elk.direction': 'DOWN', 'elk.edgeRouting': 'ORTHOGONAL',
       'elk.layered.mergeEdges': 'false', 'elk.layered.feedbackEdges': 'true',
       'elk.spacing.nodeNode': '48', 'elk.spacing.edgeNode': '24', 'elk.spacing.edgeEdge': '18',
       'elk.layered.spacing.nodeNodeBetweenLayers': '64', 'elk.layered.spacing.edgeEdgeBetweenLayers': '18',

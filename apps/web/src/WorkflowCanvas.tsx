@@ -29,12 +29,12 @@ function WorkflowNodeView({ id, data, selected }: NodeProps<WorkflowNode>) {
         {data.attempt !== undefined && <span>第 {data.attempt + 1} 次</span>}</>}
     </div>
     {data.ports.map(port => <Handle key={port.id} id={port.id} type={port.type}
-      position={port.side === 'SOUTH' ? Position.Bottom : port.side === 'WEST' ? Position.Left : Position.Right}
+      position={port.side === 'SOUTH' ? Position.Bottom : port.side === 'NORTH' ? Position.Top : Position.Right}
       isConnectable={false} className="route-port"
       style={{ left: port.x, top: port.y, right: 'auto', bottom: 'auto', transform: 'translate(-50%, -50%)' }} />)}
     {data.editing && <>
-      <Handle id="connect-in" type="target" position={Position.Left} className="connect-port" title="连接输入" />
-      <Handle id="connect-out" type="source" position={Position.Right} className="connect-port" title="连接输出" />
+      <Handle id="connect-in" type="target" position={Position.Top} className="connect-port" title="连接输入" />
+      <Handle id="connect-out" type="source" position={Position.Bottom} className="connect-port" title="连接输出" />
     </>}
   </div>;
 }
@@ -133,7 +133,7 @@ function Canvas({ graph, name, mode, state = null, editable = false, onPick, onP
       <Controls showInteractive={false} onFitView={fit} />
       <Panel position="top-left" className="workflow-legend">
         {editing ? <><span><i />前向连接</span><span><i className="feedback" />循环返回</span></>
-          : <><span><i className="walked" />已走过</span><span><i className="unwalked" />未走过</span><span>底部连接为循环返回</span></>}
+          : <><span><i className="walked" />已走过</span><span><i className="unwalked" />未走过</span><span>侧边连接为循环返回</span></>}
       </Panel>
       {editing && <Panel position="top-right"><button className="arrange-button" disabled={!editable || arranging}
         onClick={() => void arrange()}>自动整理</button></Panel>}

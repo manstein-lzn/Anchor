@@ -51,6 +51,9 @@ describe('shared workflow geometry', () => {
     expect([...feedbackEdges(definition)]).toEqual([3, 4, 8, 9, 10]);
     const layout = await layoutWorkflow(definition);
     expect(layout.routes).toHaveLength(12);
+    for (const [index, edge] of definition.edges.entries()) {
+      if (!layout.routes[index].feedback) expect(layout.positions[edge.target].y).toBeGreaterThan(layout.positions[edge.source].y);
+    }
     checkRoutes(layout, definition);
     for (const ports of Object.values(layout.ports)) {
       expect(new Set(ports.map(p => `${p.x},${p.y}`)).size).toBe(ports.length);
@@ -58,7 +61,7 @@ describe('shared workflow geometry', () => {
   });
   it('keeps saved coordinates and reroutes around dragged nodes', async () => {
     const auto = await layoutWorkflow(definition);
-    const positions = { ...auto.positions, investigate: { ...auto.positions.investigate, y: auto.positions.investigate.y + 180 } };
+    const positions = { ...auto.positions, investigate: { ...auto.positions.investigate, x: auto.positions.investigate.x - 280 } };
     const manual = await layoutWorkflow(definition, positions);
     expect(manual.positions).toEqual(positions);
     checkRoutes(manual, definition);

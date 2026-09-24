@@ -28,7 +28,7 @@ export async function routeFixedLayout(definition: Definition, positions: Layout
       shapes.set(node.id, shape);
       ports[node.id].forEach((port, index) => {
         const pin = new avoid.ShapeConnectionPin(shape, index + 1, port.x / NODE_WIDTH, port.y / NODE_HEIGHT,
-          true, 0, port.side === 'EAST' ? 8 : port.side === 'WEST' ? 4 : 2);
+          true, 0, port.side === 'EAST' ? 8 : port.side === 'NORTH' ? 1 : 2);
         pin.setExclusive(true);
       });
       dispose(rect); dispose(top); dispose(bottom);
