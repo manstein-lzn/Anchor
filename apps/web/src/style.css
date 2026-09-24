@@ -229,7 +229,6 @@ input[type=checkbox] { accent-color: var(--accent); }
 .panel-toggles button:hover:not(:disabled) { background: #365346; color: #fff; }
 .connection-error { padding: 9px 24px; background: #fff0ee; color: var(--red); overflow-wrap: anywhere; }
 .workspace { --sidebar-size: min(var(--sidebar-width, 224px), 28vw); --inspector-size: min(var(--inspector-width, 304px), max(220px, calc(100% - var(--sidebar-reserved, var(--sidebar-size)) - 280px))); position: relative; flex: 1; display: grid; min-height: 0; grid-template-columns: var(--sidebar-size) minmax(0, 1fr) var(--inspector-size); }
-.workspace.running { --sidebar-size: min(var(--sidebar-width, 250px), 28vw); --inspector-size: min(var(--inspector-width, 370px), max(220px, calc(100% - var(--sidebar-reserved, var(--sidebar-size)) - 280px))); }
 .library, .runs, .inspector { min-width: 0; padding: 22px 16px; }
 .library, .runs { border-right: 1px solid var(--line); background: #f9fbfa; }
 .hide-library .workspace { grid-template-columns: minmax(0, 1fr) var(--inspector-size); }
@@ -313,10 +312,6 @@ input[type=checkbox] { accent-color: var(--accent); }
 .canvas-caption { margin-left: auto; color: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums; }
 .canvas, .execution-canvas { min-width: 0; background: #f2f6f3; }
 .canvas .react-flow__pane, .execution-canvas .react-flow__pane { background: radial-gradient(circle at 50% 20%, #ffffff 0, #f2f6f3 72%); }
-.react-flow__edge.feedback-edge .react-flow__edge-path { stroke: #98704a; stroke-dasharray: 8 5; }
-.react-flow__edge.main-edge .react-flow__edge-path { stroke: #639b7e; }
-.legend-line { display: inline-block; width: 22px; height: 0; border-top: 2px solid #639b7e; margin-right: 3px; vertical-align: middle; }
-.legend-line.feedback { border-top-color: #98704a; border-top-style: dashed; margin-left: 8px; }
 .empty-state { align-self: center; margin: auto; padding: 46px 18px; display: flex; flex-direction: column; align-items: center; text-align: center; color: var(--muted); max-width: 350px; }
 .empty-state > svg { box-sizing: content-box; padding: 15px; background: #eaf1ed; color: #709582; border-radius: 16px; margin-bottom: 17px; }
 .empty-state strong { color: #4b6255; font-weight: 500; font-size: 14px; }
@@ -372,6 +367,35 @@ input[type=checkbox] { accent-color: var(--accent); }
 .react-flow__controls-button { border-radius: 0; width: 30px; height: 30px; min-height: 30px; color: var(--ink); }
 .react-flow__edge-path { stroke: #adbfb3; stroke-width: 1.6; }
 .react-flow__edge.selected .react-flow__edge-path { stroke: var(--accent); stroke-width: 2.5; }
+.workflow-canvas { position: relative; }
+.workflow-node.graph-node, .workflow-node.execution-node {
+  box-sizing: border-box; width: 200px; height: 108px; padding: 12px 14px;
+  border: 1px solid #c9d9d0; border-top: 3px solid #62a58b; border-radius: 8px;
+  background: #fff; opacity: 1; box-shadow: 0 2px 8px #243e300a;
+}
+.workflow-node.kind-op { border-top-color: #b79256; background: #fffcf6; }
+.workflow-node.kind-subgraph { border-top-color: #8c8aba; background: #f8f7ff; }
+.workflow-node-heading { display: flex; align-items: center; gap: 6px; font-size: 10px; color: var(--muted); height: 18px; }
+.workflow-node strong { display: block; margin: 7px 0 8px; font-size: 14px; line-height: 18px; }
+.workflow-node-footer { display: flex; justify-content: space-between; gap: 4px; overflow: hidden; white-space: nowrap; font-size: 10px; color: var(--muted); border-top: 1px solid #edf1ee; padding-top: 6px; }
+.workflow-node.state-running { border-color: #c8963c; background: #fffaf0; }
+.workflow-node.state-completed { border-color: #167565; }
+.workflow-node.state-failed { border-color: var(--red); }
+.workflow-node.selected { border-color: #205bc1; box-shadow: 0 0 0 2px #205bc122; }
+.workflow-node .route-port { width: 5px; height: 5px; min-width: 5px; min-height: 5px; border: 0; background: #93ad9f; pointer-events: none; }
+.workflow-node .connect-port { opacity: 0; width: 10px; height: 10px; }
+.workflow-node:hover .connect-port, .workflow-node.selected .connect-port { opacity: 1; }
+.workflow-edge-label { position: absolute; padding: 3px 7px; border: 1px solid #e2e9e4; border-radius: 4px; background: #fffffff5; font-size: 12px; color: #5c6b62; white-space: nowrap; }
+.workflow-legend { display: flex; flex-wrap: wrap; gap: 12px; max-width: calc(100% - 120px); font-size: 10px; color: #708177; pointer-events: none; }
+.workflow-legend span { display: flex; align-items: center; gap: 5px; }
+.workflow-legend i { width: 18px; border-top: 2px solid #568571; }
+.workflow-legend i.feedback { border-color: #98704a; }
+.workflow-legend i.walked { border-color: #167565; border-top-width: 4px; }
+.workflow-legend i.unwalked { border-color: #b8cbc0; border-top-style: dashed; }
+.arrange-button { font: inherit; font-size: 12px; border: 1px solid var(--line); padding: 6px 10px; border-radius: 6px; background: #fff; color: var(--ink); cursor: pointer; }
+.arrange-button:disabled { opacity: .5; cursor: default; }
+.layout-message { position: absolute; left: 20px; bottom: 20px; padding: 12px; background: white; border: 1px solid var(--line); border-radius: 6px; }
+.layout-message[role=alert] { color: var(--red); }
 .run-row {
   display: grid; align-items: center;
   width: 100%; text-align: left;

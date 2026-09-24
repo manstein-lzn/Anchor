@@ -1,46 +1,18 @@
-import {
-  BaseEdge, getBezierPath, getSmoothStepPath, Position, type EdgeProps,
-} from '@xyflow/react';
+import { BaseEdge, EdgeLabelRenderer, type EdgeProps } from '@xyflow/react';
+import type { Route } from './graph';
 
-// A backwards edge (target left of its source) is routed below the graph in two
-// orthogonal segments so it never sweeps across unrelated nodes. Forward edges
-// stay as bezier curves whose curvature is varied per fan-out by `project()`.
-const HANDLE_OFFSET = 20;
-const BACK_EDGE_DROP = 120;
-const BACK_EDGE_OFFSET = 34;
-const BORDER_RADIUS = 16;
-
-export function RoutedEdge({
-  id, sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition,
-  markerEnd, style, pathOptions,
-}: EdgeProps) {
-  const backward = sourceX - HANDLE_OFFSET > targetX;
-  const lane = Number((pathOptions as { lane?: number } | undefined)?.lane ?? 0);
-  const interaction = 26;
-
-  if (backward) {
-    const bendX = (sourceX + targetX) / 2;
-    const bendY = Math.max(sourceY, targetY) + BACK_EDGE_DROP + lane * 46;
-    const [first] = getSmoothStepPath({
-      sourceX, sourceY, sourcePosition, targetX: bendX, targetY: bendY,
-      targetPosition: Position.Right, borderRadius: BORDER_RADIUS, offset: BACK_EDGE_OFFSET,
-    });
-    const [second] = getSmoothStepPath({
-      sourceX: bendX, sourceY: bendY, sourcePosition: Position.Left,
-      targetX, targetY, targetPosition, borderRadius: BORDER_RADIUS, offset: BACK_EDGE_OFFSET,
-    });
-    return <g data-testid={`edge-${id}`}>
-      <BaseEdge id={id} path={first} style={style} interactionWidth={interaction} />
-      <BaseEdge id={`${id}-return`} path={second} style={style} markerEnd={markerEnd}
-        interactionWidth={interaction} />
-    </g>;
-  }
-
-  const curvature = (pathOptions as { curvature?: number } | undefined)?.curvature ?? 0.3;
-  const [path] = getBezierPath({
-    sourceX, sourceY, sourcePosition, targetX, targetY, targetPosition, curvature,
-  });
-  return <g data-testid={`edge-${id}`}>
-    <BaseEdge id={id} path={path} style={style} markerEnd={markerEnd} interactionWidth={interaction} />
+// Geometry is owned by the whole-graph router; never re-route one edge in isolation here.
+export function RoutedEdge({ id, data, markerEnd, style, selected }: EdgeProps) {
+  const route = data as Route | undefined;
+  if (!route?.points.length) return null;
+  const path = route.points.map((p, i) => `${i ? 'L' : 'M'} ${p.x} ${p.y}`).join(' ');
+  return <g data-testid={`edge-${id}`} data-feedback={route.feedback}>
+    <BaseEdge id={id} path={path} markerEnd={markerEnd} interactionWidth={16}
+      style={{ ...style, ...(selected ? { stroke: '#205bc1', strokeWidth: 3 } : {}), strokeLinejoin: 'round' }} />
+    {route.label && route.labelPosition && <EdgeLabelRenderer>
+      <span className="workflow-edge-label nodrag nopan" style={{
+        transform: `translate(-50%, -50%) translate(${route.labelPosition.x}px, ${route.labelPosition.y}px)`,
+      }}>{route.label}</span>
+    </EdgeLabelRenderer>}
   </g>;
 }

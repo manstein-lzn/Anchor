@@ -7,7 +7,7 @@
  */
 
 import type { Edge, Node, XYPosition } from '@xyflow/react';
-import { isFeedbackEdge, layeredLayout, type Definition } from './graph';
+import type { Definition } from './graph';
 import { label } from './execution';
 
 /** An agent: a model loop. `reads`/`writes` are the files it expects and the files it promises,
@@ -46,7 +46,7 @@ export type OurGraph = {
   edges: { from: string; to: string }[];
   /** Where nodes were dragged to. Beside the definition, not part of it: a node's position is not
    *  something the graph means, and a run must not be affected by it. */
-  layout?: { positions?: Record<string, { x: number; y: number }> };
+  layout?: { positions?: Record<string, { x: number; y: number }>; edgeLabels?: Record<string, string> };
 };
 
 /** A node runs an agent or a graph, never both and never neither.
@@ -144,11 +144,11 @@ export type OurRunDetail = {
 export type FlowNode = Node<{
   name: string; kind: string; state: string; detail: string;
   /** Which of the two it is, so a component can choose an icon without parsing the label. */
-  nodeKind: 'agent' | 'op';
+  nodeKind: 'agent' | 'op' | 'subgraph';
   attempt?: number; statusLabel?: string;
 }, 'execution'>;
 
-/** Our graph.json in the shape `layeredLayout` expects. */
+/** Only display metadata and topology go to the layout engine. */
 export function asDefinition(graph: OurGraph, name: string): Definition {
   return {
     graph_id: name,
@@ -160,7 +160,8 @@ export function asDefinition(graph: OurGraph, name: string): Definition {
       // printing the node's own id twice.
       name: node.graph ? `${node.id} · ${node.graph}` : node.id,
     })),
-    edges: graph.edges.map(edge => ({ source: edge.from, target: edge.to })),
+    edges: graph.edges.map(edge => ({ source: edge.from, target: edge.to,
+      label: graph.layout?.edgeLabels?.[`${edge.from}|${edge.to}`] })),
     entry_node_id: graph.entry,
   };
 }
@@ -180,7 +181,7 @@ function nodeState(nodeId: string, graph: OurGraph, state: OurRunState | null): 
     : skipped ? 'skipped'
     : 'pending';
 
-  const statusLabel = result ? label(result.exit_status || status) : undefined;
+  const statusLabel = running ? label('running') : result ? label(result.exit_status || status) : undefined;
   const detail = result
     ? (result.submission || '').split('\n').find(line => line.trim()) ?? ''
     : skipped ? '没有被选中' : '尚未执行';
@@ -197,7 +198,7 @@ function nodeState(nodeId: string, graph: OurGraph, state: OurRunState | null): 
       kind: nodeKindLabel(graph, nodeId),
       state: status,
       detail,
-      nodeKind: graph.nodes.find(item => item.id === nodeId)?.op ? 'op' : 'agent',
+      nodeKind: kindOf(graph.nodes.find(item => item.id === nodeId)!),
       // The canvas renders `attempt + 1` as "第 N 次执行", so zero means the first pass.
       attempt: passes ? passes - 1 : undefined,
       statusLabel,
@@ -216,13 +217,7 @@ function nodeKindLabel(graph: OurGraph, nodeId: string): string {
 export function toFlowNodes(graph: OurGraph, name: string,
                             state: OurRunState | null): FlowNode[] {
   const spec = asDefinition(graph, name);
-  // Stored positions win, so a run's picture is laid out the way its author arranged it rather than
-  // the way dagre would. Falling back to dagre covers a graph nobody has dragged yet.
-  const auto = layeredLayout(spec);
-  return spec.nodes.map(node => ({
-    ...nodeState(node.id, graph, state),
-    position: graph.layout?.positions?.[node.id] ?? auto.get(node.id) ?? { x: 0, y: 0 },
-  }));
+  return spec.nodes.map(node => nodeState(node.id, graph, state));
 }
 
 /** An edge carries what the run decided about it, which is the whole point of drawing one. */
@@ -235,7 +230,6 @@ export function toFlowEdges(graph: OurGraph, state: OurRunState | null): Edge[] 
   for (let index = 1; index < (state?.executed.length ?? 0); index += 1) {
     traversed.add(`${state!.executed[index - 1]}|${state!.executed[index]}`);
   }
-  const positions = layeredLayout(asDefinition(graph, 'run'));
   return graph.edges.map((edge, index) => {
     const decision = state?.decided?.[`${edge.from}|${edge.to}`];
     const selected = decision?.[0];
@@ -244,11 +238,8 @@ export function toFlowEdges(graph: OurGraph, state: OurRunState | null): Edge[] 
       // Ops can be scheduled between a source and its routed target, so the persisted decision
       // is the fallback evidence for a selected edge when adjacency is not visible in the list.
       || selected === true && decision?.[1] !== undefined;
-    const feedback = isFeedbackEdge(positions.get(edge.from) ?? { x: 0, y: 0 }, positions.get(edge.to) ?? { x: 0, y: 0 });
-    const lane = feedback ? graph.edges.slice(0, index).filter(previous =>
-      isFeedbackEdge(positions.get(previous.from) ?? { x: 0, y: 0 }, positions.get(previous.to) ?? { x: 0, y: 0 })).length : 0;
     const style = walked ? { stroke: '#167565', strokeWidth: 3.5 }
-      : !decided ? { stroke: feedback ? '#c9a986' : '#b8cbc0', strokeWidth: 1.8, strokeDasharray: '6 5' }
+      : !decided ? { stroke: '#b8cbc0', strokeWidth: 1.8, strokeDasharray: '6 5' }
       : selected ? { stroke: '#167565', strokeWidth: 3.5 }
       : { stroke: '#d1d8d4', strokeWidth: 1.5, strokeDasharray: '5 6' };
     return {
@@ -256,8 +247,6 @@ export function toFlowEdges(graph: OurGraph, state: OurRunState | null): Edge[] 
       source: edge.from,
       target: edge.to,
       type: 'routed',
-      pathOptions: { lane },
-      className: feedback ? 'feedback-edge' : 'main-edge',
       style,
       animated: Boolean(selected) && state?.cursor?.node === edge.to,
     } as Edge;

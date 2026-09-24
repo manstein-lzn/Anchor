@@ -50,7 +50,7 @@ export function Workspace({ running = false, children }: { running?: boolean; ch
       aria-label={side === 'left' ? '调整侧边栏宽度' : '调整详情面板宽度'}
       aria-orientation="vertical" aria-valuemin={side === 'left' ? 160 : 220}
       aria-valuemax={side === 'left' ? 480 : undefined}
-      aria-valuenow={widths[side] ?? (side === 'left' ? (running ? 250 : 224) : (running ? 370 : 304))}
+      aria-valuenow={widths[side] ?? (side === 'left' ? 224 : 304)}
       title="拖动调整宽度，双击恢复默认；方向键微调"
       onDoubleClick={() => setWidths(previous => ({ ...previous, [side]: undefined }))}
       onPointerDown={event => {

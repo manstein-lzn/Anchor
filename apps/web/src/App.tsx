@@ -6,12 +6,11 @@ import {
   Play, Search, SlidersHorizontal, FolderOpen, PanelLeftClose, PanelRightClose,
 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ExecutionCanvas } from './ExecutionCanvas';
-import { GraphCanvas } from './GraphCanvas';
+import { WorkflowCanvas } from './WorkflowCanvas';
 import { GraphActions } from './GraphActions';
 import { label } from './execution';
 import {
-  toFlowEdges, toFlowNodes, type OurAgent, type OurGraph, type OurRun, type OurRunDetail,
+  type OurAgent, type OurGraph, type OurRun, type OurRunDetail,
 } from './model';
 import { RunInspector } from './RunInspector';
 import { Workspace } from './Workspace';
@@ -264,13 +263,6 @@ export function App() {
     setPick(null);
   };
 
-  const nodes = useMemo(
-    () => (doc ? toFlowNodes(doc, name, view === 'runs' ? detail?.state ?? null : null) : []),
-    [doc, name, detail, view]);
-  const edges = useMemo(
-    () => (doc ? toFlowEdges(doc, view === 'runs' ? detail?.state ?? null : null) : []),
-    [doc, detail, view]);
-
   const entry = doc?.entry ?? '';
   const routing = useMemo(() => {
     if (!doc) return new Set<string>();
@@ -358,9 +350,9 @@ export function App() {
                   </button> : null}
               </> : <span className="hint">选一次运行，或触发一次。</span>}
             </div>
-            <ExecutionCanvas instanceKey={`run-${name}-${run}`} nodes={nodes} edges={edges}
-                             onSelectNode={id => { setNode(id); setInspectorOpen(true); }} />
-            <div className="canvas-bottom"><span className="legend"><i className="legend-line main" />主流程<i className="legend-line feedback" />反馈回路<i className="dot running" />执行中<i className="dot finished" />已完成<i className="dot failed" />失败</span><span className="canvas-caption">点击节点查看对话与产物</span></div>
+            {doc && <WorkflowCanvas graph={doc} name={name} mode="run" state={detail?.state}
+              onPick={value => { if (value?.kind === 'node') { setNode(value.id); setInspectorOpen(true); } }} />}
+            <div className="canvas-bottom"><span className="legend"><i className="dot running" />执行中<i className="dot finished" />已完成<i className="dot failed" />失败</span><span className="canvas-caption">点击节点查看对话与产物</span></div>
           </main>
           <RunInspector key={`${run}/${node}`} run={run} node={node} detail={detail} />
         </Workspace>
@@ -450,11 +442,9 @@ export function App() {
 
             <div className="canvas">
               {doc
-                ? <GraphCanvas graph={doc} name={name} editable={editable}
+                ? <WorkflowCanvas graph={doc} name={name} mode="edit" editable={editable}
                                onPick={value => { setPick(value); if (value) setInspectorOpen(true); }}
-                               onMove={(id, position) => patch({ ...doc,
-                                 layout: { ...doc.layout,
-                                   positions: { ...doc.layout?.positions, [id]: position } } })}
+                               onPositions={positions => patch({ ...doc, layout: { ...doc.layout, positions } })}
                                onConnect={(from, to) => {
                                  if (doc.edges.some(edge => edge.from === from && edge.to === to)) {
                                    setNotice({ kind: 'bad', text: '这条连线已经有了。' }); return;
@@ -579,6 +569,12 @@ export function App() {
                           onChange={event => patchEdge({ to: event.target.value })}>
                     {doc?.nodes.map(item => <option key={item.id} value={item.id}>{item.id}</option>)}
                   </select>
+                </label>
+                <label>分支说明
+                  <input value={doc?.layout?.edgeLabels?.[`${selectedEdge.from}|${selectedEdge.to}`] ?? ''}
+                    placeholder="例如：需要补证（仅用于显示）" maxLength={80}
+                    onChange={event => doc && patch({ ...doc, layout: { ...doc.layout,
+                      edgeLabels: { ...doc.layout?.edgeLabels, [`${selectedEdge.from}|${selectedEdge.to}`]: event.target.value } } })} />
                 </label>
                 <button className="full-button" onClick={() => setJson('edge')}>连线 JSON</button>
               </>}

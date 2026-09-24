@@ -1,5 +1,16 @@
 {
   "entry": "frame",
+  "layout": {
+    "edgeLabels": {
+      "feedback|frame": "框架有误",
+      "feedback|investigate": "需要补证",
+      "feedback|synthesize": "可以写作",
+      "review-gate|synthesize": "修订论文",
+      "review-gate|investigate": "证据缺口",
+      "review-gate|frame": "重构问题",
+      "review-gate|report": "通过"
+    }
+  },
   "objective": "2024 年以后，检索增强生成（RAG）的主要进展究竟解决了哪些瓶颈，又留下了哪些关键问题？",
   "agents": {
     "framer": {
