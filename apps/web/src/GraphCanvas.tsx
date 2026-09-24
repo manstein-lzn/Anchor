@@ -18,7 +18,7 @@ import '@xyflow/react/dist/style.css';
 import { useEffect, useMemo, useRef } from 'react';
 import { Bot, Terminal, Layers } from 'lucide-react';
 import { RoutedEdge } from './RoutedEdge';
-import { layeredLayout } from './graph';
+import { isFeedbackEdge, layeredLayout } from './graph';
 import { kindOf, type OurGraph } from './model';
 
 export type AnchorNode = Node<{ label: string; agent: string; entry: boolean;
@@ -73,9 +73,18 @@ function Inner({ graph, name, editable, onMove, onConnect, onPick }:
             kind: kindOf(item) },
   })), [graph, laid]);
 
-  const edges: Edge[] = useMemo(() => graph.edges.map((item, index) => ({
-    id: `e${index}`, source: item.from, target: item.to, type: 'routed',
-  })), [graph]);
+  const edges: Edge[] = useMemo(() => graph.edges.map((item, index) => {
+    const source = nodes.find(node => node.id === item.from)?.position ?? { x: 0, y: 0 };
+    const target = nodes.find(node => node.id === item.to)?.position ?? { x: 0, y: 0 };
+    const feedback = isFeedbackEdge(source, target);
+    const lane = feedback ? graph.edges.slice(0, index).filter(previous => {
+      const previousSource = nodes.find(node => node.id === previous.from)?.position ?? { x: 0, y: 0 };
+      const previousTarget = nodes.find(node => node.id === previous.to)?.position ?? { x: 0, y: 0 };
+      return isFeedbackEdge(previousSource, previousTarget);
+    }).length : 0;
+    return { id: `e${index}`, source: item.from, target: item.to, type: 'routed',
+      pathOptions: { lane }, style: feedback ? { stroke: '#8b6f47', strokeDasharray: '7 4' } : undefined };
+  }), [graph, nodes]);
 
   const [flowNodes, setFlowNodes, onNodesChange] = useNodesState(nodes);
   useEffect(() => {

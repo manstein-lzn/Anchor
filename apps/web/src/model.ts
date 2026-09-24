@@ -7,7 +7,7 @@
  */
 
 import type { Edge, Node, XYPosition } from '@xyflow/react';
-import { layeredLayout, type Definition } from './graph';
+import { isFeedbackEdge, layeredLayout, type Definition } from './graph';
 import { label } from './execution';
 
 /** An agent: a model loop. `reads`/`writes` are the files it expects and the files it promises,
@@ -235,6 +235,7 @@ export function toFlowEdges(graph: OurGraph, state: OurRunState | null): Edge[] 
   for (let index = 1; index < (state?.executed.length ?? 0); index += 1) {
     traversed.add(`${state!.executed[index - 1]}|${state!.executed[index]}`);
   }
+  const positions = layeredLayout(asDefinition(graph, 'run'));
   return graph.edges.map((edge, index) => {
     const decision = state?.decided?.[`${edge.from}|${edge.to}`];
     const selected = decision?.[0];
@@ -243,6 +244,9 @@ export function toFlowEdges(graph: OurGraph, state: OurRunState | null): Edge[] 
       // Ops can be scheduled between a source and its routed target, so the persisted decision
       // is the fallback evidence for a selected edge when adjacency is not visible in the list.
       || selected === true && decision?.[1] !== undefined;
+    const feedback = isFeedbackEdge(positions.get(edge.from) ?? { x: 0, y: 0 }, positions.get(edge.to) ?? { x: 0, y: 0 });
+    const lane = feedback ? graph.edges.slice(0, index).filter(previous =>
+      isFeedbackEdge(positions.get(previous.from) ?? { x: 0, y: 0 }, positions.get(previous.to) ?? { x: 0, y: 0 })).length : 0;
     const style = walked ? { stroke: '#2f7d5f', strokeWidth: 2.5 }
       : !decided ? { stroke: '#c8d4d0', strokeDasharray: '4 4' }
       : selected ? { stroke: '#2f7d5f', strokeWidth: 2.5 }
@@ -252,6 +256,7 @@ export function toFlowEdges(graph: OurGraph, state: OurRunState | null): Edge[] 
       source: edge.from,
       target: edge.to,
       type: 'routed',
+      pathOptions: { lane },
       style,
       animated: Boolean(selected) && state?.cursor?.node === edge.to,
     } as Edge;

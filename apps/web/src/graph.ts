@@ -10,6 +10,10 @@ export interface Definition {
   entry_node_id?: string;
 }
 
+export function isFeedbackEdge(source: XYPosition, target: XYPosition): boolean {
+  return source.x > target.x + 20;
+}
+
 const NODE_WIDTH = 220;
 const NODE_HEIGHT = 106;
 const layoutCache = new Map<string, Map<string, XYPosition>>();
@@ -27,13 +31,14 @@ export function layeredLayout(definition: Definition, width = NODE_WIDTH, height
   const cached = layoutCache.get(key);
   if (cached) return cached;
   const graph = new dagre.graphlib.Graph().setDefaultEdgeLabel(() => ({}));
-  graph.setGraph({ rankdir: 'LR', nodesep: 56, ranksep: 60, marginx: 40, marginy: 40 });
+  graph.setGraph({ rankdir: 'LR', nodesep: 72, ranksep: 90, marginx: 48, marginy: 48 });
   for (const node of definition.nodes) {
     graph.setNode(node.id, { width, height });
   }
-  for (const edge of definition.edges) {
+  for (const [index, edge] of definition.edges.entries()) {
     if (graph.hasNode(edge.source) && graph.hasNode(edge.target)) {
-      graph.setEdge(edge.source, edge.target);
+      // Dagre's multigraph keeps parallel and feedback constraints instead of collapsing them.
+      graph.setEdge(edge.source, edge.target, {}, `${edge.source}>${edge.target}:${index}`);
     }
   }
   dagre.layout(graph);
