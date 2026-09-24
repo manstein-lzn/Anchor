@@ -30,7 +30,7 @@ export function layeredLayout(definition: Definition, width = NODE_WIDTH, height
   });
   const cached = layoutCache.get(key);
   if (cached) return cached;
-  const graph = new dagre.graphlib.Graph().setDefaultEdgeLabel(() => ({}));
+  const graph = new dagre.graphlib.Graph({ multigraph: true }).setDefaultEdgeLabel(() => ({}));
   graph.setGraph({ rankdir: 'LR', nodesep: 72, ranksep: 90, marginx: 48, marginy: 48 });
   for (const node of definition.nodes) {
     graph.setNode(node.id, { width, height });
