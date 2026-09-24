@@ -14,6 +14,14 @@ export function isFeedbackEdge(source: XYPosition, target: XYPosition): boolean 
   return source.x > target.x + 20;
 }
 
+export function feedbackLane(definition: Definition, index: number): number {
+  const positions = layeredLayout(definition);
+  return definition.edges.slice(0, index).filter(edge => isFeedbackEdge(
+    positions.get(edge.source) ?? { x: 0, y: 0 },
+    positions.get(edge.target) ?? { x: 0, y: 0 },
+  )).length;
+}
+
 const NODE_WIDTH = 220;
 const NODE_HEIGHT = 106;
 const layoutCache = new Map<string, Map<string, XYPosition>>();

@@ -247,16 +247,17 @@ export function toFlowEdges(graph: OurGraph, state: OurRunState | null): Edge[] 
     const feedback = isFeedbackEdge(positions.get(edge.from) ?? { x: 0, y: 0 }, positions.get(edge.to) ?? { x: 0, y: 0 });
     const lane = feedback ? graph.edges.slice(0, index).filter(previous =>
       isFeedbackEdge(positions.get(previous.from) ?? { x: 0, y: 0 }, positions.get(previous.to) ?? { x: 0, y: 0 })).length : 0;
-    const style = walked ? { stroke: '#2f7d5f', strokeWidth: 2.5 }
-      : !decided ? { stroke: '#c8d4d0', strokeDasharray: '4 4' }
-      : selected ? { stroke: '#2f7d5f', strokeWidth: 2.5 }
-      : { stroke: '#d6d6d6', strokeDasharray: '4 4' };
+    const style = walked ? { stroke: '#167565', strokeWidth: 3.5 }
+      : !decided ? { stroke: feedback ? '#c9a986' : '#b8cbc0', strokeWidth: 1.8, strokeDasharray: '6 5' }
+      : selected ? { stroke: '#167565', strokeWidth: 3.5 }
+      : { stroke: '#d1d8d4', strokeWidth: 1.5, strokeDasharray: '5 6' };
     return {
       id: `e${index}-${edge.from}-${edge.to}`,
       source: edge.from,
       target: edge.to,
       type: 'routed',
       pathOptions: { lane },
+      className: feedback ? 'feedback-edge' : 'main-edge',
       style,
       animated: Boolean(selected) && state?.cursor?.node === edge.to,
     } as Edge;

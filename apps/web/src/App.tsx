@@ -360,7 +360,7 @@ export function App() {
             </div>
             <ExecutionCanvas instanceKey={`run-${name}-${run}`} nodes={nodes} edges={edges}
                              onSelectNode={id => { setNode(id); setInspectorOpen(true); }} />
-            <div className="canvas-bottom"><span className="legend"><i className="dot running" />执行中<i className="dot finished" />已完成<i className="dot failed" />失败</span><span className="canvas-caption">点击节点查看对话与产物</span></div>
+            <div className="canvas-bottom"><span className="legend"><i className="legend-line main" />主流程<i className="legend-line feedback" />反馈回路<i className="dot running" />执行中<i className="dot finished" />已完成<i className="dot failed" />失败</span><span className="canvas-caption">点击节点查看对话与产物</span></div>
           </main>
           <RunInspector key={`${run}/${node}`} run={run} node={node} detail={detail} />
         </Workspace>

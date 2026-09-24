@@ -83,7 +83,9 @@ function Inner({ graph, name, editable, onMove, onConnect, onPick }:
       return isFeedbackEdge(previousSource, previousTarget);
     }).length : 0;
     return { id: `e${index}`, source: item.from, target: item.to, type: 'routed',
-      pathOptions: { lane }, style: feedback ? { stroke: '#8b6f47', strokeDasharray: '7 4' } : undefined };
+      pathOptions: { lane }, className: feedback ? 'feedback-edge' : 'main-edge',
+      style: feedback ? { stroke: '#98704a', strokeWidth: 2, strokeDasharray: '8 5' }
+        : { stroke: '#639b7e', strokeWidth: 2 } };
   }), [graph, nodes]);
 
   const [flowNodes, setFlowNodes, onNodesChange] = useNodesState(nodes);

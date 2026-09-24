@@ -6,7 +6,7 @@ import {
 // orthogonal segments so it never sweeps across unrelated nodes. Forward edges
 // stay as bezier curves whose curvature is varied per fan-out by `project()`.
 const HANDLE_OFFSET = 20;
-const BACK_EDGE_DROP = 88;
+const BACK_EDGE_DROP = 120;
 const BACK_EDGE_OFFSET = 34;
 const BORDER_RADIUS = 16;
 
@@ -20,7 +20,7 @@ export function RoutedEdge({
 
   if (backward) {
     const bendX = (sourceX + targetX) / 2;
-    const bendY = Math.max(sourceY, targetY) + BACK_EDGE_DROP + lane * 34;
+    const bendY = Math.max(sourceY, targetY) + BACK_EDGE_DROP + lane * 46;
     const [first] = getSmoothStepPath({
       sourceX, sourceY, sourcePosition, targetX: bendX, targetY: bendY,
       targetPosition: Position.Right, borderRadius: BORDER_RADIUS, offset: BACK_EDGE_OFFSET,
