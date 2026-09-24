@@ -8,6 +8,7 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ExecutionCanvas } from './ExecutionCanvas';
 import { GraphCanvas } from './GraphCanvas';
+import { GraphActions } from './GraphActions';
 import { label } from './execution';
 import {
   toFlowEdges, toFlowNodes, type OurAgent, type OurGraph, type OurRun, type OurRunDetail,
@@ -47,6 +48,7 @@ export function App() {
   const [busy, setBusy] = useState(false);
   const nameRef = useRef(name); nameRef.current = name;
   const upload = useRef<HTMLInputElement>(null);
+  const newGraphButton = useRef<HTMLButtonElement>(null);
 
   const dirty = doc !== null && JSON.stringify(doc, null, 2) + '\n' !== savedDoc;
   const editable = doc !== null && !busy;
@@ -171,6 +173,25 @@ export function App() {
     await refresh();
     setNotice({ kind: 'ok', text: '运行记录及其文件已删除。' });
   });
+
+  const deleteGraph = async (target: string) => {
+    setBusy(true);
+    try {
+      await api(`/graphs/${encodeURIComponent(target)}`, 'DELETE');
+      setGraphs(items => items.filter(item => item.graph !== target));
+      setRuns(items => items.filter(item => item.graph !== target));
+      if (nameRef.current === target) {
+        const next = graphs.find(item => item.graph !== target)?.graph ?? '';
+        nameRef.current = next;
+        setName(next); setRun(runs.find(item => item.graph === next)?.run ?? '');
+        setDetail(null); setNode(''); setDoc(null); setSavedDoc('');
+        setPast([]); setFuture([]); setPick(null); setJson(null); setPalette(false);
+      }
+      setNotice({ kind: 'ok', text: `工作流“${target}”及其运行历史已删除。` });
+      await refresh();
+    } finally { setBusy(false); }
+    requestAnimationFrame(() => newGraphButton.current?.focus());
+  };
 
   const selectedNode = pick?.kind === 'node' ? doc?.nodes.find(item => item.id === pick.id) : undefined;
   const selectedAgent = pick?.kind === 'agent' && doc ? doc.agents?.[pick.id] : undefined;
@@ -348,17 +369,20 @@ export function App() {
           <aside className="library">
             <div className="section-heading"><h3><FolderOpen size={15} />工作流</h3><span className="count">{graphs.length}</span></div>
             <label className="search-field"><Search size={15} /><input aria-label="搜索工作流" placeholder="搜索工作流…" value={search} onChange={event => setSearch(event.target.value)} /></label>
-            <button className="new-graph" onClick={() => void create()} disabled={busy}>
+            <button ref={newGraphButton} className="new-graph" onClick={() => void create()} disabled={busy}>
               <Plus size={16} />新建图
             </button>
             <div className="library-list">
               {graphs.filter(item => item.graph.toLowerCase().includes(search.toLowerCase())).map(item => (
-                <button key={item.graph}
-                        className={`library-row ${item.graph === name ? 'chosen' : ''}`}
-                        onClick={() => selectGraph(item.graph)}>
-                  <GitBranch size={16} /><span className="library-name" title={item.graph}>{item.graph}</span>
-                  {item.running && <span className="pill running">执行中</span>}
-                </button>
+                <div key={item.graph} className={`library-item ${item.graph === name ? 'chosen' : ''}`}>
+                  <button className="library-row" aria-pressed={item.graph === name}
+                          onClick={() => selectGraph(item.graph)}>
+                    <GitBranch size={16} /><span className="library-name" title={item.graph}>{item.graph}</span>
+                    {item.running && <span className="pill running">执行中</span>}
+                  </button>
+                  <GraphActions graph={item.graph} running={Boolean(item.running)} busy={busy}
+                                runCount={runs.filter(run => run.graph === item.graph).length} onDelete={deleteGraph} />
+                </div>
               ))}
             </div>
             {!graphs.length && <EmptyState icon={GitBranch} title="从一个想法开始">新建工作流，连接你的第一个节点。</EmptyState>}

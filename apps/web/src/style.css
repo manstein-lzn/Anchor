@@ -268,8 +268,31 @@ input[type=checkbox] { accent-color: var(--accent); }
 .library-row svg { color: #85958c; }
 .library-row.chosen { background: #e7f1eb; border-color: #d4e5da; color: #226346; font-weight: 600; }
 .library-row.chosen svg { color: var(--accent); }
+.library-item { display: flex; align-items: center; min-width: 0; border: 1px solid transparent; border-radius: 7px; padding-right: 4px; }
+.library-item:hover { background: var(--paper); }
+.library-item.chosen { background: #e7f1eb; border-color: #d4e5da; color: #226346; }
+.library-item .library-row { flex: 1; min-width: 0; border: 0; background: transparent; }
+.library-item.chosen .library-row { font-weight: 600; }
+.library-item.chosen .library-row > svg { color: var(--accent); }
+.library-item .library-row > svg, .library-item .pill { flex-shrink: 0; }
+.graph-actions-trigger { display: grid; place-items: center; flex-shrink: 0; width: 30px; height: 30px; padding: 0; border: 0; border-radius: 5px; color: var(--muted); background: transparent; cursor: pointer; }
+.graph-actions-trigger:hover, .graph-actions-trigger[aria-expanded="true"] { background: #dce7e1; color: var(--ink); }
+.graph-actions-trigger:focus-visible, .library-item .library-row:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+@media (hover: hover) and (pointer: fine) {
+  .graph-actions-trigger { opacity: 0; }
+  .library-item:hover .graph-actions-trigger, .library-item:focus-within .graph-actions-trigger,
+  .graph-actions-trigger[aria-expanded="true"] { opacity: 1; }
+}
+@media (hover: none), (pointer: coarse) {
+  .graph-actions-trigger { width: 44px; height: 44px; }
+}
+.graph-actions-menu { position: fixed; inset: auto; margin: 0; width: 192px; padding: 5px; border: 1px solid var(--line); border-radius: 9px; background: #fff; color: var(--ink); box-shadow: 0 8px 24px #19392d24; }
+.graph-actions-menu button { display: flex; align-items: center; justify-content: flex-start; gap: 9px; width: 100%; padding: 10px; font: inherit; text-align: left; color: var(--red); border: 0; border-radius: 5px; background: transparent; cursor: pointer; }
+.graph-actions-menu button:hover, .graph-actions-menu button:focus-visible { background: #fbeeed; outline: none; }
+.graph-actions-menu button[aria-disabled="true"] { color: var(--muted); cursor: default; }
+.graph-actions-menu p { margin: 3px 10px 7px; font-size: 11px; line-height: 1.6; color: var(--muted); }
 .library-footer {
-  display: flex;
+  display: flex; flex-wrap: wrap;
   border-top: 1px solid var(--line); gap: 8px; margin-top: 25px; padding-top: 16px; }
 .document-header {
   display: flex; align-items: center;
@@ -436,6 +459,18 @@ details.call pre {
 .modal header {
   display: flex; align-items: center; justify-content: space-between; margin-bottom: 22px; }
 .modal header h2 { font-size: 17px; }
+.delete-graph-dialog { width: min(440px, 92vw); }
+.delete-graph-target { display: flex; align-items: center; gap: 10px; padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--paper); }
+.delete-graph-target svg { flex-shrink: 0; color: var(--muted); }
+.delete-graph-target strong { overflow-wrap: anywhere; }
+.delete-graph-description { margin: 20px 0 8px; line-height: 1.6; }
+.delete-graph-scope { margin: 0 0 20px; padding-left: 20px; line-height: 1.9; color: var(--muted); }
+.delete-graph-dialog .modal-actions { gap: 8px; }
+.delete-graph-dialog .modal-actions button { min-height: 36px; }
+.delete-graph-dialog .cancel-delete { background: #fff; border-color: var(--line); color: var(--ink); }
+.delete-graph-dialog .confirm-delete { background: var(--red); border-color: var(--red); color: #fff; }
+.delete-graph-dialog button:disabled { opacity: .5; cursor: default; }
+.delete-graph-dialog .modal-actions button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 .json-editor {
   flex: 1; resize: vertical;
   border: 1px solid var(--line); border-radius: 8px; color: inherit;
@@ -463,7 +498,7 @@ details.call pre {
   .hide-library .workspace { grid-template-rows: minmax(0, 1fr); }
   .library .section-heading, .runs .section-heading { margin-bottom: 10px; }
   .library-list { flex-direction: row; flex-wrap: wrap; }
-  .library-list .library-row { width: auto; max-width: 220px; }
+  .library-list .library-item { max-width: 100%; width: 220px; }
   .library .new-graph { margin-bottom: 10px; }
   .hide-inspector .workspace, .hide-inspector .workspace.running { grid-template-columns: minmax(0, 1fr); }
   .inspector { padding: 18px 12px; }

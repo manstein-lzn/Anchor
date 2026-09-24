@@ -169,6 +169,39 @@ def test_deleting_a_running_run_is_refused(tmp_path):
     assert run_dir.exists()
 
 
+def test_deleting_a_graph_removes_definition_and_all_runs(tmp_path):
+    scheduler, _ = _scheduler(tmp_path)
+    workspace = tmp_path / "workspaces" / "demo"
+
+    response, status = scheduler.delete_graph("demo")
+
+    assert status == 200 and json.loads(response) == {"graph": "demo", "deleted": True}
+    assert not workspace.exists()
+
+
+def test_deleting_a_running_graph_is_refused(tmp_path):
+    scheduler, _ = _scheduler(tmp_path)
+    workspace = tmp_path / "workspaces" / "demo"
+    scheduler.running["demo"] = "r1"
+
+    response, status = scheduler.delete_graph("demo")
+
+    assert status == 409 and "still running" in response
+    assert (workspace / "graph.json").exists()
+    assert (workspace / "runs" / "r1" / "run.json").exists()
+
+
+@pytest.mark.parametrize("name", ["", "..", "../demo", "missing"])
+def test_deleting_an_invalid_or_missing_graph_is_not_found(tmp_path, name):
+    scheduler, _ = _scheduler(tmp_path)
+    outside = tmp_path / "workspaces" / "demo" / "graph.json"
+
+    response, status = scheduler.delete_graph(name)
+
+    assert status == 404 and "no such graph" in response
+    assert outside.exists()
+
+
 def test_pydantic_trace_is_readable_as_calls_and_results(tmp_path):
     scheduler, _ = _scheduler(tmp_path)
     trace = tmp_path / "workspaces" / "demo" / "runs" / "r1" / "notes.trace.jsonl"

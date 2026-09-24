@@ -6,13 +6,13 @@ export function ToolButton({ icon: Icon, label, ...rest }:
   return <button type="button" aria-label={label} title={label} {...rest}><Icon size={16} /></button>;
 }
 
-export function Modal({ title, close, children }:
-  { title: string; close: () => void; children: ReactNode }) {
+export function Modal({ title, close, children, className = '' }:
+  { title: string; close: () => void; children: ReactNode; className?: string }) {
   const ref = useRef<HTMLDialogElement>(null);
   const titleId = useId();
   useEffect(() => { ref.current?.showModal(); }, []);
-  return <dialog ref={ref} className="modal" aria-labelledby={titleId}
-    onCancel={close} onClick={event => { if (event.target === event.currentTarget) close(); }}>
+  return <dialog ref={ref} className={`modal ${className}`} aria-labelledby={titleId}
+    onCancel={event => { event.preventDefault(); close(); }} onClick={event => { if (event.target === event.currentTarget) close(); }}>
     <div className="modal-content">
       <header><h2 id={titleId}>{title}</h2><ToolButton icon={X} label="关闭" onClick={close} /></header>
       {children}

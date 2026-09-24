@@ -132,6 +132,18 @@ class Scheduler:
             shutil.rmtree(run_dir)
         return json.dumps({"run": run_id, "deleted": True}), 200
 
+    def delete_graph(self, name: str) -> tuple[str, int]:
+        """Remove a graph workspace, including its runs, unless it is still running."""
+        with self.lock:
+            if self.running.get(name):
+                return json.dumps({"error": "that graph is still running",
+                                   "running": self.running[name]}), 409
+            workspace = self.workspace(name)
+            if workspace is None:
+                return json.dumps({"error": f"no such graph: {name}"}), 404
+            shutil.rmtree(workspace)
+        return json.dumps({"graph": name, "deleted": True}), 200
+
     def files(self, run_id: str, node: str) -> tuple[str, int]:
         """What a node left in its workspace. Returns (body, status)."""
         run_dir = self.run_dir(run_id)
@@ -589,9 +601,10 @@ class Handler(BaseHTTPRequestHandler):
     def do_DELETE(self) -> None:
         parts = [part for part in PurePosixPath(unquote(urlparse(self.path).path)).parts
                  if part != "/"]
-        if len(parts) != 2 or parts[0] != "runs":
+        if len(parts) != 2 or parts[0] not in ("runs", "graphs"):
             return self._send(json.dumps({"error": "not found"}), 404)
-        response, status = self.scheduler.delete_run(parts[1])
+        response, status = (self.scheduler.delete_run(parts[1]) if parts[0] == "runs"
+                            else self.scheduler.delete_graph(parts[1]))
         self._send(response, status)
 
 

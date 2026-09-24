@@ -1,6 +1,96 @@
 import { test, expect } from '@playwright/test';
 import { readFileSync } from 'node:fs';
 
+test('manage individual workflows without disturbing the editor', async ({ page }) => {
+  const graph = JSON.parse(readFileSync('../../examples/graphs/academic-gated.json', 'utf8'));
+  let graphs = [
+    { graph: 'academic-survey', running: null as string | null },
+    { graph: 'research-review', running: null as string | null },
+    { graph: 'running-research', running: 'run-active' as string | null },
+  ];
+  const deleted: string[] = [];
+  let refuseDelete = true;
+  await page.route('**/graphs', route => route.fulfill({ json: { graphs } }));
+  await page.route('**/runs', route => route.fulfill({ json: { runs: [] } }));
+  await page.route('**/graphs/*', route => {
+    if (route.request().method() !== 'DELETE') return route.fulfill({ json: { definition: graph } });
+    if (refuseDelete) return route.fulfill({ status: 409, json: { error: '工作流正在运行' } });
+    const name = decodeURIComponent(new URL(route.request().url()).pathname.split('/').at(-1)!);
+    deleted.push(name);
+    graphs = graphs.filter(item => item.graph !== name);
+    return route.fulfill({ json: { graph: name, deleted: true } });
+  });
+  await page.goto('/');
+  await expect(page.getByLabel('目标', { exact: true })).toHaveValue(graph.objective);
+  await page.getByLabel('目标', { exact: true }).fill('尚未保存的研究目标');
+  const manage = page.getByRole('button', { name: '管理工作流 research-review', exact: true });
+  await manage.focus();
+  await page.keyboard.press('Enter');
+  const menu = page.getByRole('menu');
+  await expect(menu).toBeVisible();
+  await expect(page.getByLabel('当前工作流')).toHaveValue('academic-survey');
+  await page.screenshot({ path: 'test-results/workflow-menu-desktop.png' });
+  await page.keyboard.press('Escape');
+  await expect(menu).not.toBeVisible();
+  await expect(manage).toBeFocused();
+  await manage.click();
+  await page.getByRole('heading', { name: '工作流设置', exact: true }).click();
+  await expect(menu).not.toBeVisible();
+  await manage.click();
+  await page.keyboard.press('ArrowDown');
+  await expect(page.getByRole('menuitem', { name: '删除工作流' })).toBeFocused();
+  await page.keyboard.press('Enter');
+  const dialog = page.getByRole('dialog', { name: '删除工作流？' });
+  await expect(dialog.getByText('research-review', { exact: true })).toBeVisible();
+  await expect(dialog.getByText('所有运行的工作区文件、产物和 Git 历史')).toBeVisible();
+  await expect(dialog.getByRole('button', { name: '取消' })).toBeFocused();
+  await page.screenshot({ path: 'test-results/workflow-delete-desktop.png' });
+  await page.keyboard.press('Escape');
+  await expect(dialog).not.toBeVisible();
+  await expect(manage).toBeFocused();
+  expect(deleted).toEqual([]);
+  await manage.click();
+  await page.getByRole('menuitem', { name: '删除工作流' }).click();
+  await dialog.getByRole('button', { name: '永久删除' }).click();
+  await expect(dialog.getByRole('alert')).toContainText('工作流正在运行');
+  await expect(page.getByLabel('目标', { exact: true })).toHaveValue('尚未保存的研究目标');
+  refuseDelete = false;
+  await dialog.getByRole('button', { name: '永久删除' }).click();
+  await expect(dialog).not.toBeVisible();
+  await expect(manage).toHaveCount(0);
+  expect(deleted).toEqual(['research-review']);
+  await expect(page.getByLabel('当前工作流')).toHaveValue('academic-survey');
+  await expect(page.getByLabel('目标', { exact: true })).toHaveValue('尚未保存的研究目标');
+
+  await page.getByRole('button', { name: '管理工作流 running-research', exact: true }).click();
+  await expect(page.getByRole('menuitem', { name: '删除工作流' })).toBeDisabled();
+  await expect(menu).toContainText('请先停止运行');
+  await page.keyboard.press('Escape');
+
+  // Touch-sized layout: actions stay visible and the popover escapes the scrolling sidebar.
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await page.getByRole('button', { name: '管理工作流 academic-survey', exact: true }).click();
+  await expect(menu).toBeInViewport();
+  await page.screenshot({ path: 'test-results/workflow-menu-mobile.png', fullPage: true });
+  await page.getByRole('menuitem', { name: '删除工作流' }).click();
+  await expect(dialog.getByRole('button', { name: '取消' })).toBeFocused();
+  await page.screenshot({ path: 'test-results/workflow-delete-mobile.png', fullPage: true });
+  await dialog.getByRole('button', { name: '永久删除' }).click();
+  await expect(page.getByLabel('当前工作流')).toHaveValue('running-research');
+  await expect(page.getByText('● 未保存')).toHaveCount(0);
+  graphs = graphs.map(item => ({ ...item, running: null }));
+  await expect(async () => {
+    await page.getByRole('button', { name: '管理工作流 running-research', exact: true }).click();
+    await expect(page.getByRole('menuitem', { name: '删除工作流' })).toBeEnabled();
+  }).toPass();
+  await page.getByRole('menuitem', { name: '删除工作流' }).click();
+  await dialog.getByRole('button', { name: '永久删除' }).click();
+  await expect(page.getByText('从一个想法开始', { exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: '运行工作流', exact: true })).toBeDisabled();
+  expect(deleted).toEqual(['research-review', 'academic-survey', 'running-research']);
+});
+
 test('edit a graph, inspect a run and read its files across screen sizes', async ({ page }) => {
   const graph = JSON.parse(readFileSync('../../examples/graphs/academic-gated.json', 'utf8'));
   const errors: string[] = [];
