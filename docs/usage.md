@@ -86,9 +86,18 @@ cp -n examples/graphs/deep-academic-research.json \
 
 ## Anchor Pilot 与 Session API
 
+本节描述当前代码。2026-09-26 的恢复方案「保存工作记录 → 重开原会话 → Agent 核查现场后继续」已按 P2 接通并通过真实验收；当前工具审批只剩删除 Graph，中断会话可以直接发新消息。验收状态与证据见 [开发台账](pilot-development-plan.md)。
+
+开发者在仓库根目录可运行两个显式验收脚本（都会产生真实模型调用费用），它们都用独立数据目录，不触碰正在使用的服务：
+
+- `./.venv/bin/python scripts/verify_pilot_provider.py`：真实 provider 走 HTTP/SSE，验证直接建图与启动 Run、回复里的对象引用、删除确认与拒绝、过期确认、`session_ask` 问答和提交去重；证据在 `.local/pilot-provider-*/`。
+- `./.venv/bin/python scripts/verify_pilot_resume.py`：真实 `kill -9` 两次（工具结果已记录 / 结果缺失），重启后在同一 Session 继续；证据在 `.local/pilot-resume-*/`。
+
+浏览器端真实验收用 `ANCHOR_REAL_PROVIDER=1 npx playwright test e2e/real-provider.spec.ts`（在 `apps/web/` 下运行）：真实 provider 流式回答、杀进程、刷新、续聊和对象跳转。未设置该变量时这条用例自动跳过。
+
 点击顶部「Pilot」可创建可恢复的对话。Session 是长期对话，不是一次 Graph Run；PydanticAI 使用运行配置中的 `pilot_model`（若未配置则取首个模型）回答，对话消息由 Harness 保存，Anchor 记录生命周期和事件。可在 `.local/runtime.json` 顶层设置 `pilot_model`，模型连接信息不写入 Session 或 Graph。
 
-Pilot 可以通过显式控制工具操作 Anchor 资源；模型不能绕过 Scheduler 的校验。查询、启动和运行控制会复用现有 Graph/Run/Plugin 文件事实。Graph 创建、修改、删除和 Run 的启动与控制标为需要审批，模型调用它们时当次运行立即结束并停在等待状态：待确认记录保存框架给出的 `tool_call_id` 和原始参数，未确认前工具不会执行。用户确认或拒绝后，客户端发起一次 `resume` turn 让同一调用继续；批准由框架用原参数执行该工具，拒绝作为工具结果返回给模型。已确认的调用由操作账本保证只执行一次，重放或中断后重试返回已记录结果。API 也提供：
+Pilot 可以通过显式控制工具操作 Anchor 资源；模型不能绕过 Scheduler 的校验。查询、启动和运行控制会复用现有 Graph/Run/Plugin 文件事实。用户已经明确提出的建图、改图、启动和控制请求直接执行；删除 Graph 仍保留确认步骤，模型调用它时当次运行停在等待状态，用户确认或拒绝后由框架恢复原调用。操作账本按 `tool_call_id` 记录结果，未知结果不会被静默重放。API 也提供：
 
 ```text
 GET    /sessions
@@ -116,7 +125,13 @@ DELETE /sessions/<id>
 
 用户输入在模型调用前写入 Harness；首条输入的前 60 个字符用作会话标题。回复支持 Markdown、代码高亮、表格和复制；可搜索标题，浏览器保留当前会话和未发送草稿。输入支持中文输入法，Enter 发送、Shift + Enter 换行。
 
-Pilot 需要补充信息时会调用 `session_ask`，该调用被推迟为外部执行，本次运行立即结束、turn 停在 `waiting_user`，问题写入 Session 的 `waiting_reason`。用户下一条消息就是这次调用的结果：它以工具返回值回到模型，而不是另起一轮用户发言，所以模型看到的是自己对问题的答复。Provider 失败或用户停止时 Session 标为 `interrupted`，已生成的增量文本保留在 turn 事件里，可通过「继续上次回复」发起一次新的执行身份。服务重启会把遗留的 `running` turn 标为 `interrupted` 并保留记录，不自动重放。删除前必须先将 Session 置为 `archived` 或 `interrupted`；删除会同时清理 Anchor Session 目录和 Harness 对话。完整能力与剩余缺口见 [Pilot 体验核查](pilot-experience-audit.md)。
+当前模型历史在 `state/pilot-conversations.sqlite`，工作记录在 `state/pilot-steps/`（Harness `FileStepStore`：每次执行的 `run.json`、`events.jsonl`、`tool_effects.jsonl`、`snapshots/*.json`、`media/*`），界面事件在 `state/pilot-turns.sqlite`。`sessions/<id>/events.jsonl` 只是产品活动日志，不含完整模型工作历史。备份现有会话要保留整个数据根目录，包含上述存储与所关联的运行文件。
+
+Pilot 需要补充信息时会调用 `session_ask`，该调用被推迟为外部执行，本次运行立即结束、turn 停在 `waiting_user`，问题写入 Session 的 `waiting_reason`。用户下一条消息以工具结果回到模型。删除 Graph 仍会先请求确认，其余操作（建图、改图、启动与控制 Run）按用户请求直接执行。
+
+Provider 失败、用户停止或服务被杀时 Session 标为 `interrupted`，已生成的增量文本保留在 turn 事件里。此时可以直接发新消息：服务用 Harness 文件记录还原上一次尝试——工具结果已保存的能读到，结果缺失的以 `interrupted` 如实呈现——Agent 核查实际 Run、文件和测试后继续，不重放旧调用，也不要求用户处理操作账本。服务重启会把遗留的 `running` turn 标为 `interrupted` 并保留记录。
+
+回复里提到 Graph、Run 或节点文件时带有 `#anchor/...` 链接，点击进入已有的图编排或运行记录页面，右上角「返回会话」回到原 Session。删除前必须先将 Session 置为 `archived` 或 `interrupted`；删除会同时清理 Anchor Session 目录和 Harness 对话。当前能力与新目标的验收状态见 [开发台账](pilot-development-plan.md)。
 
 **后续开发统一使用这个脚本管理服务**，不要依赖对话框或终端里的前台进程：
 

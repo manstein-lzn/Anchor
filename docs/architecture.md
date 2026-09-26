@@ -1,6 +1,6 @@
 # 当前架构
 
-本文说明当前实现，不是完整产品目标。Anchor Pilot、Session、恢复和分阶段实施契约见 [产品与系统架构](product-architecture.md)；Plugin 的当前格式与边界见 [Plugin 设计](plugins.md)；操作方式见 [使用指南](usage.md)。
+本文说明当前实现，不是完整产品目标。产品目标和待讨论需求见 [产品与系统架构](product-architecture.md)，当前工作与验收见 [开发台账](pilot-development-plan.md)；Plugin 的当前格式与边界见 [Plugin 设计](plugins.md)；操作方式见 [使用指南](usage.md)。
 
 ## 核心模型
 
@@ -103,7 +103,7 @@ Agent 完成由 PydanticAI 校验的结构化结果表示（`summary`，多出�
 
 研究方法维护在 [Plugin 说明](../plugins/academic-research/instructions.md)，通过 `/tools/scholarly/run` 使用登记的环境。`library.py` 解析资源，调度层注入简短目录并把只读挂载交给节点。Agent 完成与工具调用分离，结果由 Runtime 持久化。
 
-代码中的 harness `capabilities` 指上下文管理、步骤持久化等运行机制，**不是**业务 Plugin。节点层已有组合验证，但默认 Graph 路径尚未注入 `context_capabilities`，Pilot 也未启用上下文压缩。具体证据与体验基线见 [Pilot 体验核查](pilot-experience-audit.md)。
+代码中的 harness `capabilities` 指上下文管理、步骤持久化等运行机制，**不是**业务 Plugin。节点层已有组合验证，但默认 Graph 路径尚未注入 `context_capabilities`；Pilot 已接步骤持久化与框架压缩（见下文）。具体证据与体验基线见 [Pilot 体验核查](pilot-experience-audit.md)。
 
 ## 已知边界
 
@@ -111,11 +111,21 @@ Session 已接入服务：`/sessions` 提供创建、列表、读取、消息和
 
 Pilot 对话执行走 turn API。客户端为每次提交生成 `request_id`，服务端在一张 SQLite 表里原子接受提交并分配 `turn_id`，随后在后台线程执行；同一个 Session 下同 ID 同内容复用已存在的 turn，所以丢失响应后的重试不会触发第二次模型调用。模型输出经 PydanticAI 的 Vercel AI 事件编码器转成 chunks，按序号追加到同一数据库；`GET /sessions/<id>/turns/<turn>/events` 只是这些记录的只读 SSE 投影，`id` 即游标，`Last-Event-ID`/`?after=` 决定补发起点，重连或重新订阅都不会重新调用模型和工具。执行在服务端进行，关闭页面既不取消任务也不启动新请求，停止必须显式调用。Harness 保存权威模型消息，Anchor 保存提交意图、执行身份、终态与传输游标；恢复尝试使用新的 `turn_id`，不复用原 framework run ID。进程启动时遗留的 `running` turn 会被标记为 `interrupted` 并保留事件，不自动重放。
 
-这三类记录仍分散在 Session JSON/JSONL、Harness 存储和 turn 数据库里，跨存储没有统一事务；实例内锁也只对单进程有效。涉及副作用的失败 turn 当前保守拒绝自动重放，正式的原始调用账本、资源前态比较与等待边界属于后续阶段。
+turn 数据库使用 SQLite WAL，让 SSE 读取已提交事件时不与逐条增量写入争抢数据库排他锁。Session JSON/JSONL、Harness 存储和 turn 数据库没有统一事务；实例内锁只对单进程有效。这是当前边界，不再作为跨存储事务改造的待办。
 
-确认功能已有 `POST /sessions/<id>/confirm`、`/reject` 和 WebUI 入口。待确认记录包含动作、目标、完整提案和 Graph 当前版本摘要；确认后先持久化操作意图，再执行副作用，重启发现 pending 操作时报告 uncertain，禁止自动重放。接口不再维护动作白名单，确认与拒绝都由存储层比对待确认记录的动作和 key，因此新增受控动作不需要同步改 API。当前锁是单进程实例锁，多进程部署仍需事务存储；真实浏览器和跨进程验收仍待补齐。
+续聊按框架记录接通：Pilot 的 `StepPersistence` 用原生 `FileStepStore`（`state/pilot-steps/`，每个持久化 run 一份 `run.json`、`events.jsonl`、`tool_effects.jsonl`、`snapshots/*.json`、`media/*`），并打开 `capture_frontier=True`——进程在工具执行中被杀时不会走到「已结算」边界，没有 frontier 快照就没有任何可读现场。新一轮消息先看框架记录：记录比已保存对话更长（进程被杀或用户停止的回合走不到保存）时用它，否则用 conversation store。`continue_run(include_interrupted=True)` 读回的历史末尾可能是未完成的 tool call，而框架拒绝在未处理调用上叠加新 prompt，所以 `pilot._close_unfinished` 只把这种响应标成框架自己的 `state='interrupted'`，由框架合成 `outcome='interrupted'` 的 tool-return：模型看到「调用过、结果未知」，不会重放那次调用。`Scheduler.create_turn`、`pilot_message` 允许中断会话接新消息，旧 `unsafe_to_retry` 门禁已删除。
 
-Pilot 会先保存用户输入。需要审批的工具（Graph 创建/修改/删除、Run 启动与控制）用 PydanticAI 的 `requires_approval` 声明，模型调用它们时本次运行以 `DeferredToolRequests` 结束，Anchor 把每个待确认调用的 `tool_call_id` 与原始参数写入 Session；确认或拒绝只记录决定，随后的一次 `resume` turn 带着 `DeferredToolResults` 让框架用原参数执行或拒绝该调用。参数由框架持有，客户端不能替换成别的动作。`session_ask` 走同一机制的外部执行分支：工具体抛 `CallDeferred`，运行停在问题处，用户的下一条消息作为该调用的结果回到模型，因此提问之后不会再有工具在同一轮里先跑掉。工具执行前先写 pending 操作、完成后记录结果、未知结果返回 uncertain，因此同一次已确认调用在崩溃重试后不会执行第二次；账本按 `tool_call_id` 保存在 `Session.operations`，一次暂停里的多个调用各自保留结果，不会互相覆盖。暂停时还把目标资源的前态（Graph 的 sha256 与是否存在）写进待确认记录，执行前在同一把进程锁内重新比较，所以用户在确认期间改过的 Graph 会被拒绝，而不是被模型提案覆盖。仍然保留的 P2 缺口：Session、Harness 与 turn 库之间的跨存储状态事务、未知结果的明确处置入口、系统 Pilot Graph。
+确认功能已有 `POST /sessions/<id>/confirm`、`/reject` 和 WebUI 入口。待确认记录包含动作、目标、完整提案和 Graph 当前版本摘要；执行前持久化操作意图，遇到已有未完成操作时返回 uncertain。确认与拒绝由存储层比对原调用。这套现有审批通过了真实 DeepSeek HTTP/SSE 验证，浏览器审批测试仍用 mock SSE；它不是新续聊方案的验收证据。
+
+审批已按 2026-09-26 的收敛决定缩减：用户请求即授权，`graph_run`、`run_pause/resume/stop`、`graph_create`、`graph_update` 直接执行，不再逐次确认；只有 `graph_delete` 仍声明 `requires_approval`，以 `DeferredToolRequests` 暂停，确认或拒绝后通过 `DeferredToolResults` 恢复原调用。`session_ask` 通过 `CallDeferred` 暂停，用户的下一条消息作为工具结果返回。操作账本按 `tool_call_id` 保存在 `Session.operations`，删除的前态在暂停时记录、执行前比较；结果不确定的操作不会被重放。
+
+当前 Pilot 尚不是系统 Graph。聊天中的 Graph、Run、Artifact 引用可以直接打开已有页面并返回原会话：Pilot 在回复里写 `#anchor/graph/<graph>`、`#anchor/run/<run>`、`#anchor/artifact/<run>/<node>/<path>`，`apps/web/src/links.ts` 解析，`App` 拦截点击切换到对应视图并显示「返回会话」。系统 Pilot、计划呈现、研究应用和附件等后续需求不构成当前实现；是否及如何开发以用户后续决定为准。当前工作与验收见 [唯一开发台账](pilot-development-plan.md)。
+
+本地框架接口核对补充：StepPersistence、FileStepStore / SqliteStepStore、continue_run、inspect_recovery 与 `capture_frontier` 已存在；普通 AgentNode 使用 FileStepStore 与 continue_run，Pilot 现在同样如此。配置 agent_name 后，框架 persistence run ID 由 agent_name 与执行 ID 派生（`5:pilot<turn_id>` 的 base64），不能假定等于 Anchor turn ID，因此续聊按 `conversation_id` 查记录。真实杀进程续聊已通过验收，证据见开发台账 A07–A09。
+
+Harness 的 FileStepStore 原生记录包括 `events.jsonl`、`tool_effects.jsonl`、`snapshots/*.json`、`media/*` 和 `run.json`，不等于一个 transcript 文件。当前 Pilot 的模型历史在 `state/pilot-conversations.sqlite`，工作记录在 `state/pilot-steps/`，界面事件在 `state/pilot-turns.sqlite`；`sessions/<id>/events.jsonl` 只是产品活动日志。
+
+Pilot 已启用框架压缩：默认 `SlidingWindowCompaction`（200 条消息或上下文 60% 触发），配置 `pilot_compaction` 可调阈值、关闭，或加上 `SummarizingCompaction` 与 summarizer 模型。压缩写入的是继续对话所用的历史，并留下 receipt 说明此前内容已不是原话；被丢弃的消息仍留在该 run 更早的快照里。Planning、AskUser capability 和编辑分支未接；现有提问通过 CallDeferred 实现。接口存在不等于对应产品交互已接入。
 
 以下是现状说明，不是另一份升级待办：
 
