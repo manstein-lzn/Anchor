@@ -7,9 +7,9 @@ import { EmptyState } from './ui';
 import type { OurRunDetail } from './model';
 
 /** Inspection state is local to the selected run/node, independent of graph editing. */
-export function RunInspector({ run, node, detail }:
-  { run: string; node: string; detail: OurRunDetail | null }) {
-  const [tab, setTab] = useState<'talk' | 'files' | 'plugins'>('talk');
+export function RunInspector({ run, node, detail, targetPath = '' }:
+  { run: string; node: string; detail: OurRunDetail | null; targetPath?: string }) {
+  const [tab, setTab] = useState<'talk' | 'files' | 'plugins'>(targetPath ? 'files' : 'talk');
   const [pass, setPass] = useState('');
   const passes = useMemo(() => Object.keys(detail?.traces ?? {})
     .filter(item => item === node || (item.startsWith(`${node}-`) && /^\d+$/.test(item.slice(node.length + 1))))
@@ -36,7 +36,7 @@ export function RunInspector({ run, node, detail }:
     {!node ? <EmptyState icon={MessageSquare} title="探索一次执行">
       在画布中选择节点，查看它的思考、执行过程和生成的文件。
     </EmptyState> : tab === 'plugins' ? <Plugins recorded={detail?.plugins?.[node] ?? []} />
-    : tab === 'files' ? <><p className="inspector-note">显示 {node} 当前工作区的文件；历史轮次的对话不会改变这里的最新文件。</p><Files run={run} node={node} /></> : <>
+    : tab === 'files' ? <><p className="inspector-note">显示 {node} 当前工作区的文件；历史轮次的对话不会改变这里的最新文件。</p><Files run={run} node={node} targetPath={targetPath} /></> : <>
       <div className="node-summary">
         <span className={`pill ${detail?.state.cursor?.node === node ? 'running' : result?.submitted ? 'finished' : result ? 'failed' : 'pending'}`}>
           {detail?.state.cursor?.node === node ? '执行中' : result ? (result.submitted ? '已提交' : '失败') : '未执行'}

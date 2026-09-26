@@ -30,8 +30,8 @@ function Preview({ body, url }: { body: OurFileBody; url: string }) {
   </>;
 }
 
-function FileItem({ file, base, revision }: { file: OurFile; base: string; revision: number }) {
-  const [open, setOpen] = useState(false);
+function FileItem({ file, base, revision, targetPath }: { file: OurFile; base: string; revision: number; targetPath: string }) {
+  const [open, setOpen] = useState(file.path === targetPath || file.path.endsWith(`/${targetPath}`));
   const [body, setBody] = useState<OurFileBody | null>(null);
   const [problem, setProblem] = useState('');
   const [retry, setRetry] = useState(0);
@@ -68,18 +68,19 @@ function FileItem({ file, base, revision }: { file: OurFile; base: string; revis
   </div>;
 }
 
-function FolderContents({ directory, base, revision }: { directory: Directory; base: string; revision: number }) {
+function FolderContents({ directory, base, revision, targetPath }: { directory: Directory; base: string; revision: number; targetPath: string }) {
   return <>
     {[...directory.directories.values()].sort((a, b) => a.name.localeCompare(b.name)).map(child =>
-      <details className="file-folder" key={child.name}>
+      <details className="file-folder" key={child.name} open={targetPath.startsWith(`${child.name}/`)}>
         <summary><ChevronRight size={13} className="call-caret" /><Folder size={15} /><span>{child.name}</span></summary>
-        <div className="file-folder-children"><FolderContents directory={child} base={base} revision={revision} /></div>
+        <div className="file-folder-children"><FolderContents directory={child} base={base} revision={revision}
+          targetPath={targetPath.startsWith(`${child.name}/`) ? targetPath.slice(child.name.length + 1) : targetPath} /></div>
       </details>)}
-    {directory.files.map(file => <FileItem key={file.path} file={file} base={base} revision={revision} />)}
+    {directory.files.map(file => <FileItem key={file.path} file={file} base={base} revision={revision} targetPath={targetPath} />)}
   </>;
 }
 
-export function Files({ run, node }: { run: string; node: string }) {
+export function Files({ run, node, targetPath = '' }: { run: string; node: string; targetPath?: string }) {
   const [listing, setListing] = useState<OurFileList | null>(null);
   const [problem, setProblem] = useState('');
   const [busy, setBusy] = useState(false);
@@ -106,6 +107,6 @@ export function Files({ run, node }: { run: string; node: string }) {
     {problem && <div className="message error" role="alert"><AlertTriangle size={15} /><span>{problem}</span></div>}
     {listing && !listing.files.length && <p className="hint">这个节点还没有在工作区里留下文件。</p>}
     {listing?.truncated && <p className="folded">文件太多，这里只列了前面一部分。</p>}
-    <div className="file-groups" key={base}><FolderContents directory={tree} base={base} revision={revision} /></div>
+    <div className="file-groups" key={base}><FolderContents directory={tree} base={base} revision={revision} targetPath={targetPath} /></div>
   </div>;
 }

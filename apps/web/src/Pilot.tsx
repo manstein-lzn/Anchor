@@ -21,7 +21,7 @@ function cached(key: string, value?: string) {
   } catch { return ''; }
 }
 
-export function Pilot() {
+export function Pilot({ session = '', onSession }: { session?: string; onSession?: (id: string) => void }) {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [selected, setSelected] = useState('');
   const selectedRef = useRef('');
@@ -35,6 +35,9 @@ export function Pilot() {
   const [copied, setCopied] = useState<number | null>(null);
   const [atBottom, setAtBottom] = useState(true);
   const follow = useRef(true);
+  // Read through a ref so `activate` stays a plain function and the effect below can depend on the id.
+  const onSessionRef = useRef(onSession);
+  onSessionRef.current = onSession;
   const scroller = useRef<HTMLDivElement>(null);
   const input = useRef<HTMLTextAreaElement>(null);
 
@@ -44,7 +47,7 @@ export function Pilot() {
   };
   const activate = (id: string) => {
     selectedRef.current = id;
-    setSelected(id); cached('selected', id);
+    setSelected(id); cached('selected', id); onSessionRef.current?.(id);
     setDraft(cached(`draft:${id || 'new'}`));
     setMessages([]); setTurn(null); setCopied(null); setProblem('');
     follow.current = true; setAtBottom(true);
@@ -85,7 +88,7 @@ export function Pilot() {
         const result = await api<{ sessions: Session[] }>('/sessions');
         if (!live) return;
         setSessions(result.sessions);
-        const saved = cached('selected');
+        const saved = session || cached('selected');
         if (result.sessions.some(item => item.id === saved)) {
           activate(saved);
           await refresh(saved);
@@ -198,7 +201,9 @@ export function Pilot() {
   };
   const current = sessions.find(item => item.id === selected);
   const pendingApproval = current?.approval?.status === 'requested';
-  const canSend = !selected || (current && ['active', 'waiting_user'].includes(current.status) && !pendingApproval);
+  // An interrupted session accepts a new message: the next turn carries what the dead run recorded.
+  const canSend = !selected || (current &&
+    ['active', 'waiting_user', 'interrupted'].includes(current.status) && !pendingApproval);
   const heading = current?.title || messages.find(item => item.role === 'user')?.text.slice(0, 60) || '新对话';
   const filtered = sessions.filter(item => `${title(item)} ${item.id}`.toLowerCase().includes(query.toLowerCase()));
   return <main className="pilot-page">
@@ -268,7 +273,7 @@ export function Pilot() {
             <button className="primary" type="submit" disabled={!draft.trim() || loading || !canSend}><Send size={16} />发送</button>}
         </div>
       </form>
-      <small className="pilot-disclaimer">修改工作流、启动或控制运行前会请求确认。研究结论请结合来源核验。</small>
+      <small className="pilot-disclaimer">删除工作流会再次确认；研究结论请结合来源核验。</small>
     </section>
   </main>;
 }

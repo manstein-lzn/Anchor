@@ -5,7 +5,7 @@ import {
   Anchor, Activity, CheckCheck, Copy, Download, GitBranch, MessageSquare, Plus, Redo2, Save, Trash2, Undo2, Upload,
   Play, Search, SlidersHorizontal, FolderOpen, PanelLeftClose, PanelRightClose,
 } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from 'react';
 import { WorkflowCanvas } from './WorkflowCanvas';
 import { GraphActions } from './GraphActions';
 import { label } from './execution';
@@ -16,6 +16,7 @@ import { RunInspector } from './RunInspector';
 import { Plugins } from './Plugins';
 import { Workspace } from './Workspace';
 import { Pilot } from './Pilot';
+import { anchorRef, anchorTarget, type AnchorRef } from './links';
 import { api } from './api';
 import { EmptyState, JsonDialog, Modal, ToolButton } from './ui';
 
@@ -44,9 +45,12 @@ export function App() {
   const [run, setRun] = useState('');
   const [detail, setDetail] = useState<OurRunDetail | null>(null);
   const [node, setNode] = useState('');
+  const [targetPath, setTargetPath] = useState('');
   const [notice, setNotice] = useState<{ kind: 'ok' | 'bad'; text: string } | null>(null);
   const [problem, setProblem] = useState('');
   const [busy, setBusy] = useState(false);
+  // Which Pilot session to go back to after opening a Graph, Run or artifact from the chat.
+  const [chat, setChat] = useState('');
   const nameRef = useRef(name); nameRef.current = name;
   const upload = useRef<HTMLInputElement>(null);
   const newGraphButton = useRef<HTMLButtonElement>(null);
@@ -61,12 +65,14 @@ export function App() {
     return () => window.removeEventListener('beforeunload', warn);
   }, [dirty]);
 
-  const selectGraph = (next: string) => {
-    if (next === name) return;
-    if (dirty && !window.confirm('当前工作流有未保存的修改，确定切换并放弃修改吗？')) return;
+  const selectGraph = (next: string): boolean => {
+    if (next === name) return true;
+    if (dirty && !window.confirm('当前工作流有未保存的修改，确定切换并放弃修改吗？')) return false;
     setName(next);
     setRun(runs.find(item => item.graph === next)?.run ?? '');
     setNode('');
+    setTargetPath('');
+    return true;
   };
 
   const refresh = useCallback(async () => {
@@ -156,6 +162,26 @@ export function App() {
     await refresh();
     setName(wanted); setView('graph');
   });
+
+  const openReference = (ref: AnchorRef) => {
+    const graph = ref.kind === 'graph' ? '' : ref.run;
+    const target = anchorTarget(ref, runs.find(item => item.run === graph)?.graph ?? nameRef.current);
+    if (target.graph && !selectGraph(target.graph)) return;
+    setRun(target.run); setNode(target.node); setTargetPath('path' in target ? target.path ?? '' : ''); setView(target.view);
+    if (target.view === 'runs' && !runs.some(item => item.run === target.run)) void refresh();
+  };
+
+  // A Pilot reply links its objects with `#anchor/…`; the click opens the page that already shows
+  // them, and the way back is the session it was opened from. Captured on the shell so every
+  // rendered reply is covered without teaching the Markdown renderer about Anchor.
+  const followReference = (event: MouseEvent<HTMLElement>) => {
+    const element = event.target as HTMLElement | null;
+    const link = element?.closest?.('a');
+    const ref = anchorRef(link?.getAttribute('href'));
+    if (!ref) return;
+    event.preventDefault();
+    openReference(ref);
+  };
 
   const trigger = () => perform('触发', async () => {
     const body = await api<{ run: string }>('/trigger', 'POST', { graph: name });
@@ -274,7 +300,8 @@ export function App() {
   }, [doc]);
 
   return (
-    <div className={`app-shell ${libraryOpen ? '' : 'hide-library'} ${inspectorOpen ? '' : 'hide-inspector'}`}>
+    <div className={`app-shell ${libraryOpen ? '' : 'hide-library'} ${inspectorOpen ? '' : 'hide-inspector'}`}
+         onClickCapture={followReference}>
       <header className="topbar">
         <div className="brand"><span className="brand-mark"><Anchor size={22} /></span>Anchor<span className="brand-caption">WORKSPACE</span></div>
         <nav className="product-switch" aria-label="工作台">
@@ -293,6 +320,9 @@ export function App() {
           {problem ? '连接中断' : '服务在线'}
         </div>
         {view !== 'pilot' && <button className="primary" title={dirty ? '请先保存工作流' : '运行已保存的工作流'} onClick={() => void trigger()} disabled={busy || !name || dirty}><Play size={14} fill="currentColor" />运行工作流</button>}
+        {view !== 'pilot' && chat && <button onClick={() => setView('pilot')} title={`回到会话 ${chat}`}>
+          <MessageSquare size={14} />返回会话
+        </button>}
         {view !== 'pilot' && <div className="panel-toggles">
           <ToolButton icon={PanelLeftClose} label="切换侧边栏" aria-pressed={libraryOpen} onClick={() => setLibraryOpen(!libraryOpen)} />
           <ToolButton icon={PanelRightClose} label="切换详情面板" aria-pressed={inspectorOpen} onClick={() => setInspectorOpen(!inspectorOpen)} />
@@ -301,7 +331,7 @@ export function App() {
       {problem && <div className="connection-error" role="alert">{problem}</div>}
       {view === 'runs' && notice && <p className={`notice ${notice.kind}`} role="status">{notice.text}</p>}
 
-      {view === 'pilot' ? <Pilot /> : view === 'runs' ? (
+      {view === 'pilot' ? <Pilot session={chat} onSession={setChat} /> : view === 'runs' ? (
         <Workspace running>
           <aside className="runs">
             <div className="section-heading"><h3><Activity size={15} />运行历史</h3><span className="count">{runs.filter(item => item.graph === name).length}</span></div>
@@ -357,7 +387,7 @@ export function App() {
               onPick={value => { if (value?.kind === 'node') { setNode(value.id); setInspectorOpen(true); } }} />}
             <div className="canvas-bottom"><span className="legend"><i className="dot running" />执行中<i className="dot finished" />已完成<i className="dot failed" />失败</span><span className="canvas-caption">点击节点查看对话与产物</span></div>
           </main>
-          <RunInspector key={`${run}/${node}`} run={run} node={node} detail={detail} />
+          <RunInspector key={`${run}/${node}/${targetPath}`} run={run} node={node} detail={detail} targetPath={targetPath} />
         </Workspace>
       ) : (
         <Workspace>

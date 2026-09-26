@@ -212,14 +212,14 @@ test('Pilot streams text and tool activity, and resumes the stream from the last
   await page.screenshot({ path: test.info().outputPath('pilot-stream-reconnect.png'), fullPage: true });
 });
 
-test('Pilot asks before a Run and continues the paused run after the decision', async ({ page }) => {
-  const base = { id: 'gated', title: '启动研究', status: 'active', updated_at: '2026-09-26T07:00:00Z', approval: null };
+test('Pilot confirms a deletion before it runs and continues the paused run after the decision', async ({ page }) => {
+  const base = { id: 'gated', title: '删除研究', status: 'active', updated_at: '2026-09-26T07:00:00Z', approval: null };
   const messages: Array<{ role: string; text: string }> = [];
   const calls: string[] = [];
   let resumed = false;
   const pending = {
-    tool_call_id: 'call-1', key: 'call-1', action: 'graph_run', target: 'demo',
-    proposal: { graph: 'demo', objective: null },
+    tool_call_id: 'call-1', key: 'call-1', action: 'graph_delete', target: 'demo',
+    proposal: { graph: 'demo' },
   };
   const session = () => ({
     ...base,
@@ -241,7 +241,7 @@ test('Pilot asks before a Run and continues the paused run after the decision', 
     calls.push(body.resume ? 'resume' : body.message);
     if (body.resume) {
       resumed = true;
-      messages.push({ role: 'assistant', text: '已启动 demo。' });
+      messages.push({ role: 'assistant', text: '已删除 demo。' });
     } else messages.push({ role: 'user', text: body.message });
     return route.fulfill({ status: 202, json: { turn: inProgress('turn-1', 'gated', body.message ?? null) } });
   });
@@ -256,8 +256,79 @@ test('Pilot asks before a Run and continues the paused run after the decision', 
   await expect(banner).toContainText('demo');
   await expect(page.getByLabel('发送给 Anchor Pilot')).toBeDisabled();
   await banner.getByRole('button', { name: '确认并继续' }).click();
-  await expect(page.locator('.pilot-message.assistant').last()).toContainText('已启动 demo。');
+  await expect(page.locator('.pilot-message.assistant').last()).toContainText('已删除 demo。');
   await expect(page.getByRole('region', { name: '待确认操作' })).toHaveCount(0);
   expect(calls).toEqual(['resume']);
   await page.screenshot({ path: test.info().outputPath('pilot-approval.png'), fullPage: true });
+});
+
+test('a reply opens the Graph, the Run and the file it links, and returns to the same session', async ({ page }) => {
+  test.setTimeout(60000);
+  const run = '20260926T104613';
+  const session = { id: 'linked', title: '对象跳转', status: 'active', updated_at: '2026-09-26T07:00:00Z',
+                    approval: null, waiting_reason: '' };
+  const definition = { entry: 'write', objective: '写一个文件', ops: { write: { run: 'true', writes: ['result.txt'] } },
+                       nodes: [{ id: 'write', op: 'write' }], edges: [] };
+  const reply = `运行 [${run}](#anchor/run/${run}) 已完成，产物在 [result.txt](#anchor/artifact/${run}/write/result.txt)，`
+    + '图谱见 [demo](#anchor/graph/demo)。';
+  await page.route('**/graphs', route => route.fulfill({ json: { graphs: [{ graph: 'demo', running: null }] } }));
+  await page.route('**/graphs/demo', route => route.fulfill({ json: { definition } }));
+  await page.route('**/runs', route => route.fulfill({ json: { runs: [{ run, graph: 'demo', status: 'finished',
+    running: false, started: '2026-09-26T10:46:13Z', updated: '2026-09-26T10:47:00Z', executed: ['write'],
+    objective: '写一个文件' }] } }));
+  await page.route(`**/runs/${run}/files/write`, route => route.fulfill({ json: { files: [{ path: 'out/result.txt', size: 12, binary: false }] } }));
+  await page.route(`**/runs/${run}/files/write/out/result.txt`, route => route.fulfill({ json: {
+    path: 'out/result.txt', size: 12, binary: false, text: 'artifact-opened', truncated: false,
+  } }));
+  await page.route('**/runs/*', route => {
+    if (route.request().url().includes('/files/write/out/result.txt')) return route.fulfill({ json: {
+      path: 'out/result.txt', size: 12, binary: false, text: 'artifact-opened', truncated: false,
+    } });
+    if (route.request().url().endsWith('/files/write')) return route.fulfill({ json: {
+      files: [{ path: 'out/result.txt', size: 12, binary: false }],
+    } });
+    return route.fulfill({ json: { graph: 'demo', run,
+    state: { status: 'finished', objective: '写一个文件', cursor: null, reason: '', nodes: {},
+             passes: {}, skipped: [], executed: ['write'], started: '2026-09-26T10:46:13Z',
+             updated: '2026-09-26T10:47:00Z' },
+    traces: {}, nodes: ['write'] } });
+  });
+  await page.route('**/sessions', route => route.fulfill({ json: { sessions: [session] } }));
+  await page.route('**/sessions/*/messages', route => route.fulfill({
+    json: { messages: [{ role: 'user', text: '看看结果' }, { role: 'assistant', text: reply }] } }));
+  await page.route('**/sessions/*/turns', route => route.fulfill({ json: { turns: [] } }));
+  const errors: string[] = [];
+  page.on('pageerror', error => errors.push(error.message));
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Pilot', exact: true }).click();
+  await page.locator('.pilot-session').filter({ hasText: session.title }).click();
+  await expect(page.getByRole('link', { name: run })).toBeVisible();
+  await page.screenshot({ path: test.info().outputPath('pilot-references.png'), fullPage: true });
+
+  // The Run link opens the run page the workbench already has, without a second object view.
+  await page.getByRole('link', { name: run }).click();
+  await expect(page.getByRole('button', { name: '返回会话' })).toBeVisible();
+  await expect(page.locator('select[aria-label="当前工作流"]')).toHaveValue('demo');
+  await expect(page.locator('.run-row.chosen')).toContainText(run);
+
+  // The way back is the session it was opened from, not a new one and not the session list.
+  await page.getByRole('button', { name: '返回会话' }).click();
+  await expect(page.locator('.pilot-chat-heading strong')).toHaveAttribute('title', session.id);
+
+  // The file link opens that Run at that node and expands the linked artifact.
+  await page.getByRole('link', { name: 'result.txt' }).click();
+  await expect(page.locator('aside.inspector h3')).toContainText('write');
+  await expect(page.locator('.file-preview')).toContainText('artifact-opened');
+  await page.getByRole('button', { name: '返回会话' }).click();
+  await expect(page.locator('.pilot-chat-heading strong')).toHaveAttribute('title', session.id);
+
+  // The Graph link opens the graph page, and every page keeps the way back.
+  await page.getByRole('link', { name: 'demo' }).click();
+  await expect(page.getByRole('button', { name: '图编排', exact: true })).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.locator('select[aria-label="当前工作流"]')).toHaveValue('demo');
+  await page.getByRole('button', { name: '返回会话' }).click();
+  await expect(page.locator('.pilot-chat-heading strong')).toHaveAttribute('title', session.id);
+  await expect(page.locator('article.pilot-message.assistant').last()).toContainText(run);
+  expect(errors).toEqual([]);
+  await page.screenshot({ path: test.info().outputPath('pilot-returned.png'), fullPage: true });
 });

@@ -9,6 +9,7 @@ import rehypeHighlight from 'rehype-highlight';
 import 'katex/dist/katex.min.css';
 import 'highlight.js/styles/github.css';
 import { MermaidDiagram } from './MermaidDiagram';
+import { ANCHOR_PREFIX } from './links';
 
 // Sanitize user HTML before trusted math/highlighting plugins produce their own markup.
 const schema = {
@@ -30,6 +31,9 @@ export function Markdown({ text, prefix = 'm', fileBase }:
   { text: string; prefix?: string; fileBase?: string }) {
   const resolve = (url: string) => {
     const safe = saferHref(url);
+    // Anchor references are handled by the workbench, not by an element id, so they must not be
+    // rewritten into the sanitizer's `user-content-` namespace.
+    if (safe?.startsWith(ANCHOR_PREFIX)) return safe;
     if (safe?.startsWith('#')) return `#user-content-${safe.slice(1)}`;
     if (!safe || !fileBase || /^(?:[a-z]+:|\/|#)/i.test(safe)) return safe ?? '';
     // Relative images and attachments are relative to this Markdown file, not the web application.
