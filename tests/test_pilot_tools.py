@@ -6,7 +6,8 @@ import re
 from pathlib import Path
 
 from pydantic_ai import Agent, DeferredToolRequests
-from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, ToolCallPart, ToolReturnPart
+from pydantic_ai.messages import (ModelRequest, ModelResponse, TextPart, ToolCallPart, ToolReturnPart,
+                                  UserPromptPart)
 from pydantic_ai.models.function import FunctionModel
 
 from anchor.pilot import PilotDeps, _register_tools
@@ -49,6 +50,7 @@ class _Scheduler:
         self.triggers = 0
         self.triggered = []
         self.controls = []
+        self.deleted = []
 
     def workspaces(self):
         return []
@@ -81,6 +83,10 @@ class _Scheduler:
     def control_run(self, run, action):
         self.controls.append((run, action))
         return json.dumps({"run": run, "asked": action}), 202
+
+    def delete_graph(self, name):
+        self.deleted.append(name)
+        return json.dumps({"graph": name, "deleted": True}), 200
 
     def read_file(self, run, node, path):
         return json.dumps({"path": path, "text": "evidence"}), 200
@@ -120,63 +126,61 @@ def _tool_then_answer(name: str, args: dict):
     return model
 
 
-def _run_once(scheduler, model, history=None, deferred=None):
+def _run_once(scheduler, model, history=None, deferred=None, prompt: str | None = "操作"):
     agent = Agent(FunctionModel(model), output_type=[str, DeferredToolRequests])
     _register_tools(agent)
     kwargs = {"message_history": history} if history is not None else {}
     if deferred is not None:
         kwargs["deferred_tool_results"] = deferred
-    return asyncio.run(agent.run("操作", deps=PilotDeps(scheduler, "pilot"), **kwargs))
+    return asyncio.run(agent.run(prompt, deps=PilotDeps(scheduler, "pilot"), **kwargs))
 
 
-def test_graph_run_requires_confirmation_and_starts_only_once(tmp_path):
+def _replay(call_id: str, name: str, args: dict):
+    """A history that hands the framework the same tool call again, as a crash retry would."""
+    return [
+        ModelRequest(parts=[UserPromptPart(content="操作")]),
+        ModelResponse(parts=[ToolCallPart(tool_name=name, args=args, tool_call_id=call_id)]),
+    ]
+
+
+def test_graph_run_executes_once_for_the_users_request_and_is_recorded(tmp_path):
     scheduler = _Scheduler(tmp_path)
     store = SessionStore(tmp_path)
     store.create("pilot")
     scheduler.sessions = store
     model = _tool_then_answer("graph_run", {"graph": "academic"})
 
-    first = _run_once(scheduler, model)
-    assert isinstance(first.output, DeferredToolRequests)
-    assert [call.tool_name for call in first.output.approvals] == ["graph_run"]
-    assert scheduler.triggers == 0, "a Run must not start before the user confirms"
-
-    call_id = first.output.approvals[0].tool_call_id
-    approved = first.output.build_results(approvals={call_id: True})
-    settled = _run_once(scheduler, model, history=first.all_messages(), deferred=approved)
+    settled = _run_once(scheduler, model)
     assert settled.output == "已处理"
     assert scheduler.triggers == 1
     assert store.get("pilot").run_ids == ["r1"]
     assert "run.started" in [event.kind for event in store.events("pilot")]
 
-    # Replaying the same approved call after a crash reads the recorded result, not the side effect.
-    _run_once(scheduler, model, history=first.all_messages(), deferred=approved)
+    # Replaying the same call after a crash reads the recorded result, not the side effect.
+    call_id = next(iter(store.get("pilot").operations))
+    _run_once(scheduler, _tool_then_answer("graph_run", {"graph": "academic"}),
+              history=_replay(call_id, "graph_run", {"graph": "academic"}), prompt=None)
     assert scheduler.triggers == 1
     assert store.get("pilot").run_ids == ["r1"]
 
 
-def test_run_control_requires_confirmation_and_is_recorded_once(tmp_path):
+def test_run_control_executes_and_is_recorded_once(tmp_path):
     scheduler = _Scheduler(tmp_path)
     store = SessionStore(tmp_path)
     store.create("pilot")
     scheduler.sessions = store
     model = _tool_then_answer("run_stop", {"run": "r1"})
 
-    first = _run_once(scheduler, model)
-    assert isinstance(first.output, DeferredToolRequests)
-    assert [call.tool_name for call in first.output.approvals] == ["run_stop"]
-    assert scheduler.controls == []
-
-    approved = first.output.build_results(approvals={first.output.approvals[0].tool_call_id: True})
-    _run_once(scheduler, model, history=first.all_messages(), deferred=approved)
+    assert _run_once(scheduler, model).output == "已处理"
     assert scheduler.controls == [("r1", "stop")]
     assert "run.stop.asked" in [event.kind for event in store.events("pilot")]
 
-    _run_once(scheduler, model, history=first.all_messages(), deferred=approved)
+    call_id = next(iter(store.get("pilot").operations))
+    _run_once(scheduler, model, history=_replay(call_id, "run_stop", {"run": "r1"}), prompt=None)
     assert scheduler.controls == [("r1", "stop")]
 
 
-def test_graph_create_requires_user_approval_and_consumes_it_once(tmp_path):
+def test_graph_create_executes_and_is_recorded_once(tmp_path):
     scheduler = _Scheduler(tmp_path)
     store = SessionStore(tmp_path)
     store.create("pilot")
@@ -184,24 +188,41 @@ def test_graph_create_requires_user_approval_and_consumes_it_once(tmp_path):
     definition = {"nodes": []}
     model = _tool_then_answer("graph_create", {"name": "new", "definition": definition})
 
+    assert _run_once(scheduler, model).output == "已处理"
+    assert scheduler.created == 1
+
+    call_id = next(iter(store.get("pilot").operations))
+    _run_once(scheduler, model, history=_replay(call_id, "graph_create",
+                                                {"name": "new", "definition": definition}), prompt=None)
+    assert scheduler.created == 1
+
+
+def test_a_deleting_call_still_waits_for_the_user(tmp_path):
+    """The destructive call keeps the framework's human gate; the ordinary ones no longer pay for it."""
+    scheduler = _Scheduler(tmp_path)
+    store = SessionStore(tmp_path)
+    store.create("pilot")
+    scheduler.sessions = store
+    model = _tool_then_answer("graph_delete", {"graph": "academic"})
+
     first = _run_once(scheduler, model)
     assert isinstance(first.output, DeferredToolRequests)
-    assert scheduler.created == 0
-    call_id = first.output.approvals[0].tool_call_id
+    assert [call.tool_name for call in first.output.approvals] == ["graph_delete"]
+    assert scheduler.deleted == []
 
-    # A refusal is a real outcome the model can read, not a silent no-op.
+    call_id = first.output.approvals[0].tool_call_id
     denied = first.output.build_results(approvals={call_id: False})
     assert _run_once(scheduler, model, history=first.all_messages(), deferred=denied).output == "已处理"
-    assert scheduler.created == 0
+    assert scheduler.deleted == [], "a refused deletion must not run"
 
     approved = first.output.build_results(approvals={call_id: True})
     _run_once(scheduler, model, history=first.all_messages(), deferred=approved)
-    assert scheduler.created == 1
+    assert scheduler.deleted == ["academic"]
     _run_once(scheduler, model, history=first.all_messages(), deferred=approved)
-    assert scheduler.created == 1
+    assert scheduler.deleted == ["academic"], "a replayed approval must not delete twice"
 
 
-def test_two_pending_approvals_do_not_overwrite_each_other(tmp_path):
+def test_two_calls_in_one_response_each_keep_their_own_record(tmp_path):
     scheduler = _Scheduler(tmp_path)
     store = SessionStore(tmp_path)
     store.create("pilot")
@@ -213,63 +234,34 @@ def test_two_pending_approvals_do_not_overwrite_each_other(tmp_path):
                        for part in message.parts)
         if answered:
             return ModelResponse(parts=[TextPart(content="都处理完了")])
-        return ModelResponse(parts=[ToolCallPart(tool_name="graph_run", args={"graph": name})
+        return ModelResponse(parts=[ToolCallPart(tool_name="graph_run", args={"graph": name},
+                                                 tool_call_id=f"call-{name}")
                                     for name in ("first", "second")])
 
-    first = _run_once(scheduler, model)
-    assert isinstance(first.output, DeferredToolRequests)
-    graphs = {call.tool_call_id: call.args["graph"] for call in first.output.approvals}
-    assert sorted(graphs.values()) == ["first", "second"]
-    assert scheduler.triggers == 0
-
-    approved = first.output.build_results(approvals={call_id: True for call_id in graphs})
-    assert _run_once(scheduler, model, history=first.all_messages(),
-                     deferred=approved).output == "都处理完了"
-    # Deferred calls resolve concurrently, so the two independent Runs need not start in call order.
+    assert _run_once(scheduler, model).output == "都处理完了"
+    # The two calls run concurrently, so they need not start in call order.
     assert sorted(scheduler.triggered) == ["first", "second"]
-    # Each confirmed call keeps its own outcome, so replaying either one reads its own record.
-    assert set(store.get("pilot").operations) == set(graphs)
-    for call_id, graph in graphs.items():
-        assert store.begin_operation("pilot", "graph.run", call_id) == (
-            "completed", {"run": "r1", "graph": graph, "http_status": 202, "session": "pilot"})
+    # Each call keeps its own outcome, so replaying either one reads its own record.
+    assert set(store.get("pilot").operations) == {"call-first", "call-second"}
+    for name in ("first", "second"):
+        assert store.begin_operation("pilot", "graph.run", f"call-{name}") == (
+            "completed", {"run": "r1", "graph": name, "http_status": 202, "session": "pilot"})
     assert scheduler.triggers == 2
 
 
-def test_two_approved_edits_of_one_graph_do_not_both_apply(tmp_path):
-    from anchor.pilot import approval_precondition
-
+def test_an_operation_whose_outcome_is_unknown_is_not_replayed(tmp_path):
     scheduler = _Scheduler(tmp_path)
     store = SessionStore(tmp_path)
     store.create("pilot")
     scheduler.sessions = store
-    workspace = tmp_path / "workspaces" / "demo"
-    workspace.mkdir(parents=True)
-    graph = workspace / "graph.json"
-    graph.write_text(json.dumps({"nodes": ["original"]}), encoding="utf-8")
+    # What a crash between the side effect and its record leaves behind.
+    store.begin_operation("pilot", "graph.run", "call-first")
+    model = _tool_then_answer("graph_run", {"graph": "first"})
 
-    def model(messages, info):
-        answered = any(isinstance(part, ToolReturnPart)
-                       for message in messages if isinstance(message, ModelRequest)
-                       for part in message.parts)
-        if answered:
-            return ModelResponse(parts=[TextPart(content="处理完了")])
-        return ModelResponse(parts=[
-            ToolCallPart(tool_name="graph_update",
-                         args={"graph": "demo", "definition": {"nodes": [name]}})
-            for name in ("first", "second")])
-
-    first = _run_once(scheduler, model)
-    assert len(first.output.approvals) == 2
-    # This is what `serve` records while the run is paused; both calls saw the same original file.
-    store.set_pending("pilot", [
-        {"tool_call_id": call.tool_call_id, "key": call.tool_call_id, "action": call.tool_name,
-         "precondition": approval_precondition(scheduler, call.tool_name, call.args)}
-        for call in first.output.approvals])
-    approved = first.output.build_results(
-        approvals={call.tool_call_id: True for call in first.output.approvals})
-    assert _run_once(scheduler, model, history=first.all_messages(),
-                     deferred=approved).output == "处理完了"
-    # Serialized check-and-act: the second edit sees the first one's file and refuses instead of
-    # silently overwriting it.
-    assert json.loads(graph.read_text(encoding="utf-8"))["nodes"] in (["first"], ["second"])
-    assert len(store.get("pilot").operations) == 1
+    settled = _run_once(scheduler, model, history=_replay("call-first", "graph_run", {"graph": "first"}),
+                        prompt=None)
+    assert settled.output == "已处理"
+    assert scheduler.triggers == 0, "an unknown outcome must not be replayed"
+    returned = [part.content for message in settled.all_messages() if isinstance(message, ModelRequest)
+                for part in message.parts if isinstance(part, ToolReturnPart)]
+    assert returned and returned[0]["uncertain"] is True

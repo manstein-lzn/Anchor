@@ -3,17 +3,21 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import hashlib
 import json
 import inspect
 import threading
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from pydantic_ai import (Agent, CancellationToken, CallDeferred, DeferredToolRequests,
                          DeferredToolResults, RunContext)
-from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
+from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, TextPart, UserPromptPart
+
+from pydantic_ai_harness.step_persistence import StepPersistence
 
 from anchor.node.model_bridge import model_for
 from anchor.runtime.secrets import ChainedSecretProvider, EnvironmentSecretProvider, JsonFileSecretProvider
@@ -22,12 +26,22 @@ from anchor.session import Session, SessionStore
 INSTRUCTIONS = """You are Anchor Pilot, the user's assistant for working with Anchor.
 Help clarify goals, inspect Anchor resources, construct graphs when requested, start and control runs,
 and report concrete evidence. Use the Anchor tools for facts and actions; never claim an action happened
-unless its tool returned success. Ask the user before destructive or high-impact changes. Answer in the
-user's language, clearly and practically.
+unless its tool returned success. Answer in the user's language, clearly and practically.
 
-Starting a Graph Run, controlling a Run, and creating, replacing or deleting a Graph all require the
-user's confirmation. Call the tool; if it returns confirmation_required, say briefly what will happen
-and wait. After the user confirms, call the same tool again with exactly the same arguments."""
+Doing what the user asked is authorization: when the request names the Graph, Run or change, call the
+tool and report the result. Ask the user — with session_ask — only when the request does not say which
+object or what change. Deleting a Graph is the one call with its own confirmation step: call
+graph_delete and let that step ask, instead of asking the same question again yourself.
+
+A tool result may come back marked interrupted. That means an earlier process stopped before the tool
+returned and the outcome is unknown — not that nothing happened. Check the actual state first (the Graph
+file, the Run record, the node files), say what you found, and do not repeat the interrupted call
+unchanged or report it as success.
+
+When you mention a Graph, a Run or a file from a Run, link it so the user can open it in the workspace:
+[the graph](#anchor/graph/<graph>), [the run](#anchor/run/<run>),
+[the file](#anchor/artifact/<run>/<node>/<path>). Use the exact identifiers the tools returned, and
+keep the link text short."""
 
 
 @dataclass(frozen=True)
@@ -203,9 +217,9 @@ def _register_tools(agent: Agent[PilotDeps, str]) -> None:  # noqa: C901 - expli
         body, status = ctx.deps.scheduler.read_file(run, node, path)
         return _payload(body, status)
 
-    @agent.tool(requires_approval=True)
+    @agent.tool
     def graph_run(ctx: RunContext[PilotDeps], graph: str, objective: str | None = None) -> dict[str, Any]:
-        """Start a Graph Run after explicit confirmation, associated with this Pilot Session."""
+        """Start a Graph Run for a request the user already made, linked to this Pilot Session."""
 
         def mutate() -> tuple[str, int]:
             body, status = ctx.deps.scheduler.trigger(graph, objective)
@@ -239,17 +253,17 @@ def _register_tools(agent: Agent[PilotDeps, str]) -> None:  # noqa: C901 - expli
 
         return _recorded(ctx, f"run.{action}", run, mutate)
 
-    @agent.tool(requires_approval=True)
+    @agent.tool
     def run_pause(ctx: RunContext[PilotDeps], run: str) -> dict[str, Any]:
         """Ask a running Graph Run to pause at the next node boundary."""
         return _run_control(ctx, run, "pause")
 
-    @agent.tool(requires_approval=True)
+    @agent.tool
     def run_resume(ctx: RunContext[PilotDeps], run: str) -> dict[str, Any]:
         """Resume a paused or interrupted Graph Run."""
         return _run_control(ctx, run, "resume")
 
-    @agent.tool(requires_approval=True)
+    @agent.tool
     def run_stop(ctx: RunContext[PilotDeps], run: str) -> dict[str, Any]:
         """Stop a Graph Run, cancelling its active node when supported."""
         return _run_control(ctx, run, "stop")
@@ -285,18 +299,18 @@ def _register_tools(agent: Agent[PilotDeps, str]) -> None:  # noqa: C901 - expli
             return {"error": "question must not be empty"}
         raise CallDeferred(metadata={"question": question.strip()})
 
-    @agent.tool(requires_approval=True)
+    @agent.tool
     def graph_create(ctx: RunContext[PilotDeps], name: str,
                      definition: dict[str, Any]) -> dict[str, Any]:
-        """Create a saved Graph after explicit confirmation."""
+        """Create a saved Graph the user asked for; the request is the authorization."""
         return _recorded(ctx, "graph.create", name,
                          lambda: ctx.deps.scheduler.create(name, definition),
                          lambda: _stale(ctx, "graph_create", name))
 
-    @agent.tool(requires_approval=True)
+    @agent.tool
     def graph_update(ctx: RunContext[PilotDeps], graph: str,
                      definition: dict[str, Any]) -> dict[str, Any]:
-        """Replace a saved Graph after explicit confirmation."""
+        """Replace a saved Graph the user asked for; the request is the authorization."""
         return _recorded(ctx, "graph.update", graph,
                          lambda: ctx.deps.scheduler.save(graph, definition),
                          lambda: _stale(ctx, "graph_update", graph))
@@ -307,6 +321,51 @@ def _register_tools(agent: Agent[PilotDeps, str]) -> None:  # noqa: C901 - expli
         return _recorded(ctx, "graph.delete", graph,
                          lambda: ctx.deps.scheduler.delete_graph(graph),
                          lambda: _stale(ctx, "graph_delete", graph))
+
+
+def _compaction(raw: dict[str, Any], profile: dict[str, Any]) -> list[Any]:
+    """The harness capability that keeps a long conversation inside the model's window.
+
+    Nothing Anchor-specific is built here: the framework trims, or summarises when a summariser model
+    is configured. It compacts the history the run continues from, and the receipt saying how much was
+    dropped stays in that history, so the model knows its memory before that point is secondhand. The
+    dropped messages remain in that run's earlier snapshots but are no longer what a later turn reads.
+
+    Configuration, all optional:
+
+    ```json
+    "pilot_compaction": {"max_messages": 200, "keep_messages": 40,
+                         "max_fraction": 0.6, "summarizer_model": "models.deepseek"}
+    ```
+    """
+    from pydantic_ai_harness.compaction import SlidingWindowCompaction, SummarizingCompaction
+    settings = raw.get("pilot_compaction") or {}
+    if settings.get("enabled") is False:
+        return []
+    keep = int(settings.get("keep_messages", 40))
+    window = int(profile.get("context_window") or 0)
+    fraction = float(settings.get("max_fraction", 0.6)) if window else None
+    max_messages = settings.get("max_messages", 200)
+    strategies: list[Any] = []
+    summarizer_ref = settings.get("summarizer_model")
+    if summarizer_ref:
+        profiles = {item["ref"]: item for item in raw.get("models", [])}
+        source = profiles.get(summarizer_ref)
+        if source is None:
+            raise ValueError(f"pilot_compaction.summarizer_model is not a configured model: {summarizer_ref}")
+        secret_file = raw.get("secret_file")
+        providers = [EnvironmentSecretProvider()]
+        if secret_file:
+            providers.append(JsonFileSecretProvider(secret_file))
+        secret = ChainedSecretProvider(*providers).get(source["secret_ref"])
+        strategies.append(SummarizingCompaction(model=model_for(source, secret=secret),
+                                                max_messages=max_messages, max_fraction=fraction,
+                                                keep_messages=keep, context_window=window or None,
+                                                preserve_first_user_message=True, receipts=True))
+    strategies.append(SlidingWindowCompaction(max_messages=max_messages, max_fraction=fraction,
+                                              keep_messages=keep, context_window=window or None,
+                                              preserve_first_user_message=True, receipts=True))
+    return strategies
 
 
 def _agent(config_path: Path, scheduler: Any = None, session_id: str = "") -> Agent[Any, str]:
@@ -323,28 +382,94 @@ def _agent(config_path: Path, scheduler: Any = None, session_id: str = "") -> Ag
     secret = ChainedSecretProvider(*providers).get(profile["secret_ref"])
     agent: Agent[Any, Any] = Agent(model_for(profile, secret=secret),
                                    output_type=[str, DeferredToolRequests],
-                                   instructions=INSTRUCTIONS)
+                                   instructions=INSTRUCTIONS,
+                                   capabilities=_compaction(raw, profile))
     if scheduler is not None:
         _register_tools(agent)
     return agent
 
 
-def _text(message: ModelRequest | ModelResponse) -> tuple[str, str] | None:
+def _entries(message: ModelRequest | ModelResponse) -> list[dict[str, str]]:
+    """One conversation view of one framework message.
+
+    A `ModelRequest` can hold several user prompts — pydantic-ai merges consecutive requests, and a
+    prompt whose turn failed is followed by the next one — so each part becomes its own message. The
+    assistant's text parts are one reply and stay together.
+    """
     if isinstance(message, ModelRequest):
-        parts = [part.content for part in message.parts if isinstance(part, UserPromptPart)]
-        role = "user"
-    else:
-        parts = [part.content for part in message.parts if isinstance(part, TextPart)]
-        role = "assistant"
-    content = "\n".join(part if isinstance(part, str) else "" for part in parts).strip()
-    return (role, content) if content else None
+        contents = [part.content for part in message.parts if isinstance(part, UserPromptPart)]
+        return [{"role": "user", "text": content.strip()}
+                for content in contents if isinstance(content, str) and content.strip()]
+    reply = "\n".join(part.content for part in message.parts
+                      if isinstance(part, TextPart) and isinstance(part.content, str)).strip()
+    return [{"role": "assistant", "text": reply}] if reply else []
 
 
 def history(store: SessionStore, session: Session) -> list[dict[str, str]]:
     saved = asyncio.run(store.conversation_store().get(conversation_id=session.conversation_id))
-    return [{"role": role, "text": content}
-            for message in saved.messages if (item := _text(message))
-            for role, content in [item]]
+    return [entry for message in saved.messages for entry in _entries(message)]
+
+
+#: Where the framework keeps this Pilot's own file record: `run.json`, `events.jsonl`,
+#: `tool_effects.jsonl`, `snapshots/*.json` and `media/*` per run. Native format, never rewritten here.
+PILOT_STEPS = Path("state") / "pilot-steps"
+
+
+def step_store(root: Path):
+    """The harness file store for one Anchor data root."""
+    from pydantic_ai_harness.step_persistence import FileStepStore
+    return FileStepStore(directory=Path(root) / PILOT_STEPS)
+
+
+def _close_unfinished(messages: list[ModelMessage]) -> list[ModelMessage]:
+    """Let PydanticAI close missing results, including when resuming without a new prompt."""
+    if not messages:
+        return messages
+    tail = messages[-1]
+    if isinstance(tail, ModelResponse) and tail.tool_calls:
+        return [*messages, ModelRequest(parts=[], state="interrupted")]
+    if isinstance(tail, ModelRequest):
+        return [*messages[:-1], dataclasses.replace(tail, state="interrupted")]
+    return messages
+
+
+def attempt_history(store: SessionStore, session: Session,
+                    saved_at: datetime) -> list[ModelMessage] | None:
+    """Load a framework snapshot newer than the saved conversation head.
+
+    A turn that was killed or stopped never reaches the save the conversation store gets at the end of
+    a normal turn, so the file record is the only place its messages are. Compare native timestamps:
+    compaction can make a newer snapshot shorter than the saved conversation.
+
+    The file record outlives the Session it belongs to — the harness store has no delete, and Anchor
+    does not delete its files — so a Session created *after* a record was written is a different
+    conversation wearing a reused id, and must not inherit it.
+
+    Reading it is best effort. The store is files on disk that another process may have been writing
+    when it died, and one unreadable `run.json` anywhere in the store would otherwise fail every
+    Session's next message; such a record is reported on stdout and the saved conversation is used
+    instead.
+    """
+    steps = step_store(store.root)
+    try:
+        runs = [run for run in asyncio.run(steps.list_runs(conversation_id=session.conversation_id))
+                if run.started_at >= session.created_at]
+    except (ValueError, OSError) as exc:
+        print(json.dumps({"pilot_record_unreadable": str(store.root), "error": str(exc)}), flush=True)
+        return None
+    if not runs:
+        return None
+    try:
+        snapshot = asyncio.run(steps.latest_snapshot(run_id=runs[-1].run_id, include_interrupted=True))
+    except LookupError:
+        # The process died before the first frontier snapshot; events remain diagnostic only.
+        return None
+    except (ValueError, OSError) as exc:
+        print(json.dumps({"pilot_record_unreadable": runs[-1].run_id, "error": str(exc)}), flush=True)
+        return None
+    if snapshot is None or snapshot.timestamp <= saved_at:
+        return None
+    return _close_unfinished(list(snapshot.messages))
 
 
 def respond(store: SessionStore, config_path: Path, session: Session, prompt: str | None,
@@ -355,12 +480,20 @@ def respond(store: SessionStore, config_path: Path, session: Session, prompt: st
     saved = asyncio.run(conversation_store.get(conversation_id=session.conversation_id))
     messages = saved.messages
     summary = saved.summary
+    # Deferred answers must complete the saved live call, not close it as interrupted.
+    attempt = attempt_history(store, session, summary.updated_at) if deferred is None else None
+    if attempt is not None:
+        messages = attempt
     if prompt is not None:
-        messages = [*messages, ModelRequest(parts=[UserPromptPart(content=prompt)])]
+        # A process killed mid-run leaves the attempt in the framework's file record and not in the
+        # saved conversation, which still ends at the prompt that started it. Carrying that attempt in
+        # is what lets the model see what it already tried and that the result never came back.
+        messages = [*messages, ModelRequest(parts=[UserPromptPart(content=prompt)],
+                                           state="interrupted" if attempt is not None else "complete")]
         # Persist the user's turn before the provider call. A failed call leaves recoverable input
         # rather than a message that vanished with the HTTP request.
         summary = asyncio.run(conversation_store.save(summary=summary, messages=messages))
-    elif deferred is None and (not messages or not isinstance(messages[-1], ModelRequest) or not any(
+    elif deferred is None and attempt is None and (not messages or not isinstance(messages[-1], ModelRequest) or not any(
         isinstance(part, UserPromptPart) for part in messages[-1].parts
     )):
         raise ValueError("there is no unanswered Pilot turn to resume")
@@ -373,7 +506,13 @@ def respond(store: SessionStore, config_path: Path, session: Session, prompt: st
     else:
         agent = _agent(config_path)
     kwargs = {"message_history": messages, "cancellation_token": cancellation_token,
-              "conversation_id": session.conversation_id}
+              "conversation_id": session.conversation_id,
+              # Framework records tool intent before execution; UI chunks are not a safety ledger.
+              "capabilities": [StepPersistence(
+                  store=step_store(store.root), agent_name="pilot",
+                  # A process killed inside a tool never reaches the settled boundary that writes a
+                  # complete snapshot; the frontier checkpoint is what the next process can read.
+                  capture_frontier=True)]}
     if deferred is not None:
         kwargs["deferred_tool_results"] = deferred
     if turn_id is not None:
@@ -383,7 +522,7 @@ def respond(store: SessionStore, config_path: Path, session: Session, prompt: st
     if emit is None:
         result = asyncio.run(agent.run(None, **kwargs))
     else:
-        result = asyncio.run(_stream(agent, kwargs, store, emit, turn_id))
+        result = asyncio.run(_stream(agent, kwargs, emit, turn_id))
     if cancellation_token is not None and cancellation_token.cancelled:
         raise InterruptedError("Pilot response was stopped")
     output = result.output
@@ -393,14 +532,9 @@ def respond(store: SessionStore, config_path: Path, session: Session, prompt: st
     return output if isinstance(output, DeferredToolRequests) else output.strip()
 
 
-async def _stream(agent: Agent, kwargs: dict, store: SessionStore, emit: Any, turn_id: str):
+async def _stream(agent: Agent, kwargs: dict, emit: Any, turn_id: str):
     from pydantic_ai.run import AgentRunResultEvent
     from pydantic_ai.ui.vercel_ai import VercelAIEventStream
-    from pydantic_ai_harness.step_persistence import SqliteStepStore, StepPersistence
-
-    # Framework records tool intent before execution. UI chunks alone are not a replay safety ledger.
-    kwargs["capabilities"] = [StepPersistence(
-        store=SqliteStepStore(database=store.root / "state" / "pilot-steps.sqlite"), agent_name="pilot")]
     result = None
     failure = None
 

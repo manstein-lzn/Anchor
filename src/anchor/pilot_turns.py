@@ -22,6 +22,8 @@ class TurnStore:
         self.path = root / "state" / "pilot-turns.sqlite"
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as db:
+            # Stream readers must not compete with each token's durable write for the database lock.
+            db.execute("PRAGMA journal_mode = WAL")
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS turns (
                     id TEXT PRIMARY KEY, session TEXT NOT NULL, request_id TEXT NOT NULL,
@@ -113,22 +115,6 @@ class TurnStore:
             db.execute("UPDATE turns SET status='interrupted',error=?,updated_at=? WHERE status='running'",
                        ("服务在执行期间退出；未自动重放，请检查执行记录。", _now()))
             return [row["session"] for row in rows]
-
-    def unsafe_to_retry(self, session: str) -> bool:
-        """Until P2 step recovery lands, never replay a failed turn that entered a mutating tool."""
-        turns = self.list(session)
-        mutating = {"graph_create", "graph_update", "graph_delete", "graph_run",
-                    "run_pause", "run_resume", "run_stop"}
-        import asyncio
-        from pydantic_ai_harness.step_persistence import SqliteStepStore
-        store = SqliteStepStore(database=self.path.parent / "pilot-steps.sqlite")
-        for turn in turns:
-            if turn["status"] == "completed":
-                break
-            events = asyncio.run(store.list_events(run_id=turn["id"]))
-            if any(event.kind == "tool_call_started" and event.tool_name in mutating for event in events):
-                return True
-        return False
 
     def delete_session(self, session: str) -> None:
         with self.connect() as db:

@@ -317,16 +317,13 @@ class Scheduler:
                     return json.dumps({"turn": existing}, ensure_ascii=False), 202
                 if session_id in self.pilot_active:
                     raise ValueError("that session is already processing a message")
-                if session.status not in {"active", "waiting_user"} and not (
-                        session.status == "interrupted" and prompt is None):
+                if session.status not in {"active", "waiting_user", "interrupted"}:
                     raise ValueError(f"session is {session.status}")
                 if any(item.get("status") == "requested" for item in session.approvals):
                     raise ValueError("confirm or reject the pending operation first")
                 if prompt is not None and any(item.get("status") in {"approved", "rejected"}
                                               for item in session.approvals):
                     raise ValueError("resume the confirmed operation first")
-                if self.turns.unsafe_to_retry(session_id):
-                    raise ValueError("上次执行已进入有副作用的工具；请先核查执行结果，当前阶段禁止自动重放。")
                 turn, _ = self.turns.create(session_id, request_id, prompt)
                 self.pilot_active.add(session_id)
                 self.pilot_tokens[session_id] = CancellationToken()
@@ -366,11 +363,14 @@ class Scheduler:
         try:
             from anchor.pilot import approval_precondition, respond
             session = self.sessions.get(session_id)
-            if self.turns.unsafe_to_retry(session_id):
-                return json.dumps({"error": "上次工具副作用需要核查，不能自动重放。"}, ensure_ascii=False), 409
+            if prompt is not None and any(item.get("status") == "requested" for item in session.approvals):
+                # Same rule as the turn API: a message is not a way around a decision nobody made yet.
+                return json.dumps({"error": "confirm or reject the pending operation first"}), 409
             decisions = {} if prompt is not None else self.sessions.approval_decisions(session_id)
             question = self.sessions.pending_question(session_id) if prompt is not None else None
-            if prompt is not None and session.status == "waiting_user":
+            if prompt is not None and session.status in {"waiting_user", "interrupted"}:
+                # Answering a question, or starting a new turn after an interruption. What the next
+                # run continues from is the saved record, not the status the previous attempt left.
                 self.sessions.set_status(session_id, "active")
                 session = self.sessions.get(session_id)
             if session.status != "active" and not (prompt is None and (

@@ -181,8 +181,9 @@ def test_pilot_conversation_persists_messages_and_can_resume_a_failed_turn(tmp_p
     body, status = scheduler.pilot_message("pilot", "second question")
     assert status == 502
     assert scheduler.sessions.get("pilot").status == "interrupted"
-    assert scheduler.pilot_message("pilot", "should not overlap")[1] == 409
-    body, status = scheduler.pilot_message("pilot", None)
+    # A failed turn does not lock the conversation: the next message is a new turn that carries the
+    # question the provider never answered, so the model still knows what was asked.
+    body, status = scheduler.pilot_message("pilot", "third question")
     assert status == 200 and "reply 3" in body
     assert scheduler.sessions.get("pilot").status == "active"
     assert SessionStore(tmp_path).get("pilot").title == "hello"
@@ -192,7 +193,8 @@ def test_pilot_conversation_persists_messages_and_can_resume_a_failed_turn(tmp_p
     messages = __import__("json").loads(body)["messages"]
     assert messages == [
         {"role": "user", "text": "hello"}, {"role": "assistant", "text": "reply 1"},
-        {"role": "user", "text": "second question"}, {"role": "assistant", "text": "reply 3"},
+        {"role": "user", "text": "second question"}, {"role": "user", "text": "third question"},
+        {"role": "assistant", "text": "reply 3"},
     ]
 
 
@@ -277,3 +279,72 @@ def test_pilot_http_create_send_and_read_history(tmp_path, monkeypatch):
         server.shutdown()
         server.server_close()
         thread.join()
+
+
+def test_a_recreated_session_does_not_inherit_the_deleted_ones_record(tmp_path, monkeypatch):
+    """The harness file record outlives the Session; a reused id must not resurrect that conversation."""
+    from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
+    from anchor import pilot
+
+    seen: list[list[str]] = []
+
+    def answer(messages, info):
+        seen.append([part.content for message in messages if isinstance(message, ModelRequest)
+                     for part in message.parts if isinstance(part, UserPromptPart)])
+        return ModelResponse(parts=[TextPart(content='好的')])
+
+    monkeypatch.setattr(pilot, "_agent", lambda _: Agent(FunctionModel(answer), output_type=str))
+    scheduler = Scheduler(tmp_path, tmp_path / "runtime.json")
+    body, status = scheduler.create_session("reused")
+    assert status == 201, body
+    assert scheduler.pilot_message("reused", "被删除会话里的旧问题")[1] == 200
+    scheduler.sessions.set_status("reused", "archived")
+    scheduler.sessions.delete("reused")
+    assert not (tmp_path / "sessions/reused").exists()
+    assert (tmp_path / "state/pilot-steps").is_dir(), "the file record survives, by design"
+
+    body, status = scheduler.create_session("reused")
+    assert status == 201, body
+    assert scheduler.pilot_message("reused", "新会话的问题")[1] == 200
+    assert seen[-1] == ["新会话的问题"], seen
+
+
+def test_an_unreadable_record_does_not_block_the_next_message(tmp_path, monkeypatch):
+    """A damaged file record must not lock the conversation; the saved history is still there."""
+    from pydantic_ai.messages import ModelResponse, TextPart
+    from anchor import pilot
+
+    def answer(messages, info):
+        return ModelResponse(parts=[TextPart(content='好的')])
+
+    monkeypatch.setattr(pilot, "_agent", lambda _: Agent(FunctionModel(answer), output_type=str))
+    scheduler = Scheduler(tmp_path, tmp_path / "runtime.json")
+    scheduler.create_session("broken")
+    assert scheduler.pilot_message("broken", "第一句")[1] == 200
+    record = sorted((tmp_path / "state/pilot-steps").iterdir())[-1]
+    newest = max((record / "snapshots").glob("*.json"), key=lambda item: int(item.stem))
+    newest.write_text("{not json", encoding="utf-8")
+    scheduler.sessions.set_status("broken", "interrupted", reason="模拟中断")
+
+    assert scheduler.pilot_message("broken", "第二句")[1] == 200
+    assert scheduler.sessions.get("broken").status == "active"
+    messages = __import__("json").loads(scheduler.pilot_messages("broken")[0])["messages"]
+    assert [item["text"] for item in messages] == ["第一句", "好的", "第二句", "好的"]
+
+
+def test_the_message_endpoint_refuses_while_a_decision_is_pending(tmp_path, monkeypatch):
+    from pydantic_ai.messages import ModelResponse, TextPart
+    from anchor import pilot
+
+    def answer(messages, info):
+        return ModelResponse(parts=[TextPart(content='不该走到这里')])
+
+    monkeypatch.setattr(pilot, "_agent", lambda _: Agent(FunctionModel(answer), output_type=str))
+    scheduler = Scheduler(tmp_path, tmp_path / "runtime.json")
+    scheduler.create_session("gated")
+    scheduler.sessions.set_pending("gated", [{"tool_call_id": "call-1", "key": "call-1",
+                                              "action": "graph_delete", "target": "demo",
+                                              "proposal": {"graph": "demo"}}])
+    body, status = scheduler.pilot_message("gated", "顺便做点别的")
+    assert status == 409 and "pending operation" in body, body
+    assert scheduler.sessions.get("gated").status == "waiting_user"
