@@ -16,7 +16,7 @@
     },
     "reviewer": {
       "model": "models.academic",
-      "instructions": "Count the words in the draft you were given. Decide where this goes next:\n\n  route to `draft` if you have not written `review.md` yet — write it first, asking for one concrete example.\n  route to `done` if `review.md` is already there.\n\nFinish with `anchor-route --to <draft|done> --reason \"…\"` and nothing after it.",
+      "instructions": "Count the words in the draft you were given. Decide where this goes next:\n\n  route to `draft` if you have not written `review.md` yet — write it first, asking for one concrete example.\n  route to `done` if `review.md` is already there.\n\nReturn a structured completion with the selected route.",
       "network": false,
       "reads": [
         "draft.md"
@@ -27,7 +27,7 @@
     },
     "finisher": {
       "model": "models.academic",
-      "instructions": "The draft is mounted read-only with what you were given, reachable through the review. Copy it into `final.md`, with a one-line heading above it. Then finish with `anchor-done --summary \"…\"`.",
+      "instructions": "The draft is mounted read-only with what you were given, reachable through the review. Copy it into `final.md`, with a one-line heading above it. Then return a structured completion.",
       "network": false,
       "reads": [
         "draft.md"

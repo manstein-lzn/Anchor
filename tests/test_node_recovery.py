@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import subprocess
 import sys
 from pathlib import Path
 
@@ -25,7 +24,7 @@ from anchor.node.recovery import (                                              
 from anchor.runtime.sandbox import BubblewrapWorkspaceSandbox                   # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPT = ROOT / "scripts" / "recovery_windows.py"
+sys.path.insert(0, str(ROOT))
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -34,22 +33,6 @@ def needs_a_sandbox():
         BubblewrapWorkspaceSandbox(allowed_commands=frozenset({"sh"}))
     except RuntimeError as exc:
         pytest.skip(f"no usable sandbox on this machine: {exc}")
-
-
-@pytest.fixture(scope="module")
-def killed(tmp_path_factory) -> dict:
-    """Every window, run once, with real kills — the evidence the assertions below are about.
-
-    Module-scoped because a kill takes about half a second and there is no reason to repeat it for each
-    assertion. The JSON it writes is the same evidence a person would read.
-    """
-    root = tmp_path_factory.mktemp("recovery")
-    out = root / "evidence.json"
-    done = subprocess.run(
-        [sys.executable, str(SCRIPT), "--root", str(root), "--json", str(out), "--timeout", "90"],
-        capture_output=True, text=True, timeout=900, cwd=str(ROOT))
-    assert out.exists(), f"the fault script produced no evidence:\n{done.stdout}\n{done.stderr}"
-    return {item["window"]: item for item in json.loads(out.read_text(encoding="utf-8"))}
 
 
 # ── the reference ────────────────────────────────────────────────────────────────────────────────

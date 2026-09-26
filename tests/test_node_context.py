@@ -62,11 +62,20 @@ class Counting(FunctionModel):
             # pass asked again after submitting.
             if n == len(self.turns):
                 return ModelResponse(parts=[ToolCallPart(
-                    tool_name="bash", args={"command": 'anchor-done --summary "finished"'})])
+                    tool_name="final_result", args={"summary": "finished"})])
             raise AssertionError(f"the model was asked {n + 1} times for {len(self.turns)} turns")
         entry = self.turns[n]
         if isinstance(entry, str):
             return ModelResponse(parts=[TextPart(content=entry)])
+        if len(entry) == 1 and entry[0].startswith("anchor-done --summary"):
+            summary = entry[0].split("--summary", 1)[1].strip().strip("'\"")
+            return ModelResponse(parts=[ToolCallPart(tool_name="final_result",
+                                                     args={"summary": summary})])
+        if len(entry) == 1 and entry[0].startswith("anchor-route --to"):
+            fields = entry[0].split()
+            route = fields[fields.index("--to") + 1]
+            return ModelResponse(parts=[ToolCallPart(tool_name="final_result",
+                                                     args={"summary": "routed", "route": route})])
         return ModelResponse(parts=[ToolCallPart(tool_name="bash", args={"command": command})
                                     for command in entry])
 
@@ -263,8 +272,7 @@ def test_b4_the_tool_set_is_exactly_bash_and_the_record_is_outside_the_workspace
     def watching(messages, info):
         seen["function_tools"] = [tool.name for tool in info.function_tools]
         seen["output_tools"] = [tool.name for tool in (info.output_tools or [])]
-        return ModelResponse(parts=[ToolCallPart(tool_name="bash",
-                                                 args={"command": 'anchor-done --summary "x"'})])
+        return ModelResponse(parts=[ToolCallPart(tool_name="final_result", args={"summary": "x"})])
 
     record = Record(tmp_path / "record")
     outcome = asyncio.run(run_node(
@@ -273,13 +281,13 @@ def test_b4_the_tool_set_is_exactly_bash_and_the_record_is_outside_the_workspace
 
     assert outcome.status == COMPLETED, outcome.reason
     assert seen["function_tools"] == ["bash"], f"found {seen['function_tools']}"
-    assert seen["output_tools"] == []
+    assert seen["output_tools"] == ["final_result"]
 
     # The record is outside the workspace, and the node cannot write to it.
     assert record.directory != workspace and workspace not in record.directory.parents
     written = asyncio.run(run_node(
         request(workspace),
-        model=Counting("echo tampered >> " + str(record.directory / "record.jsonl") + " || echo refused",
+        model=Counting(["echo tampered >> " + str(record.directory / "record.jsonl") + " || echo refused"],
                        'anchor-done --summary "tried"'),
         capabilities=()))
     assert written.status == COMPLETED
@@ -364,9 +372,9 @@ def test_b6_every_command_is_in_the_record_even_after_the_history_is_cut(tmp_pat
 
     assert outcome.status == COMPLETED
     assert record.compactions, "no compaction happened, so this proves nothing"
-    # Every request but the last carries a command, and the last carries the completion — so the
-    # record has one command per request, not one fewer.
-    assert len(record.commands) == model.asked, \
+    # Completion is a structured result, not another shell command.
+    # The final structured result is a model request but not a bash command.
+    assert len(record.commands) == model.asked - 1, \
         f"{len(record.commands)} commands recorded for {model.asked} model requests"
     # The arriving history is much larger than anything sent — proof the two are not the same list.
     assert max(item["tokens"] for item in record.arriving) > 3 * max(
@@ -383,10 +391,8 @@ def test_b6_two_runs_do_not_share_a_record(tmp_path):
 
     assert first.submission == "a" and second.submission == "b"
     assert record_a.directory != record_b.directory
-    assert len(record_a.commands) == 2 and len(record_b.commands) == 2
-    # Two commands per run: the one the script gave and the completion, which is a command too.
-    assert [item["command"] for item in record_a.commands] == ["echo one",
-                                                             'anchor-done --summary "a"']
+    assert len(record_a.commands) == 1 and len(record_b.commands) == 1
+    assert [item["command"] for item in record_a.commands] == ["echo one"]
     assert record_b.commands[0]["command"] == "echo two"
 
 
@@ -915,9 +921,7 @@ def test_a_skipped_call_does_not_inherit_the_previous_spill(tmp_path):
     assert outcome.status == COMPLETED, outcome.reason
     assert not (workspace / "after.txt").exists()
     assert record.commands[0]["complete"] is True, "the command that spilled is not marked kept"
-    assert record.commands[-1]["seen_by_node"] is None, \
-        "the refused call was credited with the previous command's spill"
-    assert record.commands[-1]["complete"] is False
+    assert len(record.commands) == 1, "no bash command is emitted after structured completion"
 
 
 def test_a_refused_request_is_not_counted_as_sent(tmp_path):

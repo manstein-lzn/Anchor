@@ -13,7 +13,7 @@ dependencies = [
     # The agent loop and its model client. Ours is the graph, the workspace and the sandbox; the
     # loop is theirs (MIT), because a loop that cannot be stopped by talking is a property of the
     # loop and theirs has it. Pinned to the pair the migration was verified against (ADR-062); the
-    # matrix is in DECISIONS.md and a change to it re-verifies.
+    # historical matrix is in docs/archive/DECISIONS.md; changes require re-verification.
     "pydantic-ai-slim==2.46.0",
     "pydantic-ai-harness==0.32.0",
     # The literature tools: fetching, and turning what comes back into text.
@@ -26,6 +26,7 @@ dependencies = [
 ]
 
 [project.scripts]
+anchor-library = "anchor.library:main"
 anchor-scholarly = "anchor.scholarly.__main__:main"
 anchor-graph = "anchor.simple.__main__:main"
 anchor-done = "anchor.done.__main__:main"
@@ -35,6 +36,8 @@ anchor-serve = "anchor.__main__:main"
 [project.optional-dependencies]
 dev = [
     "pytest>=8,<9",
+    # The suite runs real sandboxes and fault injection; most of its wall time is a handful of tests.
+    "pytest-xdist>=3.8,<4",
     "ruff>=0.16,<1",
     "mypy>=1.11,<3",
 ]

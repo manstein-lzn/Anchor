@@ -55,7 +55,13 @@ export type OurGraph = {
  * separately from its nodes worth doing: two nodes can share one and still be asked for different
  * things. It belongs to agents: an op has no instructions to add to, and the loader refuses it there.
  */
-export type OurNode = { id: string; agent?: string; op?: string; graph?: string; with?: string };
+export type OurNode = { id: string; agent?: string; op?: string; graph?: string; with?: string; plugins?: string[] };
+
+export type Plugin = {
+  id: string; name: string; description: string; digest?: string;
+  tools: { id: string; entrypoint: string; digest?: string; executable_digest?: string }[];
+  available?: boolean; error?: string; instructions?: string;
+};
 
 /** Which of the three a node is as written. A module is the third: it disappears when the graph is
  *  expanded, so a run only ever sees agents and ops. */
@@ -134,6 +140,7 @@ export type OurFileBody = {
 };
 
 export type OurRunDetail = {
+  plugins?: Record<string, Plugin[]>;
   graph: string;
   run: string;
   state: OurRunState;
@@ -143,6 +150,7 @@ export type OurRunDetail = {
 
 export type FlowNode = Node<{
   name: string; kind: string; state: string; detail: string;
+  plugins?: string[];
   /** Which of the two it is, so a component can choose an icon without parsing the label. */
   nodeKind: 'agent' | 'op' | 'subgraph';
   attempt?: number; statusLabel?: string;
@@ -199,6 +207,7 @@ function nodeState(nodeId: string, graph: OurGraph, state: OurRunState | null): 
       state: status,
       detail,
       nodeKind: kindOf(graph.nodes.find(item => item.id === nodeId)!),
+      plugins: graph.nodes.find(item => item.id === nodeId)?.plugins,
       // The canvas renders `attempt + 1` as "第 N 次执行", so zero means the first pass.
       attempt: passes ? passes - 1 : undefined,
       statusLabel,

@@ -4,7 +4,7 @@
   "agents": {
     "searcher": {
       "model": "models.academic",
-      "instructions": "Do a SHORT literature search: at most 6 searches in total, using `anchor-scholarly search` (try crossref first; arxiv is often rate limited) and `anchor-scholarly read-many` for what you find. Then stop searching.\n\nWrite two files and keep them current as you go:\n\n  sources.md   one entry per paper actually retrieved: number, title, authors, year, DOI or arXiv id, and the URL.\n  notes.md     one line per source saying what it contributes to the question, in your own words, with its number.\n\nIf a source refuses, do not wait for it — use another or move on. Finish with `anchor-done --summary \"what you found and what is missing\"`.",
+      "instructions": "Do a focused literature search using the mounted academic Plugin. Write sources.md and notes.md with the evidence and what remains missing. If a source refuses, use another or move on. Return a structured completion when the pass is complete.",
       "network": true,
       "max_steps": 25,
       "wall_time_limit_seconds": 600,

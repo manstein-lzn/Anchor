@@ -37,6 +37,8 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from anchor.library import references
+
 #: Separates a module's name from the name of a node inside it, once the module is inlined. A name
 #: an author writes may not contain it: `a/b` written by hand and "node b of module a" would be the
 #: same string, and nothing downstream could tell them apart.
@@ -101,6 +103,7 @@ class Node:
     # Appended to the role's instructions. Two nodes may share a role and differ here, which is what
     # makes a role worth declaring separately from the nodes that use it.
     with_: str = ""
+    plugins: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -245,6 +248,8 @@ def _files(value: object, where: str, what: str) -> tuple[str, ...]:
 
 def _agent(name: str, spec: dict) -> Agent:
     where = f"agent {name!r}"
+    if "plugins" in spec:
+        raise ValueError(f"{where}: put plugins on the AgentNode, not the shared role")
     if "model" not in spec:
         raise ValueError(f"{where} needs a \"model\"")
     if spec.get("max_steps") is not None and (
@@ -284,6 +289,10 @@ def _check_node(item: object, where: str, *, allow_sep: bool) -> dict:
     if not kinds:
         raise ValueError(f"{where}: node {item['id']!r} needs an \"agent\", an \"op\" or a "
                          f"\"graph\"")
+    if "plugins" in item:
+        if "agent" not in item:
+            raise ValueError(f"{where}: plugins can only be attached to an AgentNode")
+        references(item["plugins"])
     has_graph = "graph" in item
     if has_graph and "with" in item:
         # Read by nothing: a module has no instructions of its own to add to. `max_rounds` is a
@@ -444,7 +453,8 @@ def _expand(body: dict, pool: dict[str, dict], prefix: str) -> _Expansion:
             sides[item["id"]] = (inner.entry, inner.exit)
         else:
             nodes[flat] = Node(id=flat, agent=item.get("agent", ""), op=item.get("op", ""),
-                               with_=item.get("with", ""))
+                               with_=item.get("with", ""),
+                               plugins=references(item.get("plugins", [])))
             if item.get("max_rounds", ceiling) is not None:
                 max_rounds[flat] = int(item.get("max_rounds", ceiling))
             sides[item["id"]] = (flat, flat)
@@ -590,6 +600,7 @@ def to_dict(graph: Graph) -> dict:
                 for name, op in graph.ops.items()},
         "nodes": [{"id": node.id, **({"agent": node.agent} if node.agent else {"op": node.op}),
                    **({"with": node.with_} if node.with_ else {}),
+                   **({"plugins": list(node.plugins)} if node.plugins else {}),
                    **({"max_rounds": graph.ceiling(node.id)}
                       if graph.ceiling(node.id) is not None else {})}
                   for node in graph.nodes.values()],

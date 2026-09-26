@@ -1,0 +1,14 @@
+{
+  "entry": "research",
+  "objective": "查询一个检索增强生成的研究问题，读取原始论文，并在 research.md 中说明证据与结论边界。",
+  "agents": {
+    "researcher": {
+      "model": "models.academic",
+      "network": true,
+      "writes": ["research.md"],
+      "instructions": "根据目标进行研究，先了解挂载的 Plugin。保存研究笔记与可核验的来源。完成后返回结构化完成结果。"
+    }
+  },
+  "nodes": [{"id": "research", "agent": "researcher", "plugins": ["academic-research"]}],
+  "edges": []
+}

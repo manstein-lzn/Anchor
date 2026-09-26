@@ -32,7 +32,7 @@
     },
     "critic": {
       "model": "models.academic",
-      "instructions": "Read the draft you were given, and the sources behind it. Write `critique.md`: one concrete problem, quoted, and what would fix it.\n\nThen decide where this goes next and finish with `anchor-route --to <draft|settle> --reason \"…\"` and nothing after it. Route to `draft` if the paragraph still has a problem worth another pass. Route to `settle` if it does not.",
+      "instructions": "Read the draft you were given, and the sources behind it. Write `critique.md`: one concrete problem, quoted, and what would fix it. Then choose draft if another pass is needed or settle otherwise, and return a structured completion with that route.",
       "reads": [
         "draft.md",
         "sources.md"
@@ -43,7 +43,7 @@
     },
     "editor": {
       "model": "models.academic",
-      "instructions": "Read the draft, which is reachable through the critique you were given. Write `final.md` containing the paragraph plus a one-line heading above it, and nothing else. Finish with `anchor-done --summary \"what it says\"`.",
+      "instructions": "Read the draft, which is reachable through the critique you were given. Write `final.md` containing the paragraph plus a one-line heading above it, and nothing else. Return a structured completion.",
       "reads": [
         "draft.md"
       ],

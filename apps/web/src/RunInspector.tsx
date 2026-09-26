@@ -2,13 +2,14 @@ import { useEffect, useMemo, useState } from 'react';
 import { FolderOpen, MessageSquare, SlidersHorizontal } from 'lucide-react';
 import { Files } from './Files';
 import { Transcript } from './Transcript';
+import { Plugins } from './Plugins';
 import { EmptyState } from './ui';
 import type { OurRunDetail } from './model';
 
 /** Inspection state is local to the selected run/node, independent of graph editing. */
 export function RunInspector({ run, node, detail }:
   { run: string; node: string; detail: OurRunDetail | null }) {
-  const [tab, setTab] = useState<'talk' | 'files'>('talk');
+  const [tab, setTab] = useState<'talk' | 'files' | 'plugins'>('talk');
   const [pass, setPass] = useState('');
   const passes = useMemo(() => Object.keys(detail?.traces ?? {})
     .filter(item => item === node || (item.startsWith(`${node}-`) && /^\d+$/.test(item.slice(node.length + 1))))
@@ -28,11 +29,14 @@ export function RunInspector({ run, node, detail }:
           onClick={() => setTab('talk')}><MessageSquare size={14} />对话</button>
         <button aria-pressed={tab === 'files'} className={tab === 'files' ? 'chosen' : ''}
           onClick={() => setTab('files')}><FolderOpen size={14} />文件</button>
+        <button aria-pressed={tab === 'plugins'} className={tab === 'plugins' ? 'chosen' : ''}
+          onClick={() => setTab('plugins')}>Plugin</button>
       </div>}
     </div>
     {!node ? <EmptyState icon={MessageSquare} title="探索一次执行">
       在画布中选择节点，查看它的思考、执行过程和生成的文件。
-    </EmptyState> : tab === 'files' ? <><p className="inspector-note">显示 {node} 当前工作区的文件；历史轮次的对话不会改变这里的最新文件。</p><Files run={run} node={node} /></> : <>
+    </EmptyState> : tab === 'plugins' ? <Plugins recorded={detail?.plugins?.[node] ?? []} />
+    : tab === 'files' ? <><p className="inspector-note">显示 {node} 当前工作区的文件；历史轮次的对话不会改变这里的最新文件。</p><Files run={run} node={node} /></> : <>
       <div className="node-summary">
         <span className={`pill ${detail?.state.cursor?.node === node ? 'running' : result?.submitted ? 'finished' : result ? 'failed' : 'pending'}`}>
           {detail?.state.cursor?.node === node ? '执行中' : result ? (result.submitted ? '已提交' : '失败') : '未执行'}

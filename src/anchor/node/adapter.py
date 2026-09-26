@@ -241,10 +241,8 @@ async def _what_a_previous_attempt_left(request: NodeRequest, capabilities: tupl
         # **It already submitted.** Nothing is run and no model is asked: the result is recorded, and
         # the one action that must never happen twice is the submission.
         #
-        # Read from the **fact the protocol wrote**, not from the history's text. The history holds the
-        # observation the model was shown, and the marker is in it whether or not the protocol accepted
-        # it — a command that printed the marker and exited 1, which is refused on the normal path, was
-        # reported here as a finished node with the refusal as its submission.
+        # Read from the **fact the protocol wrote**, not from history text. Tool output is evidence for
+        # the model, never proof that the node completed.
         if verdict.action == "finished":
             from anchor.node.recovery import already_finished
             submission, route = already_finished(Path(started.ref.store), started.ref.node)
@@ -284,9 +282,9 @@ async def _what_a_previous_attempt_left(request: NodeRequest, capabilities: tupl
         # repeated `run_id` outright, which is what made this necessary rather than convenient.
         from pydantic_ai_harness import StepPersistence
         started.store = open_store(Path(recovery_store))
+        started.this_run = await _next_run_id(started.store, request.node_key)
         started.resumed.append(StepPersistence(store=started.store, agent_name=request.node_key,
-                                               run_id=await _next_run_id(started.store,
-                                                                         request.node_key)))
+                                               run_id=started.this_run))
 
     return started
 
@@ -328,6 +326,7 @@ async def run_node(request: NodeRequest, *, model: Any,
             recovery=request.recovery)
 
     counted = _CountingModel(model)
+    counted.cancelled = request.cancelled
     # **A caller that passes only a reference still gets its spending recorded.** The reference names the
     # control directory; requiring the caller to pass the path as well meant an attempt made through a
     # reference alone spent requests nobody wrote down.
@@ -348,8 +347,6 @@ async def run_node(request: NodeRequest, *, model: Any,
     wiring: _Wiring | None = None
     run: Any = None
     messages: list[Any] = []
-    #: The last batch's already-formed results, read off the node the pass left on.
-    formed: Any = None
     current = asyncio.current_task()
 
     async def stop_when_asked() -> None:
@@ -381,15 +378,8 @@ async def run_node(request: NodeRequest, *, model: Any,
                                any(getattr(part, "part_kind", "") in ("tool-return", "retry-prompt")
                                    for part in node.request.parts) else None)
                     _write_trace(request.trace, list(run.all_messages()), wiring, formed=pending)
-                # **The boundary after the tools, not the tools themselves.** A node is yielded when it
-                # is entered, so at `CallToolsNode` the commands have not run yet and nothing has been
-                # submitted; breaking there does nothing and the pass goes on to ask the model again —
-                # measured, by a third request appearing in the record. The node that asks the model is
-                # exactly the one to leave on: a submission is already in hand, so asking again is the
-                # thing this is here to prevent.
-                if isinstance(node, ModelRequestNode) and wiring.done is not None:
-                    formed = node.request
-                    break
+                # Structured output ends the PydanticAI run naturally. There is no shell sentinel to
+                # intercept and no extra model request after the completion validator has persisted it.
 
         messages = list(run.all_messages())
         done = wiring.done
@@ -416,14 +406,17 @@ async def run_node(request: NodeRequest, *, model: Any,
             files=_files(request.workspace))
     except Exception as exc:                      # noqa: BLE001 - every failure is a recorded status
         messages = list(run.all_messages()) if run is not None else []
+        asked_to_stop = request.cancelled is not None and request.cancelled()
         outcome = NodeOutcome(
             status=FAILED, model_requests=counted.requests - already,
-            reason=f"{type(exc).__name__}: {exc}", files=_files(request.workspace))
+            reason=("stopped on request" if asked_to_stop
+                    else f"{type(exc).__name__}: {exc}"),
+            files=_files(request.workspace))
     finally:
         if watcher is not None:
             watcher.cancel()
 
-    return replace(outcome, trace_ref=_write_trace(request.trace, messages, wiring, outcome, formed),
+    return replace(outcome, trace_ref=_write_trace(request.trace, messages, wiring, outcome),
                    recovery=await _reference(recovery_store, request, store, ref,
                                              spent=outcome.model_requests, ran=this_run))
 

@@ -368,9 +368,9 @@ class BubblewrapWorkspaceSandbox:
               for item in ("--ro-bind", path, path)),
             *(item for source, destination in SANDBOX_FILES if Path(source).exists()
               for item in ("--ro-bind-try", source, destination)),
+            "--tmpfs", "/tmp",
             *(item for source, destination in spec.readonly_binds
               for item in ("--ro-bind", source, destination)),
-            "--tmpfs", "/tmp",
             *(("--proc", "/proc") if self._proc else ()),
             "--dir", SANDBOX_WORKSPACE,
             # Read-write, unlike the rest of the tree, because a node that can only read cannot

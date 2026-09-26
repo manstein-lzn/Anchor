@@ -6,8 +6,8 @@ node whose edges were all rejected is skipped, and the run ends when nothing is 
 
 A node has one workspace, kept across the passes of a loop: a node revising its own work needs to see
 what it wrote last time, and that is simply the directory it is already standing in. Nothing is copied
-between nodes. What an edge carries is a pointer — the predecessor's workspace, mounted read-only in
-the sandbox at `/in/<node>`, its git history included — so a node reads what it was given and cannot
+into a downstream workspace. What an edge carries is a commit pointer — exported and mounted read-only
+in the sandbox at `/in/<node>`, with history only up to that commit — so a node reads it and cannot
 write to it. Its own output is exactly what is in its own directory, which is why a node's files can be
 attributed to it without keeping a list of what it was handed.
 
@@ -37,6 +37,7 @@ from typing import Any
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
+from anchor.library import Attached, for_workspace, record_bindings
 
 from anchor.simple import graph as graph_module
 from anchor.node import node_key
@@ -220,10 +221,12 @@ def _task(graph: graph_module.Graph, node_id: str, objective: str,
                          f"{result.submission.strip() or '(nothing said)'}")
             if result.files:
                 lines.append("What it produced:\n" + "\n".join(f"  {name}" for name in result.files))
-            lines.append(f"Its whole history is there too, one commit per pass — what you were "
-                         f"given is {item.commit[:12]}:\n\n"
+            lines.append(f"If needed, trace its history up to the input commit {item.commit[:12]}, "
+                         f"one commit per pass. HEAD is pinned to that input; later commits and "
+                         f"unrelated branches are not available:\n\n"
                          f"    git --git-dir={item.mount}/.git log --oneline\n"
-                         f"    git --git-dir={item.mount}/.git show <commit>")
+                         f"    git --git-dir={item.mount}/.git show <commit>\n"
+                         f"    git --git-dir={item.mount}/.git diff <older-commit> HEAD")
     if reached:
         lines.append(
             "# What you can reach\n\n"
@@ -232,7 +235,8 @@ def _task(graph: graph_module.Graph, node_id: str, objective: str,
             + "\n".join(f"    {item.mount}   ({item.node_id} at {item.commit[:12]})"
                         for item in reached)
             + "\n\nEach is at the commit it had when it fed this line of work, not its latest. "
-              "`git --git-dir=<mount>/.git log` reads the rest of that node's history.")
+              "`git --git-dir=<mount>/.git log` traces its ancestors only; HEAD is pinned to "
+              "the input commit, with no later commits or unrelated branches available.")
     if node_op:
         lines.append(
             "# What this node is\n\n"
@@ -261,16 +265,13 @@ def _task(graph: graph_module.Graph, node_id: str, objective: str,
         "    git -C /workspace diff HEAD~1")
     routes = graph.routes(node_id)
     if len(routes) > 1:
-        lines.append("# How this node finishes\n\nYou decide where it goes next. When the work is "
-                     "done, run this and nothing after it:\n\n"
-                     f"    anchor-route --to <{'|'.join(routes)}> --reason \"one line why\"\n\n"
-                     "That is the only way this node finishes — `anchor-done` is not accepted "
-                     "here, because this node chooses where the graph goes. The reason is recorded; "
-                     "nothing parses it.")
+        lines.append("# How this node finishes\n\nWhen the work is done, return the structured "
+                     "completion result with a non-empty `summary` and exactly one legal `route`: "
+                     f"`{'`, `'.join(routes)}`. Do not use shell commands to signal completion.")
     else:
-        lines.append("# How this node finishes\n\nWhen the work is done, run this and nothing "
-                     "after it:\n\n    anchor-done --summary \"what you did, and what you "
-                     "could not do\"")
+        lines.append("# How this node finishes\n\nWhen the work is done, return a structured "
+                     "completion result with a non-empty `summary`. Completion is separate from bash "
+                     "tool use, so do not use a shell command as a completion signal.")
     return "\n\n".join(lines)
 
 
@@ -322,8 +323,30 @@ class _Given:
     direct: bool = True
 
     def binds(self) -> tuple[tuple[str, str], ...]:
-        """The tree at that commit, and the repository behind it so the history stays readable."""
+        """The tree and its pinned history, both read-only in the sandbox."""
         return ((str(self.tree), self.mount), (str(self.tree / ".git"), f"{self.mount}/.git"))
+
+
+def _materialize_history(repo: Path, commit: str, into: Path) -> None:
+    """Fetch only this commit and its ancestors, never the live repository's refs or object store."""
+    if (into / "HEAD").is_file():
+        return
+    staging = into.with_name(into.name + ".building")
+    shutil.rmtree(staging, ignore_errors=True)
+    try:
+        # A fetch by object ID transfers reachable history only. A local clone or shared objects
+        # would also expose later commits, even with a detached HEAD and no advertised branches.
+        _git(staging.parent, "init", "-q", "--bare", "--template=", str(staging.resolve()))
+        _git(staging, "fetch", "-q", "--no-tags", "--no-write-fetch-head",
+             "--no-auto-maintenance", str(repo.resolve()), commit)
+        _git(staging, "update-ref", "--no-deref", "HEAD", commit)
+        # Atomic publication also replaces the empty .git placeholder in old cached views.
+        staging.rename(into)
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(f"cannot read history at commit {commit[:12]} of {repo}: "
+                           f"{exc.stderr.strip()}") from exc
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
 
 
 def _materialize(repo: Path, commit: str, into: Path) -> Path:
@@ -333,6 +356,7 @@ def _materialize(repo: Path, commit: str, into: Path) -> Path:
     file a node chose not to commit is a file it chose not to hand on.
     """
     if into.is_dir():
+        _materialize_history(repo, commit, into / ".git")
         return into
     # Built beside the name it will take, and moved into place only once it is whole. A half-written
     # view left under the real name is returned by the guard above on the next call and mounted as if
@@ -364,9 +388,7 @@ def _materialize(repo: Path, commit: str, into: Path) -> Path:
             # node fail to start, reported as a tar error about a link. A symlink is part of the
             # snapshot and is kept; the archive-level guards (`..`, absolute member paths) stay.
             tar.extractall(staging, filter="tar")
-    # Made here, not by the sandbox: a mount point cannot be created inside a read-only bind, and the
-    # history is mounted over this.
-    (staging / ".git").mkdir(exist_ok=True)
+    _materialize_history(repo, commit, staging / ".git")
     staging.rename(into)
     return into
 
@@ -548,7 +570,8 @@ def _next_step(graph: graph_module.Graph, state: RunState, decided: dict, run_di
         state.activations[scope] = entry
         _restart_scope(state, scope)
     number = state.passes.get(node_id, 0) + 1
-    if graph.ceiling(node_id) is not None and number > graph.ceiling(node_id):
+    allowed = graph.ceiling(node_id)
+    if allowed is not None and number > allowed:
         return _Step(node_id, number, Path(), None, False,
                      refused=f"{node_id}@{graph.ceiling(node_id)}")
     # One directory per node, kept across its passes. A node revising its own work needs to see what
@@ -673,7 +696,7 @@ def _secret(secret_file: str | None, model: dict) -> str:
 def _agent_for(graph, node_id: str, directory: Path, models: dict, secret_file, config_path,
                inputs: tuple[_Given, ...] = (), trace: Path | None = None,
                scripted_model: Any = None, control: Path | None = None,
-               cancelled: Callable[[], bool] | None = None):
+               cancelled: Callable[[], bool] | None = None, plugins: Attached = Attached()):
     """The node about to run, built around the runtime ADR-062 names.
 
     **One factory for both kinds of node**, because the difference between an agent and an op is what
@@ -709,6 +732,8 @@ def _agent_for(graph, node_id: str, directory: Path, models: dict, secret_file, 
     # more than once, and two uses that differ only in their framing differ here.
     instructions = (f"{spec.instructions}\n\n{node.with_}" if spec.instructions and node.with_
                     else spec.instructions or node.with_)
+    if plugins.records:
+        instructions = f"{instructions}\n\n{plugins.instructions}"
     return Node(node_id=node_id, directory=directory, routes=graph.routes(node_id), inputs=inputs,
                 trace=trace, model=model, instructions=instructions,
                 # Ten minutes for one command, not five. A batch of literature searches is legitimately
@@ -716,6 +741,7 @@ def _agent_for(graph, node_id: str, directory: Path, models: dict, secret_file, 
                 # that is killed at five throws away everything it had done.
                 network=spec.network, timeout_seconds=600.0,
                 max_requests=spec.max_steps, control=control,
+                resources=plugins.binds,
                 cancelled=cancelled)
 
 
@@ -804,7 +830,8 @@ def run(workspace: str | Path, *, objective: str | None = None, config_path: str
         run_id: str | None = None, resume: str | Path | None = None,
         model_script: dict[str, list[str]] | None = None,
         stop_request: Callable[[], str | None] | None = None,
-        already_submitted: Callable[[str], tuple[str, str | None] | None] | None = None) -> RunState:
+        already_submitted: Callable[[str], tuple[str, str | None] | None] | None = None,
+        library_root: str | Path | None = None) -> RunState:
     """Walk the graph. `model_script` replaces the model with written-down commands, per node.
 
     `stop_request` is asked between nodes. A stop also cancels the active model call or sandbox
@@ -850,8 +877,6 @@ def run(workspace: str | Path, *, objective: str | None = None, config_path: str
     # The graph as this run read it — every module already inlined, every node naming its agent.
     # Written rather than referenced, so a run can be read without the workspace still holding the
     # file it came from, and so which module a node belongs to is answerable from the record alone.
-    (run_dir / "graph.json").write_text(
-        json.dumps(graph_module.to_dict(graph), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     # A node that is already recorded as not having submitted means the run stopped without
     # finishing. Checked before anything runs, because afterwards the scheduler has no reason to
     # revisit it — it would find nothing ready and report `finished`, which is the failure in the
@@ -904,6 +929,19 @@ def run(workspace: str | Path, *, objective: str | None = None, config_path: str
         state.decided = {f"{source}|{target}": [value[0], value[1]]
                          for (source, target), value in decided.items()}
     try:
+        library = for_workspace(workspace, Path(library_root) if library_root is not None else None)
+        bindings = {node.id: library.attach(node.plugins) for node in graph.nodes.values() if node.plugins}
+        snapshot = graph_module.to_dict(graph)
+        if bindings:
+            snapshot["_module_rounds"] = graph.module_rounds
+            if resume is not None and (run_dir / "graph.json").exists():
+                previous = json.loads((run_dir / "graph.json").read_text(encoding="utf-8"))
+                if snapshot != previous:
+                    raise ValueError("Graph definition changed since this Plugin run started; start a new run")
+        record_bindings(run_dir, bindings, resume=resume is not None)
+        if resume is None or not bindings:
+            (run_dir / "graph.json").write_text(
+                json.dumps(snapshot, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         while True:
             stopped = _asked_to_stop(stop_request, state, run_dir)
             if stopped is not None:
@@ -938,11 +976,20 @@ def run(workspace: str | Path, *, objective: str | None = None, config_path: str
             commands = model_script.get(step.node_id) if model_script else None
             scripted_model = scripted_models({step.node_id: commands}).get(step.node_id) if commands \
                 else None
+            attached = bindings.get(step.node_id)
+            if attached is not None:
+                current = library.attach(graph.nodes[step.node_id].plugins)
+                if current != attached:
+                    raise ValueError(f"Plugin resources for {step.node_id} changed during this run")
+            options: dict[str, Any] = {}
+            if attached is not None:
+                options["plugins"] = attached
+            if stop_request is not None:
+                options["cancelled"] = lambda: stop_request() == "stopped"
             agent = _agent_for(graph, step.node_id, step.directory, models, secret_file, config_path,
                                inputs=step.inputs, trace=step.trace, control=control,
                                scripted_model=scripted_model,
-                               **({"cancelled": lambda: stop_request() == "stopped"}
-                                  if stop_request is not None else {}))
+                               **options)
             # **A cursor without a trace means the node never actually started.** The scheduler writes
             # the cursor before dispatching, so a kill in between leaves a node marked as interrupted
             # with nothing to continue from — and resuming reads a trace file that was never written,

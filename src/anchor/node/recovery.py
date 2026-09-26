@@ -342,6 +342,20 @@ async def assess(store: FileStepStore, ref: RecoveryRef) -> Verdict:
             effects=every, events=kinds,
             snapshot=where if snapshot else "", budget=ref.budget)
 
+    # A structured completion may legitimately happen without any tool call. Check its durable fact
+    # before the replayable/no-tool branch; otherwise a completed, tool-free continuation is run again.
+    try:
+        fact = read_completion_fact(Path(ref.store), ref.node)
+    except InvalidReference as exc:
+        return Verdict("invalid", str(exc), effects=every, events=kinds, snapshot=where,
+                       budget=ref.budget)
+    if fact is not None:
+        return Verdict(
+            "finished",
+            f"the completion protocol accepted a {fact.kind} for this node in run {fact.run!r}, so the "
+            "work finished: resuming would ask the model again and could repeat the submission.",
+            effects=every, events=kinds, snapshot=where, budget=ref.budget)
+
     # ── 2. Nothing entered a tool. Running the work once is running it once. ──
     started = [kind for kind in kinds if kind == "tool_call_started"]
     if not started:
@@ -357,25 +371,7 @@ async def assess(store: FileStepStore, ref: RecoveryRef) -> Verdict:
             "recorded anywhere. Nothing to replay from.",
             effects=every, events=kinds, budget=ref.budget)
 
-    # ── 3. It already submitted. Nothing to resume, and asking again is the thing to avoid. ──
-    #
-    # **The recorded fact, not the history's text.** The history holds the observation the model saw, and
-    # the marker appears in it whether or not the protocol accepted it: a command that printed the marker
-    # and exited 1 was reported as finished here, with the refusal as its submission.
-    try:
-        fact = read_completion_fact(Path(ref.store), ref.node)
-    except InvalidReference as exc:
-        return Verdict("invalid", str(exc), effects=every, events=kinds, snapshot=where,
-                       budget=ref.budget)
-    if fact is not None:
-        return Verdict(
-            "finished",
-            f"the completion protocol accepted a {fact.kind} for this node in run {fact.run!r}, so the "
-            f"work finished: resuming would ask the model again and could run the submission a second "
-            f"time. Read the result rather than restarting.",
-            effects=every, events=kinds, snapshot=where, budget=ref.budget)
-
-    # ── 4. Everything settled. Continue only if the snapshot actually covers it. ──
+    # ── 3. Everything settled. Continue only if the snapshot actually covers it. ──
     #
     # **"A complete snapshot exists" is not enough.** The framework writes a tool's terminal record in
     # `after_tool_execute` and the snapshot in `after_node_run` — two hooks, two writes, not one step
@@ -427,15 +423,9 @@ async def continued_messages(store: FileStepStore, ref: RecoveryRef) -> list[Any
 class CompletionFact:
     """**The completion the normal protocol accepted**, written down as a fact rather than as text.
 
-    Exists because recovery cannot re-derive this. A snapshot's history holds a *rendered observation* —
-    `<returncode>1</returncode><output>COMPLETE_TASK…</output>` — and a scanner looking for the marker in
-    it cannot tell an accepted completion from a command that printed the marker and then failed. It did
-    not: a command that printed the marker and exited 1, which `read_completion` refuses and the model is
-    told about, was reported by recovery as `finished` with the refusal text as its submission.
-
-    So the fact is recorded **where the protocol accepts it** (`agent_runtime`'s bash tool) and read
-    back whole. One implementation of the protocol, and recovery reads its output rather than guessing at
-    it from a string.
+    Exists because recovery cannot re-derive this from a conversation snapshot. It is recorded where the
+    structured output validator accepts the result and read back whole; tool output is never scanned to
+    guess whether a completion occurred.
     """
 
     node: str

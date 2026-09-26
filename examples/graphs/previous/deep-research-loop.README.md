@@ -1,5 +1,9 @@
 # deep-research-loop.bundle.json
 
+> 本文仅作历史记录，不是当前操作指南或待办。当前研究图见
+> [deep-academic-research.json](../deep-academic-research.json)，唯一升级方向见
+> [Plugin 设计](../../../docs/plugins.md)。
+
 > **Historical.** It documents a Graph Bundle, a concept removed in commit `9a7497f`.
 > `deep-research-loop.bundle.json` no longer loads: it has no `agents` key, which every graph now
 > requires.

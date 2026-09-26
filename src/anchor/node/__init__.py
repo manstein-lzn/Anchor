@@ -130,8 +130,8 @@ class NodeOutcome:
 
     status: str
     submission: str = ""
-    """What the node said it did, taken from the completion command rather than from a model's last
-    sentence. Empty unless it completed."""
+    """What the node said it did, taken from the validated structured completion rather than from a
+    model's unvalidated last sentence. Empty unless it completed."""
 
     route: str | None = None
     """Which way out it chose. **Only a completed execution has one**: a node that ran out of budget

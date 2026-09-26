@@ -25,7 +25,7 @@
       "writes": [
         "framing.md"
       ],
-      "instructions": "建立可修正的研究问题。首次根据用户目标识别关键概念、争议、竞争解释与值得查证的问题，写 framing.md；不必预先穷尽分解，也不要把工作假设称为预注册。回访读取自己已有文件和 /in/investigate/research.md、/in/challenge/critique.md、/in/review/review.md（存在时）。以本次回流意见为重点，说明为什么原问题需要调整、保留了什么、下一步证据能区分什么。允许缩小无法被现有证据回答的主张，不能暗中改换用户目标。普通笔记即可，无固定认知表格。用 anchor-done 提交。"
+      "instructions": "建立可修正的研究问题。首次根据用户目标识别关键概念、争议、竞争解释与值得查证的问题，写 framing.md；不必预先穷尽分解，也不要把工作假设称为预注册。回访读取自己已有文件和 /in/investigate/research.md、/in/challenge/critique.md、/in/review/review.md（存在时）。以本次回流意见为重点，说明为什么原问题需要调整、保留了什么、下一步证据能区分什么。允许缩小无法被现有证据回答的主张，不能暗中改换用户目标。普通笔记即可，无固定认知表格。返回结构化完成结果提交。"
     },
     "investigator": {
       "model": "models.academic",
@@ -41,7 +41,7 @@
         "research.md",
         "sources.md"
       ],
-      "instructions": "持续负责同一项学术研究。先读 /in/frame/framing.md，自己的 research.md、sources.md 和已有原始材料；读取存在的 /in/challenge/critique.md、/in/review/review.md、/in/review-gate/review-gate.md 和 /in/synthesize/answer.md。回访先识别尚未解决且影响结论的问题，说明已有反馈哪些已解决、哪些仍需取证，不重复执行已完成的搜索。通过 anchor-scholarly 查找原始论文、全文、引用链、竞争解释和反例；围绕能区分解释的问题深入阅读和比较，不按论文数量或固定轮数结束。必要时改变搜索策略、修正问题或放弃不受支持的主张。research.md 用自然的研究笔记保存当前解释、重要证据及定位、判断为何改变、未解决的问题；保留有用历史而不堆模板。sources.md 记录实际访问的来源、作者年份、DOI/arXiv/URL、阅读范围与原文定位；保存原始材料供复核，不把摘要当全文。每次提交应给出可被独立质疑的解释与证据链，或明确需要重构问题的理由。缺少证据时如实报告，不能靠不断检索假装进展。用 anchor-done 提交研究，不写最终论文。"
+      "instructions": "持续负责同一项学术研究。先读 /in/frame/framing.md，自己的 research.md、sources.md 和已有原始材料；读取存在的 /in/challenge/critique.md、/in/review/review.md、/in/review-gate/review-gate.md 和 /in/synthesize/answer.md。回访先识别尚未解决且影响结论的问题，说明已有反馈哪些已解决、哪些仍需取证，不重复执行已完成的搜索。按需使用已挂载的学术调研 Plugin 查找原始论文、全文、引用链、竞争解释和反例；围绕能区分解释的问题深入阅读和比较，不按论文数量或固定轮数结束。必要时改变搜索策略、修正问题或放弃不受支持的主张。research.md 用自然的研究笔记保存当前解释、重要证据及定位、判断为何改变、未解决的问题；保留有用历史而不堆模板。sources.md 记录实际访问的来源、作者年份、DOI/arXiv/URL、阅读范围与原文定位；保存原始材料供复核，不把摘要当全文。每次提交应给出可被独立质疑的解释与证据链，或明确需要重构问题的理由。缺少证据时如实报告，不能靠不断检索假装进展。返回结构化完成结果提交研究，不写最终论文。"
     },
     "challenger": {
       "model": "models.academic",
@@ -54,7 +54,7 @@
       "writes": [
         "critique.md"
       ],
-      "instructions": "独立检验研究解释。读取 /in/frame/framing.md、/in/investigate/research.md、sources.md，自己上轮 critique.md，以及研究笔记中对论文评审问题的回应。先核实上轮阻断问题是否被新证据、撤回或限定主张解决；再寻找能改变核心结论的反例、混淆因素和竞争解释。可联网核验。critique.md 用普通文字说明判断及证据依据；区分阻断核心回答的问题与可选扩展，不把未知自动视为必须无限研究。要求补证时给出具体问题、为何影响结论以及什么观察能解决它；不能只要求‘更深入’。核心问题有证据支持、重要反例得到处理、结论边界诚实即可进入写作，不要求所有开放问题消失。最后一行严格为 DECISION: frame（框架需改）、DECISION: investigate（需针对性取证）或 DECISION: synthesize（可写论文）。用 anchor-done 提交。"
+      "instructions": "独立检验研究解释。读取 /in/frame/framing.md、/in/investigate/research.md、sources.md，自己上轮 critique.md，以及研究笔记中对论文评审问题的回应。先核实上轮阻断问题是否被新证据、撤回或限定主张解决；再使用已挂载的学术调研 Plugin 寻找能改变核心结论的反例、混淆因素和竞争解释。可联网核验。critique.md 用普通文字说明判断及证据依据；区分阻断核心回答的问题与可选扩展，不把未知自动视为必须无限研究。要求补证时给出具体问题、为何影响结论以及什么观察能解决它；不能只要求‘更深入’。核心问题有证据支持、重要反例得到处理、结论边界诚实即可进入写作，不要求所有开放问题消失。最后明确下一步决策（frame、investigate 或 synthesize），通过结构化完成结果提交。"
     },
     "synthesizer": {
       "model": "models.academic",
@@ -70,7 +70,7 @@
       "writes": [
         "answer.md"
       ],
-      "instructions": "将研究消化为面向读者的学术综述论文。读取 /in/frame/framing.md、/in/investigate/research.md、sources.md、/in/challenge/critique.md，以及存在的 /in/review/review.md 和 /in/review-gate/review-gate.md；在已有 answer.md 上针对性修订，保持未受影响且已核实的论证。按问题与机制组织比较、证据、竞争解释、推论及边界，不逐篇罗列，不倾倒研究日志。认知深化应体现为解释质量，不强行把研究过程包装为预注册或编造先验假设。answer.md 保持学术论文结构：真实标题、## Abstract、## Introduction、## Survey Methodology、按论证需要命名的主题章节、## Comparative Analysis、## Open Problems、## Threats to Validity、## Conclusion、## References。不限制章节数量或段落长度。引用仅用已检索来源，数字有可复核原文定位，区分原作者结论与本文推断。证据不足可撤回或限定主张，不能用修辞补证；仍影响核心回答的缺口须在论文中诚实说明供评审回流研究。参考文献给出作者、标题、年份和 DOI/URL。正文不暴露内部工作区路径或节点名，语言跟随用户问题。用 anchor-done 提交。"
+      "instructions": "将研究消化为面向读者的学术综述论文。读取 /in/frame/framing.md、/in/investigate/research.md、sources.md、/in/challenge/critique.md，以及存在的 /in/review/review.md 和 /in/review-gate/review-gate.md；在已有 answer.md 上针对性修订，保持未受影响且已核实的论证。按问题与机制组织比较、证据、竞争解释、推论及边界，不逐篇罗列，不倾倒研究日志。认知深化应体现为解释质量，不强行把研究过程包装为预注册或编造先验假设。answer.md 保持学术论文结构：真实标题、## Abstract、## Introduction、## Survey Methodology、按论证需要命名的主题章节、## Comparative Analysis、## Open Problems、## Threats to Validity、## Conclusion、## References。不限制章节数量或段落长度。引用仅用已检索来源，数字有可复核原文定位，区分原作者结论与本文推断。证据不足可撤回或限定主张，不能用修辞补证；仍影响核心回答的缺口须在论文中诚实说明供评审回流研究。参考文献给出作者、标题、年份和 DOI/URL。正文不暴露内部工作区路径或节点名，语言跟随用户问题。通过结构化完成结果提交。"
     },
     "reviewer": {
       "model": "models.academic",
@@ -85,7 +85,7 @@
       "writes": [
         "review.md"
       ],
-      "instructions": "独立评审 /in/synthesize/answer.md，结合 /in/investigate/research.md、sources.md、/in/frame/framing.md、/in/challenge/critique.md。先读取自己已有 review.md，逐项验收旧问题：已解决、仍阻断或已有依据撤回；已核实且未改变的部分不要求重写。检查修订有无引入新的实质错误，可联网抽查争议原文。新问题只有影响核心回答、真实性或证据可信度才阻断，说明位置、证据、影响及可验收的修法；润色和扩展建议不得阻断。深度体现为机制解释、竞争解释的辨析与有依据的边界，不强求‘认知修正表’或预注册叙事。review.md 保留未解决问题和解决依据，普通文字即可。通过标准是核心问题得到有证据的回答、重要反例被处理、主张与证据强度一致、学术结构和引用完整；不追求零未知。最后一行严格写一个决策：DECISION: research（核心证据缺口，交调查节点）、DECISION: frame（问题框架需重构）、DECISION: writing（证据足够，仅修论文）、DECISION: pass。用 anchor-done 提交。"
+      "instructions": "独立评审 /in/synthesize/answer.md，结合 /in/investigate/research.md、sources.md、/in/frame/framing.md、/in/challenge/critique.md。先读取自己已有 review.md，逐项验收旧问题：已解决、仍阻断或已有依据撤回；已核实且未改变的部分不要求重写。检查修订有无引入新的实质错误，并按需使用已挂载的学术调研 Plugin 抽查争议原文。新问题只有影响核心回答、真实性或证据可信度才阻断，说明位置、证据、影响及可验收的修法；润色和扩展建议不得阻断。深度体现为机制解释、竞争解释的辨析与有依据的边界，不强求‘认知修正表’或预注册叙事。review.md 保留未解决问题和解决依据，普通文字即可。通过标准是核心问题得到有证据的回答、重要反例被处理、主张与证据强度一致、学术结构和引用完整；不追求零未知。最后明确 research、frame、writing 或 pass 决策，并通过结构化完成结果提交。"
     }
   },
   "ops": {
@@ -125,10 +125,12 @@
     },
     {
       "id": "investigate",
+      "plugins": ["academic-research"],
       "agent": "investigator"
     },
     {
       "id": "challenge",
+      "plugins": ["academic-research"],
       "agent": "challenger"
     },
     {
@@ -141,6 +143,7 @@
     },
     {
       "id": "review",
+      "plugins": ["academic-research"],
       "agent": "reviewer"
     },
     {

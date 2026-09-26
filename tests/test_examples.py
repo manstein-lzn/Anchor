@@ -23,6 +23,22 @@ from anchor.simple import graph as graph_module
 from anchor.simple import run as runner
 
 EXAMPLES = Path(__file__).resolve().parents[1] / "examples" / "graphs"
+ROOT = EXAMPLES.parents[1]
+
+
+def _test_library(tmp_path: Path) -> Path:
+    """Give Plugin based examples the same shared-library contract as the service."""
+    library = tmp_path / "library"
+    (library / "plugins").mkdir(parents=True)
+    (library / "tools" / "scholarly").mkdir(parents=True)
+    (library / "plugins" / "academic-research").symlink_to(ROOT / "plugins" / "academic-research",
+                                                               target_is_directory=True)
+    (library / "tools" / "scholarly" / "tool.json").write_text(json.dumps({
+        "entrypoint": str(ROOT / ".venv" / "bin" / "anchor-scholarly"),
+        "environment": str(ROOT / ".venv"),
+        "imports": [str(ROOT / "src")],
+    }), encoding="utf-8")
+    return library
 
 
 @pytest.mark.parametrize("path", sorted(EXAMPLES.glob("*.json")), ids=lambda p: p.name)
@@ -221,7 +237,8 @@ def test_deep_research_requires_feedback_and_paper_review(tmp_path):
     config = tmp_path / "runtime.json"
     config.write_text('{"models": []}', encoding="utf-8")
 
-    state = runner.run(workspace, config_path=config, model_script=DEEP_RESEARCH_SCRIPT)
+    state = runner.run(workspace, config_path=config, model_script=DEEP_RESEARCH_SCRIPT,
+                       library_root=_test_library(tmp_path))
     run_dir = next((workspace / "runs").glob("*"))
 
     assert state.status == "finished", (state.status, state.error, state.ceased)
@@ -247,7 +264,8 @@ def test_deep_research_reframes_when_evidence_overturns_question(tmp_path):
         'anchor-done --summary "challenged the frame"',
     ]}
 
-    state = runner.run(workspace, config_path=config, model_script=script)
+    state = runner.run(workspace, config_path=config, model_script=script,
+                       library_root=_test_library(tmp_path))
     run_dir = next((workspace / "runs").glob("*"))
 
     assert state.status == "finished", (state.status, state.error, state.ceased)
@@ -285,7 +303,8 @@ def test_paper_feedback_reaches_research_and_converges_beyond_old_ceiling(tmp_pa
             f"printf 'resolve evidence issue %s\\nDECISION: {decision}\\n' $n > review.md; "
             "else printf 'DECISION: pass\\n' > review.md; fi",
             'anchor-done --summary "reviewed"']}
-    state = runner.run(workspace, config_path=config, model_script=script)
+    state = runner.run(workspace, config_path=config, model_script=script,
+                       library_root=_test_library(tmp_path))
     run_dir = next((workspace / "runs").iterdir())
     assert state.status == "finished", (state.reason, state.error)
     assert state.passes["review"] == 8

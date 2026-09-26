@@ -15,7 +15,7 @@ On startup every run recorded as running is resumed. There is no other recovery:
 `run.json` plus the directories and conversations beside it, so continuing one is reading it back and
 stepping again.
 
-The state is files. There is no database, and nothing here reads anything but the directory tree.
+Graphs and runs remain file-backed; Pilot uses Harness messages and SQLite delivery records.
 """
 
 from __future__ import annotations
@@ -23,13 +23,41 @@ from __future__ import annotations
 import json
 import shutil
 import threading
+import time
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
+from typing import Any
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from anchor.simple import graph as graph_module
 from anchor.simple import run as runner
+from anchor.library import Library
+from anchor.session import SessionStore
+from anchor.pilot_turns import TurnStore
+
+
+def _call_args(call: Any) -> Any:
+    """Streamed tool calls arrive with JSON text; a proposal a person reads should be parsed."""
+    args = call.args
+    if isinstance(args, str):
+        try:
+            args = json.loads(args)
+        except ValueError:
+            return args
+    return args
+
+
+def _call_target(call: Any) -> str:
+    """The name a person recognises in an approval prompt: the Graph or Run the call touches."""
+    args = _call_args(call)
+    if not isinstance(args, dict):
+        return ""
+    for name in ("graph", "run", "name"):
+        if isinstance(args.get(name), str):
+            return args[name]
+    return ""
+
 
 #: How much of a node's conversation an observer is given. Enough to see what it is doing, not so
 #: much that the endpoint becomes a way to download a run's whole history one request at a time.
@@ -45,10 +73,20 @@ class Scheduler:
     def __init__(self, root: Path, config: Path) -> None:
         self.root = root
         self.config = config
+        self.library = Library(root / "library")
+        self.sessions = SessionStore(root)
+        self.turns = TurnStore(root)
+        self.pilot_active: set[str] = set()
+        self.pilot_tokens: dict[str, Any] = {}
         self.running: dict[str, str] = {}         # graph -> run id
         # A pause lands between nodes; a stop also cancels the current model call or command.
         self.control: dict[str, str] = {}
         self.lock = threading.Lock()
+        for session_id in self.turns.interrupt_running():
+            try:
+                self.sessions.set_status(session_id, "interrupted", reason="服务重启，未自动重放上次执行")
+            except (KeyError, ValueError):
+                pass
 
     def workspaces(self) -> list[Path]:
         base = self.root / "workspaces"
@@ -75,6 +113,12 @@ class Scheduler:
         workspace = self.workspace(graph)
         if workspace is None:
             return json.dumps({"error": f"no such graph: {graph}"}), 404
+        try:
+            parsed = graph_module.load(workspace / "graph.json")
+            for node in parsed.nodes.values():
+                self.library.attach(node.plugins)
+        except (ValueError, OSError) as exc:
+            return json.dumps({"error": str(exc)}, ensure_ascii=False), 400
         with self.lock:
             if graph in self.running:
                 # Refused, not queued: whoever asked should be able to tell that this run did not
@@ -143,6 +187,250 @@ class Scheduler:
                 return json.dumps({"error": f"no such graph: {name}"}), 404
             shutil.rmtree(workspace)
         return json.dumps({"graph": name, "deleted": True}), 200
+
+    def create_session(self, session_id: str | None = None) -> tuple[str, int]:
+        """Create the Anchor-owned half of a Pilot conversation."""
+        if session_id is not None and not isinstance(session_id, str):
+            return json.dumps({"error": "session id must be a string"}), 400
+        try:
+            session = self.sessions.create(session_id)
+        except FileExistsError:
+            return json.dumps({"error": "that session already exists"}), 409
+        except (ValueError, OSError) as exc:
+            return json.dumps({"error": str(exc)}, ensure_ascii=False), 400
+        return json.dumps({"session": session.model_dump(mode="json")}, ensure_ascii=False), 201
+
+    def session(self, session_id: str) -> tuple[str, int]:
+        try:
+            session = self.sessions.get(session_id)
+        except KeyError:
+            return json.dumps({"error": "no such session"}), 404
+        except ValueError as exc:
+            return json.dumps({"error": str(exc)}, ensure_ascii=False), 400
+        return json.dumps({"session": session.model_dump(mode="json")}, ensure_ascii=False), 200
+
+    def sessions_list(self) -> tuple[str, int]:
+        return json.dumps({"sessions": [item.model_dump(mode="json")
+                                         for item in self.sessions.list()]},
+                          ensure_ascii=False), 200
+
+    def session_events(self, session_id: str) -> tuple[str, int]:
+        try:
+            events = self.sessions.events(session_id)
+        except KeyError:
+            return json.dumps({"error": "no such session"}), 404
+        except ValueError as exc:
+            return json.dumps({"error": str(exc)}, ensure_ascii=False), 400
+        return json.dumps({"events": [event.model_dump(mode="json") for event in events]},
+                          ensure_ascii=False), 200
+
+    def set_session_status(self, session_id: str, status: str, reason: str = "") -> tuple[str, int]:
+        if status not in ("active", "waiting_user", "interrupted", "archived"):
+            return json.dumps({"error": f"unknown session status: {status}"}), 400
+        try:
+            session = self.sessions.set_status(session_id, status, reason=reason)
+        except KeyError:
+            return json.dumps({"error": "no such session"}), 404
+        except ValueError as exc:
+            return json.dumps({"error": str(exc)}, ensure_ascii=False), 400
+        return json.dumps({"session": session.model_dump(mode="json")}, ensure_ascii=False), 200
+
+    def confirm_session(self, session_id: str, action: str, approval_key: str) -> tuple[str, int]:
+        if not approval_key:
+            return json.dumps({"error": "approval_key is required"}), 400
+        try:
+            session = self.sessions.decide_approval(session_id, approval_key, True, action)
+        except KeyError:
+            return json.dumps({"error": "no such session"}), 404
+        except ValueError as exc:
+            return json.dumps({"error": str(exc)}, ensure_ascii=False), 409
+        return json.dumps({"session": session.model_dump(mode="json"), "confirmed": True},
+                          ensure_ascii=False), 200
+
+    def reject_session(self, session_id: str, action: str, approval_key: str) -> tuple[str, int]:
+        if not approval_key:
+            return json.dumps({"error": "approval_key is required"}), 400
+        try:
+            session = self.sessions.decide_approval(session_id, approval_key, False, action)
+        except KeyError:
+            return json.dumps({"error": "no such session"}), 404
+        except ValueError as exc:
+            return json.dumps({"error": str(exc)}, ensure_ascii=False), 409
+        return json.dumps({"session": session.model_dump(mode="json"), "rejected": True},
+                          ensure_ascii=False), 200
+
+    def attach_session_run(self, session_id: str, run_id: str) -> tuple[str, int]:
+        if self.run_dir(run_id) is None:
+            return json.dumps({"error": "no such run", "run": run_id}), 404
+        try:
+            session = self.sessions.attach_run(session_id, run_id)
+        except KeyError:
+            return json.dumps({"error": "no such session"}), 404
+        except ValueError as exc:
+            return json.dumps({"error": str(exc)}, ensure_ascii=False), 400
+        return json.dumps({"session": session.model_dump(mode="json")}, ensure_ascii=False), 200
+
+    def delete_session(self, session_id: str) -> tuple[str, int]:
+        with self.lock:
+            if session_id in self.pilot_active:
+                return json.dumps({"error": "that session is processing a message"}), 409
+        try:
+            self.sessions.delete(session_id)
+            self.turns.delete_session(session_id)
+        except KeyError:
+            return json.dumps({"error": "no such session"}), 404
+        except ValueError as exc:
+            return json.dumps({"error": str(exc)}, ensure_ascii=False), 409
+        except OSError as exc:
+            return json.dumps({"error": str(exc)}, ensure_ascii=False), 400
+        return json.dumps({"session": session_id, "deleted": True}), 200
+
+    def pilot_messages(self, session_id: str) -> tuple[str, int]:
+        from anchor.pilot import history
+        try:
+            session = self.sessions.get(session_id)
+            messages = history(self.sessions, session)
+            if not session.title:
+                first = next((item["text"] for item in messages if item["role"] == "user"), "")
+                if first:
+                    self.sessions.name_from_prompt(session_id, first)
+        except KeyError:
+            return json.dumps({"error": "no such session"}), 404
+        except Exception as exc:  # noqa: BLE001 - report persistence/configuration failures at API boundary
+            return json.dumps({"error": str(exc)}, ensure_ascii=False), 500
+        return json.dumps({"messages": messages}, ensure_ascii=False), 200
+
+    def create_turn(self, session_id: str, request_id: str, prompt: str | None) -> tuple[str, int]:
+        from pydantic_ai import CancellationToken
+
+        if not isinstance(request_id, str) or not request_id.strip() or len(request_id) > 200:
+            return json.dumps({"error": "request_id must contain 1 to 200 characters"}), 400
+        if prompt is not None and (not isinstance(prompt, str) or not prompt.strip() or len(prompt) > 100_000):
+            return json.dumps({"error": "message must contain 1 to 100000 characters"}), 400
+        with self.lock:
+            try:
+                session = self.sessions.get(session_id)
+                existing = self.turns.find_request(session_id, request_id)
+                if existing:
+                    if existing["prompt"] != prompt:
+                        raise ValueError("request_id was already used for different input")
+                    return json.dumps({"turn": existing}, ensure_ascii=False), 202
+                if session_id in self.pilot_active:
+                    raise ValueError("that session is already processing a message")
+                if session.status not in {"active", "waiting_user"} and not (
+                        session.status == "interrupted" and prompt is None):
+                    raise ValueError(f"session is {session.status}")
+                if any(item.get("status") == "requested" for item in session.approvals):
+                    raise ValueError("confirm or reject the pending operation first")
+                if prompt is not None and any(item.get("status") in {"approved", "rejected"}
+                                              for item in session.approvals):
+                    raise ValueError("resume the confirmed operation first")
+                if self.turns.unsafe_to_retry(session_id):
+                    raise ValueError("上次执行已进入有副作用的工具；请先核查执行结果，当前阶段禁止自动重放。")
+                turn, _ = self.turns.create(session_id, request_id, prompt)
+                self.pilot_active.add(session_id)
+                self.pilot_tokens[session_id] = CancellationToken()
+            except KeyError:
+                return json.dumps({"error": "no such session"}), 404
+            except ValueError as exc:
+                return json.dumps({"error": str(exc)}, ensure_ascii=False), 409
+            threading.Thread(target=self._run_turn, args=(turn,), daemon=True).start()
+        return json.dumps({"turn": turn}, ensure_ascii=False), 202
+
+    def _run_turn(self, turn: dict) -> None:
+        try:
+            body, code = self.pilot_message(turn["session"], turn["prompt"], turn_id=turn["id"])
+            response = json.loads(body)
+            status = ("waiting_approval" if response.get("approvals") else
+                      "waiting_user" if response.get("paused") else
+                      "completed" if code == 200 else
+                      "stopped" if response.get("stopped") else "failed")
+            self.turns.finish(turn["id"], status, response.get("error", ""))
+        finally:
+            with self.lock:
+                self.pilot_active.discard(turn["session"])
+                self.pilot_tokens.pop(turn["session"], None)
+
+    def pilot_message(self, session_id: str, prompt: str | None, *, turn_id: str | None = None) -> tuple[str, int]:
+        # Imported here rather than at module scope: an op-only graph must run without the harness.
+        from pydantic_ai import CancellationToken, DeferredToolRequests, DeferredToolResults
+
+        if prompt is not None and (not prompt.strip() or len(prompt) > 100_000):
+            return json.dumps({"error": "message must contain 1 to 100000 characters"}), 400
+        with self.lock:
+            if session_id in self.pilot_active and turn_id is None:
+                return json.dumps({"error": "that session is already processing a message"}), 409
+            self.pilot_active.add(session_id)
+            token = self.pilot_tokens.get(session_id) if turn_id else CancellationToken()
+            self.pilot_tokens[session_id] = token
+        try:
+            from anchor.pilot import approval_precondition, respond
+            session = self.sessions.get(session_id)
+            if self.turns.unsafe_to_retry(session_id):
+                return json.dumps({"error": "上次工具副作用需要核查，不能自动重放。"}, ensure_ascii=False), 409
+            decisions = {} if prompt is not None else self.sessions.approval_decisions(session_id)
+            question = self.sessions.pending_question(session_id) if prompt is not None else None
+            if prompt is not None and session.status == "waiting_user":
+                self.sessions.set_status(session_id, "active")
+                session = self.sessions.get(session_id)
+            if session.status != "active" and not (prompt is None and (
+                    session.status == "interrupted" or (session.status == "waiting_user" and decisions))):
+                return json.dumps({"error": f"session is {session.status}"}), 409
+            if prompt is not None:
+                self.sessions.name_from_prompt(session_id, prompt)
+                self.sessions.append(session_id, "pilot.turn.started")
+            extra = ({"turn_id": turn_id, "emit": lambda data: self.turns.append(turn_id, data)}
+                     if turn_id else {})
+            if question is not None:
+                # The user's next message answers the deferred question; it is a tool result, not a
+                # new user turn, so the model sees the reply to what it actually asked.
+                deferred = DeferredToolResults(calls={question["tool_call_id"]: prompt})
+                prompt = None
+            else:
+                deferred = DeferredToolResults(approvals=decisions) if decisions else None
+            answer = respond(self.sessions, self.config, session, prompt, token, scheduler=self,
+                             deferred=deferred, **extra)
+            if isinstance(answer, DeferredToolRequests):
+                pending = [{"tool_call_id": call.tool_call_id, "key": call.tool_call_id,
+                            "action": call.tool_name, "target": _call_target(call),
+                            "proposal": _call_args(call),
+                            "precondition": approval_precondition(self, call.tool_name, _call_args(call))}
+                           for call in answer.approvals]
+                asked = [{"tool_call_id": call.tool_call_id,
+                          "question": (answer.metadata.get(call.tool_call_id) or {}).get("question", "")}
+                         for call in answer.calls]
+                self.sessions.set_pending(session_id, pending, asked)
+                self.sessions.append(session_id, "pilot.turn.paused",
+                                     {"calls": [item["tool_call_id"] for item in [*pending, *asked]]})
+                return json.dumps({"paused": True, "approvals": pending, "session": session_id},
+                                  ensure_ascii=False), 200
+            self.sessions.clear_pending(session_id)
+            if prompt is None and session.status == "interrupted":
+                self.sessions.set_status(session_id, "active")
+            self.sessions.append(session_id, "pilot.turn.completed")
+            return json.dumps({"message": answer, "session": session_id}, ensure_ascii=False), 200
+        except KeyError:
+            return json.dumps({"error": "no such session"}), 404
+        except Exception as exc:  # noqa: BLE001 - provider and persistence errors become visible to the caller
+            try:
+                self.sessions.append(session_id, "pilot.turn.failed", {"error": type(exc).__name__})
+                self.sessions.set_status(session_id, "interrupted", reason="Pilot turn failed; resume to retry")
+            except (KeyError, ValueError, OSError):
+                pass
+            return json.dumps({"error": str(exc), "stopped": bool(token and token.cancelled)}, ensure_ascii=False), 502
+        finally:
+            if turn_id is None:
+                with self.lock:
+                    self.pilot_active.discard(session_id)
+                    self.pilot_tokens.pop(session_id, None)
+
+    def stop_pilot(self, session_id: str) -> tuple[str, int]:
+        with self.lock:
+            token = self.pilot_tokens.get(session_id)
+            if token is None:
+                return json.dumps({"error": "that session is not processing a message"}), 409
+            token.cancel()
+        return json.dumps({"session": session_id, "asked": "stop"}), 202
 
     def files(self, run_id: str, node: str) -> tuple[str, int]:
         """What a node left in its workspace. Returns (body, status)."""
@@ -229,7 +517,9 @@ class Scheduler:
             return json.dumps({"error": "this graph is running; changing it now would change what "
                                        "the run reads", "running": self.running[name]}), 409
         try:
-            graph_module.parse(definition)
+            parsed = graph_module.parse(definition)
+            for node in parsed.nodes.values():
+                self.library.attach(node.plugins)
         except Exception as exc:  # noqa: BLE001 - the message is the point
             return json.dumps({"error": f"{type(exc).__name__}: {exc}"}), 400
         target = workspace / "graph.json"
@@ -274,7 +564,7 @@ class Scheduler:
         try:
             runner.run(workspace, objective=objective, config_path=self.config, run_id=run_id,
                        resume=(workspace / "runs" / run_id) if resume else None,
-                       stop_request=asked)
+                       stop_request=asked, library_root=self.library.root)
         except Exception:  # noqa: BLE001 - the run already recorded its own failure
             traceback.print_exc()
         finally:
@@ -312,6 +602,8 @@ class Scheduler:
             traces[trace.name.removesuffix(".trace.jsonl")] = [message for line in lines
                                                                  for message in _readable(line)]
         return {"graph": workspace.name, "run": run_id, "state": state, "traces": traces,
+                "plugins": (json.loads((base / "plugins.json").read_text(encoding="utf-8"))
+                            if (base / "plugins.json").is_file() else {}),
                 "nodes": sorted(item.name for item in base.iterdir() if item.is_dir())}
 
 
@@ -524,7 +816,59 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(payload)
 
-    def do_GET(self) -> None:
+    def _get_plugin(self, parts: list[str]) -> None:
+        try:
+            if len(parts) == 1:
+                return self._send(json.dumps({"plugins": self.scheduler.library.catalog()}, ensure_ascii=False))
+            if len(parts) == 2:
+                return self._send(json.dumps(self.scheduler.library.detail(parts[1]), ensure_ascii=False))
+            if len(parts) >= 4 and parts[2] == "files":
+                return self._send_file(self.scheduler.library.file(parts[1], "/".join(parts[3:])))
+        except (ValueError, OSError) as exc:
+            return self._send(json.dumps({"error": str(exc)}, ensure_ascii=False), 400)
+        self._send(json.dumps({"error": "not found"}), 404)
+
+    def _turn_stream(self, session_id: str, turn_id: str, cursor: str) -> None:
+        try:
+            after = int(cursor)
+            if after < 0:
+                raise ValueError("cursor must be nonnegative")
+            self.scheduler.sessions.get(session_id)
+            self.scheduler.turns.get(session_id, turn_id)
+        except (ValueError, KeyError) as exc:
+            return self._send(json.dumps({"error": str(exc)}), 404 if isinstance(exc, KeyError) else 400)
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("X-Accel-Buffering", "no")
+        self.send_header("x-vercel-ai-ui-message-stream", "v1")
+        self.end_headers()
+        try:
+            heartbeat = time.monotonic()
+            while True:
+                # Read terminal state BEFORE draining: completion commits after the last event.
+                turn = self.scheduler.turns.get(session_id, turn_id)
+                events = self.scheduler.turns.events(session_id, turn_id, after)
+                for event in events:
+                    payload = json.dumps(event["data"], ensure_ascii=False)
+                    self.wfile.write(f'id: {event["seq"]}\ndata: {payload}\n\n'.encode())
+                    after = event["seq"]
+                self.wfile.flush()
+                if turn["status"] != "running" and len(events) < 256:
+                    self.wfile.write(f'event: turn\ndata: {json.dumps(turn, ensure_ascii=False)}\n\n'.encode())
+                    self.wfile.flush()
+                    return
+                if len(events) == 256:
+                    continue
+                if time.monotonic() - heartbeat >= 10:
+                    self.wfile.write(b": heartbeat\n\n")
+                    self.wfile.flush()
+                    heartbeat = time.monotonic()
+                time.sleep(0.1)
+        except (BrokenPipeError, ConnectionResetError, KeyError):
+            return  # The worker belongs to the service, not this subscriber.
+
+    def do_GET(self) -> None:  # noqa: C901 - one small HTTP router keeps endpoint behavior visible
         parsed = urlparse(self.path)
         query = parse_qs(parsed.query)
         path = PurePosixPath(unquote(parsed.path))
@@ -536,6 +880,25 @@ class Handler(BaseHTTPRequestHandler):
             names = [{"graph": item.name, "running": self.scheduler.running.get(item.name)}
                      for item in self.scheduler.workspaces()]
             return self._send(json.dumps({"graphs": names}, ensure_ascii=False))
+        if parts == ["sessions"]:
+            return self._send(*self.scheduler.sessions_list())
+        if len(parts) == 3 and parts[0] == "sessions" and parts[2] == "turns":
+            try:
+                self.scheduler.sessions.get(parts[1])
+                return self._send(json.dumps({"turns": self.scheduler.turns.list(parts[1])}, ensure_ascii=False))
+            except (KeyError, ValueError):
+                return self._send(json.dumps({"error": "no such session"}), 404)
+        if len(parts) == 5 and parts[0] == "sessions" and parts[2] == "turns" and parts[4] == "events":
+            return self._turn_stream(parts[1], parts[3], self.headers.get("Last-Event-ID")
+                                     or query.get("after", ["0"])[0])
+        if len(parts) == 3 and parts[0] == "sessions" and parts[2] == "messages":
+            return self._send(*self.scheduler.pilot_messages(parts[1]))
+        if len(parts) == 3 and parts[0] == "sessions" and parts[2] == "events":
+            return self._send(*self.scheduler.session_events(parts[1]))
+        if len(parts) == 2 and parts[0] == "sessions":
+            return self._send(*self.scheduler.session(parts[1]))
+        if parts and parts[0] == "plugins":
+            return self._get_plugin(parts)
         if len(parts) == 2 and parts[0] == "graphs":
             # The graph itself, so a view can draw the topology and not only a run through it.
             workspace = self.scheduler.workspace(parts[1])
@@ -573,8 +936,62 @@ class Handler(BaseHTTPRequestHandler):
         response, status = self.scheduler.save(parts[1], body.get("definition") or {})
         self._send(response, status)
 
-    def do_POST(self) -> None:
+    def do_POST(self) -> None:  # noqa: C901 - one small HTTP router keeps endpoint behavior visible
         parts = [part for part in PurePosixPath(unquote(urlparse(self.path).path)).parts if part != "/"]
+        if len(parts) == 3 and parts[0] == "sessions" and parts[2] == "turns":
+            body = self._body()
+            if body is None:
+                return
+            resume = body.get("resume") is True
+            if (resume and "message" in body) or (not resume and not isinstance(body.get("message"), str)):
+                return self._send(json.dumps({"error": "provide a message or resume: true"}), 400)
+            return self._send(*self.scheduler.create_turn(
+                parts[1], body.get("request_id"), None if resume else body["message"]))
+        if parts == ["sessions"]:
+            body = self._body()
+            if body is None:
+                return
+            return self._send(*self.scheduler.create_session(body.get("id")))
+        if len(parts) == 3 and parts[0] == "sessions" and parts[2] == "status":
+            body = self._body()
+            if body is None:
+                return
+            return self._send(*self.scheduler.set_session_status(
+                parts[1], str(body.get("status") or ""), str(body.get("reason") or "")))
+        if len(parts) == 3 and parts[0] == "sessions" and parts[2] == "confirm":
+            body = self._body()
+            if body is None:
+                return
+            return self._send(*self.scheduler.confirm_session(
+                parts[1], str(body.get("action") or ""),
+                str(body.get("approval_key") or "")))
+        if len(parts) == 3 and parts[0] == "sessions" and parts[2] == "reject":
+            body = self._body()
+            if body is None:
+                return
+            return self._send(*self.scheduler.reject_session(
+                parts[1], str(body.get("action") or ""),
+                str(body.get("approval_key") or "")))
+        if len(parts) == 3 and parts[0] == "sessions" and parts[2] == "messages":
+            body = self._body()
+            if body is None:
+                return
+            prompt = body.get("message")
+            if not isinstance(prompt, str):
+                return self._send(json.dumps({"error": "message must be a string"}), 400)
+            return self._send(*self.scheduler.pilot_message(parts[1], prompt))
+        if len(parts) == 3 and parts[0] == "sessions" and parts[2] == "resume":
+            return self._send(*self.scheduler.pilot_message(parts[1], None))
+        if len(parts) == 3 and parts[0] == "sessions" and parts[2] == "stop":
+            return self._send(*self.scheduler.stop_pilot(parts[1]))
+        if len(parts) == 3 and parts[0] == "sessions" and parts[2] == "runs":
+            body = self._body()
+            if body is None:
+                return
+            run_id = str(body.get("run") or "")
+            if not run_id:
+                return self._send(json.dumps({"error": "run is required"}), 400)
+            return self._send(*self.scheduler.attach_session_run(parts[1], run_id))
         if parts == ["graphs"]:
             body = self._body()
             if body is None:
@@ -601,6 +1018,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_DELETE(self) -> None:
         parts = [part for part in PurePosixPath(unquote(urlparse(self.path).path)).parts
                  if part != "/"]
+        if len(parts) == 2 and parts[0] == "sessions":
+            return self._send(*self.scheduler.delete_session(parts[1]))
         if len(parts) != 2 or parts[0] not in ("runs", "graphs"):
             return self._send(json.dumps({"error": "not found"}), 404)
         response, status = (self.scheduler.delete_run(parts[1]) if parts[0] == "runs"

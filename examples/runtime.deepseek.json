@@ -1,5 +1,6 @@
 {
   "secret_file": ".local/anchor-secrets.json",
+  "pilot_model": "models.academic",
   "models": [
     {
       "ref": "models.academic",

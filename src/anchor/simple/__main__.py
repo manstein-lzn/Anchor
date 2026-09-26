@@ -32,13 +32,14 @@ def main() -> None:
                         help="runtime config, for model profiles and the secret file")
     parser.add_argument("--resume", default=None, metavar="RUN_DIR",
                         help="pick up a run that a previous process left unfinished")
+    parser.add_argument("--library", type=Path, help="shared library directory; inferred for service workspaces")
     args = parser.parse_args()
 
     written = os.environ.get("ANCHOR_MODEL_SCRIPT")
     model_script = json.loads(Path(written).read_text(encoding="utf-8")) if written else None
 
     state = runner.run(args.workspace, objective=args.objective, config_path=args.config,
-                       resume=args.resume, model_script=model_script)
+                       resume=args.resume, model_script=model_script, library_root=args.library)
     print(json.dumps({"status": state.status, "executed": state.executed,
                       "skipped": state.skipped}, ensure_ascii=False))
 

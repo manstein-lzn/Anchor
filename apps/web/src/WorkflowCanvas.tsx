@@ -12,6 +12,7 @@ import { RoutedEdge } from './RoutedEdge';
 type WorkflowNode = Node<{
   name: string; kind: string; nodeKind: 'agent' | 'op' | 'subgraph'; entry: boolean; terminal: boolean;
   state: string; statusLabel?: string; attempt?: number; ports: Port[]; editing: boolean;
+  plugins?: string[];
 }, 'workflow'>;
 
 function WorkflowNodeView({ id, data, selected }: NodeProps<WorkflowNode>) {
@@ -22,6 +23,8 @@ function WorkflowNodeView({ id, data, selected }: NodeProps<WorkflowNode>) {
     <div className="workflow-node-heading"><Icon size={14} />
       <span>{data.nodeKind === 'op' ? '命令' : data.nodeKind === 'subgraph' ? '子图' : '智能体'}</span>
       {data.entry ? <span className="entry-tag">入口</span> : data.terminal && <span className="entry-tag">终点</span>}
+      {!!data.plugins?.length && <span className="entry-tag" title={data.plugins.join(', ')}
+        aria-label={`挂载 ${data.plugins.length} 个 Plugin`}>Plugin {data.plugins.length}</span>}
     </div>
     <strong title={data.name}>{data.name}</strong>
     <div className="workflow-node-footer" title={data.kind}>

@@ -31,23 +31,7 @@ from anchor.runtime.sandbox import (                                            
 )
 
 ROOT = Path(__file__).resolve().parents[1]
-
-
-@pytest.fixture(scope="module")
-def killed(tmp_path_factory) -> dict:
-    """Every fault window, run once, with real kills — the evidence the B assertions read.
-
-    The same fixture the recovery suite uses, and the same script: the combination assertions are about
-    executions that happen in the fault harness, so they read its evidence rather than re-running it.
-    """
-    root = tmp_path_factory.mktemp("g2")
-    out = root / "evidence.json"
-    done = subprocess.run(
-        [sys.executable, str(ROOT / "scripts" / "recovery_windows.py"), "--root", str(root),
-         "--json", str(out), "--timeout", "120"],
-        capture_output=True, text=True, timeout=1800, cwd=str(ROOT))
-    assert out.exists(), f"the fault script produced no evidence:\n{done.stdout}\n{done.stderr}"
-    return {item["window"]: item for item in json.loads(out.read_text(encoding="utf-8"))}
+sys.path.insert(0, str(ROOT))
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -275,8 +259,8 @@ def test_b7_a_submission_with_persistence_and_context_stops_the_rest(tmp_path):
     验收指出第一版只传了 `context_capabilities` ✓——没有 `StepPersistence` ✓、没有 `recovery_store`
     ✓——所以它不是报告声称的组合 ✓，也没有恢复阶段 ✓。
 
-    这里两者都在 ✓：单响应三连（提交在中间）✓、`StepPersistence` 记步骤 ✓、控制目录即恢复存储 ✓。
-    断言提交之后的命令**永不执行** ✓、只发生**一次**请求 ✓、并且不做第二次提交 ✓。
+    这里两者都在 ✓：工作区命令后返回结构化完成 ✓、`StepPersistence` 记步骤 ✓、控制目录即恢复存储 ✓。
+    断言完成后不再执行命令 ✓、恢复不再请求模型 ✓、并且不做第二次提交 ✓。
     """
     from pydantic_ai.messages import ModelResponse, ToolCallPart
     from pydantic_ai.models.function import FunctionModel
@@ -295,11 +279,11 @@ def test_b7_a_submission_with_persistence_and_context_stops_the_rest(tmp_path):
 
     def model(messages, info):
         calls["n"] += 1
-        return ModelResponse(parts=[
-            ToolCallPart(tool_name="bash", args={"command": "printf 'before\\n' > before.txt"}),
-            ToolCallPart(tool_name="bash", args={"command": 'anchor-done --summary "mid"'}),
-            ToolCallPart(tool_name="bash", args={"command": "printf 'after\\n' > after.txt"}),
-        ])
+        if calls["n"] == 1:
+            return ModelResponse(parts=[ToolCallPart(
+                tool_name="bash", args={"command": "printf 'before\\n' > before.txt"})])
+        return ModelResponse(parts=[ToolCallPart(
+            tool_name="final_result", args={"summary": "mid"})])
 
     outcome = asyncio.run(run_node(
         NodeRequest(execution_id="b7", task="submit in the middle", workspace=workspace,
@@ -309,8 +293,8 @@ def test_b7_a_submission_with_persistence_and_context_stops_the_rest(tmp_path):
     assert outcome.status == COMPLETED, outcome.reason
     assert (workspace / "before.txt").is_file(), "the command before the submission did not run"
     assert not (workspace / "after.txt").exists(), "a command after the submission ran"
-    assert outcome.model_requests == 1, "the response did not end at the submission"
-    assert calls["n"] == 1
+    assert outcome.model_requests == 2, "the structured completion was not requested after the command"
+    assert calls["n"] == 2
     # **Persistence was really on**: a run is in the store, and the completion was recorded as a fact.
     assert asyncio.run(open_store(control).list_runs()), "StepPersistence was not in this execution"
     assert already_finished(control, "b7")[0] == "mid"
@@ -324,21 +308,23 @@ def test_b7_a_submission_with_persistence_and_context_stops_the_rest(tmp_path):
     verdict = asyncio.run(assess(open_store(control), ref))
     assert verdict.action == "finished", verdict.because
 
-    from scripts.recovery_windows import _ask_once  # noqa: PLC0415
+    def must_not_be_called(messages, info):
+        pytest.fail("recovery asked the model again")
 
-    script = {"window": "B7", "node": "b7", "run_id": "b7", "task": "t", "commands": []}
-    recovered = _ask_once(control, ref.encode(), script)
-    assert recovered.get("status") == COMPLETED, recovered
-    assert recovered.get("model_requests") == 0, "recovery asked the model again"
-    assert recovered.get("submission") == "mid", "recovery did not hand back the submission"
-    assert calls["n"] == 1, "the model was called a second time"
+    recovered = asyncio.run(run_node(
+        NodeRequest(execution_id="b7", task="t", workspace=workspace, recovery=ref.encode()),
+        model=FunctionModel(must_not_be_called), recovery_store=control))
+    assert recovered.status == COMPLETED, recovered.reason
+    assert recovered.model_requests == 0
+    assert recovered.submission == "mid"
+    assert calls["n"] == 2, "the model was called a third time"
 
 
 def test_b8_an_op_in_a_graph_does_not_need_any_of_this(tmp_path):
     """**B8 的一半。** 真实 Agent→op→Agent 里，**op 不依赖 Harness 的任何内部对象** ✓。
 
     这条断言的是 op 旁边没有任何框架类型的管道：图照跑 ✓，op 只看到它的挂载 ✓。
-    另一半（压缩后中断再恢复的闭环）记在 `AGENT_NODE_G2_RESULT.md` 里，连同它为什么还是阻塞 ✓。
+    当时另一半（压缩后中断再恢复的闭环）的结论记在 `docs/archive/AGENT_NODE_G2_RESULT.md` 中。
     """
     from anchor.simple import run as runner
 

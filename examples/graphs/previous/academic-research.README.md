@@ -1,5 +1,9 @@
 # Academic Literature Review
 
+> 本文仅作历史记录，不是当前操作指南或待办。当前研究图见
+> [deep-academic-research.json](../deep-academic-research.json)，使用方式见
+> [使用指南](../../../docs/usage.md)。
+
 > **Historical.** The graph it documents, `academic-research.json`, is from before commit `9a7497f`
 > and no longer loads: it has no `agents` key, which every graph now requires. The install and run
 > instructions below name `scripts/academic_research.py`, `alembic` and the worker services, none of

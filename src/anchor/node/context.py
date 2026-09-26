@@ -339,7 +339,7 @@ class Watching(AbstractCapability):
         reached through the run's dependencies because there is no parameter for it: the adapter builds
         the sandbox and the contract is frozen, so a capability that needs the seam reaches the one
         that exists. The cleaner patch — a field on `NodeRequest` that the adapter passes down — is
-        described in `AGENT_NODE_PLAN_02_RESULT.md` for main integration.
+        described in `docs/archive/AGENT_NODE_PLAN_02_RESULT.md` for main integration.
         """
         sandbox = getattr(getattr(ctx, "deps", None), "sandbox", None)
         if sandbox is None or getattr(sandbox, "spill_dir", None) is not None:

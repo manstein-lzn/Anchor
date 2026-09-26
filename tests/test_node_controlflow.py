@@ -26,10 +26,8 @@ from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart          
 from pydantic_ai.models.function import FunctionModel                          # noqa: E402
 
 from anchor.node import BUDGET_EXHAUSTED, COMPLETED, FAILED, NodeRequest, NodeOutcome  # noqa: E402
-from anchor.node.pydantic_adapter import (                                      # noqa: E402
-    DONE_SENTINEL, ROUTE_SENTINEL, read_completion, run_node,
-)
-from anchor.runtime.execenv import Executed, NodeSandbox                        # noqa: E402
+from anchor.node.pydantic_adapter import run_node                                 # noqa: E402
+from anchor.runtime.execenv import NodeSandbox                                  # noqa: E402
 from anchor.runtime.sandbox import BubblewrapWorkspaceSandbox                   # noqa: E402
 
 
@@ -51,6 +49,14 @@ def model_from(*turns, on_extra=None) -> FunctionModel:
     rather than being asked again.
     """
     def fn(messages, info):
+        for message in reversed(messages):
+            for part in getattr(message, "parts", ()) or ():
+                if getattr(part, "part_kind", "") == "tool-return":
+                    for line in str(getattr(part, "content", "") or "").splitlines():
+                        if line.startswith("ANCHOR_ROUTE: "):
+                            return ModelResponse(parts=[ToolCallPart(
+                                tool_name="final_result",
+                                args={"summary": "routed", "route": line.split(":", 1)[1].strip()})])
         served = sum(1 for message in messages if getattr(message, "kind", "") == "response")
         if served >= len(turns):
             if on_extra is not None:
@@ -59,8 +65,20 @@ def model_from(*turns, on_extra=None) -> FunctionModel:
         entry = turns[served]
         if isinstance(entry, str):
             return ModelResponse(parts=[TextPart(content=entry)])
-        return ModelResponse(parts=[ToolCallPart(tool_name="bash", args={"command": command})
-                                    for command in entry])
+        parts = []
+        for index, command in enumerate(entry):
+            if command.startswith("anchor-done --summary"):
+                summary = command.split("--summary", 1)[1].strip().strip("'\"")
+                parts.append(ToolCallPart(tool_name="final_result", args={"summary": summary}))
+                break
+            if command.startswith("anchor-route --to"):
+                fields = command.split()
+                route = fields[fields.index("--to") + 1]
+                parts.append(ToolCallPart(tool_name="final_result",
+                                          args={"summary": "routed", "route": route}))
+                break
+            parts.append(ToolCallPart(tool_name="bash", args={"command": command}))
+        return ModelResponse(parts=parts)
     return FunctionModel(fn)
 
 
@@ -114,9 +132,8 @@ def test_a1_one_bash_tool_writes_a_file_and_submits(tmp_path):
     assert outcome.files == ("out.txt",)
 
 
-def test_a1_the_model_is_offered_exactly_one_tool(tmp_path):
-    """Not "one plus a finish tool": the completion is a bash command, and a second tool would be a
-    second way out that the protocol does not have."""
+def test_a1_the_model_gets_bash_and_structured_completion(tmp_path):
+    """Workspace operations use bash; graph completion uses PydanticAI's output tool."""
     workspace = tmp_path / "ws"
     workspace.mkdir()
     seen: dict[str, list[str]] = {}
@@ -129,9 +146,7 @@ def test_a1_the_model_is_offered_exactly_one_tool(tmp_path):
     asyncio.run(run_node(request(workspace, max_requests=2), model=FunctionModel(watching)))
 
     assert seen["function_tools"] == ["bash"], f"found {seen['function_tools']}"
-    assert seen["output_tools"] == [], \
-        "an output tool would be a second way out, and its records are the wrong shape for the " \
-        "context machinery"
+    assert seen["output_tools"] == ["final_result"]
 
 
 # ── A2 · plain text is not a submission, and the loop can recover ────────────────────────────────
@@ -223,8 +238,7 @@ def test_a4_the_order_commands_ran_in_is_the_order_they_were_emitted(tmp_path):
 def test_a5_with_several_ways_out_done_is_refused_and_route_finishes(tmp_path):
     workspace = tmp_path / "ws"
     workspace.mkdir()
-    # The real CLI: the target is validated against ANCHOR_ROUTES inside the sandbox, so a marker
-    # printed by hand would not be testing the protocol the node actually has.
+    # An attempted no-route completion is retried; the next structured result selects an exit.
     model = model_from(['anchor-done --summary "trying the ordinary way"'],
                        ['anchor-route --to right --reason "because that is where it goes"'])
 
@@ -232,7 +246,7 @@ def test_a5_with_several_ways_out_done_is_refused_and_route_finishes(tmp_path):
 
     assert outcome.status == COMPLETED
     assert outcome.route == "right"
-    assert outcome.submission == "because that is where it goes", "the reason is the summary"
+    assert outcome.submission == "routed"
 
 
 def test_a5_with_one_way_out_done_finishes_and_names_no_route(tmp_path):
@@ -264,7 +278,7 @@ def test_a6_an_unknown_target_is_refused_and_can_be_corrected(tmp_path):
 def test_a7_a_marker_that_is_not_the_first_line_is_not_a_completion(tmp_path):
     workspace = tmp_path / "ws"
     workspace.mkdir()
-    model = model_from([f'printf "talking about {DONE_SENTINEL}\\n"'],
+    model = model_from(['printf "talking about COMPLETE_TASK_AND_SUBMIT\\n"'],
                        ['anchor-done --summary "the real one"'])
 
     outcome = asyncio.run(run_node(request(workspace), model=model))
@@ -275,7 +289,7 @@ def test_a7_a_marker_that_is_not_the_first_line_is_not_a_completion(tmp_path):
 def test_a7_a_marker_on_a_command_that_failed_is_refused(tmp_path):
     workspace = tmp_path / "ws"
     workspace.mkdir()
-    model = model_from(['echo "' + DONE_SENTINEL + '"; exit 3'],
+    model = model_from(['echo "COMPLETE_TASK_AND_SUBMIT"; exit 3'],
                        ['anchor-done --summary "the one that worked"'])
 
     outcome = asyncio.run(run_node(request(workspace), model=model))
@@ -283,42 +297,17 @@ def test_a7_a_marker_on_a_command_that_failed_is_refused(tmp_path):
     assert outcome.status == COMPLETED and outcome.submission == "the one that worked"
 
 
-def test_a7_a_route_on_a_command_that_failed_is_refused(tmp_path):
+def test_a7_shell_output_does_not_route_without_structured_completion(tmp_path):
     workspace = tmp_path / "ws"
     workspace.mkdir()
-    # The marker is printed by the real command, and then the command fails. A route printed by a
-    # command that did not succeed must not be accepted — the check the mini path does not make.
-    model = model_from(['anchor-route --to left --reason "printed, then failed"; exit 1'],
+    # A marker-like string printed by a failing Bash command is not completion.
+    model = model_from(['printf "finished\\n"; exit 1'],
                        ['anchor-route --to left --reason "from a command that succeeded"'])
 
     outcome = asyncio.run(run_node(request(workspace, routes=("left", "right")), model=model))
 
     assert outcome.status == COMPLETED
-    assert outcome.submission == "from a command that succeeded", \
-        "a route printed by a command that then failed must not have been accepted"
-
-
-@pytest.mark.parametrize("output,code,timed_out,expected", [
-    (DONE_SENTINEL, 0, False, "done"),
-    (DONE_SENTINEL + "\nsummary", 0, True, "refused"),
-    (ROUTE_SENTINEL + " left", 127, False, "refused"),
-    ("x\n" + DONE_SENTINEL, 0, False, ""),
-    ("COMPLETE_TASK_AND_SUBMIT", 0, False, ""),
-    (f"prefix {DONE_SENTINEL}", 0, False, ""),
-    ("", 0, False, ""),
-])
-def test_a7_read_completion_is_exact(output, code, timed_out, expected):
-    """The protocol, at its edges, without a sandbox in the way."""
-    # `done` is the ordinary finish, and an ordinary finish needs at most one way out.
-    routes = ("left",) if (output == DONE_SENTINEL and code == 0 and not timed_out) else ("left", "right")
-    kind, _, _ = read_completion(Executed(output=output, returncode=code, timed_out=timed_out), routes)
-    assert kind == expected
-
-
-def test_a7_done_is_refused_where_the_node_has_to_choose():
-    kind, message, _ = read_completion(Executed(output=DONE_SENTINEL, returncode=0),
-                                       ("left", "right"))
-    assert kind == "refused" and "left" in message and "right" in message
+    assert outcome.submission == "routed"
 
 
 # ── A8 · an ordinary failure, and no framework-level retry ───────────────────────────────────────
@@ -343,7 +332,7 @@ def test_a8_a_failing_command_is_visible_and_is_not_run_again(tmp_path):
 def test_a8_a_timed_out_command_is_refused_as_a_completion(tmp_path):
     workspace = tmp_path / "ws"
     workspace.mkdir()
-    model = model_from(["sleep 30; echo '" + DONE_SENTINEL + "'", 'anchor-done --summary "later"'])
+    model = model_from(["sleep 30; echo 'COMPLETE_TASK_AND_SUBMIT'", 'anchor-done --summary "later"'])
 
     outcome = asyncio.run(run_node(request(workspace, timeout_seconds=1.0), model=model))
 
@@ -737,8 +726,8 @@ def test_trace_is_visible_while_the_node_is_still_running(tmp_path):
     def watching(messages, info):
         if sum(getattr(item, "kind", "") == "response" for item in messages):
             observed.extend(json.loads(line) for line in trace.read_text().splitlines())
-            return ModelResponse(parts=[ToolCallPart(tool_name="bash",
-                                                    args={"command": 'anchor-done --summary "done"'})])
+            return ModelResponse(parts=[ToolCallPart(tool_name="final_result",
+                                                    args={"summary": "done"})])
         return ModelResponse(parts=[ToolCallPart(tool_name="bash", args={"command": "echo visible"})])
 
     outcome = asyncio.run(run_node(request(workspace, trace=trace), model=FunctionModel(watching)))
@@ -794,6 +783,9 @@ def test_stop_cancels_an_agent_tool_command(tmp_path):
     worker.join(timeout=3)
     assert not worker.is_alive(), "the agent tool did not stop promptly"
     assert results[0].status == FAILED and results[0].reason == "stopped on request"
+    # The killed command reads as an ordinary failure; without the guard the loop would ask again and
+    # retry its way to a different verdict, spending requests after the operator stopped.
+    assert results[0].model_requests == 1, results[0].model_requests
 
 
 def test_a_sandbox_that_cannot_start_is_a_failed_result_and_not_an_exception(tmp_path, monkeypatch):
@@ -926,15 +918,8 @@ def test_what_an_ordinary_command_is_recorded_as(tmp_path):
         f"be blind to every command's output, which is the whole of what it exists to reclaim")
 
 
-def test_a4b_a_later_call_is_dispatched_and_does_not_reach_the_sandbox(tmp_path):
-    """The distinction the design rests on: the framework handling a call is not the call happening.
-
-    A function tool cannot stop the rest of a response the way an output tool can — and an output tool
-    is the wrong shape for the context machinery. So the framework *does* dispatch the calls after a
-    submission, and the tool refuses them. Both halves are asserted here, because only the first one
-    distinguishes this from "the framework never saw them": the record shows a call for the command
-    after the submission, and its result says it was skipped, and the sandbox never ran it.
-    """
+def test_a4b_structured_completion_ends_the_model_turn(tmp_path):
+    """A structured completion ends the Agent run; later tool calls are never dispatched."""
     workspace = tmp_path / "ws"
     workspace.mkdir()
     trace = tmp_path / "trace.jsonl"
@@ -948,26 +933,18 @@ def test_a4b_a_later_call_is_dispatched_and_does_not_reach_the_sandbox(tmp_path)
     # The effect did not happen.
     assert (workspace / "before.txt").is_file()
     assert not (workspace / "after.txt").exists(), "the command after the submission ran"
-    # And it was dispatched, and refused, rather than never seen. Read from the record's own account of
-    # the commands, because a pass that submits leaves the loop before the framework puts its last
-    # batch into the message history.
+    # No tool request follows the structured result.
     lines = [json.loads(line) for line in trace.read_text(encoding="utf-8").splitlines()]
     calls = [part.get("args", {}).get("command")
              for line in lines for part in (line.get("parts") or [])
              if part.get("part_kind") == "tool-call"]
-    commands = lines[-1]["extra"]["commands"]
-    assert "printf 'after\\n' > after.txt" in calls, \
-        "the framework did not dispatch the later call, so this test is not about the guard"
-    skipped = [item for item in commands if item["returncode"] is None]
-    assert len(skipped) == 1, f"the later call was not recorded as refused: {commands}"
-    assert "already submitted" in skipped[0]["first_line"]
+    assert "printf 'after\\n' > after.txt" not in calls
     # No model request after the submission, and the record says so.
     assert outcome.model_requests == 1, "the model was asked again after the submission"
 
 
 def test_a4c_the_last_batch_is_recorded_whole_even_when_it_is_large(tmp_path):
-    """The acceptance's regression: a big ordinary command, a submission, and a skipped call in one
-    batch.
+    """A big ordinary command is paired with its result before structured completion.
 
     Two things were wrong and both were this package's. The record's framework half stopped at the
     node before the results were in the history, so a submitting pass had tool calls and no results.
@@ -1001,24 +978,19 @@ def test_a4c_the_last_batch_is_recorded_whole_even_when_it_is_large(tmp_path):
                 if part.get("part_kind") == "tool-return"]
     assert returned, "the last batch's results are not in the record at all"
 
-    # Every call has an id, and every id in the response is answered — this is what makes the record
-    # correlatable rather than a list of text.
+    # Every dispatched call has its matching result.
     calls = [part for line in lines for part in (line.get("parts") or [])
              if part.get("part_kind") == "tool-call"]
-    assert len(calls) == 3, f"expected three dispatched calls, found {len(calls)}"
+    assert len(calls) == 2, f"expected bash and structured completion, found {len(calls)}"
     call_ids = {part.get("tool_call_id") for part in calls}
     return_ids = {part.get("tool_call_id") for part in returned}
     assert return_ids == call_ids, f"unanswered calls: {call_ids - return_ids}"
 
-    # The tail of a long output survives, and the skipped call says that it was skipped.
+    # The tail of a long output survives.
     long_one = next(part for part in returned if marker in json.dumps(part.get("content")))
     assert len(json.dumps(long_one["content"])) > 25_000, "the output was truncated again"
 
-    skipped = [part for part in returned
-               if part.get("tool_call_id") in call_ids
-               and "skipped" in json.dumps(part.get("content"))]
-    assert len(skipped) == 1, "the call after the submission is not recorded as skipped"
-    # And the commands' own account agrees, uncapped.
+    # The commands' own account agrees, uncapped.
     commands = lines[-1]["extra"]["commands"]
     ran = [item for item in commands if item["returncode"] is not None]
     assert len(ran[0]["output"]) > 25_000, "the commands' own account was truncated"
@@ -1064,14 +1036,8 @@ def test_r2_a_real_harness_capability_works_on_this_executor_history(tmp_path):
         f"executor's command output"
 
 
-def test_r2_the_frameworks_own_view_of_each_kind_of_command(tmp_path):
-    """What the framework sees for the four cases, taken from its event stream rather than from the
-    adapter's account of itself.
-
-    An ordinary command's success, a command that fails, a submission and a skipped call all look
-    different to the lifecycle hooks, and the next packages are written against those hooks. Recorded
-    here so the answer is evidence rather than an assumption.
-    """
+def test_r2_the_framework_hook_sees_workspace_commands(tmp_path):
+    """The execution hook sees Bash calls; structured completion is not a workspace tool call."""
     from pydantic_ai.capabilities import AbstractCapability
 
     # `wrap_tool_execute` and not `on_event`: an event observer puts the run on the streamed path,
@@ -1094,32 +1060,16 @@ def test_r2_the_frameworks_own_view_of_each_kind_of_command(tmp_path):
         capabilities=(Watching(),)))
 
     assert outcome.status == COMPLETED, outcome.reason
-    # **All four reach the hook**, in order: the ordinary success, the command that failed, the
-    # submission, and the call that was skipped. The framework's lifecycle therefore sees everything
-    # this executor does — there is no case it is blind to, which is what the next packages need.
-    assert len(seen) == 4, f"expected four executions to reach the hook, got {seen}"
+    # Only the ordinary commands reach this hook; final_result is structured output.
+    assert len(seen) == 2, f"expected two Bash executions to reach the hook, got {seen}"
     assert all(name == "bash" for name, _ in seen), f"a command is not a bash call: {seen}"
     assert "fine" in seen[0][1], f"the ordinary success is not visible: {seen[0]}"
     assert "<returncode>9</returncode>" in seen[1][1] and "broken" in seen[1][1], \
         f"the failing command's return code and output are not both visible: {seen[1]}"
-    assert "COMPLETE_TASK_AND_SUBMIT" in seen[2][1], \
-        f"the submission does not reach the hook as an execution: {seen[2]}"
-    assert "skipped" in seen[3][1], f"the skipped call is not visible to the hooks: {seen[3]}"
 
 
 def test_r2_leaving_the_iteration_early_is_visible_to_the_run_level_hook(tmp_path):
-    """The mismatch the acceptance asked to have stated rather than papered over.
-
-    `wrap_run` wraps the whole run and its handler returns an `AgentRunResult`. This adapter leaves the
-    iteration at a boundary instead, and the framework's answer to that is measured here: **the run is
-    cancelled, not completed** — `handler()` raises `CancelledError`. So a run-level capability, which
-    is where step persistence would live, sees a cancelled pass rather than a finished one.
-
-    The wrapper's own teardown still runs, which is what makes a run-level observation point usable at
-    all, and the batch the pass left on is readable from the node (which is how this adapter records
-    it). Both halves are asserted, because the mismatch is the finding and the usable part is what a
-    later package may rely on.
-    """
+    """Structured output exits normally and reaches the run-level hook as a result."""
     from pydantic_ai.capabilities import AbstractCapability
 
     seen: dict[str, object] = {"entered": 0, "exited": 0, "result": None, "error": None}
@@ -1148,12 +1098,40 @@ def test_r2_leaving_the_iteration_early_is_visible_to_the_run_level_hook(tmp_pat
 
     assert outcome.status == COMPLETED
     assert seen["entered"] == 1 and seen["exited"] == 1, f"the run wrapper did not run: {seen}"
-    # The finding, asserted so that it cannot quietly change: **no `AgentRunResult` is produced**,
-    # because the pass left before the run ended. A package wanting a framework-level record of the
-    # pass has to read the node it left on (which is what this adapter does) rather than expect a
-    # result. If this ever starts producing one, that is news and this test should fail.
-    assert seen["result"] is None, \
-        f"an early exit produced a run result ({seen['result']}) — the note in the report is stale"
-    assert seen["error"] == "CancelledError", (
-        f"leaving early did not look like a cancellation ({seen['error']}) — if the framework now "
-        f"reports a completed run here, that is news and the report's note is stale")
+    assert seen["result"] == "AgentRunResult", f"structured output did not finish normally: {seen}"
+    assert seen["error"] is None, f"normal completion raised through the run wrapper: {seen}"
+
+
+def test_a_stop_stops_the_next_model_request_before_it_is_made():
+    """A killed command reads as an ordinary failure, so the loop would otherwise ask again and
+    retry its way to a different verdict than the one the operator asked for."""
+    from anchor.node.agent_runtime import _CountingModel
+
+    asked = []
+
+    def refuse(messages, info):
+        asked.append(1)
+        raise AssertionError("the provider was asked after the stop")
+
+    counted = _CountingModel(FunctionModel(refuse))
+    counted.cancelled = lambda: True
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(counted.request([], None, None))
+    assert asked == [] and counted.requests == 0
+
+
+def test_a_failure_while_stopping_is_a_stop_and_not_a_retry(tmp_path):
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    stopping = threading.Event()
+    asked = []
+
+    async def dying(messages, info):
+        asked.append(1)
+        stopping.set()  # the operator asks to stop while the model call is in flight
+        raise RuntimeError("the command died while stopping")
+
+    outcome = asyncio.run(run_node(request(workspace, cancelled=stopping.is_set),
+                                   model=FunctionModel(dying)))
+    assert outcome.status == FAILED and outcome.reason == "stopped on request"
+    assert len(asked) == 1, "a stop must not turn into retries"

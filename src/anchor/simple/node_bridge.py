@@ -38,6 +38,7 @@ class Node:
                  network: bool, timeout_seconds: float, max_requests: int | None,
                  command: str | None = None, control: Path | None = None,
                  capabilities: tuple[Any, ...] = (),
+                 resources: tuple[tuple[str, str], ...] = (),
                  cancelled: Callable[[], bool] | None = None) -> None:
         self.node_id = node_id
         self.directory = Path(directory)
@@ -52,6 +53,7 @@ class Node:
         self._timeout = timeout_seconds
         self._max_requests = max_requests
         self._capabilities = tuple(capabilities)
+        self._resources = resources
         self._cancelled = cancelled
         # Read by `_result_of` through `agent.env.route`. Kept as an object rather than a bare
         # attribute so the shape the scheduler reads does not change with the loop behind it.
@@ -126,7 +128,7 @@ class Node:
 
             outcome = asyncio.run(run_agent_node(
                 NodeRequest(execution_id=self.node_id, task=task or "", workspace=self.directory,
-                            instructions=self._instructions, inputs=_binds(self.inputs),
+                            instructions=self._instructions, inputs=(*_binds(self.inputs), *self._resources),
                             routes=self.routes, network=self._network,
                             timeout_seconds=self._timeout, max_requests=self._max_requests,
                             trace=self.trace, roles=self.node_id, cancelled=self._cancelled,

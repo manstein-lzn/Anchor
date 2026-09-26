@@ -13,6 +13,7 @@ export async function api<T>(path: string, method = 'GET', body?: unknown): Prom
   });
   const data = await response.json().catch(() => null);
   if (!response.ok) throw new Error(data?.error ?? `${method} ${path} → ${response.status}`);
+  if (data === null) throw new Error(`${method} ${path} 未返回有效 JSON，请检查 API 服务连接。`);
   return data as T;
 }
 

@@ -38,14 +38,44 @@ def _scripted(commands: list[str]) -> Any:
     from pydantic_ai.messages import ModelResponse, ToolCallPart
     from pydantic_ai.models.function import FunctionModel
 
+    # Test fixture normalization only: model_script predates structured output. The production Agent
+    # runtime never parses these strings or exposes a sentinel protocol.
     served = {"count": 0}
 
     def answer(messages: list[Any], info: Any) -> ModelResponse:
         at = served["count"]
         served["count"] += 1
+        # A scripted shell step may choose a route conditionally. Read the actual tool observation,
+        # rather than guessing from the command text (which can contain several branches).
+        for message in reversed(messages):
+            for part in getattr(message, "parts", ()) or ():
+                if getattr(part, "part_kind", "") != "tool-return":
+                    continue
+                content = str(getattr(part, "content", "") or "")
+                observed = content
+                if "<output>" in observed and "</output>" in observed:
+                    observed = observed.split("<output>", 1)[1].split("</output>", 1)[0]
+                lines = observed.splitlines()
+                for index, line in enumerate(lines):
+                    if line.startswith("ANCHOR_ROUTE: "):
+                        summary = "\n".join(lines[index + 1:]).strip() or "routed"
+                        return ModelResponse(parts=[ToolCallPart(
+                            tool_name="final_result",
+                            args={"summary": summary, "route": line.split(":", 1)[1].strip()})])
         if at >= len(commands):
-            return ModelResponse(parts=[])
-        return ModelResponse(parts=[ToolCallPart(tool_name="bash", args={"command": commands[at]})])
+            return ModelResponse(parts=[ToolCallPart(tool_name="final_result",
+                                                     args={"summary": "completed"})])
+        command = commands[at]
+        if command.startswith("anchor-done --summary"):
+            summary = command.split("--summary", 1)[1].strip().strip("'\"")
+            return ModelResponse(parts=[ToolCallPart(tool_name="final_result",
+                                                     args={"summary": summary})])
+        if command.startswith("anchor-route --to"):
+            fields = command.split()
+            route = fields[fields.index("--to") + 1]
+            return ModelResponse(parts=[ToolCallPart(tool_name="final_result",
+                                                     args={"summary": "routed", "route": route})])
+        return ModelResponse(parts=[ToolCallPart(tool_name="bash", args={"command": command})])
 
     return FunctionModel(answer)
 

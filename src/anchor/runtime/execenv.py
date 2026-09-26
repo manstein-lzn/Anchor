@@ -170,7 +170,7 @@ class NodeSandbox:
     def __post_init__(self) -> None:
         if self.sandbox is None:
             self.sandbox = BubblewrapWorkspaceSandbox(allowed_commands=frozenset(SHELL))
-        found = console_script("anchor-scholarly")
+        found = console_script("anchor-done")
         self.dirs = tool_dirs(found)
         self.binds = tool_binds(found)
 

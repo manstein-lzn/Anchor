@@ -2,7 +2,7 @@
  * state; the model adapter and canvas layout stay independent of the page. */
 
 import {
-  Anchor, Activity, CheckCheck, Copy, Download, GitBranch, Plus, Redo2, Save, Trash2, Undo2, Upload,
+  Anchor, Activity, CheckCheck, Copy, Download, GitBranch, MessageSquare, Plus, Redo2, Save, Trash2, Undo2, Upload,
   Play, Search, SlidersHorizontal, FolderOpen, PanelLeftClose, PanelRightClose,
 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -13,7 +13,9 @@ import {
   type OurAgent, type OurGraph, type OurRun, type OurRunDetail,
 } from './model';
 import { RunInspector } from './RunInspector';
+import { Plugins } from './Plugins';
 import { Workspace } from './Workspace';
+import { Pilot } from './Pilot';
 import { api } from './api';
 import { EmptyState, JsonDialog, Modal, ToolButton } from './ui';
 
@@ -27,7 +29,7 @@ export function App() {
   const [search, setSearch] = useState('');
   const [libraryOpen, setLibraryOpen] = useState(true);
   const [inspectorOpen, setInspectorOpen] = useState(true);
-  const [view, setView] = useState<'graph' | 'runs'>('graph');
+  const [view, setView] = useState<'graph' | 'runs' | 'pilot'>('graph');
   const [graphs, setGraphs] = useState<{ graph: string; running: string | null }[]>([]);
   const [runs, setRuns] = useState<OurRun[]>([]);
   const [name, setName] = useState('');
@@ -196,7 +198,7 @@ export function App() {
   const selectedAgent = pick?.kind === 'agent' && doc ? doc.agents?.[pick.id] : undefined;
   const selectedEdge = pick?.kind === 'edge' && doc ? doc.edges[Number(pick.id)] : undefined;
 
-  const patchNode = (fields: Partial<{ id: string; agent: string; with: string }>) => {
+  const patchNode = (fields: Partial<{ id: string; agent: string; with: string; plugins: string[] }>) => {
     if (!doc || !selectedNode) return;
     patch({ ...doc, nodes: doc.nodes.map(item =>
       item.id === selectedNode.id ? { ...item, ...fields } : item) });
@@ -278,27 +280,28 @@ export function App() {
         <nav className="product-switch" aria-label="工作台">
           <button aria-pressed={view === 'graph'} className={view === 'graph' ? 'chosen' : ''} onClick={() => setView('graph')}><GitBranch size={15} />图编排</button>
           <button aria-pressed={view === 'runs'} className={view === 'runs' ? 'chosen' : ''} onClick={() => setView('runs')}><Activity size={15} />运行记录</button>
+          <button aria-pressed={view === 'pilot'} className={view === 'pilot' ? 'chosen' : ''} onClick={() => setView('pilot')}><MessageSquare size={15} />Pilot</button>
         </nav>
-        <select aria-label="当前工作流" value={name} onChange={event => selectGraph(event.target.value)}>
+        {view !== 'pilot' && <select aria-label="当前工作流" value={name} onChange={event => selectGraph(event.target.value)}>
           {graphs.map(item => (
             <option key={item.graph} value={item.graph}>
               {item.graph}{item.running ? '（执行中）' : ''}
             </option>
           ))}
-        </select>
+        </select>}
         <div className="connection" title={problem || '服务已连接'}><span className={`status-dot ${problem ? 'bad' : ''}`} />
           {problem ? '连接中断' : '服务在线'}
         </div>
-        <button className="primary" title={dirty ? '请先保存工作流' : '运行已保存的工作流'} onClick={() => void trigger()} disabled={busy || !name || dirty}><Play size={14} fill="currentColor" />运行工作流</button>
-        <div className="panel-toggles">
+        {view !== 'pilot' && <button className="primary" title={dirty ? '请先保存工作流' : '运行已保存的工作流'} onClick={() => void trigger()} disabled={busy || !name || dirty}><Play size={14} fill="currentColor" />运行工作流</button>}
+        {view !== 'pilot' && <div className="panel-toggles">
           <ToolButton icon={PanelLeftClose} label="切换侧边栏" aria-pressed={libraryOpen} onClick={() => setLibraryOpen(!libraryOpen)} />
           <ToolButton icon={PanelRightClose} label="切换详情面板" aria-pressed={inspectorOpen} onClick={() => setInspectorOpen(!inspectorOpen)} />
-        </div>
+        </div>}
       </header>
       {problem && <div className="connection-error" role="alert">{problem}</div>}
       {view === 'runs' && notice && <p className={`notice ${notice.kind}`} role="status">{notice.text}</p>}
 
-      {view === 'runs' ? (
+      {view === 'pilot' ? <Pilot /> : view === 'runs' ? (
         <Workspace running>
           <aside className="runs">
             <div className="section-heading"><h3><Activity size={15} />运行历史</h3><span className="count">{runs.filter(item => item.graph === name).length}</span></div>
@@ -510,6 +513,8 @@ export function App() {
                   以 <code>{selectedNode.id}/…</code> 命名，各自在自己的目录里，父图只看得到它的
                   <code>exit</code> 节点。
                 </p> : <>
+                <Plugins selected={selectedNode.plugins} disabled={!editable}
+                  onChange={plugins => patchNode({ plugins })} />
                 <label>使用角色
                   <select value={selectedNode.agent}
                           onChange={event => patchNode({ agent: event.target.value })}>

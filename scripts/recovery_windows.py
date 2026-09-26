@@ -33,6 +33,20 @@ import subprocess
 from types import SimpleNamespace
 import sys
 import time
+
+
+def _structured_result(command: str):
+    """Translate legacy fixture labels to the AgentNode structured result."""
+    from pydantic_ai.messages import ModelResponse, ToolCallPart
+    if command.startswith("anchor-done --summary"):
+        summary = command.split("--summary", 1)[1].strip().strip("'\"")
+        return ModelResponse(parts=[ToolCallPart(tool_name="final_result", args={"summary": summary})])
+    if command.startswith("anchor-route --to"):
+        fields = command.split()
+        route = fields[fields.index("--to") + 1]
+        return ModelResponse(parts=[ToolCallPart(tool_name="final_result",
+                                                  args={"summary": "routed", "route": route})])
+    return None
 import traceback
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -289,9 +303,9 @@ class Barrier(AbstractCapability[Any]):
 
     async def wrap_tool_execute(self, ctx, *, call, tool_def, args, handler):
         result = await handler(args)
-        if self.window == "C3" and self.seen_tools == 2:
-            # The counter command is the first call; this is the pause after *its* effect and before the
-            # framework writes the terminal record for it.
+        if self.window == "C3" and self.seen_tools == 1:
+            # The counter command is the only Bash call; structured completion follows it and is not a
+            # workspace tool. Pause after its effect and before the framework writes its terminal record.
             _wait_for_a_kill("side effect done, terminal record not written")
         if self.window == "B3-effect" and self._pause_for_compaction_tool_case():
             _wait_for_a_kill("after a compaction: effect done, terminal record not written")
@@ -354,6 +368,9 @@ def _run_graph_child(window: str, control: Path, workspace: Path, script: dict) 
         seen = any(script["marker"] in str(getattr(part, "content", ""))
                    for message in messages for part in (getattr(message, "parts", ()) or ()))
         command = script["then"] if seen else script["first"]
+        result = _structured_result(command)
+        if result is not None:
+            return result
         return ModelResponse(parts=[ToolCallPart(tool_name="bash", args={"command": command})])
 
     class Bridged:
@@ -430,6 +447,9 @@ def install_graph_bridge(window: str, control: Path, script: dict) -> None:
         seen = any(script["marker"] in str(getattr(part, "content", ""))
                    for message in messages for part in (getattr(message, "parts", ()) or ()))
         command = script["then"] if seen else script["first"]
+        result = _structured_result(command)
+        if result is not None:
+            return result
         return ModelResponse(parts=[ToolCallPart(tool_name="bash", args={"command": command})])
 
     class Bridged:
@@ -539,6 +559,9 @@ async def _run_child(window: str, control: Path, workspace: Path, script: dict,
             # `RuntimeError` — measured, by the recovery failing with exactly that.
             command = next((item["command"] for item in script["phases"]
                             if item["until"] not in rendered), script["then"])
+            result = _structured_result(command)
+            if result is not None:
+                return result
             return ModelResponse(parts=[ToolCallPart(tool_name="bash", args={"command": command})])
         if script.get("staged"):
             # **Driven by a monotonic stage signal**, read out of the history. The largest `STEP-n` the
@@ -554,18 +577,26 @@ async def _run_child(window: str, control: Path, workspace: Path, script: dict,
                 command = script["then"]
             else:
                 command = script["step"].format(n=reached + 1)
+            result = _structured_result(command)
+            if result is not None:
+                return result
             return ModelResponse(parts=[ToolCallPart(tool_name="bash", args={"command": command})])
         if script.get("history_driven"):
             seen = any(script["marker"] in str(getattr(part, "content", ""))
                        for message in messages for part in (getattr(message, "parts", ()) or ()))
             command = script["then"] if seen else script["first"]
+            result = _structured_result(command)
+            if result is not None:
+                return result
             return ModelResponse(parts=[ToolCallPart(tool_name="bash", args={"command": command})])
         index = turn["n"]
         turn["n"] += 1
         command = script["commands"][index] if index < len(script["commands"]) else None
         if command is None:
-            return ModelResponse(parts=[ToolCallPart(
-                tool_name="bash", args={"command": 'anchor-done --summary "finished"'})])
+            command = 'anchor-done --summary "finished"'
+        result = _structured_result(command)
+        if result is not None:
+            return result
         return ModelResponse(parts=[ToolCallPart(tool_name="bash", args={"command": command})])
 
     # **The capability order decides which side of a write a hook lands on, and the two directions

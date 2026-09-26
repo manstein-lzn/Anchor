@@ -446,6 +446,7 @@ def test_the_task_names_where_what_it_was_given_is_mounted():
     assert "read-only" in task, "and that it cannot be written to"
     assert "wrote notes" in task and "notes.md" in task, "and what is behind it"
     assert "git --git-dir=/in/in/.git log" in task, "and that the history is there too"
+    assert "HEAD is pinned" in task and "If needed" in task
     assert "/workspace" in task, "and which directory is its own"
 
 
@@ -486,6 +487,9 @@ def test_a_pointer_is_a_commit_and_not_a_directory_that_moved_since(tmp_path, mo
     assert (handed[0].tree / "a.md").read_text(encoding="utf-8") == "v1", \
         "what b was given first changed underneath it"
     assert (handed[1].tree / "a.md").read_text(encoding="utf-8") == "v2"
+    for index, item in enumerate(handed):
+        assert runner._git(item.tree, "rev-parse", "HEAD").stdout.strip() == item.commit
+        assert len(_commits(item.tree)) == index + 2, "only this pass and its ancestors"
     assert (run_dir / "a" / "a.md").read_text(encoding="utf-8") == "v2", \
         "and the node's own workspace is still the live one it is standing in"
 
@@ -518,6 +522,83 @@ def test_a_loop_of_two_that_exceeds_its_ceiling_stops_instead_of_spinning(tmp_pa
 
 
 # -- materializing a commit's tree ---------------------------------------------------------------
+
+
+@pytest.mark.parametrize("legacy_cache", [False, True])
+def test_input_history_is_pinned_and_readable_in_the_sandbox(tmp_path, legacy_cache):
+    from anchor.runtime.sandbox import BubblewrapWorkspaceSandbox, SandboxSpec
+
+    repo = tmp_path / "upstream"
+    repo.mkdir()
+    runner._init_history(repo)
+    (repo / "notes.md").write_text("first\n", encoding="utf-8")
+    first = runner._freeze(repo, "first pass")
+    (repo / "notes.md").write_text("revised\n", encoding="utf-8")
+    selected = runner._freeze(repo, "second pass")
+    runner._git(repo, "checkout", "-q", "-b", "unrelated", first)
+    (repo / "notes.md").write_text("other branch\n", encoding="utf-8")
+    unrelated = runner._freeze(repo, "unrelated")
+    runner._git(repo, "tag", "other-tag")
+    runner._git(repo, "checkout", "-q", "--detach", selected)
+    (repo / "notes.md").write_text("future\n", encoding="utf-8")
+    future = runner._freeze(repo, "future pass")
+    runner._git(repo, "tag", "future-tag")
+    runner._git(repo, "repack", "-ad")  # All branches share a pack; copying it would leak history.
+
+    result = runner.NodeResult(node_id="upstream", agent="w", tree=str(repo), pass_number=2,
+                               submission="revised", files=("notes.md",), submitted=True,
+                               exit_status="Submitted", commit=selected)
+    view = tmp_path / ".views" / f"upstream-{selected[:12]}"
+    if legacy_cache:
+        (view / ".git").mkdir(parents=True)
+        (view / "notes.md").write_text("revised\n", encoding="utf-8")
+        # A failed upgrade must leave the old files intact and be retryable.
+        with pytest.raises(RuntimeError, match="cannot read history"):
+            runner._materialize(repo, "0" * 40, view)
+        assert not (view / ".git" / "HEAD").exists()
+        assert not (view / ".git.building").exists()
+
+    given = runner._given(tmp_path, result)
+    assert given.tree == view
+    assert _commits(view) == ["second pass", "first pass", "start"]
+    assert runner._git(view, "rev-parse", "HEAD").stdout.strip() == selected
+    assert runner._git(view, "show", f"{first}:notes.md").stdout == "first\n"
+    assert "+revised" in runner._git(view, "diff", first, "HEAD").stdout
+    assert runner._git(view, "for-each-ref").stdout == ""
+    for excluded in (future, unrelated):
+        assert runner._git(view, "cat-file", "-e", excluded, check=False).returncode != 0
+    assert not (view / ".git" / "objects" / "info" / "alternates").exists()
+
+    (repo / "notes.md").write_text("even later\n", encoding="utf-8")
+    later = runner._freeze(repo, "another pass")
+    assert runner._given(tmp_path, result).tree == view
+    assert (view / "notes.md").read_text(encoding="utf-8") == "revised\n"
+
+    try:
+        sandbox = BubblewrapWorkspaceSandbox(allowed_commands=frozenset({"sh"}))
+    except RuntimeError as exc:
+        pytest.skip(f"no usable sandbox: {exc}")
+    downstream = tmp_path / "downstream"
+    downstream.mkdir()
+    checked = sandbox.run(SandboxSpec(
+        workspace=downstream, readonly_binds=given.binds(),
+        command=("sh", "-ec", f"""
+git_read() {{ git --git-dir=/in/upstream/.git "$@"; }}
+test "$(git_read rev-parse HEAD)" = {selected}
+test "$(cat /in/upstream/notes.md)" = revised
+test "$(git_read show {first}:notes.md)" = first
+git_read log --oneline
+git_read diff {first} HEAD
+if git_read cat-file -e {future}; then exit 11; fi
+if git_read cat-file -e {unrelated}; then exit 12; fi
+if git_read cat-file -e {later}; then exit 13; fi
+if git_read update-ref refs/heads/tampered HEAD; then exit 14; fi
+if echo tampered > /in/upstream/notes.md; then exit 15; fi
+test "$(git_read rev-parse HEAD)" = {selected}
+""")))
+    assert checked.ok, checked.stderr
+    assert "first pass" in checked.stdout and "+revised" in checked.stdout
+    assert (repo / "notes.md").read_text(encoding="utf-8") == "even later\n"
 
 
 def test_a_node_that_wrote_nothing_still_has_a_view(tmp_path, monkeypatch):

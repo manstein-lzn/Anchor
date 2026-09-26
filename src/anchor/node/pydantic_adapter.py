@@ -8,11 +8,9 @@ one name and the old one still resolves. `anchor.node.adapter` is where the code
 from __future__ import annotations
 
 from anchor.node.adapter import run_node
-from anchor.node.agent_runtime import (DONE_SENTINEL, ROUTE_SENTINEL, RULES, build_agent,
-                                       read_completion)
+from anchor.node.agent_runtime import RULES, AgentCompletion, build_agent
 
 #: The name ADR-062 freezes. Same function; a caller that wants the frozen name uses this.
 run_agent_node = run_node
 
-__all__ = ["DONE_SENTINEL", "ROUTE_SENTINEL", "RULES", "build_agent", "read_completion",
-           "run_agent_node", "run_node"]
+__all__ = ["AgentCompletion", "RULES", "build_agent", "run_agent_node", "run_node"]
