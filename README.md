@@ -1,52 +1,143 @@
 # Anchor
 
-Anchor 是一个以文件、Git 和沙箱为基础的 Agent 工作流系统。用一个 JSON 文件定义图，让节点在独立工作区完成任务，通过带 commit 标识的输入交接成果，在 WebUI 中编排、观察和管理运行。
+**把复杂工作交给一张图，让每一步都留下证据。**
 
-当前产品方向是：**以 Anchor Pilot 作为唯一系统级控制面，让用户通过可恢复对话使用 Graph；以 Plugin 作为 AgentNode 的可复用能力资产。** Plugin 是一套做事方法及其配套知识和工具；Agent 决定如何运用它，Graph 组织各节点之间的协作。产品边界、Session、恢复和分阶段建设见[产品与系统架构](docs/product-architecture.md)。
+Anchor 是一个本地优先的 Agent 工作流系统：用 Graph 组织多个 Agent 和确定性操作，用 Plugin 复用能力，用隔离工作区和 Git 保存产物，用 Pilot 通过自然语言查看和管理工作。
 
-## 当前产品
+它适合需要反复推进、允许质疑和返工、又不能只靠一段聊天记忆的工作：研究、资料整理、代码分析、报告编写，以及以后更多日常事务。
 
-- 创建、编辑、校验和保存工作流；支持 Agent Node、命令型 OpNode、条件路由、反馈循环和子图展开。
-- 在统一的纵向画布中编排和观察运行，查看节点多轮执行、对话、工具调用和产物。
-- 暂停、继续、停止运行，删除运行记录及文件，删除工作流及其全部运行历史。
-- 使用深度学术调研图进行研究、质疑、写作和评审，按证据与反馈回流，产出学术综述论文。
+<p align="center">
+  <img src="docs/images/anchor-graph-editor.png" alt="Anchor Graph 编辑器：一个带反馈回路的深度研究工作流" width="100%">
+</p>
 
-Agent Node 使用 **PydanticAI + pydantic-ai-harness**，模型可通过 Bash 操作沙箱内的工作区，并以结构化结果结束节点；完成不依赖 Bash。每次新运行拥有独立的节点工作区，同一次运行的多轮执行保留文件与 Git 历史。图就是 `graph.json`，没有图版本发布流程；运行记录和 commit 用于追溯执行事实。
+## 先看一个真实例子
 
-旧学术调研图继续按原有方式运行。Plugin 基础链路已接入：AgentNode 引用 Plugin、按需读取说明、调用共享环境中的工具，WebUI 可选择和查看，运行记录保存资源摘要。代表性示例为 [plugin-research.json](examples/graphs/plugin-research.json)。Anchor Pilot、持久 Session 和对话控制面已接入服务，Pilot 可查询和操作 Graph、Run、Plugin，并在修改 Graph 前请求用户确认。知识库编译、自动环境安装和真实模型长上下文验收暂未完成。
+Anchor 附带一张深度学术调研 Graph。它把研究拆成问题构建、检索、质疑、综合、评审和报告几个角色；质疑结果可以把工作送回前面的节点补证，直到评审通过。
 
-## 能力资产：Plugin
+运行完成后，Graph、每个节点的执行轮次、对话、工具调用和最终文件都能在同一个界面里回看：
 
-Anchor 的核心概念是 **Graph、AgentNode、OpNode、Plugin**。Plugin 由名称、描述、说明，以及按需关联的知识库和工具构成，直接挂载给 AgentNode，不设角色继承规则。
+<p align="center">
+  <img src="docs/images/anchor-run-evidence.png" alt="Anchor 运行记录：Graph 执行路径和生成的论文文件" width="100%">
+</p>
 
-- **唯一事实来源**：Anchor 维护资源，Agent 配置只保存引用；多个能力可以引用同一知识库或工具。
-- **渐进式披露**：系统提示词提供能力名称、简述和入口；Agent 按需阅读说明、查询知识、调用工具。
-- **知识库暂缓**：先使用 Plugin 说明和补充资料，后续再接入编译知识与统一查询。
-- **集中管理工具环境**：工具入口与实现有明确来源；按 Python 和依赖要求隔离环境，跨节点、跨运行复用，不在每个工作区重复安装。
-- **图中可见**：编排和运行界面展示 Agent 配置的能力，并能查看说明、知识和工具入口。配置的能力不等于已成功调用或结果可靠。
+这里展示的不是演示文字，而是一次实际运行留下的 `paper.md` 产物。Graph 告诉你工作怎样推进，文件和 Git commit 告诉你最后留下了什么。
 
-Plugin 不等同于 Op。OpNode 继续表示图中明确安排的程序执行；Agent 和 OpNode 可以复用同一工具实现。能力通过文件维护，UI 负责选择与只读查看。边界、格式和验收依据只在 [Plugin 设计](docs/plugins.md) 中维护；[当前架构](docs/architecture.md) 说明其文件系统结构。
+## Anchor 解决什么问题
 
-## 开始使用
+普通 Agent 对话擅长即时回答，却很难让人看清长期任务到底做过什么、为什么返工、结果从哪里来。Anchor 把这几件事拆开并连接起来：
 
-首次安装、模型配置和示例工作流导入见 [使用指南](docs/usage.md)。完成准备后，从仓库根目录启动：
-
-```bash
-./scripts/dev.sh start
-./scripts/dev.sh status
+```text
+Plugin       可复用的方法、知识和工具
+   ↓
+AgentNode    理解、判断、执行
+   + OpNode   确定性的程序步骤
+   ↓
+Graph        依赖、路由和反馈回路
+   ↓
+Run          工作区、文件、对话、工具轨迹和 Git 历史
+   ↓
+Pilot        用自然语言查询、启动和继续工作
 ```
 
-访问 **http://127.0.0.1:5173**。后续开发也统一使用此脚本管理后台服务，关闭终端或对话框不会关闭 Anchor。脚本不提供开机自启或崩溃自动拉起；日志、停止和重启方式见使用指南。
+- **Graph** 是工作流本身：可以有 Agent Node、OpNode、条件路由、反馈循环和子图。
+- **Plugin** 是能力资产：说明 Agent 应该怎样做，并按需提供知识和工具入口。
+- **Run** 是一次工作的事实记录：每次运行有独立工作区，节点之间通过 commit 对应的只读输入交接。
+- **Pilot** 是控制面：可以查询 Graph、Run、Plugin 和产物；聊天中提到的对象可以直接打开。
 
-## 文档入口
+Agent 使用 PydanticAI，步骤记录和恢复使用 pydantic-ai-harness。Anchor 负责 Graph、工作区、Git、沙箱、Session 和运行生命周期，不另造一套模型循环或聊天记忆系统。
 
-| 文档 | 负责回答的问题 |
+## 当前已经可以做什么
+
+- 在 WebUI 中创建、编辑、校验和保存 Graph。
+- 组合 Agent Node、命令型 OpNode、路由、反馈循环和子图。
+- 为 AgentNode 挂载 Plugin，按需读取说明并使用共享工具环境。
+- 在隔离工作区运行任务，查看对话、工具调用、轮次、文件和 Git 产物。
+- 暂停、继续、停止和删除运行记录；在原会话里让 Pilot 查询或管理资源。
+- 服务或进程中断后重新打开 Session，加载 Harness 工作记录继续；缺失的工具结果会如实标记为中断，不盲目重放。
+- 通过聊天里的 Graph、Run、Artifact 链接直接跳到已有页面。
+
+现在的触发入口是手动/API 的 `POST /trigger`。定时、邮件、文件变化等外部事件触发，以及更丰富的常驻 Graph，还在后续产品讨论中。
+
+## 从一个 Graph 开始
+
+Graph 就是一个 JSON 文件。下面的例子让一个 Agent 写出结果，再由命令节点检查文件：
+
+```json
+{
+  "entry": "write",
+  "objective": "整理一份关于 RAG 的简短说明",
+  "agents": {
+    "writer": {
+      "model": "models.academic",
+      "writes": ["answer.md"],
+      "instructions": "读取任务，写出 answer.md，并返回结构化完成结果。"
+    }
+  },
+  "ops": {
+    "check": {
+      "reads": ["answer.md"],
+      "run": "test -s /workspace/answer.md"
+    }
+  },
+  "nodes": [
+    {"id": "write", "agent": "writer"},
+    {"id": "check", "op": "check"}
+  ],
+  "edges": [{"from": "write", "to": "check"}]
+}
+```
+
+更完整的示例：
+
+- [深度学术调研 Graph](examples/graphs/deep-academic-research.json)
+- [带 Plugin 的调研 Graph](examples/graphs/plugin-research.json)
+- [Plugin 设计与格式](docs/plugins.md)
+
+## 安装和运行
+
+需要 Linux、Python 3.12+、Git、Bubblewrap，以及 Node.js 20.19+ 或 22.12+。
+
+```bash
+python3.12 -m venv .venv
+./.venv/bin/python -m pip install -e '.[dev]'
+npm --prefix apps/web ci
+
+mkdir -p .local
+cp -n examples/runtime.deepseek.json .local/runtime.json
+# 设置 ANCHOR_SECRET_DEEPSEEK_API_KEY，或按 docs/usage.md 配置本地密钥文件
+
+mkdir -p .local/demo/workspaces/deep-academic-research
+cp -n examples/graphs/deep-academic-research.json \
+  .local/demo/workspaces/deep-academic-research/graph.json
+
+./scripts/dev.sh start
+```
+
+打开 <http://127.0.0.1:5173>，选择 Graph，保存后运行。完整的模型配置、沙箱依赖、服务管理和恢复说明见 [使用指南](docs/usage.md)。
+
+## 项目边界
+
+Anchor 目前是面向本机的单服务进程产品。它不承诺任意外部副作用 exactly-once，也不把研究结论自动判定为正确；运行记录提供证据，最终判断仍由用户和具体 Graph 负责。
+
+计划中的系统级 Pilot、事件触发、附件和资源引用、编辑分支与导出、研究应用层体验，都会在当前核心运行链稳定后分别讨论。它们不是使用 Anchor 的前置条件。
+
+## 文档
+
+| 文档 | 内容 |
 | --- | --- |
-| [使用指南](docs/usage.md) | 当前怎样安装、启动、编排、运行、恢复和管理文件？ |
-| [当前架构](docs/architecture.md) | 当前代码怎样组织，节点、工作区和工具怎样连接，有哪些已知边界？ |
-| [产品与系统架构](docs/product-architecture.md) | Anchor Pilot、Session、Graph、Run、Plugin 的产品真相、边界和演进顺序是什么？ |
-| [Plugin 设计](docs/plugins.md) | 唯一升级方向是什么，什么已确定，什么尚未实现，怎样验收？ |
-| [开发约定](docs/development.md) | 后续开发先读什么，怎样验证和同步文档？ |
-| [历史归档](docs/archive/README.md) | 旧架构、讨论和内核迁移当时依据什么，有什么验证记录？ |
+| [使用指南](docs/usage.md) | 安装、配置、启动、编排、运行和恢复 |
+| [当前架构](docs/architecture.md) | Graph、Run、工作区、Git、沙箱和当前实现边界 |
+| [产品与系统架构](docs/product-architecture.md) | 产品对象、原则和后续方向 |
+| [Plugin 设计](docs/plugins.md) | Plugin 格式、工具环境和能力边界 |
+| [Pilot 开发计划](docs/pilot-development-plan.md) | 当前阶段、验收矩阵和证据台账 |
 
-现行使用行为由使用指南和当前架构说明；产品边界与演进顺序以产品与系统架构为准，Plugin 的能力格式以 Plugin 设计为准。历史归档中的待办、里程碑和提案不再构成开发计划。运行事实以当前源码与可复现验证为依据，发现文档不符时修正文档，不用旧方案覆盖现状。
+## 开发
+
+```bash
+./.venv/bin/python -m pytest -q -n 8 --dist worksteal
+npm --prefix apps/web test
+npm --prefix apps/web run test:e2e
+npm --prefix apps/web run build
+```
+
+Anchor 使用 MIT License，见 [LICENSE](LICENSE)。
