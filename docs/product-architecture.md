@@ -16,6 +16,8 @@ Anchor 是一个以 Graph 组织 Agent 工作、以文件系统保存事实、�
 
 用户最终可以与 Anchor Pilot 对话，理解目标、选择或构建 Graph、启动运行、查看产物。WebUI 继续承担观察、编辑和人工接管职责。
 
+长期产品方向：用户可以直接向 Anchor Copilot 提出任务；Copilot 根据意图选择已有 Graph，必要时临时构建 Graph 执行，并把结果沿原始交互来源返回给用户。Graph 有默认输入，单次 Run 可提供输入覆盖默认值。Anchor 通过常驻 HTTP 服务接受不同用户/调用方的消息并返回响应，对外 Agent 交互采用 OpenAI Responses 格式。这里的 Responses 是用户与 Copilot 的请求/响应协议；定时触发和第三方业务事件 Webhook 是其他触发入口，不应与对话 API 混为一谈。Responses 与 Webhook 均参考 OpenAI 的 Bearer API key 请求方式，使用 `Authorization: Bearer <anchor-key>`；Anchor 维护 `anchor-key` 白名单，匹配后允许请求继续执行，不增加角色审批机制。具体接口子集、密钥配置及调用方隔离见下文；这些均为目标契约，尚未实现。
+
 Anchor 的核心积累不是某次对话，而是可复用、可观察、可组合的资产：
 
 ```text
@@ -35,7 +37,7 @@ Session（用户与 Anchor Pilot 的长期关系）
 ## 不可动摇的设计原则
 
 1. **唯一事实来源**：Graph 定义只在 `graph.json`；Plugin、工具和环境只在能力库；Session、Run 和节点历史各自保存自己负责的事实。派生摘要必须能回到来源。
-2. **极简对象模型**：Graph、AgentNode、OpNode、Plugin、Run、Session 六类对象足够表达产品。不要为了形式主义增加 Graph 版本平台、临时 Graph 类型或第二套 Agent 内核。
+2. **极简对象模型**：Graph、AgentNode、OpNode、Plugin、Run、Session 是当前核心对象。不要为了形式主义增加 Graph 版本平台或第二套 Agent 内核；Copilot 临时构建 Graph 的产品需求已提出，其是否需要独立生命周期尚未决定。
 3. **能力渐进披露**：Plugin 先给 Agent 名称和短描述，需要时再读取说明、知识和工具用法。能力挂载可见，实际调用另有运行记录。
 4. **智能与机械事实分工**：Agent 负责理解、规划、核查现场和决定如何继续；代码负责保存和加载记录、权限、路径、提交及请求去重，不替 Agent 建立业务恢复决策平台。
 5. **用户始终可控**：运行可以暂停、恢复、停止；需要用户决定时进入 `waiting_user`；不使用固定 `max_xxx` 伪装研究质量或收敛。资源预算是用户明确的运行约束，不是任务完成判据。
@@ -167,6 +169,18 @@ Pilot 与普通 AgentNode 的生命周期统一、普通节点等待用户输入
 
 具体缺口、先后顺序与验收只见 [Pilot 开发计划](pilot-development-plan.md)，本节不再维护第二份实现路线。
 
+### 对外 HTTP、鉴权与 Responses API（冻结契约与当前接线）
+
+外部调用方通过 HTTP 与 Anchor Copilot 交互，消息和响应采用 OpenAI Responses 格式；Anchor 内部如何把输入路由到 Copilot、Graph 和 Run 由 Anchor 自己定义。Anchor 实现 Responses 的常用兼容子集，不宣称完整兼容：仅提供 `POST /v1/responses`，固定模型名 `anchor-copilot`，接受文本 `input` 或仅含 user 消息的输入列表；支持 `previous_response_id` 续接同一对话及 `stream` 的普通 JSON / SSE 两种传输。SSE 发出 `response.created`、`response.in_progress`、文本增量和 `response.completed` / `response.failed` 终态事件。返回标准形状的 Response 对象和文本输出；外部工具定义/调用、图像/音频输入、任意模型名及其他未列明字段暂不支持，遇到不支持内容明确返回 400，不静默忽略。`previous_response_id` 不存在或不属于当前 key 时统一返回 404。Responses 是对话协议，不规定 Graph 的业务输入格式。
+
+所有 HTTP API（包括已有管理 API、Responses 与 Webhook）统一要求 `Authorization: Bearer <anchor-key>`。服务通过环境变量 `ANCHOR_API_KEYS` 配置 JSON 字符串数组，例如 `["key-one","key-two"]`；key 应为至少 32 字节随机生成的秘密，只在服务启动时读取，增删密钥需重启。非空但格式错误、含空 key 或重复 key 时服务拒绝启动。空白配置在 loopback 本机开发模式允许无认证；监听非 loopback 地址时若没有至少一个 key，服务拒绝启动。key 精确匹配白名单即有完整 API 权限，不增加角色、逐请求审批或权限配置。缺失、格式错误或不匹配统一返回 401，不泄露哪一步失败；比较使用常量时间方式，密钥不得写入日志、Run、Session 或错误响应。密钥本身是粗粒度调用者边界，不提供用户资料或细粒度授权。
+
+每个 Responses 会话归属于创建它的 key；续接时必须使用同一个 key，不能仅凭 `previous_response_id` 跨 key 读取对话。撤销 key 后，该 key 创建的对话不再能经 API 访问。Anchor 不据此承诺完整多租户隔离；一个 key 的所有持有者共享同一权限与会话可见范围。长请求通过 `stream:true` SSE 返回进度和文本，客户端断开不取消服务端已接受的处理；`stream:false` 等待最终 Response。Responses 返回的 `id` 可通过 `previous_response_id` 续聊，不额外设计 Anchor 专有会话 ID API。
+
+Webhook 是 Graph Run 触发入口，与 Responses 分开：`POST /v1/webhooks/graphs/<graph-id>`，请求体为 `{"input": {…}}`，其中 `input` 是可选 JSON object，缺省按空对象处理；它作为本次 Run 输入，与 Graph 默认 input 按已确认的递归合并规则解析。端点只启动指定的既有 Graph，不接受调用方覆盖 Graph objective 或指定其他 Graph。每次合法到达独立触发，不做事件去重或自动重试；Graph 空闲时返回 202 和 `run`、`graph` 标识，Graph 正忙时返回 409 和当前运行 ID，不创建 Run。未知 Graph 返回 404，非法 JSON 或非 object 输入返回 400。客户端收到 409 后自行决定是否再次发送；Anchor 不保留请求、不排队。
+
+当前已接入 `ANCHOR_API_KEYS`、Bearer 常量时间白名单校验、非 loopback 启动约束及 WebUI 会话级 key 输入。Responses/Webhook 已接入目标子集；官方字段兼容和真实 provider 端到端仍需验收，不能称为完整 Responses 兼容。
+
 ## Graph、工作区和 Git
 
 Graph 仍然就是一个 JSON 文件，不建立不可变 Graph 版本平台。保存 Graph 是编辑当前资产；运行时把当时的 Graph 定义写入 Run 目录，作为该次运行的事实快照。
@@ -182,6 +196,18 @@ Graph 仍然就是一个 JSON 文件，不建立不可变 Graph 版本平台。�
 - 上游工作区后续变化不会影响已交付输入。
 
 commit 是运行事实和输入快照标识，不是 Graph 版本，也不要求 Agent 理解 Git 才能完成任务。
+
+### Graph 默认输入与单次 Run 输入
+
+Graph 用 `objective` 描述工作流的固定目的，并可声明 JSON object 形式的默认 `input`。单次 Run 可提供自己的 JSON object；Anchor 将它与默认输入递归合并：对象按键递归合并，数组和其他值（包括 `null`）整体由 Run 值替换；Run 输入可增加默认输入中没有的键。默认输入不是字段 schema，不限制运行时可增加的键。解析后的有效输入属于 Run 事实并随 Run 保存。
+
+每个 AgentNode 在任务上下文中收到有效输入；OpNode 通过只读的 `ANCHOR_INPUT` JSON 环境变量取得同一份输入。解析后输入保存在 `run.json`；手动、定时、Webhook 统一经过同一合并规则。OpenAI Responses 的请求/响应兼容属于对外交互协议，不定义 Graph 的业务输入格式。
+
+### Run 触发与时间线
+
+触发方式包括手动、定时和业务 Webhook。定时支持一次性未来时刻，以及周期规则：固定间隔或本地日历规则（例如每天、每周指定星期、每月指定日期），按运行机器本地时间，不另配时区。Anchor 停机期间错过的计划不补跑；看板应明确显示错过，一次性计划结束，周期计划等待下个未来时点。
+
+同一 Graph 同一时刻只允许一个 Run。Graph 正忙时手动/API/Webhook 立即得到 409；定时触发错过该时点且不创建 Run。Anchor 停机期间错过的计划也不补跑。计划规则保存在 `state/schedules.json`，运行看板由计划规则和实际 `run.json` 事实派生；未来展示 7 天，历史按天分页，区分已计划、实际 Run、Graph 忙碌错过和停机错过。页面现已提供计划创建/删除和 Graph 输入入口；完整浏览器验收待完成。
 
 ## Plugin 与能力积累
 
@@ -273,7 +299,6 @@ P1 流式与提交去重已完成；P2 按 2026-09-26 的用户决定收敛，Fr
 
 ## 明确不做
 
-- 不增加临时 Graph 类型；Pilot 创建的就是普通 Graph。
 - 不把所有能力、工具和外部交互都抽象成 OpNode 或一个巨大的 Plugin。
 - 不用 PydanticAI Graph 替换 Anchor Graph。
 - 不建立无需求支撑的 Graph 发布版本、不可变模型版本或模型版本平台。

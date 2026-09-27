@@ -13,6 +13,8 @@ export default defineConfig({
       '/plugins': { target: process.env.ANCHOR_WEB_API_URL || 'http://127.0.0.1:8077', changeOrigin: true },
       '/graphs': { target: process.env.ANCHOR_WEB_API_URL || 'http://127.0.0.1:8077', changeOrigin: true },
       '/runs': { target: process.env.ANCHOR_WEB_API_URL || 'http://127.0.0.1:8077', changeOrigin: true },
+      '/timeline': { target: process.env.ANCHOR_WEB_API_URL || 'http://127.0.0.1:8077', changeOrigin: true },
+      '/schedules': { target: process.env.ANCHOR_WEB_API_URL || 'http://127.0.0.1:8077', changeOrigin: true },
       '/trigger': { target: process.env.ANCHOR_WEB_API_URL || 'http://127.0.0.1:8077', changeOrigin: true },
     },
   },

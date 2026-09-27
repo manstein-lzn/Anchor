@@ -122,6 +122,8 @@ class RunState:
 
     objective: str
     started: str
+    input: dict = field(default_factory=dict)
+    trigger: dict = field(default_factory=lambda: {"source": "manual"})
     status: str = "running"
     updated: str = ""
     # Set while a node is running and cleared when it finishes, so a restart knows both that
@@ -198,12 +200,16 @@ def _files(tree: Path) -> tuple[str, ...]:
 
 
 def _task(graph: graph_module.Graph, node_id: str, objective: str,
-          sources: list[NodeResult], inputs: tuple[_Given, ...]) -> str:
+          sources: list[NodeResult], inputs: tuple[_Given, ...],
+          run_input: dict | None = None) -> str:
     # Empty for an agent node. Its presence is what makes the two kinds one function: everything
     # above this line — the task, what was given, what can be reached — is the same for both.
     node = graph.nodes[node_id]
     node_op = graph.ops[node.op].run if node.op else ""
     lines = [f"# Task\n\n{objective}"]
+    if run_input:
+        lines.append("# Run input\n\n```json\n" +
+                     json.dumps(run_input, ensure_ascii=False, indent=2) + "\n```")
     reached = [item for item in inputs if not item.direct]
     inputs = tuple(item for item in inputs if item.direct)
     if inputs:
@@ -592,7 +598,8 @@ def _next_step(graph: graph_module.Graph, state: RunState, decided: dict, run_di
     state.last_seq[node_id] = state.seq
     state.cursor = {"node": node_id, "pass": number, "run": run_number, "dir": str(directory)}
     state.save(run_dir)             # written before the work starts, not after
-    return _Step(node_id, number, directory, _task(graph, node_id, state.objective, handed, inputs),
+    return _Step(node_id, number, directory,
+                 _task(graph, node_id, state.objective, handed, inputs, state.input),
                  False, trace=_trace_path(run_dir, node_id, run_number), inputs=inputs)
 
 
@@ -696,7 +703,8 @@ def _secret(secret_file: str | None, model: dict) -> str:
 def _agent_for(graph, node_id: str, directory: Path, models: dict, secret_file, config_path,
                inputs: tuple[_Given, ...] = (), trace: Path | None = None,
                scripted_model: Any = None, control: Path | None = None,
-               cancelled: Callable[[], bool] | None = None, plugins: Attached = Attached()):
+               cancelled: Callable[[], bool] | None = None, plugins: Attached = Attached(),
+               run_input: dict | None = None):
     """The node about to run, built around the runtime ADR-062 names.
 
     **One factory for both kinds of node**, because the difference between an agent and an op is what
@@ -719,7 +727,7 @@ def _agent_for(graph, node_id: str, directory: Path, models: dict, secret_file, 
         return Node(node_id=node_id, directory=directory, routes=graph.routes(node_id),
                     inputs=inputs, trace=trace, model=None, instructions="", network=op.network,
                     timeout_seconds=600.0, max_requests=1, command=op.run, control=control,
-                    cancelled=cancelled)
+                    cancelled=cancelled, run_input=run_input or {})
     spec = graph.agents[node.agent]
     if scripted_model is not None:
         model: Any = scripted_model
@@ -742,6 +750,7 @@ def _agent_for(graph, node_id: str, directory: Path, models: dict, secret_file, 
                 network=spec.network, timeout_seconds=600.0,
                 max_requests=spec.max_steps, control=control,
                 resources=plugins.binds,
+                run_input=run_input or {},
                 cancelled=cancelled)
 
 
@@ -827,6 +836,8 @@ def _settled_already(step: _Step, control: Path,
 # count did not move, because what the metric counts is the conditions. A deliberate exception, and the
 # report says so.
 def run(workspace: str | Path, *, objective: str | None = None, config_path: str | Path,   # noqa: C901
+        run_input: dict | None = None,
+        trigger: dict | None = None,
         run_id: str | None = None, resume: str | Path | None = None,
         model_script: dict[str, list[str]] | None = None,
         stop_request: Callable[[], str | None] | None = None,
@@ -872,7 +883,9 @@ def run(workspace: str | Path, *, objective: str | None = None, config_path: str
     else:
         run_dir = workspace / "runs" / (run_id or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S"))
         run_dir.mkdir(parents=True, exist_ok=True)
-        state = RunState(objective=objective or graph.objective, started=_now())
+        state = RunState(objective=objective or graph.objective, started=_now(),
+                         input=graph_module.merge_input(graph.input, run_input),
+                         trigger=trigger or {"source": "manual"})
         state.save(run_dir)
     # The graph as this run read it — every module already inlined, every node naming its agent.
     # Written rather than referenced, so a run can be read without the workspace still holding the
@@ -986,10 +999,11 @@ def run(workspace: str | Path, *, objective: str | None = None, config_path: str
                 options["plugins"] = attached
             if stop_request is not None:
                 options["cancelled"] = lambda: stop_request() == "stopped"
+            if state.input:
+                options["run_input"] = state.input
             agent = _agent_for(graph, step.node_id, step.directory, models, secret_file, config_path,
                                inputs=step.inputs, trace=step.trace, control=control,
-                               scripted_model=scripted_model,
-                               **options)
+                               scripted_model=scripted_model, **options)
             # **A cursor without a trace means the node never actually started.** The scheduler writes
             # the cursor before dispatching, so a kill in between leaves a node marked as interrupted
             # with nothing to continue from — and resuming reads a trace file that was never written,

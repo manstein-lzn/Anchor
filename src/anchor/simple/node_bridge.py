@@ -39,6 +39,7 @@ class Node:
                  command: str | None = None, control: Path | None = None,
                  capabilities: tuple[Any, ...] = (),
                  resources: tuple[tuple[str, str], ...] = (),
+                 run_input: dict | None = None,
                  cancelled: Callable[[], bool] | None = None) -> None:
         self.node_id = node_id
         self.directory = Path(directory)
@@ -54,6 +55,7 @@ class Node:
         self._max_requests = max_requests
         self._capabilities = tuple(capabilities)
         self._resources = resources
+        self._run_input = run_input or {}
         self._cancelled = cancelled
         # Read by `_result_of` through `agent.env.route`. Kept as an object rather than a bare
         # attribute so the shape the scheduler reads does not change with the loop behind it.
@@ -100,7 +102,7 @@ class Node:
                 NodeRequest(execution_id=self.node_id, task=self.command, workspace=self.directory,
                             inputs=_binds(self.inputs), routes=self.routes, network=self._network,
                             timeout_seconds=self._timeout, roles=self.node_id,
-                            cancelled=self._cancelled),
+                            cancelled=self._cancelled, run_input=self._run_input),
                 command=self.command)
             # **The runtime's own answer, and nothing re-derived from it.** It already read the exit
             # code against the command line it dispatched — the one fact a caller could not supply and
@@ -132,6 +134,7 @@ class Node:
                             routes=self.routes, network=self._network,
                             timeout_seconds=self._timeout, max_requests=self._max_requests,
                             trace=self.trace, roles=self.node_id, cancelled=self._cancelled,
+                            run_input=self._run_input,
                             # **A write that landed before the record is what `recovery` is for.** The
                             # adapter refuses a reference whose node, workspace, store or budget does not
                             # match, and a bare name is not one — so the node says `uncertain` instead,

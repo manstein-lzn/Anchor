@@ -71,7 +71,9 @@ test('Plugin selection, lazy instructions and historical records work with a rea
     const detail = await (await request.get(`${base}/runs/${run.run}`)).json();
     expect(detail.plugins.research[0].id).toBe('academic-research');
     await page.reload();
-    await page.getByRole('button', { name: '运行记录', exact: true }).click();
+    await page.getByRole('button', { name: '运行看板', exact: true }).click();
+    await page.locator('.timeline-run').first().click();
+    await page.getByRole('button', { name: '查看节点与产物', exact: true }).click();
     await page.locator('.react-flow__node').filter({ hasText: 'research' }).click();
     await page.getByRole('button', { name: 'Plugin', exact: true }).click();
     await expect(page.locator('.plugins-panel')).toContainText('学术调研');

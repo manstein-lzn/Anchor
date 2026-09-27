@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Anchor, LoaderCircle } from 'lucide-react';
 import { Markdown } from './markdown';
+import { bearerKey, setBearerKey } from './api';
 
 export type Turn = { id: string; session: string; status: string; error: string; created_at: string; prompt: string | null };
 type Tool = { id: string; name: string; input?: unknown; output?: unknown; status: string };
@@ -18,14 +19,7 @@ export function PilotTurn({ turn, onComplete }: { turn: Turn; onComplete: (turn:
     let last = 0;
     let ended = false;
     let resultText = '';
-    const source = new EventSource(`/sessions/${encodeURIComponent(turn.session)}/turns/${turn.id}/events`);
-    source.onopen = () => setConnection('');
-    source.onerror = () => { if (!ended) setConnection('连接断开，正在重新连接；任务仍由服务端处理。'); };
-    source.onmessage = event => {
-      const seq = Number(event.lastEventId);
-      if (seq <= last) return;
-      last = seq;
-      const chunk: Chunk = JSON.parse(event.data);
+    const consume = (chunk: Chunk) => {
       if (chunk.type === 'text-start' && resultText) resultText += '\n\n';
       if (chunk.type === 'text-delta') {
         resultText += chunk.delta ?? '';
@@ -45,14 +39,58 @@ export function PilotTurn({ turn, onComplete }: { turn: Turn; onComplete: (turn:
       }
       if (chunk.type === 'error') setProblem(chunk.errorText ?? '执行失败');
     };
-    source.addEventListener('turn', event => {
-      const final: Turn = JSON.parse((event as MessageEvent).data);
-      ended = true; source.close(); setStatus(final.status); setConnection('');
+    const complete = (final: Turn) => {
+      ended = true; setStatus(final.status); setConnection('');
       if (final.error) setProblem(final.error);
       setTools(previous => previous.map(item => item.status === '执行中' ? { ...item, status: '执行已结束，请核查结果' } : item));
       onComplete(final);
-    });
-    return () => { ended = true; source.close(); };
+    };
+    const connect = async () => {
+      while (!ended) {
+        try {
+          const headers: Record<string, string> = { Accept: 'text/event-stream' };
+          const key = bearerKey();
+          if (key) headers.Authorization = `Bearer ${key}`;
+          const response = await fetch(`/sessions/${encodeURIComponent(turn.session)}/turns/${turn.id}/events?after=${last}`, { headers });
+          if (response.status === 401) {
+            const entered = window.prompt('请输入 Anchor API key') ?? '';
+            if (!entered) { setConnection('需要 API key 才能读取执行记录。'); return; }
+            setBearerKey(entered); continue;
+          }
+          if (!response.ok || !response.body) throw new Error(`HTTP ${response.status}`);
+          setConnection('');
+          const reader = response.body.getReader();
+          const decoder = new TextDecoder();
+          let buffer = '';
+          while (!ended) {
+            const { value, done } = await reader.read();
+            if (done) {
+              buffer += decoder.decode();
+              const final = buffer.trim();
+              if (final) consumeBlock(final);
+              break;
+            }
+            buffer += decoder.decode(value, { stream: true });
+            const blocks = buffer.replace(/\r\n/g, '\n').split('\n\n'); buffer = blocks.pop() ?? '';
+            for (const block of blocks) if (consumeBlock(block)) break;
+          }
+        } catch {
+          if (!ended) { setConnection('连接断开，正在重新连接；任务仍由服务端处理。'); await new Promise(resolve => setTimeout(resolve, 1000)); }
+        }
+      }
+    };
+    const consumeBlock = (block: string) => {
+      const event = block.split(/\r?\n/);
+      const id = event.find(line => line.startsWith('id:'))?.slice(3).trim();
+      const data = event.filter(line => line.startsWith('data:')).map(line => line.slice(5).trim()).join('\n');
+      if (!data) return false;
+      const type = event.find(line => line.startsWith('event:'))?.slice(6).trim();
+      if (id && Number(id) > last) { last = Number(id); consume(JSON.parse(data)); }
+      else if (type === 'turn') { complete(JSON.parse(data) as Turn); return true; }
+      return false;
+    };
+    void connect();
+    return () => { ended = true; };
   }, [turn.id, turn.session, onComplete]);
   return <section className="pilot-turn" aria-label="本次执行过程">
     {tools.length > 0 && <details className="pilot-tools" open={status === 'running'}>

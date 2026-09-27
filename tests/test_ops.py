@@ -29,13 +29,13 @@ def needs_a_sandbox():
         pytest.skip(f"no usable sandbox on this machine: {exc}")
 
 
-def _run(tmp_path, graph: dict, script: dict | None = None):
+def _run(tmp_path, graph: dict, script: dict | None = None, run_input: dict | None = None):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     (workspace / "graph.json").write_text(json.dumps(graph), encoding="utf-8")
     config = tmp_path / "runtime.json"
     config.write_text('{"models": []}', encoding="utf-8")
-    state = runner.run(workspace, config_path=config, model_script=script)
+    state = runner.run(workspace, config_path=config, model_script=script, run_input=run_input)
     return state, next((workspace / "runs").glob("*"))
 
 
@@ -74,6 +74,25 @@ def test_a_graph_of_nothing_but_ops_runs(tmp_path):
     assert state.nodes["make"]["submission"] == "wrote notes.md"
     assert _commits(run_dir / "make") == ["wrote notes.md", "start"]
     assert state.nodes["check"]["submitted"] is True
+
+
+def test_run_input_overrides_graph_defaults_and_reaches_an_op(tmp_path):
+    graph = {
+        "entry": "check", "objective": "input test",
+        "input": {"nested": {"keep": 1, "replace": 2}, "items": [1, 2], "nullable": "value"},
+        "ops": {"check": {"run": "printf '%s' \"$ANCHOR_INPUT\""}},
+        "nodes": [{"id": "check", "op": "check"}], "edges": [],
+    }
+
+    state, run_dir = _run(tmp_path, graph, run_input={
+        "nested": {"replace": 3, "added": 4}, "items": [9], "nullable": None,
+    })
+
+    expected = {"nested": {"keep": 1, "replace": 3, "added": 4}, "items": [9], "nullable": None}
+    assert state.status == "finished", state.error
+    assert state.input == expected
+    assert json.loads(state.nodes["check"]["submission"]) == expected
+    assert json.loads((run_dir / "run.json").read_text())["input"] == expected
 
 
 def test_a_command_that_fails_fails_the_pass(tmp_path):

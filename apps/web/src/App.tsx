@@ -11,6 +11,7 @@ import { GraphActions } from './GraphActions';
 import { label } from './execution';
 import {
   type OurAgent, type OurGraph, type OurRun, type OurRunDetail,
+  type TimelineData,
 } from './model';
 import { RunInspector } from './RunInspector';
 import { Plugins } from './Plugins';
@@ -19,20 +20,32 @@ import { Pilot } from './Pilot';
 import { anchorRef, anchorTarget, type AnchorRef } from './links';
 import { api } from './api';
 import { EmptyState, JsonDialog, Modal, ToolButton } from './ui';
+import { Timeline } from './Timeline';
 
 const POLL_MS = 3000;
 type Pick = { kind: 'node' | 'edge' | 'agent'; id: string } | null;
 
+const recentRuns = (runs: OurRun[], graph: string) => runs
+  .filter(item => item.graph === graph)
+  .sort((a, b) => Date.parse(b.updated || b.started) - Date.parse(a.updated || a.started));
 
-const when = (iso: string) => (iso ? iso.replace('T', ' ').replace('Z', '') : '');
+const runTime = (value: string) => {
+  const date = new Date(value);
+  return Number.isNaN(date.valueOf()) ? '时间未知' : date.toLocaleString('zh-CN', {
+    month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false,
+  });
+};
+
 
 export function App() {
   const [search, setSearch] = useState('');
   const [libraryOpen, setLibraryOpen] = useState(true);
   const [inspectorOpen, setInspectorOpen] = useState(true);
-  const [view, setView] = useState<'graph' | 'runs' | 'pilot'>('graph');
+  const [view, setView] = useState<'graph' | 'runs' | 'runDetail' | 'pilot'>('graph');
   const [graphs, setGraphs] = useState<{ graph: string; running: string | null }[]>([]);
   const [runs, setRuns] = useState<OurRun[]>([]);
+  const [timeline, setTimeline] = useState<TimelineData | null>(null);
+  const [timelinePage, setTimelinePage] = useState(0);
   const [name, setName] = useState('');
   const [doc, setDoc] = useState<OurGraph | null>(null);
   const [savedDoc, setSavedDoc] = useState('');
@@ -57,6 +70,8 @@ export function App() {
 
   const dirty = doc !== null && JSON.stringify(doc, null, 2) + '\n' !== savedDoc;
   const editable = doc !== null && !busy;
+  const graphRuns = useMemo(() => recentRuns(runs, name), [runs, name]);
+  const activeRun = graphRuns.find(item => item.running) ?? graphRuns[0];
 
   useEffect(() => {
     if (!dirty) return;
@@ -69,7 +84,7 @@ export function App() {
     if (next === name) return true;
     if (dirty && !window.confirm('当前工作流有未保存的修改，确定切换并放弃修改吗？')) return false;
     setName(next);
-    setRun(runs.find(item => item.graph === next)?.run ?? '');
+    setRun(recentRuns(runs, next)[0]?.run ?? '');
     setNode('');
     setTargetPath('');
     return true;
@@ -81,8 +96,12 @@ export function App() {
         api<{ graphs: { graph: string; running: string | null }[] }>('/graphs'),
         api<{ runs: OurRun[] }>('/runs'),
       ]);
+      const cutoff = new Date(); cutoff.setHours(0, 0, 0, 0); cutoff.setDate(cutoff.getDate() + 1 - timelinePage * 30);
+      const before = `${cutoff.getFullYear()}-${String(cutoff.getMonth() + 1).padStart(2, '0')}-${String(cutoff.getDate()).padStart(2, '0')}`;
+      const board = await api<TimelineData>(`/timeline?days=30&before=${before}`);
       setGraphs(graphList.graphs);
       setRuns(runList.runs);
+      setTimeline(board);
       setProblem('');
       if (!nameRef.current) {
         const initial = runList.runs.find(item => item.running)?.graph ?? graphList.graphs[0]?.graph;
@@ -94,7 +113,7 @@ export function App() {
     } catch (error) {
       setProblem(`服务未连接：${(error as Error).message}`);
     }
-  }, []);
+  }, [timelinePage]);
 
   useEffect(() => { void refresh(); }, [refresh]);
   useEffect(() => {
@@ -167,7 +186,8 @@ export function App() {
     const graph = ref.kind === 'graph' ? '' : ref.run;
     const target = anchorTarget(ref, runs.find(item => item.run === graph)?.graph ?? nameRef.current);
     if (target.graph && !selectGraph(target.graph)) return;
-    setRun(target.run); setNode(target.node); setTargetPath('path' in target ? target.path ?? '' : ''); setView(target.view);
+    setRun(target.run); setNode(target.node); setTargetPath('path' in target ? target.path ?? '' : '');
+    setView(target.view === 'runs' && target.run ? 'runDetail' : target.view);
     if (target.view === 'runs' && !runs.some(item => item.run === target.run)) void refresh();
   };
 
@@ -184,9 +204,20 @@ export function App() {
   };
 
   const trigger = () => perform('触发', async () => {
-    const body = await api<{ run: string }>('/trigger', 'POST', { graph: name });
-    setRun(body.run); setView('runs');
+    const raw = window.prompt('本次运行输入（JSON object，可留空）', JSON.stringify(doc?.input ?? {}, null, 2));
+    if (raw === null) return;
+    let input: Record<string, unknown>;
+    try { input = raw.trim() ? JSON.parse(raw) : {}; }
+    catch { throw new Error('运行输入必须是有效 JSON'); }
+    if (!input || Array.isArray(input) || typeof input !== 'object') throw new Error('运行输入必须是 JSON object');
+    const body = await api<{ run: string }>('/trigger', 'POST', { graph: name, input });
+    setRun(body.run); setView('runDetail');
   });
+
+  const openRun = (item: OurRun) => {
+    if (item.graph !== name && !selectGraph(item.graph)) return;
+    setRun(item.run); setNode(''); setTargetPath(''); setView('runDetail');
+  };
 
   const controlRun = (what: 'pause' | 'stop' | 'resume') => perform(what, async () => {
     await api(`/runs/${run}/${what}`, 'POST');
@@ -306,24 +337,16 @@ export function App() {
         <div className="brand"><span className="brand-mark"><Anchor size={22} /></span>Anchor<span className="brand-caption">WORKSPACE</span></div>
         <nav className="product-switch" aria-label="工作台">
           <button aria-pressed={view === 'graph'} className={view === 'graph' ? 'chosen' : ''} onClick={() => setView('graph')}><GitBranch size={15} />图编排</button>
-          <button aria-pressed={view === 'runs'} className={view === 'runs' ? 'chosen' : ''} onClick={() => setView('runs')}><Activity size={15} />运行记录</button>
+          <button aria-pressed={view === 'runs' || view === 'runDetail'} className={view === 'runs' || view === 'runDetail' ? 'chosen' : ''} onClick={() => setView('runs')}><Activity size={15} />运行看板</button>
           <button aria-pressed={view === 'pilot'} className={view === 'pilot' ? 'chosen' : ''} onClick={() => setView('pilot')}><MessageSquare size={15} />Pilot</button>
         </nav>
-        {view !== 'pilot' && <select aria-label="当前工作流" value={name} onChange={event => selectGraph(event.target.value)}>
-          {graphs.map(item => (
-            <option key={item.graph} value={item.graph}>
-              {item.graph}{item.running ? '（执行中）' : ''}
-            </option>
-          ))}
-        </select>}
         <div className="connection" title={problem || '服务已连接'}><span className={`status-dot ${problem ? 'bad' : ''}`} />
           {problem ? '连接中断' : '服务在线'}
         </div>
-        {view !== 'pilot' && <button className="primary" title={dirty ? '请先保存工作流' : '运行已保存的工作流'} onClick={() => void trigger()} disabled={busy || !name || dirty}><Play size={14} fill="currentColor" />运行工作流</button>}
         {view !== 'pilot' && chat && <button onClick={() => setView('pilot')} title={`回到会话 ${chat}`}>
           <MessageSquare size={14} />返回会话
         </button>}
-        {view !== 'pilot' && <div className="panel-toggles">
+        {(view === 'graph' || view === 'runDetail') && <div className="panel-toggles">
           <ToolButton icon={PanelLeftClose} label="切换侧边栏" aria-pressed={libraryOpen} onClick={() => setLibraryOpen(!libraryOpen)} />
           <ToolButton icon={PanelRightClose} label="切换详情面板" aria-pressed={inspectorOpen} onClick={() => setInspectorOpen(!inspectorOpen)} />
         </div>}
@@ -333,25 +356,23 @@ export function App() {
 
       {view === 'pilot' ? <Pilot session={chat} onSession={setChat} /> : view === 'runs' ? (
         <Workspace running>
-          <aside className="runs">
-            <div className="section-heading"><h3><Activity size={15} />运行历史</h3><span className="count">{runs.filter(item => item.graph === name).length}</span></div>
-            {runs.filter(item => !name || item.graph === name).map(item => (
-              <button key={`${item.graph}-${item.run}`}
-                      className={`run-row ${item.run === run ? 'chosen' : ''}`}
-                      onClick={() => { setRun(item.run); setName(item.graph); setNode(''); }}>
-                <span className={`dot ${item.status}`} />
-                <span className="run-when">{when(item.started)}</span>
-                <span className={`pill ${item.status}`}>
-                  {item.running ? '执行中' : label(item.status)}
-                </span>
-                <span className="run-nodes">{item.objective || '未设置目标'}</span>
-                <span className="run-meta">{item.executed.length} 步执行 · {item.run}</span>
-              </button>
-            ))}
-            {!runs.some(item => item.graph === name) && <EmptyState icon={Activity} title="还没有运行记录">运行这个工作流后，可以在这里追踪每一步。</EmptyState>}
-          </aside>
-          <main className="main">
-            <div className="document-header"><div className="document-title"><span className="eyebrow">EXECUTION</span><h2>{name || '运行概览'}</h2></div><span className="hint">每一步，都有迹可循</span></div>
+          <Timeline data={timeline} graphs={graphs.map(item => item.graph)} page={timelinePage} onPage={setTimelinePage}
+            onRefresh={() => void refresh()} onSelect={item => {
+            setRun(item.run); setName(item.graph); setNode(''); setView('runDetail');
+          }} />
+        </Workspace>
+      ) : view === 'runDetail' ? (
+        <Workspace running>
+          <main className="main timeline-inspector">
+            <div className="document-header"><div className="document-title"><span className="eyebrow">EXECUTION</span><h2>{name || '运行概览'}</h2></div>
+              <div className="document-context-actions">
+                <select aria-label="当前工作流" value={name} onChange={event => selectGraph(event.target.value)}>
+                  {graphs.map(item => <option key={item.graph} value={item.graph}>{item.graph}{item.running ? '（执行中）' : ''}</option>)}
+                </select>
+                <button className="primary" title={dirty ? '请先保存工作流' : '运行已保存的工作流'} onClick={() => void trigger()} disabled={busy || !name || dirty}><Play size={14} fill="currentColor" />运行工作流</button>
+                <button onClick={() => setView('runs')}><Activity size={14} />返回时间线</button>
+              </div>
+            </div>
             <div className="canvas-head">
               {detail ? <>
                 <span className={`pill ${detail.state.status}`}>
@@ -445,12 +466,47 @@ export function App() {
                 <span className={`document-state ${dirty ? 'unsaved' : ''}`}>{dirty ? '● 未保存' : doc ? '所有更改已保存' : '选择或创建工作流'}</span>
               </div>
               <div className="document-actions">
+                <select aria-label="当前工作流" value={name} onChange={event => selectGraph(event.target.value)}>
+                  {graphs.map(item => <option key={item.graph} value={item.graph}>{item.graph}{item.running ? '（执行中）' : ''}</option>)}
+                </select>
+                <button className="primary" title={dirty ? '请先保存工作流' : '运行已保存的工作流'} onClick={() => void trigger()} disabled={busy || !name || dirty}><Play size={14} fill="currentColor" />运行工作流</button>
                 <button disabled={!editable} onClick={() => void check()}>
                   <CheckCheck size={16} />校验并保存</button>
                 <button className="primary" disabled={!editable || !dirty} onClick={() => void save()}>
                   <Save size={16} />保存</button>
               </div>
             </div>
+            {name && <section className="graph-execution-summary" aria-label={`${name} 的执行概览`}>
+              <div className="graph-execution-heading">
+                <div>
+                  <span className="eyebrow">EXECUTION</span>
+                  <h3>运行概览</h3>
+                  <p>{graphRuns.length ? '从这里直接进入这个 Graph 的执行过程与产物。' : '这个 Graph 还没有运行记录。'}</p>
+                </div>
+                <div className="graph-execution-actions">
+                  {activeRun && <button className="primary" onClick={() => openRun(activeRun)}>
+                    {activeRun.running ? '查看当前运行' : '查看最近运行'}
+                  </button>}
+                  <button onClick={() => setView('runs')}>打开运行看板</button>
+                </div>
+              </div>
+              <div className="graph-execution-facts">
+                <span className={`pill ${activeRun ? (activeRun.running ? 'running' : activeRun.status) : ''}`}>
+                  {activeRun ? (activeRun.running ? '执行中' : label(activeRun.status)) : '尚未运行'}
+                </span>
+                <span><strong>{graphRuns.length}</strong> 次运行</span>
+                {activeRun && <span>最近：{runTime(activeRun.updated || activeRun.started)}</span>}
+              </div>
+              {graphRuns.length > 0 && <div className="graph-run-history">
+                <div className="graph-run-history-title"><strong>最近运行</strong><span>点击任意一条查看详情</span></div>
+                {graphRuns.slice(0, 4).map(item => <button key={item.run} className="graph-run-row" onClick={() => openRun(item)}>
+                  <span className={`run-status-dot ${item.running ? 'running' : item.status}`} />
+                  <span className="graph-run-row-main"><strong>{item.running ? '正在执行' : label(item.status)}</strong><small>{runTime(item.updated || item.started)}</small></span>
+                  <span className="graph-run-row-id">{item.run}</span>
+                  <span className="graph-run-row-open">查看详情 →</span>
+                </button>)}
+              </div>}
+            </section>}
             {notice && <p className={`notice ${notice.kind}`}>{notice.text}</p>}
 
             <div className="canvas-top">

@@ -31,6 +31,7 @@ the exit code for.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -166,6 +167,8 @@ def run_op_node(request: NodeRequest, *, command: str | None = None) -> NodeOutc
     sandbox = NodeSandbox(tree=request.workspace, node_id=request.roles or request.execution_id,
                           network=request.network, timeout_seconds=request.timeout_seconds,
                           routes=request.routes, inputs=request.inputs,
+                              environment=(("ANCHOR_INPUT", json.dumps(request.run_input,
+                                                                       ensure_ascii=False)),),
                           cancelled=request.cancelled)
     try:
         sandbox.require_working()

@@ -5,16 +5,33 @@
  */
 
 export async function api<T>(path: string, method = 'GET', body?: unknown): Promise<T> {
-  const response = await fetch(path, {
+  const send = (key: string) => fetch(path, {
     method,
-    headers: body === undefined ? { Accept: 'application/json' }
-      : { Accept: 'application/json', 'Content-Type': 'application/json' },
+    headers: { Accept: 'application/json', ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
+      ...(key ? { Authorization: `Bearer ${key}` } : {}) },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
+  let key = sessionStorage.getItem('anchor-api-key') ?? '';
+  let response = await send(key);
+  if (response.status === 401) {
+    key = window.prompt('请输入 Anchor API key') ?? '';
+    if (key) {
+      sessionStorage.setItem('anchor-api-key', key);
+      response = await send(key);
+    }
+  }
   const data = await response.json().catch(() => null);
   if (!response.ok) throw new Error(data?.error ?? `${method} ${path} → ${response.status}`);
   if (data === null) throw new Error(`${method} ${path} 未返回有效 JSON，请检查 API 服务连接。`);
   return data as T;
+}
+
+export function bearerKey(): string {
+  return sessionStorage.getItem('anchor-api-key') ?? '';
+}
+
+export function setBearerKey(key: string): void {
+  sessionStorage.setItem('anchor-api-key', key);
 }
 
 /** How a fetch failure reads to a person. The server's own message when there is one. */

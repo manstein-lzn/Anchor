@@ -21,20 +21,27 @@ Graphs and runs remain file-backed; Pilot uses Harness messages and SQLite deliv
 from __future__ import annotations
 
 import json
+import hmac
+import hashlib
+import ipaddress
+import os
 import shutil
 import threading
 import time
 import traceback
+from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import parse_qs, quote, unquote, urlparse
+from uuid import uuid4
 
 from anchor.simple import graph as graph_module
 from anchor.simple import run as runner
 from anchor.library import Library
 from anchor.session import SessionStore
 from anchor.pilot_turns import TurnStore
+from anchor.scheduling import next_after, occurrences, validate as validate_schedule
 
 
 def _call_args(call: Any) -> Any:
@@ -57,6 +64,34 @@ def _call_target(call: Any) -> str:
         if isinstance(args.get(name), str):
             return args[name]
     return ""
+
+
+def _response_prompt(value: Any) -> str | None:
+    if isinstance(value, str):
+        return value if value.strip() else None
+    if not isinstance(value, list) or not value:
+        return None
+    messages = []
+    for item in value:
+        if not isinstance(item, dict) or item.get("role") != "user":
+            return None
+        content = item.get("content")
+        if isinstance(content, str):
+            messages.append(content)
+        elif isinstance(content, list):
+            if any(not isinstance(part, dict) or part.get("type") != "input_text" or
+                   not isinstance(part.get("text"), str) for part in content):
+                return None
+            messages.append("\n".join(part["text"] for part in content))
+        else:
+            return None
+    text = "\n\n".join(messages)
+    return text if text.strip() else None
+
+
+def _local_time(value: str) -> datetime:
+    result = datetime.fromisoformat(value)
+    return result.astimezone().replace(tzinfo=None) if result.tzinfo else result
 
 
 #: How much of a node's conversation an observer is given. Enough to see what it is doing, not so
@@ -82,11 +117,204 @@ class Scheduler:
         # A pause lands between nodes; a stop also cancels the current model call or command.
         self.control: dict[str, str] = {}
         self.lock = threading.Lock()
+        self.schedule_path = root / "state" / "schedules.json"
+        self.schedule_path.parent.mkdir(parents=True, exist_ok=True)
+        self.schedules = (json.loads(self.schedule_path.read_text(encoding="utf-8"))
+                          if self.schedule_path.exists() else [])
+        self.responses_path = root / "state" / "responses.json"
+        self.response_refs = (json.loads(self.responses_path.read_text(encoding="utf-8"))
+                              if self.responses_path.exists() else {})
+        raw_keys = os.environ.get("ANCHOR_API_KEYS", "").strip()
+        if raw_keys:
+            try:
+                keys = json.loads(raw_keys)
+            except json.JSONDecodeError as exc:
+                raise ValueError("ANCHOR_API_KEYS must be a JSON array of strings") from exc
+            if (not isinstance(keys, list) or not keys or
+                    any(not isinstance(key, str) or len(key.encode()) < 32 for key in keys) or
+                    len(set(keys)) != len(keys)):
+                raise ValueError("ANCHOR_API_KEYS must contain unique secrets of at least 32 bytes")
+            self.api_keys = tuple(keys)
+        else:
+            self.api_keys = ()
         for session_id in self.turns.interrupt_running():
             try:
                 self.sessions.set_status(session_id, "interrupted", reason="服务重启，未自动重放上次执行")
             except (KeyError, ValueError):
                 pass
+        # Anything already due belongs to downtime, so advance past it instead of catching up.
+        self._skip_missed_schedules(datetime.now())
+
+    def save_schedules(self) -> None:
+        temp = self.schedule_path.with_suffix(".tmp")
+        temp.write_text(json.dumps(self.schedules, ensure_ascii=False, indent=2) + "\n",
+                        encoding="utf-8")
+        temp.replace(self.schedule_path)
+
+    def _skip_missed_schedules(self, now: datetime) -> None:
+        for item in self.schedules:
+            due = datetime.fromisoformat(item["next_at"])
+            if due <= now:
+                if item["rule"]["type"] == "once":
+                    item["enabled"] = False
+                else:
+                    item["next_at"] = next_after(item["rule"], now).isoformat(timespec="seconds")
+        self.save_schedules()
+
+    def create_schedule(self, graph: str, rule: dict, run_input: dict | None = None) -> tuple[str, int]:
+        if self.workspace(graph) is None:
+            return json.dumps({"error": f"no such graph: {graph}"}), 404
+        try:
+            parsed = validate_schedule(rule, datetime.now())
+        except (TypeError, ValueError) as exc:
+            return json.dumps({"error": str(exc)}, ensure_ascii=False), 400
+        now = datetime.now()
+        schedule = {"id": str(uuid4()), "graph": graph, "rule": parsed,
+                    "input": run_input or {}, "created_at": now.isoformat(timespec="seconds"),
+                    "next_at": next_after(parsed, now).isoformat(timespec="seconds"),
+                    "enabled": True}
+        self.schedules.append(schedule)
+        self.save_schedules()
+        return json.dumps({"schedule": schedule}, ensure_ascii=False), 201
+
+    def delete_schedule(self, identifier: str) -> tuple[str, int]:
+        old = len(self.schedules)
+        self.schedules = [item for item in self.schedules if item["id"] != identifier]
+        if len(self.schedules) == old:
+            return json.dumps({"error": "no such schedule"}), 404
+        self.save_schedules()
+        return json.dumps({"schedule": identifier, "deleted": True}), 200
+
+    def response_turn(self, owner: str, body: dict) -> tuple[dict | None, int]:
+        allowed = {"input", "model", "stream", "previous_response_id"}
+        if set(body) - allowed:
+            return {"error": f"unsupported fields: {', '.join(sorted(set(body) - allowed))}"}, 400
+        if body.get("model", "anchor-copilot") != "anchor-copilot":
+            return {"error": "model must be anchor-copilot"}, 400
+        stream = body.get("stream", False)
+        if type(stream) is not bool:
+            return {"error": "stream must be a boolean"}, 400
+        prompt = _response_prompt(body.get("input"))
+        if prompt is None:
+            return {"error": "input must be text or a list of user text messages"}, 400
+        previous = body.get("previous_response_id")
+        if previous is not None:
+            ref = self.response_refs.get(previous)
+            if not isinstance(ref, dict) or ref.get("owner") != owner:
+                return {"error": "no such response"}, 404
+            session_id = ref["session"]
+        else:
+            session_id = "responses-" + uuid4().hex
+            self.sessions.create(session_id)
+        response_id = "resp_" + uuid4().hex
+        turn, status = self.create_turn(session_id, response_id, prompt)
+        if status != 202:
+            return json.loads(turn), status
+        turn = json.loads(turn)
+        with self.lock:
+            self.response_refs[response_id] = {"owner": owner, "session": session_id,
+                                               "turn": turn["turn"]["id"]}
+            temp = self.responses_path.with_suffix(".tmp")
+            temp.write_text(json.dumps(self.response_refs, ensure_ascii=False), encoding="utf-8")
+            temp.replace(self.responses_path)
+        return {"id": response_id, "session": session_id, "turn": turn["turn"]["id"],
+                "stream": stream}, 200
+
+    def response_object(self, response_id: str, status: str, text: str, error: str = "") -> dict:
+        response = {"id": response_id, "object": "response", "created_at": int(time.time()),
+                    "status": status, "model": "anchor-copilot", "output": [],
+                    "output_text": text}
+        if text:
+            response["output"] = [{"id": "msg_" + response_id.removeprefix("resp_"),
+                                   "type": "message", "role": "assistant", "status": status,
+                                   "content": [{"type": "output_text", "text": text,
+                                                "annotations": []}]}]
+        if error:
+            response["error"] = {"message": error, "type": "server_error"}
+        return response
+
+    def response_result(self, response_id: str) -> tuple[dict, int]:
+        ref = self.response_refs[response_id]
+        turn = self.turns.get(ref["session"], ref["turn"])
+        chunks = []
+        cursor = 0
+        while True:
+            events = self.turns.events(ref["session"], ref["turn"], cursor)
+            chunks.extend(event["data"].get("delta", "") for event in events
+                          if event["data"].get("type") == "text-delta")
+            if len(events) < 256:
+                break
+            cursor = events[-1]["seq"]
+        text = "".join(chunks)
+        status = turn["status"]
+        if status == "running":
+            return self.response_object(response_id, "in_progress", text), 202
+        if status == "completed":
+            return self.response_object(response_id, "completed", text), 200
+        return self.response_object(response_id, "failed", text, turn.get("error") or status), 200
+
+    def tick_schedules(self, now: datetime | None = None) -> None:
+        now = now or datetime.now()
+        with self.lock:
+            for item in self.schedules:
+                if not item["enabled"] or datetime.fromisoformat(item["next_at"]) > now:
+                    continue
+                due = datetime.fromisoformat(item["next_at"])
+                item["next_at"] = (next_after(item["rule"], now).isoformat(timespec="seconds")
+                                    if item["rule"]["type"] != "once" else item["next_at"])
+                if item["rule"]["type"] == "once":
+                    item["enabled"] = False
+                # Busy due times are skipped without creating a Run or a refusal record.
+                if now - due > timedelta(seconds=1) or item["graph"] in self.running:
+                    continue
+                threading.Thread(target=self.trigger, args=(item["graph"], None, item["input"],
+                                 {"source": "schedule", "schedule": item["id"],
+                                  "scheduled_at": due.isoformat(timespec="seconds")}),
+                                 daemon=True).start()
+            self.save_schedules()
+
+    def timeline(self, days_back: int = 30, before: str | None = None) -> dict:
+        now = datetime.now()
+        future_start = datetime.combine(now.date(), datetime.min.time())
+        future_end = future_start + timedelta(days=8)
+        end = (datetime.combine(datetime.fromisoformat(before).date(), datetime.min.time())
+               if before else future_start + timedelta(days=1))
+        start = end - timedelta(days=days_back)
+        scheduled = []
+        runs = self.runs()
+        for item in self.schedules:
+            windows = [(start, end)]
+            if not before:
+                windows.append((future_start, future_end))
+            else:
+                windows.append((future_start, future_end))
+            seen = set()
+            for window_start, window_end in windows:
+              for due in occurrences(item["rule"], datetime.fromisoformat(item["created_at"]),
+                                     window_start, window_end):
+                if due in seen:
+                    continue
+                seen.add(due)
+                if due > now:
+                    scheduled.append({"schedule": item["id"], "graph": item["graph"],
+                                      "scheduled_at": due.isoformat(timespec="seconds"),
+                                      "status": "planned"})
+                elif due <= now:
+                    matched = next((run for run in runs if run.get("trigger", {}).get("schedule") == item["id"]
+                                    and run.get("trigger", {}).get("scheduled_at") == due.isoformat(timespec="seconds")), None)
+                    if matched:
+                        scheduled.append({"schedule": item["id"], "graph": item["graph"],
+                                          "scheduled_at": due.isoformat(timespec="seconds"),
+                                          "run": matched["run"], "status": matched["status"]})
+                    else:
+                        running = next((run for run in runs if run["graph"] == item["graph"] and
+                                        run.get("started") and run.get("updated") and
+                                        _local_time(run["started"]) <= due <= _local_time(run["updated"])), None)
+                        scheduled.append({"schedule": item["id"], "graph": item["graph"],
+                                          "scheduled_at": due.isoformat(timespec="seconds"),
+                                          "status": "missed_busy" if running else "missed_downtime"})
+        return {"from": start.isoformat(timespec="seconds"), "to": end.isoformat(timespec="seconds"),
+                "runs": runs, "scheduled": scheduled, "schedules": self.schedules}
 
     def workspaces(self) -> list[Path]:
         base = self.root / "workspaces"
@@ -108,7 +336,9 @@ class Scheduler:
         candidate = self.root / "workspaces" / name
         return candidate if candidate.is_dir() else None
 
-    def trigger(self, graph: str, objective: str | None) -> tuple[str, int]:
+    def trigger(self, graph: str, objective: str | None,
+                run_input: dict | None = None,
+                trigger: dict | None = None) -> tuple[str, int]:
         """Start a run, or say why not. Returns (body, status)."""
         workspace = self.workspace(graph)
         if workspace is None:
@@ -129,6 +359,7 @@ class Scheduler:
             run_id = _stamp()
             self.running[graph] = run_id
         threading.Thread(target=self._run, args=(workspace, run_id, objective),
+                         kwargs={"run_input": run_input, "trigger": trigger},
                          daemon=True).start()
         return json.dumps({"run": run_id, "graph": graph}), 202
 
@@ -552,11 +783,13 @@ class Scheduler:
                     self.running[workspace.name] = run_id
                 print(json.dumps({"resume": run_id, "graph": workspace.name}), flush=True)
                 threading.Thread(target=self._run,
-                                 args=(workspace, run_id, state.get("objective"), True),
+                                 args=(workspace, run_id, state.get("objective"), True,
+                                       None, state.get("trigger")),
                                  daemon=True).start()
 
     def _run(self, workspace: Path, run_id: str, objective: str | None,
-             resume: bool = False) -> None:
+             resume: bool = False, run_input: dict | None = None,
+             trigger: dict | None = None) -> None:
         def asked() -> str | None:
             with self.lock:
                 return self.control.get(run_id)
@@ -564,6 +797,8 @@ class Scheduler:
         try:
             runner.run(workspace, objective=objective, config_path=self.config, run_id=run_id,
                        resume=(workspace / "runs" / run_id) if resume else None,
+                       run_input=run_input,
+                       trigger=trigger,
                        stop_request=asked, library_root=self.library.root)
         except Exception:  # noqa: BLE001 - the run already recorded its own failure
             traceback.print_exc()
@@ -583,7 +818,8 @@ class Scheduler:
                               "running": self.running.get(workspace.name) == state_file.parent.name,
                               "started": state.get("started"), "updated": state.get("updated"),
                               "executed": state.get("executed", []),
-                              "objective": (state.get("objective") or "")[:200]})
+                              "objective": (state.get("objective") or "")[:200],
+                              "trigger": state.get("trigger", {"source": "manual"})})
         return found
 
     def run(self, graph: str, run_id: str) -> dict | None:
@@ -762,8 +998,11 @@ class Handler(BaseHTTPRequestHandler):
         """The request body, or None after answering that it was not usable."""
         length = int(self.headers.get("Content-Length") or 0)
         try:
-            return json.loads(self.rfile.read(length) or b"{}")
-        except json.JSONDecodeError:
+            body = json.loads(self.rfile.read(length) or b"{}")
+            if not isinstance(body, dict):
+                raise ValueError("body must be a JSON object")
+            return body
+        except (json.JSONDecodeError, ValueError):
             self._send(json.dumps({"error": "body must be JSON"}), 400)
             return None
 
@@ -800,6 +1039,17 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
         self.wfile.write(payload)
+
+    def _authorized(self) -> bool:
+        keys = self.scheduler.api_keys
+        if not keys:
+            return True  # serve() only allows this mode on a loopback listener.
+        scheme, separator, value = self.headers.get("Authorization", "").partition(" ")
+        valid = separator and scheme.lower() == "bearer" and value
+        if valid and any(hmac.compare_digest(value.encode(), key.encode()) for key in keys):
+            return True
+        self._send(json.dumps({"error": "invalid API key"}), 401)
+        return False
 
     def _send_file(self, path: Path) -> None:
         """The bytes as they are, and as a download rather than something a browser renders.
@@ -868,6 +1118,48 @@ class Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError, KeyError):
             return  # The worker belongs to the service, not this subscriber.
 
+    def _response_stream(self, response_id: str) -> None:
+        ref = self.scheduler.response_refs[response_id]
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
+
+        def emit(kind: str, payload: dict) -> None:
+            self.wfile.write(f"event: {kind}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n".encode())
+            self.wfile.flush()
+
+        response, _ = self.scheduler.response_result(response_id)
+        response["status"] = "in_progress"
+        response["output"] = []
+        response["output_text"] = ""
+        emit("response.created", {"type": "response.created", "response": response})
+        emit("response.in_progress", {"type": "response.in_progress", "response": response})
+        cursor = 0
+        try:
+            while True:
+                turn = self.scheduler.turns.get(ref["session"], ref["turn"])
+                events = self.scheduler.turns.events(ref["session"], ref["turn"], cursor)
+                for event in events:
+                    data = event["data"]
+                    cursor = event["seq"]
+                    if data.get("type") == "text-delta":
+                        emit("response.output_text.delta", {"type": "response.output_text.delta",
+                             "item_id": "msg_" + response_id.removeprefix("resp_"),
+                             "output_index": 0, "content_index": 0,
+                             "delta": data.get("delta", "")})
+                if turn["status"] != "running" and len(events) < 256:
+                    response, _ = self.scheduler.response_result(response_id)
+                    kind = "response.completed" if turn["status"] == "completed" else "response.failed"
+                    response["status"] = "completed" if kind.endswith("completed") else "failed"
+                    emit(kind, {"type": kind, "response": response})
+                    return
+                if len(events) < 256:
+                    time.sleep(0.1)
+        except (BrokenPipeError, ConnectionResetError, KeyError):
+            return
+
     def do_GET(self) -> None:  # noqa: C901 - one small HTTP router keeps endpoint behavior visible
         parsed = urlparse(self.path)
         query = parse_qs(parsed.query)
@@ -876,10 +1168,28 @@ class Handler(BaseHTTPRequestHandler):
         if not parts or parts[0] == "assets" or (len(parts) == 1 and "." in parts[0]):
             if self._serve_built(parts):
                 return
+        if not self._authorized():
+            return
         if parts == ["graphs"]:
             names = [{"graph": item.name, "running": self.scheduler.running.get(item.name)}
                      for item in self.scheduler.workspaces()]
             return self._send(json.dumps({"graphs": names}, ensure_ascii=False))
+        if parts == ["timeline"]:
+            try:
+                days = int(query.get("days", ["30"])[0])
+                if not 1 <= days <= 366:
+                    raise ValueError
+                before = query.get("before", [None])[0]
+                if before is not None:
+                    datetime.fromisoformat(before)
+            except ValueError:
+                return self._send(json.dumps({"error": "days must be between 1 and 366"}), 400)
+            return self._send(json.dumps(self.scheduler.timeline(days, before), ensure_ascii=False))
+        if parts == ["schedules"]:
+            return self._send(json.dumps({"schedules": self.scheduler.schedules}, ensure_ascii=False))
+        if parts == ["v1", "responses"]:
+            # Responses are created with POST; GET is intentionally outside the frozen subset.
+            return self._send(json.dumps({"error": "not found"}), 404)
         if parts == ["sessions"]:
             return self._send(*self.scheduler.sessions_list())
         if len(parts) == 3 and parts[0] == "sessions" and parts[2] == "turns":
@@ -926,6 +1236,8 @@ class Handler(BaseHTTPRequestHandler):
         self._send(json.dumps({"error": "not found"}), 404)
 
     def do_PUT(self) -> None:
+        if not self._authorized():
+            return
         parts = [part for part in PurePosixPath(unquote(urlparse(self.path).path)).parts
                  if part != "/"]
         if len(parts) != 2 or parts[0] != "graphs":
@@ -938,6 +1250,27 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: C901 - one small HTTP router keeps endpoint behavior visible
         parts = [part for part in PurePosixPath(unquote(urlparse(self.path).path)).parts if part != "/"]
+        if not self._authorized():
+            return
+        if parts == ["v1", "responses"]:
+            body = self._body()
+            if body is None:
+                return
+            bearer = self.headers.get("Authorization", "").partition(" ")[2]
+            owner = hashlib.sha256(bearer.encode()).hexdigest()
+            created, status = self.scheduler.response_turn(owner, body)
+            if status != 200:
+                return self._send(json.dumps(created, ensure_ascii=False), status)
+            if created["stream"]:
+                return self._response_stream(created["id"])
+            deadline = time.monotonic() + 24 * 60 * 60
+            while time.monotonic() < deadline:
+                response, response_status = self.scheduler.response_result(created["id"])
+                if response_status != 202:
+                    return self._send(json.dumps(response, ensure_ascii=False), response_status)
+                time.sleep(0.1)
+            response, _ = self.scheduler.response_result(created["id"])
+            return self._send(json.dumps(response, ensure_ascii=False), 202)
         if len(parts) == 3 and parts[0] == "sessions" and parts[2] == "turns":
             body = self._body()
             if body is None:
@@ -952,6 +1285,15 @@ class Handler(BaseHTTPRequestHandler):
             if body is None:
                 return
             return self._send(*self.scheduler.create_session(body.get("id")))
+        if parts == ["schedules"]:
+            body = self._body()
+            if body is None:
+                return
+            if set(body) - {"graph", "rule", "input"} or not body.get("graph") or \
+                    not isinstance(body.get("rule"), dict) or not isinstance(body.get("input", {}), dict):
+                return self._send(json.dumps({"error": "provide graph, rule, and optional object input"}), 400)
+            return self._send(*self.scheduler.create_schedule(str(body["graph"]), body["rule"],
+                                                              body.get("input", {})))
         if len(parts) == 3 and parts[0] == "sessions" and parts[2] == "status":
             body = self._body()
             if body is None:
@@ -1005,6 +1347,15 @@ class Handler(BaseHTTPRequestHandler):
             # run" rather than "no such request".
             response, status = self.scheduler.control_run(parts[1], parts[2])
             return self._send(response, status)
+        if len(parts) == 4 and parts[:3] == ["v1", "webhooks", "graphs"]:
+            body = self._body()
+            if body is None:
+                return
+            if set(body) - {"input"} or not isinstance(body.get("input", {}), dict):
+                return self._send(json.dumps({"error": "body must contain only an object input"}), 400)
+            response, status = self.scheduler.trigger(parts[3], None, body.get("input", {}),
+                                                      {"source": "webhook"})
+            return self._send(response, status)
         if parts != ["trigger"]:
             return self._send(json.dumps({"error": "not found"}), 404)
         body = self._body()
@@ -1012,12 +1363,19 @@ class Handler(BaseHTTPRequestHandler):
             return
         if not body.get("graph"):
             return self._send(json.dumps({"error": "graph is required"}), 400)
-        response, status = self.scheduler.trigger(str(body["graph"]), body.get("objective"))
+        if body.get("input") is not None and not isinstance(body.get("input"), dict):
+            return self._send(json.dumps({"error": "input must be an object"}), 400)
+        response, status = self.scheduler.trigger(str(body["graph"]), body.get("objective"),
+                                                  body.get("input"))
         self._send(response, status)
 
     def do_DELETE(self) -> None:
+        if not self._authorized():
+            return
         parts = [part for part in PurePosixPath(unquote(urlparse(self.path).path)).parts
                  if part != "/"]
+        if len(parts) == 2 and parts[0] == "schedules":
+            return self._send(*self.scheduler.delete_schedule(parts[1]))
         if len(parts) == 2 and parts[0] == "sessions":
             return self._send(*self.scheduler.delete_session(parts[1]))
         if len(parts) != 2 or parts[0] not in ("runs", "graphs"):
@@ -1036,10 +1394,21 @@ def _graph_of(scheduler: Scheduler, run_id: str) -> str:
 
 def serve(root: str | Path, config: str | Path, host: str = "127.0.0.1", port: int = 8077) -> None:
     scheduler = Scheduler(Path(root).expanduser().resolve(), Path(config).resolve())
+    try:
+        loopback = ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        loopback = host.lower() == "localhost"
+    if not loopback and not scheduler.api_keys:
+        raise ValueError("ANCHOR_API_KEYS is required when listening on a non-loopback address")
     Handler.scheduler = scheduler
     server = ThreadingHTTPServer((host, port), Handler)
     (Path(root).expanduser() / "workspaces").mkdir(parents=True, exist_ok=True)
     print(json.dumps({"listening": f"http://{host}:{port}", "root": str(scheduler.root),
                       "graphs": [item.name for item in scheduler.workspaces()]}), flush=True)
     scheduler.resume_all()
+    def schedule_loop() -> None:
+        while True:
+            scheduler.tick_schedules()
+            time.sleep(1)
+    threading.Thread(target=schedule_loop, daemon=True).start()
     server.serve_forever()

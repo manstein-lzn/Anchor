@@ -12,6 +12,7 @@ test('manage individual workflows without disturbing the editor', async ({ page 
   let refuseDelete = true;
   await page.route('**/graphs', route => route.fulfill({ json: { graphs } }));
   await page.route('**/runs', route => route.fulfill({ json: { runs: [] } }));
+  await page.route('**/timeline*', route => route.fulfill({ json: { runs: [], scheduled: [], schedules: [] } }));
   await page.route('**/graphs/*', route => {
     if (route.request().method() !== 'DELETE') return route.fulfill({ json: { definition: graph } });
     if (refuseDelete) return route.fulfill({ status: 409, json: { error: '工作流正在运行' } });
@@ -22,6 +23,7 @@ test('manage individual workflows without disturbing the editor', async ({ page 
   });
   await page.goto('/');
   await expect(page.getByLabel('目标', { exact: true })).toHaveValue(graph.objective);
+  await expect(page.getByRole('region', { name: 'academic-survey 的执行概览' })).toContainText('这个 Graph 还没有运行记录');
   await page.getByLabel('目标', { exact: true }).fill('尚未保存的研究目标');
   const manage = page.getByRole('button', { name: '管理工作流 research-review', exact: true });
   await manage.focus();
@@ -104,6 +106,7 @@ test('edit a graph, inspect a run and read its files across screen sizes', async
   ] } }));
   await page.route('**/graphs/*', route => route.fulfill({ json: { definition: graph } }));
   await page.route('**/runs', route => route.fulfill({ json: { runs: [run] } }));
+  await page.route('**/timeline*', route => route.fulfill({ json: { runs: [run], scheduled: [], schedules: [] } }));
   await page.route('**/runs/run-demo', route => route.fulfill({ json: {
     graph: run.graph, run: run.run, nodes: graph.nodes.map((node: { id: string }) => node.id),
     state: { ...run, cursor: { node: 'structure', pass: 1, dir: '' }, passes: { plan: 1, gather: 1, write: 1, structure: 1 },
@@ -132,6 +135,13 @@ test('edit a graph, inspect a run and read its files across screen sizes', async
     path: 'sources/raw/evidence.md', size: 80, binary: false, truncated: false, text: '这是嵌套目录中的证据。',
   } }));
   await page.goto('/');
+  await expect(page.getByTestId('graph-canvas').locator('.graph-node')).toHaveCount(5);
+  const executionSummary = page.getByRole('region', { name: 'academic-survey 的执行概览' });
+  await expect(executionSummary).toContainText('执行中');
+  await expect(executionSummary).toContainText('最近运行');
+  await executionSummary.getByRole('button', { name: '查看当前运行' }).click();
+  await expect(page.getByTestId('execution-canvas').locator('.execution-node')).toHaveCount(5);
+  await page.getByRole('button', { name: '图编排', exact: true }).click();
   await expect(page.getByTestId('graph-canvas').locator('.graph-node')).toHaveCount(5);
   for (const [label, panel, delta] of [
     ['调整侧边栏宽度', '.library', 75], ['调整详情面板宽度', '.inspector', -100],
@@ -187,7 +197,15 @@ test('edit a graph, inspect a run and read its files across screen sizes', async
   await expect(page.locator('.graph-node.kind-op')).toHaveCount(3);
   await page.getByRole('button', { name: '撤销', exact: true }).click();
   await expect(page.locator('.graph-node.kind-op')).toHaveCount(2);
-  await page.getByRole('button', { name: '运行记录', exact: true }).click();
+  await page.getByRole('button', { name: '运行看板', exact: true }).click();
+  await page.locator('.timeline-run').first().click();
+  await expect(page.getByLabel('当前工作流')).toHaveCount(0);
+  const durations = await page.locator('.timeline-entry').filter({ hasText: run.graph }).evaluateAll(entries => entries.map(entry => ({
+    bar: entry.querySelector<HTMLElement>('.timeline-duration')?.getBoundingClientRect().width ?? 0,
+    track: entry.parentElement?.getBoundingClientRect().width ?? 0,
+  })));
+  expect(durations.some(item => item.bar < item.track - 1)).toBeTruthy();
+  await page.getByRole('button', { name: '查看节点与产物', exact: true }).click();
   await expect(page.getByTestId('execution-canvas').locator('.execution-node')).toHaveCount(5);
   await page.getByTestId('edge-e0-plan-gather').locator('path').first().hover({ force: true });
   await page.mouse.move(10, 10);

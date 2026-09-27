@@ -114,6 +114,7 @@ class Graph:
     out_edges: dict[str, tuple[str, ...]]
     in_edges: dict[str, tuple[str, ...]]
     objective: str = ""
+    input: dict = field(default_factory=dict)
     # Where a run starts, already resolved through any modules.
     entry_node: str = ""
     # Each node carries the ceiling of the graph that declared it: a module's bound belongs to the
@@ -337,7 +338,7 @@ def _check_body(body: object, where: str, *, module: bool) -> dict:
             type(body["max_rounds"]) is not int or body["max_rounds"] < 1):
         raise ValueError(f"{where}: max_rounds must be a positive integer when specified")
     if module:
-        for key in ("agents", "ops", "objective", "graphs"):
+        for key in ("agents", "ops", "objective", "input", "graphs"):
             if key in body:
                 raise ValueError(
                     f"{where} declares {key!r}, and only the file does. There is one agent pool per "
@@ -350,6 +351,8 @@ def _check_body(body: object, where: str, *, module: bool) -> dict:
                 f"result, and the parent's edges leaving this module attach to it.")
     if not body.get("nodes"):
         raise ValueError(f"{where} needs at least one node")
+    if "input" in body and not isinstance(body["input"], dict):
+        raise ValueError(f'{where}: "input" must be a JSON object')
     # A file with a `graphs` block expands, so its own node ids share one namespace with the
     # modules' and may not contain the separator. A file without one does not expand.
     allow_sep = not body.get("graphs") and not module
@@ -550,7 +553,8 @@ def parse(raw: dict) -> Graph:
                   ops={name: _op(name, spec) for name, spec in (raw.get("ops") or {}).items()},
                   out_edges={node: tuple(targets) for node, targets in out_edges.items()},
                   in_edges={node: tuple(sources) for node, sources in in_edges.items()},
-                  objective=raw.get("objective", ""), entry_node=expansion.entry,
+                  objective=raw.get("objective", ""), input=raw.get("input", {}),
+                  entry_node=expansion.entry,
                   max_rounds=expansion.max_rounds, module_rounds=expansion.module_rounds)
     # Only the one it actually has: an agent node's `op` is empty and an op node's `agent` is, so
     # checking both unconditionally would report the empty string as an undeclared name.
@@ -586,6 +590,7 @@ def to_dict(graph: Graph) -> dict:
     """
     return {
         "objective": graph.objective,
+        "input": graph.input,
         "entry": graph.entry_node,
         "agents": {name: {"model": agent.model, "instructions": agent.instructions,
                           "network": agent.network, "max_steps": agent.max_steps,
@@ -606,3 +611,14 @@ def to_dict(graph: Graph) -> dict:
                   for node in graph.nodes.values()],
         "edges": [{"from": source, "to": target} for source, target in edges(graph)],
     }
+
+
+def merge_input(default: dict, override: dict | None) -> dict:
+    """Recursively merge object values; arrays and other values replace as a whole."""
+    result = dict(default)
+    for key, value in (override or {}).items():
+        if isinstance(result.get(key), dict) and isinstance(value, dict):
+            result[key] = merge_input(result[key], value)
+        else:
+            result[key] = value
+    return result

@@ -34,6 +34,8 @@
 以下内容保留为产品需求，当前只记录用户可能需要的能力，不形成开发顺序、技术方案、接口契约或验收前置条件：
 
 - 系统级 Pilot 与 Graph/Run/Artifact 的更深联动；
+- 系统级 Pilot 与 Graph/Run/Artifact 的更深联动；
+- 长期 Copilot：用户可直接向 Anchor Copilot 提出任务，由 Copilot 选择或临时构建 Graph 执行，并把结果返回给原始用户/来源。临时 Graph 的持久化、可见性和生命周期，以及异步来源的回传方式尚未决定；
 - 研究目标、研究合同、证据验收和研究应用体验；
 - 长任务的上下文使用展示、可见计划和进度表达（基础压缩按当前目标复用框架）；
 - 附件、图片、资源引用、编辑后分支和导出。
@@ -50,6 +52,7 @@
 | P1 执行身份与事件流 | 提交去重、后台执行、SSE 重连、真实文本与工具卡片 | P0 | 刷新接回原执行；重复提交不产生第二次执行；停止保留输出 | 已完成（后端 + 浏览器证据） |
 | P2 框架记录与续聊接入 | 原生持久记录与续聊、必要提问、按需压缩、对象直接跳转；收敛现有审批门禁 | P1 | 杀进程后重开同一会话可继续；结果缺失时 Agent 可查询核验；对象链接进入已有页面 | R1–R5 修复完成，待真实 provider 长会话复验 |
 | P7 当前目标集成验收 | 真实 provider、桌面/移动浏览器、进程中断、相关回归与文档 | P2 | 实际走通保存、关闭、重开、续聊和对象跳转；未验收不报完成 | 持续进行 |
+| E1 事件触发与运行看板 | Graph/Run 输入、Bearer 白名单、Webhook、Responses 子集、本机定时和时间线看板 | P2/P7 基础稳定 | 确认触发来源、忙碌/停机错过语义、Responses JSON/SSE、计划编辑删除和浏览器查看；未通过真实 provider 前不报端到端完成 | 功能接线与自动回归完成；真实 provider/停机验收待做 |
 
 当前顺序只有：核对框架接口 → 接通 Anchor 会话入口 → 真实中断续聊验收。P3–P6 不提供当前实现指导。
 
@@ -149,6 +152,9 @@ SSE `message` 的 data 为标准 Vercel chunk，`id` 为已提交到 SQLite 的�
 | A12 | 对话与 Graph/Run/Artifact 联动 | 本轮只验收已有对象的直接跳转 | P2/P7 | 代码与前端回归通过：对象跳转服从未保存编辑确认，Artifact 自动打开文件页并展开目标路径；浏览器完整复验待跑 |
 | A13 | 研究目标与证据验收 | 产品需求记录，属于研究应用 | 后续需求 | 不纳入 Anchor 核心验收 |
 | A14 | 附件、编辑分支与导出 | 产品需求记录，资源边界未冻结 | 后续需求 | 不纳入本轮验收 |
+| A15 | 定时/Webhook 触发与运行时间线 | 支持周期及一次性定时；停机或 Graph 忙时错过的计划清楚显示、不补跑；Graph 忙时拒绝所有来源且不创建 Run；Webhook 不去重；统一 Run 输入 | E1 | 后端全量回归、桌面/移动浏览器看板、时间线筛选、计划 Modal、Run 预览与详情路径通过；真实 provider 与真实停机恢复验收待做 |
+| A16 | Bearer 白名单与 Responses 子集 | 所有 API 统一 key；同 key 的 previous_response_id 续聊；普通 JSON/SSE 文本请求 | E1 | 伪 provider HTTP JSON/鉴权测试与代码回归通过；真实 provider 和官方兼容细节未验收，不声明完整兼容 |
+| A17 | 从 Graph 页面查看执行 | 选择 Graph 后直接看到当前/最近状态、运行次数和最近运行；点击任意最近运行直接进入执行画布与节点/产物详情，不必先进入全局看板 | E1 前端体验 | 代码与工作台 E2E 通过：Graph 页面新增运行概览、最近运行入口和无记录空状态；全局运行看板仍保留。真实 provider 不属于此 UI 入口验收 |
 
 每阶段执行相关后端测试、Ruff/compileall、前端测试/build、真实 HTTP 与浏览器验收。最终必须取得全量 pytest 的明确退出码和总结；运行中或仅看到进度点不算通过。阶段产物不能等同于产品全部完成。
 
@@ -170,3 +176,16 @@ SSE `message` 的 data 为标准 Vercel chunk，`id` 为已提交到 SQLite 的�
 - 2026-09-26：P2 续聊实现。**先核对框架，再接线**，四个结论决定了实现方式：(1) Pilot 的 `StepPersistence` 后端从 `SqliteStepStore` 换成原生 `FileStepStore`（`state/pilot-steps/`：`run.json`、`events.jsonl`、`tool_effects.jsonl`、`snapshots/*.json`、`media/*`）；(2) 只开持久化不够——工具执行中被 `kill -9` 只留下 `events.jsonl` 与 `tool_effects.jsonl`，没有快照，`continue_run` 直接 `LookupError`；打开 `capture_frontier=True` 后才有可供下一个进程读取的 `snapshots/*.json`；(3) `continue_run(include_interrupted=True)` 读回的中断历史末尾是未完成的 tool call，直接叠新 prompt 会被框架以 `UserError: Cannot provide a new user prompt when the message history contains unprocessed tool calls` 拒绝（框架宁报错不静默重放，这点是对的），因此只在 `is_provider_valid(...)` 为假时把末尾响应标成框架自己的 `state='interrupted'`，其余交回框架：它合成 `outcome='interrupted'` 的 tool-return，模型因此看到「调用过、结果未知」；(4) `agent_name` 让持久化 run ID 变成 `5:pilot<turn_id>` 的 base64，不等于 turn ID，所以续聊按 `conversation_id` 查而不是拼 ID。接线：`pilot.attempt_history` 只在框架记录比已存对话更长时接手（进程被杀或用户停止的回合不会走到保存），`respond` 在带新输入时把它接在 message_history 前面；`Scheduler.create_turn` / `pilot_message` 允许 interrupted 会话接新消息；`pilot_turns.unsafe_to_retry` 与两条「副作用门禁」删除。审批收敛：`graph_run`、`run_pause/resume/stop`、`graph_create`、`graph_update` 取消逐次审批（用户请求即授权），只有 `graph_delete` 保留框架 deferred 确认；`session_ask` 不变。压缩：接入框架 `SlidingWindowCompaction`（可配 `SummarizingCompaction` + summarizer 模型），默认按 200 条消息 / 上下文 60% 触发，配置键 `pilot_compaction`。对象跳转：`#anchor/graph|run|artifact/...` 引用由 `apps/web/src/links.ts` 解析，点击进入已有页面，右上角「返回会话」回到原 Session（`Pilot` 的会话选择改为受 App 控制）。证据：`tests/test_pilot_turns.py` 真实子进程 SIGKILL 后重启续聊两例（工具结果已保存读到 `recorded-result`；结果缺失得到 `outcome='interrupted'`）与文件记录用例、`tests/test_pilot_tools.py` 重写（普通操作直接执行并记账、删除仍需确认、未知结果不重放）、压缩用例、`apps/web/src/links.test.ts`、e2e `pilot.spec.ts` 引用跳转用例。全量 `pytest -q -n 8 --dist worksteal` 297 项退出码 0；Ruff、compileall、前端 23 单测、9 个 e2e、build 通过。真实验收：`scripts/verify_pilot_provider.py`（直连 DeepSeek：直接建图/启动 Run、链接、删除确认与拒绝、过期确认、`session_ask`、提交去重、文件记录，证据 `.local/pilot-provider-qxmyajmk/`）、`scripts/verify_pilot_resume.py`（真实 SIGKILL 两次 + 重启续聊，证据 `.local/pilot-resume-u3pvap_a/`）、浏览器 `apps/web/e2e/real-provider.spec.ts`（真实 provider + 杀进程 + 刷新 + 续聊 + 链接与返回，证据 `.local/pilot-browser-acceptance/`）。未验证：真实长会话的压缩触发、多进程/多租户、系统 Pilot。
 - 2026-09-26：P2 独立验收暂不通过。全量后端独立复跑 300 passed in 99.78s、退出码 0（`.local/pilot-p2-review-pytest.xml`）；前端 23 单测、9 E2E（1 条 opt-in 真实浏览器测试跳过）、build、Ruff、compileall 均通过。真实 DeepSeek HTTP/SSE 复跑通过（`.local/pilot-provider-hntv2f1d/`，Run `20260926T140327`），真实 SIGKILL 两例复跑通过（`.local/pilot-resume-ga78jp5d/`，准备 Run `20260926T135924`）。额外诊断复现 R1 空 prompt 续答漏读中断记录、R2 压缩后按消息长度错误舍弃新历史、R3 聊天链接丢失未保存编辑、R4 Artifact 链接未定位文件、R5 模型窗口未传给框架压缩；前三者影响恢复或编辑保留。详见 `docs/pilot-p2-acceptance-review.md`，同步调整 P2、A07/A09/A10/A12 状态。仅记录验收、未修改产品代码，修复继续交开发 Agent。
 - 2026-09-26：修复独立验收报告 R1–R5。续聊同时读取新消息和空 prompt 的原生快照，使用快照时间而非消息长度选择压缩后记录；中断工具调用交给 PydanticAI 生成 interrupted 返回；压缩能力传递 profile.context_window；聊天对象跳转复用未保存编辑确认，Artifact 引用进入文件页并展开目标路径。相关后端回归 34 项通过，前端 23 项单测、9 条 mock E2E（另 1 条 opt-in 跳过）、build、compileall、Ruff 和 diff 检查通过；补充 E2E Artifact 内容断言。真实 provider 验证 `scripts/verify_pilot_provider.py` 通过，证据 `.local/pilot-provider-e8bo319e/`；该脚本覆盖实际对话、Graph Run、对象链接、必要提问、删除确认/拒绝与资源变更保护。空 prompt 真实续聊、真实长压缩及真实 provider 浏览器复验仍待运行，未提前宣称通过。
+- 2026-09-27：确认定时计划的停机语义：Anchor 不补跑停机期间错过的时点，避免过期输入在错误时间产生副作用；一次性计划显示为错过并结束，周期计划显示错过的发生并保留后续计划。A15 记录该产品契约，调度实现留待事件触发阶段。
+- 2026-09-27：收敛事件触发与输入契约。Graph 忙时手动、定时和 Webhook 触发均直接拒绝，不排队、不合并、不创建 Run、不持久化拒绝记录；周期定时覆盖间隔型和日历型规则，按本机时间。Graph 默认 `input` 与 Run 输入采用递归对象合并、非对象值整体替换；AgentNode 获取有效 JSON 输入，OpNode 获取只读 JSON 输入，Run 保存最终输入。同步更新 A15；未修改代码。
+- 2026-09-27：补充确认忙碌时点的看板语义与 Webhook 重试语义：计划时点因 Graph 正在运行而未触发时，看板显示原因但不创建 Run/拒绝记录；Webhook 不按事件内容去重，空闲时到达的每个请求均为新触发。产品契约已足以进入实现拆分，低层接口与持久化方式留在实现阶段决定。
+- 2026-09-27：确认 Webhook 与 Responses API 均参考 OpenAI 的 Bearer API key 方式，Anchor 使用 `anchor-key` 白名单，密钥匹配后允许请求执行；不引入角色审批机制。只更新产品需求，尚未实现。
+- 2026-09-27：补齐 HTTP 目标契约：所有 API 统一使用启动时读取的 `ANCHOR_API_KEYS` Bearer 白名单；非 loopback 监听必须配置 key。冻结 `POST /v1/webhooks/graphs/<graph-id>` 的 JSON 输入和 202/400/401/404/409 语义；Responses 采用固定 `anchor-copilot` 常用子集、文本输入、同 key 的 `previous_response_id` 续聊及 JSON/SSE 返回。外部工具、图像/音频和完整多租户隔离不纳入此契约。仅更新产品文档，未实现；Responses 官方文档页面在本环境被访问拦截，因此未将未核实的字段细节写成兼容承诺。
+- 2026-09-27：用户明确开始推进事件触发实现。接入 Graph 默认输入与 Run 覆盖输入，OpNode 通过只读 `ANCHOR_INPUT` JSON 环境变量读取；增加 Webhook 与统一 Bearer 白名单、按 key 绑定的 Responses 文本 JSON/SSE 子集；加入本机时间一次性/间隔/日历定时、错过不补跑、Graph 忙时跳过及运行时间线看板（未来 7 天、历史分页、跨日时长）。相关后端子集、前端 23 单测和 build 通过。Responses 目前仅通过伪执行器 HTTP 测试，真实 provider 验证、真实停机/重启与浏览器 E2E 仍待完成；不得视为 E1 全面验收通过。
+- 2026-09-27：继续完成 E1 自动验收收敛。修正流式浏览器夹具按实际 `after` 游标续传（开发模式重复挂载不再错误跳过首批事件）；时间线点击 Run 进入原运行详情并可返回，避免看板与运行画布争抢布局；修正时间线对已结束 Run 覆盖计划时点的忙碌识别。新增相应回归。全量后端 pytest（`-n 8 --dist worksteal`）、Ruff、compileall、前端 23 单测/build 通过；浏览器 E2E 最终 9 条通过、1 条真实 provider opt-in 跳过。真实 provider 与实际停机/恢复仍未验收。
+- 2026-09-27：现场启动旧版服务后发现前端 Vite 代理遗漏 `/timeline` 与 `/schedules`，导致浏览器请求在代理层 404，页面显示“服务未连接”。补齐代理并重启当前服务；直接后端和浏览器实际请求均验证成功，时间线显示历史运行与未来日期。该问题属于部署进程/代理未随代码更新，不改变 E1 契约。
+- 2026-09-27：重构运行看板前端。页面改为“运行摘要 → 筛选与日期导航 → 每日 24 小时时间线 → 图例”的单列层级；实际 Run 用持续时间横条，计划用时间点，当前时刻、错过原因和空白日期折叠均可见。点击时间线条先打开运行/计划预览，再进入既有节点与产物详情；定时计划移入 Modal，桌面与移动端均验证无页面横向溢出。为适配预览层，更新三条浏览器测试路径。`npm --prefix apps/web run test:e2e` 最终 9 条通过、1 条真实 provider opt-in 跳过；截图验收覆盖 1440×1000 与 390×844，控制台无错误。未改变后端契约；真实 provider 与停机/重启仍待 E1 完整验收。
+- 2026-09-27：继续检查并修复看板现场问题。原 `.timeline-entry` 为了扩大点击区域继承了旧版运行条背景，导致短运行被误绘制为覆盖整天；现在点击层与时长条分离，真实运行条只显示 `started` 到 `updated` 的时长。用 10 个并行 Graph 的浏览器夹具验证同日多泳道可读；9/23–24 真实数据显示实际持续时间而非 24 小时。看板与 Pilot 顶部栏移除无关的 Graph 选择器和运行按钮，Graph 图编排与运行详情仍保留自己的上下文操作。相关 E2E、前端单测/build 通过；A15 仍待真实 provider 与停机恢复验收。
+- 2026-09-27：再次做整体体验复核并收敛时间导航。历史页不再重复显示未来 7 天，日期范围标题与实际可见范围一致；增加“最近活动”定位入口，避免默认定位今天时让历史运行看起来消失；运行看板隐藏无关的详情面板最大化按钮，保持全局页面语义。桌面/移动截图、前端单测 23 项、E2E 9 条（1 条真实 provider opt-in 跳过）和 build 通过。
+- 2026-09-27：修复 Graph 层执行详情不可达。图编排页新增 Graph 运行概览，直接显示当前/最近状态、运行次数、最近时间和最近 4 次运行；点击“查看当前运行”“查看最近运行”或任意历史条目直接进入已有执行画布与节点/产物详情，未运行的 Graph 显示空状态并保留看板入口。复用现有 `/runs` 与 `/runs/<run>`，未新增后端契约；前端单测 23 项、工作台 E2E 2 条、build 和 `git diff --check` 通过。
+- 2026-09-27：统一页面上下文层级。顶栏现在只保留 Anchor、图编排、运行看板、Pilot 和服务状态；Graph 选择器与“运行工作流”移入图编排/运行详情的页面头部，Pilot 与全局看板不再出现无关控件。工作台 E2E 2 条、前端 build 通过，截图确认 Graph 页面控件仍然可见且层级清晰。

@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 #: Done. The pass produced what it was asked for and named a way out if it had to.
 COMPLETED = "completed"
@@ -95,6 +95,9 @@ class NodeRequest:
     cancelled: Callable[[], bool] | None = None
     """Whether the caller has asked to stop this pass now."""
 
+    run_input: dict[str, Any] = field(default_factory=dict)
+    """The resolved, read-only JSON input for this Graph Run."""
+
     @property
     def node_key(self) -> str:
         """The node's name in the framework's own vocabulary, and **not always `execution_id`**.
@@ -121,6 +124,7 @@ def node_key(execution_id: str) -> str:
     convenience over it. Two copies of `replace("/", "__")` would be two chances to disagree about what
     a node is called.
     """
+
     return execution_id.replace("/", "__")
 
 

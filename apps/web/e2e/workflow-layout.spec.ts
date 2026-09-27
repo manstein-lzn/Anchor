@@ -27,6 +27,7 @@ test('one layout survives view switches, polling, dragging, arranging, undo and 
   });
   let polls = 0;
   await page.route('**/runs', r => { polls++; return r.fulfill({ json: { runs: [run] } }); });
+  await page.route('**/timeline*', r => r.fulfill({ json: { runs: [run], scheduled: [], schedules: [] } }));
   await page.route('**/runs/research-run', r => r.fulfill({ json: {
     graph: 'research', run: run.run, nodes: graph.nodes.map((n: { id: string }) => n.id), traces: {},
     state: { ...run, cursor: { node: 'investigate', pass: 2, dir: '' }, passes: { frame: 2, investigate: 2 },
@@ -37,7 +38,9 @@ test('one layout survives view switches, polling, dragging, arranging, undo and 
   const initial = await geometry(page);
   await expect(page.locator('.workflow-edge-label')).toHaveCount(7);
   await page.screenshot({ path: 'test-results/layout-editor.png' });
-  await page.getByRole('button', { name: '运行记录', exact: true }).click();
+  await page.getByRole('button', { name: '运行看板', exact: true }).click();
+  await page.locator('.timeline-run').first().click();
+  await page.getByRole('button', { name: '查看节点与产物', exact: true }).click();
   await expect(page.getByTestId('execution-canvas')).toBeVisible();
   expect(await geometry(page)).toEqual(initial);
   const feedback = page.getByTestId('edge-e3-feedback-frame').locator('.react-flow__edge-path');
@@ -63,7 +66,9 @@ test('one layout survives view switches, polling, dragging, arranging, undo and 
   const dragged = await geometry(page);
   expect(dragged.paths).not.toEqual(initial.paths);
   expect(dragged.nodes.find(n => n.id === 'investigate')).not.toEqual(initial.nodes.find(n => n.id === 'investigate'));
-  await page.getByRole('button', { name: '运行记录', exact: true }).click();
+  await page.getByRole('button', { name: '运行看板', exact: true }).click();
+  await page.locator('.timeline-run').first().click();
+  await page.getByRole('button', { name: '查看节点与产物', exact: true }).click();
   expect(await geometry(page)).toEqual(dragged);
   await page.getByRole('button', { name: '图编排', exact: true }).click();
   await page.getByRole('button', { name: '自动整理', exact: true }).click();

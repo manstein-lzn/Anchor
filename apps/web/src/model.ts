@@ -34,6 +34,7 @@ export type OurOp = {
 export type OurGraph = {
   entry: string;
   objective?: string;
+  input?: Record<string, unknown>;
   max_rounds?: number;
   /** A file declares agents, ops, or both. A graph of nothing but ops has no `agents` key at all,
    *  and one of nothing but agents has no `ops` — so neither is required. */
@@ -87,6 +88,7 @@ export type OurNodeResult = {
 };
 
 export type OurRunState = {
+  input?: Record<string, unknown>;
   objective: string;
   started: string;
   status: string;
@@ -111,7 +113,12 @@ export type OurRun = {
   updated: string;
   executed: string[];
   objective: string;
+  trigger?: { source: string; schedule?: string; scheduled_at?: string };
 };
+
+export type TimelineItem = { schedule: string; graph: string; scheduled_at: string; run?: string; status: string };
+export type TimelineData = { runs: OurRun[]; scheduled: TimelineItem[]; schedules: Schedule[] };
+export type Schedule = { id: string; graph: string; rule: Record<string, unknown>; next_at: string; enabled: boolean; input?: Record<string, unknown> };
 
 export type TraceMessage = {
   role: string;

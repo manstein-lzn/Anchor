@@ -146,6 +146,7 @@ class NodeSandbox:
     network: bool
     timeout_seconds: float
     routes: tuple[str, ...] = ()
+    environment: tuple[tuple[str, str], ...] = ()
     # What this node was given, as (where it lives, where it is visible). Read-only, and never
     # copied: a pointer to a predecessor's workspace, which is also why its history comes with it.
     inputs: tuple[tuple[str, str], ...] = ()
@@ -200,7 +201,8 @@ class NodeSandbox:
             workspace_readonly=present, spill_dir=self.spill_dir,
             spill_limit_bytes=self.spill_limit_bytes, spill_mount=self.spill_mount,
             cancelled=self.cancelled,
-            env=(("ANCHOR_NODE", self.node_id), ("ANCHOR_ROUTES", ",".join(self.routes))))
+            env=(("ANCHOR_NODE", self.node_id), ("ANCHOR_ROUTES", ",".join(self.routes)),
+                 *self.environment))
 
     def run(self, command: str, *, timeout: float | None = None) -> Executed:
         result = self.sandbox.run(self.spec(command, timeout=timeout))

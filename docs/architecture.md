@@ -29,6 +29,10 @@ Graph 是一个可编辑的 JSON 文件，包含角色 `agents`、命令定义 `
 │   │   ├── tool.json                执行入口与环境引用
 │   │   └── …                        工具自己的文件
 │   └── environments/<name>/         集中准备的环境，可被多个工具引用
+├── state/
+│   ├── schedules.json               本机定时计划；时间线从计划和 Run 事实派生
+│   ├── responses.json               Responses id → key 摘要 / Session / turn
+│   └── pilot-*.sqlite               Pilot 会话、提交和 SSE 事件
 └── workspaces/<graph-name>/         保留现有目录名称
     ├── graph.json                   Graph、AgentNode、OpNode 及 Plugin 引用
     └── runs/<run-id>/
@@ -71,7 +75,7 @@ WebUI / anchor-graph
 | [node/op_runtime.py](../src/anchor/node/op_runtime.py) | 命令节点执行，不依赖模型循环 |
 | [node/recovery.py](../src/anchor/node/recovery.py)、[node/context.py](../src/anchor/node/context.py) | 恢复判断、上下文管理和输出记录 |
 | [runtime/execenv.py](../src/anchor/runtime/execenv.py)、[runtime/sandbox.py](../src/anchor/runtime/sandbox.py) | 命令环境、工具路径、只读挂载、网络隔离和取消 |
-| [serve.py](../src/anchor/serve.py) | 工作流、运行、文件、控制及 Session 生命周期 API |
+| [serve.py](../src/anchor/serve.py) | 工作流、运行、文件、控制、Session、Webhook、Responses、定时与时间线 API |
 | [pilot.py](../src/anchor/pilot.py) | Pilot 模型执行、控制工具与流式事件编码 |
 | [session.py](../src/anchor/session.py) | Session 生命周期、消息与审批记录的持久化 |
 | [pilot_turns.py](../src/anchor/pilot_turns.py) | turn 提交幂等、执行身份、事件游标与终态 |
@@ -82,6 +86,8 @@ Graph 通过节点契约交付任务、接收结果，不直接解释 harness �
 ## 工作与记录的边界
 
 每次新运行产生独立的运行目录，其中每个节点有自己的工作区与 Git 仓库。同一运行的反馈循环复用该节点工作区；新一轮对话通过文件和输入延续工作。不同运行不会自动继承成果。
+
+Graph 可声明 object 默认 `input`；触发时的 object 与其递归合并（数组、null 和其他非对象整体替换），最终输入随 `run.json` 保存。Agent 节点在任务上下文看到它；Op 节点读取 `ANCHOR_INPUT` JSON 环境变量。运行看板由 Run 的 `started` / `updated` 和 `run.json.trigger`，以及 `state/schedules.json` 派生，不额外保存拒绝事件；前端按运行摘要、筛选、每日 24 小时刻度和计划/实际状态组织时间线，点击时间线条先看运行预览，再进入既有节点与产物详情，可返回时间线。定时只按本机时间到点触发；重启和 Graph 忙时错过的时点不补跑。HTTP 管理 API、Webhook 和 Responses 统一由 `ANCHOR_API_KEYS` Bearer 白名单保护；loopback 空白 key 仅为本机开发兼容。Responses 当前只实现文本请求、文本结果、`previous_response_id` 同 key 续聊及 JSON/SSE 子集，尚未以真实 provider 做产品验收，不能称完整兼容。
 
 节点写 `/workspace`，读 `/in/<上游节点>`。自己的 `.git` 在沙箱中只读，commit 由 Anchor 在沙箱外创建。边保存 commit 引用；运行时将对应文件树导出到 `.views` 再只读挂载，并非物理零复制。目录结构、传递范围和恢复操作见 [使用指南](usage.md)。
 
