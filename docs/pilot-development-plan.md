@@ -156,6 +156,7 @@ SSE `message` 的 data 为标准 Vercel chunk，`id` 为已提交到 SQLite 的�
 | A16 | Bearer 白名单与 Responses 子集 | 所有 API 统一 key；同 key 的 previous_response_id 续聊；普通 JSON/SSE 文本请求 | E1 | 伪 provider HTTP JSON/鉴权测试与代码回归通过；真实 provider 和官方兼容细节未验收，不声明完整兼容 |
 | A17 | 从 Graph 页面查看执行 | 选择 Graph 后直接看到当前/最近状态、运行次数；运行历史按需展开，按钮与画布位置保持不变，点击记录直达执行画布与节点/产物详情 | E1 前端体验 | 2026-09-28 运行概览融入 Graph 页头，原生浮层展示此图全部运行历史；工作台 E2E 覆盖桌面/手机展开位置与画布尺寸不变、超过四条历史、键盘/Esc/外部点击、详情直达和空状态。真实 provider 不属于此 UI 入口验收 |
 | A18 | 开发服务访问 | 5173 页面及其后端代理可访问 | 开发环境 | 2026-09-28 两端无监听后通过现有 dev.sh start 恢复；首页、/graphs、/timeline?days=30、/sessions 经 5173 请求均 HTTP 200；仅验证本机访问，未验证用户侧端口转发 |
+| A19 | 社区 Plugin 生态兼容任务交接 | 背景与目标见独立说明，具体方案和兼容验收待探索 | 独立任务背景 | 已生成 [任务背景](plugin-ecosystem-task-background.md)；仅完成文档交接，未实现或验收生态兼容 |
 
 每阶段执行相关后端测试、Ruff/compileall、前端测试/build、真实 HTTP 与浏览器验收。最终必须取得全量 pytest 的明确退出码和总结；运行中或仅看到进度点不算通过。阶段产物不能等同于产品全部完成。
 
@@ -198,3 +199,4 @@ SSE `message` 的 data 为标准 Vercel chunk，`id` 为已提交到 SQLite 的�
 - 2026-09-28：Pilot 修复验收：前端 23 单测、7 条 Pilot 专项 E2E、全套 E2E 11 条通过（真实 provider opt-in 1 条跳过）及 build 通过；后端全量 `pytest -q -n 8 --dist worksteal` 313 项通过、退出码 0，`git diff --check` 通过。新增长连接测试使用真实浏览器、Vite 代理和持续 HTTP/SSE，模型输出及持久化延迟为合成；同时只读打开真实 5173 会话并刷新，恢复原会话与 10 条消息，桌面/手机截图无脚本错误、手机无横向溢出。未发新的 Pilot provider 请求，未将此次测试计为真实生成速度或停机续聊验收。
 - 2026-09-28：用户指出最近输入仍未显示，复核确认上条验收遗漏真实内容完整性：那 10 条消息仅含首条用户消息。最新 turn 已收到「PPT 只是例子，能否构建 plugin」的澄清，框架将其保存为 `session_ask` 的 ToolReturnPart，`_entries` 只投影 UserPromptPart，导致完成/重开后漏显；原测试甚至将遗漏写成预期。现只调整展示投影，成功的提问工具返回显示为用户消息，提问调用里的问题显示为助手消息；不修改原生存储或给模型重复追加输入。修正 HTTP/框架测试，验证完整问答顺序及重开读取。确认无活动 turn/Run 后重启服务，真实 5173 会话刷新后显示两条用户输入，丢失的那条恰好出现一次，截图与控制台复核通过。同步澄清「生成 Graph 参数」实际是模型自行展开完整图定义用于 graph_validate，并非用户要求；收紧 Pilot 指令，讨论/能力咨询先回答问题，不擅自生成整图、不猜 Plugin ID，已授权实施仍直接执行。提示词调整未发新 provider 请求验证，不宣称已解决模型慢回复。对应 A08。
 - 2026-09-28：问答历史修复验收收尾：相关后端 34 项、后端全量 313 项通过（退出码 0），Pilot 浏览器专项 7 条通过，Ruff、compileall 与 diff 检查通过；服务 8077/5173 均在线。真实会话恢复截图 `/tmp/anchor-pilot-missing-answer-restored.png`；本轮没有修改或重发用户输入。
+- 2026-09-28：按用户要求生成 [社区 Plugin 生态兼容独立任务背景](plugin-ecosystem-task-background.md)，供新的 Agent 理解原生兼容 OpenAI/Codex 与 Anthropic/Claude 插件的产品意图、工程起点与讨论脉络。本文不冻结技术方案、实施顺序或验收条件；此前少量 Skill 包装建议不作为任务限制。对应 A19，仅交接背景，未改运行代码、未开展兼容验收。
