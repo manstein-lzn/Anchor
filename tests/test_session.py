@@ -117,13 +117,9 @@ def test_concurrent_session_events_keep_unique_order(tmp_path):
     assert [event.seq for event in events] == list(range(1, 34))
 
 
-def test_session_delete_requires_archive_and_removes_conversation(tmp_path):
+def test_session_delete_removes_conversation_without_archiving(tmp_path):
     store = SessionStore(tmp_path)
     store.create("remove-me")
-    with pytest.raises(ValueError, match="archive"):
-        store.delete("remove-me")
-
-    store.set_status("remove-me", "archived")
     store.delete("remove-me")
     assert not (tmp_path / "sessions" / "remove-me").exists()
     import asyncio
@@ -146,6 +142,31 @@ def test_scheduler_exposes_session_lifecycle_and_run_attachment(tmp_path):
     assert status == 200 and "archived" in body
     body, status = scheduler.delete_session("pilot")
     assert status == 200 and '"deleted": true' in body
+
+
+def test_session_management_validates_titles_and_preserves_running_sessions_and_runs(tmp_path):
+    scheduler = Scheduler(tmp_path, tmp_path / "runtime.json")
+    scheduler.create_session("managed")
+    run_path = tmp_path / "workspaces" / "demo" / "runs" / "kept"
+    run_path.mkdir(parents=True)
+    (run_path / "run.json").write_text('{"status":"finished"}')
+    scheduler.sessions.attach_run("managed", "kept")
+    assert scheduler.rename_session("missing", "name")[1] == 404
+    for title in (None, 2, [], "", "   ", "x" * 121):
+        assert scheduler.rename_session("managed", title)[1] == 400
+    scheduler.pilot_active.add("managed")
+    assert scheduler.rename_session("managed", "  我的研究  ")[1] == 200
+    scheduler.sessions.name_from_prompt("managed", "automatic title")
+    assert scheduler.sessions.get("managed").title == "我的研究"
+    assert scheduler.delete_session("managed")[1] == 409
+    assert scheduler.sessions.get("managed").status == "active"
+    scheduler.pilot_active.remove("managed")
+    turn, _ = scheduler.turns.create("managed", "old", "hi")
+    scheduler.turns.finish(turn["id"], "completed")
+    assert scheduler.delete_session("managed")[1] == 200
+    assert scheduler.turns.list("managed") == []
+    assert (run_path / "run.json").exists()
+    assert scheduler.delete_session("managed")[1] == 404
 
 
 def test_scheduler_confirmation_endpoint_requires_pending_request(tmp_path):

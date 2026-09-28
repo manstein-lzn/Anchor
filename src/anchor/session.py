@@ -146,6 +146,15 @@ class SessionStore:
                 sessions.append(self._read(directory.name))
         return sorted(sessions, key=lambda item: item.updated_at, reverse=True)
 
+    def rename(self, session_id: str, title: str) -> Session:
+        if not isinstance(title, str) or not title.strip() or len(title.strip()) > 120:
+            raise ValueError("title must contain 1 to 120 characters")
+        with self._approval_lock:
+            session = self._read(session_id)
+            updated = self._write(session.model_copy(update={"title": title.strip()}))
+            self._append(updated, "session.renamed", {"title": updated.title})
+            return updated
+
     def events(self, session_id: str) -> list[SessionEvent]:
         self._read(session_id)
         path = self._path(session_id) / "events.jsonl"
@@ -300,17 +309,16 @@ class SessionStore:
                          {"action": operation["action"], "key": call_id})
 
     def delete(self, session_id: str) -> None:
-        session = self._read(session_id)
-        if session.status not in {"archived", "interrupted"}:
-            raise ValueError("archive or interrupt a session before deleting it")
-        store = self.conversation_store()
-        import asyncio
-        summaries = asyncio.run(store.listing(query=""))
-        summary = next((item for item in summaries if item.id == session.conversation_id), None)
-        if summary is not None:
-            asyncio.run(store.delete(source=summary))
-        import shutil
-        shutil.rmtree(self._path(session_id))
+        with self._approval_lock:
+            session = self._read(session_id)
+            store = self.conversation_store()
+            import asyncio
+            summaries = asyncio.run(store.listing(query=""))
+            summary = next((item for item in summaries if item.id == session.conversation_id), None)
+            if summary is not None:
+                asyncio.run(store.delete(source=summary))
+            import shutil
+            shutil.rmtree(self._path(session_id))
 
     def _append(self, session: Session, kind: str, data: dict[str, Any] | None = None) -> SessionEvent:
         events = self.events(session.id)

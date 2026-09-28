@@ -3,6 +3,7 @@ import { Anchor, ArrowDown, Check, Copy, LoaderCircle, MessageSquare, Plus, Sear
 import { api, ApiError } from './api';
 import { Markdown } from './markdown';
 import { PilotTurn, type Turn } from './PilotTurn';
+import { SessionActions } from './SessionActions';
 
 type Session = {
   id: string; title?: string; status: string; waiting_reason: string; updated_at: string;
@@ -53,6 +54,7 @@ export function Pilot({ session = '', onSession }: { session?: string; onSession
   const submissions = useRef(new Set<string>());
   const navigation = useRef(0);
   const mounted = useRef(true);
+  const listVersion = useRef(0);
 
   const editDraft = (value: string) => {
     cached(`draft:${selectedRef.current || 'new'}`, value);
@@ -69,6 +71,7 @@ export function Pilot({ session = '', onSession }: { session?: string; onSession
     follow.current = true; setAtBottom(true);
   };
   const refresh = useCallback(async (id: string) => {
+    const version = listVersion.current;
     historyRequest.current?.abort();
     const controller = new AbortController();
     historyRequest.current = controller;
@@ -93,7 +96,8 @@ export function Pilot({ session = '', onSession }: { session?: string; onSession
       const prompt = latest?.status === 'running' ? latest.prompt : pendingSubmission(id)?.message;
       setMessages(prompt && !(last?.role === 'user' && last.text === prompt)
         ? [...history.messages, { role: 'user', text: prompt }] : history.messages);
-      setSessions(result.sessions); setTurn(latest ?? null);
+      if (version === listVersion.current) setSessions(result.sessions);
+      setTurn(latest ?? null);
       setSyncedTurn(latest && ['completed', 'waiting_user', 'waiting_approval'].includes(latest.status) ? latest.id : '');
       setBusy(submissions.current.has(id) || latest?.status === 'running');
     } catch (error) {
@@ -265,6 +269,19 @@ export function Pilot({ session = '', onSession }: { session?: string; onSession
     try { await navigator.clipboard.writeText(message.text); setCopied(index); }
     catch { setProblem('无法访问剪贴板，请选中文字复制。'); }
   };
+  const renameSession = async (id: string, title: string) => {
+    const result = await api<{ session: Session }>(`/sessions/${encodeURIComponent(id)}`, 'PUT', { title });
+    listVersion.current += 1;
+    if (mounted.current) setSessions(items => items.map(item => item.id === id ? { ...item, title: result.session.title } : item));
+  };
+  const deleteSession = async (id: string) => {
+    await api(`/sessions/${encodeURIComponent(id)}`, 'DELETE');
+    listVersion.current += 1;
+    cached(`draft:${id}`, ''); cached(`submission:${id}`, '');
+    if (!mounted.current) return;
+    setSessions(items => items.filter(item => item.id !== id));
+    if (selectedRef.current === id) { activate(''); setLoading(false); }
+  };
   const current = sessions.find(item => item.id === selected);
   const pendingApproval = current?.approval?.status === 'requested';
   // An interrupted session accepts a new message: the next turn carries what the dead run recorded.
@@ -280,12 +297,13 @@ export function Pilot({ session = '', onSession }: { session?: string; onSession
         onChange={event => setQuery(event.target.value)} /></label>
       <p className="pilot-sidebar-label">对话历史 <span>{sessions.length}</span></p>
       {!filtered.length && <p className="pilot-muted">{query ? '没有找到匹配的对话' : '你的对话会保存在这里'}</p>}
-      {filtered.map(session => <button key={session.id} aria-current={session.id === selected ? 'page' : undefined}
+      {filtered.map(session => <div key={session.id} className={`pilot-session-row ${session.id === selected ? 'chosen' : ''}`}><button aria-current={session.id === selected ? 'page' : undefined}
         title={session.id} className={`pilot-session ${session.id === selected ? 'chosen' : ''}`}
         onClick={() => void select(session.id)}>
         <MessageSquare size={16} /><span><strong>{title(session)}</strong>
           <small>{date(session.updated_at)} · {labels[session.status] ?? session.status}</small></span>
-      </button>)}
+      </button><SessionActions title={title(session)} busy={(session.id === selected && busy) || submissions.current.has(session.id)}
+        onRename={name => renameSession(session.id, name)} onDelete={() => deleteSession(session.id)} /></div>)}
     </aside>
     <section className="pilot-chat" aria-label="Pilot 对话">
       <header className="pilot-chat-heading">

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties } from 'react';
 import { Activity, ArrowUpRight, CalendarDays, ChevronLeft, ChevronRight, Clock3, Plus, Trash2 } from 'lucide-react';
 import type { OurRun, OurRunDetail, Schedule, TimelineData, TimelineItem } from './model';
 import { api } from './api';
@@ -20,6 +20,12 @@ const duration = (ms: number) => {
   const minutes = Math.floor(seconds / 60);
   return minutes < 60 ? `${minutes} 分钟` : `${Math.floor(minutes / 60)} 小时 ${minutes % 60} 分`;
 };
+const graphColors = ['#2f7f9f', '#8e5aa9', '#cf7c3a', '#3b8d68', '#c45d66', '#5273b5', '#b06b90', '#6c8d47'];
+const graphColor = (name: string) => {
+  let hash = 0;
+  for (const char of name) hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
+  return graphColors[hash % graphColors.length];
+};
 const runStatus = (run: OurRun) => run.running ? 'running' : run.status;
 const needsAttention = (status: string) => ['failed', 'interrupted', 'uncertain'].includes(status) || status.startsWith('missed_');
 const ruleText = (rule: Record<string, unknown>) => {
@@ -30,7 +36,22 @@ const ruleText = (rule: Record<string, unknown>) => {
   return `每天 · ${rule.time}`;
 };
 type Entry = { id: string; graph: string; start: number; end: number; status: string; source: string; run?: OurRun; plan?: TimelineItem };
+type PlacedEntry = Entry & { lane: number };
 type Filter = 'all' | 'running' | 'finished' | 'attention' | 'planned' | 'stopped';
+
+const placeEntries = (items: Entry[], date: Date): PlacedEntry[] => {
+  const dayStart = +date;
+  const dayEnd = +addDays(date, 1);
+  const laneEnds: number[] = [];
+  return [...items].sort((a, b) => a.start - b.start).map(entry => {
+    const start = Math.max(entry.start, dayStart);
+    const end = Math.min(Math.max(entry.end, entry.start), dayEnd);
+    let lane = laneEnds.findIndex(lastEnd => lastEnd <= start);
+    if (lane < 0) { lane = laneEnds.length; laneEnds.push(end); }
+    else laneEnds[lane] = end;
+    return { ...entry, start, end, lane };
+  });
+};
 
 export function Timeline({ data, graphs, page, onPage, onSelect, onRefresh, problem = '' }: {
   data: TimelineData | null; graphs: string[]; page: number; onPage: (page: number) => void;
@@ -41,6 +62,9 @@ export function Timeline({ data, graphs, page, onPage, onSelect, onRefresh, prob
   const [sourceFilter, setSourceFilter] = useState('');
   const [expanded, setExpanded] = useState(false);
   const [selected, setSelected] = useState<Entry | null>(null);
+  const [hint, setHint] = useState<{ entry: Entry; anchor: HTMLButtonElement } | null>(null);
+  const hintId = useId();
+  const tooltip = useRef<HTMLDivElement>(null);
   const [scheduleOpen, setScheduleOpen] = useState(false);
   const [graph, setGraph] = useState(graphs[0] ?? '');
   const [rule, setRule] = useState('once');
@@ -56,6 +80,27 @@ export function Timeline({ data, graphs, page, onPage, onSelect, onRefresh, prob
   const surface = useRef<HTMLDivElement>(null);
   const positioned = useRef('');
   const requestedFocus = useRef<'today' | 'latest'>('today');
+  useLayoutEffect(() => {
+    const tip = tooltip.current;
+    if (!hint || !tip) return;
+    tip.showPopover();
+    const anchor = hint.anchor.getBoundingClientRect();
+    const { width, height } = tip.getBoundingClientRect();
+    tip.style.left = `${Math.max(8, Math.min(anchor.left, window.innerWidth - width - 8))}px`;
+    const top = anchor.top >= height + 8 ? anchor.top - height : anchor.bottom;
+    tip.style.top = `${Math.max(8, Math.min(top, window.innerHeight - height - 8))}px`;
+    const dismiss = () => setHint(null);
+    const escape = (event: KeyboardEvent) => { if (event.key === 'Escape') dismiss(); };
+    window.addEventListener('resize', dismiss);
+    document.addEventListener('scroll', dismiss, true);
+    document.addEventListener('keydown', escape);
+    return () => {
+      tip.hidePopover();
+      window.removeEventListener('resize', dismiss);
+      document.removeEventListener('scroll', dismiss, true);
+      document.removeEventListener('keydown', escape);
+    };
+  }, [hint]);
   useEffect(() => { if (!graphs.includes(graph)) setGraph(graphs[0] ?? ''); }, [graphs, graph]);
   useEffect(() => { const timer = window.setInterval(() => setNow(Date.now()), 15000); return () => clearInterval(timer); }, []);
   const today = new Date(now); today.setHours(0, 0, 0, 0);
@@ -85,7 +130,7 @@ export function Timeline({ data, graphs, page, onPage, onSelect, onRefresh, prob
   }).sort((a, b) => a.start - b.start);
   const rowData = rows.map(date => {
     const end = +addDays(date, 1);
-    return { date, items: matching.filter(entry => entry.start < end && Math.max(entry.start, entry.end) >= +date) };
+    return { date, items: placeEntries(matching.filter(entry => entry.start < end && Math.max(entry.start, entry.end) >= +date), date) };
   });
   const nextPlan = (data?.schedules ?? []).filter(item => item.enabled && (!graphFilter || item.graph === graphFilter) && +new Date(item.next_at) > now)
     .sort((a, b) => +new Date(a.next_at) - +new Date(b.next_at))[0];
@@ -138,7 +183,7 @@ export function Timeline({ data, graphs, page, onPage, onSelect, onRefresh, prob
 
   return <main className="timeline-board">
     <header className="timeline-header">
-      <div><span className="eyebrow">ACTIVITY & SCHEDULE</span><h2>运行看板</h2><p>现在的进度，接下来的安排。</p></div>
+      <div className="timeline-title"><h2>运行看板</h2><p>运行进度与定时计划</p></div>
       <div className="timeline-actions"><button onClick={() => { setError(''); setScheduleOpen(true); }}><CalendarDays size={16} />管理计划 <span className="count">{data?.schedules.length ?? 0}</span></button>
         <button className="primary" disabled={!graphs.length} onClick={() => { setError(''); setScheduleOpen(true); }}><Plus size={16} />添加计划</button></div>
     </header>
@@ -182,21 +227,26 @@ export function Timeline({ data, graphs, page, onPage, onSelect, onRefresh, prob
               return <button className="timeline-gap" key={day(row.date)} onClick={() => setExpanded(true)}>{day(rowData[emptyStart].date)}{emptyStart !== index && ` — ${day(row.date)}`} · {index - emptyStart + 1} 天无匹配记录 <span>展开</span></button>;
             }
             const dayLength = +addDays(row.date, 1) - +row.date;
-            return <section className={`timeline-day ${isToday ? 'today' : ''} ${row.items.length ? 'has-events' : ''}`} data-date={day(row.date)} key={day(row.date)} style={{ minHeight: Math.max(62, row.items.length * 57 + 12) }}>
+            const lanes = row.items.length ? Math.max(...row.items.map(item => item.lane)) + 1 : 0;
+            return <section className={`timeline-day ${isToday ? 'today' : ''} ${row.items.length ? 'has-events' : ''}`} data-date={day(row.date)} key={day(row.date)} style={{ minHeight: Math.max(62, lanes * 57 + 12) }}>
               <div className="timeline-day-meta"><time dateTime={day(row.date)}>{row.date.toLocaleDateString('zh-CN', { month: '2-digit', day: '2-digit' })}</time><span>{row.date.toLocaleDateString('zh-CN', { weekday: 'short' })}</span>{isToday && <em>今天</em>}</div>
               <div className="timeline-track">
                 {[0, 25, 50, 75, 100].map(mark => <i className="timeline-gridline" key={mark} style={{ left: `${mark}%` }} />)}
                 {isToday && <i className="timeline-now" style={{ left: `${(now - +row.date) / dayLength * 100}%` }}><span>现在 {clockText(now)}</span></i>}
-                {row.items.map((entry, lane) => {
-                  const start = Math.max(entry.start, +row.date);
-                  const end = Math.min(Math.max(entry.end, entry.start), +addDays(row.date, 1));
-                  const left = (start - +row.date) / dayLength * 100;
-                  const width = (end - start) / dayLength * 100;
+                {row.items.map(entry => {
+                  const left = (entry.start - +row.date) / dayLength * 100;
+                  const width = (entry.end - entry.start) / dayLength * 100;
                   return <button key={entry.id} className={`timeline-entry ${entry.run ? 'timeline-run' : 'timeline-plan'} ${entry.status}`}
-                    style={{ top: lane * 57 + 7 }} aria-label={`${entry.graph}，${statusText(entry.status)}，${clockText(entry.start)}`}
-                    onClick={() => setSelected(entry)}>
-                    <span className="timeline-entry-label" style={{ left: `${Math.min(left, 65)}%` }}><strong>{entry.graph}</strong><small>{clockText(entry.start)} · {statusText(entry.status)}{entry.run ? ` · ${duration(entry.end - entry.start)}` : ''}</small></span>
-                    <i className={entry.run ? 'timeline-duration' : 'timeline-point'} style={{ left: `${left}%`, width: entry.run ? `${width}%` : undefined }} />
+                    style={{ top: entry.lane * 57 + (entry.run ? 37 : 36), left: `${left}%`, width: entry.run ? `${width}%` : undefined, '--graph-color': graphColor(entry.graph) } as CSSProperties}
+                    aria-label={`${entry.graph}，${statusText(entry.status)}，${clockText(entry.start)}`}
+                    aria-describedby={hint?.anchor.dataset.hintKey === `${day(row.date)}:${entry.id}` ? hintId : undefined}
+                    data-hint-key={`${day(row.date)}:${entry.id}`}
+                    onMouseEnter={event => setHint({ entry, anchor: event.currentTarget })}
+                    onMouseLeave={event => { if (!tooltip.current?.contains(event.relatedTarget as Node | null)) setHint(null); }}
+                    onFocus={event => setHint({ entry, anchor: event.currentTarget })}
+                    onBlur={() => setHint(null)}
+                    onClick={() => { setHint(null); setSelected(entry); }}>
+                    <i className={entry.run ? 'timeline-duration' : 'timeline-point'} />
                   </button>;
                 })}
                 {!row.items.length && <span className="timeline-no-events">{+row.date > +today ? '暂无计划' : '没有匹配的运行'}</span>}
@@ -204,10 +254,15 @@ export function Timeline({ data, graphs, page, onPage, onSelect, onRefresh, prob
             </section>;
           })}
         </div>
-        <footer className="timeline-footer"><div className="timeline-legend"><span><i className="running" />执行中</span><span><i className="finished" />已完成</span><span><i className="failed" />异常</span><span><i className="planned" />计划时点</span><span><i className="missed_busy" />错过</span></div><span>横条表示实际时长 · 点击查看详情</span></footer>
+        <footer className="timeline-footer"><div className="timeline-legend"><span><i className="finished" />实际运行</span><span><i className="planned" />计划时点</span><span><i className="missed_busy" />已错过</span></div><span>悬停查看状态 · 点击查看详情</span></footer>
       </>}
     </section>
 
+    <div ref={tooltip} id={hintId} popover="manual" role="tooltip" className="timeline-entry-label"
+      style={{ '--graph-color': hint ? graphColor(hint.entry.graph) : undefined } as CSSProperties}
+      onMouseLeave={event => { if (!hint?.anchor.contains(event.relatedTarget as Node | null)) setHint(null); }}>
+      {hint && <><strong>{hint.entry.graph}</strong><small>{clockText(hint.entry.start)} · {statusText(hint.entry.status)}{hint.entry.run ? ` · ${duration(hint.entry.end - hint.entry.start)}` : ''}</small></>}
+    </div>
     {selected && <RunPreview key={selected.id} entry={selected} data={data} onClose={() => setSelected(null)} onOpen={onSelect} />}
     {scheduleOpen && <Modal title="定时计划" close={() => { if (!pending) setScheduleOpen(false); }} className="timeline-schedule-dialog">
       <p className="timeline-muted">按本机时间执行。停机或 Graph 忙碌时跳过，不补跑。</p>

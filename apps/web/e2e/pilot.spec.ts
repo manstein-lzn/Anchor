@@ -72,6 +72,56 @@ test('Pilot opens, creates and reopens sessions through the real Vite proxy, and
     await expect(page.getByLabel('发送给 Anchor Pilot')).toBeEnabled();
     await page.screenshot({ path: test.info().outputPath('pilot-open.png') });
 
+    // Manage a session through the real API; the menu must not select another conversation.
+    await page.getByRole('button', { name: '管理对话 新对话', exact: true }).click();
+    await page.getByRole('menuitem', { name: '改名', exact: true }).click();
+    const rename = page.getByRole('dialog', { name: '修改对话名称' });
+    await rename.getByLabel('对话名称').fill('  研究计划  ');
+    await rename.getByRole('button', { name: '保存', exact: true }).click();
+    await expect(rename).not.toBeVisible();
+    await expect(page.locator('.pilot-chat-heading strong')).toHaveText('研究计划');
+    await page.reload();
+    await expect(page.locator('.pilot-chat-heading strong')).toHaveText('研究计划');
+    const second = await (await request.post(`${base}/sessions`)).json();
+    const otherId = second.session.id;
+    await request.put(`${base}/sessions/${otherId}`, { data: { title: '待删除的历史' } });
+    await page.reload();
+    await page.getByLabel('发送给 Anchor Pilot').fill('保留当前草稿');
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.getByRole('button', { name: '管理对话 待删除的历史', exact: true }).click();
+    await expect(page.locator('.pilot-chat-heading strong')).toHaveText('研究计划');
+    await expect(page.getByRole('menu')).toBeInViewport();
+    await page.keyboard.press('ArrowDown');
+    await expect(page.getByRole('menuitem', { name: '删除', exact: true })).toBeFocused();
+    await page.keyboard.press('Enter');
+    const deletion = page.getByRole('dialog', { name: '删除对话？' });
+    await expect(deletion).toContainText('待删除的历史');
+    await page.screenshot({ path: test.info().outputPath('pilot-delete-mobile.png') });
+    await deletion.getByRole('button', { name: '取消', exact: true }).click();
+    expect((await request.get(`${base}/sessions/${otherId}`)).ok()).toBe(true);
+    await page.getByRole('button', { name: '管理对话 待删除的历史', exact: true }).click();
+    await page.getByRole('menuitem', { name: '删除', exact: true }).click();
+    await page.route(`**/sessions/${otherId}`, route => route.request().method() === 'DELETE'
+      ? route.fulfill({ status: 409, json: { error: '此对话正在回复，请先停止' } }) : route.continue());
+    await deletion.getByRole('button', { name: '删除对话', exact: true }).click();
+    await expect(deletion.getByRole('alert')).toContainText('此对话正在回复');
+    await expect(page.locator(`.pilot-session[title="${otherId}"]`)).toBeVisible();
+    await page.unroute(`**/sessions/${otherId}`);
+    await deletion.getByRole('button', { name: '删除对话', exact: true }).click();
+    await expect(page.locator(`.pilot-session[title="${otherId}"]`)).toHaveCount(0);
+    await expect(page.locator('.pilot-chat-heading strong')).toHaveText('研究计划');
+    await expect(page.getByLabel('发送给 Anchor Pilot')).toHaveValue('保留当前草稿');
+    expect((await request.get(`${base}/sessions/${otherId}`)).status()).toBe(404);
+    await page.getByRole('button', { name: '管理对话 研究计划', exact: true }).click();
+    await page.getByRole('menuitem', { name: '删除', exact: true }).click();
+    await deletion.getByRole('button', { name: '删除对话', exact: true }).click();
+    await expect(page.locator('.pilot-session')).toHaveCount(0);
+    await expect(page.getByRole('heading', { name: '从一个问题，开始探索' })).toBeVisible();
+    await expect(page.getByLabel('发送给 Anchor Pilot')).toHaveValue('');
+    expect(await page.evaluate(id => localStorage.getItem(`pilot:draft:${id}`), id)).toBe('');
+    await page.reload();
+    await expect(page.locator('.pilot-session')).toHaveCount(0);
+
     // Both errors must be visible even before a conversation is selected.
     await page.route('**/sessions', route => route.fulfill({
       status: 200, contentType: 'text/html', body: '<html>wrong upstream</html>',

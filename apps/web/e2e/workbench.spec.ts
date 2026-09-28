@@ -235,7 +235,7 @@ test('edit a graph, inspect a run and read its files across screen sizes', async
   await page.getByRole('button', { name: '运行看板', exact: true }).click();
   await page.locator('.timeline-run').first().click();
   await expect(page.getByLabel('当前工作流')).toHaveCount(0);
-  const durations = await page.locator('.timeline-entry').filter({ hasText: run.graph }).evaluateAll(entries => entries.map(entry => ({
+  const durations = await page.getByRole('button', { name: new RegExp(`^${run.graph}，`), includeHidden: true }).evaluateAll(entries => entries.map(entry => ({
     bar: entry.querySelector<HTMLElement>('.timeline-duration')?.getBoundingClientRect().width ?? 0,
     track: entry.parentElement?.getBoundingClientRect().width ?? 0,
   })));

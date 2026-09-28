@@ -245,6 +245,7 @@ WebUI 和 Pilot 使用同一套资源 API。下列为当前控制面入口；`co
 GET    /sessions
 POST   /sessions
 GET    /sessions/<id>
+PUT /sessions/<id>                        # 修改会话名称
 GET    /sessions/<id>/messages
 GET    /sessions/<id>/events
 POST   /sessions/<id>/turns

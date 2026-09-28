@@ -505,16 +505,26 @@ class Scheduler:
         with self.lock:
             if session_id in self.pilot_active:
                 return json.dumps({"error": "that session is processing a message"}), 409
-        try:
-            self.sessions.delete(session_id)
-            self.turns.delete_session(session_id)
-        except KeyError:
-            return json.dumps({"error": "no such session"}), 404
-        except ValueError as exc:
-            return json.dumps({"error": str(exc)}, ensure_ascii=False), 409
-        except OSError as exc:
-            return json.dumps({"error": str(exc)}, ensure_ascii=False), 400
-        return json.dumps({"session": session_id, "deleted": True}), 200
+            try:
+                self.sessions.delete(session_id)
+                self.turns.delete_session(session_id)
+            except KeyError:
+                return json.dumps({"error": "no such session"}), 404
+            except ValueError as exc:
+                return json.dumps({"error": str(exc)}, ensure_ascii=False), 409
+            except OSError as exc:
+                return json.dumps({"error": str(exc)}, ensure_ascii=False), 400
+            return json.dumps({"session": session_id, "deleted": True}), 200
+
+    def rename_session(self, session_id: str, title: str) -> tuple[str, int]:
+        with self.lock:
+            try:
+                session = self.sessions.rename(session_id, title)
+            except KeyError:
+                return json.dumps({"error": "no such session"}), 404
+            except (ValueError, OSError) as exc:
+                return json.dumps({"error": str(exc)}, ensure_ascii=False), 400
+        return json.dumps({"session": session.model_dump(mode="json")}, ensure_ascii=False), 200
 
     def pilot_messages(self, session_id: str) -> tuple[str, int]:
         from anchor.pilot import history
@@ -1240,6 +1250,13 @@ class Handler(BaseHTTPRequestHandler):
             return
         parts = [part for part in PurePosixPath(unquote(urlparse(self.path).path)).parts
                  if part != "/"]
+        if len(parts) == 2 and parts[0] == "sessions":
+            body = self._body()
+            if body is None:
+                return
+            if set(body) != {"title"}:
+                return self._send(json.dumps({"error": "body must contain only title"}), 400)
+            return self._send(*self.scheduler.rename_session(parts[1], body["title"]))
         if len(parts) != 2 or parts[0] != "graphs":
             return self._send(json.dumps({"error": "not found"}), 404)
         body = self._body()
