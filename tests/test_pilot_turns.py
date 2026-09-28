@@ -421,17 +421,26 @@ def test_session_ask_pauses_the_run_until_the_user_answers(tmp_path, monkeypatch
         assert session.status == 'waiting_user' and session.waiting_reason == '研究范围？'
         assert scheduler.sessions.pending_question('ask')['tool_call_id'] == 'ask-1'
         assert len(calls) == 1, 'the run must end at the question, not keep calling tools'
+        assert call('GET', '/sessions/ask/messages')[1]['messages'] == [
+            {'role': 'user', 'text': '帮我规划'},
+            {'role': 'assistant', 'text': '研究范围？'},
+        ]
 
         status, data = call('POST', '/sessions/ask/turns',
                             {'request_id': 'r2', 'message': '只看 2020 年后的'})
         assert status == 202, data
         assert settle(data['turn']['id'])['status'] == 'completed'
         assert scheduler.sessions.get('ask').questions == []
-        # The answer arrives as the tool's result, so it is not a second user turn in the history.
-        assert json.loads(scheduler.pilot_messages('ask')[0])['messages'] == [
+        # The model receives a deferred result; the user still sees an ordinary question and answer.
+        expected = [
             {'role': 'user', 'text': '帮我规划'},
+            {'role': 'assistant', 'text': '研究范围？'},
+            {'role': 'user', 'text': '只看 2020 年后的'},
             {'role': 'assistant', 'text': '按你的回答继续'},
         ]
+        assert call('GET', '/sessions/ask/messages')[1]['messages'] == expected
+        reopened = Scheduler(tmp_path, tmp_path / 'config.json')
+        assert json.loads(reopened.pilot_messages('ask')[0])['messages'] == expected
         returned = [part for message in calls[1] for part in getattr(message, 'parts', [])
                     if isinstance(part, ToolReturnPart)]
         assert [part.content for part in returned] == ['只看 2020 年后的']

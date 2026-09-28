@@ -85,7 +85,7 @@ test('Pilot opens, creates and reopens sessions through the real Vite proxy, and
     await page.reload();
     await page.getByRole('button', { name: 'Pilot', exact: true }).click();
     await page.getByRole('button', { name: '新对话', exact: true }).click();
-    await expect(page.locator('.pilot-chat').getByRole('alert')).toHaveText('会话服务暂不可用');
+    await expect(page.locator('.pilot-chat').getByRole('alert')).toContainText('会话服务暂不可用');
     expect(errors).toEqual([]);
   } finally {
     for (const process of processes.reverse()) {
@@ -122,10 +122,12 @@ test('Pilot renders rich replies, restores drafts and selection, and handles Chi
     messages.push({ role: 'user', text: prompt }, { role: 'assistant', text: '已收到你的补充。' });
     await route.fulfill({ status: 202, json: { turn } });
   });
-  await page.route(/\/sessions\/[^/]+\/turns\/[^/]+\/events/, route => route.fulfill({
-    status: 200, contentType: 'text/event-stream',
-    body: stream([[1, { type: 'text-delta', id: 'answer', delta: '已收到你的补充。' }]], { ...turns[0], status: 'completed' }),
-  }));
+  await page.route(/\/sessions\/[^/]+\/turns\/[^/]+\/events/, route => {
+    turns = [{ ...turns[0], status: 'completed' }, ...turns.slice(1)];
+    return route.fulfill({ status: 200, contentType: 'text/event-stream',
+      body: stream([[1, { type: 'text-delta', id: 'answer', delta: '已收到你的补充。' }]], turns[0]),
+    });
+  });
   await page.goto('/');
   await page.getByRole('button', { name: 'Pilot', exact: true }).click();
   await page.locator('.pilot-session').filter({ hasText: sessions[0].title }).click();
@@ -192,7 +194,8 @@ test('Pilot streams text and tool activity, and resumes the stream from the last
       [5, { type: 'text-delta', id: 'answer', delta: '，已读取。' }],
     ], undefined, 3000) });
     messages.push({ role: 'assistant', text: '你好，已读取。' });
-    return route.fulfill({ ...header, body: stream([], { ...turns[0], status: 'completed' }) });
+    turns = [{ ...turns[0], status: 'completed' }];
+    return route.fulfill({ ...header, body: stream([], turns[0]) });
   });
   await page.goto('/');
   await page.getByRole('button', { name: 'Pilot', exact: true }).click();
@@ -219,6 +222,7 @@ test('Pilot confirms a deletion before it runs and continues the paused run afte
   const messages: Array<{ role: string; text: string }> = [];
   const calls: string[] = [];
   let resumed = false;
+  let turns: Turn[] = [];
   const pending = {
     tool_call_id: 'call-1', key: 'call-1', action: 'graph_delete', target: 'demo',
     proposal: { graph: 'demo' },
@@ -233,13 +237,14 @@ test('Pilot confirms a deletion before it runs and continues the paused run afte
   await page.route('**/timeline*', route => route.fulfill({ json: { runs: [], scheduled: [], schedules: [] } }));
   await page.route('**/sessions', route => route.fulfill({ json: { sessions: [session()] } }));
   await page.route('**/sessions/*/messages', route => route.fulfill({ json: { messages } }));
-  await page.route('**/sessions/*/turns/*/events', route => route.fulfill({
-    status: 200, contentType: 'text/event-stream',
-    body: stream([[1, { type: 'tool-approval-request', approvalId: 'call-1', toolCallId: 'call-1' }]],
-      { ...inProgress('turn-1', 'gated', ''), status: resumed ? 'completed' : 'waiting_approval' }),
-  }));
+  await page.route(/\/sessions\/[^/]+\/turns\/[^/]+\/events/, route => {
+    turns = [{ ...inProgress('turn-1', 'gated', ''), status: resumed ? 'completed' : 'waiting_approval' }];
+    return route.fulfill({ status: 200, contentType: 'text/event-stream',
+      body: stream([[1, { type: 'tool-approval-request', approvalId: 'call-1', toolCallId: 'call-1' }]], turns[0]),
+    });
+  });
   await page.route('**/sessions/*/turns', route => {
-    if (route.request().method() !== 'POST') return route.fulfill({ json: { turns: [] } });
+    if (route.request().method() !== 'POST') return route.fulfill({ json: { turns } });
     const body = route.request().postDataJSON();
     calls.push(body.resume ? 'resume' : body.message);
     if (body.resume) {

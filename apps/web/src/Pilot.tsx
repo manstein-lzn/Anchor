@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { Anchor, ArrowDown, Check, Copy, LoaderCircle, MessageSquare, Plus, Search, Send, Square } from 'lucide-react';
-import { api } from './api';
+import { api, ApiError } from './api';
 import { Markdown } from './markdown';
 import { PilotTurn, type Turn } from './PilotTurn';
 
@@ -20,6 +20,14 @@ function cached(key: string, value?: string) {
     return localStorage.getItem(`pilot:${key}`) ?? '';
   } catch { return ''; }
 }
+type Submission = { request_id: string; message?: string; resume?: boolean };
+function pendingSubmission(id: string): Submission | null {
+  try {
+    const value = JSON.parse(cached(`submission:${id}`) || 'null');
+    if (value && typeof value.request_id === 'string' && (typeof value.message === 'string' || value.resume === true)) return value;
+  } catch { /* Invalid browser cache must not prevent loading the server's history. */ }
+  return null;
+}
 
 export function Pilot({ session = '', onSession }: { session?: string; onSession?: (id: string) => void }) {
   const [sessions, setSessions] = useState<Session[]>([]);
@@ -27,6 +35,7 @@ export function Pilot({ session = '', onSession }: { session?: string; onSession
   const selectedRef = useRef('');
   const [messages, setMessages] = useState<Message[]>([]);
   const [turn, setTurn] = useState<Turn | null>(null);
+  const [syncedTurn, setSyncedTurn] = useState('');
   const [draft, setDraft] = useState(() => cached('draft:new'));
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -40,64 +49,105 @@ export function Pilot({ session = '', onSession }: { session?: string; onSession
   onSessionRef.current = onSession;
   const scroller = useRef<HTMLDivElement>(null);
   const input = useRef<HTMLTextAreaElement>(null);
+  const historyRequest = useRef<AbortController | null>(null);
+  const submissions = useRef(new Set<string>());
+  const navigation = useRef(0);
+  const mounted = useRef(true);
 
   const editDraft = (value: string) => {
     cached(`draft:${selectedRef.current || 'new'}`, value);
     setDraft(value);
   };
   const activate = (id: string) => {
+    navigation.current += 1;
+    historyRequest.current?.abort();
     selectedRef.current = id;
     setSelected(id); cached('selected', id); onSessionRef.current?.(id);
     setDraft(cached(`draft:${id || 'new'}`));
-    setMessages([]); setTurn(null); setCopied(null); setProblem('');
+    setMessages([]); setTurn(null); setSyncedTurn(''); setCopied(null); setProblem('');
+    setBusy(submissions.current.has(id));
     follow.current = true; setAtBottom(true);
   };
   const refresh = useCallback(async (id: string) => {
-    const history = await api<{ messages: Message[] }>(`/sessions/${encodeURIComponent(id)}/messages`);
-    const result = await api<{ sessions: Session[] }>('/sessions');
-    if (selectedRef.current !== id) return;
-    setMessages(history.messages); setSessions(result.sessions);
+    historyRequest.current?.abort();
+    const controller = new AbortController();
+    historyRequest.current = controller;
+    try {
+      const [history, result, execution] = await Promise.all([
+        api<{ messages: Message[] }>(`/sessions/${encodeURIComponent(id)}/messages`, 'GET', undefined, controller.signal),
+        api<{ sessions: Session[] }>('/sessions', 'GET', undefined, controller.signal),
+        api<{ turns: Turn[] }>(`/sessions/${encodeURIComponent(id)}/turns`, 'GET', undefined, controller.signal),
+      ]);
+      if (!mounted.current || controller.signal.aborted || selectedRef.current !== id) return;
+      const latest = execution.turns[0];
+      const pending = pendingSubmission(id);
+      if (pending && execution.turns.some(item => item.request_id === pending.request_id)) {
+        cached(`submission:${id}`, '');
+        if (pending.message && cached(`draft:${id}`) === pending.message) {
+          cached(`draft:${id}`, ''); setDraft('');
+        }
+      }
+      // The turn is accepted before Harness saves its prompt. Keep that accepted message visible
+      // when reopening a session during this window, without duplicating an already saved prompt.
+      const last = history.messages.at(-1);
+      const prompt = latest?.status === 'running' ? latest.prompt : pendingSubmission(id)?.message;
+      setMessages(prompt && !(last?.role === 'user' && last.text === prompt)
+        ? [...history.messages, { role: 'user', text: prompt }] : history.messages);
+      setSessions(result.sessions); setTurn(latest ?? null);
+      setSyncedTurn(latest && ['completed', 'waiting_user', 'waiting_approval'].includes(latest.status) ? latest.id : '');
+      setBusy(submissions.current.has(id) || latest?.status === 'running');
+    } catch (error) {
+      if (!controller.signal.aborted) throw error;
+    }
   }, []);
   const complete = useCallback((final: Turn) => {
-    if (selectedRef.current !== final.session) return;
-    setBusy(false);
-    void refresh(final.session).catch(error => setProblem((error as Error).message));
+    if (!mounted.current || selectedRef.current !== final.session) return;
+    setTurn(final); setBusy(false);
+    void refresh(final.session).catch(error => {
+      if (mounted.current && selectedRef.current === final.session) setProblem((error as Error).message);
+    });
   }, [refresh]);
-  const reconnect = async (id: string) => {
-    const result = await api<{ turns: Turn[] }>(`/sessions/${encodeURIComponent(id)}/turns`);
-    if (selectedRef.current !== id) return;
-    const latest = result.turns[0];
-    setTurn(latest ?? null);
-    setBusy(latest?.status === 'running');
-  };
   const submit = async (id: string, message: string | null) => {
     const key = `submission:${id}`;
-    const saved = cached(key);
-    const pending = saved ? JSON.parse(saved) as { request_id: string; message?: string; resume?: boolean } : null;
+    const pending = pendingSubmission(id);
     if (pending && (pending.message ?? null) !== message) throw new Error('上次提交的结果尚未确认，请先使用原内容重试。');
     const body = pending ?? { request_id: crypto.randomUUID(), ...(message === null ? { resume: true } : { message }) };
     cached(key, JSON.stringify(body));
-    const result = await api<{ turn: Turn }>(`/sessions/${encodeURIComponent(id)}/turns`, 'POST', body);
+    let result: { turn: Turn };
+    try { result = await api<{ turn: Turn }>(`/sessions/${encodeURIComponent(id)}/turns`, 'POST', body); }
+    catch (error) {
+      // Explicit rejection means no turn was accepted. Only ambiguous delivery keeps its retry ID.
+      if (error instanceof ApiError && [400, 401, 403, 404, 409, 422].includes(error.status)) cached(key, '');
+      throw error;
+    }
     cached(key, '');
-    setTurn(result.turn); setBusy(result.turn.status === 'running');
+    if (mounted.current && selectedRef.current === id) {
+      historyRequest.current?.abort();
+      setLoading(false); setTurn(result.turn); setSyncedTurn('');
+      setBusy(result.turn.status === 'running');
+    }
   };
   useEffect(() => {
     let live = true;
+    mounted.current = true;
+    const initialNavigation = navigation.current;
+    let expectedNavigation = initialNavigation;
+    const controller = new AbortController();
     void (async () => {
       try {
-        const result = await api<{ sessions: Session[] }>('/sessions');
-        if (!live) return;
+        const result = await api<{ sessions: Session[] }>('/sessions', 'GET', undefined, controller.signal);
+        if (!live || navigation.current !== initialNavigation) return;
         setSessions(result.sessions);
         const saved = session || cached('selected');
         if (result.sessions.some(item => item.id === saved)) {
           activate(saved);
+          expectedNavigation = navigation.current;
           await refresh(saved);
-          await reconnect(saved);
         }
-      } catch (error) { if (live) setProblem((error as Error).message); }
-      finally { if (live) setLoading(false); }
+      } catch (error) { if (live && navigation.current === expectedNavigation) setProblem((error as Error).message); }
+      finally { if (live && navigation.current === expectedNavigation) setLoading(false); }
     })();
-    return () => { live = false; };
+    return () => { live = false; mounted.current = false; controller.abort(); historyRequest.current?.abort(); };
   }, []);
   useEffect(() => {
     if (!input.current) return;
@@ -106,7 +156,7 @@ export function Pilot({ session = '', onSession }: { session?: string; onSession
   }, [draft, selected]);
   useEffect(() => {
     if (follow.current && scroller.current) scroller.current.scrollTop = scroller.current.scrollHeight;
-  }, [messages, busy, loading]);
+  }, [messages, busy, loading, turn]);
   useEffect(() => {
     const element = scroller.current;
     if (!element) return;
@@ -114,7 +164,7 @@ export function Pilot({ session = '', onSession }: { session?: string; onSession
       if (follow.current) element.scrollTop = element.scrollHeight;
     });
     observer.observe(element);
-    const content = element.firstElementChild;
+    const content = element.querySelector('.pilot-message-list');
     if (content) observer.observe(content);
     return () => observer.disconnect();
   }, []);
@@ -123,77 +173,93 @@ export function Pilot({ session = '', onSession }: { session?: string; onSession
   }, [busy, loading, selected]);
 
   const select = async (id: string) => {
-    if (busy || loading) return;
     activate(id); setLoading(true);
-    try { await refresh(id); await reconnect(id); } catch (error) { setProblem((error as Error).message); }
-    finally { setLoading(false); }
+    const version = navigation.current;
+    try { await refresh(id); }
+    catch (error) { if (mounted.current && version === navigation.current) setProblem((error as Error).message); }
+    finally { if (mounted.current && version === navigation.current) setLoading(false); }
   };
   const create = async () => {
+    let version = navigation.current;
     setLoading(true); setProblem('');
     try {
       const { session } = await api<{ session: Session }>('/sessions', 'POST');
-      activate(session.id); await refresh(session.id);
-    } catch (error) { setProblem((error as Error).message); }
-    finally { setLoading(false); }
+      if (!mounted.current || version !== navigation.current) return;
+      activate(session.id); version = navigation.current; await refresh(session.id);
+    } catch (error) { if (mounted.current && version === navigation.current) setProblem((error as Error).message); }
+    finally { if (mounted.current && version === navigation.current) setLoading(false); }
   };
   const send = async (event: FormEvent) => {
     event.preventDefault();
     if (!draft.trim() || busy || loading) return;
+    historyRequest.current?.abort();
     const prompt = draft.trim();
     let id = selected;
+    const version = navigation.current;
     setBusy(true); setProblem(''); follow.current = true;
+    setTurn(null); setSyncedTurn('');
+    editDraft('');
+    setMessages(previous => pendingSubmission(id)?.message === prompt && previous.at(-1)?.role === 'user'
+      && previous.at(-1)?.text === prompt ? previous : [...previous, { role: 'user', text: prompt }]);
+    submissions.current.add(id);
     try {
       if (!id) {
         const { session } = await api<{ session: Session }>('/sessions', 'POST');
-        id = session.id; activate(id);
-        setSessions(previous => [session, ...previous]);
+        submissions.current.delete('');
+        id = session.id; submissions.current.add(id);
+        if (mounted.current) setSessions(previous => [session, ...previous]);
+        if (mounted.current && version === navigation.current) {
+          activate(id);
+          setMessages([{ role: 'user', text: prompt }]);
+        }
         cached('draft:new', '');
       }
-      editDraft('');
-      setMessages(previous => [...previous, { role: 'user', text: prompt }]);
+      if (mounted.current) setSessions(previous => previous.map(item => item.id === id && !item.title
+        ? { ...item, title: prompt.slice(0, 60) } : item));
       await submit(id, prompt);
-      await refresh(id);
     } catch (error) {
-      setProblem((error as Error).message);
       // Keep unsent text available if transport failed before the backend saved it.
-      editDraft(prompt);
-      if (id) await refresh(id).catch(() => undefined);
-      setBusy(false);
+      cached(`draft:${id || 'new'}`, prompt);
+      if (mounted.current && selectedRef.current === id) {
+        setProblem((error as Error).message); setDraft(prompt); setBusy(false);
+      }
+    } finally {
+      submissions.current.delete(id);
     }
   };
   const resume = async () => {
     if (!selected || busy) return;
+    historyRequest.current?.abort();
     setBusy(true); setProblem(''); follow.current = true;
+    const id = selected;
+    submissions.current.add(id);
     try {
-      await submit(selected, null);
-      await refresh(selected);
+      await submit(id, null);
     } catch (error) {
-      setProblem((error as Error).message);
-      await refresh(selected).catch(() => undefined);
-      setBusy(false);
-    }
+      if (mounted.current && selectedRef.current === id) { setProblem((error as Error).message); setBusy(false); }
+    } finally { submissions.current.delete(id); }
   };
   const stop = async () => {
     if (!selected) return;
     try { await api(`/sessions/${encodeURIComponent(selected)}/stop`, 'POST'); }
-    catch (error) { setProblem((error as Error).message); }
+    catch (error) { if (mounted.current && selectedRef.current === selected) setProblem((error as Error).message); }
   };
   const decide = async (accept: boolean) => {
     const approval = current?.approval;
     if (!selected || !approval || busy) return;
+    historyRequest.current?.abort();
     setBusy(true); setProblem('');
+    const id = selected;
+    submissions.current.add(id);
     try {
       await api(`/sessions/${encodeURIComponent(selected)}/${accept ? 'confirm' : 'reject'}`, 'POST', {
         action: approval.action, approval_key: approval.key,
       });
       // A decision does not run anything by itself: it resumes the paused run with the original call.
-      await submit(selected, null);
-      await refresh(selected);
+      await submit(id, null);
     } catch (error) {
-      setProblem((error as Error).message);
-      await refresh(selected).catch(() => undefined);
-      setBusy(false);
-    }
+      if (mounted.current && selectedRef.current === id) { setProblem((error as Error).message); setBusy(false); }
+    } finally { submissions.current.delete(id); }
   };
   const copy = async (message: Message, index: number) => {
     try { await navigator.clipboard.writeText(message.text); setCopied(index); }
@@ -209,14 +275,14 @@ export function Pilot({ session = '', onSession }: { session?: string; onSession
   return <main className="pilot-page">
     <aside className="pilot-sessions" aria-label="对话历史">
       <div className="pilot-session-heading"><h2><Anchor size={18} />Pilot</h2>
-        <button onClick={() => void create()} disabled={busy || loading} title="新建对话"><Plus size={16} />新对话</button></div>
+        <button onClick={() => void create()} disabled={loading} title="新建对话"><Plus size={16} />新对话</button></div>
       <label className="pilot-search"><Search size={15} /><input aria-label="搜索对话" placeholder="搜索对话…" value={query}
         onChange={event => setQuery(event.target.value)} /></label>
       <p className="pilot-sidebar-label">对话历史 <span>{sessions.length}</span></p>
       {!filtered.length && <p className="pilot-muted">{query ? '没有找到匹配的对话' : '你的对话会保存在这里'}</p>}
       {filtered.map(session => <button key={session.id} aria-current={session.id === selected ? 'page' : undefined}
         title={session.id} className={`pilot-session ${session.id === selected ? 'chosen' : ''}`}
-        disabled={busy || loading} onClick={() => void select(session.id)}>
+        onClick={() => void select(session.id)}>
         <MessageSquare size={16} /><span><strong>{title(session)}</strong>
           <small>{date(session.updated_at)} · {labels[session.status] ?? session.status}</small></span>
       </button>)}
@@ -232,6 +298,7 @@ export function Pilot({ session = '', onSession }: { session?: string; onSession
         const near = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
         follow.current = near; setAtBottom(near);
       }}>
+        <div className="pilot-message-list">
         {!messages.length && !loading && <div className="pilot-welcome">
           <span className="pilot-emblem"><Anchor size={30} /></span>
           <p className="pilot-eyebrow">ANCHOR PILOT</p><h2>{selected ? '我们从哪里开始？' : '从一个问题，开始探索'}</h2>
@@ -247,8 +314,9 @@ export function Pilot({ session = '', onSession }: { session?: string; onSession
           <button className="pilot-copy" aria-label={`复制${message.role === 'assistant' ? '回复' : '消息'} ${index + 1}`}
             onClick={() => void copy(message, index)}>{copied === index ? <Check size={14} /> : <Copy size={14} />}{copied === index ? '已复制' : '复制'}</button>
         </article>)}
-        {turn && <PilotTurn key={turn.id} turn={turn} onComplete={complete} />}
+        {turn && <PilotTurn key={turn.id} turn={turn} saved={syncedTurn === turn.id} onComplete={complete} />}
         {busy && !turn && <div className="pilot-thinking" role="status"><LoaderCircle size={16} />正在提交…</div>}
+        </div>
       </div>
       {!atBottom && <button className="pilot-latest" onClick={() => {
         if (scroller.current) scroller.current.scrollTop = scroller.current.scrollHeight;
@@ -260,7 +328,9 @@ export function Pilot({ session = '', onSession }: { session?: string; onSession
         <details><summary>查看操作内容 · {current.approval.action}</summary><pre>{JSON.stringify(current.approval.proposal, null, 2)}</pre></details>
         <div><button onClick={() => void decide(false)} disabled={busy}>拒绝</button><button onClick={() => void decide(true)} disabled={busy}>确认并继续</button></div>
       </div>}
-      {problem && <p className="pilot-error" role="alert">{problem}</p>}
+      {problem && <p className="pilot-error" role="alert">{problem}
+        {selected && <button onClick={() => void select(selected)}>重新加载对话</button>}
+      </p>}
       <form className="pilot-composer" onSubmit={send}>
         <textarea ref={input} rows={2} aria-label="发送给 Anchor Pilot" placeholder={pendingApproval ? '请先确认或拒绝上方操作' : '描述你的问题，或告诉 Pilot 你想完成什么…'} value={draft}
           maxLength={100000} onChange={event => editDraft(event.target.value)} onKeyDown={event => {

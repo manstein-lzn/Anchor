@@ -15,7 +15,8 @@ from typing import Any
 
 from pydantic_ai import (Agent, CancellationToken, CallDeferred, DeferredToolRequests,
                          DeferredToolResults, RunContext)
-from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, TextPart, UserPromptPart
+from pydantic_ai.messages import (ModelMessage, ModelRequest, ModelResponse, TextPart, ToolCallPart,
+                                  ToolReturnPart, UserPromptPart)
 
 from pydantic_ai_harness.step_persistence import StepPersistence
 
@@ -28,9 +29,16 @@ Help clarify goals, inspect Anchor resources, construct graphs when requested, s
 and report concrete evidence. Use the Anchor tools for facts and actions; never claim an action happened
 unless its tool returned success. Answer in the user's language, clearly and practically.
 
-Doing what the user asked is authorization: when the request names the Graph, Run or change, call the
-tool and report the result. Ask the user — with session_ask — only when the request does not say which
-object or what change. Deleting a Graph is the one call with its own confirmation step: call
+Answer the user's current question first. A capability question, example, or clarification is not a
+request to implement a Graph. During design discussion, explain the approach without generating or
+validating a full Graph definition unless the user asks for that deliverable. Continue already
+requested implementation without adding approval steps. Read only resources relevant to the question;
+do not inspect unrelated runs or invent Plugin IDs to test whether a capability exists. The available
+Plugin tools are read-only: they can inspect installed Plugins, not create or install them.
+
+Doing what the user asked is authorization: when the user requests an action on a Graph or Run, call
+the relevant tool and report the result. Ask the user — with session_ask — only when a missing choice
+prevents the requested work. Deleting a Graph is the one call with its own confirmation step: call
 graph_delete and let that step ask, instead of asking the same question again yourself.
 
 A tool result may come back marked interrupted. That means an earlier process stopped before the tool
@@ -397,11 +405,24 @@ def _entries(message: ModelRequest | ModelResponse) -> list[dict[str, str]]:
     assistant's text parts are one reply and stay together.
     """
     if isinstance(message, ModelRequest):
-        contents = [part.content for part in message.parts if isinstance(part, UserPromptPart)]
+        # Answers to session_ask are native deferred tool results, but are still user messages in UI.
+        contents = [part.content for part in message.parts if isinstance(part, UserPromptPart) or (
+            isinstance(part, ToolReturnPart) and part.tool_name == "session_ask"
+            and part.outcome == "success")]
         return [{"role": "user", "text": content.strip()}
                 for content in contents if isinstance(content, str) and content.strip()]
-    reply = "\n".join(part.content for part in message.parts
-                      if isinstance(part, TextPart) and isinstance(part.content, str)).strip()
+    contents = []
+    for part in message.parts:
+        if isinstance(part, TextPart) and isinstance(part.content, str):
+            contents.append(part.content)
+        elif isinstance(part, ToolCallPart) and part.tool_name == "session_ask":
+            try:
+                question = part.args_as_dict().get("question")
+            except ValueError:
+                continue  # Invalid arguments are retried by the framework, not a question to the user.
+            if isinstance(question, str) and question.strip():
+                contents.append(question)
+    reply = "\n".join(contents).strip()
     return [{"role": "assistant", "text": reply}] if reply else []
 
 

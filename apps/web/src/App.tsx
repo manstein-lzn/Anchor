@@ -2,7 +2,7 @@
  * state; the model adapter and canvas layout stay independent of the page. */
 
 import {
-  Anchor, Activity, CheckCheck, Copy, Download, GitBranch, MessageSquare, Plus, Redo2, Save, Trash2, Undo2, Upload,
+  Anchor, Activity, CheckCheck, ChevronDown, Copy, Download, GitBranch, MessageSquare, Plus, Redo2, Save, Trash2, Undo2, Upload,
   Play, Search, SlidersHorizontal, FolderOpen, PanelLeftClose, PanelRightClose,
 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from 'react';
@@ -41,7 +41,16 @@ export function App() {
   const [search, setSearch] = useState('');
   const [libraryOpen, setLibraryOpen] = useState(true);
   const [inspectorOpen, setInspectorOpen] = useState(true);
-  const [view, setView] = useState<'graph' | 'runs' | 'runDetail' | 'pilot'>('graph');
+  const [view, setView] = useState<'graph' | 'runs' | 'runDetail' | 'pilot'>(() => {
+    try {
+      const saved = localStorage.getItem('anchor:view');
+      return saved === 'pilot' || saved === 'runs' ? saved : 'graph';
+    } catch { return 'graph'; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem('anchor:view', view === 'runDetail' ? 'runs' : view); }
+    catch { /* Navigation still works without browser storage. */ }
+  }, [view]);
   const [graphs, setGraphs] = useState<{ graph: string; running: string | null }[]>([]);
   const [runs, setRuns] = useState<OurRun[]>([]);
   const [timeline, setTimeline] = useState<TimelineData | null>(null);
@@ -67,6 +76,13 @@ export function App() {
   const nameRef = useRef(name); nameRef.current = name;
   const upload = useRef<HTMLInputElement>(null);
   const newGraphButton = useRef<HTMLButtonElement>(null);
+  const runHistory = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const dismiss = () => runHistory.current?.hidePopover();
+    window.addEventListener('resize', dismiss);
+    return () => window.removeEventListener('resize', dismiss);
+  }, []);
 
   const dirty = doc !== null && JSON.stringify(doc, null, 2) + '\n' !== savedDoc;
   const editable = doc !== null && !busy;
@@ -459,7 +475,7 @@ export function App() {
           </aside>
 
           <main className="main">
-            <div className="document-header">
+            <div className="document-header graph-document-header">
               <div className="document-title">
                 <span className="eyebrow">WORKFLOW / EDITOR</span>
                 <h2>{name || '未选择图'}</h2>
@@ -475,38 +491,41 @@ export function App() {
                 <button className="primary" disabled={!editable || !dirty} onClick={() => void save()}>
                   <Save size={16} />保存</button>
               </div>
+              {name && <section className="graph-execution-summary" aria-label={`${name} 的执行概览`}>
+                <div className="graph-execution-status">
+                  <Activity size={14} aria-hidden="true" />
+                  <span>{activeRun?.running ? '当前运行' : '最近运行'}</span>
+                  {activeRun ? <>
+                    <span className={`pill ${activeRun.running ? 'running' : activeRun.status}`}>
+                      {activeRun.running ? '执行中' : label(activeRun.status)}
+                    </span>
+                    <time dateTime={activeRun.started} title="开始时间">{runTime(activeRun.started)} 开始</time>
+                    <button className="graph-run-link" onClick={() => openRun(activeRun)}
+                      aria-label={activeRun.running ? '查看当前运行' : '查看最近运行'}>查看详情 →</button>
+                  </> : <span>尚未运行 · 保存后即可运行</span>}
+                </div>
+                {graphRuns.length > 0 && <div key={name} className="graph-run-history">
+                  <button popoverTarget="graph-run-history" onClick={event => {
+                    const rect = event.currentTarget.getBoundingClientRect();
+                    if (runHistory.current) {
+                      const width = Math.min(560, window.innerWidth - 32);
+                      runHistory.current.style.left = `${Math.max(16, rect.right - width)}px`;
+                      runHistory.current.style.top = `${rect.bottom + 6}px`;
+                      runHistory.current.style.maxHeight = `${Math.max(120, window.innerHeight - rect.bottom - 22)}px`;
+                    }
+                  }}>运行历史 <span className="count">{graphRuns.length}</span><ChevronDown size={13} /></button>
+                  <div ref={runHistory} id="graph-run-history" popover="auto" className="graph-run-list" aria-label="此图的运行历史">
+                    <div className="graph-run-list-heading">{name}<span>{graphRuns.length} 次运行</span></div>
+                    {graphRuns.map(item => <button key={item.run} className="graph-run-row" onClick={() => openRun(item)}>
+                      <span className={`run-status-dot ${item.running ? 'running' : item.status}`} />
+                      <span className="graph-run-row-main"><strong>{item.running ? '执行中' : label(item.status)}</strong><small>{runTime(item.started)} 开始</small></span>
+                      <span className="graph-run-row-id" title={item.run}>{item.run}</span>
+                      <span className="graph-run-row-open">查看详情 →</span>
+                    </button>)}
+                  </div>
+                </div>}
+              </section>}
             </div>
-            {name && <section className="graph-execution-summary" aria-label={`${name} 的执行概览`}>
-              <div className="graph-execution-heading">
-                <div>
-                  <span className="eyebrow">EXECUTION</span>
-                  <h3>运行概览</h3>
-                  <p>{graphRuns.length ? '从这里直接进入这个 Graph 的执行过程与产物。' : '这个 Graph 还没有运行记录。'}</p>
-                </div>
-                <div className="graph-execution-actions">
-                  {activeRun && <button className="primary" onClick={() => openRun(activeRun)}>
-                    {activeRun.running ? '查看当前运行' : '查看最近运行'}
-                  </button>}
-                  <button onClick={() => setView('runs')}>打开运行看板</button>
-                </div>
-              </div>
-              <div className="graph-execution-facts">
-                <span className={`pill ${activeRun ? (activeRun.running ? 'running' : activeRun.status) : ''}`}>
-                  {activeRun ? (activeRun.running ? '执行中' : label(activeRun.status)) : '尚未运行'}
-                </span>
-                <span><strong>{graphRuns.length}</strong> 次运行</span>
-                {activeRun && <span>最近：{runTime(activeRun.updated || activeRun.started)}</span>}
-              </div>
-              {graphRuns.length > 0 && <div className="graph-run-history">
-                <div className="graph-run-history-title"><strong>最近运行</strong><span>点击任意一条查看详情</span></div>
-                {graphRuns.slice(0, 4).map(item => <button key={item.run} className="graph-run-row" onClick={() => openRun(item)}>
-                  <span className={`run-status-dot ${item.running ? 'running' : item.status}`} />
-                  <span className="graph-run-row-main"><strong>{item.running ? '正在执行' : label(item.status)}</strong><small>{runTime(item.updated || item.started)}</small></span>
-                  <span className="graph-run-row-id">{item.run}</span>
-                  <span className="graph-run-row-open">查看详情 →</span>
-                </button>)}
-              </div>}
-            </section>}
             {notice && <p className={`notice ${notice.kind}`}>{notice.text}</p>}
 
             <div className="canvas-top">

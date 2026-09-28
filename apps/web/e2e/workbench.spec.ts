@@ -23,7 +23,7 @@ test('manage individual workflows without disturbing the editor', async ({ page 
   });
   await page.goto('/');
   await expect(page.getByLabel('目标', { exact: true })).toHaveValue(graph.objective);
-  await expect(page.getByRole('region', { name: 'academic-survey 的执行概览' })).toContainText('这个 Graph 还没有运行记录');
+  await expect(page.getByRole('region', { name: 'academic-survey 的执行概览' })).toContainText('尚未运行');
   await page.getByLabel('目标', { exact: true }).fill('尚未保存的研究目标');
   const manage = page.getByRole('button', { name: '管理工作流 research-review', exact: true });
   await manage.focus();
@@ -105,7 +105,10 @@ test('edit a graph, inspect a run and read its files across screen sizes', async
     { graph: 'one-search', running: null },
   ] } }));
   await page.route('**/graphs/*', route => route.fulfill({ json: { definition: graph } }));
-  await page.route('**/runs', route => route.fulfill({ json: { runs: [run] } }));
+  const history = Array.from({ length: 5 }, (_, index) => ({ ...run, run: `run-history-${index}`,
+    running: false, status: index === 0 ? 'failed' : 'finished',
+    started: `2026-09-${21 - index}T08:30:00Z`, updated: `2026-09-${21 - index}T08:32:00Z` }));
+  await page.route('**/runs', route => route.fulfill({ json: { runs: [run, ...history] } }));
   await page.route('**/timeline*', route => route.fulfill({ json: { runs: [run], scheduled: [], schedules: [] } }));
   await page.route('**/runs/run-demo', route => route.fulfill({ json: {
     graph: run.graph, run: run.run, nodes: graph.nodes.map((node: { id: string }) => node.id),
@@ -138,7 +141,39 @@ test('edit a graph, inspect a run and read its files across screen sizes', async
   await expect(page.getByTestId('graph-canvas').locator('.graph-node')).toHaveCount(5);
   const executionSummary = page.getByRole('region', { name: 'academic-survey 的执行概览' });
   await expect(executionSummary).toContainText('执行中');
-  await expect(executionSummary).toContainText('最近运行');
+  await expect(executionSummary).toContainText('当前运行');
+  await expect(page.locator('.graph-document-header').getByRole('region')).toBeVisible();
+  expect((await executionSummary.boundingBox())!.height).toBeLessThan(90);
+  const historyToggle = executionSummary.getByRole('button', { name: /运行历史/ });
+  const toggleBefore = await historyToggle.boundingBox();
+  const canvasBefore = await page.getByTestId('graph-canvas').boundingBox();
+  await expect(executionSummary.locator('.graph-run-row').first()).not.toBeVisible();
+  await historyToggle.focus();
+  await page.keyboard.press('Enter');
+  expect(await historyToggle.boundingBox()).toEqual(toggleBefore);
+  expect(await page.getByTestId('graph-canvas').boundingBox()).toEqual(canvasBefore);
+  await expect(executionSummary.locator('.graph-run-row')).toHaveCount(6);
+  await executionSummary.getByRole('button', { name: /run-history-4/ }).scrollIntoViewIfNeeded();
+  await expect(executionSummary.getByRole('button', { name: /run-history-4/ })).toBeInViewport();
+  await page.screenshot({ path: 'test-results/graph-history-desktop.png' });
+  await page.keyboard.press('Escape');
+  await expect(executionSummary.locator('.graph-run-list')).not.toBeVisible();
+  await expect(historyToggle).toBeFocused();
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(executionSummary.getByRole('button', { name: '查看当前运行' })).toBeInViewport();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.screenshot({ path: 'test-results/graph-summary-mobile.png', fullPage: true });
+  const mobileToggleBefore = await historyToggle.boundingBox();
+  const mobileCanvasBefore = await page.getByTestId('graph-canvas').boundingBox();
+  await historyToggle.click();
+  expect(await historyToggle.boundingBox()).toEqual(mobileToggleBefore);
+  expect(await page.getByTestId('graph-canvas').boundingBox()).toEqual(mobileCanvasBefore);
+  expect((await page.getByTestId('graph-canvas').boundingBox())!.height).toBeGreaterThan(300);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.screenshot({ path: 'test-results/graph-history-mobile.png', fullPage: true });
+  await page.getByRole('heading', { name: 'academic-survey', exact: true }).click();
+  await expect(executionSummary.locator('.graph-run-list')).not.toBeVisible();
+  await page.setViewportSize({ width: 1440, height: 1000 });
   await executionSummary.getByRole('button', { name: '查看当前运行' }).click();
   await expect(page.getByTestId('execution-canvas').locator('.execution-node')).toHaveCount(5);
   await page.getByRole('button', { name: '图编排', exact: true }).click();

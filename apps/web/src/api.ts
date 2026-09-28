@@ -4,9 +4,15 @@
  * second copy of this would be a second place for the error handling to be subtly different.
  */
 
-export async function api<T>(path: string, method = 'GET', body?: unknown): Promise<T> {
+export class ApiError extends Error {
+  constructor(message: string, readonly status: number) { super(message); }
+}
+
+export async function api<T>(path: string, method = 'GET', body?: unknown, signal?: AbortSignal): Promise<T> {
+  const timeout = AbortSignal.timeout(30000);
   const send = (key: string) => fetch(path, {
     method,
+    signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
     headers: { Accept: 'application/json', ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
       ...(key ? { Authorization: `Bearer ${key}` } : {}) },
     body: body === undefined ? undefined : JSON.stringify(body),
@@ -21,7 +27,7 @@ export async function api<T>(path: string, method = 'GET', body?: unknown): Prom
     }
   }
   const data = await response.json().catch(() => null);
-  if (!response.ok) throw new Error(data?.error ?? `${method} ${path} → ${response.status}`);
+  if (!response.ok) throw new ApiError(data?.error ?? `${method} ${path} → ${response.status}`, response.status);
   if (data === null) throw new Error(`${method} ${path} 未返回有效 JSON，请检查 API 服务连接。`);
   return data as T;
 }
