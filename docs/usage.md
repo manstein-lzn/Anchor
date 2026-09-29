@@ -23,36 +23,15 @@ npm --prefix apps/web ci
 
 ### 2. 配置模型
 
-```bash
-mkdir -p .local
-cp -n examples/runtime.deepseek.json .local/runtime.json
+模型只在仓库根目录 `.env` 配置，`.local/runtime.json` 可以保持为空：
+
+```env
+ANCHOR_MODEL_URL=https://第三方服务/v1
+ANCHOR_MODEL_API_KEY=你的API_KEY
+ANCHOR_MODEL_NAME=你的模型名
 ```
 
-配置文件的有效连接字段如下。`model` 必须是服务商支持的模型名；图中的 `models.academic` 引用这里的 `ref`。
-
-```json
-{
-  "pilot_model": "models.academic",
-  "models": [
-    {
-      "ref": "models.academic",
-      "model": "deepseek-flash",
-      "base_url": "https://api.deepseek.com/v1",
-      "secret_ref": "DEEPSEEK_API_KEY"
-    }
-  ]
-}
-```
-
-当前模型连接使用 OpenAI Chat Completions 兼容接口。密钥通过 `secret_ref` 解析，不写进图文件。可以在启动服务的终端中设置 `ANCHOR_SECRET_DEEPSEEK_API_KEY`；环境变量名称是 `ANCHOR_SECRET_` 加上 `secret_ref`。
-
-也可以使用本地密钥文件：在 `.local/runtime.json` 中增加 `"secret_file": ".local/anchor-secrets.json"`，文件内容为 `{"DEEPSEEK_API_KEY": "你的密钥"}`，权限设为仅当前用户可读写：
-
-```bash
-chmod 600 .local/anchor-secrets.json
-```
-
-环境变量优先于密钥文件。相对密钥文件路径按进程工作目录解析，因此请从仓库根目录启动。`.local/` 已被 Git 忽略。
+`ANCHOR_MODEL_URL`、`ANCHOR_MODEL_API_KEY` 和 `ANCHOR_MODEL_NAME` 是唯一模型事实来源；不再配置 provider、`secret_ref` 或 DeepSeek 专用字段。`.env` 已被 Git 忽略。
 
 ### 3. 放入一个工作流
 
@@ -278,6 +257,8 @@ anchor-scholarly citations --identifier 2005.11401 --direction cited_by
 搜索源包括 Crossref、arXiv、OpenAlex。结果写入标准输出的 JSON；失败以非零退出码和标准错误报告。长文阅读需使用返回的 `next_offset`、`next_page_start`，分别传给 `--offset`、`--page-start` 继续读取。来源可能限流、拒绝访问或无法提供全文，研究节点需要据此调整策略。
 
 ## Plugin 的准备与使用
+
+本地配置统一放在仓库根目录 `.env`（该文件已被 Git 忽略），可从 `.env.example` 复制。设置 `ANCHOR_MODEL_URL`、`ANCHOR_MODEL_API_KEY` 和 `ANCHOR_MODEL_NAME` 即可配置唯一的 OpenAI-compatible 模型；Anchor 启动命令会加载它，已有 shell 环境变量优先，不会被 `.env` 覆盖。`runtime.json` 不需要模型条目。不要把真实 key 写入 Graph、Plugin 清单、日志或提交。
 
 Plugin 由文件维护，WebUI 负责浏览、只读查看与挂载。先准备共享工具，再登记 Plugin。以下示例复用当前已安装的 Anchor 环境，不新建节点专用环境；从仓库根目录执行：
 

@@ -110,7 +110,15 @@ def model_for(profile: dict[str, Any], *, secret: str) -> Any:
     # A base URL means an OpenAI-compatible endpoint that is not OpenAI's, in which case the graph's
     # `model` field is the name the endpoint knows. Without one, the name is passed through and the
     # provider resolves it.
-    return OpenAIChatModel(model_name if base_url else _qualified(model_name), provider=provider)
+    compatibility = None
+    if model_name.startswith('deepseek-'):
+        from pydantic_ai.providers.deepseek import DeepSeekProvider
+
+        # Gateways expose V4 under this alias; keep the wire name, reuse the native profile.
+        compatibility = DeepSeekProvider.model_profile(
+            'deepseek-v4-flash' if model_name == 'deepseek-flash' else model_name)
+    return OpenAIChatModel(model_name if base_url else _qualified(model_name), provider=provider,
+                           profile=compatibility)
 
 
 def _qualified(name: str) -> str:

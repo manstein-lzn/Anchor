@@ -37,7 +37,7 @@ from typing import Any
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from anchor.library import Attached, for_workspace, record_bindings
+from anchor.library import Attached, for_workspace, record_bindings, _mount, reference
 
 from anchor.simple import graph as graph_module
 from anchor.node import node_key
@@ -685,6 +685,10 @@ def _record(state: RunState, graph: graph_module.Graph, run_dir: Path,
 
 def _config(config_path: str | Path) -> tuple[dict, str | None]:
     raw = json.loads(Path(config_path).read_text(encoding="utf-8"))
+    from anchor.runtime.secrets import env_model_profile
+    profile = env_model_profile()
+    if profile:
+        return {profile["ref"]: profile}, None
     return {item["ref"]: item for item in raw.get("models", [])}, raw.get("secret_file")
 
 
@@ -695,6 +699,9 @@ def _secret(secret_file: str | None, model: dict) -> str:
         JsonFileSecretProvider,
     )
     providers: list = [EnvironmentSecretProvider()]
+    if model.get("secret_ref") == "MODEL_API_KEY":
+        import os
+        providers.insert(0, EnvironmentSecretProvider({"MODEL_API_KEY": os.environ.get("ANCHOR_MODEL_API_KEY", "")}, prefix=""))
     if secret_file:
         providers.append(JsonFileSecretProvider(secret_file))
     return ChainedSecretProvider(*providers).get(model["secret_ref"])
@@ -704,7 +711,8 @@ def _agent_for(graph, node_id: str, directory: Path, models: dict, secret_file, 
                inputs: tuple[_Given, ...] = (), trace: Path | None = None,
                scripted_model: Any = None, control: Path | None = None,
                cancelled: Callable[[], bool] | None = None, plugins: Attached = Attached(),
-               run_input: dict | None = None):
+               run_input: dict | None = None, mcp_auth: bool = False,
+               resources: tuple[tuple[str, str], ...] = ()):
     """The node about to run, built around the runtime ADR-062 names.
 
     **One factory for both kinds of node**, because the difference between an agent and an op is what
@@ -727,12 +735,12 @@ def _agent_for(graph, node_id: str, directory: Path, models: dict, secret_file, 
         return Node(node_id=node_id, directory=directory, routes=graph.routes(node_id),
                     inputs=inputs, trace=trace, model=None, instructions="", network=op.network,
                     timeout_seconds=600.0, max_requests=1, command=op.run, control=control,
-                    cancelled=cancelled, run_input=run_input or {})
+                    cancelled=cancelled, run_input=run_input or {}, resources=resources)
     spec = graph.agents[node.agent]
     if scripted_model is not None:
         model: Any = scripted_model
     else:
-        profile = models.get(spec.model)
+        profile = models.get(spec.model) or (next(iter(models.values())) if len(models) == 1 else None)
         if profile is None:
             raise ValueError(f"no model named {spec.model!r} in {config_path}")
         model = model_for(profile, secret=_secret(secret_file, profile))
@@ -749,7 +757,9 @@ def _agent_for(graph, node_id: str, directory: Path, models: dict, secret_file, 
                 # that is killed at five throws away everything it had done.
                 network=spec.network, timeout_seconds=600.0,
                 max_requests=spec.max_steps, control=control,
-                resources=plugins.binds,
+                resources=(*plugins.binds, *resources),
+                mcp_servers=plugins.mcp_servers,
+                mcp_auth=mcp_auth,
                 run_input=run_input or {},
                 cancelled=cancelled)
 
@@ -835,6 +845,28 @@ def _settled_already(step: _Step, control: Path,
 # loop's own exits. Three of those were extracted to helpers while adding the settled-node seam and the
 # count did not move, because what the metric counts is the conditions. A deliberate exception, and the
 # report says so.
+def _local_inputs(workspace: Path, nodes) -> dict[str, tuple[tuple[str, str], ...]]:
+    """Operator-owned read-only inputs; never accepted in an API-editable graph definition."""
+    path = workspace / "local-inputs.json"
+    grants = json.loads(path.read_text()) if path.exists() else {}
+    if not isinstance(grants, dict) or set(grants) - set(nodes):
+        raise ValueError("local-inputs.json must map existing node IDs to named paths")
+    result = {}
+    for node, sources in grants.items():
+        if not isinstance(sources, dict):
+            raise ValueError("local inputs must map names to absolute paths")
+        bindings = []
+        for name, source in sources.items():
+            reference(name)
+            if not isinstance(source, str) or not Path(source).is_absolute():
+                raise ValueError("local input paths must be absolute")
+            resolved = Path(source).resolve()
+            _mount(resolved)
+            bindings.append((str(resolved), f"/local-inputs/{name}"))
+        result[node] = tuple(bindings)
+    return result
+
+
 def run(workspace: str | Path, *, objective: str | None = None, config_path: str | Path,   # noqa: C901
         run_input: dict | None = None,
         trigger: dict | None = None,
@@ -842,7 +874,7 @@ def run(workspace: str | Path, *, objective: str | None = None, config_path: str
         model_script: dict[str, list[str]] | None = None,
         stop_request: Callable[[], str | None] | None = None,
         already_submitted: Callable[[str], tuple[str, str | None] | None] | None = None,
-        library_root: str | Path | None = None) -> RunState:
+        library_root: str | Path | None = None, mcp_auth: bool = False) -> RunState:
     """Walk the graph. `model_script` replaces the model with written-down commands, per node.
 
     `stop_request` is asked between nodes. A stop also cancels the active model call or sandbox
@@ -944,15 +976,23 @@ def run(workspace: str | Path, *, objective: str | None = None, config_path: str
     try:
         library = for_workspace(workspace, Path(library_root) if library_root is not None else None)
         bindings = {node.id: library.attach(node.plugins) for node in graph.nodes.values() if node.plugins}
+        local = _local_inputs(workspace, graph.nodes)
+        local_record = json.dumps(local, ensure_ascii=False, sort_keys=True, indent=2)
+        local_path = run_dir / "local-inputs.json"
+        previous_local = local_path.read_text() if local_path.exists() else "{}"
+        if resume is not None and previous_local != local_record:
+            raise ValueError("Local input grants changed; start a new run")
+        if local:
+            local_path.write_text(local_record)
         snapshot = graph_module.to_dict(graph)
-        if bindings:
+        if bindings or local:
             snapshot["_module_rounds"] = graph.module_rounds
             if resume is not None and (run_dir / "graph.json").exists():
                 previous = json.loads((run_dir / "graph.json").read_text(encoding="utf-8"))
                 if snapshot != previous:
                     raise ValueError("Graph definition changed since this Plugin run started; start a new run")
         record_bindings(run_dir, bindings, resume=resume is not None)
-        if resume is None or not bindings:
+        if resume is None or not (bindings or local):
             (run_dir / "graph.json").write_text(
                 json.dumps(snapshot, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         while True:
@@ -994,7 +1034,9 @@ def run(workspace: str | Path, *, objective: str | None = None, config_path: str
                 current = library.attach(graph.nodes[step.node_id].plugins)
                 if current != attached:
                     raise ValueError(f"Plugin resources for {step.node_id} changed during this run")
-            options: dict[str, Any] = {}
+            options: dict[str, Any] = {"mcp_auth": mcp_auth} if mcp_auth else {}
+            if step.node_id in local:
+                options["resources"] = local[step.node_id]
             if attached is not None:
                 options["plugins"] = attached
             if stop_request is not None:

@@ -23,7 +23,7 @@ Graph 是一个可编辑的 JSON 文件，包含角色 `agents`、命令定义 `
 ├── library/                         共享资源，与单次运行无关
 │   ├── plugins/<plugin-id>/
 │   │   ├── plugin.json              名称、描述、工具引用
-│   │   ├── instructions.md          按需读取的说明
+│   │   ├── skills/<skill>/SKILL.md  按需读取的说明
 │   │   └── …                        补充资料；目录可链接到权威来源
 │   ├── tools/<tool-id>/
 │   │   ├── tool.json                执行入口与环境引用
@@ -107,7 +107,7 @@ Agent 完成由 PydanticAI 校验的结构化结果表示（`summary`，多出�
 4. [scholarly/__main__.py](../src/anchor/scholarly/__main__.py)解析命令，[runtime/research_tools.py](../src/anchor/runtime/research_tools.py)执行搜索、全文读取、引用追踪等操作，以 JSON 返回结果。
 5. Agent 消化结果、保存证据并提交文件，Graph 通过质疑和评审组织反馈。
 
-研究方法维护在 [Plugin 说明](../plugins/academic-research/instructions.md)，通过 `/tools/scholarly/run` 使用登记的环境。`library.py` 解析资源，调度层注入简短目录并把只读挂载交给节点。Agent 完成与工具调用分离，结果由 Runtime 持久化。
+研究方法维护在 [academic-research Skill](../plugins/academic-research/skills/academic-research/SKILL.md)，通过 `/tools/scholarly/run` 使用登记的环境。`library.py` 解析资源，调度层注入简短目录并把只读挂载交给节点。Agent 完成与工具调用分离，结果由 Runtime 持久化。
 
 代码中的 harness `capabilities` 指上下文管理、步骤持久化等运行机制，**不是**业务 Plugin。节点层已有组合验证，但默认 Graph 路径尚未注入 `context_capabilities`；Pilot 已接步骤持久化与框架压缩（见下文）。具体证据与体验基线见 [Pilot 体验核查](pilot-experience-audit.md)。
 
@@ -149,3 +149,7 @@ Pilot 已启用框架压缩：默认 `SlidingWindowCompaction`（200 条消息�
 复用现有运行链与沙箱边界；图仍是 JSON，节点仍拥有独立工作区，成果仍通过 commit 关联。研究是否结束应由目标、证据和反馈决定，不能用固定 `max_xxx` 充当质量或收敛判断。用户主动停止和显式资源预算是另外的控制需求。
 
 这些原则约束 Plugin 接入，不要求恢复历史上已删除的服务、数据库或图版本发布体系。
+
+## 本机工作周报
+
+`weekly-work-report` 的采集、理解、写作和评审仍是普通业务 Graph；通过评审后的 Docmost 同步节点挂载 `docmost` Plugin。Graph 工作区中的 `local-inputs.json` 由本机操作员按节点 ID 授予具名只读路径，挂载到 `/local-inputs/<name>`；Graph JSON/API 本身无权增加该授权。采集 Op 读取两个 sessions 目录和普通采集脚本，将当次窗口的证据交给后续节点。授权路径随 Run 保存，恢复时授权改变则拒绝继续。图按程序采集→项目理解与选题→写作→读者视角独立评审→门禁分流运行；表达问题退回写作，项目理解与判断问题退回理解。证据缺口通过限定结论处理，不设 blocked 分支。正文围绕项目实质变化，来源单独保留，评审先检查可理解性再核查关键事实。四项评审通过、阻断问题解决且评审对应当前稿件 commit 后才组装 Markdown、来源附录和 SVG；Docmost 发布节点通过附件接口上传 SVG 并插入页面，失败时不更新正文；使用方式见 [每周工作报告](weekly-work-report.md)，真实验收以台账 A21 为准。图片下载保留 attachment，并提供图片 MIME 与隔离 CSP，使 Markdown 图片预览可用且不开放脚本或外部资源执行。

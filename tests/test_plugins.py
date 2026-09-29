@@ -3,6 +3,8 @@
 import json
 import sys
 import venv
+import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -20,8 +22,13 @@ def write_json(path, value):
 
 def library_at(root):
     plugin = root / "library/plugins/method"
-    write_json(plugin / "plugin.json", {"name": "Method", "description": "Find the evidence", "tools": []})
-    (plugin / "instructions.md").write_text("ONLY_READ_WHEN_NEEDED\n", encoding="utf-8")
+    write_json(plugin / "plugin.json", {
+        "name": "Method", "description": "Find the evidence", "skills": "skills/"})
+    skill = plugin / "skills/method/SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text(
+        "---\nname: method\ndescription: Find the evidence\n---\nONLY_READ_WHEN_NEEDED\n",
+        encoding="utf-8")
     return Library(root / "library")
 
 
@@ -53,10 +60,10 @@ def test_lazy_disclosure_missing_resources_and_history(tmp_path):
     library = library_at(tmp_path)
     attached = library.attach(("method",))
     assert "Find the evidence" in attached.instructions
-    assert "/plugins/method/instructions.md" in attached.instructions
+    assert "/plugins/method/skills/" in attached.instructions
     assert "ONLY_READ_WHEN_NEEDED" not in attached.instructions
     assert "ONLY_READ_WHEN_NEEDED" in library.detail("method")["instructions"]
-    assert library.file("method", "instructions.md").read_text() == "ONLY_READ_WHEN_NEEDED\n"
+    assert "ONLY_READ_WHEN_NEEDED" in library.file("method", "skills/method/SKILL.md").read_text()
     with pytest.raises(ValueError):
         library.file("method", "../../tools/secret")
     assert library.attach(()).binds == ()
@@ -67,7 +74,7 @@ def test_lazy_disclosure_missing_resources_and_history(tmp_path):
     record_bindings(run, {"a": attached}, resume=False)
     record_bindings(run, {"a": attached}, resume=True)
     original = (run / "plugins.json").read_bytes()
-    (library.root / "plugins/method/instructions.md").write_text("changed")
+    (library.root / "plugins/method/skills/method/SKILL.md").write_text("changed")
     with pytest.raises(ValueError, match="changed"):
         record_bindings(run, {"a": library.attach(("method",))}, resume=True)
     assert (run / "plugins.json").read_bytes() == original
@@ -76,6 +83,206 @@ def test_lazy_disclosure_missing_resources_and_history(tmp_path):
     with pytest.raises(ValueError, match="symlinks"):
         library.attach(("method",))
     assert library.catalog()[0]["available"] is False
+
+
+def test_anchor_plugin_manifest_is_at_bundle_root(tmp_path):
+    library = library_at(tmp_path)
+    record, _ = library.plugin("method")
+    assert "format" not in record
+    assert "format" not in record
+    assert "mcpServers" in record
+
+
+def test_legacy_instructions_resource_error_points_to_skill_layout():
+    library = Library(__import__("pathlib").Path(__file__).parents[1])
+    with pytest.raises(ValueError, match=r"uses skills/<skill>/SKILL\.md"):
+        library.file("academic-research", "instructions.md")
+    assert library.file("academic-research", "skills/academic-research/SKILL.md").is_file()
+
+
+def test_legacy_plugin_instructions_remain_readable_and_are_single_source(tmp_path):
+    plugin = tmp_path / "library/plugins/legacy"
+    write_json(plugin / "plugin.json", {"name": "Legacy", "description": "legacy"})
+    (plugin / "instructions.md").write_text("Legacy source of truth\n", encoding="utf-8")
+    library = Library(tmp_path / "library")
+    assert "Legacy source of truth" in library.detail("legacy")["instructions"]
+    assert library.file("legacy", "instructions.md").read_text(encoding="utf-8") == "Legacy source of truth\n"
+
+
+def test_install_moves_codex_manifest_to_anchor_bundle_root(tmp_path, monkeypatch):
+    library = Library(tmp_path / "library")
+
+    def git(args, **kwargs):
+        if args[1] == "clone":
+            checkout = Path(args[-1])
+            source = checkout / "plugins/example"
+            write_json(source / ".codex-plugin/plugin.json", {
+                "name": "Example", "description": "An example", "skills": "./skills/"})
+            skill = source / "skills/example/SKILL.md"
+            skill.parent.mkdir(parents=True)
+            skill.write_text("# Example\n", encoding="utf-8")
+        return subprocess.CompletedProcess(args, 0)
+
+    monkeypatch.setattr("anchor.library.subprocess.run", git)
+    installed = library.install("https://github.com/example/repo/tree/main/plugins/example")
+    assert installed == "example"
+    plugin = tmp_path / "library/plugins/example"
+    assert (plugin / "plugin.json").is_file()
+    assert not (plugin / ".codex-plugin").exists()
+    assert library.plugin("example")[0]["skills"] == ["skills/example/SKILL.md"]
+
+
+def test_mcp_env_references_are_resolved_only_for_runtime(tmp_path, monkeypatch):
+    library = library_at(tmp_path)
+    plugin = library.root / "plugins/method"
+    write_json(plugin / ".mcp.json", {"mcpServers": {
+        "remote": {"url": "https://mcp.example", "headers": {"Authorization": "Bearer ${MCP_TOKEN}"}}}})
+    monkeypatch.setenv("MCP_TOKEN", "secret-value")
+    assert library.plugin("method")[0]["mcpServers"] == {"remote": {"transport": "http"}}
+    assert library.mcp_servers("method")[0][1]["headers"]["Authorization"] == "Bearer secret-value"
+
+
+def test_oauth_metadata_is_exposed_without_resolving_credentials(tmp_path):
+    library = library_at(tmp_path)
+    write_json(library.root / "plugins/method/.mcp.json", {"mcpServers": {
+        "remote": {"type": "sse", "url": "https://mcp.example", "oauth_resource": "https://mcp.example"}}})
+    record = library.plugin("method")[0]
+    assert record["mcpServers"] == {"remote": {"transport": "sse", "auth": "oauth"}}
+    assert "secret" not in json.dumps(record)
+
+
+def test_docmost_plugin_definition_uses_runtime_bearer_secret(tmp_path):
+    import os
+    from pathlib import Path
+
+    library = Library(Path(__file__).parents[1])
+    original = os.environ.get("DOCMOST_API_KEY")
+    try:
+        os.environ["DOCMOST_API_KEY"] = "test-only-secret"
+        record = library.plugin("docmost")[0]
+        servers = dict(library.mcp_servers("docmost"))
+        server = servers["docmost"]
+        assert server["url"] == "https://docmost.cwise.dev/mcp"
+        assert server["headers"]["Authorization"] == "Bearer test-only-secret"
+        assert servers["attachments"]["command"] == "python3"
+        assert servers["attachments"]["env"]["DOCMOST_API_KEY"] == "test-only-secret"
+        assert record["mcpServers"] == {"docmost": {"transport": "http"},
+                                        "attachments": {"transport": "stdio"}}
+        assert "test-only-secret" not in json.dumps(record)
+    finally:
+        if original is None:
+            os.environ.pop("DOCMOST_API_KEY", None)
+        else:
+            os.environ["DOCMOST_API_KEY"] = original
+
+
+def test_docmost_image_upload_is_page_scoped_and_returns_attachment_url(tmp_path, monkeypatch):
+    import importlib.util
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    import threading
+
+    source = Path(__file__).parents[1] / "plugins/docmost/upload_server.py"
+    spec = importlib.util.spec_from_file_location("docmost_upload", source)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    root = tmp_path / "assets"
+    root.mkdir()
+    image = root / "figure.svg"
+    image.write_text('<svg xmlns="http://www.w3.org/2000/svg"/>', encoding="utf-8")
+    page_id = "01a0eb18-bb52-7db2-91c0-13202044b48d"
+
+    class Upload(BaseHTTPRequestHandler):
+        def do_POST(self):
+            body = self.rfile.read(int(self.headers["Content-Length"]))
+            assert self.headers["Authorization"] == "Bearer test-secret"
+            assert page_id.encode() in body and b"figure.svg" in body
+            assert b"image/svg+xml" in body
+            result = {"id": "01a0eb28-37ae-7341-99bb-b52a93eba632", "fileName": "figure.svg",
+                      "mimeType": "image/svg+xml", "pageId": page_id}
+            data = json.dumps(result).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def log_message(self, *_args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Upload)
+    worker = threading.Thread(target=server.serve_forever, daemon=True)
+    worker.start()
+    monkeypatch.setattr(module, "UPLOAD_ROOT", root)
+    monkeypatch.setattr(module, "SERVER_URL", f"http://127.0.0.1:{server.server_port}/upload")
+    monkeypatch.setenv("DOCMOST_API_KEY", "test-secret")
+    try:
+        result = module._attachment(str(image), page_id, "01a0eb28-37ae-7341-99bb-b52a93eba632")
+        assert result == {"attachmentId": "01a0eb28-37ae-7341-99bb-b52a93eba632",
+                          "fileName": "figure.svg", "url":
+                          "/api/files/01a0eb28-37ae-7341-99bb-b52a93eba632/figure.svg",
+                          "mimeType": "image/svg+xml", "pageId": page_id}
+        with pytest.raises(ValueError, match="under /in/publish/assets"):
+            outside = tmp_path / "outside.svg"
+            outside.write_text("<svg/>", encoding="utf-8")
+            module._attachment(str(outside), page_id)
+    finally:
+        server.shutdown()
+        server.server_close()
+        worker.join()
+
+
+def test_docmost_upload_mcp_tool_maps_camel_case_arguments(monkeypatch):
+    import importlib.util
+    from pathlib import Path
+
+    source = Path(__file__).parents[1] / "plugins/docmost/upload_server.py"
+    spec = importlib.util.spec_from_file_location("docmost_upload_protocol", source)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    monkeypatch.setattr(module, "_attachment", lambda path, page_id, attachment_id=None: {
+        "path": path, "pageId": page_id, "attachmentId": attachment_id})
+
+    response = module._handle({"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": {
+        "name": "upload_page_image", "arguments": {
+            "path": "/in/publish/assets/figure.svg", "pageId": "page-id",
+            "attachmentId": "attachment-id"}}})
+
+    result = json.loads(response["result"]["content"][0]["text"])
+    assert result == {"path": "/in/publish/assets/figure.svg", "pageId": "page-id",
+                      "attachmentId": "attachment-id"}
+    assert response["result"]["isError"] is False
+
+
+def test_stdio_mcp_tool_is_exposed_and_called_inside_bubblewrap(tmp_path):
+    import asyncio
+    from pydantic_ai import RunContext, usage
+    from pydantic_ai.models.test import TestModel
+    from anchor.node.mcp import toolsets_for
+
+    library = library_at(tmp_path)
+    plugin = library.root / "plugins/method"
+    server = plugin / "mcp_server.py"
+    server.write_text(
+        'from mcp.server.mcpserver import MCPServer\n'
+        'server = MCPServer("probe")\n'
+        'def ping(): return "pong"\n'
+        'server.add_tool(ping)\nserver.run()\n', encoding="utf-8")
+    server_config = {"command": sys.executable, "args": [str(server)],
+                     "_anchor_plugin_id": "method", "_anchor_plugin_dir": str(plugin)}
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    toolset = toolsets_for((("probe", server_config),), NodeSandbox(workspace, "a", False, 10))[0]
+
+    async def check():
+        agent = __import__("pydantic_ai").Agent(TestModel(), toolsets=[toolset])
+        async with toolset:
+            context = RunContext(deps=None, model=TestModel(), usage=usage.RunUsage(),
+                                 agent=agent, max_retries=2)
+            tool = (await toolset.get_tools(context))["probe_ping"]
+            assert await tool.toolset.call_tool("probe_ping", {}, context, tool) == "pong"
+
+    asyncio.run(check())
+    assert not list(workspace.iterdir())
 
 
 def test_graph_runs_with_shared_plugin_and_restores_catalog_after_pause(tmp_path):
@@ -94,8 +301,8 @@ def test_graph_runs_with_shared_plugin_and_restores_catalog_after_pause(tmp_path
     assert "Find the evidence" in node._instructions
     assert "ONLY_READ_WHEN_NEEDED" not in node._instructions
     commands = [
-        "cat /plugins/method/instructions.md > evidence.txt; "
-        "if echo corrupt >> /plugins/method/instructions.md; then exit 1; fi; "
+        "tail -n 1 /plugins/method/skills/method/SKILL.md > evidence.txt; "
+        "if echo corrupt >> /plugins/method/skills/method/SKILL.md; then exit 1; fi; "
         "test ! -d /workspace/plugins && test ! -d /plugins/unmounted",
         "anchor-done --summary 'used shared Plugin'",
     ]
@@ -110,7 +317,7 @@ def test_graph_runs_with_shared_plugin_and_restores_catalog_after_pause(tmp_path
     scheduler = Scheduler(tmp_path, config)
     detail = scheduler.run("research", "proof")
     assert detail["plugins"]["a"] == detail["plugins"]["b"]
-    assert (library.root / "plugins/method/instructions.md").read_text() == "ONLY_READ_WHEN_NEEDED\n"
+    assert "ONLY_READ_WHEN_NEEDED" in (library.root / "plugins/method/skills/method/SKILL.md").read_text()
     before = (workspace / "runs/proof/graph.json").read_bytes()
     raw["nodes"][1]["with"] = "different task"
     write_json(workspace / "graph.json", raw)
@@ -133,12 +340,12 @@ def test_tools_use_separate_reused_python_environments(tmp_path):
         write_json(library.root / f"tools/{name}/tool.json", {"entrypoint": str(command), "environment": str(env)})
         tools.append(name)
     write_json(library.root / "plugins/method/plugin.json",
-               {"name": "Method", "description": "Two conflicting dependencies", "tools": tools})
-    attached = library.attach(("method",))
+               {"name": "Method", "description": "Two conflicting dependencies", "skills": "skills/"})
     for node_id in ("a", "b"):
         workspace = tmp_path / node_id
         workspace.mkdir()
-        sandbox = NodeSandbox(workspace, node_id, False, 30, inputs=attached.binds)
+        mounts = tuple(mount for name in tools for mount in library.tool(name)[1])
+        sandbox = NodeSandbox(workspace, node_id, False, 30, inputs=mounts)
         output = sandbox.run("/tools/one/run && /tools/two/run")
         assert output.returncode == 0, output.output
         assert output.output == "one\ntwo\n"
@@ -146,11 +353,10 @@ def test_tools_use_separate_reused_python_environments(tmp_path):
     assert len(list((library.root / "environments").iterdir())) == 2
     run = tmp_path / "recorded"
     run.mkdir()
-    record_bindings(run, {"a": attached}, resume=False)
+    record_bindings(run, {"a": Library(library.root).attach(("method",))}, resume=False)
     dependency = library.root / f"environments/one/lib/python{sys.version_info.major}.{sys.version_info.minor}/site-packages/conflicting_dependency.py"
     dependency.write_text("value = 'changed dependency'\n")
-    with pytest.raises(ValueError, match="changed"):
-        record_bindings(run, {"a": library.attach(("method",))}, resume=True)
+    record_bindings(run, {"a": library.attach(("method",))}, resume=True)
 
 
 def test_api_rejects_unavailable_plugin_without_starting_run(tmp_path):

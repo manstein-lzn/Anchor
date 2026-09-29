@@ -2,11 +2,38 @@ from __future__ import annotations
 
 import json
 import threading
+import os
 from datetime import datetime, timedelta
 from http.client import HTTPConnection
 from http.server import ThreadingHTTPServer
 
 from anchor.serve import Handler, Scheduler
+from anchor.runtime.secrets import load_dotenv
+from anchor.simple.run import _config, _secret
+
+
+def test_dotenv_loads_without_overriding_environment(tmp_path, monkeypatch):
+    path = tmp_path / ".env"
+    path.write_text("DOCMOST_API_KEY='from-file'\nNEW_KEY=value\n", encoding="utf-8")
+    monkeypatch.setenv("DOCMOST_API_KEY", "explicit")
+    monkeypatch.delenv("NEW_KEY", raising=False)
+    load_dotenv(path)
+    assert os.environ["DOCMOST_API_KEY"] == "explicit"
+    assert os.environ["NEW_KEY"] == "value"
+
+
+def test_env_model_is_single_source_over_runtime_models(tmp_path, monkeypatch):
+    monkeypatch.setenv("ANCHOR_MODEL_URL", "https://llm.example/v1")
+    monkeypatch.setenv("ANCHOR_MODEL_API_KEY", "one-secret")
+    monkeypatch.setenv("ANCHOR_MODEL_NAME", "unified-model")
+    config = tmp_path / "runtime.json"
+    config.write_text('{"models": [{"ref": "models.old", "model": "old"}]}', encoding="utf-8")
+    models, secret_file = _config(config)
+    profile = models["models.default"]
+    assert secret_file is None
+    assert profile["base_url"] == "https://llm.example/v1"
+    assert profile["model"] == "unified-model"
+    assert _secret(None, profile) == "one-secret"
 
 
 def test_webhook_requires_a_key_and_rejects_busy_graph_without_a_run(tmp_path, monkeypatch):

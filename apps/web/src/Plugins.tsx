@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { BookOpen, RefreshCw, Search, Wrench, X } from 'lucide-react';
+import { BookOpen, RefreshCw, Search, X } from 'lucide-react';
 import { api, reason } from './api';
 import type { Plugin } from './model';
 import { Markdown } from './markdown';
@@ -26,6 +26,9 @@ export function Plugins({ selected, onChange, disabled = false, recorded }:
   const [revision, setRevision] = useState(0);
   const [query, setQuery] = useState('');
   const [filter, setFilter] = useState<PluginFilter>('all');
+  const [installSource, setInstallSource] = useState('');
+  const [installing, setInstalling] = useState(false);
+  const [authorizing, setAuthorizing] = useState('');
   useEffect(() => {
     if (recorded !== undefined) return;
     if (catalogCache) return;
@@ -39,7 +42,7 @@ export function Plugins({ selected, onChange, disabled = false, recorded }:
     return () => { active = false; };
   }, [recorded, revision]);
   const items: Plugin[] = recorded ?? [...catalog, ...(selected ?? []).filter(id => !catalog.some(p => p.id === id))
-    .map(id => ({ id, name: id, description: '', tools: [], available: false, error: 'Plugin 未在库中找到' }))];
+    .map(id => ({ id, name: id, description: '', available: false, error: 'Plugin 未在库中找到' }))];
   const selectedIds = new Set(selected ?? []);
   const attached = items.filter(plugin => selectedIds.has(plugin.id));
   const needle = query.trim().toLocaleLowerCase();
@@ -83,6 +86,21 @@ export function Plugins({ selected, onChange, disabled = false, recorded }:
             aria-pressed={filter === value} onClick={() => setFilter(value)}>{label}</button>)}
       </div>
     </div>}
+    {recorded === undefined && onChange && <form className="plugin-install" onSubmit={async event => {
+      event.preventDefault(); setInstalling(true); setError('');
+      try {
+        await api('/plugins/install', 'POST', { source: installSource });
+        catalogCache = null; setInstallSource(''); setRevision(v => v + 1);
+        setCatalog(await loadCatalog());
+      } catch (e) { setError(reason(e)); } finally { setInstalling(false); }
+    }}>
+      <label>安装社区 Plugin
+        <input type="url" required placeholder="https://github.com/owner/repo/tree/ref/path"
+          value={installSource} onChange={event => setInstallSource(event.target.value)} />
+      </label>
+      <button type="submit" disabled={installing}>{installing ? '安装中…' : '安装'}</button>
+      <small>Skills/资源与 MCP 可用；hooks、commands、agents 暂不执行。</small>
+    </form>}
     {loading && <p role="status">正在读取 Plugin 库…</p>}
     {error && <p role="alert" className="plugin-error">{error}</p>}
     {!loading && !items.length && <p className="inspector-note">{recorded !== undefined
@@ -99,11 +117,19 @@ export function Plugins({ selected, onChange, disabled = false, recorded }:
               {plugin.description && <span>{plugin.description}</span>}
             </span></label> : <div className="plugin-row-label"><strong>{plugin.name}</strong><small>{plugin.id}</small></div>}
         <div className="plugin-row-actions">
-          {!!plugin.tools.length && <span className="plugin-tool-count"><Wrench size={12} />{plugin.tools.length}</span>}
+          {!!plugin.skills?.length && <span className="plugin-tool-count">{plugin.skills.length} Skills</span>}
+          {recorded === undefined && Object.entries(plugin.mcpServers ?? {}).filter(([, server]) => server.auth === 'oauth')
+            .map(([name]) => <button key={name} type="button" disabled={!!authorizing}
+              onClick={async () => {
+                setAuthorizing(`${plugin.id}/${name}`); setError('');
+                try { await api(`/plugins/${encodeURIComponent(plugin.id)}/authorize/${encodeURIComponent(name)}`, 'POST'); }
+                catch (e) { setError(reason(e)); } finally { setAuthorizing(''); }
+              }}>{authorizing === `${plugin.id}/${name}` ? '等待授权…' : `授权 ${name}`}</button>)}
           {recorded === undefined && plugin.available !== false
             && <button type="button" onClick={() => void read(plugin.id)}>查看说明</button>}
         </div>
         {plugin.error && <p className="plugin-error">不可用：{plugin.error}</p>}
+        {!!plugin.unsupported?.length && <p className="plugin-error">暂不支持：{plugin.unsupported.join('、')}</p>}
         {recorded !== undefined && plugin.digest && <small className="plugin-digest">内容摘要：{plugin.digest.slice(0, 12)}</small>}
       </article>;
     })}</div>
@@ -111,7 +137,7 @@ export function Plugins({ selected, onChange, disabled = false, recorded }:
       <div className="section-heading"><h3>{opened.name}</h3><button type="button" onClick={() => setOpened(null)}>关闭说明</button></div>
       <p className="inspector-note">来自当前共享库，文件维护，只读查看。</p>
       <Markdown text={opened.instructions ?? ''} prefix={`plugin-${opened.id}`}
-        fileBase={`/plugins/${encodeURIComponent(opened.id)}/files/instructions.md`} />
+        fileBase={`/plugins/${encodeURIComponent(opened.id)}/files/`} />
     </div>}
   </section>;
 }

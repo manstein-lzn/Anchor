@@ -1,0 +1,18 @@
+{
+  "name": "Docmost",
+  "description": "通过 Docmost MCP 管理页面，并上传报告图片附件；访问遵循当前 API key 的权限。",
+  "skills": "skills/",
+  "mcpServers": {
+    "docmost": {
+      "type": "http",
+      "url": "https://docmost.cwise.dev/mcp",
+      "bearer_token_env_var": "DOCMOST_API_KEY"
+    },
+    "attachments": {
+      "command": "python3",
+      "args": ["upload_server.py"],
+      "cwd": ".",
+      "env_vars": ["DOCMOST_API_KEY"]
+    }
+  }
+}

@@ -56,6 +56,12 @@ class NodeRequest:
     """What this node adds to the role. The rules every node obeys are the runner's to supply, not the
     caller's — they are a contract, and a contract each node may reword is not one."""
 
+    mcp_servers: tuple[tuple[str, dict[str, Any]], ...] = ()
+    """MCP servers selected from attached Plugin bundles."""
+
+    mcp_auth: bool = False
+    """Allow an interactive OAuth handshake for a deliberately initiated single run."""
+
     workspace: Path = Path()
     """Where it works. Kept between passes; whatever is in it when it finishes is what the next node
     is pointed at."""

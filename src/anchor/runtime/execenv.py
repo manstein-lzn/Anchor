@@ -204,6 +204,77 @@ class NodeSandbox:
             env=(("ANCHOR_NODE", self.node_id), ("ANCHOR_ROUTES", ",".join(self.routes)),
                  *self.environment))
 
+    def isolated_process(self, command: tuple[str, ...], *, plugin_id: str,
+                         plugin_dir: Path, cwd: Path, env: dict[str, str]) -> tuple[str, list[str]]:
+        """Build a long-lived stdio process command with the node's existing Bubblewrap boundary."""
+        from dataclasses import replace
+        plugin_dir = plugin_dir.resolve()
+        cwd = cwd.resolve()
+        if not cwd.is_relative_to(plugin_dir) or not cwd.is_dir():
+            raise ValueError("MCP working directory must be inside its Plugin bundle")
+        mount = f"/plugins/{plugin_id}"
+
+        def visible(value: str) -> str:
+            return value.replace(str(plugin_dir), mount)
+
+        command, extra = self._mcp_executable(command, plugin_dir, mount)
+        spec = replace(self.spec(""), command=tuple(visible(arg) for arg in command),
+                       readonly_binds=tuple(dict.fromkeys((*self.readonly(), (str(plugin_dir), mount), *extra))),
+                       env=tuple((key, visible(value)) for key, value in
+                                 {"PATH": "/usr/local/bin:/usr/bin:/bin", **env}.items()))
+        argv = self.sandbox._argv(spec)
+        argv.insert(1, "--clearenv")
+        argv[argv.index("--chdir") + 1] = visible(str(cwd))
+        return argv[0], argv[1:]
+
+    @staticmethod
+    def _mcp_executable(command: tuple[str, ...], plugin_dir: Path, mount: str) -> tuple[tuple[str, ...], list[tuple[str, str]]]:
+        from anchor.runtime.sandbox import SANDBOX_SYSTEM
+
+        executable = Path(command[0])
+        extra: list[tuple[str, str]] = []
+        if executable.is_absolute() and executable.is_relative_to(plugin_dir):
+            command = (f"{mount}/{executable.relative_to(plugin_dir)}", *command[1:])
+        elif not executable.is_absolute():
+            found = shutil.which(command[0])
+            if not found:
+                raise ValueError(f"MCP executable is not available: {command[0]}")
+            discovered = Path(found)
+            if not any(discovered.is_relative_to(Path(path)) for path in SANDBOX_SYSTEM):
+                raise ValueError(f"MCP executable is outside sandbox system paths: {discovered}")
+            executable = discovered
+            command = (str(executable), *command[1:])
+        elif not any(executable.is_relative_to(Path(path)) for path in SANDBOX_SYSTEM):
+            configured = executable
+            executable = executable.resolve(strict=True)
+            if not executable.is_file():
+                raise ValueError("MCP executable must resolve to a file")
+            extra.append((str(executable), str(executable)))
+            if configured.name.startswith("python"):
+                python_prefix = next((p for p in configured.parents if p.name == ".venv"), Path(sys.prefix))
+                python_version = f"python{sys.version_info.major}.{sys.version_info.minor}"
+                site = python_prefix / "lib" / python_version / "site-packages"
+                if site.is_dir():
+                    extra.append((str(site), str(site)))
+                    extra.append((str(site), "/usr/local/lib/" + python_version + "/dist-packages"))
+                else:
+                    for root in (Path("/usr/local/lib"), Path("/usr/lib")):
+                        extra.extend((str(path), str(path)) for path in root.glob(
+                            f"python{sys.version_info.major}.{sys.version_info.minor}/site-packages")
+                                     if path.is_dir())
+            for candidate in configured.parents:
+                if candidate.name == ".venv":
+                    extra.append((str(candidate), str(candidate)))
+                    site = candidate / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages"
+                    if site.is_dir():
+                        extra.append((str(site), str(site)))
+                    break
+            if command[0].endswith("node"):
+                extra.extend((str(path), str(path)) for path in
+                             (Path("/usr/lib/node_modules"), Path("/usr/share/nodejs")) if path.exists())
+            command = (str(executable), *command[1:])
+        return command, extra
+
     def run(self, command: str, *, timeout: float | None = None) -> Executed:
         result = self.sandbox.run(self.spec(command, timeout=timeout))
         # Assigned before the result is built, so a caller reading them after `run` gets this command's

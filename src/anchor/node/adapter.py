@@ -31,6 +31,7 @@ from anchor.node.agent_runtime import _CountingModel, _Wiring, build_agent
 from anchor.node.recovery import budget_path, load_budget, open_store
 from anchor.runtime.execenv import NodeSandbox
 
+
 async def _next_run_id(store: Any, agent_name: str) -> str:
     """A run id that has not been used for this logical node before.
 
@@ -369,17 +370,23 @@ async def run_node(request: NodeRequest, *, model: Any,
         # it was promised a result.
         wiring.sandbox.require_working()
 
-        async with agent.iter(request.task, deps=wiring, usage_limits=limits,
-                              message_history=history,
-                              conversation_id=conversation) as run:
-            async for node in run:
-                if request.trace is not None:
-                    pending = (node.request if isinstance(node, ModelRequestNode) and
-                               any(getattr(part, "part_kind", "") in ("tool-return", "retry-prompt")
-                                   for part in node.request.parts) else None)
-                    _write_trace(request.trace, list(run.all_messages()), wiring, formed=pending)
-                # Structured output ends the PydanticAI run naturally. There is no shell sentinel to
-                # intercept and no extra model request after the completion validator has persisted it.
+        from contextlib import AsyncExitStack
+        from anchor.node.mcp import toolsets_for
+        toolsets = toolsets_for(request.mcp_servers, wiring.sandbox, interactive=request.mcp_auth)
+        async with AsyncExitStack() as stack:
+            for capability in toolsets:
+                await stack.enter_async_context(capability)
+            async with agent.iter(request.task, deps=wiring, usage_limits=limits,
+                                  message_history=history,
+                                  conversation_id=conversation, toolsets=toolsets) as run:
+                async for node in run:
+                    if request.trace is not None:
+                        pending = (node.request if isinstance(node, ModelRequestNode) and
+                                   any(getattr(part, "part_kind", "") in ("tool-return", "retry-prompt")
+                                       for part in node.request.parts) else None)
+                        _write_trace(request.trace, list(run.all_messages()), wiring, formed=pending)
+                    # Structured output ends the PydanticAI run naturally. There is no shell sentinel to
+                    # intercept and no extra model request after the completion validator has persisted it.
 
         messages = list(run.all_messages())
         done = wiring.done

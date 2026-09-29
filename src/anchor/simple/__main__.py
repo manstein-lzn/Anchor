@@ -19,11 +19,13 @@ import os
 from pathlib import Path
 
 from anchor.simple import run as runner
+from anchor.runtime.secrets import load_dotenv
 
 ROOT = Path(__file__).resolve().parents[3]
 
 
 def main() -> None:
+    load_dotenv(ROOT / ".env")
     parser = argparse.ArgumentParser(prog="anchor-graph", description=__doc__)
     parser.add_argument("workspace", help="the directory holding graph.json")
     parser.add_argument("--objective", default=None,

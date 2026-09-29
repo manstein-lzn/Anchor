@@ -26,6 +26,7 @@ import hashlib
 import ipaddress
 import os
 import shutil
+import subprocess
 import threading
 import time
 import traceback
@@ -1062,15 +1063,14 @@ class Handler(BaseHTTPRequestHandler):
         return False
 
     def _send_file(self, path: Path) -> None:
-        """The bytes as they are, and as a download rather than something a browser renders.
-
-        `attachment` and `application/octet-stream` on purpose: a node's workspace holds whatever the
-        node wrote, and a browser that rendered it would be rendering text this program did not write
-        inside a page this program does serve. A download has no such question.
-        """
+        """Download artifacts; SVGs also work as passive images in Markdown previews."""
         payload = path.read_bytes()
         self.send_response(200)
-        self.send_header("Content-Type", "application/octet-stream")
+        image_types = {".svg": "image/svg+xml", ".png": "image/png", ".jpg": "image/jpeg",
+                       ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp"}
+        self.send_header("Content-Type", image_types.get(path.suffix.lower(), "application/octet-stream"))
+        self.send_header("Content-Security-Policy", "sandbox; default-src 'none'; style-src 'unsafe-inline'")
+        self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Content-Disposition", f"attachment; filename*=UTF-8''{quote(path.name)}")
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
@@ -1087,6 +1087,30 @@ class Handler(BaseHTTPRequestHandler):
         except (ValueError, OSError) as exc:
             return self._send(json.dumps({"error": str(exc)}, ensure_ascii=False), 400)
         self._send(json.dumps({"error": "not found"}), 404)
+
+    def _authorize_mcp(self, parts: list[str]) -> None:
+        if len(parts) != 4 or parts[0] != "plugins" or parts[2] != "authorize":
+            return self._send(json.dumps({"error": "not found"}), 404)
+        try:
+            import asyncio
+            from anchor.node.mcp import http_toolset
+            servers = dict(self.scheduler.library.mcp_servers(parts[1]))
+            server = servers[parts[3]]
+            if "url" not in server or not (server.get("oauth_resource") or server.get("auth") == "oauth"):
+                raise ValueError("this MCP server does not declare OAuth")
+
+            async def authorize() -> None:
+                toolset = http_toolset(parts[3], server, interactive=True)
+                async with toolset:
+                    await toolset.get_tools()
+
+            # Async servers already own this thread's loop; the authorization endpoint is sync HTTP.
+            asyncio.run(authorize())
+            self._send(json.dumps({"authorized": True}))
+        except KeyError:
+            self._send(json.dumps({"error": "no such MCP server"}), 404)
+        except (ValueError, OSError, RuntimeError, TimeoutError) as exc:
+            self._send(json.dumps({"error": str(exc)}, ensure_ascii=False), 400)
 
     def _turn_stream(self, session_id: str, turn_id: str, cursor: str) -> None:
         try:
@@ -1269,6 +1293,18 @@ class Handler(BaseHTTPRequestHandler):
         parts = [part for part in PurePosixPath(unquote(urlparse(self.path).path)).parts if part != "/"]
         if not self._authorized():
             return
+        if len(parts) == 4 and parts[0] == "plugins" and parts[2] == "authorize":
+            return self._authorize_mcp(parts)
+        if parts == ["plugins", "install"]:
+            body = self._body()
+            if body is None:
+                return
+            try:
+                installed = self.scheduler.library.install(body.get("source"), body.get("id"),
+                                                            replace_existing=body.get("replace") is True)
+                return self._send(json.dumps({"id": installed}, ensure_ascii=False), 201)
+            except (ValueError, OSError, subprocess.SubprocessError) as exc:
+                return self._send(json.dumps({"error": str(exc)}, ensure_ascii=False), 400)
         if parts == ["v1", "responses"]:
             body = self._body()
             if body is None:

@@ -12,6 +12,37 @@ from pathlib import Path
 from typing import Mapping, Protocol
 
 
+def load_dotenv(path: str | Path | None = None) -> Path | None:
+    """Load simple KEY=VALUE lines without overriding explicit environment variables."""
+    candidate = Path(path) if path else Path.cwd() / ".env"
+    if not candidate.is_file():
+        return None
+    for line in candidate.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = (part.strip() for part in line.split("=", 1))
+        if not key or any(ch not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_" for ch in key):
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        if value and value not in ("[]", "{}"):
+            os.environ.setdefault(key, value)
+    return candidate
+
+
+def env_model_profile() -> dict | None:
+    """Return the single model configured by .env, when all required values exist."""
+    url, key = os.environ.get("ANCHOR_MODEL_URL"), os.environ.get("ANCHOR_MODEL_API_KEY")
+    if not url or not key:
+        return None
+    return {"ref": "models.default", "model": os.environ.get("ANCHOR_MODEL_NAME", "default"),
+            "base_url": url, "wire_api": os.environ.get("ANCHOR_MODEL_WIRE_API", "responses"),
+            "secret_ref": "MODEL_API_KEY",
+            "context_window": int(os.environ.get("ANCHOR_MODEL_CONTEXT_WINDOW", "0") or 0)}
+
+
 class SecretProvider(Protocol):
     def get(self, name: str) -> str: ...
 
@@ -72,4 +103,3 @@ class ChainedSecretProvider:
             except SecretUnavailable:
                 continue
         raise SecretUnavailable(f"secret is unavailable: {name}")
-

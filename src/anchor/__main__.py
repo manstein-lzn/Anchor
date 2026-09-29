@@ -6,11 +6,13 @@ import argparse
 from pathlib import Path
 
 from anchor.serve import serve
+from anchor.runtime.secrets import load_dotenv
 
 ROOT = Path(__file__).resolve().parents[2]
 
 
 def main() -> None:
+    load_dotenv(ROOT / ".env")
     parser = argparse.ArgumentParser(prog="anchor-serve", description=__doc__)
     parser.add_argument("--root", default=str(Path.home() / ".anchor"),
                         help="where the workspaces live")

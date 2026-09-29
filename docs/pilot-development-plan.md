@@ -157,6 +157,9 @@ SSE `message` 的 data 为标准 Vercel chunk，`id` 为已提交到 SQLite 的�
 | A17 | 从 Graph 页面查看执行 | 选择 Graph 后直接看到当前/最近状态、运行次数；运行历史按需展开，按钮与画布位置保持不变，点击记录直达执行画布与节点/产物详情 | E1 前端体验 | 2026-09-28 运行概览融入 Graph 页头，原生浮层展示此图全部运行历史；工作台 E2E 覆盖桌面/手机展开位置与画布尺寸不变、超过四条历史、键盘/Esc/外部点击、详情直达和空状态。真实 provider 不属于此 UI 入口验收 |
 | A18 | 开发服务访问 | 5173 页面及其后端代理可访问 | 开发环境 | 2026-09-28 两端无监听后通过现有 dev.sh start 恢复；首页、/graphs、/timeline?days=30、/sessions 经 5173 请求均 HTTP 200；仅验证本机访问，未验证用户侧端口转发 |
 | A19 | 社区 Plugin 生态兼容任务交接 | 背景与目标见独立说明，具体方案和兼容验收待探索 | 独立任务背景 | 已生成 [任务背景](plugin-ecosystem-task-background.md)；仅完成文档交接，未实现或验收生态兼容 |
+| A20 | 安装来源 Plugin 并统一 Anchor bundle 格式；兼容 Skills/资源与 MCP | 安装结果根目录 `plugin.json`；其他来源资源保留；不记录来源类型；明确暂不支持 hooks/commands/agents | 社区 Plugin 兼容 | 安装 API、根清单转换、Skill/资源浏览器 E2E、MCP stdio Bubblewrap 发现及调用回归通过；HTTP/SSE 环境变量鉴权配置与显式 OAuth 授权入口已接入。OAuth 外部 provider、真实社区 MCP 端到端未验收 |
+
+| A21 | 每周四 09:00 本机工作周报与独立反馈 | 普通 Graph：项目理解与选题、写作、读者评审；问题退回、逐项复验、通过后组装；评审通过后使用 Docmost Plugin 同步图文到 MsteinL/Anchor周报；不设 blocked | 周报 Graph | 计划已启用；旧真实 Run 20260928T132435 已交付，但用户否定其流水账式内容；已重构读者视角指令，相关 11 项测试通过，新版真实内容质量待验收；Docmost 同步节点已接入，已整理报告已创建为目标父页面下的子页面并插入上传的 SVG；上传工具与图文替换回归通过；完整 Graph 真实 provider 验收待执行 |
 | A22 | Pilot 历史会话改名与删除 | 每行“…”菜单；改名持久化；确认后删除空闲会话；当前聊天及关联 Run/产物边界明确 | Pilot 会话管理 | 后端 336 项、前端 23 项单测与 E2E 13 条通过（provider opt-in 1 条跳过）；隔离真实 HTTP 浏览器覆盖持久改名、取消/失败保留、删除其他/当前会话、草稿与刷新、手机及键盘；本机页面只读核查菜单可用。未触发新 provider 请求 |
 
 每阶段执行相关后端测试、Ruff/compileall、前端测试/build、真实 HTTP 与浏览器验收。最终必须取得全量 pytest 的明确退出码和总结；运行中或仅看到进度点不算通过。阶段产物不能等同于产品全部完成。
@@ -201,8 +204,31 @@ SSE `message` 的 data 为标准 Vercel chunk，`id` 为已提交到 SQLite 的�
 - 2026-09-28：用户指出最近输入仍未显示，复核确认上条验收遗漏真实内容完整性：那 10 条消息仅含首条用户消息。最新 turn 已收到「PPT 只是例子，能否构建 plugin」的澄清，框架将其保存为 `session_ask` 的 ToolReturnPart，`_entries` 只投影 UserPromptPart，导致完成/重开后漏显；原测试甚至将遗漏写成预期。现只调整展示投影，成功的提问工具返回显示为用户消息，提问调用里的问题显示为助手消息；不修改原生存储或给模型重复追加输入。修正 HTTP/框架测试，验证完整问答顺序及重开读取。确认无活动 turn/Run 后重启服务，真实 5173 会话刷新后显示两条用户输入，丢失的那条恰好出现一次，截图与控制台复核通过。同步澄清「生成 Graph 参数」实际是模型自行展开完整图定义用于 graph_validate，并非用户要求；收紧 Pilot 指令，讨论/能力咨询先回答问题，不擅自生成整图、不猜 Plugin ID，已授权实施仍直接执行。提示词调整未发新 provider 请求验证，不宣称已解决模型慢回复。对应 A08。
 - 2026-09-28：问答历史修复验收收尾：相关后端 34 项、后端全量 313 项通过（退出码 0），Pilot 浏览器专项 7 条通过，Ruff、compileall 与 diff 检查通过；服务 8077/5173 均在线。真实会话恢复截图 `/tmp/anchor-pilot-missing-answer-restored.png`；本轮没有修改或重发用户输入。
 - 2026-09-28：按用户要求生成 [社区 Plugin 生态兼容独立任务背景](plugin-ecosystem-task-background.md)，供新的 Agent 理解原生兼容 OpenAI/Codex 与 Anthropic/Claude 插件的产品意图、工程起点与讨论脉络。本文不冻结技术方案、实施顺序或验收条件；此前少量 Skill 包装建议不作为任务限制。对应 A19，仅交接背景，未改运行代码、未开展兼容验收。
+- 2026-09-28：用户澄清安装产物不保留 `.codex-plugin`，而由安装器把来源清单放在 bundle 根目录 `plugin.json`，其他资源原样保留，运行时不记录来源类型字段。实现已调整为只读根清单；随仓库 Plugin 和测试夹具使用该布局。Skill 渐进披露、只读挂载、摘要核验和 UI 预览已接入；MCP 配置由 PydanticAI MCPToolset 接入 AgentNode，资源摘要包含 MCP 声明。相关后端、前端单测和构建通过。安装入口、hooks、commands、agents 和真实 MCP 端到端未完成；MCP stdio 子进程尚未证明受 Bubblewrap 隔离。对应 A20，不代表完整宿主兼容。
+- 2026-09-28：排查 `resource must be a file ...: instructions.md` 后确认这是请求旧插件布局文件名导致的路径拒绝；academic-research 已迁移至 `skills/academic-research/SKILL.md`，当前 UI 使用详情 API 聚合 Skill 内容。对旧资源名增加明确迁移提示并验证新 Skill 路径。对应 A20。
+- 2026-09-28：继续完成 A20 接线：修复 Bubblewrap 子进程空环境下缺少 PATH，stdio MCP 真实 sandbox 测试覆盖工具发现/调用；安装 API 和前端 GitHub 子目录安装入口可用；HTTP/SSE token 环境变量不进入 Plugin 摘要，OAuth 声明暴露显式授权按钮；更新 Plugin 使用说明。Ruff、compileall、Plugin 与 Node 控制流相关测试通过（55 项）。OAuth provider 授权及真实社区 MCP provider 仍未验证，不计作完整 MCP 生态端到端通过。
+- 2026-09-28：新增 Docmost MCP Plugin 定义，端点为 `https://docmost.cwise.dev/mcp`，使用运行服务环境中的 `DOCMOST_API_KEY` 构造 Bearer Authorization；Skill 要求仅按用户目标搜索/读取并引用页面。Pilot system instructions 指向共享 Plugin 库管理及 Graph 挂载流程。新增解析回归验证密钥不进入 catalog 记录；未设置或读取真实 API key，未宣称远端握手通过。对应 A20。
+- 2026-09-28：按用户提供的 `.env` 完成 Docmost Plugin 设计并进行真实只读 MCP 工具发现；Docmost 返回 20 个工具（搜索、页面/空间读取及评论/编辑类工具）。Skill 明确默认只搜索和读取，禁止无请求的遍历、修改和删除；API key 未输出或写入文件。真实工具调用和 Graph/Pilot 端到端挂载尚未验收。
+- 2026-09-28：用户明确授权 AgentNode 使用 Docmost MCP 暴露的全部能力。更新 Docmost Skill，允许搜索、读取、创建、修改、移动、评论和删除；仅保留按用户目标执行、不可逆操作确认、权限边界和密钥保密约束。真实工具发现仍已通过，具体写操作未执行。
+- 2026-09-28：用户确定社区 Plugin 首期范围为 Skills/资源与 MCP；Codex hooks、commands、agents 暂不支持。记录 MCP 当前实际接线（PydanticAI stdio/URL MCPToolset、AgentNode 作用域 AsyncExitStack）及未验收边界：stdio 沙箱、鉴权/秘密/OAuth、取消生命周期和真实插件端到端。对应 A20；解析配置不计为兼容通过。
+
+- 2026-09-28：按用户要求新增 weekly-work-report Graph（理解取证→写作配图→编辑核验→文件组装），使用现有周定时规则。Codex JSONL 与 DSH 最新代际 JSONL/zstd 只读投影，按事件时间过滤七天窗口、保留原始行号；概览与详细证据分开，工具截断显式标记。library/local-inputs.json 是本机操作员授权，不从可安装 Plugin 清单授予宿主目录访问；仅该 Plugin 挂载两个 sessions 目录。已安装 Graph/计划；首个执行被现有 .env 上下文窗口千分位格式阻断，已规范为整数后复跑，未据此宣称端到端完成。对应 A21。
+
+- 2026-09-28：A21 真实执行暴露 DeepSeek 思考模式拒绝强制 tool_choice；在共享 model_for 复用 PydanticAI 的 DeepSeekProvider 原生兼容 profile（保留网关 deepseek-flash wire name），覆盖 Pilot/Graph 共同入口并增加回归。另验证旧下载 MIME 导致 SVG 在 Chromium 中 naturalWidth=0，改用图片 MIME、attachment、隔离 CSP 和 nosniff 后 naturalWidth=300；其余文件继续二进制下载。只读沙箱实测历史可读、写入遭拒、认证文件不可见。相关回归通过，真实报告 Run 20260928T122930 仍在执行，未记为完成。
+
+- 2026-09-28：用户质疑为单一周报创建 Plugin。撤回该包装，移除本任务的 Plugin 清单与安装注册（保留既有失败 Run 证据）；采集改为普通 Op，脚本归 scripts/weekly_work_report，只读授权归 Graph 工作区 local-inputs.json 并限定到 collect 节点。已强化写作要求：正文不列会话/事件/测试数与提交哈希，以最新可靠记录更新现状。首轮 Run 20260928T122930 在编辑阶段遭模型网关内容过滤拒绝，保留原始材料和错误，不将草稿标为已完成；对应 A21。
+
+- 2026-09-28：A21 去除 Plugin 后验证完成：五节点普通 Graph，无 plugins 引用；真实 sessions 采集、只读挂载、节点输入快照、最终组装通过（`.local/weekly-report-pipeline-proof/runs/pipeline-proof/`，三个语言节点用脚本模型，不能充当报告质量或真实 provider 证据）。`pytest -q -n 8 --dist worksteal -o addopts=''` 329 passed in 36.81s、退出码 0，Ruff 通过。服务已加载新实现，计划仍 enabled，下次 2026-10-01 09:00，Plugin catalog 无 weekly-work-report。真实首轮编辑失败未消除，报告不标为完成。
+
+- 2026-09-28：用户确认加入高质量独立反馈。将原直接编辑节点替换为独立 reviewer，普通 gate Op 校验四项质量判断、逐问题解决依据、历史问题不遗漏和当前稿件 commit 后复用 anchor-route 分流；可退回 write/understand，无法解决时 blocked 失败保留反馈，只有 publish 组装正式稿件。保持冻结窗口，不重采集、不新增 Plugin、不改运行时。相关 12 项测试通过，覆盖两次不同退回后的最新材料、未解决停止、假通过/旧稿/遗漏旧问题拒绝。对应 A21，真实 reviewer 与全量回归进行中。
+
+- 2026-09-28：周报 Graph 在 WebUI 中运行时不再弹出通用 JSON 输入框；该 Graph 的数据源和窗口由采集节点及默认输入确定，点击“运行”直接提交空/默认对象。其他 Graph 保持可编辑 JSON 运行输入。前端 build 通过。
+
+- 2026-09-28：用户指出完整工作记录不应因证据边界而整体停止交付。移除 weekly-work-report 的 blocked 节点和决策：证据不足、记录冲突或无法视觉核验改为在正文/review.md 中限定结论后继续 publish；只有可通过补证或改写解决的事实、结构、推理和表达问题退回 understand/write。相关回归 11 项通过。
 
 - 2026-09-28：按用户反馈复核运行看板视觉。移除重复的旧版时间线 CSS，保留单一规则；看板改为全屏白色工作区，摘要收敛为状态栏，时间导航/筛选/时间线共享明确层级，压缩日期行并修正运行点击层与实际时长条的定位。桌面与 390px 移动截图确认无页面横向溢出；前端 23 项单测、工作台 E2E 2 条、build 和 `git diff --check` 通过。未改变后端契约，A15 仍待真实 provider 与停机恢复验收。
+
+- 2026-09-28：按用户明确的受众视角重构周报 Graph。理解节点先重建项目目标与阶段、选择两三项实质变化，写作按重要性组织并将来源移出正文，图示解释状态与关系而非事件时间线；独立评审先复述读后重点，再核查关键事实，准确但不可读的流水账必须退回。沿用现有反馈回路和门禁，不新增节点、Plugin 或运行时机制。旧真实 Run 20260928T132435 的流程成功不能作为内容质量通过依据。对应 A21；新版真实验证待执行。
 
 - 2026-09-28：继续收敛运行看板视觉与交互。清理旧版时间线样式覆盖，统一运行/计划的时间轴定位与标签展示；看板在桌面、平板、390px 和 320px 视口使用独立滚动面板，避免页面级横向溢出；计划点与小时刻度对齐，短运行条按真实时长绘制。新增 `apps/web/e2e/timeline.spec.ts` 覆盖计划/运行预览、筛选、四种视口、弹窗和布局边界。前端单测 23 项、E2E 12 条通过（真实 provider opt-in 1 条跳过）、build、diff 检查通过；未改变后端契约，A15 仍待真实 provider 与停机恢复验收。
 
@@ -221,3 +247,8 @@ SSE `message` 的 data 为标准 Vercel chunk，`id` 为已提交到 SQLite 的�
 - 2026-09-28：按用户要求移除看板图例中的“颜色区分 Graph”说明，仅保留三个标记图例。同步更新现有断言，时间线 E2E 2 条通过。对应 A15，纯文案调整。
 
 - 2026-09-28：按用户要求为每条 Pilot 历史 Session 添加“…”操作菜单，复用原生 Popover 与现有 Modal，提供改名和确认删除。新增仅接受 title 的 PUT 接口，名称不能为空、最长 120 字符；手动名称不会被首条消息覆盖。删除不再要求用户先归档，执行中仍由服务端拒绝，活动检查与删除共享调度锁。前端删除当前会话回到新对话并清理该会话草稿/待重试缓存，删除其他会话保留当前输入；防止在途历史响应恢复旧列表。关联 Graph/Run/产物和底层步骤文件保持原有保留语义。后端全量 336 passed、退出码 0；前端单测 23 项、完整 E2E 13 条通过（真实 provider opt-in 1 条跳过），最终会话专项复验通过；Ruff/compileall、build 与 diff 检查通过。确认无运行中的 Graph/Pilot 后重启开发服务，真实 5173 菜单与改名弹窗只读复核通过，没有修改或删除用户现有会话。对应 A22，本次未调用真实 provider。
+
+- 2026-09-29：按用户要求升级 weekly-work-report Graph。保留本地评审与离线产物组装，在 publish 后新增挂载 `docmost` Plugin 的网络 Agent 节点：以正式报告一级标题作为子页面标题，精确解析 `MsteinL` 空间和 `Anchor周报` 父页面，按同名子页面创建或 replace 更新，写出 `docmost.json` 页面元数据；不重复创建，不删除或移动其他页面，本地 SVG 和来源清单不上传。已通过 Docmost MCP 真实工具清单与目标路径核查，Graph 相关回归通过；使用最近一份已整理报告实际创建子页面并复核空间、父页面和正文，尚未执行完整 Graph 真实 provider 生成验收。对应 A21。
+- 2026-09-29：纠正先前对 Docmost 图片能力的判断：Docmost 原生支持通过 `/api/files/upload` 上传页面附件。新增受限 stdio MCP 工具，仅接受 `/in/publish/assets/` 下的 SVG/PNG/JPEG/WebP，并以页面 ID 绑定上传；周报同步节点将返回的附件 URL 替换到正文图片链接，更新同名报告时可替换现有附件。已有报告 SVG 已上传并插入 Docmost 页面；MCP 参数协议回归及上传、周报测试共 14 项通过，Graph JSON 合法。完整周报 Graph 真实 provider 验收仍待执行。对应 A21。
+- 2026-09-29：根据 Docmost 页面实际阅读效果调整周报发布：页面标题栏承担一级标题，发布节点去掉正文第一行标题，避免重复；写作提示增加具体、平实的同事汇报口吻，减少模板化转折和空泛总结。已更新现有两篇周报页面，保留日期、图片、图注和正文层级；相关 Graph 回归通过。对应 A21。
+- 2026-09-29：将 AI 味调研结论接入 weekly-work-report Graph：写作节点要求先写事实、对象、动作和结果，优先主动语态与直接动词，不强求各节同构或等长，保留真实取舍；独立评审增加模板化开头/结尾、元话语、抽象名词、隐藏责任主体和机械三段式检查，但只在影响理解或掩盖取舍时退回，避免机械禁词审查。新增对应回归断言，周报测试通过。对应 A21。

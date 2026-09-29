@@ -697,6 +697,11 @@ details.call pre {
 .plugin-chip button { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; padding: 0; border: 0; border-radius: 50%; color: #6f8c7d; background: transparent; cursor: pointer; }
 .plugin-chip button:hover { color: var(--red); background: #fbe8e6; }
 .plugin-browser { display: grid; gap: 8px; margin-bottom: 10px; }
+.plugin-install { display: grid; gap: 7px; margin: 10px 0; padding: 10px; border: 1px solid var(--line); border-radius: 8px; }
+.plugin-install label { display: grid; gap: 5px; color: var(--muted); font-size: 11px; }
+.plugin-install input { min-width: 0; }
+.plugin-install button { justify-self: start; }
+.plugin-install small { color: var(--muted); }
 .plugin-search { display: flex; align-items: center; gap: 7px; margin: 0; padding: 0 9px; border: 1px solid var(--line); border-radius: 7px; color: var(--muted); background: #fff; }
 .plugin-search:focus-within { border-color: #94bba5; box-shadow: 0 0 0 2px #1675651c; }
 .plugin-search input { min-width: 0; margin: 0 !important; padding: 8px 0 !important; border: 0 !important; outline: 0; box-shadow: none !important; }

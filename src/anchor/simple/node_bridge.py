@@ -39,6 +39,8 @@ class Node:
                  command: str | None = None, control: Path | None = None,
                  capabilities: tuple[Any, ...] = (),
                  resources: tuple[tuple[str, str], ...] = (),
+                 mcp_servers: tuple[tuple[str, dict], ...] = (),
+                 mcp_auth: bool = False,
                  run_input: dict | None = None,
                  cancelled: Callable[[], bool] | None = None) -> None:
         self.node_id = node_id
@@ -55,6 +57,8 @@ class Node:
         self._max_requests = max_requests
         self._capabilities = tuple(capabilities)
         self._resources = resources
+        self._mcp_servers = mcp_servers
+        self._mcp_auth = mcp_auth
         self._run_input = run_input or {}
         self._cancelled = cancelled
         # Read by `_result_of` through `agent.env.route`. Kept as an object rather than a bare
@@ -100,7 +104,7 @@ class Node:
                                   "automatically"}
             outcome = run_op_node(
                 NodeRequest(execution_id=self.node_id, task=self.command, workspace=self.directory,
-                            inputs=_binds(self.inputs), routes=self.routes, network=self._network,
+                            inputs=(*_binds(self.inputs), *self._resources), routes=self.routes, network=self._network,
                             timeout_seconds=self._timeout, roles=self.node_id,
                             cancelled=self._cancelled, run_input=self._run_input),
                 command=self.command)
@@ -128,9 +132,12 @@ class Node:
             # running a graph in an interpreter where it cannot be imported at all.
             from anchor.node.adapter import run_agent_node
 
+
             outcome = asyncio.run(run_agent_node(
                 NodeRequest(execution_id=self.node_id, task=task or "", workspace=self.directory,
                             instructions=self._instructions, inputs=(*_binds(self.inputs), *self._resources),
+                            mcp_servers=self._mcp_servers,
+                            mcp_auth=self._mcp_auth,
                             routes=self.routes, network=self._network,
                             timeout_seconds=self._timeout, max_requests=self._max_requests,
                             trace=self.trace, roles=self.node_id, cancelled=self._cancelled,

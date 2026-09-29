@@ -34,6 +34,7 @@ anchor-route = "anchor.route.__main__:main"
 anchor-serve = "anchor.__main__:main"
 
 [project.optional-dependencies]
+mcp = ["pydantic-ai-slim[mcp]==2.46.0"]
 dev = [
     "pytest>=8,<9",
     # The suite runs real sandboxes and fault injection; most of its wall time is a handful of tests.

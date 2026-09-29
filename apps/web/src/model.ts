@@ -60,7 +60,9 @@ export type OurNode = { id: string; agent?: string; op?: string; graph?: string;
 
 export type Plugin = {
   id: string; name: string; description: string; digest?: string;
-  tools: { id: string; entrypoint: string; digest?: string; executable_digest?: string }[];
+  skills?: string[];
+  unsupported?: string[];
+  mcpServers?: Record<string, { transport: string; auth?: string }>;
   available?: boolean; error?: string; instructions?: string;
 };
 

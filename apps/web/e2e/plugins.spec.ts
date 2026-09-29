@@ -43,7 +43,7 @@ test('Plugin selection, lazy instructions and historical records work with a rea
     await page.getByRole('button', { name: '查看说明', exact: true }).click();
     await expect(page.locator('.plugin-instructions').getByRole('heading', { name: '学术调研', exact: true })).toHaveCount(2);
     await expect(page.locator('.plugin-instructions')).toContainText('/tools/scholarly/run');
-    expect((await request.get(`${base}/plugins/academic-research/files/instructions.md`)).ok()).toBeTruthy();
+    expect((await request.get(`${base}/plugins/academic-research/files/skills/academic-research/SKILL.md`)).ok()).toBeTruthy();
     await page.getByRole('button', { name: '保存', exact: true }).click();
     await expect(async () => {
       const graph = await (await request.get(`${base}/graphs/plugin-proof`)).json();
@@ -59,7 +59,7 @@ test('Plugin selection, lazy instructions and historical records work with a rea
     // Script only replaces the model; CLI, mounts, scholarly executable and Git are real.
     const script = join(root, 'model.json');
     await writeFile(script, JSON.stringify({ research: [
-      'cat /plugins/academic-research/instructions.md > notes.md',
+      'cat /plugins/academic-research/skills/academic-research/SKILL.md > notes.md',
       '/tools/scholarly/run --help > tool-help.txt',
       'anchor-done --summary "Plugin and shared tool verified"',
     ] }));

@@ -41,7 +41,7 @@ Anchor 是本地优先的 Agent 工作流系统。Graph 组织任务，AgentNode
 现有 Plugin 机制比较直接：
 
 - AgentNode 在 Graph 中显式引用 Plugin 标识。
-- 能力库中的 `plugin.json` 提供名称、描述和工具引用，`instructions.md` 提供完整说明，目录可以包含补充资源。
+- 历史能力库曾用根 `plugin.json` 提供名称和描述，并用 `instructions.md` 提供完整说明；当前 Skill 布局以清单声明的 `skills/<skill>/SKILL.md` 为说明来源。
 - Agent 初始获得简短目录，按需读取完整说明；Plugin 资源只读挂载到节点。
 - 工具通过独立登记的执行入口和环境提供，多个 Plugin 可以复用工具。
 - Run 保存资源绑定摘要；当前实现会在有关执行和恢复边界核对资源变化。

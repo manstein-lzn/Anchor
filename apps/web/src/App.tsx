@@ -127,7 +127,10 @@ export function App() {
         }
       }
     } catch (error) {
-      setProblem(`服务未连接：${(error as Error).message}`);
+      const message = (error as Error).message;
+      setProblem(error instanceof TypeError || /fetch|network|ECONNREFUSED|proxy error/i.test(message)
+        ? '后端 API 暂不可达，请检查 8077 服务及前端代理。'
+        : `后端请求失败：${message}`);
     }
   }, [timelinePage]);
 
@@ -220,6 +223,11 @@ export function App() {
   };
 
   const trigger = () => perform('触发', async () => {
+    if (name === 'weekly-work-report') {
+      const body = await api<{ run: string }>('/trigger', 'POST', { graph: name, input: doc?.input ?? {} });
+      setRun(body.run); setView('runDetail');
+      return;
+    }
     const raw = window.prompt('本次运行输入（JSON object，可留空）', JSON.stringify(doc?.input ?? {}, null, 2));
     if (raw === null) return;
     let input: Record<string, unknown>;

@@ -21,7 +21,8 @@ from pydantic_ai.messages import (ModelMessage, ModelRequest, ModelResponse, Tex
 from pydantic_ai_harness.step_persistence import StepPersistence
 
 from anchor.node.model_bridge import model_for
-from anchor.runtime.secrets import ChainedSecretProvider, EnvironmentSecretProvider, JsonFileSecretProvider
+from anchor.runtime.secrets import (ChainedSecretProvider, EnvironmentSecretProvider,
+                                    JsonFileSecretProvider, env_model_profile)
 from anchor.session import Session, SessionStore
 
 INSTRUCTIONS = """You are Anchor Pilot, the user's assistant for working with Anchor.
@@ -33,8 +34,8 @@ Answer the user's current question first. A capability question, example, or cla
 request to implement a Graph. During design discussion, explain the approach without generating or
 validating a full Graph definition unless the user asks for that deliverable. Continue already
 requested implementation without adding approval steps. Read only resources relevant to the question;
-do not inspect unrelated runs or invent Plugin IDs to test whether a capability exists. The available
-Plugin tools are read-only: they can inspect installed Plugins, not create or install them.
+do not inspect unrelated runs or invent Plugin IDs to test whether a capability exists. Plugins in the
+shared library can be mounted by editing a Graph; installation is managed through the Plugin library UI.
 
 Doing what the user asked is authorization: when the user requests an action on a Graph or Run, call
 the relevant tool and report the result. Ask the user — with session_ask — only when a missing choice
@@ -378,13 +379,19 @@ def _compaction(raw: dict[str, Any], profile: dict[str, Any]) -> list[Any]:
 
 def _agent(config_path: Path, scheduler: Any = None, session_id: str = "") -> Agent[Any, str]:
     raw = json.loads(config_path.read_text(encoding="utf-8"))
+    configured = env_model_profile()
     profiles = {item["ref"]: item for item in raw.get("models", [])}
+    if configured:
+        profiles = {configured["ref"]: configured}
     ref = raw.get("pilot_model") or next(iter(profiles), None)
     profile = profiles.get(ref)
     if profile is None:
         raise ValueError("runtime config must define at least one model for Anchor Pilot")
     secret_file = raw.get("secret_file")
     providers = [EnvironmentSecretProvider()]
+    if profile.get("secret_ref") == "MODEL_API_KEY":
+        import os
+        providers.insert(0, EnvironmentSecretProvider({"MODEL_API_KEY": os.environ.get("ANCHOR_MODEL_API_KEY", "")}, prefix=""))
     if secret_file:
         providers.append(JsonFileSecretProvider(secret_file))
     secret = ChainedSecretProvider(*providers).get(profile["secret_ref"])
