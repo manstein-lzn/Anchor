@@ -161,12 +161,15 @@ SSE `message` 的 data 为标准 Vercel chunk，`id` 为已提交到 SQLite 的�
 
 | A21 | 每周四 09:00 本机工作周报与独立反馈 | 普通 Graph：项目理解与选题、写作、读者评审；问题退回、逐项复验、通过后组装；评审通过后使用 Docmost Plugin 同步图文到 MsteinL/Anchor周报；不设 blocked | 周报 Graph | 计划已启用；旧真实 Run 20260928T132435 已交付，但用户否定其流水账式内容；已重构读者视角指令，相关 11 项测试通过，新版真实内容质量待验收；Docmost 同步节点已接入，已整理报告已创建为目标父页面下的子页面并插入上传的 SVG；上传工具与图文替换回归通过；完整 Graph 真实 provider 验收待执行 |
 | A22 | Pilot 历史会话改名与删除 | 每行“…”菜单；改名持久化；确认后删除空闲会话；当前聊天及关联 Run/产物边界明确 | Pilot 会话管理 | 后端 336 项、前端 23 项单测与 E2E 13 条通过（provider opt-in 1 条跳过）；隔离真实 HTTP 浏览器覆盖持久改名、取消/失败保留、删除其他/当前会话、草稿与刷新、手机及键盘；本机页面只读核查菜单可用。未触发新 provider 请求 |
+| A23 | 企业微信 Plugin | MCP 主动消息工具、企业微信回调解密与 Anchor Graph Webhook 转发；凭证使用环境变量 | Plugin 联动 | 本地 API 夹具、MCP JSON-RPC、AES 回调解密和 Webhook 转换回归通过；真实企业微信凭证、公网回调和真实 provider 联动待验收 |
 
 每阶段执行相关后端测试、Ruff/compileall、前端测试/build、真实 HTTP 与浏览器验收。最终必须取得全量 pytest 的明确退出码和总结；运行中或仅看到进度点不算通过。阶段产物不能等同于产品全部完成。
 
 ## 推进记录
 
 2026-09-28 服务恢复记录：用户报告无法打开 5173，现场确认 5173/8077 均无进程监听；使用 `./scripts/dev.sh start` 启动现有前后端，本机首页及 Graph、时间线、Session 代理接口均返回 HTTP 200。日志未能确定此前进程退出原因；未改产品代码，未将此次访问检查计为 provider 或停机恢复验收。对应 A18。
+
+2026-09-29：新增 `plugins/wecom` 企业微信 Plugin。stdio MCP 提供发送文本、发送 Markdown、查询成员；独立 `bridge.py` 校验回调签名、使用 AES 解密 XML，并把消息转换为 Anchor Graph Webhook 输入。新增 `tests/test_wecom_plugin.py`，本地 API 夹具、MCP 协议、回调解密和 Webhook 转发通过；未宣称真实企业微信端到端完成。对应 A23。
 
 以下按时间保留当时的实现与决定；旧条目中的「剩余工作」不再独立生效，当前范围以上文阶段表及最新收敛决定为准。
 

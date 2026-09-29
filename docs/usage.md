@@ -288,6 +288,8 @@ ln -s "$PWD/plugins/academic-research" .local/demo/library/plugins/academic-rese
 
 在图编排中选中 AgentNode，刷新 Plugin 列表、查看说明、勾选能力并保存。新示例为 [plugin-research.json](../examples/graphs/plugin-research.json)。旧图不会自动获得 Plugin；已有研究工作流的节点配置由用户明确选择，不自动迁移运行历史。
 
+企业微信接入使用仓库中的 `plugins/wecom`。将它登记到数据根目录的 `library/plugins/wecom` 后，在 Graph 的 AgentNode 上选择该 Plugin，并设置 `WECOM_CORP_ID`、`WECOM_AGENT_ID`、`WECOM_SECRET`。需要接收企业微信消息时，另行设置 `WECOM_TOKEN`、`WECOM_ENCODING_AES_KEY`、`ANCHOR_WEBHOOK_URL`、`ANCHOR_API_KEY`，运行 `python plugins/wecom/bridge.py`；`ANCHOR_WEBHOOK_URL` 应指向已有的 `/v1/webhooks/graphs/<graph-id>`，并通过 HTTPS 暴露给企业微信。真实企业微信凭证和公网回调尚未在本仓库验收。
+
 服务默认使用 `<root>/library`。CLI 对 `<root>/workspaces/<graph>` 自动找到相同位置；独立目录运行时可用 `anchor-graph ... --library /absolute/path/to/library` 指定。资源不可用时修正库中的定义，不在节点工作区补装另一份。
 
 运行详情中的 Plugin 页显示本次解析记录。共享说明和工具在运行期间保持不变；修改资源后开始新运行。这个记录不等于工具调用清单，实际命令在对话中查看。

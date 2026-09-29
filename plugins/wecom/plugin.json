@@ -1,0 +1,20 @@
+{
+  "name": "企业微信",
+  "description": "通过企业微信应用 API 发送文本/Markdown 消息并查询成员；bridge.py 接收企业微信回调后触发 Anchor Graph。",
+  "skills": "skills/",
+  "mcpServers": {
+    "wecom": {
+      "command": "python3",
+      "args": ["server.py"],
+      "cwd": ".",
+      "env": {
+        "WECOM_API_BASE_URL": "${WECOM_API_BASE_URL:-https://qyapi.weixin.qq.com}"
+      },
+      "env_vars": [
+          "WECOM_CORP_ID",
+          "WECOM_AGENT_ID",
+        "WECOM_SECRET"
+        ]
+    }
+  }
+}
