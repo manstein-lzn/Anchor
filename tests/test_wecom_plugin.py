@@ -126,3 +126,19 @@ def test_wecom_bridge_decrypts_and_triggers_anchor(monkeypatch):
     server.shutdown()
     server.server_close()
     thread.join()
+
+
+def test_wecom_websocket_normalizes_text_message():
+    module = _load("wecom_ws_gateway", Path(__file__).parents[1] / "plugins/wecom/ws_gateway.py")
+    frame = {
+        "cmd": "aibot_msg_callback",
+        "headers": {"req_id": "request-1"},
+        "body": {"msgid": "message-1", "msgtype": "text", "from": {"userid": "alice"},
+                 "text": {"content": "hello"}},
+    }
+    event = module.normalize_message(frame)
+    assert event is not None
+    assert event.event_id == "message-1"
+    assert event.sender_id == "alice"
+    assert event.conversation_id == "alice"
+    assert event.text == "hello"

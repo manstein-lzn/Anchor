@@ -79,6 +79,7 @@ WebUI / anchor-graph
 | [pilot.py](../src/anchor/pilot.py) | Pilot 模型执行、控制工具与流式事件编码 |
 | [session.py](../src/anchor/session.py) | Session 生命周期、消息与审批记录的持久化 |
 | [pilot_turns.py](../src/anchor/pilot_turns.py) | turn 提交幂等、执行身份、事件游标与终态 |
+| [channel/__init__.py](../src/anchor/channel/__init__.py) | 长驻平台通道的规范化事件和落盘去重账本契约 |
 | [apps/web](../apps/web) | 编排和运行共用画布，叠加状态与执行次数 |
 
 Graph 通过节点契约交付任务、接收结果，不直接解释 harness 的内部消息或检查点。mini-swe-agent 已移除。当前依赖的唯一配置来源是 [pyproject.toml](../pyproject.toml)，不在文档另维护一份“当前版本矩阵”。历史迁移验证保存在归档中。
@@ -96,6 +97,8 @@ Graph 可声明 object 默认 `input`；触发时的 object 与其递归合并�
 Agent 完成由 PydanticAI 校验的结构化结果表示（`summary`，多出口时加 `route`）。Bash 是普通工作区工具，不是完成仪式。Op 仍用退出码表示执行成败，分支由显式路由表达。完成声明、文件存在、论证质量是不同的事实，不能相互代替。
 
 沙箱默认不联网；Agent 或 Op 的 `network: true` 显式启用网络。工作区之外的工具与输入只读，沙箱不可用时不退回宿主机裸执行。节点执行记录和恢复控制文件位于工作区之外。
+
+长驻平台通道不随 AgentNode 的 MCP 生命周期启动。通道适配器（当前为 `plugins/wecom/ws_gateway.py`）维护平台连接，把可信平台事件转换为 `ChannelEvent`，由 `EventLedger` 记录认领、完成和失败；助手 Graph 的会话绑定和回复编排仍由服务层接入。通道适配器的真实平台连接不计作 Graph/Plugin provider 端到端验收。
 
 ## 学术调研与 Plugin 接入
 

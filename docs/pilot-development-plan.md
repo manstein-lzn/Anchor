@@ -161,11 +161,25 @@ SSE `message` 的 data 为标准 Vercel chunk，`id` 为已提交到 SQLite 的�
 
 | A21 | 每周四 09:00 本机工作周报与独立反馈 | 普通 Graph：项目理解与选题、写作、读者评审；问题退回、逐项复验、通过后组装；评审通过后使用 Docmost Plugin 同步图文到 MsteinL/Anchor周报；不设 blocked | 周报 Graph | 计划已启用；旧真实 Run 20260928T132435 已交付，但用户否定其流水账式内容；已重构读者视角指令，相关 11 项测试通过，新版真实内容质量待验收；Docmost 同步节点已接入，已整理报告已创建为目标父页面下的子页面并插入上传的 SVG；上传工具与图文替换回归通过；完整 Graph 真实 provider 验收待执行 |
 | A22 | Pilot 历史会话改名与删除 | 每行“…”菜单；改名持久化；确认后删除空闲会话；当前聊天及关联 Run/产物边界明确 | Pilot 会话管理 | 后端 336 项、前端 23 项单测与 E2E 13 条通过（provider opt-in 1 条跳过）；隔离真实 HTTP 浏览器覆盖持久改名、取消/失败保留、删除其他/当前会话、草稿与刷新、手机及键盘；本机页面只读核查菜单可用。未触发新 provider 请求 |
-| A23 | 企业微信 Plugin | MCP 主动消息工具、企业微信回调解密与 Anchor Graph Webhook 转发；凭证使用环境变量 | Plugin 联动 | 本地 API 夹具、MCP JSON-RPC、AES 回调解密和 Webhook 转换回归通过；真实企业微信凭证、公网回调和真实 provider 联动待验收 |
+| A23 | 企业微信 Plugin 与 WebSocket 通道 | MCP 主动消息工具、旧版回调桥、官方智能机器人 WebSocket、事件规范化与落盘去重；凭证由根目录 `.env` 提供，显式 shell 环境变量优先 | Plugin/通道联动 | WebSocket 适配器、SQLite 去重/失败重试、规范化测试及原有 API/回调回归通过；`.env` 启动加载有测试覆盖；助手 Graph 会话接线、真实企业微信凭证、公网连接和真实 provider 联动待验收 |
+| A24 | 多用户 Graph 助手工作中枢 | 不同用户并发调用业务 Plugin；独立对话、数据权限与工作记录；重启后可续接 | 近期目标，未冻结实现 | 已完成代码链路核查：需补 WebSocket 通道、Graph 会话绑定、多 Run 调度、身份授权及消息交付；未实现或端到端验收。见产品架构“近期链路的代码核查” |
+| A25 | 从工作证据改进 Plugin、Graph 与 Anchor | 普通 Graph 生成候选改动；可追溯证据、对比验证、按授权发布及效果观察；私有记录不跨用户泄露 | 远期需求，暂不实现 | 用户明确待积累足够数据后再执行改进 Graph；不是企业微信助手的前置工作，无 RSI 效果或真实 provider 验收 |
 
 每阶段执行相关后端测试、Ruff/compileall、前端测试/build、真实 HTTP 与浏览器验收。最终必须取得全量 pytest 的明确退出码和总结；运行中或仅看到进度点不算通过。阶段产物不能等同于产品全部完成。
 
 ## 推进记录
+
+2026-09-30：实现企业微信 WebSocket 通道第一步。新增 `anchor.channel` 的 `ChannelEvent` 与 SQLite `EventLedger`；新增 `plugins/wecom/ws_gateway.py`，使用官方 `wecom-aibot-python-sdk==1.0.2`，支持单常驻连接、事件规范化、重复事件跳过、失败重试和 Anchor 回调回复；增加 `channel.json`、channels 可选依赖、Plugin/使用文档和 2 项测试。验证：`pytest tests/test_channel_gateway.py tests/test_wecom_plugin.py -q`（5 passed）、compileall、Ruff 和 `git diff --check` 通过。尚未接助手 Graph Session，也未进行真实企业微信连接或 provider 端到端验收，对应 A23。
+
+2026-09-30：企业微信 WebSocket、旧版回调桥和 MCP 独立入口启动时统一调用 Anchor 现有 `load_dotenv()`，从当前工作目录读取 `.env`，不覆盖显式 shell 环境变量；MCP API 地址改为请求时读取，使 `.env` 生效。补充 `.env.example`、Plugin/使用说明及 WebSocket 入口配置测试。尚未使用真实企业微信凭证连接；对应 A23。
+
+2026-09-30：用户收敛近期范围为企业微信 WebSocket Plugin、助手 Graph 及必要基础能力，RSI 延后至积累足够数据。核查实际 Plugin、Graph/Node、Session/TurnStore、调度和鉴权代码，记录当前链路缺口及复用边界，更新 A24/A25；未修改运行代码。相关现有回归 `pytest tests/test_wecom_plugin.py tests/test_session.py tests/test_pilot_turns.py -q` 通过、退出码 0，`git diff --check` 通过；这些只证明原有应用 API/HTTP 回调和 Pilot 基础行为，不证明 WebSocket、多用户 Graph 或真实企业微信联动完成。
+
+2026-09-30：用户确认企业微信之外还需要支持其他平台。确定近期只抽取窄的常驻通道能力：平台适配器负责协议、签名/加密和平台收发，通道层负责连接生命周期、事件去重与投递状态，Graph/Plugin 负责会话和业务；不把 MCP 工具生命周期当作长连接宿主。记录 WebSocket 的重连、单连接、重复事件、速率和回复窗口边界，以及个人微信不能默认视为官方可接入机器人平台。暂未修改运行代码或声称跨平台能力已实现。
+
+2026-09-30：核查飞书与普通个人微信的官方公开能力。飞书开放平台有 WebSocket 长连接接收事件入口；微信公开文档的公众号/微信客服能力使用 HTTP 推送和 API，未找到普通个人微信号的官方机器人 WebSocket 接口。补充官方文档链接及主体边界说明；未修改运行代码或宣称飞书/微信适配器已实现。
+
+2026-09-30：用户明确 Anchor 的目标为多用户并发工作中枢，助手通过 Graph 调用 Plugin，并从独立落盘的工作记录整理经验，改进 Plugin、Graph 及 Anchor 内部实现。产品架构新增需求章节，区分已确认目标、建议方案、发布授权和工程验证缺口；新增 A24/A25。仅完成需求记录，未修改运行代码、触发业务操作或宣称多用户/RSI 已实现。
 
 2026-09-28 服务恢复记录：用户报告无法打开 5173，现场确认 5173/8077 均无进程监听；使用 `./scripts/dev.sh start` 启动现有前后端，本机首页及 Graph、时间线、Session 代理接口均返回 HTTP 200。日志未能确定此前进程退出原因；未改产品代码，未将此次访问检查计为 provider 或停机恢复验收。对应 A18。
 

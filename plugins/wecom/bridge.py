@@ -13,6 +13,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 from xml.etree import ElementTree
 
+from anchor.runtime.secrets import load_dotenv
+
 
 def _env(name: str) -> str:
     value = os.environ.get(name, "").strip()
@@ -116,6 +118,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
+    load_dotenv()
     host = os.environ.get("WECOM_LISTEN_HOST", "127.0.0.1")
     port = int(os.environ.get("WECOM_LISTEN_PORT", "8090"))
     ThreadingHTTPServer((host, port), Handler).serve_forever()

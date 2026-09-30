@@ -10,7 +10,9 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-API_BASE = os.environ.get("WECOM_API_BASE_URL", "https://qyapi.weixin.qq.com").rstrip("/")
+from anchor.runtime.secrets import load_dotenv
+
+API_BASE = "https://qyapi.weixin.qq.com"
 _token_lock = threading.Lock()
 _token: tuple[str, float] | None = None
 
@@ -24,7 +26,8 @@ def _config(name: str) -> str:
 
 def _json_request(path: str, *, params: dict[str, str] | None = None,
                   body: dict | None = None) -> dict:
-    url = f"{API_BASE}{path}"
+    api_base = os.environ.get("WECOM_API_BASE_URL", API_BASE).rstrip("/")
+    url = f"{api_base}{path}"
     if params:
         url += "?" + urllib.parse.urlencode(params)
     data = json.dumps(body, ensure_ascii=False).encode() if body is not None else None
@@ -132,6 +135,7 @@ def _handle(message: dict) -> dict | None:
 
 
 def main() -> None:
+    load_dotenv()
     for line in sys.stdin:
         message = None
         try:

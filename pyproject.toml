@@ -35,6 +35,7 @@ anchor-serve = "anchor.__main__:main"
 
 [project.optional-dependencies]
 mcp = ["pydantic-ai-slim[mcp]==2.46.0"]
+channels = ["wecom-aibot-python-sdk==1.0.2"]
 dev = [
     "pytest>=8,<9",
     # The suite runs real sandboxes and fault injection; most of its wall time is a handful of tests.

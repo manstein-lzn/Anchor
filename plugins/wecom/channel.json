@@ -1,0 +1,14 @@
+{
+  "platform": "wecom",
+  "transport": "websocket",
+  "entrypoint": "ws_gateway.py",
+  "description": "企业微信智能机器人 WebSocket 长连接适配器",
+  "required_environment": [
+    "WECOM_BOT_ID",
+    "WECOM_BOT_SECRET",
+    "WECOM_CHANNEL_STATE",
+    "ANCHOR_CHANNEL_WEBHOOK_URL",
+    "ANCHOR_API_KEY"
+  ],
+  "sdk": "wecom-aibot-python-sdk==1.0.2"
+}
