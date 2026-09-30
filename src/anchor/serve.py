@@ -910,6 +910,7 @@ class Scheduler:
         return self.save(name, definition or _starter_graph(name))
 
     def resume_all(self) -> None:
+        self._recover_admissions()
         """Pick up anything a previous process left running. The whole of recovery."""
         for workspace in self.workspaces():
             runs = sorted((workspace / "runs").glob("*/run.json")) if (workspace / "runs").is_dir() else []
@@ -939,6 +940,24 @@ class Scheduler:
                                        None, state.get("trigger")),
                                  daemon=True).start()
 
+    def _recover_admissions(self) -> None:
+        """Find accepted child admissions whose native state was not yet visible at crash time."""
+        for workspace in self.workspaces():
+            for admission in (workspace / "runs").glob("*/admission.json"):
+                try:
+                    record = json.loads(admission.read_text(encoding="utf-8"))
+                    child = admission.parent
+                    if not (child / "run.json").exists():
+                        definition = record["definition"]
+                        graph = graph_module.parse(definition)
+                        _write = getattr(__import__("anchor.graph_calls", fromlist=["_write"]), "_write")
+                        _write(child / "graph.json", definition)
+                        runner.RunState(objective=graph.objective, started=runner._now(),
+                                        input=record.get("input", {}), trigger=record["trigger"]).save(child)
+                    self.graph_calls.start(workspace, admission.parent.name)
+                except (OSError, ValueError, KeyError, json.JSONDecodeError):
+                    continue
+
     def _run(self, workspace: Path, run_id: str, objective: str | None,
              resume: bool = False, run_input: dict | None = None,
              trigger: dict | None = None) -> None:
@@ -967,10 +986,18 @@ class Scheduler:
             run_dir = workspace / "runs" / run_id
             if (run_dir / "run.json").exists():
                 state = runner.RunState.load(run_dir)
+                state.error = f"{type(exc).__name__}: {exc}"
                 if state.status == "running":
                     state.status = "interrupted"
-                    state.error = f"{type(exc).__name__}: {exc}"
-                    state.save(run_dir)
+                admission = run_dir / "admission.json"
+                if admission.exists():
+                    record = json.loads(admission.read_text(encoding="utf-8"))
+                    if record.get("session_pending"):
+                        record["delivery_error"] = state.error
+                        record["session_pending"] = False
+                        from anchor.graph_calls import _write
+                        _write(admission, record)
+                state.save(run_dir)
         finally:
             with self.lock:
                 if self.running.get(workspace.name) == run_id:
@@ -1434,8 +1461,8 @@ class Handler(BaseHTTPRequestHandler):
         if parts == ["channel-sessions"]:
             return self._send(json.dumps({"sessions": [
                 {"id": item.id, "title": item.title, "graph": item.graph,
-                 "platform": item.channel.get("platform", "")}
-                for item in self.scheduler.sessions.list() if item.graph]}, ensure_ascii=False))
+                 "platform": item.channel.get("source", item.channel.get("platform", ""))}
+                for item in self.scheduler.sessions.list() if item.graph and item.status != "archived"]}, ensure_ascii=False))
         if parts == ["sessions"]:
             return self._send(*self.scheduler.sessions_list())
         if len(parts) == 3 and parts[0] == "sessions" and parts[2] == "turns":
@@ -1559,11 +1586,6 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(json.dumps({"error": "provide a message or resume: true"}), 400)
             return self._send(*self.scheduler.create_turn(
                 parts[1], body.get("request_id"), None if resume else body["message"]))
-        if parts == ["channel-sessions"]:
-            return self._send(json.dumps({"sessions": [
-                {"id": item.id, "title": item.title, "graph": item.graph,
-                 "platform": item.channel.get("platform", "")}
-                for item in self.scheduler.sessions.list() if item.graph]}, ensure_ascii=False))
         if parts == ["sessions"]:
             body = self._body()
             if body is None:

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import json
 import shutil
 import threading
@@ -21,6 +22,9 @@ def _write(path: Path, value: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     staged = path.with_suffix(path.suffix + ".incoming")
     staged.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    with staged.open("r+b") as stream:
+        stream.flush()
+        os.fsync(stream.fileno())
     staged.replace(path)
 
 
