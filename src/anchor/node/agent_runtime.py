@@ -7,6 +7,7 @@ that completes an AgentNode and is persisted before control returns to the sched
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -42,7 +43,7 @@ class _CountingModel(WrapperModel):
     allowed: int | None = None
     cancelled: Callable[[], bool] | None = None
 
-    async def request(self, messages: Any, model_settings: Any, model_request_parameters: Any) -> Any:
+    def _charge(self) -> None:
         # A killed command comes back as an ordinary failure, so the loop would ask the provider again
         # and retry its way to a different verdict. Asking after the operator stopped is a request
         # nobody wants and nobody is paying for; cancelling here ends the pass instead.
@@ -52,7 +53,18 @@ class _CountingModel(WrapperModel):
         if self.control is not None:
             from anchor.node.recovery import charge_request
             charge_request(Path(str(self.control)), self.allowed)
+
+    async def request(self, messages: Any, model_settings: Any, model_request_parameters: Any) -> Any:
+        self._charge()
         return await super().request(messages, model_settings, model_request_parameters)
+
+    @asynccontextmanager
+    async def request_stream(self, messages: Any, model_settings: Any,
+                             model_request_parameters: Any, run_context: Any = None):
+        self._charge()
+        async with super().request_stream(
+                messages, model_settings, model_request_parameters, run_context) as stream:
+            yield stream
 
 
 @dataclass

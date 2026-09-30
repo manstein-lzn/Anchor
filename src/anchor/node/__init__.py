@@ -114,6 +114,19 @@ class NodeRequest:
     not permission to replay or resume the previous execution.
     """
 
+    prompt_images: tuple[tuple[bytes, str], ...] = ()
+    """Validated image bytes and MIME types supplied by the trusted caller as native model input."""
+
+    on_output: Callable[[str], None] | None = None
+    """Receive cumulative, provisional structured completion summaries while the model streams.
+
+    Only the user-facing `final_result.summary` is exposed, never reasoning, plain assistant text,
+    or other tool arguments. Completion and route validation still happen at the end of the run.
+    """
+
+    toolsets: tuple[Any, ...] = ()
+    """Additional framework toolsets assembled and scoped by the trusted caller."""
+
     @property
     def node_key(self) -> str:
         """The node's name in the framework's own vocabulary, and **not always `execution_id`**.

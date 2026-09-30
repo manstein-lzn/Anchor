@@ -21,8 +21,9 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
-from pydantic_ai import ModelRequestNode, UsageLimits
-from pydantic_ai.messages import ModelMessagesTypeAdapter, ModelRequest, ModelResponse
+from pydantic_core import from_json
+from pydantic_ai import BinaryContent, ModelRequestNode, UsageLimits
+from pydantic_ai.messages import ModelMessagesTypeAdapter, ModelRequest, ModelResponse, ToolCallPart
 from pydantic_ai.exceptions import UsageLimitExceeded
 
 from anchor.node import (BUDGET_EXHAUSTED, COMPLETED, FAILED, UNCERTAIN, NodeOutcome,
@@ -327,6 +328,76 @@ def _conversation_capabilities(request: NodeRequest, capabilities: tuple[Any, ..
     return (*capabilities, SlidingWindowCompaction(max_messages=200, keep_messages=40))
 
 
+def _supports_streaming(model: Any) -> bool:
+    """Only fall back for models explicitly lacking streaming, never after a provider error."""
+    from pydantic_ai.models import Model
+    from pydantic_ai.models.function import FunctionModel
+    from pydantic_ai.models.wrapper import WrapperModel
+
+    while isinstance(model, WrapperModel):
+        model = model.wrapped
+    if isinstance(model, FunctionModel):
+        return model.stream_function is not None
+    return type(model).request_stream is not Model.request_stream
+
+
+def _streamed_summary(response: ModelResponse) -> str | None:
+    """Project only the output tool's summary without invoking completion validators.
+
+    Partial JSON parsing also decodes escaped characters correctly. These previews cannot persist
+    a completion fact: the framework validates the complete response after the stream is drained.
+    """
+    for part in response.parts:
+        if not isinstance(part, ToolCallPart) or part.tool_name != "final_result":
+            continue
+        try:
+            args = (from_json(part.args, allow_partial="trailing-strings")
+                    if isinstance(part.args, str) else part.args)
+        except ValueError:
+            continue
+        summary = args.get("summary") if isinstance(args, dict) else None
+        if isinstance(summary, str) and summary:
+            return summary
+    return None
+
+
+async def _stream_node(node: ModelRequestNode, run: Any, request: NodeRequest,
+                       last_output: str | None) -> str | None:
+    assert request.on_output is not None
+    async with node.stream(run.ctx) as stream:
+        async for response in stream.stream_response(debounce_by=None):
+            if request.cancelled is not None and request.cancelled():
+                raise asyncio.CancelledError()
+            summary = _streamed_summary(response)
+            if summary is not None and summary != last_output:
+                request.on_output(summary)
+                last_output = summary
+    return last_output
+
+
+def _prompt(request: NodeRequest) -> str | list[Any]:
+    if not request.prompt_images:
+        return request.task
+    return [request.task, *(BinaryContent(data=data, media_type=media_type)
+                            for data, media_type in request.prompt_images)]
+
+
+async def _walk_run(run: Any, request: NodeRequest, wiring: _Wiring, model: Any) -> str | None:
+    stream_output = request.on_output is not None and _supports_streaming(model)
+    last_output: str | None = None
+    async for node in run:
+        if request.trace is not None:
+            pending = (node.request if isinstance(node, ModelRequestNode) and
+                       any(getattr(part, "part_kind", "") in ("tool-return", "retry-prompt")
+                           for part in node.request.parts) else None)
+            _write_trace(request.trace, list(run.all_messages()), wiring, formed=pending)
+        if stream_output and isinstance(node, ModelRequestNode):
+            last_output = await _stream_node(node, run, request, last_output)
+        # Drain each model response before the framework validates and persists completion.
+        # Structured output ends the run naturally without another provider request.
+    return last_output
+
+
 async def run_node(request: NodeRequest, *, model: Any,
                    capabilities: tuple[Any, ...] = (),
                    recovery_store: Path | None = None) -> NodeOutcome:
@@ -410,21 +481,15 @@ async def run_node(request: NodeRequest, *, model: Any,
 
         from contextlib import AsyncExitStack
         from anchor.node.mcp import toolsets_for
-        toolsets = toolsets_for(request.mcp_servers, wiring.sandbox, interactive=request.mcp_auth)
+        toolsets = [*toolsets_for(request.mcp_servers, wiring.sandbox, interactive=request.mcp_auth),
+                    *request.toolsets]
         async with AsyncExitStack() as stack:
             for capability in toolsets:
                 await stack.enter_async_context(capability)
-            async with agent.iter(request.task, deps=wiring, usage_limits=limits,
+            async with agent.iter(_prompt(request), deps=wiring, usage_limits=limits,
                                   message_history=history,
                                   conversation_id=conversation, toolsets=toolsets) as run:
-                async for node in run:
-                    if request.trace is not None:
-                        pending = (node.request if isinstance(node, ModelRequestNode) and
-                                   any(getattr(part, "part_kind", "") in ("tool-return", "retry-prompt")
-                                       for part in node.request.parts) else None)
-                        _write_trace(request.trace, list(run.all_messages()), wiring, formed=pending)
-                    # Structured output ends the PydanticAI run naturally. There is no shell sentinel to
-                    # intercept and no extra model request after the completion validator has persisted it.
+                last_output = await _walk_run(run, request, wiring, counted)
 
         messages = list(run.all_messages())
         done = wiring.done
@@ -433,6 +498,8 @@ async def run_node(request: NodeRequest, *, model: Any,
             # so this is a pass that stopped for a reason that is not a completion — and calling it
             # one is the failure this whole design exists to refuse.
             raise RuntimeError("the run ended without a submission")
+        if request.on_output is not None and done.submission != last_output:
+            request.on_output(done.submission)
         outcome = NodeOutcome(
             status=COMPLETED, submission=done.submission, route=done.route,
             model_requests=counted.requests - already, files=_files(request.workspace))
