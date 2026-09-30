@@ -20,11 +20,23 @@ const duration = (ms: number) => {
   const minutes = Math.floor(seconds / 60);
   return minutes < 60 ? `${minutes} 分钟` : `${Math.floor(minutes / 60)} 小时 ${minutes % 60} 分`;
 };
-const graphColors = ['#2f7f9f', '#8e5aa9', '#cf7c3a', '#3b8d68', '#c45d66', '#5273b5', '#b06b90', '#6c8d47'];
-const graphColor = (name: string) => {
-  let hash = 0;
-  for (const char of name) hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
-  return graphColors[hash % graphColors.length];
+export const graphColor = (name: string) => {
+  // Use the full 32-bit hash as a hue instead of indexing a short palette. This keeps a Graph's
+  // color stable across refreshes while avoiding collisions such as `assistant` and `weekly-report`
+  // landing in the same eight-color slot.
+  let hash = 2166136261;
+  for (const char of name) hash = Math.imul(hash ^ char.charCodeAt(0), 16777619) >>> 0;
+  // Avalanche the final value so names with a shared prefix/suffix don't remain adjacent in hue.
+  hash ^= hash >>> 16;
+  hash = Math.imul(hash, 0x85ebca6b) >>> 0;
+  hash ^= hash >>> 13;
+  hash = Math.imul(hash, 0xc2b2ae35) >>> 0;
+  hash ^= hash >>> 16;
+  const hue = (hash / 0x100000000) * 360;
+  // Use the comma form for compatibility with older embedded/enterprise browsers. If a browser
+  // rejects the newer space-separated HSL syntax, the custom property falls back to one default
+  // color and makes otherwise distinct Graphs look identical.
+  return `hsl(${hue.toFixed(2)}, 52%, 42%)`;
 };
 const runStatus = (run: OurRun) => run.running ? 'running' : run.status;
 const needsAttention = (status: string) => ['failed', 'interrupted', 'uncertain'].includes(status) || status.startsWith('missed_');

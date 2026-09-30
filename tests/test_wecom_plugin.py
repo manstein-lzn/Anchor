@@ -29,6 +29,17 @@ def test_wecom_plugin_manifest_and_mcp_schema(monkeypatch):
     server = dict(library.mcp_servers("wecom"))["wecom"]
     assert server["env"] == {"WECOM_CORP_ID": "corp", "WECOM_AGENT_ID": "7", "WECOM_SECRET": "secret",
                               "WECOM_API_BASE_URL": "https://qyapi.weixin.qq.com"}
+    assert record["channels"][0]["platform"] == "wecom"
+    assert record["channels"][0]["transport"] == "websocket"
+
+
+def test_wecom_channel_can_mount_with_bot_credentials_only(monkeypatch):
+    root = Path(__file__).parents[1]
+    for key in ("WECOM_CORP_ID", "WECOM_AGENT_ID", "WECOM_SECRET"):
+        monkeypatch.delenv(key, raising=False)
+    attached = Library(root).attach(("wecom",))
+    assert attached.mcp_servers == ()
+    assert attached.records[0]["channels"][0]["platform"] == "wecom"
 
 
 def test_wecom_mcp_sends_text_and_reuses_token(monkeypatch):
@@ -142,3 +153,115 @@ def test_wecom_websocket_normalizes_text_message():
     assert event.sender_id == "alice"
     assert event.conversation_id == "alice"
     assert event.text == "hello"
+
+
+def test_wecom_websocket_normalizes_media_and_mixed_messages():
+    module = _load("wecom_ws_media", Path(__file__).parents[1] / "plugins/wecom/ws_gateway.py")
+    image = module.normalize_message({
+        "cmd": "aibot_msg_callback", "headers": {"req_id": "request-image"},
+        "body": {"msgid": "image-1", "msgtype": "image", "from": {"userid": "alice"},
+                 "image": {"url": "https://example.test/image", "aeskey": "key"}},
+    })
+    assert image is not None and image.text == "" and image.attachments == ({"kind": "image"},)
+    mixed = module.normalize_message({
+        "cmd": "aibot_msg_callback", "headers": {"req_id": "request-mixed"},
+        "body": {"msgid": "mixed-1", "msgtype": "mixed", "from": {"userid": "alice"},
+                 "mixed": {"msg_item": [
+                     {"msgtype": "text", "text": {"content": "看这张图"}},
+                     {"msgtype": "image", "image": {"url": "https://example.test/image", "aeskey": "key"}},
+                 ]}},
+    })
+    assert mixed is not None and mixed.text == "看这张图"
+    assert mixed.attachments == ({"kind": "image"},)
+
+
+def test_wecom_websocket_downloads_and_decrypts_media_to_event_directory(tmp_path):
+    import asyncio
+
+    module = _load("wecom_ws_download", Path(__file__).parents[1] / "plugins/wecom/ws_gateway.py")
+    frame = {"cmd": "aibot_msg_callback", "headers": {"req_id": "request-image"},
+             "body": {"msgid": "image-1", "msgtype": "image", "from": {"userid": "alice"},
+                      "image": {"url": "https://example.test/image", "aeskey": "key"}}}
+    event = module.normalize_message(frame)
+
+    class Client:
+        async def download_file(self, url, aes_key):
+            assert url.endswith("/image") and aes_key == "key"
+            return b"image-bytes", "原图.jpg"
+
+    downloaded = asyncio.run(module._download_attachments(
+        event, frame, Client(), tmp_path / "state" / "events.sqlite"))
+    assert downloaded.attachments[0]["kind"] == "image"
+    path = Path(downloaded.attachments[0]["path"])
+    assert path.read_bytes() == b"image-bytes" and path.parent.name == module.hashlib.sha256(b"image-1").hexdigest()
+
+
+def test_wecom_stdio_entrypoint_runs_without_host_anchor_imports(tmp_path, monkeypatch):
+    import subprocess
+    from anchor.runtime.execenv import NodeSandbox
+
+    root = Path(__file__).parents[1]
+    for key, value in {"WECOM_CORP_ID": "corp", "WECOM_AGENT_ID": "7", "WECOM_SECRET": "secret"}.items():
+        monkeypatch.setenv(key, value)
+    server = dict(Library(root).mcp_servers("wecom"))["wecom"]
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+    sandbox = NodeSandbox(workspace, "assistant", False, 10)
+    command, args = sandbox.isolated_process(
+        ("/usr/bin/python3", "server.py"), plugin_id="wecom", plugin_dir=root / "plugins/wecom",
+        cwd=root / "plugins/wecom", env=server["env"])
+    requests = [{"jsonrpc": "2.0", "id": 1, "method": "initialize"},
+                {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}]
+    completed = subprocess.run([command, *args], input="\n".join(json.dumps(q) for q in requests) + "\n",
+                               capture_output=True, text=True, timeout=10)
+    assert completed.returncode == 0, completed.stderr
+    replies = [json.loads(line) for line in completed.stdout.splitlines()]
+    assert replies[0]["result"]["serverInfo"]["name"] == "wecom"
+    assert {tool["name"] for tool in replies[1]["result"]["tools"]} == {
+        "wecom_send_text", "wecom_send_markdown", "wecom_get_user"}
+
+
+def test_channel_supervisor_starts_one_declared_daemon_restarts_and_stops(tmp_path, monkeypatch):
+    import time
+    from anchor.channel.supervisor import ChannelSupervisor
+
+    plugin = tmp_path / "library/plugins/loop-channel"
+    plugin.mkdir(parents=True)
+    (plugin / "plugin.json").write_text(json.dumps({"name": "Loop channel", "description": "test"}))
+    (plugin / "channel.json").write_text(json.dumps({
+        "platform": "loop", "transport": "websocket", "entrypoint": "daemon.py",
+        "required_environment": ["LOOP_TOKEN", "LOOP_MARKER"],
+    }))
+    (plugin / "daemon.py").write_text(
+        "import os, time\nfrom pathlib import Path\n"
+        "Path(os.environ['LOOP_MARKER']).write_text(os.environ.get('MODEL_SECRET', 'missing'))\n"
+        "while True: time.sleep(0.1)\n")
+    workspace = tmp_path / "workspaces/assistant"
+    workspace.mkdir(parents=True)
+    (workspace / "graph.json").write_text(json.dumps({
+        "objective": "test", "agents": {"assistant": {"model": "models.default"}},
+        "nodes": [{"id": "assistant", "agent": "assistant", "plugins": ["loop-channel"]}],
+        "edges": [],
+    }))
+    marker = tmp_path / "daemon-env"
+    monkeypatch.setenv("LOOP_TOKEN", "allowed")
+    monkeypatch.setenv("LOOP_MARKER", str(marker))
+    monkeypatch.setenv("MODEL_SECRET", "must-not-leak")
+    supervisor = ChannelSupervisor(tmp_path, Library(tmp_path / "library"), lambda: [workspace],
+                                   callback_url="http://127.0.0.1:1/events", api_key="k" * 40)
+    supervisor.start()
+    try:
+        deadline = time.monotonic() + 5
+        while not marker.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert marker.read_text() == "missing"
+        first = supervisor.processes["loop"].pid
+        supervisor.processes["loop"].terminate()
+        deadline = time.monotonic() + 5
+        while ("loop" not in supervisor.processes or supervisor.processes["loop"].pid == first) \
+                and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert supervisor.processes["loop"].pid != first
+    finally:
+        supervisor.stop()
+    assert supervisor.processes == {}

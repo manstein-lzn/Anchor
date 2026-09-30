@@ -288,11 +288,9 @@ ln -s "$PWD/plugins/academic-research" .local/demo/library/plugins/academic-rese
 
 在图编排中选中 AgentNode，刷新 Plugin 列表、查看说明、勾选能力并保存。新示例为 [plugin-research.json](../examples/graphs/plugin-research.json)。旧图不会自动获得 Plugin；已有研究工作流的节点配置由用户明确选择，不自动迁移运行历史。
 
-企业微信接入使用仓库中的 `plugins/wecom`。将它登记到数据根目录的 `library/plugins/wecom` 后，在 Graph 的 AgentNode 上选择该 Plugin。凭证和地址统一配置在仓库根目录 `.env`，可从 `.env.example` 复制；Anchor 服务和三个独立企业微信入口都会读取它，已有 shell 环境变量优先。MCP 应用 API 使用 `WECOM_CORP_ID`、`WECOM_AGENT_ID`、`WECOM_SECRET`。智能机器人长连接使用官方 SDK：安装 `pip install 'anchor-agent-product[channels]'`，在 `.env` 配置 `WECOM_BOT_ID`、`WECOM_BOT_SECRET`、`WECOM_CHANNEL_STATE`、`ANCHOR_CHANNEL_WEBHOOK_URL`、`ANCHOR_API_KEY`，运行 `python plugins/wecom/ws_gateway.py`。回调服务应接收规范化的 `{"event": ...}`，返回 `{"text": "..."}` 或 `{"reply": "..."}`；它不是现有 Graph Webhook 的直接替代，助手 Graph 的会话绑定接口仍在后续接线。自建应用旧版 HTTP 回调配置 `WECOM_TOKEN`、`WECOM_ENCODING_AES_KEY`、`ANCHOR_WEBHOOK_URL` 后运行 `python plugins/wecom/bridge.py`。真实企业微信凭证和公网连接尚未在本仓库验收。
+企业微信助手通过普通 Graph 执行，支持按用户隔离的历史、同图并发和新消息取消旧任务后接续。长连接网关和 Anchor 均可部署在 Linux，客户端无需同机。完整 `.env`、安装、自检、启动和私聊验收步骤见 [企业微信助手接入](wecom-assistant.md)。
 
-服务默认使用 `<root>/library`。CLI 对 `<root>/workspaces/<graph>` 自动找到相同位置；独立目录运行时可用 `anchor-graph ... --library /absolute/path/to/library` 指定。资源不可用时修正库中的定义，不在节点工作区补装另一份。
-
-运行详情中的 Plugin 页显示本次解析记录。共享说明和工具在运行期间保持不变；修改资源后开始新运行。这个记录不等于工具调用清单，实际命令在对话中查看。
+默认助手不挂业务 Plugin；可在节点上添加已登记的 Plugin。机器人 Bot ID/Secret 用于长连接，自建应用的 Corp ID/Agent ID/Secret 用于可选 MCP 消息与成员 API。企业微信审批接口尚未实现。真实模型/Graph/本地 Plugin 验收与真实企业微信公网联动分开记录。
 
 ## 深度学术调研图
 

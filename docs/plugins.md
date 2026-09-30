@@ -21,6 +21,6 @@ stdio 工具发现和调用已在真实 Bubblewrap MCP server 测试中通过，
 
 ## 企业微信
 
-仓库中的 [`plugins/wecom`](../plugins/wecom/) 现在包含两种入口：`server.py` 通过 stdio MCP 提供 `wecom_send_text`、`wecom_send_markdown` 和 `wecom_get_user`；`ws_gateway.py` 使用官方 `wecom-aibot-python-sdk` 建立智能机器人 WebSocket 长连接，规范化消息并向 `ANCHOR_CHANNEL_WEBHOOK_URL` 转发。连接进程不是 Agent 或 Anchor MCP 自动启动的；由常驻服务单独管理。`bridge.py` 保留为自建应用旧版 HTTP 回调桥，负责签名校验、XML 解密和 Graph Webhook 转换。
+仓库中的 [`plugins/wecom`](../plugins/wecom/) 现在包含两种入口：`server.py` 通过 stdio MCP 提供 `wecom_send_text`、`wecom_send_markdown` 和 `wecom_get_user`；`ws_gateway.py` 使用官方 `wecom-aibot-python-sdk` 建立智能机器人 WebSocket 长连接，规范化消息并向 Anchor 通道端点转发。`channel.json` 是服务级通道声明；当 Graph 节点挂载此 Plugin 时，Anchor 的 `ChannelSupervisor` 自动启动并监管网关进程，不在每个 Graph Run 内重复连接。图片、文件和混合消息会先下载到通道状态目录，再以只读附件挂载给 Graph。`bridge.py` 保留为自建应用旧版 HTTP 回调桥，负责签名校验、XML 解密和 Graph Webhook 转换。
 
-凭证和连接配置统一写在仓库根目录 `.env`，可从 `.env.example` 复制。WebSocket 需要 `WECOM_BOT_ID`、`WECOM_BOT_SECRET`、`WECOM_CHANNEL_STATE`、`ANCHOR_CHANNEL_WEBHOOK_URL` 和 `ANCHOR_API_KEY`；MCP 应用 API 使用 `WECOM_CORP_ID`、`WECOM_AGENT_ID`、`WECOM_SECRET`，旧版回调桥使用 `WECOM_TOKEN`、`WECOM_ENCODING_AES_KEY` 和 `ANCHOR_WEBHOOK_URL`。三个独立入口启动时都会加载当前工作目录的 `.env`，已有 shell 环境变量优先。安装 WebSocket 依赖后运行 `python plugins/wecom/ws_gateway.py`。当前测试覆盖事件规范化、SQLite 去重/失败重试、本地 API 夹具、MCP JSON-RPC、AES 回调解密和 Anchor Webhook 转换；尚未使用真实企业微信凭证完成端到端验证。
+凭证与连接配置统一写在根目录 `.env`，显式 shell 环境变量优先。智能机器人长连接负责平台收发，Anchor 按允许名单把私聊接到指定普通 Graph；Graph 节点使用既有 Plugin 机制查询或操作业务系统。每个用户独立维护原生历史，新消息可以取消旧 Run 并接续。默认 Graph 不挂自建应用 MCP，因此基础聊天仅需 Bot ID/Secret，无需 Corp ID/Agent ID/Secret。安装、自检和接入步骤见 [企业微信助手接入](wecom-assistant.md)。真实 provider + 本地 Graph/Plugin 已验证，真实企业微信公网私聊待用户凭证后验证。

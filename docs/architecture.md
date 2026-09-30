@@ -98,7 +98,7 @@ Agent 完成由 PydanticAI 校验的结构化结果表示（`summary`，多出�
 
 沙箱默认不联网；Agent 或 Op 的 `network: true` 显式启用网络。工作区之外的工具与输入只读，沙箱不可用时不退回宿主机裸执行。节点执行记录和恢复控制文件位于工作区之外。
 
-长驻平台通道不随 AgentNode 的 MCP 生命周期启动。通道适配器（当前为 `plugins/wecom/ws_gateway.py`）维护平台连接，把可信平台事件转换为 `ChannelEvent`，由 `EventLedger` 记录认领、完成和失败；助手 Graph 的会话绑定和回复编排仍由服务层接入。通道适配器的真实平台连接不计作 Graph/Plugin provider 端到端验收。
+长驻平台通道不运行在 AgentNode 的 MCP 生命周期内。Plugin 的 `channel.json` 由 Library 识别；Anchor 服务启动后由 `ChannelSupervisor` 扫描 Graph 节点挂载，按平台只启动一个受监管的 WebSocket 子进程，服务退出时停止它。`plugins/wecom/ws_gateway.py` 用 SDK 维护长连接，把可信事件转换为 `ChannelEvent`，用 `EventLedger` 去重并保存回复。`POST /v1/channels/wecom/events` 按配置的 Graph、回复节点和来源/成员/会话建立独立 Session/Turn；直接调用既有普通 Graph runner，不调用 Pilot。Pilot 与通道共享 Session 持久化实现，但 `/sessions` 只列出没有 Graph/通道绑定的 Pilot 会话，避免企业微信聊天混入 Pilot 会话选择器。`.env` 的 `ANCHOR_WECOM_USERS` 默认拒绝，平台不能选择 Graph 或 Plugin。每条消息对应独立 Run，同一会话新消息取消旧 Run 并等待其退出后接上原生 FileStepStore / continue_run；不同用户的同一 Graph 可以并发。文本、图片、文件和混合消息的附件由网关下载到 `state/channels/wecom/events/<event>`，Graph 以只读 `/in/channel` 读取，路径经过服务端目录校验。按节点查找最近可读历史，上一轮产物及取消时未完成工作通过只读 `/previous` 传递。旧事件重投不重跑，已被新消息替代的回复不回传业务答案；外部副作用不回滚。Run 状态原子发布，Graph 修改/删除及历史 Run 删除受活动执行保护。API 鉴权沿用 `ANCHOR_API_KEYS`，网关使用其中一把密钥。默认 Graph 不挂业务 Plugin，挂载后仍走原有沙箱和工具边界；企业微信审批 API 未实现。图片是否能被模型直接视觉理解取决于后续模型/Plugin 的多模态能力，当前契约保证安全下载、落盘和只读访问。配置与真实验收边界见 [企业微信助手接入](wecom-assistant.md)。
 
 ## 学术调研与 Plugin 接入
 

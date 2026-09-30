@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Anchor, LoaderCircle } from 'lucide-react';
 import { Markdown } from './markdown';
-import { bearerKey, setBearerKey } from './api';
+import { bearerKey, requestApiKey, setBearerKey } from './api';
 
 export type Turn = { id: string; session: string; request_id?: string; status: string; error: string; created_at: string; prompt: string | null };
 type Tool = { id: string; name: string; input?: unknown; output?: unknown; status: string; inputSize?: number };
@@ -81,7 +81,7 @@ export function PilotTurn({ turn, saved = false, onComplete }: { turn: Turn; sav
           });
           if (ended) return;
           if (response.status === 401) {
-            const entered = window.prompt('请输入 Anchor API key') ?? '';
+            const entered = await requestApiKey();
             if (!entered) { setConnection('需要 API key 才能读取执行记录。'); return; }
             setBearerKey(entered); continue;
           }

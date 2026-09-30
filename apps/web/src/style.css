@@ -252,6 +252,11 @@ details.note .markdown { padding: 8px 10px; }
   border: 1px solid var(--line); border-radius: 6px; background: #fff;
 }
 .modal-actions { display: flex; justify-content: flex-end; margin-top: 11px; }
+.api-key-form { display: grid; gap: 10px; }
+.api-key-form p { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.5; }
+.api-key-form label { font-size: 12px; }
+.api-key-form input { min-width: 0; width: 100%; padding: 9px; border: 1px solid var(--line); border-radius: 6px; }
+.api-key-form .modal-actions { gap: 8px; }
 .modal-actions button {
   font: inherit; padding: 5px 16px; cursor: pointer; font-weight: 600;
   border: 1px solid var(--accent); border-radius: 6px; background: #eaf3f1; color: var(--accent);
@@ -409,8 +414,8 @@ input[type=checkbox] { accent-color: var(--accent); }
 .graph-run-history > button:focus-visible, .graph-run-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .graph-run-row { display: grid; grid-template-columns: 8px minmax(130px, 1fr) minmax(90px, .8fr) auto; align-items: center; gap: 9px; width: 100%; min-width: 0; padding: 8px 7px; border: 1px solid transparent; border-radius: 7px; background: #fff; color: var(--ink); text-align: left; cursor: pointer; }
 .graph-run-row:hover, .graph-run-row:focus-visible { border-color: #bed7c6; background: #f5faf6; outline: none; }
-.run-status-dot { width: 7px; height: 7px; border-radius: 50%; background: #7d9587; }
-.run-status-dot.running { background: #208461; box-shadow: 0 0 0 3px #2084611f; }
+.run-status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--graph-color, #7d9587); }
+.run-status-dot.running { background: var(--graph-color, #208461); box-shadow: 0 0 0 3px color-mix(in srgb, var(--graph-color, #208461) 15%, transparent); }
 .run-status-dot.failed, .run-status-dot.interrupted, .run-status-dot.stopped { background: #c55b56; }
 .graph-run-row-main { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
 .graph-run-row-main strong, .graph-run-row-main small, .graph-run-row-id { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

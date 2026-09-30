@@ -27,7 +27,9 @@ async function freePort() {
 
 function startServer(root: string, config: string, port: number) {
   return spawn(join(repo, '.venv/bin/python'), ['-m', 'anchor', '--root', root, '--config', config,
-    '--host', '127.0.0.1', '--port', String(port)], { cwd: repo, stdio: 'ignore' });
+    '--host', '127.0.0.1', '--port', String(port)], {
+    cwd: repo, stdio: 'ignore', env: { ...process.env, ANCHOR_API_KEYS: '', ANCHOR_API_KEY: '' },
+  });
 }
 
 test('a killed server is restarted and the same Session continues in the browser', async ({ page, request }) => {

@@ -30,6 +30,9 @@ class Session(BaseModel):
     status: SessionStatus = "active"
     waiting_reason: str = ""
     run_ids: list[str] = Field(default_factory=list)
+    graph: str = ""
+    reply_node: str = ""
+    channel: dict[str, str] = Field(default_factory=dict)
     approval: dict[str, Any] | None = None
     approvals: list[dict[str, Any]] = Field(default_factory=list)
     questions: list[dict[str, Any]] = Field(default_factory=list)
@@ -112,10 +115,12 @@ class SessionStore:
         self._atomic(self._path(session.id) / "session.json", session.model_dump_json(indent=2) + "\n")
         return session
 
-    def create(self, session_id: str | None = None) -> Session:
+    def create(self, session_id: str | None = None, *, graph: str = "", reply_node: str = "",
+               channel: dict[str, str] | None = None) -> Session:
         now = _now()
         identifier = session_id or str(uuid4())
         session = Session(id=identifier, conversation_id=identifier,
+                          graph=graph, reply_node=reply_node, channel=channel or {},
                           created_at=now, updated_at=now)
         directory = self._path(identifier)
         if directory.exists():

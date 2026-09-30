@@ -29,7 +29,9 @@ test('Plugin selection, lazy instructions and historical records work with a rea
     }));
     await writeFile(config, JSON.stringify({ models: [] }));
     server = spawn(join(repo, '.venv/bin/python'), ['-m', 'anchor', '--root', root,
-      '--config', config, '--host', '127.0.0.1', '--port', String(port)], { cwd: repo, stdio: 'ignore' });
+      '--config', config, '--host', '127.0.0.1', '--port', String(port)], {
+      cwd: repo, stdio: 'ignore', env: { ...process.env, ANCHOR_API_KEYS: '', ANCHOR_API_KEY: '' },
+    });
     await expect(async () => expect((await request.get(`${base}/plugins`)).ok()).toBeTruthy()).toPass({ timeout: 10000 });
     const response = await request.post(`${base}/graphs`, { data: { name: 'plugin-proof', definition: {
       entry: 'research', agents: { worker: { model: 'test', instructions: 'Use Plugin resources.' } },

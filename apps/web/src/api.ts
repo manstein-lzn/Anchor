@@ -8,6 +8,24 @@ export class ApiError extends Error {
   constructor(message: string, readonly status: number) { super(message); }
 }
 
+type ApiKeyPrompt = () => Promise<string>;
+let apiKeyPrompt: ApiKeyPrompt | undefined;
+let pendingApiKeyPrompt: Promise<string> | undefined;
+
+/** Register the application's accessible key dialog for API requests that receive 401. */
+export function registerApiKeyPrompt(prompt: ApiKeyPrompt): () => void {
+  apiKeyPrompt = prompt;
+  return () => { if (apiKeyPrompt === prompt) apiKeyPrompt = undefined; };
+}
+
+export function requestApiKey(): Promise<string> {
+  if (!pendingApiKeyPrompt) {
+    if (!apiKeyPrompt) return Promise.reject(new Error('需要 Anchor API key；请重新打开页面后输入密钥。'));
+    pendingApiKeyPrompt = apiKeyPrompt().finally(() => { pendingApiKeyPrompt = undefined; });
+  }
+  return pendingApiKeyPrompt;
+}
+
 export async function api<T>(path: string, method = 'GET', body?: unknown, signal?: AbortSignal): Promise<T> {
   const timeout = AbortSignal.timeout(30000);
   const send = (key: string) => fetch(path, {
@@ -20,7 +38,7 @@ export async function api<T>(path: string, method = 'GET', body?: unknown, signa
   let key = sessionStorage.getItem('anchor-api-key') ?? '';
   let response = await send(key);
   if (response.status === 401) {
-    key = window.prompt('请输入 Anchor API key') ?? '';
+    key = await requestApiKey();
     if (key) {
       sessionStorage.setItem('anchor-api-key', key);
       response = await send(key);

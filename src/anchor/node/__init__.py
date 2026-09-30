@@ -104,6 +104,16 @@ class NodeRequest:
     run_input: dict[str, Any] = field(default_factory=dict)
     """The resolved, read-only JSON input for this Graph Run."""
 
+    conversation_id: str = ""
+    """Optional external conversation identity; a new message still starts a new execution."""
+
+    previous_steps: tuple[Path, ...] = ()
+    """Prior node control directories, newest first, supplied by the trusted Graph caller.
+
+    Read through the framework's native continuation API. This is context for a new task,
+    not permission to replay or resume the previous execution.
+    """
+
     @property
     def node_key(self) -> str:
         """The node's name in the framework's own vocabulary, and **not always `execution_id`**.

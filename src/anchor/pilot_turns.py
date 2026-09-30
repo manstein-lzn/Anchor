@@ -28,6 +28,7 @@ class TurnStore:
                 CREATE TABLE IF NOT EXISTS turns (
                     id TEXT PRIMARY KEY, session TEXT NOT NULL, request_id TEXT NOT NULL,
                     prompt TEXT, status TEXT NOT NULL, error TEXT NOT NULL DEFAULT '',
+                    channel_input TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
                     UNIQUE(session, request_id)
                 );
@@ -40,6 +41,9 @@ class TurnStore:
                 );
                 CREATE INDEX IF NOT EXISTS turn_events ON events(turn, seq);
             """)
+            columns = {row["name"] for row in db.execute("PRAGMA table_info(turns)")}
+            if "channel_input" not in columns:
+                db.execute("ALTER TABLE turns ADD COLUMN channel_input TEXT NOT NULL DEFAULT ''")
 
     @contextmanager
     def connect(self):
@@ -52,7 +56,8 @@ class TurnStore:
         finally:
             db.close()
 
-    def create(self, session: str, request_id: str, prompt: str | None) -> tuple[dict, bool]:
+    def create(self, session: str, request_id: str, prompt: str | None,
+               channel_input: dict | None = None) -> tuple[dict, bool]:
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             found = db.execute("SELECT * FROM turns WHERE session=? AND request_id=?",
@@ -63,9 +68,12 @@ class TurnStore:
                 return dict(found), False
             now = _now()
             identifier = str(uuid4())
+            encoded = json.dumps(channel_input, ensure_ascii=False) if channel_input else ""
             try:
-                db.execute("INSERT INTO turns VALUES (?, ?, ?, ?, 'running', '', ?, ?)",
-                           (identifier, session, request_id, prompt, now, now))
+                db.execute("INSERT INTO turns "
+                           "(id, session, request_id, prompt, status, error, channel_input, created_at, updated_at) "
+                           "VALUES (?, ?, ?, ?, 'running', '', ?, ?, ?)",
+                           (identifier, session, request_id, prompt, encoded, now, now))
             except sqlite3.IntegrityError as exc:
                 raise ValueError("that session is already processing a message") from exc
             return dict(db.execute("SELECT * FROM turns WHERE id=?", (identifier,)).fetchone()), True

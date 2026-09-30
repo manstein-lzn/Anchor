@@ -10,7 +10,7 @@
       "env": {
         "WECOM_API_BASE_URL": "${WECOM_API_BASE_URL:-https://qyapi.weixin.qq.com}"
       },
-      "env_vars": [
+      "optional_env_vars": [
           "WECOM_CORP_ID",
           "WECOM_AGENT_ID",
         "WECOM_SECRET"

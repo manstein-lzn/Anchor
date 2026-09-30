@@ -10,7 +10,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from anchor.runtime.secrets import load_dotenv
+from pathlib import Path
 
 API_BASE = "https://qyapi.weixin.qq.com"
 _token_lock = threading.Lock()
@@ -135,7 +135,11 @@ def _handle(message: dict) -> dict | None:
 
 
 def main() -> None:
-    load_dotenv()
+    # Graph MCP processes receive only manifest-approved environment variables. They do not
+    # mount Anchor or its root .env into the sandbox. Direct CLI launches can load that file.
+    if Path(".env").is_file():
+        from anchor.runtime.secrets import load_dotenv
+        load_dotenv()
     for line in sys.stdin:
         message = None
         try:

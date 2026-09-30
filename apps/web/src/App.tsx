@@ -5,7 +5,7 @@ import {
   Anchor, Activity, CheckCheck, ChevronDown, Copy, Download, GitBranch, MessageSquare, Plus, Redo2, Save, Trash2, Undo2, Upload,
   Play, Search, SlidersHorizontal, FolderOpen, PanelLeftClose, PanelRightClose,
 } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent } from 'react';
 import { WorkflowCanvas } from './WorkflowCanvas';
 import { GraphActions } from './GraphActions';
 import { label } from './execution';
@@ -18,9 +18,9 @@ import { Plugins } from './Plugins';
 import { Workspace } from './Workspace';
 import { Pilot } from './Pilot';
 import { anchorRef, anchorTarget, type AnchorRef } from './links';
-import { api } from './api';
+import { api, registerApiKeyPrompt, setBearerKey } from './api';
 import { EmptyState, JsonDialog, Modal, ToolButton } from './ui';
-import { Timeline } from './Timeline';
+import { graphColor, Timeline } from './Timeline';
 
 const POLL_MS = 3000;
 type Pick = { kind: 'node' | 'edge' | 'agent'; id: string } | null;
@@ -71,12 +71,28 @@ export function App() {
   const [notice, setNotice] = useState<{ kind: 'ok' | 'bad'; text: string } | null>(null);
   const [problem, setProblem] = useState('');
   const [busy, setBusy] = useState(false);
+  const [apiKeyDialog, setApiKeyDialog] = useState(false);
+  const [apiKeyDraft, setApiKeyDraft] = useState('');
+  const apiKeyResolver = useRef<((key: string) => void) | null>(null);
   // Which Pilot session to go back to after opening a Graph, Run or artifact from the chat.
   const [chat, setChat] = useState('');
   const nameRef = useRef(name); nameRef.current = name;
   const upload = useRef<HTMLInputElement>(null);
   const newGraphButton = useRef<HTMLButtonElement>(null);
   const runHistory = useRef<HTMLDivElement>(null);
+
+  useEffect(() => registerApiKeyPrompt(() => new Promise(resolve => {
+    apiKeyResolver.current = resolve;
+    setApiKeyDraft('');
+    setApiKeyDialog(true);
+  })), []);
+
+  const finishApiKeyPrompt = (key: string) => {
+    if (key) setBearerKey(key);
+    apiKeyResolver.current?.(key);
+    apiKeyResolver.current = null;
+    setApiKeyDialog(false);
+  };
 
   useEffect(() => {
     const dismiss = () => runHistory.current?.hidePopover();
@@ -525,7 +541,8 @@ export function App() {
                   <div ref={runHistory} id="graph-run-history" popover="auto" className="graph-run-list" aria-label="此图的运行历史">
                     <div className="graph-run-list-heading">{name}<span>{graphRuns.length} 次运行</span></div>
                     {graphRuns.map(item => <button key={item.run} className="graph-run-row" onClick={() => openRun(item)}>
-                      <span className={`run-status-dot ${item.running ? 'running' : item.status}`} />
+                      <span className={`run-status-dot ${item.running ? 'running' : item.status}`}
+                        style={{ '--graph-color': graphColor(name) } as CSSProperties} />
                       <span className="graph-run-row-main"><strong>{item.running ? '执行中' : label(item.status)}</strong><small>{runTime(item.started)} 开始</small></span>
                       <span className="graph-run-row-id" title={item.run}>{item.run}</span>
                       <span className="graph-run-row-open">查看详情 →</span>
@@ -797,6 +814,22 @@ export function App() {
           else if (pick?.kind === 'agent') patch({ ...doc,
             agents: { ...doc.agents, [pick.id]: value as OurAgent } });
         }} />}
+
+      {apiKeyDialog && <Modal title="连接 Anchor 服务" close={() => finishApiKeyPrompt('')}>
+        <form className="api-key-form" onSubmit={event => {
+          event.preventDefault();
+          finishApiKeyPrompt(apiKeyDraft.trim());
+        }}>
+          <p>此 Anchor 服务需要 API key。密钥只保存在当前浏览器标签页中。</p>
+          <label htmlFor="anchor-api-key">Anchor API key</label>
+          <input id="anchor-api-key" type="password" autoComplete="current-password" autoFocus
+            value={apiKeyDraft} onChange={event => setApiKeyDraft(event.target.value)} />
+          <div className="modal-actions">
+            <button type="button" onClick={() => finishApiKeyPrompt('')}>取消</button>
+            <button className="primary" type="submit" disabled={!apiKeyDraft.trim()}>连接</button>
+          </div>
+        </form>
+      </Modal>}
     </div>
   );
 }

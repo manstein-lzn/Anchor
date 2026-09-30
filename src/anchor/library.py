@@ -83,7 +83,7 @@ def _mount(path: Path) -> tuple[str, str]:
 def _validate_mcp(server: dict, label: str) -> None:  # noqa: C901 - explicit external config validation
     stdio = "command" in server
     allowed = {"type", "enabled", "startup_timeout_sec", "tool_timeout_sec"} | (
-        {"command", "args", "env", "env_vars", "cwd"} if stdio else
+        {"command", "args", "env", "env_vars", "optional_env_vars", "cwd"} if stdio else
         {"url", "headers", "http_headers", "env_http_headers", "bearer_token_env_var", "auth", "oauth_resource"})
     if set(server) - allowed:
         raise ValueError(f"{label}: unsupported MCP fields: {', '.join(sorted(set(server) - allowed))}")
@@ -94,7 +94,7 @@ def _validate_mcp(server: dict, label: str) -> None:  # noqa: C901 - explicit ex
     for key in ("command", "cwd", "url", "bearer_token_env_var", "oauth_resource"):
         if key in server and (not isinstance(server[key], str) or not server[key] or "\x00" in server[key]):
             raise ValueError(f"{label}: {key} must be a nonempty string")
-    for key in ("args", "env_vars"):
+    for key in ("args", "env_vars", "optional_env_vars"):
         if key in server and (not isinstance(server[key], list) or
                               not all(isinstance(v, str) and "\x00" not in v for v in server[key])):
             raise ValueError(f"{label}: {key} must be a list of strings")
@@ -285,6 +285,7 @@ class Library:
                 digest.update(str(path.relative_to(directory)).encode())
                 digest.update(bytes.fromhex(_digest(path)))
         mcp_servers = self.mcp_servers(plugin_id, resolve_env=False)
+        channels = list(self.channels(plugin_id))
         record = {"id": plugin_id, "name": name, "description": description,
                   "skills": list(dict.fromkeys(skill_paths)),
                   "unsupported": [key for key in ("hooks", "commands", "agents", "apps")
@@ -294,10 +295,49 @@ class Library:
                                                 server.get("type", "http"),
                                                 **({"auth": "oauth"} if server.get("auth") == "oauth"
                                                    or server.get("oauth_resource") else {})}
-                                 for server_name, server in mcp_servers},
+                                                 for server_name, server in mcp_servers},
+                  "channels": channels,
                   "digest": digest.hexdigest()}
         binds = [(str(directory), f"/plugins/{plugin_id}")]
         return record, tuple(dict.fromkeys(binds))
+
+    def channels(self, plugin_id: str) -> tuple[dict, ...]:
+        """Return validated long-lived channel declarations bundled by a Plugin.
+
+        A channel declaration is deliberately separate from MCP: MCP is a node capability, while
+        this entrypoint is a service-level connection supervised by Anchor.  The declaration is
+        metadata only; credentials are resolved from the service environment when the supervisor
+        starts the process.
+        """
+        plugin_dir = (self.root / "plugins" / reference(plugin_id)).resolve()
+        manifest = plugin_dir / "channel.json"
+        if not manifest.exists():
+            return ()
+        spec = _json(manifest)
+        platform = spec.get("platform")
+        transport = spec.get("transport")
+        entrypoint = spec.get("entrypoint")
+        if not isinstance(platform, str) or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_.-]*", platform):
+            raise ValueError(f"Plugin {plugin_id}: channel platform is required")
+        if transport != "websocket":
+            raise ValueError(f"Plugin {plugin_id}: only websocket channels are supported")
+        if not isinstance(entrypoint, str) or not entrypoint:
+            raise ValueError(f"Plugin {plugin_id}: channel entrypoint is required")
+        _inside(plugin_dir, entrypoint)
+        required = spec.get("required_environment", [])
+        if not isinstance(required, list) or not all(
+                isinstance(item, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", item)
+                for item in required):
+            raise ValueError(f"Plugin {plugin_id}: required_environment must be a list of names")
+        description = spec.get("description", "")
+        if not isinstance(description, str):
+            raise ValueError(f"Plugin {plugin_id}: channel description must be a string")
+        sdk = spec.get("sdk", "")
+        if not isinstance(sdk, str):
+            raise ValueError(f"Plugin {plugin_id}: channel sdk must be a string")
+        return ({"plugin": plugin_id, "platform": platform, "transport": transport,
+                 "entrypoint": entrypoint, "required_environment": required,
+                 "description": description, "sdk": sdk},)
 
     def attach(self, ids: tuple[str, ...]) -> Attached:
         records: list[dict] = []
@@ -375,6 +415,9 @@ class Library:
             if executable.is_absolute() and executable.is_relative_to(plugin_dir) and (
                     not executable.is_file() or not os.access(executable, os.X_OK)):
                 raise ValueError(f"Plugin {plugin_id}: MCP command is not an executable Plugin file")
+        if resolve_env and "command" in server and any(
+                not os.environ.get(key, "").strip() for key in server.get("optional_env_vars", [])):
+            return None
         if isinstance(server.get("cwd"), str) and not Path(server["cwd"]).is_absolute():
             server["cwd"] = str((plugin_dir / server["cwd"]).resolve())
             if not Path(server["cwd"]).is_relative_to(plugin_dir):
@@ -389,7 +432,8 @@ class Library:
     @staticmethod
     def _resolve_mcp_env(plugin_id: str, name: str, server: dict, environment: Any) -> None:
         if "command" in server:
-            server["env"] = {**{key: environment(key) for key in server.get("env_vars", [])},
+            names = (*server.get("env_vars", []), *server.get("optional_env_vars", []))
+            server["env"] = {**{key: environment(key) for key in names},
                              **server.get("env", {})}
             return
         headers = {**server.get("http_headers", {}), **server.get("headers", {}),

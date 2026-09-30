@@ -162,8 +162,9 @@ class RunState:
 
     def save(self, run_dir: Path) -> None:
         self.updated = _now()
-        (run_dir / "run.json").write_text(
-            json.dumps(asdict(self), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        staged = run_dir / "run.json.incoming"
+        staged.write_text(json.dumps(asdict(self), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        staged.replace(run_dir / "run.json")
 
     @classmethod
 
@@ -712,6 +713,7 @@ def _agent_for(graph, node_id: str, directory: Path, models: dict, secret_file, 
                scripted_model: Any = None, control: Path | None = None,
                cancelled: Callable[[], bool] | None = None, plugins: Attached = Attached(),
                run_input: dict | None = None, mcp_auth: bool = False,
+               conversation_id: str = "", previous_steps: tuple[Path, ...] = (),
                resources: tuple[tuple[str, str], ...] = ()):
     """The node about to run, built around the runtime ADR-062 names.
 
@@ -761,6 +763,7 @@ def _agent_for(graph, node_id: str, directory: Path, models: dict, secret_file, 
                 mcp_servers=plugins.mcp_servers,
                 mcp_auth=mcp_auth,
                 run_input=run_input or {},
+                conversation_id=conversation_id, previous_steps=previous_steps,
                 cancelled=cancelled)
 
 
@@ -870,11 +873,13 @@ def _local_inputs(workspace: Path, nodes) -> dict[str, tuple[tuple[str, str], ..
 def run(workspace: str | Path, *, objective: str | None = None, config_path: str | Path,   # noqa: C901
         run_input: dict | None = None,
         trigger: dict | None = None,
+        conversation_id: str = "", previous_runs: tuple[Path, ...] = (),
         run_id: str | None = None, resume: str | Path | None = None,
         model_script: dict[str, list[str]] | None = None,
         stop_request: Callable[[], str | None] | None = None,
         already_submitted: Callable[[str], tuple[str, str | None] | None] | None = None,
-        library_root: str | Path | None = None, mcp_auth: bool = False) -> RunState:
+        library_root: str | Path | None = None, mcp_auth: bool = False,
+        resources: tuple[tuple[str, str], ...] = ()) -> RunState:
     """Walk the graph. `model_script` replaces the model with written-down commands, per node.
 
     `stop_request` is asked between nodes. A stop also cancels the active model call or sandbox
@@ -903,6 +908,7 @@ def run(workspace: str | Path, *, objective: str | None = None, config_path: str
     print(json.dumps({"graph": str(graph_path), "digest": digest,
                       "entry": graph.entry(), "nodes": len(graph.nodes)}), flush=True)
     models, secret_file = _config(config_path)
+    previous = [(path, RunState.load(path)) for path in previous_runs]
     if resume is not None:
         run_dir = Path(resume).resolve()
         state = RunState.load(run_dir)
@@ -1035,14 +1041,34 @@ def run(workspace: str | Path, *, objective: str | None = None, config_path: str
                 if current != attached:
                     raise ValueError(f"Plugin resources for {step.node_id} changed during this run")
             options: dict[str, Any] = {"mcp_auth": mcp_auth} if mcp_auth else {}
+            if resources:
+                options["resources"] = tuple(resources)
             if step.node_id in local:
-                options["resources"] = local[step.node_id]
+                options["resources"] = (*options.get("resources", ()), *local[step.node_id])
             if attached is not None:
                 options["plugins"] = attached
             if stop_request is not None:
                 options["cancelled"] = lambda: stop_request() == "stopped"
             if state.input:
                 options["run_input"] = state.input
+            if conversation_id and graph.nodes[step.node_id].agent:
+                options["conversation_id"] = f"{conversation_id}:{step.node_id}"
+                # In a graph loop, the latest pass in this Run is more recent than the previous turn.
+                candidates = ([(run_dir, state)] if run_number > 1 else []) + previous
+                controls = []
+                artifact = None
+                for prior_dir, prior_state in candidates:
+                    count = prior_state.runs.get(step.node_id, 0) - (1 if prior_dir == run_dir else 0)
+                    for number in range(count, 0, -1):
+                        name = step.node_id if number == 1 else f"{step.node_id}-{number}"
+                        controls.append(prior_dir / "control" / name)
+                    prior_result = prior_state.result(step.node_id)
+                    if artifact is None and prior_result is not None and prior_result.commit:
+                        artifact = prior_result
+                options["previous_steps"] = tuple(controls)
+                if artifact is not None and run_number == 1:
+                    snapshot = _given(run_dir, artifact)
+                    options["resources"] = (*options.get("resources", ()), (str(snapshot.tree), "/previous"))
             agent = _agent_for(graph, step.node_id, step.directory, models, secret_file, config_path,
                                inputs=step.inputs, trace=step.trace, control=control,
                                scripted_model=scripted_model, **options)
@@ -1061,6 +1087,13 @@ def run(workspace: str | Path, *, objective: str | None = None, config_path: str
             else:
                 outcome = agent.run(task=step.task, resume_mark=step.resuming)
             if stop_request is not None and stop_request() == "stopped":
+                if conversation_id:
+                    partial = _result_of(step.node_id, graph.nodes[step.node_id].agent, step.directory,
+                                         step.number, outcome, step.inputs)
+                    partial = replace(partial, submitted=False, exit_status="Stopped",
+                                      commit=_freeze(step.directory, "Interrupted conversation work"))
+                    state.nodes[step.node_id] = asdict(partial)
+                    state.history[f"{step.node_id}|{partial.commit}"] = asdict(partial)
                 return _asked_to_stop(stop_request, state, run_dir, "stopped") or state
             result = _result_of(step.node_id, graph.nodes[step.node_id].agent, step.directory,
                                 step.number, outcome, step.inputs)

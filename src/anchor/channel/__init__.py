@@ -25,6 +25,9 @@ class ChannelEvent:
     reply_target: str = ""
     message_type: str = "text"
     metadata: dict[str, Any] = field(default_factory=dict)
+    # Downloaded platform media.  Paths are host-side facts and are converted to a read-only
+    # ``/in/channel`` mount before a Graph run is started.
+    attachments: tuple[dict[str, Any], ...] = ()
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)

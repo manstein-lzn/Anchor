@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from pydantic_ai import ModelRequestNode, UsageLimits
-from pydantic_ai.messages import ModelMessagesTypeAdapter, ModelRequest
+from pydantic_ai.messages import ModelMessagesTypeAdapter, ModelRequest, ModelResponse
 from pydantic_ai.exceptions import UsageLimitExceeded
 
 from anchor.node import (BUDGET_EXHAUSTED, COMPLETED, FAILED, UNCERTAIN, NodeOutcome,
@@ -189,7 +189,7 @@ async def _what_a_previous_attempt_left(request: NodeRequest, capabilities: tupl
     # name that is legal and stable is `request.node_key`, and both the conversation and the run ids
     # below are that name and not `execution_id` — two spellings in one store is a node that cannot
     # find its own last attempt.
-    started = _Started(conversation=request.node_key, spending=request.max_requests)
+    started = _Started(conversation=request.conversation_id or request.node_key, spending=request.max_requests)
     # **What earlier processes already spent.** Counted against this attempt too, so the cap is a cap on
     # the whole logical execution rather than a fresh allowance per process — a node killed three times
     # would otherwise spend its budget three times over.
@@ -285,9 +285,46 @@ async def _what_a_previous_attempt_left(request: NodeRequest, capabilities: tupl
         started.store = open_store(Path(recovery_store))
         started.this_run = await _next_run_id(started.store, request.node_key)
         started.resumed.append(StepPersistence(store=started.store, agent_name=request.node_key,
-                                               run_id=started.this_run))
+                                               run_id=started.this_run,
+                                               capture_frontier=bool(request.conversation_id)))
 
+    if started.history is None and not request.recovery:
+        started.history = await _conversation_history(request)
     return started
+
+
+async def _conversation_history(request: NodeRequest) -> list[Any] | None:
+    """Read a previous turn without treating its completion or tool calls as work to replay."""
+    from pydantic_ai_harness.step_persistence import continue_run
+
+    messages = None
+    for directory in request.previous_steps:
+        if not directory.is_dir():
+            continue
+        source = open_store(directory)
+        runs = await source.list_runs(conversation_id=request.conversation_id)
+        for prior in sorted(runs, key=lambda item: item.started_at, reverse=True):
+            try:
+                messages = await continue_run(source, run_id=prior.run_id, include_interrupted=True)
+            except LookupError:
+                continue  # A process may have stopped before its first native snapshot.
+            if messages:
+                break
+        if messages:
+            break
+    # Let PydanticAI close unfinished calls with its native interrupted tool results.
+    if messages and isinstance(messages[-1], ModelResponse) and messages[-1].tool_calls:
+        messages.append(ModelRequest(parts=[], state="interrupted"))
+    elif messages and isinstance(messages[-1], ModelRequest):
+        messages[-1] = replace(messages[-1], state="interrupted")
+    return messages
+
+
+def _conversation_capabilities(request: NodeRequest, capabilities: tuple[Any, ...]) -> tuple[Any, ...]:
+    if not request.conversation_id:
+        return capabilities
+    from pydantic_ai_harness.compaction import SlidingWindowCompaction
+    return (*capabilities, SlidingWindowCompaction(max_messages=200, keep_messages=40))
 
 
 async def run_node(request: NodeRequest, *, model: Any,
@@ -305,6 +342,7 @@ async def run_node(request: NodeRequest, *, model: Any,
     conversation — `AgentRun.all_messages()` is readable from the handler for an exception, and a
     result, which is where `run` keeps them, does not exist on that path.
     """
+    capabilities = _conversation_capabilities(request, capabilities)
     started = await _what_a_previous_attempt_left(request, capabilities, recovery_store)
     if started.outcome is not None:
         return started.outcome

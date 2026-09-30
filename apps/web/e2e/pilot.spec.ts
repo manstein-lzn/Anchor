@@ -45,7 +45,9 @@ test('Pilot opens, creates and reopens sessions through the real Vite proxy, and
     const config = join(root, 'runtime.json');
     await writeFile(config, JSON.stringify({ models: [] }));
     processes.push(spawn(join(repo, '.venv/bin/python'), ['-m', 'anchor', '--root', root,
-      '--config', config, '--host', '127.0.0.1', '--port', String(apiPort)], { cwd: repo, stdio: 'ignore' }));
+      '--config', config, '--host', '127.0.0.1', '--port', String(apiPort)], {
+      cwd: repo, stdio: 'ignore', env: { ...process.env, ANCHOR_API_KEYS: '', ANCHOR_API_KEY: '' },
+    }));
     processes.push(spawn(join(repo, 'apps/web/node_modules/.bin/vite'),
       ['--host', '127.0.0.1', '--port', String(webPort)], {
         cwd: join(repo, 'apps/web'), stdio: 'ignore',
