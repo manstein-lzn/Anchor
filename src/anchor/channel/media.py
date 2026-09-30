@@ -104,6 +104,11 @@ def make_image_item(data: bytes) -> dict:
     }}
 
 
+def read_image_item(path: Path) -> dict:
+    """Read a caller-authorized image without following any path-component links."""
+    return make_image_item(_read_file(path, MAX_IMAGE_BYTES))
+
+
 def _xml(archive: zipfile.ZipFile, name: str):
     from defusedxml.ElementTree import fromstring
 

@@ -71,6 +71,35 @@ def test_msg_item_contains_original_bytes_and_digest(fmt):
     assert item['image']['md5'] == hashlib.md5(data, usedforsecurity=False).hexdigest()
 
 
+def test_read_image_item_uses_safe_open_and_image_byte_limit(tmp_path, monkeypatch):
+    data = image_bytes()
+    attachment(tmp_path, 'image.png', data)
+    path = tmp_path / 'image.png'
+    assert media.read_image_item(path) == media.make_image_item(data)
+    link = tmp_path / 'link.png'
+    link.symlink_to(path)
+    parent = tmp_path / 'linked-parent'
+    parent.symlink_to(tmp_path, target_is_directory=True)
+    for unsafe in [link, parent / 'image.png']:
+        with pytest.raises(OSError):
+            media.read_image_item(unsafe)
+    monkeypatch.setattr(media, 'MAX_IMAGE_BYTES', len(data) - 1)
+    with pytest.raises(ValueError, match='byte limit'):
+        media.read_image_item(path)
+
+
+def test_failed_parser_still_consumes_aggregate_byte_budget(tmp_path, monkeypatch):
+    monkeypatch.setattr(media, 'MAX_TOTAL_BYTES', 5)
+    text, images = media.prepare_attachments([
+        attachment(tmp_path, 'bad.png', b'wrong'),
+        attachment(tmp_path, 'good.txt', b'OK'),
+    ])
+    assert text.count('Not read') == 2
+    assert 'byte limit' in text
+    assert 'OK' not in text
+    assert not images
+
+
 @pytest.mark.parametrize('data', [b'not an image', b'\x89PNG\r\n\x1a\n', b'\xff\xd8\xff', b''])
 def test_corrupt_images_are_not_sent_or_claimed_read(tmp_path, data):
     text, images = media.prepare_attachments([attachment(tmp_path, 'corrupt.png', data, kind='image')])
