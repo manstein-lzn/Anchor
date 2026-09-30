@@ -23,7 +23,7 @@ from typing import Any
 
 from pydantic_core import from_json
 from pydantic_ai import BinaryContent, ModelRequestNode, UsageLimits
-from pydantic_ai.messages import ModelMessagesTypeAdapter, ModelRequest, ModelResponse, ToolCallPart
+from pydantic_ai.messages import ModelMessagesTypeAdapter, ModelRequest, ModelResponse, ToolCallPart, UserPromptPart
 from pydantic_ai.exceptions import UsageLimitExceeded
 
 from anchor.node import (BUDGET_EXHAUSTED, COMPLETED, FAILED, UNCERTAIN, NodeOutcome,
@@ -310,6 +310,7 @@ async def _conversation_history(request: NodeRequest) -> list[Any] | None:
             except LookupError:
                 continue  # A process may have stopped before its first native snapshot.
             if messages:
+                messages = await _omit_unanswered_images(source, prior.run_id, messages)
                 break
         if messages:
             break
@@ -319,6 +320,44 @@ async def _conversation_history(request: NodeRequest) -> list[Any] | None:
     elif messages and isinstance(messages[-1], ModelRequest):
         messages[-1] = replace(messages[-1], state="interrupted")
     return messages
+
+
+async def _omit_unanswered_images(store: Any, run_id: str, messages: list[Any]) -> list[Any]:
+    """Do not automatically resend an image request that never received a model response.
+
+    The native events establish that this run failed or was interrupted. A final user request
+    establishes that its images have no response yet. Project only that prompt for this new turn;
+    original snapshots, earlier answered images, and non-image attachments remain intact.
+    """
+    request_index = len(messages) - 1
+    last = messages[request_index]
+    # The stream error path can append an empty interrupted placeholder before any provider
+    # content arrives. It is not an answer; any nonempty response still protects its images.
+    if isinstance(last, ModelResponse) and last.state == "interrupted" and not last.parts:
+        request_index -= 1
+        last = messages[request_index] if request_index >= 0 else None
+    if not isinstance(last, ModelRequest):
+        return messages
+    index = next((i for i in range(len(last.parts) - 1, -1, -1)
+                  if isinstance(last.parts[i], UserPromptPart)), None)
+    if index is None:
+        return messages
+    prompt = last.parts[index]
+    assert isinstance(prompt, UserPromptPart)
+    if isinstance(prompt.content, str) or not any(
+            isinstance(item, BinaryContent) and item.is_image for item in prompt.content):
+        return messages
+    events = await store.list_events(run_id=run_id)
+    run_events = [event.kind for event in events if event.kind.startswith("run_")]
+    if not run_events or run_events[-1] == "run_completed":
+        return messages
+    marker = ("[Image from previous uncompleted/rejected request is preserved in native records "
+              "but not resent automatically; ask user to resend if needed]")
+    content = [marker if isinstance(item, BinaryContent) and item.is_image else item
+               for item in prompt.content]
+    parts = list(last.parts)
+    parts[index] = replace(prompt, content=content)
+    return [*messages[:request_index], replace(last, parts=parts), *messages[request_index + 1:]]
 
 
 def _conversation_capabilities(request: NodeRequest, capabilities: tuple[Any, ...]) -> tuple[Any, ...]:

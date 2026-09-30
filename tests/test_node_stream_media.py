@@ -230,3 +230,101 @@ def test_stream_failure_does_not_retry_as_nonstream(tmp_path):
     assert result.status == FAILED and "transport failed" in result.reason
     assert result.model_requests == 1 and calls == [1]
     assert load_budget(control).requests_used == 1
+
+
+@pytest.mark.parametrize("accepted_history", [False, True])
+@pytest.mark.parametrize("interrupted", [False, True])
+def test_unanswered_image_is_not_resent_but_answered_images_and_native_records_remain(
+        tmp_path, accepted_history, interrupted):
+    from pydantic_ai.exceptions import ModelHTTPError
+    from pydantic_ai_harness.step_persistence import continue_run
+
+    accepted = b"accepted-image"
+    rejected = b"unanswered-image"
+    first_control = tmp_path / "accepted-control"
+    failed_control = tmp_path / "failed-control"
+
+    async def answer(messages, info):
+        yield {0: DeltaToolCall(name="final_result", json_args='{"summary":"Image answered"}')}
+
+    req = request(tmp_path, conversation_id="member-a", on_output=lambda text: None)
+    if accepted_history:
+        initial = asyncio.run(run_node(replace(req, prompt_images=((accepted, "image/png"),)),
+                                       model=FunctionModel(stream_function=answer), recovery_store=first_control))
+        assert initial.status == COMPLETED, initial.reason
+
+    async def reject(messages, info):
+        images = [item for msg in messages for part in msg.parts if isinstance(part, UserPromptPart)
+                  and not isinstance(part.content, str) for item in part.content if isinstance(item, BinaryContent)]
+        assert images[-1].data == rejected
+        if interrupted:
+            raise asyncio.CancelledError()
+        raise ModelHTTPError(400, "image-provider", {"error": "unsupported image"})
+        yield "unreachable"
+
+    failed_req = replace(req, task="Inspect this new attachment", prompt_images=((rejected, "image/png"),),
+                         previous_steps=(first_control,) if accepted_history else ())
+    failed = asyncio.run(run_node(failed_req, model=FunctionModel(stream_function=reject),
+                                 recovery_store=failed_control))
+    assert failed.status == FAILED
+    assert failed.model_requests == 1
+    assert ("stopped on request" if interrupted else "400") in failed.reason
+
+    original = {path.relative_to(failed_control): path.read_bytes()
+                for path in failed_control.rglob("*") if path.is_file()}
+
+    async def next_turn(messages, info):
+        prompts = [part for msg in messages for part in msg.parts if isinstance(part, UserPromptPart)]
+        images = [item.data for part in prompts if not isinstance(part.content, str)
+                  for item in part.content if isinstance(item, BinaryContent)]
+        assert images == ([accepted] if accepted_history else [])
+        failed_prompt = next(part for part in prompts if not isinstance(part.content, str)
+                             and part.content[0] == failed_req.task)
+        assert failed_prompt.content[1] == (
+            "[Image from previous uncompleted/rejected request is preserved in native records "
+            "but not resent automatically; ask user to resend if needed]")
+        assert prompts[-1].content == "Continue using text only"
+        yield {0: DeltaToolCall(name="final_result", json_args='{"summary":"Text works"}')}
+
+    resumed = asyncio.run(run_node(replace(req, task="Continue using text only", previous_steps=(failed_control,)),
+                                   model=FunctionModel(stream_function=next_turn),
+                                   recovery_store=tmp_path / "resumed-control"))
+    assert resumed.status == COMPLETED, resumed.reason
+    assert resumed.submission == "Text works" and resumed.model_requests == 1
+    assert original == {path.relative_to(failed_control): path.read_bytes()
+                        for path in failed_control.rglob("*") if path.is_file()}
+
+    async def original_history():
+        store = open_store(failed_control)
+        runs = await store.list_runs(conversation_id=req.conversation_id)
+        return await continue_run(store, run_id=runs[-1].run_id, include_interrupted=True)
+
+    native = asyncio.run(original_history())
+    assert any(isinstance(item, BinaryContent) and item.data == rejected
+               for msg in native for part in msg.parts if isinstance(part, UserPromptPart)
+               and not isinstance(part.content, str) for item in part.content)
+
+
+def test_image_with_partial_provider_response_is_kept_on_continuation(tmp_path):
+    control = tmp_path / "control"
+    image_bytes = b"image-that-received-provider-content"
+
+    async def interrupted(messages, info):
+        yield {0: DeltaThinkingPart(content="The image has arrived")}
+        raise RuntimeError("transport interrupted after partial response")
+
+    req = request(tmp_path, conversation_id="member-a", on_output=lambda text: None,
+                  prompt_images=((image_bytes, "image/png"),))
+    failed = asyncio.run(run_node(req, model=FunctionModel(stream_function=interrupted), recovery_store=control))
+    assert failed.status == FAILED
+
+    async def continued(messages, info):
+        images = [item.data for msg in messages for part in msg.parts if isinstance(part, UserPromptPart)
+                  and not isinstance(part.content, str) for item in part.content if isinstance(item, BinaryContent)]
+        assert images == [image_bytes]
+        yield {0: DeltaToolCall(name="final_result", json_args='{"summary":"Image history retained"}')}
+
+    result = asyncio.run(run_node(replace(req, task="Continue", prompt_images=(), previous_steps=(control,)),
+                                  model=FunctionModel(stream_function=continued),
+                                  recovery_store=tmp_path / "next-control"))
+    assert result.status == COMPLETED, result.reason
