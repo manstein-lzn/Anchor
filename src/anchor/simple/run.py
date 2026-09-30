@@ -823,6 +823,15 @@ def _completion_of(control: Path, node_id: str) -> tuple[str, str | None] | None
     return None if fact is None else (fact.submission, fact.route)
 
 
+def _control_path(graph: graph_module.Graph, run_dir: Path, node_id: str, invocation: int) -> Path:
+    """Call identity cannot alias a node named after another node's numbered invocation."""
+    definition = graph.definition(node_id)
+    if isinstance(definition, graph_module.Op) and definition.call is not None:
+        identity = json.dumps([node_id, invocation], ensure_ascii=False, separators=(",", ":"))
+        return run_dir / "control" / ".graph-calls" / hashlib.sha256(identity.encode()).hexdigest()
+    return run_dir / "control" / (node_id if invocation == 1 else f"{node_id}-{invocation}")
+
+
 def _settled_already(step: _Step, control: Path,
                      asked: Callable[[str], tuple[str, str | None] | None] | None = None,
                      ) -> NodeResult | None:
@@ -967,7 +976,8 @@ def run(workspace: str | Path, *, objective: str | None = None, config_path: str
     # guess here is a pass run twice or a pass never run, and the disagreement is worth more than either.
     disagreement = [node for node in sorted(state.nodes)
                     if not state.nodes[node].get("submitted")
-                    and _completion_of(run_dir / "control" / node, node) is not None]
+                    and _completion_of(_control_path(graph, run_dir, node, state.runs.get(node, 1)), node)
+                    is not None]
     if disagreement:
         state.status = "failed"
         state.error = (f"{', '.join(disagreement)} has a completion fact on disk but the graph's "
@@ -1032,8 +1042,7 @@ def run(workspace: str | Path, *, objective: str | None = None, config_path: str
             # Each visit is a separate execution with its own allowance and completion fact. Retried
             # attempts of that visit keep the same directory; the first visit retains its old path.
             run_number = state.runs[step.node_id]
-            control = run_dir / "control" / (step.node_id if run_number == 1
-                                             else f"{step.node_id}-{run_number}")
+            control = _control_path(graph, run_dir, step.node_id, run_number)
             settled = _settled_already(step, control, already_submitted)
             if settled is not None:
                 if not _record(state, graph, run_dir, decided, settled, settle):

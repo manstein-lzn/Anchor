@@ -225,6 +225,8 @@ def _check_node_id(node_id: object, where: str, *, allow_sep: bool) -> str:
     and have that file be a real one.
     """
     name = _check_name(node_id, "node", where)
+    if name.split(SEP)[0] == ".graph-calls":
+        raise ValueError(f"{where}: '.graph-calls' is reserved for Graph call control records")
     if SEP in name and not allow_sep:
         raise ValueError(
             f"{where}: the node name {name!r} contains {SEP!r}, which separates a module from its "

@@ -127,7 +127,7 @@ def test_native_success_and_exact_keyword_contract(configured):
     assert seen[0]["invocation"] == 1 and seen[0]["inputs"] == ()
     assert seen[0]["run_input"] == {"a": 1} and seen[0]["cancelled"]() is False
     assert state.result("invoke").submitted and state.result("invoke").commit
-    fact = read_completion_fact(configured / "runs/proof/control/invoke", "invoke")
+    fact = read_completion_fact(seen[0]["control"], "invoke")
     assert fact is not None and fact.kind == "graph_call"
     assert json.loads(fact.submission)["run"] == "child-1"
 
@@ -140,7 +140,7 @@ def test_no_handler_and_callback_failure_are_failed_nodes(configured):
         raise ValueError("child failed")
     state = runner.run(configured, config_path="unused", run_id="failed-child", call_handler=fail)
     assert state.status == "failed" and "child failed" in state.result("invoke").submission
-    assert not (configured / "runs/failed-child/control/invoke/completion.json").exists()
+    assert not list((configured / "runs/failed-child/control").glob("**/completion.json"))
 
 
 def test_completion_recovers_gap_before_graph_commit_without_recalling(configured, monkeypatch):
@@ -197,8 +197,9 @@ def test_module_reentry_uses_global_invocation_and_roundtrips_snapshot(configure
         seen.append((kwargs["node_id"], kwargs["invocation"], kwargs["control"].name))
         return accept(**kwargs)
     state = runner.run(configured, config_path="unused", run_id="proof", call_handler=handler)
-    assert seen == [("outer", 1, "outer"), ("module/call", 1, "call"),
-                    ("outer", 2, "outer-2"), ("module/call", 2, "call-2")]
+    assert [(node, invocation) for node, invocation, _ in seen] == [
+        ("outer", 1), ("module/call", 1), ("outer", 2), ("module/call", 2)]
+    assert len({control for _, _, control in seen}) == 4
     assert state.passes["module/call"] == 1 and state.runs["module/call"] == 2
 
 
@@ -230,7 +231,35 @@ def test_missing_selected_result_never_records_completion(configured):
         return result
     state = runner.run(configured, config_path="unused", run_id="proof", call_handler=missing)
     assert state.status == "failed" and "required file" in state.result("invoke").submission
-    assert not (configured / "runs/proof/control/invoke/completion.json").exists()
+    assert not list((configured / "runs/proof/control").glob("**/completion.json"))
+
+
+def test_call_controls_do_not_alias_other_node_names_or_resumes(configured):
+    raw = definition({"graph": "child", "mode": "detach"})
+    raw.update(entry="a", max_rounds=2,
+               nodes=[{"id": "a", "op": "invoke"}, {"id": "a-2", "op": "invoke"}],
+               edges=[{"from": "a", "to": "a-2"}, {"from": "a-2", "to": "a"}])
+    write(configured / "graph.json", raw)
+    seen = []
+    def handler(**kwargs):
+        seen.append((kwargs["node_id"], kwargs["invocation"], kwargs["control"]))
+        assert not (kwargs["control"] / "graph-call.json").exists()
+        write(kwargs["control"] / "graph-call.json", {"identity": list(seen[-1][:2])})
+        return accept(**kwargs)
+    state = runner.run(configured, config_path="unused", run_id="proof", call_handler=handler)
+    assert state.executed == ["a", "a-2", "a", "a-2"]
+    assert len({control for _, _, control in seen}) == 4
+    for node, invocation, control in seen:
+        assert control.parent.name == ".graph-calls"
+        assert read_completion_fact(control, node) is not None
+        assert json.loads((control / "graph-call.json").read_text())["identity"] == [node, invocation]
+
+
+def test_call_control_namespace_is_reserved():
+    raw = definition()
+    raw["nodes"][0]["id"] = ".graph-calls/some-hash"
+    with pytest.raises(ValueError, match="reserved"):
+        graph.parse(raw)
 
 
 def test_admitted_call_input_bundle_is_mounted_on_resume(configured, monkeypatch):
