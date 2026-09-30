@@ -174,6 +174,7 @@ def execute(scheduler: Scheduler, turn: dict) -> tuple[str, int]:
             prompt_images=prompt_images, on_output=publish,
             toolset_factory=factory(scheduler, workspace, identifier, reply_node=session.reply_node,
                                     cancelled=cancelled),
+            call_handler=scheduler.graph_calls.factory(workspace, identifier),
             stop_request=lambda: scheduler.control.get(identifier))
         body, status = result(scheduler, {**turn, "status": state.status, "error": state.error})
         if status != 200:

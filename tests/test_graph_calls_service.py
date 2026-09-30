@@ -357,3 +357,30 @@ def test_interrupted_command_child_resumes_same_run_but_stays_uncertain(setup):
         invoke(setup)
     assert len(list(child.parent.glob("*/run.json"))) == 1
     assert not (child / "work/report.txt").exists()
+
+
+def test_fast_consecutive_manual_calls_get_distinct_source_and_child_runs(setup, monkeypatch):
+    import datetime
+    fixed = datetime.datetime(2026, 9, 30, tzinfo=datetime.timezone.utc)
+    class FrozenClock(datetime.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed
+    monkeypatch.setattr(datetime, "datetime", FrozenClock)
+    scheduler, source, _ = setup
+    write(source / "graph.json", {
+        "ops": {"invoke": {"call": {"graph": "child", "mode": "wait"}}},
+        "nodes": [{"id": "invoke", "op": "invoke"}], "edges": []})
+    parents, children = [], []
+    for _ in range(2):
+        body, status = scheduler.trigger("parent", None)
+        assert status == 202
+        identifier = json.loads(body)["run"]
+        deadline = time.monotonic() + 10
+        while scheduler.active_run("parent") and time.monotonic() < deadline:
+            time.sleep(.02)
+        detail = scheduler.run("parent", identifier)
+        assert detail["state"]["status"] == "finished"
+        parents.append(identifier)
+        children.append(detail["calls"][0]["run"])
+    assert len(set(parents)) == len(set(children)) == 2

@@ -77,10 +77,10 @@ class ChannelSupervisor:
                         for channel in self.library.channels(plugin_id):
                             platform = channel["platform"]
                             plugin_dir = self.library.root / "plugins" / plugin_id
-                            spec = {**channel, "graph": workspace.name,
+                            spec = {**channel,
                                     "entrypoint_path": str(plugin_dir / channel["entrypoint"])}
                             prior = found.get(platform)
-                            if prior and (prior["plugin"] != plugin_id or prior["graph"] != workspace.name):
+                            if prior and prior != spec:
                                 conflicts.add(platform)
                             else:
                                 found[platform] = spec
@@ -90,7 +90,7 @@ class ChannelSupervisor:
             found.pop(platform, None)
             if platform not in self._errors:
                 print(json.dumps({"channel_conflict": platform,
-                                  "error": "one platform channel may be mounted by only one Graph"}), flush=True)
+                                  "error": "one platform must use the same channel Plugin and configuration"}), flush=True)
                 self._errors.add(platform)
         return found
 
@@ -143,4 +143,4 @@ class ChannelSupervisor:
         self.processes[platform] = process
         self.controls[platform] = (control_path, token)
         print(json.dumps({"channel_started": platform, "plugin": spec["plugin"],
-                          "graph": spec["graph"], "pid": process.pid}), flush=True)
+                          "pid": process.pid}), flush=True)

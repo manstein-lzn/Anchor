@@ -1,0 +1,30 @@
+{
+  "entry": "publish",
+  "objective": "演示报告完成后调用另一个工作流，等待结果并读取返回文件。",
+  "input": {"report_code": "DEMO-001"},
+  "ops": {
+    "publish": {
+      "run": "printf 'Example report\\n' > report.md && echo '报告已生成'",
+      "writes": ["report.md"]
+    },
+    "process": {
+      "call": {
+        "graph": "call-worker",
+        "mode": "wait",
+        "input_map": {"code": "/report_code"},
+        "files": [{"node": "publish", "path": "report.md", "as": "report.md"}],
+        "result": {"node": "answer", "files": ["result.md"]}
+      }
+    },
+    "check": {
+      "run": "cat /in/process/result/result.md",
+      "reads": ["result/result.md"]
+    }
+  },
+  "nodes": [
+    {"id": "publish", "op": "publish"},
+    {"id": "process", "op": "process"},
+    {"id": "check", "op": "check"}
+  ],
+  "edges": [{"from": "publish", "to": "process"}, {"from": "process", "to": "check"}]
+}

@@ -1,0 +1,12 @@
+{
+  "entry": "answer",
+  "objective": "读取独立调用传入的文件，生成可返回的结果。",
+  "ops": {
+    "answer": {
+      "run": "cat /in/call/report.md > result.md && printf '\\nProcessed by an independent Graph Run.\\n' >> result.md && echo '报告已处理'",
+      "writes": ["result.md"]
+    }
+  },
+  "nodes": [{"id": "answer", "op": "answer"}],
+  "edges": []
+}

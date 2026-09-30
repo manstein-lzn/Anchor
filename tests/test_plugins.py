@@ -321,8 +321,8 @@ def test_graph_runs_with_shared_plugin_and_restores_catalog_after_pause(tmp_path
     before = (workspace / "runs/proof/graph.json").read_bytes()
     raw["nodes"][1]["with"] = "different task"
     write_json(workspace / "graph.json", raw)
-    with pytest.raises(ValueError, match="Graph definition changed"):
-        runner.run(workspace, config_path=config, resume=workspace / "runs/proof", model_script={"b": commands})
+    resumed = runner.run(workspace, config_path=config, resume=workspace / "runs/proof", model_script={"b": commands})
+    assert resumed.status == "finished"
     assert (workspace / "runs/proof/graph.json").read_bytes() == before
 
 

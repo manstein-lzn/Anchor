@@ -305,7 +305,8 @@ class GraphCalls:
                 pending = admission.exists() and json.loads(admission.read_text()).get("session_pending")
                 if pending:
                     session_id = record.get("spec", {}).get("session")
-                    item["status"] = ("running" if session_id in self.scheduler.session_background else "queued")
+                    lease = self.scheduler.session_background.get(session_id)
+                    item["status"] = ("running" if getattr(lease, "run_id", None) == record["run"] else "queued")
                 result = record.get("spec", {}).get("result")
                 output = state.result(result["node"]) if result else None
                 if output is not None:

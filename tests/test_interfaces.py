@@ -169,11 +169,11 @@ def test_an_op_has_no_instructions_to_add_to():
         G.parse(raw)
 
 
-def test_an_op_needs_a_command():
+def test_an_op_needs_a_command_or_call():
     """A node that runs a command without a command has nothing to do, and would finish having
     done it."""
     raw = {"entry": "a", "objective": "test", "ops": {"one": {}},
            "nodes": [{"id": "a", "op": "one"}], "edges": []}
 
-    with pytest.raises(ValueError, match="needs a \"run\""):
+    with pytest.raises(ValueError, match="needs exactly one of"):
         G.parse(raw)

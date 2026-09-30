@@ -1207,7 +1207,8 @@ def _readable(line: str) -> list[dict]:  # noqa: C901 - both trace formats are p
 
 def _stamp() -> str:
     from datetime import datetime, timezone
-    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+    # Fast jobs and different Graphs can start within one second; all links use a global ID.
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S") + "-" + uuid4().hex
 
 
 class Handler(BaseHTTPRequestHandler):
