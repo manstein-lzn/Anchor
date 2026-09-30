@@ -40,6 +40,7 @@ from uuid import uuid4
 from anchor.simple import graph as graph_module
 from anchor.simple import run as runner
 from anchor.library import Library
+from anchor.graph_calls import GraphCalls
 from anchor.session import SessionStore
 from anchor.pilot_turns import TurnStore
 from anchor.scheduling import next_after, occurrences, validate as validate_schedule
@@ -116,6 +117,7 @@ class Scheduler:
         self.pilot_tokens: dict[str, Any] = {}
         self.running: dict[str, str] = {}         # graph -> run id
         self.channel_tail: dict[str, tuple[str, threading.Event]] = {}
+        self.session_background: dict[str, Any] = {}
         self.channel_runs: dict[str, str] = {}    # conversation run id -> graph
         self.wecom_graph = os.environ.get("ANCHOR_WECOM_GRAPH", "").strip()
         self.wecom_reply_node = os.environ.get("ANCHOR_WECOM_REPLY_NODE", "assistant").strip()
@@ -124,7 +126,8 @@ class Scheduler:
         # A pause lands between nodes; a stop also cancels the current model call or command.
         self.control: dict[str, str] = {}
         self.channel_supervisor = None
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()
+        self.graph_calls = GraphCalls(self)
         self.schedule_path = root / "state" / "schedules.json"
         self.schedule_path.parent.mkdir(parents=True, exist_ok=True)
         self.schedules = (json.loads(self.schedule_path.read_text(encoding="utf-8"))
@@ -374,7 +377,7 @@ class Scheduler:
         except (ValueError, OSError) as exc:
             return json.dumps({"error": str(exc)}, ensure_ascii=False), 400
         with self.lock:
-            if graph in self.running or graph in self.channel_runs.values():
+            if self.active_run(graph):
                 # Refused, not queued: whoever asked should be able to tell that this run did not
                 # start, and one graph doing two things at once is not something it can be asked to
                 # keep straight.
@@ -396,7 +399,7 @@ class Scheduler:
             return json.dumps({"error": f"unknown control: {what}"}), 400
         if run_id in self.channel_runs and what != "stop":
             return json.dumps({"error": "channel Runs accept stop; continue with a new conversation message"}), 409
-        graph = self.channel_runs.get(run_id) or next(
+        graph = self.graph_calls.active.get(run_id) or self.channel_runs.get(run_id) or next(
             (name for name, current in self.running.items() if current == run_id), None)
         with self.lock:
             if what == "resume":
@@ -421,34 +424,55 @@ class Scheduler:
                 return candidate
         return None
 
+    def active_runs(self, graph: str) -> list[str]:
+        return list(dict.fromkeys(
+            ([self.running[graph]] if graph in self.running else []) +
+            [identifier for identifier, name in self.channel_runs.items() if name == graph] +
+            [identifier for identifier, name in self.graph_calls.active.items() if name == graph]))
+
     def active_run(self, graph: str) -> str | None:
-        return self.running.get(graph) or next(
-            (identifier for identifier, name in self.channel_runs.items() if name == graph), None)
+        return next(iter(self.active_runs(graph)), None)
 
     def delete_run(self, run_id: str) -> tuple[str, int]:
         """Remove a run and everything it left behind, unless it is still running."""
         if not run_id or "/" in run_id or run_id in (".", ".."):
             return json.dumps({"error": "no such run"}), 404
         with self.lock:
-            if run_id in self.running.values() or run_id in self.channel_runs:
+            if (run_id in self.running.values() or run_id in self.channel_runs or
+                    run_id in self.graph_calls.active):
                 return json.dumps({"error": "that run is still running", "run": run_id}), 409
             run_dir = self.run_dir(run_id)
             if run_dir is None:
                 return json.dumps({"error": "no such run"}), 404
             if run_dir.parent.parent.name in self.channel_runs.values():
                 return json.dumps({"error": "this graph is using conversation history", "run": run_id}), 409
+            for item in self.runs():
+                if item.get("trigger", {}).get("run") == run_id and item["running"]:
+                    return json.dumps({"error": "this run has an active called Run"}), 409
+            for workspace in self.workspaces():
+                for record in (workspace / "runs").glob("*/control/**/graph-call.json"):
+                    if json.loads(record.read_text()).get("run") == run_id:
+                        return json.dumps({"error": "this run is referenced by a Graph call"}), 409
             shutil.rmtree(run_dir)
         return json.dumps({"run": run_id, "deleted": True}), 200
 
     def delete_graph(self, name: str) -> tuple[str, int]:
         """Remove a graph workspace, including its runs, unless it is still running."""
         with self.lock:
-            if self.running.get(name) or name in self.channel_runs.values():
+            if self.active_run(name):
                 return json.dumps({"error": "that graph is still running",
                                    "running": self.active_run(name)}), 409
             workspace = self.workspace(name)
             if workspace is None:
                 return json.dumps({"error": f"no such graph: {name}"}), 404
+            references = [item for item in self.graph_calls.relations()["calls"]
+                          if item["target"] == name and item["graph"] != name]
+            if references:
+                return json.dumps({"error": "this graph is referenced by Graph calls",
+                                   "calls": references}), 409
+            for item in self.runs():
+                if item["trigger"].get("graph") == name and item["running"]:
+                    return json.dumps({"error": "this graph has an active called Run"}), 409
             shutil.rmtree(workspace)
         return json.dumps({"graph": name, "deleted": True}), 200
 
@@ -624,6 +648,10 @@ class Scheduler:
                         prior_id, predecessor = tail
                         self.control[f"channel-{prior_id}"] = "stopped"
                         self.turns.finish(prior_id, "stopped", "superseded by a newer message")
+                    elif session_id in self.session_background:
+                        background = self.session_background[session_id]
+                        background.interrupt()
+                        predecessor = background.released
                     completed = threading.Event()
                 turn, _ = self.turns.create(session_id, request_id, prompt, channel_input=channel_input)
                 self.pilot_active.add(session_id)
@@ -820,10 +848,17 @@ class Scheduler:
             run_dir = workspace / "runs" / run_id
             if not (run_dir / "run.json").is_file():
                 continue
-            if runner.RunState.load(run_dir).trigger.get("source") == "channel":
+            source = runner.RunState.load(run_dir).trigger.get("source")
+            if source == "graph_call":
+                state = runner.RunState.load(run_dir)
+                state.status = "running"
+                state.save(run_dir)
+                self.graph_calls.start(workspace, run_id)
+                return json.dumps({"run": run_id, "graph": workspace.name, "resumed": True}), 202
+            if source == "channel":
                 return json.dumps({"error": "continue a channel Graph with a new conversation message"}), 409
             with self.lock:
-                if workspace.name in self.running or workspace.name in self.channel_runs.values():
+                if self.active_run(workspace.name):
                     return json.dumps({"error": "this graph is already running",
                                        "running": self.active_run(workspace.name)}), 409
                 self.running[workspace.name] = run_id
@@ -846,11 +881,12 @@ class Scheduler:
         workspace = self._directory(name)
         if workspace is None:
             return json.dumps({"error": f"no such graph: {name}"}), 404
-        if self.running.get(name) or name in self.channel_runs.values():
+        if self.active_run(name):
             return json.dumps({"error": "this graph is running; changing it now would change what "
                                        "the run reads", "running": self.active_run(name)}), 409
         try:
             parsed = graph_module.parse(definition)
+            self.graph_calls.validate_targets(parsed)
             for node in parsed.nodes.values():
                 self.library.attach(node.plugins)
         except Exception as exc:  # noqa: BLE001 - the message is the point
@@ -879,7 +915,9 @@ class Scheduler:
             runs = sorted((workspace / "runs").glob("*/run.json")) if (workspace / "runs").is_dir() else []
             for state_file in runs:
                 state = json.loads(state_file.read_text(encoding="utf-8"))
-                if state.get("status") != "running":
+                admission = state_file.parent / "admission.json"
+                pending = admission.exists() and json.loads(admission.read_text()).get("session_pending")
+                if state.get("status") != "running" and not pending:
                     continue
                 if state.get("trigger", {}).get("source") == "channel":
                     interrupted = runner.RunState.load(state_file.parent)
@@ -888,6 +926,9 @@ class Scheduler:
                     interrupted.save(state_file.parent)
                     continue
                 run_id = state_file.parent.name
+                if state.get("trigger", {}).get("source") == "graph_call":
+                    self.graph_calls.start(workspace, run_id)
+                    continue
                 with self.lock:
                     if workspace.name in self.running:
                         continue
@@ -907,17 +948,34 @@ class Scheduler:
 
         try:
             from anchor.channel.tools import factory
-            runner.run(workspace, objective=objective, config_path=self.config, run_id=run_id,
-                       resume=(workspace / "runs" / run_id) if resume else None,
-                       run_input=run_input,
-                       trigger=trigger,
-                       stop_request=asked, library_root=self.library.root,
-                       toolset_factory=factory(self, workspace, run_id, cancelled=lambda: asked() == "stopped"))
-        except Exception:  # noqa: BLE001 - the run already recorded its own failure
+            options = dict(objective=objective, config_path=self.config, run_id=run_id,
+                           resume=(workspace / "runs" / run_id) if resume else None,
+                           run_input=run_input, trigger=trigger,
+                           call_handler=self.graph_calls.factory(workspace, run_id),
+                           stop_request=asked, library_root=self.library.root,
+                           toolset_factory=factory(self, workspace, run_id,
+                                                   cancelled=lambda: asked() == "stopped"))
+            admission = workspace / "runs" / run_id / "admission.json"
+            record = json.loads(admission.read_text()) if admission.exists() else {}
+            if record.get("spec", {}).get("session"):
+                from anchor.channel.background import execute
+                execute(self, record, workspace, run_id, options)
+            else:
+                runner.run(workspace, **options)
+        except Exception as exc:  # noqa: BLE001 - preserve failures before the runner entered
             traceback.print_exc()
+            run_dir = workspace / "runs" / run_id
+            if (run_dir / "run.json").exists():
+                state = runner.RunState.load(run_dir)
+                if state.status == "running":
+                    state.status = "interrupted"
+                    state.error = f"{type(exc).__name__}: {exc}"
+                    state.save(run_dir)
         finally:
             with self.lock:
-                self.running.pop(workspace.name, None)
+                if self.running.get(workspace.name) == run_id:
+                    self.running.pop(workspace.name, None)
+                self.graph_calls.active.pop(run_id, None)
                 self.control.pop(run_id, None)
 
     def runs(self) -> list[dict]:
@@ -929,7 +987,8 @@ class Scheduler:
                 found.append({"run": state_file.parent.name, "graph": workspace.name,
                               "status": state.get("status"),
                               "running": (self.running.get(workspace.name) == state_file.parent.name
-                                          or state_file.parent.name in self.channel_runs),
+                                          or state_file.parent.name in self.channel_runs
+                                          or state_file.parent.name in self.graph_calls.active),
                               "started": state.get("started"), "updated": state.get("updated"),
                               "executed": state.get("executed", []),
                               "objective": (state.get("objective") or "")[:200],
@@ -952,6 +1011,7 @@ class Scheduler:
             traces[trace.name.removesuffix(".trace.jsonl")] = [message for line in lines
                                                                  for message in _readable(line)]
         return {"graph": workspace.name, "run": run_id, "state": state, "traces": traces,
+                "calls": self.graph_calls.projections(base),
                 "plugins": (json.loads((base / "plugins.json").read_text(encoding="utf-8"))
                             if (base / "plugins.json").is_file() else {}),
                 "nodes": sorted(item.name for item in base.iterdir() if item.is_dir())}
@@ -1349,9 +1409,12 @@ class Handler(BaseHTTPRequestHandler):
         if not self._authorized():
             return
         if parts == ["graphs"]:
-            names = [{"graph": item.name, "running": self.scheduler.active_run(item.name)}
+            names = [{"graph": item.name, "running": self.scheduler.active_run(item.name),
+                      "active_runs": self.scheduler.active_runs(item.name)}
                      for item in self.scheduler.workspaces()]
             return self._send(json.dumps({"graphs": names}, ensure_ascii=False))
+        if parts == ["graph-relations"]:
+            return self._send(json.dumps(self.scheduler.graph_calls.relations(), ensure_ascii=False))
         if parts == ["timeline"]:
             try:
                 days = int(query.get("days", ["30"])[0])
@@ -1368,6 +1431,11 @@ class Handler(BaseHTTPRequestHandler):
         if parts == ["v1", "responses"]:
             # Responses are created with POST; GET is intentionally outside the frozen subset.
             return self._send(json.dumps({"error": "not found"}), 404)
+        if parts == ["channel-sessions"]:
+            return self._send(json.dumps({"sessions": [
+                {"id": item.id, "title": item.title, "graph": item.graph,
+                 "platform": item.channel.get("platform", "")}
+                for item in self.scheduler.sessions.list() if item.graph]}, ensure_ascii=False))
         if parts == ["sessions"]:
             return self._send(*self.scheduler.sessions_list())
         if len(parts) == 3 and parts[0] == "sessions" and parts[2] == "turns":
@@ -1491,6 +1559,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(json.dumps({"error": "provide a message or resume: true"}), 400)
             return self._send(*self.scheduler.create_turn(
                 parts[1], body.get("request_id"), None if resume else body["message"]))
+        if parts == ["channel-sessions"]:
+            return self._send(json.dumps({"sessions": [
+                {"id": item.id, "title": item.title, "graph": item.graph,
+                 "platform": item.channel.get("platform", "")}
+                for item in self.scheduler.sessions.list() if item.graph]}, ensure_ascii=False))
         if parts == ["sessions"]:
             body = self._body()
             if body is None:
