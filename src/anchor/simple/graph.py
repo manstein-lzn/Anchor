@@ -34,6 +34,8 @@ and referenced from anywhere, which is the whole point of declaring it separatel
 from __future__ import annotations
 
 import json
+import re
+from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -89,6 +91,8 @@ class Op(Interface):
     of shell are the same thing here.
     """
     run: str = ""
+    # A service-owned structured operation; never interpreted as a shell command.
+    call: dict | None = None
     network: bool = False
     wall_time_limit_seconds: int = 3600
 
@@ -264,10 +268,81 @@ def _agent(name: str, spec: dict) -> Agent:
                  writes=_files(spec.get("writes"), where, "\"writes\""))
 
 
+def _call_path(value: object, where: str, *, component: bool = False) -> str:
+    if (not isinstance(value, str) or not value.strip() or "\\" in value
+            or any(ord(char) < 32 for char in value)
+            or any(part in ("", ".", "..", ".git") for part in value.split("/"))
+            or (component and "/" in value)):
+        raise ValueError(f"{where}: expected a safe {'name' if component else 'relative path'}")
+    return value
+
+
+def _call_object(value: object, allowed: set[str], where: str) -> dict:
+    if not isinstance(value, dict):
+        raise ValueError(f"{where} must be a JSON object")
+    unknown = set(value) - allowed
+    if unknown:
+        raise ValueError(f"{where}: unknown fields {sorted(unknown)}")
+    return value
+
+
+def _call(spec: object, where: str) -> dict:  # noqa: C901 - the finite call schema
+    value = _call_object(spec, {"graph", "mode", "input", "input_map", "files", "result", "session"}, where)
+    _call_path(value.get("graph"), f"{where}.graph", component=True)
+    if value.get("mode") not in ("wait", "detach"):
+        raise ValueError(f"{where}.mode must be 'wait' or 'detach'")
+    if "input" in value and not isinstance(value["input"], dict):
+        raise ValueError(f"{where}.input must be a JSON object")
+    if "input_map" in value:
+        mapping = value["input_map"]
+        if not isinstance(mapping, dict):
+            raise ValueError(f"{where}.input_map must map input keys to JSON pointers")
+        for key, pointer in mapping.items():
+            if not isinstance(key, str) or not key:
+                raise ValueError(f"{where}.input_map keys must be non-empty strings")
+            if (not isinstance(pointer, str) or (pointer and not pointer.startswith("/"))
+                    or re.search(r"~(?![01])", pointer)):
+                raise ValueError(f"{where}.input_map[{key!r}] must be an RFC6901 JSON pointer")
+    if "files" in value:
+        if not isinstance(value["files"], list):
+            raise ValueError(f"{where}.files must be a list")
+        aliases: set[str] = set()
+        for item in value["files"]:
+            item = _call_object(item, {"node", "path", "as"}, f"{where}.files")
+            for key in ("node", "path", "as"):
+                _call_path(item.get(key), f"{where}.files.{key}")
+            alias = item["as"]
+            if any(alias == prior or alias.startswith(prior + "/") or prior.startswith(alias + "/")
+                   for prior in aliases):
+                raise ValueError(f"{where}.files: overlapping destination {alias!r}")
+            aliases.add(alias)
+    if "result" in value:
+        if value["mode"] != "wait":
+            raise ValueError(f"{where}.result is only available in wait mode")
+        result = _call_object(value["result"], {"node", "files"}, f"{where}.result")
+        _call_path(result.get("node"), f"{where}.result.node")
+        if "files" in result:
+            if not isinstance(result["files"], list):
+                raise ValueError(f"{where}.result.files must be a list")
+            for path in result["files"]:
+                _call_path(path, f"{where}.result.files")
+    if "session" in value:
+        _call_path(value["session"], f"{where}.session", component=True)
+    return deepcopy(value)
+
+
 def _op(name: str, spec: dict) -> Op:
     where = f"op {name!r}"
     if not isinstance(spec, dict):
         raise ValueError(f"{where} must be a JSON object")
+    if ("run" in spec) == ("call" in spec):
+        raise ValueError(f'{where} needs exactly one of "run" or "call"')
+    reads = _files(spec.get("reads"), where, '"reads"')
+    writes = _files(spec.get("writes"), where, '"writes"')
+    if "call" in spec:
+        call = _call(spec["call"], f"{where}.call")
+        produced = ("call.json", *(f"result/{path}" for path in call.get("result", {}).get("files", ())))
+        return Op(call=call, reads=reads, writes=tuple(dict.fromkeys((*writes, *produced))))
     run = spec.get("run")
     if not isinstance(run, str) or not run.strip():
         raise ValueError(
@@ -275,8 +350,7 @@ def _op(name: str, spec: dict) -> Op:
             f"node that runs one without a command has nothing to do and would finish having done it.")
     return Op(run=run, network=bool(spec.get("network", False)),
               wall_time_limit_seconds=int(spec.get("wall_time_limit_seconds", 3600)),
-              reads=_files(spec.get("reads"), where, "\"reads\""),
-              writes=_files(spec.get("writes"), where, "\"writes\""))
+              reads=reads, writes=writes)
 
 
 def _check_node(item: object, where: str, *, allow_sep: bool) -> dict:
@@ -505,6 +579,14 @@ def _check_interfaces(graph: Graph) -> None:
     Refused at load, where the author is, rather than left to be noticed in a transcript.
     """
     for node_id in graph.nodes:
+        definition = graph.definition(node_id)
+        if isinstance(definition, Op) and definition.call is not None:
+            if len(graph.routes(node_id)) > 1:
+                raise ValueError(f"call node {node_id!r} cannot choose between multiple outgoing edges")
+            visible = feeders(graph, node_id)
+            for selection in definition.call.get("files", ()):
+                if selection["node"] not in visible:
+                    raise ValueError(f"call node {node_id!r}: file source {selection['node']!r} is not upstream")
         wanted = set(graph.reads(node_id))
         if not wanted:
             continue
@@ -555,7 +637,8 @@ def parse(raw: dict) -> Graph:
                   in_edges={node: tuple(sources) for node, sources in in_edges.items()},
                   objective=raw.get("objective", ""), input=raw.get("input", {}),
                   entry_node=expansion.entry,
-                  max_rounds=expansion.max_rounds, module_rounds=expansion.module_rounds)
+                  max_rounds=expansion.max_rounds,
+                  module_rounds=_snapshot_module_rounds(raw, expansion))
     # Only the one it actually has: an agent node's `op` is empty and an op node's `agent` is, so
     # checking both unconditionally would report the empty string as an undeclared name.
     unknown = sorted(
@@ -568,6 +651,19 @@ def parse(raw: dict) -> Graph:
     graph.entry()          # fail at load rather than at the first step of a run
     _check_interfaces(graph)
     return graph
+
+
+def _snapshot_module_rounds(raw: dict, expansion: _Expansion) -> dict[str, int]:
+    rounds = raw.get("_module_rounds", expansion.module_rounds)
+    if not isinstance(rounds, dict):
+        raise ValueError("_module_rounds must be an object")
+    for scope, ceiling in rounds.items():
+        _call_path(scope, "_module_rounds scope")
+        if type(ceiling) is not int or ceiling < 1:
+            raise ValueError("_module_rounds values must be positive integers")
+        if not any(node.startswith(scope + SEP) for node in expansion.nodes):
+            raise ValueError(f"_module_rounds names unknown scope {scope!r}")
+    return dict(rounds)
 
 
 def _root(raw: object) -> dict:
@@ -592,13 +688,15 @@ def to_dict(graph: Graph) -> dict:
         "objective": graph.objective,
         "input": graph.input,
         "entry": graph.entry_node,
+        **({"_module_rounds": dict(graph.module_rounds)} if graph.module_rounds else {}),
         "agents": {name: {"model": agent.model, "instructions": agent.instructions,
                           "network": agent.network, "max_steps": agent.max_steps,
                           "wall_time_limit_seconds": agent.wall_time_limit_seconds,
                           **({"reads": list(agent.reads)} if agent.reads else {}),
                           **({"writes": list(agent.writes)} if agent.writes else {})}
                    for name, agent in graph.agents.items()},
-        "ops": {name: {"run": op.run, "network": op.network,
+        "ops": {name: {**({"call": deepcopy(op.call)} if op.call is not None else {"run": op.run}),
+                       "network": op.network,
                        "wall_time_limit_seconds": op.wall_time_limit_seconds,
                        **({"reads": list(op.reads)} if op.reads else {}),
                        **({"writes": list(op.writes)} if op.writes else {})}

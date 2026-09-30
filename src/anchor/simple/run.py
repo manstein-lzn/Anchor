@@ -880,6 +880,7 @@ def run(workspace: str | Path, *, objective: str | None = None, config_path: str
         run_input: dict | None = None,
         trigger: dict | None = None,
         conversation_id: str = "", previous_runs: tuple[Path, ...] = (),
+        preserve_interrupted: bool = True,
         run_id: str | None = None, resume: str | Path | None = None,
         model_script: dict[str, list[str]] | None = None,
         stop_request: Callable[[], str | None] | None = None,
@@ -888,7 +889,8 @@ def run(workspace: str | Path, *, objective: str | None = None, config_path: str
         resources: tuple[tuple[str, str], ...] = (),
         prompt_images: tuple[tuple[bytes, str], ...] = (),
         on_output: Callable[[str, str], None] | None = None,
-        toolset_factory: Callable | None = None) -> RunState:
+        toolset_factory: Callable | None = None,
+        call_handler: Callable | None = None, definition: dict | None = None) -> RunState:
     """Walk the graph. `model_script` replaces the model with written-down commands, per node.
 
     `stop_request` is asked between nodes. A stop also cancels the active model call or sandbox
@@ -908,12 +910,16 @@ def run(workspace: str | Path, *, objective: str | None = None, config_path: str
     """
 
     workspace = Path(workspace).resolve()
-    graph_path = workspace / "graph.json"
-    graph = graph_module.load(graph_path)
+    graph_path = Path(resume).resolve() / "graph.json" if resume is not None else workspace / "graph.json"
+    # Admission may freeze a definition before the worker starts. A resumed Run always reads its
+    # own snapshot, even if its workspace has since been edited or removed.
+    raw_graph = (definition if definition is not None and resume is None
+                 else json.loads(graph_path.read_text(encoding="utf-8")))
+    graph = graph_module.parse(raw_graph)
     # Which graph this run is actually reading, as a digest. A workspace owns its own copy, so
     # editing the one in the repository changes nothing about a workspace that already has one —
     # which cost a long run and a wrong conclusion about the model before anyone thought to look.
-    digest = hashlib.sha256(graph_path.read_bytes()).hexdigest()[:12]
+    digest = hashlib.sha256(json.dumps(raw_graph, sort_keys=True).encode()).hexdigest()[:12]
     print(json.dumps({"graph": str(graph_path), "digest": digest,
                       "entry": graph.entry(), "nodes": len(graph.nodes)}), flush=True)
     models, secret_file = _config(config_path)
@@ -934,6 +940,9 @@ def run(workspace: str | Path, *, objective: str | None = None, config_path: str
                          input=graph_module.merge_input(graph.input, run_input),
                          trigger=trigger or {"source": "manual"})
         state.save(run_dir)
+    call_inputs = run_dir / "call-inputs"
+    if call_inputs.is_dir():
+        resources = (*resources, (str(call_inputs), "/in/call"))
     # The graph as this run read it — every module already inlined, every node naming its agent.
     # Written rather than referenced, so a run can be read without the workspace still holding the
     # file it came from, and so which module a node belongs to is answerable from the record alone.
@@ -1000,14 +1009,8 @@ def run(workspace: str | Path, *, objective: str | None = None, config_path: str
         if local:
             local_path.write_text(local_record)
         snapshot = graph_module.to_dict(graph)
-        if bindings or local:
-            snapshot["_module_rounds"] = graph.module_rounds
-            if resume is not None and (run_dir / "graph.json").exists():
-                previous = json.loads((run_dir / "graph.json").read_text(encoding="utf-8"))
-                if snapshot != previous:
-                    raise ValueError("Graph definition changed since this Plugin run started; start a new run")
         record_bindings(run_dir, bindings, resume=resume is not None)
-        if resume is None or not (bindings or local):
+        if resume is None:
             (run_dir / "graph.json").write_text(
                 json.dumps(snapshot, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         while True:
@@ -1036,6 +1039,26 @@ def run(workspace: str | Path, *, objective: str | None = None, config_path: str
                 if not _record(state, graph, run_dir, decided, settled, settle):
                     print(json.dumps({"run": str(run_dir), "status": state.status,
                                       "stopped_at": settled.node_id}, ensure_ascii=False), flush=True)
+                    return state
+                continue
+            definition_for_step = graph.definition(step.node_id)
+            if isinstance(definition_for_step, graph_module.Op) and definition_for_step.call is not None:
+                from anchor.simple.call_node import run_call
+
+                called = run_call(
+                    handler=call_handler, spec=definition_for_step.call, node_id=step.node_id,
+                    invocation=run_number, directory=step.directory, control=control,
+                    run_input=state.input,
+                    inputs=tuple({"node": given.node_id, "tree": str(given.tree), "commit": given.commit}
+                                 for given in step.inputs),
+                    cancelled=lambda: stop_request is not None and stop_request() == "stopped")
+                if stop_request is not None and stop_request() == "stopped":
+                    return _asked_to_stop(stop_request, state, run_dir, "stopped") or state
+                result = _result_of(step.node_id, "", step.directory, step.number,
+                                    {"submission": called.submission or called.reason,
+                                     "exit_status": "Submitted" if called.status == "completed" else "Failed"},
+                                    step.inputs)
+                if not _record(state, graph, run_dir, decided, result, settle):
                     return state
                 continue
             # A node the script does not name is a node whose model comes from the config, which is
@@ -1103,7 +1126,7 @@ def run(workspace: str | Path, *, objective: str | None = None, config_path: str
             else:
                 outcome = agent.run(task=step.task, resume_mark=step.resuming)
             if stop_request is not None and stop_request() == "stopped":
-                if conversation_id:
+                if conversation_id and preserve_interrupted:
                     partial = _result_of(step.node_id, graph.nodes[step.node_id].agent, step.directory,
                                          step.number, outcome, step.inputs)
                     partial = replace(partial, submitted=False, exit_status="Stopped",
