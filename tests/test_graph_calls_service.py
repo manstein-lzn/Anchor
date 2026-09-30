@@ -304,3 +304,54 @@ def test_failed_file_selection_retry_does_not_expose_unselected_bytes(setup, tmp
     child = scheduler.run_dir(answer["run"])
     assert not (child / "call-inputs/stale").exists()
     settled(scheduler, answer["run"])
+
+
+def test_real_parent_graph_call_uses_native_completion_and_child_run(setup):
+    scheduler, source, _ = setup
+    write(source / "graph.json", {
+        "ops": {"invoke": {"call": {"graph": "child", "mode": "wait",
+                                      "result": {"node": "work", "files": ["report.txt"]}}}},
+        "nodes": [{"id": "invoke", "op": "invoke"}], "edges": []})
+    state = runner.run(source, config_path=scheduler.config, run_id="actual-parent",
+                       call_handler=scheduler.graph_calls.factory(source, "actual-parent"))
+    assert state.status == "finished"
+    result = state.result("invoke")
+    assert result.submitted and result.commit
+    payload = json.loads(result.submission)
+    child = runner.RunState.load(scheduler.run_dir(payload["run"]))
+    assert child.trigger["run"] == "actual-parent"
+    assert child.trigger["root_run"] == "actual-parent"
+    assert child.trigger["node"] == "invoke"
+    assert child.status == "finished"
+
+
+def test_interrupted_command_child_resumes_same_run_but_stays_uncertain(setup):
+    scheduler, _, _ = setup
+    write(scheduler.workspace("child") / "graph.json",
+          command("printf started > side-effect.txt; sleep 10; printf done > report.txt"))
+    cancel = threading.Event()
+    errors = []
+    def waiting():
+        try:
+            invoke(setup, cancelled=cancel.is_set)
+        except RuntimeError as exc:
+            errors.append(str(exc))
+    worker = threading.Thread(target=waiting)
+    worker.start()
+    deadline = time.monotonic() + 10
+    child = None
+    while time.monotonic() < deadline:
+        runs = list((scheduler.workspace("child") / "runs").glob("*/work/side-effect.txt"))
+        if runs:
+            child = runs[0].parent.parent
+            break
+        time.sleep(.02)
+    assert child is not None
+    cancel.set()
+    worker.join(5)
+    assert errors
+    assert settled(scheduler, child.name).status == "stopped"
+    with pytest.raises(RuntimeError, match="Uncertain"):
+        invoke(setup)
+    assert len(list(child.parent.glob("*/run.json"))) == 1
+    assert not (child / "work/report.txt").exists()
