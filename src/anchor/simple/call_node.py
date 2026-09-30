@@ -53,7 +53,8 @@ def _validate_result(payload: object, spec: dict, directory: Path) -> None:
     statuses = ("finished",) if spec["mode"] == "wait" else ("accepted", "queued", "running", "finished")
     if payload.get("status") not in statuses:
         raise ValueError(f"call handler did not confirm {spec['mode']} completion: {payload.get('status')!r}")
-    if spec["mode"] == "detach" and ("result" in payload or "summary" in payload):
+    # An admission summary describes acceptance; business results require a completed wait.
+    if spec["mode"] == "detach" and "result" in payload:
         raise ValueError("detach returns an accepted reference, not business results")
     _regular_result(directory, "call.json")
     if json.loads((directory / "call.json").read_text(encoding="utf-8")) != payload:
