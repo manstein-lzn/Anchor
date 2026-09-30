@@ -13,6 +13,9 @@ import {
   type OurAgent, type OurGraph, type OurRun, type OurRunDetail,
   type TimelineData,
 } from './model';
+import { validateCallTargets } from './calls';
+import { CallEditor } from './CallEditor';
+import { GraphRelations } from './GraphRelations';
 import { RunInspector } from './RunInspector';
 import { Plugins } from './Plugins';
 import { Workspace } from './Workspace';
@@ -51,7 +54,10 @@ export function App() {
     try { localStorage.setItem('anchor:view', view === 'runDetail' ? 'runs' : view); }
     catch { /* Navigation still works without browser storage. */ }
   }, [view]);
-  const [graphs, setGraphs] = useState<{ graph: string; running: string | null }[]>([]);
+  const [graphs, setGraphs] = useState<{ graph: string; running: string | null; active_runs?: string[] }[]>([]);
+  const [relations, setRelations] = useState(false);
+  const pendingPick = useRef<string>('');
+  const [graphReturn, setGraphReturn] = useState<{ graph: string; node?: string } | null>(null);
   const [runs, setRuns] = useState<OurRun[]>([]);
   const [timeline, setTimeline] = useState<TimelineData | null>(null);
   const [timelinePage, setTimelinePage] = useState(0);
@@ -125,7 +131,7 @@ export function App() {
   const refresh = useCallback(async () => {
     try {
       const [graphList, runList] = await Promise.all([
-        api<{ graphs: { graph: string; running: string | null }[] }>('/graphs'),
+        api<{ graphs: { graph: string; running: string | null; active_runs?: string[] }[] }>('/graphs'),
         api<{ runs: OurRun[] }>('/runs'),
       ]);
       const cutoff = new Date(); cutoff.setHours(0, 0, 0, 0); cutoff.setDate(cutoff.getDate() + 1 - timelinePage * 30);
@@ -164,7 +170,7 @@ export function App() {
         if (!active) return;
         setDoc(value.definition);
         setSavedDoc(JSON.stringify(value.definition, null, 2) + '\n');
-        setPast([]); setFuture([]); setPick(null); setNotice(null);
+        setPast([]); setFuture([]); setPick(pendingPick.current ? { kind: 'node', id: pendingPick.current } : null); pendingPick.current = ''; setNotice(null);
       })
       .catch(() => { if (active) setDoc(null); });
     return () => { active = false; };
@@ -196,6 +202,7 @@ export function App() {
 
   const save = () => perform('保存', async () => {
     if (!doc) return;
+    validateCallTargets(doc, graphs.map(item => item.graph));
     await api(`/graphs/${encodeURIComponent(name)}`, 'PUT', { definition: doc });
     setSavedDoc(JSON.stringify(doc, null, 2) + '\n');
     setNotice({ kind: 'ok', text: '已保存。' });
@@ -204,6 +211,7 @@ export function App() {
   // The server validates on PUT; this action also saves and must say so.
   const check = () => perform('校验', async () => {
     if (!doc) return;
+    validateCallTargets(doc, graphs.map(item => item.graph));
     await api(`/graphs/${encodeURIComponent(name)}`, 'PUT', { definition: doc });
     setSavedDoc(JSON.stringify(doc, null, 2) + '\n');
     setNotice({ kind: 'ok', text: '校验通过，工作流已保存。' });
@@ -257,6 +265,19 @@ export function App() {
   const openRun = (item: OurRun) => {
     if (item.graph !== name && !selectGraph(item.graph)) return;
     setRun(item.run); setNode(''); setTargetPath(''); setView('runDetail');
+  };
+
+  const navigateGraph = (target: string, targetNode?: string, remember = false, sourceNode?: string) => {
+    const previous = { graph: name, node: sourceNode ?? selectedNode?.id };
+    if (!selectGraph(target)) return;
+    if (remember) setGraphReturn(previous);
+    pendingPick.current = target === name ? '' : targetNode ?? '';
+    setPick(targetNode ? { kind: 'node', id: targetNode } : null);
+    setInspectorOpen(true); setView('graph'); setRelations(false);
+  };
+  const navigateRun = async (targetRun: string, targetGraph: string, targetNode = '') => {
+    if (!selectGraph(targetGraph)) return;
+    setDetail(null); setRun(targetRun); setNode(targetNode); setTargetPath(''); setView('runDetail');
   };
 
   const controlRun = (what: 'pause' | 'stop' | 'resume') => perform(what, async () => {
@@ -320,6 +341,16 @@ export function App() {
     patch({ ...doc, nodes: [...doc.nodes, { id, agent: agentName }] });
     setPalette(false);
     setPick({ kind: 'node', id });
+  };
+
+  const addOperation = (calling: boolean) => {
+    if (!doc) return;
+    let id = calling ? 'call' : 'command';
+    let suffix = 2;
+    while (doc.nodes.some(item => item.id === id) || doc.ops?.[id]) id = `${calling ? 'call' : 'command'}${suffix++}`;
+    patch({ ...doc, entry: doc.entry || id, nodes: [...doc.nodes, { id, op: id }], ops: { ...doc.ops,
+      [id]: calling ? { call: { graph: graphs.find(item => item.graph !== name)?.graph ?? '', mode: 'wait' } } : { run: 'true' } } });
+    setPalette(false); setPick({ kind: 'node', id }); setInspectorOpen(true);
   };
 
   const addAgent = () => {
@@ -413,6 +444,10 @@ export function App() {
                 <button onClick={() => setView('runs')}><Activity size={14} />返回时间线</button>
               </div>
             </div>
+            {detail?.state.trigger?.source === 'graph_call' && detail.state.trigger.run && <div className="run-origin">
+              由 {detail.state.trigger.graph} / {detail.state.trigger.node} · 第 {detail.state.trigger.invocation} 轮发起
+              <button onClick={() => void navigateRun(detail.state.trigger!.run!, detail.state.trigger!.graph!, detail.state.trigger!.node)}>返回来源运行 ←</button>
+            </div>}
             <div className="canvas-head">
               {detail ? <>
                 <span className={`pill ${detail.state.status}`}>
@@ -429,7 +464,7 @@ export function App() {
                       <button onClick={() => void controlRun('pause')} disabled={busy}
                               title="当前节点完成后暂停">暂停</button>
                       <button className="danger-link" onClick={() => void controlRun('stop')}
-                              disabled={busy} title="立即停止当前节点">停止</button>
+                              disabled={busy} title="停止本次运行及等待模式创建的目标；已接纳的启动后继续调用不受影响">停止</button>
                     </> : <button onClick={() => void controlRun('resume')} disabled={busy}>
                       继续
                     </button>}
@@ -448,7 +483,7 @@ export function App() {
               onPick={value => { if (value?.kind === 'node') { setNode(value.id); setInspectorOpen(true); } }} />}
             <div className="canvas-bottom"><span className="legend"><i className="dot running" />执行中<i className="dot finished" />已完成<i className="dot failed" />失败</span><span className="canvas-caption">点击节点查看对话与产物</span></div>
           </main>
-          <RunInspector key={`${run}/${node}/${targetPath}`} run={run} node={node} detail={detail} targetPath={targetPath} />
+          <RunInspector key={`${run}/${node}/${targetPath}`} run={run} node={node} detail={detail} targetPath={targetPath} onOpenRun={navigateRun} />
         </Workspace>
       ) : (
         <Workspace>
@@ -464,9 +499,9 @@ export function App() {
                   <button className="library-row" aria-pressed={item.graph === name}
                           onClick={() => selectGraph(item.graph)}>
                     <GitBranch size={16} /><span className="library-name" title={item.graph}>{item.graph}</span>
-                    {item.running && <span className="pill running">执行中</span>}
+                    {(item.active_runs?.length || item.running) && <span className="pill running">执行中{(item.active_runs?.length ?? 0) > 1 ? ` ${item.active_runs!.length}` : ''}</span>}
                   </button>
-                  <GraphActions graph={item.graph} running={Boolean(item.running)} busy={busy}
+                  <GraphActions graph={item.graph} running={Boolean(item.active_runs?.length || item.running)} busy={busy}
                                 runCount={runs.filter(run => run.graph === item.graph).length} onDelete={deleteGraph} />
                 </div>
               ))}
@@ -506,6 +541,8 @@ export function App() {
                 <span className={`document-state ${dirty ? 'unsaved' : ''}`}>{dirty ? '● 未保存' : doc ? '所有更改已保存' : '选择或创建工作流'}</span>
               </div>
               <div className="document-actions">
+                <button onClick={() => setRelations(true)}>工作流关系</button>
+                {graphReturn && <button onClick={() => { const back = graphReturn; navigateGraph(back.graph, back.node); setGraphReturn(null); }}>返回来源工作流 ←</button>}
                 <select aria-label="当前工作流" value={name} onChange={event => selectGraph(event.target.value)}>
                   {graphs.map(item => <option key={item.graph} value={item.graph}>{item.graph}{item.running ? '（执行中）' : ''}</option>)}
                 </select>
@@ -515,6 +552,10 @@ export function App() {
                 <button className="primary" disabled={!editable || !dirty} onClick={() => void save()}>
                   <Save size={16} />保存</button>
               </div>
+              {graphRuns.filter(item => item.running).length > 1 && <div className="active-run-strip" aria-label="活动运行">
+                <strong>{graphRuns.filter(item => item.running).length} 个活动运行</strong>
+                {graphRuns.filter(item => item.running).map(item => <button key={item.run} onClick={() => openRun(item)}>{item.run} →</button>)}
+              </div>}
               {name && <section className="graph-execution-summary" aria-label={`${name} 的执行概览`}>
                 <div className="graph-execution-status">
                   <Activity size={14} aria-hidden="true" />
@@ -575,7 +616,7 @@ export function App() {
 
             <div className="canvas">
               {doc
-                ? <WorkflowCanvas graph={doc} name={name} mode="edit" editable={editable}
+                ? <WorkflowCanvas graph={doc} name={name} mode="edit" editable={editable} targets={graphs.map(item => item.graph)} onOpenTarget={(target, sourceNode) => navigateGraph(target, undefined, true, sourceNode)}
                                onPick={value => { setPick(value); if (value) setInspectorOpen(true); }}
                                onPositions={positions => patch({ ...doc, layout: { ...doc.layout, positions } })}
                                onConnect={(from, to) => {
@@ -616,30 +657,18 @@ export function App() {
                                to: edge.to === selectedNode.id ? next : edge.to })) });
                          }} />
                 </label>
-                {selectedNode.op ? <>
-                <div className="inspector-kind">Op</div>
-                <p className="inspector-note">
-                  这个节点跑的是 <code>{selectedNode.op}</code>，<strong>没有模型</strong>：
-                  退出码就是判定，0 完成、非 0 失败。它和 agent 节点共用同一套沙箱、工作区、
-                  每轮一个 commit 和同一份 <code>reads</code>/<code>writes</code> 契约。
-                </p>
-                <label>命令
-                  <textarea className="instructions" readOnly
-                            value={doc.ops?.[selectedNode.op]?.run ?? ''} />
-                </label>
-                <label>读
-                  <input readOnly
-                         value={(doc.ops?.[selectedNode.op]?.reads ?? []).join(', ')} />
-                </label>
-                <label>写
-                  <input readOnly
-                         value={(doc.ops?.[selectedNode.op]?.writes ?? []).join(', ')} />
-                </label>
-                <p className="inspector-note">
-                  界面还不能编辑 op 的定义——这一版只让图能画出来、跑起来、看得见。
-                </p>
+                {selectedNode.op ? doc.ops?.[selectedNode.op]?.call ? <CallEditor
+                  key={`${name}/${selectedNode.op}`} call={doc.ops[selectedNode.op].call!} graph={doc} node={selectedNode.id}
+                  targets={graphs.map(item => item.graph)} onOpen={target => navigateGraph(target, undefined, true)}
+                  onChange={call => patch({ ...doc, ops: { ...doc.ops, [selectedNode.op!]: { ...doc.ops![selectedNode.op!], call } } })} /> : <>
+                  <div className="inspector-kind">命令</div><p className="inspector-note">退出码 0 完成，非 0 失败。</p>
+                  <label>命令<textarea className="instructions" value={doc.ops?.[selectedNode.op]?.run ?? ''}
+                    onChange={event => patch({ ...doc, ops: { ...doc.ops, [selectedNode.op!]: { ...doc.ops?.[selectedNode.op!], run: event.target.value } } })} /></label>
+                  {(['reads', 'writes'] as const).map(field => <label key={field}>{field === 'reads' ? '读' : '写'}<input
+                    value={(doc.ops?.[selectedNode.op!]?.[field] ?? []).join(', ')} onChange={event => patch({ ...doc,
+                    ops: { ...doc.ops, [selectedNode.op!]: { ...doc.ops?.[selectedNode.op!], [field]: event.target.value.split(',').map(item => item.trim()).filter(Boolean) } } })} /></label>)}
                 </> : selectedNode.graph ? <p className="inspector-note">
-                  这个节点运行的是文件里声明的 <code>{selectedNode.graph}</code>。展开之后它的节点
+                  本次运行内执行。这个节点运行的是文件里声明的 <code>{selectedNode.graph}</code>。展开之后它的节点
                   以 <code>{selectedNode.id}/…</code> 命名，各自在自己的目录里，父图只看得到它的
                   <code>exit</code> 节点。
                 </p> : <>
@@ -786,8 +815,12 @@ export function App() {
         </Workspace>
       )}
 
+      {relations && <GraphRelations graph={name} close={() => setRelations(false)} onOpen={navigateGraph} />}
+
       {palette && doc && <Modal title="添加节点" close={() => setPalette(false)}>
         <div className="node-palette">
+          <button onClick={() => addOperation(true)}><strong>调用工作流</strong><small>启动独立运行，等待完成或启动后继续</small></button>
+          <button onClick={() => addOperation(false)}><strong>命令</strong><small>确定性操作，无需模型</small></button>
           {Object.keys(doc.agents ?? {}).map(agent => (
             <button key={agent} onClick={() => addNode(agent)}>
               <strong>{agent}</strong><small>用这个角色</small>

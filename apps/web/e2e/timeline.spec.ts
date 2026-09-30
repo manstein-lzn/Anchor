@@ -15,6 +15,8 @@ test('timeline fills the workspace and renders runs and plans on the same time s
   ] } }));
   await page.route('**/graphs/*', route => route.fulfill({ json: { definition: graph } }));
   await page.route('**/runs', route => route.fulfill({ json: { runs } }));
+  // Keep polling isolated from any authenticated development backend.
+  await page.route('**/runs/*', route => route.fulfill({ json: { state: { ...run, input: {} } } }));
   await page.route('**/runs/short-run', route => route.fulfill({ json: { state: { ...run, input: {} } } }));
   await page.route('**/timeline*', route => route.fulfill({ json: {
     runs, schedules: [{ id: 'evening', graph: 'research-review', enabled: true,
@@ -138,6 +140,7 @@ test('timeline hints fit the viewport at both edges and dismiss without blocking
   await page.route('**/graphs', route => route.fulfill({ json: { graphs: [{ graph: longName, running: null }] } }));
   await page.route('**/graphs/*', route => route.fulfill({ json: { definition: graph } }));
   await page.route('**/runs', route => route.fulfill({ json: { runs } }));
+  await page.route('**/runs/*', route => route.fulfill({ json: { state: { ...runs[0], input: {} } } }));
   await page.route('**/runs/right', route => route.fulfill({ json: { state: { ...runs[1], input: {} } } }));
   await page.route('**/timeline*', route => route.fulfill({ json: { runs, schedules: [], scheduled: [
     { schedule: 'late', graph: longName, scheduled_at: '2026-09-28T23:59:00', status: 'planned' },

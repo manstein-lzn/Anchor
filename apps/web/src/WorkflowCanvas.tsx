@@ -4,31 +4,32 @@ import {
   getViewportForBounds, useNodesState, useReactFlow, useUpdateNodeInternals,
   type Edge, type Node, type NodeProps,
 } from '@xyflow/react';
-import { Bot, Layers, Terminal } from 'lucide-react';
-import { asDefinition, toFlowEdges, toFlowNodes, type OurGraph, type OurRunState } from './model';
+import { Bot, Layers, Terminal, Workflow } from 'lucide-react';
+import { asDefinition, toFlowEdges, toFlowNodes, type GraphCall, type OurGraph, type OurRunState } from './model';
 import { layoutWorkflow, NODE_HEIGHT, NODE_WIDTH, type Layout, type Port } from './graph';
 import { RoutedEdge } from './RoutedEdge';
 
 type WorkflowNode = Node<{
   name: string; kind: string; nodeKind: 'agent' | 'op' | 'subgraph'; entry: boolean; terminal: boolean;
   state: string; statusLabel?: string; attempt?: number; ports: Port[]; editing: boolean;
-  plugins?: string[];
+  plugins?: string[]; call?: GraphCall; targetMissing?: boolean; onOpenTarget?: (target: string, node: string) => void;
 }, 'workflow'>;
 
 function WorkflowNodeView({ id, data, selected }: NodeProps<WorkflowNode>) {
   const update = useUpdateNodeInternals();
   useEffect(() => { update(id); }, [id, data.ports, update]);
-  const Icon = data.nodeKind === 'op' ? Terminal : data.nodeKind === 'subgraph' ? Layers : Bot;
+  const Icon = data.call ? Workflow : data.nodeKind === 'op' ? Terminal : data.nodeKind === 'subgraph' ? Layers : Bot;
   return <div className={`workflow-node ${data.editing ? 'graph-node' : 'execution-node'} kind-${data.nodeKind} state-${data.state} ${selected ? 'selected' : ''}`}>
     <div className="workflow-node-heading"><Icon size={14} />
-      <span>{data.nodeKind === 'op' ? '命令' : data.nodeKind === 'subgraph' ? '子图' : '智能体'}</span>
+      <span>{data.call ? '调用工作流' : data.nodeKind === 'op' ? '命令' : data.nodeKind === 'subgraph' ? '子图' : '智能体'}</span>
       {data.entry ? <span className="entry-tag">入口</span> : data.terminal && <span className="entry-tag">终点</span>}
       {!!data.plugins?.length && <span className="entry-tag" title={data.plugins.join(', ')}
         aria-label={`挂载 ${data.plugins.length} 个 Plugin`}>Plugin {data.plugins.length}</span>}
     </div>
-    <strong title={data.name}>{data.name}</strong>
+    <strong title={data.call ? `${data.name} → ${data.call.graph}` : data.name}>{data.call && data.editing ? <button className="call-target-link nodrag" onClick={event => { event.stopPropagation(); data.onOpenTarget?.(data.call!.graph, id); }} disabled={data.targetMissing}>
+      {data.call.graph || '未选择目标'} {data.targetMissing ? '· 引用失效' : '↗'}</button> : data.name}</strong>
     <div className="workflow-node-footer" title={data.kind}>
-      {data.editing ? data.kind : <><span>{data.statusLabel || ({ running: '执行中', completed: '已完成', pending: '尚未执行', failed: '失败', skipped: '未选中' }[data.state] ?? data.state)}</span>
+      {data.editing ? data.call ? `独立运行 · ${data.call.mode === 'wait' ? '等待完成' : '启动后继续'}` : data.kind : <><span>{data.statusLabel || ({ running: '执行中', completed: '已完成', pending: '尚未执行', failed: '失败', skipped: '未选中' }[data.state] ?? data.state)}</span>
         {data.attempt !== undefined && <span>第 {data.attempt + 1} 次</span>}</>}
     </div>
     {data.ports.map(port => <Handle key={port.id} id={port.id} type={port.type}
@@ -47,6 +48,7 @@ const edgeTypes = { routed: RoutedEdge };
 type Pick = { kind: 'node' | 'edge'; id: string } | null;
 type Props = {
   graph: OurGraph; name: string; mode: 'edit' | 'run'; state?: OurRunState | null; editable?: boolean;
+  targets?: string[]; onOpenTarget?: (target: string, node: string) => void;
   onPick: (pick: Pick) => void;
   onPositions?: (positions: Layout['positions']) => void;
   onConnect?: (source: string, target: string) => void;
@@ -56,7 +58,7 @@ export function WorkflowCanvas(props: Props) {
   return <ReactFlowProvider key={props.name}><Canvas {...props} /></ReactFlowProvider>;
 }
 
-function Canvas({ graph, name, mode, state = null, editable = false, onPick, onPositions, onConnect }: Props) {
+function Canvas({ graph, name, mode, state = null, editable = false, onPick, onPositions, onConnect, targets, onOpenTarget }: Props) {
   const editing = mode === 'edit';
   // Only topology, labels and saved positions invalidate geometry. Polling cannot relayout it.
   const definitionKey = JSON.stringify(asDefinition(graph, name));
@@ -82,8 +84,8 @@ function Canvas({ graph, name, mode, state = null, editable = false, onPick, onP
   const nodes = useMemo<WorkflowNode[]>(() => !layout ? [] : toFlowNodes(graph, name, state).map(node => ({
     id: node.id, type: 'workflow', position: layout.positions[node.id], width: NODE_WIDTH, height: NODE_HEIGHT,
     data: { ...node.data, entry: node.id === graph.entry, terminal: !graph.edges.some(edge => edge.from === node.id),
-      editing, ports: layout.ports[node.id] },
-  })), [graph, name, state, editing, layout]);
+      editing, ports: layout.ports[node.id], onOpenTarget, targetMissing: !!node.data.call && !!targets && !targets.includes(node.data.call.graph) },
+  })), [graph, name, state, editing, layout, targets, onOpenTarget]);
   const [canvasNodes, setCanvasNodes, onNodesChange] = useNodesState(nodes);
   useEffect(() => { if (!dragging) setCanvasNodes(nodes); }, [nodes, dragging, setCanvasNodes]);
   const edges = useMemo<Edge[]>(() => !layout ? [] : toFlowEdges(graph, state).map((edge, index) => {

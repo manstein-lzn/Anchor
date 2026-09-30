@@ -13,7 +13,7 @@ const statusText = (status: string) => ({
   interrupted: '已中断', paused: '已暂停', uncertain: '待核查', planned: '已计划',
   missed_busy: '忙碌错过', missed_downtime: '停机错过',
 }[status] ?? status);
-const sourceText = (value: string) => ({ manual: '手动', schedule: '定时', webhook: 'Webhook' }[value] ?? value);
+const sourceText = (value: string) => ({ manual: '手动', schedule: '定时', webhook: 'Webhook', graph_call: '工作流调用', channel: '通道' }[value] ?? value);
 const duration = (ms: number) => {
   const seconds = Math.max(0, Math.floor(ms / 1000));
   if (seconds < 60) return `${seconds} 秒`;
@@ -72,6 +72,7 @@ export function Timeline({ data, graphs, page, onPage, onSelect, onRefresh, prob
   const [graphFilter, setGraphFilter] = useState('');
   const [filter, setFilter] = useState<Filter>('all');
   const [sourceFilter, setSourceFilter] = useState('');
+  const [chainFilter, setChainFilter] = useState('');
   const [expanded, setExpanded] = useState(false);
   const [selected, setSelected] = useState<Entry | null>(null);
   const [hint, setHint] = useState<{ entry: Entry; anchor: HTMLButtonElement } | null>(null);
@@ -136,6 +137,7 @@ export function Timeline({ data, graphs, page, onPage, onSelect, onRefresh, prob
   ].filter(entry => Number.isFinite(entry.start) && Number.isFinite(entry.end));
   const matching = entries.filter(entry => {
     if (sourceFilter && entry.source !== sourceFilter) return false;
+    if (chainFilter && (!entry.run || (entry.run.trigger?.root_run ?? entry.run.run) !== chainFilter)) return false;
     if (filter === 'attention') return needsAttention(entry.status);
     if (filter === 'finished') return ['finished', 'completed'].includes(entry.status);
     return filter === 'all' || entry.status === filter;
@@ -170,7 +172,7 @@ export function Timeline({ data, graphs, page, onPage, onSelect, onRefresh, prob
     } else if (page === 0) focusToday();
     else if (surface.current) surface.current.scrollTop = 0;
   }, [data, page, todayKey]);
-  const reset = () => { setFilter('all'); setGraphFilter(''); setSourceFilter(''); };
+  const reset = () => { setFilter('all'); setGraphFilter(''); setSourceFilter(''); setChainFilter(''); };
 
   const create = async () => {
     setPending(true); setError('');
@@ -220,8 +222,11 @@ export function Timeline({ data, graphs, page, onPage, onSelect, onRefresh, prob
           <select aria-label="筛选状态" value={filter} onChange={event => setFilter(event.target.value as Filter)}>
             <option value="all">全部状态</option><option value="running">执行中</option><option value="finished">已完成</option><option value="attention">仅异常 / 错过</option><option value="planned">仅未来计划</option><option value="stopped">已停止</option>
           </select>
-          <select aria-label="筛选触发方式" value={sourceFilter} onChange={event => setSourceFilter(event.target.value)}><option value="">全部触发方式</option><option value="manual">手动</option><option value="schedule">定时</option><option value="webhook">Webhook</option></select>
-          {(graphFilter || filter !== 'all' || sourceFilter) && <button className="timeline-clear" onClick={reset}>清除筛选</button>}
+          <select aria-label="筛选触发方式" value={sourceFilter} onChange={event => setSourceFilter(event.target.value)}><option value="">全部触发方式</option><option value="manual">手动</option><option value="schedule">定时</option><option value="webhook">Webhook</option><option value="graph_call">工作流调用</option><option value="channel">通道</option></select>
+          <select aria-label="筛选调用链" value={chainFilter} onChange={event => setChainFilter(event.target.value)}><option value="">全部调用链</option>
+            {[...new Set((data?.runs ?? []).filter(run => run.trigger?.source === 'graph_call').map(run => run.trigger?.root_run ?? run.trigger?.run).filter((run): run is string => Boolean(run)))].map(run => <option key={run} value={run}>{run}</option>)}
+          </select>
+          {(graphFilter || filter !== 'all' || sourceFilter || chainFilter) && <button className="timeline-clear" onClick={reset}>清除筛选</button>}
         </div>
         <label className="timeline-expand"><input type="checkbox" checked={expanded} onChange={event => setExpanded(event.target.checked)} />展开空白日期</label>
       </div>
@@ -273,7 +278,7 @@ export function Timeline({ data, graphs, page, onPage, onSelect, onRefresh, prob
     <div ref={tooltip} id={hintId} popover="manual" role="tooltip" className="timeline-entry-label"
       style={{ '--graph-color': hint ? graphColor(hint.entry.graph) : undefined } as CSSProperties}
       onMouseLeave={event => { if (!hint?.anchor.contains(event.relatedTarget as Node | null)) setHint(null); }}>
-      {hint && <><strong>{hint.entry.graph}</strong><small>{clockText(hint.entry.start)} · {statusText(hint.entry.status)}{hint.entry.run ? ` · ${duration(hint.entry.end - hint.entry.start)}` : ''}</small></>}
+      {hint && <><strong>{hint.entry.graph}</strong><small>{sourceText(hint.entry.source)} · {clockText(hint.entry.start)} · {statusText(hint.entry.status)}{hint.entry.run ? ` · ${duration(hint.entry.end - hint.entry.start)}` : ''}</small></>}
     </div>
     {selected && <RunPreview key={selected.id} entry={selected} data={data} onClose={() => setSelected(null)} onOpen={onSelect} />}
     {scheduleOpen && <Modal title="定时计划" close={() => { if (!pending) setScheduleOpen(false); }} className="timeline-schedule-dialog">
@@ -316,6 +321,7 @@ function RunPreview({ entry, data, onClose, onOpen }: { entry: Entry; data: Time
     {run?.objective && <p className="preview-objective">{run.objective}</p>}
     <dl className="preview-facts">
       <dt>触发方式</dt><dd>{sourceText(entry.source)}</dd>
+      {run?.trigger?.source === 'graph_call' && <><dt>调用来源</dt><dd>{run.trigger.graph} / {run.trigger.node} · 第 {run.trigger.invocation} 轮<br />{run.trigger.run}</dd><dt>调用链</dt><dd>{run.trigger.root_run ?? run.trigger.run}</dd></>}
       <dt>{run ? '开始时间' : '计划时间'}</dt><dd>{dateText(entry.start)}</dd>
       {run && <><dt>{run.running ? '已运行' : '运行时长'}</dt><dd>{duration((run.running ? Date.now() : +new Date(run.updated)) - entry.start)}</dd><dt>结束时间</dt><dd>{run.running ? '仍在执行' : dateText(run.updated)}</dd><dt>已执行步骤</dt><dd>{run.executed.length}</dd></>}
       {schedule && <><dt>定时规则</dt><dd>{ruleText(schedule.rule)}</dd></>}

@@ -4,11 +4,12 @@ import { Files } from './Files';
 import { Transcript } from './Transcript';
 import { Plugins } from './Plugins';
 import { EmptyState } from './ui';
-import type { OurRunDetail } from './model';
+import { callModeLabel, type OurRunDetail } from './model';
+import { label } from './execution';
 
 /** Inspection state is local to the selected run/node, independent of graph editing. */
-export function RunInspector({ run, node, detail, targetPath = '' }:
-  { run: string; node: string; detail: OurRunDetail | null; targetPath?: string }) {
+export function RunInspector({ run, node, detail, targetPath = '', onOpenRun }:
+  { run: string; node: string; detail: OurRunDetail | null; targetPath?: string; onOpenRun?: (run: string, graph: string, node?: string) => void }) {
   const [tab, setTab] = useState<'talk' | 'files' | 'plugins'>(targetPath ? 'files' : 'talk');
   const [pass, setPass] = useState('');
   const passes = useMemo(() => Object.keys(detail?.traces ?? {})
@@ -33,6 +34,21 @@ export function RunInspector({ run, node, detail, targetPath = '' }:
           onClick={() => setTab('plugins')}>Plugin</button>
       </div>}
     </div>
+    {!!detail?.calls?.filter(call => !node || call.node === node).length && <section className="call-records" aria-label="工作流调用记录">
+      <h3>独立运行</h3>
+      {node && <p>本节点：{detail.state.cursor?.node === node ? '执行中' : result?.submitted ? '已完成' : result ? '失败' : '尚未完成'}</p>}
+      {detail.calls.filter(call => !node || call.node === node).map(call => <article className="call-record" key={`${call.node}/${call.invocation}`}>
+        <header><strong>{call.graph}</strong><span>第 {call.invocation} 轮 · {call.node}</span></header>
+        <p>{callModeLabel(call.mode)} · {call.mode === 'detach' ? '已接纳独立运行' : ['running', 'queued', 'created', 'pending'].includes(call.status) ? '等待目标结果' : '目标已结束'}</p>
+        <p>目标运行：<span className={`pill ${call.status}`}>{label(call.status)}</span></p>
+        <button className="full-button" onClick={() => onOpenRun?.(call.run, call.graph)}>查看目标运行 ↗</button>
+        <small className="call-run-id">{call.run}</small>
+        {call.summary && <p>{call.summary}</p>}
+        {call.input && <details><summary>本次传入参数</summary><pre className="call-json">{JSON.stringify(call.input, null, 2)}</pre></details>}
+        {call.result != null && <details><summary>返回结果</summary><pre className="call-json">{JSON.stringify(call.result, null, 2)}</pre></details>}
+        <p className="inspector-note">{call.mode === 'detach' ? '目标独立继续；其后续状态不会改写已完成的调用节点。' : '停止来源运行会停止本次调用创建的目标运行。'}</p>
+      </article>)}
+    </section>}
     {!node ? <EmptyState icon={MessageSquare} title="探索一次执行">
       在画布中选择节点，查看它的思考、执行过程和生成的文件。
     </EmptyState> : tab === 'plugins' ? <Plugins recorded={detail?.plugins?.[node] ?? []} />

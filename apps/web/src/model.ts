@@ -24,12 +24,26 @@ export type OurAgent = {
  *  it is what it is for an agent — the same sandbox, the same workspace, a commit per pass, the same
  *  `reads`/`writes` — so the canvas draws it as a node like any other and only says which kind it is. */
 export type OurOp = {
-  run: string;
+  run?: string;
+  call?: GraphCall;
   reads?: string[];
   writes?: string[];
   network?: boolean;
   wall_time_limit_seconds?: number;
 };
+
+export type GraphCall = {
+  graph: string; mode: 'wait' | 'detach'; input?: Record<string, unknown>;
+  input_map?: Record<string, string>; files?: { node: string; path: string; as: string }[];
+  result?: { node: string; files?: string[] }; session?: string;
+};
+export type RunTrigger = { source: string; schedule?: string; scheduled_at?: string;
+  graph?: string; run?: string; node?: string; invocation?: number; mode?: 'wait' | 'detach'; root_run?: string };
+export type CallRecord = { node: string; invocation: number; graph: string; run: string;
+  mode: 'wait' | 'detach'; status: string; summary?: string; input?: Record<string, unknown>; result?: unknown };
+export type GraphRelationsData = { graphs: { graph: string; schedules: number }[];
+  calls: { graph: string; node: string; op: string; target: string; mode: 'wait' | 'detach' }[] };
+export const callModeLabel = (mode: 'wait' | 'detach') => mode === 'wait' ? '等待完成' : '启动后继续';
 
 export type OurGraph = {
   entry: string;
@@ -90,6 +104,7 @@ export type OurNodeResult = {
 };
 
 export type OurRunState = {
+  trigger?: RunTrigger;
   input?: Record<string, unknown>;
   objective: string;
   started: string;
@@ -115,7 +130,7 @@ export type OurRun = {
   updated: string;
   executed: string[];
   objective: string;
-  trigger?: { source: string; schedule?: string; scheduled_at?: string };
+  trigger?: RunTrigger;
 };
 
 export type TimelineItem = { schedule: string; graph: string; scheduled_at: string; run?: string; status: string };
@@ -149,6 +164,7 @@ export type OurFileBody = {
 };
 
 export type OurRunDetail = {
+  calls?: CallRecord[];
   plugins?: Record<string, Plugin[]>;
   graph: string;
   run: string;
@@ -160,6 +176,7 @@ export type OurRunDetail = {
 export type FlowNode = Node<{
   name: string; kind: string; state: string; detail: string;
   plugins?: string[];
+  call?: GraphCall;
   /** Which of the two it is, so a component can choose an icon without parsing the label. */
   nodeKind: 'agent' | 'op' | 'subgraph';
   attempt?: number; statusLabel?: string;
@@ -217,6 +234,7 @@ function nodeState(nodeId: string, graph: OurGraph, state: OurRunState | null): 
       detail,
       nodeKind: kindOf(graph.nodes.find(item => item.id === nodeId)!),
       plugins: graph.nodes.find(item => item.id === nodeId)?.plugins,
+      call: graph.ops?.[graph.nodes.find(item => item.id === nodeId)?.op ?? '']?.call,
       // The canvas renders `attempt + 1` as "第 N 次执行", so zero means the first pass.
       attempt: passes ? passes - 1 : undefined,
       statusLabel,
@@ -227,7 +245,9 @@ function nodeState(nodeId: string, graph: OurGraph, state: OurRunState | null): 
 function nodeKindLabel(graph: OurGraph, nodeId: string): string {
   const node = graph.nodes.find(item => item.id === nodeId);
   if (!node) return '';
-  if (node.graph) return `${node.graph} · 模块`;
+  if (node.graph) return '本次运行内执行';
+  const call = graph.ops?.[node.op ?? '']?.call;
+  if (call) return `${call.graph || '未选择目标'} · ${callModeLabel(call.mode)}`;
   if (node.op) return `${node.op} · op`;
   return `${node.agent} · agent`;
 }

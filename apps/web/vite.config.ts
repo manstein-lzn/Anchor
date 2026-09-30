@@ -9,6 +9,8 @@ export default defineConfig({
     port: 5173,
     strictPort: true,
     proxy: {
+      '/graph-relations': { target: process.env.ANCHOR_WEB_API_URL || 'http://127.0.0.1:8077', changeOrigin: true },
+      '/channel-sessions': { target: process.env.ANCHOR_WEB_API_URL || 'http://127.0.0.1:8077', changeOrigin: true },
       '/sessions': { target: process.env.ANCHOR_WEB_API_URL || 'http://127.0.0.1:8077', changeOrigin: true },
       '/plugins': { target: process.env.ANCHOR_WEB_API_URL || 'http://127.0.0.1:8077', changeOrigin: true },
       '/graphs': { target: process.env.ANCHOR_WEB_API_URL || 'http://127.0.0.1:8077', changeOrigin: true },
