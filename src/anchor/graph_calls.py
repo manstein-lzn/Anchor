@@ -124,68 +124,8 @@ class GraphCalls:
                     if any(record.get("trigger", {}).get(key) != value for key, value in expected.items()):
                         raise ValueError("Graph call admission belongs to a different source invocation")
                 else:
-                    if cancelled():
-                        raise RuntimeError("Graph call cancelled before admission")
-                    session_context = None
-                    if spec.get("session"):
-                        try:
-                            from anchor.channel.background import validate
-                        except ImportError as exc:
-                            raise ValueError("Graph calls to channel sessions are not supported by this service") from exc
-                        session_context = validate(self.scheduler, source_workspace, source_run_id, spec)
-                    root = self._ancestry(source_workspace, source_run_id, spec["graph"])
-                    definition = json.loads((workspace / "graph.json").read_text())
-                    graph = graph_module.parse(definition)
-                    result = spec.get("result")
-                    if result and result["node"] not in graph.nodes:
-                        raise ValueError(f"no such result node: {result['node']}")
-                    values = dict(spec.get("input", {}))
-                    values.update({key: _pointer(run_input, pointer)
-                                   for key, pointer in spec.get("input_map", {}).items()})
-                    resolved = graph_module.merge_input(graph.input, values)
-                    record = {"graph": workspace.name, "run": run_id, "mode": spec["mode"],
-                              "status": "accepted", "node": node_id, "invocation": invocation,
-                              "input": resolved, "spec": spec,
-                              "definition": graph_module.to_dict(graph),
-                              "trigger": {"source": "graph_call", "graph": source_workspace.name,
-                                          "run": source_run_id, "node": node_id,
-                                          "invocation": invocation, "mode": spec["mode"],
-                                          "root_run": root}}
-                    if session_context is not None:
-                        record["session_pending"] = True
-                        record["session_context"] = session_context
-                        record["trigger"]["session"] = spec["session"]
-                    child.mkdir(parents=True, exist_ok=True)
-                    bundle = child / "call-inputs"
-                    visible = {item["node"]: Path(item["tree"]) for item in inputs}
-                    with tempfile.TemporaryDirectory(prefix=".call-inputs-", dir=child) as temporary:
-                        staged = Path(temporary)
-                        destinations = set()
-                        for selection in spec.get("files", []):
-                            if selection["node"] not in visible:
-                                raise ValueError(f"file source is not visible to caller: {selection['node']}")
-                            selected = _file(visible[selection["node"]], selection["path"])
-                            relative = _relative(selection["as"])
-                            if any(relative == other or relative in other.parents or other in relative.parents
-                                   for other in destinations):
-                                raise ValueError(f"overlapping selected file destination: {relative}")
-                            destinations.add(relative)
-                            output = staged / relative
-                            output.parent.mkdir(parents=True, exist_ok=True)
-                            shutil.copyfile(selected, output)
-                            with output.open("rb") as stream:
-                                os.fsync(stream.fileno())
-                        if bundle.exists():
-                            shutil.rmtree(bundle)  # this invocation has not been accepted yet
-                        staged.replace(bundle)
-                    bindings = {node.id: self.scheduler.library.attach(node.plugins)
-                                for node in graph.nodes.values() if node.plugins}
-                    record_bindings(child, bindings, resume=False)
-                    local = runner._local_inputs(workspace, graph.nodes)
-                    if local:
-                        (child / "local-inputs.json").write_text(
-                            json.dumps(local, ensure_ascii=False, sort_keys=True, indent=2))
-                    _write(admission, record)
+                    record = self._prepare_record(source_workspace, source_run_id, node_id, invocation,
+                                                  spec, run_input, inputs, cancelled, workspace, child, run_id)
                 if not (child / "run.json").exists():
                     _write(child / "graph.json", record["definition"])
                     graph = graph_module.parse(record["definition"])
@@ -214,47 +154,126 @@ class GraphCalls:
             response = {key: record[key] for key in ("graph", "run", "mode")}
             response["status"] = "accepted"
         else:
-            while True:
-                if cancelled():
-                    with self.scheduler.lock:
-                        if self.scheduler.control.get(record["run"]) != "stopped":
-                            _write(child / "call-cancellation.json", {"parent": source_run_id,
-                                                                     "node": node_id,
-                                                                     "invocation": invocation})
-                            self.scheduler.control_run(record["run"], "stop", cause="graph_call")
-                    while record["run"] in self.active:
-                        time.sleep(0.05)
-                    raise RuntimeError("waiting Graph call cancelled")
-                state = runner.RunState.load(child)
-                if state.status != "running" and record["run"] not in self.active:
-                    break
-                time.sleep(0.05)
-            if state.status != "finished":
-                raise RuntimeError(f"called Graph {record['graph']} Run {record['run']} "
-                                   f"{state.status}: {state.error or state.reason}")
-            response = {key: record[key] for key in ("graph", "run", "mode")}
-            response["status"] = state.status
-            result = record["spec"].get("result")
-            if result:
-                output = state.result(result["node"])
-                if output is None or not output.commit:
-                    raise ValueError(f"called Graph did not produce result node: {result['node']}")
-                snapshot = runner._given(child, output)
-                response["summary"] = output.submission
-                files = result.get("files", [])
-                for name in files:
-                    source = _file(snapshot.tree, name)
-                    destination = directory / "result" / _relative(name)
-                    # Prior invocations may leave files, but must never redirect writes.
-                    current = directory
-                    for part in destination.relative_to(directory).parts:
-                        current = current / part
-                        if current.is_symlink():
-                            raise ValueError("result destination must not traverse symlinks")
-                    destination.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copyfile(source, destination)
-                response["result"] = {"node": output.node_id, "commit": output.commit, "files": files}
+            state = self._wait(record, child, source_run_id, node_id, invocation, cancelled)
+            response = self._result(record, child, directory, state)
         _write(directory / "call.json", response)
+        return response
+
+    def _bundle(self, child: Path, spec: dict, inputs: tuple) -> None:
+        bundle = child / "call-inputs"
+        visible = {item["node"]: Path(item["tree"]) for item in inputs}
+        with tempfile.TemporaryDirectory(prefix=".call-inputs-", dir=child) as temporary:
+            staged = Path(temporary)
+            destinations = set()
+            for selection in spec.get("files", []):
+                if selection["node"] not in visible:
+                    raise ValueError(f"file source is not visible to caller: {selection['node']}")
+                selected = _file(visible[selection["node"]], selection["path"])
+                relative = _relative(selection["as"])
+                if any(relative == other or relative in other.parents or other in relative.parents
+                       for other in destinations):
+                    raise ValueError(f"overlapping selected file destination: {relative}")
+                destinations.add(relative)
+                output = staged / relative
+                output.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(selected, output)
+                with output.open("rb") as stream:
+                    os.fsync(stream.fileno())
+            if bundle.exists():
+                shutil.rmtree(bundle)  # this invocation has not been accepted yet
+            staged.replace(bundle)
+
+    def _prepare_record(self, source_workspace, source_run_id, node_id, invocation,
+                        spec, run_input, inputs, cancelled, workspace, child, run_id) -> dict:
+        admission = child / "admission.json"
+        if cancelled():
+            raise RuntimeError("Graph call cancelled before admission")
+        session_context = None
+        if spec.get("session"):
+            try:
+                from anchor.channel.background import validate
+            except ImportError as exc:
+                raise ValueError("Graph calls to channel sessions are not supported by this service") from exc
+            session_context = validate(self.scheduler, source_workspace, source_run_id, spec)
+        root = self._ancestry(source_workspace, source_run_id, spec["graph"])
+        definition = json.loads((workspace / "graph.json").read_text())
+        graph = graph_module.parse(definition)
+        result = spec.get("result")
+        if result and result["node"] not in graph.nodes:
+            raise ValueError(f"no such result node: {result['node']}")
+        values = dict(spec.get("input", {}))
+        values.update({key: _pointer(run_input, pointer)
+                       for key, pointer in spec.get("input_map", {}).items()})
+        resolved = graph_module.merge_input(graph.input, values)
+        record = {"graph": workspace.name, "run": run_id, "mode": spec["mode"],
+                  "status": "accepted", "node": node_id, "invocation": invocation,
+                  "input": resolved, "spec": spec,
+                  "definition": graph_module.to_dict(graph),
+                  "trigger": {"source": "graph_call", "graph": source_workspace.name,
+                              "run": source_run_id, "node": node_id,
+                              "invocation": invocation, "mode": spec["mode"],
+                              "root_run": root}}
+        if session_context is not None:
+            record["session_pending"] = True
+            record["session_context"] = session_context
+            record["trigger"]["session"] = spec["session"]
+        child.mkdir(parents=True, exist_ok=True)
+        self._bundle(child, spec, inputs)
+        bindings = {node.id: self.scheduler.library.attach(node.plugins)
+                    for node in graph.nodes.values() if node.plugins}
+        record_bindings(child, bindings, resume=False)
+        local = runner._local_inputs(workspace, graph.nodes)
+        if local:
+            (child / "local-inputs.json").write_text(
+                json.dumps(local, ensure_ascii=False, sort_keys=True, indent=2))
+        _write(admission, record)
+        return record
+
+    def _wait(self, record, child, source_run_id, node_id, invocation, cancelled):
+        while True:
+            if cancelled():
+                with self.scheduler.lock:
+                    if (record["run"] in self.active and
+                            self.scheduler.control.get(record["run"]) != "stopped"):
+                        _write(child / "call-cancellation.json", {"parent": source_run_id,
+                                                                 "node": node_id,
+                                                                 "invocation": invocation})
+                        self.scheduler.control_run(record["run"], "stop", cause="graph_call")
+                while record["run"] in self.active:
+                    time.sleep(0.05)
+                raise RuntimeError("waiting Graph call cancelled")
+            state = runner.RunState.load(child)
+            if state.status != "running" and record["run"] not in self.active:
+                break
+            time.sleep(0.05)
+        if state.status != "finished":
+            raise RuntimeError(f"called Graph {record['graph']} Run {record['run']} "
+                               f"{state.status}: {state.error or state.reason}")
+        return state
+
+    def _result(self, record, child, directory, state) -> dict:
+        response = {key: record[key] for key in ("graph", "run", "mode")}
+        response["status"] = state.status
+        result = record["spec"].get("result")
+        if result:
+            output = state.result(result["node"])
+            if output is None or not output.commit:
+                raise ValueError(f"called Graph did not produce result node: {result['node']}")
+            snapshot = runner._given(child, output)
+            response["summary"] = output.submission
+            files = result.get("files", [])
+            for name in files:
+                source = _file(snapshot.tree, name)
+                destination = directory / "result" / _relative(name)
+                # Prior invocations may leave files, but must never redirect writes.
+                current = directory
+                for part in destination.relative_to(directory).parts:
+                    current = current / part
+                    if current.is_symlink():
+                        raise ValueError("result destination must not traverse symlinks")
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(source, destination)
+            response["result"] = {"node": output.node_id, "commit": output.commit, "files": files}
         return response
 
     def start(self, workspace: Path, run_id: str) -> None:
@@ -282,6 +301,11 @@ class GraphCalls:
             if child is not None:
                 state = runner.RunState.load(child)
                 item["status"] = state.status
+                admission = child / "admission.json"
+                pending = admission.exists() and json.loads(admission.read_text()).get("session_pending")
+                if pending:
+                    session_id = record.get("spec", {}).get("session")
+                    item["status"] = ("running" if session_id in self.scheduler.session_background else "queued")
                 result = record.get("spec", {}).get("result")
                 output = state.result(result["node"]) if result else None
                 if output is not None:

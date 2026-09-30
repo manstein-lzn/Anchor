@@ -429,10 +429,11 @@ class Scheduler:
         return None
 
     def active_runs(self, graph: str) -> list[str]:
-        return list(dict.fromkeys(
-            ([self.running[graph]] if graph in self.running else []) +
-            [identifier for identifier, name in self.channel_runs.items() if name == graph] +
-            [identifier for identifier, name in self.graph_calls.active.items() if name == graph]))
+        with self.lock:
+            return list(dict.fromkeys(
+                ([self.running[graph]] if graph in self.running else []) +
+                [identifier for identifier, name in self.channel_runs.items() if name == graph] +
+                [identifier for identifier, name in self.graph_calls.active.items() if name == graph]))
 
     def active_run(self, graph: str) -> str | None:
         return next(iter(self.active_runs(graph)), None)
