@@ -63,6 +63,31 @@ cp -n examples/graphs/deep-academic-research.json \
 | WebUI 日志 | `.local/dev/vite.log` |
 | 进程 PID 文件 | `.local/dev/` |
 
+### 5. Linux 常驻部署（systemd）
+
+`scripts/dev.sh` 只启动开发后台进程，不提供开机启动或崩溃后重启。正式部署使用 [anchor.service](../deploy/systemd/anchor.service)，由 systemd 管理 Anchor；企业微信网关仍由 Anchor 的 ChannelSupervisor 管理，不单独启动第二份。
+
+模板适用于仓库 `/root/Anchor`、数据目录 `.local/demo`，运行用户为 root；其他安装位置需调整 `User`、`WorkingDirectory` 和 `ExecStart`。凭证继续由 Anchor 从仓库 `.env` 加载，不复制到 unit。监听地址保持 `127.0.0.1:8077`，远程访问需要已有代理或 SSH 端口转发。
+
+先完成 `npm --prefix apps/web run build`。安装前停止同一数据目录的旧 Anchor 和遗留网关，避免端口冲突及重复企业微信连接。然后在 **PID 1 为 systemd 的宿主机终端** 执行：
+
+```bash
+sudo install -m 644 deploy/systemd/anchor.service /etc/systemd/system/anchor.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now anchor.service
+sudo systemctl status anchor.service
+```
+
+直接打开 **http://127.0.0.1:8077** 即可使用构建后的网页和 API，无需 Vite。日常管理：
+
+```bash
+sudo systemctl restart anchor.service
+sudo systemctl stop anchor.service
+sudo journalctl -u anchor.service -f
+```
+
+服务启用后独立于终端/Codex 会话，并配置开机启动和进程退出后重启；运行中的任务不因此获得自动重放保证。停止时 systemd 清理整个服务进程组（cgroup），包括长连接网关。PID 1 为 Bash 的容器/执行环境不能仅靠安装此文件启用服务，需要由宿主机 systemd 或容器运行平台管理其生命周期。
+
 ## Anchor Pilot 与 Session API
 
 本节描述当前代码。2026-09-26 的恢复方案「保存工作记录 → 重开原会话 → Agent 核查现场后继续」已按 P2 接通并通过真实验收；当前工具审批只剩删除 Graph，中断会话可以直接发新消息。验收状态与证据见 [开发台账](pilot-development-plan.md)。
@@ -290,7 +315,7 @@ ln -s "$PWD/plugins/academic-research" .local/demo/library/plugins/academic-rese
 
 企业微信助手通过普通 Graph 执行，支持按用户隔离的历史、同图并发和新消息取消旧任务后接续。长连接网关和 Anchor 均可部署在 Linux，客户端无需同机。完整 `.env`、安装、自检、启动和私聊验收步骤见 [企业微信助手接入](wecom-assistant.md)。
 
-默认助手不挂业务 Plugin；可在节点上添加已登记的 Plugin。机器人 Bot ID/Secret 用于长连接，自建应用的 Corp ID/Agent ID/Secret 用于可选 MCP 消息与成员 API。企业微信审批接口尚未实现。真实模型/Graph/本地 Plugin 验收与真实企业微信公网联动分开记录。
+默认助手挂载 `wecom`，支持主动 Markdown 通知、附件提取/原生图片输入、持续正文及图片回复；其他业务 Plugin 可按需添加。机器人 Bot ID/Secret 用于长连接及上述能力，主动通知目标由可选 `ANCHOR_WECOM_SEND_USERS` 限制（默认继承入口名单）；自建应用的 Corp ID/Agent ID/Secret 仅用于另外的可选 MCP 消息与成员 API。企业微信审批接口尚未实现。真实模型/Graph/本地 Plugin 验收与真实企业微信公网联动分开记录。
 
 ## 深度学术调研图
 
@@ -366,3 +391,29 @@ flowchart TD
 | `DELETE /runs/<id>` | 删除该次运行及文件，运行中拒绝 |
 | `GET /runs/<id>/files/<node>` | 列出节点产物 |
 | `GET /runs/<id>/files/<node>/<path>` | 预览文件，加 `?download=1` 下载原文件 |
+
+
+## 调用另一个工作流
+
+在工作流编辑页添加“调用工作流”节点，选择已安装的目标及执行模式：
+
+- **等待完成**：本步骤等待目标结束。可选择目标输出节点及返回文件，后续节点从 `/in/<调用节点>/result/` 读取。
+- **启动后继续**：目标 Run 已保存后本步骤完成。目标继续执行，运行详情会分别显示调用节点完成状态与目标当前状态。
+
+在右侧设置输入常量、来源输入的 JSON Pointer 映射、上游文件和可选的助手会话。目标只能访问明确选中的文件；来源路径必须位于本节点可见的已提交上游快照。普通调用不继承来源 Run 的完整上下文。已有通道会话提供自己的对话历史，并在后台结果完成后向该用户投递正文。
+
+“工作流关系”显示已保存的直接调用者、目标及定时计划；点击关系可定位来源调用节点。运行详情中可进入具体目标 Run，再返回来源；循环中的每次调用都有独立引用。时间线支持按来源和调用链筛选。
+
+可先安装不调用模型、不发消息的两个示例：
+
+```bash
+mkdir -p .local/demo/workspaces/call-worker .local/demo/workspaces/call-report
+cp examples/graphs/call-worker.json .local/demo/workspaces/call-worker/graph.json
+cp examples/graphs/call-report.json .local/demo/workspaces/call-report/graph.json
+```
+
+在网页运行 `call-report`，它生成报告、wait 调用 `call-worker`，再读取返回文件。调用节点需通过 Anchor 服务执行；直接使用 standalone runner 没有服务调用处理器。
+
+周报提醒可在发布节点后连接调用节点，目标选 `wecom-assistant`，选自己的已有企业微信会话，传入报告文件并设置 `input.message`（例如“阅读报告并给我一段完成提醒”）。助手后台输出的 summary 自动投递，不要再要求模型重复调用主动发送工具。此配置会在后续定时执行时产生真实通知；本次开发没有修改生产周报或激活新通知计划。
+
+被打断的后台任务保留同一个 Run；若原生命令恢复判定 `Uncertain`，需检查真实业务结果再处理。平台 ACK 不确定时系统不会自动重发，以避免重复通知。跨 Graph 递归、自调用到正在使用的同一会话、自动猜测成员身份均不支持。

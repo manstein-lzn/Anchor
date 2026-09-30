@@ -172,9 +172,11 @@ SSE `message` 的 data 为标准 Vercel chunk，`id` 为已提交到 SQLite 的�
 
 | A21 | 每周四 09:00 本机工作周报与独立反馈 | 普通 Graph：项目理解与选题、写作、读者评审；问题退回、逐项复验、通过后组装；评审通过后使用 Docmost Plugin 同步图文到 MsteinL/Anchor周报；不设 blocked | 周报 Graph | 计划已启用；旧真实 Run 20260928T132435 已交付，但用户否定其流水账式内容；已重构读者视角指令，相关 11 项测试通过，新版真实内容质量待验收；Docmost 同步节点已接入，已整理报告已创建为目标父页面下的子页面并插入上传的 SVG；上传工具与图文替换回归通过；完整 Graph 真实 provider 验收待执行 |
 | A22 | Pilot 历史会话改名与删除 | 每行“…”菜单；改名持久化；确认后删除空闲会话；当前聊天及关联 Run/产物边界明确 | Pilot 会话管理 | 后端 336 项、前端 23 项单测与 E2E 13 条通过（provider opt-in 1 条跳过）；隔离真实 HTTP 浏览器覆盖持久改名、取消/失败保留、删除其他/当前会话、草稿与刷新、手机及键盘；本机页面只读核查菜单可用。未触发新 provider 请求 |
-| A23 | 企业微信 Plugin 与 WebSocket 通道 | 长连接、事件去重、回复投递、自动监管及附件落盘 | Plugin/通道联动 | `channel.json` 已由 Library 识别；Graph 挂载 Plugin 后由 Anchor `ChannelSupervisor` 自动启动单一网关并在服务退出时停止；文本/图片/文件/混合事件已规范化，附件安全下载到 `state/channels/wecom/events/<event>` 并只读挂载 `/in/channel`。网页登录的 401 通过页面内 API key 对话框输入并重试，避免依赖浏览器原生 prompt。原有真实文本 provider、HTTP、Graph、本地 MCP、并发、重启和真实企业微信文本私聊证据保留。媒体真实企业微信投递、模型视觉理解和多平台监管仍待真实 provider/平台验收 |
-| A24 | 多用户 Graph 助手工作中枢 | 同图并发、独立原生历史、Plugin 调用、新消息打断并接续 | 近期目标 | 普通 Graph 接线、两用户隔离、跨轮产物、消息打断、三消息交接、本地 stdio MCP 测试通过；真实 provider 基础链路通过。Pilot 的 `/sessions` 列表仅显示 Pilot 会话，企业微信 Graph 会话不混入 Pilot 选择器；相关隔离回归通过。跨轮跳过节点、模型初始化失败后的快照回退和 SDK 实际连接/重连回归通过；全量 359 项通过。逐业务用户数据授权、企业微信审批 API、RSI 尚未交付 |
+| A23 | 企业微信 Plugin 与 WebSocket 通道 | 长连接、事件去重、回复投递、自动监管、主动发送、附件处理及图文流式回复 | Plugin/通道联动 | 已确认真实私聊发送者标识保存在 Session，可从平台回调取得，无需先找管理员；按姓名查联系人尚未接入。 唯一受监管网关及已有真实文本私聊证据保留；新接运行时主动 Markdown 发送工具、真实附件提取/原生 BinaryContent、指定节点 summary 的持续 SSE、PNG/JPEG 回复。隔离真实 provider Graph 两轮通过（`.local/wecom-capability-proof/20260930T133215/evidence.json`）；真实 SDK 本地 WebSocket 发送/ACK/流式/图文及取消/重放回归通过；最终后端全量 412 项通过。四项真实企业微信公网验收、多平台监管、语音/卡片/反馈仍待做。详见 [能力矩阵](wecom-sdk-capability-audit.md) |
+| A24 | 多用户 Graph 助手工作中枢 | 同图并发、独立原生历史、Plugin 调用、新消息打断并接续 | 近期目标 | 新增跨轮图片失败隔离、延迟 ACK/媒体接纳顺序、重启后旧事件抑制回归；真实 provider 图片/文件两轮接续通过。 普通 Graph 接线、两用户隔离、跨轮产物、消息打断、三消息交接、本地 stdio MCP 测试通过；真实 provider 基础链路通过。Pilot 的 `/sessions` 列表仅显示 Pilot 会话，企业微信 Graph 会话不混入 Pilot 选择器；相关隔离回归通过。跨轮跳过节点、模型初始化失败后的快照回退和 SDK 实际连接/重连回归通过；全量 359 项通过。逐业务用户数据授权、企业微信审批 API、RSI 尚未交付 |
 | A25 | 从工作证据改进 Plugin、Graph 与 Anchor | 普通 Graph 生成候选改动；可追溯证据、对比验证、按授权发布及效果观察；私有记录不跨用户泄露 | 远期需求，暂不实现 | 用户明确待积累足够数据后再执行改进 Graph；不是企业微信助手的前置工作，无 RSI 效果或真实 provider 验收 |
+| A27 | Graph 组合与独立调用及 Web 表达 | 保留内联；节点创建独立 Run，可辨调用模式、输入结果与具体执行关系；周报通知作为案例 | 已实现并部署；隔离真实模型/浏览器验收通过，真实成员通知待验收 | Op.call wait/detach、持久接纳/恢复、输入与产物、独立并发、会话串行/让出、Web 编辑/关系/父子导航通过。后端 479 项、前端单测 27 项、浏览器 17 项通过；1 个真实 provider 浏览器 opt-in 用例跳过，另有隔离真实模型报告→助手→同会话追问通过。证据 `.local/graph-call-proof/20260930T144935/evidence.json`、`browser-release/`、`deployment.json`。未向真实成员发消息，未改变生产周报计划；命令 Uncertain 仍需核查，未提供历史链级联删除。 |
+| A26 | 关闭开发会话后服务仍可用 | 宿主服务管理、自动重启、开机启动；只保留一个企业微信网关 | 常驻部署 | 已提供 systemd unit 并通过 `systemd-analyze verify`；当前执行环境 PID 1 为 Bash、systemd offline，无法激活宿主服务。临时恢复 8077，首页及鉴权 API、5173 代理均 200，唯一网关归属于 Anchor。宿主启用、关闭 Codex 后访问、崩溃重启及开机验收仍待做 |
 
 每阶段执行相关后端测试、Ruff/compileall、前端测试/build、真实 HTTP 与浏览器验收。最终必须取得全量 pytest 的明确退出码和总结；运行中或仅看到进度点不算通过。阶段产物不能等同于产品全部完成。
 
@@ -308,3 +310,42 @@ SSE `message` 的 data 为标准 Vercel chunk，`id` 为已提交到 SQLite 的�
 - 2026-09-30：将企业微信长连接正式纳入 Plugin/服务生命周期：Library 校验 `channel.json`，Anchor 服务扫描 Graph 节点挂载并由 `ChannelSupervisor` 启动、重启和停止单一 WebSocket 网关；`setup.py` 为新数据根复制完整 Plugin。扩展 `ChannelEvent` 与 TurnStore 保存通道附件，网关支持企业微信 image/file/mixed 消息，调用 SDK 下载并解密后落盘，Graph 以只读 `/in/channel` 读取，服务端限制来源目录、单事件 16 个附件、单文件 20 MiB、单事件 50 MiB。现有通道与 Plugin 回归通过，Ruff 通过；尚未用真实企业微信媒体消息或视觉模型验收，不能宣称模型已理解图片。对应 A23。
 - 2026-09-30：用户首次打开更新后的网页时遇到 `prompt() is not supported`。原因是 API key 轮换后，管理 API 返回 401，网页调用浏览器原生 `window.prompt()` 输入密钥；部分宿主不支持该 API。改为页面内密码输入对话框，并让同时失败的请求共用一个输入、提交后各自重试；Pilot SSE 认证也复用该对话框。前端单测 24 项、API key 专项浏览器 E2E、生产构建及 diff 检查通过。服务端需重启加载新 bundle；对应 A23。
 - 2026-09-30：用户发现 Pilot 面板显示企业微信助手聊天。根因是 Pilot 列表接口直接返回共享 SessionStore 中的所有会话，而企业微信对话虽由普通 Graph 执行，也持久化为 Session/Turn。现在 `/sessions` 只列未绑定 Graph/通道的 Pilot 会话，通道历史仍保留在各自 Session/Run 存储中；新增回归验证 Pilot 会话仍可见、企业微信会话不进入列表。对应 A24。
+
+- 2026-09-30：用户报告关闭 Codex 会话后后端不可达。核查发现 8077 无监听、旧企业微信网关孤立存活；当前环境 PID 1 为 Bash，systemd offline 且 Docker daemon 不可达，无法在此激活宿主服务。新增 `/root/Anchor` 部署用 systemd unit，配置退出重启、开机安装目标、SIGINT 清理及 cgroup 子进程管理，并补充操作文档；`systemd-analyze verify` 与 diff 检查通过。停止确认身份的孤立网关后临时启动 Anchor PID 358872，唯一网关 PID 358873 为其子进程；8077 首页、鉴权 /graphs 及 5173 /graphs 代理均返回 200。临时进程不等于系统常驻部署；未验证关闭 Codex、宿主重启、故障重启或新增真实 provider/平台对话。对应 A26。
+
+- 2026-09-30：按用户要求只读核查企业微信助手 5 轮对话及对应 Run。前四轮尚未挂 Plugin，最后一轮已挂 wecom；最后一轮通过 Bash 手动运行 server.py 的 tools/list 得到静态工具定义，未实际调用业务 API，不能据此称工具可用。当前 .env 仅配置 Bot ID/Secret，WECOM_CORP_ID/AGENT_ID/SECRET 缺失，Library 实际解析 wecom MCP 为 0；节点 network=false，未挂其他业务 Plugin，审批尚未实现。本地 SDK 1.0.2 提供 WSClient.send_message(chatid, body)，网关当前仅接 reply_stream，未向 Graph 暴露主动发送工具；平台主动发送权限及目标范围未实测。未修改权限或凭证、未触发模型及发送消息。对应 A23/A24。
+
+- 2026-09-30：核对安装 SDK 1.0.2、WecomTeam 上游 commit `6bcb59a9a636c566f4c6ea5268b228e3def1611a` 的 README/API 矩阵、Node/Python 对照及示例，形成 `docs/wecom-sdk-capability-audit.md`。静态调用与离线规范化核查确认：语音转写未提取且后端拒绝 voice；未订阅业务事件；仅回复处理提示和最终文本；主动发送、图文输出、欢迎语、卡片、反馈均未接。图片/文件本地链路已接，真实媒体/视觉待验收。`pytest tests/test_wecom_plugin.py tests/test_channel_gateway.py -q -o addopts=''` 25 passed（2 条 SDK 弃用提示）、diff 检查通过。未修改运行代码或配置、未重启、未发消息、未触发模型调用。本次只完成审计，不宣称 SDK 全能力交付；对应 A23/A24。
+
+### 2026-09-30 企业微信四项能力实现契约
+
+用户授权开发：长连接主动发送、真实附件处理、持续流式输出、图文回复。沿用普通助手 Graph 和唯一网关，不接 Pilot，不扩大为通讯录/审批或群聊。
+
+- 主动发送由已挂载企业微信 Plugin 的节点调用运行时提供的工具，委托现有网关执行 SDK `send_message`；节点不获得 Bot Secret 或管理 API key。服务端校验接收成员允许名单、当前 Run 取消状态；平台 ACK 才能记为已接受，超时不自动重复发送。
+- 附件原件继续只读挂载；文本/PDF/常用 Office 文件做有界提取，图片经内容校验后使用框架原生 BinaryContent，不能将本地路径当成模型可见图片。当前模型能否接收图像需真实 provider 验证。
+- 普通节点增加可选的可信输出观察者和运行时 toolset 接线；模型循环、持久化、历史仍由固定版本 PydanticAI/Harness 承担。仅将指定回复节点的结构化 summary 增量发送到平台，不泄露思考、任意工具参数或其他节点输出。
+- 流式传输复用 TurnStore 事件和 SSE，兼容原 JSON 通道入口；断开订阅不重启 Graph。平台回复按同一 stream_id 有节流地更新，终态以已验证 summary 为准；新消息取消旧 Run 后禁止继续投递其业务输出。
+- 图文回复由 Plugin 工具选择当前节点可读的 PNG/JPEG，校验路径/格式/大小后暂存为本 Run 回复产物，网关以 SDK `msg_item` 回传；不能读宿主任意路径或跨用户产物。主动发送首期 Markdown，图文用于当前对话回复。
+- 工作包：节点框架接线约 25%，通道/工具约 40%，附件约 15%，集成与验收约 20%。节点与附件在独立 worktree 开发，主线负责调用契约、网关、Graph 接线和最终验收。分包测试 → 主线交叉测试 → 真实 provider/平台验收。平台实发测试需用户明确指定测试对象并授权，当前开发授权不自动当作发消息授权。
+
+- 2026-09-30：按用户确定的四项优先级完成主线接线：挂载 wecom 的 Graph 节点使用受限运行时工具委托唯一网关主动发 Markdown；附件有界解析并以原生 BinaryContent 传图；公开 summary 经 TurnStore/SSE 持续更新；指定回复节点准备 PNG/JPEG，终态按 SDK msg_item 回传。复用原生持久化/续聊和既有事件账本，增加出站调用去重、成员允许名单、未知 ACK 不重发、只读图片路径及取消检查。独立复审发现的慢附件接纳倒序、初始 ACK 延迟、旧 ready/failed 重放覆盖新消息已修复，首次顺序与事件身份保存在原账本。未获响应的失败图片仅在下一轮上下文投影中替换，原生记录不改。相关分包与集成回归通过，最终全量 412 项通过；对应 A23/A24。
+- 2026-09-30：四项能力隔离真实 provider 验收通过，证据 `.local/wecom-capability-proof/20260930T133215/evidence.json`。普通 Graph 接收有效 PNG、TXT、DOCX，返回红色/ALPHA-47/128.50 CNY、通过真实图片工具附回字节一致原图，HTTP SSE 在完成前输出正文，下一轮保留三项事实。实际 SDK 对本地 WebSocket 另验证主动发送帧及 ACK、持续正文、最终图文。没有启动真实 Bot 验收网关或向成员发送测试消息；本地模拟平台不等于企业微信公网四项验收。对应 A23/A24。
+
+- 2026-09-30：四项能力最终收尾：`./.venv/bin/python -m pytest -q -n 8 --dist worksteal` 全量 412 项通过、退出码 0（SDK 的 websockets 弃用提示保留）；Ruff 与 diff 检查通过，无前端改动。独立复审无剩余确定阻断项，另复演旧失败事件在新 Run 进行中重投，不再压掉新业务回复。确认当前 0 个活动 Run/Turn 后，将与旧仓库一致、未经操作员修改的已安装 wecom Plugin 文件备份并升级，保留 Graph 与凭证，重启当前 Anchor PID 410211，唯一网关 PID 410212 为其子进程；8077 首页/鉴权 API 与 5173 代理返回 200，本机控制 socket 权限 0600，配置自检通过。部署证据 `.local/wecom-capability-proof/20260930T133215/deployment.json`，未向真实成员发送测试消息；仍是当前环境临时进程，未新增 systemd 常驻部署验收。对应 A23/A24，四项公网验收留待用户私聊。
+
+- 2026-09-30：按用户对 userid 获取的疑问只读核查：当前入口名单为 `*`、出站名单未设置因此继承入口；已有一个真实企业微信通道身份保存在 Session.channel.sender_id。纠正接入文档中必须先找管理员取得账号的表述，说明回调 body.from.userid 可直接提供已接触用户标识，不把它与姓名或自建应用通讯录账号未经核对混用。未修改名单、权限、凭证或运行代码，未发送消息；联系人姓名映射/搜索尚未实现。对应 A23。
+
+- 2026-09-30：按用户关于定期周报完成后企业微信提醒的提问，核查现有 schedule、weekly-work-report、Scheduler._run、通道监管和用户 Turn 接纳。此前仅记录结果回传与长任务关联会话目标，未实现完成订阅；当前周报以 Docmost 节点结束，计划没有通知目标。确认跨 Graph 挂载同一通道冲突、直接复用用户输入会取消当前助手 Run 两处架构缺口，记录源 Run 完成事件→订阅目标会话→助手 Graph→主动投递的候选方案及直接模板通知路径。明确候选未冻结、未修改现有运行代码或任务、未发企业微信消息；仅文档 diff 检查，对应 A27。
+
+- 2026-09-30：用户确认保留内联与独立 Run 两种 Graph 组合，并要求从整体架构和 Web 易理解性设计。核查内联仅引用文件内 graphs、前端 Op 尚为只读命令、独立 trigger 无调用去重/持久接纳保证且按 Graph 拒绝并发、恢复重新读取工作区定义等具体边界；形成 docs/graph-composition-design.md，提出调用 Op、两种完成条件、输入与只读产物、逐轮调用身份、状态/停止/恢复和三级前端表达。旧通知订阅候选明确不作为实现合同。默认并发策略询问中，未冻结 schema、未开始实现或修改当前任务；仅文档检查，对应 A27。
+
+- 2026-09-30：用户答复确认独立 Graph 调用的默认并发策略：多个任务调用同一个 Graph 时各自产生独立 Run，允许并发；助手同一用户会话仍串行。同步设计草案和 A27，明确实现需更新活动 Run 索引、全部活动运行的编辑/删除保护与 Graph 页面多运行呈现；既有手动/定时繁忙规则不因本答复静默改变。无运行代码变更、未运行测试，仅文档 diff 检查。
+
+- 2026-09-30：用户授权按独立 Graph 调用设计完成开发。冻结 Op.call 与 wait/detach、输入映射、选定产物、稳定调用身份及 Web 投影契约；使用开发编排 skill 划分 runner/schema、服务调度、Web 三个隔离工作包，主线负责通道 Session 集成及真实验收。先将已验证的企业微信四项能力代码提交为 9f04c6b，保留未提交部署/文档改动；未推送。对应 A27，目前实施中，不能称功能完成。
+
+- 2026-09-30：A27 首轮集成 runner/schema、持久调用服务、Web 编辑/关系/父子 Run 展示；增加共享通道与后台 Session 绑定，同会话后台等待前台、新消息让后台原 Run 暂停后恢复。独立复核发现并修复循环节点控制路径碰撞（a 第 2 轮与 a-2 第 1 轮）、多级调用来源会话校验、投递失败误报 finished；新调用控制使用完整节点及全局轮次摘要。相关 72 项通过，调用/会话集成 61 项通过。保持原生命令恢复的 Uncertain 语义，已开始但不确定完成的命令不自动重放。最终回归与真实后端浏览器验收进行中。
+- 2026-09-30：A27 隔离真实 provider 验收：报告 Op 生成文件→wait 调用绑定既有 Session 的助手 Graph→模型读取 /in/call/report.md→测试网关记录一次主动通知→同 Session 新用户 Run 正确追问报告代号 QUARTZ-93 和金额 731.25。证据 `.local/graph-call-proof/20260930T144935/evidence.json`；真实模型与文件沙箱已执行，投递为显式测试替身，未开启实际企业微信通道或发真实消息。第一次验收脚本读取不存在的 detail 方法导致记录失败，纠正为公开 run 查询后完整重跑通过；未掩盖该脚本失败。
+
+- 2026-09-30：A27 真实后端浏览器闭环通过：页面创建调用节点、输入映射/选定文件、连线保存，wait 真实命令文件回传与未选输入隔离，detach 两个并发子 Run、全部活动运行呈现、父子跳转、关系定位/定时标记、调用链过滤及 390px 窄屏检查。首次完整浏览器回归暴露既有秒级 Run ID 的同秒复用，改为时间戳加 UUID 并增加固定时钟两次运行回归；没有放宽测试或用等待规避。最终浏览器 17 passed、1 skipped（单独的 opt-in provider 浏览器用例）；证据归档 `.local/graph-call-proof/browser-release/`。
+- 2026-09-30：A27 最终独立复核确认调用控制身份、跨会话祖先校验、投递失败状态已修复；另发现同 Session 排队任务误显 running，租约绑定具体 Run 后修复并回归。最终全量 `./.venv/bin/python -m pytest -q -n 8 --dist worksteal` 479 项通过、退出码 0；前端 27 单测、生产 build、Ruff 和 diff 检查通过。SDK 弃用提示及 Vite 大 chunk 提示保留。原生不确定命令不会自动重放；没有引入另一套模型/恢复引擎。
+- 2026-09-30：A27 部署：确认无活动 Run 后停止旧 Anchor 410211，启动当前代码 Anchor 516328，唯一企业微信网关 516329 为其子进程。8077/5173 首页与新 graph-relations API 均 200，channel-sessions 可见既有通道会话，控制 socket 存在，setup --check 通过；证据 `.local/graph-call-proof/deployment.json`。生产 Graph/定时计划/凭证未修改，未向真实成员测试发送；保留当前临时进程部署事实，未宣称启用系统常驻。使用文档与无模型调用示例已补齐。代码提交本地，未推送。

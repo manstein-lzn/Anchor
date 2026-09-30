@@ -10,13 +10,15 @@ Graph 是一个可编辑的 JSON 文件，包含角色 `agents`、命令定义 `
 | --- | --- |
 | Agent 角色 | 定义模型、指令、网络权限以及读写声明；节点的 `with` 补充本次职责 |
 | Agent Node | 在自己的工作区内，由模型使用工具并返回结构化结果完成任务 |
-| OpNode | 在同样的沙箱边界内执行命令，由程序完成工作 |
+| OpNode | 执行沙箱命令，或通过服务内置的 `call` 操作启动独立 Graph Run |
 | Edge | 表达依赖和路由；输入记录关联上游节点及 commit |
 | Graph Run | 保存一次运行的调度状态、各节点工作区、执行轮次与记录 |
 
-`Op` 继续表示命令定义。Plugin 是独立的共享能力资源，AgentNode 通过节点的 `plugins` 列表直接引用；角色没有 Plugin 继承规则，OpNode 也不挂载 Plugin。
+`Op` 定义恰好包含 `run` 沙箱命令或 `call` 结构化工作流调用。Plugin 是独立的共享能力资源，AgentNode 通过节点的 `plugins` 列表直接引用；角色没有 Plugin 继承规则，OpNode 也不挂载 Plugin。
 
 ## 文件系统
+
+部署时可使用 `deploy/systemd/anchor.service` 将 HTTP 服务及其 Plugin 通道子进程交给 systemd 管理；凭证仍由服务入口从仓库 `.env` 加载。构建后的网页由同一 HTTP 服务在 8077 提供，Vite 只用于开发。仓库提供 unit 不代表当前运行环境已启用 systemd，实际部署验证见开发台账。
 
 ```text
 <Anchor 数据根目录>/                 anchor-serve --root 指定
@@ -98,7 +100,7 @@ Agent 完成由 PydanticAI 校验的结构化结果表示（`summary`，多出�
 
 沙箱默认不联网；Agent 或 Op 的 `network: true` 显式启用网络。工作区之外的工具与输入只读，沙箱不可用时不退回宿主机裸执行。节点执行记录和恢复控制文件位于工作区之外。
 
-长驻平台通道不运行在 AgentNode 的 MCP 生命周期内。Plugin 的 `channel.json` 由 Library 识别；Anchor 服务启动后由 `ChannelSupervisor` 扫描 Graph 节点挂载，按平台只启动一个受监管的 WebSocket 子进程，服务退出时停止它。`plugins/wecom/ws_gateway.py` 用 SDK 维护长连接，把可信事件转换为 `ChannelEvent`，用 `EventLedger` 去重并保存回复。`POST /v1/channels/wecom/events` 按配置的 Graph、回复节点和来源/成员/会话建立独立 Session/Turn；直接调用既有普通 Graph runner，不调用 Pilot。Pilot 与通道共享 Session 持久化实现，但 `/sessions` 只列出没有 Graph/通道绑定的 Pilot 会话，避免企业微信聊天混入 Pilot 会话选择器。`.env` 的 `ANCHOR_WECOM_USERS` 默认拒绝，平台不能选择 Graph 或 Plugin。每条消息对应独立 Run，同一会话新消息取消旧 Run 并等待其退出后接上原生 FileStepStore / continue_run；不同用户的同一 Graph 可以并发。文本、图片、文件和混合消息的附件由网关下载到 `state/channels/wecom/events/<event>`，Graph 以只读 `/in/channel` 读取，路径经过服务端目录校验。按节点查找最近可读历史，上一轮产物及取消时未完成工作通过只读 `/previous` 传递。旧事件重投不重跑，已被新消息替代的回复不回传业务答案；外部副作用不回滚。Run 状态原子发布，Graph 修改/删除及历史 Run 删除受活动执行保护。API 鉴权沿用 `ANCHOR_API_KEYS`，网关使用其中一把密钥。默认 Graph 不挂业务 Plugin，挂载后仍走原有沙箱和工具边界；企业微信审批 API 未实现。图片是否能被模型直接视觉理解取决于后续模型/Plugin 的多模态能力，当前契约保证安全下载、落盘和只读访问。配置与真实验收边界见 [企业微信助手接入](wecom-assistant.md)。
+长驻平台通道不运行在 AgentNode 的 MCP 生命周期内。Plugin 的 `channel.json` 由 Library 识别；Anchor 服务启动后由 `ChannelSupervisor` 扫描 Graph 节点挂载，按平台只启动一个受监管的 WebSocket 子进程，服务退出时停止它。`plugins/wecom/ws_gateway.py` 用 SDK 维护长连接，把可信事件转换为 `ChannelEvent`，用 `EventLedger` 去重并保存回复。`POST /v1/channels/wecom/events` 按配置的 Graph、回复节点和来源/成员/会话建立独立 Session/Turn；直接调用既有普通 Graph runner，不调用 Pilot。Pilot 与通道共享 Session 持久化实现，但 `/sessions` 只列出没有 Graph/通道绑定的 Pilot 会话，避免企业微信聊天混入 Pilot 会话选择器。`.env` 的 `ANCHOR_WECOM_USERS` 默认拒绝，平台不能选择 Graph 或 Plugin。每条消息对应独立 Run，同一会话新消息取消旧 Run 并等待其退出后接上原生 FileStepStore / continue_run；不同用户的同一 Graph 可以并发。文本、图片、文件和混合消息的附件由网关下载到 `state/channels/wecom/events/<event>`，Graph 以只读 `/in/channel` 读取，路径经过服务端目录校验。按节点查找最近可读历史，上一轮产物及取消时未完成工作通过只读 `/previous` 传递。旧事件重投不重跑，已被新消息替代的回复不回传业务答案；外部副作用不回滚。Run 状态原子发布，Graph 修改/删除及历史 Run 删除受活动执行保护。API 鉴权沿用 `ANCHOR_API_KEYS`，网关使用其中一把密钥。默认助手挂载 `wecom`；其他业务 Plugin 仍需显式挂载，审批 API 未实现。附件经有界文本提取/图片校验后进入原生模型输入，原件继续只读保留。指定回复节点的结构化 summary 经 TurnStore/SSE 持续输出，网关对同一个 stream_id 节流更新，最终可附 PNG/JPEG。宿主按节点挂载注入受限 FunctionToolset：主动发送经鉴权 Unix socket 委托唯一网关，回复图片只允许当前节点可读路径；这两个通道工具不受节点 network 开关影响，MCP/业务命令仍受原沙箱限制。主动发送按工具调用 ID 去重、ACK 确认，结果未知不自动重试；入口和出站成员名单分开配置。现有事件账本保存首次接收顺序与会话身份，重连/重启后也抑制旧消息重放。配置与真实验收边界见 [企业微信助手接入](wecom-assistant.md)。
 
 ## 学术调研与 Plugin 接入
 
@@ -156,3 +158,16 @@ Pilot 已启用框架压缩：默认 `SlidingWindowCompaction`（200 条消息�
 ## 本机工作周报
 
 `weekly-work-report` 的采集、理解、写作和评审仍是普通业务 Graph；通过评审后的 Docmost 同步节点挂载 `docmost` Plugin。Graph 工作区中的 `local-inputs.json` 由本机操作员按节点 ID 授予具名只读路径，挂载到 `/local-inputs/<name>`；Graph JSON/API 本身无权增加该授权。采集 Op 读取两个 sessions 目录和普通采集脚本，将当次窗口的证据交给后续节点。授权路径随 Run 保存，恢复时授权改变则拒绝继续。图按程序采集→项目理解与选题→写作→读者视角独立评审→门禁分流运行；表达问题退回写作，项目理解与判断问题退回理解。证据缺口通过限定结论处理，不设 blocked 分支。正文围绕项目实质变化，来源单独保留，评审先检查可理解性再核查关键事实。四项评审通过、阻断问题解决且评审对应当前稿件 commit 后才组装 Markdown、来源附录和 SVG；Docmost 发布节点通过附件接口上传 SVG 并插入页面，失败时不更新正文；使用方式见 [每周工作报告](weekly-work-report.md)，真实验收以台账 A21 为准。图片下载保留 attachment，并提供图片 MIME 与隔离 CSP，使 Markdown 图片预览可用且不开放脚本或外部资源执行。
+
+
+## 独立 Graph 调用
+
+保留文件内子图展开，同一 Run 内执行；新增 `ops.<name>.call` 在普通 OpNode 上建立独立 Run。`wait` 等待成功并复制显式选择的结果，`detach` 在持久接纳后返回，子 Run 继续独立运行。多来源调用同一个 Graph 可并发；手动/定时入口原有繁忙拒绝规则保留。
+
+调用身份由来源 Graph、Run、完整节点 ID、全局执行轮次确定。控制记录位于 `control/.graph-calls/<identity>/graph-call.json`，目标保存 `admission.json`、冻结 `graph.json`、`run.json` 和只读 `call-inputs/`。服务恢复接纳后尚未启动的运行；Runner 恢复使用 Run 自己的定义快照。模型与命令的执行、提交、恢复仍由现有 Node/Harness 接口承担。已开始但无法确认结果的命令保留 `Uncertain`，不通过创建新 Run 自动重放。
+
+输入常量及 JSON Pointer 映射只传递显式选择的数据；文件仅取调用节点可见的已提交上游快照，目标读取 `/in/call/`。wait 结果复制到调用节点 `result/`，每轮引用写入 `call.json` 并随节点提交；网页从原生历史投影具体父子关系。跨 Graph 祖先递归调用被拒绝，图内反馈循环不受此限制。wait 取消只停止自己的子 Run；detach 接纳后不随父 Run 停止。
+
+`call.session` 是操作员在定义中选择的已有通道会话。后台 Graph 与该会话用户消息串行，后台不能打断聊天；用户新消息可使后台保留原 Run 并让出执行。恢复完成后由既有网关以稳定发送 ID 投递正文，网关沿用原账本处理 ACK 去重和未知投递结果。后台模型完成不等于消息已投递，投递失败会使等待调用失败。完整调用祖先中的会话身份约束跨用户访问，输入参数不能授予会话权限。同一 Plugin 通道可由多个 Graph 挂载，服务只启动一个平台网关。
+
+`/graph-relations` 从已保存定义派生关系；`/graphs` 提供全部 `active_runs`；Run 详情提供逐轮 `calls` 和 `trigger` 来源；`/channel-sessions` 提供已认证操作员可选的通道会话。历史调用引用和活动运行参与编辑/删除保护，不另建关系数据库。
