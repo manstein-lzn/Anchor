@@ -1,20 +1,22 @@
 {
   "name": "企业微信",
-  "description": "通过企业微信应用 API 发送消息、查询成员，并用官方 WebSocket 长连接接收智能机器人消息。",
+  "description": "企业微信机器人长连接私聊、主动通知、附件分析与图文回复；可选自建应用消息和成员查询 API。",
   "skills": "skills/",
   "mcpServers": {
     "wecom": {
       "command": "python3",
-      "args": ["server.py"],
+      "args": [
+        "server.py"
+      ],
       "cwd": ".",
       "env": {
         "WECOM_API_BASE_URL": "${WECOM_API_BASE_URL:-https://qyapi.weixin.qq.com}"
       },
       "optional_env_vars": [
-          "WECOM_CORP_ID",
-          "WECOM_AGENT_ID",
+        "WECOM_CORP_ID",
+        "WECOM_AGENT_ID",
         "WECOM_SECRET"
-        ]
+      ]
     }
   }
 }

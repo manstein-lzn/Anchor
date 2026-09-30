@@ -43,13 +43,16 @@ def check(root: Path) -> list[str]:
             issues.append("ANCHOR_API_KEY 必须与 ANCHOR_API_KEYS 中一把至少 32 字节的密钥相同")
     except ValueError:
         issues.append("ANCHOR_API_KEYS 必须是 JSON 数组")
-    if importlib.util.find_spec("aibot") is None:
+    if any(importlib.util.find_spec(name) is None for name in ("aibot", "PIL")):
         issues.append("缺少 channels 依赖：pip install -e '.[channels,mcp]'")
     from anchor.simple.graph import load
     try:
         graph = load(root / "workspaces" / os.environ.get("ANCHOR_WECOM_GRAPH", "wecom-assistant") / "graph.json")
-        if os.environ.get("ANCHOR_WECOM_REPLY_NODE", "assistant") not in graph.nodes:
+        reply_node = graph.nodes.get(os.environ.get("ANCHOR_WECOM_REPLY_NODE", "assistant"))
+        if reply_node is None:
             issues.append("回复节点不存在")
+        elif "wecom" not in reply_node.plugins:
+            issues.append("回复节点未挂载 wecom Plugin，无法自动启动网关及使用机器人工具")
     except (OSError, ValueError) as exc:
         issues.append(f"助手 Graph 不可用：{type(exc).__name__}")
     return issues

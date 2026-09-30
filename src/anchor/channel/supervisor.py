@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import subprocess
 import sys
 import threading
@@ -26,6 +27,7 @@ class ChannelSupervisor:
         self.api_key = api_key
         self.processes: dict[str, subprocess.Popen] = {}
         self.specs: dict[str, dict[str, Any]] = {}
+        self.controls: dict[str, tuple[Path, str]] = {}
         self._errors: set[str] = set()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -50,6 +52,15 @@ class ChannelSupervisor:
             except subprocess.TimeoutExpired:
                 process.kill()
         self.processes.clear()
+        self.controls.clear()
+
+    def send(self, platform: str, payload: dict) -> dict:
+        from anchor.channel.control import request
+        control = self.controls.get(platform)
+        process = self.processes.get(platform)
+        if control is None or process is None or process.poll() is not None:
+            raise RuntimeError("channel gateway is not running")
+        return request(*control, payload)
 
     def _loop(self) -> None:
         while not self._stop.wait(1):
@@ -90,6 +101,7 @@ class ChannelSupervisor:
                 if process.poll() is None:
                     process.terminate()
                 self.processes.pop(platform, None)
+                self.controls.pop(platform, None)
         for platform, spec in desired.items():
             self.specs[platform] = spec
             if platform in self.processes:
@@ -113,6 +125,12 @@ class ChannelSupervisor:
         env["ANCHOR_CHANNEL_WEBHOOK_URL"] = self.callback_url
         env["ANCHOR_API_KEY"] = self.api_key
         env["WECOM_CHANNEL_STATE"] = str(self.root / "state" / "channels" / platform)
+        control_path = self.root / "state" / "channels" / platform / "control.sock"
+        token = secrets.token_urlsafe(32)
+        env["ANCHOR_CHANNEL_CONTROL_SOCKET"] = str(control_path)
+        env["ANCHOR_CHANNEL_CONTROL_TOKEN"] = token
+        env["ANCHOR_WECOM_SEND_USERS"] = (os.environ.get("ANCHOR_WECOM_SEND_USERS") or
+                                          os.environ.get("ANCHOR_WECOM_USERS", ""))
         env["PYTHONPATH"] = os.pathsep.join(dict.fromkeys(
             [str(Path(__file__).resolve().parents[3] / "src"), str(Path.cwd()),
              *([env["PYTHONPATH"]] if env.get("PYTHONPATH") else [])]))
@@ -123,5 +141,6 @@ class ChannelSupervisor:
             print(json.dumps({"channel_start_error": platform, "error": str(exc)}), flush=True)
             return
         self.processes[platform] = process
+        self.controls[platform] = (control_path, token)
         print(json.dumps({"channel_started": platform, "plugin": spec["plugin"],
                           "graph": spec["graph"], "pid": process.pid}), flush=True)

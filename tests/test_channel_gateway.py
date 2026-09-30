@@ -125,7 +125,7 @@ def test_graph_channel_deduplicates_and_continues_native_history_after_reopen(ch
 
     def answer(messages, info):
         calls.append(messages)
-        assert {tool.name for tool in info.function_tools} == {"bash"}
+        assert {tool.name for tool in info.function_tools} == {"bash", "wecom_send_message", "wecom_attach_image"}
         return _complete("已收到你的消息")
 
     _use_model(monkeypatch, answer)
@@ -310,9 +310,10 @@ def test_websocket_delivery_retries_saved_graph_reply(channel_server, tmp_path, 
         task = asyncio.create_task(ws_gateway.main())
         try:
             await asyncio.wait_for(client.ready.wait(), timeout=20)
-            assert len(client.replies) == 3
+            finals = [reply for reply in client.replies if reply["finish"]]
+            assert len(finals) == 2
             assert not client.replies[0]["finish"]
-            assert all(reply["content"] == "已收到你的消息" and reply["finish"] for reply in client.replies[1:])
+            assert all(reply["content"] == "已收到你的消息" for reply in finals)
             assert len({r["stream_id"] for r in client.replies}) == 1
             assert len(calls) == 1
         finally:

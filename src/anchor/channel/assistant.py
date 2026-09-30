@@ -30,7 +30,7 @@ def history(scheduler: Scheduler, session_id: str) -> list[dict[str, str]]:
     return messages
 
 
-def receive(scheduler: Scheduler, event: dict[str, Any]) -> tuple[str, int]:  # noqa: C901
+def receive(scheduler: Scheduler, event: dict[str, Any], *, wait: bool = True) -> tuple[str, int]:  # noqa: C901
     required = ("source", "event_id", "sender_id", "conversation_id")
     if any(not isinstance(event.get(name), str) or not event[name].strip() for name in required):
         return json.dumps({"error": "event is missing a required string"}), 400
@@ -43,7 +43,7 @@ def receive(scheduler: Scheduler, event: dict[str, Any]) -> tuple[str, int]:  # 
     attachments = event.get("attachments", [])
     if not isinstance(attachments, list) or any(not isinstance(item, dict) for item in attachments):
         return json.dumps({"error": "attachments must be a list of objects"}), 400
-    if message_type != "text" and not attachments:
+    if message_type in {"image", "file"} and not attachments:
         return json.dumps({"error": "media message has no downloaded attachment"}), 400
     if not text.strip() and not attachments:
         return json.dumps({"error": "event must contain text or an attachment"}), 400
@@ -84,6 +84,8 @@ def receive(scheduler: Scheduler, event: dict[str, Any]) -> tuple[str, int]:  # 
                                          channel_input={"attachments": attachments})
     if status != 202:
         return body, status
+    if not wait:
+        return body, status
     turn = json.loads(body)["turn"]
     deadline = time.monotonic() + 120
     while time.monotonic() < deadline:
@@ -107,8 +109,12 @@ def result(scheduler: Scheduler, turn: dict) -> tuple[str, int]:
     if state is not None and state.status == "finished":
         reply = state.result(session.reply_node)
         if reply is not None and reply.submitted:
-            return json.dumps({"text": reply.submission, "session": session.id,
-                               "graph": session.graph, "run": run_id(turn)}, ensure_ascii=False), 200
+            images = workspace / "runs" / run_id(turn) / "control" / session.reply_node / "channel-reply.json"
+            value = {"text": reply.submission, "session": session.id,
+                     "graph": session.graph, "run": run_id(turn)}
+            if images.is_file():
+                value["msg_item"] = json.loads(images.read_text())
+            return json.dumps(value, ensure_ascii=False), 200
     return json.dumps({"error": turn.get("error") or (state.error if state else "") or turn["status"],
                        "session": session.id, "run": run_id(turn)}, ensure_ascii=False), 502
 
@@ -140,23 +146,34 @@ def execute(scheduler: Scheduler, turn: dict) -> tuple[str, int]:
         scheduler.sessions.set_status(session.id, "interrupted", reason=str(exc))
         return json.dumps({"error": str(exc)}, ensure_ascii=False), 400
     channel = {**session.channel, "attachments": virtual_attachments}
-    interrupted = []
-    for prior in scheduler.turns.list(session.id):
-        if prior["id"] == turn["id"] or prior["created_at"] > turn["created_at"]:
-            continue
-        if prior["status"] == "completed":
-            break
-        if prior["prompt"]:
-            interrupted.append(prior["prompt"])
+    from anchor.channel.media import prepare_attachments
+    from anchor.channel.tools import factory
+    attachment_text, prompt_images = prepare_attachments(channel_input.get("attachments", []))
+
+    def cancelled() -> bool:
+        return scheduler.control.get(identifier) == "stopped"
+
+    last_publish = [0.0]
+
+    def publish(node: str, text: str) -> None:
+        now = time.monotonic()
+        if node == session.reply_node and not cancelled() and now - last_publish[0] >= 0.1:
+            scheduler.turns.append(turn["id"], {"type": "channel-output", "text": text[:20000]})
+            last_publish[0] = now
+    interrupted = _interrupted_messages(scheduler, session.id, turn)
     try:
         state = runner.run(
             workspace, config_path=scheduler.config, run_id=identifier,
             run_input={"message": turn["prompt"], "channel": channel, "session": session.id,
-                       "interrupted_messages": list(reversed(interrupted))},
+                       "interrupted_messages": list(reversed(interrupted)),
+                       **({"attachment_content": attachment_text} if attachment_text else {})},
             trigger={"source": "channel", "platform": session.channel.get("source"), "session": session.id},
             conversation_id=session.conversation_id, previous_runs=previous,
             library_root=scheduler.library.root,
             resources=resources,
+            prompt_images=prompt_images, on_output=publish,
+            toolset_factory=factory(scheduler, workspace, identifier, reply_node=session.reply_node,
+                                    cancelled=cancelled),
             stop_request=lambda: scheduler.control.get(identifier))
         body, status = result(scheduler, {**turn, "status": state.status, "error": state.error})
         if status != 200:
@@ -176,6 +193,18 @@ def execute(scheduler: Scheduler, turn: dict) -> tuple[str, int]:
         return json.dumps({"error": f"{type(exc).__name__}: {exc}"}, ensure_ascii=False), 502
 
 
+
+def _interrupted_messages(scheduler: Scheduler, session_id: str, turn: dict) -> list[str]:
+    interrupted = []
+    for prior in scheduler.turns.list(session_id):
+        if prior["id"] == turn["id"] or prior["created_at"] > turn["created_at"]:
+            continue
+        if prior["status"] == "completed":
+            break
+        if prior["prompt"]:
+            interrupted.append(prior["prompt"])
+    return interrupted
+
 def _attachment_resources(scheduler: Scheduler, attachments: object) -> tuple[
         tuple[tuple[str, str], ...], list[dict[str, Any]]]:
     """Validate downloaded channel files and expose their containing directory read-only."""
@@ -189,7 +218,10 @@ def _attachment_resources(scheduler: Scheduler, attachments: object) -> tuple[
     for item in attachments:
         if not isinstance(item, dict) or not isinstance(item.get("path"), str):
             raise ValueError("channel attachment path is invalid")
-        path = Path(item["path"]).resolve()
+        raw = Path(item["path"])
+        if any(part.is_symlink() for part in (raw, *raw.parents)):
+            raise ValueError("channel attachment cannot be a symlink")
+        path = raw.resolve()
         if not path.is_file() or not path.is_relative_to(root):
             raise ValueError("channel attachment is outside the managed state directory")
         if path.is_symlink() or path.stat().st_size > 20 * 1024 * 1024:
@@ -200,6 +232,8 @@ def _attachment_resources(scheduler: Scheduler, attachments: object) -> tuple[
             raise ValueError("channel attachment name is invalid")
         normalized.append({key: item[key] for key in ("kind", "name", "mime_type", "size") if key in item})
     parent = files[0].parent
+    if sum(path.stat().st_size for path in files) > 50 * 1024 * 1024:
+        raise ValueError("channel attachments exceed the total size limit")
     if any(path.parent != parent for path in files):
         raise ValueError("channel attachments must belong to one event directory")
     for item, path in zip(normalized, files):

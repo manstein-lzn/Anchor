@@ -714,7 +714,9 @@ def _agent_for(graph, node_id: str, directory: Path, models: dict, secret_file, 
                cancelled: Callable[[], bool] | None = None, plugins: Attached = Attached(),
                run_input: dict | None = None, mcp_auth: bool = False,
                conversation_id: str = "", previous_steps: tuple[Path, ...] = (),
-               resources: tuple[tuple[str, str], ...] = ()):
+               resources: tuple[tuple[str, str], ...] = (),
+               prompt_images: tuple[tuple[bytes, str], ...] = (),
+               on_output: Callable[[str], None] | None = None, toolset_factory: Callable | None = None):
     """The node about to run, built around the runtime ADR-062 names.
 
     **One factory for both kinds of node**, because the difference between an agent and an op is what
@@ -764,6 +766,10 @@ def _agent_for(graph, node_id: str, directory: Path, models: dict, secret_file, 
                 mcp_auth=mcp_auth,
                 run_input=run_input or {},
                 conversation_id=conversation_id, previous_steps=previous_steps,
+                prompt_images=prompt_images, on_output=on_output,
+                toolsets=(toolset_factory(node_id, tuple(node.plugins), directory,
+                          (*tuple(bind for item in inputs for bind in item.binds()), *resources))
+                          if toolset_factory else ()),
                 cancelled=cancelled)
 
 
@@ -879,7 +885,10 @@ def run(workspace: str | Path, *, objective: str | None = None, config_path: str
         stop_request: Callable[[], str | None] | None = None,
         already_submitted: Callable[[str], tuple[str, str | None] | None] | None = None,
         library_root: str | Path | None = None, mcp_auth: bool = False,
-        resources: tuple[tuple[str, str], ...] = ()) -> RunState:
+        resources: tuple[tuple[str, str], ...] = (),
+        prompt_images: tuple[tuple[bytes, str], ...] = (),
+        on_output: Callable[[str, str], None] | None = None,
+        toolset_factory: Callable | None = None) -> RunState:
     """Walk the graph. `model_script` replaces the model with written-down commands, per node.
 
     `stop_request` is asked between nodes. A stop also cancels the active model call or sandbox
@@ -1041,6 +1050,13 @@ def run(workspace: str | Path, *, objective: str | None = None, config_path: str
                 if current != attached:
                     raise ValueError(f"Plugin resources for {step.node_id} changed during this run")
             options: dict[str, Any] = {"mcp_auth": mcp_auth} if mcp_auth else {}
+            if prompt_images:
+                options["prompt_images"] = prompt_images
+            if on_output is not None:
+                from functools import partial
+                options["on_output"] = partial(on_output, step.node_id)
+            if toolset_factory is not None:
+                options["toolset_factory"] = toolset_factory
             if resources:
                 options["resources"] = tuple(resources)
             if step.node_id in local:

@@ -12,6 +12,7 @@ import json
 import mimetypes
 import os
 import re
+import time
 import urllib.error
 import urllib.request
 from dataclasses import replace
@@ -112,6 +113,8 @@ async def _download_attachments(event: ChannelEvent, frame: dict[str, Any], clie
     specs = _attachment_specs(frame.get("body", {}))
     if not specs:
         return event
+    if len(specs) > 16:
+        raise ValueError("too many WeCom attachments")
     event_dir = state_path.parent / "events" / hashlib.sha256(event.event_id.encode()).hexdigest()
     event_dir.mkdir(parents=True, exist_ok=True)
     saved: list[dict[str, Any]] = []
@@ -133,16 +136,46 @@ async def _download_attachments(event: ChannelEvent, frame: dict[str, Any], clie
     return replace(event, attachments=tuple(saved))
 
 
-Handler = Callable[[ChannelEvent], Awaitable[str | None]]
+Handler = Callable[[ChannelEvent], Awaitable[str | dict | None]]
+
+
+def _reply_value(value: str | dict | None) -> dict:
+    return value if isinstance(value, dict) else {"text": value or ""}
+
+
+def _saved_reply(reply: str) -> dict:
+    try:
+        saved = json.loads(reply)
+        if isinstance(saved, dict) and "channel_reply" in saved:
+            return saved["channel_reply"]
+    except ValueError:
+        pass
+    return {"text": reply}
+
+
+def _platform_text(text: str) -> str:
+    if len(text.encode()) <= 20480:
+        return text
+    suffix = "\n\n（回复超出企业微信消息长度，完整内容保留在 Anchor 运行记录中。）"
+    return text.encode()[:20480 - len(suffix.encode())].decode("utf-8", errors="ignore") + suffix
 
 
 class WeComWebSocketGateway:
     """Run one long-lived Enterprise WeChat bot connection."""
 
-    def __init__(self, handler: Handler, *, state_path: Path):
+    def __init__(self, handler: Handler, *, state_path: Path, stream_handler: Callable | None = None):
         self.handler = handler
+        self.stream_handler = stream_handler
         self.ledger = EventLedger(state_path)
         self.client: Any = None
+        self._admission: dict[str, asyncio.Lock] = {}
+
+    async def _deliver(self, frame: dict, stream_id: str, reply: dict) -> None:
+        kwargs = {"stream_id": stream_id, "content": _platform_text(
+            reply.get("text") or "已根据你的补充继续处理。"), "finish": True}
+        if reply.get("msg_item"):
+            kwargs["msg_item"] = reply["msg_item"]
+        await self.client.reply_stream(frame, **kwargs)
 
     async def run(self) -> None:  # noqa: C901
         try:
@@ -158,8 +191,14 @@ class WeComWebSocketGateway:
             max_reconnect_attempts=-1,
         )
         self.client = WSClient(options)
+        control = None
+        if os.environ.get("ANCHOR_CHANNEL_CONTROL_SOCKET"):
+            from anchor.channel.control import ControlServer
+            control = ControlServer(Path(_required("ANCHOR_CHANNEL_CONTROL_SOCKET")),
+                                    _required("ANCHOR_CHANNEL_CONTROL_TOKEN"), self.ledger,
+                                    self.client.send_message)
 
-        async def on_message(frame: dict[str, Any]) -> None:
+        async def on_message(frame: dict[str, Any]) -> None:  # noqa: C901 - ordered admission and delivery phases
             event = normalize_message(frame)
             if event is None:
                 return
@@ -168,19 +207,41 @@ class WeComWebSocketGateway:
                 reply = self.ledger.pending_reply(event)
                 if reply is None:
                     return
+                if not self.ledger.is_latest(event):
+                    self.ledger.complete(event)
+                    return
                 try:
                     if reply:
-                        await self.client.reply_stream(
-                            frame, stream_id=stream_id, content=reply, finish=True
-                        )
+                        # Old ledger rows stored plain text. New rows wrap the complete rich reply.
+                        await self._deliver(frame, stream_id, _saved_reply(reply))
                     self.ledger.complete(event)
                 except Exception as exc:  # noqa: BLE001 - ready reply remains retryable
                     self.ledger.fail_delivery(event, f"{type(exc).__name__}: {exc}")
                 return
+            if not self.ledger.is_latest(event):
+                self.ledger.complete(event)
+                return
+            admission = self._admission.setdefault(event.conversation_id, asyncio.Lock())
+            await admission.acquire()
+            admitted = False
+
+            def admit() -> None:
+                nonlocal admitted
+                if not admitted:
+                    admitted = True
+                    admission.release()
+
+            def current() -> bool:
+                return self.ledger.is_latest(event)
+
             # Admit input immediately; a slow progress ACK must not let a later message jump ahead.
             try:
                 event = await _download_attachments(event, frame, self.client, self.ledger.path)
+            except asyncio.CancelledError:
+                admit()
+                raise
             except Exception as exc:  # noqa: BLE001 - failed downloads remain retryable
+                admit()
                 self.ledger.fail(event, f"{type(exc).__name__}: {exc}")
                 try:
                     await self.client.reply_stream(frame, stream_id=stream_id,
@@ -188,7 +249,23 @@ class WeComWebSocketGateway:
                 except Exception as delivery:  # noqa: BLE001 - original failure remains retryable
                     print(json.dumps({"reply_error": type(delivery).__name__}), flush=True)
                 return
-            handler_task = asyncio.create_task(self.handler(event))
+            progress_ready = asyncio.Event()
+
+            async def progress(text: str) -> None:
+                await progress_ready.wait()
+                if not current():
+                    return
+                try:
+                    await self.client.reply_stream(frame, stream_id=stream_id,
+                                                   content=_platform_text(text), finish=False)
+                except Exception as exc:  # noqa: BLE001 - partial delivery cannot rerun the Graph
+                    print(json.dumps({"progress_error": type(exc).__name__}), flush=True)
+
+            if not self.stream_handler:
+                admit()
+            handler_task = asyncio.create_task(self.stream_handler(event, progress, admit)
+                if self.stream_handler else self.handler(event))
+            handler_task.add_done_callback(lambda _: admit())
             try:
                 await self.client.reply_stream(frame, stream_id=stream_id, content="正在处理…", finish=False)
             except asyncio.CancelledError:
@@ -197,9 +274,13 @@ class WeComWebSocketGateway:
                 raise
             except Exception as exc:  # noqa: BLE001 - progress delivery must not prevent admission
                 print(json.dumps({"progress_error": type(exc).__name__}), flush=True)
+            finally:
+                progress_ready.set()
             try:
-                reply = await handler_task
-                self.ledger.prepare_reply(event, reply or "")
+                reply = _reply_value(await handler_task)
+                if not current() or reply.get("superseded"):
+                    reply = {"text": "已按你的新消息继续处理。", "superseded": True}
+                self.ledger.prepare_reply(event, json.dumps({"channel_reply": reply}, ensure_ascii=False))
             except Exception as exc:  # noqa: BLE001 - the event remains retryable
                 self.ledger.fail(event, f"{type(exc).__name__}: {exc}")
                 try:
@@ -209,9 +290,7 @@ class WeComWebSocketGateway:
                     print(json.dumps({"reply_error": type(delivery).__name__}), flush=True)
                 return
             try:
-                await self.client.reply_stream(
-                    frame, stream_id=stream_id, content=reply or "已根据你的补充继续处理。", finish=True
-                )
+                await self._deliver(frame, stream_id, reply)
                 self.ledger.complete(event)
             except Exception as exc:  # noqa: BLE001 - preserve the reply for delivery retries
                 self.ledger.fail_delivery(event, f"{type(exc).__name__}: {exc}")
@@ -223,6 +302,8 @@ class WeComWebSocketGateway:
             json.dumps({"wecom_connection_error": type(error).__name__}), flush=True))
         self.client.on("message", on_message)
         try:
+            if control:
+                await control.start()
             await self.client.connect()
             while True:
                 await asyncio.sleep(1)
@@ -232,6 +313,8 @@ class WeComWebSocketGateway:
                     self.client.disconnect()
                     await self.client.connect()
         finally:
+            if control:
+                await control.close()
             self.client.disconnect()
 
 
@@ -262,10 +345,69 @@ async def _handle_event(event: ChannelEvent) -> str | None:
     return await asyncio.to_thread(_post_event, event)
 
 
+def _post_stream(event: ChannelEvent, progress: Callable[[str], None],
+                 admitted: Callable[[], None] | None = None) -> dict:
+    """Read existing turn projections; a broken transport does not submit another Graph Run."""
+    request = urllib.request.Request(_required("ANCHOR_CHANNEL_WEBHOOK_URL"),
+        data=json.dumps({"event": event.as_dict()}, ensure_ascii=False).encode(), method="POST",
+        headers={"Authorization": f"Bearer {_required('ANCHOR_API_KEY')}",
+                 "Content-Type": "application/json", "Accept": "text/event-stream"})
+    with urllib.request.urlopen(request, timeout=30) as response:
+        if admitted:
+            admitted()
+        kind = ""
+        for line in response:
+            line = line.decode("utf-8").rstrip("\r\n")
+            if line.startswith("event:"):
+                kind = line[6:].strip()
+            elif line.startswith("data:"):
+                value = json.loads(line[5:])
+                if kind == "progress":
+                    progress(value["text"])
+                elif kind == "reply":
+                    if value.get("error"):
+                        raise RuntimeError(value["error"])
+                    return value
+    raise RuntimeError("channel stream closed without a final reply")
+
+
+async def _handle_stream(event: ChannelEvent, progress: Callable[[str], Awaitable[None]],
+                         admitted: Callable[[], None] | None = None) -> dict:
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue[str] = asyncio.Queue(maxsize=1)
+
+    def offer(text: str) -> None:
+        if queue.full():
+            queue.get_nowait()
+        queue.put_nowait(text)
+
+    def changed(text: str) -> None:
+        if not loop.is_closed():
+            loop.call_soon_threadsafe(offer, text)
+
+    def accepted() -> None:
+        if admitted and not loop.is_closed():
+            loop.call_soon_threadsafe(admitted)
+
+    task = asyncio.create_task(asyncio.to_thread(_post_stream, event, changed, accepted))
+    sent_at = 0.0
+    try:
+        while not task.done():
+            await asyncio.sleep(0.05)
+            if not queue.empty() and time.monotonic() - sent_at >= 0.5 and not task.done():
+                await progress(queue.get_nowait())
+                sent_at = time.monotonic()
+        return await task
+    finally:
+        if not task.done():
+            task.cancel()
+
+
 async def main() -> None:
     load_dotenv()
     state = Path(os.environ.get("WECOM_CHANNEL_STATE", ".local/wecom-channel"))
-    await WeComWebSocketGateway(_handle_event, state_path=state / "events.sqlite").run()
+    await WeComWebSocketGateway(_handle_event, state_path=state / "events.sqlite",
+                               stream_handler=_handle_stream).run()
 
 
 if __name__ == "__main__":

@@ -906,11 +906,13 @@ class Scheduler:
                 return self.control.get(run_id)
 
         try:
+            from anchor.channel.tools import factory
             runner.run(workspace, objective=objective, config_path=self.config, run_id=run_id,
                        resume=(workspace / "runs" / run_id) if resume else None,
                        run_input=run_input,
                        trigger=trigger,
-                       stop_request=asked, library_root=self.library.root)
+                       stop_request=asked, library_root=self.library.root,
+                       toolset_factory=factory(self, workspace, run_id, cancelled=lambda: asked() == "stopped"))
         except Exception:  # noqa: BLE001 - the run already recorded its own failure
             traceback.print_exc()
         finally:
@@ -1257,6 +1259,43 @@ class Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError, KeyError):
             return  # The worker belongs to the service, not this subscriber.
 
+    def _channel_stream(self, turn: dict) -> None:
+        """Only public answer snapshots and the validated final reply, using the existing turn store."""
+        from anchor.channel.assistant import result
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
+        after, heartbeat = 0, time.monotonic()
+        try:
+            while True:
+                current = self.scheduler.turns.get(turn["session"], turn["id"])
+                events = self.scheduler.turns.events(turn["session"], turn["id"], after)
+                if current["status"] == "running":
+                    for event in events:
+                        if event["data"].get("type") == "channel-output":
+                            data = json.dumps({"text": event["data"]["text"]}, ensure_ascii=False)
+                            self.wfile.write(f"event: progress\ndata: {data}\n\n".encode())
+                if events:
+                    after = events[-1]["seq"]
+                if current["status"] != "running":
+                    body, status = result(self.scheduler, current)
+                    value = json.loads(body)
+                    if status != 200:
+                        value = {"error": value.get("error", "channel execution failed")}
+                    self.wfile.write(f"event: reply\ndata: {json.dumps(value, ensure_ascii=False)}\n\n".encode())
+                    self.wfile.flush()
+                    return
+                if time.monotonic() - heartbeat >= 10:
+                    self.wfile.write(b": heartbeat\n\n")
+                    heartbeat = time.monotonic()
+                self.wfile.flush()
+                if len(events) < 256:
+                    time.sleep(0.1)
+        except (BrokenPipeError, ConnectionResetError, KeyError):
+            return
+
     def _response_stream(self, response_id: str) -> None:
         ref = self.scheduler.response_refs[response_id]
         self.send_response(200)
@@ -1405,6 +1444,12 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if set(body) != {"event"} or not isinstance(body["event"], dict):
                 return self._send(json.dumps({"error": "body must contain only an event object"}), 400)
+            if "text/event-stream" in self.headers.get("Accept", ""):
+                from anchor.channel.assistant import receive
+                response, status = receive(self.scheduler, body["event"], wait=False)
+                if status != 202:
+                    return self._send(response, status)
+                return self._channel_stream(json.loads(response)["turn"])
             return self._send(*self.scheduler.channel_message(body["event"]))
         if len(parts) == 4 and parts[0] == "plugins" and parts[2] == "authorize":
             return self._authorize_mcp(parts)

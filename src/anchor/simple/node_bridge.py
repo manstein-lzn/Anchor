@@ -43,6 +43,8 @@ class Node:
                  mcp_auth: bool = False,
                  run_input: dict | None = None,
                  conversation_id: str = "", previous_steps: tuple[Path, ...] = (),
+                 prompt_images: tuple[tuple[bytes, str], ...] = (),
+                 on_output: Callable[[str], None] | None = None, toolsets: tuple[Any, ...] = (),
                  cancelled: Callable[[], bool] | None = None) -> None:
         self.node_id = node_id
         self.directory = Path(directory)
@@ -63,6 +65,9 @@ class Node:
         self._run_input = run_input or {}
         self._conversation_id = conversation_id
         self._previous_steps = previous_steps
+        self._prompt_images = prompt_images
+        self._on_output = on_output
+        self._toolsets = toolsets
         self._cancelled = cancelled
         # Read by `_result_of` through `agent.env.route`. Kept as an object rather than a bare
         # attribute so the shape the scheduler reads does not change with the loop behind it.
@@ -146,6 +151,7 @@ class Node:
                             trace=self.trace, roles=self.node_id, cancelled=self._cancelled,
                             run_input=self._run_input,
                             conversation_id=self._conversation_id, previous_steps=self._previous_steps,
+                            prompt_images=self._prompt_images, on_output=self._on_output, toolsets=self._toolsets,
                             # **A write that landed before the record is what `recovery` is for.** The
                             # adapter refuses a reference whose node, workspace, store or budget does not
                             # match, and a bare name is not one — so the node says `uncertain` instead,
