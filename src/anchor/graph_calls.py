@@ -2,15 +2,17 @@
 from __future__ import annotations
 
 import hashlib
-import os
 import json
+import os
 import shutil
 import threading
+import tempfile
 import time
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 
 from anchor.library import record_bindings
+from anchor.session import SessionStore
 from anchor.simple import graph as graph_module
 from anchor.simple import run as runner
 
@@ -19,13 +21,7 @@ if TYPE_CHECKING:
 
 
 def _write(path: Path, value: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    staged = path.with_suffix(path.suffix + ".incoming")
-    staged.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    with staged.open("r+b") as stream:
-        stream.flush()
-        os.fsync(stream.fileno())
-    staged.replace(path)
+    SessionStore._atomic(path, json.dumps(value, ensure_ascii=False, indent=2) + "\n")
 
 
 def _relative(value: str) -> Path:
@@ -38,6 +34,8 @@ def _relative(value: str) -> Path:
 
 def _file(tree: Path, name: str) -> Path:
     relative = _relative(name)
+    if tree.is_symlink():
+        raise ValueError("selected file snapshot must not be a symlink")
     current = tree
     for part in relative.parts:
         current = current / part
@@ -121,6 +119,10 @@ class GraphCalls:
                 admission = child / "admission.json"
                 if admission.exists():
                     record = json.loads(admission.read_text())
+                    expected = {"graph": source_workspace.name, "run": source_run_id,
+                                "node": node_id, "invocation": invocation}
+                    if any(record.get("trigger", {}).get(key) != value for key, value in expected.items()):
+                        raise ValueError("Graph call admission belongs to a different source invocation")
                 else:
                     if cancelled():
                         raise RuntimeError("Graph call cancelled before admission")
@@ -154,19 +156,28 @@ class GraphCalls:
                         record["session_context"] = session_context
                         record["trigger"]["session"] = spec["session"]
                     child.mkdir(parents=True, exist_ok=True)
+                    bundle = child / "call-inputs"
                     visible = {item["node"]: Path(item["tree"]) for item in inputs}
-                    destinations = set()
-                    for selection in spec.get("files", []):
-                        if selection["node"] not in visible:
-                            raise ValueError(f"file source is not visible to caller: {selection['node']}")
-                        selected = _file(visible[selection["node"]], selection["path"])
-                        relative = _relative(selection["as"])
-                        if relative in destinations:
-                            raise ValueError(f"duplicate selected file destination: {relative}")
-                        destinations.add(relative)
-                        output = child / "call-inputs" / relative
-                        output.parent.mkdir(parents=True, exist_ok=True)
-                        shutil.copyfile(selected, output)
+                    with tempfile.TemporaryDirectory(prefix=".call-inputs-", dir=child) as temporary:
+                        staged = Path(temporary)
+                        destinations = set()
+                        for selection in spec.get("files", []):
+                            if selection["node"] not in visible:
+                                raise ValueError(f"file source is not visible to caller: {selection['node']}")
+                            selected = _file(visible[selection["node"]], selection["path"])
+                            relative = _relative(selection["as"])
+                            if any(relative == other or relative in other.parents or other in relative.parents
+                                   for other in destinations):
+                                raise ValueError(f"overlapping selected file destination: {relative}")
+                            destinations.add(relative)
+                            output = staged / relative
+                            output.parent.mkdir(parents=True, exist_ok=True)
+                            shutil.copyfile(selected, output)
+                            with output.open("rb") as stream:
+                                os.fsync(stream.fileno())
+                        if bundle.exists():
+                            shutil.rmtree(bundle)  # this invocation has not been accepted yet
+                        staged.replace(bundle)
                     bindings = {node.id: self.scheduler.library.attach(node.plugins)
                                 for node in graph.nodes.values() if node.plugins}
                     record_bindings(child, bindings, resume=False)
@@ -181,12 +192,23 @@ class GraphCalls:
                     runner.RunState(objective=graph.objective, started=runner._now(),
                                     input=record["input"], trigger=record["trigger"]).save(child)
                 _write(path, record)
+            expected = {"graph": source_workspace.name, "run": source_run_id,
+                        "node": node_id, "invocation": invocation}
+            if any(record.get("trigger", {}).get(key) != value for key, value in expected.items()):
+                raise ValueError("Graph call record belongs to a different source invocation")
             workspace = self.scheduler.workspace(record["graph"])
             if workspace is None:
                 raise RuntimeError("accepted Graph call target is missing")
             child = workspace / "runs" / record["run"]
             if not (child / "run.json").exists():
                 raise RuntimeError("accepted Graph call Run is missing; refusing replacement")
+            cancellation = child / "call-cancellation.json"
+            if cancellation.exists() and record["mode"] == "wait" and not cancelled():
+                state = runner.RunState.load(child)
+                if state.status == "stopped" and record["run"] not in self.active:
+                    state.status = "running"
+                    state.save(child)
+                cancellation.unlink()
             self.start(workspace, record["run"])
         if record["mode"] == "detach":
             response = {key: record[key] for key in ("graph", "run", "mode")}
@@ -194,7 +216,14 @@ class GraphCalls:
         else:
             while True:
                 if cancelled():
-                    self.scheduler.control_run(record["run"], "stop")
+                    with self.scheduler.lock:
+                        if self.scheduler.control.get(record["run"]) != "stopped":
+                            _write(child / "call-cancellation.json", {"parent": source_run_id,
+                                                                     "node": node_id,
+                                                                     "invocation": invocation})
+                            self.scheduler.control_run(record["run"], "stop", cause="graph_call")
+                    while record["run"] in self.active:
+                        time.sleep(0.05)
                     raise RuntimeError("waiting Graph call cancelled")
                 state = runner.RunState.load(child)
                 if state.status != "running" and record["run"] not in self.active:

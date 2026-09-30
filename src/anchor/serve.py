@@ -40,7 +40,7 @@ from uuid import uuid4
 from anchor.simple import graph as graph_module
 from anchor.simple import run as runner
 from anchor.library import Library
-from anchor.graph_calls import GraphCalls
+from anchor.graph_calls import GraphCalls, _write as write_call_record
 from anchor.session import SessionStore
 from anchor.pilot_turns import TurnStore
 from anchor.scheduling import next_after, occurrences, validate as validate_schedule
@@ -390,7 +390,7 @@ class Scheduler:
                          daemon=True).start()
         return json.dumps({"run": run_id, "graph": graph}), 202
 
-    def control_run(self, run_id: str, what: str) -> tuple[str, int]:
+    def control_run(self, run_id: str, what: str, *, cause: str = "operator") -> tuple[str, int]:
         """Ask a run to pause, stop or carry on. Returns (body, status).
 
         A pause leaves off between nodes. A stop cancels the current node and is terminal.
@@ -402,6 +402,10 @@ class Scheduler:
         graph = self.graph_calls.active.get(run_id) or self.channel_runs.get(run_id) or next(
             (name for name, current in self.running.items() if current == run_id), None)
         with self.lock:
+            if what == "stop" and cause != "graph_call":
+                run_dir = self.run_dir(run_id)
+                if run_dir is not None:
+                    (run_dir / "call-cancellation.json").unlink(missing_ok=True)
             if what == "resume":
                 self.control.pop(run_id, None)
             else:
@@ -447,8 +451,8 @@ class Scheduler:
             if run_dir.parent.parent.name in self.channel_runs.values():
                 return json.dumps({"error": "this graph is using conversation history", "run": run_id}), 409
             for item in self.runs():
-                if item.get("trigger", {}).get("run") == run_id and item["running"]:
-                    return json.dumps({"error": "this run has an active called Run"}), 409
+                if item.get("trigger", {}).get("run") == run_id:
+                    return json.dumps({"error": "this run is the source of a Graph call"}), 409
             for workspace in self.workspaces():
                 for record in (workspace / "runs").glob("*/control/**/graph-call.json"):
                     if json.loads(record.read_text()).get("run") == run_id:
@@ -471,8 +475,14 @@ class Scheduler:
                 return json.dumps({"error": "this graph is referenced by Graph calls",
                                    "calls": references}), 409
             for item in self.runs():
-                if item["trigger"].get("graph") == name and item["running"]:
-                    return json.dumps({"error": "this graph has an active called Run"}), 409
+                if item["trigger"].get("graph") == name:
+                    return json.dumps({"error": "this graph is the source of a Graph call"}), 409
+            for source in self.workspaces():
+                if source.name == name:
+                    continue
+                for record in (source / "runs").glob("*/control/**/graph-call.json"):
+                    if json.loads(record.read_text()).get("graph") == name:
+                        return json.dumps({"error": "this graph has Runs referenced by Graph calls"}), 409
             shutil.rmtree(workspace)
         return json.dumps({"graph": name, "deleted": True}), 200
 
@@ -569,6 +579,12 @@ class Scheduler:
         with self.lock:
             if session_id in self.pilot_active:
                 return json.dumps({"error": "that session is processing a message"}), 409
+            for workspace in self.workspaces():
+                for path in (workspace / "runs").glob("*/admission.json"):
+                    admission = json.loads(path.read_text())
+                    if (admission.get("spec", {}).get("session") == session_id and
+                            (admission.get("session_pending") or path.parent.name in self.graph_calls.active)):
+                        return json.dumps({"error": "that session has a pending Graph call"}), 409
             try:
                 self.sessions.delete(session_id)
                 self.turns.delete_session(session_id)
@@ -894,6 +910,12 @@ class Scheduler:
         with self.lock:
             if self.active_run(name):
                 return json.dumps({"error": "this graph is running", "running": self.active_run(name)}), 409
+            if self._directory(name) is None:
+                return json.dumps({"error": f"no such graph: {name}"}), 404
+            try:
+                self.graph_calls.validate_targets(parsed)
+            except (ValueError, OSError) as exc:
+                return json.dumps({"error": str(exc)}), 400
             target = workspace / "graph.json"
             staged = target.with_suffix(".json.incoming")
             staged.write_text(json.dumps(definition, ensure_ascii=False, indent=2) + "\n",
@@ -910,8 +932,8 @@ class Scheduler:
         return self.save(name, definition or _starter_graph(name))
 
     def resume_all(self) -> None:
+        """Pick up native Runs and any admission interrupted before native state creation."""
         self._recover_admissions()
-        """Pick up anything a previous process left running. The whole of recovery."""
         for workspace in self.workspaces():
             runs = sorted((workspace / "runs").glob("*/run.json")) if (workspace / "runs").is_dir() else []
             for state_file in runs:
@@ -950,8 +972,7 @@ class Scheduler:
                     if not (child / "run.json").exists():
                         definition = record["definition"]
                         graph = graph_module.parse(definition)
-                        _write = getattr(__import__("anchor.graph_calls", fromlist=["_write"]), "_write")
-                        _write(child / "graph.json", definition)
+                        write_call_record(child / "graph.json", definition)
                         runner.RunState(objective=graph.objective, started=runner._now(),
                                         input=record.get("input", {}), trigger=record["trigger"]).save(child)
                     self.graph_calls.start(workspace, admission.parent.name)
@@ -993,10 +1014,10 @@ class Scheduler:
                 if admission.exists():
                     record = json.loads(admission.read_text(encoding="utf-8"))
                     if record.get("session_pending"):
+                        state.status = "failed"
                         record["delivery_error"] = state.error
                         record["session_pending"] = False
-                        from anchor.graph_calls import _write
-                        _write(admission, record)
+                        write_call_record(admission, record)
                 state.save(run_dir)
         finally:
             with self.lock:
