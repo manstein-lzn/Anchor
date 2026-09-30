@@ -310,6 +310,22 @@ class GraphCalls:
                 output = state.result(result["node"]) if result else None
                 if output is not None:
                     item["summary"] = output.submission
+            # Native committed node submissions bind returned files to this exact child Run.
+            # Local pass numbers can restart when entering a module, so never join on those.
+            if item["mode"] == "wait":
+                source_state = json.loads((run_dir / "run.json").read_text())
+                for outcome in source_state.get("history", {}).values():
+                    if outcome.get("node_id") != item["node"]:
+                        continue
+                    try:
+                        returned = json.loads(outcome.get("submission", ""))
+                    except (ValueError, TypeError):
+                        continue
+                    if isinstance(returned, dict) and returned.get("run") == item["run"]:
+                        for field in ("summary", "result"):
+                            if field in returned:
+                                item[field] = returned[field]
+                        break
             calls.append(item)
         return sorted(calls, key=lambda item: (item["node"], item["invocation"]))
 

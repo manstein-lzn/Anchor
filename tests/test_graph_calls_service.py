@@ -322,6 +322,9 @@ def test_real_parent_graph_call_uses_native_completion_and_child_run(setup):
     assert child.trigger["root_run"] == "actual-parent"
     assert child.trigger["node"] == "invoke"
     assert child.status == "finished"
+    projected = scheduler.run("parent", "actual-parent")["calls"]
+    assert projected[0]["result"] == payload["result"]
+    assert projected[0]["result"]["files"] == ["report.txt"]
 
 
 def test_interrupted_command_child_resumes_same_run_but_stays_uncertain(setup):
