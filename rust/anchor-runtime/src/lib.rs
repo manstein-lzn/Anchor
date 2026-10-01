@@ -12,6 +12,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
+    time::Duration,
 };
 
 use rig_agent::{
@@ -247,6 +248,21 @@ pub struct NodeOutcome {
     pub reason: String,
 }
 
+/// Optional host policy for one node attempt. `None` preserves provider/tool
+/// behavior; a timeout drops the in-flight future and leaves its pending step
+/// in the checkpoint for a deliberate recovery decision.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ExecutionPolicy {
+    pub model_timeout: Option<Duration>,
+    pub tool_timeout: Option<Duration>,
+}
+
+struct ExecutionContext<'a> {
+    policy: ExecutionPolicy,
+    cancellation: &'a Cancellation,
+    routes: &'a [String],
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum NodeError {
     #[error("rig run failed: {0}")]
@@ -259,6 +275,11 @@ pub enum NodeError {
     InvalidResult(String),
     #[error("checkpoint persistence failed: {0}")]
     Checkpoint(Box<CheckpointStoreError>),
+    #[error("{phase} timed out after {timeout:?}")]
+    Timeout {
+        phase: &'static str,
+        timeout: Duration,
+    },
 }
 
 impl From<rig_agent::run::PromptError> for NodeError {
@@ -312,12 +333,11 @@ impl NodeExecutor {
         cancellation: &Cancellation,
         routes: &[String],
     ) -> Result<NodeOutcome, NodeError> {
-        Self::execute_with_store(
+        Self::execute_with_policy(
             checkpoint,
             completion,
             tools,
-            &NoopCheckpointStore,
-            "noop",
+            ExecutionPolicy::default(),
             cancellation,
             routes,
         )
@@ -335,9 +355,50 @@ impl NodeExecutor {
         cancellation: &Cancellation,
         routes: &[String],
     ) -> Result<NodeOutcome, NodeError> {
+        let context = ExecutionContext {
+            policy: ExecutionPolicy::default(),
+            cancellation,
+            routes,
+        };
+        Self::execute_with_store_context(checkpoint, completion, tools, store, store_key, &context)
+            .await
+    }
+
+    pub async fn execute_with_policy<C: CompletionPort, T: ToolPort>(
+        checkpoint: &mut AgentCheckpoint,
+        completion: &C,
+        tools: &T,
+        policy: ExecutionPolicy,
+        cancellation: &Cancellation,
+        routes: &[String],
+    ) -> Result<NodeOutcome, NodeError> {
+        let context = ExecutionContext {
+            policy,
+            cancellation,
+            routes,
+        };
+        Self::execute_with_store_context(
+            checkpoint,
+            completion,
+            tools,
+            &NoopCheckpointStore,
+            "noop",
+            &context,
+        )
+        .await
+    }
+
+    async fn execute_with_store_context<C: CompletionPort, T: ToolPort, S: CheckpointStore>(
+        checkpoint: &mut AgentCheckpoint,
+        completion: &C,
+        tools: &T,
+        store: &S,
+        store_key: &str,
+        context: &ExecutionContext<'_>,
+    ) -> Result<NodeOutcome, NodeError> {
         let mut requests = 0;
         loop {
-            if cancellation.load(Ordering::Relaxed) {
+            if context.cancellation.load(Ordering::Relaxed) {
                 store.save(store_key, checkpoint)?;
                 return Ok(NodeOutcome {
                     status: NodeStatus::Cancelled,
@@ -373,7 +434,16 @@ impl NodeExecutor {
                     )
                     .map_err(|error| NodeError::InvalidResult(error.to_string()))?;
                     let request = prepared.clone().apply(CompletionRequest::new(prompt));
-                    let response = completion.complete(request).await?;
+                    let response = if let Some(timeout) = context.policy.model_timeout {
+                        tokio::time::timeout(timeout, completion.complete(request))
+                            .await
+                            .map_err(|_| NodeError::Timeout {
+                                phase: "model request",
+                                timeout,
+                            })??
+                    } else {
+                        completion.complete(request).await?
+                    };
                     requests += 1;
                     let turn = ModelTurn::from_response(&response, &prepared);
                     let outcome = checkpoint.run.model_response(turn)?;
@@ -393,7 +463,7 @@ impl NodeExecutor {
                     store.save(store_key, checkpoint)?;
                     let mut results = Vec::with_capacity(calls.len());
                     for call in calls {
-                        if cancellation.load(Ordering::Relaxed) {
+                        if context.cancellation.load(Ordering::Relaxed) {
                             return Ok(NodeOutcome {
                                 status: NodeStatus::Cancelled,
                                 submission: String::new(),
@@ -405,16 +475,26 @@ impl NodeExecutor {
                         let result = if let Some(result) = call.preresolved_result {
                             result
                         } else {
-                            let value = tools
-                                .call(
-                                    &call.tool_call.function.name,
-                                    call.tool_call.function.arguments.clone(),
-                                )
-                                .await
-                                .map_err(|source| NodeError::Tool {
-                                    name: call.tool_call.function.name.to_string(),
+                            let name = call.tool_call.function.name.to_string();
+                            let future =
+                                tools.call(&name, call.tool_call.function.arguments.clone());
+                            let value = if let Some(timeout) = context.policy.tool_timeout {
+                                tokio::time::timeout(timeout, future)
+                                    .await
+                                    .map_err(|_| NodeError::Timeout {
+                                        phase: "tool execution",
+                                        timeout,
+                                    })?
+                                    .map_err(|source| NodeError::Tool {
+                                        name: name.clone(),
+                                        source,
+                                    })?
+                            } else {
+                                future.await.map_err(|source| NodeError::Tool {
+                                    name: name.clone(),
                                     source,
-                                })?;
+                                })?
+                            };
                             UserContent::tool_result(
                                 call.tool_call.id,
                                 call.tool_call.function.name,
@@ -429,7 +509,7 @@ impl NodeExecutor {
                 }
                 AgentRunStep::Done(response) => {
                     store.save(store_key, checkpoint)?;
-                    return parse_outcome(response.output, requests, routes);
+                    return parse_outcome(response.output, requests, context.routes);
                 }
             }
         }

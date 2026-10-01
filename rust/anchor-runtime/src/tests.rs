@@ -14,7 +14,7 @@ use rig_agent::{
 use serde::Deserialize;
 use serde_json::json;
 
-use super::{AgentCheckpoint, CheckpointError, CheckpointStore};
+use super::{AgentCheckpoint, CheckpointError, CheckpointStore, CompletionPort, ExecutionPolicy};
 
 #[derive(Debug, Deserialize, JsonSchema, PartialEq)]
 struct AgentCompletion {
@@ -202,6 +202,36 @@ impl super::ToolPort for FailingTools {
         >,
     > {
         Box::pin(async { Err(super::ToolError::Failed("fixture tool failure".to_owned())) })
+    }
+}
+
+struct SlowCompletion;
+
+impl CompletionPort for SlowCompletion {
+    fn capabilities(&self) -> rig_agent::core::completion::ProviderCapabilities {
+        rig_agent::core::completion::ProviderCapabilities::default()
+    }
+
+    fn complete<'a>(
+        &'a self,
+        _request: rig_agent::core::completion::CompletionRequest,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        rig_agent::core::completion::CompletionResponse,
+                        rig_agent::core::error::ProviderError,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            Err(rig_agent::core::error::ProviderError::request(
+                "late fixture",
+            ))
+        })
     }
 }
 
@@ -467,4 +497,28 @@ async fn node_executor_persists_pending_tools_after_tool_failure() {
     .expect("resume pending tools");
     assert_eq!(outcome.submission, "tool recovered");
     std::fs::remove_dir_all(root).expect("remove test directory");
+}
+
+#[tokio::test]
+async fn node_executor_timeout_keeps_pending_model_step() {
+    let mut checkpoint = AgentCheckpoint::start("review", 12, "slow", 1);
+    let cancellation = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let error = super::NodeExecutor::execute_with_policy(
+        &mut checkpoint,
+        &SlowCompletion,
+        &EchoTools,
+        ExecutionPolicy {
+            model_timeout: Some(std::time::Duration::from_millis(1)),
+            tool_timeout: None,
+        },
+        &cancellation,
+        &[],
+    )
+    .await
+    .expect_err("slow model should time out");
+    assert!(error.to_string().contains("model request timed out"));
+    assert!(matches!(
+        checkpoint.pending_step(),
+        Some(AgentRunStep::CallModel { turn: 1, .. })
+    ));
 }
