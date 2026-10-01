@@ -37,6 +37,7 @@ from typing import Any
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import quote
 from anchor.library import Attached, for_workspace, record_bindings, _mount, reference
 
 from anchor.simple import graph as graph_module
@@ -129,6 +130,10 @@ class RunState:
     # Set while a node is running and cleared when it finishes, so a restart knows both that
     # something was in flight and exactly what it was.
     cursor: dict | None = None
+    # Local fanout branches share this Run, but never share a writable node workspace.
+    # Only the coordinator writes these records; workers execute nodes and return outcomes.
+    active: dict[str, dict] = field(default_factory=dict)
+    parallel: dict | None = None
     # Rounds within the current entry into this node's scope, which is what the ceiling compares
     # against: counting is per level, so re-entering a module starts its nodes' rounds again.
     passes: dict[str, int] = field(default_factory=dict)
@@ -404,7 +409,7 @@ def _given(run_dir: Path, result: NodeResult, *, direct: bool = True) -> _Given:
     """Where a pointer lands, and what it points at."""
     if not result.commit:
         raise RuntimeError(f"{result.node_id} has no commit, so there is nothing to point at")
-    name = f"{result.node_id.replace('/', '_')}-{result.commit[:12]}"
+    name = f"{quote(result.node_id, safe='')}-{result.commit[:12]}"
     tree = _materialize(Path(result.tree), result.commit, run_dir / ".views" / name)
     # The mount is named for the node, so a module's nodes keep their scope: `/in/write/draft` is the
     # draft node of the `write` module, not a node called `draft` somewhere else.
@@ -473,13 +478,15 @@ def _incoming(graph: graph_module.Graph, state: RunState, decided: dict,
     return results
 
 
-def _trace_path(run_dir: Path, node_id: str, run_number: int) -> Path:
+def _trace_path(run_dir: Path, node_id: str, run_number: int, graph=None) -> Path:
     """One conversation per run. The workspace is reused; the conversation is not.
 
     Keyed by how many times the node has run, not by its round within the current entry: a round
     number restarts when a module is re-entered, and the second run would have overwritten the
     first's conversation under the same name.
     """
+    if graph is not None and graph.parallel_regions():
+        return run_dir / '.parallel-traces' / hashlib.sha256(node_id.encode()).hexdigest() / f'{run_number}.trace.jsonl'
     return run_dir / (f"{node_id}.trace.jsonl" if run_number == 1
                       else f"{node_id}-{run_number}.trace.jsonl")
 
@@ -521,14 +528,14 @@ def _restart_scope(state: RunState, scope: str) -> None:
 
 
 def _next_step(graph: graph_module.Graph, state: RunState, decided: dict, run_dir: Path,
-               order: list[str], ready) -> _Step | None:
+               order: list[str], ready, *, parallel: bool = False) -> _Step | None:
     """The node to run now, or None when nothing can proceed.
 
     Two ways in: a cursor left by a process that died mid-node, which is continued; or a node whose
     inputs have arrived since it last ran, which is started. Everything else is refusing to start a
     node that has been round too many times.
     """
-    cursor = state.cursor
+    cursor = state.active.get(order[0]) if parallel else state.cursor
     if cursor is not None:
         key = f"{cursor['node']}|{cursor['run']}"
         state.attempts[key] = state.attempts.get(key, 0) + 1
@@ -539,13 +546,16 @@ def _next_step(graph: graph_module.Graph, state: RunState, decided: dict, run_di
             state.status = "failed"
             state.error = (f"{cursor['node']} run {cursor['run']} was started "
                            f"{state.attempts[key] - 1} times without finishing")
-            state.cursor = None
+            if parallel:
+                state.active.pop(cursor['node'], None)
+            else:
+                state.cursor = None
             state.save(run_dir)
             return None
         state.save(run_dir)
         node_id = cursor["node"]
         return _Step(node_id, cursor["pass"], Path(cursor["dir"]), None, True,
-                     trace=_trace_path(run_dir, node_id, cursor["run"]),
+                     trace=_trace_path(run_dir, node_id, cursor["run"], graph),
                      inputs=_handed(run_dir, graph, state, node_id,
                                     _incoming(graph, state, decided, node_id)))
     # A node the ceiling already turned away stays turned away. Settling its out-edges is not enough
@@ -597,11 +607,15 @@ def _next_step(graph: graph_module.Graph, state: RunState, decided: dict, run_di
     state.runs[node_id] = run_number
     state.seq += 1
     state.last_seq[node_id] = state.seq
-    state.cursor = {"node": node_id, "pass": number, "run": run_number, "dir": str(directory)}
+    cursor = {"node": node_id, "pass": number, "run": run_number, "dir": str(directory)}
+    if parallel:
+        state.active[node_id] = cursor
+    else:
+        state.cursor = cursor
     state.save(run_dir)             # written before the work starts, not after
     return _Step(node_id, number, directory,
                  _task(graph, node_id, state.objective, handed, inputs, state.input),
-                 False, trace=_trace_path(run_dir, node_id, run_number), inputs=inputs)
+                 False, trace=_trace_path(run_dir, node_id, run_number, graph), inputs=inputs)
 
 
 def _ready(graph: graph_module.Graph, state: RunState, decided: dict,
@@ -665,7 +679,25 @@ def _record(state: RunState, graph: graph_module.Graph, run_dir: Path,
     state.nodes[result.node_id] = {**asdict(result), "files": list(result.files)}
     state.history[f"{result.node_id}|{result.commit}"] = state.nodes[result.node_id]
     state.executed.append(result.node_id)
-    state.cursor = None
+    if result.node_id in state.active:
+        state.active.pop(result.node_id)
+        if state.parallel is None:
+            raise RuntimeError("parallel node completed without an active fanout")
+        if result.submitted:
+            state.parallel["completed"][result.node_id] = result.commit
+        else:
+            state.parallel["failure"] = f"{result.node_id}: {result.exit_status}"
+    else:
+        state.cursor = None
+    definition = graph.definition(result.node_id)
+    if isinstance(definition, graph_module.Op) and definition.fanout is not None and result.submitted:
+        region = graph.parallel_regions()[result.node_id]
+        if state.parallel is not None:
+            raise RuntimeError("a fanout is already active")
+        state.parallel = {"fanout": result.node_id, "join": region.join,
+                          "invocation": state.runs[result.node_id], "completed": {}}
+    if isinstance(definition, graph_module.Op) and definition.join is not None and result.submitted:
+        state.parallel = None
     ways = graph.routes(result.node_id)
     chosen = result.route if len(ways) > 1 else (ways[0] if ways else None)
     # Through `settle`, not by stamping `state.seq` here. That was a second copy of the same rule and
@@ -686,10 +718,10 @@ def _record(state: RunState, graph: graph_module.Graph, run_dir: Path,
 
 def _config(config_path: str | Path) -> tuple[dict, str | None]:
     raw = json.loads(Path(config_path).read_text(encoding="utf-8"))
-    from anchor.runtime.secrets import env_model_profile
-    profile = env_model_profile()
-    if profile:
-        return {profile["ref"]: profile}, None
+    from anchor.runtime.secrets import env_model_profiles
+    profiles = env_model_profiles()
+    if profiles:
+        return profiles, None
     return {item["ref"]: item for item in raw.get("models", [])}, raw.get("secret_file")
 
 
@@ -745,6 +777,8 @@ def _agent_for(graph, node_id: str, directory: Path, models: dict, secret_file, 
         model: Any = scripted_model
     else:
         profile = models.get(spec.model) or (next(iter(models.values())) if len(models) == 1 else None)
+        if profile is None:
+            profile = next((item for item in models.values() if item.get("fallback_for_unknown_refs")), None)
         if profile is None:
             raise ValueError(f"no model named {spec.model!r} in {config_path}")
         model = model_for(profile, secret=_secret(secret_file, profile))
@@ -829,6 +863,9 @@ def _control_path(graph: graph_module.Graph, run_dir: Path, node_id: str, invoca
     if isinstance(definition, graph_module.Op) and definition.call is not None:
         identity = json.dumps([node_id, invocation], ensure_ascii=False, separators=(",", ":"))
         return run_dir / "control" / ".graph-calls" / hashlib.sha256(identity.encode()).hexdigest()
+    if graph.parallel_regions():
+        identity = json.dumps([node_id, invocation], ensure_ascii=False, separators=(",", ":"))
+        return run_dir / 'control' / '.parallel-nodes' / hashlib.sha256(identity.encode()).hexdigest()
     return run_dir / "control" / (node_id if invocation == 1 else f"{node_id}-{invocation}")
 
 
@@ -959,7 +996,8 @@ def run(workspace: str | Path, *, objective: str | None = None, config_path: str
     # finishing. Checked before anything runs, because afterwards the scheduler has no reason to
     # revisit it — it would find nothing ready and report `finished`, which is the failure in the
     # shape of a success that this rework exists to stop making.
-    unfinished = [node for node, data in state.nodes.items() if not data.get("submitted")]
+    unfinished = [node for node, data in state.nodes.items() if not data.get("submitted")
+                  and not (node in state.active and data.get("exit_status") == "Stopped")]
     if unfinished:
         state.status = "failed"
         state.error = f"{', '.join(sorted(unfinished))} did not submit (exit_status " \
@@ -975,7 +1013,7 @@ def run(workspace: str | Path, *, objective: str | None = None, config_path: str
     # again, and one would not run it at all. So this stops and says which node, rather than picking — a
     # guess here is a pass run twice or a pass never run, and the disagreement is worth more than either.
     disagreement = [node for node in sorted(state.nodes)
-                    if not state.nodes[node].get("submitted")
+                    if not state.nodes[node].get("submitted") and node not in state.active
                     and _completion_of(_control_path(graph, run_dir, node, state.runs.get(node, 1)), node)
                     is not None]
     if disagreement:
@@ -993,6 +1031,7 @@ def run(workspace: str | Path, *, objective: str | None = None, config_path: str
     entry = graph.entry()
     back = graph_module.back_edges(graph)
     order = list(graph.nodes)
+    regions = graph.parallel_regions()
 
     def ready(node_id: str) -> bool:
         return _ready(graph, state, decided, back, entry, node_id)
@@ -1004,7 +1043,8 @@ def run(workspace: str | Path, *, objective: str | None = None, config_path: str
         # skipped instead, and the run reported success having quietly dropped the loop.
         state.seq += 1
         for target in graph.routes(node_id):
-            decided[(node_id, target)] = (target == chosen, state.seq)
+            broadcast = node_id in regions and state.parallel is not None and state.parallel['fanout'] == node_id
+            decided[(node_id, target)] = (broadcast or target == chosen, state.seq)
         state.decided = {f"{source}|{target}": [value[0], value[1]]
                          for (source, target), value in decided.items()}
     try:
@@ -1023,64 +1063,39 @@ def run(workspace: str | Path, *, objective: str | None = None, config_path: str
         if resume is None:
             (run_dir / "graph.json").write_text(
                 json.dumps(snapshot, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        while True:
-            stopped = _asked_to_stop(stop_request, state, run_dir)
-            if stopped is not None:
-                return stopped
-            step = _next_step(graph, state, decided, run_dir, order, ready)
-            if step is None:
-                break
-            if step.refused:
-                _cease(state, step, settle, run_dir)
-                continue
-            # **Asked before the node runs.** A node whose completion is already recorded has
-            # submitted, and running it again is the duplicate the whole recovery path exists to avoid:
-            # the pass is recorded from what the record says instead.
-            # **Before the node runs, and with its own directory already known.** A completion fact
-            # left by a killed process is what stops the node being run a second time — the duplicate
-            # the recovery path exists to avoid — so this is read before anything is built.
-            # Each visit is a separate execution with its own allowance and completion fact. Retried
-            # attempts of that visit keep the same directory; the first visit retains its old path.
+
+        def prepare(step, cancelled):  # noqa: C901 - shared assembly of the existing node execution options
+            """Resolve inputs/config on the coordinator; workers never modify RunState."""
             run_number = state.runs[step.node_id]
             control = _control_path(graph, run_dir, step.node_id, run_number)
             settled = _settled_already(step, control, already_submitted)
             if settled is not None:
-                if not _record(state, graph, run_dir, decided, settled, settle):
-                    print(json.dumps({"run": str(run_dir), "status": state.status,
-                                      "stopped_at": settled.node_id}, ensure_ascii=False), flush=True)
-                    return state
-                continue
-            definition_for_step = graph.definition(step.node_id)
-            if isinstance(definition_for_step, graph_module.Op) and definition_for_step.call is not None:
+                return lambda: settled
+            spec = graph.definition(step.node_id)
+            if isinstance(spec, graph_module.Op) and (spec.fanout is not None or spec.join is not None):
+                from anchor.simple.parallel import control_result
+                result = control_result(graph, state, step, regions)
+                return lambda: result
+            if isinstance(spec, graph_module.Op) and spec.call is not None:
                 from anchor.simple.call_node import run_call
 
-                called = run_call(
-                    handler=call_handler, spec=definition_for_step.call, node_id=step.node_id,
-                    invocation=run_number, directory=step.directory, control=control,
-                    run_input=state.input,
-                    inputs=tuple({"node": given.node_id, "tree": str(given.tree), "commit": given.commit}
-                                 for given in step.inputs),
-                    cancelled=lambda: stop_request is not None and stop_request() == "stopped")
-                if stop_request is not None and stop_request() == "stopped":
-                    return _asked_to_stop(stop_request, state, run_dir, "stopped") or state
-                result = _result_of(step.node_id, "", step.directory, step.number,
-                                    {"submission": called.submission or called.reason,
-                                     "exit_status": "Submitted" if called.status == "completed" else "Failed"},
-                                    step.inputs)
-                if not _record(state, graph, run_dir, decided, result, settle):
-                    return state
-                continue
-            # A node the script does not name is a node whose model comes from the config, which is
-            # what `models.get` did before this switch: a partial script is a partial script, and
-            # demanding an entry for every node would make the script a second copy of the graph.
+                def call():
+                    called = run_call(
+                        handler=call_handler, spec=spec.call, node_id=step.node_id,
+                        invocation=run_number, directory=step.directory, control=control,
+                        run_input=state.input,
+                        inputs=tuple({"node": item.node_id, "tree": str(item.tree), "commit": item.commit}
+                                     for item in step.inputs), cancelled=cancelled)
+                    return _result_of(step.node_id, "", step.directory, step.number,
+                                      {"submission": called.submission or called.reason,
+                                       "exit_status": "Submitted" if called.status == "completed" else "Failed"},
+                                      step.inputs)
+                return call
             commands = model_script.get(step.node_id) if model_script else None
-            scripted_model = scripted_models({step.node_id: commands}).get(step.node_id) if commands \
-                else None
+            scripted_model = scripted_models({step.node_id: commands}).get(step.node_id) if commands else None
             attached = bindings.get(step.node_id)
-            if attached is not None:
-                current = library.attach(graph.nodes[step.node_id].plugins)
-                if current != attached:
-                    raise ValueError(f"Plugin resources for {step.node_id} changed during this run")
+            if attached is not None and library.attach(graph.nodes[step.node_id].plugins) != attached:
+                raise ValueError(f"Plugin resources for {step.node_id} changed during this run")
             options: dict[str, Any] = {"mcp_auth": mcp_auth} if mcp_auth else {}
             if prompt_images:
                 options["prompt_images"] = prompt_images
@@ -1095,57 +1110,78 @@ def run(workspace: str | Path, *, objective: str | None = None, config_path: str
                 options["resources"] = (*options.get("resources", ()), *local[step.node_id])
             if attached is not None:
                 options["plugins"] = attached
-            if stop_request is not None:
-                options["cancelled"] = lambda: stop_request() == "stopped"
+            if stop_request is not None or step.node_id in state.active:
+                options["cancelled"] = cancelled
             if state.input:
                 options["run_input"] = state.input
             if conversation_id and graph.nodes[step.node_id].agent:
                 options["conversation_id"] = f"{conversation_id}:{step.node_id}"
-                # In a graph loop, the latest pass in this Run is more recent than the previous turn.
                 candidates = ([(run_dir, state)] if run_number > 1 else []) + previous
                 controls = []
                 artifact = None
                 for prior_dir, prior_state in candidates:
+                    prior_graph_path = prior_dir / 'graph.json'
+                    prior_graph = (graph if prior_dir == run_dir or not prior_graph_path.exists()
+                                   else graph_module.load(prior_graph_path))
                     count = prior_state.runs.get(step.node_id, 0) - (1 if prior_dir == run_dir else 0)
                     for number in range(count, 0, -1):
-                        name = step.node_id if number == 1 else f"{step.node_id}-{number}"
-                        controls.append(prior_dir / "control" / name)
+                        if step.node_id in prior_graph.nodes:
+                            controls.append(_control_path(prior_graph, prior_dir, step.node_id, number))
                     prior_result = prior_state.result(step.node_id)
                     if artifact is None and prior_result is not None and prior_result.commit:
                         artifact = prior_result
                 options["previous_steps"] = tuple(controls)
                 if artifact is not None and run_number == 1:
-                    snapshot = _given(run_dir, artifact)
-                    options["resources"] = (*options.get("resources", ()), (str(snapshot.tree), "/previous"))
+                    prior_snapshot = _given(run_dir, artifact)
+                    options["resources"] = (*options.get("resources", ()), (str(prior_snapshot.tree), "/previous"))
             agent = _agent_for(graph, step.node_id, step.directory, models, secret_file, config_path,
                                inputs=step.inputs, trace=step.trace, control=control,
                                scripted_model=scripted_model, **options)
-            # **A cursor without a trace means the node never actually started.** The scheduler writes
-            # the cursor before dispatching, so a kill in between leaves a node marked as interrupted
-            # with nothing to continue from — and resuming reads a trace file that was never written,
-            # which fails the whole run rather than running the node. Started fresh is the honest reading:
-            # nothing of it happened.
-            #
-            # **How many attempts of this pass are gone decides which question to ask.** With the trace
-            # still there it was interrupted mid-conversation and the node continues; with the trace gone
-            # this process is the one that interrupted it, and asking the node directly is what turns a
-            # write that landed before the record into `uncertain` instead of a rerun.
-            if step.resuming and step.trace is not None and Path(step.trace).exists():
-                outcome = agent.resume()
+
+            def execute():
+                if step.resuming and step.trace is not None and Path(step.trace).exists():
+                    outcome = agent.resume()
+                else:
+                    outcome = agent.run(task=step.task, resume_mark=step.resuming)
+                result = _result_of(step.node_id, graph.nodes[step.node_id].agent, step.directory,
+                                    step.number, outcome, step.inputs)
+                return replace(result, route=getattr(agent.env, "route", None))
+            return execute
+
+        def preserve_partial(result):
+            if conversation_id and preserve_interrupted and graph.nodes[result.node_id].agent:
+                partial_result = replace(result, submitted=False, exit_status="Stopped",
+                                         commit=_freeze(Path(result.tree), "Interrupted conversation work"))
+                state.nodes[result.node_id] = asdict(partial_result)
+                state.history[f"{result.node_id}|{partial_result.commit}"] = asdict(partial_result)
+                state.save(run_dir)
+
+        while True:
+            stopped = _asked_to_stop(stop_request, state, run_dir)
+            if stopped is not None:
+                return stopped
+            if state.parallel is not None:
+                from anchor.simple.parallel import run_branches
+                if not run_branches(graph, state, decided, run_dir, regions, prepare, settle,
+                                    stop_request, preserve_partial):
+                    return state
+                step_order = [state.parallel['join']]
             else:
-                outcome = agent.run(task=step.task, resume_mark=step.resuming)
+                step_order = order
+            step = _next_step(graph, state, decided, run_dir, step_order, ready)
+            if step is None:
+                break
+            if step.refused:
+                _cease(state, step, settle, run_dir)
+                continue
+            result = prepare(step, lambda: stop_request is not None and stop_request() == "stopped")()
             if stop_request is not None and stop_request() == "stopped":
-                if conversation_id and preserve_interrupted:
-                    partial = _result_of(step.node_id, graph.nodes[step.node_id].agent, step.directory,
-                                         step.number, outcome, step.inputs)
-                    partial = replace(partial, submitted=False, exit_status="Stopped",
+                if conversation_id and preserve_interrupted and graph.nodes[step.node_id].agent:
+                    partial = replace(result, submitted=False, exit_status="Stopped",
                                       commit=_freeze(step.directory, "Interrupted conversation work"))
                     state.nodes[step.node_id] = asdict(partial)
                     state.history[f"{step.node_id}|{partial.commit}"] = asdict(partial)
                 return _asked_to_stop(stop_request, state, run_dir, "stopped") or state
-            result = _result_of(step.node_id, graph.nodes[step.node_id].agent, step.directory,
-                                step.number, outcome, step.inputs)
-            result = replace(result, route=getattr(agent.env, "route", None))
             if not _record(state, graph, run_dir, decided, result, settle):
                 print(json.dumps({"run": str(run_dir), "status": state.status,
                                   "stopped_at": result.node_id}, ensure_ascii=False), flush=True)

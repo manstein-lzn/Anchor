@@ -36,7 +36,7 @@ from __future__ import annotations
 import json
 import re
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from anchor.library import references
@@ -78,14 +78,15 @@ class Agent(Interface):
 
 @dataclass(frozen=True)
 class Op(Interface):
-    """A node's work when no model is involved: one command, and its exit code is the verdict.
+    """A node's work when no model is involved: a command or a structured runtime operation.
 
     The same thing as an agent in every way the graph can see — a workspace of its own, a read-only
     pointer to what came before, one commit per run, one action that finishes it — and different in
     exactly one: what decides the work is done is a program rather than a model. A model can talk
     itself into believing it has finished. `grep -q '^## References' paper.md` cannot.
 
-    A command rather than a function, and not for convenience: everything a node runs has to run
+    Commands run inside the sandbox; call and paired fanout/join are owned by the graph runtime.
+    A command rather than a function, and not for convenience: everything a command node runs must run
     *inside the sandbox*, and an in-process function would run outside it, with the host in reach.
     What the command is written in is the author's business — a console script, a python file, a line
     of shell are the same thing here.
@@ -93,6 +94,8 @@ class Op(Interface):
     run: str = ""
     # A service-owned structured operation; never interpreted as a shell command.
     call: dict | None = None
+    fanout: dict | None = None
+    join: dict | None = None
     network: bool = False
     wall_time_limit_seconds: int = 3600
 
@@ -108,6 +111,15 @@ class Node:
     # makes a role worth declaring separately from the nodes that use it.
     with_: str = ""
     plugins: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class ParallelRegion:
+    """A paired control region, with branch chains in declared fanout edge order."""
+
+    fanout: str
+    join: str
+    branches: tuple[tuple[str, ...], ...]
 
 
 @dataclass(frozen=True)
@@ -140,7 +152,7 @@ class Graph:
         return self.entry_node
 
     def routes(self, node_id: str) -> tuple[str, ...]:
-        """The ways out of a node. More than one means the node must choose."""
+        """The ways out. Ordinary nodes choose one; fanout activates all paired branches."""
         return self.out_edges.get(node_id, ())
 
     def ceiling(self, node_id: str) -> int | None:
@@ -157,6 +169,10 @@ class Graph:
 
     def writes(self, node_id: str) -> tuple[str, ...]:
         return self.definition(node_id).writes
+
+    def parallel_regions(self) -> dict[str, ParallelRegion]:
+        """Validate and derive parallel membership from the graph's edges."""
+        return _parallel_regions(self)
 
 
 def edges(graph: Graph) -> list[tuple[str, str]]:
@@ -337,10 +353,20 @@ def _op(name: str, spec: dict) -> Op:
     where = f"op {name!r}"
     if not isinstance(spec, dict):
         raise ValueError(f"{where} must be a JSON object")
-    if ("run" in spec) == ("call" in spec):
-        raise ValueError(f'{where} needs exactly one of "run" or "call"')
+    if sum(key in spec for key in ("run", "call", "fanout", "join")) != 1:
+        raise ValueError(f'{where} needs exactly one of "run", "call", "fanout" or "join"')
     reads = _files(spec.get("reads"), where, '"reads"')
     writes = _files(spec.get("writes"), where, '"writes"')
+    if "fanout" in spec or "join" in spec:
+        _call_object(spec, {"fanout", "join", "reads", "writes", "network",
+                            "wall_time_limit_seconds"}, where)
+        if "fanout" in spec:
+            fanout = _call_object(spec["fanout"], {"join"}, f"{where}.fanout")
+            _call_path(fanout.get("join"), f"{where}.fanout.join")
+            return Op(fanout=deepcopy(fanout), reads=reads,
+                      writes=tuple(dict.fromkeys((*writes, 'fanout.json'))))
+        _call_object(spec["join"], set(), f"{where}.join")
+        return Op(join={}, reads=reads, writes=tuple(dict.fromkeys((*writes, "join.json"))))
     if "call" in spec:
         call = _call(spec["call"], f"{where}.call")
         produced = ("call.json", *(f"result/{path}" for path in call.get("result", {}).get("files", ())))
@@ -499,6 +525,7 @@ class _Expansion:
     module_rounds: dict[str, int]
     entry: str
     exit: str | None
+    scopes: dict[str, str]
 
 
 def _expand(body: dict, pool: dict[str, dict], prefix: str) -> _Expansion:
@@ -514,6 +541,7 @@ def _expand(body: dict, pool: dict[str, dict], prefix: str) -> _Expansion:
     module_rounds: dict[str, int] = {}
     edges: list[tuple[str, str]] = []
     sides: dict[str, tuple[str, str]] = {}
+    scopes: dict[str, str] = {}
     ceiling = body.get("max_rounds", DEFAULT_MAX_ROUNDS)
 
     for item in body["nodes"]:
@@ -521,6 +549,7 @@ def _expand(body: dict, pool: dict[str, dict], prefix: str) -> _Expansion:
         if "graph" in item:
             inner = _expand(pool[item["graph"]], pool, flat + SEP)
             nodes.update(inner.nodes)
+            scopes.update(inner.scopes)
             max_rounds.update(inner.max_rounds)
             module_rounds.update(inner.module_rounds)
             edges.extend(inner.edges)
@@ -534,6 +563,7 @@ def _expand(body: dict, pool: dict[str, dict], prefix: str) -> _Expansion:
             nodes[flat] = Node(id=flat, agent=item.get("agent", ""), op=item.get("op", ""),
                                with_=item.get("with", ""),
                                plugins=references(item.get("plugins", [])))
+            scopes[flat] = prefix
             if item.get("max_rounds", ceiling) is not None:
                 max_rounds[flat] = int(item.get("max_rounds", ceiling))
             sides[item["id"]] = (flat, flat)
@@ -544,7 +574,101 @@ def _expand(body: dict, pool: dict[str, dict], prefix: str) -> _Expansion:
 
     entry = body.get("entry") or _infer_entry(body, "graph")
     exit_node = sides[body["exit"]][1] if body.get("exit") else None
-    return _Expansion(nodes, edges, max_rounds, module_rounds, sides[entry][0], exit_node)
+    return _Expansion(nodes, edges, max_rounds, module_rounds, sides[entry][0], exit_node, scopes)
+
+
+def _resolve_fanouts(expansion: _Expansion, ops: dict[str, Op]) -> None:
+    """Bind shared fanout ops to the scope of each use before saving a flat snapshot.
+
+    Flat files resolve references from their root, even when node IDs contain '/'. Only actual
+    module expansion adds a prefix. Specialized ops keep the snapshot self-contained and avoid
+    mutating a definition shared by two module instances.
+    """
+    bound: dict[tuple[str, str], str] = {}
+    for node_id, node in expansion.nodes.items():
+        op = ops.get(node.op)
+        prefix = expansion.scopes[node_id]
+        if op is None or op.fanout is None or not prefix:
+            continue
+        key = (node.op, prefix)
+        if key not in bound:
+            name = f"{node.op}@{prefix.rstrip(SEP)}"
+            while name in ops:
+                name += "@"
+            ops[name] = replace(op, fanout={"join": prefix + op.fanout["join"]})
+            bound[key] = name
+        expansion.nodes[node_id] = replace(node, op=bound[key])
+
+
+def _parallel_branch(graph: Graph, fanout: str, start: str, join: str,
+                     controls: set[str], members: set[str]) -> tuple[str, ...]:
+    branch: list[str] = []
+    previous, current = fanout, start
+    while current != join:
+        if current in members:
+            raise ValueError(f"fanout node {fanout!r}: overlapping or cyclic branch at {current!r}")
+        if current in controls:
+            raise ValueError(f"fanout node {fanout!r}: nested or crossing control node {current!r}")
+        if graph.in_edges.get(current, ()) != (previous,):
+            raise ValueError(f"fanout node {fanout!r}: branch node {current!r} has external or overlapping incoming edges")
+        targets = graph.routes(current)
+        if len(targets) != 1:
+            raise ValueError(f"fanout node {fanout!r}: branch node {current!r} needs exactly one outgoing edge toward join {join!r}")
+        members.add(current)
+        branch.append(current)
+        previous, current = current, targets[0]
+    if not branch:
+        raise ValueError(f"fanout node {fanout!r}: branches must be nonempty")
+    return tuple(branch)
+
+
+def _parallel_regions(graph: Graph) -> dict[str, ParallelRegion]:
+    fanouts = {node: definition for node in graph.nodes
+               if isinstance(definition := graph.definition(node), Op)
+               and definition.fanout is not None}
+    joins = {node for node in graph.nodes
+             if isinstance(definition := graph.definition(node), Op) and definition.join is not None}
+    if fanouts or joins:
+        for node in graph.nodes:
+            _call_path(node, 'parallel node workspace')
+            parts = node.split(SEP)
+            if any(SEP.join(parts[:index]) in graph.nodes for index in range(1, len(parts))):
+                raise ValueError(f"parallel graph has overlapping node workspaces: {node!r}")
+            if parts[0] in {'control', '.views', '.parallel-nodes', '.parallel-traces',
+                            'call-inputs', 'run.json', 'graph.json', 'plugins.json', 'local-inputs.json'}:
+                raise ValueError(f"parallel graph node uses reserved directory: {node!r}")
+    paired: dict[str, str] = {}
+    for fanout, definition in fanouts.items():
+        join = definition.fanout["join"]
+        if join not in joins:
+            raise ValueError(f"fanout node {fanout!r}: paired join {join!r} is not a join node")
+        if join in paired:
+            raise ValueError(f"join node {join!r} is paired with multiple fanout nodes")
+        paired[join] = fanout
+    if orphaned := joins - paired.keys():
+        raise ValueError(f"join nodes have no paired fanout: {sorted(orphaned)}")
+
+    regions: dict[str, ParallelRegion] = {}
+    owned: set[str] = set()
+    for fanout, definition in fanouts.items():
+        join = definition.fanout["join"]
+        starts = graph.routes(fanout)
+        if len(starts) < 2:
+            raise ValueError(f"fanout node {fanout!r} needs at least two outgoing branches")
+        if len(set(starts)) != len(starts):
+            raise ValueError(f"fanout node {fanout!r} has duplicate branch edges")
+        if len(graph.routes(join)) > 1:
+            raise ValueError(f"join node {join!r} cannot choose between multiple outgoing edges")
+        branches = tuple(_parallel_branch(graph, fanout, start, join, fanouts.keys() | joins, owned)
+                         for start in starts)
+        tails = {branch[-1] for branch in branches}
+        incoming = graph.in_edges.get(join, ())
+        if len(incoming) != len(tails) or set(incoming) != tails:
+            raise ValueError(f"join node {join!r} must receive exactly its paired branch tails")
+        if graph.entry() in owned or graph.entry() == join:
+            raise ValueError(f"parallel region {fanout!r}: graph entry cannot bypass the fanout")
+        regions[fanout] = ParallelRegion(fanout, join, branches)
+    return regions
 
 
 def feeders(graph: Graph, node_id: str) -> set[str]:
@@ -632,9 +756,11 @@ def parse(raw: dict) -> Graph:
         out_edges[source].append(target)
         in_edges[target].append(source)
 
+    ops = {name: _op(name, spec) for name, spec in (raw.get("ops") or {}).items()}
+    _resolve_fanouts(expansion, ops)
     graph = Graph(nodes=expansion.nodes,
                   agents={name: _agent(name, spec) for name, spec in (raw.get("agents") or {}).items()},
-                  ops={name: _op(name, spec) for name, spec in (raw.get("ops") or {}).items()},
+                  ops=ops,
                   out_edges={node: tuple(targets) for node, targets in out_edges.items()},
                   in_edges={node: tuple(sources) for node, sources in in_edges.items()},
                   objective=raw.get("objective", ""), input=raw.get("input", {}),
@@ -651,6 +777,7 @@ def parse(raw: dict) -> Graph:
     if unknown:
         raise ValueError(f"nodes name an agent or an op that is not declared: {unknown}")
     graph.entry()          # fail at load rather than at the first step of a run
+    graph.parallel_regions()
     _check_interfaces(graph)
     return graph
 
@@ -697,7 +824,9 @@ def to_dict(graph: Graph) -> dict:
                           **({"reads": list(agent.reads)} if agent.reads else {}),
                           **({"writes": list(agent.writes)} if agent.writes else {})}
                    for name, agent in graph.agents.items()},
-        "ops": {name: {**({"call": deepcopy(op.call)} if op.call is not None else {"run": op.run}),
+        "ops": {name: {**({"call": deepcopy(op.call)} if op.call is not None else
+                         {"fanout": deepcopy(op.fanout)} if op.fanout is not None else
+                         {"join": deepcopy(op.join)} if op.join is not None else {"run": op.run}),
                        "network": op.network,
                        "wall_time_limit_seconds": op.wall_time_limit_seconds,
                        **({"reads": list(op.reads)} if op.reads else {}),

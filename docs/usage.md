@@ -1,5 +1,22 @@
 # Anchor 使用指南
 
+## 同一 Run 内的并行分支
+
+在画布选择“添加节点 → 并行分支”，会在当前入口前添加一对展开/收束节点和两个 AgentNode。为两个分支填写各自任务，按需要调整连线；fanout 只需选择配对 join，分支由边表达。一个 Run 内并行执行分支，全部成功后才执行 join 下游；普通多出口节点仍选择一条路由。
+
+```json
+{
+  "ops": {
+    "split": {"fanout": {"join": "collect"}},
+    "collect": {"join": {}}
+  }
+}
+```
+
+上面是操作定义片段，节点和边仍使用原格式。完整示例见 [parallel-audit.json](../examples/graphs/parallel-audit.json)。每个分支可以是一串 Agent/Op，分支间互不交叉，至少两条分支在唯一配对 join 收束。首期不支持分支内选择/循环或嵌套并行；整个区域之后可以通过评审反馈回到 fanout。
+
+join 产生 `join.json`，列出本次展开轮次、分支摘要、文件和 commit。综合 Agent 可通过 `/in/<join节点>/join.json` 查结果索引，并从既有 `/in/<分支节点>/` 读取只读证据。失败会取消尚在执行的同伴且不放行 join；暂停等活动节点结算后停下，停止请求取消全部活动节点。恢复保留已完成分支，命令副作用未知时仍可能报告 Uncertain，需要核查。画布和运行详情显示所有活动节点及配对关系。
+
 本文描述当前已实现的行为。所有命令均从仓库根目录执行；返回 [项目入口](../README.md)。Plugin 的格式与边界见 [Plugin 设计](plugins.md)，知识库编译暂缓。
 
 ## 安装与首次启动
@@ -39,7 +56,7 @@ ANCHOR_MODEL_API_KEY=你的API_KEY
 ANCHOR_MODEL_NAME=你的模型名
 ```
 
-`ANCHOR_MODEL_URL`、`ANCHOR_MODEL_API_KEY` 和 `ANCHOR_MODEL_NAME` 是唯一模型事实来源；不再配置 provider、`secret_ref` 或 DeepSeek 专用字段。`.env` 已被 Git 忽略。
+`ANCHOR_MODEL_URL`、`ANCHOR_MODEL_API_KEY` 和 `ANCHOR_MODEL_NAME` 配置默认模型；不再配置 provider、`secret_ref` 或 DeepSeek 专用字段。可选 `ANCHOR_MODEL_ALIASES={"models.review":"服务支持的另一模型名"}` 为同一服务和凭证增加模型名别名，Agent 的 `model` 引用该别名。它不能替换 `models.default`、更换端点或携带凭证；旧图未配置的引用仍回落到环境默认模型，Pilot 默认模型不变。所有模型事实仍来自 `.env`，该文件已被 Git 忽略。
 
 ### 3. 放入一个工作流
 
@@ -291,7 +308,7 @@ anchor-scholarly citations --identifier 2005.11401 --direction cited_by
 
 ## Plugin 的准备与使用
 
-本地配置统一放在仓库根目录 `.env`（该文件已被 Git 忽略），可从 `.env.example` 复制。设置 `ANCHOR_MODEL_URL`、`ANCHOR_MODEL_API_KEY` 和 `ANCHOR_MODEL_NAME` 即可配置唯一的 OpenAI-compatible 模型；Anchor 启动命令会加载它，已有 shell 环境变量优先，不会被 `.env` 覆盖。`runtime.json` 不需要模型条目。不要把真实 key 写入 Graph、Plugin 清单、日志或提交。
+本地配置统一放在仓库根目录 `.env`（该文件已被 Git 忽略），可从 `.env.example` 复制。设置 `ANCHOR_MODEL_URL`、`ANCHOR_MODEL_API_KEY` 和 `ANCHOR_MODEL_NAME` 即可配置默认的 OpenAI-compatible 模型（可用 ANCHOR_MODEL_ALIASES 为同一服务增加模型名别名）；Anchor 启动命令会加载它，已有 shell 环境变量优先，不会被 `.env` 覆盖。`runtime.json` 不需要模型条目。不要把真实 key 写入 Graph、Plugin 清单、日志或提交。
 
 Plugin 由文件维护，WebUI 负责浏览、只读查看与挂载。先准备共享工具，再登记 Plugin。以下示例复用当前已安装的 Anchor 环境，不新建节点专用环境；从仓库根目录执行：
 
@@ -330,6 +347,16 @@ AgentNode 挂载的 MCP 工具默认采用框架原生延迟加载。模型首�
 企业微信助手通过普通 Graph 执行，支持按用户隔离的历史、同图并发和新消息取消旧任务后接续。长连接网关和 Anchor 均可部署在 Linux，客户端无需同机。完整 `.env`、安装、自检、启动和私聊验收步骤见 [企业微信助手接入](wecom-assistant.md)。
 
 默认助手挂载 `wecom`，支持主动 Markdown 通知、附件提取/原生图片输入、持续正文及图片回复；其他业务 Plugin 可按需添加。机器人 Bot ID/Secret 用于长连接及上述能力，主动通知目标由可选 `ANCHOR_WECOM_SEND_USERS` 限制（默认继承入口名单）；自建应用的 Corp ID/Agent ID/Secret 仅用于另外的可选 MCP 消息与成员 API。企业微信审批接口尚未实现。真实模型/Graph/本地 Plugin 验收与真实企业微信公网联动分开记录。
+
+## 每周 RSI Graph
+
+要让 Anchor 每周审查自己的运行和代码，使用普通 Graph 安装脚本：
+
+```bash
+./.venv/bin/python scripts/setup_rsi.py --root .local/demo
+```
+
+这会安装 [rsi Graph](rsi.md)，为采集节点授予当前数据根和源码的只读输入，并增加每周四 09:00 的本地计划。公开生态数据来自固定的 GitHub、PyPI、npm 端点；完整边界、产物和验收状态见 [RSI Graph](rsi.md)。修改仓库位置或 Anchor 数据根时同时传入 `--source` 和 `--root`。脚本不会覆盖已有 Graph 或重复同规则计划。
 
 ## 深度学术调研图
 

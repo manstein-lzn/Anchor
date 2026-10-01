@@ -10,11 +10,13 @@ import { WorkflowCanvas } from './WorkflowCanvas';
 import { GraphActions } from './GraphActions';
 import { label } from './execution';
 import {
-  type OurAgent, type OurGraph, type OurRun, type OurRunDetail,
+  type OurAgent, type OurGraph, type OurOp, type OurRun, type OurRunDetail,
   type TimelineData,
 } from './model';
 import { validateCallTargets } from './calls';
 import { CallEditor } from './CallEditor';
+import { ParallelEditor } from './ParallelEditor';
+import { activeNodes, addParallelRegion, parallelControl, renameGraphNode } from './parallel';
 import { GraphRelations } from './GraphRelations';
 import { RunInspector } from './RunInspector';
 import { Plugins } from './Plugins';
@@ -23,7 +25,8 @@ import { Pilot } from './Pilot';
 import { anchorRef, anchorTarget, type AnchorRef } from './links';
 import { api, registerApiKeyPrompt, setBearerKey } from './api';
 import { EmptyState, JsonDialog, Modal, ToolButton } from './ui';
-import { graphColor, Timeline } from './Timeline';
+import { Timeline } from './Timeline';
+import { assignGraphColors } from './graphColors';
 
 const POLL_MS = 3000;
 type Pick = { kind: 'node' | 'edge' | 'agent'; id: string } | null;
@@ -60,6 +63,13 @@ export function App() {
   const [graphReturn, setGraphReturn] = useState<{ graph: string; node?: string } | null>(null);
   const [runs, setRuns] = useState<OurRun[]>([]);
   const [timeline, setTimeline] = useState<TimelineData | null>(null);
+  const graphColors = useMemo(() => assignGraphColors([
+    ...graphs.map(item => item.graph),
+    ...runs.map(run => run.graph),
+    ...(timeline?.runs ?? []).map(run => run.graph),
+    ...(timeline?.scheduled ?? []).map(plan => plan.graph),
+    ...(timeline?.schedules ?? []).map(schedule => schedule.graph),
+  ]), [graphs, runs, timeline?.runs, timeline?.scheduled, timeline?.schedules]);
   const [timelinePage, setTimelinePage] = useState(0);
   const [name, setName] = useState('');
   const [doc, setDoc] = useState<OurGraph | null>(null);
@@ -247,7 +257,7 @@ export function App() {
   };
 
   const trigger = () => perform('触发', async () => {
-    if (name === 'weekly-work-report') {
+    if (name === 'weekly-work-report' || name === 'rsi') {
       const body = await api<{ run: string }>('/trigger', 'POST', { graph: name, input: doc?.input ?? {} });
       setRun(body.run); setView('runDetail');
       return;
@@ -313,6 +323,10 @@ export function App() {
   };
 
   const selectedNode = pick?.kind === 'node' ? doc?.nodes.find(item => item.id === pick.id) : undefined;
+  const selectedOp = selectedNode?.op ? doc?.ops?.[selectedNode.op] : undefined;
+  const patchOperation = (op: OurOp) => {
+    if (doc && selectedNode?.op) patch({ ...doc, ops: { ...doc.ops, [selectedNode.op]: op } });
+  };
   const selectedAgent = pick?.kind === 'agent' && doc ? doc.agents?.[pick.id] : undefined;
   const selectedEdge = pick?.kind === 'edge' && doc ? doc.edges[Number(pick.id)] : undefined;
 
@@ -351,6 +365,12 @@ export function App() {
     patch({ ...doc, entry: doc.entry || id, nodes: [...doc.nodes, { id, op: id }], ops: { ...doc.ops,
       [id]: calling ? { call: { graph: graphs.find(item => item.graph !== name)?.graph ?? '', mode: 'wait' } } : { run: 'true' } } });
     setPalette(false); setPick({ kind: 'node', id }); setInspectorOpen(true);
+  };
+
+  const addParallel = () => {
+    if (!doc) return;
+    const added = addParallelRegion(doc);
+    patch(added.graph); setPalette(false); setPick({ kind: 'node', id: added.fanout }); setInspectorOpen(true);
   };
 
   const addAgent = () => {
@@ -427,7 +447,7 @@ export function App() {
 
       {view === 'pilot' ? <Pilot session={chat} onSession={setChat} /> : view === 'runs' ? (
         <Workspace running>
-          <Timeline data={timeline} graphs={graphs.map(item => item.graph)} page={timelinePage} onPage={setTimelinePage}
+          <Timeline data={timeline} graphs={graphs.map(item => item.graph)} graphColors={graphColors} page={timelinePage} onPage={setTimelinePage}
             onRefresh={() => void refresh()} onSelect={item => {
             setRun(item.run); setName(item.graph); setNode(''); setView('runDetail');
           }} />
@@ -454,15 +474,14 @@ export function App() {
                   {detail.state.status === 'running' ? '执行中' : label(detail.state.status)}
                 </span>
                 <span className="objective">{detail.state.objective}</span>
-                {detail.state.cursor && <span className="hint">
+                {activeNodes(detail.state).length > 0 && <span className="hint" aria-label="活动节点">
                   {detail.state.status === 'running' ? '正在执行' :
-                    detail.state.status === 'stopped' ? '停止于' : '中断于'} {detail.state.cursor.node}
-                  （第 {detail.state.cursor.pass} 轮）</span>}
+                    detail.state.status === 'stopped' ? '停止于' : '中断于'} {activeNodes(detail.state).map(item => `${item.node}（第 ${item.pass} 轮）`).join('、')}</span>}
                 {['running', 'paused'].includes(detail.state.status) &&
                   <span className="run-controls">
                     {detail.state.status === 'running' ? <>
                       <button onClick={() => void controlRun('pause')} disabled={busy}
-                              title="当前节点完成后暂停">暂停</button>
+                              title="等待所有活动节点结算后暂停">暂停</button>
                       <button className="danger-link" onClick={() => void controlRun('stop')}
                               disabled={busy} title="停止本次运行及等待模式创建的目标；已接纳的启动后继续调用不受影响">停止</button>
                     </> : <button onClick={() => void controlRun('resume')} disabled={busy}>
@@ -583,7 +602,7 @@ export function App() {
                     <div className="graph-run-list-heading">{name}<span>{graphRuns.length} 次运行</span></div>
                     {graphRuns.map(item => <button key={item.run} className="graph-run-row" onClick={() => openRun(item)}>
                       <span className={`run-status-dot ${item.running ? 'running' : item.status}`}
-                        style={{ '--graph-color': graphColor(name) } as CSSProperties} />
+                        style={{ '--graph-color': graphColors[name] } as CSSProperties} />
                       <span className="graph-run-row-main"><strong>{item.running ? '执行中' : label(item.status)}</strong><small>{runTime(item.started)} 开始</small></span>
                       <span className="graph-run-row-id" title={item.run}>{item.run}</span>
                       <span className="graph-run-row-open">查看详情 →</span>
@@ -649,24 +668,19 @@ export function App() {
                          onChange={event => {
                            const next = event.target.value;
                            setPick({ kind: 'node', id: next });
-                           patch({ ...doc,
-                             nodes: doc.nodes.map(item => item.id === selectedNode.id
-                               ? { ...item, id: next } : item),
-                             edges: doc.edges.map(edge => ({
-                               from: edge.from === selectedNode.id ? next : edge.from,
-                               to: edge.to === selectedNode.id ? next : edge.to })) });
+                           patch(renameGraphNode(doc, selectedNode.id, next));
                          }} />
                 </label>
-                {selectedNode.op ? doc.ops?.[selectedNode.op]?.call ? <CallEditor
+                {selectedNode.op ? parallelControl(doc, selectedNode.id) ? <ParallelEditor graph={doc} node={selectedNode.id}
+                  onChange={join => { if (selectedOp?.fanout) patchOperation({ ...selectedOp, fanout: { join } }); }} /> : doc.ops?.[selectedNode.op]?.call ? <CallEditor
                   key={`${name}/${selectedNode.op}`} call={doc.ops[selectedNode.op].call!} graph={doc} node={selectedNode.id}
                   targets={graphs.map(item => item.graph)} onOpen={target => navigateGraph(target, undefined, true)}
-                  onChange={call => patch({ ...doc, ops: { ...doc.ops, [selectedNode.op!]: { ...doc.ops![selectedNode.op!], call } } })} /> : <>
+                  onChange={call => { if (selectedOp?.call) patchOperation({ ...selectedOp, call }); }} /> : <>
                   <div className="inspector-kind">命令</div><p className="inspector-note">退出码 0 完成，非 0 失败。</p>
                   <label>命令<textarea className="instructions" value={doc.ops?.[selectedNode.op]?.run ?? ''}
-                    onChange={event => patch({ ...doc, ops: { ...doc.ops, [selectedNode.op!]: { ...doc.ops?.[selectedNode.op!], run: event.target.value } } })} /></label>
+                    onChange={event => { if (selectedOp?.run !== undefined) patchOperation({ ...selectedOp, run: event.target.value }); }} /></label>
                   {(['reads', 'writes'] as const).map(field => <label key={field}>{field === 'reads' ? '读' : '写'}<input
-                    value={(doc.ops?.[selectedNode.op!]?.[field] ?? []).join(', ')} onChange={event => patch({ ...doc,
-                    ops: { ...doc.ops, [selectedNode.op!]: { ...doc.ops?.[selectedNode.op!], [field]: event.target.value.split(',').map(item => item.trim()).filter(Boolean) } } })} /></label>)}
+                    value={(doc.ops?.[selectedNode.op!]?.[field] ?? []).join(', ')} onChange={event => { if (selectedOp) patchOperation({ ...selectedOp, [field]: event.target.value.split(',').map(item => item.trim()).filter(Boolean) }); }} /></label>)}
                 </> : selectedNode.graph ? <p className="inspector-note">
                   本次运行内执行。这个节点运行的是文件里声明的 <code>{selectedNode.graph}</code>。展开之后它的节点
                   以 <code>{selectedNode.id}/…</code> 命名，各自在自己的目录里，父图只看得到它的
@@ -692,7 +706,7 @@ export function App() {
                   不能用 <code>anchor-done</code>。这一点要写进它的指令里。
                 </p>}
                 <div className="selection-tools">
-                  <ToolButton icon={Copy} label="复制节点" onClick={duplicateNode} />
+                  <ToolButton icon={Copy} label="复制节点" onClick={duplicateNode} disabled={!!parallelControl(doc, selectedNode.id)} />
                 </div>
                 <button className="full-button"
                         disabled={Boolean(selectedNode.graph) || Boolean(selectedNode.op)}
@@ -819,6 +833,7 @@ export function App() {
 
       {palette && doc && <Modal title="添加节点" close={() => setPalette(false)}>
         <div className="node-palette">
+          <button onClick={addParallel}><strong>并行分支</strong><small>在入口前添加展开、两个智能体分支和配对收束</small></button>
           <button onClick={() => addOperation(true)}><strong>调用工作流</strong><small>启动独立运行，等待完成或启动后继续</small></button>
           <button onClick={() => addOperation(false)}><strong>命令</strong><small>确定性操作，无需模型</small></button>
           {Object.keys(doc.agents ?? {}).map(agent => (

@@ -1,0 +1,21 @@
+{
+  "objective": "分别核查两个独立主题，再根据各分支的已提交证据综合结论。",
+  "entry": "fanout",
+  "agents": {
+    "auditor": {"model": "models.default", "instructions": "只完成本节点指定的审查。将结论、依据和不确定性写入 findings.md。", "writes": ["findings.md"]},
+    "synthesizer": {"model": "models.default", "instructions": "读取 join.json 及两个分支的 findings.md，比较结论并把综合报告写入 report.md。", "reads": ["join.json", "findings.md"], "writes": ["report.md"]}
+  },
+  "ops": {"fanout": {"fanout": {"join": "join"}}, "join": {"join": {}}},
+  "nodes": [
+    {"id": "fanout", "op": "fanout"},
+    {"id": "architecture", "agent": "auditor", "with": "评估通过显式 fanout/join 组织局部并行的可理解性，不推断任何项目已经实现该能力。"},
+    {"id": "recovery", "agent": "auditor", "with": "分析并行分支失败、停止和恢复时需要保持的事实与不变量，不推断任何项目已经通过验证。"},
+    {"id": "join", "op": "join"},
+    {"id": "synthesize", "agent": "synthesizer"}
+  ],
+  "edges": [
+    {"from": "fanout", "to": "architecture"}, {"from": "fanout", "to": "recovery"},
+    {"from": "architecture", "to": "join"}, {"from": "recovery", "to": "join"},
+    {"from": "join", "to": "synthesize"}
+  ]
+}

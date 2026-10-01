@@ -1,12 +1,16 @@
 import { describe, expect, it } from 'vitest';
-import { graphColor } from './Timeline';
+import { assignGraphColors } from './graphColors';
 
 describe('timeline Graph colors', () => {
-  it('generates stable distinct colors from Graph names', () => {
-    expect(graphColor('assistant')).toBe(graphColor('assistant'));
-    expect(graphColor('wecom-assistant')).not.toBe(graphColor('weekly-work-report'));
+  it('assigns a deterministic, perceptually spread palette to the current Graph set', () => {
+    const names = ['deep-academic-research', 'rsi', 'wecom-assistant', 'weekly-work-report'];
+    const colors = assignGraphColors(names);
+    expect(colors).toEqual(assignGraphColors([...names].reverse()));
+    expect(new Set(Object.values(colors)).size).toBe(names.length);
+    expect(colors.rsi).not.toBe(colors['deep-academic-research']);
     const hue = (color: string) => Number(color.match(/^hsl\((\d+\.\d+)/)?.[1]);
-    expect(Math.abs(hue(graphColor('wecom-assistant')) - hue(graphColor('weekly-work-report')))).toBeGreaterThan(30);
-    expect(graphColor('assistant')).toMatch(/^hsl\(\d+\.\d{2}, 52%, 42%\)$/);
+    expect(Math.abs(hue(colors.rsi) - hue(colors['deep-academic-research']))).toBeGreaterThan(30);
+    expect(assignGraphColors([])).toEqual({});
+    expect(assignGraphColors(['same', 'same'])).toEqual(assignGraphColors(['same']));
   });
 });

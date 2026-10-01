@@ -7,6 +7,8 @@ from datetime import datetime, timedelta
 from http.client import HTTPConnection
 from http.server import ThreadingHTTPServer
 
+import pytest
+
 from anchor.serve import Handler, Scheduler
 from anchor.runtime.secrets import load_dotenv
 from anchor.simple.run import _config, _secret
@@ -34,6 +36,51 @@ def test_env_model_is_single_source_over_runtime_models(tmp_path, monkeypatch):
     assert profile["base_url"] == "https://llm.example/v1"
     assert profile["model"] == "unified-model"
     assert _secret(None, profile) == "one-secret"
+
+
+def test_model_aliases_select_names_without_changing_default_or_credentials(tmp_path, monkeypatch):
+    monkeypatch.setenv("ANCHOR_MODEL_URL", "https://llm.example/v1")
+    monkeypatch.setenv("ANCHOR_MODEL_API_KEY", "one-secret")
+    monkeypatch.setenv("ANCHOR_MODEL_NAME", "fast")
+    monkeypatch.setenv("ANCHOR_MODEL_ALIASES", '{"models.review":"strong"}')
+    config = tmp_path / "runtime.json"
+    config.write_text("{}")
+    models, secret_file = _config(config)
+    assert models["models.default"]["model"] == "fast"
+    assert models["models.review"]["model"] == "strong"
+    assert models["models.review"]["base_url"] == models["models.default"]["base_url"]
+    assert _secret(secret_file, models["models.review"]) == "one-secret"
+    assert "one-secret" not in json.dumps(models)
+    # Legacy graphs such as models.academic still use the environment default.
+    assert models["models.default"]["fallback_for_unknown_refs"] is True
+    assert not models["models.review"].get("fallback_for_unknown_refs")
+    from anchor.simple import run as runner
+    from anchor.simple.graph import load
+    graph_path = tmp_path / "graph.json"
+    graph_path.write_text(json.dumps({
+        "agents": {"legacy": {"model": "models.academic"}, "review": {"model": "models.review"}},
+        "nodes": [{"id": "legacy", "agent": "legacy"}, {"id": "review", "agent": "review"}],
+        "edges": [{"from": "legacy", "to": "review"}],
+    }))
+    graph = load(graph_path)
+    selected = []
+    monkeypatch.setattr(runner, "model_for", lambda profile, **kwargs: selected.append(profile["model"]))
+    monkeypatch.setattr(runner, "Node", lambda **kwargs: kwargs)
+    for name in ("legacy", "review"):
+        runner._agent_for(graph, name, tmp_path / name, models, secret_file, config)
+    assert selected == ["fast", "strong"]
+
+
+@pytest.mark.parametrize("aliases", ['[]', '{"models.default":"other"}',
+                                    '{"wrong":"strong"}', '{"models.review":""}'])
+def test_invalid_model_aliases_fail_without_replacing_default(tmp_path, monkeypatch, aliases):
+    monkeypatch.setenv("ANCHOR_MODEL_URL", "https://llm.example/v1")
+    monkeypatch.setenv("ANCHOR_MODEL_API_KEY", "one-secret")
+    monkeypatch.setenv("ANCHOR_MODEL_ALIASES", aliases)
+    config = tmp_path / "runtime.json"
+    config.write_text("{}")
+    with pytest.raises(ValueError):
+        _config(config)
 
 
 def test_webhook_requires_a_key_and_rejects_busy_graph_without_a_run(tmp_path, monkeypatch):

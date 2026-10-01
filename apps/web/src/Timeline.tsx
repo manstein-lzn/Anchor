@@ -1,8 +1,9 @@
-import { useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties } from 'react';
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { Activity, ArrowUpRight, CalendarDays, ChevronLeft, ChevronRight, Clock3, Plus, Trash2 } from 'lucide-react';
 import type { OurRun, OurRunDetail, Schedule, TimelineData, TimelineItem } from './model';
 import { api } from './api';
 import { Modal } from './ui';
+import { assignGraphColors } from './graphColors';
 
 const day = (value: Date) => `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, '0')}-${String(value.getDate()).padStart(2, '0')}`;
 const addDays = (date: Date, amount: number) => { const result = new Date(date); result.setDate(result.getDate() + amount); return result; };
@@ -19,24 +20,6 @@ const duration = (ms: number) => {
   if (seconds < 60) return `${seconds} 秒`;
   const minutes = Math.floor(seconds / 60);
   return minutes < 60 ? `${minutes} 分钟` : `${Math.floor(minutes / 60)} 小时 ${minutes % 60} 分`;
-};
-export const graphColor = (name: string) => {
-  // Use the full 32-bit hash as a hue instead of indexing a short palette. This keeps a Graph's
-  // color stable across refreshes while avoiding collisions such as `assistant` and `weekly-report`
-  // landing in the same eight-color slot.
-  let hash = 2166136261;
-  for (const char of name) hash = Math.imul(hash ^ char.charCodeAt(0), 16777619) >>> 0;
-  // Avalanche the final value so names with a shared prefix/suffix don't remain adjacent in hue.
-  hash ^= hash >>> 16;
-  hash = Math.imul(hash, 0x85ebca6b) >>> 0;
-  hash ^= hash >>> 13;
-  hash = Math.imul(hash, 0xc2b2ae35) >>> 0;
-  hash ^= hash >>> 16;
-  const hue = (hash / 0x100000000) * 360;
-  // Use the comma form for compatibility with older embedded/enterprise browsers. If a browser
-  // rejects the newer space-separated HSL syntax, the custom property falls back to one default
-  // color and makes otherwise distinct Graphs look identical.
-  return `hsl(${hue.toFixed(2)}, 52%, 42%)`;
 };
 const runStatus = (run: OurRun) => run.running ? 'running' : run.status;
 const needsAttention = (status: string) => ['failed', 'interrupted', 'uncertain'].includes(status) || status.startsWith('missed_');
@@ -65,8 +48,8 @@ const placeEntries = (items: Entry[], date: Date): PlacedEntry[] => {
   });
 };
 
-export function Timeline({ data, graphs, page, onPage, onSelect, onRefresh, problem = '' }: {
-  data: TimelineData | null; graphs: string[]; page: number; onPage: (page: number) => void;
+export function Timeline({ data, graphs, graphColors: sharedGraphColors, page, onPage, onSelect, onRefresh, problem = '' }: {
+  data: TimelineData | null; graphs: string[]; graphColors?: Record<string, string>; page: number; onPage: (page: number) => void;
   onSelect: (run: OurRun) => void; onRefresh: () => void; problem?: string;
 }) {
   const [graphFilter, setGraphFilter] = useState('');
@@ -90,6 +73,12 @@ export function Timeline({ data, graphs, page, onPage, onSelect, onRefresh, prob
   const [error, setError] = useState('');
   const [pending, setPending] = useState(false);
   const [now, setNow] = useState(Date.now());
+  const graphColors = useMemo(() => sharedGraphColors ?? assignGraphColors([
+    ...graphs,
+    ...(data?.runs ?? []).map(run => run.graph),
+    ...(data?.scheduled ?? []).map(plan => plan.graph),
+    ...(data?.schedules ?? []).map(schedule => schedule.graph),
+  ]), [sharedGraphColors, graphs, data?.runs, data?.scheduled, data?.schedules]);
   const surface = useRef<HTMLDivElement>(null);
   const positioned = useRef('');
   const requestedFocus = useRef<'today' | 'latest'>('today');
@@ -254,7 +243,7 @@ export function Timeline({ data, graphs, page, onPage, onSelect, onRefresh, prob
                   const left = (entry.start - +row.date) / dayLength * 100;
                   const width = (entry.end - entry.start) / dayLength * 100;
                   return <button key={entry.id} className={`timeline-entry ${entry.run ? 'timeline-run' : 'timeline-plan'} ${entry.status}`}
-                    style={{ top: entry.lane * 57 + (entry.run ? 37 : 36), left: `${left}%`, width: entry.run ? `${width}%` : undefined, '--graph-color': graphColor(entry.graph) } as CSSProperties}
+                    style={{ top: entry.lane * 57 + (entry.run ? 37 : 36), left: `${left}%`, width: entry.run ? `${width}%` : undefined, '--graph-color': graphColors[entry.graph] } as CSSProperties}
                     aria-label={`${entry.graph}，${statusText(entry.status)}，${clockText(entry.start)}`}
                     aria-describedby={hint?.anchor.dataset.hintKey === `${day(row.date)}:${entry.id}` ? hintId : undefined}
                     data-hint-key={`${day(row.date)}:${entry.id}`}
@@ -276,7 +265,7 @@ export function Timeline({ data, graphs, page, onPage, onSelect, onRefresh, prob
     </section>
 
     <div ref={tooltip} id={hintId} popover="manual" role="tooltip" className="timeline-entry-label"
-      style={{ '--graph-color': hint ? graphColor(hint.entry.graph) : undefined } as CSSProperties}
+      style={{ '--graph-color': hint ? graphColors[hint.entry.graph] : undefined } as CSSProperties}
       onMouseLeave={event => { if (!hint?.anchor.contains(event.relatedTarget as Node | null)) setHint(null); }}>
       {hint && <><strong>{hint.entry.graph}</strong><small>{sourceText(hint.entry.source)} · {clockText(hint.entry.start)} · {statusText(hint.entry.status)}{hint.entry.run ? ` · ${duration(hint.entry.end - hint.entry.start)}` : ''}</small></>}
     </div>

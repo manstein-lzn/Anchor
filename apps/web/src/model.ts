@@ -9,6 +9,7 @@
 import type { Edge, Node, XYPosition } from '@xyflow/react';
 import type { Definition } from './graph';
 import { label } from './execution';
+import { isNodeActive, pairedNodes, parallelControl } from './parallel';
 
 /** An agent: a model loop. `reads`/`writes` are the files it expects and the files it promises,
  *  which the loader checks against what the graph can actually hand it. */
@@ -20,17 +21,18 @@ export type OurAgent = {
   writes?: string[];
 };
 
-/** An op: one command and no model at all, whose **exit code is the verdict**. Everything else about
- *  it is what it is for an agent — the same sandbox, the same workspace, a commit per pass, the same
- *  `reads`/`writes` — so the canvas draws it as a node like any other and only says which kind it is. */
+/** An Op performs exactly one command, independent call, or same-Run parallel control. */
 export type OurOp = {
-  run?: string;
-  call?: GraphCall;
   reads?: string[];
   writes?: string[];
   network?: boolean;
   wall_time_limit_seconds?: number;
-};
+} & (
+  | { run: string; call?: never; fanout?: never; join?: never }
+  | { run?: never; call: GraphCall; fanout?: never; join?: never }
+  | { run?: never; call?: never; fanout: { join: string }; join?: never }
+  | { run?: never; call?: never; fanout?: never; join: Record<string, never> }
+);
 
 export type GraphCall = {
   graph: string; mode: 'wait' | 'detach'; input?: Record<string, unknown>;
@@ -111,6 +113,8 @@ export type OurRunState = {
   status: string;
   updated: string;
   cursor: { node: string; pass: number; dir: string } | null;
+  active?: Record<string, { node: string; pass: number; run?: number; dir: string }>;
+  parallel?: { fanout: string; join: string; invocation: number; [key: string]: unknown } | null;
   passes: Record<string, number>;
   decided: Record<string, [boolean, number]>;
   nodes: Record<string, OurNodeResult>;
@@ -177,6 +181,7 @@ export type FlowNode = Node<{
   name: string; kind: string; state: string; detail: string;
   plugins?: string[];
   call?: GraphCall;
+  control?: 'fanout' | 'join';
   /** Which of the two it is, so a component can choose an icon without parsing the label. */
   nodeKind: 'agent' | 'op' | 'subgraph';
   attempt?: number; statusLabel?: string;
@@ -206,7 +211,7 @@ function nodeState(nodeId: string, graph: OurGraph, state: OurRunState | null): 
   const node = definition.nodes.find(item => item.id === nodeId)!;
   const result = state?.nodes[nodeId];
   const passes = state?.passes[nodeId] ?? 0;
-  const running = state?.cursor?.node === nodeId;
+  const running = isNodeActive(state, nodeId);
   const skipped = state?.skipped?.includes(nodeId) ?? false;
 
   const status = running ? 'running'
@@ -234,6 +239,7 @@ function nodeState(nodeId: string, graph: OurGraph, state: OurRunState | null): 
       detail,
       nodeKind: kindOf(graph.nodes.find(item => item.id === nodeId)!),
       plugins: graph.nodes.find(item => item.id === nodeId)?.plugins,
+      control: parallelControl(graph, nodeId),
       call: graph.ops?.[graph.nodes.find(item => item.id === nodeId)?.op ?? '']?.call,
       // The canvas renders `attempt + 1` as "第 N 次执行", so zero means the first pass.
       attempt: passes ? passes - 1 : undefined,
@@ -246,6 +252,8 @@ function nodeKindLabel(graph: OurGraph, nodeId: string): string {
   const node = graph.nodes.find(item => item.id === nodeId);
   if (!node) return '';
   if (node.graph) return '本次运行内执行';
+  const control = parallelControl(graph, nodeId);
+  if (control) return `${control === 'fanout' ? '收束于' : '展开自'} ${pairedNodes(graph, nodeId).join('、') || '未配对'}`;
   const call = graph.ops?.[node.op ?? '']?.call;
   if (call) return `${call.graph || '未选择目标'} · ${callModeLabel(call.mode)}`;
   if (node.op) return `${node.op} · op`;
@@ -286,7 +294,7 @@ export function toFlowEdges(graph: OurGraph, state: OurRunState | null): Edge[] 
       target: edge.to,
       type: 'routed',
       style,
-      animated: Boolean(selected) && state?.cursor?.node === edge.to,
+      animated: Boolean(selected) && isNodeActive(state, edge.to),
     } as Edge;
   });
 }

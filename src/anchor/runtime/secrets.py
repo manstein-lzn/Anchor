@@ -43,6 +43,23 @@ def env_model_profile() -> dict | None:
             "context_window": int(os.environ.get("ANCHOR_MODEL_CONTEXT_WINDOW", "0") or 0)}
 
 
+def env_model_profiles() -> dict[str, dict]:
+    """Resolve optional model-name aliases on the same operator-configured endpoint."""
+    default = env_model_profile()
+    if default is None:
+        return {}
+    aliases = json.loads(os.environ.get("ANCHOR_MODEL_ALIASES", "{}") or "{}")
+    if not isinstance(aliases, dict):
+        raise ValueError("ANCHOR_MODEL_ALIASES must be a JSON object")
+    profiles = {default["ref"]: {**default, "fallback_for_unknown_refs": True}}
+    for ref, model in aliases.items():
+        if (not isinstance(ref, str) or not ref.startswith("models.") or ref == "models.default"
+                or not isinstance(model, str) or not model.strip()):
+            raise ValueError("model aliases require a non-default models.* name and a model name")
+        profiles[ref] = {**default, "ref": ref, "model": model.strip()}
+    return profiles
+
+
 class SecretProvider(Protocol):
     def get(self, name: str) -> str: ...
 

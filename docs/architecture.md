@@ -10,11 +10,11 @@ Graph 是一个可编辑的 JSON 文件，包含角色 `agents`、命令定义 `
 | --- | --- |
 | Agent 角色 | 定义模型、指令、网络权限以及读写声明；节点的 `with` 补充本次职责 |
 | Agent Node | 在自己的工作区内，由模型使用工具并返回结构化结果完成任务 |
-| OpNode | 执行沙箱命令，或通过服务内置的 `call` 操作启动独立 Graph Run |
+| OpNode | 执行沙箱命令、独立 Graph 调用，或同一 Run 内的配对 fanout/join 控制 |
 | Edge | 表达依赖和路由；输入记录关联上游节点及 commit |
 | Graph Run | 保存一次运行的调度状态、各节点工作区、执行轮次与记录 |
 
-`Op` 定义恰好包含 `run` 沙箱命令或 `call` 结构化工作流调用。Plugin 是独立的共享能力资源，AgentNode 通过节点的 `plugins` 列表直接引用；角色没有 Plugin 继承规则，OpNode 也不挂载 Plugin。
+`Op` 定义恰好包含 `run` 沙箱命令、`call` 结构化工作流调用、`fanout: {"join": "节点 ID"}` 或 `join: {}` 中的一种。Plugin 是独立的共享能力资源，AgentNode 通过节点的 `plugins` 列表直接引用；角色没有 Plugin 继承规则，OpNode 也不挂载 Plugin。
 
 ## 文件系统
 
@@ -86,6 +86,23 @@ WebUI / anchor-graph
 
 Graph 通过节点契约交付任务、接收结果，不直接解释 harness 的内部消息或检查点。mini-swe-agent 已移除。当前依赖的唯一配置来源是 [pyproject.toml](../pyproject.toml)，不在文档另维护一份“当前版本矩阵”。历史迁移验证保存在归档中。
 
+## 架构审视与演进方向（2026-10-01）
+
+当前实现已有有价值的核心边界：Graph 定义与 Run 记录分开；Runner 经 `NodeRequest` / `NodeOutcome` 和 `simple/node_bridge.py` 调用节点；Agent 与 Op 执行共用沙箱和运行结果契约；Session、Turn、Library、Graph Run 分别有自己的持久化或资产归属。新功能应延续这些边界，而不是另建执行链。
+
+静态代码审视也发现两处边界压力，作为后续渐进治理方向，不表示本次已重构：
+
+- `src/anchor/serve.py` 同时放置 `Scheduler`、请求处理器、HTTP 路由、Session/Turn 用例、计划和响应处理。`graph_calls.py` 及 `channel/` 中的部分流程还直接访问 Scheduler 的锁、可变状态和内部运行方法。入口协议、应用协调与运行时状态因此耦合在一起。
+- `src/anchor/simple/run.py` 同时承载恢复/状态处理、任务和输入组装、节点执行准备及主调度循环。Call、fanout/join 等扩展需要接入同一 Runner 主路径，变化容易集中到它。
+
+目前已有 `anchor-graph` 命令，可不启动 Web 服务而单独执行一个 workspace；这证明了单进程 Graph 执行路径，但还不是干净的独立分发单元。该入口默认从 Anchor 源码根加载 `.env` 和 `.local/runtime.json`，Python 包的必装依赖也包含研究/PDF/HTML 能力；目前没有 Graph 与精确 Plugin 资源闭包的 bundle 格式或 Runtime 兼容清单。因此“可单图运行”与“只安装这个 Graph 所需的最小内容”是两个不同状态。
+
+演进应先收紧跨模块契约，再按不变量逐步抽取。服务侧的目标是让 HTTP、CLI 和通道作为入口适配器调用应用用例，通道与 Graph Call 通过明确的 Run/Session 能力接口协调，而不直接操作 Scheduler 内部状态。Runner 侧的目标是保留单 Run 的唯一协调者和现有恢复语义，同时把节点执行配置/分发从主调度循环中隔离。只有在调用关系和验收边界明确后才移动代码；不为了行数拆文件，也不做一次性服务层或 Runner 重写。
+
+独立交付的目标设计见 [产品与系统架构](product-architecture.md) 的“可独立交付的 Graph 执行单元”。它要求平台服务和精简部署共用 Runner 与 Run 格式；当前代码尚未实现依赖裁剪或 Graph/Plugin 打包。
+
+后续跨模块设计依据见 [产品与系统架构的“新能力放置规则”](product-architecture.md#架构指导新能力放在哪里)。该目标设计与本页记录的当前实现分开维护。
+
 ## 工作与记录的边界
 
 每次新运行产生独立的运行目录，其中每个节点有自己的工作区与 Git 仓库。同一运行的反馈循环复用该节点工作区；新一轮对话通过文件和输入延续工作。不同运行不会自动继承成果。
@@ -140,7 +157,7 @@ Pilot 已启用框架压缩：默认 `SlidingWindowCompaction`（200 条消息�
 
 以下是现状说明，不是另一份升级待办：
 
-- 服务内同一图一次只运行一个任务，不同图可同时运行；图内节点目前串行调度。CLI 不参与服务内互斥。
+- 手动/定时入口按 Graph 拒绝忙碌时的新任务；独立调用和不同通道会话允许同图并发。单个 Run 在配对 fanout/join 区域内并行执行分支，其余节点串行推进。CLI 不参与服务内互斥。
 - 图拓扑和节点身份静态；新运行不会以已有 commit 自动命中结果缓存。子图可展开，WebUI 尚不能进入子图内部编辑。
 - 调度仍读取当前图。带 Plugin 的运行会核对展开定义、子图轮次配置与资源摘要，变化时拒绝恢复并保留旧记录；无 Plugin 的旧路径继续沿用原恢复方式。恢复前不要修改图结构。
 - 不能判断副作用是否发生时，运行会报告不确定或失败，不保证任意命令可以自动安全重跑，也不保证 exactly-once。
@@ -160,7 +177,19 @@ Pilot 已启用框架压缩：默认 `SlidingWindowCompaction`（200 条消息�
 `weekly-work-report` 的采集、理解、写作和评审仍是普通业务 Graph；通过评审后的 Docmost 同步节点挂载 `docmost` Plugin。Graph 工作区中的 `local-inputs.json` 由本机操作员按节点 ID 授予具名只读路径，挂载到 `/local-inputs/<name>`；Graph JSON/API 本身无权增加该授权。采集 Op 读取两个 sessions 目录和普通采集脚本，将当次窗口的证据交给后续节点。授权路径随 Run 保存，恢复时授权改变则拒绝继续。图按程序采集→项目理解与选题→写作→读者视角独立评审→门禁分流运行；表达问题退回写作，项目理解与判断问题退回理解。证据缺口通过限定结论处理，不设 blocked 分支。正文围绕项目实质变化，来源单独保留，评审先检查可理解性再核查关键事实。四项评审通过、阻断问题解决且评审对应当前稿件 commit 后才组装 Markdown、来源附录和 SVG；Docmost 发布节点通过附件接口上传 SVG 并插入页面，失败时不更新正文；使用方式见 [每周工作报告](weekly-work-report.md)，真实验收以台账 A21 为准。图片下载保留 attachment，并提供图片 MIME 与隔离 CSP，使 Markdown 图片预览可用且不开放脚本或外部资源执行。
 
 
+## 本机 RSI Graph
+
+仓库提供 [rsi Graph](../examples/graphs/rsi.json) 和 [安装脚本](../scripts/setup_rsi.py)。它复用同一计划存储和 Graph 反馈机制：`collect → audit-context → audit-fanout → 五个专项分支 → audit-join → analyze → review-fanout → 两个独立评审 → review-join → review → gate → publish`。五个领域为 Run、架构代码、Graph、Plugin、依赖/社区；最后一个分支先执行联网 research Op，再执行 dependency-audit。整个流程属于同一个 Run。gate 区分修改综合稿（回 analyze）与重新专项审查（回 audit-context 保存反馈，再 fanout），不设固定模型请求或 Graph 轮数上限。 review 是校验评审 commit 并合并意见的普通 Op，事实/研究与方案/验收/回滚分工，任一未通过不能被另一方覆盖。
+
+collect 动态发现可授权源码与未忽略新文件、全部部署 Graph、已安装 Plugin/工具/Skill/MCP/通道资源和全历史 Run 索引。本周 Run 及按需历史投影包含错误、恢复和 commit/输入关系；不会采集完整聊天/trace/推理。领域索引引导重点读取，源码及 Plugin 证据保留哈希与脱敏标记。Python 字面量和注释脱敏保留可解析语法，目录排除、二进制和授权缺失都有覆盖记录。历史提案从成功 publish 的记录 commit 读取，模型先读简洁 previous-index，再按 ID 回查完整历史。
+
+research 从本次冻结 manifest、可选/开发依赖和包注册表项目链接发现目标，公开 API 主机限定 GitHub/PyPI/npm；记录版本、发布说明与 issue 信号以及限流/失败，未覆盖 Discussions/私有/非 GitHub 社区，不等同于穷尽互联网。Python 清单来自采集解释器，不冒充服务环境。专项输出 findings 与实际读取/未覆盖范围；综合以分支结论为起点，按需追溯证据。gate 检查当前分析评审 commit、join 分支 commit、证据可读取、提案 ID 唯一与历史连续性；这些机械检查不证明报告语义正确。结果写入 Run 的 publish/，包含 audit-manifest.json、报告、提案、来源、评审和门禁。
+
+该 Graph 不写源码、不修改 Graph/Plugin、不重放历史副作用，也不把计划或模型回答当成完成事实。源码和数据根通过 Graph 工作区的 `local-inputs.json` 由操作员只读授权；网络响应有主机白名单、超时和大小限制，失败会进入证据文件。当前实现和真实 provider/长期递归效果的验证状态见 [RSI Graph](rsi.md) 和开发台账。
+
 ## 独立 Graph 调用
+
+同 Run 的局部并行与独立调用分别表达，具体见下节及 [组合设计](graph-composition-design.md)。
 
 保留文件内子图展开，同一 Run 内执行；新增 `ops.<name>.call` 在普通 OpNode 上建立独立 Run。`wait` 等待成功并复制显式选择的结果，`detach` 在持久接纳后返回，子 Run 继续独立运行。多来源调用同一个 Graph 可并发；手动/定时入口原有繁忙拒绝规则保留。
 
@@ -171,3 +200,13 @@ Pilot 已启用框架压缩：默认 `SlidingWindowCompaction`（200 条消息�
 `call.session` 是操作员在定义中选择的已有通道会话。后台 Graph 与该会话用户消息串行，后台不能打断聊天；用户新消息可使后台保留原 Run 并让出执行。恢复完成后由既有网关以稳定发送 ID 投递正文，网关沿用原账本处理 ACK 去重和未知投递结果。后台模型完成不等于消息已投递，投递失败会使等待调用失败。完整调用祖先中的会话身份约束跨用户访问，输入参数不能授予会话权限。同一 Plugin 通道可由多个 Graph 挂载，服务只启动一个平台网关。
 
 `/graph-relations` 从已保存定义派生关系；`/graphs` 提供全部 `active_runs`；Run 详情提供逐轮 `calls` 和 `trigger` 来源；`/channel-sessions` 提供已认证操作员可选的通道会话。历史调用引用和活动运行参与编辑/删除保护，不另建关系数据库。
+
+## 同一 Run 内的局部并行
+
+`fanout` Op 只声明配对 join 节点，普通边声明至少两条独立串行分支。分支中的 Agent/Op 属于同一 Run，各自使用既有工作区、沙箱、Harness 记录和 Git 提交。首期拒绝区域内分支选择/循环、嵌套并行、交叉边、外部进入分支及重叠工作区；区域外的路由和整体反馈循环继续有效。
+
+原调度线程准备输入、保存活动执行身份、接收完成结果及提交状态；工作线程仅调用原 Node 执行接口。`run.json.active` 保存活动节点，`parallel` 保存当前 fanout/join、展开轮次和本轮完成 commit。全部分支成功后 join 写 `join.json`，绑定每个分支的节点、commit、摘要和文件；下游沿用只读输入及祖先快照读取分支产物。分支失败取消同伴且不放行 join；暂停等待当前活动节点结算，停止请求取消并等待活动执行退出。已发生的外部操作不回滚。
+
+恢复保留同一展开轮次和节点执行身份，先读取原生 completion fact，已完成节点不重复执行；命令结果未知仍按原有 Uncertain 规则处理。带并行区域的 Graph 用 `control/.parallel-nodes/<身份摘要>/` 与 `.parallel-traces/<节点摘要>/<执行轮次>.trace.jsonl` 避免名称/轮次冲突；独立调用仍使用 `.graph-calls`。API trace 键使用 `[节点ID,执行轮次]` 的 JSON 字符串，前端兼容旧串行 trace 键。会话停止保留未完成分支文件快照供下一 Run `/previous` 使用；历史步骤路径按各次 Run 自己的 Graph 快照解析。旧 Run 缺省新字段，无需迁移。
+
+WebUI 的“添加节点 → 并行分支”生成配对控制节点及两个 Agent 分支，画布展示配对关系和多个活动节点。示例见 [parallel-audit.json](../examples/graphs/parallel-audit.json)。已取得真实 DeepSeek 并行 Agent、join、综合文件的运行证据，以及真实后端浏览器和进程退出恢复验证；具体测试与部署边界以台账 A31 为准。

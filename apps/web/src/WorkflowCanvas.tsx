@@ -4,7 +4,7 @@ import {
   getViewportForBounds, useNodesState, useReactFlow, useUpdateNodeInternals,
   type Edge, type Node, type NodeProps,
 } from '@xyflow/react';
-import { Bot, Layers, Terminal, Workflow } from 'lucide-react';
+import { Bot, GitFork, GitMerge, Layers, Terminal, Workflow } from 'lucide-react';
 import { asDefinition, toFlowEdges, toFlowNodes, type GraphCall, type OurGraph, type OurRunState } from './model';
 import { layoutWorkflow, NODE_HEIGHT, NODE_WIDTH, type Layout, type Port } from './graph';
 import { RoutedEdge } from './RoutedEdge';
@@ -12,16 +12,16 @@ import { RoutedEdge } from './RoutedEdge';
 type WorkflowNode = Node<{
   name: string; kind: string; nodeKind: 'agent' | 'op' | 'subgraph'; entry: boolean; terminal: boolean;
   state: string; statusLabel?: string; attempt?: number; ports: Port[]; editing: boolean;
-  plugins?: string[]; call?: GraphCall; targetMissing?: boolean; onOpenTarget?: (target: string, node: string) => void;
+  control?: 'fanout' | 'join'; plugins?: string[]; call?: GraphCall; targetMissing?: boolean; onOpenTarget?: (target: string, node: string) => void;
 }, 'workflow'>;
 
 function WorkflowNodeView({ id, data, selected }: NodeProps<WorkflowNode>) {
   const update = useUpdateNodeInternals();
   useEffect(() => { update(id); }, [id, data.ports, update]);
-  const Icon = data.call ? Workflow : data.nodeKind === 'op' ? Terminal : data.nodeKind === 'subgraph' ? Layers : Bot;
+  const Icon = data.control === 'fanout' ? GitFork : data.control === 'join' ? GitMerge : data.call ? Workflow : data.nodeKind === 'op' ? Terminal : data.nodeKind === 'subgraph' ? Layers : Bot;
   return <div className={`workflow-node ${data.editing ? 'graph-node' : 'execution-node'} kind-${data.nodeKind} state-${data.state} ${selected ? 'selected' : ''}`}>
     <div className="workflow-node-heading"><Icon size={14} />
-      <span>{data.call ? '调用工作流' : data.nodeKind === 'op' ? '命令' : data.nodeKind === 'subgraph' ? '子图' : '智能体'}</span>
+      <span>{data.control === 'fanout' ? '并行展开' : data.control === 'join' ? '等待收束' : data.call ? '调用工作流' : data.nodeKind === 'op' ? '命令' : data.nodeKind === 'subgraph' ? '子图' : '智能体'}</span>
       {data.entry ? <span className="entry-tag">入口</span> : data.terminal && <span className="entry-tag">终点</span>}
       {!!data.plugins?.length && <span className="entry-tag" title={data.plugins.join(', ')}
         aria-label={`挂载 ${data.plugins.length} 个 Plugin`}>Plugin {data.plugins.length}</span>}
@@ -30,6 +30,7 @@ function WorkflowNodeView({ id, data, selected }: NodeProps<WorkflowNode>) {
       {data.call.graph || '未选择目标'} {data.targetMissing ? '· 引用失效' : '↗'}</button> : data.name}</strong>
     <div className="workflow-node-footer" title={data.kind}>
       {data.editing ? data.call ? `独立运行 · ${data.call.mode === 'wait' ? '等待完成' : '启动后继续'}` : data.kind : <><span>{data.statusLabel || ({ running: '执行中', completed: '已完成', pending: '尚未执行', failed: '失败', skipped: '未选中' }[data.state] ?? data.state)}</span>
+        {data.control && <span title={data.kind}>{data.kind}</span>}
         {data.attempt !== undefined && <span>第 {data.attempt + 1} 次</span>}</>}
     </div>
     {data.ports.map(port => <Handle key={port.id} id={port.id} type={port.type}

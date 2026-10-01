@@ -1059,6 +1059,15 @@ class Scheduler:
             lines = trace.read_text(encoding="utf-8").splitlines()[-TAIL_LINES:]
             traces[trace.name.removesuffix(".trace.jsonl")] = [message for line in lines
                                                                  for message in _readable(line)]
+        # Parallel executions use collision-free paths; the API key binds full node ID and invocation.
+        for node, count in state.get('runs', {}).items():
+            folder = base / '.parallel-traces' / hashlib.sha256(node.encode()).hexdigest()
+            for invocation in range(1, count + 1):
+                trace = folder / f'{invocation}.trace.jsonl'
+                if trace.is_file():
+                    lines = trace.read_text(encoding='utf-8').splitlines()[-TAIL_LINES:]
+                    key = json.dumps([node, invocation], ensure_ascii=False, separators=(',', ':'))
+                    traces[key] = [message for line in lines for message in _readable(line)]
         return {"graph": workspace.name, "run": run_id, "state": state, "traces": traces,
                 "calls": self.graph_calls.projections(base),
                 "plugins": (json.loads((base / "plugins.json").read_text(encoding="utf-8"))

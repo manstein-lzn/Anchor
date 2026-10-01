@@ -142,6 +142,7 @@ Anchor 当前面向本机单服务进程。它不承诺任意外部副作用 exa
 | [当前架构](docs/architecture.md) | 开发者 | Graph、Run、工作区、Git、沙箱和当前边界 |
 | [产品与系统架构](docs/product-architecture.md) | 设计和规划 | 产品对象、原则和后续方向 |
 | [开发台账](docs/pilot-development-plan.md) | 贡献者 | 阶段、验收矩阵和证据记录 |
+| [RSI Graph](docs/rsi.md) | 维护者 | 每周运行审查、公开生态取证和递归改进提案 |
 
 ## 开发
 
