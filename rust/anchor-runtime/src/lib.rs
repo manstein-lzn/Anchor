@@ -15,6 +15,7 @@ use std::{
     time::Duration,
 };
 
+use futures::StreamExt;
 use rig_agent::{
     core::{
         DynModel,
@@ -146,6 +147,15 @@ pub trait CompletionPort: Send + Sync {
     >;
 }
 
+/// Optional streaming extension. The complete response is still returned to
+/// the AgentRun only after the stream reaches its provider finish event.
+pub trait StreamingCompletionPort: CompletionPort {
+    fn stream(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<rig_core::streaming::CompletionStream, Box<rig_agent::core::error::ProviderError>>;
+}
+
 /// Adapter for any Rig completion model.
 #[derive(Clone)]
 pub struct RigCompletionPort {
@@ -210,6 +220,82 @@ impl CompletionPort for RigCompletionPort {
         >,
     > {
         Box::pin(self.model.call(request))
+    }
+}
+
+impl StreamingCompletionPort for RigCompletionPort {
+    fn stream(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<rig_core::streaming::CompletionStream, Box<rig_agent::core::error::ProviderError>>
+    {
+        self.model.stream(request).map_err(Box::new)
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum StreamingError {
+    #[error("stream provider failed: {0}")]
+    Provider(Box<rig_agent::core::error::ProviderError>),
+    #[error("stream cancelled by host")]
+    Cancelled,
+    #[error("stream timed out after {0:?}")]
+    Timeout(Duration),
+}
+
+impl From<rig_agent::core::error::ProviderError> for StreamingError {
+    fn from(error: rig_agent::core::error::ProviderError) -> Self {
+        Self::Provider(Box::new(error))
+    }
+}
+
+/// Consume one provider stream while exposing normalized Rig events to the
+/// host. Dropping or cancelling before `finish` leaves the caller's checkpoint
+/// pending; no partial response is committed to `AgentRun`.
+pub async fn stream_completion<P: StreamingCompletionPort>(
+    provider: &P,
+    request: CompletionRequest,
+    cancellation: &Cancellation,
+    timeout: Option<Duration>,
+    mut observe: impl FnMut(&rig_core::streaming::StreamEvent),
+) -> Result<CompletionResponse, StreamingError> {
+    let future = async {
+        let mut stream = provider.stream(request).map_err(|error| *error)?;
+        loop {
+            let Some(item) = stream.next().await else {
+                break;
+            };
+            match item? {
+                rig_core::streaming::Item::Event(event) => observe(&event),
+                rig_core::streaming::Item::Unknown(_) => {}
+            }
+            if cancellation.load(Ordering::Relaxed) {
+                return Err(StreamingError::Cancelled);
+            }
+        }
+        Ok(stream.finish().await?)
+    };
+    tokio::pin!(future);
+    let cancel = async {
+        while !cancellation.load(Ordering::Relaxed) {
+            tokio::task::yield_now().await;
+        }
+    };
+    tokio::pin!(cancel);
+    match timeout {
+        Some(timeout) => {
+            tokio::select! {
+                result = &mut future => result,
+                _ = &mut cancel => Err(StreamingError::Cancelled),
+                _ = tokio::time::sleep(timeout) => Err(StreamingError::Timeout(timeout)),
+            }
+        }
+        None => {
+            tokio::select! {
+                result = &mut future => result,
+                _ = &mut cancel => Err(StreamingError::Cancelled),
+            }
+        }
     }
 }
 

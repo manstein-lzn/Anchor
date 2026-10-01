@@ -9,7 +9,7 @@ use rig_agent::{
         schemars::JsonSchema,
     },
     run::{AgentRunStep, ModelTurn, ModelTurnOutcome},
-    test_utils::{MockAddTool, MockCompletionModel, MockTurn},
+    test_utils::{MockAddTool, MockCompletionModel, MockStreamEvent, MockTurn},
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -521,4 +521,51 @@ async fn node_executor_timeout_keeps_pending_model_step() {
         checkpoint.pending_step(),
         Some(AgentRunStep::CallModel { turn: 1, .. })
     ));
+}
+
+#[tokio::test]
+async fn streaming_port_emits_events_and_returns_complete_response() {
+    let model = MockCompletionModel::from_stream_turns([[
+        MockStreamEvent::text("{"),
+        MockStreamEvent::text("\"summary\":\"streamed\"}"),
+        MockStreamEvent::final_response_with_default_usage(),
+    ]]);
+    let port = super::RigCompletionPort::new(model.erase());
+    let cancellation = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut chunks = Vec::new();
+    let response = super::stream_completion(
+        &port,
+        rig_agent::core::completion::CompletionRequest::new("stream"),
+        &cancellation,
+        None,
+        |event| {
+            if let rig_agent::core::streaming::StreamEvent::Text { text, .. } = event {
+                chunks.push(text.clone());
+            }
+        },
+    )
+    .await
+    .expect("stream should finish");
+    assert_eq!(chunks.concat(), "{\"summary\":\"streamed\"}");
+    assert_eq!(response.choice.len(), 1);
+}
+
+#[tokio::test]
+async fn streaming_port_honors_cancellation_without_committing_response() {
+    let model = MockCompletionModel::from_stream_turns([[
+        MockStreamEvent::text("partial"),
+        MockStreamEvent::text("never committed"),
+    ]]);
+    let port = super::RigCompletionPort::new(model.erase());
+    let cancellation = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let error = super::stream_completion(
+        &port,
+        rig_agent::core::completion::CompletionRequest::new("stream"),
+        &cancellation,
+        None,
+        |_| {},
+    )
+    .await
+    .expect_err("cancelled stream");
+    assert!(matches!(error, super::StreamingError::Cancelled));
 }
