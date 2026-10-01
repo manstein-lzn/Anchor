@@ -151,6 +151,33 @@ impl RigCompletionPort {
         self.capabilities = capabilities;
         self
     }
+
+    /// Construct an OpenAI-compatible client from host-supplied credentials.
+    /// The credential is held only by Rig's live client and is never part of a
+    /// checkpoint. `wire_api` accepts `chat` or `responses`.
+    pub fn openai_compatible(
+        api_key: impl Into<rig_core::wire::Secret>,
+        base_url: impl Into<String>,
+        model: impl Into<String>,
+        wire_api: &str,
+    ) -> Result<Self, ProviderConfigError> {
+        let config =
+            rig_core::providers::openai::OpenAIConfig::new(api_key).with_base_url(base_url);
+        let client = config.client();
+        let model = model.into();
+        let model = match wire_api {
+            "chat" => client.chat(model).erase(),
+            "responses" => client.responses(model).erase(),
+            other => return Err(ProviderConfigError::UnsupportedWire(other.to_owned())),
+        };
+        Ok(Self::new(model))
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ProviderConfigError {
+    #[error("unsupported Rig provider wire `{0}`; expected `chat` or `responses`")]
+    UnsupportedWire(String),
 }
 
 impl CompletionPort for RigCompletionPort {

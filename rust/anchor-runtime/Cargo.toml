@@ -7,6 +7,7 @@ description = "Experimental Rust/Rig runtime kernel for Anchor"
 
 [dependencies]
 rig-agent.workspace = true
+rig-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
