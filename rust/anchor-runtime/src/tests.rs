@@ -179,6 +179,32 @@ impl super::ToolPort for EchoTools {
     }
 }
 
+struct FailingTools;
+
+impl super::ToolPort for FailingTools {
+    fn definitions(&self) -> Vec<rig_agent::core::completion::ToolDefinition> {
+        EchoTools.definitions()
+    }
+
+    fn call<'a>(
+        &'a self,
+        _name: &'a str,
+        _arguments: serde_json::Value,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        Vec<rig_agent::core::message::ToolResultContent>,
+                        super::ToolError,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async { Err(super::ToolError::Failed("fixture tool failure".to_owned())) })
+    }
+}
+
 #[tokio::test]
 async fn node_executor_drives_tools_and_validates_route() {
     let model = MockCompletionModel::from_turns([
@@ -386,5 +412,59 @@ async fn node_executor_persists_pending_model_before_provider_failure() {
     .await
     .expect("resume pending model");
     assert_eq!(outcome.submission, "recovered");
+    std::fs::remove_dir_all(root).expect("remove test directory");
+}
+
+#[tokio::test]
+async fn node_executor_persists_pending_tools_after_tool_failure() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("anchor-rig-tool-failure-{unique}"));
+    let store = super::FileCheckpointStore::new(&root);
+    let model = MockCompletionModel::from_turns([MockTurn::tool_call(
+        "echo-1",
+        "echo",
+        json!({"value":"fixture"}),
+    )]);
+    let port = super::RigCompletionPort::new(model.erase());
+    let mut checkpoint = AgentCheckpoint::start("review", 11, "use tool", 2);
+    let cancellation = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let error = super::NodeExecutor::execute_with_store(
+        &mut checkpoint,
+        &port,
+        &FailingTools,
+        &store,
+        "execution-11",
+        &cancellation,
+        &[],
+    )
+    .await
+    .expect_err("tool failure should be returned");
+    assert!(error.to_string().contains("tool"));
+    let mut restored = store
+        .load("execution-11", "review", 11)
+        .expect("load pending tools")
+        .expect("pending tool checkpoint exists");
+    assert!(matches!(
+        restored.pending_step(),
+        Some(AgentRunStep::CallTools { calls }) if calls.len() == 1
+    ));
+    let recovery_port = super::RigCompletionPort::new(
+        MockCompletionModel::text(r#"{"summary":"tool recovered"}"#).erase(),
+    );
+    let outcome = super::NodeExecutor::execute_with_store(
+        &mut restored,
+        &recovery_port,
+        &EchoTools,
+        &store,
+        "execution-11",
+        &cancellation,
+        &[],
+    )
+    .await
+    .expect("resume pending tools");
+    assert_eq!(outcome.submission, "tool recovered");
     std::fs::remove_dir_all(root).expect("remove test directory");
 }
