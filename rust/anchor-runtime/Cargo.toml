@@ -1,0 +1,17 @@
+[package]
+name = "anchor-runtime-rig"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Experimental Rust/Rig runtime kernel for Anchor"
+
+[dependencies]
+rig-agent.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+rig-agent = { workspace = true, features = ["test-utils"] }
+schemars = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

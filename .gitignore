@@ -11,6 +11,7 @@ __pycache__/
 *.sqlite
 dist/
 build/
+target/
 *.egg-info/
 node_modules/
 test-results/
