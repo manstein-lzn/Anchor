@@ -30,7 +30,7 @@
 | --- | --- | --- |
 | R0 事实与契约 | 本计划、架构边界、运行身份和错误/恢复术语 | 契约能映射现有 Node/Run/Sandbox；未决权限和持久化变化单独记录 |
 | R1 AgentNode Kernel | `NodeRequest`、`NodeOutcome`、`CompletionPort`、`ToolPort`、Rig `AgentRun` checkpoint、结构化 route | provider-free 工具循环、取消、非法 route、模型/工具边界恢复通过；真实单节点 smoke 通过 |
-| R2 持久化边界 | `CheckpointStore` port、原子文件适配器、版本与身份校验、边界保存约定 | 进行中：端口、原子文件保存、缺失/删除和路径拒绝已通过；重启续行接线、并发写入语义和宿主集成仍待做 |
+| R2 持久化边界 | `CheckpointStore` port、原子文件适配器、版本与身份校验、边界保存约定 | 进行中：端口、原子文件保存、pending model 失败后重启续行、缺失/删除和路径拒绝已通过；工具副作用恢复、并发写入语义和宿主集成仍待做 |
 | R3 Provider 与流式 | provider 配置适配、stream 事件、超时、取消传播、请求/响应观测 | 真实 provider 结构化结果、工具调用、流式、取消和 provider 错误均有证据 |
 | R4 Sandbox Adapter | Rust Sandbox port；Bubblewrap、只读输入、网络权限、命令超时和取消适配 | 真实命令在权限边界内运行；越权路径、网络和取消负向测试通过 |
 | R5 串行 Graph Runner | Graph 快照、Run 身份、普通节点路由、提交/恢复/停止 | 与现有 Python Graph 的代表性 Graph 结果和失败语义对照通过；平台与独立 CLI 共用 Runner |
@@ -41,7 +41,7 @@
 
 ## 当前进度和下一步
 
-R0 已由现有架构约束和本计划冻结；R1 已完成实验纵向切片，代码位于 `rust/anchor-runtime`，真实 provider smoke 已通过。当前 R2 已完成第一小步：`CheckpointStore` 端口和文件适配器可独立使用，下一步是把 Executor 的边界保存与恢复接线固定下来。R3 之前不宣称 Rust Runtime 已替代 Python；R5 之前不实现第二套 Rust Graph 调度语义。
+R0 已由现有架构约束和本计划冻结；R1 已完成实验纵向切片，代码位于 `rust/anchor-runtime`，真实 provider smoke 已通过。当前 R2 已完成 checkpoint 端口、文件适配器和 pending model 失败后的续行接线；下一步是明确工具副作用批次、并发写入和宿主恢复策略。R3 之前不宣称 Rust Runtime 已替代 Python；R5 之前不实现第二套 Rust Graph 调度语义。
 
 ## 每阶段记录
 

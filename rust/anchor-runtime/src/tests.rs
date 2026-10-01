@@ -338,3 +338,53 @@ fn file_checkpoint_store_round_trips_and_rejects_path_escape() {
     );
     std::fs::remove_dir_all(root).expect("remove test directory");
 }
+
+#[tokio::test]
+async fn node_executor_persists_pending_model_before_provider_failure() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("anchor-rig-provider-failure-{unique}"));
+    let store = super::FileCheckpointStore::new(&root);
+    let model = MockCompletionModel::from_turns([MockTurn::error("provider fixture failure")]);
+    let port = super::RigCompletionPort::new(model.erase());
+    let mut checkpoint = AgentCheckpoint::start("review", 10, "fail", 1);
+    let cancellation = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let error = super::NodeExecutor::execute_with_store(
+        &mut checkpoint,
+        &port,
+        &EchoTools,
+        &store,
+        "execution-10",
+        &cancellation,
+        &[],
+    )
+    .await
+    .expect_err("provider failure should be returned");
+    assert!(error.to_string().contains("provider"));
+    let mut restored = store
+        .load("execution-10", "review", 10)
+        .expect("load persisted pending model")
+        .expect("pending checkpoint exists");
+    assert!(matches!(
+        restored.pending_step(),
+        Some(AgentRunStep::CallModel { turn: 1, .. })
+    ));
+    let recovery_port = super::RigCompletionPort::new(
+        MockCompletionModel::text(r#"{"summary":"recovered"}"#).erase(),
+    );
+    let outcome = super::NodeExecutor::execute_with_store(
+        &mut restored,
+        &recovery_port,
+        &EchoTools,
+        &store,
+        "execution-10",
+        &cancellation,
+        &[],
+    )
+    .await
+    .expect("resume pending model");
+    assert_eq!(outcome.submission, "recovered");
+    std::fs::remove_dir_all(root).expect("remove test directory");
+}

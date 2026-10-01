@@ -30,7 +30,7 @@ use serde::{Deserialize, Serialize};
 pub mod checkpoint;
 pub use checkpoint::{CheckpointStore, CheckpointStoreError, FileCheckpointStore};
 
-const CHECKPOINT_FORMAT: u32 = 2;
+const CHECKPOINT_FORMAT: u32 = 3;
 
 /// A cancellation flag owned by the host.
 pub type Cancellation = Arc<AtomicBool>;
@@ -70,6 +70,11 @@ pub struct AgentCheckpoint {
     pub invocation: u32,
     pub run_spec: RunSpec,
     pub run: AgentRun,
+    /// The last protocol step issued by the driver. Rig keeps the state
+    /// machine's pending phase private; retaining the issued step lets a host
+    /// re-submit a model request after a process dies before its response.
+    #[serde(default)]
+    pending_step: Option<AgentRunStep>,
 }
 
 impl AgentCheckpoint {
@@ -87,7 +92,12 @@ impl AgentCheckpoint {
             invocation,
             run_spec,
             run: AgentRun::new(Message::user(task.into())).max_turns(max_turns),
+            pending_step: None,
         }
+    }
+
+    pub fn pending_step(&self) -> Option<&AgentRunStep> {
+        self.pending_step.as_ref()
     }
 
     /// Build a checkpoint from the node boundary without persisting host-only
@@ -247,6 +257,8 @@ pub enum NodeError {
     Tool { name: String, source: ToolError },
     #[error("structured AgentNode result is invalid: {0}")]
     InvalidResult(String),
+    #[error("checkpoint persistence failed: {0}")]
+    Checkpoint(Box<CheckpointStoreError>),
 }
 
 impl From<rig_agent::run::PromptError> for NodeError {
@@ -258,6 +270,33 @@ impl From<rig_agent::run::PromptError> for NodeError {
 impl From<rig_agent::core::error::ProviderError> for NodeError {
     fn from(error: rig_agent::core::error::ProviderError) -> Self {
         Self::Provider(Box::new(error))
+    }
+}
+
+impl From<CheckpointStoreError> for NodeError {
+    fn from(error: CheckpointStoreError) -> Self {
+        Self::Checkpoint(Box::new(error))
+    }
+}
+
+struct NoopCheckpointStore;
+
+impl CheckpointStore for NoopCheckpointStore {
+    fn save(&self, _key: &str, _checkpoint: &AgentCheckpoint) -> Result<(), CheckpointStoreError> {
+        Ok(())
+    }
+
+    fn load(
+        &self,
+        _key: &str,
+        _expected_node: &str,
+        _expected_invocation: u32,
+    ) -> Result<Option<AgentCheckpoint>, CheckpointStoreError> {
+        Ok(None)
+    }
+
+    fn delete(&self, _key: &str) -> Result<(), CheckpointStoreError> {
+        Ok(())
     }
 }
 
@@ -273,9 +312,33 @@ impl NodeExecutor {
         cancellation: &Cancellation,
         routes: &[String],
     ) -> Result<NodeOutcome, NodeError> {
+        Self::execute_with_store(
+            checkpoint,
+            completion,
+            tools,
+            &NoopCheckpointStore,
+            "noop",
+            cancellation,
+            routes,
+        )
+        .await
+    }
+
+    /// Drive a node while persisting protocol state at every external I/O
+    /// boundary. The key is supplied by the host and is opaque to the runner.
+    pub async fn execute_with_store<C: CompletionPort, T: ToolPort, S: CheckpointStore>(
+        checkpoint: &mut AgentCheckpoint,
+        completion: &C,
+        tools: &T,
+        store: &S,
+        store_key: &str,
+        cancellation: &Cancellation,
+        routes: &[String],
+    ) -> Result<NodeOutcome, NodeError> {
         let mut requests = 0;
         loop {
             if cancellation.load(Ordering::Relaxed) {
+                store.save(store_key, checkpoint)?;
                 return Ok(NodeOutcome {
                     status: NodeStatus::Cancelled,
                     submission: String::new(),
@@ -284,12 +347,20 @@ impl NodeExecutor {
                     reason: "cancelled by host".to_owned(),
                 });
             }
-            match checkpoint.run.next_step()? {
+            let step = if let Some(step) = checkpoint.pending_step.clone() {
+                step
+            } else {
+                let step = checkpoint.run.next_step()?;
+                checkpoint.pending_step = Some(step.clone());
+                step
+            };
+            match step {
                 AgentRunStep::CallModel {
                     prompt,
                     history,
                     turn,
                 } => {
+                    store.save(store_key, checkpoint)?;
                     let definitions = tools.definitions();
                     checkpoint.run.advertise_tools(turn, definitions.clone());
                     let prepared = prepare_request(
@@ -305,7 +376,9 @@ impl NodeExecutor {
                     let response = completion.complete(request).await?;
                     requests += 1;
                     let turn = ModelTurn::from_response(&response, &prepared);
-                    match checkpoint.run.model_response(turn)? {
+                    let outcome = checkpoint.run.model_response(turn)?;
+                    checkpoint.pending_step = None;
+                    match outcome {
                         rig_agent::run::ModelTurnOutcome::Continue { .. }
                         | rig_agent::run::ModelTurnOutcome::TurnRetried => {}
                         rig_agent::run::ModelTurnOutcome::NeedsResolution(context) => {
@@ -314,8 +387,10 @@ impl NodeExecutor {
                             )));
                         }
                     }
+                    store.save(store_key, checkpoint)?;
                 }
                 AgentRunStep::CallTools { calls } => {
+                    store.save(store_key, checkpoint)?;
                     let mut results = Vec::with_capacity(calls.len());
                     for call in calls {
                         if cancellation.load(Ordering::Relaxed) {
@@ -349,8 +424,11 @@ impl NodeExecutor {
                         results.push(result);
                     }
                     checkpoint.run.tool_results(results)?;
+                    checkpoint.pending_step = None;
+                    store.save(store_key, checkpoint)?;
                 }
                 AgentRunStep::Done(response) => {
+                    store.save(store_key, checkpoint)?;
                     return parse_outcome(response.output, requests, routes);
                 }
             }
