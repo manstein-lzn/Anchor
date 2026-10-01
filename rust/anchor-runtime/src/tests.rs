@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use rig_agent::{
     AgentBuilder,
@@ -13,7 +14,7 @@ use rig_agent::{
 use serde::Deserialize;
 use serde_json::json;
 
-use super::{AgentCheckpoint, CheckpointError};
+use super::{AgentCheckpoint, CheckpointError, CheckpointStore};
 
 #[derive(Debug, Deserialize, JsonSchema, PartialEq)]
 struct AgentCompletion {
@@ -299,4 +300,41 @@ fn checkpoint_can_be_created_from_node_request() {
     let checkpoint = AgentCheckpoint::from_request("review", 5, &request);
     assert!(checkpoint.run.initial_prompt().is_some());
     assert_eq!(checkpoint.run_spec.max_turns, Some(2));
+}
+
+#[test]
+fn file_checkpoint_store_round_trips_and_rejects_path_escape() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("anchor-rig-checkpoint-{unique}"));
+    let store = super::FileCheckpointStore::new(&root);
+    let checkpoint = AgentCheckpoint::start("review", 9, "persist", 2);
+    store
+        .save("execution-9", &checkpoint)
+        .expect("save checkpoint");
+    let restored = store
+        .load("execution-9", "review", 9)
+        .expect("load checkpoint")
+        .expect("checkpoint exists");
+    assert_eq!(restored.node_id, "review");
+    assert!(
+        store
+            .load("missing", "review", 9)
+            .expect("missing is normal")
+            .is_none()
+    );
+    assert!(matches!(
+        store.save("../escape", &checkpoint),
+        Err(super::CheckpointStoreError::InvalidKey(_))
+    ));
+    store.delete("execution-9").expect("delete checkpoint");
+    assert!(
+        store
+            .load("execution-9", "review", 9)
+            .expect("deleted is missing")
+            .is_none()
+    );
+    std::fs::remove_dir_all(root).expect("remove test directory");
 }

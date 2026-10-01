@@ -27,6 +27,9 @@ use rig_agent::{
 };
 use serde::{Deserialize, Serialize};
 
+pub mod checkpoint;
+pub use checkpoint::{CheckpointStore, CheckpointStoreError, FileCheckpointStore};
+
 const CHECKPOINT_FORMAT: u32 = 2;
 
 /// A cancellation flag owned by the host.
