@@ -279,7 +279,19 @@ def test_stdio_mcp_tool_is_exposed_and_called_inside_bubblewrap(tmp_path):
             context = RunContext(deps=None, model=TestModel(), usage=usage.RunUsage(),
                                  agent=agent, max_retries=2)
             tool = (await toolset.get_tools(context))["probe_ping"]
+            assert tool.tool_def.defer_loading is True
             assert await tool.toolset.call_tool("probe_ping", {}, context, tool) == "pong"
+
+            # PydanticAI auto-injects its ToolSearch capability. On a provider without
+            # native search support the MCP definition stays withheld and only the
+            # local discovery surface is visible on the first request.
+            model = TestModel(call_tools=[], custom_output_text="done")
+            search_agent = __import__("pydantic_ai").Agent(
+                model, output_type=str, toolsets=[toolset])
+            assert await search_agent.run("hello")
+            params = model.last_model_request_parameters
+            assert params.visibility_of("probe_ping") == "withheld"
+            assert params.visibility_of("search_tools") == "visible"
 
     asyncio.run(check())
     assert not list(workspace.iterdir())

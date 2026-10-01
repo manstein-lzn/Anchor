@@ -19,6 +19,14 @@ python3.12 -m venv .venv
 npm --prefix apps/web ci
 ```
 
+CodeMode 是可选的执行加速能力；安装后所有普通 AgentNode 自动使用，Graph 不需要增加配置：
+
+```bash
+./.venv/bin/python -m pip install -e '.[dev,codemode]'
+```
+
+如果不安装这个可选依赖，AgentNode 自动回退到普通工具调用，Graph 文件和 Plugin 无需修改。
+
 开发、测试和启动服务均使用项目的 `.venv`。如果出现 `No module named pydantic_ai`，先确认使用的解释器和依赖安装位置；PydanticAI 是当前 Agent Node 的正式依赖。
 
 ### 2. 配置模型
@@ -313,6 +321,12 @@ ln -s "$PWD/plugins/academic-research" .local/demo/library/plugins/academic-rese
 
 在图编排中选中 AgentNode，刷新 Plugin 列表、查看说明、勾选能力并保存。新示例为 [plugin-research.json](../examples/graphs/plugin-research.json)。旧图不会自动获得 Plugin；已有研究工作流的节点配置由用户明确选择，不自动迁移运行历史。
 
+### MCP 工具的按需发现
+
+AgentNode 挂载的 MCP 工具默认采用框架原生延迟加载。模型首轮只看到 Plugin 的短说明、核心宿主工具和 `search_tools`；当任务需要某项 MCP 能力时，先按工具名和描述搜索，匹配的定义才进入当前对话。PydanticAI 会在支持的 provider 上使用原生 Tool Search，在其他 provider 上使用本地关键词搜索。工具集仍按节点的网络、Bubblewrap 和 AsyncExitStack 生命周期运行，延迟加载只控制模型看到的定义。
+
+因此，挂载多个 Plugin 不会自动把所有 MCP 参数 schema 放进每一次请求，但搜索会增加必要的模型往返，中文描述和当前模型服务仍需用真实 provider 验证。工具结果一旦执行，仍会进入该 Run 的原生历史；Tool Search 不替代 Graph、Session 或持久化记录。
+
 企业微信助手通过普通 Graph 执行，支持按用户隔离的历史、同图并发和新消息取消旧任务后接续。长连接网关和 Anchor 均可部署在 Linux，客户端无需同机。完整 `.env`、安装、自检、启动和私聊验收步骤见 [企业微信助手接入](wecom-assistant.md)。
 
 默认助手挂载 `wecom`，支持主动 Markdown 通知、附件提取/原生图片输入、持续正文及图片回复；其他业务 Plugin 可按需添加。机器人 Bot ID/Secret 用于长连接及上述能力，主动通知目标由可选 `ANCHOR_WECOM_SEND_USERS` 限制（默认继承入口名单）；自建应用的 Corp ID/Agent ID/Secret 仅用于另外的可选 MCP 消息与成员 API。企业微信审批接口尚未实现。真实模型/Graph/本地 Plugin 验收与真实企业微信公网联动分开记录。
@@ -414,6 +428,6 @@ cp examples/graphs/call-report.json .local/demo/workspaces/call-report/graph.jso
 
 在网页运行 `call-report`，它生成报告、wait 调用 `call-worker`，再读取返回文件。调用节点需通过 Anchor 服务执行；直接使用 standalone runner 没有服务调用处理器。
 
-周报提醒可在发布节点后连接调用节点，目标选 `wecom-assistant`，选自己的已有企业微信会话，传入报告文件并设置 `input.message`（例如“阅读报告并给我一段完成提醒”）。助手后台输出的 summary 自动投递，不要再要求模型重复调用主动发送工具。此配置会在后续定时执行时产生真实通知；本次开发没有修改生产周报或激活新通知计划。
+周报提醒可在发布节点后连接调用节点，目标选 `wecom-assistant`，选自己的已有企业微信会话，传入报告文件并设置 `input.message`（例如“阅读报告并给我一段完成提醒”）。助手后台输出的 summary 自动投递，不要再要求模型重复调用主动发送工具。此配置会在后续定时执行时产生真实通知。本机 weekly-work-report 已按用户授权接好并完成真实平台发送验收；其他部署仍需选择自己的已确认会话。
 
 被打断的后台任务保留同一个 Run；若原生命令恢复判定 `Uncertain`，需检查真实业务结果再处理。平台 ACK 不确定时系统不会自动重发，以避免重复通知。跨 Graph 递归、自调用到正在使用的同一会话、自动猜测成员身份均不支持。

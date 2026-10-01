@@ -17,6 +17,16 @@ Graph 的 AgentNode 仍只保存 Plugin 目录 ID。Anchor Library 校验根清�
 
 当前兼容范围是根清单解析、Skill/资源读取、只读挂载和 MCP；Codex `hooks`、`commands`、`agents` 暂不支持。可通过 `POST /plugins/install` 安装 GitHub 仓库子目录，安装时将来源清单放到 bundle 根目录 `plugin.json`。MCP 通过 PydanticAI `MCPToolset` 接入 AgentNode：stdio server 在节点现有 Bubblewrap 边界中运行；HTTP/SSE 要求节点允许网络，可用环境变量配置 headers 或 OAuth。OAuth 可从 Plugin 面板显式授权，token 保存在 Anchor state 中。
 
+MCP 工具集默认使用 PydanticAI 的 `defer_loading()`。Agent 初始只看到自动注入的 `search_tools` 和其他核心工具；模型需要某项能力时先搜索，框架再揭示匹配工具的定义。支持原生工具搜索的 provider 会使用 provider 的延迟标记，其他 provider 使用框架的本地关键词回退。MCP 连接和沙箱边界不因此改变，工具调用仍会写入原生运行记录。少量必须始终可见的宿主控制工具不通过 MCP 延迟。
+
+### CodeMode
+
+CodeMode 是 AgentNode 的内部执行优化，不是 Graph 配置项。安装 `codemode` 可选依赖后，普通 AgentNode 自动使用 Harness 的 `tools='all'` 模式；模型可以在一次 `run_code` 中批量调用已发现的 Plugin/MCP 工具并整理结果，用户不需要填写工具名、Monty 限制或额外 JSON。没有安装 Monty 时自动回退到普通工具调用。
+
+PydanticAI/Harness 会自动保留 Tool Search、完成控制和其他框架工具的原生路径；Anchor 的 Bash 工作区工具也保持原生。CodeMode 不获得宿主文件、环境变量、时钟或远程 sandbox 访问，已有 NodeSandbox 和 Graph 权限边界继续生效。CodeMode 的嵌套调用元数据保留在原生 trace 中。
+
+Plugin 开发者不需要为每个工具编写适配层。工具仍按普通 PydanticAI/MCP 工具注册；结构化返回 schema 会让模型在代码中获得更准确的类型提示，但缺少 schema 也不会阻止工具运行。
+
 stdio 工具发现和调用已在真实 Bubblewrap MCP server 测试中通过，UI 安装与只读 Skill/资源场景有浏览器端到端覆盖。仓库包含 Docmost 示例 Plugin，使用服务端环境变量 `DOCMOST_API_KEY` 作为 Bearer token；配置解析已覆盖，需提供有效 key 才能验证真实服务握手。OAuth 外部服务授权和真实社区 MCP provider 尚未端到端验证，因此不声明所有 MCP server 兼容；hooks、commands、agents 仍不执行。
 
 ## 企业微信

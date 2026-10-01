@@ -104,11 +104,11 @@ Agent 完成由 PydanticAI 校验的结构化结果表示（`summary`，多出�
 
 ## 学术调研与 Plugin 接入
 
-学术调研使用普通 AgentNode。AgentNode 通过 PydanticAI 结构化结果完成；Bash 只是工作区工具。Anchor 尚在开发阶段，维护中的 Graph 示例与测试应使用这一统一契约，不维护旧完成协议的双轨路径。
+学术调研使用普通 AgentNode。AgentNode 通过 PydanticAI 结构化结果完成；Bash 只是工作区工具。安装可选 Monty 依赖后，CodeMode 作为内部优化自动折叠普通 Plugin/MCP 工具，Harness 控制工具和 Bash 保持原生，Monty 不获得宿主文件、环境变量或时钟访问。Anchor 尚在开发阶段，维护中的 Graph 示例与测试应使用这一统一契约，不维护旧完成协议的双轨路径。
 
 1. [深度学术调研图](../examples/graphs/deep-academic-research.json)在 investigator、challenger、reviewer 三个 AgentNode 上挂载 `academic-research` Plugin；这些节点按需使用 Plugin 提供的学术证据能力。
 2. 模型注册的工具是 `bash`，由模型构造文献命令。角色指令作为指令文本提供，没有从能力库按需加载说明的机制。
-3. `NodeSandbox` 提供普通工作区工具，并由 Plugin 显式挂载登记的 scholarly 工具入口；联网能力另由节点权限决定。
+3. `NodeSandbox` 提供普通工作区工具，并由 Plugin 显式挂载登记的 scholarly 工具入口；联网能力另由节点权限决定。MCP 工具集通过 PydanticAI `defer_loading()` 挂载，模型首轮只获得 `search_tools`，需要时再揭示匹配的工具定义；stdio/HTTP 生命周期、网络和沙箱边界不变。
 4. [scholarly/__main__.py](../src/anchor/scholarly/__main__.py)解析命令，[runtime/research_tools.py](../src/anchor/runtime/research_tools.py)执行搜索、全文读取、引用追踪等操作，以 JSON 返回结果。
 5. Agent 消化结果、保存证据并提交文件，Graph 通过质疑和评审组织反馈。
 

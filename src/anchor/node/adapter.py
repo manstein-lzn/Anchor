@@ -28,9 +28,22 @@ from pydantic_ai.exceptions import UsageLimitExceeded
 
 from anchor.node import (BUDGET_EXHAUSTED, COMPLETED, FAILED, UNCERTAIN, NodeOutcome,
                          NodeRequest)
-from anchor.node.agent_runtime import _CountingModel, _Wiring, build_agent
+from anchor.node.agent_runtime import (_CountingModel, _Wiring, build_agent,
+                                       capabilities_with_code_mode)
 from anchor.node.recovery import budget_path, load_budget, open_store
 from anchor.runtime.execenv import NodeSandbox
+
+
+def _tool_model_and_code_mode(model: Any, override: bool | None) -> tuple[Any, bool, bool]:
+    """Choose deferred MCP and automatic CodeMode behavior without exposing it to Graphs."""
+    from pydantic_ai.models.function import FunctionModel
+    from pydantic_ai.models.wrapper import WrapperModel
+
+    tool_model = model
+    while isinstance(tool_model, WrapperModel):
+        tool_model = tool_model.wrapped
+    scripted = isinstance(tool_model, FunctionModel)
+    return tool_model, override if override is not None else not scripted, scripted
 
 
 async def _next_run_id(store: Any, agent_name: str) -> str:
@@ -476,6 +489,9 @@ async def run_node(request: NodeRequest, *, model: Any,
 
     counted = _CountingModel(model)
     counted.cancelled = request.cancelled
+    # FunctionModel cannot perform the provider-side discovery turn, so its default remains eager;
+    # real providers use deferred MCP definitions and automatic CodeMode.
+    tool_model, automatic_code_mode, scripted_model = _tool_model_and_code_mode(counted, request.code_mode)
     # **A caller that passes only a reference still gets its spending recorded.** The reference names the
     # control directory; requiring the caller to pass the path as well meant an attempt made through a
     # reference alone spent requests nobody wrote down.
@@ -487,10 +503,6 @@ async def run_node(request: NodeRequest, *, model: Any,
         counted.control = where
         counted.allowed = spending
         counted.requests = already
-    agent = build_agent(counted, instructions=request.instructions,
-                        # Malformed tool/output retries are separate from healthy research turns.
-                        max_retries=spending if spending is not None else 3,
-                        capabilities=(*capabilities, *resumed))
     limits = UsageLimits(request_limit=remaining)
 
     wiring: _Wiring | None = None
@@ -517,10 +529,17 @@ async def run_node(request: NodeRequest, *, model: Any,
         # status for it; raising out of the entry point would leave the caller with an exception where
         # it was promised a result.
         wiring.sandbox.require_working()
+        capabilities = capabilities_with_code_mode(capabilities, automatic_code_mode)
+        agent = build_agent(counted, instructions=request.instructions,
+                            # Malformed tool/output retries are separate from healthy research turns.
+                            max_retries=spending if spending is not None else 3,
+                            capabilities=(*capabilities, *resumed))
 
         from contextlib import AsyncExitStack
         from anchor.node.mcp import toolsets_for
-        toolsets = [*toolsets_for(request.mcp_servers, wiring.sandbox, interactive=request.mcp_auth),
+        toolsets = [*toolsets_for(
+            request.mcp_servers, wiring.sandbox, interactive=request.mcp_auth,
+            defer_loading=not scripted_model),
                     *request.toolsets]
         async with AsyncExitStack() as stack:
             for capability in toolsets:

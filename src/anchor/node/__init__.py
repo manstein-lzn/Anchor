@@ -62,6 +62,9 @@ class NodeRequest:
     mcp_auth: bool = False
     """Allow an interactive OAuth handshake for a deliberately initiated single run."""
 
+    code_mode: bool | None = None
+    """Internal override for CodeMode auto-selection. ``None`` means automatic; Graph files do not set it."""
+
     workspace: Path = Path()
     """Where it works. Kept between passes; whatever is in it when it finishes is what the next node
     is pointed at."""

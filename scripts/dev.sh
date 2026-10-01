@@ -24,7 +24,9 @@ ready() {
 }
 
 start_api() {
-  if curl -fsS --max-time 1 http://127.0.0.1:8077/graphs >/dev/null 2>&1; then
+  # `/graphs` is an authenticated management endpoint when ANCHOR_API_KEYS is configured.
+  # Use the public service root for readiness so a valid service is not mistaken for a failed start.
+  if curl -fsS --max-time 1 http://127.0.0.1:8077/ >/dev/null 2>&1; then
     echo "Anchor API already available at http://127.0.0.1:8077"
   elif alive "$api_pid"; then
     echo "Anchor API process already exists (pid $(<"$api_pid"))"
@@ -34,7 +36,7 @@ start_api() {
       --host 127.0.0.1 --port 8077 \
       >"$state/anchor-serve.log" 2>&1 < /dev/null &
     echo "$!" > "$api_pid"
-    ready http://127.0.0.1:8077/graphs "$api_pid" "$state/anchor-serve.log"
+    ready http://127.0.0.1:8077/ "$api_pid" "$state/anchor-serve.log"
   fi
 }
 
@@ -68,7 +70,7 @@ stop_one() {
 }
 
 status() {
-  curl -fsS --max-time 1 http://127.0.0.1:8077/graphs >/dev/null 2>&1 &&
+  curl -fsS --max-time 1 http://127.0.0.1:8077/ >/dev/null 2>&1 &&
     echo "Anchor API: up (http://127.0.0.1:8077)" || echo "Anchor API: down"
   curl -fsS --max-time 1 http://127.0.0.1:5173/ >/dev/null 2>&1 &&
     echo "Web UI:     up (http://127.0.0.1:5173)" || echo "Web UI:     down"

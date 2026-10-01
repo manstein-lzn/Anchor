@@ -1,0 +1,22 @@
+[Unit]
+Description=Anchor Graph runtime and Plugin channels
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/Anchor
+ExecStart=/root/Anchor/.venv/bin/anchor-serve --root /root/Anchor/.local/demo --config /root/Anchor/examples/runtime.env.json --host 127.0.0.1 --port 8077
+Environment=PYTHONUNBUFFERED=1
+Restart=always
+RestartSec=5
+# SIGINT lets the HTTP server's finally block stop Plugin channel processes.
+KillSignal=SIGINT
+KillMode=control-group
+TimeoutStopSec=30
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -15,7 +15,7 @@ dependencies = [
     # loop and theirs has it. Pinned to the pair the migration was verified against (ADR-062); the
     # historical matrix is in docs/archive/DECISIONS.md; changes require re-verification.
     "pydantic-ai-slim==2.46.0",
-    "pydantic-ai-harness==0.32.0",
+    "pydantic-ai-harness==0.36.0",
     # The literature tools: fetching, and turning what comes back into text.
     "pydantic>=2.7,<3",
     "httpx>=0.27,<1",
@@ -35,6 +35,7 @@ anchor-serve = "anchor.__main__:main"
 
 [project.optional-dependencies]
 mcp = ["pydantic-ai-slim[mcp]==2.46.0"]
+codemode = ["pydantic-monty>=1.0.0,<2"]
 channels = ["wecom-aibot-python-sdk==1.0.2", "Pillow>=11,<13"]
 dev = [
     "pytest>=8,<9",

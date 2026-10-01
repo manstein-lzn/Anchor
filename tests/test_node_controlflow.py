@@ -88,6 +88,45 @@ def request(workspace: Path, **overrides) -> NodeRequest:
     return NodeRequest(**fields)
 
 
+def test_code_mode_runs_all_regular_tools_while_bash_stays_native(tmp_path):
+    """CodeMode is an internal AgentNode optimization, not a Graph configuration surface."""
+    pytest.importorskip("pydantic_ai_harness")
+    from pydantic_ai.toolsets import FunctionToolset
+
+    calls = []
+
+    def lookup(*, query: str) -> dict:
+        calls.append(query)
+        return {"answer": query.upper()}
+
+    def model(messages, info):
+        responses = sum(getattr(message, "kind", "") == "response" for message in messages)
+        if responses == 0:
+            names = {tool.name for tool in info.function_tools}
+            assert "run_code" in names
+            assert "bash" in names
+            return ModelResponse(parts=[ToolCallPart(
+                tool_name="run_code",
+                args={"code": 'result = await lookup(query="anchor")\nresult'},
+            )])
+        returns = [part for message in messages for part in getattr(message, "parts", ())
+                   if getattr(part, "part_kind", "") == "tool-return"]
+        assert any("ANCHOR" in str(part.content) for part in returns)
+        return ModelResponse(parts=[ToolCallPart(
+            tool_name="final_result", args={"summary": "queried through CodeMode"})])
+
+    toolset = FunctionToolset([lookup], id="fixture")
+    outcome = asyncio.run(run_node(
+        request(tmp_path, code_mode=True, toolsets=(toolset,), trace=tmp_path / "trace.jsonl"),
+        model=FunctionModel(model)))
+
+    assert outcome.status == COMPLETED, outcome.reason
+    assert outcome.submission == "queried through CodeMode"
+    assert calls == ["anchor"]
+    trace = (tmp_path / "trace.jsonl").read_text()
+    assert "lookup" in trace and "tool_calls" in trace
+
+
 def ran(workspace: Path, *, routes: tuple[str, ...] = ()) -> NodeOutcome:
     return asyncio.run(run_node(request(workspace, routes=routes), model=model_from()))
 

@@ -133,7 +133,10 @@ def build_agent(model: Any, *, instructions: str = "", max_retries: int = 60,
         retries=max_retries,
         instructions=f"{instructions.strip()}\n\n{RULES}".strip(),
     )
-    agent.tool(name="bash", description="Execute a bash command", sequential=True)(_bash)
+    # Mark Bash as a code-execution surface so Harness keeps it beside `run_code`, rather than
+    # nesting one executable language inside another when CodeMode is enabled.
+    agent.tool(name="bash", description="Execute a bash command", sequential=True,
+               metadata={"code_arg_name": "command", "code_arg_language": "bash"})(_bash)
 
     @agent.output_validator
     def validate_completion(ctx: RunContext[_Wiring], value: AgentCompletion) -> AgentCompletion:
@@ -146,3 +149,27 @@ def build_agent(model: Any, *, instructions: str = "", max_retries: int = 60,
         return value
 
     return agent
+
+
+def code_mode_capability(enabled: bool = True) -> Any | None:
+    """Build Anchor's automatic CodeMode capability when Monty is installed.
+
+    CodeMode is an execution optimization, not a Graph authoring concern. Harness keeps framework
+    control tools, deferred undiscovered tools and code-execution tools native. A deployment without
+    the optional Monty package transparently uses the normal PydanticAI tool path.
+    """
+    if not enabled:
+        return None
+    try:
+        import pydantic_monty  # noqa: F401 - presence check for the optional runtime
+        from pydantic_ai_harness import CodeMode
+    except ImportError:
+        return None
+
+    return CodeMode(tools="all", dynamic_catalog=True)
+
+
+def capabilities_with_code_mode(capabilities: tuple[Any, ...], enabled: bool = True) -> tuple[Any, ...]:
+    """Append the automatic CodeMode capability without changing caller-facing tool contracts."""
+    mode = code_mode_capability(enabled)
+    return (*capabilities, *(() if mode is None else (mode,)))

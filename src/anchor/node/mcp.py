@@ -36,7 +36,7 @@ def http_toolset(name: str, server: dict, *, interactive: bool = False) -> Any:
 
 
 def toolsets_for(servers: tuple[tuple[str, dict], ...], sandbox: NodeSandbox, *,
-                 interactive: bool = False) -> tuple[Any, ...]:
+                 interactive: bool = False, defer_loading: bool = True) -> tuple[Any, ...]:
     if not servers:
         return ()
     from pydantic_ai.mcp import MCPToolset, StdioTransport
@@ -60,5 +60,11 @@ def toolsets_for(servers: tuple[tuple[str, dict], ...], sandbox: NodeSandbox, *,
             if not sandbox.network:
                 raise ValueError(f"MCP server {name}: HTTP transport requires node network=true")
             toolset = http_toolset(name, server, interactive=interactive)
-        result.append(toolset.prefixed(name))
+        # MCP servers can expose dozens of tools. Keep their definitions out of the
+        # initial model request and let PydanticAI's auto-injected ToolSearch capability
+        # reveal only the tools that match the current task. The connected toolset is
+        # still available to the runtime, so discovery does not change MCP lifecycle or
+        # sandbox boundaries.
+        exposed = toolset.prefixed(name)
+        result.append(exposed.defer_loading() if defer_loading else exposed)
     return tuple(result)
