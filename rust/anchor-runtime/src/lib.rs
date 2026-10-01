@@ -1,44 +1,106 @@
-//! Experimental Anchor runtime kernel using Rig's Rust agent runtime.
+//! Experimental Rust runtime kernel for Anchor.
 //!
-//! This crate is a feasibility slice, not yet the authoritative Anchor runtime.
+//! Rig owns the serializable agent state machine; Anchor owns node identity,
+//! provider selection, tools and cancellation. No graph scheduler or platform
+//! API is included here.
 
-use rig_agent::{core::completion::Message, run::AgentRun};
+use std::{
+    future::Future,
+    path::PathBuf,
+    pin::Pin,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
+
+use rig_agent::{
+    core::{
+        DynModel,
+        completion::{
+            CompletionRequest, CompletionResponse, Message, ProviderCapabilities, ToolDefinition,
+        },
+        message::{ToolResultContent, UserContent},
+        operation::Completion,
+    },
+    run::{AgentRun, AgentRunStep, ModelTurn, RunSpec, prepare::prepare_request},
+};
 use serde::{Deserialize, Serialize};
 
-const CHECKPOINT_FORMAT: u32 = 1;
+const CHECKPOINT_FORMAT: u32 = 2;
 
-/// Durable identity and Rig state for one experimental AgentNode attempt.
+/// A cancellation flag owned by the host.
+pub type Cancellation = Arc<AtomicBool>;
+
+/// Minimal input contract for one AgentNode invocation.
+#[derive(Debug, Clone)]
+pub struct NodeRequest {
+    pub execution_id: String,
+    pub task: String,
+    pub instructions: String,
+    pub routes: Vec<String>,
+    pub max_turns: usize,
+    pub workspace: PathBuf,
+    pub cancellation: Cancellation,
+}
+
+impl NodeRequest {
+    pub fn prompt(&self) -> String {
+        let routes = if self.routes.is_empty() {
+            "(no route)".to_owned()
+        } else {
+            self.routes.join(", ")
+        };
+        format!(
+            "Task:\n{}\n\nInstructions:\n{}\n\nAllowed routes: {}\n\nReturn a JSON object with `summary` and an optional `route`. The route must be one of the allowed routes.",
+            self.task, self.instructions, routes
+        )
+    }
+}
+
+/// Durable identity and Rig state for one AgentNode attempt.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentCheckpoint {
     format: u32,
     pub node_id: String,
     pub invocation: u32,
+    pub run_spec: RunSpec,
     pub run: AgentRun,
 }
 
 impl AgentCheckpoint {
-    /// Start a Rig run bound to an Anchor node invocation.
     pub fn start(
         node_id: impl Into<String>,
         invocation: u32,
         task: impl Into<String>,
         max_turns: usize,
     ) -> Self {
+        let mut run_spec = RunSpec::new();
+        run_spec.max_turns = Some(max_turns);
         Self {
             format: CHECKPOINT_FORMAT,
             node_id: node_id.into(),
             invocation,
+            run_spec,
             run: AgentRun::new(Message::user(task.into())).max_turns(max_turns),
         }
     }
 
-    /// Serialize the checkpoint using Rig's own versioned AgentRun envelope.
+    /// Build a checkpoint from the node boundary without persisting host-only
+    /// handles such as the cancellation flag or workspace path.
+    pub fn from_request(
+        node_id: impl Into<String>,
+        invocation: u32,
+        request: &NodeRequest,
+    ) -> Self {
+        Self::start(node_id, invocation, request.prompt(), request.max_turns)
+    }
+
     pub fn encode(&self) -> Result<Vec<u8>, serde_json::Error> {
         serde_json::to_vec(self)
     }
 
-    /// Restore a checkpoint only for the exact Anchor node invocation.
     pub fn decode(
         bytes: &[u8],
         expected_node: &str,
@@ -55,162 +117,255 @@ impl AgentCheckpoint {
     }
 }
 
+/// Port used by the node executor to send a prepared Rig request.
+pub trait CompletionPort: Send + Sync {
+    fn capabilities(&self) -> ProviderCapabilities;
+    fn complete<'a>(
+        &'a self,
+        request: CompletionRequest,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<CompletionResponse, rig_agent::core::error::ProviderError>>
+                + Send
+                + 'a,
+        >,
+    >;
+}
+
+/// Adapter for any Rig completion model.
+#[derive(Clone)]
+pub struct RigCompletionPort {
+    model: DynModel<Completion>,
+    capabilities: ProviderCapabilities,
+}
+
+impl RigCompletionPort {
+    pub fn new(model: DynModel<Completion>) -> Self {
+        Self {
+            capabilities: ProviderCapabilities::default(),
+            model,
+        }
+    }
+
+    pub fn with_capabilities(mut self, capabilities: ProviderCapabilities) -> Self {
+        self.capabilities = capabilities;
+        self
+    }
+}
+
+impl CompletionPort for RigCompletionPort {
+    fn capabilities(&self) -> ProviderCapabilities {
+        self.capabilities
+    }
+
+    fn complete<'a>(
+        &'a self,
+        request: CompletionRequest,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<CompletionResponse, rig_agent::core::error::ProviderError>>
+                + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(self.model.call(request))
+    }
+}
+
+/// Tool execution port. Implementations can enforce Anchor's sandbox,
+/// credentials and idempotency policy outside the runtime kernel.
+pub trait ToolPort: Send + Sync {
+    fn definitions(&self) -> Vec<ToolDefinition>;
+    fn call<'a>(
+        &'a self,
+        name: &'a str,
+        arguments: serde_json::Value,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<ToolResultContent>, ToolError>> + Send + 'a>>;
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ToolError {
+    #[error("tool `{0}` is not registered")]
+    Unknown(String),
+    #[error("tool failed: {0}")]
+    Failed(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeStatus {
+    Completed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeOutcome {
+    pub status: NodeStatus,
+    pub submission: String,
+    pub route: Option<String>,
+    pub model_requests: usize,
+    pub reason: String,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum NodeError {
+    #[error("rig run failed: {0}")]
+    Rig(Box<rig_agent::run::PromptError>),
+    #[error("model request failed: {0}")]
+    Provider(Box<rig_agent::core::error::ProviderError>),
+    #[error("tool `{name}` failed: {source}")]
+    Tool { name: String, source: ToolError },
+    #[error("structured AgentNode result is invalid: {0}")]
+    InvalidResult(String),
+}
+
+impl From<rig_agent::run::PromptError> for NodeError {
+    fn from(error: rig_agent::run::PromptError) -> Self {
+        Self::Rig(Box::new(error))
+    }
+}
+
+impl From<rig_agent::core::error::ProviderError> for NodeError {
+    fn from(error: rig_agent::core::error::ProviderError) -> Self {
+        Self::Provider(Box::new(error))
+    }
+}
+
+/// Provider-free AgentNode driver. Hosts may persist the checkpoint at each
+/// boundary and resume it without serializing a provider client or tool handler.
+pub struct NodeExecutor;
+
+impl NodeExecutor {
+    pub async fn execute<C: CompletionPort, T: ToolPort>(
+        checkpoint: &mut AgentCheckpoint,
+        completion: &C,
+        tools: &T,
+        cancellation: &Cancellation,
+        routes: &[String],
+    ) -> Result<NodeOutcome, NodeError> {
+        let mut requests = 0;
+        loop {
+            if cancellation.load(Ordering::Relaxed) {
+                return Ok(NodeOutcome {
+                    status: NodeStatus::Cancelled,
+                    submission: String::new(),
+                    route: None,
+                    model_requests: requests,
+                    reason: "cancelled by host".to_owned(),
+                });
+            }
+            match checkpoint.run.next_step()? {
+                AgentRunStep::CallModel {
+                    prompt,
+                    history,
+                    turn,
+                } => {
+                    let definitions = tools.definitions();
+                    checkpoint.run.advertise_tools(turn, definitions.clone());
+                    let prepared = prepare_request(
+                        &checkpoint.run_spec,
+                        &completion.capabilities(),
+                        &history,
+                        definitions,
+                        None,
+                        None,
+                    )
+                    .map_err(|error| NodeError::InvalidResult(error.to_string()))?;
+                    let request = prepared.clone().apply(CompletionRequest::new(prompt));
+                    let response = completion.complete(request).await?;
+                    requests += 1;
+                    let turn = ModelTurn::from_response(&response, &prepared);
+                    match checkpoint.run.model_response(turn)? {
+                        rig_agent::run::ModelTurnOutcome::Continue { .. }
+                        | rig_agent::run::ModelTurnOutcome::TurnRetried => {}
+                        rig_agent::run::ModelTurnOutcome::NeedsResolution(context) => {
+                            return Err(NodeError::InvalidResult(format!(
+                                "model requested an unavailable tool: {context:?}"
+                            )));
+                        }
+                    }
+                }
+                AgentRunStep::CallTools { calls } => {
+                    let mut results = Vec::with_capacity(calls.len());
+                    for call in calls {
+                        if cancellation.load(Ordering::Relaxed) {
+                            return Ok(NodeOutcome {
+                                status: NodeStatus::Cancelled,
+                                submission: String::new(),
+                                route: None,
+                                model_requests: requests,
+                                reason: "cancelled before tool execution".to_owned(),
+                            });
+                        }
+                        let result = if let Some(result) = call.preresolved_result {
+                            result
+                        } else {
+                            let value = tools
+                                .call(
+                                    &call.tool_call.function.name,
+                                    call.tool_call.function.arguments.clone(),
+                                )
+                                .await
+                                .map_err(|source| NodeError::Tool {
+                                    name: call.tool_call.function.name.to_string(),
+                                    source,
+                                })?;
+                            UserContent::tool_result(
+                                call.tool_call.id,
+                                call.tool_call.function.name,
+                                value,
+                            )
+                        };
+                        results.push(result);
+                    }
+                    checkpoint.run.tool_results(results)?;
+                }
+                AgentRunStep::Done(response) => {
+                    return parse_outcome(response.output, requests, routes);
+                }
+            }
+        }
+    }
+}
+
+fn parse_outcome(
+    output: String,
+    model_requests: usize,
+    routes: &[String],
+) -> Result<NodeOutcome, NodeError> {
+    #[derive(Deserialize)]
+    struct ResultShape {
+        summary: String,
+        route: Option<String>,
+    }
+    let parsed: ResultShape = serde_json::from_str(&output)
+        .map_err(|error| NodeError::InvalidResult(error.to_string()))?;
+    if let Some(route) = &parsed.route
+        && !routes.iter().any(|allowed| allowed == route)
+    {
+        return Err(NodeError::InvalidResult(format!(
+            "route `{route}` is not allowed"
+        )));
+    }
+    Ok(NodeOutcome {
+        status: NodeStatus::Completed,
+        submission: parsed.summary,
+        route: parsed.route,
+        model_requests,
+        reason: "model completed".to_owned(),
+    })
+}
+
 /// A checkpoint could not be parsed or did not belong to the requested node attempt.
 #[derive(Debug, thiserror::Error)]
 pub enum CheckpointError {
-    /// The saved run did not use this wrapper's format.
     #[error("unsupported Anchor checkpoint format: {0}")]
     UnsupportedFormat(u32),
-    /// The checkpoint was saved for a different node or invocation.
     #[error("checkpoint identity does not match the requested node invocation")]
     IdentityMismatch,
-    /// JSON or Rig's own run-state format could not be decoded.
     #[error(transparent)]
     Decode(#[from] serde_json::Error),
 }
 
 #[cfg(test)]
-mod tests {
-    use std::collections::BTreeSet;
-
-    use rig_agent::{
-        AgentBuilder,
-        core::{
-            completion::Usage,
-            message::{AssistantContent, ToolCall, ToolFunction, ToolName},
-            schemars::JsonSchema,
-        },
-        run::{AgentRunStep, ModelTurn, ModelTurnOutcome},
-        test_utils::{MockAddTool, MockCompletionModel, MockTurn},
-    };
-    use serde::Deserialize;
-    use serde_json::json;
-
-    use super::{AgentCheckpoint, CheckpointError};
-
-    #[derive(Debug, Deserialize, JsonSchema, PartialEq)]
-    struct AgentCompletion {
-        summary: String,
-        route: Option<String>,
-    }
-
-    #[test]
-    fn checkpoint_restores_a_pending_model_turn_and_completes() {
-        let mut checkpoint = AgentCheckpoint::start("research", 3, "calculate", 2);
-        assert!(matches!(
-            checkpoint.run.next_step().expect("model step"),
-            AgentRunStep::CallModel { turn: 1, .. }
-        ));
-
-        let encoded = checkpoint.encode().expect("encode checkpoint");
-        let mut restored = AgentCheckpoint::decode(&encoded, "research", 3)
-            .expect("restore matching node invocation");
-        let turn = ModelTurn::new(
-            Some("response-1".to_owned()),
-            vec![AssistantContent::text("42")],
-            Usage::default(),
-            BTreeSet::new(),
-            BTreeSet::new(),
-            json!({"fixture": true}),
-        );
-        assert!(matches!(
-            restored.run.model_response(turn).expect("accept response"),
-            ModelTurnOutcome::Continue { .. }
-        ));
-        assert!(matches!(
-            restored.run.next_step().expect("terminal step"),
-            AgentRunStep::Done(response) if response.output == "42"
-        ));
-    }
-
-    #[test]
-    fn checkpoint_cannot_be_reused_for_a_different_invocation() {
-        let checkpoint = AgentCheckpoint::start("research", 3, "calculate", 2);
-        let encoded = checkpoint.encode().expect("encode checkpoint");
-        assert!(matches!(
-            AgentCheckpoint::decode(&encoded, "research", 4),
-            Err(CheckpointError::IdentityMismatch)
-        ));
-    }
-
-    #[test]
-    fn checkpoint_restores_the_same_pending_tool_call() {
-        let mut checkpoint = AgentCheckpoint::start("research", 7, "use a tool", 2);
-        assert!(matches!(
-            checkpoint.run.next_step().expect("model step"),
-            AgentRunStep::CallModel { .. }
-        ));
-        let mut tools = BTreeSet::new();
-        tools.insert("persisted_tool".to_owned());
-        checkpoint
-            .run
-            .model_response(ModelTurn::new(
-                Some("response-1".to_owned()),
-                vec![AssistantContent::ToolCall(ToolCall::from_wire(
-                    "call-1",
-                    ToolFunction::new(
-                        ToolName::new("persisted_tool".to_owned()).expect("valid name"),
-                        json!({"value": 42}),
-                    ),
-                ))],
-                Usage::default(),
-                tools.clone(),
-                tools,
-                json!({"fixture": true}),
-            ))
-            .expect("accept tool call");
-
-        assert!(matches!(
-            checkpoint.run.next_step().expect("pending tool step"),
-            AgentRunStep::CallTools { .. }
-        ));
-        let encoded = checkpoint.encode().expect("encode checkpoint");
-        let mut restored =
-            AgentCheckpoint::decode(&encoded, "research", 7).expect("restore matching invocation");
-        let AgentRunStep::CallTools { calls } =
-            restored.run.next_step().expect("replay pending step")
-        else {
-            panic!("Rig should restore the pending tool batch");
-        };
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].tool_call.id.to_string(), "call-1");
-        assert_eq!(
-            calls[0].tool_call.function.name.to_string(),
-            "persisted_tool"
-        );
-    }
-
-    #[tokio::test]
-    async fn rig_runs_a_tool_call_with_its_native_agent_driver() {
-        let model = MockCompletionModel::from_turns([
-            MockTurn::tool_call("call-1", "add", json!({"x": 20, "y": 22})),
-            MockTurn::text("42"),
-        ]);
-        let agent = AgentBuilder::new(model).tool(MockAddTool).build();
-        let result = agent
-            .prompt("add 20 and 22")
-            .max_turns(2)
-            .run()
-            .await
-            .expect("Rig agent call");
-        assert_eq!(result.output, "42");
-        assert_eq!(result.completion_calls.len(), 2);
-    }
-
-    #[tokio::test]
-    async fn rig_parses_anchor_shaped_structured_completion() {
-        let model = MockCompletionModel::text(r#"{"summary":"review complete","route":"next"}"#);
-        let agent = AgentBuilder::new(model).build();
-        let result = agent
-            .prompt_typed::<AgentCompletion>("review the node")
-            .await
-            .expect("typed completion");
-        assert_eq!(
-            result.output,
-            AgentCompletion {
-                summary: "review complete".to_owned(),
-                route: Some("next".to_owned()),
-            }
-        );
-    }
-}
+mod tests;
