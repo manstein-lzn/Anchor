@@ -33,9 +33,9 @@
 | R2 持久化边界 | `CheckpointStore` port、原子文件适配器、版本与身份校验、边界保存约定 | 进行中：端口、原子文件保存、pending model/tool 失败后续行、缺失/删除和路径拒绝已通过；未知外部副作用、并发写入语义和宿主集成仍待做 |
 | R3 Provider 与流式 | provider 配置适配、stream 事件、超时、取消传播、请求/响应观测 | 进行中：OpenAI-compatible chat/responses、模型/工具超时、pending 状态保留、provider-free 流事件/取消、真实 provider 流式 smoke、可组合请求观测，以及中断后 checkpoint 重载并换 provider 续行的确定性测试已通过；真实进程/provider 断线中断仍待做 |
 | R4 Sandbox Adapter | Rust Sandbox port；Bubblewrap、只读输入、网络权限、命令超时和取消适配 | 部分完成：独立 Bubblewrap host adapter 已实现；本机真实 bwrap 只读挂载 smoke 和 fake-helper 策略/超时/取消测试通过。真实网络隔离、host 路径 TOCTOU、真实 bwrap 超时/取消和 Python/平台接线未验收 |
-| R5 串行 Graph Runner | Graph 快照、Run 身份、普通节点路由、提交/恢复/停止 | 与现有 Python Graph 的代表性 Graph 结果和失败语义对照通过；平台与独立 CLI 共用 Runner |
+| R5 串行 Graph Runner | 展开后 Graph 快照、Run 状态、串行路由、不可变提交输入、恢复与停止 | Rust Kernel Runner 与 Python oracle 的 provider-free 语义对照通过；fanout/join 在 admission 时明确拒绝；平台与 CLI 接线留到 R8 |
 | R6 fanout/join | 复用现有配对契约；分支活动身份、乱序收束、失败/停止/崩溃恢复 | 现有 A31 代表性 Graph 在 Rust Runner 上通过；不引入嵌套或隐式并行 |
-| R7 Plugin/MCP | Plugin manifest、工具目录、MCP stdio/HTTP、凭证和 Sandbox 绑定 | 明确 Plugin 闭包可独立启动；工具恢复、权限拒绝和资源变更检查通过 |
+| R7 Op.call 与 Plugin/MCP | wait/detach Graph call 通过既有 admission 语义复用同一 Runner；Plugin manifest、MCP stdio/HTTP、凭证与 Sandbox 绑定 | Graph call 不产生第二种调度语义；Plugin 闭包可独立启动；工具恢复、权限拒绝和资源变更检查通过 |
 | R8 宿主适配与独立包 | Python 平台调用 Rust Runner；`anchor-graph` 使用同一 Runner；最小 bundle/兼容清单 | 同一 Graph 在平台和独立宿主产生一致 Run/提交/恢复事实；bundle 不含密钥、不扩大授权 |
 | R9 迁移与收缩 | RSI、周报、企业微信助手逐个切换；旧 Python 执行路径只保留兼容用途 | 每个 Graph 通过真实 provider、Sandbox、恢复和平台验收；达到条件后再移除 Python Kernel 依赖 |
 
@@ -68,3 +68,15 @@ Rust 请求表达执行意图和可验证的边界字段；真实授权与主机
 Bubblewrap adapter 位于独立 host crate `rust/anchor-sandbox-bwrap`，不把进程执行权加入 Kernel。`BubblewrapPolicy` 显式配置命令 allowlist、workspace roots，以及使用到的只读输入/tool/spill roots 和 sandbox destination roots；spill 目录必须先由宿主创建，adapter 只 canonicalize 和授权校验，不创建请求路径；网络另需 host policy 开关。环境值通过清理后的子进程环境传递，不放进 bwrap argv。双流并发读取并按 preview 与共享 spill quota 限制；reader 或 spill 落盘不完整会设置 `incomplete`。Bubblewrap `--info-fd` 启动握手未成功时返回错误，不把 setup 失败记作 `Completed`；超时/取消会 kill 并 wait。
 
 本机真实 bwrap smoke 已验证只读输入绑定和 `workspace_readonly` 写保护；fake-helper 覆盖 host policy 拒绝、路径 symlink、输出界限、setup 失败、超时与取消。这不等价于网络 namespace 负向证明，也未覆盖真实 bwrap 的超时/取消。A35/R4 尚未完成；不得接入 Python Sandbox/平台或宣称替代现有运行时。不能实现的字段必须拒绝请求，不能静默降级。
+
+### R5 串行 Graph Runner 契约（冻结）
+
+- Rust Runner 输入是与 Python `graph.json` 同形的**展开后快照**。Runner 不重新解释 YAML/模块引用，也不在恢复时读取 Graph 工作区的当前版本；模块展开与独立 Graph bundle 编译另属宿主/打包工作。
+- Runner 拥有 Graph Run 状态：稳定 Run 身份、快照摘要、状态、cursor、节点 pass/invocation、边决定、提交历史和 stop/pause 原因。节点 `AgentCheckpoint` 仍只保存一次 AgentNode 的 Rig 协议状态，二者不能互相替代。
+- 每次调用节点执行 port 前先持久化 cursor；节点工作通过节点执行 port，产物通过 artifact/workspace port 冻结为不可变 commit。下游输入必须引用上游精确 commit，不能挂载会继续变化的工作目录。
+- 恢复核对 Run 状态与节点完成事实。完成事实已经持久化但 Run 尚未提交时补记结果而不重跑；事实缺失/冲突或外部副作用结果不明时 fail closed，不猜测重放。commit、节点事实与 Run 状态的多存储窗口必须有明确错误结果。
+- 串行调度复用 Python 的入口、全部入边决定/至少一条新选中边、多出口唯一 route、回边、回合 ceiling 和作用域计数语义。多出口缺 route 属节点契约错误；`max_steps` 是累计 provider-request 预算，不可未经证据直接映射成 Rig `max_turns`。
+- R5 明确只承接串行协调；遇到 fanout/join 在 admission 时拒绝，R6 才启用配对区域。Runner 不静默忽略插件或 `Op.call`：节点工作由声明能力的执行 port 承接，暂未提供的 Node kind/capability 必须在执行前拒绝。`Op.call` 的 wait/detach 语义在 R7 由同一 Runner 与专用 call port 实现，不建立第二个调度器。
+- pause 只在节点边界停下；stop 取消当前节点并保留 cursor/checkpoint 事实。R5 做 Kernel 与 Python oracle 的 provider-free 对照，不接 Python 平台或独立 CLI；宿主接线归 R8。
+
+R5 出口至少对照展开快照固定、入口/路由/未选分支、循环回边与回合上限、不可变 commit 输入、预算停止续行、提交 crash window 对账和 pause/stop 差异。线性 happy path 单测不构成阶段通过。不能证明等价的语义先返回明确不支持/不确定状态，不能以默认值改写行为。

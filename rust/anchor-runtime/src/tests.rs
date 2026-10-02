@@ -315,6 +315,47 @@ async fn node_executor_rejects_unknown_route() {
 }
 
 #[tokio::test]
+async fn node_executor_requires_a_route_when_multiple_routes_are_available() {
+    let port =
+        super::RigCompletionPort::new(MockCompletionModel::text(r#"{"summary":"done"}"#).erase());
+    let mut checkpoint = AgentCheckpoint::start("review", 4, "finish", 1);
+    let cancellation = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let error = super::NodeExecutor::execute(
+        &mut checkpoint,
+        &port,
+        &EchoTools,
+        &cancellation,
+        &["accept".to_owned(), "revise".to_owned()],
+    )
+    .await
+    .expect_err("a multi-exit node must select one route");
+    assert!(error.to_string().contains("choose exactly one route"));
+    assert!(error.to_string().contains("accept, revise"));
+}
+
+#[tokio::test]
+async fn node_executor_keeps_route_optional_with_zero_or_one_exit() {
+    for routes in [vec![], vec!["next".to_owned()]] {
+        let port = super::RigCompletionPort::new(
+            MockCompletionModel::text(r#"{"summary":"done"}"#).erase(),
+        );
+        let mut checkpoint = AgentCheckpoint::start("review", 5, "finish", 1);
+        let cancellation = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let outcome = super::NodeExecutor::execute(
+            &mut checkpoint,
+            &port,
+            &EchoTools,
+            &cancellation,
+            &routes,
+        )
+        .await
+        .expect("route remains optional with at most one exit");
+        assert_eq!(outcome.route, None);
+        assert_eq!(outcome.submission, "done");
+    }
+}
+
+#[tokio::test]
 async fn node_executor_honors_cancellation_before_io() {
     let port = super::RigCompletionPort::new(
         MockCompletionModel::text(r#"{"summary":"unreachable"}"#).erase(),

@@ -61,9 +61,14 @@ impl NodeRequest {
         } else {
             self.routes.join(", ")
         };
+        let completion = if self.routes.len() > 1 {
+            "Return a JSON object with `summary` and exactly one `route` selected from the allowed routes."
+        } else {
+            "Return a JSON object with `summary` and an optional `route`. If present, it must be one of the allowed routes."
+        };
         format!(
-            "Task:\n{}\n\nInstructions:\n{}\n\nAllowed routes: {}\n\nReturn a JSON object with `summary` and an optional `route`. The route must be one of the allowed routes.",
-            self.task, self.instructions, routes
+            "Task:\n{}\n\nInstructions:\n{}\n\nAllowed routes: {}\n\n{}",
+            self.task, self.instructions, routes, completion
         )
     }
 }
@@ -714,6 +719,12 @@ fn parse_outcome(
     }
     let parsed: ResultShape = serde_json::from_str(&output)
         .map_err(|error| NodeError::InvalidResult(error.to_string()))?;
+    if routes.len() > 1 && parsed.route.is_none() {
+        return Err(NodeError::InvalidResult(format!(
+            "choose exactly one route: {}",
+            routes.join(", ")
+        )));
+    }
     if let Some(route) = &parsed.route
         && !routes.iter().any(|allowed| allowed == route)
     {
