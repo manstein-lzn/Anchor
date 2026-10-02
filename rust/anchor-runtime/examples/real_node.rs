@@ -3,13 +3,15 @@
 //! Required environment: ANCHOR_MODEL_API_KEY, ANCHOR_MODEL_URL,
 //! ANCHOR_MODEL_NAME. Optional ANCHOR_MODEL_WIRE_API defaults to chat.
 
+use futures::StreamExt;
 use std::{
     env,
     sync::{Arc, atomic::AtomicBool},
 };
 
 use anchor_runtime_rig::{
-    AgentCheckpoint, Cancellation, NodeExecutor, NodeRequest, RigCompletionPort, ToolPort,
+    AgentCheckpoint, Cancellation, NodeExecutor, NodeRequest, RigCompletionPort,
+    StreamingCompletionPort, ToolPort,
 };
 
 struct FixtureTool;
@@ -74,5 +76,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "status={:?} requests={} summary={}",
         outcome.status, outcome.model_requests, outcome.submission
     );
+
+    let stream_request = rig_agent::core::completion::CompletionRequest::new(
+        "Return exactly JSON with summary=stream-smoke and no route",
+    );
+    let mut stream = provider.stream(stream_request)?;
+    let mut chunks = 0usize;
+    while let Some(item) = stream.next().await {
+        if let rig_agent::core::streaming::Item::Event(
+            rig_agent::core::streaming::StreamEvent::Text { .. },
+        ) = item?
+        {
+            chunks += 1;
+        }
+    }
+    let response = stream.finish().await?;
+    let text = response
+        .choice
+        .iter()
+        .filter_map(|item| match item {
+            rig_agent::core::completion::AssistantContent::Text(text) => Some(text.text.as_str()),
+            _ => None,
+        })
+        .collect::<String>();
+    println!("stream_chunks={} stream_text={}", chunks, text);
     Ok(())
 }
