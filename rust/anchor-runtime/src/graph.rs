@@ -1860,6 +1860,34 @@ mod tests {
             Ok(Box::new(MemLease))
         }
     }
+    struct PersistThenFailStore {
+        inner: FileRunStore,
+        fail_after_result_commit: Mutex<bool>,
+    }
+    impl RunStore for PersistThenFailStore {
+        fn load(&self, id: &str) -> Result<Option<GraphRunRecord>, GraphError> {
+            self.inner.load(id)
+        }
+        fn save(&self, record: &GraphRunRecord) -> Result<(), GraphError> {
+            self.inner.save(record)?;
+            let committed_result = record.cursor.is_none()
+                && record.status == RunStatus::Running
+                && record.results.values().any(|results| !results.is_empty());
+            if committed_result {
+                let mut fail = self.fail_after_result_commit.lock().unwrap();
+                if *fail {
+                    *fail = false;
+                    return Err(GraphError::CorruptRun(
+                        "injected feedback failure after durable Run save".into(),
+                    ));
+                }
+            }
+            Ok(())
+        }
+        fn acquire_lease(&self, id: &str) -> Result<Box<dyn RunLease>, GraphError> {
+            self.inner.acquire_lease(id)
+        }
+    }
     #[derive(Default)]
     struct MemoryArtifacts {
         values: Mutex<BTreeMap<String, Value>>,
@@ -2968,6 +2996,70 @@ mod tests {
         assert_eq!(done.status, RunStatus::Completed);
         assert_eq!(n.calls.lock().unwrap().len(), 1);
         assert_eq!(*a.freezes.lock().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn durable_run_save_feedback_error_requires_reloading_before_resume() {
+        let root = std::env::temp_dir().join(format!(
+            "anchor-run-save-feedback-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let store = PersistThenFailStore {
+            inner: FileRunStore::new(&root),
+            fail_after_result_commit: Mutex::new(true),
+        };
+        let ports = DurableTestPorts {
+            root: root.clone(),
+            crash_point: None,
+        };
+        let control = Control::default();
+        let initial = GraphRunRecord::create(graph(&["one"], &[], "one"), Value::Null).unwrap();
+        let run_id = initial.run_id.clone();
+
+        let first = GraphRunner::new(&store, &ports, &ports, &control)
+            .run(initial.clone())
+            .await;
+        assert!(first.is_err(), "wrapper must report its post-save error");
+
+        // The atomic file replacement committed before the wrapper lost the
+        // success feedback, so replaying the caller's old in-memory snapshot
+        // must conflict with the durable Run facts.
+        assert!(matches!(
+            GraphRunner::new(&store, &ports, &ports, &control)
+                .run(initial)
+                .await,
+            Err(GraphError::RunConflict)
+        ));
+
+        // Recovery starts from the durable latest record, using a fresh Runner
+        // and the underlying FileRunStore adapter.
+        let recovered_record = store.load(&run_id).unwrap().unwrap();
+        assert_eq!(recovered_record.status, RunStatus::Running);
+        assert!(recovered_record.cursor.is_none());
+        assert_eq!(recovered_record.results["one"].len(), 1);
+        let result = &recovered_record.results["one"][0];
+        assert_eq!(result.commit.id, result.key.durable_key());
+        let recovered = GraphRunner::new(&store.inner, &ports, &ports, &control)
+            .run(recovered_record)
+            .await
+            .unwrap();
+
+        assert_eq!(recovered.status, RunStatus::Completed);
+        assert!(recovered.cursor.is_none());
+        assert_eq!(recovered.results["one"].len(), 1);
+        assert_eq!(recovered.invocations["one"], 1);
+        assert_eq!(recovered.passes["one"], 1);
+        assert_eq!(fs::read(root.join("execute-count")).unwrap(), b"1");
+        assert_eq!(fs::read(root.join("freeze-count")).unwrap(), b"1");
+        assert_eq!(store.inner.load(&run_id).unwrap().unwrap(), recovered);
+
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]
