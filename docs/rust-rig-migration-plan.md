@@ -34,7 +34,7 @@
 | R3 Provider 与流式 | provider 配置适配、stream 事件、超时、取消传播、请求/响应观测 | 进行中：OpenAI-compatible chat/responses、模型/工具超时、pending 状态保留、provider-free 流事件/取消、真实 provider 流式 smoke、可组合请求观测，以及中断后 checkpoint 重载并换 provider 续行的确定性测试已通过；真实进程/provider 断线中断仍待做 |
 | R4 Sandbox Adapter | Rust Sandbox port；Bubblewrap、只读输入、网络权限、命令超时和取消适配 | 部分完成：独立 Bubblewrap host adapter 已实现；本机真实 bwrap 只读挂载 smoke 和 fake-helper 策略/超时/取消测试通过。真实网络隔离、host 路径 TOCTOU、真实 bwrap 超时/取消和 Python/平台接线未验收 |
 | R5 串行 Graph Runner | 展开后 Graph 快照、Run 状态、串行路由、不可变提交输入、恢复与停止 | 进行中：首个 Kernel Runner vertical slice、十种 provider-free Python `run()` 场景（含明确失败语义差异、未启动 SCC 闭包及嵌套模块回边重入）、format 1→2 Run 迁移、本机跨进程 lease 退出释放、结果顺序/cursor 输入事实校验、edge decision 晚于其 source result 的 freshness 校验、四个 test-port 跨进程 Runner 故障窗口，以及 FileRunStore 提交成功但调用反馈失败后的重载恢复测试均通过；生产 host/provider 崩溃恢复、更广语义覆盖仍待做。fanout/join admission 拒绝；平台与 CLI 接线留到 R8 |
-| R6 fanout/join | 复用现有配对契约；分支活动身份、乱序收束、失败/停止/崩溃恢复 | 现有 A31 代表性 Graph 在 Rust Runner 上通过；不引入嵌套或隐式并行 |
+| R6 fanout/join | 复用现有配对契约；分支活动身份、乱序收束、失败/停止/崩溃恢复 | 部分完成：Rust 已验证显式一一配对与非嵌套线性拓扑、加入分支 activation 持久事实并升 Run format 3；Runner 仍拒绝实际 fanout/join 调度。调度、乱序收束、失败/停止及崩溃恢复待做；不引入嵌套或隐式并行 |
 | R7 Op.call 与 Plugin/MCP | wait/detach Graph call 通过既有 admission 语义复用同一 Runner；Plugin manifest、MCP stdio/HTTP、凭证与 Sandbox 绑定 | Graph call 不产生第二种调度语义；Plugin 闭包可独立启动；工具恢复、权限拒绝和资源变更检查通过 |
 | R8 宿主适配与独立包 | Python 平台调用 Rust Runner；`anchor-graph` 使用同一 Runner；最小 bundle/兼容清单 | 同一 Graph 在平台和独立宿主产生一致 Run/提交/恢复事实；bundle 不含密钥、不扩大授权 |
 | R9 迁移与收缩 | RSI、周报、企业微信助手逐个切换；旧 Python 执行路径只保留兼容用途 | 每个 Graph 通过真实 provider、Sandbox、恢复和平台验收；达到条件后再移除 Python Kernel 依赖 |

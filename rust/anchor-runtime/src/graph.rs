@@ -37,6 +37,15 @@ pub struct GraphSnapshot {
     pub module_rounds: BTreeMap<String, u32>,
 }
 
+/// A statically validated, non-nested region activated by one fanout node.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParallelRegion {
+    pub fanout: String,
+    pub join: String,
+    /// Ordered linear paths, excluding the fanout and join control nodes.
+    pub branches: Vec<Vec<String>>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentDefinition {
@@ -149,9 +158,14 @@ impl GraphSnapshot {
                         node.id
                     ))
                 })?;
-                if op.get("fanout").is_some() || op.get("join").is_some() {
-                    return Err(GraphError::Unsupported(format!(
-                        "fanout/join op `{op_name}` is reserved for R6"
+                if ["run", "call", "fanout", "join"]
+                    .iter()
+                    .filter(|key| op.get(**key).is_some())
+                    .count()
+                    != 1
+                {
+                    return Err(GraphError::InvalidSnapshot(format!(
+                        "op `{op_name}` must declare exactly one execution operation"
                     )));
                 }
                 if op.get("call").is_some() {
@@ -159,7 +173,8 @@ impl GraphSnapshot {
                         "op.call `{op_name}` is reserved for R7"
                     )));
                 }
-                if op.get("run").is_none() {
+                if op.get("run").is_none() && op.get("fanout").is_none() && op.get("join").is_none()
+                {
                     return Err(GraphError::Unsupported(format!(
                         "op `{op_name}` has no supported R5 execution capability"
                     )));
@@ -223,7 +238,175 @@ impl GraphSnapshot {
                 )));
             }
         }
+        self.parallel_regions()?;
         Ok(())
+    }
+
+    /// Validate and derive explicit fanout/join regions from the expanded snapshot.
+    pub fn parallel_regions(&self) -> Result<BTreeMap<String, ParallelRegion>, GraphError> {
+        let nodes = self
+            .nodes
+            .iter()
+            .map(|node| (node.id.as_str(), node))
+            .collect::<BTreeMap<_, _>>();
+        let mut fanouts = BTreeMap::<String, String>::new();
+        let mut joins = BTreeSet::<String>::new();
+        for node in &self.nodes {
+            let Some(op_name) = &node.op else { continue };
+            let op = &self.ops[op_name];
+            match (op.get("fanout"), op.get("join")) {
+                (Some(spec), None) => {
+                    let join = spec
+                        .as_object()
+                        .filter(|object| object.len() == 1)
+                        .and_then(|object| object.get("join"))
+                        .and_then(Value::as_str)
+                        .filter(|join| !join.is_empty())
+                        .ok_or_else(|| {
+                            GraphError::InvalidSnapshot(format!(
+                                "fanout op `{op_name}` must declare exactly one non-empty join id"
+                            ))
+                        })?;
+                    fanouts.insert(node.id.clone(), join.to_owned());
+                }
+                (None, Some(spec)) => {
+                    if !spec.as_object().is_some_and(serde_json::Map::is_empty) {
+                        return Err(GraphError::InvalidSnapshot(format!(
+                            "join op `{op_name}` must be an empty object"
+                        )));
+                    }
+                    joins.insert(node.id.clone());
+                }
+                (Some(_), Some(_)) => {
+                    return Err(GraphError::InvalidSnapshot(format!(
+                        "op `{op_name}` cannot be both fanout and join"
+                    )));
+                }
+                (None, None) => {}
+            }
+        }
+
+        let mut paired_joins = BTreeSet::new();
+        let mut regions = BTreeMap::new();
+        let mut owned = BTreeSet::<String>::new();
+        for (fanout, join) in &fanouts {
+            if !joins.contains(join) {
+                return Err(GraphError::InvalidSnapshot(format!(
+                    "fanout `{fanout}` references `{join}`, which is not a join node"
+                )));
+            }
+            if !paired_joins.insert(join.clone()) {
+                return Err(GraphError::InvalidSnapshot(format!(
+                    "join `{join}` is paired with multiple fanouts"
+                )));
+            }
+            let starts = self.outgoing(fanout);
+            if starts.len() < 2 {
+                return Err(GraphError::InvalidSnapshot(format!(
+                    "fanout `{fanout}` needs at least two outgoing branches"
+                )));
+            }
+            if self.outgoing(join).len() > 1 {
+                return Err(GraphError::InvalidSnapshot(format!(
+                    "join `{join}` cannot choose between multiple outgoing edges"
+                )));
+            }
+            let mut branch_paths = Vec::new();
+            let mut tails = BTreeSet::new();
+            for start in starts {
+                let mut path = Vec::new();
+                let mut current = start;
+                loop {
+                    if current == join {
+                        if path.is_empty() {
+                            return Err(GraphError::InvalidSnapshot(format!(
+                                "fanout `{fanout}` has an empty branch"
+                            )));
+                        }
+                        break;
+                    }
+                    if !nodes.contains_key(current) || !owned.insert(current.to_owned()) {
+                        return Err(GraphError::InvalidSnapshot(format!(
+                            "fanout `{fanout}` has overlapping or invalid branch node `{current}`"
+                        )));
+                    }
+                    let branch_node = nodes[current];
+                    if branch_node.op.as_ref().is_some_and(|name| {
+                        self.ops[name].get("fanout").is_some()
+                            || self.ops[name].get("join").is_some()
+                    }) {
+                        return Err(GraphError::InvalidSnapshot(format!(
+                            "fanout `{fanout}` cannot contain nested control node `{current}`"
+                        )));
+                    }
+                    let incoming = self
+                        .edges
+                        .iter()
+                        .filter(|edge| edge.to_node == current)
+                        .map(|edge| edge.from_node.as_str())
+                        .collect::<Vec<_>>();
+                    let expected_source = path.last().map(String::as_str).unwrap_or(fanout);
+                    if incoming.len() != 1 || incoming[0] != expected_source {
+                        return Err(GraphError::InvalidSnapshot(format!(
+                            "fanout `{fanout}` branch node `{current}` has external or overlapping input"
+                        )));
+                    }
+                    let outgoing = self.outgoing(current);
+                    if outgoing.len() != 1 {
+                        return Err(GraphError::InvalidSnapshot(format!(
+                            "fanout `{fanout}` branch node `{current}` must have exactly one outgoing edge"
+                        )));
+                    }
+                    path.push(current.to_owned());
+                    current = outgoing[0];
+                    if path.len() > self.nodes.len() {
+                        return Err(GraphError::InvalidSnapshot(format!(
+                            "fanout `{fanout}` branch contains a cycle"
+                        )));
+                    }
+                }
+                tails.insert(path.last().expect("non-empty branch").clone());
+                branch_paths.push(path);
+            }
+            let join_incoming = self
+                .edges
+                .iter()
+                .filter(|edge| edge.to_node == *join)
+                .map(|edge| edge.from_node.as_str())
+                .collect::<BTreeSet<_>>();
+            if join_incoming != tails.iter().map(String::as_str).collect() {
+                return Err(GraphError::InvalidSnapshot(format!(
+                    "join `{join}` must receive exactly the paired branch tails"
+                )));
+            }
+            if owned.contains(&self.entry) || self.entry == *join {
+                return Err(GraphError::InvalidSnapshot(format!(
+                    "parallel region `{fanout}` cannot be bypassed by the graph entry"
+                )));
+            }
+            regions.insert(
+                fanout.clone(),
+                ParallelRegion {
+                    fanout: fanout.clone(),
+                    join: join.clone(),
+                    branches: branch_paths,
+                },
+            );
+        }
+        if let Some(orphan) = joins.difference(&paired_joins).next() {
+            return Err(GraphError::InvalidSnapshot(format!(
+                "join `{orphan}` has no paired fanout"
+            )));
+        }
+        Ok(regions)
+    }
+
+    fn outgoing<'a>(&'a self, node: &'a str) -> Vec<&'a str> {
+        self.edges
+            .iter()
+            .filter(|edge| edge.from_node == node)
+            .map(|edge| edge.to_node.as_str())
+            .collect()
     }
 
     pub fn digest(&self) -> Result<String, GraphError> {
@@ -309,6 +492,41 @@ pub struct RunResult {
     pub sequence: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ParallelBranchStatus {
+    Ready,
+    Running,
+    Completed,
+    Failed,
+    Stopped,
+}
+
+/// Durable branch-local progress for one explicit fanout activation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ParallelBranchRecord {
+    pub branch_id: String,
+    pub entry: String,
+    pub nodes: Vec<String>,
+    pub next_index: usize,
+    pub status: ParallelBranchStatus,
+    pub cursor: Option<RunCursor>,
+    /// Commits for the completed prefix of `nodes`, in dependency order.
+    pub completed: Vec<CommitRef>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ParallelActivation {
+    pub activation_id: String,
+    pub fanout_node: String,
+    pub join_node: String,
+    pub fanout_invocation: u64,
+    pub branches: Vec<ParallelBranchRecord>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GraphRunRecord {
@@ -319,6 +537,8 @@ pub struct GraphRunRecord {
     pub input: Value,
     pub status: RunStatus,
     pub cursor: Option<RunCursor>,
+    #[serde(default)]
+    pub parallel: Option<ParallelActivation>,
     pub invocations: BTreeMap<String, u64>,
     pub passes: BTreeMap<String, u64>,
     pub module_activations: BTreeMap<String, u64>,
@@ -913,6 +1133,15 @@ impl<'a, S: RunStore, A: ArtifactPort, N: NodeExecutionPort, C: RunControl>
                     node.id
                 )));
             }
+            if let Some(op_name) = &node.op
+                && (snapshot.ops[op_name].get("fanout").is_some()
+                    || snapshot.ops[op_name].get("join").is_some())
+            {
+                return Err(GraphError::Unsupported(format!(
+                    "Rust Runner has validated fanout/join topology for `{}`, but parallel scheduling is not enabled yet",
+                    node.id
+                )));
+            }
             if let Some(agent) = node.agent.as_ref().and_then(|n| snapshot.agents.get(n))
                 && agent.max_steps.is_some()
                 && !caps.exact_provider_request_budget
@@ -960,13 +1189,14 @@ impl GraphRunRecord {
         let run_id = format!("{}-{stamp:x}-{serial:x}", &graph_digest[..16]);
         let input = merge_values(&snapshot.input, &input, &Value::Null);
         Ok(Self {
-            format: 2,
+            format: 3,
             run_id,
             graph_digest,
             snapshot,
             input,
             status: RunStatus::Ready,
             cursor: None,
+            parallel: None,
             invocations: BTreeMap::new(),
             passes: BTreeMap::new(),
             module_activations: BTreeMap::new(),
@@ -980,7 +1210,7 @@ impl GraphRunRecord {
 
     fn validate(&self) -> Result<(), GraphError> {
         validate_component(&self.run_id)?;
-        if self.format != 2 {
+        if self.format != 3 {
             return Err(GraphError::CorruptRun(format!(
                 "unsupported graph run format {}",
                 self.format
@@ -991,17 +1221,25 @@ impl GraphRunRecord {
             return Err(GraphError::CorruptRun("snapshot digest mismatch".into()));
         }
         match self.status {
-            RunStatus::Ready if self.cursor.is_some() => {
+            RunStatus::Ready if self.cursor.is_some() || self.parallel.is_some() => {
                 return Err(GraphError::CorruptRun(
                     "ready Run cannot have an active cursor".into(),
                 ));
             }
-            RunStatus::BudgetStopped if self.cursor.is_none() => {
+            RunStatus::BudgetStopped
+                if self.cursor.is_none()
+                    && !self.parallel.as_ref().is_some_and(|activation| {
+                        activation
+                            .branches
+                            .iter()
+                            .any(|branch| branch.cursor.is_some())
+                    }) =>
+            {
                 return Err(GraphError::CorruptRun(
                     "budget-stopped Run must retain its cursor".into(),
                 ));
             }
-            RunStatus::Completed if self.cursor.is_some() => {
+            RunStatus::Completed if self.cursor.is_some() || self.parallel.is_some() => {
                 return Err(GraphError::CorruptRun(
                     "completed Run cannot have an active cursor".into(),
                 ));
@@ -1023,6 +1261,124 @@ impl GraphRunRecord {
             return Err(GraphError::CorruptRun(
                 "cursor identity does not match its Graph Run".into(),
             ));
+        }
+        if self.cursor.is_some() && self.parallel.is_some() {
+            return Err(GraphError::CorruptRun(
+                "serial cursor cannot coexist with a parallel activation".into(),
+            ));
+        }
+        if let Some(activation) = &self.parallel {
+            let regions = self.snapshot.parallel_regions().map_err(|error| {
+                GraphError::CorruptRun(format!("invalid parallel snapshot: {error}"))
+            })?;
+            let region = regions.get(&activation.fanout_node).ok_or_else(|| {
+                GraphError::CorruptRun("parallel activation references unknown fanout".into())
+            })?;
+            let expected_id = format!(
+                "{}:{}:{}",
+                self.run_id, activation.fanout_node, activation.fanout_invocation
+            );
+            let fanout_result = self
+                .results
+                .get(&activation.fanout_node)
+                .and_then(|results| {
+                    results
+                        .iter()
+                        .find(|result| result.key.invocation == activation.fanout_invocation)
+                });
+            if activation.activation_id != expected_id
+                || activation.join_node != region.join
+                || activation.fanout_invocation == 0
+                || self.invocations.get(&activation.fanout_node).copied()
+                    != Some(activation.fanout_invocation)
+                || activation.branches.len() != region.branches.len()
+                || fanout_result.is_none()
+            {
+                return Err(GraphError::CorruptRun(
+                    "parallel activation identity does not match its Graph Run".into(),
+                ));
+            }
+            let fanout_result = fanout_result.expect("checked above");
+            for (index, (branch, path)) in
+                activation.branches.iter().zip(&region.branches).enumerate()
+            {
+                let expected_branch_id = format!("{}:branch:{index}", activation.activation_id);
+                if branch.branch_id != expected_branch_id
+                    || branch.nodes != *path
+                    || branch.entry != path[0]
+                    || branch.next_index > path.len()
+                    || branch.completed.len() != branch.next_index
+                {
+                    return Err(GraphError::CorruptRun(format!(
+                        "parallel branch `{index}` identity or path is invalid"
+                    )));
+                }
+                let mut previous_result_sequence = fanout_result.sequence;
+                for (position, commit) in branch.completed.iter().enumerate() {
+                    let branch_result = self
+                        .results
+                        .get(&commit.node_id)
+                        .and_then(|results| results.iter().find(|result| result.commit == *commit));
+                    if commit.node_id != path[position]
+                        || branch_result.is_none_or(|result| {
+                            let stale = result.sequence <= previous_result_sequence;
+                            previous_result_sequence = result.sequence;
+                            stale
+                        })
+                    {
+                        return Err(GraphError::CorruptRun(format!(
+                            "parallel branch `{index}` has a missing or mismatched completed result"
+                        )));
+                    }
+                }
+                let cursor_matches = branch.cursor.as_ref().is_some_and(|cursor| {
+                    path.get(branch.next_index).is_some_and(|node_id| {
+                        cursor.node_id == *node_id
+                            && cursor.key.run_id == self.run_id
+                            && cursor.key.graph_digest == self.graph_digest
+                            && cursor.key.node_id == cursor.node_id
+                            && cursor.key.invocation > 0
+                            && self.passes.get(&cursor.node_id).copied().unwrap_or(0) > 0
+                            && self.invocations.get(&cursor.node_id).copied()
+                                == Some(cursor.key.invocation)
+                            && expected_input_commits(self, &cursor.node_id)
+                                .is_ok_and(|expected| expected == cursor.input_commits)
+                    })
+                });
+                let valid_state = match branch.status {
+                    ParallelBranchStatus::Ready => {
+                        branch.cursor.is_none() && branch.next_index < path.len()
+                    }
+                    ParallelBranchStatus::Running => cursor_matches,
+                    ParallelBranchStatus::Completed => {
+                        branch.cursor.is_none()
+                            && branch.next_index == path.len()
+                            && branch.error.is_none()
+                    }
+                    ParallelBranchStatus::Failed => {
+                        branch.cursor.is_none() && branch.error.is_some()
+                    }
+                    ParallelBranchStatus::Stopped => branch.cursor.is_none() || cursor_matches,
+                };
+                if !valid_state {
+                    return Err(GraphError::CorruptRun(format!(
+                        "parallel branch `{index}` status disagrees with its cursor"
+                    )));
+                }
+            }
+            for path in &region.branches {
+                let key = edge_key(&activation.fanout_node, &path[0]);
+                if !self.decided.get(&key).is_some_and(|decision| {
+                    decision.selected
+                        && decision.source_invocation == activation.fanout_invocation
+                        && decision.result_sequence == fanout_result.sequence
+                }) {
+                    return Err(GraphError::CorruptRun(format!(
+                        "parallel activation branch `{}` lacks its selected fanout edge fact",
+                        path[0]
+                    )));
+                }
+            }
         }
 
         let graph_nodes = self
@@ -1247,9 +1603,14 @@ impl GraphRunRecord {
                     }
                 }
                 self.format = 2;
+                self.migrate_format()
+            }
+            2 => {
+                self.parallel = None;
+                self.format = 3;
                 Ok(())
             }
-            2 => Ok(()),
+            3 => Ok(()),
             other => Err(GraphError::CorruptRun(format!(
                 "unsupported graph run format {other}"
             ))),
@@ -1354,6 +1715,46 @@ fn next_node(record: &GraphRunRecord) -> Result<Option<GraphNode>, GraphError> {
             .find(|n| n.id == c.node_id)
             .cloned()
     }))
+}
+
+fn expected_input_commits(
+    record: &GraphRunRecord,
+    node_id: &str,
+) -> Result<Vec<CommitRef>, GraphError> {
+    let mut expected = Vec::new();
+    for edge in record
+        .snapshot
+        .edges
+        .iter()
+        .filter(|edge| edge.to_node == node_id)
+    {
+        let Some(decision) = record
+            .decided
+            .get(&edge_key(&edge.from_node, &edge.to_node))
+        else {
+            continue;
+        };
+        if !decision.selected {
+            continue;
+        }
+        let result = record
+            .results
+            .get(&edge.from_node)
+            .and_then(|results| {
+                results.iter().find(|result| {
+                    result.key.invocation == decision.source_invocation
+                        && result.sequence == decision.result_sequence
+                })
+            })
+            .ok_or_else(|| {
+                GraphError::CorruptRun(format!(
+                    "selected input edge {} -> {} has no source result",
+                    edge.from_node, edge.to_node
+                ))
+            })?;
+        expected.push(result.commit.clone());
+    }
+    Ok(expected)
 }
 
 /// Persist false decisions through nodes that were structurally skipped because
@@ -2319,6 +2720,31 @@ mod tests {
             module_rounds: BTreeMap::new(),
         }
     }
+    fn parallel_graph() -> GraphSnapshot {
+        let mut snapshot = graph(
+            &["start", "left", "right", "collect", "after"],
+            &[
+                ("start", "left"),
+                ("start", "right"),
+                ("left", "collect"),
+                ("right", "collect"),
+                ("collect", "after"),
+            ],
+            "start",
+        );
+        snapshot.ops.insert(
+            "fanout".into(),
+            serde_json::json!({"fanout":{"join":"collect"}}),
+        );
+        snapshot
+            .ops
+            .insert("join".into(), serde_json::json!({"join":{}}));
+        snapshot.nodes[0].agent = None;
+        snapshot.nodes[0].op = Some("fanout".into());
+        snapshot.nodes[3].agent = None;
+        snapshot.nodes[3].op = Some("join".into());
+        snapshot
+    }
     fn setup() -> (MemStore, MemoryArtifacts, FakeNodes, Control) {
         (
             MemStore::default(),
@@ -2854,7 +3280,7 @@ mod tests {
 
         // Loading migrates in memory, without writing outside the Runner lease.
         let loaded = store.load(&id).unwrap().unwrap();
-        assert_eq!(loaded.format, 2);
+        assert_eq!(loaded.format, 3);
         assert_eq!(loaded.invocations["one"], 1);
         assert_eq!(loaded.passes["one"], 1);
         let persisted: Value =
@@ -2867,7 +3293,7 @@ mod tests {
         assert_eq!(result.invocations["one"], 1);
         assert_eq!(result.passes["one"], 1);
         let persisted = store.load(&id).unwrap().unwrap();
-        assert_eq!(persisted.format, 2);
+        assert_eq!(persisted.format, 3);
         assert_eq!(persisted.invocations["one"], 1);
         assert_eq!(persisted.passes["one"], 1);
 
@@ -2902,7 +3328,7 @@ mod tests {
         .unwrap();
 
         let loaded = store.load(&id).unwrap().unwrap();
-        assert_eq!(loaded.format, 2);
+        assert_eq!(loaded.format, 3);
         assert_eq!(loaded.passes["one"], 3);
         assert_eq!(loaded.invocations["one"], 3);
         let result = GraphRunner::new(&store, &artifacts, &nodes, &control)
@@ -2911,7 +3337,7 @@ mod tests {
             .unwrap();
         assert_eq!(result.status, RunStatus::Completed);
         let persisted = store.load(&id).unwrap().unwrap();
-        assert_eq!(persisted.format, 2);
+        assert_eq!(persisted.format, 3);
         assert_eq!(persisted.passes["one"], 3);
         assert_eq!(persisted.invocations["one"], 3);
         assert!(nodes.calls.lock().unwrap().is_empty());
@@ -3148,20 +3574,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn admission_rejects_plugins_parallel_nodes_and_finite_budget_without_exact_port() {
+    async fn admission_accepts_paired_parallel_topology_but_runner_still_requires_execution_support()
+     {
         let mut g = graph(&["one"], &[], "one");
         g.nodes[0].plugins = vec!["p".into()];
         assert!(matches!(
             GraphSnapshot::admit(serde_json::to_value(g).unwrap()),
             Err(GraphError::Unsupported(_))
         ));
-        let mut g = graph(&["one"], &[], "one");
-        g.ops
-            .insert("fan".into(), serde_json::json!({"fanout":{"join":"x"}}));
-        g.nodes[0].agent = None;
-        g.nodes[0].op = Some("fan".into());
+        let g = parallel_graph();
+        let admitted = GraphSnapshot::admit(serde_json::to_value(&g).unwrap()).unwrap();
+        assert_eq!(
+            admitted.parallel_regions().unwrap()["start"].branches,
+            vec![vec!["left".to_string()], vec!["right".to_string()]]
+        );
+        let (s, a, n, c) = setup();
+        let record = GraphRunRecord::create(admitted, Value::Null).unwrap();
         assert!(matches!(
-            GraphSnapshot::admit(serde_json::to_value(g).unwrap()),
+            GraphRunner::new(&s, &a, &n, &c).run(record).await,
             Err(GraphError::Unsupported(_))
         ));
         let mut g = graph(&["one"], &[], "one");
@@ -3173,6 +3603,211 @@ mod tests {
             GraphRunner::new(&s, &a, &n, &c).run(record).await,
             Err(GraphError::Unsupported(_))
         ));
+    }
+
+    #[test]
+    fn parallel_admission_rejects_orphan_reused_and_malformed_pairs() {
+        let mut orphan = parallel_graph();
+        orphan
+            .ops
+            .insert("lonely".into(), serde_json::json!({"join":{}}));
+        orphan.nodes.push(GraphNode {
+            id: "orphan".into(),
+            agent: None,
+            op: Some("lonely".into()),
+            input: None,
+            plugins: vec![],
+            max_rounds: None,
+        });
+        assert!(matches!(
+            orphan.validate(),
+            Err(GraphError::InvalidSnapshot(_))
+        ));
+
+        let mut wrong_pair = parallel_graph();
+        wrong_pair
+            .ops
+            .insert("other".into(), serde_json::json!({"join":{}}));
+        wrong_pair.nodes.push(GraphNode {
+            id: "other-join".into(),
+            agent: None,
+            op: Some("other".into()),
+            input: None,
+            plugins: vec![],
+            max_rounds: None,
+        });
+        wrong_pair.ops.insert(
+            "fanout2".into(),
+            serde_json::json!({"fanout":{"join":"collect"}}),
+        );
+        wrong_pair.nodes.push(GraphNode {
+            id: "split2".into(),
+            agent: None,
+            op: Some("fanout2".into()),
+            input: None,
+            plugins: vec![],
+            max_rounds: None,
+        });
+        wrong_pair.edges.extend([
+            GraphEdge {
+                from_node: "split2".into(),
+                to_node: "left".into(),
+            },
+            GraphEdge {
+                from_node: "split2".into(),
+                to_node: "right".into(),
+            },
+        ]);
+        assert!(matches!(
+            wrong_pair.validate(),
+            Err(GraphError::InvalidSnapshot(_))
+        ));
+
+        let mut both = parallel_graph();
+        both.ops.get_mut("fanout").unwrap()["run"] = Value::String("echo".into());
+        assert!(matches!(
+            both.validate(),
+            Err(GraphError::InvalidSnapshot(_))
+        ));
+    }
+
+    #[test]
+    fn parallel_admission_rejects_branch_forks_merges_and_cycles() {
+        let mut fork = parallel_graph();
+        fork.edges.push(GraphEdge {
+            from_node: "left".into(),
+            to_node: "after".into(),
+        });
+        assert!(matches!(
+            fork.validate(),
+            Err(GraphError::InvalidSnapshot(_))
+        ));
+
+        let mut merge = parallel_graph();
+        merge.edges.push(GraphEdge {
+            from_node: "after".into(),
+            to_node: "left".into(),
+        });
+        assert!(matches!(
+            merge.validate(),
+            Err(GraphError::InvalidSnapshot(_))
+        ));
+
+        let mut cycle = parallel_graph();
+        cycle.edges.push(GraphEdge {
+            from_node: "left".into(),
+            to_node: "start".into(),
+        });
+        assert!(matches!(
+            cycle.validate(),
+            Err(GraphError::InvalidSnapshot(_))
+        ));
+    }
+
+    #[test]
+    fn parallel_activation_facts_bind_pair_branch_paths_and_active_cursors() {
+        let snapshot = parallel_graph();
+        let mut record = GraphRunRecord::create(snapshot, Value::Null).unwrap();
+        record.status = RunStatus::Running;
+        let fanout_key = InvocationKey {
+            run_id: record.run_id.clone(),
+            graph_digest: record.graph_digest.clone(),
+            node_id: "start".into(),
+            invocation: 1,
+        };
+        record.invocations.insert("start".into(), 1);
+        record.passes.insert("start".into(), 1);
+        record.sequence = 1;
+        record.results.insert(
+            "start".into(),
+            vec![RunResult {
+                node_id: "start".into(),
+                key: fanout_key,
+                completion: NodeCompletion {
+                    submission: "fanout".into(),
+                    route: None,
+                    model_requests: 0,
+                    output: Value::Null,
+                },
+                commit: CommitRef {
+                    id: "start-1".into(),
+                    node_id: "start".into(),
+                    invocation: 1,
+                },
+                sequence: 1,
+            }],
+        );
+        record.sequence = 3;
+        for (sequence, target) in [(2, "left"), (3, "right")] {
+            record.decided.insert(
+                edge_key("start", target),
+                EdgeDecision {
+                    selected: true,
+                    sequence,
+                    source_invocation: 1,
+                    result_sequence: 1,
+                },
+            );
+        }
+        let activation_id = format!("{}:start:1", record.run_id);
+        record.parallel = Some(ParallelActivation {
+            activation_id: activation_id.clone(),
+            fanout_node: "start".into(),
+            join_node: "collect".into(),
+            fanout_invocation: 1,
+            branches: ["left", "right"]
+                .into_iter()
+                .enumerate()
+                .map(|(index, node)| ParallelBranchRecord {
+                    branch_id: format!("{activation_id}:branch:{index}"),
+                    entry: node.into(),
+                    nodes: vec![node.into()],
+                    next_index: 0,
+                    status: ParallelBranchStatus::Ready,
+                    cursor: None,
+                    completed: vec![],
+                    error: None,
+                })
+                .collect(),
+        });
+        record.validate().unwrap();
+
+        let mut invalid_pair = record.clone();
+        invalid_pair.parallel.as_mut().unwrap().join_node = "after".into();
+        assert!(matches!(
+            invalid_pair.validate(),
+            Err(GraphError::CorruptRun(_))
+        ));
+
+        let mut invalid_cursor = record.clone();
+        invalid_cursor.parallel.as_mut().unwrap().branches[0].cursor = Some(RunCursor {
+            node_id: "left".into(),
+            key: InvocationKey {
+                run_id: invalid_cursor.run_id.clone(),
+                graph_digest: invalid_cursor.graph_digest.clone(),
+                node_id: "left".into(),
+                invocation: 1,
+            },
+            input_commits: vec![],
+            prepared_input: Value::Null,
+        });
+        assert!(matches!(
+            invalid_cursor.validate(),
+            Err(GraphError::CorruptRun(_))
+        ));
+    }
+
+    #[test]
+    fn run_format_two_migrates_to_parallel_aware_format_three() {
+        let mut record = GraphRunRecord::create(graph(&["one"], &[], "one"), Value::Null).unwrap();
+        record.format = 2;
+        let mut value = serde_json::to_value(&record).unwrap();
+        value.as_object_mut().unwrap().remove("parallel");
+        let mut loaded: GraphRunRecord = serde_json::from_value(value).unwrap();
+        loaded.migrate_format().unwrap();
+        assert_eq!(loaded.format, 3);
+        assert!(loaded.parallel.is_none());
+        loaded.validate().unwrap();
     }
 
     #[tokio::test]
