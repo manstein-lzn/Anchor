@@ -2002,6 +2002,204 @@ mod tests {
             })
         }
     }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum CrashPoint {
+        AfterNodeFact,
+        AfterArtifactCommit,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    struct DurableTestArtifact {
+        commit: CommitRef,
+        output: Value,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    enum DurableTestNodeFact {
+        Completed(NodeCompletion),
+    }
+
+    struct DurableTestPorts {
+        root: PathBuf,
+        crash_point: Option<CrashPoint>,
+    }
+
+    impl DurableTestPorts {
+        fn node_fact_path(&self, key: &InvocationKey) -> PathBuf {
+            self.root.join(format!("node-{}.json", key.durable_key()))
+        }
+
+        fn artifact_path(&self, key: &InvocationKey) -> PathBuf {
+            self.root
+                .join(format!("artifact-{}.json", key.durable_key()))
+        }
+
+        fn execute_count_path(&self) -> PathBuf {
+            self.root.join("execute-count")
+        }
+
+        fn freeze_count_path(&self) -> PathBuf {
+            self.root.join("freeze-count")
+        }
+    }
+
+    impl NodeExecutionPort for DurableTestPorts {
+        fn capabilities(&self) -> NodeExecutionCapabilities {
+            NodeExecutionCapabilities {
+                agent: true,
+                op_run: false,
+                exact_provider_request_budget: true,
+            }
+        }
+
+        fn completion_fact<'a>(
+            &'a self,
+            key: &'a InvocationKey,
+        ) -> Pin<Box<dyn Future<Output = Result<CompletionFact, GraphError>> + Send + 'a>> {
+            Box::pin(async move {
+                let path = self.node_fact_path(key);
+                match fs::read(path) {
+                    Ok(bytes) => {
+                        let fact: DurableTestNodeFact =
+                            serde_json::from_slice(&bytes).map_err(GraphError::RunDecode)?;
+                        match fact {
+                            DurableTestNodeFact::Completed(completion) => {
+                                Ok(CompletionFact::Completed(completion))
+                            }
+                        }
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                        Ok(CompletionFact::NotStarted)
+                    }
+                    Err(error) => Err(error.into()),
+                }
+            })
+        }
+
+        fn execute<'a>(
+            &'a self,
+            request: NodeExecutionRequest,
+        ) -> Pin<Box<dyn Future<Output = Result<NodeExecutionOutcome, GraphError>> + Send + 'a>>
+        {
+            Box::pin(async move {
+                if self.node_fact_path(&request.key).exists() {
+                    return Err(GraphError::CorruptRun(
+                        "durable test Node port received a duplicate dispatch".into(),
+                    ));
+                }
+                write_durable_bytes(&self.execute_count_path(), b"1")?;
+                let completion = NodeCompletion {
+                    submission: format!("completed:{}", request.key.node_id),
+                    route: request.routes.first().cloned(),
+                    model_requests: 1,
+                    output: serde_json::json!({"node":request.key.node_id,"input":request.input}),
+                };
+                write_durable_json(
+                    &self.node_fact_path(&request.key),
+                    &DurableTestNodeFact::Completed(completion.clone()),
+                )?;
+                if self.crash_point == Some(CrashPoint::AfterNodeFact) {
+                    std::process::exit(71);
+                }
+                Ok(NodeExecutionOutcome::Completed(completion))
+            })
+        }
+    }
+
+    impl ArtifactPort for DurableTestPorts {
+        fn freeze<'a>(
+            &'a self,
+            key: &'a InvocationKey,
+            completion: &'a NodeCompletion,
+        ) -> Pin<Box<dyn Future<Output = Result<CommitRef, GraphError>> + Send + 'a>> {
+            Box::pin(async move {
+                let path = self.artifact_path(key);
+                let artifact = match fs::read(&path) {
+                    Ok(bytes) => {
+                        let existing: DurableTestArtifact =
+                            serde_json::from_slice(&bytes).map_err(GraphError::RunDecode)?;
+                        if existing.output != completion.output {
+                            return Err(GraphError::CorruptRun(
+                                "artifact retry changed the frozen output".into(),
+                            ));
+                        }
+                        existing
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                        let artifact = DurableTestArtifact {
+                            commit: CommitRef {
+                                id: key.durable_key(),
+                                node_id: key.node_id.clone(),
+                                invocation: key.invocation,
+                            },
+                            output: completion.output.clone(),
+                        };
+                        write_durable_json(&path, &artifact)?;
+                        write_durable_bytes(&self.freeze_count_path(), b"1")?;
+                        artifact
+                    }
+                    Err(error) => return Err(error.into()),
+                };
+                if self.crash_point == Some(CrashPoint::AfterArtifactCommit) {
+                    std::process::exit(72);
+                }
+                Ok(artifact.commit)
+            })
+        }
+
+        fn resolve<'a>(
+            &'a self,
+            commit: &'a CommitRef,
+        ) -> Pin<Box<dyn Future<Output = Result<Value, GraphError>> + Send + 'a>> {
+            Box::pin(async move {
+                let path = self.root.join(format!("artifact-{}.json", commit.id));
+                let bytes = fs::read(path)?;
+                let artifact: DurableTestArtifact =
+                    serde_json::from_slice(&bytes).map_err(GraphError::RunDecode)?;
+                if artifact.commit != *commit {
+                    return Err(GraphError::CorruptRun(
+                        "test artifact commit identity mismatch".into(),
+                    ));
+                }
+                Ok(artifact.output)
+            })
+        }
+    }
+
+    fn write_durable_json(
+        path: &std::path::Path,
+        value: &impl Serialize,
+    ) -> Result<(), GraphError> {
+        let bytes = serde_json::to_vec(value).map_err(GraphError::RunDecode)?;
+        write_durable_bytes(path, &bytes)
+    }
+
+    fn write_durable_bytes(path: &std::path::Path, bytes: &[u8]) -> Result<(), GraphError> {
+        let parent = path
+            .parent()
+            .ok_or_else(|| GraphError::CorruptRun("test durable path has no parent".into()))?;
+        fs::create_dir_all(parent)?;
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| GraphError::CorruptRun("test durable path is invalid".into()))?;
+        let temporary = parent.join(format!(".{name}.{}.{}.tmp", std::process::id(), stamp));
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        fs::rename(&temporary, path)?;
+        fs::File::open(parent)?.sync_all()?;
+        Ok(())
+    }
+
     struct Control {
         pause: bool,
         stop: bool,
@@ -3305,6 +3503,129 @@ mod tests {
         std::process::exit(0);
         #[allow(unreachable_code)]
         drop(_lease);
+    }
+
+    #[tokio::test]
+    async fn file_run_store_recovers_completed_node_and_artifact_facts_after_process_crash() {
+        let executable = std::env::current_exe().unwrap();
+        for (crash_name, expected_exit) in [("after-node-fact", 71), ("after-artifact-commit", 72)]
+        {
+            let root = std::env::temp_dir().join(format!(
+                "anchor-graph-recovery-{}-{}-{crash_name}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            fs::create_dir_all(&root).unwrap();
+            let store = FileRunStore::new(&root);
+            let initial = GraphRunRecord::create(graph(&["one"], &[], "one"), Value::Null).unwrap();
+            let run_id = initial.run_id.clone();
+            write_durable_json(&root.join("initial.json"), &initial).unwrap();
+
+            let crashed = Command::new(&executable)
+                .args([
+                    "--exact",
+                    "graph::tests::graph_runner_recovery_process_helper",
+                    "--nocapture",
+                ])
+                .env("ANCHOR_GRAPH_RECOVERY_TEST_ROOT", &root)
+                .env("ANCHOR_GRAPH_RECOVERY_TEST_RUN", &run_id)
+                .env("ANCHOR_GRAPH_RECOVERY_TEST_CRASH", crash_name)
+                .output()
+                .unwrap();
+            assert_eq!(
+                crashed.status.code(),
+                Some(expected_exit),
+                "child did not crash at {crash_name}; stdout={}, stderr={}",
+                String::from_utf8_lossy(&crashed.stdout),
+                String::from_utf8_lossy(&crashed.stderr)
+            );
+
+            let interrupted = store.load(&run_id).unwrap().unwrap();
+            assert_eq!(interrupted.status, RunStatus::Running);
+            let cursor = interrupted
+                .cursor
+                .as_ref()
+                .expect("cursor persisted before dispatch");
+            assert_eq!(cursor.node_id, "one");
+            assert_eq!(cursor.key.invocation, 1);
+            assert_eq!(fs::read(root.join("execute-count")).unwrap(), b"1");
+            assert!(
+                root.join(format!("node-{}.json", cursor.key.durable_key()))
+                    .exists(),
+                "durable completion fact must survive {crash_name}"
+            );
+
+            let ports = DurableTestPorts {
+                root: root.clone(),
+                crash_point: None,
+            };
+            let control = Control::default();
+            let recovered = GraphRunner::new(&store, &ports, &ports, &control)
+                .run(interrupted)
+                .await
+                .unwrap();
+            assert_eq!(recovered.status, RunStatus::Completed, "{crash_name}");
+            assert!(recovered.cursor.is_none());
+            assert_eq!(recovered.invocations["one"], 1);
+            assert_eq!(recovered.passes["one"], 1);
+            assert_eq!(recovered.results["one"].len(), 1);
+            assert_eq!(fs::read(root.join("execute-count")).unwrap(), b"1");
+            assert_eq!(fs::read(root.join("freeze-count")).unwrap(), b"1");
+
+            let result = &recovered.results["one"][0];
+            let artifact_path = ports.artifact_path(&result.key);
+            let artifact: DurableTestArtifact =
+                serde_json::from_slice(&fs::read(artifact_path).unwrap()).unwrap();
+            assert_eq!(result.commit, artifact.commit);
+            assert_eq!(result.commit.id, result.key.durable_key());
+            assert_eq!(
+                store.load(&run_id).unwrap().unwrap(),
+                recovered,
+                "the recovered result must be the durable Run fact"
+            );
+            drop(store);
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn graph_runner_recovery_process_helper() {
+        let (Ok(root), Ok(run_id), Ok(crash_name)) = (
+            std::env::var("ANCHOR_GRAPH_RECOVERY_TEST_ROOT"),
+            std::env::var("ANCHOR_GRAPH_RECOVERY_TEST_RUN"),
+            std::env::var("ANCHOR_GRAPH_RECOVERY_TEST_CRASH"),
+        ) else {
+            return;
+        };
+        if !PathBuf::from(&root)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("anchor-graph-recovery-"))
+        {
+            return;
+        }
+        let crash_point = match crash_name.as_str() {
+            "after-node-fact" => CrashPoint::AfterNodeFact,
+            "after-artifact-commit" => CrashPoint::AfterArtifactCommit,
+            _ => panic!("unknown graph recovery crash point `{crash_name}`"),
+        };
+        let bytes = fs::read(PathBuf::from(&root).join("initial.json")).unwrap();
+        let record: GraphRunRecord = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(record.run_id, run_id);
+        let store = FileRunStore::new(&root);
+        let ports = DurableTestPorts {
+            root: PathBuf::from(root),
+            crash_point: Some(crash_point),
+        };
+        let control = Control::default();
+        let result = GraphRunner::new(&store, &ports, &ports, &control)
+            .run(record)
+            .await
+            .unwrap();
+        assert_eq!(result.status, RunStatus::Completed);
     }
 
     #[derive(Default)]
