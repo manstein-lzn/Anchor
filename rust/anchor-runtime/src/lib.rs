@@ -509,8 +509,39 @@ impl NodeExecutor {
         cancellation: &Cancellation,
         routes: &[String],
     ) -> Result<NodeOutcome, NodeError> {
+        Self::execute_with_store_and_policy(
+            checkpoint,
+            completion,
+            tools,
+            store,
+            store_key,
+            ExecutionPolicy::default(),
+            cancellation,
+            routes,
+        )
+        .await
+    }
+
+    /// Drive a node with host policy and persist protocol state at every
+    /// external I/O boundary. A timeout leaves the last pending step in the
+    /// store so the host can reload it and bind a provider again.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn execute_with_store_and_policy<
+        C: CompletionPort,
+        T: ToolPort,
+        S: CheckpointStore,
+    >(
+        checkpoint: &mut AgentCheckpoint,
+        completion: &C,
+        tools: &T,
+        store: &S,
+        store_key: &str,
+        policy: ExecutionPolicy,
+        cancellation: &Cancellation,
+        routes: &[String],
+    ) -> Result<NodeOutcome, NodeError> {
         let context = ExecutionContext {
-            policy: ExecutionPolicy::default(),
+            policy,
             cancellation,
             routes,
         };

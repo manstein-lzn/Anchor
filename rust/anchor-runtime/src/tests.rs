@@ -569,10 +569,12 @@ async fn node_executor_recovers_persisted_model_timeout_with_new_provider() {
     let store = super::FileCheckpointStore::new(&root);
     let mut checkpoint = AgentCheckpoint::start("review", 13, "slow provider", 1);
     let cancellation = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let error = super::NodeExecutor::execute_with_policy(
+    let error = super::NodeExecutor::execute_with_store_and_policy(
         &mut checkpoint,
         &SlowCompletion,
         &EchoTools,
+        &store,
+        "execution-13",
         ExecutionPolicy {
             model_timeout: Some(std::time::Duration::from_millis(1)),
             tool_timeout: None,
@@ -584,9 +586,6 @@ async fn node_executor_recovers_persisted_model_timeout_with_new_provider() {
     .expect_err("slow model should time out");
     assert!(error.to_string().contains("model request timed out"));
 
-    store
-        .save("execution-13", &checkpoint)
-        .expect("persist interrupted model request");
     let mut restored = store
         .load("execution-13", "review", 13)
         .expect("load checkpoint")
