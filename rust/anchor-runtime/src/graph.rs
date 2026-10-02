@@ -1125,6 +1125,15 @@ impl GraphRunRecord {
                     "edge decision `{key}` has an invalid sequence"
                 )));
             }
+            if decision.result_sequence > 0
+                && results_by_identity
+                    .get(&(from, decision.source_invocation))
+                    .is_none_or(|result_sequence| decision.sequence <= *result_sequence)
+            {
+                return Err(GraphError::CorruptRun(format!(
+                    "edge decision `{key}` is not newer than its source result"
+                )));
+            }
             match (
                 decision.selected,
                 decision.source_invocation,
@@ -3563,6 +3572,76 @@ mod tests {
             Err(GraphError::CorruptRun(_))
         ));
 
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn file_run_store_rejects_edge_decision_not_newer_than_its_result() {
+        let root = std::env::temp_dir().join(format!(
+            "anchor-self-loop-freshness-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let store = FileRunStore::new(&root);
+        let mut record =
+            GraphRunRecord::create(graph(&["spin"], &[("spin", "spin")], "spin"), Value::Null)
+                .unwrap();
+        let key = InvocationKey {
+            run_id: record.run_id.clone(),
+            graph_digest: record.graph_digest.clone(),
+            node_id: "spin".into(),
+            invocation: 1,
+        };
+        let result_sequence = 1;
+        record.results.insert(
+            "spin".into(),
+            vec![RunResult {
+                node_id: "spin".into(),
+                key: key.clone(),
+                completion: NodeCompletion {
+                    submission: "spin completed".into(),
+                    route: Some("spin".into()),
+                    model_requests: 1,
+                    output: Value::Null,
+                },
+                commit: CommitRef {
+                    id: key.durable_key(),
+                    node_id: "spin".into(),
+                    invocation: 1,
+                },
+                sequence: result_sequence,
+            }],
+        );
+        record.invocations.insert("spin".into(), 1);
+        record.passes.insert("spin".into(), 1);
+        record.sequence = 2;
+        record.status = RunStatus::Stopped;
+        record.decided.insert(
+            "spin|spin".into(),
+            EdgeDecision {
+                selected: true,
+                sequence: 2,
+                source_invocation: 1,
+                result_sequence,
+            },
+        );
+
+        // This is a valid completed node result whose self-loop was selected;
+        // the Run was then stopped before the next invocation was dispatched.
+        store.save(&record).unwrap();
+        let id = record.run_id.clone();
+        assert_eq!(store.load(&id).unwrap(), Some(record.clone()));
+
+        let mut stale = record.clone();
+        stale.decided.get_mut("spin|spin").unwrap().sequence = result_sequence;
+        assert!(matches!(store.save(&stale), Err(GraphError::CorruptRun(_))));
+
+        let path = root.join(format!("{id}.json"));
+        fs::write(&path, serde_json::to_vec(&stale).unwrap()).unwrap();
+        assert!(matches!(store.load(&id), Err(GraphError::CorruptRun(_))));
         fs::remove_dir_all(root).unwrap();
     }
 
