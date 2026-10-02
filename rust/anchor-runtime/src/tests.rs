@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rig_agent::{
@@ -14,7 +15,10 @@ use rig_agent::{
 use serde::Deserialize;
 use serde_json::json;
 
-use super::{AgentCheckpoint, CheckpointError, CheckpointStore, CompletionPort, ExecutionPolicy};
+use super::{
+    AgentCheckpoint, CheckpointError, CheckpointStore, CompletionObserver, CompletionPort,
+    ExecutionPolicy,
+};
 
 #[derive(Debug, Deserialize, JsonSchema, PartialEq)]
 struct AgentCompletion {
@@ -202,6 +206,38 @@ impl super::ToolPort for FailingTools {
         >,
     > {
         Box::pin(async { Err(super::ToolError::Failed("fixture tool failure".to_owned())) })
+    }
+}
+
+#[derive(Default)]
+struct RecordingObserver {
+    events: Mutex<Vec<String>>,
+}
+
+impl CompletionObserver for RecordingObserver {
+    fn request_started(&self, provider: &str) {
+        self.events
+            .lock()
+            .expect("observer lock")
+            .push(format!("start:{provider}"));
+    }
+
+    fn request_finished(
+        &self,
+        provider: &str,
+        _response: &rig_agent::core::completion::CompletionResponse,
+    ) {
+        self.events
+            .lock()
+            .expect("observer lock")
+            .push(format!("finish:{provider}"));
+    }
+
+    fn request_failed(&self, provider: &str, _error: &rig_agent::core::error::ProviderError) {
+        self.events
+            .lock()
+            .expect("observer lock")
+            .push(format!("fail:{provider}"));
     }
 }
 
@@ -568,4 +604,23 @@ async fn streaming_port_honors_cancellation_without_committing_response() {
     .await
     .expect_err("cancelled stream");
     assert!(matches!(error, super::StreamingError::Cancelled));
+}
+
+#[tokio::test]
+async fn observed_completion_port_records_only_request_outcomes() {
+    let model = MockCompletionModel::text(r#"{"summary":"observed"}"#);
+    let base = super::RigCompletionPort::new(model.erase());
+    let observer = std::sync::Arc::new(RecordingObserver::default());
+    let port = super::ObservedCompletionPort::new(base, "fixture-provider", observer.clone());
+    let response = port
+        .complete(rig_agent::core::completion::CompletionRequest::new(
+            "observe",
+        ))
+        .await
+        .expect("completion");
+    assert_eq!(response.choice.len(), 1);
+    assert_eq!(
+        observer.events.lock().expect("observer lock").as_slice(),
+        ["start:fixture-provider", "finish:fixture-provider"]
+    );
 }

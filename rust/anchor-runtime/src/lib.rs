@@ -147,6 +147,69 @@ pub trait CompletionPort: Send + Sync {
     >;
 }
 
+/// Host-owned request/response observation hook. It receives metadata and
+/// normalized provider outcomes, never credentials or prompt contents.
+pub trait CompletionObserver: Send + Sync {
+    fn request_started(&self, provider: &str);
+    fn request_finished(&self, provider: &str, response: &CompletionResponse);
+    fn request_failed(&self, provider: &str, error: &rig_agent::core::error::ProviderError);
+}
+
+/// Decorator that adds observation without changing the CompletionPort
+/// contract or making the kernel depend on a logging/telemetry framework.
+pub struct ObservedCompletionPort<P, O> {
+    inner: P,
+    observer: Arc<O>,
+    provider: String,
+}
+
+impl<P, O> ObservedCompletionPort<P, O> {
+    pub fn new(inner: P, provider: impl Into<String>, observer: Arc<O>) -> Self {
+        Self {
+            inner,
+            observer,
+            provider: provider.into(),
+        }
+    }
+}
+
+impl<P, O> CompletionPort for ObservedCompletionPort<P, O>
+where
+    P: CompletionPort,
+    O: CompletionObserver + 'static,
+{
+    fn capabilities(&self) -> ProviderCapabilities {
+        self.inner.capabilities()
+    }
+
+    fn complete<'a>(
+        &'a self,
+        request: CompletionRequest,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<CompletionResponse, rig_agent::core::error::ProviderError>>
+                + Send
+                + 'a,
+        >,
+    > {
+        let provider = self.provider.clone();
+        let observer = Arc::clone(&self.observer);
+        Box::pin(async move {
+            observer.request_started(&provider);
+            match self.inner.complete(request).await {
+                Ok(response) => {
+                    observer.request_finished(&provider, &response);
+                    Ok(response)
+                }
+                Err(error) => {
+                    observer.request_failed(&provider, &error);
+                    Err(error)
+                }
+            }
+        })
+    }
+}
+
 /// Optional streaming extension. The complete response is still returned to
 /// the AgentRun only after the stream reaches its provider finish event.
 pub trait StreamingCompletionPort: CompletionPort {
