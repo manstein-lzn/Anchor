@@ -2005,8 +2005,10 @@ mod tests {
 
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum CrashPoint {
-        AfterNodeFact,
-        AfterArtifactCommit,
+        NotStartedFactCheck,
+        NodeFact,
+        FailedFact,
+        ArtifactCommit,
     }
 
     #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -2018,6 +2020,7 @@ mod tests {
     #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     enum DurableTestNodeFact {
         Completed(NodeCompletion),
+        Failed(String),
     }
 
     struct DurableTestPorts {
@@ -2067,9 +2070,15 @@ mod tests {
                             DurableTestNodeFact::Completed(completion) => {
                                 Ok(CompletionFact::Completed(completion))
                             }
+                            DurableTestNodeFact::Failed(reason) => {
+                                Ok(CompletionFact::Failed(reason))
+                            }
                         }
                     }
                     Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                        if self.crash_point == Some(CrashPoint::NotStartedFactCheck) {
+                            std::process::exit(70);
+                        }
                         Ok(CompletionFact::NotStarted)
                     }
                     Err(error) => Err(error.into()),
@@ -2089,6 +2098,14 @@ mod tests {
                     ));
                 }
                 write_durable_bytes(&self.execute_count_path(), b"1")?;
+                if self.crash_point == Some(CrashPoint::FailedFact) {
+                    let reason = "durable test failure".to_owned();
+                    write_durable_json(
+                        &self.node_fact_path(&request.key),
+                        &DurableTestNodeFact::Failed(reason),
+                    )?;
+                    std::process::exit(73);
+                }
                 let completion = NodeCompletion {
                     submission: format!("completed:{}", request.key.node_id),
                     route: request.routes.first().cloned(),
@@ -2099,7 +2116,7 @@ mod tests {
                     &self.node_fact_path(&request.key),
                     &DurableTestNodeFact::Completed(completion.clone()),
                 )?;
-                if self.crash_point == Some(CrashPoint::AfterNodeFact) {
+                if self.crash_point == Some(CrashPoint::NodeFact) {
                     std::process::exit(71);
                 }
                 Ok(NodeExecutionOutcome::Completed(completion))
@@ -2141,7 +2158,7 @@ mod tests {
                     }
                     Err(error) => return Err(error.into()),
                 };
-                if self.crash_point == Some(CrashPoint::AfterArtifactCommit) {
+                if self.crash_point == Some(CrashPoint::ArtifactCommit) {
                     std::process::exit(72);
                 }
                 Ok(artifact.commit)
@@ -3592,6 +3609,163 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn file_run_store_recovers_not_started_invocation_after_process_crash() {
+        let executable = std::env::current_exe().unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "anchor-graph-recovery-{}-{}-before-dispatch",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let store = FileRunStore::new(&root);
+        let initial = GraphRunRecord::create(graph(&["one"], &[], "one"), Value::Null).unwrap();
+        let run_id = initial.run_id.clone();
+        write_durable_json(&root.join("initial.json"), &initial).unwrap();
+
+        let crashed = Command::new(&executable)
+            .args([
+                "--exact",
+                "graph::tests::graph_runner_recovery_process_helper",
+                "--nocapture",
+            ])
+            .env("ANCHOR_GRAPH_RECOVERY_TEST_ROOT", &root)
+            .env("ANCHOR_GRAPH_RECOVERY_TEST_RUN", &run_id)
+            .env("ANCHOR_GRAPH_RECOVERY_TEST_CRASH", "after-not-started")
+            .output()
+            .unwrap();
+        assert_eq!(crashed.status.code(), Some(70));
+
+        let interrupted = store.load(&run_id).unwrap().unwrap();
+        assert_eq!(interrupted.status, RunStatus::Running);
+        let cursor = interrupted
+            .cursor
+            .clone()
+            .expect("cursor saved before fact lookup");
+        assert_eq!(cursor.node_id, "one");
+        assert_eq!(cursor.key.invocation, 1);
+        assert!(
+            !root
+                .join(format!("node-{}.json", cursor.key.durable_key()))
+                .exists()
+        );
+        assert!(!root.join("execute-count").exists());
+        drop(store.acquire_lease(&run_id).unwrap());
+
+        let ports = DurableTestPorts {
+            root: root.clone(),
+            crash_point: None,
+        };
+        let recovered = GraphRunner::new(&store, &ports, &ports, &Control::default())
+            .run(interrupted)
+            .await
+            .unwrap();
+        assert_eq!(recovered.status, RunStatus::Completed);
+        assert!(recovered.cursor.is_none());
+        assert_eq!(recovered.invocations["one"], 1);
+        assert_eq!(recovered.passes["one"], 1);
+        assert_eq!(recovered.results["one"].len(), 1);
+        assert_eq!(fs::read(root.join("execute-count")).unwrap(), b"1");
+        let result = &recovered.results["one"][0];
+        assert_eq!(result.key, cursor.key);
+        assert_eq!(result.commit.id, cursor.key.durable_key());
+        assert_eq!(store.load(&run_id).unwrap().unwrap(), recovered);
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn file_run_store_recovers_durable_failed_node_without_replay_or_freeze() {
+        let executable = std::env::current_exe().unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "anchor-graph-recovery-{}-{}-after-failed-fact",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let store = FileRunStore::new(&root);
+        let initial = GraphRunRecord::create(
+            graph(&["one", "two"], &[("one", "two")], "one"),
+            Value::Null,
+        )
+        .unwrap();
+        let run_id = initial.run_id.clone();
+        write_durable_json(&root.join("initial.json"), &initial).unwrap();
+
+        let crashed = Command::new(&executable)
+            .args([
+                "--exact",
+                "graph::tests::graph_runner_recovery_process_helper",
+                "--nocapture",
+            ])
+            .env("ANCHOR_GRAPH_RECOVERY_TEST_ROOT", &root)
+            .env("ANCHOR_GRAPH_RECOVERY_TEST_RUN", &run_id)
+            .env("ANCHOR_GRAPH_RECOVERY_TEST_CRASH", "after-failed-fact")
+            .output()
+            .unwrap();
+        assert_eq!(crashed.status.code(), Some(73));
+
+        let interrupted = store.load(&run_id).unwrap().unwrap();
+        assert_eq!(interrupted.status, RunStatus::Running);
+        let cursor = interrupted
+            .cursor
+            .clone()
+            .expect("cursor saved before dispatch");
+        assert_eq!(cursor.node_id, "one");
+        assert_eq!(cursor.key.invocation, 1);
+        assert_eq!(fs::read(root.join("execute-count")).unwrap(), b"1");
+        let fact: DurableTestNodeFact = serde_json::from_slice(
+            &fs::read(root.join(format!("node-{}.json", cursor.key.durable_key()))).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            fact,
+            DurableTestNodeFact::Failed("durable test failure".into())
+        );
+        drop(store.acquire_lease(&run_id).unwrap());
+
+        let ports = DurableTestPorts {
+            root: root.clone(),
+            crash_point: None,
+        };
+        let recovered = GraphRunner::new(&store, &ports, &ports, &Control::default())
+            .run(interrupted)
+            .await
+            .unwrap();
+        assert_eq!(recovered.status, RunStatus::Failed);
+        assert!(recovered.cursor.is_none());
+        assert_eq!(recovered.invocations["one"], 1);
+        assert_eq!(recovered.passes["one"], 1);
+        assert!(recovered.results.is_empty());
+        assert!(
+            recovered.decided.is_empty(),
+            "failure must not settle outgoing edges"
+        );
+        assert!(
+            recovered
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("durable test failure")
+        );
+        assert_eq!(fs::read(root.join("execute-count")).unwrap(), b"1");
+        assert!(!root.join("freeze-count").exists());
+        assert!(
+            !root
+                .join(format!("artifact-{}.json", cursor.key.durable_key()))
+                .exists()
+        );
+        assert_eq!(store.load(&run_id).unwrap().unwrap(), recovered);
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
     async fn graph_runner_recovery_process_helper() {
         let (Ok(root), Ok(run_id), Ok(crash_name)) = (
             std::env::var("ANCHOR_GRAPH_RECOVERY_TEST_ROOT"),
@@ -3608,8 +3782,10 @@ mod tests {
             return;
         }
         let crash_point = match crash_name.as_str() {
-            "after-node-fact" => CrashPoint::AfterNodeFact,
-            "after-artifact-commit" => CrashPoint::AfterArtifactCommit,
+            "after-not-started" => CrashPoint::NotStartedFactCheck,
+            "after-node-fact" => CrashPoint::NodeFact,
+            "after-failed-fact" => CrashPoint::FailedFact,
+            "after-artifact-commit" => CrashPoint::ArtifactCommit,
             _ => panic!("unknown graph recovery crash point `{crash_name}`"),
         };
         let bytes = fs::read(PathBuf::from(&root).join("initial.json")).unwrap();
