@@ -127,6 +127,7 @@ def generate(source: dict[str, Any]) -> dict[str, Any]:
                     "python_status": state.status,
                     "reason": state.reason,
                     "ordered_executed_nodes": state.executed,
+                    "skipped_nodes": state.skipped,
                     "passes": state.passes,
                     "ceased": state.ceased,
                     "edge_decisions": edge_decisions,

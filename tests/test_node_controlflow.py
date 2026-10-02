@@ -897,6 +897,62 @@ def test_a12b_the_route_the_adapter_returns_drives_a_real_branch(tmp_path, monke
     assert state.nodes["decide"]["route"] == "right", "the route the adapter returned is the record's"
 
 
+def test_rejected_branch_propagates_false_edge_to_diamond_merge(tmp_path, monkeypatch):
+    """A rejected arm settles its downstream edge so a selected arm can reach the merge."""
+    from anchor.simple import graph as graph_module
+    from anchor.simple import run as runner
+
+    graph = {
+        "entry": "decide",
+        "objective": "route through one side of a conditional diamond",
+        "agents": {"w": {"model": "models.academic", "writes": ["note.md"]}},
+        "nodes": [{"id": node, "agent": "w"} for node in ("decide", "left", "right", "merge")],
+        "edges": [
+            {"from": "decide", "to": "left"},
+            {"from": "decide", "to": "right"},
+            {"from": "left", "to": "merge"},
+            {"from": "right", "to": "merge"},
+        ],
+    }
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "graph.json").write_text(json.dumps(graph), encoding="utf-8")
+    config = tmp_path / "runtime.json"
+    config.write_text('{"models": []}', encoding="utf-8")
+
+    models = {
+        "decide": model_from(
+            ["printf 'decision\\n' > note.md"], ['anchor-route --to right --reason "take the right arm"']
+        ),
+        "right": model_from(['anchor-done --summary "right arm complete"']),
+        "merge": model_from(['anchor-done --summary "merge complete"']),
+    }
+    calls = []
+
+    def factory(g, node_id, directory, models_, secret, cfg, inputs=(), trace=None, scripted_model=None, control=None):
+        calls.append(node_id)
+        return AdapterAgent(
+            Path(directory), node_id, inputs, trace, models[node_id], graph_module.Graph.routes(g, node_id)
+        )
+
+    monkeypatch.setattr(runner, "_config", lambda path: ({}, None))
+    monkeypatch.setattr(runner, "_agent_for", factory)
+
+    state = runner.run(workspace, config_path=config)
+
+    assert state.status == "finished", (state.status, state.error, state.decided)
+    assert calls == ["decide", "right", "merge"]
+    assert state.executed == ["decide", "right", "merge"]
+    assert state.skipped == ["left"]
+    assert state.decided["decide|left"][0] is False
+    assert state.decided["decide|right"][0] is True
+    assert state.decided["left|merge"][0] is False
+    assert state.decided["right|merge"][0] is True
+    merge_inputs = dict(state.nodes["merge"]["inputs"])
+    assert merge_inputs["right"] == state.nodes["right"]["commit"]
+    assert "left" not in merge_inputs
+
+
 # ── the compatibility question the reviewer said must be settled before freezing ──────────────────
 
 def test_the_harness_compaction_can_see_an_ordinary_observation(tmp_path):

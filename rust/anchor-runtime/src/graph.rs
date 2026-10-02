@@ -564,6 +564,9 @@ impl<'a, S: RunStore, A: ArtifactPort, N: NodeExecutionPort, C: RunControl>
                 self.store.save(&record)?;
                 return Ok(record);
             }
+            if propagate_inactive_edges(&mut record)? {
+                self.store.save(&record)?;
+            }
             let Some(node) = next_node(&record)? else {
                 record.status = if record.ceased.is_empty() {
                     RunStatus::Completed
@@ -601,7 +604,7 @@ impl<'a, S: RunStore, A: ArtifactPort, N: NodeExecutionPort, C: RunControl>
                     let next = record.module_activations.get(&scope).copied().unwrap_or(0) + 1;
                     if next > u64::from(limit) {
                         record.ceased.insert(format!("{scope}@{limit}"));
-                        self.refuse_edges(&mut record, &node.id)?;
+                        refuse_module_activation(&mut record, &scope, &node.id)?;
                         continue;
                     }
                     record.module_activations.insert(scope.clone(), next);
@@ -1141,6 +1144,167 @@ fn next_node(record: &GraphRunRecord) -> Result<Option<GraphNode>, GraphError> {
     }))
 }
 
+/// Persist false decisions through nodes that were structurally skipped because
+/// every incoming route was explicitly unselected. A previously-run node is
+/// inactive again only when it receives a newer false input than its latest
+/// result; this retires stale outgoing selections on later loop rounds.
+fn propagate_inactive_edges(record: &mut GraphRunRecord) -> Result<bool, GraphError> {
+    if record.cursor.is_some() {
+        return Ok(false);
+    }
+
+    let mut changed = false;
+    loop {
+        let mut pass_changed = false;
+        for node in &record.snapshot.nodes {
+            if node.id == record.snapshot.entry
+                || record.cursor.as_ref().is_some_and(|c| c.node_id == node.id)
+            {
+                continue;
+            }
+            let incoming = record
+                .snapshot
+                .edges
+                .iter()
+                .filter(|edge| edge.to_node == node.id)
+                .collect::<Vec<_>>();
+            if incoming.is_empty()
+                || incoming.iter().any(|edge| {
+                    record
+                        .decided
+                        .get(&edge_key(&edge.from_node, &edge.to_node))
+                        .is_none_or(|decision| decision.selected)
+                })
+            {
+                continue;
+            }
+
+            let latest_result_sequence = record
+                .results
+                .get(&node.id)
+                .and_then(|results| results.last())
+                .map(|result| result.sequence);
+            let latest_input_sequence = incoming
+                .iter()
+                .filter_map(|edge| {
+                    record
+                        .decided
+                        .get(&edge_key(&edge.from_node, &edge.to_node))
+                        .map(|decision| decision.sequence)
+                })
+                .max()
+                .unwrap_or(0);
+            if latest_result_sequence.is_some_and(|result| latest_input_sequence <= result) {
+                continue;
+            }
+
+            let outgoing = record
+                .snapshot
+                .edges
+                .iter()
+                .filter(|edge| edge.from_node == node.id)
+                .map(|edge| edge.to_node.clone())
+                .collect::<Vec<_>>();
+            for target in outgoing {
+                let key = edge_key(&node.id, &target);
+                if record.decided.get(&key).is_some_and(|decision| {
+                    !decision.selected
+                        && latest_result_sequence
+                            .is_none_or(|result_sequence| decision.sequence > result_sequence)
+                }) {
+                    continue;
+                }
+                record.sequence += 1;
+                record.decided.insert(
+                    key,
+                    EdgeDecision {
+                        selected: false,
+                        sequence: record.sequence,
+                        source_invocation: 0,
+                        result_sequence: 0,
+                    },
+                );
+                pass_changed = true;
+                changed = true;
+            }
+        }
+        if !pass_changed {
+            return Ok(changed);
+        }
+    }
+}
+
+fn refuse_module_activation(
+    record: &mut GraphRunRecord,
+    scope: &str,
+    entry: &str,
+) -> Result<(), GraphError> {
+    let prefix = format!("{scope}/");
+    // A denied activation invalidates the incoming trigger for this round.
+    // Keep prior commits/results as history, while making the latest edge facts
+    // show that this attempt did not enter or traverse the module.
+    let prior_result_sequence = record
+        .results
+        .get(entry)
+        .and_then(|results| results.last())
+        .map(|result| result.sequence)
+        .unwrap_or(0);
+    let trigger = record
+        .snapshot
+        .edges
+        .iter()
+        .filter(|edge| edge.to_node == entry && !edge.from_node.starts_with(&prefix))
+        .filter_map(|edge| {
+            record
+                .decided
+                .get(&edge_key(&edge.from_node, entry))
+                .filter(|decision| decision.selected && decision.sequence > prior_result_sequence)
+                .map(|decision| (edge.from_node.clone(), decision.sequence))
+        })
+        .max_by_key(|(_, sequence)| *sequence)
+        .map(|(source, _)| source);
+    if let Some(source) = trigger {
+        record.sequence += 1;
+        record.decided.insert(
+            edge_key(&source, entry),
+            EdgeDecision {
+                selected: false,
+                sequence: record.sequence,
+                source_invocation: 0,
+                result_sequence: 0,
+            },
+        );
+    }
+
+    let members = record
+        .snapshot
+        .nodes
+        .iter()
+        .filter(|node| node.id.starts_with(&prefix))
+        .map(|node| node.id.clone())
+        .collect::<BTreeSet<_>>();
+    let outgoing = record
+        .snapshot
+        .edges
+        .iter()
+        .filter(|edge| members.contains(&edge.from_node))
+        .map(|edge| (edge.from_node.clone(), edge.to_node.clone()))
+        .collect::<Vec<_>>();
+    for (from, to) in outgoing {
+        record.sequence += 1;
+        record.decided.insert(
+            edge_key(&from, &to),
+            EdgeDecision {
+                selected: false,
+                sequence: record.sequence,
+                source_invocation: 0,
+                result_sequence: 0,
+            },
+        );
+    }
+    Ok(())
+}
+
 fn structural_back_edges(snapshot: &GraphSnapshot) -> BTreeSet<(&str, &str)> {
     let mut color: BTreeMap<&str, u8> = BTreeMap::new();
     let mut found = BTreeSet::new();
@@ -1594,6 +1758,184 @@ mod tests {
         assert!(next.network);
         assert_eq!(next.wall_time_limit_seconds, Some(45.0));
         assert_eq!(done.graph_digest, done.snapshot.digest().unwrap());
+    }
+
+    #[tokio::test]
+    async fn skipped_diamond_branch_propagates_false_edge_and_releases_join() {
+        let snapshot = graph(
+            &["start", "left", "right", "merge"],
+            &[
+                ("start", "left"),
+                ("start", "right"),
+                ("left", "merge"),
+                ("right", "merge"),
+            ],
+            "start",
+        );
+        let (store, artifacts, nodes, control) = setup();
+        let result = GraphRunner::new(&store, &artifacts, &nodes, &control)
+            .run(GraphRunRecord::create(snapshot, Value::Null).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(result.status, RunStatus::Completed);
+        let executed: Vec<String> = nodes
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|request| request.key.node_id.clone())
+            .collect();
+        assert_eq!(executed, vec!["start", "left", "merge"]);
+        assert!(!result.decided["start|right"].selected);
+        let propagated = &result.decided["right|merge"];
+        assert!(!propagated.selected);
+        assert_eq!(propagated.source_invocation, 0);
+        assert_eq!(propagated.result_sequence, 0);
+        assert!(!result.invocations.contains_key("right"));
+    }
+
+    #[tokio::test]
+    async fn skipped_multi_level_chain_propagates_to_join_without_running_nodes() {
+        let snapshot = graph(
+            &["start", "live", "skip-a", "skip-b", "join"],
+            &[
+                ("start", "live"),
+                ("start", "skip-a"),
+                ("live", "join"),
+                ("skip-a", "skip-b"),
+                ("skip-b", "join"),
+            ],
+            "start",
+        );
+        let (store, artifacts, nodes, control) = setup();
+        let result = GraphRunner::new(&store, &artifacts, &nodes, &control)
+            .run(GraphRunRecord::create(snapshot, Value::Null).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(result.status, RunStatus::Completed);
+        let executed: Vec<String> = nodes
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|request| request.key.node_id.clone())
+            .collect();
+        assert_eq!(executed, vec!["start", "live", "join"]);
+        assert_eq!(result.decided["start|skip-a"].source_invocation, 1);
+        for edge in ["skip-a|skip-b", "skip-b|join"] {
+            let decision = &result.decided[edge];
+            assert!(!decision.selected, "{edge}");
+            assert_eq!(decision.source_invocation, 0, "{edge}");
+            assert_eq!(decision.result_sequence, 0, "{edge}");
+        }
+        for node in ["skip-a", "skip-b"] {
+            assert!(!result.invocations.contains_key(node));
+            assert!(!result.passes.contains_key(node));
+        }
+    }
+
+    #[test]
+    fn skipped_propagation_does_not_invent_decisions_inside_unentered_cycle() {
+        let snapshot = graph(
+            &["entry", "loop/a", "loop/b"],
+            &[
+                ("entry", "loop/a"),
+                ("loop/a", "loop/b"),
+                ("loop/b", "loop/a"),
+            ],
+            "entry",
+        );
+        let mut record = GraphRunRecord::create(snapshot, Value::Null).unwrap();
+        record.decided.insert(
+            edge_key("entry", "loop/a"),
+            EdgeDecision {
+                selected: false,
+                sequence: 1,
+                source_invocation: 1,
+                result_sequence: 1,
+            },
+        );
+        record.sequence = 1;
+
+        assert!(!propagate_inactive_edges(&mut record).unwrap());
+        assert_eq!(record.decided.len(), 1);
+        assert!(!record.decided.contains_key("loop/a|loop/b"));
+        assert!(!record.decided.contains_key("loop/b|loop/a"));
+    }
+
+    #[test]
+    fn later_false_loop_input_retires_stale_selected_output() {
+        let snapshot = graph(
+            &["source", "branch", "merge"],
+            &[
+                ("source", "branch"),
+                ("branch", "source"),
+                ("branch", "merge"),
+            ],
+            "source",
+        );
+        let mut record = GraphRunRecord::create(snapshot, Value::Null).unwrap();
+        record.invocations.insert("source".into(), 2);
+        record.invocations.insert("branch".into(), 1);
+        record.passes.insert("source".into(), 2);
+        record.passes.insert("branch".into(), 1);
+        let key = |node: &str, invocation| InvocationKey {
+            run_id: record.run_id.clone(),
+            graph_digest: record.graph_digest.clone(),
+            node_id: node.into(),
+            invocation,
+        };
+        record.results.insert(
+            "branch".into(),
+            vec![RunResult {
+                node_id: "branch".into(),
+                key: key("branch", 1),
+                completion: NodeCompletion {
+                    submission: "branch completed in round one".into(),
+                    route: Some("merge".into()),
+                    model_requests: 1,
+                    output: serde_json::json!({"stale":true}),
+                },
+                commit: CommitRef {
+                    id: "branch-round-one".into(),
+                    node_id: "branch".into(),
+                    invocation: 1,
+                },
+                sequence: 10,
+            }],
+        );
+        record.decided.insert(
+            "source|branch".into(),
+            EdgeDecision {
+                selected: false,
+                sequence: 11,
+                source_invocation: 2,
+                result_sequence: 0,
+            },
+        );
+        record.decided.insert(
+            "branch|merge".into(),
+            EdgeDecision {
+                selected: true,
+                sequence: 12,
+                source_invocation: 1,
+                result_sequence: 10,
+            },
+        );
+        record.sequence = 12;
+
+        assert!(propagate_inactive_edges(&mut record).unwrap());
+        let stale_output = &record.decided["branch|merge"];
+        assert!(!stale_output.selected);
+        assert_eq!(stale_output.source_invocation, 0);
+        assert_eq!(stale_output.result_sequence, 0);
+        assert!(
+            record.results["branch"]
+                .iter()
+                .any(|result| { result.commit.id == "branch-round-one" })
+        ); // Preserve the old artifact as history, but no longer route it.
     }
 
     #[tokio::test]
@@ -2314,7 +2656,7 @@ mod tests {
         );
 
         let scenarios = fixture["scenarios"].as_array().unwrap();
-        assert_eq!(scenarios.len(), 6);
+        assert_eq!(scenarios.len(), 7);
         for scenario in scenarios {
             let snapshot = GraphSnapshot::admit(scenario["graph_snapshot"].clone()).unwrap();
             let override_input = scenario["run_override"]["input"].clone();
@@ -2359,6 +2701,31 @@ mod tests {
                 "scenario {}",
                 scenario["id"]
             );
+
+            let executed_set: BTreeSet<&str> =
+                calls.iter().map(|(node, _)| node.as_str()).collect();
+            let derived_skipped: Vec<&str> = result
+                .snapshot
+                .nodes
+                .iter()
+                .filter(|node| !executed_set.contains(node.id.as_str()))
+                .map(|node| node.id.as_str())
+                .collect();
+            let expected_skipped: Vec<&str> = expected["skipped_nodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|node| node.as_str().unwrap())
+                .collect();
+            if scenario["id"] == "deterministic_failure_settles_single_exit" {
+                assert_eq!(derived_skipped, vec!["downstream"]);
+            } else {
+                assert_eq!(
+                    derived_skipped, expected_skipped,
+                    "skipped nodes, scenario {}",
+                    scenario["id"]
+                );
+            }
 
             let expected_passes = expected["passes"].as_object().unwrap();
             assert_eq!(

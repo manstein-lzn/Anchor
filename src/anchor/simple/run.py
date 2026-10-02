@@ -1047,6 +1047,37 @@ def run(workspace: str | Path, *, objective: str | None = None, config_path: str
             decided[(node_id, target)] = (broadcast or target == chosen, state.seq)
         state.decided = {f"{source}|{target}": [value[0], value[1]]
                          for (source, target), value in decided.items()}
+
+    def propagate_skips() -> bool:
+        """Settle the outgoing edges of nodes that every path has rejected.
+
+        A rejected branch is still a decision. Without propagating that fact through the skipped
+        node, a downstream merge waits forever for an edge that can no longer be selected.
+        Repeating to a fixed point also settles chains of skipped nodes without invoking them.
+        """
+        changed = False
+        while True:
+            pass_changed = False
+            for node_id in order:
+                if node_id == entry:
+                    continue
+                incoming = [(source, node_id) for source in graph.in_edges[node_id]]
+                if not incoming or any(key not in decided for key in incoming):
+                    continue
+                if any(decided[key][0] for key in incoming):
+                    continue
+                outgoing = graph.routes(node_id)
+                if not outgoing or all(
+                    (node_id, target) in decided and not decided[(node_id, target)][0] for target in outgoing
+                ):
+                    continue
+                settle(node_id, None)
+                pass_changed = changed = True
+            if not pass_changed:
+                break
+        if changed:
+            state.save(run_dir)
+        return changed
     try:
         library = for_workspace(workspace, Path(library_root) if library_root is not None else None)
         bindings = {node.id: library.attach(node.plugins) for node in graph.nodes.values() if node.plugins}
@@ -1160,6 +1191,8 @@ def run(workspace: str | Path, *, objective: str | None = None, config_path: str
             stopped = _asked_to_stop(stop_request, state, run_dir)
             if stopped is not None:
                 return stopped
+            if state.parallel is None:
+                propagate_skips()
             if state.parallel is not None:
                 from anchor.simple.parallel import run_branches
                 if not run_branches(graph, state, decided, run_dir, regions, prepare, settle,

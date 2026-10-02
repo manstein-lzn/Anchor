@@ -90,6 +90,9 @@
           "start",
           "selected"
         ],
+        "skipped_nodes": [
+          "unselected"
+        ],
         "passes": {
           "start": 1,
           "selected": 1
@@ -172,6 +175,7 @@
           "spin",
           "spin"
         ],
+        "skipped_nodes": [],
         "passes": {
           "spin": 2
         },
@@ -246,6 +250,7 @@
         "ordered_executed_nodes": [
           "budgeted"
         ],
+        "skipped_nodes": [],
         "passes": {
           "budgeted": 1
         },
@@ -380,6 +385,7 @@
           "use_review/review",
           "out"
         ],
+        "skipped_nodes": [],
         "passes": {
           "in": 1,
           "use_review/draft": 1,
@@ -398,7 +404,7 @@
           {
             "from": "out",
             "to": "use_review/draft",
-            "selected": true
+            "selected": false
           },
           {
             "from": "use_review/draft",
@@ -408,7 +414,7 @@
           {
             "from": "use_review/review",
             "to": "out",
-            "selected": true
+            "selected": false
           }
         ],
         "cursor": {
@@ -499,6 +505,7 @@
           "a",
           "b"
         ],
+        "skipped_nodes": [],
         "passes": {
           "a": 2,
           "b": 2
@@ -515,7 +522,133 @@
           {
             "from": "b",
             "to": "a",
+            "selected": false
+          }
+        ],
+        "cursor": {
+          "exists": false
+        }
+      }
+    },
+    {
+      "id": "dag_merge_waits_for_undecided_incoming_edge",
+      "graph_snapshot": {
+        "objective": "oracle converging dag",
+        "input": {},
+        "entry": "start",
+        "agents": {
+          "worker": {
+            "model": "fixture.model",
+            "instructions": "fixture",
+            "network": false,
+            "max_steps": null,
+            "wall_time_limit_seconds": 3600
+          }
+        },
+        "ops": {},
+        "nodes": [
+          {
+            "id": "start",
+            "agent": "worker"
+          },
+          {
+            "id": "left",
+            "agent": "worker"
+          },
+          {
+            "id": "right",
+            "agent": "worker"
+          },
+          {
+            "id": "merge",
+            "agent": "worker"
+          }
+        ],
+        "edges": [
+          {
+            "from": "start",
+            "to": "left"
+          },
+          {
+            "from": "start",
+            "to": "right"
+          },
+          {
+            "from": "left",
+            "to": "merge"
+          },
+          {
+            "from": "right",
+            "to": "merge"
+          }
+        ]
+      },
+      "run_override": {
+        "input": {
+          "request": "merge"
+        }
+      },
+      "effective_input": {
+        "request": "merge"
+      },
+      "node_outcomes": [
+        {
+          "node": "start",
+          "invocation": 1,
+          "exit_status": "Submitted",
+          "route": "left"
+        },
+        {
+          "node": "left",
+          "invocation": 1,
+          "exit_status": "Submitted",
+          "route": null
+        },
+        {
+          "node": "merge",
+          "invocation": 1,
+          "exit_status": "Submitted",
+          "route": null
+        }
+      ],
+      "python": {
+        "status": "completed",
+        "python_status": "finished",
+        "reason": "",
+        "ordered_executed_nodes": [
+          "start",
+          "left",
+          "merge"
+        ],
+        "skipped_nodes": [
+          "right"
+        ],
+        "passes": {
+          "start": 1,
+          "left": 1,
+          "merge": 1
+        },
+        "ceased": [],
+        "edge_decisions": [
+          {
+            "from": "left",
+            "to": "merge",
             "selected": true
+          },
+          {
+            "from": "right",
+            "to": "merge",
+            "selected": false
+          },
+          {
+            "from": "start",
+            "to": "left",
+            "selected": true
+          },
+          {
+            "from": "start",
+            "to": "right",
+            "selected": false
           }
         ],
         "cursor": {
@@ -579,6 +712,7 @@
         "ordered_executed_nodes": [
           "fail"
         ],
+        "skipped_nodes": [],
         "passes": {
           "fail": 1
         },

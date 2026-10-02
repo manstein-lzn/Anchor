@@ -5,23 +5,65 @@
       "id": "selected_route_skips_other_exit",
       "graph": {
         "objective": "oracle routing",
-        "input": {"shared": {"default": 1, "override": 0}},
+        "input": {
+          "shared": {
+            "default": 1,
+            "override": 0
+          }
+        },
         "entry": "start",
-        "agents": {"worker": {"model": "fixture.model", "instructions": "fixture"}},
+        "agents": {
+          "worker": {
+            "model": "fixture.model",
+            "instructions": "fixture"
+          }
+        },
         "nodes": [
-          {"id": "start", "agent": "worker"},
-          {"id": "selected", "agent": "worker"},
-          {"id": "unselected", "agent": "worker"}
+          {
+            "id": "start",
+            "agent": "worker"
+          },
+          {
+            "id": "selected",
+            "agent": "worker"
+          },
+          {
+            "id": "unselected",
+            "agent": "worker"
+          }
         ],
         "edges": [
-          {"from": "start", "to": "selected"},
-          {"from": "start", "to": "unselected"}
+          {
+            "from": "start",
+            "to": "selected"
+          },
+          {
+            "from": "start",
+            "to": "unselected"
+          }
         ]
       },
-      "run_override": {"input": {"shared": {"override": 2}, "request": "r5"}},
+      "run_override": {
+        "input": {
+          "shared": {
+            "override": 2
+          },
+          "request": "r5"
+        }
+      },
       "outcomes": [
-        {"node": "start", "invocation": 1, "exit_status": "Submitted", "route": "selected"},
-        {"node": "selected", "invocation": 1, "exit_status": "Submitted", "route": null}
+        {
+          "node": "start",
+          "invocation": 1,
+          "exit_status": "Submitted",
+          "route": "selected"
+        },
+        {
+          "node": "selected",
+          "invocation": 1,
+          "exit_status": "Submitted",
+          "route": null
+        }
       ]
     },
     {
@@ -30,29 +72,85 @@
         "objective": "oracle loop ceiling",
         "input": {},
         "entry": "spin",
-        "agents": {"worker": {"model": "fixture.model", "instructions": "fixture"}},
-        "nodes": [{"id": "spin", "agent": "worker", "max_rounds": 2}],
-        "edges": [{"from": "spin", "to": "spin"}]
+        "agents": {
+          "worker": {
+            "model": "fixture.model",
+            "instructions": "fixture"
+          }
+        },
+        "nodes": [
+          {
+            "id": "spin",
+            "agent": "worker",
+            "max_rounds": 2
+          }
+        ],
+        "edges": [
+          {
+            "from": "spin",
+            "to": "spin"
+          }
+        ]
       },
-      "run_override": {"input": {"request": "ceiling"}},
+      "run_override": {
+        "input": {
+          "request": "ceiling"
+        }
+      },
       "outcomes": [
-        {"node": "spin", "invocation": 1, "exit_status": "Submitted", "route": "spin"},
-        {"node": "spin", "invocation": 2, "exit_status": "Submitted", "route": "spin"}
+        {
+          "node": "spin",
+          "invocation": 1,
+          "exit_status": "Submitted",
+          "route": "spin"
+        },
+        {
+          "node": "spin",
+          "invocation": 2,
+          "exit_status": "Submitted",
+          "route": "spin"
+        }
       ]
     },
     {
       "id": "budget_stop_preserves_cursor",
       "graph": {
         "objective": "oracle budget stop",
-        "input": {"defaults": {"mode": "safe"}},
+        "input": {
+          "defaults": {
+            "mode": "safe"
+          }
+        },
         "entry": "budgeted",
-        "agents": {"worker": {"model": "fixture.model", "instructions": "fixture", "max_steps": 4}},
-        "nodes": [{"id": "budgeted", "agent": "worker"}],
+        "agents": {
+          "worker": {
+            "model": "fixture.model",
+            "instructions": "fixture",
+            "max_steps": 4
+          }
+        },
+        "nodes": [
+          {
+            "id": "budgeted",
+            "agent": "worker"
+          }
+        ],
         "edges": []
       },
-      "run_override": {"input": {"defaults": {"request": "budget"}}},
+      "run_override": {
+        "input": {
+          "defaults": {
+            "request": "budget"
+          }
+        }
+      },
       "outcomes": [
-        {"node": "budgeted", "invocation": 1, "exit_status": "budget_exhausted", "route": null}
+        {
+          "node": "budgeted",
+          "invocation": 1,
+          "exit_status": "budget_exhausted",
+          "route": null
+        }
       ]
     },
     {
@@ -61,38 +159,112 @@
         "objective": "oracle module scope reentry",
         "input": {},
         "entry": "in",
-        "agents": {"worker": {"model": "fixture.model", "instructions": "fixture"}},
+        "agents": {
+          "worker": {
+            "model": "fixture.model",
+            "instructions": "fixture"
+          }
+        },
         "graphs": {
           "review": {
             "entry": "draft",
             "exit": "review",
             "nodes": [
-              {"id": "draft", "agent": "worker"},
-              {"id": "review", "agent": "worker"}
+              {
+                "id": "draft",
+                "agent": "worker"
+              },
+              {
+                "id": "review",
+                "agent": "worker"
+              }
             ],
-            "edges": [{"from": "draft", "to": "review"}]
+            "edges": [
+              {
+                "from": "draft",
+                "to": "review"
+              }
+            ]
           }
         },
         "nodes": [
-          {"id": "in", "agent": "worker"},
-          {"id": "use_review", "graph": "review", "max_rounds": 2},
-          {"id": "out", "agent": "worker"}
+          {
+            "id": "in",
+            "agent": "worker"
+          },
+          {
+            "id": "use_review",
+            "graph": "review",
+            "max_rounds": 2
+          },
+          {
+            "id": "out",
+            "agent": "worker"
+          }
         ],
         "edges": [
-          {"from": "in", "to": "use_review"},
-          {"from": "use_review", "to": "out"},
-          {"from": "out", "to": "use_review"}
+          {
+            "from": "in",
+            "to": "use_review"
+          },
+          {
+            "from": "use_review",
+            "to": "out"
+          },
+          {
+            "from": "out",
+            "to": "use_review"
+          }
         ]
       },
-      "run_override": {"input": {"request": "module reentry"}},
+      "run_override": {
+        "input": {
+          "request": "module reentry"
+        }
+      },
       "outcomes": [
-        {"node": "in", "invocation": 1, "exit_status": "Submitted", "route": null},
-        {"node": "use_review/draft", "invocation": 1, "exit_status": "Submitted", "route": null},
-        {"node": "use_review/review", "invocation": 1, "exit_status": "Submitted", "route": null},
-        {"node": "out", "invocation": 1, "exit_status": "Submitted", "route": null},
-        {"node": "use_review/draft", "invocation": 2, "exit_status": "Submitted", "route": null},
-        {"node": "use_review/review", "invocation": 2, "exit_status": "Submitted", "route": null},
-        {"node": "out", "invocation": 2, "exit_status": "Submitted", "route": null}
+        {
+          "node": "in",
+          "invocation": 1,
+          "exit_status": "Submitted",
+          "route": null
+        },
+        {
+          "node": "use_review/draft",
+          "invocation": 1,
+          "exit_status": "Submitted",
+          "route": null
+        },
+        {
+          "node": "use_review/review",
+          "invocation": 1,
+          "exit_status": "Submitted",
+          "route": null
+        },
+        {
+          "node": "out",
+          "invocation": 1,
+          "exit_status": "Submitted",
+          "route": null
+        },
+        {
+          "node": "use_review/draft",
+          "invocation": 2,
+          "exit_status": "Submitted",
+          "route": null
+        },
+        {
+          "node": "use_review/review",
+          "invocation": 2,
+          "exit_status": "Submitted",
+          "route": null
+        },
+        {
+          "node": "out",
+          "invocation": 2,
+          "exit_status": "Submitted",
+          "route": null
+        }
       ]
     },
     {
@@ -102,22 +274,138 @@
         "input": {},
         "entry": "a",
         "max_rounds": 2,
-        "agents": {"worker": {"model": "fixture.model", "instructions": "fixture"}},
+        "agents": {
+          "worker": {
+            "model": "fixture.model",
+            "instructions": "fixture"
+          }
+        },
         "nodes": [
-          {"id": "a", "agent": "worker"},
-          {"id": "b", "agent": "worker"}
+          {
+            "id": "a",
+            "agent": "worker"
+          },
+          {
+            "id": "b",
+            "agent": "worker"
+          }
         ],
         "edges": [
-          {"from": "a", "to": "b"},
-          {"from": "b", "to": "a"}
+          {
+            "from": "a",
+            "to": "b"
+          },
+          {
+            "from": "b",
+            "to": "a"
+          }
         ]
       },
-      "run_override": {"input": {"request": "two node loop"}},
+      "run_override": {
+        "input": {
+          "request": "two node loop"
+        }
+      },
       "outcomes": [
-        {"node": "a", "invocation": 1, "exit_status": "Submitted", "route": null},
-        {"node": "b", "invocation": 1, "exit_status": "Submitted", "route": null},
-        {"node": "a", "invocation": 2, "exit_status": "Submitted", "route": null},
-        {"node": "b", "invocation": 2, "exit_status": "Submitted", "route": null}
+        {
+          "node": "a",
+          "invocation": 1,
+          "exit_status": "Submitted",
+          "route": null
+        },
+        {
+          "node": "b",
+          "invocation": 1,
+          "exit_status": "Submitted",
+          "route": null
+        },
+        {
+          "node": "a",
+          "invocation": 2,
+          "exit_status": "Submitted",
+          "route": null
+        },
+        {
+          "node": "b",
+          "invocation": 2,
+          "exit_status": "Submitted",
+          "route": null
+        }
+      ]
+    },
+    {
+      "id": "dag_merge_waits_for_undecided_incoming_edge",
+      "graph": {
+        "objective": "oracle converging dag",
+        "input": {},
+        "entry": "start",
+        "agents": {
+          "worker": {
+            "model": "fixture.model",
+            "instructions": "fixture"
+          }
+        },
+        "nodes": [
+          {
+            "id": "start",
+            "agent": "worker"
+          },
+          {
+            "id": "left",
+            "agent": "worker"
+          },
+          {
+            "id": "right",
+            "agent": "worker"
+          },
+          {
+            "id": "merge",
+            "agent": "worker"
+          }
+        ],
+        "edges": [
+          {
+            "from": "start",
+            "to": "left"
+          },
+          {
+            "from": "start",
+            "to": "right"
+          },
+          {
+            "from": "left",
+            "to": "merge"
+          },
+          {
+            "from": "right",
+            "to": "merge"
+          }
+        ]
+      },
+      "run_override": {
+        "input": {
+          "request": "merge"
+        }
+      },
+      "outcomes": [
+        {
+          "node": "start",
+          "invocation": 1,
+          "exit_status": "Submitted",
+          "route": "left"
+        },
+        {
+          "node": "left",
+          "invocation": 1,
+          "exit_status": "Submitted",
+          "route": null
+        },
+        {
+          "node": "merge",
+          "invocation": 1,
+          "exit_status": "Submitted",
+          "route": null
+        }
       ]
     },
     {
@@ -126,16 +414,41 @@
         "objective": "oracle deterministic failure",
         "input": {},
         "entry": "fail",
-        "agents": {"worker": {"model": "fixture.model", "instructions": "fixture"}},
+        "agents": {
+          "worker": {
+            "model": "fixture.model",
+            "instructions": "fixture"
+          }
+        },
         "nodes": [
-          {"id": "fail", "agent": "worker"},
-          {"id": "downstream", "agent": "worker"}
+          {
+            "id": "fail",
+            "agent": "worker"
+          },
+          {
+            "id": "downstream",
+            "agent": "worker"
+          }
         ],
-        "edges": [{"from": "fail", "to": "downstream"}]
+        "edges": [
+          {
+            "from": "fail",
+            "to": "downstream"
+          }
+        ]
       },
-      "run_override": {"input": {"request": "failure"}},
+      "run_override": {
+        "input": {
+          "request": "failure"
+        }
+      },
       "outcomes": [
-        {"node": "fail", "invocation": 1, "exit_status": "Exited", "route": null}
+        {
+          "node": "fail",
+          "invocation": 1,
+          "exit_status": "Exited",
+          "route": null
+        }
       ]
     }
   ]
