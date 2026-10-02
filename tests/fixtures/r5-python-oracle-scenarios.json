@@ -409,6 +409,23 @@
       ]
     },
     {
+      "id": "pause_before_first_dispatch",
+      "graph": {
+        "objective": "oracle pause boundary",
+        "input": {},
+        "entry": "start",
+        "agents": {"worker": {"model": "fixture.model", "instructions": "fixture"}},
+        "nodes": [
+          {"id": "start", "agent": "worker"},
+          {"id": "downstream", "agent": "worker"}
+        ],
+        "edges": [{"from": "start", "to": "downstream"}]
+      },
+      "run_override": {"input": {"request": "pause"}},
+      "control": {"pause_before_dispatch": true},
+      "outcomes": []
+    },
+    {
       "id": "deterministic_failure_settles_single_exit",
       "graph": {
         "objective": "oracle deterministic failure",

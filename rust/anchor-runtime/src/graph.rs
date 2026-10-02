@@ -364,9 +364,11 @@ impl RunStore for FileRunStore {
             ));
         }
         record.migrate_format()?;
+        record.validate()?;
         Ok(Some(record))
     }
     fn save(&self, record: &GraphRunRecord) -> Result<(), GraphError> {
+        record.validate()?;
         let path = self.path(&record.run_id)?;
         fs::create_dir_all(&self.root)?;
         let stamp = SystemTime::now()
@@ -1004,6 +1006,132 @@ impl GraphRunRecord {
                 "cursor identity does not match its Graph Run".into(),
             ));
         }
+
+        let graph_nodes = self
+            .snapshot
+            .nodes
+            .iter()
+            .map(|node| node.id.as_str())
+            .collect::<BTreeSet<_>>();
+        let mut result_sequences = BTreeSet::new();
+        let mut results_by_identity = BTreeMap::new();
+        for (map_node_id, results) in &self.results {
+            if !graph_nodes.contains(map_node_id.as_str()) {
+                return Err(GraphError::CorruptRun(format!(
+                    "results contain unknown node `{map_node_id}`"
+                )));
+            }
+            let mut previous_invocation = 0;
+            for result in results {
+                if result.node_id != *map_node_id
+                    || result.key.node_id != *map_node_id
+                    || result.key.run_id != self.run_id
+                    || result.key.graph_digest != self.graph_digest
+                    || result.key.invocation == 0
+                    || result.key.invocation <= previous_invocation
+                    || result.commit.node_id != *map_node_id
+                    || result.commit.invocation != result.key.invocation
+                    || result.commit.id.is_empty()
+                    || result.sequence == 0
+                    || result.sequence > self.sequence
+                    || !result_sequences.insert(result.sequence)
+                {
+                    return Err(GraphError::CorruptRun(format!(
+                        "invalid result identity or sequence for node `{map_node_id}`"
+                    )));
+                }
+                previous_invocation = result.key.invocation;
+                results_by_identity.insert(
+                    (map_node_id.as_str(), result.key.invocation),
+                    result.sequence,
+                );
+            }
+        }
+
+        for (node_id, invocation) in &self.invocations {
+            if !graph_nodes.contains(node_id.as_str()) || *invocation == 0 {
+                return Err(GraphError::CorruptRun(format!(
+                    "invalid invocation counter for node `{node_id}`"
+                )));
+            }
+            if self
+                .results
+                .get(node_id)
+                .and_then(|node_results| node_results.last())
+                .is_some_and(|result| result.key.invocation > *invocation)
+            {
+                return Err(GraphError::CorruptRun(format!(
+                    "invocation counter trails results for node `{node_id}`"
+                )));
+            }
+        }
+        for (node_id, node_results) in &self.results {
+            if let Some(last_result) = node_results.last()
+                && self.invocations.get(node_id).copied().unwrap_or(0) < last_result.key.invocation
+            {
+                return Err(GraphError::CorruptRun(format!(
+                    "invocation counter is missing or stale for node `{node_id}`"
+                )));
+            }
+        }
+        for (node_id, passes) in &self.passes {
+            if !graph_nodes.contains(node_id.as_str()) || *passes == 0 {
+                return Err(GraphError::CorruptRun(format!(
+                    "invalid pass counter for node `{node_id}`"
+                )));
+            }
+        }
+
+        let graph_edges = self
+            .snapshot
+            .edges
+            .iter()
+            .map(|edge| edge_key(&edge.from_node, &edge.to_node))
+            .collect::<BTreeSet<_>>();
+        for (key, decision) in &self.decided {
+            let Some((from, to)) = key.split_once('|') else {
+                return Err(GraphError::CorruptRun(format!(
+                    "invalid edge decision key `{key}`"
+                )));
+            };
+            if key.matches('|').count() != 1 || !graph_edges.contains(key) {
+                return Err(GraphError::CorruptRun(format!(
+                    "edge decision `{key}` is not in the Graph snapshot"
+                )));
+            }
+            if decision.sequence == 0 || decision.sequence > self.sequence {
+                return Err(GraphError::CorruptRun(format!(
+                    "edge decision `{key}` has an invalid sequence"
+                )));
+            }
+            match (
+                decision.selected,
+                decision.source_invocation,
+                decision.result_sequence,
+            ) {
+                (true, source_invocation, result_sequence)
+                    if source_invocation > 0
+                        && result_sequence > 0
+                        && results_by_identity.get(&(from, source_invocation))
+                            == Some(&result_sequence) => {}
+                (false, 0, 0) => {}
+                (false, source_invocation, 0)
+                    if source_invocation > 0
+                        && self.invocations.get(from).copied().unwrap_or(0)
+                            >= source_invocation => {}
+                (false, source_invocation, result_sequence)
+                    if source_invocation > 0
+                        && result_sequence > 0
+                        && results_by_identity.get(&(from, source_invocation))
+                            == Some(&result_sequence) => {}
+                _ => {
+                    return Err(GraphError::CorruptRun(format!(
+                        "edge decision `{key}` has an invalid source result reference"
+                    )));
+                }
+            }
+            let _ = to;
+        }
         Ok(())
     }
 
@@ -1033,6 +1161,21 @@ impl GraphRunRecord {
                     self.invocations
                         .insert(cursor.node_id.clone(), cursor.key.invocation);
                     *self.passes.entry(cursor.node_id.clone()).or_default() += 1;
+                }
+                for (edge_key_value, decision) in &mut self.decided {
+                    if decision.source_invocation == 0 || decision.result_sequence != 0 {
+                        continue;
+                    }
+                    let Some((from, _)) = edge_key_value.split_once('|') else {
+                        continue;
+                    };
+                    if let Some(result) = self.results.get(from).and_then(|results| {
+                        results
+                            .iter()
+                            .find(|result| result.key.invocation == decision.source_invocation)
+                    }) {
+                        decision.result_sequence = result.sequence;
+                    }
                 }
                 self.format = 2;
                 Ok(())
@@ -2032,7 +2175,12 @@ mod tests {
             prepared_input: Value::Null,
         });
         record.format = 1;
-        store.save(&record).unwrap();
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join(format!("{id}.json")),
+            serde_json::to_vec(&record).unwrap(),
+        )
+        .unwrap();
 
         // Loading migrates in memory, without writing outside the Runner lease.
         let loaded = store.load(&id).unwrap().unwrap();
@@ -2076,7 +2224,12 @@ mod tests {
         record.passes.insert("one".into(), 3);
         record.invocations.insert("one".into(), 3);
         let id = record.run_id.clone();
-        store.save(&record).unwrap();
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join(format!("{id}.json")),
+            serde_json::to_vec(&record).unwrap(),
+        )
+        .unwrap();
 
         let loaded = store.load(&id).unwrap().unwrap();
         assert_eq!(loaded.format, 2);
@@ -2509,6 +2662,83 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    #[tokio::test]
+    async fn file_run_store_rejects_damaged_result_and_edge_facts() {
+        let root = std::env::temp_dir().join(format!(
+            "anchor-run-validation-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let store = FileRunStore::new(&root);
+        let (memory_store, artifacts, nodes, control) = setup();
+        let valid = GraphRunner::new(&memory_store, &artifacts, &nodes, &control)
+            .run(
+                GraphRunRecord::create(
+                    graph(&["one", "two"], &[("one", "two")], "one"),
+                    Value::Null,
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(valid.status, RunStatus::Completed);
+        let id = valid.run_id.clone();
+        let path = root.join(format!("{id}.json"));
+
+        let mut bad_records = Vec::new();
+        let mut bad = valid.clone();
+        bad.results.get_mut("one").unwrap()[0].node_id = "two".into();
+        bad_records.push(bad);
+        let mut bad = valid.clone();
+        bad.results.get_mut("one").unwrap()[0].key.node_id = "two".into();
+        bad_records.push(bad);
+        let mut bad = valid.clone();
+        bad.results.get_mut("one").unwrap()[0].commit.node_id = "two".into();
+        bad_records.push(bad);
+        let mut bad = valid.clone();
+        bad.results.get_mut("one").unwrap()[0].sequence = valid.sequence + 1;
+        bad_records.push(bad);
+        let mut bad = valid.clone();
+        let duplicate_sequence = bad.results["one"][0].sequence;
+        bad.results.get_mut("two").unwrap()[0].sequence = duplicate_sequence;
+        bad_records.push(bad);
+        let mut bad = valid.clone();
+        let selected = bad.decided.get_mut("one|two").unwrap();
+        selected.result_sequence = valid.sequence + 1;
+        bad_records.push(bad);
+        let mut bad = valid.clone();
+        bad.decided.insert(
+            "one|ghost".into(),
+            EdgeDecision {
+                selected: false,
+                sequence: valid.sequence,
+                source_invocation: 0,
+                result_sequence: 0,
+            },
+        );
+        bad_records.push(bad);
+        let mut bad = valid.clone();
+        bad.decided.get_mut("one|two").unwrap().sequence = valid.sequence + 1;
+        bad_records.push(bad);
+
+        for bad in bad_records {
+            assert!(matches!(store.save(&bad), Err(GraphError::CorruptRun(_))));
+            assert!(
+                !path.exists(),
+                "invalid save must not create final run file"
+            );
+            fs::create_dir_all(&root).unwrap();
+            fs::write(&path, serde_json::to_vec(&bad).unwrap()).unwrap();
+            assert!(matches!(store.load(&id), Err(GraphError::CorruptRun(_))));
+            fs::remove_file(&path).unwrap();
+        }
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn file_run_store_lease_process_helper() {
         // This test is intentionally inert when run by the normal harness. The
@@ -2656,7 +2886,7 @@ mod tests {
         );
 
         let scenarios = fixture["scenarios"].as_array().unwrap();
-        assert_eq!(scenarios.len(), 7);
+        assert_eq!(scenarios.len(), 8);
         for scenario in scenarios {
             let snapshot = GraphSnapshot::admit(scenario["graph_snapshot"].clone()).unwrap();
             let override_input = scenario["run_override"]["input"].clone();
@@ -2664,7 +2894,8 @@ mod tests {
                 outcomes: scenario["node_outcomes"].as_array().unwrap().clone(),
                 ..OracleNodes::default()
             };
-            let (store, artifacts, _, control) = setup();
+            let (store, artifacts, _, mut control) = setup();
+            control.pause = scenario["control"]["pause_before_dispatch"] == true;
             let record = GraphRunRecord::create(snapshot, override_input).unwrap();
             assert_eq!(record.input, scenario["effective_input"]);
             let result = GraphRunner::new(&store, &artifacts, &nodes, &control)
@@ -2719,6 +2950,10 @@ mod tests {
                 .collect();
             if scenario["id"] == "deterministic_failure_settles_single_exit" {
                 assert_eq!(derived_skipped, vec!["downstream"]);
+            } else if scenario["id"] == "pause_before_first_dispatch" {
+                // Unstarted nodes are not considered skipped when the run pauses
+                // before admission reaches the scheduler's propagation pass.
+                assert!(expected_skipped.is_empty());
             } else {
                 assert_eq!(
                     derived_skipped, expected_skipped,
@@ -2747,6 +2982,15 @@ mod tests {
                     expected["passes"]["budgeted"], 1,
                     "Python oracle must capture the started budgeted pass"
                 );
+            }
+            if scenario["id"] == "pause_before_first_dispatch" {
+                assert_eq!(expected["reason"], "asked");
+                assert_eq!(result.status, RunStatus::Paused);
+                assert!(nodes.calls.lock().unwrap().is_empty());
+                assert!(result.cursor.is_none());
+                assert!(result.passes.is_empty());
+                assert!(result.decided.is_empty());
+                assert!(scenario["node_outcomes"].as_array().unwrap().is_empty());
             }
 
             let mut ceased: Vec<String> = result.ceased.iter().cloned().collect();

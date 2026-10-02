@@ -9,6 +9,7 @@
   "scenarios": [
     {
       "id": "selected_route_skips_other_exit",
+      "control": {},
       "graph_snapshot": {
         "objective": "oracle routing",
         "input": {
@@ -117,6 +118,7 @@
     },
     {
       "id": "self_loop_ceiling",
+      "control": {},
       "graph_snapshot": {
         "objective": "oracle loop ceiling",
         "input": {},
@@ -196,6 +198,7 @@
     },
     {
       "id": "budget_stop_preserves_cursor",
+      "control": {},
       "graph_snapshot": {
         "objective": "oracle budget stop",
         "input": {
@@ -266,6 +269,7 @@
     },
     {
       "id": "module_scope_reentry_ceiling",
+      "control": {},
       "graph_snapshot": {
         "objective": "oracle module scope reentry",
         "input": {},
@@ -424,6 +428,7 @@
     },
     {
       "id": "two_node_back_edge_ceiling",
+      "control": {},
       "graph_snapshot": {
         "objective": "oracle two node loop",
         "input": {},
@@ -532,6 +537,7 @@
     },
     {
       "id": "dag_merge_waits_for_undecided_incoming_edge",
+      "control": {},
       "graph_snapshot": {
         "objective": "oracle converging dag",
         "input": {},
@@ -657,7 +663,67 @@
       }
     },
     {
+      "id": "pause_before_first_dispatch",
+      "control": {
+        "pause_before_dispatch": true
+      },
+      "graph_snapshot": {
+        "objective": "oracle pause boundary",
+        "input": {},
+        "entry": "start",
+        "agents": {
+          "worker": {
+            "model": "fixture.model",
+            "instructions": "fixture",
+            "network": false,
+            "max_steps": null,
+            "wall_time_limit_seconds": 3600
+          }
+        },
+        "ops": {},
+        "nodes": [
+          {
+            "id": "start",
+            "agent": "worker"
+          },
+          {
+            "id": "downstream",
+            "agent": "worker"
+          }
+        ],
+        "edges": [
+          {
+            "from": "start",
+            "to": "downstream"
+          }
+        ]
+      },
+      "run_override": {
+        "input": {
+          "request": "pause"
+        }
+      },
+      "effective_input": {
+        "request": "pause"
+      },
+      "node_outcomes": [],
+      "python": {
+        "status": "paused",
+        "python_status": "paused",
+        "reason": "asked",
+        "ordered_executed_nodes": [],
+        "skipped_nodes": [],
+        "passes": {},
+        "ceased": [],
+        "edge_decisions": [],
+        "cursor": {
+          "exists": false
+        }
+      }
+    },
+    {
       "id": "deterministic_failure_settles_single_exit",
+      "control": {},
       "graph_snapshot": {
         "objective": "oracle deterministic failure",
         "input": {},

@@ -87,6 +87,11 @@ def generate(source: dict[str, Any]) -> dict[str, Any]:
             workspace = Path(tmp) / "workspace"
             workspace.mkdir()
             run_input = scenario["run_override"].get("input", {})
+            stop_request = (
+                (lambda: "paused")
+                if scenario.get("control", {}).get("pause_before_dispatch")
+                else None
+            )
             with contextlib.redirect_stdout(io.StringIO()):
                 state = python_runner.run(
                     workspace,
@@ -94,6 +99,7 @@ def generate(source: dict[str, Any]) -> dict[str, Any]:
                     run_input=run_input,
                     run_id="oracle-run",
                     definition=scenario["graph"],
+                    stop_request=stop_request,
                 )
             run_dir = workspace / "runs" / "oracle-run"
             snapshot = json.loads((run_dir / "graph.json").read_text(encoding="utf-8"))
@@ -118,6 +124,7 @@ def generate(source: dict[str, Any]) -> dict[str, Any]:
                 raise AssertionError(f"{scenario['id']}: run input merge mismatch")
             generated.append({
                 "id": scenario["id"],
+                "control": scenario.get("control", {}),
                 "graph_snapshot": snapshot,
                 "run_override": {"input": run_input},
                 "effective_input": effective_input,
