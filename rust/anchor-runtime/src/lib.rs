@@ -33,8 +33,8 @@ pub mod checkpoint;
 pub mod sandbox;
 pub use checkpoint::{CheckpointStore, CheckpointStoreError, FileCheckpointStore};
 pub use sandbox::{
-    NetworkPolicy, NoopSandbox, ReadOnlyInput, SandboxError, SandboxPort, SandboxRequest,
-    SandboxResult, SandboxStatus,
+    NetworkPolicy, NoopSandbox, ReadOnlyInput, SandboxEnvironment, SandboxError, SandboxPort,
+    SandboxRequest, SandboxResult, SandboxStatus, SpillPolicy,
 };
 
 const CHECKPOINT_FORMAT: u32 = 3;

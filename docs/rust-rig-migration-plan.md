@@ -32,7 +32,7 @@
 | R1 AgentNode Kernel | `NodeRequest`、`NodeOutcome`、`CompletionPort`、`ToolPort`、Rig `AgentRun` checkpoint、结构化 route | provider-free 工具循环、取消、非法 route、模型/工具边界恢复通过；真实单节点 smoke 通过 |
 | R2 持久化边界 | `CheckpointStore` port、原子文件适配器、版本与身份校验、边界保存约定 | 进行中：端口、原子文件保存、pending model/tool 失败后续行、缺失/删除和路径拒绝已通过；未知外部副作用、并发写入语义和宿主集成仍待做 |
 | R3 Provider 与流式 | provider 配置适配、stream 事件、超时、取消传播、请求/响应观测 | 进行中：OpenAI-compatible chat/responses、模型/工具超时、pending 状态保留、provider-free 流事件/取消、真实 provider 流式 smoke、可组合请求观测，以及中断后 checkpoint 重载并换 provider 续行的确定性测试已通过；真实进程/provider 断线中断仍待做 |
-| R4 Sandbox Adapter | Rust Sandbox port；Bubblewrap、只读输入、网络权限、命令超时和取消适配 | 契约切片已完成：请求/结果/网络/只读输入/超时/取消端口与安全 no-op adapter 已通过 provider-free 测试；真实 Bubblewrap、命令执行、越权路径、网络和取消负向测试仍未验收 |
+| R4 Sandbox Adapter | Rust Sandbox port；Bubblewrap、只读输入、网络权限、命令超时和取消适配 | 部分完成：独立 Bubblewrap host adapter 已实现；本机真实 bwrap 只读挂载 smoke 和 fake-helper 策略/超时/取消测试通过。真实网络隔离、host 路径 TOCTOU、真实 bwrap 超时/取消和 Python/平台接线未验收 |
 | R5 串行 Graph Runner | Graph 快照、Run 身份、普通节点路由、提交/恢复/停止 | 与现有 Python Graph 的代表性 Graph 结果和失败语义对照通过；平台与独立 CLI 共用 Runner |
 | R6 fanout/join | 复用现有配对契约；分支活动身份、乱序收束、失败/停止/崩溃恢复 | 现有 A31 代表性 Graph 在 Rust Runner 上通过；不引入嵌套或隐式并行 |
 | R7 Plugin/MCP | Plugin manifest、工具目录、MCP stdio/HTTP、凭证和 Sandbox 绑定 | 明确 Plugin 闭包可独立启动；工具恢复、权限拒绝和资源变更检查通过 |
@@ -41,7 +41,7 @@
 
 ## 当前进度和下一步
 
-R0 已由现有架构约束和本计划冻结；R1 已完成实验纵向切片，代码位于 `rust/anchor-runtime`，真实 provider smoke 已通过。R2 的 checkpoint 端口、文件适配器和 pending model/tool 失败续行已通过；R3 已加入可选模型/工具超时、独立 `StreamingCompletionPort` 和 `ObservedCompletionPort`。确定性测试现覆盖 unary timeout、流式取消后序列化/重载 pending model step 并用新 provider 续行，且终态会清除 pending step；这不等价于真实进程退出或 provider 断线恢复。真实 provider 流式 smoke 已通过。R4 已完成第一可逆切片：`SandboxRequest`、`SandboxResult`、`SandboxPort`、网络策略、只读输入和取消/超时字段，以及不会执行命令的 `NoopSandbox`；尚未接入 Bubblewrap 或任何真实宿主执行。下一步是真实进程中断证据和 R4 的受限 Bubblewrap 适配；R3/R4 之前不宣称 Rust Runtime 已替代 Python，R5 之前不实现第二套 Rust Graph 调度语义。
+R0 已由现有架构约束和本计划冻结；R1 已完成实验纵向切片，代码位于 `rust/anchor-runtime`，真实 provider smoke 已通过。R2 的 checkpoint 端口、文件适配器和 pending model/tool 失败续行已通过；R3 已加入可选模型/工具超时、独立 `StreamingCompletionPort` 和 `ObservedCompletionPort`。`execute_with_store_and_policy` 让宿主在同一次执行中组合持久化和超时策略，旧的 `execute_with_store` 委托给默认策略入口。确定性测试覆盖 unary timeout、流式取消后序列化/重载 pending model step 并用新 provider 续行，且终态会清除 pending step；这不等价于真实进程退出或 provider 断线恢复。真实 provider 流式 smoke 已通过。R4 已新增独立 `rust/anchor-sandbox-bwrap` host adapter；命令/网络授权与 host path roots 由 adapter policy 所有，Kernel 保持无子进程能力。本机真实 Bubblewrap 已通过只读输入挂载和 `workspace_readonly` 负向 smoke；fake helper 覆盖输出配额、设置失败、超时和取消。网络隔离、真实 bwrap 超时/取消、TOCTOU 和 Python/平台接线仍待验收；R3/R4 之前不宣称 Rust Runtime 已替代 Python，R5 之前不实现第二套 Rust Graph 调度语义。
 
 ## 每阶段记录
 
@@ -53,3 +53,18 @@ R0 已由现有架构约束和本计划冻结；R1 已完成实验纵向切片�
 - 真实 provider、Sandbox、平台或独立宿主证据（如果该阶段要求）。
 
 阶段完成只表示该阶段出口条件满足，不表示整个 Anchor 已经完成 Rust 重构。
+
+### R4 Sandbox 契约归属
+
+Rust 请求表达执行意图和可验证的边界字段；真实授权与主机资源始终由宿主适配器持有。`workspace_readonly`、`tool_dirs`、环境变量、输出预览上限和 spill 配额现已进入请求契约。`SandboxResult` 另区分宿主 spill 文件、沙箱可见路径和无法完整保留的 `incomplete` 输出。环境变量值及宿主 spill 目录在 Debug 输出中脱敏。
+
+| 数据/能力 | 所有者和适配要求 |
+| --- | --- |
+| argv、工作区只读相对路径、网络意图、超时、输出预览/保留配额 | Kernel/节点调用方提出；适配器必须在结果中如实反映执行、超时、取消和输出完整性。`network=enabled` 只是请求，不是授权 |
+| 实际 workspace、只读输入源、tool_dirs、spill host directory、env 值、取消句柄 | 宿主拥有并绑定；Graph/模型不得自行挑选宿主绝对路径、注入任意凭证或扩大授权。host spill 目录必须由宿主预创建在受控 Run 存储内；adapter 校验前不创建请求路径 |
+| 路径安全、符号链接与挂载、网络 namespace、子进程终止、输出与磁盘限额 | 真实 adapter 的强制职责。独立 bwrap adapter canonicalize host paths 并校验 host policy roots，拒绝 `workspace_readonly` symlink 和保留挂载目标覆盖；当前不宣称可抵御并发宿主文件系统改写（TOCTOU） |
+| `spilled_host_paths`、`visible_spill_paths`、`incomplete` | 适配器产生的执行事实；host path 仅供宿主后续读取/清理，不传给模型或普通日志；模型可见的只能是 sandbox 内路径。丢失超出配额的数据时必须设置 `incomplete=true` |
+
+Bubblewrap adapter 位于独立 host crate `rust/anchor-sandbox-bwrap`，不把进程执行权加入 Kernel。`BubblewrapPolicy` 显式配置命令 allowlist、workspace roots，以及使用到的只读输入/tool/spill roots 和 sandbox destination roots；spill 目录必须先由宿主创建，adapter 只 canonicalize 和授权校验，不创建请求路径；网络另需 host policy 开关。环境值通过清理后的子进程环境传递，不放进 bwrap argv。双流并发读取并按 preview 与共享 spill quota 限制；reader 或 spill 落盘不完整会设置 `incomplete`。Bubblewrap `--info-fd` 启动握手未成功时返回错误，不把 setup 失败记作 `Completed`；超时/取消会 kill 并 wait。
+
+本机真实 bwrap smoke 已验证只读输入绑定和 `workspace_readonly` 写保护；fake-helper 覆盖 host policy 拒绝、路径 symlink、输出界限、setup 失败、超时与取消。这不等价于网络 namespace 负向证明，也未覆盖真实 bwrap 的超时/取消。A35/R4 尚未完成；不得接入 Python Sandbox/平台或宣称替代现有运行时。不能实现的字段必须拒绝请求，不能静默降级。

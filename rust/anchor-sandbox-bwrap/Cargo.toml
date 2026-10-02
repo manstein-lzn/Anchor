@@ -1,0 +1,14 @@
+[package]
+name = "anchor-sandbox-bwrap"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Bubblewrap host adapter for Anchor's Rust sandbox port"
+
+[dependencies]
+anchor-runtime-rig = { path = "../anchor-runtime" }
+tokio = { workspace = true, features = ["process", "io-util", "net"] }
+libc = "0.2"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["process", "io-util", "macros", "rt-multi-thread", "time", "net"] }

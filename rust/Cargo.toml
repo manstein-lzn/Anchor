@@ -1,5 +1,5 @@
 [workspace]
-members = ["anchor-runtime"]
+members = ["anchor-runtime", "anchor-sandbox-bwrap"]
 resolver = "2"
 
 [workspace.package]
