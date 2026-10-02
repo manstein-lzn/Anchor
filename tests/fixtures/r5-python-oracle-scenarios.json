@@ -409,6 +409,41 @@
       ]
     },
     {
+      "id": "unstarted_cycle_skip_releases_merge",
+      "graph": {
+        "objective": "oracle unstarted cycle skip",
+        "input": {},
+        "entry": "start",
+        "agents": {
+          "worker": {
+            "model": "fixture.model",
+            "instructions": "fixture"
+          }
+        },
+        "nodes": [
+          {"id": "start", "agent": "worker"},
+          {"id": "live", "agent": "worker"},
+          {"id": "cycle_a", "agent": "worker"},
+          {"id": "cycle_b", "agent": "worker"},
+          {"id": "merge", "agent": "worker"}
+        ],
+        "edges": [
+          {"from": "start", "to": "live"},
+          {"from": "start", "to": "cycle_a"},
+          {"from": "live", "to": "merge"},
+          {"from": "cycle_a", "to": "cycle_b"},
+          {"from": "cycle_b", "to": "cycle_a"},
+          {"from": "cycle_b", "to": "merge"}
+        ]
+      },
+      "run_override": {"input": {"request": "skip unreachable cycle"}},
+      "outcomes": [
+        {"node": "start", "invocation": 1, "exit_status": "Submitted", "route": "live"},
+        {"node": "live", "invocation": 1, "exit_status": "Submitted", "route": null},
+        {"node": "merge", "invocation": 1, "exit_status": "Submitted", "route": null}
+      ]
+    },
+    {
       "id": "pause_before_first_dispatch",
       "graph": {
         "objective": "oracle pause boundary",

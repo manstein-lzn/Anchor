@@ -1033,6 +1033,46 @@ def run(workspace: str | Path, *, objective: str | None = None, config_path: str
     order = list(graph.nodes)
     regions = graph.parallel_regions()
 
+    # Cyclic regions need a joint reachability decision. A node-by-node walk cannot reject an
+    # unstarted cycle because its internal back-edges are intentionally still undecided.
+    components: list[tuple[str, ...]] = []
+    index = 0
+    indices: dict[str, int] = {}
+    lowlinks: dict[str, int] = {}
+    stack: list[str] = []
+    on_stack: set[str] = set()
+
+    def visit(node_id: str) -> None:
+        nonlocal index
+        indices[node_id] = lowlinks[node_id] = index
+        index += 1
+        stack.append(node_id)
+        on_stack.add(node_id)
+        for target in graph.routes(node_id):
+            if target not in indices:
+                visit(target)
+                lowlinks[node_id] = min(lowlinks[node_id], lowlinks[target])
+            elif target in on_stack:
+                lowlinks[node_id] = min(lowlinks[node_id], indices[target])
+        if lowlinks[node_id] == indices[node_id]:
+            component = []
+            while True:
+                member = stack.pop()
+                on_stack.remove(member)
+                component.append(member)
+                if member == node_id:
+                    break
+            components.append(tuple(component))
+
+    for node_id in order:
+        if node_id not in indices:
+            visit(node_id)
+    component_of = {node_id: component for component in components for node_id in component}
+    cyclic_components = {
+        component for component in components
+        if len(component) > 1 or any(target == component[0] for target in graph.routes(component[0]))
+    }
+
     def ready(node_id: str) -> bool:
         return _ready(graph, state, decided, back, entry, node_id)
 
@@ -1047,6 +1087,31 @@ def run(workspace: str | Path, *, objective: str | None = None, config_path: str
             decided[(node_id, target)] = (broadcast or target == chosen, state.seq)
         state.decided = {f"{source}|{target}": [value[0], value[1]]
                          for (source, target), value in decided.items()}
+
+    def closed_inactive_component(component: tuple[str, ...], inactive: set[tuple[str, ...]]) -> bool:
+        if entry in component or any(state.runs.get(node, 0) for node in component):
+            return False
+        members = set(component)
+        for target in component:
+            for source in graph.in_edges[target]:
+                if source in members:
+                    continue
+                edge = (source, target)
+                if edge in decided:
+                    if decided[edge][0]:
+                        return False
+                elif component_of[source] not in inactive:
+                    return False
+        return True
+
+    def settle_inactive_component(component: tuple[str, ...]) -> bool:
+        changed_component = False
+        for source in component:
+            if any((source, target) not in decided or decided[(source, target)][0]
+                   for target in graph.routes(source)):
+                settle(source, None)
+                changed_component = True
+        return changed_component
 
     def propagate_skips() -> bool:
         """Settle the outgoing edges of nodes that every path has rejected.
@@ -1073,6 +1138,27 @@ def run(workspace: str | Path, *, objective: str | None = None, config_path: str
                     continue
                 settle(node_id, None)
                 pass_changed = changed = True
+            # Collapse a cyclic component only when every ingress is known inactive. Internal
+            # back-edges do not count as unresolved ingress. An external undecided edge is safe
+            # only after its source component has itself been proved inactive; in particular, an
+            # invoked source with a missing decision keeps the target live/unknown.
+            inactive_components: set[tuple[str, ...]] = set()
+            pending_components = sorted(
+                cyclic_components,
+                key=lambda component: min(order.index(node) for node in component),
+            )
+            found_component = True
+            while found_component:
+                found_component = False
+                for component in pending_components:
+                    if component in inactive_components or not closed_inactive_component(
+                        component, inactive_components
+                    ):
+                        continue
+                    inactive_components.add(component)
+                    found_component = True
+                    if settle_inactive_component(component):
+                        pass_changed = changed = True
             if not pass_changed:
                 break
         if changed:

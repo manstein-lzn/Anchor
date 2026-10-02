@@ -663,6 +663,156 @@
       }
     },
     {
+      "id": "unstarted_cycle_skip_releases_merge",
+      "control": {},
+      "graph_snapshot": {
+        "objective": "oracle unstarted cycle skip",
+        "input": {},
+        "entry": "start",
+        "agents": {
+          "worker": {
+            "model": "fixture.model",
+            "instructions": "fixture",
+            "network": false,
+            "max_steps": null,
+            "wall_time_limit_seconds": 3600
+          }
+        },
+        "ops": {},
+        "nodes": [
+          {
+            "id": "start",
+            "agent": "worker"
+          },
+          {
+            "id": "live",
+            "agent": "worker"
+          },
+          {
+            "id": "cycle_a",
+            "agent": "worker"
+          },
+          {
+            "id": "cycle_b",
+            "agent": "worker"
+          },
+          {
+            "id": "merge",
+            "agent": "worker"
+          }
+        ],
+        "edges": [
+          {
+            "from": "start",
+            "to": "live"
+          },
+          {
+            "from": "start",
+            "to": "cycle_a"
+          },
+          {
+            "from": "live",
+            "to": "merge"
+          },
+          {
+            "from": "cycle_a",
+            "to": "cycle_b"
+          },
+          {
+            "from": "cycle_b",
+            "to": "cycle_a"
+          },
+          {
+            "from": "cycle_b",
+            "to": "merge"
+          }
+        ]
+      },
+      "run_override": {
+        "input": {
+          "request": "skip unreachable cycle"
+        }
+      },
+      "effective_input": {
+        "request": "skip unreachable cycle"
+      },
+      "node_outcomes": [
+        {
+          "node": "start",
+          "invocation": 1,
+          "exit_status": "Submitted",
+          "route": "live"
+        },
+        {
+          "node": "live",
+          "invocation": 1,
+          "exit_status": "Submitted",
+          "route": null
+        },
+        {
+          "node": "merge",
+          "invocation": 1,
+          "exit_status": "Submitted",
+          "route": null
+        }
+      ],
+      "python": {
+        "status": "completed",
+        "python_status": "finished",
+        "reason": "",
+        "ordered_executed_nodes": [
+          "start",
+          "live",
+          "merge"
+        ],
+        "skipped_nodes": [
+          "cycle_a",
+          "cycle_b"
+        ],
+        "passes": {
+          "start": 1,
+          "live": 1,
+          "merge": 1
+        },
+        "ceased": [],
+        "edge_decisions": [
+          {
+            "from": "cycle_a",
+            "to": "cycle_b",
+            "selected": false
+          },
+          {
+            "from": "cycle_b",
+            "to": "cycle_a",
+            "selected": false
+          },
+          {
+            "from": "cycle_b",
+            "to": "merge",
+            "selected": false
+          },
+          {
+            "from": "live",
+            "to": "merge",
+            "selected": true
+          },
+          {
+            "from": "start",
+            "to": "cycle_a",
+            "selected": false
+          },
+          {
+            "from": "start",
+            "to": "live",
+            "selected": true
+          }
+        ],
+        "cursor": {
+          "exists": false
+        }
+      }
+    },
+    {
       "id": "pause_before_first_dispatch",
       "control": {
         "pause_before_dispatch": true

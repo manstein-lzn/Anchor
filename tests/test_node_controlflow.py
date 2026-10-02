@@ -953,6 +953,154 @@ def test_rejected_branch_propagates_false_edge_to_diamond_merge(tmp_path, monkey
     assert "left" not in merge_inputs
 
 
+def test_unstarted_closed_cycle_propagates_false_edges_to_diamond_merge(tmp_path, monkeypatch):
+    """A rejected entry closes an otherwise-unstarted cycle, including its back-edge."""
+    from anchor.simple import graph as graph_module
+    from anchor.simple import run as runner
+
+    graph = {
+        "entry": "decide",
+        "objective": "skip a closed cycle and merge the live arm",
+        "agents": {"w": {"model": "models.academic", "writes": ["note.md"]}},
+        "nodes": [{"id": node, "agent": "w"}
+                  for node in ("decide", "right", "loop_a", "loop_b", "merge")],
+        "edges": [{"from": "decide", "to": "right"},
+                  {"from": "decide", "to": "loop_a"},
+                  {"from": "loop_a", "to": "loop_b"},
+                  {"from": "loop_b", "to": "loop_a"},
+                  {"from": "loop_b", "to": "merge"},
+                  {"from": "right", "to": "merge"}],
+    }
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "graph.json").write_text(json.dumps(graph), encoding="utf-8")
+    config = tmp_path / "runtime.json"
+    config.write_text('{"models": []}', encoding="utf-8")
+    models = {
+        "decide": model_from(['anchor-route --to right --reason "take the live arm"']),
+        "right": model_from(['anchor-done --summary "right arm complete"']),
+        "merge": model_from(['anchor-done --summary "merge complete"']),
+    }
+    calls = []
+
+    def factory(g, node_id, directory, models_, secret, cfg, inputs=(), trace=None,
+                scripted_model=None, control=None):
+        calls.append(node_id)
+        return AdapterAgent(Path(directory), node_id, inputs, trace, models[node_id],
+                            graph_module.Graph.routes(g, node_id))
+
+    monkeypatch.setattr(runner, "_config", lambda path: ({}, None))
+    monkeypatch.setattr(runner, "_agent_for", factory)
+    state = runner.run(workspace, config_path=config)
+
+    assert state.status == "finished", (state.status, state.error, state.decided)
+    assert calls == ["decide", "right", "merge"]
+    assert state.skipped == ["loop_a", "loop_b"]
+    assert state.decided["loop_a|loop_b"][0] is False
+    assert state.decided["loop_b|loop_a"][0] is False
+    assert state.decided["loop_b|merge"][0] is False
+
+
+def test_unstarted_cycle_with_undecided_live_ingress_is_not_closed(tmp_path, monkeypatch):
+    """An unresolved ingress from a runnable node keeps the cycle eligible to run."""
+    from anchor.simple import graph as graph_module
+    from anchor.simple import run as runner
+
+    graph = {
+        "entry": "decide",
+        "objective": "preserve a cycle with a live external ingress",
+        "agents": {"w": {"model": "models.academic", "writes": ["note.md"]}},
+        "nodes": [{"id": node, "agent": "w"}
+                  for node in ("decide", "live", "loop_a", "loop_b", "merge")],
+        "edges": [{"from": "decide", "to": "live"},
+                  {"from": "decide", "to": "loop_a"},
+                  {"from": "live", "to": "loop_a"},
+                  {"from": "live", "to": "merge"},
+                  {"from": "loop_a", "to": "loop_b"},
+                  {"from": "loop_b", "to": "loop_a"},
+                  {"from": "loop_b", "to": "merge"}],
+    }
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "graph.json").write_text(json.dumps(graph), encoding="utf-8")
+    config = tmp_path / "runtime.json"
+    config.write_text('{"models": []}', encoding="utf-8")
+    models = {
+        "decide": model_from(['anchor-route --to live --reason "open the live ingress"']),
+        "live": model_from(['anchor-route --to loop_a --reason "enter the cycle"']),
+        "loop_a": model_from(['anchor-route --to loop_b --reason "continue"']),
+        "loop_b": model_from(['anchor-route --to merge --reason "leave the cycle"']),
+        "merge": model_from(['anchor-done --summary "merge complete"']),
+    }
+    calls = []
+
+    def factory(g, node_id, directory, models_, secret, cfg, inputs=(), trace=None,
+                scripted_model=None, control=None):
+        calls.append(node_id)
+        return AdapterAgent(Path(directory), node_id, inputs, trace, models[node_id],
+                            graph_module.Graph.routes(g, node_id))
+
+    monkeypatch.setattr(runner, "_config", lambda path: ({}, None))
+    monkeypatch.setattr(runner, "_agent_for", factory)
+    state = runner.run(workspace, config_path=config)
+
+    assert state.status == "finished", (state.status, state.error, state.decided)
+    assert calls == ["decide", "live", "loop_a", "loop_b", "merge"]
+    assert state.skipped == []
+
+
+def test_unstarted_cycle_closure_cascades_through_two_sccs(tmp_path, monkeypatch):
+    """An inactive cycle settles the ingress that proves the next cycle inactive."""
+    from anchor.simple import graph as graph_module
+    from anchor.simple import run as runner
+
+    graph = {
+        "entry": "decide",
+        "objective": "close two unreachable cycles before merging",
+        "agents": {"w": {"model": "models.academic", "writes": ["note.md"]}},
+        # Declare downstream first to exercise closure independently of SCC enumeration order.
+        "nodes": [{"id": node, "agent": "w"} for node in
+                  ("decide", "right", "b1", "b2", "a1", "a2", "merge")],
+        "edges": [{"from": "decide", "to": "right"},
+                  {"from": "decide", "to": "a1"},
+                  {"from": "a1", "to": "a2"},
+                  {"from": "a2", "to": "a1"},
+                  {"from": "a2", "to": "b1"},
+                  {"from": "b1", "to": "b2"},
+                  {"from": "b2", "to": "b1"},
+                  {"from": "b2", "to": "merge"},
+                  {"from": "right", "to": "merge"}],
+    }
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "graph.json").write_text(json.dumps(graph), encoding="utf-8")
+    config = tmp_path / "runtime.json"
+    config.write_text('{"models": []}', encoding="utf-8")
+    models = {
+        "decide": model_from(['anchor-route --to right --reason "take the live arm"']),
+        "right": model_from(['anchor-done --summary "right arm complete"']),
+        "merge": model_from(['anchor-done --summary "merge complete"']),
+    }
+    calls = []
+
+    def factory(g, node_id, directory, models_, secret, cfg, inputs=(), trace=None,
+                scripted_model=None, control=None):
+        calls.append(node_id)
+        return AdapterAgent(Path(directory), node_id, inputs, trace, models[node_id],
+                            graph_module.Graph.routes(g, node_id))
+
+    monkeypatch.setattr(runner, "_config", lambda path: ({}, None))
+    monkeypatch.setattr(runner, "_agent_for", factory)
+    state = runner.run(workspace, config_path=config)
+
+    assert state.status == "finished", (state.status, state.error, state.decided)
+    assert calls == ["decide", "right", "merge"]
+    assert state.skipped == ["b1", "b2", "a1", "a2"]
+    assert state.decided["a2|b1"][0] is False
+    assert state.decided["b2|merge"][0] is False
+    assert state.decided["b2|b1"][0] is False
+
+
 # ── the compatibility question the reviewer said must be settled before freezing ──────────────────
 
 def test_the_harness_compaction_can_see_an_ordinary_observation(tmp_path):
