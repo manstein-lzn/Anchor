@@ -1630,10 +1630,18 @@ async fn parallel_branches_complete_out_of_order_and_join_receives_all_branch_fa
     let calls = nodes.calls.lock().unwrap();
     assert!(!calls.iter().any(|request| request.key.node_id == "collect"));
     let join = run.results.get("collect").unwrap().first().unwrap();
-    assert_eq!(
-        join.completion.output["branches"].as_array().unwrap().len(),
-        2
-    );
+    let manifest_branches = join.completion.output["branches"].as_array().unwrap();
+    assert_eq!(manifest_branches.len(), 2);
+    for branch in manifest_branches {
+        for node in branch["nodes"].as_array().unwrap() {
+            let node_id = node["node"].as_str().unwrap();
+            let expected_commit = &run.results[node_id].first().unwrap().commit;
+            assert_eq!(
+                node["commit"],
+                serde_json::to_value(expected_commit).unwrap()
+            );
+        }
+    }
     assert_eq!(
         run.results.get("collect").unwrap().len(),
         1,
