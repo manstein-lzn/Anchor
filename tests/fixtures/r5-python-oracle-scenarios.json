@@ -119,6 +119,24 @@
         {"node": "a", "invocation": 2, "exit_status": "Submitted", "route": null},
         {"node": "b", "invocation": 2, "exit_status": "Submitted", "route": null}
       ]
+    },
+    {
+      "id": "deterministic_failure_settles_single_exit",
+      "graph": {
+        "objective": "oracle deterministic failure",
+        "input": {},
+        "entry": "fail",
+        "agents": {"worker": {"model": "fixture.model", "instructions": "fixture"}},
+        "nodes": [
+          {"id": "fail", "agent": "worker"},
+          {"id": "downstream", "agent": "worker"}
+        ],
+        "edges": [{"from": "fail", "to": "downstream"}]
+      },
+      "run_override": {"input": {"request": "failure"}},
+      "outcomes": [
+        {"node": "fail", "invocation": 1, "exit_status": "Exited", "route": null}
+      ]
     }
   ]
 }

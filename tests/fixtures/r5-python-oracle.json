@@ -522,6 +522,78 @@
           "exists": false
         }
       }
+    },
+    {
+      "id": "deterministic_failure_settles_single_exit",
+      "graph_snapshot": {
+        "objective": "oracle deterministic failure",
+        "input": {},
+        "entry": "fail",
+        "agents": {
+          "worker": {
+            "model": "fixture.model",
+            "instructions": "fixture",
+            "network": false,
+            "max_steps": null,
+            "wall_time_limit_seconds": 3600
+          }
+        },
+        "ops": {},
+        "nodes": [
+          {
+            "id": "fail",
+            "agent": "worker"
+          },
+          {
+            "id": "downstream",
+            "agent": "worker"
+          }
+        ],
+        "edges": [
+          {
+            "from": "fail",
+            "to": "downstream"
+          }
+        ]
+      },
+      "run_override": {
+        "input": {
+          "request": "failure"
+        }
+      },
+      "effective_input": {
+        "request": "failure"
+      },
+      "node_outcomes": [
+        {
+          "node": "fail",
+          "invocation": 1,
+          "exit_status": "Exited",
+          "route": null
+        }
+      ],
+      "python": {
+        "status": "failed",
+        "python_status": "failed",
+        "reason": "",
+        "ordered_executed_nodes": [
+          "fail"
+        ],
+        "passes": {
+          "fail": 1
+        },
+        "ceased": [],
+        "edge_decisions": [
+          {
+            "from": "fail",
+            "to": "downstream",
+            "selected": true
+          }
+        ],
+        "cursor": {
+          "exists": false
+        }
+      }
     }
   ]
 }

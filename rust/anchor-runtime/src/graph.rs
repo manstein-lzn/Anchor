@@ -694,7 +694,8 @@ impl<'a, S: RunStore, A: ArtifactPort, N: NodeExecutionPort, C: RunControl>
             let completion = match fact {
                 CompletionFact::Completed(c) => Some(c),
                 CompletionFact::Failed(reason) => {
-                    return self.fail(record, format!("{} failed: {reason}", cursor.node_id));
+                    return self
+                        .fail_known_node(record, format!("{} failed: {reason}", cursor.node_id));
                 }
                 CompletionFact::Uncertain(reason) => {
                     return self.fail(
@@ -813,7 +814,10 @@ impl<'a, S: RunStore, A: ArtifactPort, N: NodeExecutionPort, C: RunControl>
                         return Ok(record);
                     }
                     NodeExecutionOutcome::Failed { reason } => {
-                        return self.fail(record, format!("{} failed: {reason}", cursor.node_id));
+                        return self.fail_known_node(
+                            record,
+                            format!("{} failed: {reason}", cursor.node_id),
+                        );
                     }
                 }
             };
@@ -925,6 +929,17 @@ impl<'a, S: RunStore, A: ArtifactPort, N: NodeExecutionPort, C: RunControl>
         record.error = Some(reason);
         self.store.save(&record)?;
         Ok(record)
+    }
+
+    fn fail_known_node(
+        &self,
+        mut record: GraphRunRecord,
+        reason: String,
+    ) -> Result<GraphRunRecord, GraphError> {
+        // A known failed outcome cannot be resumed as the same invocation and
+        // must never settle outgoing edges. Its started counters remain factual.
+        record.cursor = None;
+        self.fail(record, reason)
     }
 }
 
@@ -1766,8 +1781,14 @@ mod tests {
                 .unwrap()
                 .contains("provider rejected request")
         );
+        assert!(failed.error.as_deref().unwrap().contains("fails"));
+        assert!(failed.cursor.is_none());
+        assert_eq!(failed.invocations["fails"], 1);
+        assert_eq!(failed.passes["fails"], 1);
         assert_eq!(nodes.calls.lock().unwrap().len(), 1);
         assert!(failed.decided.is_empty());
+        assert!(!failed.invocations.contains_key("downstream"));
+        assert!(!failed.passes.contains_key("downstream"));
 
         // Even an explicit second call with the durable terminal record cannot replay it.
         let terminal = runner.run(failed).await.unwrap();
@@ -1823,6 +1844,10 @@ mod tests {
         let failed = runner.run(record).await.unwrap();
         assert_eq!(failed.status, RunStatus::Failed);
         assert!(n.calls.lock().unwrap().is_empty());
+        assert!(failed.cursor.is_some());
+        assert_eq!(failed.invocations["one"], 1);
+        assert_eq!(failed.passes["one"], 1);
+        assert!(failed.decided.is_empty());
         c.pause = true;
         let paused = GraphRunner::new(&s, &a, &n, &c)
             .run(GraphRunRecord::create(graph(&["one"], &[], "one"), Value::Null).unwrap())
@@ -2289,7 +2314,7 @@ mod tests {
         );
 
         let scenarios = fixture["scenarios"].as_array().unwrap();
-        assert_eq!(scenarios.len(), 5);
+        assert_eq!(scenarios.len(), 6);
         for scenario in scenarios {
             let snapshot = GraphSnapshot::admit(scenario["graph_snapshot"].clone()).unwrap();
             let override_input = scenario["run_override"]["input"].clone();
@@ -2369,20 +2394,17 @@ mod tests {
             assert_eq!(ceased, expected_ceased, "scenario {}", scenario["id"]);
 
             let expected_cursor = &expected["cursor"];
-            assert_eq!(
-                result.cursor.is_some(),
-                expected_cursor["exists"],
-                "cursor presence, scenario {}",
-                scenario["id"]
+            let cursor_fact = result.cursor.as_ref().map_or_else(
+                || serde_json::json!({"exists":false}),
+                |cursor| {
+                    serde_json::json!({
+                        "exists":true,
+                        "node":cursor.node_id,
+                        "pass":result.passes.get(&cursor.node_id).copied().unwrap_or(0),
+                        "invocation":cursor.key.invocation
+                    })
+                },
             );
-            if let Some(cursor) = &result.cursor {
-                assert_eq!(cursor.node_id, expected_cursor["node"]);
-                assert_eq!(cursor.key.invocation, expected_cursor["invocation"]);
-                assert_eq!(
-                    result.passes.get(&cursor.node_id),
-                    Some(&expected_cursor["pass"].as_u64().unwrap())
-                );
-            }
 
             let mut decisions: Vec<Value> = result
                 .decided
@@ -2399,11 +2421,29 @@ mod tests {
             expected_decisions.sort_by(|a, b| {
                 (a["from"].as_str(), a["to"].as_str()).cmp(&(b["from"].as_str(), b["to"].as_str()))
             });
-            assert_eq!(
-                decisions, expected_decisions,
-                "edge decisions, scenario {}",
-                scenario["id"]
-            );
+            if scenario["id"] == "deterministic_failure_settles_single_exit" {
+                // Intentional semantic divergence: Python settles a single exit
+                // even after node failure; Rust treats the failed fact as terminal.
+                assert_eq!(
+                    result.status,
+                    RunStatus::Failed,
+                    "intentional semantic divergence: failure is terminal"
+                );
+                assert_eq!(result.passes.get("fail"), Some(&1));
+                assert!(result.cursor.is_none());
+                assert!(result.decided.is_empty());
+                assert_eq!(expected_decisions.len(), 1);
+                assert_eq!(expected_decisions[0]["to"], "downstream");
+                assert_eq!(expected_decisions[0]["selected"], true);
+                assert_eq!(cursor_fact, expected_cursor.clone());
+            } else {
+                assert_eq!(
+                    (decisions, cursor_fact),
+                    (expected_decisions, expected_cursor.clone()),
+                    "edge decisions and cursor, scenario {}",
+                    scenario["id"]
+                );
+            }
         }
     }
 }
