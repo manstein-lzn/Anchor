@@ -258,6 +258,270 @@
           "invocation": 1
         }
       }
+    },
+    {
+      "id": "module_scope_reentry_ceiling",
+      "graph_snapshot": {
+        "objective": "oracle module scope reentry",
+        "input": {},
+        "entry": "in",
+        "_module_rounds": {
+          "use_review": 2
+        },
+        "agents": {
+          "worker": {
+            "model": "fixture.model",
+            "instructions": "fixture",
+            "network": false,
+            "max_steps": null,
+            "wall_time_limit_seconds": 3600
+          }
+        },
+        "ops": {},
+        "nodes": [
+          {
+            "id": "in",
+            "agent": "worker"
+          },
+          {
+            "id": "use_review/draft",
+            "agent": "worker"
+          },
+          {
+            "id": "use_review/review",
+            "agent": "worker"
+          },
+          {
+            "id": "out",
+            "agent": "worker"
+          }
+        ],
+        "edges": [
+          {
+            "from": "in",
+            "to": "use_review/draft"
+          },
+          {
+            "from": "use_review/draft",
+            "to": "use_review/review"
+          },
+          {
+            "from": "use_review/review",
+            "to": "out"
+          },
+          {
+            "from": "out",
+            "to": "use_review/draft"
+          }
+        ]
+      },
+      "run_override": {
+        "input": {
+          "request": "module reentry"
+        }
+      },
+      "effective_input": {
+        "request": "module reentry"
+      },
+      "node_outcomes": [
+        {
+          "node": "in",
+          "invocation": 1,
+          "exit_status": "Submitted",
+          "route": null
+        },
+        {
+          "node": "use_review/draft",
+          "invocation": 1,
+          "exit_status": "Submitted",
+          "route": null
+        },
+        {
+          "node": "use_review/review",
+          "invocation": 1,
+          "exit_status": "Submitted",
+          "route": null
+        },
+        {
+          "node": "out",
+          "invocation": 1,
+          "exit_status": "Submitted",
+          "route": null
+        },
+        {
+          "node": "use_review/draft",
+          "invocation": 2,
+          "exit_status": "Submitted",
+          "route": null
+        },
+        {
+          "node": "use_review/review",
+          "invocation": 2,
+          "exit_status": "Submitted",
+          "route": null
+        },
+        {
+          "node": "out",
+          "invocation": 2,
+          "exit_status": "Submitted",
+          "route": null
+        }
+      ],
+      "python": {
+        "status": "stopped",
+        "python_status": "stopped",
+        "reason": "max_rounds",
+        "ordered_executed_nodes": [
+          "in",
+          "use_review/draft",
+          "use_review/review",
+          "out",
+          "use_review/draft",
+          "use_review/review",
+          "out"
+        ],
+        "passes": {
+          "in": 1,
+          "use_review/draft": 1,
+          "use_review/review": 1,
+          "out": 2
+        },
+        "ceased": [
+          "use_review@2"
+        ],
+        "edge_decisions": [
+          {
+            "from": "in",
+            "to": "use_review/draft",
+            "selected": true
+          },
+          {
+            "from": "out",
+            "to": "use_review/draft",
+            "selected": true
+          },
+          {
+            "from": "use_review/draft",
+            "to": "use_review/review",
+            "selected": false
+          },
+          {
+            "from": "use_review/review",
+            "to": "out",
+            "selected": true
+          }
+        ],
+        "cursor": {
+          "exists": false
+        }
+      }
+    },
+    {
+      "id": "two_node_back_edge_ceiling",
+      "graph_snapshot": {
+        "objective": "oracle two node loop",
+        "input": {},
+        "entry": "a",
+        "agents": {
+          "worker": {
+            "model": "fixture.model",
+            "instructions": "fixture",
+            "network": false,
+            "max_steps": null,
+            "wall_time_limit_seconds": 3600
+          }
+        },
+        "ops": {},
+        "nodes": [
+          {
+            "id": "a",
+            "agent": "worker",
+            "max_rounds": 2
+          },
+          {
+            "id": "b",
+            "agent": "worker",
+            "max_rounds": 2
+          }
+        ],
+        "edges": [
+          {
+            "from": "a",
+            "to": "b"
+          },
+          {
+            "from": "b",
+            "to": "a"
+          }
+        ]
+      },
+      "run_override": {
+        "input": {
+          "request": "two node loop"
+        }
+      },
+      "effective_input": {
+        "request": "two node loop"
+      },
+      "node_outcomes": [
+        {
+          "node": "a",
+          "invocation": 1,
+          "exit_status": "Submitted",
+          "route": null
+        },
+        {
+          "node": "b",
+          "invocation": 1,
+          "exit_status": "Submitted",
+          "route": null
+        },
+        {
+          "node": "a",
+          "invocation": 2,
+          "exit_status": "Submitted",
+          "route": null
+        },
+        {
+          "node": "b",
+          "invocation": 2,
+          "exit_status": "Submitted",
+          "route": null
+        }
+      ],
+      "python": {
+        "status": "stopped",
+        "python_status": "stopped",
+        "reason": "max_rounds",
+        "ordered_executed_nodes": [
+          "a",
+          "b",
+          "a",
+          "b"
+        ],
+        "passes": {
+          "a": 2,
+          "b": 2
+        },
+        "ceased": [
+          "a@2"
+        ],
+        "edge_decisions": [
+          {
+            "from": "a",
+            "to": "b",
+            "selected": false
+          },
+          {
+            "from": "b",
+            "to": "a",
+            "selected": true
+          }
+        ],
+        "cursor": {
+          "exists": false
+        }
+      }
     }
   ]
 }

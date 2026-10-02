@@ -2146,7 +2146,7 @@ mod tests {
         );
 
         let scenarios = fixture["scenarios"].as_array().unwrap();
-        assert_eq!(scenarios.len(), 3);
+        assert_eq!(scenarios.len(), 5);
         for scenario in scenarios {
             let snapshot = GraphSnapshot::admit(scenario["graph_snapshot"].clone()).unwrap();
             let override_input = scenario["run_override"]["input"].clone();
