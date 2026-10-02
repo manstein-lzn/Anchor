@@ -836,7 +836,7 @@ impl<'a, S: RunStore, A: ArtifactPort, N: NodeExecutionPort, C: RunControl>
             let chosen = match select_route(&completion, &routes) {
                 Ok(route) => route,
                 Err(error) => {
-                    return self.fail(record, format!("{}: {error}", cursor.node_id));
+                    return self.fail_known_node(record, format!("{}: {error}", cursor.node_id));
                 }
             };
             let commit = self.artifacts.freeze(&cursor.key, &completion).await?;
@@ -2297,13 +2297,20 @@ mod tests {
         let snapshot = graph(&["start", "next"], &[("start", "next")], "start");
         let (store, artifacts, nodes, control) = setup();
         *nodes.invalid_route_once.lock().unwrap() = true;
+        *store.fail_on.lock().unwrap() = Some(3);
         let runner = GraphRunner::new(&store, &artifacts, &nodes, &control);
-        let failed = runner
-            .run(GraphRunRecord::create(snapshot, Value::Null).unwrap())
-            .await
-            .unwrap();
+        let record = GraphRunRecord::create(snapshot, Value::Null).unwrap();
+        let id = record.run_id.clone();
+        assert!(runner.run(record).await.is_err());
+        let interrupted = store.load(&id).unwrap().unwrap();
+        assert!(interrupted.cursor.is_some());
+        *store.fail_on.lock().unwrap() = None;
+        let failed = runner.run(interrupted).await.unwrap();
         assert_eq!(failed.status, RunStatus::Failed);
         assert!(failed.error.as_deref().unwrap().contains("unlisted-route"));
+        assert!(failed.cursor.is_none());
+        assert_eq!(failed.invocations["start"], 1);
+        assert_eq!(failed.passes["start"], 1);
         assert!(failed.decided.is_empty());
         assert!(failed.results.is_empty());
         assert_eq!(nodes.calls.lock().unwrap().len(), 1);
