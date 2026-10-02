@@ -662,6 +662,7 @@ impl NodeExecutor {
                     store.save(store_key, checkpoint)?;
                 }
                 AgentRunStep::Done(response) => {
+                    checkpoint.pending_step = None;
                     store.save(store_key, checkpoint)?;
                     return parse_outcome(response.output, requests, context.routes);
                 }

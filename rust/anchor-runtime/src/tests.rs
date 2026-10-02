@@ -560,6 +560,60 @@ async fn node_executor_timeout_keeps_pending_model_step() {
 }
 
 #[tokio::test]
+async fn node_executor_recovers_persisted_model_timeout_with_new_provider() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("anchor-rig-timeout-recovery-{unique}"));
+    let store = super::FileCheckpointStore::new(&root);
+    let mut checkpoint = AgentCheckpoint::start("review", 13, "slow provider", 1);
+    let cancellation = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let error = super::NodeExecutor::execute_with_policy(
+        &mut checkpoint,
+        &SlowCompletion,
+        &EchoTools,
+        ExecutionPolicy {
+            model_timeout: Some(std::time::Duration::from_millis(1)),
+            tool_timeout: None,
+        },
+        &cancellation,
+        &[],
+    )
+    .await
+    .expect_err("slow model should time out");
+    assert!(error.to_string().contains("model request timed out"));
+
+    store
+        .save("execution-13", &checkpoint)
+        .expect("persist interrupted model request");
+    let mut restored = store
+        .load("execution-13", "review", 13)
+        .expect("load checkpoint")
+        .expect("persisted checkpoint exists");
+    assert!(matches!(
+        restored.pending_step(),
+        Some(AgentRunStep::CallModel { turn: 1, .. })
+    ));
+
+    let recovery_port = super::RigCompletionPort::new(
+        MockCompletionModel::text(r#"{"summary":"recovered after timeout"}"#).erase(),
+    );
+    let outcome = super::NodeExecutor::execute(
+        &mut restored,
+        &recovery_port,
+        &EchoTools,
+        &cancellation,
+        &[],
+    )
+    .await
+    .expect("resume pending model request with a newly bound provider");
+    assert_eq!(outcome.submission, "recovered after timeout");
+    assert!(restored.pending_step().is_none());
+    std::fs::remove_dir_all(root).expect("remove test directory");
+}
+
+#[tokio::test]
 async fn streaming_port_emits_events_and_returns_complete_response() {
     let model = MockCompletionModel::from_stream_turns([[
         MockStreamEvent::text("{"),
@@ -604,6 +658,67 @@ async fn streaming_port_honors_cancellation_without_committing_response() {
     .await
     .expect_err("cancelled stream");
     assert!(matches!(error, super::StreamingError::Cancelled));
+}
+
+#[tokio::test]
+async fn interrupted_stream_keeps_checkpoint_pending_for_provider_recovery() {
+    let mut checkpoint = AgentCheckpoint::start("review", 14, "stream then recover", 1);
+    let step = checkpoint.run.next_step().expect("pending model step");
+    let AgentRunStep::CallModel {
+        prompt, turn: 1, ..
+    } = &step
+    else {
+        panic!("first Rig step should call the model");
+    };
+    let prompt = prompt.clone();
+    checkpoint.pending_step = Some(step);
+    let encoded = checkpoint.encode().expect("encode interrupted checkpoint");
+    let mut restored = AgentCheckpoint::decode(&encoded, "review", 14).expect("reload");
+
+    let model = MockCompletionModel::from_stream_turns([[
+        MockStreamEvent::text("partial response"),
+        MockStreamEvent::text(" must not be committed"),
+        MockStreamEvent::final_response_with_default_usage(),
+    ]]);
+    let port = super::RigCompletionPort::new(model.erase());
+    let cancellation = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut observed = Vec::new();
+    let error = super::stream_completion(
+        &port,
+        rig_agent::core::completion::CompletionRequest::new(prompt),
+        &cancellation,
+        None,
+        |event| {
+            if let rig_agent::core::streaming::StreamEvent::Text { text, .. } = event {
+                observed.push(text.clone());
+                cancellation.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        },
+    )
+    .await
+    .expect_err("host cancellation should discard a partial provider response");
+    assert!(matches!(error, super::StreamingError::Cancelled));
+    assert_eq!(observed.concat(), "partial response");
+    assert!(matches!(
+        restored.pending_step(),
+        Some(AgentRunStep::CallModel { turn: 1, .. })
+    ));
+
+    let recovery_port = super::RigCompletionPort::new(
+        MockCompletionModel::text(r#"{"summary":"recovered after stream interruption"}"#).erase(),
+    );
+    let recovery_cancellation = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let outcome = super::NodeExecutor::execute(
+        &mut restored,
+        &recovery_port,
+        &EchoTools,
+        &recovery_cancellation,
+        &[],
+    )
+    .await
+    .expect("resume interrupted model step through a fresh provider binding");
+    assert_eq!(outcome.submission, "recovered after stream interruption");
+    assert!(restored.pending_step().is_none());
 }
 
 #[tokio::test]
