@@ -390,7 +390,9 @@ impl ArtifactPort for DurableTestPorts {
                 }
                 Err(error) => return Err(error.into()),
             };
-            if self.crash_point == Some(CrashPoint::ArtifactCommit) {
+            if self.crash_point == Some(CrashPoint::ArtifactCommit)
+                && !completion.submission.starts_with("fanout activation")
+            {
                 std::process::exit(72);
             }
             Ok(artifact.commit)
@@ -2567,6 +2569,77 @@ async fn file_run_store_recovers_not_started_invocation_after_process_crash() {
 }
 
 #[tokio::test]
+async fn parallel_wave_recovers_each_branch_after_process_crash() {
+    let executable = std::env::current_exe().unwrap();
+    for (crash_name, expected_exit) in [
+        ("after-not-started", 70),
+        ("after-node-fact", 71),
+        ("after-artifact-commit", 72),
+    ] {
+        let root = std::env::temp_dir().join(format!(
+            "anchor-parallel-recovery-{}-{}-{crash_name}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let store = FileRunStore::new(&root);
+        let initial = GraphRunRecord::create(parallel_graph(), Value::Null).unwrap();
+        let run_id = initial.run_id.clone();
+        write_durable_json(&root.join("initial.json"), &initial).unwrap();
+
+        let crashed = Command::new(&executable)
+            .args([
+                "--exact",
+                "graph::tests::graph_runner_recovery_process_helper",
+                "--nocapture",
+            ])
+            .env("ANCHOR_GRAPH_RECOVERY_TEST_ROOT", &root)
+            .env("ANCHOR_GRAPH_RECOVERY_TEST_RUN", &run_id)
+            .env("ANCHOR_GRAPH_RECOVERY_TEST_CRASH", crash_name)
+            .output()
+            .unwrap();
+        assert_eq!(
+            crashed.status.code(),
+            Some(expected_exit),
+            "parallel child did not crash at {crash_name}; stdout={}, stderr={}",
+            String::from_utf8_lossy(&crashed.stdout),
+            String::from_utf8_lossy(&crashed.stderr)
+        );
+
+        let interrupted = store.load(&run_id).unwrap().unwrap();
+        assert_eq!(interrupted.status, RunStatus::Running);
+        let activation = interrupted.parallel.as_ref().unwrap();
+        assert!(
+            activation
+                .branches
+                .iter()
+                .all(|branch| branch.cursor.is_some()
+                    || branch.status == ParallelBranchStatus::Completed)
+        );
+        let ports = DurableTestPorts {
+            root: root.clone(),
+            crash_point: None,
+        };
+        let recovered = GraphRunner::new(&store, &ports, &ports, &Control::default())
+            .run(interrupted)
+            .await
+            .unwrap();
+        assert_eq!(recovered.status, RunStatus::Completed, "{crash_name}");
+        assert!(recovered.parallel.is_none());
+        for node in ["left", "right", "after"] {
+            assert_eq!(recovered.results[node].len(), 1, "{node}, {crash_name}");
+        }
+        assert_eq!(recovered.results["collect"].len(), 1);
+        assert_eq!(store.load(&run_id).unwrap().unwrap(), recovered);
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[tokio::test]
 async fn file_run_store_recovers_durable_failed_node_without_replay_or_freeze() {
     let executable = std::env::current_exe().unwrap();
     let root = std::env::temp_dir().join(format!(
@@ -2667,7 +2740,10 @@ async fn graph_runner_recovery_process_helper() {
     if !PathBuf::from(&root)
         .file_name()
         .and_then(|name| name.to_str())
-        .is_some_and(|name| name.starts_with("anchor-graph-recovery-"))
+        .is_some_and(|name| {
+            name.starts_with("anchor-graph-recovery-")
+                || name.starts_with("anchor-parallel-recovery-")
+        })
     {
         return;
     }

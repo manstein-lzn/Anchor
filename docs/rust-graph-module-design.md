@@ -71,12 +71,12 @@ graph/
 
 ## 当前验收结论与未决缺口
 
-R6 当前切片已通过 74 个 Rust runtime 测试（其中 Graph 测试 45 项）、Clippy、fmt、diff 检查，以及 Python 相关子集 70 项。已验证真实分支重叠、乱序收束、join 不调用 NodeExecutionPort、失败不放行 join、BudgetStopped/Cancelled reload、FileRunStore activation roundtrip，以及并行分支的 node `max_rounds` 和 module activation ceiling。
+R6 当前切片已通过 75 个 Rust runtime 测试（其中 Graph 测试 46 项）、Clippy、fmt、diff 检查，以及 Python 相关子集 70 项。已验证真实分支重叠、乱序收束、join 不调用 NodeExecutionPort、失败不放行 join、BudgetStopped/Cancelled reload、FileRunStore activation roundtrip、并行分支的 node `max_rounds` 和 module activation ceiling，以及三个 provider-free 并行 wave 进程崩溃窗口。
 
 这仍是“核心切片通过”，不是完整 R6：
 
 - 并行 wave 现在已经复用 node `max_rounds` 和 module activation ceiling；共享 prepare/settle 入口仍需在后续拆分中继续收紧，避免再次出现旁路。
-- 尚未完成并行 wave 进程崩溃窗口的独立测试。
+- 并行 wave 崩溃窗口目前只由 durable test ports 覆盖，尚未接入真实 Node/Artifact host。
 - 尚未接入真实 Node/Artifact host、provider、平台宿主或独立 Graph 宿主。
 - Cancellation 只保证 fail-closed、drain 已启动 future 和可恢复 cursor，不宣称 sibling exactly-cancel。
 
