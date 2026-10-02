@@ -1,0 +1,1879 @@
+//! Durable, serial coordinator for an already-expanded Anchor graph snapshot.
+//!
+//! This module owns graph/run facts only. Agent checkpoints, providers, tools,
+//! and host execution remain behind `NodeExecutionPort`.
+
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs::{self, OpenOptions},
+    future::Future,
+    io::{self, Write},
+    path::PathBuf,
+    pin::Pin,
+    sync::atomic::{AtomicU64, Ordering},
+    time::{SystemTime, UNIX_EPOCH},
+};
+
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+static RUN_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GraphSnapshot {
+    pub objective: String,
+    #[serde(default)]
+    pub input: Value,
+    pub entry: String,
+    #[serde(default)]
+    pub agents: BTreeMap<String, AgentDefinition>,
+    #[serde(default)]
+    pub ops: BTreeMap<String, Value>,
+    pub nodes: Vec<GraphNode>,
+    #[serde(default)]
+    pub edges: Vec<GraphEdge>,
+    #[serde(default, rename = "_module_rounds")]
+    pub module_rounds: BTreeMap<String, u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentDefinition {
+    #[serde(default)]
+    pub model: String,
+    #[serde(default)]
+    pub instructions: String,
+    #[serde(default)]
+    pub network: bool,
+    #[serde(default)]
+    pub max_steps: Option<u64>,
+    #[serde(default)]
+    pub wall_time_limit_seconds: Option<f64>,
+    #[serde(default)]
+    pub reads: Vec<String>,
+    #[serde(default)]
+    pub writes: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GraphNode {
+    pub id: String,
+    #[serde(default)]
+    pub agent: Option<String>,
+    #[serde(default)]
+    pub op: Option<String>,
+    #[serde(default, rename = "with")]
+    pub input: Option<Value>,
+    #[serde(default)]
+    pub plugins: Vec<String>,
+    #[serde(default)]
+    pub max_rounds: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NodeKind {
+    Agent,
+    OpRun,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GraphEdge {
+    #[serde(rename = "from")]
+    pub from_node: String,
+    #[serde(rename = "to")]
+    pub to_node: String,
+}
+
+impl GraphSnapshot {
+    pub fn admit(value: Value) -> Result<Self, GraphError> {
+        if let Value::Object(fields) = &value {
+            let allowed = [
+                "objective",
+                "input",
+                "entry",
+                "agents",
+                "ops",
+                "nodes",
+                "edges",
+                "_module_rounds",
+            ];
+            if let Some(unknown) = fields.keys().find(|key| !allowed.contains(&key.as_str())) {
+                return Err(GraphError::InvalidSnapshot(format!(
+                    "unknown graph snapshot field `{unknown}`"
+                )));
+            }
+        }
+        let snapshot: Self = serde_json::from_value(value).map_err(GraphError::SnapshotDecode)?;
+        snapshot.validate()?;
+        Ok(snapshot)
+    }
+
+    pub fn validate(&self) -> Result<(), GraphError> {
+        if self.nodes.is_empty() {
+            return Err(GraphError::InvalidSnapshot("graph has no nodes".into()));
+        }
+        let mut ids = BTreeSet::new();
+        for node in &self.nodes {
+            validate_node_id(&node.id)?;
+            if !ids.insert(node.id.as_str()) {
+                return Err(GraphError::InvalidSnapshot(format!(
+                    "duplicate node id `{}`",
+                    node.id
+                )));
+            }
+            if node.max_rounds == Some(0) {
+                return Err(GraphError::InvalidSnapshot(format!(
+                    "node `{}` max_rounds must be positive",
+                    node.id
+                )));
+            }
+            if node.agent.is_some() == node.op.is_some() {
+                return Err(GraphError::InvalidSnapshot(format!(
+                    "node `{}` must have exactly one of agent/op",
+                    node.id
+                )));
+            }
+            if !node.plugins.is_empty() {
+                return Err(GraphError::Unsupported(format!(
+                    "node `{}` declares plugins, unsupported in R5",
+                    node.id
+                )));
+            }
+            if let Some(op_name) = &node.op {
+                let op = self.ops.get(op_name).ok_or_else(|| {
+                    GraphError::InvalidSnapshot(format!(
+                        "node `{}` references missing op `{op_name}`",
+                        node.id
+                    ))
+                })?;
+                if op.get("fanout").is_some() || op.get("join").is_some() {
+                    return Err(GraphError::Unsupported(format!(
+                        "fanout/join op `{op_name}` is reserved for R6"
+                    )));
+                }
+                if op.get("call").is_some() {
+                    return Err(GraphError::Unsupported(format!(
+                        "op.call `{op_name}` is reserved for R7"
+                    )));
+                }
+                if op.get("run").is_none() {
+                    return Err(GraphError::Unsupported(format!(
+                        "op `{op_name}` has no supported R5 execution capability"
+                    )));
+                }
+            }
+            if let Some(agent_name) = &node.agent {
+                let agent = self.agents.get(agent_name).ok_or_else(|| {
+                    GraphError::InvalidSnapshot(format!(
+                        "node `{}` references missing agent `{agent_name}`",
+                        node.id
+                    ))
+                })?;
+                validate_wall_time(agent.wall_time_limit_seconds, &node.id)?;
+            }
+            if let Some(op_name) = &node.op {
+                let op = &self.ops[op_name];
+                if op.get("network").is_some_and(|value| !value.is_boolean()) {
+                    return Err(GraphError::InvalidSnapshot(format!(
+                        "op `{op_name}` network must be a boolean"
+                    )));
+                }
+                if op
+                    .get("wall_time_limit_seconds")
+                    .is_some_and(|value| value.as_f64().is_none())
+                {
+                    return Err(GraphError::InvalidSnapshot(format!(
+                        "op `{op_name}` wall_time_limit_seconds must be a number"
+                    )));
+                }
+                validate_wall_time(
+                    op.get("wall_time_limit_seconds").and_then(Value::as_f64),
+                    &node.id,
+                )?;
+            }
+        }
+        if !ids.contains(self.entry.as_str()) {
+            return Err(GraphError::InvalidSnapshot(format!(
+                "entry `{}` does not name a node",
+                self.entry
+            )));
+        }
+        let mut edge_set = BTreeSet::new();
+        for edge in &self.edges {
+            if !edge_set.insert((edge.from_node.as_str(), edge.to_node.as_str())) {
+                return Err(GraphError::InvalidSnapshot(format!(
+                    "duplicate edge {} -> {}",
+                    edge.from_node, edge.to_node
+                )));
+            }
+            if !ids.contains(edge.from_node.as_str()) || !ids.contains(edge.to_node.as_str()) {
+                return Err(GraphError::InvalidSnapshot(format!(
+                    "edge {} -> {} references unknown node",
+                    edge.from_node, edge.to_node
+                )));
+            }
+        }
+        for (scope, limit) in &self.module_rounds {
+            if *limit == 0 || !ids.iter().any(|id| id.starts_with(&format!("{scope}/"))) {
+                return Err(GraphError::InvalidSnapshot(format!(
+                    "invalid module-round scope or ceiling `{scope}`"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn digest(&self) -> Result<String, GraphError> {
+        let bytes = serde_json::to_vec(self).map_err(GraphError::SnapshotDecode)?;
+        Ok(format!("{:x}", sha2::Sha256::digest(bytes)))
+    }
+}
+
+use sha2::Digest;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InvocationKey {
+    pub run_id: String,
+    pub graph_digest: String,
+    pub node_id: String,
+    pub invocation: u64,
+}
+impl InvocationKey {
+    pub fn durable_key(&self) -> String {
+        format!(
+            "{}:{}:{}:{}",
+            self.run_id, self.graph_digest, self.node_id, self.invocation
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CommitRef {
+    pub id: String,
+    pub node_id: String,
+    pub invocation: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NodeCompletion {
+    pub submission: String,
+    pub route: Option<String>,
+    pub model_requests: u64,
+    pub output: Value,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunStatus {
+    Ready,
+    Running,
+    Paused,
+    BudgetStopped,
+    Completed,
+    Stopped,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EdgeDecision {
+    pub selected: bool,
+    pub sequence: u64,
+    pub source_invocation: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunCursor {
+    pub node_id: String,
+    pub key: InvocationKey,
+    pub input_commits: Vec<CommitRef>,
+    pub prepared_input: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunResult {
+    pub node_id: String,
+    pub key: InvocationKey,
+    pub completion: NodeCompletion,
+    pub commit: CommitRef,
+    pub sequence: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GraphRunRecord {
+    pub format: u32,
+    pub run_id: String,
+    pub graph_digest: String,
+    pub snapshot: GraphSnapshot,
+    pub input: Value,
+    pub status: RunStatus,
+    pub cursor: Option<RunCursor>,
+    pub invocations: BTreeMap<String, u64>,
+    pub passes: BTreeMap<String, u64>,
+    pub module_activations: BTreeMap<String, u64>,
+    pub ceased: BTreeSet<String>,
+    pub results: BTreeMap<String, Vec<RunResult>>,
+    pub decided: BTreeMap<String, EdgeDecision>,
+    pub sequence: u64,
+    pub error: Option<String>,
+}
+
+pub trait RunStore: Send + Sync {
+    fn load(&self, run_id: &str) -> Result<Option<GraphRunRecord>, GraphError>;
+    fn save(&self, record: &GraphRunRecord) -> Result<(), GraphError>;
+    fn acquire_lease(&self, run_id: &str) -> Result<Box<dyn RunLease>, GraphError>;
+}
+pub trait RunLease: Send {}
+
+#[derive(Debug, Clone)]
+pub struct FileRunStore {
+    root: PathBuf,
+}
+impl FileRunStore {
+    pub fn new(root: impl Into<PathBuf>) -> Self {
+        Self { root: root.into() }
+    }
+    fn path(&self, id: &str) -> Result<PathBuf, GraphError> {
+        validate_component(id)?;
+        Ok(self.root.join(format!("{id}.json")))
+    }
+}
+impl RunStore for FileRunStore {
+    fn load(&self, run_id: &str) -> Result<Option<GraphRunRecord>, GraphError> {
+        let bytes = match fs::read(self.path(run_id)?) {
+            Ok(b) => b,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+        let record: GraphRunRecord =
+            serde_json::from_slice(&bytes).map_err(GraphError::RunDecode)?;
+        if record.run_id != run_id || record.format != 1 {
+            return Err(GraphError::CorruptRun(
+                "run identity or format mismatch".into(),
+            ));
+        }
+        Ok(Some(record))
+    }
+    fn save(&self, record: &GraphRunRecord) -> Result<(), GraphError> {
+        let path = self.path(&record.run_id)?;
+        fs::create_dir_all(&self.root)?;
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let tmp = self.root.join(format!(
+            ".{}.{}.{}.tmp",
+            record.run_id,
+            std::process::id(),
+            stamp
+        ));
+        let bytes = serde_json::to_vec(record).map_err(GraphError::RunDecode)?;
+        let mut file = OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        if let Err(e) = fs::rename(&tmp, &path) {
+            let _ = fs::remove_file(tmp);
+            return Err(e.into());
+        }
+        fs::File::open(&self.root)?.sync_all()?;
+        Ok(())
+    }
+    fn acquire_lease(&self, run_id: &str) -> Result<Box<dyn RunLease>, GraphError> {
+        validate_component(run_id)?;
+        fs::create_dir_all(&self.root)?;
+        let path = self.root.join(format!(".{run_id}.lock"));
+        // Keep the lock inode stable. The OS releases this advisory lock if
+        // the process exits, including an unclean crash; never unlink it.
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)?;
+        file.try_lock().map_err(|error| match error {
+            std::fs::TryLockError::WouldBlock => GraphError::RunBusy(run_id.to_owned()),
+            std::fs::TryLockError::Error(error) => GraphError::Io(error),
+        })?;
+        file.sync_all()?;
+        Ok(Box::new(FileRunLease { _file: file }))
+    }
+}
+struct FileRunLease {
+    _file: fs::File,
+}
+impl RunLease for FileRunLease {}
+
+pub trait ArtifactPort: Send + Sync {
+    /// Must be idempotent for an InvocationKey. A retry after freeze succeeded
+    /// but before the RunStore commit must resolve to the same immutable commit.
+    fn freeze<'a>(
+        &'a self,
+        key: &'a InvocationKey,
+        completion: &'a NodeCompletion,
+    ) -> Pin<Box<dyn Future<Output = Result<CommitRef, GraphError>> + Send + 'a>>;
+    /// Read/materialize the exact fixed commit. Implementations must not follow
+    /// a mutable workspace head or create/advance a commit as a side effect.
+    fn resolve<'a>(
+        &'a self,
+        commit: &'a CommitRef,
+    ) -> Pin<Box<dyn Future<Output = Result<Value, GraphError>> + Send + 'a>>;
+}
+
+#[derive(Debug, Clone)]
+pub struct NodeExecutionRequest {
+    pub key: InvocationKey,
+    /// Provider/model reference selected by the Graph for Agent nodes.
+    pub model: Option<String>,
+    pub task: String,
+    pub instructions: String,
+    pub routes: Vec<String>,
+    pub input: Value,
+    pub input_commits: Vec<CommitRef>,
+    /// Python max_steps is a cumulative provider-request budget. Implementors
+    /// must honor this exact meaning; it is not Rig max_turns.
+    pub max_provider_requests: Option<u64>,
+    pub wall_time_limit_seconds: Option<f64>,
+    /// Graph request intent only. The host adapter must apply its own network authorization.
+    pub network: bool,
+    pub kind: NodeKind,
+    pub operation: Option<Value>,
+    pub cancellation: crate::Cancellation,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum CompletionFact {
+    NotStarted,
+    Completed(NodeCompletion),
+    Failed(String),
+    Uncertain(String),
+}
+
+pub trait NodeExecutionPort: Send + Sync {
+    fn capabilities(&self) -> NodeExecutionCapabilities;
+    fn completion_fact<'a>(
+        &'a self,
+        key: &'a InvocationKey,
+    ) -> Pin<Box<dyn Future<Output = Result<CompletionFact, GraphError>> + Send + 'a>>;
+    /// On `Completed` or `Failed`, the implementation MUST durably write the
+    /// matching completion fact before resolving this future. If it cannot
+    /// establish whether execution completed it must persist/return Uncertain.
+    /// BudgetExhausted retains the same invocation's resumable checkpoint and
+    /// MUST NOT publish a completion fact.
+    fn execute<'a>(
+        &'a self,
+        request: NodeExecutionRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<NodeExecutionOutcome, GraphError>> + Send + 'a>>;
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NodeExecutionCapabilities {
+    pub agent: bool,
+    pub op_run: bool,
+    /// True only when max_provider_requests is enforced as the cumulative
+    /// provider request count, rather than translated to a turn count.
+    pub exact_provider_request_budget: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum NodeExecutionOutcome {
+    Completed(NodeCompletion),
+    BudgetExhausted {
+        model_requests: u64,
+    },
+    Cancelled,
+    /// A known terminal node failure. The host has established that the
+    /// invocation failed; the Graph Run records a terminal failure and never
+    /// treats it as an invitation to replay the invocation.
+    Failed {
+        reason: String,
+    },
+}
+
+pub trait RunControl: Send + Sync {
+    fn pause_requested(&self) -> bool;
+    fn stop_requested(&self) -> bool;
+    fn cancellation(&self) -> crate::Cancellation;
+}
+
+pub struct GraphRunner<'a, S, A, N, C> {
+    store: &'a S,
+    artifacts: &'a A,
+    nodes: &'a N,
+    control: &'a C,
+}
+impl<'a, S: RunStore, A: ArtifactPort, N: NodeExecutionPort, C: RunControl>
+    GraphRunner<'a, S, A, N, C>
+{
+    pub fn new(store: &'a S, artifacts: &'a A, nodes: &'a N, control: &'a C) -> Self {
+        Self {
+            store,
+            artifacts,
+            nodes,
+            control,
+        }
+    }
+    pub async fn run(&self, mut record: GraphRunRecord) -> Result<GraphRunRecord, GraphError> {
+        record.validate()?;
+        self.admit_capabilities(&record.snapshot)?;
+        let _lease = self.store.acquire_lease(&record.run_id)?;
+        if let Some(saved) = self.store.load(&record.run_id)?
+            && saved != record
+        {
+            return Err(GraphError::RunConflict);
+        }
+        if matches!(record.status, RunStatus::Failed | RunStatus::Completed) {
+            return Ok(record);
+        }
+        record.status = RunStatus::Running;
+        self.store.save(&record)?;
+        loop {
+            if self.control.stop_requested() {
+                record.status = RunStatus::Stopped;
+                self.store.save(&record)?;
+                return Ok(record);
+            }
+            if self.control.pause_requested() && record.cursor.is_none() {
+                record.status = RunStatus::Paused;
+                self.store.save(&record)?;
+                return Ok(record);
+            }
+            let Some(node) = next_node(&record)? else {
+                record.status = if record.ceased.is_empty() {
+                    RunStatus::Completed
+                } else {
+                    RunStatus::Stopped
+                };
+                self.store.save(&record)?;
+                return Ok(record);
+            };
+            if record.cursor.is_none() {
+                let scope = scope_of(&node.id);
+                let prior_sequence = record
+                    .results
+                    .get(&node.id)
+                    .and_then(|results| results.last())
+                    .map(|r| r.sequence)
+                    .unwrap_or(0);
+                let enters_scope = !scope.is_empty()
+                    && record
+                        .snapshot
+                        .edges
+                        .iter()
+                        .filter(|e| {
+                            e.to_node == node.id && !e.from_node.starts_with(&format!("{scope}/"))
+                        })
+                        .any(|e| {
+                            record
+                                .decided
+                                .get(&edge_key(&e.from_node, &e.to_node))
+                                .is_some_and(|d| d.selected && d.sequence > prior_sequence)
+                        });
+                if enters_scope
+                    && let Some(limit) = record.snapshot.module_rounds.get(&scope).copied()
+                {
+                    let next = record.module_activations.get(&scope).copied().unwrap_or(0) + 1;
+                    if next > u64::from(limit) {
+                        record.ceased.insert(format!("{scope}@{limit}"));
+                        self.refuse_edges(&mut record, &node.id)?;
+                        continue;
+                    }
+                    record.module_activations.insert(scope.clone(), next);
+                    for member in &record.snapshot.nodes {
+                        if member.id.starts_with(&format!("{scope}/")) {
+                            record.passes.remove(&member.id);
+                        }
+                    }
+                    for nested in record
+                        .module_activations
+                        .keys()
+                        .filter(|nested| nested.starts_with(&format!("{scope}/")))
+                        .cloned()
+                        .collect::<Vec<_>>()
+                    {
+                        record.module_activations.remove(&nested);
+                    }
+                }
+                if let Some(limit) = node.max_rounds
+                    && record.passes.get(&node.id).copied().unwrap_or(0) >= u64::from(limit)
+                {
+                    record.ceased.insert(format!("{}@{limit}", node.id));
+                    self.refuse_edges(&mut record, &node.id)?;
+                    continue;
+                }
+                let invocation = record.invocations.get(&node.id).copied().unwrap_or(0) + 1;
+                let key = InvocationKey {
+                    run_id: record.run_id.clone(),
+                    graph_digest: record.graph_digest.clone(),
+                    node_id: node.id.clone(),
+                    invocation,
+                };
+                let input_commits = record
+                    .snapshot
+                    .edges
+                    .iter()
+                    .filter(|e| e.to_node == node.id)
+                    .filter_map(|e| {
+                        record
+                            .decided
+                            .get(&edge_key(&e.from_node, &e.to_node))
+                            .filter(|d| d.selected)
+                            .and_then(|decision| {
+                                record
+                                    .results
+                                    .get(&e.from_node)
+                                    .and_then(|rs| {
+                                        rs.iter().find(|r| r.sequence == decision.sequence)
+                                    })
+                                    .map(|r| r.commit.clone())
+                            })
+                    })
+                    .collect::<Vec<_>>();
+                let mut resolved = Vec::new();
+                for commit in &input_commits {
+                    resolved.push(self.artifacts.resolve(commit).await?);
+                }
+                let prepared_input =
+                    serde_json::json!({"input":record.input,"committed_inputs":resolved});
+                record.cursor = Some(RunCursor {
+                    node_id: node.id.clone(),
+                    key,
+                    input_commits,
+                    prepared_input,
+                });
+                record.status = RunStatus::Running;
+                self.store.save(&record)?; // durable before dispatch
+            }
+            if self.control.stop_requested() {
+                record.status = RunStatus::Stopped;
+                self.store.save(&record)?;
+                return Ok(record);
+            }
+            let cursor = record.cursor.clone().expect("cursor established");
+            let fact = self.nodes.completion_fact(&cursor.key).await?;
+            let completion = match fact {
+                CompletionFact::Completed(c) => Some(c),
+                CompletionFact::Failed(reason) => {
+                    return self.fail(record, format!("{} failed: {reason}", cursor.node_id));
+                }
+                CompletionFact::Uncertain(reason) => {
+                    return self.fail(
+                        record,
+                        format!("uncertain node result for {}: {reason}", cursor.node_id),
+                    );
+                }
+                CompletionFact::NotStarted => None,
+            };
+            let completion = if let Some(c) = completion {
+                c
+            } else {
+                if self.control.pause_requested() {
+                    record.status = RunStatus::Paused;
+                    self.store.save(&record)?;
+                    return Ok(record);
+                }
+                let def = record
+                    .snapshot
+                    .nodes
+                    .iter()
+                    .find(|n| n.id == cursor.node_id)
+                    .expect("validated node");
+                let agent = def
+                    .agent
+                    .as_ref()
+                    .and_then(|name| record.snapshot.agents.get(name));
+                let operation = def
+                    .op
+                    .as_ref()
+                    .and_then(|name| record.snapshot.ops.get(name))
+                    .and_then(|value| value.get("run"))
+                    .cloned();
+                let routes = record
+                    .snapshot
+                    .edges
+                    .iter()
+                    .filter(|e| e.from_node == def.id)
+                    .map(|e| e.to_node.clone())
+                    .collect::<Vec<_>>();
+                if self.control.stop_requested() {
+                    record.status = RunStatus::Stopped;
+                    self.store.save(&record)?;
+                    return Ok(record);
+                }
+                let (
+                    kind,
+                    model,
+                    instructions,
+                    max_provider_requests,
+                    wall_time_limit_seconds,
+                    network,
+                ) = if let Some(agent) = agent {
+                    (
+                        NodeKind::Agent,
+                        Some(agent.model.clone()),
+                        agent.instructions.clone(),
+                        agent.max_steps,
+                        Some(agent.wall_time_limit_seconds.unwrap_or(3600.0)),
+                        agent.network,
+                    )
+                } else {
+                    let op = def
+                        .op
+                        .as_ref()
+                        .and_then(|name| record.snapshot.ops.get(name))
+                        .expect("validated op");
+                    (
+                        NodeKind::OpRun,
+                        None,
+                        String::new(),
+                        None,
+                        Some(
+                            op.get("wall_time_limit_seconds")
+                                .and_then(Value::as_f64)
+                                .unwrap_or(3600.0),
+                        ),
+                        op.get("network").and_then(Value::as_bool).unwrap_or(false),
+                    )
+                };
+                let local_instruction = def
+                    .input
+                    .as_ref()
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let request = NodeExecutionRequest {
+                    key: cursor.key.clone(),
+                    model,
+                    task: node_task(
+                        &record.snapshot.objective,
+                        &instructions,
+                        local_instruction,
+                        &cursor.prepared_input,
+                    ),
+                    instructions,
+                    routes,
+                    input: cursor.prepared_input.clone(),
+                    input_commits: cursor.input_commits.clone(),
+                    max_provider_requests,
+                    wall_time_limit_seconds,
+                    network,
+                    kind,
+                    operation,
+                    cancellation: self.control.cancellation(),
+                };
+                match self.nodes.execute(request).await? {
+                    NodeExecutionOutcome::Completed(c) => c,
+                    NodeExecutionOutcome::BudgetExhausted { .. } => {
+                        record.status = RunStatus::BudgetStopped;
+                        self.store.save(&record)?;
+                        return Ok(record);
+                    }
+                    NodeExecutionOutcome::Cancelled => {
+                        record.status = RunStatus::Stopped;
+                        self.store.save(&record)?;
+                        return Ok(record);
+                    }
+                    NodeExecutionOutcome::Failed { reason } => {
+                        return self.fail(record, format!("{} failed: {reason}", cursor.node_id));
+                    }
+                }
+            };
+            let routes = record
+                .snapshot
+                .edges
+                .iter()
+                .filter(|e| e.from_node == cursor.node_id)
+                .map(|e| e.to_node.clone())
+                .collect::<Vec<_>>();
+            let chosen = match select_route(&completion, &routes) {
+                Ok(route) => route,
+                Err(error) => {
+                    return self.fail(record, format!("{}: {error}", cursor.node_id));
+                }
+            };
+            let commit = self.artifacts.freeze(&cursor.key, &completion).await?;
+            record.sequence += 1;
+            let result = RunResult {
+                node_id: cursor.node_id.clone(),
+                key: cursor.key.clone(),
+                completion,
+                commit,
+                sequence: record.sequence,
+            };
+            // completion fact is durable in the NodeExecutionPort, then artifact freeze,
+            // then this atomic Run record establishes result/history/edge decisions.
+            record
+                .invocations
+                .insert(cursor.node_id.clone(), cursor.key.invocation);
+            *record.passes.entry(cursor.node_id.clone()).or_default() += 1;
+            record
+                .results
+                .entry(cursor.node_id.clone())
+                .or_default()
+                .push(result);
+            for target in routes {
+                record.decided.insert(
+                    edge_key(&cursor.node_id, &target),
+                    EdgeDecision {
+                        selected: Some(&target) == chosen.as_ref(),
+                        sequence: record.sequence,
+                        source_invocation: cursor.key.invocation,
+                    },
+                );
+            }
+            record.cursor = None;
+            record.status = RunStatus::Running;
+            self.store.save(&record)?;
+        }
+    }
+    fn refuse_edges(&self, record: &mut GraphRunRecord, node_id: &str) -> Result<(), GraphError> {
+        record.sequence += 1;
+        let invocation = record.invocations.get(node_id).copied().unwrap_or(0);
+        for edge in record
+            .snapshot
+            .edges
+            .iter()
+            .filter(|edge| edge.from_node == node_id)
+        {
+            record.decided.insert(
+                edge_key(node_id, &edge.to_node),
+                EdgeDecision {
+                    selected: false,
+                    sequence: record.sequence,
+                    source_invocation: invocation,
+                },
+            );
+        }
+        record.status = RunStatus::Running;
+        self.store.save(record)
+    }
+    fn admit_capabilities(&self, snapshot: &GraphSnapshot) -> Result<(), GraphError> {
+        let caps = self.nodes.capabilities();
+        for node in &snapshot.nodes {
+            if node.agent.is_some() && !caps.agent {
+                return Err(GraphError::Unsupported(format!(
+                    "NodeExecutionPort does not support Agent node `{}`",
+                    node.id
+                )));
+            }
+            if node.op.is_some() && !caps.op_run {
+                return Err(GraphError::Unsupported(format!(
+                    "NodeExecutionPort does not support Op.run node `{}`",
+                    node.id
+                )));
+            }
+            if let Some(agent) = node.agent.as_ref().and_then(|n| snapshot.agents.get(n))
+                && agent.max_steps.is_some()
+                && !caps.exact_provider_request_budget
+            {
+                return Err(GraphError::Unsupported(format!(
+                    "Agent node `{}` has max_steps but NodeExecutionPort cannot enforce cumulative provider-request budget",
+                    node.id
+                )));
+            }
+        }
+        Ok(())
+    }
+    fn fail(
+        &self,
+        mut record: GraphRunRecord,
+        reason: String,
+    ) -> Result<GraphRunRecord, GraphError> {
+        record.status = RunStatus::Failed;
+        record.error = Some(reason);
+        self.store.save(&record)?;
+        Ok(record)
+    }
+}
+
+impl GraphRunRecord {
+    pub fn create(snapshot: GraphSnapshot, input: Value) -> Result<Self, GraphError> {
+        snapshot.validate()?;
+        let graph_digest = snapshot.digest()?;
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let serial = RUN_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let run_id = format!("{}-{stamp:x}-{serial:x}", &graph_digest[..16]);
+        let input = merge_values(&snapshot.input, &input, &Value::Null);
+        Ok(Self {
+            format: 1,
+            run_id,
+            graph_digest,
+            snapshot,
+            input,
+            status: RunStatus::Ready,
+            cursor: None,
+            invocations: BTreeMap::new(),
+            passes: BTreeMap::new(),
+            module_activations: BTreeMap::new(),
+            ceased: BTreeSet::new(),
+            results: BTreeMap::new(),
+            decided: BTreeMap::new(),
+            sequence: 0,
+            error: None,
+        })
+    }
+
+    fn validate(&self) -> Result<(), GraphError> {
+        validate_component(&self.run_id)?;
+        if self.format != 1 {
+            return Err(GraphError::CorruptRun(format!(
+                "unsupported graph run format {}",
+                self.format
+            )));
+        }
+        self.snapshot.validate()?;
+        if self.snapshot.digest()? != self.graph_digest {
+            return Err(GraphError::CorruptRun("snapshot digest mismatch".into()));
+        }
+        if let Some(cursor) = &self.cursor {
+            let invocation = self.invocations.get(&cursor.node_id).copied().unwrap_or(0) + 1;
+            if cursor.key.node_id != cursor.node_id
+                || cursor.key.run_id != self.run_id
+                || cursor.key.graph_digest != self.graph_digest
+                || cursor.key.invocation != invocation
+                || !self
+                    .snapshot
+                    .nodes
+                    .iter()
+                    .any(|node| node.id == cursor.node_id)
+            {
+                return Err(GraphError::CorruptRun(
+                    "cursor identity does not match its Graph Run".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+fn next_node(record: &GraphRunRecord) -> Result<Option<GraphNode>, GraphError> {
+    let back_edges = structural_back_edges(&record.snapshot);
+    for node in &record.snapshot.nodes {
+        if record.ceased.contains(&node.id)
+            || node
+                .max_rounds
+                .is_some_and(|limit| record.ceased.contains(&format!("{}@{limit}", node.id)))
+        {
+            continue;
+        }
+        let scope = scope_of(&node.id);
+        if record
+            .snapshot
+            .module_rounds
+            .get(&scope)
+            .is_some_and(|limit| record.ceased.contains(&format!("{scope}@{limit}")))
+        {
+            continue;
+        }
+        if node.id == record.snapshot.entry
+            && record.results.get(&node.id).is_none_or(Vec::is_empty)
+        {
+            return Ok(Some(node.clone()));
+        }
+        let incoming = record
+            .snapshot
+            .edges
+            .iter()
+            .filter(|e| e.to_node == node.id)
+            .collect::<Vec<_>>();
+        if incoming.is_empty() {
+            continue;
+        }
+        let all_decided = incoming.iter().all(|e| {
+            record
+                .decided
+                .contains_key(&edge_key(&e.from_node, &e.to_node))
+                || (back_edges.contains(&(e.from_node.as_str(), e.to_node.as_str()))
+                    && !record.invocations.contains_key(&e.from_node))
+        });
+        if !all_decided {
+            continue;
+        }
+        let chosen = incoming
+            .iter()
+            .filter(|e| {
+                record
+                    .decided
+                    .get(&edge_key(&e.from_node, &e.to_node))
+                    .is_some_and(|d| d.selected)
+            })
+            .collect::<Vec<_>>();
+        if chosen.is_empty() {
+            continue;
+        }
+        let latest_input = chosen
+            .iter()
+            .filter_map(|e| {
+                record
+                    .decided
+                    .get(&edge_key(&e.from_node, &e.to_node))
+                    .map(|d| d.sequence)
+            })
+            .max()
+            .unwrap_or(0);
+        let completed = record
+            .results
+            .get(&node.id)
+            .and_then(|v| v.last())
+            .map(|r| r.key.invocation);
+        // A selected back-edge can re-enter after its source advances; ordinary selected edges only execute once.
+        let has_new = chosen.iter().any(|e| {
+            record
+                .decided
+                .get(&edge_key(&e.from_node, &e.to_node))
+                .is_some_and(|d| {
+                    d.sequence
+                        > record
+                            .results
+                            .get(&node.id)
+                            .and_then(|v| v.last())
+                            .map(|r| r.sequence)
+                            .unwrap_or(0)
+                })
+        });
+        if completed.is_none() || (latest_input > 0 && has_new) {
+            return Ok(Some(node.clone()));
+        }
+    }
+    Ok(record.cursor.as_ref().and_then(|c| {
+        record
+            .snapshot
+            .nodes
+            .iter()
+            .find(|n| n.id == c.node_id)
+            .cloned()
+    }))
+}
+
+fn structural_back_edges(snapshot: &GraphSnapshot) -> BTreeSet<(&str, &str)> {
+    let mut color: BTreeMap<&str, u8> = BTreeMap::new();
+    let mut found = BTreeSet::new();
+    let mut stack = vec![(snapshot.entry.as_str(), 0usize)];
+    color.insert(snapshot.entry.as_str(), 1);
+    while let Some((node, index)) = stack.pop() {
+        let outgoing = snapshot
+            .edges
+            .iter()
+            .filter(|e| e.from_node == node)
+            .collect::<Vec<_>>();
+        if index >= outgoing.len() {
+            color.insert(node, 2);
+            continue;
+        }
+        stack.push((node, index + 1));
+        let target = outgoing[index].to_node.as_str();
+        match color.get(target).copied() {
+            Some(1) => {
+                found.insert((node, target));
+            }
+            None => {
+                color.insert(target, 1);
+                stack.push((target, 0));
+            }
+            _ => {}
+        }
+    }
+    found
+}
+
+fn select_route(c: &NodeCompletion, routes: &[String]) -> Result<Option<String>, GraphError> {
+    if let Some(route) = &c.route
+        && !routes.iter().any(|allowed| allowed == route)
+    {
+        return Err(GraphError::InvalidRoute(format!(
+            "route `{route}` is not an exit"
+        )));
+    }
+    match routes.len() {
+        0 => Ok(None),
+        1 => Ok(Some(routes[0].clone())),
+        _ => {
+            let route = c
+                .route
+                .as_ref()
+                .ok_or_else(|| GraphError::InvalidRoute("multiple exits require route".into()))?;
+            Ok(Some(route.clone()))
+        }
+    }
+}
+fn edge_key(a: &str, b: &str) -> String {
+    format!("{a}|{b}")
+}
+fn merge_values(default: &Value, override_value: &Value, node_value: &Value) -> Value {
+    fn merge(base: &Value, over: &Value) -> Value {
+        match (base, over) {
+            (Value::Object(a), Value::Object(b)) => {
+                let mut out = a.clone();
+                for (k, v) in b {
+                    out.insert(
+                        k.clone(),
+                        if out.get(k).is_some_and(Value::is_object) && v.is_object() {
+                            merge(&out[k], v)
+                        } else {
+                            v.clone()
+                        },
+                    );
+                }
+                Value::Object(out)
+            }
+            (_, Value::Null) => base.clone(),
+            (_, v) => v.clone(),
+        }
+    }
+    merge(&merge(default, override_value), node_value)
+}
+fn node_task(
+    objective: &str,
+    instructions: &str,
+    local_instruction: &str,
+    input: &Value,
+) -> String {
+    format!(
+        "Objective:\n{objective}\n\nInstructions:\n{instructions}{}\n\nInput:\n{}",
+        if local_instruction.is_empty() {
+            String::new()
+        } else {
+            format!("\n\nNode instructions:\n{local_instruction}")
+        },
+        input
+    )
+}
+fn scope_of(node_id: &str) -> String {
+    node_id
+        .rsplit_once('/')
+        .map(|(scope, _)| scope.to_owned())
+        .unwrap_or_default()
+}
+fn validate_component(s: &str) -> Result<(), GraphError> {
+    if s.is_empty()
+        || s == "."
+        || s == ".."
+        || s.chars()
+            .any(|c| !(c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')))
+    {
+        Err(GraphError::InvalidRunId(s.to_owned()))
+    } else {
+        Ok(())
+    }
+}
+fn validate_node_id(s: &str) -> Result<(), GraphError> {
+    if s.is_empty()
+        || s.split('/').any(|part| {
+            part.is_empty()
+                || part == "."
+                || part == ".."
+                || part == ".graph-calls"
+                || part
+                    .chars()
+                    .any(|c| !(c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')))
+        })
+    {
+        Err(GraphError::InvalidSnapshot(format!("unsafe node id `{s}`")))
+    } else {
+        Ok(())
+    }
+}
+fn validate_wall_time(value: Option<f64>, node_id: &str) -> Result<(), GraphError> {
+    if value.is_some_and(|seconds| !seconds.is_finite() || seconds <= 0.0) {
+        return Err(GraphError::InvalidSnapshot(format!(
+            "node `{node_id}` wall_time_limit_seconds must be positive and finite"
+        )));
+    }
+    Ok(())
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum GraphError {
+    #[error("invalid graph snapshot: {0}")]
+    InvalidSnapshot(String),
+    #[error("unsupported graph capability: {0}")]
+    Unsupported(String),
+    #[error("snapshot decode failed: {0}")]
+    SnapshotDecode(serde_json::Error),
+    #[error("run decode failed: {0}")]
+    RunDecode(serde_json::Error),
+    #[error("run store I/O failed: {0}")]
+    Io(#[from] io::Error),
+    #[error("corrupt graph run: {0}")]
+    CorruptRun(String),
+    #[error("run ID is not a safe file name: {0}")]
+    InvalidRunId(String),
+    #[error("run record conflict: supplied state differs from durable state")]
+    RunConflict,
+    #[error("run `{0}` already has an active writer")]
+    RunBusy(String),
+    #[error("invalid node route: {0}")]
+    InvalidRoute(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Default)]
+    struct MemStore {
+        record: Mutex<Option<GraphRunRecord>>,
+        saves: Mutex<usize>,
+        fail_on: Mutex<Option<usize>>,
+    }
+    struct MemLease;
+    impl RunLease for MemLease {}
+    impl RunStore for MemStore {
+        fn load(&self, id: &str) -> Result<Option<GraphRunRecord>, GraphError> {
+            Ok(self
+                .record
+                .lock()
+                .unwrap()
+                .clone()
+                .filter(|r| r.run_id == id))
+        }
+        fn save(&self, r: &GraphRunRecord) -> Result<(), GraphError> {
+            let mut n = self.saves.lock().unwrap();
+            *n += 1;
+            if *self.fail_on.lock().unwrap() == Some(*n) {
+                return Err(GraphError::CorruptRun("injected save failure".into()));
+            }
+            *self.record.lock().unwrap() = Some(r.clone());
+            Ok(())
+        }
+        fn acquire_lease(&self, _: &str) -> Result<Box<dyn RunLease>, GraphError> {
+            Ok(Box::new(MemLease))
+        }
+    }
+    #[derive(Default)]
+    struct MemoryArtifacts {
+        values: Mutex<BTreeMap<String, Value>>,
+        freezes: Mutex<usize>,
+    }
+    impl ArtifactPort for MemoryArtifacts {
+        fn freeze<'a>(
+            &'a self,
+            key: &'a InvocationKey,
+            c: &'a NodeCompletion,
+        ) -> Pin<Box<dyn Future<Output = Result<CommitRef, GraphError>> + Send + 'a>> {
+            Box::pin(async move {
+                let id = key.durable_key();
+                let mut values = self.values.lock().unwrap();
+                if let Some(existing) = values.get(&id) {
+                    if existing != &c.output {
+                        return Err(GraphError::CorruptRun("conflicting freeze retry".into()));
+                    }
+                } else {
+                    values.insert(id.clone(), c.output.clone());
+                    *self.freezes.lock().unwrap() += 1;
+                }
+                Ok(CommitRef {
+                    id,
+                    node_id: key.node_id.clone(),
+                    invocation: key.invocation,
+                })
+            })
+        }
+        fn resolve<'a>(
+            &'a self,
+            c: &'a CommitRef,
+        ) -> Pin<Box<dyn Future<Output = Result<Value, GraphError>> + Send + 'a>> {
+            Box::pin(async move {
+                self.values
+                    .lock()
+                    .unwrap()
+                    .get(&c.id)
+                    .cloned()
+                    .ok_or_else(|| GraphError::CorruptRun("missing commit".into()))
+            })
+        }
+    }
+    #[derive(Default)]
+    struct FakeNodes {
+        facts: Mutex<BTreeMap<String, CompletionFact>>,
+        calls: Mutex<Vec<NodeExecutionRequest>>,
+        budget_once: Mutex<bool>,
+        uncertain: Mutex<bool>,
+        caps_budget_off: bool,
+        cancel_once: Mutex<bool>,
+        op_run: bool,
+        fail_once: Mutex<Option<String>>,
+        invalid_route_once: Mutex<bool>,
+    }
+    impl NodeExecutionPort for FakeNodes {
+        fn capabilities(&self) -> NodeExecutionCapabilities {
+            NodeExecutionCapabilities {
+                agent: true,
+                op_run: self.op_run,
+                exact_provider_request_budget: !self.caps_budget_off,
+            }
+        }
+        fn completion_fact<'a>(
+            &'a self,
+            key: &'a InvocationKey,
+        ) -> Pin<Box<dyn Future<Output = Result<CompletionFact, GraphError>> + Send + 'a>> {
+            Box::pin(async move {
+                if *self.uncertain.lock().unwrap() {
+                    return Ok(CompletionFact::Uncertain("fake unknown".into()));
+                }
+                Ok(self
+                    .facts
+                    .lock()
+                    .unwrap()
+                    .get(&key.durable_key())
+                    .cloned()
+                    .unwrap_or(CompletionFact::NotStarted))
+            })
+        }
+        fn execute<'a>(
+            &'a self,
+            request: NodeExecutionRequest,
+        ) -> Pin<Box<dyn Future<Output = Result<NodeExecutionOutcome, GraphError>> + Send + 'a>>
+        {
+            Box::pin(async move {
+                if self
+                    .facts
+                    .lock()
+                    .unwrap()
+                    .contains_key(&request.key.durable_key())
+                {
+                    return Err(GraphError::CorruptRun(
+                        "duplicate dispatch after completion fact".into(),
+                    ));
+                }
+                self.calls.lock().unwrap().push(request.clone());
+                if let Some(reason) = self.fail_once.lock().unwrap().take() {
+                    self.facts.lock().unwrap().insert(
+                        request.key.durable_key(),
+                        CompletionFact::Failed(reason.clone()),
+                    );
+                    return Ok(NodeExecutionOutcome::Failed { reason });
+                }
+                {
+                    let mut budget = self.budget_once.lock().unwrap();
+                    if *budget {
+                        *budget = false;
+                        return Ok(NodeExecutionOutcome::BudgetExhausted { model_requests: 2 });
+                    }
+                }
+                {
+                    let mut cancel = self.cancel_once.lock().unwrap();
+                    if *cancel {
+                        *cancel = false;
+                        request.cancellation.store(true, Ordering::Relaxed);
+                        return Ok(NodeExecutionOutcome::Cancelled);
+                    }
+                }
+                let route = {
+                    let mut invalid = self.invalid_route_once.lock().unwrap();
+                    if *invalid {
+                        *invalid = false;
+                        Some("unlisted-route".into())
+                    } else {
+                        request.routes.first().cloned()
+                    }
+                };
+                let completion = NodeCompletion {
+                    submission: format!("done:{}", request.key.node_id),
+                    route,
+                    model_requests: 1,
+                    output: serde_json::json!({"node":request.key.node_id,"input":request.input}),
+                };
+                self.facts.lock().unwrap().insert(
+                    request.key.durable_key(),
+                    CompletionFact::Completed(completion.clone()),
+                );
+                Ok(NodeExecutionOutcome::Completed(completion))
+            })
+        }
+    }
+    struct Control {
+        pause: bool,
+        stop: bool,
+        token: crate::Cancellation,
+    }
+    impl Default for Control {
+        fn default() -> Self {
+            Self {
+                pause: false,
+                stop: false,
+                token: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            }
+        }
+    }
+    impl RunControl for Control {
+        fn pause_requested(&self) -> bool {
+            self.pause
+        }
+        fn stop_requested(&self) -> bool {
+            self.stop
+        }
+        fn cancellation(&self) -> crate::Cancellation {
+            self.token.clone()
+        }
+    }
+    fn graph(nodes: &[&str], edges: &[(&str, &str)], entry: &str) -> GraphSnapshot {
+        let agents = BTreeMap::from([(
+            "worker".to_string(),
+            AgentDefinition {
+                model: "m".into(),
+                instructions: "base".into(),
+                network: false,
+                max_steps: None,
+                wall_time_limit_seconds: None,
+                reads: vec![],
+                writes: vec![],
+            },
+        )]);
+        GraphSnapshot {
+            objective: "objective".into(),
+            input: serde_json::json!({"defaults":{"a":1,"b":1}}),
+            entry: entry.into(),
+            agents,
+            ops: BTreeMap::new(),
+            nodes: nodes
+                .iter()
+                .map(|id| GraphNode {
+                    id: (*id).into(),
+                    agent: Some("worker".into()),
+                    op: None,
+                    input: None,
+                    plugins: vec![],
+                    max_rounds: None,
+                })
+                .collect(),
+            edges: edges
+                .iter()
+                .map(|(a, b)| GraphEdge {
+                    from_node: (*a).into(),
+                    to_node: (*b).into(),
+                })
+                .collect(),
+            module_rounds: BTreeMap::new(),
+        }
+    }
+    fn setup() -> (MemStore, MemoryArtifacts, FakeNodes, Control) {
+        (
+            MemStore::default(),
+            MemoryArtifacts::default(),
+            FakeNodes::default(),
+            Control::default(),
+        )
+    }
+
+    #[tokio::test]
+    async fn serial_routing_skips_unselected_and_passes_fixed_commit_input() {
+        let mut g = graph(
+            &["start", "left", "right"],
+            &[("start", "left"), ("start", "right")],
+            "start",
+        );
+        let worker = g.agents.get_mut("worker").unwrap();
+        worker.network = true;
+        worker.wall_time_limit_seconds = Some(45.0);
+        g.nodes[1].input = Some(Value::String("review left".into()));
+        let (s, a, n, c) = setup();
+        let record =
+            GraphRunRecord::create(g, serde_json::json!({"defaults":{"b":2},"request":"x"}))
+                .unwrap();
+        let runner = GraphRunner::new(&s, &a, &n, &c);
+        let done = runner.run(record).await.unwrap();
+        assert_eq!(done.status, RunStatus::Completed);
+        assert_eq!(
+            n.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|r| r.key.node_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["start", "left"]
+        );
+        let next = &n.calls.lock().unwrap()[1];
+        assert_eq!(next.input_commits.len(), 1);
+        assert_eq!(next.input["input"]["defaults"]["a"], 1);
+        assert_eq!(next.input["input"]["defaults"]["b"], 2);
+        assert_eq!(next.input["input"]["request"], "x");
+        assert!(next.task.contains("review left"));
+        assert_eq!(next.model.as_deref(), Some("m"));
+        assert!(next.network);
+        assert_eq!(next.wall_time_limit_seconds, Some(45.0));
+        assert_eq!(done.graph_digest, done.snapshot.digest().unwrap());
+    }
+
+    #[tokio::test]
+    async fn op_run_policy_and_command_are_passed_to_the_host_port() {
+        let mut snapshot = graph(&["command"], &[], "command");
+        snapshot.ops.insert(
+            "script".into(),
+            serde_json::json!({
+                "run": "printf fixture",
+                "network": true,
+                "wall_time_limit_seconds": 90
+            }),
+        );
+        snapshot.nodes[0].agent = None;
+        snapshot.nodes[0].op = Some("script".into());
+        let (store, artifacts, mut nodes, control) = setup();
+        nodes.op_run = true;
+        let record = GraphRunRecord::create(snapshot, Value::Null).unwrap();
+        let result = GraphRunner::new(&store, &artifacts, &nodes, &control)
+            .run(record)
+            .await
+            .unwrap();
+        assert_eq!(result.status, RunStatus::Completed);
+        let calls = nodes.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].kind, NodeKind::OpRun);
+        assert_eq!(calls[0].model, None);
+        assert_eq!(
+            calls[0].operation,
+            Some(Value::String("printf fixture".into()))
+        );
+        assert!(calls[0].network);
+        assert_eq!(calls[0].wall_time_limit_seconds, Some(90.0));
+    }
+
+    #[tokio::test]
+    async fn budget_stop_keeps_cursor_and_resume_uses_same_invocation() {
+        let mut g = graph(&["one"], &[], "one");
+        g.agents.get_mut("worker").unwrap().max_steps = Some(0);
+        let (s, a, n, c) = setup();
+        *n.budget_once.lock().unwrap() = true;
+        let record = GraphRunRecord::create(g, Value::Null).unwrap();
+        let runner = GraphRunner::new(&s, &a, &n, &c);
+        let stopped = runner.run(record).await.unwrap();
+        assert_eq!(stopped.status, RunStatus::BudgetStopped);
+        assert!(stopped.cursor.is_some());
+        assert_eq!(
+            n.facts
+                .lock()
+                .unwrap()
+                .get(&stopped.cursor.as_ref().unwrap().key.durable_key()),
+            None
+        );
+        assert_eq!(*a.freezes.lock().unwrap(), 0);
+        let resumed = runner.run(stopped).await.unwrap();
+        assert_eq!(resumed.status, RunStatus::Completed);
+        let calls = n.calls.lock().unwrap();
+        assert_eq!(calls[0].key, calls[1].key);
+        assert_eq!(resumed.invocations["one"], 1);
+    }
+
+    #[tokio::test]
+    async fn known_node_failure_is_terminal_and_does_not_advance_edges() {
+        let snapshot = graph(
+            &["fails", "downstream"],
+            &[("fails", "downstream")],
+            "fails",
+        );
+        let (store, artifacts, nodes, control) = setup();
+        *nodes.fail_once.lock().unwrap() = Some("provider rejected request".into());
+        *store.fail_on.lock().unwrap() = Some(3);
+        let record = GraphRunRecord::create(snapshot.clone(), Value::Null).unwrap();
+        let runner = GraphRunner::new(&store, &artifacts, &nodes, &control);
+        assert!(runner.run(record).await.is_err());
+        let interrupted = store
+            .load(&nodes.calls.lock().unwrap()[0].key.run_id)
+            .unwrap()
+            .unwrap();
+        assert!(interrupted.cursor.is_some());
+        let failed = runner.run(interrupted).await.unwrap();
+        assert_eq!(failed.status, RunStatus::Failed);
+        assert!(
+            failed
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("provider rejected request")
+        );
+        assert_eq!(nodes.calls.lock().unwrap().len(), 1);
+        assert!(failed.decided.is_empty());
+
+        // Even an explicit second call with the durable terminal record cannot replay it.
+        let terminal = runner.run(failed).await.unwrap();
+        assert_eq!(terminal.status, RunStatus::Failed);
+        assert_eq!(nodes.calls.lock().unwrap().len(), 1);
+        assert_eq!(*artifacts.freezes.lock().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn invalid_durable_route_fails_run_without_settling_or_replaying() {
+        let snapshot = graph(&["start", "next"], &[("start", "next")], "start");
+        let (store, artifacts, nodes, control) = setup();
+        *nodes.invalid_route_once.lock().unwrap() = true;
+        let runner = GraphRunner::new(&store, &artifacts, &nodes, &control);
+        let failed = runner
+            .run(GraphRunRecord::create(snapshot, Value::Null).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(failed.status, RunStatus::Failed);
+        assert!(failed.error.as_deref().unwrap().contains("unlisted-route"));
+        assert!(failed.decided.is_empty());
+        assert!(failed.results.is_empty());
+        assert_eq!(nodes.calls.lock().unwrap().len(), 1);
+        let terminal = runner.run(failed).await.unwrap();
+        assert_eq!(terminal.status, RunStatus::Failed);
+        assert_eq!(nodes.calls.lock().unwrap().len(), 1);
+        assert_eq!(*artifacts.freezes.lock().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn completion_fact_closes_run_store_crash_window_without_reexecution() {
+        let (s, a, n, c) = setup();
+        *s.fail_on.lock().unwrap() = Some(3);
+        let record = GraphRunRecord::create(graph(&["one"], &[], "one"), Value::Null).unwrap();
+        let id = record.run_id.clone();
+        let runner = GraphRunner::new(&s, &a, &n, &c);
+        assert!(runner.run(record).await.is_err());
+        let recovered = s.load(&id).unwrap().unwrap();
+        assert!(recovered.cursor.is_some());
+        *s.fail_on.lock().unwrap() = None;
+        let done = runner.run(recovered).await.unwrap();
+        assert_eq!(done.status, RunStatus::Completed);
+        assert_eq!(n.calls.lock().unwrap().len(), 1);
+        assert_eq!(*a.freezes.lock().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn uncertain_and_pause_fail_closed_at_invocation_boundary() {
+        let (s, a, n, mut c) = setup();
+        *n.uncertain.lock().unwrap() = true;
+        let record = GraphRunRecord::create(graph(&["one"], &[], "one"), Value::Null).unwrap();
+        let runner = GraphRunner::new(&s, &a, &n, &c);
+        let failed = runner.run(record).await.unwrap();
+        assert_eq!(failed.status, RunStatus::Failed);
+        assert!(n.calls.lock().unwrap().is_empty());
+        c.pause = true;
+        let paused = GraphRunner::new(&s, &a, &n, &c)
+            .run(GraphRunRecord::create(graph(&["one"], &[], "one"), Value::Null).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(paused.status, RunStatus::Paused);
+        assert!(paused.cursor.is_none());
+    }
+
+    #[tokio::test]
+    async fn stop_before_dispatch_and_executor_cancel_preserve_safe_cursor() {
+        let (s, a, n, mut control) = setup();
+        control.stop = true;
+        let initial = GraphRunRecord::create(graph(&["one"], &[], "one"), Value::Null).unwrap();
+        let stopped = GraphRunner::new(&s, &a, &n, &control)
+            .run(initial)
+            .await
+            .unwrap();
+        assert_eq!(stopped.status, RunStatus::Stopped);
+        assert!(stopped.cursor.is_none());
+        assert!(n.calls.lock().unwrap().is_empty());
+
+        control.stop = false;
+        *n.cancel_once.lock().unwrap() = true;
+        let initial = GraphRunRecord::create(graph(&["one"], &[], "one"), Value::Null).unwrap();
+        let stopped = GraphRunner::new(&s, &a, &n, &control)
+            .run(initial)
+            .await
+            .unwrap();
+        assert_eq!(stopped.status, RunStatus::Stopped);
+        let cursor = stopped
+            .cursor
+            .as_ref()
+            .expect("cancelled attempt stays resumable");
+        assert_eq!(cursor.key.invocation, 1);
+        assert_eq!(n.facts.lock().unwrap().get(&cursor.key.durable_key()), None);
+    }
+
+    #[tokio::test]
+    async fn run_rejects_cursor_identity_mismatch_before_dispatch() {
+        let (store, artifacts, nodes, control) = setup();
+        let mut record = GraphRunRecord::create(graph(&["one"], &[], "one"), Value::Null).unwrap();
+        let key = InvocationKey {
+            run_id: "another-run".into(),
+            graph_digest: record.graph_digest.clone(),
+            node_id: "one".into(),
+            invocation: 1,
+        };
+        record.cursor = Some(RunCursor {
+            node_id: "one".into(),
+            key,
+            input_commits: vec![],
+            prepared_input: Value::Null,
+        });
+        assert!(matches!(
+            GraphRunner::new(&store, &artifacts, &nodes, &control)
+                .run(record)
+                .await,
+            Err(GraphError::CorruptRun(_))
+        ));
+        assert!(nodes.calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn admission_rejects_plugins_parallel_nodes_and_finite_budget_without_exact_port() {
+        let mut g = graph(&["one"], &[], "one");
+        g.nodes[0].plugins = vec!["p".into()];
+        assert!(matches!(
+            GraphSnapshot::admit(serde_json::to_value(g).unwrap()),
+            Err(GraphError::Unsupported(_))
+        ));
+        let mut g = graph(&["one"], &[], "one");
+        g.ops
+            .insert("fan".into(), serde_json::json!({"fanout":{"join":"x"}}));
+        g.nodes[0].agent = None;
+        g.nodes[0].op = Some("fan".into());
+        assert!(matches!(
+            GraphSnapshot::admit(serde_json::to_value(g).unwrap()),
+            Err(GraphError::Unsupported(_))
+        ));
+        let mut g = graph(&["one"], &[], "one");
+        g.agents.get_mut("worker").unwrap().max_steps = Some(2);
+        let (s, a, mut n, c) = setup();
+        n.caps_budget_off = true;
+        let record = GraphRunRecord::create(g, Value::Null).unwrap();
+        assert!(matches!(
+            GraphRunner::new(&s, &a, &n, &c).run(record).await,
+            Err(GraphError::Unsupported(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn loop_reentry_uses_fresh_selected_back_edge_and_ceiling() {
+        let mut g = graph(
+            &["gather", "review"],
+            &[("gather", "review"), ("review", "gather")],
+            "gather",
+        );
+        g.nodes[0].max_rounds = Some(2);
+        let (s, a, n, c) = setup();
+        let run = GraphRunRecord::create(g, Value::Null).unwrap();
+        let result = GraphRunner::new(&s, &a, &n, &c).run(run).await.unwrap();
+        assert_eq!(
+            n.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|r| r.key.node_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["gather", "review", "gather", "review"]
+        );
+        assert_eq!(result.status, RunStatus::Stopped);
+    }
+
+    #[tokio::test]
+    async fn module_reentry_counts_activations_and_resets_node_pass_ceiling() {
+        let mut snapshot = graph(
+            &["entry", "module/a", "module/b", "again", "done"],
+            &[
+                ("entry", "module/a"),
+                ("module/a", "module/b"),
+                ("module/b", "again"),
+                ("module/b", "done"),
+                ("again", "module/a"),
+            ],
+            "entry",
+        );
+        snapshot.module_rounds.insert("module".into(), 2);
+        snapshot.nodes[1].max_rounds = Some(1);
+        let (store, artifacts, nodes, control) = setup();
+        let run = GraphRunRecord::create(snapshot, Value::Null).unwrap();
+        let result = GraphRunner::new(&store, &artifacts, &nodes, &control)
+            .run(run)
+            .await
+            .unwrap();
+        assert_eq!(result.status, RunStatus::Stopped);
+        assert_eq!(result.module_activations["module"], 2);
+        assert_eq!(result.passes["module/a"], 1);
+        assert_eq!(result.invocations["module/a"], 2);
+    }
+
+    #[test]
+    fn route_selection_checks_any_explicit_route_and_requires_multiple_exit_choice() {
+        let completion = |route: Option<&str>| NodeCompletion {
+            submission: "done".into(),
+            route: route.map(str::to_owned),
+            model_requests: 1,
+            output: Value::Null,
+        };
+        assert_eq!(
+            select_route(&completion(None), &["only".into()]).unwrap(),
+            Some("only".into())
+        );
+        assert!(matches!(
+            select_route(&completion(Some("wrong")), &["only".into()]),
+            Err(GraphError::InvalidRoute(_))
+        ));
+        assert!(matches!(
+            select_route(&completion(None), &["left".into(), "right".into()]),
+            Err(GraphError::InvalidRoute(_))
+        ));
+    }
+
+    #[test]
+    fn snapshot_admission_preserves_module_rounds_and_rejects_unsafe_shapes() {
+        let mut snapshot = graph(&["enter", "m/a", "m/b"], &[("enter", "m/a")], "enter");
+        snapshot.module_rounds.insert("m".into(), 2);
+        let value = serde_json::to_value(&snapshot).unwrap();
+        assert_eq!(value["_module_rounds"]["m"], 2);
+        assert_eq!(GraphSnapshot::admit(value).unwrap().module_rounds["m"], 2);
+
+        let mut bad = graph(&["a", "b"], &[("a", "b"), ("a", "b")], "a");
+        assert!(bad.validate().is_err());
+        bad = graph(&[".graph-calls/x"], &[], ".graph-calls/x");
+        assert!(bad.validate().is_err());
+        bad = graph(&["a"], &[], "a");
+        bad.module_rounds.insert("missing".into(), 2);
+        assert!(bad.validate().is_err());
+        let mut raw = serde_json::to_value(graph(&["a"], &[], "a")).unwrap();
+        raw["unexpected"] = Value::Bool(true);
+        assert!(GraphSnapshot::admit(raw).is_err());
+    }
+
+    #[test]
+    fn python_expanded_graph_snapshot_fixture_preserves_node_policy() {
+        let raw: Value =
+            serde_json::from_str(include_str!("../tests/fixtures/one-search.snapshot.json"))
+                .unwrap();
+        let snapshot = GraphSnapshot::admit(raw).unwrap();
+        assert_eq!(snapshot.entry, "search");
+        let agent = &snapshot.agents["searcher"];
+        assert_eq!(agent.model, "models.academic");
+        assert!(agent.network);
+        assert_eq!(agent.max_steps, Some(25));
+        assert_eq!(agent.wall_time_limit_seconds, Some(600.0));
+        assert_eq!(snapshot.nodes[0].id, "search");
+    }
+
+    #[test]
+    fn file_run_store_roundtrips_rejects_corruption_and_releases_process_lease() {
+        let root = std::env::temp_dir().join(format!(
+            "anchor-run-store-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let store = FileRunStore::new(&root);
+        let record = GraphRunRecord::create(graph(&["one"], &[], "one"), Value::Null).unwrap();
+        store.save(&record).unwrap();
+        assert_eq!(store.load(&record.run_id).unwrap(), Some(record.clone()));
+        let lease = store.acquire_lease(&record.run_id).unwrap();
+        assert!(matches!(
+            store.acquire_lease(&record.run_id),
+            Err(GraphError::RunBusy(_))
+        ));
+        drop(lease);
+        let _reopened = store.acquire_lease(&record.run_id).unwrap();
+        fs::write(root.join(format!("{}.json", record.run_id)), b"not json").unwrap();
+        assert!(matches!(
+            store.load(&record.run_id),
+            Err(GraphError::RunDecode(_))
+        ));
+        drop(_reopened);
+        fs::remove_dir_all(root).unwrap();
+    }
+}

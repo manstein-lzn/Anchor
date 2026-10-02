@@ -1,0 +1,26 @@
+{
+  "objective": "编译器代价模型的几点近期证据。",
+  "input": {},
+  "entry": "search",
+  "agents": {
+    "searcher": {
+      "model": "models.academic",
+      "instructions": "Do a focused literature search using the mounted academic Plugin. Write sources.md and notes.md with the evidence and what remains missing. If a source refuses, use another or move on. Return a structured completion when the pass is complete.",
+      "network": true,
+      "max_steps": 25,
+      "wall_time_limit_seconds": 600,
+      "writes": [
+        "sources.md",
+        "notes.md"
+      ]
+    }
+  },
+  "ops": {},
+  "nodes": [
+    {
+      "id": "search",
+      "agent": "searcher"
+    }
+  ],
+  "edges": []
+}

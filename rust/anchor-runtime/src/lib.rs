@@ -30,6 +30,7 @@ use rig_agent::{
 use serde::{Deserialize, Serialize};
 
 pub mod checkpoint;
+pub mod graph;
 pub mod sandbox;
 pub use checkpoint::{CheckpointStore, CheckpointStoreError, FileCheckpointStore};
 pub use sandbox::{
