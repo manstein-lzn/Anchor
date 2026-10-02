@@ -30,7 +30,12 @@ use rig_agent::{
 use serde::{Deserialize, Serialize};
 
 pub mod checkpoint;
+pub mod sandbox;
 pub use checkpoint::{CheckpointStore, CheckpointStoreError, FileCheckpointStore};
+pub use sandbox::{
+    NetworkPolicy, NoopSandbox, ReadOnlyInput, SandboxError, SandboxPort, SandboxRequest,
+    SandboxResult, SandboxStatus,
+};
 
 const CHECKPOINT_FORMAT: u32 = 3;
 
