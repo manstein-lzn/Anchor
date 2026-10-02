@@ -1,0 +1,263 @@
+{
+  "format": 1,
+  "source": "tests/fixtures/r5-python-oracle-scenarios.json via anchor.simple.graph.parse/to_dict and anchor.simple.run.run",
+  "status_mapping": {
+    "finished": "completed",
+    "stopped with reason=budget_exhausted": "budget_stopped",
+    "stopped otherwise": "stopped"
+  },
+  "scenarios": [
+    {
+      "id": "selected_route_skips_other_exit",
+      "graph_snapshot": {
+        "objective": "oracle routing",
+        "input": {
+          "shared": {
+            "default": 1,
+            "override": 0
+          }
+        },
+        "entry": "start",
+        "agents": {
+          "worker": {
+            "model": "fixture.model",
+            "instructions": "fixture",
+            "network": false,
+            "max_steps": null,
+            "wall_time_limit_seconds": 3600
+          }
+        },
+        "ops": {},
+        "nodes": [
+          {
+            "id": "start",
+            "agent": "worker"
+          },
+          {
+            "id": "selected",
+            "agent": "worker"
+          },
+          {
+            "id": "unselected",
+            "agent": "worker"
+          }
+        ],
+        "edges": [
+          {
+            "from": "start",
+            "to": "selected"
+          },
+          {
+            "from": "start",
+            "to": "unselected"
+          }
+        ]
+      },
+      "run_override": {
+        "input": {
+          "shared": {
+            "override": 2
+          },
+          "request": "r5"
+        }
+      },
+      "effective_input": {
+        "shared": {
+          "default": 1,
+          "override": 2
+        },
+        "request": "r5"
+      },
+      "node_outcomes": [
+        {
+          "node": "start",
+          "invocation": 1,
+          "exit_status": "Submitted",
+          "route": "selected"
+        },
+        {
+          "node": "selected",
+          "invocation": 1,
+          "exit_status": "Submitted",
+          "route": null
+        }
+      ],
+      "python": {
+        "status": "completed",
+        "python_status": "finished",
+        "reason": "",
+        "ordered_executed_nodes": [
+          "start",
+          "selected"
+        ],
+        "passes": {
+          "start": 1,
+          "selected": 1
+        },
+        "ceased": [],
+        "edge_decisions": [
+          {
+            "from": "start",
+            "to": "selected",
+            "selected": true
+          },
+          {
+            "from": "start",
+            "to": "unselected",
+            "selected": false
+          }
+        ],
+        "cursor": {
+          "exists": false
+        }
+      }
+    },
+    {
+      "id": "self_loop_ceiling",
+      "graph_snapshot": {
+        "objective": "oracle loop ceiling",
+        "input": {},
+        "entry": "spin",
+        "agents": {
+          "worker": {
+            "model": "fixture.model",
+            "instructions": "fixture",
+            "network": false,
+            "max_steps": null,
+            "wall_time_limit_seconds": 3600
+          }
+        },
+        "ops": {},
+        "nodes": [
+          {
+            "id": "spin",
+            "agent": "worker",
+            "max_rounds": 2
+          }
+        ],
+        "edges": [
+          {
+            "from": "spin",
+            "to": "spin"
+          }
+        ]
+      },
+      "run_override": {
+        "input": {
+          "request": "ceiling"
+        }
+      },
+      "effective_input": {
+        "request": "ceiling"
+      },
+      "node_outcomes": [
+        {
+          "node": "spin",
+          "invocation": 1,
+          "exit_status": "Submitted",
+          "route": "spin"
+        },
+        {
+          "node": "spin",
+          "invocation": 2,
+          "exit_status": "Submitted",
+          "route": "spin"
+        }
+      ],
+      "python": {
+        "status": "stopped",
+        "python_status": "stopped",
+        "reason": "max_rounds",
+        "ordered_executed_nodes": [
+          "spin",
+          "spin"
+        ],
+        "passes": {
+          "spin": 2
+        },
+        "ceased": [
+          "spin@2"
+        ],
+        "edge_decisions": [
+          {
+            "from": "spin",
+            "to": "spin",
+            "selected": false
+          }
+        ],
+        "cursor": {
+          "exists": false
+        }
+      }
+    },
+    {
+      "id": "budget_stop_preserves_cursor",
+      "graph_snapshot": {
+        "objective": "oracle budget stop",
+        "input": {
+          "defaults": {
+            "mode": "safe"
+          }
+        },
+        "entry": "budgeted",
+        "agents": {
+          "worker": {
+            "model": "fixture.model",
+            "instructions": "fixture",
+            "network": false,
+            "max_steps": 4,
+            "wall_time_limit_seconds": 3600
+          }
+        },
+        "ops": {},
+        "nodes": [
+          {
+            "id": "budgeted",
+            "agent": "worker"
+          }
+        ],
+        "edges": []
+      },
+      "run_override": {
+        "input": {
+          "defaults": {
+            "request": "budget"
+          }
+        }
+      },
+      "effective_input": {
+        "defaults": {
+          "mode": "safe",
+          "request": "budget"
+        }
+      },
+      "node_outcomes": [
+        {
+          "node": "budgeted",
+          "invocation": 1,
+          "exit_status": "budget_exhausted",
+          "route": null
+        }
+      ],
+      "python": {
+        "status": "budget_stopped",
+        "python_status": "stopped",
+        "reason": "budget_exhausted",
+        "ordered_executed_nodes": [
+          "budgeted"
+        ],
+        "passes": {
+          "budgeted": 1
+        },
+        "ceased": [],
+        "edge_decisions": [],
+        "cursor": {
+          "exists": true,
+          "node": "budgeted",
+          "pass": 1,
+          "invocation": 1
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,59 @@
+{
+  "format": 1,
+  "scenarios": [
+    {
+      "id": "selected_route_skips_other_exit",
+      "graph": {
+        "objective": "oracle routing",
+        "input": {"shared": {"default": 1, "override": 0}},
+        "entry": "start",
+        "agents": {"worker": {"model": "fixture.model", "instructions": "fixture"}},
+        "nodes": [
+          {"id": "start", "agent": "worker"},
+          {"id": "selected", "agent": "worker"},
+          {"id": "unselected", "agent": "worker"}
+        ],
+        "edges": [
+          {"from": "start", "to": "selected"},
+          {"from": "start", "to": "unselected"}
+        ]
+      },
+      "run_override": {"input": {"shared": {"override": 2}, "request": "r5"}},
+      "outcomes": [
+        {"node": "start", "invocation": 1, "exit_status": "Submitted", "route": "selected"},
+        {"node": "selected", "invocation": 1, "exit_status": "Submitted", "route": null}
+      ]
+    },
+    {
+      "id": "self_loop_ceiling",
+      "graph": {
+        "objective": "oracle loop ceiling",
+        "input": {},
+        "entry": "spin",
+        "agents": {"worker": {"model": "fixture.model", "instructions": "fixture"}},
+        "nodes": [{"id": "spin", "agent": "worker", "max_rounds": 2}],
+        "edges": [{"from": "spin", "to": "spin"}]
+      },
+      "run_override": {"input": {"request": "ceiling"}},
+      "outcomes": [
+        {"node": "spin", "invocation": 1, "exit_status": "Submitted", "route": "spin"},
+        {"node": "spin", "invocation": 2, "exit_status": "Submitted", "route": "spin"}
+      ]
+    },
+    {
+      "id": "budget_stop_preserves_cursor",
+      "graph": {
+        "objective": "oracle budget stop",
+        "input": {"defaults": {"mode": "safe"}},
+        "entry": "budgeted",
+        "agents": {"worker": {"model": "fixture.model", "instructions": "fixture", "max_steps": 4}},
+        "nodes": [{"id": "budgeted", "agent": "worker"}],
+        "edges": []
+      },
+      "run_override": {"input": {"defaults": {"request": "budget"}}},
+      "outcomes": [
+        {"node": "budgeted", "invocation": 1, "exit_status": "budget_exhausted", "route": null}
+      ]
+    }
+  ]
+}
