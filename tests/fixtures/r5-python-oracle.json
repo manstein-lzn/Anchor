@@ -944,6 +944,222 @@
           "exists": false
         }
       }
+    },
+    {
+      "id": "nested_modules_reentered_by_back_edge",
+      "control": {},
+      "graph_snapshot": {
+        "objective": "oracle nested module back edge",
+        "input": {},
+        "entry": "start",
+        "_module_rounds": {
+          "use_outer/inner_call": 2,
+          "use_outer": 2
+        },
+        "agents": {
+          "worker": {
+            "model": "fixture.model",
+            "instructions": "fixture",
+            "network": false,
+            "max_steps": null,
+            "wall_time_limit_seconds": 3600
+          }
+        },
+        "ops": {},
+        "nodes": [
+          {
+            "id": "start",
+            "agent": "worker"
+          },
+          {
+            "id": "use_outer/outer_start",
+            "agent": "worker"
+          },
+          {
+            "id": "use_outer/inner_call/inside_start",
+            "agent": "worker"
+          },
+          {
+            "id": "use_outer/inner_call/inside_end",
+            "agent": "worker"
+          },
+          {
+            "id": "use_outer/outer_end",
+            "agent": "worker"
+          },
+          {
+            "id": "after",
+            "agent": "worker"
+          }
+        ],
+        "edges": [
+          {
+            "from": "start",
+            "to": "use_outer/outer_start"
+          },
+          {
+            "from": "use_outer/outer_start",
+            "to": "use_outer/inner_call/inside_start"
+          },
+          {
+            "from": "use_outer/inner_call/inside_start",
+            "to": "use_outer/inner_call/inside_end"
+          },
+          {
+            "from": "use_outer/inner_call/inside_end",
+            "to": "use_outer/outer_end"
+          },
+          {
+            "from": "use_outer/outer_end",
+            "to": "after"
+          },
+          {
+            "from": "after",
+            "to": "use_outer/outer_start"
+          }
+        ]
+      },
+      "run_override": {
+        "input": {
+          "request": "nested module back edge"
+        }
+      },
+      "effective_input": {
+        "request": "nested module back edge"
+      },
+      "node_outcomes": [
+        {
+          "node": "start",
+          "invocation": 1,
+          "exit_status": "Submitted",
+          "route": null
+        },
+        {
+          "node": "use_outer/outer_start",
+          "invocation": 1,
+          "exit_status": "Submitted",
+          "route": null
+        },
+        {
+          "node": "use_outer/inner_call/inside_start",
+          "invocation": 1,
+          "exit_status": "Submitted",
+          "route": null
+        },
+        {
+          "node": "use_outer/inner_call/inside_end",
+          "invocation": 1,
+          "exit_status": "Submitted",
+          "route": null
+        },
+        {
+          "node": "use_outer/outer_end",
+          "invocation": 1,
+          "exit_status": "Submitted",
+          "route": null
+        },
+        {
+          "node": "after",
+          "invocation": 1,
+          "exit_status": "Submitted",
+          "route": null
+        },
+        {
+          "node": "use_outer/outer_start",
+          "invocation": 2,
+          "exit_status": "Submitted",
+          "route": null
+        },
+        {
+          "node": "use_outer/inner_call/inside_start",
+          "invocation": 2,
+          "exit_status": "Submitted",
+          "route": null
+        },
+        {
+          "node": "use_outer/inner_call/inside_end",
+          "invocation": 2,
+          "exit_status": "Submitted",
+          "route": null
+        },
+        {
+          "node": "use_outer/outer_end",
+          "invocation": 2,
+          "exit_status": "Submitted",
+          "route": null
+        },
+        {
+          "node": "after",
+          "invocation": 2,
+          "exit_status": "Submitted",
+          "route": null
+        }
+      ],
+      "python": {
+        "status": "stopped",
+        "python_status": "stopped",
+        "reason": "max_rounds",
+        "ordered_executed_nodes": [
+          "start",
+          "use_outer/outer_start",
+          "use_outer/inner_call/inside_start",
+          "use_outer/inner_call/inside_end",
+          "use_outer/outer_end",
+          "after",
+          "use_outer/outer_start",
+          "use_outer/inner_call/inside_start",
+          "use_outer/inner_call/inside_end",
+          "use_outer/outer_end",
+          "after"
+        ],
+        "skipped_nodes": [],
+        "passes": {
+          "start": 1,
+          "use_outer/outer_start": 1,
+          "use_outer/inner_call/inside_start": 1,
+          "use_outer/inner_call/inside_end": 1,
+          "use_outer/outer_end": 1,
+          "after": 2
+        },
+        "ceased": [
+          "use_outer@2"
+        ],
+        "edge_decisions": [
+          {
+            "from": "after",
+            "to": "use_outer/outer_start",
+            "selected": false
+          },
+          {
+            "from": "start",
+            "to": "use_outer/outer_start",
+            "selected": true
+          },
+          {
+            "from": "use_outer/inner_call/inside_end",
+            "to": "use_outer/outer_end",
+            "selected": false
+          },
+          {
+            "from": "use_outer/inner_call/inside_start",
+            "to": "use_outer/inner_call/inside_end",
+            "selected": false
+          },
+          {
+            "from": "use_outer/outer_end",
+            "to": "after",
+            "selected": false
+          },
+          {
+            "from": "use_outer/outer_start",
+            "to": "use_outer/inner_call/inside_start",
+            "selected": false
+          }
+        ],
+        "cursor": {
+          "exists": false
+        }
+      }
     }
   ]
 }

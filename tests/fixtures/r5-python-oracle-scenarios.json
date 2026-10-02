@@ -502,6 +502,74 @@
           "route": null
         }
       ]
+    },
+    {
+      "id": "nested_modules_reentered_by_back_edge",
+      "graph": {
+        "objective": "oracle nested module back edge",
+        "input": {},
+        "entry": "start",
+        "agents": {
+          "worker": {
+            "model": "fixture.model",
+            "instructions": "fixture"
+          }
+        },
+        "graphs": {
+          "inner": {
+            "entry": "inside_start",
+            "exit": "inside_end",
+            "nodes": [
+              {"id": "inside_start", "agent": "worker"},
+              {"id": "inside_end", "agent": "worker"}
+            ],
+            "edges": [
+              {"from": "inside_start", "to": "inside_end"}
+            ]
+          },
+          "outer": {
+            "entry": "outer_start",
+            "exit": "outer_end",
+            "nodes": [
+              {"id": "outer_start", "agent": "worker"},
+              {"id": "inner_call", "graph": "inner", "max_rounds": 2},
+              {"id": "outer_end", "agent": "worker"}
+            ],
+            "edges": [
+              {"from": "outer_start", "to": "inner_call"},
+              {"from": "inner_call", "to": "outer_end"}
+            ]
+          }
+        },
+        "nodes": [
+          {"id": "start", "agent": "worker"},
+          {"id": "use_outer", "graph": "outer", "max_rounds": 2},
+          {"id": "after", "agent": "worker"}
+        ],
+        "edges": [
+          {"from": "start", "to": "use_outer"},
+          {"from": "use_outer", "to": "after"},
+          {"from": "after", "to": "use_outer"}
+        ]
+      },
+      "run_override": {
+        "input": {
+          "request": "nested module back edge"
+        }
+      },
+      "outcomes": [
+        {"node": "start", "invocation": 1, "exit_status": "Submitted", "route": null},
+        {"node": "use_outer/outer_start", "invocation": 1, "exit_status": "Submitted", "route": null},
+        {"node": "use_outer/inner_call/inside_start", "invocation": 1, "exit_status": "Submitted", "route": null},
+        {"node": "use_outer/inner_call/inside_end", "invocation": 1, "exit_status": "Submitted", "route": null},
+        {"node": "use_outer/outer_end", "invocation": 1, "exit_status": "Submitted", "route": null},
+        {"node": "after", "invocation": 1, "exit_status": "Submitted", "route": null},
+        {"node": "use_outer/outer_start", "invocation": 2, "exit_status": "Submitted", "route": null},
+        {"node": "use_outer/inner_call/inside_start", "invocation": 2, "exit_status": "Submitted", "route": null},
+        {"node": "use_outer/inner_call/inside_end", "invocation": 2, "exit_status": "Submitted", "route": null},
+        {"node": "use_outer/outer_end", "invocation": 2, "exit_status": "Submitted", "route": null},
+        {"node": "after", "invocation": 2, "exit_status": "Submitted", "route": null}
+      ]
     }
   ]
 }

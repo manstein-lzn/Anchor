@@ -3406,7 +3406,7 @@ mod tests {
         );
 
         let scenarios = fixture["scenarios"].as_array().unwrap();
-        assert_eq!(scenarios.len(), 9);
+        assert_eq!(scenarios.len(), 10);
         for scenario in scenarios {
             let snapshot = GraphSnapshot::admit(scenario["graph_snapshot"].clone()).unwrap();
             let override_input = scenario["run_override"]["input"].clone();
@@ -3435,8 +3435,8 @@ mod tests {
             };
             assert_eq!(
                 rust_status, expected["status"],
-                "scenario {}",
-                scenario["id"]
+                "scenario {}, reason {:?}, ceased {:?}",
+                scenario["id"], result.error, result.ceased
             );
 
             let calls = nodes.calls.lock().unwrap().clone();
