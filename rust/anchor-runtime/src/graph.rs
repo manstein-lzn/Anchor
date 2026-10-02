@@ -1290,7 +1290,11 @@ pub enum GraphError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Arc, Mutex};
+    use std::{
+        io::BufRead,
+        process::{Command, Stdio},
+        sync::{Arc, Mutex},
+    };
 
     #[derive(Default)]
     struct MemStore {
@@ -2018,9 +2022,9 @@ mod tests {
     }
 
     #[test]
-    fn file_run_store_roundtrips_rejects_corruption_and_releases_process_lease() {
+    fn file_run_store_roundtrips_rejects_corruption_and_releases_lease_after_process_crash() {
         let root = std::env::temp_dir().join(format!(
-            "anchor-run-store-{}-{}",
+            "anchor-run-store-crash-{}-{}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -2037,14 +2041,153 @@ mod tests {
             Err(GraphError::RunBusy(_))
         ));
         drop(lease);
-        let _reopened = store.acquire_lease(&record.run_id).unwrap();
+        let reopened = store.acquire_lease(&record.run_id).unwrap();
+        drop(reopened);
+
+        // Hold the lease in another test process and synchronize using pipes:
+        // the child announces only after acquiring the OS lock, and exits via
+        // process::exit so Rust destructors cannot release it explicitly.
+        let token = format!(
+            "{}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+            RUN_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        );
+        let executable = std::env::current_exe().unwrap();
+        let mut child = Command::new(&executable)
+            .args([
+                "--exact",
+                "graph::tests::file_run_store_lease_process_helper",
+                "--nocapture",
+            ])
+            .env("ANCHOR_FILE_LEASE_TEST_TOKEN", &token)
+            .env("ANCHOR_FILE_LEASE_TEST_MODE", "holder")
+            .env("ANCHOR_FILE_LEASE_TEST_ROOT", &root)
+            .env("ANCHOR_FILE_LEASE_TEST_RUN", &record.run_id)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let child_stdout = child.stdout.take().unwrap();
+        let mut child_output = io::BufReader::new(child_stdout);
+        let marker = format!("ANCHOR_FILE_LEASE_HELD:{token}");
+        let mut line = String::new();
+        let mut acquired = false;
+        loop {
+            line.clear();
+            let bytes = child_output.read_line(&mut line).unwrap();
+            if bytes == 0 {
+                break;
+            }
+            if line.trim_end() == marker {
+                acquired = true;
+                break;
+            }
+        }
+        if !acquired {
+            let output = child.wait_with_output().unwrap();
+            panic!(
+                "lease holder exited before announcing acquisition; status={}, stdout={}, stderr={}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        let contender = Command::new(&executable)
+            .args([
+                "--exact",
+                "graph::tests::file_run_store_lease_process_helper",
+                "--nocapture",
+            ])
+            .env("ANCHOR_FILE_LEASE_TEST_TOKEN", &token)
+            .env("ANCHOR_FILE_LEASE_TEST_MODE", "contender")
+            .env("ANCHOR_FILE_LEASE_TEST_ROOT", &root)
+            .env("ANCHOR_FILE_LEASE_TEST_RUN", &record.run_id)
+            .output();
+        let release_result = writeln!(child.stdin.as_mut().unwrap(), "exit-crash:{token}");
+        drop(child.stdin.take());
+        let child_status = child.wait().unwrap();
+        release_result.unwrap();
+        assert!(
+            child_status.success(),
+            "lease holder exited unsuccessfully: {child_status}"
+        );
+
+        let contender = contender.unwrap();
+        assert!(
+            contender.status.success(),
+            "lease contender failed: stdout={}, stderr={}",
+            String::from_utf8_lossy(&contender.stdout),
+            String::from_utf8_lossy(&contender.stderr)
+        );
+        let contender_output = String::from_utf8_lossy(&contender.stdout);
+        assert!(
+            contender_output.contains(&format!("ANCHOR_FILE_LEASE_BUSY:{token}")),
+            "contending process did not observe RunBusy: {contender_output}"
+        );
+
+        let after_crash = store.acquire_lease(&record.run_id).unwrap();
+        drop(after_crash);
+
         fs::write(root.join(format!("{}.json", record.run_id)), b"not json").unwrap();
         assert!(matches!(
             store.load(&record.run_id),
             Err(GraphError::RunDecode(_))
         ));
-        drop(_reopened);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn file_run_store_lease_process_helper() {
+        // This test is intentionally inert when run by the normal harness. The
+        // parent test supplies a per-invocation token and a private temp root.
+        let (Ok(token), Ok(mode), Ok(root), Ok(run_id)) = (
+            std::env::var("ANCHOR_FILE_LEASE_TEST_TOKEN"),
+            std::env::var("ANCHOR_FILE_LEASE_TEST_MODE"),
+            std::env::var("ANCHOR_FILE_LEASE_TEST_ROOT"),
+            std::env::var("ANCHOR_FILE_LEASE_TEST_RUN"),
+        ) else {
+            return;
+        };
+        if token.is_empty()
+            || !["holder", "contender"].contains(&mode.as_str())
+            || !PathBuf::from(&root)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("anchor-run-store-crash-"))
+        {
+            return;
+        }
+
+        let store = FileRunStore::new(root);
+        if mode == "contender" {
+            match store.acquire_lease(&run_id) {
+                Err(GraphError::RunBusy(_)) => println!("ANCHOR_FILE_LEASE_BUSY:{token}"),
+                Ok(lease) => {
+                    drop(lease);
+                    println!("ANCHOR_FILE_LEASE_ACQUIRED:{token}");
+                }
+                Err(error) => panic!("contender failed to check lease: {error}"),
+            }
+            return;
+        }
+
+        let _lease = store.acquire_lease(&run_id).unwrap();
+        println!("ANCHOR_FILE_LEASE_HELD:{token}");
+        io::stdout().flush().unwrap();
+        let mut command = String::new();
+        io::stdin().read_line(&mut command).unwrap();
+        assert_eq!(command.trim_end(), format!("exit-crash:{token}"));
+        // Deliberately bypass `drop(lease)`: process termination must release
+        // the kernel lock while leaving its stable lock file/inode in place.
+        std::process::exit(0);
+        #[allow(unreachable_code)]
+        drop(_lease);
     }
 
     #[derive(Default)]
