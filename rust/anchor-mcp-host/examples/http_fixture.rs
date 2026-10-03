@@ -1,16 +1,16 @@
 //! Local-only MCP fixture for real-provider Graph acceptance. No business APIs.
 //! Prints its ephemeral endpoint; optional first argument receives call evidence.
 use rmcp::{
-    RoleServer, ServerHandler,
     model::{
         CallToolRequestParams, CallToolResult, ContentBlock, ErrorData, ListToolsResult,
         PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
     },
     service::RequestContext,
     transport::{
-        StreamableHttpServerConfig, StreamableHttpService,
-        streamable_http_server::session::local::LocalSessionManager,
+        streamable_http_server::session::local::LocalSessionManager, StreamableHttpServerConfig,
+        StreamableHttpService,
     },
+    RoleServer, ServerHandler,
 };
 use serde_json::json;
 use std::{fs::OpenOptions, io::Write, path::PathBuf, sync::Arc};
@@ -19,6 +19,7 @@ use std::{fs::OpenOptions, io::Write, path::PathBuf, sync::Arc};
 struct Fixture {
     evidence: Option<PathBuf>,
     append_evidence: bool,
+    large_tools: usize,
 }
 impl ServerHandler for Fixture {
     fn get_info(&self) -> ServerInfo {
@@ -29,7 +30,48 @@ impl ServerHandler for Fixture {
         _: Option<PaginatedRequestParams>,
         _: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, ErrorData> {
-        Ok(ListToolsResult { tools: vec![Tool::new("fixture_suffix".to_owned(), "Return text with -checked appended. Deterministic local acceptance fixture.".to_owned(), Arc::new(serde_json::from_value(json!({"type":"object","properties":{"text":{"type":"string"}},"required":["text"],"additionalProperties":false})).unwrap()))], next_cursor:None, meta:None })
+        let target = Tool::new(
+            "fixture_suffix".to_owned(),
+            "Return text with -checked appended. Deterministic local acceptance fixture."
+                .to_owned(),
+            Arc::new(
+                serde_json::from_value(json!({
+                    "type":"object",
+                    "properties":{"text":{"type":"string"}},
+                    "required":["text"],
+                    "additionalProperties":false
+                }))
+                .unwrap(),
+            ),
+        );
+        let mut tools = vec![target];
+        for index in 0..self.large_tools {
+            tools.push(Tool::new(
+                format!("fixture_noise_{index:04}"),
+                format!(
+                    "Unrelated capability {index}; do not select this operation for the requested transformation. {}",
+                    "metadata ".repeat(32)
+                ),
+                Arc::new(
+                    serde_json::from_value(json!({
+                        "type":"object",
+                        "properties": {
+                            "value": {"type":"string"},
+                            "scope": {"type":"string"},
+                            "limit": {"type":"integer"}
+                        },
+                        "required":["value"],
+                        "additionalProperties":false
+                    }))
+                    .unwrap(),
+                ),
+            ));
+        }
+        Ok(ListToolsResult {
+            tools,
+            next_cursor: None,
+            meta: None,
+        })
     }
     async fn call_tool(
         &self,
@@ -80,9 +122,20 @@ impl ServerHandler for Fixture {
 }
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args: Vec<String> = std::env::args().collect();
     let fixture = Fixture {
-        evidence: std::env::args_os().nth(1).map(PathBuf::from),
-        append_evidence: std::env::args().any(|arg| arg == "--append-evidence"),
+        evidence: args
+            .get(1)
+            .filter(|arg| !arg.starts_with('-'))
+            .map(PathBuf::from),
+        append_evidence: args.iter().any(|arg| arg == "--append-evidence"),
+        large_tools: args
+            .iter()
+            .position(|arg| arg == "--large-tools")
+            .and_then(|position| args.get(position + 1))
+            .map(|value| value.parse::<usize>())
+            .transpose()?
+            .unwrap_or(0),
     };
     let service: StreamableHttpService<Fixture, LocalSessionManager> = StreamableHttpService::new(
         move || Ok(fixture.clone()),
