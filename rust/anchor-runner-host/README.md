@@ -44,8 +44,19 @@ not a business integration. Model requests use the real configured provider.
 - `ANCHOR_RUST_MCP_SERVERS`: deployment-owned JSON map from manifest server ID to
   `{"transport":"http","endpoint":"...","allowed_tools":["..."]}` with optional
   `bearer_token_env` naming a credential environment variable. A node must also
-  declare `network:true` to connect HTTP MCP. Reserved or duplicate tool names are
-  rejected before connection. `anchor_run` itself remains network-disabled.
+  declare `network:true` to connect HTTP MCP. Reserved or duplicate names within
+  one server are rejected before connection; equal remote names on different
+  servers remain distinct because calls include `server_id`. `anchor_run` itself
+  remains network-disabled.
+
+For AgentNodes with MCP Plugins, the model receives only two small Anchor tools:
+`anchor_mcp__search_tools` and `anchor_mcp__call_tool`. Search returns a stable,
+paginated list from this node's admitted Plugin bindings and host allowlists;
+each page has at most 8 matches, each schema is capped at 12 KiB, and the full
+serialized page at 24 KiB. The complete MCP schema catalogue is not sent with every model
+request. Search results are untrusted metadata, not authorization; every call is
+rechecked against the exact server binding and allowlist. MCP calls keep the
+existing conservative unknown-effect recovery behavior.
 
 `Op.run` strings are parsed as quoted argv using shlex. A shell script must be
 explicit, e.g. `sh -c 'cat /in/producer/report.txt > output.txt'`; it does not gain

@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import select
 import shlex
+import sqlite3
 import struct
 import subprocess
 import tempfile
@@ -57,7 +58,9 @@ def main() -> None:
                 "model": os.environ["ANCHOR_MODEL_NAME"], "network": True,
                 "wall_time_limit_seconds": 120,
                 "instructions": (
-                    "Use anchor_run to read /in/producer/source.txt. Call fixture_suffix with that exact text. "
+                    "Use anchor_run to read /in/producer/source.txt. Search the attached MCP tools for fixture_suffix, "
+                    "then call the exact returned tool using anchor_mcp__call_tool with its server_id, tool_name, "
+                    "and arguments={\"text\": <exact source text>}. "
                     "Use anchor_run to write ONLY the returned structured text field into /workspace/report.txt "
                     "(no newline, no quotes, no Markdown). Do not guess the text or compute the suffix yourself. "
                     "Read back report.txt, then return JSON summary and route=verify."
@@ -107,8 +110,27 @@ def main() -> None:
         assert final.read_text() == token + "-checked"
         mcp_call = json.loads((proof / "mcp-call.json").read_text())
         assert mcp_call["input"] == token
+        stores = list((proof / "state/io-harness/store").glob("*.sqlite3"))
+        assert len(stores) == 1, f"expected one AgentNode store, found {stores}"
+        with sqlite3.connect(stores[0]) as store:
+            calls = [
+                call
+                for (serialized,) in store.execute("SELECT calls FROM step_turns ORDER BY step")
+                for call in json.loads(serialized)
+                if call["name"].startswith("anchor_mcp__")
+            ]
+        mcp_tool_sequence = [call["name"] for call in calls]
+        assert mcp_tool_sequence == ["anchor_mcp__search_tools", "anchor_mcp__call_tool"], mcp_tool_sequence
+        selected_call = calls[1]["arguments"]
+        assert selected_call == {
+            "server_id": "fixture",
+            "tool_name": "fixture_suffix",
+            "arguments": {"text": token},
+        }
         evidence = {"status": "passed", "run": record["run_id"], "nodes": sorted(record["results"], key=lambda node: record["results"][node][0]["sequence"]),
                     "model_requests": record["results"]["worker"][0]["completion"]["model_requests"],
+                    "mcp_tool_sequence": mcp_tool_sequence,
+                    "mcp_selected_tool": {"server_id": selected_call["server_id"], "tool_name": selected_call["tool_name"]},
                     "mcp": "local Rust fixture over real HTTP", "provider": "real configured model",
                     "verified_artifact": str(final.relative_to(proof))}
         (proof / "evidence.json").write_text(json.dumps(evidence, indent=2))

@@ -20,8 +20,12 @@ use std::{
     sync::Arc,
 };
 
+mod discovery;
+
 pub const FAKE_SERVER_ID: &str = "anchor.fake";
 pub const FAKE_ECHO_TOOL: &str = "anchor_fake__echo";
+pub const MCP_SEARCH_TOOLS_TOOL: &str = "anchor_mcp__search_tools";
+pub const MCP_CALL_TOOL: &str = "anchor_mcp__call_tool";
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -112,7 +116,6 @@ impl McpToolConfig {
 
     pub fn validate_bindings(&self, bindings: &[PluginBinding]) -> Result<(), String> {
         let mut seen_servers = BTreeSet::new();
-        let mut seen_tools = BTreeSet::new();
         for binding in bindings {
             for server_id in &binding.mcp_servers {
                 if server_id == FAKE_SERVER_ID || !seen_servers.insert(server_id) {
@@ -122,6 +125,7 @@ impl McpToolConfig {
                     .servers
                     .get(server_id)
                     .ok_or_else(|| format!("MCP server `{server_id}` is not configured"))?;
+                let mut seen_tools = BTreeSet::new();
                 for name in &config.allowed_tools {
                     if name.is_empty()
                         || name.len() > 64
@@ -129,10 +133,15 @@ impl McpToolConfig {
                             .bytes()
                             .all(|c| c.is_ascii_alphanumeric() || b"_-".contains(&c))
                         || name == FAKE_ECHO_TOOL
+                        || name == MCP_SEARCH_TOOLS_TOOL
+                        || name == MCP_CALL_TOOL
                         || name == crate::node_tools::RUN_TOOL_NAME
                         || !seen_tools.insert(name)
                     {
-                        return Err("MCP tool names must be valid, unique and not reserved".into());
+                        return Err(
+                            "MCP tool names must be valid, unique per server, and not reserved"
+                                .into(),
+                        );
                     }
                 }
                 if let Some(name) = config.bearer_token_env.as_deref()
@@ -152,19 +161,15 @@ pub struct LiveMcpTools {
 
 impl ToolPort for LiveMcpTools {
     fn definitions(&self) -> Vec<ToolDefinition> {
-        let mut result = Vec::new();
-        for host in self.hosts.values() {
-            for tool in host.tools() {
-                if let Ok(name) = ToolName::new(tool.name.clone()) {
-                    result.push(ToolDefinition::new(
-                        name,
-                        tool.description.unwrap_or_default(),
-                        tool.input_schema,
-                    ));
-                }
-            }
+        if self.hosts.is_empty() {
+            return Vec::new();
         }
-        result
+
+        discovery::definitions()
+    }
+
+    fn is_read_only(&self, name: &str) -> bool {
+        name == MCP_SEARCH_TOOLS_TOOL
     }
 
     fn call<'a>(
@@ -173,16 +178,55 @@ impl ToolPort for LiveMcpTools {
         arguments: Value,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<ToolResultContent>, ToolError>> + Send + 'a>> {
         Box::pin(async move {
-            for host in self.hosts.values() {
-                if host.tools().iter().any(|tool| tool.name == name) {
-                    return host
-                        .call_rig(name, arguments)
-                        .await
-                        .map_err(|e| ToolError::Failed(e.to_string()));
+            match name {
+                MCP_SEARCH_TOOLS_TOOL => {
+                    let result = discovery::search(&self.hosts, arguments)?;
+                    Ok(vec![ToolResultContent::json(result)])
                 }
+                MCP_CALL_TOOL => self.call_tool(arguments).await,
+                _ => Err(ToolError::Unknown(name.to_owned())),
             }
-            Err(ToolError::Unknown(name.to_owned()))
         })
+    }
+}
+
+impl LiveMcpTools {
+    async fn call_tool(&self, arguments: Value) -> Result<Vec<ToolResultContent>, ToolError> {
+        let object = arguments
+            .as_object()
+            .ok_or_else(|| ToolError::Failed("MCP tool call arguments must be an object".into()))?;
+        if object.len() != 3
+            || !object.contains_key("server_id")
+            || !object.contains_key("tool_name")
+            || !object.contains_key("arguments")
+        {
+            return Err(ToolError::Failed(
+                "MCP tool call requires only server_id, tool_name, and arguments".into(),
+            ));
+        }
+        let server_id = object
+            .get("server_id")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| ToolError::Failed("MCP server_id must not be empty".into()))?;
+        let tool_name = object
+            .get("tool_name")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| ToolError::Failed("MCP tool_name must not be empty".into()))?;
+        let tool_arguments = object
+            .get("arguments")
+            .filter(|value| value.is_object())
+            .cloned()
+            .ok_or_else(|| ToolError::Failed("MCP tool arguments must be a JSON object".into()))?;
+
+        let host = self
+            .hosts
+            .get(server_id)
+            .ok_or_else(|| ToolError::Unknown(format!("MCP server `{server_id}`")))?;
+        host.call_rig(tool_name, tool_arguments)
+            .await
+            .map_err(|error| ToolError::Failed(error.to_string()))
     }
 }
 
@@ -202,6 +246,10 @@ impl ToolPort for CombinedPluginTools {
         let mut definitions = self.fake.definitions();
         definitions.extend(self.live.definitions());
         definitions
+    }
+
+    fn is_read_only(&self, name: &str) -> bool {
+        name == MCP_SEARCH_TOOLS_TOOL
     }
 
     fn call<'a>(

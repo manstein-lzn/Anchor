@@ -461,7 +461,7 @@ mod tests {
     use std::time::Duration;
 
     use crate::adapter::RigProviderAdapter;
-    use anchor_runtime_rig::{Cancellation, ToolError};
+    use anchor_runtime_rig::{Cancellation, ToolError, ToolPort};
     use io_harness::RunOutcome;
     use rig_core::completion::ToolDefinition;
     use rig_core::message::ToolResultContent;
@@ -505,6 +505,82 @@ mod tests {
                 Ok(vec![ToolResultContent::json(json!({
                     "echo": arguments["value"]
                 }))])
+            })
+        }
+    }
+
+    struct DiscoveryPort {
+        searches: AtomicUsize,
+        remote_calls: AtomicUsize,
+    }
+
+    impl ToolPort for DiscoveryPort {
+        fn definitions(&self) -> Vec<ToolDefinition> {
+            vec![
+                ToolDefinition {
+                    name: "anchor_mcp__search_tools".into(),
+                    description: "Search attached MCP tools.".into(),
+                    parameters: json!({
+                        "type":"object",
+                        "properties":{"query":{"type":"string"}},
+                        "required":["query"],
+                        "additionalProperties":false
+                    }),
+                },
+                ToolDefinition {
+                    name: "anchor_mcp__call_tool".into(),
+                    description: "Call a selected MCP tool.".into(),
+                    parameters: json!({
+                        "type":"object",
+                        "properties":{
+                            "server_id":{"type":"string"},
+                            "tool_name":{"type":"string"},
+                            "arguments":{"type":"object","additionalProperties":true}
+                        },
+                        "required":["server_id","tool_name","arguments"],
+                        "additionalProperties":false
+                    }),
+                },
+            ]
+        }
+
+        fn is_read_only(&self, name: &str) -> bool {
+            name == "anchor_mcp__search_tools"
+        }
+
+        fn call<'a>(
+            &'a self,
+            name: &'a str,
+            arguments: serde_json::Value,
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<ToolResultContent>, ToolError>> + Send + 'a>>
+        {
+            Box::pin(async move {
+                match name {
+                    "anchor_mcp__search_tools" => {
+                        self.searches.fetch_add(1, Ordering::SeqCst);
+                        Ok(vec![ToolResultContent::json(json!({
+                            "tools":[{
+                                "server_id":"fixture",
+                                "tool_name":"remote_read",
+                                "description":"Read a record by its id.",
+                                "input_schema":{
+                                    "type":"object",
+                                    "properties":{"id":{"type":"string"}},
+                                    "required":["id"]
+                                }
+                            }]
+                        }))])
+                    }
+                    "anchor_mcp__call_tool"
+                        if arguments["server_id"] == "fixture"
+                            && arguments["tool_name"] == "remote_read"
+                            && arguments["arguments"]["id"] == "item-1" =>
+                    {
+                        self.remote_calls.fetch_add(1, Ordering::SeqCst);
+                        Ok(vec![ToolResultContent::json(json!({"value":"found"}))])
+                    }
+                    _ => Err(ToolError::Unknown(name.to_owned())),
+                }
             })
         }
     }
@@ -640,6 +716,59 @@ mod tests {
         assert!(serialized.contains("use the echo tool"));
         assert!(serialized.contains("Keep the answer concise."));
         assert!(serialized.contains("Allowed Anchor routes: next"));
+    }
+
+    #[tokio::test]
+    async fn progressive_mcp_discovery_keeps_remote_schema_out_of_provider_tool_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let model = MockCompletionModel::from_turns([
+            MockTurn::tool_call(
+                "search-1",
+                "anchor_mcp__search_tools",
+                json!({"query":"read a record"}),
+            ),
+            MockTurn::tool_call(
+                "call-1",
+                "anchor_mcp__call_tool",
+                json!({
+                    "server_id":"fixture",
+                    "tool_name":"remote_read",
+                    "arguments":{"id":"item-1"}
+                }),
+            ),
+            MockTurn::text(r#"{"summary":"record found","route":"next"}"#),
+        ]);
+        let provider = RigProviderAdapter::new(model.clone().erase(), false);
+        let port = Arc::new(DiscoveryPort {
+            searches: AtomicUsize::new(0),
+            remote_calls: AtomicUsize::new(0),
+        });
+        let execution =
+            IoHarnessNodeExecution::new(dir.path().join("runs.sqlite3"), fixture_policy());
+        let outcome = execution
+            .start(
+                &request(dir.path(), Arc::new(AtomicBool::new(false))),
+                &provider,
+                port.clone(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.status, anchor_runtime_rig::NodeStatus::Completed);
+        assert_eq!(outcome.submission, "record found");
+        assert_eq!(port.searches.load(Ordering::SeqCst), 1);
+        assert_eq!(port.remote_calls.load(Ordering::SeqCst), 1);
+        let requests = model.requests();
+        assert_eq!(requests.len(), 3);
+        let initial = serde_json::to_string(&requests[0]).unwrap();
+        assert!(initial.contains("anchor_mcp__search_tools"));
+        assert!(initial.contains("anchor_mcp__call_tool"));
+        assert!(!initial.contains("remote_read"));
+        let after_search = serde_json::to_string(&requests[1]).unwrap();
+        assert!(after_search.contains("remote_read"));
+        assert!(after_search.contains("input_schema"));
+        let after_call = serde_json::to_string(&requests[2]).unwrap();
+        assert!(after_call.contains("found"));
     }
 
     #[tokio::test]

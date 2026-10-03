@@ -138,30 +138,21 @@ impl Observer for AnchorCancellationObserver {
 ///
 /// The default declaration is deliberately conservative: calls are mutating
 /// and indeterminate to prevent an interrupted external operation from being
-/// replayed automatically. [`Self::read_only_fixture`] is an explicit fixture
-/// escape hatch for tools whose implementation is known to be read-only.
+/// replayed automatically. A ToolPort may explicitly identify a read-only tool.
 pub struct AnchorToolAdapter {
     port: Arc<dyn ToolPort>,
     definition: ToolDefinition,
-    read_only_fixture: bool,
+    read_only: bool,
 }
 
 impl AnchorToolAdapter {
     /// Build a conservative adapter for one named Anchor tool.
     pub fn new(port: Arc<dyn ToolPort>, name: &str) -> Result<Self, String> {
-        Self::with_mode(port, name, false)
+        let read_only = port.is_read_only(name);
+        Self::with_mode(port, name, read_only)
     }
 
-    /// Build an adapter explicitly marked read-only/replayable for a fixture.
-    pub fn read_only_fixture(port: Arc<dyn ToolPort>, name: &str) -> Result<Self, String> {
-        Self::with_mode(port, name, true)
-    }
-
-    fn with_mode(
-        port: Arc<dyn ToolPort>,
-        name: &str,
-        read_only_fixture: bool,
-    ) -> Result<Self, String> {
+    fn with_mode(port: Arc<dyn ToolPort>, name: &str, read_only: bool) -> Result<Self, String> {
         let definition = port
             .definitions()
             .into_iter()
@@ -170,7 +161,7 @@ impl AnchorToolAdapter {
         Ok(Self {
             port,
             definition,
-            read_only_fixture,
+            read_only,
         })
     }
 
@@ -229,7 +220,7 @@ impl Tool for AnchorToolAdapter {
     }
 
     fn effect(&self) -> ToolEffect {
-        if self.read_only_fixture {
+        if self.read_only {
             ToolEffect::ReadOnly
         } else {
             ToolEffect::Mutating
@@ -237,7 +228,7 @@ impl Tool for AnchorToolAdapter {
     }
 
     fn recovery(&self) -> ToolRecovery {
-        if self.read_only_fixture {
+        if self.read_only {
             ToolRecovery::Replayable
         } else {
             ToolRecovery::Indeterminate
@@ -266,6 +257,7 @@ mod tests {
 
     struct FakePort {
         calls: AtomicUsize,
+        read_only: bool,
     }
 
     impl ToolPort for FakePort {
@@ -275,6 +267,10 @@ mod tests {
                 description: "Return the supplied JSON payload.".into(),
                 parameters: json!({"type":"object","properties":{"value":{"type":"string"}}}),
             }]
+        }
+
+        fn is_read_only(&self, name: &str) -> bool {
+            name == "anchor_echo" && self.read_only
         }
 
         fn call<'a>(
@@ -296,16 +292,21 @@ mod tests {
     }
 
     #[test]
-    fn defaults_are_conservative_and_fixture_can_opt_in_to_read_only() {
+    fn tool_port_read_only_declaration_maps_to_replayable_harness_tool() {
         let port: Arc<dyn ToolPort> = Arc::new(FakePort {
             calls: AtomicUsize::new(0),
+            read_only: false,
         });
         let adapter = AnchorToolAdapter::new(Arc::clone(&port), "anchor_echo").unwrap();
         assert_eq!(adapter.effect(), io_harness::ToolEffect::Mutating);
         assert_eq!(adapter.recovery(), io_harness::ToolRecovery::Indeterminate);
-        let fixture = AnchorToolAdapter::read_only_fixture(port, "anchor_echo").unwrap();
-        assert_eq!(fixture.effect(), io_harness::ToolEffect::ReadOnly);
-        assert_eq!(fixture.recovery(), io_harness::ToolRecovery::Replayable);
+        let read_only_port: Arc<dyn ToolPort> = Arc::new(FakePort {
+            calls: AtomicUsize::new(0),
+            read_only: true,
+        });
+        let read_only = AnchorToolAdapter::new(read_only_port, "anchor_echo").unwrap();
+        assert_eq!(read_only.effect(), io_harness::ToolEffect::ReadOnly);
+        assert_eq!(read_only.recovery(), io_harness::ToolRecovery::Replayable);
     }
 
     #[test]
@@ -320,6 +321,7 @@ mod tests {
     async fn rig_model_io_loop_calls_anchor_once_and_sees_json_result() {
         let port = Arc::new(FakePort {
             calls: AtomicUsize::new(0),
+            read_only: false,
         });
         let adapter = AnchorToolAdapter::new(port.clone(), "anchor_echo").unwrap();
         let model = MockCompletionModel::from_turns([
@@ -360,6 +362,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let port = Arc::new(FakePort {
             calls: AtomicUsize::new(0),
+            read_only: false,
         });
         let contract =
             TaskContract::workspace("resume an Anchor node", temp.path()).with_max_steps(1);

@@ -162,7 +162,7 @@ def main():
             "entry": "producer",
             "agents": {"worker": {
                 "model": os.environ["ANCHOR_MODEL_NAME"], "network": True,
-                "instructions": "Read /in/producer/source.txt using anchor_run. Call fixture_suffix with that exact text. Write only its returned text field to /workspace/report.txt. Read the file back, then finish with summary and route=verify. Do not guess or compute the suffix yourself.",
+                "instructions": "Read /in/producer/source.txt using anchor_run. Search attached MCP tools for fixture_suffix, then call the exact returned tool using anchor_mcp__call_tool with its server_id, tool_name, and arguments={\"text\": <exact source text>}. Write only its returned text field to /workspace/report.txt. Read the file back, then finish with summary and route=verify. Do not guess or compute the suffix yourself.",
             }},
             "ops": {
                 "producer": {"run": command(f"printf %s {shlex.quote(token)} > source.txt; sleep 2")},

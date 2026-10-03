@@ -409,6 +409,14 @@ pub async fn stream_completion<P: StreamingCompletionPort>(
 /// credentials and idempotency policy outside the runtime kernel.
 pub trait ToolPort: Send + Sync {
     fn definitions(&self) -> Vec<ToolDefinition>;
+
+    /// Whether calls to this named tool only observe data and are safe to
+    /// replay after an interrupted io-harness step. The conservative default
+    /// treats every tool as an external, indeterminate effect.
+    fn is_read_only(&self, _name: &str) -> bool {
+        false
+    }
+
     fn call<'a>(
         &'a self,
         name: &'a str,

@@ -142,7 +142,9 @@ def main() -> None:
                 "model": smoke_model,
                 "network": True,
                 "instructions": (
-                    "Read /in/producer/source.txt using anchor_run. Call fixture_suffix with that exact text. "
+                    "Read /in/producer/source.txt using anchor_run. Search attached MCP tools for fixture_suffix, "
+                    "then call the exact returned tool using anchor_mcp__call_tool with its server_id, tool_name, "
+                    "and arguments={\"text\": <exact source text>}. "
                     "Write only the returned structured text field into /workspace/effect.txt as one line. "
                     "For that single write, call anchor_run once with a shell command that appends the line "
                     "and then runs sleep 90, so an operator can inspect the result while the command is active. "

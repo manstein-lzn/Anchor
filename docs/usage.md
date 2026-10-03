@@ -344,6 +344,8 @@ AgentNode 挂载的 MCP 工具默认采用框架原生延迟加载。模型首�
 
 因此，挂载多个 Plugin 不会自动把所有 MCP 参数 schema 放进每一次请求，但搜索会增加必要的模型往返，中文描述和当前模型服务仍需用真实 provider 验证。工具结果一旦执行，仍会进入该 Run 的原生历史；Tool Search 不替代 Graph、Session 或持久化记录。
 
+Rust Host 采用同样的按需目标，但 io-harness 0.86.0 的工具分层 API 只适用于它自带的固定工具族，不能自动收起 Anchor MCP。Rust AgentNode 因此只注册两个轻量 Anchor 工具：`anchor_mcp__search_tools` 返回已授权 MCP 工具的限量分页及所选完整 schema，`anchor_mcp__call_tool` 按 server 与工具名执行并再次检查 allowlist。搜索结果不是权限；MCP 调用仍按未知外部效果保守处理。Rust 当前搜索不把匹配工具 schema 动态加入 provider 的 function 列表，而是由 Agent 阅读搜索结果并经通用调用入口执行。
+
 企业微信助手通过普通 Graph 执行，支持按用户隔离的历史、同图并发和新消息取消旧任务后接续。长连接网关和 Anchor 均可部署在 Linux，客户端无需同机。完整 `.env`、安装、自检、启动和私聊验收步骤见 [企业微信助手接入](wecom-assistant.md)。
 
 默认助手挂载 `wecom`，支持主动 Markdown 通知、附件提取/原生图片输入、持续正文及图片回复；其他业务 Plugin 可按需添加。机器人 Bot ID/Secret 用于长连接及上述能力，主动通知目标由可选 `ANCHOR_WECOM_SEND_USERS` 限制（默认继承入口名单）；自建应用的 Corp ID/Agent ID/Secret 仅用于另外的可选 MCP 消息与成员 API。企业微信审批接口尚未实现。真实模型/Graph/本地 Plugin 验收与真实企业微信公网联动分开记录。

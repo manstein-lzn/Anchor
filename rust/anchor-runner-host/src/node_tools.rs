@@ -80,6 +80,10 @@ impl ToolPort for NodeTools {
         definitions
     }
 
+    fn is_read_only(&self, name: &str) -> bool {
+        name != RUN_TOOL_NAME && self.inner.is_read_only(name)
+    }
+
     fn call<'a>(
         &'a self,
         name: &'a str,
