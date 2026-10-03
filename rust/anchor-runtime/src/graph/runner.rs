@@ -1,4 +1,5 @@
 use super::*;
+use sha2::Digest;
 
 pub struct GraphRunner<'a, S, A, N, C> {
     pub(super) store: &'a S,
@@ -41,9 +42,21 @@ impl<'a, S: RunStore, A: ArtifactPort, N: NodeExecutionPort, C: RunControl>
                 .insert(cursor.node_id.clone(), cursor.key.invocation);
             *record.passes.entry(cursor.node_id.clone()).or_default() += 1;
         }
-        if matches!(record.status, RunStatus::Failed | RunStatus::Completed) {
+        if matches!(
+            record.status,
+            RunStatus::Failed | RunStatus::Completed | RunStatus::Aborted
+        ) {
             self.store.save(&record)?;
             return Ok(record);
+        }
+        if record.status == RunStatus::WaitingRecovery {
+            // Recovery is an explicit operator action. Re-entering GraphRunner
+            // directly must not turn a waiting record into ordinary resume.
+            self.store.save(&record)?;
+            return Ok(record);
+        }
+        if let Err(reason) = self.bind_plugin_manifests(&mut record) {
+            return self.fail(record, reason);
         }
         record.status = RunStatus::Running;
         self.store.save(&record)?;
@@ -252,11 +265,21 @@ impl<'a, S: RunStore, A: ArtifactPort, N: NodeExecutionPort, C: RunControl>
                 .and_then(|node| node.op.as_ref())
                 .and_then(|op| record.snapshot.ops.get(op))
                 .is_some_and(|operation| operation.get("fanout").is_some());
+            let call_spec = record
+                .snapshot
+                .nodes
+                .iter()
+                .find(|node| node.id == cursor.node_id)
+                .and_then(|node| node.op.as_ref())
+                .and_then(|name| record.snapshot.ops.get(name))
+                .and_then(|operation| operation.get("call"))
+                .cloned();
+            let is_call = call_spec.is_some();
             let is_join_control = record
                 .parallel
                 .as_ref()
                 .is_some_and(|activation| activation.join_node == cursor.node_id);
-            let fact = if is_fanout || is_join_control {
+            let fact = if is_fanout || is_join_control || is_call {
                 CompletionFact::NotStarted
             } else {
                 self.nodes.completion_fact(&cursor.key).await?
@@ -273,10 +296,214 @@ impl<'a, S: RunStore, A: ArtifactPort, N: NodeExecutionPort, C: RunControl>
                         format!("uncertain node result for {}: {reason}", cursor.node_id),
                     );
                 }
-                CompletionFact::NotStarted => None,
+                CompletionFact::NotStarted | CompletionFact::Resumable => None,
             };
             let completion = if let Some(c) = completion {
                 c
+            } else if let Some(spec) = call_spec {
+                let target_graph = spec
+                    .get("graph")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        GraphError::InvalidSnapshot("op.call.graph must be a string".into())
+                    })?
+                    .to_owned();
+                let mode = spec.get("mode").and_then(Value::as_str).unwrap_or("wait");
+                let spec_bytes = serde_json::to_vec(&spec).map_err(GraphError::SnapshotDecode)?;
+                let identity = CallIdentity {
+                    parent_run_id: record.run_id.clone(),
+                    parent_graph_digest: record.graph_digest.clone(),
+                    node_id: cursor.node_id.clone(),
+                    invocation: cursor.key.invocation,
+                    call_spec_digest: format!("{:x}", sha2::Sha256::digest(spec_bytes)),
+                };
+                let identity_key = identity.durable_key();
+                // Older Run records may contain a `Deleted` marker written by the
+                // previous cascade-delete behavior. Preserve their resume behavior;
+                // new deletions reject callers and never create this marker.
+                if let Some(existing) = record
+                    .graph_calls
+                    .get(&identity_key)
+                    .filter(|call| call.status == GraphCallStatus::Deleted)
+                {
+                    let output = existing.output.clone().unwrap_or_else(|| {
+                        serde_json::json!({
+                            "graph": target_graph,
+                            "run_id": existing.child_run_id,
+                            "mode": existing.mode,
+                            "status": "deleted",
+                        })
+                    });
+                    NodeCompletion {
+                        submission: output.to_string(),
+                        route: None,
+                        model_requests: 0,
+                        output,
+                    }
+                } else {
+                    let port = self.nodes.graph_call_port().ok_or_else(|| {
+                        GraphError::Unsupported("op.call requires a GraphCallPort".into())
+                    })?;
+                    let call_outcome = port
+                        .call(
+                            &identity,
+                            &spec,
+                            &cursor.prepared_input,
+                            self.control.cancellation(),
+                        )
+                        .await?;
+                    if mode == "wait"
+                        && self.control.stop_requested()
+                        && let GraphCallOutcome::Waiting { child_run_id } = &call_outcome
+                    {
+                        record.graph_calls.insert(
+                            identity_key,
+                            GraphCallRecord {
+                                identity,
+                                graph: target_graph,
+                                child_run_id: Some(child_run_id.clone()),
+                                mode: "wait".into(),
+                                status: GraphCallStatus::Waiting,
+                                output: None,
+                                error: None,
+                            },
+                        );
+                        record.status = RunStatus::Stopped;
+                        self.store.save(&record)?;
+                        return Ok(record);
+                    }
+                    match call_outcome {
+                        GraphCallOutcome::Waiting { child_run_id } if mode == "wait" => {
+                            record.graph_calls.insert(
+                                identity_key,
+                                GraphCallRecord {
+                                    identity,
+                                    graph: target_graph,
+                                    child_run_id: Some(child_run_id),
+                                    mode: "wait".into(),
+                                    status: GraphCallStatus::Waiting,
+                                    output: None,
+                                    error: None,
+                                },
+                            );
+                            record.status = RunStatus::WaitingCall;
+                            self.store.save(&record)?;
+                            return Ok(record);
+                        }
+                        GraphCallOutcome::Detached { child_run_id } if mode == "detach" => {
+                            let output = serde_json::json!({"graph":target_graph,"run_id":child_run_id,
+                            "mode":"detach","status":"accepted"});
+                            record.graph_calls.insert(
+                                identity_key,
+                                GraphCallRecord {
+                                    identity,
+                                    graph: target_graph,
+                                    child_run_id: Some(child_run_id),
+                                    mode: "detach".into(),
+                                    status: GraphCallStatus::Detached,
+                                    output: Some(output.clone()),
+                                    error: None,
+                                },
+                            );
+                            NodeCompletion {
+                                submission: output.to_string(),
+                                route: None,
+                                model_requests: 0,
+                                output,
+                            }
+                        }
+                        GraphCallOutcome::Completed {
+                            child_run_id,
+                            output,
+                        } if mode == "wait" => {
+                            record.graph_calls.insert(
+                                identity_key,
+                                GraphCallRecord {
+                                    identity,
+                                    graph: target_graph,
+                                    child_run_id: Some(child_run_id),
+                                    mode: "wait".into(),
+                                    status: GraphCallStatus::Completed,
+                                    output: Some(output.clone()),
+                                    error: None,
+                                },
+                            );
+                            NodeCompletion {
+                                submission: output.to_string(),
+                                route: None,
+                                model_requests: 0,
+                                output,
+                            }
+                        }
+                        GraphCallOutcome::Completed { child_run_id, .. } if mode == "detach" => {
+                            let output = serde_json::json!({"graph":target_graph,"run_id":child_run_id,
+                            "mode":"detach","status":"accepted"});
+                            record.graph_calls.insert(
+                                identity_key,
+                                GraphCallRecord {
+                                    identity,
+                                    graph: target_graph,
+                                    child_run_id: Some(child_run_id),
+                                    mode: "detach".into(),
+                                    status: GraphCallStatus::Detached,
+                                    output: Some(output.clone()),
+                                    error: None,
+                                },
+                            );
+                            NodeCompletion {
+                                submission: output.to_string(),
+                                route: None,
+                                model_requests: 0,
+                                output,
+                            }
+                        }
+                        GraphCallOutcome::Failed {
+                            child_run_id,
+                            reason,
+                        } => {
+                            record.graph_calls.insert(
+                                identity_key,
+                                GraphCallRecord {
+                                    identity,
+                                    graph: target_graph,
+                                    child_run_id,
+                                    mode: mode.into(),
+                                    status: GraphCallStatus::Failed,
+                                    output: None,
+                                    error: Some(reason.clone()),
+                                },
+                            );
+                            return self
+                                .fail_known_node(record, format!("Graph call failed: {reason}"));
+                        }
+                        GraphCallOutcome::Uncertain {
+                            child_run_id,
+                            reason,
+                        } => {
+                            record.graph_calls.insert(
+                                identity_key,
+                                GraphCallRecord {
+                                    identity,
+                                    graph: target_graph,
+                                    child_run_id,
+                                    mode: mode.into(),
+                                    status: GraphCallStatus::Uncertain,
+                                    output: None,
+                                    error: Some(reason.clone()),
+                                },
+                            );
+                            return self.fail(
+                                record,
+                                format!("Graph call outcome uncertain; refusing replay: {reason}"),
+                            );
+                        }
+                        outcome => {
+                            return Err(GraphError::Unsupported(format!(
+                                "GraphCallPort returned incompatible outcome: {outcome:?}"
+                            )));
+                        }
+                    }
+                }
             } else if is_fanout {
                 let region = record
                     .snapshot
@@ -425,6 +652,17 @@ impl<'a, S: RunStore, A: ArtifactPort, N: NodeExecutionPort, C: RunControl>
                     routes,
                     input: cursor.prepared_input.clone(),
                     input_commits: cursor.input_commits.clone(),
+                    plugins: def
+                        .plugins
+                        .iter()
+                        .map(|id| {
+                            record.plugin_bindings.get(id).cloned().ok_or_else(|| {
+                                GraphError::CorruptRun(format!(
+                                    "Run has no frozen Plugin binding for `{id}`"
+                                ))
+                            })
+                        })
+                        .collect::<Result<Vec<_>, _>>()?,
                     max_provider_requests,
                     wall_time_limit_seconds,
                     network,
@@ -433,14 +671,38 @@ impl<'a, S: RunStore, A: ArtifactPort, N: NodeExecutionPort, C: RunControl>
                     cancellation: self.control.cancellation(),
                 };
                 match self.nodes.execute(request).await? {
-                    NodeExecutionOutcome::Completed(c) => c,
+                    NodeExecutionOutcome::Completed(c) => {
+                        record.recovery.retain(|pending| pending.key != cursor.key);
+                        c
+                    }
+                    NodeExecutionOutcome::WaitingRecovery { attempts } => {
+                        record.recovery.retain(|pending| pending.key != cursor.key);
+                        record.recovery.extend(attempts.into_iter().map(|attempt| {
+                            PendingRecovery {
+                                key: cursor.key.clone(),
+                                attempt,
+                            }
+                        }));
+                        record.status = RunStatus::WaitingRecovery;
+                        self.store.save(&record)?;
+                        return Ok(record);
+                    }
                     NodeExecutionOutcome::BudgetExhausted { .. } => {
+                        record.recovery.retain(|pending| pending.key != cursor.key);
                         record.status = RunStatus::BudgetStopped;
                         self.store.save(&record)?;
                         return Ok(record);
                     }
                     NodeExecutionOutcome::Cancelled => {
+                        record.recovery.retain(|pending| pending.key != cursor.key);
                         record.status = RunStatus::Stopped;
+                        self.store.save(&record)?;
+                        return Ok(record);
+                    }
+                    NodeExecutionOutcome::Aborted => {
+                        record.recovery.retain(|pending| pending.key != cursor.key);
+                        record.status = RunStatus::Aborted;
+                        record.error = Some(format!("{} aborted by operator", cursor.node_id));
                         self.store.save(&record)?;
                         return Ok(record);
                     }
@@ -470,7 +732,22 @@ impl<'a, S: RunStore, A: ArtifactPort, N: NodeExecutionPort, C: RunControl>
                     }
                 }
             };
-            let commit = self.artifacts.freeze(&cursor.key, &completion).await?;
+            let context = ArtifactFreezeContext {
+                kind: if is_fanout {
+                    ArtifactKind::Fanout
+                } else if is_join_control {
+                    ArtifactKind::Join
+                } else if is_call {
+                    ArtifactKind::GraphCall
+                } else {
+                    ArtifactKind::Node
+                },
+                input_commits: cursor.input_commits.clone(),
+            };
+            let commit = self
+                .artifacts
+                .freeze_with_context(&cursor.key, &completion, &context)
+                .await?;
             record.sequence += 1;
             let result = RunResult {
                 node_id: cursor.node_id.clone(),
@@ -580,7 +857,14 @@ impl<'a, S: RunStore, A: ArtifactPort, N: NodeExecutionPort, C: RunControl>
             let op = node.op.as_ref().and_then(|name| snapshot.ops.get(name));
             let is_fanout = op.is_some_and(|op| op.get("fanout").is_some());
             let is_join = op.is_some_and(|op| op.get("join").is_some());
-            if node.op.is_some() && !is_fanout && !is_join && !caps.op_run {
+            let is_call = op.is_some_and(|op| op.get("call").is_some());
+            if is_call && self.nodes.graph_call_port().is_none() {
+                return Err(GraphError::Unsupported(format!(
+                    "op.call node `{}` requires a GraphCallPort",
+                    node.id
+                )));
+            }
+            if node.op.is_some() && !is_fanout && !is_join && !is_call && !caps.op_run {
                 return Err(GraphError::Unsupported(format!(
                     "NodeExecutionPort does not support Op.run node `{}`",
                     node.id
@@ -595,6 +879,65 @@ impl<'a, S: RunStore, A: ArtifactPort, N: NodeExecutionPort, C: RunControl>
                     node.id
                 )));
             }
+        }
+        Ok(())
+    }
+
+    fn bind_plugin_manifests(&self, record: &mut GraphRunRecord) -> Result<(), String> {
+        let ids = record
+            .snapshot
+            .nodes
+            .iter()
+            .flat_map(|node| node.plugins.iter().cloned())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        if ids.is_empty() {
+            if !record.plugin_bindings.is_empty() {
+                return Err("Run contains Plugin bindings not referenced by its Graph".into());
+            }
+            if !record.plugin_bindings_initialized {
+                record.plugin_bindings_initialized = true;
+            }
+            return Ok(());
+        }
+        let resolved = self
+            .nodes
+            .resolve_plugins(&ids)
+            .map_err(|error| format!("Plugin manifest resolution failed: {error}"))?;
+        let valid = resolved.len() == ids.len()
+            && resolved
+                .iter()
+                .zip(&ids)
+                .all(|(binding, id)| binding.id == *id && !binding.digest.is_empty());
+        if !valid {
+            return Err(
+                "Plugin resolver returned incomplete, reordered, or unhashed bindings".into(),
+            );
+        }
+        let bindings = resolved
+            .into_iter()
+            .map(|binding| (binding.id.clone(), binding))
+            .collect::<BTreeMap<_, _>>();
+        if !record.plugin_bindings_initialized {
+            if record.status != RunStatus::Ready
+                || !record.plugin_bindings.is_empty()
+                || record.cursor.is_some()
+                || record.sequence > 0
+                || !record.results.is_empty()
+            {
+                return Err(
+                    "cannot establish Plugin resource identity for an in-progress legacy Run"
+                        .into(),
+                );
+            }
+            record.plugin_bindings = bindings;
+            record.plugin_bindings_initialized = true;
+            self.store
+                .save(record)
+                .map_err(|error| format!("failed to persist Plugin manifest bindings: {error}"))?;
+        } else if record.plugin_bindings != bindings {
+            return Err("Plugin manifest changed since this Graph Run was admitted".into());
         }
         Ok(())
     }

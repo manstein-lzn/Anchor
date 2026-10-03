@@ -829,7 +829,7 @@ details.call pre {
 .timeline-entry-label small { color: var(--muted); font-size: 11px; }
 .timeline-duration { position: absolute; inset: 0; border-radius: inherit; background: var(--graph-color, #8aa597); box-shadow: inset 0 -2px #ffffff55; }
 .timeline-entry.running .timeline-duration { box-shadow: inset 0 0 0 1px #ffffff88; }
-.timeline-entry:is(.failed, .interrupted, .uncertain) .timeline-duration { box-shadow: inset 0 -2px #c45c56; }
+.timeline-entry:is(.failed, .interrupted, .waiting_resume, .uncertain) .timeline-duration { box-shadow: inset 0 -2px #c45c56; }
 .timeline-point { position: absolute; inset: 0; border: 2px solid var(--graph-color, #668499); border-radius: inherit; background: #fff; }
 .timeline-entry:is(.missed_busy, .missed_downtime) .timeline-point,
 .timeline-legend i.missed_busy { background: linear-gradient(45deg, transparent 40%, var(--graph-color, #718079) 40% 60%, transparent 60%); }

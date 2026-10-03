@@ -10,8 +10,8 @@ const addDays = (date: Date, amount: number) => { const result = new Date(date);
 const clockText = (value: string | number) => new Date(value).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
 const dateText = (value: string | number) => new Date(value).toLocaleString('zh-CN', { month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 const statusText = (status: string) => ({
-  running: '执行中', finished: '已完成', completed: '已完成', failed: '失败', stopped: '已停止',
-  interrupted: '已中断', paused: '已暂停', uncertain: '待核查', planned: '已计划',
+  running: '执行中', finished: '已完成', completed: '已完成', failed: '失败', aborted: '已终止', stopped: '已停止',
+  interrupted: '已中断', waiting_resume: '等待接续', paused: '已暂停', uncertain: '待核查', planned: '已计划',
   missed_busy: '忙碌错过', missed_downtime: '停机错过',
 }[status] ?? status);
 const sourceText = (value: string) => ({ manual: '手动', schedule: '定时', webhook: 'Webhook', graph_call: '工作流调用', channel: '通道' }[value] ?? value);
@@ -21,8 +21,9 @@ const duration = (ms: number) => {
   const minutes = Math.floor(seconds / 60);
   return minutes < 60 ? `${minutes} 分钟` : `${Math.floor(minutes / 60)} 小时 ${minutes % 60} 分`;
 };
-const runStatus = (run: OurRun) => run.running ? 'running' : run.status;
-const needsAttention = (status: string) => ['failed', 'interrupted', 'uncertain'].includes(status) || status.startsWith('missed_');
+const hasRunEnd = (run: OurRun) => Boolean(run.updated?.trim()) && Number.isFinite(Date.parse(run.updated));
+const runStatus = (run: OurRun) => run.running ? 'running' : run.status === 'running' ? 'waiting_resume' : run.status;
+const needsAttention = (status: string) => ['failed', 'aborted', 'interrupted', 'waiting_resume', 'uncertain'].includes(status) || status.startsWith('missed_');
 const ruleText = (rule: Record<string, unknown>) => {
   if (rule.type === 'once') return `一次性 · ${dateText(String(rule.at))}`;
   if (rule.type === 'interval') return `每 ${rule.seconds} 秒`;
@@ -48,9 +49,9 @@ const placeEntries = (items: Entry[], date: Date): PlacedEntry[] => {
   });
 };
 
-export function Timeline({ data, graphs, graphColors: sharedGraphColors, page, onPage, onSelect, onRefresh, problem = '' }: {
+export function Timeline({ data, graphs, graphColors: sharedGraphColors, page, onPage, onSelect, onOpenRun, onRefresh, problem = '' }: {
   data: TimelineData | null; graphs: string[]; graphColors?: Record<string, string>; page: number; onPage: (page: number) => void;
-  onSelect: (run: OurRun) => void; onRefresh: () => void; problem?: string;
+  onSelect: (run: OurRun) => void; onOpenRun?: (run: string, graph: string) => void; onRefresh: () => void; problem?: string;
 }) {
   const [graphFilter, setGraphFilter] = useState('');
   const [filter, setFilter] = useState<Filter>('all');
@@ -73,6 +74,7 @@ export function Timeline({ data, graphs, graphColors: sharedGraphColors, page, o
   const [error, setError] = useState('');
   const [pending, setPending] = useState(false);
   const [now, setNow] = useState(Date.now());
+  const scheduling = data?.capabilities?.scheduling !== false;
   const graphColors = useMemo(() => sharedGraphColors ?? assignGraphColors([
     ...graphs,
     ...(data?.runs ?? []).map(run => run.graph),
@@ -118,7 +120,9 @@ export function Timeline({ data, graphs, graphColors: sharedGraphColors, page, o
   const plans = (data?.scheduled ?? []).filter(plan => !plan.run && (!graphFilter || plan.graph === graphFilter));
   const entries: Entry[] = [
     ...runs.map(run => ({ id: run.run, graph: run.graph, start: +new Date(run.started),
-      end: run.running ? now : +new Date(run.updated), status: runStatus(run),
+      // Rust-native Run currently has no durable finish timestamp. Keep it visible at its known
+      // start time without inventing a duration; Python-backed Runs retain their measured span.
+      end: run.running ? now : hasRunEnd(run) ? +new Date(run.updated) : +new Date(run.started), status: runStatus(run),
       source: run.trigger?.source ?? 'manual', run })),
     ...plans.map(plan => ({ id: `${plan.schedule}-${plan.scheduled_at}`, graph: plan.graph,
       start: +new Date(plan.scheduled_at), end: +new Date(plan.scheduled_at),
@@ -187,8 +191,8 @@ export function Timeline({ data, graphs, graphColors: sharedGraphColors, page, o
   return <main className="timeline-board">
     <header className="timeline-header">
       <div className="timeline-title"><h2>运行看板</h2><p>运行进度与定时计划</p></div>
-      <div className="timeline-actions"><button onClick={() => { setError(''); setScheduleOpen(true); }}><CalendarDays size={16} />管理计划 <span className="count">{data?.schedules.length ?? 0}</span></button>
-        <button className="primary" disabled={!graphs.length} onClick={() => { setError(''); setScheduleOpen(true); }}><Plus size={16} />添加计划</button></div>
+      <div className="timeline-actions"><button disabled={!scheduling} title={!scheduling ? '定时计划尚未由此运行时托管' : undefined} onClick={() => { setError(''); setScheduleOpen(true); }}><CalendarDays size={16} />管理计划 <span className="count">{data?.schedules.length ?? 0}</span></button>
+        <button className="primary" disabled={!graphs.length || !scheduling} title={!scheduling ? '定时计划尚未由此运行时托管' : undefined} onClick={() => { setError(''); setScheduleOpen(true); }}><Plus size={16} />添加计划</button></div>
     </header>
     <section className="timeline-summary" aria-label="运行概览">
       <button className="summary-card summary-running" onClick={() => { reset(); setFilter('running'); onPage(0); }}><span><Activity size={15} />正在运行</span><strong>{data ? running.length : '—'}<small> 个</small></strong><small>{running[0]?.graph ?? '当前没有执行中的工作流'}</small></button>
@@ -203,7 +207,7 @@ export function Timeline({ data, graphs, graphColors: sharedGraphColors, page, o
           <button disabled={!page} aria-label="查看更新记录" onClick={() => onPage(page - 1)}><ChevronRight size={16} /></button>
           <strong>{day(first)} — {day(rangeEnd)}</strong><button onClick={() => { onPage(0); focusToday(); }}>今天</button>
           <button onClick={() => { requestedFocus.current = 'latest'; onPage(0); if (page === 0) requestAnimationFrame(focusLatest); }}>最近活动</button></div>
-        <span className="timeline-range-note">历史每页 30 天 · 未来 7 天</span>
+        <span className="timeline-range-note">{scheduling ? '历史每页 30 天 · 未来 7 天' : '运行历史 · 定时计划由其他宿主提供'}</span>
       </div>
       <div className="timeline-controls">
         <div className="timeline-filters">
@@ -243,6 +247,7 @@ export function Timeline({ data, graphs, graphColors: sharedGraphColors, page, o
                   const left = (entry.start - +row.date) / dayLength * 100;
                   const width = (entry.end - entry.start) / dayLength * 100;
                   return <button key={entry.id} className={`timeline-entry ${entry.run ? 'timeline-run' : 'timeline-plan'} ${entry.status}`}
+                    data-run-id={entry.run?.run}
                     style={{ top: entry.lane * 57 + (entry.run ? 37 : 36), left: `${left}%`, width: entry.run ? `${width}%` : undefined, '--graph-color': graphColors[entry.graph] } as CSSProperties}
                     aria-label={`${entry.graph}，${statusText(entry.status)}，${clockText(entry.start)}`}
                     aria-describedby={hint?.anchor.dataset.hintKey === `${day(row.date)}:${entry.id}` ? hintId : undefined}
@@ -267,9 +272,9 @@ export function Timeline({ data, graphs, graphColors: sharedGraphColors, page, o
     <div ref={tooltip} id={hintId} popover="manual" role="tooltip" className="timeline-entry-label"
       style={{ '--graph-color': hint ? graphColors[hint.entry.graph] : undefined } as CSSProperties}
       onMouseLeave={event => { if (!hint?.anchor.contains(event.relatedTarget as Node | null)) setHint(null); }}>
-      {hint && <><strong>{hint.entry.graph}</strong><small>{sourceText(hint.entry.source)} · {clockText(hint.entry.start)} · {statusText(hint.entry.status)}{hint.entry.run ? ` · ${duration(hint.entry.end - hint.entry.start)}` : ''}</small></>}
+      {hint && <><strong>{hint.entry.graph}</strong><small>{sourceText(hint.entry.source)} · {clockText(hint.entry.start)} · {statusText(hint.entry.status)}{hint.entry.run && (hint.entry.run.running || hasRunEnd(hint.entry.run)) ? ` · ${duration(hint.entry.end - hint.entry.start)}` : ''}</small></>}
     </div>
-    {selected && <RunPreview key={selected.id} entry={selected} data={data} onClose={() => setSelected(null)} onOpen={onSelect} />}
+    {selected && <RunPreview key={selected.id} entry={selected} data={data} onClose={() => setSelected(null)} onOpen={onSelect} onOpenRun={onOpenRun} />}
     {scheduleOpen && <Modal title="定时计划" close={() => { if (!pending) setScheduleOpen(false); }} className="timeline-schedule-dialog">
       <p className="timeline-muted">按本机时间执行。停机或 Graph 忙碌时跳过，不补跑。</p>
       <form onSubmit={event => { event.preventDefault(); void create(); }}>
@@ -290,7 +295,8 @@ export function Timeline({ data, graphs, graphColors: sharedGraphColors, page, o
   </main>;
 }
 
-function RunPreview({ entry, data, onClose, onOpen }: { entry: Entry; data: TimelineData | null; onClose: () => void; onOpen: (run: OurRun) => void }) {
+function RunPreview({ entry, data, onClose, onOpen, onOpenRun }: { entry: Entry; data: TimelineData | null; onClose: () => void;
+  onOpen: (run: OurRun) => void; onOpenRun?: (run: string, graph: string) => void }) {
   const [detail, setDetail] = useState<OurRunDetail | null>(null);
   const [error, setError] = useState('');
   const [attempt, setAttempt] = useState(0);
@@ -310,11 +316,23 @@ function RunPreview({ entry, data, onClose, onOpen }: { entry: Entry; data: Time
     {run?.objective && <p className="preview-objective">{run.objective}</p>}
     <dl className="preview-facts">
       <dt>触发方式</dt><dd>{sourceText(entry.source)}</dd>
-      {run?.trigger?.source === 'graph_call' && <><dt>调用来源</dt><dd>{run.trigger.graph} / {run.trigger.node} · 第 {run.trigger.invocation} 轮<br />{run.trigger.run}</dd><dt>调用链</dt><dd>{run.trigger.root_run ?? run.trigger.run}</dd></>}
+      {run?.trigger?.source === 'graph_call' && <>
+        <dt>调用方式</dt><dd>{run.trigger.mode ? (run.trigger.mode === 'wait' ? '等待目标完成' : '启动后独立运行') : '工作流调用'}</dd>
+        <dt>调用来源</dt><dd>{run.trigger.graph} / {run.trigger.node} · 第 {run.trigger.invocation} 轮<br />{run.trigger.run}</dd>
+        <dt>调用链</dt><dd>{run.trigger.root_run ?? run.trigger.run}</dd>
+      </>}
       <dt>{run ? '开始时间' : '计划时间'}</dt><dd>{dateText(entry.start)}</dd>
-      {run && <><dt>{run.running ? '已运行' : '运行时长'}</dt><dd>{duration((run.running ? Date.now() : +new Date(run.updated)) - entry.start)}</dd><dt>结束时间</dt><dd>{run.running ? '仍在执行' : dateText(run.updated)}</dd><dt>已执行步骤</dt><dd>{run.executed.length}</dd></>}
+      {run && <>
+        {run.running ? <><dt>已运行</dt><dd>{duration(Date.now() - entry.start)}</dd><dt>结束时间</dt><dd>仍在执行</dd></>
+          : run.status === 'running' ? <><dt>运行状态</dt><dd>宿主重启后等待接续</dd></>
+            : hasRunEnd(run) ? <><dt>运行时长</dt><dd>{duration(+new Date(run.updated) - entry.start)}</dd><dt>结束时间</dt><dd>{dateText(run.updated)}</dd></>
+              : <><dt>运行时长</dt><dd>暂无记录</dd><dt>结束时间</dt><dd>暂无记录</dd></>}
+        <dt>已执行步骤</dt><dd>{run.executed.length}</dd>
+      </>}
       {schedule && <><dt>定时规则</dt><dd>{ruleText(schedule.rule)}</dd></>}
     </dl>
+    {run?.trigger?.source === 'graph_call' && run.trigger.run && run.trigger.graph && <button className="full-button"
+      onClick={() => onOpenRun?.(run.trigger!.run!, run.trigger!.graph!)}>查看来源运行 ↖</button>}
     {entry.plan && <p className="preview-note">{entry.status === 'planned' ? '这是计划开始的时点，实际时长将在执行后显示。' : entry.status === 'missed_busy' ? 'Graph 在该时点忙碌，本次未执行，也不会补跑。' : '该计划未执行，也不会补跑；错过原因以服务端记录为准。'}</p>}
     {detail?.state.error && <p className="timeline-error" role="alert">{detail.state.error}</p>}
     <section className="preview-input"><h3>运行输入</h3>{error ? <p role="alert">{error} <button onClick={() => setAttempt(value => value + 1)}>重试</button></p> : run && !detail ? <p>正在读取…</p> : <pre>{JSON.stringify(run ? detail?.state.input ?? {} : schedule?.input ?? {}, null, 2)}</pre>}</section>

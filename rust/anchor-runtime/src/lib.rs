@@ -25,7 +25,9 @@ use rig_agent::{
         message::{ToolResultContent, UserContent},
         operation::Completion,
     },
-    run::{AgentRun, AgentRunStep, ModelTurn, RunSpec, prepare::prepare_request},
+    run::{
+        AgentRun, AgentRunStep, ModelTurn, RunSpec, output::OutputMode, prepare::prepare_request,
+    },
 };
 use serde::{Deserialize, Serialize};
 
@@ -120,7 +122,31 @@ impl AgentCheckpoint {
         invocation: u32,
         request: &NodeRequest,
     ) -> Self {
-        Self::start(node_id, invocation, request.prompt(), request.max_turns)
+        let mut checkpoint = Self::start(node_id, invocation, request.prompt(), request.max_turns);
+        let mut required = vec!["summary"];
+        let route = if request.routes.len() > 1 {
+            required.push("route");
+            serde_json::json!({"type": "string", "enum": request.routes})
+        } else if request.routes.is_empty() {
+            serde_json::json!({"type": "null"})
+        } else {
+            serde_json::json!({"anyOf": [
+                {"type": "string", "enum": request.routes},
+                {"type": "null"}
+            ]})
+        };
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {"summary": {"type": "string"}, "route": route},
+            "required": required,
+            "additionalProperties": false
+        });
+        checkpoint.run_spec.output_schema = Some(schema.clone());
+        checkpoint.run_spec.output_mode = OutputMode::Tool;
+        checkpoint.run = checkpoint
+            .run
+            .with_output_validation(Some(schema), RunSpec::DEFAULT_OUTPUT_RETRIES);
+        checkpoint
     }
 
     pub fn encode(&self) -> Result<Vec<u8>, serde_json::Error> {
@@ -248,6 +274,12 @@ impl RigCompletionPort {
     pub fn with_capabilities(mut self, capabilities: ProviderCapabilities) -> Self {
         self.capabilities = capabilities;
         self
+    }
+
+    /// Return the configured provider transport for a Rust-native runtime
+    /// adapter that owns the Agent loop and persistence contract.
+    pub fn dyn_model(&self) -> DynModel<Completion> {
+        self.model.clone()
     }
 
     /// Construct an OpenAI-compatible client from host-supplied credentials.
@@ -612,18 +644,21 @@ impl NodeExecutor {
                     history,
                     turn,
                 } => {
-                    store.save(store_key, checkpoint)?;
                     let definitions = tools.definitions();
-                    checkpoint.run.advertise_tools(turn, definitions.clone());
                     let prepared = prepare_request(
                         &checkpoint.run_spec,
                         &completion.capabilities(),
                         &history,
                         definitions,
-                        None,
+                        checkpoint.run.output_tool_name(),
                         None,
                     )
                     .map_err(|error| NodeError::InvalidResult(error.to_string()))?;
+                    if let Some(name) = &prepared.output_tool_name {
+                        let _ = checkpoint.run.commit_output_tool_name(name.clone());
+                    }
+                    checkpoint.run.advertise_tools(turn, prepared.tools.clone());
+                    store.save(store_key, checkpoint)?;
                     let request = prepared.clone().apply(CompletionRequest::new(prompt));
                     let response = if let Some(timeout) = context.policy.model_timeout {
                         tokio::time::timeout(timeout, completion.complete(request))

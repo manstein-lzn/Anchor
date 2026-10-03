@@ -6,9 +6,13 @@
 
 本文不是把未来功能写成已完成的功能。每个章节都明确当前状态和目标状态；实现开始前先更新这里的契约，完成后再更新当前架构和验收记录。
 
-2026-09-26 收敛决定：用户要的是保存 Agent 工作记录、重开原会话后继续工作。恢复以持续写入的工作 JSONL 为依据，由 Agent 查询现场、检查文件和运行测试后续做；不建设复杂审批平台、跨存储事务或未知结果人工处置平台。开发顺序与验收状态只维护在 [Pilot 开发计划](pilot-development-plan.md)。
+2026-09-26 收敛决定：用户要的是保存 Agent 工作记录、重开原会话后继续工作。一般会话恢复以持续写入的工作 JSONL 为依据，由 Agent 查询现场、检查文件和运行测试后续做；不建设通用审批平台或跨存储事务。2026-10-03 用户进一步收敛 Rust io-harness 的未决副作用路径：保留原 Graph Run 与 invocation，普通“继续”将未决工具事实作为恢复上下文交给 Agent；不自动重放，也不把 Retry、Completed、Abort 暴露为用户流程。外部副作用仍不承诺 exactly-once。开发顺序与验收状态只维护在 [Pilot 开发计划](pilot-development-plan.md)。
 
-进一步约定：先找 PydanticAI / Harness 的现有接口，接入即可，不预先设计自有记录和恢复框架。框架原生 FileStepStore 使用 JSONL 事件加消息快照等文件，按原生格式保留；不为单文件形式重写存储。记忆与计划不列为 Anchor 自研模块，研究目标与证据验收属于研究 Graph / Plugin 的业务。
+进一步约定：现有 Python/Pilot 路径优先复用 PydanticAI/Harness 公开接口。Rust-native AgentNode 统一由 io-harness 承担 Agent loop、上下文、持久化、compaction 和工具效果恢复；Rig 如保留，只作为 Provider transport adapter。Anchor 不自研第二套通用 Harness，继续拥有 Graph/Run/Artifact/Sandbox/Plugin 外层事实。记忆和计划不列为 Anchor 自研模块，研究目标与证据验收属于研究 Graph/Plugin 业务。
+
+2026-10-03 Rust-native 方向决策更新：用户不要求 Rust 完全兼容旧 Python 平台或 Harness，并明确开发阶段所有 AgentNode 直接使用 io-harness。Rust Runtime 以 io-harness 作为 Agent loop、上下文、单节点持久化和恢复基础；Rig 只负责 Provider transport，不参与 Agent loop。Anchor 定义 Graph Run、权限、Sandbox、Plugin、Artifact 和外层恢复事实，不复制 Harness 能力。现有 Python/PydanticAI/Harness 保留为独立 legacy 宿主，不能反向决定 Rust-native 产品核心。
+
+这里的兼容目标是**产品形态兼容**，不是实现兼容：用户仍然通过 Graph、AgentNode、OpNode、Plugin、Run、Session 和独立 Graph 包完成同类工作，能够观察执行、控制运行、读取产物并从中断处继续；Rust 不需要读取 Python 的 `run.json`、复刻 Harness 的内部记录、保留 Python RPC，或维持相同的内部字段和调用顺序。用户可见行为发生变化时，必须在 Rust-native 产品契约和验收中明确说明。
 
 ## 产品方向
 
@@ -56,7 +60,7 @@ Session（用户与 Anchor Pilot 的长期关系）
 | HTTP、CLI、企业微信等入口协议、身份和请求格式 | 入口适配器 | Graph 调度、节点执行、持久化内部细节 |
 | Run 接纳/控制、Session 与 Run 的协调、入口共用的应用用例 | 应用协调服务 | 模型循环、Graph 的路由语义、渠道专属业务流程 |
 | Graph 定义解析、静态校验、单 Run 的路由/反馈/并行调度 | Graph 编译与 Runner | HTTP、Session 展示、研究或周报的业务判断 |
-| Agent/Op 单节点执行、结构化请求/结果、Harness 接入 | Node 契约与运行时 | Graph 整体调度、服务 API、业务流程状态 |
+| Agent/Op 单节点执行、结构化请求/结果、Rig 或 legacy Harness 接入 | Node 契约与运行时 | Graph 整体调度、服务 API、业务流程状态 |
 | 文件、网络、进程、凭证和隔离执行 | Runtime / Sandbox | 让 Agent 提示词代替权限控制 |
 | 可复用的领域能力、工具说明和外部系统接入 | Plugin / Library | 自动成为 Anchor 核心依赖或取得宿主权限 |
 | 研究、周报、审查等特定目标及其验收标准 | 普通 Graph / Plugin | 通用 Runner 中的项目专属分支 |
@@ -78,7 +82,7 @@ Session（用户与 Anchor Pilot 的长期关系）
 
 ### 评审新设计时依次问
 
-1. 哪个已确认的用户结果或已观察到的失败要求这项能力？现有 Graph、Plugin、PydanticAI/Harness 或存储能否直接支持？
+1. 哪个已确认的用户结果或已观察到的失败要求这项能力？现有 Graph、Plugin、Rig、legacy PydanticAI/Harness 或存储能否直接支持？
 2. 哪个对象或模块拥有唯一事实和不变量？其他模块能否只通过小契约调用它，而不读写它的私有字典、表或临时文件？
 3. 这是语义判断还是机械约束？Agent 负责理解、取舍和综合；代码负责权限、schema、身份、路由执行、持久化和可机械验证的门禁。
 4. 新状态、队列、缓存、服务、框架或配置是否减少了端到端复杂度？它的删除、恢复、失败和测试路径是什么？
@@ -100,17 +104,17 @@ Graph 包只带入显式声明的资源及可验证的来源/版本信息。模�
 
 用户希望 Anchor 的底层 Runtime Kernel 长期以 Rust 实现。Rust 是平台与精简交付共同调用的内核，而不是给轻量版另写一套 Runner；HTTP/WebUI/Session/Scheduler/渠道等能力作为可组合宿主。Kernel 的职责边界围绕 Graph 校验与执行、Run 调度/状态、节点调用契约、资源和权限边界，以及必要的运行数据格式逐步收敛。
 
-现有 AgentNode 依赖 Python PydanticAI/Harness。语言目标本身不等于重写模型循环：迁移期间应通过窄且语言无关的 Node 执行契约复用已验证的框架；是否以及何时替换 Agent 框架，作为独立决策，不能隐式混入 Runtime 移植。OpNode 和外部 Plugin 可继续经明确的进程/MCP 等接口运行，不要求所有业务工具改写成 Rust。
+Rust-native AgentNode 使用 io-harness 作为唯一 Agent loop、上下文与单节点持久化/恢复层；Rig 仅可通过 Provider adapter 提供模型 transport。Anchor 保持 Graph Run、Sandbox、Plugin、Artifact 和宿主权限事实，不与 Harness 重复实现上下文或工具循环。Python PydanticAI/Harness 是迁移期 legacy 宿主，不约束 Rust 核心。OpNode 和外部 Plugin 经明确的进程/MCP 接口运行。
 
-迁移以垂直切片验证同一 Graph 在 standalone 与平台宿主中的路由、Run 事实、停止/恢复、沙箱和 Plugin 行为一致，再扩展覆盖面。当前 Python Runner 在替代实现达到对应验收前仍是实现真相；禁止长期维护两套权威调度语义，也不做无兼容证据的大爆炸重写。具体 FFI/子进程协议、数据格式演进和 Rust crate 拆分待进入实施设计时再决定。
+迁移以 Rust-native Graph 在 standalone 与平台宿主中的路由、Run 事实、停止/恢复、沙箱和 Plugin 行为为主要验收对象，再按需要提供 Python legacy 读取或调用适配。Python Runner 不再是 Rust 产品行为的永久实现真相；两套语义只在迁移边界明确隔离，禁止同一 Run 双重写入。具体 HTTP/CLI、持久化、Session 和 bundle 设计可以采用成熟 Rust crates，并在垂直切片中冻结，而不是等待 Python 完全兼容后才开始。
 
 ### Anchor 的执行不变量
 
 - 每个 Graph Run 由一个协调者有序推进并更新 Run 状态。只有 Graph 明确声明且配对合法的 fanout/join 区域才在同一 Run 内并发；工作节点不能私自推进其他节点或竞争写 Run 状态。
 - 普通 AgentNode 和 OpNode 继续经过同一 Graph 执行契约。AgentNode 不成为隐藏调度器；OpNode 不绕过既有输入、沙箱、取消、提交和恢复边界。
 - Graph 与 Plugin 是可演进的用户资产；研究和周报等目标通过它们表达。只有对多类 Graph 都成立的执行语义才进入通用 Runner。
-- 优先调用固定依赖版本公开支持的 PydanticAI/Harness 接口。除非明确证明框架接口缺失且用户结果要求补足，否则不自建模型循环、计划/记忆、步骤存储或恢复引擎。
-- 恢复以持久化事实为依据。副作用结果未知时不把“重试”伪装为安全；由适配器、Runner、Harness 和业务 Graph 各自承担其层级可验证的恢复责任。
+- Python legacy 路径优先调用固定依赖版本公开支持的 PydanticAI/Harness 接口；Rust-native AgentNode 优先调用固定版本 io-harness；Rig 只作为 Provider transport adapter，Anchor 只实现产品需要的 Graph/Run/Artifact/Sandbox/Plugin 边界。
+- 恢复以持久化事实为依据。副作用结果未知时不把“重试”伪装为安全；由适配器、Runner、io-harness/legacy Harness 和业务 Graph 各自承担其层级可验证的恢复责任。
 - Run、Session、Turn、Node、Plugin 与 Graph 身份跨 API、文件记录和 UI 保持一致。UI 可汇总事实，但不能成为运行状态的权威来源。
 
 每项跨模块改动至少在设计或评审中说清：归属层、调用契约、事实所有者、失败/恢复语义和可执行验收。小型局部改动不要求另写 ADR；当决定新增持久对象、跨 Run 并发语义、权限边界或不可逆迁移时，记录 ADR 并冻结契约后再并行实施。
@@ -196,7 +200,7 @@ active/running → archived
 
 `waiting_user` 表示 Pilot 需要用户回答问题，后端不应继续猜测。当前 `session_ask` 已通过 `CallDeferred` 真正暂停，回答作为原工具调用的结果返回。`interrupted` 允许加载历史后继续对话：用户可以直接发新消息，旧副作用门禁已删除，AI 核查现场后继续。普通 Graph 节点的外部输入协议尚未统一。
 
-Run 状态仍由调度器维护（例如 `running`、`paused`、`stopped`、`finished`、`failed`、`uncertain`），Session 只引用和解释这些状态，不复制一份独立的 Run 真相。
+Run 状态仍由调度器维护（例如 `running`、`paused`、`stopped`、`finished`、`failed`、`waiting_recovery`、`aborted`），Session 只引用和解释这些状态，不复制一份独立的 Run 真相。Rust-native 的 `waiting_recovery` 保留同一 Graph cursor 和 invocation，并投影 io-harness 公开的未决工具名、step 与 attempt ID；工具参数不可用。普通 `/resume` 为每个未决 attempt 写入恢复 observation，明确说明结果未记录、外部效果未知，并要求 Agent 先核查 workspace、产物和可用外部状态；不会自动重放工具，也不要求用户判断底层 Harness 决定。Harness 尚未处理的其他并行分支 attempt 继续作为同一恢复上下文提供。该能力属于 Run/Node Runtime 契约，不影响 Python Session 续聊语义。
 
 ### PydanticAI 的边界
 
@@ -453,16 +457,16 @@ GET    /plugins/<id>
 - Pilot 的模型输出不是权限凭证；所有控制动作由 Runtime 再校验。
 - Plugin 说明不是安全策略；工具挂载、网络、文件访问和删除权限由 Runtime 强制执行。
 - Session 事件追加必须保持顺序，重复请求要有幂等键或明确返回已处理结果。
-- 工具结果缺失时保留中断事实，Pilot 可查询实际 Run、文件或测试结果后继续。现有 Run 的 `uncertain` 状态可以作为核查线索，不因此要求一套人工处置平台，也不默认重发旧命令。
+- Python Pilot 的工具结果缺失时保留中断事实，由 Pilot 查询实际 Run、文件或测试结果后继续。Rust io-harness AgentNode 的 `waiting_recovery` 使用同一原则：Host 将确切 attempt 的中断事实写成 Agent observation，不默认重发未知副作用；Agent 根据现场核查结果自行决定继续、补偿、重新执行或询问用户。
 - 服务重启后恢复的是已记录的状态和可恢复的模型对话；正在执行的外部副作用不承诺 exactly-once。
-- 普通 Graph 删除必须拒绝仍在运行的 Graph；系统 Pilot 的保护范围与接法待后续讨论。
+- Graph 删除必须拒绝仍有当前 Graph 定义或未结束 Run 快照调用它的目标，也拒绝仍有未结束自身 Run 的目标。Completed、Failed、Aborted 等终态历史调用不阻止删除；Stopped Run 仍可恢复，所以会阻止删除。成功删除目标 Graph 及其自身 Run/文件，不级联删除或改写其他 Graph 的 Run。系统 Pilot 的保护范围与接法待后续讨论。
 - 默认服务面向本机，正式多用户部署前必须增加身份、授权和 Session 隔离，不能把本地路径模型直接当成多租户安全模型。
 
 ## 阶段性实施顺序
 
 唯一开发范围与 A01–A14 验收状态见 [Pilot 开发计划](pilot-development-plan.md)。当前接通框架工作记录和续聊，保留必要提问，按需接框架压缩，补上聊天对象跳转并做真实验收。系统 Pilot、可见计划、研究业务、附件、分支和导出等只保留产品需求，当前目标完成后再与用户讨论决定，不自动进入下一阶段。
 
-P1 流式与提交去重已完成；P2 按 2026-09-26 的用户决定收敛，Framework 记录、重开续聊、必要提问、按需压缩与对象跳转都已通过真实 provider / 杀进程 / 浏览器验收（状态与证据见开发台账 A07–A12）。跨存储事务和未知结果人工处置不再是任何阶段的前置条件。没有真实验收的能力不描述成已经交付。
+P1 流式与提交去重已完成；P2 按 2026-09-26 的用户决定收敛，Framework 记录、重开续聊、必要提问、按需压缩与对象跳转都已通过真实 provider / 杀进程 / 浏览器验收（状态与证据见开发台账 A07–A12）。Rust-native Graph Run 的未知工具恢复按 A79 单独验收；provider-free、浏览器和真实 provider Completed smoke 已验证同一 Run 上下文续行，但不证明任意外部副作用 exactly-once，也不建设跨存储事务或通用未知结果处置平台。
 
 ## 明确不做
 
@@ -472,7 +476,7 @@ P1 流式与提交去重已完成；P2 按 2026-09-26 的用户决定收敛，Fr
 - 不把隐藏提示词当作控制面 API。
 - 不把前端缓存、模型上下文或 trace 摘要当作唯一事实。
 - 不用固定轮数、固定请求数或人工 `max_xxx` 判断复杂任务完成。
-- 不扩建通用审批、跨存储原子事务或未知结果人工处置平台；不承诺任意外部操作 exactly-once。
+- 不扩建通用审批或未知结果人工处置平台，不建设跨存储原子事务；A79 只把持久化的未决 attempt 转为 Agent 恢复上下文，不承诺任意外部操作 exactly-once。
 
 P0 时的历史问题与框架核查见 [Pilot 对话体验与 Pydantic 接入核查](pilot-experience-audit.md)，其中旧待办不代替当前验收标准。
 

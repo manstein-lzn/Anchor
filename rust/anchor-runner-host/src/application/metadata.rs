@@ -1,0 +1,185 @@
+use super::{ApplicationError, storage};
+use crate::create_durable_directory;
+use serde::{Deserialize, Serialize};
+use std::{
+    fs::OpenOptions,
+    io::Write,
+    path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
+};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RunMetadata {
+    format: u32,
+    pub(crate) run_id: String,
+    pub(crate) graph: String,
+    pub(crate) graph_digest: String,
+    pub(crate) bundle_source: PathBuf,
+    pub(crate) created: String,
+    pub(crate) trigger_source: String,
+    #[serde(default)]
+    pub(crate) graph_call: Option<GraphCallSource>,
+    #[serde(default)]
+    pub(crate) schedule: Option<String>,
+    #[serde(default)]
+    pub(crate) scheduled_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct GraphCallSource {
+    pub(crate) parent_run: String,
+    pub(crate) parent_graph: String,
+    pub(crate) parent_graph_digest: String,
+    pub(crate) node: String,
+    pub(crate) invocation: u64,
+    pub(crate) mode: String,
+    pub(crate) root_run: String,
+}
+
+pub(super) fn now_nanos() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
+}
+
+impl RunMetadata {
+    pub(super) fn new(
+        run_id: String,
+        graph: String,
+        graph_digest: String,
+        source: &Path,
+    ) -> Result<Self, ApplicationError> {
+        Ok(Self {
+            format: 2,
+            run_id,
+            graph,
+            graph_digest,
+            bundle_source: source.canonicalize().map_err(storage)?,
+            created: chrono::DateTime::<chrono::Utc>::from(SystemTime::now()).to_rfc3339(),
+            trigger_source: "manual".into(),
+            graph_call: None,
+            schedule: None,
+            scheduled_at: None,
+        })
+    }
+
+    pub(crate) fn child(
+        run_id: String,
+        graph: String,
+        graph_digest: String,
+        source: &Path,
+    ) -> Result<Self, ApplicationError> {
+        let mut metadata = Self::new(run_id, graph, graph_digest, source)?;
+        metadata.trigger_source = "graph_call".into();
+        Ok(metadata)
+    }
+
+    pub(crate) fn graph_call_child(
+        run_id: String,
+        graph: String,
+        graph_digest: String,
+        source: &Path,
+        call: GraphCallSource,
+    ) -> Result<Self, ApplicationError> {
+        let mut metadata = Self::child(run_id, graph, graph_digest, source)?;
+        if !matches!(call.mode.as_str(), "wait" | "detach")
+            || call.parent_run.is_empty()
+            || call.parent_graph.is_empty()
+            || call.parent_graph_digest.is_empty()
+            || call.node.is_empty()
+            || call.invocation == 0
+            || call.root_run.is_empty()
+        {
+            return Err(ApplicationError::Invalid(
+                "invalid Graph call source metadata".into(),
+            ));
+        }
+        metadata.graph_call = Some(call);
+        Ok(metadata)
+    }
+}
+
+fn path(root: &Path, id: &str) -> Result<PathBuf, ApplicationError> {
+    if id.is_empty()
+        || id == "."
+        || id == ".."
+        || !id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))
+    {
+        return Err(ApplicationError::Invalid("invalid Run id".into()));
+    }
+    Ok(root.join("run-metadata").join(format!("{id}.json")))
+}
+
+pub(crate) fn save(root: &Path, metadata: &RunMetadata) -> Result<(), ApplicationError> {
+    let target = path(root, &metadata.run_id)?;
+    let directory = target.parent().expect("metadata path has parent");
+    create_durable_directory(directory).map_err(storage)?;
+    let temporary = directory.join(format!(".{}.{}.tmp", metadata.run_id, now_nanos()));
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&temporary)
+        .map_err(storage)?;
+    file.write_all(&serde_json::to_vec(metadata).map_err(storage)?)
+        .map_err(storage)?;
+    file.sync_all().map_err(storage)?;
+    std::fs::rename(temporary, &target).map_err(storage)?;
+    std::fs::File::open(directory)
+        .and_then(|f| f.sync_all())
+        .map_err(storage)?;
+    Ok(())
+}
+
+pub(crate) fn save_child_once(
+    root: &Path,
+    run_id: String,
+    graph: String,
+    graph_digest: String,
+    source: &Path,
+    call: GraphCallSource,
+) -> Result<(), ApplicationError> {
+    let expected =
+        RunMetadata::graph_call_child(run_id.clone(), graph, graph_digest, source, call)?;
+    if let Some(existing) = load(root, &run_id)? {
+        if existing.graph != expected.graph
+            || existing.graph_digest != expected.graph_digest
+            || existing.bundle_source != expected.bundle_source
+            || existing.trigger_source != "graph_call"
+            || existing.graph_call != expected.graph_call
+        {
+            return Err(ApplicationError::Conflict(
+                "child Run identity metadata conflicts with its durable admission".into(),
+            ));
+        }
+        return Ok(());
+    }
+    save(root, &expected)
+}
+
+pub(crate) fn load(root: &Path, id: &str) -> Result<Option<RunMetadata>, ApplicationError> {
+    let bytes = match std::fs::read(path(root, id)?) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(ApplicationError::Storage(format!(
+                "Run identity metadata unavailable: {error}"
+            )));
+        }
+    };
+    let metadata: RunMetadata = serde_json::from_slice(&bytes).map_err(storage)?;
+    if !matches!(metadata.format, 1 | 2)
+        || metadata.run_id != id
+        || metadata.graph.is_empty()
+        || metadata.graph_digest.is_empty()
+    {
+        return Err(ApplicationError::Storage(
+            "Run identity metadata is corrupt".into(),
+        ));
+    }
+    Ok(Some(metadata))
+}

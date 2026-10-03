@@ -30,6 +30,27 @@ import { assignGraphColors } from './graphColors';
 
 const POLL_MS = 3000;
 type Pick = { kind: 'node' | 'edge' | 'agent'; id: string } | null;
+type GraphSummary = { graph: string; running: string | null; active_runs?: string[] };
+type ApiFetcher = <T>(path: string) => Promise<T>;
+
+/** Load the core workbench independently from the optional timeline projection. */
+export async function loadWorkbenchData(apiCall: ApiFetcher, timelinePath: string) {
+  const [graphList, runList] = await Promise.all([
+    apiCall<{ graphs: GraphSummary[] }>('/graphs'),
+    apiCall<{ runs: OurRun[] }>('/runs'),
+  ]);
+  try {
+    const timeline = await apiCall<TimelineData>(timelinePath);
+    return { graphs: graphList.graphs, runs: runList.runs, timeline, timelineProblem: '' };
+  } catch (error) {
+    return {
+      graphs: graphList.graphs,
+      runs: runList.runs,
+      timeline: null,
+      timelineProblem: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
 
 const recentRuns = (runs: OurRun[], graph: string) => runs
   .filter(item => item.graph === graph)
@@ -63,6 +84,7 @@ export function App() {
   const [graphReturn, setGraphReturn] = useState<{ graph: string; node?: string } | null>(null);
   const [runs, setRuns] = useState<OurRun[]>([]);
   const [timeline, setTimeline] = useState<TimelineData | null>(null);
+  const [timelineProblem, setTimelineProblem] = useState('');
   const graphColors = useMemo(() => assignGraphColors([
     ...graphs.map(item => item.graph),
     ...runs.map(run => run.graph),
@@ -140,22 +162,19 @@ export function App() {
 
   const refresh = useCallback(async () => {
     try {
-      const [graphList, runList] = await Promise.all([
-        api<{ graphs: { graph: string; running: string | null; active_runs?: string[] }[] }>('/graphs'),
-        api<{ runs: OurRun[] }>('/runs'),
-      ]);
       const cutoff = new Date(); cutoff.setHours(0, 0, 0, 0); cutoff.setDate(cutoff.getDate() + 1 - timelinePage * 30);
       const before = `${cutoff.getFullYear()}-${String(cutoff.getMonth() + 1).padStart(2, '0')}-${String(cutoff.getDate()).padStart(2, '0')}`;
-      const board = await api<TimelineData>(`/timeline?days=30&before=${before}`);
-      setGraphs(graphList.graphs);
-      setRuns(runList.runs);
-      setTimeline(board);
+      const data = await loadWorkbenchData(api, `/timeline?days=30&before=${before}`);
+      setGraphs(data.graphs);
+      setRuns(data.runs);
+      setTimeline(data.timeline);
+      setTimelineProblem(data.timelineProblem);
       setProblem('');
       if (!nameRef.current) {
-        const initial = runList.runs.find(item => item.running)?.graph ?? graphList.graphs[0]?.graph;
+        const initial = data.runs.find(item => item.running)?.graph ?? data.graphs[0]?.graph;
         if (initial) {
           setName(initial);
-          setRun(runList.runs.find(item => item.graph === initial)?.run ?? '');
+          setRun(data.runs.find(item => item.graph === initial)?.run ?? '');
         }
       }
     } catch (error) {
@@ -447,10 +466,13 @@ export function App() {
 
       {view === 'pilot' ? <Pilot session={chat} onSession={setChat} /> : view === 'runs' ? (
         <Workspace running>
-          <Timeline data={timeline} graphs={graphs.map(item => item.graph)} graphColors={graphColors} page={timelinePage} onPage={setTimelinePage}
-            onRefresh={() => void refresh()} onSelect={item => {
-            setRun(item.run); setName(item.graph); setNode(''); setView('runDetail');
-          }} />
+          {timelineProblem ? <main className="main"><p className="timeline-error" role="alert">
+            运行时间线无法加载：{timelineProblem} <button onClick={() => void refresh()}>重新连接</button>
+          </p></main> : <Timeline data={timeline} graphs={graphs.map(item => item.graph)} graphColors={graphColors} page={timelinePage} onPage={setTimelinePage}
+              onOpenRun={(id, graph) => void navigateRun(id, graph)}
+              onRefresh={() => void refresh()} onSelect={item => {
+              setRun(item.run); setName(item.graph); setNode(''); setView('runDetail');
+            }} />}
         </Workspace>
       ) : view === 'runDetail' ? (
         <Workspace running>
@@ -468,16 +490,21 @@ export function App() {
               由 {detail.state.trigger.graph} / {detail.state.trigger.node} · 第 {detail.state.trigger.invocation} 轮发起
               <button onClick={() => void navigateRun(detail.state.trigger!.run!, detail.state.trigger!.graph!, detail.state.trigger!.node)}>返回来源运行 ←</button>
             </div>}
+            {notice && <p className={`notice ${notice.kind}`} role="status">{notice.text}</p>}
             <div className="canvas-head">
               {detail ? <>
                 <span className={`pill ${detail.state.status}`}>
-                  {detail.state.status === 'running' ? '执行中' : label(detail.state.status)}
+                  {detail.state.status === 'running'
+                    ? detail.active === false ? '等待接续' : '执行中'
+                    : label(detail.state.status)}
                 </span>
                 <span className="objective">{detail.state.objective}</span>
                 {activeNodes(detail.state).length > 0 && <span className="hint" aria-label="活动节点">
-                  {detail.state.status === 'running' ? '正在执行' :
-                    detail.state.status === 'stopped' ? '停止于' : '中断于'} {activeNodes(detail.state).map(item => `${item.node}（第 ${item.pass} 轮）`).join('、')}</span>}
-                {['running', 'paused'].includes(detail.state.status) &&
+                  {detail.state.status === 'running' && detail.active !== false ? '正在执行' :
+                    detail.state.status === 'running' ? '宿主重启后尚未接续' :
+                    detail.state.status === 'stopped' ? '停止于' : detail.state.status === 'waiting_recovery' ? '待恢复于' : '中断于'} {activeNodes(detail.state).map(item => `${item.node}（第 ${item.pass} 轮）`).join('、')}</span>}
+                {(['running', 'paused'].includes(detail.state.status) &&
+                  (detail.state.status === 'paused' || detail.active !== false) && !detail.state.recovery?.length) &&
                   <span className="run-controls">
                     {detail.state.status === 'running' ? <>
                       <button onClick={() => void controlRun('pause')} disabled={busy}
@@ -488,10 +515,21 @@ export function App() {
                       继续
                     </button>}
                   </span>}
+                {detail.state.status === 'running' && detail.active === false && !detail.state.recovery?.length &&
+                  <span className="run-controls">
+                    <button onClick={() => void controlRun('resume')} disabled={busy}>
+                      继续
+                    </button>
+                  </span>}
                 {detail.state.reason === 'asked' && <span className="hint">
                   {detail.state.status === 'paused' ? '已按请求暂停' : '已按请求停止'}
                 </span>}
                 {detail.state.error && <span className="problem">{detail.state.error}</span>}
+                {detail.state.status === 'waiting_recovery' &&
+                  <span className="run-controls">
+                    <span className="hint">Agent 上次工具调用的结果未记录，继续后会先恢复上下文并核查现场。</span>
+                    <button onClick={() => void controlRun('resume')} disabled={busy}>继续</button>
+                  </span>}
                 {detail.state.status !== 'running' ?
                   <button className="danger-link" onClick={() => void deleteRun()} disabled={busy}>
                     <Trash2 size={14} />删除运行记录

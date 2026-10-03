@@ -553,7 +553,7 @@ pub(crate) fn execution_request(
     record: &GraphRunRecord,
     cursor: &RunCursor,
     cancellation: crate::Cancellation,
-) -> NodeExecutionRequest {
+) -> Result<NodeExecutionRequest, GraphError> {
     let node = record
         .snapshot
         .nodes
@@ -616,7 +616,7 @@ pub(crate) fn execution_request(
         .as_ref()
         .and_then(Value::as_str)
         .unwrap_or_default();
-    NodeExecutionRequest {
+    Ok(NodeExecutionRequest {
         key: cursor.key.clone(),
         model,
         task: node_task(
@@ -629,13 +629,22 @@ pub(crate) fn execution_request(
         routes,
         input: cursor.prepared_input.clone(),
         input_commits: cursor.input_commits.clone(),
+        plugins: node
+            .plugins
+            .iter()
+            .map(|id| {
+                record.plugin_bindings.get(id).cloned().ok_or_else(|| {
+                    GraphError::CorruptRun(format!("Run has no frozen Plugin binding for `{id}`"))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?,
         max_provider_requests,
         wall_time_limit_seconds,
         network,
         kind,
         operation,
         cancellation,
-    }
+    })
 }
 pub(crate) fn scope_of(node_id: &str) -> String {
     node_id

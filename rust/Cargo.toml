@@ -1,5 +1,5 @@
 [workspace]
-members = ["anchor-runtime", "anchor-sandbox-bwrap"]
+members = ["anchor-runtime", "anchor-io-harness-runtime", "anchor-sandbox-bwrap", "anchor-mcp-host", "anchor-runner-host", "anchor-graph-host", "anchor-rsi"]
 resolver = "2"
 
 [workspace.package]
@@ -15,4 +15,6 @@ serde_json = "1"
 thiserror = "2"
 futures = "0.3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+rmcp = { version = "=2.2.0", default-features = false, features = ["client", "transport-streamable-http-client-reqwest"] }
+rig-rmcp = { version = "=0.43.0", default-features = false }
 sha2 = "0.10"

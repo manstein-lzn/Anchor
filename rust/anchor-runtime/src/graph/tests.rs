@@ -36,6 +36,355 @@ impl RunStore for MemStore {
         Ok(Box::new(MemLease))
     }
 }
+
+#[test]
+fn host_assigned_run_identity_is_preserved_and_validated() {
+    let snapshot = graph(&["one"], &[], "one");
+    let record =
+        GraphRunRecord::create_with_id(snapshot.clone(), Value::Null, "platform-run-42").unwrap();
+    assert_eq!(record.run_id, "platform-run-42");
+    assert_eq!(record.snapshot, snapshot);
+    assert!(matches!(
+        GraphRunRecord::create_with_id(snapshot, Value::Null, "../escape"),
+        Err(GraphError::InvalidRunId(_))
+    ));
+}
+
+#[test]
+fn executed_nodes_follow_first_durable_completion_order() {
+    let mut record = GraphRunRecord::create(
+        graph(&["alpha", "beta", "gamma"], &[], "alpha"),
+        Value::Null,
+    )
+    .unwrap();
+    let make_result = |node: &str, sequence: u64| RunResult {
+        node_id: node.into(),
+        key: InvocationKey {
+            run_id: record.run_id.clone(),
+            graph_digest: record.graph_digest.clone(),
+            node_id: node.into(),
+            invocation: sequence,
+        },
+        completion: NodeCompletion {
+            submission: String::new(),
+            route: None,
+            model_requests: 0,
+            output: Value::Null,
+        },
+        commit: CommitRef {
+            id: format!("commit-{node}-{sequence}"),
+            node_id: node.into(),
+            invocation: sequence,
+        },
+        sequence,
+    };
+    record.results.insert(
+        "alpha".into(),
+        vec![make_result("alpha", 2), make_result("alpha", 4)],
+    );
+    record
+        .results
+        .insert("beta".into(), vec![make_result("beta", 1)]);
+    record
+        .results
+        .insert("gamma".into(), vec![make_result("gamma", 3)]);
+    assert_eq!(record.executed_nodes(), ["beta", "alpha", "gamma"]);
+}
+
+#[tokio::test]
+async fn waiting_recovery_preserves_cursor_and_direct_graph_resume_cannot_bypass_it() {
+    let store = MemStore::default();
+    let artifacts = MemoryArtifacts::default();
+    let control = Control::default();
+    let nodes = FakeNodes {
+        recovery_once: Mutex::new(true),
+        ..Default::default()
+    };
+    let initial = GraphRunRecord::create(graph(&["one"], &[], "one"), Value::Null).unwrap();
+    let first = GraphRunner::new(&store, &artifacts, &nodes, &control)
+        .run(initial)
+        .await
+        .unwrap();
+    assert_eq!(first.status, RunStatus::WaitingRecovery);
+    assert_eq!(first.recovery.len(), 1);
+    assert_eq!(first.recovery[0].key, first.cursor.as_ref().unwrap().key);
+    assert_eq!(first.cursor.as_ref().unwrap().key.invocation, 1);
+    assert_eq!(nodes.calls.lock().unwrap().len(), 1);
+
+    let again = GraphRunner::new(&store, &artifacts, &nodes, &control)
+        .run(first.clone())
+        .await
+        .unwrap();
+    assert_eq!(again, first);
+    assert_eq!(nodes.calls.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn graph_call_wait_resumes_same_identity_and_detach_records_acceptance() {
+    fn call_snapshot(mode: &str) -> GraphSnapshot {
+        let mut snapshot = graph(&["call", "end"], &[("call", "end")], "call");
+        snapshot.nodes[0].agent = None;
+        snapshot.nodes[0].op = Some("child".into());
+        let mut call = serde_json::json!({
+            "graph": "child-graph",
+            "mode": mode,
+            "input": {"x": 1},
+            "input_map": {"topic": "/request/topic"},
+            "files": [{"node": "produce", "path": "report.md", "as": "input/report.md"}],
+            "session": "research"
+        });
+        if mode == "wait" {
+            call["result"] = serde_json::json!({"node": "answer", "files": ["answer.md"]});
+        }
+        snapshot
+            .ops
+            .insert("child".into(), serde_json::json!({"call": call}));
+        snapshot
+    }
+
+    let port = Arc::new(FakeGraphCalls {
+        outcomes: Mutex::new(vec![
+            GraphCallOutcome::Waiting {
+                child_run_id: "child-run-1".into(),
+            },
+            GraphCallOutcome::Completed {
+                child_run_id: "child-run-1".into(),
+                output: serde_json::json!({"answer": 42}),
+            },
+        ]),
+        ..Default::default()
+    });
+    let nodes = FakeNodes {
+        graph_call_port: Some(port.clone()),
+        ..Default::default()
+    };
+    let store = MemStore::default();
+    let artifacts = MemoryArtifacts::default();
+    let control = Control::default();
+    let initial = GraphRunRecord::create(call_snapshot("wait"), Value::Null).unwrap();
+    let first = GraphRunner::new(&store, &artifacts, &nodes, &control)
+        .run(initial)
+        .await
+        .unwrap();
+    assert_eq!(first.status, RunStatus::WaitingCall);
+    assert!(
+        first
+            .cursor
+            .as_ref()
+            .is_some_and(|cursor| cursor.node_id == "call")
+    );
+    let resumed = GraphRunner::new(&store, &artifacts, &nodes, &control)
+        .run(first)
+        .await
+        .unwrap();
+    assert_eq!(resumed.status, RunStatus::Completed);
+    {
+        let identities = port.identities.lock().unwrap();
+        assert_eq!(identities.len(), 2);
+        assert_eq!(identities[0], identities[1]);
+    }
+    assert_eq!(
+        resumed.graph_calls.values().next().unwrap().status,
+        GraphCallStatus::Completed
+    );
+    assert!(
+        nodes
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|request| request.key.node_id != "call")
+    );
+
+    for outcome in [
+        GraphCallOutcome::Detached {
+            child_run_id: "child-run-2".into(),
+        },
+        // If the child finishes before the parent observes it, detach still
+        // returns only the accepted child reference, never its business result.
+        GraphCallOutcome::Completed {
+            child_run_id: "child-run-3".into(),
+            output: serde_json::json!({"secret_result": "not forwarded"}),
+        },
+    ] {
+        let port = Arc::new(FakeGraphCalls {
+            outcomes: Mutex::new(vec![outcome]),
+            ..Default::default()
+        });
+        let nodes = FakeNodes {
+            graph_call_port: Some(port),
+            ..Default::default()
+        };
+        let store = MemStore::default();
+        let artifacts = MemoryArtifacts::default();
+        let result = GraphRunner::new(&store, &artifacts, &nodes, &control)
+            .run(GraphRunRecord::create(call_snapshot("detach"), Value::Null).unwrap())
+            .await
+            .unwrap();
+        let call_result = result.results.get("call").unwrap().last().unwrap();
+        assert_eq!(call_result.completion.output["status"], "accepted");
+        assert!(call_result.completion.output.get("secret_result").is_none());
+    }
+}
+
+#[tokio::test]
+async fn deleted_graph_call_marker_resumes_as_completed_without_replay() {
+    use sha2::Digest;
+
+    let mut snapshot = graph(&["call"], &[], "call");
+    snapshot.nodes[0].agent = None;
+    snapshot.nodes[0].op = Some("child".into());
+    let spec = serde_json::json!({"graph": "child-graph", "mode": "wait", "input": {}});
+    snapshot
+        .ops
+        .insert("child".into(), serde_json::json!({"call": spec.clone()}));
+
+    let mut record = GraphRunRecord::create(snapshot, Value::Null).unwrap();
+    let key = InvocationKey {
+        run_id: record.run_id.clone(),
+        graph_digest: record.graph_digest.clone(),
+        node_id: "call".into(),
+        invocation: 1,
+    };
+    let identity = CallIdentity {
+        parent_run_id: record.run_id.clone(),
+        parent_graph_digest: record.graph_digest.clone(),
+        node_id: "call".into(),
+        invocation: 1,
+        call_spec_digest: format!(
+            "{:x}",
+            sha2::Sha256::digest(serde_json::to_vec(&spec).unwrap())
+        ),
+    };
+    record.graph_calls.insert(
+        identity.durable_key(),
+        GraphCallRecord {
+            identity,
+            graph: "child-graph".into(),
+            child_run_id: Some("child-run-deleted".into()),
+            mode: "wait".into(),
+            status: GraphCallStatus::Deleted,
+            output: None,
+            error: None,
+        },
+    );
+    record.cursor = Some(RunCursor {
+        node_id: "call".into(),
+        key: key.clone(),
+        input_commits: vec![],
+        prepared_input: serde_json::json!({"input": Value::Null, "committed_inputs": []}),
+    });
+    record.invocations.insert("call".into(), 1);
+    record.passes.insert("call".into(), 1);
+    record.status = RunStatus::Stopped;
+
+    let port = Arc::new(FakeGraphCalls::default());
+    let nodes = FakeNodes {
+        graph_call_port: Some(port.clone()),
+        ..Default::default()
+    };
+    let store = MemStore::default();
+    let artifacts = MemoryArtifacts::default();
+    let control = Control::default();
+    let finished = GraphRunner::new(&store, &artifacts, &nodes, &control)
+        .run(record)
+        .await
+        .unwrap();
+
+    assert_eq!(finished.status, RunStatus::Completed);
+    assert!(
+        port.identities.lock().unwrap().is_empty(),
+        "a deleted child must never be re-admitted"
+    );
+    let result = finished.results.get("call").unwrap().last().unwrap();
+    assert_eq!(result.completion.output["status"], "deleted");
+    assert_eq!(result.completion.output["run_id"], "child-run-deleted");
+    assert_eq!(
+        finished.graph_calls.values().next().unwrap().status,
+        GraphCallStatus::Deleted
+    );
+}
+
+#[tokio::test]
+async fn plugin_manifest_is_pinned_to_run_and_drift_fails_before_dispatch() {
+    let mut snapshot = graph(&["work"], &[], "work");
+    snapshot.nodes[0].plugins = vec!["review".into()];
+    let binding = PluginBinding {
+        id: "review".into(),
+        digest: "manifest-v1".into(),
+        resources: vec!["instructions.md".into()],
+        mcp_servers: vec!["search".into()],
+    };
+    let nodes = FakeNodes {
+        resolved_plugins: Mutex::new(vec![binding.clone()]),
+        budget_once: Mutex::new(true),
+        ..Default::default()
+    };
+    let store = MemStore::default();
+    let artifacts = MemoryArtifacts::default();
+    let control = Control::default();
+    let first = GraphRunner::new(&store, &artifacts, &nodes, &control)
+        .run(GraphRunRecord::create(snapshot, Value::Null).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(first.status, RunStatus::BudgetStopped);
+    assert_eq!(first.plugin_bindings.get("review"), Some(&binding));
+    assert!(first.plugin_bindings_initialized);
+    assert_eq!(nodes.calls.lock().unwrap()[0].plugins, vec![binding]);
+
+    {
+        let mut changed = nodes.resolved_plugins.lock().unwrap();
+        changed[0].digest = "manifest-v2".into();
+    }
+    let resumed = GraphRunner::new(&store, &artifacts, &nodes, &control)
+        .run(first)
+        .await
+        .unwrap();
+    assert_eq!(resumed.status, RunStatus::Failed);
+    assert!(
+        resumed
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("manifest changed")
+    );
+    assert_eq!(nodes.calls.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn legacy_in_progress_plugin_run_without_binding_fails_closed() {
+    let mut snapshot = graph(&["work"], &[], "work");
+    snapshot.nodes[0].plugins = vec!["review".into()];
+    let nodes = FakeNodes {
+        resolved_plugins: Mutex::new(vec![PluginBinding {
+            id: "review".into(),
+            digest: "manifest-v1".into(),
+            resources: vec![],
+            mcp_servers: vec![],
+        }]),
+        ..Default::default()
+    };
+    let store = MemStore::default();
+    let artifacts = MemoryArtifacts::default();
+    let control = Control::default();
+    let mut legacy = GraphRunRecord::create(snapshot, Value::Null).unwrap();
+    legacy.status = RunStatus::Paused;
+    store.save(&legacy).unwrap();
+    let resumed = GraphRunner::new(&store, &artifacts, &nodes, &control)
+        .run(legacy)
+        .await
+        .unwrap();
+    assert_eq!(resumed.status, RunStatus::Failed);
+    assert!(
+        resumed
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("in-progress legacy Run")
+    );
+    assert!(nodes.calls.lock().unwrap().is_empty());
+}
+
 struct PersistThenFailStore {
     inner: FileRunStore,
     fail_after_result_commit: Mutex<bool>,
@@ -118,10 +467,13 @@ struct FakeNodes {
     op_run: bool,
     fail_once: Mutex<Option<String>>,
     invalid_route_once: Mutex<bool>,
+    recovery_once: Mutex<bool>,
     delays_ms: Mutex<BTreeMap<String, u64>>,
     completed_order: Mutex<Vec<String>>,
     active_calls: std::sync::atomic::AtomicUsize,
     max_active_calls: std::sync::atomic::AtomicUsize,
+    graph_call_port: Option<Arc<FakeGraphCalls>>,
+    resolved_plugins: Mutex<Vec<PluginBinding>>,
 }
 impl NodeExecutionPort for FakeNodes {
     fn capabilities(&self) -> NodeExecutionCapabilities {
@@ -130,6 +482,23 @@ impl NodeExecutionPort for FakeNodes {
             op_run: self.op_run,
             exact_provider_request_budget: !self.caps_budget_off,
         }
+    }
+    fn graph_call_port(&self) -> Option<&dyn GraphCallPort> {
+        self.graph_call_port
+            .as_deref()
+            .map(|port| port as &dyn GraphCallPort)
+    }
+    fn resolve_plugins(&self, ids: &[String]) -> Result<Vec<PluginBinding>, GraphError> {
+        let bindings = self.resolved_plugins.lock().unwrap();
+        ids.iter()
+            .map(|id| {
+                bindings
+                    .iter()
+                    .find(|binding| &binding.id == id)
+                    .cloned()
+                    .ok_or_else(|| GraphError::Unsupported(format!("unknown Plugin `{id}`")))
+            })
+            .collect()
     }
     fn completion_fact<'a>(
         &'a self,
@@ -157,7 +526,8 @@ impl NodeExecutionPort for FakeNodes {
                 .facts
                 .lock()
                 .unwrap()
-                .contains_key(&request.key.durable_key())
+                .get(&request.key.durable_key())
+                .is_some_and(|fact| !matches!(fact, CompletionFact::Resumable))
             {
                 return Err(GraphError::CorruptRun(
                     "duplicate dispatch after completion fact".into(),
@@ -179,6 +549,22 @@ impl NodeExecutionPort for FakeNodes {
                 .unwrap_or_default();
             if delay > 0 {
                 tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+            }
+            {
+                let mut recovery = self.recovery_once.lock().unwrap();
+                if *recovery {
+                    *recovery = false;
+                    self.active_calls
+                        .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                    return Ok(NodeExecutionOutcome::WaitingRecovery {
+                        attempts: vec![RecoveryAttempt {
+                            attempt_id: 17,
+                            step: 4,
+                            tool: "publish".into(),
+                            started_at: "2026-10-03T00:00:00Z".into(),
+                        }],
+                    });
+                }
             }
             if let Some(reason) = self.fail_once.lock().unwrap().take() {
                 self.facts.lock().unwrap().insert(
@@ -234,6 +620,31 @@ impl NodeExecutionPort for FakeNodes {
             self.active_calls
                 .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
             Ok(NodeExecutionOutcome::Completed(completion))
+        })
+    }
+}
+
+#[derive(Default)]
+struct FakeGraphCalls {
+    outcomes: Mutex<Vec<GraphCallOutcome>>,
+    identities: Mutex<Vec<String>>,
+}
+impl GraphCallPort for FakeGraphCalls {
+    fn call<'a>(
+        &'a self,
+        identity: &'a CallIdentity,
+        _spec: &'a Value,
+        _input: &'a Value,
+        _cancellation: crate::Cancellation,
+    ) -> Pin<Box<dyn Future<Output = Result<GraphCallOutcome, GraphError>> + Send + 'a>> {
+        Box::pin(async move {
+            self.identities.lock().unwrap().push(identity.durable_key());
+            if self.outcomes.lock().unwrap().is_empty() {
+                return Err(GraphError::CorruptRun(
+                    "fake GraphCallPort exhausted".into(),
+                ));
+            }
+            Ok(self.outcomes.lock().unwrap().remove(0))
         })
     }
 }
@@ -1034,6 +1445,37 @@ async fn budget_stop_keeps_cursor_and_resume_uses_same_invocation() {
 }
 
 #[tokio::test]
+async fn graph_runner_dispatches_durable_resumable_node_with_same_invocation() {
+    let nodes = FakeNodes::default();
+    let store = MemStore::default();
+    let artifacts = MemoryArtifacts::default();
+    let control = Control::default();
+    let snapshot = graph(&["one"], &[], "one");
+    let mut record = GraphRunRecord::create(snapshot, Value::Null).unwrap();
+    let key = InvocationKey {
+        run_id: record.run_id.clone(),
+        graph_digest: record.graph_digest.clone(),
+        node_id: "one".into(),
+        invocation: 1,
+    };
+    nodes
+        .facts
+        .lock()
+        .unwrap()
+        .insert(key.durable_key(), CompletionFact::Resumable);
+
+    record = GraphRunner::new(&store, &artifacts, &nodes, &control)
+        .run(record)
+        .await
+        .unwrap();
+
+    assert_eq!(record.status, RunStatus::Completed);
+    assert_eq!(nodes.calls.lock().unwrap().len(), 1);
+    assert_eq!(nodes.calls.lock().unwrap()[0].key, key);
+    assert_eq!(record.invocations["one"], 1);
+}
+
+#[tokio::test]
 async fn format_one_cursor_migrates_under_lease_and_persists_once() {
     let root = std::env::temp_dir().join(format!(
         "anchor-run-migration-{}-{}",
@@ -1071,7 +1513,7 @@ async fn format_one_cursor_migrates_under_lease_and_persists_once() {
 
     // Loading migrates in memory, without writing outside the Runner lease.
     let loaded = store.load(&id).unwrap().unwrap();
-    assert_eq!(loaded.format, 3);
+    assert_eq!(loaded.format, 7);
     assert_eq!(loaded.invocations["one"], 1);
     assert_eq!(loaded.passes["one"], 1);
     let persisted: Value =
@@ -1084,7 +1526,7 @@ async fn format_one_cursor_migrates_under_lease_and_persists_once() {
     assert_eq!(result.invocations["one"], 1);
     assert_eq!(result.passes["one"], 1);
     let persisted = store.load(&id).unwrap().unwrap();
-    assert_eq!(persisted.format, 3);
+    assert_eq!(persisted.format, 7);
     assert_eq!(persisted.invocations["one"], 1);
     assert_eq!(persisted.passes["one"], 1);
 
@@ -1119,7 +1561,7 @@ async fn format_one_terminal_run_migrates_without_changing_counters() {
     .unwrap();
 
     let loaded = store.load(&id).unwrap().unwrap();
-    assert_eq!(loaded.format, 3);
+    assert_eq!(loaded.format, 7);
     assert_eq!(loaded.passes["one"], 3);
     assert_eq!(loaded.invocations["one"], 3);
     let result = GraphRunner::new(&store, &artifacts, &nodes, &control)
@@ -1128,7 +1570,7 @@ async fn format_one_terminal_run_migrates_without_changing_counters() {
         .unwrap();
     assert_eq!(result.status, RunStatus::Completed);
     let persisted = store.load(&id).unwrap().unwrap();
-    assert_eq!(persisted.format, 3);
+    assert_eq!(persisted.format, 7);
     assert_eq!(persisted.passes["one"], 3);
     assert_eq!(persisted.invocations["one"], 3);
     assert!(nodes.calls.lock().unwrap().is_empty());
@@ -1368,10 +1810,26 @@ async fn run_rejects_cursor_identity_mismatch_before_dispatch() {
 async fn admission_accepts_paired_parallel_topology_and_runner_executes_control_ops() {
     let mut g = graph(&["one"], &[], "one");
     g.nodes[0].plugins = vec!["p".into()];
-    assert!(matches!(
-        GraphSnapshot::admit(serde_json::to_value(g).unwrap()),
-        Err(GraphError::Unsupported(_))
-    ));
+    let plugin_snapshot = GraphSnapshot::admit(serde_json::to_value(g).unwrap()).unwrap();
+    let (plugin_store, plugin_artifacts, plugin_nodes, plugin_control) = setup();
+    let rejected = GraphRunner::new(
+        &plugin_store,
+        &plugin_artifacts,
+        &plugin_nodes,
+        &plugin_control,
+    )
+    .run(GraphRunRecord::create(plugin_snapshot, Value::Null).unwrap())
+    .await
+    .unwrap();
+    assert_eq!(rejected.status, RunStatus::Failed);
+    assert!(
+        rejected
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("Plugin manifest resolution")
+    );
+    assert!(plugin_nodes.calls.lock().unwrap().is_empty());
     let g = parallel_graph();
     let admitted = GraphSnapshot::admit(serde_json::to_value(&g).unwrap()).unwrap();
     assert_eq!(
@@ -1600,9 +2058,44 @@ fn run_format_two_migrates_to_parallel_aware_format_three() {
     value.as_object_mut().unwrap().remove("parallel");
     let mut loaded: GraphRunRecord = serde_json::from_value(value).unwrap();
     loaded.migrate_format().unwrap();
-    assert_eq!(loaded.format, 3);
+    assert_eq!(loaded.format, 7);
     assert!(loaded.parallel.is_none());
     loaded.validate().unwrap();
+}
+
+#[test]
+fn run_format_three_migrates_graph_calls_and_plugin_bindings_to_current_format() {
+    let mut value = serde_json::to_value(
+        GraphRunRecord::create(graph(&["one"], &[], "one"), Value::Null).unwrap(),
+    )
+    .unwrap();
+    value["format"] = serde_json::json!(3);
+    value.as_object_mut().unwrap().remove("graph_calls");
+    value.as_object_mut().unwrap().remove("plugin_bindings");
+    let mut record: GraphRunRecord = serde_json::from_value(value).unwrap();
+    record.migrate_format().unwrap();
+    assert_eq!(record.format, 7);
+    assert!(record.graph_calls.is_empty());
+    assert!(record.plugin_bindings.is_empty());
+    record.validate().unwrap();
+}
+
+#[test]
+fn run_format_six_migrates_recovery_submissions_to_current_format() {
+    let mut value = serde_json::to_value(
+        GraphRunRecord::create(graph(&["one"], &[], "one"), Value::Null).unwrap(),
+    )
+    .unwrap();
+    value["format"] = serde_json::json!(6);
+    value
+        .as_object_mut()
+        .unwrap()
+        .remove("recovery_submissions");
+    let mut record: GraphRunRecord = serde_json::from_value(value).unwrap();
+    record.migrate_format().unwrap();
+    assert_eq!(record.format, 7);
+    assert!(record.recovery_submissions.is_empty());
+    record.validate().unwrap();
 }
 
 #[tokio::test]
@@ -1760,7 +2253,7 @@ async fn parallel_file_store_roundtrip_preserves_activation_and_branch_cursors()
             .iter()
             .any(|branch| branch.cursor.is_some())
     );
-    assert_eq!(loaded.format, 3);
+    assert_eq!(loaded.format, 7);
     loaded.validate().unwrap();
     let resumed = GraphRunner::new(&store, &artifacts, &nodes, &control)
         .run(loaded)
@@ -2893,12 +3386,15 @@ async fn rust_graph_runner_matches_python_runtime_oracle_scenarios() {
 
         let rust_status = match result.status {
             RunStatus::Completed => "completed",
+            RunStatus::Aborted => "aborted",
             RunStatus::BudgetStopped => "budget_stopped",
             RunStatus::Stopped => "stopped",
             RunStatus::Failed => "failed",
             RunStatus::Ready => "ready",
             RunStatus::Running => "running",
             RunStatus::Paused => "paused",
+            RunStatus::WaitingCall => "waiting_call",
+            RunStatus::WaitingRecovery => "waiting_recovery",
         };
         assert_eq!(
             rust_status, expected["status"],

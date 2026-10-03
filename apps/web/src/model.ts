@@ -42,7 +42,7 @@ export type GraphCall = {
 export type RunTrigger = { source: string; schedule?: string; scheduled_at?: string;
   graph?: string; run?: string; node?: string; invocation?: number; mode?: 'wait' | 'detach'; root_run?: string };
 export type CallRecord = { node: string; invocation: number; graph: string; run: string;
-  mode: 'wait' | 'detach'; status: string; summary?: string; input?: Record<string, unknown>; result?: unknown };
+  mode: 'wait' | 'detach'; status: string; active?: boolean; summary?: string; input?: Record<string, unknown>; result?: unknown };
 export type GraphRelationsData = { graphs: { graph: string; schedules: number }[];
   calls: { graph: string; node: string; op: string; target: string; mode: 'wait' | 'detach' }[] };
 export const callModeLabel = (mode: 'wait' | 'detach') => mode === 'wait' ? '等待完成' : '启动后继续';
@@ -123,6 +123,13 @@ export type OurRunState = {
   error: string;
   /** Why a run that stopped did not simply finish. `asked` means somebody pressed the button. */
   reason?: string;
+  /** Exact io-harness tool attempts whose result was not recorded yet. */
+  recovery?: RecoveryAttempt[];
+};
+
+export type RecoveryAttempt = {
+  key: { run_id: string; graph_digest: string; node_id: string; invocation: number };
+  attempt: { attempt_id: number; step: number; tool: string; started_at: string };
 };
 
 export type OurRun = {
@@ -138,7 +145,8 @@ export type OurRun = {
 };
 
 export type TimelineItem = { schedule: string; graph: string; scheduled_at: string; run?: string; status: string };
-export type TimelineData = { runs: OurRun[]; scheduled: TimelineItem[]; schedules: Schedule[] };
+export type TimelineData = { runs: OurRun[]; scheduled: TimelineItem[]; schedules: Schedule[];
+  capabilities?: { scheduling?: boolean } };
 export type Schedule = { id: string; graph: string; rule: Record<string, unknown>; next_at: string; enabled: boolean; input?: Record<string, unknown> };
 
 export type TraceMessage = {
@@ -168,6 +176,8 @@ export type OurFileBody = {
 };
 
 export type OurRunDetail = {
+  /** Whether this host currently owns a live execution task for the durable Run. */
+  active?: boolean;
   calls?: CallRecord[];
   plugins?: Record<string, Plugin[]>;
   graph: string;

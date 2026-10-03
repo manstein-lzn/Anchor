@@ -1,5 +1,6 @@
 use super::*;
 use serde::{Deserialize, Serialize};
+use sha2::Digest;
 use std::sync::atomic::AtomicU64;
 
 pub(crate) static RUN_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -45,7 +46,10 @@ pub enum RunStatus {
     Running,
     Paused,
     BudgetStopped,
+    WaitingCall,
+    WaitingRecovery,
     Completed,
+    Aborted,
     Stopped,
     Failed,
 }
@@ -77,6 +81,53 @@ pub struct RunResult {
     pub completion: NodeCompletion,
     pub commit: CommitRef,
     pub sequence: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CallIdentity {
+    pub parent_run_id: String,
+    pub parent_graph_digest: String,
+    pub node_id: String,
+    pub invocation: u64,
+    pub call_spec_digest: String,
+}
+
+impl CallIdentity {
+    pub fn durable_key(&self) -> String {
+        let bytes = serde_json::to_vec(self).expect("CallIdentity serialization is infallible");
+        format!("{:x}", sha2::Sha256::digest(bytes))
+    }
+}
+
+/// Stable child-run association for one Op.call invocation. It contains no
+/// credentials or live host handles and is safe to persist with the parent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GraphCallRecord {
+    pub identity: CallIdentity,
+    pub graph: String,
+    pub child_run_id: Option<String>,
+    pub mode: String,
+    pub status: GraphCallStatus,
+    #[serde(default)]
+    pub output: Option<Value>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GraphCallStatus {
+    Prepared,
+    Waiting,
+    Completed,
+    Detached,
+    Failed,
+    Uncertain,
+    /// Legacy persisted marker from the earlier cascade-delete behavior. New
+    /// Graph deletion rejects callers instead of writing this status.
+    Deleted,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -126,6 +177,18 @@ pub struct GraphRunRecord {
     pub cursor: Option<RunCursor>,
     #[serde(default)]
     pub parallel: Option<ParallelActivation>,
+    /// Operator-resolvable io-harness tool attempts. Each attempt is tied to
+    /// the exact serial or parallel invocation whose cursor remains active.
+    #[serde(default)]
+    pub recovery: Vec<PendingRecovery>,
+    #[serde(default)]
+    pub recovery_submissions: Vec<RecoverySubmission>,
+    #[serde(default)]
+    pub graph_calls: BTreeMap<String, GraphCallRecord>,
+    #[serde(default)]
+    pub plugin_bindings: BTreeMap<String, PluginBinding>,
+    #[serde(default)]
+    pub plugin_bindings_initialized: bool,
     pub invocations: BTreeMap<String, u64>,
     pub passes: BTreeMap<String, u64>,
     pub module_activations: BTreeMap<String, u64>,
@@ -146,9 +209,26 @@ impl GraphRunRecord {
             .as_nanos();
         let serial = RUN_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let run_id = format!("{}-{stamp:x}-{serial:x}", &graph_digest[..16]);
+        Self::create_with_id(snapshot, input, run_id)
+    }
+
+    /// Create a Run using an identity assigned by the owning host.
+    ///
+    /// This is used when a platform has already admitted a Run and needs the
+    /// Rust Runner to persist that same identity rather than inventing a
+    /// second one. The ID is validated before it can become a store path.
+    pub fn create_with_id(
+        snapshot: GraphSnapshot,
+        input: Value,
+        run_id: impl Into<String>,
+    ) -> Result<Self, GraphError> {
+        snapshot.validate()?;
+        let graph_digest = snapshot.digest()?;
+        let run_id = run_id.into();
+        validate_component(&run_id)?;
         let input = merge_values(&snapshot.input, &input, &Value::Null);
         Ok(Self {
-            format: 3,
+            format: 7,
             run_id,
             graph_digest,
             snapshot,
@@ -156,6 +236,11 @@ impl GraphRunRecord {
             status: RunStatus::Ready,
             cursor: None,
             parallel: None,
+            recovery: Vec::new(),
+            recovery_submissions: Vec::new(),
+            graph_calls: BTreeMap::new(),
+            plugin_bindings: BTreeMap::new(),
+            plugin_bindings_initialized: false,
             invocations: BTreeMap::new(),
             passes: BTreeMap::new(),
             module_activations: BTreeMap::new(),
@@ -167,9 +252,23 @@ impl GraphRunRecord {
         })
     }
 
+    /// Returns node IDs in first durable completion order.
+    /// The persisted `results` map is keyed by node ID and therefore cannot
+    /// itself represent execution order.
+    pub fn executed_nodes(&self) -> Vec<String> {
+        let mut results = self.results.values().flatten().collect::<Vec<_>>();
+        results.sort_by_key(|result| result.sequence);
+        let mut seen = BTreeSet::new();
+        results
+            .into_iter()
+            .filter(|result| seen.insert(result.node_id.clone()))
+            .map(|result| result.node_id.clone())
+            .collect()
+    }
+
     pub(crate) fn validate(&self) -> Result<(), GraphError> {
         validate_component(&self.run_id)?;
-        if self.format != 3 {
+        if self.format != 7 {
             return Err(GraphError::CorruptRun(format!(
                 "unsupported graph run format {}",
                 self.format
@@ -178,6 +277,34 @@ impl GraphRunRecord {
         self.snapshot.validate()?;
         if self.snapshot.digest()? != self.graph_digest {
             return Err(GraphError::CorruptRun("snapshot digest mismatch".into()));
+        }
+        for (key, call) in &self.graph_calls {
+            let spec_exists = self.snapshot.nodes.iter().any(|node| {
+                node.id == call.identity.node_id
+                    && node
+                        .op
+                        .as_ref()
+                        .and_then(|name| self.snapshot.ops.get(name))
+                        .is_some_and(|op| op.get("call").is_some())
+            });
+            if key != &call.identity.durable_key()
+                || call.identity.parent_run_id != self.run_id
+                || call.identity.parent_graph_digest != self.graph_digest
+                || call.identity.invocation == 0
+                || call.graph.is_empty()
+                || !spec_exists
+                || matches!(
+                    call.status,
+                    GraphCallStatus::Waiting
+                        | GraphCallStatus::Completed
+                        | GraphCallStatus::Detached
+                        | GraphCallStatus::Deleted
+                ) && call.child_run_id.as_deref().is_none_or(str::is_empty)
+            {
+                return Err(GraphError::CorruptRun(
+                    "Graph call record identity or child reference is invalid".into(),
+                ));
+            }
         }
         match self.status {
             RunStatus::Ready if self.cursor.is_some() || self.parallel.is_some() => {
@@ -204,6 +331,63 @@ impl GraphRunRecord {
                 ));
             }
             _ => {}
+        }
+        if self.status == RunStatus::WaitingRecovery && self.recovery.is_empty() {
+            return Err(GraphError::CorruptRun(
+                "recovery-waiting Run has no pending attempt".into(),
+            ));
+        }
+        if !matches!(
+            self.status,
+            RunStatus::WaitingRecovery | RunStatus::Running | RunStatus::Aborted
+        ) && !self.recovery.is_empty()
+        {
+            return Err(GraphError::CorruptRun(
+                "non-recovery Run has pending recovery attempts".into(),
+            ));
+        }
+        let mut recovery_ids = BTreeSet::new();
+        for pending in &self.recovery {
+            let key_is_active = self
+                .cursor
+                .as_ref()
+                .is_some_and(|cursor| cursor.key == pending.key)
+                || self.parallel.as_ref().is_some_and(|activation| {
+                    activation.branches.iter().any(|branch| {
+                        branch
+                            .cursor
+                            .as_ref()
+                            .is_some_and(|cursor| cursor.key == pending.key)
+                    })
+                });
+            if !key_is_active
+                || pending.key.run_id != self.run_id
+                || pending.key.graph_digest != self.graph_digest
+                || pending.attempt.attempt_id <= 0
+                || pending.attempt.tool.is_empty()
+                || !recovery_ids.insert((pending.key.durable_key(), pending.attempt.attempt_id))
+            {
+                return Err(GraphError::CorruptRun(
+                    "pending recovery attempt does not match an active invocation".into(),
+                ));
+            }
+        }
+        let mut submitted_ids = BTreeSet::new();
+        for submission in &self.recovery_submissions {
+            if submission.key.run_id != self.run_id
+                || submission.key.graph_digest != self.graph_digest
+                || submission.attempt_id <= 0
+                || !self
+                    .snapshot
+                    .nodes
+                    .iter()
+                    .any(|node| node.id == submission.key.node_id && node.agent.is_some())
+                || !submitted_ids.insert((submission.key.durable_key(), submission.attempt_id))
+            {
+                return Err(GraphError::CorruptRun(
+                    "recovery submission identity is invalid or duplicated".into(),
+                ));
+            }
         }
         if let Some(cursor) = &self.cursor
             && (cursor.key.node_id != cursor.node_id
@@ -598,9 +782,29 @@ impl GraphRunRecord {
             2 => {
                 self.parallel = None;
                 self.format = 3;
+                self.migrate_format()
+            }
+            3 => {
+                self.graph_calls = BTreeMap::new();
+                self.format = 4;
+                self.migrate_format()
+            }
+            4 => {
+                self.plugin_bindings = BTreeMap::new();
+                self.format = 5;
+                self.migrate_format()
+            }
+            5 => {
+                self.recovery = Vec::new();
+                self.format = 6;
+                self.migrate_format()
+            }
+            6 => {
+                self.recovery_submissions = Vec::new();
+                self.format = 7;
                 Ok(())
             }
-            3 => Ok(()),
+            7 => Ok(()),
             other => Err(GraphError::CorruptRun(format!(
                 "unsupported graph run format {other}"
             ))),

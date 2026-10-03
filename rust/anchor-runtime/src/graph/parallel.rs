@@ -147,7 +147,7 @@ impl<'a, S: RunStore, A: ArtifactPort, N: NodeExecutionPort, C: RunControl>
                     self.store.save(record)?;
                     fact_error.get_or_insert(reason);
                 }
-                CompletionFact::NotStarted => {
+                CompletionFact::NotStarted | CompletionFact::Resumable => {
                     dispatch.push((branch_index, cursor));
                 }
             }
@@ -162,7 +162,7 @@ impl<'a, S: RunStore, A: ArtifactPort, N: NodeExecutionPort, C: RunControl>
             return Ok(false);
         }
         for (branch_index, cursor) in dispatch {
-            let request = execution_request(record, &cursor, self.control.cancellation());
+            let request = execution_request(record, &cursor, self.control.cancellation())?;
             let nodes = self.nodes;
             pending.push(Box::pin(async move {
                 let outcome = AssertUnwindSafe(async move { nodes.execute(request).await })
@@ -174,6 +174,8 @@ impl<'a, S: RunStore, A: ArtifactPort, N: NodeExecutionPort, C: RunControl>
 
         let mut terminal_error = None;
         let mut stopped = false;
+        let mut waiting_recovery = false;
+        let mut aborted = false;
         while let Some((branch_index, outcome)) = pending.next().await {
             let cursor = record.parallel.as_ref().unwrap().branches[branch_index]
                 .cursor
@@ -194,20 +196,44 @@ impl<'a, S: RunStore, A: ArtifactPort, N: NodeExecutionPort, C: RunControl>
             };
             match outcome {
                 NodeExecutionOutcome::Completed(completion) => {
+                    record.recovery.retain(|pending| pending.key != cursor.key);
                     self.settle_parallel_completion(record, branch_index, cursor, completion)
                         .await?;
                 }
+                NodeExecutionOutcome::WaitingRecovery { attempts } => {
+                    record.recovery.retain(|pending| pending.key != cursor.key);
+                    record
+                        .recovery
+                        .extend(attempts.into_iter().map(|attempt| PendingRecovery {
+                            key: cursor.key.clone(),
+                            attempt,
+                        }));
+                    waiting_recovery = true;
+                }
                 NodeExecutionOutcome::BudgetExhausted { .. } => {
+                    record.recovery.retain(|pending| pending.key != cursor.key);
                     record.status = RunStatus::BudgetStopped;
                     self.store.save(record)?;
                     stopped = true;
                 }
                 NodeExecutionOutcome::Cancelled => {
+                    record.recovery.retain(|pending| pending.key != cursor.key);
                     record.status = RunStatus::Stopped;
                     self.store.save(record)?;
                     stopped = true;
                 }
+                NodeExecutionOutcome::Aborted => {
+                    record.recovery.retain(|pending| pending.key != cursor.key);
+                    let branch = &mut record.parallel.as_mut().unwrap().branches[branch_index];
+                    branch.status = ParallelBranchStatus::Stopped;
+                    branch.cursor = None;
+                    branch.error = Some("aborted by operator".into());
+                    record.status = RunStatus::Aborted;
+                    record.error = Some(format!("{} aborted by operator", cursor.node_id));
+                    aborted = true;
+                }
                 NodeExecutionOutcome::Failed { reason } => {
+                    record.recovery.retain(|pending| pending.key != cursor.key);
                     let branch = &mut record.parallel.as_mut().unwrap().branches[branch_index];
                     branch.status = ParallelBranchStatus::Failed;
                     branch.cursor = None;
@@ -227,7 +253,16 @@ impl<'a, S: RunStore, A: ArtifactPort, N: NodeExecutionPort, C: RunControl>
             self.store.save(record)?;
             return Ok(false);
         }
+        if aborted {
+            self.store.save(record)?;
+            return Ok(false);
+        }
         if stopped {
+            self.store.save(record)?;
+            return Ok(false);
+        }
+        if waiting_recovery {
+            record.status = RunStatus::WaitingRecovery;
             self.store.save(record)?;
             return Ok(false);
         }
@@ -361,7 +396,14 @@ impl<'a, S: RunStore, A: ArtifactPort, N: NodeExecutionPort, C: RunControl>
             )));
         }
         select_route(&completion, &routes)?;
-        let commit = self.artifacts.freeze(&cursor.key, &completion).await?;
+        let context = ArtifactFreezeContext {
+            kind: ArtifactKind::Node,
+            input_commits: cursor.input_commits.clone(),
+        };
+        let commit = self
+            .artifacts
+            .freeze_with_context(&cursor.key, &completion, &context)
+            .await?;
         record.sequence += 1;
         let result_sequence = record.sequence;
         record

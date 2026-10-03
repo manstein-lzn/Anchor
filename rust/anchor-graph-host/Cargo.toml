@@ -1,0 +1,16 @@
+[package]
+name = "anchor-graph-host"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Minimal in-process standalone host for Anchor Graph calls"
+
+[dependencies]
+anchor-runtime-rig = { path = "../anchor-runtime" }
+serde_json = "1"
+serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tempfile = "3"

@@ -435,6 +435,284 @@ fn checkpoint_can_be_created_from_node_request() {
     assert_eq!(checkpoint.run_spec.max_turns, Some(2));
 }
 
+fn structured_node_request(routes: &[&str]) -> super::NodeRequest {
+    super::NodeRequest {
+        execution_id: "structured-fixture".into(),
+        task: "perform the work and finish".into(),
+        instructions: "preserve the result".into(),
+        routes: routes.iter().map(|route| (*route).into()).collect(),
+        max_turns: 8,
+        workspace: "/tmp/structured-fixture".into(),
+        cancellation: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    }
+}
+
+struct StructuredTools {
+    name: &'static str,
+    calls: Mutex<usize>,
+}
+
+impl super::ToolPort for StructuredTools {
+    fn definitions(&self) -> Vec<rig_agent::core::completion::ToolDefinition> {
+        vec![rig_agent::core::completion::ToolDefinition::new(
+            ToolName::new(self.name).unwrap(),
+            "fixture business tool",
+            json!({"type":"object"}),
+        )]
+    }
+
+    fn call<'a>(
+        &'a self,
+        name: &'a str,
+        arguments: serde_json::Value,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        Vec<rig_agent::core::message::ToolResultContent>,
+                        super::ToolError,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            if name != self.name {
+                return Err(super::ToolError::Unknown(name.into()));
+            }
+            *self.calls.lock().unwrap() += 1;
+            Ok(vec![rig_agent::core::message::ToolResultContent::json(
+                arguments,
+            )])
+        })
+    }
+}
+
+struct RecordingCompletion {
+    inner: super::RigCompletionPort,
+    requests: Mutex<Vec<rig_agent::core::completion::CompletionRequest>>,
+}
+
+impl CompletionPort for RecordingCompletion {
+    fn capabilities(&self) -> rig_agent::core::completion::ProviderCapabilities {
+        self.inner.capabilities()
+    }
+
+    fn complete<'a>(
+        &'a self,
+        request: rig_agent::core::completion::CompletionRequest,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        rig_agent::core::completion::CompletionResponse,
+                        rig_agent::core::error::ProviderError,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    > {
+        self.requests.lock().unwrap().push(request.clone());
+        self.inner.complete(request)
+    }
+}
+
+#[test]
+fn structured_node_schema_requires_a_route_only_for_multiple_exits() {
+    for routes in [vec![], vec!["next"], vec!["accept", "revise"]] {
+        let checkpoint =
+            AgentCheckpoint::from_request("work", 1, &structured_node_request(&routes));
+        let schema = checkpoint.run_spec.output_schema.as_ref().unwrap();
+        assert_eq!(checkpoint.run_spec.output_mode, super::OutputMode::Tool);
+        assert_eq!(schema["properties"]["summary"]["type"], "string");
+        assert_eq!(
+            schema["required"],
+            if routes.len() > 1 {
+                json!(["summary", "route"])
+            } else {
+                json!(["summary"])
+            }
+        );
+        if routes.len() > 1 {
+            assert_eq!(schema["properties"]["route"]["enum"], json!(routes));
+        }
+    }
+    assert!(
+        AgentCheckpoint::start("work", 1, "low-level", 2)
+            .run_spec
+            .output_schema
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn structured_node_corrects_prose_with_rig_feedback_without_replaying_business_tools() {
+    let model = MockCompletionModel::from_turns([
+        MockTurn::tool_call("business", "echo", json!({"report":"already-written"})),
+        MockTurn::text("Finished the report.\n```json\n{\"summary\":\"done\"}\n```"),
+        MockTurn::tool_call(
+            "answer",
+            "final_result",
+            json!({"summary":"done","route":"next"}),
+        ),
+    ]);
+    let completion = RecordingCompletion {
+        inner: super::RigCompletionPort::new(model.erase()),
+        requests: Mutex::new(Vec::new()),
+    };
+    let tools = StructuredTools {
+        name: "echo",
+        calls: Mutex::new(0),
+    };
+    let request = structured_node_request(&["next"]);
+    let mut checkpoint = AgentCheckpoint::from_request("work", 1, &request);
+    let outcome = super::NodeExecutor::execute(
+        &mut checkpoint,
+        &completion,
+        &tools,
+        &request.cancellation,
+        &request.routes,
+    )
+    .await
+    .unwrap();
+    assert_eq!(outcome.submission, "done");
+    assert_eq!(outcome.route.as_deref(), Some("next"));
+    assert_eq!(outcome.model_requests, 3);
+    assert_eq!(*tools.calls.lock().unwrap(), 1);
+    let requests = completion.requests.lock().unwrap();
+    assert!(
+        serde_json::to_string(&requests[2].chat_history)
+            .unwrap()
+            .contains("not as plain text")
+    );
+    assert!(
+        serde_json::to_string(&requests[2].chat_history)
+            .unwrap()
+            .contains("already-written")
+    );
+    for request in requests.iter() {
+        assert_eq!(
+            request
+                .tools
+                .iter()
+                .map(|tool| tool.name.as_str())
+                .collect::<Vec<_>>(),
+            ["echo", "final_result"]
+        );
+    }
+    assert_eq!(checkpoint.run.output_tool_name(), Some("final_result"));
+}
+
+#[tokio::test]
+async fn structured_output_tool_name_is_saved_before_provider_io_and_pinned_on_reload() {
+    let root = std::env::temp_dir().join(format!(
+        "anchor-output-name-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let store = super::FileCheckpointStore::new(&root);
+    let request = structured_node_request(&[]);
+    let mut checkpoint = AgentCheckpoint::from_request("work", 1, &request);
+    let tools = StructuredTools {
+        name: "final_result",
+        calls: Mutex::new(0),
+    };
+    let failed = super::RigCompletionPort::new(
+        MockCompletionModel::from_turns([MockTurn::error("interrupt")]).erase(),
+    );
+    assert!(
+        super::NodeExecutor::execute_with_store(
+            &mut checkpoint,
+            &failed,
+            &tools,
+            &store,
+            "output-name",
+            &request.cancellation,
+            &request.routes
+        )
+        .await
+        .is_err()
+    );
+    let mut restored = store.load("output-name", "work", 1).unwrap().unwrap();
+    assert_eq!(restored.run.output_tool_name(), Some("final_result_1"));
+    assert_eq!(
+        restored
+            .run
+            .advertised_tools()
+            .unwrap()
+            .definitions
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>(),
+        ["final_result", "final_result_1"]
+    );
+    let completion = RecordingCompletion {
+        inner: super::RigCompletionPort::new(
+            MockCompletionModel::from_turns([MockTurn::tool_call(
+                "answer",
+                "final_result_1",
+                json!({"summary":"recovered"}),
+            )])
+            .erase(),
+        ),
+        requests: Mutex::new(Vec::new()),
+    };
+    let changed_tools = StructuredTools {
+        name: "echo",
+        calls: Mutex::new(0),
+    };
+    let outcome = super::NodeExecutor::execute_with_store(
+        &mut restored,
+        &completion,
+        &changed_tools,
+        &store,
+        "output-name",
+        &request.cancellation,
+        &request.routes,
+    )
+    .await
+    .unwrap();
+    assert_eq!(outcome.submission, "recovered");
+    assert_eq!(
+        completion.requests.lock().unwrap()[0]
+            .tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>(),
+        ["echo", "final_result_1"]
+    );
+    assert_eq!(*changed_tools.calls.lock().unwrap(), 0);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn structured_output_still_rejects_an_illegal_route() {
+    let request = structured_node_request(&["accept", "revise"]);
+    let mut checkpoint = AgentCheckpoint::from_request("work", 1, &request);
+    let completion = super::RigCompletionPort::new(
+        MockCompletionModel::from_turns([MockTurn::tool_call(
+            "answer",
+            "final_result",
+            json!({"summary":"done","route":"unauthorized"}),
+        )])
+        .erase(),
+    );
+    let error = super::NodeExecutor::execute(
+        &mut checkpoint,
+        &completion,
+        &EchoTools,
+        &request.cancellation,
+        &request.routes,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(error, super::NodeError::InvalidResult(reason) if reason.contains("not allowed"))
+    );
+}
+
 #[test]
 fn file_checkpoint_store_round_trips_and_rejects_path_escape() {
     let unique = SystemTime::now()

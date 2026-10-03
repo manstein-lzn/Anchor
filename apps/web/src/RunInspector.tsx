@@ -37,8 +37,14 @@ export function RunInspector({ run, node, detail, targetPath = '', onOpenRun }:
       {node && <p>本节点：{isNodeActive(detail.state, node) ? '执行中' : result?.submitted ? '已完成' : result ? '失败' : '尚未完成'}</p>}
       {detail.calls.filter(call => !node || call.node === node).map(call => <article className="call-record" key={`${call.node}/${call.invocation}`}>
         <header><strong>{call.graph}</strong><span>第 {call.invocation} 轮 · {call.node}</span></header>
-        <p>{callModeLabel(call.mode)} · {call.mode === 'detach' ? '已接纳独立运行' : ['running', 'queued', 'created', 'pending'].includes(call.status) ? '等待目标结果' : '目标已结束'}</p>
-        <p>目标运行：<span className={`pill ${call.status}`}>{label(call.status)}</span></p>
+        <p>{callModeLabel(call.mode)} · {call.active === true
+          ? call.mode === 'detach' ? '目标正在后台执行' : '正在等待目标完成'
+          : call.mode === 'detach'
+            ? ['ready', 'created', 'queued', 'pending'].includes(call.status) ? '目标已接纳，等待启动'
+              : call.status === 'running' ? '目标已启动，等待接续' : '目标已结束'
+            : call.status === 'running' ? '目标等待接续'
+              : ['queued', 'created', 'pending'].includes(call.status) ? '等待目标启动' : '目标已结束'}</p>
+        <p>目标运行：<span className={`pill ${call.active ? 'running' : call.status}`}>{call.active ? '执行中' : label(call.status)}</span></p>
         <button className="full-button" onClick={() => onOpenRun?.(call.run, call.graph)}>查看目标运行 ↗</button>
         <small className="call-run-id">{call.run}</small>
         {call.summary && <p>{call.summary}</p>}

@@ -135,6 +135,22 @@ Agent 完成由 PydanticAI 校验的结构化结果表示（`summary`，多出�
 
 ## 已知边界
 
+### Rust-native 迁移切片（Agent backend 已切换，完整平台仍在迁移）
+
+`rust/anchor-io-harness-runtime` 是 io-harness 0.86.0 的 canonical workspace crate，提供 Rig Provider adapter、Anchor ToolPort/SQLite backend、NodeRequest 执行器和 Graph `NodeExecutionPort`。`HostNodes` 的生产 AgentNode 已切至 io-harness 唯一 loop；Op.run 仍走 Anchor Bubblewrap。io-harness 管理 Agent 上下文、compaction、SQLite checkpoint 与工具效果恢复；Rig 仅作模型 Provider transport；Graph/Run/Artifact/Plugin/Sandbox 事实继续归 Anchor。旧 `experiments/io-harness-*` 入口是兼容 wrapper，不含第二份实现。NodePort 在专用 blocking thread/current-thread Tokio runtime 执行非 `Send` Harness Store，异步解析冻结 PluginBinding 并组装 owned ToolPort。Harness 原生文件/shell/exec 等内建工具被 `ToolMask` 屏蔽；Anchor `anchor_run` 经 Bubblewrap，输入只读挂载精确 Artifact snapshot。Harness completion schema 由本地校验和格式反馈执行，不强制送给 Provider `response_format`。GraphRun format 7 的 `WaitingRecovery` 保留原 Graph cursor，并按 `InvocationKey + io-harness run/attempt ID` 展示未决工具名、step 与开始时间；工具参数不由 Harness attempt journal 保存。普通 `/resume` 在 Run/Graph lease 下为每个未决 attempt 写入明确的恢复 observation，说明工具结果未记录、外部效果未知并要求 Agent 先核查现场，然后继续同一 Harness run；不自动重放工具，也不把底层 Retry/Completed/Abort 暴露为用户流程。内部 `/recovery` API 保留兼容性，但不是主要用户入口。若 Run 已保存为 `running`、宿主却在注册活动任务前退出，重复 `/resume` 或详情页“继续”可恢复同一 cursor。恢复上下文与 Harness 账本不构成外部副作用 exactly-once。provider-free Graph/NodePort、HTTP 恢复投影、前端普通继续 E2E 及真实 provider Completed 恢复 smoke 已验证；跨存储故障注入仍未验收。多个并行 attempt 会逐项写入同一恢复上下文；Run 终止时未决调用只读保留。真实 `deepseek-chat` 多节点 Op→Agent→Op、HTTP MCP 本机 fixture、Bubblewrap 和 Artifact 验收通过，证据 `.local/rust-multinode-lyk86avx/evidence.json`；A79 Completed 证据为 `.local/rust-recovery-cqifxcyz/evidence.json`。精确累计 `max_provider_requests`、Graph 图片输入、逐节点 model alias registry、外部业务 MCP 和 reasoning/富内容 provider 兼容仍未完成；host 目前使用部署级单一模型 Provider。
+
+在 `codex/rust-rig-runtime` 上，`rust/anchor-runtime` 已有 Rig AgentNode、GraphRunner、Run/Checkpoint stores、fanout/join kernel 与 Bubblewrap adapter。`anchor-runner-host` 的 stdio `start_bundle` 与独立 Axum 入口调用同一 Runner；format-1 bundle loader 固定读取 manifest/graph 并核对 Plugin 资源摘要。宿主现支持串行多节点 Agent/Op.run、同 Run 内一一配对非嵌套 fanout/join，以及有限 Op.call wait/detach 生命周期。wait child复用同一 GraphRunner/RunStore/ArtifactPort，暂停后可独立继续并在完成后接回仍等待的父Run；detach admission后立即独立后台执行，服务启动仅接续metadata标明detach且Ready的child，未知Running不重放。父stop取消wait child、不影响detach child；child按identity独立lease，可同时执行多个同target调用。Run metadata和detail.calls投影父子关系及active状态；Graph CRUD对所有存在未完成Run的Graph拒绝。child来源metadata存parent Run/Graph/digest/call node/invocation/mode/root Run，metadata v1兼容读取但旧记录不触发detach恢复。无Plugin child重入只用durable snapshot/input，不依赖当前Graph仍存在；有Plugin child重入仍校验pinned resources。仍不支持input_map/files/result/session、嵌套调用、child Agent/Plugin执行或真实进程/provider恢复验收。五领域并行RSI真实模型证据见A61。
+
+宿主节点执行、文件事实、Agent命令工具分别位于 `node_host.rs`、`artifacts.rs`、`node_tools.rs`。每 invocation 使用独立工作区；文件快照由 ArtifactPort 独立复制、摘要校验及 fsync/rename 发布为 fs2 commit，保留 fs1 读取。Coordinator 通过类型化冻结上下文传入 Node/Fanout/Join 及精确父 commit；宿主生成控制文件，并沿不可变父关系以 `/in/<node-id>` 只读挂载祖先文件。模型输出不能授予文件访问权；最近祖先优先，同深度同名冲突、跨 Run、摘要不符及损坏谱系拒绝。Agent 的 `anchor_run` 同样经过宿主命令授权与 Bubblewrap；参数/准入拒绝返回明确 not_executed 供模型修正，取消或未知执行错误不伪称成功。Agent/Op 执行前持久化事实；未知 mutating tool effect 会让同一 Run 保持待恢复，普通 `/resume` 把未决工具与结果未知的事实交给 Agent 核查，然后在原 Harness run 上继续，不自动重放。内部恢复决策 API 只保留兼容性，不是主要用户流程。Op.started、没有 Harness cursor 的 Agent.started 及冲突 backend 事实仍 fail closed。宿主尚不支持精确累计 `max_provider_requests`、Graph 图片输入或自定义 reads/writes；没有默认16轮研究上限。
+
+当前 HostNodes 的 Agent 完成格式由 io-harness `TaskContract` schema 本地校验并以 Harness 反馈纠错，Anchor 最终仍校验 route；早期 Rig executor 的结构化输出能力作为历史实现保留。Rust host 目前使用部署级单一 Provider，尚无逐节点 model alias registry。Plugin server绑定部署配置的Streamable HTTP MCP，要求node network=true和明确endpoint/凭证引用/工具白名单，拒绝非法/重名/保留工具名，Rig原生转换保留结构化数据及媒体。本机 `Op → Agent + HTTP MCP → Op` bundle已由真实模型完成，末节点核对随机内容生成的实际文件（A60）；A60 MCP 为本地 Rust 测试服务；A61 使用独立业务证据服务 `anchor-rsi` 读取真实项目并访问公共依赖元数据。A79 已有指定 SIGKILL 后普通续跑的真实 provider 验收，但未覆盖所有进程/存储故障窗口或跨存储故障注入；外部业务 MCP 与 stdio Sandbox launcher 仍未验收。
+
+`anchor-rsi` 是独立只读业务 Plugin，不依赖 Graph Kernel。它从操作员授权根动态冻结源码、部署 Graph、公开 Plugin、Run 机械元数据及历史报告，通过分页索引/按行读取供普通 JSON RSI Graph 使用。Run 投影记录字段存在性及省略清单，避免把脱敏省略误判为源记录缺失；模型 trace、checkpoint、对话与凭证不作为审查材料。公开联网目前覆盖直接依赖注册表和 GitHub release 元数据，包含超限/HTTP 失败记录，不等于全面社区调研或特性适用性验证。报告经独立模型评审及结构门禁后落文件；执行通过、内容验收、提案实施与长期收益分别记录，未切换生产定时任务。
+
+Rust宿主执行入口分为 `api/{graphs,runs,files}` 协议层、`application` 接纳/控制层、`execution` 共享Runner接线。HTTP接纳先保存冻结Run及独立不可变来源元数据（Graph名、digest、bundle来源、创建时间），不再按相同digest猜Graph名。暂停在节点/并行wave边界结算，resume重载原snapshot/input并校验原Plugin资源，未知started副作用不重放。同图手动触发检查活动/暂停/遗留未完成Run，不同Graph可并行。每个state根由一个宿主持OS写入lease，HTTP持有整个服务周期、stdio执行持有执行周期；只读status不争写锁。旧无来源metadata的Run列表显示unknown，HTTP拒绝接管，未完成者阻止新的接纳/Graph修改。此约束不取代未来独立调用的同图多Run并发契约。
+
+Rust host 的 Axum `serve` 入口已提供 Graph CRUD/trigger、Run list/detail/control、Artifact list/read 和 `/timeline` 的 Run 历史投影，并可托管现有 React bundle。React 浏览器 E2E 已从 Rust Host 提供的页面加载应用，在非 loopback + Bearer key 配置下运行 Rust-owned Graph，通过界面查看节点文件，并检查时间线。时间线只显示真实 Run；`schedules`/`scheduled` 为空且 `capabilities.scheduling=false`，计划管理按钮会禁用。Run detail 的 trace 从 io-harness 持久 turn/observation 投影；当前 fixture 测试不是实际模型 trace 的浏览器验收。Graph/Run/Artifact 这条前端垂直切片已通过 provider-free 浏览器验证，但 Session/Pilot、Scheduler、Plugin 管理、relations/channel 与全平台行为仍未迁入 Rust，也未接入 Python `serve.py`。生产架构真相仍是上文 Python 服务路径；Rust-native 产品形态尚未完成，Rust 宿主和独立 bundle 继续复用同一个 Runner。
+
 Session 已接入服务：`/sessions` 提供创建、列表、读取、消息和事件读取、状态变更、Run 关联、停止、失败后续答与删除。Pilot 使用 PydanticAI 和 Harness 会话存储，WebUI 可创建及恢复对话，历史会话旁的“…”菜单支持改名与确认删除。`PUT /sessions/<id>` 只更新 title；空闲会话可直接删除，服务端在同一调度锁内拒绝正在回复的会话并执行删除，避免与新 turn 并发。删除保留关联 Graph/Run/产物及框架步骤文件，不代表磁盘记录的彻底擦除。Pilot 还通过显式 PydanticAI 工具查询 Graph、Plugin、Run 和产物，并可在 Scheduler 校验后创建、修改、删除、启动及控制 Graph Run。
 
 Pilot 对话执行走 turn API。客户端为每次提交生成 `request_id`，服务端在一张 SQLite 表里原子接受提交并分配 `turn_id`，随后在后台线程执行；同一个 Session 下同 ID 同内容复用已存在的 turn，所以丢失响应后的重试不会触发第二次模型调用。模型输出经 PydanticAI 的 Vercel AI 事件编码器转成 chunks，按序号追加到同一数据库；`GET /sessions/<id>/turns/<turn>/events` 只是这些记录的只读 SSE 投影，`id` 即游标，`Last-Event-ID`/`?after=` 决定补发起点，重连或重新订阅都不会重新调用模型和工具。执行在服务端进行，关闭页面既不取消任务也不启动新请求，停止必须显式调用。Harness 保存权威模型消息，Anchor 保存提交意图、执行身份、终态与传输游标；恢复尝试使用新的 `turn_id`，不复用原 framework run ID。进程启动时遗留的 `running` turn 会被标记为 `interrupted` 并保留事件，不自动重放。
@@ -191,6 +207,8 @@ research 从本次冻结 manifest、可选/开发依赖和包注册表项目链�
 
 同 Run 的局部并行与独立调用分别表达，具体见下节及 [组合设计](graph-composition-design.md)。
 
+下列完整调用与转交语义目前对应 Python 宿主；Rust 宿主已完成 A82 所述的 wait/detach 后台生命周期与父子运行投影，但文件/result/session 转交和 Plugin child 执行仍未完成，具体差异以开发台账与 Rust 迁移计划为准。
+
 保留文件内子图展开，同一 Run 内执行；新增 `ops.<name>.call` 在普通 OpNode 上建立独立 Run。`wait` 等待成功并复制显式选择的结果，`detach` 在持久接纳后返回，子 Run 继续独立运行。多来源调用同一个 Graph 可并发；手动/定时入口原有繁忙拒绝规则保留。
 
 调用身份由来源 Graph、Run、完整节点 ID、全局执行轮次确定。控制记录位于 `control/.graph-calls/<identity>/graph-call.json`，目标保存 `admission.json`、冻结 `graph.json`、`run.json` 和只读 `call-inputs/`。服务恢复接纳后尚未启动的运行；Runner 恢复使用 Run 自己的定义快照。模型与命令的执行、提交、恢复仍由现有 Node/Harness 接口承担。已开始但无法确认结果的命令保留 `Uncertain`，不通过创建新 Run 自动重放。
@@ -199,7 +217,7 @@ research 从本次冻结 manifest、可选/开发依赖和包注册表项目链�
 
 `call.session` 是操作员在定义中选择的已有通道会话。后台 Graph 与该会话用户消息串行，后台不能打断聊天；用户新消息可使后台保留原 Run 并让出执行。恢复完成后由既有网关以稳定发送 ID 投递正文，网关沿用原账本处理 ACK 去重和未知投递结果。后台模型完成不等于消息已投递，投递失败会使等待调用失败。完整调用祖先中的会话身份约束跨用户访问，输入参数不能授予会话权限。同一 Plugin 通道可由多个 Graph 挂载，服务只启动一个平台网关。
 
-`/graph-relations` 从已保存定义派生关系；`/graphs` 提供全部 `active_runs`；Run 详情提供逐轮 `calls` 和 `trigger` 来源；`/channel-sessions` 提供已认证操作员可选的通道会话。历史调用引用和活动运行参与编辑/删除保护，不另建关系数据库。
+`/graph-relations` 从已保存定义派生关系；`/graphs` 提供全部 `active_runs`；Run 详情提供逐轮 `calls` 和 `trigger` 来源；`/channel-sessions` 提供已认证操作员可选的通道会话。Rust Host 接纳 Run 时会在同一 Graph admission lease 内读取定义并持久化展开快照；更新 Graph 使用相同短 lease，因此只改变之后接纳的 Run，活动或暂停 Run 仍按自身快照恢复。Graph 创建、编辑和删除共用短 catalog mutation gate；删除会检查当前可运行的 Graph 定义及所有未结束 Run 的冻结快照，存在 `op.call` 引用时返回冲突。Completed、Failed、Aborted 等终态历史 Run 不阻止删除；Stopped Run 仍可恢复，所以会阻止删除。目标 Graph 自己仍有未结束 Run 时也返回冲突。成功删除会清除目标 Graph 自己的 Run 与文件，保留其他 Graph 的 Run，不级联删除或改写调用方。
 
 ## 同一 Run 内的局部并行
 

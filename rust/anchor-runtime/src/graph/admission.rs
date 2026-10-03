@@ -51,12 +51,6 @@ impl GraphSnapshot {
                     node.id
                 )));
             }
-            if !node.plugins.is_empty() {
-                return Err(GraphError::Unsupported(format!(
-                    "node `{}` declares plugins, unsupported in R5",
-                    node.id
-                )));
-            }
             if let Some(op_name) = &node.op {
                 let op = self.ops.get(op_name).ok_or_else(|| {
                     GraphError::InvalidSnapshot(format!(
@@ -74,15 +68,16 @@ impl GraphSnapshot {
                         "op `{op_name}` must declare exactly one execution operation"
                     )));
                 }
-                if op.get("call").is_some() {
-                    return Err(GraphError::Unsupported(format!(
-                        "op.call `{op_name}` is reserved for R7"
-                    )));
+                if let Some(call) = op.get("call") {
+                    validate_graph_call(call, op_name)?;
                 }
-                if op.get("run").is_none() && op.get("fanout").is_none() && op.get("join").is_none()
+                if op.get("run").is_none()
+                    && op.get("fanout").is_none()
+                    && op.get("join").is_none()
+                    && op.get("call").is_none()
                 {
                     return Err(GraphError::Unsupported(format!(
-                        "op `{op_name}` has no supported R5 execution capability"
+                        "op `{op_name}` has no supported execution capability"
                     )));
                 }
             }
@@ -319,4 +314,177 @@ impl GraphSnapshot {
         let bytes = serde_json::to_vec(self).map_err(GraphError::SnapshotDecode)?;
         Ok(format!("{:x}", sha2::Sha256::digest(bytes)))
     }
+}
+
+fn validate_graph_call(call: &Value, op_name: &str) -> Result<(), GraphError> {
+    let fields = call.as_object().ok_or_else(|| {
+        GraphError::InvalidSnapshot(format!("op `{op_name}` call must be an object"))
+    })?;
+    if let Some(unknown) = fields.keys().find(|key| {
+        ![
+            "graph",
+            "mode",
+            "input",
+            "input_map",
+            "files",
+            "result",
+            "session",
+        ]
+        .contains(&key.as_str())
+    }) {
+        return Err(GraphError::InvalidSnapshot(format!(
+            "op.call `{op_name}` has unknown field `{unknown}`"
+        )));
+    }
+    let graph = fields
+        .get("graph")
+        .and_then(Value::as_str)
+        .filter(|value| safe_call_path(value, true))
+        .ok_or_else(|| {
+            GraphError::InvalidSnapshot(format!("op.call `{op_name}` requires a safe graph name"))
+        })?;
+    let _ = graph;
+    let mode = fields.get("mode").and_then(Value::as_str).ok_or_else(|| {
+        GraphError::InvalidSnapshot(format!("op.call `{op_name}` mode must be wait or detach"))
+    })?;
+    if !matches!(mode, "wait" | "detach") {
+        return Err(GraphError::InvalidSnapshot(format!(
+            "op.call `{op_name}` mode must be wait or detach"
+        )));
+    }
+    if fields.get("input").is_some_and(|input| !input.is_object()) {
+        return Err(GraphError::InvalidSnapshot(format!(
+            "op.call `{op_name}` input must be an object"
+        )));
+    }
+    if let Some(mapping) = fields.get("input_map") {
+        let mapping = mapping.as_object().ok_or_else(|| {
+            GraphError::InvalidSnapshot(format!("op.call `{op_name}` input_map must be an object"))
+        })?;
+        for (key, pointer) in mapping {
+            let Some(pointer) = pointer.as_str() else {
+                return Err(GraphError::InvalidSnapshot(format!(
+                    "op.call `{op_name}` input_map value must be a JSON pointer"
+                )));
+            };
+            if key.is_empty()
+                || (!pointer.is_empty() && !pointer.starts_with('/'))
+                || !valid_json_pointer(pointer)
+            {
+                return Err(GraphError::InvalidSnapshot(format!(
+                    "op.call `{op_name}` has an invalid input_map entry"
+                )));
+            }
+        }
+    }
+    let mut aliases = Vec::<String>::new();
+    if let Some(files) = fields.get("files") {
+        let files = files.as_array().ok_or_else(|| {
+            GraphError::InvalidSnapshot(format!("op.call `{op_name}` files must be a list"))
+        })?;
+        for item in files {
+            let item = item.as_object().ok_or_else(|| {
+                GraphError::InvalidSnapshot(format!("op.call `{op_name}` file must be an object"))
+            })?;
+            if item
+                .keys()
+                .any(|key| !["node", "path", "as"].contains(&key.as_str()))
+            {
+                return Err(GraphError::InvalidSnapshot(format!(
+                    "op.call `{op_name}` file has an unknown field"
+                )));
+            }
+            for key in ["node", "path", "as"] {
+                if !item
+                    .get(key)
+                    .and_then(Value::as_str)
+                    .is_some_and(|path| safe_call_path(path, false))
+                {
+                    return Err(GraphError::InvalidSnapshot(format!(
+                        "op.call `{op_name}` file `{key}` must be a safe relative path"
+                    )));
+                }
+            }
+            let alias = item["as"].as_str().unwrap();
+            if aliases.iter().any(|prior| {
+                alias == prior
+                    || alias.starts_with(&format!("{prior}/"))
+                    || prior.starts_with(&format!("{alias}/"))
+            }) {
+                return Err(GraphError::InvalidSnapshot(format!(
+                    "op.call `{op_name}` has overlapping file destinations"
+                )));
+            }
+            aliases.push(alias.to_owned());
+        }
+    }
+    if let Some(result) = fields.get("result") {
+        if mode != "wait" {
+            return Err(GraphError::InvalidSnapshot(format!(
+                "op.call `{op_name}` result is only valid in wait mode"
+            )));
+        }
+        let result = result.as_object().ok_or_else(|| {
+            GraphError::InvalidSnapshot(format!("op.call `{op_name}` result must be an object"))
+        })?;
+        if result
+            .keys()
+            .any(|key| !["node", "files"].contains(&key.as_str()))
+            || !result
+                .get("node")
+                .and_then(Value::as_str)
+                .is_some_and(|node| safe_call_path(node, false))
+        {
+            return Err(GraphError::InvalidSnapshot(format!(
+                "op.call `{op_name}` has an invalid result selector"
+            )));
+        }
+        if let Some(files) = result.get("files") {
+            let files = files.as_array().ok_or_else(|| {
+                GraphError::InvalidSnapshot(format!(
+                    "op.call `{op_name}` result files must be a list"
+                ))
+            })?;
+            if files.iter().any(|path| {
+                !path
+                    .as_str()
+                    .is_some_and(|path| safe_call_path(path, false))
+            }) {
+                return Err(GraphError::InvalidSnapshot(format!(
+                    "op.call `{op_name}` has an unsafe result file"
+                )));
+            }
+        }
+    }
+    if let Some(session) = fields.get("session")
+        && !session
+            .as_str()
+            .is_some_and(|session| safe_call_path(session, true))
+    {
+        return Err(GraphError::InvalidSnapshot(format!(
+            "op.call `{op_name}` session must be a safe name"
+        )));
+    }
+    Ok(())
+}
+
+fn safe_call_path(value: &str, component: bool) -> bool {
+    !value.is_empty()
+        && !value.trim().is_empty()
+        && !value.contains('\\')
+        && !value.chars().any(char::is_control)
+        && (!component || !value.contains('/'))
+        && value
+            .split('/')
+            .all(|part| !matches!(part, "" | "." | ".." | ".git"))
+}
+
+fn valid_json_pointer(pointer: &str) -> bool {
+    let mut chars = pointer.chars();
+    while let Some(char) = chars.next() {
+        if char == '~' && !matches!(chars.next(), Some('0' | '1')) {
+            return false;
+        }
+    }
+    true
 }
