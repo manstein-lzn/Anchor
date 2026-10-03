@@ -57,14 +57,13 @@ Plugin 挂载到 `/plugins/<id>`，工具入口挂载到 `/tools/<id>/run`，工
 ## 执行链与代码位置
 
 ```text
-WebUI / anchor-graph
-  → 图解析、子图展开与调度
-  → NodeRequest / NodeOutcome 节点边界
-      → Agent：PydanticAI + harness → 工具与结构化结果
-      → Op：执行配置的命令
-  → NodeSandbox / Bubblewrap
-  → 节点工作区产物 → Anchor 提交 Git → 下游只读输入
+Python 平台/Pilot：WebUI → serve.py/Session/Turn → PydanticAI + Harness
+Rust Host Graph：React/Rust API → anchor-runtime GraphRunner
+  → io-harness HostNodes AgentNode / Bubblewrap Op
+两条实现线 → Anchor Graph/Run/Artifact/Sandbox/Plugin 事实与对象页面
 ```
+
+Python Pilot 与 Rust Host 当前并存；它们共享产品不变量，但不对同一 Run 双写。Rust 迁移按 R7→R8→R9 推进，不能把 Python P2/P7 或 Rust A79/A80 的单条证据直接称为另一条实现线已完成。
 
 | 文件或目录 | 职责 |
 | --- | --- |
@@ -139,7 +138,7 @@ Agent 完成由 PydanticAI 校验的结构化结果表示（`summary`，多出�
 
 `rust/anchor-io-harness-runtime` 是 io-harness 0.86.0 的 canonical workspace crate，提供 Rig Provider adapter、Anchor ToolPort/SQLite backend、NodeRequest 执行器和 Graph `NodeExecutionPort`。`HostNodes` 的生产 AgentNode 已切至 io-harness 唯一 loop；Op.run 仍走 Anchor Bubblewrap。io-harness 管理 Agent 上下文、compaction、SQLite checkpoint 与工具效果恢复；Rig 仅作模型 Provider transport；Graph/Run/Artifact/Plugin/Sandbox 事实继续归 Anchor。旧 `experiments/io-harness-*` 入口是兼容 wrapper，不含第二份实现。NodePort 在专用 blocking thread/current-thread Tokio runtime 执行非 `Send` Harness Store，异步解析冻结 PluginBinding 并组装 owned ToolPort。Harness 原生文件/shell/exec 等内建工具被 `ToolMask` 屏蔽；Anchor `anchor_run` 经 Bubblewrap，输入只读挂载精确 Artifact snapshot。Harness completion schema 由本地校验和格式反馈执行，不强制送给 Provider `response_format`。GraphRun format 7 的 `WaitingRecovery` 保留原 Graph cursor，并按 `InvocationKey + io-harness run/attempt ID` 展示未决工具名、step 与开始时间；工具参数不由 Harness attempt journal 保存。普通 `/resume` 在 Run/Graph lease 下为每个未决 attempt 写入明确的恢复 observation，说明工具结果未记录、外部效果未知并要求 Agent 先核查现场，然后继续同一 Harness run；不自动重放工具，也不把底层 Retry/Completed/Abort 暴露为用户流程。内部 `/recovery` API 保留兼容性，但不是主要用户入口。若 Run 已保存为 `running`、宿主却在注册活动任务前退出，重复 `/resume` 或详情页“继续”可恢复同一 cursor。恢复上下文与 Harness 账本不构成外部副作用 exactly-once。provider-free Graph/NodePort、HTTP 恢复投影、前端普通继续 E2E 及真实 provider Completed 恢复 smoke 已验证；跨存储故障注入仍未验收。多个并行 attempt 会逐项写入同一恢复上下文；Run 终止时未决调用只读保留。真实 `deepseek-chat` 多节点 Op→Agent→Op、HTTP MCP 本机 fixture、Bubblewrap 和 Artifact 验收通过，证据 `.local/rust-multinode-lyk86avx/evidence.json`；A79 Completed 证据为 `.local/rust-recovery-cqifxcyz/evidence.json`。精确累计 `max_provider_requests`、Graph 图片输入、逐节点 model alias registry、外部业务 MCP 和 reasoning/富内容 provider 兼容仍未完成；host 目前使用部署级单一模型 Provider。
 
-在 `codex/rust-rig-runtime` 上，`rust/anchor-runtime` 已有 Rig AgentNode、GraphRunner、Run/Checkpoint stores、fanout/join kernel 与 Bubblewrap adapter。`anchor-runner-host` 的 stdio `start_bundle` 与独立 Axum 入口调用同一 Runner；format-1 bundle loader 固定读取 manifest/graph 并核对 Plugin 资源摘要。宿主现支持串行多节点 Agent/Op.run、同 Run 内一一配对非嵌套 fanout/join，以及有限 Op.call wait/detach 生命周期。wait child复用同一 GraphRunner/RunStore/ArtifactPort，暂停后可独立继续并在完成后接回仍等待的父Run；detach admission后立即独立后台执行，服务启动仅接续metadata标明detach且Ready的child，未知Running不重放。父stop取消wait child、不影响detach child；child按identity独立lease，可同时执行多个同target调用。Run metadata和detail.calls投影父子关系及active状态；Graph CRUD对所有存在未完成Run的Graph拒绝。child来源metadata存parent Run/Graph/digest/call node/invocation/mode/root Run，metadata v1兼容读取但旧记录不触发detach恢复。无Plugin child重入只用durable snapshot/input，不依赖当前Graph仍存在；有Plugin child重入仍校验pinned resources。仍不支持input_map/files/result/session、嵌套调用、child Agent/Plugin执行或真实进程/provider恢复验收。五领域并行RSI真实模型证据见A61。
+在 `codex/rust-rig-runtime` 上，`rust/anchor-runtime` 保留 GraphRunner、Run/Checkpoint stores、fanout/join kernel 与 Bubblewrap adapter；AgentNode 生产执行由 `rust/anchor-io-harness-runtime` 的 HostNodes 接管，Rig 只作 Provider transport，不再作为 Agent loop。`anchor-runner-host` 的 stdio `start_bundle` 与独立 Axum 入口调用同一 Runner；format-1 bundle loader 固定读取 manifest/graph 并核对 Plugin 资源摘要。宿主现支持串行多节点 Agent/Op.run、同 Run 内一一配对非嵌套 fanout/join，以及有限 Op.call wait/detach 生命周期。wait child复用同一 GraphRunner/RunStore/ArtifactPort，暂停后可独立继续并在完成后接回仍等待的父Run；detach admission后立即独立后台执行，服务启动仅接续metadata标明detach且Ready的child，未知Running不重放。父stop取消wait child、不影响detach child；child按identity独立lease，可同时执行多个同target调用。Run metadata和detail.calls投影父子关系及active状态；Graph CRUD对所有存在未完成Run的Graph拒绝。child来源metadata存parent Run/Graph/digest/call node/invocation/mode/root Run，metadata v1兼容读取但旧记录不触发detach恢复。无Plugin child重入只用durable snapshot/input，不依赖当前Graph仍存在；有Plugin child重入仍校验pinned resources。仍不支持input_map/files/result/session、嵌套调用、child Agent/Plugin执行或真实进程/provider恢复验收。五领域并行RSI真实模型证据见A61。
 
 宿主节点执行、文件事实、Agent命令工具分别位于 `node_host.rs`、`artifacts.rs`、`node_tools.rs`。每 invocation 使用独立工作区；文件快照由 ArtifactPort 独立复制、摘要校验及 fsync/rename 发布为 fs2 commit，保留 fs1 读取。Coordinator 通过类型化冻结上下文传入 Node/Fanout/Join 及精确父 commit；宿主生成控制文件，并沿不可变父关系以 `/in/<node-id>` 只读挂载祖先文件。模型输出不能授予文件访问权；最近祖先优先，同深度同名冲突、跨 Run、摘要不符及损坏谱系拒绝。Agent 的 `anchor_run` 同样经过宿主命令授权与 Bubblewrap；参数/准入拒绝返回明确 not_executed 供模型修正，取消或未知执行错误不伪称成功。Agent/Op 执行前持久化事实；未知 mutating tool effect 会让同一 Run 保持待恢复，普通 `/resume` 把未决工具与结果未知的事实交给 Agent 核查，然后在原 Harness run 上继续，不自动重放。内部恢复决策 API 只保留兼容性，不是主要用户流程。Op.started、没有 Harness cursor 的 Agent.started 及冲突 backend 事实仍 fail closed。宿主尚不支持精确累计 `max_provider_requests`、Graph 图片输入或自定义 reads/writes；没有默认16轮研究上限。
 
@@ -158,6 +157,8 @@ Pilot 对话执行走 turn API。客户端为每次提交生成 `request_id`，�
 turn 数据库使用 SQLite WAL，让 SSE 读取已提交事件时不与逐条增量写入争抢数据库排他锁。Session JSON/JSONL、Harness 存储和 turn 数据库没有统一事务；实例内锁只对单进程有效。这是当前边界，不再作为跨存储事务改造的待办。
 
 续聊按框架记录接通：Pilot 的 `StepPersistence` 用原生 `FileStepStore`（`state/pilot-steps/`，每个持久化 run 一份 `run.json`、`events.jsonl`、`tool_effects.jsonl`、`snapshots/*.json`、`media/*`），并打开 `capture_frontier=True`——进程在工具执行中被杀时不会走到「已结算」边界，没有 frontier 快照就没有任何可读现场。新一轮消息先看框架记录：记录比已保存对话更长（进程被杀或用户停止的回合走不到保存）时用它，否则用 conversation store。`continue_run(include_interrupted=True)` 读回的历史末尾可能是未完成的 tool call，而框架拒绝在未处理调用上叠加新 prompt，所以 `pilot._close_unfinished` 只把这种响应标成框架自己的 `state='interrupted'`，由框架合成 `outcome='interrupted'` 的 tool-return：模型看到「调用过、结果未知」，不会重放那次调用。`Scheduler.create_turn`、`pilot_message` 允许中断会话接新消息，旧 `unsafe_to_retry` 门禁已删除。
+
+上述 Session/Pilot 续聊、压缩和对象跳转属于 Python 当前入口的 P2/P7 验收；Rust-native 宿主不读取这些内部文件或 turn ID，迁移到 R8 时按同一用户结果重新验收，并保持各自 Run/Session 事实单写。
 
 确认功能已有 `POST /sessions/<id>/confirm`、`/reject` 和 WebUI 入口。待确认记录包含动作、目标、完整提案和 Graph 当前版本摘要；执行前持久化操作意图，遇到已有未完成操作时返回 uncertain。确认与拒绝由存储层比对原调用。这套现有审批通过了真实 DeepSeek HTTP/SSE 验证，浏览器审批测试仍用 mock SSE；它不是新续聊方案的验收证据。
 

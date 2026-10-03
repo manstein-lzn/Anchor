@@ -44,8 +44,8 @@ Rust 平台宿主和独立 Graph 包共享同一 `anchor-runtime` Runner。Pytho
 | R5 串行 Graph Runner | 展开后 Graph 快照、Run 状态、串行路由、不可变提交输入、恢复与停止 | 进行中：首个 Kernel Runner vertical slice、十种 provider-free Python `run()` 场景（含明确失败语义差异、未启动 SCC 闭包及嵌套模块回边重入）、format 1→2 Run 迁移、本机跨进程 lease 退出释放、结果顺序/cursor 输入事实校验、edge decision 晚于其 source result 的 freshness 校验、四个 test-port 跨进程 Runner 故障窗口，以及 FileRunStore 提交成功但调用反馈失败后的重载恢复测试均通过；生产 host/provider 崩溃恢复、更广语义覆盖仍待做。fanout/join Kernel 能力见 R6；当前串行/并行宿主见 R8/A60–A61，完整平台接线待做 |
 | R6 fanout/join | 复用现有配对契约；分支活动身份、乱序收束、失败/停止/崩溃恢复 | 部分完成：Rust 已验证显式一一配对、非嵌套线性拓扑、Run format 3 activation，以及单 Coordinator 的 provider-free 局部并行、join 控制事实、node ceiling/module activation 约束和并行 wave 三个进程崩溃窗口。A61 已接真实宿主文件谱系及五领域 RSI provider 并行运行，并验证分支失败阻断 join、进程中断保留完成分支且不重放未知分支；平台控制与 Agent kill/restart 仍待做。不引入嵌套或隐式并行 |
 | R7 Op.call 与 Plugin/MCP | wait/detach Graph call 通过既有 admission 语义复用同一 Runner；Plugin manifest、MCP stdio/HTTP、凭证与 Sandbox 绑定 | A82 已接入生产 Rust Host 的后台生命周期、child 独立控制/active 与父子关系投影，并通过 provider-free API 测试。Run 固定自身 Graph snapshot；PUT 与 trigger admission 共用短 lease，已有 Run 不受编辑影响；DELETE 仍拒绝存在任意未完成 Run 的 Graph。Plugin resources 漂移仍 fail closed。R7 仍待 Plugin child 执行、文件/result/session 语义、真实 Provider/MCP/Sandbox 与进程故障窗口验收。Python 平台兼容不再是出口条件。 |
-| R8 Rust-native 宿主与独立包 | Rust API/CLI/Session 宿主和 `anchor-graph` 使用同一 Runner；Graph + Plugin 资源闭包与兼容清单 | Rust standalone 与 Rust platform host 对同一 Graph 产生一致 Run/提交/恢复事实；bundle 不含密钥、不扩大授权；旧 Python 只做可选 legacy 适配 |
-| R9 产品迁移与 Python 收缩 | RSI、周报、企业微信助手逐个切换到 Rust-native host；Python 路径降为 legacy/迁移工具 | 每个目标 Graph 通过真实 provider、Sandbox、恢复和平台验收；达到条件后再移除不再使用的 Python Kernel 依赖 |
+| R8 Rust-native 宿主与独立包 | Rust API/CLI/Session 宿主和 `anchor-graph` 使用同一 Runner；Graph + Plugin 资源闭包与兼容清单 | Rust standalone 与 Rust platform host 对同一 Graph 产生一致 Run/提交/恢复事实；bundle 不含密钥、不扩大授权；旧 Python 只做可选 legacy 适配。产品验收复用 `pilot-development-plan.md` 的 P2/P7 共同用户语义；Rust API、存储和 Run/turn 身份可以不同，但字段/状态差异必须单独记录。 |
+| R9 产品迁移与 Python 收缩 | RSI、周报、企业微信助手逐个切换到 Rust-native host；Python 路径降为 legacy/迁移工具 | 只有 R8 共同契约、真实 provider、Sandbox、恢复和平台证据齐全的 Graph 才切换；达到条件后再移除不再使用的 Python Kernel 依赖。provider-free 或 A80 浏览器 slice 不能代替这些出口。 |
 
 ### R8 compatibility spike（历史切片，已被 Rust-native 方向取代）
 
@@ -70,6 +70,8 @@ Rust 平台宿主和独立 Graph 包共享同一 `anchor-runtime` Runner。Pytho
 - Rust-native host 的首个生产出口是一个包含 AgentNode、Op.run、Plugin/MCP、fanout/join 和恢复的真实 Graph；provider-free 只证明接口，真实 provider、Sandbox、重启和 artifact 需要分别验收。
 
 ## 当前进度和下一步
+
+2026-10-04 近期主线：R1–R6 与 HostNodes Agent backend 已有分层证据；先收口 R7（Plugin child 执行、files/result/session、真实 provider/MCP/Sandbox 与跨存储故障窗口），再做 R8（Rust Session/Pilot/Scheduler/Plugin/channel 宿主，并按 P2/P7 共同用户契约重新验收），最后进入 R9 逐图切换。Python P2/P7 仍可完成其 Pilot 入口，不改变 Rust-owned Run；E1/E2 的 Python 功能可并行，不能代替 R8/R9 出口。
 
 2026-10-03 决策更新：用户要求开发阶段直接以 io-harness 满足 AgentRuntime 需求。io-harness 是唯一 Agent loop 与上下文/恢复 owner；Rig 只作 Provider transport。该方向已从隔离 spike 推进到生产 HostNodes Agent 分发，Anchor GraphRunner/Sandbox/Artifact/Plugin 仍为外层事实 owner。能力范围为文本、图片、流式和简单 JSON 工具结果；复杂结构化输出不作为选型阻断，但 Anchor 的 `{summary, route?}` completion 仍由 Harness schema 本地校验。
 

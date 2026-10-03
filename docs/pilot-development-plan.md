@@ -8,7 +8,9 @@
 
 2026-09-26 用户决定：普通会话恢复以持续保存的工作记录（JSONL）为依据，由 Agent 核查现场后续做，不扩建通用审批平台或跨存储事务。2026-10-03 收敛 Rust io-harness 未知副作用路径：同一 Graph Run 保留 cursor，普通“继续”把持久化的中断事实作为恢复上下文交给 Agent；不自动重放工具，也不把 Retry、Completed、Abort 暴露为用户流程。外部副作用仍不承诺 exactly-once。
 
-当前核心目标：找到并接通 PydanticAI / Harness 已有的持久记录和续聊接口，让用户重新打开原会话后继续工作。保持真实流式展示和必要提问，按需接框架压缩，补上对象直接跳转，并完成真实路径验收。Anchor 负责把这些能力接入现有 Session、Graph、Run、Plugin、文件和沙箱边界。
+当前核心目标（历史 Python 路径）：找到并接通 PydanticAI / Harness 已有的持久记录和续聊接口，让用户重新打开原会话后继续工作。保持真实流式展示和必要提问，按需接框架压缩，补上对象直接跳转，并完成真实路径验收。Anchor 负责把这些能力接入现有 Session、Graph、Run、Plugin、文件和沙箱边界。
+
+2026-10-04 路线收敛：Rust-native Runtime 是当前开发主线。io-harness 负责 Rust AgentNode 的 loop、上下文、单节点 checkpoint/compaction 和工具效果恢复；Rig 只负责 Provider transport；Anchor 负责 Graph/Run、Plugin、Sandbox、Artifact、权限和宿主 API。上面的 P2/P7 继续作为 Python legacy 路径的真实验收记录，不再阻塞 Rust-native 的 R1–R9 进度，也不再作为 Rust 产品完成条件。
 
 框架优先：先核对本地固定版本的公开 API、仓库已有调用和最小运行结果，再做必要接线。不能把框架已有的消息存储、恢复、压缩、计划能力重新列成 Anchor 自研系统。JSONL 诉求通过框架原生文件存储承接，不预先设计自有日志协议；需要保留框架同时生成的消息快照和媒体文件，不能误称单个事件 JSONL 就是全部历史。
 
@@ -28,6 +30,8 @@
 6. 用真实 provider、进程中断、服务重启和浏览器路径验收上述行为。未通过真实路径前不写成已完成。
 
 本轮只核对续聊所需的框架压缩配置，不预设摘要格式或记忆机制。计划呈现、系统 Pilot 的实现形态、研究合同、附件、编辑分支和导出方式待后续讨论。
+
+P2/P7 的保存、重开、续聊、必要提问、压缩和 Graph/Run/Artifact 跳转是跨 Runtime 的用户可见契约；共同的是保存事实、重开后能核查现场并继续、未知副作用不自动重放，以及提问和对象跳转可完成，不要求 Python 文件格式或 Run/turn 身份兼容。当前表中的 P2/P7 只关闭 Python Pilot/Session 入口。Rust-native Graph/Run 通过 R7/R8 重新实现并单独验收同一类语义，Rust 证据不回填为 P2/P7 已完成，两条实现线也不对同一 Run 双写。
 
 ## 后续产品需求记录（暂不决定实现）
 
@@ -55,7 +59,17 @@
 | E1 事件触发与运行看板 | Graph/Run 输入、Bearer 白名单、Webhook、Responses 子集、本机定时和时间线看板 | P2/P7 基础稳定 | 确认触发来源、忙碌/停机错过语义、Responses JSON/SSE、计划编辑删除和浏览器查看；未通过真实 provider 前不报端到端完成 | 功能接线与自动回归完成；真实 provider/停机验收待做 |
 | E2 RSI Graph | 每周只读审查 Anchor Run、架构代码、Graph/Plugin 和公开生态，形成可追溯演进提案 | E1/普通 Graph 稳定 | provider-free 全图、公开 API 失败边界、评审反馈回路、计划注册和本地报告；真实 provider、长期递归效果和提案实施单独验收 | 五领域同 Run 并行版已部署并保留原计划；真实验收与当前状态见 A30，长期改进收益单独验收 |
 
-当前顺序只有：核对框架接口 → 接通 Anchor 会话入口 → 真实中断续聊验收。P3–P6 不提供当前实现指导。
+### 当前 Rust-native 推进顺序（2026-10-04）
+
+当前按下面的出口推进，完成一项再进入下一项；provider-free 测试不能替代真实验收：
+
+1. **MCP 渐进披露真实验收**：用真实 Provider 和大工具清单验证先搜索、后精确调用、未授权工具不可见，并记录请求大小或工具 schema 传输量；随后修复发现的权限/元数据问题。
+2. **RSI 内容验收**：对五领域并行报告做独立事实抽查，修复来源绑定、结论和提案质量问题；通过前不把 RSI 视为递归自进化完成，也不自动实施提案。
+3. **Op.call 真实子图验收**：验证 child Graph 的 Plugin/MCP、Sandbox、真实 Provider、文件/结果边界和进程中断恢复；继续遵守“有调用方的 Graph 不允许删除”。
+4. **Rust Host 平台能力**：补 Scheduler/计划停机语义、Session/Pilot、Plugin 管理和真实浏览器路径，再迁移 RSI、周报等生产 Graph。
+5. **独立分发与 Python 收缩**：用同一 Runtime 验证 platform host 与 standalone bundle 的一致 Run/Artifact/恢复事实，补齐平台与外部依赖矩阵；每个业务 Graph 通过真实验收后再收缩对应 Python 路径。
+
+Python P2/P7 仍可单独完成其 legacy 真实验收，但不与以上 Rust-native 顺序交叉实施。P3–P6 不提供当前实现指导。
 
 2026-09-26 独立验收：五处待修复问题及复现证据见 [P2 独立验收报告](pilot-p2-acceptance-review.md)。历史路径通过不代表全部入口和压缩组合已通过。
 
@@ -248,6 +262,7 @@ SSE `message` 的 data 为标准 Vercel chunk，`id` 为已提交到 SQLite 的�
 | A80 | Rust Host → 现有 React 的 Graph/Run/Artifact/Timeline 垂直切片 | Rust Host 托管 React bundle；非 loopback API 受 Bearer key 保护且静态页面可先加载；从 UI 运行 Graph、查看文件和真实 Run 历史；缺失结束时间/非活动 running 状态不得伪造时长或执行状态 | provider-free Host 浏览器 E2E、Host API 子集、Web 单测/build、workspace lint/format 通过；真实 Provider、计划、Session/Pilot、Plugin、relations/channel 和真实 trace UI 仍待验收 | Rust Host 静态页面与资源在 API key 保护开启时可加载，Graph/Run API 仍需 key；浏览器从 Host 页面输入 key、运行无 Plugin Graph、打开节点 Artifact 文件并查看时间线。`/timeline` 返回持久 Run，明确 `scheduling=false`；结束时间未知时界面不显示 0 秒/Invalid Date，非活动但状态 `running` 显示等待接续并归入需关注。证据为本次 Rust Host+React Playwright 1 项、恢复/时间线 Playwright 3 项、Web 单测 33 项、build、runner-host 56 项测试、workspace Clippy 与 fmt/diff。此 slice 不证明真实模型 trace UI、Scheduler 或完整 Rust 平台替代。 |
 | A81 | Rust Host 的 Op.call wait/detach admission 接线 | wait 通过稳定身份持久接纳 child、使用同一 GraphRunner/RunStore/ArtifactPort 并在重载后沿同一 child Run 续行；child 有 API 可见 Graph 来源；只开放冻结的 graph/mode/input，其他 call 字段和嵌套递归 fail closed | wait → child Op.run 的 provider-free Rust Host API e2e 通过；detach 仅持久 admission，后台 dispatch、真实 Provider/Plugin child 与完整 R7 未完成 | Runner-owned GraphCatalog 从部署 catalog root 读取子 bundle。父 child共用 Runner ports但以各自 Run ID/lease执行；child snapshot、input、PluginBinding 固定在 child Run，Plugin drift fail closed；child 写 `graph_call` 来源 metadata，可从 `/runs` list 和 detail 查询。已有 child 重入先按稳定 identity 加载 durable snapshot/input，不要求无 Plugin Graph 的当前定义仍存在；带 Plugin 的 child 仍通过 pinned resources 校验，source metadata 的 `graph_call`、Graph digest 必须与持久 child 一致。父 stop signal不传给 detach admission；本轮 detach 返回 durable accepted 引用但 child 保持 Ready，不宣称后台执行。`ArtifactKind::GraphCall` 生成无业务文件控制产物。验证：两 crate 73 项测试及 `cargo test --workspace --all-targets` 均通过；workspace Clippy `-D warnings`、fmt、diff check 通过。仍拒绝 input_map/files/result/session、嵌套 call；wait child 执行时尚未进入独立 active/control 投影，父子关系也未由 API 投影；未完成 detached dispatcher、Plugin child runtime 复用、进程中断真实验收。 |
 | A82 | Rust Host Op.call wait/detach 生命周期闭环 | detach admission 后立即独立后台运行；重启仅恢复 metadata 明确标记 detach 且 Ready 的 child；child 独立 pause/resume/stop；wait child暂停后可独立恢复并接回原 WaitingCall parent；parent stop仅取消wait child；child按独立identity并发；父子关系API可查 | provider-free Rust Host API 与 GraphCallPort 测试通过；BudgetStopped child 仍需明确预算策略，普通 resume 不接续；真实 Provider/Plugin child、文件/result/session和跨存储故障窗口未覆盖 | Run metadata v2保存 child graph/digest/source bundle、parent Run/Graph/digest、call node/invocation/mode/root Run；v1旧记录可读且缺 source的Run不被detach扫描。detach在GraphCallPort内完成durable child admission后由RunApplication按child FileRunStore lease、重载snapshot/status登记active并立即dispatch；serve启动在bind前只扫描mode=detach且status=Ready的child，wait child和未知Running均不重放。wait child有独立pause token及与parent cancellation的单向桥；child独立控制；wait child非终态时父保持WaitingCall；普通 Paused/Stopped child 可独立 resume，完成后只接回仍等待的父Run；BudgetStopped child 保持阻塞，Host 要求后续明确预算策略，不能由普通 resume 自动续行。父停止时取消wait child，不触及detach child。不同parent identity可同时运行同一target Graph；target Graph PUT允许存在未完成Run，但与Run admission共用短lease，确保后续Run取到完整定义快照；已接纳Run恢复始终使用自身快照。Graph CRUD 共用短 catalog mutation gate；删除检查所有当前可运行 Graph 定义和未结束 Run snapshot 的 `op.call` 引用，有引用或目标自身未结束 Run 时返回冲突；Completed、Failed、Aborted 等终态历史调用不阻止删除，Stopped 仍可恢复并阻止删除。成功删除只清目标 Graph 自身数据，不级联删除/改写调用方或其他 Graph 的 Run。`/runs` trigger与detail.calls投影父Graph/run/node/invocation/mode/root_run。验证：两crate all-target测试82项、Clippy `-D warnings`、fmt与diff check；provider-free Bubblewrap命令覆盖控制和并发。 |
+| A83 | Rust MCP 渐进披露真实验收 | AgentNode 默认只看到搜索/调用两个小工具；搜索只返回冻结 allowlist 中的分页 schema；精确调用再次执行权限校验并保留未知副作用恢复语义 | provider-free、fixture 真实模型和大清单边界已通过；真实业务 MCP/Provider、传输量量化和多模型兼容仍待验收 | `anchor_mcp__search_tools`/`anchor_mcp__call_tool` 已接入 HostNodes，分页、server_id 消歧、schema/结果大小限制和未授权拒绝均已覆盖。下一出口是使用真实 Provider 与大工具清单核对先搜索后调用、请求大小变化和 Mutating/ReadOnly 事实；不能把旧式全量工具 schema 的 A60 证据当作本项通过。 |
 
 每阶段执行相关后端测试、Ruff/compileall、前端测试/build、真实 HTTP 与浏览器验收。最终必须取得全量 pytest 的明确退出码和总结；运行中或仅看到进度点不算通过。阶段产物不能等同于产品全部完成。
 
