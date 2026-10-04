@@ -138,11 +138,11 @@ fn reject_snapshot(snapshot: &GraphSnapshot) -> Result<(), String> {
             .ok_or_else(|| "node needs an Agent or Op definition".to_owned())?;
         if let Some(call) = op.get("call") {
             let fields = call.as_object().ok_or("Op.call must be an object")?;
-            if fields
-                .keys()
-                .any(|key| !["graph", "mode", "input"].contains(&key.as_str()))
-            {
-                return Err("Op.call supports only graph, mode and input in this host".into());
+            // `snapshot.validate()` above already rejects unknown fields and
+            // structurally validates input/input_map/files/result. Session
+            // handoff is the one product field this host still refuses.
+            if fields.contains_key("session") {
+                return Err("Op.call session handoff is not supported by this host".into());
             }
             if fields.get("graph").and_then(Value::as_str).is_none()
                 || !matches!(
@@ -224,7 +224,40 @@ fn make_host_with_control(
     )
     .authorize_workspace_root(&work_root)
     .authorize_readonly_input_root(state.join("artifacts"))
-    .authorize_readonly_destination_root("/in");
+    .authorize_readonly_destination_root("/in")
+    .authorize_readonly_destination_root("/plugins")
+    .allow_network();
+    // Plugin bundles are immutable host inputs.  The standalone runner and
+    // the service API both expose their accepted bundle/catalog roots through
+    // these existing deployment settings; no new Plugin protocol is added.
+    let mut policy = policy;
+    for root in [
+        env::var_os("ANCHOR_RUNNER_BUNDLE_ROOT").map(PathBuf::from),
+        env::var_os("ANCHOR_RUNNER_CATALOG_ROOT").map(PathBuf::from),
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|path| path.is_dir())
+    {
+        policy = policy.authorize_readonly_input_root(root);
+    }
+    // Library Plugins may be top-level symlinks to operator-managed source
+    // directories. Authorize each resolved, admitted Plugin root so the
+    // sandbox can mount the same canonical path the catalog resolved.
+    for root in [
+        env::var_os("ANCHOR_RUNNER_BUNDLE_ROOT").map(PathBuf::from),
+        env::var_os("ANCHOR_RUNNER_CATALOG_ROOT").map(PathBuf::from),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let catalog = anchor_graph_host::FilePluginCatalog::new(&root);
+        for binding in plugin_bindings.values() {
+            if let Ok(directory) = catalog.plugin_directory(&binding.id) {
+                policy = policy.authorize_readonly_input_root(directory);
+            }
+        }
+    }
     let sandbox = Arc::new(BubblewrapSandbox::new(policy).map_err(|e| e.to_string())?);
     let provider = match (
         env::var("ANCHOR_MODEL_API_KEY").ok(),
@@ -248,7 +281,26 @@ fn make_host_with_control(
         .filter(|id| !id.trim().is_empty())
         .map(|id| id.trim().to_owned())
         .collect::<Vec<_>>();
-    let mcp = tool_host::McpToolConfig::from_environment().map_err(|error| error.to_string())?;
+    let bindings = plugin_bindings.values().cloned().collect::<Vec<_>>();
+    let needs_catalog = bindings.iter().any(|binding| {
+        binding
+            .mcp_servers
+            .iter()
+            .any(|server| server != tool_host::FAKE_SERVER_ID)
+    });
+    let mcp = if !needs_catalog {
+        tool_host::McpToolConfig::default()
+    } else {
+        let root = env::var_os("ANCHOR_RUNNER_BUNDLE_ROOT")
+            .or_else(|| env::var_os("ANCHOR_RUNNER_CATALOG_ROOT"))
+            .map(PathBuf::from)
+            .ok_or_else(|| {
+                "a Plugin-bearing Run requires ANCHOR_RUNNER_BUNDLE_ROOT or ANCHOR_RUNNER_CATALOG_ROOT"
+                    .to_owned()
+            })?;
+        tool_host::McpToolConfig::from_catalog(root, &bindings)
+            .map_err(|error| error.to_string())?
+    };
     let artifacts = HostArtifacts::new(state.join("artifacts"), work_root);
     let tools = tool_host::PluginToolHost::new(fake_plugin_ids);
     let io_resolver = Arc::new(node_host::HostIoResolver::new(
@@ -312,16 +364,17 @@ async fn handle(request: Request) -> Response {
                     };
                 }
             };
-            let bundle = match anchor_graph_host::FileGraphBundleLoader::new(bundle_root).load() {
-                Ok(bundle) => bundle,
-                Err(error) => {
-                    return Response::Rejected {
-                        version: 1,
-                        request_id,
-                        reason: error.to_string(),
-                    };
-                }
-            };
+            let bundle =
+                match anchor_graph_host::FileGraphBundleLoader::new(bundle_root.clone()).load() {
+                    Ok(bundle) => bundle,
+                    Err(error) => {
+                        return Response::Rejected {
+                            version: 1,
+                            request_id,
+                            reason: error.to_string(),
+                        };
+                    }
+                };
             if let Err(reason) = reject_snapshot(&bundle.snapshot) {
                 return Response::Rejected {
                     version: 1,
@@ -339,6 +392,7 @@ async fn handle(request: Request) -> Response {
                     .into_iter()
                     .map(|binding| (binding.id.clone(), binding))
                     .collect(),
+                Some(bundle_root),
             )
             .await
         }
@@ -404,7 +458,7 @@ async fn handle(request: Request) -> Response {
                     reason,
                 };
             }
-            execute_snapshot(*snapshot, input, run_id, request_id, BTreeMap::new()).await
+            execute_snapshot(*snapshot, input, run_id, request_id, BTreeMap::new(), None).await
         }
     }
 }
@@ -415,8 +469,18 @@ async fn execute_snapshot(
     run_id: String,
     request_id: String,
     plugin_bindings: BTreeMap<String, anchor_runtime_rig::graph::PluginBinding>,
+    bundle_root: Option<PathBuf>,
 ) -> Response {
-    execute_snapshot_with_control(snapshot, input, run_id, request_id, None, plugin_bindings).await
+    execute_snapshot_with_control(
+        snapshot,
+        input,
+        run_id,
+        request_id,
+        None,
+        plugin_bindings,
+        bundle_root,
+    )
+    .await
 }
 
 async fn execute_snapshot_with_control(
@@ -426,6 +490,7 @@ async fn execute_snapshot_with_control(
     request_id: String,
     supplied_control: Option<HostControl>,
     plugin_bindings: BTreeMap<String, anchor_runtime_rig::graph::PluginBinding>,
+    bundle_root: Option<PathBuf>,
 ) -> Response {
     let _writer = match acquire_deployment_writer() {
         Ok(lease) => lease,
@@ -489,6 +554,13 @@ async fn execute_snapshot_with_control(
             };
         }
     };
+    if let Err(reason) = ensure_standalone_run_metadata(&record, bundle_root.as_deref()) {
+        return Response::Rejected {
+            version: 1,
+            request_id,
+            reason,
+        };
+    }
     match execution.run(record).await {
         Ok(record) => Response::Run {
             version: 1,
@@ -503,6 +575,75 @@ async fn execute_snapshot_with_control(
             reason: error.to_string(),
         },
     }
+}
+
+/// Persist the manual Run identity metadata a framed/standalone top-level Run
+/// needs before GraphRunner can admit an `Op.call` child. `RunnerGraphCatalog`
+/// fails closed when the parent Run has no durable source metadata, so a
+/// `start_bundle`/`start` Run records the same manual identity the HTTP
+/// RunApplication writes. This is idempotent, verifies graph/source/digest on
+/// replay, and never fabricates metadata for a Graph-call child.
+fn ensure_standalone_run_metadata(
+    record: &GraphRunRecord,
+    bundle_root: Option<&std::path::Path>,
+) -> Result<(), String> {
+    if !record
+        .snapshot
+        .ops
+        .values()
+        .any(|op| op.get("call").is_some())
+    {
+        return Ok(());
+    }
+    let bundle_root = match bundle_root {
+        Some(root) => root.to_path_buf(),
+        None => match env::var_os("ANCHOR_RUNNER_BUNDLE_ROOT") {
+            Some(root) => PathBuf::from(root),
+            None => {
+                return Err(
+                    "op.call requires ANCHOR_RUNNER_BUNDLE_ROOT to record the parent Run source"
+                        .into(),
+                );
+            }
+        },
+    };
+    let graph = env::var("ANCHOR_RUNNER_GRAPH_NAME")
+        .ok()
+        .map(|name| name.trim().to_owned())
+        .filter(|name| !name.is_empty())
+        .or_else(|| {
+            bundle_root
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(str::to_owned)
+        })
+        .ok_or_else(|| "cannot derive the standalone parent Graph name".to_owned())?;
+    let source = bundle_root
+        .canonicalize()
+        .map_err(|error| format!("standalone bundle source unavailable: {error}"))?;
+    let state = env_path("ANCHOR_RUNNER_STATE_ROOT")?;
+    let expected = crate::application::RunMetadata::new(
+        record.run_id.clone(),
+        graph,
+        record.graph_digest.clone(),
+        &source,
+    )
+    .map_err(|error| format!("{error:?}"))?;
+    if let Some(existing) =
+        crate::application::metadata::load(&state, &record.run_id).map_err(|e| format!("{e:?}"))?
+    {
+        if existing.trigger_source == "graph_call" {
+            return Err("standalone Run id collides with a Graph-call child identity".into());
+        }
+        if existing.graph != expected.graph
+            || existing.graph_digest != expected.graph_digest
+            || existing.bundle_source != expected.bundle_source
+        {
+            return Err("standalone Run identity metadata conflicts with the accepted Run".into());
+        }
+        return Ok(());
+    }
+    crate::application::metadata::save(&state, &expected).map_err(|error| format!("{error:?}"))
 }
 
 async fn read_frame<R: AsyncRead + Unpin>(reader: &mut R) -> io::Result<Option<Vec<u8>>> {
@@ -621,21 +762,26 @@ mod tests {
     }
 
     #[test]
-    fn host_admission_accepts_only_frozen_op_call_fields() {
+    fn host_admission_accepts_frozen_op_call_fields_and_rejects_session() {
         let graph = GraphSnapshot::admit(serde_json::json!({
             "objective":"parent", "entry":"call", "agents":{},
-            "ops":{"call":{"call":{"graph":"child","mode":"wait","input":{}}}},
+            "ops":{"call":{"call":{
+                "graph":"child","mode":"wait","input":{"a":1},
+                "input_map":{"b":"/b"},
+                "files":[{"node":"up","path":"r.md","as":"input/r.md"}],
+                "result":{"node":"answer","files":["answer.md"]}
+            }}},
             "nodes":[{"id":"call","op":"call","plugins":[]}], "edges":[]
         }))
         .unwrap();
         assert!(reject_snapshot(&graph).is_ok());
-        let unsupported = GraphSnapshot::admit(serde_json::json!({
+        let session = GraphSnapshot::admit(serde_json::json!({
             "objective":"parent", "entry":"call", "agents":{},
-            "ops":{"call":{"call":{"graph":"child","mode":"wait","input_map":{}}}},
+            "ops":{"call":{"call":{"graph":"child","mode":"wait","session":"ops"}}},
             "nodes":[{"id":"call","op":"call","plugins":[]}], "edges":[]
         }))
         .unwrap();
-        assert!(reject_snapshot(&unsupported).is_err());
+        assert!(reject_snapshot(&session).is_err());
     }
 
     #[tokio::test]

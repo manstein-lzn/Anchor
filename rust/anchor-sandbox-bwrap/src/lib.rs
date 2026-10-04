@@ -209,12 +209,38 @@ impl BubblewrapSandbox {
             .file_name()
             .and_then(OsStr::to_str)
             .unwrap_or("");
-        if command != basename {
+        if command != basename && !Path::new(command).starts_with("/plugins/") {
             return Err(SandboxError::InvalidRequest(
-                "command must select an allowlisted executable by basename, not host path".into(),
+                "command must select an allowlisted executable by basename or a mounted Plugin path".into(),
             ));
         }
-        if !self.allowed_commands.contains(basename) {
+        let mounted_plugin_executable = if Path::new(command).starts_with("/plugins/") {
+            request.readonly_inputs.iter().any(|input| {
+                let destination = &input.destination;
+                let Some(relative) = Path::new(command).strip_prefix(destination).ok() else {
+                    return false;
+                };
+                let Ok(source) = fs::canonicalize(&input.source) else {
+                    return false;
+                };
+                let candidate = source.join(relative);
+                candidate.is_file()
+                    && std::fs::metadata(&candidate).is_ok_and(|metadata| {
+                        #[cfg(unix)]
+                        {
+                            use std::os::unix::fs::PermissionsExt;
+                            metadata.permissions().mode() & 0o111 != 0
+                        }
+                        #[cfg(not(unix))]
+                        {
+                            true
+                        }
+                    })
+            })
+        } else {
+            false
+        };
+        if !self.allowed_commands.contains(basename) && !mounted_plugin_executable {
             return Err(SandboxError::InvalidRequest(format!(
                 "command `{basename}` is not authorized by the host sandbox policy"
             )));
@@ -246,6 +272,28 @@ impl BubblewrapSandbox {
             let destination = normalized_destination(&input.destination)?;
             self.authorize_destination(&destination)?;
             readonly_inputs.push((source, destination));
+        }
+        let working_directory = request
+            .working_directory
+            .clone()
+            .unwrap_or_else(|| PathBuf::from(WORKSPACE_MOUNT));
+        if working_directory != Path::new(WORKSPACE_MOUNT) {
+            let in_workspace = working_directory
+                .strip_prefix(WORKSPACE_MOUNT)
+                .ok()
+                .is_some_and(|relative| workspace.join(relative).is_dir());
+            let in_readonly_input = readonly_inputs.iter().any(|(source, destination)| {
+                working_directory
+                    .strip_prefix(destination)
+                    .ok()
+                    .is_some_and(|relative| source.join(relative).is_dir())
+            });
+            if !in_workspace && !in_readonly_input {
+                return Err(SandboxError::InvalidRequest(
+                    "working_directory must be inside the workspace or a mounted read-only input"
+                        .into(),
+                ));
+            }
         }
         let mut workspace_readonly = Vec::with_capacity(request.workspace_readonly.len());
         for relative in &request.workspace_readonly {
@@ -288,6 +336,7 @@ impl BubblewrapSandbox {
         }
         Ok(ResolvedRequest {
             workspace,
+            working_directory,
             readonly_inputs,
             workspace_readonly,
             tool_dirs,
@@ -309,7 +358,12 @@ impl BubblewrapSandbox {
         ))
     }
 
-    fn argv(&self, request: &SandboxRequest, resolved: &ResolvedRequest) -> Vec<String> {
+    fn argv(
+        &self,
+        request: &SandboxRequest,
+        resolved: &ResolvedRequest,
+        include_info_fd: bool,
+    ) -> Vec<String> {
         let mut args = vec!["--unshare-all".to_owned(), "--die-with-parent".to_owned()];
         let mut made_dirs = HashSet::new();
         if request.network == NetworkPolicy::Enabled {
@@ -358,14 +412,48 @@ impl BubblewrapSandbox {
         }
         args.extend([
             "--chdir".into(),
-            WORKSPACE_MOUNT.into(),
+            path_string(&resolved.working_directory),
             "--dev".into(),
             "/dev".into(),
         ]);
-        args.extend(["--info-fd".into(), BWRAP_INFO_FD.to_string()]);
+        if include_info_fd {
+            args.extend(["--info-fd".into(), BWRAP_INFO_FD.to_string()]);
+        }
         args.extend(["--".into()]);
         args.extend(request.command.iter().cloned());
         args
+    }
+
+    /// Build an interactive command inside the same Bubblewrap boundary used
+    /// by [`SandboxPort::run`]. The caller owns the child's lifetime and may
+    /// attach an MCP stdio transport to its piped stdin/stdout. Validation is
+    /// identical to a normal sandbox request; this method does not provide an
+    /// unisolated process fallback.
+    pub fn isolated_command(&self, request: SandboxRequest) -> Result<Command, SandboxError> {
+        let resolved = self.validate_authority(&request)?;
+        if request.cancellation.load(Ordering::Relaxed) {
+            return Err(SandboxError::InvalidRequest(
+                "sandbox command was cancelled before launch".into(),
+            ));
+        }
+        let argv = self.argv(&request, &resolved, false);
+        let mut command = Command::new(&self.binary);
+        command
+            .args(argv)
+            .env_clear()
+            .env("PATH", make_path(&resolved.tool_dirs))
+            .env("HOME", WORKSPACE_MOUNT)
+            .env("TMPDIR", "/tmp")
+            .env("PYTHONDONTWRITEBYTECODE", "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        for variable in &request.environment {
+            command.env(&variable.key, variable.value());
+        }
+        command.as_std_mut().process_group(0);
+        command.kill_on_drop(true);
+        Ok(command)
     }
 }
 
@@ -390,7 +478,7 @@ impl SandboxPort for BubblewrapSandbox {
                     incomplete: false,
                 });
             }
-            let argv = self.argv(&request, &resolved);
+            let argv = self.argv(&request, &resolved, true);
             let mut command = Command::new(&self.binary);
             command
                 .args(argv)
@@ -543,6 +631,7 @@ struct ResolvedSpill {
 }
 struct ResolvedRequest {
     workspace: PathBuf,
+    working_directory: PathBuf,
     readonly_inputs: Vec<(PathBuf, PathBuf)>,
     workspace_readonly: Vec<(PathBuf, PathBuf)>,
     tool_dirs: Vec<PathBuf>,
@@ -1076,7 +1165,7 @@ mod tests {
         let resolved = sandbox
             .validate_authority(&request)
             .expect("authorized read-only input");
-        let argv = sandbox.argv(&request, &resolved);
+        let argv = sandbox.argv(&request, &resolved, true);
         let dirs = argv
             .windows(2)
             .filter(|pair| pair[0] == "--dir")
@@ -1101,7 +1190,7 @@ mod tests {
                 "argv-secret-must-not-appear",
             ));
         let resolved = sandbox.validate_authority(&request).unwrap();
-        let argv = sandbox.argv(&request, &resolved).join(" ");
+        let argv = sandbox.argv(&request, &resolved, true).join(" ");
         assert!(!argv.contains("argv-secret-must-not-appear"));
         assert!(!format!("{request:?}").contains("argv-secret-must-not-appear"));
         let _ = fs::remove_dir_all(dir);

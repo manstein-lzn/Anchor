@@ -152,7 +152,10 @@ def main():
         bundle = proof / "catalog/lifecycle"
         plugin = bundle / "plugins/fixture"
         plugin.mkdir(parents=True)
-        resource = b'{"name":"Local acceptance fixture","mcpServers":{"fixture":{}}}'
+        resource = json.dumps({
+            "name": "Local acceptance fixture",
+            "mcpServers": {"fixture": {"type": "http", "url": endpoint}},
+        }).encode()
         (plugin / "plugin.json").write_bytes(resource)
         digest = hashlib.sha256(b"plugin.json" + hashlib.sha256(resource).digest()).hexdigest()
         token = "lifecycle-" + uuid.uuid4().hex
@@ -162,7 +165,7 @@ def main():
             "entry": "producer",
             "agents": {"worker": {
                 "model": os.environ["ANCHOR_MODEL_NAME"], "network": True,
-                "instructions": "Read /in/producer/source.txt using anchor_run. Search attached MCP tools for fixture_suffix, then call the exact returned tool using anchor_mcp__call_tool with its server_id, tool_name, and arguments={\"text\": <exact source text>}. Write only its returned text field to /workspace/report.txt. Read the file back, then finish with summary and route=verify. Do not guess or compute the suffix yourself.",
+                "instructions": "Read /in/producer/source.txt using anchor_run. Call the attached MCP tool fixture-fixture_fixture_suffix with text=<exact source text>. Write only its returned text field to /workspace/report.txt. Read the file back, then finish with summary and route=verify. Do not guess or compute the suffix yourself.",
             }},
             "ops": {
                 "producer": {"run": command(f"printf %s {shlex.quote(token)} > source.txt; sleep 2")},
@@ -181,7 +184,7 @@ def main():
         env = {key: os.environ[key] for key in keys}
         env.update({
             "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-            "ANCHOR_MODEL_WIRE_API": os.environ.get("ANCHOR_MODEL_WIRE_API", "chat"),
+            "ANCHOR_MODEL_WIRE_API": os.environ.get("ANCHOR_MODEL_WIRE_API", "responses"),
             "ANCHOR_RUNNER_BUNDLE_ROOT": str(bundle),
             "ANCHOR_RUNNER_CATALOG_ROOT": str(proof / "catalog"),
             "ANCHOR_RUNNER_GRAPH_NAME": "lifecycle",
@@ -189,7 +192,6 @@ def main():
             "ANCHOR_RUNNER_WORKSPACE_ROOT": str(proof / "work"),
             "ANCHOR_RUNNER_LISTEN": f"127.0.0.1:{port}",
             "ANCHOR_RUNNER_ALLOWED_COMMANDS": "sh,cat,cp,printf,test,sleep",
-            "ANCHOR_RUST_MCP_SERVERS": json.dumps({"fixture": {"transport": "http", "endpoint": endpoint, "allowed_tools": ["fixture_suffix"]}}),
         })
         api = Api(env, proof)
         api.start()

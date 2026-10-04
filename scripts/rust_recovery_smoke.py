@@ -114,7 +114,7 @@ def main() -> None:
     smoke_model = os.environ.get("ANCHOR_RECOVERY_SMOKE_MODEL", os.environ["ANCHOR_MODEL_NAME"])
     smoke_wire_api = os.environ.get(
         "ANCHOR_RECOVERY_SMOKE_WIRE_API",
-        os.environ.get("ANCHOR_MODEL_WIRE_API", "chat"),
+        os.environ.get("ANCHOR_MODEL_WIRE_API", "responses"),
     )
     executable = ROOT / "rust/target/debug/anchor-runner-host"
     fixture_executable = ROOT / "rust/target/debug/examples/http_fixture"
@@ -131,9 +131,6 @@ def main() -> None:
     plugin_dir.mkdir(parents=True)
     token = "recovery-" + uuid.uuid4().hex
     command = lambda script: shlex.join(["sh", "-c", script])
-    resource = b'{"name":"Local recovery acceptance fixture","mcpServers":{"fixture":{}}}'
-    (plugin_dir / "plugin.json").write_bytes(resource)
-    plugin_digest = hashlib.sha256(b"plugin.json" + hashlib.sha256(resource).digest()).hexdigest()
     graph = {
         "objective": "Resume the same Graph Run after an interrupted mutating tool and verify its effect once.",
         "entry": "producer",
@@ -142,9 +139,8 @@ def main() -> None:
                 "model": smoke_model,
                 "network": True,
                 "instructions": (
-                    "Read /in/producer/source.txt using anchor_run. Search attached MCP tools for fixture_suffix, "
-                    "then call the exact returned tool using anchor_mcp__call_tool with its server_id, tool_name, "
-                    "and arguments={\"text\": <exact source text>}. "
+                    "Read /in/producer/source.txt using anchor_run. Call the attached MCP tool "
+                    "fixture-fixture_fixture_suffix with text=<exact source text>. "
                     "Write only the returned structured text field into /workspace/effect.txt as one line. "
                     "For that single write, call anchor_run once with a shell command that appends the line "
                     "and then runs sleep 90, so an operator can inspect the result while the command is active. "
@@ -171,14 +167,6 @@ def main() -> None:
         "edges": [{"from": "producer", "to": "work"}, {"from": "work", "to": "verify"}],
     }
     (bundle / "graph.json").write_text(json.dumps(graph), encoding="utf-8")
-    (bundle / "manifest.json").write_text(
-        json.dumps({"format": 1, "graph": "graph.json", "plugins": [
-            {"id": "fixture", "digest": plugin_digest, "resources": ["plugin.json"],
-             "mcp_servers": ["fixture"]}
-        ]}),
-        encoding="utf-8",
-    )
-
     with socket.socket() as reserved:
         reserved.bind(("127.0.0.1", 0))
         port = reserved.getsockname()[1]
@@ -209,9 +197,19 @@ def main() -> None:
     if not endpoint.startswith("http://127.0.0.1:"):
         terminate(fixture)
         raise RuntimeError("Local MCP fixture returned an invalid endpoint")
-    env["ANCHOR_RUST_MCP_SERVERS"] = json.dumps({"fixture": {
-        "transport": "http", "endpoint": endpoint, "allowed_tools": ["fixture_suffix"]
-    }})
+    resource = json.dumps({
+        "name": "Local recovery acceptance fixture",
+        "mcpServers": {"fixture": {"type": "http", "url": endpoint}},
+    }).encode()
+    (plugin_dir / "plugin.json").write_bytes(resource)
+    plugin_digest = hashlib.sha256(b"plugin.json" + hashlib.sha256(resource).digest()).hexdigest()
+    (bundle / "manifest.json").write_text(
+        json.dumps({"format": 1, "graph": "graph.json", "plugins": [
+            {"id": "fixture", "digest": plugin_digest, "resources": ["plugin.json"],
+             "mcp_servers": ["fixture"]}
+        ]}),
+        encoding="utf-8",
+    )
     api = Api(env, proof, port)
     try:
         api.start()

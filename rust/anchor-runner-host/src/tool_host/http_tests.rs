@@ -1,4 +1,5 @@
-//! Provider-free tests using real loopback TCP and the public RMCP server.
+//! Provider-free tests using loopback TCP and the public RMCP server.
+
 use super::*;
 use axum::{
     Router,
@@ -25,56 +26,38 @@ use tokio_util::sync::CancellationToken;
 #[derive(Clone)]
 struct Fixture {
     calls: Arc<AtomicUsize>,
-    extra_tool_count: usize,
-    schema_padding_bytes: usize,
 }
+
 impl ServerHandler for Fixture {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("runner-http-fixture", "1"))
     }
+
     async fn list_tools(
         &self,
         _: Option<PaginatedRequestParams>,
         _: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, ErrorData> {
-        let schema = || {
-            Arc::new(
-                serde_json::from_value(json!({
-                    "type":"object",
-                    "description":"x".repeat(self.schema_padding_bytes),
-                    "properties":{"value":{"type":"string"}},
-                    "required":["value"],
-                    "additionalProperties":false
-                }))
-                .unwrap(),
-            )
-        };
-        let mut tools: Vec<Tool> = [
-            ("echo", "Echo the supplied value."),
-            ("hidden", "A hidden fixture tool."),
-            (
-                "weather_lookup",
-                "Retrieve current weather conditions for a city; 查询当前天气情况。",
-            ),
-            ("weather_forecast", "Return a weather forecast for a city."),
-        ]
-        .into_iter()
-        .map(|(name, description)| Tool::new(name, description, schema()))
-        .collect();
-        tools.extend((0..self.extra_tool_count).map(|index| {
-            Tool::new(
-                format!("catalogue_tool_{index:04}"),
-                "A tool in the large-catalogue disclosure fixture.",
-                schema(),
-            )
-        }));
+        let schema: Arc<serde_json::Map<String, Value>> = Arc::new(
+            serde_json::from_value(json!({
+                "type":"object",
+                "properties":{"value":{"type":"string"}},
+                "required":["value"],
+                "additionalProperties":false
+            }))
+            .unwrap(),
+        );
         Ok(ListToolsResult {
-            tools,
+            tools: vec![
+                Tool::new("echo", "Echo the supplied value.", schema.clone()),
+                Tool::new("hidden", "A hidden fixture tool.", schema),
+            ],
             next_cursor: None,
             meta: None,
         })
     }
+
     async fn call_tool(
         &self,
         request: CallToolRequestParams,
@@ -87,13 +70,7 @@ impl ServerHandler for Fixture {
                 "fixture error",
             )]));
         }
-        let mut result = CallToolResult::success(vec![
-            ContentBlock::text("HTTP reply"),
-            ContentBlock::image("aGVsbG8=", "image/png"),
-        ]);
-        if value == "structured-only" {
-            result.content.clear();
-        }
+        let mut result = CallToolResult::success(vec![ContentBlock::json(value.clone())?]);
         result.structured_content = Some(value);
         Ok(result)
     }
@@ -105,31 +82,19 @@ struct HttpFixture {
     cancellation: CancellationToken,
     task: tokio::task::JoinHandle<()>,
 }
+
 impl Drop for HttpFixture {
     fn drop(&mut self) {
         self.cancellation.cancel();
         self.task.abort();
     }
 }
+
 async fn fixture(require_auth: bool) -> HttpFixture {
-    fixture_with_extra_tools(require_auth, 0).await
-}
-
-async fn fixture_with_extra_tools(require_auth: bool, extra_tool_count: usize) -> HttpFixture {
-    fixture_with_catalogue(require_auth, extra_tool_count, 0).await
-}
-
-async fn fixture_with_catalogue(
-    require_auth: bool,
-    extra_tool_count: usize,
-    schema_padding_bytes: usize,
-) -> HttpFixture {
     let cancellation = CancellationToken::new();
     let calls = Arc::new(AtomicUsize::new(0));
     let handler = Fixture {
         calls: calls.clone(),
-        extra_tool_count,
-        schema_padding_bytes,
     };
     let service: StreamableHttpService<Fixture, LocalSessionManager> = StreamableHttpService::new(
         move || Ok(handler.clone()),
@@ -167,6 +132,7 @@ async fn fixture_with_catalogue(
         task,
     }
 }
+
 fn binding(server: &str) -> PluginBinding {
     PluginBinding {
         id: "fixture-plugin".into(),
@@ -175,181 +141,81 @@ fn binding(server: &str) -> PluginBinding {
         mcp_servers: vec![server.into()],
     }
 }
-fn config(endpoint: &str, names: &[&str]) -> McpToolConfig {
+
+fn config(endpoint: &str, _names: &[&str]) -> McpToolConfig {
     McpToolConfig {
         servers: BTreeMap::from([(
-            "fixture".into(),
-            McpServerEnvConfig {
-                transport: "http".into(),
-                endpoint: Some(endpoint.into()),
-                bearer_token_env: None,
-                allowed_tools: names.iter().map(|s| (*s).into()).collect(),
+            "fixture-plugin-fixture".into(),
+            ResolvedMcpServer {
+                plugin_id: "fixture-plugin".into(),
+                name: "fixture".into(),
+                plugin_directory: PathBuf::from("/tmp/fixture-plugin"),
+                config: json!({"type":"http", "url":endpoint, "headers":{}}),
             },
         )]),
     }
 }
 
 #[tokio::test]
-async fn authenticated_http_result_reaches_combined_toolport_without_losing_content() {
+async fn authenticated_http_tools_are_exposed_as_server_prefixed_names() {
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
         let fixture = fixture(true).await;
-        let host_config = |token: &str| McpServerConfig {
+        let host = McpHost::connect(McpServerConfig {
             server_id: "fixture".into(),
-            allowed_tools: BTreeSet::from([
-                "echo".into(),
-                "weather_lookup".into(),
-                "weather_forecast".into(),
-            ]),
             transport: McpTransportConfig::StreamableHttp {
                 endpoint: fixture.endpoint.clone(),
-                bearer_token: Some(Secret::new(token)),
+                bearer_token: Some(Secret::new("fixture-token")),
+                headers: BTreeMap::new(),
             },
+        })
+        .await
+        .unwrap();
+        let tools = LiveMcpTools {
+            hosts: BTreeMap::from([("fixture-plugin-fixture".into(), Arc::new(host))]),
         };
-        assert!(McpHost::connect(host_config("wrong-token")).await.is_err());
-        let host = McpHost::connect(host_config("fixture-token"))
-            .await
-            .unwrap();
-        let live = LiveMcpTools {
-            hosts: BTreeMap::from([("fixture".into(), Arc::new(host))]),
-        };
-        let fake_host = PluginToolHost::new(std::iter::empty());
-        let bindings = [binding("fixture")];
-        let tools = CombinedPluginTools::new(fake_host.for_bindings(&bindings).unwrap(), live);
         let definitions = tools.definitions();
-        assert_eq!(definitions.len(), 2);
         assert_eq!(
             definitions
                 .iter()
                 .map(|tool| tool.name.as_str())
                 .collect::<Vec<_>>(),
-            [MCP_SEARCH_TOOLS_TOOL, MCP_CALL_TOOL]
-        );
-        assert!(tools.is_read_only(MCP_SEARCH_TOOLS_TOOL));
-        assert!(!tools.is_read_only(MCP_CALL_TOOL));
-        assert!(definitions.iter().all(|definition| {
-            !["echo", "weather_lookup", "weather_forecast", "hidden"]
-                .contains(&definition.name.as_str())
-        }));
-
-        let first_page = tools
-            .call(MCP_SEARCH_TOOLS_TOOL, json!({"query":"weather","limit":1}))
-            .await
-            .unwrap();
-        let first_page = first_page[0].as_json().unwrap();
-        assert_eq!(first_page["total_matches"], 2);
-        assert_eq!(first_page["tools"][0]["tool_name"], "weather_forecast");
-        assert_eq!(first_page["tools"][0]["server_id"], "fixture");
-        assert_eq!(first_page["has_more"], true);
-        assert_eq!(first_page["next_offset"], 1);
-        let second_page = tools
-            .call(
-                MCP_SEARCH_TOOLS_TOOL,
-                json!({"query":"weather","offset":1,"limit":1}),
-            )
-            .await
-            .unwrap();
-        let second_page = second_page[0].as_json().unwrap();
-        assert_eq!(second_page["tools"][0]["tool_name"], "weather_lookup");
-        assert_eq!(second_page["has_more"], false);
-        let chinese_search = tools
-            .call(MCP_SEARCH_TOOLS_TOOL, json!({"query":"当前天气"}))
-            .await
-            .unwrap();
-        let chinese_search = chinese_search[0].as_json().unwrap();
-        assert_eq!(chinese_search["total_matches"], 1);
-        assert_eq!(chinese_search["tools"][0]["tool_name"], "weather_lookup");
-
-        let echo_schema = tools
-            .call(MCP_SEARCH_TOOLS_TOOL, json!({"query":"echo"}))
-            .await
-            .unwrap();
-        let echo_schema = echo_schema[0].as_json().unwrap();
-        assert_eq!(
-            echo_schema["tools"][0]["input_schema"],
-            json!({
-                "type":"object",
-                "description":"",
-                "properties":{"value":{"type":"string"}},
-                "required":["value"],
-                "additionalProperties":false
-            })
-        );
-        assert!(matches!(
-            tools
-                .call(MCP_SEARCH_TOOLS_TOOL, json!({"query":"   "}))
-                .await,
-            Err(ToolError::Failed(_))
-        ));
-
-        assert!(matches!(
-            tools.call("hidden", json!({"value":0})).await,
-            Err(ToolError::Unknown(_))
-        ));
-        assert!(matches!(
-            tools
-                .call(
-                    MCP_CALL_TOOL,
-                    json!({"server_id":"fixture","tool_name":"hidden","arguments":{"value":0}})
-                )
-                .await,
-            Err(ToolError::Failed(_))
-        ));
-        assert_eq!(fixture.calls.load(Ordering::SeqCst), 0);
-        let result = tools
-            .call(
-                MCP_CALL_TOOL,
-                json!({
-                    "server_id":"fixture",
-                    "tool_name":"echo",
-                    "arguments":{"value":{"answer":42}}
-                }),
-            )
-            .await
-            .unwrap();
-        assert_eq!(
-            result,
-            vec![
-                ToolResultContent::json(json!({"answer":42})),
-                ToolResultContent::text("HTTP reply"),
-                ToolResultContent::image_base64(
-                    "aGVsbG8=",
-                    Some(rig_agent::core::message::ImageMediaType::PNG),
-                    None
-                )
+            [
+                "fixture-plugin-fixture_echo",
+                "fixture-plugin-fixture_hidden",
             ]
         );
-        assert_eq!(fixture.calls.load(Ordering::SeqCst), 1);
-        assert_eq!(
-            tools
-                .call(
-                    MCP_CALL_TOOL,
-                    json!({
-                        "server_id":"fixture",
-                        "tool_name":"echo",
-                        "arguments":{"value":"structured-only"}
-                    })
-                )
-                .await
-                .unwrap(),
-            vec![ToolResultContent::json(json!("structured-only"))]
-        );
+        assert!(!tools.is_read_only("fixture-plugin-fixture_echo"));
         assert!(matches!(
-            tools
-                .call(
-                    MCP_CALL_TOOL,
-                    json!({
-                        "server_id":"fixture",
-                        "tool_name":"echo",
-                        "arguments":{"value":"error"}
-                    })
-                )
-                .await,
-            Err(ToolError::Failed(_))
+            tools.call("echo", json!({"value": 1})).await,
+            Err(ToolError::Unknown(_))
         ));
-        assert_eq!(fixture.calls.load(Ordering::SeqCst), 3);
+        let result = tools
+            .call(
+                "fixture-plugin-fixture_echo",
+                json!({"value": {"answer": 42}}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result[0].as_json(), Some(&json!({"answer": 42})));
+        assert_eq!(fixture.calls.load(Ordering::SeqCst), 1);
     })
     .await
     .expect("HTTP integration must finish");
+}
+
+#[tokio::test]
+async fn wrong_credentials_fail_before_tool_registration() {
+    let fixture = fixture(true).await;
+    let result = McpHost::connect(McpServerConfig {
+        server_id: "fixture".into(),
+        transport: McpTransportConfig::StreamableHttp {
+            endpoint: fixture.endpoint.clone(),
+            bearer_token: Some(Secret::new("wrong-token")),
+            headers: BTreeMap::new(),
+        },
+    })
+    .await;
+    assert!(result.is_err());
 }
 
 #[tokio::test]
@@ -358,180 +224,75 @@ async fn network_policy_and_tool_name_validation_happen_before_connect() {
     let bindings = [binding("fixture")];
     let result = config(endpoint, &["echo"]).bind(&bindings, false).await;
     assert!(matches!(result, Err(error) if error.contains("network=true")));
-    for names in [
-        vec![""],
-        vec!["invalid.name"],
-        vec![FAKE_ECHO_TOOL],
-        vec![MCP_SEARCH_TOOLS_TOOL],
-        vec![MCP_CALL_TOOL],
-        vec![crate::node_tools::RUN_TOOL_NAME],
-        vec!["echo", "echo"],
-    ] {
-        let result = config(endpoint, &names).bind(&bindings, true).await;
-        assert!(matches!(result, Err(error) if error.contains("valid, unique")));
-    }
-    let mut config = config(endpoint, &["echo"]);
-    config
-        .servers
-        .insert("second".into(), config.servers["fixture"].clone());
-    let result = config
-        .bind(&[binding("fixture"), binding("second")], true)
-        .await;
-    assert!(
-        result.is_err(),
-        "the duplicate endpoint fixture is unreachable"
-    );
-    assert!(
-        config
-            .validate_bindings(&[binding("fixture"), binding("second")])
-            .is_ok(),
-        "server ids disambiguate equal MCP tool names"
-    );
-    assert!(
-        config
-            .validate_bindings(&[binding("fixture"), binding("fixture")])
-            .is_ok()
-    );
+    let missing = McpToolConfig::default()
+        .bind(&bindings, true)
+        .await
+        .err()
+        .unwrap();
+    assert!(missing.contains("not configured"));
 }
 
 #[tokio::test]
-async fn deployment_binding_connects_once_per_server_and_rejects_missing_inventory() {
+async fn each_server_gets_its_own_prefix_and_duplicate_bindings_connect_once() {
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
-        let first_fixture = fixture(false).await;
-        let second_fixture = fixture(false).await;
-        let mut config = config(&first_fixture.endpoint, &["echo"]);
-        config.servers.insert(
-            "second".into(),
-            McpServerEnvConfig {
-                endpoint: Some(second_fixture.endpoint.clone()),
-                ..config.servers["fixture"].clone()
+        let first = fixture(false).await;
+        let second = fixture(false).await;
+        let mut host_config = config(&first.endpoint, &["echo"]);
+        host_config.servers.insert(
+            "fixture-plugin-second".into(),
+            ResolvedMcpServer {
+                plugin_id: "fixture-plugin".into(),
+                name: "second".into(),
+                plugin_directory: PathBuf::from("/tmp/fixture-plugin"),
+                config: json!({"type":"http", "url":second.endpoint, "headers":{}}),
             },
         );
-        let bindings = [binding("fixture"), binding("fixture"), binding("second")];
-        let tools = config.bind(&bindings, true).await.unwrap();
-        assert_eq!(tools.hosts.len(), 2);
-        assert_eq!(tools.definitions().len(), 2);
-        assert!(matches!(
-            tools.call("echo", json!({"value":1})).await,
-            Err(ToolError::Unknown(_))
-        ));
-        tools
-            .call(
-                MCP_CALL_TOOL,
-                json!({"server_id":"fixture","tool_name":"echo","arguments":{"value":1}}),
-            )
+        let mut first_binding = binding("fixture");
+        first_binding.mcp_servers.push("second".into());
+        let tools = host_config
+            .bind(&[first_binding, binding("fixture")], true)
             .await
             .unwrap();
-        assert_eq!(first_fixture.calls.load(Ordering::SeqCst), 1);
-        assert_eq!(second_fixture.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            tools
+                .definitions()
+                .iter()
+                .map(|tool| tool.name.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "fixture-plugin-fixture_echo",
+                "fixture-plugin-fixture_hidden",
+                "fixture-plugin-second_echo",
+                "fixture-plugin-second_hidden",
+            ]
+        );
         tools
-            .call(
-                MCP_CALL_TOOL,
-                json!({"server_id":"second","tool_name":"echo","arguments":{"value":2}}),
-            )
+            .call("fixture-plugin-second_echo", json!({"value": 2}))
             .await
             .unwrap();
-        assert_eq!(first_fixture.calls.load(Ordering::SeqCst), 1);
-        assert_eq!(second_fixture.calls.load(Ordering::SeqCst), 1);
-        let mut missing = config;
-        missing.servers.get_mut("fixture").unwrap().allowed_tools = vec!["missing".into()];
-        assert!(missing.bind(&[binding("fixture")], true).await.is_err());
-        assert_eq!(first_fixture.calls.load(Ordering::SeqCst), 1);
-        assert_eq!(second_fixture.calls.load(Ordering::SeqCst), 1);
+        tools
+            .call("fixture-plugin-fixture_echo", json!({"value": 1}))
+            .await
+            .unwrap();
+        assert_eq!(first.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(second.calls.load(Ordering::SeqCst), 1);
     })
     .await
     .expect("HTTP binding must finish");
 }
 
 #[tokio::test]
-async fn large_mcp_inventory_keeps_provider_catalogue_small_and_search_pages_bounded() {
-    tokio::time::timeout(std::time::Duration::from_secs(10), async {
-        let tool_count = 512;
-        let fixture = fixture_with_extra_tools(false, tool_count).await;
-        let config = McpToolConfig {
-            servers: BTreeMap::from([(
-                "fixture".into(),
-                McpServerEnvConfig {
-                    transport: "http".into(),
-                    endpoint: Some(fixture.endpoint.clone()),
-                    bearer_token_env: None,
-                    allowed_tools: (0..tool_count)
-                        .map(|index| format!("catalogue_tool_{index:04}"))
-                        .collect(),
-                },
-            )]),
-        };
-        let tools = config.bind(&[binding("fixture")], true).await.unwrap();
-        let definitions = tools.definitions();
-        assert_eq!(definitions.len(), 2);
-        assert!(
-            definitions
-                .iter()
-                .all(|definition| !definition.name.starts_with("catalogue_tool_"))
-        );
-        assert!(serde_json::to_vec(&definitions).unwrap().len() < 2_000);
-
-        let result = tools
-            .call(
-                MCP_SEARCH_TOOLS_TOOL,
-                json!({"query":"catalogue","limit":8}),
-            )
-            .await
-            .unwrap();
-        let result = result[0].as_json().unwrap();
-        assert_eq!(result["total_matches"], tool_count);
-        assert_eq!(result["tools"].as_array().unwrap().len(), 8);
-        assert_eq!(result["has_more"], true);
-        assert_eq!(result["next_offset"], 8);
-    })
-    .await
-    .expect("large inventory should stay local until matching tool schemas are requested");
-}
-
-#[tokio::test]
-async fn mcp_search_rejects_schemas_or_pages_that_exceed_disclosure_byte_limits() {
-    tokio::time::timeout(std::time::Duration::from_secs(10), async {
-        let one = fixture_with_catalogue(false, 1, 13 * 1024).await;
-        let config = McpToolConfig {
-            servers: BTreeMap::from([(
-                "fixture".into(),
-                McpServerEnvConfig {
-                    transport: "http".into(),
-                    endpoint: Some(one.endpoint.clone()),
-                    bearer_token_env: None,
-                    allowed_tools: vec!["catalogue_tool_0000".into()],
-                },
-            )]),
-        };
-        let tools = config.bind(&[binding("fixture")], true).await.unwrap();
-        assert!(matches!(
-            tools.call(MCP_SEARCH_TOOLS_TOOL, json!({"query":"catalogue"})).await,
-            Err(ToolError::Failed(message)) if message.contains("disclosure limit")
-        ));
-
-        let many = fixture_with_catalogue(false, 3, 10 * 1024).await;
-        let config = McpToolConfig {
-            servers: BTreeMap::from([(
-                "fixture".into(),
-                McpServerEnvConfig {
-                    transport: "http".into(),
-                    endpoint: Some(many.endpoint.clone()),
-                    bearer_token_env: None,
-                    allowed_tools: (0..3)
-                        .map(|index| format!("catalogue_tool_{index:04}"))
-                        .collect(),
-                },
-            )]),
-        };
-        let tools = config.bind(&[binding("fixture")], true).await.unwrap();
-        assert!(matches!(
-            tools.call(
-                MCP_SEARCH_TOOLS_TOOL,
-                json!({"query":"catalogue","limit":3})
-            ).await,
-            Err(ToolError::Failed(message)) if message.contains("search result")
-        ));
-    })
-    .await
-    .expect("oversized remote schemas are rejected without partial disclosure");
+async fn stdio_requires_the_sandbox_launcher() {
+    let mut config = McpToolConfig::default();
+    config.servers.insert(
+        "fixture-plugin-stdio".into(),
+        ResolvedMcpServer {
+            plugin_id: "fixture-plugin".into(),
+            name: "stdio".into(),
+            plugin_directory: PathBuf::from("/tmp/fixture-plugin"),
+            config: json!({"type":"stdio", "command":"fixture-mcp", "args":[], "env":{}}),
+        },
+    );
+    let error = config.bind(&[binding("stdio")], false).await.err().unwrap();
+    assert!(error.contains("sandbox launcher"));
 }

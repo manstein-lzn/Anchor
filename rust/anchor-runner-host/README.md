@@ -41,22 +41,19 @@ not a business integration. Model requests use the real configured provider.
 - `ANCHOR_RUNNER_ALLOWED_COMMANDS`: explicit comma-separated executable basenames.
   Authorizing `sh` permits its shell scripts inside the Sandbox; this is not a
   whitelist for each command within a script.
-- `ANCHOR_RUST_MCP_SERVERS`: deployment-owned JSON map from manifest server ID to
-  `{"transport":"http","endpoint":"...","allowed_tools":["..."]}` with optional
-  `bearer_token_env` naming a credential environment variable. A node must also
-  declare `network:true` to connect HTTP MCP. Reserved or duplicate names within
-  one server are rejected before connection; equal remote names on different
-  servers remain distinct because calls include `server_id`. `anchor_run` itself
-  remains network-disabled.
+- MCP configuration is read from the admitted Plugin's canonical `plugin.json`
+  and optional `.mcp.json`. The removed deployment-level
+  `ANCHOR_RUST_MCP_SERVERS` setting is not read. HTTP MCP requires the
+  AgentNode's `network:true`;
+  credentials and headers are expanded from the Plugin declaration at bind time.
+  stdio MCP is launched through Bubblewrap with the Plugin mounted read-only at
+  `/plugins/<id>`.
 
-For AgentNodes with MCP Plugins, the model receives only two small Anchor tools:
-`anchor_mcp__search_tools` and `anchor_mcp__call_tool`. Search returns a stable,
-paginated list from this node's admitted Plugin bindings and host allowlists;
-each page has at most 8 matches, each schema is capped at 12 KiB, and the full
-serialized page at 24 KiB. The complete MCP schema catalogue is not sent with every model
-request. Search results are untrusted metadata, not authorization; every call is
-rechecked against the exact server binding and allowlist. MCP calls keep the
-existing conservative unknown-effect recovery behavior.
+For AgentNodes with MCP Plugins, the model receives remote tools directly under
+the Python community convention `<plugin>-<server>_<tool>`. The server inventory
+from the MCP handshake is the source of tool schemas; no Anchor search/call proxy
+is inserted. Plugin Skill files are mounted read-only and their `/plugins/...`
+paths are added to the node instructions.
 
 `Op.run` strings are parsed as quoted argv using shlex. A shell script must be
 explicit, e.g. `sh -c 'cat /in/producer/report.txt > output.txt'`; it does not gain

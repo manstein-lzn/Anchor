@@ -50,7 +50,10 @@ def main() -> None:
         bundle = proof / "bundle"
         plugin = bundle / "plugins/fixture"
         plugin.mkdir(parents=True)
-        resource = b'{"name":"Local acceptance fixture","mcpServers":{"fixture":{}}}'
+        resource = json.dumps({
+            "name": "Local acceptance fixture",
+            "mcpServers": {"fixture": {"type": "http", "url": endpoint}},
+        }).encode()
         (plugin / "plugin.json").write_bytes(resource)
         digest = hashlib.sha256(b"plugin.json" + hashlib.sha256(resource).digest()).hexdigest()
         token = "evidence-" + uuid.uuid4().hex
@@ -62,9 +65,8 @@ def main() -> None:
                 "model": os.environ["ANCHOR_MODEL_NAME"], "network": True,
                 "wall_time_limit_seconds": 120,
                 "instructions": (
-                    "Use anchor_run to read /in/producer/source.txt. Search the attached MCP tools for fixture_suffix, "
-                    "then call the exact returned tool using anchor_mcp__call_tool with its server_id, tool_name, "
-                    "and arguments={\"text\": <exact source text>}. "
+                    "Use anchor_run to read /in/producer/source.txt. Call the attached MCP tool "
+                    "fixture-fixture_fixture_suffix with text=<exact source text>. "
                     "Use anchor_run with command=[\"sh\",\"-c\",\"printf '%s' '<returned structured text field>' > /workspace/report.txt\"] "
                     "to write ONLY the returned structured text field into /workspace/report.txt "
                     "(no newline, no quotes, no Markdown); do not use bash, tee, write_file, exec, or shell. "
@@ -91,17 +93,13 @@ def main() -> None:
             {"id": "fixture", "digest": digest, "resources": ["plugin.json"], "mcp_servers": ["fixture"]}
         ]}))
         env = {name: os.environ[name] for name in required}
-        allowed_tools = ["fixture_suffix"] + [f"fixture_noise_{index:04}" for index in range(fixture_tools)]
         env.update({
             "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-            "ANCHOR_MODEL_WIRE_API": os.environ.get("ANCHOR_MODEL_WIRE_API", "chat"),
+            "ANCHOR_MODEL_WIRE_API": os.environ.get("ANCHOR_MODEL_WIRE_API", "responses"),
             "ANCHOR_RUNNER_BUNDLE_ROOT": str(bundle),
             "ANCHOR_RUNNER_STATE_ROOT": str(proof / "state"),
             "ANCHOR_RUNNER_WORKSPACE_ROOT": str(proof / "work"),
             "ANCHOR_RUNNER_ALLOWED_COMMANDS": "sh,cat,cp,printf,test",
-            "ANCHOR_RUST_MCP_SERVERS": json.dumps({"fixture": {
-                "transport": "http", "endpoint": endpoint, "allowed_tools": allowed_tools
-            }}),
         })
         request = json.dumps({"op": "start_bundle", "version": 1, "request_id": "acceptance", "run_id": "native-multinode", "input": {}}).encode()
         result = subprocess.run([str(ROOT / "rust/target/debug/anchor-runner-host")],
@@ -124,26 +122,21 @@ def main() -> None:
                 call
                 for (serialized,) in store.execute("SELECT calls FROM step_turns ORDER BY step")
                 for call in json.loads(serialized)
-                if call["name"].startswith("anchor_mcp__")
+                if call["name"].startswith("fixture-fixture_")
             ]
             provider_calls = store.execute(
                 "SELECT step, model, prompt_tokens, completion_tokens, total_tokens "
                 "FROM provider_calls ORDER BY id"
             ).fetchall()
         mcp_tool_sequence = [call["name"] for call in calls]
-        assert mcp_tool_sequence[:2] == ["anchor_mcp__search_tools", "anchor_mcp__call_tool"], mcp_tool_sequence
-        selected_call = calls[1]["arguments"]
-        assert selected_call == {
-            "server_id": "fixture",
-            "tool_name": "fixture_suffix",
-            "arguments": {"text": token},
-        }
+        assert mcp_tool_sequence == ["fixture-fixture_fixture_suffix"], mcp_tool_sequence
+        assert calls[0]["arguments"] == {"text": token}
         evidence = {"status": "passed", "run": record["run_id"], "nodes": sorted(record["results"], key=lambda node: record["results"][node][0]["sequence"]),
                     "model_requests": record["results"]["worker"][0]["completion"]["model_requests"],
                     "mcp_tool_sequence": mcp_tool_sequence,
-                    "mcp_required_prefix": mcp_tool_sequence[:2],
-                    "mcp_selected_tool": {"server_id": selected_call["server_id"], "tool_name": selected_call["tool_name"]},
-                    "mcp_inventory_tools": len(allowed_tools),
+                    "mcp_selected_tool": {"server_id": "fixture-fixture", "tool_name": "fixture_suffix"},
+                    "mcp_inventory_tools": fixture_tools + 1,
+                    "provider_wire": env["ANCHOR_MODEL_WIRE_API"],
                     "provider_model_observed": sorted({row[1] for row in provider_calls if row[1]}),
                     "provider_prompt_tokens": [row[2] for row in provider_calls],
                     "provider_prompt_tokens_total": sum(row[2] or 0 for row in provider_calls),

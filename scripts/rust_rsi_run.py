@@ -7,6 +7,7 @@ It neither edits the project nor registers/replaces any production schedule.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -53,9 +54,9 @@ def main() -> None:
         graph = json.loads(graph_path.read_text())
         analyst = graph["agents"]["analyst"]
         analyst["instructions"] = (
-            "这是上一份RSI报告的独立纠错Run。先用rsi_index(domain=previous)和rsi_read读取上一报告的rsi-report.md、evolution.json、sources.md及review.json。"
+            "这是上一份RSI报告的独立纠错Run。先用rsi-anchor.rsi_rsi_index(domain=previous)和rsi-anchor.rsi_rsi_read读取上一报告的rsi-report.md、evolution.json、sources.md及review.json。"
             "按任务input.acceptance_feedback逐项核查并修正，不能仅删除异议而不核对原文。当前Run没有五个审查分支，不读取/in/audit-join或/in/*-audit。"
-            "使用rsi_read核对源代码/冻结产品目标/采集投影的实际边界；必要时重新定位行号，不能沿用旧报告失效定位。"
+            "使用rsi-anchor.rsi_rsi_read核对源代码/冻结产品目标/采集投影的实际边界；必要时重新定位行号，不能沿用旧报告失效定位。"
             "写/workspace/rsi-report.md、evolution.json、sources.md；格式沿原报告，保留原来五领域覆盖局限，明确这次是纠错复核。"
             "若/in/review/review.json存在则先处理本Run最新反馈。不得自动实施提案。\n"
             + analyst["instructions"].split("证据与目标判据", 1)[-1]
@@ -88,15 +89,26 @@ def main() -> None:
             endpoint = plugin.stdout.readline().strip()
             if not endpoint.startswith("http://127.0.0.1:"):
                 raise RuntimeError(f"Evidence server failed; inspect {proof / 'plugin-stderr.log'}")
+            plugin_path = proof / "bundle/plugins/rsi/plugin.json"
+            plugin_manifest = json.loads(plugin_path.read_text())
+            plugin_manifest["mcpServers"]["anchor.rsi"] = {
+                "type": "http", "url": endpoint,
+            }
+            plugin_bytes = json.dumps(plugin_manifest, ensure_ascii=False, indent=2).encode()
+            plugin_path.write_bytes(plugin_bytes)
+            digest = hashlib.sha256(
+                b"plugin.json" + hashlib.sha256(plugin_bytes).digest()
+            ).hexdigest()
+            bundle_manifest = json.loads((proof / "bundle/manifest.json").read_text())
+            bundle_manifest["plugins"][0]["digest"] = digest
+            (proof / "bundle/manifest.json").write_text(json.dumps(bundle_manifest, indent=2))
             env = {**base, **{key: os.environ[key] for key in model_names},
-                   "ANCHOR_MODEL_WIRE_API": os.environ.get("ANCHOR_MODEL_WIRE_API", "chat"),
+                   "ANCHOR_MODEL_WIRE_API": os.environ.get("ANCHOR_MODEL_WIRE_API", "responses"),
                    "ANCHOR_RUNNER_STATE_ROOT": str(proof / "state"),
                    "ANCHOR_RUNNER_WORKSPACE_ROOT": str(proof / "work"),
                    "ANCHOR_RUNNER_BUNDLE_ROOT": str(proof / "bundle"),
                    "ANCHOR_RUNNER_ALLOWED_COMMANDS": "sh,cat,jq,cp,printf,test,ls,sed,head,wc,mkdir",
-                   "ANCHOR_RUST_MCP_SERVERS": json.dumps({"anchor.rsi": {
-                       "transport": "http", "endpoint": endpoint,
-                       "allowed_tools": ["rsi_index", "rsi_read", "rsi_ecosystem"]}})}
+                   }
             request = json.dumps({"op":"start_bundle","version":1,"request_id":"rsi","run_id":"rsi-native","input":({"acceptance_feedback":feedback} if feedback else {})}).encode()
             host = subprocess.Popen([str(ROOT / "rust/target/debug/anchor-runner-host")],
                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)

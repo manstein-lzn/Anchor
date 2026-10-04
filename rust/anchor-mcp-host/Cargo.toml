@@ -7,12 +7,13 @@ description = "Host-owned MCP client adapter for Anchor Rust runtime"
 
 [dependencies]
 rig-core = { workspace = true }
-rmcp = { workspace = true }
+rmcp = { workspace = true, features = ["transport-child-process"] }
 rig-rmcp = { workspace = true }
+http = "1"
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "process"] }
 
 [dev-dependencies]
 axum = "0.8"

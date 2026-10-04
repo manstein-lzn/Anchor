@@ -1,11 +1,7 @@
 //! Host-owned MCP connections. Server configuration, credentials and live
-//! clients stay in this crate; only manifest-authorized tool calls are exposed.
+//! clients stay in this crate; only tools from an admitted Plugin server are exposed.
 
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    fmt,
-    sync::Arc,
-};
+use std::{collections::BTreeMap, fmt, sync::Arc};
 
 use rmcp::{
     ServiceExt,
@@ -37,8 +33,8 @@ impl fmt::Debug for Secret {
     }
 }
 
-/// An explicit host launch/connection description. The manifest chooses the
-/// server id and allowed tool names; it cannot provide commands, URLs or keys.
+/// An explicit host launch/connection description. The Plugin chooses the
+/// server id; commands, URLs, headers and keys are supplied by the host.
 #[derive(Clone)]
 pub enum McpTransportConfig {
     Stdio {
@@ -49,6 +45,14 @@ pub enum McpTransportConfig {
     StreamableHttp {
         endpoint: String,
         bearer_token: Option<Secret>,
+        headers: BTreeMap<String, String>,
+    },
+    /// Legacy MCP SSE is represented so hosts can report it explicitly. The
+    /// pinned RMCP 2.2 client does not implement that transport.
+    Sse {
+        endpoint: String,
+        bearer_token: Option<Secret>,
+        headers: BTreeMap<String, String>,
     },
 }
 
@@ -64,8 +68,18 @@ impl fmt::Debug for McpTransportConfig {
             Self::StreamableHttp {
                 endpoint,
                 bearer_token,
+                ..
             } => f
                 .debug_struct("StreamableHttp")
+                .field("endpoint", &redacted_endpoint(endpoint))
+                .field("bearer_token", &bearer_token.as_ref().map(|_| "[REDACTED]"))
+                .finish(),
+            Self::Sse {
+                endpoint,
+                bearer_token,
+                ..
+            } => f
+                .debug_struct("Sse")
                 .field("endpoint", &redacted_endpoint(endpoint))
                 .field("bearer_token", &bearer_token.as_ref().map(|_| "[REDACTED]"))
                 .finish(),
@@ -78,14 +92,28 @@ fn redacted_endpoint(_endpoint: &str) -> &'static str {
     "[configured endpoint]"
 }
 
+fn custom_headers(
+    headers: &BTreeMap<String, String>,
+) -> Result<std::collections::HashMap<http::HeaderName, http::HeaderValue>, McpHostError> {
+    headers
+        .iter()
+        .map(|(name, value)| {
+            let name = http::HeaderName::try_from(name).map_err(|error| {
+                McpHostError::Connect(format!("invalid MCP header name: {error}"))
+            })?;
+            let value = http::HeaderValue::try_from(value).map_err(|error| {
+                McpHostError::Connect(format!("invalid MCP header value: {error}"))
+            })?;
+            Ok((name, value))
+        })
+        .collect()
+}
+
 /// Host-owned binding for one declared Plugin MCP server.
 #[derive(Clone, Debug)]
 pub struct McpServerConfig {
     pub server_id: String,
     pub transport: McpTransportConfig,
-    /// Exact names declared by the Plugin manifest. Every name must exist on
-    /// the remote server at bind time; undeclared tools are never callable.
-    pub allowed_tools: BTreeSet<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -104,18 +132,18 @@ pub struct ToolCallResult {
 
 #[derive(Debug, Error)]
 pub enum McpHostError {
-    #[error("MCP server id and allowed tool list must be non-empty")]
+    #[error("MCP server id must be non-empty")]
     InvalidBinding,
     #[error("MCP transport connection failed: {0}")]
     Connect(String),
+    #[error("MCP transport is unsupported by the pinned RMCP client: {0}")]
+    UnsupportedTransport(String),
     #[error(
         "stdio MCP launch is unsupported without a host-provided sandboxed launcher; launch it inside Sandbox and bind its RMCP service with bind_service"
     )]
     StdioRequiresSandboxLauncher,
     #[error("MCP tool inventory failed: {0}")]
     Inventory(String),
-    #[error("manifest-declared MCP tool is missing: {0}")]
-    MissingTool(String),
     #[error("MCP tool is not bound by the Plugin manifest: {0}")]
     NotBound(String),
     #[error("MCP tool call failed: {0}")]
@@ -124,11 +152,10 @@ pub enum McpHostError {
     Encode(String),
 }
 
-/// Connected MCP host adapter bound to an immutable manifest tool allowlist.
+/// Connected MCP host adapter bound to one immutable Plugin server inventory.
 /// The live RMCP service is intentionally neither serializable nor Debug.
 pub struct McpHost {
     server_id: String,
-    allowed_tools: BTreeSet<String>,
     inventory: BTreeMap<String, Tool>,
     service: RunningService<RoleClient, ClientInfo>,
 }
@@ -137,7 +164,6 @@ impl fmt::Debug for McpHost {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("McpHost")
             .field("server_id", &self.server_id)
-            .field("allowed_tools", &self.allowed_tools)
             .field("inventory", &self.inventory.keys().collect::<Vec<_>>())
             .field("service", &"[live client redacted]")
             .finish()
@@ -146,7 +172,7 @@ impl fmt::Debug for McpHost {
 
 impl McpHost {
     pub async fn connect(config: McpServerConfig) -> Result<Self, McpHostError> {
-        if config.server_id.trim().is_empty() || config.allowed_tools.is_empty() {
+        if config.server_id.trim().is_empty() {
             return Err(McpHostError::InvalidBinding);
         }
         let service = match &config.transport {
@@ -156,6 +182,7 @@ impl McpHost {
             McpTransportConfig::StreamableHttp {
                 endpoint,
                 bearer_token,
+                headers,
             } => {
                 if endpoint.trim().is_empty() {
                     return Err(McpHostError::InvalidBinding);
@@ -167,23 +194,51 @@ impl McpHost {
                 if let Some(token) = bearer_token {
                     transport.auth_header = Some(token.expose().to_owned());
                 }
+                transport.custom_headers = custom_headers(headers)?;
                 ClientInfo::default()
                     .serve(StreamableHttpClientTransport::from_config(transport))
                     .await
                     .map_err(|e| McpHostError::Connect(e.to_string()))?
             }
+            McpTransportConfig::Sse { .. } => {
+                return Err(McpHostError::UnsupportedTransport(
+                    "legacy SSE transport is not provided by RMCP 2.2; use streamable HTTP".into(),
+                ));
+            }
         };
-        Self::bind_service(config.server_id, config.allowed_tools, service).await
+        Self::bind_service(config.server_id, service).await
+    }
+
+    /// Connect a stdio MCP server through a command that was already created
+    /// by the host sandbox. The command is intentionally supplied by the
+    /// caller: this adapter never spawns an arbitrary Plugin command itself.
+    /// The RMCP child transport owns the process and terminates it when the
+    /// live service is dropped.
+    pub async fn connect_sandboxed_stdio(
+        server_id: String,
+        command: tokio::process::Command,
+    ) -> Result<Self, McpHostError> {
+        if server_id.trim().is_empty() {
+            return Err(McpHostError::InvalidBinding);
+        }
+        let (transport, _stderr) = rmcp::transport::TokioChildProcess::builder(command)
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|error| McpHostError::Connect(error.to_string()))?;
+        let service = ClientInfo::default()
+            .serve(transport)
+            .await
+            .map_err(|error| McpHostError::Connect(error.to_string()))?;
+        Self::bind_service(server_id, service).await
     }
 
     /// Bind an already established public RMCP service. This keeps the same
     /// manifest checks available to embedding hosts and deterministic tests.
     pub async fn bind_service(
         server_id: String,
-        allowed_tools: BTreeSet<String>,
         service: RunningService<RoleClient, ClientInfo>,
     ) -> Result<Self, McpHostError> {
-        if server_id.trim().is_empty() || allowed_tools.is_empty() {
+        if server_id.trim().is_empty() {
             return Err(McpHostError::InvalidBinding);
         }
         let tools = service
@@ -191,21 +246,12 @@ impl McpHost {
             .list_all_tools()
             .await
             .map_err(|e| McpHostError::Inventory(e.to_string()))?;
-        let mut inventory = BTreeMap::new();
-        for tool in tools {
-            let name = tool.name.to_string();
-            if allowed_tools.contains(&name) {
-                inventory.insert(name, tool);
-            }
-        }
-        for name in &allowed_tools {
-            if !inventory.contains_key(name) {
-                return Err(McpHostError::MissingTool(name.clone()));
-            }
-        }
+        let inventory = tools
+            .into_iter()
+            .map(|tool| (tool.name.to_string(), tool))
+            .collect();
         Ok(Self {
             server_id,
-            allowed_tools,
             inventory,
             service,
         })
@@ -227,11 +273,10 @@ impl McpHost {
             .collect()
     }
 
-    /// Convert only the manifest-bound remote tools to Rig DynamicTools.
+    /// Convert the bound remote tools to Rig DynamicTools.
     ///
     /// This preserves Rig's native MCP result handling and liveness checks;
-    /// tools advertised by the server but omitted from the manifest are
-    /// intentionally never registered with the model.
+    /// The catalog selects the server; the MCP handshake supplies its tools.
     pub fn rig_tools(&self) -> Vec<rig_core::tool::DynamicTool> {
         self.inventory
             .values()
@@ -280,13 +325,18 @@ impl McpHost {
         tool_name: &str,
         arguments: Value,
     ) -> Result<rmcp::model::CallToolResult, McpHostError> {
-        if !self.allowed_tools.contains(tool_name) || !self.inventory.contains_key(tool_name) {
+        if !self.inventory.contains_key(tool_name) {
             return Err(McpHostError::NotBound(tool_name.to_owned()));
         }
-        let arguments = arguments
-            .as_object()
-            .cloned()
-            .ok_or_else(|| McpHostError::Call("MCP tool arguments must be a JSON object".into()))?;
+        let arguments = match arguments {
+            Value::Null => serde_json::Map::new(),
+            Value::Object(arguments) => arguments,
+            _ => {
+                return Err(McpHostError::Call(
+                    "MCP tool arguments must be a JSON object".into(),
+                ));
+            }
+        };
         self.service
             .peer()
             .call_tool(CallToolRequestParams::new(tool_name.to_owned()).with_arguments(arguments))
@@ -372,13 +422,9 @@ mod tests {
             .serve(client_io)
             .await
             .expect("fake MCP server handshake");
-        let host = McpHost::bind_service(
-            "fixture".into(),
-            BTreeSet::from(["echo".to_owned()]),
-            service,
-        )
-        .await
-        .expect("manifest binding");
+        let host = McpHost::bind_service("fixture".into(), service)
+            .await
+            .expect("manifest binding");
         (host, task)
     }
 
@@ -390,7 +436,7 @@ mod tests {
                 .iter()
                 .map(|t| t.name.as_str())
                 .collect::<Vec<_>>(),
-            ["echo"]
+            ["echo", "outside"]
         );
         let result = host
             .call("echo", serde_json::json!({"value": "hello"}))
@@ -398,12 +444,13 @@ mod tests {
             .expect("bound call succeeds");
         assert!(!result.is_error);
         assert!(result.content[0].to_string().contains("hello"));
-        assert!(matches!(
-            host.call("outside", serde_json::json!({})).await,
-            Err(McpHostError::NotBound(_))
-        ));
+        let outside = host
+            .call("outside", serde_json::json!({}))
+            .await
+            .expect("all inventory tools are bound");
+        assert!(!outside.is_error);
         let rig_tools = host.rig_tools();
-        assert_eq!(rig_tools.len(), 1);
+        assert_eq!(rig_tools.len(), 2);
         assert_eq!(rig_tools[0].name(), "echo");
         server.abort();
     }
@@ -432,8 +479,8 @@ mod tests {
             transport: McpTransportConfig::StreamableHttp {
                 endpoint: format!("http://{address}/mcp"),
                 bearer_token: None,
+                headers: BTreeMap::new(),
             },
-            allowed_tools: BTreeSet::from(["echo".to_owned()]),
         })
         .await
         .expect("HTTP MCP binding");
@@ -442,7 +489,7 @@ mod tests {
                 .iter()
                 .map(|tool| tool.name.as_str())
                 .collect::<Vec<_>>(),
-            ["echo"]
+            ["echo", "outside"]
         );
         let result = host
             .call("echo", serde_json::json!({"value":"http"}))
@@ -461,7 +508,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn missing_manifest_tool_rejects_binding() {
+    async fn inventory_binding_does_not_require_a_tool_allowlist() {
         let (client_io, server_io) = tokio::io::duplex(16_384);
         let task = tokio::spawn(async move {
             if let Ok(running) = Fixture.serve(server_io).await {
@@ -472,13 +519,9 @@ mod tests {
             .serve(client_io)
             .await
             .expect("handshake");
-        let result = McpHost::bind_service(
-            "fixture".into(),
-            BTreeSet::from(["not-advertised".to_owned()]),
-            service,
-        )
-        .await;
-        assert!(matches!(result, Err(McpHostError::MissingTool(_))));
+        let result = McpHost::bind_service("fixture".into(), service).await;
+        let host = result.expect("inventory binding");
+        assert_eq!(host.tools().len(), 2);
         task.abort();
     }
 
@@ -491,11 +534,26 @@ mod tests {
                 args: Vec::new(),
                 env: BTreeMap::new(),
             },
-            allowed_tools: BTreeSet::from(["echo".into()]),
         };
         assert!(matches!(
             McpHost::connect(config).await,
             Err(McpHostError::StdioRequiresSandboxLauncher)
+        ));
+    }
+
+    #[tokio::test]
+    async fn legacy_sse_is_reported_as_unsupported_by_rmcp_2() {
+        let config = McpServerConfig {
+            server_id: "legacy-sse".into(),
+            transport: McpTransportConfig::Sse {
+                endpoint: "http://127.0.0.1:9/sse".into(),
+                bearer_token: None,
+                headers: BTreeMap::new(),
+            },
+        };
+        assert!(matches!(
+            McpHost::connect(config).await,
+            Err(McpHostError::UnsupportedTransport(message)) if message.contains("legacy SSE")
         ));
     }
 
@@ -504,6 +562,7 @@ mod tests {
         let config = McpTransportConfig::StreamableHttp {
             endpoint: "https://user:pass@mcp.invalid/mcp?token=query-secret".into(),
             bearer_token: Some(Secret::new("super-secret-token")),
+            headers: BTreeMap::new(),
         };
         let debug = format!("{config:?}");
         assert!(!debug.contains("super-secret-token"));

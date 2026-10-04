@@ -42,6 +42,56 @@ pub trait ArtifactPort: Send + Sync {
         &'a self,
         commit: &'a CommitRef,
     ) -> Pin<Box<dyn Future<Output = Result<Value, GraphError>> + Send + 'a>>;
+    /// Stage the parent-visible committed input files selected by an Op.call
+    /// `files` list into the child Run's read-only `/in/call` bundle. Hosts that
+    /// cannot expose immutable file trees must fail closed when a selection is
+    /// requested; an empty selection is always a no-op. Implementations must be
+    /// idempotent for a given child Run so a wait retry never rewrites inputs.
+    fn stage_call_inputs<'a>(
+        &'a self,
+        _child_run_id: &'a str,
+        _parents: &'a [CommitRef],
+        selections: &'a [CallFileSelection],
+    ) -> Pin<Box<dyn Future<Output = Result<(), GraphError>> + Send + 'a>> {
+        Box::pin(async move {
+            if selections.is_empty() {
+                Ok(())
+            } else {
+                Err(GraphError::Unsupported(
+                    "host ArtifactPort cannot stage Op.call input files".into(),
+                ))
+            }
+        })
+    }
+    /// Copy selected files from a child result commit into the parent call node
+    /// workspace `result/` directory, returning the copied relative paths. The
+    /// call node's GraphCall commit is frozen after this future resolves, so a
+    /// successful export is what makes the files readable downstream.
+    fn export_call_result_files<'a>(
+        &'a self,
+        _call_key: &'a InvocationKey,
+        _commit: &'a CommitRef,
+        files: &'a [String],
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, GraphError>> + Send + 'a>> {
+        Box::pin(async move {
+            if files.is_empty() {
+                Ok(Vec::new())
+            } else {
+                Err(GraphError::Unsupported(
+                    "host ArtifactPort cannot export Op.call result files".into(),
+                ))
+            }
+        })
+    }
+}
+
+/// One already-validated `files` selection from an Op.call spec: the committed
+/// source node, the source-relative path, and the child-relative `as` alias.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallFileSelection {
+    pub node: String,
+    pub path: String,
+    pub alias: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,6 +127,7 @@ pub trait GraphCallPort: Send + Sync {
         identity: &'a CallIdentity,
         spec: &'a Value,
         input: &'a Value,
+        input_commits: &'a [CommitRef],
         cancellation: crate::Cancellation,
     ) -> Pin<Box<dyn Future<Output = Result<GraphCallOutcome, GraphError>> + Send + 'a>>;
 }

@@ -3,10 +3,11 @@
 use anchor_runtime_rig::{
     ReadOnlyInput,
     graph::{
-        ArtifactFreezeContext, ArtifactKind, ArtifactPort, CommitRef, GraphError, InvocationKey,
-        NodeCompletion,
+        ArtifactFreezeContext, ArtifactKind, ArtifactPort, CallFileSelection, CommitRef,
+        GraphError, InvocationKey, NodeCompletion,
     },
 };
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{
@@ -65,7 +66,112 @@ impl HostArtifacts {
             }
             mounts.push(ReadOnlyInput::new(path.join("files"), destination));
         }
+        // A child admitted by Op.call sees the explicitly selected parent
+        // committed files read-only at `/in/call`, alongside its own committed
+        // inputs. The bundle is staged before the child runs and frozen with its
+        // identity, so it is stable across a wait resume.
+        let call_inputs = self.call_inputs_path(run_id)?;
+        let call_manifest = self.call_inputs_manifest_path(run_id)?;
+        let bundle_present = fs::symlink_metadata(&call_inputs).is_ok();
+        let manifest_present = fs::symlink_metadata(&call_manifest).is_ok();
+        if bundle_present || manifest_present {
+            // A half-published bundle (bundle without its recorded identity, or
+            // a surviving manifest whose bundle is gone) can never be proven
+            // identical to the frozen selection, so it fails closed instead of
+            // mounting a missing or silently rebuilt input.
+            require_directory(&call_inputs)?;
+            self.verify_call_inputs_bundle(run_id, &call_inputs, None, None)?;
+            let destination = PathBuf::from("/in/call");
+            if mounts.iter().any(|mount| mount.destination == destination) {
+                return Err(corrupt("call input mount conflicts with a committed input"));
+            }
+            mounts.push(ReadOnlyInput::new(call_inputs, destination));
+        }
         Ok(mounts)
+    }
+
+    fn call_inputs_path(&self, run_id: &str) -> Result<PathBuf, GraphError> {
+        validate_component(run_id)?;
+        // The bundle is a read-only sandbox source, so it lives under the
+        // host-authorized artifact root rather than the writable workspace root.
+        let root = self.root.join("call-inputs");
+        checked_path(&root)?;
+        let path = root.join(run_id);
+        checked_path(&path)?;
+        Ok(path)
+    }
+
+    fn call_inputs_manifest_path(&self, run_id: &str) -> Result<PathBuf, GraphError> {
+        let mut path = self.call_inputs_path(run_id)?;
+        path.set_file_name(format!("{run_id}.json"));
+        Ok(path)
+    }
+
+    /// Re-derive the staged `/in/call` bundle and prove it is exactly the
+    /// parent-keyed, child-identified, hash-recorded selection. A tampered or
+    /// incomplete bundle fails closed instead of being mounted.
+    fn verify_call_inputs_bundle(
+        &self,
+        run_id: &str,
+        bundle: &Path,
+        expected_parents: Option<&[CommitRef]>,
+        expected_selections: Option<&[CallFileSelection]>,
+    ) -> Result<(), GraphError> {
+        checked_path(bundle)?;
+        let manifest_path = self.call_inputs_manifest_path(run_id)?;
+        require_file(&manifest_path)?;
+        let manifest: CallInputManifest = serde_json::from_slice(&fs::read(&manifest_path)?)
+            .map_err(|error| corrupt(format!("call input manifest is unreadable: {error}")))?;
+        if manifest.format != 1 || manifest.child_run_id != run_id {
+            return Err(corrupt(
+                "call input manifest does not belong to this child Run",
+            ));
+        }
+        if let Some(expected) = expected_parents
+            && manifest.parents != expected
+        {
+            return Err(corrupt(
+                "call input bundle was staged for a different parent selection",
+            ));
+        }
+        if let Some(expected) = expected_selections {
+            // The frozen selection, not just the parent commits, must match.
+            // A retry that asks for different `(node, path, alias)` inputs is a
+            // different request and must fail closed rather than reuse this
+            // bundle or overwrite it.
+            if manifest.files.len() != expected.len()
+                || manifest
+                    .files
+                    .iter()
+                    .zip(expected)
+                    .any(|(file, selection)| {
+                        file.node != selection.node
+                            || file.path != selection.path
+                            || file.alias != selection.alias
+                    })
+            {
+                return Err(corrupt(
+                    "call input bundle was staged for a different file selection",
+                ));
+            }
+        }
+        let mut expected = BTreeMap::new();
+        for file in &manifest.files {
+            validate_file_relative(&file.alias)?;
+            if expected
+                .insert(file.alias.clone(), (file.sha256.clone(), file.bytes))
+                .is_some()
+            {
+                return Err(corrupt("call input manifest declares a duplicate alias"));
+            }
+        }
+        let actual = scan_hash_tree(bundle)?;
+        if actual != expected {
+            return Err(corrupt(
+                "call input bundle does not match its recorded identity and hashes",
+            ));
+        }
+        Ok(())
     }
 
     /// The caller must first authorize the CommitRef through durable Run results.
@@ -183,12 +289,28 @@ impl HostArtifacts {
             }
             return Ok(commit);
         }
-        let workspace = if context.kind == ArtifactKind::Node {
-            let workspace = self.workspace_path(key)?;
-            require_directory(&workspace)?;
-            Some(workspace)
-        } else {
-            None
+        let workspace = match context.kind {
+            ArtifactKind::Node => {
+                let workspace = self.workspace_path(key)?;
+                require_directory(&workspace)?;
+                Some(workspace)
+            }
+            // A Graph call node has no sandbox workspace of its own, but a wait
+            // call copies explicitly selected child results into `<workspace>/result/`.
+            // Freezing that directory is what makes them readable downstream.
+            ArtifactKind::GraphCall => {
+                let workspace = self.workspace_path(key)?;
+                if workspace.is_dir() {
+                    // Refuse to freeze a result tree that an interrupted export
+                    // left half-published, otherwise an empty or partial
+                    // `result/` would be committed as the call output.
+                    ensure_export_complete(&workspace)?;
+                    Some(workspace)
+                } else {
+                    None
+                }
+            }
+            ArtifactKind::Fanout | ArtifactKind::Join => None,
         };
         let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let temporary = self.root.join(format!(
@@ -317,6 +439,428 @@ impl ArtifactPort for HostArtifacts {
             serde_json::to_value(completion).map_err(|error| corrupt(error.to_string()))
         })
     }
+
+    fn stage_call_inputs<'a>(
+        &'a self,
+        child_run_id: &'a str,
+        parents: &'a [CommitRef],
+        selections: &'a [CallFileSelection],
+    ) -> Pin<Box<dyn Future<Output = Result<(), GraphError>> + Send + 'a>> {
+        Box::pin(async move {
+            if selections.is_empty() {
+                return Ok(());
+            }
+            // Reject a malformed selection before any durable side effect: a
+            // duplicate alias would otherwise publish a bundle the verifier
+            // must reject, leaving the child permanently unable to admit.
+            let mut aliases = std::collections::BTreeSet::new();
+            for selection in selections {
+                validate_file_relative(&selection.path)?;
+                validate_file_relative(&selection.alias)?;
+                if !aliases.insert(selection.alias.clone()) {
+                    return Err(corrupt("call input selection declares a duplicate alias"));
+                }
+            }
+            let final_dir = self.call_inputs_path(child_run_id)?;
+            let manifest_path = self.call_inputs_manifest_path(child_run_id)?;
+            let parent_dir = final_dir
+                .parent()
+                .ok_or_else(|| corrupt("call input bundle has no parent"))?;
+            fs::create_dir_all(parent_dir)?;
+            if let Ok(metadata) = fs::symlink_metadata(&final_dir) {
+                if !metadata.is_dir() {
+                    return Err(corrupt("call input bundle path is not a directory"));
+                }
+                if !manifest_path.is_file() {
+                    // A published bundle whose recorded identity vanished cannot
+                    // be proven identical to the frozen selection. Rebuilding it
+                    // would silently hand the child a different input tree, so
+                    // this fails closed until the admission is fully reset.
+                    return Err(corrupt(
+                        "call input bundle exists without its recorded identity",
+                    ));
+                }
+                // The bundle is frozen with the child identity; a resume must
+                // observe exactly the inputs the first admission selected.
+                return self.verify_call_inputs_bundle(
+                    child_run_id,
+                    &final_dir,
+                    Some(parents),
+                    Some(selections),
+                );
+            }
+            // Clear temp trees this child left behind when a previous attempt
+            // died before publishing. A completed bundle is never named
+            // `.call-inputs-*`, so this cannot drop a committed input.
+            remove_stale_call_input_temps(parent_dir, child_run_id)?;
+            let snapshots = self.expanded_snapshots(parents, None)?;
+            let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            let temporary = parent_dir.join(format!(
+                ".call-inputs-{child_run_id}-{}-{}.tmp",
+                std::process::id(),
+                sequence
+            ));
+            let _ = fs::remove_dir_all(&temporary);
+            fs::create_dir(&temporary)?;
+            let result = (|| {
+                let mut files = Vec::with_capacity(selections.len());
+                for selection in selections {
+                    let (source_root, _) = snapshots
+                        .iter()
+                        .find(|(_, manifest)| manifest.key.node_id == selection.node)
+                        .ok_or_else(|| {
+                            GraphError::InvalidSnapshot(format!(
+                                "Op.call file source node `{}` is not a visible committed input",
+                                selection.node
+                            ))
+                        })?;
+                    let source = source_root.join("files").join(&selection.path);
+                    checked_path(&source)?;
+                    require_file(&source)?;
+                    let (sha256, bytes) =
+                        copy_regular_file(&source, &temporary.join(&selection.alias))?;
+                    files.push(CallInputFile {
+                        node: selection.node.clone(),
+                        path: selection.path.clone(),
+                        alias: selection.alias.clone(),
+                        sha256,
+                        bytes,
+                    });
+                }
+                // Persist every directory level before the manifest records the
+                // hashes, so a crash cannot leave a bundle whose nested entries
+                // are missing after the rename.
+                sync_tree_dirs(&temporary)?;
+                // Publish the manifest before the bundle directory so a crash can
+                // only leave an incomplete publish that the next attempt rebuilds,
+                // never a Ready child whose inputs are missing.
+                write_json_atomic(
+                    &manifest_path,
+                    &CallInputManifest {
+                        format: 1,
+                        child_run_id: child_run_id.to_owned(),
+                        parents: parents.to_vec(),
+                        files,
+                    },
+                )?;
+                fs::rename(&temporary, &final_dir)?;
+                fs::File::open(parent_dir)?.sync_all()?;
+                self.verify_call_inputs_bundle(
+                    child_run_id,
+                    &final_dir,
+                    Some(parents),
+                    Some(selections),
+                )
+            })();
+            if temporary.exists() {
+                let _ = fs::remove_dir_all(&temporary);
+            }
+            result
+        })
+    }
+
+    fn export_call_result_files<'a>(
+        &'a self,
+        call_key: &'a InvocationKey,
+        commit: &'a CommitRef,
+        files: &'a [String],
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, GraphError>> + Send + 'a>> {
+        Box::pin(async move {
+            if files.is_empty() {
+                return Ok(Vec::new());
+            }
+            let workspace = self.workspace_path(call_key)?;
+            let (snapshot, manifest) = self.load_snapshot(commit)?;
+            fs::create_dir_all(&workspace)?;
+            checked_path(&workspace)?;
+            remove_stale_result_dirs(&workspace)?;
+            let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            let temporary =
+                workspace.join(format!(".result-{}-{}.tmp", std::process::id(), sequence));
+            let _ = fs::remove_dir_all(&temporary);
+            fs::create_dir(&temporary)?;
+            let copied = (|| {
+                let mut copied = Vec::with_capacity(files.len());
+                for name in files {
+                    validate_file_relative(name)?;
+                    let recorded = manifest.files.get(name).ok_or_else(|| {
+                        corrupt(format!("result file `{name}` is not in the child commit"))
+                    })?;
+                    let source = snapshot.join("files").join(name);
+                    checked_path(&source)?;
+                    require_file(&source)?;
+                    let (sha256, bytes) = copy_regular_file(&source, &temporary.join(name))?;
+                    if sha256 != recorded.sha256 || bytes != recorded.bytes {
+                        return Err(corrupt(format!(
+                            "result file `{name}` changed after the child commit was verified"
+                        )));
+                    }
+                    copied.push(name.clone());
+                }
+                sync_tree_dirs(&temporary)?;
+                Ok::<_, GraphError>(copied)
+            })();
+            let copied = match copied {
+                Ok(copied) => copied,
+                Err(error) => {
+                    let _ = fs::remove_dir_all(&temporary);
+                    return Err(error);
+                }
+            };
+            // Atomically replace `<workspace>/result` so a crash during transfer
+            // never leaves a partial result tree for the freeze to commit.
+            let target = workspace.join("result");
+            let result = publish_directory(&temporary, &target);
+            if temporary.exists() {
+                let _ = fs::remove_dir_all(&temporary);
+            }
+            result?;
+            fs::File::open(&workspace)?.sync_all()?;
+            Ok(copied)
+        })
+    }
+}
+
+/// Durable, immutable record binding one child `/in/call` bundle to the exact
+/// parent commits and file hashes that produced it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CallInputManifest {
+    format: u32,
+    child_run_id: String,
+    parents: Vec<CommitRef>,
+    files: Vec<CallInputFile>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CallInputFile {
+    node: String,
+    path: String,
+    alias: String,
+    sha256: String,
+    bytes: u64,
+}
+
+fn copy_regular_file(source: &Path, destination: &Path) -> Result<(String, u64), GraphError> {
+    if let Some(parent) = destination.parent() {
+        checked_path(parent)?;
+        fs::create_dir_all(parent)?;
+    }
+    checked_path(destination)?;
+    let mut input = fs::File::open(source)?;
+    let mut output = fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(destination)?;
+    let mut buffer = vec![0_u8; FILE_BUFFER_BYTES];
+    let mut hash = Sha256::new();
+    let mut bytes = 0_u64;
+    loop {
+        let count = match input.read(&mut buffer) {
+            Ok(count) => count,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error.into()),
+        };
+        if count == 0 {
+            break;
+        }
+        let chunk = &buffer[..count];
+        hash.update(chunk);
+        bytes = bytes
+            .checked_add(count as u64)
+            .ok_or_else(|| corrupt("file size overflow"))?;
+        output.write_all(chunk)?;
+    }
+    output.sync_all()?;
+    Ok((format!("{:x}", hash.finalize()), bytes))
+}
+
+fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<(), GraphError> {
+    let bytes = serde_json::to_vec(value).map_err(|error| corrupt(error.to_string()))?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| corrupt("manifest path has no parent"))?;
+    checked_path(parent)?;
+    fs::create_dir_all(parent)?;
+    let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let temporary = parent.join(format!(
+        ".{}.{}.{}.tmp",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("manifest"),
+        std::process::id(),
+        sequence
+    ));
+    let _ = fs::remove_file(&temporary);
+    let mut file = fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&temporary)?;
+    file.write_all(&bytes)?;
+    file.sync_all()?;
+    fs::rename(&temporary, path)?;
+    fs::File::open(parent)?.sync_all()?;
+    Ok(())
+}
+
+fn publish_directory(temporary: &Path, target: &Path) -> Result<(), GraphError> {
+    match fs::symlink_metadata(target) {
+        Ok(metadata) => {
+            if !metadata.is_dir() {
+                return Err(corrupt("result destination is not a directory"));
+            }
+            checked_path(target)?;
+            let old = target.with_file_name(format!(
+                ".result-old-{}-{}.tmp",
+                std::process::id(),
+                TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+            ));
+            let _ = fs::remove_dir_all(&old);
+            fs::rename(target, &old)?;
+            fs::rename(temporary, target)?;
+            let _ = fs::remove_dir_all(&old);
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            fs::rename(temporary, target)?;
+        }
+        Err(error) => return Err(error.into()),
+    }
+    Ok(())
+}
+
+fn remove_stale_result_dirs(workspace: &Path) -> Result<(), GraphError> {
+    for entry in fs::read_dir(workspace)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with(".result") {
+            let path = entry.path();
+            checked_path(&path)?;
+            if entry.file_type()?.is_dir() {
+                fs::remove_dir_all(&path)?;
+            } else {
+                fs::remove_file(&path)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A Graph call workspace is only mutated by `export_call_result_files`, which
+/// publishes `<workspace>/result` through a temporary `.result-*` tree. Any
+/// surviving `.result-*` entry means an export was interrupted, so the freeze
+/// fails closed instead of committing a partial result tree.
+fn ensure_export_complete(workspace: &Path) -> Result<(), GraphError> {
+    checked_path(workspace)?;
+    for entry in fs::read_dir(workspace)? {
+        let entry = entry?;
+        if entry.file_name().to_string_lossy().starts_with(".result") {
+            return Err(corrupt(
+                "result export was interrupted; refusing to freeze a partial call result",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Remove the temporary bundle trees a previous `stage_call_inputs` attempt for
+/// `child_run_id` left behind when it crashed before publishing. Scoped to this
+/// child so an in-flight stage for a different child is never disturbed.
+fn remove_stale_call_input_temps(parent: &Path, child_run_id: &str) -> Result<(), GraphError> {
+    let prefix = format!(".call-inputs-{child_run_id}-");
+    for entry in fs::read_dir(parent)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with(&prefix) && name.ends_with(".tmp") {
+            let path = entry.path();
+            checked_path(&path)?;
+            if entry.file_type()?.is_dir() {
+                fs::remove_dir_all(&path)?;
+            } else {
+                fs::remove_file(&path)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// fsync every directory in a freshly built tree. File contents are already
+/// synced per file, but a nested directory entry is only durable once its own
+/// directory is synced, not just the top-level parent.
+fn sync_tree_dirs(root: &Path) -> Result<(), GraphError> {
+    checked_path(root)?;
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        let path = entry.path();
+        checked_path(&path)?;
+        if entry.file_type()?.is_dir() {
+            sync_tree_dirs(&path)?;
+        }
+    }
+    fs::File::open(root)?.sync_all()?;
+    Ok(())
+}
+
+fn scan_hash_tree(root: &Path) -> Result<BTreeMap<String, (String, u64)>, GraphError> {
+    let mut files = BTreeMap::new();
+    scan_hash_directory(root, root, &mut files)?;
+    Ok(files)
+}
+
+fn scan_hash_directory(
+    root: &Path,
+    current: &Path,
+    files: &mut BTreeMap<String, (String, u64)>,
+) -> Result<(), GraphError> {
+    for entry in fs::read_dir(current)? {
+        let entry = entry?;
+        let path = entry.path();
+        checked_path(&path)?;
+        let relative = path
+            .strip_prefix(root)
+            .map_err(|_| corrupt("call input path escapes root"))?
+            .to_str()
+            .ok_or_else(|| corrupt("call input paths must be UTF-8"))?
+            .to_owned();
+        validate_file_relative(&relative)?;
+        let kind = entry.file_type()?;
+        if kind.is_dir() {
+            scan_hash_directory(root, &path, files)?;
+        } else if kind.is_file() {
+            let mut buffer = vec![0_u8; FILE_BUFFER_BYTES];
+            let mut file = fs::File::open(&path)?;
+            let mut hash = Sha256::new();
+            let mut bytes = 0_u64;
+            loop {
+                let count = match file.read(&mut buffer) {
+                    Ok(count) => count,
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(error) => return Err(error.into()),
+                };
+                if count == 0 {
+                    break;
+                }
+                hash.update(&buffer[..count]);
+                bytes = bytes
+                    .checked_add(count as u64)
+                    .ok_or_else(|| corrupt("call input size overflow"))?;
+            }
+            if files
+                .insert(relative, (format!("{:x}", hash.finalize()), bytes))
+                .is_some()
+            {
+                return Err(corrupt("duplicate call input file"));
+            }
+        } else {
+            return Err(corrupt(
+                "call input symlinks and special files are not supported",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn corrupt(message: impl Into<String>) -> GraphError {

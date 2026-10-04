@@ -366,10 +366,38 @@ impl<R: NodeHostResolver> IoHarnessNodePort<R> {
     }
 
     fn node_request(&self, request: &NodeExecutionRequest, workspace: PathBuf) -> NodeRequest {
+        let plugin_instructions = request
+            .plugins
+            .iter()
+            .filter_map(|binding| {
+                let skills = binding
+                    .resources
+                    .iter()
+                    .filter(|path| path.ends_with("SKILL.md") || path == &"instructions.md")
+                    .map(|path| format!("/plugins/{}/{}", binding.id, path))
+                    .collect::<Vec<_>>();
+                (!skills.is_empty()).then(|| {
+                    format!(
+                        "- {}: read-only Plugin instructions at {}",
+                        binding.id,
+                        skills.join(", ")
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        let instructions = if plugin_instructions.is_empty() {
+            request.instructions.clone()
+        } else {
+            format!(
+                "{}\n\nAvailable Plugins (read-only; read their instructions when needed):\n{}\nAfter context compaction, reread the relevant Plugin instructions as needed. Save task notes and results in /workspace, never in the Plugin library.",
+                request.instructions,
+                plugin_instructions.join("\n")
+            )
+        };
         NodeRequest {
             execution_id: request.key.durable_key(),
             task: request.task.clone(),
-            instructions: request.instructions.clone(),
+            instructions,
             routes: request.routes.clone(),
             max_turns: usize::MAX,
             workspace,

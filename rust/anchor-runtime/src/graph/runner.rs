@@ -318,6 +318,16 @@ impl<'a, S: RunStore, A: ArtifactPort, N: NodeExecutionPort, C: RunControl>
                     call_spec_digest: format!("{:x}", sha2::Sha256::digest(spec_bytes)),
                 };
                 let identity_key = identity.durable_key();
+                // A durable call binds this evaluation identity to one concrete
+                // child Run. The port must keep returning that same child on
+                // every retry; a different child under a stable identity would
+                // silently fork or replay work, so a mismatch fails closed.
+                let bound_child = record
+                    .graph_calls
+                    .get(&identity_key)
+                    .filter(|call| call.status != GraphCallStatus::Deleted)
+                    .and_then(|call| call.child_run_id.clone())
+                    .filter(|child| !child.is_empty());
                 // Older Run records may contain a `Deleted` marker written by the
                 // previous cascade-delete behavior. Preserve their resume behavior;
                 // new deletions reject callers and never create this marker.
@@ -349,9 +359,28 @@ impl<'a, S: RunStore, A: ArtifactPort, N: NodeExecutionPort, C: RunControl>
                             &identity,
                             &spec,
                             &cursor.prepared_input,
+                            &cursor.input_commits,
                             self.control.cancellation(),
                         )
                         .await?;
+                    if let Some(previous) = bound_child.as_deref() {
+                        let returned = match &call_outcome {
+                            GraphCallOutcome::Waiting { child_run_id }
+                            | GraphCallOutcome::Detached { child_run_id }
+                            | GraphCallOutcome::Completed { child_run_id, .. } => {
+                                Some(child_run_id.clone())
+                            }
+                            GraphCallOutcome::Failed { child_run_id, .. }
+                            | GraphCallOutcome::Uncertain { child_run_id, .. } => {
+                                child_run_id.clone()
+                            }
+                        };
+                        if returned.as_deref() != Some(previous) {
+                            return Err(GraphError::CorruptRun(format!(
+                                "Graph call `{identity_key}` changed child Run from `{previous}` to `{returned:?}` on resume"
+                            )));
+                        }
+                    }
                     if mode == "wait"
                         && self.control.stop_requested()
                         && let GraphCallOutcome::Waiting { child_run_id } = &call_outcome

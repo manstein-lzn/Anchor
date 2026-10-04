@@ -109,6 +109,9 @@ pub enum NetworkPolicy {
 #[derive(Clone)]
 pub struct SandboxRequest {
     pub workspace: PathBuf,
+    /// Optional process working directory inside the workspace or a mounted
+    /// read-only input. Defaults to `/workspace` in the concrete adapter.
+    pub working_directory: Option<PathBuf>,
     pub command: Vec<String>,
     pub readonly_inputs: Vec<ReadOnlyInput>,
     /// Workspace-relative paths mounted read-only after the workspace bind.
@@ -132,6 +135,7 @@ impl fmt::Debug for SandboxRequest {
         formatter
             .debug_struct("SandboxRequest")
             .field("workspace", &self.workspace)
+            .field("working_directory", &self.working_directory)
             .field("command", &self.command)
             .field("readonly_inputs", &self.readonly_inputs)
             .field("workspace_readonly", &self.workspace_readonly)
@@ -153,6 +157,7 @@ impl SandboxRequest {
     ) -> Self {
         Self {
             workspace: workspace.into(),
+            working_directory: None,
             command: command.into_iter().map(Into::into).collect(),
             readonly_inputs: Vec::new(),
             workspace_readonly: Vec::new(),
@@ -172,6 +177,13 @@ impl SandboxRequest {
         if !is_safe_absolute(&self.workspace) {
             return Err(SandboxError::InvalidRequest(
                 "workspace must be an absolute path without `..` components".to_owned(),
+            ));
+        }
+        if let Some(working_directory) = &self.working_directory
+            && !is_safe_absolute(working_directory)
+        {
+            return Err(SandboxError::InvalidRequest(
+                "working_directory must be an absolute path without `..` components".to_owned(),
             ));
         }
         if self.command.is_empty() {

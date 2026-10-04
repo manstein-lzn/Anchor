@@ -46,7 +46,7 @@ pub(super) fn now_nanos() -> u128 {
 }
 
 impl RunMetadata {
-    pub(super) fn new(
+    pub(crate) fn new(
         run_id: String,
         graph: String,
         graph_digest: String,

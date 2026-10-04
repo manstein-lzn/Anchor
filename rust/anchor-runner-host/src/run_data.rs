@@ -136,6 +136,15 @@ pub(crate) fn delete_run_data(
         if workspace.exists() {
             std::fs::remove_dir_all(&workspace).map_err(|error| error.to_string())?;
         }
+        // Op.call stages its read-only `/in/call` bundle under the artifact
+        // root; it belongs to this Run and goes with the rest of its data.
+        let call_inputs = data_root
+            .join("artifacts")
+            .join("call-inputs")
+            .join(&record.run_id);
+        if call_inputs.exists() {
+            std::fs::remove_dir_all(&call_inputs).map_err(|error| error.to_string())?;
+        }
     }
     Ok(())
 }

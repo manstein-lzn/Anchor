@@ -8,14 +8,16 @@
 
 use anchor_runtime_rig::Cancellation;
 use anchor_runtime_rig::graph::{
-    ArtifactPort, CallIdentity, GraphCallOutcome, GraphCallPort, GraphError, GraphRunRecord,
-    GraphRunner, GraphSnapshot, NodeExecutionCapabilities, NodeExecutionOutcome, NodeExecutionPort,
-    NodeExecutionRequest, RunControl, RunLease, RunStatus, RunStore,
+    ArtifactPort, CallFileSelection, CallIdentity, CommitRef, GraphCallOutcome, GraphCallPort,
+    GraphError, GraphRunRecord, GraphRunner, GraphSnapshot, InvocationKey,
+    NodeExecutionCapabilities, NodeExecutionOutcome, NodeExecutionPort, NodeExecutionRequest,
+    RunControl, RunLease, RunStatus, RunStore,
 };
 use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{
+    collections::BTreeMap,
     future::Future,
     path::{Component, Path, PathBuf},
     pin::Pin,
@@ -166,65 +168,259 @@ pub struct FilePluginCatalog {
     root: PathBuf,
 }
 
+/// The installed, canonical Plugin definition.  This is the runtime shape of
+/// a Plugin after installation has moved its manifest to the bundle root.
+/// `mcp_servers` contains validated, unexpanded declarations; use
+/// [`FilePluginCatalog::mcp_servers`] when a host is ready to resolve secrets.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PluginDefinition {
+    pub id: String,
+    pub directory: PathBuf,
+    pub name: String,
+    pub description: String,
+    pub skills: Vec<String>,
+    pub unsupported: Vec<String>,
+    pub mcp_servers: Vec<McpServerDefinition>,
+    pub channels: Vec<ChannelDefinition>,
+    pub digest: String,
+}
+
+/// One validated MCP server declaration from `.mcp.json` or `plugin.json`.
+/// The config is kept as JSON because the MCP adapter owns transport-specific
+/// details and credentials; the catalog owns validation and expansion only.
+#[derive(Debug, Clone, PartialEq)]
+pub struct McpServerDefinition {
+    pub name: String,
+    pub config: Value,
+}
+
+/// Service-level channel metadata.  Channels are not MCP servers and are
+/// supervised by the host separately from AgentNode execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChannelDefinition {
+    pub plugin: String,
+    pub platform: String,
+    pub transport: String,
+    pub entrypoint: String,
+    pub required_environment: Vec<String>,
+    pub description: String,
+    pub sdk: String,
+}
+
 impl FilePluginCatalog {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
     }
 
-    fn plugin(&self, id: &str) -> Result<anchor_runtime_rig::graph::PluginBinding, GraphError> {
+    /// Resolve the canonical installed Plugin definition and all of its
+    /// resource metadata.  This is the single catalog path used by runtime
+    /// identity resolution and by host adapters that need live resources.
+    pub fn definition(&self, id: &str) -> Result<PluginDefinition, GraphError> {
+        let (root, dir) = self.plugin_dir(id)?;
+        let manifest_path = dir.join("plugin.json");
+        reject_symlink_components(&dir, &manifest_path)?;
+        let manifest = read_object(&manifest_path)?;
+
+        let name = manifest
+            .get("name")
+            .and_then(Value::as_str)
+            .filter(|name| !name.trim().is_empty())
+            .ok_or_else(|| invalid(format!("Plugin {id}: name is required")))?
+            .to_owned();
+        let interface = manifest
+            .get("interface")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        let description_value = manifest
+            .get("description")
+            .filter(|value| python_truthy(value))
+            .or_else(|| {
+                interface
+                    .get("longDescription")
+                    .filter(|value| python_truthy(value))
+            })
+            .or_else(|| {
+                interface
+                    .get("shortDescription")
+                    .filter(|value| python_truthy(value))
+            })
+            .cloned()
+            .unwrap_or_else(|| Value::String(String::new()));
+        let description = description_value
+            .as_str()
+            .ok_or_else(|| invalid(format!("Plugin {id}: description must be a string")))?
+            .to_owned();
+
+        let skill_roots = match manifest.get("skills") {
+            Some(Value::String(path)) => vec![path.clone()],
+            Some(Value::Array(paths)) => paths
+                .iter()
+                .map(|path| {
+                    path.as_str().map(str::to_owned).ok_or_else(|| {
+                        invalid(format!(
+                            "Plugin {id}: skills must be a path or list of paths"
+                        ))
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+            Some(_) => {
+                return Err(invalid(format!(
+                    "Plugin {id}: skills must be a path or list of paths"
+                )));
+            }
+            None if dir.join("skills").is_dir() => vec!["skills/".into()],
+            None => Vec::new(),
+        };
+        let mut skills = Vec::new();
+        for skill_root in skill_roots {
+            let path = inside_directory(&dir, &skill_root).map_err(|error| {
+                invalid(format!(
+                    "Plugin {id}: skill path is outside the bundle or not a directory: {skill_root} ({error})"
+                ))
+            })?;
+            let mut discovered = Vec::new();
+            collect_skill_files(&dir, &path, &mut discovered)?;
+            discovered.sort();
+            for skill in discovered {
+                if !skills.contains(&skill) {
+                    skills.push(skill);
+                }
+            }
+        }
+        let legacy = dir.join("instructions.md");
+        if legacy.is_file() {
+            skills.push("instructions.md".into());
+        }
+
+        let resources = resource_files(&dir)?;
+        let mut hash = Sha256::new();
+        for relative in &resources {
+            let content = std::fs::read(dir.join(relative))?;
+            hash.update(relative.as_bytes());
+            hash.update(Sha256::digest(content));
+        }
+        let digest = format!("{:x}", hash.finalize());
+
+        let mcp_servers = self.mcp_servers_from_dir(id, &root, &dir, false)?;
+        let channels = channels_from_dir(id, &dir)?;
+        let unsupported = ["hooks", "commands", "agents", "apps"]
+            .into_iter()
+            .filter(|key| {
+                manifest.get(*key).is_some_and(python_truthy)
+                    || dir.join(key).exists()
+                    || (*key == "apps" && dir.join(".app.json").exists())
+            })
+            .map(str::to_owned)
+            .collect();
+
+        Ok(PluginDefinition {
+            id: id.into(),
+            directory: dir,
+            name,
+            description,
+            skills,
+            unsupported,
+            mcp_servers,
+            channels,
+            digest,
+        })
+    }
+
+    /// Return MCP declarations after optionally applying the environment
+    /// expansion defined by the Python Library contract.
+    pub fn mcp_servers(
+        &self,
+        id: &str,
+        resolve_env: bool,
+    ) -> Result<Vec<McpServerDefinition>, GraphError> {
+        let (root, dir) = self.plugin_dir(id)?;
+        self.mcp_servers_from_dir(id, &root, &dir, resolve_env)
+    }
+
+    /// Return validated service-level channel declarations from `channel.json`.
+    pub fn channels(&self, id: &str) -> Result<Vec<ChannelDefinition>, GraphError> {
+        let (_root, dir) = self.plugin_dir(id)?;
+        channels_from_dir(id, &dir)
+    }
+
+    /// Return the canonical installed Plugin directory after validating the
+    /// reference and all path components.
+    pub fn plugin_directory(&self, id: &str) -> Result<PathBuf, GraphError> {
+        self.plugin_dir(id).map(|(_, dir)| dir)
+    }
+
+    fn plugin_dir(&self, id: &str) -> Result<(PathBuf, PathBuf), GraphError> {
         if !valid_reference(id) {
             return Err(invalid(format!("invalid Plugin reference `{id}`")));
         }
         let root = self.root.canonicalize()?;
         let plugins = root.join("plugins");
-        let dir = plugins.join(id);
-        reject_symlink_components(&root, &dir)?;
+        let dir = plugins.join(id).canonicalize()?;
         if !dir.is_dir() {
             return Err(invalid(format!("unknown Plugin `{id}`")));
         }
-        let manifest_path = dir.join("plugin.json");
-        reject_symlink_components(&root, &manifest_path)?;
-        let manifest = read_object(&manifest_path)?;
-        let mut resources = Vec::new();
-        collect_files(&dir, &dir, &mut resources)?;
-        resources.sort();
-        let mut hash = Sha256::new();
-        for rel in &resources {
-            let content = std::fs::read(dir.join(rel))?;
-            hash.update(rel.as_bytes());
-            hash.update(Sha256::digest(content));
-        }
-        let digest = format!("{:x}", hash.finalize());
+        Ok((root, dir))
+    }
 
-        let mut servers = std::collections::BTreeSet::new();
+    fn plugin(&self, id: &str) -> Result<anchor_runtime_rig::graph::PluginBinding, GraphError> {
+        let definition = self.definition(id)?;
+        Ok(anchor_runtime_rig::graph::PluginBinding {
+            id: definition.id,
+            digest: definition.digest,
+            resources: resource_files(&definition.directory)?,
+            mcp_servers: definition
+                .mcp_servers
+                .into_iter()
+                .map(|server| server.name)
+                .collect(),
+        })
+    }
+
+    fn mcp_servers_from_dir(
+        &self,
+        id: &str,
+        root: &Path,
+        dir: &Path,
+        resolve_env: bool,
+    ) -> Result<Vec<McpServerDefinition>, GraphError> {
+        let manifest_path = dir.join("plugin.json");
+        reject_symlink_components(dir, &manifest_path)?;
+        let manifest = read_object(&manifest_path)?;
+        let mut servers = serde_json::Map::new();
         let dot_mcp = dir.join(".mcp.json");
         if dot_mcp.exists() {
-            reject_symlink_components(&root, &dot_mcp)?;
-            collect_server_names(read_object(&dot_mcp)?.get("mcpServers"), &mut servers, id)?;
+            reject_symlink_components(dir, &dot_mcp)?;
+            let config = read_object(&dot_mcp)?;
+            collect_server_values(config.get("mcpServers"), &mut servers, id)?;
         }
         match manifest.get("mcpServers") {
-            None | Some(Value::Null) => {}
+            None => {}
             Some(Value::String(relative)) => {
-                let rel = Path::new(relative);
-                if rel.components().any(|c| !matches!(c, Component::Normal(_))) {
-                    return Err(invalid(format!("Plugin {id}: unsafe MCP config path")));
-                }
-                let config_path = dir.join(rel);
-                reject_symlink_components(&root, &config_path)?;
-                collect_server_names(
-                    read_object(&config_path)?.get("mcpServers"),
-                    &mut servers,
-                    id,
-                )?;
+                let config_path = inside_file(dir, relative)
+                    .map_err(|_| invalid(format!("Plugin {id}: unsafe MCP config path")))?;
+                reject_symlink_components(dir, &config_path)?;
+                let config = read_object(&config_path)?;
+                collect_server_values(config.get("mcpServers"), &mut servers, id)?;
             }
-            Some(value) => collect_server_names(Some(value), &mut servers, id)?,
+            Some(value) => collect_server_values(Some(value), &mut servers, id)?,
         }
-        Ok(anchor_runtime_rig::graph::PluginBinding {
-            id: id.into(),
-            digest,
-            resources,
-            mcp_servers: servers.into_iter().collect(),
-        })
+        let mut result = Vec::new();
+        for (name, value) in servers {
+            let Some(config) = mcp_server(
+                id,
+                &name,
+                value,
+                dir,
+                resolve_env,
+                root.parent().unwrap_or(root),
+            )?
+            else {
+                continue;
+            };
+            result.push(McpServerDefinition { name, config });
+        }
+        Ok(result)
     }
 }
 
@@ -254,27 +450,6 @@ fn read_object(path: &Path) -> Result<serde_json::Map<String, Value>, GraphError
         .as_object()
         .cloned()
         .ok_or_else(|| invalid(format!("{} must contain a JSON object", path.display())))
-}
-fn collect_server_names(
-    value: Option<&Value>,
-    names: &mut std::collections::BTreeSet<String>,
-    id: &str,
-) -> Result<(), GraphError> {
-    let Some(value) = value else { return Ok(()) };
-    let servers = value
-        .as_object()
-        .ok_or_else(|| invalid(format!("Plugin {id}: mcpServers must be an object")))?;
-    for (name, server) in servers {
-        if !valid_reference(name) || !server.is_object() {
-            return Err(invalid(format!(
-                "Plugin {id}: invalid MCP server declaration"
-            )));
-        }
-        if server.get("enabled") != Some(&Value::Bool(false)) {
-            names.insert(name.clone());
-        }
-    }
-    Ok(())
 }
 fn reject_symlink_components(root: &Path, path: &Path) -> Result<(), GraphError> {
     let root = root.canonicalize()?;
@@ -326,6 +501,628 @@ fn collect_files(root: &Path, current: &Path, out: &mut Vec<String>) -> Result<(
         }
     }
     Ok(())
+}
+
+fn python_truthy(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Bool(value) => *value,
+        Value::Number(value) => value.as_f64().is_some_and(|number| number != 0.0),
+        Value::String(value) => !value.is_empty(),
+        Value::Array(value) => !value.is_empty(),
+        Value::Object(value) => !value.is_empty(),
+    }
+}
+
+fn inside_path(base: &Path, relative: &str, require_file: bool) -> Result<PathBuf, String> {
+    let candidate = Path::new(relative);
+    let base = base
+        .canonicalize()
+        .map_err(|error| format!("Plugin directory cannot be resolved: {error}"))?;
+    let joined = base.join(candidate);
+    reject_symlink_components(&base, &joined).map_err(|error| error.to_string())?;
+    let resolved = base
+        .join(candidate)
+        .canonicalize()
+        .map_err(|error| format!("resource cannot be resolved: {error}"))?;
+    if !resolved.starts_with(&base) {
+        return Err("resource escapes the Plugin bundle".into());
+    }
+    if require_file && !resolved.is_file() {
+        return Err("resource is not a file".into());
+    }
+    if !require_file && !resolved.is_dir() {
+        return Err("resource is not a directory".into());
+    }
+    Ok(resolved)
+}
+
+fn inside_directory(base: &Path, relative: &str) -> Result<PathBuf, String> {
+    inside_path(base, relative, false)
+}
+
+fn inside_file(base: &Path, relative: &str) -> Result<PathBuf, String> {
+    inside_path(base, relative, true)
+}
+
+fn collect_skill_files(
+    root: &Path,
+    current: &Path,
+    out: &mut Vec<String>,
+) -> Result<(), GraphError> {
+    for entry in std::fs::read_dir(current)? {
+        let entry = entry?;
+        let path = entry.path();
+        let metadata = std::fs::symlink_metadata(&path)?;
+        if metadata.file_type().is_symlink() {
+            return Err(invalid(format!(
+                "Plugin symlinks are not supported: {}",
+                path.display()
+            )));
+        }
+        if metadata.is_dir() {
+            collect_skill_files(root, &path, out)?;
+        } else if metadata.is_file() && path.file_name().is_some_and(|name| name == "SKILL.md") {
+            out.push(
+                path.strip_prefix(root)
+                    .map_err(|error| invalid(error.to_string()))?
+                    .to_string_lossy()
+                    .replace('\\', "/"),
+            );
+        }
+    }
+    Ok(())
+}
+
+fn resource_files(root: &Path) -> Result<Vec<String>, GraphError> {
+    let mut resources = Vec::new();
+    collect_files(root, root, &mut resources)?;
+    resources.sort();
+    Ok(resources)
+}
+
+fn collect_server_values(
+    value: Option<&Value>,
+    servers: &mut serde_json::Map<String, Value>,
+    id: &str,
+) -> Result<(), GraphError> {
+    let Some(value) = value else { return Ok(()) };
+    let object = value
+        .as_object()
+        .ok_or_else(|| invalid(format!("Plugin {id}: mcpServers must be an object")))?;
+    for (name, server) in object {
+        if !valid_reference(name) || !server.is_object() {
+            return Err(invalid(format!(
+                "Plugin {id}: invalid MCP server declaration"
+            )));
+        }
+        servers.insert(name.clone(), server.clone());
+    }
+    Ok(())
+}
+
+fn valid_environment_key(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|character| character == '_' || character.is_ascii_alphanumeric())
+}
+
+fn environment(plugin: &str, key: &str) -> Result<String, GraphError> {
+    if !valid_environment_key(key) {
+        return Err(invalid(format!(
+            "Plugin {plugin}: invalid MCP environment variable name"
+        )));
+    }
+    std::env::var(key).map_err(|_| {
+        invalid(format!(
+            "Plugin {plugin}: MCP environment variable {key} is not set"
+        ))
+    })
+}
+
+fn http_url_is_valid(url: &str) -> bool {
+    let Some(rest) = url
+        .strip_prefix("http://")
+        .or_else(|| url.strip_prefix("https://"))
+    else {
+        return false;
+    };
+    if rest.contains('#') || rest.contains('\0') {
+        return false;
+    }
+    let authority = rest.split(['/', '?']).next().unwrap_or_default();
+    if authority.is_empty() || authority.contains('@') {
+        return false;
+    }
+    if let Some(rest) = authority.strip_prefix('[') {
+        return rest
+            .split_once(']')
+            .is_some_and(|(host, _)| !host.is_empty());
+    }
+    !authority.split(':').next().unwrap_or_default().is_empty()
+}
+
+fn normalize_inside(base: &Path, relative: &str) -> Option<PathBuf> {
+    let mut path = base.to_path_buf();
+    for component in Path::new(relative).components() {
+        match component {
+            Component::Normal(part) => path.push(part),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !path.pop() || !path.starts_with(base) {
+                    return None;
+                }
+            }
+            Component::RootDir | Component::Prefix(_) => return None,
+        }
+    }
+    path.starts_with(base).then_some(path)
+}
+
+#[cfg(unix)]
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    path.metadata()
+        .is_ok_and(|metadata| metadata.permissions().mode() & 0o111 != 0)
+}
+
+#[cfg(not(unix))]
+fn is_executable(path: &Path) -> bool {
+    path.is_file()
+}
+
+fn validate_mcp(
+    id: &str,
+    name: &str,
+    server: &serde_json::Map<String, Value>,
+) -> Result<(), GraphError> {
+    let stdio = server.contains_key("command");
+    let allowed: &[&str] = if stdio {
+        &[
+            "type",
+            "enabled",
+            "startup_timeout_sec",
+            "tool_timeout_sec",
+            "command",
+            "args",
+            "env",
+            "env_vars",
+            "optional_env_vars",
+            "cwd",
+        ]
+    } else {
+        &[
+            "type",
+            "enabled",
+            "startup_timeout_sec",
+            "tool_timeout_sec",
+            "url",
+            "headers",
+            "http_headers",
+            "env_http_headers",
+            "bearer_token_env_var",
+            "auth",
+            "oauth_resource",
+        ]
+    };
+    if let Some(key) = server.keys().find(|key| !allowed.contains(&key.as_str())) {
+        return Err(invalid(format!(
+            "Plugin {id}, server {name}: unsupported MCP field: {key}"
+        )));
+    }
+    if let Some(enabled) = server.get("enabled")
+        && !enabled.is_boolean()
+    {
+        return Err(invalid(format!(
+            "Plugin {id}, server {name}: enabled must be boolean"
+        )));
+    }
+    let transport = server
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or(if stdio { "stdio" } else { "http" });
+    if (stdio && transport != "stdio") || (!stdio && !matches!(transport, "http" | "sse")) {
+        return Err(invalid(format!(
+            "Plugin {id}, server {name}: invalid MCP transport type"
+        )));
+    }
+    for key in [
+        "command",
+        "cwd",
+        "url",
+        "bearer_token_env_var",
+        "oauth_resource",
+    ] {
+        if let Some(value) = server.get(key)
+            && value
+                .as_str()
+                .is_none_or(|value| value.is_empty() || value.contains('\0'))
+        {
+            return Err(invalid(format!(
+                "Plugin {id}, server {name}: {key} must be a nonempty string"
+            )));
+        }
+    }
+    for key in ["args", "env_vars", "optional_env_vars"] {
+        if let Some(value) = server.get(key) {
+            let Some(values) = value.as_array() else {
+                return Err(invalid(format!(
+                    "Plugin {id}, server {name}: {key} must be a list of strings"
+                )));
+            };
+            if values
+                .iter()
+                .any(|value| value.as_str().is_none_or(|value| value.contains('\0')))
+            {
+                return Err(invalid(format!(
+                    "Plugin {id}, server {name}: {key} must be a list of strings"
+                )));
+            }
+        }
+    }
+    for key in ["env", "headers", "http_headers", "env_http_headers"] {
+        if let Some(value) = server.get(key) {
+            let Some(values) = value.as_object() else {
+                return Err(invalid(format!(
+                    "Plugin {id}, server {name}: {key} must contain string keys and values"
+                )));
+            };
+            if values.iter().any(|(key, value)| {
+                key.is_empty()
+                    || key.contains('\0')
+                    || value.as_str().is_none_or(|value| value.contains('\0'))
+            }) {
+                return Err(invalid(format!(
+                    "Plugin {id}, server {name}: {key} must contain string keys and values"
+                )));
+            }
+        }
+    }
+    for key in ["startup_timeout_sec", "tool_timeout_sec"] {
+        if let Some(value) = server.get(key)
+            && !value
+                .as_f64()
+                .is_some_and(|value| value > 0.0 && value <= 86_400.0)
+        {
+            return Err(invalid(format!(
+                "Plugin {id}, server {name}: {key} must be positive seconds, at most 86400"
+            )));
+        }
+    }
+    if !stdio {
+        let url = server
+            .get("url")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if !http_url_is_valid(url) {
+            return Err(invalid(format!(
+                "Plugin {id}, server {name}: url must be HTTP(S), without embedded credentials or fragment"
+            )));
+        }
+        if server
+            .get("auth")
+            .is_some_and(|value| value.as_str() != Some("oauth"))
+        {
+            return Err(invalid(format!(
+                "Plugin {id}, server {name}: auth supports only oauth; use headers or bearer_token_env_var for tokens"
+            )));
+        }
+        if server.contains_key("headers") && server.contains_key("http_headers") {
+            return Err(invalid(format!(
+                "Plugin {id}, server {name}: choose headers or http_headers, not both"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn expand_env(value: Value, plugin_dir: &Path, plugin_id: &str) -> Result<Value, GraphError> {
+    match value {
+        Value::String(text) => {
+            let mut output = String::with_capacity(text.len());
+            let bytes = text.as_bytes();
+            let mut index = 0;
+            while index < bytes.len() {
+                if bytes[index] == b'$' && bytes.get(index + 1) == Some(&b'{') {
+                    let Some(end) = text[index + 2..].find('}') else {
+                        output.push(bytes[index] as char);
+                        index += 1;
+                        continue;
+                    };
+                    let end = index + 2 + end;
+                    let token = &text[index + 2..end];
+                    let (key, default) = token
+                        .split_once(":-")
+                        .map(|(key, default)| (key, Some(default)))
+                        .unwrap_or((token, None));
+                    if !valid_environment_key(key) {
+                        output.push_str(&text[index..=end]);
+                        index = end + 1;
+                        continue;
+                    }
+                    let replacement = match key {
+                        "CODEX_PLUGIN_ROOT" | "CLAUDE_PLUGIN_ROOT" | "PLUGIN_ROOT" => {
+                            plugin_dir.to_string_lossy().into_owned()
+                        }
+                        _ => match std::env::var(key) {
+                            Ok(value) if !value.is_empty() => value,
+                            Ok(value) => default.unwrap_or(&value).to_owned(),
+                            Err(_) => default.map(str::to_owned).ok_or_else(|| {
+                                invalid(format!(
+                                    "Plugin {plugin_id}: MCP environment variable {key} is not set"
+                                ))
+                            })?,
+                        },
+                    };
+                    output.push_str(&replacement);
+                    index = end + 1;
+                } else {
+                    let character = text[index..].chars().next().expect("index in string");
+                    output.push(character);
+                    index += character.len_utf8();
+                }
+            }
+            Ok(Value::String(output))
+        }
+        Value::Array(items) => items
+            .into_iter()
+            .map(|item| expand_env(item, plugin_dir, plugin_id))
+            .collect::<Result<Vec<_>, _>>()
+            .map(Value::Array),
+        Value::Object(items) => items
+            .into_iter()
+            .map(|(key, item)| Ok((key, expand_env(item, plugin_dir, plugin_id)?)))
+            .collect::<Result<serde_json::Map<_, _>, GraphError>>()
+            .map(Value::Object),
+        other => Ok(other),
+    }
+}
+
+fn mcp_server(
+    id: &str,
+    name: &str,
+    value: Value,
+    plugin_dir: &Path,
+    resolve_env: bool,
+    data_root: &Path,
+) -> Result<Option<Value>, GraphError> {
+    let mut server = value
+        .as_object()
+        .cloned()
+        .ok_or_else(|| invalid(format!("Plugin {id}: MCP server {name} must be an object")))?;
+    validate_mcp(id, name, &server)?;
+    if server.get("enabled") == Some(&Value::Bool(false)) {
+        return Ok(None);
+    }
+
+    if resolve_env {
+        server = expand_env(Value::Object(server), plugin_dir, id)?
+            .as_object()
+            .cloned()
+            .ok_or_else(|| invalid("expanded MCP server is not an object".into()))?;
+
+        if let Some(command) = server.get("command").and_then(Value::as_str) {
+            let executable = Path::new(command);
+            if executable.is_absolute()
+                && !executable.starts_with(plugin_dir)
+                && !["/usr", "/bin", "/lib", "/lib64", "/sbin"]
+                    .iter()
+                    .any(|prefix| executable.starts_with(prefix))
+            {
+                return Err(invalid(format!(
+                    "Plugin {id}: MCP executable is outside system paths"
+                )));
+            }
+            if executable.is_absolute()
+                && executable.starts_with(plugin_dir)
+                && (!executable.is_file() || !is_executable(executable))
+            {
+                return Err(invalid(format!(
+                    "Plugin {id}: MCP command is not an executable Plugin file"
+                )));
+            }
+            if let Some(Value::Array(values)) = server.get("optional_env_vars")
+                && values.iter().filter_map(Value::as_str).any(|name| {
+                    std::env::var(name)
+                        .ok()
+                        .is_none_or(|value| value.trim().is_empty())
+                })
+            {
+                return Ok(None);
+            }
+        }
+    }
+
+    if let Some(Value::String(cwd)) = server.get("cwd").cloned()
+        && !Path::new(&cwd).is_absolute()
+    {
+        let path = normalize_inside(plugin_dir, &cwd)
+            .ok_or_else(|| invalid(format!("Plugin {id}: MCP cwd escapes the Plugin bundle")))?;
+        let path = if path.exists() {
+            let resolved = path.canonicalize()?;
+            if !resolved.starts_with(plugin_dir) {
+                return Err(invalid(format!(
+                    "Plugin {id}: MCP cwd escapes the Plugin bundle"
+                )));
+            }
+            resolved
+        } else {
+            path
+        };
+        server.insert(
+            "cwd".into(),
+            Value::String(path.to_string_lossy().into_owned()),
+        );
+    }
+
+    if resolve_env {
+        let stdio = server.contains_key("command");
+        if stdio {
+            let mut env = server
+                .get("env")
+                .and_then(Value::as_object)
+                .cloned()
+                .unwrap_or_default();
+            let names = server
+                .get("env_vars")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .chain(
+                    server
+                        .get("optional_env_vars")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten(),
+                )
+                .filter_map(Value::as_str);
+            for key in names {
+                let value = environment(id, key)?;
+                env.insert(key.into(), Value::String(value));
+            }
+            server.insert("env".into(), Value::Object(env));
+        } else {
+            let mut headers = server
+                .get("http_headers")
+                .and_then(Value::as_object)
+                .cloned()
+                .unwrap_or_default();
+            if let Some(explicit) = server.get("headers").and_then(Value::as_object) {
+                headers.extend(explicit.clone());
+            }
+            if let Some(values) = server.get("env_http_headers").and_then(Value::as_object) {
+                for (header, variable) in values {
+                    let variable = variable.as_str().ok_or_else(|| {
+                        invalid(format!(
+                            "Plugin {id}: invalid MCP environment variable name"
+                        ))
+                    })?;
+                    headers.insert(header.clone(), Value::String(environment(id, variable)?));
+                }
+            }
+            if let Some(variable) = server.get("bearer_token_env_var").and_then(Value::as_str) {
+                if headers
+                    .keys()
+                    .any(|key| key.eq_ignore_ascii_case("authorization"))
+                {
+                    return Err(invalid(format!(
+                        "Plugin {id}: duplicate MCP authorization configuration"
+                    )));
+                }
+                let token = environment(id, variable)?;
+                headers.insert(
+                    "Authorization".into(),
+                    Value::String(format!("Bearer {token}")),
+                );
+            }
+            server.insert("headers".into(), Value::Object(headers));
+        }
+        server.insert("_anchor_plugin_id".into(), Value::String(id.into()));
+        server.insert(
+            "_anchor_plugin_dir".into(),
+            Value::String(plugin_dir.to_string_lossy().into_owned()),
+        );
+        server.insert("_anchor_server_name".into(), Value::String(name.into()));
+        server.insert(
+            "_anchor_auth_dir".into(),
+            Value::String(
+                data_root
+                    .join("state")
+                    .join("mcp-auth")
+                    .join(id)
+                    .join(name)
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+        );
+    }
+    Ok(Some(Value::Object(server)))
+}
+
+fn channels_from_dir(id: &str, dir: &Path) -> Result<Vec<ChannelDefinition>, GraphError> {
+    let path = dir.join("channel.json");
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    reject_symlink_components(dir, &path)?;
+    let spec = read_object(&path)?;
+    let platform = spec
+        .get("platform")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid(format!("Plugin {id}: channel platform is required")))?;
+    if platform.is_empty()
+        || !platform.chars().enumerate().all(|(index, character)| {
+            if index == 0 {
+                character.is_ascii_alphabetic()
+            } else {
+                character.is_ascii_alphanumeric() || matches!(character, '_' | '.' | '-')
+            }
+        })
+    {
+        return Err(invalid(format!(
+            "Plugin {id}: channel platform is required"
+        )));
+    }
+    if spec.get("transport").and_then(Value::as_str) != Some("websocket") {
+        return Err(invalid(format!(
+            "Plugin {id}: only websocket channels are supported"
+        )));
+    }
+    let entrypoint = spec
+        .get("entrypoint")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| invalid(format!("Plugin {id}: channel entrypoint is required")))?;
+    let _ = inside_file(dir, entrypoint).map_err(|error| invalid(error.to_string()))?;
+    let required = match spec.get("required_environment") {
+        None => Vec::new(),
+        Some(Value::Array(values)) => values.clone(),
+        Some(_) => {
+            return Err(invalid(format!(
+                "Plugin {id}: required_environment must be a list of names"
+            )));
+        }
+    };
+    let mut required_environment = Vec::new();
+    for item in required {
+        let item = item.as_str().ok_or_else(|| {
+            invalid(format!(
+                "Plugin {id}: required_environment must be a list of names"
+            ))
+        })?;
+        if !valid_environment_key(item) {
+            return Err(invalid(format!(
+                "Plugin {id}: required_environment must be a list of names"
+            )));
+        }
+        required_environment.push(item.to_owned());
+    }
+    let description = match spec.get("description") {
+        None => String::new(),
+        Some(value) => value
+            .as_str()
+            .map(str::to_owned)
+            .ok_or_else(|| invalid(format!("Plugin {id}: channel description must be a string")))?,
+    };
+    let sdk = match spec.get("sdk") {
+        None => String::new(),
+        Some(value) => value
+            .as_str()
+            .map(str::to_owned)
+            .ok_or_else(|| invalid(format!("Plugin {id}: channel sdk must be a string")))?,
+    };
+    Ok(vec![ChannelDefinition {
+        plugin: id.into(),
+        platform: platform.into(),
+        transport: "websocket".into(),
+        entrypoint: entrypoint.into(),
+        required_environment,
+        description,
+        sdk,
+    }])
 }
 
 pub trait GraphCatalog: Send + Sync {
@@ -599,6 +1396,7 @@ impl<S: RunStore, A: ArtifactPort, N: NodeExecutionPort, C: RunControl> GraphCal
         identity: &'b CallIdentity,
         spec: &'b Value,
         input: &'b Value,
+        input_commits: &'b [CommitRef],
         cancellation: Cancellation,
     ) -> Pin<Box<dyn Future<Output = Result<GraphCallOutcome, GraphError>> + Send + 'b>> {
         Box::pin(async move {
@@ -646,36 +1444,26 @@ impl<S: RunStore, A: ArtifactPort, N: NodeExecutionPort, C: RunControl> GraphCal
                     "Graph call spec does not match frozen parent snapshot".into(),
                 ));
             }
-            let fields = spec
-                .as_object()
-                .ok_or_else(|| GraphError::InvalidSnapshot("op.call must be an object".into()))?;
-            for unsupported in ["input_map", "files", "result", "session"] {
-                if fields.contains_key(unsupported) {
-                    return Err(GraphError::Unsupported(format!(
-                        "standalone GraphCallPort does not support `{unsupported}` yet"
-                    )));
-                }
+            if spec.get("session").is_some() {
+                return Err(GraphError::Unsupported(
+                    "Op.call session handoff is not supported by this host".into(),
+                ));
             }
-            let graph_name = fields.get("graph").and_then(Value::as_str).ok_or_else(|| {
-                GraphError::InvalidSnapshot("op.call.graph must be a string".into())
+            // A typed, `deny_unknown_fields` decode rejects malformed
+            // input/input_map/files/result and any stray field before the host
+            // can create a child Run or run a child side effect.
+            let call_spec: CallSpec = serde_json::from_value(spec.clone()).map_err(|error| {
+                GraphError::InvalidSnapshot(format!("invalid op.call spec: {error}"))
             })?;
-            let mode = fields.get("mode").and_then(Value::as_str).ok_or_else(|| {
-                GraphError::InvalidSnapshot("op.call.mode must be a string".into())
-            })?;
-            if !matches!(mode, "wait" | "detach") {
+            if !matches!(call_spec.mode.as_str(), "wait" | "detach") {
                 return Err(GraphError::InvalidSnapshot(
                     "op.call.mode must be wait or detach".into(),
                 ));
             }
-            let child_input = fields
-                .get("input")
-                .cloned()
-                .unwrap_or_else(|| serde_json::json!({}));
-            if !child_input.is_object() {
-                return Err(GraphError::InvalidSnapshot(
-                    "op.call input must be an object".into(),
-                ));
-            }
+            let graph_name = call_spec.graph.as_str();
+            let mode = call_spec.mode.as_str();
+            let child_input = call_spec.child_input(input)?;
+            let file_selections = call_spec.file_selections();
             let run_id = child_run_id(identity);
             let child_lease = self
                 .store
@@ -704,6 +1492,9 @@ impl<S: RunStore, A: ArtifactPort, N: NodeExecutionPort, C: RunControl> GraphCal
                         .collect::<Vec<_>>();
                     self.catalog.verify_child_plugins(graph_name, &pins)?;
                 }
+                self.artifacts
+                    .stage_call_inputs(&run_id, input_commits, &file_selections)
+                    .await?;
                 existing
             } else {
                 // Serialize only the short child admission against mutations to
@@ -731,6 +1522,9 @@ impl<S: RunStore, A: ArtifactPort, N: NodeExecutionPort, C: RunControl> GraphCal
                             .collect::<Vec<_>>();
                         self.catalog.verify_child_plugins(graph_name, &pins)?;
                     }
+                    self.artifacts
+                        .stage_call_inputs(&run_id, input_commits, &file_selections)
+                        .await?;
                     existing
                 } else {
                     if self.catalog.has_child_admission(&run_id)? {
@@ -755,6 +1549,13 @@ impl<S: RunStore, A: ArtifactPort, N: NodeExecutionPort, C: RunControl> GraphCal
                                 .into(),
                         ));
                     }
+                    // Stage the read-only `/in/call` bundle before the child
+                    // becomes durable. A crash can therefore never leave a
+                    // Ready child (including a startup-recovered detach child)
+                    // without the inputs its frozen identity selected.
+                    self.artifacts
+                        .stage_call_inputs(&run_id, input_commits, &file_selections)
+                        .await?;
                     let mut record = GraphRunRecord::create(snapshot.clone(), child_input)?;
                     record.run_id = run_id.clone();
                     record.plugin_bindings = bundle
@@ -791,39 +1592,93 @@ impl<S: RunStore, A: ArtifactPort, N: NodeExecutionPort, C: RunControl> GraphCal
                     child_run_id: run_id,
                 });
             }
-            if cancellation.load(std::sync::atomic::Ordering::Acquire) {
-                return Ok(GraphCallOutcome::Waiting {
-                    child_run_id: run_id,
-                });
-            }
-            let child_control = ChildControl::new(
-                self.catalog
-                    .begin_child_execution(&run_id, graph_name, cancellation.clone())
-                    .await?,
+            // A durable child that already reached a terminal or recovery state
+            // is never re-entered: its own facts decide the parent outcome and
+            // re-running it could replay an unknown side effect. Only the
+            // non-terminal states are resumed along the same child Run.
+            let resumable = matches!(
+                child.status,
+                RunStatus::Ready
+                    | RunStatus::Running
+                    | RunStatus::Paused
+                    | RunStatus::Stopped
+                    | RunStatus::BudgetStopped
             );
-            let child_nodes = BoundNodes {
-                nodes: self.nodes,
-                plugins: child.plugin_bindings.clone(),
-            };
-            child = GraphRunner::new(self.store, self.artifacts, &child_nodes, &child_control)
-                .run(child)
-                .await
-                .map_err(|e| GraphError::Unsupported(format!("execute child Run: {e}")))?;
-            self.catalog.end_child_execution(&run_id).await;
-            self.catalog
-                .child_execution_finished(&run_id, graph_name, child.status)
-                .await?;
+            if child.status == RunStatus::WaitingCall {
+                return Err(GraphError::CorruptRun(
+                    "called Graph child is itself waiting on a nested Graph call".into(),
+                ));
+            }
+            if resumable {
+                if cancellation.load(std::sync::atomic::Ordering::Acquire) {
+                    return Ok(GraphCallOutcome::Waiting {
+                        child_run_id: run_id,
+                    });
+                }
+                let child_control = ChildControl::new(
+                    self.catalog
+                        .begin_child_execution(&run_id, graph_name, cancellation.clone())
+                        .await?,
+                );
+                let child_nodes = BoundNodes {
+                    nodes: self.nodes,
+                    plugins: child.plugin_bindings.clone(),
+                };
+                child = GraphRunner::new(self.store, self.artifacts, &child_nodes, &child_control)
+                    .run(child)
+                    .await
+                    .map_err(|e| GraphError::Unsupported(format!("execute child Run: {e}")))?;
+                self.catalog.end_child_execution(&run_id).await;
+                self.catalog
+                    .child_execution_finished(&run_id, graph_name, child.status)
+                    .await?;
+            }
             match child.status {
                 RunStatus::Completed => {
-                    let output = child
-                        .results
-                        .values()
-                        .flatten()
-                        .max_by_key(|result| result.sequence)
-                        .map(|result| result.completion.output.clone())
-                        .ok_or_else(|| {
-                            GraphError::CorruptRun("completed child has no result".into())
-                        })?;
+                    let output = if let Some(selector) = call_spec.result.as_ref() {
+                        let result = child
+                            .results
+                            .get(&selector.node)
+                            .and_then(|results| results.iter().max_by_key(|r| r.sequence))
+                            .ok_or_else(|| {
+                                GraphError::CorruptRun(format!(
+                                    "called Graph `{graph_name}` produced no result node `{}`",
+                                    selector.node
+                                ))
+                            })?;
+                        let call_key = InvocationKey {
+                            run_id: identity.parent_run_id.clone(),
+                            graph_digest: identity.parent_graph_digest.clone(),
+                            node_id: identity.node_id.clone(),
+                            invocation: identity.invocation,
+                        };
+                        let copied = self
+                            .artifacts
+                            .export_call_result_files(&call_key, &result.commit, &selector.files)
+                            .await?;
+                        serde_json::json!({
+                            "graph": graph_name,
+                            "run": child.run_id,
+                            "mode": "wait",
+                            "status": "completed",
+                            "summary": result.completion.submission,
+                            "result": {
+                                "node": result.node_id,
+                                "commit": result.commit,
+                                "files": copied,
+                            },
+                        })
+                    } else {
+                        child
+                            .results
+                            .values()
+                            .flatten()
+                            .max_by_key(|result| result.sequence)
+                            .map(|result| result.completion.output.clone())
+                            .ok_or_else(|| {
+                                GraphError::CorruptRun("completed child has no result".into())
+                            })?
+                    };
                     Ok(GraphCallOutcome::Completed {
                         child_run_id: run_id,
                         output,
@@ -836,7 +1691,22 @@ impl<S: RunStore, A: ArtifactPort, N: NodeExecutionPort, C: RunControl> GraphCal
                 | RunStatus::Stopped => Ok(GraphCallOutcome::Waiting {
                     child_run_id: run_id,
                 }),
-                RunStatus::Failed | RunStatus::Aborted => Ok(GraphCallOutcome::Failed {
+                RunStatus::Aborted => Ok(GraphCallOutcome::Failed {
+                    child_run_id: Some(run_id),
+                    reason: child.error.unwrap_or_else(|| "child Graph failed".into()),
+                }),
+                // A known failure clears its cursor; a retained cursor means the
+                // child could not prove its terminal fact (unknown side effect
+                // or an unproven completion). Report that as Uncertain so the
+                // parent records it and never treats the call as a settled
+                // known failure it may replay.
+                RunStatus::Failed if child.cursor.is_some() => Ok(GraphCallOutcome::Uncertain {
+                    child_run_id: Some(run_id),
+                    reason: child.error.unwrap_or_else(|| {
+                        "child Graph failed without a proven terminal fact".into()
+                    }),
+                }),
+                RunStatus::Failed => Ok(GraphCallOutcome::Failed {
                     child_run_id: Some(run_id),
                     reason: child.error.unwrap_or_else(|| "child Graph failed".into()),
                 }),
@@ -851,6 +1721,84 @@ impl<S: RunStore, A: ArtifactPort, N: NodeExecutionPort, C: RunControl> GraphCal
 
 fn child_run_id(identity: &CallIdentity) -> String {
     format!("call-{}", identity.durable_key())
+}
+
+/// Strict, typed view of a frozen `ops.<name>.call` object. Unknown fields are
+/// rejected so session or any future/unrecognized capability cannot be
+/// silently ignored before a child Run or side effect is created.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CallSpec {
+    graph: String,
+    mode: String,
+    #[serde(default)]
+    input: Option<Value>,
+    #[serde(default)]
+    input_map: BTreeMap<String, String>,
+    #[serde(default)]
+    files: Vec<CallSpecFile>,
+    #[serde(default)]
+    result: Option<CallSpecResult>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CallSpecFile {
+    node: String,
+    path: String,
+    #[serde(rename = "as")]
+    alias: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CallSpecResult {
+    node: String,
+    #[serde(default)]
+    files: Vec<String>,
+}
+
+impl CallSpec {
+    /// Resolve the `input` constants merged with the explicit `input_map`
+    /// pointers. Pointers are evaluated with RFC6901 semantics against the
+    /// parent Run's own input (the frozen `input` field of the prepared input),
+    /// matching the contract that only explicitly selected data crosses the
+    /// boundary.
+    fn child_input(&self, prepared_input: &Value) -> Result<Value, GraphError> {
+        let source = prepared_input.get("input").unwrap_or(&Value::Null);
+        let mut values = match &self.input {
+            Some(value) if value.is_object() => value.clone(),
+            Some(_) => {
+                return Err(GraphError::InvalidSnapshot(
+                    "op.call input must be an object".into(),
+                ));
+            }
+            None => serde_json::json!({}),
+        };
+        let target = values
+            .as_object_mut()
+            .expect("checked object input before mapping");
+        for (key, pointer) in &self.input_map {
+            let value = source.pointer(pointer).ok_or_else(|| {
+                GraphError::InvalidSnapshot(format!(
+                    "op.call input_map pointer `{pointer}` is not visible from the parent input"
+                ))
+            })?;
+            target.insert(key.clone(), value.clone());
+        }
+        Ok(values)
+    }
+
+    fn file_selections(&self) -> Vec<CallFileSelection> {
+        self.files
+            .iter()
+            .map(|file| CallFileSelection {
+                node: file.node.clone(),
+                path: file.path.clone(),
+                alias: file.alias.clone(),
+            })
+            .collect()
+    }
 }
 
 fn expected_input(snapshot: &GraphSnapshot, provided: &Value) -> Value {
@@ -886,10 +1834,10 @@ mod plugin_catalog_tests {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("plugins/demo");
         fs::create_dir_all(dir.join("skills/example")).unwrap();
-        fs::write(dir.join("plugin.json"), r#"{"name":"Demo","mcpServers":{"inline":{"command":"run","env":{"TOKEN":"top-secret"}},"disabled":{"enabled":false}}}"#).unwrap();
+        fs::write(dir.join("plugin.json"), r#"{"name":"Demo","mcpServers":{"inline":{"command":"run","env":{"TOKEN":"top-secret"}},"disabled":{"enabled":false,"url":"https://example.test/mcp"}}}"#).unwrap();
         fs::write(
             dir.join(".mcp.json"),
-            r#"{"mcpServers":{"config":{"headers":{"Authorization":"secret-value"}}}}"#,
+            r#"{"mcpServers":{"config":{"url":"https://example.test/mcp","headers":{"Authorization":"secret-value"}}}}"#,
         )
         .unwrap();
         fs::write(dir.join("skills/example/SKILL.md"), "hello").unwrap();
@@ -949,6 +1897,153 @@ mod plugin_catalog_tests {
         fs::write(&outside, r#"{"mcpServers":{"escape":{}}}"#).unwrap();
         symlink(&outside, tmp.path().join("plugins/demo/escape.json")).unwrap();
         assert!(catalog.resolve(&["demo".into()]).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn plugin_root_symlink_is_accepted() {
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("source/demo");
+        fs::create_dir_all(source.join("skills/example")).unwrap();
+        fs::write(
+            source.join("plugin.json"),
+            r#"{"name":"Demo","mcpServers":{}}"#,
+        )
+        .unwrap();
+        fs::write(source.join("skills/example/SKILL.md"), "hello").unwrap();
+        fs::create_dir_all(tmp.path().join("plugins")).unwrap();
+        symlink(&source, tmp.path().join("plugins/demo")).unwrap();
+
+        let binding = FilePluginCatalog::new(tmp.path())
+            .resolve(&["demo".into()])
+            .unwrap()
+            .remove(0);
+        assert_eq!(
+            binding.resources,
+            vec!["plugin.json", "skills/example/SKILL.md"]
+        );
+    }
+
+    #[test]
+    fn adopts_python_manifest_skills_description_channels_and_mcp_merge() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("plugins/contract");
+        fs::create_dir_all(dir.join("custom/one")).unwrap();
+        fs::write(dir.join("custom/one/SKILL.md"), "skill").unwrap();
+        fs::write(dir.join("gateway.py"), "# entrypoint").unwrap();
+        fs::write(
+            dir.join("plugin.json"),
+            r#"{
+                "name":"Contract",
+                "description":"",
+                "interface":{"longDescription":"from interface"},
+                "skills":["custom"],
+                "hooks":[],
+                "mcpServers":"mcp-config.json"
+            }"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.join("mcp-config.json"),
+            r#"{"mcpServers":{"gateway":{"url":"https://${MISSING:-example.test}/mcp","headers":{"X-Root":"${CODEX_PLUGIN_ROOT}","X-Literal":"${bad-name}"}}}}"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.join("channel.json"),
+            r#"{"platform":"demo_platform","transport":"websocket","entrypoint":"gateway.py","required_environment":["DEMO_TOKEN"],"description":"channel","sdk":"sdk"}"#,
+        )
+        .unwrap();
+
+        let catalog = FilePluginCatalog::new(tmp.path());
+        let definition = catalog.definition("contract").unwrap();
+        assert_eq!(definition.description, "from interface");
+        assert_eq!(definition.skills, vec!["custom/one/SKILL.md"]);
+        assert!(definition.unsupported.is_empty());
+        assert_eq!(definition.mcp_servers.len(), 1);
+        assert_eq!(definition.channels[0].platform, "demo_platform");
+        assert_eq!(
+            definition.channels[0].required_environment,
+            vec!["DEMO_TOKEN"]
+        );
+
+        let servers = catalog.mcp_servers("contract", true).unwrap();
+        let config = servers[0].config.as_object().unwrap();
+        assert_eq!(config["url"], "https://example.test/mcp");
+        assert_eq!(config["headers"]["X-Root"], dir.to_string_lossy().as_ref());
+        assert_eq!(config["headers"]["X-Literal"], "${bad-name}");
+    }
+
+    #[test]
+    fn mcp_environment_and_paths_are_validated_before_resolution() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("plugins/invalid");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("plugin.json"),
+            r#"{"name":"Invalid","mcpServers":{"bad":{"command":"echo","env_vars":["bad-name"]}}}"#,
+        )
+        .unwrap();
+        let catalog = FilePluginCatalog::new(tmp.path());
+        assert!(catalog.mcp_servers("invalid", true).is_err());
+
+        fs::write(
+            dir.join("plugin.json"),
+            r#"{"name":"Invalid","mcpServers":{"bad":{"url":"https://example.test","headers":{"Authorization":"x"},"bearer_token_env_var":"MISSING_ANCHOR_TOKEN"}}}"#,
+        )
+        .unwrap();
+        assert!(catalog.mcp_servers("invalid", true).is_err());
+    }
+}
+
+/// Strict parsing/selection tests for the frozen Op.call spec. These run
+/// provider-free and cover the boundary checks the host performs before it
+/// creates any child Run or side effect.
+#[cfg(test)]
+mod call_spec_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn parse(value: Value) -> Result<CallSpec, serde_json::Error> {
+        serde_json::from_value(value)
+    }
+
+    #[test]
+    fn rejects_session_unknown_fields_and_wrong_types() {
+        assert!(parse(json!({"graph":"c","mode":"wait","session":"ops"})).is_err());
+        assert!(parse(json!({"graph":"c","mode":"wait","bogus":1})).is_err());
+        assert!(parse(json!({"graph":"c","mode":"wait","input":{"a":1},"input_map":[]})).is_err());
+        assert!(
+            parse(json!({"graph":"c","mode":"wait","result":{"node":"n","files":"x"}})).is_err()
+        );
+        assert!(
+            parse(json!({"graph":"c","mode":"wait","files":[{"node":"n","path":"p"}]})).is_err()
+        );
+    }
+
+    #[test]
+    fn input_map_resolves_rfc6901_pointers_against_the_parent_input() {
+        let call = parse(json!({
+            "graph":"c","mode":"wait",
+            "input":{"constant":1},
+            "input_map":{"topic":"/nested/topic","escaped":"/a~1b"}
+        }))
+        .unwrap();
+        let resolved = call
+            .child_input(&json!({"input":{"nested":{"topic":"x"},"a/b":"y"}}))
+            .unwrap();
+        assert_eq!(resolved, json!({"constant":1,"topic":"x","escaped":"y"}));
+        // An unreachable pointer must fail rather than silently drop the key.
+        assert!(matches!(
+            call.child_input(&json!({"input":{}})),
+            Err(GraphError::InvalidSnapshot(_))
+        ));
+        // A non-object `input` constant is rejected before admission.
+        let bad = parse(json!({"graph":"c","mode":"wait","input":[1,2]})).unwrap();
+        assert!(matches!(
+            bad.child_input(&json!({"input":{}})),
+            Err(GraphError::InvalidSnapshot(_))
+        ));
     }
 }
 

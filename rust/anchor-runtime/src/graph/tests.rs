@@ -228,6 +228,62 @@ async fn graph_call_wait_resumes_same_identity_and_detach_records_acceptance() {
 }
 
 #[tokio::test]
+async fn graph_call_identity_must_keep_one_child_run_across_reload() {
+    let mut snapshot = graph(&["call"], &[], "call");
+    snapshot.nodes[0].agent = None;
+    snapshot.nodes[0].op = Some("child".into());
+    snapshot.ops.insert(
+        "child".into(),
+        serde_json::json!({"call": {"graph": "child-graph", "mode": "wait"}}),
+    );
+
+    let port = Arc::new(FakeGraphCalls {
+        outcomes: Mutex::new(vec![
+            GraphCallOutcome::Waiting {
+                child_run_id: "child-run-1".into(),
+            },
+            // A durable identity must keep resolving to its original child Run.
+            // Switching to a different child on reload would silently fork or
+            // replay work, so the mismatch must fail closed.
+            GraphCallOutcome::Completed {
+                child_run_id: "child-run-2".into(),
+                output: serde_json::json!({"answer": "unexpected"}),
+            },
+        ]),
+        ..Default::default()
+    });
+    let nodes = FakeNodes {
+        graph_call_port: Some(port.clone()),
+        ..Default::default()
+    };
+    let store = MemStore::default();
+    let artifacts = MemoryArtifacts::default();
+    let control = Control::default();
+    let waiting = GraphRunner::new(&store, &artifacts, &nodes, &control)
+        .run(GraphRunRecord::create(snapshot, Value::Null).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(waiting.status, RunStatus::WaitingCall);
+    assert_eq!(
+        waiting
+            .graph_calls
+            .values()
+            .next()
+            .unwrap()
+            .child_run_id
+            .as_deref(),
+        Some("child-run-1")
+    );
+
+    let result = GraphRunner::new(&store, &artifacts, &nodes, &control)
+        .run(waiting)
+        .await;
+    assert!(
+        matches!(result, Err(GraphError::CorruptRun(message)) if message.contains("changed child Run"))
+    );
+}
+
+#[tokio::test]
 async fn deleted_graph_call_marker_resumes_as_completed_without_replay() {
     use sha2::Digest;
 
@@ -635,6 +691,7 @@ impl GraphCallPort for FakeGraphCalls {
         identity: &'a CallIdentity,
         _spec: &'a Value,
         _input: &'a Value,
+        _input_commits: &'a [CommitRef],
         _cancellation: crate::Cancellation,
     ) -> Pin<Box<dyn Future<Output = Result<GraphCallOutcome, GraphError>> + Send + 'a>> {
         Box::pin(async move {

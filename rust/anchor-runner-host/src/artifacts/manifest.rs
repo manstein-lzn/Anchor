@@ -61,14 +61,11 @@ impl Manifest {
                 }
                 match context.kind {
                     ArtifactKind::Node => Ok(()),
-                    ArtifactKind::GraphCall
-                        if self.files.is_empty() && self.directories.is_empty() =>
-                    {
-                        Ok(())
-                    }
-                    ArtifactKind::GraphCall => {
-                        Err(corrupt("Graph call artifact contains undeclared files"))
-                    }
+                    // A Graph call commit carries only the selected child result
+                    // files copied into the call node workspace. `read_snapshot`
+                    // already re-derives and verifies the exact tree, so any
+                    // declared files are the authoritative result inventory.
+                    ArtifactKind::GraphCall => Ok(()),
                     ArtifactKind::Fanout | ArtifactKind::Join => {
                         let filename = match context.kind {
                             ArtifactKind::Fanout => "fanout.json",

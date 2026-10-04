@@ -41,6 +41,7 @@ pub(crate) struct HostIoResolver {
     mcp: tool_host::McpToolConfig,
     plugin_bindings: BTreeMap<String, PluginBinding>,
     run_store: FileRunStore,
+    catalog_roots: Vec<PathBuf>,
 }
 
 impl HostIoResolver {
@@ -52,6 +53,26 @@ impl HostIoResolver {
         plugin_bindings: BTreeMap<String, PluginBinding>,
         run_store: FileRunStore,
     ) -> Self {
+        let mut catalog_roots = Vec::new();
+        for root in [
+            std::env::var_os("ANCHOR_RUNNER_BUNDLE_ROOT").map(PathBuf::from),
+            std::env::var_os("ANCHOR_RUNNER_CATALOG_ROOT").map(PathBuf::from),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if root.is_dir() && !catalog_roots.contains(&root) {
+                catalog_roots.push(root.clone());
+            }
+            if let Ok(entries) = std::fs::read_dir(&root) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_dir() && !catalog_roots.contains(&path) {
+                        catalog_roots.push(path);
+                    }
+                }
+            }
+        }
         Self {
             artifacts,
             sandbox,
@@ -59,7 +80,52 @@ impl HostIoResolver {
             mcp,
             plugin_bindings,
             run_store,
+            catalog_roots,
         }
+    }
+
+    fn catalog_config(
+        &self,
+        bindings: &[PluginBinding],
+    ) -> Result<tool_host::McpToolConfig, String> {
+        if bindings.iter().all(|binding| {
+            binding
+                .mcp_servers
+                .iter()
+                .all(|server| server == tool_host::FAKE_SERVER_ID)
+        }) {
+            return Ok(self.mcp.clone());
+        }
+        let mut last_error = None;
+        for root in &self.catalog_roots {
+            match tool_host::McpToolConfig::from_catalog(root, bindings) {
+                Ok(config) => return Ok(config),
+                Err(error) => last_error = Some(error),
+            }
+        }
+        Err(last_error.unwrap_or_else(|| {
+            "Plugin-bearing Agent requires an accepted bundle/catalog root".into()
+        }))
+    }
+
+    fn plugin_mounts(
+        &self,
+        bindings: &[PluginBinding],
+    ) -> Result<Vec<anchor_runtime_rig::ReadOnlyInput>, String> {
+        if bindings
+            .iter()
+            .all(|binding| binding.id == "fake-tools" && binding.resources.is_empty())
+        {
+            return Ok(Vec::new());
+        }
+        let mut last_error = None;
+        for root in &self.catalog_roots {
+            match tool_host::McpToolConfig::plugin_mounts(root, bindings) {
+                Ok(mounts) => return Ok(mounts),
+                Err(error) => last_error = Some(error),
+            }
+        }
+        Err(last_error.unwrap_or_else(|| "Plugin resource root is unavailable".into()))
     }
 }
 
@@ -119,7 +185,7 @@ impl NodeHostResolver for HostIoResolver {
                 }
             }
             let workspace = self.workspace(request)?;
-            let readonly_inputs = self
+            let mut readonly_inputs = self
                 .artifacts
                 .input_mounts(
                     &request.input_commits,
@@ -127,9 +193,17 @@ impl NodeHostResolver for HostIoResolver {
                     &request.key.graph_digest,
                 )
                 .map_err(|error| error.to_string())?;
+            readonly_inputs.extend(self.plugin_mounts(&request.plugins)?);
+            let mcp = self.catalog_config(&request.plugins)?;
             let plugins = self
                 .tools
-                .assemble(&self.mcp, &request.plugins, request.network)
+                .assemble_with_sandbox(
+                    &mcp,
+                    &request.plugins,
+                    request.network,
+                    &self.sandbox,
+                    &workspace,
+                )
                 .await?;
             Ok(std::sync::Arc::new(crate::node_tools::NodeTools::new(
                 plugins,
@@ -289,6 +363,7 @@ impl HostNodes {
             .sandbox
             .run(SandboxRequest {
                 workspace,
+                working_directory: None,
                 command: argv,
                 readonly_inputs,
                 workspace_readonly: vec![],

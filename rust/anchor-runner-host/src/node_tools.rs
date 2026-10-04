@@ -108,6 +108,7 @@ impl ToolPort for NodeTools {
                 .sandbox
                 .run(SandboxRequest {
                     workspace: self.workspace.clone(),
+                    working_directory: None,
                     command: arguments.command,
                     readonly_inputs: self.readonly_inputs.clone(),
                     workspace_readonly: Vec::new(),

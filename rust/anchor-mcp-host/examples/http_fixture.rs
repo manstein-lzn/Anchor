@@ -1,16 +1,16 @@
 //! Local-only MCP fixture for real-provider Graph acceptance. No business APIs.
 //! Prints its ephemeral endpoint; optional first argument receives call evidence.
 use rmcp::{
+    RoleServer, ServerHandler,
     model::{
         CallToolRequestParams, CallToolResult, ContentBlock, ErrorData, ListToolsResult,
         PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
     },
     service::RequestContext,
     transport::{
-        streamable_http_server::session::local::LocalSessionManager, StreamableHttpServerConfig,
-        StreamableHttpService,
+        StreamableHttpServerConfig, StreamableHttpService,
+        streamable_http_server::session::local::LocalSessionManager,
     },
-    RoleServer, ServerHandler,
 };
 use serde_json::json;
 use std::{fs::OpenOptions, io::Write, path::PathBuf, sync::Arc};

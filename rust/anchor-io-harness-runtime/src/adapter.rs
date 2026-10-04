@@ -12,8 +12,8 @@ use io_harness::{
 };
 use rig_core::DynModel;
 use rig_core::completion::message::{
-    CallId, ImageMediaType, ToolCall as RigToolCall, ToolFunction, ToolName, ToolResult,
-    ToolResultContent, UserContent,
+    CallId, ImageMediaType, Reasoning, ReasoningContent, ToolCall as RigToolCall, ToolFunction,
+    ToolName, ToolResult, ToolResultContent, UserContent,
 };
 use rig_core::completion::{
     AssistantContent, CompletionRequest as RigRequest, CompletionResponse as RigResponse,
@@ -44,6 +44,8 @@ pub enum ConversionError {
     UnsupportedMedia(String),
     #[error("Rig response contains unsupported assistant content")]
     UnsupportedAssistantContent,
+    #[error("Rig reasoning content has no representable text (encrypted/redacted only)")]
+    UnsupportedReasoning,
 }
 
 /// A Provider implementation that lets io-harness own the loop while Rig owns
@@ -237,6 +239,16 @@ pub fn to_rig_request(request: &IoRequest) -> Result<RigRequest, ConversionError
 /// inventing provider IDs or silently flattening rich assistant content.
 pub fn from_rig_response(response: &RigResponse) -> Result<IoResponse, ConversionError> {
     let mut text = String::new();
+    // io-harness carries provider thinking in `CompletionResponse::reasoning`:
+    // a display string delivered to the observer and deliberately never
+    // persisted or replayed (a step's durable turn keeps only text and tool
+    // calls). Rig's `Text`/`Summary` reasoning blocks are that thinking and map
+    // onto it faithfully. `Encrypted`/`Redacted` blocks are opaque provider
+    // replay payloads, not thinking; io-harness has no field for them, and
+    // because this boundary never replays reasoning they are neither sent nor
+    // flattened into the display text. A reasoning item with no displayable
+    // text carries nothing representable and must fail closed, not be dropped.
+    let mut reasoning = String::new();
     let mut calls = Vec::new();
     for part in &response.choice {
         match part {
@@ -245,7 +257,22 @@ pub fn from_rig_response(response: &RigResponse) -> Result<IoResponse, Conversio
                 name: call.function.name.to_string(),
                 arguments: call.function.arguments.clone(),
             }),
-            AssistantContent::Reasoning(_) | AssistantContent::Image(_) => {
+            AssistantContent::Reasoning(sealed) => {
+                // A sealed value opens for its own issuer, which is always
+                // present on the value.
+                let opened = sealed
+                    .open(sealed.issuer())
+                    .ok_or(ConversionError::UnsupportedReasoning)?;
+                let value = rig_reasoning_display_text(opened);
+                if value.is_empty() {
+                    return Err(ConversionError::UnsupportedReasoning);
+                }
+                if !reasoning.is_empty() {
+                    reasoning.push('\n');
+                }
+                reasoning.push_str(&value);
+            }
+            AssistantContent::Image(_) => {
                 return Err(ConversionError::UnsupportedAssistantContent);
             }
         }
@@ -253,6 +280,7 @@ pub fn from_rig_response(response: &RigResponse) -> Result<IoResponse, Conversio
     let usage = response.usage;
     Ok(IoResponse {
         text: (!text.is_empty()).then_some(text),
+        reasoning: (!reasoning.is_empty()).then_some(reasoning),
         tool_calls: calls,
         usage: usage.is_reported().then(|| io_harness::Usage {
             prompt_tokens: usage.input_tokens.unwrap_or_default(),
@@ -266,6 +294,22 @@ pub fn from_rig_response(response: &RigResponse) -> Result<IoResponse, Conversio
         finish_reason: response.finish_reason().map(|reason| format!("{reason:?}")),
         ..Default::default()
     })
+}
+
+/// The displayable thinking text of a Rig reasoning item: `Text` and `Summary`
+/// blocks, in order. `Encrypted` and `Redacted` blocks are opaque provider
+/// replay payloads and contribute nothing here; a caller can tell an item that
+/// carried only those apart by the empty result.
+fn rig_reasoning_display_text(reasoning: &Reasoning) -> String {
+    let mut text = String::new();
+    for block in &reasoning.content {
+        match block {
+            ReasoningContent::Text { text: value, .. } => text.push_str(value),
+            ReasoningContent::Summary(value) => text.push_str(value),
+            ReasoningContent::Encrypted(_) | ReasoningContent::Redacted { .. } => {}
+        }
+    }
+    text
 }
 
 #[cfg(test)]
@@ -411,6 +455,88 @@ mod tests {
             from_rig_response(&response),
             Err(ConversionError::UnsupportedAssistantContent)
         );
+    }
+
+    fn sealed_reasoning(reasoning: Reasoning) -> rig_core::completion::message::Sealed<Reasoning> {
+        reasoning.sealed(rig_core::completion::message::Issuer::from_static("openai"))
+    }
+
+    #[test]
+    fn reasoning_text_is_carried_into_io_reasoning_without_dropping_text_or_tools() {
+        let name = tool_name("lookup").unwrap();
+        let response = RigResponse::new(
+            vec![
+                AssistantContent::Reasoning(sealed_reasoning(Reasoning::new("thinking hard"))),
+                AssistantContent::text("answer"),
+                AssistantContent::ToolCall(RigToolCall::new(
+                    CallId::from_wire("call-1"),
+                    ToolFunction::new(name, json!({"id": 7})),
+                )),
+            ],
+            Default::default(),
+            "rig-test",
+            json!({}),
+        );
+        let converted = from_rig_response(&response).unwrap();
+        assert_eq!(converted.reasoning.as_deref(), Some("thinking hard"));
+        assert_eq!(converted.text.as_deref(), Some("answer"));
+        assert_eq!(converted.tool_calls[0].name, "lookup");
+    }
+
+    #[test]
+    fn mixed_reasoning_keeps_text_and_does_not_flatten_opaque_bytes() {
+        // DeepSeek's Responses wire returns reasoning_text beside an opaque
+        // encrypted payload. The thinking text is carried; the opaque replay
+        // payload has no io-harness field and must not be flattened into the
+        // output.
+        let opaque = "ENC:v1:opaque-replay-bytes";
+        let response = RigResponse::new(
+            vec![
+                AssistantContent::Reasoning(sealed_reasoning(Reasoning {
+                    id: Some("reasoning-1".into()),
+                    content: vec![
+                        ReasoningContent::Text {
+                            text: "plan: help the user".into(),
+                            signature: None,
+                        },
+                        ReasoningContent::Encrypted(opaque.into()),
+                    ],
+                })),
+                AssistantContent::text("Hi"),
+            ],
+            Default::default(),
+            "rig-test",
+            json!({}),
+        );
+        let converted = from_rig_response(&response).unwrap();
+        let reasoning = converted.reasoning.as_deref().unwrap();
+        assert_eq!(reasoning, "plan: help the user");
+        assert!(!reasoning.contains(opaque));
+        assert_eq!(converted.text.as_deref(), Some("Hi"));
+    }
+
+    #[test]
+    fn opaque_only_reasoning_fails_closed() {
+        for block in [
+            ReasoningContent::Encrypted("encrypted-only".into()),
+            ReasoningContent::Redacted {
+                data: "redacted-only".into(),
+            },
+        ] {
+            let response = RigResponse::new(
+                vec![AssistantContent::Reasoning(sealed_reasoning(Reasoning {
+                    id: None,
+                    content: vec![block],
+                }))],
+                Default::default(),
+                "rig-test",
+                json!({}),
+            );
+            assert_eq!(
+                from_rig_response(&response),
+                Err(ConversionError::UnsupportedReasoning)
+            );
+        }
     }
 
     #[tokio::test]

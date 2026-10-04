@@ -43,7 +43,7 @@ Rust 平台宿主和独立 Graph 包共享同一 `anchor-runtime` Runner。Pytho
 | R4 Sandbox Adapter | Rust Sandbox port；Bubblewrap、只读输入、网络权限、命令超时和取消适配 | 部分完成：独立 Bubblewrap host adapter 已实现；本机真实 bwrap 只读挂载 smoke 和 fake-helper 策略/超时/取消测试通过。真实网络隔离、host 路径 TOCTOU、真实 bwrap 超时/取消和 Python/平台接线未验收 |
 | R5 串行 Graph Runner | 展开后 Graph 快照、Run 状态、串行路由、不可变提交输入、恢复与停止 | 进行中：首个 Kernel Runner vertical slice、十种 provider-free Python `run()` 场景（含明确失败语义差异、未启动 SCC 闭包及嵌套模块回边重入）、format 1→2 Run 迁移、本机跨进程 lease 退出释放、结果顺序/cursor 输入事实校验、edge decision 晚于其 source result 的 freshness 校验、四个 test-port 跨进程 Runner 故障窗口，以及 FileRunStore 提交成功但调用反馈失败后的重载恢复测试均通过。A84 将 Rust Command Op 的成功 stdout 路由标记接入 Host 并通过 Bubblewrap 测试；Rust sandbox 尚无 `anchor-route` CLI，Python `graphs` 模块展开也未实现。生产 host/provider 崩溃恢复和更广语义覆盖仍待做。fanout/join Kernel 能力见 R6；当前并行宿主见 R8/A60–A61，完整平台接线待做 |
 | R6 fanout/join | 复用现有配对契约；分支活动身份、乱序收束、失败/停止/崩溃恢复 | 部分完成：Rust 已验证显式一一配对、非嵌套线性拓扑、Run format 3 activation，以及单 Coordinator 的 provider-free 局部并行、join 控制事实、node ceiling/module activation 约束和并行 wave 三个进程崩溃窗口。A61 已接真实宿主文件谱系及五领域 RSI provider 并行运行，并验证分支失败阻断 join、进程中断保留完成分支且不重放未知分支；平台控制与 Agent kill/restart 仍待做。不引入嵌套或隐式并行 |
-| R7 Op.call 与 Plugin/MCP | wait/detach Graph call 通过既有 admission 语义复用同一 Runner；Plugin manifest、MCP stdio/HTTP、凭证与 Sandbox 绑定 | A82 已接入生产 Rust Host 的后台生命周期、child 独立控制/active 与父子关系投影，并通过 provider-free API 测试。Run 固定自身 Graph snapshot；PUT 与 trigger admission 共用短 lease，已有 Run 不受编辑影响；DELETE 仍拒绝存在任意未完成 Run 的 Graph。Plugin resources 漂移仍 fail closed。R7 仍待 Plugin child 执行、文件/result/session 语义、真实 Provider/MCP/Sandbox 与进程故障窗口验收。Python 平台兼容不再是出口条件。 |
+| R7 Op.call 与 Plugin/MCP | wait/detach Graph call 通过既有 admission 语义复用同一 Runner；Plugin manifest、MCP stdio/HTTP、凭证与 Sandbox 绑定 | A85 已通过 wait 子图的 `input_map/files/result`、child Plugin/MCP/Sandbox 和真实 DeepSeek Flash Responses provider 验收；A86 又通过 provider-free 四边界恢复 smoke，并在真实 provider 的 child-write/parent-completion 已观测边界通过。standalone parent metadata、结果文件原子转交、Plugin 漂移/篡改/重启负例和 Artifact 半发布 fail-closed 均有回归。仍待 `session`、嵌套调用、真实业务 MCP、跨存储故障窗口与外部副作用 exactly-once；Python 平台兼容不再是出口条件。 |
 | R8 Rust-native 宿主与独立包 | Rust API/CLI/Session 宿主和 `anchor-graph` 使用同一 Runner；Graph + Plugin 资源闭包与兼容清单 | Rust standalone 与 Rust platform host 对同一 Graph 产生一致 Run/提交/恢复事实；bundle 不含密钥、不扩大授权；旧 Python 只做可选 legacy 适配。产品验收复用 `pilot-development-plan.md` 的 P2/P7 共同用户语义；Rust API、存储和 Run/turn 身份可以不同，但字段/状态差异必须单独记录。 |
 | R9 产品迁移与 Python 收缩 | RSI、周报、企业微信助手逐个切换到 Rust-native host；Python 路径降为 legacy/迁移工具 | 只有 R8 共同契约、真实 provider、Sandbox、恢复和平台证据齐全的 Graph 才切换；达到条件后再移除不再使用的 Python Kernel 依赖。provider-free 或 A80 浏览器 slice 不能代替这些出口。 |
 
@@ -71,7 +71,7 @@ Rust 平台宿主和独立 Graph 包共享同一 `anchor-runtime` Runner。Pytho
 
 ## 当前进度和下一步
 
-2026-10-04 近期主线：R1–R6 与 HostNodes Agent backend 已有分层证据；先收口 R7（Plugin child 执行、files/result/session、真实 provider/MCP/Sandbox 与跨存储故障窗口），再做 R8（Rust Session/Pilot/Scheduler/Plugin/channel 宿主，并按 P2/P7 共同用户契约重新验收），最后进入 R9 逐图切换。Python P2/P7 仍可完成其 Pilot 入口，不改变 Rust-owned Run；E1/E2 的 Python 功能可并行，不能代替 R8/R9 出口。
+2026-10-04 近期主线：R1–R6 与 HostNodes Agent backend 已有分层证据；A85 收口 R7 的 wait 子图 Plugin/MCP/Sandbox、`input_map/files/result` 和真实 Responses provider 闭环，A86 补齐 child/Artifact 本地恢复硬化并验证 provider-free 四边界与两个真实 provider 故障边界。剩余 R7 边界是 `session`、嵌套调用、真实业务 MCP、跨存储故障窗口与外部副作用 exactly-once；再做 R8（Rust Session/Pilot/Scheduler/Plugin/channel 宿主，并按 P2/P7 共同用户契约重新验收），最后进入 R9 逐图切换。Python P2/P7 仍可完成其 Pilot 入口，不改变 Rust-owned Run；E1/E2 的 Python 功能可并行，不能代替 R8/R9 出口。
 
 2026-10-03 决策更新：用户要求开发阶段直接以 io-harness 满足 AgentRuntime 需求。io-harness 是唯一 Agent loop 与上下文/恢复 owner；Rig 只作 Provider transport。该方向已从隔离 spike 推进到生产 HostNodes Agent 分发，Anchor GraphRunner/Sandbox/Artifact/Plugin 仍为外层事实 owner。能力范围为文本、图片、流式和简单 JSON 工具结果；复杂结构化输出不作为选型阻断，但 Anchor 的 `{summary, route?}` completion 仍由 Harness schema 本地校验。
 
@@ -116,6 +116,8 @@ R0 已由现有架构约束和本计划冻结；R1 已完成实验纵向切片�
 2026-10-02：R6 Rust 最小区域调度接入。fanout 与 join 均由 Graph Coordinator 生成确定性 manifest，作为普通 `RunResult` 经 `ArtifactPort` 冻结；join 不要求 `NodeExecutionPort` 的 `op_run` capability，后续 AgentNode 消费 join commit。分支 cursor 在 dispatch 前逐个持久化；不同分支通过唯一 Coordinator 的 `FuturesUnordered` 并发执行，分支内部沿静态路径串行；完成按到达顺序逐个 freeze、记录 result/edge、更新 branch progress 并保存。全部分支完成后才收束 join；Failed/Uncertain 不放行 join，已启动 future 先 drain，Cancellation 仅 fail-closed，不宣称同伴 exactly-cancel。provider-free 测试覆盖并发峰值 2、乱序完成、join manifest 两支结构化事实、失败不调度 join、BudgetStopped/Cancelled reload 不重放已完成分支，以及 format3 `FileRunStore` activation/cursor roundtrip。并行分支已复用普通 node ceiling/module activation；并行 wave 三个进程崩溃窗口也通过 durable test ports 验证。真实 host/provider、生产 workspace 接线仍未完成；不得据此宣称完整 R6 或平台验收。
 
 ## 每阶段记录
+
+以下带日期的条目保留各阶段当时的实现和验证证据；若与上方阶段表或“当前进度和下一步”冲突，以当前状态为准。早期条目中的部署配置、工具代理和未完成边界可能已被后续 Rust-native 切片取代。
 
 每个阶段必须同时更新：
 
@@ -174,11 +176,11 @@ R5 首片已覆盖展开快照 admission、入口/路由/未选分支、循环�
 
 ### Op.call 宿主接入顺序（A62后的工作）
 
-A82 已把 wait/detach 生命周期接到生产 Rust Host：detach 持久接纳后独立运行，启动时只接续明确标记且仍为 Ready 的 detach child；未知 Running 不重放。wait child 有独立控制与父等待关系，不同调用身份可并发运行同一目标 Graph，Run list/detail 投影父子来源。Run 接纳时保存 Graph snapshot；PUT 与触发读取/持久化快照共用短 admission lease，定义编辑影响后续 Run，不改既有 Run 的恢复语义。2026-10-04 收敛 Graph 删除：创建、编辑、删除经短 catalog mutation gate 串行；当前有效 Graph 定义或未结束 Run 的冻结 snapshot 有 `op.call` 指向目标时拒绝删除。已结束的历史 Run 不算活动调用方；目标自身仍有未结束 Run 时拒绝删除。删除只清理目标 Graph 和它自己的 Run/文件，不级联删除或改写调用方及其子 Run。R7 仍未覆盖 Plugin child 执行、文件/result/session 语义、真实 Provider/MCP/Sandbox 与跨存储故障窗口。
+A82 已把 wait/detach 生命周期接到生产 Rust Host：detach 持久接纳后独立运行，启动时只接续明确标记且仍为 Ready 的 detach child；未知 Running 不重放。wait child 有独立控制与父等待关系，不同调用身份可并发运行同一目标 Graph，Run list/detail 投影父子来源。Run 接纳时保存 Graph snapshot；PUT 与触发读取/持久化快照共用短 admission lease，定义编辑影响后续 Run，不改既有 Run 的恢复语义。2026-10-04 收敛 Graph 删除：创建、编辑、删除经短 catalog mutation gate 串行；当前有效 Graph 定义或未结束 Run 的冻结 snapshot 有 `op.call` 指向目标时拒绝删除。已结束的历史 Run 不算活动调用方；目标自身仍有未结束 Run 时拒绝删除。删除只清理目标 Graph 和它自己的 Run/文件，不级联删除或改写调用方及其子 Run。A85/A86 已覆盖 Plugin child 执行、文件/result 转交、本地 Artifact 恢复硬化与部分真实 provider 重启边界；R7 仍未覆盖 session、嵌套调用、真实业务 MCP、跨存储故障窗口与 exactly-once。
 
-当前宿主只放行 `op.call` 的 `graph`、`mode`、可选对象 `input` 三字段；`input_map`、`files`、`result`、`session`、未知配置及嵌套调用均拒绝。PluginBinding固定进child record，当前target catalog Plugin漂移 fail closed。child Agent/Plugin执行、Plugin资源生命周期验证、文件/result传递和真实进程恢复仍待后续切片。
+当前宿主严格解析 `op.call` 的 `graph`、`mode`、`input`、`input_map`、`files`、`result`；`session`、未知配置及嵌套调用仍拒绝。PluginBinding 固定进 child record，当前 target catalog Plugin 漂移 fail closed。child Agent/Plugin 执行、选定文件转交和结果回传已接入；A86 对 child 状态、未知事实与 Artifact 半发布做 fail-closed 恢复，真实 provider 只在已观测的 child-write/parent-completion 边界通过，跨存储恢复仍待后续切片。
 
-文件转交沿已冻结call.files/result语义：从父调用可见的已提交输入中复制选定文件至有来源摘要的只读转交快照；子产物复制到父call invocation工作区，再以父自身fs2提交。维持fs2同Run祖先校验，不能直接给模型foreign commit授权或放宽到整个父工作区。先验wait/detach生命期，再验真实父Op→子Agent/MCP→选定返回文件→父验证，最后补接纳/转交/完成进程中断窗口。Session及递归保护另按R7要求推进。
+文件转交沿已冻结 `call.files/result` 语义：从父调用可见的已提交输入中复制选定文件至有来源摘要的只读转交快照；子产物复制到父 call invocation 工作区，再以父自身 fs2 提交。A86 额外校验输入/结果 manifest、目录、选择、hash、symlink 和半发布临时目录，结果导出可幂等重试但跨 RunStore/Artifact root/GraphCall 记录的事务性仍未证明。child `Op.run` 在 started 无 terminal fact 时保留不确定性并阻止父完成；只有已观测的真实 provider 故障边界通过。Session 及递归保护另按 R7 要求推进。
 
 A62的同Graph互斥用于手动/API触发；未来独立调用仍遵守已冻结的“多来源调用同一目标产生独立并发Run”，不得把手动互斥策略推广为所有子调用互斥。每个Run始终只有一个写入执行者。
 
@@ -188,3 +190,4 @@ A62的同Graph互斥用于手动/API触发；未来独立调用仍遵守已冻�
 2026-10-03 A79 同一 Graph Run 恢复入口：GraphRun format 7 保留 `WaitingRecovery` 与精确 invocation 绑定的 pending io-harness attempt。底层仍 fail-closed，普通 `/resume` 会把未决工具、step 与结果未知的事实写入同一 Harness 上下文，让 Agent 核查现场后续做；不会自动重放工具，也不要求用户选择 Retry/Completed/Abort。内部 `/recovery` 路由仅为兼容入口。重启后同一 Graph digest、invocation、Harness attempt 与下游 Artifact 的真实 provider Completed smoke 已通过，证据 `.local/rust-recovery-cqifxcyz/evidence.json`；跨存储故障注入和外部副作用 exactly-once 不承诺。
 
 2026-10-03 A80 Rust Host → React 浏览器垂直切片通过。Host 可托管 React bundle；静态页面/资源不要求 API key，Graph/Run API 仍由 Bearer key 保护，使非 loopback 部署可先加载登录界面。Playwright 从 Rust Host 页面输入 key、运行无 Plugin Graph、在节点面板查看 committed Artifact，并从 Timeline 打开 Run。Host API 的 `/timeline` 投影真实持久 Run，明确不支持计划；无持久结束时间时前端不造时长，非活动的 `running` Run 显示等待接续。验证：runner-host 56 项测试、workspace Clippy/fmt/diff、Web 33 项单测/build、恢复与 Rust Host Playwright 4 项。该 slice provider-free；不代表真实模型 trace UI、计划/Session/Plugin 管理或全平台替代。
+2026-10-04 A86 Rust Host `Op.call` 恢复硬化完成。GraphRunner 固定 call identity，只恢复可继续状态；终态或 `WaitingRecovery` child 不重复派发，`Failed + cursor` 返回 `Uncertain` 并保留父 cursor。Artifact 对 `/in/call` manifest、来源 CommitRef、目录/hash、symlink、半发布和残留临时目录做 fail-closed 校验，输入 staging、结果 export 和 GraphCall freeze 可幂等恢复。provider-free smoke `.local/rust-graph-call-recovery-bian709i/evidence.json` 的 admission、child_running、result transfer、parent completion 四边界通过；真实 Responses + `deepseek-flash` + 本机 HTTP MCP + Bubblewrap 在 `.local/rust-graph-call-recovery-6sm8mc6j/evidence.json`（child write 已记录）和 `.local/rust-graph-call-recovery-00tapghd/evidence.json`（parent completion commit）通过。更早真实中断运行保留 duplicate MCP effect，故不承诺外部 exactly-once；`Op.run` started 无 terminal 仍只能 uncertain。workspace tests、Clippy、受影响 crate fmt、diff、脚本静态检查与 provider-free smoke 均通过；跨存储故障窗口、session、嵌套调用和真实业务 MCP 仍待后续。

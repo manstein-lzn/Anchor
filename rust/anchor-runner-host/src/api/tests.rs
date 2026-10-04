@@ -435,6 +435,185 @@ async fn op_call_wait_projects_durable_child_run_through_host_api() {
 }
 
 #[tokio::test]
+async fn op_call_wait_hands_off_input_map_files_and_selected_result() {
+    let (root, state) = fixture();
+    let _env_guard = PROCESS_ENV.lock().await;
+    set_host_env(root.path(), &state.data_root);
+    let child = root.path().join("child");
+    std::fs::create_dir_all(&child).unwrap();
+    std::fs::write(
+        child.join("graph.json"),
+        serde_json::to_vec(&json!({
+            "objective":"child",
+            "entry":"answer",
+            "input":{"default":"child-default"},
+            "agents":{},
+            "ops":{"answer":{"run":"sh -c \"cat /in/call/input/report.txt > answer.md; cat answer.md\""}},
+            "nodes":[{"id":"answer","op":"answer","plugins":[]}],
+            "edges":[]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        child.join("manifest.json"),
+        r#"{"format":1,"graph":"graph.json","plugins":[]}"#,
+    )
+    .unwrap();
+    let parent = json!({
+        "objective":"parent",
+        "entry":"produce",
+        "input":{"topic":"default-topic"},
+        "agents":{},
+        "ops":{
+            "produce":{"run":"sh -c \"printf 'parent-report\\n' > report.md\""},
+            "notify":{"call":{"graph":"child","mode":"wait",
+                "input":{"constant":"yes"},
+                "input_map":{"topic":"/topic"},
+                "files":[{"node":"produce","path":"report.md","as":"input/report.txt"}],
+                "result":{"node":"answer","files":["answer.md"]}}},
+            "after":{"run":"sh -c \"cat /in/notify/result/answer.md\""}
+        },
+        "nodes":[
+            {"id":"produce","op":"produce","plugins":[]},
+            {"id":"notify","op":"notify","plugins":[]},
+            {"id":"after","op":"after","plugins":[]}
+        ],
+        "edges":[{"from":"produce","to":"notify"},{"from":"notify","to":"after"}]
+    });
+    write_graph_bundle(&state.bundle_root, &parent).unwrap();
+    let app = router(state.clone());
+    let (status, started) = call(
+        app.clone(),
+        "POST",
+        "/trigger",
+        Some(r#"{"graph":"fixture"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    let parent_id = started["run"].as_str().unwrap().to_owned();
+    let store = FileRunStore::new(state.data_root.join("runs"));
+    let mut child_id = String::new();
+    for _ in 0..300 {
+        let record = store.load(&parent_id).unwrap().unwrap();
+        if let Some(id) = record
+            .graph_calls
+            .values()
+            .next()
+            .and_then(|call| call.child_run_id.clone())
+        {
+            child_id = id;
+        }
+        if matches!(
+            record.status,
+            RunStatus::Completed | RunStatus::Failed | RunStatus::Stopped | RunStatus::Aborted
+        ) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let parent_record = store.load(&parent_id).unwrap().unwrap();
+    assert_eq!(
+        parent_record.status,
+        RunStatus::Completed,
+        "{:?}",
+        parent_record.error
+    );
+    assert!(!child_id.is_empty(), "parent did not admit a child Run");
+    let child_record = store.load(&child_id).unwrap().unwrap();
+    assert_eq!(
+        child_record.status,
+        RunStatus::Completed,
+        "{:?}",
+        child_record.error
+    );
+    // `input` constants override and `input_map` pointers select the parent input,
+    // all merged under the child's own declared input.
+    assert_eq!(child_record.input["constant"], "yes");
+    assert_eq!(child_record.input["topic"], "default-topic");
+    assert_eq!(child_record.input["default"], "child-default");
+    // The child read the selected parent commit through the read-only /in/call mount.
+    assert_eq!(
+        child_record.results["answer"][0]
+            .completion
+            .submission
+            .trim(),
+        "parent-report"
+    );
+    // The wait call node returns the explicitly selected result descriptor.
+    let notify = &parent_record.results["notify"][0].completion.output;
+    assert_eq!(notify["summary"], "parent-report");
+    assert_eq!(notify["result"]["node"], "answer");
+    assert_eq!(notify["result"]["files"], json!(["answer.md"]));
+    // The downstream node reads the copied result file from the call node commit.
+    assert_eq!(
+        parent_record.results["after"][0]
+            .completion
+            .submission
+            .trim(),
+        "parent-report"
+    );
+}
+
+#[tokio::test]
+async fn op_call_wait_fails_closed_on_missing_input_map_pointer() {
+    let (root, state) = fixture();
+    let _env_guard = PROCESS_ENV.lock().await;
+    set_host_env(root.path(), &state.data_root);
+    let child = root.path().join("child");
+    std::fs::create_dir_all(&child).unwrap();
+    std::fs::write(
+        child.join("graph.json"),
+        r#"{"objective":"child","entry":"answer","agents":{},"ops":{"answer":{"run":"true"}},"nodes":[{"id":"answer","op":"answer","plugins":[]}],"edges":[]}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        child.join("manifest.json"),
+        r#"{"format":1,"graph":"graph.json","plugins":[]}"#,
+    )
+    .unwrap();
+    let parent = json!({
+        "objective":"parent",
+        "entry":"notify",
+        "input":{"topic":"default-topic"},
+        "agents":{},
+        "ops":{"notify":{"call":{"graph":"child","mode":"wait","input_map":{"missing":"/nope"}}}},
+        "nodes":[{"id":"notify","op":"notify","plugins":[]}],
+        "edges":[]
+    });
+    write_graph_bundle(&state.bundle_root, &parent).unwrap();
+    let app = router(state.clone());
+    let (status, started) = call(
+        app.clone(),
+        "POST",
+        "/trigger",
+        Some(r#"{"graph":"fixture"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    let parent_id = started["run"].as_str().unwrap().to_owned();
+    let store = FileRunStore::new(state.data_root.join("runs"));
+    for _ in 0..300 {
+        let record = store.load(&parent_id).unwrap().unwrap();
+        if matches!(
+            record.status,
+            RunStatus::Completed | RunStatus::Failed | RunStatus::Stopped | RunStatus::Aborted
+        ) {
+            let error = record.error.unwrap_or_default();
+            assert_eq!(record.status, RunStatus::Failed, "{error}");
+            assert!(error.contains("input_map"), "{error}");
+            assert!(
+                record.graph_calls.is_empty(),
+                "a rejected call must not admit a child"
+            );
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("parent Run did not settle");
+}
+
+#[tokio::test]
 async fn op_call_detach_dispatches_child_and_projects_parent_relation() {
     let (root, state) = fixture();
     let _env_guard = PROCESS_ENV.lock().await;
@@ -576,6 +755,116 @@ async fn startup_recovery_dispatches_only_ready_detached_children() {
     assert_eq!(
         store.load("waiting-ready").unwrap().unwrap().status,
         RunStatus::Ready
+    );
+}
+
+#[tokio::test]
+async fn restart_dispatches_ready_detach_child_only_with_staged_call_inputs() {
+    use anchor_runtime_rig::graph::{
+        ArtifactPort, CallFileSelection, GraphRunRecord, GraphSnapshot, InvocationKey,
+        NodeCompletion,
+    };
+    let (root, state) = fixture();
+    let _env_guard = PROCESS_ENV.lock().await;
+    set_host_env(root.path(), &state.data_root);
+    let child_bundle = root.path().join("child");
+    std::fs::create_dir_all(&child_bundle).unwrap();
+    let definition = json!({
+        "objective":"child","entry":"answer","agents":{},
+        "ops":{"answer":{"run":"sh -c \"cat /in/call/input/report.txt\""}},
+        "nodes":[{"id":"answer","op":"answer","plugins":[]}],"edges":[]
+    });
+    std::fs::write(child_bundle.join("graph.json"), definition.to_string()).unwrap();
+    std::fs::write(
+        child_bundle.join("manifest.json"),
+        r#"{"format":1,"graph":"graph.json","plugins":[]}"#,
+    )
+    .unwrap();
+
+    // The staged read-only `/in/call` bundle is written before the child is
+    // durable, exactly as the live Op.call path orders it.
+    let artifacts = HostArtifacts::new(
+        state.data_root.join("artifacts"),
+        state.workspace_root.clone(),
+    );
+    let producer = InvocationKey {
+        run_id: "parent-run".into(),
+        graph_digest: "parent-digest".into(),
+        node_id: "produce".into(),
+        invocation: 1,
+    };
+    let producer_workspace = artifacts.workspace_path(&producer).unwrap();
+    std::fs::create_dir_all(&producer_workspace).unwrap();
+    std::fs::write(producer_workspace.join("report.txt"), "parent-report").unwrap();
+    let producer_commit = artifacts
+        .freeze(
+            &producer,
+            &NodeCompletion {
+                submission: "done".into(),
+                route: None,
+                model_requests: 0,
+                output: json!({}),
+            },
+        )
+        .await
+        .unwrap();
+    let child_id = "detach-restart";
+    artifacts
+        .stage_call_inputs(
+            child_id,
+            std::slice::from_ref(&producer_commit),
+            &[CallFileSelection {
+                node: "produce".into(),
+                path: "report.txt".into(),
+                alias: "input/report.txt".into(),
+            }],
+        )
+        .await
+        .unwrap();
+
+    let snapshot = GraphSnapshot::admit(definition).unwrap();
+    let store = FileRunStore::new(state.data_root.join("runs"));
+    let mut record = GraphRunRecord::create_with_id(snapshot, json!({}), child_id).unwrap();
+    record.plugin_bindings_initialized = true;
+    store.save(&record).unwrap();
+    let metadata = RunMetadata::graph_call_child(
+        child_id.to_owned(),
+        "child".into(),
+        record.graph_digest.clone(),
+        &child_bundle,
+        crate::application::metadata::GraphCallSource {
+            parent_run: "missing-parent".into(),
+            parent_graph: "parent".into(),
+            parent_graph_digest: "parent-digest".into(),
+            node: "notify".into(),
+            invocation: 1,
+            mode: "detach".into(),
+            root_run: "missing-parent".into(),
+        },
+    )
+    .unwrap();
+    metadata::save(&state.data_root, &metadata).unwrap();
+
+    state
+        .application
+        .recover_detached_at_startup()
+        .await
+        .unwrap();
+    for _ in 0..200 {
+        if store
+            .load(child_id)
+            .unwrap()
+            .is_some_and(|record| record.status == RunStatus::Completed)
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let child = store.load(child_id).unwrap().unwrap();
+    assert_eq!(child.status, RunStatus::Completed, "{:?}", child.error);
+    assert_eq!(
+        child.results["answer"][0].completion.submission.trim(),
+        "parent-report"
     );
 }
 
@@ -2000,7 +2289,11 @@ async fn changed_plugin_and_mismatched_metadata_block_resume_without_starting_wo
     let (_root, state) = fixture();
     let plugin = state.bundle_root.join("plugins/fixture");
     std::fs::create_dir_all(&plugin).unwrap();
-    std::fs::write(plugin.join("plugin.json"), "{}").unwrap();
+    std::fs::write(
+        plugin.join("plugin.json"),
+        r#"{"name":"Fixture","description":"test"}"#,
+    )
+    .unwrap();
     let bindings = FilePluginCatalog::new(&state.bundle_root)
         .resolve(&["fixture".into()])
         .unwrap();
@@ -2025,7 +2318,11 @@ async fn changed_plugin_and_mismatched_metadata_block_resume_without_starting_wo
         "graph_digest":record.graph_digest,"bundle_source":state.bundle_root.canonicalize().unwrap(),
         "created":"2026-10-02T00:00:00Z","trigger_source":"manual"});
     std::fs::write(&metadata_path, metadata.to_string()).unwrap();
-    std::fs::write(plugin.join("plugin.json"), r#"{"changed":true}"#).unwrap();
+    std::fs::write(
+        plugin.join("plugin.json"),
+        r#"{"name":"Changed","description":"test"}"#,
+    )
+    .unwrap();
     let app = router(state.clone());
     let (status, error) = call(app.clone(), "POST", "/runs/paused-plugin/resume", None).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);

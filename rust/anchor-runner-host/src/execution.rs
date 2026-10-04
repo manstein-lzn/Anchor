@@ -47,9 +47,11 @@ impl PreparedExecution {
         reject_snapshot(&record.snapshot)?;
         let (store, artifacts, nodes, control) =
             make_host_with_control(&record.run_id, bindings.clone(), control)?;
+        // Admission validates the Plugin declarations and host wiring. The
+        // per-node network flag is enforced when the node is dispatched.
         nodes
             .mcp
-            .validate_bindings(&bindings.values().cloned().collect::<Vec<_>>())?;
+            .validate_bindings(&bindings.values().cloned().collect::<Vec<_>>(), true)?;
         let caps = nodes.capabilities();
         for node in &record.snapshot.nodes {
             if node.agent.is_some() && !caps.agent {

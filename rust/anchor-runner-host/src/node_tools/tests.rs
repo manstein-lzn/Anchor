@@ -8,17 +8,11 @@ use std::sync::{
 struct Inner;
 impl ToolPort for Inner {
     fn definitions(&self) -> Vec<ToolDefinition> {
-        vec![
-            ToolDefinition::new(ToolName::new("echo").unwrap(), "fixture", json!({})),
-            ToolDefinition::new(
-                ToolName::new("anchor_mcp__search_tools").unwrap(),
-                "MCP search fixture",
-                json!({"type":"object"}),
-            ),
-        ]
-    }
-    fn is_read_only(&self, name: &str) -> bool {
-        name == "anchor_mcp__search_tools"
+        vec![ToolDefinition::new(
+            ToolName::new("echo").unwrap(),
+            "fixture",
+            json!({}),
+        )]
     }
     fn call<'a>(
         &'a self,
@@ -157,10 +151,8 @@ async fn strict_arguments_and_other_tool_forwarding() {
             .iter()
             .map(|tool| tool.name.as_str())
             .collect::<Vec<_>>(),
-        ["echo", "anchor_mcp__search_tools", RUN_TOOL_NAME]
+        ["echo", RUN_TOOL_NAME]
     );
-    assert!(tools.is_read_only("anchor_mcp__search_tools"));
-    assert!(!tools.is_read_only("anchor_mcp__call_tool"));
     assert!(!tools.is_read_only(RUN_TOOL_NAME));
     let result = tools
         .call("echo", json!({"arbitrary":"inner"}))
@@ -204,9 +196,8 @@ async fn owned_node_tools_are_static_arc_ports_with_owned_invocation_context() {
             .iter()
             .map(|tool| tool.name.as_str())
             .collect::<Vec<_>>(),
-        ["echo", "anchor_mcp__search_tools", RUN_TOOL_NAME]
+        ["echo", RUN_TOOL_NAME]
     );
-    assert!(tools.is_read_only("anchor_mcp__search_tools"));
     let result = tools.call("echo", json!({"owned": true})).await.unwrap();
     assert_eq!(result[0].as_json(), Some(&json!({"owned": true})));
 }
