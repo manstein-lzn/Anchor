@@ -1,0 +1,12 @@
+[package]
+name = "anchor-io-node-exec-spike"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+anchor-runtime-rig = { package = "anchor-runtime-rig", path = "../../rust/anchor-runtime" }
+anchor-io-harness-runtime = { path = "../../rust/anchor-io-harness-runtime" }
+rig-core = { version = "=0.43.0", default-features = false, features = ["reqwest", "rustls"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

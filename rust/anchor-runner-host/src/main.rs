@@ -257,6 +257,7 @@ fn make_host_with_control(
         Arc::new(tools.clone()),
         mcp.clone(),
         plugin_bindings.clone(),
+        anchor_runtime_rig::graph::FileRunStore::new(state.join("runs")),
     ));
     let io_nodes = provider.as_ref().map(|provider| {
         anchor_io_harness_runtime::node_port::IoHarnessNodePort::new_with_default_policy(

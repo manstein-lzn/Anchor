@@ -1,0 +1,5 @@
+{
+  "name": "Anchor RSI evidence",
+  "description": "Read frozen project, Graph, Plugin and Run evidence and public dependency signals. No project mutations or message sending.",
+  "mcpServers": {"anchor.rsi": {}}
+}

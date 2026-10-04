@@ -3,9 +3,9 @@ use super::{HostArtifacts, create_durable_directory, write_durable};
 use crate::tool_host;
 use anchor_io_harness_runtime::node_port::{NodeHostResolver, ToolResolution};
 use anchor_runtime_rig::graph::{
-    CompletionFact, GraphError, InvocationKey, NodeCompletion, NodeExecutionCapabilities,
-    NodeExecutionOutcome, NodeExecutionPort, NodeExecutionRequest, NodeKind, PluginBinding,
-    RecoveryDecision,
+    CompletionFact, FileRunStore, GraphError, InvocationKey, NodeCompletion,
+    NodeExecutionCapabilities, NodeExecutionOutcome, NodeExecutionPort, NodeExecutionRequest,
+    NodeKind, PluginBinding, RecoveryDecision, RunStore,
 };
 use anchor_runtime_rig::{NetworkPolicy, SandboxPort, SandboxRequest, SandboxStatus};
 use anchor_sandbox_bwrap::BubblewrapSandbox;
@@ -40,6 +40,7 @@ pub(crate) struct HostIoResolver {
     tools: std::sync::Arc<tool_host::PluginToolHost>,
     mcp: tool_host::McpToolConfig,
     plugin_bindings: BTreeMap<String, PluginBinding>,
+    run_store: FileRunStore,
 }
 
 impl HostIoResolver {
@@ -49,6 +50,7 @@ impl HostIoResolver {
         tools: std::sync::Arc<tool_host::PluginToolHost>,
         mcp: tool_host::McpToolConfig,
         plugin_bindings: BTreeMap<String, PluginBinding>,
+        run_store: FileRunStore,
     ) -> Self {
         Self {
             artifacts,
@@ -56,6 +58,7 @@ impl HostIoResolver {
             tools,
             mcp,
             plugin_bindings,
+            run_store,
         }
     }
 }
@@ -83,16 +86,34 @@ impl NodeHostResolver for HostIoResolver {
 
     fn tools<'a>(&'a self, request: &'a NodeExecutionRequest) -> ToolResolution<'a> {
         Box::pin(async move {
+            let admitted = self
+                .run_store
+                .load(&request.key.run_id)
+                .map_err(|error| format!("load admitted Run Plugin bindings: {error}"))?
+                .ok_or_else(|| {
+                    format!(
+                        "Run `{}` has no durable Plugin binding record",
+                        request.key.run_id
+                    )
+                })?;
+            if admitted.graph_digest != request.key.graph_digest
+                || !admitted.plugin_bindings_initialized
+            {
+                return Err(format!(
+                    "Run `{}` has no matching initialized Plugin binding record",
+                    request.key.run_id
+                ));
+            }
             for binding in &request.plugins {
-                let Some(frozen) = self.plugin_bindings.get(&binding.id) else {
+                let Some(frozen) = admitted.plugin_bindings.get(&binding.id) else {
                     return Err(format!(
-                        "Plugin `{}` is not bound by the admitted bundle",
-                        binding.id
+                        "Plugin `{}` is not bound by the admitted Run",
+                        binding.id,
                     ));
                 };
                 if frozen != binding {
                     return Err(format!(
-                        "Plugin `{}` differs from the frozen bundle binding",
+                        "Plugin `{}` differs from the frozen Run binding",
                         binding.id
                     ));
                 }
@@ -389,12 +410,25 @@ impl NodeExecutionPort for HostNodes {
 #[cfg(test)]
 mod io_resolver_tests {
     use super::*;
+    use anchor_graph_host::{GraphCatalog, InProcessGraphHost, LoadedGraphBundle};
     use anchor_io_harness_runtime::node_port::IoHarnessNodePort;
     use anchor_runtime_rig::graph::{
         GraphRunRecord, GraphRunner, GraphSnapshot, InvocationKey, RunControl, RunStatus, RunStore,
     };
     use anchor_sandbox_bwrap::BubblewrapPolicy;
     use rig_core::test_utils::{MockCompletionModel, MockTurn};
+
+    struct ChildBundleCatalog(LoadedGraphBundle);
+
+    impl GraphCatalog for ChildBundleCatalog {
+        fn snapshot(&self, name: &str) -> Result<Option<GraphSnapshot>, GraphError> {
+            Ok((name == "child").then(|| self.0.snapshot.clone()))
+        }
+
+        fn bundle(&self, name: &str) -> Result<Option<LoadedGraphBundle>, GraphError> {
+            Ok((name == "child").then(|| self.0.clone()))
+        }
+    }
     use serde_json::json;
     use std::sync::atomic::AtomicBool;
 
@@ -434,6 +468,20 @@ mod io_resolver_tests {
         let bindings = tools
             .resolve_fixture_plugins(&["fake-tools".into()])
             .unwrap();
+        let store = FileRunStore::new(root.path().join("runs"));
+        let snapshot = anchor_runtime_rig::graph::GraphSnapshot::admit(json!({
+            "objective":"resolver test","entry":"agent","agents":{"worker":{"model":"fixture"}},
+            "ops":{},"nodes":[{"id":"agent","agent":"worker","plugins":["fake-tools"]}],"edges":[]
+        }))
+        .unwrap();
+        let mut admitted = GraphRunRecord::create(snapshot, serde_json::Value::Null).unwrap();
+        admitted.plugin_bindings = bindings
+            .iter()
+            .cloned()
+            .map(|b| (b.id.clone(), b))
+            .collect();
+        admitted.plugin_bindings_initialized = true;
+        store.save(&admitted).unwrap();
         let resolver = HostIoResolver::new(
             HostArtifacts::new(artifacts_root, workspace_root),
             sandbox,
@@ -444,6 +492,7 @@ mod io_resolver_tests {
                 .cloned()
                 .map(|binding| (binding.id.clone(), binding))
                 .collect(),
+            store,
         );
 
         assert_eq!(
@@ -454,8 +503,8 @@ mod io_resolver_tests {
 
         let request = NodeExecutionRequest {
             key: InvocationKey {
-                run_id: "resolver-test".into(),
-                graph_digest: "digest".into(),
+                run_id: admitted.run_id,
+                graph_digest: admitted.graph_digest,
                 node_id: "agent".into(),
                 invocation: 1,
             },
@@ -559,12 +608,14 @@ mod io_resolver_tests {
             .resolve_fixture_plugins(&["fake-tools".into()])
             .unwrap()
             .remove(0);
+        let store = anchor_runtime_rig::graph::FileRunStore::new(state_root.join("runs"));
         let resolver = std::sync::Arc::new(HostIoResolver::new(
             HostArtifacts::new(artifacts_root.clone(), workspace_root),
             std::sync::Arc::clone(&sandbox),
             std::sync::Arc::new(plugin_tools),
             tool_host::McpToolConfig::default(),
             BTreeMap::from([(binding.id.clone(), binding.clone())]),
+            store.clone(),
         ));
         let model = MockCompletionModel::from_turns([
             MockTurn::tool_call(
@@ -630,6 +681,112 @@ mod io_resolver_tests {
     }
 
     #[tokio::test]
+    async fn op_call_wait_runs_child_agent_with_child_only_fixture_plugin() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace_root = root.path().join("workspaces");
+        let artifacts_root = root.path().join("artifacts");
+        let state_root = root.path().join("state");
+        std::fs::create_dir_all(&workspace_root).unwrap();
+        std::fs::create_dir_all(&artifacts_root).unwrap();
+        let sandbox = std::sync::Arc::new(
+            BubblewrapSandbox::new(
+                BubblewrapPolicy::new("bwrap", ["sh"])
+                    .authorize_workspace_root(&workspace_root)
+                    .authorize_readonly_input_root(&artifacts_root)
+                    .authorize_readonly_destination_root("/in"),
+            )
+            .unwrap(),
+        );
+        let plugin_tools =
+            std::sync::Arc::new(tool_host::PluginToolHost::new(["fake-tools".to_owned()]));
+        let binding = plugin_tools
+            .resolve_fixture_plugins(&["fake-tools".into()])
+            .unwrap()
+            .remove(0);
+        let child_snapshot = GraphSnapshot::admit(json!({
+            "objective":"child plugin tool acceptance",
+            "entry":"work",
+            "agents":{"worker":{"model":"fixture","instructions":"Call the fake echo tool once, then return a JSON summary."}},
+            "ops":{},
+            "nodes":[{"id":"work","agent":"worker","plugins":["fake-tools"]}],
+            "edges":[]
+        }))
+        .unwrap();
+        let catalog = ChildBundleCatalog(LoadedGraphBundle {
+            snapshot: child_snapshot,
+            plugins: vec![binding.clone()],
+        });
+        let store = anchor_runtime_rig::graph::FileRunStore::new(state_root.join("runs"));
+        let artifacts = HostArtifacts::new(artifacts_root.clone(), workspace_root.clone());
+        // The parent has no Plugin bindings. The child binding must be accepted
+        // from its own durable GraphRunRecord, written by child admission.
+        let resolver = std::sync::Arc::new(HostIoResolver::new(
+            artifacts.clone(),
+            std::sync::Arc::clone(&sandbox),
+            plugin_tools,
+            tool_host::McpToolConfig::default(),
+            BTreeMap::new(),
+            store.clone(),
+        ));
+        let model = MockCompletionModel::from_turns([
+            MockTurn::tool_call(
+                "child-echo",
+                tool_host::FAKE_ECHO_TOOL,
+                json!({"value":"child-plugin-ok"}),
+            ),
+            MockTurn::text(r#"{"summary":"child-plugin-ok"}"#),
+        ])
+        .erase();
+        let nodes = HostNodes {
+            sandbox,
+            allowed_commands: vec!["sh".into()],
+            artifacts: artifacts.clone(),
+            facts_root: state_root.join("facts"),
+            io_resolver: std::sync::Arc::clone(&resolver),
+            mcp: tool_host::McpToolConfig::default(),
+            io_nodes: Some(IoHarnessNodePort::new_with_default_policy(
+                state_root.join("io-harness/facts"),
+                state_root.join("io-harness/store"),
+                model,
+                resolver,
+            )),
+        };
+        let parent_snapshot = GraphSnapshot::admit(json!({
+            "objective":"invoke child",
+            "entry":"invoke",
+            "agents":{},
+            "ops":{"invoke":{"call":{"graph":"child","mode":"wait","input":{}}}},
+            "nodes":[{"id":"invoke","op":"invoke","plugins":[]}],
+            "edges":[]
+        }))
+        .unwrap();
+        let parent = GraphRunRecord::create(parent_snapshot, serde_json::Value::Null).unwrap();
+        let host = InProcessGraphHost::new(&catalog, &store, &artifacts, &nodes, &NoControl);
+
+        let completed = GraphRunner::new(&store, &artifacts, &host, &NoControl)
+            .run(parent)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            completed.status,
+            RunStatus::Completed,
+            "{:?}",
+            completed.error
+        );
+        assert_eq!(completed.plugin_bindings.len(), 0);
+        let call = completed.graph_calls.values().next().unwrap();
+        let child_id = call.child_run_id.as_ref().unwrap();
+        let child = store.load(child_id).unwrap().unwrap();
+        assert_eq!(child.status, RunStatus::Completed, "{:?}", child.error);
+        assert_eq!(child.plugin_bindings.get("fake-tools"), Some(&binding));
+        assert_eq!(
+            child.results["work"][0].completion.output["summary"],
+            "child-plugin-ok"
+        );
+    }
+
+    #[tokio::test]
     async fn graph_runner_restart_resumes_io_harness_without_replaying_anchor_run() {
         let root = tempfile::tempdir().unwrap();
         let workspace_root = root.path().join("workspaces");
@@ -655,6 +812,7 @@ mod io_resolver_tests {
             plugin_tools,
             tool_host::McpToolConfig::default(),
             BTreeMap::new(),
+            anchor_runtime_rig::graph::FileRunStore::new(state_root.join("runs")),
         ));
         let build_nodes = |model| HostNodes {
             sandbox: std::sync::Arc::clone(&sandbox),

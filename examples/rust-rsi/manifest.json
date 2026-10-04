@@ -1,0 +1,16 @@
+{
+  "format": 1,
+  "graph": "graph.json",
+  "plugins": [
+    {
+      "id": "rsi",
+      "digest": "1eef3c413f5b5e97f0b0a98db039c728f4e40bf5a5998f2288d3bad018d7e50d",
+      "resources": [
+        "plugin.json"
+      ],
+      "mcp_servers": [
+        "anchor.rsi"
+      ]
+    }
+  ]
+}
