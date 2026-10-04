@@ -177,17 +177,6 @@ fn reject_snapshot(snapshot: &GraphSnapshot) -> Result<(), String> {
         if shlex::split(command).is_none_or(|args| args.is_empty()) {
             return Err("Op.run has empty or malformed command arguments".into());
         }
-        if snapshot
-            .edges
-            .iter()
-            .filter(|edge| edge.from_node == node.id)
-            .count()
-            > 1
-        {
-            return Err(
-                "Op.run has no route-selection result; use an AgentNode for multiple exits".into(),
-            );
-        }
     }
     Ok(())
 }
@@ -595,6 +584,38 @@ mod tests {
             from_node: "command".into(),
             to_node: "command".into(),
         });
+        assert!(reject_snapshot(&graph).is_ok());
+    }
+
+    #[test]
+    fn host_admission_accepts_op_routes_with_multiple_exits() {
+        let mut graph = snapshot();
+        graph.nodes.push(anchor_runtime_rig::graph::GraphNode {
+            id: "good".into(),
+            agent: None,
+            op: Some("run".into()),
+            input: None,
+            plugins: Vec::new(),
+            max_rounds: None,
+        });
+        graph.nodes.push(anchor_runtime_rig::graph::GraphNode {
+            id: "bad".into(),
+            agent: None,
+            op: Some("run".into()),
+            input: None,
+            plugins: Vec::new(),
+            max_rounds: None,
+        });
+        graph.edges.extend([
+            anchor_runtime_rig::graph::GraphEdge {
+                from_node: "command".into(),
+                to_node: "good".into(),
+            },
+            anchor_runtime_rig::graph::GraphEdge {
+                from_node: "command".into(),
+                to_node: "bad".into(),
+            },
+        ]);
         assert!(reject_snapshot(&graph).is_ok());
     }
 

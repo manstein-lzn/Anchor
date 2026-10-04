@@ -184,6 +184,26 @@ fn merge_agent_completion_facts(rig: CompletionFact, io_harness: CompletionFact)
     }
 }
 
+/// Read the deterministic Op routing marker used by the Python Op runtime.
+/// The graph kernel remains responsible for checking that the selected route
+/// is an actual outgoing edge, and for requiring a choice when there are
+/// multiple exits.
+fn read_op_route(stdout: &str) -> (String, Option<String>) {
+    let lines = stdout.lines().collect::<Vec<_>>();
+    let Some((index, first)) = lines
+        .iter()
+        .enumerate()
+        .find(|(_, line)| !line.trim().is_empty())
+    else {
+        return (String::new(), None);
+    };
+    let Some(target) = first.trim().strip_prefix("ANCHOR_ROUTE:") else {
+        return (stdout.trim().to_owned(), None);
+    };
+    let submission = lines[index + 1..].join("\n").trim().to_owned();
+    (submission, Some(target.trim().to_owned()))
+}
+
 impl HostNodes {
     fn start(&self, key: &InvocationKey) -> Result<(), GraphError> {
         create_durable_directory(&self.facts_root)?;
@@ -252,7 +272,10 @@ impl HostNodes {
                 readonly_inputs,
                 workspace_readonly: vec![],
                 tool_dirs: vec![],
-                environment: vec![],
+                environment: vec![anchor_runtime_rig::SandboxEnvironment::new(
+                    "ANCHOR_ROUTES",
+                    request.routes.join(","),
+                )],
                 network: NetworkPolicy::Disabled,
                 timeout: Duration::from_secs_f64(request.wall_time_limit_seconds.unwrap_or(3600.0)),
                 max_output_bytes: 64 * 1024,
@@ -262,14 +285,24 @@ impl HostNodes {
             .await
             .map_err(|e| GraphError::Unsupported(e.to_string()))?;
         match result.status {
-            SandboxStatus::Completed if result.exit_code == Some(0) => self.complete(&request.key, NodeCompletion {
-                submission: "anchor-runner-host".into(), route: None, model_requests: 0,
-                output: json!({"stdout":result.stdout,"stderr":result.stderr,"exit_code":result.exit_code}),
-            }),
+            SandboxStatus::Completed if result.exit_code == Some(0) => {
+                let (submission, route) = read_op_route(&result.stdout);
+                self.complete(&request.key, NodeCompletion {
+                    submission,
+                    route,
+                    model_requests: 0,
+                    output: json!({"stdout":result.stdout,"stderr":result.stderr,"exit_code":result.exit_code}),
+                })
+            }
             SandboxStatus::Cancelled => Ok(NodeExecutionOutcome::Cancelled),
             _ => {
                 let reason = format!("{} (exit_code={:?})", result.reason, result.exit_code);
-                write_durable(&self.facts_root.join(format!("{}.failed", fact_stem(&request.key))), reason.as_bytes())?;
+                write_durable(
+                    &self
+                        .facts_root
+                        .join(format!("{}.failed", fact_stem(&request.key))),
+                    reason.as_bytes(),
+                )?;
                 Ok(NodeExecutionOutcome::Failed { reason })
             }
         }
