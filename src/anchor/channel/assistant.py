@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 
 from anchor.simple import graph as graph_module
 from anchor.simple import run as runner
+from anchor.runtime_http import RuntimeHTTPError
 
 if TYPE_CHECKING:
     from anchor.serve import Scheduler
@@ -20,6 +21,9 @@ def run_id(turn: dict) -> str:
 
 
 def history(scheduler: Scheduler, session_id: str) -> list[dict[str, str]]:
+    if scheduler.runtime is not None:
+        from anchor.channel.runtime import history as runtime_history
+        return runtime_history(scheduler, session_id)
     messages = []
     for turn in reversed(scheduler.turns.list(session_id)):
         if turn["prompt"]:
@@ -43,6 +47,8 @@ def receive(scheduler: Scheduler, event: dict[str, Any], *, wait: bool = True) -
     attachments = event.get("attachments", [])
     if not isinstance(attachments, list) or any(not isinstance(item, dict) for item in attachments):
         return json.dumps({"error": "attachments must be a list of objects"}), 400
+    if "attachment_snapshot" in event or any("attachment_snapshot" in item for item in attachments):
+        return json.dumps({"error": "attachment snapshots are internal channel facts"}), 400
     if message_type in {"image", "file"} and not attachments:
         return json.dumps({"error": "media message has no downloaded attachment"}), 400
     if not text.strip() and not attachments:
@@ -52,26 +58,54 @@ def receive(scheduler: Scheduler, event: dict[str, Any], *, wait: bool = True) -
         return json.dumps({"error": "only private conversations are supported"}), 400
     if len(text) > 100_000:
         return json.dumps({"error": "text must contain at most 100000 characters"}), 400
-    try:
-        _attachment_resources(scheduler, attachments)
-    except ValueError as exc:
-        return json.dumps({"error": str(exc)}, ensure_ascii=False), 400
     if event["sender_id"] not in scheduler.wecom_users and "*" not in scheduler.wecom_users:
         return json.dumps({"error": "WeCom user is not allowed"}), 403
-    workspace = scheduler.workspace(scheduler.wecom_graph)
-    if workspace is None:
-        return json.dumps({"error": "configure ANCHOR_WECOM_GRAPH with an installed Graph"}), 503
-    try:
-        graph = graph_module.load(workspace / "graph.json")
-        if scheduler.wecom_reply_node not in graph.nodes:
-            raise ValueError("ANCHOR_WECOM_REPLY_NODE must name a node in the Graph")
-        for node in graph.nodes.values():
-            scheduler.library.attach(node.plugins)
-    except (ValueError, OSError) as exc:
-        return json.dumps({"error": str(exc)}), 503
     channel = {name: event[name] for name in ("source", "sender_id", "conversation_id")}
     identity = json.dumps([scheduler.wecom_graph, scheduler.wecom_reply_node, *channel.values()])
     session_id = "channel-graph-" + hashlib.sha256(identity.encode()).hexdigest()[:40]
+    request_id = "channel-" + hashlib.sha256(json.dumps([event["source"], event["event_id"]]).encode()).hexdigest()
+    channel_input = {"attachments": attachments}
+    repeated = None
+    if scheduler.runtime is not None:
+        from anchor.channel.attachments import prepare_channel_input, source_descriptors
+        try:
+            descriptors = source_descriptors(attachments)
+            with scheduler.lock:
+                repeated = scheduler.turns.find_request(session_id, request_id)
+                if repeated:
+                    session = scheduler.sessions.get(session_id)
+                    saved = json.loads(repeated.get("channel_input") or "{}")
+                    original = saved.get("attachment_sources", saved.get("attachments", []))
+                    if (session.graph != scheduler.wecom_graph or session.reply_node != scheduler.wecom_reply_node or
+                            session.channel != channel or repeated["prompt"] != text or original != descriptors):
+                        return json.dumps({"error": "event_id was already used for different channel input"}), 409
+            if repeated is None:
+                channel_input = prepare_channel_input(scheduler, channel_input)
+        except (KeyError, TypeError, ValueError, OSError) as exc:
+            error = str(exc) if isinstance(exc, ValueError) else "channel attachment could not be read safely"
+            return json.dumps({"error": error}, ensure_ascii=False), 400
+    else:
+        try:
+            _attachment_resources(scheduler, attachments)
+        except ValueError as exc:
+            return json.dumps({"error": str(exc)}, ensure_ascii=False), 400
+    try:
+        if scheduler.runtime is not None:
+            from anchor.channel.runtime import graph_plugins
+            graph_plugins(scheduler)
+        else:
+            workspace = scheduler.workspace(scheduler.wecom_graph)
+            if workspace is None:
+                return json.dumps({"error": "configure ANCHOR_WECOM_GRAPH with an installed Graph"}), 503
+            graph = graph_module.load(workspace / "graph.json")
+            if scheduler.wecom_reply_node not in graph.nodes:
+                raise ValueError("ANCHOR_WECOM_REPLY_NODE must name a node in the Graph")
+            for node in graph.nodes.values():
+                scheduler.library.attach(node.plugins)
+    except (ValueError, OSError) as exc:
+        return json.dumps({"error": str(exc)}), 503
+    except RuntimeHTTPError as exc:
+        return exc.response()
     with scheduler.lock:
         try:
             scheduler.sessions.get(session_id)
@@ -79,9 +113,10 @@ def receive(scheduler: Scheduler, event: dict[str, Any], *, wait: bool = True) -
             scheduler.sessions.create(session_id, graph=scheduler.wecom_graph,
                                       reply_node=scheduler.wecom_reply_node, channel=channel)
             scheduler.sessions.append(session_id, "channel.bound", channel)
-    request_id = "channel-" + hashlib.sha256(json.dumps([event["source"], event["event_id"]]).encode()).hexdigest()
-    body, status = scheduler.create_turn(session_id, request_id, text,
-                                         channel_input={"attachments": attachments})
+    if repeated is None:
+        body, status = scheduler.create_turn(session_id, request_id, text, channel_input=channel_input)
+    else:
+        body, status = json.dumps({"turn": repeated}, ensure_ascii=False), 202
     if status != 202:
         return body, status
     if not wait:
@@ -97,6 +132,9 @@ def receive(scheduler: Scheduler, event: dict[str, Any], *, wait: bool = True) -
 
 
 def result(scheduler: Scheduler, turn: dict) -> tuple[str, int]:
+    if scheduler.runtime is not None:
+        from anchor.channel.runtime import result as runtime_result
+        return runtime_result(scheduler, turn)
     session = scheduler.sessions.get(turn["session"])
     current = scheduler.turns.get(session.id, turn["id"])
     if current["status"] == "stopped" and current["error"] == "superseded by a newer message":
@@ -121,6 +159,9 @@ def result(scheduler: Scheduler, turn: dict) -> tuple[str, int]:
 
 def execute(scheduler: Scheduler, turn: dict) -> tuple[str, int]:
     """One admitted turn, through the existing runner and its node/Plugin/sandbox boundary."""
+    if scheduler.runtime is not None:
+        from anchor.channel.runtime import execute as runtime_execute
+        return runtime_execute(scheduler, turn)
     session = scheduler.sessions.get(turn["session"])
     workspace = scheduler.workspace(session.graph)
     if workspace is None:

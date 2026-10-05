@@ -162,3 +162,75 @@ pub(super) async fn read_file(
     };
     Ok(Json(json!({"path":path,"size":metadata.len(),"binary":binary,"text":text,"truncated":truncated})).into_response())
 }
+
+/// Read the durable rich channel reply prepared by a Rust AgentNode.  It is
+/// kept out of the normal Run JSON projection because an image can approach
+/// the WeCom 10 MiB limit.
+pub(super) async fn read_channel_reply(
+    State(state): State<ApiState>,
+    AxumPath(run): AxumPath<String>,
+) -> Result<HttpResponse, HttpResponse> {
+    if run.is_empty()
+        || !run
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+    {
+        return Err(error(StatusCode::BAD_REQUEST, "invalid Run id"));
+    }
+    let metadata = state
+        .application
+        .metadata(&run)
+        .map_err(application_error)?
+        .ok_or_else(|| error(StatusCode::NOT_FOUND, "no such run"))?;
+    if metadata.conversation.is_none() {
+        return Err(error(StatusCode::NOT_FOUND, "Run has no channel reply"));
+    }
+    let path = state
+        .data_root
+        .join("channel-replies")
+        .join(format!("{run}.json"));
+    let record = FileRunStore::new(state.data_root.join("runs"))
+        .load(&run)
+        .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or_else(|| error(StatusCode::NOT_FOUND, "no such run"))?;
+    if record.status != RunStatus::Completed
+        || state.application.active_runs(None).await.contains(&run)
+    {
+        return Err(error(StatusCode::CONFLICT, "channel Run has not completed"));
+    }
+    use tokio::io::AsyncReadExt;
+    let file = tokio::fs::File::open(&path).await.map_err(|e| {
+        error(
+            if e.kind() == std::io::ErrorKind::NotFound {
+                StatusCode::NOT_FOUND
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            },
+            "channel reply is unavailable",
+        )
+    })?;
+    let mut bytes = Vec::new();
+    file.take(16 * 1024 * 1024 + 1)
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if bytes.len() > 16 * 1024 * 1024 {
+        return Err(error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "channel reply exceeds its size limit",
+        ));
+    }
+    let items: Vec<Value> = serde_json::from_slice(&bytes)
+        .map_err(|_| error(StatusCode::UNPROCESSABLE_ENTITY, "invalid channel reply"))?;
+    if items.is_empty() {
+        return Err(error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "empty channel reply",
+        ));
+    }
+    Ok((
+        [(header::CONTENT_TYPE, "application/json; charset=utf-8")],
+        bytes,
+    )
+        .into_response())
+}

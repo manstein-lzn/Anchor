@@ -2,7 +2,8 @@
 //!
 //! This crate is deliberately host-neutral: the host supplies workspace and
 //! ToolPort resolution, while io-harness owns the Agent loop and its SQLite
-//! checkpoint. It is an integration spike, not production HostNodes wiring.
+//! checkpoint. `HostNodes` supplies the production resolver and persistence
+//! boundary.
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -11,7 +12,13 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use crate::adapter::RigProviderAdapter;
+mod model_registry;
+pub use crate::node_exec::NodeImage;
+pub use model_registry::RigModelRegistry;
+
+use crate::conversation::{
+    ConversationObserver, ConversationPaths, PreparedConversation, find_invocation_paths,
+};
 use crate::node_exec::{
     IoHarnessNodeExecution, IoHarnessNodeExecutionError, NodeExecutionLimits, fixture_policy,
     validate_anchor_tools,
@@ -29,12 +36,46 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 
 pub trait NodeHostResolver: Send + Sync {
+    /// Return immutable image input from trusted Run admission. The host owns
+    /// path authorization, format validation and durable byte freezing.
+    fn prompt_images(&self, _request: &NodeExecutionRequest) -> Result<Vec<NodeImage>, String> {
+        Ok(Vec::new())
+    }
+    /// Trusted host metadata identifying one durable native conversation.
+    /// Implementations must derive this from immutable admission facts; the
+    /// editable node input is not a conversation identity.
+    fn conversation_hint(
+        &self,
+        _request: &NodeExecutionRequest,
+    ) -> Result<Option<NodeConversationHint>, String> {
+        Ok(None)
+    }
+    /// Only the trusted host may continue an independent background job after
+    /// later foreground turns. Ordinary conversation turns remain superseded.
+    fn resume_after_interleaving(&self, _request: &NodeExecutionRequest) -> bool {
+        false
+    }
     /// Resolve public, immutable Plugin identity before a Run starts. Secrets
     /// and live clients remain in the host adapter; returned bindings are
     /// frozen into the Graph Run by its coordinator.
     fn resolve_plugins(&self, ids: &[String]) -> Result<Vec<PluginBinding>, String>;
     fn workspace(&self, request: &NodeExecutionRequest) -> Result<PathBuf, String>;
     fn tools<'a>(&'a self, request: &'a NodeExecutionRequest) -> ToolResolution<'a>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NodeConversationHint {
+    pub key: String,
+}
+
+/// Remove the native history of one complete trusted conversation scope.
+/// The host must first exclude active execution and delete its owning Graph's
+/// full Run chain. Individual Run deletion cannot preserve Session ancestry.
+pub fn remove_conversation(
+    io_store_root: &Path,
+    hint: &NodeConversationHint,
+) -> Result<(), String> {
+    crate::conversation::remove_scope(io_store_root, &hint.key)
 }
 
 pub type ToolResolution<'a> =
@@ -47,18 +88,79 @@ pub fn trace_messages(
     io_store_root: &Path,
     key: &InvocationKey,
 ) -> Result<Vec<serde_json::Value>, String> {
+    match invocation_store(io_store_root, key)? {
+        Some((store, run_id)) => trace_run(&store, run_id),
+        None => Ok(Vec::new()),
+    }
+}
+
+/// Stable native identity for an executing mutating tool. Harness persists its
+/// attempt before dispatch and serializes mutating calls. No second send log.
+pub fn active_tool_attempt(
+    io_store_root: &Path,
+    key: &InvocationKey,
+    tool: &str,
+) -> Result<i64, String> {
+    let (store, run_id) = invocation_store(io_store_root, key)?
+        .ok_or("tool invocation has no native store binding")?;
+    let attempts = store
+        .open_attempts(run_id)
+        .map_err(|error| error.to_string())?;
+    let mut matching = attempts.iter().filter(|attempt| attempt.tool == tool);
+    let attempt = matching
+        .next()
+        .ok_or("tool invocation has no durable attempt")?;
+    if matching.next().is_some() {
+        return Err("tool invocation has ambiguous durable attempts".into());
+    }
+    Ok(attempt.id)
+}
+
+fn invocation_store(
+    io_store_root: &Path,
+    key: &InvocationKey,
+) -> Result<Option<(Store, i64)>, String> {
     let stem = format!("np1-{:x}", Sha256::digest(key.durable_key().as_bytes()));
+    let conversation_sidecar = io_store_root.join(format!("{stem}.conversation.json"));
+    let locator = ConversationPaths::invocation_from_sidecar(&conversation_sidecar)?.or(
+        find_invocation_paths(io_store_root, key)?
+            .map(|paths| paths.read_locator())
+            .transpose()?
+            .flatten(),
+    );
+    if let Some(locator) = locator {
+        if locator.invocation != key.durable_key() {
+            return Err("native conversation trace invocation mismatch".into());
+        }
+        let store_path = ConversationPaths::scope_store_path(io_store_root, &locator.scope);
+        let store = Store::open(store_path).map_err(|error| error.to_string())?;
+        let turn = store
+            .session_turn(locator.turn_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "native conversation trace turn is missing".to_owned())?;
+        if turn.run_id != locator.run_id || turn.session_id != locator.session_id {
+            return Err("native conversation trace identity mismatch".into());
+        }
+        return Ok(Some((store, locator.run_id)));
+    }
+    if conversation_sidecar.exists() {
+        return Ok(None);
+    }
     let sidecar = io_store_root.join(format!("{stem}.run"));
     let run_id = match std::fs::read_to_string(sidecar) {
         Ok(value) => value
             .trim()
             .parse::<i64>()
             .map_err(|error| format!("invalid io-harness run id: {error}"))?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error.to_string()),
     };
     let store = Store::open(io_store_root.join(format!("{stem}.sqlite3")))
         .map_err(|error| error.to_string())?;
+    Ok(Some((store, run_id)))
+}
+
+fn trace_run(store: &Store, run_id: i64) -> Result<Vec<serde_json::Value>, String> {
     let turns = store
         .step_turns(run_id)
         .map_err(|error| error.to_string())?;
@@ -92,13 +194,26 @@ pub fn trace_messages(
             messages.push(json!({"role":"tool","text":observation.text}));
         }
     }
+    for attempt in store
+        .open_attempts(run_id)
+        .map_err(|error| error.to_string())?
+    {
+        messages.push(json!({
+            "role": "tool",
+            "text": format!("Tool result was not recorded for {} at step {} (attempt {}, started {}). External outcome is unknown; verify actual state before acting.", attempt.tool, attempt.step, attempt.id, attempt.started_at),
+            "unrecorded": true,
+            "unknown_external_outcome": true,
+            "tool": attempt.tool,
+            "step": attempt.step,
+        }));
+    }
     Ok(messages)
 }
 
 pub struct IoHarnessNodePort<R> {
     facts_root: PathBuf,
     io_store_root: PathBuf,
-    provider: RigProviderAdapter,
+    models: RigModelRegistry,
     resolver: Arc<R>,
     policy: Policy,
 }
@@ -108,7 +223,7 @@ impl<R> Clone for IoHarnessNodePort<R> {
         Self {
             facts_root: self.facts_root.clone(),
             io_store_root: self.io_store_root.clone(),
-            provider: self.provider.clone(),
+            models: self.models.clone(),
             resolver: Arc::clone(&self.resolver),
             policy: self.policy.clone(),
         }
@@ -123,10 +238,28 @@ impl<R: NodeHostResolver> IoHarnessNodePort<R> {
         resolver: Arc<R>,
         policy: Policy,
     ) -> Self {
+        Self::new_with_registry(
+            facts_root,
+            io_store_root,
+            RigModelRegistry::single(model),
+            resolver,
+            policy,
+        )
+    }
+
+    /// Select the Graph's model reference through an immutable, host-supplied
+    /// registry. Credentials stay inside the live Rig model transports.
+    pub fn new_with_registry(
+        facts_root: impl Into<PathBuf>,
+        io_store_root: impl Into<PathBuf>,
+        models: RigModelRegistry,
+        resolver: Arc<R>,
+        policy: Policy,
+    ) -> Self {
         Self {
             facts_root: facts_root.into(),
             io_store_root: io_store_root.into(),
-            provider: RigProviderAdapter::new(model, false),
+            models,
             resolver,
             policy,
         }
@@ -145,6 +278,21 @@ impl<R: NodeHostResolver> IoHarnessNodePort<R> {
             facts_root,
             io_store_root,
             model,
+            resolver,
+            Policy::default(),
+        )
+    }
+
+    pub fn new_with_default_policy_and_registry(
+        facts_root: impl Into<PathBuf>,
+        io_store_root: impl Into<PathBuf>,
+        models: RigModelRegistry,
+        resolver: Arc<R>,
+    ) -> Self {
+        Self::new_with_registry(
+            facts_root,
+            io_store_root,
+            models,
             resolver,
             Policy::default(),
         )
@@ -171,6 +319,115 @@ impl<R: NodeHostResolver> IoHarnessNodePort<R> {
         self.facts_root.join(format!("{}.json", Self::stem(key)))
     }
 
+    fn model_binding_path(&self, key: &InvocationKey) -> PathBuf {
+        self.facts_root
+            .join(format!("{}.model.json", Self::stem(key)))
+    }
+
+    /// Check recovery configuration before the host changes Run state. This
+    /// reads only existing facts: old invocations without a model fact are
+    /// accepted, and completed invocations never depend on current transports.
+    pub fn validate_model_binding(
+        &self,
+        key: &InvocationKey,
+        model_ref: Option<&str>,
+    ) -> Result<(), GraphError> {
+        match std::fs::read(self.completion_path(key)) {
+            Ok(bytes) => {
+                serde_json::from_slice::<NodeCompletion>(&bytes)
+                    .map_err(|error| GraphError::CorruptRun(error.to_string()))?;
+                return Ok(());
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+            Err(error) => return Err(error.into()),
+        }
+        match std::fs::read(self.model_binding_path(key)) {
+            Ok(bytes) => self.validate_recorded_model_binding(key, model_ref, &bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    fn validate_recorded_model_binding(
+        &self,
+        key: &InvocationKey,
+        model_ref: Option<&str>,
+        bytes: &[u8],
+    ) -> Result<(), GraphError> {
+        let recorded: serde_json::Value = serde_json::from_slice(bytes)
+            .map_err(|error| GraphError::CorruptRun(error.to_string()))?;
+        let expected = json!({
+            "format": 1,
+            "model_ref": model_ref,
+            "binding_sha256": self.models.select(model_ref).fingerprint,
+        });
+        let recorded_images = match recorded.get("accepts_images") {
+            None => false,
+            Some(serde_json::Value::Bool(value)) => *value,
+            Some(_) => {
+                return Err(GraphError::CorruptRun(
+                    "model image capability is not a boolean".into(),
+                ));
+            }
+        };
+        if expected
+            .as_object()
+            .expect("model fact is an object")
+            .iter()
+            .any(|(key, value)| recorded.get(key) != Some(value))
+            || recorded_images != self.models.accepts_images(model_ref)
+        {
+            return Err(GraphError::Unsupported(format!(
+                "model binding changed for node `{}`; restore the original model/endpoint configuration before resuming",
+                key.node_id,
+            )));
+        }
+        Ok(())
+    }
+
+    fn pin_model(
+        &self,
+        request: &NodeExecutionRequest,
+    ) -> Result<crate::adapter::RigProviderAdapter, GraphError> {
+        let selection = self.models.select(request.model.as_deref());
+        let expected = json!({
+            "format": 1,
+            "model_ref": request.model,
+            "binding_sha256": selection.fingerprint,
+            "accepts_images": selection.accepts_images,
+        });
+        let path = self.model_binding_path(&request.key);
+        self.ensure_roots()?;
+        match std::fs::read(&path) {
+            Ok(bytes) => {
+                self.validate_recorded_model_binding(
+                    &request.key,
+                    request.model.as_deref(),
+                    &bytes,
+                )?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let legacy = self.started_path(&request.key).exists()
+                    || self.io_run_path(&request.key).exists()
+                    || self.io_run_id_path(&request.key).exists();
+                // Harness provider_calls.model is response metadata, not the
+                // requested wire model. A gateway may normalize it, so it cannot
+                // prove that a legacy invocation used a different binding.
+                let mut fact = expected;
+                fact["binding_origin"] = json!(if legacy {
+                    "legacy_first_binding"
+                } else {
+                    "new_invocation"
+                });
+                let bytes = serde_json::to_vec(&fact)
+                    .map_err(|error| GraphError::CorruptRun(error.to_string()))?;
+                Self::write_atomic(&path, &bytes)?;
+            }
+            Err(error) => return Err(error.into()),
+        }
+        Ok(selection.provider.clone())
+    }
+
     fn failed_path(&self, key: &InvocationKey) -> PathBuf {
         self.facts_root.join(format!("{}.failed", Self::stem(key)))
     }
@@ -182,6 +439,28 @@ impl<R: NodeHostResolver> IoHarnessNodePort<R> {
 
     fn io_run_id_path(&self, key: &InvocationKey) -> PathBuf {
         self.io_store_root.join(format!("{}.run", Self::stem(key)))
+    }
+
+    fn conversation_sidecar_path(&self, key: &InvocationKey) -> PathBuf {
+        self.io_store_root
+            .join(format!("{}.conversation.json", Self::stem(key)))
+    }
+
+    fn checked_io_run_path(&self, key: &InvocationKey) -> Result<PathBuf, GraphError> {
+        match ConversationPaths::scope_from_sidecar(&self.conversation_sidecar_path(key))
+            .map_err(GraphError::CorruptRun)?
+        {
+            Some(scope) => Ok(ConversationPaths::scope_store_path(
+                &self.io_store_root,
+                &scope,
+            )),
+            None => match find_invocation_paths(&self.io_store_root, key)
+                .map_err(GraphError::CorruptRun)?
+            {
+                Some(paths) => Ok(paths.store_path().to_path_buf()),
+                None => Ok(self.io_run_path(key)),
+            },
+        }
     }
 
     fn recovery_intent_path(&self, key: &InvocationKey, attempt_id: i64) -> PathBuf {
@@ -310,6 +589,23 @@ impl<R: NodeHostResolver> IoHarnessNodePort<R> {
     }
 
     fn stored_run_id(&self, key: &InvocationKey) -> Result<Option<i64>, GraphError> {
+        let locator =
+            ConversationPaths::invocation_from_sidecar(&self.conversation_sidecar_path(key))
+                .map_err(GraphError::CorruptRun)?
+                .or(find_invocation_paths(&self.io_store_root, key)
+                    .map_err(GraphError::CorruptRun)?
+                    .map(|paths| paths.read_locator())
+                    .transpose()
+                    .map_err(GraphError::CorruptRun)?
+                    .flatten());
+        if let Some(locator) = locator {
+            if locator.invocation != key.durable_key() {
+                return Err(GraphError::CorruptRun(
+                    "native conversation invocation mismatch".into(),
+                ));
+            }
+            return Ok(Some(locator.run_id));
+        }
         match std::fs::read_to_string(self.io_run_id_path(key)) {
             Ok(value) => value
                 .trim()
@@ -353,7 +649,13 @@ impl<R: NodeHostResolver> IoHarnessNodePort<R> {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }
-        if self.stored_run_id(key)?.is_some() || self.discover_io_run_id(key)?.is_some() {
+        if self.conversation_sidecar_path(key).exists()
+            || find_invocation_paths(&self.io_store_root, key)
+                .map_err(GraphError::CorruptRun)?
+                .is_some()
+            || self.stored_run_id(key)?.is_some()
+            || self.discover_io_run_id(key)?.is_some()
+        {
             return Ok(CompletionFact::Resumable);
         }
         if self.started_path(key).exists() {
@@ -423,6 +725,13 @@ impl<R: NodeHostResolver> IoHarnessNodePort<R> {
     /// invocation owns its Store file, so the newest row is the only safe
     /// candidate to persist for later recovery.
     fn discover_io_run_id(&self, key: &InvocationKey) -> Result<Option<i64>, GraphError> {
+        if self.conversation_sidecar_path(key).exists()
+            || find_invocation_paths(&self.io_store_root, key)
+                .map_err(GraphError::CorruptRun)?
+                .is_some()
+        {
+            return self.stored_run_id(key);
+        }
         let path = self.io_run_path(key);
         if !path.exists() {
             return Ok(None);
@@ -436,7 +745,7 @@ impl<R: NodeHostResolver> IoHarnessNodePort<R> {
     }
 
     fn provider_request_count(&self, key: &InvocationKey, run_id: i64) -> Result<u64, GraphError> {
-        let store = Store::open(self.io_run_path(key))
+        let store = Store::open(self.checked_io_run_path(key)?)
             .map_err(|error| GraphError::Unsupported(error.to_string()))?;
         let calls = store
             .provider_calls(run_id)
@@ -446,24 +755,92 @@ impl<R: NodeHostResolver> IoHarnessNodePort<R> {
         })
     }
 
+    fn prepare_conversation(
+        &self,
+        paths: &ConversationPaths,
+        request: &NodeExecutionRequest,
+    ) -> Result<PreparedConversation, GraphError> {
+        crate::conversation::prepare(
+            &self.io_store_root,
+            paths,
+            request,
+            self.resolver.resume_after_interleaving(request),
+        )
+        .map_err(GraphError::Unsupported)
+    }
+
     async fn execute_agent(
         &self,
         request: NodeExecutionRequest,
     ) -> Result<NodeExecutionOutcome, GraphError> {
+        if let CompletionFact::Completed(completion) = self.completion_fact_inner(&request.key)? {
+            return Ok(NodeExecutionOutcome::Completed(completion));
+        }
         if request.kind != NodeKind::Agent {
             return self.write_known_failure(
                 &request.key,
-                "io-harness NodeExecutionPort spike accepts Agent nodes only",
+                "io-harness NodeExecutionPort accepts Agent nodes only",
             );
         }
         if request.max_provider_requests.is_some() {
             return self.write_known_failure(
                 &request.key,
-                "io-harness spike does not claim exact cumulative provider budget support",
+                "exact cumulative provider budgets are unsupported: io-harness 0.86 records provider_calls only after a request returns and has no durable pre-call request limit; max_steps counts Harness steps, not provider requests",
             );
         }
         if request.cancellation.load(Ordering::Relaxed) {
             return Ok(NodeExecutionOutcome::Cancelled);
+        }
+        let conversation_hint = self
+            .resolver
+            .conversation_hint(&request)
+            .map_err(GraphError::Unsupported)?;
+        let conversation_paths = conversation_hint
+            .as_ref()
+            .map(|hint| ConversationPaths::new(&self.io_store_root, &hint.key, &request.key));
+        let recorded_scope =
+            ConversationPaths::scope_from_sidecar(&self.conversation_sidecar_path(&request.key))
+                .map_err(GraphError::CorruptRun)?
+                .or(find_invocation_paths(&self.io_store_root, &request.key)
+                    .map_err(GraphError::CorruptRun)?
+                    .map(|paths| paths.scope));
+        if let Some(scope) = &recorded_scope {
+            if conversation_paths
+                .as_ref()
+                .is_none_or(|paths| &paths.scope != scope)
+            {
+                return Err(GraphError::Unsupported(
+                    "native conversation identity changed for the admitted invocation".into(),
+                ));
+            }
+        } else if conversation_paths.is_some()
+            && (self.io_run_path(&request.key).exists()
+                || self.io_run_id_path(&request.key).exists())
+        {
+            return Err(GraphError::Unsupported(
+                "cannot attach an existing one-shot invocation to a native conversation".into(),
+            ));
+        }
+        let _conversation_lease = conversation_paths
+            .as_ref()
+            .map(|paths| {
+                paths
+                    .acquire(&self.io_store_root)
+                    .map_err(GraphError::Unsupported)
+            })
+            .transpose()?;
+        let provider = self
+            .pin_model(&request)?
+            .with_recording(crate::recording::directory(
+                &self.io_store_root,
+                &request.key,
+            ));
+        let images = self
+            .resolver
+            .prompt_images(&request)
+            .map_err(GraphError::Unsupported)?;
+        if !images.is_empty() && !self.models.accepts_images(request.model.as_deref()) {
+            return self.write_known_failure(&request.key, "image input requires an explicitly configured image-capable model; this model does not accept images");
         }
         let workspace = self
             .resolver
@@ -477,10 +854,40 @@ impl<R: NodeHostResolver> IoHarnessNodePort<R> {
         if let Err(error) = validate_anchor_tools(Arc::clone(&tools)) {
             return self.write_known_failure(&request.key, error.to_string());
         }
+        let mut conversation = conversation_paths
+            .as_ref()
+            .map(|paths| self.prepare_conversation(paths, &request))
+            .transpose()?;
+        if conversation.is_none() && self.conversation_sidecar_path(&request.key).exists() {
+            return Err(GraphError::Unsupported(
+                "native conversation hint is missing for a previously admitted invocation".into(),
+            ));
+        }
+        let execution = IoHarnessNodeExecution::new(
+            self.checked_io_run_path(&request.key)?,
+            self.policy.clone(),
+        )
+        .with_images(images);
+        let execution = match execution {
+            Ok(execution) => execution,
+            Err(error) => return self.write_known_failure(&request.key, error.to_string()),
+        };
         self.mark_started(&request.key)?;
-        let execution =
-            IoHarnessNodeExecution::new(self.io_run_path(&request.key), self.policy.clone());
-        let node_request = self.node_request(&request, workspace);
+        let mut node_request = self.node_request(&request, workspace);
+        let background = self.resolver.resume_after_interleaving(&request);
+        if background {
+            // Yield preserves the native run for resume. Flow::Cancel is a native
+            // terminal outcome in 0.86; dropping this future retains its journal
+            // instead. Actual tools still use the original host cancellation.
+            node_request.cancellation = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        }
+
+        if let Some(conversation) = &conversation {
+            node_request.workspace = conversation.paths.root_path().to_path_buf();
+            node_request
+                .instructions
+                .push_str(&conversation.previous_effects);
+        }
         let limits = NodeExecutionLimits {
             wall_time: request
                 .wall_time_limit_seconds
@@ -509,7 +916,7 @@ impl<R: NodeHostResolver> IoHarnessNodePort<R> {
             Some(run_id) => {
                 let intent = self.find_recovery_intent(&request.key, run_id)?;
                 if let Some((attempt_id, intent)) = intent {
-                    let store = Store::open(self.io_run_path(&request.key))
+                    let store = Store::open(self.checked_io_run_path(&request.key)?)
                         .map_err(|error| GraphError::Unsupported(error.to_string()))?;
                     let open = store
                         .open_attempts(run_id)
@@ -537,7 +944,7 @@ impl<R: NodeHostResolver> IoHarnessNodePort<R> {
                                 execution
                                     .resume_with_limits(
                                         &node_request,
-                                        &self.provider,
+                                        &provider,
                                         tools,
                                         run_id,
                                         limits,
@@ -547,7 +954,7 @@ impl<R: NodeHostResolver> IoHarnessNodePort<R> {
                                 execution
                                     .resume_with_recovery(
                                         &node_request,
-                                        &self.provider,
+                                        &provider,
                                         tools,
                                         run_id,
                                         attempt_id,
@@ -560,7 +967,7 @@ impl<R: NodeHostResolver> IoHarnessNodePort<R> {
                             execution
                                 .resume_with_recovery(
                                     &node_request,
-                                    &self.provider,
+                                    &provider,
                                     tools,
                                     run_id,
                                     attempt_id,
@@ -583,17 +990,11 @@ impl<R: NodeHostResolver> IoHarnessNodePort<R> {
                             &self.recovery_intent_path(&request.key, attempt_id),
                         )?;
                         execution
-                            .resume_with_limits(
-                                &node_request,
-                                &self.provider,
-                                tools,
-                                run_id,
-                                limits,
-                            )
+                            .resume_with_limits(&node_request, &provider, tools, run_id, limits)
                             .await
                     }
                 } else {
-                    let store = Store::open(self.io_run_path(&request.key))
+                    let store = Store::open(self.checked_io_run_path(&request.key)?)
                         .map_err(|error| GraphError::Unsupported(error.to_string()))?;
                     let open = store
                         .open_attempts(run_id)
@@ -609,16 +1010,51 @@ impl<R: NodeHostResolver> IoHarnessNodePort<R> {
                         });
                     }
                     execution
-                        .resume_with_limits(&node_request, &self.provider, tools, run_id, limits)
+                        .resume_with_limits(&node_request, &provider, tools, run_id, limits)
                         .await
                 }
             }
             None => {
-                execution
-                    .start_with_limits(&node_request, &self.provider, tools, limits)
-                    .await
+                if let Some(conversation) = &mut conversation {
+                    let observer = ConversationObserver::new(
+                        conversation.paths.clone(),
+                        conversation.admission.clone(),
+                        node_request.cancellation.clone(),
+                    );
+                    let result = execution
+                        .start_conversation_with_limits(
+                            &node_request,
+                            &provider,
+                            tools,
+                            limits,
+                            &mut conversation.session,
+                            &conversation.store,
+                            &observer,
+                        )
+                        .await;
+                    observer.check().map_err(GraphError::Unsupported)?;
+                    result
+                } else {
+                    execution
+                        .start_with_limits(&node_request, &provider, tools, limits)
+                        .await
+                }
             }
         };
+        if let Some(conversation) = &mut conversation
+            && let Some(locator) = conversation
+                .paths
+                .read_locator()
+                .map_err(GraphError::CorruptRun)?
+        {
+            crate::conversation::reconcile_with_policy(
+                &conversation.store,
+                &mut conversation.session,
+                &locator,
+                conversation.resume_after_interleaving,
+            )
+            .map_err(GraphError::Unsupported)?;
+        }
         match result {
             Ok(outcome) => {
                 let completion = NodeCompletion {
@@ -682,13 +1118,16 @@ impl<R: NodeHostResolver> IoHarnessNodePort<R> {
             | Err(error @ IoHarnessNodeExecutionError::InvalidSummary) => {
                 self.write_known_failure(&request.key, error.to_string())
             }
+            Err(error @ IoHarnessNodeExecutionError::InvalidImage(_)) => {
+                self.write_known_failure(&request.key, error.to_string())
+            }
             Err(IoHarnessNodeExecutionError::Harness(error)) => {
                 let run_id = self
                     .stored_run_id(&request.key)?
                     .or(self.discover_io_run_id(&request.key)?);
                 if let Some(run_id) = run_id {
                     self.store_run_id(&request.key, run_id)?;
-                    let store = Store::open(self.io_run_path(&request.key))
+                    let store = Store::open(self.checked_io_run_path(&request.key)?)
                         .map_err(|store_error| GraphError::Unsupported(store_error.to_string()))?;
                     let open = store
                         .open_attempts(run_id)
@@ -716,7 +1155,7 @@ impl<R: NodeHostResolver> IoHarnessNodePort<R> {
         key: &InvocationKey,
         run_id: i64,
     ) -> Result<Option<(i64, RecoveryIntent)>, GraphError> {
-        let store = Store::open(self.io_run_path(key))
+        let store = Store::open(self.checked_io_run_path(key)?)
             .map_err(|error| GraphError::Unsupported(error.to_string()))?;
         let attempts = store
             .open_attempts(run_id)
@@ -902,7 +1341,7 @@ impl<R: NodeHostResolver + 'static> NodeExecutionPort for IoHarnessNodePort<R> {
             .ok_or_else(|| {
                 GraphError::Unsupported("no persisted io-harness run for recovery".into())
             })?;
-        let store = Store::open(self.io_run_path(key))
+        let store = Store::open(self.checked_io_run_path(key)?)
             .map_err(|error| GraphError::Unsupported(error.to_string()))?;
         let intent = RecoveryIntent {
             run_id,
@@ -969,7 +1408,20 @@ impl<R: NodeHostResolver + 'static> NodeExecutionPort for IoHarnessNodePort<R> {
                             "could not create io-harness worker runtime: {error}"
                         ))
                     })?;
-                runtime.block_on(worker.execute_agent(request))
+                runtime.block_on(async {
+                    if !worker.resolver.resume_after_interleaving(&request) {
+                        return worker.execute_agent(request).await;
+                    }
+                    let cancellation = request.cancellation.clone();
+                    tokio::select! {
+                        result = worker.execute_agent(request) => result,
+                        _ = async {
+                            while !cancellation.load(Ordering::Acquire) {
+                                tokio::time::sleep(Duration::from_millis(10)).await;
+                            }
+                        } => Ok(NodeExecutionOutcome::Cancelled),
+                    }
+                })
             });
             join.await.map_err(|error| {
                 GraphError::Unsupported(format!("io-harness worker thread failed: {error}"))
@@ -980,6 +1432,11 @@ impl<R: NodeHostResolver + 'static> NodeExecutionPort for IoHarnessNodePort<R> {
 
 #[cfg(test)]
 mod tests {
+    mod conversation;
+    mod images;
+    mod models;
+    mod recording;
+
     use std::sync::atomic::AtomicUsize;
 
     use anchor_runtime_rig::graph::{InvocationKey, NodeExecutionRequest};
@@ -1016,6 +1473,7 @@ mod tests {
             &workspace,
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
         );
+        port.pin_model(&req).unwrap();
         std::fs::create_dir_all(&port.io_store_root).unwrap();
         let store = Store::open(port.io_run_path(&req.key)).unwrap();
         let run_id = store
@@ -1107,7 +1565,7 @@ mod tests {
             },
             model: Some("fixture".into()),
             task: "call anchor_echo".into(),
-            instructions: "Return JSON summary=ok and route=next".into(),
+            instructions: "Call final_result with summary=ok and route=next".into(),
             routes: vec!["next".into()],
             input: json!({}),
             input_commits: vec![],
@@ -1126,7 +1584,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let model = MockCompletionModel::from_turns([
             MockTurn::tool_call("call-1", "anchor_echo", json!({"value":"port"})),
-            MockTurn::text(r#"{"summary":"ok","route":"next"}"#),
+            MockTurn::tool_call(
+                "completion-1",
+                "final_result",
+                json!({"summary":"ok","route":"next"}),
+            ),
         ]);
         let calls = Arc::new(AtomicUsize::new(0));
         let resolver = Arc::new(FixtureResolver {
@@ -1243,7 +1705,12 @@ mod tests {
         let restarted = IoHarnessNodePort::fixture(
             facts,
             io,
-            MockCompletionModel::text(r#"{"summary":"resumed","route":"next"}"#).erase(),
+            MockCompletionModel::from_turns([MockTurn::tool_call(
+                "completion-1",
+                "final_result",
+                json!({"summary":"resumed","route":"next"}),
+            )])
+            .erase(),
             resolver,
         );
         let error = restarted.execute(req.clone()).await.unwrap_err();
@@ -1302,7 +1769,12 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let (port, req, attempt_id) = seed_recovery(
             dir.path(),
-            MockCompletionModel::text(r#"{"summary":"ok","route":"next"}"#).erase(),
+            MockCompletionModel::from_turns([MockTurn::tool_call(
+                "completion-1",
+                "final_result",
+                json!({"summary":"ok","route":"next"}),
+            )])
+            .erase(),
             calls.clone(),
         );
         let decision = RecoveryDecision::Completed {
@@ -1334,7 +1806,11 @@ mod tests {
             dir.path(),
             MockCompletionModel::from_turns([
                 MockTurn::tool_call("retry-call", "anchor_echo", json!({"value":"retry"})),
-                MockTurn::text(r#"{"summary":"ok","route":"next"}"#),
+                MockTurn::tool_call(
+                    "completion-1",
+                    "final_result",
+                    json!({"summary":"ok","route":"next"}),
+                ),
             ])
             .erase(),
             calls.clone(),
@@ -1413,7 +1889,12 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let (port, req, attempt_id) = seed_recovery(
             dir.path(),
-            MockCompletionModel::text(r#"{"summary":"ok","route":"next"}"#).erase(),
+            MockCompletionModel::from_turns([MockTurn::tool_call(
+                "completion-1",
+                "final_result",
+                json!({"summary":"ok","route":"next"}),
+            )])
+            .erase(),
             calls.clone(),
         );
         let decision = RecoveryDecision::Completed {
@@ -1441,7 +1922,12 @@ mod tests {
         let reopened = IoHarnessNodePort::fixture(
             dir.path().join("facts"),
             dir.path().join("io"),
-            MockCompletionModel::text(r#"{"summary":"ok","route":"next"}"#).erase(),
+            MockCompletionModel::from_turns([MockTurn::tool_call(
+                "completion-1",
+                "final_result",
+                json!({"summary":"ok","route":"next"}),
+            )])
+            .erase(),
             Arc::new(FixtureResolver {
                 workspace: dir.path().join("workspace"),
                 calls: calls.clone(),

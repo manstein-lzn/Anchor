@@ -176,6 +176,7 @@ export type OurFileBody = {
 };
 
 export type OurRunDetail = {
+  control_requested?: 'pause' | 'stop' | null;
   /** Whether this host currently owns a live execution task for the durable Run. */
   active?: boolean;
   calls?: CallRecord[];

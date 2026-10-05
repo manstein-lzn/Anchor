@@ -8,6 +8,66 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum TriggerSource {
+    #[default]
+    Manual,
+    Schedule,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RunTrigger {
+    source: TriggerSource,
+    #[serde(default)]
+    schedule: Option<String>,
+    #[serde(default)]
+    scheduled_at: Option<String>,
+}
+
+impl RunTrigger {
+    pub(crate) fn validate(&self) -> Result<(), String> {
+        match self.source {
+            TriggerSource::Manual if self.schedule.is_some() || self.scheduled_at.is_some() => {
+                Err("manual trigger does not accept schedule or scheduled_at".into())
+            }
+            TriggerSource::Manual => Ok(()),
+            TriggerSource::Schedule => {
+                if self
+                    .schedule
+                    .as_ref()
+                    .is_none_or(|value| value.trim().is_empty())
+                {
+                    return Err("schedule trigger requires a non-empty schedule".into());
+                }
+                let scheduled_at = self
+                    .scheduled_at
+                    .as_deref()
+                    .ok_or_else(|| "schedule trigger requires scheduled_at".to_owned())?;
+                // The Python scheduler uses local ISO timestamps without an offset.
+                if chrono::DateTime::parse_from_rfc3339(scheduled_at).is_err()
+                    && chrono::NaiveDateTime::parse_from_str(scheduled_at, "%Y-%m-%dT%H:%M:%S%.f")
+                        .is_err()
+                {
+                    return Err("scheduled_at must be an ISO datetime".into());
+                }
+                Ok(())
+            }
+        }
+    }
+
+    pub(super) fn apply(self, metadata: &mut RunMetadata) {
+        metadata.trigger_source = match self.source {
+            TriggerSource::Manual => "manual",
+            TriggerSource::Schedule => "schedule",
+        }
+        .into();
+        metadata.schedule = self.schedule;
+        metadata.scheduled_at = self.scheduled_at;
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RunMetadata {
@@ -21,9 +81,23 @@ pub(crate) struct RunMetadata {
     #[serde(default)]
     pub(crate) graph_call: Option<GraphCallSource>,
     #[serde(default)]
+    pub(crate) conversation: Option<ConversationSource>,
+    #[serde(default)]
+    pub(crate) session_call: Option<super::session_calls::SessionCall>,
+    #[serde(default)]
+    pub(crate) attachments: Vec<crate::channel_inputs::AttachmentManifest>,
+    #[serde(default)]
     pub(crate) schedule: Option<String>,
     #[serde(default)]
     pub(crate) scheduled_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ConversationSource {
+    pub(crate) session: String,
+    pub(crate) reply_node: String,
+    pub(crate) previous_run: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -38,7 +112,7 @@ pub(crate) struct GraphCallSource {
     pub(crate) root_run: String,
 }
 
-pub(super) fn now_nanos() -> u128 {
+pub(crate) fn now_nanos() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -61,6 +135,9 @@ impl RunMetadata {
             created: chrono::DateTime::<chrono::Utc>::from(SystemTime::now()).to_rfc3339(),
             trigger_source: "manual".into(),
             graph_call: None,
+            conversation: None,
+            session_call: None,
+            attachments: Vec::new(),
             schedule: None,
             scheduled_at: None,
         })

@@ -1,6 +1,151 @@
-# Rust-native Runtime 重构计划
+# Rust-native Runtime 迁移与产品对齐计划
 
-本文是 `codex/rust-rig-runtime` 实验分支的开发计划，描述如何把 Anchor 逐步收敛到一个由平台宿主和独立 Graph 宿主共同使用的 Rust Runtime Kernel。它不是当前生产 Python 实现的完成声明，也不替代 [开发台账](pilot-development-plan.md)；每个阶段只有在取得对应证据后，才更新台账中的验收状态。
+## 当前授权：Python 产品体验对齐（2026-10-05）
+
+用户已授权精确拆分并由子 Agent 并行实施。当前目标是普通用户继续使用既有 Graph/Plugin 和入口，由同一 Rust Runtime 执行；下方 2026-10-04 冻结记录是历史，不再解释为禁止推进本节工作。Graph 不增加版本或第二套作者语言，Plugin/外部工具不要求改写为 Rust；不扩展不同 Linux 发行版兼容性，不自动切换现有生产数据或发送/发布业务内容。
+
+第一批实现使用当前未提交源码的隔离快照 `bc4331f2e92a91322307fdb0e5f5ebb7b0fd734f`，worktree 位于 `/root/anchor-parity-worktrees/{commands,artifacts,models}`。该快照只供隔离开发，不代表已提交主工作区；集成只取各任务增量，保留此前未提交内容。主 Agent 是唯一集成和验收负责人。
+
+### 工作包与边界
+
+下列占比是含实现、验证、集成的相对工作量估计，不是工期承诺。第一批 A/B/C 可并行；D/E 必须经过相应接口集成后再实施，不能把排队或接口骨架计作完成。
+
+| 包 | 责任和代码所有者 | 输入/输出契约 | 工作量 | 依赖与验收出口 | 当前状态 |
+| --- | --- | --- | ---: | --- | --- |
+| A 命令与本地输入 | 子 Agent commands；Host main/execution/node_host、新 op/local_inputs 模块、定向测试 | 原 Op.run 字符串按 Python shell 语义执行；现有宿主网络授权 + 节点 network；操作员 local-inputs.json 按节点冻结和挂载 | 20% | 真实 bwrap 跑 case/heredoc/重定向/路由；失败不能选边；输入只读且节点隔离；恢复遇授权漂移拒绝 | 已集成；真实 bwrap/受控原图与恢复回归通过 |
+| B 文件延续与审阅绑定 | 子 Agent artifacts；artifacts.rs 与 artifacts/* | prepare_workspace(key,input_commits) 从同 Run 同节点最近已提交快照播种；当前 invocation 重开不覆盖；只读 Git 兼容投影从权威 Artifact 导出 | 15% | 两次回访保留稿件，旧快照不变；不同 Run 不串文件；原周报 Git HEAD 校验识别改稿后的过期审阅 | 已集成；组件/受控双反馈通过，真实模型反馈验收另记 |
+| C 模型与预算 | 子 Agent models；io-harness NodePort/必要 adapter、新 Host model_registry | ANCHOR_MODEL_ALIASES 与 Python 同义；已声明别名实际选模型；NodePort 保留既有构造器；框架原生能力可支持时接精确累计请求预算 | 15% | 同图两模型在 wire 上可区分；默认 fallback 与非法配置明确；恢复选型稳定；预算必须计纠错与重开累计，不能用 step 冒充请求 | 模型已集成并验证 wire/恢复；预算不支持，见框架边界 |
+| D 平台入口接线 | 后续独立包；Python 服务/适配器、Rust application/API 的小契约；每批单一所有者 | Graph/Run/Artifact 由 Rust 唯一写入；Session/Library/Scheduler/Channel 复用既有宿主能力，通过公共调用接入 | 25% | D1 手动/定时触发、状态/文件/控制一致；D2 Plugin 管理和 Pilot 发起/查看 Run；D3 企业微信会话/附件/回复与 call.session；旧历史只读策略明确 | D1 双服务/浏览器及真实 Provider 已通过；D2a Library/挂载/执行首片与 D2b Pilot 同 Run 接续通过；OAuth 与 D3 完整能力待办，D3a 文字首片（A96）与附件/图片（A97）通过 |
+| E 观察与控制体验 | 后续独立包；Node adapter/Host 事件投影/Web，避免与 C 同时修改 | 摘要增量仅是显示，不是完成事实；停止/暂停/进程中断沿既有事实恢复；图像输入作为输入接线处理 | 10% | 真实界面可逐步看到内容；最终提交唯一；最后回合 stop 的实际边界可复现并处理；附件到模型的路径可验收 | E2 停止待收束和无重放续跑浏览器通过；E3 附件/图片已由 A97 验收；E1 摘要流待办 |
+| I 集成和业务验收 | 主 Agent；共享接口、验收脚本、文档 | 不更改原业务 Graph 来掩盖 Runtime 差距；不修改 Python 历史或原运行目录；真实外部副作用另按用户授权 | 15% | 分阶段 fmt/clippy/测试；真实 Provider 验收；原深度研究、周报、RSI、企业微信逐条记录正常/回访/中断恢复证据 | 进行中 |
+
+A/B/C 的职责内聚、测试可独立运行；主要耦合是 Host 装配，main.rs 先归 A，C 只交付 model_registry 和装配说明，B 只交付 prepare_workspace 接口，主 Agent 在 A 集成后统一接线。本批曾共享 Cargo target，发现不同 worktree 会覆盖同名集成测试 binary，不能用其交错运行结果作验收。最终检查由主树独占 target 完成；后续并行任务各用独立 target，或显式串行编译和运行。每个测试使用独立临时状态根，业务环境由主 Agent 独占。
+
+### 集成顺序与完成标准
+
+```text
+原有产品可由 Rust Runtime 替换（逐项证据）
+                 ↑
+原业务 Graph + 原入口 + 正常/回访/中断恢复验收
+                 ↑
+       D 平台接线          E 观察/控制
+                 ↑          ↑
+       I1 Host 组合与原 Graph 执行契约验收
+             ↑       ↑       ↑
+             A       B       C
+                 ↑
+     已有作者 Graph、Plugin、io-harness 和 Artifact 契约
+```
+
+I1 不要求等待整个平台完成：先验证原图的 shell/本地输入/文件和模型路径，使用真实 Provider 运行无外部发布副作用的代表路径，再接平台。深度研究、周报、RSI 的完整交付和企业微信实际渠道各自单独验收；Crossref smoke 不替代这些结果。每完成一个用户可见切片才更新 pilot 台账；组件测试通过、组合路径通过、真实 Provider 通过、整体替代完成分别标识。
+
+本轮约束：Python 本身不允许 Op 挂 Plugin，该项不是 Rust 必须增加的新能力。Git 兼容投影只保留原 Graph 已使用的“审阅绑定稿件”读取契约，Rust Artifact 仍是唯一权威；不引入第二套可写历史或更改 fs2 CommitRef。当前宿主网络默认授权保持不变，不顺带引入新权限开关。
+
+### 第一批集成验收（A92）
+
+A/B/C 代码已集成，主树独占运行的 336 项 Rust 测试、Clippy、fmt、release build，以及 Python package/conformance 子集 8 项通过。原样深度研究 Graph 的受控 Provider + 真实 bwrap 路径通过，含研究/写作双反馈、本地输入、文件延续与 Git 审阅绑定。真实 DeepSeek Flash + 原 Plugin + scholarly/Crossref 复验通过。汇总与日志：`.local/rust-parity-integration-20261005/evidence.json`。
+
+真实模型的原 `revise-loop.json` 两次都在首次 review 写文件后直接选择 done：Runtime 为 Completed，但预期 draft/review/done=2/2/1，实际=1/1/1，因此反馈业务验收 **fail**。原定义、产物与失败证据保留；没有修改路由规则或放宽断言。下一验证任务先做相同 Provider 的 Python 对照与节点上下文差分，定位历史 Graph 指令歧义或适配差异，再修正实际归属层，不能让 Runtime 猜测业务路由。尚未做 Python live 对照，不能把失败定性为 Rust 独有回归。
+
+### 第二批反馈与录制验收（A93）
+
+A92 的提前结束已完成 Python/Rust live 对照：原图 Python Chat 和 Rust Chat 各一次通过，先前 Rust Responses 两次失败保留。示例 reviewer 指令现明确按本轮入口的文件存在性选路，修正图 Python、Rust Chat/Responses 都达到 2/2/1。不能由这组样例推断所有 Graph 普遍等价，也不能归因为 Rust 调度器错误。
+
+生产模型调用现按 invocation/attempt 保存框架原生 Record 及适配前后 typed 请求/结果，保留实际 final_result 参数；32 次 Responses 调用逐条匹配。录制只供审查/回放，不驱动恢复，不等于 HTTP 原始流量或半截 stream 记录。A93 证据与失败保留路径见开发台账。
+
+### 尚未关闭的框架与组合边界
+
+精确累计请求预算仍不支持：固定 io-harness 0.86 的请求记录发生在 Provider 返回后，且记录失败仅告警；`provider_calls` 不能提供发送前、含纠错与重开的可靠累计限额。未新增旁路日志或另一套 Agent loop，仍在准入明确拒绝该预算。后续先核查框架公开扩展点或上游支持，再接入；step limit 不能替代请求预算。
+
+独立审查另发现已有 `fanout` 分支内 `Op.call` 缺口：作者/Host 准入未拒绝，但 parallel dispatch 只接 Agent/Op.run，运行时会失败。本批不宣称该组合可用；后续组合调用任务须先补准入错误，再按 Python 行为接入唯一 GraphRunner，并补分支暂停/恢复与子图配置预检。`call.session`、嵌套调用仍按独立出口验收。
+
+### 第二批平台接线（A94）
+
+D1 已接入 `runtime_http.py` 与 Python `Scheduler` 的公共适配。显式 Rust backend 模式中 Graph CRUD、trigger、Run 查询/控制/文件使用 Rust HTTP；Python 保留 schedules 和 Library，既不复制 `running/control`，也不在故障时回退 Python Runner。Rust trigger 冻结本次 objective 和 schedule 来源，Run updated 来自文件 mtime；Graph POST 的初始 definition/Plugin 完整暂存再发布。旧 Python Run 只读，重复 ID 拒绝。Pilot/Channel/Webhook/relations 等未接通路径明确 501。
+
+真实双服务浏览器已验证手动触发、暂停、两服务重启后同 Run 继续且已提交节点不重放、文件下载/预览、平台 API 创建的一次定时实际触发、原 Plugin 勾选/查看 Skill/保存，以及 Rust 退出后 503 且不生成 Python Run。证据 `.local/platform-rust-kGaL4f/evidence.json`。原 Plugin 的真实 provider/Crossref 路径通过 Python 平台发起，6 次模型调用与6份录制匹配，Graph/Plugin 未改且没有 Python Graph/Run 权威副本：`.local/rust-platform-plugin-445wco2l/evidence.json`。本轮修正 Library 仅含 plugins、无 tools 时的错误拒绝。受控延迟 Provider + 浏览器验证最后回答期间 stop，节点完成唯一、下游不启动、普通继续不重放模型：`.local/rust-stop-final-iR0bzq/evidence.json`。
+
+最终主树 360 项 Rust 测试、Clippy/fmt/release、Python 全量、Web33项单测/build、5项浏览器验收通过。真实 bwrap 挂起促成启动 FD 和管道收尾的最小修正，独立审查后用 WNOWAIT 保护清理期间的进程身份；最终 release 双服务/stop浏览器复验通过。最后原 Plugin live 的两次断言失败分别来自标题连字符排版和 cat 输出包含 ls/echo 前缀；修正验收文本比较后对同一保留 Run 补验通过，7次模型调用/7份录制，未再次调用模型（`.local/rust-platform-plugin-6v7zvcqk/postcheck.json`）。完整失败与验证记录见 A94，汇总 `.local/rust-parity2-integration-20261005/evidence.json`。
+
+上述范围是 D1 与 D2a 已安装资源的复用首片，以及 E2；不代表 D2b/D3 或整个平台替代。Plugin 安装管理仍复用 Python，尚未组合验收全新安装/OAuth 缓存进入 Rust MCP；Pilot/Session、企业微信与 call.session、摘要增量/图片、完整深度研究/周报/RSI 继续单独验收。历史 busy 区间只按当前状态与时间推断，不能声称保存了全部暂停/停止请求史。A94 当时的下一批为 D2b 原 Pilot 经公共端口发起/观察/控制同一 Rust Run，再接 D3 与 E1/E3；不要再次改 Graph 作者语言或 Plugin 规范。
+
+### 第三批接线验收：Pilot 调用 Rust Run（D2b / A95）
+
+共享基线为保留主树未提交内容的隔离快照 `e35103b4602637002e34fd4c5d5ac6ce60642a2e`，worktree 位于 `/root/anchor-parity-worktrees/batch3/`。上一批最终验证作为基线，不更换生产数据根。本批不是迁移 Pilot 自身的模型循环：普通 Session/Turn、原生提问/确认、消息与 SSE 继续由既有 Python/PydanticAI Harness 持有；Pilot 的 Graph/Run/Artifact 操作改为公共应用端口，Rust 仍是 Run 唯一写入者。Graph 绑定的通道 Session 与企业微信保持后续切片。
+
+| 包 | 所有者与路径 | 固定契约 | 工作量 | 独立验证与集成出口 |
+| --- | --- | --- | ---: | --- |
+| Pilot 工具 | artifacts；pilot.py 与工具测试 | graphs/graph/run/runs/read_file/trigger/control 等现有 Scheduler 公共方法；新增 validate_graph 返回 JSON+HTTP状态；删除确认绑定公开定义的稳定摘要 | 30% | 禁止访问本地 workspace/private running 的fixture；Graph/Run/文件/关联与过期确认/后端故障测试 |
+| Rust 静态校验 | platform_rust；Host API/graphs 与专属测试 | POST /graph-validation，definition 输入；200 valid/nodes/entry；语义无效422，坏输入400；复用作者编译与Library解析，不写状态或调用Provider/MCP | 20% | 原Graph/缺失Plugin/非法定义、鉴权、零副作用；Host定向测试与独立target |
+| 真实验收脚本 | commands；新 scripts/rust_pilot_smoke.py | 原 Session/Turn API 与最终Rust release，通过真实Pilot工具产生并读取唯一Rust Run，重开同会话继续核查 | 20% | 先静态检查；主Agent独占真实provider与隔离服务根运行，不发送业务消息 |
+| 宿主接线与集成 | 主Agent；serve.py、平台/会话测试、浏览器和文档 | 开启普通Pilot/Responses及原确认/停止入口；Session关联经公共Run查询；通道入口仍明确拒绝 | 30% | 合入工具+校验后跑组合测试；真实双服务浏览器控制/重启与真实模型验收，随后更新台账 |
+
+工具与Rust校验各自内聚，唯一耦合是已经固定的validate_graph响应；serve.py只有主Agent编辑。独立包先进入公共端口集成，再进入Session/Turn与浏览器/真实模型验收，不等待无关渠道功能。无副作用校验只证明当前作者定义、Plugin和已覆盖静态能力，不承诺provider配置、运行期路径授权、MCP连通性或所有组合能力可执行。
+
+本批已通过真实 Pilot 与双服务浏览器验收。真实 DeepSeek Flash 五轮对话、17 次模型响应、13 项工具结果在 SSE、原生会话和 Harness effects 中一致；唯一 Rust Run 暂停后重启两服务，同 Session 继续，已完成首节点不重放，两个 Op 的产物与下载逐字节一致。证据 `.local/rust-pilot-xryj4117/evidence.json`；受控模型浏览器 `.local/pilot-rust-browser-clTi4M/evidence.json`。主树 Host 152项、workspace Clippy/fmt/release、Python715项全量与最后125项子集、浏览器1+7项通过。权限独立复审补齐 Responses 的共享Session入口owner核验、无key匿名owner及未接通渠道审批拒绝；详情见 A95，汇总 `.local/rust-parity3-integration-20261005/evidence.json`。
+
+D2b 的完成范围是原有 Python Pilot 操作 Rust Run，不能称作 Pilot 自身已成为 Rust runtime。下一批优先冻结 D3a 的会话并发、跨轮历史/产物与替换取消契约，再接通企业微信；图片输入与摘要增量按 E1/E3 组合验收，随后推进 call.session 和完整研究/周报/RSI。现有 OAuth、精确请求预算及并行 Op.call 缺口保持公开，不因本批通过而关闭。
+
+### 第四批文字会话验收：接入 Rust（D3a 首片 / A96）
+
+用户在 A95 后授权继续。首个验收闭环是原企业微信规范文字事件 → 原 Session/Turn → Rust Graph Run → 原网关回复结果：同用户追问、不同用户同图并发、新消息打断并等待前驱收束、双服务重启后历史与 `/previous` 可读。Graph/Plugin/网关格式不变，Python 不写 Rust Graph Run。附件/图片输入、摘要增量、主动发送/回复图片工具和 `call.session` 是后续组合验收项；首片对未接通输入明确拒绝，不把完整渠道替代记为完成。只使用隔离规范事件和真实模型验证，不自动启动生产网关或向企业微信业务用户发消息。
+
+固定归属：Python 继续持有可信来源校验、Session/Turn、事件去重与网关投递；Rust 持有 Run 接纳/控制、会话 Run 谱系、节点执行与产物；io-harness 原生 Session/Store 持有节点会话及模型记录，不增加 Anchor history/Agent loop。原生 Session 继承 prompt/reply 和框架 compaction，不等于把之前所有工具细节重新注入模型；原工具记录要保持可核查，未完成操作不能借历史摘要宣称成功。
+
+| 包 | 单一编辑边界 | 工作量 | 契约与独立验收 |
+| --- | --- | ---: | --- |
+| Python 通道适配 | channel/assistant.py、supervisor.py、新适配模块和定向测试 | 25% | 公共 Graph 编译元数据、Rust会话Run端口；原鉴权/去重/替换/回复保持，无本地Graph/Run副本；不接受未接通附件 |
+| Rust 会话接纳 | application/API/metadata、定向测试 | 25% | 按可信Session串行、不同Session同图并发；固定请求身份/前驱谱系，已接受Run不重复执行；普通trigger仍互斥，旧被替代Run不能回写新会话历史 |
+| io-harness 会话适配 | anchor-io-harness-runtime 节点执行/NodePort和定向测试 | 25% | 复用固定0.86原生Session/Store，稳定session/node框架身份与每Run工作区分离；新请求和同invocation恢复分开，trace仍能定位原生记录 |
+| 主集成与验收 | serve.py公共接线、Host resolver/只读previous输入、共享小契约、真实验收与文档 | 25% | 合入端口→原生会话→现场文件→Python规范事件；真实模型两用户/追问/重启，确定性打断反例与不重放证据，最终独立权限/谱系审查 |
+
+应用/节点/入口三个职责可分别用fixture验证，具体所有权及基线在派发时记录。主轨独占共享Host装配与真实环境，各Rust worker使用独立target。原生框架root稳定不意味着共享可写工作区：实际工具只得到当前Run的沙箱目录，前驱文件只能按可信Run链冻结为只读 `/previous` 输入；不为未完成文件构造假的NodeCompletion。验收按 `公共Run接纳 → 原生节点会话 → 原入口组合 → 真实模型/重启` 汇聚，不等待图片等无关后续包。
+
+本片已在最终 release 验收。真实 DeepSeek Flash 两用户各两轮、双服务重启、原生历史隔离、真实工具回查、`/previous` 与 Artifact 下载通过；重复事件没有新增 Run，共 4 Run、2 原生会话、15 次模型请求/响应录制，证据 `.local/rust-channel-p7sqd_sm/evidence.json`。受控模型结合真实 HTTP/框架/沙箱/持久化，验证连续消息替代、另一用户并发、未完成文件只读、在工具执行中实际杀掉 Rust 服务后新消息接续且不重放，证据 `.local/rust-channel-control-crgu8_ak/evidence.json`。没有启动生产网关或向业务用户发送消息。
+
+原生 admission 分步发布的中断窗口、Session 删除版本竞态、旧轮连续 wait 后代恢复、封存 Plugin 历史阻塞编辑已修复并独立复核。会话 Run 暂不支持单独删除；整 Graph 清理在执行收束后删除原生 scope，其他 Graph/用户隔离，同名重建不继承已删历史；已删除的终态 callee 不阻止 caller 清理。主树 Python 743 项、Rust workspace 400 项（0 ignored）、Clippy/fmt/release、修改 Python 的 Ruff/py_compile 通过。首次 Python 全量的 3 个并发超时保留，相关 26 项和相同全量命令复跑通过，未放宽超时。汇总 `.local/rust-parity4-integration-20261005/evidence.json`。
+
+后续依次接通 E1 摘要增量、E3 附件/图片与渠道宿主发送工具，再组合 D3b `call.session` 和完整业务 Graph。当前仅文字路径验收，不能用 Python legacy 的渠道能力或本地规范事件证明 Rust 全渠道、公网投递或纯 Rust 平台替代。
+
+### 第五批实施边界：文件附件与原生图片输入（E3 / D3a）
+
+A96 后用户继续授权。固定版本 Rig 0.43 的 `StreamEvent::Start` 不含工具名；`operation/completion.rs` 中 `call_fragment` 缓冲参数，直到 `close_call` 才发完整 `Arguments` 和包含工具名的 `End`。因此现有 `DynModel::stream` 上层不能安全提供 `final_result.summary` 的真实增量；不能从业务参数中猜摘要。公开 Wire/Decoder 装饰接点需在 model erase 前接入并适配具体 wire，E1 保留后续窄 transport 接线，不为了显示 fork 框架或新增 Agent loop。本批先闭合独立的 E3 附件路径。
+
+用户明确当前 `deepseek-flash` 可用于视觉验收。保持 Graph/Plugin 不变：Python 复用现有附件解析，以同一份受限读取的 bytes 生成提取文本与渠道输入快照；Turn 仅存小 manifest/文本，不反复携带大段 base64。受信 `/conversation-runs` 增加 `attachments` 字节上传，Rust 保存 Run 所有的内容/hash/MIME，恢复时验证固定字节，`/in/channel` 只读；图片经 resolver → 原生 `Media` → `TaskContract::with_images` → 原 Rig transport。工具和 Op 都可读取获授权文件，Graph input 不授予宿主路径权限。
+
+模型图像能力由宿主 `ANCHOR_MODEL_IMAGE_MODELS` 的 wire model 名列表声明，默认空；alias 按实际模型判定，能力随 invocation 模型绑定核验。非视觉配置不得静默丢图。只接 PNG/JPEG/WebP 单帧图像和既有文本/PDF/Office 提取，沿用 16 文件、单文件 20 MiB、总文件 50 MiB、8 图/单图 10 MiB/总图 20 MiB/20M 像素边界。原图片和文件仍只读保留，不将提取文本误称全内容理解。
+
+集成契约补充：附件 manifest、只读文件引用和模型图片保持上传顺序，重排视为不同输入，避免改变“第一张图”的含义。固定框架 `Media::image` 的 5 MiB 上限取自跨供应商最小值，低于现有产品的 10 MiB；本适配使用公开 `Media` 值保留已经过 Host 解码、配额和 MIME 校验的原字节，仍由框架执行 20 MiB 请求总图像限制。不修改框架、不转码降质，也不把超过上游特定供应商额度的兼容性当作已经验收。
+
+隔离基线 `d201ca6bc489a717f6f69e53fe0b1f3966ba9c17`，三个工作包为 Host 字节冻结/权限/API、原生 Media/模型能力、Python 入口快照/附件适配；主轨接线 serve/NodeHost 并统一验收。同路径单编辑者、各自 Cargo target，最终以定向反例 → 主树回归 → 真实模型两用户/图像辨认/重启/原文件删除后的内容一致收束。主动发送、回复图片、E1、call.session 不纳入本片完成声明。
+
+### 第五批验收结果（A97）
+
+E3/D3a 文件附件与原生图片输入已在主树 release 完成。Python 入口一次读取并冻结受信文件，提取文本与 Rust 上传使用同一字节；Rust Run 持有 hash/MIME/字节和顺序 manifest，Agent/Op 只读挂载 `/in/channel`，重试不依赖已删除源文件。`ANCHOR_MODEL_IMAGE_MODELS` 按实际 wire 名声明视觉能力，图片在每个 provider 请求、恢复和 native Session 中保持原字节；非视觉模型在 provider 请求前拒绝。真实 `deepseek-flash` 两用户图片+文本附件、源文件删除、8 次图片请求逐条核对、重复事件、双服务重启与历史隔离通过，证据 `.local/rust-channel-media-c_fkgh9i/evidence.json`；文字回归 `.local/rust-channel-8o4jtqw3/evidence.json`。主动发送/回复图片、summary 增量、`call.session`、生产公网投递和跨平台兼容仍待后续切片。
+
+### D2/D3 派发边界补充
+
+| 切片 | 单一编辑边界与事实所有者 | 可复用契约和缺口 | 并行条件与验收出口 |
+| --- | --- | --- | --- |
+| D2a Plugin 管理 | Python `library.py`、serve Plugin handlers；Rust Graph/Plugin 接入由主集成者处理。Library 持有资源与凭证，Rust Run 持有冻结 PluginBinding | 复用 catalog/detail/file/install；Rust Graph 保存从操作员 Library 取资源。Rust 尚无 Plugin 管理 API，也未消费 OAuth 缓存，授权页面成功不能代替执行授权 | 可与 D1 并行，但 serve.py 的 shared wiring 只由主集成者编辑。原 UI 安装/浏览 Skill/挂载后 Rust Run 执行原 Plugin；已有 Run 资源不静默变更、秘密不进 bundle |
+| D2b Pilot/Session | `pilot.py`、`session.py`、`pilot_turns.py`；Session/Turn 保留宿主所有权，Rust 唯一写 Graph Run | 工具接 D1 Graph CRUD/trigger/control/Run/Artifact；移除对本地 graph.json、scheduler.running、run_dir 的依赖。补无副作用 Graph/Plugin 校验入口，删除确认前态通过公共定义读取核验 | 可按 D1 固定契约并行开发，组合验收依赖 D1。原 Pilot 发起 Rust Run、关联 Session、读文件、控制、重开仍查看同一 Run；提问与历史恢复继续用已有框架 |
+| D3a 会话渠道，D3b call.session | `channel/assistant.py`、tools/background/supervisor 与 Rust application/Node resolver；网关/EventLedger/Session/Turn 归宿主，Run/产物归 Rust | 普通 trigger 同图互斥不能承载多用户会话；需可信会话接纳、按会话并发/替换取消、跨轮历史及未完成文件、附件/图片、回复和宿主 ToolPort。先接普通会话，再接 call.session 授权/让位/同 Run 恢复与完成投递 | 等 D1 稳定及 E 图片输入契约。重复事件不重跑、两用户隔离、打断留历史且仅最新回复、附件只读/发送权限正确；后台让位不重放、跨用户调用拒绝。真实发消息另按用户明确授权，不能为验收擅自发送 |
+
+### E 派发边界补充
+
+| 切片 | 单一编辑边界和已有接点 | 前提/已知限制 | 验收出口 |
+| --- | --- | --- | --- |
+| E1 摘要显示增量 | io adapter/completion/NodePort，Host Run detail 与 Web RunInspector 由主集成者接线；复用 Rig stream 和 detail 轮询，以 invocation 隔离临时显示投影 | Harness observed 普通入口未启用 stream，Rig Arguments 在 End 前缺工具名。先小样证明可靠识别 final_result.summary，不能把业务参数当摘要；不新建日志或 loop | 真实 Provider + 浏览器在响应结束前至少两次增长；混合/非法/截断完成、刷新不产生提前提交，最终事实唯一 |
+| E2 最后回合 stop | io node/node_exec/NodePort、Graph runner；复用 Observer/Flow::Cancel、控制 token、completion fact 与 cursor | Harness 最后回答可能直接 Finished；GraphRunner 下一循环仍先处理 stop 并保留已提交结果。首片如实展示停止待收束，不事后伪改 Harness 账本；E1/E2 对共享文件分时合入 | 延迟 Provider 在最后响应前/完成后注入 stop；无下游 dispatch，完成唯一；恢复不重放已完成模型/工具，浏览器状态一致 |
+| E3 图片输入 | Host application/node_host、Runtime graph/ports 与 NodeRequest、io model_registry；复用冻结附件、Media::image、TaskContract::with_images 和已有四种 MIME 转换 | 当前请求无图片字段，模型能力固定 accepts_images=false。HTTP 核心接线可先做，渠道来源依赖 D3；附件归 Run，Graph 不增加另一套版本或语言 | 多轮/重启发送同一冻结字节；来源越界、摘要漂移、超限、错误 MIME、非视觉模型拒绝；真实视觉 Provider 辨认测试图 |
+
+E1/E2/E3 可先分别做只读核查、fixture 和边界设计；因共享 NodePort/Host 文件，不能同时编辑同一路径。建议 E2 先合入，再由 E1/E3 按小契约分时接线，与 D1/D2a 的独立路径并行。
+
+## 历史计划与冻结记录
+
+本文是 `codex/rust-rig-runtime` 实验分支的历史开发计划，描述过如何把 Anchor 逐步收敛到一个由平台宿主和独立 Graph 宿主共同使用的 Rust Runtime Kernel。2026-10-04 已冻结该扩展路线；本文不再表示 R1–R9 正在推进，也不替代 [开发台账](pilot-development-plan.md)。当前边界、保留资产和重新评估条件见 [Rust Runtime 迁移收尾记录](rust-migration-closure.md)。
+
+冻结后的解释：本计划中的阶段表、完整 R8/R9 出口和“下一步”段落保留作为设计与历史证据，不构成当前开发承诺。Python `serve.py` 继续是当前生产路径，Rust Host 定位为实验性 standalone Graph Host 垂直切片。当前仅重新评估一条更窄的二进制 Runtime 交付闭环，具体条件见 [Rust Runtime 迁移收尾记录](rust-migration-closure.md)。
 
 ## 目标和不做的事
 
@@ -69,9 +214,9 @@ Rust 平台宿主和独立 Graph 包共享同一 `anchor-runtime` Runner。Pytho
 - 独立 bundle 首先支持一个真实 Graph 的资源闭包：展开后的 Graph、显式 Plugin/工具资源、Runtime 兼容版本和无密钥 manifest。凭证、模型配置、Sandbox 根目录和运行数据由部署环境提供。
 - Rust-native host 的首个生产出口是一个包含 AgentNode、Op.run、Plugin/MCP、fanout/join 和恢复的真实 Graph；provider-free 只证明接口，真实 provider、Sandbox、重启和 artifact 需要分别验收。
 
-## 当前进度和下一步
+## 冻结时的历史进度
 
-2026-10-04 近期主线：R1–R6 与 HostNodes Agent backend 已有分层证据；A85 收口 R7 的 wait 子图 Plugin/MCP/Sandbox、`input_map/files/result` 和真实 Responses provider 闭环，A86 补齐 child/Artifact 本地恢复硬化并验证 provider-free 四边界与两个真实 provider 故障边界。剩余 R7 边界是 `session`、嵌套调用、真实业务 MCP、跨存储故障窗口与外部副作用 exactly-once；再做 R8（Rust Session/Pilot/Scheduler/Plugin/channel 宿主，并按 P2/P7 共同用户契约重新验收），最后进入 R9 逐图切换。Python P2/P7 仍可完成其 Pilot 入口，不改变 Rust-owned Run；E1/E2 的 Python 功能可并行，不能代替 R8/R9 出口。
+2026-10-04 收尾：R1–R7 与 HostNodes Agent backend 保留分层证据，A85/A86 的 wait 子图、Plugin/MCP/Sandbox、Artifact 和本地恢复硬化证据继续有效，但不足以宣称完整平台迁移。R8（Rust Session/Pilot/Scheduler/Plugin/channel 宿主）与 R9（逐图切换、Python 收缩）冻结，不再作为当前下一步。用户明确了真实产品价值是交付不依赖 Python 和 Anchor 源码的二进制 Runtime，因此当前只评估二进制 Runtime、Graph 包闭包和干净环境端到端验收；Python P2/P7 与 E1/E2 继续按各自生产路径维护。
 
 2026-10-03 决策更新：用户要求开发阶段直接以 io-harness 满足 AgentRuntime 需求。io-harness 是唯一 Agent loop 与上下文/恢复 owner；Rig 只作 Provider transport。该方向已从隔离 spike 推进到生产 HostNodes Agent 分发，Anchor GraphRunner/Sandbox/Artifact/Plugin 仍为外层事实 owner。能力范围为文本、图片、流式和简单 JSON 工具结果；复杂结构化输出不作为选型阻断，但 Anchor 的 `{summary, route?}` completion 仍由 Harness schema 本地校验。
 
@@ -191,3 +336,5 @@ A62的同Graph互斥用于手动/API触发；未来独立调用仍遵守已冻�
 
 2026-10-03 A80 Rust Host → React 浏览器垂直切片通过。Host 可托管 React bundle；静态页面/资源不要求 API key，Graph/Run API 仍由 Bearer key 保护，使非 loopback 部署可先加载登录界面。Playwright 从 Rust Host 页面输入 key、运行无 Plugin Graph、在节点面板查看 committed Artifact，并从 Timeline 打开 Run。Host API 的 `/timeline` 投影真实持久 Run，明确不支持计划；无持久结束时间时前端不造时长，非活动的 `running` Run 显示等待接续。验证：runner-host 56 项测试、workspace Clippy/fmt/diff、Web 33 项单测/build、恢复与 Rust Host Playwright 4 项。该 slice provider-free；不代表真实模型 trace UI、计划/Session/Plugin 管理或全平台替代。
 2026-10-04 A86 Rust Host `Op.call` 恢复硬化完成。GraphRunner 固定 call identity，只恢复可继续状态；终态或 `WaitingRecovery` child 不重复派发，`Failed + cursor` 返回 `Uncertain` 并保留父 cursor。Artifact 对 `/in/call` manifest、来源 CommitRef、目录/hash、symlink、半发布和残留临时目录做 fail-closed 校验，输入 staging、结果 export 和 GraphCall freeze 可幂等恢复。provider-free smoke `.local/rust-graph-call-recovery-bian709i/evidence.json` 的 admission、child_running、result transfer、parent completion 四边界通过；真实 Responses + `deepseek-flash` + 本机 HTTP MCP + Bubblewrap 在 `.local/rust-graph-call-recovery-6sm8mc6j/evidence.json`（child write 已记录）和 `.local/rust-graph-call-recovery-00tapghd/evidence.json`（parent completion commit）通过。更早真实中断运行保留 duplicate MCP effect，故不承诺外部 exactly-once；`Op.run` started 无 terminal 仍只能 uncertain。workspace tests、Clippy、受影响 crate fmt、diff、脚本静态检查与 provider-free smoke 均通过；跨存储故障窗口、session、嵌套调用和真实业务 MCP 仍待后续。
+
+2026-10-05 A91：Rust AgentNode 完成改用 Provider adapter 注入的原生 `final_result` 输出工具。完成参数由程序投影到 Harness 原有本地 schema 校验，额外字段和 null route 对齐 Python，普通 JSON 文本不再能触发新回合完成；混合业务/完成调用先执行全部业务，要求重新单独提交。循环、校验纠错、检查点与恢复仍由 io-harness 拥有；既有完成事实兼容读取，未新增 Graph/Plugin 格式。最终 release + 原样学术 Graph/Plugin + 真实 DeepSeek Flash/Crossref 验收通过，证据 `.local/rust-plugin-reuse-rk32np54/evidence.json`；具体范围和流式/停止边界见当前架构及台账 A91。

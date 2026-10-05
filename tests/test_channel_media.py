@@ -3,6 +3,7 @@ import base64
 import hashlib
 import io
 import os
+from pathlib import Path
 import zipfile
 
 import pytest
@@ -223,6 +224,20 @@ def test_byte_limits_and_text_truncation_are_explicit(tmp_path, monkeypatch):
     assert not images
     with pytest.raises(ValueError, match='16'):
         media.prepare_attachments([item] * 17)
+
+
+def test_uploaded_bytes_are_the_same_bytes_extracted_after_source_changes(tmp_path, monkeypatch):
+    item = attachment(tmp_path, 'source.txt', b'original authorized content')
+    frozen = Path(item['path']).read_bytes()
+    Path(item['path']).write_bytes(b'changed after authorization')
+    text, images = media.prepare_attachments([item], contents=(frozen,))
+    assert 'original authorized content' in text
+    assert 'changed after authorization' not in text
+    assert not images
+    monkeypatch.setattr(media, 'MAX_FILE_BYTES', 4)
+    assert 'byte limit' in media.prepare_attachments([item], contents=(frozen,))[0]
+    with pytest.raises(ValueError, match='match'):
+        media.prepare_attachments([item], contents=())
 
 
 def test_unsupported_archive_and_binary_not_claimed_read(tmp_path):

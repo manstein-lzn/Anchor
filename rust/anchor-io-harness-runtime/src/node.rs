@@ -1,4 +1,4 @@
-//! Provider-free vertical spike for an Anchor ToolPort in io-harness.
+//! Anchor ToolPort integration for the io-harness Agent loop.
 //!
 //! `io-harness` owns the model/tool loop. Anchor owns tool definitions and
 //! execution through [`anchor_runtime_rig::ToolPort`]. The adapter makes that
@@ -12,9 +12,9 @@ use io_harness::{Flow, Observer, RunEvent, Tool, ToolEffect, ToolFuture, ToolRec
 use rig_core::completion::ToolDefinition;
 use serde_json::Value;
 
-/// The io-harness-owned AgentNode execution boundary used by the next host
-/// integration slice. Each invocation opens the same durable SQLite Store by
-/// path; Anchor Graph/Run facts remain outside this helper.
+/// The io-harness-owned AgentNode execution boundary used by the host. Each
+/// invocation opens the same durable SQLite Store by path; Anchor Graph/Run
+/// facts remain outside this helper.
 #[derive(Debug, Clone)]
 pub struct IoHarnessNodeBackend {
     store_path: PathBuf,

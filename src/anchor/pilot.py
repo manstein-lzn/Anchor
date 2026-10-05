@@ -23,6 +23,7 @@ from pydantic_ai_harness.step_persistence import StepPersistence
 from anchor.node.model_bridge import model_for
 from anchor.runtime.secrets import (ChainedSecretProvider, EnvironmentSecretProvider,
                                     JsonFileSecretProvider, env_model_profile)
+from anchor.runtime_http import RuntimeHTTPError
 from anchor.session import Session, SessionStore
 
 INSTRUCTIONS = """You are Anchor Pilot, the user's assistant for working with Anchor.
@@ -71,17 +72,46 @@ def _payload(body: str, status: int) -> dict[str, Any]:
     }
 
 
-def _resource_snapshot(scheduler: Any, target: str) -> tuple[str | None, Any]:
-    lookup = getattr(scheduler, "workspace", None)
-    workspace = lookup(target) if lookup else None
-    if workspace is None:
-        return None, None
-    path = workspace / "graph.json"
+def _port_payload(call: Any, *args: Any) -> dict[str, Any]:
     try:
-        raw = path.read_bytes()
-    except FileNotFoundError:
+        return _payload(*call(*args))
+    except RuntimeHTTPError as exc:
+        return _payload(*exc.response())
+    except (OSError, ValueError) as exc:
+        return {"error": str(exc), "http_status": 502}
+
+
+def _graph_payload(scheduler: Any, graph: str) -> dict[str, Any]:
+    result = _port_payload(scheduler.graph, graph)
+    if result["http_status"] == 200 and not isinstance(result.get("definition"), dict):
+        return {"error": "Graph definition response is invalid", "http_status": 502}
+    return result
+
+
+class _SnapshotError(RuntimeError):
+    def __init__(self, result: dict[str, Any]):
+        self.result = result
+        super().__init__(result.get("error") or "Graph snapshot could not be read")
+
+
+def _resource_snapshot(scheduler: Any, target: str) -> tuple[str | None, Any]:
+    result = _graph_payload(scheduler, target)
+    if result["http_status"] == 404:
         return None, None
-    return hashlib.sha256(raw).hexdigest(), json.loads(raw)
+    if result["http_status"] != 200:
+        raise _SnapshotError(result)
+    definition = result["definition"]
+    raw = json.dumps(definition, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest(), definition
+
+
+def _run_snapshot(scheduler: Any, run: str) -> dict[str, Any] | None:
+    value = scheduler.run("", run)
+    if value is not None:
+        return value
+    graph = next((item["graph"] for item in scheduler.graphs()["graphs"]
+                  if item.get("running") == run or run in (item.get("active_runs") or [])), None)
+    return {"run": run, "graph": graph, "status": "starting", "running": True} if graph is not None else None
 
 
 _SIDE_EFFECTS = threading.Lock()
@@ -109,8 +139,7 @@ def _recorded(ctx: RunContext[PilotDeps], action: str, target: str, mutate: Any,
         if state == "uncertain":
             return {"error": "operation outcome is uncertain; it was not replayed",
                     "action": action, "target": target, "uncertain": True}
-        body, status = mutate()
-        result = _payload(body, status)
+        result = _port_payload(mutate)
         try:
             sessions.finish_operation(ctx.deps.session_id, key, result)
         except (KeyError, ValueError, OSError) as exc:
@@ -136,7 +165,10 @@ def _stale(ctx: RunContext[PilotDeps], tool_name: str, graph: str) -> dict[str, 
         ctx.deps.session_id, ctx.tool_call_id)
     if not precondition or precondition.get("graph") != graph:
         return None
-    version, current = _resource_snapshot(ctx.deps.scheduler, graph)
+    try:
+        version, current = _resource_snapshot(ctx.deps.scheduler, graph)
+    except _SnapshotError as exc:
+        return exc.result
     if tool_name == "graph_create":
         return {"error": f"Graph already exists: {graph}"} if current is not None else None
     if version != precondition.get("expected_sha256"):
@@ -149,48 +181,37 @@ def _register_tools(agent: Agent[PilotDeps, str]) -> None:  # noqa: C901 - expli
     """Expose Anchor's control plane as structured tools, not prompt conventions."""
 
     @agent.tool
-    def graph_list(ctx: RunContext[PilotDeps]) -> list[dict[str, Any]]:
+    def graph_list(ctx: RunContext[PilotDeps]) -> list[dict[str, Any]] | dict[str, Any]:
         """List saved Graph assets and their current run, if any."""
         scheduler = ctx.deps.scheduler
+        try:
+            graphs = scheduler.graphs()["graphs"]
+        except RuntimeHTTPError as exc:
+            return _payload(*exc.response())
         result = []
-        for workspace in scheduler.workspaces():
-            try:
-                definition = json.loads((workspace / "graph.json").read_text(encoding="utf-8"))
-            except (OSError, ValueError) as exc:
-                result.append({"graph": workspace.name, "error": str(exc)})
+        for graph in graphs:
+            response = _graph_payload(scheduler, graph["graph"])
+            if response["http_status"] != 200:
+                result.append({"graph": graph["graph"], **response})
                 continue
+            definition = response["definition"]
             result.append({
-                "graph": workspace.name,
+                **graph,
                 "objective": definition.get("objective", ""),
                 "nodes": [item.get("id") for item in definition.get("nodes", [])
                            if isinstance(item, dict)],
-                "running": scheduler.running.get(workspace.name),
             })
         return result
 
     @agent.tool
     def graph_read(ctx: RunContext[PilotDeps], graph: str) -> dict[str, Any]:
         """Read one Graph's canonical JSON definition."""
-        workspace = ctx.deps.scheduler.workspace(graph)
-        if workspace is None:
-            return {"error": f"no such graph: {graph}"}
-        try:
-            return {"graph": graph, "definition": json.loads(
-                (workspace / "graph.json").read_text(encoding="utf-8"))}
-        except (OSError, ValueError) as exc:
-            return {"error": str(exc)}
+        return _graph_payload(ctx.deps.scheduler, graph)
 
     @agent.tool
     def graph_validate(ctx: RunContext[PilotDeps], definition: dict[str, Any]) -> dict[str, Any]:
         """Validate Graph JSON and Plugin references without saving it."""
-        try:
-            parsed = __import__("anchor.simple.graph", fromlist=["parse"]).parse(definition)
-            for node in parsed.nodes.values():
-                ctx.deps.scheduler.library.attach(node.plugins)
-            return {"valid": True, "nodes": list(parsed.nodes),
-                    "entry": parsed.entry()}
-        except (ValueError, OSError, TypeError) as exc:
-            return {"valid": False, "error": str(exc)}
+        return _port_payload(ctx.deps.scheduler.validate_graph, definition)
 
     @agent.tool
     def plugin_list(ctx: RunContext[PilotDeps]) -> list[dict[str, Any]]:
@@ -206,25 +227,25 @@ def _register_tools(agent: Agent[PilotDeps, str]) -> None:  # noqa: C901 - expli
             return {"error": str(exc)}
 
     @agent.tool
-    def run_list(ctx: RunContext[PilotDeps]) -> list[dict[str, Any]]:
+    def run_list(ctx: RunContext[PilotDeps]) -> list[dict[str, Any]] | dict[str, Any]:
         """List Graph Runs, newest first."""
-        return ctx.deps.scheduler.runs()
+        try:
+            return ctx.deps.scheduler.runs()
+        except RuntimeHTTPError as exc:
+            return _payload(*exc.response())
 
     @agent.tool
     def run_status(ctx: RunContext[PilotDeps], run: str) -> dict[str, Any]:
         """Read one Run state, traces, Plugin bindings, and node directories."""
-        value = ctx.deps.scheduler.run("", run)
-        if value is not None:
-            return value
-        graph = next((name for name, current in ctx.deps.scheduler.running.items() if current == run), None)
-        return ({"run": run, "graph": graph, "status": "starting", "running": True}
-                if graph is not None else {"error": f"no such run: {run}"})
+        try:
+            return _run_snapshot(ctx.deps.scheduler, run) or {"error": f"no such run: {run}", "http_status": 404}
+        except RuntimeHTTPError as exc:
+            return _payload(*exc.response())
 
     @agent.tool
     def artifact_read(ctx: RunContext[PilotDeps], run: str, node: str, path: str) -> dict[str, Any]:
         """Read a text artifact from a node workspace; binary files are reported, not decoded."""
-        body, status = ctx.deps.scheduler.read_file(run, node, path)
-        return _payload(body, status)
+        return _port_payload(ctx.deps.scheduler.read_file, run, node, path)
 
     @agent.tool
     def graph_run(ctx: RunContext[PilotDeps], graph: str, objective: str | None = None) -> dict[str, Any]:
@@ -285,15 +306,13 @@ def _register_tools(agent: Agent[PilotDeps, str]) -> None:  # noqa: C901 - expli
         except (KeyError, ValueError) as exc:
             return {"error": str(exc)}
         runs = []
-        for run in session.run_ids:
-            snapshot = ctx.deps.scheduler.run("", run)
-            if snapshot is None:
-                graph = next((name for name, current in ctx.deps.scheduler.running.items()
-                              if current == run), None)
-                snapshot = ({"run": run, "graph": graph, "status": "starting",
-                             "running": True} if graph is not None else None)
-            if snapshot is not None:
-                runs.append(snapshot)
+        try:
+            for run in session.run_ids:
+                snapshot = _run_snapshot(ctx.deps.scheduler, run)
+                if snapshot is not None:
+                    runs.append(snapshot)
+        except RuntimeHTTPError as exc:
+            return {"session": session.model_dump(mode="json"), **_payload(*exc.response())}
         return {"session": session.model_dump(mode="json"),
                 "runs": runs}
 

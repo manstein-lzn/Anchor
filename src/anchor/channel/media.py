@@ -94,7 +94,7 @@ def _image_mime(data: bytes, *, output: bool = False) -> str:
 
 
 def make_image_item(data: bytes) -> dict:
-    """Build one SDK msg_item from validated PNG/JPEG bytes, never a path/URL."""
+    """Build one internal image item from validated PNG/JPEG bytes, never a path/URL."""
     if not isinstance(data, bytes):
         raise ValueError('image data must be bytes')
     _image_mime(data, output=True)
@@ -211,25 +211,33 @@ def _extract(data: bytes, item: dict) -> tuple[str, str | None]:
     return '[Not read: unsupported attachment type; original remains available in read-only input]', None
 
 
-def prepare_attachments(items: list[dict]) -> tuple[str, tuple[tuple[bytes, str], ...]]:
+def prepare_attachments(items: list[dict], *, contents: tuple[bytes, ...] | None = None
+                        ) -> tuple[str, tuple[tuple[bytes, str], ...]]:
     """Return bounded extracted text and (image bytes, sniffed MIME) tuples.
 
     Bad individual files produce explicit ``Not read`` notices and no image.
     More than 16 items is a request error. The caller still authorizes paths.
+    A trusted caller may supply bytes read once from those paths, so extraction
+    and upload use identical content even if the original file later changes.
     """
     if len(items) > MAX_ATTACHMENTS:
         raise ValueError('at most 16 attachments are allowed')
+    if contents is not None and (len(contents) != len(items) or
+                                 any(not isinstance(data, bytes) for data in contents)):
+        raise ValueError('attachment contents must match the supplied files')
     from defusedxml.common import DefusedXmlException
     from xml.etree.ElementTree import ParseError
 
     parts: list[str] = []
     images: list[tuple[bytes, str]] = []
     total = image_total = 0
-    for item in items:
+    for index, item in enumerate(items):
         name = str(item.get('name') or Path(str(item.get('path', 'attachment'))).name)[:200]
         name = name.replace('\n', ' ').replace('\r', ' ')
         try:
-            data = _read_file(Path(item['path']), MAX_TOTAL_BYTES - total)
+            data = contents[index] if contents is not None else _read_file(Path(item['path']), MAX_TOTAL_BYTES - total)
+            if len(data) > min(MAX_FILE_BYTES, MAX_TOTAL_BYTES - total):
+                raise ValueError('file or aggregate attachment byte limit exceeded')
             total += len(data)
             content, mime = _extract(data, item)
             if mime:

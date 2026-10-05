@@ -1,21 +1,27 @@
 mod api;
 mod application;
 mod artifacts;
+mod channel_inputs;
+mod channel_tools;
 mod execution;
+mod local_inputs;
+mod model_registry;
 use artifacts::HostArtifacts;
 mod node_host;
 mod node_tools;
+mod op;
 mod run_data;
+mod tool_environment;
 mod tool_host;
 use execution::PreparedExecution;
 use node_host::HostNodes;
 #[cfg(test)]
 use node_host::load_host_completion_fact;
 
+use anchor_runtime_rig::Cancellation;
 #[cfg(test)]
 use anchor_runtime_rig::graph::{CompletionFact, InvocationKey};
 use anchor_runtime_rig::graph::{GraphRunRecord, GraphSnapshot, RunControl, RunStatus, RunStore};
-use anchor_runtime_rig::{Cancellation, RigCompletionPort};
 use anchor_sandbox_bwrap::{BubblewrapPolicy, BubblewrapSandbox};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -116,14 +122,23 @@ impl RunControl for HostControl {
 
 fn reject_snapshot(snapshot: &GraphSnapshot) -> Result<(), String> {
     snapshot.validate().map_err(|error| error.to_string())?;
+    // The parallel coordinator currently dispatches branch nodes through the
+    // plain NodeExecutionPort. Graph calls require the host-owned GraphCallPort
+    // and their parent/child admission facts, so allowing one inside a
+    // fanout/join branch would turn a valid-looking graph into a runtime
+    // failure (or, worse, a partially admitted child). Reject the combination
+    // before a Run is created until the coordinator has an explicit call port.
+    let parallel_regions = snapshot
+        .parallel_regions()
+        .map_err(|error| error.to_string())?;
+    let parallel_nodes = parallel_regions
+        .values()
+        .flat_map(|region| region.branches.iter().flatten())
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
     for node in &snapshot.nodes {
         if let Some(agent_id) = &node.agent {
             let agent = &snapshot.agents[agent_id];
-            if !agent.reads.is_empty() || !agent.writes.is_empty() {
-                return Err(
-                    "custom Agent reads/writes policies are not yet supported by this host".into(),
-                );
-            }
             if agent.max_steps.is_some() {
                 return Err(
                     "exact cumulative provider budgets are not yet supported by this host".into(),
@@ -136,14 +151,17 @@ fn reject_snapshot(snapshot: &GraphSnapshot) -> Result<(), String> {
             .as_ref()
             .and_then(|name| snapshot.ops.get(name))
             .ok_or_else(|| "node needs an Agent or Op definition".to_owned())?;
+        if parallel_nodes.contains(&node.id) && op.get("call").is_some() {
+            return Err(format!(
+                "Op.call node `{}` is unsupported inside a fanout/join region",
+                node.id
+            ));
+        }
         if let Some(call) = op.get("call") {
             let fields = call.as_object().ok_or("Op.call must be an object")?;
             // `snapshot.validate()` above already rejects unknown fields and
             // structurally validates input/input_map/files/result. Session
-            // handoff is the one product field this host still refuses.
-            if fields.contains_key("session") {
-                return Err("Op.call session handoff is not supported by this host".into());
-            }
+            // handoff is validated by the selected host entrypoint below.
             if fields.get("graph").and_then(Value::as_str).is_none()
                 || !matches!(
                     fields.get("mode").and_then(Value::as_str),
@@ -171,11 +189,33 @@ fn reject_snapshot(snapshot: &GraphSnapshot) -> Result<(), String> {
             .get("run")
             .and_then(Value::as_str)
             .ok_or_else(|| "Op.call requires further host integration".to_owned())?;
-        if !node.plugins.is_empty() || op.get("network").and_then(Value::as_bool).unwrap_or(false) {
-            return Err("Op.run currently requires no Plugin and network=false".into());
+        if !node.plugins.is_empty() {
+            return Err("Op.run cannot execute Plugins".into());
         }
-        if shlex::split(command).is_none_or(|args| args.is_empty()) {
-            return Err("Op.run has empty or malformed command arguments".into());
+        if command.trim().is_empty() || command.contains('\0') {
+            return Err("Op.run must be a non-empty shell command without NUL bytes".into());
+        }
+    }
+    Ok(())
+}
+
+fn reject_standalone_snapshot(snapshot: &GraphSnapshot) -> Result<(), String> {
+    reject_snapshot(snapshot)?;
+    for node in &snapshot.nodes {
+        let Some(call) = node
+            .op
+            .as_ref()
+            .and_then(|op_id| snapshot.ops.get(op_id))
+            .and_then(|op| op.get("call"))
+            .and_then(Value::as_object)
+        else {
+            continue;
+        };
+        if call.get("session").is_some() {
+            return Err("Op.call session handoff requires a platform application".into());
+        }
+        if call.get("mode").and_then(Value::as_str) == Some("detach") {
+            return Err("Op.call detach requires a persistent background host".into());
         }
     }
     Ok(())
@@ -258,49 +298,19 @@ fn make_host_with_control(
             }
         }
     }
-    let sandbox = Arc::new(BubblewrapSandbox::new(policy).map_err(|e| e.to_string())?);
-    let provider = match (
-        env::var("ANCHOR_MODEL_API_KEY").ok(),
-        env::var("ANCHOR_MODEL_URL").ok(),
-        env::var("ANCHOR_MODEL_NAME").ok(),
-    ) {
-        (Some(api_key), Some(base_url), Some(model)) => Some(
-            RigCompletionPort::openai_compatible(
-                api_key,
-                base_url,
-                model,
-                &env::var("ANCHOR_MODEL_WIRE_API").unwrap_or_else(|_| "chat".into()),
-            )
-            .map_err(|e| e.to_string())?,
-        ),
-        _ => None,
-    };
+    let tool_environment = tool_environment::ToolEnvironment::from_env()?;
+    let sandbox = Arc::new(
+        BubblewrapSandbox::new(tool_environment.authorize(policy)).map_err(|e| e.to_string())?,
+    );
+    let models = model_registry::from_env()?;
     let fake_plugin_ids = env::var("ANCHOR_RUNNER_FAKE_PLUGINS")
         .unwrap_or_default()
         .split(',')
         .filter(|id| !id.trim().is_empty())
         .map(|id| id.trim().to_owned())
         .collect::<Vec<_>>();
-    let bindings = plugin_bindings.values().cloned().collect::<Vec<_>>();
-    let needs_catalog = bindings.iter().any(|binding| {
-        binding
-            .mcp_servers
-            .iter()
-            .any(|server| server != tool_host::FAKE_SERVER_ID)
-    });
-    let mcp = if !needs_catalog {
-        tool_host::McpToolConfig::default()
-    } else {
-        let root = env::var_os("ANCHOR_RUNNER_BUNDLE_ROOT")
-            .or_else(|| env::var_os("ANCHOR_RUNNER_CATALOG_ROOT"))
-            .map(PathBuf::from)
-            .ok_or_else(|| {
-                "a Plugin-bearing Run requires ANCHOR_RUNNER_BUNDLE_ROOT or ANCHOR_RUNNER_CATALOG_ROOT"
-                    .to_owned()
-            })?;
-        tool_host::McpToolConfig::from_catalog(root, &bindings)
-            .map_err(|error| error.to_string())?
-    };
+    let mut mcp = tool_host::McpToolConfig::default();
+    mcp.environment = tool_environment;
     let artifacts = HostArtifacts::new(state.join("artifacts"), work_root);
     let tools = tool_host::PluginToolHost::new(fake_plugin_ids);
     let io_resolver = Arc::new(node_host::HostIoResolver::new(
@@ -310,12 +320,13 @@ fn make_host_with_control(
         mcp.clone(),
         plugin_bindings.clone(),
         anchor_runtime_rig::graph::FileRunStore::new(state.join("runs")),
+        local_inputs::LocalInputs::from_env(state.clone())?,
     ));
-    let io_nodes = provider.as_ref().map(|provider| {
-        anchor_io_harness_runtime::node_port::IoHarnessNodePort::new_with_default_policy(
+    let io_nodes = models.as_ref().map(|models| {
+        anchor_io_harness_runtime::node_port::IoHarnessNodePort::new_with_default_policy_and_registry(
             state.join("io-harness/facts"),
             state.join("io-harness/store"),
-            provider.dyn_model(),
+            models.clone(),
             Arc::clone(&io_resolver),
         )
     });
@@ -375,7 +386,7 @@ async fn handle(request: Request) -> Response {
                         };
                     }
                 };
-            if let Err(reason) = reject_snapshot(&bundle.snapshot) {
+            if let Err(reason) = reject_standalone_snapshot(&bundle.snapshot) {
                 return Response::Rejected {
                     version: 1,
                     request_id,
@@ -451,7 +462,7 @@ async fn handle(request: Request) -> Response {
                     reason: "unsupported protocol version".into(),
                 };
             }
-            if let Err(reason) = reject_snapshot(&snapshot) {
+            if let Err(reason) = reject_standalone_snapshot(&snapshot) {
                 return Response::Rejected {
                     version: 1,
                     request_id,
@@ -587,11 +598,12 @@ fn ensure_standalone_run_metadata(
     record: &GraphRunRecord,
     bundle_root: Option<&std::path::Path>,
 ) -> Result<(), String> {
-    if !record
-        .snapshot
-        .ops
-        .values()
-        .any(|op| op.get("call").is_some())
+    if env::var_os("ANCHOR_RUNNER_LOCAL_INPUTS_ROOT").is_none()
+        && !record
+            .snapshot
+            .ops
+            .values()
+            .any(|op| op.get("call").is_some())
     {
         return Ok(());
     }
@@ -607,10 +619,16 @@ fn ensure_standalone_run_metadata(
             }
         },
     };
-    let graph = env::var("ANCHOR_RUNNER_GRAPH_NAME")
+    let graph_name = env::var("ANCHOR_RUNNER_GRAPH_NAME")
         .ok()
         .map(|name| name.trim().to_owned())
-        .filter(|name| !name.is_empty())
+        .filter(|name| !name.is_empty());
+    if env::var_os("ANCHOR_RUNNER_LOCAL_INPUTS_ROOT").is_some() && graph_name.is_none() {
+        return Err(
+            "ANCHOR_RUNNER_GRAPH_NAME is required with ANCHOR_RUNNER_LOCAL_INPUTS_ROOT".into(),
+        );
+    }
+    let graph = graph_name
         .or_else(|| {
             bundle_root
                 .file_name()
@@ -679,6 +697,9 @@ async fn write_frame<W: AsyncWrite + Unpin>(writer: &mut W, value: &Response) ->
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
+    if let Some(args) = op::route_cli_args() {
+        std::process::exit(op::run_route_cli(&args));
+    }
     if env::args().nth(1).as_deref() == Some("serve") {
         return api::serve().await;
     }
@@ -730,6 +751,36 @@ mod tests {
     }
 
     #[test]
+    fn host_admission_accepts_declared_agent_file_interfaces() {
+        let graph: GraphSnapshot = serde_json::from_value(serde_json::json!({
+            "objective": "academic fixture",
+            "entry": "plan",
+            "agents": {
+                "planner": {
+                    "model": "models.academic",
+                    "instructions": "write a plan",
+                    "reads": [],
+                    "writes": ["plan.md"]
+                },
+                "writer": {
+                    "model": "models.academic",
+                    "instructions": "write the paper",
+                    "reads": ["plan.md"],
+                    "writes": ["paper.md"]
+                }
+            },
+            "nodes": [
+                {"id": "plan", "agent": "planner"},
+                {"id": "write", "agent": "writer"}
+            ],
+            "edges": [{"from": "plan", "to": "write"}]
+        }))
+        .expect("fixture snapshot");
+
+        assert!(reject_snapshot(&graph).is_ok());
+    }
+
+    #[test]
     fn host_admission_accepts_op_routes_with_multiple_exits() {
         let mut graph = snapshot();
         graph.nodes.push(anchor_runtime_rig::graph::GraphNode {
@@ -762,7 +813,7 @@ mod tests {
     }
 
     #[test]
-    fn host_admission_accepts_frozen_op_call_fields_and_rejects_session() {
+    fn host_admission_accepts_frozen_op_call_fields_and_session() {
         let graph = GraphSnapshot::admit(serde_json::json!({
             "objective":"parent", "entry":"call", "agents":{},
             "ops":{"call":{"call":{
@@ -781,7 +832,73 @@ mod tests {
             "nodes":[{"id":"call","op":"call","plugins":[]}], "edges":[]
         }))
         .unwrap();
-        assert!(reject_snapshot(&session).is_err());
+        assert!(reject_snapshot(&session).is_ok());
+    }
+
+    #[test]
+    fn standalone_admission_rejects_detached_graph_calls_but_host_admits_them() {
+        let graph = GraphSnapshot::admit(serde_json::json!({
+            "objective":"detached child", "entry":"call", "agents":{},
+            "ops":{"call":{"call":{"graph":"child","mode":"detach"}}},
+            "nodes":[{"id":"call","op":"call","plugins":[]}], "edges":[]
+        }))
+        .unwrap();
+
+        assert!(
+            reject_snapshot(&graph).is_ok(),
+            "persistent HTTP host supports detach"
+        );
+        let error = reject_standalone_snapshot(&graph)
+            .expect_err("standalone host cannot own a persistent detached child");
+        assert!(error.contains("persistent background host"), "{error}");
+    }
+
+    #[test]
+    fn standalone_admission_rejects_session_calls_before_run_creation() {
+        let graph = GraphSnapshot::admit(serde_json::json!({
+            "objective":"session child", "entry":"call", "agents":{},
+            "ops":{"call":{"call":{"graph":"child","mode":"wait","session":"ops"}}},
+            "nodes":[{"id":"call","op":"call","plugins":[]}], "edges":[]
+        }))
+        .unwrap();
+
+        assert!(
+            reject_snapshot(&graph).is_ok(),
+            "platform host owns Session calls"
+        );
+        let error = reject_standalone_snapshot(&graph)
+            .expect_err("standalone entrypoint has no Session delivery authority");
+        assert!(error.contains("platform application"), "{error}");
+    }
+
+    #[test]
+    fn host_admission_rejects_graph_call_inside_parallel_branch() {
+        let graph = GraphSnapshot::admit(serde_json::json!({
+            "objective": "parallel call",
+            "entry": "fork",
+            "ops": {
+                "fork": {"fanout": {"join": "join"}},
+                "call": {"call": {"graph": "child", "mode": "wait"}},
+                "work": {"run": "true"},
+                "join": {"join": {}}
+            },
+            "nodes": [
+                {"id": "fork", "op": "fork"},
+                {"id": "call", "op": "call"},
+                {"id": "work", "op": "work"},
+                {"id": "join", "op": "join"}
+            ],
+            "edges": [
+                {"from": "fork", "to": "call"},
+                {"from": "fork", "to": "work"},
+                {"from": "call", "to": "join"},
+                {"from": "work", "to": "join"}
+            ]
+        }))
+        .expect("parallel graph shape");
+
+        let error = reject_snapshot(&graph).expect_err("unsupported combination must fail closed");
+        assert!(error.contains("inside a fanout/join region"), "{error}");
     }
 
     #[tokio::test]

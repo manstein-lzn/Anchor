@@ -1,9 +1,9 @@
 //! Narrow, explicit conversion between io-harness 0.86 and Rig 0.43.
 //!
 //! This crate owns data conversion only. It does not run either agent loop,
-//! execute tools, persist runs, or grant host permissions. A future runtime
-//! adapter must call io-harness as the sole loop owner and use this boundary for
-//! model/provider calls.
+//! execute tools, persist runs, or grant host permissions. The host calls
+//! io-harness as the sole loop owner and uses this boundary for model/provider
+//! calls.
 
 use futures_util::StreamExt;
 use io_harness::{
@@ -17,10 +17,13 @@ use rig_core::completion::message::{
 };
 use rig_core::completion::{
     AssistantContent, CompletionRequest as RigRequest, CompletionResponse as RigResponse,
-    Message as RigMessage, ToolDefinition as RigToolDefinition,
+    FinishReason, Message as RigMessage, ToolDefinition as RigToolDefinition,
 };
 use rig_core::operation::Completion;
 use rig_core::streaming::{Item, StreamEvent};
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
 use thiserror::Error;
 
 fn rig_provider_error(error: impl std::fmt::Display) -> io_harness::Error {
@@ -36,6 +39,8 @@ fn rig_provider_error(error: impl std::fmt::Display) -> io_harness::Error {
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ConversionError {
+    #[error("tool name `final_result` is reserved for Anchor node completion")]
+    ReservedCompletionTool,
     #[error("tool name cannot be empty: {0:?}")]
     EmptyToolName(String),
     #[error("message {message} has a tool result index {call} without a preceding call")]
@@ -49,13 +54,100 @@ pub enum ConversionError {
 }
 
 /// A Provider implementation that lets io-harness own the loop while Rig owns
-/// the model transport. Text deltas are forwarded incrementally; reasoning and
-/// tool argument deltas remain internal to Rig and are represented only by the
-/// final response conversion.
+/// the model transport. Plain requests forward text deltas incrementally. Anchor
+/// completion requests buffer the stream and emit the canonical projection once
+/// the full tool call arrives; partial arguments and prose cannot signal completion.
 #[derive(Clone)]
 pub struct RigProviderAdapter {
     model: DynModel<Completion>,
     accepts_images: bool,
+    recording_root: Option<std::path::PathBuf>,
+    call_ids: Arc<Mutex<CallIdLedger>>,
+}
+
+/// io-harness intentionally models tool calls without provider IDs. Responses
+/// APIs require the provider's `call_id` to survive into the next request, so
+/// this small ledger bridges that representation gap. The ordinal is the
+/// position of a call in the flattened io-harness transcript; it is stable
+/// while the native Harness run grows its history.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+struct CallIdLedger {
+    assigned: BTreeMap<usize, String>,
+    pending: Vec<PendingCallId>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct PendingCallId {
+    name: String,
+    arguments: serde_json::Value,
+    id: String,
+}
+
+impl CallIdLedger {
+    fn load(root: &std::path::Path) -> Self {
+        std::fs::read(crate::recording::call_ids_path(root))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default()
+    }
+
+    fn save(&self, root: Option<&std::path::Path>) {
+        let Some(root) = root else { return };
+        let Ok(bytes) = serde_json::to_vec_pretty(self) else {
+            return;
+        };
+        let path = crate::recording::call_ids_path(root);
+        let temporary = path.with_extension(format!("tmp-{}", std::process::id()));
+        if std::fs::write(&temporary, bytes).is_ok() {
+            let _ = std::fs::rename(temporary, path);
+        }
+    }
+
+    fn id_for(
+        &mut self,
+        ordinal: usize,
+        message: usize,
+        call: usize,
+        name: &ToolName,
+        arguments: &serde_json::Value,
+    ) -> CallId {
+        if let Some(id) = self.assigned.get(&ordinal) {
+            return CallId::from_wire(id.clone());
+        }
+        if let Some(pending) = self
+            .pending
+            .first()
+            .filter(|pending| pending.name == name.as_ref() && pending.arguments == *arguments)
+            .cloned()
+        {
+            self.pending.remove(0);
+            self.assigned.insert(ordinal, pending.id.clone());
+            return CallId::from_wire(pending.id);
+        }
+        let id = stable_call_id(message, call);
+        self.assigned.insert(ordinal, id.wire().into_owned());
+        id
+    }
+
+    fn observe(&mut self, response: &RigResponse, completion: bool) {
+        self.pending = response
+            .choice
+            .iter()
+            .filter_map(|part| {
+                let AssistantContent::ToolCall(call) = part else {
+                    return None;
+                };
+                if completion && call.function.name.as_ref() == crate::completion::TOOL_NAME {
+                    return None;
+                }
+                Some(PendingCallId {
+                    name: call.function.name.to_string(),
+                    arguments: call.function.arguments.clone(),
+                    id: call.id.wire().into_owned(),
+                })
+            })
+            .collect();
+    }
 }
 
 impl RigProviderAdapter {
@@ -63,16 +155,83 @@ impl RigProviderAdapter {
         Self {
             model,
             accepts_images,
+            recording_root: None,
+            call_ids: Arc::new(Mutex::new(CallIdLedger::default())),
+        }
+    }
+
+    /// Bind private append-only observations to this invocation. The recorder
+    /// stores typed requests/responses, never provider credentials or HTTP bytes.
+    pub fn with_recording(mut self, root: impl Into<std::path::PathBuf>) -> Self {
+        let root = root.into();
+        let ledger = CallIdLedger::load(&root);
+        self.recording_root = Some(root);
+        self.call_ids = Arc::new(Mutex::new(ledger));
+        self
+    }
+
+    async fn exchange(
+        &self,
+        request: IoRequest,
+        on_token: Option<&(dyn Fn(&str) + Send + Sync)>,
+    ) -> io_harness::Result<IoResponse> {
+        let completion = request.output_schema.is_some();
+        let attempt = self
+            .recording_root
+            .as_ref()
+            .map(|root| crate::recording::Attempt::begin(root, &request))
+            .transpose()?;
+        // Record sees the response before Anchor's completion projection. Its
+        // native exchange retains final_result calls instead of the internal value.
+        let transport = RigExchange {
+            adapter: self,
+            attempt: attempt.as_ref(),
+            on_token,
+            completion,
+        };
+        let result = if let Some(attempt) = &attempt {
+            let provider = io_harness::provider::Record::new(transport);
+            let result = io_harness::Provider::complete(&provider, request).await;
+            match &result {
+                Ok(_) => {
+                    // Recording failures after a response cannot change the
+                    // executed turn or cause Harness to retry its effects.
+                    let saved = attempt.save(&provider);
+                    let _ = attempt.outcome(
+                        if saved.is_ok() {
+                            "succeeded"
+                        } else {
+                            "recording_incomplete"
+                        },
+                        saved.as_ref().err(),
+                    );
+                }
+                Err(error) => {
+                    let _ = attempt.outcome("failed", Some(error));
+                }
+            }
+            result
+        } else {
+            io_harness::Provider::complete(&transport, request).await
+        };
+        let response = result?;
+        if completion {
+            let response = crate::completion::response(response);
+            if let Some(on_token) = on_token
+                && let Some(text) = &response.text
+            {
+                on_token(text);
+            }
+            Ok(response)
+        } else {
+            Ok(response)
         }
     }
 }
 
 impl io_harness::Provider for RigProviderAdapter {
     async fn complete(&self, request: IoRequest) -> io_harness::Result<IoResponse> {
-        let request = to_rig_request(&request)
-            .map_err(|error| io_harness::Error::Config(error.to_string()))?;
-        let response = self.model.call(request).await.map_err(rig_provider_error)?;
-        from_rig_response(&response).map_err(|error| io_harness::Error::Config(error.to_string()))
+        self.exchange(request, None).await
     }
 
     async fn complete_streaming(
@@ -80,20 +239,7 @@ impl io_harness::Provider for RigProviderAdapter {
         request: IoRequest,
         on_token: &(dyn Fn(&str) + Send + Sync),
     ) -> io_harness::Result<IoResponse> {
-        let request = to_rig_request(&request)
-            .map_err(|error| io_harness::Error::Config(error.to_string()))?;
-        let mut stream = self.model.stream(request).map_err(rig_provider_error)?;
-        while let Some(item) = stream.next().await {
-            match item {
-                Ok(Item::Event(StreamEvent::Text { text, .. })) => on_token(&text),
-                Ok(Item::Event(_)) | Ok(Item::Unknown(_)) => {}
-                Err(error) => {
-                    return Err(rig_provider_error(error));
-                }
-            }
-        }
-        let response = stream.finish().await.map_err(rig_provider_error)?;
-        from_rig_response(&response).map_err(|error| io_harness::Error::Config(error.to_string()))
+        self.exchange(request, Some(on_token)).await
     }
 
     fn name(&self) -> &str {
@@ -102,6 +248,60 @@ impl io_harness::Provider for RigProviderAdapter {
 
     fn accepts_images(&self) -> bool {
         self.accepts_images
+    }
+}
+
+struct RigExchange<'a> {
+    adapter: &'a RigProviderAdapter,
+    attempt: Option<&'a crate::recording::Attempt>,
+    on_token: Option<&'a (dyn Fn(&str) + Send + Sync)>,
+    completion: bool,
+}
+
+impl io_harness::Provider for RigExchange<'_> {
+    async fn complete(&self, request: IoRequest) -> io_harness::Result<IoResponse> {
+        let request = to_rig_request_with_ids(&request, &self.adapter.call_ids)
+            .map_err(|error| io_harness::Error::Config(error.to_string()))?;
+        if let Some(attempt) = self.attempt {
+            attempt.rig_request(&request)?;
+        }
+        let response = if let Some(on_token) = self.on_token {
+            let mut stream = self
+                .adapter
+                .model
+                .stream(request)
+                .map_err(rig_provider_error)?;
+            while let Some(item) = stream.next().await {
+                match item {
+                    Ok(Item::Event(StreamEvent::Text { text, .. })) if !self.completion => {
+                        on_token(&text)
+                    }
+                    Ok(Item::Event(_)) | Ok(Item::Unknown(_)) => {}
+                    Err(error) => return Err(rig_provider_error(error)),
+                }
+            }
+            stream.finish().await.map_err(rig_provider_error)?
+        } else {
+            self.adapter
+                .model
+                .call(request)
+                .await
+                .map_err(rig_provider_error)?
+        };
+        if let Some(attempt) = self.attempt {
+            let _ = attempt.rig_response(&response);
+        }
+        let converted = from_rig_response(&response)
+            .map_err(|error| io_harness::Error::Config(error.to_string()))?;
+        if let Ok(mut ledger) = self.adapter.call_ids.lock() {
+            ledger.observe(&response, self.completion);
+            ledger.save(self.adapter.recording_root.as_deref());
+        }
+        Ok(converted)
+    }
+
+    fn name(&self) -> &str {
+        self.adapter.model.name()
     }
 }
 
@@ -139,11 +339,24 @@ fn rig_tools(tools: &[IoToolSpec]) -> Result<Vec<RigToolDefinition>, ConversionE
 /// Convert an io-harness request while preserving role-tagged text, tool calls,
 /// positional results, schemas, and the supported image media types.
 pub fn to_rig_request(request: &IoRequest) -> Result<RigRequest, ConversionError> {
+    to_rig_request_with_ids(request, &Arc::new(Mutex::new(CallIdLedger::default())))
+}
+
+fn to_rig_request_with_ids(
+    request: &IoRequest,
+    call_ids: &Arc<Mutex<CallIdLedger>>,
+) -> Result<RigRequest, ConversionError> {
     let mut history = Vec::new();
     if !request.system.is_empty() {
         history.push(RigMessage::system(request.system.clone()));
     }
+    if request.output_schema.is_some() {
+        history.push(RigMessage::system(
+            "Anchor completion protocol: submit your final result by calling final_result alone. Any feedback asking for a JSON document or an output shape refers to the arguments of final_result, never to plain assistant text. Business tool calls remain separate; inspect their results before submitting completion."
+        ));
+    }
     let mut last_calls: Vec<(CallId, ToolName)> = Vec::new();
+    let mut call_ordinal = 0;
     for (message_index, message) in request.messages.iter().enumerate() {
         match message {
             IoMessage::User(text) => {
@@ -158,7 +371,17 @@ pub fn to_rig_request(request: &IoRequest) -> Result<RigRequest, ConversionError
                 last_calls.clear();
                 for (call_index, call) in calls.iter().enumerate() {
                     let name = tool_name(&call.name)?;
-                    let id = stable_call_id(message_index, call_index);
+                    let id = call_ids
+                        .lock()
+                        .map_err(|_| ConversionError::UnsupportedAssistantContent)?
+                        .id_for(
+                            call_ordinal,
+                            message_index,
+                            call_index,
+                            &name,
+                            &call.arguments,
+                        );
+                    call_ordinal += 1;
                     content.push(AssistantContent::ToolCall(RigToolCall::new(
                         id.clone(),
                         ToolFunction::new(name.clone(), call.arguments.clone()),
@@ -196,10 +419,20 @@ pub fn to_rig_request(request: &IoRequest) -> Result<RigRequest, ConversionError
     }
     let last = history.pop().expect("history is non-empty");
     let mut converted = RigRequest::new(last).messages(history);
-    converted = converted.tools(rig_tools(&request.tools)?);
-    // Keep output validation in io-harness. Some OpenAI-compatible providers
-    // reject response_format; the Harness still validates the declared schema
-    // locally and feeds violations back through its normal correction turn.
+    let mut tools = rig_tools(&request.tools)?;
+    if let Some(schema) = &request.output_schema {
+        if request
+            .tools
+            .iter()
+            .any(|tool| tool.name == crate::completion::TOOL_NAME)
+        {
+            return Err(ConversionError::ReservedCompletionTool);
+        }
+        tools.push(crate::completion::definition(schema));
+    }
+    converted = converted.tools(tools);
+    // Output travels as a native tool invocation. Harness validates the adapter's
+    // canonical result locally; providers need no response_format support.
     if let Some(model) = &request.model {
         converted = converted.model(model.clone());
     }
@@ -291,7 +524,13 @@ pub fn from_rig_response(response: &RigResponse) -> Result<IoResponse, Conversio
             ..Default::default()
         }),
         model: response.model.clone(),
-        finish_reason: response.finish_reason().map(|reason| format!("{reason:?}")),
+        finish_reason: response.finish_reason().map(|reason| match reason {
+            FinishReason::Stop => "stop".into(),
+            FinishReason::Length => "length".into(),
+            FinishReason::ToolCalls => "tool_calls".into(),
+            FinishReason::ContentFilter => "content_filter".into(),
+            FinishReason::Other(value) => value,
+        }),
         ..Default::default()
     })
 }
@@ -356,6 +595,161 @@ mod tests {
     }
 
     #[test]
+    fn responses_wire_preserves_parallel_tool_results_and_call_ids() {
+        let request = IoRequest {
+            user: "run both checks".into(),
+            messages: vec![
+                Message::User("run both checks".into()),
+                Message::Assistant {
+                    text: None,
+                    calls: vec![
+                        IoToolCall {
+                            name: "check_one".into(),
+                            arguments: json!({"item": 1}),
+                        },
+                        IoToolCall {
+                            name: "check_two".into(),
+                            arguments: json!({"item": 2}),
+                        },
+                    ],
+                },
+                Message::Results(vec![
+                    ToolResult {
+                        call: 0,
+                        content: "sandbox refusal".into(),
+                    },
+                    ToolResult {
+                        call: 1,
+                        content: "success".into(),
+                    },
+                ]),
+            ],
+            tools: vec![
+                IoToolSpec {
+                    name: "check_one".into(),
+                    description: "first check".into(),
+                    parameters: json!({"type": "object"}),
+                },
+                IoToolSpec {
+                    name: "check_two".into(),
+                    description: "second check".into(),
+                    parameters: json!({"type": "object"}),
+                },
+            ],
+            ..Default::default()
+        };
+
+        let rig_request = to_rig_request(&request).unwrap();
+        let responses = rig_core::providers::openai::responses_api::CompletionRequest::try_from((
+            "test-model".to_owned(),
+            rig_request,
+        ))
+        .unwrap();
+        let encoded = serde_json::to_value(responses).unwrap();
+        let input = encoded["input"].as_array().unwrap();
+        let calls: Vec<_> = input
+            .iter()
+            .filter(|item| item["type"] == "function_call")
+            .collect();
+        let outputs: Vec<_> = input
+            .iter()
+            .filter(|item| item["type"] == "function_call_output")
+            .collect();
+        assert_eq!(calls.len(), 2, "encoded input: {encoded}");
+        assert_eq!(outputs.len(), 2, "encoded input: {encoded}");
+        assert_eq!(
+            calls
+                .iter()
+                .map(|item| item["call_id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["io-00000001-00000000", "io-00000001-00000001"]
+        );
+        assert_eq!(
+            outputs
+                .iter()
+                .map(|item| item["call_id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["io-00000001-00000000", "io-00000001-00000001"]
+        );
+        assert_eq!(outputs[0]["output"], "sandbox refusal");
+        assert_eq!(outputs[1]["output"], "success");
+    }
+
+    #[test]
+    fn provider_call_ids_survive_io_harness_round_trip() {
+        let first_response = RigResponse::new(
+            vec![
+                AssistantContent::ToolCall(RigToolCall::new(
+                    CallId::from_wire("call_provider_a"),
+                    ToolFunction::new(tool_name("check_one").unwrap(), json!({"item": 1})),
+                )),
+                AssistantContent::ToolCall(RigToolCall::new(
+                    CallId::from_wire("call_provider_b"),
+                    ToolFunction::new(tool_name("check_two").unwrap(), json!({"item": 2})),
+                )),
+            ],
+            Default::default(),
+            "test-model",
+            json!({}),
+        );
+        let io_response = from_rig_response(&first_response).unwrap();
+        assert_eq!(io_response.tool_calls.len(), 2);
+
+        let ledger = Arc::new(Mutex::new(CallIdLedger::default()));
+        ledger.lock().unwrap().observe(&first_response, false);
+        let next_request = IoRequest {
+            messages: vec![
+                Message::User("run both checks".into()),
+                Message::Assistant {
+                    text: None,
+                    calls: io_response.tool_calls,
+                },
+                Message::Results(vec![
+                    ToolResult {
+                        call: 0,
+                        content: "first".into(),
+                    },
+                    ToolResult {
+                        call: 1,
+                        content: "second".into(),
+                    },
+                ]),
+            ],
+            ..Default::default()
+        };
+        let rig_request = to_rig_request_with_ids(&next_request, &ledger).unwrap();
+        let responses = rig_core::providers::openai::responses_api::CompletionRequest::try_from((
+            "test-model".to_owned(),
+            rig_request,
+        ))
+        .unwrap();
+        let encoded = serde_json::to_value(responses).unwrap();
+        let input = encoded["input"].as_array().unwrap();
+        let calls: Vec<_> = input
+            .iter()
+            .filter(|item| item["type"] == "function_call")
+            .collect();
+        let outputs: Vec<_> = input
+            .iter()
+            .filter(|item| item["type"] == "function_call_output")
+            .collect();
+        assert_eq!(
+            calls
+                .iter()
+                .map(|item| item["call_id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["call_provider_a", "call_provider_b"]
+        );
+        assert_eq!(
+            outputs
+                .iter()
+                .map(|item| item["call_id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["call_provider_a", "call_provider_b"]
+        );
+    }
+
+    #[test]
     fn invalid_result_position_and_empty_tool_name_fail_closed() {
         let bad_result = IoRequest {
             messages: vec![Message::Results(vec![ToolResult {
@@ -398,7 +792,7 @@ mod tests {
     }
 
     #[test]
-    fn output_schema_is_kept_out_of_provider_wire_request() {
+    fn output_schema_becomes_native_completion_tool_without_response_format() {
         let schema = io_harness::schema::OutputSchema::new(json!({
             "type":"object",
             "properties":{"summary":{"type":"string"}},
@@ -414,6 +808,19 @@ mod tests {
 
         let converted = to_rig_request(&request).unwrap();
         assert!(converted.output_schema.is_none());
+        assert_eq!(converted.tools.len(), 1);
+        assert_eq!(converted.tools[0].name, "final_result");
+        assert_eq!(converted.tools[0].parameters, *schema.as_value());
+        let mut collision = request;
+        collision.tools.push(IoToolSpec {
+            name: "final_result".into(),
+            description: "business tool".into(),
+            parameters: json!({"type":"object"}),
+        });
+        assert!(matches!(
+            to_rig_request(&collision),
+            Err(ConversionError::ReservedCompletionTool)
+        ));
     }
 
     #[test]

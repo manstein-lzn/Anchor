@@ -52,12 +52,24 @@ class _Scheduler:
         self.controls = []
         self.deleted = []
 
-    def workspaces(self):
-        return []
+    def graphs(self):
+        base = self.root / "workspaces"
+        return {"graphs": [{"graph": item.name, "running": self.running.get(item.name)}
+                           for item in base.iterdir() if item.is_dir()] if base.is_dir() else []}
 
-    def workspace(self, name):
-        path = self.root / "workspaces" / name
-        return path if path.is_dir() else None
+    def graph(self, name):
+        path = self.root / "workspaces" / name / "graph.json"
+        if not path.is_file():
+            return json.dumps({"error": "no such graph"}), 404
+        return json.dumps({"graph": name, "definition": json.loads(path.read_text())}), 200
+
+    def validate_graph(self, definition):
+        from anchor.simple.graph import parse
+        try:
+            parsed = parse(definition)
+            return json.dumps({"valid": True, "nodes": list(parsed.nodes), "entry": parsed.entry()}), 200
+        except (ValueError, OSError, TypeError) as exc:
+            return json.dumps({"valid": False, "error": str(exc)}), 422
 
     def runs(self):
         return [{"run": "r1", "status": "finished"}]

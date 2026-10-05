@@ -144,6 +144,8 @@ fn binding(server: &str) -> PluginBinding {
 
 fn config(endpoint: &str, _names: &[&str]) -> McpToolConfig {
     McpToolConfig {
+        environment: Default::default(),
+        disabled: Default::default(),
         servers: BTreeMap::from([(
             "fixture-plugin-fixture".into(),
             ResolvedMcpServer {

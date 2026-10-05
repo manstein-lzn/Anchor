@@ -7,6 +7,7 @@ The adapter owns the platform connection only. Anchor decides what the message m
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
 import mimetypes
@@ -15,11 +16,13 @@ import re
 import time
 import urllib.error
 import urllib.request
+import uuid
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from anchor.channel import ChannelEvent, EventLedger
+from anchor.channel.media import MAX_IMAGE_BYTES, make_image_item
 from anchor.runtime.secrets import load_dotenv
 
 
@@ -173,9 +176,74 @@ class WeComWebSocketGateway:
     async def _deliver(self, frame: dict, stream_id: str, reply: dict) -> None:
         kwargs = {"stream_id": stream_id, "content": _platform_text(
             reply.get("text") or "已根据你的补充继续处理。"), "finish": True}
-        if reply.get("msg_item"):
-            kwargs["msg_item"] = reply["msg_item"]
         await self.client.reply_stream(frame, **kwargs)
+        # Long connections silently ignore stream.msg_item. Upload media and reply using
+        # the original callback instead (official protocol, document/path/101463).
+        items = reply.get("msg_item") or []
+        if not items:
+            return
+        event = normalize_message(frame)
+        if event is None:
+            raise ValueError("image reply requires a trusted message callback")
+        for index, item in enumerate(items):
+            if not self.ledger.is_latest(event):
+                return
+            encoded = item["image"]["base64"]
+            if len(encoded) > 4 * ((MAX_IMAGE_BYTES + 2) // 3):
+                raise ValueError("reply image exceeds the 10 MiB limit")
+            data = base64.b64decode(encoded, validate=True)
+            canonical = make_image_item(data)
+            if item != canonical:
+                raise ValueError("reply image content or digest is invalid")
+            media_id = await self._upload_image(data, canonical["image"]["md5"])
+            if not self.ledger.is_latest(event):
+                return
+            delivery = replace(event, source="wecom-reply-image", event_id=f"{event.event_id}:{index}")
+            digest = hashlib.sha256(json.dumps([
+                event.sender_id, event.conversation_id, hashlib.sha256(data).hexdigest(),
+            ]).encode()).hexdigest()
+            # Uploading is invisible to the user and can be retried. Once sending starts,
+            # persist the outcome using the same non-replayable contract as tool sends.
+            if self.ledger.claim_send(delivery, digest):
+                continue
+            try:
+                ack = await self.client.reply(frame, {"msgtype": "image", "image": {"media_id": media_id}})
+                self._check_media_ack(ack)
+                self.ledger.complete(delivery)
+            except Exception as exc:
+                self.ledger.fail(delivery, type(exc).__name__)
+                raise
+
+    @staticmethod
+    def _check_media_ack(ack: Any) -> dict:
+        if not isinstance(ack, dict) or ack.get("errcode") != 0:
+            raise RuntimeError("WeCom media operation was not acknowledged")
+        return ack.get("body") or {}
+
+    async def _upload_image(self, data: bytes, md5: str) -> str:
+        async def command(name: str, body: dict) -> dict:
+            frame = {"headers": {"req_id": "anchor-media-" + uuid.uuid4().hex}}
+            return self._check_media_ack(await self.client.reply(frame, body, cmd=name))
+
+        chunk_size = 512 * 1024
+        upload = await command("aibot_upload_media_init", {
+            "type": "image", "filename": "reply.png" if data.startswith(b"\x89PNG") else "reply.jpg",
+            "total_size": len(data), "total_chunks": (len(data) + chunk_size - 1) // chunk_size,
+            "md5": md5,
+        })
+        upload_id = upload.get("upload_id")
+        if not isinstance(upload_id, str) or not upload_id:
+            raise RuntimeError("WeCom upload acknowledgement omitted upload_id")
+        for index, start in enumerate(range(0, len(data), chunk_size)):
+            await command("aibot_upload_media_chunk", {
+                "upload_id": upload_id, "chunk_index": index,
+                "base64_data": base64.b64encode(data[start:start + chunk_size]).decode("ascii"),
+            })
+        finished = await command("aibot_upload_media_finish", {"upload_id": upload_id})
+        media_id = finished.get("media_id")
+        if not isinstance(media_id, str) or not media_id:
+            raise RuntimeError("WeCom upload acknowledgement omitted media_id")
+        return media_id
 
     async def run(self) -> None:  # noqa: C901
         try:

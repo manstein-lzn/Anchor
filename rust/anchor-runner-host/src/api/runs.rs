@@ -1,5 +1,54 @@
 use super::*;
 
+pub(super) async fn conversation_run(
+    State(state): State<ApiState>,
+    body: Result<
+        Json<crate::application::ConversationAdmission>,
+        axum::extract::rejection::JsonRejection,
+    >,
+) -> Result<(StatusCode, Json<Value>), HttpResponse> {
+    let Json(request) = body.map_err(|rejection| {
+        let status = if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
+            StatusCode::PAYLOAD_TOO_LARGE
+        } else {
+            StatusCode::BAD_REQUEST
+        };
+        error(status, "invalid conversation Run request")
+    })?;
+    request
+        .validate()
+        .map_err(|message| error(StatusCode::BAD_REQUEST, message))?;
+    let attachments = crate::channel_inputs::prepare(&request.attachments)
+        .map_err(|message| error(StatusCode::BAD_REQUEST, message))?;
+    let path = graph_path(&state, &request.graph)?;
+    let graph = request.graph.clone();
+    let session = request.session.clone();
+    let run = if let Some(run) = state
+        .application
+        .retry_conversation_admission(&request, &path, &attachments)
+        .await
+        .map_err(application_error)?
+    {
+        run
+    } else {
+        let lease = state
+            .application
+            .acquire_graph_lease_waiting(&path)
+            .await
+            .map_err(application_error)?;
+        let (path, bundle) = load_graph_definition(&state, &graph)?;
+        state
+            .application
+            .admit_conversation(request, &path, bundle, lease, &attachments)
+            .await
+            .map_err(application_error)?
+    };
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(json!({"run":run,"graph":graph,"session":session})),
+    ))
+}
+
 pub(super) async fn trigger(
     State(state): State<ApiState>,
     Json(body): Json<Value>,
@@ -12,6 +61,19 @@ pub(super) async fn trigger(
     if !input.is_null() && !input.is_object() {
         return Err(error(StatusCode::BAD_REQUEST, "input must be an object"));
     }
+    let objective = match body.get("objective") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(value)) => Some(value.clone()),
+        Some(_) => return Err(error(StatusCode::BAD_REQUEST, "objective must be a string")),
+    };
+    let trigger = match body.get("trigger") {
+        None | Some(Value::Null) => crate::application::RunTrigger::default(),
+        Some(value) => serde_json::from_value::<crate::application::RunTrigger>(value.clone())
+            .map_err(|message| error(StatusCode::BAD_REQUEST, message.to_string()))?,
+    };
+    trigger
+        .validate()
+        .map_err(|message| error(StatusCode::BAD_REQUEST, message))?;
     let path = graph_path(&state, requested)?;
     let graph_lease = state
         .application
@@ -20,7 +82,14 @@ pub(super) async fn trigger(
     let (path, bundle) = load_graph_definition(&state, requested)?;
     let run_id = state
         .application
-        .admit(requested.to_owned(), &path, bundle, input, graph_lease)
+        .admit(
+            requested.to_owned(),
+            &path,
+            bundle,
+            input,
+            crate::application::AdmissionOptions { objective, trigger },
+            graph_lease,
+        )
         .await
         .map_err(application_error)?;
     Ok((
@@ -30,9 +99,18 @@ pub(super) async fn trigger(
 }
 
 pub(super) async fn list_runs(State(state): State<ApiState>) -> Result<Json<Value>, HttpResponse> {
+    Ok(Json(json!({"runs":projected_runs(&state).await?})))
+}
+
+#[allow(clippy::result_large_err)]
+pub(super) async fn projected_runs(state: &ApiState) -> Result<Vec<Value>, HttpResponse> {
     let active = state.application.active_runs(None).await;
     let mut runs = Vec::new();
     for (id, record) in state.application.records().map_err(application_error)? {
+        let updated = state
+            .application
+            .run_updated(&id)
+            .map_err(application_error)?;
         let metadata = state.application.metadata(&id).map_err(application_error)?;
         let (graph, created, mut trigger) = metadata
             .as_ref()
@@ -57,10 +135,18 @@ pub(super) async fn list_runs(State(state): State<ApiState>) -> Result<Json<Valu
             trigger["mode"] = json!(source.mode);
             trigger["root_run"] = json!(source.root_run);
         }
+        if let Some(source) = metadata
+            .as_ref()
+            .and_then(|metadata| metadata.conversation.as_ref())
+        {
+            trigger["session"] = json!(source.session);
+            trigger["reply_node"] = json!(source.reply_node);
+            trigger["previous_run"] = json!(source.previous_run);
+        }
         let executed = record.executed_nodes();
-        runs.push(json!({"run":id,"graph":graph,"status":status(record.status),"running":active.contains(&id),"started":created,"updated":"","executed":executed,"objective":record.snapshot.objective,"trigger":trigger}));
+        runs.push(json!({"session_call":metadata.as_ref().and_then(|m| m.session_call.as_ref()),"run":id,"graph":graph,"status":status(record.status),"running":active.contains(&id),"started":created,"updated":updated,"executed":executed,"objective":record.snapshot.objective,"trigger":trigger}));
     }
-    Ok(Json(json!({"runs":runs})))
+    Ok(runs)
 }
 
 pub(super) async fn get_run(
@@ -74,6 +160,10 @@ pub(super) async fn get_run(
         .load(&id)
         .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or_else(|| error(StatusCode::NOT_FOUND, "no such run"))?;
+    let updated = state
+        .application
+        .run_updated(&id)
+        .map_err(application_error)?;
     let artifacts = HostArtifacts::new(
         state.data_root.join("artifacts"),
         state.workspace_root.clone(),
@@ -143,6 +233,7 @@ pub(super) async fn get_run(
         }
     }
     let active = state.application.active_runs(None).await;
+    let control_requested = state.application.control_requested(&id).await;
     let metadata = state
         .application
         .metadata(&id)
@@ -210,7 +301,7 @@ pub(super) async fn get_run(
             "root_run":source.root_run,
         }));
     }
-    let mut trigger = json!({"source":metadata.trigger_source});
+    let mut trigger = json!({"source":metadata.trigger_source,"schedule":metadata.schedule,"scheduled_at":metadata.scheduled_at});
     if let Some(source) = metadata.graph_call.as_ref() {
         trigger["graph"] = json!(source.parent_graph);
         trigger["run"] = json!(source.parent_run);
@@ -219,8 +310,20 @@ pub(super) async fn get_run(
         trigger["mode"] = json!(source.mode);
         trigger["root_run"] = json!(source.root_run);
     }
+    if let Some(source) = metadata.conversation.as_ref() {
+        trigger["session"] = json!(source.session);
+        trigger["reply_node"] = json!(source.reply_node);
+        trigger["previous_run"] = json!(source.previous_run);
+    }
+    let channel_reply = metadata.conversation.is_some()
+        && state
+            .data_root
+            .join("channel-replies")
+            .join(format!("{id}.json"))
+            .try_exists()
+            .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(Json(
-        json!({"graph":metadata.graph,"run":id,"state":{"objective":record.snapshot.objective,"started":metadata.created,"updated":"","status":status(record.status),"trigger":trigger,"input":record.input,"cursor":cursor,"passes":record.passes,"decided":decided,"nodes":nodes,"executed":executed,"skipped":[],"error":record.error.unwrap_or_default(),"parallel":record.parallel,"recovery":record.recovery},"calls":calls,"traces":traces,"nodes":record.snapshot.nodes.iter().map(|node|node.id.clone()).collect::<Vec<_>>(),"active":active.contains(&id)}),
+        json!({"session_call":metadata.session_call,"channel_reply":channel_reply,"graph":metadata.graph,"run":id,"attachments":metadata.attachments,"state":{"objective":record.snapshot.objective,"started":metadata.created,"updated":updated,"status":status(record.status),"trigger":trigger,"input":record.input,"cursor":cursor,"passes":record.passes,"decided":decided,"nodes":nodes,"executed":executed,"skipped":[],"error":record.error.unwrap_or_default(),"parallel":record.parallel,"recovery":record.recovery},"calls":calls,"traces":traces,"nodes":record.snapshot.nodes.iter().map(|node|node.id.clone()).collect::<Vec<_>>(),"active":active.contains(&id),"control_requested":control_requested}),
     ))
 }
 
@@ -237,65 +340,11 @@ pub(super) async fn delete_run(
     {
         return Err(error(StatusCode::NOT_FOUND, "no such run"));
     }
-    if state.application.active_runs(None).await.contains(&id) {
-        return Err(error(StatusCode::CONFLICT, "that Run is still running"));
-    }
-    let store = FileRunStore::new(state.data_root.join("runs"));
-    let record = store
-        .load(&id)
-        .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or_else(|| error(StatusCode::NOT_FOUND, "no such run"))?;
-    if !record.graph_calls.is_empty() {
-        return Err(error(
-            StatusCode::CONFLICT,
-            "Run is referenced by or owns a Graph call",
-        ));
-    }
-    for (other_id, other) in state.application.records().map_err(application_error)? {
-        if other_id != id
-            && other.graph_calls.values().any(|call| {
-                call.child_run_id.as_deref() == Some(id.as_str())
-                    && call.status != anchor_runtime_rig::graph::GraphCallStatus::Deleted
-            })
-        {
-            return Err(error(
-                StatusCode::CONFLICT,
-                "Run is referenced by another Graph call",
-            ));
-        }
-    }
-    let _lease = store
-        .acquire_lease(&id)
-        .map_err(|e| error(StatusCode::CONFLICT, e.to_string()))?;
-    let artifacts = HostArtifacts::new(
-        state.data_root.join("artifacts"),
-        state.workspace_root.clone(),
-    );
-    for result in record.results.values().flatten() {
-        // Validate a still-present artifact's identity; a Run that was already
-        // partially cleaned up can always be re-deleted.
-        let artifact = state.data_root.join("artifacts").join(&result.commit.id);
-        if artifact.exists() {
-            artifacts
-                .list_files(&result.commit)
-                .map_err(|e| error(StatusCode::UNPROCESSABLE_ENTITY, e.to_string()))?;
-        }
-        if result.key.run_id != id
-            || result.key.graph_digest != record.graph_digest
-            || result.commit.node_id != result.key.node_id
-            || result.commit.invocation != result.key.invocation
-        {
-            return Err(error(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "Run artifact identity mismatch",
-            ));
-        }
-    }
-    // Derived data first, Run record last: a crash mid-cleanup stays replayable.
-    crate::run_data::delete_run_data(&record, &state.data_root, &state.workspace_root)
-        .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    crate::run_data::remove_run_files(&state.data_root, &id)
-        .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    state
+        .application
+        .delete_run(&id, &state.workspace_root)
+        .await
+        .map_err(application_error)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -368,4 +417,64 @@ pub(super) async fn control(
         StatusCode::ACCEPTED,
         Json(json!({"run":id,"asked":operation})),
     ))
+}
+
+pub(super) async fn execute_session_call(
+    State(state): State<ApiState>,
+    AxumPath(id): AxumPath<String>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, HttpResponse> {
+    let session = body
+        .get("session")
+        .and_then(Value::as_str)
+        .ok_or_else(|| error(StatusCode::BAD_REQUEST, "session is required"))?;
+    let previous = match body.get("previous_run") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(value)) => Some(value.clone()),
+        _ => {
+            return Err(error(
+                StatusCode::BAD_REQUEST,
+                "previous_run must be a string",
+            ));
+        }
+    };
+    state
+        .application
+        .execute_session_call(&id, session, previous)
+        .await
+        .map_err(application_error)?;
+    Ok(Json(json!({"accepted":true})))
+}
+
+pub(super) async fn yield_session_call(
+    State(state): State<ApiState>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Json<Value>, HttpResponse> {
+    state
+        .application
+        .yield_session_call(&id)
+        .await
+        .map_err(application_error)?;
+    Ok(Json(json!({"accepted":true})))
+}
+
+pub(super) async fn settle_session_call(
+    State(state): State<ApiState>,
+    AxumPath(id): AxumPath<String>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, HttpResponse> {
+    let status = body
+        .get("status")
+        .and_then(Value::as_str)
+        .ok_or_else(|| error(StatusCode::BAD_REQUEST, "status is required"))?;
+    state
+        .application
+        .settle_session_call(
+            &id,
+            status,
+            body.get("error").and_then(Value::as_str).unwrap_or(""),
+        )
+        .await
+        .map_err(application_error)?;
+    Ok(Json(json!({"accepted":true})))
 }

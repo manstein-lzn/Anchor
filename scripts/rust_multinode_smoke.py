@@ -3,6 +3,8 @@
 The Python script only prepares fixtures and checks evidence. Runtime execution,
 MCP server, persistence and Sandbox are Rust binaries. Loads local .env without
 printing credentials. Run after cargo build --workspace --bins --examples in rust/.
+Set `ANCHOR_RUST_PACKAGE_RUNTIME=1` to package the release binary and execute
+the same real-provider Graph from the extracted distribution.
 """
 from __future__ import annotations
 
@@ -15,13 +17,30 @@ import shlex
 import sqlite3
 import struct
 import subprocess
+import sys
 import tempfile
+import tarfile
 import uuid
 
 from anchor.runtime.secrets import load_dotenv
 
 
 ROOT = Path(__file__).resolve().parents[1]
+PACKAGER = ROOT / "scripts/package_rust_runtime.py"
+
+
+def packaged_runtime(proof: Path, bundle: Path) -> Path:
+    archive = proof / "anchor-runtime.tar.gz"
+    subprocess.run([
+        sys.executable, str(PACKAGER),
+        "--binary", str(ROOT / "rust/target/release/anchor-runner-host"),
+        "--bundle", str(bundle), "--output", str(archive),
+    ], check=True)
+    deployment = proof / "deployment"
+    deployment.mkdir()
+    with tarfile.open(archive, "r:gz") as package:
+        package.extractall(deployment)
+    return deployment / "anchor-runtime"
 
 
 def main() -> None:
@@ -92,30 +111,36 @@ def main() -> None:
         (bundle / "manifest.json").write_text(json.dumps({"format": 1, "graph": "graph.json", "plugins": [
             {"id": "fixture", "digest": digest, "resources": ["plugin.json"], "mcp_servers": ["fixture"]}
         ]}))
+        runtime_root = packaged_runtime(proof, bundle) if os.environ.get("ANCHOR_RUST_PACKAGE_RUNTIME") == "1" else proof
+        runtime_bundle = runtime_root / "bundle" if runtime_root != proof else bundle
+        state_root = runtime_root / "state"
+        workspace_root = runtime_root / "work"
         env = {name: os.environ[name] for name in required}
         env.update({
             "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
             "ANCHOR_MODEL_WIRE_API": os.environ.get("ANCHOR_MODEL_WIRE_API", "responses"),
-            "ANCHOR_RUNNER_BUNDLE_ROOT": str(bundle),
-            "ANCHOR_RUNNER_STATE_ROOT": str(proof / "state"),
-            "ANCHOR_RUNNER_WORKSPACE_ROOT": str(proof / "work"),
+            "ANCHOR_RUNNER_BUNDLE_ROOT": str(runtime_bundle),
+            "ANCHOR_RUNNER_STATE_ROOT": str(state_root),
+            "ANCHOR_RUNNER_WORKSPACE_ROOT": str(workspace_root),
             "ANCHOR_RUNNER_ALLOWED_COMMANDS": "sh,cat,cp,printf,test",
         })
         request = json.dumps({"op": "start_bundle", "version": 1, "request_id": "acceptance", "run_id": "native-multinode", "input": {}}).encode()
-        result = subprocess.run([str(ROOT / "rust/target/debug/anchor-runner-host")],
-                                input=struct.pack(">I", len(request)) + request, capture_output=True, env=env, timeout=150, check=True)
+        binary = runtime_root / "bin/anchor-runner-host" if runtime_root != proof else ROOT / "rust/target/debug/anchor-runner-host"
+        result = subprocess.run([str(binary)],
+                                input=struct.pack(">I", len(request)) + request, capture_output=True,
+                                env=env, cwd=runtime_root, timeout=150, check=True)
         size = struct.unpack(">I", result.stdout[:4])[0]
         response = json.loads(result.stdout[4:4 + size])
         (proof / "response.json").write_text(json.dumps(response, indent=2))
         if response.get("status") != "completed":
             raise RuntimeError(f"Graph did not complete; inspect {proof / 'response.json'}")
-        record = json.loads((proof / "state/runs/native-multinode.json").read_text())
+        record = json.loads((state_root / "runs/native-multinode.json").read_text())
         commit = record["results"]["verify"][0]["commit"]["id"]
-        final = proof / "state/artifacts" / commit / "files/verified.txt"
+        final = state_root / "artifacts" / commit / "files/verified.txt"
         assert final.read_text() == token + "-checked"
         mcp_call = json.loads((proof / "mcp-call.json").read_text())
         assert mcp_call["input"] == token
-        stores = list((proof / "state/io-harness/store").glob("*.sqlite3"))
+        stores = list((state_root / "io-harness/store").glob("*.sqlite3"))
         assert len(stores) == 1, f"expected one AgentNode store, found {stores}"
         with sqlite3.connect(stores[0]) as store:
             calls = [
@@ -141,6 +166,7 @@ def main() -> None:
                     "provider_prompt_tokens": [row[2] for row in provider_calls],
                     "provider_prompt_tokens_total": sum(row[2] or 0 for row in provider_calls),
                     "mcp": "local Rust fixture over real HTTP", "provider": "real configured model",
+                    "packaged_runtime": runtime_root != proof,
                     "verified_artifact": str(final.relative_to(proof))}
         (proof / "evidence.json").write_text(json.dumps(evidence, indent=2))
         print(json.dumps({"evidence": str(proof / "evidence.json"), **evidence}, indent=2))

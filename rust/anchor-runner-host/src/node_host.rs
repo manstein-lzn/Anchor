@@ -1,13 +1,13 @@
 //! Executes one node request; graph scheduling remains in the shared Runner.
 use super::{HostArtifacts, create_durable_directory, write_durable};
-use crate::tool_host;
+use crate::{local_inputs::LocalInputs, op, tool_host};
 use anchor_io_harness_runtime::node_port::{NodeHostResolver, ToolResolution};
 use anchor_runtime_rig::graph::{
-    CompletionFact, FileRunStore, GraphError, InvocationKey, NodeCompletion,
+    CompletionFact, FileRunStore, GraphError, GraphRunRecord, InvocationKey, NodeCompletion,
     NodeExecutionCapabilities, NodeExecutionOutcome, NodeExecutionPort, NodeExecutionRequest,
     NodeKind, PluginBinding, RecoveryDecision, RunStore,
 };
-use anchor_runtime_rig::{NetworkPolicy, SandboxPort, SandboxRequest, SandboxStatus};
+use anchor_runtime_rig::{NetworkPolicy, SandboxError, SandboxPort, SandboxRequest, SandboxStatus};
 use anchor_sandbox_bwrap::BubblewrapSandbox;
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -19,6 +19,21 @@ use std::{
     sync::atomic::Ordering,
     time::Duration,
 };
+
+mod conversation;
+mod media;
+
+pub(crate) fn conversation_hint_for(
+    metadata: &crate::application::RunMetadata,
+    node: &str,
+) -> Option<anchor_io_harness_runtime::node_port::NodeConversationHint> {
+    let binding = metadata.conversation.as_ref()?;
+    let identity = serde_json::to_vec(&(&metadata.bundle_source, &binding.session, node))
+        .expect("host conversation identity is serializable");
+    Some(anchor_io_harness_runtime::node_port::NodeConversationHint {
+        key: format!("{:x}", Sha256::digest(identity)),
+    })
+}
 
 pub(crate) struct HostNodes {
     pub(crate) sandbox: std::sync::Arc<BubblewrapSandbox>,
@@ -42,6 +57,7 @@ pub(crate) struct HostIoResolver {
     plugin_bindings: BTreeMap<String, PluginBinding>,
     run_store: FileRunStore,
     catalog_roots: Vec<PathBuf>,
+    local_inputs: LocalInputs,
 }
 
 impl HostIoResolver {
@@ -52,6 +68,7 @@ impl HostIoResolver {
         mcp: tool_host::McpToolConfig,
         plugin_bindings: BTreeMap<String, PluginBinding>,
         run_store: FileRunStore,
+        local_inputs: LocalInputs,
     ) -> Self {
         let mut catalog_roots = Vec::new();
         for root in [
@@ -81,7 +98,94 @@ impl HostIoResolver {
             plugin_bindings,
             run_store,
             catalog_roots,
+            local_inputs,
         }
+    }
+
+    pub(crate) fn local_inputs_configured(&self) -> bool {
+        self.local_inputs.configured()
+    }
+
+    pub(crate) fn validate_plugin_configuration(
+        &self,
+        bindings: &[PluginBinding],
+    ) -> Result<(), String> {
+        self.catalog_config(bindings)?
+            .validate_bindings(bindings, true)
+    }
+
+    pub(crate) fn bind_local_inputs(
+        &self,
+        record: &GraphRunRecord,
+        graph: Option<&str>,
+    ) -> Result<(), String> {
+        let existing = self
+            .run_store
+            .load(&record.run_id)
+            .map_err(|error| error.to_string())?;
+        if let Some(existing) = &existing
+            && (existing.snapshot != record.snapshot || existing.input != record.input)
+        {
+            return Err("Run local input identity differs from the admitted snapshot/input".into());
+        }
+        self.local_inputs.freeze(
+            &record.run_id,
+            &record.graph_digest,
+            &record.snapshot,
+            graph,
+            existing.is_none(),
+        )
+    }
+
+    pub(crate) fn verify_local_inputs(&self, record: &GraphRunRecord) -> Result<(), String> {
+        self.local_inputs.verify(record)?;
+        if self.local_inputs.configured() {
+            let metadata =
+                crate::application::metadata::load(self.local_inputs.state_root(), &record.run_id)
+                    .map_err(|error| format!("local input Run identity unavailable: {error:?}"))?
+                    .ok_or("local input authorization requires immutable Run Graph metadata")?;
+            if metadata.graph_digest != record.graph_digest {
+                return Err(
+                    "local input Run Graph metadata differs from the admitted snapshot".into(),
+                );
+            }
+            self.local_inputs.freeze(
+                &record.run_id,
+                &record.graph_digest,
+                &record.snapshot,
+                Some(&metadata.graph),
+                false,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn local_input_mounts(
+        &self,
+        key: &InvocationKey,
+    ) -> Result<Vec<anchor_runtime_rig::ReadOnlyInput>, String> {
+        let record = self
+            .run_store
+            .load(&key.run_id)
+            .map_err(|error| error.to_string())?
+            .ok_or("local input mounts require a durable admitted Run")?;
+        // Old Runs could not receive local inputs. Only their empty authority
+        // may be recorded during migration; new grants require a new Run.
+        if !self.local_inputs.configured() {
+            self.local_inputs.freeze(
+                &record.run_id,
+                &record.graph_digest,
+                &record.snapshot,
+                None,
+                false,
+            )?;
+        }
+        self.verify_local_inputs(&record)?;
+        let mut mounts = self.local_inputs.mounts(&record, key)?;
+        if let Some(mount) = self.channel_inputs(key)?.mount {
+            mounts.push(mount);
+        }
+        Ok(mounts)
     }
 
     fn catalog_config(
@@ -98,8 +202,15 @@ impl HostIoResolver {
         }
         let mut last_error = None;
         for root in &self.catalog_roots {
+            if let Err(error) = tool_host::McpToolConfig::plugin_mounts(root, bindings) {
+                last_error = Some(error);
+                continue;
+            }
             match tool_host::McpToolConfig::from_catalog(root, bindings) {
-                Ok(config) => return Ok(config),
+                Ok(mut config) => {
+                    config.environment = self.mcp.environment.clone();
+                    return Ok(config);
+                }
                 Err(error) => last_error = Some(error),
             }
         }
@@ -130,6 +241,40 @@ impl HostIoResolver {
 }
 
 impl NodeHostResolver for HostIoResolver {
+    fn prompt_images(
+        &self,
+        request: &NodeExecutionRequest,
+    ) -> Result<Vec<anchor_io_harness_runtime::node_port::NodeImage>, String> {
+        Ok(self
+            .channel_inputs(&request.key)?
+            .images
+            .into_iter()
+            .map(|image| anchor_io_harness_runtime::node_port::NodeImage {
+                data: image.bytes,
+                media_type: image.media_type,
+            })
+            .collect())
+    }
+    fn resume_after_interleaving(&self, request: &NodeExecutionRequest) -> bool {
+        crate::application::metadata::load(self.local_inputs.state_root(), &request.key.run_id)
+            .ok()
+            .flatten()
+            .is_some_and(|metadata| metadata.session_call.is_some())
+    }
+
+    fn conversation_hint(
+        &self,
+        request: &NodeExecutionRequest,
+    ) -> Result<Option<anchor_io_harness_runtime::node_port::NodeConversationHint>, String> {
+        self.conversation(&request.key).map(|conversation| {
+            conversation.map(
+                |value| anchor_io_harness_runtime::node_port::NodeConversationHint {
+                    key: value.key,
+                },
+            )
+        })
+    }
+
     fn resolve_plugins(&self, ids: &[String]) -> Result<Vec<PluginBinding>, String> {
         ids.iter()
             .map(|id| {
@@ -142,12 +287,9 @@ impl NodeHostResolver for HostIoResolver {
     }
 
     fn workspace(&self, request: &NodeExecutionRequest) -> Result<PathBuf, String> {
-        let workspace = self
-            .artifacts
-            .workspace_path(&request.key)
-            .map_err(|error| error.to_string())?;
-        create_durable_directory(&workspace).map_err(|error| error.to_string())?;
-        Ok(workspace)
+        self.artifacts
+            .prepare_workspace(&request.key, &request.input_commits)
+            .map_err(|error| error.to_string())
     }
 
     fn tools<'a>(&'a self, request: &'a NodeExecutionRequest) -> ToolResolution<'a> {
@@ -185,6 +327,18 @@ impl NodeHostResolver for HostIoResolver {
                 }
             }
             let workspace = self.workspace(request)?;
+            let mut local_inputs = self.local_input_mounts(&request.key)?;
+            let conversation = self.conversation(&request.key)?;
+            if let Some(conversation) = &conversation
+                && let Some(mount) = self.previous_mount(&request.key, conversation)?
+            {
+                local_inputs.push(mount);
+            }
+            let sandbox = std::sync::Arc::new(
+                self.sandbox
+                    .with_readonly_grants(&local_inputs)
+                    .map_err(|error| error.to_string())?,
+            );
             let mut readonly_inputs = self
                 .artifacts
                 .input_mounts(
@@ -194,6 +348,7 @@ impl NodeHostResolver for HostIoResolver {
                 )
                 .map_err(|error| error.to_string())?;
             readonly_inputs.extend(self.plugin_mounts(&request.plugins)?);
+            readonly_inputs.extend(local_inputs);
             let mcp = self.catalog_config(&request.plugins)?;
             let plugins = self
                 .tools
@@ -201,18 +356,35 @@ impl NodeHostResolver for HostIoResolver {
                     &mcp,
                     &request.plugins,
                     request.network,
-                    &self.sandbox,
+                    &sandbox,
                     &workspace,
+                    &readonly_inputs,
                 )
                 .await?;
-            Ok(std::sync::Arc::new(crate::node_tools::NodeTools::new(
-                plugins,
-                std::sync::Arc::clone(&self.sandbox),
-                workspace,
-                readonly_inputs,
-                request.cancellation.clone(),
-            ))
-                as std::sync::Arc<dyn anchor_runtime_rig::ToolPort>)
+            let tools = std::sync::Arc::new(
+                crate::node_tools::NodeTools::new(
+                    crate::channel_tools::wrap(
+                        plugins,
+                        &request.plugins,
+                        request.key.clone(),
+                        self.local_inputs.state_root().to_path_buf(),
+                        conversation.as_ref().map(|value| value.reply_node.clone()),
+                        workspace.clone(),
+                        readonly_inputs.clone(),
+                        request.cancellation.clone(),
+                    ),
+                    sandbox,
+                    workspace,
+                    readonly_inputs,
+                    request.cancellation.clone(),
+                )
+                .with_environment(self.mcp.environment.clone())
+                .with_network(request.network),
+            ) as std::sync::Arc<dyn anchor_runtime_rig::ToolPort>;
+            Ok(match conversation {
+                Some(conversation) => self.conversation_tools(tools, &request.key, conversation),
+                None => tools,
+            })
         })
     }
 }
@@ -336,16 +508,22 @@ impl HostNodes {
                 "HostNodes deterministic executor accepts Op.run only".into(),
             ));
         }
-        let workspace = self.artifacts.workspace_path(&request.key)?;
-        create_durable_directory(&workspace)?;
-        let readonly_inputs = self.artifacts.input_mounts(
+        let workspace = self
+            .artifacts
+            .prepare_workspace(&request.key, &request.input_commits)?;
+        let local_inputs = self
+            .io_resolver
+            .local_input_mounts(&request.key)
+            .map_err(GraphError::Unsupported)?;
+        let mut readonly_inputs = self.artifacts.input_mounts(
             &request.input_commits,
             &request.key.run_id,
             &request.key.graph_digest,
         )?;
-        if !request.plugins.is_empty() || request.network {
+        readonly_inputs.extend(local_inputs.clone());
+        if !request.plugins.is_empty() {
             return Err(GraphError::Unsupported(
-                "Op.run currently requires no Plugin and network=false".into(),
+                "Op.run cannot execute Plugins".into(),
             ));
         }
         let command = request
@@ -353,33 +531,66 @@ impl HostNodes {
             .as_ref()
             .and_then(serde_json::Value::as_str)
             .ok_or_else(|| GraphError::Unsupported("Op.run must be a command string".into()))?;
-        let argv = shlex::split(command)
-            .filter(|args| !args.is_empty())
-            .ok_or_else(|| {
-                GraphError::Unsupported("Op.run has empty or malformed command arguments".into())
-            })?;
-        self.start(&request.key)?;
-        let result = self
+        // GraphRunner wraps the frozen Run input with upstream artifact metadata.
+        // Business commands receive only the effective Graph input.
+        let run_input = request.input.get("input").ok_or_else(|| {
+            GraphError::Unsupported("Op.run request is missing effective Graph input".into())
+        })?;
+        let input = serde_json::to_string(run_input).map_err(|error| {
+            GraphError::Unsupported(format!("Op.run input is not JSON: {error}"))
+        })?;
+        let argv =
+            op::shell_command(command, &self.allowed_commands).map_err(GraphError::Unsupported)?;
+        let route_helper = op::route_helper_mount().map_err(GraphError::Unsupported)?;
+        let sandbox = self
             .sandbox
-            .run(SandboxRequest {
-                workspace,
-                working_directory: None,
-                command: argv,
-                readonly_inputs,
-                workspace_readonly: vec![],
-                tool_dirs: vec![],
-                environment: vec![anchor_runtime_rig::SandboxEnvironment::new(
+            .with_readonly_grants(&local_inputs)
+            .and_then(|sandbox| sandbox.with_readonly_grants(std::slice::from_ref(&route_helper)))
+            .map_err(|error| GraphError::Unsupported(error.to_string()))?;
+        let mut sandbox_request = SandboxRequest {
+            workspace,
+            working_directory: None,
+            command: argv,
+            readonly_inputs,
+            workspace_readonly: vec![],
+            tool_dirs: vec![],
+            environment: vec![
+                anchor_runtime_rig::SandboxEnvironment::new(
+                    "ANCHOR_NODE",
+                    request.key.node_id.clone(),
+                ),
+                anchor_runtime_rig::SandboxEnvironment::new(
                     "ANCHOR_ROUTES",
                     request.routes.join(","),
-                )],
-                network: NetworkPolicy::Disabled,
-                timeout: Duration::from_secs_f64(request.wall_time_limit_seconds.unwrap_or(3600.0)),
-                max_output_bytes: 64 * 1024,
-                spill: None,
-                cancellation: request.cancellation.clone(),
-            })
-            .await
-            .map_err(|e| GraphError::Unsupported(e.to_string()))?;
+                ),
+                anchor_runtime_rig::SandboxEnvironment::new("ANCHOR_INPUT", input),
+            ],
+            network: if request.network {
+                NetworkPolicy::Enabled
+            } else {
+                NetworkPolicy::Disabled
+            },
+            timeout: Duration::from_secs_f64(request.wall_time_limit_seconds.unwrap_or(3600.0)),
+            max_output_bytes: 64 * 1024,
+            spill: None,
+            cancellation: request.cancellation.clone(),
+        };
+        self.mcp.environment.apply(&mut sandbox_request);
+        op::add_route_helper(&mut sandbox_request, route_helper);
+        self.start(&request.key)?;
+        let result = match sandbox.run(sandbox_request).await {
+            Ok(result) => result,
+            Err(SandboxError::InvalidRequest(reason)) => {
+                write_durable(
+                    &self
+                        .facts_root
+                        .join(format!("{}.failed", fact_stem(&request.key))),
+                    reason.as_bytes(),
+                )?;
+                return Ok(NodeExecutionOutcome::Failed { reason });
+            }
+            Err(error) => return Err(GraphError::Unsupported(error.to_string())),
+        };
         match result.status {
             SandboxStatus::Completed if result.exit_code == Some(0) => {
                 let (submission, route) = read_op_route(&result.stdout);
@@ -392,7 +603,13 @@ impl HostNodes {
             }
             SandboxStatus::Cancelled => Ok(NodeExecutionOutcome::Cancelled),
             _ => {
-                let reason = format!("{} (exit_code={:?})", result.reason, result.exit_code);
+                let mut reason = format!("{} (exit_code={:?})", result.reason, result.exit_code);
+                for output in [&result.stdout, &result.stderr] {
+                    if !output.trim().is_empty() {
+                        reason.push('\n');
+                        reason.push_str(output.trim());
+                    }
+                }
                 write_durable(
                     &self
                         .facts_root
@@ -568,6 +785,7 @@ mod io_resolver_tests {
                 .map(|binding| (binding.id.clone(), binding))
                 .collect(),
             store,
+            LocalInputs::new(root.path().to_path_buf(), None).unwrap(),
         );
 
         assert_eq!(
@@ -615,6 +833,119 @@ mod io_resolver_tests {
         let mut drifted = request;
         drifted.plugins[0].digest = "sha256:drift".into();
         assert!(resolver.tools(&drifted).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn agent_command_tools_receive_only_the_nodes_frozen_local_inputs() {
+        let root = tempfile::tempdir().unwrap();
+        let state = root.path().join("state");
+        let config = root.path().join("operator-workspaces");
+        let workspace = root.path().join("workspaces");
+        let artifacts = root.path().join("artifacts");
+        let private = root.path().join("private-inputs");
+        for path in [&workspace, &artifacts, &private, &config.join("weekly")] {
+            std::fs::create_dir_all(path).unwrap();
+        }
+        std::fs::write(private.join("history.txt"), "agent-local-evidence").unwrap();
+        std::fs::write(
+            config.join("weekly/local-inputs.json"),
+            json!({"agent":{"history":private}}).to_string(),
+        )
+        .unwrap();
+        let snapshot = GraphSnapshot::admit(json!({
+            "objective":"agent local inputs", "entry":"agent", "agents":{"worker":{"model":"fixture"}},
+            "nodes":[{"id":"agent","agent":"worker"},{"id":"other","agent":"worker"}],
+            "edges":[{"from":"agent","to":"other"}]
+        })).unwrap();
+        let mut record =
+            GraphRunRecord::create_with_id(snapshot, json!({}), "agent-local-inputs").unwrap();
+        record.plugin_bindings_initialized = true;
+        let local = LocalInputs::new(state.clone(), Some(config.clone())).unwrap();
+        local
+            .freeze(
+                &record.run_id,
+                &record.graph_digest,
+                &record.snapshot,
+                Some("weekly"),
+                true,
+            )
+            .unwrap();
+        let store = FileRunStore::new(state.join("runs"));
+        store.save(&record).unwrap();
+        crate::application::metadata::save(
+            &state,
+            &crate::application::RunMetadata::new(
+                record.run_id.clone(),
+                "weekly".into(),
+                record.graph_digest.clone(),
+                root.path(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let sandbox = std::sync::Arc::new(
+            BubblewrapSandbox::new(
+                BubblewrapPolicy::new("bwrap", ["sh"])
+                    .authorize_workspace_root(&workspace)
+                    .authorize_readonly_input_root(&artifacts)
+                    .authorize_readonly_destination_root("/in"),
+            )
+            .unwrap(),
+        );
+        let resolver = HostIoResolver::new(
+            HostArtifacts::new(artifacts, workspace),
+            sandbox,
+            std::sync::Arc::new(tool_host::PluginToolHost::new(Vec::<String>::new())),
+            tool_host::McpToolConfig::default(),
+            BTreeMap::new(),
+            store,
+            local,
+        );
+        let mut request = NodeExecutionRequest {
+            key: InvocationKey {
+                run_id: record.run_id,
+                graph_digest: record.graph_digest,
+                node_id: "agent".into(),
+                invocation: 1,
+            },
+            model: Some("fixture".into()),
+            task: "read evidence".into(),
+            instructions: String::new(),
+            routes: Vec::new(),
+            input: json!({}),
+            input_commits: Vec::new(),
+            plugins: Vec::new(),
+            max_provider_requests: None,
+            wall_time_limit_seconds: Some(30.0),
+            network: false,
+            kind: NodeKind::Agent,
+            operation: None,
+            cancellation: std::sync::Arc::new(AtomicBool::new(false)),
+        };
+        let tools = resolver.tools(&request).await.unwrap();
+        let result = tools.call(crate::node_tools::RUN_TOOL_NAME, json!({"command":["sh","-c","cat /local-inputs/history/history.txt; ! touch /local-inputs/history/forbidden"]})).await.unwrap();
+        assert_eq!(result[0].as_json().unwrap()["exit_code"], 0);
+        assert_eq!(
+            result[0].as_json().unwrap()["stdout"],
+            "agent-local-evidence"
+        );
+        assert!(!private.join("forbidden").exists());
+        request.key.node_id = "other".into();
+        let tools = resolver.tools(&request).await.unwrap();
+        let result = tools
+            .call(
+                crate::node_tools::RUN_TOOL_NAME,
+                json!({"command":["sh","-c","test ! -e /local-inputs/history/history.txt"]}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result[0].as_json().unwrap()["exit_code"], 0);
+        std::fs::write(
+            config.join("weekly/local-inputs.json"),
+            json!({"other":{"history":private}}).to_string(),
+        )
+        .unwrap();
+        assert!(resolver.tools(&request).await.is_err());
     }
 
     #[test]
@@ -691,6 +1022,7 @@ mod io_resolver_tests {
             tool_host::McpToolConfig::default(),
             BTreeMap::from([(binding.id.clone(), binding.clone())]),
             store.clone(),
+            LocalInputs::new(state_root.clone(), None).unwrap(),
         ));
         let model = MockCompletionModel::from_turns([
             MockTurn::tool_call(
@@ -703,7 +1035,11 @@ mod io_resolver_tests {
                 crate::node_tools::RUN_TOOL_NAME,
                 json!({"command":["sh","-c","printf sandbox-ok > result.txt"]}),
             ),
-            MockTurn::text(r#"{"summary":"host-tools-ok"}"#),
+            MockTurn::tool_call(
+                "completion-1",
+                "final_result",
+                json!({"summary":"host-tools-ok"}),
+            ),
         ])
         .erase();
         let io_nodes = IoHarnessNodePort::new_with_default_policy(
@@ -781,13 +1117,14 @@ mod io_resolver_tests {
         let child_snapshot = GraphSnapshot::admit(json!({
             "objective":"child plugin tool acceptance",
             "entry":"work",
-            "agents":{"worker":{"model":"fixture","instructions":"Call the fake echo tool once, then return a JSON summary."}},
+            "agents":{"worker":{"model":"fixture","instructions":"Call the fake echo tool once, then call final_result with a summary."}},
             "ops":{},
             "nodes":[{"id":"work","agent":"worker","plugins":["fake-tools"]}],
             "edges":[]
         }))
         .unwrap();
         let catalog = ChildBundleCatalog(LoadedGraphBundle {
+            authoring_definition: serde_json::to_value(&child_snapshot).unwrap(),
             snapshot: child_snapshot,
             plugins: vec![binding.clone()],
         });
@@ -802,6 +1139,7 @@ mod io_resolver_tests {
             tool_host::McpToolConfig::default(),
             BTreeMap::new(),
             store.clone(),
+            LocalInputs::new(state_root.clone(), None).unwrap(),
         ));
         let model = MockCompletionModel::from_turns([
             MockTurn::tool_call(
@@ -809,7 +1147,11 @@ mod io_resolver_tests {
                 tool_host::FAKE_ECHO_TOOL,
                 json!({"value":"child-plugin-ok"}),
             ),
-            MockTurn::text(r#"{"summary":"child-plugin-ok"}"#),
+            MockTurn::tool_call(
+                "completion-1",
+                "final_result",
+                json!({"summary":"child-plugin-ok"}),
+            ),
         ])
         .erase();
         let nodes = HostNodes {
@@ -888,6 +1230,7 @@ mod io_resolver_tests {
             tool_host::McpToolConfig::default(),
             BTreeMap::new(),
             anchor_runtime_rig::graph::FileRunStore::new(state_root.join("runs")),
+            LocalInputs::new(state_root.clone(), None).unwrap(),
         ));
         let build_nodes = |model| HostNodes {
             sandbox: std::sync::Arc::clone(&sandbox),
@@ -906,7 +1249,7 @@ mod io_resolver_tests {
         let snapshot = GraphSnapshot::admit(json!({
             "objective":"resume the same io-harness Agent invocation",
             "entry":"work",
-            "agents":{"worker":{"model":"fixture","instructions":"Use anchor_run once to append one line containing called to /workspace/effects.txt, then return a JSON summary."}},
+            "agents":{"worker":{"model":"fixture","instructions":"Use anchor_run once to append one line containing called to /workspace/effects.txt, then call final_result with a summary."}},
             "ops":{},
             "nodes":[{"id":"work","agent":"worker"}],
             "edges":[]
@@ -955,8 +1298,14 @@ mod io_resolver_tests {
         // A new host/provider instance re-enters the same Harness run. Since
         // the failed provider call followed a mutating tool, io-harness requires
         // an explicit recovery decision; it must not replay the tool.
-        let restarted_nodes =
-            build_nodes(MockCompletionModel::text(r#"{"summary":"resumed"}"#).erase());
+        let restarted_nodes = build_nodes(
+            MockCompletionModel::from_turns([MockTurn::tool_call(
+                "completion-1",
+                "final_result",
+                json!({"summary":"resumed"}),
+            )])
+            .erase(),
+        );
         let resumed = GraphRunner::new(&store, &artifacts, &restarted_nodes, &NoControl)
             .run(interrupted)
             .await;

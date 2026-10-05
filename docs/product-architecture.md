@@ -106,6 +106,14 @@ Graph 包只带入显式声明的资源及可验证的来源/版本信息。模�
 
 Rust-native AgentNode 使用 io-harness 作为唯一 Agent loop、上下文与单节点持久化/恢复层；Rig 仅可通过 Provider adapter 提供模型 transport。Anchor 保持 Graph Run、Sandbox、Plugin、Artifact 和宿主权限事实，不与 Harness 重复实现上下文或工具循环。Python PydanticAI/Harness 是迁移期 legacy 宿主，不约束 Rust 核心。OpNode 和外部 Plugin 经明确的进程/MCP 接口运行。
 
+2026-10-05 用户明确：Rust 化范围是核心 Runtime。用户编排的 Graph 和既有 Codex 风格 Plugin 保持原有格式与用法，Plugin 可使用 Python、Node.js、脚本、独立解释器环境或 MCP 服务。迁移只补适配与接线，不要求重写业务工具，不另立 Rust Plugin 规范。二进制交付消除的是核心 Runtime 对 Python 源码与依赖链的要求；选用 Plugin 的外部依赖仍由部署者提供，并通过宿主授权进入沙箱。
+
+同日用户确认：AgentNode 完成采用原生 `final_result` 输出工具，沿用 Python 的 `summary` 与可选 `route` 语义。普通回答的 JSON 格式不能成为完成协议；额外参数可忽略，必需信息缺失或路由非法应由既有框架反馈纠正。Runtime 负责将真实完成调用确定性地转换为内部校验值，并由 Harness 和 NodePort 分别保存节点执行与 Graph 完成事实；混合业务/完成调用须先处理业务结果，再单独提交完成。该适配归 Node Runtime 的 Provider 边界，不增加 Graph 字段、Plugin 格式或第二套 Agent 循环。
+
+产品对齐保留反馈回访的文件延续与审阅绑定契约：同 Run 同节点从最近已提交产物延续工作，已开始的 invocation 保留现场；跨 Run 不自动继承。Rust fs2 Artifact 是文件与谱系的权威，只读 Git 输入视图用于兼容已有 Graph 的审阅命令，不是第二套可写历史。本地路径授权仍归操作员、按 Run 冻结并按节点提供，Graph 包不能携带或扩大授权。模型别名属于宿主配置，实际请求模型在 invocation 开始时绑定，继续执行不得静默换模型。
+
+平台迁移通过公共 Runtime 端口接线：Graph、Run、Artifact 的唯一写入者是 Rust，Library、Scheduler 等已有宿主能力可以继续复用 Python；后端不可用时不得暗中改由另一 Runner 执行。同一 Run 的模型交互记录用于核查实际请求与回答，沿用框架原生格式，不成为第二套恢复引擎。停止请求被接收与 Run 已停止是两个时点，界面应如实显示等待节点收束。
+
 迁移以 Rust-native Graph 在 standalone 与平台宿主中的路由、Run 事实、停止/恢复、沙箱和 Plugin 行为为主要验收对象，再按需要提供 Python legacy 读取或调用适配。Python Runner 不再是 Rust 产品行为的永久实现真相；两套语义只在迁移边界明确隔离，禁止同一 Run 双重写入。具体 HTTP/CLI、持久化、Session 和 bundle 设计可以采用成熟 Rust crates，并在垂直切片中冻结，而不是等待 Python 完全兼容后才开始。
 
 ### Anchor 的执行不变量
@@ -249,7 +257,7 @@ Pilot 与普通 AgentNode 的生命周期统一、普通节点等待用户输入
 
 所有 HTTP API（包括已有管理 API、Responses 与 Webhook）统一要求 `Authorization: Bearer <anchor-key>`。服务通过环境变量 `ANCHOR_API_KEYS` 配置 JSON 字符串数组，例如 `["key-one","key-two"]`；key 应为至少 32 字节随机生成的秘密，只在服务启动时读取，增删密钥需重启。非空但格式错误、含空 key 或重复 key 时服务拒绝启动。空白配置在 loopback 本机开发模式允许无认证；监听非 loopback 地址时若没有至少一个 key，服务拒绝启动。key 精确匹配白名单即有完整 API 权限，不增加角色、逐请求审批或权限配置。缺失、格式错误或不匹配统一返回 401，不泄露哪一步失败；比较使用常量时间方式，密钥不得写入日志、Run、Session 或错误响应。密钥本身是粗粒度调用者边界，不提供用户资料或细粒度授权。
 
-每个 Responses 会话归属于创建它的 key；续接时必须使用同一个 key，不能仅凭 `previous_response_id` 跨 key 读取对话。撤销 key 后，该 key 创建的对话不再能经 API 访问。Anchor 不据此承诺完整多租户隔离；一个 key 的所有持有者共享同一权限与会话可见范围。长请求通过 `stream:true` SSE 返回进度和文本，客户端断开不取消服务端已接受的处理；`stream:false` 等待最终 Response。Responses 返回的 `id` 可通过 `previous_response_id` 续聊，不额外设计 Anchor 专有会话 ID API。
+每个 Responses 会话归属于创建它的 key；续接时必须使用同一个 key，不能仅凭 `previous_response_id` 跨 key 读取对话。撤销 key 后，该 key 创建的对话不再能经 API 访问。Anchor 不据此承诺完整多租户隔离；一个 key 的所有持有者共享同一权限与会话可见范围。长请求通过 `stream:true` SSE 返回进度和文本，客户端断开不取消服务端已接受的处理；`stream:false` 等待最终 Response。Responses 返回的 `id` 可通过 `previous_response_id` 续聊，不额外设计 Anchor 专有会话 ID API。 共享 Session 管理入口也必须核对 Responses 的同一 key 归属：其他 key 的列表不显示该会话，读写及 SSE 返回 404；创建窗口或孤儿记录不放开访问。`responses-` 保留为该内部会话命名空间，普通 Pilot 会话仍沿用共享管理权限。
 
 Webhook 是 Graph Run 触发入口，与 Responses 分开：`POST /v1/webhooks/graphs/<graph-id>`，请求体为 `{"input": {…}}`，其中 `input` 是可选 JSON object，缺省按空对象处理；它作为本次 Run 输入，与 Graph 默认 input 按已确认的递归合并规则解析。端点只启动指定的既有 Graph，不接受调用方覆盖 Graph objective 或指定其他 Graph。每次合法到达独立触发，不做事件去重或自动重试；Graph 空闲时返回 202 和 `run`、`graph` 标识，Graph 正忙时返回 409 和当前运行 ID，不创建 Run。未知 Graph 返回 404，非法 JSON 或非 object 输入返回 400。客户端收到 409 后自行决定是否再次发送；Anchor 不保留请求、不排队。
 
@@ -329,6 +337,8 @@ Plugin 的运行绑定摘要写入 Run，记录当时解析到的来源和内容
 | 消息接收与发送可靠性 | 事件去重、回复落盘和重复事件投递重试；旧 Run 被新消息替代后抑制其业务答案。SDK 本地协议/断线重连已验证；默认 SSE 持续推送正文，断订阅不取消 Run，兼容 JSON 模式仍有 120 秒等待上限；首次接纳顺序持久化以抑制旧重放，真实平台回复窗口待验收 |
 
 当前已接通长期 Session 与普通助手 Graph 的直接绑定：一条新消息启动一个 Run，同一用户补充消息取消旧 Run，保存历史和未完成文件后接续；不同用户可以并发执行同一 Graph。模型历史复用 Harness 原生记录和压缩，Plugin 仍通过既有节点沙箱调用。首期由通道回复来源会话。机器人 SDK 主动推送已通过 Plugin 挂载的运行时工具接线，沿现有长连接发送获授权的 Markdown 通知；接收对象范围仍需平台验证。附件文本提取、原生图片输入、summary 持续输出和图文回复已接入，并经隔离真实 provider 验证，四项真实企业微信平台验收待做。企业微信审批能力需另外接入。能力对照见 [SDK 核查](wecom-sdk-capability-audit.md)。
+
+2026-10-05 Rust 接线边界：文字 Graph/通道 Session 沿用上述用户模型，Python 持有入口、会话与投递，Rust 持有 Graph Run，io-harness 原生 Session 持有逐节点历史。前驱现场通过只读 `/previous` 传递；结果未知的调用保留为事实，不自动重放。会话 Run 暂不支持单条历史删除，整 Graph 删除清理完整原生会话；有保留 Rust Run 的 Session 不可删除。渠道附件已由 Python 入口冻结为同一份提取/上传字节，Rust 持有 Run 内容、hash、MIME 和只读 `/in/channel`，配置视觉 wire model 后图片进入原生模型输入，并通过两用户、删除源文件、去重、重启和真实 `deepseek-flash` 验收。摘要增量和完整业务组合仍属后续 Rust 切片；`call.session` wait/detach 已接通并完成本地 ACK/真实模型验收；上文完整渠道能力是 Python 路径的现状。
 
 ### 通道能力与平台适配器
 

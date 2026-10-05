@@ -29,6 +29,8 @@ pub(crate) struct NodeTools {
     workspace: PathBuf,
     readonly_inputs: Vec<ReadOnlyInput>,
     cancellation: Cancellation,
+    environment: crate::tool_environment::ToolEnvironment,
+    network: NetworkPolicy,
 }
 
 impl NodeTools {
@@ -45,7 +47,26 @@ impl NodeTools {
             workspace,
             readonly_inputs,
             cancellation,
+            environment: Default::default(),
+            network: NetworkPolicy::Disabled,
         }
+    }
+
+    pub fn with_environment(
+        mut self,
+        environment: crate::tool_environment::ToolEnvironment,
+    ) -> Self {
+        self.environment = environment;
+        self
+    }
+
+    pub fn with_network(mut self, enabled: bool) -> Self {
+        self.network = if enabled {
+            NetworkPolicy::Enabled
+        } else {
+            NetworkPolicy::Disabled
+        };
+        self
     }
 }
 
@@ -104,24 +125,22 @@ impl ToolPort for NodeTools {
                     )));
                 }
             };
-            let result = match self
-                .sandbox
-                .run(SandboxRequest {
-                    workspace: self.workspace.clone(),
-                    working_directory: None,
-                    command: arguments.command,
-                    readonly_inputs: self.readonly_inputs.clone(),
-                    workspace_readonly: Vec::new(),
-                    tool_dirs: Vec::new(),
-                    environment: Vec::new(),
-                    network: NetworkPolicy::Disabled,
-                    timeout: Duration::from_secs(30),
-                    max_output_bytes: 64 * 1024,
-                    spill: None,
-                    cancellation: self.cancellation.clone(),
-                })
-                .await
-            {
+            let mut request = SandboxRequest {
+                workspace: self.workspace.clone(),
+                working_directory: None,
+                command: arguments.command,
+                readonly_inputs: self.readonly_inputs.clone(),
+                workspace_readonly: Vec::new(),
+                tool_dirs: Vec::new(),
+                environment: Vec::new(),
+                network: self.network,
+                timeout: Duration::from_secs(30),
+                max_output_bytes: 64 * 1024,
+                spill: None,
+                cancellation: self.cancellation.clone(),
+            };
+            self.environment.apply(&mut request);
+            let result = match self.sandbox.run(request).await {
                 Ok(result) => result,
                 // This error is raised by the adapter before any process
                 // launch, so the model can safely correct its command.

@@ -82,6 +82,53 @@ async fn run(tools: &NodeTools, command: &[&str]) -> Value {
 }
 
 #[tokio::test]
+async fn graph_network_intent_is_applied_and_host_authority_still_limits_it() {
+    use tokio::io::AsyncWriteExt;
+    let fixture = Fixture::new();
+    let refused = run(
+        &fixture.tools(cancellation()).with_network(true),
+        &["sh", "-c", "true"],
+    )
+    .await;
+    assert_eq!(refused["status"], "not_executed");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        socket.write_all(b"network-visible").await.unwrap();
+    });
+    let sandbox = Arc::new(
+        BubblewrapSandbox::new(
+            BubblewrapPolicy::new("bwrap", ["python3"])
+                .authorize_workspace_root(&fixture.workspace)
+                .allow_network(),
+        )
+        .unwrap(),
+    );
+    let script = format!(
+        "import socket; s=socket.create_connection(('127.0.0.1',{port}), timeout=1); print(s.recv(64).decode())"
+    );
+    let tools = || {
+        NodeTools::new(
+            Arc::new(Inner),
+            sandbox.clone(),
+            fixture.workspace.clone(),
+            vec![],
+            cancellation(),
+        )
+    };
+    let denied = run(&tools(), &["python3", "-c", &script]).await;
+    assert_ne!(denied["exit_code"], 0, "{denied}");
+    let allowed = run(&tools().with_network(true), &["python3", "-c", &script]).await;
+    assert_eq!(allowed["exit_code"], 0, "{allowed}");
+    assert_eq!(
+        allowed["stdout"].as_str().unwrap().trim(),
+        "network-visible"
+    );
+    server.await.unwrap();
+}
+
+#[tokio::test]
 async fn real_bwrap_reads_input_writes_workspace_and_rejects_input_mutation() {
     let fixture = Fixture::new();
     let tools = fixture.tools(cancellation());
@@ -133,12 +180,15 @@ async fn real_bwrap_hides_host_files_and_enforces_command_allowlist() {
     );
     for command in [
         vec!["printf", "forbidden"],
-        vec!["/bin/cat", "/in/producer/report.txt"],
+        vec!["/usr/bin/printf", "forbidden"],
     ] {
         let result = run(&tools, &command).await;
         assert_eq!(result["status"], "not_executed");
         assert!(!result["error"].as_str().unwrap().is_empty());
     }
+    let result = run(&tools, &["/bin/cat", "/in/producer/report.txt"]).await;
+    assert_eq!(result["exit_code"], 0);
+    assert_eq!(result["stdout"], "immutable-input");
 }
 
 #[tokio::test]

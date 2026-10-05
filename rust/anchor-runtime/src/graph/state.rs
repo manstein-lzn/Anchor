@@ -339,7 +339,10 @@ impl GraphRunRecord {
         }
         if !matches!(
             self.status,
-            RunStatus::WaitingRecovery | RunStatus::Running | RunStatus::Aborted
+            RunStatus::WaitingRecovery
+                | RunStatus::Running
+                | RunStatus::Aborted
+                | RunStatus::Stopped
         ) && !self.recovery.is_empty()
         {
             return Err(GraphError::CorruptRun(

@@ -9,6 +9,9 @@
 //! io-harness is the only Agent loop. Rig is only the provider transport.
 
 pub mod adapter;
+mod completion;
+mod conversation;
 pub mod node;
 pub mod node_exec;
 pub mod node_port;
+pub mod recording;

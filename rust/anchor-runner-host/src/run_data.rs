@@ -95,7 +95,21 @@ pub(crate) fn delete_run_data(
         let hash = key_hash(&key);
         let node_stem = format!("nf1-{hash}");
         let io_stem = format!("np1-{hash}");
-        for suffix in ["json", "failed", "started"] {
+        let recordings = anchor_io_harness_runtime::recording::directory(
+            &data_root.join("io-harness/store"),
+            &key,
+        );
+        if recordings.exists() {
+            std::fs::remove_dir_all(&recordings).map_err(|error| error.to_string())?;
+        }
+        match std::fs::remove_file(anchor_io_harness_runtime::recording::call_ids_path(
+            &recordings,
+        )) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.to_string()),
+        }
+        for suffix in ["json", "failed", "started", "model.json"] {
             let _ = std::fs::remove_file(
                 data_root
                     .join("facts")
@@ -132,6 +146,23 @@ pub(crate) fn delete_run_data(
         }
     }
     if safe_component(&record.run_id) {
+        crate::channel_inputs::remove(data_root, &record.run_id)?;
+        let local_inputs = crate::local_inputs::fact_path(data_root, &record.run_id);
+        match std::fs::remove_file(local_inputs) {
+            Ok(()) => (),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+            Err(error) => return Err(error.to_string()),
+        }
+        let channel_reply = data_root
+            .join("channel-replies")
+            .join(format!("{}.json", record.run_id));
+        for path in [&channel_reply, &channel_reply.with_extension("tmp")] {
+            match std::fs::remove_file(path) {
+                Ok(()) => (),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+                Err(error) => return Err(error.to_string()),
+            }
+        }
         let workspace = workspace_root.join(&record.run_id);
         if workspace.exists() {
             std::fs::remove_dir_all(&workspace).map_err(|error| error.to_string())?;

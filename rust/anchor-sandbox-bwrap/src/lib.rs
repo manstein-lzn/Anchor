@@ -22,8 +22,8 @@ use std::{
 };
 
 use anchor_runtime_rig::{
-    NetworkPolicy, SandboxError, SandboxPort, SandboxRequest, SandboxResult, SandboxStatus,
-    SpillPolicy,
+    NetworkPolicy, ReadOnlyInput, SandboxError, SandboxPort, SandboxRequest, SandboxResult,
+    SandboxStatus, SpillPolicy,
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, BufReader},
@@ -108,6 +108,7 @@ impl BubblewrapPolicy {
 }
 
 /// Bubblewrap implementation of the host-owned [`SandboxPort`].
+#[derive(Clone)]
 pub struct BubblewrapSandbox {
     binary: PathBuf,
     allowed_commands: HashSet<String>,
@@ -115,6 +116,7 @@ pub struct BubblewrapSandbox {
     workspace_roots: Vec<PathBuf>,
     readonly_input_roots: Vec<PathBuf>,
     readonly_destination_roots: Vec<PathBuf>,
+    readonly_grants: Vec<(PathBuf, PathBuf)>,
     tool_dirs: Vec<PathBuf>,
     spill_roots: Vec<PathBuf>,
 }
@@ -131,6 +133,7 @@ impl std::fmt::Debug for BubblewrapSandbox {
                 "readonly_destination_roots",
                 &self.readonly_destination_roots,
             )
+            .field("readonly_grants", &self.readonly_grants)
             .field("tool_dirs", &self.tool_dirs)
             .field("spill_roots", &self.spill_roots)
             .finish()
@@ -194,9 +197,45 @@ impl BubblewrapSandbox {
             workspace_roots,
             readonly_input_roots,
             readonly_destination_roots,
+            readonly_grants: Vec::new(),
             tool_dirs,
             spill_roots,
         })
+    }
+
+    /// Derive a node sandbox with exact host-approved read-only mounts.
+    /// Callers must resolve these grants from operator configuration, never
+    /// from model arguments or editable Graph fields. The original policy,
+    /// its roots, command authority, and network authority remain unchanged.
+    pub fn with_readonly_grants(&self, grants: &[ReadOnlyInput]) -> Result<Self, SandboxError> {
+        let mut sandbox = self.clone();
+        for grant in grants {
+            let source = fs::canonicalize(&grant.source).map_err(|error| {
+                SandboxError::InvalidRequest(format!(
+                    "host read-only grant cannot be resolved: {error}"
+                ))
+            })?;
+            let destination = normalized_destination(&grant.destination)?;
+            if is_reserved_mount(&destination) {
+                return Err(SandboxError::InvalidRequest(
+                    "host read-only grant overlaps a reserved sandbox mount".into(),
+                ));
+            }
+            if let Some((existing, _)) = sandbox
+                .readonly_grants
+                .iter()
+                .find(|(_, target)| *target == destination)
+            {
+                if *existing != source {
+                    return Err(SandboxError::InvalidRequest(
+                        "host read-only grants have conflicting destinations".into(),
+                    ));
+                }
+                continue;
+            }
+            sandbox.readonly_grants.push((source, destination));
+        }
+        Ok(sandbox)
     }
 
     fn validate_authority(
@@ -209,12 +248,35 @@ impl BubblewrapSandbox {
             .file_name()
             .and_then(OsStr::to_str)
             .unwrap_or("");
-        if command != basename && !Path::new(command).starts_with("/plugins/") {
+        if Path::new(command)
+            .components()
+            .any(|part| matches!(part, Component::ParentDir))
+        {
             return Err(SandboxError::InvalidRequest(
-                "command must select an allowlisted executable by basename or a mounted Plugin path".into(),
+                "command paths must not contain `..`".into(),
             ));
         }
-        let mounted_plugin_executable = if Path::new(command).starts_with("/plugins/") {
+        let mounted_command = Path::new(command).starts_with("/plugins/")
+            || Path::new(command).starts_with("/tools/");
+        let registered_command = Path::new(command).is_absolute()
+            && request.tool_dirs.iter().any(|directory| {
+                Path::new(command).parent() == Some(directory.as_path())
+                    && directory
+                        .canonicalize()
+                        .is_ok_and(|path| self.tool_dirs.contains(&path))
+            });
+        let system_command = Path::new(command).is_absolute()
+            && SYSTEM_DIRS
+                .iter()
+                .any(|root| Path::new(command).starts_with(root))
+            && fs::canonicalize(command)
+                .is_ok_and(|path| SYSTEM_DIRS.iter().any(|root| path.starts_with(root)));
+        if command != basename && !mounted_command && !registered_command && !system_command {
+            return Err(SandboxError::InvalidRequest(
+                "command must select an allowlisted basename/system executable or a mounted Plugin/tool path".into(),
+            ));
+        }
+        let mounted_plugin_executable = if mounted_command {
             request.readonly_inputs.iter().any(|input| {
                 let destination = &input.destination;
                 let Some(relative) = Path::new(command).strip_prefix(destination).ok() else {
@@ -223,7 +285,11 @@ impl BubblewrapSandbox {
                 let Ok(source) = fs::canonicalize(&input.source) else {
                     return false;
                 };
-                let candidate = source.join(relative);
+                let candidate = if relative.as_os_str().is_empty() {
+                    source
+                } else {
+                    source.join(relative)
+                };
                 candidate.is_file()
                     && std::fs::metadata(&candidate).is_ok_and(|metadata| {
                         #[cfg(unix)]
@@ -240,7 +306,10 @@ impl BubblewrapSandbox {
         } else {
             false
         };
-        if !self.allowed_commands.contains(basename) && !mounted_plugin_executable {
+        if !self.allowed_commands.contains(basename)
+            && !mounted_plugin_executable
+            && !registered_command
+        {
             return Err(SandboxError::InvalidRequest(format!(
                 "command `{basename}` is not authorized by the host sandbox policy"
             )));
@@ -268,9 +337,15 @@ impl BubblewrapSandbox {
             let source = fs::canonicalize(&input.source).map_err(|error| {
                 SandboxError::InvalidRequest(format!("read-only input cannot be resolved: {error}"))
             })?;
-            ensure_within(&source, &self.readonly_input_roots, "read-only input")?;
             let destination = normalized_destination(&input.destination)?;
-            self.authorize_destination(&destination)?;
+            if !self
+                .readonly_grants
+                .iter()
+                .any(|grant| grant == &(source.clone(), destination.clone()))
+            {
+                ensure_within(&source, &self.readonly_input_roots, "read-only input")?;
+                self.authorize_destination(&destination)?;
+            }
             readonly_inputs.push((source, destination));
         }
         let working_directory = request
@@ -504,12 +579,9 @@ impl SandboxPort for BubblewrapSandbox {
                 })?;
             let info_child_fd = info_child.as_raw_fd();
             unsafe {
-                command.as_std_mut().pre_exec(move || {
-                    if libc::dup2(info_child_fd, BWRAP_INFO_FD) < 0 {
-                        return Err(io::Error::last_os_error());
-                    }
-                    Ok(())
-                });
+                command
+                    .as_std_mut()
+                    .pre_exec(move || inherit_startup_descriptor(info_child_fd));
             }
             command.kill_on_drop(true);
             let mut child = command.spawn().map_err(|error| {
@@ -543,40 +615,69 @@ impl SandboxPort for BubblewrapSandbox {
                             Ok(count) if count > 0 => sandbox_started = true,
                             Ok(_) => info_done = true,
                             Err(error) => {
-                                terminate_and_wait(&mut child).await?;
+                                out_task.abort();
+                                err_task.abort();
+                                terminate_and_wait(child).await?;
                                 return Err(SandboxError::Failed(format!("reading Bubblewrap startup status failed: {error}")));
                             }
                         }
                     }
-                    result = child.wait() => {
-                        let status = match result {
-                            Ok(status) => status,
-                            Err(error) => {
-                                terminate_and_wait(&mut child).await?;
-                                return Err(SandboxError::Failed(format!("waiting for Bubblewrap failed: {error}")));
-                            }
-                        };
-                        if !sandbox_started {
-                            let _ = tokio::join!(out_task, err_task);
-                            return Err(SandboxError::Failed(format!("Bubblewrap exited before sandbox startup was confirmed (exit code {:?}); command was not reported as executed", status.code())));
-                        }
-                        break (SandboxStatus::Completed, status.code());
-                    }
                     _ = sleep(Duration::from_millis(20)) => {
+                        match child_exited_without_reaping(&child) {
+                            Ok(true) => break SandboxStatus::Completed,
+                            Ok(false) => {}
+                            Err(error) => {
+                                out_task.abort();
+                                err_task.abort();
+                                if error.raw_os_error() == Some(libc::ECHILD) {
+                                    // Tokio cannot disable kill_on_drop after losing PID ownership.
+                                    // Retain its few handles rather than signal a possibly reused PID.
+                                    std::mem::forget(child);
+                                } else {
+                                    terminate_and_wait(child).await?;
+                                }
+                                return Err(SandboxError::Failed(format!("observing Bubblewrap exit failed: {error}")));
+                            }
+                        }
                         if request.cancellation.load(Ordering::Relaxed) {
-                            terminate_and_wait(&mut child).await?;
-                            break (SandboxStatus::Cancelled, None);
+                            terminate_process_group(&child)?;
+                            break SandboxStatus::Cancelled;
                         }
                         if Instant::now() >= deadline {
-                            terminate_and_wait(&mut child).await?;
-                            break (SandboxStatus::TimedOut, None);
+                            terminate_process_group(&child)?;
+                            break SandboxStatus::TimedOut;
                         }
                     }
                 }
             };
-            let (stdout_read, stderr_read) = tokio::join!(out_task, err_task);
-            if stdout_read.is_err() || stderr_read.is_err() {
-                capture.read_failed.store(true, Ordering::Relaxed);
+            if status == SandboxStatus::Completed && !sandbox_started {
+                terminate_process_group(&child)?;
+            }
+            drain_output(
+                out_task,
+                err_task,
+                &capture,
+                &request.cancellation,
+                deadline,
+                &child,
+            )
+            .await?;
+            let exit_status = match child.wait().await {
+                Ok(status) => status,
+                Err(error) => {
+                    if error.raw_os_error() == Some(libc::ECHILD) {
+                        std::mem::forget(child);
+                    }
+                    return Err(SandboxError::Failed(format!(
+                        "waiting for Bubblewrap failed: {error}"
+                    )));
+                }
+            };
+            if status == SandboxStatus::Completed && !sandbox_started {
+                return Err(SandboxError::Failed(format!(
+                    "Bubblewrap exited before sandbox startup was confirmed (exit code {:?}); command was not reported as executed",
+                    exit_status.code()
+                )));
             }
             let capture = capture.finish()?;
             let (stdout, stdout_incomplete, stdout_host, stdout_visible) =
@@ -601,11 +702,15 @@ impl SandboxPort for BubblewrapSandbox {
                 visible.clear();
             }
             Ok(SandboxResult {
-                status: status.0,
-                exit_code: status.1,
+                status,
+                exit_code: if status == SandboxStatus::Completed {
+                    exit_status.code()
+                } else {
+                    None
+                },
                 stdout,
                 stderr,
-                reason: match status.0 {
+                reason: match status {
                     SandboxStatus::Completed => {
                         "Bubblewrap startup was confirmed and the command exited".into()
                     }
@@ -743,6 +848,7 @@ fn is_reserved_mount(destination: &Path) -> bool {
         let reserved = Path::new(reserved);
         destination == reserved
             || (reserved != Path::new("/")
+                && reserved != Path::new("/tmp")
                 && (destination.starts_with(reserved) || reserved.starts_with(destination)))
     })
 }
@@ -798,24 +904,128 @@ fn probe(binary: &Path) -> Result<(), SandboxError> {
     Ok(())
 }
 
-async fn terminate_and_wait(child: &mut Child) -> Result<(), SandboxError> {
-    if let Some(pid) = child.id() {
-        let result = unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
-        if result != 0 {
-            let error = io::Error::last_os_error();
-            if error.raw_os_error() != Some(libc::ESRCH) {
-                child.start_kill().map_err(|kill_error| {
-                    SandboxError::Failed(format!("could not terminate Bubblewrap process group ({error}) or process ({kill_error})"))
-                })?;
+fn inherit_startup_descriptor(source: i32) -> io::Result<()> {
+    if unsafe { libc::dup2(source, BWRAP_INFO_FD) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // dup2(fd, fd) preserves CLOEXEC when allocation already chose the target.
+    let flags = unsafe { libc::fcntl(BWRAP_INFO_FD, libc::F_GETFD) };
+    if flags < 0
+        || unsafe { libc::fcntl(BWRAP_INFO_FD, libc::F_SETFD, flags & !libc::FD_CLOEXEC) } < 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+fn child_exited_without_reaping(child: &Child) -> io::Result<bool> {
+    let pid = child
+        .id()
+        .ok_or_else(|| io::Error::from_raw_os_error(libc::ECHILD))?;
+    observe_child_exit(pid)
+}
+
+fn observe_child_exit(pid: u32) -> io::Result<bool> {
+    loop {
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        // Leave the owned root's PID reserved until output cleanup finishes.
+        if unsafe {
+            libc::waitid(
+                libc::P_PID,
+                pid,
+                &mut info,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            )
+        } == 0
+        {
+            return Ok(unsafe { info.si_pid() } != 0);
+        }
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::EINTR) {
+            return Err(error);
+        }
+    }
+}
+
+fn terminate_process_group(child: &Child) -> Result<(), SandboxError> {
+    let process_group = child.id().ok_or_else(|| {
+        SandboxError::Failed("Bubblewrap root was reaped before process-group cleanup".into())
+    })?;
+    if unsafe { libc::kill(-(process_group as i32), libc::SIGKILL) } != 0 {
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::ESRCH) {
+            return Err(SandboxError::Failed(format!(
+                "could not terminate Bubblewrap process group: {error}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+async fn terminate_and_wait(mut child: Child) -> Result<(), SandboxError> {
+    if let Err(error) = child_exited_without_reaping(&child) {
+        if error.raw_os_error() == Some(libc::ECHILD) {
+            std::mem::forget(child);
+        }
+        return Err(SandboxError::Failed(format!(
+            "observing Bubblewrap before termination failed: {error}"
+        )));
+    }
+    if let Err(error) = terminate_process_group(&child) {
+        if child.id().is_none() {
+            return Err(error);
+        }
+        child.start_kill().map_err(|kill_error| {
+            SandboxError::Failed(format!(
+                "{error}; could not terminate Bubblewrap process: {kill_error}"
+            ))
+        })?;
+    }
+    if let Err(error) = child.wait().await {
+        if error.raw_os_error() == Some(libc::ECHILD) {
+            std::mem::forget(child);
+        }
+        return Err(SandboxError::Failed(format!(
+            "could not reap Bubblewrap after termination: {error}"
+        )));
+    }
+    Ok(())
+}
+
+async fn drain_output(
+    stdout: tokio::task::JoinHandle<()>,
+    stderr: tokio::task::JoinHandle<()>,
+    capture: &CaptureState,
+    cancellation: &AtomicBool,
+    deadline: Instant,
+    child: &Child,
+) -> Result<(), SandboxError> {
+    let stdout_abort = stdout.abort_handle();
+    let stderr_abort = stderr.abort_handle();
+    let drained = async { tokio::join!(stdout, stderr) };
+    tokio::pin!(drained);
+    loop {
+        tokio::select! {
+            biased;
+            (stdout, stderr) = &mut drained => {
+                if stdout.is_err() || stderr.is_err() {
+                    capture.read_failed.store(true, Ordering::Relaxed);
+                }
+                return Ok(());
+            }
+            _ = sleep(Duration::from_millis(20)) => {
+                if cancellation.load(Ordering::Relaxed) || Instant::now() >= deadline {
+                    // The unreaped root reserves its PID while pipe writers are cleaned up.
+                    let terminated = terminate_process_group(child);
+                    capture.read_failed.store(true, Ordering::Relaxed);
+                    stdout_abort.abort();
+                    stderr_abort.abort();
+                    let _ = drained.await;
+                    return terminated;
+                }
             }
         }
     }
-    child.wait().await.map_err(|error| {
-        SandboxError::Failed(format!(
-            "could not reap Bubblewrap after termination: {error}"
-        ))
-    })?;
-    Ok(())
 }
 
 struct CaptureState {
@@ -1022,6 +1232,7 @@ mod tests {
             workspace_roots: vec![root.clone()],
             readonly_input_roots: vec![root.clone()],
             readonly_destination_roots: vec![PathBuf::from("/in"), PathBuf::from("/spill")],
+            readonly_grants: Vec::new(),
             tool_dirs: Vec::new(),
             spill_roots: vec![root],
         }
@@ -1048,6 +1259,230 @@ mod tests {
             matches!(sandbox.run(request).await, Err(SandboxError::Failed(message)) if message.contains("before sandbox startup was confirmed"))
         );
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn regression_startup_descriptor_with_same_number_survives_exec() {
+        use std::io::Read;
+
+        let (mut parent, child) = std::os::unix::net::UnixStream::pair().unwrap();
+        parent
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let source = child.as_raw_fd();
+        let mut command = std::process::Command::new("/bin/bash");
+        command.args(["-c", "printf startup-confirmed >&200"]);
+        unsafe {
+            command.pre_exec(move || {
+                if libc::dup2(source, BWRAP_INFO_FD) < 0
+                    || libc::fcntl(BWRAP_INFO_FD, libc::F_SETFD, libc::FD_CLOEXEC) < 0
+                {
+                    return Err(io::Error::last_os_error());
+                }
+                inherit_startup_descriptor(BWRAP_INFO_FD)
+            });
+        }
+        let status = command.status().unwrap();
+        drop(child);
+        let mut message = String::new();
+        parent.read_to_string(&mut message).unwrap();
+        assert!(status.success());
+        assert_eq!(message, "startup-confirmed");
+    }
+
+    fn orphaning_fake_bwrap(dir: &Path, startup_confirmed: bool, detached: bool) -> PathBuf {
+        let script = dir.join("bwrap-held-pipes");
+        let confirmation = if startup_confirmed {
+            "printf '{\"child-pid\":1}\\n' >&200\n"
+        } else {
+            ""
+        };
+        let background = if detached {
+            "setsid sleep 30"
+        } else {
+            "sleep 30"
+        };
+        fs::write(
+            &script,
+            format!(
+                "#!/bin/bash\nprintf '%s\\n' \"$$\" > \"${{0%/*}}/root.pid\"\n{confirmation}printf parent-complete\n{background} &\nprintf '%s\\n' \"$!\" > \"${{0%/*}}/descendant.pid\"\nexit {}\n",
+                if startup_confirmed { 0 } else { 1 },
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
+        script
+    }
+
+    fn kill_fixture_descendant(dir: &Path) {
+        if let Ok(pid) = fs::read_to_string(dir.join("descendant.pid"))
+            && let Ok(pid) = pid.trim().parse::<i32>()
+        {
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+        }
+    }
+
+    async fn fixture_descendant_terminated(dir: &Path) -> bool {
+        let pid = fs::read_to_string(dir.join("descendant.pid")).unwrap();
+        let path = PathBuf::from(format!("/proc/{}/status", pid.trim()));
+        for _ in 0..100 {
+            match fs::read_to_string(&path) {
+                Err(error) if error.kind() == io::ErrorKind::NotFound => return true,
+                Ok(status)
+                    if status.lines().any(|line| {
+                        line.starts_with("State:") && line.split_whitespace().nth(1) == Some("Z")
+                    }) =>
+                {
+                    return true;
+                }
+                _ => {}
+            }
+            sleep(Duration::from_millis(2)).await;
+        }
+        false
+    }
+
+    #[tokio::test]
+    async fn regression_setup_failure_with_inherited_output_is_bounded() {
+        let dir = temp_dir("startup-held-pipes");
+        let workspace = dir.join("ws");
+        fs::create_dir(&workspace).unwrap();
+        let sandbox = unchecked(orphaning_fake_bwrap(&dir, false, false));
+        let mut request = SandboxRequest::new(&workspace, ["true"]);
+        request.timeout = Duration::from_millis(100);
+        let result = tokio::time::timeout(Duration::from_secs(2), sandbox.run(request)).await;
+        let descendant_terminated = fixture_descendant_terminated(&dir).await;
+        if !descendant_terminated {
+            kill_fixture_descendant(&dir);
+        }
+        let _ = fs::remove_dir_all(dir);
+        assert!(
+            descendant_terminated,
+            "startup failure left a running descendant"
+        );
+        assert!(
+            matches!(result, Ok(Err(SandboxError::Failed(message))) if message.contains("before sandbox startup was confirmed"))
+        );
+    }
+
+    #[tokio::test]
+    async fn regression_exited_command_output_is_bounded_by_deadline() {
+        let dir = temp_dir("completed-held-pipes");
+        let workspace = dir.join("ws");
+        fs::create_dir(&workspace).unwrap();
+        let sandbox = unchecked(orphaning_fake_bwrap(&dir, true, false));
+        let mut request = SandboxRequest::new(&workspace, ["true"]);
+        request.timeout = Duration::from_millis(100);
+        let result = tokio::time::timeout(Duration::from_secs(2), sandbox.run(request)).await;
+        let descendant_terminated = fixture_descendant_terminated(&dir).await;
+        if !descendant_terminated {
+            kill_fixture_descendant(&dir);
+        }
+        let _ = fs::remove_dir_all(dir);
+        assert!(
+            descendant_terminated,
+            "output deadline left a running descendant"
+        );
+        let result = result
+            .expect("exited command retained output pipes")
+            .unwrap();
+        assert_eq!(result.status, SandboxStatus::Completed);
+        assert_eq!(result.exit_code, Some(0));
+        assert!(result.stdout.starts_with("parent-complete"));
+        assert!(result.incomplete);
+    }
+
+    #[tokio::test]
+    async fn regression_exited_command_output_is_bounded_by_cancellation() {
+        let dir = temp_dir("cancel-held-pipes");
+        let workspace = dir.join("ws");
+        fs::create_dir(&workspace).unwrap();
+        let sandbox = unchecked(orphaning_fake_bwrap(&dir, true, false));
+        let mut request = SandboxRequest::new(&workspace, ["true"]);
+        request.timeout = Duration::from_secs(30);
+        let cancellation = request.cancellation.clone();
+        let root_pid = dir.join("root.pid");
+        let cancel_task = tokio::spawn(async move {
+            for _ in 0..200 {
+                if let Ok(pid) = fs::read_to_string(&root_pid)
+                    && let Ok(pid) = pid.trim().parse::<i32>()
+                    && observe_child_exit(pid as u32).unwrap_or(false)
+                {
+                    cancellation.store(true, Ordering::Relaxed);
+                    return;
+                }
+                sleep(Duration::from_millis(5)).await;
+            }
+            panic!("fake foreground command did not exit");
+        });
+        let result = tokio::time::timeout(Duration::from_secs(2), sandbox.run(request)).await;
+        let descendant_terminated = fixture_descendant_terminated(&dir).await;
+        if !descendant_terminated {
+            kill_fixture_descendant(&dir);
+        }
+        let cancelled = cancel_task.await;
+        let _ = fs::remove_dir_all(dir);
+        assert!(
+            descendant_terminated,
+            "output cancellation left a running descendant"
+        );
+        cancelled.unwrap();
+        let result = result
+            .expect("cancellation did not finish output drainage")
+            .unwrap();
+        assert_eq!(result.status, SandboxStatus::Completed);
+        assert_eq!(result.exit_code, Some(0));
+        assert!(result.incomplete);
+    }
+
+    #[tokio::test]
+    async fn regression_detached_pipe_writer_keeps_root_unreaped_until_drain_finishes() {
+        let dir = temp_dir("detached-held-pipes");
+        let workspace = dir.join("ws");
+        fs::create_dir(&workspace).unwrap();
+        let sandbox = unchecked(orphaning_fake_bwrap(&dir, true, true));
+        let mut request = SandboxRequest::new(&workspace, ["true"]);
+        request.timeout = Duration::from_millis(250);
+        let root_pid = dir.join("root.pid");
+        let observe = tokio::spawn(async move {
+            for _ in 0..100 {
+                if let Ok(pid) = fs::read_to_string(&root_pid)
+                    && let Ok(pid) = pid.trim().parse::<u32>()
+                    && observe_child_exit(pid).unwrap_or(false)
+                {
+                    sleep(Duration::from_millis(30)).await;
+                    return (pid, observe_child_exit(pid).unwrap_or(false));
+                }
+                sleep(Duration::from_millis(2)).await;
+            }
+            panic!("foreground identity was lost before drainage");
+        });
+        let result = tokio::time::timeout(Duration::from_secs(2), sandbox.run(request)).await;
+        let pinned = observe.await;
+        let detached_stopped = fixture_descendant_terminated(&dir).await;
+        if !detached_stopped {
+            kill_fixture_descendant(&dir);
+        }
+        let _ = fs::remove_dir_all(dir);
+        let (pid, remained_owned) = pinned.unwrap();
+        assert!(
+            remained_owned,
+            "foreground root was reaped during output drainage"
+        );
+        assert_eq!(
+            observe_child_exit(pid).unwrap_err().raw_os_error(),
+            Some(libc::ECHILD)
+        );
+        assert!(
+            !detached_stopped,
+            "cleanup must remain within the original group"
+        );
+        let result = result
+            .expect("detached writer retained the output pipes")
+            .unwrap();
+        assert_eq!(result.status, SandboxStatus::Completed);
+        assert_eq!(result.exit_code, Some(0));
+        assert!(result.incomplete);
     }
 
     #[tokio::test]
@@ -1177,6 +1612,37 @@ mod tests {
     }
 
     #[test]
+    fn explicit_system_commands_still_require_allowlisted_basenames() {
+        let dir = temp_dir("absolute-command");
+        let workspace = dir.join("ws");
+        fs::create_dir(&workspace).unwrap();
+        let sandbox = unchecked(fake_bwrap(&dir));
+        for command in ["/usr/bin/printf", "/bin/printf"] {
+            let request = SandboxRequest::new(&workspace, [command, "permitted"]);
+            assert!(sandbox.validate_authority(&request).is_ok(), "{command}");
+        }
+        let request = SandboxRequest::new(&workspace, ["/usr/bin/sh"]);
+        assert!(matches!(
+            sandbox.validate_authority(&request),
+            Err(SandboxError::InvalidRequest(message)) if message.contains("not authorized")
+        ));
+        let ungranted = dir.join("printf");
+        fs::write(&ungranted, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&ungranted, fs::Permissions::from_mode(0o755)).unwrap();
+        for command in [
+            ungranted.display().to_string(),
+            format!("/usr/..{}", ungranted.display()),
+        ] {
+            let request = SandboxRequest::new(&workspace, [command]);
+            assert!(matches!(
+                sandbox.validate_authority(&request),
+                Err(SandboxError::InvalidRequest(_))
+            ));
+        }
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn environment_secrets_are_not_bubblewrap_argv() {
         let dir = temp_dir("env");
         let workspace = dir.join("ws");
@@ -1289,5 +1755,63 @@ mod tests {
 
     fn symlink_dir(target: &Path, link: &Path) {
         std::os::unix::fs::symlink(target, link).unwrap();
+    }
+
+    #[tokio::test]
+    async fn exact_node_grants_are_readonly_and_do_not_expand_base_or_network_authority() {
+        let dir = temp_dir("exact-grants");
+        let workspace = dir.join("ws");
+        let inputs = dir.join("private-inputs");
+        fs::create_dir(&workspace).unwrap();
+        fs::create_dir(&inputs).unwrap();
+        let source = inputs.join("selected.txt");
+        fs::write(&source, "selected-content").unwrap();
+        fs::write(inputs.join("other.txt"), "ungranted").unwrap();
+        let base = BubblewrapSandbox::new(
+            BubblewrapPolicy::new("bwrap", ["sh"]).authorize_workspace_root(&workspace),
+        )
+        .unwrap();
+        let grant = ReadOnlyInput::new(&source, "/local-inputs/selected");
+        let node = base
+            .with_readonly_grants(std::slice::from_ref(&grant))
+            .unwrap();
+        let mut request = SandboxRequest::new(
+            &workspace,
+            [
+                "sh",
+                "-c",
+                "cat /local-inputs/selected; ! printf changed > /local-inputs/selected",
+            ],
+        );
+        request.readonly_inputs.push(grant);
+        assert!(matches!(
+            base.run(request.clone()).await,
+            Err(SandboxError::InvalidRequest(_))
+        ));
+        let result = node.run(request.clone()).await.unwrap();
+        assert_eq!(result.exit_code, Some(0));
+        assert_eq!(result.stdout, "selected-content");
+        assert_eq!(fs::read_to_string(&source).unwrap(), "selected-content");
+
+        let mut moved = request.clone();
+        moved.readonly_inputs[0].destination = "/local-inputs/other".into();
+        assert!(matches!(
+            node.run(moved).await,
+            Err(SandboxError::InvalidRequest(_))
+        ));
+        let mut sibling = request.clone();
+        sibling.readonly_inputs[0].source = inputs.join("other.txt");
+        assert!(matches!(
+            node.run(sibling).await,
+            Err(SandboxError::InvalidRequest(_))
+        ));
+
+        request.command = vec!["sh".into(), "-c".into(), "touch network-denied".into()];
+        request.network = NetworkPolicy::Enabled;
+        assert!(
+            matches!(node.run(request).await, Err(SandboxError::InvalidRequest(reason)) if reason.contains("network access"))
+        );
+        assert!(!workspace.join("network-denied").exists());
+        let _ = fs::remove_dir_all(dir);
     }
 }

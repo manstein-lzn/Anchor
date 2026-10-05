@@ -9,7 +9,7 @@ use anchor_runtime_rig::graph::{
 };
 use sha2::Digest;
 use std::collections::BTreeMap;
-use std::{future::Future, path::Path, pin::Pin};
+use std::{future::Future, pin::Pin};
 
 pub(crate) struct PreparedExecution {
     pub(crate) store: FileRunStore,
@@ -50,8 +50,8 @@ impl PreparedExecution {
         // Admission validates the Plugin declarations and host wiring. The
         // per-node network flag is enforced when the node is dispatched.
         nodes
-            .mcp
-            .validate_bindings(&bindings.values().cloned().collect::<Vec<_>>(), true)?;
+            .io_resolver
+            .validate_plugin_configuration(&bindings.values().cloned().collect::<Vec<_>>())?;
         let caps = nodes.capabilities();
         for node in &record.snapshot.nodes {
             if node.agent.is_some() && !caps.agent {
@@ -62,32 +62,132 @@ impl PreparedExecution {
             if let Some(op) = node.op.as_ref().and_then(|id| record.snapshot.ops.get(id))
                 && let Some(command) = op.get("run").and_then(serde_json::Value::as_str)
             {
-                let args = shlex::split(command).ok_or("malformed Op.run command")?;
-                let basename = Path::new(&args[0])
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .ok_or("Op.run command must select an executable basename")?;
-                if args[0] != basename
-                    || !nodes
-                        .allowed_commands
-                        .iter()
-                        .any(|allowed| allowed == basename)
-                {
-                    return Err(format!("Op.run command `{}` is not authorized", args[0]));
-                }
+                crate::op::shell_command(command, &nodes.allowed_commands)?;
             }
         }
-        Ok(Self {
+        let execution = Self {
             store,
             artifacts,
             nodes,
             control,
             catalog_root,
             application,
-        })
+        };
+        let metadata = crate::application::metadata::load(
+            &crate::env_path("ANCHOR_RUNNER_STATE_ROOT")?,
+            &record.run_id,
+        )
+        .map_err(|error| format!("local input Run identity unavailable: {error:?}"))?;
+        if let Some(metadata) = metadata {
+            execution.bind_local_inputs(record, &metadata.graph)?;
+        } else if !execution.nodes.io_resolver.local_inputs_configured() {
+            execution
+                .nodes
+                .io_resolver
+                .bind_local_inputs(record, None)?;
+        } else if execution.application.is_none() {
+            let graph = std::env::var("ANCHOR_RUNNER_GRAPH_NAME")
+                .ok()
+                .filter(|name| !name.trim().is_empty())
+                .ok_or(
+                    "ANCHOR_RUNNER_GRAPH_NAME is required with ANCHOR_RUNNER_LOCAL_INPUTS_ROOT",
+                )?;
+            execution.bind_local_inputs(record, &graph)?;
+        }
+        // The framed entrypoint prepares from the submitted snapshot before
+        // loading its stored cursor. Validate the durable record here too, so
+        // configuration mistakes cannot turn a recoverable Run into Failed.
+        if let Some(existing) = execution
+            .store
+            .load(&record.run_id)
+            .map_err(|error| error.to_string())?
+        {
+            execution.validate_configuration(&existing)?;
+        }
+        Ok(execution)
+    }
+
+    pub(crate) fn bind_local_inputs(
+        &self,
+        record: &GraphRunRecord,
+        graph: &str,
+    ) -> Result<(), String> {
+        self.nodes
+            .io_resolver
+            .bind_local_inputs(record, Some(graph))
+    }
+
+    fn validate_configuration(&self, root: &GraphRunRecord) -> Result<(), String> {
+        let mut pending = vec![root.clone()];
+        let mut checked = std::collections::BTreeSet::new();
+        while let Some(record) = pending.pop() {
+            if !checked.insert(record.run_id.clone()) {
+                continue;
+            }
+            let metadata = crate::application::metadata::load(
+                &crate::env_path("ANCHOR_RUNNER_STATE_ROOT")?,
+                &record.run_id,
+            )
+            .map_err(|error| format!("Run configuration identity unavailable: {error:?}"))?;
+            self.nodes.io_resolver.bind_local_inputs(
+                &record,
+                metadata.as_ref().map(|metadata| metadata.graph.as_str()),
+            )?;
+            self.nodes.io_resolver.verify_local_inputs(&record)?;
+            if let Some(nodes) = &self.nodes.io_nodes {
+                let mut cursors = record.cursor.iter().collect::<Vec<_>>();
+                if let Some(parallel) = &record.parallel {
+                    cursors.extend(
+                        parallel
+                            .branches
+                            .iter()
+                            .filter_map(|branch| branch.cursor.as_ref()),
+                    );
+                }
+                for cursor in cursors {
+                    if let Some(agent) = record
+                        .snapshot
+                        .nodes
+                        .iter()
+                        .find(|node| node.id == cursor.node_id)
+                        .and_then(|node| node.agent.as_ref())
+                        .and_then(|agent| record.snapshot.agents.get(agent))
+                    {
+                        nodes
+                            .validate_model_binding(&cursor.key, Some(&agent.model))
+                            .map_err(|error| error.to_string())?;
+                    }
+                }
+            }
+            // A waiting parent may resume an already admitted child in-process.
+            // Its authority and model configuration must pass before either Run
+            // enters execution; the parent's grants never authorize the child.
+            for call in record.graph_calls.values() {
+                if call.mode != "wait"
+                    || !record.cursor.as_ref().is_some_and(|cursor| {
+                        cursor.node_id == call.identity.node_id
+                            && cursor.key.invocation == call.identity.invocation
+                    })
+                {
+                    continue;
+                }
+                if let Some(child) = &call.child_run_id
+                    && let Some(child) =
+                        self.store.load(child).map_err(|error| error.to_string())?
+                    && !matches!(
+                        child.status,
+                        RunStatus::Completed | RunStatus::Failed | RunStatus::Aborted
+                    )
+                {
+                    pending.push(child);
+                }
+            }
+        }
+        Ok(())
     }
 
     pub(crate) async fn run(self, record: GraphRunRecord) -> Result<GraphRunRecord, String> {
+        self.validate_configuration(&record)?;
         let run_id = record.run_id.clone();
         let graph_calls = record
             .snapshot
@@ -192,6 +292,101 @@ impl RunnerGraphCatalog {
 }
 
 impl GraphCatalog for RunnerGraphCatalog {
+    fn prepare_session_call<'a>(
+        &'a self,
+        identity: &'a CallIdentity,
+        session: &'a str,
+        graph: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value, GraphError>> + Send + 'a>> {
+        Box::pin(async move {
+            if self.application.is_none() {
+                return Err(GraphError::Unsupported(
+                    "call.session requires a platform application".into(),
+                ));
+            }
+            let mut ancestor = Some(identity.parent_run_id.clone());
+            let mut seen = std::collections::BTreeSet::new();
+            while let Some(id) = ancestor {
+                if !seen.insert(id.clone()) {
+                    return Err(GraphError::CorruptRun("cyclic call ancestry".into()));
+                }
+                let metadata = crate::application::metadata::load(&self.state, &id)
+                    .map_err(|error| {
+                        GraphError::Unsupported(format!("parent identity: {error:?}"))
+                    })?
+                    .ok_or_else(|| GraphError::CorruptRun("missing parent identity".into()))?;
+                if metadata.conversation.is_some() || metadata.session_call.is_some() {
+                    return Err(GraphError::Unsupported(
+                        "a conversation cannot enqueue work into a Session".into(),
+                    ));
+                }
+                ancestor = metadata.graph_call.map(|source| source.parent_run);
+            }
+            // Admission freezes the authorized recipient. A resumed wait consumes
+            // that same fact; the Session host revalidates it before execution/send.
+            if let Some(metadata) = crate::application::metadata::load(
+                &self.state,
+                &format!("call-{}", identity.durable_key()),
+            )
+            .map_err(|error| GraphError::Unsupported(format!("Session identity: {error:?}")))?
+                && let Some(call) = metadata.session_call
+            {
+                if call.context.session != session || metadata.graph != graph {
+                    return Err(GraphError::RunConflict);
+                }
+                return serde_json::to_value(call.context).map_err(GraphError::SnapshotDecode);
+            }
+            crate::application::session_calls::resolve(identity, session, graph).await
+        })
+    }
+
+    fn record_session_call(
+        &self,
+        run_id: &str,
+        context: &serde_json::Value,
+    ) -> Result<(), GraphError> {
+        self.application
+            .as_ref()
+            .ok_or_else(|| GraphError::Unsupported("Session host unavailable".into()))?
+            .record_session_call(run_id, context)
+            .map_err(|error| GraphError::Unsupported(format!("Session admission: {error:?}")))
+    }
+
+    fn session_call_outcome<'a>(
+        &'a self,
+        run_id: &'a str,
+        mode: &'a str,
+        cancellation: anchor_runtime_rig::Cancellation,
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<
+                        Option<anchor_runtime_rig::graph::GraphCallOutcome>,
+                        GraphError,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            let application = self
+                .application
+                .as_ref()
+                .ok_or_else(|| GraphError::Unsupported("Session host unavailable".into()))?;
+            if mode == "wait" && cancellation.load(std::sync::atomic::Ordering::Acquire) {
+                application
+                    .stop_session_call(run_id)
+                    .await
+                    .map_err(|error| {
+                        GraphError::Unsupported(format!("Session cancellation: {error:?}"))
+                    })?;
+            }
+            application
+                .session_call_outcome(run_id, mode)
+                .map_err(|error| GraphError::Unsupported(format!("Session outcome: {error:?}")))
+        })
+    }
+
     fn snapshot(&self, name: &str) -> Result<Option<GraphSnapshot>, GraphError> {
         Ok(self.bundle(name)?.map(|bundle| bundle.snapshot))
     }
@@ -245,6 +440,17 @@ impl GraphCatalog for RunnerGraphCatalog {
         mode: &str,
     ) -> Result<(), GraphError> {
         let path = self.path(graph)?;
+        crate::local_inputs::LocalInputs::from_env(self.state.clone())
+            .and_then(|inputs| {
+                inputs.freeze(
+                    run_id,
+                    &snapshot.digest().map_err(|error| error.to_string())?,
+                    snapshot,
+                    Some(graph),
+                    true,
+                )
+            })
+            .map_err(GraphError::Unsupported)?;
         let parent_metadata =
             crate::application::metadata::load(&self.state, &identity.parent_run_id)
                 .map_err(|error| GraphError::Unsupported(format!("parent metadata: {error:?}")))?
@@ -306,6 +512,26 @@ impl GraphCatalog for RunnerGraphCatalog {
                 "child Run metadata does not match its durable Graph call identity".into(),
             ));
         }
+        let child = FileRunStore::new(self.state.join("runs")).load(run_id)?;
+        if child.is_some_and(|child| {
+            matches!(
+                child.status,
+                RunStatus::Completed | RunStatus::Failed | RunStatus::Aborted
+            )
+        }) {
+            return Ok(());
+        }
+        crate::local_inputs::LocalInputs::from_env(self.state.clone())
+            .and_then(|inputs| {
+                inputs.freeze(
+                    run_id,
+                    &snapshot.digest().map_err(|error| error.to_string())?,
+                    snapshot,
+                    Some(&metadata.graph),
+                    false,
+                )
+            })
+            .map_err(GraphError::Unsupported)?;
         Ok(())
     }
 

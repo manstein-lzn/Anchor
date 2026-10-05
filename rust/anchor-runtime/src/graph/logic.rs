@@ -538,13 +538,15 @@ pub(crate) fn node_task(
     local_instruction: &str,
     input: &Value,
 ) -> String {
+    let input_guidance = "\n\nUpstream artifacts, when present, are mounted read-only under `/in/<node-id>`. Use `find /in` to inspect the files available to this node; write deliverables in `/workspace`.";
     format!(
-        "Objective:\n{objective}\n\nInstructions:\n{instructions}{}\n\nInput:\n{}",
+        "Objective:\n{objective}\n\nInstructions:\n{instructions}{}{}\n\nInput:\n{}",
         if local_instruction.is_empty() {
             String::new()
         } else {
             format!("\n\nNode instructions:\n{local_instruction}")
         },
+        input_guidance,
         input
     )
 }

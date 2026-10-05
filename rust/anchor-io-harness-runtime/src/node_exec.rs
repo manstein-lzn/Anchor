@@ -1,7 +1,7 @@
 //! Anchor `NodeRequest` execution through the io-harness loop.
 //!
-//! This crate is intentionally a spike. io-harness owns the model/tool loop;
-//! Anchor owns the node request, ToolPort, and the completed NodeOutcome.
+//! io-harness owns the model/tool loop; Anchor owns the node request, ToolPort,
+//! and the completed NodeOutcome.
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -10,6 +10,7 @@ use std::time::Duration;
 use crate::node::{AnchorToolAdapter, IoHarnessNodeBackend};
 use anchor_runtime_rig::graph::{RecoveryAttempt, RecoveryDecision};
 use anchor_runtime_rig::{NodeError, NodeOutcome, NodeRequest, NodeStatus, ToolPort};
+use base64::{Engine, engine::general_purpose::STANDARD};
 use io_harness::{
     ApproveAll, Policy, RecoveryDecision as HarnessRecoveryDecision, RunOutcome, Store,
     TaskContract, ToolMask, Toolbox, Verification,
@@ -42,6 +43,8 @@ pub enum IoHarnessNodeExecutionError {
     CompletionSchema(String),
     #[error("completed io-harness output does not satisfy the Anchor completion schema")]
     InvalidSummary,
+    #[error("invalid node image: {0}")]
+    InvalidImage(String),
 }
 
 impl From<IoHarnessNodeExecutionError> for NodeError {
@@ -55,6 +58,14 @@ impl From<IoHarnessNodeExecutionError> for NodeError {
 pub struct IoHarnessNodeExecution {
     backend: IoHarnessNodeBackend,
     policy: Policy,
+    images: Vec<io_harness::Media>,
+}
+
+/// Image bytes already validated and frozen by the trusted host resolver.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NodeImage {
+    pub data: Vec<u8>,
+    pub media_type: String,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -67,7 +78,37 @@ impl IoHarnessNodeExecution {
         Self {
             backend: IoHarnessNodeBackend::new(store_path, policy.clone()),
             policy,
+            images: Vec::new(),
         }
+    }
+
+    /// Attach the same host-frozen images to every request of this invocation,
+    /// including exact-run resume and native Session turns.
+    pub fn with_images(
+        mut self,
+        images: Vec<NodeImage>,
+    ) -> Result<Self, IoHarnessNodeExecutionError> {
+        self.images = images
+            .into_iter()
+            .map(|image| {
+                if !io_harness::IMAGE_MEDIA_TYPES.contains(&image.media_type.as_str()) {
+                    return Err(IoHarnessNodeExecutionError::InvalidImage(format!(
+                        "unsupported image media type {:?}: expected one of {}",
+                        image.media_type,
+                        io_harness::IMAGE_MEDIA_TYPES.join(", "),
+                    )));
+                }
+                // Media::image's 5 MiB convenience limit is vendor-agnostic.
+                // Our Rig transport uses OpenAI wires; the trusted host owns
+                // Anchor's 10 MiB per-image quota and validates the bytes.
+                // Harness still enforces its 20 MiB aggregate request bound.
+                Ok(io_harness::Media {
+                    media_type: image.media_type,
+                    base64: STANDARD.encode(image.data),
+                })
+            })
+            .collect::<Result<_, _>>()?;
+        Ok(self)
     }
 
     pub fn backend(&self) -> &IoHarnessNodeBackend {
@@ -93,6 +134,37 @@ impl IoHarnessNodeExecution {
         limits: NodeExecutionLimits,
     ) -> Result<NodeOutcome, IoHarnessNodeExecutionError> {
         self.run(request, provider, port, None, None, limits).await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn start_conversation_with_limits<P: io_harness::Provider>(
+        &self,
+        request: &NodeRequest,
+        provider: &P,
+        port: Arc<dyn ToolPort>,
+        limits: NodeExecutionLimits,
+        session: &mut io_harness::Session,
+        store: &Store,
+        observer: &dyn io_harness::Observer,
+    ) -> Result<NodeOutcome, IoHarnessNodeExecutionError> {
+        if request.cancellation.load(Ordering::Relaxed) {
+            return Err(IoHarnessNodeExecutionError::CancelledBeforeStart);
+        }
+        let contract = frozen_contract(request, limits)?
+            .with_images(self.images.clone())
+            .with_conversational_turns(false)
+            .with_tools(anchor_tools(port)?);
+        let result = session
+            .turn_bounded_observed(
+                &contract,
+                provider,
+                store,
+                &self.policy,
+                &ApproveAll,
+                observer,
+            )
+            .await?;
+        self.outcome(request, result.run_id, result.outcome)
     }
 
     /// Resume a previously persisted io-harness run using the same frozen
@@ -161,7 +233,7 @@ impl IoHarnessNodeExecution {
             return Err(IoHarnessNodeExecutionError::CancelledBeforeStart);
         }
 
-        let contract = frozen_contract(request, limits)?;
+        let contract = frozen_contract(request, limits)?.with_images(self.images.clone());
         let tools = anchor_tools(port)?;
         let result = match (resume_id, recovery) {
             (Some(run_id), Some((attempt_id, decision))) => {
@@ -210,11 +282,20 @@ impl IoHarnessNodeExecution {
             (None, Some(_)) => unreachable!("recovery requires a persisted run id"),
         };
 
-        if !matches!(result.outcome, RunOutcome::Finished { .. }) {
-            if let RunOutcome::AwaitingRecovery { attempt_id, .. } = result.outcome {
+        self.outcome(request, result.run_id, result.outcome)
+    }
+
+    fn outcome(
+        &self,
+        request: &NodeRequest,
+        run_id: i64,
+        outcome: RunOutcome,
+    ) -> Result<NodeOutcome, IoHarnessNodeExecutionError> {
+        if !matches!(outcome, RunOutcome::Finished { .. }) {
+            if let RunOutcome::AwaitingRecovery { attempt_id, .. } = outcome {
                 let store = Store::open(self.backend.store_path())?;
                 let attempt = store
-                    .open_attempts(result.run_id)?
+                    .open_attempts(run_id)?
                     .into_iter()
                     .find(|attempt| attempt.id == attempt_id)
                     .ok_or_else(|| {
@@ -223,7 +304,7 @@ impl IoHarnessNodeExecution {
                         ))
                     })?;
                 return Err(IoHarnessNodeExecutionError::AwaitingRecovery {
-                    run_id: result.run_id,
+                    run_id,
                     attempts: vec![RecoveryAttempt {
                         attempt_id: attempt.id,
                         step: attempt.step,
@@ -232,14 +313,11 @@ impl IoHarnessNodeExecution {
                     }],
                 });
             }
-            return Err(IoHarnessNodeExecutionError::Incomplete {
-                run_id: result.run_id,
-                outcome: result.outcome,
-            });
+            return Err(IoHarnessNodeExecutionError::Incomplete { run_id, outcome });
         }
 
         let store = Store::open(self.backend.store_path())?;
-        let turns = store.step_turns(result.run_id)?;
+        let turns = store.step_turns(run_id)?;
         let final_turn = turns
             .last()
             .filter(|turn| {
@@ -261,8 +339,8 @@ impl IoHarnessNodeExecution {
             status: NodeStatus::Completed,
             submission,
             route,
-            model_requests: store.provider_calls(result.run_id)?.len(),
-            reason: format!("io-harness finished run {}", result.run_id),
+            model_requests: store.provider_calls(run_id)?.len(),
+            reason: format!("io-harness finished run {run_id}"),
         })
     }
 }
@@ -272,11 +350,12 @@ fn frozen_contract(
     limits: NodeExecutionLimits,
 ) -> Result<TaskContract, IoHarnessNodeExecutionError> {
     let max_steps = request.max_turns.clamp(1, u32::MAX as usize) as u32;
+    let output_schema = completion_schema(&request.routes)?;
     let mut contract = TaskContract::workspace(&request.task, &request.workspace)
         .with_verification(Verification::None)
         .with_max_steps(max_steps)
         .with_tool_mask(anchor_tool_mask())
-        .with_output_schema(completion_schema(&request.routes)?);
+        .with_output_schema(output_schema);
     if let Some(wall_time) = limits.wall_time {
         contract = contract.with_time_budget(wall_time);
     }
@@ -292,7 +371,7 @@ fn frozen_contract(
         .instructions
         .push(format!("Allowed Anchor routes: {routes}"));
     contract.instructions.push(
-        "Finish with exactly one JSON object matching the required Anchor completion schema; do not add prose, Markdown, or code fences.".into(),
+        "When this node is complete, call final_result with a non-empty summary and a legal route when required. Call it alone after inspecting all business tool results. Completion is separate from business tool use; ordinary text does not complete the node.".into()
     );
     Ok(contract)
 }
@@ -309,6 +388,10 @@ fn completion_schema(
             "route".into(),
             serde_json::json!({"type":"string","enum":routes}),
         );
+    } else {
+        // A supplied non-null route with no outgoing edge is a correctable
+        // completion error, not an ignored extra field or a post-loop failure.
+        properties.insert("route".into(), serde_json::json!({"type":"null"}));
     }
     let mut required = vec![serde_json::json!("summary")];
     if routes.len() > 1 {
@@ -318,7 +401,7 @@ fn completion_schema(
         "type":"object",
         "properties":properties,
         "required":required,
-        "additionalProperties":false
+        "additionalProperties":true
     }))
     .map_err(|error| IoHarnessNodeExecutionError::CompletionSchema(error.to_string()))
 }
@@ -387,6 +470,11 @@ fn anchor_tool_mask() -> ToolMask {
 fn anchor_tools(port: Arc<dyn ToolPort>) -> Result<Toolbox, IoHarnessNodeExecutionError> {
     let mut tools = Toolbox::new();
     for definition in port.definitions() {
+        if definition.name == crate::completion::TOOL_NAME {
+            return Err(IoHarnessNodeExecutionError::ToolRegistration(
+                "tool name `final_result` is reserved for Anchor node completion".into(),
+            ));
+        }
         let adapter = AnchorToolAdapter::new(Arc::clone(&port), &definition.name)
             .map_err(IoHarnessNodeExecutionError::ToolRegistration)?;
         tools = tools.with(adapter);
@@ -454,6 +542,7 @@ fn _approval_type_is_public() -> ApproveAll {
 
 #[cfg(test)]
 mod tests {
+    mod completion_protocol;
     use std::future::Future;
     use std::pin::Pin;
     use std::sync::Arc;
@@ -626,7 +715,7 @@ mod tests {
             schema.as_value()["properties"]["route"]["enum"],
             serde_json::json!(["next"])
         );
-        assert_eq!(schema.as_value()["additionalProperties"], false);
+        assert_eq!(schema.as_value()["additionalProperties"], true);
     }
 
     #[test]
@@ -648,7 +737,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let model = MockCompletionModel::from_turns([
             MockTurn::tool_call("call-1", "anchor_echo", json!({"value":"from-node"})),
-            MockTurn::text(r#"{"summary":"echo observed","route":"next"}"#),
+            MockTurn::tool_call(
+                "completion-1",
+                "final_result",
+                json!({"summary":"echo observed","route":"next"}),
+            ),
         ]);
         let provider = RigProviderAdapter::new(model.clone().erase(), false);
         let port = std::sync::Arc::new(FakePort {
@@ -683,7 +776,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let model = MockCompletionModel::from_turns([
             MockTurn::tool_call("call-1", "fixture_remote_read", json!({"id":"item-1"})),
-            MockTurn::text(r#"{"summary":"record found","route":"next"}"#),
+            MockTurn::tool_call(
+                "completion-1",
+                "final_result",
+                json!({"summary":"record found","route":"next"}),
+            ),
         ]);
         let provider = RigProviderAdapter::new(model.clone().erase(), false);
         let port = Arc::new(DirectMcpPort {
@@ -718,7 +815,11 @@ mod tests {
             MockTurn::text(
                 "```json\n{\"summary\":\"first attempt\",\"route\":\"next\",\"extra\":true}\n```",
             ),
-            MockTurn::text(r#"{"summary":"corrected","route":"next"}"#),
+            MockTurn::tool_call(
+                "completion-1",
+                "final_result",
+                json!({"summary":"corrected","route":"next"}),
+            ),
         ]);
         let provider = RigProviderAdapter::new(model.clone().erase(), false);
         let execution =
@@ -741,6 +842,10 @@ mod tests {
         assert_eq!(model.request_count(), 2);
         let requests = model.requests();
         assert!(requests[0].output_schema.is_none());
+        let initial = serde_json::to_string(&requests[0]).unwrap();
+        assert!(initial.contains("additionalProperties"));
+        assert!(initial.contains("summary"));
+        assert!(initial.contains("required"));
         assert!(
             serde_json::to_string(&requests[1])
                 .unwrap()
@@ -780,7 +885,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let model = MockCompletionModel::from_turns([
             MockTurn::tool_call("call-1", "anchor_echo", json!({"value":"cancel-me"})),
-            MockTurn::text(r#"{"summary":"must not publish","route":"next"}"#),
+            MockTurn::tool_call(
+                "completion-1",
+                "final_result",
+                json!({"summary":"must not publish","route":"next"}),
+            ),
         ]);
         let provider = RigProviderAdapter::new(model.clone().erase(), false);
         let cancellation = std::sync::Arc::new(AtomicBool::new(false));

@@ -10,7 +10,7 @@ use anchor_graph_host::FileGraphBundleLoader;
 use anchor_runtime_rig::graph::{FileRunStore, RunStatus};
 use axum::{
     Json, Router,
-    extract::{Path as AxumPath, Query, State},
+    extract::{DefaultBodyLimit, Path as AxumPath, Query, State},
     http::{HeaderMap, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response as HttpResponse},
@@ -20,7 +20,11 @@ use files::*;
 use graphs::*;
 use runs::*;
 use serde_json::{Value, json};
-use std::{collections::HashMap, env, io, path::PathBuf};
+use std::{
+    collections::{HashMap, HashSet},
+    env, io,
+    path::PathBuf,
+};
 use timeline::*;
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::services::ServeDir;
@@ -113,13 +117,7 @@ pub async fn serve() -> io::Result<()> {
         .parse::<std::net::SocketAddr>()
         .is_ok_and(|addr| addr.ip().is_loopback())
         || listen.starts_with("localhost:");
-    let api_keys = env::var("ANCHOR_API_KEYS")
-        .unwrap_or_default()
-        .split(',')
-        .map(str::trim)
-        .filter(|key| !key.is_empty())
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
+    let api_keys = parse_api_keys(&env::var("ANCHOR_API_KEYS").unwrap_or_default())?;
     if !loopback && api_keys.is_empty() {
         return Err(io::Error::other(
             "ANCHOR_API_KEYS required on non-loopback bind",
@@ -155,6 +153,22 @@ pub async fn serve() -> io::Result<()> {
     axum::serve(listener, app).await.map_err(io::Error::other)
 }
 
+fn parse_api_keys(raw: &str) -> io::Result<Vec<String>> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Ok(Vec::new());
+    }
+    let keys = serde_json::from_str::<Vec<String>>(raw)
+        .map_err(|_| io::Error::other("ANCHOR_API_KEYS must be a JSON array of strings"))?;
+    let unique = keys.iter().collect::<HashSet<_>>().len() == keys.len();
+    if keys.is_empty() || keys.iter().any(|key| key.is_empty() || key.len() < 32) || !unique {
+        return Err(io::Error::other(
+            "ANCHOR_API_KEYS must contain unique secrets of at least 32 bytes",
+        ));
+    }
+    Ok(keys)
+}
+
 fn router(state: ApiState) -> Router {
     let web_root = env::var_os("ANCHOR_RUNNER_WEB_ROOT")
         .map(PathBuf::from)
@@ -163,10 +177,17 @@ fn router(state: ApiState) -> Router {
 }
 
 fn router_with_web_root(state: ApiState, web_root: PathBuf) -> Router {
+    let conversations = Router::new()
+        .route("/conversation-runs", post(conversation_run))
+        .layer(DefaultBodyLimit::max(crate::channel_inputs::MAX_BODY_BYTES))
+        .layer(RequestBodyLimitLayer::new(
+            crate::channel_inputs::MAX_BODY_BYTES,
+        ));
     let api = Router::new()
         .route("/health", get(|| async { Json(json!({"status":"ok"})) }))
         .route("/graphs", get(graphs))
         .route("/graphs", post(create_graph))
+        .route("/graph-validation", post(validate_graph))
         .route(
             "/graphs/{graph}",
             get(graph).put(update_graph).delete(delete_graph),
@@ -174,14 +195,19 @@ fn router_with_web_root(state: ApiState, web_root: PathBuf) -> Router {
         .route("/trigger", post(trigger))
         .route("/runs", get(list_runs))
         .route("/runs/{run}", get(get_run).delete(delete_run))
+        .route("/runs/{run}/channel-reply", get(read_channel_reply))
+        .route("/runs/{run}/session-execution", post(execute_session_call))
+        .route("/runs/{run}/session-yield", post(yield_session_call))
+        .route("/runs/{run}/session-settlement", post(settle_session_call))
         .route("/runs/{run}/recovery", post(recover_run))
         .route("/runs/{run}/{operation}", post(control))
         .route("/runs/{run}/files/{node}", get(list_files))
         .route("/runs/{run}/files/{node}/{*path}", get(read_file))
         .route("/timeline", get(timeline))
+        .layer(RequestBodyLimitLayer::new(2 * 1024 * 1024))
+        .merge(conversations)
         .with_state(state.clone())
-        .layer(middleware::from_fn_with_state(state, auth))
-        .layer(RequestBodyLimitLayer::new(2 * 1024 * 1024));
+        .layer(middleware::from_fn_with_state(state, auth));
     Router::new()
         .merge(api)
         .fallback_service(ServeDir::new(web_root).append_index_html_on_directories(true))

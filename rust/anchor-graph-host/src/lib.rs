@@ -47,6 +47,10 @@ pub struct BundlePluginSummary {
 /// Admitted expanded Graph snapshot and secret-free Plugin identities.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LoadedGraphBundle {
+    /// The editable graph definition as it appears in `graph.json`. Keep this
+    /// beside the compiled Runtime snapshot so hosts can return and persist
+    /// author-only fields without feeding them into Runtime execution.
+    pub authoring_definition: Value,
     pub snapshot: GraphSnapshot,
     pub plugins: Vec<anchor_runtime_rig::graph::PluginBinding>,
 }
@@ -79,9 +83,9 @@ impl FileGraphBundleLoader {
         }
         let graph_path = root.join("graph.json");
         reject_symlink_components(&root, &graph_path)?;
-        let value: Value = serde_json::from_slice(&std::fs::read(&graph_path)?)
+        let authoring_definition: Value = serde_json::from_slice(&std::fs::read(&graph_path)?)
             .map_err(GraphError::SnapshotDecode)?;
-        let snapshot = GraphSnapshot::admit(value)?;
+        let snapshot = GraphSnapshot::from_authoring(authoring_definition.clone())?;
 
         let expected = snapshot
             .nodes
@@ -136,6 +140,9 @@ impl FileGraphBundleLoader {
         if !ids.is_empty() {
             let plugin_root = root.join("plugins");
             reject_symlink_components(&root, &plugin_root)?;
+            for id in &ids {
+                reject_symlink_components(&root, &plugin_root.join(id))?;
+            }
             let mut actual = std::fs::read_dir(plugin_root)?
                 .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
                 .collect::<Result<Vec<_>, _>>()?;
@@ -149,6 +156,7 @@ impl FileGraphBundleLoader {
             }
         }
         Ok(LoadedGraphBundle {
+            authoring_definition,
             snapshot,
             plugins: bindings,
         })
@@ -906,16 +914,9 @@ fn mcp_server(
 
         if let Some(command) = server.get("command").and_then(Value::as_str) {
             let executable = Path::new(command);
-            if executable.is_absolute()
-                && !executable.starts_with(plugin_dir)
-                && !["/usr", "/bin", "/lib", "/lib64", "/sbin"]
-                    .iter()
-                    .any(|prefix| executable.starts_with(prefix))
-            {
-                return Err(invalid(format!(
-                    "Plugin {id}: MCP executable is outside system paths"
-                )));
-            }
+            // External interpreters are deployment resources. Preserve their
+            // declaration here; the host sandbox must authorize the exact
+            // configured tool environment before launching a process.
             if executable.is_absolute()
                 && executable.starts_with(plugin_dir)
                 && (!executable.is_file() || !is_executable(executable))
@@ -1138,10 +1139,17 @@ pub trait GraphCatalog: Send + Sync {
     /// keep the provider-free adapter behavior; production catalogs should
     /// return the bundle's Plugin pins as well.
     fn bundle(&self, name: &str) -> Result<Option<LoadedGraphBundle>, GraphError> {
-        Ok(self.snapshot(name)?.map(|snapshot| LoadedGraphBundle {
-            snapshot,
-            plugins: Vec::new(),
-        }))
+        self.snapshot(name)?
+            .map(|snapshot| {
+                let authoring_definition =
+                    serde_json::to_value(&snapshot).map_err(GraphError::SnapshotDecode)?;
+                Ok(LoadedGraphBundle {
+                    authoring_definition,
+                    snapshot,
+                    plugins: Vec::new(),
+                })
+            })
+            .transpose()
     }
 
     /// Persist API-visible identity metadata alongside a durable child Run.
@@ -1155,6 +1163,45 @@ pub trait GraphCatalog: Send + Sync {
         _mode: &str,
     ) -> Result<(), GraphError> {
         Ok(())
+    }
+
+    /// Resolve and authorize an existing channel Session. Returned context
+    /// supplies the trusted Session identity and channel input for the child.
+    fn prepare_session_call<'a>(
+        &'a self,
+        _identity: &'a CallIdentity,
+        _session: &'a str,
+        _graph: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<Value, GraphError>> + Send + 'a>> {
+        Box::pin(async {
+            Err(GraphError::Unsupported(
+                "Op.call session handoff is not supported by this host".into(),
+            ))
+        })
+    }
+
+    /// Persist trusted Session metadata before the child Run becomes durable.
+    fn record_session_call(&self, _run_id: &str, _context: &Value) -> Result<(), GraphError> {
+        Err(GraphError::Unsupported(
+            "Op.call session handoff is not supported by this host".into(),
+        ))
+    }
+
+    /// Delegate Session scheduling, execution and message delivery to its
+    /// owning host. `None` certifies successful execution and delivery; the
+    /// adapter then reads the completed child to export the ordinary result.
+    fn session_call_outcome<'a>(
+        &'a self,
+        _run_id: &'a str,
+        _mode: &'a str,
+        _cancellation: Cancellation,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<GraphCallOutcome>, GraphError>> + Send + 'a>>
+    {
+        Box::pin(async {
+            Err(GraphError::Unsupported(
+                "Op.call session handoff is not supported by this host".into(),
+            ))
+        })
     }
 
     /// Register a wait child with the host's per-Run control registry. The
@@ -1444,11 +1491,6 @@ impl<S: RunStore, A: ArtifactPort, N: NodeExecutionPort, C: RunControl> GraphCal
                     "Graph call spec does not match frozen parent snapshot".into(),
                 ));
             }
-            if spec.get("session").is_some() {
-                return Err(GraphError::Unsupported(
-                    "Op.call session handoff is not supported by this host".into(),
-                ));
-            }
             // A typed, `deny_unknown_fields` decode rejects malformed
             // input/input_map/files/result and any stray field before the host
             // can create a child Run or run a child side effect.
@@ -1462,7 +1504,30 @@ impl<S: RunStore, A: ArtifactPort, N: NodeExecutionPort, C: RunControl> GraphCal
             }
             let graph_name = call_spec.graph.as_str();
             let mode = call_spec.mode.as_str();
-            let child_input = call_spec.child_input(input)?;
+            let session_context = if let Some(session) = call_spec.session.as_deref() {
+                let context = self
+                    .catalog
+                    .prepare_session_call(identity, session, graph_name)
+                    .await?;
+                if context.get("session").and_then(Value::as_str) != Some(session)
+                    || !context.get("channel").is_some_and(Value::is_object)
+                {
+                    return Err(GraphError::CorruptRun(
+                        "session call context does not match the authorized Session".into(),
+                    ));
+                }
+                Some(context)
+            } else {
+                None
+            };
+            let mut child_input = call_spec.child_input(input)?;
+            if let Some(context) = session_context.as_ref() {
+                let values = child_input
+                    .as_object_mut()
+                    .expect("child_input returns an object");
+                values.insert("session".into(), context["session"].clone());
+                values.insert("channel".into(), context["channel"].clone());
+            }
             let file_selections = call_spec.file_selections();
             let run_id = child_run_id(identity);
             let child_lease = self
@@ -1577,6 +1642,9 @@ impl<S: RunStore, A: ArtifactPort, N: NodeExecutionPort, C: RunControl> GraphCal
                         .map_err(|e| {
                             GraphError::Unsupported(format!("persist child identity metadata: {e}"))
                         })?;
+                    if let Some(context) = session_context.as_ref() {
+                        self.catalog.record_session_call(&run_id, context)?;
+                    }
                     self.store
                         .save(&record)
                         .map_err(|e| GraphError::Unsupported(format!("persist child Run: {e}")))?;
@@ -1584,9 +1652,26 @@ impl<S: RunStore, A: ArtifactPort, N: NodeExecutionPort, C: RunControl> GraphCal
                 }
             };
             drop(child_lease);
+            if session_context.is_some() {
+                if let Some(outcome) = self
+                    .catalog
+                    .session_call_outcome(&run_id, mode, cancellation.clone())
+                    .await?
+                {
+                    return Ok(outcome);
+                }
+                child = self.store.load(&run_id)?.ok_or_else(|| {
+                    GraphError::CorruptRun("completed Session child Run is missing".into())
+                })?;
+                if child.status != RunStatus::Completed {
+                    return Err(GraphError::CorruptRun(
+                        "Session host confirmed delivery without a completed child Run".into(),
+                    ));
+                }
+            }
             // FileRunStore's record is the durable identity → child admission:
             // deterministic ID plus frozen snapshot/input are checked on retry.
-            if mode == "detach" {
+            if mode == "detach" && session_context.is_none() {
                 self.catalog.dispatch_detached(&run_id).await?;
                 return Ok(GraphCallOutcome::Detached {
                     child_run_id: run_id,
@@ -1596,14 +1681,15 @@ impl<S: RunStore, A: ArtifactPort, N: NodeExecutionPort, C: RunControl> GraphCal
             // is never re-entered: its own facts decide the parent outcome and
             // re-running it could replay an unknown side effect. Only the
             // non-terminal states are resumed along the same child Run.
-            let resumable = matches!(
-                child.status,
-                RunStatus::Ready
-                    | RunStatus::Running
-                    | RunStatus::Paused
-                    | RunStatus::Stopped
-                    | RunStatus::BudgetStopped
-            );
+            let resumable = session_context.is_none()
+                && matches!(
+                    child.status,
+                    RunStatus::Ready
+                        | RunStatus::Running
+                        | RunStatus::Paused
+                        | RunStatus::Stopped
+                        | RunStatus::BudgetStopped
+                );
             if child.status == RunStatus::WaitingCall {
                 return Err(GraphError::CorruptRun(
                     "called Graph child is itself waiting on a nested Graph call".into(),
@@ -1724,13 +1810,15 @@ fn child_run_id(identity: &CallIdentity) -> String {
 }
 
 /// Strict, typed view of a frozen `ops.<name>.call` object. Unknown fields are
-/// rejected so session or any future/unrecognized capability cannot be
+/// rejected so any future/unrecognized capability cannot be
 /// silently ignored before a child Run or side effect is created.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CallSpec {
     graph: String,
     mode: String,
+    #[serde(default)]
+    session: Option<String>,
     #[serde(default)]
     input: Option<Value>,
     #[serde(default)]
@@ -2009,8 +2097,10 @@ mod call_spec_tests {
     }
 
     #[test]
-    fn rejects_session_unknown_fields_and_wrong_types() {
-        assert!(parse(json!({"graph":"c","mode":"wait","session":"ops"})).is_err());
+    fn accepts_session_and_rejects_unknown_fields_and_wrong_types() {
+        let call = parse(json!({"graph":"c","mode":"wait","session":"ops"})).unwrap();
+        assert_eq!(call.session.as_deref(), Some("ops"));
+        assert!(parse(json!({"graph":"c","mode":"wait","session":1})).is_err());
         assert!(parse(json!({"graph":"c","mode":"wait","bogus":1})).is_err());
         assert!(parse(json!({"graph":"c","mode":"wait","input":{"a":1},"input_map":[]})).is_err());
         assert!(
@@ -2048,19 +2138,469 @@ mod call_spec_tests {
 }
 
 #[cfg(test)]
+mod session_call_tests {
+    use super::*;
+    use anchor_runtime_rig::graph::{CompletionFact, FileRunStore, NodeCompletion, RunCursor};
+    use serde_json::json;
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    #[derive(Default)]
+    struct Artifacts {
+        exports: Mutex<Vec<(InvocationKey, CommitRef, Vec<String>)>>,
+    }
+
+    impl ArtifactPort for Artifacts {
+        fn freeze<'a>(
+            &'a self,
+            key: &'a InvocationKey,
+            _: &'a NodeCompletion,
+        ) -> Pin<Box<dyn Future<Output = Result<CommitRef, GraphError>> + Send + 'a>> {
+            Box::pin(async move {
+                Ok(CommitRef {
+                    id: format!("commit-{}", key.durable_key()),
+                    node_id: key.node_id.clone(),
+                    invocation: key.invocation,
+                })
+            })
+        }
+
+        fn resolve<'a>(
+            &'a self,
+            _: &'a CommitRef,
+        ) -> Pin<Box<dyn Future<Output = Result<Value, GraphError>> + Send + 'a>> {
+            Box::pin(async { Ok(json!({})) })
+        }
+
+        fn export_call_result_files<'a>(
+            &'a self,
+            key: &'a InvocationKey,
+            commit: &'a CommitRef,
+            files: &'a [String],
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, GraphError>> + Send + 'a>> {
+            Box::pin(async move {
+                self.exports
+                    .lock()
+                    .unwrap()
+                    .push((key.clone(), commit.clone(), files.to_vec()));
+                Ok(files.iter().map(|file| format!("result/{file}")).collect())
+            })
+        }
+    }
+
+    #[derive(Default)]
+    struct Nodes(AtomicUsize);
+
+    impl NodeExecutionPort for Nodes {
+        fn capabilities(&self) -> NodeExecutionCapabilities {
+            NodeExecutionCapabilities {
+                agent: false,
+                op_run: true,
+                exact_provider_request_budget: true,
+            }
+        }
+
+        fn completion_fact<'a>(
+            &'a self,
+            _: &'a InvocationKey,
+        ) -> Pin<Box<dyn Future<Output = Result<CompletionFact, GraphError>> + Send + 'a>> {
+            Box::pin(async { Ok(CompletionFact::NotStarted) })
+        }
+
+        fn execute<'a>(
+            &'a self,
+            request: NodeExecutionRequest,
+        ) -> Pin<Box<dyn Future<Output = Result<NodeExecutionOutcome, GraphError>> + Send + 'a>>
+        {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move {
+                Ok(NodeExecutionOutcome::Completed(NodeCompletion {
+                    submission: "session reply".into(),
+                    route: None,
+                    model_requests: 0,
+                    output: request.input,
+                }))
+            })
+        }
+    }
+
+    struct Control;
+
+    impl RunControl for Control {
+        fn pause_requested(&self) -> bool {
+            false
+        }
+        fn stop_requested(&self) -> bool {
+            false
+        }
+        fn cancellation(&self) -> Cancellation {
+            Cancellation::default()
+        }
+    }
+
+    fn child_snapshot() -> GraphSnapshot {
+        GraphSnapshot::from_authoring(json!({
+            "objective":"child", "input":{"default":1}, "entry":"work",
+            "agents":{}, "ops":{"work":{"run":"true"}},
+            "nodes":[{"id":"work","op":"work"}], "edges":[]
+        }))
+        .unwrap()
+    }
+
+    struct OrdinaryCatalog;
+
+    impl GraphCatalog for OrdinaryCatalog {
+        fn snapshot(&self, _: &str) -> Result<Option<GraphSnapshot>, GraphError> {
+            Ok(Some(child_snapshot()))
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum SessionAction {
+        Waiting,
+        Detached,
+        Complete,
+        Unproven,
+    }
+
+    struct SessionCatalog<'a> {
+        store: FileRunStore,
+        artifacts: &'a Artifacts,
+        context: Value,
+        authorized: bool,
+        action: Mutex<SessionAction>,
+        admissions: AtomicUsize,
+        contexts: Mutex<Vec<Value>>,
+        nodes: Nodes,
+    }
+
+    impl<'a> SessionCatalog<'a> {
+        fn new(store: &FileRunStore, artifacts: &'a Artifacts, action: SessionAction) -> Self {
+            Self {
+                store: store.clone(),
+                artifacts,
+                context: json!({
+                    "session":"trusted-session", "reply_node":"work",
+                    "conversation_id":"trusted-user",
+                    "channel":{"source":"wecom", "sender_id":"trusted-user"}
+                }),
+                authorized: true,
+                action: Mutex::new(action),
+                admissions: AtomicUsize::new(0),
+                contexts: Mutex::new(Vec::new()),
+                nodes: Nodes::default(),
+            }
+        }
+    }
+
+    impl GraphCatalog for SessionCatalog<'_> {
+        fn snapshot(&self, _: &str) -> Result<Option<GraphSnapshot>, GraphError> {
+            Ok(Some(child_snapshot()))
+        }
+
+        fn record_child_admission(
+            &self,
+            run_id: &str,
+            _: &str,
+            _: &GraphSnapshot,
+            _: &[anchor_runtime_rig::graph::PluginBinding],
+            _: &CallIdentity,
+            _: &str,
+        ) -> Result<(), GraphError> {
+            assert!(self.store.load(run_id)?.is_none());
+            self.admissions.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn prepare_session_call<'a>(
+            &'a self,
+            _: &'a CallIdentity,
+            session: &'a str,
+            graph: &'a str,
+        ) -> Pin<Box<dyn Future<Output = Result<Value, GraphError>> + Send + 'a>> {
+            Box::pin(async move {
+                assert_eq!(session, "trusted-session");
+                assert_eq!(graph, "child");
+                if self.authorized {
+                    Ok(self.context.clone())
+                } else {
+                    Err(GraphError::Unsupported("Session is not authorized".into()))
+                }
+            })
+        }
+
+        fn record_session_call(&self, run_id: &str, context: &Value) -> Result<(), GraphError> {
+            assert_eq!(self.admissions.load(Ordering::SeqCst), 1);
+            assert!(self.store.load(run_id)?.is_none());
+            self.contexts.lock().unwrap().push(context.clone());
+            Ok(())
+        }
+
+        fn session_call_outcome<'a>(
+            &'a self,
+            run_id: &'a str,
+            mode: &'a str,
+            _: Cancellation,
+        ) -> Pin<Box<dyn Future<Output = Result<Option<GraphCallOutcome>, GraphError>> + Send + 'a>>
+        {
+            Box::pin(async move {
+                drop(self.store.acquire_lease(run_id)?);
+                assert_eq!(self.contexts.lock().unwrap().len(), 1);
+                let action = *self.action.lock().unwrap();
+                match action {
+                    SessionAction::Waiting => Ok(Some(GraphCallOutcome::Waiting {
+                        child_run_id: run_id.into(),
+                    })),
+                    SessionAction::Detached => {
+                        assert_eq!(mode, "detach");
+                        Ok(Some(GraphCallOutcome::Detached {
+                            child_run_id: run_id.into(),
+                        }))
+                    }
+                    SessionAction::Complete => {
+                        let child = self.store.load(run_id)?.unwrap();
+                        let completed =
+                            GraphRunner::new(&self.store, self.artifacts, &self.nodes, &Control)
+                                .run(child)
+                                .await?;
+                        assert_eq!(completed.status, RunStatus::Completed);
+                        Ok(None)
+                    }
+                    SessionAction::Unproven => Ok(None),
+                }
+            })
+        }
+
+        fn dispatch_detached<'a>(
+            &'a self,
+            _: &'a str,
+        ) -> Pin<Box<dyn Future<Output = Result<(), GraphError>> + Send + 'a>> {
+            Box::pin(async { panic!("Session child bypassed its owning host") })
+        }
+    }
+
+    fn parent_call(store: &FileRunStore, spec: &Value) -> (CallIdentity, Value) {
+        let snapshot = GraphSnapshot::from_authoring(json!({
+            "objective":"parent", "entry":"invoke", "agents":{},
+            "ops":{"invoke":{"call":spec}},
+            "nodes":[{"id":"invoke","op":"invoke"}], "edges":[]
+        }))
+        .unwrap();
+        let mut parent = GraphRunRecord::create(snapshot, json!({})).unwrap();
+        let input = json!({"input":{"session":"forged", "channel":{"sender_id":"forged"}}});
+        parent.status = RunStatus::Running;
+        parent.invocations.insert("invoke".into(), 1);
+        parent.passes.insert("invoke".into(), 1);
+        parent.cursor = Some(RunCursor {
+            node_id: "invoke".into(),
+            key: InvocationKey {
+                run_id: parent.run_id.clone(),
+                graph_digest: parent.graph_digest.clone(),
+                node_id: "invoke".into(),
+                invocation: 1,
+            },
+            input_commits: Vec::new(),
+            prepared_input: input.clone(),
+        });
+        let identity = CallIdentity {
+            parent_run_id: parent.run_id.clone(),
+            parent_graph_digest: parent.graph_digest.clone(),
+            node_id: "invoke".into(),
+            invocation: 1,
+            call_spec_digest: format!("{:x}", Sha256::digest(serde_json::to_vec(spec).unwrap())),
+        };
+        store.save(&parent).unwrap();
+        (identity, input)
+    }
+
+    fn session_spec(mode: &str) -> Value {
+        json!({
+            "graph":"child", "mode":mode, "session":"trusted-session",
+            "input":{"session":"forged", "channel":{"sender_id":"forged"}},
+            "input_map":{"session":"/session", "channel":"/channel"}
+        })
+    }
+
+    #[tokio::test]
+    async fn session_wait_reuses_admission_and_exports_completed_result() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FileRunStore::new(dir.path());
+        let artifacts = Artifacts::default();
+        let catalog = SessionCatalog::new(&store, &artifacts, SessionAction::Waiting);
+        let nodes = Nodes::default();
+        let host = InProcessGraphHost::new(&catalog, &store, &artifacts, &nodes, &Control);
+        let mut spec = session_spec("wait");
+        spec["result"] = json!({"node":"work", "files":["report.txt"]});
+        let (identity, input) = parent_call(&store, &spec);
+        let child_id = child_run_id(&identity);
+        let waiting = host
+            .call(&identity, &spec, &input, &[], Cancellation::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            waiting,
+            GraphCallOutcome::Waiting {
+                child_run_id: child_id.clone()
+            }
+        );
+        let child = store.load(&child_id).unwrap().unwrap();
+        assert_eq!(child.status, RunStatus::Ready);
+        assert_eq!(child.input["session"], catalog.context["session"]);
+        assert_eq!(child.input["channel"], catalog.context["channel"]);
+        assert_eq!(catalog.contexts.lock().unwrap()[0], catalog.context);
+        assert_eq!(nodes.0.load(Ordering::SeqCst), 0);
+
+        *catalog.action.lock().unwrap() = SessionAction::Complete;
+        let completed = host
+            .call(&identity, &spec, &input, &[], Cancellation::default())
+            .await
+            .unwrap();
+        let GraphCallOutcome::Completed {
+            child_run_id,
+            output,
+        } = completed
+        else {
+            panic!("expected completed Session call");
+        };
+        assert_eq!(child_run_id, child_id);
+        assert_eq!(output["summary"], "session reply");
+        assert_eq!(output["result"]["files"], json!(["result/report.txt"]));
+        assert_eq!(catalog.admissions.load(Ordering::SeqCst), 1);
+        assert_eq!(catalog.contexts.lock().unwrap().len(), 1);
+        assert_eq!(catalog.nodes.0.load(Ordering::SeqCst), 1);
+        assert_eq!(nodes.0.load(Ordering::SeqCst), 0);
+        let exports = artifacts.exports.lock().unwrap();
+        assert_eq!(exports.len(), 1);
+        assert_eq!(exports[0].0.run_id, identity.parent_run_id);
+        assert_eq!(exports[0].1.node_id, "work");
+        assert_eq!(exports[0].2, vec!["report.txt"]);
+    }
+
+    #[tokio::test]
+    async fn session_detach_uses_session_host_dispatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FileRunStore::new(dir.path());
+        let artifacts = Artifacts::default();
+        let catalog = SessionCatalog::new(&store, &artifacts, SessionAction::Detached);
+        let nodes = Nodes::default();
+        let host = InProcessGraphHost::new(&catalog, &store, &artifacts, &nodes, &Control);
+        let spec = session_spec("detach");
+        let (identity, input) = parent_call(&store, &spec);
+        assert_eq!(
+            host.call(&identity, &spec, &input, &[], Cancellation::default())
+                .await
+                .unwrap(),
+            GraphCallOutcome::Detached {
+                child_run_id: child_run_id(&identity)
+            }
+        );
+        assert_eq!(nodes.0.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn session_rejection_or_invalid_context_never_admits_child() {
+        for context in [
+            None,
+            Some(json!({"session":"other-session", "channel":{}})),
+            Some(json!({"session":"trusted-session", "channel":false})),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = FileRunStore::new(dir.path());
+            let artifacts = Artifacts::default();
+            let mut catalog = SessionCatalog::new(&store, &artifacts, SessionAction::Complete);
+            if let Some(context) = context {
+                catalog.context = context;
+            } else {
+                catalog.authorized = false;
+            }
+            let nodes = Nodes::default();
+            let host = InProcessGraphHost::new(&catalog, &store, &artifacts, &nodes, &Control);
+            let spec = session_spec("wait");
+            let (identity, input) = parent_call(&store, &spec);
+            let result = host
+                .call(&identity, &spec, &input, &[], Cancellation::default())
+                .await;
+            assert!(matches!(
+                result,
+                Err(GraphError::Unsupported(_) | GraphError::CorruptRun(_))
+            ));
+            assert!(store.load(&child_run_id(&identity)).unwrap().is_none());
+            assert_eq!(catalog.admissions.load(Ordering::SeqCst), 0);
+            assert_eq!(nodes.0.load(Ordering::SeqCst), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn session_delivery_confirmation_requires_completed_child() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FileRunStore::new(dir.path());
+        let artifacts = Artifacts::default();
+        let catalog = SessionCatalog::new(&store, &artifacts, SessionAction::Unproven);
+        let nodes = Nodes::default();
+        let host = InProcessGraphHost::new(&catalog, &store, &artifacts, &nodes, &Control);
+        let spec = session_spec("wait");
+        let (identity, input) = parent_call(&store, &spec);
+        assert!(matches!(
+            host.call(&identity, &spec, &input, &[], Cancellation::default()).await,
+            Err(GraphError::CorruptRun(message)) if message.contains("without a completed child")
+        ));
+        assert_eq!(nodes.0.load(Ordering::SeqCst), 0);
+        assert!(artifacts.exports.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn ordinary_host_rejects_session_but_keeps_ordinary_wait_behavior() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FileRunStore::new(dir.path());
+        let artifacts = Artifacts::default();
+        let nodes = Nodes::default();
+        let host = InProcessGraphHost::new(&OrdinaryCatalog, &store, &artifacts, &nodes, &Control);
+        let spec = session_spec("wait");
+        let (identity, input) = parent_call(&store, &spec);
+        assert!(matches!(
+            host.call(&identity, &spec, &input, &[], Cancellation::default()).await,
+            Err(GraphError::Unsupported(message)) if message.contains("session handoff")
+        ));
+        assert!(store.load(&child_run_id(&identity)).unwrap().is_none());
+        assert_eq!(nodes.0.load(Ordering::SeqCst), 0);
+
+        let spec = json!({"graph":"child", "mode":"wait"});
+        let (identity, input) = parent_call(&store, &spec);
+        assert!(matches!(
+            host.call(&identity, &spec, &input, &[], Cancellation::default())
+                .await,
+            Ok(GraphCallOutcome::Completed { .. })
+        ));
+        assert_eq!(nodes.0.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[cfg(test)]
 mod bundle_loader_tests {
     use super::*;
     use std::fs;
 
     fn graph_json(plugins: &[&str]) -> Value {
-        serde_json::json!({
+        let mut graph = serde_json::json!({
             "objective":"demo",
             "entry":"work",
             "agents":{},
             "ops":{"work":{"run":"true"}},
             "nodes":[{"id":"work","op":"work","plugins":plugins}],
             "edges":[]
-        })
+        });
+        if !plugins.is_empty() {
+            graph["agents"] = serde_json::json!({
+                "worker":{"model":"fixture","instructions":"work"}
+            });
+            graph["ops"] = serde_json::json!({});
+            graph["nodes"][0] = serde_json::json!({
+                "id":"work","agent":"worker","plugins":plugins
+            });
+        }
+        graph
     }
 
     fn bundle() -> tempfile::TempDir {
@@ -2104,9 +2644,104 @@ mod bundle_loader_tests {
         let tmp = bundle();
         let loaded = FileGraphBundleLoader::new(tmp.path()).load().unwrap();
         assert_eq!(loaded.snapshot.objective, "demo");
+        assert_eq!(loaded.authoring_definition, graph_json(&["demo"]));
         assert_eq!(loaded.plugins.len(), 1);
         assert_eq!(loaded.plugins[0].id, "demo");
         assert!(loaded.plugins[0].resources.contains(&"plugin.json".into()));
+    }
+
+    #[test]
+    fn retains_authoring_graph_and_layout_while_loading_flat_runtime_snapshot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let authoring = serde_json::json!({
+            "objective":"module graph",
+            "entry":"stage",
+            "agents":{},
+            "ops":{"work":{"run":"true"}},
+            "nodes":[{"id":"stage","graph":"inner"}],
+            "edges":[],
+            "graphs":{"inner":{
+                "entry":"inside",
+                "exit":"inside",
+                "nodes":[{"id":"inside","op":"work"}],
+                "edges":[]
+            }},
+            "layout":{"positions":{"stage":{"x":17,"y":29}},
+                       "edgeLabels":{"stage|done":"Finished"}}
+        });
+        fs::write(
+            tmp.path().join("graph.json"),
+            serde_json::to_vec(&authoring).unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            tmp.path().join("manifest.json"),
+            r#"{"format":1,"graph":"graph.json","plugins":[]}"#,
+        )
+        .unwrap();
+
+        let loaded = FileGraphBundleLoader::new(tmp.path()).load().unwrap();
+        assert_eq!(loaded.authoring_definition, authoring);
+        assert_eq!(
+            loaded.authoring_definition["layout"]["positions"]["stage"]["x"],
+            17
+        );
+        assert_eq!(
+            loaded.authoring_definition["graphs"]["inner"]["exit"],
+            "inside"
+        );
+        assert_eq!(loaded.snapshot.nodes[0].id, "stage/inside");
+        assert_eq!(loaded.snapshot.entry, "stage/inside");
+    }
+
+    #[test]
+    fn manifest_plugin_set_matches_references_after_module_expansion() {
+        let tmp = bundle();
+        let authoring = serde_json::json!({
+            "objective":"module plugin graph",
+            "entry":"stage",
+            "agents":{"worker":{"model":"fixture","instructions":"work"}},
+            "ops":{},
+            "nodes":[{"id":"stage","graph":"inner"}],
+            "edges":[],
+            "graphs":{"inner":{
+                "entry":"inside",
+                "exit":"inside",
+                "nodes":[{"id":"inside","agent":"worker","plugins":["demo"]}],
+                "edges":[]
+            }},
+            "layout":{"positions":{"stage":{"x":31,"y":47}}}
+        });
+        fs::write(
+            tmp.path().join("graph.json"),
+            serde_json::to_vec(&authoring).unwrap(),
+        )
+        .unwrap();
+        let binding = FilePluginCatalog::new(tmp.path())
+            .resolve(&["demo".into()])
+            .unwrap()
+            .remove(0);
+        fs::write(
+            tmp.path().join("manifest.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "format":1,
+                "graph":"graph.json",
+                "plugins":[{
+                    "id":binding.id,
+                    "digest":binding.digest,
+                    "resources":binding.resources,
+                    "mcp_servers":binding.mcp_servers
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let loaded = FileGraphBundleLoader::new(tmp.path()).load().unwrap();
+        assert_eq!(loaded.authoring_definition, authoring);
+        assert_eq!(loaded.snapshot.nodes[0].id, "stage/inside");
+        assert_eq!(loaded.snapshot.nodes[0].plugins, ["demo"]);
+        assert_eq!(loaded.plugins.len(), 1);
     }
 
     #[test]
@@ -2122,6 +2757,20 @@ mod bundle_loader_tests {
         let path = tmp.path().join("manifest.json");
         let mut manifest: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         manifest["graph"] = Value::String("../outside.json".into());
+        fs::write(&path, manifest.to_string()).unwrap();
+        assert!(FileGraphBundleLoader::new(tmp.path()).load().is_err());
+
+        let tmp = bundle();
+        let path = tmp.path().join("manifest.json");
+        let mut manifest: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        manifest["format"] = Value::Number(2.into());
+        fs::write(&path, manifest.to_string()).unwrap();
+        assert!(FileGraphBundleLoader::new(tmp.path()).load().is_err());
+
+        let tmp = bundle();
+        let path = tmp.path().join("manifest.json");
+        let mut manifest: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        manifest["plugins"] = serde_json::json!([]);
         fs::write(&path, manifest.to_string()).unwrap();
         assert!(FileGraphBundleLoader::new(tmp.path()).load().is_err());
 
@@ -2162,6 +2811,13 @@ mod bundle_loader_tests {
         fs::create_dir(&outside).unwrap();
         fs::remove_dir_all(tmp.path().join("plugins/demo/skills")).unwrap();
         symlink(&outside, tmp.path().join("plugins/demo/skills")).unwrap();
+        assert!(FileGraphBundleLoader::new(tmp.path()).load().is_err());
+
+        let tmp = bundle();
+        let outside = tmp.path().join("outside/demo");
+        fs::create_dir_all(outside.parent().unwrap()).unwrap();
+        fs::rename(tmp.path().join("plugins/demo"), &outside).unwrap();
+        symlink(&outside, tmp.path().join("plugins/demo")).unwrap();
         assert!(FileGraphBundleLoader::new(tmp.path()).load().is_err());
     }
 }

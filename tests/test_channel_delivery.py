@@ -1,10 +1,13 @@
 """Graph -> scoped channel tools / SSE -> gateway, without sending to real members."""
 import asyncio
 import base64
+import hashlib
 import io
 import json
+import random
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
@@ -21,9 +24,9 @@ from plugins.wecom import ws_gateway
 from test_channel_gateway import channel_server, _event, _complete, _use_model  # noqa: F401
 
 
-def png():
+def png(color="red"):
     buf = io.BytesIO()
-    Image.new("RGB", (12, 12), "red").save(buf, format="PNG")
+    Image.new("RGB", (12, 12), color).save(buf, format="PNG")
     return buf.getvalue()
 
 
@@ -146,17 +149,265 @@ def test_rich_reply_survives_gateway_retry_and_legacy_ledger_values(tmp_path):
     from anchor.channel.media import make_image_item
     reply = {"text": "结果图片", "msg_item": [make_image_item(png())]}
     delivered = []
+    images = []
+    frame = {"cmd": "aibot_msg_callback", "headers": {"req_id": "callback-rich"},
+             "body": {"msgid": "rich", "from": {"userid": "alice"},
+                      "msgtype": "text", "text": {"content": "fixture"}}}
 
     async def send(frame, **kwargs):
         delivered.append(kwargs)
 
+    async def media(frame, body, cmd=None):
+        if cmd == "aibot_upload_media_init":
+            return {"errcode": 0, "body": {"upload_id": "upload-rich"}}
+        if cmd == "aibot_upload_media_finish":
+            return {"errcode": 0, "body": {"media_id": "media-rich"}}
+        if cmd == "aibot_upload_media_chunk":
+            assert base64.b64decode(body["base64_data"]) == png()
+        else:
+            images.append((frame, body))
+        return {"errcode": 0}
+
     gateway = ws_gateway.WeComWebSocketGateway(None, state_path=tmp_path / "ledger.sqlite")
-    gateway.client = SimpleNamespace(reply_stream=send)
+    client = SimpleNamespace(reply_stream=send, reply=media)
+    gateway.client = client
+    event = ws_gateway.normalize_message(frame)
+    assert gateway.ledger.claim(event)
     saved = json.dumps({"channel_reply": reply})
-    asyncio.run(gateway._deliver({}, "stable-stream", ws_gateway._saved_reply(saved)))
-    assert delivered[0]["finish"] and delivered[0]["msg_item"] == reply["msg_item"]
+    gateway.ledger.prepare_reply(event, saved)
+    asyncio.run(gateway._deliver(frame, "stable-stream", ws_gateway._saved_reply(saved)))
+    retried = ws_gateway.WeComWebSocketGateway(None, state_path=tmp_path / "ledger.sqlite")
+    retried.client = client
+    asyncio.run(retried._deliver(frame, "stable-stream", ws_gateway._saved_reply(retried.ledger.pending_reply(event))))
+    assert len(delivered) == 2
+    assert all(value["finish"] and "msg_item" not in value for value in delivered)
+    assert images == [(frame, {"msgtype": "image", "image": {"media_id": "media-rich"}})]
     assert ws_gateway._saved_reply("旧回复") == {"text": "旧回复"}
     assert ws_gateway._saved_reply('{"other":"text"}') == {"text": '{"other":"text"}'}
+
+
+def _reply_frame(identifier="rich"):
+    return {"cmd": "aibot_msg_callback", "headers": {"req_id": "callback-" + identifier},
+            "body": {"msgid": identifier, "from": {"userid": "alice"},
+                     "msgtype": "text", "text": {"content": identifier}}}
+
+
+class _MediaClient:
+    def __init__(self):
+        self.connected = asyncio.Event()
+        self.callbacks = {}
+        self.streams = []
+        self.calls = []
+        self.uploads = {}
+        self.media = {}
+        self.images = []
+
+    def on(self, name, callback):
+        self.callbacks[name] = callback
+
+    async def connect(self):
+        self.connected.set()
+
+    def disconnect(self):
+        pass
+
+    async def reply_stream(self, frame, **kwargs):
+        self.streams.append((frame, kwargs))
+        return {"errcode": 0}
+
+    async def reply(self, frame, body, cmd=None):
+        self.calls.append((frame, body, cmd))
+        if cmd == "aibot_upload_media_init":
+            upload_id = "upload-" + str(len(self.uploads))
+            self.uploads[upload_id] = []
+            return {"errcode": 0, "body": {"upload_id": upload_id}}
+        if cmd == "aibot_upload_media_chunk":
+            self.uploads[body["upload_id"]].append(base64.b64decode(body["base64_data"], validate=True))
+        elif cmd == "aibot_upload_media_finish":
+            media_id = "media-" + body["upload_id"]
+            self.media[media_id] = b"".join(self.uploads[body["upload_id"]])
+            return {"errcode": 0, "body": {"media_id": media_id}}
+        else:
+            assert cmd is None and body["msgtype"] == "image"
+            self.images.append((frame, body))
+        return {"errcode": 0}
+
+
+@asynccontextmanager
+async def _running_media_gateway(tmp_path, monkeypatch, client, handler):
+    import sys
+    monkeypatch.setenv("WECOM_BOT_ID", "fixture")
+    monkeypatch.setenv("WECOM_BOT_SECRET", "fixture")
+    monkeypatch.delenv("ANCHOR_CHANNEL_CONTROL_SOCKET", raising=False)
+    monkeypatch.setitem(sys.modules, "aibot", SimpleNamespace(
+        WSClient=lambda _: client, WSClientOptions=lambda **kwargs: kwargs))
+    gateway = ws_gateway.WeComWebSocketGateway(handler, state_path=tmp_path / "image-retry.sqlite")
+    task = asyncio.create_task(gateway.run())
+    try:
+        await asyncio.wait_for(client.connected.wait(), 2)
+        yield gateway
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.parametrize("stage", ["init", "chunk", "finish"])
+def test_image_upload_failure_retries_saved_reply_after_gateway_restart(tmp_path, monkeypatch, stage):
+    from anchor.channel.media import make_image_item
+    reply = {"text": "结果图片", "msg_item": [make_image_item(png())]}
+    executed = []
+    frame = _reply_frame()
+    event = ws_gateway.normalize_message(frame)
+
+    async def handler(event):
+        executed.append(event.event_id)
+        return reply
+
+    async def check():
+        first = _MediaClient()
+        send = first.reply
+
+        async def failed_upload(frame, body, cmd=None):
+            ack = await send(frame, body, cmd)
+            if cmd == "aibot_upload_media_" + stage:
+                raise TimeoutError("upload ACK lost")
+            return ack
+
+        first.reply = failed_upload
+        async with _running_media_gateway(tmp_path, monkeypatch, first, handler) as gateway:
+            await first.callbacks["message"](frame)
+            assert not first.images
+            assert ws_gateway._saved_reply(gateway.ledger.pending_reply(event)) == reply
+        second = _MediaClient()
+        async with _running_media_gateway(tmp_path, monkeypatch, second, handler) as gateway:
+            await second.callbacks["message"](frame)
+            assert len(second.images) == 1 and second.images[0][0] == frame
+            assert second.media[second.images[0][1]["image"]["media_id"]] == png()
+            assert gateway.ledger.pending_reply(event) is None
+            await second.callbacks["message"](frame)
+            assert len(second.images) == 1
+        assert executed == [event.event_id]
+
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize("failure", ["timeout", "rejected_ack"])
+def test_image_ack_unknown_is_not_resent_after_gateway_restart(tmp_path, monkeypatch, failure):
+    from anchor.channel.media import make_image_item
+    reply = {"text": "结果图片", "msg_item": [make_image_item(png())]}
+    executed = []
+    frame = _reply_frame()
+    event = ws_gateway.normalize_message(frame)
+
+    async def handler(event):
+        executed.append(event.event_id)
+        return reply
+
+    async def check():
+        first = _MediaClient()
+        send = first.reply
+
+        async def unknown_image(frame, body, cmd=None):
+            ack = await send(frame, body, cmd)
+            if cmd is None:
+                if failure == "timeout":
+                    raise TimeoutError("image ACK lost after send")
+                return {"errcode": 400, "errmsg": "fixture rejection"}
+            return ack
+
+        first.reply = unknown_image
+        async with _running_media_gateway(tmp_path, monkeypatch, first, handler) as gateway:
+            await first.callbacks["message"](frame)
+            assert len(first.images) == 1
+            assert ws_gateway._saved_reply(gateway.ledger.pending_reply(event)) == reply
+        second = _MediaClient()
+        async with _running_media_gateway(tmp_path, monkeypatch, second, handler) as gateway:
+            for _ in range(2):
+                await second.callbacks["message"](frame)
+            assert second.images == []
+            assert ws_gateway._saved_reply(gateway.ledger.pending_reply(event)) == reply
+        assert executed == [event.event_id]
+
+    asyncio.run(check())
+
+
+def test_confirmed_image_is_skipped_when_later_upload_retries(tmp_path, monkeypatch):
+    from anchor.channel.media import make_image_item
+    reply = {"text": "两张结果图片", "msg_item": [make_image_item(png()), make_image_item(png("blue"))]}
+    executed = []
+    frame = _reply_frame()
+    event = ws_gateway.normalize_message(frame)
+
+    async def handler(event):
+        executed.append(event.event_id)
+        return reply
+
+    async def check():
+        first = _MediaClient()
+        send = first.reply
+
+        async def fail_second_upload(frame, body, cmd=None):
+            ack = await send(frame, body, cmd)
+            if cmd == "aibot_upload_media_init" and len(first.uploads) == 2:
+                raise TimeoutError("second image upload failed")
+            return ack
+
+        first.reply = fail_second_upload
+        async with _running_media_gateway(tmp_path, monkeypatch, first, handler) as gateway:
+            await first.callbacks["message"](frame)
+            assert len(first.images) == 1
+            assert first.media[first.images[0][1]["image"]["media_id"]] == png()
+            assert gateway.ledger.pending_reply(event) is not None
+        second = _MediaClient()
+        async with _running_media_gateway(tmp_path, monkeypatch, second, handler) as gateway:
+            await second.callbacks["message"](frame)
+            assert len(second.images) == 1
+            assert second.media[second.images[0][1]["image"]["media_id"]] == png("blue")
+            assert gateway.ledger.pending_reply(event) is None
+        assert executed == [event.event_id]
+
+    asyncio.run(check())
+
+
+def test_new_message_during_image_upload_suppresses_old_image(tmp_path, monkeypatch):
+    from anchor.channel.media import make_image_item
+
+    async def handler(event):
+        if event.event_id == "older":
+            return {"text": "旧图片回复", "msg_item": [make_image_item(png())]}
+        return {"text": "NEW ANSWER"}
+
+    async def check():
+        client = _MediaClient()
+        started, release = asyncio.Event(), asyncio.Event()
+        send = client.reply
+
+        async def slow_upload(frame, body, cmd=None):
+            ack = await send(frame, body, cmd)
+            if cmd == "aibot_upload_media_init":
+                started.set()
+                await release.wait()
+            return ack
+
+        client.reply = slow_upload
+        async with _running_media_gateway(tmp_path, monkeypatch, client, handler) as gateway:
+            older = asyncio.create_task(client.callbacks["message"](_reply_frame("older")))
+            try:
+                await asyncio.wait_for(started.wait(), 2)
+                await asyncio.wait_for(client.callbacks["message"](_reply_frame("newer")), 2)
+                release.set()
+                await asyncio.wait_for(older, 2)
+                assert client.images == []
+                assert any(kwargs["content"] == "NEW ANSWER" for _, kwargs in client.streams)
+                assert gateway.ledger.is_latest(ws_gateway.normalize_message(_reply_frame("newer")))
+            finally:
+                release.set()
+                if not older.done():
+                    older.cancel()
+                await asyncio.gather(older, return_exceptions=True)
+
+    asyncio.run(check())
 
 
 @pytest.mark.parametrize("delayed", ["download", "progress_ack"])
@@ -350,7 +601,11 @@ def test_installed_sdk_control_send_stream_and_rich_reply_on_wire(tmp_path, monk
 
     async def check():
         finished = asyncio.Event()
-        sends, replies = [], []
+        sends, replies, uploads, images = [], [], [], []
+        buffer = io.BytesIO()
+        Image.frombytes("RGB", (512, 512), random.Random(47).randbytes(512 * 512 * 3)).save(buffer, format="PNG")
+        data = buffer.getvalue()
+        assert len(data) > 512 * 1024
         frame = {'cmd':'aibot_msg_callback','headers':{'req_id':'callback-rich'},
                  'body':{'msgid':'rich','from':{'userid':'alice'},'msgtype':'text','text':{'content':'fixture'}}}
         async def platform(ws):
@@ -360,20 +615,30 @@ def test_installed_sdk_control_send_stream_and_rich_reply_on_wire(tmp_path, monk
             await ws.send(json.dumps(frame))
             async for raw in ws:
                 message = json.loads(raw)
-                await ws.send(json.dumps({'headers':message['headers'],'errcode':0}))
+                ack = {'headers':message['headers'],'errcode':0}
+                if message['cmd'] == 'aibot_upload_media_init':
+                    ack['body'] = {'upload_id':'upload-wire'}
+                elif message['cmd'] == 'aibot_upload_media_finish':
+                    ack['body'] = {'media_id':'media-wire'}
+                await ws.send(json.dumps(ack))
                 if message['cmd'] == 'aibot_send_msg':
                     sends.append(message['body'])
                 elif message['cmd'] == 'aibot_respond_msg':
-                    replies.append(message['body']['stream'])
-                    if replies[-1]['finish']:
+                    assert message['headers'] == frame['headers']
+                    if message['body']['msgtype'] == 'stream':
+                        replies.append(message['body']['stream'])
+                    else:
+                        images.append(message['body'])
                         finished.set()
+                elif message['cmd'].startswith('aibot_upload_media_'):
+                    uploads.append(message)
         async def handle(event, progress, admitted):
             admitted()
             ack = await asyncio.to_thread(request, socket_path, 'fixture-token', {
                 'operation':'send','request_id':'one-send','userid':'alice','content':'authorized fixture'})
             assert ack['accepted']
             await progress('正文正在生成')
-            return {'text':'完整回复','msg_item':[make_image_item(png())]}
+            return {'text':'完整回复','msg_item':[make_image_item(data)]}
         async with serve(platform, '127.0.0.1', 0) as server:
             port = server.sockets[0].getsockname()[1]
             monkeypatch.setattr(aibot, 'WSClientOptions', lambda **kw: original_options(**kw, ws_url=f'ws://127.0.0.1:{port}'))
@@ -387,7 +652,26 @@ def test_installed_sdk_control_send_stream_and_rich_reply_on_wire(tmp_path, monk
                 assert any(r['content'] == '正文正在生成' and not r['finish'] for r in replies)
                 final = replies[-1]
                 assert final['finish'] and final['content'] == '完整回复'
-                assert base64.b64decode(final['msg_item'][0]['image']['base64']) == png()
+                assert all('msg_item' not in reply for reply in replies)
+                assert images == [{'msgtype':'image','image':{'media_id':'media-wire'}}]
+                assert [message['cmd'] for message in uploads] == [
+                    'aibot_upload_media_init', 'aibot_upload_media_chunk',
+                    'aibot_upload_media_chunk', 'aibot_upload_media_finish']
+                initial = uploads[0]['body']
+                assert initial['type'] == 'image' and initial['filename'].endswith('.png')
+                assert initial['total_size'] == len(data) and initial['total_chunks'] == 2
+                assert initial['md5'] == hashlib.md5(data, usedforsecurity=False).hexdigest()
+                chunks = [message['body'] for message in uploads[1:-1]]
+                assert [chunk['chunk_index'] for chunk in chunks] == [0, 1]
+                assert all(chunk['upload_id'] == 'upload-wire' for chunk in chunks)
+                decoded = [base64.b64decode(chunk['base64_data'], validate=True) for chunk in chunks]
+                assert all(len(chunk) <= 512 * 1024 for chunk in decoded)
+                assert b''.join(decoded) == data
+                assert uploads[-1]['body'] == {'upload_id':'upload-wire'}
+                identifiers = [message['headers']['req_id'] for message in uploads]
+                assert len(set(identifiers)) == len(identifiers)
+                assert all(identifier and len(identifier.encode()) <= 256 and identifier != 'callback-rich'
+                           for identifier in identifiers)
                 assert len({r['id'] for r in replies}) == 1
             finally:
                 task.cancel()

@@ -10,6 +10,29 @@ use tower::ServiceExt;
 
 static PROCESS_ENV: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+mod channel_attachments;
+mod channel_media;
+mod conversations;
+mod graph_validation;
+mod platform_contract;
+mod session_calls;
+
+#[test]
+fn api_keys_follow_json_array_and_strength_contract() {
+    let first = "a".repeat(32);
+    let second = "b".repeat(32);
+    assert_eq!(parse_api_keys("").unwrap(), Vec::<String>::new());
+    assert_eq!(
+        parse_api_keys(&serde_json::to_string(&vec![first.clone(), second.clone()]).unwrap())
+            .unwrap(),
+        vec![first.clone(), second]
+    );
+    assert!(parse_api_keys("a,b").is_err());
+    assert!(parse_api_keys("[]").is_err());
+    assert!(parse_api_keys(&serde_json::to_string(&vec!["short"]).unwrap()).is_err());
+    assert!(parse_api_keys(&serde_json::to_string(&vec![first.clone(), first]).unwrap()).is_err());
+}
+
 fn set_host_env(root: &std::path::Path, state_root: &std::path::Path) {
     // The subprocess host currently obtains sandbox configuration from
     // process configuration. Serialize this test and set only isolated
@@ -123,6 +146,203 @@ async fn graph_crud_uses_admitted_catalog_bundles() {
     assert_eq!(status, StatusCode::NO_CONTENT);
     let (status, _) = call(app, "GET", "/graphs/new-graph", None).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn graph_mutation_lease_is_released_before_forked_child_executes() {
+    use std::{
+        io::{Read, Write},
+        os::unix::{net::UnixStream, process::CommandExt},
+        process::Command,
+        time::Duration,
+    };
+
+    let (_root, state) = fixture();
+    let lease = state
+        .application
+        .graph_admission_lease(&state.bundle_root)
+        .unwrap();
+    let (mut parent, mut child) = UnixStream::pair().unwrap();
+    parent
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    child
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    // Bubblewrap's pre_exec also forces fork instead of posix_spawn. Keep this
+    // child before exec so its inherited lock descriptor cannot close yet.
+    let process = std::thread::spawn(move || {
+        let mut command = Command::new("/usr/bin/true");
+        unsafe {
+            command.pre_exec(move || {
+                child.write_all(&[1])?;
+                child.read_exact(&mut [0])?;
+                Ok(())
+            });
+        }
+        command.status()
+    });
+    parent.read_exact(&mut [0]).unwrap();
+
+    let app = router(state);
+    let definition = r#"{"definition":{"objective":"changed","entry":"work","agents":{},"ops":{"work":{"run":"true"}},"nodes":[{"id":"work","op":"work","plugins":[]}],"edges":[]}}"#;
+    let (held_status, held) = call(app.clone(), "PUT", "/graphs/fixture", Some(definition)).await;
+    drop(lease);
+    let (released_status, released) = call(app, "PUT", "/graphs/fixture", Some(definition)).await;
+    parent.write_all(&[1]).unwrap();
+    assert!(process.join().unwrap().unwrap().success());
+    assert_eq!(held_status, StatusCode::CONFLICT, "{held}");
+    assert_eq!(released_status, StatusCode::OK, "{released}");
+}
+
+#[tokio::test]
+async fn graph_crud_round_trips_authoring_modules_and_layout() {
+    let (_root, state) = fixture();
+    let _env_guard = PROCESS_ENV.lock().await;
+    set_host_env(_root.path(), &state.data_root);
+    let app = router(state);
+    let authoring = r#"{
+        "objective":"authoring graph",
+        "entry":"stage",
+        "agents":{},
+        "ops":{"work":{"run":"true"}},
+        "nodes":[{"id":"stage","graph":"inner"}],
+        "edges":[],
+        "graphs":{"inner":{
+            "entry":"inside",
+            "exit":"inside",
+            "nodes":[{"id":"inside","op":"work"}],
+            "edges":[]
+        }},
+        "layout":{"positions":{"stage":{"x":17,"y":29}},
+                   "edgeLabels":{"stage|done":"Finished"}}
+    }"#;
+    let (status, value) = call(
+        app.clone(),
+        "PUT",
+        "/graphs/fixture",
+        Some(&format!(r#"{{"definition":{authoring}}}"#)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{value}");
+    assert_eq!(value["definition"]["layout"]["positions"]["stage"]["x"], 17);
+    assert!(value["definition"]["graphs"]["inner"].is_object());
+
+    let (status, fetched) = call(app.clone(), "GET", "/graphs/fixture", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        fetched["definition"]["layout"],
+        value["definition"]["layout"]
+    );
+    assert_eq!(
+        fetched["definition"]["graphs"],
+        value["definition"]["graphs"]
+    );
+
+    let (status, started) = call(
+        app.clone(),
+        "POST",
+        "/trigger",
+        Some(r#"{"graph":"fixture","input":{}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{started}");
+    let run = started["run"].as_str().unwrap();
+    let mut completed = false;
+    for _ in 0..100 {
+        let (status, detail) = call(app.clone(), "GET", &format!("/runs/{run}"), None).await;
+        if status == StatusCode::OK
+            && detail["state"]["status"] != "running"
+            && detail["state"]["status"] != "ready"
+        {
+            assert_eq!(detail["state"]["status"], "completed", "{detail}");
+            assert_eq!(detail["nodes"][0], "stage/inside");
+            assert_eq!(detail["state"]["executed"][0], "stage/inside");
+            completed = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(completed, "authoring Graph Run did not complete: {run}");
+}
+
+#[tokio::test]
+async fn graph_crud_binds_plugin_resources_and_removes_stale_bundle_plugins() {
+    let (_root, state) = fixture();
+    let _env_guard = PROCESS_ENV.lock().await;
+    set_host_env(_root.path(), &state.data_root);
+    let plugin = state.catalog_root.join("plugins/demo");
+    std::fs::create_dir_all(plugin.join("skills/example")).unwrap();
+    std::fs::write(
+        plugin.join("plugin.json"),
+        r#"{"name":"Demo","skills":"skills/"}"#,
+    )
+    .unwrap();
+    std::fs::write(plugin.join("skills/example/SKILL.md"), "demo skill").unwrap();
+    let app = router(state.clone());
+    let definition = serde_json::json!({
+        "objective":"plugin authoring graph",
+        "agents":{"worker":{"model":"fixture","instructions":"work"}},
+        "ops":{},
+        "nodes":[{"id":"work","agent":"worker","plugins":["demo"]}],
+        "edges":[]
+    });
+    let (status, value) = call(
+        app.clone(),
+        "PUT",
+        "/graphs/fixture",
+        Some(&json!({"definition":definition}).to_string()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{value}");
+    let bundle = FileGraphBundleLoader::new(&state.bundle_root)
+        .load()
+        .unwrap();
+    assert_eq!(bundle.plugins.len(), 1);
+    assert_eq!(bundle.plugins[0].id, "demo");
+    assert!(
+        state
+            .bundle_root
+            .join("plugins/demo/skills/example/SKILL.md")
+            .is_file()
+    );
+
+    std::fs::write(plugin.join(".env"), "TOKEN=must-not-copy").unwrap();
+    let (status, failure) = call(
+        app.clone(),
+        "PUT",
+        "/graphs/fixture",
+        Some(&json!({"definition":definition}).to_string()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{failure}");
+    assert!(
+        FileGraphBundleLoader::new(&state.bundle_root)
+            .load()
+            .is_ok()
+    );
+    std::fs::remove_file(plugin.join(".env")).unwrap();
+
+    let mut no_plugin = definition;
+    no_plugin["nodes"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("plugins");
+    let (status, value) = call(
+        app,
+        "PUT",
+        "/graphs/fixture",
+        Some(&json!({"definition":no_plugin}).to_string()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{value}");
+    assert!(!state.bundle_root.join("plugins").exists());
+    assert!(
+        FileGraphBundleLoader::new(&state.bundle_root)
+            .load()
+            .is_ok()
+    );
 }
 
 #[tokio::test]
@@ -1368,13 +1588,16 @@ fn two_node_definition(second_command: &str) -> Value {
 }
 
 async fn start_and_pause(state: &ApiState, app: &Router) -> String {
-    let (status, accepted) = call(
-        app.clone(),
-        "POST",
-        "/trigger",
-        Some(r#"{"graph":"fixture","input":{"original":true}}"#),
+    start_and_pause_request(
+        state,
+        app,
+        r#"{"graph":"fixture","input":{"original":true}}"#,
     )
-    .await;
+    .await
+}
+
+async fn start_and_pause_request(state: &ApiState, app: &Router, body: &str) -> String {
+    let (status, accepted) = call(app.clone(), "POST", "/trigger", Some(body)).await;
     assert_eq!(status, StatusCode::ACCEPTED, "{accepted}");
     let run = accepted["run"].as_str().unwrap().to_owned();
     for _ in 0..200 {
@@ -1791,10 +2014,18 @@ async fn graph_delete_removes_only_its_run_data_and_preserves_other_graph_runs()
     let io_facts = state.data_root.join("io-harness").join("facts");
     std::fs::create_dir_all(&io_facts).unwrap();
     std::fs::write(io_facts.join(format!("np1-{hash}.json")), b"{}").unwrap();
+    std::fs::write(io_facts.join(format!("np1-{hash}.model.json")), b"{}").unwrap();
+    let local_grants = crate::local_inputs::fact_path(&state.data_root, "target-run");
+    std::fs::create_dir_all(local_grants.parent().unwrap()).unwrap();
+    std::fs::write(&local_grants, b"{}").unwrap();
     std::fs::write(io_facts.join(format!("np1-{hash}.recovery-7.json")), b"{}").unwrap();
     let io_store = state.data_root.join("io-harness").join("store");
     std::fs::create_dir_all(&io_store).unwrap();
     std::fs::write(io_store.join(format!("np1-{hash}.sqlite3-wal")), b"x").unwrap();
+    let recordings = anchor_io_harness_runtime::recording::directory(&io_store, &target_key);
+    let pending_recording = recordings.join("00000000000000000001");
+    std::fs::create_dir_all(&pending_recording).unwrap();
+    std::fs::write(pending_recording.join("request.json"), b"{}").unwrap();
 
     // A child Run created by "target-run" belongs to another Graph and survives.
     let grandchild_path = state.catalog_root.join("grandchild");
@@ -1841,6 +2072,9 @@ async fn graph_delete_removes_only_its_run_data_and_preserves_other_graph_runs()
     );
     assert!(!workspace.exists());
     assert!(!io_facts.join(format!("np1-{hash}.json")).exists());
+    assert!(!io_facts.join(format!("np1-{hash}.model.json")).exists());
+    assert!(!recordings.exists());
+    assert!(!local_grants.exists());
     assert!(
         !io_facts
             .join(format!("np1-{hash}.recovery-7.json"))
@@ -2066,7 +2300,7 @@ async fn graph_reference_edit_and_delete_are_serialized_by_catalog_gate() {
 }
 
 #[tokio::test]
-async fn missing_host_config_and_path_command_reject_before_acceptance() {
+async fn missing_host_config_or_shell_authority_reject_before_acceptance() {
     let (root, state) = fixture();
     let _env_guard = PROCESS_ENV.lock().await;
     set_host_env(root.path(), &state.data_root);
@@ -2084,7 +2318,10 @@ async fn missing_host_config_and_path_command_reject_before_acceptance() {
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     assert!(state.application.records().unwrap().is_empty());
     set_host_env(root.path(), &state.data_root);
-    let mut definition = two_node_definition("/bin/cat /in/first/count.txt");
+    unsafe {
+        env::set_var("ANCHOR_RUNNER_ALLOWED_COMMANDS", "cat");
+    }
+    let definition = two_node_definition("/bin/cat /in/first/count.txt");
     write_graph_bundle(&state.bundle_root, &definition).unwrap();
     let (status, _) = call(
         app.clone(),
@@ -2095,8 +2332,9 @@ async fn missing_host_config_and_path_command_reject_before_acceptance() {
     .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     assert!(state.application.records().unwrap().is_empty());
-    definition["ops"]["second"]["run"] = json!("cat /in/first/count.txt");
-    write_graph_bundle(&state.bundle_root, &definition).unwrap();
+    // The operator authorizes the shell, as in Python. It can run an absolute
+    // system command inside its sandbox without granting host paths.
+    set_host_env(root.path(), &state.data_root);
     assert_eq!(
         call(app, "POST", "/trigger", Some(r#"{"graph":"fixture"}"#))
             .await
@@ -2280,7 +2518,9 @@ async fn downstream_failure_does_not_reclassify_committed_upstream_result() {
         detail["state"]["nodes"]["first"]["exit_status"],
         Value::Null
     );
-    assert_eq!(detail["state"]["updated"], "");
+    assert!(
+        chrono::DateTime::parse_from_rfc3339(detail["state"]["updated"].as_str().unwrap()).is_ok()
+    );
 }
 
 #[tokio::test]
@@ -2350,4 +2590,212 @@ async fn changed_plugin_and_mismatched_metadata_block_resume_without_starting_wo
         record
     );
     assert!(state.application.active_runs(None).await.is_empty());
+}
+
+#[tokio::test]
+async fn waiting_parent_rejects_child_grant_drift_then_restores_same_child_without_replay() {
+    struct RestoreLocalInputRoot(Option<std::ffi::OsString>);
+    impl Drop for RestoreLocalInputRoot {
+        fn drop(&mut self) {
+            unsafe {
+                match self.0.take() {
+                    Some(value) => env::set_var("ANCHOR_RUNNER_LOCAL_INPUTS_ROOT", value),
+                    None => env::remove_var("ANCHOR_RUNNER_LOCAL_INPUTS_ROOT"),
+                }
+            }
+        }
+    }
+
+    let (root, state) = fixture();
+    let _env_guard = PROCESS_ENV.lock().await;
+    set_host_env(root.path(), &state.data_root);
+    let _local_root_guard = RestoreLocalInputRoot(env::var_os("ANCHOR_RUNNER_LOCAL_INPUTS_ROOT"));
+    let operator_root = root.path().join("operator-workspaces");
+    let original_source = root.path().join("original-history");
+    let changed_source = root.path().join("changed-history");
+    for directory in [
+        operator_root.join("fixture"),
+        operator_root.join("child"),
+        original_source.clone(),
+        changed_source.clone(),
+    ] {
+        std::fs::create_dir_all(directory).unwrap();
+    }
+    std::fs::write(original_source.join("source.txt"), "original-evidence").unwrap();
+    std::fs::write(changed_source.join("source.txt"), "changed-evidence").unwrap();
+    std::fs::write(operator_root.join("fixture/local-inputs.json"), "{}").unwrap();
+    let child_grant = operator_root.join("child/local-inputs.json");
+    let original_grant = json!({"finish":{"history":original_source}}).to_string();
+    std::fs::write(&child_grant, &original_grant).unwrap();
+    unsafe {
+        env::set_var("ANCHOR_RUNNER_LOCAL_INPUTS_ROOT", &operator_root);
+    }
+
+    let child_bundle = root.path().join("child");
+    write_graph_bundle(&child_bundle, &json!({
+        "objective":"child grant recovery", "entry":"slow", "agents":{},
+        "ops":{
+            "slow":{"run":"printf once >> count.txt; sleep 2"},
+            "finish":{"run":"cat /local-inputs/history/source.txt > result.txt; cat /in/slow/count.txt"}
+        },
+        "nodes":[{"id":"slow","op":"slow","plugins":[]},{"id":"finish","op":"finish","plugins":[]}],
+        "edges":[{"from":"slow","to":"finish"}]
+    })).unwrap();
+    write_graph_bundle(
+        &state.bundle_root,
+        &json!({
+            "objective":"parent grant recovery", "entry":"call", "agents":{},
+            "ops":{"call":{"call":{"graph":"child","mode":"wait"}}},
+            "nodes":[{"id":"call","op":"call","plugins":[]}], "edges":[]
+        }),
+    )
+    .unwrap();
+    let app = router(state.clone());
+    let (status, started) = call(
+        app.clone(),
+        "POST",
+        "/trigger",
+        Some(r#"{"graph":"fixture"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{started}");
+    let parent_id = started["run"].as_str().unwrap().to_owned();
+    let store = FileRunStore::new(state.data_root.join("runs"));
+    let artifacts = HostArtifacts::new(
+        state.data_root.join("artifacts"),
+        state.workspace_root.clone(),
+    );
+
+    // Pause only after the first command has made its visible local effect.
+    let mut child_id = None;
+    let mut first_effect_observed = false;
+    for _ in 0..500 {
+        child_id = state
+            .application
+            .child_metadata(&parent_id)
+            .unwrap()
+            .first()
+            .map(|metadata| metadata.run_id.clone());
+        if let Some(id) = &child_id
+            && let Some(child) = store.load(id).unwrap()
+            && child.status == RunStatus::Running
+            && let Some(cursor) = child.cursor
+            && cursor.node_id == "slow"
+            && std::fs::read(
+                artifacts
+                    .workspace_path(&cursor.key)
+                    .unwrap()
+                    .join("count.txt"),
+            )
+            .is_ok_and(|bytes| bytes == b"once")
+        {
+            first_effect_observed = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    assert!(
+        first_effect_observed,
+        "child first command did not reach its visible effect; parent={:?}; child={:?}",
+        store.load(&parent_id).unwrap(),
+        child_id.as_ref().and_then(|id| store.load(id).unwrap())
+    );
+    let child_id = child_id.expect("wait child was not admitted");
+    let (status, paused) = call(
+        app.clone(),
+        "POST",
+        &format!("/runs/{child_id}/pause"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{paused}");
+    wait_idle(&state).await;
+    let parent_before = store.load(&parent_id).unwrap().unwrap();
+    let child_before = store.load(&child_id).unwrap().unwrap();
+    assert_eq!(parent_before.status, RunStatus::WaitingCall);
+    assert_eq!(child_before.status, RunStatus::Paused);
+    assert_eq!(child_before.results["slow"].len(), 1);
+    let first_commit = child_before.results["slow"][0].commit.clone();
+    let first_key = child_before.results["slow"][0].key.clone();
+    assert_eq!(
+        std::fs::read(
+            artifacts
+                .files_path(&first_commit)
+                .unwrap()
+                .join("count.txt")
+        )
+        .unwrap(),
+        b"once"
+    );
+    let parent_record_path = state.data_root.join(format!("runs/{parent_id}.json"));
+    let child_record_path = state.data_root.join(format!("runs/{child_id}.json"));
+    let parent_bytes = std::fs::read(&parent_record_path).unwrap();
+    let child_bytes = std::fs::read(&child_record_path).unwrap();
+
+    std::fs::write(
+        &child_grant,
+        json!({"finish":{"history":changed_source}}).to_string(),
+    )
+    .unwrap();
+    let (status, refused) = call(
+        app.clone(),
+        "POST",
+        &format!("/runs/{parent_id}/resume"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refused}");
+    assert!(refused.to_string().contains("grants"), "{refused}");
+    assert_eq!(std::fs::read(&parent_record_path).unwrap(), parent_bytes);
+    assert_eq!(std::fs::read(&child_record_path).unwrap(), child_bytes);
+    assert!(state.application.active_runs(None).await.is_empty());
+
+    std::fs::write(&child_grant, original_grant).unwrap();
+    let (status, resumed) = call(
+        app.clone(),
+        "POST",
+        &format!("/runs/{parent_id}/resume"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{resumed}");
+    wait_idle(&state).await;
+    let parent = store.load(&parent_id).unwrap().unwrap();
+    let child = store.load(&child_id).unwrap().unwrap();
+    assert_eq!(parent.status, RunStatus::Completed, "{:?}", parent.error);
+    assert_eq!(child.status, RunStatus::Completed, "{:?}", child.error);
+    assert_eq!(
+        parent
+            .graph_calls
+            .values()
+            .next()
+            .unwrap()
+            .child_run_id
+            .as_deref(),
+        Some(child_id.as_str())
+    );
+    assert_eq!(child.results["slow"].len(), 1);
+    assert_eq!(child.results["slow"][0].commit, first_commit);
+    assert_eq!(
+        std::fs::read(
+            artifacts
+                .workspace_path(&first_key)
+                .unwrap()
+                .join("count.txt")
+        )
+        .unwrap(),
+        b"once"
+    );
+    let second_commit = &child.results["finish"][0].commit;
+    assert_eq!(
+        std::fs::read(
+            artifacts
+                .files_path(second_commit)
+                .unwrap()
+                .join("result.txt")
+        )
+        .unwrap(),
+        b"original-evidence"
+    );
+    assert_eq!(child.results["finish"][0].completion.submission, "once");
 }

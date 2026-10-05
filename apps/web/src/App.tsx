@@ -495,7 +495,8 @@ export function App() {
               {detail ? <>
                 <span className={`pill ${detail.state.status}`}>
                   {detail.state.status === 'running'
-                    ? detail.active === false ? '等待接续' : '执行中'
+                    ? detail.active === false ? '等待接续' : detail.control_requested === 'stop' ? '正在停止'
+                      : detail.control_requested === 'pause' ? '正在暂停' : '执行中'
                     : label(detail.state.status)}
                 </span>
                 <span className="objective">{detail.state.objective}</span>
@@ -503,14 +504,16 @@ export function App() {
                   {detail.state.status === 'running' && detail.active !== false ? '正在执行' :
                     detail.state.status === 'running' ? '宿主重启后尚未接续' :
                     detail.state.status === 'stopped' ? '停止于' : detail.state.status === 'waiting_recovery' ? '待恢复于' : '中断于'} {activeNodes(detail.state).map(item => `${item.node}（第 ${item.pass} 轮）`).join('、')}</span>}
-                {(['running', 'paused'].includes(detail.state.status) &&
-                  (detail.state.status === 'paused' || detail.active !== false) && !detail.state.recovery?.length) &&
+                {detail.state.status === 'running' && detail.control_requested &&
+                  <span className="hint" role="status">请求已接收，等待当前节点收束。</span>}
+                {(['running', 'paused', 'stopped'].includes(detail.state.status) &&
+                  (detail.state.status !== 'running' || detail.active !== false) && !detail.state.recovery?.length) &&
                   <span className="run-controls">
                     {detail.state.status === 'running' ? <>
-                      <button onClick={() => void controlRun('pause')} disabled={busy}
+                      <button onClick={() => void controlRun('pause')} disabled={busy || Boolean(detail.control_requested)}
                               title="等待所有活动节点结算后暂停">暂停</button>
                       <button className="danger-link" onClick={() => void controlRun('stop')}
-                              disabled={busy} title="停止本次运行及等待模式创建的目标；已接纳的启动后继续调用不受影响">停止</button>
+                              disabled={busy || detail.control_requested === 'stop'} title="停止本次运行及等待模式创建的目标；已接纳的启动后继续调用不受影响">停止</button>
                     </> : <button onClick={() => void controlRun('resume')} disabled={busy}>
                       继续
                     </button>}

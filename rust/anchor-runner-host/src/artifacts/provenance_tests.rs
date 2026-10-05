@@ -350,6 +350,10 @@ async fn context_retry_is_immutable_and_old_fs1_remains_readable() {
     ));
 
     let (path, mut manifest) = artifacts.load_snapshot(&parent).unwrap();
+    if path.join("git-view").exists() {
+        fs::remove_dir_all(path.join("git-view")).unwrap();
+        fs::remove_file(path.join(".git-view.lock")).unwrap();
+    }
     manifest.format = 1;
     manifest.context = None;
     manifest.context_sha256 = None;

@@ -3,7 +3,7 @@ name = "anchor-runtime-rig"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Experimental Rust/Rig runtime kernel for Anchor"
+description = "Shared Rust Graph runtime kernel for Anchor"
 
 [dependencies]
 rig-agent.workspace = true

@@ -1,7 +1,7 @@
 use super::*;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Manifest {
     pub format: u32,
@@ -15,7 +15,7 @@ pub(super) struct Manifest {
     pub context_sha256: Option<String>,
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct FileHash {
     pub sha256: String,

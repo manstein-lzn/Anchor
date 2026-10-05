@@ -8,21 +8,25 @@ import secrets
 import subprocess
 import sys
 import threading
+import tempfile
 from pathlib import Path
 from typing import Any, Callable
 
 from anchor.library import Library
 from anchor.simple import graph as graph_module
+from anchor.runtime_http import RuntimeHTTPError
 
 
 class ChannelSupervisor:
     """Keep one daemon per platform/profile, outside every AgentNode sandbox."""
 
     def __init__(self, root: Path, library: Library, workspaces: Callable[[], list[Path]],
-                 *, callback_url: str, api_key: str):
+                 *, callback_url: str, api_key: str,
+                 node_plugins: Callable[[], list[dict[str, list[str]]]] | None = None):
         self.root = Path(root).resolve()
         self.library = library
         self.workspaces = workspaces
+        self.node_plugins = node_plugins
         self.callback_url = callback_url
         self.api_key = api_key
         self.processes: dict[str, subprocess.Popen] = {}
@@ -53,6 +57,8 @@ class ChannelSupervisor:
                 process.kill()
         self.processes.clear()
         self.controls.clear()
+        for platform in self.specs:
+            (self.root / "state/channels" / platform / "control.json").unlink(missing_ok=True)
 
     def send(self, platform: str, payload: dict) -> dict:
         from anchor.channel.control import request
@@ -66,14 +72,30 @@ class ChannelSupervisor:
         while not self._stop.wait(1):
             self._reconcile()
 
-    def _desired(self) -> dict[str, dict[str, Any]]:
-        found: dict[str, dict[str, Any]] = {}
-        conflicts: set[str] = set()
+    def _plugin_records(self) -> list[dict[str, list[str]]]:
+        if self.node_plugins is not None:
+            records = self.node_plugins()
+            if (not isinstance(records, list) or any(not isinstance(record, dict) or
+                    any(not isinstance(ids, list) or any(not isinstance(plugin, str) for plugin in ids)
+                        for ids in record.values()) for record in records)):
+                raise ValueError("invalid compiled channel Plugin projection")
+            return records
+        records = []
         for workspace in self.workspaces():
             try:
                 graph = graph_module.load(workspace / "graph.json")
-                for node in graph.nodes.values():
-                    for plugin_id in node.plugins:
+                records.append({node: list(value.plugins) for node, value in graph.nodes.items()})
+            except (OSError, ValueError) as exc:
+                print(json.dumps({"channel_config_error": str(exc)}, ensure_ascii=False), flush=True)
+        return records
+
+    def _desired(self) -> dict[str, dict[str, Any]]:
+        found: dict[str, dict[str, Any]] = {}
+        conflicts: set[str] = set()
+        for record in self._plugin_records():
+            try:
+                for plugins in record.values():
+                    for plugin_id in plugins:
                         for channel in self.library.channels(plugin_id):
                             platform = channel["platform"]
                             plugin_dir = self.library.root / "plugins" / plugin_id
@@ -95,13 +117,19 @@ class ChannelSupervisor:
         return found
 
     def _reconcile(self) -> None:
-        desired = self._desired()
+        try:
+            desired = self._desired()
+        except (RuntimeHTTPError, OSError, ValueError) as exc:
+            print(json.dumps({"channel_config_error": str(exc)}, ensure_ascii=False), flush=True)
+            return
         for platform, process in tuple(self.processes.items()):
             if platform not in desired or process.poll() is not None:
                 if process.poll() is None:
                     process.terminate()
                 self.processes.pop(platform, None)
                 self.controls.pop(platform, None)
+                (self.root / "state/channels" / platform / "control.json").unlink(missing_ok=True)
+
         for platform, spec in desired.items():
             self.specs[platform] = spec
             if platform in self.processes:
@@ -142,5 +170,18 @@ class ChannelSupervisor:
             return
         self.processes[platform] = process
         self.controls[platform] = (control_path, token)
+        # Rust hosts run in a separate process and cannot inherit the gateway's
+        # per-start token. Publish the same private control endpoint through a
+        # mode-0600 descriptor; the Rust adapter rereads it for every send so
+        # gateway restarts rotate credentials without restarting the host.
+        descriptor = control_path.with_name("control.json")
+        descriptor.parent.mkdir(parents=True, exist_ok=True)
+        fd, temporary = tempfile.mkstemp(prefix=".control-", dir=descriptor.parent)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                json.dump({"socket": str(control_path), "token": token}, stream)
+            os.replace(temporary, descriptor)
+        finally:
+            Path(temporary).unlink(missing_ok=True)
         print(json.dumps({"channel_started": platform, "plugin": spec["plugin"],
                           "pid": process.pid}), flush=True)

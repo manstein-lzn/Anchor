@@ -88,3 +88,10 @@ struct FileRunLease {
     _file: fs::File,
 }
 impl RunLease for FileRunLease {}
+impl Drop for FileRunLease {
+    fn drop(&mut self) {
+        // A concurrent fork may inherit this descriptor before exec closes it.
+        // Release the owner's lock explicitly instead of waiting for every copy.
+        let _ = self._file.unlock();
+    }
+}

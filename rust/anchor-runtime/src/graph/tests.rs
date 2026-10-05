@@ -361,6 +361,36 @@ async fn deleted_graph_call_marker_resumes_as_completed_without_replay() {
     );
 }
 
+#[test]
+fn stopped_conversation_run_can_retain_unknown_recovery_attempts() {
+    let mut record = GraphRunRecord::create(graph(&["work"], &[], "work"), Value::Null).unwrap();
+    let key = InvocationKey {
+        run_id: record.run_id.clone(),
+        graph_digest: record.graph_digest.clone(),
+        node_id: "work".into(),
+        invocation: 1,
+    };
+    record.cursor = Some(RunCursor {
+        node_id: "work".into(),
+        key: key.clone(),
+        input_commits: vec![],
+        prepared_input: serde_json::json!({"input": Value::Null, "committed_inputs": []}),
+    });
+    record.invocations.insert("work".into(), 1);
+    record.passes.insert("work".into(), 1);
+    record.recovery.push(PendingRecovery {
+        key,
+        attempt: RecoveryAttempt {
+            attempt_id: 77,
+            step: 2,
+            tool: "external_effect".into(),
+            started_at: "2026-10-05T00:00:00Z".into(),
+        },
+    });
+    record.status = RunStatus::Stopped;
+    assert!(record.validate().is_ok());
+}
+
 #[tokio::test]
 async fn plugin_manifest_is_pinned_to_run_and_drift_fails_before_dispatch() {
     let mut snapshot = graph(&["work"], &[], "work");
@@ -1047,6 +1077,12 @@ async fn serial_routing_skips_unselected_and_passes_fixed_commit_input() {
     assert_eq!(next.input["input"]["defaults"]["b"], 2);
     assert_eq!(next.input["input"]["request"], "x");
     assert!(next.task.contains("review left"));
+    assert!(
+        next.task
+            .contains("mounted read-only under `/in/<node-id>`")
+    );
+    assert!(next.task.contains("find /in"));
+    assert!(next.task.contains("/workspace"));
     assert_eq!(next.model.as_deref(), Some("m"));
     assert!(next.network);
     assert_eq!(next.wall_time_limit_seconds, Some(45.0));

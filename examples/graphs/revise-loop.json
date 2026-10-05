@@ -16,7 +16,7 @@
     },
     "reviewer": {
       "model": "models.academic",
-      "instructions": "Count the words in the draft you were given. Decide where this goes next:\n\n  route to `draft` if you have not written `review.md` yet — write it first, asking for one concrete example.\n  route to `done` if `review.md` is already there.\n\nReturn a structured completion with the selected route.",
+      "instructions": "Count the words in the draft you were given. Choose the next node from the state of /workspace/review.md when this pass begins, before writing anything:\n\n  If review.md was absent at the start of this pass, write it asking for one concrete example, then route to `draft`. Creating review.md during this pass does not change that choice.\n  If review.md was already present at the start of this pass, read the revised draft and your previous review, then route to `done`.\n\nReturn a structured completion with the selected route.",
       "network": false,
       "reads": [
         "draft.md"

@@ -30,6 +30,10 @@ pub const FAKE_ECHO_TOOL: &str = "anchor_fake__echo";
 #[derive(Debug, Clone, Default)]
 pub struct McpToolConfig {
     servers: BTreeMap<String, ResolvedMcpServer>,
+    // Declarations intentionally disabled by the existing optional environment
+    // contract are different from missing host configuration.
+    disabled: BTreeSet<String>,
+    pub(crate) environment: crate::tool_environment::ToolEnvironment,
 }
 
 #[derive(Debug, Clone)]
@@ -51,6 +55,7 @@ impl McpToolConfig {
         let root = root.into();
         let catalog = FilePluginCatalog::new(root);
         let mut servers = BTreeMap::new();
+        let mut disabled = BTreeSet::new();
         for binding in bindings {
             if binding
                 .mcp_servers
@@ -62,6 +67,12 @@ impl McpToolConfig {
             let definitions = catalog
                 .mcp_servers(&binding.id, true)
                 .map_err(|error| format!("Plugin `{}` MCP catalog failed: {error}", binding.id))?;
+            let declared = catalog
+                .mcp_servers(&binding.id, false)
+                .map_err(|error| format!("Plugin `{}` MCP catalog failed: {error}", binding.id))?
+                .into_iter()
+                .map(|definition| definition.name)
+                .collect::<BTreeSet<_>>();
             let mut by_name = definitions
                 .into_iter()
                 .map(|definition| (definition.name.clone(), definition))
@@ -70,13 +81,17 @@ impl McpToolConfig {
                 if server_name == FAKE_SERVER_ID {
                     continue;
                 }
-                let definition = by_name.remove(server_name).ok_or_else(|| {
-                    format!(
+                let key = format!("{}-{server_name}", binding.id);
+                let Some(definition) = by_name.remove(server_name) else {
+                    if declared.contains(server_name) {
+                        disabled.insert(key);
+                        continue;
+                    }
+                    return Err(format!(
                         "Plugin `{}` MCP server `{server_name}` is not present in the catalog",
                         binding.id
-                    )
-                })?;
-                let key = format!("{}-{server_name}", binding.id);
+                    ));
+                };
                 if servers
                     .insert(
                         key.clone(),
@@ -95,7 +110,11 @@ impl McpToolConfig {
                 }
             }
         }
-        Ok(Self { servers })
+        Ok(Self {
+            servers,
+            disabled,
+            environment: Default::default(),
+        })
     }
 
     /// Resolve the same immutable Plugin directories as the catalog and map
@@ -147,6 +166,7 @@ impl McpToolConfig {
 
     /// Bind the same manifest MCP servers while giving stdio servers a
     /// command created inside the host Bubblewrap boundary.
+    #[cfg(test)]
     pub async fn bind_with_sandbox(
         &self,
         bindings: &[PluginBinding],
@@ -154,15 +174,31 @@ impl McpToolConfig {
         sandbox: &BubblewrapSandbox,
         workspace: &Path,
     ) -> Result<LiveMcpTools, String> {
-        self.bind_inner(bindings, network, Some((sandbox, workspace)))
+        self.bind_with_node_inputs(bindings, network, sandbox, workspace, &[])
             .await
+    }
+
+    async fn bind_with_node_inputs(
+        &self,
+        bindings: &[PluginBinding],
+        network: bool,
+        sandbox: &BubblewrapSandbox,
+        workspace: &Path,
+        readonly_inputs: &[ReadOnlyInput],
+    ) -> Result<LiveMcpTools, String> {
+        self.bind_inner(
+            bindings,
+            network,
+            Some((sandbox, workspace, readonly_inputs)),
+        )
+        .await
     }
 
     async fn bind_inner(
         &self,
         bindings: &[PluginBinding],
         network: bool,
-        sandbox: Option<(&BubblewrapSandbox, &Path)>,
+        sandbox: Option<(&BubblewrapSandbox, &Path, &[ReadOnlyInput])>,
     ) -> Result<LiveMcpTools, String> {
         self.validate_bindings(bindings, network)?;
         let mut hosts = BTreeMap::new();
@@ -172,6 +208,9 @@ impl McpToolConfig {
                     continue;
                 }
                 let key = format!("{}-{server_id}", binding.id);
+                if self.disabled.contains(&key) {
+                    continue;
+                }
                 if hosts.contains_key(&key) {
                     continue;
                 }
@@ -203,6 +242,9 @@ impl McpToolConfig {
                     continue;
                 }
                 let key = format!("{}-{server_id}", binding.id);
+                if self.disabled.contains(&key) {
+                    continue;
+                }
                 let definition = self
                     .servers
                     .get(&key)
@@ -221,7 +263,7 @@ impl McpToolConfig {
         key: &str,
         definition: &ResolvedMcpServer,
         network: bool,
-        sandbox: Option<(&BubblewrapSandbox, &Path)>,
+        sandbox: Option<(&BubblewrapSandbox, &Path, &[ReadOnlyInput])>,
     ) -> Result<McpHost, String> {
         let transport = transport_name(&definition.config)?;
         match transport {
@@ -242,14 +284,26 @@ impl McpToolConfig {
                 "MCP server `{key}` uses legacy SSE, which RMCP 2.2 does not provide"
             )),
             "stdio" => {
-                let (sandbox, workspace) = sandbox.ok_or_else(|| {
+                let (sandbox, workspace, readonly_inputs) = sandbox.ok_or_else(|| {
                     format!("MCP server `{key}` requires the host sandbox launcher")
                 })?;
-                let (program, args, environment, working_directory) = stdio_config(
+                let (mut program, args, environment, working_directory) = stdio_config(
                     &definition.config,
                     &definition.plugin_directory,
                     &definition.plugin_id,
                 )?;
+                if let Some(command) = definition.config.get("command").and_then(Value::as_str)
+                    && Path::new(command).is_absolute()
+                    && !Path::new(command).starts_with(&definition.plugin_directory)
+                {
+                    // Standalone entrypoints use their granted mount; interpreters
+                    // keep their explicit path so PATH cannot select another version.
+                    program = self
+                        .environment
+                        .visible_entrypoint(Path::new(command))
+                        .map(|path| path.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| command.to_owned());
+                }
                 let mut request = SandboxRequest::new(workspace.to_path_buf(), {
                     let mut argv = vec![program.clone()];
                     argv.extend(args.clone());
@@ -260,7 +314,13 @@ impl McpToolConfig {
                     &definition.plugin_directory,
                     format!("/plugins/{}", definition.plugin_id),
                 ));
+                for input in readonly_inputs {
+                    if !request.readonly_inputs.contains(input) {
+                        request.readonly_inputs.push(input.clone());
+                    }
+                }
                 request.environment = environment;
+                self.environment.apply(&mut request);
                 request.network = if network {
                     NetworkPolicy::Enabled
                 } else {
@@ -483,7 +543,11 @@ impl LiveMcpTools {
         for (server_id, host) in &self.hosts {
             for tool in host.tools() {
                 let exposed = exposed_tool_name(server_id, &tool.name);
-                if exposed == FAKE_ECHO_TOOL || exposed == crate::node_tools::RUN_TOOL_NAME {
+                if exposed == FAKE_ECHO_TOOL
+                    || exposed == crate::node_tools::RUN_TOOL_NAME
+                    || exposed == crate::channel_tools::SEND_TOOL
+                    || exposed == crate::channel_tools::IMAGE_TOOL
+                {
                     return Err(format!(
                         "MCP tool `{exposed}` is reserved by the Anchor node host"
                     ));
@@ -678,12 +742,13 @@ impl PluginToolHost {
         network: bool,
         sandbox: &BubblewrapSandbox,
         workspace: &Path,
+        readonly_inputs: &[ReadOnlyInput],
     ) -> Result<Arc<dyn ToolPort>, String> {
         let fake = self
             .for_bindings(bindings)
             .map_err(|error| error.to_string())?;
         let live = mcp
-            .bind_with_sandbox(bindings, network, sandbox, workspace)
+            .bind_with_node_inputs(bindings, network, sandbox, workspace, readonly_inputs)
             .await?;
         Ok(Arc::new(CombinedPluginTools::new(fake, live)))
     }
@@ -863,6 +928,125 @@ mod tests {
         assert!(config.servers.is_empty());
     }
 
+    #[tokio::test]
+    async fn optional_unconfigured_mcp_is_absent_without_disabling_the_plugin() {
+        let root = tempfile::tempdir().unwrap();
+        let plugin = root.path().join("plugins/optional");
+        std::fs::create_dir_all(&plugin).unwrap();
+        std::fs::write(plugin.join("plugin.json"),
+            r#"{"name":"Optional","mcpServers":{"api":{"command":"python3","args":["server.py"],"optional_env_vars":["ANCHOR_TEST_UNCONFIGURED_OPTIONAL_MCP_7F90"]}}}"#).unwrap();
+        let binding = PluginBinding {
+            id: "optional".into(),
+            digest: String::new(),
+            resources: vec!["plugin.json".into()],
+            mcp_servers: vec!["api".into()],
+        };
+        let config =
+            McpToolConfig::from_catalog(root.path(), std::slice::from_ref(&binding)).unwrap();
+        assert!(config.servers.is_empty());
+        assert!(config.disabled.contains("optional-api"));
+        assert!(
+            config
+                .bind(std::slice::from_ref(&binding), false)
+                .await
+                .unwrap()
+                .definitions()
+                .is_empty()
+        );
+        assert!(
+            McpToolConfig::from_catalog(
+                root.path(),
+                &[PluginBinding {
+                    mcp_servers: vec!["not-declared".into()],
+                    ..binding
+                }]
+            )
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn stdio_mcp_receives_only_its_nodes_readonly_grants() {
+        use anchor_sandbox_bwrap::BubblewrapPolicy;
+        let root = tempfile::tempdir().unwrap();
+        let plugin = root.path().join("plugins/reader");
+        let workspace = root.path().join("workspace");
+        let other_workspace = root.path().join("other-workspace");
+        let private = root.path().join("private");
+        for path in [&plugin, &workspace, &other_workspace, &private] {
+            std::fs::create_dir_all(path).unwrap();
+        }
+        std::fs::write(private.join("history.txt"), "mcp-local-evidence").unwrap();
+        std::fs::write(plugin.join("server.py"), r#"import json, os, sys
+for line in sys.stdin:
+    request = json.loads(line)
+    if "id" not in request:
+        continue
+    method = request.get("method")
+    if method == "initialize":
+        result = {"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"reader","version":"1"}}
+    elif method == "tools/list":
+        result = {"tools":[{"name":"inspect","description":"inspect granted input","inputSchema":{"type":"object","properties":{}}}]}
+    elif method == "tools/call":
+        path = "/local-inputs/history/history.txt"
+        value = {"visible": os.path.exists(path)}
+        if value["visible"]:
+            value["text"] = open(path).read()
+            try:
+                open("/local-inputs/history/forbidden", "w").write("changed")
+                value["readonly"] = False
+            except OSError:
+                value["readonly"] = True
+        result = {"content":[{"type":"text","text":json.dumps(value)}]}
+    else:
+        result = {}
+    print(json.dumps({"jsonrpc":"2.0","id":request["id"],"result":result}), flush=True)
+"#).unwrap();
+        std::fs::write(plugin.join("plugin.json"), json!({
+            "name":"Reader", "mcpServers":{"stdio":{"command":"/usr/bin/python3","args":["server.py"]}}
+        }).to_string()).unwrap();
+        let binding = FilePluginCatalog::new(root.path())
+            .resolve(&["reader".into()])
+            .unwrap()
+            .remove(0);
+        let config =
+            McpToolConfig::from_catalog(root.path(), std::slice::from_ref(&binding)).unwrap();
+        let sandbox = BubblewrapSandbox::new(
+            BubblewrapPolicy::new("bwrap", ["python3"])
+                .authorize_workspace_root(&workspace)
+                .authorize_workspace_root(&other_workspace)
+                .authorize_readonly_input_root(&plugin)
+                .authorize_readonly_destination_root("/plugins"),
+        )
+        .unwrap();
+        let grants = [ReadOnlyInput::new(&private, "/local-inputs/history")];
+        let node_sandbox = sandbox.with_readonly_grants(&grants).unwrap();
+        let tools = config
+            .bind_with_node_inputs(
+                std::slice::from_ref(&binding),
+                false,
+                &node_sandbox,
+                &workspace,
+                &grants,
+            )
+            .await
+            .unwrap();
+        let result = tools.call("reader-stdio_inspect", json!({})).await.unwrap();
+        let value: Value = serde_json::from_str(result[0].as_text().unwrap()).unwrap();
+        assert_eq!(
+            value,
+            json!({"visible":true,"text":"mcp-local-evidence","readonly":true})
+        );
+        assert!(!private.join("forbidden").exists());
+        let tools = config
+            .bind_with_sandbox(&[binding], false, &sandbox, &other_workspace)
+            .await
+            .unwrap();
+        let result = tools.call("reader-stdio_inspect", json!({})).await.unwrap();
+        let value: Value = serde_json::from_str(result[0].as_text().unwrap()).unwrap();
+        assert_eq!(value, json!({"visible":false}));
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn stdio_mcp_runs_inside_the_plugin_mount_and_exposes_direct_tools() {
@@ -875,6 +1059,7 @@ mod tests {
         std::fs::write(
             plugin.join("server.py"),
             r#"import json, os, sys
+from installed_dependency import prefix
 if os.getcwd() != "/plugins/research/nested":
     raise SystemExit(f"wrong cwd: {os.getcwd()}")
 for line in sys.stdin:
@@ -888,7 +1073,7 @@ for line in sys.stdin:
     elif method == "tools/list":
         result = {"tools":[{"name":"echo","description":"echo","inputSchema":{"type":"object","properties":{"value":{"type":"string"}}}}]}
     elif method == "tools/call":
-        result = {"content":[{"type":"text","text":request["params"]["arguments"]["value"]}]}
+        result = {"content":[{"type":"text","text":prefix + request["params"]["arguments"]["value"]}]}
     else:
         result = {}
     print(json.dumps({"jsonrpc":"2.0","id":request["id"],"result":result}), flush=True)
@@ -902,29 +1087,86 @@ for line in sys.stdin:
             .permissions();
         permissions.set_mode(0o644);
         std::fs::set_permissions(plugin.join("server.py"), permissions).unwrap();
-        std::fs::write(
-            plugin.join("plugin.json"),
-            r#"{"name":"Research","mcpServers":{"stdio":{"command":"python3","args":["../server.py"],"cwd":"nested"}}}"#,
+        let environment = root.path().join("external-env");
+        let tool = root.path().join("tools/python");
+        let imports = root.path().join("external-modules");
+        // Another installation sorts first on PATH; it must not replace the
+        // explicitly requested interpreter of this MCP server.
+        let decoy = root.path().join("decoy-env");
+        let decoy_tool = root.path().join("tools/a-decoy");
+        std::fs::create_dir_all(decoy.join("bin")).unwrap();
+        std::fs::create_dir_all(&decoy_tool).unwrap();
+        std::fs::write(decoy.join("bin/python"), "#!/bin/sh\nexit 88\n").unwrap();
+        std::fs::set_permissions(
+            decoy.join("bin/python"),
+            std::fs::Permissions::from_mode(0o755),
         )
         .unwrap();
+        std::os::unix::fs::symlink("python", decoy.join("bin/python3")).unwrap();
+        std::fs::write(
+            decoy_tool.join("tool.json"),
+            json!({
+                "entrypoint":decoy.join("bin/python"), "environment":decoy
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::create_dir_all(environment.join("bin")).unwrap();
+        std::fs::create_dir_all(&tool).unwrap();
+        std::fs::create_dir(&imports).unwrap();
+        std::os::unix::fs::symlink("/usr/bin/python3", environment.join("bin/python")).unwrap();
+        std::fs::write(
+            imports.join("installed_dependency.py"),
+            "prefix = 'dependency:'",
+        )
+        .unwrap();
+        std::fs::write(tool.join("tool.json"), json!({
+            "entrypoint":environment.join("bin/python"), "environment":environment, "imports":[imports]
+        }).to_string()).unwrap();
+        let standalone = root.path().join("standalone-launcher");
+        let standalone_tool = root.path().join("tools/standalone");
+        std::fs::create_dir(&standalone_tool).unwrap();
+        std::fs::write(&standalone, "#!/bin/sh\nexec /usr/bin/python3 \"$@\"\n").unwrap();
+        std::fs::set_permissions(&standalone, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(
+            standalone_tool.join("tool.json"),
+            json!({"entrypoint":standalone}).to_string(),
+        )
+        .unwrap();
+        std::fs::write(plugin.join("plugin.json"), json!({
+            "name":"Research", "mcpServers":{
+                "stdio":{
+                    "command": environment.join("bin/python"), "args":["../server.py"], "cwd":"nested"
+                },
+                "system":{
+                    "command":"/usr/bin/python3", "args":["../server.py"], "cwd":"nested"
+                },
+                "standalone":{
+                    "command":standalone, "args":["../server.py"], "cwd":"nested"
+                }
+            }
+        }).to_string()).unwrap();
         let binding = FilePluginCatalog::new(root.path())
             .resolve(&["research".into()])
             .unwrap()
             .remove(0);
-        let config =
+        let mut config =
             McpToolConfig::from_catalog(root.path(), std::slice::from_ref(&binding)).unwrap();
+        config.environment = crate::tool_environment::ToolEnvironment::load(root.path()).unwrap();
         let workspace = root.path().join("workspace");
         std::fs::create_dir(&workspace).unwrap();
         let sandbox = BubblewrapSandbox::new(
-            BubblewrapPolicy::new("bwrap", ["python3"])
-                .authorize_workspace_root(&workspace)
-                .authorize_readonly_input_root(root.path())
-                .authorize_readonly_destination_root("/plugins"),
+            config.environment.authorize(
+                BubblewrapPolicy::new("bwrap", ["python3"])
+                    .authorize_workspace_root(&workspace)
+                    .authorize_readonly_input_root(root.path())
+                    .authorize_readonly_destination_root("/plugins"),
+            ),
         )
         .unwrap();
         let tools = match tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            config.bind_with_sandbox(&[binding], false, &sandbox, &workspace),
+            config.bind_with_sandbox(std::slice::from_ref(&binding), false, &sandbox, &workspace),
         )
         .await
         {
@@ -936,17 +1178,31 @@ for line in sys.stdin:
                 std::fs::read_to_string(workspace.join("mcp-log"))
             ),
         };
-        assert!(
-            tools
-                .definitions()
-                .iter()
-                .any(|definition| definition.name == "research-stdio_echo")
-        );
-        let result = tools
-            .call("research-stdio_echo", json!({"value":"hello"}))
-            .await
-            .unwrap();
-        assert_eq!(result[0].as_text(), Some("hello"));
+        for name in [
+            "research-stdio_echo",
+            "research-system_echo",
+            "research-standalone_echo",
+        ] {
+            assert!(
+                tools
+                    .definitions()
+                    .iter()
+                    .any(|definition| definition.name == name)
+            );
+            let result = tools.call(name, json!({"value":"hello"})).await.unwrap();
+            assert_eq!(result[0].as_text(), Some("dependency:hello"), "{name}");
+        }
+        let ungranted = root.path().join("python3");
+        std::fs::copy(&standalone, &ungranted).unwrap();
+        config
+            .servers
+            .get_mut("research-standalone")
+            .unwrap()
+            .config["command"] = json!(ungranted);
+        assert!(matches!(
+            config.bind_with_sandbox(&[binding], false, &sandbox, &workspace).await,
+            Err(error) if error.contains("sandbox launch rejected") && error.contains("command must select")
+        ));
     }
 }
 

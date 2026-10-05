@@ -1,6 +1,11 @@
 //! Run admission and control. Graph routing and node scheduling belong to GraphRunner.
+mod conversations;
 pub(crate) mod metadata;
+pub(crate) mod session_calls;
+pub(crate) use conversations::ConversationAdmission;
+pub(crate) use metadata::ConversationSource;
 pub(crate) use metadata::RunMetadata;
+pub(crate) use metadata::RunTrigger;
 
 use crate::{HostControl, create_durable_directory, execution::PreparedExecution, run_data};
 use anchor_graph_host::{
@@ -29,6 +34,11 @@ pub(crate) enum ApplicationError {
     Conflict(String),
     Invalid(String),
     Storage(String),
+}
+
+pub(crate) struct AdmissionOptions {
+    pub(crate) objective: Option<String>,
+    pub(crate) trigger: RunTrigger,
 }
 
 impl From<GraphError> for ApplicationError {
@@ -128,7 +138,21 @@ impl RunApplication {
     }
 
     pub(crate) async fn recover_detached_at_startup(&self) -> Result<(), ApplicationError> {
-        self.recover_detached().await
+        self.recover_detached().await?;
+        // A delivery receipt can be committed just before the service exits,
+        // leaving its wait parent parked. Reuse ordinary child completion.
+        for (id, _) in self.records()? {
+            if let Some(metadata) = self.metadata(&id)?
+                && metadata
+                    .session_call
+                    .as_ref()
+                    .is_some_and(|call| call.status != "pending")
+            {
+                self.child_finished(&id, &metadata.graph, RunStatus::Completed)
+                    .await?;
+            }
+        }
+        Ok(())
     }
 
     fn store(&self) -> FileRunStore {
@@ -151,8 +175,38 @@ impl RunApplication {
             .collect()
     }
 
+    pub(crate) async fn control_requested(&self, run_id: &str) -> Option<&'static str> {
+        let active = self.active.lock().await;
+        let run = active.get(run_id)?;
+        if run.control.cancellation.load(Ordering::Relaxed) {
+            Some("stop")
+        } else if run.control.pause.load(Ordering::Relaxed) {
+            Some("pause")
+        } else {
+            None
+        }
+    }
+
     pub(crate) fn metadata(&self, run_id: &str) -> Result<Option<RunMetadata>, ApplicationError> {
         metadata::load(&self.data_root, run_id)
+    }
+
+    /// FileRunStore's persisted modification time, not an independent audit clock.
+    pub(crate) fn run_updated(&self, run_id: &str) -> Result<String, ApplicationError> {
+        if run_id.is_empty()
+            || run_id == "."
+            || run_id == ".."
+            || !run_id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))
+        {
+            return Err(ApplicationError::Invalid("invalid Run id".into()));
+        }
+        let modified =
+            std::fs::metadata(self.data_root.join("runs").join(format!("{run_id}.json")))
+                .and_then(|metadata| metadata.modified())
+                .map_err(storage)?;
+        Ok(chrono::DateTime::<chrono::Utc>::from(modified).to_rfc3339())
     }
 
     pub(crate) fn child_metadata(
@@ -206,9 +260,38 @@ impl RunApplication {
         Ok(records)
     }
 
+    pub(crate) async fn has_unfinished_plugin_run(
+        &self,
+        graph_path: &Path,
+    ) -> Result<bool, ApplicationError> {
+        let graph_path = Self::graph_identity(graph_path)?;
+        let active = self.active.lock().await;
+        for (run_id, record) in self.records()? {
+            if record.plugin_bindings.is_empty()
+                || matches!(
+                    record.status,
+                    RunStatus::Completed | RunStatus::Failed | RunStatus::Aborted
+                )
+            {
+                continue;
+            }
+            if let Some(metadata) = self.metadata(&run_id)?
+                && Self::graph_identity(&metadata.bundle_source)? == graph_path
+            {
+                if self.superseded_conversation_ancestor(&run_id)?.is_some()
+                    && self.ensure_predecessor_settled(&record, &active).is_ok()
+                {
+                    continue;
+                }
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// Runs whose immutable Graph identity resolves to this exact bundle path.
     /// Runs without metadata cannot be attributed and are left untouched.
-    fn runs_for_graph(
+    pub(crate) fn runs_for_graph(
         &self,
         graph_path: &Path,
     ) -> Result<Vec<(String, GraphRunRecord)>, ApplicationError> {
@@ -226,7 +309,7 @@ impl RunApplication {
 
     /// Acquire the shared Graph lease, retrying briefly so an in-flight child
     /// admission is not surfaced as a spurious delete conflict.
-    async fn acquire_graph_lease_waiting(
+    pub(crate) async fn acquire_graph_lease_waiting(
         &self,
         graph_path: &Path,
     ) -> Result<Box<dyn RunLease>, ApplicationError> {
@@ -240,7 +323,7 @@ impl RunApplication {
             }
         }
         Err(ApplicationError::Conflict(
-            "Graph is busy with an admission; retry the delete".into(),
+            "Graph is busy with an admission; retry the operation".into(),
         ))
     }
 
@@ -333,14 +416,52 @@ impl RunApplication {
                 callers.join(", ")
             )));
         }
+        let active = self.active.lock().await;
         let targets = self.runs_for_graph(&graph_path)?;
-        if let Some((run_id, _)) = targets
-            .iter()
-            .find(|(_, record)| is_unfinished(record.status))
-        {
-            return Err(ApplicationError::Conflict(format!(
-                "Graph has unfinished Run `{run_id}`; resume or stop it before deleting the Graph"
-            )));
+        for (run_id, record) in &targets {
+            self.reject_pending_session_delivery(run_id)?;
+            if active.contains_key(run_id) {
+                return Err(ApplicationError::Conflict(
+                    "Graph still has active execution".into(),
+                ));
+            }
+            if is_unfinished(record.status) {
+                let conversation = self
+                    .metadata(run_id)?
+                    .is_some_and(|metadata| metadata.conversation.is_some());
+                if !conversation
+                    || (record.status != RunStatus::Stopped
+                        && !self.has_conversation_successor(run_id)?)
+                {
+                    return Err(ApplicationError::Conflict(format!(
+                        "Graph has unfinished Run `{run_id}`; resume it, or stop and delete its record before deleting the Graph"
+                    )));
+                }
+            }
+            if self
+                .metadata(run_id)?
+                .is_some_and(|metadata| metadata.conversation.is_some())
+            {
+                self.ensure_conversation_delete_settled(record, &active)?;
+            }
+        }
+        let mut conversations = std::collections::BTreeMap::new();
+        for (run_id, record) in &targets {
+            if let Some(metadata) = self.metadata(run_id)? {
+                for node in &record.snapshot.nodes {
+                    if let Some(hint) = crate::node_host::conversation_hint_for(&metadata, &node.id)
+                    {
+                        conversations.entry(hint.key.clone()).or_insert(hint);
+                    }
+                }
+            }
+        }
+        for hint in conversations.into_values() {
+            anchor_io_harness_runtime::node_port::remove_conversation(
+                &self.data_root.join("io-harness/store"),
+                &hint,
+            )
+            .map_err(ApplicationError::Storage)?;
         }
         for (id, record) in &targets {
             run_data::delete_run_data(record, &self.data_root, workspace_root)
@@ -356,14 +477,93 @@ impl RunApplication {
         Ok(targets.len())
     }
 
+    pub(crate) async fn delete_run(
+        &self,
+        run_id: &str,
+        workspace_root: &Path,
+    ) -> Result<(), ApplicationError> {
+        let active = self.active.lock().await;
+        if active.contains_key(run_id) {
+            return Err(ApplicationError::Conflict(
+                "that Run is still running".into(),
+            ));
+        }
+        let store = self.store();
+        let record = store.load(run_id)?.ok_or(ApplicationError::Missing)?;
+        self.reject_conversation_successor(run_id)?;
+        self.reject_pending_session_delivery(run_id)?;
+        if self
+            .metadata(run_id)?
+            .is_some_and(|metadata| metadata.conversation.is_some())
+        {
+            return Err(ApplicationError::Conflict(
+                "conversation Runs can only be deleted with their complete Graph lineage".into(),
+            ));
+        }
+        if !record.graph_calls.is_empty() {
+            return Err(ApplicationError::Conflict(
+                "Run is referenced by or owns a Graph call".into(),
+            ));
+        }
+        for (other_id, other) in self.records()? {
+            if other_id != run_id
+                && other.graph_calls.values().any(|call| {
+                    call.child_run_id.as_deref() == Some(run_id)
+                        && call.status != anchor_runtime_rig::graph::GraphCallStatus::Deleted
+                })
+            {
+                return Err(ApplicationError::Conflict(
+                    "Run is referenced by another Graph call".into(),
+                ));
+            }
+        }
+        let _lease = store.acquire_lease(run_id)?;
+        let artifacts = crate::HostArtifacts::new(
+            self.data_root.join("artifacts"),
+            workspace_root.to_path_buf(),
+        );
+        for result in record.results.values().flatten() {
+            if self
+                .data_root
+                .join("artifacts")
+                .join(&result.commit.id)
+                .exists()
+            {
+                artifacts
+                    .list_files(&result.commit)
+                    .map_err(|error| ApplicationError::Invalid(error.to_string()))?;
+            }
+            if result.key.run_id != run_id
+                || result.key.graph_digest != record.graph_digest
+                || result.commit.node_id != result.key.node_id
+                || result.commit.invocation != result.key.invocation
+            {
+                return Err(ApplicationError::Invalid(
+                    "Run artifact identity mismatch".into(),
+                ));
+            }
+        }
+        run_data::delete_run_data(&record, &self.data_root, workspace_root)
+            .map_err(ApplicationError::Storage)?;
+        run_data::remove_run_files(&self.data_root, run_id).map_err(ApplicationError::Storage)
+    }
+
     pub(crate) async fn admit(
         &self,
         graph: String,
         source: &Path,
-        bundle: LoadedGraphBundle,
+        mut bundle: LoadedGraphBundle,
         input: Value,
+        options: AdmissionOptions,
         graph_lease: Box<dyn RunLease>,
     ) -> Result<String, ApplicationError> {
+        options
+            .trigger
+            .validate()
+            .map_err(ApplicationError::Invalid)?;
+        if let Some(objective) = options.objective.filter(|value| !value.is_empty()) {
+            bundle.snapshot.objective = objective;
+        }
         let graph_path = Self::graph_identity(source)?;
         let mut active = self.active.lock().await;
         if active.values().any(|run| run.graph_path == graph_path) {
@@ -388,7 +588,7 @@ impl RunApplication {
                         if Self::graph_identity(&meta.bundle_source)? == graph_path =>
                     {
                         return Err(ApplicationError::Conflict(
-                            "this graph has an unfinished Run; resume or stop it".into(),
+                            "this graph has an unfinished Run; resume it, or stop and delete its record".into(),
                         ));
                     }
                     None => return Err(ApplicationError::Conflict(
@@ -415,13 +615,17 @@ impl RunApplication {
             self.clone(),
         )
         .map_err(ApplicationError::Invalid)?;
+        execution
+            .bind_local_inputs(&record, &graph)
+            .map_err(ApplicationError::Invalid)?;
         self.check_store()?;
-        let metadata = RunMetadata::new(
+        let mut metadata = RunMetadata::new(
             run_id.clone(),
             graph.clone(),
             record.graph_digest.clone(),
             source,
         )?;
+        options.trigger.apply(&mut metadata);
         create_durable_directory(&self.data_root.join("runs")).map_err(storage)?;
         let lease = self.store().acquire_lease(&run_id)?;
         // Metadata is saved first: a crash can leave unused metadata, never an accepted
@@ -489,8 +693,31 @@ impl RunApplication {
         run_id: &str,
         operation: &str,
     ) -> Result<(), ApplicationError> {
+        self.control_expected(run_id, operation, None).await
+    }
+
+    async fn control_expected(
+        &self,
+        run_id: &str,
+        operation: &str,
+        waiting: Option<(&str, u64)>,
+    ) -> Result<(), ApplicationError> {
         if !matches!(operation, "pause" | "resume" | "stop") {
             return Err(ApplicationError::Invalid("unknown Run control".into()));
+        }
+        if self
+            .metadata(run_id)?
+            .is_some_and(|metadata| metadata.session_call.is_some())
+        {
+            match operation {
+                "resume" | "pause" => {
+                    return Err(ApplicationError::Conflict(
+                        "Session calls are coordinated through the Session host".into(),
+                    ));
+                }
+                "stop" => return self.stop_session_call(run_id).await,
+                _ => unreachable!(),
+            }
         }
         // An unresolved tool result is part of the Agent's recovery context,
         // not a separate operator workflow. Resume the same Harness run with
@@ -522,6 +749,20 @@ impl RunApplication {
             return Ok(());
         }
         let mut active = self.active.lock().await;
+        if let Some((node, invocation)) = waiting {
+            let expected = self.store().load(run_id)?.is_some_and(|parent| {
+                parent.status == RunStatus::WaitingCall
+                    && parent.cursor.as_ref().is_some_and(|cursor| {
+                        cursor.node_id == node && cursor.key.invocation == invocation
+                    })
+            });
+            if !expected || active.contains_key(run_id) {
+                return Ok(());
+            }
+        }
+        if operation == "resume" {
+            self.reject_superseded_conversation_execution(run_id)?;
+        }
         if let Some(run) = active.get(run_id) {
             match operation {
                 "pause" => run.control.pause.store(true, Ordering::Relaxed),
@@ -532,13 +773,17 @@ impl RunApplication {
                     ));
                 }
             }
+            if operation == "stop" {
+                drop(active);
+                self.stop_wait_session_children(run_id).await?;
+            }
             return Ok(());
         }
         let record = self
             .store()
             .load(run_id)?
             .ok_or(ApplicationError::Missing)?;
-        if record.status == RunStatus::WaitingRecovery {
+        if record.status == RunStatus::WaitingRecovery && operation != "stop" {
             return Err(ApplicationError::Conflict(
                 "Run recovery context is not ready".into(),
             ));
@@ -566,10 +811,8 @@ impl RunApplication {
         }
         let is_child = metadata.trigger_source == "graph_call";
         let graph_path = Self::graph_identity(&metadata.bundle_source)?;
-        if !is_child && active.values().any(|run| run.graph_path == graph_path) {
-            return Err(ApplicationError::Conflict(
-                "this graph is already running".into(),
-            ));
+        if operation == "resume" {
+            self.check_execution_scope(&metadata, &active)?;
         }
         let graph_lease = if is_child {
             None
@@ -590,6 +833,8 @@ impl RunApplication {
             ));
         }
         if operation == "stop" && record.status == RunStatus::WaitingCall {
+            record.status = RunStatus::Stopped;
+            self.store().save(&record)?;
             let wait_children = record
                 .graph_calls
                 .values()
@@ -598,6 +843,7 @@ impl RunApplication {
                 .collect::<Vec<_>>();
             drop(active);
             drop(lease);
+            self.stop_wait_session_children(run_id).await?;
             for child_id in wait_children {
                 if self.store().load(&child_id)?.is_some_and(|child| {
                     !matches!(
@@ -677,12 +923,21 @@ impl RunApplication {
         attempt_id: i64,
         decision: RecoveryDecision,
     ) -> Result<(), ApplicationError> {
+        if self
+            .metadata(run_id)?
+            .is_some_and(|metadata| metadata.session_call.is_some())
+        {
+            return Err(ApplicationError::Conflict(
+                "Session calls recover through the Session host".into(),
+            ));
+        }
         if attempt_id <= 0 || invocation == 0 || node_id.is_empty() {
             return Err(ApplicationError::Invalid(
                 "node_id, invocation, and positive attempt_id are required".into(),
             ));
         }
         let mut active = self.active.lock().await;
+        self.reject_superseded_conversation_execution(run_id)?;
         let mut record = self
             .store()
             .load(run_id)?
@@ -726,6 +981,7 @@ impl RunApplication {
             }
             return Ok(());
         }
+        self.check_execution_scope(&metadata, &active)?;
         if active.contains_key(run_id) {
             return Err(ApplicationError::Conflict("Run is already active".into()));
         }
@@ -897,6 +1153,9 @@ impl RunApplication {
             return Ok(());
         }
         let metadata = self.metadata(run_id)?.ok_or(ApplicationError::Missing)?;
+        if metadata.session_call.is_some() {
+            return Ok(());
+        }
         let source = metadata.graph_call.as_ref().ok_or_else(|| {
             ApplicationError::Invalid("detached child has no durable Graph call source".into())
         })?;
@@ -1002,41 +1261,62 @@ impl RunApplication {
         self.active.lock().await.remove(run_id);
     }
 
-    pub(crate) async fn child_finished(
-        &self,
-        run_id: &str,
+    pub(crate) fn child_finished<'a>(
+        &'a self,
+        run_id: &'a str,
         _graph: &str,
         status: RunStatus,
-    ) -> Result<(), ApplicationError> {
-        if status != RunStatus::Completed {
-            return Ok(());
-        }
-        let metadata = self.metadata(run_id)?.ok_or(ApplicationError::Missing)?;
-        let Some(source) = metadata.graph_call else {
-            return Ok(());
-        };
-        if source.mode != "wait" {
-            return Ok(());
-        }
-        if self.active.lock().await.contains_key(&source.parent_run) {
-            // Inline wait execution returns the child result directly to the
-            // still-running parent Runner; only independently resumed child
-            // Runs need to kick a WaitingCall parent.
-            return Ok(());
-        }
-        if let Some(parent) = self.store().load(&source.parent_run)?
-            && parent.status == RunStatus::WaitingCall
-        {
-            let application = self.clone();
-            let parent_run = source.parent_run.clone();
-            tokio::spawn(async move {
-                tokio::task::yield_now().await;
-                if let Err(error) = application.control(&parent_run, "resume").await {
-                    eprintln!("waiting parent {parent_run} could not resume: {error:?}");
-                }
-            });
-        }
-        Ok(())
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<(), ApplicationError>> + Send + 'a>,
+    > {
+        Box::pin(async move {
+            if status != RunStatus::Completed {
+                return Ok(());
+            }
+            let metadata = self.metadata(run_id)?.ok_or(ApplicationError::Missing)?;
+            if metadata
+                .session_call
+                .as_ref()
+                .is_some_and(|call| call.status == "pending")
+            {
+                return Ok(());
+            }
+            let Some(source) = metadata.graph_call else {
+                return Ok(());
+            };
+            if source.mode != "wait" {
+                return Ok(());
+            }
+            if self.active.lock().await.contains_key(&source.parent_run) {
+                // Inline wait execution returns the child result directly to the
+                // still-running parent Runner; only independently resumed child
+                // Runs need to kick a WaitingCall parent.
+                return Ok(());
+            }
+            if let Some(parent) = self.store().load(&source.parent_run)?
+                && parent.status == RunStatus::WaitingCall
+                && parent.cursor.as_ref().is_some_and(|cursor| {
+                    cursor.node_id == source.node && cursor.key.invocation == source.invocation
+                })
+            {
+                let application = self.clone();
+                let parent_run = source.parent_run.clone();
+                tokio::spawn(async move {
+                    tokio::task::yield_now().await;
+                    if let Err(error) = application
+                        .control_expected(
+                            &parent_run,
+                            "resume",
+                            Some((&source.node, source.invocation)),
+                        )
+                        .await
+                    {
+                        eprintln!("waiting parent {parent_run} could not resume: {error:?}");
+                    }
+                });
+            }
+            Ok(())
+        })
     }
 
     fn spawn(&self, record: GraphRunRecord, execution: PreparedExecution) {
@@ -1057,7 +1337,28 @@ impl RunApplication {
                     (String::new(), status)
                 }
             };
-            application.active.lock().await.remove(&run_id);
+            let finished = application.active.lock().await.remove(&run_id);
+            if finished.is_some_and(|run| run.control.cancellation.load(Ordering::Acquire)) {
+                if let Err(error) = application.stop_wait_session_children(&run_id).await {
+                    eprintln!("Run {run_id} wait cancellation failed: {error:?}");
+                }
+            } else if status == RunStatus::WaitingCall {
+                // Settlement can race the parent's final WaitingCall write. Once the
+                // execution slot is released, recheck the durable child facts once.
+                if let Ok(children) = application.child_metadata(&run_id) {
+                    for child in children {
+                        if child
+                            .session_call
+                            .as_ref()
+                            .is_some_and(|call| call.status != "pending")
+                        {
+                            let _ = application
+                                .child_finished(&child.run_id, &child.graph, RunStatus::Completed)
+                                .await;
+                        }
+                    }
+                }
+            }
             if let Err(error) = application.child_finished(&run_id, &graph, status).await {
                 eprintln!("Run {run_id} completion callback failed: {error:?}");
             }
@@ -1087,4 +1388,39 @@ fn is_unfinished(status: RunStatus) -> bool {
 
 fn storage(error: impl std::fmt::Display) -> ApplicationError {
     ApplicationError::Storage(error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn pending_control_projects_active_tokens_with_stop_priority() {
+        let root = tempfile::tempdir().unwrap();
+        let data_root = root.path().join("state");
+        let application = RunApplication::new(data_root.clone(), root.path().join("catalog"));
+        let control = new_control();
+        application.active.lock().await.insert(
+            "active-run".into(),
+            ActiveRun {
+                graph_path: root.path().join("graph"),
+                control: control.clone(),
+            },
+        );
+        assert_eq!(application.control_requested("missing").await, None);
+        assert_eq!(application.control_requested("active-run").await, None);
+        control.pause.store(true, Ordering::Relaxed);
+        assert_eq!(
+            application.control_requested("active-run").await,
+            Some("pause")
+        );
+        control.cancellation.store(true, Ordering::Relaxed);
+        assert_eq!(
+            application.control_requested("active-run").await,
+            Some("stop")
+        );
+        application.active.lock().await.remove("active-run");
+        assert_eq!(application.control_requested("active-run").await, None);
+        assert!(!data_root.exists());
+    }
 }

@@ -23,8 +23,11 @@ use std::{
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 const FILE_BUFFER_BYTES: usize = 64 * 1024;
 
+mod git;
 mod links;
 mod manifest;
+mod previous;
+mod workspace;
 use manifest::{FileHash, Manifest, context_hash};
 
 #[derive(Clone)]
@@ -64,7 +67,10 @@ impl HostArtifacts {
             }) {
                 return Err(corrupt("artifact mount paths overlap"));
             }
-            mounts.push(ReadOnlyInput::new(path.join("files"), destination));
+            mounts.push(ReadOnlyInput::new(
+                self.git_projection(&path, &manifest)?,
+                destination,
+            ));
         }
         // A child admitted by Op.call sees the explicitly selected parent
         // committed files read-only at `/in/call`, alongside its own committed
@@ -225,6 +231,16 @@ impl HostArtifacts {
             .map(|entry| entry.map(|entry| entry.file_name()))
             .collect::<Result<Vec<_>, _>>()?;
         entries.sort();
+        for name in ["git-view", ".git-view.lock"] {
+            if let Some(index) = entries.iter().position(|entry| entry == name) {
+                if name == "git-view" {
+                    require_directory(&path.join(name))?;
+                } else {
+                    require_file(&path.join(name))?;
+                }
+                entries.remove(index);
+            }
+        }
         if entries
             != [
                 std::ffi::OsString::from("files"),
@@ -322,7 +338,7 @@ impl HostArtifacts {
         fs::create_dir(&temporary)?;
         let result = (|| {
             let (files, directories) = if let Some(workspace) = &workspace {
-                scan_tree(workspace, Some(&temporary.join("files")))?
+                scan_workspace(workspace, Some(&temporary.join("files")))?
             } else {
                 let files_dir = temporary.join("files");
                 fs::create_dir(&files_dir)?;
@@ -975,7 +991,18 @@ fn scan_tree(
     require_directory(root)?;
     let mut files = BTreeMap::new();
     let mut directories = Vec::new();
-    scan_directory(root, root, destination, &mut files, &mut directories)?;
+    scan_directory(root, root, destination, &mut files, &mut directories, false)?;
+    directories.sort();
+    Ok((files, directories))
+}
+fn scan_workspace(
+    root: &Path,
+    destination: Option<&Path>,
+) -> Result<(BTreeMap<String, FileHash>, Vec<String>), GraphError> {
+    require_directory(root)?;
+    let mut files = BTreeMap::new();
+    let mut directories = Vec::new();
+    scan_directory(root, root, destination, &mut files, &mut directories, true)?;
     directories.sort();
     Ok((files, directories))
 }
@@ -985,12 +1012,18 @@ fn scan_directory(
     destination: Option<&Path>,
     files: &mut BTreeMap<String, FileHash>,
     directories: &mut Vec<String>,
+    exclude_workspace_git: bool,
 ) -> Result<(), GraphError> {
     if let Some(destination) = destination {
         fs::create_dir(destination)?;
     }
     for entry in fs::read_dir(current)? {
         let entry = entry?;
+        // Git metadata belongs to the host projection, never the Agent's
+        // writable files or its configuration and hooks.
+        if exclude_workspace_git && current == root && entry.file_name() == ".git" {
+            continue;
+        }
         let path = entry.path();
         checked_path(&path)?;
         let relative = path
@@ -1004,7 +1037,14 @@ fn scan_directory(
         if kind.is_dir() {
             directories.push(relative);
             let next = destination.map(|destination| destination.join(entry.file_name()));
-            scan_directory(root, &path, next.as_deref(), files, directories)?;
+            scan_directory(
+                root,
+                &path,
+                next.as_deref(),
+                files,
+                directories,
+                exclude_workspace_git,
+            )?;
         } else if kind.is_file() {
             let mut source = fs::File::open(&path)?;
             let mut copy = destination
@@ -1069,3 +1109,7 @@ mod provenance_tests;
 #[cfg(test)]
 #[path = "artifacts/coordinator_tests.rs"]
 mod coordinator_tests;
+
+#[cfg(test)]
+#[path = "artifacts/parity_tests.rs"]
+mod parity_tests;

@@ -49,50 +49,7 @@ pub(super) async fn timeline(
 
 #[allow(clippy::result_large_err)]
 async fn projected_runs(state: &ApiState) -> Result<Vec<Value>, HttpResponse> {
-    let active = state.application.active_runs(None).await;
-    let mut runs = state
-        .application
-        .records()
-        .map_err(application_error)?
-        .into_iter()
-        .map(|(id, record)| {
-            let metadata = state.application.metadata(&id).map_err(application_error)?;
-            let graph = metadata
-                .as_ref()
-                .map(|metadata| metadata.graph.as_str())
-                .unwrap_or("unknown");
-            let started = metadata
-                .as_ref()
-                .map(|metadata| metadata.created.as_str())
-                .unwrap_or("");
-            let source = metadata
-                .as_ref()
-                .map(|metadata| metadata.trigger_source.as_str())
-                .unwrap_or("unknown");
-            let executed = record
-                .results
-                .values()
-                .flat_map(|items| {
-                    items
-                        .iter()
-                        .map(|item| (item.sequence, item.node_id.clone()))
-                })
-                .collect::<std::collections::BTreeMap<_, _>>()
-                .into_values()
-                .collect::<Vec<_>>();
-            Ok(json!({
-                "run": id,
-                "graph": graph,
-                "status": super::status(record.status),
-                "running": active.contains(&id),
-                "started": started,
-                "updated": "",
-                "executed": executed,
-                "objective": record.snapshot.objective,
-                "trigger": {"source": source}
-            }))
-        })
-        .collect::<Result<Vec<_>, HttpResponse>>()?;
+    let mut runs = super::runs::projected_runs(state).await?;
     runs.sort_by(|left, right| right["started"].as_str().cmp(&left["started"].as_str()));
     Ok(runs)
 }

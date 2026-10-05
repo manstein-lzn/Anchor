@@ -20,6 +20,7 @@ pub use error::GraphError;
 mod model;
 pub use model::*;
 mod admission;
+mod authoring;
 mod logic;
 pub(crate) use logic::*;
 mod state;

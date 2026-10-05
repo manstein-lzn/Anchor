@@ -16,6 +16,7 @@ On startup every run recorded as running is resumed. There is no other recovery:
 stepping again.
 
 Graphs and runs remain file-backed; Pilot uses Harness messages and SQLite delivery records.
+An explicit Rust HTTP backend delegates Graph/Run execution and keeps legacy Runs read-only.
 """
 
 from __future__ import annotations
@@ -26,11 +27,13 @@ import hashlib
 import ipaddress
 import os
 import shutil
+import signal
 import subprocess
 import threading
 import time
 import traceback
 from datetime import datetime, timedelta
+from http.client import HTTPException
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -44,6 +47,7 @@ from anchor.graph_calls import GraphCalls, _write as write_call_record
 from anchor.session import SessionStore
 from anchor.pilot_turns import TurnStore
 from anchor.scheduling import next_after, occurrences, validate as validate_schedule
+from anchor.runtime_http import RuntimeHTTPClient, RuntimeHTTPError, files_path, resource_path
 
 
 def _call_args(call: Any) -> Any:
@@ -110,6 +114,7 @@ class Scheduler:
     def __init__(self, root: Path, config: Path) -> None:
         self.root = root
         self.config = config
+        self.runtime = RuntimeHTTPClient.from_env()
         self.library = Library(root / "library")
         self.sessions = SessionStore(root)
         self.turns = TurnStore(root)
@@ -118,6 +123,7 @@ class Scheduler:
         self.running: dict[str, str] = {}         # graph -> run id
         self.channel_tail: dict[str, tuple[str, threading.Event]] = {}
         self.session_background: dict[str, Any] = {}
+        self.session_call_workers: set[str] = set()
         self.channel_runs: dict[str, str] = {}    # conversation run id -> graph
         self.wecom_graph = os.environ.get("ANCHOR_WECOM_GRAPH", "").strip()
         self.wecom_reply_node = os.environ.get("ANCHOR_WECOM_REPLY_NODE", "assistant").strip()
@@ -164,8 +170,22 @@ class Scheduler:
         from anchor.channel.supervisor import ChannelSupervisor
         self.channel_supervisor = ChannelSupervisor(
             self.root, self.library, self.workspaces,
-            callback_url=callback_url, api_key=key)
+            callback_url=callback_url, api_key=key,
+            node_plugins=self.channel_node_plugins if self.runtime is not None else None)
         self.channel_supervisor.start()
+
+    def channel_node_plugins(self) -> list[dict[str, list[str]]]:
+        """Project installed channel resources from Runtime-compiled Graphs."""
+        result = []
+        for graph in self.graphs()["graphs"]:
+            body, status = self.graph(graph["graph"])
+            value = json.loads(body)
+            if status != 200:
+                raise RuntimeHTTPError(value.get("error", "channel Graph is unavailable"), status)
+            if not isinstance(value.get("node_plugins"), dict):
+                raise RuntimeHTTPError("Runtime did not return compiled node Plugins", 502)
+            result.append(value["node_plugins"])
+        return result
 
     def stop_channels(self) -> None:
         if self.channel_supervisor is not None:
@@ -189,7 +209,11 @@ class Scheduler:
         self.save_schedules()
 
     def create_schedule(self, graph: str, rule: dict, run_input: dict | None = None) -> tuple[str, int]:
-        if self.workspace(graph) is None:
+        if self.runtime is not None:
+            body, status = self.graph(graph)
+            if status != 200:
+                return body, status
+        elif self.workspace(graph) is None:
             return json.dumps({"error": f"no such graph: {graph}"}), 404
         try:
             parsed = validate_schedule(rule, datetime.now())
@@ -292,7 +316,8 @@ class Scheduler:
                 if item["rule"]["type"] == "once":
                     item["enabled"] = False
                 # Busy due times are skipped without creating a Run or a refusal record.
-                if now - due > timedelta(seconds=1) or item["graph"] in self.running:
+                if (now - due > timedelta(seconds=1) or
+                        (self.runtime is None and item["graph"] in self.running)):
                     continue
                 threading.Thread(target=self.trigger, args=(item["graph"], None, item["input"],
                                  {"source": "schedule", "schedule": item["id"],
@@ -309,6 +334,15 @@ class Scheduler:
         start = end - timedelta(days=days_back)
         scheduled = []
         runs = self.runs()
+        busy_intervals = []
+        for run in runs:
+            if not run.get("started") or (self.runtime is not None and run.get("backend") == "legacy"):
+                continue
+            # A live Rust node can remain busy without updating its persisted Run for minutes.
+            busy_until = now if self.runtime is not None and run.get("running") else (
+                _local_time(run["updated"]) if run.get("updated") else None)
+            if busy_until is not None:
+                busy_intervals.append((run["graph"], _local_time(run["started"]), busy_until))
         for item in self.schedules:
             windows = [(start, end)]
             if not before:
@@ -334,9 +368,8 @@ class Scheduler:
                                           "scheduled_at": due.isoformat(timespec="seconds"),
                                           "run": matched["run"], "status": matched["status"]})
                     else:
-                        running = next((run for run in runs if run["graph"] == item["graph"] and
-                                        run.get("started") and run.get("updated") and
-                                        _local_time(run["started"]) <= due <= _local_time(run["updated"])), None)
+                        running = any(graph == item["graph"] and began <= due <= ended
+                                      for graph, began, ended in busy_intervals)
                         scheduled.append({"schedule": item["id"], "graph": item["graph"],
                                           "scheduled_at": due.isoformat(timespec="seconds"),
                                           "status": "missed_busy" if running else "missed_downtime"})
@@ -347,6 +380,78 @@ class Scheduler:
         base = self.root / "workspaces"
         return sorted(item for item in base.iterdir()
                       if item.is_dir() and (item / "graph.json").is_file()) if base.is_dir() else []
+
+    def _legacy_workspaces(self) -> list[Path]:
+        base = self.root / "workspaces"
+        return sorted(item for item in base.iterdir() if item.is_dir()) if base.is_dir() else []
+
+    def _runtime_response(self, method: str, path: str, body: dict | None = None) -> tuple[str, int]:
+        try:
+            value, status = self.runtime.request(method, path, body)
+            return json.dumps(value, ensure_ascii=False), status
+        except RuntimeHTTPError as exc:
+            return exc.response()
+
+    def graphs(self) -> dict:
+        if self.runtime is not None:
+            value, status = self.runtime.request("GET", "/graphs")
+            if status != 200 or not isinstance(value.get("graphs"), list):
+                raise RuntimeHTTPError(value.get("error") or "Rust runtime Graph listing failed", status if status != 200 else 502)
+            return value
+        return {"graphs": [{"graph": item.name, "running": self.active_run(item.name),
+                            "active_runs": self.active_runs(item.name)} for item in self.workspaces()]}
+
+    def graph(self, name: str) -> tuple[str, int]:
+        if self.runtime is not None:
+            try:
+                return self._runtime_response("GET", resource_path("graphs", name))
+            except RuntimeHTTPError as exc:
+                return exc.response()
+        workspace = self.workspace(name)
+        if workspace is None:
+            return json.dumps({"error": "no such graph"}), 404
+        return json.dumps({"graph": name, "definition": json.loads(
+            (workspace / "graph.json").read_text(encoding="utf-8"))}, ensure_ascii=False), 200
+
+    def validate_graph(self, definition: dict) -> tuple[str, int]:
+        """Check authoring syntax and Plugin references without saving or running."""
+        if self.runtime is not None:
+            return self._runtime_response("POST", "/graph-validation", {"definition": definition})
+        try:
+            parsed = graph_module.parse(definition)
+            for node in parsed.nodes.values():
+                self.library.attach(node.plugins)
+            return json.dumps({"valid": True, "nodes": list(parsed.nodes), "entry": parsed.entry()}), 200
+        except (ValueError, OSError, TypeError) as exc:
+            return json.dumps({"valid": False, "error": str(exc)}, ensure_ascii=False), 422
+
+    def conversation_run(self, graph: str, run: str, session: str, reply_node: str,
+                         run_input: dict, previous_run: str | None,
+                         attachments: list[dict] | None = None) -> tuple[str, int]:
+        """Admit one trusted Session turn through the shared Rust application."""
+        if self.runtime is None:
+            return json.dumps({"error": "conversation Run HTTP requires the Rust backend"}), 501
+        return self._runtime_response("POST", "/conversation-runs", {
+            "graph": graph, "run": run, "session": session, "reply_node": reply_node,
+            "input": run_input, "previous_run": previous_run, "attachments": attachments or [],
+        })
+
+    def _runtime_run(self, run_id: str) -> dict | None:
+        value, status = self.runtime.request("GET", resource_path("runs", run_id))
+        if status == 404:
+            return None
+        if status != 200 or not isinstance(value.get("state"), dict):
+            raise RuntimeHTTPError(value.get("error") or "Rust runtime Run query failed", status if status != 200 else 502)
+        if self.run_dir(run_id) is not None:
+            raise RuntimeHTTPError("Run id exists in both Rust and legacy stores; ownership is ambiguous", 409)
+        return value
+
+    def _runtime_mutation(self, method: str, path: str, body: dict | None = None,
+                          *, deleted: dict | None = None) -> tuple[str, int]:
+        response, status = self._runtime_response(method, path, body)
+        if status == 204 and deleted is not None:
+            return json.dumps(deleted), 200
+        return response, status
 
     def workspace(self, name: str) -> Path | None:
         """A graph that exists — that is, a workspace with a definition in it.
@@ -367,6 +472,13 @@ class Scheduler:
                 run_input: dict | None = None,
                 trigger: dict | None = None) -> tuple[str, int]:
         """Start a run, or say why not. Returns (body, status)."""
+        if self.runtime is not None:
+            if trigger and trigger.get("source") not in {"manual", "schedule"}:
+                return json.dumps({"error": "this trigger source is not supported by the Rust backend"}), 501
+            return self._runtime_response("POST", "/trigger", {
+                "graph": graph, "objective": objective, "input": {} if run_input is None else run_input,
+                "trigger": trigger or {"source": "manual"},
+            })
         workspace = self.workspace(graph)
         if workspace is None:
             return json.dumps({"error": f"no such graph: {graph}"}), 404
@@ -397,6 +509,13 @@ class Scheduler:
         """
         if what not in ("pause", "stop", "resume"):
             return json.dumps({"error": f"unknown control: {what}"}), 400
+        if self.runtime is not None:
+            try:
+                if self.run_dir(run_id) is not None and self._runtime_run(run_id) is None:
+                    return json.dumps({"error": "legacy Runs are read-only in Rust backend mode", "run": run_id}), 409
+                return self._runtime_mutation("POST", resource_path("runs", run_id) + f"/{what}")
+            except RuntimeHTTPError as exc:
+                return exc.response()
         if run_id in self.channel_runs and what != "stop":
             return json.dumps({"error": "channel Runs accept stop; continue with a new conversation message"}), 409
         graph = self.graph_calls.active.get(run_id) or self.channel_runs.get(run_id) or next(
@@ -421,14 +540,27 @@ class Scheduler:
 
         A run id is unique across the root, so the graph does not have to be named to find one — which
         matters because a caller holding a run id from a trigger is not holding a graph name.
+        In Rust backend mode this locates only read-only legacy records.
         """
-        for workspace in self.workspaces():
+        if self.runtime is not None and (not run_id or run_id in {".", ".."} or "/" in run_id or "\\" in run_id):
+            return None
+        found = None
+        for workspace in self._legacy_workspaces() if self.runtime is not None else self.workspaces():
             candidate = workspace / "runs" / run_id
             if (candidate / "run.json").is_file():
-                return candidate
-        return None
+                if self.runtime is None:
+                    return candidate
+                if found is not None:
+                    raise RuntimeHTTPError("Run id exists in multiple legacy stores; ownership is ambiguous", 409)
+                found = candidate
+        return found
 
     def active_runs(self, graph: str) -> list[str]:
+        if self.runtime is not None:
+            for item in self.graphs()["graphs"]:
+                if item.get("graph") == graph:
+                    return list(item.get("active_runs") or [])
+            return []
         with self.lock:
             return list(dict.fromkeys(
                 ([self.running[graph]] if graph in self.running else []) +
@@ -442,6 +574,14 @@ class Scheduler:
         """Remove a run and everything it left behind, unless it is still running."""
         if not run_id or "/" in run_id or run_id in (".", ".."):
             return json.dumps({"error": "no such run"}), 404
+        if self.runtime is not None:
+            try:
+                if self.run_dir(run_id) is not None and self._runtime_run(run_id) is None:
+                    return json.dumps({"error": "legacy Runs are read-only in Rust backend mode", "run": run_id}), 409
+                return self._runtime_mutation("DELETE", resource_path("runs", run_id),
+                                              deleted={"run": run_id, "deleted": True})
+            except RuntimeHTTPError as exc:
+                return exc.response()
         with self.lock:
             if (run_id in self.running.values() or run_id in self.channel_runs or
                     run_id in self.graph_calls.active):
@@ -463,6 +603,12 @@ class Scheduler:
 
     def delete_graph(self, name: str) -> tuple[str, int]:
         """Remove a graph workspace, including its runs, unless it is still running."""
+        if self.runtime is not None:
+            try:
+                return self._runtime_mutation("DELETE", resource_path("graphs", name),
+                                              deleted={"graph": name, "deleted": True})
+            except RuntimeHTTPError as exc:
+                return exc.response()
         with self.lock:
             if self.active_run(name):
                 return json.dumps({"error": "that graph is still running",
@@ -491,6 +637,8 @@ class Scheduler:
         """Create the Anchor-owned half of a Pilot conversation."""
         if session_id is not None and not isinstance(session_id, str):
             return json.dumps({"error": "session id must be a string"}), 400
+        if session_id is not None and session_id.startswith("responses-"):
+            return json.dumps({"error": "responses- is reserved for Responses conversations"}), 400
         try:
             session = self.sessions.create(session_id)
         except FileExistsError:
@@ -508,11 +656,23 @@ class Scheduler:
             return json.dumps({"error": str(exc)}, ensure_ascii=False), 400
         return json.dumps({"session": session.model_dump(mode="json")}, ensure_ascii=False), 200
 
-    def sessions_list(self) -> tuple[str, int]:
+    def session_visible(self, session_id: str, owner: str | None) -> bool:
+        """Responses ownership also applies to the shared Session HTTP routes."""
+        with self.lock:
+            owners = {ref.get("owner") for ref in self.response_refs.values()
+                      if ref.get("session") == session_id}
+        if owners:
+            return owners == {owner}
+        # A new Responses session precedes its first persisted response reference.
+        # Unregistered/orphaned sessions must not become public in that window.
+        return not session_id.startswith("responses-")
+
+    def sessions_list(self, owner: str | None = None) -> tuple[str, int]:
         # The Pilot sidebar is a list of Pilot conversations, not every Session Anchor owns.
         # Channel Graph conversations share the same persistence but have a separate UI and
         # audience; listing them here leaked WeCom chats into Pilot's conversation picker.
-        sessions = [item for item in self.sessions.list() if not item.graph and not item.channel]
+        sessions = [item for item in self.sessions.list() if not item.graph and not item.channel
+                    and self.session_visible(item.id, owner)]
         return json.dumps({"sessions": [item.model_dump(mode="json")
                                          for item in sessions]},
                           ensure_ascii=False), 200
@@ -545,6 +705,9 @@ class Scheduler:
         if not approval_key:
             return json.dumps({"error": "approval_key is required"}), 400
         try:
+            session = self.sessions.get(session_id)
+            if self.runtime is not None and (session.graph or session.channel):
+                return json.dumps({"error": "channel Graph conversations are not connected to the Rust backend"}), 501
             session = self.sessions.decide_approval(session_id, approval_key, True, action)
         except KeyError:
             return json.dumps({"error": "no such session"}), 404
@@ -557,6 +720,9 @@ class Scheduler:
         if not approval_key:
             return json.dumps({"error": "approval_key is required"}), 400
         try:
+            session = self.sessions.get(session_id)
+            if self.runtime is not None and (session.graph or session.channel):
+                return json.dumps({"error": "channel Graph conversations are not connected to the Rust backend"}), 501
             session = self.sessions.decide_approval(session_id, approval_key, False, action)
         except KeyError:
             return json.dumps({"error": "no such session"}), 404
@@ -566,8 +732,13 @@ class Scheduler:
                           ensure_ascii=False), 200
 
     def attach_session_run(self, session_id: str, run_id: str) -> tuple[str, int]:
-        if self.run_dir(run_id) is None:
-            return json.dumps({"error": "no such run", "run": run_id}), 404
+        try:
+            exists = (self.run("", run_id) is not None if self.runtime is not None
+                      else self.run_dir(run_id) is not None)
+            if not exists:
+                return json.dumps({"error": "no such run", "run": run_id}), 404
+        except RuntimeHTTPError as exc:
+            return exc.response()
         try:
             session = self.sessions.attach_run(session_id, run_id)
         except KeyError:
@@ -577,9 +748,34 @@ class Scheduler:
         return json.dumps({"session": session.model_dump(mode="json")}, ensure_ascii=False), 200
 
     def delete_session(self, session_id: str) -> tuple[str, int]:
+        checked_revision = None
+        if self.runtime is not None:
+            try:
+                with self.lock:
+                    session = self.sessions.get(session_id)
+                    checked_revision = (tuple(session.run_ids),
+                                        tuple(turn["id"] for turn in self.turns.list(session_id)))
+                if session.graph and any(
+                        item.get("backend") == "rust" and (
+                            item.get("trigger", {}).get("session") == session_id or
+                            (item.get("session_call") or {}).get("context", {}).get("session") == session_id)
+                        for item in self.runs()):
+                    return json.dumps({"error": "this conversation has retained Rust Runs; remove the Graph and its history before deleting the Session"}), 409
+            except KeyError:
+                return json.dumps({"error": "no such session"}), 404
+            except RuntimeHTTPError as exc:
+                return exc.response()
         with self.lock:
             if session_id in self.pilot_active:
                 return json.dumps({"error": "that session is processing a message"}), 409
+            if checked_revision is not None:
+                try:
+                    current = self.sessions.get(session_id)
+                except KeyError:
+                    return json.dumps({"error": "no such session"}), 404
+                if checked_revision != (tuple(current.run_ids),
+                                        tuple(turn["id"] for turn in self.turns.list(session_id))):
+                    return json.dumps({"error": "conversation changed while checking retained Runs; retry deletion"}), 409
             for workspace in self.workspaces():
                 for path in (workspace / "runs").glob("*/admission.json"):
                     admission = json.loads(path.read_text())
@@ -610,6 +806,8 @@ class Scheduler:
     def pilot_messages(self, session_id: str) -> tuple[str, int]:
         try:
             session = self.sessions.get(session_id)
+            if self.runtime is not None and session.channel and not session.graph:
+                return json.dumps({"error": "channel Session requires a bound Graph"}), 501
             if session.graph:
                 from anchor.channel.assistant import history
                 return json.dumps({"messages": history(self, session_id)}, ensure_ascii=False), 200
@@ -639,11 +837,28 @@ class Scheduler:
         with self.lock:
             try:
                 session = self.sessions.get(session_id)
+                if self.runtime is not None:
+                    if session.channel and not session.graph:
+                        return json.dumps({"error": "channel Session requires a bound Graph"}), 501
                 existing = self.turns.find_request(session_id, request_id)
                 if existing:
                     if existing["prompt"] != prompt:
                         raise ValueError("request_id was already used for different input")
+                    if self.runtime is not None and session.graph:
+                        from anchor.channel.attachments import source_descriptors
+                        stored_input = json.loads(existing.get("channel_input") or "{}")
+                        incoming_input = channel_input or {}
+                        stored_sources = stored_input.get("attachment_sources", stored_input.get("attachments", []))
+                        incoming_sources = incoming_input.get("attachment_sources", incoming_input.get("attachments", []))
+                        if source_descriptors(stored_sources) != source_descriptors(incoming_sources):
+                            raise ValueError("request_id was already used for different attachments")
                     return json.dumps({"turn": existing}, ensure_ascii=False), 202
+                if self.runtime is not None and channel_input:
+                    from anchor.channel.attachments import prepare_channel_input
+                    try:
+                        channel_input = prepare_channel_input(self, channel_input)
+                    except (ValueError, OSError) as exc:
+                        return json.dumps({"error": str(exc)}, ensure_ascii=False), 400
                 if session_id in self.pilot_active and not session.graph:
                     raise ValueError("that session is already processing a message")
                 if session.graph and prompt is None:
@@ -663,7 +878,8 @@ class Scheduler:
                     tail = self.channel_tail.get(session_id)
                     if tail:
                         prior_id, predecessor = tail
-                        self.control[f"channel-{prior_id}"] = "stopped"
+                        if self.runtime is None:
+                            self.control[f"channel-{prior_id}"] = "stopped"
                         self.turns.finish(prior_id, "stopped", "superseded by a newer message")
                     elif session_id in self.session_background:
                         background = self.session_background[session_id]
@@ -674,7 +890,8 @@ class Scheduler:
                 self.pilot_active.add(session_id)
                 self.pilot_tokens[session_id] = CancellationToken()
                 if session.graph:
-                    self.channel_runs[f"channel-{turn['id']}"] = session.graph
+                    if self.runtime is None:
+                        self.channel_runs[f"channel-{turn['id']}"] = session.graph
                     self.channel_tail[session_id] = (turn["id"], completed)
             except KeyError:
                 return json.dumps({"error": "no such session"}), 404
@@ -690,6 +907,9 @@ class Scheduler:
     def _run_turn(self, turn: dict, predecessor: threading.Event | None = None,
                   completed: threading.Event | None = None) -> None:
         try:
+            session = self.sessions.get(turn["session"])
+            if self.runtime is not None and session.channel and not session.graph:
+                raise RuntimeHTTPError("channel Session requires a bound Graph", 501)
             if predecessor is not None:
                 predecessor.wait()
             if self.sessions.get(turn["session"]).graph:
@@ -720,6 +940,9 @@ class Scheduler:
                         completed.set()
 
     def pilot_message(self, session_id: str, prompt: str | None, *, turn_id: str | None = None) -> tuple[str, int]:
+        return self._pilot_message(session_id, prompt, turn_id=turn_id)
+
+    def _pilot_message(self, session_id: str, prompt: str | None, *, turn_id: str | None = None) -> tuple[str, int]:  # noqa: C901
         # Imported here rather than at module scope: an op-only graph must run without the harness.
         from pydantic_ai import CancellationToken, DeferredToolRequests, DeferredToolResults
 
@@ -734,6 +957,8 @@ class Scheduler:
         try:
             from anchor.pilot import approval_precondition, respond
             session = self.sessions.get(session_id)
+            if self.runtime is not None and (session.graph or session.channel):
+                return json.dumps({"error": "channel Graph conversations are not connected to the Rust backend"}), 501
             if session.graph:
                 return json.dumps({"error": "Graph conversations use the turns endpoint"}), 409
             if prompt is not None and any(item.get("status") == "requested" for item in session.approvals):
@@ -804,12 +1029,24 @@ class Scheduler:
                 return json.dumps({"error": "that session is not processing a message"}), 409
             token.cancel()
             for turn in self.turns.list(session_id):
-                if turn["status"] == "running" and f"channel-{turn['id']}" in self.channel_runs:
+                if turn["status"] != "running":
+                    continue
+                if self.runtime is not None and self.sessions.get(session_id).graph:
+                    # The channel worker observes this intent and waits for the
+                    # authoritative Rust Run to stop before releasing its tail.
+                    self.turns.finish(turn["id"], "stopped", "stopped by the user")
+                elif f"channel-{turn['id']}" in self.channel_runs:
                     self.control[f"channel-{turn['id']}"] = "stopped"
         return json.dumps({"session": session_id, "asked": "stop"}), 202
 
     def files(self, run_id: str, node: str) -> tuple[str, int]:
         """What a node left in its workspace. Returns (body, status)."""
+        if self.runtime is not None:
+            try:
+                if self.run_dir(run_id) is None or self._runtime_run(run_id) is not None:
+                    return self._runtime_response("GET", files_path(run_id, node))
+            except RuntimeHTTPError as exc:
+                return exc.response()
         run_dir = self.run_dir(run_id)
         if run_dir is None:
             return json.dumps({"error": "no such run"}), 404
@@ -833,6 +1070,8 @@ class Scheduler:
         different things from the same file, and a return value whose type is its own mode is how a
         caller ends up sending a dict as bytes.
         """
+        if self.runtime is not None:
+            self._runtime_run(run_id)
         run_dir = self.run_dir(run_id)
         if run_dir is None:
             return None
@@ -844,6 +1083,12 @@ class Scheduler:
 
     def read_file(self, run_id: str, node: str, name: str) -> tuple[str, int]:
         """One file's contents, as text, if it is text. Returns (body, status)."""
+        if self.runtime is not None:
+            try:
+                if self.run_dir(run_id) is None or self._runtime_run(run_id) is not None:
+                    return self._runtime_response("GET", files_path(run_id, node, name))
+            except RuntimeHTTPError as exc:
+                return exc.response()
         target = self.locate(run_id, node, name)
         if target is None:
             return json.dumps({"error": f"no such file: {name}"}), 404
@@ -861,6 +1106,8 @@ class Scheduler:
 
     def _resume_cold(self, run_id: str) -> tuple[str, int]:
         """Continue a run that is not in this process — one a restart left, or one paused earlier."""
+        if self.runtime is not None:
+            return self.control_run(run_id, "resume")
         for workspace in self.workspaces():
             run_dir = workspace / "runs" / run_id
             if not (run_dir / "run.json").is_file():
@@ -892,6 +1139,11 @@ class Scheduler:
         replaced whole rather than edited, because `graph.json` is the graph and a half-written one is
         not a smaller graph, it is a broken one.
         """
+        if self.runtime is not None:
+            try:
+                return self._runtime_mutation("PUT", resource_path("graphs", name), {"definition": definition})
+            except RuntimeHTTPError as exc:
+                return exc.response()
         # The directory, not `workspace`: creating a graph makes the directory and then saves into
         # it, and looking it up by the stricter rule would report the graph it had just made as
         # missing.
@@ -925,6 +1177,10 @@ class Scheduler:
         return json.dumps({"graph": name, "saved": True}), 200
 
     def create(self, name: str, definition: dict | None) -> tuple[str, int]:
+        if self.runtime is not None:
+            return self._runtime_mutation("POST", "/graphs", {
+                "name": name, "definition": definition or _starter_graph(name),
+            })
         if not name or "/" in name or name.startswith("."):
             return json.dumps({"error": "a graph name may not be empty or contain a slash"}), 400
         if self._directory(name) is not None:
@@ -934,6 +1190,8 @@ class Scheduler:
 
     def resume_all(self) -> None:
         """Pick up native Runs and any admission interrupted before native state creation."""
+        if self.runtime is not None:
+            return
         self._recover_admissions()
         for workspace in self.workspaces():
             runs = sorted((workspace / "runs").glob("*/run.json")) if (workspace / "runs").is_dir() else []
@@ -965,6 +1223,8 @@ class Scheduler:
 
     def _recover_admissions(self) -> None:
         """Find accepted child admissions whose native state was not yet visible at crash time."""
+        if self.runtime is not None:
+            return
         for workspace in self.workspaces():
             for admission in (workspace / "runs").glob("*/admission.json"):
                 try:
@@ -983,6 +1243,8 @@ class Scheduler:
     def _run(self, workspace: Path, run_id: str, objective: str | None,
              resume: bool = False, run_input: dict | None = None,
              trigger: dict | None = None) -> None:
+        if self.runtime is not None:
+            raise RuntimeHTTPError("Python Runner execution is disabled in Rust backend mode", 409)
         def asked() -> str | None:
             with self.lock:
                 return self.control.get(run_id)
@@ -1028,29 +1290,55 @@ class Scheduler:
                 self.control.pop(run_id, None)
 
     def runs(self) -> list[dict]:
+        if self.runtime is not None:
+            value, status = self.runtime.request("GET", "/runs")
+            if status != 200 or not isinstance(value.get("runs"), list):
+                raise RuntimeHTTPError(value.get("error") or "Rust runtime Run listing failed", status if status != 200 else 502)
+            remote = value["runs"]
+            if any(not isinstance(item, dict) or not isinstance(item.get("run"), str) for item in remote):
+                raise RuntimeHTTPError("Rust runtime returned an invalid Run listing", 502)
+            legacy = self._legacy_runs()
+            identifiers = [item["run"] for item in remote + legacy]
+            if len(identifiers) != len(set(identifiers)):
+                raise RuntimeHTTPError("Run id exists in multiple stores; ownership is ambiguous", 409)
+            return sorted([*({**item, "backend": "rust"} for item in remote), *legacy],
+                          key=lambda item: _local_time(item["started"]).timestamp() if item.get("started") else 0,
+                          reverse=True)
+        return self._legacy_runs()
+
+    def _legacy_runs(self) -> list[dict]:
         found = []
-        for workspace in self.workspaces():
+        for workspace in self._legacy_workspaces() if self.runtime is not None else self.workspaces():
             base = workspace / "runs"
             for state_file in sorted(base.glob("*/run.json"), reverse=True) if base.is_dir() else []:
                 state = json.loads(state_file.read_text(encoding="utf-8"))
                 found.append({"run": state_file.parent.name, "graph": workspace.name,
                               "status": state.get("status"),
-                              "running": (self.running.get(workspace.name) == state_file.parent.name
+                              "running": self.runtime is None and (self.running.get(workspace.name) == state_file.parent.name
                                           or state_file.parent.name in self.channel_runs
                                           or state_file.parent.name in self.graph_calls.active),
                               "started": state.get("started"), "updated": state.get("updated"),
                               "executed": state.get("executed", []),
                               "objective": (state.get("objective") or "")[:200],
-                              "trigger": state.get("trigger", {"source": "manual"})})
+                              "trigger": state.get("trigger", {"source": "manual"}),
+                              **({"backend": "legacy", "read_only": True} if self.runtime is not None else {})})
         return found
 
     def run(self, graph: str, run_id: str) -> dict | None:
-        workspace = self.workspace(graph) or next(
-            (item for item in self.workspaces()
-             if (item / "runs" / run_id / "run.json").is_file()), None)
-        if workspace is None:
-            return None
-        base = workspace / "runs" / run_id
+        if self.runtime is not None:
+            remote = self._runtime_run(run_id)
+            if remote is not None:
+                return {**remote, "backend": "rust"}
+            base = self.run_dir(run_id)
+            if base is None:
+                return None
+            workspace = base.parent.parent
+        else:
+            workspace = self.workspace(graph) or next(
+                (item for item in self.workspaces() if (item / "runs" / run_id / "run.json").is_file()), None)
+            if workspace is None:
+                return None
+            base = workspace / "runs" / run_id
         if not (base / "run.json").is_file():
             return None
         state = json.loads((base / "run.json").read_text(encoding="utf-8"))
@@ -1072,7 +1360,8 @@ class Scheduler:
                 "calls": self.graph_calls.projections(base),
                 "plugins": (json.loads((base / "plugins.json").read_text(encoding="utf-8"))
                             if (base / "plugins.json").is_file() else {}),
-                "nodes": sorted(item.name for item in base.iterdir() if item.is_dir())}
+                "nodes": sorted(item.name for item in base.iterdir() if item.is_dir()),
+                **({"backend": "legacy", "read_only": True} if self.runtime is not None else {})}
 
 
 def _starter_graph(name: str) -> dict:
@@ -1223,6 +1512,12 @@ def _stamp() -> str:
 class Handler(BaseHTTPRequestHandler):
     scheduler: Scheduler          # set on the server's class by `serve`
 
+    def handle_one_request(self) -> None:
+        try:
+            super().handle_one_request()
+        except RuntimeHTTPError as exc:
+            self._send(*exc.response())
+
     def log_message(self, fmt, *args):        # quieter: one line per request is enough
         print(json.dumps({"request": self.path, "status": args[1] if len(args) > 1 else ""}),
               flush=True)
@@ -1279,14 +1574,21 @@ class Handler(BaseHTTPRequestHandler):
 
     def _authorized(self) -> bool:
         keys = self.scheduler.api_keys
-        if not keys:
-            return True  # serve() only allows this mode on a loopback listener.
         scheme, separator, value = self.headers.get("Authorization", "").partition(" ")
         valid = separator and scheme.lower() == "bearer" and value
-        if valid and any(hmac.compare_digest(value.encode(), key.encode()) for key in keys):
-            return True
-        self._send(json.dumps({"error": "invalid API key"}), 401)
-        return False
+        if keys and not (valid and any(hmac.compare_digest(value.encode(), key.encode()) for key in keys)):
+            self._send(json.dumps({"error": "invalid API key"}), 401)
+            return False
+        parts = PurePosixPath(unquote(urlparse(self.path).path)).parts
+        if len(parts) >= 3 and parts[1] == "sessions" and not self.scheduler.session_visible(
+                parts[2], self._request_owner()):
+            self._send(json.dumps({"error": "no such session"}), 404)
+            return False
+        return True
+
+    def _request_owner(self) -> str:
+        bearer = self.headers.get("Authorization", "").partition(" ")[2] if self.scheduler.api_keys else ""
+        return hashlib.sha256(bearer.encode()).hexdigest()
 
     def _send_file(self, path: Path) -> None:
         """Download artifacts; SVGs also work as passive images in Markdown previews."""
@@ -1301,6 +1603,37 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
         self.wfile.write(payload)
+
+    def _download_run_file(self, run: str, node: str, name: str) -> None:
+        runtime = self.scheduler.runtime
+        if runtime is not None and (self.scheduler.run_dir(run) is None or
+                                    self.scheduler._runtime_run(run) is not None):
+            with runtime.download(files_path(run, node, name)) as response:
+                self.send_response(200)
+                image_types = {".svg": "image/svg+xml", ".png": "image/png", ".jpg": "image/jpeg",
+                               ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp"}
+                filename = Path(name).name
+                self.send_header("Content-Type", image_types.get(Path(filename).suffix.lower(), "application/octet-stream"))
+                self.send_header("Content-Security-Policy", "sandbox; default-src 'none'; style-src 'unsafe-inline'")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.send_header("Content-Disposition", f"attachment; filename*=UTF-8''{quote(filename)}")
+                size = response.headers.get("Content-Length", "")
+                if size.isdigit():
+                    self.send_header("Content-Length", size)
+                else:
+                    self.close_connection = True
+                self.end_headers()
+                try:
+                    while chunk := response.read(64 * 1024):
+                        self.wfile.write(chunk)
+                except (OSError, HTTPException):
+                    self.close_connection = True
+            return
+        target = self.scheduler.locate(run, node, name)
+        if target is None:
+            self._send(json.dumps({"error": f"no such file: {name}"}), 404)
+            return
+        self._send_file(target)
 
     def _get_plugin(self, parts: list[str]) -> None:
         try:
@@ -1460,19 +1793,21 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: C901 - one small HTTP router keeps endpoint behavior visible
         parsed = urlparse(self.path)
         query = parse_qs(parsed.query)
-        path = PurePosixPath(unquote(parsed.path))
-        parts = [part for part in path.parts if part != "/"]
+        if self.scheduler.runtime is not None:
+            parts = [unquote(part) for part in parsed.path.split("/") if part]
+        else:
+            path = PurePosixPath(unquote(parsed.path))
+            parts = [part for part in path.parts if part != "/"]
         if not parts or parts[0] == "assets" or (len(parts) == 1 and "." in parts[0]):
             if self._serve_built(parts):
                 return
         if not self._authorized():
             return
         if parts == ["graphs"]:
-            names = [{"graph": item.name, "running": self.scheduler.active_run(item.name),
-                      "active_runs": self.scheduler.active_runs(item.name)}
-                     for item in self.scheduler.workspaces()]
-            return self._send(json.dumps({"graphs": names}, ensure_ascii=False))
+            return self._send(json.dumps(self.scheduler.graphs(), ensure_ascii=False))
         if parts == ["graph-relations"]:
+            if self.scheduler.runtime is not None:
+                return self._send(json.dumps({"error": "Graph relations are not connected to the Rust backend"}), 501)
             return self._send(json.dumps(self.scheduler.graph_calls.relations(), ensure_ascii=False))
         if parts == ["timeline"]:
             try:
@@ -1496,7 +1831,7 @@ class Handler(BaseHTTPRequestHandler):
                  "platform": item.channel.get("source", item.channel.get("platform", ""))}
                 for item in self.scheduler.sessions.list() if item.graph and item.status != "archived"]}, ensure_ascii=False))
         if parts == ["sessions"]:
-            return self._send(*self.scheduler.sessions_list())
+            return self._send(*self.scheduler.sessions_list(self._request_owner()))
         if len(parts) == 3 and parts[0] == "sessions" and parts[2] == "turns":
             try:
                 self.scheduler.sessions.get(parts[1])
@@ -1515,13 +1850,7 @@ class Handler(BaseHTTPRequestHandler):
         if parts and parts[0] == "plugins":
             return self._get_plugin(parts)
         if len(parts) == 2 and parts[0] == "graphs":
-            # The graph itself, so a view can draw the topology and not only a run through it.
-            workspace = self.scheduler.workspace(parts[1])
-            if workspace is None:
-                return self._send(json.dumps({"error": "no such graph"}), 404)
-            graph = json.loads((workspace / "graph.json").read_text(encoding="utf-8"))
-            return self._send(json.dumps({"graph": parts[1], "definition": graph},
-                                         ensure_ascii=False))
+            return self._send(*self.scheduler.graph(parts[1]))
         if parts == ["runs"]:
             return self._send(json.dumps({"runs": self.scheduler.runs()}, ensure_ascii=False))
         if len(parts) == 4 and parts[0] == "runs" and parts[2] == "files":
@@ -1529,13 +1858,11 @@ class Handler(BaseHTTPRequestHandler):
         if len(parts) >= 5 and parts[0] == "runs" and parts[2] == "files":
             name = "/".join(parts[4:])
             if query.get("download"):
-                target = self.scheduler.locate(parts[1], parts[3], name)
-                if target is None:
-                    return self._send(json.dumps({"error": f"no such file: {name}"}), 404)
-                return self._send_file(target)
+                return self._download_run_file(parts[1], parts[3], name)
             return self._send(*self.scheduler.read_file(parts[1], parts[3], name))
         if len(parts) == 2 and parts[0] == "runs":
-            found = self.scheduler.run(_graph_of(self.scheduler, parts[1]), parts[1])
+            found = self.scheduler.run("" if self.scheduler.runtime is not None else
+                                       _graph_of(self.scheduler, parts[1]), parts[1])
             return self._send(json.dumps(found, ensure_ascii=False) if found
                               else json.dumps({"error": "no such run"}), 200 if found else 404)
         self._send(json.dumps({"error": "not found"}), 404)
@@ -1565,6 +1892,12 @@ class Handler(BaseHTTPRequestHandler):
         channel_endpoint = parts == ["v1", "channels", "wecom", "events"]
         if not self._authorized():
             return
+        if parts == ["v1", "runtime", "session-calls", "resolve"]:
+            body = self._body()
+            if body is None:
+                return
+            from anchor.channel.runtime_background import resolve
+            return self._send(*resolve(self.scheduler, body))
         if channel_endpoint:
             body = self._body()
             if body is None:
@@ -1594,9 +1927,7 @@ class Handler(BaseHTTPRequestHandler):
             body = self._body()
             if body is None:
                 return
-            bearer = self.headers.get("Authorization", "").partition(" ")[2]
-            owner = hashlib.sha256(bearer.encode()).hexdigest()
-            created, status = self.scheduler.response_turn(owner, body)
+            created, status = self.scheduler.response_turn(self._request_owner(), body)
             if status != 200:
                 return self._send(json.dumps(created, ensure_ascii=False), status)
             if created["stream"]:
@@ -1672,6 +2003,13 @@ class Handler(BaseHTTPRequestHandler):
             if not run_id:
                 return self._send(json.dumps({"error": "run is required"}), 400)
             return self._send(*self.scheduler.attach_session_run(parts[1], run_id))
+        if parts == ["graph-validation"]:
+            body = self._body()
+            if body is None:
+                return
+            if not isinstance(body.get("definition"), dict):
+                return self._send(json.dumps({"valid": False, "error": "definition must be an object"}), 400)
+            return self._send(*self.scheduler.validate_graph(body["definition"]))
         if parts == ["graphs"]:
             body = self._body()
             if body is None:
@@ -1740,19 +2078,44 @@ def serve(root: str | Path, config: str | Path, host: str = "127.0.0.1", port: i
         raise ValueError("ANCHOR_API_KEYS is required when listening on a non-loopback address")
     Handler.scheduler = scheduler
     server = ThreadingHTTPServer((host, port), Handler)
-    (Path(root).expanduser() / "workspaces").mkdir(parents=True, exist_ok=True)
-    print(json.dumps({"listening": f"http://{host}:{port}", "root": str(scheduler.root),
-                      "graphs": [item.name for item in scheduler.workspaces()]}), flush=True)
-    callback_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
-    scheduler.start_channels(f"http://{callback_host}:{server.server_port}/v1/channels/wecom/events")
-    scheduler.resume_all()
+    stopping = threading.Event()
+    main_thread = threading.current_thread() is threading.main_thread()
+    previous_sigterm = signal.getsignal(signal.SIGTERM) if main_thread else None
+
+    def request_shutdown(_signum: int, _frame: Any) -> None:
+        if not stopping.is_set():
+            stopping.set()
+            # shutdown() waits for serve_forever(), which is also the signal-handling thread.
+            threading.Thread(target=server.shutdown, name="anchor-http-shutdown", daemon=True).start()
+
     def schedule_loop() -> None:
-        while True:
+        while not stopping.is_set():
             scheduler.tick_schedules()
-            time.sleep(1)
-    threading.Thread(target=schedule_loop, daemon=True).start()
+            if scheduler.runtime is not None:
+                from anchor.channel.runtime_background import tick
+                tick(scheduler)
+            stopping.wait(1)
+
     try:
+        if main_thread:
+            signal.signal(signal.SIGTERM, request_shutdown)
+        (Path(root).expanduser() / "workspaces").mkdir(parents=True, exist_ok=True)
+        print(json.dumps({"listening": f"http://{host}:{port}", "root": str(scheduler.root),
+                          "graphs": [] if scheduler.runtime is not None else
+                                    [item.name for item in scheduler.workspaces()],
+                          **({"runtime_backend": "rust"} if scheduler.runtime is not None else {})}), flush=True)
+        callback_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
+        scheduler.start_channels(f"http://{callback_host}:{server.server_port}/v1/channels/wecom/events")
+        scheduler.resume_all()
+        threading.Thread(target=schedule_loop, daemon=True).start()
         server.serve_forever()
     finally:
-        scheduler.stop_channels()
-        server.server_close()
+        stopping.set()
+        try:
+            scheduler.stop_channels()
+        finally:
+            try:
+                server.server_close()
+            finally:
+                if main_thread:
+                    signal.signal(signal.SIGTERM, previous_sigterm)
