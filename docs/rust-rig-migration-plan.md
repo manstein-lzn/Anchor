@@ -1,10 +1,12 @@
 # Rust-native Runtime 迁移与产品对齐计划
 
-## 当前授权：Python 产品体验对齐（2026-10-05）
+## 当前状态（2026-10-06）
 
-用户已授权精确拆分并由子 Agent 并行实施。当前目标是普通用户继续使用既有 Graph/Plugin 和入口，由同一 Rust Runtime 执行；下方 2026-10-04 冻结记录是历史，不再解释为禁止推进本节工作。Graph 不增加版本或第二套作者语言，Plugin/外部工具不要求改写为 Rust；不扩展不同 Linux 发行版兼容性，不自动切换现有生产数据或发送/发布业务内容。
+用户已授权继续推进 Rust Runtime 对齐 Python 产品体验。Graph 不增加版本或第二套作者语言，Plugin/外部工具不要求改写为 Rust；不同 Linux 发行版兼容性暂不纳入范围，也不自动切换现有生产数据或发送/发布业务内容。
 
-第一批实现使用当前未提交源码的隔离快照 `bc4331f2e92a91322307fdb0e5f5ebb7b0fd734f`，worktree 位于 `/root/anchor-parity-worktrees/{commands,artifacts,models}`。该快照只供隔离开发，不代表已提交主工作区；集成只取各任务增量，保留此前未提交内容。主 Agent 是唯一集成和验收负责人。
+Rust 二进制 Runtime、Graph/Run/Artifact、Sandbox、Plugin/MCP、io-harness AgentNode、附件/图片输入、Graph call wait/detach 和 Rust backend 首片已经实现并提交到 `codex/rust-rig-runtime`。当前生产入口仍由 Python 协调，完整替代还需要业务 Graph、平台职责和生产切换验收。历史 worktree、未提交快照和子 Agent 分工只属于开发记录，不再作为当前状态依据。
+
+当前出口分为四层：组件测试通过、组合路径通过、真实 provider/业务 Graph 通过、生产 backend 切换通过。任何一层都不能代替下一层。
 
 ### 工作包与边界
 
@@ -17,7 +19,7 @@
 | C 模型与预算 | 子 Agent models；io-harness NodePort/必要 adapter、新 Host model_registry | ANCHOR_MODEL_ALIASES 与 Python 同义；已声明别名实际选模型；NodePort 保留既有构造器；框架原生能力可支持时接精确累计请求预算 | 15% | 同图两模型在 wire 上可区分；默认 fallback 与非法配置明确；恢复选型稳定；预算必须计纠错与重开累计，不能用 step 冒充请求 | 模型已集成并验证 wire/恢复；预算不支持，见框架边界 |
 | D 平台入口接线 | 后续独立包；Python 服务/适配器、Rust application/API 的小契约；每批单一所有者 | Graph/Run/Artifact 由 Rust 唯一写入；Session/Library/Scheduler/Channel 复用既有宿主能力，通过公共调用接入 | 25% | D1 手动/定时触发、状态/文件/控制一致；D2 Plugin 管理和 Pilot 发起/查看 Run；D3 企业微信会话/附件/回复与 call.session；旧历史只读策略明确 | D1 双服务/浏览器及真实 Provider 已通过；D2a Library/挂载/执行首片与 D2b Pilot 同 Run 接续通过；OAuth 与 D3 完整能力待办，D3a 文字首片（A96）与附件/图片（A97）通过 |
 | E 观察与控制体验 | 后续独立包；Node adapter/Host 事件投影/Web，避免与 C 同时修改 | 摘要增量仅是显示，不是完成事实；停止/暂停/进程中断沿既有事实恢复；图像输入作为输入接线处理 | 10% | 真实界面可逐步看到内容；最终提交唯一；最后回合 stop 的实际边界可复现并处理；附件到模型的路径可验收 | E2 停止待收束和无重放续跑浏览器通过；E3 附件/图片已由 A97 验收；E1 摘要流待办 |
-| I 集成和业务验收 | 主 Agent；共享接口、验收脚本、文档 | 不更改原业务 Graph 来掩盖 Runtime 差距；不修改 Python 历史或原运行目录；真实外部副作用另按用户授权 | 15% | 分阶段 fmt/clippy/测试；真实 Provider 验收；原深度研究、周报、RSI、企业微信逐条记录正常/回访/中断恢复证据 | 进行中 |
+| I 集成和业务验收 | 主 Agent；共享接口、验收脚本、文档 | 不更改原业务 Graph 来掩盖 Runtime 差距；不修改 Python 历史或原运行目录；真实外部副作用另按用户授权 | 15% | 分阶段 fmt/clippy/测试；真实 Provider 验收；原深度研究、周报、RSI、企业微信逐条记录正常/回访/中断恢复证据 | 进行中；企业微信文字/附件/图片已验收，标准 RSI 与周报仍未闭环 |
 
 A/B/C 的职责内聚、测试可独立运行；主要耦合是 Host 装配，main.rs 先归 A，C 只交付 model_registry 和装配说明，B 只交付 prepare_workspace 接口，主 Agent 在 A 集成后统一接线。本批曾共享 Cargo target，发现不同 worktree 会覆盖同名集成测试 binary，不能用其交错运行结果作验收。最终检查由主树独占 target 完成；后续并行任务各用独立 target，或显式串行编译和运行。每个测试使用独立临时状态根，业务环境由主 Agent 独占。
 
@@ -143,9 +145,9 @@ E1/E2/E3 可先分别做只读核查、fixture 和边界设计；因共享 NodeP
 
 ## 历史计划与冻结记录
 
-本文是 `codex/rust-rig-runtime` 实验分支的历史开发计划，描述过如何把 Anchor 逐步收敛到一个由平台宿主和独立 Graph 宿主共同使用的 Rust Runtime Kernel。2026-10-04 已冻结该扩展路线；本文不再表示 R1–R9 正在推进，也不替代 [开发台账](pilot-development-plan.md)。当前边界、保留资产和重新评估条件见 [Rust Runtime 迁移收尾记录](rust-migration-closure.md)。
+本文保留 R1–R9 的设计、历史拆分和验收证据，不替代 [开发台账](pilot-development-plan.md)。其中二进制 Runtime、Graph/Run/Artifact、平台首片和通道接线已经从计划进入当前实现；未完成项以本文顶部“当前状态”和 [Rust Runtime 迁移边界与当前收口状态](rust-migration-closure.md) 为准。
 
-冻结后的解释：本计划中的阶段表、完整 R8/R9 出口和“下一步”段落保留作为设计与历史证据，不构成当前开发承诺。Python `serve.py` 继续是当前生产路径，Rust Host 定位为实验性 standalone Graph Host 垂直切片。当前仅重新评估一条更窄的二进制 Runtime 交付闭环，具体条件见 [Rust Runtime 迁移收尾记录](rust-migration-closure.md)。
+历史阶段表和“下一步”段落不构成新的实现承诺。Python `serve.py` 仍是当前默认生产入口，Rust Host 已是可运行的共享 Kernel 和独立 Runtime；标准 RSI、周报、平台职责迁移及生产 backend 切换仍需单独验收。
 
 ## 目标和不做的事
 

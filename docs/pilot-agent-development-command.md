@@ -1,4 +1,6 @@
-# Anchor Pilot 当前目标开发命令
+# Anchor Pilot legacy 开发命令（历史归档）
+
+本文对应 2026-09-26 的 Python Pilot/Session 目标，保留作 legacy 基线和历史验收入口。当前 Rust Runtime 产品对齐不再以本文件的“当前目标开发”范围为准，请阅读 [开发计划与验收台账](pilot-development-plan.md) 和 [Rust Runtime 迁移边界](rust-migration-closure.md)。
 
 工作目录：`/root/Anchor`
 
@@ -11,7 +13,7 @@
 - `docs/architecture.md`
 - `docs/product-architecture.md`
 
-以开发台账的“当前目标开发”范围为准，完成实现与验证。
+历史执行时以当时开发台账的目标范围为准；当前工作不要从本文件派生新的实现范围。
 
 ## 开发范围
 

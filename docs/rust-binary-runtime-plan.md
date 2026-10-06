@@ -1,5 +1,7 @@
 # Rust Binary Runtime 产品化计划
 
+> 第一阶段已于 2026-10-05 收口。本文保留目标、验收标准和实际证据；当前未完成的产品平台迁移边界见 [Rust Runtime 迁移边界与当前收口状态](rust-migration-closure.md)。
+
 ## 目标
 
 交付一个核心执行不依赖 Python、Anchor Runtime 源码或 Python 虚拟环境的 Rust Runtime 二进制，并与一个明确声明资源闭包的 Graph 包组合部署。既有 Plugin 保持原样，可使用部署者提供的 Python、Node.js、脚本环境或 MCP；不要求将业务工具改写为 Rust。第一阶段只证明一个真实 Graph 可以被交付和运行，不承担完整 Anchor 平台迁移。
@@ -81,4 +83,4 @@ Graph 编辑 DTO、完整平台 trace、Session/Turn 和 Scheduler 不属于第�
 - 不建立第二个 Graph Runner，不为兼容性提前引入通用安装器、市场或远程控制面。
 - 不把二进制交付等同于业务源码保护、完整多租户安全或性能必然提升。
 
-当前实现证据、已知限制和重新评估背景见 [Rust Runtime 迁移收尾记录](rust-migration-closure.md)。
+当前实现证据和未完成平台边界见 [Rust Runtime 迁移边界与当前收口状态](rust-migration-closure.md)。

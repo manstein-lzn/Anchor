@@ -8,11 +8,9 @@
 
 2026-09-26 用户决定：普通会话恢复以持续保存的工作记录（JSONL）为依据，由 Agent 核查现场后续做，不扩建通用审批平台或跨存储事务。2026-10-03 收敛 Rust io-harness 未知副作用路径：同一 Graph Run 保留 cursor，普通“继续”把持久化的中断事实作为恢复上下文交给 Agent；不自动重放工具，也不把 Retry、Completed、Abort 暴露为用户流程。外部副作用仍不承诺 exactly-once。
 
-当前核心目标（历史 Python 路径）：找到并接通 PydanticAI / Harness 已有的持久记录和续聊接口，让用户重新打开原会话后继续工作。保持真实流式展示和必要提问，按需接框架压缩，补上对象直接跳转，并完成真实路径验收。Anchor 负责把这些能力接入现有 Session、Graph、Run、Plugin、文件和沙箱边界。
+当前核心目标是以同一 Rust Runtime 承接既有 Graph/Plugin 和入口，同时保持产品可见的会话、产物、恢复和通道语义。Python 仍保留尚未迁移的 Session/Turn、Scheduler、Library 和渠道协调职责；Rust 组件通过公共 Host 接入，不把局部接线写成整个平台替换。
 
-2026-10-04 路线收尾：Rust-native Runtime 的完整 R8/R9 扩展路线冻结，当前 Rust Host 定位为 experimental standalone slice。用户随后明确 Rust 的交付价值是编译为不依赖 Python 或 Anchor 源码的二进制 Runtime，再与 Graph 包组合部署，因此只重新开启“二进制 Runtime 交付”这一有边界的产品化切片。io-harness 负责已实现 Rust AgentNode 的 loop、上下文、单节点 checkpoint/compaction 和工具效果恢复；Rig 只负责 Provider transport；Anchor 负责已实现部分的 Graph/Run、Plugin、Sandbox、Artifact、权限和宿主 API。Python `serve.py` 继续是当前生产路径。收尾边界、已知限制和二进制交付验收出口见 [Rust Runtime 迁移收尾记录](rust-migration-closure.md)。
-
-2026-10-05 当前授权已扩大为保持原 Graph/Plugin 与产品体验的 Rust Runtime 替代，前述冻结为历史。A93 关闭反馈样例歧义与模型录制首片；A94 接通可选 Python 平台 → Rust 公共 HTTP 路径，验收手动/定时/文件/控制和既有 Plugin。默认生产入口未切换；Pilot/Session、企业微信、摘要流/图片和完整业务逐条验收仍待推进。当前拆包和状态见 [产品对齐计划](rust-rig-migration-plan.md#当前授权python-产品体验对齐2026-10-05)。
+2026-10-05 用户将 Rust 目标从二进制 Runtime 交付扩大为保持原 Graph/Plugin 与产品体验的 Runtime 替代。二进制发行已收口；当前剩余工作是标准业务 Graph 完整验收、平台职责迁移和生产 backend 切换。具体边界见 [Rust Runtime 迁移边界与当前收口状态](rust-migration-closure.md) 和 [产品对齐计划](rust-rig-migration-plan.md#当前状态（2026-10-06）)。
 
 框架优先：先核对本地固定版本的公开 API、仓库已有调用和最小运行结果，再做必要接线。不能把框架已有的消息存储、恢复、压缩、计划能力重新列成 Anchor 自研系统。JSONL 诉求通过框架原生文件存储承接，不预先设计自有日志协议；需要保留框架同时生成的消息快照和媒体文件，不能误称单个事件 JSONL 就是全部历史。
 
@@ -20,9 +18,9 @@
 
 不做：通用审批平台、外部操作 exactly-once 保证、跨存储原子事务、未知结果人工处置平台、自造模型循环、第二个 Graph 调度器、宿主 Shell/FileSystem 绕过沙箱、多租户平台、知识库自动编译、自动环境安装、云端持久工作流集群。默认部署仍是本机单个服务进程。
 
-## 当前目标开发（本轮唯一范围）
+## Python legacy 基线（历史目标，保留作对照）
 
-本轮只交付以下内容：
+该基线曾交付以下内容，后续 Rust 对齐以相同用户语义为准：
 
 1. 用 Harness 原生 `StepPersistence` 和文件存储保存 Agent 的逐步工作记录；保留框架生成的 JSONL、消息快照和媒体文件。
 2. 重新打开同一 Session 时，用 Harness 的公开接口找到记录并通过 `continue_run` 续聊；新输入可以进入同一对话。
@@ -31,7 +29,7 @@
 5. 让聊天中的 Graph、Run、Artifact 引用可以直接进入已有对象页面并返回会话。
 6. 用真实 provider、进程中断、服务重启和浏览器路径验收上述行为。未通过真实路径前不写成已完成。
 
-本轮只核对续聊所需的框架压缩配置，不预设摘要格式或记忆机制。计划呈现、系统 Pilot 的实现形态、研究合同、附件、编辑分支和导出方式待后续讨论。
+这部分不再限制 Rust 当前范围；摘要流、计划呈现、附件、研究合同和导出按后续 Rust 产品切片单独记录。
 
 P2/P7 的保存、重开、续聊、必要提问、压缩和 Graph/Run/Artifact 跳转是跨 Runtime 的用户可见契约；共同的是保存事实、重开后能核查现场并继续、未知副作用不自动重放，以及提问和对象跳转可完成，不要求 Python 文件格式或 Run/turn 身份兼容。当前表中的 P2/P7 只关闭 Python Pilot/Session 入口。Rust-native Graph/Run 通过 R7/R8 重新实现并单独验收同一类语义，Rust 证据不回填为 P2/P7 已完成，两条实现线也不对同一 Run 双写。
 
@@ -40,13 +38,12 @@ P2/P7 的保存、重开、续聊、必要提问、压缩和 Graph/Run/Artifact 
 以下内容保留为产品需求，当前只记录用户可能需要的能力，不形成开发顺序、技术方案、接口契约或验收前置条件：
 
 - 系统级 Pilot 与 Graph/Run/Artifact 的更深联动；
-- 系统级 Pilot 与 Graph/Run/Artifact 的更深联动；
 - 长期 Copilot：用户可直接向 Anchor Copilot 提出任务，由 Copilot 选择或临时构建 Graph 执行，并把结果返回给原始用户/来源。临时 Graph 的持久化、可见性和生命周期，以及异步来源的回传方式尚未决定；
 - 研究目标、研究合同、证据验收和研究应用体验；
 - 长任务的上下文使用展示、可见计划和进度表达（基础压缩按当前目标复用框架）；
 - 附件、图片、资源引用、编辑后分支和导出。
 
-当前目标完成后，再逐项讨论这些需求是否需要、边界是什么，以及是否已有 PydanticAI / Harness 接口可以直接复用。
+这些内容仍是未冻结的产品需求，是否进入 Rust 产品范围按独立切片决定。
 
 ## 分阶段工作包
 
@@ -61,9 +58,9 @@ P2/P7 的保存、重开、续聊、必要提问、压缩和 Graph/Run/Artifact 
 | E1 事件触发与运行看板 | Graph/Run 输入、Bearer 白名单、Webhook、Responses 子集、本机定时和时间线看板 | P2/P7 基础稳定 | 确认触发来源、忙碌/停机错过语义、Responses JSON/SSE、计划编辑删除和浏览器查看；未通过真实 provider 前不报端到端完成 | 功能接线与自动回归完成；真实 provider/停机验收待做 |
 | E2 RSI Graph | 每周只读审查 Anchor Run、架构代码、Graph/Plugin 和公开生态，形成可追溯演进提案 | E1/普通 Graph 稳定 | provider-free 全图、公开 API 失败边界、评审反馈回路、计划注册和本地报告；真实 provider、长期递归效果和提案实施单独验收 | 五领域同 Run 并行版已部署并保留原计划；真实验收与当前状态见 A30，长期改进收益单独验收 |
 
-### Rust-native 路线状态（2026-10-04）
+### Rust-native 路线状态（2026-10-06）
 
-完整 Rust-native R8/R9 扩展路线已冻结。上文历史记录和代码证据继续保留，不把 provider-free、浏览器或局部真实 provider 证据写成完整平台迁移。当前只评估“二进制 Runtime 交付”这一窄切片：验证无 Python/源码运行环境、Graph 包闭包、真实 Graph 端到端运行和可测的交付/运行收益。Python P2/P7 仍可单独完成其 legacy 真实验收。具体边界见 [Rust Runtime 迁移收尾记录](rust-migration-closure.md)。
+Rust 二进制 Runtime 交付切片已完成；当前路线继续推进产品体验对齐，但不把组件测试、admission、浏览器或局部 provider 证据写成完整平台迁移。标准 RSI、周报、平台职责迁移和生产 backend 切换仍按独立验收记录。具体边界见 [Rust Runtime 迁移边界与当前收口状态](rust-migration-closure.md)。
 
 2026-09-26 独立验收：五处待修复问题及复现证据见 [P2 独立验收报告](pilot-p2-acceptance-review.md)。历史路径通过不代表全部入口和压缩组合已通过。
 
@@ -279,7 +276,7 @@ SSE `message` 的 data 为标准 Vercel chunk，`id` 为已提交到 SQLite 的�
 
 ## 推进记录
 
-- 2026-10-04：Rust-native Runtime 完整 R8/R9 扩展路线收尾并冻结。随后用户明确了二进制 Runtime 的交付价值：避免交付 Anchor/Python 源码与复杂 Python 依赖，并以 Graph 包组合部署。基于这一真实产品目标，只重新开启“二进制 Runtime 交付”窄切片；不恢复完整平台迁移。验收需覆盖可重复构建、干净环境无 Python 运行、Graph/Plugin 闭包、真实 provider/Sandbox/Artifact/恢复，以及与 Python 基线的实测比较。具体出口见 [Rust Runtime 迁移收尾记录](rust-migration-closure.md)。
+- 2026-10-04（历史决定，已被 2026-10-05 授权取代）：Rust-native Runtime 完整 R8/R9 扩展路线收尾并冻结。随后用户明确了二进制 Runtime 的交付价值：避免交付 Anchor/Python 源码与复杂 Python 依赖，并以 Graph 包组合部署。基于这一真实产品目标，只重新开启“二进制 Runtime 交付”窄切片；不恢复完整平台迁移。验收需覆盖可重复构建、干净环境无 Python 运行、Graph/Plugin 闭包、真实 provider/Sandbox/Artifact/恢复，以及与 Python 基线的实测比较。二进制切片现已收口；当前边界见 [Rust Runtime 迁移边界与当前收口状态](rust-migration-closure.md)。
 - 2026-10-04：二进制 Runtime walking skeleton 完成。`cargo build --release --bin anchor-runner-host` 生成约 40 MB release binary；修复 Rust Op.run 未注入 `ANCHOR_INPUT` 的边界，并用 routing 回归验证默认 Graph input 与触发 input 合并后能经 Bubblewrap 到达串行 Op。`cargo test -p anchor-runner-host --test routing`（2 passed）、`cargo clippy -p anchor-runner-host --all-targets -- -D warnings`、`cargo fmt --all -- --check` 通过。另在仅提供 `/usr/bin:/bin` 的临时根目录中，以 binary、format-1 Graph bundle、Bubblewrap 和 `sh` 完成 provider-free Run，响应与持久 Run 均为 `completed`。这只证明 walking skeleton，不代表真实 provider、Plugin 闭包、重启恢复或发行包收益已完成。
 - 2026-10-04：二进制 Runtime 发行边界收紧。standalone bundle loader 拒绝 Plugin 根目录 symlink 逃逸，保留通用 Library catalog 对旧资源库 symlink 的兼容行为；Rust HTTP `ANCHOR_API_KEYS` 改为与 Python 一致的 JSON 数组、唯一且至少32字节校验。`cargo test -p anchor-graph-host --lib`（14 passed）、API key 回归、workspace fmt/clippy 通过。真实 provider、恢复错误映射、detach 语义和发行包完整性仍未验收。
 - 2026-10-04：二进制 Runtime 发行包垂直切片完成 provider-free 验收。新增 `scripts/package_rust_runtime.py` 和 `tests/test_package_rust_runtime.py`：release ELF 与 format-1 Graph bundle 生成确定性 `tar.gz`，拒绝 symlink、未知顶层资源、Plugin 目录漂移和非 ELF binary；3 项边界测试、Ruff、`py_compile` 通过，两次归档摘要一致。归档解压到本机不含仓库源码的独立 deployment root，Runtime cwd 和状态/工作目录均与仓库隔离，实际启动 binary 执行 Graph，Run 与 `result.txt` Artifact 均为完成。该记录不扩展为真实 provider、业务 Plugin/MCP、重启恢复或 Python 基线收益完成。
