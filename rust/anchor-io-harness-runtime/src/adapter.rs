@@ -972,4 +972,106 @@ mod tests {
         assert_eq!(*seen.lock().unwrap(), "first second");
         assert_eq!(response.text.as_deref(), Some("first second"));
     }
+
+    fn summary_request() -> IoRequest {
+        IoRequest {
+            user: "finish the node".into(),
+            output_schema: Some(
+                io_harness::schema::OutputSchema::new(json!({
+                    "type": "object",
+                    "properties": {"summary": {"type": "string"}},
+                    "required": ["summary"]
+                }))
+                .unwrap(),
+            ),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn completion_stream_is_atomic_and_fails_closed_before_final_call() {
+        use std::sync::{Arc, Mutex};
+
+        // Rig exposes argument fragments before it exposes the completed
+        // tool call (and its name). The adapter must not publish a guessed
+        // summary from those fragments. The sole callback is the canonical
+        // projection after the final_result End event.
+        let model = MockCompletionModel::from_stream_turns([[
+            MockStreamEvent::tool_call_name_delta("done", "final_result"),
+            MockStreamEvent::tool_call_arguments_delta("done", "{\"summary\":\"first"),
+            MockStreamEvent::tool_call_arguments_delta("done", " growth\"}"),
+            MockStreamEvent::tool_call_end("done"),
+            MockStreamEvent::final_response_with_default_usage(),
+        ]]);
+        let adapter = RigProviderAdapter::new(model.erase(), false);
+        let chunks = Arc::new(Mutex::new(Vec::<String>::new()));
+        let captured = Arc::clone(&chunks);
+        let response =
+            io_harness::Provider::complete_streaming(&adapter, summary_request(), &move |chunk| {
+                captured.lock().unwrap().push(chunk.to_owned())
+            })
+            .await
+            .unwrap();
+        let chunks = chunks.lock().unwrap();
+        assert_eq!(
+            chunks.len(),
+            1,
+            "partial final_result arguments must not stream"
+        );
+        let value: serde_json::Value = serde_json::from_str(&chunks[0]).unwrap();
+        assert_eq!(value["summary"], "first growth");
+        assert_eq!(value["_anchor_completion"]["status"], "submitted");
+        assert_eq!(response.text.as_deref(), Some(chunks[0].as_str()));
+    }
+
+    #[tokio::test]
+    async fn mixed_and_truncated_completion_streams_never_publish_summary() {
+        use std::sync::{Arc, Mutex};
+
+        let mixed_model = MockCompletionModel::from_stream_turns([[
+            MockStreamEvent::tool_call("business", "lookup", json!({"id": 7})),
+            MockStreamEvent::tool_call_name_delta("done", "final_result"),
+            MockStreamEvent::tool_call_arguments_delta("done", "{\"summary\":\"premature\"}"),
+            MockStreamEvent::tool_call_end("done"),
+            MockStreamEvent::final_response_with_default_usage(),
+        ]]);
+        let mixed_adapter = RigProviderAdapter::new(mixed_model.erase(), false);
+        let mixed_chunks = Arc::new(Mutex::new(Vec::<String>::new()));
+        let mixed_captured = Arc::clone(&mixed_chunks);
+        io_harness::Provider::complete_streaming(
+            &mixed_adapter,
+            summary_request(),
+            &move |chunk| mixed_captured.lock().unwrap().push(chunk.to_owned()),
+        )
+        .await
+        .unwrap();
+        let mixed_chunks = mixed_chunks.lock().unwrap();
+        assert_eq!(mixed_chunks.len(), 1);
+        let mixed: serde_json::Value = serde_json::from_str(&mixed_chunks[0]).unwrap();
+        assert_eq!(mixed["_anchor_completion"]["status"], "deferred");
+        assert!(mixed.get("summary").is_none());
+
+        // A stream that reaches the provider finish without a completed tool
+        // call is rejected; its partial arguments are never a completion fact.
+        let truncated_model = MockCompletionModel::from_stream_turns([[
+            MockStreamEvent::tool_call_name_delta("done", "final_result"),
+            MockStreamEvent::tool_call_arguments_delta("done", "{\"summary\":\"cut off"),
+            MockStreamEvent::final_response_with_default_usage(),
+        ]]);
+        let truncated_adapter = RigProviderAdapter::new(truncated_model.erase(), false);
+        let truncated_chunks = Arc::new(Mutex::new(Vec::<String>::new()));
+        let truncated_captured = Arc::clone(&truncated_chunks);
+        io_harness::Provider::complete_streaming(
+            &truncated_adapter,
+            summary_request(),
+            &move |chunk| truncated_captured.lock().unwrap().push(chunk.to_owned()),
+        )
+        .await
+        .unwrap();
+        let truncated_chunks = truncated_chunks.lock().unwrap();
+        assert_eq!(truncated_chunks.len(), 1);
+        let truncated: serde_json::Value = serde_json::from_str(&truncated_chunks[0]).unwrap();
+        assert_eq!(truncated["_anchor_completion"]["status"], "rejected");
+        assert!(truncated.get("summary").is_none());
+    }
 }
