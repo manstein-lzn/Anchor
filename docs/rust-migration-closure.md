@@ -6,7 +6,7 @@
 
 Rust 已经可以作为 Anchor 的共享 Runtime Kernel 和独立二进制 Runtime 使用。Graph、Run、Artifact、Sandbox、Plugin/MCP、io-harness AgentNode、Provider transport、fanout/join、Graph call wait/detach、附件/图片输入、恢复和基础平台 HTTP 接线均已实现，并有相应的 Rust、Python、Web 或真实 provider 证据。2026-10-06 又完成了标准 18 节点 RSI 的原图受控闭环，以及标准周报原图的真实 provider 无外部发布闭环；这两项证据分别证明 Rust 执行契约和安全发布边界，不能替代真实 RSI 内容质量或 Docmost 生产发布验收。
 
-这还不等于 Python Anchor 平台已经被替换。当前生产入口仍由 Python `serve.py`、Scheduler、Library、Session/Turn、SSE 和企业微信网关协调；显式 Rust backend 可以把 Graph/Run/Artifact 等执行职责委派给 Rust Host。实现归属和未完成边界以 [当前架构](architecture.md) 为准，逐项验收以 [开发计划与验收台账](pilot-development-plan.md) 为准。
+这还不等于 Python Anchor 平台已经被替换。生产 backend 默认仍是 Python；`ANCHOR_RUNTIME_BACKEND=rust` 是显式 opt-in。该模式下计划 CRUD、tick 与 timeline 投影已委派给 Rust Host 并复用既有 `state/schedules.json`，而 Python legacy backend 仍由 Python Scheduler 管理；Library 安装/授权、Session/Turn、SSE 和企业微信网关仍由 Python 协调。实现归属和未完成边界以 [当前架构](architecture.md) 为准，逐项验收以 [开发计划与验收台账](pilot-development-plan.md) 为准。
 
 ## 已达到的交付边界
 
@@ -16,21 +16,22 @@ Rust 已经可以作为 Anchor 的共享 Runtime Kernel 和独立二进制 Runti
 - Rust Host 已覆盖 Graph CRUD、Run 触发/查询/控制、Artifact、时间线、文件附件、图片输入、Plugin 绑定和部分 Session/Graph call 接线。
 - 企业微信入站文字、附件、图片和图文回复已有真实公网验收；这证明 Rust Run 可以被真实入口驱动，但在线整个平台仍保持 Python backend。
 - 标准 `examples/graphs/weekly-work-report.json` 已在隔离 reject-only Docmost Plugin 下通过真实 provider 执行，原 Graph 字节、七个 Artifact 和安全拒绝事实均有证据；未触发 Docmost 生产写入。
-- 标准 `examples/graphs/rsi.json` 已在受控本地 Provider 下通过完整 18 节点 fanout/join、反馈、评审、gate 和 publish；Rust Git 兼容投影已绑定 native Artifact 身份。真实 RSI provider Run 在联网 research 阶段中断，未形成业务内容通过证据。
+- 标准 `examples/graphs/rsi.json` 已在受控本地 Provider 下通过完整 18 节点 fanout/join、反馈、评审、gate 和 publish；Rust Git 兼容投影已绑定 native Artifact 身份。两次隔离真实 RSI 尝试均未形成业务内容通过证据：第一次 143 次 DeepSeek Flash 请求后因 Responses body decode error 终止；第二次运行 900 秒、155 次请求后停止，Run 仍记录为 running，六个上游节点和六项 Artifact 已提交但 audit fanout 未收束。第二次执行进程与运行期间重建的 release binary inode 不同，构建身份无法确认。两个 Run 均未发布或发送业务消息，真实内容验收未通过（A105）。
+- 显式 Rust backend 下的计划 CRUD/tick/timeline 投影由 Host 接管，沿用既有计划文件；双服务浏览器证据见 A104。验收在 `TZ=UTC` 环境进行，证明 Host 停机期间过期的 once 计划重启后 `enabled=false`、Run 数不增加并投影为 `missed_downtime`；没有覆盖 DST 或非 UTC 时区。OAuth route 测试只证明 POST 留在 Python handler、没有 Rust proxy。上述局部接线不是生产 backend 切换，也不表示平台其他 Scheduler/Session/OAuth 职责迁移。
 
 不同 Linux 发行版兼容性按用户决定暂不作为本阶段范围。Provider 网络延迟占主导的场景也不预先宣称 Rust 更快；当前可证明的价值是二进制交付、依赖收敛、可恢复和可复现的运行事实。
 
 ## 仍然阻止“完全替代 Python 平台”的事项
 
 1. **业务 Graph 的完整验收**：标准周报已经完成无外部发布的真实 provider 闭环；标准 RSI 仅完成受控 Rust 原图闭环，真实内容验收仍缺；深度学术研究仍缺完整 Rust 原图闭环。已有 admission、局部工具或受控 Graph 证据不能替代真实 provider、产物、恢复和业务结果验收。
-2. **平台职责迁移**：Scheduler、Library/Plugin 管理、Session/Turn、SSE 摘要流、企业微信协调和 EventLedger 仍由 Python 持有。Rust backend 接线不等于这些事实所有权已经迁移。
+2. **平台职责迁移**：Scheduler 仅在显式 Rust backend 下把计划 CRUD/tick/timeline 子路径交给 Rust Host；Python legacy backend 仍由 Python 管理，生产 backend 默认仍为 Python。Session/Turn、SSE 摘要流、企业微信协调、EventLedger 及 Library/Plugin 安装与授权仍由 Python 持有。Rust backend 下的 Plugin catalog、详情、文件只读路由也是读取接线，不迁移 Library 写入所有权。上述局部接线均不等于 Scheduler 全面迁移或生产切换。
 3. **产品调用体验**：`call.session` 的基础 wait/detach 已接入，但摘要增量、嵌套/并行 Graph call、OAuth 执行授权和完整前台/后台产品闭环仍未完成。
 4. **生产切换**：还需要在保留现有数据和凭证的前提下完成单一生产 backend 切换、旧 Run/Session 兼容、Scheduler/网关接管、重启恢复和回滚验证。
 5. **原 Graph 无修改执行契约**：Rust bundle 要求显式 Plugin 绑定；Responses 工具名必须符合 provider 合法字符集；HTTP MCP 还受节点网络授权约束。需要把这些规则收敛为正式作者/部署契约，避免每个 Graph 在隔离副本中手工适配。
 
 ## 推荐收口顺序
 
-先完成标准 RSI 和周报的无外部发布完整验收，再补齐 Plugin 管理、Session/Turn/SSE 和 Scheduler 的 Rust 宿主职责，最后做一次生产 backend 切换。每一步都要分别记录组件通过、组合通过、真实 provider 通过和生产切换通过，不能用其中一个状态代替另一个。
+继续完成标准 RSI 和深度研究的真实业务验收，并补齐 Plugin 管理、Session/Turn/SSE、渠道协调等尚未迁移的宿主职责；Scheduler 的计划 CRUD/tick/timeline Rust backend 子路径已经有双服务验收，仍需覆盖时区边界并与其他平台职责集成。之后再评估并验证生产 backend 切换。每一步都要分别记录组件通过、组合通过、真实 provider 通过和生产切换通过，不能用其中一个状态代替另一个。
 
 ## 历史决定
 

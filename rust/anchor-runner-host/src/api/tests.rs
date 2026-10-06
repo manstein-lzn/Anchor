@@ -16,6 +16,7 @@ mod conversations;
 mod graph_validation;
 mod platform_contract;
 mod plugin_library;
+mod schedules;
 mod session_calls;
 
 #[test]
@@ -69,6 +70,9 @@ fn fixture() -> (tempfile::TempDir, ApiState) {
         graph_name: "fixture".into(),
         loopback: true,
         api_keys: Vec::new(),
+        // Keep the schedule fixture outside data_root: static graph validation
+        // must leave that root absent and otherwise unchanged.
+        schedules: ScheduleStore::open(root.path().join("schedules.json")).unwrap(),
     };
     (root, state)
 }
@@ -550,7 +554,7 @@ async fn trigger_persists_run_and_projects_list_detail_and_control() {
     let (status, timeline) = call(app.clone(), "GET", "/timeline?days=30", None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(timeline["runs"][0]["run"], run);
-    assert_eq!(timeline["capabilities"]["scheduling"], false);
+    assert_eq!(timeline["capabilities"]["scheduling"], true);
     let traversal = app
         .clone()
         .oneshot(

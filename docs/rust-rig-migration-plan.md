@@ -4,9 +4,49 @@
 
 用户已授权继续推进 Rust Runtime 对齐 Python 产品体验。Graph 不增加版本或第二套作者语言，Plugin/外部工具不要求改写为 Rust；不同 Linux 发行版兼容性暂不纳入范围，也不自动切换现有生产数据或发送/发布业务内容。
 
-Rust 二进制 Runtime、Graph/Run/Artifact、Sandbox、Plugin/MCP、io-harness AgentNode、附件/图片输入、Graph call wait/detach 和 Rust backend 首片已经实现并提交到 `codex/rust-rig-runtime`。标准周报原图已经通过真实 provider 的隔离无发布验收；标准 18 节点 RSI 原图已经通过受控 Rust 执行契约验收，但真实内容质量运行在联网 research 阶段中断。当前生产入口仍由 Python 协调，完整替代还需要深度研究/RSI 真实业务验收、平台职责和生产切换验收。历史 worktree、未提交快照和子 Agent 分工只属于开发记录，不再作为当前状态依据。
+Rust 二进制 Runtime、Graph/Run/Artifact、Sandbox、Plugin/MCP、io-harness AgentNode、附件/图片输入、Graph call wait/detach 和 Rust backend 首片已经实现并提交到 `codex/rust-rig-runtime`。Rig retryable Provider error 已由 A103 归入 io-harness 有界重试；显式 Rust backend 下计划 CRUD/tick/timeline 已由 A104 接到 Rust Host。标准周报原图已经通过真实 provider 的隔离无发布验收；标准 18 节点 RSI 原图已经通过受控 Rust 执行契约验收。两次隔离真实 RSI 尝试均未完成内容验收：一次 143 次请求后因 Responses body decode error 终止，另一次 900 秒到时、155 次请求后停止在 audit fanout，Run 持久状态仍为 running，且运行进程构建身份无法确认；证据见 A105。生产 backend 默认仍为 Python，Rust backend 继续显式 opt-in；完整替代还需要深度研究/RSI 真实业务验收、其他平台职责和生产切换验收。历史 worktree、未提交快照和子 Agent 分工只属于开发记录，不再作为当前状态依据。
 
 当前出口分为四层：组件测试通过、组合路径通过、真实 provider/业务 Graph 通过、生产 backend 切换通过。任何一层都不能代替下一层。
+
+## 下一开发会话入口（2026-10-06）
+
+本提交是继续开发的基线，新增四类已完成的切片：显式 Rust backend 下 Plugin catalog/detail/file 只读代理（安装与授权仍在 Python，A102）；Rig Provider retry verdict 透传到 io-harness 有界重试（A103）；显式 Rust backend 下 Scheduler 计划 CRUD/tick/timeline 由 Rust Host 接管并复用 `state/schedules.json`（A104）；标准 RSI 两次真实运行失败证据入账，与受控原图闭环分开（A105）。新会话先读 `AGENTS.md`、本文、[当前架构](architecture.md)、[开发台账](pilot-development-plan.md) 和 [迁移收口边界](rust-migration-closure.md)，不要重跑已保留证据的大型业务 Graph。
+
+### 默认验证策略：确定性测试 Graph
+
+大型 RSI、深度研究和周报的完整运行耗时、token 成本和模型波动都高，不适合作为常规回归。常规 Runtime 回归改为小型 fixture Graph 加确定性本地 Provider：
+
+- Provider 是唯一替换点；Graph、Plugin、Sandbox、Artifact、Run store、Scheduler、Session 等 Anchor 组件不 mock，执行必须实际经过 Rust Host、GraphRunner、NodeExecutionPort、io-harness 和 Rig adapter。
+- fixture Provider 按请求返回预设的工具调用与完成结果，并记录收到的模型名、消息、工具定义和调用序号；断言由测试控制，不依赖模型理解长提示词。
+- 每条用例使用独立临时 state、workspace、catalog 和 recording root，不与生产数据或其他用例共享。
+- 断言持久事实：Run 记录与状态、invocation/passes、边选择、open attempts、Provider 调用数与 payload、工具执行次数、Artifact manifest/文件字节/hash、重启和恢复后不重放、错误分类与 no-fallback。
+- 真实 Provider 只保留低成本的一到两节点传输冒烟；真实业务 Graph 只在需要业务内容或外部集成验收时低频运行。受控原图闭环、真实 Provider 执行和业务内容通过继续分三层记录。
+
+### 建议工作包顺序
+
+1. **确定性 Runtime 测试 Graph 套件（第一优先）**：测试专用 Graph 与 fixture，不改产品 Graph 语言和运行语义。至少覆盖 AgentNode 工具调用与完成协议、Op.run、Op.call wait/detach、fanout/join 与已完成分支不重放、pause/stop/restart/resume、Artifact workspace 继承与 Git 投影、Plugin 绑定与本地 MCP fixture、模型 alias 选择与 Provider retry 分类、附件和图片字节、Session/Turn 会话历史、Scheduler CRUD/tick/timeline/停机语义、Rust 不可用时的 no-fallback。交付可直接运行的 Rust 集成测试目标，必要时补 Python 或 Playwright 包装，并为每组用例输出 evidence JSON。
+2. **剩余平台职责**：Session/Turn/SSE 摘要增量、OAuth 执行授权、企业微信摘要与图片增量、嵌套和并行 `Op.call`、Library 安装与授权所有权决策。
+3. **低频业务验收**：优先从已保留的失败事实继续标准 RSI 真实 Run，或做有界重跑；随后补深度研究原图完整闭环；周报继续保持无外部发布边界。运行前先做 preflight、请求预算和中断恢复方案，不把 900 秒、上百请求的运行当常规验证。
+4. **生产切换准备**：单一 backend 切换、旧 Run/Session 兼容、Scheduler 与网关接管、重启恢复和回滚验证。生产切换仍是需要用户确认的独立步骤。
+
+### 当前开放事实
+
+- 生产 backend 默认 Python，`ANCHOR_RUNTIME_BACKEND=rust` 是显式 opt-in。
+- 标准 RSI 受控原图闭环通过，真实内容验收未通过（A105）。
+- 深度研究有原图受控执行、真实工具接线和局部真实验收，但完整原图业务闭环未收口。
+- 周报真实 Provider 无发布闭环通过，Docmost 生产发布未验收。
+- 企业微信已有真实入站文字、图片与回复 ACK 切片，不代表整个平台迁移完成。
+- `revise-loop.json` 真实反馈验收曾为 1/1/1，未达到 2/2/1；Python/Rust live 对照后修正示例 reviewer 指令并达到预期，不能推广为所有 Graph 等价。
+- 精确累计 `max_provider_requests` 仍不支持；fanout 分支内 `Op.call` 的完整执行和恢复仍未关闭。
+- A104 的 timeline busy 分类已改为使用未裁剪的持久 Run 列表，并把仍阻止 admission 的 paused/orphan Run 视为活动区间；DST 与非 UTC 时区、tick 已消费 occurrence 后 admission 前进程退出的窗口仍未验证。
+
+### 本批验证记录
+
+- `./.venv/bin/python -m pytest -q tests/test_platform_rust_backend.py tests/test_node_controlflow.py`：通过，退出码 0。
+- `cargo test --manifest-path rust/Cargo.toml --workspace --all-targets -- --test-threads=8`：通过；首轮 graph-validation fixture 创建了本应保持不存在的 data root，已把 fixture 计划文件移出该目录后复跑通过。
+- `cargo clippy --manifest-path rust/Cargo.toml --workspace --all-targets -- -D warnings`、`cargo fmt --manifest-path rust/Cargo.toml --all -- --check`：通过。
+- `ruff check src/anchor/runtime_http.py src/anchor/serve.py tests/test_platform_rust_backend.py`、`git diff --check`：通过。
+- Web build 和 `npm --prefix apps/web run test:e2e -- e2e/platform-rust.spec.ts` 在本批早前通过，证据 `.local/platform-rust-WRanc9/evidence.json`；timeline busy 修正后没有重跑浏览器 E2E，该分支由 Host 单测 `timeline_marks_persisted_admission_blockers_busy_across_history_pages` 覆盖。
 
 ### 工作包与边界
 
@@ -17,7 +57,7 @@ Rust 二进制 Runtime、Graph/Run/Artifact、Sandbox、Plugin/MCP、io-harness 
 | A 命令与本地输入 | 子 Agent commands；Host main/execution/node_host、新 op/local_inputs 模块、定向测试 | 原 Op.run 字符串按 Python shell 语义执行；现有宿主网络授权 + 节点 network；操作员 local-inputs.json 按节点冻结和挂载 | 20% | 真实 bwrap 跑 case/heredoc/重定向/路由；失败不能选边；输入只读且节点隔离；恢复遇授权漂移拒绝 | 已集成；真实 bwrap/受控原图与恢复回归通过 |
 | B 文件延续与审阅绑定 | 子 Agent artifacts；artifacts.rs 与 artifacts/* | prepare_workspace(key,input_commits) 从同 Run 同节点最近已提交快照播种；当前 invocation 重开不覆盖；只读 Git 兼容投影从权威 Artifact 导出 | 15% | 两次回访保留稿件，旧快照不变；不同 Run 不串文件；原周报 Git HEAD 校验识别改稿后的过期审阅 | 已集成；组件/受控双反馈通过，真实模型反馈验收另记 |
 | C 模型与预算 | 子 Agent models；io-harness NodePort/必要 adapter、新 Host model_registry | ANCHOR_MODEL_ALIASES 与 Python 同义；已声明别名实际选模型；NodePort 保留既有构造器；框架原生能力可支持时接精确累计请求预算 | 15% | 同图两模型在 wire 上可区分；默认 fallback 与非法配置明确；恢复选型稳定；预算必须计纠错与重开累计，不能用 step 冒充请求 | 模型已集成并验证 wire/恢复；预算不支持，见框架边界 |
-| D 平台入口接线 | 后续独立包；Python 服务/适配器、Rust application/API 的小契约；每批单一所有者 | Graph/Run/Artifact 由 Rust 唯一写入；Session/Library/Scheduler/Channel 复用既有宿主能力，通过公共调用接入 | 25% | D1 手动/定时触发、状态/文件/控制一致；D2 Plugin 管理和 Pilot 发起/查看 Run；D3 企业微信会话/附件/回复与 call.session；旧历史只读策略明确 | D1 双服务/浏览器及真实 Provider 已通过；D2a Library/挂载/执行首片与 D2b Pilot 同 Run 接续通过；OAuth 与 D3 完整能力待办，D3a 文字首片（A96）与附件/图片（A97）通过 |
+| D 平台入口接线 | 后续独立包；Python 服务/适配器、Rust application/API 的小契约；每批单一所有者 | Graph/Run/Artifact 由 Rust 唯一写入；显式 Rust backend 下计划 CRUD/tick/timeline 由 Rust Host 使用既有计划文件负责，Python legacy backend 继续自管；Session/Library/Channel 其他职责仍经公共调用逐步接入 | 25% | D1 手动/定时触发、状态/文件/控制一致；D2 Plugin 管理和 Pilot 发起/查看 Run；D3 企业微信会话/附件/回复与 call.session；旧历史只读策略明确 | D1 Graph/Run 双服务浏览器与真实 Provider 已通过；计划 CRUD/tick/timeline 及停机错过 once 重启不补跑由 A104 浏览器验收（`TZ=UTC`，未覆盖 DST/non-UTC）；D2a Library/挂载/执行及 catalog/detail/file 只读路由通过（A102）；D2b Pilot 同 Run 接续通过；OAuth 与 D3 完整能力待办，D3a 文字首片（A96）与附件/图片（A97）通过。生产 backend 默认 Python，未切换 |
 | E 观察与控制体验 | 后续独立包；Node adapter/Host 事件投影/Web，避免与 C 同时修改 | 摘要增量仅是显示，不是完成事实；停止/暂停/进程中断沿既有事实恢复；图像输入作为输入接线处理 | 10% | 真实界面可逐步看到内容；最终提交唯一；最后回合 stop 的实际边界可复现并处理；附件到模型的路径可验收 | E2 停止待收束和无重放续跑浏览器通过；E3 附件/图片已由 A97 验收；E1 摘要流仍待接线，固定 Rig 0.43 已有 partial/mixed/truncated completion 的 fail-closed contract tests（`35ed682`），未声称真实 Provider/Web 增量通过 |
 | I 集成和业务验收 | 主 Agent；共享接口、验收脚本、文档 | 不更改原业务 Graph 来掩盖 Runtime 差距；不修改 Python 历史或原运行目录；真实外部副作用另按用户授权 | 15% | 分阶段 fmt/clippy/测试；真实 Provider 验收；原深度研究、周报、RSI、企业微信逐条记录正常/回访/中断恢复证据 | 进行中；周报已完成真实 provider 的隔离无发布闭环，标准 RSI 已完成受控原图闭环，深度研究与 RSI 真实内容验收、平台职责迁移和生产切换仍待做 |
 
@@ -63,7 +103,7 @@ A92 的提前结束已完成 Python/Rust live 对照：原图 Python Chat 和 Ru
 
 ### 第二批平台接线（A94）
 
-D1 已接入 `runtime_http.py` 与 Python `Scheduler` 的公共适配。显式 Rust backend 模式中 Graph CRUD、trigger、Run 查询/控制/文件使用 Rust HTTP；Python 保留 schedules 和 Library，既不复制 `running/control`，也不在故障时回退 Python Runner。Rust trigger 冻结本次 objective 和 schedule 来源，Run updated 来自文件 mtime；Graph POST 的初始 definition/Plugin 完整暂存再发布。旧 Python Run 只读，重复 ID 拒绝。Pilot/Channel/Webhook/relations 等未接通路径明确 501。
+D1 已接入 `runtime_http.py` 与 Python `Scheduler` 的公共适配。显式 Rust backend 模式中 Graph CRUD、trigger、Run 查询/控制/文件和计划 CRUD/tick/timeline 使用 Rust HTTP；Rust Host 复用既有 `state/schedules.json`，Python 不复制计划 writer，既不复制 `running/control`，也不在故障时回退 Python Runner。默认 Python backend 仍由 Python Scheduler 管理计划，Rust backend 仍是 opt-in。Rust trigger 冻结本次 objective 和 schedule 来源，Run updated 来自文件 mtime；Graph POST 的初始 definition/Plugin 完整暂存再发布。旧 Python Run 只读，重复 ID 拒绝。A104 在 `TZ=UTC` 下验证停机错过 once 重启后不补跑并标记 `missed_downtime`；DST/non-UTC 尚未验证。OAuth route 测试只证明 POST 留在 Python handler、不代理到 Rust。Pilot/Channel/Webhook/relations 等未接通路径明确 501。
 
 真实双服务浏览器已验证手动触发、暂停、两服务重启后同 Run 继续且已提交节点不重放、文件下载/预览、平台 API 创建的一次定时实际触发、原 Plugin 勾选/查看 Skill/保存，以及 Rust 退出后 503 且不生成 Python Run。证据 `.local/platform-rust-kGaL4f/evidence.json`。原 Plugin 的真实 provider/Crossref 路径通过 Python 平台发起，6 次模型调用与6份录制匹配，Graph/Plugin 未改且没有 Python Graph/Run 权威副本：`.local/rust-platform-plugin-445wco2l/evidence.json`。本轮修正 Library 仅含 plugins、无 tools 时的错误拒绝。受控延迟 Provider + 浏览器验证最后回答期间 stop，节点完成唯一、下游不启动、普通继续不重放模型：`.local/rust-stop-final-iR0bzq/evidence.json`。
 

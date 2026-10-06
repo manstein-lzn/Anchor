@@ -2,6 +2,7 @@ mod files;
 mod graphs;
 mod plugins;
 mod runs;
+mod schedules;
 #[cfg(test)]
 mod tests;
 mod timeline;
@@ -21,6 +22,7 @@ use files::*;
 use graphs::*;
 use plugins::*;
 use runs::*;
+use schedules::*;
 use serde_json::{Value, json};
 use std::{
     collections::{HashMap, HashSet},
@@ -41,6 +43,7 @@ struct ApiState {
     application: RunApplication,
     loopback: bool,
     api_keys: Vec<String>,
+    schedules: ScheduleStoreHandle,
 }
 
 fn error(status: StatusCode, message: impl Into<String>) -> HttpResponse {
@@ -133,6 +136,9 @@ pub async fn serve() -> io::Result<()> {
                 .unwrap_or_else(|| std::path::Path::new("."))
                 .to_path_buf()
         });
+    let schedules_path = env::var_os("ANCHOR_RUNNER_SCHEDULES_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| data_root.join("state/schedules.json"));
     let state = ApiState {
         bundle_root: bundle_root.clone(),
         catalog_root: catalog_root.clone(),
@@ -143,6 +149,7 @@ pub async fn serve() -> io::Result<()> {
         graph_name,
         loopback,
         api_keys,
+        schedules: ScheduleStore::open(schedules_path).map_err(io::Error::other)?,
     };
     // A deleted configured bundle must not block service start: the Graph is
     // reported as missing and other Graphs keep serving. Detached recovery is
@@ -150,6 +157,10 @@ pub async fn serve() -> io::Result<()> {
     if let Err(error) = state.application.recover_detached_at_startup().await {
         eprintln!("detached Run recovery skipped: {error:?}");
     }
+    if let Err(error) = skip_missed_schedules(&state, chrono::Local::now().naive_local()) {
+        return Err(io::Error::other(error));
+    }
+    start_schedule_ticker(state.clone());
     let app = router(state);
     let listener = tokio::net::TcpListener::bind(&listen).await?;
     axum::serve(listener, app).await.map_err(io::Error::other)
@@ -198,6 +209,11 @@ fn router_with_web_root(state: ApiState, web_root: PathBuf) -> Router {
             get(graph).put(update_graph).delete(delete_graph),
         )
         .route("/trigger", post(trigger))
+        .route("/schedules", get(list_schedules).post(create_schedule))
+        .route(
+            "/schedules/{schedule}",
+            axum::routing::delete(delete_schedule),
+        )
         .route("/runs", get(list_runs))
         .route("/runs/{run}", get(get_run).delete(delete_run))
         .route("/runs/{run}/channel-reply", get(read_channel_reply))

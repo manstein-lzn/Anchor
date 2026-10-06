@@ -49,6 +49,7 @@ test('existing platform uses Rust for manual and scheduled Runs, files and contr
     PATH: '/usr/bin:/bin', TZ: 'UTC',
     ANCHOR_RUNNER_BUNDLE_ROOT: bundle, ANCHOR_RUNNER_CATALOG_ROOT: catalog, ANCHOR_RUNNER_GRAPH_NAME: 'work',
     ANCHOR_RUNNER_STATE_ROOT: join(root, 'state'), ANCHOR_RUNNER_WORKSPACE_ROOT: join(root, 'workspaces'),
+    ANCHOR_RUNNER_SCHEDULES_PATH: join(platform, 'state/schedules.json'),
     ANCHOR_RUNNER_LIBRARY_ROOT: join(platform, 'library'), ANCHOR_RUNNER_LISTEN: `127.0.0.1:${rustPort}`,
     ANCHOR_RUNNER_ALLOWED_COMMANDS: 'sh',
   });
@@ -101,6 +102,8 @@ test('existing platform uses Rust for manual and scheduled Runs, files and contr
     const at = new Date(Date.now() + 6000).toISOString().slice(0, 19);
     const scheduled = await request.post(`${base}/schedules`, { data: { graph: 'work', rule: { type: 'once', at } } });
     expect(scheduled.ok(), await scheduled.text()).toBeTruthy();
+    const storedSchedules = join(platform, 'state/schedules.json');
+    expect(JSON.parse(await readFile(storedSchedules, 'utf8'))[0].graph).toBe('work');
     await expect.poll(async () => (await (await request.get(`${base}/runs`)).json()).runs.length, { timeout: 20000 }).toBe(2);
     let scheduledRun: Record<string, unknown> | undefined;
     await expect(async () => {
@@ -110,6 +113,7 @@ test('existing platform uses Rust for manual and scheduled Runs, files and contr
     }).toPass({ timeout: 15000 });
     expect(scheduledRun!.trigger).toMatchObject({ source: 'schedule', scheduled_at: at });
     expect(scheduledRun!.updated).toBeTruthy();
+    expect((await (await request.get(`${base}/timeline`)).json()).capabilities.scheduling).toBe(true);
     // Existing Library and editor remain the source of Plugin definitions.
     const pluginGraph = { entry: 'research', agents: { worker: { model: 'models.default', instructions: 'Read the Skill.' } },
       nodes: [{ id: 'research', agent: 'worker' }], edges: [] };
@@ -119,6 +123,14 @@ test('existing platform uses Rust for manual and scheduled Runs, files and contr
     await page.reload();
     await page.getByRole('combobox', { name: '当前工作流' }).selectOption('plugin-proof');
     await page.locator('[data-id="research"]').click();
+    const catalogResponse = await request.get(`${base}/plugins`);
+    expect(catalogResponse.ok(), await catalogResponse.text()).toBeTruthy();
+    expect((await catalogResponse.json()).plugins.find((item: { id: string }) => item.id === 'academic-research')
+      ?.available).toBe(true);
+    const skill = await request.get(`${base}/plugins/academic-research/files/skills/academic-research/SKILL.md`);
+    expect(skill.ok(), await skill.text()).toBeTruthy();
+    expect(await skill.text()).toContain('/tools/scholarly/run');
+    expect(skill.headers()['x-content-type-options']).toBe('nosniff');
     await page.getByRole('checkbox', { name: '学术调研' }).check();
     await page.getByRole('button', { name: '查看说明', exact: true }).click();
     await expect(page.locator('.plugin-instructions')).toContainText('/tools/scholarly/run');
@@ -135,12 +147,29 @@ test('existing platform uses Rust for manual and scheduled Runs, files and contr
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBeTruthy();
     await page.screenshot({ path: join(root, 'plugin-editor-mobile.png'), fullPage: true });
     expect(await readdir(join(platform, 'workspaces')).catch(() => [])).toEqual([]);
+    const downtimeAt = new Date(Date.now() + 4000).toISOString().slice(0, 19);
+    const downtimeSchedule = await request.post(`${base}/schedules`, {
+      data: { graph: 'work', rule: { type: 'once', at: downtimeAt } },
+    });
+    expect(downtimeSchedule.ok(), await downtimeSchedule.text()).toBeTruthy();
+    const downtimeId = (await downtimeSchedule.json()).schedule.id as string;
+    const beforeDowntime = (await (await request.get(`${base}/runs`)).json()).runs.length;
+    await stop(rust);
+    await page.waitForTimeout(5000);
+    rust = startRust(); await ready();
+    await expect.poll(async () => JSON.parse(await readFile(storedSchedules, 'utf8'))
+      .find((item: { id: string }) => item.id === downtimeId)?.enabled,
+    { timeout: 10000 }).toBe(false);
+    expect((await (await request.get(`${base}/runs`)).json()).runs).toHaveLength(beforeDowntime);
+    const recoveredTimeline = (await (await request.get(`${base}/timeline`)).json()).scheduled;
+    expect(recoveredTimeline.find((item: { schedule: string }) =>
+      item.schedule === downtimeId)?.status).toBe('missed_downtime');
     await stop(rust);
     expect((await request.post(`${base}/trigger`, { data: { graph: 'work' } })).status()).toBe(503);
     expect(await readdir(join(platform, 'workspaces')).catch(() => [])).toEqual([]);
     await writeFile(join(root, 'evidence.json'), JSON.stringify({ status: 'passed', manual_run: runId,
       scheduled_run: scheduledRun!.run, source: 'real Python platform + real Rust HTTP + Bubblewrap + browser',
-      scope: 'Manual/scheduled admission, pause/restart/resume, files/download, Library/editor Plugin binding and no fallback; no live model' }, null, 2));
+      scope: 'Manual/scheduled admission, shared schedule CRUD/tick, local-time timeline, downtime restart skip, pause/resume, files/download, Library/editor Plugin binding and no fallback; no live model' }, null, 2));
   } finally {
     await stop(web); await stop(rust);
     await writeFile(join(root, 'services.log'), logs);

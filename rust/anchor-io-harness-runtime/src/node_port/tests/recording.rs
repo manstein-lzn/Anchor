@@ -81,6 +81,111 @@ async fn production_node_port_records_correction_requests_and_completed_reopen_c
 }
 
 #[tokio::test]
+async fn transient_rig_transport_failure_uses_native_bounded_retry_and_completes_same_invocation() {
+    use rig_core::{
+        driver::{Exchange, Model, Opening, Transport},
+        error::ProviderError,
+        test_utils::{MockFrame, MockRuntime, MockScript},
+    };
+
+    #[derive(Clone)]
+    struct FailFirstRequest {
+        inner: MockRuntime,
+        calls: Arc<AtomicUsize>,
+    }
+    impl Transport<MockScript> for FailFirstRequest {
+        fn send(
+            &self,
+            payload: rig_core::completion::CompletionRequest,
+            exchange: Exchange,
+        ) -> Opening<MockFrame> {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                Opening::failed(ProviderError::from_transport_error(
+                    rig_core::http_client::Error::StreamEnded,
+                ))
+            } else {
+                self.inner.send(payload, exchange)
+            }
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = dir.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let business_calls = Arc::new(AtomicUsize::new(0));
+    let resolver = Arc::new(FixtureResolver {
+        workspace: workspace.clone(),
+        calls: business_calls.clone(),
+        bindings: vec![],
+    });
+    let mock = MockCompletionModel::from_turns([
+        MockTurn::tool_call("business", "anchor_echo", json!({"value":"once"})),
+        MockTurn::tool_call(
+            "completion",
+            "final_result",
+            json!({"summary":"done","route":"next"}),
+        ),
+    ]);
+    let transport_calls = Arc::new(AtomicUsize::new(0));
+    let model = Model::new(
+        mock.wire,
+        FailFirstRequest {
+            inner: mock.transport,
+            calls: transport_calls.clone(),
+        },
+    );
+    let port = IoHarnessNodePort::fixture(
+        dir.path().join("facts"),
+        dir.path().join("io"),
+        model.erase(),
+        resolver,
+    );
+    let request = request(
+        &workspace,
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    );
+
+    let outcome = port.execute(request.clone()).await.unwrap();
+    let NodeExecutionOutcome::Completed(completion) = outcome else {
+        panic!("native retry should complete this invocation: {outcome:?}");
+    };
+    assert_eq!(completion.submission, "done");
+    // TaskContract's native retry limit defaults to two retries: the failed
+    // initial transport plus two retries are all durably counted.
+    assert_eq!(completion.model_requests, 3);
+    assert_eq!(transport_calls.load(Ordering::SeqCst), 3);
+    assert_eq!(business_calls.load(Ordering::SeqCst), 1);
+
+    let store = Store::open(port.io_run_path(&request.key)).unwrap();
+    let run_id = store.last_run().unwrap().unwrap();
+    assert_eq!(
+        store.run_status(run_id).unwrap(),
+        Some(io_harness::RunStatus::Completed)
+    );
+    assert_eq!(store.provider_calls(run_id).unwrap().len(), 3);
+    assert_eq!(store.open_attempts(run_id).unwrap().len(), 0);
+    assert!(port.completion_path(&request.key).is_file());
+
+    let fresh_model = MockCompletionModel::from_turns([]);
+    let reopened = IoHarnessNodePort::fixture(
+        dir.path().join("facts"),
+        dir.path().join("io"),
+        fresh_model.clone().erase(),
+        Arc::new(FixtureResolver {
+            workspace,
+            calls: business_calls.clone(),
+            bindings: vec![],
+        }),
+    );
+    assert!(matches!(
+        reopened.execute(request).await.unwrap(),
+        NodeExecutionOutcome::Completed(_)
+    ));
+    assert_eq!(fresh_model.request_count(), 0);
+    assert_eq!(business_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
 async fn recorded_provider_error_does_not_enable_tool_replay_on_reopen() {
     let dir = tempfile::tempdir().unwrap();
     let workspace = dir.path().join("workspace");

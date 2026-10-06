@@ -37,6 +37,7 @@
 - 测试反馈按阶段收敛：定向测试用于快速修复，跨模块切片完成后执行一次全量回归；并发超时或环境抖动要先独立复跑受影响用例，再决定是否需要扩大验证范围，不把重复失败当作新的功能工作。
 - Python 全量：`./.venv/bin/python -m pytest -q -n 8 --dist worksteal`；相关子集按改动选择。`--dist worksteal` 必须带，避免慢用例集中到一个 worker。
 - Rust 按 crate/工作区运行 `cargo test`、`cargo clippy` 和 `cargo fmt`；Web 按需要运行 `npm --prefix apps/web test`、`npm --prefix apps/web run test:e2e`、`npm --prefix apps/web run build`。
+- Runtime 行为回归默认使用小型 fixture Graph 加确定性本地 Provider，实际经过 Host、GraphRunner、NodeExecutionPort、io-harness 和 Rig adapter，只替换模型传输；大型 RSI、深度研究、周报等 Graph 只用于低频业务内容验收，不在常规回归中重复运行。
 - 验证报告只写实际执行的命令和结果；失败、跳过、provider 未配置和未覆盖的边界必须如实区分，不为通过门槛而扩大测试范围或伪造证据。
 
 ## 框架优先

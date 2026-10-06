@@ -26,15 +26,16 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use thiserror::Error;
 
-fn rig_provider_error(error: impl std::fmt::Display) -> io_harness::Error {
-    // Rig's normalized error does not expose a lossless mapping to io-harness's
-    // retry taxonomy at this boundary. Treat unknown failures as non-retryable
-    // until a provider-specific mapping is proven; this avoids duplicating a
-    // request whose external outcome is not known.
-    io_harness::Error::provider(
-        io_harness::ProviderErrorKind::Request,
-        format!("Rig provider adapter: {error}"),
-    )
+fn rig_provider_error(error: rig_core::error::ProviderError) -> io_harness::Error {
+    // Preserve Rig's explicit retry verdict. In particular, transport/body
+    // decode failures are retryable in Rig 0.43; mapping them to Request makes
+    // io-harness escalate without using its native bounded retry policy.
+    let kind = if error.is_retryable() {
+        io_harness::ProviderErrorKind::Transport
+    } else {
+        io_harness::ProviderErrorKind::Request
+    };
+    io_harness::Error::provider(kind, format!("Rig provider adapter: {error}"))
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -595,6 +596,31 @@ mod tests {
     }
 
     #[test]
+    fn provider_error_mapping_preserves_rigs_retry_verdict() {
+        let transient = rig_provider_error(rig_core::error::ProviderError::from_transport_error(
+            rig_core::http_client::Error::StreamEnded,
+        ));
+        assert!(matches!(
+            transient,
+            io_harness::Error::Provider {
+                kind: io_harness::ProviderErrorKind::Transport,
+                ..
+            }
+        ));
+
+        let permanent = rig_provider_error(rig_core::error::ProviderError::request(
+            "request cannot be built",
+        ));
+        assert!(matches!(
+            permanent,
+            io_harness::Error::Provider {
+                kind: io_harness::ProviderErrorKind::Request,
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn responses_wire_preserves_parallel_tool_results_and_call_ids() {
         let request = IoRequest {
             user: "run both checks".into(),
@@ -1045,11 +1071,13 @@ mod tests {
         )
         .await
         .unwrap();
-        let mixed_chunks = mixed_chunks.lock().unwrap();
-        assert_eq!(mixed_chunks.len(), 1);
-        let mixed: serde_json::Value = serde_json::from_str(&mixed_chunks[0]).unwrap();
-        assert_eq!(mixed["_anchor_completion"]["status"], "deferred");
-        assert!(mixed.get("summary").is_none());
+        {
+            let mixed_chunks = mixed_chunks.lock().unwrap();
+            assert_eq!(mixed_chunks.len(), 1);
+            let mixed: serde_json::Value = serde_json::from_str(&mixed_chunks[0]).unwrap();
+            assert_eq!(mixed["_anchor_completion"]["status"], "deferred");
+            assert!(mixed.get("summary").is_none());
+        }
 
         // A stream that reaches the provider finish without a completed tool
         // call is rejected; its partial arguments are never a completion fact.

@@ -37,7 +37,7 @@ from http.client import HTTPException
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
 from typing import Any
-from urllib.parse import parse_qs, quote, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 from uuid import uuid4
 
 from anchor.simple import graph as graph_module
@@ -47,7 +47,7 @@ from anchor.graph_calls import GraphCalls, _write as write_call_record
 from anchor.session import SessionStore
 from anchor.pilot_turns import TurnStore
 from anchor.scheduling import next_after, occurrences, validate as validate_schedule
-from anchor.runtime_http import RuntimeHTTPClient, RuntimeHTTPError, files_path, resource_path
+from anchor.runtime_http import RuntimeHTTPClient, RuntimeHTTPError, files_path, plugin_file_path, resource_path
 
 
 def _call_args(call: Any) -> Any:
@@ -136,7 +136,11 @@ class Scheduler:
         self.graph_calls = GraphCalls(self)
         self.schedule_path = root / "state" / "schedules.json"
         self.schedule_path.parent.mkdir(parents=True, exist_ok=True)
-        self.schedules = (json.loads(self.schedule_path.read_text(encoding="utf-8"))
+        # Rust owns this same durable file while the explicit Rust backend is
+        # active. Do not load/advance it here: constructor-time missed-run
+        # handling and the Python ticker would create a second writer.
+        self.schedules = ([] if self.runtime is not None else
+                          json.loads(self.schedule_path.read_text(encoding="utf-8"))
                           if self.schedule_path.exists() else [])
         self.responses_path = root / "state" / "responses.json"
         self.response_refs = (json.loads(self.responses_path.read_text(encoding="utf-8"))
@@ -160,7 +164,8 @@ class Scheduler:
             except (KeyError, ValueError):
                 pass
         # Anything already due belongs to downtime, so advance past it instead of catching up.
-        self._skip_missed_schedules(datetime.now())
+        if self.runtime is None:
+            self._skip_missed_schedules(datetime.now())
 
     def start_channels(self, callback_url: str) -> None:
         """Start Plugin-declared channel daemons after the HTTP listener is ready."""
@@ -305,6 +310,8 @@ class Scheduler:
         return self.response_object(response_id, "failed", text, turn.get("error") or status), 200
 
     def tick_schedules(self, now: datetime | None = None) -> None:
+        if self.runtime is not None:
+            return
         now = now or datetime.now()
         with self.lock:
             for item in self.schedules:
@@ -326,6 +333,14 @@ class Scheduler:
             self.save_schedules()
 
     def timeline(self, days_back: int = 30, before: str | None = None) -> dict:
+        if self.runtime is not None:
+            query = {"days": str(days_back)}
+            if before is not None:
+                query["before"] = before
+            value, status = self.runtime.request("GET", "/timeline?" + urlencode(query))
+            if status != 200:
+                raise RuntimeHTTPError(value.get("error") or "Rust Runtime timeline failed", status)
+            return value
         now = datetime.now()
         future_start = datetime.combine(now.date(), datetime.min.time())
         future_end = future_start + timedelta(days=8)
@@ -1636,6 +1651,19 @@ class Handler(BaseHTTPRequestHandler):
         self._send_file(target)
 
     def _get_plugin(self, parts: list[str]) -> None:
+        if self.scheduler.runtime is not None:
+            try:
+                if len(parts) == 1:
+                    return self._send(*self.scheduler._runtime_response("GET", "/plugins"))
+                if len(parts) == 2:
+                    path = resource_path("plugins", parts[1])
+                    return self._send(*self.scheduler._runtime_response("GET", path))
+                if len(parts) >= 4 and parts[2] == "files":
+                    path = plugin_file_path(parts[1], "/".join(parts[3:]))
+                    return self._download_plugin_file(path, "/".join(parts[3:]))
+                return self._send(json.dumps({"error": "not found"}), 404)
+            except RuntimeHTTPError as exc:
+                return self._send(*exc.response())
         try:
             if len(parts) == 1:
                 return self._send(json.dumps({"plugins": self.scheduler.library.catalog()}, ensure_ascii=False))
@@ -1646,6 +1674,32 @@ class Handler(BaseHTTPRequestHandler):
         except (ValueError, OSError) as exc:
             return self._send(json.dumps({"error": str(exc)}, ensure_ascii=False), 400)
         self._send(json.dumps({"error": "not found"}), 404)
+
+    def _download_plugin_file(self, path: str, name: str) -> None:
+        """Stream a Plugin Library file from the selected Runtime without a local copy."""
+        try:
+            with self.scheduler.runtime.download(path, download_flag=False) as response:
+                suffix = Path(name).suffix.lower()
+                image_types = {".svg": "image/svg+xml", ".png": "image/png", ".jpg": "image/jpeg",
+                               ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp"}
+                self.send_response(200)
+                self.send_header("Content-Type", image_types.get(suffix, "application/octet-stream"))
+                self.send_header("Content-Security-Policy", "sandbox; default-src 'none'; style-src 'unsafe-inline'")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.send_header("Content-Disposition", f"attachment; filename*=UTF-8''{quote(Path(name).name)}")
+                size = response.headers.get("Content-Length", "")
+                if size.isdigit():
+                    self.send_header("Content-Length", size)
+                else:
+                    self.close_connection = True
+                self.end_headers()
+                try:
+                    while chunk := response.read(64 * 1024):
+                        self.wfile.write(chunk)
+                except (OSError, HTTPException):
+                    self.close_connection = True
+        except RuntimeHTTPError as exc:
+            self._send(*exc.response())
 
     def _authorize_mcp(self, parts: list[str]) -> None:
         if len(parts) != 4 or parts[0] != "plugins" or parts[2] != "authorize":
@@ -1821,6 +1875,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(json.dumps({"error": "days must be between 1 and 366"}), 400)
             return self._send(json.dumps(self.scheduler.timeline(days, before), ensure_ascii=False))
         if parts == ["schedules"]:
+            if self.scheduler.runtime is not None:
+                return self._send(*self.scheduler._runtime_response("GET", "/schedules"))
             return self._send(json.dumps({"schedules": self.scheduler.schedules}, ensure_ascii=False))
         if parts == ["v1", "responses"]:
             # Responses are created with POST; GET is intentionally outside the frozen subset.
@@ -1961,6 +2017,10 @@ class Handler(BaseHTTPRequestHandler):
             if set(body) - {"graph", "rule", "input"} or not body.get("graph") or \
                     not isinstance(body.get("rule"), dict) or not isinstance(body.get("input", {}), dict):
                 return self._send(json.dumps({"error": "provide graph, rule, and optional object input"}), 400)
+            if self.scheduler.runtime is not None:
+                return self._send(*self.scheduler._runtime_response("POST", "/schedules", {
+                    "graph": str(body["graph"]), "rule": body["rule"], "input": body.get("input", {}),
+                }))
             return self._send(*self.scheduler.create_schedule(str(body["graph"]), body["rule"],
                                                               body.get("input", {})))
         if len(parts) == 3 and parts[0] == "sessions" and parts[2] == "status":
@@ -2051,6 +2111,12 @@ class Handler(BaseHTTPRequestHandler):
         parts = [part for part in PurePosixPath(unquote(urlparse(self.path).path)).parts
                  if part != "/"]
         if len(parts) == 2 and parts[0] == "schedules":
+            if self.scheduler.runtime is not None:
+                try:
+                    path = resource_path("schedules", parts[1])
+                except RuntimeHTTPError as exc:
+                    return self._send(*exc.response())
+                return self._send(*self.scheduler._runtime_response("DELETE", path))
             return self._send(*self.scheduler.delete_schedule(parts[1]))
         if len(parts) == 2 and parts[0] == "sessions":
             return self._send(*self.scheduler.delete_session(parts[1]))

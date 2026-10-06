@@ -1538,6 +1538,42 @@ async fn budget_stop_keeps_cursor_and_resume_uses_same_invocation() {
 }
 
 #[tokio::test]
+async fn serial_file_store_reload_resumes_same_invocation_after_interruption() {
+    let root = std::env::temp_dir().join(format!(
+        "anchor-serial-provider-retry-{}-{}",
+        std::process::id(),
+        RUN_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    ));
+    let store = FileRunStore::new(&root);
+    let artifacts = MemoryArtifacts::default();
+    let nodes = FakeNodes {
+        budget_once: Mutex::new(true),
+        ..FakeNodes::default()
+    };
+    let control = Control::default();
+    let initial = GraphRunRecord::create(graph(&["one"], &[], "one"), Value::Null).unwrap();
+    let run_id = initial.run_id.clone();
+    let runner = GraphRunner::new(&store, &artifacts, &nodes, &control);
+    let paused = runner.run(initial).await.unwrap();
+    assert_eq!(paused.status, RunStatus::BudgetStopped);
+    let original_key = paused.cursor.as_ref().unwrap().key.clone();
+
+    let loaded = store.load(&run_id).unwrap().unwrap();
+    assert_eq!(loaded.cursor.as_ref().unwrap().key, original_key);
+    let resumed = runner.run(loaded).await.unwrap();
+    assert_eq!(resumed.status, RunStatus::Completed);
+    assert_eq!(resumed.invocations["one"], 1);
+    assert_eq!(resumed.passes["one"], 1);
+    let calls = nodes.calls.lock().unwrap();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0].key, original_key);
+    assert_eq!(calls[1].key, original_key);
+    assert_eq!(resumed.results["one"].len(), 1);
+    drop(calls);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
 async fn graph_runner_dispatches_durable_resumable_node_with_same_invocation() {
     let nodes = FakeNodes::default();
     let store = MemStore::default();
@@ -2348,12 +2384,46 @@ async fn parallel_file_store_roundtrip_preserves_activation_and_branch_cursors()
     );
     assert_eq!(loaded.format, 7);
     loaded.validate().unwrap();
+    let completed_before_resume = activation
+        .branches
+        .iter()
+        .find(|branch| branch.status == ParallelBranchStatus::Completed)
+        .unwrap()
+        .entry
+        .clone();
+    let pending_key = activation
+        .branches
+        .iter()
+        .find_map(|branch| branch.cursor.as_ref().map(|cursor| cursor.key.clone()))
+        .unwrap();
+    let calls_before_resume = nodes.calls.lock().unwrap().clone();
     let resumed = GraphRunner::new(&store, &artifacts, &nodes, &control)
         .run(loaded)
         .await
         .unwrap();
     assert_eq!(resumed.status, RunStatus::Completed);
     assert!(resumed.parallel.is_none());
+    let calls = nodes.calls.lock().unwrap();
+    let resumed_pending = calls
+        .iter()
+        .filter(|request| request.key == pending_key)
+        .collect::<Vec<_>>();
+    assert_eq!(resumed_pending.len(), 2);
+    assert!(
+        calls_before_resume
+            .iter()
+            .any(|request| request.key == pending_key)
+    );
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|request| request.key.node_id == completed_before_resume)
+            .count(),
+        1,
+        "completed sibling is not replayed after reload"
+    );
+    assert_eq!(resumed.results["collect"].len(), 1);
+    drop(calls);
     fs::remove_dir_all(root).unwrap();
 }
 

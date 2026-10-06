@@ -6,7 +6,7 @@ license = "MIT"
 description = "Rust-native Graph host with Sandbox, immutable files and paired parallelism"
 
 [dependencies]
-chrono = { version = "0.4", default-features = false, features = ["std"] }
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 tokio-util = { version = "0.7", features = ["io"] }
 sha2 = { workspace = true }
 base64 = "0.22"

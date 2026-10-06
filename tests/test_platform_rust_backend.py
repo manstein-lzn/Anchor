@@ -6,7 +6,6 @@ from http.client import HTTPConnection
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import threading
-import time
 from urllib.parse import unquote, urlsplit
 
 import pytest
@@ -35,6 +34,7 @@ class FakeRuntime:
         self.graphs = {"demo": self.definition}
         self.runs = {}
         self.files = {}
+        self.schedules = []
         self.requests = []
         self.unavailable = False
         self.overrides = {}
@@ -72,6 +72,36 @@ class FakeRuntime:
         if (method, parsed.path) in self.overrides:
             return self.overrides[(method, parsed.path)]
         parts = [unquote(part) for part in parsed.path.split("/") if part]
+        if parts == ["schedules"] and method == "GET":
+            return 200, {"schedules": self.schedules}
+        if parts == ["schedules"] and method == "POST":
+            schedule = {"id": f"schedule-{len(self.schedules) + 1}", "graph": body["graph"],
+                        "rule": body["rule"], "input": body.get("input", {}),
+                        "created_at": datetime.now().replace(microsecond=0).isoformat(),
+                        "next_at": body["rule"].get("at", "2026-10-07T09:00:00"), "enabled": True}
+            self.schedules.append(schedule)
+            return 201, {"schedule": schedule}
+        if len(parts) == 2 and parts[0] == "schedules" and method == "DELETE":
+            for schedule in self.schedules:
+                if schedule["id"] == parts[1]:
+                    self.schedules.remove(schedule)
+                    return 200, {"schedule": parts[1], "deleted": True}
+            return 404, {"error": "no such schedule"}
+        if parts == ["timeline"] and method == "GET":
+            return 200, {"from": "2026-10-01T00:00:00", "to": "2026-10-07T00:00:00",
+                         "runs": [], "scheduled": [], "schedules": self.schedules,
+                         "capabilities": {"scheduling": True}}
+        if parts == ["plugins"] and method == "GET":
+            return 200, {"plugins": [{"id": "sample", "name": "Sample", "description": "Existing Plugin",
+                                       "skills": ["skills/sample/SKILL.md"], "mcpServers": {},
+                                       "available": True, "digest": "fixture"}]}
+        if len(parts) == 2 and parts[0] == "plugins" and method == "GET":
+            return 200, {"id": parts[1], "name": "Sample", "description": "Existing Plugin",
+                         "skills": ["skills/sample/SKILL.md"], "mcpServers": {},
+                         "available": True, "digest": "fixture", "instructions": "# Existing skill\n"}
+        if len(parts) >= 4 and parts[0] == "plugins" and parts[2] == "files" and method == "GET":
+            payload = f"plugin-file:{'/'.join(parts[3:])}".encode()
+            return 200, payload
         if parts == ["graph-validation"] and method == "POST":
             return 200, {"valid": True, "entry": body["definition"].get("entry"),
                          "nodes": [node["id"] for node in body["definition"].get("nodes", [])]}
@@ -260,7 +290,7 @@ def test_remote_file_preview_and_stream_download_support_module_ids_and_passive_
     assert request(frontend, "GET", f"/runs/{run}/files/module%2Fwork/%2E%2E/run.json")[0] == 400
 
 
-def test_schedules_keep_python_ownership_and_send_frozen_source_to_runtime(platform):
+def test_rust_backend_proxies_schedules_and_timeline_without_python_writes(platform):
     scheduler, runtime, frontend, _forbidden = platform
     due = datetime.now().replace(microsecond=0) + timedelta(seconds=5)
     status, value, _headers = request(frontend, "POST", "/schedules", {
@@ -268,70 +298,33 @@ def test_schedules_keep_python_ownership_and_send_frozen_source_to_runtime(platf
     })
     assert status == 201
     schedule = value["schedule"]
-    scheduler.running["demo"] = "stale Python state must not decide admission"
+    assert schedule["input"] == {"scheduled": True}
+    assert request(frontend, "GET", "/schedules")[1]["schedules"] == [schedule]
+    status, timeline, _headers = request(frontend, "GET", "/timeline?days=7&before=2026-10-07")
+    assert status == 200 and timeline["capabilities"]["scheduling"] is True
+    assert timeline["schedules"] == [schedule]
+    assert request(frontend, "DELETE", f"/schedules/{schedule['id']}")[1] == {
+        "schedule": schedule["id"], "deleted": True,
+    }
+    assert runtime.schedules == []
+    assert scheduler.schedules == []
+    assert not scheduler.schedule_path.exists()
     scheduler.tick_schedules(due)
-    deadline = time.monotonic() + 2
-    while not runtime.runs and time.monotonic() < deadline:
-        time.sleep(0.01)
-    assert len(runtime.runs) == 1
-    record = next(iter(runtime.runs.values()))
-    assert record["state"]["trigger"] == {"source": "schedule", "schedule": schedule["id"],
-                                           "scheduled_at": due.isoformat()}
-    assert record["state"]["input"] == {"scheduled": True}
-    assert request(frontend, "GET", "/schedules")[1]["schedules"][0]["enabled"] is False
-    assert json.loads(scheduler.schedule_path.read_text())[0]["enabled"] is False
-    assert request(frontend, "GET", "/timeline")[0] == 200
+    assert runtime.runs == {}
     assert not (scheduler.root / "workspaces").exists()
 
 
-def test_busy_schedule_creates_no_run_and_active_runtime_covers_due_after_last_update(platform, monkeypatch):
+def test_rust_backend_schedule_unavailability_does_not_fall_back_to_python(platform):
     scheduler, runtime, frontend, _forbidden = platform
-    run = start(platform)
-    due = datetime.now().replace(microsecond=0) - timedelta(seconds=1)
-    earlier = due - timedelta(minutes=1)
-    runtime.runs[run]["state"].update(started=earlier.isoformat(), updated=earlier.isoformat())
-    schedule = {"id": "busy-fixture", "graph": "demo", "rule": {"type": "once", "at": due.isoformat()},
-                "input": {}, "created_at": earlier.isoformat(), "next_at": due.isoformat(), "enabled": True}
-    scheduler.schedules.append(schedule)
-    replied = threading.Event()
-    replies = []
-    trigger = scheduler.trigger
-
-    def capture_reply(*args, **kwargs):
-        reply = trigger(*args, **kwargs)
-        replies.append(reply)
-        replied.set()
-        return reply
-
-    monkeypatch.setattr(scheduler, "trigger", capture_reply)
-    scheduler.tick_schedules(due)
-    assert replied.wait(2)
-    assert replies[0][1] == 409
-    assert len(runtime.runs) == 1 and not schedule["enabled"]
-    assert scheduler.running == scheduler.control == {}
-    assert not (scheduler.root / "workspaces").exists()
-    status, timeline, _headers = request(frontend, "GET", "/timeline")
-    assert status == 200
-    assert next(item for item in timeline["scheduled"] if item["schedule"] == schedule["id"])["status"] == "missed_busy"
-
-
-def test_readonly_legacy_history_does_not_decide_rust_schedule_busy_intervals(platform):
-    scheduler, _runtime, frontend, _forbidden = platform
-    due = datetime.now().replace(microsecond=0) - timedelta(seconds=1)
-    directory = legacy_run(scheduler.root, graph="demo")
-    state_file = directory / "run.json"
-    state = json.loads(state_file.read_text())
-    state.update(started=(due - timedelta(minutes=1)).isoformat(), updated=(due + timedelta(seconds=1)).isoformat())
-    state_file.write_text(json.dumps(state))
-    before = state_file.read_bytes()
-    scheduler.schedules.append({"id": "legacy-interval", "graph": "demo",
-                                "rule": {"type": "once", "at": due.isoformat()}, "input": {},
-                                "created_at": (due - timedelta(minutes=1)).isoformat(),
-                                "next_at": due.isoformat(), "enabled": False})
-    status, timeline, _headers = request(frontend, "GET", "/timeline")
-    assert status == 200
-    assert timeline["scheduled"][0]["status"] == "missed_downtime"
-    assert state_file.read_bytes() == before
+    due = datetime.now().replace(microsecond=0) + timedelta(minutes=1)
+    runtime.unavailable = True
+    body = {"graph": "demo", "rule": {"type": "once", "at": due.isoformat()}}
+    assert request(frontend, "POST", "/schedules", body)[0] == 503
+    assert request(frontend, "GET", "/schedules")[0] == 503
+    assert request(frontend, "GET", "/timeline")[0] == 503
+    assert request(frontend, "DELETE", "/schedules/absent")[0] == 503
+    assert scheduler.schedules == [] and not scheduler.schedule_path.exists()
+    assert not _forbidden
 
 
 def test_legacy_history_is_readonly_by_store_presence_not_run_prefix(platform):
@@ -453,19 +446,69 @@ def test_bad_channel_attachment_does_not_supersede_the_current_turn(platform):
     assert not scheduler.turns.find_request("media-active", "bad")
 
 
-def test_plugin_library_stays_on_existing_host_implementation(platform, monkeypatch):
-    scheduler, _runtime, frontend, _forbidden = platform
-    plugin = scheduler.library.root / "plugins" / "sample"
-    (plugin / "skills" / "sample").mkdir(parents=True)
-    (plugin / "plugin.json").write_text('{"name":"Sample","description":"Existing Plugin"}')
-    (plugin / "skills" / "sample" / "SKILL.md").write_text("# Existing skill\n")
-    assert request(frontend, "GET", "/plugins")[1]["plugins"][0]["id"] == "sample"
-    assert "Existing skill" in request(frontend, "GET", "/plugins/sample")[1]["instructions"]
+def test_plugin_library_reads_from_rust_and_streams_file_through_public_route(platform):
+    scheduler, runtime, frontend, _forbidden = platform
+    status, catalog, _headers = request(frontend, "GET", "/plugins")
+    assert status == 200 and catalog["plugins"][0]["id"] == "sample"
+    status, detail, _headers = request(frontend, "GET", "/plugins/sample")
+    assert status == 200 and "Existing skill" in detail["instructions"]
+    status, payload, headers = request(frontend, "GET", "/plugins/sample/files/skills/sample/SKILL.md")
+    assert status == 200 and payload == b"plugin-file:skills/sample/SKILL.md"
+    assert headers["Content-Type"] == "application/octet-stream"
+    assert headers["X-Content-Type-Options"] == "nosniff"
+    assert headers["Content-Security-Policy"].startswith("sandbox;")
+    assert headers["Content-Disposition"].endswith("SKILL.md")
+    assert any(item["path"] == "/plugins/sample/files/skills/sample/SKILL.md" for item in runtime.requests)
+    assert scheduler.runtime is not None
+
+
+@pytest.mark.parametrize("path", ["/plugins", "/plugins/sample", "/plugins/sample/files/notes.txt"])
+def test_plugin_reads_do_not_fall_back_to_local_library_when_rust_is_unavailable(platform, path):
+    _scheduler, runtime, frontend, _forbidden = platform
+    runtime.unavailable = True
+    status, body, _headers = request(frontend, "GET", path)
+    assert status == 503
+    assert "unavailable" in body["error"]
+
+
+@pytest.mark.parametrize("path", [
+    "/plugins/sample/files/../private.txt",
+    "/plugins/sample/files/%2Fprivate.txt",
+    "/plugins/sample/files/notes%5Cprivate.txt",
+    "/plugins/sample%2Fother",
+])
+def test_plugin_unsafe_paths_are_rejected_before_upstream_request(platform, path):
+    _scheduler, runtime, frontend, _forbidden = platform
+    before = len(runtime.requests)
+    status, _body, _headers = request(frontend, "GET", path)
+    assert status == 400
+    assert len(runtime.requests) == before
+
+
+def test_plugin_install_keeps_existing_library_writer(platform, monkeypatch):
+    scheduler, runtime, frontend, _forbidden = platform
     installed = []
     monkeypatch.setattr(scheduler.library, "install", lambda source, plugin_id, **options:
                         installed.append((source, plugin_id, options)) or "installed")
     assert request(frontend, "POST", "/plugins/install", {"source": "existing-source", "id": "installed"})[0] == 201
     assert installed == [("existing-source", "installed", {"replace_existing": False})]
+    assert not any(item["path"] == "/plugins/install" for item in runtime.requests)
+
+
+def test_plugin_authorization_keeps_existing_platform_route_in_rust_backend(platform, monkeypatch):
+    _scheduler, runtime, frontend, _forbidden = platform
+    calls = []
+
+    def existing_authorization_route(handler, parts):
+        calls.append(parts)
+        handler._send(json.dumps({"authorized": True}))
+
+    monkeypatch.setattr(Handler, "_authorize_mcp", existing_authorization_route)
+    before = len(runtime.requests)
+    status, response, _headers = request(frontend, "POST", "/plugins/sample/authorize/server", {})
+    assert status == 200 and response == {"authorized": True}
+    assert calls == [["plugins", "sample", "authorize", "server"]]
+    assert len(runtime.requests) == before
 
 
 def test_channel_session_cannot_discard_the_index_of_retained_rust_history(platform):

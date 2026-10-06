@@ -104,8 +104,9 @@ class RuntimeHTTPClient:
         return value, status
 
     @contextmanager
-    def download(self, path: str) -> Iterator:
-        with self._open("GET", path + "?download=1") as response:
+    def download(self, path: str, *, download_flag: bool = True) -> Iterator:
+        suffix = "?download=1" if download_flag else ""
+        with self._open("GET", path + suffix) as response:
             if response.status != 200:
                 try:
                     value = json.loads(response.read(JSON_RESPONSE_LIMIT + 1))
@@ -136,3 +137,13 @@ def files_path(run: str, node: str, name: str | None = None) -> str:
             raise RuntimeHTTPError("invalid file path", 400)
         path += f"/{quote(name, safe='/')}"
     return path
+
+
+def plugin_file_path(plugin: str, name: str) -> str:
+    """Build a safe Library file URL while preserving nested resource paths."""
+    path = resource_path("plugins", plugin)
+    if (not name or name.startswith("/") or "\\" in name or
+            any(part in {"", ".", ".."} for part in name.split("/")) or
+            any(ord(char) < 32 for char in name)):
+        raise RuntimeHTTPError("invalid Plugin file path", 400)
+    return path + "/files/" + quote(name, safe="/")
