@@ -5,6 +5,11 @@ import json
 from pathlib import Path
 import subprocess
 
+try:
+    from scripts.rsi.commit_binding import verify_commit
+except ModuleNotFoundError:  # Executed directly inside the sandbox input mount.
+    from commit_binding import verify_commit
+
 
 REVIEWERS = {'fact-review': ('facts', 'research'), 'proposal-review': ('architecture', 'writing')}
 UNSAFE_ROLLBACK_PHRASES = (
@@ -63,8 +68,14 @@ def aggregate(inputs: Path) -> dict:  # noqa: C901 - two independent artifact co
             name = branch['output']
             directory = inputs / name
             joined = next(item['commit'] for item in branch['nodes'] if item['node'] == name)
-            if joined != _commit(directory):
-                raise ValueError(f'{name}: review is not the joined commit')
+            try:
+                if isinstance(joined, str):
+                    if joined != _commit(directory):
+                        raise ValueError('joined commit does not match the branch Git HEAD')
+                else:
+                    verify_commit(directory, joined, node=name)
+            except (OSError, ValueError, subprocess.SubprocessError) as exc:
+                raise ValueError(f'{name}: review is not the joined commit ({exc})') from exc
             data = json.loads((directory / 'review.json').read_text())
             if not isinstance(data, dict):
                 raise ValueError(f'{name}: review must be an object')

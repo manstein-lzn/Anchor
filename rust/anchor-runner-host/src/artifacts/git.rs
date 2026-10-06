@@ -164,8 +164,8 @@ impl HostArtifacts {
 
 fn commit_message(commit: &CommitRef, manifest_sha256: &str) -> String {
     format!(
-        "Anchor Artifact {}\nManifest-SHA256: {manifest_sha256}\n",
-        commit.id
+        "Anchor Artifact {}\nArtifact-Node: {}\nArtifact-Invocation: {}\nManifest-SHA256: {manifest_sha256}\n",
+        commit.id, commit.node_id, commit.invocation
     )
 }
 

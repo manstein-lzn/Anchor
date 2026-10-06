@@ -36,6 +36,33 @@ fn git(files: &Path, arguments: &[&str]) -> String {
 }
 
 #[tokio::test]
+async fn git_projection_commit_message_binds_typed_artifact_identity() {
+    let (_temp, artifacts) = fixture();
+    let invocation = key("write");
+    let workspace = artifacts.prepare_workspace(&invocation, &[]).unwrap();
+    fs::write(workspace.join("report.md"), "bound artifact\n").unwrap();
+    let commit = freeze_node(&artifacts, &invocation, &[]).await;
+    let source = artifacts
+        .input_mounts(std::slice::from_ref(&commit), "run-1", "digest-1")
+        .unwrap()
+        .remove(0)
+        .source;
+    let message = git(&source, &["show", "-s", "--format=%B", "HEAD"]);
+    assert!(message.starts_with(&format!(
+        "Anchor Artifact {}\nArtifact-Node: {}\nArtifact-Invocation: {}\nManifest-SHA256: ",
+        commit.id, commit.node_id, commit.invocation
+    )));
+    let digest = message
+        .strip_prefix(&format!(
+            "Anchor Artifact {}\nArtifact-Node: {}\nArtifact-Invocation: {}\nManifest-SHA256: ",
+            commit.id, commit.node_id, commit.invocation
+        ))
+        .unwrap();
+    assert_eq!(digest.len(), 64);
+    assert!(digest.bytes().all(|byte| byte.is_ascii_hexdigit()));
+}
+
+#[tokio::test]
 async fn revisit_preserves_own_files_but_not_pending_work_and_restart_keeps_edits() {
     let (_temp, artifacts) = fixture();
     let first = key("write");

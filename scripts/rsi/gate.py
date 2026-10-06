@@ -5,8 +5,18 @@ import json
 from pathlib import Path
 import subprocess
 
+try:
+    from scripts.rsi.commit_binding import verify_commit
+except ModuleNotFoundError:  # Executed directly inside the sandbox input mount.
+    from commit_binding import verify_commit
+
 
 DOMAINS = {'runs', 'code', 'graphs', 'plugins', 'dependencies'}
+
+
+def _commit(directory: Path) -> str:
+    return subprocess.check_output(['git', f'--git-dir={directory / ".git"}', 'rev-parse', 'HEAD'],
+                                   text=True, timeout=10).strip()
 
 
 def _object(path: Path) -> dict:
@@ -36,11 +46,6 @@ def _references(refs, inputs: Path, *, coverage: bool = False) -> bool:
     return True
 
 
-def _commit(directory: Path) -> str:
-    return subprocess.check_output(['git', f'--git-dir={directory / ".git"}', 'rev-parse', 'HEAD'],
-                                   text=True, timeout=10).strip()
-
-
 def _audit_errors(inputs: Path) -> list[str]:  # noqa: C901 - finite artifact contract
     errors = []
     manifest = _object(inputs / 'audit-join/join.json')
@@ -59,8 +64,14 @@ def _audit_errors(inputs: Path) -> list[str]:  # noqa: C901 - finite artifact co
         try:
             directory = inputs / name
             record = next(item for item in branch['nodes'] if item['node'] == name)
-            if record['commit'] != _commit(directory):
-                errors.append(f'{name}: findings do not belong to the joined commit')
+            try:
+                if isinstance(record['commit'], str):
+                    if record['commit'] != _commit(directory):
+                        raise ValueError('joined commit does not match the branch Git HEAD')
+                else:
+                    verify_commit(directory, record['commit'], node=name)
+            except (OSError, ValueError, subprocess.SubprocessError) as exc:
+                errors.append(f'{name}: findings do not belong to the joined commit ({exc})')
             data = _object(directory / 'findings.json')
             domain = data.get('domain')
             if not isinstance(domain, str) or domain not in DOMAINS or domain in domains:
