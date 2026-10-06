@@ -4,7 +4,7 @@
 
 ## 当前结论（2026-10-06）
 
-Rust 已经可以作为 Anchor 的共享 Runtime Kernel 和独立二进制 Runtime 使用。Graph、Run、Artifact、Sandbox、Plugin/MCP、io-harness AgentNode、Provider transport、fanout/join、Graph call wait/detach、附件/图片输入、恢复和基础平台 HTTP 接线均已实现，并有相应的 Rust、Python、Web 或真实 provider 证据。
+Rust 已经可以作为 Anchor 的共享 Runtime Kernel 和独立二进制 Runtime 使用。Graph、Run、Artifact、Sandbox、Plugin/MCP、io-harness AgentNode、Provider transport、fanout/join、Graph call wait/detach、附件/图片输入、恢复和基础平台 HTTP 接线均已实现，并有相应的 Rust、Python、Web 或真实 provider 证据。2026-10-06 又完成了标准 18 节点 RSI 的原图受控闭环，以及标准周报原图的真实 provider 无外部发布闭环；这两项证据分别证明 Rust 执行契约和安全发布边界，不能替代真实 RSI 内容质量或 Docmost 生产发布验收。
 
 这还不等于 Python Anchor 平台已经被替换。当前生产入口仍由 Python `serve.py`、Scheduler、Library、Session/Turn、SSE 和企业微信网关协调；显式 Rust backend 可以把 Graph/Run/Artifact 等执行职责委派给 Rust Host。实现归属和未完成边界以 [当前架构](architecture.md) 为准，逐项验收以 [开发计划与验收台账](pilot-development-plan.md) 为准。
 
@@ -15,12 +15,14 @@ Rust 已经可以作为 Anchor 的共享 Runtime Kernel 和独立二进制 Runti
 - io-harness 是 Rust AgentNode 的执行、上下文、压缩和单节点恢复基础；Rig 只提供模型传输适配。
 - Rust Host 已覆盖 Graph CRUD、Run 触发/查询/控制、Artifact、时间线、文件附件、图片输入、Plugin 绑定和部分 Session/Graph call 接线。
 - 企业微信入站文字、附件、图片和图文回复已有真实公网验收；这证明 Rust Run 可以被真实入口驱动，但在线整个平台仍保持 Python backend。
+- 标准 `examples/graphs/weekly-work-report.json` 已在隔离 reject-only Docmost Plugin 下通过真实 provider 执行，原 Graph 字节、七个 Artifact 和安全拒绝事实均有证据；未触发 Docmost 生产写入。
+- 标准 `examples/graphs/rsi.json` 已在受控本地 Provider 下通过完整 18 节点 fanout/join、反馈、评审、gate 和 publish；Rust Git 兼容投影已绑定 native Artifact 身份。真实 RSI provider Run 在联网 research 阶段中断，未形成业务内容通过证据。
 
 不同 Linux 发行版兼容性按用户决定暂不作为本阶段范围。Provider 网络延迟占主导的场景也不预先宣称 Rust 更快；当前可证明的价值是二进制交付、依赖收敛、可恢复和可复现的运行事实。
 
 ## 仍然阻止“完全替代 Python 平台”的事项
 
-1. **业务 Graph 的完整验收**：深度学术研究、标准 18 节点 RSI 和周报仍缺完整 Rust 原图闭环证据。已有 admission、局部工具或受控 Graph 证据不能替代完整 provider、产物、恢复和业务结果验收。
+1. **业务 Graph 的完整验收**：标准周报已经完成无外部发布的真实 provider 闭环；标准 RSI 仅完成受控 Rust 原图闭环，真实内容验收仍缺；深度学术研究仍缺完整 Rust 原图闭环。已有 admission、局部工具或受控 Graph 证据不能替代真实 provider、产物、恢复和业务结果验收。
 2. **平台职责迁移**：Scheduler、Library/Plugin 管理、Session/Turn、SSE 摘要流、企业微信协调和 EventLedger 仍由 Python 持有。Rust backend 接线不等于这些事实所有权已经迁移。
 3. **产品调用体验**：`call.session` 的基础 wait/detach 已接入，但摘要增量、嵌套/并行 Graph call、OAuth 执行授权和完整前台/后台产品闭环仍未完成。
 4. **生产切换**：还需要在保留现有数据和凭证的前提下完成单一生产 backend 切换、旧 Run/Session 兼容、Scheduler/网关接管、重启恢复和回滚验证。

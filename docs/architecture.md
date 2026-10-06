@@ -158,7 +158,7 @@ Bubblewrap 启动通道显式清除目标 FD 的 CLOEXEC，包含源 FD 恰好�
 
 A91 完成协议由 `anchor-io-harness-runtime/completion.rs` 在 Provider 边界无状态适配。原生调用与业务调用同轮返回时，保留全部业务调用及顺序，完成候选仅记为 deferred；后续必须查看结果并重新单独提交。普通文本、多个完成调用及截断完成不能冒充有效交付；非法摘要/路由进入 Harness 纠错。现有 `step_turns.text` 的可选 `_anchor_completion` 由 adapter 保存收到的调用和转换状态，不是新的完成事实或日志；旧已完成记录仍可读。完成后重开无需再次调用模型，混合回合在业务步骤提交后中断并重开不会重放业务或采用旧候选。Cancelled 沿用 Harness 终态规则，最后一轮取消仍受既有 step 边界限制。完成模式流式响应缓冲到完整调用后才发出内部值，尚未提供用户摘要的增量流。该 output-schema adapter 面向 Anchor 的 summary/route 完成契约，未承诺任意结构化输出类型。最终 release 的真实 DeepSeek Flash 原生完成验收见 `.local/rust-plugin-reuse-rk32np54/evidence.json`，Graph/Plugin 未修改。
 
-`anchor-rsi` 是独立只读业务 Plugin，不依赖 Graph Kernel。它从操作员授权根动态冻结源码、部署 Graph、公开 Plugin、Run 机械元数据及历史报告，通过分页索引/按行读取供普通 JSON RSI Graph 使用。Run 投影记录字段存在性及省略清单，避免把脱敏省略误判为源记录缺失；模型 trace、checkpoint、对话与凭证不作为审查材料。公开联网目前覆盖直接依赖注册表和 GitHub release 元数据，包含超限/HTTP 失败记录，不等于全面社区调研或特性适用性验证。报告经独立模型评审及结构门禁后落文件；执行通过、内容验收、提案实施与长期收益分别记录，未切换生产定时任务。
+`anchor-rsi` 是独立只读业务 Plugin，不依赖 Graph Kernel。它从操作员授权根动态冻结源码、部署 Graph、公开 Plugin、Run 机械元数据及历史报告，通过分页索引/按行读取供普通 JSON RSI Graph 使用。Run 投影记录字段存在性及省略清单，避免把脱敏省略误判为源记录缺失；模型 trace、checkpoint、对话与凭证不作为审查材料。公开联网目前覆盖直接依赖注册表和 GitHub release 元数据，包含超限/HTTP 失败记录，不等于全面社区调研或特性适用性验证。报告经独立模型评审及结构门禁后落文件；执行通过、内容验收、提案实施与长期收益分别记录，未切换生产定时任务。标准 18 节点原图已在 Rust Host 受控运行通过，但真实 provider 内容验收仍未完成。
 
 Rust宿主执行入口分为 `api/{graphs,runs,files}` 协议层、`application` 接纳/控制层、`execution` 共享Runner接线。HTTP接纳先保存冻结Run及独立不可变来源元数据（Graph名、digest、bundle来源、创建时间），不再按相同digest猜Graph名。暂停在节点/并行wave边界结算，resume重载原snapshot/input并校验原Plugin资源，未知started副作用不重放。同图手动触发检查活动/暂停/遗留未完成Run，不同Graph可并行。每个state根由一个宿主持OS写入lease，HTTP持有整个服务周期、stdio执行持有执行周期；只读status不争写锁。旧无来源metadata的Run列表显示unknown，HTTP拒绝接管，未完成者阻止新的接纳/Graph修改。此约束不取代未来独立调用的同图多Run并发契约。
 
@@ -234,6 +234,7 @@ Run detail 的 `control_requested` 来自当前进程活动控制 token；UI 展
 ## 本机工作周报
 
 `weekly-work-report` 的采集、理解、写作和评审仍是普通业务 Graph；通过评审后的 Docmost 同步节点挂载 `docmost` Plugin。Graph 工作区中的 `local-inputs.json` 由本机操作员按节点 ID 授予具名只读路径，挂载到 `/local-inputs/<name>`；Graph JSON/API 本身无权增加该授权。采集 Op 读取两个 sessions 目录和普通采集脚本，将当次窗口的证据交给后续节点。授权路径随 Run 保存，恢复时授权改变则拒绝继续。图按程序采集→项目理解与选题→写作→读者视角独立评审→门禁分流运行；表达问题退回写作，项目理解与判断问题退回理解。证据缺口通过限定结论处理，不设 blocked 分支。正文围绕项目实质变化，来源单独保留，评审先检查可理解性再核查关键事实。四项评审通过、阻断问题解决且评审对应当前稿件 commit 后才组装 Markdown、来源附录和 SVG；Docmost 发布节点通过附件接口上传 SVG 并插入页面，失败时不更新正文；使用方式见 [每周工作报告](weekly-work-report.md)，真实验收以台账 A21 为准。图片下载保留 attachment，并提供图片 MIME 与隔离 CSP，使 Markdown 图片预览可用且不开放脚本或外部资源执行。
+`weekly-work-report` 的采集、理解、写作和评审仍是普通业务 Graph；通过评审后的 Docmost 同步节点挂载 `docmost` Plugin。Graph 工作区中的 `local-inputs.json` 由本机操作员按节点 ID 授予具名只读路径，挂载到 `/local-inputs/<name>`；Graph JSON/API 本身无权增加该授权。采集 Op 读取两个 sessions 目录和普通采集脚本，将当次窗口的证据交给后续节点。授权路径随 Run 保存，恢复时授权改变则拒绝继续。图按程序采集→项目理解与选题→写作→读者视角独立评审→门禁分流运行；表达问题退回写作，项目理解与判断问题退回理解。证据缺口通过限定结论处理，不设 blocked 分支。正文围绕项目实质变化，来源单独保留，评审先检查可理解性再核查关键事实。四项评审通过、阻断问题解决且评审对应当前稿件 commit 后才组装 Markdown、来源附录和 SVG；Docmost 发布节点通过附件接口上传 SVG 并插入页面，失败时不更新正文；使用方式见 [每周工作报告](weekly-work-report.md)，真实验收以台账 A21 为准。图片下载保留 attachment，并提供图片 MIME 与隔离 CSP，使 Markdown 图片预览可用且不开放脚本或外部资源执行。Rust 已用 reject-only Docmost 替身完成真实 provider 的七节点无发布验收；该证据不等于生产页面发布。
 
 
 ## 本机 RSI Graph
