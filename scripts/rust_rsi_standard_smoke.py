@@ -1,9 +1,9 @@
 """Run the unchanged standard 18-node RSI Graph through the Rust Host.
 
-The local provider deliberately emits deterministic artifact-writing tool calls.
-This validates Rust graph execution, parallel joins, native CommitRef review
-binding and publication without making model or external publication requests.
-It is not a research-quality or real-provider acceptance.
+The default local provider emits deterministic artifact-writing tool calls;
+``--real`` uses the configured provider in the same isolated bundle.  Both
+modes retain durable Run, Harness records and partial Artifacts on failure.
+Successful mechanical closure alone is not research-content acceptance.
 """
 
 from __future__ import annotations
@@ -22,6 +22,7 @@ import subprocess
 import tempfile
 import threading
 import shlex
+import sqlite3
 
 from anchor.runtime.secrets import load_dotenv
 
@@ -75,6 +76,78 @@ def _agent_command(node: str) -> str:
                 f"python3 -c {shlex.quote(code)} \"$head\"; "
                 "printf '%s\\n' publish > review.md")
     raise ValueError(f"unknown agent {node}")
+
+
+def _runtime_trace(state: Path) -> dict:
+    """Read the io-harness records without inventing a second event format."""
+    trace = {"stores": [], "provider_calls": [], "tool_calls": [], "observations": [], "errors": []}
+    for store in sorted((state / "io-harness/store").glob("*.sqlite3")):
+        trace["stores"].append(str(store))
+        try:
+            with sqlite3.connect(f"file:{store}?mode=ro", uri=True) as db:
+                trace["provider_calls"].extend(
+                    {
+                        "store": str(store), "id": row[0], "step": row[1],
+                        "attempt": row[2], "model": row[3],
+                        "finish_reason": row[4], "failure": row[5],
+                    }
+                    for row in db.execute(
+                        "SELECT id, step, attempt, model, finish_reason, failure "
+                        "FROM provider_calls ORDER BY id"
+                    )
+                )
+                for step, serialized in db.execute("SELECT step, calls FROM step_turns ORDER BY step"):
+                    for call in json.loads(serialized):
+                        if call.get("name") in {"anchor_run", "final_result"}:
+                            trace["tool_calls"].append({"store": str(store), "step": step, **call})
+                for step, text in db.execute(
+                    "SELECT step, text FROM ledger_observations "
+                    "WHERE target='anchor_run' ORDER BY id"
+                ):
+                    trace["observations"].append({"store": str(store), "step": step, "text": text})
+        except (sqlite3.Error, json.JSONDecodeError) as error:
+            # A killed process may leave a store before its final schema write;
+            # retain the store path and report the partial trace explicitly.
+            trace["errors"].append({"store": str(store), "error": str(error)})
+    return trace
+
+
+def _collect_runtime(proof: Path, state: Path, run_name: str, evidence: dict) -> None:
+    run_path = state / "runs" / f"{run_name}.json"
+    record = {}
+    if run_path.is_file():
+        try:
+            record = json.loads(run_path.read_text())
+        except json.JSONDecodeError:
+            evidence["run_record_error"] = "durable Run record is not valid JSON"
+    trace = _runtime_trace(state)
+    results = record.get("results", {})
+    evidence.update({
+        "run_status": record.get("status"),
+        "run_record": str(run_path.relative_to(proof)) if run_path.exists() else None,
+        "runs": results,
+        "node_invocations": record.get("invocations", {}),
+        "committed_node_invocations": {node: len(items) for node, items in results.items()},
+        "parallel": record.get("parallel"),
+        "runtime_error": record.get("error"),
+        "provider_trace": trace,
+        "provider_requests": len(trace["provider_calls"]),
+        "provider_calls": trace["provider_calls"],
+        "provider_failures": [call for call in trace["provider_calls"] if call["failure"]],
+        "provider_model_observed": sorted({call["model"] for call in trace["provider_calls"] if call["model"]}),
+        "tool_call_counts": dict(Counter(call["name"] for call in trace["tool_calls"])),
+        "artifact_count": len({item["commit"]["id"] for items in results.values() for item in items}),
+        "artifacts": [str(path.relative_to(proof)) for path in sorted((state / "artifacts").rglob("*"))
+                      if path.is_file() and "/files/" in path.as_posix()],
+        "recordings": [str(path.relative_to(proof)) for path in sorted(
+            state.glob("io-harness/store/*.recordings/*/recording.json"))],
+        "uncommitted_files": [str(path.relative_to(proof)) for path in sorted(
+            (proof / "workspaces").rglob("*")) if path.is_file()],
+        "research_quality": "not accepted by this mechanical collector",
+        "runtime_closure": "passed" if evidence["status"] == "passed" else "not completed",
+    })
+    if results:
+        evidence["branch_nodes"] = sorted(results)
 
 
 class FixtureProvider(BaseHTTPRequestHandler):
@@ -148,7 +221,10 @@ def main() -> None:
         missing = [name for name in required if not os.environ.get(name)]
         if missing:
             raise SystemExit(f"Missing configured provider variables: {', '.join(missing)}")
-    proof = Path(tempfile.mkdtemp(prefix="rust-rsi-standard-controlled-", dir=ROOT / ".local"))
+    mode = "real" if args.real else "controlled"
+    run_name = f"rsi-standard-{mode}"
+    proof = Path(tempfile.mkdtemp(prefix=f"rust-rsi-standard-{mode}-", dir=ROOT / ".local"))
+    print(f"Evidence directory: {proof}", flush=True)
     bundle = proof / "bundle"
     bundle.mkdir()
     source_graph = ROOT / "examples/graphs/rsi.json"
@@ -188,27 +264,32 @@ def main() -> None:
             "ANCHOR_MODEL_NAME": "fixture-rsi",
             "ANCHOR_MODEL_WIRE_API": "chat",
         })
-    request = json.dumps({"op": "start_bundle", "version": 1, "request_id": "rsi-standard-controlled",
-                          "run_id": "rsi-standard-controlled", "input": {}}).encode()
+    request = json.dumps({"op": "start_bundle", "version": 1, "request_id": run_name,
+                          "run_id": run_name, "input": {}}).encode()
     evidence = {"status": "failed", "graph_sha256": hashlib.sha256(source_graph.read_bytes()).hexdigest(),
                 "provider": "configured real provider" if args.real else "controlled local fixture",
-                "graph_unchanged": True}
+                "provider_mode": mode,
+                "graph_unchanged": (bundle / "graph.json").read_bytes() == source_graph.read_bytes(),
+                "proof": str(proof),
+                "publishing": "disabled: no external publication or channel configured"}
     try:
         result = subprocess.run([str(args.binary.resolve())], input=struct.pack(">I", len(request)) + request,
                                 env=env, cwd=proof, capture_output=True, timeout=args.timeout)
+        (proof / "host.stdout").write_bytes(result.stdout)
         (proof / "host.stderr").write_bytes(result.stderr)
+        evidence["host_exit_code"] = result.returncode
         result.check_returncode()
         size = struct.unpack(">I", result.stdout[:4])[0]
         response = json.loads(result.stdout[4:4 + size])
         (proof / "response.json").write_text(json.dumps(response, indent=2, ensure_ascii=False))
-        record = json.loads((state / "runs/rsi-standard-controlled.json").read_text())
+        record = json.loads((state / "runs" / f"{run_name}.json").read_text())
         evidence.update(status=response.get("status"), response_status=response.get("status"),
                         run_status=record.get("status"), runs=record.get("results"),
                         provider_requests=len(FixtureProvider.calls) if not args.real else None,
                         tool_calls=dict(Counter(c["tool"] for c in FixtureProvider.calls)) if not args.real else None,
                         provider_failures=FixtureProvider.failures if not args.real else [])
         if response.get("status") != "completed":
-            raise RuntimeError(f"controlled RSI did not complete; inspect {proof / 'response.json'}")
+            raise RuntimeError(f"{mode} RSI did not complete; inspect {proof / 'response.json'}")
         publish = state / "artifacts" / record["results"]["publish"][0]["commit"]["id"] / "files"
         for name in ("rsi-report.md", "evolution.json", "sources.md", "review.json", "gate.txt", "audit-manifest.json", "review-manifest.json"):
             if not (publish / name).is_file():
@@ -216,6 +297,8 @@ def main() -> None:
         evidence["status"] = "passed"
     except subprocess.TimeoutExpired as error:
         evidence.update(status="timeout", error=f"provider/runtime timeout after {args.timeout}s: {error}")
+        (proof / "host.stdout").write_bytes(error.stdout or b"")
+        (proof / "host.stderr").write_bytes(error.stderr or b"")
         raise
     except subprocess.CalledProcessError as error:
         evidence.update(status="failed", error=f"Rust Host exited with status {error.returncode}")
@@ -229,10 +312,13 @@ def main() -> None:
             server.server_close()
         if thread is not None:
             thread.join(timeout=5)
-        evidence["provider_calls"] = FixtureProvider.calls
-        evidence["provider_failures"] = FixtureProvider.failures
+        evidence["fixture_provider_calls"] = FixtureProvider.calls
+        evidence["fixture_provider_failures"] = FixtureProvider.failures
+        _collect_runtime(proof, state, run_name, evidence)
         (proof / "evidence.json").write_text(json.dumps(evidence, indent=2, ensure_ascii=False))
-        print(json.dumps({"evidence": str(proof / "evidence.json"), **evidence}, ensure_ascii=False))
+        print(json.dumps({key: value for key, value in {"evidence": str(proof / "evidence.json"), **evidence}.items()
+                          if key not in {"runs", "provider_trace", "provider_calls", "artifacts", "recordings",
+                                         "uncommitted_files", "parallel"}}, ensure_ascii=False))
 
 
 if __name__ == "__main__":
