@@ -144,6 +144,7 @@ def collect(proof: Path, evidence: dict) -> dict:
         "mcp": "not applicable: original academic Plugin declares no MCP servers; scholarly is an operator tool",
         "research_quality": "not accepted by this mechanical collector",
     })
+    evidence["recovery_contract"] = _inspect_recovery_contract(proof, record)
     if evidence.get("status") == "completed":
         failures = _completed_checks(state, record, trace)
         evidence["completion_check_failures"] = failures
@@ -152,6 +153,39 @@ def collect(proof: Path, evidence: dict) -> dict:
         evidence["runtime_closure"] = "not completed"
     (proof / "evidence.json").write_text(json.dumps(evidence, indent=2, ensure_ascii=False))
     return evidence
+
+
+def _inspect_recovery_contract(proof: Path, record: dict) -> dict:
+    """Describe the read-only same-Run resume inputs without invoking resume."""
+    state = proof / "state"
+    cursor = record.get("cursor") or {}
+    key = cursor.get("key") or {}
+    run_id = record.get("run_id")
+    durable_key = ":".join(str(key.get(field, "")) for field in ("run_id", "graph_digest", "node_id", "invocation"))
+    stem = "np1-" + hashlib.sha256(durable_key.encode()).hexdigest() if all(key.get(field) is not None for field in
+                                                                              ("run_id", "graph_digest", "node_id", "invocation")) else None
+    store = state / "io-harness/store" / f"{stem}.sqlite3" if stem else None
+    recordings = sorted(store.parent.glob(f"{stem}.recordings/*/recording.json")) if stem else []
+    started = state / "io-harness/facts" / f"{stem}.started" if stem else None
+    return {
+        "read_only": True,
+        "resume_invoked": False,
+        "same_run_id": run_id == key.get("run_id") if run_id else False,
+        "run_id": run_id,
+        "cursor": key,
+        "cursor_status": record.get("status"),
+        "same_graph_digest": key.get("graph_digest") == record.get("graph_digest"),
+        "harness_store": str(store.relative_to(proof)) if store and store.exists() else None,
+        "harness_store_exists": bool(store and store.exists()),
+        "harness_started_marker_exists": bool(started and started.exists()),
+        "recording_count": len(recordings),
+        "recordings_preserved": bool(recordings),
+        "workspace_preserved": bool(key and (proof / "workspace" / str(run_id)).exists()),
+        "standalone_protocol": "start_bundle re-entry checks existing run snapshot/input identity and loads same FileRunStore record",
+        "http_protocol": "POST /runs/{run}/resume uses the persisted Run metadata/snapshot and rejects drift; it is not equivalent to creating a new trigger",
+        "unknown_effect_policy": "if the Harness cursor has an unresolved mutating tool, ordinary resume is fail-closed or requires the existing recovery decision; it must not replay the tool automatically",
+        "next_action": "operator may inspect workspace and then use the existing Run resume/recovery endpoint; this evidence collector intentionally does not do so",
+    }
 
 
 def main() -> None:

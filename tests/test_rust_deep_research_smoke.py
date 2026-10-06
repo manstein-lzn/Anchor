@@ -69,3 +69,22 @@ def test_trace_uses_native_provider_schema_and_observations(tmp_path):
     }
     assert trace["observations"][0]["step"] == 1
     assert '"status":"completed"' in trace["observations"][0]["text"]
+
+
+def test_recovery_contract_is_read_only_and_same_run(tmp_path):
+    record = {
+        "run_id": "deep-academic-research",
+        "graph_digest": "digest",
+        "status": "running",
+        "cursor": {"key": {
+            "run_id": "deep-academic-research", "graph_digest": "digest",
+            "node_id": "investigate", "invocation": 1,
+        }},
+    }
+    contract = smoke._inspect_recovery_contract(tmp_path, record)
+    assert contract["read_only"] is True
+    assert contract["resume_invoked"] is False
+    assert contract["same_run_id"] is True
+    assert contract["same_graph_digest"] is True
+    assert "POST /runs/{run}/resume" in contract["http_protocol"]
+    assert "must not replay" in contract["unknown_effect_policy"]
