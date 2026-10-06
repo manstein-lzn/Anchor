@@ -1,5 +1,6 @@
 mod files;
 mod graphs;
+mod plugins;
 mod runs;
 #[cfg(test)]
 mod tests;
@@ -18,6 +19,7 @@ use axum::{
 };
 use files::*;
 use graphs::*;
+use plugins::*;
 use runs::*;
 use serde_json::{Value, json};
 use std::{
@@ -185,6 +187,9 @@ fn router_with_web_root(state: ApiState, web_root: PathBuf) -> Router {
         ));
     let api = Router::new()
         .route("/health", get(|| async { Json(json!({"status":"ok"})) }))
+        .route("/plugins", get(plugin_catalog))
+        .route("/plugins/{plugin}", get(plugin_detail))
+        .route("/plugins/{plugin}/files/{*path}", get(plugin_file))
         .route("/graphs", get(graphs))
         .route("/graphs", post(create_graph))
         .route("/graph-validation", post(validate_graph))

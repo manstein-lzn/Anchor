@@ -59,8 +59,7 @@ fn resolve_graph_definition(
         .into_iter()
         .collect::<Vec<_>>();
     // Resolve only installed resource identities; transport/env expansion belongs to execution.
-    let library_root = std::env::var_os("ANCHOR_RUNNER_LIBRARY_ROOT").map(PathBuf::from);
-    let catalog = FilePluginCatalog::new(library_root.as_deref().unwrap_or(catalog_root));
+    let catalog = FilePluginCatalog::new(library_root(catalog_root));
     let bindings = catalog.resolve(&ids)?;
     Ok((snapshot, catalog, bindings))
 }

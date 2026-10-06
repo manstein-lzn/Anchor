@@ -15,6 +15,7 @@ mod channel_media;
 mod conversations;
 mod graph_validation;
 mod platform_contract;
+mod plugin_library;
 mod session_calls;
 
 #[test]
