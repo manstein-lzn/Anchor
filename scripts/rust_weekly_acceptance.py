@@ -118,7 +118,9 @@ class FixtureProvider(BaseHTTPRequestHandler):
             self.calls.append({"tool": name, "model": request.get("model")})
             payload = _tool_response(request, name, arguments)
             self.send_response(200)
-        except Exception as error:  # provider errors are retained as evidence
+        except (AssertionError, KeyError, OSError, TypeError, ValueError) as error:
+            # Provider protocol errors are returned as a fixture response and
+            # retained in evidence; transport failures still fail the Host.
             self.failures.append(f"{type(error).__name__}: {error}")
             payload = _json({"error": {"message": str(error), "type": "fixture_error"}}).encode()
             self.send_response(400)
@@ -260,6 +262,70 @@ def _run_real_service(binary: Path, env: dict[str, str], proof: Path) -> tuple[d
         log.close()
 
 
+def _acceptance_environment(proof: Path, bundle: Path, local_inputs: Path, mode: str):
+    provider = thread = None
+    if mode == "fixture":
+        provider = ThreadingHTTPServer(("127.0.0.1", 0), FixtureProvider)
+        thread = threading.Thread(target=provider.serve_forever, daemon=True)
+        thread.start()
+    env = {"PATH": "/usr/local/bin:/usr/bin:/bin", "PYTHONDONTWRITEBYTECODE": "1"}
+    if mode == "fixture":
+        env.update({"ANCHOR_MODEL_API_KEY": "fixture-only", "ANCHOR_MODEL_URL": f"http://127.0.0.1:{provider.server_port}/v1", "ANCHOR_MODEL_NAME": "fixture-weekly", "ANCHOR_MODEL_WIRE_API": "chat"})
+    else:
+        env.update({key: os.environ[key] for key in MODEL_KEYS})
+        env["ANCHOR_MODEL_WIRE_API"] = os.environ.get("ANCHOR_MODEL_WIRE_API", "responses")
+    env.update({
+        "ANCHOR_RUNNER_BUNDLE_ROOT": str(bundle), "ANCHOR_RUNNER_GRAPH_NAME": "weekly-work-report",
+        "ANCHOR_RUNNER_LOCAL_INPUTS_ROOT": str(local_inputs), "ANCHOR_RUNNER_STATE_ROOT": str(proof / "state"),
+        "ANCHOR_RUNNER_WORKSPACE_ROOT": str(proof / "workspaces"), "ANCHOR_RUNNER_LIBRARY_ROOT": str(proof / "library"),
+        "ANCHOR_RUNNER_ALLOWED_COMMANDS": "sh,cat,cp,git,grep,head,mkdir,printf,python,python3,test",
+    })
+    for key in ("DOCMOST_API_KEY", "ANCHOR_CHANNEL_CONTROL_DESCRIPTOR", "ANCHOR_WECOM_SEND_USERS", "ANCHOR_WECOM_USERS"):
+        env.pop(key, None)
+    if any(key in env for key in ("DOCMOST_API_KEY", "ANCHOR_CHANNEL_CONTROL_DESCRIPTOR", "ANCHOR_WECOM_SEND_USERS", "ANCHOR_WECOM_USERS")):
+        raise RuntimeError("production channel or Docmost credentials leaked into acceptance environment")
+    if any("docmost" in value.lower() and "cwise" in value.lower() for value in env.values()):
+        raise RuntimeError("production Docmost endpoint leaked into acceptance environment")
+    return env, provider, thread
+
+
+def _execute_host(binary: Path, mode: str, env: dict[str, str], proof: Path) -> dict[str, Any]:
+    if mode == "real":
+        response, detail = _run_real_service(binary, env, proof)
+        (proof / "http-run.json").write_text(json.dumps(detail, indent=2, ensure_ascii=False))
+        return response
+    request = _json({"op": "start_bundle", "version": 1, "request_id": "weekly-acceptance", "run_id": "weekly-acceptance", "input": {}}).encode()
+    result = subprocess.run([str(binary.resolve())], input=struct.pack(">I", len(request)) + request, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=900, check=False)
+    (proof / "host.stderr").write_bytes(result.stderr)
+    result.check_returncode()
+    return json.loads(result.stdout[4:])
+
+
+def _validate_run(state: Path, bundle: Path, source: Path, mode: str, response: dict[str, Any]) -> dict[str, int]:
+    if response.get("status") != "completed":
+        raise RuntimeError(f"Rust weekly run did not complete: {response}")
+    run_id = response.get("run_id", "weekly-acceptance")
+    record = json.loads((state / "runs" / f"{run_id}.json").read_text())
+    counts = {node: len(values) for node, values in record["results"].items()}
+    if set(counts) != set(EXPECTED_NODES):
+        raise RuntimeError(f"weekly graph did not execute every node: {counts}")
+    if mode == "fixture" and (counts["understand"] < 2 or counts["write"] < 2 or counts["review"] < 2):
+        raise RuntimeError(f"weekly feedback path was not exercised by the fixture: {counts}")
+    for node in EXPECTED_NODES:
+        for item in record["results"].get(node, []):
+            files = state / "artifacts" / item["commit"]["id"] / "files"
+            if not files.is_dir():
+                raise RuntimeError(f"missing immutable Artifact for {node}")
+    if (bundle / "graph.json").read_bytes() != source.read_bytes():
+        raise RuntimeError("production Graph bytes changed in the acceptance bundle")
+    docmost_files = []
+    for item in record["results"].get("docmost", []):
+        docmost_files.extend(path.name for path in (state / "artifacts" / item["commit"]["id"] / "files").rglob("*"))
+    if "docmost.json" in docmost_files:
+        raise RuntimeError("safe gate run produced Docmost metadata")
+    return counts, record
+
+
 def run(binary: Path, mode: str) -> dict[str, Any]:
     load_dotenv(ROOT / ".env")
     if mode == "real" and any(not os.environ.get(key) for key in MODEL_KEYS):
@@ -276,66 +342,12 @@ def run(binary: Path, mode: str) -> dict[str, Any]:
     (library / "tool.json").write_text(_json({
         "entrypoint": "/usr/local/bin/python", "environment": "/usr/local",
     }) + "\n")
-    state = proof / "state"
-    provider = None
-    thread = None
-    if mode == "fixture":
-        provider = ThreadingHTTPServer(("127.0.0.1", 0), FixtureProvider)
-        thread = threading.Thread(target=provider.serve_forever, daemon=True)
-        thread.start()
-    env = {"PATH": "/usr/local/bin:/usr/bin:/bin", "PYTHONDONTWRITEBYTECODE": "1"}
-    if mode == "fixture":
-        env.update({"ANCHOR_MODEL_API_KEY": "fixture-only", "ANCHOR_MODEL_URL": f"http://127.0.0.1:{provider.server_port}/v1", "ANCHOR_MODEL_NAME": "fixture-weekly", "ANCHOR_MODEL_WIRE_API": "chat"})
-    else:
-        env.update({key: os.environ[key] for key in MODEL_KEYS})
-        env["ANCHOR_MODEL_WIRE_API"] = os.environ.get("ANCHOR_MODEL_WIRE_API", "responses")
-    env.update({
-        "ANCHOR_RUNNER_BUNDLE_ROOT": str(bundle), "ANCHOR_RUNNER_GRAPH_NAME": "weekly-work-report",
-        "ANCHOR_RUNNER_LOCAL_INPUTS_ROOT": str(local_inputs), "ANCHOR_RUNNER_STATE_ROOT": str(state),
-        "ANCHOR_RUNNER_WORKSPACE_ROOT": str(proof / "workspaces"),
-        "ANCHOR_RUNNER_LIBRARY_ROOT": str(proof / "library"),
-        "ANCHOR_RUNNER_ALLOWED_COMMANDS": "sh,cat,cp,git,grep,head,mkdir,printf,python,python3,test",
-    })
-    # Explicitly prevent accidental reuse of production transport credentials.
-    for key in ("DOCMOST_API_KEY", "ANCHOR_CHANNEL_CONTROL_DESCRIPTOR", "ANCHOR_WECOM_SEND_USERS", "ANCHOR_WECOM_USERS"):
-        env.pop(key, None)
-    if any(key in env for key in ("DOCMOST_API_KEY", "ANCHOR_CHANNEL_CONTROL_DESCRIPTOR", "ANCHOR_WECOM_SEND_USERS", "ANCHOR_WECOM_USERS")):
-        raise RuntimeError("production channel or Docmost credentials leaked into acceptance environment")
-    if any("docmost" in value.lower() and "cwise" in value.lower() for value in env.values()):
-        raise RuntimeError("production Docmost endpoint leaked into acceptance environment")
-    request = _json({"op": "start_bundle", "version": 1, "request_id": "weekly-acceptance", "run_id": "weekly-acceptance", "input": {}}).encode()
+    env, provider, thread = _acceptance_environment(proof, bundle, local_inputs, mode)
     evidence: dict[str, Any] = {"status": "failed", "mode": mode, "graph_sha256": source_hash, "external_publish": False}
     try:
-        if mode == "real":
-            response, detail = _run_real_service(binary, env, proof)
-            (proof / "http-run.json").write_text(json.dumps(detail, indent=2, ensure_ascii=False))
-        else:
-            result = subprocess.run([str(binary.resolve())], input=struct.pack(">I", len(request)) + request, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=900, check=False)
-            (proof / "host.stderr").write_bytes(result.stderr)
-            result.check_returncode()
-            response = json.loads(result.stdout[4:])
+        response = _execute_host(binary, mode, env, proof)
         (proof / "response.json").write_text(json.dumps(response, indent=2, ensure_ascii=False))
-        if response.get("status") != "completed":
-            raise RuntimeError(f"Rust weekly run did not complete: {response}")
-        run_id = response.get("run_id", "weekly-acceptance")
-        record = json.loads((state / "runs" / f"{run_id}.json").read_text())
-        counts = {node: len(values) for node, values in record["results"].items()}
-        if set(counts) != set(EXPECTED_NODES):
-            raise RuntimeError(f"weekly graph did not execute every node: {counts}")
-        if mode == "fixture" and (counts["understand"] < 2 or counts["write"] < 2 or counts["review"] < 2):
-            raise RuntimeError(f"weekly feedback path was not exercised by the fixture: {counts}")
-        for node in EXPECTED_NODES:
-            for item in record["results"].get(node, []):
-                files = state / "artifacts" / item["commit"]["id"] / "files"
-                if not files.is_dir():
-                    raise RuntimeError(f"missing immutable Artifact for {node}")
-        if (bundle / "graph.json").read_bytes() != SOURCE.read_bytes():
-            raise RuntimeError("production Graph bytes changed in the acceptance bundle")
-        docmost_files = []
-        for item in record["results"].get("docmost", []):
-            docmost_files.extend(path.name for path in (state / "artifacts" / item["commit"]["id"] / "files").rglob("*"))
-        if "docmost.json" in docmost_files:
-            raise RuntimeError("safe gate run produced Docmost metadata")
+        counts, record = _validate_run(proof / "state", bundle, SOURCE, mode, response)
         evidence.update(status="passed", node_passes=counts, artifact_commits=sum(counts.values()), source_graph_unchanged=True, safe_gate="stdio reject-only MCP; no production endpoint or channel credentials")
         (proof / "run.json").write_text(json.dumps(record, indent=2, ensure_ascii=False))
         return {"evidence": str(proof / "evidence.json"), **evidence}
