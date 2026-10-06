@@ -118,7 +118,20 @@ async fn plugin_internal_symlink_is_rejected() {
     write_plugin(&state);
     let plugin = state.catalog_root.join("plugins/demo");
     symlink("/etc/passwd", plugin.join("escape.txt")).unwrap();
-    let (status, value) = call(router(state), "GET", "/plugins/demo", None).await;
+    let (status, value) = call(router(state.clone()), "GET", "/plugins/demo", None).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(value["error"], "Plugin is unavailable or malformed");
+
+    symlink("/etc", state.catalog_root.join("plugins/escape")).unwrap();
+    let (status, value) = call(router(state), "GET", "/plugins", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        value["plugins"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["id"] == "escape")
+            .unwrap()["available"],
+        false
+    );
 }

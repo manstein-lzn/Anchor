@@ -95,9 +95,22 @@ pub(super) async fn plugin_catalog(
         if name.starts_with('.') {
             continue;
         }
-        records.push(match catalog.definition(&name) {
-            Ok(definition) => plugin_record(&definition),
-            Err(error) => unavailable_record(name, public_catalog_error(error)),
+        let file_type = entry.file_type().map_err(|_| {
+            error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "cannot read Plugin catalog",
+            )
+        })?;
+        if !file_type.is_dir() && !file_type.is_symlink() {
+            continue;
+        }
+        records.push(if file_type.is_symlink() {
+            unavailable_record(name, "Plugin is unavailable or malformed")
+        } else {
+            match catalog.definition(&name) {
+                Ok(definition) => plugin_record(&definition),
+                Err(failure) => unavailable_record(name, public_catalog_error(failure)),
+            }
         });
     }
     records.sort_by(|left, right| left["id"].as_str().cmp(&right["id"].as_str()));
@@ -108,7 +121,9 @@ pub(super) async fn plugin_detail(
     State(state): State<ApiState>,
     AxumPath(plugin): AxumPath<String>,
 ) -> Result<Json<Value>, HttpResponse> {
-    let catalog = FilePluginCatalog::new(library_root(&state.catalog_root));
+    let root = library_root(&state.catalog_root);
+    plugin_entry(&root, &plugin).map_err(|message| error(StatusCode::BAD_REQUEST, message))?;
+    let catalog = FilePluginCatalog::new(root);
     let definition = catalog
         .definition(&plugin)
         .map_err(|failure| error(StatusCode::BAD_REQUEST, public_catalog_error(failure)))?;
@@ -123,7 +138,9 @@ pub(super) async fn plugin_file(
     State(state): State<ApiState>,
     AxumPath((plugin, path)): AxumPath<(String, String)>,
 ) -> Result<HttpResponse, HttpResponse> {
-    let catalog = FilePluginCatalog::new(library_root(&state.catalog_root));
+    let root = library_root(&state.catalog_root);
+    plugin_entry(&root, &plugin).map_err(|message| error(StatusCode::BAD_REQUEST, message))?;
+    let catalog = FilePluginCatalog::new(root);
     let definition = catalog
         .definition(&plugin)
         .map_err(|failure| error(StatusCode::BAD_REQUEST, public_catalog_error(failure)))?;
@@ -263,6 +280,26 @@ fn public_catalog_error(_error: GraphError) -> &'static str {
     // Parser errors can contain raw config keys or host paths; only expose
     // availability here, never the unexpanded MCP declaration.
     "Plugin is unavailable or malformed"
+}
+
+fn plugin_entry(root: &Path, id: &str) -> Result<PathBuf, &'static str> {
+    if id.is_empty()
+        || !id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"_.-".contains(&byte))
+        || !id.as_bytes()[0].is_ascii_alphanumeric()
+    {
+        return Err("invalid Plugin reference");
+    }
+    let entry = root.join("plugins").join(id);
+    let metadata = std::fs::symlink_metadata(&entry).map_err(|_| "no such Plugin")?;
+    if metadata.file_type().is_symlink() {
+        return Err("Plugin symlinks are not supported");
+    }
+    if !metadata.is_dir() {
+        return Err("no such Plugin");
+    }
+    Ok(entry)
 }
 
 fn safe_filename(value: &str) -> String {
