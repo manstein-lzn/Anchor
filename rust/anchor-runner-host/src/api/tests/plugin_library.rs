@@ -122,8 +122,19 @@ async fn plugin_internal_symlink_is_rejected() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(value["error"], "Plugin is unavailable or malformed");
 
-    symlink("/etc", state.catalog_root.join("plugins/escape")).unwrap();
-    let (status, value) = call(router(state), "GET", "/plugins", None).await;
+    let linked_source = state.catalog_root.join("linked-source");
+    std::fs::create_dir_all(linked_source.join("skills/demo")).unwrap();
+    std::fs::write(linked_source.join("plugin.json"), r#"{"name":"Linked"}"#).unwrap();
+    std::fs::write(linked_source.join("skills/demo/SKILL.md"), "linked").unwrap();
+    symlink(&linked_source, state.catalog_root.join("plugins/linked")).unwrap();
+    symlink(
+        "/etc/does-not-exist",
+        state.catalog_root.join("plugins/escape"),
+    )
+    .unwrap();
+
+    let app = router(state);
+    let (status, value) = call(app.clone(), "GET", "/plugins", None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         value["plugins"]
@@ -134,4 +145,25 @@ async fn plugin_internal_symlink_is_rejected() {
             .unwrap()["available"],
         false
     );
+    assert_eq!(
+        value["plugins"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["id"] == "linked")
+            .unwrap()["available"],
+        true
+    );
+    let (status, detail) = call(app.clone(), "GET", "/plugins/linked", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(detail["name"], "Linked");
+    let (status, body) = raw(
+        app,
+        "GET",
+        "/plugins/linked/files/skills/demo/SKILL.md",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, b"linked");
 }
