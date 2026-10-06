@@ -19,7 +19,7 @@ Rust 二进制 Runtime、Graph/Run/Artifact、Sandbox、Plugin/MCP、io-harness 
 | C 模型与预算 | 子 Agent models；io-harness NodePort/必要 adapter、新 Host model_registry | ANCHOR_MODEL_ALIASES 与 Python 同义；已声明别名实际选模型；NodePort 保留既有构造器；框架原生能力可支持时接精确累计请求预算 | 15% | 同图两模型在 wire 上可区分；默认 fallback 与非法配置明确；恢复选型稳定；预算必须计纠错与重开累计，不能用 step 冒充请求 | 模型已集成并验证 wire/恢复；预算不支持，见框架边界 |
 | D 平台入口接线 | 后续独立包；Python 服务/适配器、Rust application/API 的小契约；每批单一所有者 | Graph/Run/Artifact 由 Rust 唯一写入；Session/Library/Scheduler/Channel 复用既有宿主能力，通过公共调用接入 | 25% | D1 手动/定时触发、状态/文件/控制一致；D2 Plugin 管理和 Pilot 发起/查看 Run；D3 企业微信会话/附件/回复与 call.session；旧历史只读策略明确 | D1 双服务/浏览器及真实 Provider 已通过；D2a Library/挂载/执行首片与 D2b Pilot 同 Run 接续通过；OAuth 与 D3 完整能力待办，D3a 文字首片（A96）与附件/图片（A97）通过 |
 | E 观察与控制体验 | 后续独立包；Node adapter/Host 事件投影/Web，避免与 C 同时修改 | 摘要增量仅是显示，不是完成事实；停止/暂停/进程中断沿既有事实恢复；图像输入作为输入接线处理 | 10% | 真实界面可逐步看到内容；最终提交唯一；最后回合 stop 的实际边界可复现并处理；附件到模型的路径可验收 | E2 停止待收束和无重放续跑浏览器通过；E3 附件/图片已由 A97 验收；E1 摘要流仍待接线，固定 Rig 0.43 已有 partial/mixed/truncated completion 的 fail-closed contract tests（`35ed682`），未声称真实 Provider/Web 增量通过 |
-| I 集成和业务验收 | 主 Agent；共享接口、验收脚本、文档 | 不更改原业务 Graph 来掩盖 Runtime 差距；不修改 Python 历史或原运行目录；真实外部副作用另按用户授权 | 15% | 分阶段 fmt/clippy/测试；真实 Provider 验收；原深度研究、周报、RSI、企业微信逐条记录正常/回访/中断恢复证据 | 进行中；企业微信文字/附件/图片已验收，标准 RSI 与周报仍未闭环 |
+| I 集成和业务验收 | 主 Agent；共享接口、验收脚本、文档 | 不更改原业务 Graph 来掩盖 Runtime 差距；不修改 Python 历史或原运行目录；真实外部副作用另按用户授权 | 15% | 分阶段 fmt/clippy/测试；真实 Provider 验收；原深度研究、周报、RSI、企业微信逐条记录正常/回访/中断恢复证据 | 进行中；周报已完成真实 provider 的隔离无发布闭环，标准 RSI 已完成受控原图闭环，深度研究与 RSI 真实内容验收、平台职责迁移和生产切换仍待做 |
 
 A/B/C 的职责内聚、测试可独立运行；主要耦合是 Host 装配，main.rs 先归 A，C 只交付 model_registry 和装配说明，B 只交付 prepare_workspace 接口，主 Agent 在 A 集成后统一接线。本批曾共享 Cargo target，发现不同 worktree 会覆盖同名集成测试 binary，不能用其交错运行结果作验收。最终检查由主树独占 target 完成；后续并行任务各用独立 target，或显式串行编译和运行。每个测试使用独立临时状态根，业务环境由主 Agent 独占。
 
@@ -147,7 +147,7 @@ E1/E2/E3 可先分别做只读核查、fixture 和边界设计；因共享 NodeP
 
 本文保留 R1–R9 的设计、历史拆分和验收证据，不替代 [开发台账](pilot-development-plan.md)。其中二进制 Runtime、Graph/Run/Artifact、平台首片和通道接线已经从计划进入当前实现；未完成项以本文顶部“当前状态”和 [Rust Runtime 迁移边界与当前收口状态](rust-migration-closure.md) 为准。
 
-历史阶段表和“下一步”段落不构成新的实现承诺。Python `serve.py` 仍是当前默认生产入口，Rust Host 已是可运行的共享 Kernel 和独立 Runtime；标准 RSI、周报、平台职责迁移及生产 backend 切换仍需单独验收。
+历史阶段表和“下一步”段落不构成新的实现承诺。Python `serve.py` 仍是当前默认生产入口，Rust Host 已是可运行的共享 Kernel 和独立 Runtime；标准周报的隔离无发布验收和标准 RSI 的受控原图验收已单独完成，深度研究、RSI 真实内容、平台职责迁移及生产 backend 切换仍需单独验收。
 
 ## 目标和不做的事
 
