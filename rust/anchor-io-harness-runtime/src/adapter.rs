@@ -22,7 +22,7 @@ use rig_core::completion::{
 use rig_core::operation::Completion;
 use rig_core::streaming::{Item, StreamEvent};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 use thiserror::Error;
 
@@ -64,6 +64,8 @@ pub struct RigProviderAdapter {
     accepts_images: bool,
     recording_root: Option<std::path::PathBuf>,
     call_ids: Arc<Mutex<CallIdLedger>>,
+    tool_catalog: Option<BTreeSet<String>>,
+    pilot_question_alias: bool,
 }
 
 /// io-harness intentionally models tool calls without provider IDs. Responses
@@ -158,6 +160,8 @@ impl RigProviderAdapter {
             accepts_images,
             recording_root: None,
             call_ids: Arc::new(Mutex::new(CallIdLedger::default())),
+            tool_catalog: None,
+            pilot_question_alias: false,
         }
     }
 
@@ -171,11 +175,40 @@ impl RigProviderAdapter {
         self
     }
 
+    pub(crate) fn with_tool_catalog(mut self, names: impl IntoIterator<Item = String>) -> Self {
+        self.tool_catalog = Some(names.into_iter().collect());
+        self
+    }
+
+    pub(crate) fn with_pilot_question_alias(mut self) -> Self {
+        self.pilot_question_alias = true;
+        self
+    }
+
     async fn exchange(
         &self,
-        request: IoRequest,
+        mut request: IoRequest,
         on_token: Option<&(dyn Fn(&str) + Send + Sync)>,
     ) -> io_harness::Result<IoResponse> {
+        if self.pilot_question_alias {
+            for tool in &mut request.tools {
+                if tool.name == io_harness::ASK_QUESTION_TOOL {
+                    tool.name = "session_ask".into();
+                }
+            }
+            for message in &mut request.messages {
+                if let IoMessage::Assistant { calls, .. } = message {
+                    for call in calls {
+                        if call.name == io_harness::ASK_QUESTION_TOOL {
+                            call.name = "session_ask".into();
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(catalog) = &self.tool_catalog {
+            request.tools.retain(|tool| catalog.contains(&tool.name));
+        }
         let completion = request.output_schema.is_some();
         let attempt = self
             .recording_root
@@ -215,7 +248,14 @@ impl RigProviderAdapter {
         } else {
             io_harness::Provider::complete(&transport, request).await
         };
-        let response = result?;
+        let mut response = result?;
+        if self.pilot_question_alias {
+            for call in &mut response.tool_calls {
+                if call.name == "session_ask" {
+                    call.name = io_harness::ASK_QUESTION_TOOL.into();
+                }
+            }
+        }
         if completion {
             let response = crate::completion::response(response);
             if let Some(on_token) = on_token

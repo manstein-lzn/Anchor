@@ -1,0 +1,12 @@
+.trace-media { display: grid; gap: 10px; min-width: 0; padding: 10px; }
+.trace-picture { margin: 0; min-width: 0; }
+.trace-picture > img { display: block; width: 100%; aspect-ratio: 4 / 3; max-height: 280px; object-fit: contain; background: #f6f8f7; }
+.trace-picture figcaption { display: flex; align-items: center; gap: 9px; min-height: 32px; color: var(--muted); font-size: 11px; letter-spacing: 0; }
+.trace-picture figcaption button { display: grid; place-items: center; width: 30px; height: 30px; min-height: 30px; padding: 0; margin-left: auto; border: 0; background: transparent; }
+.trace-media-unavailable { display: flex; align-items: center; gap: 6px; color: var(--red); font-size: 12px; margin: 0; }
+.trace-media-text { max-height: 24em; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; font-size: 12px; }
+.trace-picture-modal { width: min(960px, calc(100vw - 24px)); }
+.trace-picture-modal .modal-content { min-width: 0; max-width: 100%; }
+.trace-picture-modal img { display: block; width: 100%; max-height: 75vh; object-fit: contain; }
+.transcript .said, .transcript .note, .transcript .call { min-width: 0; max-width: 100%; }
+.transcript .call-exit { max-width: 92px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

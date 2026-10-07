@@ -1,5 +1,5 @@
 [workspace]
-members = ["anchor-runtime", "anchor-io-harness-runtime", "anchor-sandbox-bwrap", "anchor-mcp-host", "anchor-runner-host", "anchor-graph-host", "anchor-rsi"]
+members = ["anchor-runtime", "anchor-io-harness-runtime", "anchor-sandbox-bwrap", "anchor-mcp-host", "anchor-runner-host", "anchor-graph-host", "anchor-rsi", "anchor-platform-session", "anchor-wecom-tools", "anchor-docmost-tools", "anchor-devtools", "anchor-scholarly", "anchor-library", "anchor-wecom-gateway", "anchor-distribution"]
 resolver = "2"
 
 [workspace.package]

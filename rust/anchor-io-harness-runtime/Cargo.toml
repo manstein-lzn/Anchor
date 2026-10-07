@@ -7,7 +7,7 @@ description = "Rust-native Anchor Agent execution boundary backed by io-harness 
 publish = false
 
 [dependencies]
-anchor-runtime-rig = { path = "../anchor-runtime" }
+anchor-runtime-rig = { path = "../anchor-runtime", features = ["rig-legacy"] }
 base64 = "0.22"
 io-harness = { version = "=0.86.0", features = ["media"] }
 rig-core = { version = "=0.43.0", default-features = false }

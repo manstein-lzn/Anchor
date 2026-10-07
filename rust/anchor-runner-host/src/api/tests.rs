@@ -12,12 +12,19 @@ static PROCESS_ENV: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 mod channel_attachments;
 mod channel_media;
+mod channel_sessions;
 mod conversations;
+mod graph_deletion;
 mod graph_validation;
+mod oauth;
 mod platform_contract;
+mod plugin_installation;
 mod plugin_library;
+mod questions;
 mod schedules;
 mod session_calls;
+mod sessions;
+mod wecom;
 
 #[test]
 fn api_keys_follow_json_array_and_strength_contract() {
@@ -73,6 +80,15 @@ fn fixture() -> (tempfile::TempDir, ApiState) {
         // Keep the schedule fixture outside data_root: static graph validation
         // must leave that root absent and otherwise unchanged.
         schedules: ScheduleStore::open(root.path().join("schedules.json")).unwrap(),
+        pilots: crate::pilot_host::PilotService::default(),
+        wecom: WecomSettings {
+            graph: "fixture".into(),
+            reply_node: "work".into(),
+            account: Some("corp-a".into()),
+            users: HashSet::from(["*".into()]),
+        },
+        channel_event_locks: Default::default(),
+        plugin_checkout: None,
     };
     (root, state)
 }
@@ -465,38 +481,63 @@ async fn trigger_persists_run_and_projects_list_detail_and_control() {
         .unwrap()
         .unwrap();
     let key = &record.results["work"][0].key;
-    let io_store = state.data_root.join("io-harness/store");
-    std::fs::create_dir_all(&io_store).unwrap();
-    let stem = format!("np1-{:x}", Sha256::digest(key.durable_key().as_bytes()));
-    let trace_store = io_harness::Store::open(io_store.join(format!("{stem}.sqlite3"))).unwrap();
-    let trace_run = trace_store.start_run("trace fixture", "workspace").unwrap();
-    trace_store
-        .record_step_turn(
-            trace_run,
-            &io_harness::AssistantTurn::new(
-                1,
-                Some("Inspecting the task now."),
-                vec![io_harness::ToolCall {
-                    name: "anchor_run".into(),
-                    arguments: json!({"command":"cat report.txt"}),
-                }],
-            ),
+    #[cfg(feature = "legacy-regression")]
+    {
+        let io_store = state.data_root.join("io-harness/store");
+        std::fs::create_dir_all(&io_store).unwrap();
+        let stem = format!("np1-{:x}", Sha256::digest(key.durable_key().as_bytes()));
+        let trace_store =
+            io_harness::Store::open(io_store.join(format!("{stem}.sqlite3"))).unwrap();
+        let trace_run = trace_store.start_run("trace fixture", "workspace").unwrap();
+        trace_store
+            .record_step_turn(
+                trace_run,
+                &io_harness::AssistantTurn::new(
+                    1,
+                    Some("Inspecting the task now."),
+                    vec![io_harness::ToolCall {
+                        name: "anchor_run".into(),
+                        arguments: json!({"command":"cat report.txt"}),
+                    }],
+                ),
+            )
+            .unwrap();
+        trace_store
+            .record_observations(
+                trace_run,
+                &[io_harness::context::Observation::new(
+                    1,
+                    io_harness::context::ObsKind::Tool,
+                    Some("anchor_run".into()),
+                    "tool returned report.txt",
+                    io_harness::context::Origin::Tool,
+                )],
+            )
+            .unwrap();
+        std::fs::write(io_store.join(format!("{stem}.run")), trace_run.to_string()).unwrap();
+        drop(trace_store);
+    }
+    #[cfg(not(feature = "legacy-regression"))]
+    {
+        let root = state.data_root.join("goose-acp");
+        std::fs::create_dir_all(&root).unwrap();
+        let stem = format!("{:x}", Sha256::digest(key.durable_key().as_bytes()));
+        std::fs::write(
+            root.join(format!("{stem}.json")),
+            json!({
+                "version":2,"key":key,"binary_sha256":"fixture","session_id":"trace-fixture",
+                "completion":null,"reason":null,"model_binding":null,"tool_observation":null
+            })
+            .to_string(),
         )
         .unwrap();
-    trace_store
-        .record_observations(
-            trace_run,
-            &[io_harness::context::Observation::new(
-                1,
-                io_harness::context::ObsKind::Tool,
-                Some("anchor_run".into()),
-                "tool returned report.txt",
-                io_harness::context::Origin::Tool,
-            )],
-        )
-        .unwrap();
-    std::fs::write(io_store.join(format!("{stem}.run")), trace_run.to_string()).unwrap();
-    drop(trace_store);
+        std::fs::write(root.join(format!("{stem}.evidence.json")), json!({
+            "version":1,"key":key,"runtime":"goose","notifications":[
+                {"method":"session/update","params":{"sessionId":"trace-fixture","update":{"sessionUpdate":"agent_message_chunk","content":{"text":"Inspecting the task now."}}}},
+                {"method":"session/update","params":{"sessionId":"trace-fixture","update":{"sessionUpdate":"tool_call_update","toolCallId":"call-1","status":"completed","content":[{"content":{"text":"tool returned report.txt"}}]}}}
+            ]
+        }).to_string()).unwrap();
+    }
     let (status, traced) = call(app.clone(), "GET", &format!("/runs/{run}"), None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
@@ -2027,7 +2068,7 @@ async fn graph_delete_removes_only_its_run_data_and_preserves_other_graph_runs()
     let io_store = state.data_root.join("io-harness").join("store");
     std::fs::create_dir_all(&io_store).unwrap();
     std::fs::write(io_store.join(format!("np1-{hash}.sqlite3-wal")), b"x").unwrap();
-    let recordings = anchor_io_harness_runtime::recording::directory(&io_store, &target_key);
+    let recordings = io_store.join(format!("np1-{hash}.recordings"));
     let pending_recording = recordings.join("00000000000000000001");
     std::fs::create_dir_all(&pending_recording).unwrap();
     std::fs::write(pending_recording.join("request.json"), b"{}").unwrap();
@@ -2380,6 +2421,7 @@ async fn legacy_unfinished_run_quarantines_admission_and_graph_creation() {
 }
 
 #[tokio::test]
+#[cfg(feature = "legacy-regression")]
 async fn waiting_recovery_projects_context_and_resume_continues_same_run() {
     let (root, state) = fixture();
     let _env_guard = PROCESS_ENV.lock().await;

@@ -59,6 +59,7 @@ impl<'a, S: RunStore, A: ArtifactPort, N: NodeExecutionPort, C: RunControl>
             return self.fail(record, reason);
         }
         record.status = RunStatus::Running;
+        record.error = None;
         self.store.save(&record)?;
         loop {
             if self.control.stop_requested() {
@@ -725,6 +726,13 @@ impl<'a, S: RunStore, A: ArtifactPort, N: NodeExecutionPort, C: RunControl>
                     NodeExecutionOutcome::Cancelled => {
                         record.recovery.retain(|pending| pending.key != cursor.key);
                         record.status = RunStatus::Stopped;
+                        self.store.save(&record)?;
+                        return Ok(record);
+                    }
+                    NodeExecutionOutcome::Interrupted { reason } => {
+                        record.recovery.retain(|pending| pending.key != cursor.key);
+                        record.status = RunStatus::Stopped;
+                        record.error = Some(reason);
                         self.store.save(&record)?;
                         return Ok(record);
                     }

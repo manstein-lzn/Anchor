@@ -134,6 +134,18 @@ impl PreparedExecution {
                 metadata.as_ref().map(|metadata| metadata.graph.as_str()),
             )?;
             self.nodes.io_resolver.verify_local_inputs(&record)?;
+            #[cfg(not(feature = "legacy-regression"))]
+            for key in crate::run_data::invocation_keys(&record) {
+                if crate::run_data::legacy_invocation_exists(
+                    &crate::env_path("ANCHOR_RUNNER_STATE_ROOT")?,
+                    &key,
+                )? {
+                    return Err(
+                        "legacy Agent state is not resumable by the standard Goose Host".into(),
+                    );
+                }
+            }
+            #[cfg(feature = "legacy-regression")]
             if let Some(nodes) = &self.nodes.io_nodes {
                 let mut cursors = record.cursor.iter().collect::<Vec<_>>();
                 if let Some(parallel) = &record.parallel {

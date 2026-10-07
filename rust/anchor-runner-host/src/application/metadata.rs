@@ -83,6 +83,10 @@ pub(crate) struct RunMetadata {
     #[serde(default)]
     pub(crate) conversation: Option<ConversationSource>,
     #[serde(default)]
+    pub(crate) channel: Option<ChannelRunSource>,
+    #[serde(default)]
+    pub(crate) pilot: Option<PilotRunSource>,
+    #[serde(default)]
     pub(crate) session_call: Option<super::session_calls::SessionCall>,
     #[serde(default)]
     pub(crate) attachments: Vec<crate::channel_inputs::AttachmentManifest>,
@@ -98,6 +102,23 @@ pub(crate) struct ConversationSource {
     pub(crate) session: String,
     pub(crate) reply_node: String,
     pub(crate) previous_run: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ChannelRunSource {
+    pub(crate) owner: String,
+    pub(crate) session: String,
+    pub(crate) inbound: String,
+    pub(crate) turn: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PilotRunSource {
+    pub(crate) owner: String,
+    pub(crate) session: String,
+    pub(crate) turn: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -136,6 +157,8 @@ impl RunMetadata {
             trigger_source: "manual".into(),
             graph_call: None,
             conversation: None,
+            channel: None,
+            pilot: None,
             session_call: None,
             attachments: Vec::new(),
             schedule: None,

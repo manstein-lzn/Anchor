@@ -103,9 +103,10 @@ class Service:
 
 
 class Api:
-    def __init__(self, port: int):
+    def __init__(self, port: int, timeout: float = 5):
         self.base = f"http://127.0.0.1:{port}"
         self.opener = build_opener(ProxyHandler({}))
+        self.timeout = timeout
 
     def raw(self, method: str, path: str, body=None) -> tuple[int, bytes]:
         request = Request(
@@ -114,7 +115,7 @@ class Api:
             headers={"Content-Type": "application/json"},
         )
         try:
-            with self.opener.open(request, timeout=5) as response:
+            with self.opener.open(request, timeout=self.timeout) as response:
                 return response.status, response.read()
         except HTTPError as error:
             with error:

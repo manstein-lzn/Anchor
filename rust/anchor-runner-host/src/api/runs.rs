@@ -1,7 +1,139 @@
 use super::*;
+use anchor_platform_session::{ChannelInboundAdmission, TurnStatus};
+
+fn channel_attachment_manifest_matches(
+    inbound: &ChannelInboundAdmission,
+    actual: &[crate::channel_inputs::AttachmentManifest],
+) -> bool {
+    inbound.request.attachments.files.len() == actual.len()
+        && inbound
+            .request
+            .attachments
+            .files
+            .iter()
+            .zip(actual)
+            .all(|(expected, actual)| {
+                expected.name == actual.name
+                    && expected.sha256 == actual.sha256
+                    && expected.size == actual.size
+                    && expected.media_type == actual.media_type
+            })
+}
+
+async fn resolve_channel_source(
+    state: &ApiState,
+    headers: &HeaderMap,
+    request: &crate::application::ConversationAdmission,
+    attachments: &crate::channel_inputs::PreparedAttachments,
+) -> Result<Option<crate::application::ChannelRunSource>, HttpResponse> {
+    let Some(inbound_id) = request.channel_inbound.clone() else {
+        return Ok(None);
+    };
+    let owner = private_owner(state, headers);
+    let session = request.session.clone();
+    let graph = request.graph.clone();
+    let reply_node = request.reply_node.clone();
+    let previous_run = request.previous_run.clone();
+    let input_message = request
+        .input
+        .get("message")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let attachment_manifest = attachments.manifest();
+    let run_id = request.run.clone();
+    let lookup = state.clone();
+    blocking(move || {
+        let sessions = store(&lookup)?;
+        let inbound = sessions
+            .get_channel_inbound(&owner, &session, &inbound_id)
+            .map_err(session_error)?;
+        if inbound.relation.superseded_by_turn_id.is_some() {
+            return Err(error(
+                StatusCode::CONFLICT,
+                "channel inbound was superseded by a newer Turn",
+            ));
+        }
+        if inbound.request.graph != graph || inbound.request.reply_node != reply_node {
+            return Err(error(
+                StatusCode::CONFLICT,
+                "channel inbound Graph or reply node differs from the Run request",
+            ));
+        }
+        if inbound.request.text != input_message {
+            return Err(error(
+                StatusCode::CONFLICT,
+                "channel inbound text differs from the Run input",
+            ));
+        }
+        if !channel_attachment_manifest_matches(&inbound, &attachment_manifest) {
+            return Err(error(
+                StatusCode::CONFLICT,
+                "channel inbound attachment manifest differs from the Run request",
+            ));
+        }
+        if inbound.previous_run != previous_run {
+            return Err(error(
+                StatusCode::CONFLICT,
+                "previous_run does not name the previous channel Run",
+            ));
+        }
+        if inbound
+            .relation
+            .run_id
+            .as_deref()
+            .is_some_and(|run| run != run_id)
+        {
+            return Err(error(
+                StatusCode::CONFLICT,
+                "channel inbound is already bound to another Run",
+            ));
+        }
+        if inbound.relation.run_id.is_none() && inbound.turn.status != TurnStatus::Running {
+            return Err(error(
+                StatusCode::CONFLICT,
+                "channel Turn is no longer available for Graph admission",
+            ));
+        }
+        Ok(Some(crate::application::ChannelRunSource {
+            owner,
+            session,
+            inbound: inbound_id,
+            turn: inbound.relation.turn_id,
+        }))
+    })
+    .await
+}
+
+async fn settle_channel_admission_failure(
+    state: &ApiState,
+    source: &crate::application::ChannelRunSource,
+) -> Result<(), HttpResponse> {
+    let source = source.clone();
+    let state = state.clone();
+    blocking(move || {
+        let sessions = store(&state)?;
+        let turn = sessions
+            .get_turn(&source.owner, &source.session, &source.turn)
+            .map_err(session_error)?;
+        if turn.status == TurnStatus::Running {
+            sessions
+                .finish_turn(
+                    &source.owner,
+                    &source.session,
+                    &source.turn,
+                    TurnStatus::Failed,
+                    Some("Graph admission failed"),
+                )
+                .map_err(session_error)?;
+        }
+        Ok(())
+    })
+    .await
+}
 
 pub(super) async fn conversation_run(
     State(state): State<ApiState>,
+    headers: HeaderMap,
     body: Result<
         Json<crate::application::ConversationAdmission>,
         axum::extract::rejection::JsonRejection,
@@ -20,12 +152,13 @@ pub(super) async fn conversation_run(
         .map_err(|message| error(StatusCode::BAD_REQUEST, message))?;
     let attachments = crate::channel_inputs::prepare(&request.attachments)
         .map_err(|message| error(StatusCode::BAD_REQUEST, message))?;
+    let channel = resolve_channel_source(&state, &headers, &request, &attachments).await?;
     let path = graph_path(&state, &request.graph)?;
     let graph = request.graph.clone();
     let session = request.session.clone();
     let run = if let Some(run) = state
         .application
-        .retry_conversation_admission(&request, &path, &attachments)
+        .retry_conversation_admission(&request, &path, &attachments, channel.as_ref())
         .await
         .map_err(application_error)?
     {
@@ -37,12 +170,36 @@ pub(super) async fn conversation_run(
             .await
             .map_err(application_error)?;
         let (path, bundle) = load_graph_definition(&state, &graph)?;
-        state
+        let admitted = state
             .application
-            .admit_conversation(request, &path, bundle, lease, &attachments)
-            .await
-            .map_err(application_error)?
+            .admit_conversation(request, &path, bundle, lease, &attachments, channel.clone())
+            .await;
+        match admitted {
+            Ok(run) => run,
+            Err(failure) => {
+                if let Some(channel) = channel.as_ref() {
+                    settle_channel_admission_failure(&state, channel).await?;
+                }
+                return Err(application_error(failure));
+            }
+        }
     };
+    if let Some(channel) = channel {
+        let state_for_association = state.clone();
+        let run_for_association = run.clone();
+        blocking(move || {
+            store(&state_for_association)?
+                .associate_channel_run(
+                    &channel.owner,
+                    &channel.session,
+                    &channel.inbound,
+                    &run_for_association,
+                )
+                .map_err(session_error)?;
+            Ok(())
+        })
+        .await?;
+    }
     Ok((
         StatusCode::ACCEPTED,
         Json(json!({"run":run,"graph":graph,"session":session})),
@@ -87,7 +244,11 @@ pub(super) async fn trigger(
             &path,
             bundle,
             input,
-            crate::application::AdmissionOptions { objective, trigger },
+            crate::application::AdmissionOptions {
+                objective,
+                trigger,
+                pilot: None,
+            },
             graph_lease,
         )
         .await
@@ -142,6 +303,16 @@ pub(super) async fn projected_runs(state: &ApiState) -> Result<Vec<Value>, HttpR
             trigger["session"] = json!(source.session);
             trigger["reply_node"] = json!(source.reply_node);
             trigger["previous_run"] = json!(source.previous_run);
+        }
+        if let Some(source) = metadata
+            .as_ref()
+            .and_then(|metadata| metadata.channel.as_ref())
+        {
+            trigger["channel"] = json!({
+                "session": source.session,
+                "inbound": source.inbound,
+                "turn": source.turn,
+            });
         }
         let executed = record.executed_nodes();
         runs.push(json!({"session_call":metadata.as_ref().and_then(|m| m.session_call.as_ref()),"run":id,"graph":graph,"status":status(record.status),"running":active.contains(&id),"started":created,"updated":updated,"executed":executed,"objective":record.snapshot.objective,"trigger":trigger}));
@@ -221,11 +392,8 @@ pub(super) async fn get_run(
     trace_keys.sort_by_key(|key| key.durable_key());
     trace_keys.dedup();
     for key in trace_keys {
-        let messages = anchor_io_harness_runtime::node_port::trace_messages(
-            &state.data_root.join("io-harness/store"),
-            &key,
-        )
-        .map_err(|message| error(StatusCode::INTERNAL_SERVER_ERROR, message))?;
+        let messages = crate::goose_acp::trace_messages(&state.data_root, &key)
+            .map_err(|message| error(StatusCode::INTERNAL_SERVER_ERROR, message))?;
         if !messages.is_empty() {
             let trace_key = serde_json::to_string(&(&key.node_id, key.invocation))
                 .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -314,6 +482,13 @@ pub(super) async fn get_run(
         trigger["session"] = json!(source.session);
         trigger["reply_node"] = json!(source.reply_node);
         trigger["previous_run"] = json!(source.previous_run);
+    }
+    if let Some(source) = metadata.channel.as_ref() {
+        trigger["channel"] = json!({
+            "session": source.session,
+            "inbound": source.inbound,
+            "turn": source.turn,
+        });
     }
     let channel_reply = metadata.conversation.is_some()
         && state

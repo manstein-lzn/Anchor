@@ -178,6 +178,10 @@ fn reload_accepts_legacy_schedule_array_and_skips_downtime_occurrences() {
         loopback: true,
         api_keys: Vec::new(),
         schedules,
+        pilots: crate::pilot_host::PilotService::default(),
+        wecom: Default::default(),
+        channel_event_locks: Default::default(),
+        plugin_checkout: None,
     };
     let now = NaiveDateTime::parse_from_str("2026-10-06T09:01:00", "%Y-%m-%dT%H:%M:%S").unwrap();
     crate::api::schedules::skip_missed_schedules(&state, now).unwrap();

@@ -1,13 +1,25 @@
+#[allow(clippy::result_large_err)]
+mod channel_sessions;
 mod files;
 mod graphs;
+#[allow(clippy::result_large_err)]
+mod oauth;
 mod plugins;
+#[allow(clippy::result_large_err)]
 mod runs;
 mod schedules;
+#[allow(clippy::result_large_err)]
+mod sessions;
 #[cfg(test)]
 mod tests;
 mod timeline;
+#[allow(clippy::result_large_err)]
+mod turns;
+#[allow(clippy::result_large_err)]
+mod wecom;
 use super::*;
 use crate::application::{ApplicationError, RunApplication};
+#[cfg(test)]
 use anchor_graph_host::FileGraphBundleLoader;
 use anchor_runtime_rig::graph::{FileRunStore, RunStatus};
 use axum::{
@@ -18,12 +30,15 @@ use axum::{
     response::{IntoResponse, Response as HttpResponse},
     routing::{get, post},
 };
+use channel_sessions::*;
 use files::*;
 use graphs::*;
+use oauth::*;
 use plugins::*;
 use runs::*;
 use schedules::*;
 use serde_json::{Value, json};
+use sessions::*;
 use std::{
     collections::{HashMap, HashSet},
     env, io,
@@ -32,9 +47,11 @@ use std::{
 use timeline::*;
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::services::ServeDir;
+use turns::*;
 
 #[derive(Clone)]
 struct ApiState {
+    #[cfg(test)]
     bundle_root: PathBuf,
     catalog_root: PathBuf,
     data_root: PathBuf,
@@ -44,6 +61,50 @@ struct ApiState {
     loopback: bool,
     api_keys: Vec<String>,
     schedules: ScheduleStoreHandle,
+    pilots: crate::pilot_host::PilotService,
+    wecom: WecomSettings,
+    channel_event_locks:
+        std::sync::Arc<tokio::sync::Mutex<HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>>,
+    #[cfg(test)]
+    plugin_checkout: Option<std::sync::Arc<dyn anchor_library::Checkout>>,
+}
+
+#[derive(Clone, Default)]
+struct WecomSettings {
+    graph: String,
+    reply_node: String,
+    account: Option<String>,
+    users: HashSet<String>,
+}
+
+impl WecomSettings {
+    fn from_env() -> Self {
+        Self {
+            graph: env::var("ANCHOR_WECOM_GRAPH")
+                .unwrap_or_default()
+                .trim()
+                .to_owned(),
+            reply_node: env::var("ANCHOR_WECOM_REPLY_NODE")
+                .unwrap_or_else(|_| "assistant".into())
+                .trim()
+                .to_owned(),
+            account: env::var("WECOM_BOT_ID")
+                .ok()
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty()),
+            users: env::var("ANCHOR_WECOM_USERS")
+                .unwrap_or_default()
+                .split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+                .collect(),
+        }
+    }
+
+    fn allows(&self, user: &str) -> bool {
+        self.users.contains("*") || self.users.contains(user)
+    }
 }
 
 fn error(status: StatusCode, message: impl Into<String>) -> HttpResponse {
@@ -140,6 +201,7 @@ pub async fn serve() -> io::Result<()> {
         .map(PathBuf::from)
         .unwrap_or_else(|| data_root.join("state/schedules.json"));
     let state = ApiState {
+        #[cfg(test)]
         bundle_root: bundle_root.clone(),
         catalog_root: catalog_root.clone(),
         application: RunApplication::new(data_root.clone(), catalog_root.clone())
@@ -150,7 +212,15 @@ pub async fn serve() -> io::Result<()> {
         loopback,
         api_keys,
         schedules: ScheduleStore::open(schedules_path).map_err(io::Error::other)?,
+        pilots: crate::pilot_host::PilotService::default(),
+        wecom: WecomSettings::from_env(),
+        channel_event_locks: Default::default(),
+        #[cfg(test)]
+        plugin_checkout: None,
     };
+    recover_pilot_turns(&state)
+        .await
+        .map_err(io::Error::other)?;
     // A deleted configured bundle must not block service start: the Graph is
     // reported as missing and other Graphs keep serving. Detached recovery is
     // best-effort for the same reason.
@@ -199,8 +269,17 @@ fn router_with_web_root(state: ApiState, web_root: PathBuf) -> Router {
     let api = Router::new()
         .route("/health", get(|| async { Json(json!({"status":"ok"})) }))
         .route("/plugins", get(plugin_catalog))
+        .route("/plugins/install", post(install_plugin))
         .route("/plugins/{plugin}", get(plugin_detail))
         .route("/plugins/{plugin}/files/{*path}", get(plugin_file))
+        .route(
+            "/plugins/{plugin}/oauth/{server}",
+            get(oauth_status).post(authorize_oauth).delete(revoke_oauth),
+        )
+        .route(
+            "/plugins/{plugin}/authorize/{server}",
+            post(authorize_oauth),
+        )
         .route("/graphs", get(graphs))
         .route("/graphs", post(create_graph))
         .route("/graph-validation", post(validate_graph))
@@ -208,7 +287,71 @@ fn router_with_web_root(state: ApiState, web_root: PathBuf) -> Router {
             "/graphs/{graph}",
             get(graph).put(update_graph).delete(delete_graph),
         )
+        .route(
+            "/graphs/{graph}/delete-precondition",
+            get(graph_delete_precondition),
+        )
         .route("/trigger", post(trigger))
+        .route("/sessions", get(list_sessions).post(create_session))
+        .route(
+            "/sessions/{session}",
+            get(get_session).put(rename_session).delete(delete_session),
+        )
+        .route("/sessions/{session}/status", post(set_session_status))
+        .route("/sessions/{session}/events", get(session_events))
+        .route(
+            "/sessions/{session}/messages",
+            get(pilot_messages).post(session_execution_unavailable),
+        )
+        .route(
+            "/sessions/{session}/turns",
+            get(list_pilot_turns).post(create_pilot_turn),
+        )
+        .route("/sessions/{session}/stop", post(stop_pilot))
+        .route("/sessions/{session}/turns/{turn}", get(get_pilot_turn))
+        .route(
+            "/sessions/{session}/turns/{turn}/questions",
+            get(list_pilot_questions),
+        )
+        .route(
+            "/sessions/{session}/turns/{turn}/questions/{question}/answer",
+            post(answer_pilot_question),
+        )
+        .route(
+            "/sessions/{session}/turns/{turn}/events",
+            get(pilot_turn_events),
+        )
+        .route("/channel-sessions/inbound", post(admit_channel_inbound))
+        .route("/channels/wecom/events", post(wecom::receive_event))
+        .route("/channels/wecom/settlements", post(wecom::settle_delivery))
+        .route(
+            "/channel-sessions/{session}/inbounds/{inbound}",
+            get(get_channel_relation),
+        )
+        .route(
+            "/channel-sessions/{session}/inbounds/{inbound}/run",
+            post(associate_channel_run),
+        )
+        .route(
+            "/channel-sessions/{session}/turns/{turn}/deliveries",
+            post(admit_channel_delivery),
+        )
+        .route(
+            "/channel-sessions/{session}/turns/{turn}/deliveries/{key}/begin",
+            post(begin_channel_delivery),
+        )
+        .route(
+            "/channel-sessions/{session}/deliveries/{key}/settle",
+            post(settle_channel_delivery),
+        )
+        .route(
+            "/channel-sessions/{session}/deliveries/unresolved",
+            get(list_channel_deliveries),
+        )
+        .route(
+            "/channel-sessions/{session}",
+            axum::routing::delete(delete_channel_session),
+        )
         .route("/schedules", get(list_schedules).post(create_schedule))
         .route(
             "/schedules/{schedule}",

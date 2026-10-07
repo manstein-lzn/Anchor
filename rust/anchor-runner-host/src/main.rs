@@ -4,8 +4,14 @@ mod artifacts;
 mod channel_inputs;
 mod channel_tools;
 mod execution;
+mod goose_acp;
+mod goose_tool_context;
 mod local_inputs;
+#[cfg(feature = "legacy-regression")]
 mod model_registry;
+mod pilot_host;
+mod pilot_tools;
+mod resource_read;
 use artifacts::HostArtifacts;
 mod node_host;
 mod node_tools;
@@ -302,6 +308,7 @@ fn make_host_with_control(
     let sandbox = Arc::new(
         BubblewrapSandbox::new(tool_environment.authorize(policy)).map_err(|e| e.to_string())?,
     );
+    #[cfg(feature = "legacy-regression")]
     let models = model_registry::from_env()?;
     let fake_plugin_ids = env::var("ANCHOR_RUNNER_FAKE_PLUGINS")
         .unwrap_or_default()
@@ -311,7 +318,7 @@ fn make_host_with_control(
         .collect::<Vec<_>>();
     let mut mcp = tool_host::McpToolConfig::default();
     mcp.environment = tool_environment;
-    let artifacts = HostArtifacts::new(state.join("artifacts"), work_root);
+    let artifacts = HostArtifacts::new(state.join("artifacts"), work_root.clone());
     let tools = tool_host::PluginToolHost::new(fake_plugin_ids);
     let io_resolver = Arc::new(node_host::HostIoResolver::new(
         artifacts.clone(),
@@ -322,7 +329,14 @@ fn make_host_with_control(
         anchor_runtime_rig::graph::FileRunStore::new(state.join("runs")),
         local_inputs::LocalInputs::from_env(state.clone())?,
     ));
-    let io_nodes = models.as_ref().map(|models| {
+    let goose_nodes = goose_acp::GooseNodePort::from_env(
+        &state,
+        &work_root,
+        Arc::clone(&io_resolver),
+        Arc::clone(&sandbox),
+    )?;
+    #[cfg(feature = "legacy-regression")]
+    let io_nodes = models.as_ref().filter(|_| goose_nodes.is_none()).map(|models| {
         anchor_io_harness_runtime::node_port::IoHarnessNodePort::new_with_default_policy_and_registry(
             state.join("io-harness/facts"),
             state.join("io-harness/store"),
@@ -344,7 +358,9 @@ fn make_host_with_control(
             facts_root: state.join("facts"),
             io_resolver,
             mcp,
+            #[cfg(feature = "legacy-regression")]
             io_nodes,
+            goose_nodes,
         },
         control,
     ))

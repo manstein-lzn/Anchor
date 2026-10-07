@@ -6,7 +6,8 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { toEntries } from './Transcript';
+import { Transcript, toEntries } from './Transcript';
+import { renderToStaticMarkup } from 'react-dom/server';
 import type { TraceMessage } from './model';
 
 const said = (text: string, commands: string[] = []): TraceMessage =>
@@ -75,5 +76,42 @@ describe('what it said and what it was told', () => {
     expect(entries).toEqual([
       { kind: 'note', role: '任务', text: '# Task\n\nanswer a question', truncated: false },
     ]);
+  });
+});
+
+describe('native tool identity and media', () => {
+  const image = { type: 'content', content: { type: 'image', mimeType: 'image/png', data: 'AAEC' } };
+  it('pairs interleaved results by identity rather than arrival order', () => {
+    const entries = toEntries([
+      { ...said('', ['first']), tool_call_id: 'one', status: 'in_progress' },
+      { ...said('', ['second']), tool_call_id: 'two', status: 'completed' },
+      { ...result('second result'), tool_call_id: 'two', status: 'completed', contents: [image] },
+      { ...result('first result'), tool_call_id: 'one', status: 'completed' },
+    ]);
+    expect(entries[0]).toMatchObject({ kind: 'call', command: 'first', output: 'first result', exit: 'completed' });
+    expect(entries[1]).toMatchObject({ kind: 'call', command: 'second', output: 'second result', contents: [image] });
+  });
+  it('keeps an identified orphan as a note instead of consuming a legacy pending command', () => {
+    const entries = toEntries([said('', ['legacy']), { ...result('orphan'), tool_call_id: 'missing', contents: [image] }, result('legacy result')]);
+    expect(entries[0]).toMatchObject({ kind: 'note', text: 'orphan', contents: [image] });
+    expect(entries[1]).toMatchObject({ kind: 'call', command: 'legacy', output: 'legacy result' });
+  });
+  it('keeps user and assistant image-only chunks and separates reasoning from speech', () => {
+    const entries = toEntries([
+      { role: 'user', text: '', contents: [image] },
+      { role: 'assistant', text: '', contents: [image] },
+      { role: 'assistant', text: 'private thought', thinking: true },
+    ]);
+    expect(entries[0]).toMatchObject({ kind: 'note', role: '任务', contents: [image] });
+    expect(entries[1]).toMatchObject({ kind: 'said', contents: [image] });
+    expect(entries[2]).toMatchObject({ kind: 'note', role: '思考', text: 'private thought' });
+  });
+  it('does not style a successful native result as failure and preserves unknown text', () => {
+    const html = renderToStaticMarkup(<Transcript messages={[
+      { ...said('', ['native']), tool_call_id: 'native', status: 'completed' },
+      { ...result('External outcome is unknown; inspect actual state.'), tool_call_id: 'native' },
+    ]} />);
+    expect(html).not.toContain('call-exit bad');
+    expect(html).toContain('External outcome is unknown');
   });
 });

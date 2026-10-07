@@ -1,8 +1,11 @@
 //! Run admission and control. Graph routing and node scheduling belong to GraphRunner.
 mod conversations;
+pub(crate) mod graphs;
 pub(crate) mod metadata;
+mod plugins;
 pub(crate) mod session_calls;
 pub(crate) use conversations::ConversationAdmission;
+pub(crate) use metadata::ChannelRunSource;
 pub(crate) use metadata::ConversationSource;
 pub(crate) use metadata::RunMetadata;
 pub(crate) use metadata::RunTrigger;
@@ -39,6 +42,7 @@ pub(crate) enum ApplicationError {
 pub(crate) struct AdmissionOptions {
     pub(crate) objective: Option<String>,
     pub(crate) trigger: RunTrigger,
+    pub(crate) pilot: Option<metadata::PilotRunSource>,
 }
 
 impl From<GraphError> for ApplicationError {
@@ -62,6 +66,7 @@ pub(crate) struct RunApplication {
     configured_graph: Option<(String, PathBuf)>,
     active: Arc<Mutex<HashMap<String, ActiveRun>>>,
     catalog_mutations: Arc<Mutex<()>>,
+    executor: Option<tokio::runtime::Handle>,
 }
 
 impl RunApplication {
@@ -72,6 +77,7 @@ impl RunApplication {
             configured_graph: None,
             active: Arc::new(Mutex::new(HashMap::new())),
             catalog_mutations: Arc::new(Mutex::new(())),
+            executor: tokio::runtime::Handle::try_current().ok(),
         }
     }
 
@@ -408,7 +414,18 @@ impl RunApplication {
         workspace_root: &Path,
     ) -> Result<usize, ApplicationError> {
         let graph_path = Self::graph_identity(bundle_path)?;
-        let _graph_lease = self.acquire_graph_lease_waiting(&graph_path).await?;
+        let graph_lease = self.acquire_graph_lease_waiting(&graph_path).await?;
+        self.delete_graph_with_lease(bundle_path, workspace_root, graph_lease)
+            .await
+    }
+
+    pub(crate) async fn delete_graph_with_lease(
+        &self,
+        bundle_path: &Path,
+        workspace_root: &Path,
+        _graph_lease: Box<dyn RunLease>,
+    ) -> Result<usize, ApplicationError> {
+        let graph_path = Self::graph_identity(bundle_path)?;
         let callers = self.graph_callers(&graph_path)?;
         if !callers.is_empty() {
             return Err(ApplicationError::Conflict(format!(
@@ -457,11 +474,13 @@ impl RunApplication {
             }
         }
         for hint in conversations.into_values() {
-            anchor_io_harness_runtime::node_port::remove_conversation(
-                &self.data_root.join("io-harness/store"),
-                &hint,
+            crate::goose_acp::remove_conversation(
+                &workspace_root.join(".goose-process"),
+                &hint.key,
             )
             .map_err(ApplicationError::Storage)?;
+            run_data::remove_legacy_conversation(&self.data_root, &hint.key)
+                .map_err(ApplicationError::Storage)?;
         }
         for (id, record) in &targets {
             run_data::delete_run_data(record, &self.data_root, workspace_root)
@@ -626,6 +645,7 @@ impl RunApplication {
             source,
         )?;
         options.trigger.apply(&mut metadata);
+        metadata.pilot = options.pilot;
         create_durable_directory(&self.data_root.join("runs")).map_err(storage)?;
         let lease = self.store().acquire_lease(&run_id)?;
         // Metadata is saved first: a crash can leave unused metadata, never an accepted
@@ -643,7 +663,7 @@ impl RunApplication {
         // The durable snapshot and immutable identity now serialize future
         // admissions. The catalog lock only protects reading/writing the bundle.
         drop(graph_lease);
-        self.spawn(record, execution);
+        self.spawn(record, execution)?;
         Ok(run_id)
     }
 
@@ -667,6 +687,7 @@ impl RunApplication {
     }
 
     fn check_store(&self) -> Result<(), ApplicationError> {
+        self.executor()?;
         // The host uses deployment environment, never HTTP-supplied paths.
         let expected = self
             .data_root
@@ -911,7 +932,7 @@ impl RunApplication {
         );
         drop(lease);
         drop(graph_lease);
-        self.spawn(record, execution);
+        self.spawn(record, execution)?;
         Ok(())
     }
 
@@ -1113,7 +1134,7 @@ impl RunApplication {
         );
         drop(_lease);
         drop(_graph_lease);
-        self.spawn(record, execution);
+        self.spawn(record, execution)?;
         Ok(())
     }
 
@@ -1190,7 +1211,7 @@ impl RunApplication {
         );
         drop(lease);
         drop(active);
-        self.spawn(record, execution);
+        self.spawn(record, execution)?;
         Ok(())
     }
 
@@ -1242,7 +1263,7 @@ impl RunApplication {
             },
         );
         let cancel = control.cancellation.clone();
-        tokio::spawn(async move {
+        self.executor()?.spawn(async move {
             while !parent_cancellation.load(Ordering::Acquire) {
                 if cancel.load(Ordering::Acquire) {
                     return;
@@ -1301,7 +1322,7 @@ impl RunApplication {
             {
                 let application = self.clone();
                 let parent_run = source.parent_run.clone();
-                tokio::spawn(async move {
+                self.executor()?.spawn(async move {
                     tokio::task::yield_now().await;
                     if let Err(error) = application
                         .control_expected(
@@ -1319,9 +1340,19 @@ impl RunApplication {
         })
     }
 
-    fn spawn(&self, record: GraphRunRecord, execution: PreparedExecution) {
+    fn executor(&self) -> Result<&tokio::runtime::Handle, ApplicationError> {
+        self.executor.as_ref().ok_or_else(|| {
+            ApplicationError::Invalid("Run execution requires the owning Host executor".into())
+        })
+    }
+
+    fn spawn(
+        &self,
+        record: GraphRunRecord,
+        execution: PreparedExecution,
+    ) -> Result<(), ApplicationError> {
         let application = self.clone();
-        tokio::spawn(async move {
+        self.executor()?.spawn(async move {
             let run_id = record.run_id.clone();
             let result = execution.run(record).await;
             let (graph, status) = match result {
@@ -1359,10 +1390,14 @@ impl RunApplication {
                     }
                 }
             }
+            if let Err(error) = application.settle_channel_run(&run_id, status) {
+                eprintln!("Run {run_id} channel Turn settlement failed: {error:?}");
+            }
             if let Err(error) = application.child_finished(&run_id, &graph, status).await {
                 eprintln!("Run {run_id} completion callback failed: {error:?}");
             }
         });
+        Ok(())
     }
 }
 

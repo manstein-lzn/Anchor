@@ -1,0 +1,13 @@
+.pilot-question { margin: 16px 0; padding: 16px; border: 1px solid var(--line); border-radius: 10px; background: #f8faf9; }
+.pilot-question > p { margin-bottom: 14px; font-size: 14px; }
+.pilot-question form { display: grid; gap: 14px; }
+.pilot-question-field { display: grid; gap: 7px; font-size: 12px; }
+.pilot-question-field label { color: var(--ink); font-weight: 550; }
+.pilot-question-field :is(input, select) { width: 100%; box-sizing: border-box; }
+.pilot-question-field small { color: var(--muted); }
+.pilot-question-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+.pilot-question-error { margin: 0; color: var(--red); font-size: 12px; overflow-wrap: anywhere; }
+.pilot-question-answer { display: grid; gap: 8px; font-size: 12px; }
+.pilot-question-answer > div { display: grid; grid-template-columns: minmax(80px, 1fr) minmax(0, 3fr); gap: 12px; }
+.pilot-question-answer dt { color: var(--muted); }
+.pilot-question-answer dd { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }

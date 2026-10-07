@@ -3,6 +3,7 @@
 
 use std::{collections::BTreeMap, fmt, sync::Arc};
 
+use anchor_runtime_rig::ToolResultContent;
 use rmcp::{
     ServiceExt,
     model::{CallToolRequestParams, ClientInfo, Tool},
@@ -12,6 +13,10 @@ use rmcp::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
+
+mod contents;
+mod images;
+pub use images::{ImageBudget, validate_image_bytes};
 
 /// A credential whose value is never included in Debug output or serde state.
 #[derive(Clone, Default)]
@@ -277,6 +282,7 @@ impl McpHost {
     ///
     /// This preserves Rig's native MCP result handling and liveness checks;
     /// The catalog selects the server; the MCP handshake supplies its tools.
+    #[cfg(feature = "rig-legacy")]
     pub fn rig_tools(&self) -> Vec<rig_core::tool::DynamicTool> {
         self.inventory
             .values()
@@ -305,19 +311,25 @@ impl McpHost {
             is_error: response.is_error.unwrap_or(false),
         })
     }
-    /// Keep MCP structured data and rich content through Rig's public adapter.
+    pub async fn call_contents(
+        &self,
+        tool_name: &str,
+        arguments: Value,
+    ) -> Result<Vec<ToolResultContent>, McpHostError> {
+        let response = self.call_raw(tool_name, arguments).await?;
+        if response.is_error.unwrap_or(false) {
+            return Err(McpHostError::Call("remote tool reported failure".into()));
+        }
+        contents::result_contents(&response)
+    }
+
+    #[cfg(feature = "rig-legacy")]
     pub async fn call_rig(
         &self,
         tool_name: &str,
         arguments: Value,
     ) -> Result<Vec<rig_core::message::ToolResultContent>, McpHostError> {
-        let response = self.call_raw(tool_name, arguments).await?;
-        if response.is_error.unwrap_or(false) {
-            return Err(McpHostError::Call("remote tool reported failure".into()));
-        }
-        rig_rmcp::mcp_result_output(&response)
-            .map(|output| output.into_content())
-            .map_err(|_| McpHostError::Encode("unsupported tool result".into()))
+        self.call_contents(tool_name, arguments).await
     }
 
     async fn call_raw(
@@ -347,6 +359,7 @@ impl McpHost {
 
 /// Publicly re-export Rig's adapter type so the host can register a bound
 /// inventory as Rig DynamicTools without implementing tool conversion itself.
+#[cfg(feature = "rig-legacy")]
 pub use rig_rmcp::{McpTool, tools_from_server};
 
 #[cfg(test)]
@@ -401,6 +414,14 @@ mod tests {
             request: CallToolRequestParams,
             _context: RequestContext<RoleServer>,
         ) -> Result<CallToolResult, ErrorData> {
+            if let Some(response) = request
+                .arguments
+                .as_ref()
+                .and_then(|arguments| arguments.get("response"))
+            {
+                return serde_json::from_value(response.clone())
+                    .map_err(|_| ErrorData::invalid_params("invalid fixture response", None));
+            }
             let value = request
                 .arguments
                 .as_ref()
@@ -449,9 +470,113 @@ mod tests {
             .await
             .expect("all inventory tools are bound");
         assert!(!outside.is_error);
-        let rig_tools = host.rig_tools();
-        assert_eq!(rig_tools.len(), 2);
-        assert_eq!(rig_tools[0].name(), "echo");
+        #[cfg(feature = "rig-legacy")]
+        {
+            let rig_tools = host.rig_tools();
+            assert_eq!(rig_tools.len(), 2);
+            assert_eq!(rig_tools[0].name(), "echo");
+        }
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn call_contents_uses_bound_rmcp_service_and_preserves_structured_results() {
+        let (host, server) = connected_fixture().await;
+        let response = CallToolResult::structured(serde_json::json!({"value": "native"}));
+        let contents = host
+            .call_contents("echo", serde_json::json!({"response": response}))
+            .await
+            .unwrap();
+        assert_eq!(
+            contents,
+            vec![ToolResultContent::json(
+                serde_json::json!({"value": "native"})
+            )]
+        );
+        let literal = host
+            .call_contents("echo", serde_json::json!({"value": "literal"}))
+            .await
+            .unwrap();
+        assert_eq!(literal[0].as_text(), Some("\"literal\""));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn call_contents_keeps_remote_failure_inventory_and_argument_guards() {
+        let (host, server) = connected_fixture().await;
+        let response = CallToolResult::error(vec![ContentBlock::text("remote failure")]);
+        assert!(matches!(
+            host.call_contents("echo", serde_json::json!({"response": response})).await,
+            Err(McpHostError::Call(message)) if message == "remote tool reported failure"
+        ));
+        assert!(matches!(
+            host.call_contents("not_bound", Value::Null).await,
+            Err(McpHostError::NotBound(name)) if name == "not_bound"
+        ));
+        assert!(matches!(
+            host.call_contents("echo", serde_json::json!([1, 2])).await,
+            Err(McpHostError::Call(message)) if message.contains("JSON object")
+        ));
+        server.abort();
+    }
+
+    #[cfg(not(feature = "rig-legacy"))]
+    #[tokio::test]
+    async fn invalid_native_image_is_rejected_and_raw_call_keeps_complete_content() {
+        let (host, server) = connected_fixture().await;
+        let response = CallToolResult::success(vec![ContentBlock::image("AAEC", "image/png")]);
+        let arguments = serde_json::json!({"response": response});
+        assert!(matches!(
+            host.call_contents("echo", arguments.clone()).await,
+            Err(McpHostError::Encode(message)) if message.contains("invalid image")
+        ));
+        let raw = host.call("echo", arguments).await.unwrap();
+        assert_eq!(
+            raw.content,
+            vec![serde_json::json!({"type": "image", "data": "AAEC", "mimeType": "image/png"})]
+        );
+        server.abort();
+    }
+
+    #[cfg(not(feature = "rig-legacy"))]
+    #[tokio::test]
+    async fn valid_native_image_remains_typed_through_the_bound_mcp_service() {
+        use base64::{Engine, engine::general_purpose::STANDARD};
+        let (host, server) = connected_fixture().await;
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgb8(2, 2)
+            .write_to(&mut bytes, image::ImageFormat::Png)
+            .unwrap();
+        let data = STANDARD.encode(bytes.into_inner());
+        let response = CallToolResult::success(vec![
+            ContentBlock::text("before"),
+            ContentBlock::image(&data, "image/png"),
+            ContentBlock::text("after"),
+        ]);
+        let contents = host
+            .call_contents("echo", serde_json::json!({"response":response}))
+            .await
+            .unwrap();
+        assert_eq!(
+            contents,
+            vec![
+                ToolResultContent::text("before"),
+                ToolResultContent::image(&data, "image/png"),
+                ToolResultContent::text("after")
+            ]
+        );
+        server.abort();
+    }
+
+    #[cfg(feature = "rig-legacy")]
+    #[tokio::test]
+    async fn legacy_call_rig_remains_an_alias_with_typed_media_support() {
+        let (host, server) = connected_fixture().await;
+        let response = CallToolResult::success(vec![ContentBlock::image("AAEC", "image/png")]);
+        let arguments = serde_json::json!({"response": response});
+        let contents = host.call_contents("echo", arguments.clone()).await.unwrap();
+        assert!(matches!(contents[0], ToolResultContent::Image(_)));
+        assert_eq!(host.call_rig("echo", arguments).await.unwrap(), contents);
         server.abort();
     }
 

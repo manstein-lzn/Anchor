@@ -159,6 +159,10 @@ export type TraceMessage = {
    *  believing it is all of it. */
   truncated?: boolean;
   exit_status?: string;
+  tool_call_id?: string;
+  status?: string;
+  thinking?: boolean;
+  contents?: unknown[];
 };
 
 /** One file in a node's workspace, as the listing reports it. */

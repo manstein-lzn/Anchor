@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+
+binary=${ANCHOR_SCHOLARLY_BINARY:-anchor-scholarly}
+exec "$binary" mcp "$@"

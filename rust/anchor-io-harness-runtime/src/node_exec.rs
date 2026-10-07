@@ -409,7 +409,7 @@ fn completion_schema(
 /// io-harness workspace tools execute against the host workspace directly.
 /// Anchor owns filesystem/process access through its ToolPort and Bubblewrap
 /// adapter, so the harness-native capabilities must never become a bypass.
-fn anchor_tool_mask() -> ToolMask {
+pub(crate) fn anchor_tool_mask() -> ToolMask {
     ToolMask::withholding([
         io_harness::tools::WRITE_FILE_TOOL,
         io_harness::tools::EDIT_FILE_TOOL,
@@ -467,7 +467,9 @@ fn anchor_tool_mask() -> ToolMask {
     ])
 }
 
-fn anchor_tools(port: Arc<dyn ToolPort>) -> Result<Toolbox, IoHarnessNodeExecutionError> {
+pub(crate) fn anchor_tools(
+    port: Arc<dyn ToolPort>,
+) -> Result<Toolbox, IoHarnessNodeExecutionError> {
     let mut tools = Toolbox::new();
     for definition in port.definitions() {
         if definition.name == crate::completion::TOOL_NAME {

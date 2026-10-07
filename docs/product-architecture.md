@@ -8,9 +8,9 @@
 
 2026-09-26 收敛决定：用户要的是保存 Agent 工作记录、重开原会话后继续工作。一般会话恢复以持续写入的工作 JSONL 为依据，由 Agent 查询现场、检查文件和运行测试后续做；不建设通用审批平台或跨存储事务。2026-10-03 用户进一步收敛 Rust io-harness 的未决副作用路径：保留原 Graph Run 与 invocation，普通“继续”将未决工具事实作为恢复上下文交给 Agent；不自动重放，也不把 Retry、Completed、Abort 暴露为用户流程。外部副作用仍不承诺 exactly-once。开发顺序与验收状态只维护在 [Pilot 开发计划](pilot-development-plan.md)。
 
-进一步约定：现有 Python/Pilot 路径优先复用 PydanticAI/Harness 公开接口。Rust-native AgentNode 统一由 io-harness 承担 Agent loop、上下文、持久化、compaction 和工具效果恢复；Rig 如保留，只作为 Provider transport adapter。Anchor 不自研第二套通用 Harness，继续拥有 Graph/Run/Artifact/Sandbox/Plugin 外层事实。记忆和计划不列为 Anchor 自研模块，研究目标与证据验收属于研究 Graph/Plugin 业务。
+当前方向（2026-10-06 用户决定）：Rust-native AgentNode 与 Pilot 统一迁移到 Goose，通过 ACP 交互、MCP 暴露授权工具；io-harness 与 Rig 不再是目标依赖，旧路径只在迁移期间隔离保留。Goose 承担 Agent loop、Provider、原生会话与 compaction；Anchor 不自研第二套通用 Harness，继续拥有 Graph/Run/Artifact/Sandbox/Plugin 和平台 Session/Turn 事实。预算控制暂不列为迁移门槛，优先完成任务；权限、取消和现场核查后继续不放弃。实施取舍见 [Goose-only Runtime 迁移决定](goose-runtime-migration.md)，不是默认后端已经切换的声明。记忆和计划不列为 Anchor 自研模块，研究目标与证据验收属于研究 Graph/Plugin 业务。
 
-2026-10-03 Rust-native 方向决策更新：用户不要求 Rust 完全兼容旧 Python 平台或 Harness，并明确开发阶段所有 AgentNode 直接使用 io-harness。Rust Runtime 以 io-harness 作为 Agent loop、上下文、单节点持久化和恢复基础；Rig 只负责 Provider transport，不参与 Agent loop。Anchor 定义 Graph Run、权限、Sandbox、Plugin、Artifact 和外层恢复事实，不复制 Harness 能力。现有 Python/PydanticAI/Harness 保留为独立 legacy 宿主，不能反向决定 Rust-native 产品核心。
+历史方向（2026-10-03，执行框架选择已被上述 Goose 决定替代）：用户不要求 Rust 完全兼容旧 Python 平台或 Harness，开发阶段曾统一使用 io-harness 负责 Agent loop、上下文、单节点持久化和恢复，Rig 只负责 Provider transport。原有证据和记录保留，不自动认作 Goose 产品验收。现有 Python/PydanticAI/Harness 是独立 legacy 宿主，不能反向决定 Rust-native 产品核心。
 
 这里的兼容目标是**产品形态兼容**，不是实现兼容：用户仍然通过 Graph、AgentNode、OpNode、Plugin、Run、Session 和独立 Graph 包完成同类工作，能够观察执行、控制运行、读取产物并从中断处继续；Rust 不需要读取 Python 的 `run.json`、复刻 Harness 的内部记录、保留 Python RPC，或维持相同的内部字段和调用顺序。用户可见行为发生变化时，必须在 Rust-native 产品契约和验收中明确说明。
 
@@ -44,7 +44,7 @@ Session（用户与 Anchor Pilot 的长期关系）
 2. **极简对象模型**：Graph、AgentNode、OpNode、Plugin、Run、Session 是当前核心对象。不要为了形式主义增加 Graph 版本平台或第二套 Agent 内核；Copilot 临时构建 Graph 的产品需求已提出，其是否需要独立生命周期尚未决定。
 3. **能力渐进披露**：Plugin 先给 Agent 名称和短描述，需要时再读取说明、知识和工具用法。能力挂载可见，实际调用另有运行记录。
 4. **智能与机械事实分工**：Agent 负责理解、规划、核查现场和决定如何继续；代码负责保存和加载记录、权限、路径、提交及请求去重，不替 Agent 建立业务恢复决策平台。
-5. **用户始终可控**：运行可以暂停、恢复、停止；需要用户决定时进入 `waiting_user`；不使用固定 `max_xxx` 伪装研究质量或收敛。资源预算是用户明确的运行约束，不是任务完成判据。
+5. **用户始终可控**：运行可以暂停、恢复、停止；需要用户决定时进入 `waiting_user`；不使用固定 `max_xxx` 伪装研究质量或收敛。资源预算不是任务完成判据；2026-10-06 用户决定暂不实现预算控制，也不将其作为 Goose 迁移门槛，不影响权限、取消和稳定性边界。
 6. **恢复是正常路径**：用户消息、模型输出、工具调用与结果及时保存。进程退出后加载已保存的历史，缺少结果如实标明，允许 Agent 核查后继续；不以外部操作 exactly-once 为目标。
 7. **快照而非隐式共享**：下游默认读取上游 commit 对应的只读快照；需要时可查询该快照的祖先历史。不同 Run 之间不隐式继承工作区。
 8. **透明可预测**：Graph UI、运行记录和 Pilot 对话使用相同的 Graph、Node、Plugin、Run 标识，不在界面背后制造另一套隐藏流程。
@@ -60,7 +60,7 @@ Session（用户与 Anchor Pilot 的长期关系）
 | HTTP、CLI、企业微信等入口协议、身份和请求格式 | 入口适配器 | Graph 调度、节点执行、持久化内部细节 |
 | Run 接纳/控制、Session 与 Run 的协调、入口共用的应用用例 | 应用协调服务 | 模型循环、Graph 的路由语义、渠道专属业务流程 |
 | Graph 定义解析、静态校验、单 Run 的路由/反馈/并行调度 | Graph 编译与 Runner | HTTP、Session 展示、研究或周报的业务判断 |
-| Agent/Op 单节点执行、结构化请求/结果、Rig 或 legacy Harness 接入 | Node 契约与运行时 | Graph 整体调度、服务 API、业务流程状态 |
+| Agent/Op 单节点执行、结构化请求/结果、Goose ACP 或 legacy 执行器接入 | Node 契约与运行时 | Graph 整体调度、服务 API、业务流程状态 |
 | 文件、网络、进程、凭证和隔离执行 | Runtime / Sandbox | 让 Agent 提示词代替权限控制 |
 | 可复用的领域能力、工具说明和外部系统接入 | Plugin / Library | 自动成为 Anchor 核心依赖或取得宿主权限 |
 | 研究、周报、审查等特定目标及其验收标准 | 普通 Graph / Plugin | 通用 Runner 中的项目专属分支 |
@@ -82,7 +82,7 @@ Session（用户与 Anchor Pilot 的长期关系）
 
 ### 评审新设计时依次问
 
-1. 哪个已确认的用户结果或已观察到的失败要求这项能力？现有 Graph、Plugin、Rig、legacy PydanticAI/Harness 或存储能否直接支持？
+1. 哪个已确认的用户结果或已观察到的失败要求这项能力？现有 Graph、Plugin、Goose 公开接口、legacy 执行器或存储能否直接支持？
 2. 哪个对象或模块拥有唯一事实和不变量？其他模块能否只通过小契约调用它，而不读写它的私有字典、表或临时文件？
 3. 这是语义判断还是机械约束？Agent 负责理解、取舍和综合；代码负责权限、schema、身份、路由执行、持久化和可机械验证的门禁。
 4. 新状态、队列、缓存、服务、框架或配置是否减少了端到端复杂度？它的删除、恢复、失败和测试路径是什么？
@@ -102,9 +102,11 @@ Graph 包只带入显式声明的资源及可验证的来源/版本信息。模�
 
 ### Rust 共享 Runtime Kernel（长期技术方向）
 
+2026-10-06 用户确认扩大目标：Anchor 平台服务端和官方可执行工具/集成均迁移到 Rust，保留现有 React/TypeScript WebUI；标准生产部署不要求 Python/venv。此前仅 Kernel 替代和允许保留 Python 宿主是迁移历史，不再是最终交付边界。当前实现仍为混合状态，迁移事实所有者、兼容规则及出口见 [Rust 平台交付决定](rust-platform-target.md)，实施见 [全 Rust 平台计划](rust-platform-development-plan.md)。这不要求改写外部服务或所有第三方 Plugin。
+
 用户希望 Anchor 的底层 Runtime Kernel 长期以 Rust 实现。Rust 是平台与精简交付共同调用的内核，而不是给轻量版另写一套 Runner；HTTP/WebUI/Session/Scheduler/渠道等能力作为可组合宿主。Kernel 的职责边界围绕 Graph 校验与执行、Run 调度/状态、节点调用契约、资源和权限边界，以及必要的运行数据格式逐步收敛。
 
-Rust-native AgentNode 使用 io-harness 作为唯一 Agent loop、上下文与单节点持久化/恢复层；Rig 仅可通过 Provider adapter 提供模型 transport。Anchor 保持 Graph Run、Sandbox、Plugin、Artifact 和宿主权限事实，不与 Harness 重复实现上下文或工具循环。Python PydanticAI/Harness 是迁移期 legacy 宿主，不约束 Rust 核心。OpNode 和外部 Plugin 经明确的进程/MCP 接口运行。
+Rust-native AgentNode 与 Pilot 的唯一目标执行层是固定版本 Goose，通过 ACP 接入，不再以 io-harness/Rig 组装 Agent。Anchor 保持 Graph Run、Sandbox、Plugin、Artifact、平台 Session/Turn 和宿主权限事实，不与 Goose 重复实现上下文或工具循环。Python PydanticAI/Harness 及旧 Rust 执行器是隔离的迁移历史，不约束新核心。OpNode 和外部 Plugin 经明确的进程/MCP 接口运行。当前实现及迁移出口仍需分别验收。
 
 2026-10-05 用户明确：Rust 化范围是核心 Runtime。用户编排的 Graph 和既有 Codex 风格 Plugin 保持原有格式与用法，Plugin 可使用 Python、Node.js、脚本、独立解释器环境或 MCP 服务。迁移只补适配与接线，不要求重写业务工具，不另立 Rust Plugin 规范。二进制交付消除的是核心 Runtime 对 Python 源码与依赖链的要求；选用 Plugin 的外部依赖仍由部署者提供，并通过宿主授权进入沙箱。
 
@@ -121,8 +123,8 @@ Rust-native AgentNode 使用 io-harness 作为唯一 Agent loop、上下文与�
 - 每个 Graph Run 由一个协调者有序推进并更新 Run 状态。只有 Graph 明确声明且配对合法的 fanout/join 区域才在同一 Run 内并发；工作节点不能私自推进其他节点或竞争写 Run 状态。
 - 普通 AgentNode 和 OpNode 继续经过同一 Graph 执行契约。AgentNode 不成为隐藏调度器；OpNode 不绕过既有输入、沙箱、取消、提交和恢复边界。
 - Graph 与 Plugin 是可演进的用户资产；研究和周报等目标通过它们表达。只有对多类 Graph 都成立的执行语义才进入通用 Runner。
-- Python legacy 路径优先调用固定依赖版本公开支持的 PydanticAI/Harness 接口；Rust-native AgentNode 优先调用固定版本 io-harness；Rig 只作为 Provider transport adapter，Anchor 只实现产品需要的 Graph/Run/Artifact/Sandbox/Plugin 边界。
-- 恢复以持久化事实为依据。副作用结果未知时不把“重试”伪装为安全；由适配器、Runner、io-harness/legacy Harness 和业务 Graph 各自承担其层级可验证的恢复责任。
+- Python legacy 路径优先调用固定依赖版本公开支持的 PydanticAI/Harness 接口；Rust-native AgentNode 与 Pilot 优先复用固定 Goose 的公开 ACP/MCP 能力，Anchor 只实现产品需要的外层事实和权限边界，不重建 Agent loop。
+- 恢复以持久化事实为依据。副作用结果未知时不把“重试”伪装为安全；由适配器、Runner、Goose/legacy 执行器和业务 Graph 各自承担其层级可验证的恢复责任。
 - Run、Session、Turn、Node、Plugin 与 Graph 身份跨 API、文件记录和 UI 保持一致。UI 可汇总事实，但不能成为运行状态的权威来源。
 
 每项跨模块改动至少在设计或评审中说清：归属层、调用契约、事实所有者、失败/恢复语义和可执行验收。小型局部改动不要求另写 ADR；当决定新增持久对象、跨 Run 并发语义、权限边界或不可逆迁移时，记录 ADR 并冻结契约后再并行实施。
@@ -145,7 +147,7 @@ Agent 的共享 `agents` 配置只是模型、指令、权限和读写声明的�
 
 用户希望系统级 Pilot 持续可用，并能通过对话管理工作流。系统保护、控制能力的组织方式及它与普通 Graph 的生命周期关系，留待当前续聊目标完成后再讨论；不预定系统目录、注册字段、控制 Plugin 或升级机制。
 
-当前代码中的 Pilot 是可用的 PydanticAI Agent 和 Session 入口；它不是已经确定的系统 Pilot Graph，也不代表上面这些产品决策已经完成。
+生产 legacy Pilot 保留 PydanticAI Agent/Session 入口；标准 Rust Host 的 Pilot 已直接共用 Goose ACP/MCP，原生提问与精确删除确认的范围见 A117。两者都不是已经确定的系统 Pilot Graph，也不代表上面这些产品决策已经完成。
 
 ## Session、对话和 Run
 
@@ -339,6 +341,8 @@ Plugin 的运行绑定摘要写入 Run，记录当时解析到的来源和内容
 当前已接通长期 Session 与普通助手 Graph 的直接绑定：一条新消息启动一个 Run，同一用户补充消息取消旧 Run，保存历史和未完成文件后接续；不同用户可以并发执行同一 Graph。模型历史复用 Harness 原生记录和压缩，Plugin 仍通过既有节点沙箱调用。首期由通道回复来源会话。机器人 SDK 主动推送已通过 Plugin 挂载的运行时工具接线，沿现有长连接发送获授权的 Markdown 通知；接收对象范围仍需平台验证。附件文本提取、原生图片输入、summary 持续输出和图文回复已接入，并经隔离真实 provider 验证，四项真实企业微信平台验收待做。企业微信审批能力需另外接入。能力对照见 [SDK 核查](wecom-sdk-capability-audit.md)。
 
 2026-10-05 Rust 接线边界：文字 Graph/通道 Session 沿用上述用户模型，Python 持有入口、会话与投递，Rust 持有 Graph Run，io-harness 原生 Session 持有逐节点历史。前驱现场通过只读 `/previous` 传递；结果未知的调用保留为事实，不自动重放。会话 Run 暂不支持单条历史删除，整 Graph 删除清理完整原生会话；有保留 Rust Run 的 Session 不可删除。渠道附件已由 Python 入口冻结为同一份提取/上传字节，Rust 持有 Run 内容、hash、MIME 和只读 `/in/channel`，配置视觉 wire model 后图片进入原生模型输入，并通过两用户、删除源文件、去重、重启和真实 `deepseek-flash` 验收。摘要增量和完整业务组合仍属后续 Rust 切片；`call.session` wait/detach 已接通并完成本地 ACK/真实模型验收；上文完整渠道能力是 Python 路径的现状。
+
+2026-10-07 Goose 标准路径边界：A119 已按相同产品契约复用可信 Graph/channel lineage 和固定 Goose 原生 Session；逐节点 scope、workspace/Artifact、只读前驱、原生发送身份与未知效果核查已通过确定性小图，另有默认模型 Chat 两轮/重启证据。冻结图片已通过原生 ACP 输入传输验收；真实 vision、公网渠道、摘要/媒体 UI 和全部渠道组合仍待验收。旧 Python/io-harness 证据保留，不自动变成 Goose 产品证据，生产路径未切换。
 
 ### 通道能力与平台适配器
 

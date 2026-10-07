@@ -4,6 +4,7 @@ import { api, ApiError } from './api';
 import { Markdown } from './markdown';
 import { PilotTurn, type Turn } from './PilotTurn';
 import { SessionActions } from './SessionActions';
+import { PilotQuestionHistory } from './PilotQuestionHistory';
 
 type Session = {
   id: string; title?: string; status: string; waiting_reason: string; updated_at: string;
@@ -36,6 +37,10 @@ export function Pilot({ session = '', onSession }: { session?: string; onSession
   const selectedRef = useRef('');
   const [messages, setMessages] = useState<Message[]>([]);
   const [turn, setTurn] = useState<Turn | null>(null);
+  const [turns, setTurns] = useState<Turn[]>([]);
+  const turnRef = useRef<Turn | null>(null);
+  const [waitingQuestion, setWaitingQuestion] = useState(false);
+  const [stopping, setStopping] = useState(false);
   const [syncedTurn, setSyncedTurn] = useState('');
   const [draft, setDraft] = useState(() => cached('draft:new'));
   const [busy, setBusy] = useState(false);
@@ -55,6 +60,13 @@ export function Pilot({ session = '', onSession }: { session?: string; onSession
   const navigation = useRef(0);
   const mounted = useRef(true);
   const listVersion = useRef(0);
+  const setCurrentTurn = useCallback((value: Turn | null) => { turnRef.current = value; setTurn(value); }, []);
+  const questionState = useCallback((id: string, turnId: string, pending: boolean) => {
+    if (!mounted.current || selectedRef.current !== id || turnRef.current?.id !== turnId || turnRef.current.status !== 'running') return;
+    setWaitingQuestion(pending);
+    setSessions(previous => previous.map(item => item.id === id && item.status !== 'archived'
+      ? { ...item, status: pending ? 'waiting_user' : 'active' } : item));
+  }, []);
 
   const editDraft = (value: string) => {
     cached(`draft:${selectedRef.current || 'new'}`, value);
@@ -66,7 +78,7 @@ export function Pilot({ session = '', onSession }: { session?: string; onSession
     selectedRef.current = id;
     setSelected(id); cached('selected', id); onSessionRef.current?.(id);
     setDraft(cached(`draft:${id || 'new'}`));
-    setMessages([]); setTurn(null); setSyncedTurn(''); setCopied(null); setProblem('');
+    setMessages([]); setCurrentTurn(null); setTurns([]); setWaitingQuestion(false); setStopping(false); setSyncedTurn(''); setCopied(null); setProblem('');
     setBusy(submissions.current.has(id));
     follow.current = true; setAtBottom(true);
   };
@@ -97,20 +109,22 @@ export function Pilot({ session = '', onSession }: { session?: string; onSession
       setMessages(prompt && !(last?.role === 'user' && last.text === prompt)
         ? [...history.messages, { role: 'user', text: prompt }] : history.messages);
       if (version === listVersion.current) setSessions(result.sessions);
-      setTurn(latest ?? null);
+      setCurrentTurn(latest ?? null);
+      setTurns(execution.turns);
+      if (latest?.status !== 'running') { setWaitingQuestion(false); setStopping(false); }
       setSyncedTurn(latest && ['completed', 'waiting_user', 'waiting_approval'].includes(latest.status) ? latest.id : '');
       setBusy(submissions.current.has(id) || latest?.status === 'running');
     } catch (error) {
       if (!controller.signal.aborted) throw error;
     }
-  }, []);
+  }, [setCurrentTurn]);
   const complete = useCallback((final: Turn) => {
     if (!mounted.current || selectedRef.current !== final.session) return;
-    setTurn(final); setBusy(false);
+    setCurrentTurn(final); setBusy(false); setWaitingQuestion(false); setStopping(false);
     void refresh(final.session).catch(error => {
       if (mounted.current && selectedRef.current === final.session) setProblem((error as Error).message);
     });
-  }, [refresh]);
+  }, [refresh, setCurrentTurn]);
   const submit = async (id: string, message: string | null) => {
     const key = `submission:${id}`;
     const pending = pendingSubmission(id);
@@ -127,7 +141,8 @@ export function Pilot({ session = '', onSession }: { session?: string; onSession
     cached(key, '');
     if (mounted.current && selectedRef.current === id) {
       historyRequest.current?.abort();
-      setLoading(false); setTurn(result.turn); setSyncedTurn('');
+      setLoading(false); setCurrentTurn(result.turn); setWaitingQuestion(false); setStopping(false); setSyncedTurn('');
+      setTurns(previous => [result.turn, ...previous.filter(item => item.id !== result.turn.id)]);
       setBusy(result.turn.status === 'running');
     }
   };
@@ -160,7 +175,7 @@ export function Pilot({ session = '', onSession }: { session?: string; onSession
   }, [draft, selected]);
   useEffect(() => {
     if (follow.current && scroller.current) scroller.current.scrollTop = scroller.current.scrollHeight;
-  }, [messages, busy, loading, turn]);
+  }, [messages, busy, loading, turn, waitingQuestion]);
   useEffect(() => {
     const element = scroller.current;
     if (!element) return;
@@ -195,13 +210,13 @@ export function Pilot({ session = '', onSession }: { session?: string; onSession
   };
   const send = async (event: FormEvent) => {
     event.preventDefault();
-    if (!draft.trim() || busy || loading) return;
+    if (!draft.trim() || busy || loading || !canSend) return;
     historyRequest.current?.abort();
     const prompt = draft.trim();
     let id = selected;
     const version = navigation.current;
     setBusy(true); setProblem(''); follow.current = true;
-    setTurn(null); setSyncedTurn('');
+    setCurrentTurn(null); setWaitingQuestion(false); setSyncedTurn('');
     editDraft('');
     setMessages(previous => pendingSubmission(id)?.message === prompt && previous.at(-1)?.role === 'user'
       && previous.at(-1)?.text === prompt ? previous : [...previous, { role: 'user', text: prompt }]);
@@ -244,9 +259,14 @@ export function Pilot({ session = '', onSession }: { session?: string; onSession
     } finally { submissions.current.delete(id); }
   };
   const stop = async () => {
-    if (!selected) return;
-    try { await api(`/sessions/${encodeURIComponent(selected)}/stop`, 'POST'); }
-    catch (error) { if (mounted.current && selectedRef.current === selected) setProblem((error as Error).message); }
+    if (!selected || stopping) return;
+    const id = selected;
+    const version = navigation.current;
+    setStopping(true);
+    try { await api(`/sessions/${encodeURIComponent(id)}/stop`, 'POST'); }
+    catch (error) {
+      if (mounted.current && version === navigation.current) { setProblem((error as Error).message); setStopping(false); }
+    }
   };
   const decide = async (accept: boolean) => {
     const approval = current?.approval;
@@ -286,7 +306,7 @@ export function Pilot({ session = '', onSession }: { session?: string; onSession
   const pendingApproval = current?.approval?.status === 'requested';
   // An interrupted session accepts a new message: the next turn carries what the dead run recorded.
   const canSend = !selected || (current &&
-    ['active', 'waiting_user', 'interrupted'].includes(current.status) && !pendingApproval);
+    ['active', 'interrupted'].includes(current.status) && !pendingApproval && !waitingQuestion);
   const heading = current?.title || messages.find(item => item.role === 'user')?.text.slice(0, 60) || '新对话';
   const filtered = sessions.filter(item => `${title(item)} ${item.id}`.toLowerCase().includes(query.toLowerCase()));
   return <main className="pilot-page">
@@ -307,7 +327,7 @@ export function Pilot({ session = '', onSession }: { session?: string; onSession
     </aside>
     <section className="pilot-chat" aria-label="Pilot 对话">
       <header className="pilot-chat-heading">
-        <div><strong title={selected || undefined}>{heading}</strong><span>{busy ? '正在处理你的请求' : loading ? '正在加载对话' : current ? labels[current.status] : '和 Anchor 一起开展研究'}</span></div>
+        <div><strong title={selected || undefined}>{heading}</strong><span>{stopping ? '正在停止执行' : waitingQuestion ? '等待你的答复' : busy ? '正在处理你的请求' : loading ? '正在加载对话' : current ? labels[current.status] : '和 Anchor 一起开展研究'}</span></div>
         {current?.status === 'interrupted' && <button onClick={() => void resume()} disabled={busy || loading}>继续上次回复</button>}
       </header>
       <div className="pilot-messages" ref={scroller} role="log" aria-label="对话消息" aria-live="polite" onScroll={() => {
@@ -332,7 +352,9 @@ export function Pilot({ session = '', onSession }: { session?: string; onSession
           <button className="pilot-copy" aria-label={`复制${message.role === 'assistant' ? '回复' : '消息'} ${index + 1}`}
             onClick={() => void copy(message, index)}>{copied === index ? <Check size={14} /> : <Copy size={14} />}{copied === index ? '已复制' : '复制'}</button>
         </article>)}
-        {turn && <PilotTurn key={turn.id} turn={turn} saved={syncedTurn === turn.id} onComplete={complete} />}
+        {turns.some(item => item.id !== turn?.id) && <PilotQuestionHistory key={selected} session={selected}
+          turns={turns.filter(item => item.id !== turn?.id).map(item => item.id).reverse()} />}
+        {turn && <PilotTurn key={`${turn.session}-${turn.id}`} turn={turn} saved={syncedTurn === turn.id} stopping={stopping} onComplete={complete} onQuestions={questionState} />}
         {busy && !turn && <div className="pilot-thinking" role="status"><LoaderCircle size={16} />正在提交…</div>}
         </div>
       </div>
@@ -340,7 +362,7 @@ export function Pilot({ session = '', onSession }: { session?: string; onSession
         if (scroller.current) scroller.current.scrollTop = scroller.current.scrollHeight;
         follow.current = true; setAtBottom(true);
       }}><ArrowDown size={14} />回到最新消息</button>}
-      {current?.status === 'waiting_user' && !pendingApproval && <p className="pilot-waiting" role="status">{current.waiting_reason || 'Pilot 需要你的补充信息，请在下方回答。'}</p>}
+      {current?.status === 'waiting_user' && !pendingApproval && <p className="pilot-waiting" role="status">{current.waiting_reason || 'Pilot 需要你的补充信息，请回答本次执行中的问题。'}</p>}
       {pendingApproval && current.approval && <div className="pilot-approval" role="region" aria-label="待确认操作">
         <span><Check size={16} />需要你的确认 · {current.approval.target || current.approval.action}</span>
         <details><summary>查看操作内容 · {current.approval.action}</summary><pre>{JSON.stringify(current.approval.proposal, null, 2)}</pre></details>
@@ -350,14 +372,14 @@ export function Pilot({ session = '', onSession }: { session?: string; onSession
         {selected && <button onClick={() => void select(selected)}>重新加载对话</button>}
       </p>}
       <form className="pilot-composer" onSubmit={send}>
-        <textarea ref={input} rows={2} aria-label="发送给 Anchor Pilot" placeholder={pendingApproval ? '请先确认或拒绝上方操作' : '描述你的问题，或告诉 Pilot 你想完成什么…'} value={draft}
+        <textarea ref={input} rows={2} aria-label="发送给 Anchor Pilot" placeholder={pendingApproval ? '请先确认或拒绝上方操作' : waitingQuestion || current?.status === 'waiting_user' ? '请先回答、拒绝或取消上方问题' : '描述你的问题，或告诉 Pilot 你想完成什么…'} value={draft}
           maxLength={100000} onChange={event => editDraft(event.target.value)} onKeyDown={event => {
             if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing && event.keyCode !== 229) {
               event.preventDefault(); event.currentTarget.form?.requestSubmit();
             }
           }} disabled={busy || loading || !canSend} />
         <div className="pilot-composer-footer"><small>Enter 发送 · Shift + Enter 换行</small>
-          {busy ? <button className="pilot-stop" type="button" onClick={() => void stop()}><Square size={14} fill="currentColor" />停止</button> :
+          {busy ? <button className="pilot-stop" type="button" disabled={stopping} onClick={() => void stop()}><Square size={14} fill="currentColor" />{stopping ? '正在停止…' : '停止'}</button> :
             <button className="primary" type="submit" disabled={!draft.trim() || loading || !canSend}><Send size={16} />发送</button>}
         </div>
       </form>

@@ -552,6 +552,7 @@ struct FakeNodes {
     cancel_once: Mutex<bool>,
     op_run: bool,
     fail_once: Mutex<Option<String>>,
+    interrupt_once: Mutex<BTreeMap<String, String>>,
     invalid_route_once: Mutex<bool>,
     recovery_once: Mutex<bool>,
     delays_ms: Mutex<BTreeMap<String, u64>>,
@@ -660,6 +661,20 @@ impl NodeExecutionPort for FakeNodes {
                 self.active_calls
                     .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
                 return Ok(NodeExecutionOutcome::Failed { reason });
+            }
+            if let Some(reason) = self
+                .interrupt_once
+                .lock()
+                .unwrap()
+                .remove(&request.key.node_id)
+            {
+                self.facts
+                    .lock()
+                    .unwrap()
+                    .insert(request.key.durable_key(), CompletionFact::Resumable);
+                self.active_calls
+                    .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                return Ok(NodeExecutionOutcome::Interrupted { reason });
             }
             {
                 let mut budget = self.budget_once.lock().unwrap();
@@ -1574,6 +1589,98 @@ async fn serial_file_store_reload_resumes_same_invocation_after_interruption() {
 }
 
 #[tokio::test]
+async fn serial_interrupted_file_store_reload_resumes_same_invocation_and_clears_error() {
+    let root = std::env::temp_dir().join(format!(
+        "anchor-serial-interrupted-{}-{}",
+        std::process::id(),
+        RUN_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    ));
+    let artifacts = MemoryArtifacts::default();
+    let reason = "provider stream interrupted before final_result";
+    let nodes = FakeNodes {
+        interrupt_once: Mutex::new(BTreeMap::from([("work".into(), reason.into())])),
+        ..FakeNodes::default()
+    };
+    let control = Control::default();
+    let initial = GraphRunRecord::create(
+        graph(
+            &["before", "work", "after"],
+            &[("before", "work"), ("work", "after")],
+            "before",
+        ),
+        serde_json::json!({"request":"continue interrupted work"}),
+    )
+    .unwrap();
+    let run_id = initial.run_id.clone();
+    let stopped = {
+        let store = FileRunStore::new(&root);
+        GraphRunner::new(&store, &artifacts, &nodes, &control)
+            .run(initial)
+            .await
+            .unwrap()
+    };
+    assert_eq!(stopped.status, RunStatus::Stopped);
+    assert_eq!(stopped.error.as_deref(), Some(reason));
+    assert!(stopped.recovery.is_empty());
+    assert!(stopped.parallel.is_none());
+    let cursor = stopped.cursor.as_ref().unwrap().clone();
+    let request = nodes.calls.lock().unwrap()[1].clone();
+    assert_eq!(cursor.node_id, "work");
+    assert_eq!(cursor.key, request.key);
+    assert_eq!(cursor.key.invocation, 1);
+    assert_eq!(cursor.input_commits, request.input_commits);
+    assert_eq!(
+        cursor.input_commits,
+        vec![stopped.results["before"][0].commit.clone()]
+    );
+    assert_eq!(cursor.prepared_input, request.input);
+    assert_eq!(stopped.invocations["work"], 1);
+    assert_eq!(stopped.passes["work"], 1);
+    assert!(!stopped.results.contains_key("work"));
+    assert!(!stopped.invocations.contains_key("after"));
+    assert_eq!(
+        nodes.facts.lock().unwrap().get(&cursor.key.durable_key()),
+        Some(&CompletionFact::Resumable)
+    );
+    assert_eq!(*artifacts.freezes.lock().unwrap(), 1);
+
+    let store = FileRunStore::new(&root);
+    let loaded = store.load(&run_id).unwrap().unwrap();
+    assert_eq!(loaded, stopped);
+    loaded.validate().unwrap();
+    let resumed = GraphRunner::new(&store, &artifacts, &nodes, &control)
+        .run(loaded)
+        .await
+        .unwrap();
+    assert_eq!(resumed.status, RunStatus::Completed);
+    assert!(resumed.cursor.is_none());
+    assert!(resumed.recovery.is_empty());
+    assert_eq!(resumed.results["before"], stopped.results["before"]);
+    assert_eq!(resumed.results["work"].len(), 1);
+    assert_eq!(resumed.results["work"][0].key, cursor.key);
+    assert_eq!(resumed.results["after"].len(), 1);
+    for node in ["before", "work", "after"] {
+        assert_eq!(resumed.invocations[node], 1);
+        assert_eq!(resumed.passes[node], 1);
+    }
+    let calls = nodes.calls.lock().unwrap();
+    assert_eq!(calls.len(), 4);
+    assert_eq!(calls[2].key, cursor.key);
+    assert_eq!(calls[2].input_commits, cursor.input_commits);
+    assert_eq!(calls[2].input, cursor.prepared_input);
+    assert_eq!(calls[3].key.node_id, "after");
+    drop(calls);
+    assert_eq!(*artifacts.freezes.lock().unwrap(), 3);
+    assert_eq!(store.load(&run_id).unwrap().unwrap(), resumed);
+    fs::remove_dir_all(root).unwrap();
+    assert!(
+        resumed.error.is_none(),
+        "completed Run retains interruption: {:?}",
+        resumed.error
+    );
+}
+
+#[tokio::test]
 async fn graph_runner_dispatches_durable_resumable_node_with_same_invocation() {
     let nodes = FakeNodes::default();
     let store = MemStore::default();
@@ -2472,6 +2579,136 @@ async fn parallel_cancelled_branch_can_reload_without_replaying_completed_siblin
     }
     assert_eq!(resumed.results.get("collect").unwrap().len(), 1);
     fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn parallel_interrupted_file_store_reload_preserves_completed_branch_and_clears_error() {
+    let root = std::env::temp_dir().join(format!(
+        "anchor-parallel-interrupted-{}-{}",
+        std::process::id(),
+        RUN_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    ));
+    let artifacts = MemoryArtifacts::default();
+    let reason = "left branch provider stream interrupted before final_result";
+    let nodes = FakeNodes {
+        op_run: true,
+        interrupt_once: Mutex::new(BTreeMap::from([("left".into(), reason.into())])),
+        ..FakeNodes::default()
+    };
+    let control = Control::default();
+    let initial = GraphRunRecord::create(parallel_graph(), Value::Null).unwrap();
+    let run_id = initial.run_id.clone();
+    let stopped = {
+        let store = FileRunStore::new(&root);
+        GraphRunner::new(&store, &artifacts, &nodes, &control)
+            .run(initial)
+            .await
+            .unwrap()
+    };
+    assert_eq!(stopped.status, RunStatus::Stopped);
+    assert_eq!(stopped.error.as_deref(), Some(reason));
+    assert!(stopped.cursor.is_none());
+    assert!(stopped.recovery.is_empty());
+    let activation = stopped.parallel.as_ref().unwrap();
+    let pending = activation
+        .branches
+        .iter()
+        .find(|branch| branch.entry == "left")
+        .unwrap();
+    let cursor = pending.cursor.as_ref().unwrap().clone();
+    assert_eq!(pending.next_index, 0);
+    assert!(pending.completed.is_empty());
+    let completed = activation
+        .branches
+        .iter()
+        .find(|branch| branch.entry == "right")
+        .unwrap();
+    assert_eq!(completed.status, ParallelBranchStatus::Completed);
+    assert!(completed.cursor.is_none());
+    assert_eq!(
+        completed.completed,
+        vec![stopped.results["right"][0].commit.clone()]
+    );
+    let calls = nodes.calls.lock().unwrap().clone();
+    let request = calls
+        .iter()
+        .find(|request| request.key.node_id == "left")
+        .unwrap();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(cursor.key, request.key);
+    assert_eq!(cursor.key.invocation, 1);
+    assert_eq!(cursor.input_commits, request.input_commits);
+    assert_eq!(
+        cursor.input_commits,
+        vec![stopped.results["start"][0].commit.clone()]
+    );
+    assert_eq!(cursor.prepared_input, request.input);
+    for node in ["start", "left", "right"] {
+        assert_eq!(stopped.invocations[node], 1);
+        assert_eq!(stopped.passes[node], 1);
+    }
+    assert!(!stopped.results.contains_key("left"));
+    assert!(!stopped.invocations.contains_key("collect"));
+    assert!(!stopped.invocations.contains_key("after"));
+    assert_eq!(
+        nodes.facts.lock().unwrap().get(&cursor.key.durable_key()),
+        Some(&CompletionFact::Resumable)
+    );
+    assert_eq!(*artifacts.freezes.lock().unwrap(), 2);
+
+    let store = FileRunStore::new(&root);
+    let loaded = store.load(&run_id).unwrap().unwrap();
+    assert_eq!(loaded, stopped);
+    loaded.validate().unwrap();
+    let resumed = GraphRunner::new(&store, &artifacts, &nodes, &control)
+        .run(loaded)
+        .await
+        .unwrap();
+    assert_eq!(resumed.status, RunStatus::Completed);
+    assert!(resumed.cursor.is_none());
+    assert!(resumed.parallel.is_none());
+    assert!(resumed.recovery.is_empty());
+    assert_eq!(resumed.results["right"], stopped.results["right"]);
+    assert_eq!(resumed.results["start"], stopped.results["start"]);
+    assert_eq!(resumed.results["left"].len(), 1);
+    assert_eq!(resumed.results["left"][0].key, cursor.key);
+    assert_eq!(resumed.results["collect"].len(), 1);
+    assert_eq!(resumed.results["after"].len(), 1);
+    for node in ["start", "left", "right", "collect", "after"] {
+        assert_eq!(resumed.invocations[node], 1);
+        assert_eq!(resumed.passes[node], 1);
+    }
+    let calls = nodes.calls.lock().unwrap();
+    assert_eq!(calls.len(), 4);
+    let pending_calls = calls
+        .iter()
+        .filter(|request| request.key.node_id == "left")
+        .collect::<Vec<_>>();
+    assert_eq!(pending_calls.len(), 2);
+    for request in pending_calls {
+        assert_eq!(request.key, cursor.key);
+        assert_eq!(request.input_commits, cursor.input_commits);
+        assert_eq!(request.input, cursor.prepared_input);
+    }
+    for node in ["right", "after"] {
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|request| request.key.node_id == node)
+                .count(),
+            1
+        );
+    }
+    assert!(calls.iter().all(|request| request.key.node_id != "collect"));
+    drop(calls);
+    assert_eq!(*artifacts.freezes.lock().unwrap(), 5);
+    assert_eq!(store.load(&run_id).unwrap().unwrap(), resumed);
+    fs::remove_dir_all(root).unwrap();
+    assert!(
+        resumed.error.is_none(),
+        "completed Run retains interruption: {:?}",
+        resumed.error
+    );
 }
 
 #[tokio::test]

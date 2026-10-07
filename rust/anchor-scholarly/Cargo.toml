@@ -1,0 +1,31 @@
+[package]
+name = "anchor-scholarly"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Rust-native official scholarly literature CLI"
+
+[dependencies]
+async-trait = "=0.1.92"
+chrono = { version = "=0.4.45", default-features = false, features = ["clock"] }
+clap = { version = "=4.5.54", features = ["derive"] }
+dom_smoothie = "=0.18.2"
+encoding_rs = "=0.8.42"
+futures = { workspace = true }
+httpdate = "=1.0.3"
+ipnet = "=2.12.2"
+lopdf = { version = "=0.42.0", default-features = false }
+mime = "=0.3.17"
+pdf-extract = "=0.12.1"
+reqwest = { version = "=0.12.28", default-features = false, features = ["rustls-tls"] }
+roxmltree = "=0.20.0"
+rustix = { version = "=1.1.5", features = ["fs"] }
+scraper = "=0.24.0"
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["io-std", "net", "sync"] }
+
+[dev-dependencies]
+axum = "=0.8.9"
+tempfile = "=3.27.0"
+tokio = { workspace = true, features = ["test-util"] }

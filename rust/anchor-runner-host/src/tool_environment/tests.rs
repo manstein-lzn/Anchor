@@ -28,7 +28,11 @@ fn fixture(root: &Path) -> PathBuf {
     fs::create_dir_all(&imports).unwrap();
     // Two symlinks, including a relative one, exercise ordinary venv layout.
     std::os::unix::fs::symlink("python3", environment.join("bin/python")).unwrap();
-    std::os::unix::fs::symlink("/usr/bin/python3", environment.join("bin/python3")).unwrap();
+    std::os::unix::fs::symlink(
+        fs::canonicalize("/usr/bin/python3").unwrap(),
+        environment.join("bin/python3"),
+    )
+    .unwrap();
     let entry = environment.join("bin/sample");
     fs::write(
         &entry,
@@ -144,6 +148,7 @@ fn malformed_tool_grants_are_rejected_and_mcp_explicit_environment_is_preserved(
     for invalid in [
         json!({"imports": ["/"]}),
         json!({"imports": ["/root"]}),
+        json!({"imports": ["/etc"]}),
         json!({"imports": ["relative"]}),
         json!({"environment": "/"}),
         json!({"entrypoint": "../missing"}),

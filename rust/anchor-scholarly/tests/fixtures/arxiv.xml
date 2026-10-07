@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry>
+    <id>http://arxiv.org/abs/2401.00001v2</id>
+    <published>2024-01-01T00:00:00Z</published>
+    <title> Learned
+      cost models </title>
+    <summary>Evidence from   compiler optimization.</summary>
+    <author><name>Ada Lovelace</name></author>
+    <author><name>Alan Turing</name></author>
+    <link title="pdf" href="http://arxiv.org/pdf/2401.00001v2"/>
+  </entry>
+</feed>

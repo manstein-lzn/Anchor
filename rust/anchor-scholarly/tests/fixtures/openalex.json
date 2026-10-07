@@ -1,0 +1,19 @@
+{
+  "meta": {"count": 57},
+  "results": [
+    {
+      "id": "https://openalex.org/W42",
+      "doi": "https://doi.org/10.1234/cost-model",
+      "title": "Learned cost models",
+      "authorships": [{"author": {"display_name": "Ada Lovelace"}}, {"author": {}}],
+      "publication_year": 2024,
+      "primary_location": {"source": {"display_name": "Compiler Journal"}},
+      "best_oa_location": {"pdf_url": "http://publisher.example.org/paper.pdf", "landing_page_url": "http://publisher.example.org/paper"},
+      "locations": [{"pdf_url": "http://publisher.example.org/paper.pdf"}, {"landing_page_url": "https://arxiv.org/abs/2401.00001"}],
+      "type": "article",
+      "abstract_inverted_index": {"models": [2], "Learned": [0], "cost": [1, 3]},
+      "cited_by_count": 12
+    },
+    {"id": "https://openalex.org/W43", "abstract_inverted_index": null}
+  ]
+}

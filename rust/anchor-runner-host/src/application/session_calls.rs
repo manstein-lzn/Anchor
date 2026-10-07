@@ -67,6 +67,57 @@ pub(crate) async fn resolve(
 }
 
 impl RunApplication {
+    pub(crate) fn settled_session_call_successors(
+        &self,
+        metadata: &RunMetadata,
+    ) -> Result<Vec<GraphRunRecord>, ApplicationError> {
+        let Some(call) = &metadata.session_call else {
+            return Ok(Vec::new());
+        };
+        if call.status != "pending" {
+            return Ok(Vec::new());
+        }
+        let binding = metadata.conversation.as_ref().ok_or_else(|| {
+            ApplicationError::Conflict("Session call has no execution binding".into())
+        })?;
+        if metadata.graph_call.is_none()
+            || call.context.session != binding.session
+            || call.context.reply_node != binding.reply_node
+        {
+            return Err(ApplicationError::Conflict(
+                "Session call execution identity changed".into(),
+            ));
+        }
+        let chain = self.conversation_chain(binding, &metadata.bundle_source)?;
+        let mut next = chain.first().map(|(entry, _)| entry.run_id.as_str());
+        let mut successors = Vec::new();
+        while let Some(id) = next {
+            if id == metadata.run_id {
+                return Ok(successors);
+            }
+            let (entry, record) = chain
+                .iter()
+                .find(|(entry, _)| entry.run_id == id)
+                .ok_or_else(|| ApplicationError::Conflict("Session successor is missing".into()))?;
+            if !matches!(
+                record.status,
+                RunStatus::Completed | RunStatus::Stopped | RunStatus::Failed | RunStatus::Aborted
+            ) {
+                return Err(ApplicationError::Conflict(
+                    "Session successor is not settled".into(),
+                ));
+            }
+            successors.push(record.clone());
+            next = entry
+                .conversation
+                .as_ref()
+                .and_then(|binding| binding.previous_run.as_deref());
+        }
+        Err(ApplicationError::Conflict(
+            "Session call is outside the admitted conversation chain".into(),
+        ))
+    }
+
     pub(crate) fn reject_pending_session_delivery(
         &self,
         run_id: &str,
@@ -356,7 +407,7 @@ impl RunApplication {
         );
         drop(lease);
         drop(_graph_lease);
-        self.spawn(record, execution);
+        self.spawn(record, execution)?;
         Ok(())
     }
 

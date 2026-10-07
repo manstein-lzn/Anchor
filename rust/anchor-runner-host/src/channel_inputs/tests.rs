@@ -1,6 +1,10 @@
 use super::*;
 use crate::application::ConversationSource;
-use image::{DynamicImage, ImageBuffer, Rgb};
+use image::{
+    DynamicImage, ImageBuffer, Rgb,
+    codecs::{png::PngDecoder, webp::WebPDecoder},
+};
+use std::io::Cursor;
 use tempfile::tempdir;
 
 fn upload(name: &str, bytes: &[u8], media_type: Option<&str>) -> UploadedAttachment {

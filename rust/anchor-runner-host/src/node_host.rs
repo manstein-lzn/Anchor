@@ -1,7 +1,10 @@
 //! Executes one node request; graph scheduling remains in the shared Runner.
 use super::{HostArtifacts, create_durable_directory, write_durable};
 use crate::{local_inputs::LocalInputs, op, tool_host};
-use anchor_io_harness_runtime::node_port::{NodeHostResolver, ToolResolution};
+#[cfg(feature = "legacy-regression")]
+pub(crate) use anchor_io_harness_runtime::node_port::{
+    NodeConversationHint, NodeHostResolver, NodeImage, ToolResolution,
+};
 use anchor_runtime_rig::graph::{
     CompletionFact, FileRunStore, GraphError, GraphRunRecord, InvocationKey, NodeCompletion,
     NodeExecutionCapabilities, NodeExecutionOutcome, NodeExecutionPort, NodeExecutionRequest,
@@ -20,17 +23,22 @@ use std::{
     time::Duration,
 };
 
+#[cfg(not(feature = "legacy-regression"))]
+mod contracts;
 mod conversation;
 mod media;
+
+#[cfg(not(feature = "legacy-regression"))]
+pub(crate) use contracts::{NodeConversationHint, NodeHostResolver, NodeImage, ToolResolution};
 
 pub(crate) fn conversation_hint_for(
     metadata: &crate::application::RunMetadata,
     node: &str,
-) -> Option<anchor_io_harness_runtime::node_port::NodeConversationHint> {
+) -> Option<NodeConversationHint> {
     let binding = metadata.conversation.as_ref()?;
     let identity = serde_json::to_vec(&(&metadata.bundle_source, &binding.session, node))
         .expect("host conversation identity is serializable");
-    Some(anchor_io_harness_runtime::node_port::NodeConversationHint {
+    Some(NodeConversationHint {
         key: format!("{:x}", Sha256::digest(identity)),
     })
 }
@@ -42,8 +50,10 @@ pub(crate) struct HostNodes {
     pub(crate) facts_root: PathBuf,
     pub(crate) io_resolver: std::sync::Arc<HostIoResolver>,
     pub(crate) mcp: tool_host::McpToolConfig,
+    #[cfg(feature = "legacy-regression")]
     pub(crate) io_nodes:
         Option<anchor_io_harness_runtime::node_port::IoHarnessNodePort<HostIoResolver>>,
+    pub(crate) goose_nodes: Option<crate::goose_acp::GooseNodePort>,
 }
 
 /// Resolves only resources already frozen into a Graph Run. Tool clients and
@@ -241,20 +251,18 @@ impl HostIoResolver {
 }
 
 impl NodeHostResolver for HostIoResolver {
-    fn prompt_images(
-        &self,
-        request: &NodeExecutionRequest,
-    ) -> Result<Vec<anchor_io_harness_runtime::node_port::NodeImage>, String> {
+    fn prompt_images(&self, request: &NodeExecutionRequest) -> Result<Vec<NodeImage>, String> {
         Ok(self
             .channel_inputs(&request.key)?
             .images
             .into_iter()
-            .map(|image| anchor_io_harness_runtime::node_port::NodeImage {
+            .map(|image| NodeImage {
                 data: image.bytes,
                 media_type: image.media_type,
             })
             .collect())
     }
+    #[cfg(feature = "legacy-regression")]
     fn resume_after_interleaving(&self, request: &NodeExecutionRequest) -> bool {
         crate::application::metadata::load(self.local_inputs.state_root(), &request.key.run_id)
             .ok()
@@ -265,14 +273,9 @@ impl NodeHostResolver for HostIoResolver {
     fn conversation_hint(
         &self,
         request: &NodeExecutionRequest,
-    ) -> Result<Option<anchor_io_harness_runtime::node_port::NodeConversationHint>, String> {
-        self.conversation(&request.key).map(|conversation| {
-            conversation.map(
-                |value| anchor_io_harness_runtime::node_port::NodeConversationHint {
-                    key: value.key,
-                },
-            )
-        })
+    ) -> Result<Option<NodeConversationHint>, String> {
+        self.conversation(&request.key)
+            .map(|conversation| conversation.map(|value| NodeConversationHint { key: value.key }))
     }
 
     fn resolve_plugins(&self, ids: &[String]) -> Result<Vec<PluginBinding>, String> {
@@ -440,6 +443,7 @@ pub(crate) fn load_host_completion_fact(
     Ok(CompletionFact::NotStarted)
 }
 
+#[cfg(feature = "legacy-regression")]
 fn merge_agent_completion_facts(rig: CompletionFact, io_harness: CompletionFact) -> CompletionFact {
     match (&rig, &io_harness) {
         (CompletionFact::NotStarted, _) => io_harness,
@@ -625,7 +629,16 @@ impl HostNodes {
 impl NodeExecutionPort for HostNodes {
     fn capabilities(&self) -> NodeExecutionCapabilities {
         NodeExecutionCapabilities {
-            agent: self.io_nodes.is_some(),
+            agent: {
+                #[cfg(feature = "legacy-regression")]
+                {
+                    self.io_nodes.is_some() || self.goose_nodes.is_some()
+                }
+                #[cfg(not(feature = "legacy-regression"))]
+                {
+                    self.goose_nodes.is_some()
+                }
+            },
             op_run: true,
             exact_provider_request_budget: false,
         }
@@ -642,11 +655,36 @@ impl NodeExecutionPort for HostNodes {
     {
         Box::pin(async move {
             let rig = load_host_completion_fact(&self.facts_root, key)?;
-            let io_harness = match &self.io_nodes {
-                Some(nodes) => nodes.completion_fact(key).await?,
-                None => CompletionFact::NotStarted,
-            };
-            Ok(merge_agent_completion_facts(rig, io_harness))
+            #[cfg(not(feature = "legacy-regression"))]
+            if crate::run_data::legacy_invocation_exists(
+                self.io_resolver.local_inputs.state_root(),
+                key,
+            )
+            .map_err(GraphError::Unsupported)?
+            {
+                return Ok(CompletionFact::Uncertain(
+                    "legacy Agent state is not resumable by the standard Goose Host".into(),
+                ));
+            }
+            if let Some(nodes) = &self.goose_nodes {
+                let goose = nodes.completion_fact(key)?;
+                return Ok(match (&rig, &goose) {
+                    (CompletionFact::NotStarted, _) => goose,
+                    (_, CompletionFact::NotStarted) => rig,
+                    _ if rig == goose => rig,
+                    _ => CompletionFact::Uncertain("host and Goose node facts conflict".into()),
+                });
+            }
+            #[cfg(feature = "legacy-regression")]
+            {
+                let io_harness = match &self.io_nodes {
+                    Some(nodes) => nodes.completion_fact(key).await?,
+                    None => CompletionFact::NotStarted,
+                };
+                Ok(merge_agent_completion_facts(rig, io_harness))
+            }
+            #[cfg(not(feature = "legacy-regression"))]
+            Ok(rig)
         })
     }
     fn record_recovery_decision(
@@ -655,10 +693,20 @@ impl NodeExecutionPort for HostNodes {
         attempt_id: i64,
         decision: RecoveryDecision,
     ) -> Result<(), GraphError> {
-        let nodes = self.io_nodes.as_ref().ok_or_else(|| {
-            GraphError::Unsupported("io-harness Agent runtime is not configured".into())
-        })?;
-        nodes.record_recovery_decision(key, attempt_id, decision)
+        #[cfg(feature = "legacy-regression")]
+        {
+            let nodes = self.io_nodes.as_ref().ok_or_else(|| {
+                GraphError::Unsupported("io-harness Agent runtime is not configured".into())
+            })?;
+            nodes.record_recovery_decision(key, attempt_id, decision)
+        }
+        #[cfg(not(feature = "legacy-regression"))]
+        {
+            let _ = (key, attempt_id, decision);
+            Err(GraphError::Unsupported(
+                "legacy Agent recovery is disabled in the standard Goose Host".into(),
+            ))
+        }
     }
     fn execute<'a>(
         &'a self,
@@ -667,17 +715,36 @@ impl NodeExecutionPort for HostNodes {
         Box<dyn std::future::Future<Output = Result<NodeExecutionOutcome, GraphError>> + Send + 'a>,
     > {
         if request.kind == NodeKind::Agent {
-            let Some(nodes) = &self.io_nodes else {
-                return Box::pin(async {
-                    Err(GraphError::Unsupported(
-                        "io-harness Agent runtime requires configured Rig provider credentials/model".into(),
-                    ))
-                });
-            };
-            // io-harness owns the durable wall-time budget and observes
-            // cancellation at step boundaries. Do not race it with an outer
-            // timeout that would detach its blocking worker.
-            return nodes.execute(request);
+            #[cfg(not(feature = "legacy-regression"))]
+            match crate::run_data::legacy_invocation_exists(
+                self.io_resolver.local_inputs.state_root(),
+                &request.key,
+            ) {
+                Ok(false) => {}
+                Ok(true) => {
+                    return Box::pin(async {
+                        Err(GraphError::Unsupported(
+                            "legacy Agent state cannot be executed as a Goose invocation".into(),
+                        ))
+                    });
+                }
+                Err(error) => return Box::pin(async move { Err(GraphError::Unsupported(error)) }),
+            }
+            if let Some(nodes) = &self.goose_nodes {
+                return Box::pin(nodes.execute(request));
+            }
+            #[cfg(feature = "legacy-regression")]
+            if let Some(nodes) = &self.io_nodes {
+                // io-harness owns the durable wall-time budget and observes
+                // cancellation at step boundaries. Do not race it with an outer
+                // timeout that would detach its blocking worker.
+                return nodes.execute(request);
+            }
+            return Box::pin(async {
+                Err(GraphError::Unsupported(
+                    "Agent execution requires a configured Goose runtime".into(),
+                ))
+            });
         }
         Box::pin(async move {
             let cancellation = request.cancellation.clone();
@@ -699,7 +766,7 @@ impl NodeExecutionPort for HostNodes {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "legacy-regression"))]
 mod io_resolver_tests {
     use super::*;
     use anchor_graph_host::{GraphCatalog, InProcessGraphHost, LoadedGraphBundle};
@@ -1056,6 +1123,7 @@ mod io_resolver_tests {
             io_resolver: resolver,
             mcp: tool_host::McpToolConfig::default(),
             io_nodes: Some(io_nodes),
+            goose_nodes: None,
         };
         let snapshot = GraphSnapshot::admit(json!({
             "objective":"io-host-tool-integration",
@@ -1167,6 +1235,7 @@ mod io_resolver_tests {
                 model,
                 resolver,
             )),
+            goose_nodes: None,
         };
         let parent_snapshot = GraphSnapshot::admit(json!({
             "objective":"invoke child",
@@ -1245,6 +1314,7 @@ mod io_resolver_tests {
                 model,
                 std::sync::Arc::clone(&resolver),
             )),
+            goose_nodes: None,
         };
         let snapshot = GraphSnapshot::admit(json!({
             "objective":"resume the same io-harness Agent invocation",

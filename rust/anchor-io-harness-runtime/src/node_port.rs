@@ -148,15 +148,32 @@ fn invocation_store(
     }
     let sidecar = io_store_root.join(format!("{stem}.run"));
     let run_id = match std::fs::read_to_string(sidecar) {
-        Ok(value) => value
-            .trim()
-            .parse::<i64>()
-            .map_err(|error| format!("invalid io-harness run id: {error}"))?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Ok(value) => Some(
+            value
+                .trim()
+                .parse::<i64>()
+                .map_err(|error| format!("invalid io-harness run id: {error}"))?,
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => return Err(error.to_string()),
     };
-    let store = Store::open(io_store_root.join(format!("{stem}.sqlite3")))
-        .map_err(|error| error.to_string())?;
+    let store_path = io_store_root.join(format!("{stem}.sqlite3"));
+    if run_id.is_none() && !store_path.try_exists().map_err(|error| error.to_string())? {
+        return Ok(None);
+    }
+    let store = Store::open(store_path).map_err(|error| error.to_string())?;
+    let run_id = match run_id {
+        Some(run_id) => run_id,
+        None => match store
+            .runs()
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .max()
+        {
+            Some(run_id) => run_id,
+            None => return Ok(None),
+        },
+    };
     Ok(Some((store, run_id)))
 }
 
@@ -1490,6 +1507,83 @@ mod tests {
             .unwrap();
         port.store_run_id(&req.key, run_id).unwrap();
         (port, req, attempt_id)
+    }
+
+    #[test]
+    fn completed_invocation_trace_survives_run_id_sidecar_cleanup() {
+        let root = tempfile::tempdir().unwrap();
+        let req = request(
+            root.path(),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        );
+        let stem = IoHarnessNodePort::<FixtureResolver>::stem(&req.key);
+        let store = Store::open(root.path().join(format!("{stem}.sqlite3"))).unwrap();
+        let run = store
+            .start_run("trace", root.path().to_str().unwrap())
+            .unwrap();
+        store
+            .record_step_turn(
+                run,
+                &io_harness::AssistantTurn::new(
+                    1,
+                    Some("saved model turn"),
+                    vec![io_harness::ToolCall {
+                        name: "anchor_echo".into(),
+                        arguments: json!({"value":"saved"}),
+                    }],
+                ),
+            )
+            .unwrap();
+        store
+            .record_observations(
+                run,
+                &[io_harness::context::Observation::new(
+                    1,
+                    io_harness::context::ObsKind::Tool,
+                    Some("anchor_echo".into()),
+                    "saved tool result",
+                    io_harness::context::Origin::Tool,
+                )],
+            )
+            .unwrap();
+        drop(store);
+        let messages = trace_messages(root.path(), &req.key).unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["text"], "saved model turn");
+        assert!(messages[0]["commands"].to_string().contains("anchor_echo"));
+        assert_eq!(messages[1]["text"], "saved tool result");
+        assert!(!root.path().join(format!("{stem}.run")).exists());
+    }
+
+    #[test]
+    fn trace_without_an_invocation_store_does_not_create_a_database() {
+        let root = tempfile::tempdir().unwrap();
+        let req = request(
+            root.path(),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        );
+        assert!(trace_messages(root.path(), &req.key).unwrap().is_empty());
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn invalid_trace_run_id_sidecar_is_not_replaced_by_a_guessed_run() {
+        let root = tempfile::tempdir().unwrap();
+        let req = request(
+            root.path(),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        );
+        let stem = IoHarnessNodePort::<FixtureResolver>::stem(&req.key);
+        let store = Store::open(root.path().join(format!("{stem}.sqlite3"))).unwrap();
+        store
+            .start_run("trace", root.path().to_str().unwrap())
+            .unwrap();
+        std::fs::write(root.path().join(format!("{stem}.run")), "invalid").unwrap();
+        assert!(
+            trace_messages(root.path(), &req.key)
+                .unwrap_err()
+                .contains("invalid io-harness run id")
+        );
     }
 
     struct FixtureResolver {

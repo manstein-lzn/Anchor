@@ -7,14 +7,10 @@
 use anchor_graph_host::{FilePluginCatalog, PluginCatalog};
 use anchor_mcp_host::{McpHost, McpServerConfig, McpTransportConfig, Secret};
 use anchor_runtime_rig::{
-    NetworkPolicy, ReadOnlyInput, SandboxEnvironment, SandboxRequest, ToolError, ToolPort,
-    graph::PluginBinding,
+    NetworkPolicy, ReadOnlyInput, SandboxEnvironment, SandboxRequest, ToolDefinition, ToolError,
+    ToolName, ToolPort, ToolResultContent, graph::PluginBinding,
 };
 use anchor_sandbox_bwrap::BubblewrapSandbox;
-use rig_agent::core::{
-    completion::ToolDefinition,
-    message::{ToolName, ToolResultContent},
-};
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -530,7 +526,7 @@ impl ToolPort for LiveMcpTools {
             let Some((host, remote_name)) = self.resolve(name) else {
                 return Err(ToolError::Unknown(name.to_owned()));
             };
-            host.call_rig(&remote_name, arguments)
+            host.call_contents(&remote_name, arguments)
                 .await
                 .map_err(|error| ToolError::Failed(error.to_string()))
         })
@@ -968,6 +964,7 @@ mod tests {
     #[tokio::test]
     async fn stdio_mcp_receives_only_its_nodes_readonly_grants() {
         use anchor_sandbox_bwrap::BubblewrapPolicy;
+        let python = std::fs::canonicalize("/usr/bin/python3").unwrap();
         let root = tempfile::tempdir().unwrap();
         let plugin = root.path().join("plugins/reader");
         let workspace = root.path().join("workspace");
@@ -1002,9 +999,14 @@ for line in sys.stdin:
         result = {}
     print(json.dumps({"jsonrpc":"2.0","id":request["id"],"result":result}), flush=True)
 "#).unwrap();
-        std::fs::write(plugin.join("plugin.json"), json!({
-            "name":"Reader", "mcpServers":{"stdio":{"command":"/usr/bin/python3","args":["server.py"]}}
-        }).to_string()).unwrap();
+        std::fs::write(
+            plugin.join("plugin.json"),
+            json!({
+                "name":"Reader", "mcpServers":{"stdio":{"command":python,"args":["server.py"]}}
+            })
+            .to_string(),
+        )
+        .unwrap();
         let binding = FilePluginCatalog::new(root.path())
             .resolve(&["reader".into()])
             .unwrap()
@@ -1012,7 +1014,7 @@ for line in sys.stdin:
         let config =
             McpToolConfig::from_catalog(root.path(), std::slice::from_ref(&binding)).unwrap();
         let sandbox = BubblewrapSandbox::new(
-            BubblewrapPolicy::new("bwrap", ["python3"])
+            BubblewrapPolicy::new("bwrap", [python.file_name().unwrap().to_str().unwrap()])
                 .authorize_workspace_root(&workspace)
                 .authorize_workspace_root(&other_workspace)
                 .authorize_readonly_input_root(&plugin)
@@ -1050,6 +1052,7 @@ for line in sys.stdin:
     #[cfg(unix)]
     #[tokio::test]
     async fn stdio_mcp_runs_inside_the_plugin_mount_and_exposes_direct_tools() {
+        let python = std::fs::canonicalize("/usr/bin/python3").unwrap();
         use anchor_sandbox_bwrap::BubblewrapPolicy;
         use std::os::unix::fs::PermissionsExt;
 
@@ -1114,7 +1117,7 @@ for line in sys.stdin:
         std::fs::create_dir_all(environment.join("bin")).unwrap();
         std::fs::create_dir_all(&tool).unwrap();
         std::fs::create_dir(&imports).unwrap();
-        std::os::unix::fs::symlink("/usr/bin/python3", environment.join("bin/python")).unwrap();
+        std::os::unix::fs::symlink(&python, environment.join("bin/python")).unwrap();
         std::fs::write(
             imports.join("installed_dependency.py"),
             "prefix = 'dependency:'",
@@ -1126,7 +1129,11 @@ for line in sys.stdin:
         let standalone = root.path().join("standalone-launcher");
         let standalone_tool = root.path().join("tools/standalone");
         std::fs::create_dir(&standalone_tool).unwrap();
-        std::fs::write(&standalone, "#!/bin/sh\nexec /usr/bin/python3 \"$@\"\n").unwrap();
+        std::fs::write(
+            &standalone,
+            format!("#!/bin/sh\nexec '{}' \"$@\"\n", python.display()),
+        )
+        .unwrap();
         std::fs::set_permissions(&standalone, std::fs::Permissions::from_mode(0o755)).unwrap();
         std::fs::write(
             standalone_tool.join("tool.json"),
@@ -1139,7 +1146,7 @@ for line in sys.stdin:
                     "command": environment.join("bin/python"), "args":["../server.py"], "cwd":"nested"
                 },
                 "system":{
-                    "command":"/usr/bin/python3", "args":["../server.py"], "cwd":"nested"
+                    "command":python, "args":["../server.py"], "cwd":"nested"
                 },
                 "standalone":{
                     "command":standalone, "args":["../server.py"], "cwd":"nested"
@@ -1157,7 +1164,7 @@ for line in sys.stdin:
         std::fs::create_dir(&workspace).unwrap();
         let sandbox = BubblewrapSandbox::new(
             config.environment.authorize(
-                BubblewrapPolicy::new("bwrap", ["python3"])
+                BubblewrapPolicy::new("bwrap", [python.file_name().unwrap().to_str().unwrap()])
                     .authorize_workspace_root(&workspace)
                     .authorize_readonly_input_root(root.path())
                     .authorize_readonly_destination_root("/plugins"),

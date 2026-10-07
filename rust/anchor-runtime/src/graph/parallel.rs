@@ -222,6 +222,13 @@ impl<'a, S: RunStore, A: ArtifactPort, N: NodeExecutionPort, C: RunControl>
                     self.store.save(record)?;
                     stopped = true;
                 }
+                NodeExecutionOutcome::Interrupted { reason } => {
+                    record.recovery.retain(|pending| pending.key != cursor.key);
+                    record.status = RunStatus::Stopped;
+                    record.error = Some(reason);
+                    self.store.save(record)?;
+                    stopped = true;
+                }
                 NodeExecutionOutcome::Aborted => {
                     record.recovery.retain(|pending| pending.key != cursor.key);
                     let branch = &mut record.parallel.as_mut().unwrap().branches[branch_index];

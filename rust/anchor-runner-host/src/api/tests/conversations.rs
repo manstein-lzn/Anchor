@@ -912,21 +912,34 @@ fn seed_native_scope(state: &ApiState, run: &str, node: &str) -> (PathBuf, PathB
     let framework_root = io_root.join("conversation-roots").join(&scope);
     std::fs::create_dir_all(&directory).unwrap();
     std::fs::create_dir_all(&framework_root).unwrap();
-    let store = io_harness::Store::open(directory.join("framework.sqlite3")).unwrap();
-    let mut session = io_harness::Session::open(&store, &framework_root).unwrap();
-    let native_run = store
-        .start_run("cleanup fixture", &framework_root.display().to_string())
+    #[cfg(feature = "legacy-regression")]
+    let (session_id, native_run, turn) = {
+        let store = io_harness::Store::open(directory.join("framework.sqlite3")).unwrap();
+        let mut session = io_harness::Session::open(&store, &framework_root).unwrap();
+        let native_run = store
+            .start_run("cleanup fixture", &framework_root.display().to_string())
+            .unwrap();
+        let turn = store
+            .record_turn(session.id(), None, native_run, "cleanup fixture")
+            .unwrap();
+        store
+            .finish_turn(turn, Some("retained native fixture"), "finished")
+            .unwrap();
+        session.branch_from(&store, turn).unwrap();
+        (session.id(), native_run, turn)
+    };
+    #[cfg(not(feature = "legacy-regression"))]
+    let (session_id, native_run, turn) = {
+        std::fs::write(
+            directory.join("framework.sqlite3"),
+            b"opaque legacy cleanup fixture",
+        )
         .unwrap();
-    let turn = store
-        .record_turn(session.id(), None, native_run, "cleanup fixture")
-        .unwrap();
-    store
-        .finish_turn(turn, Some("retained native fixture"), "finished")
-        .unwrap();
-    session.branch_from(&store, turn).unwrap();
+        (1, 1, 1)
+    };
     std::fs::write(
         directory.join("session.json"),
-        json!({"version":1,"session_id":session.id()}).to_string(),
+        json!({"version":1,"session_id":session_id}).to_string(),
     )
     .unwrap();
     let key = anchor_runtime_rig::graph::InvocationKey {
@@ -940,7 +953,7 @@ fn seed_native_scope(state: &ApiState, run: &str, node: &str) -> (PathBuf, PathB
     std::fs::write(
         &pointer,
         json!({"version":1,"scope":scope,"invocation":key.durable_key(),
-        "session_id":session.id(),"run_id":native_run,"turn_id":turn})
+        "session_id":session_id,"run_id":native_run,"turn_id":turn})
         .to_string(),
     )
     .unwrap();
@@ -948,6 +961,7 @@ fn seed_native_scope(state: &ApiState, run: &str, node: &str) -> (PathBuf, PathB
 }
 
 #[tokio::test]
+#[cfg(feature = "legacy-regression")]
 async fn graph_delete_cleans_full_native_scopes_and_preserves_other_graph_history() {
     let (root, state) = fixture();
     let _env = PROCESS_ENV.lock().await;

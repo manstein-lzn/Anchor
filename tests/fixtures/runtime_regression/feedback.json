@@ -1,0 +1,34 @@
+{
+  "objective": "Revise a local draft once while retaining each Agent workspace, then approve it.",
+  "entry": "writer",
+  "max_rounds": 2,
+  "agents": {
+    "writer": {
+      "model": "models.regression",
+      "network": false,
+      "wall_time_limit_seconds": 60,
+      "instructions": "Run the script below with anchor_run using command=[\"sh\",\"-c\",script]. No research. After exit 0, call final_result with summary=\"draft ready for review\", route=\"reviewer\". Run it once per invocation.\nset -eu\ntest ! -e review.txt\nif test -e draft.txt; then\n  printf 'retained draft:\\n'; cat draft.txt\n  printf 'retained notes:\\n'; cat notes.txt\n  printf 'retained effects:\\n'; cat effects.txt\n  printf 'reviewer input:\\n'; cat /in/reviewer/review.txt\n  printf 'draft-v1\\n' | cmp - draft.txt\n  printf 'retained\\n' | cmp - notes.txt\n  printf 'writer-1\\n' | cmp - effects.txt\n  printf 'revise once\\n' | cmp - /in/reviewer/review.txt\n  printf 'retained files and reviewer input verified\\n'\n  printf 'draft-v2\\n' > draft.txt\n  printf 'writer-2\\n' >> effects.txt\nelse\n  test ! -e notes.txt; test ! -e effects.txt\n  printf 'draft-v1\\n' > draft.txt\n  printf 'retained\\n' > notes.txt\n  printf 'writer-1\\n' > effects.txt\nfi\nprintf 'draft:\\n'; cat draft.txt\nprintf 'notes:\\n'; cat notes.txt\nprintf 'effects:\\n'; cat effects.txt"
+    },
+    "reviewer": {
+      "model": "models.regression",
+      "network": false,
+      "wall_time_limit_seconds": 60,
+      "instructions": "Run the script below with anchor_run using command=[\"sh\",\"-c\",script]. No research. After exit 0, call final_result: if output says route=writer, summary=\"revise once\", route=\"writer\"; if route=done, summary=\"approved\", route=\"done\". Run it once per invocation.\nset -eu\ntest ! -e draft.txt; test ! -e notes.txt\nprintf 'writer input:\\n'; cat /in/writer/draft.txt\nif test -e review.txt; then\n  printf 'retained review:\\n'; cat review.txt\n  printf 'retained effects:\\n'; cat effects.txt\n  printf 'revise once\\n' | cmp - review.txt\n  printf 'reviewer-1\\n' | cmp - effects.txt\n  printf 'draft-v2\\n' | cmp - /in/writer/draft.txt\n  printf 'retained review and revised draft verified\\n'\n  printf 'approved\\n' > review.txt\n  printf 'reviewer-2\\n' >> effects.txt\n  printf 'route=done\\n'\nelse\n  test ! -e effects.txt\n  printf 'draft-v1\\n' | cmp - /in/writer/draft.txt\n  printf 'first draft verified\\n'\n  printf 'revise once\\n' > review.txt\n  printf 'reviewer-1\\n' > effects.txt\n  printf 'route=writer\\n'\nfi\nprintf 'review:\\n'; cat review.txt\nprintf 'effects:\\n'; cat effects.txt"
+    }
+  },
+  "ops": {
+    "done": {
+      "run": "sh -c 'set -eu; printf \"writer input:\\n\"; cat /in/writer/draft.txt; printf \"draft-v2\\n\" | cmp - /in/writer/draft.txt; cp /in/writer/draft.txt final.txt; printf \"final draft verified:\\n\"; cat final.txt'"
+    }
+  },
+  "nodes": [
+    { "id": "writer", "agent": "writer" },
+    { "id": "reviewer", "agent": "reviewer" },
+    { "id": "done", "op": "done" }
+  ],
+  "edges": [
+    { "from": "writer", "to": "reviewer" },
+    { "from": "reviewer", "to": "writer" },
+    { "from": "reviewer", "to": "done" }
+  ]
+}

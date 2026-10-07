@@ -1,23 +1,49 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Anchor, LoaderCircle } from 'lucide-react';
 import { Markdown } from './markdown';
-import { bearerKey, requestApiKey, setBearerKey } from './api';
+import { api, bearerKey, requestApiKey, setBearerKey } from './api';
+import { PilotQuestion } from './PilotQuestion';
+import { mergeQuestions, questionsPath, type Question } from './pilotQuestions';
 
 export type Turn = { id: string; session: string; request_id?: string; status: string; error: string; created_at: string; prompt: string | null };
 type Tool = { id: string; name: string; input?: unknown; output?: unknown; status: string; inputSize?: number };
-type Chunk = { type: string; id?: string; delta?: string; inputTextDelta?: string; toolCallId?: string; toolName?: string; input?: unknown; output?: unknown; errorText?: string };
+type Chunk = { type: string; id?: string; delta?: string; inputTextDelta?: string; toolCallId?: string; toolName?: string; input?: unknown; output?: unknown; errorText?: string; question?: Question };
 const outcomes: Record<string, string> = { completed: '回复完成', failed: '执行失败', stopped: '已停止', interrupted: '执行中断', waiting_approval: '等待你确认操作', waiting_user: '等待你的回答' };
 
 /** Read-only SSE projection. Leaving a page cancels the subscription, never the server's task. */
-export function PilotTurn({ turn, saved = false, onComplete }: { turn: Turn; saved?: boolean; onComplete: (turn: Turn) => void }) {
+export function PilotTurn({ turn, saved = false, stopping = false, onComplete, onQuestions }: {
+  turn: Turn; saved?: boolean; stopping?: boolean; onComplete: (turn: Turn) => void;
+  onQuestions: (session: string, turn: string, pending: boolean) => void;
+}) {
   const [text, setText] = useState('');
   const [tools, setTools] = useState<Tool[]>([]);
   const [problem, setProblem] = useState('');
   const [status, setStatus] = useState(turn.status);
   const [connection, setConnection] = useState('连接执行记录…');
   const [phase, setPhase] = useState('等待模型响应');
+  const [questions, setQuestions] = useState<Question[]>([]);
+  const [questionProblem, setQuestionProblem] = useState('');
+  const [questionReload, setQuestionReload] = useState(0);
+  const questionsRef = useRef<Question[]>([]);
   const [now, setNow] = useState(Date.now);
   const lastEvent = useRef(Date.now());
+  const updateQuestions = useCallback((incoming: Question[]) => {
+    const next = mergeQuestions(questionsRef.current, incoming, turn.session, turn.id);
+    questionsRef.current = next;
+    setQuestions(next);
+    onQuestions(turn.session, turn.id, next.some(question => question.status === 'pending'));
+  }, [turn.session, turn.id, onQuestions]);
+  useEffect(() => { setStatus(turn.status); }, [turn.status]);
+  useEffect(() => {
+    const controller = new AbortController();
+    setQuestionProblem('');
+    void api<{ questions: Question[] }>(questionsPath(turn.session, turn.id), 'GET', undefined, controller.signal).then(result => {
+      if (!controller.signal.aborted) updateQuestions(result.questions);
+    }).catch(error => {
+      if (!controller.signal.aborted) setQuestionProblem((error as Error).message);
+    });
+    return () => controller.abort();
+  }, [turn.session, turn.id, questionReload, updateQuestions]);
   useEffect(() => {
     if (status !== 'running') return;
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
@@ -32,6 +58,7 @@ export function PilotTurn({ turn, saved = false, onComplete }: { turn: Turn; sav
     setStatus(turn.status); setConnection('连接执行记录…'); setPhase('等待模型响应');
     const consume = (chunk: Chunk) => {
       lastEvent.current = Date.now();
+      if (['question', 'question-answered', 'question-interrupted'].includes(chunk.type) && chunk.question) updateQuestions([chunk.question]);
       if (chunk.type === 'start-step') setPhase('等待模型响应');
       if (chunk.type === 'reasoning-start' || chunk.type === 'reasoning-delta') setPhase('模型正在思考');
       if (chunk.type === 'reasoning-end') setPhase('等待模型继续输出');
@@ -63,6 +90,7 @@ export function PilotTurn({ turn, saved = false, onComplete }: { turn: Turn; sav
     };
     const complete = (final: Turn) => {
       ended = true; setStatus(final.status); setConnection('');
+      onQuestions(turn.session, turn.id, false);
       if (final.error) setProblem(final.error);
       setTools(previous => previous.map(item => ['执行中', '准备参数'].includes(item.status) ? { ...item, status: '执行已结束，请核查结果' } : item));
       onComplete(final);
@@ -131,7 +159,7 @@ export function PilotTurn({ turn, saved = false, onComplete }: { turn: Turn; sav
     };
     void connect();
     return () => { ended = true; controller.abort(); };
-  }, [turn.id, turn.session, onComplete]);
+  }, [turn.id, turn.session, onComplete, onQuestions, updateQuestions]);
   const activeTool = tools.find(item => item.status === '执行中') ?? tools.find(item => item.status === '准备参数');
   const activity = activeTool ? `${activeTool.status === '准备参数' ? '正在准备工具参数' : '正在执行工具'}：${activeTool.name}` : phase;
   const elapsed = Math.max(0, Math.floor((now - Date.parse(turn.created_at)) / 1000));
@@ -148,7 +176,12 @@ export function PilotTurn({ turn, saved = false, onComplete }: { turn: Turn; sav
       <div className="pilot-message-author"><Anchor size={16} />Anchor Pilot{['failed', 'stopped', 'interrupted'].includes(status) && <small> · 未完成的回复</small>}</div>
       <Markdown text={text} prefix={`turn-${turn.id}`} />
     </article>}
-    {status === 'running' && <div className="pilot-thinking" role="status"><LoaderCircle size={16} />
+    {questions.map(question => <PilotQuestion key={question.id} question={question} enabled={status === 'running' && !stopping} stopping={stopping}
+      onAnswered={answered => updateQuestions([answered])} />)}
+    {questionProblem && <p className="pilot-error" role="alert">无法加载提问：{questionProblem}
+      <button type="button" onClick={() => setQuestionReload(previous => previous + 1)}>重新加载问题</button>
+    </p>}
+    {status === 'running' && !questions.some(question => question.status === 'pending') && <div className="pilot-thinking" role="status"><LoaderCircle size={16} />
       <span>{activity} · 已用时 {Number.isFinite(elapsed) ? `${Math.floor(elapsed / 60)}分${elapsed % 60}秒` : '未知'}
         {quiet >= 15 && ` · ${quiet} 秒未收到新进展`}</span>
     </div>}

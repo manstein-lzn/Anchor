@@ -2,6 +2,9 @@
 //! exposes only same-node predecessor files and the existing native trace.
 use super::*;
 use anchor_runtime_rig::{ReadOnlyInput, ToolError, ToolPort, graph::RunStatus};
+#[cfg(not(feature = "legacy-regression"))]
+use anchor_runtime_rig::{ToolDefinition, ToolName, ToolResultContent};
+#[cfg(feature = "legacy-regression")]
 use rig_agent::core::{
     completion::ToolDefinition,
     message::{ToolName, ToolResultContent},
@@ -19,6 +22,48 @@ pub(super) struct Conversation {
 }
 
 impl HostIoResolver {
+    pub(crate) fn conversation_predecessors(
+        &self,
+        key: &InvocationKey,
+    ) -> Result<Vec<InvocationKey>, String> {
+        let Some(conversation) = self.conversation(key)? else {
+            return Ok(Vec::new());
+        };
+        let mut keys = Vec::new();
+        let root = self.local_inputs.state_root();
+        let current = crate::application::metadata::load(root, &key.run_id)
+            .map_err(|error| format!("conversation metadata: {error:?}"))?
+            .ok_or("conversation metadata is missing")?;
+        let successors = crate::application::RunApplication::new(root.to_owned(), root.to_owned())
+            .settled_session_call_successors(&current)
+            .map_err(|error| format!("conversation Session continuation: {error:?}"))?;
+        for invocation in (1..key.invocation).rev() {
+            keys.push(InvocationKey {
+                invocation,
+                ..key.clone()
+            });
+        }
+        for record in successors.into_iter().chain(conversation.previous) {
+            if !record
+                .snapshot
+                .nodes
+                .iter()
+                .any(|node| node.id == key.node_id && node.agent.is_some())
+            {
+                continue;
+            }
+            for invocation in (1..=record.invocations.get(&key.node_id).copied().unwrap_or(0)).rev()
+            {
+                keys.push(InvocationKey {
+                    run_id: record.run_id.clone(),
+                    graph_digest: record.graph_digest.clone(),
+                    node_id: key.node_id.clone(),
+                    invocation,
+                });
+            }
+        }
+        Ok(keys)
+    }
     pub(super) fn conversation(&self, key: &InvocationKey) -> Result<Option<Conversation>, String> {
         let root = self.local_inputs.state_root();
         let Some(current) = crate::application::metadata::load(root, &key.run_id)
@@ -130,7 +175,7 @@ impl HostIoResolver {
         Arc::new(HistoryTools {
             inner,
             node: key.node_id.clone(),
-            io_store: self.local_inputs.state_root().join("io-harness/store"),
+            data_root: self.local_inputs.state_root().to_path_buf(),
             previous: conversation.previous,
         })
     }
@@ -139,7 +184,7 @@ impl HostIoResolver {
 struct HistoryTools {
     inner: Arc<dyn ToolPort>,
     node: String,
-    io_store: PathBuf,
+    data_root: PathBuf,
     previous: Vec<GraphRunRecord>,
 }
 
@@ -199,9 +244,8 @@ impl ToolPort for HistoryTools {
                     node_id: self.node.clone(),
                     invocation,
                 };
-                let messages =
-                    anchor_io_harness_runtime::node_port::trace_messages(&self.io_store, &key)
-                        .map_err(ToolError::Failed)?;
+                let messages = crate::goose_acp::trace_messages(&self.data_root, &key)
+                    .map_err(ToolError::Failed)?;
                 invocations.push(json!({"invocation":invocation, "messages":messages}));
             }
             Ok(vec![ToolResultContent::json(
@@ -302,6 +346,78 @@ mod tests {
         assert_eq!(
             resolver.conversation(&first).unwrap().unwrap().key,
             resolver.conversation(&second).unwrap().unwrap().key
+        );
+    }
+
+    #[test]
+    fn only_pending_session_calls_include_settled_successors_for_native_resume() {
+        use crate::application::{
+            metadata::GraphCallSource,
+            session_calls::{SessionCall, SessionContext},
+        };
+        let root = tempfile::tempdir().unwrap();
+        let resolver = resolver(root.path());
+        let first = admit(&resolver, "first", "alice", None);
+        let background = admit(&resolver, "background", "alice", Some("first"));
+        let foreground = admit(&resolver, "foreground", "alice", Some("background"));
+        assert_eq!(
+            resolver.conversation_predecessors(&background).unwrap(),
+            vec![first.clone()]
+        );
+        let mut metadata = metadata::load(root.path(), "background").unwrap().unwrap();
+        metadata.graph_call = Some(GraphCallSource {
+            parent_run: "parent".into(),
+            parent_graph: "source".into(),
+            parent_graph_digest: "digest".into(),
+            node: "invoke".into(),
+            invocation: 1,
+            mode: "wait".into(),
+            root_run: "parent".into(),
+        });
+        metadata.session_call = Some(SessionCall {
+            context: SessionContext {
+                session: "alice".into(),
+                reply_node: "agent".into(),
+                conversation_id: "conversation".into(),
+                channel: json!({}),
+            },
+            status: "pending".into(),
+            error: String::new(),
+        });
+        metadata::save(root.path(), &metadata).unwrap();
+        assert_eq!(
+            resolver.conversation_predecessors(&background).unwrap(),
+            vec![foreground.clone(), first.clone()]
+        );
+        assert_eq!(
+            resolver.conversation_predecessors(&first).unwrap(),
+            Vec::<InvocationKey>::new()
+        );
+        let mut active = resolver.run_store.load("foreground").unwrap().unwrap();
+        active.status = RunStatus::Running;
+        resolver.run_store.save(&active).unwrap();
+        assert!(
+            resolver
+                .conversation_predecessors(&background)
+                .unwrap_err()
+                .contains("not settled")
+        );
+        active.status = RunStatus::Completed;
+        resolver.run_store.save(&active).unwrap();
+        metadata.session_call.as_mut().unwrap().context.session = "bob".into();
+        metadata::save(root.path(), &metadata).unwrap();
+        assert!(
+            resolver
+                .conversation_predecessors(&background)
+                .unwrap_err()
+                .contains("identity changed")
+        );
+        metadata.session_call.as_mut().unwrap().context.session = "alice".into();
+        metadata.session_call.as_mut().unwrap().status = "delivered".into();
+        metadata::save(root.path(), &metadata).unwrap();
+        assert_eq!(
+            resolver.conversation_predecessors(&background).unwrap(),
+            vec![first]
         );
     }
 

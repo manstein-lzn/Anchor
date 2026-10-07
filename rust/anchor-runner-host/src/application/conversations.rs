@@ -1,4 +1,5 @@
 use super::*;
+use anchor_platform_session::{SessionError, SessionStore, TurnStatus};
 use serde::Deserialize;
 
 /// Identity is supplied by the trusted host, separately from model-visible input.
@@ -15,6 +16,8 @@ pub(crate) struct ConversationAdmission {
     pub(crate) previous_run: Option<String>,
     #[serde(default)]
     pub(crate) attachments: Vec<crate::channel_inputs::UploadedAttachment>,
+    #[serde(default)]
+    pub(crate) channel_inbound: Option<String>,
 }
 
 fn valid_id(value: &str) -> bool {
@@ -47,6 +50,13 @@ impl ConversationAdmission {
         if self.previous_run.as_ref().is_some_and(|id| !valid_id(id)) {
             return Err("invalid previous_run".into());
         }
+        if self
+            .channel_inbound
+            .as_ref()
+            .is_some_and(|id| !valid_id(id))
+        {
+            return Err("invalid channel_inbound".into());
+        }
         if !self.input.is_null() && !self.input.is_object() {
             return Err("input must be an object".into());
         }
@@ -63,11 +73,48 @@ impl ConversationAdmission {
 }
 
 impl RunApplication {
+    pub(crate) fn settle_channel_run(
+        &self,
+        run_id: &str,
+        status: RunStatus,
+    ) -> Result<(), ApplicationError> {
+        let Some(metadata) = self.metadata(run_id)? else {
+            return Ok(());
+        };
+        let Some(channel) = metadata.channel else {
+            return Ok(());
+        };
+        let turn_status = match status {
+            RunStatus::Completed => TurnStatus::Completed,
+            RunStatus::Failed | RunStatus::Aborted => TurnStatus::Failed,
+            RunStatus::Stopped => TurnStatus::Stopped,
+            RunStatus::Ready
+            | RunStatus::Running
+            | RunStatus::Paused
+            | RunStatus::BudgetStopped
+            | RunStatus::WaitingCall
+            | RunStatus::WaitingRecovery => return Ok(()),
+        };
+        let sessions = SessionStore::open(self.data_root.join("platform/sessions.sqlite"))
+            .map_err(|error| ApplicationError::Storage(error.to_string()))?;
+        match sessions.finish_turn(
+            &channel.owner,
+            &channel.session,
+            &channel.turn,
+            turn_status,
+            None,
+        ) {
+            Ok(_) | Err(SessionError::Missing) => Ok(()),
+            Err(error) => Err(ApplicationError::Storage(error.to_string())),
+        }
+    }
+
     fn retry_conversation(
         &self,
         request: &ConversationAdmission,
         graph_path: &Path,
         attachments: &crate::channel_inputs::PreparedAttachments,
+        channel: Option<&ChannelRunSource>,
     ) -> Result<Option<String>, ApplicationError> {
         let Some(record) = self.store().load(&request.run)? else {
             return Ok(None);
@@ -84,6 +131,7 @@ impl RunApplication {
             || Self::graph_identity(&metadata.bundle_source)? != Self::graph_identity(graph_path)?
             || metadata.graph_digest != record.graph_digest
             || metadata.conversation.as_ref() != Some(&request.source())
+            || metadata.channel.as_ref() != channel
             || repeated.input != record.input
             || metadata.attachments != attachments.manifest()
         {
@@ -101,9 +149,10 @@ impl RunApplication {
         request: &ConversationAdmission,
         graph_path: &Path,
         attachments: &crate::channel_inputs::PreparedAttachments,
+        channel: Option<&ChannelRunSource>,
     ) -> Result<Option<String>, ApplicationError> {
         let _active = self.active.lock().await;
-        self.retry_conversation(request, graph_path, attachments)
+        self.retry_conversation(request, graph_path, attachments, channel)
     }
 
     pub(super) fn conversation_chain(
@@ -392,11 +441,14 @@ impl RunApplication {
         bundle: LoadedGraphBundle,
         graph_lease: Box<dyn RunLease>,
         attachments: &crate::channel_inputs::PreparedAttachments,
+        channel: Option<ChannelRunSource>,
     ) -> Result<String, ApplicationError> {
         request.validate().map_err(ApplicationError::Invalid)?;
         let graph_path = Self::graph_identity(source)?;
         let mut active = self.active.lock().await;
-        if let Some(run) = self.retry_conversation(&request, &graph_path, attachments)? {
+        if let Some(run) =
+            self.retry_conversation(&request, &graph_path, attachments, channel.as_ref())?
+        {
             return Ok(run);
         }
         if self.metadata(&request.run)?.is_some() {
@@ -463,6 +515,7 @@ impl RunApplication {
         )?;
         metadata.trigger_source = "channel".into();
         metadata.conversation = Some(conversation);
+        metadata.channel = channel;
         metadata.attachments = attachments.manifest();
         let lease = self.store().acquire_lease(&request.run)?;
         crate::channel_inputs::freeze(&self.data_root, &metadata, attachments)
@@ -492,7 +545,7 @@ impl RunApplication {
         );
         drop(lease);
         drop(graph_lease);
-        self.spawn(record, execution);
+        self.spawn(record, execution)?;
         Ok(request.run)
     }
 }

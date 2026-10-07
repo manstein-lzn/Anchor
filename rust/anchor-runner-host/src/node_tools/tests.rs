@@ -97,16 +97,18 @@ async fn graph_network_intent_is_applied_and_host_authority_still_limits_it() {
         let (mut socket, _) = listener.accept().await.unwrap();
         socket.write_all(b"network-visible").await.unwrap();
     });
+    let python = std::fs::canonicalize("/usr/bin/python3").unwrap();
+    let executable = python.to_str().unwrap();
     let sandbox = Arc::new(
         BubblewrapSandbox::new(
-            BubblewrapPolicy::new("bwrap", ["python3"])
+            BubblewrapPolicy::new("bwrap", [python.file_name().unwrap().to_str().unwrap()])
                 .authorize_workspace_root(&fixture.workspace)
                 .allow_network(),
         )
         .unwrap(),
     );
     let script = format!(
-        "import socket; s=socket.create_connection(('127.0.0.1',{port}), timeout=1); print(s.recv(64).decode())"
+        "import socket; print('network-probe-started', flush=True); s=socket.create_connection(('127.0.0.1',{port}), timeout=1); print(s.recv(64).decode())"
     );
     let tools = || {
         NodeTools::new(
@@ -117,13 +119,19 @@ async fn graph_network_intent_is_applied_and_host_authority_still_limits_it() {
             cancellation(),
         )
     };
-    let denied = run(&tools(), &["python3", "-c", &script]).await;
+    let denied = run(&tools(), &[executable, "-c", &script]).await;
+    assert_eq!(denied["status"], "completed", "{denied}");
+    assert_eq!(
+        denied["stdout"].as_str().unwrap().trim(),
+        "network-probe-started",
+        "{denied}"
+    );
     assert_ne!(denied["exit_code"], 0, "{denied}");
-    let allowed = run(&tools().with_network(true), &["python3", "-c", &script]).await;
+    let allowed = run(&tools().with_network(true), &[executable, "-c", &script]).await;
     assert_eq!(allowed["exit_code"], 0, "{allowed}");
     assert_eq!(
         allowed["stdout"].as_str().unwrap().trim(),
-        "network-visible"
+        "network-probe-started\nnetwork-visible"
     );
     server.await.unwrap();
 }

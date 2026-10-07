@@ -818,6 +818,25 @@ fn validate_mcp(
                 "Plugin {id}, server {name}: auth supports only oauth; use headers or bearer_token_env_var for tokens"
             )));
         }
+        let oauth = server.get("auth").and_then(Value::as_str) == Some("oauth")
+            || server.get("oauth_resource").is_some();
+        if oauth
+            && (server.contains_key("bearer_token_env_var")
+                || ["headers", "http_headers", "env_http_headers"].iter().any(|key| {
+                    server
+                        .get(*key)
+                        .and_then(Value::as_object)
+                        .is_some_and(|values| {
+                            values
+                                .keys()
+                                .any(|name| name.eq_ignore_ascii_case("authorization"))
+                        })
+                }))
+        {
+            return Err(invalid(format!(
+                "Plugin {id}, server {name}: OAuth cannot be combined with static Authorization"
+            )));
+        }
         if server.contains_key("headers") && server.contains_key("http_headers") {
             return Err(invalid(format!(
                 "Plugin {id}, server {name}: choose headers or http_headers, not both"
@@ -2078,6 +2097,13 @@ mod plugin_catalog_tests {
         fs::write(
             dir.join("plugin.json"),
             r#"{"name":"Invalid","mcpServers":{"bad":{"url":"https://example.test","headers":{"Authorization":"x"},"bearer_token_env_var":"MISSING_ANCHOR_TOKEN"}}}"#,
+        )
+        .unwrap();
+        assert!(catalog.mcp_servers("invalid", true).is_err());
+
+        fs::write(
+            dir.join("plugin.json"),
+            r#"{"name":"Invalid","mcpServers":{"oauth":{"url":"https://example.test","auth":"oauth","headers":{"authorization":"static-secret"}}}}"#,
         )
         .unwrap();
         assert!(catalog.mcp_servers("invalid", true).is_err());

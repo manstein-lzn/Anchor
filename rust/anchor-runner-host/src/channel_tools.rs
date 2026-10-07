@@ -5,16 +5,15 @@
 //! call its private Unix socket, or persist the final rich reply for the host
 //! adapter to deliver.
 
-use anchor_runtime_rig::{Cancellation, ReadOnlyInput, ToolError, ToolPort};
+use anchor_runtime_rig::{
+    Cancellation, ReadOnlyInput, ToolDefinition, ToolError, ToolName, ToolPort, ToolResultContent,
+};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use image::ImageFormat;
 use md5::{Digest as Md5Digest, Md5};
-use rig_agent::core::{
-    completion::ToolDefinition,
-    message::{ToolName, ToolResultContent},
-};
 use serde::Deserialize;
 use serde_json::{Value, json};
+#[cfg(feature = "legacy-regression")]
 use sha2::Sha256;
 use std::{
     fs::{self, OpenOptions},
@@ -352,25 +351,23 @@ impl ChannelTools {
         {
             return Err(ToolError::Failed("recipient is not allowed".into()));
         }
+        let request_id = self.send_request_id()?;
         let (socket, token) = Self::control_endpoint()?;
-        let attempt = anchor_io_harness_runtime::node_port::active_tool_attempt(
-            &self.state_root.join("io-harness/store"),
-            &self.key,
-            SEND_TOOL,
-        )
-        .map_err(ToolError::Failed)?;
-        let request_id = format!(
-            "channel-send-{:x}",
-            Sha256::digest(format!("{}:{attempt}", self.key.durable_key()).as_bytes())
-        );
         let payload = json!({"operation":"send","request_id":request_id,"userid":args.userid,"content":args.content,"token":token});
+        if args.content.len() > 20480 || args.userid.chars().count() > 200 {
+            return Err(ToolError::Failed(
+                "message or identifier exceeds platform limits".into(),
+            ));
+        }
+        self.deliver(socket, payload).await
+    }
+
+    async fn deliver(&self, socket: PathBuf, payload: Value) -> Result<Value, ToolError> {
+        self.check_active()?;
         let mut bytes =
             serde_json::to_vec(&payload).map_err(|e| ToolError::Failed(e.to_string()))?;
         bytes.push(b'\n');
-        if bytes.len() > 64 * 1024
-            || args.content.len() > 20480
-            || args.userid.chars().count() > 200
-        {
+        if bytes.len() > 64 * 1024 {
             return Err(ToolError::Failed(
                 "message or identifier exceeds platform limits".into(),
             ));
@@ -405,6 +402,28 @@ impl ChannelTools {
         // Preserve a confirmed ACK even if cancellation arrived during delivery.
 
         Ok(value)
+    }
+
+    #[cfg(feature = "legacy-regression")]
+    fn send_request_id(&self) -> Result<String, ToolError> {
+        if crate::goose_acp::runtime_mode() != "io-harness" {
+            return crate::goose_tool_context::channel_request_id(&self.key);
+        }
+        let attempt = anchor_io_harness_runtime::node_port::active_tool_attempt(
+            &self.state_root.join("io-harness/store"),
+            &self.key,
+            SEND_TOOL,
+        )
+        .map_err(ToolError::Failed)?;
+        Ok(format!(
+            "channel-send-{:x}",
+            Sha256::digest(format!("{}:{attempt}", self.key.durable_key()).as_bytes())
+        ))
+    }
+
+    #[cfg(not(feature = "legacy-regression"))]
+    fn send_request_id(&self) -> Result<String, ToolError> {
+        crate::goose_tool_context::channel_request_id(&self.key)
     }
 }
 
@@ -505,6 +524,205 @@ mod tests {
             .write_to(&mut out, ImageFormat::Png)
             .unwrap();
         out.into_inner()
+    }
+    #[cfg(not(feature = "legacy-regression"))]
+    #[test]
+    fn goose_gateway_send_refuses_before_connecting_or_inventing_an_attempt() {
+        let root = tempfile::tempdir().unwrap();
+        let host = tools(root.path());
+        assert!(
+            host.send_request_id()
+                .unwrap_err()
+                .to_string()
+                .contains("no message was sent")
+        );
+        assert!(!host.state_root.join("io-harness").exists());
+    }
+
+    fn delivery_payload(request_id: &str) -> Value {
+        json!({"operation":"send","request_id":request_id,"userid":"fixture-user","content":"same body","token":"fixture-token"})
+    }
+
+    async fn gateway_request(stream: &mut UnixStream) -> Value {
+        let mut bytes = Vec::new();
+        BufReader::new(stream)
+            .read_until(b'\n', &mut bytes)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[cfg(not(feature = "legacy-regression"))]
+    #[tokio::test]
+    async fn scoped_concurrent_calls_with_identical_bodies_have_independent_acks() {
+        use crate::goose_tool_context::{GooseToolIdentity, scope};
+        let root = tempfile::tempdir().unwrap();
+        let host = tools(root.path());
+        let socket = root.path().join("gateway.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let gateway = async {
+            let mut payloads = Vec::new();
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let payload = gateway_request(&mut stream).await;
+                let response = json!({"accepted":true,"request_id":payload["request_id"]});
+                stream
+                    .write_all(format!("{response}\n").as_bytes())
+                    .await
+                    .unwrap();
+                payloads.push(payload);
+            }
+            payloads
+        };
+        let send = |tool_call: &str| {
+            scope(
+                Some(GooseToolIdentity {
+                    key: host.key.clone(),
+                    session: "fixture-session".into(),
+                    tool_call: tool_call.into(),
+                }),
+                async {
+                    let request_id = host.send_request_id().unwrap();
+                    host.deliver(socket.clone(), delivery_payload(&request_id))
+                        .await
+                        .unwrap()
+                },
+            )
+        };
+        let (first, second, payloads) =
+            tokio::join!(send("native-first"), send("native-second"), gateway);
+        assert_ne!(first["request_id"], second["request_id"]);
+        assert_eq!(payloads.len(), 2);
+        assert_eq!(payloads[0]["content"], payloads[1]["content"]);
+        assert!(host.send_request_id().is_err());
+    }
+
+    #[tokio::test]
+    async fn late_cancellation_preserves_confirmed_gateway_ack() {
+        let root = tempfile::tempdir().unwrap();
+        let host = tools(root.path());
+        let socket = root.path().join("gateway.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let gateway = async {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let payload = gateway_request(&mut stream).await;
+            host.cancellation.store(true, Ordering::SeqCst);
+            stream
+                .write_all(
+                    format!(
+                        "{}\n",
+                        json!({"accepted":true,"request_id":payload["request_id"]})
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        };
+        let (result, _) = tokio::join!(
+            host.deliver(socket, delivery_payload("fixture-request")),
+            gateway
+        );
+        assert_eq!(result.unwrap()["accepted"], true);
+        assert!(host.check_active().is_err());
+    }
+
+    #[tokio::test]
+    async fn stopped_or_unauthorized_calls_do_not_connect() {
+        let root = tempfile::tempdir().unwrap();
+        let host = tools(root.path());
+        let socket = root.path().join("gateway.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let error = host
+            .call(SEND_TOOL, json!({"userid":"@all","content":"blocked"}))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("recipient is not allowed"));
+        let error = host.call(SEND_TOOL, json!({"userid":"fixture-user","content":"blocked","agent-tool-call-request-id":"spoofed"})).await.unwrap_err();
+        assert!(error.to_string().contains("invalid WeCom send arguments"));
+        host.cancellation.store(true, Ordering::SeqCst);
+        assert!(
+            host.deliver(socket, delivery_payload("fixture-request"))
+                .await
+                .is_err()
+        );
+        assert!(
+            timeout(Duration::from_millis(20), listener.accept())
+                .await
+                .is_err()
+        );
+    }
+
+    #[cfg(not(feature = "legacy-regression"))]
+    #[tokio::test]
+    async fn missing_or_wrong_invocation_identity_never_opens_the_socket() {
+        use crate::goose_tool_context::{GooseToolIdentity, scope};
+        let root = tempfile::tempdir().unwrap();
+        let host = tools(root.path());
+        let socket = root.path().join("gateway.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let mut wrong_key = host.key.clone();
+        wrong_key.invocation += 1;
+        for identity in [
+            None,
+            Some(GooseToolIdentity {
+                key: wrong_key,
+                session: "fixture-session".into(),
+                tool_call: "native-call".into(),
+            }),
+        ] {
+            let result = scope(identity, async {
+                let request_id = host.send_request_id()?;
+                host.deliver(socket.clone(), delivery_payload(&request_id))
+                    .await
+            })
+            .await;
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("no message was sent")
+            );
+        }
+        assert!(
+            timeout(Duration::from_millis(20), listener.accept())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_malformed_or_mismatched_ack_is_uncertain_and_never_retried() {
+        for response in [
+            "",
+            "not-json\n",
+            "{\"accepted\":false}\n",
+            "{\"accepted\":true,\"request_id\":\"wrong\"}\n",
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let host = tools(root.path());
+            let socket = root.path().join("gateway.sock");
+            let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+            let gateway = async {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                gateway_request(&mut stream).await;
+                stream.write_all(response.as_bytes()).await.unwrap();
+            };
+            let (result, _) = tokio::join!(
+                host.deliver(socket, delivery_payload("fixture-request")),
+                gateway
+            );
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("do not resend automatically")
+            );
+            assert!(
+                timeout(Duration::from_millis(20), listener.accept())
+                    .await
+                    .is_err()
+            );
+        }
     }
     #[tokio::test]
     async fn channel_image_is_scoped_durable_deduplicated_and_cancellable() {

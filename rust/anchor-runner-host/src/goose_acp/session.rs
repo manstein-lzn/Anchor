@@ -1,0 +1,76 @@
+use super::{bridge::Bridge, transport::AcpConnection};
+use anchor_runtime_rig::Cancellation;
+use serde_json::{Value, json};
+use std::time::Duration;
+use tokio::time::Instant;
+
+pub(super) struct OpenedSession {
+    pub(super) id: String,
+    pub(super) initialize: Value,
+    pub(super) response: Value,
+    pub(super) history: Vec<Value>,
+}
+
+pub(super) async fn open(
+    connection: &mut AcpConnection,
+    bridge: &Bridge,
+    restored: Option<&str>,
+    cancellation: &Cancellation,
+    deadline: Option<Instant>,
+    custom_notifications: bool,
+    form_elicitation: bool,
+) -> Result<OpenedSession, String> {
+    let handshake_deadline = deadline.unwrap_or_else(|| Instant::now() + Duration::from_secs(30));
+    let mut capabilities = json!({"_meta":{"goose":{"customNotifications":custom_notifications}}});
+    if form_elicitation {
+        capabilities["elicitation"] = json!({"form":{}});
+    }
+    let (initialize, _) = connection
+        .request(
+            "initialize",
+            json!({"protocolVersion":1,
+            "clientCapabilities":capabilities,
+            "clientInfo":{"name":"anchor","version":"0.1.0"}}),
+            cancellation,
+            handshake_deadline,
+        )
+        .await?;
+    if initialize["protocolVersion"] != 1
+        || initialize["agentCapabilities"]["mcpCapabilities"]["http"] != true
+        || initialize["agentInfo"]["name"] != "goose"
+        || initialize["agentInfo"]["version"] != "1.53.0"
+    {
+        return Err("Goose did not negotiate ACP v1 and HTTP MCP".into());
+    }
+    let server = json!({"type":"http","name":"anchor", "url":format!("{}/mcp", bridge.url),
+        "headers":[{"name":"Authorization","value":format!("Bearer {}", bridge.token)}]});
+    let mut params = json!({"cwd":"/workspace","mcpServers":[server.clone()],
+        "_meta":{"hidden":true,"sessionTitle":"Anchor",
+            "enabledExtensions":[{"type":"mcp","server":server}]}});
+    if let Some(id) = restored {
+        params["sessionId"] = json!(id);
+    }
+    let (response, history) = connection
+        .request_with_deadline(
+            if restored.is_some() {
+                "session/load"
+            } else {
+                "session/new"
+            },
+            params,
+            cancellation,
+            Some(handshake_deadline),
+        )
+        .await?;
+    let id = restored
+        .or_else(|| response["sessionId"].as_str())
+        .filter(|id| !id.is_empty())
+        .ok_or("Goose returned no sessionId")?
+        .to_owned();
+    Ok(OpenedSession {
+        id,
+        initialize,
+        response,
+        history,
+    })
+}

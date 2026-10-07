@@ -14,4 +14,5 @@ mod conversation;
 pub mod node;
 pub mod node_exec;
 pub mod node_port;
+pub mod pilot;
 pub mod recording;

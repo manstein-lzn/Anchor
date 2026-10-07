@@ -278,6 +278,9 @@ pub enum NodeExecutionOutcome {
         model_requests: u64,
     },
     Cancelled,
+    Interrupted {
+        reason: String,
+    },
     /// The operator explicitly chose to abort this invocation after an
     /// unresolved external tool effect. The containing Graph Run is terminal.
     Aborted,

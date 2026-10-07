@@ -1,0 +1,19 @@
+{
+  "message": {
+    "total-results": 101,
+    "items": [
+      {
+        "DOI": "10.1234/cost-model",
+        "title": ["Learned", "cost models"],
+        "author": [{"given": "Ada", "family": "Lovelace"}, {"family": "Turing"}],
+        "published": {"date-parts": [[2024, 6, 1]]},
+        "container-title": ["Compiler Journal"],
+        "type": "journal-article",
+        "URL": "http://xplorestaging.ieee.org/document/42",
+        "abstract": "<jats:p>Cost <b>models</b> &amp; evidence.</jats:p>",
+        "link": [{"URL": "http://publisher.example.org/paper.pdf"}, {}]
+      },
+      {"DOI": "10.1234/metadata", "title": ["Metadata only"]}
+    ]
+  }
+}

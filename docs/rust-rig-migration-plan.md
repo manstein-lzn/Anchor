@@ -1,8 +1,10 @@
 # Rust-native Runtime 迁移与产品对齐计划
 
+2026-10-06 后续决定：本文保留旧 io-harness/Rig 路线的历史边界与证据。当前目标已改为 [Goose-only Runtime](goose-runtime-migration.md)，暂不实施预算控制；不要依本文件继续扩展旧 Agent 装配或将其误认为最终依赖。
+
 ## 当前状态（2026-10-06）
 
-用户已授权继续推进 Rust Runtime 对齐 Python 产品体验。Graph 不增加版本或第二套作者语言，Plugin/外部工具不要求改写为 Rust；不同 Linux 发行版兼容性暂不纳入范围，也不自动切换现有生产数据或发送/发布业务内容。
+用户已授权继续推进 Rust Runtime 对齐 Python 产品体验，并将目标扩大为完整 Rust 平台服务端和官方可执行工具；保留现有 WebUI，标准部署不依赖 Python。Graph 不增加版本或第二套作者语言，外部服务和可选第三方 Plugin 不要求改写；不同 Linux 发行版兼容性暂不纳入范围，也不自动切换现有生产数据或发送/发布业务内容。后续工作顺序以 [全 Rust 平台开发计划](rust-platform-development-plan.md) 为准，本文保留 Kernel 迁移的历史边界与证据。
 
 Rust 二进制 Runtime、Graph/Run/Artifact、Sandbox、Plugin/MCP、io-harness AgentNode、附件/图片输入、Graph call wait/detach 和 Rust backend 首片已经实现并提交到 `codex/rust-rig-runtime`。Rig retryable Provider error 已由 A103 归入 io-harness 有界重试；显式 Rust backend 下计划 CRUD/tick/timeline 已由 A104 接到 Rust Host。标准周报原图已经通过真实 provider 的隔离无发布验收；标准 18 节点 RSI 原图已经通过受控 Rust 执行契约验收。两次隔离真实 RSI 尝试均未完成内容验收：一次 143 次请求后因 Responses body decode error 终止，另一次 900 秒到时、155 次请求后停止在 audit fanout，Run 持久状态仍为 running，且运行进程构建身份无法确认；证据见 A105。生产 backend 默认仍为 Python，Rust backend 继续显式 opt-in；完整替代还需要深度研究/RSI 真实业务验收、其他平台职责和生产切换验收。历史 worktree、未提交快照和子 Agent 分工只属于开发记录，不再作为当前状态依据。
 

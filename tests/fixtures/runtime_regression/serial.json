@@ -1,0 +1,29 @@
+{
+  "objective": "Read local producer and Plugin files, verify read-only mounts, and write fixed artifacts.",
+  "entry": "producer",
+  "agents": {
+    "worker": {
+      "model": "models.regression",
+      "network": false,
+      "wall_time_limit_seconds": 60,
+      "instructions": "Run the script below with anchor_run using command=[\"sh\",\"-c\",script]. Read and follow the printed Plugin skill; no external research. After exit 0, call final_result with summary=\"producer and Plugin verified\", route=\"verify\". Do not repeat a successful command.\nset -eu\ntest ! -e report.txt; test ! -e effects.txt\nprintf 'producer input:\\n'; cat /in/producer/source.txt\nprintf 'Plugin skill:\\n'; cat /plugins/regression/skills/check/SKILL.md\nprintf 'Plugin resource:\\n'; cat /plugins/regression/resources/input.txt\nprintf 'seed\\n' | cmp - /in/producer/source.txt\nprintf 'fixture-resource\\n' | cmp - /plugins/regression/resources/input.txt\nfor path in /in/producer/source.txt /plugins/regression/skills/check/SKILL.md /plugins/regression/resources/input.txt; do\n  if (: >> \"$path\") 2>/dev/null; then printf 'ERROR writable: %s\\n' \"$path\"; exit 1; fi\n  printf 'read-only verified: %s\\n' \"$path\"\ndone\nif (: > /plugins/regression/readonly-probe.txt) 2>/dev/null; then printf 'ERROR Plugin directory writable\\n'; exit 1; fi\nprintf 'Plugin directory read-only verified\\n'\ncat /in/producer/source.txt /plugins/regression/resources/input.txt > report.txt\nprintf 'once\\n' > effects.txt\nprintf 'report:\\n'; cat report.txt\nprintf 'effects:\\n'; cat effects.txt"
+    }
+  },
+  "ops": {
+    "producer": {
+      "run": "sh -c 'set -eu; printf \"seed\\n\" > source.txt; cat source.txt'"
+    },
+    "verify": {
+      "run": "sh -c 'set -eu; printf \"producer input:\\n\"; cat /in/producer/source.txt; printf \"worker report:\\n\"; cat /in/worker/report.txt; printf \"worker effects:\\n\"; cat /in/worker/effects.txt; printf \"seed\\n\" | cmp - /in/producer/source.txt; printf \"seed\\nfixture-resource\\n\" | cmp - /in/worker/report.txt; printf \"once\\n\" | cmp - /in/worker/effects.txt; if (: >> /in/producer/source.txt) 2>/dev/null; then printf \"ERROR producer input writable\\n\"; exit 1; fi; printf \"bytes and producer read-only verified\\n\"; cp /in/worker/report.txt verified.txt; cat verified.txt'"
+    }
+  },
+  "nodes": [
+    { "id": "producer", "op": "producer" },
+    { "id": "worker", "agent": "worker", "plugins": ["regression"] },
+    { "id": "verify", "op": "verify" }
+  ],
+  "edges": [
+    { "from": "producer", "to": "worker" },
+    { "from": "worker", "to": "verify" }
+  ]
+}

@@ -2,13 +2,9 @@
 
 use anchor_runtime_rig::{
     Cancellation, NetworkPolicy, ReadOnlyInput, SandboxError, SandboxPort, SandboxRequest,
-    SandboxStatus, ToolError, ToolPort,
+    SandboxStatus, ToolDefinition, ToolError, ToolName, ToolPort, ToolResultContent,
 };
 use anchor_sandbox_bwrap::BubblewrapSandbox;
-use rig_agent::core::{
-    completion::ToolDefinition,
-    message::{ToolName, ToolResultContent},
-};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
