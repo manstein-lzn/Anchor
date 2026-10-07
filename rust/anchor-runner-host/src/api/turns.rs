@@ -24,9 +24,6 @@ pub(super) async fn recover_pilot_turns(state: &ApiState) -> Result<(), String> 
     tokio::task::spawn_blocking(move || {
         let sessions = store(&state).map_err(|_| "Pilot storage startup failed".to_owned())?;
         sessions
-            .interrupt_running()
-            .map_err(|_| "Pilot startup recovery failed".to_owned())?;
-        sessions
             .recover_channel_deliveries()
             .map_err(|_| "Channel delivery startup recovery failed".to_owned())?;
         for (run, record) in state
@@ -71,6 +68,9 @@ pub(super) async fn recover_pilot_turns(state: &ApiState) -> Result<(), String> 
                 }
             }
         }
+        sessions
+            .interrupt_running()
+            .map_err(|_| "Pilot startup recovery failed".to_owned())?;
         Ok(())
     })
     .await

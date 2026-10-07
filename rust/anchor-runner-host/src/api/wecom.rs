@@ -1,4 +1,5 @@
 use super::*;
+use crate::application::{WECOM_REPLY_KEY_PREFIX, WECOM_REPLY_KIND};
 use anchor_platform_session::{
     ChannelDeliveryRequest, ChannelDeliveryStatus, ChannelIdentity, ChannelInboundRequest,
     TurnStatus,
@@ -10,8 +11,6 @@ use std::time::Duration;
 const MAX_EVENT_TEXT_BYTES: usize = 100_000;
 const RUN_WAIT: Duration = Duration::from_secs(120);
 const RUN_POLL: Duration = Duration::from_millis(50);
-const REPLY_KIND: &str = "wecom_reply";
-const REPLY_KEY_PREFIX: &str = "channel-wecom-reply:";
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -270,10 +269,14 @@ pub(super) async fn receive_event(
     };
 
     let content_sha256 = format!("{:x}", Sha256::digest(reply.text.as_bytes()));
-    let key = format!("{REPLY_KEY_PREFIX}{}:{}", reply.session, event.inbound_id());
+    let key = format!(
+        "{WECOM_REPLY_KEY_PREFIX}{}:{}",
+        reply.session,
+        event.inbound_id()
+    );
     let delivery_request = ChannelDeliveryRequest {
         key: key.clone(),
-        kind: REPLY_KIND.into(),
+        kind: WECOM_REPLY_KIND.into(),
         content_sha256: content_sha256.clone(),
     };
     let session = reply.session.clone();
@@ -532,7 +535,7 @@ async fn settle_delivery_value(
     envelope.event.validate_settlement_event()?;
 
     let inbound_id = envelope.event.inbound_id();
-    let Some(key_suffix) = envelope.settlement.key.strip_prefix(REPLY_KEY_PREFIX) else {
+    let Some(key_suffix) = envelope.settlement.key.strip_prefix(WECOM_REPLY_KEY_PREFIX) else {
         return Err(error(
             StatusCode::BAD_REQUEST,
             "invalid WeCom delivery receipt key",
@@ -552,7 +555,7 @@ async fn settle_delivery_value(
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
         || session.is_empty()
         || key_inbound_id != inbound_id
-        || key.as_str() != format!("{REPLY_KEY_PREFIX}{session}:{inbound_id}").as_str()
+        || key.as_str() != format!("{WECOM_REPLY_KEY_PREFIX}{session}:{inbound_id}").as_str()
     {
         return Err(error(
             StatusCode::BAD_REQUEST,
@@ -589,7 +592,7 @@ async fn settle_delivery_value(
     };
     let request = ChannelDeliveryRequest {
         key: key.clone(),
-        kind: REPLY_KIND.into(),
+        kind: WECOM_REPLY_KIND.into(),
         content_sha256: envelope.settlement.content_sha256,
     };
     let settle_state = state.clone();

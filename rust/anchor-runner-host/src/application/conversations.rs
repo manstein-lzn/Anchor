@@ -1,6 +1,10 @@
 use super::*;
-use anchor_platform_session::{SessionError, SessionStore, TurnStatus};
+use anchor_platform_session::{ChannelDeliveryRequest, SessionError, SessionStore, TurnStatus};
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
+
+pub(crate) const WECOM_REPLY_KIND: &str = "wecom_reply";
+pub(crate) const WECOM_REPLY_KEY_PREFIX: &str = "channel-wecom-reply:";
 
 /// Identity is supplied by the trusted host, separately from model-visible input.
 #[derive(Debug, Deserialize)]
@@ -73,6 +77,38 @@ impl ConversationAdmission {
 }
 
 impl RunApplication {
+    pub(crate) fn wecom_channel_delivery_request(
+        metadata: &RunMetadata,
+        record: &GraphRunRecord,
+    ) -> Option<ChannelDeliveryRequest> {
+        let channel = metadata.channel.as_ref()?;
+        let conversation = metadata.conversation.as_ref()?;
+        if record
+            .input
+            .get("channel")
+            .and_then(|channel| channel.get("source"))
+            .and_then(Value::as_str)
+            != Some("wecom")
+        {
+            return None;
+        }
+        let submission = record
+            .results
+            .get(&conversation.reply_node)
+            .and_then(|results| results.last())
+            .map(|result| result.completion.submission.as_str())
+            .filter(|submission| !submission.trim().is_empty())?;
+        let content_sha256 = format!("{:x}", Sha256::digest(submission.as_bytes()));
+        Some(ChannelDeliveryRequest {
+            key: format!(
+                "{WECOM_REPLY_KEY_PREFIX}{}:{}",
+                channel.session, channel.inbound
+            ),
+            kind: WECOM_REPLY_KIND.into(),
+            content_sha256,
+        })
+    }
+
     pub(crate) fn settle_channel_run(
         &self,
         run_id: &str,
@@ -81,7 +117,7 @@ impl RunApplication {
         let Some(metadata) = self.metadata(run_id)? else {
             return Ok(());
         };
-        let Some(channel) = metadata.channel else {
+        let Some(channel) = metadata.channel.as_ref() else {
             return Ok(());
         };
         let turn_status = match status {
@@ -95,8 +131,18 @@ impl RunApplication {
             | RunStatus::WaitingCall
             | RunStatus::WaitingRecovery => return Ok(()),
         };
+        let completed_record = if status == RunStatus::Completed {
+            self.store().load(run_id)?
+        } else {
+            None
+        };
         let sessions = SessionStore::open(self.data_root.join("platform/sessions.sqlite"))
             .map_err(|error| ApplicationError::Storage(error.to_string()))?;
+        match sessions.get_channel_inbound(&channel.owner, &channel.session, &channel.inbound) {
+            Ok(inbound) if inbound.relation.superseded_by_turn_id.is_some() => return Ok(()),
+            Ok(_) | Err(SessionError::Missing) => {}
+            Err(error) => return Err(ApplicationError::Storage(error.to_string())),
+        }
         match sessions.finish_turn(
             &channel.owner,
             &channel.session,
@@ -104,7 +150,33 @@ impl RunApplication {
             turn_status,
             None,
         ) {
+            Ok(_) | Err(SessionError::Missing) => {}
+            Err(error) => return Err(ApplicationError::Storage(error.to_string())),
+        };
+        let Some(record) = completed_record else {
+            return Ok(());
+        };
+        let Some(request) = Self::wecom_channel_delivery_request(&metadata, &record) else {
+            return Ok(());
+        };
+        match sessions.admit_completed_channel_delivery(
+            &channel.owner,
+            &channel.session,
+            &channel.turn,
+            request,
+        ) {
             Ok(_) | Err(SessionError::Missing) => Ok(()),
+            Err(conflict @ SessionError::Conflict(_)) => {
+                match sessions.get_channel_inbound(
+                    &channel.owner,
+                    &channel.session,
+                    &channel.inbound,
+                ) {
+                    Ok(inbound) if inbound.relation.superseded_by_turn_id.is_some() => Ok(()),
+                    Ok(_) => Err(ApplicationError::Storage(conflict.to_string())),
+                    Err(error) => Err(ApplicationError::Storage(error.to_string())),
+                }
+            }
             Err(error) => Err(ApplicationError::Storage(error.to_string())),
         }
     }

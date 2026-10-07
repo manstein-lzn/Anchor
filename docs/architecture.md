@@ -399,6 +399,8 @@ Host 安装与 Graph 冻结共用 catalog mutation gate；blocking 安装任务�
 
 新 native 私有状态目录为 0700，descriptor/socket/database 为 0600；稳定文件 lease 保证单 owner，NOFOLLOW 拒绝 symlink/special/hardlink。SQLite 在实际发送前绑定 request ID、内容/身份摘要和 wire ID 为 unknown；只有匹配成功 ACK 才 confirmed。未知、超时、拒绝、断连、SIGKILL 与晚到 ACK 不触发自动重发，confirmed 相同请求幂等返回。未知不等于失败且无 exactly-once 承诺。持久事实绑定 bot/endpoint，control token 轮换保留事实；旧 Python events.sqlite 拒绝接管并保留。回调去重后中断不重新执行 webhook；未发送 ready 回复在重启后核查当前入站授权与较新消息身份。
 
+Host 启动恢复先把遗留 channel delivery 的 `sending` 收敛为 `unknown`，再扫描已持久化的终态 Run，按保存的 Run 结果和受信 channel metadata 幂等补建 WeCom reply delivery；该过程不重新执行 Graph、AgentNode 或模型请求。只有仍属于当前 inbound 的完成 Run 才能建立 delivery；已被更新消息替代的 inbound 不发送旧回复，若其 Turn 尚未结算则随后按孤立 running Turn 规则中断。Gateway 重启只重试处于 `unknown` 且没有 durable reply claim 的 inbound；已有 claim 的入站 fail-closed，不重新调用 webhook。该切片关闭 Run 完成到 Host 建立 delivery 的崩溃窗口和无 reply claim 的 webhook 恢复窗口，但不提供外部投递 exactly-once，也不等于公网 WeCom 或完整渠道 supervisor 验收。
+
 `anchor-distribution` 是操作员 Rust builder，调用同一 FileGraphBundleLoader，不执行输入 binary 或新增 Runner。包只带给定 ELF Host、固定 Goose v1.53.0、精确声明的 Graph/Plugin 资源和显式工具/Web；资源原子私有快照与发布前身份/内容复查，归档顺序、uid/gid、mtime、mode 和 gzip header 确定。逐文件 SHA256、平台、Plugin pins 和环境变量引用记录在 runtime-manifest；它不是签名，也不能从任意 ELF 证明 Host 无 legacy feature。标准 Host 的 normal/build/dev 依赖闭包另行验证。
 
 源码/凭据/状态路径、symlink/hardlink/special、未知 bundle 文件或空目录均拒绝；JSON/TOML/YAML 的已知凭据字段结构化检查，保留未展开的环境引用。该过滤不是任意文本/二进制秘密发现，输入需要操作员审查；ELF 共享库、系统 Git/Bubblewrap 与外部服务不自动打包，工具放入 bin 不自动扩大授权。输出用 NOREPLACE 原子发布，不覆盖并发赢家；发布后 durability 不确定明确返回 uncertain。实际解包 Host/Goose 的小图停止、重启、同 Session 核查续行和只读 Artifact 已验收；这不是无 Python OS、release candidate、真实模型或生产切换验收。

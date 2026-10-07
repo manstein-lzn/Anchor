@@ -4,7 +4,7 @@ pub(crate) mod graphs;
 pub(crate) mod metadata;
 mod plugins;
 pub(crate) mod session_calls;
-pub(crate) use conversations::ConversationAdmission;
+pub(crate) use conversations::{ConversationAdmission, WECOM_REPLY_KEY_PREFIX, WECOM_REPLY_KIND};
 pub(crate) use metadata::ChannelRunSource;
 pub(crate) use metadata::ConversationSource;
 pub(crate) use metadata::RunMetadata;

@@ -234,7 +234,8 @@ impl Ledger {
             bind_receipt(&transaction, event_id, receipt)?;
         }
         let changed = transaction.execute(
-            "UPDATE inbound SET state='ready',reply=?2 WHERE event_id=?1 AND state='processing'",
+            "UPDATE inbound SET state='ready',reply=?2 WHERE event_id=?1
+             AND state IN ('processing','unknown')",
             params![event_id, text],
         )?;
         if changed != 1 {
@@ -266,7 +267,8 @@ impl Ledger {
         }
         enqueue_settlement(&transaction, event_id, SettlementStatus::Suppressed)?;
         let changed = transaction.execute(
-            "UPDATE inbound SET state='completed' WHERE event_id=?1 AND state IN ('processing','ready')",
+            "UPDATE inbound SET state='completed' WHERE event_id=?1
+             AND state IN ('processing','ready','unknown')",
             [event_id],
         )?;
         if changed != 1 {
@@ -301,6 +303,38 @@ impl Ledger {
             params![event_id, if confirmed { "completed" } else { "unknown" }],
         )?;
         Ok(())
+    }
+
+    pub fn retryable_events(&self) -> Result<Vec<ChannelEvent>, GatewayError> {
+        let connection = self.lock()?;
+        let mut statement = connection.prepare(
+            "SELECT inbound.event_id,inbound.digest,inbound.event_json
+             FROM inbound
+             WHERE inbound.state='unknown' AND inbound.event_json IS NOT NULL
+             AND NOT EXISTS(
+                 SELECT 1 FROM deliveries
+                 WHERE deliveries.kind='reply' AND deliveries.request_id=inbound.event_id
+             )
+             ORDER BY inbound.rowid",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        let mut events = Vec::new();
+        for row in rows {
+            let (event_id, saved_digest, event_json) = row?;
+            let event: ChannelEvent =
+                serde_json::from_str(&event_json).map_err(|_| GatewayError::Ledger)?;
+            if event.event_id != event_id || event_digest(&event) != saved_digest {
+                return Err(GatewayError::Ledger);
+            }
+            events.push(event);
+        }
+        Ok(events)
     }
 
     pub fn finish_reply(

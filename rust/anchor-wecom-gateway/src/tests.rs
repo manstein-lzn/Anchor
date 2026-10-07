@@ -256,6 +256,27 @@ fn callback_claims_do_not_rebind_or_reexecute_and_suppress_stale_replies() {
 }
 
 #[test]
+fn retryable_events_require_unknown_state_without_reply_claim() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("ledger.sqlite");
+    let ledger = crate::ledger::Ledger::open(&path, "profile").unwrap();
+    let event = normalize_message(&callback()).unwrap().unwrap();
+    assert!(ledger.admit(&event).unwrap());
+    assert!(ledger.retryable_events().unwrap().is_empty());
+    ledger.finish_event(&event.event_id, false).unwrap();
+    assert_eq!(ledger.retryable_events().unwrap(), vec![event.clone()]);
+
+    assert!(
+        ledger
+            .claim("reply", &event.event_id, "reply-digest", "reply-wire")
+            .unwrap()
+    );
+    assert!(ledger.retryable_events().unwrap().is_empty());
+    ledger.confirm("reply-wire").unwrap();
+    assert!(ledger.retryable_events().unwrap().is_empty());
+}
+
+#[test]
 fn webhook_receipt_has_bounded_stable_key_digest_and_exact_fields() {
     use serde_json::json;
 

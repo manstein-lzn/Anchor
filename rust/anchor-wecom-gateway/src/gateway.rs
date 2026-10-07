@@ -2,7 +2,7 @@ mod connection;
 mod control;
 
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, HashSet, VecDeque},
     sync::Arc,
     time::Duration,
 };
@@ -87,7 +87,7 @@ impl Gateway {
             shutdown: shutdown.clone(),
             status: status.clone(),
         };
-        let driver = Driver {
+        let mut driver = Driver {
             config,
             ledger: ledger.clone(),
             webhook,
@@ -97,7 +97,9 @@ impl Gateway {
             errors: errors.clone(),
             callbacks: FuturesUnordered::new(),
             pending: BTreeMap::new(),
+            recovery: VecDeque::new(),
         };
+        driver.recover_unknown()?;
         let stopped = stop.clone();
         let task = tokio::spawn(async move {
             let mut control_task = tokio::spawn(control.run());
@@ -215,6 +217,7 @@ struct Driver {
     errors: broadcast::Sender<GatewayError>,
     callbacks: FuturesUnordered<Callback>,
     pending: BTreeMap<String, PendingDelivery>,
+    recovery: VecDeque<ChannelEvent>,
 }
 
 impl Driver {
@@ -238,23 +241,48 @@ impl Driver {
             ));
         }
         if self.ledger.admit(&event)? {
-            self.callbacks.push(
-                async move {
-                    let result = webhook.handle(&event).await;
-                    (event, result)
-                }
-                .boxed(),
-            );
+            self.enqueue_callback(event, webhook);
         }
         Ok(())
     }
 
+    fn enqueue_callback(&mut self, event: ChannelEvent, webhook: Arc<Webhook>) {
+        self.callbacks.push(
+            async move {
+                let result = webhook.handle(&event).await;
+                (event, result)
+            }
+            .boxed(),
+        );
+    }
+
+    fn recover_unknown(&mut self) -> Result<(), GatewayError> {
+        if self.webhook.is_none() {
+            return Ok(());
+        }
+        self.recovery.extend(self.ledger.retryable_events()?);
+        self.pump_recovery();
+        Ok(())
+    }
+
+    fn pump_recovery(&mut self) {
+        let Some(webhook) = self.webhook.clone() else {
+            return;
+        };
+        while self.callbacks.len() < MAX_IN_FLIGHT {
+            let Some(event) = self.recovery.pop_front() else {
+                break;
+            };
+            self.enqueue_callback(event, webhook.clone());
+        }
+    }
+
     fn callback_finished(
-        &self,
+        &mut self,
         event: ChannelEvent,
         result: Result<WebhookReply, GatewayError>,
     ) -> Result<(), GatewayError> {
-        match result {
+        let outcome = match result {
             Ok(reply) if reply.superseded => self
                 .ledger
                 .suppress(&event.event_id, reply.receipt.as_ref()),
@@ -273,7 +301,9 @@ impl Driver {
                 self.report(error);
                 Ok(())
             }
-        }
+        };
+        self.pump_recovery();
+        outcome
     }
 
     fn reject_disconnected(&self, request: SendRequest) {

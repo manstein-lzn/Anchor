@@ -545,6 +545,64 @@ async fn webhook_media_error_and_oversized_replies_are_not_silently_downgraded()
 }
 
 #[tokio::test]
+async fn failed_webhook_is_retried_after_restart_without_reply_claim() {
+    let root = tempfile::tempdir().unwrap();
+    let mut platform = Platform::new(Some(0)).await;
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let webhook_attempts = attempts.clone();
+    let webhook = WebhookServer::new(move |_| {
+        if webhook_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+            let mut reply = HttpReply::ok(json!({}));
+            reply.status = axum::http::StatusCode::SERVICE_UNAVAILABLE;
+            reply
+        } else {
+            HttpReply::ok(json!({"text":"recovered reply"}))
+        }
+    })
+    .await;
+    let settings = config(root.path(), &platform, Some(&webhook));
+    let gateway = Gateway::start(settings).await.unwrap();
+    let mut errors = gateway.subscribe_errors();
+    gateway
+        .wait_authenticated(Duration::from_secs(2))
+        .await
+        .unwrap();
+
+    let input = callback("failed-webhook", "alice", "hello");
+    platform.send(input.clone()).await;
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), errors.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+        GatewayError::Webhook
+    );
+    platform.no_command("aibot_respond_msg").await;
+    assert_eq!(webhook.events.lock().unwrap().len(), 1);
+    assert!(gateway.delivery_facts().unwrap().is_empty());
+    gateway.shutdown().await.unwrap();
+
+    let reopened = Gateway::start(config(root.path(), &platform, Some(&webhook)))
+        .await
+        .unwrap();
+    reopened
+        .wait_authenticated(Duration::from_secs(2))
+        .await
+        .unwrap();
+    webhook.wait_events(2).await;
+    let reply = platform.next("aibot_respond_msg").await;
+    assert_eq!(reply["body"]["stream"]["content"], "recovered reply");
+    platform.acknowledge(&reply, 0).await;
+    wait_fact(&reopened, "failed-webhook", DeliveryStatus::Confirmed).await;
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
+
+    platform.send(input).await;
+    platform.no_command("aibot_respond_msg").await;
+    assert_eq!(webhook.events.lock().unwrap().len(), 2);
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn unix_ndjson_limits_invalid_fields_and_private_state_fail_closed() {
     let root = tempfile::tempdir().unwrap();
     let mut platform = Platform::new(Some(0)).await;
