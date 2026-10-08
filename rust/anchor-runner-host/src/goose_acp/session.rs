@@ -1,5 +1,5 @@
 use super::{bridge::Bridge, transport::AcpConnection};
-use anchor_runtime_rig::Cancellation;
+use anchor_runtime::Cancellation;
 use serde_json::{Value, json};
 use std::time::Duration;
 use tokio::time::Instant;

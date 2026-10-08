@@ -5,17 +5,11 @@ edition.workspace = true
 license.workspace = true
 description = "Host-owned MCP client adapter for Anchor Rust runtime"
 
-[features]
-default = []
-rig-legacy = ["dep:rig-core", "dep:rig-rmcp", "anchor-runtime-rig/rig-legacy"]
-
 [dependencies]
-anchor-runtime-rig = { path = "../anchor-runtime", default-features = false }
+anchor-runtime = { path = "../anchor-runtime" }
 base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
-rig-core = { workspace = true, optional = true }
 rmcp = { workspace = true, features = ["transport-child-process"] }
-rig-rmcp = { workspace = true, optional = true }
 http = "1"
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -3,7 +3,7 @@ use serde_json::{Value, json};
 use super::{ToolDefinition, ToolError, ToolName, ToolPort, ToolResultContent};
 
 #[test]
-fn definition_preserves_the_rig_043_wire_shape() {
+fn definition_preserves_canonical_wire_shape() {
     let definition = ToolDefinition::new(
         ToolName::new("anchor_echo").unwrap(),
         "Return JSON unchanged",
@@ -22,7 +22,7 @@ fn definition_preserves_the_rig_043_wire_shape() {
 }
 
 #[test]
-fn text_results_preserve_the_rig_043_wire_shape_and_literal_content() {
+fn text_results_preserve_wire_shape_and_literal_content() {
     for text in ["", "plain text", "{\"value\":true}", "多行\n\"text\""] {
         let content = ToolResultContent::text(text);
         let encoded = json!({"type": "text", "text": text});
@@ -35,7 +35,7 @@ fn text_results_preserve_the_rig_043_wire_shape_and_literal_content() {
 }
 
 #[test]
-fn json_results_preserve_the_rig_043_wire_shape_and_value_types() {
+fn json_results_preserve_wire_shape_and_value_types() {
     for value in [
         Value::Null,
         json!(true),
@@ -74,7 +74,7 @@ fn typed_results_require_their_canonical_fields() {
 }
 
 #[test]
-fn tool_names_match_rig_nonempty_validation_and_string_serialization() {
+fn tool_names_require_nonempty_strings_and_preserve_serialization() {
     assert!(ToolName::new("").is_err());
     assert!(serde_json::from_value::<ToolName>(json!("")).is_err());
     for name in ["anchor_echo", "namespace.tool", " ", "工具"] {
@@ -140,9 +140,8 @@ async fn stable_tool_port_preserves_dispatch_results_and_conservative_replay() {
     );
 }
 
-#[cfg(not(feature = "rig-legacy"))]
 #[test]
-fn native_results_do_not_accept_unsupported_media() {
+fn image_results_require_mime_and_preserve_typed_content() {
     assert!(
         serde_json::from_value::<ToolResultContent>(json!({
             "type": "image",

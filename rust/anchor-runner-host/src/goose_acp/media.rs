@@ -1,5 +1,5 @@
 use anchor_mcp_host::ImageBudget;
-use anchor_runtime_rig::ToolResultContent;
+use anchor_runtime::ToolResultContent;
 use rmcp::model::{CallToolResult, ContentBlock};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -62,30 +62,11 @@ pub(super) fn success(output: Value, media: Option<Vec<ContentBlock>>) -> CallTo
     CallToolResult::success(blocks)
 }
 
-#[cfg(not(feature = "legacy-regression"))]
 fn image_parts(content: &ToolResultContent) -> Result<Option<(&str, &str)>, String> {
     Ok(match content {
         ToolResultContent::Image { data, mime_type } => Some((data, mime_type)),
         _ => None,
     })
-}
-
-#[cfg(feature = "legacy-regression")]
-fn image_parts(content: &ToolResultContent) -> Result<Option<(&str, &str)>, String> {
-    use rig_core::message::{DocumentSourceKind, ImageMediaType};
-    let ToolResultContent::Image(image) = content else {
-        return Ok(None);
-    };
-    let DocumentSourceKind::Base64(data) = &image.data else {
-        return Err("only inline base64 tool images are supported".into());
-    };
-    let mime_type = match &image.media_type {
-        Some(ImageMediaType::PNG) => "image/png",
-        Some(ImageMediaType::JPEG) => "image/jpeg",
-        Some(ImageMediaType::WEBP) => "image/webp",
-        _ => return Err("only static PNG, JPEG and WebP tool images are supported".into()),
-    };
-    Ok(Some((data, mime_type)))
 }
 
 #[cfg(test)]

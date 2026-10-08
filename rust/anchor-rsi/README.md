@@ -2,7 +2,8 @@
 
 An independent, read-only Rust Streamable HTTP MCP service. It owns business
 review evidence, not Graph scheduling, model execution, or project modifications.
-`anchor-runner-host` runs the ordinary JSON Graph in `examples/rust-rsi/`.
+The ordinary JSON Graph in `examples/rust-rsi/` is retained as a business
+acceptance asset; its full Goose execution has not been revalidated.
 
 At startup it freezes a view of the operator-authorized source and deployment:
 
@@ -57,19 +58,20 @@ All model-facing evidence is untrusted task data, not an instruction source.
 
 ## Run the Graph
 
-From `rust/`, build `cargo build -p anchor-rsi -p anchor-runner-host`. With a model
-configured in the repository `.env`, the optional operator launcher is:
+Build with `cargo build -p anchor-rsi --locked` from `rust/`. The same binary
+provides the read-only evidence MCP service and deterministic business commands:
+`collect`, `research`, `rsi-review`, `rsi-gate`, `rsi-publish`, `native-gate`,
+`native-publish`, `weekly-collect`, `weekly-gate` and `weekly-publish`.
+Use `anchor-rsi --help` for arguments. Gates call the existing Host
+`anchor-route`; publishing rechecks review, commit and evidence bindings.
 
-```sh
-./.venv/bin/python scripts/rust_rsi_run.py --data /path/to/anchor-data \
-  --rust-state /path/to/rust-state --previous /path/to/previous-published-report
-```
-
-Python here only launches the Rust binaries and verifies output; it is not part
-of either runtime or MCP service. The same binaries can be launched directly
-using the environment and host protocol documented in `anchor-runner-host`.
-No production scheduler, Graph definition, code or message destination is changed.
-The result is a review report and proposed changes, never automatic code edits.
+The Graph uses the existing Host/Runner with operator-authorized local inputs
+and a canonical Plugin MCP endpoint. Install and schedule it through the normal
+Graph APIs, following [RSI setup](../../docs/rsi.md) or
+[weekly report setup](../../docs/weekly-work-report.md). There is no separate
+business Runner. For routine execution regression, use the
+[native deterministic Goose fixtures](../anchor-devtools/README.md).
+Real model/business acceptance and report quality remain separate.
 
 The Graph uses five independent audit branches, a Coordinator join, synthesis,
 independent review with a revision edge, then a deterministic publish check.
@@ -82,17 +84,8 @@ Run projections include `source_field_presence` and `projection_omitted`: a fiel
 omitted from review evidence may still exist in the original record. Presence
 never authorizes exposing its private contents.
 
-To review an existing report with operator feedback without repeating the five
-audits, use a fresh proof directory and:
-
-```sh
-./.venv/bin/python scripts/rust_rsi_run.py \
-  --revision-report /path/to/previous-report-files \
-  --feedback-file /path/to/acceptance-feedback.md
-```
-
-The launcher creates a separate analyze/review/publish Run. The original Run and
-immutable report remain unchanged. `acceptance.json` distinguishes mechanical
-Graph completion from the separately recorded owner assessment; model approval
-is not owner acceptance. Real acceptance results and known missed claims are in
-the development ledger A61.
+Historical report and correction acceptance in A61 remains in the development
+ledger. The former launch and revision commands can be inspected at commit
+`45d4bbfa189aafb5a41bd8a8b05295e98749ca6b`; they are not current instructions.
+Mechanical Graph completion, model review and owner report assessment remain
+different acceptance states.

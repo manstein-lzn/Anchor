@@ -173,7 +173,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_python_compatible_tree_paths_and_preserves_revision() {
+    fn parses_repository_tree_paths_and_preserves_revision() {
         let source = GithubSource::parse(
             "https://github.com//owner/repo/tree/release-1.2/plugins/my-plugin//",
         )

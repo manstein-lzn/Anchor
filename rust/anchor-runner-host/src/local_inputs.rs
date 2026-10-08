@@ -1,7 +1,7 @@
 //! Operator-owned per-node grants, frozen separately from distributable Graphs.
 
 use crate::create_durable_directory;
-use anchor_runtime_rig::{
+use anchor_runtime::{
     ReadOnlyInput,
     graph::{GraphRunRecord, GraphSnapshot, InvocationKey},
 };

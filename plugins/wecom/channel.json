@@ -1,11 +1,11 @@
 {
   "platform": "wecom",
   "transport": "websocket",
-  "entrypoint": "ws_gateway.py",
+  "entrypoint": "bin/anchor-wecom-gateway",
   "description": "企业微信智能机器人 WebSocket 长连接适配器",
   "required_environment": [
     "WECOM_BOT_ID",
     "WECOM_BOT_SECRET"
   ],
-  "sdk": "wecom-aibot-python-sdk==1.0.2"
+  "sdk": "anchor-wecom-gateway"
 }

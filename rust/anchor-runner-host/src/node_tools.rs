@@ -1,6 +1,6 @@
 //! AgentNode command tools delegated to the host-authorized Bubblewrap adapter.
 
-use anchor_runtime_rig::{
+use anchor_runtime::{
     Cancellation, NetworkPolicy, ReadOnlyInput, SandboxError, SandboxPort, SandboxRequest,
     SandboxStatus, ToolDefinition, ToolError, ToolName, ToolPort, ToolResultContent,
 };

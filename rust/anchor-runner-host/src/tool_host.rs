@@ -5,16 +5,23 @@
 //! must independently enable that Plugin before any tool is advertised.
 
 use anchor_graph_host::{FilePluginCatalog, PluginCatalog};
+use anchor_library::{
+    FileOAuthTokenStore, OAuthBinding, OAuthClient, OAuthRefreshRequest, OAuthRefreshTransport,
+    OAuthTokenResponse, OAuthTransportError,
+};
 use anchor_mcp_host::{McpHost, McpServerConfig, McpTransportConfig, Secret};
-use anchor_runtime_rig::{
+use anchor_runtime::{
     NetworkPolicy, ReadOnlyInput, SandboxEnvironment, SandboxRequest, ToolDefinition, ToolError,
     ToolName, ToolPort, ToolResultContent, graph::PluginBinding,
 };
 use anchor_sandbox_bwrap::BubblewrapSandbox;
+use serde::Deserialize;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
     future::Future,
+    io::Read,
     path::{Path, PathBuf},
     pin::Pin,
     sync::Arc,
@@ -30,14 +37,33 @@ pub struct McpToolConfig {
     // contract are different from missing host configuration.
     disabled: BTreeSet<String>,
     pub(crate) environment: crate::tool_environment::ToolEnvironment,
+    oauth_library_root: Option<PathBuf>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct ResolvedMcpServer {
     plugin_id: String,
     name: String,
     plugin_directory: PathBuf,
     config: Value,
+}
+
+impl std::fmt::Debug for ResolvedMcpServer {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ResolvedMcpServer")
+            .field("plugin_id", &self.plugin_id)
+            .field("name", &self.name)
+            .field("plugin_directory", &self.plugin_directory)
+            .field(
+                "config_keys",
+                &self
+                    .config
+                    .as_object()
+                    .map(|config| config.keys().collect::<Vec<_>>()),
+            )
+            .finish()
+    }
 }
 
 impl McpToolConfig {
@@ -49,7 +75,7 @@ impl McpToolConfig {
         bindings: &[PluginBinding],
     ) -> Result<Self, String> {
         let root = root.into();
-        let catalog = FilePluginCatalog::new(root);
+        let catalog = FilePluginCatalog::new(root.clone());
         let mut servers = BTreeMap::new();
         let mut disabled = BTreeSet::new();
         for binding in bindings {
@@ -110,7 +136,70 @@ impl McpToolConfig {
             servers,
             disabled,
             environment: Default::default(),
+            oauth_library_root: Some(resolve_oauth_library_root(
+                &root,
+                std::env::var_os("ANCHOR_RUNNER_LIBRARY_ROOT").map(PathBuf::from),
+                std::env::var_os("ANCHOR_RUNNER_CATALOG_ROOT").map(PathBuf::from),
+                std::env::var_os("ANCHOR_RUNNER_BUNDLE_ROOT").map(PathBuf::from),
+            )),
         })
+    }
+
+    pub(crate) async fn authorize_oauth(
+        &mut self,
+        owner: Option<String>,
+        network_allowed: bool,
+    ) -> Result<(), String> {
+        let oauth_servers = self
+            .servers
+            .iter()
+            .filter(|(_, server)| is_oauth_config(&server.config))
+            .map(|(key, server)| (key.clone(), server.clone()))
+            .collect::<Vec<_>>();
+        if oauth_servers.is_empty() {
+            return Ok(());
+        }
+        if !network_allowed {
+            return Err("HTTP MCP requires node network=true".into());
+        }
+        let owner = owner.ok_or_else(|| {
+            "OAuth Plugin access requires an owner-bound Run authorization".to_owned()
+        })?;
+        let library_root = self
+            .oauth_library_root
+            .clone()
+            .ok_or_else(|| "OAuth Plugin Library root is unavailable".to_owned())?;
+        for (key, server) in oauth_servers {
+            let mut server = server;
+            let resource = server
+                .config
+                .get("oauth_resource")
+                .and_then(Value::as_str)
+                .or_else(|| server.config.get("url").and_then(Value::as_str))
+                .ok_or_else(|| format!("OAuth MCP server `{key}` requires a resource URL"))?;
+            let provider = format!("{:x}", Sha256::digest(resource.as_bytes()));
+            let binding = OAuthBinding::new(provider, &server.plugin_id, &server.name, &owner)
+                .map_err(|_| format!("OAuth MCP server `{key}` has an invalid binding"))?;
+            let store = FileOAuthTokenStore::new(&library_root);
+            let token = tokio::task::spawn_blocking(move || {
+                OAuthClient::new(store, ReqwestOAuthRefreshTransport)
+                    .access_token(&binding)
+                    .map_err(|failure| format!("OAuth MCP server authorization failed: {failure}"))
+            })
+            .await
+            .map_err(|_| format!("OAuth MCP server `{key}` authorization worker failed"))??;
+            let headers = server
+                .config
+                .get_mut("headers")
+                .and_then(Value::as_object_mut)
+                .ok_or_else(|| format!("OAuth MCP server `{key}` headers are invalid"))?;
+            headers.insert(
+                "Authorization".into(),
+                Value::String(format!("Bearer {}", token.expose_secret())),
+            );
+            self.servers.insert(key, server);
+        }
+        Ok(())
     }
 
     /// Resolve the same immutable Plugin directories as the catalog and map
@@ -335,6 +424,125 @@ impl McpToolConfig {
             )),
         }
     }
+}
+
+fn resolve_oauth_library_root(
+    catalog: &Path,
+    library_root: Option<PathBuf>,
+    configured_catalog_root: Option<PathBuf>,
+    bundle_root: Option<PathBuf>,
+) -> PathBuf {
+    library_root
+        .or(configured_catalog_root)
+        .or_else(|| {
+            bundle_root.map(|bundle| {
+                let parent = bundle.parent().unwrap_or(bundle.as_path());
+                if parent
+                    .file_name()
+                    .is_some_and(|name| name.to_string_lossy() == "bundles")
+                {
+                    parent.parent().unwrap_or(parent).to_path_buf()
+                } else {
+                    parent.to_path_buf()
+                }
+            })
+        })
+        .unwrap_or_else(|| catalog.to_path_buf())
+}
+
+fn is_oauth_config(config: &Value) -> bool {
+    config.get("auth").and_then(Value::as_str) == Some("oauth")
+        || config.get("oauth_resource").is_some()
+}
+
+#[derive(Debug, Deserialize)]
+struct RefreshTokenResponse {
+    access_token: String,
+    refresh_token: Option<String>,
+    token_type: Option<String>,
+    scope: Option<String>,
+    expires_in: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RefreshTokenFailure {
+    error: Option<String>,
+}
+
+#[derive(Clone)]
+struct ReqwestOAuthRefreshTransport;
+
+impl OAuthRefreshTransport for ReqwestOAuthRefreshTransport {
+    fn refresh(
+        &self,
+        request: &OAuthRefreshRequest<'_>,
+    ) -> Result<OAuthTokenResponse, OAuthTransportError> {
+        let client_id = request.metadata().client_id().unwrap_or_default();
+        let mut form = vec![
+            ("grant_type", "refresh_token"),
+            ("refresh_token", request.refresh_token().expose_secret()),
+            ("client_id", client_id),
+        ];
+        if let Some(resource) = request.metadata().resource() {
+            form.push(("resource", resource));
+        }
+        let endpoint = match url::Url::parse(request.metadata().token_endpoint()) {
+            Ok(endpoint) => endpoint,
+            Err(_) => return Err(OAuthTransportError::RequestFailed),
+        };
+        let client = crate::oauth_http::blocking_client(&endpoint)
+            .map_err(|_| OAuthTransportError::RequestFailed)?;
+        let response = client
+            .post(endpoint)
+            .form(&form)
+            .send()
+            .map_err(|_| OAuthTransportError::RequestFailed)?;
+        let success = response.status().is_success();
+        let bytes =
+            read_oauth_response(response).map_err(|_| OAuthTransportError::RequestFailed)?;
+        if !success {
+            let revoked = serde_json::from_slice::<RefreshTokenFailure>(&bytes)
+                .ok()
+                .and_then(|failure| failure.error)
+                .is_some_and(|failure| failure == "invalid_grant");
+            return Err(if revoked {
+                OAuthTransportError::Revoked
+            } else {
+                OAuthTransportError::RequestFailed
+            });
+        }
+        let token: RefreshTokenResponse =
+            serde_json::from_slice(&bytes).map_err(|_| OAuthTransportError::RequestFailed)?;
+        let mut response =
+            OAuthTokenResponse::new(token.access_token, token.refresh_token, token.expires_in)
+                .map_err(|_| OAuthTransportError::RequestFailed)?;
+        if let Some(token_type) = token.token_type {
+            if !token_type.eq_ignore_ascii_case("bearer") {
+                return Err(OAuthTransportError::RequestFailed);
+            }
+            response = response
+                .with_token_type(token_type)
+                .map_err(|_| OAuthTransportError::RequestFailed)?;
+        }
+        if let Some(scope) = token.scope {
+            response = response
+                .with_scope(scope)
+                .map_err(|_| OAuthTransportError::RequestFailed)?;
+        }
+        Ok(response)
+    }
+}
+
+fn read_oauth_response(response: reqwest::blocking::Response) -> Result<Vec<u8>, ()> {
+    let mut bytes = Vec::new();
+    response
+        .take(128 * 1024 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| ())?;
+    if bytes.len() > 128 * 1024 {
+        return Err(());
+    }
+    Ok(bytes)
 }
 
 fn transport_name(config: &Value) -> Result<&str, String> {
@@ -568,7 +776,7 @@ impl LiveMcpTools {
     }
 }
 
-/// Python's MCPToolset.prefixed(name) exposes one model tool as
+/// The Plugin MCP naming contract exposes one model tool as
 /// `<server>_<tool>`. Keeping the mapping explicit avoids a second
 /// search/call protocol and leaves the remote input schema unchanged.
 fn exposed_tool_name(server_id: &str, tool_name: &str) -> String {
@@ -779,6 +987,9 @@ impl ToolPort for BoundPluginTools {
 }
 
 #[cfg(test)]
+mod oauth_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -930,7 +1141,7 @@ mod tests {
         let plugin = root.path().join("plugins/optional");
         std::fs::create_dir_all(&plugin).unwrap();
         std::fs::write(plugin.join("plugin.json"),
-            r#"{"name":"Optional","mcpServers":{"api":{"command":"python3","args":["server.py"],"optional_env_vars":["ANCHOR_TEST_UNCONFIGURED_OPTIONAL_MCP_7F90"]}}}"#).unwrap();
+            r#"{"name":"Optional","mcpServers":{"api":{"command":"bash5","args":["server.sh","inspect"],"optional_env_vars":["ANCHOR_TEST_UNCONFIGURED_OPTIONAL_MCP_7F90"]}}}"#).unwrap();
         let binding = PluginBinding {
             id: "optional".into(),
             digest: String::new(),
@@ -961,10 +1172,63 @@ mod tests {
         );
     }
 
+    fn stdio_fixture_binary() -> PathBuf {
+        static BINARY: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+        BINARY
+            .get_or_init(|| {
+                let executable = std::env::current_exe().unwrap();
+                let profile = executable.parent().unwrap().parent().unwrap();
+                let target = profile.parent().unwrap();
+                let mut build = std::process::Command::new("cargo");
+                build
+                    .args([
+                        "build",
+                        "--offline",
+                        "-p",
+                        "anchor-mcp-host",
+                        "--example",
+                        "http_fixture",
+                    ])
+                    .arg("--manifest-path")
+                    .arg(
+                        Path::new(env!("CARGO_MANIFEST_DIR"))
+                            .parent()
+                            .unwrap()
+                            .join("Cargo.toml"),
+                    )
+                    .env("CARGO_TARGET_DIR", target);
+                if profile.file_name().is_some_and(|name| name == "release") {
+                    build.arg("--release");
+                }
+                let output = build.output().unwrap();
+                assert!(
+                    output.status.success(),
+                    "native MCP fixture build failed: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                profile
+                    .join("examples/http_fixture")
+                    .canonicalize()
+                    .unwrap()
+            })
+            .clone()
+    }
+
+    const STDIO_FIXTURE: &str = r#"set -eu
+mode="$1"
+if [ "$mode" = echo ]; then
+    [ "$PWD" = /plugins/research/nested ]
+    dependency_root="$PYTHONPATH"
+    . "$dependency_root/installed_dependency.sh"
+    exec ../mcp-fixture --stdio echo --prefix "$prefix"
+fi
+exec ./mcp-fixture --stdio inspect
+"#;
+
     #[tokio::test]
     async fn stdio_mcp_receives_only_its_nodes_readonly_grants() {
         use anchor_sandbox_bwrap::BubblewrapPolicy;
-        let python = std::fs::canonicalize("/usr/bin/python3").unwrap();
+        let shell = std::fs::canonicalize("/usr/bin/bash").unwrap();
         let root = tempfile::tempdir().unwrap();
         let plugin = root.path().join("plugins/reader");
         let workspace = root.path().join("workspace");
@@ -974,35 +1238,12 @@ mod tests {
             std::fs::create_dir_all(path).unwrap();
         }
         std::fs::write(private.join("history.txt"), "mcp-local-evidence").unwrap();
-        std::fs::write(plugin.join("server.py"), r#"import json, os, sys
-for line in sys.stdin:
-    request = json.loads(line)
-    if "id" not in request:
-        continue
-    method = request.get("method")
-    if method == "initialize":
-        result = {"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"reader","version":"1"}}
-    elif method == "tools/list":
-        result = {"tools":[{"name":"inspect","description":"inspect granted input","inputSchema":{"type":"object","properties":{}}}]}
-    elif method == "tools/call":
-        path = "/local-inputs/history/history.txt"
-        value = {"visible": os.path.exists(path)}
-        if value["visible"]:
-            value["text"] = open(path).read()
-            try:
-                open("/local-inputs/history/forbidden", "w").write("changed")
-                value["readonly"] = False
-            except OSError:
-                value["readonly"] = True
-        result = {"content":[{"type":"text","text":json.dumps(value)}]}
-    else:
-        result = {}
-    print(json.dumps({"jsonrpc":"2.0","id":request["id"],"result":result}), flush=True)
-"#).unwrap();
+        std::fs::copy(stdio_fixture_binary(), plugin.join("mcp-fixture")).unwrap();
+        std::fs::write(plugin.join("server.sh"), STDIO_FIXTURE).unwrap();
         std::fs::write(
             plugin.join("plugin.json"),
             json!({
-                "name":"Reader", "mcpServers":{"stdio":{"command":python,"args":["server.py"]}}
+                "name":"Reader", "mcpServers":{"stdio":{"command":shell,"args":["server.sh","inspect"]}}
             })
             .to_string(),
         )
@@ -1014,7 +1255,7 @@ for line in sys.stdin:
         let config =
             McpToolConfig::from_catalog(root.path(), std::slice::from_ref(&binding)).unwrap();
         let sandbox = BubblewrapSandbox::new(
-            BubblewrapPolicy::new("bwrap", [python.file_name().unwrap().to_str().unwrap()])
+            BubblewrapPolicy::new("bwrap", [shell.file_name().unwrap().to_str().unwrap()])
                 .authorize_workspace_root(&workspace)
                 .authorize_workspace_root(&other_workspace)
                 .authorize_readonly_input_root(&plugin)
@@ -1052,46 +1293,23 @@ for line in sys.stdin:
     #[cfg(unix)]
     #[tokio::test]
     async fn stdio_mcp_runs_inside_the_plugin_mount_and_exposes_direct_tools() {
-        let python = std::fs::canonicalize("/usr/bin/python3").unwrap();
+        let shell = std::fs::canonicalize("/usr/bin/bash").unwrap();
         use anchor_sandbox_bwrap::BubblewrapPolicy;
         use std::os::unix::fs::PermissionsExt;
 
         let root = tempfile::tempdir().unwrap();
         let plugin = root.path().join("plugins/research");
         std::fs::create_dir_all(&plugin).unwrap();
-        std::fs::write(
-            plugin.join("server.py"),
-            r#"import json, os, sys
-from installed_dependency import prefix
-if os.getcwd() != "/plugins/research/nested":
-    raise SystemExit(f"wrong cwd: {os.getcwd()}")
-for line in sys.stdin:
-    open("/workspace/mcp-log", "a").write("line\\n")
-    request = json.loads(line)
-    method = request.get("method")
-    if "id" not in request:
-        continue
-    if method == "initialize":
-        result = {"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"fixture","version":"1"}}
-    elif method == "tools/list":
-        result = {"tools":[{"name":"echo","description":"echo","inputSchema":{"type":"object","properties":{"value":{"type":"string"}}}}]}
-    elif method == "tools/call":
-        result = {"content":[{"type":"text","text":prefix + request["params"]["arguments"]["value"]}]}
-    else:
-        result = {}
-    print(json.dumps({"jsonrpc":"2.0","id":request["id"],"result":result}), flush=True)
-    open("/workspace/mcp-log", "a").write(method + "\\n")
-"#,
-        )
-        .unwrap();
+        std::fs::copy(stdio_fixture_binary(), plugin.join("mcp-fixture")).unwrap();
+        std::fs::write(plugin.join("server.sh"), STDIO_FIXTURE).unwrap();
         std::fs::create_dir(plugin.join("nested")).unwrap();
-        let mut permissions = std::fs::metadata(plugin.join("server.py"))
+        let mut permissions = std::fs::metadata(plugin.join("server.sh"))
             .unwrap()
             .permissions();
         permissions.set_mode(0o644);
-        std::fs::set_permissions(plugin.join("server.py"), permissions).unwrap();
+        std::fs::set_permissions(plugin.join("server.sh"), permissions).unwrap();
         let environment = root.path().join("external-env");
-        let tool = root.path().join("tools/python");
+        let tool = root.path().join("tools/bash");
         let imports = root.path().join("external-modules");
         // Another installation sorts first on PATH; it must not replace the
         // explicitly requested interpreter of this MCP server.
@@ -1099,17 +1317,17 @@ for line in sys.stdin:
         let decoy_tool = root.path().join("tools/a-decoy");
         std::fs::create_dir_all(decoy.join("bin")).unwrap();
         std::fs::create_dir_all(&decoy_tool).unwrap();
-        std::fs::write(decoy.join("bin/python"), "#!/bin/sh\nexit 88\n").unwrap();
+        std::fs::write(decoy.join("bin/bash"), "#!/bin/sh\nexit 88\n").unwrap();
         std::fs::set_permissions(
-            decoy.join("bin/python"),
+            decoy.join("bin/bash"),
             std::fs::Permissions::from_mode(0o755),
         )
         .unwrap();
-        std::os::unix::fs::symlink("python", decoy.join("bin/python3")).unwrap();
+        std::os::unix::fs::symlink("bash", decoy.join("bin/bash5")).unwrap();
         std::fs::write(
             decoy_tool.join("tool.json"),
             json!({
-                "entrypoint":decoy.join("bin/python"), "environment":decoy
+                "entrypoint":decoy.join("bin/bash"), "environment":decoy
             })
             .to_string(),
         )
@@ -1117,21 +1335,22 @@ for line in sys.stdin:
         std::fs::create_dir_all(environment.join("bin")).unwrap();
         std::fs::create_dir_all(&tool).unwrap();
         std::fs::create_dir(&imports).unwrap();
-        std::os::unix::fs::symlink(&python, environment.join("bin/python")).unwrap();
+        std::os::unix::fs::symlink("bash5", environment.join("bin/bash")).unwrap();
+        std::os::unix::fs::symlink(&shell, environment.join("bin/bash5")).unwrap();
         std::fs::write(
-            imports.join("installed_dependency.py"),
-            "prefix = 'dependency:'",
+            imports.join("installed_dependency.sh"),
+            "prefix='dependency:'",
         )
         .unwrap();
         std::fs::write(tool.join("tool.json"), json!({
-            "entrypoint":environment.join("bin/python"), "environment":environment, "imports":[imports]
+            "entrypoint":environment.join("bin/bash"), "environment":environment, "imports":[imports]
         }).to_string()).unwrap();
         let standalone = root.path().join("standalone-launcher");
         let standalone_tool = root.path().join("tools/standalone");
         std::fs::create_dir(&standalone_tool).unwrap();
         std::fs::write(
             &standalone,
-            format!("#!/bin/sh\nexec '{}' \"$@\"\n", python.display()),
+            format!("#!/bin/sh\nexec '{}' \"$@\"\n", shell.display()),
         )
         .unwrap();
         std::fs::set_permissions(&standalone, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -1143,13 +1362,16 @@ for line in sys.stdin:
         std::fs::write(plugin.join("plugin.json"), json!({
             "name":"Research", "mcpServers":{
                 "stdio":{
-                    "command": environment.join("bin/python"), "args":["../server.py"], "cwd":"nested"
+                    "command": environment.join("bin/bash"), "args":["../server.sh","echo"], "cwd":"nested"
+                },
+                "versioned":{
+                    "command":environment.join("bin/bash5"), "args":["../server.sh","echo"], "cwd":"nested"
                 },
                 "system":{
-                    "command":python, "args":["../server.py"], "cwd":"nested"
+                    "command":shell, "args":["../server.sh","echo"], "cwd":"nested"
                 },
                 "standalone":{
-                    "command":standalone, "args":["../server.py"], "cwd":"nested"
+                    "command":standalone, "args":["../server.sh","echo"], "cwd":"nested"
                 }
             }
         }).to_string()).unwrap();
@@ -1164,7 +1386,7 @@ for line in sys.stdin:
         std::fs::create_dir(&workspace).unwrap();
         let sandbox = BubblewrapSandbox::new(
             config.environment.authorize(
-                BubblewrapPolicy::new("bwrap", [python.file_name().unwrap().to_str().unwrap()])
+                BubblewrapPolicy::new("bwrap", [shell.file_name().unwrap().to_str().unwrap()])
                     .authorize_workspace_root(&workspace)
                     .authorize_readonly_input_root(root.path())
                     .authorize_readonly_destination_root("/plugins"),
@@ -1187,6 +1409,7 @@ for line in sys.stdin:
         };
         for name in [
             "research-stdio_echo",
+            "research-versioned_echo",
             "research-system_echo",
             "research-standalone_echo",
         ] {
@@ -1199,7 +1422,7 @@ for line in sys.stdin:
             let result = tools.call(name, json!({"value":"hello"})).await.unwrap();
             assert_eq!(result[0].as_text(), Some("dependency:hello"), "{name}");
         }
-        let ungranted = root.path().join("python3");
+        let ungranted = root.path().join("bash5");
         std::fs::copy(&standalone, &ungranted).unwrap();
         config
             .servers

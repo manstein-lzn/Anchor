@@ -6,8 +6,8 @@
 //! `GraphRunner` implementation. Bundle loading is read-only; result
 //! materialization, session handoff, and platform APIs are outside this adapter.
 
-use anchor_runtime_rig::Cancellation;
-use anchor_runtime_rig::graph::{
+use anchor_runtime::Cancellation;
+use anchor_runtime::graph::{
     ArtifactPort, CallFileSelection, CallIdentity, CommitRef, GraphCallOutcome, GraphCallPort,
     GraphError, GraphRunRecord, GraphRunner, GraphSnapshot, InvocationKey,
     NodeExecutionCapabilities, NodeExecutionOutcome, NodeExecutionPort, NodeExecutionRequest,
@@ -52,7 +52,7 @@ pub struct LoadedGraphBundle {
     /// author-only fields without feeding them into Runtime execution.
     pub authoring_definition: Value,
     pub snapshot: GraphSnapshot,
-    pub plugins: Vec<anchor_runtime_rig::graph::PluginBinding>,
+    pub plugins: Vec<anchor_runtime::graph::PluginBinding>,
 }
 
 /// Read-only loader for a single standalone Graph bundle directory.
@@ -168,7 +168,7 @@ pub trait PluginCatalog: Send + Sync {
     fn resolve(
         &self,
         ids: &[String],
-    ) -> Result<Vec<anchor_runtime_rig::graph::PluginBinding>, GraphError>;
+    ) -> Result<Vec<anchor_runtime::graph::PluginBinding>, GraphError>;
 }
 
 /// Filesystem catalog rooted at the library directory containing `plugins/`.
@@ -242,16 +242,16 @@ impl FilePluginCatalog {
             .unwrap_or_default();
         let description_value = manifest
             .get("description")
-            .filter(|value| python_truthy(value))
+            .filter(|value| manifest_value_is_present(value))
             .or_else(|| {
                 interface
                     .get("longDescription")
-                    .filter(|value| python_truthy(value))
+                    .filter(|value| manifest_value_is_present(value))
             })
             .or_else(|| {
                 interface
                     .get("shortDescription")
-                    .filter(|value| python_truthy(value))
+                    .filter(|value| manifest_value_is_present(value))
             })
             .cloned()
             .unwrap_or_else(|| Value::String(String::new()));
@@ -315,7 +315,7 @@ impl FilePluginCatalog {
         let unsupported = ["hooks", "commands", "agents", "apps"]
             .into_iter()
             .filter(|key| {
-                manifest.get(*key).is_some_and(python_truthy)
+                manifest.get(*key).is_some_and(manifest_value_is_present)
                     || dir.join(key).exists()
                     || (*key == "apps" && dir.join(".app.json").exists())
             })
@@ -336,7 +336,7 @@ impl FilePluginCatalog {
     }
 
     /// Return MCP declarations after optionally applying the environment
-    /// expansion defined by the Python Library contract.
+    /// expansion defined by the Library manifest contract.
     pub fn mcp_servers(
         &self,
         id: &str,
@@ -371,9 +371,9 @@ impl FilePluginCatalog {
         Ok((root, dir))
     }
 
-    fn plugin(&self, id: &str) -> Result<anchor_runtime_rig::graph::PluginBinding, GraphError> {
+    fn plugin(&self, id: &str) -> Result<anchor_runtime::graph::PluginBinding, GraphError> {
         let definition = self.definition(id)?;
-        Ok(anchor_runtime_rig::graph::PluginBinding {
+        Ok(anchor_runtime::graph::PluginBinding {
             id: definition.id,
             digest: definition.digest,
             resources: resource_files(&definition.directory)?,
@@ -436,7 +436,7 @@ impl PluginCatalog for FilePluginCatalog {
     fn resolve(
         &self,
         ids: &[String],
-    ) -> Result<Vec<anchor_runtime_rig::graph::PluginBinding>, GraphError> {
+    ) -> Result<Vec<anchor_runtime::graph::PluginBinding>, GraphError> {
         ids.iter().map(|id| self.plugin(id)).collect()
     }
 }
@@ -511,7 +511,7 @@ fn collect_files(root: &Path, current: &Path, out: &mut Vec<String>) -> Result<(
     Ok(())
 }
 
-fn python_truthy(value: &Value) -> bool {
+fn manifest_value_is_present(value: &Value) -> bool {
     match value {
         Value::Null => false,
         Value::Bool(value) => *value,
@@ -714,6 +714,8 @@ fn validate_mcp(
             "bearer_token_env_var",
             "auth",
             "oauth_resource",
+            "oauth_client_id",
+            "oauth_scope",
         ]
     };
     if let Some(key) = server.keys().find(|key| !allowed.contains(&key.as_str())) {
@@ -743,6 +745,8 @@ fn validate_mcp(
         "url",
         "bearer_token_env_var",
         "oauth_resource",
+        "oauth_client_id",
+        "oauth_scope",
     ] {
         if let Some(value) = server.get(key)
             && value
@@ -820,18 +824,26 @@ fn validate_mcp(
         }
         let oauth = server.get("auth").and_then(Value::as_str) == Some("oauth")
             || server.get("oauth_resource").is_some();
+        if !oauth && (server.contains_key("oauth_client_id") || server.contains_key("oauth_scope"))
+        {
+            return Err(invalid(format!(
+                "Plugin {id}, server {name}: oauth_client_id and oauth_scope require OAuth auth"
+            )));
+        }
         if oauth
             && (server.contains_key("bearer_token_env_var")
-                || ["headers", "http_headers", "env_http_headers"].iter().any(|key| {
-                    server
-                        .get(*key)
-                        .and_then(Value::as_object)
-                        .is_some_and(|values| {
-                            values
-                                .keys()
-                                .any(|name| name.eq_ignore_ascii_case("authorization"))
-                        })
-                }))
+                || ["headers", "http_headers", "env_http_headers"]
+                    .iter()
+                    .any(|key| {
+                        server
+                            .get(*key)
+                            .and_then(Value::as_object)
+                            .is_some_and(|values| {
+                                values
+                                    .keys()
+                                    .any(|name| name.eq_ignore_ascii_case("authorization"))
+                            })
+                    }))
         {
             return Err(invalid(format!(
                 "Plugin {id}, server {name}: OAuth cannot be combined with static Authorization"
@@ -1148,6 +1160,15 @@ fn channels_from_dir(id: &str, dir: &Path) -> Result<Vec<ChannelDefinition>, Gra
 pub trait GraphCatalog: Send + Sync {
     fn snapshot(&self, name: &str) -> Result<Option<GraphSnapshot>, GraphError>;
 
+    /// Return the graph names for a durable Run, starting with its own Graph
+    /// and following every Graph-call parent to the root. Implementations must
+    /// fail closed when the durable ancestry cannot be proven.
+    fn graph_ancestry(&self, _run_id: &str) -> Result<Vec<String>, GraphError> {
+        Err(GraphError::Unsupported(
+            "Graph call ancestry is not available from this catalog".into(),
+        ))
+    }
+
     /// Short admission lock shared with target-Graph mutation. This lock is
     /// released before child execution; child execution uses only its Run lease.
     fn lock_admission(&self, _name: &str) -> Result<Box<dyn RunLease>, GraphError> {
@@ -1177,7 +1198,7 @@ pub trait GraphCatalog: Send + Sync {
         _run_id: &str,
         _graph: &str,
         _snapshot: &GraphSnapshot,
-        _plugins: &[anchor_runtime_rig::graph::PluginBinding],
+        _plugins: &[anchor_runtime::graph::PluginBinding],
         _identity: &CallIdentity,
         _mode: &str,
     ) -> Result<(), GraphError> {
@@ -1283,7 +1304,7 @@ pub trait GraphCatalog: Send + Sync {
     fn verify_child_plugins(
         &self,
         graph: &str,
-        bindings: &[anchor_runtime_rig::graph::PluginBinding],
+        bindings: &[anchor_runtime::graph::PluginBinding],
     ) -> Result<(), GraphError> {
         let current = self
             .bundle(graph)?
@@ -1326,7 +1347,8 @@ pub struct InProcessGraphHost<'a, S, A, N, C> {
 
 struct BoundNodes<'a, N> {
     nodes: &'a N,
-    plugins: std::collections::BTreeMap<String, anchor_runtime_rig::graph::PluginBinding>,
+    plugins: std::collections::BTreeMap<String, anchor_runtime::graph::PluginBinding>,
+    graph_calls: &'a dyn GraphCallPort,
 }
 
 impl<N: NodeExecutionPort> NodeExecutionPort for BoundNodes<'_, N> {
@@ -1336,7 +1358,7 @@ impl<N: NodeExecutionPort> NodeExecutionPort for BoundNodes<'_, N> {
     fn resolve_plugins(
         &self,
         ids: &[String],
-    ) -> Result<Vec<anchor_runtime_rig::graph::PluginBinding>, GraphError> {
+    ) -> Result<Vec<anchor_runtime::graph::PluginBinding>, GraphError> {
         ids.iter()
             .map(|id| {
                 self.plugins.get(id).cloned().ok_or_else(|| {
@@ -1347,10 +1369,10 @@ impl<N: NodeExecutionPort> NodeExecutionPort for BoundNodes<'_, N> {
     }
     fn completion_fact<'b>(
         &'b self,
-        key: &'b anchor_runtime_rig::graph::InvocationKey,
+        key: &'b anchor_runtime::graph::InvocationKey,
     ) -> Pin<
         Box<
-            dyn Future<Output = Result<anchor_runtime_rig::graph::CompletionFact, GraphError>>
+            dyn Future<Output = Result<anchor_runtime::graph::CompletionFact, GraphError>>
                 + Send
                 + 'b,
         >,
@@ -1362,6 +1384,9 @@ impl<N: NodeExecutionPort> NodeExecutionPort for BoundNodes<'_, N> {
         request: NodeExecutionRequest,
     ) -> Pin<Box<dyn Future<Output = Result<NodeExecutionOutcome, GraphError>> + Send + 'b>> {
         self.nodes.execute(request)
+    }
+    fn graph_call_port(&self) -> Option<&dyn GraphCallPort> {
+        Some(self.graph_calls)
     }
 }
 
@@ -1425,7 +1450,7 @@ impl<S: RunStore, A: ArtifactPort, N: NodeExecutionPort, C: RunControl> NodeExec
     fn resolve_plugins(
         &self,
         ids: &[String],
-    ) -> Result<Vec<anchor_runtime_rig::graph::PluginBinding>, GraphError> {
+    ) -> Result<Vec<anchor_runtime::graph::PluginBinding>, GraphError> {
         match self.plugin_catalog {
             Some(catalog) => catalog.resolve(ids),
             None => self.nodes.resolve_plugins(ids),
@@ -1433,10 +1458,10 @@ impl<S: RunStore, A: ArtifactPort, N: NodeExecutionPort, C: RunControl> NodeExec
     }
     fn completion_fact<'b>(
         &'b self,
-        key: &'b anchor_runtime_rig::graph::InvocationKey,
+        key: &'b anchor_runtime::graph::InvocationKey,
     ) -> Pin<
         Box<
-            dyn Future<Output = Result<anchor_runtime_rig::graph::CompletionFact, GraphError>>
+            dyn Future<Output = Result<anchor_runtime::graph::CompletionFact, GraphError>>
                 + Send
                 + 'b,
         >,
@@ -1523,6 +1548,16 @@ impl<S: RunStore, A: ArtifactPort, N: NodeExecutionPort, C: RunControl> GraphCal
             }
             let graph_name = call_spec.graph.as_str();
             let mode = call_spec.mode.as_str();
+            if self
+                .catalog
+                .graph_ancestry(&identity.parent_run_id)?
+                .iter()
+                .any(|ancestor| ancestor == graph_name)
+            {
+                return Err(GraphError::InvalidSnapshot(format!(
+                    "recursive Graph call to `{graph_name}` is not allowed"
+                )));
+            }
             let session_context = if let Some(session) = call_spec.session.as_deref() {
                 let context = self
                     .catalog
@@ -1627,12 +1662,6 @@ impl<S: RunStore, A: ArtifactPort, N: NodeExecutionPort, C: RunControl> GraphCal
                             ))
                         })?;
                     let snapshot = bundle.snapshot;
-                    if snapshot.ops.values().any(|op| op.get("call").is_some()) {
-                        return Err(GraphError::Unsupported(
-                            "nested Graph calls are not supported by this standalone host yet"
-                                .into(),
-                        ));
-                    }
                     // Stage the read-only `/in/call` bundle before the child
                     // becomes durable. A crash can therefore never leave a
                     // Ready child (including a startup-recovered detach child)
@@ -1705,15 +1734,11 @@ impl<S: RunStore, A: ArtifactPort, N: NodeExecutionPort, C: RunControl> GraphCal
                     child.status,
                     RunStatus::Ready
                         | RunStatus::Running
+                        | RunStatus::WaitingCall
                         | RunStatus::Paused
                         | RunStatus::Stopped
                         | RunStatus::BudgetStopped
                 );
-            if child.status == RunStatus::WaitingCall {
-                return Err(GraphError::CorruptRun(
-                    "called Graph child is itself waiting on a nested Graph call".into(),
-                ));
-            }
             if resumable {
                 if cancellation.load(std::sync::atomic::Ordering::Acquire) {
                     return Ok(GraphCallOutcome::Waiting {
@@ -1728,6 +1753,7 @@ impl<S: RunStore, A: ArtifactPort, N: NodeExecutionPort, C: RunControl> GraphCal
                 let child_nodes = BoundNodes {
                     nodes: self.nodes,
                     plugins: child.plugin_bindings.clone(),
+                    graph_calls: self,
                 };
                 child = GraphRunner::new(self.store, self.artifacts, &child_nodes, &child_control)
                     .run(child)
@@ -2033,12 +2059,12 @@ mod plugin_catalog_tests {
     }
 
     #[test]
-    fn adopts_python_manifest_skills_description_channels_and_mcp_merge() {
+    fn adopts_manifest_skills_description_channels_and_mcp_merge() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("plugins/contract");
         fs::create_dir_all(dir.join("custom/one")).unwrap();
         fs::write(dir.join("custom/one/SKILL.md"), "skill").unwrap();
-        fs::write(dir.join("gateway.py"), "# entrypoint").unwrap();
+        fs::write(dir.join("gateway.sh"), "# entrypoint").unwrap();
         fs::write(
             dir.join("plugin.json"),
             r#"{
@@ -2058,7 +2084,7 @@ mod plugin_catalog_tests {
         .unwrap();
         fs::write(
             dir.join("channel.json"),
-            r#"{"platform":"demo_platform","transport":"websocket","entrypoint":"gateway.py","required_environment":["DEMO_TOKEN"],"description":"channel","sdk":"sdk"}"#,
+            r#"{"platform":"demo_platform","transport":"websocket","entrypoint":"gateway.sh","required_environment":["DEMO_TOKEN"],"description":"channel","sdk":"sdk"}"#,
         )
         .unwrap();
 
@@ -2104,6 +2130,13 @@ mod plugin_catalog_tests {
         fs::write(
             dir.join("plugin.json"),
             r#"{"name":"Invalid","mcpServers":{"oauth":{"url":"https://example.test","auth":"oauth","headers":{"authorization":"static-secret"}}}}"#,
+        )
+        .unwrap();
+        assert!(catalog.mcp_servers("invalid", true).is_err());
+
+        fs::write(
+            dir.join("plugin.json"),
+            r#"{"name":"Invalid","mcpServers":{"oauth":{"url":"https://example.test","oauth_client_id":"client"}}}"#,
         )
         .unwrap();
         assert!(catalog.mcp_servers("invalid", true).is_err());
@@ -2166,7 +2199,7 @@ mod call_spec_tests {
 #[cfg(test)]
 mod session_call_tests {
     use super::*;
-    use anchor_runtime_rig::graph::{CompletionFact, FileRunStore, NodeCompletion, RunCursor};
+    use anchor_runtime::graph::{CompletionFact, FileRunStore, NodeCompletion, RunCursor};
     use serde_json::json;
     use std::sync::{
         Mutex,
@@ -2281,6 +2314,10 @@ mod session_call_tests {
         fn snapshot(&self, _: &str) -> Result<Option<GraphSnapshot>, GraphError> {
             Ok(Some(child_snapshot()))
         }
+
+        fn graph_ancestry(&self, _: &str) -> Result<Vec<String>, GraphError> {
+            Ok(vec!["parent".into()])
+        }
     }
 
     #[derive(Clone, Copy)]
@@ -2326,12 +2363,16 @@ mod session_call_tests {
             Ok(Some(child_snapshot()))
         }
 
+        fn graph_ancestry(&self, _: &str) -> Result<Vec<String>, GraphError> {
+            Ok(vec!["parent".into()])
+        }
+
         fn record_child_admission(
             &self,
             run_id: &str,
             _: &str,
             _: &GraphSnapshot,
-            _: &[anchor_runtime_rig::graph::PluginBinding],
+            _: &[anchor_runtime::graph::PluginBinding],
             _: &CallIdentity,
             _: &str,
         ) -> Result<(), GraphError> {

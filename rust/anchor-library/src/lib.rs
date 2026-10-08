@@ -10,7 +10,8 @@ use anchor_graph_host::FilePluginCatalog;
 use serde::{Deserialize, Serialize};
 
 pub use oauth::{
-    FileOAuthTokenStore, OAuthAuthorization, OAuthAuthorizationMetadata, OAuthBinding, OAuthClient,
+    FileOAuthTokenStore, OAuthAuthorization, OAuthAuthorizationCode, OAuthAuthorizationMetadata,
+    OAuthAuthorizationResponse, OAuthAuthorizationTransaction, OAuthBinding, OAuthClient,
     OAuthError, OAuthRefreshRequest, OAuthRefreshTransport, OAuthSecret, OAuthTokenResponse,
     OAuthTransportError,
 };

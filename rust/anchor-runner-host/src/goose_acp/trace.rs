@@ -1,6 +1,6 @@
 use super::{Fact, GooseNodePort};
 use crate::resource_read::open_resource;
-use anchor_runtime_rig::graph::InvocationKey;
+use anchor_runtime::graph::InvocationKey;
 use serde_json::{Value, json};
 use std::{io::Read, path::Path};
 
@@ -58,12 +58,6 @@ pub(crate) fn trace_messages(state: &Path, key: &InvocationKey) -> Result<Vec<Va
         selected = Some((fact, evidence, root.join(format!("{stem}.json"))));
     }
     let Some((fact, evidence, fact_path)) = selected else {
-        #[cfg(feature = "legacy-regression")]
-        return anchor_io_harness_runtime::node_port::trace_messages(
-            &state.join("io-harness/store"),
-            key,
-        );
-        #[cfg(not(feature = "legacy-regression"))]
         return Ok(Vec::new());
     };
     if let Some(messages) = live::snapshot(&fact_path, fact.session_id.as_deref())? {

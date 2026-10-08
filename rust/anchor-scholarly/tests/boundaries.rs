@@ -210,7 +210,7 @@ fn query_files_reject_symlinks_traversal_special_files_size_and_invalid_utf8() {
 }
 
 #[test]
-fn cli_help_and_invalid_flags_have_python_compatible_streams_and_exit_codes() {
+fn cli_help_and_invalid_flags_have_documented_streams_and_exit_codes() {
     let binary = env!("CARGO_BIN_EXE_anchor-scholarly");
     let output = Command::new(binary).arg("--help").output().unwrap();
     assert!(output.status.success());
@@ -251,7 +251,7 @@ fn cli_help_and_invalid_flags_have_python_compatible_streams_and_exit_codes() {
 }
 
 #[test]
-fn read_and_citation_commands_are_exposed_without_python_fallback() {
+fn read_and_citation_commands_are_exposed_without_fallback() {
     for arguments in [
         vec![
             "anchor-scholarly",

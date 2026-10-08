@@ -1,4 +1,4 @@
-use anchor_runtime_rig::{
+use anchor_runtime::{
     ToolPort,
     graph::{NodeExecutionRequest, PluginBinding},
 };

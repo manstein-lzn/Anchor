@@ -14,7 +14,7 @@ use crate::{HostControl, create_durable_directory, execution::PreparedExecution,
 use anchor_graph_host::{
     FileGraphBundleLoader, FilePluginCatalog, LoadedGraphBundle, PluginCatalog,
 };
-use anchor_runtime_rig::graph::{
+use anchor_runtime::graph::{
     FileRunStore, GraphError, GraphRunRecord, GraphSnapshot, InvocationKey, RecoveryDecision,
     RunLease, RunStatus, RunStore,
 };
@@ -43,6 +43,7 @@ pub(crate) struct AdmissionOptions {
     pub(crate) objective: Option<String>,
     pub(crate) trigger: RunTrigger,
     pub(crate) pilot: Option<metadata::PilotRunSource>,
+    pub(crate) oauth_owner: Option<String>,
 }
 
 impl From<GraphError> for ApplicationError {
@@ -528,7 +529,7 @@ impl RunApplication {
             if other_id != run_id
                 && other.graph_calls.values().any(|call| {
                     call.child_run_id.as_deref() == Some(run_id)
-                        && call.status != anchor_runtime_rig::graph::GraphCallStatus::Deleted
+                        && call.status != anchor_runtime::graph::GraphCallStatus::Deleted
                 })
             {
                 return Err(ApplicationError::Conflict(
@@ -646,6 +647,7 @@ impl RunApplication {
         )?;
         options.trigger.apply(&mut metadata);
         metadata.pilot = options.pilot;
+        metadata.oauth_owner = options.oauth_owner;
         create_durable_directory(&self.data_root.join("runs")).map_err(storage)?;
         let lease = self.store().acquire_lease(&run_id)?;
         // Metadata is saved first: a crash can leave unused metadata, never an accepted
@@ -1099,7 +1101,7 @@ impl RunApplication {
             .map_err(ApplicationError::Conflict)?;
         record
             .recovery_submissions
-            .push(anchor_runtime_rig::graph::RecoverySubmission {
+            .push(anchor_runtime::graph::RecoverySubmission {
                 key: key.clone(),
                 attempt_id,
                 decision: decision.clone(),
@@ -1237,7 +1239,7 @@ impl RunApplication {
         &self,
         run_id: &str,
         graph: &str,
-        parent_cancellation: anchor_runtime_rig::Cancellation,
+        parent_cancellation: anchor_runtime::Cancellation,
     ) -> Result<anchor_graph_host::ChildRunControl, ApplicationError> {
         let mut active = self.active.lock().await;
         if let Some(existing) = active.get(run_id) {

@@ -2,8 +2,8 @@
 use crate::application::RunApplication;
 use crate::{HostArtifacts, HostControl, HostNodes, make_host_with_control, reject_snapshot};
 use anchor_graph_host::{GraphCatalog, InProcessGraphHost, LoadedGraphBundle, PluginCatalog};
-use anchor_runtime_rig::graph::{CallIdentity, PluginBinding};
-use anchor_runtime_rig::graph::{
+use anchor_runtime::graph::{CallIdentity, PluginBinding};
+use anchor_runtime::graph::{
     FileRunStore, GraphError, GraphRunRecord, GraphRunner, GraphSnapshot, InvocationKey,
     NodeExecutionPort, RecoveryDecision, RunStatus, RunStore,
 };
@@ -134,7 +134,6 @@ impl PreparedExecution {
                 metadata.as_ref().map(|metadata| metadata.graph.as_str()),
             )?;
             self.nodes.io_resolver.verify_local_inputs(&record)?;
-            #[cfg(not(feature = "legacy-regression"))]
             for key in crate::run_data::invocation_keys(&record) {
                 if crate::run_data::legacy_invocation_exists(
                     &crate::env_path("ANCHOR_RUNNER_STATE_ROOT")?,
@@ -143,32 +142,6 @@ impl PreparedExecution {
                     return Err(
                         "legacy Agent state is not resumable by the standard Goose Host".into(),
                     );
-                }
-            }
-            #[cfg(feature = "legacy-regression")]
-            if let Some(nodes) = &self.nodes.io_nodes {
-                let mut cursors = record.cursor.iter().collect::<Vec<_>>();
-                if let Some(parallel) = &record.parallel {
-                    cursors.extend(
-                        parallel
-                            .branches
-                            .iter()
-                            .filter_map(|branch| branch.cursor.as_ref()),
-                    );
-                }
-                for cursor in cursors {
-                    if let Some(agent) = record
-                        .snapshot
-                        .nodes
-                        .iter()
-                        .find(|node| node.id == cursor.node_id)
-                        .and_then(|node| node.agent.as_ref())
-                        .and_then(|agent| record.snapshot.agents.get(agent))
-                    {
-                        nodes
-                            .validate_model_binding(&cursor.key, Some(&agent.model))
-                            .map_err(|error| error.to_string())?;
-                    }
                 }
             }
             // A waiting parent may resume an already admitted child in-process.
@@ -304,6 +277,77 @@ impl RunnerGraphCatalog {
 }
 
 impl GraphCatalog for RunnerGraphCatalog {
+    fn graph_ancestry(&self, run_id: &str) -> Result<Vec<String>, GraphError> {
+        let mut ancestry = Vec::new();
+        let mut current = run_id.to_owned();
+        let mut seen = std::collections::BTreeSet::new();
+        let mut expected_parent: Option<(String, String, String)> = None;
+        let mut expected_root: Option<String> = None;
+        loop {
+            if !seen.insert(current.clone()) {
+                return Err(GraphError::CorruptRun("cyclic call ancestry".into()));
+            }
+            let metadata = crate::application::metadata::load(&self.state, &current)
+                .map_err(|error| GraphError::Unsupported(format!("Run ancestry: {error:?}")))?
+                .ok_or_else(|| {
+                    GraphError::CorruptRun(format!("missing Run ancestry for `{current}`"))
+                })?;
+            if let Some((parent_run, parent_graph, parent_digest)) = expected_parent.take()
+                && (metadata.run_id != parent_run
+                    || metadata.graph != parent_graph
+                    || metadata.graph_digest != parent_digest)
+            {
+                return Err(GraphError::CorruptRun(
+                    "Graph call ancestry does not match parent identity".into(),
+                ));
+            }
+            ancestry.push(metadata.graph.clone());
+            match (metadata.trigger_source.as_str(), metadata.graph_call) {
+                ("graph_call", Some(source)) => {
+                    if source.parent_run.is_empty()
+                        || source.parent_graph.is_empty()
+                        || source.parent_graph_digest.is_empty()
+                        || source.root_run.is_empty()
+                        || source.node.is_empty()
+                        || source.invocation == 0
+                        || !matches!(source.mode.as_str(), "wait" | "detach")
+                    {
+                        return Err(GraphError::CorruptRun(
+                            "Graph call ancestry metadata is incomplete".into(),
+                        ));
+                    }
+                    if expected_root
+                        .replace(source.root_run.clone())
+                        .is_some_and(|previous| previous != source.root_run)
+                    {
+                        return Err(GraphError::CorruptRun(
+                            "Graph call ancestry root identity changed".into(),
+                        ));
+                    }
+                    expected_parent = Some((
+                        source.parent_run.clone(),
+                        source.parent_graph,
+                        source.parent_graph_digest,
+                    ));
+                    current = source.parent_run;
+                }
+                ("graph_call", None) | (_, Some(_)) => {
+                    return Err(GraphError::CorruptRun(
+                        "Run trigger and Graph call ancestry disagree".into(),
+                    ));
+                }
+                (_, None) => {
+                    if expected_root.as_deref().is_some_and(|root| root != current) {
+                        return Err(GraphError::CorruptRun(
+                            "Graph call ancestry root identity does not match".into(),
+                        ));
+                    }
+                    return Ok(ancestry);
+                }
+            }
+        }
+    }
+
     fn prepare_session_call<'a>(
         &'a self,
         identity: &'a CallIdentity,
@@ -368,15 +412,11 @@ impl GraphCatalog for RunnerGraphCatalog {
         &'a self,
         run_id: &'a str,
         mode: &'a str,
-        cancellation: anchor_runtime_rig::Cancellation,
+        cancellation: anchor_runtime::Cancellation,
     ) -> Pin<
         Box<
-            dyn Future<
-                    Output = Result<
-                        Option<anchor_runtime_rig::graph::GraphCallOutcome>,
-                        GraphError,
-                    >,
-                > + Send
+            dyn Future<Output = Result<Option<anchor_runtime::graph::GraphCallOutcome>, GraphError>>
+                + Send
                 + 'a,
         >,
     > {
@@ -410,23 +450,13 @@ impl GraphCatalog for RunnerGraphCatalog {
         }
         let bundle = anchor_graph_host::FileGraphBundleLoader::new(&path).load()?;
         reject_snapshot(&bundle.snapshot).map_err(GraphError::Unsupported)?;
-        if bundle
-            .snapshot
-            .ops
-            .values()
-            .any(|op| op.get("call").is_some())
-        {
-            return Err(GraphError::Unsupported(
-                "nested Graph calls are not supported by this host".into(),
-            ));
-        }
         Ok(Some(bundle))
     }
 
     fn lock_admission(
         &self,
         name: &str,
-    ) -> Result<Box<dyn anchor_runtime_rig::graph::RunLease>, GraphError> {
+    ) -> Result<Box<dyn anchor_runtime::graph::RunLease>, GraphError> {
         let path = self.path(name)?;
         match &self.application {
             Some(application) => application
@@ -489,6 +519,7 @@ impl GraphCatalog for RunnerGraphCatalog {
                 mode: mode.to_owned(),
                 root_run,
             },
+            parent_metadata.oauth_owner,
         )
         .map_err(|error| GraphError::Unsupported(format!("child metadata: {error:?}")))
     }
@@ -576,7 +607,7 @@ impl GraphCatalog for RunnerGraphCatalog {
         &'a self,
         run_id: &'a str,
         graph: &'a str,
-        parent_cancellation: anchor_runtime_rig::Cancellation,
+        parent_cancellation: anchor_runtime::Cancellation,
     ) -> Pin<
         Box<
             dyn Future<Output = Result<anchor_graph_host::ChildRunControl, GraphError>> + Send + 'a,
@@ -642,5 +673,110 @@ impl GraphCatalog for RunnerGraphCatalog {
             }
             Ok(())
         })
+    }
+}
+
+#[cfg(test)]
+mod graph_call_ancestry_tests {
+    use super::*;
+    use crate::application::metadata::{self, GraphCallSource, RunMetadata};
+
+    fn catalog(state: &std::path::Path) -> RunnerGraphCatalog {
+        RunnerGraphCatalog {
+            root: state.join("graphs"),
+            state: state.to_path_buf(),
+            application: None,
+        }
+    }
+
+    fn root_metadata(state: &std::path::Path, id: &str, graph: &str, digest: &str) {
+        let metadata =
+            RunMetadata::new(id.to_owned(), graph.to_owned(), digest.to_owned(), state).unwrap();
+        metadata::save(state, &metadata).unwrap();
+    }
+
+    fn graph_call_source(
+        parent_run: &str,
+        parent_graph: &str,
+        parent_digest: &str,
+        root_run: &str,
+    ) -> GraphCallSource {
+        GraphCallSource {
+            parent_run: parent_run.to_owned(),
+            parent_graph: parent_graph.to_owned(),
+            parent_graph_digest: parent_digest.to_owned(),
+            node: "invoke".into(),
+            invocation: 1,
+            mode: "wait".into(),
+            root_run: root_run.to_owned(),
+        }
+    }
+
+    fn save_child(
+        state: &std::path::Path,
+        run_id: &str,
+        graph: &str,
+        digest: &str,
+        source: GraphCallSource,
+    ) {
+        metadata::save_child_once(
+            state,
+            run_id.to_owned(),
+            graph.to_owned(),
+            digest.to_owned(),
+            state,
+            source,
+            None,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn graph_ancestry_validates_and_returns_durable_chain() {
+        let state = tempfile::tempdir().unwrap();
+        root_metadata(state.path(), "run-a", "graph-a", "digest-a");
+        save_child(
+            state.path(),
+            "run-b",
+            "graph-b",
+            "digest-b",
+            graph_call_source("run-a", "graph-a", "digest-a", "run-a"),
+        );
+        save_child(
+            state.path(),
+            "run-c",
+            "graph-c",
+            "digest-c",
+            graph_call_source("run-b", "graph-b", "digest-b", "run-a"),
+        );
+
+        assert_eq!(
+            catalog(state.path()).graph_ancestry("run-c").unwrap(),
+            ["graph-c", "graph-b", "graph-a"]
+        );
+    }
+
+    #[test]
+    fn graph_ancestry_rejects_cycles_and_parent_identity_drift() {
+        let state = tempfile::tempdir().unwrap();
+        save_child(
+            state.path(),
+            "run-a",
+            "graph-a",
+            "digest-a",
+            graph_call_source("run-b", "graph-b", "digest-b", "run-a"),
+        );
+        save_child(
+            state.path(),
+            "run-b",
+            "graph-b",
+            "digest-b",
+            graph_call_source("run-a", "graph-a", "digest-a", "run-a"),
+        );
+
+        assert!(matches!(
+            catalog(state.path()).graph_ancestry("run-a"),
+            Err(GraphError::CorruptRun(message)) if message.contains("cyclic call ancestry")
+        ));
     }
 }

@@ -1,5 +1,5 @@
 use super::*;
-use anchor_runtime_rig::graph::{PendingRecovery, RecoveryAttempt, RunCursor};
+use anchor_runtime::graph::{PendingRecovery, RecoveryAttempt, RunCursor};
 use std::time::Duration;
 
 fn request(serial: u64, session: &str, previous: Option<&str>) -> Value {
@@ -639,12 +639,9 @@ fn seed_call_fixture(
     let parent_metadata = state.application.metadata(parent).unwrap().unwrap();
     let path = state.application.graph_bundle_path(graph);
     let bundle = FileGraphBundleLoader::new(&path).load().unwrap();
-    let mut record = anchor_runtime_rig::graph::GraphRunRecord::create_with_id(
-        bundle.snapshot,
-        Value::Null,
-        run,
-    )
-    .unwrap();
+    let mut record =
+        anchor_runtime::graph::GraphRunRecord::create_with_id(bundle.snapshot, Value::Null, run)
+            .unwrap();
     record.status = RunStatus::Stopped;
     record.plugin_bindings = bundle
         .plugins
@@ -794,7 +791,7 @@ async fn sealed_plugin_conversation_history_does_not_permanently_block_graph_upd
         .load()
         .unwrap();
     let store = FileRunStore::new(state.data_root.join("runs"));
-    let mut first = anchor_runtime_rig::graph::GraphRunRecord::create_with_id(
+    let mut first = anchor_runtime::graph::GraphRunRecord::create_with_id(
         bundle.snapshot.clone(),
         Value::Null,
         "plugin-first",
@@ -828,7 +825,7 @@ async fn sealed_plugin_conversation_history_does_not_permanently_block_graph_upd
             .0,
         StatusCode::CONFLICT
     );
-    let mut next = anchor_runtime_rig::graph::GraphRunRecord::create_with_id(
+    let mut next = anchor_runtime::graph::GraphRunRecord::create_with_id(
         first.snapshot.clone(),
         Value::Null,
         "plugin-next",
@@ -903,7 +900,7 @@ async fn sealed_plugin_conversation_history_does_not_permanently_block_graph_upd
     );
 }
 
-fn seed_native_scope(state: &ApiState, run: &str, node: &str) -> (PathBuf, PathBuf, PathBuf) {
+fn seed_legacy_scope(state: &ApiState, run: &str, node: &str) -> (PathBuf, PathBuf, PathBuf) {
     let metadata = state.application.metadata(run).unwrap().unwrap();
     let hint = crate::node_host::conversation_hint_for(&metadata, node).unwrap();
     let scope = format!("nc1-{:x}", Sha256::digest(hint.key.as_bytes()));
@@ -912,23 +909,6 @@ fn seed_native_scope(state: &ApiState, run: &str, node: &str) -> (PathBuf, PathB
     let framework_root = io_root.join("conversation-roots").join(&scope);
     std::fs::create_dir_all(&directory).unwrap();
     std::fs::create_dir_all(&framework_root).unwrap();
-    #[cfg(feature = "legacy-regression")]
-    let (session_id, native_run, turn) = {
-        let store = io_harness::Store::open(directory.join("framework.sqlite3")).unwrap();
-        let mut session = io_harness::Session::open(&store, &framework_root).unwrap();
-        let native_run = store
-            .start_run("cleanup fixture", &framework_root.display().to_string())
-            .unwrap();
-        let turn = store
-            .record_turn(session.id(), None, native_run, "cleanup fixture")
-            .unwrap();
-        store
-            .finish_turn(turn, Some("retained native fixture"), "finished")
-            .unwrap();
-        session.branch_from(&store, turn).unwrap();
-        (session.id(), native_run, turn)
-    };
-    #[cfg(not(feature = "legacy-regression"))]
     let (session_id, native_run, turn) = {
         std::fs::write(
             directory.join("framework.sqlite3"),
@@ -942,7 +922,7 @@ fn seed_native_scope(state: &ApiState, run: &str, node: &str) -> (PathBuf, PathB
         json!({"version":1,"session_id":session_id}).to_string(),
     )
     .unwrap();
-    let key = anchor_runtime_rig::graph::InvocationKey {
+    let key = anchor_runtime::graph::InvocationKey {
         run_id: run.into(),
         graph_digest: metadata.graph_digest,
         node_id: node.into(),
@@ -961,8 +941,7 @@ fn seed_native_scope(state: &ApiState, run: &str, node: &str) -> (PathBuf, PathB
 }
 
 #[tokio::test]
-#[cfg(feature = "legacy-regression")]
-async fn graph_delete_cleans_full_native_scopes_and_preserves_other_graph_history() {
+async fn graph_delete_cleans_legacy_scopes_and_preserves_other_graph_history() {
     let (root, state) = fixture();
     let _env = PROCESS_ENV.lock().await;
     set_host_env(root.path(), &state.data_root);
@@ -1025,10 +1004,10 @@ async fn graph_delete_cleans_full_native_scopes_and_preserves_other_graph_histor
         StatusCode::ACCEPTED
     );
     wait_run_status(&state, other["run"].as_str().unwrap(), RunStatus::Completed).await;
-    let first_scope = seed_native_scope(&state, first["run"].as_str().unwrap(), "first");
-    let same_scope = seed_native_scope(&state, next["run"].as_str().unwrap(), "first");
-    let old_node_scope = seed_native_scope(&state, first["run"].as_str().unwrap(), "second");
-    let other_scope = seed_native_scope(&state, other["run"].as_str().unwrap(), "first");
+    let first_scope = seed_legacy_scope(&state, first["run"].as_str().unwrap(), "first");
+    let same_scope = seed_legacy_scope(&state, next["run"].as_str().unwrap(), "first");
+    let old_node_scope = seed_legacy_scope(&state, first["run"].as_str().unwrap(), "second");
+    let other_scope = seed_legacy_scope(&state, other["run"].as_str().unwrap(), "first");
     assert_eq!(first_scope.0, same_scope.0);
     seed_call_fixture(
         &state,
@@ -1086,9 +1065,11 @@ async fn graph_delete_cleans_full_native_scopes_and_preserves_other_graph_histor
     let (status, value) = call(app, "POST", "/conversation-runs", Some(&fresh.to_string())).await;
     assert_eq!(status, StatusCode::ACCEPTED, "{value}");
     wait_run_status(&state, fresh["run"].as_str().unwrap(), RunStatus::Completed).await;
-    let native = seed_native_scope(&state, fresh["run"].as_str().unwrap(), "first");
-    let store = io_harness::Store::open(native.0.join("framework.sqlite3")).unwrap();
-    assert_eq!(store.runs().unwrap().len(), 1);
+    let native = seed_legacy_scope(&state, fresh["run"].as_str().unwrap(), "first");
+    assert_eq!(
+        std::fs::read(native.0.join("framework.sqlite3")).unwrap(),
+        b"opaque legacy cleanup fixture"
+    );
 }
 
 #[tokio::test]
@@ -1117,7 +1098,7 @@ async fn graph_delete_allows_a_completed_caller_after_its_callee_was_deleted() {
         assert_eq!(status, StatusCode::ACCEPTED, "{value}");
         let run = value["run"].as_str().unwrap();
         wait_run_status(&state, run, RunStatus::Completed).await;
-        let scope = conversation.then(|| seed_native_scope(&state, run, "work"));
+        let scope = conversation.then(|| seed_legacy_scope(&state, run, "work"));
         assert_eq!(
             call(
                 app.clone(),
@@ -1372,19 +1353,19 @@ async fn conversation_waiting_recovery_stop_keeps_unknown_attempts_without_execu
     let (root, state) = fixture();
     let _env = PROCESS_ENV.lock().await;
     set_host_env(root.path(), &state.data_root);
-    let snapshot = anchor_runtime_rig::graph::GraphSnapshot::admit(json!({
+    let snapshot = anchor_runtime::graph::GraphSnapshot::admit(json!({
         "objective":"unknown-effect fixture","entry":"work",
         "agents":{"worker":{"model":"fixture","instructions":"fixture"}},
         "ops":{},"nodes":[{"id":"work","agent":"worker"}],"edges":[],
     }))
     .unwrap();
-    let mut record = anchor_runtime_rig::graph::GraphRunRecord::create_with_id(
+    let mut record = anchor_runtime::graph::GraphRunRecord::create_with_id(
         snapshot,
         Value::Null,
         "channel-00000000-0000-4000-8000-000000000032",
     )
     .unwrap();
-    let key = anchor_runtime_rig::graph::InvocationKey {
+    let key = anchor_runtime::graph::InvocationKey {
         run_id: record.run_id.clone(),
         graph_digest: record.graph_digest.clone(),
         node_id: "work".into(),

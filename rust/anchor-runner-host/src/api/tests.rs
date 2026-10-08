@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 use tempfile::tempdir;
 use tower::ServiceExt;
 
-static PROCESS_ENV: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+use crate::PROCESS_ENV_LOCK as PROCESS_ENV;
 
 mod channel_attachments;
 mod channel_media;
@@ -20,10 +20,14 @@ mod oauth;
 mod platform_contract;
 mod plugin_installation;
 mod plugin_library;
+mod production_readiness;
 mod questions;
+mod responses;
+mod run_plugins;
 mod schedules;
 mod session_calls;
 mod sessions;
+mod webhooks;
 mod wecom;
 
 #[test]
@@ -89,6 +93,7 @@ fn fixture() -> (tempfile::TempDir, ApiState) {
         },
         channel_event_locks: Default::default(),
         plugin_checkout: None,
+        response_fixture: Some("deterministic response fixture".into()),
     };
     (root, state)
 }
@@ -481,43 +486,6 @@ async fn trigger_persists_run_and_projects_list_detail_and_control() {
         .unwrap()
         .unwrap();
     let key = &record.results["work"][0].key;
-    #[cfg(feature = "legacy-regression")]
-    {
-        let io_store = state.data_root.join("io-harness/store");
-        std::fs::create_dir_all(&io_store).unwrap();
-        let stem = format!("np1-{:x}", Sha256::digest(key.durable_key().as_bytes()));
-        let trace_store =
-            io_harness::Store::open(io_store.join(format!("{stem}.sqlite3"))).unwrap();
-        let trace_run = trace_store.start_run("trace fixture", "workspace").unwrap();
-        trace_store
-            .record_step_turn(
-                trace_run,
-                &io_harness::AssistantTurn::new(
-                    1,
-                    Some("Inspecting the task now."),
-                    vec![io_harness::ToolCall {
-                        name: "anchor_run".into(),
-                        arguments: json!({"command":"cat report.txt"}),
-                    }],
-                ),
-            )
-            .unwrap();
-        trace_store
-            .record_observations(
-                trace_run,
-                &[io_harness::context::Observation::new(
-                    1,
-                    io_harness::context::ObsKind::Tool,
-                    Some("anchor_run".into()),
-                    "tool returned report.txt",
-                    io_harness::context::Origin::Tool,
-                )],
-            )
-            .unwrap();
-        std::fs::write(io_store.join(format!("{stem}.run")), trace_run.to_string()).unwrap();
-        drop(trace_store);
-    }
-    #[cfg(not(feature = "legacy-regression"))]
     {
         let root = state.data_root.join("goose-acp");
         std::fs::create_dir_all(&root).unwrap();
@@ -683,9 +651,12 @@ async fn op_call_wait_projects_durable_child_run_through_host_api() {
     let child_record = store.load(&child_id).unwrap().unwrap();
     assert_eq!(child_record.status, RunStatus::Completed);
     assert_eq!(child_record.input["from"], "parent");
+    let parent_metadata = state.application.metadata(&parent_id).unwrap().unwrap();
+    assert_eq!(parent_metadata.oauth_owner.as_deref(), Some("local"));
     let metadata = state.application.metadata(&child_id).unwrap().unwrap();
     assert_eq!(metadata.graph, "child");
     assert_eq!(metadata.trigger_source, "graph_call");
+    assert_eq!(metadata.oauth_owner.as_deref(), Some("local"));
     let (status, detail) = call(app.clone(), "GET", &format!("/runs/{child_id}"), None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(detail["graph"], "child");
@@ -978,7 +949,7 @@ async fn startup_recovery_dispatches_only_ready_detached_children() {
         r#"{"format":1,"graph":"graph.json","plugins":[]}"#,
     )
     .unwrap();
-    let snapshot = anchor_runtime_rig::graph::GraphSnapshot::admit(definition).unwrap();
+    let snapshot = anchor_runtime::graph::GraphSnapshot::admit(definition).unwrap();
     let store = FileRunStore::new(state.data_root.join("runs"));
     let parent_digest = "parent-digest".to_owned();
     for (id, mode) in [("detached-ready", "detach"), ("waiting-ready", "wait")] {
@@ -1026,7 +997,7 @@ async fn startup_recovery_dispatches_only_ready_detached_children() {
 
 #[tokio::test]
 async fn restart_dispatches_ready_detach_child_only_with_staged_call_inputs() {
-    use anchor_runtime_rig::graph::{
+    use anchor_runtime::graph::{
         ArtifactPort, CallFileSelection, GraphRunRecord, GraphSnapshot, InvocationKey,
         NodeCompletion,
     };
@@ -1493,9 +1464,9 @@ async fn stopped_and_budget_stopped_runs_block_graph_retrigger_but_allow_update(
             let node_id = record.snapshot.entry.clone();
             record.invocations.insert(node_id.clone(), 1);
             record.passes.insert(node_id.clone(), 1);
-            record.cursor = Some(anchor_runtime_rig::graph::RunCursor {
+            record.cursor = Some(anchor_runtime::graph::RunCursor {
                 node_id: node_id.clone(),
-                key: anchor_runtime_rig::graph::InvocationKey {
+                key: anchor_runtime::graph::InvocationKey {
                     run_id: record.run_id.clone(),
                     graph_digest: record.graph_digest.clone(),
                     node_id,
@@ -1821,7 +1792,7 @@ async fn graph_delete_is_rejected_while_its_own_run_is_unfinished() {
     record.status = RunStatus::Paused;
     record.plugin_bindings.insert(
         "source-plugin".into(),
-        anchor_runtime_rig::graph::PluginBinding {
+        anchor_runtime::graph::PluginBinding {
             id: "source-plugin".into(),
             digest: "pinned-digest".into(),
             resources: vec!["resource.txt".into()],
@@ -2378,7 +2349,7 @@ async fn missing_host_config_or_shell_authority_reject_before_acceptance() {
     .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     assert!(state.application.records().unwrap().is_empty());
-    // The operator authorizes the shell, as in Python. It can run an absolute
+    // The operator authorizes the shell. It can run an absolute
     // system command inside its sandbox without granting host paths.
     set_host_env(root.path(), &state.data_root);
     assert_eq!(
@@ -2418,127 +2389,6 @@ async fn legacy_unfinished_run_quarantines_admission_and_graph_creation() {
             .0,
         StatusCode::CONFLICT
     );
-}
-
-#[tokio::test]
-#[cfg(feature = "legacy-regression")]
-async fn waiting_recovery_projects_context_and_resume_continues_same_run() {
-    let (root, state) = fixture();
-    let _env_guard = PROCESS_ENV.lock().await;
-    set_host_env(root.path(), &state.data_root);
-    unsafe {
-        env::set_var("ANCHOR_MODEL_API_KEY", "test-key");
-        env::set_var("ANCHOR_MODEL_URL", "http://127.0.0.1:1/v1");
-        env::set_var("ANCHOR_MODEL_NAME", "test-model");
-    }
-    let snapshot = GraphSnapshot::admit(json!({
-        "objective":"recovery fixture",
-        "entry":"work",
-        "agents":{"worker":{"model":"fixture","instructions":"fixture"}},
-        "ops":{},
-        "nodes":[{"id":"work","agent":"worker","plugins":[]}],
-        "edges":[]
-    }))
-    .unwrap();
-    let mut record = GraphRunRecord::create_with_id(snapshot, Value::Null, "recovery-run").unwrap();
-    let key = InvocationKey {
-        run_id: record.run_id.clone(),
-        graph_digest: record.graph_digest.clone(),
-        node_id: "work".into(),
-        invocation: 1,
-    };
-    record.invocations.insert("work".into(), 1);
-    record.passes.insert("work".into(), 1);
-    record.cursor = Some(anchor_runtime_rig::graph::RunCursor {
-        node_id: "work".into(),
-        key: key.clone(),
-        input_commits: vec![],
-        prepared_input: json!({"input":null,"committed_inputs":[]}),
-    });
-    record.status = RunStatus::WaitingRecovery;
-    record
-        .recovery
-        .push(anchor_runtime_rig::graph::PendingRecovery {
-            key: key.clone(),
-            attempt: anchor_runtime_rig::graph::RecoveryAttempt {
-                attempt_id: 1,
-                step: 3,
-                tool: "anchor_publish".into(),
-                started_at: "2026-10-03T00:00:00.000Z".into(),
-            },
-        });
-    let harness_root = state.data_root.join("io-harness");
-    let store_root = harness_root.join("store");
-    std::fs::create_dir_all(&store_root).unwrap();
-    let stem = format!("np1-{:x}", Sha256::digest(key.durable_key().as_bytes()));
-    let harness_path = store_root.join(format!("{stem}.sqlite3"));
-    let harness = io_harness::Store::open(&harness_path).unwrap();
-    let harness_run = harness.start_run("uncertain publish", "workspace").unwrap();
-    let attempt_id = harness
-        .open_attempt(
-            harness_run,
-            3,
-            "anchor_publish",
-            io_harness::ToolRecovery::Indeterminate,
-        )
-        .unwrap()
-        .unwrap();
-    let sibling_attempt_id = harness
-        .open_attempt(
-            harness_run,
-            4,
-            "anchor_update",
-            io_harness::ToolRecovery::Indeterminate,
-        )
-        .unwrap()
-        .unwrap();
-    record.recovery[0].attempt.attempt_id = attempt_id;
-    record
-        .recovery
-        .push(anchor_runtime_rig::graph::PendingRecovery {
-            key,
-            attempt: anchor_runtime_rig::graph::RecoveryAttempt {
-                attempt_id: sibling_attempt_id,
-                step: 4,
-                tool: "anchor_update".into(),
-                started_at: "2026-10-03T00:00:01.000Z".into(),
-            },
-        });
-    std::fs::write(
-        store_root.join(format!("{stem}.run")),
-        harness_run.to_string(),
-    )
-    .unwrap();
-    drop(harness);
-    let store = FileRunStore::new(state.data_root.join("runs"));
-    store.save(&record).unwrap();
-    let metadata_path = state.data_root.join("run-metadata/recovery-run.json");
-    std::fs::create_dir_all(metadata_path.parent().unwrap()).unwrap();
-    std::fs::write(
-        metadata_path,
-        json!({"format":1,"run_id":"recovery-run","graph":"fixture",
-            "graph_digest":record.graph_digest,"bundle_source":state.bundle_root.canonicalize().unwrap(),
-            "created":"2026-10-03T00:00:00Z","trigger_source":"manual"}).to_string(),
-    )
-    .unwrap();
-
-    let app = router(state.clone());
-    let (status, detail) = call(app.clone(), "GET", "/runs/recovery-run", None).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(detail["state"]["status"], "waiting_recovery");
-    assert_eq!(
-        detail["state"]["recovery"][0]["attempt"]["attempt_id"],
-        attempt_id
-    );
-    assert_eq!(detail["state"]["recovery"][0]["key"]["node_id"], "work");
-
-    // Resume is the normal user path. The host records synthetic tool
-    // observations in the same io-harness run, then lets the Agent inspect the
-    // workspace/external state and decide how to continue. The old operator
-    // decision panel is not required to unlock this Run.
-    let (status, _) = call(app.clone(), "POST", "/runs/recovery-run/resume", None).await;
-    assert_eq!(status, StatusCode::ACCEPTED);
-    drop(root);
 }
 
 #[tokio::test]

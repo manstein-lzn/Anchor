@@ -25,12 +25,20 @@ fn cli_exposes_the_agreed_inputs_without_a_pin_bypass() {
     assert!(output.status.success());
     let help = String::from_utf8(output.stdout).unwrap();
     for argument in [
-        "--host", "--goose", "--bundle", "--web", "--tool", "--output",
+        "--host",
+        "--goose",
+        "--bundle",
+        "--web",
+        "--tool",
+        "--scholarly",
+        "--docmost-tools",
+        "--wecom-tools",
+        "--wecom-gateway",
+        "--output",
     ] {
         assert!(help.contains(argument), "{argument}");
     }
     assert!(!help.contains("skip"));
-    assert!(!help.contains("python"));
 }
 
 #[test]

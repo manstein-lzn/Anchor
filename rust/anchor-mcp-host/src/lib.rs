@@ -3,7 +3,7 @@
 
 use std::{collections::BTreeMap, fmt, sync::Arc};
 
-use anchor_runtime_rig::ToolResultContent;
+use anchor_runtime::ToolResultContent;
 use rmcp::{
     ServiceExt,
     model::{CallToolRequestParams, ClientInfo, Tool},
@@ -278,22 +278,6 @@ impl McpHost {
             .collect()
     }
 
-    /// Convert the bound remote tools to Rig DynamicTools.
-    ///
-    /// This preserves Rig's native MCP result handling and liveness checks;
-    /// The catalog selects the server; the MCP handshake supplies its tools.
-    #[cfg(feature = "rig-legacy")]
-    pub fn rig_tools(&self) -> Vec<rig_core::tool::DynamicTool> {
-        self.inventory
-            .values()
-            .cloned()
-            .map(|definition| {
-                let tool = McpTool::from_mcp_server(definition, self.service.peer().clone());
-                rig_core::tool::DynamicTool::from(tool)
-            })
-            .collect()
-    }
-
     pub async fn call(
         &self,
         tool_name: &str,
@@ -323,15 +307,6 @@ impl McpHost {
         contents::result_contents(&response)
     }
 
-    #[cfg(feature = "rig-legacy")]
-    pub async fn call_rig(
-        &self,
-        tool_name: &str,
-        arguments: Value,
-    ) -> Result<Vec<rig_core::message::ToolResultContent>, McpHostError> {
-        self.call_contents(tool_name, arguments).await
-    }
-
     async fn call_raw(
         &self,
         tool_name: &str,
@@ -356,11 +331,6 @@ impl McpHost {
             .map_err(|_| McpHostError::Call("transport request failed".into()))
     }
 }
-
-/// Publicly re-export Rig's adapter type so the host can register a bound
-/// inventory as Rig DynamicTools without implementing tool conversion itself.
-#[cfg(feature = "rig-legacy")]
-pub use rig_rmcp::{McpTool, tools_from_server};
 
 #[cfg(test)]
 mod tests {
@@ -470,12 +440,6 @@ mod tests {
             .await
             .expect("all inventory tools are bound");
         assert!(!outside.is_error);
-        #[cfg(feature = "rig-legacy")]
-        {
-            let rig_tools = host.rig_tools();
-            assert_eq!(rig_tools.len(), 2);
-            assert_eq!(rig_tools[0].name(), "echo");
-        }
         server.abort();
     }
 
@@ -520,7 +484,6 @@ mod tests {
         server.abort();
     }
 
-    #[cfg(not(feature = "rig-legacy"))]
     #[tokio::test]
     async fn invalid_native_image_is_rejected_and_raw_call_keeps_complete_content() {
         let (host, server) = connected_fixture().await;
@@ -538,7 +501,6 @@ mod tests {
         server.abort();
     }
 
-    #[cfg(not(feature = "rig-legacy"))]
     #[tokio::test]
     async fn valid_native_image_remains_typed_through_the_bound_mcp_service() {
         use base64::{Engine, engine::general_purpose::STANDARD};
@@ -565,18 +527,6 @@ mod tests {
                 ToolResultContent::text("after")
             ]
         );
-        server.abort();
-    }
-
-    #[cfg(feature = "rig-legacy")]
-    #[tokio::test]
-    async fn legacy_call_rig_remains_an_alias_with_typed_media_support() {
-        let (host, server) = connected_fixture().await;
-        let response = CallToolResult::success(vec![ContentBlock::image("AAEC", "image/png")]);
-        let arguments = serde_json::json!({"response": response});
-        let contents = host.call_contents("echo", arguments.clone()).await.unwrap();
-        assert!(matches!(contents[0], ToolResultContent::Image(_)));
-        assert_eq!(host.call_rig("echo", arguments).await.unwrap(), contents);
         server.abort();
     }
 

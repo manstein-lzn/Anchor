@@ -24,7 +24,9 @@ flowchart LR
 
 `review.md` 提供可阅读的判断与反馈；`review.json` 为每个阻断问题保留 ID、位置、可定位证据、业务影响、具体修法、验收条件及解决依据。复审必须逐项核销旧问题，不能删掉问题或不断换标准；纯润色建议不阻断。项目理解、选题及事实判断问题交回理解节点，表达和图示问题交回作者，在原稿上针对性修改，不重新采集或移动报告时间窗口。
 
-普通 Op `gate` 复用现有 `anchor-route` 分流。只有四项标准全部通过、没有未解决阻断项、旧问题逐项保留并给出解决依据，且评审对应当前稿件 Git commit，才能进入 `publish`；组装前再次核对该 commit。结构不合法、旧稿评审、遗漏旧问题或“带着阻断项通过”均失败，不生成正式报告。采集节点保存当次使用的门禁脚本，后续通过既有只读输入使用，不需要 Plugin 或新的调度器。
+普通 Op `gate` 调用 `anchor-rsi weekly-gate`，复用现有 `anchor-route` 分流。只有四项标准全部通过、没有未解决阻断项、旧问题逐项保留并给出解决依据，且评审对应当前稿件 Git commit，才能进入 `publish`；`weekly-publish` 在组装前再次核对该 commit。结构不合法、旧稿评审、遗漏旧问题或“带着阻断项通过”均失败，不生成正式报告。确定性检查由 Rust 业务模块执行，不依赖模型遵守提示词。
+
+组装同时验证 Markdown 本地图片路径、普通文件和 SVG XML。图片必须在 `assets/`，拒绝路径穿越与符号链接；SVG 保留静态图表，拒绝 script、事件属性、foreignObject、外部 href、外部资源和不安全 CSS。报告、来源、图表及评审记录一并保留。
 
 证据无法获得、记录冲突或无法视觉核验时，评审应在报告中明确限制、降低断言强度或把事项列为待核实；这类边界不会阻止周报交付。只有表达、事实组织或推理问题需要退回修订。不用固定修改轮数或分数阈值代替质量判断。上述门禁检查的是评审格式、状态及版本一致性，语义质量仍取决于评审判断，不能保证零错误。
 
@@ -39,14 +41,16 @@ flowchart LR
   "collect": {
     "codex": "/root/.codex/sessions",
     "deepseek": "/root/.dsh/sessions",
-    "collector": "/root/Anchor/scripts/weekly_work_report"
-  }
+    "rsi": "/opt/anchor/bin"
+  },
+  "gate": {"rsi": "/opt/anchor/bin"},
+  "publish": {"rsi": "/opt/anchor/bin"}
 }
 ```
 
-只有 `collect` 节点能只读访问 `/local-inputs/codex`、`/local-inputs/deepseek` 和 `/local-inputs/collector`。采集脚本是仓库的普通脚本，后续节点只读取上游的当次证据文件，不直接访问本机历史目录。Run 保存授权路径和本次证据投影；恢复时授权改变会拒绝继续。
+只有 `collect` 节点能只读访问 `/local-inputs/codex` 和 `/local-inputs/deepseek`。三个业务 Op 的 `rsi` 授权目录包含原生 `anchor-rsi` 二进制；collect 调用 `weekly-collect`，后续节点只读取当次冻结证据，不直接访问本机历史目录。授权由操作员配置并按 Run 冻结，不能通过 Graph 自行扩大。
 
-运行需要现有 Python 环境和 `zstd` 命令。模型使用仓库现有 `.env` 配置。定时规则为 `{"type":"weekly","weekdays":[3],"time":"09:00"}`，通过现有 `/schedules` API 创建；安装到其他机器时需要重新配置来源目录及其时区，不要重复创建相同计划。
+运行需要 `anchor-rsi`、Git 和现有沙箱 Shell/`anchor-route`；读取压缩 DSH 历史时还需要外部 `zstd -dc`，部署者应安装并授权该命令。普通 JSONL 不使用 zstd。Goose/provider 配置由服务环境提供。定时规则为 `{"type":"weekly","weekdays":[3],"time":"09:00"}`，通过现有 `/schedules` API 创建；安装到其他机器时重新配置来源目录及其时区，不重复创建相同计划。
 
 ## 证据边界
 
@@ -54,7 +58,7 @@ flowchart LR
 
 不把模型隐藏推理、系统提示词或计费信息作为成果；常见凭证形式会脱敏，但不承诺正则覆盖所有私密信息。评审通过后，正式报告及配图会同步到指定的 Docmost 页面；来源清单、评审记录和其他 Run 产物保留在本机，不会自动发送到其他渠道。助手声称“完成”、工具执行成功、测试通过和真实 provider 验收是不同的证据等级。配图表达有证据支持的关系，不生成假截图或虚构指标。
 
-最终验收状态和实际运行证据统一记录在 [开发台账](pilot-development-plan.md) A21。
+Rust 本地定向验证入口为 `cargo test --manifest-path rust/Cargo.toml -p anchor-rsi --locked --test weekly`。它覆盖窗口、代际去重、脱敏与截断、评审状态、提交绑定、安全 SVG 和产物装配；不执行真实模型、Docmost 或企业微信。历史验收在开发台账保留，不能替代当前原生 Graph 的业务内容验收。
 
 ## Docmost 同步
 
@@ -63,8 +67,8 @@ flowchart LR
 
 ## 企业微信完成提醒（本机配置）
 
-本机安装的 Graph 已在 `docmost` 后连接 `notify-wecom`，以普通 `Op.call` 的 `detach` 模式调用 `wecom-assistant`。它绑定操作员确认的既有私聊 Session；Session 标识保存在本机 Graph 定义，不写入共享示例或由模型猜测。后续原有每周四 09:00 计划运行到该节点也会发起通知。
+需要完成提醒时，在本机 Graph 的 `docmost` 后连接 `notify-wecom`，以普通 `Op.call` 的 `detach` 模式调用 `wecom-assistant`。它绑定操作员确认的既有私聊 Session；Session 标识保存在本机 Graph 定义，不写入共享示例或由模型猜测。该能力沿用现有 Host 调用契约，不建立第二个 Runner。
 
-调用只传递正式 `report.md` 和发布元数据 `docmost.json`。助手读取报告，生成含日期范围、主要进展和 Docmost 链接的简短正文，并保存 `weekly-report.md` 供后续会话追问。网关自动投递最终 summary，因此节点指令禁止再次调用主动发送工具，避免重复提醒。来源底稿、完整会话证据和评审记录不会随通知传递。
+调用只传递正式 `report.md` 和发布元数据 `docmost.json`。助手读取报告，生成含日期范围、主要进展和 Docmost 链接的简短正文，并保存 `weekly-report.md` 供后续会话追问。由通道网关投递终态答复时，节点指令应禁止重复调用主动发送工具。来源底稿、完整会话证据和评审记录不会随通知传递。
 
-周报 Run 在通知目标持久接纳后即可结束；企业微信助手有自己的 Run、状态和投递记录。在网页选中 `notify-wecom` 可查看目标运行，并区分“调用已接纳”和“通知已完成”。Docmost 发布失败不会进入通知节点；通知失败也不会重跑周报或撤销已完成的 Docmost 发布。平台 ACK 不确定时不自动重发。实际验收与本次 Run 引用见开发台账 A27。
+周报 Run 在通知目标持久接纳后即可结束；企业微信助手有自己的 Run、状态和投递记录。区分“调用已接纳”和“通知已完成”：Docmost 发布失败不会进入通知节点；通知失败也不会重跑周报或撤销已完成的 Docmost 发布。平台 ACK 不确定时不自动重发。当前原生 Graph 的真实发布和通知仍需独立业务验收。

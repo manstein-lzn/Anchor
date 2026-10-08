@@ -73,7 +73,7 @@ fn invalid_url_configuration_never_echoes_the_value() {
 }
 
 #[tokio::test]
-async fn request_payloads_targets_and_query_encoding_match_python() {
+async fn request_payloads_targets_and_query_encoding_follow_api_contract() {
     let fixture = Fixture::start().await;
     let service = service(&fixture);
     for (name, msgtype) in [

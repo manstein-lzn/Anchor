@@ -1,14 +1,13 @@
 import { expect, test } from '@playwright/test';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { createServer } from 'node:net';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { freePort, nativeHost, repo } from './fixtures/native-host';
 
 type Turn = { id: string; session: string; status: string; error: string; created_at: string; prompt: string | null };
 
-/** A body `EventSource` reads the same way `anchor serve` writes it. */
+/** A body `EventSource` reads the Host's delivery events. */
 function stream(parts: Array<[number, unknown]>, turn?: Turn, retry?: number) {
   const events: string[][] = [];
   if (retry) events.push([`retry: ${retry}`]);
@@ -22,18 +21,8 @@ const inProgress = (id: string, session: string, prompt: string): Turn => ({
   id, session, status: 'running', error: '', created_at: '2026-09-26T07:00:00Z', prompt,
 });
 
-async function freePort() {
-  const server = createServer();
-  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
-  const address = server.address();
-  if (!address || typeof address === 'string') throw new Error('no test port');
-  await new Promise<void>(resolve => server.close(() => resolve()));
-  return address.port;
-}
-
 test('Pilot opens, creates and reopens sessions through the real Vite proxy, and shows failures', async ({ page, request }) => {
   test.setTimeout(60000);
-  const repo = fileURLToPath(new URL('../../../', import.meta.url));
   const root = await mkdtemp(join(tmpdir(), 'anchor-pilot-browser-'));
   const processes: ChildProcess[] = [];
   const apiPort = await freePort();
@@ -42,12 +31,8 @@ test('Pilot opens, creates and reopens sessions through the real Vite proxy, and
   const errors: string[] = [];
   page.on('pageerror', error => errors.push(error.message));
   try {
-    const config = join(root, 'runtime.json');
-    await writeFile(config, JSON.stringify({ models: [] }));
-    processes.push(spawn(join(repo, '.venv/bin/python'), ['-m', 'anchor', '--root', root,
-      '--config', config, '--host', '127.0.0.1', '--port', String(apiPort)], {
-      cwd: repo, stdio: 'ignore', env: { ...process.env, ANCHOR_API_KEYS: '', ANCHOR_API_KEY: '' },
-    }));
+    const host = await nativeHost(root, { port: apiPort });
+    processes.push(host.start());
     processes.push(spawn(join(repo, 'apps/web/node_modules/.bin/vite'),
       ['--host', '127.0.0.1', '--port', String(webPort)], {
         cwd: join(repo, 'apps/web'), stdio: 'ignore',
@@ -156,7 +141,7 @@ test('Pilot renders rich replies, restores drafts and selection, and handles Chi
     { id: 'research', title: '梳理 RAG 的研究进展', status: 'active', updated_at: '2026-09-26T07:00:00Z', approval: null },
     { id: 'other', title: '另一项研究', status: 'active', updated_at: '2026-09-25T07:00:00Z', approval: null },
   ];
-  const text = '## 研究进展\n\n**证据优先**，查看[论文](https://example.com)。\n\n| 方法 | 结果 |\n| --- | --- |\n| RAG | 有效 |\n\n```python\nprint("evidence")\n```\n\n<script>alert("unsafe")</script>';
+  const text = '## 研究进展\n\n**证据优先**，查看[论文](https://example.com)。\n\n| 方法 | 结果 |\n| --- | --- |\n| RAG | 有效 |\n\n```rust\nprintln!("evidence");\n```\n\n<script>alert("unsafe")</script>';
   const messages = [{ role: 'user', text: '梳理 RAG 的研究进展' }, { role: 'assistant', text }];
   let turns: Turn[] = [];
   let sent = 0;
@@ -186,7 +171,7 @@ test('Pilot renders rich replies, restores drafts and selection, and handles Chi
   await expect(page.getByRole('heading', { name: '研究进展' })).toBeVisible();
   await expect(page.locator('.pilot-message.assistant strong')).toHaveText('证据优先');
   await expect(page.locator('.pilot-message table')).toContainText('有效');
-  await expect(page.locator('.pilot-message pre code')).toContainText('print("evidence")');
+  await expect(page.locator('.pilot-message pre code')).toContainText('println!("evidence");');
   await expect(page.locator('.pilot-message script')).toHaveCount(0);
   await page.getByLabel('搜索对话').fill('RAG');
   await expect(page.locator('.pilot-session')).toHaveCount(1);
@@ -231,7 +216,7 @@ test('Pilot streams text and tool activity, and resumes the stream from the last
     await route.fulfill({ status: 202, json: { turn: turns[0] } });
   });
   // Route by the delivered cursor so StrictMode's duplicate mount cannot consume a synthetic retry.
-  // Server-side cursor/header handling is separately covered in test_pilot_turns.py.
+  // Server-side cursor/header handling is covered by Rust Session/Turn store and API tests.
   await page.route(/\/sessions\/[^/]+\/turns\/[^/]+\/events/, route => {
     const header = { status: 200, contentType: 'text/event-stream' };
     reconnects += 1;

@@ -1,7 +1,7 @@
 use super::*;
 use crate::resource_read::open_resource;
 use anchor_graph_host::{FilePluginCatalog, PluginDefinition};
-use anchor_runtime_rig::graph::GraphError;
+use anchor_runtime::graph::GraphError;
 use std::io::Read;
 use std::path::Path;
 

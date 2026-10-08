@@ -144,8 +144,8 @@ pub struct NodeExecutionRequest {
     pub input_commits: Vec<CommitRef>,
     /// Secret-free Plugin resource identities resolved by the host.
     pub plugins: Vec<PluginBinding>,
-    /// Python max_steps is a cumulative provider-request budget. Implementors
-    /// must honor this exact meaning; it is not Rig max_turns.
+    /// A cumulative provider-request budget, supported only when the node
+    /// adapter advertises exact request accounting.
     pub max_provider_requests: Option<u64>,
     pub wall_time_limit_seconds: Option<f64>,
     /// Graph request intent only. The host adapter must apply its own network authorization.
@@ -166,8 +166,8 @@ pub struct PluginBinding {
     pub mcp_servers: Vec<String>,
 }
 
-/// Public, non-secret facts exposed by io-harness for one unresolved tool
-/// call. Harness deliberately does not retain tool arguments here.
+/// Persisted, non-secret facts for one unresolved tool call.
+/// Tool arguments are not part of this recovery projection.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RecoveryAttempt {
@@ -177,7 +177,7 @@ pub struct RecoveryAttempt {
     pub started_at: String,
 }
 
-/// An operator's explicit decision about an unresolved io-harness tool call.
+/// An explicit decision about an unresolved tool call.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "decision", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RecoveryDecision {

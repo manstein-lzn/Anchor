@@ -12,16 +12,17 @@ Only direct dependencies and public release metadata are covered by the initial
 community research tool; broad community discussion and feature applicability
 remain limitations, not implied completed research.
 
-The Plugin manifest pins the identity `anchor.rsi`. The launcher writes the
-disposable evidence service URL into that Plugin's canonical `mcpServers`
+The Plugin manifest pins the identity `anchor.rsi`. The operator starts the
+evidence service and registers its URL in the canonical Plugin's `mcpServers`
 declaration before admission; credentials and host paths are never embedded in
 this bundle. MCP network permission is separate from shell-tool network
 permission: the nodes authorize the configured HTTP MCP, while `anchor_run`
 remains network-disabled.
 
-Build/run instructions are in `rust/anchor-rsi/README.md`. The optional repository
-launcher writes a disposable evidence/run directory and does not alter installed
-Graphs or production schedules. Historical reports are optional operator input.
+Build/run instructions are in [the RSI guide](../docs/rsi.md) and
+[the native tool README](../rust/anchor-rsi/README.md). Gate/publish Ops use the
+operator-authorized native binary and frozen evidence directory. Historical
+reports are optional operator input.
 Report generation does not automatically implement proposals or prove long-term
 recursive improvement.
 

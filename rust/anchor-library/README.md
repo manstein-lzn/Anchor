@@ -2,7 +2,7 @@
 
 Operator-only Plugin installation. The root is the Library directory containing
 `plugins/`, not the Anchor data root. Installation does not execute Plugin code,
-run Python, grant filesystem/network permissions, authorize OAuth, or modify
+grant filesystem/network permissions, authorize OAuth, or modify
 existing Graph bundles.
 
 ```sh

@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::net::IpAddr;
 
-use anchor_runtime_rig::SandboxEnvironment;
+use anchor_runtime::SandboxEnvironment;
 use reqwest::Url;
 use sha2::{Digest, Sha256};
 
@@ -26,18 +26,18 @@ pub(super) fn command(
     directory: &std::path::Path,
     binary: &std::path::Path,
     environment: Vec<SandboxEnvironment>,
-    cancellation: anchor_runtime_rig::Cancellation,
+    cancellation: anchor_runtime::Cancellation,
 ) -> Result<tokio::process::Command, String> {
-    let grant = anchor_runtime_rig::ReadOnlyInput {
+    let grant = anchor_runtime::ReadOnlyInput {
         source: binary.to_path_buf(),
         destination: "/tools/goose".into(),
     };
     let sandbox = sandbox
         .with_readonly_grants(std::slice::from_ref(&grant))
         .map_err(|error| error.to_string())?;
-    let mut process = anchor_runtime_rig::SandboxRequest::new(directory, ["/tools/goose", "acp"]);
+    let mut process = anchor_runtime::SandboxRequest::new(directory, ["/tools/goose", "acp"]);
     process.readonly_inputs.push(grant);
-    process.network = anchor_runtime_rig::NetworkPolicy::Enabled;
+    process.network = anchor_runtime::NetworkPolicy::Enabled;
     process.cancellation = cancellation;
     process.environment = [
         ("GOOSE_MODE", "auto"),

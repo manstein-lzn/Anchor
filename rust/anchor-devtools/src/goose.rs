@@ -20,7 +20,9 @@ const SUITES: &[&str] = &[
 fn configured_binary() -> io::Result<PathBuf> {
     let path = std::env::var_os("ANCHOR_GOOSE_BINARY")
         .map(PathBuf::from)
-        .ok_or_else(|| io::Error::other("goose-fixture requires explicit ANCHOR_GOOSE_BINARY"))?;
+        .ok_or_else(|| {
+            io::Error::other("regression fixture requires explicit ANCHOR_GOOSE_BINARY")
+        })?;
     validate_binary(&path)?;
     path.canonicalize()
 }
@@ -103,14 +105,7 @@ pub fn run_goose_fixture(options: &FixtureOptions) -> io::Result<FixtureResult> 
     let mut build_exit_code = None;
     let executed = (|| -> io::Result<()> {
         commands.push(command_record(&build));
-        build_exit_code = execute_fixture(
-            &build,
-            &workspace,
-            &target,
-            &fixture,
-            &mut log,
-            Some(&goose),
-        )?;
+        build_exit_code = execute(&build, &workspace, &target, &fixture, &mut log, &goose)?;
         exit_codes.push(build_exit_code);
         if build_exit_code != Some(0) {
             return Err(io::Error::other(
@@ -124,13 +119,13 @@ pub fn run_goose_fixture(options: &FixtureOptions) -> io::Result<FixtureResult> 
             let suite_path = root.join(format!("{suite}.log"));
             let mut suite_log = File::create(&suite_path)?;
             commands.push(command_record(&command));
-            let exit_code = execute_fixture(
+            let exit_code = execute(
                 &command,
                 &workspace,
                 &target,
                 &suite_root,
                 &mut suite_log,
-                Some(&goose),
+                &goose,
             )?;
             exit_codes.push(exit_code);
             let output = fs::read_to_string(suite_path)?;

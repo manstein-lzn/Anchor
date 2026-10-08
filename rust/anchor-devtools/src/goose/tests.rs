@@ -18,7 +18,7 @@ fn evidence() -> (Value, Value) {
 }
 
 #[test]
-fn commands_select_standard_ignored_goose_suites_without_legacy() {
+fn commands_select_standard_ignored_goose_suites() {
     assert!(SUITES.contains(&"goose_compaction"));
     assert!(SUITES.contains(&"goose_pilot_compaction"));
     assert!(SUITES.contains(&"goose_trace"));
@@ -30,7 +30,6 @@ fn commands_select_standard_ignored_goose_suites_without_legacy() {
         assert!(command.contains(&"--no-default-features"));
         assert!(command.contains(&"--locked"));
         assert!(!command.contains(&"--features"));
-        assert!(!command.contains(&"legacy-regression"));
         assert_eq!(
             &command[command
                 .iter()
@@ -93,7 +92,7 @@ fn rejects_non_fixture_unbound_incomplete_or_real_model_evidence() {
     let (report, provider) = evidence();
     for (field, value) in [
         ("status", json!("failed")),
-        ("runtime", json!("io-harness")),
+        ("runtime", json!("unknown-runtime")),
         ("real_model_requests", json!(1)),
         ("production_data_used", json!(true)),
         ("dotenv_loaded", json!(true)),

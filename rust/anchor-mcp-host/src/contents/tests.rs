@@ -1,7 +1,7 @@
 use rmcp::model::{CallToolResult, ContentBlock};
 use serde_json::{Value, json};
 
-use super::{McpHostError, native_contents, result_contents};
+use super::{McpHostError, result_contents};
 
 fn response(content: Vec<Value>, structured: Option<Value>) -> CallToolResult {
     serde_json::from_value(json!({
@@ -12,8 +12,8 @@ fn response(content: Vec<Value>, structured: Option<Value>) -> CallToolResult {
     .unwrap()
 }
 
-fn native_wire(result: &CallToolResult) -> Value {
-    serde_json::to_value(native_contents(result).unwrap()).unwrap()
+fn result_wire(result: &CallToolResult) -> Value {
+    serde_json::to_value(result_contents(result).unwrap()).unwrap()
 }
 
 fn preserved_blocks() -> Vec<Value> {
@@ -49,7 +49,7 @@ fn literal_text_is_not_reparsed_as_json() {
         ContentBlock::text("多行\ntext"),
     ]);
     assert_eq!(
-        native_wire(&result),
+        result_wire(&result),
         json!([
             {"type": "text", "text": "{\"value\":true}"},
             {"type": "text", "text": "多行\ntext"}
@@ -70,7 +70,7 @@ fn structured_results_replace_only_first_canonical_compatibility_text_in_place()
         Some(structured.clone()),
     );
     assert_eq!(
-        native_wire(&result),
+        result_wire(&result),
         json!([
             {"type": "text", "text": "before"},
             {"type": "json", "value": structured},
@@ -89,7 +89,7 @@ fn structured_results_prepend_typed_value_without_replacing_genuine_text() {
         Some(structured.clone()),
     );
     assert_eq!(
-        native_wire(&result),
+        result_wire(&result),
         json!([
             {"type": "json", "value": structured},
             {"type": "text", "text": genuine_text}
@@ -106,7 +106,7 @@ fn structured_constructor_and_nonobject_values_keep_their_types() {
         json!("text"),
     ] {
         assert_eq!(
-            native_wire(&CallToolResult::structured(value.clone())),
+            result_wire(&CallToolResult::structured(value.clone())),
             json!([{ "type": "json", "value": value }])
         );
     }
@@ -119,17 +119,17 @@ fn audio_resources_and_links_preserve_complete_blocks() {
         .iter()
         .map(|block| json!({"type": "json", "value": block}))
         .collect();
-    assert_eq!(native_wire(&response(blocks, None)), Value::Array(expected));
+    assert_eq!(result_wire(&response(blocks, None)), Value::Array(expected));
 }
 
 #[test]
 fn empty_results_match_original_sendable_text_normalization() {
     assert_eq!(
-        native_wire(&CallToolResult::success(vec![])),
+        result_wire(&CallToolResult::success(vec![])),
         json!([{ "type": "text", "text": "" }])
     );
     assert_eq!(
-        native_wire(&CallToolResult::error(vec![])),
+        result_wire(&CallToolResult::error(vec![])),
         json!([{ "type": "text", "text": "the MCP tool reported an error" }])
     );
 }
@@ -158,14 +158,13 @@ fn invalid_typed_images_and_image_resources_fail_without_partial_output() {
                 Some(json!({"also": "not a partial success"})),
             );
             assert!(matches!(
-                native_contents(&result),
+                result_contents(&result),
                 Err(McpHostError::Encode(_))
             ));
         }
     }
 }
 
-#[cfg(not(feature = "rig-legacy"))]
 #[test]
 fn native_images_and_blob_resources_remain_typed_in_mixed_order() {
     use base64::{Engine, engine::general_purpose::STANDARD};
@@ -186,7 +185,7 @@ fn native_images_and_blob_resources_remain_typed_in_mixed_order() {
         Some(structured.clone()),
     );
     assert_eq!(
-        native_wire(&result),
+        result_wire(&result),
         json!([
             {"type":"text","text":"before"},
             {"type":"image","mime_type":"image/png","data":data},
@@ -195,67 +194,4 @@ fn native_images_and_blob_resources_remain_typed_in_mixed_order() {
             {"type":"text","text":"after"}
         ])
     );
-    assert_eq!(
-        result_contents(&result).unwrap(),
-        native_contents(&result).unwrap()
-    );
-}
-
-#[test]
-fn selected_mapping_preserves_normal_text_json_results() {
-    let result = CallToolResult::structured(json!({"value": 7}));
-    assert_eq!(
-        result_contents(&result).unwrap(),
-        native_contents(&result).unwrap()
-    );
-}
-
-#[cfg(feature = "rig-legacy")]
-#[test]
-fn native_mapping_matches_fixed_rig_rmcp_for_every_representable_fixture() {
-    for result in [
-        CallToolResult::success(vec![ContentBlock::text("{\"value\":true}")]),
-        CallToolResult::structured(json!({"nested": [1, true]})),
-        response(
-            vec![json!({"type": "text", "text": "genuine text"})],
-            Some(json!({"structured": true})),
-        ),
-        response(preserved_blocks(), Some(json!({"structured": true}))),
-        CallToolResult::success(vec![]),
-        CallToolResult::error(vec![]),
-    ] {
-        assert_eq!(
-            native_contents(&result).unwrap(),
-            rig_rmcp::mcp_result_output(&result).unwrap().into_content()
-        );
-    }
-}
-
-#[cfg(feature = "rig-legacy")]
-#[test]
-fn legacy_mapping_keeps_previously_supported_typed_image_variants() {
-    for mime_type in [
-        "image/jpeg",
-        "image/png",
-        "image/gif",
-        "image/webp",
-        "image/heic",
-        "image/heif",
-        "image/svg+xml",
-    ] {
-        for block in [
-            json!({"type": "image", "data": "AAEC", "mimeType": mime_type}),
-            json!({"type": "resource", "resource": {"uri": "file:///image", "mimeType": mime_type, "blob": "AAEC"}}),
-        ] {
-            let result = response(vec![block], None);
-            assert!(matches!(
-                result_contents(&result).unwrap()[0],
-                rig_core::message::ToolResultContent::Image(_)
-            ));
-            assert_eq!(
-                result_contents(&result).unwrap(),
-                rig_rmcp::mcp_result_output(&result).unwrap().into_content()
-            );
-        }
-    }
 }

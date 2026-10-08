@@ -1,26 +1,10 @@
 import { expect, test, type APIRequestContext } from '@playwright/test';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import type { OurGraph, OurRunDetail } from '../src/model';
-
-async function freePort() {
-  const probe = createServer();
-  await new Promise<void>(resolve => probe.listen(0, '127.0.0.1', resolve));
-  const address = probe.address();
-  if (!address || typeof address === 'string') throw new Error('No test port');
-  await new Promise<void>(resolve => probe.close(() => resolve()));
-  return address.port;
-}
-async function stop(child: ChildProcess | undefined) {
-  if (!child || child.exitCode !== null) return;
-  const exited = new Promise<void>(resolve => child.once('exit', () => resolve()));
-  child.kill('SIGINT');
-  await exited;
-}
+import { freePort, nativeHost, repo, stop } from './fixtures/native-host';
 async function json(request: APIRequestContext, url: string) {
   const response = await request.get(url);
   expect(response.ok(), await response.text()).toBeTruthy();
@@ -31,7 +15,6 @@ async function json(request: APIRequestContext, url: string) {
  * persistence are real. Uses no model provider or external channel and cleans up its own data root. */
 test('real backend: author wait and detach calls, follow results and concurrent run chains', async ({ page, request }) => {
   test.setTimeout(100000);
-  const repo = fileURLToPath(new URL('../../../', import.meta.url));
   const root = await mkdtemp(join(tmpdir(), 'anchor-call-browser-'));
   const apiPort = await freePort();
   const webPort = await freePort();
@@ -50,12 +33,8 @@ test('real backend: author wait and detach calls, follow results and concurrent 
     input: { request: { code: 'BROWSER-47' }, unrelated: 'not-forwarded' },
     ops: { prepare: { run: "printf 'browser report' > report.txt", writes: ['report.txt'] } } };
   try {
-    const config = join(root, 'runtime.json');
-    await writeFile(config, JSON.stringify({ models: [] }));
-    server = spawn(join(repo, '.venv/bin/python'), ['-m', 'anchor', '--root', root, '--config', config,
-      '--host', '127.0.0.1', '--port', String(apiPort)], {
-      cwd: repo, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, ANCHOR_API_KEYS: '', ANCHOR_API_KEY: '' },
-    });
+    const host = await nativeHost(root, { port: apiPort });
+    server = host.start();
     server.stdout?.on('data', data => { serverLog += data.toString(); });
     server.stderr?.on('data', data => { serverLog += data.toString(); });
     vite = spawn(join(repo, 'apps/web/node_modules/.bin/vite'), ['--host', '127.0.0.1', '--port', String(webPort)], {
@@ -110,13 +89,13 @@ test('real backend: author wait and detach calls, follow results and concurrent 
     }).toPass({ timeout: 10000 });
     await page.locator('[data-id="call"]').click();
     const records = page.getByRole('region', { name: '工作流调用记录' });
-    await expect(records).toContainText('等待目标结果');
+    await expect(records).toContainText('正在等待目标完成');
     await records.getByRole('button', { name: '查看目标运行' }).click();
     await expect(page.locator('.run-origin')).toContainText('source / call');
     await page.getByRole('button', { name: '返回来源运行' }).click();
     await expect(records).toContainText('本节点：已完成', { timeout: 20000 });
     const waitDetail: OurRunDetail = await json(request, `${base}/runs/${waitRun}`);
-    expect(waitDetail.state.status).toBe('finished');
+    expect(waitDetail.state.status).toBe('completed');
     const childDetail = await json(request, `${base}/runs/${waitDetail.calls![0].run}`);
     expect(childDetail.state.input).toEqual({ default: 'kept', constant: 'browser', code: 'BROWSER-47' });
     const returned = await json(request, `${base}/runs/${waitRun}/files/call/result/answer.txt`);
@@ -140,7 +119,7 @@ test('real backend: author wait and detach calls, follow results and concurrent 
       const run = (await (await response).json()).run as string;
       await expect(async () => {
         const detail = await json(request, `${base}/runs/${run}`);
-        expect(detail.state.status).toBe('finished');
+        expect(detail.state.status).toBe('completed');
         expect(detail.calls).toHaveLength(1);
         expect(detail.calls[0].status).toBe('running');
       }).toPass({ timeout: 10000 });
@@ -175,7 +154,7 @@ test('real backend: author wait and detach calls, follow results and concurrent 
     await page.getByLabel('筛选调用链').selectOption(detached[1].run);
     await expect(page.locator('.timeline-entry')).toHaveCount(2);
     await expect(async () => {
-      for (const detail of detached) expect((await json(request, `${base}/runs/${detail.calls![0].run}`)).state.status).toBe('finished');
+      for (const detail of detached) expect((await json(request, `${base}/runs/${detail.calls![0].run}`)).state.status).toBe('completed');
     }).toPass({ timeout: 25000 });
     evidence.detachedRuns = await Promise.all(detached.map(detail => json(request, `${base}/runs/${detail.run}`)));
     evidence.browserErrors = errors;

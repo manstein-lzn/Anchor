@@ -850,7 +850,7 @@ impl Host {
                 json!({"models.worker":provider.model}).to_string(),
             )
             .current_dir(root);
-        if self.runtime_default && !cfg!(feature = "legacy-regression") {
+        if self.runtime_default {
             process.env_remove("ANCHOR_RUNNER_AGENT_RUNTIME");
         }
         process
@@ -1019,7 +1019,7 @@ impl Host {
 
     fn invocation_paths(&self, run: &str, node: &str, invocation: u64) -> (PathBuf, PathBuf) {
         let saved = self.record(run);
-        let key = anchor_runtime_rig::graph::InvocationKey {
+        let key = anchor_runtime::graph::InvocationKey {
             run_id: run.into(),
             graph_digest: saved["graph_digest"].as_str().unwrap().into(),
             node_id: node.into(),

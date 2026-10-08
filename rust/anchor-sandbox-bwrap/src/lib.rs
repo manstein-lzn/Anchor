@@ -21,7 +21,7 @@ use std::{
     time::Duration,
 };
 
-use anchor_runtime_rig::{
+use anchor_runtime::{
     NetworkPolicy, ReadOnlyInput, SandboxError, SandboxPort, SandboxRequest, SandboxResult,
     SandboxStatus, SpillPolicy,
 };
@@ -1201,7 +1201,7 @@ async fn read_stream<R: AsyncRead + Unpin>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use anchor_runtime_rig::SpillPolicy;
+    use anchor_runtime::SpillPolicy;
     use std::{
         os::unix::fs::PermissionsExt,
         pin::Pin,
@@ -1581,7 +1581,7 @@ mod tests {
         let mut request = SandboxRequest::new(&workspace, ["true"]);
         request
             .readonly_inputs
-            .push(anchor_runtime_rig::ReadOnlyInput::new(
+            .push(anchor_runtime::ReadOnlyInput::new(
                 &source,
                 "/workspace/override",
             ));
@@ -1593,7 +1593,7 @@ mod tests {
         let mut request = SandboxRequest::new(&workspace, ["true"]);
         request
             .readonly_inputs
-            .push(anchor_runtime_rig::ReadOnlyInput::new(
+            .push(anchor_runtime::ReadOnlyInput::new(
                 &source,
                 "/in/nested/input",
             ));
@@ -1651,7 +1651,7 @@ mod tests {
         let mut request = SandboxRequest::new(&workspace, ["true"]);
         request
             .environment
-            .push(anchor_runtime_rig::SandboxEnvironment::new(
+            .push(anchor_runtime::SandboxEnvironment::new(
                 "API_TOKEN",
                 "argv-secret-must-not-appear",
             ));
@@ -1729,7 +1729,7 @@ mod tests {
         let mut request = SandboxRequest::new(&workspace, ["cat", "/in/input.txt"]);
         request
             .readonly_inputs
-            .push(anchor_runtime_rig::ReadOnlyInput::new(
+            .push(anchor_runtime::ReadOnlyInput::new(
                 &host_input,
                 "/in/input.txt",
             ));

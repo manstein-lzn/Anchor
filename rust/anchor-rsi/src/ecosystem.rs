@@ -56,9 +56,9 @@ pub fn discover(manifests: &[Entry]) -> (Vec<Dependency>, Vec<Value>) {
                 }
                 Ok(value) => {
                     let project = value.get("project");
-                    if let Some(values) = project.and_then(|p|p.get("dependencies")).and_then(toml::Value::as_array) { python_dependencies(values,&mut add); }
-                    if let Some(groups) = project.and_then(|p|p.get("optional-dependencies")).and_then(toml::Value::as_table) { for values in groups.values().filter_map(toml::Value::as_array) { python_dependencies(values,&mut add); } }
-                    if let Some(build) = value.get("build-system").and_then(|p|p.get("requires")).and_then(toml::Value::as_array) { python_dependencies(build,&mut add); }
+                    if let Some(values) = project.and_then(|p|p.get("dependencies")).and_then(toml::Value::as_array) { ecosystem_dependencies(values, "pypi", &mut add); }
+                    if let Some(groups) = project.and_then(|p|p.get("optional-dependencies")).and_then(toml::Value::as_table) { for values in groups.values().filter_map(toml::Value::as_array) { ecosystem_dependencies(values, "pypi", &mut add); } }
+                    if let Some(build) = value.get("build-system").and_then(|p|p.get("requires")).and_then(toml::Value::as_array) { ecosystem_dependencies(build, "pypi", &mut add); }
                 }
                 Err(_) => errors.push(json!({"path":entry.path,"reason":"TOML manifest parse failed; declarations unavailable"})),
             }
@@ -95,13 +95,17 @@ fn rust_dependencies(value: &toml::Value, add: &mut impl FnMut(&str, &str)) {
         }
     }
 }
-fn python_dependencies(values: &[toml::Value], add: &mut impl FnMut(&str, &str)) {
+fn ecosystem_dependencies(
+    values: &[toml::Value],
+    ecosystem: &str,
+    add: &mut impl FnMut(&str, &str),
+) {
     for value in values.iter().filter_map(toml::Value::as_str) {
         let name = value
             .split(|c: char| !c.is_ascii_alphanumeric() && !"-_.".contains(c))
             .next()
             .unwrap_or("");
-        add("pypi", name);
+        add(ecosystem, name);
     }
 }
 

@@ -1,5 +1,5 @@
 use crate::pilot_tools::PilotTools;
-use anchor_runtime_rig::{Cancellation, ToolDefinition, ToolError, ToolResultContent};
+use anchor_runtime::{Cancellation, ToolDefinition, ToolError, ToolResultContent};
 use rmcp::{
     Peer, RoleServer,
     model::{ElicitRequestParams, ElicitationAction},

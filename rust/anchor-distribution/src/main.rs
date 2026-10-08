@@ -20,6 +20,14 @@ struct Arguments {
     web: Option<PathBuf>,
     #[arg(long = "tool", value_name = "NAME=ELF", value_parser = parse_tool)]
     tools: Vec<ToolBinary>,
+    #[arg(long, value_name = "ELF")]
+    scholarly: Option<PathBuf>,
+    #[arg(long, value_name = "ELF")]
+    docmost_tools: Option<PathBuf>,
+    #[arg(long, value_name = "ELF")]
+    wecom_tools: Option<PathBuf>,
+    #[arg(long, value_name = "ELF")]
+    wecom_gateway: Option<PathBuf>,
     #[arg(long)]
     output: PathBuf,
 }
@@ -43,6 +51,10 @@ fn main() -> ExitCode {
         bundle: arguments.bundle,
         web: arguments.web,
         tools: arguments.tools,
+        scholarly: arguments.scholarly,
+        docmost_tools: arguments.docmost_tools,
+        wecom_tools: arguments.wecom_tools,
+        wecom_gateway: arguments.wecom_gateway,
         output: arguments.output,
     };
     match build_package(&request).and_then(|report| Ok(serde_json::to_string(&report)?)) {

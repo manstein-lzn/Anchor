@@ -177,7 +177,7 @@ pub struct GraphRunRecord {
     pub cursor: Option<RunCursor>,
     #[serde(default)]
     pub parallel: Option<ParallelActivation>,
-    /// Operator-resolvable io-harness tool attempts. Each attempt is tied to
+    /// Persisted unresolved tool attempts. Each attempt is tied to
     /// the exact serial or parallel invocation whose cursor remains active.
     #[serde(default)]
     pub recovery: Vec<PendingRecovery>,

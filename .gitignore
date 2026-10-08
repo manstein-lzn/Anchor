@@ -1,3 +1,4 @@
+# Local data and environments may contain user history; never package them.
 .venv/
 .local/
 __pycache__/
@@ -12,7 +13,9 @@ __pycache__/
 dist/
 build/
 target/
+/rust/target
 *.egg-info/
+# Build outputs and frontend dependencies.
 node_modules/
 test-results/
 playwright-report/

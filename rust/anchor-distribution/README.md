@@ -7,19 +7,38 @@ dependencies, or change deployment permissions.
 ```sh
 anchor-distribution --host /reviewed/anchor-runner-host \
   --goose /reviewed/goose --bundle /reviewed/format-1-bundle \
-  --web /reviewed/web-dist --tool anchor-scholarly=/reviewed/anchor-scholarly \
+  --web /reviewed/web-dist --scholarly /reviewed/anchor-scholarly \
+  --docmost-tools /reviewed/anchor-docmost-tools \
+  --wecom-tools /reviewed/anchor-wecom-tools \
+  --wecom-gateway /reviewed/anchor-wecom-gateway \
   --output /existing/output/runtime.tar.gz
 ```
 
-`--web` and repeated `--tool NAME=ELF` inputs are optional. Output must be a new
+`--web`, the first-party binary flags and repeated `--tool NAME=ELF` inputs are
+optional unless their Plugin is referenced by the admitted Graph. If the Graph
+references `academic-research`, `--scholarly` becomes required. If it references
+`docmost`, `--docmost-tools` becomes required. If it references `wecom`, both
+`--wecom-tools` and `--wecom-gateway` become required. Each first-party binary
+must be supplied separately; passing one without its Plugin is rejected. The
+builder places the scholarly ELF at
+`bundle/plugins/academic-research/bin/anchor-scholarly`, updates the frozen
+Plugin summary and validates the resulting bundle. Native first-party MCP and
+channel entrypoints are placed under their declared Plugin `bin/` paths and do
+not use an interpreter or host `PATH`. The builder consumes reviewed,
+already-built target ELFs; it does not build workspace crates or resolve a
+cross-crate install manifest.
+
+Output must be a new
 `.tar.gz` file under an existing, non-symlink directory. Success prints a JSON
 `PackageReport` with the output path, archive SHA256, and inventory.
 
 ## Public API
 
 `ToolBinary { name: String, path: PathBuf }` and
-`PackageRequest { host, goose, bundle, web: Option<PathBuf>, tools, output }` are
-passed to `build_package(&PackageRequest) -> Result<PackageReport>`.
+`PackageRequest` carries `host`, `goose`, `bundle`, optional `web`, `tools`,
+optional `scholarly`, `docmost_tools`, `wecom_tools`, `wecom_gateway`, and
+`output`; pass it to
+`build_package(&PackageRequest) -> Result<PackageReport>`.
 `PackageReport { output, sha256, inventory }` and the inventory are serializable.
 
 Goose is fixed to the official v1.53.0 x86_64 musl executable SHA256
@@ -27,7 +46,7 @@ Goose is fixed to the official v1.53.0 x86_64 musl executable SHA256
 There is no environment or CLI option to bypass this check. Host and tools must
 be executable ELF files with an executable entry point and matching platform.
 The supplied Host's version, features and dependency closure are not attested by
-ELF acceptance. In particular, arbitrary ELF is not proof of no io-harness/Rig.
+ELF acceptance. Arbitrary ELF is not proof of the expected production Host.
 
 ## Layout And Reproducibility
 
@@ -39,6 +58,10 @@ anchor-runtime/
   bundle/graph.json
   bundle/manifest.json
   bundle/plugins/<declared-plugin>/<declared-resource>
+  bundle/plugins/academic-research/bin/anchor-scholarly # when referenced
+  bundle/plugins/docmost/bin/anchor-docmost-tools       # when referenced
+  bundle/plugins/wecom/bin/anchor-wecom-tools           # when referenced
+  bundle/plugins/wecom/bin/anchor-wecom-gateway         # when referenced
   web/                         # optional compiled assets
   README.md
   runtime-manifest.json
@@ -92,7 +115,7 @@ to deterministic USTAR limits. There is no total-size/file-count quota, binary
 provenance verifier, ELF shared-library resolver, automatic external-service
 installation, or cross-platform package builder. Use reviewed local inputs.
 Packaging alone is not runtime execution, real-provider acceptance, a test on an
-OS without Python, or production-cutover evidence. Model/API credentials,
+production-cutover evidence. Model/API credentials,
 host-path grants and runtime state must be configured outside the archive.
 
 ## Focused Verification

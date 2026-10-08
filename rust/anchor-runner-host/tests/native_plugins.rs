@@ -8,14 +8,10 @@ mod goose;
 use anchor_graph_host::{FilePluginCatalog, PluginCatalog};
 use axum::{
     Json, Router,
-    body::Bytes,
     extract::{Query, State},
-    http::HeaderMap,
-    routing::{get, post},
+    routing::get,
 };
 use fixture::{Host, read_json};
-#[cfg(feature = "legacy-regression")]
-use fixture::{Provider, Reply, command, complete, evidence};
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
@@ -26,9 +22,6 @@ use std::{
     thread,
 };
 use tokio::sync::oneshot;
-
-const PAGE: &str = "11111111-1111-4111-8111-111111111111";
-const ATTACHMENT: &str = "22222222-2222-4222-8222-222222222222";
 
 #[derive(Clone, Default)]
 struct Calls(Arc<Mutex<Vec<Value>>>);
@@ -60,28 +53,6 @@ async fn member(
     Json(json!({"errcode":0,"userid":"member-fixture","name":"Native fixture user"}))
 }
 
-async fn upload(State(calls): State<Calls>, headers: HeaderMap, body: Bytes) -> Json<Value> {
-    assert_eq!(headers["authorization"], "Bearer fixture-docmost-key");
-    assert!(
-        headers["content-type"]
-            .to_str()
-            .unwrap()
-            .starts_with("multipart/form-data;")
-    );
-    let multipart = String::from_utf8(body.to_vec()).unwrap();
-    assert!(multipart.contains("name=\"pageId\""));
-    assert!(multipart.contains(PAGE));
-    assert!(multipart.contains("filename=\"panel.png\""));
-    assert!(multipart.contains("fixture-image"));
-    assert!(multipart.to_lowercase().contains("content-type: image/png"));
-    calls
-        .0
-        .lock()
-        .unwrap()
-        .push(json!({"kind":"upload","bytes":body.len()}));
-    Json(json!({"id":ATTACHMENT,"fileName":"panel.png","mimeType":"image/png","pageId":PAGE}))
-}
-
 impl BusinessFixture {
     fn new() -> Self {
         let calls = Calls::default();
@@ -99,7 +70,6 @@ impl BusinessFixture {
                     let app = Router::new()
                         .route("/cgi-bin/gettoken", get(token))
                         .route("/cgi-bin/user/get", get(member))
-                        .route("/api/files/upload", post(upload))
                         .with_state(state);
                     axum::serve(listener, app)
                         .with_graceful_shutdown(async {
@@ -134,7 +104,7 @@ fn package(host: &Host, name: &str) -> PathBuf {
         .with_file_name(format!("anchor-{name}-tools"));
     assert!(
         binary.is_file(),
-        "Build native tools with cargo build -p anchor-wecom-tools -p anchor-docmost-tools --bins"
+        "Build native tools with cargo build -p anchor-wecom-tools --bins"
     );
     let destination = host.root.path().join("bundle/plugins").join(name);
     fs::create_dir_all(destination.parent().unwrap()).unwrap();
@@ -245,150 +215,5 @@ fn native_goose_reads_plugin_skill_and_calls_rust_stdio_mcp() {
             "native_rust_plugin":true,"plugin_skill_readonly":true,"business_calls":calls,
             "python_required":false,"production_calls":0,"case_source":"tests/native_plugins.rs"
         }),
-    );
-}
-
-#[test]
-#[cfg(feature = "legacy-regression")]
-fn rust_wecom_stdio_plugin_runs_through_host_harness_and_readonly_package() {
-    let business = BusinessFixture::new();
-    let provider = Provider::new([(
-        "fixture-worker",
-        vec![
-            Reply::Tool(
-                "wecom-wecom_wecom_get_user",
-                json!({"userid":"member-fixture"}),
-            ),
-            command("printf 'member-fixture\n' > report.txt; printf once > effects.txt"),
-            complete(None),
-        ],
-    )]);
-    let host = Host::new(&json!({
-        "entry":"worker","agents":{"worker":{"model":"models.worker","network":true,"instructions":"Read one local fixture member with the Plugin and save its userid", "wall_time_limit_seconds":30}},
-        "nodes":[{"id":"worker","agent":"worker","plugins":["wecom"]}],"edges":[]
-    }));
-    let plugin = package(&host, "wecom");
-    let path = plugin.join("plugin.json");
-    let mut manifest = read_json(&path);
-    manifest["mcpServers"]["wecom"]["env"] = json!({
-        "WECOM_API_BASE_URL":business.endpoint,"WECOM_CORP_ID":"fixture-corp",
-        "WECOM_AGENT_ID":"1","WECOM_SECRET":"fixture-secret"
-    });
-    manifest["mcpServers"]["wecom"]
-        .as_object_mut()
-        .unwrap()
-        .remove("optional_env_vars");
-    fs::write(path, manifest.to_string()).unwrap();
-    bind(&host, "wecom");
-    let response = host.run(&provider);
-    assert_eq!(response["status"], "completed", "{response}");
-    let saved = host.record();
-    assert_eq!(
-        host.file(&saved, "worker", "report.txt"),
-        b"member-fixture\n"
-    );
-    assert_eq!(host.file(&saved, "worker", "effects.txt"), b"once");
-    let history = host.history("fixture", "worker", 1);
-    assert!(history.iter().any(|message| {
-        message["commands"]
-            .to_string()
-            .contains("wecom-wecom_wecom_get_user")
-    }));
-    assert!(history.iter().any(|message| message["role"] == "tool"
-        && message["text"].to_string().contains("Native fixture user")));
-    let calls = business.calls.0.lock().unwrap().clone();
-    assert_eq!(
-        calls,
-        vec![json!({"kind":"token"}), json!({"kind":"member"})]
-    );
-    assert!(
-        provider.requests()[1]["messages"]
-            .to_string()
-            .contains("Native fixture user")
-    );
-    provider.assert_consumed();
-    evidence(
-        "native-wecom-stdio-plugin",
-        &host,
-        &provider,
-        json!({"native_tool_binary":true,"business_calls":calls,"python_required":false,"production_calls":0}),
-    );
-}
-
-#[test]
-#[cfg(feature = "legacy-regression")]
-fn rust_docmost_stdio_plugin_uploads_only_frozen_input_through_real_sandbox() {
-    let business = BusinessFixture::new();
-    let provider = Provider::new([(
-        "fixture-worker",
-        vec![
-            Reply::Tool(
-                "docmost-attachments_upload_page_image",
-                json!({"path":"/in/publish/assets/panel.png","pageId":PAGE}),
-            ),
-            command(&format!(
-                "printf '{ATTACHMENT}' > report.txt; printf once > effects.txt"
-            )),
-            complete(None),
-        ],
-    )]);
-    let host = Host::new(&json!({
-        "entry":"publish","agents":{"worker":{"model":"models.worker","network":true,"instructions":"Upload the one frozen image to the local fixture, then save its returned attachment id", "wall_time_limit_seconds":30}},
-        "ops":{"seed":{"run":"sh -c 'mkdir assets; printf fixture-image > assets/panel.png'"}},
-        "nodes":[{"id":"publish","op":"seed"},{"id":"worker","agent":"worker","plugins":["docmost"]}],
-        "edges":[{"from":"publish","to":"worker"}]
-    })).with_allowed_commands("sh,cat,git,true,mkdir");
-    let plugin = package(&host, "docmost");
-    let path = plugin.join("plugin.json");
-    let mut manifest = read_json(&path);
-    manifest["mcpServers"]
-        .as_object_mut()
-        .unwrap()
-        .retain(|name, _| name == "attachments");
-    manifest["mcpServers"]["attachments"]["args"] = json!([
-        "--endpoint",
-        format!("{}/api/files/upload", business.endpoint)
-    ]);
-    manifest["mcpServers"]["attachments"]["env"] = json!({"DOCMOST_API_KEY":"fixture-docmost-key"});
-    manifest["mcpServers"]["attachments"]
-        .as_object_mut()
-        .unwrap()
-        .remove("env_vars");
-    fs::write(path, manifest.to_string()).unwrap();
-    bind(&host, "docmost");
-    let response = host.run(&provider);
-    assert_eq!(response["status"], "completed", "{response}");
-    let saved = host.record();
-    assert_eq!(
-        host.file(&saved, "worker", "report.txt"),
-        ATTACHMENT.as_bytes()
-    );
-    assert_eq!(
-        host.file(&saved, "publish", "assets/panel.png"),
-        b"fixture-image"
-    );
-    let history = host.history("fixture", "worker", 1);
-    assert!(history.iter().any(|message| {
-        message["commands"]
-            .to_string()
-            .contains("docmost-attachments_upload_page_image")
-    }));
-    assert!(history.iter().any(
-        |message| message["role"] == "tool" && message["text"].to_string().contains(ATTACHMENT)
-    ));
-    let calls = business.calls.0.lock().unwrap().clone();
-    assert_eq!(calls.len(), 1);
-    assert_eq!(calls[0]["kind"], "upload");
-    assert!(
-        provider.requests()[1]["messages"]
-            .to_string()
-            .contains(ATTACHMENT)
-    );
-    provider.assert_consumed();
-    evidence(
-        "native-docmost-stdio-plugin",
-        &host,
-        &provider,
-        json!({"native_tool_binary":true,"business_calls":calls,"python_required":false,"production_calls":0,"upload_effects":1}),
     );
 }

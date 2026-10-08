@@ -1,32 +1,39 @@
-# Rust-native WebUI API 出口
+# Rust Host 与 WebUI API 契约
 
-本文冻结“前端体验基本不变”的产品级 API 目标，并记录首个已验证的 Rust Host → React 垂直切片。Rust `serve` 可直接托管同一 React bundle；Graph、Run、Artifact 与真实 Run 时间线路由已接通。浏览器验收已从 Rust Host 页面加载工作台，在非 loopback + Bearer key 配置下运行 Graph 并通过界面打开产物。Session/Pilot、Scheduler、Plugin 管理、relations/channel 和完整平台迁移仍未完成。路线目标仍是复用同一 React bundle，不因 Runner 语言变化重做画布与 Run Inspector。
+React/TypeScript WebUI 调用 Rust Host 的资源 API。Host 可直接托管编译 Web bundle；应用服务和唯一 GraphRunner 持有执行事实，前端负责投影与控制请求。当前证据与待验收项见 [开发台账](pilot-development-plan.md)。
 
-## 第一批：Graph 画布与 Run 体验
+## Graph、Run 与 Artifact
 
-| 当前前端请求 | Rust API 需提供的产品投影 |
+| API | 契约 |
 | --- | --- |
-| `GET /graphs` | `{graphs:[{graph,running,active_runs}]}` |
-| `GET /graphs/{graph}` | `{graph,definition}`；definition 保持 JSON Graph 用户资产格式 |
-| `POST /graphs`、`PUT /graphs/{graph}`、`DELETE /graphs/{graph}` | 已接入无 Plugin Graph catalog 首片：创建 Graph、admission 后保存；删除当前有 Graph 定义或未结束 Run snapshot 调用的目标会返回 409，目标自身有未结束 Run 也返回 409。终态历史调用不阻止删除；成功后仅清目标 Graph 自身及其 Run 数据。配置 bundle 是普通 Graph；Plugin Graph 写入继续 fail closed |
-| `POST /trigger` | 输入 `{graph,input?}`，接受后 `{run,graph}`；busy 返回 409。Rust 读取服务端配置 Graph/bundle，不接受调用方绝对路径 |
-| `GET /runs` | `{runs:[OurRun]}`，至少包含 `run,graph,status,running,started,updated,executed,objective,trigger` |
-| `GET /runs/{run}` | `{graph,run,state,traces,nodes,calls?,plugins?}`；state 保持前端依赖的产品语义，trace 提供可读消息，不要求复制 Harness 原事件 |
-| `POST /runs/{run}/pause|stop|resume` | A62已接入：暂停后真正重启同一Runner续跑、原snapshot/input与Plugin身份校验、停止/未知副作用保护；返回 `{run,asked}` 或清晰错误，请求确认与最终Run状态分开 |
-| `GET /timeline?days=&before=` | 已接入 Rust Run 历史投影；时间范围与状态来自持久 Run/来源 metadata。计划项为空且 `capabilities.scheduling=false`，React 会禁用计划管理；Rust Scheduler 和 `/schedules` 尚未实现 |
-| `GET /runs/{run}/files/{node}`、`GET /runs/{run}/files/{node}/{path}` | 文件目录、文本预览、下载；现按 Rust-owned Run 的节点持久结果读取不可变文件快照，未知节点或尚无commit返回404；下载流式，preview限定1MiB，不能接受任意 host path |
-| `GET /graph-relations`、`GET /channel-sessions` | 当前画布的组合/来源投影；若首期能力不可用，前端需做显式能力降级，不返回伪造空事实 |
+| `GET /graphs`、`GET /graphs/{graph}` | Graph 身份、定义与活动 Run，保留作者 JSON/layout |
+| `POST /graphs` | `{name,definition?}` 创建普通 Graph |
+| `PUT /graphs/{graph}` | `{definition:{...}}` 编译并保存，通过 Library 绑定资源 |
+| `POST /graph-validation` | `{definition:{...}}` 校验而不保存/执行；无效输入与语义诊断区分 |
+| `DELETE /graphs/{graph}` | 活动/可继续 Run、定义或未结算调用引用会阻止删除；只清本 Graph 数据 |
+| `POST /trigger` | `{graph,input?}` 接纳为 `{run,graph}`，busy 冲突；不接受调用方绝对路径 |
+| `GET /runs`、`GET /runs/{run}` | 状态、路径/轮次、trace、节点、调用、Plugin 与触发来源 |
+| `POST /runs/{run}/pause|stop|resume` | 控制请求与最终状态分别展示，保留 snapshot/input/身份 |
+| `GET /runs/{run}/files/{node}`、`.../{path}` | 不可变 Artifact 文件、预览/下载；拒绝 host-path 越权 |
+| `GET /graph-relations`、`GET /channel-sessions` | 真实定义、调用与可信来源投影 |
+| `GET /timeline`、`/schedules` | Run 与计划事实；时间戳未知如实披露，不编造历史 |
 
-接口可以在 Rust 中用 Axum 等成熟框架实现。HTTP DTO 是产品 projection；不要把 `GraphRunRecord` 或 Rig `AgentRun` 直接序列化成对外协议。Graph JSON 继续作为可编辑资产，Rust loader 负责 schema/admission 和 bundle manifest 校验。
+HTTP DTO 是产品投影，不直接输出执行器私有记录。未知结束时间、exit status 或来源必须保持未知；下游失败不能改变上游已提交事实。文件复制/迁移可能改变基于 mtime 的历史时间精度。
 
-## 后续产品面
+## Session、Library 与渠道
 
-Pilot 页面另依赖 `/sessions`、`/sessions/{id}/messages`、`/turns`、turn SSE、会话 rename/delete/stop/confirm/reject；Plugin 页面依赖 `/plugins`、`/plugins/{id}`、安装和授权 API；这些属于同一个 Rust 产品服务的后续迁移切片。前端 bundle 与其 API base URL 应保持可复用，不要求 Pilot/Plugin 后端和 Graph Runner 一次性切换。
+Session API 包括创建/重命名/删除、消息、Turn、SSE、停止、问题与回答。Turn 按 `request_id` 去重，SSE 支持游标回放和重连；同一请求不得再次执行。问题/回答归 Session/Turn，模型历史归 Goose。
 
-## 所有权与验收
+Plugin API 提供 catalog、安装/移除与 owner-bound 授权事务。OAuth、模型与远程 MCP 的真实兼容性需要独立验收；本地工具测试不等于外部授权流程已经通过。
 
-Rust API 调用 Rust 应用服务和唯一 GraphRunner。Rust-owned Run、checkpoint、events、artifact 都由 Rust 一方写入；前端只读投影，不拥有事实。Python legacy 可以并行服务旧 Run，但同一 Run ID 不得双写。验收需要真实 HTTP 浏览器运行、Graph JSON 创建/编辑/启动、Run timeline/detail、pause/stop/resume、文件查看，以及 UI 流程在前端未改动时通过。业务接口缺失不能用空数组或假状态掩盖。
+可信渠道入口绑定用户、Graph、回复节点与本地冻结附件。普通 Graph 和 Pilot 管理入口分别接纳，不把助手业务交给管理 Agent。相同 Session 串行，不同用户可并发；旧轮迟到回复抑制和持久去重由 Host 保证。
 
-A62补充：Graph来源和创建时间来自接纳时持久metadata，Graph同摘要不等于同身份；当前 `updated` 未知返回空、节点 `exit_status` 未知返回null，已提交节点不因下游失败改判失败。无metadata旧Run列表以unknown来源披露，详情/控制不猜身份。
+Webhook 与 Responses 共用接纳和身份校验。Responses 只实现冻结子集，不能宣称兼容完整 API；SSE 代理需关闭缓冲。`/health` 是 liveness，`/ready` 是配置 Graph readiness，不检查模型网络。
 
-当前浏览器验收覆盖 Rust Host 自己托管的 bundle、非 loopback API key 输入、无 Plugin 单节点 Graph 运行、节点文件面板和运行时间线。没有结束时间的 Run 显示时长未知；宿主重启后状态仍为 `running`、但当前无活动任务时显示等待接续。API 层已有 Run detail 与 Harness trace fixture 投影测试，但尚未用真实模型 Run 验收 trace 面板。完整产品验收仍需要 Plugin、Session/Pilot、Scheduler、relations/channel、pause/stop/resume 及跨平台宿主路径；缺失项按能力明确降级，不以此首片宣称完整 Rust 平台替代。
+## 权限、观察与验收
+
+API key、工具范围、路径/网络、原生 Session scope 与精确删除前置条件由 Host 强制执行。提示词、Plugin 说明、前端隐藏按钮和模型输出都不是授权。
+
+trace 展示 ACP 的原生文本/工具内容，按 `tool_call_id` 配对；媒体有独立可接受类型/解码边界。投影用于查看，恢复仍使用持久 Run/工具事实与 Goose 原生 Session。普通 assistant text 不冒充 canonical 完成摘要。
+
+浏览器验收使用实际 Rust Host、固定 Goose 与 Node 本地 Provider，检查 Graph CRUD、真实执行、暂停/停止/继续、历史、文件、Session 和必要提问。UI fixture 只证明展示；未配置而跳过、实际端到端与真实业务验收须分别记录。运行方法见 [小图回归](runtime-contract-tests.md)。

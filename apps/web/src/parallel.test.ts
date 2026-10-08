@@ -56,4 +56,19 @@ describe('same-run parallel authoring and observation', () => {
     expect(activeNodes({ ...state, active: undefined, cursor })).toEqual([cursor]);
     expect(activeNodes(null)).toEqual([]);
   });
+
+  it('projects native Rust branch cursors while leaving completed branches and join inactive', () => {
+    const native: OurRunState = { ...state, active: undefined, parallel: {
+      fanout_node: 'fanout', join_node: 'join', branches: [
+        { status: 'running', cursor: { node_id: 'branch-a', key: { invocation: 2 } } },
+        { status: 'running', cursor: { node_id: 'branch-b', key: { invocation: 2 } } },
+        { status: 'completed', cursor: null },
+      ],
+    } };
+    expect(activeNodes(native).map(cursor => cursor.node)).toEqual(['branch-a', 'branch-b']);
+    expect(toFlowNodes(region, 'parallel', native).filter(node => node.data.state === 'running').map(node => node.id))
+      .toEqual(['branch-a', 'branch-b']);
+    expect(toFlowEdges(region, native).filter(edge => edge.animated).map(edge => edge.target)).toEqual(['branch-a', 'branch-b']);
+    expect(activeNodes({ ...native, parallel: null })).toEqual([]);
+  });
 });

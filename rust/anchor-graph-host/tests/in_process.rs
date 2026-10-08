@@ -1,5 +1,5 @@
 use anchor_graph_host::{GraphCatalog, InProcessGraphHost};
-use anchor_runtime_rig::{Cancellation, graph::*};
+use anchor_runtime::{Cancellation, graph::*};
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
@@ -13,25 +13,46 @@ use std::{
 
 struct Catalog {
     snapshot: std::sync::Mutex<Option<GraphSnapshot>>,
+    graphs: std::sync::Mutex<BTreeMap<String, GraphSnapshot>>,
     child_metadata: std::sync::Mutex<BTreeMap<String, (String, String, CallIdentity, String)>>,
+    parents: std::sync::Mutex<BTreeMap<String, (String, Option<String>)>>,
 }
 
 impl Catalog {
     fn new(snapshot: GraphSnapshot) -> Self {
         Self {
             snapshot: std::sync::Mutex::new(Some(snapshot)),
+            graphs: std::sync::Mutex::new(BTreeMap::new()),
             child_metadata: std::sync::Mutex::new(BTreeMap::new()),
+            parents: std::sync::Mutex::new(BTreeMap::new()),
         }
     }
 }
 
 impl GraphCatalog for Catalog {
     fn snapshot(&self, name: &str) -> Result<Option<GraphSnapshot>, GraphError> {
-        Ok(if name == "child" {
-            self.snapshot.lock().unwrap().clone()
-        } else {
-            None
-        })
+        Ok(self.graphs.lock().unwrap().get(name).cloned().or_else(|| {
+            (name == "child")
+                .then(|| self.snapshot.lock().unwrap().clone())
+                .flatten()
+        }))
+    }
+    fn graph_ancestry(&self, run_id: &str) -> Result<Vec<String>, GraphError> {
+        let parents = self.parents.lock().unwrap();
+        let mut current = run_id;
+        let mut ancestry = Vec::new();
+        let mut seen = std::collections::BTreeSet::new();
+        while seen.insert(current.to_owned()) {
+            let Some((graph, parent)) = parents.get(current) else {
+                return Ok(vec!["parent".into()]);
+            };
+            ancestry.push(graph.clone());
+            match parent {
+                Some(parent) => current = parent,
+                None => return Ok(ancestry),
+            }
+        }
+        Err(GraphError::CorruptRun("cyclic test ancestry".into()))
     }
     fn record_child_admission(
         &self,
@@ -51,6 +72,18 @@ impl GraphCatalog for Catalog {
                 mode.to_owned(),
             ),
         );
+        let mut parents = self.parents.lock().unwrap();
+        let parent_graph = parents
+            .get(&identity.parent_run_id)
+            .map(|entry| entry.0.clone())
+            .unwrap_or_else(|| "parent".into());
+        parents.insert(
+            run_id.to_owned(),
+            (graph.to_owned(), Some(identity.parent_run_id.clone())),
+        );
+        parents
+            .entry(identity.parent_run_id.clone())
+            .or_insert((parent_graph, None));
         Ok(())
     }
     fn verify_child_identity(
@@ -172,7 +205,7 @@ impl NodeExecutionPort for BudgetOnceNodes {
     }
 }
 
-/// First invocation stops with an explicit io-harness recovery request; later
+/// First invocation stops with an explicit node recovery request; later
 /// invocations complete. The recovery attempt is bound to the exact child
 /// invocation, mirroring how a durable `WaitingRecovery` child reloads.
 struct RecoveryOnceNodes(Arc<AtomicUsize>);
@@ -326,6 +359,39 @@ fn parent_graph(call_spec: Value) -> GraphSnapshot {
         edges: vec![],
         module_rounds: BTreeMap::new(),
     }
+}
+
+fn graph_call_graph(objective: &str, target: &str, mode: &str) -> GraphSnapshot {
+    GraphSnapshot {
+        objective: objective.into(),
+        input: json!({}),
+        entry: "invoke".into(),
+        agents: BTreeMap::new(),
+        ops: BTreeMap::from([(
+            "invoke".into(),
+            json!({"call":{"graph":target,"mode":mode}}),
+        )]),
+        nodes: vec![GraphNode {
+            id: "invoke".into(),
+            agent: None,
+            op: Some("invoke".into()),
+            input: None,
+            plugins: vec![],
+            max_rounds: None,
+        }],
+        edges: vec![],
+        module_rounds: BTreeMap::new(),
+    }
+}
+
+fn nested_catalog(leaf: GraphSnapshot, middle: GraphSnapshot) -> Catalog {
+    let catalog = Catalog::new(leaf);
+    catalog
+        .graphs
+        .lock()
+        .unwrap()
+        .insert("middle".into(), middle);
+    catalog
 }
 
 #[tokio::test]
@@ -559,20 +625,258 @@ async fn detach_only_admits_child_without_dispatching_it() {
 async fn nested_graph_call_targets_are_rejected() {
     let dir = tempfile::tempdir().unwrap();
     let store = FileRunStore::new(dir.path());
-    let mut nested = child_graph();
-    nested.ops.insert(
-        "nested".into(),
-        json!({"call":{"graph":"child","mode":"detach"}}),
-    );
-    let catalog = Catalog::new(nested);
+    let nested = graph_call_graph("child", "child", "wait");
+    let catalog = Catalog::new(nested.clone());
     let count = Arc::new(AtomicUsize::new(0));
     let nodes = Nodes(count);
     let artifacts = Artifacts;
     let control = Control;
-    let parent = GraphRunRecord::create(parent_graph(spec("wait")), json!({})).unwrap();
+    let parent = GraphRunRecord::create(nested, json!({})).unwrap();
+    catalog
+        .parents
+        .lock()
+        .unwrap()
+        .insert(parent.run_id.clone(), ("child".into(), None));
     let host = InProcessGraphHost::new(&catalog, &store, &artifacts, &nodes, &control);
+    let result = GraphRunner::new(&store, &artifacts, &host, &control)
+        .run(parent)
+        .await;
     assert!(
-        matches!(GraphRunner::new(&store, &artifacts, &host, &control).run(parent).await, Err(GraphError::Unsupported(message)) if message.contains("nested Graph calls"))
+        matches!(result, Err(GraphError::InvalidSnapshot(ref message)) if message.contains("recursive Graph call")),
+        "unexpected result: {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn nested_call_to_non_direct_ancestor_is_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = FileRunStore::new(dir.path());
+    let catalog = Catalog::new(child_graph());
+    catalog
+        .graphs
+        .lock()
+        .unwrap()
+        .insert("A".into(), child_graph());
+    catalog
+        .graphs
+        .lock()
+        .unwrap()
+        .insert("B".into(), graph_call_graph("B", "A", "wait"));
+    let count = Arc::new(AtomicUsize::new(0));
+    let nodes = Nodes(count);
+    let artifacts = Artifacts;
+    let control = Control;
+    let parent =
+        GraphRunRecord::create(parent_graph(json!({"graph":"B","mode":"wait"})), json!({}))
+            .unwrap();
+    catalog
+        .parents
+        .lock()
+        .unwrap()
+        .insert(parent.run_id.clone(), ("A".into(), None));
+    let host = InProcessGraphHost::new(&catalog, &store, &artifacts, &nodes, &control);
+
+    let result = GraphRunner::new(&store, &artifacts, &host, &control)
+        .run(parent)
+        .await;
+    assert!(
+        matches!(result, Err(GraphError::Unsupported(ref message)) if message.contains("recursive Graph call")),
+        "unexpected result: {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn nested_wait_calls_execute_a_to_b_to_c() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = FileRunStore::new(dir.path());
+    let catalog = nested_catalog(child_graph(), graph_call_graph("middle", "child", "wait"));
+    let count = Arc::new(AtomicUsize::new(0));
+    let nodes = Nodes(count.clone());
+    let artifacts = Artifacts;
+    let control = Control;
+    let mut top = parent_graph(spec("wait"));
+    top.ops.insert(
+        "invoke".into(),
+        json!({"call":{"graph":"middle","mode":"wait"}}),
+    );
+    let parent = GraphRunRecord::create(top, json!({})).unwrap();
+    let parent_id = parent.run_id.clone();
+    let host = InProcessGraphHost::new(&catalog, &store, &artifacts, &nodes, &control);
+
+    let completed = GraphRunner::new(&store, &artifacts, &host, &control)
+        .run(parent)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        completed.status,
+        RunStatus::Completed,
+        "{:?}",
+        completed.error
+    );
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+    let middle_id = completed
+        .graph_calls
+        .values()
+        .next()
+        .unwrap()
+        .child_run_id
+        .clone()
+        .unwrap();
+    let middle = store.load(&middle_id).unwrap().unwrap();
+    assert_eq!(middle.status, RunStatus::Completed);
+    assert_eq!(middle.graph_calls.len(), 1);
+    let leaf_id = middle
+        .graph_calls
+        .values()
+        .next()
+        .unwrap()
+        .child_run_id
+        .clone()
+        .unwrap();
+    assert_eq!(
+        store.load(&leaf_id).unwrap().unwrap().status,
+        RunStatus::Completed
+    );
+    assert!(store.load(&parent_id).unwrap().is_some());
+}
+
+#[tokio::test]
+async fn nested_wait_call_reload_resumes_same_leaf_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = FileRunStore::new(dir.path());
+    let catalog = nested_catalog(child_graph(), graph_call_graph("middle", "child", "wait"));
+    let count = Arc::new(AtomicUsize::new(0));
+    let nodes = BudgetOnceNodes(count.clone());
+    let artifacts = Artifacts;
+    let control = Control;
+    let mut top = parent_graph(spec("wait"));
+    top.ops.insert(
+        "invoke".into(),
+        json!({"call":{"graph":"middle","mode":"wait"}}),
+    );
+    let parent = GraphRunRecord::create(top, json!({})).unwrap();
+    let parent_id = parent.run_id.clone();
+    let host = InProcessGraphHost::new(&catalog, &store, &artifacts, &nodes, &control);
+
+    let waiting = GraphRunner::new(&store, &artifacts, &host, &control)
+        .run(parent)
+        .await
+        .unwrap();
+    assert_eq!(waiting.status, RunStatus::WaitingCall);
+    let middle_id = waiting
+        .graph_calls
+        .values()
+        .next()
+        .unwrap()
+        .child_run_id
+        .clone()
+        .unwrap();
+    let middle = store.load(&middle_id).unwrap().unwrap();
+    assert_eq!(middle.status, RunStatus::WaitingCall);
+    let leaf_id = middle
+        .graph_calls
+        .values()
+        .next()
+        .unwrap()
+        .child_run_id
+        .clone()
+        .unwrap();
+    assert_eq!(
+        store.load(&leaf_id).unwrap().unwrap().status,
+        RunStatus::BudgetStopped
+    );
+
+    let reloaded_store = FileRunStore::new(dir.path());
+    let reloaded_parent = reloaded_store.load(&parent_id).unwrap().unwrap();
+    let resumed = GraphRunner::new(&reloaded_store, &artifacts, &host, &control)
+        .run(reloaded_parent)
+        .await
+        .unwrap();
+    assert_eq!(resumed.status, RunStatus::Completed, "{:?}", resumed.error);
+    assert_eq!(count.load(Ordering::SeqCst), 2);
+    let resumed_middle = reloaded_store.load(&middle_id).unwrap().unwrap();
+    assert_eq!(resumed_middle.status, RunStatus::Completed);
+    assert_eq!(
+        resumed_middle
+            .graph_calls
+            .values()
+            .next()
+            .unwrap()
+            .child_run_id
+            .as_deref(),
+        Some(leaf_id.as_str())
+    );
+    assert_eq!(
+        reloaded_store.load(&leaf_id).unwrap().unwrap().status,
+        RunStatus::Completed
+    );
+}
+
+#[tokio::test]
+async fn detached_nested_run_can_reload_and_continue_independently() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = FileRunStore::new(dir.path());
+    let catalog = nested_catalog(child_graph(), graph_call_graph("middle", "child", "wait"));
+    let count = Arc::new(AtomicUsize::new(0));
+    let nodes = Nodes(count.clone());
+    let artifacts = Artifacts;
+    let control = Control;
+    let mut top = parent_graph(spec("detach"));
+    top.ops.insert(
+        "invoke".into(),
+        json!({"call":{"graph":"middle","mode":"detach"}}),
+    );
+    let parent = GraphRunRecord::create(top, json!({})).unwrap();
+    let parent_id = parent.run_id.clone();
+    let host = InProcessGraphHost::new(&catalog, &store, &artifacts, &nodes, &control);
+    let detached_parent = GraphRunner::new(&store, &artifacts, &host, &control)
+        .run(parent)
+        .await
+        .unwrap();
+    assert_eq!(detached_parent.status, RunStatus::Completed);
+    let middle_id = detached_parent
+        .graph_calls
+        .values()
+        .next()
+        .unwrap()
+        .child_run_id
+        .clone()
+        .unwrap();
+    assert_eq!(
+        store.load(&middle_id).unwrap().unwrap().status,
+        RunStatus::Ready
+    );
+    assert_eq!(count.load(Ordering::SeqCst), 0);
+
+    let reloaded_store = FileRunStore::new(dir.path());
+    let detached_child = reloaded_store.load(&middle_id).unwrap().unwrap();
+    let completed_child = GraphRunner::new(&reloaded_store, &artifacts, &host, &control)
+        .run(detached_child)
+        .await
+        .unwrap();
+    assert_eq!(
+        completed_child.status,
+        RunStatus::Completed,
+        "{:?}",
+        completed_child.error
+    );
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+    let leaf_id = completed_child
+        .graph_calls
+        .values()
+        .next()
+        .unwrap()
+        .child_run_id
+        .clone()
+        .unwrap();
+    assert_eq!(
+        reloaded_store.load(&leaf_id).unwrap().unwrap().status,
+        RunStatus::Completed
+    );
+    assert_eq!(
+        reloaded_store.load(&parent_id).unwrap().unwrap().status,
+        RunStatus::Completed
     );
 }
 

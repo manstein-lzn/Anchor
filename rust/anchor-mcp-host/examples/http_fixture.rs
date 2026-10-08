@@ -13,7 +13,83 @@ use rmcp::{
     },
 };
 use serde_json::json;
-use std::{fs::OpenOptions, io::Write, path::PathBuf, sync::Arc};
+use std::{
+    fs::OpenOptions,
+    io::{BufRead, Write},
+    path::PathBuf,
+    sync::Arc,
+};
+
+fn stdio_fixture(arguments: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let mode = arguments
+        .first()
+        .map(String::as_str)
+        .ok_or("stdio fixture mode is required")?;
+    if !["inspect", "echo"].contains(&mode) {
+        return Err("unknown stdio fixture mode".into());
+    }
+    let prefix = arguments
+        .iter()
+        .position(|value| value == "--prefix")
+        .and_then(|position| arguments.get(position + 1))
+        .map(String::as_str)
+        .unwrap_or("");
+    let mut stdout = std::io::stdout().lock();
+    for line in std::io::stdin().lock().lines() {
+        let request: serde_json::Value = serde_json::from_str(&line?)?;
+        let Some(identity) = request.get("id") else {
+            continue;
+        };
+        let method = request["method"].as_str().ok_or("missing fixture method")?;
+        if mode == "echo" {
+            writeln!(
+                OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open("/workspace/mcp-log")?,
+                "{method}"
+            )?;
+        }
+        let result = match method {
+            "initialize" => {
+                json!({"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"stdio-fixture","version":"1"}})
+            }
+            "tools/list" if mode == "inspect" => {
+                json!({"tools":[{"name":"inspect","description":"Inspect only granted input","inputSchema":{"type":"object","properties":{}}}]})
+            }
+            "tools/list" => {
+                json!({"tools":[{"name":"echo","description":"Echo with installed dependency prefix","inputSchema":{"type":"object","properties":{"value":{"type":"string"}},"required":["value"]}}]})
+            }
+            "tools/call" => {
+                let text = if mode == "inspect" {
+                    let path = std::path::Path::new("/local-inputs/history/history.txt");
+                    let value = if path.is_file() {
+                        json!({"visible":true,"text":std::fs::read_to_string(path)?,"readonly":std::fs::write("/local-inputs/history/forbidden", "changed").is_err()})
+                    } else {
+                        json!({"visible":false})
+                    };
+                    value.to_string()
+                } else {
+                    format!(
+                        "{prefix}{}",
+                        request["params"]["arguments"]["value"]
+                            .as_str()
+                            .ok_or("fixture value must be a string")?
+                    )
+                };
+                json!({"content":[{"type":"text","text":text}]})
+            }
+            _ => json!({}),
+        };
+        writeln!(
+            stdout,
+            "{}",
+            json!({"jsonrpc":"2.0","id":identity,"result":result})
+        )?;
+        stdout.flush()?;
+    }
+    Ok(())
+}
 
 #[derive(Clone)]
 struct Fixture {
@@ -123,6 +199,9 @@ impl ServerHandler for Fixture {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
+    if args.get(1).is_some_and(|argument| argument == "--stdio") {
+        return stdio_fixture(&args[2..]);
+    }
     let fixture = Fixture {
         evidence: args
             .get(1)

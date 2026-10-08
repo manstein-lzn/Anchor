@@ -10,7 +10,7 @@ mod native_gateway;
 
 use anchor_graph_host::FilePluginCatalog;
 use anchor_graph_host::PluginCatalog;
-use anchor_runtime_rig::graph::InvocationKey;
+use anchor_runtime::graph::InvocationKey;
 use goose::{Host, Provider, Step, command, complete, tool_definition, tool_feedback};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};

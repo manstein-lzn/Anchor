@@ -1,4 +1,4 @@
-//! Compiler for editable Python-compatible `graph.json` definitions.
+//! Compiler for editable `graph.json` definitions into the Rust execution contract.
 //!
 //! The authoring document deliberately stays outside `GraphSnapshot`: editor
 //! metadata and graph modules are consumed here and only the flat executable
@@ -65,7 +65,7 @@ struct Expansion {
 }
 
 impl GraphSnapshot {
-    /// Compile an editable Python-compatible graph definition to the flat
+    /// Compile an editable graph definition to the flat
     /// Runtime snapshot. `layout` is editor state and is intentionally ignored.
     /// Unknown execution fields are errors instead of being silently dropped.
     pub fn from_authoring(value: Value) -> Result<Self, GraphError> {
@@ -1038,9 +1038,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn python_graph_conformance_fixtures_compile_to_their_expanded_snapshots() {
+    fn graph_conformance_fixtures_compile_to_their_expanded_snapshots() {
         let fixture: Value = serde_json::from_str(include_str!(
-            "../../../../tests/fixtures/graph-conformance/python-v1.json"
+            "../../tests/fixtures/authoring-conformance.json"
         ))
         .unwrap();
         for case in fixture["cases"].as_array().unwrap() {
@@ -1051,8 +1051,78 @@ mod tests {
                 .unwrap_or_else(|error| panic!("fixture {id:?} golden is invalid: {error}"));
             assert_eq!(
                 compiled, expected,
-                "Python expansion differs for fixture {id:?}"
+                "Authoring expansion differs for fixture {id:?}"
             );
+        }
+    }
+
+    #[test]
+    fn shipped_graph_examples_compile_without_runtime_or_external_services() {
+        let examples = [
+            (
+                "academic-gated",
+                include_str!("../../../../examples/graphs/academic-gated.json"),
+            ),
+            (
+                "academic-simple",
+                include_str!("../../../../examples/graphs/academic-simple.json"),
+            ),
+            (
+                "academic",
+                include_str!("../../../../examples/graphs/academic.json"),
+            ),
+            (
+                "call-report",
+                include_str!("../../../../examples/graphs/call-report.json"),
+            ),
+            (
+                "call-worker",
+                include_str!("../../../../examples/graphs/call-worker.json"),
+            ),
+            (
+                "deep-academic-research",
+                include_str!("../../../../examples/graphs/deep-academic-research.json"),
+            ),
+            (
+                "one-search",
+                include_str!("../../../../examples/graphs/one-search.json"),
+            ),
+            (
+                "parallel-audit",
+                include_str!("../../../../examples/graphs/parallel-audit.json"),
+            ),
+            (
+                "plugin-research",
+                include_str!("../../../../examples/graphs/plugin-research.json"),
+            ),
+            (
+                "revise-loop",
+                include_str!("../../../../examples/graphs/revise-loop.json"),
+            ),
+            ("rsi", include_str!("../../../../examples/graphs/rsi.json")),
+            (
+                "rust-rsi",
+                include_str!("../../../../examples/rust-rsi/graph.json"),
+            ),
+            (
+                "survey-modular",
+                include_str!("../../../../examples/graphs/survey-modular.json"),
+            ),
+            (
+                "wecom-assistant",
+                include_str!("../../../../examples/graphs/wecom-assistant.json"),
+            ),
+            (
+                "weekly-work-report",
+                include_str!("../../../../examples/graphs/weekly-work-report.json"),
+            ),
+        ];
+
+        for (name, source) in examples {
+            let authoring = serde_json::from_str(source)
+                .unwrap_or_else(|error| panic!("example {name:?} is invalid JSON: {error}"));
+            GraphSnapshot::from_authoring(authoring)
+                .unwrap_or_else(|error| panic!("example {name:?} does not compile: {error}"));
         }
     }
 

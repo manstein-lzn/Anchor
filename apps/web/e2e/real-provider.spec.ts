@@ -1,53 +1,39 @@
 import { expect, test } from '@playwright/test';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { createServer } from 'node:net';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { freePort, gooseEnvironment, nativeHost, repo, stop } from './fixtures/native-host';
 
 /** The real-provider, real-browser acceptance for continuing a Session after the process died.
  *
  * Opt in: `ANCHOR_REAL_PROVIDER=1 npx playwright test e2e/real-provider.spec.ts`.
- * It uses the checkout's own runtime config and secret, starts a real `anchor` server on an isolated
- * data root, and kills that process with SIGKILL while a reply is streaming. Nothing is mocked: the
- * model, the tools, the file record and the SSE stream are the ones the product runs.
+ * It uses explicitly exported model settings and pinned Goose, starts a native Rust Host on an
+ * isolated data root, and kills that process with SIGKILL while a reply is streaming.
  */
 
-const repo = fileURLToPath(new URL('../../../', import.meta.url));
-
-async function freePort() {
-  const server = createServer();
-  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
-  const address = server.address();
-  if (!address || typeof address === 'string') throw new Error('no test port');
-  await new Promise<void>(resolve => server.close(() => resolve()));
-  return address.port;
-}
-
-function startServer(root: string, config: string, port: number) {
-  return spawn(join(repo, '.venv/bin/python'), ['-m', 'anchor', '--root', root, '--config', config,
-    '--host', '127.0.0.1', '--port', String(port)], {
-    cwd: repo, stdio: 'ignore', env: { ...process.env, ANCHOR_API_KEYS: '', ANCHOR_API_KEY: '' },
-  });
-}
-
 test('a killed server is restarted and the same Session continues in the browser', async ({ page, request }) => {
-  test.skip(!process.env.ANCHOR_REAL_PROVIDER, 'set ANCHOR_REAL_PROVIDER=1 to run this acceptance');
+  test.skip(process.env.ANCHOR_REAL_PROVIDER !== '1', 'set ANCHOR_REAL_PROVIDER=1 to run this acceptance');
   test.setTimeout(300000);
   const root = await mkdtemp(join(tmpdir(), 'anchor-real-'));
   const apiPort = await freePort();
   const webPort = await freePort();
   const base = `http://127.0.0.1:${webPort}`;
   let server: ChildProcess | null = null;
+  let frontend: ChildProcess | undefined;
   const errors: string[] = [];
   page.on('pageerror', error => errors.push(error.message));
   try {
-    const config = join(root, 'runtime.json');
-    const runtime = await import('node:fs/promises').then(fs => fs.readFile(join(repo, '.local/runtime.json'), 'utf8'));
-    await writeFile(config, runtime);
-    server = startServer(root, config, apiPort);
-    spawn(join(repo, 'apps/web/node_modules/.bin/vite'), ['--host', '127.0.0.1', '--port', String(webPort)], {
+    const host = await nativeHost(root, { port: apiPort, environment: {
+      ...await gooseEnvironment(),
+      ANCHOR_MODEL_URL: process.env.ANCHOR_MODEL_URL,
+      ANCHOR_MODEL_API_KEY: process.env.ANCHOR_MODEL_API_KEY,
+      ANCHOR_MODEL_NAME: process.env.ANCHOR_MODEL_NAME,
+      ANCHOR_MODEL_WIRE_API: process.env.ANCHOR_MODEL_WIRE_API,
+      ANCHOR_MODEL_ALIASES: process.env.ANCHOR_MODEL_ALIASES,
+    } });
+    server = host.start();
+    frontend = spawn(join(repo, 'apps/web/node_modules/.bin/vite'), ['--host', '127.0.0.1', '--port', String(webPort), '--strictPort'], {
       cwd: join(repo, 'apps/web'), stdio: 'ignore',
       env: { ...process.env, ANCHOR_WEB_API_URL: `http://127.0.0.1:${apiPort}` },
     });
@@ -84,7 +70,7 @@ test('a killed server is restarted and the same Session continues in the browser
 
     // The browser survives the outage and says so, then the service comes back on the same root.
     await expect(page.getByText('服务未连接').first()).toBeVisible({ timeout: 30000 });
-    server = startServer(root, config, apiPort);
+    server = host.start();
     await expect(async () => {
       const response = await request.get(`${base}/sessions`);
       expect(response.ok()).toBeTruthy();
@@ -116,7 +102,7 @@ test('a killed server is restarted and the same Session continues in the browser
     await page.screenshot({ path: test.info().outputPath('real-provider-continued.png'), fullPage: true });
     console.log(`Real acceptance root: ${root}, session ${sessionId}`);
   } finally {
-    server?.kill('SIGKILL');
+    await stop(frontend); await stop(server);
     if (process.env.ANCHOR_REAL_PROVIDER_KEEP !== '1') await rm(root, { recursive: true, force: true });
     else console.log(`Kept evidence at ${root}`);
   }

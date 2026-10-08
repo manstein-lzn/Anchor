@@ -1,5 +1,5 @@
 use super::*;
-use anchor_runtime_rig::{Cancellation, graph::*};
+use anchor_runtime::{Cancellation, graph::*};
 use serde_json::json;
 use std::sync::{Arc, atomic::AtomicBool};
 

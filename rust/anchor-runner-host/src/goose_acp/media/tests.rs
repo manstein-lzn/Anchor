@@ -15,7 +15,6 @@ fn text_and_json_results_keep_the_existing_receipt_envelope() {
     );
 }
 
-#[cfg(not(feature = "legacy-regression"))]
 fn image() -> ToolResultContent {
     use base64::{Engine, engine::general_purpose::STANDARD};
     let mut bytes = std::io::Cursor::new(Vec::new());
@@ -25,7 +24,6 @@ fn image() -> ToolResultContent {
     ToolResultContent::image(STANDARD.encode(bytes.into_inner()), "image/png")
 }
 
-#[cfg(not(feature = "legacy-regression"))]
 #[test]
 fn image_payloads_are_native_mcp_blocks_and_anchor_facts_only_keep_a_digest() {
     let image = image();
@@ -63,7 +61,6 @@ fn image_payloads_are_native_mcp_blocks_and_anchor_facts_only_keep_a_digest() {
     assert!(!header.to_string().contains(data));
 }
 
-#[cfg(not(feature = "legacy-regression"))]
 #[test]
 fn malformed_or_overcount_images_do_not_leak_partial_content() {
     assert!(

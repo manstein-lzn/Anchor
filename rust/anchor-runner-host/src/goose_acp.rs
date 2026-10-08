@@ -16,7 +16,7 @@ use crate::{
     node_host::{HostIoResolver, NodeHostResolver},
     write_durable,
 };
-use anchor_runtime_rig::{
+use anchor_runtime::{
     Cancellation,
     graph::{
         CompletionFact, GraphError, InvocationKey, NodeCompletion, NodeExecutionOutcome,
@@ -105,14 +105,7 @@ impl Drop for CancelTools {
 }
 
 pub(crate) fn runtime_mode() -> String {
-    env::var("ANCHOR_RUNNER_AGENT_RUNTIME").unwrap_or_else(|_| {
-        if cfg!(feature = "legacy-regression") {
-            "io-harness"
-        } else {
-            "goose"
-        }
-        .into()
-    })
+    env::var("ANCHOR_RUNNER_AGENT_RUNTIME").unwrap_or_else(|_| "goose".into())
 }
 
 fn file_sha256(path: &Path) -> Result<String, String> {
@@ -177,15 +170,6 @@ impl GooseNodePort {
         sandbox: Arc<BubblewrapSandbox>,
     ) -> Result<Option<Self>, String> {
         let mode = runtime_mode();
-        if mode == "io-harness" {
-            if !cfg!(feature = "legacy-regression") {
-                return Err("io-harness is not included in the Goose-only Host".into());
-            }
-            if state.join("goose-acp-spike").exists() || state.join("goose-acp").exists() {
-                return Err("Goose spike state cannot silently switch back to io-harness".into());
-            }
-            return Ok(None);
-        }
         if !matches!(mode.as_str(), "goose-acp-spike" | "goose") {
             return Err(format!("unknown Agent runtime `{mode}`"));
         }

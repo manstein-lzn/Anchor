@@ -1,6 +1,6 @@
 //! Host-owned, immutable file snapshots behind the shared ArtifactPort.
 
-use anchor_runtime_rig::{
+use anchor_runtime::{
     ReadOnlyInput,
     graph::{
         ArtifactFreezeContext, ArtifactKind, ArtifactPort, CallFileSelection, CommitRef,

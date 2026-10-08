@@ -120,8 +120,7 @@ export function Timeline({ data, graphs, graphColors: sharedGraphColors, page, o
   const plans = (data?.scheduled ?? []).filter(plan => !plan.run && (!graphFilter || plan.graph === graphFilter));
   const entries: Entry[] = [
     ...runs.map(run => ({ id: run.run, graph: run.graph, start: +new Date(run.started),
-      // Rust-native Run currently has no durable finish timestamp. Keep it visible at its known
-      // start time without inventing a duration; Python-backed Runs retain their measured span.
+      // Use a recorded finish timestamp when present; otherwise keep the known start time.
       end: run.running ? now : hasRunEnd(run) ? +new Date(run.updated) : +new Date(run.started), status: runStatus(run),
       source: run.trigger?.source ?? 'manual', run })),
     ...plans.map(plan => ({ id: `${plan.schedule}-${plan.scheduled_at}`, graph: plan.graph,

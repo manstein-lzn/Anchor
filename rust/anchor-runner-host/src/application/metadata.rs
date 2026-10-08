@@ -45,7 +45,7 @@ impl RunTrigger {
                     .scheduled_at
                     .as_deref()
                     .ok_or_else(|| "schedule trigger requires scheduled_at".to_owned())?;
-                // The Python scheduler uses local ISO timestamps without an offset.
+                // Stored schedules use local ISO timestamps without an offset.
                 if chrono::DateTime::parse_from_rfc3339(scheduled_at).is_err()
                     && chrono::NaiveDateTime::parse_from_str(scheduled_at, "%Y-%m-%dT%H:%M:%S%.f")
                         .is_err()
@@ -78,6 +78,8 @@ pub(crate) struct RunMetadata {
     pub(crate) bundle_source: PathBuf,
     pub(crate) created: String,
     pub(crate) trigger_source: String,
+    #[serde(default)]
+    pub(crate) oauth_owner: Option<String>,
     #[serde(default)]
     pub(crate) graph_call: Option<GraphCallSource>,
     #[serde(default)]
@@ -155,6 +157,7 @@ impl RunMetadata {
             bundle_source: source.canonicalize().map_err(storage)?,
             created: chrono::DateTime::<chrono::Utc>::from(SystemTime::now()).to_rfc3339(),
             trigger_source: "manual".into(),
+            oauth_owner: None,
             graph_call: None,
             conversation: None,
             channel: None,
@@ -242,15 +245,18 @@ pub(crate) fn save_child_once(
     graph_digest: String,
     source: &Path,
     call: GraphCallSource,
+    oauth_owner: Option<String>,
 ) -> Result<(), ApplicationError> {
-    let expected =
+    let mut expected =
         RunMetadata::graph_call_child(run_id.clone(), graph, graph_digest, source, call)?;
+    expected.oauth_owner = oauth_owner;
     if let Some(existing) = load(root, &run_id)? {
         if existing.graph != expected.graph
             || existing.graph_digest != expected.graph_digest
             || existing.bundle_source != expected.bundle_source
             || existing.trigger_source != "graph_call"
             || existing.graph_call != expected.graph_call
+            || existing.oauth_owner != expected.oauth_owner
         {
             return Err(ApplicationError::Conflict(
                 "child Run identity metadata conflicts with its durable admission".into(),

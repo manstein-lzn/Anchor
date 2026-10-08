@@ -1,13 +1,9 @@
 //! Trusted cross-Run inputs. Framework Session owns dialogue; this adapter
 //! exposes only same-node predecessor files and the existing native trace.
 use super::*;
-use anchor_runtime_rig::{ReadOnlyInput, ToolError, ToolPort, graph::RunStatus};
-#[cfg(not(feature = "legacy-regression"))]
-use anchor_runtime_rig::{ToolDefinition, ToolName, ToolResultContent};
-#[cfg(feature = "legacy-regression")]
-use rig_agent::core::{
-    completion::ToolDefinition,
-    message::{ToolName, ToolResultContent},
+use anchor_runtime::{
+    ReadOnlyInput, ToolDefinition, ToolError, ToolName, ToolPort, ToolResultContent,
+    graph::RunStatus,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -262,7 +258,7 @@ impl ToolPort for HistoryTools {
 mod tests {
     use super::*;
     use crate::application::{ConversationSource, RunMetadata, metadata};
-    use anchor_runtime_rig::graph::GraphSnapshot;
+    use anchor_runtime::graph::GraphSnapshot;
     use anchor_sandbox_bwrap::BubblewrapPolicy;
 
     fn resolver(root: &Path) -> HostIoResolver {

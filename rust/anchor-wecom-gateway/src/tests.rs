@@ -76,6 +76,39 @@ fn media_is_rejected_instead_of_extracting_only_its_text() {
 }
 
 #[test]
+fn official_media_urls_and_inline_byte_shapes_are_rejected() {
+    let url = "https://media.example.invalid/signed-ciphertext-url";
+    for kind in ["image", "file"] {
+        let mut frame = callback();
+        frame["body"]["msgtype"] = json!(kind);
+        frame["body"].as_object_mut().unwrap().remove("text");
+        frame["body"][kind] = json!({"url":url});
+        assert_eq!(
+            normalize_message(&frame),
+            Err(GatewayError::UnsupportedMedia)
+        );
+    }
+
+    let mut mixed = callback();
+    mixed["body"]["msgtype"] = json!("mixed");
+    mixed["body"].as_object_mut().unwrap().remove("text");
+    mixed["body"]["mixed"] = json!({"msg_item":[
+        {"msgtype":"text","text":{"content":"caption"}},
+        {"msgtype":"image","image":{"url":url}}
+    ]});
+    assert_eq!(
+        normalize_message(&mixed),
+        Err(GatewayError::UnsupportedMedia)
+    );
+
+    mixed["body"]["mixed"]["msg_item"][1]["image"] = json!({"data_base64":"aGVsbG8="});
+    assert_eq!(
+        normalize_message(&mixed),
+        Err(GatewayError::UnsupportedMedia)
+    );
+}
+
+#[test]
 fn callback_identity_types_controls_and_size_are_validated() {
     let original = callback();
     for path in ["/headers/req_id", "/body/msgid", "/body/from/userid"] {
@@ -93,6 +126,13 @@ fn callback_identity_types_controls_and_size_are_validated() {
     frame["body"]["text"]["content"] = json!("hello");
     frame["body"]["chattype"] = json!(1);
     assert!(normalize_message(&frame).is_err());
+    frame["body"]["chattype"] = json!("group");
+    assert_eq!(
+        normalize_message(&frame),
+        Err(GatewayError::Invalid(
+            "only private WeCom callbacks are supported"
+        ))
+    );
 }
 
 #[test]

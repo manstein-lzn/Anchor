@@ -173,7 +173,7 @@ fn assert_scope(host: &Host, run: &str, node: &str) -> (Value, PathBuf) {
 
 fn fact_path(host: &Host, run: &str, node: &str) -> PathBuf {
     let record = host.record(run);
-    let key = anchor_runtime_rig::graph::InvocationKey {
+    let key = anchor_runtime::graph::InvocationKey {
         run_id: run.into(),
         graph_digest: record["graph_digest"].as_str().unwrap().into(),
         node_id: node.into(),
@@ -825,7 +825,7 @@ fn graph_delete_cleans_all_conversation_scopes_and_keeps_another_graph() {
 }
 
 fn fact_path_for_request(host: &Host, request: &Value, previous_fact: &Value) -> PathBuf {
-    let key = anchor_runtime_rig::graph::InvocationKey {
+    let key = anchor_runtime::graph::InvocationKey {
         run_id: request["run"].as_str().unwrap().into(),
         graph_digest: previous_fact["key"]["graph_digest"]
             .as_str()

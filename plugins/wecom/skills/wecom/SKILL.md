@@ -33,6 +33,6 @@ description: 企业微信机器人私聊、主动通知、附件分析和图文�
 - `wecom_send_text` / `wecom_send_markdown`：以自建应用身份给成员、部门或标签发送消息。
 - `wecom_get_user`：按 userid 查询成员资料。
 
-应用发送需提供 `touser`、`toparty`、`totag` 至少一项；网络工具需节点 `network=true`。`bridge.py` 是旧应用 HTTP 回调入口，不由 MCP 启动。审批、借款、报销 API、个人账号私聊接管、语音、欢迎语及卡片事件尚未接入。
+应用发送需提供 `touser`、`toparty`、`totag` 至少一项；网络工具需节点 `network=true`。应用 API 工具与智能机器人通道分别使用原生二进制。审批、借款、报销 API、个人账号私聊接管、语音、欢迎语及卡片事件尚未接入。
 
 操作员配置：`ANCHOR_WECOM_GRAPH`、`ANCHOR_WECOM_REPLY_NODE`、`ANCHOR_WECOM_USERS`、可选 `ANCHOR_WECOM_SEND_USERS`；内部 `ANCHOR_API_KEY` 对应服务白名单 `ANCHOR_API_KEYS` 的至少 32 字节密钥。网关状态目录、回调地址和控制 socket 由 Anchor 设置；不要同时手动启动第二个 Bot 网关。完整接入和验收见仓库 `docs/wecom-assistant.md`。

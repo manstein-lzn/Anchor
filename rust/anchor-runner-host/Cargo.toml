@@ -5,17 +5,6 @@ edition = "2024"
 license = "MIT"
 description = "Rust-native Graph host with Sandbox, immutable files and paired parallelism"
 
-[features]
-default = []
-legacy-regression = [
-    "dep:anchor-io-harness-runtime",
-    "dep:rig-agent",
-    "dep:rig-core",
-    "dep:io-harness",
-    "anchor-runtime-rig/rig-legacy",
-    "anchor-mcp-host/rig-legacy",
-]
-
 [dependencies]
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 futures-util = "0.3"
@@ -23,28 +12,26 @@ tokio-util = { version = "0.7", features = ["io"] }
 sha2 = { workspace = true }
 base64 = "0.22"
 md-5 = "0.10"
-rustix = { version = "1", features = ["fs"] }
+rustix = { version = "1", features = ["fs", "process"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 mime = "0.3"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+ipnet = "=2.12.2"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 shlex = "1"
 axum = { version = "0.8", features = ["json"] }
-anchor-runtime-rig = { path = "../anchor-runtime", default-features = false }
-anchor-io-harness-runtime = { path = "../anchor-io-harness-runtime", optional = true }
+anchor-runtime = { path = "../anchor-runtime" }
 anchor-graph-host = { path = "../anchor-graph-host" }
 anchor-library = { path = "../anchor-library" }
 anchor-mcp-host = { path = "../anchor-mcp-host" }
 anchor-sandbox-bwrap = { path = "../anchor-sandbox-bwrap" }
 anchor-platform-session = { path = "../anchor-platform-session" }
-rig-agent = { version = "=0.43.0", default-features = false, optional = true }
-rig-core = { workspace = true, features = ["test-utils"], optional = true }
-io-harness = { version = "=0.86.0", features = ["media"], optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 agent-client-protocol-schema = { version = "=1.9.1", default-features = false }
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-std", "io-util", "net", "sync", "fs", "time"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-std", "io-util", "net", "sync", "fs", "time", "signal", "process"] }
 tower-http = { version = "0.6", features = ["fs", "limit"] }
 rmcp = { workspace = true, features = ["server", "transport-streamable-http-server", "elicitation"] }
+url = "=2.5.8"
 
 [dev-dependencies]
 tempfile = "3"
@@ -59,11 +46,3 @@ png = "0.18"
 [[bin]]
 name = "anchor-runner-host"
 path = "src/main.rs"
-
-[[test]]
-name = "runtime_contract"
-required-features = ["legacy-regression"]
-
-[[test]]
-name = "model_registry"
-required-features = ["legacy-regression"]

@@ -27,6 +27,9 @@ fn host(root: &Path) -> Command {
 }
 
 fn prepare(root: &Path, command: &str) {
+    fs::create_dir_all(root.join("state")).unwrap();
+    fs::create_dir_all(root.join("work")).unwrap();
+    fs::create_dir_all(root.join("catalog")).unwrap();
     fs::create_dir_all(root.join("bundle")).unwrap();
     fs::write(
         root.join("bundle/graph.json"),

@@ -2,8 +2,7 @@
 
 The binary defaults to an rmcp 2.2 stdio MCP server. It preserves the
 `upload_page_image` name, description, input schema, multipart field order, and
-attachment JSON of `plugins/docmost/upload_server.py`. The original plugin is
-not modified.
+attachment JSON declared by the official Docmost Plugin.
 
 ## Deployment
 
@@ -45,7 +44,7 @@ partial destination presented as a completed plugin. The only files are
 `plugin.json`, the byte-identical `skills/docmost/SKILL.md`, and
 `bin/anchor-docmost-tools` copied from `current_exe`. The remote Docmost MCP URL,
 API-key environment references, and all other manifest fields are retained;
-only the attachments command/args/cwd change. No Python source, dotenv file,
+only the attachments command/args/cwd change. No source, dotenv file,
 or environment credentials are copied.
 
 ## Library and fixtures
@@ -57,15 +56,12 @@ trusted library callers and local fixtures. These are not tool arguments and do
 not expand stdio's fixed input-root authorization. `AttachmentServer` implements
 rmcp's `ServerHandler`; main uses `ServiceExt` and the native stdio transport.
 
-From the worktree root, after the integration owner updates the shared workspace
-lockfile:
+From the repository root:
 
 ```sh
-export CARGO_TARGET_DIR=/tmp/anchor-rust-platform-HEW1JK/target-docmost
-export CARGO_BUILD_JOBS=2
 cargo +stable test --manifest-path rust/Cargo.toml -p anchor-docmost-tools --all-targets --locked --offline -- --test-threads=2
 cargo +stable clippy --manifest-path rust/Cargo.toml -p anchor-docmost-tools --all-targets --locked --offline -- -D warnings
-cargo +1.92.0 fmt --manifest-path rust/Cargo.toml -p anchor-docmost-tools -- --check
+cargo +stable fmt --manifest-path rust/Cargo.toml -p anchor-docmost-tools -- --check
 ```
 
 For package-only regression, use `test --lib --test package` instead of

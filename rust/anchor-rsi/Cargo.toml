@@ -10,6 +10,7 @@ axum = "0.8"
 chrono = { version = "0.4", features = ["serde"] }
 regex = "1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+roxmltree = "=0.20.0"
 rmcp = { version = "=2.2.0", default-features = false, features = ["server", "transport-streamable-http-server"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

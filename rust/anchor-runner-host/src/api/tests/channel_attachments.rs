@@ -1,5 +1,5 @@
 use super::*;
-use anchor_runtime_rig::graph::InvocationKey;
+use anchor_runtime::graph::InvocationKey;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use image::{DynamicImage, ImageFormat};
 use std::{io::Cursor, time::Duration};
@@ -324,7 +324,7 @@ async fn published_inputs_reuse_original_bytes_and_incomplete_metadata_stays_clo
         let bundle = FileGraphBundleLoader::new(&state.bundle_root)
             .load()
             .unwrap();
-        let record = anchor_runtime_rig::graph::GraphRunRecord::create_with_id(
+        let record = anchor_runtime::graph::GraphRunRecord::create_with_id(
             bundle.snapshot,
             original["input"].clone(),
             run,

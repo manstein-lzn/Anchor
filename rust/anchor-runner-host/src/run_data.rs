@@ -7,7 +7,7 @@
 //! tolerant of already-missing files: a partial delete can always be replayed
 //! from the record.
 
-use anchor_runtime_rig::graph::{GraphRunRecord, InvocationKey};
+use anchor_runtime::graph::{GraphRunRecord, InvocationKey};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
@@ -40,7 +40,6 @@ fn remove_directory_if_exists(path: &Path) -> Result<(), String> {
     }
 }
 
-#[cfg(not(feature = "legacy-regression"))]
 pub(crate) fn legacy_invocation_exists(
     data_root: &Path,
     key: &InvocationKey,
@@ -336,7 +335,7 @@ pub(crate) fn remove_run_files(data_root: &Path, run_id: &str) -> Result<(), Str
 #[cfg(test)]
 mod tests {
     use super::*;
-    use anchor_runtime_rig::graph::GraphSnapshot;
+    use anchor_runtime::graph::GraphSnapshot;
     use serde_json::json;
 
     fn record(run_id: &str) -> GraphRunRecord {
@@ -498,7 +497,6 @@ mod tests {
         assert_eq!(std::fs::read(history).unwrap(), b"preserve");
     }
 
-    #[cfg(not(feature = "legacy-regression"))]
     #[test]
     fn legacy_detection_includes_unfinished_sidecars_and_never_goose_facts() {
         let root = tempfile::tempdir().unwrap();

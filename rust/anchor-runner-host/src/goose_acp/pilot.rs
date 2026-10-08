@@ -4,7 +4,7 @@ use super::{
 };
 use crate::pilot_tools::PilotTools;
 use anchor_platform_session::{GooseExecution, SessionStore, TurnStatus};
-use anchor_runtime_rig::{Cancellation, ToolDefinition, ToolError, ToolPort, ToolResultContent};
+use anchor_runtime::{Cancellation, ToolDefinition, ToolError, ToolPort, ToolResultContent};
 use anchor_sandbox_bwrap::{BubblewrapPolicy, BubblewrapSandbox};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};

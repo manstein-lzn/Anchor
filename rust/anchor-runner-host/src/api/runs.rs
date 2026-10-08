@@ -153,6 +153,7 @@ pub(super) async fn conversation_run(
     let attachments = crate::channel_inputs::prepare(&request.attachments)
         .map_err(|message| error(StatusCode::BAD_REQUEST, message))?;
     let channel = resolve_channel_source(&state, &headers, &request, &attachments).await?;
+    let oauth_owner = super::oauth::binding_owner(&private_owner(&state, &headers));
     let path = graph_path(&state, &request.graph)?;
     let graph = request.graph.clone();
     let session = request.session.clone();
@@ -172,7 +173,15 @@ pub(super) async fn conversation_run(
         let (path, bundle) = load_graph_definition(&state, &graph)?;
         let admitted = state
             .application
-            .admit_conversation(request, &path, bundle, lease, &attachments, channel.clone())
+            .admit_conversation(
+                request,
+                &path,
+                bundle,
+                lease,
+                &attachments,
+                channel.clone(),
+                oauth_owner,
+            )
             .await;
         match admitted {
             Ok(run) => run,
@@ -208,7 +217,17 @@ pub(super) async fn conversation_run(
 
 pub(super) async fn trigger(
     State(state): State<ApiState>,
+    headers: HeaderMap,
     Json(body): Json<Value>,
+) -> Result<(StatusCode, Json<Value>), HttpResponse> {
+    let owner = super::oauth::binding_owner(&private_owner(&state, &headers));
+    trigger_as_owner(state, body, owner).await
+}
+
+pub(super) async fn trigger_as_owner(
+    state: ApiState,
+    body: Value,
+    oauth_owner: String,
 ) -> Result<(StatusCode, Json<Value>), HttpResponse> {
     let requested = body
         .get("graph")
@@ -248,6 +267,7 @@ pub(super) async fn trigger(
                 objective,
                 trigger,
                 pilot: None,
+                oauth_owner: Some(oauth_owner),
             },
             graph_lease,
         )
@@ -361,6 +381,27 @@ pub(super) async fn get_run(
             );
         }
     }
+    let plugins = record
+        .snapshot
+        .nodes
+        .iter()
+        .map(|node| {
+            let bindings = node
+                .plugins
+                .iter()
+                .filter_map(|id| record.plugin_bindings.get(id))
+                .map(|binding| {
+                    json!({
+                        "id":binding.id,
+                        "name":binding.id,
+                        "description":"",
+                        "digest":binding.digest
+                    })
+                })
+                .collect::<Vec<_>>();
+            (node.id.clone(), json!(bindings))
+        })
+        .collect::<serde_json::Map<_, _>>();
     let decided = record
         .decided
         .iter()
@@ -498,7 +539,7 @@ pub(super) async fn get_run(
             .try_exists()
             .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(Json(
-        json!({"session_call":metadata.session_call,"channel_reply":channel_reply,"graph":metadata.graph,"run":id,"attachments":metadata.attachments,"state":{"objective":record.snapshot.objective,"started":metadata.created,"updated":updated,"status":status(record.status),"trigger":trigger,"input":record.input,"cursor":cursor,"passes":record.passes,"decided":decided,"nodes":nodes,"executed":executed,"skipped":[],"error":record.error.unwrap_or_default(),"parallel":record.parallel,"recovery":record.recovery},"calls":calls,"traces":traces,"nodes":record.snapshot.nodes.iter().map(|node|node.id.clone()).collect::<Vec<_>>(),"active":active.contains(&id),"control_requested":control_requested}),
+        json!({"session_call":metadata.session_call,"channel_reply":channel_reply,"graph":metadata.graph,"run":id,"attachments":metadata.attachments,"plugins":plugins,"state":{"objective":record.snapshot.objective,"started":metadata.created,"updated":updated,"status":status(record.status),"trigger":trigger,"input":record.input,"cursor":cursor,"passes":record.passes,"decided":decided,"nodes":nodes,"executed":executed,"skipped":[],"error":record.error.unwrap_or_default(),"parallel":record.parallel,"recovery":record.recovery},"calls":calls,"traces":traces,"nodes":record.snapshot.nodes.iter().map(|node|node.id.clone()).collect::<Vec<_>>(),"active":active.contains(&id),"control_requested":control_requested}),
     ))
 }
 
@@ -540,7 +581,7 @@ pub(super) async fn recover_run(
     Json(body): Json<RecoveryBody>,
 ) -> Result<(StatusCode, Json<Value>), HttpResponse> {
     let decision = match body.decision.as_str() {
-        "retry" if body.observation.is_none() => anchor_runtime_rig::graph::RecoveryDecision::Retry,
+        "retry" if body.observation.is_none() => anchor_runtime::graph::RecoveryDecision::Retry,
         "completed"
             if body
                 .observation
@@ -548,9 +589,9 @@ pub(super) async fn recover_run(
                 .is_some_and(|value| !value.trim().is_empty()) =>
         {
             let observation = body.observation.expect("validated observation");
-            anchor_runtime_rig::graph::RecoveryDecision::Completed { observation }
+            anchor_runtime::graph::RecoveryDecision::Completed { observation }
         }
-        "abort" if body.observation.is_none() => anchor_runtime_rig::graph::RecoveryDecision::Abort,
+        "abort" if body.observation.is_none() => anchor_runtime::graph::RecoveryDecision::Abort,
         "retry" | "completed" | "abort" => {
             return Err(error(
                 StatusCode::BAD_REQUEST,

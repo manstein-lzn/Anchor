@@ -173,7 +173,7 @@ async fn revisit_preserves_own_files_but_not_pending_work_and_restart_keeps_edit
 }
 
 #[tokio::test]
-async fn git_head_is_pinned_and_changed_draft_rejects_existing_weekly_review() {
+async fn git_head_is_pinned_and_changes_with_the_draft() {
     let (_temp, artifacts) = fixture();
     let first = key("write");
     let workspace = artifacts.prepare_workspace(&first, &[]).unwrap();
@@ -233,26 +233,6 @@ async fn git_head_is_pinned_and_changed_draft_rejects_existing_weekly_review() {
         .unwrap()
         .remove(0);
     assert_eq!(git(&rebuilt.source, &["rev-parse", "HEAD"]), original_head);
-
-    // Exercise the existing business validator unchanged, using real host Git
-    // identities. Python is only a test dependency for this legacy script.
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap();
-    let script = "import importlib.util, sys\nspec = importlib.util.spec_from_file_location('review_gate', sys.argv[1])\ngate = importlib.util.module_from_spec(spec)\nspec.loader.exec_module(gate)\nreview = {'decision':'publish', 'reviewed_commit':sys.argv[2], 'summary':'Approved', 'checks':dict.fromkeys(['facts','business','reasoning','writing'], True), 'issues':[]}\nassert gate.validate(review, {}, sys.argv[2]) == 'publish'\ntry:\n gate.validate(review, {}, sys.argv[3])\nexcept ValueError as error:\n assert 'current manuscript commit' in str(error)\nelse:\n raise AssertionError('stale review accepted')\n";
-    let output = Command::new("python3")
-        .args(["-c", script])
-        .arg(root.join("scripts/weekly_work_report/review_gate.py"))
-        .args([&original_head, &revised_head])
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
 }
 
 #[tokio::test]

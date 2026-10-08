@@ -99,7 +99,6 @@ async fn real_stdio_initializes_lists_original_schema_and_uploads_fixed_root() {
         serde_json::to_value(&tools[0]).expect("tool JSON"),
         serde_json::to_value(attachment_tool()).expect("original tool")
     );
-    let original = include_str!("../../../plugins/docmost/upload_server.py");
     let expected = json!({
         "name": "upload_page_image",
         "description": "Upload a report image from /in/publish/assets to a Docmost page and return its Markdown URL. Set attachmentId to replace an existing image on that page.",
@@ -113,7 +112,6 @@ async fn real_stdio_initializes_lists_original_schema_and_uploads_fixed_root() {
             "required": ["path", "pageId"]
         }
     });
-    assert!(original.contains(expected["description"].as_str().expect("description")));
     assert_eq!(
         serde_json::to_value(&tools[0]).expect("tool JSON"),
         expected

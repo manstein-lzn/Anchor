@@ -1,4 +1,4 @@
-use anchor_runtime_rig::{ToolError, graph::InvocationKey};
+use anchor_runtime::{ToolError, graph::InvocationKey};
 use sha2::{Digest, Sha256};
 use std::future::Future;
 

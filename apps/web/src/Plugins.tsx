@@ -29,6 +29,7 @@ export function Plugins({ selected, onChange, disabled = false, recorded }:
   const [installSource, setInstallSource] = useState('');
   const [installing, setInstalling] = useState(false);
   const [authorizing, setAuthorizing] = useState('');
+  const [oauthStatuses, setOauthStatuses] = useState<Record<string, boolean>>({});
   useEffect(() => {
     if (recorded !== undefined) return;
     if (catalogCache) return;
@@ -41,6 +42,33 @@ export function Plugins({ selected, onChange, disabled = false, recorded }:
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
   }, [recorded, revision]);
+  useEffect(() => {
+    if (recorded !== undefined || catalog.length === 0) return;
+    let active = true;
+    const refreshStatuses = async () => {
+      const statuses = await Promise.all(catalog.flatMap(plugin =>
+        Object.entries(plugin.mcpServers ?? {})
+          .filter(([, server]) => server.auth === 'oauth')
+          .map(async ([name]) => {
+            const key = `${plugin.id}/${name}`;
+            try {
+              const status = await api<{ authorized: boolean; expired?: boolean }>(
+                `/plugins/${encodeURIComponent(plugin.id)}/oauth/${encodeURIComponent(name)}`);
+              return [key, status.authorized && !status.expired] as const;
+            } catch {
+              return [key, false] as const;
+            }
+          })));
+      if (active) setOauthStatuses(Object.fromEntries(statuses));
+    };
+    const onFocus = () => { void refreshStatuses(); };
+    void refreshStatuses();
+    window.addEventListener('focus', onFocus);
+    return () => {
+      active = false;
+      window.removeEventListener('focus', onFocus);
+    };
+  }, [catalog, recorded]);
   const items: Plugin[] = recorded ?? [...catalog, ...(selected ?? []).filter(id => !catalog.some(p => p.id === id))
     .map(id => ({ id, name: id, description: '', available: false, error: 'Plugin 未在库中找到' }))];
   const selectedIds = new Set(selected ?? []);
@@ -119,12 +147,36 @@ export function Plugins({ selected, onChange, disabled = false, recorded }:
         <div className="plugin-row-actions">
           {!!plugin.skills?.length && <span className="plugin-tool-count">{plugin.skills.length} Skills</span>}
           {recorded === undefined && Object.entries(plugin.mcpServers ?? {}).filter(([, server]) => server.auth === 'oauth')
-            .map(([name]) => <button key={name} type="button" disabled={!!authorizing}
+            .map(([name]) => <span className="plugin-oauth-actions" key={name}>
+              <button type="button" disabled={!!authorizing}
               onClick={async () => {
                 setAuthorizing(`${plugin.id}/${name}`); setError('');
-                try { await api(`/plugins/${encodeURIComponent(plugin.id)}/authorize/${encodeURIComponent(name)}`, 'POST'); }
-                catch (e) { setError(reason(e)); } finally { setAuthorizing(''); }
-              }}>{authorizing === `${plugin.id}/${name}` ? '等待授权…' : `授权 ${name}`}</button>)}
+                const popup = window.open('about:blank', '_blank');
+                try {
+                  const result = await api<{ authorization_url: string }>(
+                    `/plugins/${encodeURIComponent(plugin.id)}/authorize/${encodeURIComponent(name)}`, 'POST');
+                  if (popup) {
+                    popup.opener = null;
+                    popup.location.assign(result.authorization_url);
+                  }
+                  else window.location.assign(result.authorization_url);
+                } catch (e) {
+                  popup?.close();
+                  setError(reason(e));
+                } finally { setAuthorizing(''); }
+              }}>{authorizing === `${plugin.id}/${name}` ? '等待授权…'
+                : `${oauthStatuses[`${plugin.id}/${name}`] ? '重新授权' : '授权'} ${name}`}</button>
+              {oauthStatuses[`${plugin.id}/${name}`] && <button type="button" disabled={!!authorizing}
+                onClick={async () => {
+                  const key = `${plugin.id}/${name}`;
+                  setAuthorizing(key); setError('');
+                  try {
+                    await api(`/plugins/${encodeURIComponent(plugin.id)}/oauth/${encodeURIComponent(name)}`, 'DELETE');
+                    setOauthStatuses(current => ({ ...current, [key]: false }));
+                  } catch (e) { setError(reason(e)); }
+                  finally { setAuthorizing(''); }
+                }}>撤销 {name}</button>}
+            </span>)}
           {recorded === undefined && plugin.available !== false
             && <button type="button" onClick={() => void read(plugin.id)}>查看说明</button>}
         </div>

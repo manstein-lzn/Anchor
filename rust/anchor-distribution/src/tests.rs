@@ -27,6 +27,10 @@ impl Fixture {
             bundle,
             web: None,
             tools: Vec::new(),
+            scholarly: None,
+            docmost_tools: None,
+            wecom_tools: None,
+            wecom_gateway: None,
             output: root.path().join("runtime.tar.gz"),
         };
         let fixture = Self { root, request };
@@ -93,6 +97,48 @@ impl Fixture {
         directory
     }
 
+    fn first_party_plugin(&self, id: &str) -> PathBuf {
+        let directory = self.request.bundle.join("plugins").join(id);
+        fs::create_dir_all(directory.join("skills").join(id)).unwrap();
+        let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../plugins")
+            .join(id);
+        fs::copy(source.join("plugin.json"), directory.join("plugin.json")).unwrap();
+        let application_binary = match id {
+            "docmost" => Some("anchor-docmost-tools"),
+            "wecom" => Some("anchor-wecom-tools"),
+            _ => None,
+        };
+        if let Some(binary) = application_binary {
+            let placeholder = directory.join("bin").join(binary);
+            fs::create_dir_all(placeholder.parent().unwrap()).unwrap();
+            fs::copy("/usr/bin/false", &placeholder).unwrap();
+        }
+        let channel = source.join("channel.json");
+        if channel.exists() {
+            fs::copy(&channel, directory.join("channel.json")).unwrap();
+            let placeholder = directory.join("bin/anchor-wecom-gateway");
+            fs::create_dir_all(placeholder.parent().unwrap()).unwrap();
+            fs::copy("/usr/bin/false", &placeholder).unwrap();
+        }
+        fs::write(
+            directory.join("skills").join(id).join("SKILL.md"),
+            "Read the supplied evidence.\n",
+        )
+        .unwrap();
+        self.write_bundle(&[id]);
+        if application_binary.is_some() || channel.exists() {
+            fs::remove_dir_all(directory.join("bin")).unwrap();
+        }
+        directory
+    }
+
+    fn wecom_gateway_binary(&self) -> PathBuf {
+        let binary = self.root.path().join("anchor-wecom-gateway");
+        fs::copy("/usr/bin/false", &binary).unwrap();
+        binary
+    }
+
     fn prepared(&self) -> Result<PreparedPackage> {
         prepare(&self.request, &digest(&self.request.goose))
     }
@@ -100,6 +146,22 @@ impl Fixture {
     fn package(&self) -> Result<PackageReport> {
         self.prepared()?.publish()
     }
+}
+
+fn academic_plugin(fixture: &Fixture) {
+    let directory = fixture.request.bundle.join("plugins/academic-research");
+    fs::create_dir_all(directory.join("skills/academic-research")).unwrap();
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugins/academic-research");
+    fs::copy(source.join("plugin.json"), directory.join("plugin.json")).unwrap();
+    fs::copy(
+        source.join("skills/academic-research/SKILL.md"),
+        directory.join("skills/academic-research/SKILL.md"),
+    )
+    .unwrap();
+    let demo = fixture.request.bundle.join("plugins/demo");
+    fs::create_dir_all(&demo).unwrap();
+    fs::write(demo.join("plugin.json"), r#"{"name":"Demo"}"#).unwrap();
+    fixture.write_bundle(&["academic-research", "demo"]);
 }
 
 fn digest(path: &Path) -> String {
@@ -290,6 +352,94 @@ fn native_plugin_elf_keeps_execute_mode_and_environment_references_are_not_expan
 }
 
 #[test]
+fn academic_plugin_package_includes_scholarly_binary_and_refreshes_frozen_resource_summary() {
+    let mut fixture = Fixture::new();
+    academic_plugin(&fixture);
+    fixture.request.scholarly = Some(fixture.request.host.clone());
+    let report = fixture.package().unwrap();
+    let scholarly_path = "bundle/plugins/academic-research/bin/anchor-scholarly";
+    let scholarly = report
+        .inventory
+        .files
+        .iter()
+        .find(|file| file.path == scholarly_path)
+        .unwrap();
+    assert_eq!(scholarly.mode, 0o755);
+    let executable = report
+        .inventory
+        .executables
+        .iter()
+        .find(|executable| executable.path == scholarly_path)
+        .unwrap();
+    assert_eq!(executable.sha256, scholarly.sha256);
+    let plugin = report
+        .inventory
+        .bundle
+        .plugins
+        .iter()
+        .find(|plugin| plugin.id == "academic-research")
+        .unwrap();
+    assert!(plugin.resources.contains(&"bin/anchor-scholarly".into()));
+    assert_eq!(plugin.mcp_servers, ["scholarly"]);
+    assert!(
+        report
+            .inventory
+            .bundle
+            .plugins
+            .iter()
+            .any(|plugin| plugin.id == "demo" && plugin.resources == ["plugin.json"])
+    );
+
+    let extracted = tempfile::tempdir().unwrap();
+    tar::Archive::new(GzDecoder::new(File::open(&report.output).unwrap()))
+        .unpack(extracted.path())
+        .unwrap();
+    let runtime = extracted
+        .path()
+        .join("anchor-runtime/bundle/plugins/academic-research/bin/anchor-scholarly");
+    assert_eq!(
+        fs::read(runtime).unwrap(),
+        fs::read(&fixture.request.host).unwrap()
+    );
+    FileGraphBundleLoader::new(extracted.path().join("anchor-runtime/bundle"))
+        .load()
+        .unwrap();
+
+    fixture.request.output = fixture.root.path().join("repeat.tar.gz");
+    let repeated = fixture.package().unwrap();
+    assert_eq!(report.sha256, repeated.sha256);
+    assert_eq!(
+        fs::read(report.output).unwrap(),
+        fs::read(repeated.output).unwrap()
+    );
+}
+
+#[test]
+fn academic_plugin_requires_scholarly_binary_and_nonacademic_bundle_rejects_it() {
+    let fixture = Fixture::new();
+    academic_plugin(&fixture);
+    let error = match fixture.prepared() {
+        Ok(_) => panic!("missing scholarly binary was accepted"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("requires --scholarly"));
+    assert!(!fixture.request.output.exists());
+
+    let mut fixture = Fixture::new();
+    fixture.request.scholarly = Some(fixture.request.host.clone());
+    let error = match fixture.prepared() {
+        Ok(_) => panic!("scholarly binary without academic Plugin was accepted"),
+        Err(error) => error,
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("requires the academic-research Plugin")
+    );
+    assert!(!fixture.request.output.exists());
+}
+
+#[test]
 fn partial_archive_read_failure_cleans_candidate_and_never_publishes() {
     struct InterruptedArchive {
         wrote_prefix: bool,
@@ -397,6 +547,202 @@ fn replaced_output_parent_is_not_used_for_publication() {
     assert_eq!(fs::read_dir(&moved).unwrap().count(), 0);
     assert_eq!(fs::read_dir(&parent).unwrap().count(), 1);
     assert_eq!(fs::read(parent.join("sentinel")).unwrap(), b"preserved");
+}
+
+#[test]
+fn referenced_first_party_plugins_include_exact_native_binaries_in_the_frozen_closure() {
+    let mut fixture = Fixture::new();
+    fixture.first_party_plugin("docmost");
+    fixture.first_party_plugin("wecom");
+    for (plugin, binaries) in [
+        ("docmost", ["anchor-docmost-tools"].as_slice()),
+        (
+            "wecom",
+            ["anchor-wecom-tools", "anchor-wecom-gateway"].as_slice(),
+        ),
+    ] {
+        for binary in binaries {
+            let path = fixture
+                .request
+                .bundle
+                .join("plugins")
+                .join(plugin)
+                .join("bin")
+                .join(binary);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::copy("/usr/bin/false", path).unwrap();
+        }
+    }
+    fixture.write_bundle(&["docmost", "wecom"]);
+    for plugin in ["docmost", "wecom"] {
+        fs::remove_dir_all(
+            fixture
+                .request
+                .bundle
+                .join("plugins")
+                .join(plugin)
+                .join("bin"),
+        )
+        .unwrap();
+    }
+    fixture.request.docmost_tools = Some(fixture.request.host.clone());
+    fixture.request.wecom_tools = Some(fixture.request.host.clone());
+    let gateway_binary = fixture.wecom_gateway_binary();
+    fixture.request.wecom_gateway = Some(gateway_binary.clone());
+
+    let report = fixture.package().unwrap();
+    let expected = [
+        (
+            "docmost",
+            "anchor-docmost-tools",
+            "bundle/plugins/docmost/bin/anchor-docmost-tools",
+        ),
+        (
+            "wecom",
+            "anchor-wecom-tools",
+            "bundle/plugins/wecom/bin/anchor-wecom-tools",
+        ),
+        (
+            "wecom",
+            "anchor-wecom-gateway",
+            "bundle/plugins/wecom/bin/anchor-wecom-gateway",
+        ),
+    ];
+    for (plugin_id, binary_name, path) in expected {
+        let executable = report
+            .inventory
+            .executables
+            .iter()
+            .find(|executable| executable.path == path)
+            .unwrap();
+        let expected_digest = if binary_name == "anchor-wecom-gateway" {
+            digest(&gateway_binary)
+        } else {
+            digest(&fixture.request.host)
+        };
+        assert_eq!(executable.sha256, expected_digest);
+        let resource = report
+            .inventory
+            .files
+            .iter()
+            .find(|file| file.path == path)
+            .unwrap();
+        assert_eq!(resource.mode, 0o755);
+        let plugin = report
+            .inventory
+            .bundle
+            .plugins
+            .iter()
+            .find(|plugin| plugin.id == plugin_id)
+            .unwrap();
+        assert!(plugin.resources.contains(&format!("bin/{binary_name}")));
+        assert_eq!(plugin.digest.len(), 64);
+    }
+    assert_eq!(report.inventory.executables.len(), 5);
+
+    let extracted = tempfile::tempdir().unwrap();
+    tar::Archive::new(GzDecoder::new(File::open(&report.output).unwrap()))
+        .unpack(extracted.path())
+        .unwrap();
+    for (_, _, path) in expected {
+        assert_eq!(
+            fs::read(extracted.path().join("anchor-runtime").join(path)).unwrap(),
+            fs::read(if path.ends_with("anchor-wecom-gateway") {
+                &gateway_binary
+            } else {
+                &fixture.request.host
+            })
+            .unwrap()
+        );
+    }
+    FileGraphBundleLoader::new(extracted.path().join("anchor-runtime/bundle"))
+        .load()
+        .unwrap();
+
+    fixture.request.output = fixture.root.path().join("repeat.tar.gz");
+    let repeated = fixture.package().unwrap();
+    assert_eq!(report.sha256, repeated.sha256);
+    assert_eq!(
+        fs::read(report.output).unwrap(),
+        fs::read(repeated.output).unwrap()
+    );
+}
+
+#[test]
+fn first_party_binary_inputs_are_required_only_for_referenced_plugins() {
+    let fixture = Fixture::new();
+    let report = fixture.package().unwrap();
+    assert!(
+        report
+            .inventory
+            .files
+            .iter()
+            .all(|file| !file.path.contains("anchor-docmost-tools")
+                && !file.path.contains("anchor-wecom-tools")
+                && !file.path.contains("anchor-wecom-gateway"))
+    );
+
+    let fixture = Fixture::new();
+    fixture.first_party_plugin("docmost");
+    let error = match fixture.prepared() {
+        Ok(_) => panic!("Docmost package without its native binary was accepted"),
+        Err(error) => error,
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("docmost Plugin requires --docmost-tools")
+    );
+
+    let mut fixture = Fixture::new();
+    fixture.request.wecom_tools = Some(fixture.request.host.clone());
+    let error = match fixture.prepared() {
+        Ok(_) => panic!("unreferenced WeCom binary was accepted"),
+        Err(error) => error,
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("--wecom-tools requires the wecom Plugin")
+    );
+
+    let mut fixture = Fixture::new();
+    fixture.request.wecom_gateway = Some(fixture.request.host.clone());
+    let error = match fixture.prepared() {
+        Ok(_) => panic!("unreferenced WeCom Gateway binary was accepted"),
+        Err(error) => error,
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("--wecom-gateway requires the wecom Plugin")
+    );
+
+    let mut fixture = Fixture::new();
+    fixture.first_party_plugin("wecom");
+    fixture.request.wecom_gateway = Some(fixture.request.host.clone());
+    let error = match fixture.prepared() {
+        Ok(_) => panic!("WeCom package without its application tools binary was accepted"),
+        Err(error) => error,
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("wecom Plugin requires --wecom-tools")
+    );
+
+    let mut fixture = Fixture::new();
+    fixture.first_party_plugin("wecom");
+    fixture.request.wecom_tools = Some(fixture.request.host.clone());
+    let error = match fixture.prepared() {
+        Ok(_) => panic!("WeCom package without its Gateway binary was accepted"),
+        Err(error) => error,
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("wecom Plugin requires --wecom-gateway")
+    );
 }
 
 #[test]

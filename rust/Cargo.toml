@@ -1,5 +1,5 @@
 [workspace]
-members = ["anchor-runtime", "anchor-io-harness-runtime", "anchor-sandbox-bwrap", "anchor-mcp-host", "anchor-runner-host", "anchor-graph-host", "anchor-rsi", "anchor-platform-session", "anchor-wecom-tools", "anchor-docmost-tools", "anchor-devtools", "anchor-scholarly", "anchor-library", "anchor-wecom-gateway", "anchor-distribution"]
+members = ["anchor-runtime", "anchor-sandbox-bwrap", "anchor-mcp-host", "anchor-runner-host", "anchor-graph-host", "anchor-rsi", "anchor-platform-session", "anchor-wecom-tools", "anchor-docmost-tools", "anchor-devtools", "anchor-scholarly", "anchor-library", "anchor-wecom-gateway", "anchor-distribution"]
 resolver = "2"
 
 [workspace.package]
@@ -8,13 +8,10 @@ license = "MIT"
 version = "0.1.0"
 
 [workspace.dependencies]
-rig-agent = { version = "=0.43.0", default-features = false }
-rig-core = { version = "=0.43.0", default-features = false, features = ["reqwest", "rustls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 futures = "0.3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 rmcp = { version = "=2.2.0", default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest", "client-side-sse"] }
-rig-rmcp = { version = "=0.43.0", default-features = false }
 sha2 = "0.10"

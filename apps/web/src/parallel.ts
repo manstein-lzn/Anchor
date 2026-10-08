@@ -2,6 +2,12 @@ import type { OurGraph, OurRunState } from './model';
 
 export function activeNodes(state: OurRunState | null | undefined) {
   const active = { ...state?.active };
+  for (const branch of state?.parallel?.branches ?? []) {
+    if (branch.status === 'running' && branch.cursor) {
+      const { node_id: node, key } = branch.cursor;
+      active[node] ??= { node, pass: key.invocation, dir: '' };
+    }
+  }
   if (state?.cursor && !active[state.cursor.node]) active[state.cursor.node] = state.cursor;
   return Object.values(active);
 }

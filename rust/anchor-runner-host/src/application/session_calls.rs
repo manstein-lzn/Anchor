@@ -1,6 +1,6 @@
 //! Session authority belongs to the platform host; execution belongs to this application.
 use super::*;
-use anchor_runtime_rig::graph::{CallIdentity, GraphCallOutcome};
+use anchor_runtime::graph::{CallIdentity, GraphCallOutcome};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -390,7 +390,7 @@ impl RunApplication {
                 .map_err(ApplicationError::Conflict)?;
             record
                 .recovery_submissions
-                .push(anchor_runtime_rig::graph::RecoverySubmission {
+                .push(anchor_runtime::graph::RecoverySubmission {
                     key: pending.key,
                     attempt_id: pending.attempt.attempt_id,
                     decision,

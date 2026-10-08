@@ -1,6 +1,6 @@
 use super::*;
 use crate::application::{RunMetadata, metadata};
-use anchor_runtime_rig::graph::{FileRunStore, GraphRunRecord, RunStatus, RunStore};
+use anchor_runtime::graph::{FileRunStore, GraphRunRecord, RunStatus, RunStore};
 use std::{collections::BTreeMap, time::Duration};
 
 mod deletion;

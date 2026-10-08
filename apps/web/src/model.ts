@@ -114,7 +114,9 @@ export type OurRunState = {
   updated: string;
   cursor: { node: string; pass: number; dir: string } | null;
   active?: Record<string, { node: string; pass: number; run?: number; dir: string }>;
-  parallel?: { fanout: string; join: string; invocation: number; [key: string]: unknown } | null;
+  parallel?: { fanout?: string; join?: string; invocation?: number; fanout_node?: string; join_node?: string;
+    branches?: Array<{ status: string; cursor: { node_id: string; key: { invocation: number } } | null }>;
+    [key: string]: unknown } | null;
   passes: Record<string, number>;
   decided: Record<string, [boolean, number]>;
   nodes: Record<string, OurNodeResult>;
@@ -123,7 +125,7 @@ export type OurRunState = {
   error: string;
   /** Why a run that stopped did not simply finish. `asked` means somebody pressed the button. */
   reason?: string;
-  /** Exact io-harness tool attempts whose result was not recorded yet. */
+  /** Persisted tool attempts whose results were not recorded yet. */
   recovery?: RecoveryAttempt[];
 };
 

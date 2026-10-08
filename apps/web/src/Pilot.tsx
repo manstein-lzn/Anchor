@@ -102,7 +102,7 @@ export function Pilot({ session = '', onSession }: { session?: string; onSession
           cached(`draft:${id}`, ''); setDraft('');
         }
       }
-      // The turn is accepted before Harness saves its prompt. Keep that accepted message visible
+      // The turn is accepted before its prompt is saved. Keep that accepted message visible
       // when reopening a session during this window, without duplicating an already saved prompt.
       const last = history.messages.at(-1);
       const prompt = latest?.status === 'running' ? latest.prompt : pendingSubmission(id)?.message;

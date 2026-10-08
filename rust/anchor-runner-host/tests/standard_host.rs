@@ -1,5 +1,3 @@
-#![cfg(not(feature = "legacy-regression"))]
-
 #[allow(dead_code)]
 #[path = "support/runtime_fixture.rs"]
 mod fixture;

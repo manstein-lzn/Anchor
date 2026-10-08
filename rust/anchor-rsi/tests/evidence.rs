@@ -60,12 +60,23 @@ fn discovers_new_graphs_and_dependencies_and_freezes_source() {
         r#"{"description":"public plugin","api_key":"do-not-copy"}"#,
     );
     write(&config.data, "library/skills/new/SKILL.md", "public skill");
+    write(
+        &config.data,
+        "state/schedules.json",
+        r#"{"schedules":[{"graph":"new-graph","enabled":true}],"api_key":"schedule-secret"}"#,
+    );
     let evidence = Evidence::collect(config.clone()).unwrap();
     assert_eq!(evidence.index("graphs", 0, 20).unwrap()["count"], 1);
     assert_eq!(evidence.index("plugins", 0, 20).unwrap()["count"], 2);
     assert!(evidence.dependencies.iter().any(|d| d.name == "httpx"));
     assert!(evidence.dependencies.iter().any(|d| d.name == "serde"));
     assert!(evidence.dependencies.iter().any(|d| d.name == "react"));
+    let schedules = evidence
+        .read("runs/schedules.json", 0, 200)
+        .unwrap()
+        .to_string();
+    assert!(schedules.contains("new-graph"));
+    assert!(!schedules.contains("schedule-secret"));
     fs::write(config.source.join("src/new.rs"), "changed").unwrap();
     assert_eq!(
         evidence.read("code/src/new.rs", 1, 1).unwrap()["lines"],

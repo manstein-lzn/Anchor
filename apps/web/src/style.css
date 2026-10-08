@@ -727,6 +727,7 @@ details.call pre {
 .plugin-row-copy small, .plugin-row-label > small { color: var(--muted); font-size: 10px; }
 .plugin-row-copy > span { display: -webkit-box; overflow: hidden; color: #65776c; font-size: 11px; line-height: 1.5; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
 .plugin-row-actions { display: flex; align-items: center; gap: 6px; }
+.plugin-oauth-actions { display: inline-flex; align-items: center; gap: 6px; }
 .plugin-row-actions button { padding: 3px 5px; border: 0; color: var(--accent); background: transparent; cursor: pointer; font: inherit; font-size: 10px; white-space: nowrap; }
 .plugin-row-actions button:hover { text-decoration: underline; }
 .plugin-tool-count { display: inline-flex; align-items: center; gap: 3px; color: var(--muted); font-size: 10px; }

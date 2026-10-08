@@ -1,7 +1,7 @@
 # Rust platform Session facts
 
 `SessionStore` owns platform Session/Turn metadata, lifecycle and delivery events.
-It does not open Python stores, create conversations in a framework database, own
+It does not open legacy stores, create conversations in a framework database, own
 Agent execution or copy Run state, Agent messages, Harness logs or recovery records.
 
 ## Host contract
@@ -58,7 +58,8 @@ together. Status changes and deletion cannot invalidate a running Turn.
 marks leftover business Turns interrupted without rerunning the model, changing
 native Harness outcomes or manufacturing a reply. Opening the store does not
 perform startup interruption. Accepted prompt metadata and UI chunks are not
-an alternative Agent transcript; io-harness owns the latter.
+an alternative Agent transcript; Goose owns the latter. Retained legacy native
+associations are historical facts and do not enable a legacy Agent backend.
 
 ## Native form question facts
 
@@ -183,7 +184,7 @@ The separate database uses application ID `0x414e5353` and schema version `6`.
 Only an empty, unversioned database can be initialized. Existing identity,
 version and schema definitions must match exactly. Exact native v1/v2/v3/v4/v5 databases
 upgrade transactionally to v6; foreign, altered or future schemas are rejected
-before DDL. This does not migrate Python Session/Turn history. Successful stores use
+before DDL. This does not migrate legacy Session/Turn history. Successful stores use
 WAL, full synchronous commits, foreign keys and a five-second busy timeout.
 The v3 `turn_native` and `turn_runs` tables preserve the existing Turn SQL and
 delivery records and cascade with business Turn/Session deletion. Retained Graph

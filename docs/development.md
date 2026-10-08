@@ -1,71 +1,55 @@
-# 开发约定
+# 开发指南
 
-## 开工前的阅读顺序
+先读 [开发约定](../AGENTS.md)、[当前架构](architecture.md)、[产品架构](product-architecture.md) 和 [开发台账](pilot-development-plan.md) 中与任务直接相关的章节。历史归档只用于查证当时证据，不作为当前任务列表。
 
-1. [项目 README](../README.md)：了解当前产品和文档入口。
-2. [产品与系统架构](product-architecture.md)：确认产品原则、对象边界、Pilot、Session、恢复语义和阶段契约。
-3. [当前架构](architecture.md)：确认现有代码路径与边界。
-4. [Plugin 设计](plugins.md)：确认能力库的文件格式、挂载和验收依据。
-5. 按任务需要阅读 [使用指南](usage.md) 和相关源码、测试。
+## 项目结构与依赖
 
-历史归档只用于查证当时的决策和实验，不作为新任务列表。旧计划中的“待实施”、阶段编号、旧依赖矩阵或多 Agent 分工指令，不自动适用于当前开发。发现某处功能尚未实现，不等于获得了扩展本轮范围的需求。
+`rust/` 是唯一 Cargo workspace，官方 Host、Kernel、工具、发行和开发检查共享 [Cargo.lock](../rust/Cargo.lock)。`apps/web/` 使用 React/TypeScript；依赖见 [package.json](../apps/web/package.json) 和其 lock。官方 Plugin 清单/Skill 位于 `plugins/`，Graph 示例位于 `examples/`。
 
-Anchor 仍处于开发阶段。协议或存储格式被新设计取代时，默认直接迁移受维护的示例、测试和代码并删除旧分支，不为旧开发内容保留兼容层。这个原则不授权静默删除 `.local/` 中的用户工作区或运行记录；旧数据需要显式重建或单次迁移说明，但不要求永久携带旧格式执行器。
+运行与构建需要 Linux、Git、Bubblewrap、Rust stable、Node.js 与固定 Goose。先执行 `npm --prefix apps/web ci`，再按 [使用指南](usage.md) 配置 `.env`。`scripts/dev.sh` 管理独立 Rust 开发根和本次服务 PID；修改后端需要重建并重启才能加载，不因文档变化或仅验证而重启用户服务。
 
-## 文档如何保持一致
+## 工作节奏
 
-| 信息 | 唯一维护位置 |
-| --- | --- |
-| 产品目标、对象边界、Pilot、Session、生命周期和演进阶段 | [产品与系统架构](product-architecture.md) |
-| 安装、服务管理、用户操作和 API 使用 | [使用指南](usage.md) |
-| 当前代码结构、行为边界与实际工具供应 | [当前架构](architecture.md) |
-| 能力库目标、未实现范围、设计约束和验收 | [Plugin 设计](plugins.md) |
-| 当前依赖声明 | [pyproject.toml](../pyproject.toml) 与前端包配置 |
-| 当时的决策、迁移和验证证据 | [历史归档](archive/README.md) |
+先确定归属层、事实所有者和小契约，交付可运行的垂直切片。Agent loop、模型历史与 compaction 复用 Goose；Graph、Run、Artifact、Sandbox、Library 和 Session/Turn 由 Anchor 保持唯一事实。
 
-README 只保留概览和导航，不再堆叠所有实施细节。功能实现并验证后，同一变更中更新Plugin 设计的状态、当前架构和必要的使用说明；不得把目标设计提前写成已实现功能。
+独立且契约稳定的工作包可在隔离 worktree 中并行，一个路径只保留一个实际编辑者。主轨负责共享 manifest、集成、review 和验收；获得足够证据后直接集成，不反复等待报告。变更应聚焦，避免为形式化拆分建设额外平台。
 
-核心概念为 Graph、AgentNode、OpNode、Plugin。Plugin 直接挂在 AgentNode 上，文件维护，UI 只读浏览和选择，不增加角色继承规则。知识库编译暂缓。
-
-设计细节服务于实际 Plugin 接入。先复用现有 Bash、只读挂载和节点契约，不预建通用插件总线、不复制另一套 Agent 内核，不强行为每条 Bash 命令注册能力。知识库格式与工具环境选择由代表性材料和实际依赖需求验证。
-
-对研究任务，完成标准来自目标、证据与反馈，不能用固定步数或轮数取代。保留主动停止、显式资源预算和沙箱约束；“不人为限制研究”不意味着忽略磁盘、上下文窗口或不确定副作用。
-
-## 服务与运行数据
-
-从仓库根目录使用 [scripts/dev.sh](../scripts/dev.sh) 管理后台服务。不要把长期服务绑在当前对话或前台终端中。端口、日志、初次安装与恢复操作统一见 [使用指南](usage.md)。
-
-修改 Python 后端后需要重启才能加载代码；重启会中断当前节点。先确认正在运行的任务及本次授权范围，不因仅修改文档就重启服务。项目脚本不提供开机自启或崩溃自动拉起。
-
-`.local/` 下的工作流、运行历史、密钥和服务日志是本地数据，不因清理文档或修改示例而删除、覆盖或提交。更新 `examples/graphs/` 不会自动改变现有工作流。Agent 只读引用能力库的目标，也不意味着已有用户工作区可以被重建或替换。
+工作区可能有多条工作流的未提交改动，不 reset、checkout 丢弃或 clean；提交只含本次实际改动。`.local/`、旧环境、密钥、日志和运行历史不是清理对象，不因源码或示例迁移被覆盖。更新示例不会自动迁移用户 Graph。
 
 ## 验证
 
-测试使用项目解释器。无需模型服务的测试以脚本模型替代远程调用，仍执行真实调度、沙箱、文件挂载和 Git 提交。
+开发时先跑相关 crate/测试子集；垂直切片或跨模块语义完成后再执行一次必要的整体回归。复用同一 `CARGO_TARGET_DIR`，减少重复构建。普通文档与低影响可逆改动检查链接/格式即可，不增加镜像式测试。
 
-开发的节奏是：改哪里跑哪里，阶段做完再整体跑一次。全量套件里少数用例要起沙箱、提交 Git、真杀进程，串行跑一次约 5 分半；因此不要每改一点就跑全量，也不要为了跑得快去 mock 掉这些用例——它们验证的正是沙箱、Git、调度和恢复的组合。
-
-```bash
-# 开发中：只跑本次改动相关的文件，通常几十秒
-./.venv/bin/python -m pytest tests/test_pilot_turns.py -q
-
-# 阶段结束：多核并行跑全量，约 1 分 40 秒（289 项，实测）
-./.venv/bin/python -m pytest -q -n 8 --dist worksteal
-
-# 真实服务商用例单独跑，需要配置和密钥
-./.venv/bin/python -m pytest -m provider -q
-
-# 前端单元测试、浏览器测试和构建
+```sh
+cargo +stable test --manifest-path rust/Cargo.toml -p anchor-devtools --locked
+cargo +stable test --manifest-path rust/Cargo.toml --workspace --all-features --all-targets --locked -- --test-threads=8
+cargo +stable clippy --manifest-path rust/Cargo.toml --workspace --all-features --all-targets --locked -- -D warnings
+cargo +stable fmt --manifest-path rust/Cargo.toml --all -- --check
 npm --prefix apps/web test
-(cd apps/web && npx playwright install chromium)
-npm --prefix apps/web run test:e2e
 npm --prefix apps/web run build
 ```
 
-并行必须带 `--dist worksteal`。默认的 `load` 把测试按收集顺序派发，`tests/test_examples.py` 里四个各 20～70 秒的用例会落到同一个 worker 上串行执行，实测 8 个 worker 也要 3 分钟；`worksteal` 让空闲 worker 从最长的队列里取任务，同样的 8 个 worker 只需 1 分 40 秒。worker 数超过 8 没有进一步收益（实测 16 个与 8 个持平，且高负载下 `test_stop_cancels_an_agent_tool_command` 这类卡时序的用例更容易失败），所以固定用 8。
+已缓存依赖时可加 `--offline`，缓存缺失要如实报告。Goose 条件集成用例不在普通 `cargo test` 中自动执行，必须通过 [确定性 Graph 回归](runtime-contract-tests.md) 显式选择；缺少 Goose、浏览器或外部配置与通过是不同结果。
 
-恢复故障注入的证据按脚本内容缓存在系统临时目录，一台机器只生成一次，多个 worker 共享；这是 CPU 时间从 5 分 20 秒降到 3 分钟的原因。改 `scripts/recovery_windows.py` 会让缓存自动失效。
+```sh
+ANCHOR_GOOSE_BINARY=/absolute/path/to/goose \
+  cargo +stable run --manifest-path rust/Cargo.toml -p anchor-devtools --locked -- \
+  regression fixture
+```
 
-缺少可用沙箱时部分测试会跳过；真实模型用例标记为 `provider`，需要相应配置和密钥。检查通过时应同时看是否存在跳过项，不能把模拟模型的成功视为真实研究验收。
+浏览器测试使用 Node 本地 Provider 与实际 Rust Host/Goose；执行方式见回归指南。release 包用 [原生候选回归](rust-production-candidate.md) 检查。大型 RSI、深度研究、周报和真实业务服务按低频内容验收单独运行。
 
-验证与改动相称：纯文档变更检查链接、路径、现状与目标是否混淆；运行时变更执行相关测试；Plugin 接入还需按Plugin 设计验证实际任务。历史报告中的测试数只说明当时结果，不作为今天测试通过的证据。
+测试报告只写实际命令、结果和证据，区分失败、跳过、未配置、未覆盖与真实模型请求。并发超时先独立复跑受影响用例，只有新的失败或未决风险才扩大验证，不重复跑已通过全量。
+
+## 文档归属
+
+| 信息 | 维护位置 |
+| --- | --- |
+| 长期约定 | `AGENTS.md` |
+| 产品方向、职责和不变量 | [产品架构](product-architecture.md) |
+| 当前实现 | [当前架构](architecture.md) |
+| 安装和操作 | [使用指南](usage.md)、[部署指南](rust-production-deployment.md) |
+| 完成状态、实际证据和未验收项 | [开发台账](pilot-development-plan.md) |
+| 旧设计与调研 | [历史归档](archive/README.md) |
+
+一个垂直切片或验收状态完成后才记账；小编辑、格式修复与重复测试不单独记账。未通过真实 Provider 的能力不得写成真实端到端完成。

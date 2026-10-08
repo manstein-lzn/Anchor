@@ -506,6 +506,7 @@ impl RunApplication {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn admit_conversation(
         &self,
         request: ConversationAdmission,
@@ -514,6 +515,7 @@ impl RunApplication {
         graph_lease: Box<dyn RunLease>,
         attachments: &crate::channel_inputs::PreparedAttachments,
         channel: Option<ChannelRunSource>,
+        oauth_owner: String,
     ) -> Result<String, ApplicationError> {
         request.validate().map_err(ApplicationError::Invalid)?;
         let graph_path = Self::graph_identity(source)?;
@@ -586,6 +588,7 @@ impl RunApplication {
             source,
         )?;
         metadata.trigger_source = "channel".into();
+        metadata.oauth_owner = Some(oauth_owner);
         metadata.conversation = Some(conversation);
         metadata.channel = channel;
         metadata.attachments = attachments.manifest();

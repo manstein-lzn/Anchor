@@ -13,7 +13,7 @@ describe('Markdown documents', () => {
     }
   });
   it('supports fenced and indented code and leaves unterminated fences readable', () => {
-    expect(shown('~~~python\nprint(1)\n~~~')).toContain('hljs');
+    expect(shown('~~~rust\nprintln!("evidence");\n~~~')).toContain('hljs');
     expect(shown('    <b>code</b>')).toContain('&lt;b&gt;code&lt;/b&gt;');
     expect(shown('```\nstill going')).toContain('still going');
   });

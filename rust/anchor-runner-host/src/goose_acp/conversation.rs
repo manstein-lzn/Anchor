@@ -1,7 +1,7 @@
 use super::{Fact, read_fact};
 #[cfg(test)]
 mod tests;
-use anchor_runtime_rig::graph::{GraphError, InvocationKey};
+use anchor_runtime::graph::{GraphError, InvocationKey};
 use serde::{Deserialize, Serialize};
 use std::{
     fs::{self, File, OpenOptions},
@@ -140,7 +140,6 @@ impl ConversationScope {
                     previous = Some(fact);
                 }
             }
-            #[cfg(not(feature = "legacy-regression"))]
             if crate::run_data::legacy_invocation_exists(facts.parent().unwrap(), predecessor)
                 .map_err(GraphError::Unsupported)?
             {

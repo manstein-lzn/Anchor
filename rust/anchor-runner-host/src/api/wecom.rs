@@ -1,8 +1,8 @@
 use super::*;
 use crate::application::{WECOM_REPLY_KEY_PREFIX, WECOM_REPLY_KIND};
 use anchor_platform_session::{
-    ChannelDeliveryRequest, ChannelDeliveryStatus, ChannelIdentity, ChannelInboundRequest,
-    TurnStatus,
+    AttachmentManifest, AttachmentManifestEntry, ChannelDeliveryRequest, ChannelDeliveryStatus,
+    ChannelIdentity, ChannelInboundRequest, TurnStatus,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -52,7 +52,7 @@ struct WecomEvent {
     reply_target: String,
     message_type: String,
     metadata: HashMap<String, Value>,
-    attachments: Vec<Value>,
+    attachments: Vec<crate::channel_inputs::UploadedAttachment>,
 }
 
 impl WecomEvent {
@@ -76,7 +76,10 @@ impl WecomEvent {
 
     fn validate_payload(&self) -> Result<(), HttpResponse> {
         if self.source != "wecom"
-            || !matches!(self.message_type.as_str(), "text" | "mixed")
+            || !matches!(
+                self.message_type.as_str(),
+                "text" | "mixed" | "image" | "file"
+            )
             || self.event_id.trim().is_empty()
             || self.event_id.len() > 500
             || self.sender_id.trim().is_empty()
@@ -84,9 +87,11 @@ impl WecomEvent {
             || self.conversation_id.trim().is_empty()
             || self.conversation_id.len() > 200
             || self.reply_target != self.conversation_id
-            || self.text.trim().is_empty()
             || self.text.len() > MAX_EVENT_TEXT_BYTES
-            || !self.attachments.is_empty()
+            || (self.text.trim().is_empty() && self.attachments.is_empty())
+            || (self.message_type == "text" && !self.attachments.is_empty())
+            || (matches!(self.message_type.as_str(), "image" | "file")
+                && self.attachments.is_empty())
             || self.metadata.len() != 2
             || self
                 .metadata
@@ -133,6 +138,35 @@ pub(super) async fn receive_event(
     let envelope: EventEnvelope = serde_json::from_value(payload)
         .map_err(|_| error(StatusCode::BAD_REQUEST, "invalid WeCom event envelope"))?;
     envelope.event.validate(&state.wecom)?;
+    let prepared_attachments = crate::channel_inputs::prepare(&envelope.event.attachments)
+        .map_err(|failure| error(StatusCode::BAD_REQUEST, failure))?;
+    let attachment_entries = prepared_attachments.manifest();
+    if envelope.event.message_type == "image"
+        && !attachment_entries.iter().any(|attachment| {
+            attachment
+                .media_type
+                .as_deref()
+                .is_some_and(|mime| mime.starts_with("image/"))
+        })
+    {
+        return Err(error(
+            StatusCode::BAD_REQUEST,
+            "image events must include a supported image attachment",
+        ));
+    }
+    let channel_attachments = AttachmentManifest {
+        format: 1,
+        files: attachment_entries
+            .into_iter()
+            .map(|attachment| AttachmentManifestEntry {
+                path: format!("/in/channel/{}", attachment.name),
+                name: attachment.name,
+                sha256: attachment.sha256,
+                size: attachment.size,
+                media_type: attachment.media_type,
+            })
+            .collect(),
+    };
     let (_, bundle) = load_graph_definition(&state, &state.wecom.graph).map_err(|_| {
         error(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -151,7 +185,12 @@ pub(super) async fn receive_event(
         ));
     }
 
-    let event = envelope.event;
+    let mut event = envelope.event;
+    let input_message = if event.text.trim().is_empty() {
+        "请查看随附文件并据此回复。".to_owned()
+    } else {
+        event.text.clone()
+    };
     let owner = private_owner(&state, &headers);
     let deadline = tokio::time::Instant::now() + RUN_WAIT;
     let lock_key = format!(
@@ -183,8 +222,8 @@ pub(super) async fn receive_event(
             },
             graph: state.wecom.graph.clone(),
             reply_node: state.wecom.reply_node.clone(),
-            text: Some(event.text.clone()),
-            attachments: Default::default(),
+            text: Some(input_message.clone()),
+            attachments: channel_attachments.clone(),
             run_id: None,
             replace_running: true,
         };
@@ -231,12 +270,12 @@ pub(super) async fn receive_event(
             session: admission.session.id.clone(),
             reply_node: state.wecom.reply_node.clone(),
             input: json!({
-                "message":event.text,
+                "message":input_message,
                 "channel":channel,
                 "session":admission.session.id,
             }),
             previous_run: current.previous_run,
-            attachments: Vec::new(),
+            attachments: std::mem::take(&mut event.attachments),
             channel_inbound: Some(inbound_id),
         };
         let (status, accepted) =

@@ -1,17 +1,11 @@
 [package]
-name = "anchor-runtime-rig"
+name = "anchor-runtime"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "Shared Rust Graph runtime kernel for Anchor"
 
-[features]
-default = []
-rig-legacy = ["dep:rig-agent", "dep:rig-core", "rig-agent/test-utils"]
-
 [dependencies]
-rig-agent = { workspace = true, optional = true }
-rig-core = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -21,7 +15,3 @@ sha2.workspace = true
 
 [dev-dependencies]
 schemars = "1"
-
-[[example]]
-name = "real_node"
-required-features = ["rig-legacy"]

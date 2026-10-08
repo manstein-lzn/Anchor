@@ -146,6 +146,7 @@ fn config(endpoint: &str, _names: &[&str]) -> McpToolConfig {
     McpToolConfig {
         environment: Default::default(),
         disabled: Default::default(),
+        oauth_library_root: None,
         servers: BTreeMap::from([(
             "fixture-plugin-fixture".into(),
             ResolvedMcpServer {

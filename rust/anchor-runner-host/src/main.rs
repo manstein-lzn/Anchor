@@ -2,19 +2,19 @@ mod api;
 mod application;
 mod artifacts;
 mod channel_inputs;
+mod channel_supervisor;
 mod channel_tools;
 mod execution;
 mod goose_acp;
 mod goose_tool_context;
 mod local_inputs;
-#[cfg(feature = "legacy-regression")]
-mod model_registry;
 mod pilot_host;
 mod pilot_tools;
 mod resource_read;
 use artifacts::HostArtifacts;
 mod node_host;
 mod node_tools;
+mod oauth_http;
 mod op;
 mod run_data;
 mod tool_environment;
@@ -24,10 +24,10 @@ use node_host::HostNodes;
 #[cfg(test)]
 use node_host::load_host_completion_fact;
 
-use anchor_runtime_rig::Cancellation;
+use anchor_runtime::Cancellation;
 #[cfg(test)]
-use anchor_runtime_rig::graph::{CompletionFact, InvocationKey};
-use anchor_runtime_rig::graph::{GraphRunRecord, GraphSnapshot, RunControl, RunStatus, RunStore};
+use anchor_runtime::graph::{CompletionFact, InvocationKey};
+use anchor_runtime::graph::{GraphRunRecord, GraphSnapshot, RunControl, RunStatus, RunStore};
 use anchor_sandbox_bwrap::{BubblewrapPolicy, BubblewrapSandbox};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -35,6 +35,9 @@ use std::{collections::BTreeMap, env, io, path::PathBuf, sync::Arc};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 const MAX_FRAME: usize = 1024 * 1024;
+
+#[cfg(test)]
+pub(crate) static PROCESS_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 fn create_durable_directory(path: &std::path::Path) -> io::Result<()> {
     std::fs::create_dir_all(path)?;
@@ -233,19 +236,19 @@ fn env_path(name: &str) -> Result<PathBuf, String> {
         .ok_or_else(|| format!("{name} is required"))
 }
 
-fn acquire_deployment_writer() -> Result<Box<dyn anchor_runtime_rig::graph::RunLease>, String> {
+fn acquire_deployment_writer() -> Result<Box<dyn anchor_runtime::graph::RunLease>, String> {
     let root = env_path("ANCHOR_RUNNER_STATE_ROOT")?;
-    anchor_runtime_rig::graph::FileRunStore::new(root.join("deployment-locks"))
+    anchor_runtime::graph::FileRunStore::new(root.join("deployment-locks"))
         .acquire_lease("deployment-writer")
         .map_err(|error| format!("state root already has a writing host: {error}"))
 }
 fn make_host_with_control(
     run_id: &str,
-    plugin_bindings: BTreeMap<String, anchor_runtime_rig::graph::PluginBinding>,
+    plugin_bindings: BTreeMap<String, anchor_runtime::graph::PluginBinding>,
     control: HostControl,
 ) -> Result<
     (
-        anchor_runtime_rig::graph::FileRunStore,
+        anchor_runtime::graph::FileRunStore,
         HostArtifacts,
         HostNodes,
         HostControl,
@@ -308,8 +311,6 @@ fn make_host_with_control(
     let sandbox = Arc::new(
         BubblewrapSandbox::new(tool_environment.authorize(policy)).map_err(|e| e.to_string())?,
     );
-    #[cfg(feature = "legacy-regression")]
-    let models = model_registry::from_env()?;
     let fake_plugin_ids = env::var("ANCHOR_RUNNER_FAKE_PLUGINS")
         .unwrap_or_default()
         .split(',')
@@ -326,7 +327,7 @@ fn make_host_with_control(
         Arc::new(tools.clone()),
         mcp.clone(),
         plugin_bindings.clone(),
-        anchor_runtime_rig::graph::FileRunStore::new(state.join("runs")),
+        anchor_runtime::graph::FileRunStore::new(state.join("runs")),
         local_inputs::LocalInputs::from_env(state.clone())?,
     ));
     let goose_nodes = goose_acp::GooseNodePort::from_env(
@@ -335,17 +336,8 @@ fn make_host_with_control(
         Arc::clone(&io_resolver),
         Arc::clone(&sandbox),
     )?;
-    #[cfg(feature = "legacy-regression")]
-    let io_nodes = models.as_ref().filter(|_| goose_nodes.is_none()).map(|models| {
-        anchor_io_harness_runtime::node_port::IoHarnessNodePort::new_with_default_policy_and_registry(
-            state.join("io-harness/facts"),
-            state.join("io-harness/store"),
-            models.clone(),
-            Arc::clone(&io_resolver),
-        )
-    });
     Ok((
-        anchor_runtime_rig::graph::FileRunStore::new(state.join("runs")),
+        anchor_runtime::graph::FileRunStore::new(state.join("runs")),
         artifacts.clone(),
         HostNodes {
             sandbox,
@@ -358,8 +350,6 @@ fn make_host_with_control(
             facts_root: state.join("facts"),
             io_resolver,
             mcp,
-            #[cfg(feature = "legacy-regression")]
-            io_nodes,
             goose_nodes,
         },
         control,
@@ -436,7 +426,7 @@ async fn handle(request: Request) -> Response {
                 };
             }
             match env_path("ANCHOR_RUNNER_STATE_ROOT") {
-                Ok(root) => match anchor_runtime_rig::graph::FileRunStore::new(root.join("runs"))
+                Ok(root) => match anchor_runtime::graph::FileRunStore::new(root.join("runs"))
                     .load(&run_id)
                 {
                     Ok(Some(record)) => Response::Run {
@@ -495,7 +485,7 @@ async fn execute_snapshot(
     input: Value,
     run_id: String,
     request_id: String,
-    plugin_bindings: BTreeMap<String, anchor_runtime_rig::graph::PluginBinding>,
+    plugin_bindings: BTreeMap<String, anchor_runtime::graph::PluginBinding>,
     bundle_root: Option<PathBuf>,
 ) -> Response {
     execute_snapshot_with_control(
@@ -516,7 +506,7 @@ async fn execute_snapshot_with_control(
     run_id: String,
     request_id: String,
     supplied_control: Option<HostControl>,
-    plugin_bindings: BTreeMap<String, anchor_runtime_rig::graph::PluginBinding>,
+    plugin_bindings: BTreeMap<String, anchor_runtime::graph::PluginBinding>,
     bundle_root: Option<PathBuf>,
 ) -> Response {
     let _writer = match acquire_deployment_writer() {
@@ -759,7 +749,7 @@ mod tests {
         graph.nodes[0].agent = Some("worker".into());
         assert!(reject_snapshot(&graph).is_err());
         let mut graph = snapshot();
-        graph.edges.push(anchor_runtime_rig::graph::GraphEdge {
+        graph.edges.push(anchor_runtime::graph::GraphEdge {
             from_node: "command".into(),
             to_node: "command".into(),
         });
@@ -799,7 +789,7 @@ mod tests {
     #[test]
     fn host_admission_accepts_op_routes_with_multiple_exits() {
         let mut graph = snapshot();
-        graph.nodes.push(anchor_runtime_rig::graph::GraphNode {
+        graph.nodes.push(anchor_runtime::graph::GraphNode {
             id: "good".into(),
             agent: None,
             op: Some("run".into()),
@@ -807,7 +797,7 @@ mod tests {
             plugins: Vec::new(),
             max_rounds: None,
         });
-        graph.nodes.push(anchor_runtime_rig::graph::GraphNode {
+        graph.nodes.push(anchor_runtime::graph::GraphNode {
             id: "bad".into(),
             agent: None,
             op: Some("run".into()),
@@ -816,11 +806,11 @@ mod tests {
             max_rounds: None,
         });
         graph.edges.extend([
-            anchor_runtime_rig::graph::GraphEdge {
+            anchor_runtime::graph::GraphEdge {
                 from_node: "command".into(),
                 to_node: "good".into(),
             },
-            anchor_runtime_rig::graph::GraphEdge {
+            anchor_runtime::graph::GraphEdge {
                 from_node: "command".into(),
                 to_node: "bad".into(),
             },

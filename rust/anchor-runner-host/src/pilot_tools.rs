@@ -7,7 +7,7 @@ use std::{
 
 use anchor_graph_host::{FilePluginCatalog, PluginCatalog, PluginDefinition};
 use anchor_platform_session::SessionStore;
-use anchor_runtime_rig::{
+use anchor_runtime::{
     ToolDefinition, ToolError, ToolPort, ToolResultContent, graph::GraphSnapshot,
 };
 use serde_json::{Value, json};
@@ -155,6 +155,7 @@ impl PilotTools {
                                 session: self.session.clone(),
                                 turn: self.turn.clone(),
                             }),
+                            oauth_owner: Some(crate::api::oauth::binding_owner(&self.owner)),
                         },
                         lease,
                     )

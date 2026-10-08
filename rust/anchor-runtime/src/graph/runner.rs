@@ -240,7 +240,7 @@ impl<'a, S: RunStore, A: ArtifactPort, N: NodeExecutionPort, C: RunControl>
                     input_commits,
                     prepared_input,
                 });
-                // Python's Graph runner records a pass/run when the node starts,
+                // The Graph runner records an invocation when the node starts,
                 // including attempts that stop at the provider budget boundary.
                 // Persist these counters with the cursor so resume observes the
                 // same started invocation without counting it a second time.

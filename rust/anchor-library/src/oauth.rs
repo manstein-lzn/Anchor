@@ -6,8 +6,14 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use rustix::fs::{AtFlags, FlockOperation, Mode, OFlags, flock, openat, renameat, unlinkat};
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+use rustix::{
+    fs::{AtFlags, FlockOperation, Mode, OFlags, flock, openat, renameat, unlinkat},
+    rand::{GetRandomFlags, getrandom},
+};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
 use url::Url;
 
 use crate::{InstallError, filesystem};
@@ -15,10 +21,25 @@ use crate::{InstallError, filesystem};
 const OAUTH_FORMAT: u32 = 1;
 const RECORD_NAME: &str = "authorization.json";
 const LOCK_NAME: &str = "refresh.lock";
+const PENDING_DIRECTORY: &str = "pending";
+const PENDING_LOCK_NAME: &str = "pending.lock";
 const MAX_BINDING_COMPONENT_BYTES: usize = 64;
 const MAX_METADATA_VALUE_BYTES: usize = 256;
 const MAX_SECRET_BYTES: usize = 64 * 1024;
 const MAX_RECORD_BYTES: u64 = 1024 * 1024;
+const OAUTH_TRANSACTION_RANDOM_BYTES: usize = 32;
+const MAX_OAUTH_ENDPOINT_BYTES: usize = 2048;
+const MAX_REDIRECT_URI_BYTES: usize = 2048;
+const OAUTH_AUTHORIZATION_PARAMETERS: [&str; 8] = [
+    "response_type",
+    "client_id",
+    "redirect_uri",
+    "state",
+    "code_challenge",
+    "code_challenge_method",
+    "scope",
+    "resource",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct OAuthBinding {
@@ -89,6 +110,244 @@ impl OAuthBinding {
     }
 }
 
+pub struct OAuthAuthorizationTransaction {
+    binding: OAuthBinding,
+    authorization_endpoint: Url,
+    redirect_uri: String,
+    resource: Option<String>,
+    client_id: String,
+    scope: Option<String>,
+    state: OAuthSecret,
+    code_verifier: OAuthSecret,
+    expires_at: u64,
+}
+
+impl OAuthAuthorizationTransaction {
+    pub fn new(
+        binding: OAuthBinding,
+        authorization_endpoint: impl AsRef<str>,
+        redirect_uri: impl Into<String>,
+        client_id: impl Into<String>,
+        scope: Option<String>,
+        now: u64,
+        expires_at: u64,
+    ) -> Result<Self, OAuthError> {
+        let authorization_endpoint =
+            validate_oauth_web_url(authorization_endpoint.as_ref(), MAX_OAUTH_ENDPOINT_BYTES)?;
+        if authorization_endpoint
+            .query_pairs()
+            .any(|(name, _)| OAUTH_AUTHORIZATION_PARAMETERS.contains(&name.as_ref()))
+        {
+            return Err(OAuthError::InvalidMetadata);
+        }
+
+        let redirect_uri = redirect_uri.into();
+        validate_oauth_web_url(&redirect_uri, MAX_REDIRECT_URI_BYTES)?;
+        let client_id = client_id.into();
+        validate_metadata_value(&client_id)?;
+        if let Some(scope) = &scope {
+            validate_metadata_value(scope)?;
+        }
+        if expires_at <= now {
+            return Err(OAuthError::InvalidMetadata);
+        }
+
+        Ok(Self {
+            binding,
+            authorization_endpoint,
+            redirect_uri,
+            resource: None,
+            client_id,
+            scope,
+            state: random_oauth_secret()?,
+            code_verifier: random_oauth_secret()?,
+            expires_at,
+        })
+    }
+
+    pub fn binding(&self) -> &OAuthBinding {
+        &self.binding
+    }
+
+    pub fn with_resource(mut self, resource: impl Into<String>) -> Result<Self, OAuthError> {
+        let resource = resource.into();
+        validate_oauth_web_url(&resource, MAX_REDIRECT_URI_BYTES)?;
+        self.resource = Some(resource);
+        Ok(self)
+    }
+
+    pub fn expires_at(&self) -> u64 {
+        self.expires_at
+    }
+
+    pub fn authorization_url(&self) -> Url {
+        let challenge = pkce_s256_challenge(self.code_verifier.expose_secret());
+        let mut url = self.authorization_endpoint.clone();
+        {
+            let mut query = url.query_pairs_mut();
+            query
+                .append_pair("response_type", "code")
+                .append_pair("client_id", &self.client_id)
+                .append_pair("redirect_uri", &self.redirect_uri)
+                .append_pair("state", self.state.expose_secret())
+                .append_pair("code_challenge", &challenge)
+                .append_pair("code_challenge_method", "S256");
+            if let Some(scope) = &self.scope {
+                query.append_pair("scope", scope);
+            }
+            if let Some(resource) = &self.resource {
+                query.append_pair("resource", resource);
+            }
+        }
+        url
+    }
+
+    pub fn complete(
+        self,
+        response: OAuthAuthorizationResponse<'_>,
+        now: u64,
+    ) -> Result<OAuthAuthorizationCode, OAuthError> {
+        let returned_state = match &response {
+            OAuthAuthorizationResponse::Code { state, .. }
+            | OAuthAuthorizationResponse::Error { state } => *state,
+        };
+        if now >= self.expires_at
+            || !constant_time_state_matches(self.state.expose_secret(), returned_state)
+        {
+            return Err(OAuthError::InvalidResponse);
+        }
+
+        let OAuthAuthorizationResponse::Code { code, .. } = response else {
+            return Err(OAuthError::InvalidResponse);
+        };
+        let code = OAuthSecret::new(code).map_err(|_| OAuthError::InvalidResponse)?;
+        Ok(OAuthAuthorizationCode {
+            binding: self.binding,
+            redirect_uri: self.redirect_uri,
+            resource: self.resource,
+            client_id: self.client_id,
+            scope: self.scope,
+            code,
+            code_verifier: self.code_verifier,
+        })
+    }
+}
+
+impl std::fmt::Debug for OAuthAuthorizationTransaction {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("OAuthAuthorizationTransaction")
+            .field("binding", &self.binding)
+            .field("authorization_endpoint", &self.authorization_endpoint)
+            .field("redirect_uri", &self.redirect_uri)
+            .field("resource", &self.resource)
+            .field("client_id", &self.client_id)
+            .field("scope", &self.scope)
+            .field("state", &self.state)
+            .field("code_verifier", &self.code_verifier)
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
+}
+
+pub enum OAuthAuthorizationResponse<'a> {
+    Code { state: &'a str, code: &'a str },
+    Error { state: &'a str },
+}
+
+pub struct OAuthAuthorizationCode {
+    binding: OAuthBinding,
+    redirect_uri: String,
+    resource: Option<String>,
+    client_id: String,
+    scope: Option<String>,
+    code: OAuthSecret,
+    code_verifier: OAuthSecret,
+}
+
+impl OAuthAuthorizationCode {
+    pub fn binding(&self) -> &OAuthBinding {
+        &self.binding
+    }
+
+    pub fn redirect_uri(&self) -> &str {
+        &self.redirect_uri
+    }
+
+    pub fn resource(&self) -> Option<&str> {
+        self.resource.as_deref()
+    }
+
+    pub fn client_id(&self) -> &str {
+        &self.client_id
+    }
+
+    pub fn scope(&self) -> Option<&str> {
+        self.scope.as_deref()
+    }
+
+    pub fn code(&self) -> &OAuthSecret {
+        &self.code
+    }
+
+    pub fn code_verifier(&self) -> &OAuthSecret {
+        &self.code_verifier
+    }
+}
+
+impl std::fmt::Debug for OAuthAuthorizationCode {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("OAuthAuthorizationCode")
+            .field("binding", &self.binding)
+            .field("redirect_uri", &self.redirect_uri)
+            .field("resource", &self.resource)
+            .field("client_id", &self.client_id)
+            .field("scope", &self.scope)
+            .field("code", &self.code)
+            .field("code_verifier", &self.code_verifier)
+            .finish()
+    }
+}
+
+fn random_oauth_secret() -> Result<OAuthSecret, OAuthError> {
+    let mut bytes = [0_u8; OAUTH_TRANSACTION_RANDOM_BYTES];
+    getrandom(&mut bytes[..], GetRandomFlags::empty()).map_err(|_| OAuthError::Storage)?;
+    OAuthSecret::new(URL_SAFE_NO_PAD.encode(bytes))
+}
+
+fn pkce_s256_challenge(verifier: &str) -> String {
+    URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()))
+}
+
+fn constant_time_state_matches(expected: &str, actual: &str) -> bool {
+    if expected.len() != actual.len() {
+        return false;
+    }
+    expected.as_bytes().ct_eq(actual.as_bytes()).unwrap_u8() == 1
+}
+
+fn validate_oauth_web_url(value: &str, maximum_bytes: usize) -> Result<Url, OAuthError> {
+    if value.len() > maximum_bytes {
+        return Err(OAuthError::InvalidMetadata);
+    }
+    let parsed = Url::parse(value).map_err(|_| OAuthError::InvalidMetadata)?;
+    if !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.fragment().is_some()
+        || parsed.host_str().is_none()
+    {
+        return Err(OAuthError::InvalidMetadata);
+    }
+    let secure = parsed.scheme() == "https";
+    let loopback = parsed.scheme() == "http"
+        && matches!(parsed.host_str(), Some("localhost" | "127.0.0.1" | "::1"));
+    if !secure && !loopback {
+        return Err(OAuthError::InvalidMetadata);
+    }
+    Ok(parsed)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OAuthAuthorizationMetadata {
@@ -97,6 +356,8 @@ pub struct OAuthAuthorizationMetadata {
     client_id: Option<String>,
     #[serde(default)]
     scope: Option<String>,
+    #[serde(default)]
+    resource: Option<String>,
 }
 
 impl OAuthAuthorizationMetadata {
@@ -107,6 +368,7 @@ impl OAuthAuthorizationMetadata {
             token_endpoint,
             client_id: None,
             scope: None,
+            resource: None,
         })
     }
 
@@ -124,6 +386,13 @@ impl OAuthAuthorizationMetadata {
         Ok(self)
     }
 
+    pub fn with_resource(mut self, resource: impl Into<String>) -> Result<Self, OAuthError> {
+        let resource = resource.into();
+        validate_oauth_web_url(&resource, MAX_REDIRECT_URI_BYTES)?;
+        self.resource = Some(resource);
+        Ok(self)
+    }
+
     pub fn token_endpoint(&self) -> &str {
         &self.token_endpoint
     }
@@ -134,6 +403,10 @@ impl OAuthAuthorizationMetadata {
 
     pub fn scope(&self) -> Option<&str> {
         self.scope.as_deref()
+    }
+
+    pub fn resource(&self) -> Option<&str> {
+        self.resource.as_deref()
     }
 }
 
@@ -350,7 +623,7 @@ pub enum OAuthError {
     InvalidResponse,
     #[error("OAuth authorization has no refresh token")]
     MissingRefreshToken,
-    #[error("OAuth authorization refresh failed and was revoked locally")]
+    #[error("OAuth authorization refresh request failed")]
     RefreshFailed,
     #[error("OAuth authorization was revoked")]
     Revoked,
@@ -383,6 +656,91 @@ impl FileOAuthTokenStore {
         self.revoke_locked(&locked)
     }
 
+    pub fn save_pending(
+        &self,
+        transaction: OAuthAuthorizationTransaction,
+        metadata: OAuthAuthorizationMetadata,
+    ) -> Result<(), OAuthError> {
+        validate_metadata(&metadata)?;
+        if metadata.client_id() != Some(transaction.client_id.as_str())
+            || metadata.scope() != transaction.scope.as_deref()
+            || metadata.resource() != transaction.resource.as_deref()
+        {
+            return Err(OAuthError::InvalidMetadata);
+        }
+        let state = transaction.state.expose_secret().to_owned();
+        let record = StoredPendingAuthorization::from_transaction(transaction, metadata);
+        let bytes = serde_json::to_vec(&record).map_err(|_| OAuthError::Storage)?;
+        let (directory_path, directory, lock) = self.pending_lock()?;
+        let temporary =
+            tempfile::NamedTempFile::new_in(&directory_path).map_err(|_| OAuthError::Storage)?;
+        temporary
+            .as_file()
+            .set_permissions(std::fs::Permissions::from_mode(0o600))
+            .map_err(|_| OAuthError::Storage)?;
+        let mut file = temporary.as_file();
+        file.write_all(&bytes).map_err(|_| OAuthError::Storage)?;
+        file.sync_all().map_err(|_| OAuthError::Storage)?;
+        renameat(
+            &directory,
+            temporary_file_name(&temporary)?,
+            &directory,
+            pending_record_name(&state),
+        )
+        .map_err(|_| OAuthError::Storage)?;
+        directory.sync_all().map_err(|_| OAuthError::Storage)?;
+        drop(lock);
+        Ok(())
+    }
+
+    pub fn consume_pending(
+        &self,
+        state: &str,
+        response: OAuthAuthorizationResponse<'_>,
+        now: u64,
+    ) -> Result<(OAuthAuthorizationCode, OAuthAuthorizationMetadata), OAuthError> {
+        if state.is_empty() || state.len() > MAX_SECRET_BYTES || state.chars().any(char::is_control)
+        {
+            return Err(OAuthError::NotAuthorized);
+        }
+        let (_directory_path, directory, lock) = self.pending_lock()?;
+        let name = pending_record_name(state);
+        let mut file = match openat(
+            &directory,
+            name.as_str(),
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        ) {
+            Ok(file) => File::from(file),
+            Err(rustix::io::Errno::NOENT) => return Err(OAuthError::NotAuthorized),
+            Err(_) => return Err(OAuthError::Storage),
+        };
+        ensure_private_file(&file)?;
+        let size = file.metadata().map_err(|_| OAuthError::Storage)?.len();
+        if size > MAX_RECORD_BYTES {
+            return Err(OAuthError::Storage);
+        }
+        let mut bytes = Vec::with_capacity(size as usize);
+        file.read_to_end(&mut bytes)
+            .map_err(|_| OAuthError::Storage)?;
+        let stored: StoredPendingAuthorization =
+            serde_json::from_slice(&bytes).map_err(|_| OAuthError::Storage)?;
+        if stored.format != OAUTH_FORMAT
+            || pending_record_name(&stored.state) != name
+            || !constant_time_state_matches(&stored.state, state)
+        {
+            return Err(OAuthError::Storage);
+        }
+        unlinkat(&directory, &name, AtFlags::empty()).map_err(|_| OAuthError::Storage)?;
+        directory.sync_all().map_err(|_| OAuthError::Storage)?;
+        drop(file);
+        drop(lock);
+
+        let (transaction, metadata) = stored.into_transaction()?;
+        let code = transaction.complete(response, now)?;
+        Ok((code, metadata))
+    }
+
     fn lock(&self, binding: &OAuthBinding) -> Result<LockedStore, OAuthError> {
         let (directory_path, directory) = self.binding_directory(binding)?;
         let lock = File::from(
@@ -401,6 +759,30 @@ impl FileOAuthTokenStore {
             directory,
             _lock: lock,
         })
+    }
+
+    fn pending_lock(&self) -> Result<(PathBuf, File, File), OAuthError> {
+        let (root_path, root) = filesystem::directory(&self.root, true).map_err(storage_error)?;
+        drop(root);
+        let (oauth_path, oauth) =
+            filesystem::directory(&root_path.join("oauth"), true).map_err(storage_error)?;
+        ensure_private_directory(&oauth)?;
+        let (directory_path, directory) =
+            filesystem::directory(&oauth_path.join(PENDING_DIRECTORY), true)
+                .map_err(storage_error)?;
+        ensure_private_directory(&directory)?;
+        let lock = File::from(
+            openat(
+                &directory,
+                PENDING_LOCK_NAME,
+                OFlags::RDWR | OFlags::CREATE | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::from_bits_truncate(0o600),
+            )
+            .map_err(|_| OAuthError::Storage)?,
+        );
+        ensure_private_file(&lock)?;
+        flock(&lock, FlockOperation::LockExclusive).map_err(|_| OAuthError::Storage)?;
+        Ok((directory_path, directory, lock))
     }
 
     fn binding_directory(&self, binding: &OAuthBinding) -> Result<(PathBuf, File), OAuthError> {
@@ -483,6 +865,84 @@ struct LockedStore {
     directory_path: PathBuf,
     directory: File,
     _lock: File,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredPendingAuthorization {
+    format: u32,
+    binding: OAuthBinding,
+    metadata: OAuthAuthorizationMetadata,
+    authorization_endpoint: String,
+    redirect_uri: String,
+    #[serde(default)]
+    resource: Option<String>,
+    client_id: String,
+    scope: Option<String>,
+    state: String,
+    code_verifier: String,
+    expires_at: u64,
+}
+
+impl StoredPendingAuthorization {
+    fn from_transaction(
+        transaction: OAuthAuthorizationTransaction,
+        metadata: OAuthAuthorizationMetadata,
+    ) -> Self {
+        Self {
+            format: OAUTH_FORMAT,
+            binding: transaction.binding,
+            metadata,
+            authorization_endpoint: transaction.authorization_endpoint.to_string(),
+            redirect_uri: transaction.redirect_uri,
+            resource: transaction.resource,
+            client_id: transaction.client_id,
+            scope: transaction.scope,
+            state: transaction.state.expose_secret().to_owned(),
+            code_verifier: transaction.code_verifier.expose_secret().to_owned(),
+            expires_at: transaction.expires_at,
+        }
+    }
+
+    fn into_transaction(
+        self,
+    ) -> Result<(OAuthAuthorizationTransaction, OAuthAuthorizationMetadata), OAuthError> {
+        validate_metadata(&self.metadata)?;
+        let authorization_endpoint =
+            validate_oauth_web_url(&self.authorization_endpoint, MAX_OAUTH_ENDPOINT_BYTES)?;
+        let redirect_uri = validate_oauth_web_url(&self.redirect_uri, MAX_REDIRECT_URI_BYTES)?;
+        if let Some(resource) = &self.resource {
+            validate_oauth_web_url(resource, MAX_REDIRECT_URI_BYTES)?;
+        }
+        validate_metadata_value(&self.client_id)?;
+        if self.metadata.client_id() != Some(self.client_id.as_str())
+            || self.metadata.scope() != self.scope.as_deref()
+            || self.metadata.resource() != self.resource.as_deref()
+        {
+            return Err(OAuthError::Storage);
+        }
+        let transaction = OAuthAuthorizationTransaction {
+            binding: OAuthBinding::new(
+                self.binding.provider,
+                self.binding.plugin,
+                self.binding.server,
+                self.binding.owner,
+            )?,
+            authorization_endpoint,
+            redirect_uri: redirect_uri.to_string(),
+            resource: self.resource,
+            client_id: self.client_id,
+            scope: self.scope,
+            state: OAuthSecret::new(self.state)?,
+            code_verifier: OAuthSecret::new(self.code_verifier)?,
+            expires_at: self.expires_at,
+        };
+        Ok((transaction, self.metadata))
+    }
+}
+
+fn pending_record_name(state: &str) -> String {
+    format!("{:x}.json", Sha256::digest(state.as_bytes()))
 }
 
 fn open_record(directory: &File) -> Result<Option<File>, OAuthError> {
@@ -598,6 +1058,9 @@ fn validate_metadata(metadata: &OAuthAuthorizationMetadata) -> Result<(), OAuthE
     }
     if let Some(scope) = &metadata.scope {
         validate_metadata_value(scope)?;
+    }
+    if let Some(resource) = &metadata.resource {
+        validate_oauth_web_url(resource, MAX_REDIRECT_URI_BYTES)?;
     }
     Ok(())
 }
@@ -782,7 +1245,6 @@ where
                 return Err(OAuthError::Revoked);
             }
             Err(OAuthTransportError::RequestFailed) => {
-                self.store.revoke_locked(&locked)?;
                 return Err(OAuthError::RefreshFailed);
             }
         };
@@ -864,6 +1326,319 @@ mod tests {
         expires_in: Option<u64>,
     ) -> OAuthTokenResponse {
         OAuthTokenResponse::new(access, refresh.map(str::to_owned), expires_in).unwrap()
+    }
+
+    fn new_test_transaction() -> OAuthAuthorizationTransaction {
+        test_transaction_for_owner("owner-a")
+    }
+
+    fn test_transaction_for_owner(owner: &str) -> OAuthAuthorizationTransaction {
+        OAuthAuthorizationTransaction::new(
+            binding(owner),
+            "https://provider.example/authorize?audience=api",
+            "https://anchor.example/oauth/callback",
+            "client-id",
+            Some("read write".into()),
+            100,
+            300,
+        )
+        .unwrap()
+        .with_resource("https://mcp.example/resource")
+        .unwrap()
+    }
+
+    fn query_value(url: &Url, key: &str) -> String {
+        url.query_pairs()
+            .find(|(name, _)| name == key)
+            .unwrap()
+            .1
+            .into_owned()
+    }
+
+    #[test]
+    fn pkce_s256_uses_the_rfc_7636_test_vector() {
+        assert_eq!(
+            pkce_s256_challenge("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"),
+            "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+        );
+    }
+
+    #[test]
+    fn authorization_transaction_builds_owner_bound_pkce_url_and_consumes_callback() {
+        let transaction = new_test_transaction();
+        let url = transaction.authorization_url();
+        let state = query_value(&url, "state");
+        let challenge = query_value(&url, "code_challenge");
+        let verifier = transaction.code_verifier.expose_secret().to_owned();
+        let transaction_debug = format!("{transaction:?}");
+
+        assert_eq!(transaction.binding().owner(), "owner-a");
+        assert!(!transaction_debug.contains(&state));
+        assert!(!transaction_debug.contains(&verifier));
+        assert_eq!(
+            url.query_pairs()
+                .filter(|(name, _)| name == "state")
+                .count(),
+            1
+        );
+        assert_eq!(query_value(&url, "response_type"), "code");
+        assert_eq!(query_value(&url, "client_id"), "client-id");
+        assert_eq!(
+            query_value(&url, "redirect_uri"),
+            "https://anchor.example/oauth/callback"
+        );
+        assert_eq!(query_value(&url, "scope"), "read write");
+        assert_eq!(
+            query_value(&url, "resource"),
+            "https://mcp.example/resource"
+        );
+        assert_eq!(query_value(&url, "audience"), "api");
+        assert_eq!(query_value(&url, "code_challenge_method"), "S256");
+        assert_eq!(challenge, pkce_s256_challenge(&verifier));
+        assert_eq!(state.len(), 43);
+        assert_eq!(verifier.len(), 43);
+        assert!(
+            state
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+        );
+
+        let completed = transaction
+            .complete(
+                OAuthAuthorizationResponse::Code {
+                    state: &state,
+                    code: "authorization-code",
+                },
+                200,
+            )
+            .unwrap();
+        assert_eq!(completed.binding().owner(), "owner-a");
+        assert_eq!(completed.code().expose_secret(), "authorization-code");
+        assert_eq!(completed.code_verifier().expose_secret(), verifier);
+        assert_eq!(
+            completed.redirect_uri(),
+            "https://anchor.example/oauth/callback"
+        );
+        assert_eq!(completed.client_id(), "client-id");
+        assert_eq!(completed.scope(), Some("read write"));
+        assert_eq!(completed.resource(), Some("https://mcp.example/resource"));
+        let debug = format!("{completed:?}");
+        assert!(!debug.contains("authorization-code"));
+        assert!(!debug.contains(&verifier));
+    }
+
+    #[test]
+    fn authorization_transaction_rejects_mismatched_expired_and_provider_error_callbacks() {
+        let transaction = new_test_transaction();
+        assert!(matches!(
+            transaction.complete(
+                OAuthAuthorizationResponse::Code {
+                    state: "wrong-state",
+                    code: "authorization-code",
+                },
+                200,
+            ),
+            Err(OAuthError::InvalidResponse)
+        ));
+
+        let transaction = new_test_transaction();
+        let state = query_value(&transaction.authorization_url(), "state");
+        assert!(matches!(
+            transaction.complete(
+                OAuthAuthorizationResponse::Code {
+                    state: &state,
+                    code: "authorization-code",
+                },
+                300,
+            ),
+            Err(OAuthError::InvalidResponse)
+        ));
+
+        let transaction = new_test_transaction();
+        let state = query_value(&transaction.authorization_url(), "state");
+        assert!(matches!(
+            transaction.complete(OAuthAuthorizationResponse::Error { state: &state }, 200),
+            Err(OAuthError::InvalidResponse)
+        ));
+
+        let first_owner_transaction = test_transaction_for_owner("owner-a");
+        let first_owner_state = query_value(&first_owner_transaction.authorization_url(), "state");
+        let second_owner_transaction = test_transaction_for_owner("owner-b");
+        assert!(matches!(
+            second_owner_transaction.complete(
+                OAuthAuthorizationResponse::Code {
+                    state: &first_owner_state,
+                    code: "authorization-code",
+                },
+                200,
+            ),
+            Err(OAuthError::InvalidResponse)
+        ));
+    }
+
+    #[test]
+    fn authorization_transaction_rejects_unsafe_and_ambiguous_configuration() {
+        for (endpoint, redirect_uri, expires_at) in [
+            (
+                "http://provider.example/authorize",
+                "https://anchor.example/callback",
+                300,
+            ),
+            (
+                "https://provider.example/authorize#fragment",
+                "https://anchor.example/callback",
+                300,
+            ),
+            (
+                "https://provider.example/authorize?state=attacker",
+                "https://anchor.example/callback",
+                300,
+            ),
+            (
+                "https://provider.example/authorize",
+                "http://public.example/callback",
+                300,
+            ),
+            (
+                "https://provider.example/authorize",
+                "https://anchor.example/callback",
+                100,
+            ),
+        ] {
+            assert!(matches!(
+                OAuthAuthorizationTransaction::new(
+                    binding("owner"),
+                    endpoint,
+                    redirect_uri,
+                    "client-id",
+                    None,
+                    100,
+                    expires_at,
+                ),
+                Err(OAuthError::InvalidMetadata)
+            ));
+        }
+
+        assert!(
+            OAuthAuthorizationTransaction::new(
+                binding("owner"),
+                "http://127.0.0.1:4321/authorize",
+                "http://localhost:4321/callback",
+                "client-id",
+                None,
+                100,
+                300,
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn pending_authorization_survives_restart_and_is_consumed_once() {
+        let root = tempdir().unwrap();
+        let store = FileOAuthTokenStore::new(root.path());
+        let target = binding("owner");
+        let metadata = OAuthAuthorizationMetadata::new("https://provider.example/token")
+            .unwrap()
+            .with_client_id("fixture-client")
+            .unwrap()
+            .with_scope("read")
+            .unwrap()
+            .with_resource("https://mcp.example/resource")
+            .unwrap();
+        let transaction = OAuthAuthorizationTransaction::new(
+            target.clone(),
+            "https://provider.example/authorize",
+            "https://anchor.example/oauth/callback",
+            "fixture-client",
+            Some("read".into()),
+            100,
+            200,
+        )
+        .unwrap()
+        .with_resource("https://mcp.example/resource")
+        .unwrap();
+        let url = transaction.authorization_url();
+        let state = query_value(&url, "state");
+        store.save_pending(transaction, metadata.clone()).unwrap();
+
+        let restarted_store = FileOAuthTokenStore::new(root.path());
+        let (code, restored_metadata) = restarted_store
+            .consume_pending(
+                &state,
+                OAuthAuthorizationResponse::Code {
+                    state: &state,
+                    code: "authorization-code",
+                },
+                150,
+            )
+            .unwrap();
+        assert_eq!(code.binding(), &target);
+        assert_eq!(code.code().expose_secret(), "authorization-code");
+        assert_eq!(code.redirect_uri(), "https://anchor.example/oauth/callback");
+        assert_eq!(restored_metadata, metadata);
+        assert_eq!(code.resource(), Some("https://mcp.example/resource"));
+        assert!(matches!(
+            restarted_store.consume_pending(
+                &state,
+                OAuthAuthorizationResponse::Code {
+                    state: &state,
+                    code: "authorization-code",
+                },
+                150,
+            ),
+            Err(OAuthError::NotAuthorized)
+        ));
+        let pending = root.path().join("oauth/pending");
+        let record = std::fs::read_dir(&pending)
+            .unwrap()
+            .filter_map(Result::ok)
+            .find(|entry| {
+                entry
+                    .path()
+                    .extension()
+                    .is_some_and(|extension| extension == "json")
+            })
+            .map(|entry| entry.path());
+        assert!(record.is_none());
+    }
+
+    #[test]
+    fn invalid_pending_callback_consumes_only_its_own_transaction() {
+        let root = tempdir().unwrap();
+        let store = FileOAuthTokenStore::new(root.path());
+        let metadata = OAuthAuthorizationMetadata::new("https://provider.example/token")
+            .unwrap()
+            .with_client_id("fixture-client")
+            .unwrap();
+        let transaction = OAuthAuthorizationTransaction::new(
+            binding("owner"),
+            "https://provider.example/authorize",
+            "https://anchor.example/oauth/callback",
+            "fixture-client",
+            None,
+            100,
+            200,
+        )
+        .unwrap();
+        let state = query_value(&transaction.authorization_url(), "state");
+        store.save_pending(transaction, metadata).unwrap();
+        assert!(matches!(
+            store.consume_pending(
+                &state,
+                OAuthAuthorizationResponse::Error { state: &state },
+                150,
+            ),
+            Err(OAuthError::InvalidResponse)
+        ));
+        assert!(matches!(
+            store.consume_pending(
+                &state,
+                OAuthAuthorizationResponse::Error { state: &state },
+                150,
+            ),
+            Err(OAuthError::NotAuthorized)
+        ));
     }
 
     #[test]
@@ -957,7 +1732,7 @@ mod tests {
     }
 
     #[test]
-    fn revoked_or_failed_refresh_removes_authorization() {
+    fn revoked_refresh_removes_authorization_but_transient_failure_preserves_it() {
         struct FailingTransport {
             error: OAuthTransportError,
         }
@@ -994,11 +1769,19 @@ mod tests {
                 OAuthTransportError::RequestFailed => OAuthError::RefreshFailed,
             };
             assert_eq!(client.access_token_at(&target, 20), Err(expected));
-            assert!(client.store().load(&target).unwrap().is_none());
-            assert!(matches!(
-                client.access_token_at(&target, 20),
-                Err(OAuthError::NotAuthorized)
-            ));
+            if error == OAuthTransportError::Revoked {
+                assert!(client.store().load(&target).unwrap().is_none());
+                assert!(matches!(
+                    client.access_token_at(&target, 20),
+                    Err(OAuthError::NotAuthorized)
+                ));
+            } else {
+                assert!(client.store().load(&target).unwrap().is_some());
+                assert_eq!(
+                    client.access_token_at(&target, 20),
+                    Err(OAuthError::RefreshFailed)
+                );
+            }
         }
     }
 

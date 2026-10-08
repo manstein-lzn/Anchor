@@ -1,6 +1,6 @@
 use super::tests::{completion, fixture, key, workspace};
 use super::*;
-use anchor_runtime_rig::graph::CallFileSelection;
+use anchor_runtime::graph::CallFileSelection;
 use serde_json::json;
 
 async fn freeze(

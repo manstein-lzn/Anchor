@@ -1,4 +1,4 @@
-/** The one way this page talks to `anchor-serve`.
+/** The one way this page talks to the Anchor Host.
  *
  * Its own module because two components need it: the page, and the file panel it opens inside a run. A
  * second copy of this would be a second place for the error handling to be subtly different.

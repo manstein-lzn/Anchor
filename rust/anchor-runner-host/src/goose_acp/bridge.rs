@@ -1,4 +1,4 @@
-use anchor_runtime_rig::{Cancellation, ToolPort};
+use anchor_runtime::{Cancellation, ToolPort};
 use axum::{
     Json, Router,
     body::Body,
@@ -665,8 +665,8 @@ impl Drop for Bridge {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use anchor_runtime_rig::ToolError;
-    use anchor_runtime_rig::graph::InvocationKey;
+    use anchor_runtime::ToolError;
+    use anchor_runtime::graph::InvocationKey;
     use rmcp::{
         ServiceExt,
         transport::{
@@ -723,7 +723,7 @@ mod tests {
     }
 
     impl ToolPort for SlowTools {
-        fn definitions(&self) -> Vec<anchor_runtime_rig::ToolDefinition> {
+        fn definitions(&self) -> Vec<anchor_runtime::ToolDefinition> {
             Vec::new()
         }
 
@@ -734,7 +734,7 @@ mod tests {
         ) -> std::pin::Pin<
             Box<
                 dyn std::future::Future<
-                        Output = Result<Vec<anchor_runtime_rig::ToolResultContent>, ToolError>,
+                        Output = Result<Vec<anchor_runtime::ToolResultContent>, ToolError>,
                     > + Send
                     + 'a,
             >,

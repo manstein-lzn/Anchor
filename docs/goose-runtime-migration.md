@@ -37,7 +37,7 @@
 
 | 阶段 | 交付 | 出口 |
 | --- | --- | --- |
-| G0 Kernel 去框架耦合 | Graph/Sandbox 与旧 Rig 执行器分离；旧路径暂时条件编译，不复制 Runner | 无 Rig 的 Kernel 构建与 normal dependency tree；旧公开接口定向回归 |
+| G0 Kernel 去框架耦合 | Graph/Sandbox 与 Agent 执行器分离，不复制 Runner；迁移初期曾暂时条件编译旧路径，清理阶段移除旧源码和 feature | 无旧框架的 Kernel 构建与 dependency tree；稳定产品契约定向回归 |
 | G1 Goose AgentNode 产品切片 | 从 A112 接入真实模型配置与 Plugin；结构化完成、原生历史、权限及未知结果核查后继续；复用 Goose compaction | 真实 Goose + 确定性 Provider 的小 Graph 验证结果、逐节点历史、workspace、Artifact、取消/杀进程与越权反例；再做少量真实 Provider 验收 |
 | G2 Pilot 同一执行层并删除旧依赖 | Pilot 工具经授权 MCP 接入同一 ACP 层；续聊、提问/回答、必要删除确认、SSE/重连、Session 身份；移走 resolver 等泄漏的 io-harness 类型 | AgentNode/Pilot 共用 Goose；标准 Host/build/test 依赖树无 io-harness/rig-agent/rig-core；旧记录不冒充 Goose 可恢复记录 |
 | G3 全 Rust 平台交付 | 复用现有 F3/F4 组件收口 Library/授权、渠道、官方工具和部署；WebUI 保持；候选版、旧数据策略与切换/回滚 | 无 Python 隔离发行环境通过现有用户流程；生产切换仍须独立授权 |
@@ -64,4 +64,4 @@ G3 继续按四个不重叠边界并行：Library 安装与 OAuth、官方学术
 
 常规回归用实际 Host、共享 Runner、实际 Goose 和确定性本地 Provider，只替换模型传输，不搜索数百论文或调用生产业务系统。检查完成结果、原生历史与工具配对、workspace、Artifact 和失败事实。Goose 原生文件是工作记录来源，ACP 显示事件不是另一套恢复日志；模型/Provider、提问/重启、压缩/长会话等真实组合分别如实验收。
 
-开发分支的标准构建可默认 Goose，但生产部署的 backend/配置仍不切换；新状态根不接管未完成旧 Run，不迁移凭据、不实际发送/发布。旧框架仅作为显式开发回归 feature 保留，标准服务端不自动 fallback。编译闭包去依赖、新产品切片通过、旧源码彻底删除、全 Rust 发行及生产切换是不同状态，不能提前合并为“迁移完成”。
+开发分支使用 Goose，生产部署的 backend/配置仍不切换；新状态根不接管未完成旧 Run，不迁移凭据、不实际发送/发布。旧执行源码、原型、feature 和专属 smoke 已退出维护树；官方后端、工具及回归/运维入口统一在 Rust workspace。旧工作记录与历史文档保留原身份，清理源码不转换用户数据。`anchor-devtools regression fixture` 与 `regression goose-fixture` 统一委托现有 `run_goose_fixture`，候选构建、预检和切换盘点使用同一原生 CLI。标准命令与覆盖边界见 [小型 Runtime Graph 回归](runtime-contract-tests.md)。编译闭包、产品切片、发行候选及生产切换是不同验收状态。

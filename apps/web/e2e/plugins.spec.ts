@@ -1,92 +1,76 @@
 import { expect, test } from '@playwright/test';
-import { spawn, execFileSync, type ChildProcess } from 'node:child_process';
-import { mkdtemp, mkdir, writeFile, symlink, rm } from 'node:fs/promises';
+import type { ChildProcess } from 'node:child_process';
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { createServer } from 'node:net';
+import { fixturePlugin, nativeHost, stop } from './fixtures/native-host';
 
-/** Uses the real API and sandbox, isolated from the developer's running research. */
-test('Plugin selection, lazy instructions and historical records work with a real library', async ({ page, request }) => {
+test('native Rust Library preserves Plugin selection, lazy resources and Op artifacts in the browser', async ({ page, request }) => {
   test.setTimeout(60000);
-  const repo = fileURLToPath(new URL('../../../', import.meta.url));
   const root = await mkdtemp(join(tmpdir(), 'anchor-plugin-browser-'));
-  const config = join(root, 'runtime.json');
-  const probe = createServer();
-  await new Promise<void>(resolve => probe.listen(0, '127.0.0.1', resolve));
-  const address = probe.address();
-  if (!address || typeof address === 'string') throw new Error('no test port');
-  const port = address.port;
-  await new Promise<void>(resolve => probe.close(() => resolve()));
-  const base = `http://127.0.0.1:${port}`;
-  let server: ChildProcess | undefined;
+  const host = await nativeHost(root);
+  await fixturePlugin(host.environment.ANCHOR_RUNNER_LIBRARY_ROOT!);
+  const base = host.base;
+  let backend: ChildProcess | undefined;
   try {
-    await mkdir(join(root, 'library/plugins'), { recursive: true });
-    await mkdir(join(root, 'library/tools/scholarly'), { recursive: true });
-    await symlink(join(repo, 'plugins/academic-research'), join(root, 'library/plugins/academic-research'));
-    await writeFile(join(root, 'library/tools/scholarly/tool.json'), JSON.stringify({
-      entrypoint: join(repo, '.venv/bin/anchor-scholarly'), environment: join(repo, '.venv'), imports: [join(repo, 'src')],
-    }));
-    await writeFile(config, JSON.stringify({ models: [] }));
-    server = spawn(join(repo, '.venv/bin/python'), ['-m', 'anchor', '--root', root,
-      '--config', config, '--host', '127.0.0.1', '--port', String(port)], {
-      cwd: repo, stdio: 'ignore', env: { ...process.env, ANCHOR_API_KEYS: '', ANCHOR_API_KEY: '' },
-    });
-    await expect(async () => expect((await request.get(`${base}/plugins`)).ok()).toBeTruthy()).toPass({ timeout: 10000 });
+    backend = host.start();
+    await expect(async () => expect((await request.get(`${base}/plugins`)).ok(), host.logs).toBeTruthy())
+      .toPass({ timeout: 20000 });
     const response = await request.post(`${base}/graphs`, { data: { name: 'plugin-proof', definition: {
-      entry: 'research', agents: { worker: { model: 'test', instructions: 'Use Plugin resources.' } },
+      entry: 'research', agents: { worker: { model: 'models.default', instructions: 'Use Plugin resources.' } },
       nodes: [{ id: 'research', agent: 'worker' }], edges: [],
     } } });
-    expect(response.ok()).toBeTruthy();
+    expect(response.ok(), await response.text()).toBeTruthy();
     await page.goto(base);
-    await page.locator('.react-flow__node').filter({ hasText: 'research' }).click();
-    const checkbox = page.getByRole('checkbox', { name: '学术调研' });
+    await page.getByLabel('当前工作流').selectOption('plugin-proof');
+    await page.locator('[data-id="research"]').click();
+    const checkbox = page.getByRole('checkbox', { name: '浏览器证据' });
     await checkbox.check();
     await page.getByRole('button', { name: '查看说明', exact: true }).click();
-    await expect(page.locator('.plugin-instructions').getByRole('heading', { name: '学术调研', exact: true })).toHaveCount(2);
-    await expect(page.locator('.plugin-instructions')).toContainText('/tools/scholarly/run');
-    expect((await request.get(`${base}/plugins/academic-research/files/skills/academic-research/SKILL.md`)).ok()).toBeTruthy();
+    await expect(page.locator('.plugin-instructions')).toContainText('/plugins/browser-plugin/resources/input.txt');
+    const skill = await request.get(`${base}/plugins/browser-plugin/files/skills/evidence/SKILL.md`);
+    expect(skill.ok()).toBeTruthy();
+    expect(skill.headers()['x-content-type-options']).toBe('nosniff');
+    const resource = await request.get(`${base}/plugins/browser-plugin/files/resources/input.txt`);
+    expect(await resource.text()).toBe('Native Plugin evidence');
     await page.getByRole('button', { name: '保存', exact: true }).click();
     await expect(async () => {
       const graph = await (await request.get(`${base}/graphs/plugin-proof`)).json();
-      expect(graph.definition.nodes[0].plugins).toEqual(['academic-research']);
+      expect(graph.definition.nodes[0].plugins).toEqual(['browser-plugin']);
     }).toPass();
     await expect(page.getByLabel('挂载 1 个 Plugin')).toBeVisible();
+    const frozen = await readFile(join(root, 'catalog/plugin-proof/plugins/browser-plugin/plugin.json'), 'utf8');
+    expect(frozen).toBe(await readFile(join(root, 'library/plugins/browser-plugin/plugin.json'), 'utf8'));
     await page.screenshot({ path: test.info().outputPath('plugin-editor.png'), fullPage: true });
     await page.setViewportSize({ width: 390, height: 844 });
     await expect(checkbox).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBeTruthy();
     await page.setViewportSize({ width: 1440, height: 1000 });
 
-    // Script only replaces the model; CLI, mounts, scholarly executable and Git are real.
-    const script = join(root, 'model.json');
-    await writeFile(script, JSON.stringify({ research: [
-      'cat /plugins/academic-research/skills/academic-research/SKILL.md > notes.md',
-      '/tools/scholarly/run --help > tool-help.txt',
-      'anchor-done --summary "Plugin and shared tool verified"',
-    ] }));
-    execFileSync(join(repo, '.venv/bin/python'), ['-m', 'anchor.simple', join(root, 'workspaces/plugin-proof'),
-      '--config', config], { cwd: repo, env: { ...process.env, ANCHOR_MODEL_SCRIPT: script }, timeout: 30000 });
-    const runs = await (await request.get(`${base}/runs`)).json();
-    const run = runs.runs[0];
-    expect(run.status).toBe('finished');
-    const detail = await (await request.get(`${base}/runs/${run.run}`)).json();
-    expect(detail.plugins.research[0].id).toBe('academic-research');
+    const op = await request.post(`${base}/graphs`, { data: { name: 'op-proof', definition: {
+      entry: 'build', ops: { build: { run: "printf 'native-plugin-management' > result.txt" } },
+      nodes: [{ id: 'build', op: 'build' }], edges: [],
+    } } });
+    expect(op.ok(), await op.text()).toBeTruthy();
     await page.reload();
-    await page.getByRole('button', { name: '运行看板', exact: true }).click();
-    await page.locator('.timeline-run').first().click();
-    await page.getByRole('button', { name: '查看节点与产物', exact: true }).click();
-    await page.locator('.react-flow__node').filter({ hasText: 'research' }).click();
-    await page.getByRole('button', { name: 'Plugin', exact: true }).click();
-    await expect(page.locator('.plugins-panel')).toContainText('学术调研');
-    await expect(page.locator('.plugins-panel')).toContainText('内容摘要');
-    await page.screenshot({ path: test.info().outputPath('plugin-run.png'), fullPage: true });
+    await page.getByLabel('当前工作流').selectOption('op-proof');
+    page.on('dialog', dialog => dialog.accept('{}'));
+    await page.getByRole('button', { name: '运行工作流', exact: true }).click();
+    await expect(page.locator('.execution-node.state-completed')).toHaveCount(1, { timeout: 20000 });
+    await page.locator('[data-id="build"]').click();
+    await page.getByRole('button', { name: '文件', exact: true }).click();
+    await page.getByRole('button', { name: /result\.txt/ }).click();
+    await expect(page.locator('.file-preview')).toHaveText('native-plugin-management');
+    const runs = (await (await request.get(`${base}/runs`)).json()).runs;
+    expect(runs).toHaveLength(1);
+    expect(runs[0].status).toBe('completed');
+    const artifact = await (await request.get(`${base}/runs/${runs[0].run}/files/build/result.txt`)).json();
+    expect(artifact.text).toBe('native-plugin-management');
+    await writeFile(test.info().outputPath('plugin-evidence.json'), JSON.stringify({ status: 'passed',
+      real_model_calls: 0, native_library: true, frozen_plugin: true, run: runs[0].run, artifact }, null, 2));
   } finally {
-    if (server && server.exitCode === null) {
-      const exited = new Promise<void>(resolve => server!.once('exit', () => resolve()));
-      server.kill();
-      await exited;
-    }
-    await rm(root, { recursive: true, force: true });
+    await stop(backend);
+    await writeFile(join(root, 'host.log'), host.logs);
+    console.log(`Native Plugin browser fixture: ${root}`);
   }
 });

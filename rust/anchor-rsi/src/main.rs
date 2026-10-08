@@ -16,6 +16,10 @@ use tokio_util::sync::CancellationToken;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let arguments = std::env::args().skip(1).collect::<Vec<_>>();
+    if !arguments.is_empty() && arguments.as_slice() != ["serve"] {
+        return anchor_rsi::cli::run(&arguments).await.map_err(Into::into);
+    }
     let evidence = Arc::new(Evidence::collect(Config::from_environment()?)?);
     let ecosystem = Arc::new(Ecosystem::new()?);
     let service = RsiService {

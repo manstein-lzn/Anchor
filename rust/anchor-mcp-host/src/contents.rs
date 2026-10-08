@@ -1,22 +1,9 @@
-use anchor_runtime_rig::ToolResultContent;
+use anchor_runtime::ToolResultContent;
 use rmcp::model::CallToolResult;
 
 use crate::McpHostError;
 
-#[cfg(feature = "rig-legacy")]
 pub(super) fn result_contents(
-    result: &CallToolResult,
-) -> Result<Vec<ToolResultContent>, McpHostError> {
-    rig_rmcp::mcp_result_output(result)
-        .map(|output| output.into_content())
-        .map_err(|_| McpHostError::Encode("unsupported tool result".into()))
-}
-
-#[cfg(not(feature = "rig-legacy"))]
-pub(super) use native_contents as result_contents;
-
-#[cfg(any(test, not(feature = "rig-legacy")))]
-pub(super) fn native_contents(
     result: &CallToolResult,
 ) -> Result<Vec<ToolResultContent>, McpHostError> {
     use rmcp::model::{ContentBlock, ResourceContents};
@@ -42,7 +29,7 @@ pub(super) fn native_contents(
             ContentBlock::Text(text) => mapped.push(ToolResultContent::text(text.text.clone())),
             ContentBlock::Image(image) => {
                 images.validate(&image.data, &image.mime_type)?;
-                mapped.push(image_content(&image.data, &image.mime_type));
+                mapped.push(ToolResultContent::image(&image.data, &image.mime_type));
             }
             ContentBlock::Resource(resource)
                 if matches!(
@@ -59,7 +46,7 @@ pub(super) fn native_contents(
                 } = &resource.resource
                 {
                     images.validate(blob, mime_type)?;
-                    mapped.push(image_content(blob, mime_type));
+                    mapped.push(ToolResultContent::image(blob, mime_type));
                 }
             }
             _ => mapped.push(ToolResultContent::json(
@@ -85,28 +72,6 @@ pub(super) fn native_contents(
     }
 
     Ok(mapped)
-}
-
-#[cfg(any(test, not(feature = "rig-legacy")))]
-fn image_content(data: &str, mime_type: &str) -> ToolResultContent {
-    #[cfg(not(feature = "rig-legacy"))]
-    {
-        ToolResultContent::image(data, mime_type)
-    }
-    #[cfg(feature = "rig-legacy")]
-    {
-        use rig_core::message::{DocumentSourceKind, Image, ImageMediaType};
-        ToolResultContent::Image(Image {
-            data: DocumentSourceKind::base64(data),
-            media_type: Some(match mime_type {
-                "image/png" => ImageMediaType::PNG,
-                "image/jpeg" => ImageMediaType::JPEG,
-                _ => ImageMediaType::WEBP,
-            }),
-            detail: None,
-            additional_params: None,
-        })
-    }
 }
 
 #[cfg(test)]

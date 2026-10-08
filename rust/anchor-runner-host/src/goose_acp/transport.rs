@@ -8,7 +8,7 @@ use std::{
     time::Duration,
 };
 
-use anchor_runtime_rig::Cancellation;
+use anchor_runtime::Cancellation;
 use serde_json::{Value, json};
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},

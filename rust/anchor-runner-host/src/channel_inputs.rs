@@ -1,6 +1,6 @@
 //! Request bytes frozen as Run-owned inputs. No attachment grants a host path.
 use crate::{application::RunMetadata, create_durable_directory};
-use anchor_runtime_rig::{ReadOnlyInput, graph::InvocationKey};
+use anchor_runtime::{ReadOnlyInput, graph::InvocationKey};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use image::ImageFormat;
 use serde::{Deserialize, Serialize};

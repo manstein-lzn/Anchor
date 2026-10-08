@@ -1,16 +1,12 @@
 //! Executes one node request; graph scheduling remains in the shared Runner.
 use super::{HostArtifacts, create_durable_directory, write_durable};
 use crate::{local_inputs::LocalInputs, op, tool_host};
-#[cfg(feature = "legacy-regression")]
-pub(crate) use anchor_io_harness_runtime::node_port::{
-    NodeConversationHint, NodeHostResolver, NodeImage, ToolResolution,
-};
-use anchor_runtime_rig::graph::{
+use anchor_runtime::graph::{
     CompletionFact, FileRunStore, GraphError, GraphRunRecord, InvocationKey, NodeCompletion,
     NodeExecutionCapabilities, NodeExecutionOutcome, NodeExecutionPort, NodeExecutionRequest,
     NodeKind, PluginBinding, RecoveryDecision, RunStore,
 };
-use anchor_runtime_rig::{NetworkPolicy, SandboxError, SandboxPort, SandboxRequest, SandboxStatus};
+use anchor_runtime::{NetworkPolicy, SandboxError, SandboxPort, SandboxRequest, SandboxStatus};
 use anchor_sandbox_bwrap::BubblewrapSandbox;
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -23,12 +19,10 @@ use std::{
     time::Duration,
 };
 
-#[cfg(not(feature = "legacy-regression"))]
 mod contracts;
 mod conversation;
 mod media;
 
-#[cfg(not(feature = "legacy-regression"))]
 pub(crate) use contracts::{NodeConversationHint, NodeHostResolver, NodeImage, ToolResolution};
 
 pub(crate) fn conversation_hint_for(
@@ -50,15 +44,12 @@ pub(crate) struct HostNodes {
     pub(crate) facts_root: PathBuf,
     pub(crate) io_resolver: std::sync::Arc<HostIoResolver>,
     pub(crate) mcp: tool_host::McpToolConfig,
-    #[cfg(feature = "legacy-regression")]
-    pub(crate) io_nodes:
-        Option<anchor_io_harness_runtime::node_port::IoHarnessNodePort<HostIoResolver>>,
     pub(crate) goose_nodes: Option<crate::goose_acp::GooseNodePort>,
 }
 
 /// Resolves only resources already frozen into a Graph Run. Tool clients and
-/// sandbox access are owned by the returned ToolPort so the io-harness worker
-/// can bind them inside its dedicated runtime without borrowing HostNodes.
+/// sandbox access are owned by the returned ToolPort so the Goose MCP bridge
+/// can bind them without borrowing HostNodes.
 pub(crate) struct HostIoResolver {
     artifacts: HostArtifacts,
     sandbox: std::sync::Arc<BubblewrapSandbox>,
@@ -173,7 +164,7 @@ impl HostIoResolver {
     fn local_input_mounts(
         &self,
         key: &InvocationKey,
-    ) -> Result<Vec<anchor_runtime_rig::ReadOnlyInput>, String> {
+    ) -> Result<Vec<anchor_runtime::ReadOnlyInput>, String> {
         let record = self
             .run_store
             .load(&key.run_id)
@@ -229,10 +220,16 @@ impl HostIoResolver {
         }))
     }
 
+    fn oauth_owner_for_run(&self, run_id: &str) -> Result<Option<String>, String> {
+        crate::application::metadata::load(self.local_inputs.state_root(), run_id)
+            .map(|metadata| metadata.and_then(|metadata| metadata.oauth_owner))
+            .map_err(|error| format!("OAuth Run owner is unavailable: {error:?}"))
+    }
+
     fn plugin_mounts(
         &self,
         bindings: &[PluginBinding],
-    ) -> Result<Vec<anchor_runtime_rig::ReadOnlyInput>, String> {
+    ) -> Result<Vec<anchor_runtime::ReadOnlyInput>, String> {
         if bindings
             .iter()
             .all(|binding| binding.id == "fake-tools" && binding.resources.is_empty())
@@ -262,14 +259,6 @@ impl NodeHostResolver for HostIoResolver {
             })
             .collect())
     }
-    #[cfg(feature = "legacy-regression")]
-    fn resume_after_interleaving(&self, request: &NodeExecutionRequest) -> bool {
-        crate::application::metadata::load(self.local_inputs.state_root(), &request.key.run_id)
-            .ok()
-            .flatten()
-            .is_some_and(|metadata| metadata.session_call.is_some())
-    }
-
     fn conversation_hint(
         &self,
         request: &NodeExecutionRequest,
@@ -352,7 +341,12 @@ impl NodeHostResolver for HostIoResolver {
                 .map_err(|error| error.to_string())?;
             readonly_inputs.extend(self.plugin_mounts(&request.plugins)?);
             readonly_inputs.extend(local_inputs);
-            let mcp = self.catalog_config(&request.plugins)?;
+            let mut mcp = self.catalog_config(&request.plugins)?;
+            mcp.authorize_oauth(
+                self.oauth_owner_for_run(&request.key.run_id)?,
+                request.network,
+            )
+            .await?;
             let plugins = self
                 .tools
                 .assemble_with_sandbox(
@@ -383,7 +377,7 @@ impl NodeHostResolver for HostIoResolver {
                 )
                 .with_environment(self.mcp.environment.clone())
                 .with_network(request.network),
-            ) as std::sync::Arc<dyn anchor_runtime_rig::ToolPort>;
+            ) as std::sync::Arc<dyn anchor_runtime::ToolPort>;
             Ok(match conversation {
                 Some(conversation) => self.conversation_tools(tools, &request.key, conversation),
                 None => tools,
@@ -443,19 +437,7 @@ pub(crate) fn load_host_completion_fact(
     Ok(CompletionFact::NotStarted)
 }
 
-#[cfg(feature = "legacy-regression")]
-fn merge_agent_completion_facts(rig: CompletionFact, io_harness: CompletionFact) -> CompletionFact {
-    match (&rig, &io_harness) {
-        (CompletionFact::NotStarted, _) => io_harness,
-        (_, CompletionFact::NotStarted) => rig,
-        _ if rig == io_harness => rig,
-        _ => CompletionFact::Uncertain(
-            "legacy Rig and io-harness node facts conflict; automatic replay is refused".into(),
-        ),
-    }
-}
-
-/// Read the deterministic Op routing marker used by the Python Op runtime.
+/// Read the deterministic routing marker written by the anchor-route Op helper.
 /// The graph kernel remains responsible for checking that the selected route
 /// is an actual outgoing edge, and for requiring a choice when there are
 /// multiple exits.
@@ -559,15 +541,9 @@ impl HostNodes {
             workspace_readonly: vec![],
             tool_dirs: vec![],
             environment: vec![
-                anchor_runtime_rig::SandboxEnvironment::new(
-                    "ANCHOR_NODE",
-                    request.key.node_id.clone(),
-                ),
-                anchor_runtime_rig::SandboxEnvironment::new(
-                    "ANCHOR_ROUTES",
-                    request.routes.join(","),
-                ),
-                anchor_runtime_rig::SandboxEnvironment::new("ANCHOR_INPUT", input),
+                anchor_runtime::SandboxEnvironment::new("ANCHOR_NODE", request.key.node_id.clone()),
+                anchor_runtime::SandboxEnvironment::new("ANCHOR_ROUTES", request.routes.join(",")),
+                anchor_runtime::SandboxEnvironment::new("ANCHOR_INPUT", input),
             ],
             network: if request.network {
                 NetworkPolicy::Enabled
@@ -629,16 +605,7 @@ impl HostNodes {
 impl NodeExecutionPort for HostNodes {
     fn capabilities(&self) -> NodeExecutionCapabilities {
         NodeExecutionCapabilities {
-            agent: {
-                #[cfg(feature = "legacy-regression")]
-                {
-                    self.io_nodes.is_some() || self.goose_nodes.is_some()
-                }
-                #[cfg(not(feature = "legacy-regression"))]
-                {
-                    self.goose_nodes.is_some()
-                }
-            },
+            agent: self.goose_nodes.is_some(),
             op_run: true,
             exact_provider_request_budget: false,
         }
@@ -654,8 +621,7 @@ impl NodeExecutionPort for HostNodes {
     ) -> Pin<Box<dyn std::future::Future<Output = Result<CompletionFact, GraphError>> + Send + 'a>>
     {
         Box::pin(async move {
-            let rig = load_host_completion_fact(&self.facts_root, key)?;
-            #[cfg(not(feature = "legacy-regression"))]
+            let host = load_host_completion_fact(&self.facts_root, key)?;
             if crate::run_data::legacy_invocation_exists(
                 self.io_resolver.local_inputs.state_root(),
                 key,
@@ -668,45 +634,25 @@ impl NodeExecutionPort for HostNodes {
             }
             if let Some(nodes) = &self.goose_nodes {
                 let goose = nodes.completion_fact(key)?;
-                return Ok(match (&rig, &goose) {
+                return Ok(match (&host, &goose) {
                     (CompletionFact::NotStarted, _) => goose,
-                    (_, CompletionFact::NotStarted) => rig,
-                    _ if rig == goose => rig,
+                    (_, CompletionFact::NotStarted) => host,
+                    _ if host == goose => host,
                     _ => CompletionFact::Uncertain("host and Goose node facts conflict".into()),
                 });
             }
-            #[cfg(feature = "legacy-regression")]
-            {
-                let io_harness = match &self.io_nodes {
-                    Some(nodes) => nodes.completion_fact(key).await?,
-                    None => CompletionFact::NotStarted,
-                };
-                Ok(merge_agent_completion_facts(rig, io_harness))
-            }
-            #[cfg(not(feature = "legacy-regression"))]
-            Ok(rig)
+            Ok(host)
         })
     }
     fn record_recovery_decision(
         &self,
-        key: &InvocationKey,
-        attempt_id: i64,
-        decision: RecoveryDecision,
+        _key: &InvocationKey,
+        _attempt_id: i64,
+        _decision: RecoveryDecision,
     ) -> Result<(), GraphError> {
-        #[cfg(feature = "legacy-regression")]
-        {
-            let nodes = self.io_nodes.as_ref().ok_or_else(|| {
-                GraphError::Unsupported("io-harness Agent runtime is not configured".into())
-            })?;
-            nodes.record_recovery_decision(key, attempt_id, decision)
-        }
-        #[cfg(not(feature = "legacy-regression"))]
-        {
-            let _ = (key, attempt_id, decision);
-            Err(GraphError::Unsupported(
-                "legacy Agent recovery is disabled in the standard Goose Host".into(),
-            ))
-        }
+        Err(GraphError::Unsupported(
+            "legacy Agent recovery is disabled in the standard Goose Host".into(),
+        ))
     }
     fn execute<'a>(
         &'a self,
@@ -715,7 +661,6 @@ impl NodeExecutionPort for HostNodes {
         Box<dyn std::future::Future<Output = Result<NodeExecutionOutcome, GraphError>> + Send + 'a>,
     > {
         if request.kind == NodeKind::Agent {
-            #[cfg(not(feature = "legacy-regression"))]
             match crate::run_data::legacy_invocation_exists(
                 self.io_resolver.local_inputs.state_root(),
                 &request.key,
@@ -732,13 +677,6 @@ impl NodeExecutionPort for HostNodes {
             }
             if let Some(nodes) = &self.goose_nodes {
                 return Box::pin(nodes.execute(request));
-            }
-            #[cfg(feature = "legacy-regression")]
-            if let Some(nodes) = &self.io_nodes {
-                // io-harness owns the durable wall-time budget and observes
-                // cancellation at step boundaries. Do not race it with an outer
-                // timeout that would detach its blocking worker.
-                return nodes.execute(request);
             }
             return Box::pin(async {
                 Err(GraphError::Unsupported(
@@ -766,49 +704,15 @@ impl NodeExecutionPort for HostNodes {
     }
 }
 
-#[cfg(all(test, feature = "legacy-regression"))]
-mod io_resolver_tests {
+#[cfg(test)]
+mod resolver_tests {
     use super::*;
-    use anchor_graph_host::{GraphCatalog, InProcessGraphHost, LoadedGraphBundle};
-    use anchor_io_harness_runtime::node_port::IoHarnessNodePort;
-    use anchor_runtime_rig::graph::{
-        GraphRunRecord, GraphRunner, GraphSnapshot, InvocationKey, RunControl, RunStatus, RunStore,
-    };
+    use anchor_runtime::graph::GraphSnapshot;
     use anchor_sandbox_bwrap::BubblewrapPolicy;
-    use rig_core::test_utils::{MockCompletionModel, MockTurn};
-
-    struct ChildBundleCatalog(LoadedGraphBundle);
-
-    impl GraphCatalog for ChildBundleCatalog {
-        fn snapshot(&self, name: &str) -> Result<Option<GraphSnapshot>, GraphError> {
-            Ok((name == "child").then(|| self.0.snapshot.clone()))
-        }
-
-        fn bundle(&self, name: &str) -> Result<Option<LoadedGraphBundle>, GraphError> {
-            Ok((name == "child").then(|| self.0.clone()))
-        }
-    }
-    use serde_json::json;
     use std::sync::atomic::AtomicBool;
 
-    struct NoControl;
-
-    impl RunControl for NoControl {
-        fn pause_requested(&self) -> bool {
-            false
-        }
-
-        fn stop_requested(&self) -> bool {
-            false
-        }
-
-        fn cancellation(&self) -> anchor_runtime_rig::Cancellation {
-            std::sync::Arc::new(AtomicBool::new(false))
-        }
-    }
-
     #[tokio::test]
-    async fn io_resolver_returns_owned_anchor_tools_from_frozen_plugin_bindings() {
+    async fn resolver_returns_owned_anchor_tools_from_frozen_plugin_bindings() {
         let root = tempfile::tempdir().unwrap();
         let workspace_root = root.path().join("workspaces");
         let artifacts_root = root.path().join("artifacts");
@@ -828,7 +732,7 @@ mod io_resolver_tests {
             .resolve_fixture_plugins(&["fake-tools".into()])
             .unwrap();
         let store = FileRunStore::new(root.path().join("runs"));
-        let snapshot = anchor_runtime_rig::graph::GraphSnapshot::admit(json!({
+        let snapshot = anchor_runtime::graph::GraphSnapshot::admit(json!({
             "objective":"resolver test","entry":"agent","agents":{"worker":{"model":"fixture"}},
             "ops":{},"nodes":[{"id":"agent","agent":"worker","plugins":["fake-tools"]}],"edges":[]
         }))
@@ -1013,389 +917,5 @@ mod io_resolver_tests {
         )
         .unwrap();
         assert!(resolver.tools(&request).await.is_err());
-    }
-
-    #[test]
-    fn legacy_rig_facts_are_reused_or_fenced_during_io_harness_migration() {
-        let root = tempfile::tempdir().unwrap();
-        let key = InvocationKey {
-            run_id: "legacy-run".into(),
-            graph_digest: "graph".into(),
-            node_id: "agent".into(),
-            invocation: 1,
-        };
-        let started = root.path().join(format!("{}.started", fact_stem(&key)));
-        std::fs::write(started, b"started\n").unwrap();
-        let legacy = load_host_completion_fact(root.path(), &key).unwrap();
-        assert!(matches!(legacy, CompletionFact::Uncertain(_)));
-        assert!(matches!(
-            merge_agent_completion_facts(legacy, CompletionFact::NotStarted),
-            CompletionFact::Uncertain(_)
-        ));
-
-        let completion = NodeCompletion {
-            submission: "already-done".into(),
-            route: None,
-            model_requests: 1,
-            output: serde_json::Value::Null,
-        };
-        assert_eq!(
-            merge_agent_completion_facts(
-                CompletionFact::Completed(completion.clone()),
-                CompletionFact::NotStarted,
-            ),
-            CompletionFact::Completed(completion.clone())
-        );
-        let conflicting = NodeCompletion {
-            submission: "different-result".into(),
-            ..completion.clone()
-        };
-        assert!(matches!(
-            merge_agent_completion_facts(
-                CompletionFact::Completed(completion),
-                CompletionFact::Completed(conflicting),
-            ),
-            CompletionFact::Uncertain(_)
-        ));
-    }
-
-    #[tokio::test]
-    async fn graph_runner_executes_io_agent_with_owned_plugin_and_bubblewrap_tools() {
-        let root = tempfile::tempdir().unwrap();
-        let workspace_root = root.path().join("workspaces");
-        let artifacts_root = root.path().join("artifacts");
-        let state_root = root.path().join("state");
-        std::fs::create_dir_all(&workspace_root).unwrap();
-        std::fs::create_dir_all(&artifacts_root).unwrap();
-        let sandbox = std::sync::Arc::new(
-            BubblewrapSandbox::new(
-                BubblewrapPolicy::new("bwrap", ["sh"])
-                    .authorize_workspace_root(&workspace_root)
-                    .authorize_readonly_input_root(&artifacts_root)
-                    .authorize_readonly_destination_root("/in"),
-            )
-            .unwrap(),
-        );
-        let plugin_tools = tool_host::PluginToolHost::new(["fake-tools".to_owned()]);
-        let binding = plugin_tools
-            .resolve_fixture_plugins(&["fake-tools".into()])
-            .unwrap()
-            .remove(0);
-        let store = anchor_runtime_rig::graph::FileRunStore::new(state_root.join("runs"));
-        let resolver = std::sync::Arc::new(HostIoResolver::new(
-            HostArtifacts::new(artifacts_root.clone(), workspace_root),
-            std::sync::Arc::clone(&sandbox),
-            std::sync::Arc::new(plugin_tools),
-            tool_host::McpToolConfig::default(),
-            BTreeMap::from([(binding.id.clone(), binding.clone())]),
-            store.clone(),
-            LocalInputs::new(state_root.clone(), None).unwrap(),
-        ));
-        let model = MockCompletionModel::from_turns([
-            MockTurn::tool_call(
-                "echo-1",
-                tool_host::FAKE_ECHO_TOOL,
-                json!({"value":"ready"}),
-            ),
-            MockTurn::tool_call(
-                "run-1",
-                crate::node_tools::RUN_TOOL_NAME,
-                json!({"command":["sh","-c","printf sandbox-ok > result.txt"]}),
-            ),
-            MockTurn::tool_call(
-                "completion-1",
-                "final_result",
-                json!({"summary":"host-tools-ok"}),
-            ),
-        ])
-        .erase();
-        let io_nodes = IoHarnessNodePort::new_with_default_policy(
-            state_root.join("io-harness/facts"),
-            state_root.join("io-harness/store"),
-            model,
-            std::sync::Arc::clone(&resolver),
-        );
-        let host_nodes = HostNodes {
-            sandbox,
-            allowed_commands: vec!["sh".into()],
-            artifacts: HostArtifacts::new(artifacts_root.clone(), root.path().join("workspaces")),
-            facts_root: state_root.join("facts"),
-            io_resolver: resolver,
-            mcp: tool_host::McpToolConfig::default(),
-            io_nodes: Some(io_nodes),
-            goose_nodes: None,
-        };
-        let snapshot = GraphSnapshot::admit(json!({
-            "objective":"io-host-tool-integration",
-            "entry":"work",
-            "agents":{"worker":{"model":"fixture","instructions":"Use the provided tools."}},
-            "ops":{},
-            "nodes":[{"id":"work","agent":"worker","plugins":["fake-tools"]}],
-            "edges":[]
-        }))
-        .unwrap();
-        let record =
-            GraphRunRecord::create_with_id(snapshot, serde_json::Value::Null, "io-host-run")
-                .unwrap();
-        let store = anchor_runtime_rig::graph::FileRunStore::new(state_root.join("runs"));
-        let artifacts = HostArtifacts::new(artifacts_root, root.path().join("workspaces"));
-
-        let completed = GraphRunner::new(&store, &artifacts, &host_nodes, &NoControl)
-            .run(record)
-            .await
-            .unwrap();
-        assert_eq!(completed.status, RunStatus::Completed);
-        let commit = &completed.results["work"][0].commit;
-        assert!(
-            artifacts
-                .files_path(commit)
-                .unwrap()
-                .join("result.txt")
-                .is_file()
-        );
-        assert_eq!(
-            std::fs::read(artifacts.files_path(commit).unwrap().join("result.txt")).unwrap(),
-            b"sandbox-ok"
-        );
-    }
-
-    #[tokio::test]
-    async fn op_call_wait_runs_child_agent_with_child_only_fixture_plugin() {
-        let root = tempfile::tempdir().unwrap();
-        let workspace_root = root.path().join("workspaces");
-        let artifacts_root = root.path().join("artifacts");
-        let state_root = root.path().join("state");
-        std::fs::create_dir_all(&workspace_root).unwrap();
-        std::fs::create_dir_all(&artifacts_root).unwrap();
-        let sandbox = std::sync::Arc::new(
-            BubblewrapSandbox::new(
-                BubblewrapPolicy::new("bwrap", ["sh"])
-                    .authorize_workspace_root(&workspace_root)
-                    .authorize_readonly_input_root(&artifacts_root)
-                    .authorize_readonly_destination_root("/in"),
-            )
-            .unwrap(),
-        );
-        let plugin_tools =
-            std::sync::Arc::new(tool_host::PluginToolHost::new(["fake-tools".to_owned()]));
-        let binding = plugin_tools
-            .resolve_fixture_plugins(&["fake-tools".into()])
-            .unwrap()
-            .remove(0);
-        let child_snapshot = GraphSnapshot::admit(json!({
-            "objective":"child plugin tool acceptance",
-            "entry":"work",
-            "agents":{"worker":{"model":"fixture","instructions":"Call the fake echo tool once, then call final_result with a summary."}},
-            "ops":{},
-            "nodes":[{"id":"work","agent":"worker","plugins":["fake-tools"]}],
-            "edges":[]
-        }))
-        .unwrap();
-        let catalog = ChildBundleCatalog(LoadedGraphBundle {
-            authoring_definition: serde_json::to_value(&child_snapshot).unwrap(),
-            snapshot: child_snapshot,
-            plugins: vec![binding.clone()],
-        });
-        let store = anchor_runtime_rig::graph::FileRunStore::new(state_root.join("runs"));
-        let artifacts = HostArtifacts::new(artifacts_root.clone(), workspace_root.clone());
-        // The parent has no Plugin bindings. The child binding must be accepted
-        // from its own durable GraphRunRecord, written by child admission.
-        let resolver = std::sync::Arc::new(HostIoResolver::new(
-            artifacts.clone(),
-            std::sync::Arc::clone(&sandbox),
-            plugin_tools,
-            tool_host::McpToolConfig::default(),
-            BTreeMap::new(),
-            store.clone(),
-            LocalInputs::new(state_root.clone(), None).unwrap(),
-        ));
-        let model = MockCompletionModel::from_turns([
-            MockTurn::tool_call(
-                "child-echo",
-                tool_host::FAKE_ECHO_TOOL,
-                json!({"value":"child-plugin-ok"}),
-            ),
-            MockTurn::tool_call(
-                "completion-1",
-                "final_result",
-                json!({"summary":"child-plugin-ok"}),
-            ),
-        ])
-        .erase();
-        let nodes = HostNodes {
-            sandbox,
-            allowed_commands: vec!["sh".into()],
-            artifacts: artifacts.clone(),
-            facts_root: state_root.join("facts"),
-            io_resolver: std::sync::Arc::clone(&resolver),
-            mcp: tool_host::McpToolConfig::default(),
-            io_nodes: Some(IoHarnessNodePort::new_with_default_policy(
-                state_root.join("io-harness/facts"),
-                state_root.join("io-harness/store"),
-                model,
-                resolver,
-            )),
-            goose_nodes: None,
-        };
-        let parent_snapshot = GraphSnapshot::admit(json!({
-            "objective":"invoke child",
-            "entry":"invoke",
-            "agents":{},
-            "ops":{"invoke":{"call":{"graph":"child","mode":"wait","input":{}}}},
-            "nodes":[{"id":"invoke","op":"invoke","plugins":[]}],
-            "edges":[]
-        }))
-        .unwrap();
-        let parent = GraphRunRecord::create(parent_snapshot, serde_json::Value::Null).unwrap();
-        let host = InProcessGraphHost::new(&catalog, &store, &artifacts, &nodes, &NoControl);
-
-        let completed = GraphRunner::new(&store, &artifacts, &host, &NoControl)
-            .run(parent)
-            .await
-            .unwrap();
-
-        assert_eq!(
-            completed.status,
-            RunStatus::Completed,
-            "{:?}",
-            completed.error
-        );
-        assert_eq!(completed.plugin_bindings.len(), 0);
-        let call = completed.graph_calls.values().next().unwrap();
-        let child_id = call.child_run_id.as_ref().unwrap();
-        let child = store.load(child_id).unwrap().unwrap();
-        assert_eq!(child.status, RunStatus::Completed, "{:?}", child.error);
-        assert_eq!(child.plugin_bindings.get("fake-tools"), Some(&binding));
-        assert_eq!(
-            child.results["work"][0].completion.output["summary"],
-            "child-plugin-ok"
-        );
-    }
-
-    #[tokio::test]
-    async fn graph_runner_restart_resumes_io_harness_without_replaying_anchor_run() {
-        let root = tempfile::tempdir().unwrap();
-        let workspace_root = root.path().join("workspaces");
-        let artifacts_root = root.path().join("artifacts");
-        let state_root = root.path().join("state");
-        std::fs::create_dir_all(&workspace_root).unwrap();
-        std::fs::create_dir_all(&artifacts_root).unwrap();
-        let sandbox = std::sync::Arc::new(
-            BubblewrapSandbox::new(
-                BubblewrapPolicy::new("bwrap", ["sh"])
-                    .authorize_workspace_root(&workspace_root)
-                    .authorize_readonly_input_root(&artifacts_root)
-                    .authorize_readonly_destination_root("/in"),
-            )
-            .unwrap(),
-        );
-        let plugin_tools =
-            std::sync::Arc::new(tool_host::PluginToolHost::new(Vec::<String>::new()));
-        let artifacts = HostArtifacts::new(artifacts_root.clone(), workspace_root.clone());
-        let resolver = std::sync::Arc::new(HostIoResolver::new(
-            artifacts.clone(),
-            std::sync::Arc::clone(&sandbox),
-            plugin_tools,
-            tool_host::McpToolConfig::default(),
-            BTreeMap::new(),
-            anchor_runtime_rig::graph::FileRunStore::new(state_root.join("runs")),
-            LocalInputs::new(state_root.clone(), None).unwrap(),
-        ));
-        let build_nodes = |model| HostNodes {
-            sandbox: std::sync::Arc::clone(&sandbox),
-            allowed_commands: vec!["sh".into()],
-            artifacts: artifacts.clone(),
-            facts_root: state_root.join("facts"),
-            io_resolver: std::sync::Arc::clone(&resolver),
-            mcp: tool_host::McpToolConfig::default(),
-            io_nodes: Some(IoHarnessNodePort::new_with_default_policy(
-                state_root.join("io-harness/facts"),
-                state_root.join("io-harness/store"),
-                model,
-                std::sync::Arc::clone(&resolver),
-            )),
-            goose_nodes: None,
-        };
-        let snapshot = GraphSnapshot::admit(json!({
-            "objective":"resume the same io-harness Agent invocation",
-            "entry":"work",
-            "agents":{"worker":{"model":"fixture","instructions":"Use anchor_run once to append one line containing called to /workspace/effects.txt, then call final_result with a summary."}},
-            "ops":{},
-            "nodes":[{"id":"work","agent":"worker"}],
-            "edges":[]
-        }))
-        .unwrap();
-        let record = GraphRunRecord::create_with_id(
-            snapshot,
-            serde_json::Value::Null,
-            "io-harness-restart-run",
-        )
-        .unwrap();
-        let store = anchor_runtime_rig::graph::FileRunStore::new(state_root.join("runs"));
-        let command = json!({
-            "command":["sh","-c","printf 'called\\n' >> effects.txt"]
-        });
-        let interrupted_nodes = build_nodes(
-            MockCompletionModel::from_turns([MockTurn::tool_call(
-                "run-once",
-                crate::node_tools::RUN_TOOL_NAME,
-                command,
-            )])
-            .erase(),
-        );
-
-        let first = GraphRunner::new(&store, &artifacts, &interrupted_nodes, &NoControl)
-            .run(record)
-            .await;
-        assert!(
-            first.is_err(),
-            "the missing scripted provider turn simulates interruption"
-        );
-        let interrupted = store
-            .load("io-harness-restart-run")
-            .unwrap()
-            .expect("Graph Run cursor must be durable before Agent dispatch");
-        assert_eq!(interrupted.status, RunStatus::Running);
-        assert_eq!(interrupted.cursor.as_ref().unwrap().key.invocation, 1);
-        assert!(matches!(
-            interrupted_nodes
-                .completion_fact(&interrupted.cursor.as_ref().unwrap().key)
-                .await
-                .unwrap(),
-            CompletionFact::Resumable
-        ));
-
-        // A new host/provider instance re-enters the same Harness run. Since
-        // the failed provider call followed a mutating tool, io-harness requires
-        // an explicit recovery decision; it must not replay the tool.
-        let restarted_nodes = build_nodes(
-            MockCompletionModel::from_turns([MockTurn::tool_call(
-                "completion-1",
-                "final_result",
-                json!({"summary":"resumed"}),
-            )])
-            .erase(),
-        );
-        let resumed = GraphRunner::new(&store, &artifacts, &restarted_nodes, &NoControl)
-            .run(interrupted)
-            .await;
-        assert!(matches!(
-            resumed,
-            Err(anchor_runtime_rig::graph::GraphError::Unsupported(message))
-                if message.contains("requires recovery")
-        ));
-        let still_pending = store
-            .load("io-harness-restart-run")
-            .unwrap()
-            .expect("recovery-required Run must retain its cursor");
-        assert_eq!(still_pending.status, RunStatus::Running);
-        assert_eq!(still_pending.invocations["work"], 1);
-        let workspace = artifacts
-            .workspace_path(&still_pending.cursor.unwrap().key)
-            .unwrap();
-        assert_eq!(
-            std::fs::read_to_string(workspace.join("effects.txt")).unwrap(),
-            "called\n"
-        );
     }
 }

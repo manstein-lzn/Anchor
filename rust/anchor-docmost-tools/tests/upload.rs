@@ -72,7 +72,7 @@ async fn multipart_preserves_original_fields_filename_bytes_and_json() {
 }
 
 #[tokio::test]
-async fn maximum_size_is_inclusive_and_filename_url_matches_python_quote() {
+async fn maximum_size_is_inclusive_and_filename_url_is_percent_encoded() {
     let fixture = Fixture::start(
         StatusCode::OK,
         metadata("folder/报告 % +?#.png", "image/png"),

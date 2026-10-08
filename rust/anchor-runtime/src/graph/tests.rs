@@ -2891,7 +2891,7 @@ fn snapshot_admission_preserves_module_rounds_and_rejects_unsafe_shapes() {
 }
 
 #[test]
-fn python_expanded_graph_snapshot_fixture_preserves_node_policy() {
+fn expanded_graph_snapshot_fixture_preserves_node_policy() {
     let raw: Value = serde_json::from_str(include_str!(
         "../../tests/fixtures/one-search.snapshot.json"
     ))
@@ -3672,12 +3672,12 @@ async fn graph_runner_recovery_process_helper() {
 }
 
 #[derive(Default)]
-struct OracleNodes {
+struct ScenarioNodes {
     outcomes: Vec<Value>,
     calls: Mutex<Vec<(String, u64)>>,
     facts: Mutex<BTreeMap<String, CompletionFact>>,
 }
-impl NodeExecutionPort for OracleNodes {
+impl NodeExecutionPort for ScenarioNodes {
     fn capabilities(&self) -> NodeExecutionCapabilities {
         NodeExecutionCapabilities {
             agent: true,
@@ -3752,27 +3752,19 @@ impl NodeExecutionPort for OracleNodes {
 }
 
 #[tokio::test]
-async fn rust_graph_runner_matches_python_runtime_oracle_scenarios() {
-    let fixture: Value = serde_json::from_str(include_str!(
-        "../../../../tests/fixtures/r5-python-oracle.json"
-    ))
-    .unwrap();
+async fn graph_runner_preserves_recorded_runtime_scenarios() {
+    let fixture: Value =
+        serde_json::from_str(include_str!("../../tests/fixtures/runtime-scenarios.json")).unwrap();
     assert_eq!(fixture["format"], 1);
-    assert!(
-        fixture["source"]
-            .as_str()
-            .unwrap()
-            .contains("anchor.simple.run.run")
-    );
 
     let scenarios = fixture["scenarios"].as_array().unwrap();
     assert_eq!(scenarios.len(), 10);
     for scenario in scenarios {
         let snapshot = GraphSnapshot::admit(scenario["graph_snapshot"].clone()).unwrap();
         let override_input = scenario["run_override"]["input"].clone();
-        let nodes = OracleNodes {
+        let nodes = ScenarioNodes {
             outcomes: scenario["node_outcomes"].as_array().unwrap().clone(),
-            ..OracleNodes::default()
+            ..ScenarioNodes::default()
         };
         let (store, artifacts, _, mut control) = setup();
         control.pause = scenario["control"]["pause_before_dispatch"] == true;
@@ -3782,7 +3774,7 @@ async fn rust_graph_runner_matches_python_runtime_oracle_scenarios() {
             .run(record)
             .await
             .unwrap();
-        let expected = &scenario["python"];
+        let expected = &scenario["expected"];
 
         let rust_status = match result.status {
             RunStatus::Completed => "completed",
@@ -3862,7 +3854,7 @@ async fn rust_graph_runner_matches_python_runtime_oracle_scenarios() {
         if scenario["id"] == "budget_stop_preserves_cursor" {
             assert_eq!(
                 expected["passes"]["budgeted"], 1,
-                "Python oracle must capture the started budgeted pass"
+                "A started budgeted invocation must be recorded"
             );
         }
         if scenario["id"] == "pause_before_first_dispatch" {
@@ -3915,7 +3907,7 @@ async fn rust_graph_runner_matches_python_runtime_oracle_scenarios() {
             (a["from"].as_str(), a["to"].as_str()).cmp(&(b["from"].as_str(), b["to"].as_str()))
         });
         if scenario["id"] == "deterministic_failure_settles_single_exit" {
-            // Intentional semantic divergence: Python settles a single exit
+            // The historical scenario settles a single exit
             // even after node failure; Rust treats the failed fact as terminal.
             assert_eq!(
                 result.status,

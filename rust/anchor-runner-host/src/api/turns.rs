@@ -3,8 +3,6 @@ use crate::{
     pilot_host::{PilotAdmission, scope},
     pilot_tools::PilotTools,
 };
-#[cfg(feature = "legacy-regression")]
-use anchor_io_harness_runtime::pilot;
 use anchor_platform_session::{Session, SessionStore, TurnStatus};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use std::{collections::VecDeque, convert::Infallible, time::Duration};
@@ -33,10 +31,10 @@ pub(super) async fn recover_pilot_turns(state: &ApiState) -> Result<(), String> 
         {
             if matches!(
                 record.status,
-                anchor_runtime_rig::graph::RunStatus::Completed
-                    | anchor_runtime_rig::graph::RunStatus::Failed
-                    | anchor_runtime_rig::graph::RunStatus::Stopped
-                    | anchor_runtime_rig::graph::RunStatus::Aborted
+                anchor_runtime::graph::RunStatus::Completed
+                    | anchor_runtime::graph::RunStatus::Failed
+                    | anchor_runtime::graph::RunStatus::Stopped
+                    | anchor_runtime::graph::RunStatus::Aborted
             ) {
                 state
                     .application
@@ -230,16 +228,6 @@ pub(super) async fn pilot_messages(
     blocking(move || {
         let (sessions, owner, session) = owned_session(&state, &headers, &identifier)?;
         pilot_session(&session)?;
-        #[cfg(feature = "legacy-regression")]
-        let messages = {
-            let root = scope(&state.data_root, &owner, &session);
-            if root.join("goose.json").exists() {
-                crate::goose_acp::pilot::messages(&sessions, &owner, &identifier)
-            } else {
-                pilot::pilot_messages(&root)
-            }
-        };
-        #[cfg(not(feature = "legacy-regression"))]
         let messages = crate::goose_acp::pilot::messages(&sessions, &owner, &identifier);
         let messages = messages.map_err(|_| {
             error(

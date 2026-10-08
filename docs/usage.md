@@ -1,462 +1,127 @@
-# Anchor 使用指南
+# 使用指南
 
-## 同一 Run 内的并行分支
+当前安装使用 Rust Host、固定 Goose 与编译后的 WebUI。完整生产包与 systemd 操作见 [部署指南](rust-production-deployment.md)；本文介绍仓库开发方式和产品操作。
 
-在画布选择“添加节点 → 并行分支”，会在当前入口前添加一对展开/收束节点和两个 AgentNode。为两个分支填写各自任务，按需要调整连线；fanout 只需选择配对 join，分支由边表达。一个 Run 内并行执行分支，全部成功后才执行 join 下游；普通多出口节点仍选择一条路由。
+## 安装与本地启动
 
-```json
-{
-  "ops": {
-    "split": {"fanout": {"join": "collect"}},
-    "collect": {"join": {}}
-  }
-}
-```
+需要 Linux x86_64、Git、Bubblewrap、Rust stable，以及 Node.js 20.19+ 或 22.12+。沙箱需要可用的 user/mount/network namespace。模型调用和 Plugin 网络权限分别配置。
 
-上面是操作定义片段，节点和边仍使用原格式。完整示例见 [parallel-audit.json](../examples/graphs/parallel-audit.json)。每个分支可以是一串 Agent/Op，分支间互不交叉，至少两条分支在唯一配对 join 收束。首期不支持分支内选择/循环或嵌套并行；整个区域之后可以通过评审反馈回到 fanout。
-
-join 产生 `join.json`，列出本次展开轮次、分支摘要、文件和 commit。综合 Agent 可通过 `/in/<join节点>/join.json` 查结果索引，并从既有 `/in/<分支节点>/` 读取只读证据。失败会取消尚在执行的同伴且不放行 join；暂停等活动节点结算后停下，停止请求取消全部活动节点。恢复保留已完成分支，命令副作用未知时仍可能报告 Uncertain，需要核查。画布和运行详情显示所有活动节点及配对关系。
-
-本文描述当前已实现的行为。所有命令均从仓库根目录执行；返回 [项目入口](../README.md)。Plugin 的格式与边界见 [Plugin 设计](plugins.md)，知识库编译暂缓。
-
-## 安装与首次启动
-
-以下命令均从仓库根目录执行。
-
-### 1. 准备环境
-
-需要 Linux、Python 3.12+、Git、Bubblewrap（`bwrap`），以及支持 Vite 7 的 Node.js（20.19+ 或 22.12+）。沙箱需要宿主机允许创建相应 namespace；只有安装了 `bwrap`，不代表当前容器或主机一定允许它运行。
-
-```bash
-# Debian / Ubuntu：安装系统依赖；Python、Node.js 请另行准备
-sudo apt-get install git bubblewrap
-
-python3.12 -m venv .venv
-./.venv/bin/python -m pip install -e '.[dev]'
+```sh
 npm --prefix apps/web ci
-```
-
-CodeMode 是可选的执行加速能力；安装后所有普通 AgentNode 自动使用，Graph 不需要增加配置：
-
-```bash
-./.venv/bin/python -m pip install -e '.[dev,codemode]'
-```
-
-如果不安装这个可选依赖，AgentNode 自动回退到普通工具调用，Graph 文件和 Plugin 无需修改。
-
-开发、测试和启动服务均使用项目的 `.venv`。如果出现 `No module named pydantic_ai`，先确认使用的解释器和依赖安装位置；PydanticAI 是当前 Agent Node 的正式依赖。
-
-### 2. 配置模型
-
-模型只在仓库根目录 `.env` 配置，`.local/runtime.json` 可以保持为空：
-
-```env
-ANCHOR_MODEL_URL=https://第三方服务/v1
-ANCHOR_MODEL_API_KEY=你的API_KEY
-ANCHOR_MODEL_NAME=你的模型名
-```
-
-`ANCHOR_MODEL_URL`、`ANCHOR_MODEL_API_KEY` 和 `ANCHOR_MODEL_NAME` 配置默认模型；不再配置 provider、`secret_ref` 或 DeepSeek 专用字段。可选 `ANCHOR_MODEL_ALIASES={"models.review":"服务支持的另一模型名"}` 为同一服务和凭证增加模型名别名，Agent 的 `model` 引用该别名。它不能替换 `models.default`、更换端点或携带凭证；旧图未配置的引用仍回落到环境默认模型，Pilot 默认模型不变。所有模型事实仍来自 `.env`，该文件已被 Git 忽略。
-
-### 3. 放入一个工作流
-
-开发服务读取 `.local/demo/workspaces/<图名>/graph.json`。首次使用可以复制深度学术调研示例：
-
-```bash
-mkdir -p .local/demo/workspaces/deep-academic-research
-cp -n examples/graphs/deep-academic-research.json \
-  .local/demo/workspaces/deep-academic-research/graph.json
-```
-
-示例文件与实际工作流是两份文件。修改 `examples/graphs/` 不会自动更新已创建的工作流；更新现有图应在 WebUI 中编辑，或明确修改它自己的 `graph.json`。
-
-### 4. 启动后台服务
-
-```bash
+cp .env.example .env
+# 编辑 .env 中 Goose 与模型配置
 ./scripts/dev.sh start
 ./scripts/dev.sh status
 ```
 
-打开 **http://127.0.0.1:5173**。选择工作流，修改目标并保存，再点击“运行工作流”。
+开发时打开 <http://127.0.0.1:5173>，Vite 将 API 请求转发到 <http://127.0.0.1:8077> 的 Rust Host；Host 也提供已构建的 WebUI。脚本使用 `.local/rust`，分别保存 catalog、state、workspace 和 Library，首次创建只含 `true` Op 的 `dev` Graph，启动不调用模型。预构建 Host 和 Web 资产缺失时才构建；修改代码后应主动重建。可覆盖参数见 [脚本](../scripts/dev.sh) 和 [.env.example](../.env.example)。
 
-| 服务或文件 | 位置 |
-| --- | --- |
-| WebUI（Vite） | `http://127.0.0.1:5173` |
-| API | `http://127.0.0.1:8077` |
-| 工作流与运行数据 | `.local/demo/workspaces/` |
-| API 日志 | `.local/dev/anchor-serve.log` |
-| WebUI 日志 | `.local/dev/vite.log` |
-| 进程 PID 文件 | `.local/dev/` |
-
-### 5. Linux 常驻部署（systemd）
-
-`scripts/dev.sh` 只启动开发后台进程，不提供开机启动或崩溃后重启。正式部署使用 [anchor.service](../deploy/systemd/anchor.service)，由 systemd 管理 Anchor；企业微信网关仍由 Anchor 的 ChannelSupervisor 管理，不单独启动第二份。
-
-模板适用于仓库 `/root/Anchor`、数据目录 `.local/demo`，运行用户为 root；其他安装位置需调整 `User`、`WorkingDirectory` 和 `ExecStart`。凭证继续由 Anchor 从仓库 `.env` 加载，不复制到 unit。监听地址保持 `127.0.0.1:8077`，远程访问需要已有代理或 SSH 端口转发。
-
-先完成 `npm --prefix apps/web run build`。安装前停止同一数据目录的旧 Anchor 和遗留网关，避免端口冲突及重复企业微信连接。然后在 **PID 1 为 systemd 的宿主机终端** 执行：
-
-```bash
-sudo install -m 644 deploy/systemd/anchor.service /etc/systemd/system/anchor.service
-sudo systemctl daemon-reload
-sudo systemctl enable --now anchor.service
-sudo systemctl status anchor.service
-```
-
-直接打开 **http://127.0.0.1:8077** 即可使用构建后的网页和 API，无需 Vite。日常管理：
-
-```bash
-sudo systemctl restart anchor.service
-sudo systemctl stop anchor.service
-sudo journalctl -u anchor.service -f
-```
-
-服务启用后独立于终端/Codex 会话，并配置开机启动和进程退出后重启；运行中的任务不因此获得自动重放保证。停止时 systemd 清理整个服务进程组（cgroup），包括长连接网关。PID 1 为 Bash 的容器/执行环境不能仅靠安装此文件启用服务，需要由宿主机 systemd 或容器运行平台管理其生命周期。
-
-## Anchor Pilot 与 Session API
-
-本节描述当前代码。2026-09-26 的恢复方案「保存工作记录 → 重开原会话 → Agent 核查现场后继续」已按 P2 接通并通过真实验收；当前工具审批只剩删除 Graph，中断会话可以直接发新消息。验收状态与证据见 [开发台账](pilot-development-plan.md)。
-
-开发者在仓库根目录可运行两个显式验收脚本（都会产生真实模型调用费用），它们都用独立数据目录，不触碰正在使用的服务：
-
-- `./.venv/bin/python scripts/verify_pilot_provider.py`：真实 provider 走 HTTP/SSE，验证直接建图与启动 Run、回复里的对象引用、删除确认与拒绝、过期确认、`session_ask` 问答和提交去重；证据在 `.local/pilot-provider-*/`。
-- `./.venv/bin/python scripts/verify_pilot_resume.py`：真实 `kill -9` 两次（工具结果已记录 / 结果缺失），重启后在同一 Session 继续；证据在 `.local/pilot-resume-*/`。
-
-浏览器端真实验收用 `ANCHOR_REAL_PROVIDER=1 npx playwright test e2e/real-provider.spec.ts`（在 `apps/web/` 下运行）：真实 provider 流式回答、杀进程、刷新、续聊和对象跳转。未设置该变量时这条用例自动跳过。
-
-点击顶部「Pilot」可创建可恢复的对话。Session 是长期对话，不是一次 Graph Run；PydanticAI 使用运行配置中的 `pilot_model`（若未配置则取首个模型）回答，对话消息由 Harness 保存，Anchor 记录生命周期和事件。可在 `.local/runtime.json` 顶层设置 `pilot_model`，模型连接信息不写入 Session 或 Graph。
-
-Pilot 可以通过显式控制工具操作 Anchor 资源；模型不能绕过 Scheduler 的校验。查询、启动和运行控制会复用现有 Graph/Run/Plugin 文件事实。用户已经明确提出的建图、改图、启动和控制请求直接执行；删除 Graph 仍保留确认步骤，模型调用它时当次运行停在等待状态，用户确认或拒绝后由框架恢复原调用。操作账本按 `tool_call_id` 记录结果，未知结果不会被静默重放。API 也提供：
-
-```text
-GET    /sessions
-POST   /sessions                 {"id": "可选的稳定 ID"}
-GET    /sessions/<id>
-GET    /sessions/<id>/messages
-GET    /sessions/<id>/events
-POST   /sessions/<id>/turns      {"request_id": "稳定提交 ID", "message": "用户输入"}
-POST   /sessions/<id>/turns      {"request_id": "新的恢复尝试 ID", "resume": true}
-GET    /sessions/<id>/turns      # turn 列表，不含模型消息
-GET    /sessions/<id>/turns/<turn>/events   # text/event-stream
-POST   /sessions/<id>/stop       # 显式取消当前执行
-POST   /sessions/<id>/status     {"status": "active|waiting_user|interrupted|archived", "reason": "可选"}
-POST   /sessions/<id>/confirm    {"action": "待确认动作", "approval_key": "待确认记录的 tool_call_id"}
-POST   /sessions/<id>/reject     {"action": "待确认动作", "approval_key": "待确认记录的 tool_call_id"}
-POST   /sessions/<id>/runs       {"run": "已有的 run ID"}
-POST   /sessions/<id>/messages  {"message": "用户输入"}   # 保留的同步入口
-POST   /sessions/<id>/resume    # 保留的同步续答入口
-DELETE /sessions/<id>
-```
-
-交互式调用方使用 turn API。`request_id` 由客户端生成并在网络重试时复用：同一 Session 下同 ID、同内容返回已存在的 turn 而不重复调用模型；同 ID、不同内容返回 409；同一 Session 同时只接受一个运行中的 turn。执行在服务端后台进行，浏览器断开连接不会取消任务。
-
-`GET /sessions/<id>/turns/<turn>/events` 返回 SSE：`id` 是事件游标，`data` 是 PydanticAI 的 Vercel AI chunk（文本增量、工具输入/输出等），终态另发一个 `turn` 命名事件。恢复连接时带 `Last-Event-ID` 或 `?after=<序号>`，服务端只补发游标之后的记录；浏览器重连同样会跳过已收到的序号，因此不会重复追加上下文。非法游标返回 400，跨 Session 读取 turn 返回 404。
-
-用户输入在模型调用前写入 Harness；首条输入的前 60 个字符用作会话标题。回复支持 Markdown、代码高亮、表格和复制；可搜索标题，浏览器保留当前会话和未发送草稿。输入支持中文输入法，Enter 发送、Shift + Enter 换行。
-
-当前模型历史在 `state/pilot-conversations.sqlite`，工作记录在 `state/pilot-steps/`（Harness `FileStepStore`：每次执行的 `run.json`、`events.jsonl`、`tool_effects.jsonl`、`snapshots/*.json`、`media/*`），界面事件在 `state/pilot-turns.sqlite`。`sessions/<id>/events.jsonl` 只是产品活动日志，不含完整模型工作历史。备份现有会话要保留整个数据根目录，包含上述存储与所关联的运行文件。
-
-Pilot 需要补充信息时会调用 `session_ask`，该调用被推迟为外部执行，本次运行立即结束、turn 停在 `waiting_user`，问题写入 Session 的 `waiting_reason`。用户下一条消息以工具结果回到模型。删除 Graph 仍会先请求确认，其余操作（建图、改图、启动与控制 Run）按用户请求直接执行。
-
-Provider 失败、用户停止或服务被杀时 Session 标为 `interrupted`，已生成的增量文本保留在 turn 事件里。此时可以直接发新消息：服务用 Harness 文件记录还原上一次尝试——工具结果已保存的能读到，结果缺失的以 `interrupted` 如实呈现——Agent 核查实际 Run、文件和测试后继续，不重放旧调用，也不要求用户处理操作账本。服务重启会把遗留的 `running` turn 标为 `interrupted` 并保留记录。
-
-回复里提到 Graph、Run 或节点文件时带有 `#anchor/...` 链接，点击进入已有的图编排或运行记录页面，右上角「返回会话」回到原 Session。删除前必须先将 Session 置为 `archived` 或 `interrupted`；删除会同时清理 Anchor Session 目录和 Harness 对话。当前能力与新目标的验收状态见 [开发台账](pilot-development-plan.md)。
-
-**后续开发统一使用这个脚本管理服务**，不要依赖对话框或终端里的前台进程：
-
-```bash
-./scripts/dev.sh status
-./scripts/dev.sh stop
+```sh
 ./scripts/dev.sh restart
+./scripts/dev.sh stop
 ```
 
-脚本使用 `nohup` 和 `setsid` 脱离启动终端，关闭终端或对话框不会关闭 Anchor。它不是系统服务管理器，不提供开机自启或进程崩溃后的自动拉起。
+只操作脚本持有的 PID；启动前检查端口与当前运行任务。重启会中断活动节点，之后应查看持久记录并继续。现有 `.local/demo`、旧环境和运行历史不会被自动迁移或清理。
 
-前端开发修改由 Vite 加载；Python 后端修改需要重启 API，使用上述 `restart` 会同时重启两个服务。**重启会中断正在执行的节点**；服务启动时会尝试恢复磁盘上仍标记为 `running` 的运行，能否安全恢复取决于节点记录。
+## 模型与 Goose
 
-如只需构建后的界面：
-
-```bash
-npm --prefix apps/web run build
-```
-
-`anchor-serve` 会在构建目录存在时提供静态界面，可通过 API 端口访问。自定义数据目录、配置和端口的入口为：
-
-```bash
-./.venv/bin/anchor-serve --root /path/to/anchor-data \
-  --config /path/to/runtime.json --host 127.0.0.1 --port 8077
-```
-
-## WebUI 的使用方式
-
-**图编排**：左侧用于搜索、新建和选择工作流，中间编辑拓扑，右侧修改图、角色或选中节点的属性。保存会调用后端校验；未保存的修改不能直接运行，切换图时会提示是否放弃修改。导入 JSON 是替换当前编辑内容，仍需保存。
-
-编排和运行记录共用画布、节点尺寸、端口与连线路径。自动布局使用 ELK Layered 从上到下排列并正交路由，每条边有独立端口；前向连接从底部输出、顶部输入，循环返回按入口遍历识别，安排在节点右侧。运行只叠加状态和执行次数：已走过的边（包括反馈边）为加粗实线，未走过的边为虚线。轮询不会改变布局。
-
-已有手动位置会保留，拖动结束后由 libavoid 对整图重新避障路由；拖动过程中暂时隐藏连线。点击「自动整理」重新生成布局，支持撤销，保存后生效；适配视图包含回路和标签。选中边可编辑「分支说明」，它保存在 `layout.edgeLabels`（键为 `起点|终点`），位置保存在 `layout.positions`，都只影响显示，不改变调度条件。节点重叠或空间不足的手动布局建议自动整理；复杂图仍可能有必要的交叉。
-
-**工作流管理**：每行的 `⋯` 只管理这一行的图，不需要切换当前编辑对象。桌面悬停或键盘聚焦时显示入口，触屏常显。删除确认会显示图名及删除范围，默认聚焦“取消”。删除另一个图不会丢失当前未保存的编辑。
-
-**运行记录**：选择一次运行，再点击节点查看对话、工具结果和文件。界面通过轮询更新状态；它不是与节点交互的聊天入口，也不是逐 token 的流式聊天。
-
-| 操作 | 行为 |
-| --- | --- |
-| 暂停 | 当前节点结束后暂停调度 |
-| 继续 | 尝试接着原运行执行，不创建新的运行 |
-| 停止 | 请求取消当前模型调用或沙箱命令，并停止调度；不必等待节点正常提交 |
-| 删除运行记录 | 永久删除该次运行的状态、工作区、Git 历史、对话和其他相关文件 |
-| 删除工作流 | 永久删除该图的整个目录，包括图定义和所有运行记录及文件 |
-
-停止是异步取消，后台退出和界面状态更新需要短暂时间。停止请求一旦发出，被取消的节点不会再向模型发出下一次请求，也不会把被杀的沙箱命令当成一次失败重试，最终结果固定报告为「stopped on request」，而不是重试耗尽之类的原因。后端在工作线程退出前仍将图视为运行中，期间拒绝删除。删除没有回收站。
-
-## 图、节点与反馈循环
-
-一个最小 Agent 图如下：
-
-```json
-{
-  "objective": "解释检索增强生成的核心机制与适用边界",
-  "agents": {
-    "writer": {
-      "model": "models.academic",
-      "writes": ["answer.md"],
-      "instructions": "在 answer.md 中回答问题，明确不确定之处。完成时返回包含 summary 的结构化结果。"
-    }
-  },
-  "nodes": [{"id": "write", "agent": "writer"}],
-  "edges": []
-}
-```
-
-节点有三种声明方式：
-
-| 声明 | 执行方式 |
-| --- | --- |
-| `{"id": "write", "agent": "writer"}` | Agent Node：模型在自己的工作区中通过 shell 工具完成任务 |
-| `{"id": "check", "op": "structure"}` | Op Node：在同样的沙箱中执行一条命令，用退出码判断执行结果 |
-| `{"id": "write", "graph": "revision"}` | 子图：运行前展开为普通节点，例如 `write/draft`、`write/review` |
-
-`agents`、`ops` 和可复用的 `graphs` 在文件中声明。节点可以通过 `with` 补充本次使用的指令。子图的 `entry` 和 `exit` 决定外部连线连接的位置；不允许递归包含自身，但执行上的反馈循环是允许的。
-
-Agent 和 Op 都可声明 `reads`、`writes`。加载时会检查声明的读取内容是否存在可达的生产者；这不是对研究结论真实性或产物质量的自动证明。
-
-Agent 完成一轮必须返回明确的结构化结果，不能仅回复“已完成”。结果包含 `summary`；有多个出口时还必须包含一个合法的 `route`。
-
-有多个出口时必须选择合法的后继节点。Op 的非零退出码表示失败；需要分支的检查节点应把检查结论写入文件，再由 Op 的既有路由协议选择回流或前进，而不是用失败退出码冒充反馈。
-
-反馈边再次激活节点时，它继续使用本次运行中自己的工作区，读取新反馈，在已有成果上修订，然后留下新的 commit。新一轮是新的节点对话，文件和 Git 历史承担跨轮次的连续性。
-
-### 研究进度不由固定轮数决定
-
-省略图的 `max_rounds`，以及省略 Agent 的 `max_steps` 或将其设为 `null`，都不会设置执行次数上限。深度学术调研示例使用这种方式，让证据、反馈和完成标准决定何时结束。
-
-这些可选字段仍可被显式设置；`max_steps: 0` 表示不允许模型请求。恢复不会清空已经消耗的显式预算，也不会因新配置省略上限而抹掉已持久化的限制。
-
-这不等于所有限制都已移除：当前单条命令有超时，异常模型输出有重试处理，调度器还保留同一节点轮次最多启动 4 次的恢复尝试上限（`MAX_ATTEMPTS`）。后者是现有实现边界，不能据此宣称复杂任务可以无条件无限恢复。
-
-## 工作区、Git 与运行之间的关系
-
-**每次新运行有独立的运行目录和节点工作区，不会自动继承上一条运行历史。** 同一运行里的多轮执行复用节点工作区；恢复原运行也使用原目录。
+使用 Goose v1.53.0 官方 x86_64 musl 二进制，SHA256 固定为：
 
 ```text
-<服务 root>/workspaces/<图名>/
-  graph.json                    当前可编辑的图定义
-  runs/<run id>/
-    run.json                    调度状态、轮次、路由、输入及 commit 记录
-    graph.json                  本次执行写出的图副本，子图已展开
-    <node>/                     节点工作区，包含自己的 .git
-    control/<node>/             节点恢复、预算与完成记录
-    .views/<node>-<commit>/      按指定 commit 导出的输入文件树
-    <node>.trace.jsonl           第一轮对话与工具轨迹
-    <node>-2.trace.jsonl         第二轮轨迹，以此类推
+bdf35eb00d8dcc0218fe1150a3673446f351ea699ed579062628351f00cac340
 ```
 
-节点在沙箱内写 `/workspace`，读取 `/in/<上游节点>`。Anchor 在沙箱外将一轮执行留下的工作冻结为 Git commit，记录输入来自哪个节点、哪个 commit；节点能读 Git 历史，但自己的 `.git` 在沙箱内是只读的，不应自行提交或改写历史。
+将已审查的可执行文件放在稳定路径，并配置：
 
-**边传递的是 commit 引用，不是把上游文件混入下游工作区。** 运行时仍需要通过 `git archive` 将对应 commit 的文件树导出到 `.views/`，再以只读方式挂载，因此不能把这一机制称为物理上的“零复制”。上游之后继续修改，不会改变已经指定的输入文件树；这保证输入可追溯，不保证模型输出确定性。
-
-下游默认读取快照，必要时可查询该输入 commit 及其祖先的历史；快照内 `.git` 的 HEAD 固定在输入 commit，不暴露上游后续提交或无关分支。例如，上游节点为 `research` 时：
-
-```bash
-git --git-dir=/in/research/.git log --oneline
-git --git-dir=/in/research/.git show <commit>:notes.md
-git --git-dir=/in/research/.git diff <older-commit> HEAD
+```sh
+ANCHOR_GOOSE_BINARY=/absolute/path/to/goose
+ANCHOR_GOOSE_BINARY_SHA256=bdf35eb00d8dcc0218fe1150a3673446f351ea699ed579062628351f00cac340
+ANCHOR_GOOSE_ALLOW_SHARED_NETWORK=1
+ANCHOR_MODEL_URL=https://provider.example/v1
+ANCHOR_MODEL_API_KEY=REPLACE_WITH_PROVIDER_KEY
+ANCHOR_MODEL_NAME=REPLACE_WITH_MODEL_NAME
+ANCHOR_MODEL_WIRE_API=responses
+ANCHOR_MODEL_ALIASES={}
 ```
 
-这份历史同样只读，无需也不能向上游提交修改。旧运行的空历史缓存在恢复并再次挂载时自动补齐。
+`ANCHOR_MODEL_WIRE_API` 为 `chat` 或 `responses`。URL 接受 HTTPS，或仅用于本地测试的 HTTP loopback IP endpoint；拒绝 URL 用户凭据、query 和 fragment。Graph 模型别名通过 `ANCHOR_MODEL_ALIASES` 映射到实际 wire 模型，新 invocation 冻结绑定；继续执行不能静默换模型。
 
-下游除了直接输入，还可读取这些输入沿前向依赖关联的上游成果。追溯在反馈边处停止，避免把历次循环全部重新挂载；同一节点只保留一个输入挂载，直接输入优先，其余按执行记录选择较新的轮次。
+`ANCHOR_GOOSE_ALLOW_SHARED_NETWORK=1` 是 Goose 进程的明确网络接入决定；业务工具和节点仍受 Host/Sandbox 授权。配置与凭据留在部署环境，不放进 Graph 包或版本库。
 
-### 沙箱和工具
+## Host 根目录与权限
 
-所有节点命令通过 Bubblewrap 执行。节点的工作区可写，输入和挂载的系统、工具目录只读；另有临时目录。默认禁用网络，需在 Agent 或 Op 定义中明确设置 `"network": true`。沙箱不可用时不会退回宿主机裸执行。
-
-学术调研工具不是专用 Agent 内核，而是 `academic-research` Plugin 注册的共享工具。深度学术调研图将它挂载给 investigator、challenger 和 reviewer；这些 AgentNode 通过显式入口调用登记工具。具体调用链见 [当前架构](architecture.md)。
-
-以下是节点沙箱内的调用方式；在宿主机手动使用时，将命令名换成 `./.venv/bin/anchor-scholarly`。
-
-```bash
-anchor-scholarly sources
-anchor-scholarly search --query "retrieval augmented generation evaluation" --source crossref --limit 8
-anchor-scholarly search-many --queries-file queries.txt --budget 420
-anchor-scholarly read --url "https://arxiv.org/pdf/2005.11401"
-anchor-scholarly read-many --urls "https://arxiv.org/abs/2005.11401,https://arxiv.org/pdf/2005.11401"
-anchor-scholarly citations --identifier 2005.11401 --direction cited_by
-```
-
-搜索源包括 Crossref、arXiv、OpenAlex。结果写入标准输出的 JSON；失败以非零退出码和标准错误报告。长文阅读需使用返回的 `next_offset`、`next_page_start`，分别传给 `--offset`、`--page-start` 继续读取。来源可能限流、拒绝访问或无法提供全文，研究节点需要据此调整策略。
-
-## Plugin 的准备与使用
-
-本地配置统一放在仓库根目录 `.env`（该文件已被 Git 忽略），可从 `.env.example` 复制。设置 `ANCHOR_MODEL_URL`、`ANCHOR_MODEL_API_KEY` 和 `ANCHOR_MODEL_NAME` 即可配置默认的 OpenAI-compatible 模型（可用 ANCHOR_MODEL_ALIASES 为同一服务增加模型名别名）；Anchor 启动命令会加载它，已有 shell 环境变量优先，不会被 `.env` 覆盖。`runtime.json` 不需要模型条目。不要把真实 key 写入 Graph、Plugin 清单、日志或提交。
-
-Plugin 由文件维护，WebUI 负责浏览、只读查看与挂载。先准备共享工具，再登记 Plugin。以下示例复用当前已安装的 Anchor 环境，不新建节点专用环境；从仓库根目录执行：
-
-```bash
-mkdir -p .local/demo/library/plugins .local/demo/library/tools/scholarly
-ln -s "$PWD/plugins/academic-research" .local/demo/library/plugins/academic-research
-```
-
-如果该 Plugin 已登记，不重复创建链接，也不覆盖已有资源。编辑 `.local/demo/library/tools/scholarly/tool.json`，填写本机绝对路径；例如仓库位于 `/root/Anchor` 时：
-
-```json
-{
-  "entrypoint": "/root/Anchor/.venv/bin/anchor-scholarly",
-  "environment": "/root/Anchor/.venv",
-  "imports": ["/root/Anchor/src"]
-}
-```
-
-`imports` 用于 editable 安装；常规安装进独立工具环境时不必提供项目源码。其他工具可以使用自己的环境，具体字段见 Plugin 设计。
-
-检查资源后再在 UI 中挂载：
-
-```bash
-./.venv/bin/python -m anchor.library --root .local/demo check academic-research
-./.venv/bin/python -m anchor.library --root .local/demo list
-```
-
-在图编排中选中 AgentNode，刷新 Plugin 列表、查看说明、勾选能力并保存。新示例为 [plugin-research.json](../examples/graphs/plugin-research.json)。旧图不会自动获得 Plugin；已有研究工作流的节点配置由用户明确选择，不自动迁移运行历史。
-
-### MCP 工具的按需发现
-
-AgentNode 挂载的 MCP 工具默认采用框架原生延迟加载。模型首轮只看到 Plugin 的短说明、核心宿主工具和 `search_tools`；当任务需要某项 MCP 能力时，先按工具名和描述搜索，匹配的定义才进入当前对话。PydanticAI 会在支持的 provider 上使用原生 Tool Search，在其他 provider 上使用本地关键词搜索。工具集仍按节点的网络、Bubblewrap 和 AsyncExitStack 生命周期运行，延迟加载只控制模型看到的定义。
-
-因此，挂载多个 Plugin 不会自动把所有 MCP 参数 schema 放进每一次请求，但搜索会增加必要的模型往返，中文描述和当前模型服务仍需用真实 provider 验证。工具结果一旦执行，仍会进入该 Run 的原生历史；Tool Search 不替代 Graph、Session 或持久化记录。
-
-Rust Host 直接接手同一 Plugin MCP 清单。MCP 握手返回的工具按 Python 社区约定以 `<plugin>-<server>_<tool>` 注册；工具 schema 和实际调用都来自同一个已绑定 server inventory，不再插入 Anchor 自有搜索/调用代理或第二套 allowlist 协议。Plugin 目录、Skill 和 stdio server 仍在 Bubblewrap 的只读 `/plugins/<id>` 挂载内运行，HTTP server 仍要求节点显式允许网络。
-
-企业微信助手通过普通 Graph 执行，支持按用户隔离的历史、同图并发和新消息取消旧任务后接续。长连接网关和 Anchor 均可部署在 Linux，客户端无需同机。完整 `.env`、安装、自检、启动和私聊验收步骤见 [企业微信助手接入](wecom-assistant.md)。
-
-默认助手挂载 `wecom`，支持主动 Markdown 通知、附件提取/原生图片输入、持续正文及图片回复；其他业务 Plugin 可按需添加。机器人 Bot ID/Secret 用于长连接及上述能力，主动通知目标由可选 `ANCHOR_WECOM_SEND_USERS` 限制（默认继承入口名单）；自建应用的 Corp ID/Agent ID/Secret 仅用于另外的可选 MCP 消息与成员 API。企业微信审批接口尚未实现。真实模型/Graph/本地 Plugin 验收与真实企业微信公网联动分开记录。
-
-## 每周 RSI Graph
-
-要让 Anchor 每周审查自己的运行和代码，使用普通 Graph 安装脚本：
-
-```bash
-./.venv/bin/python scripts/setup_rsi.py --root .local/demo
-```
-
-这会安装 [rsi Graph](rsi.md)，为采集节点授予当前数据根和源码的只读输入，并增加每周四 09:00 的本地计划。公开生态数据来自固定的 GitHub、PyPI、npm 端点；完整边界、产物和验收状态见 [RSI Graph](rsi.md)。修改仓库位置或 Anchor 数据根时同时传入 `--source` 和 `--root`。脚本不会覆盖已有 Graph 或重复同规则计划。
-
-## 深度学术调研图
-
-当前示例是 [deep-academic-research.json](../examples/graphs/deep-academic-research.json)。它把研究认知保存在可修订的工作文件中，由质疑和评审决定下一步，而不是预设搜索若干次后直接拼接报告。
-
-```mermaid
-flowchart TD
-  frame[frame 问题框架] --> investigate[investigate 深入研究]
-  investigate --> challenge[challenge 独立质疑]
-  challenge --> feedback{feedback 路由}
-  feedback -->|框架有误| frame
-  feedback -->|需要补证| investigate
-  feedback -->|可以写作| synthesize[synthesize 论文写作]
-  synthesize --> review[review 独立评审]
-  review --> gate{review-gate 评审与结构检查}
-  gate -->|重构问题| frame
-  gate -->|证据缺口| investigate
-  gate -->|写作缺陷| synthesize
-  gate -->|通过| report[report 论文交付]
-```
-
-- `frame` 首次形成待验证的框架，默认不联网；回访时根据研究与反馈修正问题。首次没有 `/in` 输入是正常的，不能把这一阶段的假设当成已验证结论。
-- `investigate` 联网检索、阅读全文和引用链，维护 `research.md`、`sources.md` 与原始材料，记录解释及判断变化。
-- `challenge` 独立寻找反例和竞争解释，先验收上一轮问题，再提出影响核心结论的阻断问题。
-- `synthesize` 形成 `answer.md`，按问题和机制组织论证；`review` 核查论证、引用、边界以及旧问题是否解决。
-- 两个 Op 路由节点将反馈送回能处理问题的节点；最终由 `report` 生成 `runs/<run id>/report/paper.md`。
-
-论文要求包含标题、摘要、引言、调研方法、主题分析、比较分析、开放问题、有效性威胁、结论和参考文献。结构检查验证章节是否存在，不能代替学术评审；自动化测试验证反馈送达、路由和产物结构，不证明真实论文质量。
-
-收敛标准是核心问题得到有证据的回答、重要反例被处理、主张强度与证据一致。可选润色或无关扩展不应阻断交付；证据不足时允许限定或撤回主张，不要求消灭所有未知。
-
-## 命令行、恢复与 HTTP API
-
-### 直接运行与恢复
-
-`anchor-graph` 接收**包含 `graph.json` 的目录**，不是 JSON 文件路径：
-
-```bash
-./.venv/bin/anchor-graph .local/demo/workspaces/deep-academic-research \
-  --config .local/runtime.json --objective "你的研究问题"
-
-./.venv/bin/anchor-graph .local/demo/workspaces/deep-academic-research \
-  --config .local/runtime.json \
-  --resume .local/demo/workspaces/deep-academic-research/runs/你的运行ID
-```
-
-不要在服务正运行同一个图时再用 CLI 启动它；CLI 不参与服务内的互斥调度。
-
-恢复会同时读取图调度记录和节点持久化记录。无法判断命令是否已经产生副作用时，会报告不确定或失败，不自动猜测并重跑；中断的 Op 尤其不能承诺无条件恢复。服务启动只自动尝试恢复仍标记为 `running` 的记录，不会自动重启已经暂停、停止或失败的研究。
-
-恢复仍加载工作流目录中的当前 `graph.json`。带 Plugin 的新运行核对图定义和资源摘要，变化时拒绝继续并保留旧记录；无 Plugin 的兼容路径仍会重写展开副本。需要继续旧运行时，不要先修改该工作流的结构或共享资源。
-
-### HTTP API
-
-开发环境基址为 `http://127.0.0.1:8077`。同一图一次只运行一个任务，重复触发返回 `409`；不同图可以同时运行，每个图内部目前串行调度节点。
-
-| 方法与路径 | 用途 |
+| 配置 | 用途 |
 | --- | --- |
-| `GET /plugins` | 列出共享 Plugin 及可用状态 |
-| `GET /plugins/<id>` | 只读查看当前 Plugin 说明与工具入口 |
-| `GET /plugins/<id>/files/<path>` | 读取或下载 Plugin 内的说明与补充文件 |
-| `GET /graphs` | 工作流列表与运行状态 |
-| `POST /graphs` | 创建工作流，参数为 `name` 和可选的 `definition` |
-| `GET /graphs/<name>` | 读取图定义 |
-| `PUT /graphs/<name>` | 校验并保存 `definition`，运行中拒绝修改 |
-| `DELETE /graphs/<name>` | 删除图及其全部运行数据，运行中拒绝 |
-| `POST /trigger` | 用 `graph` 和可选的 `objective` 启动运行，返回运行 ID |
-| `GET /runs` | 列出运行记录 |
-| `GET /runs/<id>` | 读取运行状态与节点轨迹摘要 |
-| `POST /runs/<id>/pause` | 请求节点完成后暂停 |
-| `POST /runs/<id>/stop` | 请求取消当前执行并停止 |
-| `POST /runs/<id>/resume` | 尝试继续原运行 |
-| `DELETE /runs/<id>` | 删除该次运行及文件，运行中拒绝 |
-| `GET /runs/<id>/files/<node>` | 列出节点产物 |
-| `GET /runs/<id>/files/<node>/<path>` | 预览文件，加 `?download=1` 下载原文件 |
+| `ANCHOR_RUNNER_BUNDLE_ROOT` | 初始 Graph bundle 与 manifest |
+| `ANCHOR_RUNNER_CATALOG_ROOT` | 可编辑 Graph catalog |
+| `ANCHOR_RUNNER_STATE_ROOT` | RunStore、Session/Turn、计划、渠道和锁 |
+| `ANCHOR_RUNNER_WORKSPACE_ROOT` | 节点 workspace、Artifact、输入与原生会话 |
+| `ANCHOR_RUNNER_LIBRARY_ROOT` | 已安装 Plugin/tool 与授权资源 |
+| `ANCHOR_RUNNER_WEB_ROOT` | `apps/web/dist` 或发行 Web 目录 |
+| `ANCHOR_RUNNER_GRAPH_NAME` | 初始 bundle 对应 Graph 名 |
+| `ANCHOR_RUNNER_LISTEN` | 默认 `127.0.0.1:8077` |
+| `ANCHOR_RUNNER_ALLOWED_COMMANDS` | 显式命令列表，例如 `sh,git` |
+| `ANCHOR_API_KEYS` | 部署 Bearer 白名单；结构见环境模板 |
 
+可写根应彼此隔离并在 release 外。Host 在监听前验证 bundle、探测可写根并获取 deployment-writer lease；同一 state root 只允许一个 writer。第三方工具环境与本地输入只按明确注册/授权挂载，不因模型提出路径就允许读取。
 
-## 调用另一个工作流
+正式部署使用 [deploy/systemd/anchor.env.example](../deploy/systemd/anchor.env.example)。非 loopback 监听必须配置有效唯一 Bearer secrets 并有对应网络边界；本地白名单不等于完整多租户模型。
 
-在工作流编辑页添加“调用工作流”节点，选择已安装的目标及执行模式：
+## Graph 与 WebUI
 
-- **等待完成**：本步骤等待目标结束。可选择目标输出节点及返回文件，后续节点从 `/in/<调用节点>/result/` 读取。
-- **启动后继续**：目标 Run 已保存后本步骤完成。目标继续执行，运行详情会分别显示调用节点完成状态与目标当前状态。
+在 WebUI 创建或打开 Graph，编辑 Agent/Op、边、反馈、子图、布局和 Plugin。保存时编译并校验，运行时冻结定义/输入。仓库示例位于 [examples/graphs](../examples/graphs)，安装所需官方工具后可以通过 Graph API 导入。
 
-在右侧设置输入常量、来源输入的 JSON Pointer 映射、上游文件和可选的助手会话。目标只能访问明确选中的文件；来源路径必须位于本节点可见的已提交上游快照。普通调用不继承来源 Run 的完整上下文。已有通道会话提供自己的对话历史，并在后台结果完成后向该用户投递正文。
-
-“工作流关系”显示已保存的直接调用者、目标及定时计划；点击关系可定位来源调用节点。运行详情中可进入具体目标 Run，再返回来源；循环中的每次调用都有独立引用。时间线支持按来源和调用链筛选。
-
-可先安装不调用模型、不发消息的两个示例：
-
-```bash
-mkdir -p .local/demo/workspaces/call-worker .local/demo/workspaces/call-report
-cp examples/graphs/call-worker.json .local/demo/workspaces/call-worker/graph.json
-cp examples/graphs/call-report.json .local/demo/workspaces/call-report/graph.json
+```sh
+curl -X POST http://127.0.0.1:8077/graphs \
+  -H 'Content-Type: application/json' \
+  --data '{"name":"research"}'
+node -e 'const fs=require("fs");process.stdout.write(JSON.stringify({definition:JSON.parse(fs.readFileSync("examples/graphs/deep-academic-research.json","utf8"))}))' | \
+  curl -X PUT http://127.0.0.1:8077/graphs/research \
+    -H 'Content-Type: application/json' --data-binary @-
 ```
 
-在网页运行 `call-report`，它生成报告、wait 调用 `call-worker`，再读取返回文件。调用节点需通过 Anchor 服务执行；直接使用 standalone runner 没有服务调用处理器。
+若部署配置 API keys，向上述请求追加 `Authorization: Bearer <key>`。Graph PUT 的接受格式、资源错误和诊断以 [Web API 契约](rust-frontend-api-contract.md) 为准。Plugin 必须先安装到 Host canonical Library；名称存在不代表外部服务或模型凭据可用。
 
-周报提醒可在发布节点后连接调用节点，目标选 `wecom-assistant`，选自己的已有企业微信会话，传入报告文件并设置 `input.message`（例如“阅读报告并给我一段完成提醒”）。助手后台输出的 summary 自动投递，不要再要求模型重复调用主动发送工具。此配置会在后续定时执行时产生真实通知。本机 weekly-work-report 已按用户授权接好并完成真实平台发送验收；其他部署仍需选择自己的已确认会话。
+AgentNode 负责模型工作，OpNode 负责确定性命令/调用。Plugin 直接挂到 AgentNode。反馈边允许带具体总结返工，节点在同 Run 的已提交产物基础上继续；读写声明、只读输入和 Sandbox 权限由运行时检查。研究完成来自目标与证据，不能以轮次数代替内容验收。
 
-被打断的后台任务保留同一个 Run；若原生命令恢复判定 `Uncertain`，需检查真实业务结果再处理。平台 ACK 不确定时系统不会自动重发，以避免重复通知。跨 Graph 递归、自调用到正在使用的同一会话、自动猜测成员身份均不支持。
+内联模块展开到同一 Run。`Op.call` 的 `wait`/`detach` 产生可追溯父子 Run；`call.session` 保留可信用户/来源。配对 `fanout`/`join` 允许独立串行分支并发并统一收束；嵌套、交叉或不支持的调用组合保存/接纳时拒绝。定义见 [组合设计](graph-composition-design.md)。
+
+## Run、历史与恢复
+
+Run 页面呈现实际路径、轮次、状态、节点对话、工具请求/结果、workspace 与 Artifact。节点之间通过不可变产物和只读输入交接，Git 视图可用于提交绑定的审查。Artifact 是产物权威，前端缓存和模型摘要不是执行记录。
+
+暂停/停止请求先保存，节点收束后才显示最终状态。继续原 Run 保留 cursor、invocation 与 Goose 原生 Session。进程中断可能留下工具结果未知事实；Agent 读取已保存历史和现场，核查效果后继续，运行时不盲目重放外部操作。
+
+删除会检查活动执行和 Graph 调用引用。持续会话中的 Run 共享原生 scope，单条删除受到限制；整 Graph 删除仍遵守调用/执行与精确确认门禁。已开始 Run 不因 Graph 编辑改变身份。
+
+## Pilot Session
+
+Pilot 用自然语言查询和管理 Graph、Run、Plugin 与 Artifact。Session 保留长期对话和运行关联；每次输入使用稳定 `request_id`，刷新通过 SSE 游标接回同一 Turn。页面关闭不等于停止执行。
+
+```text
+POST /sessions
+POST /sessions/{session}/turns
+GET  /sessions/{session}/messages
+GET  /sessions/{session}/turns/{turn}/events?after=<cursor>
+POST /sessions/{session}/stop
+GET  /sessions/{session}/turns/{turn}/questions
+POST /sessions/{session}/turns/{turn}/questions/{question}/answer
+```
+
+必要提问保持同一 Turn；回答可接受、拒绝或取消，重复相同回答幂等。删除确认绑定精确目标与资源状态。服务重启中断在途问题，不重放旧确认；保存回答不代表外部操作已经完成。
+
+## Plugin 与业务示例
+
+Plugin 保留 `plugin.json`、Skill 和资源，MCP 可用 stdio 或 HTTP。官方可执行文件使用 Rust，并在沙箱只读挂载。第三方 Plugin 可声明自己的运行环境，需部署者准备并授权；清单不是自动安装器。
+
+详细操作见 [Plugin 指南](plugins.md)。企业助手、学术研究、RSI 和周报分别见 [企业微信](wecom-assistant.md)、[RSI](rsi.md) 和 [周报](weekly-work-report.md)。Host 自动监管 Graph 声明的原生 WeCom Gateway；不要同时为同一渠道启动第二个独立网关。
+
+Docmost、公网企业微信与公共学术服务需要实际配置与真实业务验收。确定性本地测试检查接线、权限、结果、历史和文件，不证明业务内容质量或公网协议已经全部通过。
+
+## 触发、健康与发行
+
+手动 `/trigger`、Webhook、计划与 Responses 子集使用相同 Run 接纳。`/health` 返回进程存活，`/ready` 在配置 Graph 可用时返回 ready；它们不发送模型请求。Responses SSE 经反向代理时需要关闭缓冲并允许长连接。
+
+发行使用 [anchor-distribution](../rust/anchor-distribution/README.md)，构建后的 Web、固定 Goose、Host 与显式 Plugin 二进制进入受审闭包，状态和密钥留在包外。预检、切换盘点与候选验证使用 `anchor-devtools`，见 [部署指南](rust-production-deployment.md)、[切换准备](rust-production-cutover.md) 和 [候选回归](rust-production-candidate.md)。
+
+日常维护运行 [确定性小图](runtime-contract-tests.md)，真实模型兼容、目标机部署和大型业务内容验收单独安排。旧数据可原地只读保留，不自动导入或覆盖；本地候选通过也不等于生产服务与历史数据已切换。

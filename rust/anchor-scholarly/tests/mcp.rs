@@ -1,7 +1,6 @@
 use std::{
     fs,
     io::{BufRead, BufReader, Read, Write},
-    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::{Command, Stdio},
 };
@@ -15,13 +14,13 @@ fn plugin_root() -> PathBuf {
 }
 
 #[test]
-fn academic_plugin_declares_only_the_fixed_rust_stdio_entry() {
+fn academic_plugin_declares_the_bundled_rust_stdio_entry() {
     let root = plugin_root();
     let manifest: Value = serde_json::from_slice(&fs::read(root.join("plugin.json")).unwrap())
         .expect("valid plugin manifest");
     let server = &manifest["mcpServers"]["scholarly"];
-    assert_eq!(server["command"], "bin/anchor-scholarly-mcp");
-    assert_eq!(server["args"], json!([]));
+    assert_eq!(server["command"], "bin/anchor-scholarly");
+    assert_eq!(server["args"], json!(["mcp"]));
     assert_eq!(server["cwd"], ".");
     assert!(server.get("url").is_none());
     assert!(server.get("env").is_none());
@@ -34,23 +33,13 @@ fn academic_plugin_declares_only_the_fixed_rust_stdio_entry() {
             .components()
             .any(|component| { matches!(component, std::path::Component::ParentDir) })
     );
-    let wrapper = root.join(command);
-    let metadata = fs::metadata(&wrapper).expect("wrapper exists");
-    assert!(metadata.is_file());
-    assert_ne!(metadata.permissions().mode() & 0o111, 0);
-    let script = fs::read_to_string(wrapper).unwrap();
-    assert!(script.contains("anchor-scholarly"));
-    assert!(!script.contains("python"));
-    assert!(!script.contains("venv"));
-    assert!(!script.contains("https://"));
+    assert_eq!(command, "bin/anchor-scholarly");
 }
 
 #[test]
-fn fixed_wrapper_help_uses_the_configured_rust_binary() {
-    let wrapper = plugin_root().join("bin/anchor-scholarly-mcp");
-    let output = Command::new(wrapper)
-        .env_clear()
-        .env("ANCHOR_SCHOLARLY_BINARY", BINARY)
+fn plugin_entry_runs_the_local_rust_cli_without_path_lookup() {
+    let output = Command::new(BINARY)
+        .arg("mcp")
         .arg("--help")
         .output()
         .unwrap();

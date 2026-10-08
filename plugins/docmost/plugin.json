@@ -9,8 +9,8 @@
       "bearer_token_env_var": "DOCMOST_API_KEY"
     },
     "attachments": {
-      "command": "python3",
-      "args": ["upload_server.py"],
+      "command": "bin/anchor-docmost-tools",
+      "args": [],
       "cwd": ".",
       "env_vars": ["DOCMOST_API_KEY"]
     }

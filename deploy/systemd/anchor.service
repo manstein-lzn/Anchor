@@ -1,20 +1,30 @@
 [Unit]
-Description=Anchor Graph runtime and Plugin channels
+Description=Anchor Rust Goose Runtime
 Wants=network-online.target
 After=network-online.target
 
 [Service]
 Type=simple
-User=root
-WorkingDirectory=/root/Anchor
-ExecStart=/root/Anchor/.venv/bin/anchor-serve --root /root/Anchor/.local/demo --config /root/Anchor/examples/runtime.env.json --host 127.0.0.1 --port 8077
-Environment=PYTHONUNBUFFERED=1
-Restart=always
+User=anchor
+Group=anchor
+WorkingDirectory=/opt/anchor/current/anchor-runtime
+EnvironmentFile=/etc/anchor/anchor.env
+Environment=HOME=/var/lib/anchor
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=GOOSE_TELEMETRY_OFF=1
+ExecStart=/opt/anchor/current/anchor-runtime/bin/anchor-runner-host serve
+Restart=on-failure
 RestartSec=5
-# SIGINT lets the HTTP server's finally block stop Plugin channel processes.
-KillSignal=SIGINT
+KillSignal=SIGTERM
 KillMode=control-group
 TimeoutStopSec=30
+UMask=0027
+LimitNOFILE=65536
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/var/lib/anchor
 StandardOutput=journal
 StandardError=journal
 

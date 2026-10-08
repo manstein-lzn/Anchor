@@ -93,8 +93,10 @@ pub fn normalize_message(frame: &Value) -> Result<Option<ChannelEvent>, GatewayE
         ));
     }
     let chat_type = body.get("chattype").cloned().unwrap_or(json!("single"));
-    if !chat_type.is_string() {
-        return Err(GatewayError::Invalid("invalid callback chat type"));
+    if chat_type.as_str() != Some("single") {
+        return Err(GatewayError::Invalid(
+            "only private WeCom callbacks are supported",
+        ));
     }
     Ok(Some(ChannelEvent {
         source: "wecom".into(),

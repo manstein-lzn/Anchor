@@ -1,6 +1,19 @@
 # 历史归档
 
-归档日期：2026-09-25。这里保留旧方案与实验依据，**不定义当前实现，也不构成待办**。现行文档从 [项目 README](../../README.md) 进入，唯一升级方向由 [Plugin 设计](../plugins.md) 维护。
+这里保留旧方案与实验依据，**不定义当前实现，也不构成待办**。现行入口见 [文档目录](../README.md)，产品方向见 [产品架构](../product-architecture.md)，验收以 [开发台账](../pilot-development-plan.md) 为准。
+
+## Rust 与 Goose 收敛前的历史
+
+2026-10-08 清理维护树时，将旧宿主、框架比较、迁移计划和主文档快照收纳到 `pre-goose/`，保留当时证据，不继续维护旧命令。Goose 初始 ACP/vision 调研移入 `goose-research/`。
+
+- [旧主架构快照](pre-goose/architecture.md) 与 [旧产品架构快照](pre-goose/product-architecture.md)
+- [旧混合宿主说明](pre-goose/runner-host.md)
+- [旧平台目标](pre-goose/rust-platform-target.md)、[旧平台计划](pre-goose/rust-platform-development-plan.md)、[旧 Runtime 计划](pre-goose/rust-rig-migration-plan.md)
+- [框架能力核查](pre-goose/rig-harness-capability-audit.md)、[候选调研](pre-goose/rust-harness-candidate-research.md)、[CodeMode 调研](pre-goose/codemode-evaluation.md)
+- [Pilot 体验核查](pre-goose/pilot-experience-audit.md)、[P2 验收](pre-goose/pilot-p2-acceptance-review.md)
+- [Goose ACP 初步结论](goose-research/acp/initial_conclusions.md)、[初始接入验证](goose-research/acp/spike.md) 与 [vision 评估](goose-research/vision/assessment.md)
+
+已删除实现的路径和命令在历史正文中仍有参考意义；需要源码时查对应 Git 历史，而不是在当前开发环境重新安装旧依赖。旧运行记录不因文档整理被改写成 Goose 证据。
 
 原根目录的 25 份架构、讨论、计划与结果文档整体移入这里，正文保留，只增加归档提示。文中的状态、测试数、路径、命令、读取顺序和实施指令以当时为背景；旧的“下一步”不应继续执行。归档正文中的根目录路径及已删除模块名称是历史记录，不是当前可用入口。
 
@@ -48,7 +61,7 @@
 
 ## 历史示例
 
-[旧图示例](../../examples/graphs/previous/README.md) 保留原有位置，不兼容当前运行时。当前可运行图位于 [examples/graphs](../../examples/graphs)，主要研究示例为 [deep-academic-research.json](../../examples/graphs/deep-academic-research.json)。
+[旧图示例](legacy-examples/README.md) 已移入本归档，不兼容当前运行时。当前可运行图位于 [examples/graphs](../../examples/graphs)，主要研究示例为 [deep-academic-research.json](../../examples/graphs/deep-academic-research.json)。
 
 ## 查证与维护
 

@@ -1,7 +1,7 @@
 //! Operator-installed tool environments, using the existing Library tool.json.
 //! These paths are deployment grants, never fields of an editable Graph/Plugin.
 
-use anchor_runtime_rig::{ReadOnlyInput, SandboxEnvironment, SandboxRequest};
+use anchor_runtime::{ReadOnlyInput, SandboxEnvironment, SandboxRequest};
 use anchor_sandbox_bwrap::BubblewrapPolicy;
 use serde::Deserialize;
 use std::{

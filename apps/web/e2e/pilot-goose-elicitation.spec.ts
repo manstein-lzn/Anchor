@@ -21,7 +21,7 @@ async function freePort() {
 }
 
 async function stop(child?: ChildProcess) {
-  if (!child || child.exitCode !== null) return;
+  if (!child || child.exitCode !== null || child.signalCode !== null) return;
   const exited = new Promise<void>(resolve => child.once('exit', () => resolve()));
   child.kill('SIGTERM');
   await exited;
@@ -36,6 +36,8 @@ test('Goose native form answers and deletion confirmations use the same Turn thr
   await copyFile(process.env.ANCHOR_GOOSE_BINARY!, goose, constants.COPYFILE_FICLONE);
   const gooseDigest = createHash('sha256').update(await readFile(goose)).digest('hex');
   await mkdir(join(root, 'bundle'));
+  await mkdir(join(root, 'state'));
+  await mkdir(join(root, 'work'));
   await writeFile(join(root, 'bundle/graph.json'), JSON.stringify({ entry: 'seed', ops: { seed: { run: 'true' } }, nodes: [{ id: 'seed', op: 'seed' }], edges: [] }));
   await writeFile(join(root, 'bundle/manifest.json'), JSON.stringify({ format: 1, graph: 'graph.json', plugins: [] }));
   const calls: Record<string, unknown>[] = [], failures: string[] = [];
@@ -136,7 +138,7 @@ test('Goose native form answers and deletion confirmations use the same Turn thr
     expect(calls).toHaveLength(6);
     expect(failures).toEqual([]);
     const evidence = { status: 'passed', runtime: 'goose', real_model_requests: 0, production_data_used: false,
-      python: false, refresh_pending: true, no_extra_turns: true, graph_deleted: true, turns, questions: saved, provider_requests: calls };
+      refresh_pending: true, no_extra_turns: true, graph_deleted: true, turns, questions: saved, provider_requests: calls };
     await writeFile(join(root, 'evidence.json'), JSON.stringify(evidence, null, 2));
     await page.screenshot({ path: test.info().outputPath('goose-elicitation.png') });
     await writeFile(test.info().outputPath('evidence.json'), await readFile(join(root, 'evidence.json')));

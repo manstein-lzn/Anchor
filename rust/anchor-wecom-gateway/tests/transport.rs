@@ -503,6 +503,38 @@ async fn media_and_untrusted_callbacks_are_rejected_before_webhook() {
 }
 
 #[tokio::test]
+async fn group_callbacks_are_rejected_before_host_webhook() {
+    let root = tempfile::tempdir().unwrap();
+    let mut platform = Platform::new(Some(0)).await;
+    let webhook =
+        WebhookServer::new(|_| HttpReply::ok(json!({"text":"must not be invoked"}))).await;
+    let gateway = Gateway::start(config(root.path(), &platform, Some(&webhook)))
+        .await
+        .unwrap();
+    let mut errors = gateway.subscribe_errors();
+    gateway
+        .wait_authenticated(Duration::from_secs(2))
+        .await
+        .unwrap();
+
+    let mut group = callback("group-message", "alice", "hello");
+    group["body"]["chattype"] = json!("group");
+    group["body"]["chatid"] = json!("group-1");
+    platform.send(group).await;
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), errors.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+        GatewayError::Invalid("only private WeCom callbacks are supported")
+    );
+    platform.no_command("aibot_respond_msg").await;
+    assert!(webhook.events.lock().unwrap().is_empty());
+    assert!(gateway.delivery_facts().unwrap().is_empty());
+    gateway.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn webhook_media_error_and_oversized_replies_are_not_silently_downgraded() {
     let root = tempfile::tempdir().unwrap();
     let mut platform = Platform::new(Some(0)).await;
@@ -599,6 +631,51 @@ async fn failed_webhook_is_retried_after_restart_without_reply_claim() {
     platform.send(input).await;
     platform.no_command("aibot_respond_msg").await;
     assert_eq!(webhook.events.lock().unwrap().len(), 2);
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn interrupted_webhook_is_recovered_after_gateway_restart_without_duplicate_reply() {
+    let root = tempfile::tempdir().unwrap();
+    let mut platform = Platform::new(Some(0)).await;
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let webhook_attempts = attempts.clone();
+    let webhook = WebhookServer::new(move |_| {
+        if webhook_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+            let mut reply = HttpReply::ok(json!({"text":"discarded first response"}));
+            reply.delay = Duration::from_secs(1);
+            reply
+        } else {
+            HttpReply::ok(json!({"text":"recovered reply"}))
+        }
+    })
+    .await;
+    let settings = config(root.path(), &platform, Some(&webhook));
+    let gateway = Gateway::start(settings).await.unwrap();
+    gateway
+        .wait_authenticated(Duration::from_secs(2))
+        .await
+        .unwrap();
+
+    let input = callback("interrupted-webhook", "alice", "hello");
+    platform.send(input.clone()).await;
+    webhook.wait_events(1).await;
+    gateway.shutdown().await.unwrap();
+
+    let reopened = Gateway::start(config(root.path(), &platform, Some(&webhook)))
+        .await
+        .unwrap();
+    reopened
+        .wait_authenticated(Duration::from_secs(2))
+        .await
+        .unwrap();
+    webhook.wait_events(2).await;
+    let reply = platform.next("aibot_respond_msg").await;
+    assert_eq!(reply["body"]["stream"]["content"], "recovered reply");
+    platform.acknowledge(&reply, 0).await;
+    wait_fact(&reopened, "interrupted-webhook", DeliveryStatus::Confirmed).await;
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    platform.no_command("aibot_respond_msg").await;
     reopened.shutdown().await.unwrap();
 }
 
@@ -827,6 +904,42 @@ async fn newer_message_suppression_is_settled_without_dispatching_old_reply() {
         .collect::<Vec<_>>();
     assert!(settlements.contains(&"confirmed".to_owned()));
     assert!(settlements.contains(&"suppressed".to_owned()));
+    platform.no_command("aibot_respond_msg").await;
+    gateway.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn host_superseded_response_is_settled_without_platform_dispatch() {
+    let root = tempfile::tempdir().unwrap();
+    let mut platform = Platform::new(Some(0)).await;
+    let webhook = WebhookServer::new(|event| {
+        HttpReply::ok(json!({
+            "text":"",
+            "superseded":true,
+            "receipt":{
+                "key":format!("channel-{}", event["event_id"].as_str().unwrap()),
+                "content_sha256":"d".repeat(64)
+            }
+        }))
+    })
+    .await;
+    let gateway = Gateway::start(config(root.path(), &platform, Some(&webhook)))
+        .await
+        .unwrap();
+    gateway
+        .wait_authenticated(Duration::from_secs(2))
+        .await
+        .unwrap();
+
+    platform
+        .send(callback("host-superseded", "alice", "older request"))
+        .await;
+    webhook.wait_requests(2).await;
+    wait_settlement_delivered(&root.path().join("state"), "channel-host-superseded").await;
+    assert_eq!(
+        webhook.requests.lock().unwrap()[1]["settlement"]["status"],
+        "suppressed"
+    );
     platform.no_command("aibot_respond_msg").await;
     gateway.shutdown().await.unwrap();
 }

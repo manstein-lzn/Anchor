@@ -1,6 +1,6 @@
 //! Original Graph shell commands and the deterministic routing helper.
 
-use anchor_runtime_rig::{ReadOnlyInput, SandboxEnvironment, SandboxRequest};
+use anchor_runtime::{ReadOnlyInput, SandboxEnvironment, SandboxRequest};
 use std::path::Path;
 
 const ROUTE_HELPER: &str = "/tools/anchor-runtime/anchor-route";
@@ -40,7 +40,7 @@ pub(crate) fn add_route_helper(request: &mut SandboxRequest, mount: ReadOnlyInpu
 }
 
 /// A read-only mount of this binary named anchor-route needs no installed
-/// Anchor source, console script, or Python interpreter.
+/// Anchor source, console script, or interpreter.
 pub(crate) fn route_cli_args() -> Option<Vec<String>> {
     let mut args = std::env::args();
     if Path::new(&args.next()?).file_name()? == "anchor-route" {

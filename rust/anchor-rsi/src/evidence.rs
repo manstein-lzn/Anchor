@@ -141,6 +141,8 @@ impl Evidence {
             root: config.evidence.clone(),
         };
         result.walk(&config.source, "code", false)?;
+        result.source_changes(&config.source)?;
+        result.schedules(config.rust_state.as_ref().unwrap_or(&config.data))?;
         let workspaces = config.data.join("workspaces");
         if workspaces.is_dir() {
             for directory in sorted_dirs(&workspaces)? {
@@ -177,6 +179,7 @@ impl Evidence {
                         let path = entry.map_err(|e| e.to_string())?.path();
                         if path.extension().is_some_and(|e| e == "json") {
                             result.run(&path, &root, "rust-native")?;
+                            result.published_report(&path, &root)?;
                         }
                     }
                 } else {
@@ -221,7 +224,7 @@ impl Evidence {
             &declaration,
             &declaration,
         )?;
-        let index = json!({"format":1,"captured_at":result.captured_at,"window_start":result.captured_at-Duration::days(7),"window_end":result.captured_at,"entries":result.entries,"issues":result.issues,"limitations":LIMITATIONS});
+        let index = json!({"format":1,"captured_at":result.captured_at,"start":result.captured_at-Duration::days(7),"end_exclusive":result.captured_at,"window_start":result.captured_at-Duration::days(7),"window_end":result.captured_at,"entries":result.entries,"issues":result.issues,"limitations":LIMITATIONS});
         fs::write(
             result.root.join("index.json"),
             serde_json::to_vec_pretty(&index).map_err(|e| e.to_string())?,
@@ -232,6 +235,184 @@ impl Evidence {
 
     fn issue(&mut self, path: &str, reason: &str) {
         self.issues.push(json!({"path":path,"reason":reason}));
+    }
+
+    fn schedules(&mut self, root: &Path) -> Result<(), String> {
+        let path = root.join("state/schedules.json");
+        let snapshot = (|| -> Result<Value, String> {
+            safe_path(&path)?;
+            let metadata = fs::metadata(&path).map_err(|error| error.to_string())?;
+            if !metadata.is_file() || metadata.len() > MAX_FILE {
+                return Err("schedule snapshot is not a bounded regular file".into());
+            }
+            serde_json::from_slice(&fs::read(&path).map_err(|error| error.to_string())?)
+                .map_err(|error| error.to_string())
+        })();
+        let record = match snapshot {
+            Ok(value) => json!({"status":"ok","snapshot":value}),
+            Err(reason) => {
+                self.issue("runs/schedules.json", &reason);
+                json!({"status":"unavailable","reason":reason})
+            }
+        };
+        let mut record = record;
+        record["limitations"] = json!(
+            "Only the granted root's default state/schedules.json is covered; custom external paths and actual trigger delivery are not verified."
+        );
+        let original = serde_json::to_string_pretty(&record).map_err(|error| error.to_string())?;
+        redact::json(&mut record);
+        let content = serde_json::to_string_pretty(&record).map_err(|error| error.to_string())?;
+        self.add(
+            "runs/schedules.json",
+            "runs",
+            "read-only schedule metadata",
+            &original,
+            &content,
+        )
+    }
+
+    fn source_changes(&mut self, source: &Path) -> Result<(), String> {
+        let mut record = json!({"captured_at":self.captured_at,"window_start":self.captured_at-Duration::days(7),"limitations":"Git metadata identifies changes, not deployment or successful validation."});
+        let since = format!("--since={}", self.captured_at - Duration::days(7));
+        for (key, arguments) in [
+            ("status", vec!["status", "--short"]),
+            (
+                "history",
+                vec!["log", &since, "--name-status", "--format=%H %cI %s"],
+            ),
+        ] {
+            let mut command = std::process::Command::new("git");
+            for (key, _) in std::env::vars_os() {
+                if key.to_string_lossy().starts_with("GIT_") {
+                    command.env_remove(key);
+                }
+            }
+            let result = command
+                .args(["--no-replace-objects", "-c", "core.fsmonitor=false", "-C"])
+                .arg(source)
+                .args(arguments)
+                .output();
+            record[key] = match result {
+                Ok(output) if output.status.success() => {
+                    json!({"status":"ok","text":redact::text(&String::from_utf8_lossy(&output.stdout))})
+                }
+                Ok(_) => {
+                    json!({"status":"unavailable","reason":"source Git metadata is unavailable"})
+                }
+                Err(error) => json!({"status":"unavailable","reason":error.to_string()}),
+            };
+        }
+        let content = serde_json::to_string_pretty(&record).map_err(|error| error.to_string())?;
+        self.add(
+            "code/git-changes.json",
+            "code",
+            "read-only source Git metadata",
+            &content,
+            &content,
+        )
+    }
+
+    fn published_report(&mut self, path: &Path, root: &Path) -> Result<(), String> {
+        let raw: Value = match fs::read(path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        {
+            Some(value) => value,
+            None => return Ok(()),
+        };
+        if raw["status"] != "completed" {
+            return Ok(());
+        }
+        let Some(result) = raw
+            .pointer("/results/publish")
+            .and_then(Value::as_array)
+            .and_then(|items| items.last())
+        else {
+            return Ok(());
+        };
+        let commit = &result["commit"];
+        let Some(identity) = commit["id"].as_str() else {
+            self.issue(
+                "previous",
+                "published result has no native artifact identity",
+            );
+            return Ok(());
+        };
+        let check = (|| -> Result<Vec<(String, String)>, String> {
+            let key = &result["key"];
+            let run = key["run_id"]
+                .as_str()
+                .ok_or("missing published run identity")?;
+            let graph = key["graph_digest"]
+                .as_str()
+                .ok_or("missing published graph identity")?;
+            let invocation = key["invocation"]
+                .as_u64()
+                .ok_or("missing publish invocation")?;
+            let durable = format!("{run}:{graph}:publish:{invocation}");
+            let hash = format!("{:x}", Sha256::digest(durable.as_bytes()));
+            if ![format!("fs1-{hash}"), format!("fs2-{hash}")].contains(&identity.to_owned())
+                || commit["node_id"] != "publish"
+                || commit["invocation"] != invocation
+                || key["node_id"] != "publish"
+                || raw["run_id"] != run
+                || raw["graph_digest"] != graph
+            {
+                return Err("published artifact identity differs from its Run".into());
+            }
+            let artifact = root.join("artifacts").join(identity);
+            let manifest = crate::business::object(&artifact.join("manifest.json"))?;
+            if manifest["key"] != *key {
+                return Err("published manifest differs from recorded invocation".into());
+            }
+            let files = manifest["files"]
+                .as_object()
+                .ok_or("published manifest has no file inventory")?;
+            if !files.contains_key("evolution.json") {
+                return Ok(Vec::new());
+            }
+            let mut output = Vec::new();
+            for name in ["evolution.json", "rsi-report.md", "sources.md"] {
+                let bytes = crate::business::read(&artifact.join("files").join(name))?;
+                let declared = files.get(name).ok_or("published report is incomplete")?;
+                if declared["sha256"] != crate::business::digest(&bytes)
+                    || declared["bytes"] != bytes.len() as u64
+                {
+                    return Err("published report bytes differ from their frozen manifest".into());
+                }
+                output.push((
+                    name.into(),
+                    String::from_utf8(bytes).map_err(|error| error.to_string())?,
+                ));
+            }
+            Ok(output)
+        })();
+        match check {
+            Ok(files) => {
+                for (name, original) in files {
+                    let projection = if name.ends_with(".json") {
+                        let mut value: Value =
+                            serde_json::from_str(&original).map_err(|error| error.to_string())?;
+                        redact::json(&mut value);
+                        serde_json::to_string_pretty(&value).map_err(|error| error.to_string())?
+                    } else {
+                        redact::text(&original)
+                    };
+                    self.add(
+                        &format!("previous/published-{identity}/{name}"),
+                        "previous",
+                        "completed Run publish artifact",
+                        &original,
+                        &projection,
+                    )?;
+                }
+            }
+            Err(reason) => self.issue(
+                "previous",
+                &format!("published report could not be verified: {reason}"),
+            ),
+        }
+        Ok(())
     }
 
     fn walk(&mut self, root: &Path, domain: &str, reports_only: bool) -> Result<(), String> {
@@ -484,7 +665,7 @@ impl Evidence {
         files.sort_by(|a, b| a.path.cmp(&b.path));
         let limit = limit.clamp(1, 100);
         Ok(
-            json!({"domain":domain,"count":files.len(),"offset":offset,"limit":limit,"files":files.iter().skip(offset).take(limit).collect::<Vec<_>>(),"next_offset":offset.checked_add(limit).filter(|next|*next<files.len()),"issue_count":self.issues.len(),"issues":self.issues.iter().take(20).collect::<Vec<_>>(),"issue_locator":"index.json in operator evidence root contains all collection issues","direct_dependency_count":self.dependencies.len(),"limitations":LIMITATIONS,"captured_at":self.captured_at}),
+            json!({"domain":domain,"count":files.len(),"offset":offset,"limit":limit,"files":files.iter().skip(offset).take(limit).collect::<Vec<_>>(),"next_offset":offset.checked_add(limit).filter(|next|*next<files.len()),"issue_count":self.issues.len(),"issues":self.issues.iter().take(20).collect::<Vec<_>>(),"issue_locator":"index.json in operator evidence root contains all collection issues","direct_dependency_count":self.dependencies.len(),"limitations":LIMITATIONS,"captured_at":self.captured_at,"window_start":self.captured_at-Duration::days(7),"window_end":self.captured_at}),
         )
     }
 

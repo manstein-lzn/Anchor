@@ -2,7 +2,7 @@ use super::{ApplicationError, RunApplication};
 use anchor_graph_host::{
     FileGraphBundleLoader, FilePluginCatalog, LoadedGraphBundle, PluginCatalog,
 };
-use anchor_runtime_rig::graph::{GraphError, GraphSnapshot, PluginBinding};
+use anchor_runtime::graph::{GraphError, GraphSnapshot, PluginBinding};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 
@@ -167,7 +167,7 @@ impl RunApplication {
         for (run_id, _) in self.runs_for_graph(&path)? {
             self.reject_pending_session_delivery(&run_id)?;
         }
-        let next = anchor_runtime_rig::graph::GraphSnapshot::from_authoring(definition.clone())
+        let next = anchor_runtime::graph::GraphSnapshot::from_authoring(definition.clone())
             .map_err(invalid)?;
         if (!current.plugins.is_empty() || next.nodes.iter().any(|node| !node.plugins.is_empty()))
             && self.has_unfinished_plugin_run(&path).await?
@@ -287,8 +287,7 @@ pub(crate) fn write_graph_bundle(
     path: &Path,
     definition: &Value,
 ) -> Result<(), GraphManagementError> {
-    anchor_runtime_rig::graph::GraphSnapshot::from_authoring(definition.clone())
-        .map_err(invalid)?;
+    anchor_runtime::graph::GraphSnapshot::from_authoring(definition.clone()).map_err(invalid)?;
     std::fs::create_dir_all(path).map_err(storage)?;
     let graph_path = path.join("graph.json");
     let manifest_path = path.join("manifest.json");

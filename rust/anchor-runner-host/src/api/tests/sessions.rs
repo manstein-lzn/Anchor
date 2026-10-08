@@ -171,9 +171,6 @@ async fn native_pilot_validates_inputs_and_reads_durable_turns_without_executing
     .await;
     assert_eq!(status, StatusCode::CONFLICT);
     let (_, messages) = call(app.clone(), "GET", "/sessions/turn-api/messages", None).await;
-    #[cfg(feature = "legacy-regression")]
-    assert_eq!(messages["messages"], json!([]));
-    #[cfg(not(feature = "legacy-regression"))]
     assert_eq!(
         messages["messages"],
         json!([

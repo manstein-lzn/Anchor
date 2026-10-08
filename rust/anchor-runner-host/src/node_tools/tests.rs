@@ -97,18 +97,21 @@ async fn graph_network_intent_is_applied_and_host_authority_still_limits_it() {
         let (mut socket, _) = listener.accept().await.unwrap();
         socket.write_all(b"network-visible").await.unwrap();
     });
-    let python = std::fs::canonicalize("/usr/bin/python3").unwrap();
-    let executable = python.to_str().unwrap();
+    let shell = std::fs::canonicalize("/usr/bin/bash").unwrap();
+    let executable = shell.to_str().unwrap();
     let sandbox = Arc::new(
         BubblewrapSandbox::new(
-            BubblewrapPolicy::new("bwrap", [python.file_name().unwrap().to_str().unwrap()])
-                .authorize_workspace_root(&fixture.workspace)
-                .allow_network(),
+            BubblewrapPolicy::new(
+                "bwrap",
+                [shell.file_name().unwrap().to_str().unwrap(), "cat"],
+            )
+            .authorize_workspace_root(&fixture.workspace)
+            .allow_network(),
         )
         .unwrap(),
     );
     let script = format!(
-        "import socket; print('network-probe-started', flush=True); s=socket.create_connection(('127.0.0.1',{port}), timeout=1); print(s.recv(64).decode())"
+        "set -e; printf 'network-probe-started\\n'; exec 3<>/dev/tcp/127.0.0.1/{port}; cat <&3"
     );
     let tools = || {
         NodeTools::new(

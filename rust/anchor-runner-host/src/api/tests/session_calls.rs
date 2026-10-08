@@ -4,8 +4,19 @@ use crate::application::{
     metadata::GraphCallSource,
     session_calls::{SessionCall, SessionContext},
 };
-use anchor_runtime_rig::graph::GraphCallOutcome;
+use anchor_runtime::graph::GraphCallOutcome;
 use std::time::Duration;
+
+async fn resolve_session_call(Json(request): Json<Value>) -> Json<Value> {
+    assert_eq!(request["session"], "alice");
+    assert_eq!(request["graph"], "child");
+    Json(json!({
+        "session":"alice",
+        "reply_node":"work",
+        "conversation_id":"alice-conversation",
+        "channel":{"source":"wecom","sender_id":"alice-user"}
+    }))
+}
 
 fn seed_session_call(state: &ApiState, run: &str, mode: &str, bound: bool) {
     let bundle = FileGraphBundleLoader::new(&state.bundle_root)
@@ -422,6 +433,205 @@ async fn completed_session_execution_stays_waiting_until_delivery_settlement() {
             .status,
         "delivered"
     );
+}
+
+#[tokio::test]
+async fn completed_pending_wait_child_recovers_delivery_and_parent_after_restart() {
+    let (root, mut state) = fixture();
+    let _env = PROCESS_ENV.lock().await;
+    set_host_env(root.path(), &state.data_root);
+    let session_host = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let session_host_url = format!("http://{}", session_host.local_addr().unwrap());
+    let session_host_task = tokio::spawn(async move {
+        axum::serve(
+            session_host,
+            Router::new().route(
+                "/v1/runtime/session-calls/resolve",
+                axum::routing::post(resolve_session_call),
+            ),
+        )
+        .await
+        .unwrap();
+    });
+    unsafe {
+        env::set_var("ANCHOR_SESSION_HOST_URL", session_host_url);
+        env::set_var("ANCHOR_SESSION_HOST_TOKEN", "fixture-token");
+    }
+    write_graph_bundle(
+        &state.bundle_root,
+        &json!({
+            "objective":"wait for delivered Session child",
+            "entry":"invoke",
+            "agents":{},
+            "ops":{
+                "invoke":{"call":{"graph":"child","mode":"wait","session":"alice"}},
+                "after":{"run":"true"}
+            },
+            "nodes":[{"id":"invoke","op":"invoke"},{"id":"after","op":"after"}],
+            "edges":[{"from":"invoke","to":"after"}]
+        }),
+    )
+    .unwrap();
+    write_graph_bundle(
+        &state.catalog_root.join("child"),
+        &json!({
+            "objective":"deterministic Session child",
+            "entry":"work",
+            "agents":{},
+            "ops":{"work":{"run":"true"}},
+            "nodes":[{"id":"work","op":"work"}],
+            "edges":[]
+        }),
+    )
+    .unwrap();
+
+    let app = router(state.clone());
+    let (status, accepted) = call(
+        app.clone(),
+        "POST",
+        "/trigger",
+        Some(r#"{"graph":"fixture","input":{}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{accepted}");
+    let parent = accepted["run"].as_str().unwrap().to_owned();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let record = FileRunStore::new(state.data_root.join("runs"))
+                .load(&parent)
+                .unwrap()
+                .unwrap();
+            if record.status == RunStatus::WaitingCall {
+                break;
+            }
+            assert_ne!(record.status, RunStatus::Failed, "{record:?}");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("parent did not wait for Session delivery");
+    let child = state.application.child_metadata(&parent).unwrap()[0]
+        .run_id
+        .clone();
+
+    let (status, admitted) = execute(&app, &child, "alice", None).await;
+    assert_eq!(status, StatusCode::OK, "{admitted}");
+    wait_idle(&state).await;
+    assert_eq!(
+        FileRunStore::new(state.data_root.join("runs"))
+            .load(&parent)
+            .unwrap()
+            .unwrap()
+            .status,
+        RunStatus::WaitingCall
+    );
+    let child_record = record_bytes(&state, &child);
+    let child_metadata = metadata_bytes(&state, &child);
+    assert_eq!(
+        state
+            .application
+            .metadata(&child)
+            .unwrap()
+            .unwrap()
+            .session_call
+            .unwrap()
+            .status,
+        "pending"
+    );
+
+    state.application = RunApplication::new(state.data_root.clone(), state.catalog_root.clone())
+        .with_configured_graph("fixture".into(), state.bundle_root.clone());
+    let restarted_app = router(state.clone());
+    for _ in 0..2 {
+        state
+            .application
+            .recover_detached_at_startup()
+            .await
+            .unwrap();
+    }
+    let (status, runs) = call(restarted_app.clone(), "GET", "/runs", None).await;
+    assert_eq!(status, StatusCode::OK, "{runs}");
+    let child_projection = runs["runs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|run| run["run"] == child)
+        .unwrap();
+    assert_eq!(child_projection["status"], "completed");
+    assert_eq!(child_projection["session_call"]["status"], "pending");
+    assert_eq!(record_bytes(&state, &child), child_record);
+    assert_eq!(metadata_bytes(&state, &child), child_metadata);
+    assert_eq!(
+        FileRunStore::new(state.data_root.join("runs"))
+            .load(&parent)
+            .unwrap()
+            .unwrap()
+            .status,
+        RunStatus::WaitingCall
+    );
+
+    let (status, readmitted) = execute(&restarted_app, &child, "alice", None).await;
+    assert_eq!(status, StatusCode::OK, "{readmitted}");
+    assert!(state.application.active_runs(None).await.is_empty());
+    assert_eq!(record_bytes(&state, &child), child_record);
+    assert_eq!(metadata_bytes(&state, &child), child_metadata);
+
+    for _ in 0..2 {
+        let (status, settled) = call(
+            restarted_app.clone(),
+            "POST",
+            &format!("/runs/{child}/session-settlement"),
+            Some(r#"{"status":"delivered"}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{settled}");
+    }
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let record = FileRunStore::new(state.data_root.join("runs"))
+                .load(&parent)
+                .unwrap()
+                .unwrap();
+            if record.status == RunStatus::Completed {
+                break record;
+            }
+            assert_ne!(record.status, RunStatus::Failed, "{record:?}");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("settled Session child did not resume its waiting parent");
+    wait_idle(&state).await;
+    let child_record_after = FileRunStore::new(state.data_root.join("runs"))
+        .load(&child)
+        .unwrap()
+        .unwrap();
+    assert_eq!(child_record_after.status, RunStatus::Completed);
+    assert_eq!(child_record_after.passes["work"], 1);
+    assert_eq!(child_record_after.results["work"].len(), 1);
+    assert_eq!(
+        state
+            .application
+            .metadata(&child)
+            .unwrap()
+            .unwrap()
+            .session_call
+            .unwrap()
+            .status,
+        "delivered"
+    );
+    let parent_record = FileRunStore::new(state.data_root.join("runs"))
+        .load(&parent)
+        .unwrap()
+        .unwrap();
+    assert_eq!(parent_record.graph_calls.len(), 1);
+    assert!(parent_record.graph_calls.values().all(|call| {
+        call.status == anchor_runtime::graph::GraphCallStatus::Completed
+            && call.child_run_id.as_deref() == Some(child.as_str())
+    }));
+    assert!(parent_record.results.contains_key("invoke"));
+    assert!(parent_record.results.contains_key("after"));
+    session_host_task.abort();
 }
 
 #[tokio::test]

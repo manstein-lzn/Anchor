@@ -6,7 +6,7 @@ license.workspace = true
 description = "Bubblewrap host adapter for Anchor's Rust sandbox port"
 
 [dependencies]
-anchor-runtime-rig = { path = "../anchor-runtime", default-features = false }
+anchor-runtime = { path = "../anchor-runtime" }
 tokio = { workspace = true, features = ["process", "io-util", "net"] }
 libc = "0.2"
 

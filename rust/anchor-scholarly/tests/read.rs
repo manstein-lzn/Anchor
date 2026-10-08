@@ -38,7 +38,7 @@ fn pdf_document(page_count: usize) -> Vec<u8> {
                 Operation::new(
                     "Tj",
                     vec![Object::string_literal(format!(
-                        "page-{index:02} Deterministic scholarly PDF extraction preserves the requested page window and uses an established parser without Python."
+                        "page-{index:02} Deterministic scholarly PDF extraction preserves the requested page window and uses an established parser."
                     ))],
                 ),
                 Operation::new("ET", vec![]),

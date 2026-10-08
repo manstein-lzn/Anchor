@@ -485,7 +485,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn request_accepts_python_sandbox_policy_fields() {
+    async fn request_accepts_declared_sandbox_policy_fields() {
         let mut request = base_request();
         request.workspace_readonly.push(PathBuf::from(".git"));
         request.tool_dirs.push(PathBuf::from("/opt/anchor/bin"));

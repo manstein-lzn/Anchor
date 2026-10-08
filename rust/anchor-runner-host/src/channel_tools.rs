@@ -5,7 +5,7 @@
 //! call its private Unix socket, or persist the final rich reply for the host
 //! adapter to deliver.
 
-use anchor_runtime_rig::{
+use anchor_runtime::{
     Cancellation, ReadOnlyInput, ToolDefinition, ToolError, ToolName, ToolPort, ToolResultContent,
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -13,8 +13,6 @@ use image::ImageFormat;
 use md5::{Digest as Md5Digest, Md5};
 use serde::Deserialize;
 use serde_json::{Value, json};
-#[cfg(feature = "legacy-regression")]
-use sha2::Sha256;
 use std::{
     fs::{self, OpenOptions},
     future::Future,
@@ -54,8 +52,8 @@ struct ImageArguments {
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn wrap(
     inner: std::sync::Arc<dyn ToolPort>,
-    bindings: &[anchor_runtime_rig::graph::PluginBinding],
-    key: anchor_runtime_rig::graph::InvocationKey,
+    bindings: &[anchor_runtime::graph::PluginBinding],
+    key: anchor_runtime::graph::InvocationKey,
     state_root: PathBuf,
     reply_node: Option<String>,
     workspace: PathBuf,
@@ -78,7 +76,7 @@ pub(crate) fn wrap(
 
 struct ChannelTools {
     inner: std::sync::Arc<dyn ToolPort>,
-    key: anchor_runtime_rig::graph::InvocationKey,
+    key: anchor_runtime::graph::InvocationKey,
     state_root: PathBuf,
     reply_node: Option<String>,
     workspace: PathBuf,
@@ -160,17 +158,16 @@ impl ChannelTools {
         }
     }
 
-    fn control_endpoint() -> Result<(PathBuf, String), ToolError> {
+    fn control_endpoint(&self) -> Result<(PathBuf, String), ToolError> {
         if let (Some(socket), Ok(token)) = (
             std::env::var_os("ANCHOR_CHANNEL_CONTROL_SOCKET").map(PathBuf::from),
             std::env::var("ANCHOR_CHANNEL_CONTROL_TOKEN"),
         ) {
             return Ok((socket, token));
         }
-        let descriptor =
-            std::env::var_os("ANCHOR_CHANNEL_CONTROL_DESCRIPTOR").ok_or_else(|| {
-                ToolError::Failed("WeCom gateway is unavailable; no message was sent".into())
-            })?;
+        let descriptor = std::env::var_os("ANCHOR_CHANNEL_CONTROL_DESCRIPTOR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| self.state_root.join("channels/wecom/control.json"));
         let raw = fs::read(descriptor)
             .map_err(|_| ToolError::Failed("WeCom gateway descriptor is unavailable".into()))?;
         let value: Value = serde_json::from_slice(&raw)
@@ -352,7 +349,7 @@ impl ChannelTools {
             return Err(ToolError::Failed("recipient is not allowed".into()));
         }
         let request_id = self.send_request_id()?;
-        let (socket, token) = Self::control_endpoint()?;
+        let (socket, token) = self.control_endpoint()?;
         let payload = json!({"operation":"send","request_id":request_id,"userid":args.userid,"content":args.content,"token":token});
         if args.content.len() > 20480 || args.userid.chars().count() > 200 {
             return Err(ToolError::Failed(
@@ -404,24 +401,6 @@ impl ChannelTools {
         Ok(value)
     }
 
-    #[cfg(feature = "legacy-regression")]
-    fn send_request_id(&self) -> Result<String, ToolError> {
-        if crate::goose_acp::runtime_mode() != "io-harness" {
-            return crate::goose_tool_context::channel_request_id(&self.key);
-        }
-        let attempt = anchor_io_harness_runtime::node_port::active_tool_attempt(
-            &self.state_root.join("io-harness/store"),
-            &self.key,
-            SEND_TOOL,
-        )
-        .map_err(ToolError::Failed)?;
-        Ok(format!(
-            "channel-send-{:x}",
-            Sha256::digest(format!("{}:{attempt}", self.key.durable_key()).as_bytes())
-        ))
-    }
-
-    #[cfg(not(feature = "legacy-regression"))]
     fn send_request_id(&self) -> Result<String, ToolError> {
         crate::goose_tool_context::channel_request_id(&self.key)
     }
@@ -502,7 +481,7 @@ mod tests {
         fs::create_dir_all(root.join("workspace")).unwrap();
         ChannelTools {
             inner: Arc::new(Empty),
-            key: anchor_runtime_rig::graph::InvocationKey {
+            key: anchor_runtime::graph::InvocationKey {
                 run_id: "run".into(),
                 graph_digest: "digest".into(),
                 node_id: "reply".into(),
@@ -525,7 +504,6 @@ mod tests {
             .unwrap();
         out.into_inner()
     }
-    #[cfg(not(feature = "legacy-regression"))]
     #[test]
     fn goose_gateway_send_refuses_before_connecting_or_inventing_an_attempt() {
         let root = tempfile::tempdir().unwrap();
@@ -552,7 +530,6 @@ mod tests {
         serde_json::from_slice(&bytes).unwrap()
     }
 
-    #[cfg(not(feature = "legacy-regression"))]
     #[tokio::test]
     async fn scoped_concurrent_calls_with_identical_bodies_have_independent_acks() {
         use crate::goose_tool_context::{GooseToolIdentity, scope};
@@ -652,7 +629,6 @@ mod tests {
         );
     }
 
-    #[cfg(not(feature = "legacy-regression"))]
     #[tokio::test]
     async fn missing_or_wrong_invocation_identity_never_opens_the_socket() {
         use crate::goose_tool_context::{GooseToolIdentity, scope};

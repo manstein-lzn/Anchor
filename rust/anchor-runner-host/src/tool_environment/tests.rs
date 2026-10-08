@@ -1,5 +1,5 @@
 use super::*;
-use anchor_runtime_rig::{NetworkPolicy, SandboxPort};
+use anchor_runtime::{NetworkPolicy, SandboxPort};
 use anchor_sandbox_bwrap::BubblewrapSandbox;
 use serde_json::json;
 
@@ -26,26 +26,27 @@ fn fixture(root: &Path) -> PathBuf {
     fs::create_dir_all(&tool).unwrap();
     fs::create_dir_all(environment.join("bin")).unwrap();
     fs::create_dir_all(&imports).unwrap();
-    // Two symlinks, including a relative one, exercise ordinary venv layout.
-    std::os::unix::fs::symlink("python3", environment.join("bin/python")).unwrap();
+    // Two symlinks, including a relative one, exercise ordinary installation aliases.
+    std::os::unix::fs::symlink("bash5", environment.join("bin/bash")).unwrap();
     std::os::unix::fs::symlink(
-        fs::canonicalize("/usr/bin/python3").unwrap(),
-        environment.join("bin/python3"),
+        fs::canonicalize("/usr/bin/bash").unwrap(),
+        environment.join("bin/bash5"),
     )
     .unwrap();
     let entry = environment.join("bin/sample");
     fs::write(
         &entry,
         format!(
-            "#!{}/bin/python\nfrom provided import value\nprint(value)\n",
-            environment.display()
+            "#!{}/bin/bash\n. {}/provided.sh\nprintf '%s\\n' \"$value\"\n",
+            environment.display(),
+            imports.display()
         ),
     )
     .unwrap();
     fs::set_permissions(&entry, fs::Permissions::from_mode(0o755)).unwrap();
     fs::write(
-        imports.join("provided.py"),
-        "value = 'external-tool-result'\n",
+        imports.join("provided.sh"),
+        "value='external-tool-result'\n",
     )
     .unwrap();
     fs::write(
@@ -57,7 +58,7 @@ fn fixture(root: &Path) -> PathBuf {
 }
 
 #[tokio::test]
-async fn existing_tool_manifest_runs_python_with_imports_and_readonly_dependencies() {
+async fn existing_tool_manifest_runs_shell_with_imports_and_readonly_dependencies() {
     let root = tempfile::tempdir().unwrap();
     let library = fixture(root.path());
     // A deployed environment may be addressed through an operator-managed alias.
@@ -89,11 +90,14 @@ async fn existing_tool_manifest_runs_python_with_imports_and_readonly_dependenci
         &workspace,
         [
             root.path()
-                .join("environment/bin/python")
+                .join("environment/bin/bash")
                 .to_string_lossy()
                 .into_owned(),
             "-c".into(),
-            "from provided import value; print(value)".into(),
+            format!(
+                ". {}/imports/provided.sh; printf '%s\\n' \"$value\"",
+                root.path().display()
+            ),
         ],
     );
     tools.apply(&mut request);
@@ -116,7 +120,7 @@ async fn existing_tool_manifest_runs_python_with_imports_and_readonly_dependenci
             "sh".into(),
             "-c".into(),
             format!(
-                "echo changed > {}/imports/provided.py",
+                "echo changed > {}/imports/provided.sh",
                 root.path().display()
             ),
         ],
@@ -124,8 +128,8 @@ async fn existing_tool_manifest_runs_python_with_imports_and_readonly_dependenci
     tools.apply(&mut request);
     assert_ne!(sandbox.run(request).await.unwrap().exit_code, Some(0));
     assert_eq!(
-        fs::read_to_string(root.path().join("imports/provided.py")).unwrap(),
-        "value = 'external-tool-result'\n"
+        fs::read_to_string(root.path().join("imports/provided.sh")).unwrap(),
+        "value='external-tool-result'\n"
     );
 }
 

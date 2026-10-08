@@ -4,8 +4,8 @@
   "skills": "skills/",
   "mcpServers": {
     "scholarly": {
-      "command": "bin/anchor-scholarly-mcp",
-      "args": [],
+      "command": "bin/anchor-scholarly",
+      "args": ["mcp"],
       "cwd": "."
     }
   }
