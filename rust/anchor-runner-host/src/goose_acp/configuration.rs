@@ -59,8 +59,18 @@ pub(super) fn command(
         .map_err(|error| error.to_string())
 }
 
+/// Host-side model endpoint used by the bridge proxy.
+#[derive(Clone)]
+pub(super) struct ModelUpstream {
+    pub url: Url,
+    pub api_key: String,
+}
+
 pub(super) struct ModelRegistry {
     fixture: bool,
+    /// Sandbox-dials-the-provider mode. Kept only as a rollback lever for the
+    /// bridge proxy; the fixture transport always proxies.
+    direct: bool,
     endpoint: Url,
     wire: &'static str,
     model: String,
@@ -94,6 +104,8 @@ impl ModelRegistry {
         fixture: bool,
         mut value: impl FnMut(&str) -> Option<String>,
     ) -> Result<Self, String> {
+        // The sandbox-dials-the-provider lever exists only for native mode.
+        let direct = !fixture && value("ANCHOR_MODEL_DIRECT").as_deref() == Some("1");
         let (endpoint, wire, model, api_key, aliases) = if fixture {
             let host =
                 value("ANCHOR_GOOSE_OPENAI_HOST").ok_or("ANCHOR_GOOSE_OPENAI_HOST is required")?;
@@ -127,6 +139,7 @@ impl ModelRegistry {
         };
         Ok(Self {
             fixture,
+            direct,
             endpoint,
             wire,
             model,
@@ -152,8 +165,29 @@ impl ModelRegistry {
         })
     }
 
-    pub(super) fn fixture_upstream(&self) -> Option<Url> {
-        self.fixture.then(|| self.endpoint.clone())
+    pub(super) fn fixture(&self) -> bool {
+        self.fixture
+    }
+
+    /// The host-side model endpoint the bridge proxies to.
+    ///
+    /// The sandbox receives only the bridge URL and a per-invocation token, so a
+    /// real provider credential never enters it. `None` means the sandbox dials
+    /// the provider itself, which only happens with the explicit
+    /// `ANCHOR_MODEL_DIRECT=1` rollback lever.
+    pub(super) fn model_upstream(&self) -> Option<ModelUpstream> {
+        if self.direct {
+            return None;
+        }
+        Some(ModelUpstream {
+            url: self.endpoint.clone(),
+            // A fixture upstream ignores credentials; a real provider does not.
+            api_key: if self.fixture {
+                "fixture-only-not-a-secret".to_owned()
+            } else {
+                self.api_key.clone()
+            },
+        })
     }
 
     pub(super) fn environment(
@@ -162,17 +196,18 @@ impl ModelRegistry {
         bridge_url: &str,
         bridge_token: &str,
     ) -> Vec<SandboxEnvironment> {
-        let (host, base_path, api_key) = if self.fixture {
-            (
-                bridge_url.to_owned(),
-                "v1/chat/completions".to_owned(),
-                bridge_token,
-            )
-        } else {
+        let (host, base_path, api_key) = if self.direct {
             (
                 self.endpoint.origin().ascii_serialization(),
                 format!(".{}", self.endpoint.path()),
-                self.api_key.as_str(),
+                self.api_key.clone(),
+            )
+        } else {
+            // The sandbox speaks only to the host bridge.
+            (
+                bridge_url.to_owned(),
+                "v1/chat/completions".to_owned(),
+                bridge_token.to_owned(),
             )
         };
         vec![
@@ -321,7 +356,7 @@ mod tests {
         values.insert("ANCHOR_MODEL_ALIASES".into(), "invalid JSON".into());
         let models = registry(true, &values);
         assert_eq!(
-            models.fixture_upstream().unwrap().as_str(),
+            models.model_upstream().unwrap().url.as_str(),
             "http://127.0.0.1:43210/v1/chat/completions"
         );
         assert_eq!(
@@ -349,7 +384,11 @@ mod tests {
         ] {
             values.insert("ANCHOR_GOOSE_OPENAI_HOST".into(), host.into());
             assert_eq!(
-                registry(true, &values).fixture_upstream().unwrap().as_str(),
+                registry(true, &values)
+                    .model_upstream()
+                    .unwrap()
+                    .url
+                    .as_str(),
                 expected
             );
         }
@@ -470,8 +509,18 @@ mod tests {
             for (wire, suffix) in [("chat", "chat/completions"), ("responses", "responses")] {
                 values.insert("ANCHOR_MODEL_WIRE_API".into(), wire.into());
                 let models = registry(false, &values);
-                assert!(models.fixture_upstream().is_none());
+                // The host dials the configured endpoint...
+                assert_eq!(models.model_upstream().unwrap().url, models.endpoint);
+                // ...while the sandbox only ever speaks to the bridge.
                 let entries = environment(&models, None);
+                assert_eq!(entries["OPENAI_HOST"], "http://127.0.0.1:54321");
+                assert_eq!(entries["OPENAI_BASE_PATH"], "v1/chat/completions");
+                // The explicit rollback lever restores sandbox-direct dialing with
+                // the configured prefix preserved.
+                values.insert("ANCHOR_MODEL_DIRECT".into(), "1".into());
+                let direct = registry(false, &values);
+                assert!(direct.model_upstream().is_none());
+                let entries = environment(&direct, None);
                 assert_eq!(entries["OPENAI_HOST"], host);
                 assert_eq!(entries["OPENAI_BASE_PATH"], format!("./{prefix}{suffix}"));
                 assert_eq!(
@@ -479,14 +528,15 @@ mod tests {
                         .unwrap()
                         .join(&entries["OPENAI_BASE_PATH"])
                         .unwrap(),
-                    models.endpoint
+                    direct.endpoint
                 );
+                values.remove("ANCHOR_MODEL_DIRECT");
             }
         }
     }
 
     #[test]
-    fn native_environment_calls_the_endpoint_without_bridge_credentials() {
+    fn native_environment_calls_the_bridge_without_provider_credentials() {
         let mut values = native_values();
         values.extend(fixture_values());
         let models = registry(false, &values);
@@ -495,11 +545,18 @@ mod tests {
             BTreeMap::from([
                 ("GOOSE_PROVIDER".into(), "openai".into()),
                 ("GOOSE_MODEL".into(), "primary-model".into()),
-                ("OPENAI_HOST".into(), "https://provider.example".into()),
-                ("OPENAI_BASE_PATH".into(), "./gateway/v1/responses".into()),
-                ("OPENAI_API_KEY".into(), "operator-secret".into()),
+                ("OPENAI_HOST".into(), "http://127.0.0.1:54321".into()),
+                ("OPENAI_BASE_PATH".into(), "v1/chat/completions".into()),
+                ("OPENAI_API_KEY".into(), "bridge-secret".into()),
             ])
         );
+        // The provider endpoint and credential stay host-side.
+        let upstream = models.model_upstream().unwrap();
+        assert_eq!(
+            upstream.url.as_str(),
+            "https://provider.example/gateway/v1/responses"
+        );
+        assert_eq!(upstream.api_key, "operator-secret");
     }
 
     #[test]
@@ -519,18 +576,28 @@ mod tests {
             for wire in ["chat", "responses"] {
                 values.insert("ANCHOR_MODEL_WIRE_API".into(), wire.into());
                 let models = registry(false, &values);
-                let entries = environment(&models, None);
+                let upstream = models.model_upstream().unwrap().url;
+                assert_eq!(
+                    upstream.origin().ascii_serialization(),
+                    "https://provider.example"
+                );
+                assert!(upstream.username().is_empty());
+                assert!(upstream.password().is_none());
+                values.insert("ANCHOR_MODEL_DIRECT".into(), "1".into());
+                let direct = registry(false, &values);
+                let entries = environment(&direct, None);
                 let joined = Url::parse(&entries["OPENAI_HOST"])
                     .unwrap()
                     .join(&entries["OPENAI_BASE_PATH"])
                     .unwrap();
-                assert_eq!(joined, models.endpoint);
+                assert_eq!(joined, direct.endpoint);
                 assert_eq!(
                     joined.origin().ascii_serialization(),
                     "https://provider.example"
                 );
                 assert!(joined.username().is_empty());
                 assert!(joined.password().is_none());
+                values.remove("ANCHOR_MODEL_DIRECT");
             }
         }
     }
@@ -723,9 +790,12 @@ mod tests {
         values.insert("ANCHOR_MODEL_API_KEY".into(), "rotated-secret".into());
         let rotated = registry(false, &values);
         assert_eq!(rotated.resolve(None).unwrap().identity, original.identity);
+        // A rotated provider credential reaches the host-side upstream only; the
+        // sandbox keeps the per-invocation bridge token.
+        assert_eq!(rotated.model_upstream().unwrap().api_key, "rotated-secret");
         assert_eq!(
             environment(&rotated, None)["OPENAI_API_KEY"],
-            "rotated-secret"
+            "bridge-secret"
         );
         for (name, replacement) in [
             ("ANCHOR_MODEL_URL", "https://other.example/gateway/v1"),
@@ -774,6 +844,7 @@ mod tests {
             (
                 false,
                 vec![
+                    "ANCHOR_MODEL_DIRECT",
                     "ANCHOR_MODEL_URL",
                     "ANCHOR_MODEL_API_KEY",
                     "ANCHOR_MODEL_NAME",

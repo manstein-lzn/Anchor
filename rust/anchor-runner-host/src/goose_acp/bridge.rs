@@ -30,6 +30,21 @@ use std::sync::{
 use tokio::sync::{Mutex, Notify};
 use tokio_util::sync::CancellationToken;
 
+/// Everything one bridge invocation needs that is not the tool port itself.
+struct BridgeSetup {
+    routes: Vec<String>,
+    cancellation: Cancellation,
+    upstream: Option<super::configuration::ModelUpstream>,
+    fixture: bool,
+    token: String,
+    observation_path: Option<PathBuf>,
+    pilot: Option<Arc<super::pilot::PilotPort>>,
+}
+
+/// The model proxy carries whole prompts, including embedded images, so its body
+/// limit is far above the MCP tool-call limit.
+const MODEL_PROXY_BODY_LIMIT: usize = 32 * 1024 * 1024;
+
 pub(super) struct Bridge {
     pub(super) url: String,
     pub(super) token: String,
@@ -44,7 +59,10 @@ pub(super) struct BridgeState {
     node_completion: bool,
     routes: Vec<String>,
     cancellation: Cancellation,
-    upstream: Option<reqwest::Url>,
+    upstream: Option<super::configuration::ModelUpstream>,
+    /// The scripted test transport. It owns the completion-contract branches;
+    /// proxying to a real provider does not change them.
+    fixture: bool,
     client: reqwest::Client,
     token: String,
     pub(super) provider_calls: AtomicU64,
@@ -136,7 +154,7 @@ impl ServerHandler for McpBridge {
             *self.0.after_completion.lock().await = true;
             Err("tools after node completion are refused".to_owned())
         } else if self.0.node_completion && request.name == "final_result" {
-            let mixed_batch = if self.0.upstream.is_some() {
+            let mixed_batch = if self.0.fixture {
                 let response_tools = self.0.response_tools.lock().await;
                 response_tools.len() != 1 || !response_tools[0].ends_with("__final_result")
             } else {
@@ -151,7 +169,7 @@ impl ServerHandler for McpBridge {
                         .is_some_and(|fact| fact.tool_observation.is_some()),
                 }
             };
-            let same_round = self.0.upstream.is_some()
+            let same_round = self.0.fixture
                 && self.0.calls.lock().await.iter().any(|call| {
                     call["provider_request"] == epoch && call["tool"] != "final_result"
                 });
@@ -159,7 +177,7 @@ impl ServerHandler for McpBridge {
                 Err("final_result must be called alone after observing business results".to_owned())
             } else {
                 let mut completion = arguments.clone();
-                if self.0.upstream.is_none() {
+                if !self.0.fixture {
                     completion
                         .as_object_mut()
                         .unwrap()
@@ -212,7 +230,7 @@ impl ServerHandler for McpBridge {
                     media = output.media;
                     output.observation
                 });
-            let result = if self.0.node_completion && self.0.upstream.is_none() {
+            let result = if self.0.node_completion && !self.0.fixture {
                 let mut bytes = [0u8; 32];
                 std::fs::File::open("/dev/urandom")
                     .and_then(|mut file| file.read_exact(&mut bytes))
@@ -313,7 +331,7 @@ impl BridgeState {
     async fn record_call(&self, call: Value) -> Result<(), ErrorData> {
         let mut calls = self.calls.lock().await;
         if calls.len() >= 256 {
-            if self.upstream.is_some() {
+            if self.fixture {
                 self.cancellation.store(true, Ordering::SeqCst);
                 return Err(ErrorData::internal_error(
                     "Goose spike tool call limit exceeded",
@@ -344,7 +362,7 @@ impl BridgeState {
 impl BridgeState {
     fn completion_schema(&self) -> Value {
         let mut schema = completion_schema(&self.routes);
-        if self.upstream.is_none() {
+        if !self.fixture {
             schema["properties"]["observed_receipt"] = json!({
                 "type":"string", "description":"Copy the anchor_receipt from the most recent business tool result. Required after business tools; do not guess it."
             });
@@ -410,25 +428,30 @@ async fn completion(
     }
     state.provider_calls.fetch_add(1, Ordering::SeqCst);
     body["parallel_tool_calls"] = json!(false);
+    let Some(upstream) = state.upstream.as_ref() else {
+        return (StatusCode::NOT_FOUND, "model transport is not proxied").into_response();
+    };
     let response = state
         .client
-        .post(match &state.upstream {
-            Some(upstream) => upstream.clone(),
-            None => {
-                return (
-                    StatusCode::NOT_FOUND,
-                    "native Goose owns the model transport",
-                )
-                    .into_response();
-            }
-        })
-        .bearer_auth("fixture-only-not-a-secret")
+        .post(upstream.url.clone())
+        .bearer_auth(&upstream.api_key)
         .json(&body)
         .send()
         .await;
     match response {
         Ok(mut response) => {
             let status = response.status();
+            if !state.fixture {
+                // Stream a real provider response straight through: buffering it
+                // would delay every token and cap the response at the fixture bound.
+                let mut builder = Response::builder().status(status);
+                if let Some(content_type) = response.headers().get("content-type") {
+                    builder = builder.header("content-type", content_type);
+                }
+                return builder
+                    .body(Body::from_stream(response.bytes_stream()))
+                    .unwrap_or_else(|_| StatusCode::BAD_GATEWAY.into_response());
+            }
             let content_type = response.headers().get("content-type").cloned();
             let mut bytes = Vec::new();
             loop {
@@ -517,18 +540,22 @@ impl Bridge {
         tools: Arc<dyn ToolPort>,
         routes: Vec<String>,
         cancellation: Cancellation,
-        upstream: Option<reqwest::Url>,
+        upstream: Option<super::configuration::ModelUpstream>,
+        fixture: bool,
         token: String,
         observation_path: Option<PathBuf>,
     ) -> Result<Self, String> {
         Self::start_inner(
             tools,
-            routes,
-            cancellation,
-            upstream,
-            token,
-            observation_path,
-            None,
+            BridgeSetup {
+                routes,
+                cancellation,
+                upstream,
+                fixture,
+                token,
+                observation_path,
+                pilot: None,
+            },
         )
         .await
     }
@@ -536,29 +563,35 @@ impl Bridge {
     pub(super) async fn start_pilot(
         tools: Arc<super::pilot::PilotPort>,
         cancellation: Cancellation,
+        upstream: Option<super::configuration::ModelUpstream>,
+        fixture: bool,
         token: String,
     ) -> Result<Self, String> {
         Self::start_inner(
             tools.clone(),
-            Vec::new(),
-            cancellation,
-            None,
-            token,
-            None,
-            Some(tools),
+            BridgeSetup {
+                routes: Vec::new(),
+                cancellation,
+                upstream,
+                fixture,
+                token,
+                observation_path: None,
+                pilot: Some(tools),
+            },
         )
         .await
     }
 
-    async fn start_inner(
-        tools: Arc<dyn ToolPort>,
-        routes: Vec<String>,
-        cancellation: Cancellation,
-        upstream: Option<reqwest::Url>,
-        token: String,
-        observation_path: Option<PathBuf>,
-        pilot: Option<Arc<super::pilot::PilotPort>>,
-    ) -> Result<Self, String> {
+    async fn start_inner(tools: Arc<dyn ToolPort>, setup: BridgeSetup) -> Result<Self, String> {
+        let BridgeSetup {
+            routes,
+            cancellation,
+            upstream,
+            fixture,
+            token,
+            observation_path,
+            pilot,
+        } = setup;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .map_err(|error| error.to_string())?;
@@ -570,11 +603,14 @@ impl Bridge {
             routes,
             cancellation,
             upstream,
+            fixture,
             client: reqwest::Client::builder()
                 .no_proxy()
                 .redirect(reqwest::redirect::Policy::none())
                 .connect_timeout(std::time::Duration::from_secs(5))
-                .timeout(std::time::Duration::from_secs(30))
+                // A total timeout would cut a long streamed model response short;
+                // a stalled connection still fails after the read timeout.
+                .read_timeout(std::time::Duration::from_secs(60))
                 .build()
                 .map_err(|error| error.to_string())?,
             token: format!("Bearer {token}"),
@@ -604,7 +640,11 @@ impl Bridge {
             );
         let app = Router::new()
             .nest_service("/mcp", service)
-            .route("/v1/chat/completions", post(completion))
+            .route(
+                "/v1/chat/completions",
+                post(completion)
+                    .layer(axum::extract::DefaultBodyLimit::max(MODEL_PROXY_BODY_LIMIT)),
+            )
             .layer(axum::extract::DefaultBodyLimit::max(1024 * 1024))
             .layer(middleware::from_fn_with_state(state.clone(), authorize))
             .with_state(state.clone());
@@ -641,7 +681,7 @@ impl Bridge {
                 idle.await;
             }
         };
-        let settled = if self.state.upstream.is_some() {
+        let settled = if self.state.fixture {
             tokio::time::timeout(std::time::Duration::from_secs(3), settle)
                 .await
                 .map_err(|_| {
@@ -762,7 +802,11 @@ mod tests {
             tools.clone(),
             Vec::new(),
             cancellation,
-            fixture.then(|| reqwest::Url::parse("http://127.0.0.1:9/v1/chat/completions").unwrap()),
+            Some(super::super::configuration::ModelUpstream {
+                url: reqwest::Url::parse("http://127.0.0.1:9/v1/chat/completions").unwrap(),
+                api_key: "fixture-only-not-a-secret".into(),
+            }),
+            fixture,
             "test-only-token".into(),
             None,
         )

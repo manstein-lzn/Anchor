@@ -42,9 +42,12 @@ ANCHOR_MODEL_API_KEY=REPLACE_WITH_PROVIDER_KEY
 ANCHOR_MODEL_NAME=REPLACE_WITH_MODEL_NAME
 ANCHOR_MODEL_WIRE_API=responses
 ANCHOR_MODEL_ALIASES={}
+ANCHOR_MODEL_DIRECT=0
 ```
 
 `ANCHOR_MODEL_WIRE_API` 为 `chat` 或 `responses`。URL 接受 HTTPS，或仅用于本地测试的 HTTP loopback IP endpoint；拒绝 URL 用户凭据、query 和 fragment。Graph 模型别名通过 `ANCHOR_MODEL_ALIASES` 映射到实际 wire 模型，新 invocation 冻结绑定；继续执行不能静默换模型。
+
+模型调用默认由 Host 代理：Goose 进程只拿到 Host bridge 的 loopback 地址和一次性 token，provider 端点与真实 API key 留在宿主侧，宿主用真实响应流式回传。`ANCHOR_MODEL_DIRECT=1` 是显式回滚开关，会让沙箱像早期版本那样自己持有端点与凭据并直接拨号；仅在代理出问题时临时使用。
 
 `ANCHOR_GOOSE_ALLOW_SHARED_NETWORK=1` 是 Goose 进程的明确网络接入决定；业务工具和节点仍受 Host/Sandbox 授权。配置与凭据留在部署环境，不放进 Graph 包或版本库。
 

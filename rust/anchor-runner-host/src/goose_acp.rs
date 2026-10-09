@@ -450,7 +450,8 @@ impl GooseNodePort {
             tools,
             request.routes.clone(),
             tool_request.cancellation.clone(),
-            self.models.fixture_upstream(),
+            self.models.model_upstream(),
+            self.fixture,
             token,
             (!self.fixture).then(|| fact_path.clone()),
         )

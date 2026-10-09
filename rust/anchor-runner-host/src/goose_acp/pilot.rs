@@ -173,7 +173,14 @@ impl GoosePilot {
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
         let tool_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let bridge = Bridge::start_pilot(guarded, tool_cancel, token).await?;
+        let bridge = Bridge::start_pilot(
+            guarded,
+            tool_cancel,
+            self.models.model_upstream(),
+            self.models.fixture(),
+            token,
+        )
+        .await?;
         let result = self.execute(&request, &fact, &bridge, &binding).await;
         let close = bridge.close().await;
         drop(lease);
