@@ -42,10 +42,13 @@ ANCHOR_MODEL_API_KEY=REPLACE_WITH_PROVIDER_KEY
 ANCHOR_MODEL_NAME=REPLACE_WITH_MODEL_NAME
 ANCHOR_MODEL_WIRE_API=responses
 ANCHOR_MODEL_ALIASES={}
+ANCHOR_MODEL_CONTEXT_WINDOW=128000
 ANCHOR_MODEL_DIRECT=0
 ANCHOR_GOOSE_LOCAL_NETWORK=0
 ANCHOR_GOOSE_RELAY_BINARY=/absolute/path/to/anchor-net-relay
 ```
+
+`ANCHOR_MODEL_CONTEXT_WINDOW`（正整数，可选）会作为 `GOOSE_CONTEXT_LIMIT` 传给 Goose，覆盖它按模型名推断的上下文窗口——本机部署用别名与 OpenAI 兼容端点时该推断不可靠。
 
 `ANCHOR_MODEL_WIRE_API` 为 `chat` 或 `responses`。URL 接受 HTTPS，或仅用于本地测试的 HTTP loopback IP endpoint；拒绝 URL 用户凭据、query 和 fragment。Graph 模型别名通过 `ANCHOR_MODEL_ALIASES` 映射到实际 wire 模型，新 invocation 冻结绑定；继续执行不能静默换模型。
 

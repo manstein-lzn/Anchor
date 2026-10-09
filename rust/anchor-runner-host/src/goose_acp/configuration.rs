@@ -130,6 +130,8 @@ pub(super) struct ModelRegistry {
     /// Sandbox-dials-the-provider mode. Kept only as a rollback lever for the
     /// bridge proxy; the fixture transport always proxies.
     direct: bool,
+    /// Context window advertised to Goose, overriding its model-name heuristic.
+    context_limit: Option<u64>,
     endpoint: Url,
     wire: &'static str,
     model: String,
@@ -196,9 +198,30 @@ impl ModelRegistry {
             let aliases = model_aliases(value("ANCHOR_MODEL_ALIASES").as_deref())?;
             (endpoint, wire, model, api_key, aliases)
         };
+        // Only a real provider needs an explicit window: the scripted fixture
+        // transport reports its own limits.
+        let context_limit = if fixture {
+            None
+        } else {
+            match value("ANCHOR_MODEL_CONTEXT_WINDOW") {
+                None => None,
+                Some(window) => {
+                    let parsed = window.trim().parse::<u64>().map_err(|_| {
+                        "ANCHOR_MODEL_CONTEXT_WINDOW must be a positive integer".to_owned()
+                    })?;
+                    if parsed == 0 {
+                        return Err(
+                            "ANCHOR_MODEL_CONTEXT_WINDOW must be a positive integer".to_owned()
+                        );
+                    }
+                    Some(parsed)
+                }
+            }
+        };
         Ok(Self {
             fixture,
             direct,
+            context_limit,
             endpoint,
             wire,
             model,
@@ -269,13 +292,22 @@ impl ModelRegistry {
                 bridge_token.to_owned(),
             )
         };
-        vec![
+        let mut environment = vec![
             SandboxEnvironment::new("GOOSE_PROVIDER", "openai"),
             SandboxEnvironment::new("GOOSE_MODEL", binding.model.clone()),
             SandboxEnvironment::new("OPENAI_HOST", host),
             SandboxEnvironment::new("OPENAI_BASE_PATH", base_path),
             SandboxEnvironment::new("OPENAI_API_KEY", api_key),
-        ]
+        ];
+        if let Some(limit) = self.context_limit {
+            // Goose otherwise infers the window from the model name, which is wrong
+            // for the aliases and OpenAI-compatible endpoints deployed here.
+            environment.push(SandboxEnvironment::new(
+                "GOOSE_CONTEXT_LIMIT",
+                limit.to_string(),
+            ));
+        }
+        environment
     }
 }
 
@@ -389,7 +421,8 @@ mod tests {
     fn environment(models: &ModelRegistry, reference: Option<&str>) -> BTreeMap<String, String> {
         let binding = models.resolve(reference).unwrap();
         let entries = models.environment(&binding, "http://127.0.0.1:54321", "bridge-secret");
-        assert_eq!(entries.len(), 5);
+        // Five transport entries, plus an optional context window.
+        assert!((5..=6).contains(&entries.len()), "{entries:?}");
         assert!(!format!("{entries:?}").contains("secret"));
         entries
             .into_iter()
@@ -897,6 +930,28 @@ mod tests {
     }
 
     #[test]
+    fn native_context_window_is_advertised_to_goose() {
+        let mut values = native_values();
+        values.insert("ANCHOR_MODEL_CONTEXT_WINDOW".into(), "1000000".into());
+        let models = registry(false, &values);
+        let entries = environment(&models, None);
+        assert_eq!(entries["GOOSE_CONTEXT_LIMIT"], "1000000");
+        // Without it, Goose keeps its own model-name heuristic.
+        let plain = environment(&registry(false, &native_values()), None);
+        assert!(!plain.contains_key("GOOSE_CONTEXT_LIMIT"));
+    }
+
+    #[test]
+    fn context_window_must_be_a_positive_integer() {
+        for window in ["0", "abc", "-5", ""] {
+            let mut values = native_values();
+            values.insert("ANCHOR_MODEL_CONTEXT_WINDOW".into(), window.into());
+            let failure = error(false, &values);
+            assert!(failure.contains("ANCHOR_MODEL_CONTEXT_WINDOW"), "{failure}");
+        }
+    }
+
+    #[test]
     fn configuration_reads_only_its_explicit_mode_specific_variables() {
         for (fixture, expected) in [
             (true, vec!["ANCHOR_GOOSE_OPENAI_HOST", "ANCHOR_GOOSE_MODEL"]),
@@ -909,6 +964,7 @@ mod tests {
                     "ANCHOR_MODEL_NAME",
                     "ANCHOR_MODEL_WIRE_API",
                     "ANCHOR_MODEL_ALIASES",
+                    "ANCHOR_MODEL_CONTEXT_WINDOW",
                 ],
             ),
         ] {

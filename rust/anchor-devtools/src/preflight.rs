@@ -44,6 +44,14 @@ fn check_with_pin(env: &BTreeMap<String, String>, goose_sha256: &str) -> Result<
     check_env_file(env)?;
     check_api_keys(env)?;
     check_endpoint(env)?;
+    if let Some(window) = env.get("ANCHOR_MODEL_CONTEXT_WINDOW")
+        && window
+            .trim()
+            .parse::<u64>()
+            .map_or(true, |value| value == 0)
+    {
+        return Err("ANCHOR_MODEL_CONTEXT_WINDOW must be a positive integer".into());
+    }
     let isolated = value(env, "ANCHOR_GOOSE_LOCAL_NETWORK", "") == "1";
     if !isolated && required(env, "ANCHOR_GOOSE_ALLOW_SHARED_NETWORK")? != "1" {
         return Err(

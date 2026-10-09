@@ -274,6 +274,16 @@ fn rejects_wrong_pin_model_placeholder_and_missing_shared_network_authorization(
 }
 
 #[test]
+fn rejects_a_context_window_that_is_not_a_positive_integer() {
+    for window in ["0", "abc", "-1", " "] {
+        let mut fixture = Fixture::new();
+        fixture.set("ANCHOR_MODEL_CONTEXT_WINDOW", window);
+        let error = fixture.check().unwrap_err();
+        assert!(error.contains("ANCHOR_MODEL_CONTEXT_WINDOW"), "{error}");
+    }
+}
+
+#[test]
 fn model_endpoint_rejects_unsafe_urls_without_echoing_credentials_or_url_content() {
     let mut fixture = Fixture::new();
     for endpoint in [
