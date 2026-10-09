@@ -44,8 +44,17 @@ fn check_with_pin(env: &BTreeMap<String, String>, goose_sha256: &str) -> Result<
     check_env_file(env)?;
     check_api_keys(env)?;
     check_endpoint(env)?;
-    if required(env, "ANCHOR_GOOSE_ALLOW_SHARED_NETWORK")? != "1" {
-        return Err("ANCHOR_GOOSE_ALLOW_SHARED_NETWORK must explicitly equal 1".into());
+    let isolated = value(env, "ANCHOR_GOOSE_LOCAL_NETWORK", "") == "1";
+    if !isolated && required(env, "ANCHOR_GOOSE_ALLOW_SHARED_NETWORK")? != "1" {
+        return Err(
+            "Goose needs either ANCHOR_GOOSE_ALLOW_SHARED_NETWORK=1 (shared host network) or ANCHOR_GOOSE_LOCAL_NETWORK=1 (isolated sandbox)".into(),
+        );
+    }
+    if isolated {
+        let relay = required(env, "ANCHOR_GOOSE_RELAY_BINARY")?;
+        if !std::path::Path::new(relay).is_file() {
+            return Err("ANCHOR_GOOSE_RELAY_BINARY must point at the sandbox relay binary".into());
+        }
     }
     let runtime_root = runtime::check(env, goose_sha256)?;
     check_mutable_roots(env, &runtime_root)?;

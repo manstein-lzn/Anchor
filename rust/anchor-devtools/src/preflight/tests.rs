@@ -258,7 +258,7 @@ fn rejects_wrong_pin_model_placeholder_and_missing_shared_network_authorization(
         (
             "ANCHOR_GOOSE_ALLOW_SHARED_NETWORK",
             "0",
-            "explicitly equal 1",
+            "ANCHOR_GOOSE_ALLOW_SHARED_NETWORK=1",
         ),
         (
             "ANCHOR_MODEL_API_KEY",

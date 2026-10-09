@@ -51,6 +51,10 @@ pub(crate) struct GooseNodePort {
     model: String,
     models: configuration::ModelRegistry,
     fixture: bool,
+    /// Whether Goose runs in an isolated network namespace behind the relay.
+    local_network: bool,
+    /// Sandbox relay binary, required when `local_network` is set.
+    relay: Option<PathBuf>,
     facts: PathBuf,
     process_root: PathBuf,
     resolver: Arc<HostIoResolver>,
@@ -167,6 +171,17 @@ fn store_fact(path: &Path, fact: &Fact) -> Result<(), GraphError> {
     Ok(())
 }
 
+/// The Goose process must opt into exactly how it reaches the network.
+///
+/// An isolated sandbox is its own decision; sharing the host network needs the
+/// explicit `ANCHOR_GOOSE_ALLOW_SHARED_NETWORK=1`, because a shared network is not
+/// loopback-only OS isolation.
+const NETWORK_OPT_IN_ERROR: &str = "Goose requires explicit ANCHOR_GOOSE_ALLOW_SHARED_NETWORK=1 to share the host network, or ANCHOR_GOOSE_LOCAL_NETWORK=1 to run in an isolated network namespace behind the sandbox relay";
+
+fn network_opt_in(local_network: bool, shared_authorized: bool) -> bool {
+    local_network || shared_authorized
+}
+
 /// Why one Goose invocation did not produce a node completion.
 ///
 /// This decides whether the Run may resume the invocation. A definitive ACP
@@ -257,12 +272,27 @@ impl GooseNodePort {
                     .into(),
             );
         }
-        if env::var("ANCHOR_GOOSE_ALLOW_SHARED_NETWORK").as_deref() != Ok("1") {
-            return Err("Goose spike requires explicit ANCHOR_GOOSE_ALLOW_SHARED_NETWORK=1 for its runtime control plane; this is not loopback-only OS isolation".into());
+        // Opt-in isolation: the sandbox keeps its own network namespace and reaches
+        // the bridge through the in-sandbox relay instead of sharing host networking.
+        let local_network = env::var("ANCHOR_GOOSE_LOCAL_NETWORK").as_deref() == Ok("1");
+        let shared_authorized = env::var("ANCHOR_GOOSE_ALLOW_SHARED_NETWORK").as_deref() == Ok("1");
+        if !network_opt_in(local_network, shared_authorized) {
+            return Err(NETWORK_OPT_IN_ERROR.into());
         }
         let (binary, binary_sha256) = configuration::binary()?;
         let fixture = mode == "goose-acp-spike";
         let models = configuration::ModelRegistry::from_env(fixture)?;
+        let relay = if local_network {
+            Some(match env::var_os("ANCHOR_GOOSE_RELAY_BINARY") {
+                Some(path) => PathBuf::from(path),
+                None => binary
+                    .parent()
+                    .map(|parent| parent.join("anchor-net-relay"))
+                    .ok_or("ANCHOR_GOOSE_BINARY has no directory to look for the sandbox relay")?,
+            })
+        } else {
+            None
+        };
         let model = models.resolve(None)?.model;
         let facts = state.join(if fixture {
             "goose-acp-spike"
@@ -286,6 +316,8 @@ impl GooseNodePort {
             model,
             models,
             fixture,
+            local_network,
+            relay,
             facts,
             process_root,
             resolver,
@@ -467,13 +499,21 @@ impl GooseNodePort {
         bridge
             .expose_on_unix_socket(&bridge_socket)
             .map_err(GraphError::Unsupported)?;
+        let transport = match &self.relay {
+            Some(relay) if self.local_network => configuration::BridgeTransport::Isolated {
+                relay: relay.clone(),
+                socket: bridge_socket.clone(),
+            },
+            _ => configuration::BridgeTransport::Shared,
+        };
+        let endpoint = transport.endpoint(&bridge.url);
         let command = configuration::command(
             &self.sandbox,
             &directory,
             &self.binary,
-            self.models
-                .environment(&binding, &bridge.url, &bridge.token),
+            self.models.environment(&binding, &endpoint, &bridge.token),
             request.cancellation.clone(),
+            &transport,
         )
         .map_err(GraphError::Unsupported)?;
         let mut fact = retained.unwrap_or_else(|| Fact {
@@ -516,6 +556,7 @@ impl GooseNodePort {
                 &mut connection,
                 &request,
                 &bridge,
+                &endpoint,
                 deadline,
                 &fact_path,
                 &mut fact,
@@ -543,6 +584,11 @@ impl GooseNodePort {
         evidence["tool_calls_dropped"] = json!(bridge.state.dropped_calls.load(Ordering::SeqCst));
         evidence["process_directory"] = json!(directory);
         evidence["bridge_socket"] = json!(bridge_socket);
+        evidence["sandbox_network"] = json!(if self.local_network {
+            "isolated"
+        } else {
+            "shared"
+        });
         evidence["close_error"] = json!(close.as_ref().err());
         evidence["tool_close_error"] = json!(tool_close.as_ref().err());
         if request.cancellation.load(Ordering::Relaxed) {
@@ -592,6 +638,7 @@ impl GooseNodePort {
         connection: &mut AcpConnection,
         request: &NodeExecutionRequest,
         bridge: &bridge::Bridge,
+        endpoint: &str,
         deadline: Option<tokio::time::Instant>,
         fact_path: &Path,
         fact: &mut Fact,
@@ -604,11 +651,14 @@ impl GooseNodePort {
         let opened = session::open(
             connection,
             bridge,
+            endpoint,
             restored.as_deref(),
             &request.cancellation,
             deadline,
-            !self.fixture,
-            false,
+            session::ClientCapabilities {
+                custom_notifications: !self.fixture,
+                form_elicitation: false,
+            },
         )
         .await?;
         evidence["initialize"] = opened.initialize;
@@ -766,6 +816,15 @@ mod tests {
         ] {
             assert!(upstream_url(value).is_err(), "{value}");
         }
+    }
+
+    #[test]
+    fn goose_network_opt_in_needs_one_explicit_mode() {
+        assert!(!network_opt_in(false, false));
+        assert!(network_opt_in(true, false));
+        assert!(network_opt_in(false, true));
+        assert!(network_opt_in(true, true));
+        assert!(NETWORK_OPT_IN_ERROR.contains("ANCHOR_GOOSE_ALLOW_SHARED_NETWORK=1"));
     }
 
     #[test]

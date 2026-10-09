@@ -93,6 +93,7 @@ fn cli_rejects_an_unpinned_elf_without_creating_output() {
     let goose = directory.path().join("goose");
     fs::copy("/usr/bin/true", &host).unwrap();
     fs::copy("/usr/bin/true", &goose).unwrap();
+    fs::copy("/usr/bin/true", directory.path().join("anchor-net-relay")).unwrap();
     let output = directory.path().join("runtime.tar.gz");
     let result = command()
         .arg("--host")
@@ -117,6 +118,7 @@ fn cli_packages_pinned_goose_and_reports_archive_hash_without_executing_inputs()
     let directory = tempfile::tempdir().unwrap();
     let host = directory.path().join("host");
     fs::copy("/usr/bin/true", &host).unwrap();
+    fs::copy("/usr/bin/true", directory.path().join("anchor-net-relay")).unwrap();
     let bundle = directory.path().join("bundle");
     fs::create_dir(&bundle).unwrap();
     fs::write(bundle.join("graph.json"), r#"{"objective":"package smoke","entry":"work","agents":{},"ops":{"work":{"run":"true"}},"nodes":[{"id":"work","op":"work"}],"edges":[]}"#).unwrap();

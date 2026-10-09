@@ -166,6 +166,12 @@ fn prepare(request: &PackageRequest, goose_sha256: &str) -> Result<PreparedPacka
     let mut snapshots = vec![
         Snapshot::file(&request.host, root, "bin/anchor-runner-host")?,
         Snapshot::file(&request.goose, root, "bin/goose")?,
+        // The sandbox relay lets a node sandbox run without the host network.
+        Snapshot::file(
+            &request.host.with_file_name("anchor-net-relay"),
+            root,
+            "bin/anchor-net-relay",
+        )?,
     ];
     for tool in &tools {
         snapshots.push(Snapshot::file(
@@ -187,7 +193,7 @@ fn prepare(request: &PackageRequest, goose_sha256: &str) -> Result<PreparedPacka
     if let Some(web) = &request.web {
         snapshots.push(Snapshot::tree(web, root, "web")?);
     }
-    add_snapshots(&mut entries, &snapshots[tools.len() + 2..])?;
+    add_snapshots(&mut entries, &snapshots[tools.len() + 3..])?;
     let bundle_root = root.join("bundle");
     // A channel entrypoint is itself part of the closed Plugin bundle. Read
     // the manifest first so the reviewed channel binary can be staged before

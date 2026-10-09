@@ -84,6 +84,14 @@ fn execute(
         .env("ANCHOR_TEST_EVIDENCE_ROOT", fixture)
         .env("CARGO_BUILD_JOBS", "2")
         .env("ANCHOR_GOOSE_BINARY", goose);
+    // Explicit opt-ins that change how the Host isolates the Goose sandbox. The
+    // loop above strips every ambient ANCHOR_* variable, so these are passed on
+    // purpose and only when the caller asked for them.
+    for name in ["ANCHOR_GOOSE_LOCAL_NETWORK", "ANCHOR_GOOSE_RELAY_BINARY"] {
+        if let Ok(value) = std::env::var(name) {
+            command.env(name, value);
+        }
+    }
     Ok(command.status()?.code())
 }
 

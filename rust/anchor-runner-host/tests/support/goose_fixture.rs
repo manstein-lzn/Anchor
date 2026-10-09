@@ -843,6 +843,11 @@ impl Host {
                 },
             )
             .env("ANCHOR_GOOSE_ALLOW_SHARED_NETWORK", "1")
+            .envs(
+                ["ANCHOR_GOOSE_LOCAL_NETWORK", "ANCHOR_GOOSE_RELAY_BINARY"]
+                    .into_iter()
+                    .filter_map(|name| std::env::var(name).ok().map(|value| (name, value))),
+            )
             .env("ANCHOR_GOOSE_BINARY", &self.goose)
             .env("ANCHOR_GOOSE_BINARY_SHA256", digest(&self.goose))
             .env("ANCHOR_GOOSE_OPENAI_HOST", &provider.url)

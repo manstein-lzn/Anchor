@@ -43,9 +43,13 @@ ANCHOR_MODEL_NAME=REPLACE_WITH_MODEL_NAME
 ANCHOR_MODEL_WIRE_API=responses
 ANCHOR_MODEL_ALIASES={}
 ANCHOR_MODEL_DIRECT=0
+ANCHOR_GOOSE_LOCAL_NETWORK=0
+ANCHOR_GOOSE_RELAY_BINARY=/absolute/path/to/anchor-net-relay
 ```
 
 `ANCHOR_MODEL_WIRE_API` 为 `chat` 或 `responses`。URL 接受 HTTPS，或仅用于本地测试的 HTTP loopback IP endpoint；拒绝 URL 用户凭据、query 和 fragment。Graph 模型别名通过 `ANCHOR_MODEL_ALIASES` 映射到实际 wire 模型，新 invocation 冻结绑定；继续执行不能静默换模型。
+
+沙箱网络默认与宿主共享（仅 loopback 与模型/工具出口），需要显式 `ANCHOR_GOOSE_ALLOW_SHARED_NETWORK=1`。若要按"沙箱仅本地"运行：设 `ANCHOR_GOOSE_LOCAL_NETWORK=1`，并把中继二进制放到 `ANCHOR_GOOSE_BINARY` 同目录的 `anchor-net-relay`（或用 `ANCHOR_GOOSE_RELAY_BINARY` 指定绝对路径）；此模式下 Goose 拥有独立网络命名空间，只能通过沙箱内中继经 UNIX socket 到达 Host bridge，**不需要**共享网络开关。`anchor-devtools preflight` 会校验该二进制存在。
 
 模型调用默认由 Host 代理：Goose 进程只拿到 Host bridge 的 loopback 地址和一次性 token，provider 端点与真实 API key 留在宿主侧，宿主用真实响应流式回传。`ANCHOR_MODEL_DIRECT=1` 是显式回滚开关，会让沙箱像早期版本那样自己持有端点与凭据并直接拨号；仅在代理出问题时临时使用。
 

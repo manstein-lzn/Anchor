@@ -11,25 +11,33 @@ pub(super) struct OpenedSession {
     pub(super) history: Vec<Value>,
 }
 
+/// Optional ACP client capabilities this Host declares to the agent.
+pub(super) struct ClientCapabilities {
+    pub custom_notifications: bool,
+    pub form_elicitation: bool,
+}
+
 pub(super) async fn open(
     connection: &mut AcpConnection,
     bridge: &Bridge,
+    // Base URL the sandbox uses for the bridge (its own loopback when isolated).
+    endpoint: &str,
     restored: Option<&str>,
     cancellation: &Cancellation,
     deadline: Option<Instant>,
-    custom_notifications: bool,
-    form_elicitation: bool,
+    capabilities: ClientCapabilities,
 ) -> Result<OpenedSession, String> {
     let handshake_deadline = deadline.unwrap_or_else(|| Instant::now() + Duration::from_secs(30));
-    let mut capabilities = json!({"_meta":{"goose":{"customNotifications":custom_notifications}}});
-    if form_elicitation {
-        capabilities["elicitation"] = json!({"form":{}});
+    let mut declared =
+        json!({"_meta":{"goose":{"customNotifications":capabilities.custom_notifications}}});
+    if capabilities.form_elicitation {
+        declared["elicitation"] = json!({"form":{}});
     }
     let (initialize, _) = connection
         .request(
             "initialize",
             json!({"protocolVersion":1,
-            "clientCapabilities":capabilities,
+            "clientCapabilities":declared,
             "clientInfo":{"name":"anchor","version":"0.1.0"}}),
             cancellation,
             handshake_deadline,
@@ -42,7 +50,7 @@ pub(super) async fn open(
     {
         return Err("Goose did not negotiate ACP v1 and HTTP MCP".into());
     }
-    let server = json!({"type":"http","name":"anchor", "url":format!("{}/mcp", bridge.url),
+    let server = json!({"type":"http","name":"anchor", "url":format!("{endpoint}/mcp"),
         "headers":[{"name":"Authorization","value":format!("Bearer {}", bridge.token)}]});
     let mut params = json!({"cwd":"/workspace","mcpServers":[server.clone()],
         "_meta":{"hidden":true,"sessionTitle":"Anchor",

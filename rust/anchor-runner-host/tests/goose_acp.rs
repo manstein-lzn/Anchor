@@ -846,7 +846,8 @@ fn real_goose_external_effect_then_host_kill_is_spike_failclosed_not_native_safe
 #[ignore = "requires pinned Goose binary"]
 fn real_goose_missing_shared_network_authorization_rejects_before_any_model_request() {
     let provider = Provider::new("goose-shared-network-not-authorized", vec![]);
-    let host = Host::new(&graph());
+    // This negative case is about *sharing* the host network, so pin that mode.
+    let host = Host::new(&graph()).with_extra_environment([("ANCHOR_GOOSE_LOCAL_NETWORK", "0")]);
     let response = host.run_without_env(&provider, "ANCHOR_GOOSE_ALLOW_SHARED_NETWORK");
     let reason = response["reason"]
         .as_str()

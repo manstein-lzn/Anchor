@@ -219,6 +219,7 @@ impl GoosePilot {
             &self.binary,
             self.models.environment(binding, &bridge.url, &bridge.token),
             request.cancellation.clone(),
+            &configuration::BridgeTransport::Shared,
         )?;
         let mut connection = AcpConnection::spawn(command).await?;
         let result = self.prompt(request, fact, bridge, &mut connection).await;
@@ -257,11 +258,14 @@ impl GoosePilot {
         let opened = session::open(
             connection,
             bridge,
+            &bridge.url,
             restored.as_deref(),
             &request.cancellation,
             None,
-            true,
-            true,
+            session::ClientCapabilities {
+                custom_notifications: true,
+                form_elicitation: true,
+            },
         )
         .await?;
         let observation = {

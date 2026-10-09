@@ -27,21 +27,50 @@ pub(super) fn command(
     binary: &std::path::Path,
     environment: Vec<SandboxEnvironment>,
     cancellation: anchor_runtime::Cancellation,
+    transport: &BridgeTransport,
 ) -> Result<tokio::process::Command, String> {
-    let grant = anchor_runtime::ReadOnlyInput {
+    let mut grants = vec![anchor_runtime::ReadOnlyInput {
         source: binary.to_path_buf(),
         destination: "/tools/goose".into(),
-    };
-    let sandbox = sandbox
-        .with_readonly_grants(std::slice::from_ref(&grant))
-        .map_err(|error| error.to_string())?;
+    }];
     // The packaged Goose is the Anchor-built lean ACP server (`goose-acp`). It speaks ACP
     // on stdio directly and takes no subcommand: the upstream `goose acp` subcommand form
     // belongs to the full CLI and is intentionally not used, and the lean binary rejects it
     // with `unknown argument: acp`.
-    let mut process = anchor_runtime::SandboxRequest::new(directory, ["/tools/goose"]);
-    process.readonly_inputs.push(grant);
-    process.network = anchor_runtime::NetworkPolicy::Enabled;
+    let (argv, network) = match transport {
+        BridgeTransport::Shared => (
+            vec!["/tools/goose".to_owned()],
+            anchor_runtime::NetworkPolicy::Enabled,
+        ),
+        BridgeTransport::Isolated { relay, socket } => {
+            grants.push(anchor_runtime::ReadOnlyInput {
+                source: relay.clone(),
+                destination: RELAY_MOUNT.into(),
+            });
+            grants.push(anchor_runtime::ReadOnlyInput {
+                source: socket.clone(),
+                destination: SOCKET_MOUNT.into(),
+            });
+            (
+                vec![
+                    RELAY_MOUNT.to_owned(),
+                    "--socket".to_owned(),
+                    SOCKET_MOUNT.to_owned(),
+                    "--listen".to_owned(),
+                    RELAY_LISTEN.to_owned(),
+                    "--".to_owned(),
+                    "/tools/goose".to_owned(),
+                ],
+                anchor_runtime::NetworkPolicy::Disabled,
+            )
+        }
+    };
+    let sandbox = sandbox
+        .with_readonly_grants(&grants)
+        .map_err(|error| error.to_string())?;
+    let mut process = anchor_runtime::SandboxRequest::new(directory, argv);
+    process.readonly_inputs.extend(grants);
+    process.network = network;
     process.cancellation = cancellation;
     process.environment = [
         ("GOOSE_MODE", "auto"),
@@ -57,6 +86,36 @@ pub(super) fn command(
     sandbox
         .isolated_command(process)
         .map_err(|error| error.to_string())
+}
+
+/// Sandbox-visible path of the in-sandbox network relay.
+const RELAY_MOUNT: &str = "/tools/anchor-net-relay";
+/// Sandbox-visible path of the bridge UNIX socket.
+const SOCKET_MOUNT: &str = "/tools/anchor-bridge.sock";
+/// Loopback address the relay serves inside an isolated sandbox.
+pub(super) const RELAY_LISTEN: &str = "127.0.0.1:9080";
+
+/// How a Goose sandbox reaches Anchor's bridge and model proxy.
+pub(super) enum BridgeTransport {
+    /// The sandbox shares the host network and dials the bridge over loopback.
+    Shared,
+    /// The sandbox runs in its own network namespace. An in-sandbox relay listens
+    /// on that namespace's loopback and forwards to the bridge over a mounted
+    /// UNIX socket, so the bridge is the only host service it can reach.
+    Isolated {
+        relay: std::path::PathBuf,
+        socket: std::path::PathBuf,
+    },
+}
+
+impl BridgeTransport {
+    /// Base URL the sandbox uses for the model proxy and the MCP server.
+    pub(super) fn endpoint(&self, bridge_url: &str) -> String {
+        match self {
+            Self::Shared => bridge_url.to_owned(),
+            Self::Isolated { .. } => format!("http://{RELAY_LISTEN}"),
+        }
+    }
 }
 
 /// Host-side model endpoint used by the bridge proxy.
