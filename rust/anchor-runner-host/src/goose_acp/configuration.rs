@@ -7,17 +7,22 @@ use reqwest::Url;
 use sha2::{Digest, Sha256};
 
 pub(super) fn binary() -> Result<(std::path::PathBuf, String), String> {
-    // An isolated sandbox reaches its control plane through the relay, so the
-    // shared-network opt-in is only required when the sandbox shares the network.
-    let isolated = std::env::var("ANCHOR_GOOSE_LOCAL_NETWORK").as_deref() == Ok("1");
-    if !isolated && std::env::var("ANCHOR_GOOSE_ALLOW_SHARED_NETWORK").as_deref() != Ok("1") {
-        return Err("Goose requires explicit shared control network authorization".into());
-    }
     let binary = std::env::var_os("ANCHOR_GOOSE_BINARY")
         .map(std::path::PathBuf::from)
         .ok_or("ANCHOR_GOOSE_BINARY is required")?
         .canonicalize()
         .map_err(|error| error.to_string())?;
+    // An isolated sandbox reaches its control plane through the relay, so the
+    // shared-network opt-in is only required when the sandbox shares the network.
+    if !RelaySettings::isolated(&binary)
+        && std::env::var("ANCHOR_GOOSE_ALLOW_SHARED_NETWORK").as_deref() != Ok("1")
+    {
+        return Err(
+            "Goose needs ANCHOR_GOOSE_ALLOW_SHARED_NETWORK=1 to share the host network, \
+             or an anchor-net-relay beside the Goose binary (ANCHOR_GOOSE_LOCAL_NETWORK=1) to isolate it"
+                .into(),
+        );
+    }
     let digest = super::file_sha256(&binary)?;
     if std::env::var("ANCHOR_GOOSE_BINARY_SHA256").ok().as_deref() != Some(&digest) {
         return Err("ANCHOR_GOOSE_BINARY_SHA256 must match the configured binary".into());
@@ -108,22 +113,45 @@ pub(super) struct RelaySettings {
 }
 
 impl RelaySettings {
-    /// The opt-in alone, readable before the Goose binary is resolved.
-    pub(super) fn isolated_from_env() -> bool {
-        std::env::var("ANCHOR_GOOSE_LOCAL_NETWORK").as_deref() == Ok("1")
+    /// The sandbox relay for a pinned Goose binary, if one can be named.
+    fn relay_binary(binary: &std::path::Path) -> Option<PathBuf> {
+        std::env::var_os("ANCHOR_GOOSE_RELAY_BINARY")
+            .map(PathBuf::from)
+            .or_else(|| {
+                binary
+                    .parent()
+                    .map(|parent| parent.join("anchor-net-relay"))
+            })
+    }
+
+    /// Whether the sandbox runs isolated.
+    ///
+    /// Isolation is the default: a deployment that ships `anchor-net-relay` beside
+    /// its Goose binary gets its own network namespace without asking. Setting
+    /// `ANCHOR_GOOSE_LOCAL_NETWORK=0` returns to sharing the host network, which is
+    /// also what happens when no relay binary is available.
+    pub(super) fn isolated(binary: &std::path::Path) -> bool {
+        Self::isolated_for(
+            std::env::var("ANCHOR_GOOSE_LOCAL_NETWORK").ok().as_deref(),
+            Self::relay_binary(binary).is_some_and(|path| path.is_file()),
+        )
+    }
+
+    /// Pure form of the decision so it is testable without the process environment.
+    fn isolated_for(flag: Option<&str>, relay_available: bool) -> bool {
+        match flag {
+            Some("0") => false,
+            Some("1") => true,
+            _ => relay_available,
+        }
     }
 
     pub(super) fn from_env(binary: &std::path::Path) -> Result<Self, String> {
-        if !Self::isolated_from_env() {
+        if !Self::isolated(binary) {
             return Ok(Self { relay: None });
         }
-        let relay = match std::env::var_os("ANCHOR_GOOSE_RELAY_BINARY") {
-            Some(path) => PathBuf::from(path),
-            None => binary
-                .parent()
-                .map(|parent| parent.join("anchor-net-relay"))
-                .ok_or("ANCHOR_GOOSE_BINARY has no directory to look for the sandbox relay")?,
-        };
+        let relay = Self::relay_binary(binary)
+            .ok_or("ANCHOR_GOOSE_BINARY has no directory to look for the sandbox relay")?;
         Ok(Self { relay: Some(relay) })
     }
 
@@ -975,6 +1003,14 @@ mod tests {
                 binding.identity
             );
         }
+    }
+
+    #[test]
+    fn isolation_is_the_default_when_a_relay_is_available() {
+        assert!(RelaySettings::isolated_for(None, true));
+        assert!(!RelaySettings::isolated_for(None, false));
+        assert!(RelaySettings::isolated_for(Some("1"), false));
+        assert!(!RelaySettings::isolated_for(Some("0"), true));
     }
 
     #[test]

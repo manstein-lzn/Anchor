@@ -272,13 +272,12 @@ impl GooseNodePort {
         }
         // Opt-in isolation: the sandbox keeps its own network namespace and reaches
         // the bridge through the in-sandbox relay instead of sharing host networking.
-        let isolated = configuration::RelaySettings::isolated_from_env();
-        let shared_authorized = env::var("ANCHOR_GOOSE_ALLOW_SHARED_NETWORK").as_deref() == Ok("1");
-        if !network_opt_in(isolated, shared_authorized) {
-            return Err(NETWORK_OPT_IN_ERROR.into());
-        }
         let (binary, binary_sha256) = configuration::binary()?;
         let relay = configuration::RelaySettings::from_env(&binary)?;
+        let shared_authorized = env::var("ANCHOR_GOOSE_ALLOW_SHARED_NETWORK").as_deref() == Ok("1");
+        if !network_opt_in(relay.is_isolated(), shared_authorized) {
+            return Err(NETWORK_OPT_IN_ERROR.into());
+        }
         let fixture = mode == "goose-acp-spike";
         let models = configuration::ModelRegistry::from_env(fixture)?;
         let model = models.resolve(None)?.model;
