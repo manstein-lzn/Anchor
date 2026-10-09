@@ -248,7 +248,7 @@ async fn strict_arguments_and_other_tool_forwarding() {
             .iter()
             .map(|tool| tool.name.as_str())
             .collect::<Vec<_>>(),
-        ["echo", RUN_TOOL_NAME]
+        ["echo", RUN_TOOL_NAME, READ_TOOL_NAME, EDIT_TOOL_NAME]
     );
     assert!(!tools.is_read_only(RUN_TOOL_NAME));
     let result = tools
@@ -296,7 +296,7 @@ async fn owned_node_tools_are_static_arc_ports_with_owned_invocation_context() {
             .iter()
             .map(|tool| tool.name.as_str())
             .collect::<Vec<_>>(),
-        ["echo", RUN_TOOL_NAME]
+        ["echo", RUN_TOOL_NAME, READ_TOOL_NAME, EDIT_TOOL_NAME]
     );
     let result = tools.call("echo", json!({"owned": true})).await.unwrap();
     assert_eq!(result[0].as_json(), Some(&json!({"owned": true})));
@@ -506,4 +506,213 @@ fn prune_spill_keeps_only_the_newest_retained_streams() {
         .collect::<Vec<_>>();
     retained.sort();
     assert_eq!(retained, ["notes.txt", "stdout-3.spill", "stdout-4.spill"]);
+}
+
+async fn call_tool(tools: &NodeTools, name: &str, arguments: Value) -> Value {
+    tools
+        .call(name, arguments)
+        .await
+        .unwrap_or_else(|error| panic!("{name} failed: {error}"))[0]
+        .as_json()
+        .unwrap()
+        .clone()
+}
+
+async fn call_tool_error(tools: &NodeTools, name: &str, arguments: Value) -> String {
+    tools
+        .call(name, arguments)
+        .await
+        .expect_err("the tool must refuse")
+        .to_string()
+}
+
+#[tokio::test]
+async fn read_returns_numbered_pages_and_a_content_hash() {
+    let fixture = Fixture::new();
+    let tools = fixture.tools(cancellation());
+    std::fs::write(
+        fixture.workspace.join("notes.txt"),
+        "one\ntwo\nthree\nfour\n",
+    )
+    .unwrap();
+    let first = call_tool(&tools, READ_TOOL_NAME, json!({"path":"notes.txt"})).await;
+    assert_eq!(first["total_lines"], 4, "{first}");
+    assert_eq!(first["lines"][0], json!({"line":1,"text":"one"}), "{first}");
+    assert_eq!(first["truncated"], false, "{first}");
+    assert_eq!(first["next_offset"], Value::Null, "{first}");
+    let sha = first["sha256"].as_str().unwrap().to_owned();
+    assert_eq!(sha.len(), 64);
+
+    let page = call_tool(
+        &tools,
+        READ_TOOL_NAME,
+        json!({"path":"notes.txt","offset":2,"limit":1}),
+    )
+    .await;
+    assert_eq!(page["lines"][0], json!({"line":3,"text":"three"}), "{page}");
+    assert_eq!(page["truncated"], true, "{page}");
+    assert_eq!(page["next_offset"], 3, "{page}");
+    assert_eq!(page["sha256"], sha, "the hash covers the whole file");
+}
+
+#[tokio::test]
+async fn file_tools_stay_inside_the_workspace() {
+    let fixture = Fixture::new();
+    let tools = fixture.tools(cancellation());
+    std::fs::write(fixture.directory.path().join("outside.txt"), "host only").unwrap();
+    for path in ["/etc/passwd", "../outside.txt", "sub/../../outside.txt", ""] {
+        let error = call_tool_error(&tools, READ_TOOL_NAME, json!({"path": path})).await;
+        assert!(!error.contains("host only"), "{error}");
+        assert!(
+            error.contains("not_executed") || error.contains("outside") || error.contains("empty"),
+            "{path}: {error}"
+        );
+    }
+    // A symlink that leaves the workspace is refused even though it is relative.
+    std::os::unix::fs::symlink(
+        fixture.directory.path().join("outside.txt"),
+        fixture.workspace.join("link.txt"),
+    )
+    .unwrap();
+    let error = call_tool_error(&tools, READ_TOOL_NAME, json!({"path":"link.txt"})).await;
+    assert!(error.contains("outside /workspace"), "{error}");
+}
+
+#[tokio::test]
+async fn read_reports_binary_files_without_lines() {
+    let fixture = Fixture::new();
+    let tools = fixture.tools(cancellation());
+    std::fs::write(fixture.workspace.join("blob.bin"), [0u8, 1, 2, 3]).unwrap();
+    let result = call_tool(&tools, READ_TOOL_NAME, json!({"path":"blob.bin"})).await;
+    assert_eq!(result["binary"], true, "{result}");
+    assert!(result.get("lines").is_none(), "{result}");
+}
+
+#[tokio::test]
+async fn whole_file_edits_require_the_base_hash_and_can_create_files() {
+    let fixture = Fixture::new();
+    let tools = fixture.tools(cancellation());
+    // A missing parent directory is an explicit refusal, not an implicit mkdir.
+    let missing = call_tool_error(
+        &tools,
+        EDIT_TOOL_NAME,
+        json!({"path":"new/report.txt","content":"first\n"}),
+    )
+    .await;
+    assert!(missing.contains("directory does not exist"), "{missing}");
+    std::fs::create_dir(fixture.workspace.join("new")).unwrap();
+    let created = call_tool(
+        &tools,
+        EDIT_TOOL_NAME,
+        json!({"path":"new/report.txt","content":"first\n"}),
+    )
+    .await;
+    assert_eq!(created["created"], true, "{created}");
+    let sha = created["sha256_after"].as_str().unwrap().to_owned();
+
+    // Replacing the whole file without the current hash is refused.
+    let error = call_tool_error(
+        &tools,
+        EDIT_TOOL_NAME,
+        json!({"path":"new/report.txt","content":"blind\n"}),
+    )
+    .await;
+    assert!(
+        error.contains("base_sha256") && error.contains("required"),
+        "{error}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(fixture.workspace.join("new/report.txt")).unwrap(),
+        "first\n"
+    );
+
+    // A stale hash is refused too, and the refusal names the current hash.
+    let stale = "0".repeat(64);
+    let error = call_tool_error(
+        &tools,
+        EDIT_TOOL_NAME,
+        json!({"path":"new/report.txt","content":"stale\n","base_sha256":stale}),
+    )
+    .await;
+    assert!(error.contains(&sha), "{error}");
+
+    let replaced = call_tool(
+        &tools,
+        EDIT_TOOL_NAME,
+        json!({"path":"new/report.txt","content":"second\n","base_sha256":sha}),
+    )
+    .await;
+    assert_eq!(replaced["created"], false, "{replaced}");
+    assert_eq!(replaced["bytes_after"], 7, "{replaced}");
+}
+
+#[tokio::test]
+async fn counted_edits_replace_exactly_the_expected_matches() {
+    let fixture = Fixture::new();
+    let tools = fixture.tools(cancellation());
+    std::fs::write(
+        fixture.workspace.join("code.rs"),
+        "let a = 1;\nlet b = 2;\n",
+    )
+    .unwrap();
+    let ambiguous = call_tool_error(
+        &tools,
+        EDIT_TOOL_NAME,
+        json!({"path":"code.rs","old_string":"let ","new_string":"let mut "}),
+    )
+    .await;
+    assert!(ambiguous.contains("occurs 2 time(s)"), "{ambiguous}");
+    assert_eq!(
+        std::fs::read_to_string(fixture.workspace.join("code.rs")).unwrap(),
+        "let a = 1;\nlet b = 2;\n",
+        "a refused edit must not change the file"
+    );
+
+    let applied = call_tool(
+        &tools,
+        EDIT_TOOL_NAME,
+        json!({
+            "path":"code.rs","old_string":"let ","new_string":"let mut ","expected_matches":2
+        }),
+    )
+    .await;
+    assert_eq!(applied["replaced"], 2, "{applied}");
+    assert_eq!(
+        std::fs::read_to_string(fixture.workspace.join("code.rs")).unwrap(),
+        "let mut a = 1;\nlet mut b = 2;\n"
+    );
+
+    // A targeted edit can also carry the base hash, and a wrong hash is refused.
+    let current = call_tool(&tools, READ_TOOL_NAME, json!({"path":"code.rs"})).await;
+    let sha = current["sha256"].as_str().unwrap().to_owned();
+    let error = call_tool_error(
+        &tools,
+        EDIT_TOOL_NAME,
+        json!({
+            "path":"code.rs","old_string":"let mut a","new_string":"let a",
+            "base_sha256":"1".repeat(64)
+        }),
+    )
+    .await;
+    assert!(error.contains(&sha), "{error}");
+    let reverted = call_tool(
+        &tools,
+        EDIT_TOOL_NAME,
+        json!({
+            "path":"code.rs","old_string":"let mut a","new_string":"let a","base_sha256":sha
+        }),
+    )
+    .await;
+    assert_eq!(reverted["replaced"], 1, "{reverted}");
+}
+
+#[tokio::test]
+async fn file_tools_declare_read_only_semantics() {
+    let fixture = Fixture::new();
+    let tools = fixture.tools(cancellation());
+    assert!(tools.is_read_only(READ_TOOL_NAME));
+    assert!(!tools.is_read_only(EDIT_TOOL_NAME));
+    assert!(!tools.is_read_only(RUN_TOOL_NAME));
+    // The inner fixture port is not read-only, and the wrapper does not change that.
+    assert!(!tools.is_read_only("echo"));
 }

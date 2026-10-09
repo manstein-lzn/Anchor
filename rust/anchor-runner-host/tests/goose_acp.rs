@@ -122,6 +122,54 @@ fn native_goose_direct_model_transport_requires_observed_tool_receipt() {
 
 #[test]
 #[ignore = "requires pinned Goose binary"]
+fn native_goose_file_tools_read_and_edit_through_the_bridge() {
+    // One variable: the structured file tools. Everything else matches the
+    // existing native scenario, and the verify node proves the edit reached the
+    // real workspace rather than a model-side copy.
+    let provider = Provider::new(
+        "goose-native-file-tools",
+        vec![
+            // `after` asserts what the *previous* tool result showed the model.
+            command("printf 'one\\ntwo\\n' > evidence.txt"),
+            Step::tool("anchor_read", json!({"path":"evidence.txt"})).after(""),
+            Step::tool(
+                "anchor_edit",
+                json!({"path":"evidence.txt","old_string":"one","new_string":"ONE"}),
+            )
+            .after("two"),
+            command("grep -c ONE evidence.txt").after("sha256_after"),
+            complete("verify").after("1"),
+            Step::text("file tools complete"),
+        ],
+    );
+    let host = Host::new(&graph()).native();
+    let server = host.serve(&provider);
+    let run = server.trigger();
+    let response = server.wait_status(&run, "completed");
+    assert_eq!(response["state"]["status"], "completed", "{response}");
+    provider.assert_consumed();
+    let saved = host.record(&run);
+    // The edit reached the real workspace: the verify node copies the edited file.
+    assert_artifact(&host, &saved, "verify", "verified.txt", b"ONE\ntwo\n");
+    let history = host.native_conversation(&run, "worker", 1);
+    assert_native_tool_response(&history, "anchor__anchor_read", "two");
+    assert_native_tool_response(&history, "anchor__anchor_edit", "sha256_after");
+    host.evidence(
+        &provider,
+        &run,
+        json!({
+            "case_source":"tests/goose_acp.rs",
+            "structured_file_tools_advertised":true,
+            "read_returned_numbered_lines_and_hash":true,
+            "edit_reached_the_real_workspace":true,
+            "downstream_node_saw_the_edited_file":true,
+            "receipt_bound_completion":true
+        }),
+    );
+}
+
+#[test]
+#[ignore = "requires pinned Goose binary"]
 fn native_goose_unknown_external_effect_reopens_same_session_and_checks_before_continuing() {
     let provider = Provider::new("goose-native-unknown-effect-resume", vec![]);
     let payload = json!({"effect_key":"native-effect-once"});
@@ -277,8 +325,13 @@ fn assert_catalog(request: &Value) {
     names.sort_unstable();
     assert_eq!(
         names,
-        ["anchor__anchor_run", "anchor__final_result"],
-        "model tools must be exactly the two actual Anchor MCP tools"
+        [
+            "anchor__anchor_edit",
+            "anchor__anchor_read",
+            "anchor__anchor_run",
+            "anchor__final_result"
+        ],
+        "model tools must be exactly the Anchor tools, with nothing from Goose's own extensions"
     );
 }
 
