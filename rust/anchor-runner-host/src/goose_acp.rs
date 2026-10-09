@@ -14,6 +14,7 @@ pub(crate) use trace::LiveTrace;
 pub(crate) use trace::{live_notifications, trace_messages};
 mod session;
 mod transport;
+mod usage;
 
 use crate::{
     create_durable_directory,
@@ -660,7 +661,13 @@ impl GooseNodePort {
                 .map_err(|error| error.to_string())?;
             blocks.push(json!({"type":"image","data":base64::engine::general_purpose::STANDARD.encode(&image.data),"mimeType":image.media_type}));
         }
-        let observer = |event: &Value| live.observe(event);
+        // Usage/compaction notifications are observed as they arrive because the
+        // transport only retains a bounded tail of raw notifications.
+        let tally = Arc::new(usage::UsageTally::default());
+        let observer = |event: &Value| {
+            tally.observe(event);
+            live.observe(event)
+        };
         let prompted = connection
             .request_observed(
                 "session/prompt",
@@ -683,16 +690,10 @@ impl GooseNodePort {
         };
         evidence["prompt_result"] = response.clone();
         evidence["notifications"] = json!(notifications);
-        let usage = notifications
-            .iter()
-            .filter(|event| {
-                event["method"] == "_goose/unstable/session/update"
-                    && (event["params"]["sessionUpdate"] == "message_usage"
-                        || event["params"]["update"]["sessionUpdate"] == "message_usage")
-            })
-            .collect::<Vec<_>>();
-        evidence["native_usage_notifications"] = json!(usage);
-        evidence["observed_model_requests"] = json!(usage.len());
+        let metrics = tally.metrics();
+        evidence["usage"] = metrics.clone();
+        evidence["observed_model_requests"] = metrics["messages"].clone();
+        evidence["compaction_messages"] = metrics["compaction_messages"].clone();
         evidence["model_requests_scope"] = json!(if self.fixture {
             "fixture_proxy_requests"
         } else {
@@ -716,7 +717,13 @@ impl GooseNodePort {
             .await
             .clone()
             .ok_or_else(|| {
-                InvocationFailure::Contract("Goose ended without a validated final_result".into())
+                // The agent ended its turn without the completion tool. That is
+                // recoverable and deliberately stays resumable: the retained
+                // native session can be asked to inspect the scene and finish
+                // (the media fail-closed scenarios depend on this). Only
+                // protocol-level violations that no resume can repair are
+                // classified as `Contract`.
+                InvocationFailure::Uncertain("Goose ended without a validated final_result".into())
             })?;
         Ok(NodeCompletion {
             submission: output["summary"].as_str().unwrap().to_owned(),
@@ -724,7 +731,7 @@ impl GooseNodePort {
             model_requests: if self.fixture {
                 bridge.state.provider_calls.load(Ordering::SeqCst)
             } else {
-                usage.len() as u64
+                metrics["messages"].as_u64().unwrap_or(0)
             },
             output,
         })
@@ -754,7 +761,6 @@ mod tests {
         for reason in [
             "Goose prompt stopped without completion: max_tokens",
             "Goose attempted tools after final_result",
-            "Goose ended without a validated final_result",
         ] {
             assert!(
                 matches!(
@@ -764,6 +770,21 @@ mod tests {
                 "{reason}"
             );
         }
+    }
+
+    #[test]
+    fn an_agent_that_ended_without_the_completion_tool_stays_resumable() {
+        // The media fail-closed scenarios require this: the agent ended its turn
+        // without `final_result`, so the retained session may be resumed to
+        // inspect the scene and finish.
+        assert!(matches!(
+            failure_outcome(
+                false,
+                false,
+                InvocationFailure::Uncertain("Goose ended without a validated final_result".into())
+            ),
+            NodeExecutionOutcome::Interrupted { .. }
+        ));
     }
 
     #[test]

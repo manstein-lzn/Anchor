@@ -76,6 +76,19 @@ fn native_goose_direct_model_transport_requires_observed_tool_receipt() {
     assert_eq!(native["budget_enforcement"], false);
     assert!(native["provider_requests"].is_null());
     assert_eq!(native["observed_model_requests"], 3);
+    // The usage tally observes the custom notifications as they arrive, so it
+    // must agree with the count taken from the retained notification tail and
+    // expose the structured accounting alongside it.
+    let usage = &native["usage"];
+    assert_eq!(usage["messages"], 3, "{usage}");
+    assert_eq!(
+        usage["samples"].as_array().map(Vec::len),
+        Some(3),
+        "{usage}"
+    );
+    assert!(usage["total_tokens"].as_u64().is_some(), "{usage}");
+    assert!(usage["elapsed_ms"].as_u64().is_some(), "{usage}");
+    assert_eq!(native["compaction_messages"], 0, "{native}");
     let (status, detail) = server.request("GET", &format!("/runs/{run}"), None);
     assert_eq!(status, 200, "{detail}");
     let trace = detail["traces"]["[\"worker\",1]"]
