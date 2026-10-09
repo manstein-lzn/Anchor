@@ -51,10 +51,8 @@ pub(crate) struct GooseNodePort {
     model: String,
     models: configuration::ModelRegistry,
     fixture: bool,
-    /// Whether Goose runs in an isolated network namespace behind the relay.
-    local_network: bool,
-    /// Sandbox relay binary, required when `local_network` is set.
-    relay: Option<PathBuf>,
+    /// How this port's Goose sandbox reaches the bridge and the model proxy.
+    relay: configuration::RelaySettings,
     facts: PathBuf,
     process_root: PathBuf,
     resolver: Arc<HostIoResolver>,
@@ -274,25 +272,15 @@ impl GooseNodePort {
         }
         // Opt-in isolation: the sandbox keeps its own network namespace and reaches
         // the bridge through the in-sandbox relay instead of sharing host networking.
-        let local_network = env::var("ANCHOR_GOOSE_LOCAL_NETWORK").as_deref() == Ok("1");
+        let isolated = configuration::RelaySettings::isolated_from_env();
         let shared_authorized = env::var("ANCHOR_GOOSE_ALLOW_SHARED_NETWORK").as_deref() == Ok("1");
-        if !network_opt_in(local_network, shared_authorized) {
+        if !network_opt_in(isolated, shared_authorized) {
             return Err(NETWORK_OPT_IN_ERROR.into());
         }
         let (binary, binary_sha256) = configuration::binary()?;
+        let relay = configuration::RelaySettings::from_env(&binary)?;
         let fixture = mode == "goose-acp-spike";
         let models = configuration::ModelRegistry::from_env(fixture)?;
-        let relay = if local_network {
-            Some(match env::var_os("ANCHOR_GOOSE_RELAY_BINARY") {
-                Some(path) => PathBuf::from(path),
-                None => binary
-                    .parent()
-                    .map(|parent| parent.join("anchor-net-relay"))
-                    .ok_or("ANCHOR_GOOSE_BINARY has no directory to look for the sandbox relay")?,
-            })
-        } else {
-            None
-        };
         let model = models.resolve(None)?.model;
         let facts = state.join(if fixture {
             "goose-acp-spike"
@@ -316,7 +304,6 @@ impl GooseNodePort {
             model,
             models,
             fixture,
-            local_network,
             relay,
             facts,
             process_root,
@@ -499,13 +486,7 @@ impl GooseNodePort {
         bridge
             .expose_on_unix_socket(&bridge_socket)
             .map_err(GraphError::Unsupported)?;
-        let transport = match &self.relay {
-            Some(relay) if self.local_network => configuration::BridgeTransport::Isolated {
-                relay: relay.clone(),
-                socket: bridge_socket.clone(),
-            },
-            _ => configuration::BridgeTransport::Shared,
-        };
+        let transport = self.relay.transport(bridge_socket.clone());
         let endpoint = transport.endpoint(&bridge.url);
         let command = configuration::command(
             &self.sandbox,
@@ -584,7 +565,7 @@ impl GooseNodePort {
         evidence["tool_calls_dropped"] = json!(bridge.state.dropped_calls.load(Ordering::SeqCst));
         evidence["process_directory"] = json!(directory);
         evidence["bridge_socket"] = json!(bridge_socket);
-        evidence["sandbox_network"] = json!(if self.local_network {
+        evidence["sandbox_network"] = json!(if self.relay.is_isolated() {
             "isolated"
         } else {
             "shared"

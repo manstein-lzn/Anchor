@@ -8,6 +8,7 @@ use anchor_runtime::{Cancellation, ToolDefinition, ToolError, ToolPort, ToolResu
 use anchor_sandbox_bwrap::{BubblewrapPolicy, BubblewrapSandbox};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::{
     fs::{self, File, OpenOptions},
     future::Future,
@@ -25,6 +26,8 @@ pub(crate) struct GoosePilot {
     binary: PathBuf,
     binary_sha256: String,
     models: configuration::ModelRegistry,
+    /// How the Pilot sandbox reaches the bridge and the model proxy.
+    relay: configuration::RelaySettings,
 }
 
 const MAX_FACT_BYTES: u64 = 8 * 1024 * 1024;
@@ -121,10 +124,12 @@ impl GoosePilot {
         let binding = models.resolve(None)?;
         let fact = load(root)?;
         validate_binding(fact.as_ref(), retained, &binary_sha256, &binding.identity)?;
+        let relay = configuration::RelaySettings::from_env(&binary)?;
         Ok(Self {
             binary,
             binary_sha256,
             models,
+            relay,
         })
     }
 
@@ -202,6 +207,16 @@ impl GoosePilot {
         self::directory(&directory)?;
         fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
             .map_err(|error| error.to_string())?;
+        // Keep the socket path short: the kernel caps a UNIX socket path at `sun_path`.
+        let socket = std::env::temp_dir().join(format!(
+            "anchor-pilot-bridge-{}.sock",
+            &format!("{:x}", Sha256::digest(directory.display().to_string()))[..16]
+        ));
+        bridge
+            .expose_on_unix_socket(&socket)
+            .map_err(|error| error.to_string())?;
+        let transport = self.relay.transport(socket);
+        let endpoint = transport.endpoint(&bridge.url);
         let sandbox = BubblewrapSandbox::new(
             BubblewrapPolicy::new(
                 std::env::var_os("ANCHOR_BWRAP")
@@ -217,12 +232,14 @@ impl GoosePilot {
             &sandbox,
             &directory,
             &self.binary,
-            self.models.environment(binding, &bridge.url, &bridge.token),
+            self.models.environment(binding, &endpoint, &bridge.token),
             request.cancellation.clone(),
-            &configuration::BridgeTransport::Shared,
+            &transport,
         )?;
         let mut connection = AcpConnection::spawn(command).await?;
-        let result = self.prompt(request, fact, bridge, &mut connection).await;
+        let result = self
+            .prompt(request, fact, bridge, &endpoint, &mut connection)
+            .await;
         if result.is_err() {
             let session = fact
                 .lock()
@@ -248,6 +265,7 @@ impl GoosePilot {
         request: &Arc<PilotTurn>,
         fact: &Mutex<PilotFact>,
         bridge: &Bridge,
+        endpoint: &str,
         connection: &mut AcpConnection,
     ) -> Result<TurnStatus, String> {
         let restored = fact
@@ -258,7 +276,7 @@ impl GoosePilot {
         let opened = session::open(
             connection,
             bridge,
-            &bridge.url,
+            endpoint,
             restored.as_deref(),
             &request.cancellation,
             None,

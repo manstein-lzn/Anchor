@@ -1,12 +1,16 @@
 use std::collections::BTreeMap;
 use std::net::IpAddr;
+use std::path::PathBuf;
 
 use anchor_runtime::SandboxEnvironment;
 use reqwest::Url;
 use sha2::{Digest, Sha256};
 
 pub(super) fn binary() -> Result<(std::path::PathBuf, String), String> {
-    if std::env::var("ANCHOR_GOOSE_ALLOW_SHARED_NETWORK").as_deref() != Ok("1") {
+    // An isolated sandbox reaches its control plane through the relay, so the
+    // shared-network opt-in is only required when the sandbox shares the network.
+    let isolated = std::env::var("ANCHOR_GOOSE_LOCAL_NETWORK").as_deref() == Ok("1");
+    if !isolated && std::env::var("ANCHOR_GOOSE_ALLOW_SHARED_NETWORK").as_deref() != Ok("1") {
         return Err("Goose requires explicit shared control network authorization".into());
     }
     let binary = std::env::var_os("ANCHOR_GOOSE_BINARY")
@@ -94,6 +98,50 @@ const RELAY_MOUNT: &str = "/tools/anchor-net-relay";
 const SOCKET_MOUNT: &str = "/tools/anchor-bridge.sock";
 /// Loopback address the relay serves inside an isolated sandbox.
 pub(super) const RELAY_LISTEN: &str = "127.0.0.1:9080";
+
+/// Isolated-sandbox settings shared by every Goose sandbox (nodes and Pilot).
+///
+/// The opt-in is read once per port; the relay binary defaults to the one shipped
+/// beside the Goose binary.
+pub(super) struct RelaySettings {
+    relay: Option<PathBuf>,
+}
+
+impl RelaySettings {
+    /// The opt-in alone, readable before the Goose binary is resolved.
+    pub(super) fn isolated_from_env() -> bool {
+        std::env::var("ANCHOR_GOOSE_LOCAL_NETWORK").as_deref() == Ok("1")
+    }
+
+    pub(super) fn from_env(binary: &std::path::Path) -> Result<Self, String> {
+        if !Self::isolated_from_env() {
+            return Ok(Self { relay: None });
+        }
+        let relay = match std::env::var_os("ANCHOR_GOOSE_RELAY_BINARY") {
+            Some(path) => PathBuf::from(path),
+            None => binary
+                .parent()
+                .map(|parent| parent.join("anchor-net-relay"))
+                .ok_or("ANCHOR_GOOSE_BINARY has no directory to look for the sandbox relay")?,
+        };
+        Ok(Self { relay: Some(relay) })
+    }
+
+    pub(super) fn is_isolated(&self) -> bool {
+        self.relay.is_some()
+    }
+
+    /// The transport one sandbox uses to reach the bridge and the model proxy.
+    pub(super) fn transport(&self, socket: PathBuf) -> BridgeTransport {
+        match &self.relay {
+            Some(relay) => BridgeTransport::Isolated {
+                relay: relay.clone(),
+                socket,
+            },
+            None => BridgeTransport::Shared,
+        }
+    }
+}
 
 /// How a Goose sandbox reaches Anchor's bridge and model proxy.
 pub(super) enum BridgeTransport {
