@@ -44,9 +44,15 @@ export async function api<T>(path: string, method = 'GET', body?: unknown, signa
       response = await send(key);
     }
   }
-  const data = await response.json().catch(() => null);
+  // A successful DELETE answers 204 with no body. Only an OK response may be
+  // empty; anything else without a JSON body is a transport problem.
+  const empty = response.status === 204 || response.status === 205;
+  const data = empty ? null : await response.json().catch(() => null);
   if (!response.ok) throw new ApiError(data?.error ?? `${method} ${path} → ${response.status}`, response.status);
-  if (data === null) throw new Error(`${method} ${path} 未返回有效 JSON，请检查 API 服务连接。`);
+  if (data === null) {
+    if (empty) return undefined as T;
+    throw new Error(`${method} ${path} 未返回有效 JSON，请检查 API 服务连接。`);
+  }
   return data as T;
 }
 

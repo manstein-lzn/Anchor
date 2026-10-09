@@ -173,8 +173,9 @@ impl SessionStore {
     }
 
     pub fn attach_run(&self, owner: &str, id: &str, run: &str) -> Result<Session, SessionError> {
-        self.mutate(owner, id, |_, session| {
+        self.mutate(owner, id, |connection, session| {
             validate_identity(run, "run id")?;
+            crate::channel::ensure_assistant_run_scope(connection, &session.id, run)?;
             if session.run_ids.iter().any(|existing| existing == run) {
                 return Ok(None);
             }

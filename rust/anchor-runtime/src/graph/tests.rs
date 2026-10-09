@@ -6,6 +6,8 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+mod host_operations;
+
 #[derive(Default)]
 struct MemStore {
     record: Mutex<Option<GraphRunRecord>>,
@@ -59,6 +61,7 @@ fn executed_nodes_follow_first_durable_completion_order() {
     .unwrap();
     let make_result = |node: &str, sequence: u64| RunResult {
         node_id: node.into(),
+        interruption: None,
         key: InvocationKey {
             run_id: record.run_id.clone(),
             graph_digest: record.graph_digest.clone(),
@@ -567,6 +570,7 @@ impl NodeExecutionPort for FakeNodes {
         NodeExecutionCapabilities {
             agent: true,
             op_run: self.op_run,
+            host_operations: false,
             exact_provider_request_budget: !self.caps_budget_off,
         }
     }
@@ -800,6 +804,7 @@ impl NodeExecutionPort for DurableTestPorts {
         NodeExecutionCapabilities {
             agent: true,
             op_run: false,
+            host_operations: false,
             exact_provider_request_budget: true,
         }
     }
@@ -1294,6 +1299,7 @@ fn false_ingress_closes_cascaded_sccs_deterministically() {
         "entry".into(),
         vec![RunResult {
             node_id: "entry".into(),
+            interruption: None,
             key: entry_key,
             completion: NodeCompletion {
                 submission: "entry complete".into(),
@@ -1313,6 +1319,7 @@ fn false_ingress_closes_cascaded_sccs_deterministically() {
         "source".into(),
         vec![RunResult {
             node_id: "source".into(),
+            interruption: None,
             key: source_key,
             completion: NodeCompletion {
                 submission: "source chose another route".into(),
@@ -1439,6 +1446,7 @@ fn later_false_loop_input_retires_stale_selected_output() {
         "branch".into(),
         vec![RunResult {
             node_id: "branch".into(),
+            interruption: None,
             key: key("branch", 1),
             completion: NodeCompletion {
                 submission: "branch completed in round one".into(),
@@ -2211,6 +2219,7 @@ fn parallel_activation_facts_bind_pair_branch_paths_and_active_cursors() {
         "start".into(),
         vec![RunResult {
             node_id: "start".into(),
+            interruption: None,
             key: fanout_key,
             completion: NodeCompletion {
                 submission: "fanout".into(),
@@ -3223,6 +3232,7 @@ fn file_run_store_rejects_edge_decision_not_newer_than_its_result() {
         "spin".into(),
         vec![RunResult {
             node_id: "spin".into(),
+            interruption: None,
             key: key.clone(),
             completion: NodeCompletion {
                 submission: "spin completed".into(),
@@ -3682,6 +3692,7 @@ impl NodeExecutionPort for ScenarioNodes {
         NodeExecutionCapabilities {
             agent: true,
             op_run: false,
+            host_operations: false,
             exact_provider_request_budget: true,
         }
     }

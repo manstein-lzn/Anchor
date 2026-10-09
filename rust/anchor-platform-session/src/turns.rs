@@ -6,8 +6,8 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::{
-    Session, SessionError, SessionStatus, SessionStore, Turn, TurnEvent, TurnStatus, associations,
-    store,
+    Session, SessionError, SessionStatus, SessionStore, Turn, TurnEvent, TurnStatus, TurnWindow,
+    associations, store,
 };
 
 const TURN_COLUMNS: &str =
@@ -90,6 +90,38 @@ impl SessionStore {
             .collect::<Result<Vec<_>, _>>()?;
         transaction.commit()?;
         Ok(turns)
+    }
+
+    /// The execution windows this Run was associated with, oldest first.
+    ///
+    /// A resident assistant keeps one Run across many Turns, so a single
+    /// `started`..`updated` span would report every idle wait as work. The
+    /// association written when a Turn is claimed is the durable record of
+    /// which Turns that Run actually executed, and it survives handover and
+    /// restart. Read-only projections use it; an ordinary one-Turn Run gets the
+    /// same interval either way.
+    ///
+    /// It takes no owner on purpose, unlike every other public Turn lookup: the
+    /// Run board projects Runs across owners, and this result carries no prompt,
+    /// error or delivery content. An owner-scoped caller must not reuse it.
+    pub fn turn_windows_for_run(&self, run: &str) -> Result<Vec<TurnWindow>, SessionError> {
+        store::validate_identity(run, "run id")?;
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        let windows = {
+            let mut statement = transaction.prepare(
+                "SELECT turns.created_at, turns.updated_at, turns.status FROM turns
+                 JOIN turn_runs ON turn_runs.turn_id = turns.id
+                 WHERE turn_runs.run_id = ?1
+                 ORDER BY turns.created_at ASC, turns.id ASC",
+            )?;
+            statement
+                .query_map([run], read_window)?
+                .map(|row| row.map_err(SessionError::from).and_then(|window| window))
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        transaction.commit()?;
+        Ok(windows)
     }
 
     pub fn turn_events(
@@ -300,6 +332,30 @@ pub(crate) fn validate_turn_lookup(
 ) -> Result<(), SessionError> {
     store::validate_lookup(owner, session)?;
     store::validate_identity(turn, "turn id")
+}
+
+/// Read one Turn's execution window, whose columns are `created_at`,
+/// `updated_at` and `status`. An unrecognized status reads as not running: a
+/// projection must not fail the board over one unexpected row.
+fn read_window(row: &Row<'_>) -> rusqlite::Result<Result<TurnWindow, SessionError>> {
+    let created_at: String = row.get(0)?;
+    let updated_at: String = row.get(1)?;
+    let status: String = row.get(2)?;
+    let times = created_at.parse().and_then(|created_at| {
+        updated_at
+            .parse()
+            .map(|updated_at| (created_at, updated_at))
+    });
+    Ok(match times {
+        Ok((created_at, updated_at)) => Ok(TurnWindow {
+            created_at,
+            updated_at,
+            running: status == "running",
+        }),
+        Err(error) => Err(SessionError::Storage(format!(
+            "invalid turn timestamp: {error}"
+        ))),
+    })
 }
 
 pub(crate) fn read_turn(row: &Row<'_>) -> rusqlite::Result<Result<Turn, SessionError>> {

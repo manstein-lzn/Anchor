@@ -47,6 +47,15 @@ pub(super) fn control_output(completion: &NodeCompletion, kind: ArtifactKind) ->
     output
 }
 
+pub(super) fn control_filename(kind: ArtifactKind) -> Option<&'static str> {
+    match kind {
+        ArtifactKind::Fanout => Some("fanout.json"),
+        ArtifactKind::Join => Some("join.json"),
+        ArtifactKind::Interruption => Some("interruption.json"),
+        ArtifactKind::Node | ArtifactKind::GraphCall => None,
+    }
+}
+
 impl Manifest {
     pub fn validate_context(&self) -> Result<(), GraphError> {
         match (self.format, &self.context, &self.context_sha256) {
@@ -66,11 +75,8 @@ impl Manifest {
                     // already re-derives and verifies the exact tree, so any
                     // declared files are the authoritative result inventory.
                     ArtifactKind::GraphCall => Ok(()),
-                    ArtifactKind::Fanout | ArtifactKind::Join => {
-                        let filename = match context.kind {
-                            ArtifactKind::Fanout => "fanout.json",
-                            _ => "join.json",
-                        };
+                    ArtifactKind::Fanout | ArtifactKind::Join | ArtifactKind::Interruption => {
+                        let filename = control_filename(context.kind).unwrap();
                         if self.files.len() != 1
                             || !self.files.contains_key(filename)
                             || !self.directories.is_empty()

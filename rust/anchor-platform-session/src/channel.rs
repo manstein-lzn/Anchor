@@ -10,9 +10,14 @@ use uuid::Uuid;
 
 use crate::{
     AttachmentManifest, ChannelAdmission, ChannelDelivery, ChannelDeliveryRequest,
-    ChannelDeliveryStatus, ChannelIdentity, ChannelInboundRelation, ChannelInboundRequest, Session,
-    SessionError, SessionStatus, SessionStore, Turn, TurnStatus, associations, store, turns,
+    ChannelDeliveryStatus, ChannelIdentity, ChannelInboundRelation, ChannelInboundRequest,
+    ChannelInboundRun, ChannelPendingMessage, Session, SessionError, SessionStatus, SessionStore,
+    Turn, TurnStatus, associations, store, turns,
 };
+
+mod assistant;
+
+pub(crate) use assistant::ensure_assistant_run_scope;
 
 const MAX_CHANNEL_VALUE_BYTES: usize = 256;
 const MAX_INBOUND_ID_BYTES: usize = 128;
@@ -185,6 +190,69 @@ impl SessionStore {
         })
     }
 
+    /// Which channel session, turn and Run an admitted inbound message belongs
+    /// to. Read-only: the live progress projection resolves its subject through
+    /// this lookup instead of trusting a caller-supplied Run.
+    pub fn channel_run_for_inbound(
+        &self,
+        owner: &str,
+        inbound_id: &str,
+    ) -> Result<Option<ChannelInboundRun>, SessionError> {
+        store::validate_identity(owner, "owner")?;
+        validate_channel_value(inbound_id, "inbound id", MAX_INBOUND_ID_BYTES)?;
+        let connection = self.lock()?;
+        let run = connection
+            .query_row(
+                "SELECT inbound.session_id, inbound.turn_id, inbound.run_id
+                   FROM channel_inbounds inbound
+                   JOIN channel_sessions session ON session.session_id = inbound.session_id
+                  WHERE inbound.inbound_id = ?1 AND session.owner = ?2",
+                params![inbound_id, owner],
+                |row| {
+                    Ok(ChannelInboundRun {
+                        session_id: row.get(0)?,
+                        turn_id: row.get(1)?,
+                        run_id: row.get(2)?,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(run)
+    }
+
+    /// User messages this session has not been answered for: everything newer
+    /// than the newest turn whose reply the platform confirmed. A new message
+    /// folds these into its Run so interrupted work continues with the new
+    /// information instead of disappearing.
+    pub fn pending_channel_messages(
+        &self,
+        owner: &str,
+        session: &str,
+        exclude_inbound: &str,
+        limit: usize,
+    ) -> Result<Vec<ChannelPendingMessage>, SessionError> {
+        validate_channel_lookup(owner, session, exclude_inbound)?;
+        let connection = self.lock()?;
+        let mut statement = connection.prepare(
+            "SELECT json_extract(request,'$.text'),
+                    json_array_length(json_extract(request,'$.attachments.files'))
+             FROM channel_inbounds
+             WHERE session_id = ?1 AND inbound_id != ?2
+               AND created_at > COALESCE((
+                   SELECT MAX(previous.created_at) FROM channel_inbounds previous
+                    JOIN channel_deliveries delivery ON delivery.turn_id = previous.turn_id
+                   WHERE previous.session_id = ?1 AND delivery.status = 'confirmed'), '')
+             ORDER BY created_at LIMIT ?3",
+        )?;
+        let rows = statement.query_map(params![session, exclude_inbound, limit as i64], |row| {
+            Ok(ChannelPendingMessage {
+                text: row.get::<_, Option<String>>(0)?.unwrap_or_default(),
+                attachments: row.get::<_, Option<i64>>(1)?.unwrap_or(0).max(0) as usize,
+            })
+        })?;
+        rows.map(|row| row.map_err(Into::into)).collect()
+    }
+
     pub fn get_channel_relation(
         &self,
         owner: &str,
@@ -212,24 +280,9 @@ impl SessionStore {
         ensure_channel_session(&transaction, owner, session)?;
         let inbound =
             read_inbound(&transaction, session, inbound_id)?.ok_or(SessionError::Missing)?;
-        let request = serde_json::from_str(&inbound.request)?;
-        let turn = turns::find_turn(&transaction, session, &inbound.turn_id)?;
-        let previous_run = transaction
-            .query_row(
-                "SELECT run_id FROM channel_inbounds
-                 WHERE session_id = ?1 AND turn_id != ?2 AND run_id IS NOT NULL
-                 ORDER BY created_at DESC, inbound_id DESC LIMIT 1",
-                params![session, inbound.turn_id],
-                |row| row.get(0),
-            )
-            .optional()?;
+        let admission = inbound_admission(&transaction, &inbound)?;
         transaction.commit()?;
-        Ok(crate::ChannelInboundAdmission {
-            request,
-            relation: relation(&inbound),
-            turn,
-            previous_run,
-        })
+        Ok(admission)
     }
 
     pub fn associate_channel_run(
@@ -260,6 +313,16 @@ impl SessionStore {
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let snapshot = store::read_session(&transaction, owner, session)?;
         ensure_channel_session(&transaction, owner, session)?;
+        let current_assistant: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM channel_assistants WHERE session_id = ?1 AND retired = 0)",
+            [session],
+            |row| row.get(0),
+        )?;
+        if current_assistant {
+            return Err(SessionError::Conflict(
+                "channel Session has a current assistant; retire it before deletion".into(),
+            ));
+        }
         turns::ensure_no_running(&transaction, session)?;
         if !snapshot.run_ids.is_empty() {
             return Err(SessionError::Conflict(
@@ -1027,6 +1090,29 @@ fn relation(inbound: &StoredInbound) -> ChannelInboundRelation {
     }
 }
 
+fn inbound_admission(
+    connection: &Connection,
+    inbound: &StoredInbound,
+) -> Result<crate::ChannelInboundAdmission, SessionError> {
+    let request = serde_json::from_str(&inbound.request)?;
+    let turn = turns::find_turn(connection, &inbound.session_id, &inbound.turn_id)?;
+    let previous_run = connection
+        .query_row(
+            "SELECT run_id FROM channel_inbounds
+             WHERE session_id = ?1 AND turn_id != ?2 AND run_id IS NOT NULL
+             ORDER BY created_at DESC, inbound_id DESC LIMIT 1",
+            params![inbound.session_id, inbound.turn_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(crate::ChannelInboundAdmission {
+        request,
+        relation: relation(inbound),
+        turn,
+        previous_run,
+    })
+}
+
 fn associate_run(
     connection: &Connection,
     owner: &str,
@@ -1034,6 +1120,7 @@ fn associate_run(
     inbound: &StoredInbound,
     run_id: &str,
 ) -> Result<(), SessionError> {
+    assistant::ensure_assistant_run_scope(connection, &snapshot.id, run_id)?;
     let newly_bound = match inbound.run_id.as_deref() {
         Some(existing) if existing == run_id => false,
         Some(_) => {
@@ -1070,6 +1157,17 @@ fn associate_run(
             "Run is already associated with another channel Turn".into(),
         ));
     }
+    record_run_association(connection, owner, snapshot, inbound, run_id, newly_bound)
+}
+
+fn record_run_association(
+    connection: &Connection,
+    owner: &str,
+    snapshot: &mut Session,
+    inbound: &StoredInbound,
+    run_id: &str,
+    newly_bound: bool,
+) -> Result<(), SessionError> {
     let turn_associated: bool = connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM turn_runs WHERE run_id = ?1 AND turn_id = ?2)",
         params![run_id, inbound.turn_id],

@@ -88,6 +88,9 @@ async fn trigger_freezes_objective_and_manual_or_schedule_source() {
             .iter()
             .find(|item| item["run"] == run)
             .unwrap();
+        // These Runs are not resident assistant instances, the only Runs the
+        // timeline places by `activity` instead of by their own lifetime, so the
+        // two projections agree field for field.
         assert_eq!(timeline_run, listed_run);
     }
     let (_, graph) = call(app, "GET", "/graphs/fixture", None).await;

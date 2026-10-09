@@ -228,19 +228,133 @@ async fn conversation_runs_allow_same_graph_two_sessions_and_protect_previous_ru
     let shared = state.data_root.join("io-harness/sessions/node.sqlite3");
     std::fs::create_dir_all(shared.parent().unwrap()).unwrap();
     std::fs::write(&shared, "Session-owned record").unwrap();
-    assert_eq!(
-        call(app.clone(), "DELETE", &format!("/runs/{bob_run}"), None)
-            .await
-            .0,
-        StatusCode::CONFLICT
-    );
+    // A completed Session turn with nothing newer may be deleted, and that
+    // cleanup must still leave Session-owned shared records alone.
+    let (status, deleted) = call(app.clone(), "DELETE", &format!("/runs/{bob_run}"), None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{deleted}");
     assert_eq!(
         std::fs::read_to_string(&shared).unwrap(),
         "Session-owned record"
     );
+    assert!(
+        crate::run_deletions::load(&state.data_root, bob_run)
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        !state
+            .data_root
+            .join("runs")
+            .join(format!("{bob_run}.json"))
+            .exists()
+    );
     let (status, deleted) = call(app, "DELETE", "/graphs/fixture", None).await;
     assert_eq!(status, StatusCode::NO_CONTENT, "{deleted}");
     assert!(state.application.records().unwrap().is_empty());
+}
+
+/// A conversation Run is one link of a Session's lineage. A link may be deleted
+/// once nothing newer still reads it, in any order: its tombstone keeps the place
+/// it held, so the surviving lineage stays a single chain.
+#[tokio::test]
+async fn conversation_lineage_deletes_any_link_once_nothing_newer_reads_it() {
+    let (root, state) = fixture();
+    let _env = PROCESS_ENV.lock().await;
+    configure_gate(root.path(), &state);
+    let app = router(state.clone());
+
+    // first → second → third, each turn completed before the next is admitted.
+    let mut previous: Option<String> = None;
+    let mut runs = Vec::new();
+    for serial in 20..23 {
+        let body = request(serial, "alice", previous.as_deref());
+        let (status, accepted) = call(
+            app.clone(),
+            "POST",
+            "/conversation-runs",
+            Some(&body.to_string()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{accepted}");
+        let run = body["run"].as_str().unwrap().to_owned();
+        let workspace = wait_gate(&state, &run).await;
+        // The Run this turn is still reading must stay, and so must the one that
+        // is currently executing.
+        if let Some(previous) = previous.as_deref() {
+            let (status, rejected) =
+                call(app.clone(), "DELETE", &format!("/runs/{previous}"), None).await;
+            assert_eq!(status, StatusCode::CONFLICT, "{rejected}");
+            assert!(
+                rejected["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("previous turn")
+            );
+        }
+        let (status, rejected) = call(app.clone(), "DELETE", &format!("/runs/{run}"), None).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{rejected}");
+        assert!(
+            rejected["error"]
+                .as_str()
+                .unwrap()
+                .contains("still running")
+        );
+        std::fs::write(workspace.join("gate.release"), "release").unwrap();
+        wait_run_status(&state, &run, RunStatus::Completed).await;
+        previous = Some(run.clone());
+        runs.push(run);
+    }
+    let (first_run, second_run, third_run) = (&runs[0], &runs[1], &runs[2]);
+
+    // A middle link goes once its successor is settled, and the surviving chain
+    // still resolves past the tombstone onto the older link that survives.
+    let (status, deleted) = call(app.clone(), "DELETE", &format!("/runs/{second_run}"), None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{deleted}");
+    assert!(
+        crate::run_deletions::load(&state.data_root, second_run)
+            .unwrap()
+            .unwrap()
+            .previous_run()
+            .is_some()
+    );
+    let fourth = request(23, "alice", Some(third_run));
+    let (status, accepted) = call(
+        app.clone(),
+        "POST",
+        "/conversation-runs",
+        Some(&fourth.to_string()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{accepted}");
+    let fourth_run = fourth["run"].as_str().unwrap();
+    let workspace = wait_gate(&state, fourth_run).await;
+    std::fs::write(workspace.join("gate.release"), "release").unwrap();
+    wait_run_status(&state, fourth_run, RunStatus::Completed).await;
+
+    // The newest link may go while older ones survive: every surviving link is
+    // then the predecessor of a deleted one, so the Session has no live chain
+    // and the next accepted turn starts a fresh one.
+    let (status, deleted) = call(app.clone(), "DELETE", &format!("/runs/{fourth_run}"), None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{deleted}");
+    let fifth = request(24, "alice", None);
+    let (status, accepted) = call(
+        app.clone(),
+        "POST",
+        "/conversation-runs",
+        Some(&fifth.to_string()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{accepted}");
+    let fifth_run = fifth["run"].as_str().unwrap();
+    let workspace = wait_gate(&state, fifth_run).await;
+    std::fs::write(workspace.join("gate.release"), "release").unwrap();
+    wait_run_status(&state, fifth_run, RunStatus::Completed).await;
+
+    // The inert older links can still be cleaned up, in any order.
+    for run in [third_run, first_run] {
+        let (status, deleted) = call(app.clone(), "DELETE", &format!("/runs/{run}"), None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "{run}: {deleted}");
+    }
 }
 
 #[tokio::test]
@@ -1025,17 +1139,16 @@ async fn graph_delete_cleans_legacy_scopes_and_preserves_other_graph_history() {
     assert_eq!(status, StatusCode::CONFLICT, "{value}");
     assert!(first_scope.0.join("framework.sqlite3").is_file());
     stop_run(&app, &state, "orphan-wait-child").await;
-    assert_eq!(
-        call(
-            app.clone(),
-            "DELETE",
-            &format!("/runs/{}", next["run"].as_str().unwrap()),
-            None
-        )
-        .await
-        .0,
-        StatusCode::CONFLICT
-    );
+    // A single conversation Run may now be deleted, and that cleanup must still
+    // leave the Session-owned legacy scopes to the Graph cascade.
+    let (status, value) = call(
+        app.clone(),
+        "DELETE",
+        &format!("/runs/{}", next["run"].as_str().unwrap()),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{value}");
     assert!(first_scope.0.exists());
     let (status, value) = call(app.clone(), "DELETE", "/graphs/fixture", None).await;
     assert_eq!(status, StatusCode::NO_CONTENT, "{value}");

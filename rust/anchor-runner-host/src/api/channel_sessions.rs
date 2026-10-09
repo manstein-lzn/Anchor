@@ -44,6 +44,50 @@ struct RunBinding {
     run_id: String,
 }
 
+pub(super) async fn get_channel_assistant(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    AxumPath(session): AxumPath<String>,
+) -> Result<Json<Value>, HttpResponse> {
+    let owner = private_owner(&state, &headers);
+    let lookup_state = state.clone();
+    let (assistant, run_id) = blocking(move || {
+        let assistant = store(&lookup_state)?
+            .get_channel_assistant(&owner, &session)
+            .map_err(channel_error)?;
+        let run_id = assistant.as_ref().map(|binding| binding.run_id.clone());
+        Ok((json!(assistant), run_id))
+    })
+    .await?;
+    // Needs recovery is derived, never stored: a live instance is bound to a Run
+    // this process is running. A Run record that is missing (a handover whose
+    // admission never ran) or terminal is not active either, so both read as
+    // "needs recovery" — which is exactly the window a crash leaves behind.
+    let needs_recovery = match run_id {
+        Some(run) => !state.application.active_runs(None).await.contains(&run),
+        None => false,
+    };
+    Ok(Json(
+        json!({"assistant": assistant, "needs_recovery": needs_recovery}),
+    ))
+}
+
+pub(super) async fn retire_channel_assistant(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    AxumPath(session): AxumPath<String>,
+    body: axum::body::Bytes,
+) -> Result<Json<Value>, HttpResponse> {
+    let binding: RunBinding = decode(body, &["run_id"])?;
+    let owner = private_owner(&state, &headers);
+    state
+        .application
+        .retire_assistant(&owner, &session, &binding.run_id)
+        .await
+        .map_err(application_error)?;
+    Ok(Json(json!({"retired": binding.run_id, "session":session})))
+}
+
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DeliveryBegin {

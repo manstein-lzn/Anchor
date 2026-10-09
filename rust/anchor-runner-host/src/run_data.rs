@@ -2,13 +2,14 @@
 //! Graph cascade deletion.
 //!
 //! Artifacts and fact files are addressed by a SHA-256 of the invocation key,
-//! not by a per-Run directory, so a Run's own durable record is the only
-//! authority that can enumerate them. Cleanup is therefore idempotent and
-//! tolerant of already-missing files: a partial delete can always be replayed
-//! from the record.
+//! not by a per-Run directory. Ownership comes from the Run's durable record
+//! and immutable assistant invocation bindings, never model-supplied paths.
+//! Bindings survive until their dependent data is removed, so cleanup tolerates
+//! missing files and a partial delete can be replayed without losing ownership.
 
 use anchor_runtime::graph::{GraphRunRecord, InvocationKey};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 fn safe_component(value: &str) -> bool {
@@ -22,6 +23,17 @@ fn safe_component(value: &str) -> bool {
 
 fn key_hash(key: &InvocationKey) -> String {
     format!("{:x}", Sha256::digest(key.durable_key().as_bytes()))
+}
+
+fn owns_invocation(record: &GraphRunRecord, key: &InvocationKey) -> bool {
+    key.run_id == record.run_id
+        && key.graph_digest == record.graph_digest
+        && key.invocation > 0
+        && record
+            .snapshot
+            .nodes
+            .iter()
+            .any(|node| node.id == key.node_id)
 }
 
 fn remove_file_if_exists(path: &Path) -> Result<(), String> {
@@ -189,9 +201,89 @@ pub(crate) fn invocation_keys(record: &GraphRunRecord) -> Vec<InvocationKey> {
             }
         }
     }
+    keys.extend(
+        record
+            .results
+            .values()
+            .flatten()
+            .map(|result| result.key.clone()),
+    );
+    keys.retain(|key| owns_invocation(record, key));
     keys.sort_by_key(|key| key.durable_key());
     keys.dedup();
     keys
+}
+
+fn assistant_bindings(
+    record: &GraphRunRecord,
+    data_root: &Path,
+) -> Result<Vec<crate::assistant::TurnBinding>, String> {
+    let mut bindings = BTreeMap::new();
+    for key in invocation_keys(record) {
+        if let Some(binding) = crate::assistant::binding(data_root, &key)? {
+            bindings.insert(key_hash(&key), binding);
+        }
+    }
+    let entries = match std::fs::read_dir(data_root.join("assistant-invocations")) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(bindings.into_values().collect());
+        }
+        Err(error) => return Err(error.to_string()),
+    };
+    for entry in entries {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let name = entry.file_name();
+        let Some(hash) = name.to_str().and_then(|name| name.strip_suffix(".json")) else {
+            continue;
+        };
+        if hash.len() != 64
+            || !hash
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            || bindings.contains_key(hash)
+        {
+            continue;
+        }
+        let Ok(Some(binding)) =
+            crate::assistant::read_json::<crate::assistant::TurnBinding>(&entry.path())
+        else {
+            continue;
+        };
+        if owns_invocation(record, &binding.key) && key_hash(&binding.key) == hash {
+            bindings.insert(hash.to_owned(), binding);
+        }
+    }
+    Ok(bindings.into_values().collect())
+}
+
+fn assistant_turn(binding: &crate::assistant::TurnBinding) -> Result<String, String> {
+    if binding.turn.len() != 36
+        || !binding.turn.bytes().enumerate().all(|(index, byte)| {
+            if matches!(index, 8 | 13 | 18 | 23) {
+                byte == b'-'
+            } else {
+                byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
+            }
+        })
+    {
+        return Err("assistant binding has an invalid Turn UUID".into());
+    }
+    Ok(format!("turn-{}", binding.turn))
+}
+
+fn remove_assistant_file_if_exists(path: &Path) -> Result<(), String> {
+    for ancestor in path.parent().into_iter().flat_map(Path::ancestors) {
+        match std::fs::symlink_metadata(ancestor) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err("assistant cleanup cannot traverse symlinks".into());
+            }
+            Ok(_) => (),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    remove_file_if_exists(path)
 }
 
 /// Frozen artifact locations for a Run, including legacy completion files.
@@ -231,7 +323,26 @@ pub(crate) fn delete_run_data(
     data_root: &Path,
     workspace_root: &Path,
 ) -> Result<(), String> {
-    for key in invocation_keys(record) {
+    let bindings = assistant_bindings(record, data_root)?;
+    let mut turns = bindings
+        .iter()
+        .map(assistant_turn)
+        .collect::<Result<Vec<_>, _>>()?;
+    turns.sort();
+    turns.dedup();
+    for turn in turns {
+        crate::channel_inputs::remove(data_root, &turn)?;
+        let reply = data_root
+            .join("channel-replies")
+            .join(format!("{turn}.json"));
+        remove_assistant_file_if_exists(&reply)?;
+        remove_assistant_file_if_exists(&reply.with_extension("tmp"))?;
+    }
+    let mut keys = invocation_keys(record);
+    keys.extend(bindings.iter().map(|binding| binding.key.clone()));
+    keys.sort_by_key(|key| key.durable_key());
+    keys.dedup();
+    for key in keys {
         let hash = key_hash(&key);
         let node_stem = format!("nf1-{hash}");
         let io_stem = format!("np1-{hash}");
@@ -244,12 +355,23 @@ pub(crate) fn delete_run_data(
             }
         }
         remove_directory_if_exists(&workspace_root.join(".goose-process").join(&hash))?;
+        remove_assistant_file_if_exists(
+            &data_root
+                .join("assistant-seeds")
+                .join(format!("{node_stem}.json")),
+        )?;
+        remove_assistant_file_if_exists(
+            &data_root
+                .join("facts")
+                .join(format!("{node_stem}.yielded.json")),
+        )?;
         for suffix in ["json", "failed", "started", "model.json"] {
-            let _ = std::fs::remove_file(
+            remove_file_if_exists(
                 data_root
                     .join("facts")
-                    .join(format!("{node_stem}.{suffix}")),
-            );
+                    .join(format!("{node_stem}.{suffix}"))
+                    .as_path(),
+            )?;
             let _ = std::fs::remove_file(
                 data_root
                     .join("io-harness")
@@ -298,6 +420,13 @@ pub(crate) fn delete_run_data(
                 Err(error) => return Err(error.to_string()),
             }
         }
+        // An abandon intent is only meaningful while its Run exists; startup
+        // finalization would otherwise report a missing record forever.
+        remove_assistant_file_if_exists(
+            &data_root
+                .join("run-abandons")
+                .join(format!("{}.json", record.run_id)),
+        )?;
         let workspace = workspace_root.join(&record.run_id);
         if workspace.exists() {
             std::fs::remove_dir_all(&workspace).map_err(|error| error.to_string())?;
@@ -311,6 +440,13 @@ pub(crate) fn delete_run_data(
         if call_inputs.exists() {
             std::fs::remove_dir_all(&call_inputs).map_err(|error| error.to_string())?;
         }
+    }
+    for binding in bindings {
+        remove_assistant_file_if_exists(
+            &data_root
+                .join("assistant-invocations")
+                .join(format!("{}.json", key_hash(&binding.key))),
+        )?;
     }
     Ok(())
 }
@@ -333,12 +469,16 @@ pub(crate) fn remove_run_files(data_root: &Path, run_id: &str) -> Result<(), Str
 }
 
 #[cfg(test)]
+#[path = "run_data/assistant_tests.rs"]
+mod assistant_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use anchor_runtime::graph::GraphSnapshot;
     use serde_json::json;
 
-    fn record(run_id: &str) -> GraphRunRecord {
+    pub(super) fn record(run_id: &str) -> GraphRunRecord {
         let snapshot = GraphSnapshot::admit(json!({
             "objective":"cleanup fixture", "entry":"agent",
             "agents":{"worker":{"model":"fixture"}},
@@ -350,7 +490,7 @@ mod tests {
         record
     }
 
-    fn write(path: &Path, bytes: &[u8]) {
+    pub(super) fn write(path: &Path, bytes: &[u8]) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, bytes).unwrap();
     }
@@ -398,6 +538,11 @@ mod tests {
             for suffix in ["json", "started", "failed", "model.json"] {
                 paths.push(data.join("facts").join(format!("nf1-{hash}.{suffix}")));
             }
+            paths.push(
+                data.join("assistant-seeds")
+                    .join(format!("nf1-{hash}.json")),
+            );
+            paths.push(data.join("facts").join(format!("nf1-{hash}.yielded.json")));
             for path in paths.iter() {
                 write(path, b"owned");
             }

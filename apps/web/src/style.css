@@ -362,6 +362,10 @@ input[type=checkbox] { accent-color: var(--accent); }
 .library-item { display: flex; align-items: center; min-width: 0; border: 1px solid transparent; border-radius: 7px; padding-right: 4px; }
 .library-item:hover { background: var(--paper); }
 .library-item.chosen { background: #e7f1eb; border-color: #d4e5da; color: #226346; }
+.library-item.listener-listening { border: 1px dashed var(--accent); }
+.library-item.listener-working { border: 3px solid #c8963c; }
+.library-item.listener-unavailable { border: 1px solid #adb5b0; }
+.pill.listener-authenticated { color: var(--accent); background: var(--accent-soft); }
 .library-item .library-row { flex: 1; min-width: 0; border: 0; background: transparent; }
 .library-item.chosen .library-row { font-weight: 600; }
 .library-item.chosen .library-row > svg { color: var(--accent); }
@@ -498,6 +502,9 @@ input[type=checkbox] { accent-color: var(--accent); }
 .workflow-node strong { display: block; margin: 7px 0 8px; font-size: 14px; line-height: 18px; }
 .workflow-node-footer { display: flex; justify-content: space-between; gap: 4px; overflow: hidden; white-space: nowrap; font-size: 10px; color: var(--muted); border-top: 1px solid #edf1ee; padding-top: 6px; }
 .workflow-node.state-running { border-color: #c8963c; background: #fffaf0; }
+.workflow-node.graph-node.state-running, .workflow-node.execution-node.state-running { border-width: 3px; border-style: solid; }
+.workflow-node.graph-node.state-listening { border: 1px dashed var(--accent); }
+.workflow-node.graph-node.state-listener-unavailable { border: 1px solid #adb5b0; }
 .workflow-node.state-completed { border-color: #167565; }
 .workflow-node.state-failed { border-color: var(--red); }
 .workflow-node.selected { border-color: #205bc1; box-shadow: 0 0 0 2px #205bc122; }
@@ -511,6 +518,8 @@ input[type=checkbox] { accent-color: var(--accent); }
 .workflow-legend i.feedback { border-color: #98704a; }
 .workflow-legend i.walked { border-color: #167565; border-top-width: 4px; }
 .workflow-legend i.unwalked { border-color: #b8cbc0; border-top-style: dashed; }
+.workflow-legend i.listening { border-top: 1px dashed var(--accent); }
+.workflow-legend i.working { border-top: 3px solid #c8963c; }
 .arrange-button { font: inherit; font-size: 12px; border: 1px solid var(--line); padding: 6px 10px; border-radius: 6px; background: #fff; color: var(--ink); cursor: pointer; }
 .arrange-button:disabled { opacity: .5; cursor: default; }
 .layout-message { position: absolute; left: 20px; bottom: 20px; padding: 12px; background: white; border: 1px solid var(--line); border-radius: 6px; }

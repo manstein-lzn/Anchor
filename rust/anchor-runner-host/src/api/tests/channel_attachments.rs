@@ -283,9 +283,11 @@ async fn attachments_are_isolated_by_run_and_removed_by_run_and_graph_deletion()
         std::fs::read(bob_dir.join("files/same.txt")).unwrap(),
         b"bob"
     );
+    // Deleting one completed turn removes exactly that Run's frozen inputs; the
+    // other Session's Run keeps its own.
     let (status, deleted) = call(app.clone(), "DELETE", &format!("/runs/{alice_run}"), None).await;
-    assert_eq!(status, StatusCode::CONFLICT, "{deleted}");
-    assert!(alice_dir.exists());
+    assert_eq!(status, StatusCode::NO_CONTENT, "{deleted}");
+    assert!(!alice_dir.exists());
     assert!(bob_dir.exists());
     let mut legacy = request(3, "legacy", Vec::new());
     legacy.as_object_mut().unwrap().remove("attachments");

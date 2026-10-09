@@ -1,3 +1,4 @@
+mod assistant_recovery;
 #[allow(clippy::result_large_err)]
 mod channel_sessions;
 mod files;
@@ -20,6 +21,7 @@ mod turns;
 mod webhooks;
 #[allow(clippy::result_large_err)]
 mod wecom;
+mod wecom_progress;
 use super::*;
 use crate::application::{ApplicationError, RunApplication};
 use anchor_graph_host::FileGraphBundleLoader;
@@ -71,6 +73,7 @@ struct ApiState {
     schedules: ScheduleStoreHandle,
     pilots: crate::pilot_host::PilotService,
     wecom: WecomSettings,
+    channel_descriptors: std::collections::BTreeMap<String, PathBuf>,
     channel_event_locks:
         std::sync::Arc<tokio::sync::Mutex<HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>>,
     #[cfg(test)]
@@ -239,7 +242,7 @@ pub async fn serve() -> io::Result<()> {
     let schedules_path = env::var_os("ANCHOR_RUNNER_SCHEDULES_PATH")
         .map(PathBuf::from)
         .unwrap_or_else(|| data_root.join("state/schedules.json"));
-    let state = ApiState {
+    let mut state = ApiState {
         #[cfg(test)]
         bundle_root: bundle_root.clone(),
         catalog_root: catalog_root.clone(),
@@ -253,6 +256,7 @@ pub async fn serve() -> io::Result<()> {
         schedules: ScheduleStore::open(schedules_path).map_err(io::Error::other)?,
         pilots: crate::pilot_host::PilotService::default(),
         wecom: WecomSettings::from_env(),
+        channel_descriptors: Default::default(),
         channel_event_locks: Default::default(),
         #[cfg(test)]
         plugin_checkout: None,
@@ -267,6 +271,11 @@ pub async fn serve() -> io::Result<()> {
         .recover_detached_at_startup()
         .await
         .map_err(|_| io::Error::other("startup Run recovery failed"))?;
+    // A restart gives every Session back the assistant instance its binding
+    // still owns; a failure is reported per Session and never stops the Host.
+    if let Err(error) = assistant_recovery::resume_channel_assistants(&state).await {
+        eprintln!("anchor-runner-host: assistant recovery is incomplete: {error}");
+    }
     if let Err(error) = skip_missed_schedules(&state, chrono::Local::now().naive_local()) {
         return Err(io::Error::other(error));
     }
@@ -301,6 +310,9 @@ pub async fn serve() -> io::Result<()> {
         return Err(io::Error::other(
             "automatic channel supervision does not accept inherited control socket or token",
         ));
+    }
+    if let Some(supervisor) = channel_supervisor.as_ref() {
+        state.channel_descriptors = supervisor.descriptors();
     }
     let ready = Arc::new(AtomicBool::new(configured_graph_ready));
     start_schedule_ticker(state.clone());
@@ -654,6 +666,10 @@ fn router_with_readiness_and_web_root(
         ));
     let wecom_events = Router::new()
         .route("/channels/wecom/events", post(wecom::receive_event))
+        .route(
+            "/channels/wecom/progress/{event_id}",
+            get(wecom_progress::wecom_progress),
+        )
         .layer(DefaultBodyLimit::max(crate::channel_inputs::MAX_BODY_BYTES))
         .layer(RequestBodyLimitLayer::new(
             crate::channel_inputs::MAX_BODY_BYTES,
@@ -734,6 +750,14 @@ fn router_with_readiness_and_web_root(
         )
         .route("/channel-sessions/inbound", post(admit_channel_inbound))
         .route("/channel-sessions", get(channel_sessions_projection))
+        .route(
+            "/channel-sessions/{session}/assistant",
+            get(get_channel_assistant),
+        )
+        .route(
+            "/channel-sessions/{session}/assistant/retire",
+            post(retire_channel_assistant),
+        )
         .route("/channels/wecom/settlements", post(wecom::settle_delivery))
         .route(
             "/channel-sessions/{session}/inbounds/{inbound}",
@@ -775,6 +799,7 @@ fn router_with_readiness_and_web_root(
         .route("/runs/{run}/session-yield", post(yield_session_call))
         .route("/runs/{run}/session-settlement", post(settle_session_call))
         .route("/runs/{run}/recovery", post(recover_run))
+        .route("/runs/{run}/abandon", post(abandon_run))
         .route("/runs/{run}/{operation}", post(control))
         .route("/runs/{run}/files/{node}", get(list_files))
         .route("/runs/{run}/files/{node}/{*path}", get(read_file))

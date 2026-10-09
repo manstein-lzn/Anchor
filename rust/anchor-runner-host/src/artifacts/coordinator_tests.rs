@@ -9,6 +9,7 @@ impl NodeExecutionPort for Nodes<'_> {
         NodeExecutionCapabilities {
             agent: false,
             op_run: true,
+            host_operations: false,
             exact_provider_request_budget: true,
         }
     }

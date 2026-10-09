@@ -122,11 +122,108 @@ the workspace before admission.
 `settle_channel_delivery` persist idempotent outbound facts. A restart converts
 `sending` to `unknown` through `recover_channel_deliveries`; replacement
 suppresses pending/failed deliveries and marks in-flight delivery outcomes
-unknown. `delete_channel_session` refuses running Turns, retained Runs and
-unfinished deliveries. These APIs are storage contracts only: no channel
+unknown. `delete_channel_session` refuses current assistant bindings, running
+Turns, retained Runs and unfinished deliveries. Explicitly retired bindings and
+their historical input links cascade with an otherwise authorized Session
+deletion; no Run state is copied into the Session store. These APIs are storage contracts only: no channel
 supervisor, send loop, WeCom transport, webhook verification, Graph execution
 or Host wiring is implemented in this crate. Schema version 6 adds the channel
 tables transactionally on top of versions 1–5.
+
+## Persistent channel assistants
+
+`ChannelAssistant` has `session_id`, `run_id`, `wait_node`, `work_node` and
+`reply_node`, all strings. `wait_node` identifies the Graph's `session.wait_input`
+Op, `work_node` the Agent result node, and `reply_node` the `session.reply` Op.
+The existing Session `reply_node` identifies the result node: binding requires
+`work_node == Session.reply_node`, not `reply_node == Session.reply_node`.
+The Host validates the frozen Graph structure and node types.
+
+`bind_channel_assistant(owner, session, run, wait_node, work_node, reply_node)`
+returns `Result<ChannelAssistant, SessionError>`. It requires a trusted channel
+Session, binds one current assistant per Session and one Session per Run, and
+attaches the Run to the Session without binding an inbound or Turn. Exact current
+binding retries are read-only; changing any binding field conflicts until the
+current binding is explicitly retired. A retired Run cannot be rebound or
+reactivated. Existing Run attachments,
+Turn links or channel inbounds in another Session prevent binding, including
+facts owned by another user. Existing attachment and association APIs cannot
+attach a bound assistant Run to another Session.
+`get_channel_assistant(owner, session)` returns
+`Result<Option<ChannelAssistant>, SessionError>` for the current binding only.
+
+`retire_channel_assistant(owner, session, run)` returns
+`Result<(), SessionError>`. The first retirement requires no Running Turn and
+no pending, sending or unknown delivery anywhere in that Session. Its immediate
+transaction retires only that binding and writes `channel.assistant_retired`;
+it does not stop or delete a Run, change Run state, remove Session/Turn Run links,
+or discard historical input bindings. Retrying a retired binding is read-only,
+including after a different current instance starts. Only an explicit Host
+close, replacement or Graph deletion may trigger retirement; input arrival
+does not retire or create a replacement instance. After retirement the same
+Session may explicitly bind a new Run; all retained Runs remain exclusive to
+their original Session and owner.
+
+`claim_channel_assistant_input(owner, session, run, key)` and
+`get_channel_assistant_input(owner, session, run, key)` both return
+`Result<Option<ChannelInboundAdmission>, SessionError>`, the same input DTO as
+`get_channel_inbound`. They require the owned Session's exact assistant binding.
+Claim requires the current binding; historical input lookup also accepts a
+retired binding and does not compare its old work node with current Session
+metadata. A retired instance cannot claim even with a previously saved key;
+use the read method to inspect its retained input.
+An inaccessible Session returns `Missing`; absent or incompatible assistant
+bindings return `Conflict`. An unknown saved key or no available input returns `None`.
+The read method never consumes an input or changes activity.
+
+The first claim selects the latest Running, unsuperseded, unclaimed inbound.
+One immediate transaction saves the wait key-to-Turn binding, assigns
+`inbound.run_id`, records `turn_runs` and commits the Session activity events.
+Only this bound assistant path permits multiple channel Turns to share one
+Run, within its one Session. Another key cannot claim the same Turn. A retry
+of a saved key always projects that same inbound, even after replacement or
+termination and across database reopen; it cannot consume the next Turn.
+Wait keys are opaque, nonblank strings of at most 4096 UTF-8 bytes without
+control characters, `.` or `..`. They are neither parsed as runtime identities
+nor normalized, and are scoped to the Run. Input selection and notifications
+do not create another platform message queue or Agent loop.
+
+`pending_channel_assistant_inputs(owner, session, run, exclude_inbound, limit)`
+returns `Result<Vec<ChannelInboundAdmission>, SessionError>`, with `limit: usize`.
+It is read-only and requires the exact current binding. It returns only
+Interrupted inbounds in that Session, newer than the newest inbound with a
+confirmed delivery and strictly older than `exclude_inbound`'s creation time.
+The excluded admission must exist and belong to that exact Session, including
+when `limit` is zero; a missing or other-Session admission returns `Missing`.
+Within these boundaries the query first selects the most recent `limit` inputs,
+then returns that selection in chronological order. Later arrivals cannot enter
+the earlier round's pending set. Completed, Failed, Stopped and Running Turns
+are excluded.
+The result preserves each input's text, complete attachment manifest, original
+Run link and Turn facts, including unclaimed or previously retired-instance
+inputs within the same Session. Neither selection nor lookup reassigns a Run,
+claims another wait key or freezes attachment bytes. The Host must explicitly
+validate and freeze the selected attachment references under this round's
+authorization; metadata lookup alone does not grant filesystem access. This is
+a bounded recent selection, not a claim that all unanswered history is included.
+When the limit is reached, additional older facts may remain stored but omitted;
+their inbound IDs and attachments are not implicitly authorized for this round.
+The Host must persist only the selected IDs and must not describe the bounded
+selection as complete historical retention or silently union in omitted inputs.
+
+Legacy `associate_channel_run` and admission with `request.run_id` still reject
+Run reuse across channel Turns, even when the Run belongs to an assistant.
+Persistent callers admit with `request.run_id = None` and use the claim API.
+Schema v7 transactionally rebuilds `channel_inbounds` without `run_id UNIQUE`,
+preserving its rows, Turn uniqueness, primary key and chronological index;
+a nonunique Run lookup index replaces the removed unique Run lookup. The new
+`channel_assistants` and `channel_assistant_inputs` tables retain bindings with
+foreign keys and unique Run, wait-key and claimed-Turn constraints. Assistant
+bindings use Run as their primary key, with a partial unique Session index for
+unretired bindings; the private retirement flag is a binding fact, not Run state.
+This v7 schema is adjusted before deployment, not a migration of an earlier
+deployed v7 schema. Existing databases must still match their exact versioned
+schema before any DDL.
 
 ## Execution associations
 
@@ -180,10 +277,10 @@ No directories are created. Symlinks in the database path or its ancestors,
 non-regular files, unsafe SQLite sidecars, parent traversal, memory databases and
 SQLite URI paths are rejected. SQLite also opens with `SQLITE_OPEN_NOFOLLOW`.
 
-The separate database uses application ID `0x414e5353` and schema version `6`.
+The separate database uses application ID `0x414e5353` and schema version `7`.
 Only an empty, unversioned database can be initialized. Existing identity,
-version and schema definitions must match exactly. Exact native v1/v2/v3/v4/v5 databases
-upgrade transactionally to v6; foreign, altered or future schemas are rejected
+version and schema definitions must match exactly. Exact native v1/v2/v3/v4/v5/v6 databases
+upgrade transactionally to v7; foreign, altered or future schemas are rejected
 before DDL. This does not migrate legacy Session/Turn history. Successful stores use
 WAL, full synchronous commits, foreign keys and a five-second busy timeout.
 The v3 `turn_native` and `turn_runs` tables preserve the existing Turn SQL and

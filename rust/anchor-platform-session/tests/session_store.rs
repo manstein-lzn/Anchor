@@ -743,7 +743,7 @@ fn foreign_and_corrupt_databases_are_rejected_without_replacing_their_data() {
 #[test]
 fn incompatible_schema_version_identity_or_shape_is_not_overwritten() {
     for change in [
-        "PRAGMA user_version = 7",
+        "PRAGMA user_version = 8",
         "PRAGMA application_id = 42",
         "CREATE TABLE unexpected(value TEXT)",
         "DROP INDEX sessions_owner_updated",

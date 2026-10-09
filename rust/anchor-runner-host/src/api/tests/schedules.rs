@@ -180,6 +180,7 @@ fn reload_accepts_legacy_schedule_array_and_skips_downtime_occurrences() {
         schedules,
         pilots: crate::pilot_host::PilotService::default(),
         wecom: Default::default(),
+        channel_descriptors: Default::default(),
         channel_event_locks: Default::default(),
         plugin_checkout: None,
         response_fixture: None,
@@ -216,4 +217,112 @@ fn schedule_path_has_a_single_cross_process_host_owner() {
     assert!(crate::api::schedules::ScheduleStore::open(path.clone()).is_err());
     drop(first);
     assert!(crate::api::schedules::ScheduleStore::open(path).is_ok());
+}
+
+/// Windows are the raw material of a resident Run's bars, so merging and the
+/// "still executing" flag are checked directly rather than through a fixture.
+#[test]
+fn resident_activity_windows_merge_and_only_open_for_a_live_run() {
+    use anchor_platform_session::TurnWindow;
+    use chrono::{DateTime, TimeZone, Utc};
+
+    let at = |text: &str| {
+        DateTime::parse_from_rfc3339(text)
+            .unwrap()
+            .with_timezone(&Utc)
+    };
+    let local = |text: &str| Local.from_utc_datetime(&at(text).naive_utc()).naive_local();
+    let window = |start: &str, end: &str, running: bool| TurnWindow {
+        created_at: at(start),
+        updated_at: at(end),
+        running,
+    };
+    let page_start = local("2026-09-28T00:00:00+00:00");
+    let page_end = local("2026-10-02T00:00:00+00:00");
+
+    let windows = crate::api::timeline::activity_windows(
+        vec![
+            window(
+                "2026-09-30T01:00:00+00:00",
+                "2026-09-30T01:10:00+00:00",
+                false,
+            ),
+            // A superseded Turn is created before its predecessor finishes.
+            window(
+                "2026-09-30T01:09:00+00:00",
+                "2026-09-30T01:20:00+00:00",
+                false,
+            ),
+            window(
+                "2026-09-30T02:00:00+00:00",
+                "2026-09-30T02:00:00+00:00",
+                true,
+            ),
+            // Outside the page: it must not reach the board at all.
+            window(
+                "2026-09-20T01:00:00+00:00",
+                "2026-09-20T01:05:00+00:00",
+                false,
+            ),
+        ],
+        page_start,
+        page_end,
+        true,
+    );
+    let shown = |value: NaiveDateTime| value.format("%Y-%m-%dT%H:%M:%S").to_string();
+    assert_eq!(windows.len(), 2, "{windows:?}");
+    assert_eq!(
+        windows[0]["start"],
+        shown(local("2026-09-30T01:00:00+00:00"))
+    );
+    assert_eq!(windows[0]["end"], shown(local("2026-09-30T01:20:00+00:00")));
+    assert_eq!(windows[0]["running"], false);
+    assert_eq!(
+        windows[1]["start"],
+        shown(local("2026-09-30T02:00:00+00:00"))
+    );
+    assert_eq!(windows[1]["running"], true);
+
+    // The board draws whole seconds: a superseded Turn 800 ms before the real
+    // one is the same bar, not a second bar drawn underneath it.
+    let sub_second = crate::api::timeline::activity_windows(
+        vec![
+            window(
+                "2026-09-30T03:00:00.100+00:00",
+                "2026-09-30T03:00:00.100+00:00",
+                false,
+            ),
+            window(
+                "2026-09-30T03:00:00.900+00:00",
+                "2026-09-30T03:00:29.900+00:00",
+                false,
+            ),
+        ],
+        page_start,
+        page_end,
+        true,
+    );
+    assert_eq!(sub_second.len(), 1, "{sub_second:?}");
+    assert_eq!(
+        sub_second[0]["start"],
+        shown(local("2026-09-30T03:00:00+00:00"))
+    );
+    assert_eq!(
+        sub_second[0]["end"],
+        shown(local("2026-09-30T03:00:29+00:00"))
+    );
+
+    // A Run the host no longer owns never reports an open window, so a crash
+    // that left a Turn running cannot be drawn as work continuing to now.
+    let stale = crate::api::timeline::activity_windows(
+        vec![window(
+            "2026-09-30T02:00:00+00:00",
+            "2026-09-30T02:00:00+00:00",
+            true,
+        )],
+        page_start,
+        page_end,
+        false,
+    );
+    assert_eq!(stale[0]["running"], false);
 }

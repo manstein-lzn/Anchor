@@ -372,8 +372,9 @@ pub(super) async fn get_run(
                     "pass_number":result.key.invocation,
                     "submission":result.completion.submission,
                     "files":files.into_iter().map(|(path, _)| path).collect::<Vec<_>>(),
-                    "submitted":true,
-                    "exit_status":Value::Null,
+                    "submitted":result.interruption.is_none(),
+                    "exit_status":result.interruption.as_ref().map(|_| "interrupted"),
+                    "interruption":result.interruption,
                     "route":result.completion.route,
                     "commit":result.commit.id,
                     "inputs":[]
@@ -632,6 +633,54 @@ pub(super) async fn control(
     Ok((
         StatusCode::ACCEPTED,
         Json(json!({"run":id,"asked":operation})),
+    ))
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AbandonBody {
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+/// Abandon one whole Run: cancel its execution and make it terminal `Aborted`.
+///
+/// A body is optional (`{"reason":"plugin_update"}`, default `operator`), and an
+/// already abandoned Run answers with the identical body so an operations
+/// script can retry safely.
+pub(super) async fn abandon_run(
+    State(state): State<ApiState>,
+    AxumPath(id): AxumPath<String>,
+    body: String,
+) -> Result<(StatusCode, Json<Value>), HttpResponse> {
+    let reason = if body.trim().is_empty() {
+        None
+    } else {
+        let body: AbandonBody = serde_json::from_str(&body)
+            .map_err(|_| error(StatusCode::BAD_REQUEST, "invalid abandon body"))?;
+        body.reason.filter(|reason| !reason.trim().is_empty())
+    };
+    let result = state
+        .application
+        .abandon_run(&id, reason.as_deref())
+        .await
+        .map_err(application_error)?;
+    let code = match result.action {
+        crate::application::AbandonAction::Abandoning => StatusCode::ACCEPTED,
+        _ => StatusCode::OK,
+    };
+    Ok((
+        code,
+        Json(json!({
+            "run": id,
+            "action": result.action.as_str(),
+            // True only when a recorded abandon request makes this Run terminal;
+            // an already-aborted Run from another cause reports `false`.
+            "abandoned": matches!(result.action, crate::application::AbandonAction::Abandoned),
+            "status": status(result.status),
+            "reason": result.reason,
+            "requested_at": result.requested_at,
+        })),
     ))
 }
 

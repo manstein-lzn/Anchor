@@ -15,6 +15,8 @@ use tokio::{
     time::{Instant, sleep},
 };
 
+pub(crate) mod status;
+
 const RESTART_DELAY: Duration = Duration::from_secs(5);
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
 
@@ -62,6 +64,7 @@ impl ChannelSupervisor {
             return Ok(None);
         }
         let callback_override = env::var_os("ANCHOR_CHANNEL_WEBHOOK_URL");
+        let progress_override = env::var_os("ANCHOR_CHANNEL_PROGRESS_URL");
         let callback_key = api_keys
             .first()
             .cloned()
@@ -91,6 +94,15 @@ impl ChannelSupervisor {
             let callback_url = callback_override
                 .clone()
                 .unwrap_or_else(|| OsString::from(callback_url(listen, &definition.platform)));
+            // The transport reads its progress from the same host and port, so
+            // an explicit override moves both endpoints together.
+            let progress_url = progress_override.clone().unwrap_or_else(|| {
+                OsString::from(progress_url(
+                    listen,
+                    &definition.platform,
+                    callback_override.as_deref(),
+                ))
+            });
             let mut environment = BTreeMap::new();
             environment.insert("PATH".into(), parent_environment("PATH"));
             environment.insert("HOME".into(), parent_environment("HOME"));
@@ -99,6 +111,7 @@ impl ChannelSupervisor {
             }
             environment.insert("WECOM_CHANNEL_STATE".into(), state_dir.clone().into());
             environment.insert("ANCHOR_CHANNEL_WEBHOOK_URL".into(), callback_url);
+            environment.insert("ANCHOR_CHANNEL_PROGRESS_URL".into(), progress_url);
             environment.insert("ANCHOR_API_KEY".into(), callback_key.clone().into());
             environment.insert(
                 "ANCHOR_CHANNEL_CONTROL_TOKEN".into(),
@@ -121,6 +134,10 @@ impl ChannelSupervisor {
                 "ANCHOR_WECOM_HEARTBEAT_MS",
                 "ANCHOR_WECOM_RECONNECT_MS",
                 "ANCHOR_WECOM_RECONNECT_MAX_MS",
+                "ANCHOR_WECOM_ACK_DELAY_MS",
+                "ANCHOR_WECOM_RECOVERY_WINDOW_MS",
+                "ANCHOR_WECOM_DEBUG",
+                "ANCHOR_WECOM_PROGRESS",
             ] {
                 if let Some(value) = env::var_os(name) {
                     environment.insert(name.into(), value);
@@ -160,6 +177,10 @@ impl ChannelSupervisor {
 
     pub(crate) fn descriptor(&self, platform: &str) -> Option<&Path> {
         self.descriptors.get(platform).map(PathBuf::as_path)
+    }
+
+    pub(crate) fn descriptors(&self) -> BTreeMap<String, PathBuf> {
+        self.descriptors.clone()
     }
 
     pub(crate) async fn shutdown(&mut self) {
@@ -389,6 +410,20 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 fn callback_url(listen: &str, platform: &str) -> String {
+    format!("{}/events", channel_base_url(listen, platform))
+}
+
+fn progress_url(listen: &str, platform: &str, override_url: Option<&std::ffi::OsStr>) -> String {
+    match override_url.and_then(|url| url.to_str()) {
+        Some(url) => match url.strip_suffix("/events") {
+            Some(base) => format!("{base}/progress"),
+            None => format!("{}/progress", url.trim_end_matches('/')),
+        },
+        None => format!("{}/progress", channel_base_url(listen, platform)),
+    }
+}
+
+fn channel_base_url(listen: &str, platform: &str) -> String {
     let port = listen
         .parse::<std::net::SocketAddr>()
         .ok()
@@ -399,7 +434,7 @@ fn callback_url(listen: &str, platform: &str) -> String {
                 .and_then(|(_, port)| port.parse().ok())
         })
         .unwrap_or(8077);
-    format!("http://127.0.0.1:{port}/channels/{platform}/events")
+    format!("http://127.0.0.1:{port}/channels/{platform}")
 }
 
 #[cfg(test)]
@@ -496,6 +531,35 @@ mod tests {
             json!({"format": 1, "graph": "graph.json", "plugins": summaries}).to_string(),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn progress_url_moves_with_the_webhook_endpoint() {
+        assert_eq!(
+            callback_url("127.0.0.1:8077", "wecom"),
+            "http://127.0.0.1:8077/channels/wecom/events"
+        );
+        assert_eq!(
+            progress_url("127.0.0.1:8077", "wecom", None),
+            "http://127.0.0.1:8077/channels/wecom/progress"
+        );
+        // An operator override must move both endpoints together.
+        assert_eq!(
+            progress_url(
+                "127.0.0.1:8077",
+                "wecom",
+                Some(std::ffi::OsStr::new("http://127.0.0.1:9999/events"))
+            ),
+            "http://127.0.0.1:9999/progress"
+        );
+        assert_eq!(
+            progress_url(
+                "127.0.0.1:8077",
+                "wecom",
+                Some(std::ffi::OsStr::new("http://127.0.0.1:9999/base/"))
+            ),
+            "http://127.0.0.1:9999/base/progress"
+        );
     }
 
     #[test]

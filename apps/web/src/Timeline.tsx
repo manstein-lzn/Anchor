@@ -31,9 +31,46 @@ const ruleText = (rule: Record<string, unknown>) => {
   if (rule.type === 'monthly') return `每月 ${rule.day} 日 · ${rule.time}`;
   return `每天 · ${rule.time}`;
 };
-type Entry = { id: string; graph: string; start: number; end: number; status: string; source: string; run?: OurRun; plan?: TimelineItem };
+type Entry = { id: string; graph: string; start: number; end: number; status: string; source: string;
+  /** The Run has not finished this interval, so its end grows with the clock rather than a record. */
+  open?: boolean;
+  /** The Run reports its own execution windows, so this bar is one of them (or its start marker). */
+  resident?: boolean; run?: OurRun; plan?: TimelineItem };
 type PlacedEntry = Entry & { lane: number };
 type Filter = 'all' | 'running' | 'finished' | 'attention' | 'planned' | 'stopped';
+
+/** One Run's bars. A resident instance reports the intervals it actually worked; drawing its whole
+ *  lifetime instead would paint every idle wait as execution and join the days into one line. An
+ *  instance that reports no window yet is only marked where it started, never stretched to now. */
+export function timelineEntries(run: OurRun, now: number): Entry[] {
+  const base = { graph: run.graph, status: runStatus(run), source: run.trigger?.source ?? 'manual', run };
+  const started = +new Date(run.started);
+  if (run.activity) {
+    const windows = run.activity
+      .map(window => ({ start: +new Date(window.start), end: +new Date(window.end), open: Boolean(window.running) }))
+      .filter(window => Number.isFinite(window.start) && Number.isFinite(window.end));
+    if (!windows.length) return [{ ...base, resident: true, id: run.run, start: started, end: started }];
+    return windows.map(window => ({ ...base, resident: true, id: `${run.run}#${window.start}`, start: window.start, open: window.open,
+      end: window.open ? Math.max(now, window.start) : Math.max(window.end, window.start) }));
+  }
+  return [{ ...base, id: run.run, start: started, open: run.running,
+    end: run.running ? now : hasRunEnd(run) ? +new Date(run.updated) : started }];
+}
+
+/** What one bar can honestly say about its own interval. A segmented resident bar reports the
+ *  segment, so a closed window of a still-running instance must not claim it is executing now. */
+export function intervalFacts(run: OurRun, entry: Entry, now: number): { label: string; value: string; end?: string } {
+  if (run.running && entry.open) return { label: '已运行', value: duration(now - entry.start), end: '仍在执行' };
+  if (entry.resident) return entry.end > entry.start
+    ? { label: '这段时长', value: duration(entry.end - entry.start), end: dateText(entry.end) }
+    : run.running
+      ? { label: '这段时长', value: '暂无记录', end: '等待下一轮输入' }
+      : { label: '这段时长', value: '暂无记录', end: '暂无记录' };
+  if (run.status === 'running') return { label: '运行状态', value: '宿主重启后等待接续' };
+  return entry.end > entry.start
+    ? { label: '运行时长', value: duration(entry.end - entry.start), end: dateText(entry.end) }
+    : { label: '运行时长', value: '暂无记录', end: '暂无记录' };
+}
 
 const placeEntries = (items: Entry[], date: Date): PlacedEntry[] => {
   const dayStart = +date;
@@ -119,10 +156,7 @@ export function Timeline({ data, graphs, graphColors: sharedGraphColors, page, o
   // A scheduled occurrence with a Run is already represented by that Run's actual duration.
   const plans = (data?.scheduled ?? []).filter(plan => !plan.run && (!graphFilter || plan.graph === graphFilter));
   const entries: Entry[] = [
-    ...runs.map(run => ({ id: run.run, graph: run.graph, start: +new Date(run.started),
-      // Use a recorded finish timestamp when present; otherwise keep the known start time.
-      end: run.running ? now : hasRunEnd(run) ? +new Date(run.updated) : +new Date(run.started), status: runStatus(run),
-      source: run.trigger?.source ?? 'manual', run })),
+    ...runs.flatMap(run => timelineEntries(run, now)),
     ...plans.map(plan => ({ id: `${plan.schedule}-${plan.scheduled_at}`, graph: plan.graph,
       start: +new Date(plan.scheduled_at), end: +new Date(plan.scheduled_at),
       status: plan.status, source: 'schedule', plan })),
@@ -310,6 +344,7 @@ function RunPreview({ entry, data, onClose, onOpen, onOpenRun }: { entry: Entry;
     return () => { active = false; };
   }, [entry.id, attempt]);
   const status = run ? runStatus(run) : entry.status;
+  const interval = run ? intervalFacts(run, entry, Date.now()) : null;
   return <Modal title={run ? '运行详情' : '计划详情'} close={onClose} className="timeline-drawer">
     <span className={`board-badge ${status}`}>{statusText(status)}</span><h3 className="preview-graph">{entry.graph}</h3>
     {run?.objective && <p className="preview-objective">{run.objective}</p>}
@@ -321,12 +356,11 @@ function RunPreview({ entry, data, onClose, onOpen, onOpenRun }: { entry: Entry;
         <dt>调用链</dt><dd>{run.trigger.root_run ?? run.trigger.run}</dd>
       </>}
       <dt>{run ? '开始时间' : '计划时间'}</dt><dd>{dateText(entry.start)}</dd>
-      {run && <>
-        {run.running ? <><dt>已运行</dt><dd>{duration(Date.now() - entry.start)}</dd><dt>结束时间</dt><dd>仍在执行</dd></>
-          : run.status === 'running' ? <><dt>运行状态</dt><dd>宿主重启后等待接续</dd></>
-            : hasRunEnd(run) ? <><dt>运行时长</dt><dd>{duration(+new Date(run.updated) - entry.start)}</dd><dt>结束时间</dt><dd>{dateText(run.updated)}</dd></>
-              : <><dt>运行时长</dt><dd>暂无记录</dd><dt>结束时间</dt><dd>暂无记录</dd></>}
+      {run && interval && <>
+        <dt>{interval.label}</dt><dd>{interval.value}</dd>
+        {interval.end && <><dt>结束时间</dt><dd>{interval.end}</dd></>}
         <dt>已执行步骤</dt><dd>{run.executed.length}</dd>
+        {entry.resident && <><dt>实例启动</dt><dd>{dateText(run.started)}</dd><dt>活动时段</dt><dd>{run.activity?.length ?? 0} 段，等待期间不算执行</dd></>}
       </>}
       {schedule && <><dt>定时规则</dt><dd>{ruleText(schedule.rule)}</dd></>}
     </dl>

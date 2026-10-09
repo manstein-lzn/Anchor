@@ -1,6 +1,7 @@
 mod api;
 mod application;
 mod artifacts;
+mod assistant;
 mod channel_inputs;
 mod channel_supervisor;
 mod channel_tools;
@@ -17,6 +18,7 @@ mod node_tools;
 mod oauth_http;
 mod op;
 mod run_data;
+mod run_deletions;
 mod tool_environment;
 mod tool_host;
 use execution::PreparedExecution;
@@ -194,6 +196,16 @@ fn reject_snapshot(snapshot: &GraphSnapshot) -> Result<(), String> {
             }
             continue;
         }
+        if let Some(host) = op.get("host") {
+            if !matches!(
+                host.get("operation").and_then(Value::as_str),
+                Some(crate::assistant::WAIT_INPUT | crate::assistant::REPLY)
+            ) || !node.plugins.is_empty()
+            {
+                return Err("unsupported host operation configuration".into());
+            }
+            continue;
+        }
         let command = op
             .get("run")
             .and_then(Value::as_str)
@@ -210,6 +222,9 @@ fn reject_snapshot(snapshot: &GraphSnapshot) -> Result<(), String> {
 
 fn reject_standalone_snapshot(snapshot: &GraphSnapshot) -> Result<(), String> {
     reject_snapshot(snapshot)?;
+    if snapshot.ops.values().any(|op| op.get("host").is_some()) {
+        return Err("Session host operations require a platform assistant instance".into());
+    }
     for node in &snapshot.nodes {
         let Some(call) = node
             .op
@@ -340,6 +355,7 @@ fn make_host_with_control(
         anchor_runtime::graph::FileRunStore::new(state.join("runs")),
         artifacts.clone(),
         HostNodes {
+            control: control.clone(),
             sandbox,
             allowed_commands: commands
                 .split(',')

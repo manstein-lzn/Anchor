@@ -70,12 +70,22 @@ pub(super) fn load_graph_definition(
 }
 
 pub(super) async fn graphs(State(state): State<ApiState>) -> Result<Json<Value>, HttpResponse> {
-    state
+    let mut projection = state
         .application
         .list_graphs()
         .await
-        .map(Json)
-        .map_err(graph_management_error)
+        .map_err(graph_management_error)?;
+    if let Some(descriptor) = state.channel_descriptors.get("wecom")
+        && let Some(graph) = projection["graphs"].as_array_mut().and_then(|graphs| {
+            graphs
+                .iter_mut()
+                .find(|graph| graph["graph"] == state.wecom.graph)
+        })
+    {
+        let status = crate::channel_supervisor::status::read(descriptor).await;
+        graph["listener"] = json!({"platform":"wecom","status":status});
+    }
+    Ok(Json(projection))
 }
 
 pub(super) async fn graph(

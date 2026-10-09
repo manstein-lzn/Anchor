@@ -2,9 +2,11 @@ use rusqlite::Connection;
 
 use super::{
     APPLICATION_ID, CHANNEL_SCHEMA, GOOSE_SCHEMA, QUESTION_SCHEMA, RELATION_SCHEMA, SCHEMA_V1,
-    TURN_SCHEMA, migrate, schema,
+    SCHEMA_VERSION, TURN_SCHEMA, migrate, migrate_channel_assistants, schema,
 };
 use crate::SessionError;
+
+mod channel_assistants;
 
 fn assert_failed_migration_rolls_back(version: i32) {
     let mut connection = Connection::open_in_memory().unwrap();
@@ -63,7 +65,12 @@ fn assert_failed_migration_rolls_back(version: i32) {
         for (_, _, statement) in CHANNEL_SCHEMA {
             transaction.execute(statement, []).unwrap();
         }
+    } else if version == 5 {
+        for (_, _, statement) in CHANNEL_SCHEMA.iter().skip(2) {
+            transaction.execute(statement, []).unwrap();
+        }
     }
+    migrate_channel_assistants(&transaction).unwrap();
     let required: i64 = transaction
         .pragma_query_value(None, "page_count", |row| row.get(0))
         .unwrap();
@@ -112,7 +119,7 @@ fn assert_failed_migration_rolls_back(version: i32) {
         connection
             .pragma_query_value(None, "user_version", |row| row.get::<_, i32>(0))
             .unwrap(),
-        6
+        SCHEMA_VERSION
     );
 }
 
@@ -134,4 +141,9 @@ fn v3_migration_rolls_back_the_goose_table_when_the_index_cannot_be_created() {
 #[test]
 fn v4_migration_rolls_back_questions_when_the_pending_index_cannot_be_created() {
     assert_failed_migration_rolls_back(4);
+}
+
+#[test]
+fn v5_migration_rolls_back_channel_tables_when_an_index_cannot_be_created() {
+    assert_failed_migration_rolls_back(5);
 }

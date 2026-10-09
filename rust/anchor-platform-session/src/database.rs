@@ -12,7 +12,7 @@ use crate::SessionError;
 mod tests;
 
 const APPLICATION_ID: i32 = 0x414e5353;
-const SCHEMA_VERSION: i32 = 6;
+const SCHEMA_VERSION: i32 = 7;
 const SCHEMA_V1: [(&str, &str, &str); 3] = [
     (
         "table",
@@ -212,6 +212,59 @@ const CHANNEL_SCHEMA: [(&str, &str, &str); 6] = [
     ),
 ];
 
+const CHANNEL_INBOUND_SCHEMA_V7: (&str, &str, &str) = (
+    "table",
+    "channel_inbounds",
+    "CREATE TABLE channel_inbounds (
+            session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+            inbound_id TEXT NOT NULL CHECK(length(CAST(inbound_id AS BLOB)) BETWEEN 1 AND 128),
+            turn_id TEXT NOT NULL UNIQUE REFERENCES turns(id) ON DELETE CASCADE,
+            run_id TEXT,
+            request TEXT NOT NULL CHECK(json_valid(request) AND length(CAST(request AS BLOB)) <= 262144),
+            superseded_by_turn_id TEXT REFERENCES turns(id) ON DELETE SET NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY(session_id, inbound_id)
+        )",
+);
+
+const CHANNEL_ASSISTANT_SCHEMA: [(&str, &str, &str); 4] = [
+    (
+        "index",
+        "channel_inbounds_run",
+        "CREATE INDEX channel_inbounds_run ON channel_inbounds(run_id, session_id) WHERE run_id IS NOT NULL",
+    ),
+    (
+        "table",
+        "channel_assistants",
+        "CREATE TABLE channel_assistants (
+            session_id TEXT NOT NULL REFERENCES channel_sessions(session_id) ON DELETE CASCADE,
+            run_id TEXT PRIMARY KEY NOT NULL,
+            wait_node TEXT NOT NULL CHECK(length(CAST(wait_node AS BLOB)) BETWEEN 1 AND 256),
+            work_node TEXT NOT NULL CHECK(length(CAST(work_node AS BLOB)) BETWEEN 1 AND 256),
+            reply_node TEXT NOT NULL CHECK(length(CAST(reply_node AS BLOB)) BETWEEN 1 AND 256),
+            retired INTEGER NOT NULL DEFAULT 0 CHECK(retired IN (0, 1)),
+            UNIQUE(session_id, run_id)
+        )",
+    ),
+    (
+        "index",
+        "channel_assistants_current_session",
+        "CREATE UNIQUE INDEX channel_assistants_current_session ON channel_assistants(session_id) WHERE retired = 0",
+    ),
+    (
+        "table",
+        "channel_assistant_inputs",
+        "CREATE TABLE channel_assistant_inputs (
+            session_id TEXT NOT NULL,
+            run_id TEXT NOT NULL,
+            key TEXT NOT NULL CHECK(length(CAST(key AS BLOB)) BETWEEN 1 AND 4096),
+            turn_id TEXT NOT NULL UNIQUE REFERENCES channel_inbounds(turn_id) ON DELETE CASCADE,
+            PRIMARY KEY(run_id, key),
+            FOREIGN KEY(session_id, run_id) REFERENCES channel_assistants(session_id, run_id) ON DELETE CASCADE
+        )",
+    ),
+];
+
 pub(crate) fn open(path: &Path) -> Result<Connection, SessionError> {
     let path = validate_path(path)?;
     let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
@@ -244,7 +297,7 @@ fn migrate(connection: &mut Connection) -> Result<(), SessionError> {
         && existing == expected_schema(version);
     if !empty && !compatible {
         return Err(SessionError::Storage(
-            "incompatible database: expected exact Anchor platform Session schema version 1, 2, 3, 4, 5 or 6"
+            "incompatible database: expected exact Anchor platform Session schema version 1, 2, 3, 4, 5, 6 or 7"
                 .into(),
         ));
     }
@@ -259,11 +312,39 @@ fn migrate(connection: &mut Connection) -> Result<(), SessionError> {
     {
         transaction.execute(statement, [])?;
     }
+    if version < 7 {
+        migrate_channel_assistants(&transaction)?;
+    }
     if version < SCHEMA_VERSION {
         transaction.pragma_update(None, "application_id", APPLICATION_ID)?;
         transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     }
     transaction.commit()?;
+    Ok(())
+}
+
+fn migrate_channel_assistants(connection: &Connection) -> Result<(), SessionError> {
+    connection.execute(
+        "CREATE TEMP TABLE channel_inbounds_migration AS SELECT * FROM channel_inbounds",
+        [],
+    )?;
+    connection.execute("DROP TABLE channel_inbounds", [])?;
+    connection.execute(CHANNEL_INBOUND_SCHEMA_V7.2, [])?;
+    connection.execute(
+        "INSERT INTO channel_inbounds(
+            session_id, inbound_id, turn_id, run_id, request, superseded_by_turn_id, created_at
+         ) SELECT session_id, inbound_id, turn_id, run_id, request, superseded_by_turn_id, created_at
+           FROM temp.channel_inbounds_migration",
+        [],
+    )?;
+    connection.execute("DROP TABLE temp.channel_inbounds_migration", [])?;
+    for (_, _, statement) in CHANNEL_SCHEMA
+        .iter()
+        .filter(|(_, name, _)| *name == "channel_inbounds_session_created")
+        .chain(CHANNEL_ASSISTANT_SCHEMA.iter())
+    {
+        connection.execute(statement, [])?;
+    }
     Ok(())
 }
 
@@ -275,6 +356,14 @@ fn expected_schema(version: i32) -> Vec<(String, String, String)> {
         .chain(GOOSE_SCHEMA.iter().filter(|_| version >= 4))
         .chain(QUESTION_SCHEMA.iter().filter(|_| version >= 5))
         .chain(CHANNEL_SCHEMA.iter().filter(|_| version >= 6))
+        .chain(CHANNEL_ASSISTANT_SCHEMA.iter().filter(|_| version >= 7))
+        .map(|definition| {
+            if version >= 7 && definition.1 == "channel_inbounds" {
+                &CHANNEL_INBOUND_SCHEMA_V7
+            } else {
+                definition
+            }
+        })
         .map(|(kind, name, statement)| (kind.to_string(), name.to_string(), statement.to_string()))
         .collect();
     expected.sort();

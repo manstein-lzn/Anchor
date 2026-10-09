@@ -285,8 +285,15 @@ impl<'a, S: RunStore, A: ArtifactPort, N: NodeExecutionPort, C: RunControl>
             } else {
                 self.nodes.completion_fact(&cursor.key).await?
             };
+            let mut interruption = None;
             let completion = match fact {
                 CompletionFact::Completed(c) => Some(c),
+                CompletionFact::Yielded { reason, route } => {
+                    let completion = interruption_completion(&reason, route);
+                    interruption = Some(reason);
+                    record.recovery.retain(|pending| pending.key != cursor.key);
+                    Some(completion)
+                }
                 CompletionFact::Failed(reason) => {
                     return self
                         .fail_known_node(record, format!("{} failed: {reason}", cursor.node_id));
@@ -596,114 +603,22 @@ impl<'a, S: RunStore, A: ArtifactPort, N: NodeExecutionPort, C: RunControl>
                     self.store.save(&record)?;
                     return Ok(record);
                 }
-                let def = record
-                    .snapshot
-                    .nodes
-                    .iter()
-                    .find(|n| n.id == cursor.node_id)
-                    .expect("validated node");
-                let agent = def
-                    .agent
-                    .as_ref()
-                    .and_then(|name| record.snapshot.agents.get(name));
-                let operation = def
-                    .op
-                    .as_ref()
-                    .and_then(|name| record.snapshot.ops.get(name))
-                    .and_then(|value| {
-                        value.get("run").cloned().or_else(|| {
-                            value
-                                .get("join")
-                                .map(|join| serde_json::json!({"join":join}))
-                        })
-                    });
-                let routes = record
-                    .snapshot
-                    .edges
-                    .iter()
-                    .filter(|e| e.from_node == def.id)
-                    .map(|e| e.to_node.clone())
-                    .collect::<Vec<_>>();
                 if self.control.stop_requested() {
                     record.status = RunStatus::Stopped;
                     self.store.save(&record)?;
                     return Ok(record);
                 }
-                let (
-                    kind,
-                    model,
-                    instructions,
-                    max_provider_requests,
-                    wall_time_limit_seconds,
-                    network,
-                ) = if let Some(agent) = agent {
-                    (
-                        NodeKind::Agent,
-                        Some(agent.model.clone()),
-                        agent.instructions.clone(),
-                        agent.max_steps,
-                        Some(agent.wall_time_limit_seconds.unwrap_or(3600.0)),
-                        agent.network,
-                    )
-                } else {
-                    let op = def
-                        .op
-                        .as_ref()
-                        .and_then(|name| record.snapshot.ops.get(name))
-                        .expect("validated op");
-                    (
-                        NodeKind::OpRun,
-                        None,
-                        String::new(),
-                        None,
-                        Some(
-                            op.get("wall_time_limit_seconds")
-                                .and_then(Value::as_f64)
-                                .unwrap_or(3600.0),
-                        ),
-                        op.get("network").and_then(Value::as_bool).unwrap_or(false),
-                    )
-                };
-                let local_instruction = def
-                    .input
-                    .as_ref()
-                    .and_then(Value::as_str)
-                    .unwrap_or_default();
-                let request = NodeExecutionRequest {
-                    key: cursor.key.clone(),
-                    model,
-                    task: node_task(
-                        &record.snapshot.objective,
-                        &instructions,
-                        local_instruction,
-                        &cursor.prepared_input,
-                    ),
-                    instructions,
-                    routes,
-                    input: cursor.prepared_input.clone(),
-                    input_commits: cursor.input_commits.clone(),
-                    plugins: def
-                        .plugins
-                        .iter()
-                        .map(|id| {
-                            record.plugin_bindings.get(id).cloned().ok_or_else(|| {
-                                GraphError::CorruptRun(format!(
-                                    "Run has no frozen Plugin binding for `{id}`"
-                                ))
-                            })
-                        })
-                        .collect::<Result<Vec<_>, _>>()?,
-                    max_provider_requests,
-                    wall_time_limit_seconds,
-                    network,
-                    kind,
-                    operation,
-                    cancellation: self.control.cancellation(),
-                };
+                let request = execution_request(&record, &cursor, self.control.cancellation())?;
                 match self.nodes.execute(request).await? {
                     NodeExecutionOutcome::Completed(c) => {
                         record.recovery.retain(|pending| pending.key != cursor.key);
                         c
+                    }
+                    NodeExecutionOutcome::Yielded { reason, route } => {
+                        record.recovery.retain(|pending| pending.key != cursor.key);
+                        let completion = interruption_completion(&reason, route);
+                        interruption = Some(reason);
+                        completion
                     }
                     NodeExecutionOutcome::WaitingRecovery { attempts } => {
                         record.recovery.retain(|pending| pending.key != cursor.key);
@@ -720,6 +635,12 @@ impl<'a, S: RunStore, A: ArtifactPort, N: NodeExecutionPort, C: RunControl>
                     NodeExecutionOutcome::BudgetExhausted { .. } => {
                         record.recovery.retain(|pending| pending.key != cursor.key);
                         record.status = RunStatus::BudgetStopped;
+                        self.store.save(&record)?;
+                        return Ok(record);
+                    }
+                    NodeExecutionOutcome::Suspended => {
+                        record.recovery.retain(|pending| pending.key != cursor.key);
+                        record.status = RunStatus::Paused;
                         self.store.save(&record)?;
                         return Ok(record);
                     }
@@ -770,7 +691,9 @@ impl<'a, S: RunStore, A: ArtifactPort, N: NodeExecutionPort, C: RunControl>
                 }
             };
             let context = ArtifactFreezeContext {
-                kind: if is_fanout {
+                kind: if interruption.is_some() {
+                    ArtifactKind::Interruption
+                } else if is_fanout {
                     ArtifactKind::Fanout
                 } else if is_join_control {
                     ArtifactKind::Join
@@ -790,6 +713,7 @@ impl<'a, S: RunStore, A: ArtifactPort, N: NodeExecutionPort, C: RunControl>
                 node_id: cursor.node_id.clone(),
                 key: cursor.key.clone(),
                 completion,
+                interruption,
                 commit,
                 sequence: record.sequence,
             };
@@ -895,13 +819,20 @@ impl<'a, S: RunStore, A: ArtifactPort, N: NodeExecutionPort, C: RunControl>
             let is_fanout = op.is_some_and(|op| op.get("fanout").is_some());
             let is_join = op.is_some_and(|op| op.get("join").is_some());
             let is_call = op.is_some_and(|op| op.get("call").is_some());
+            let is_host = op.is_some_and(|op| op.get("host").is_some());
             if is_call && self.nodes.graph_call_port().is_none() {
                 return Err(GraphError::Unsupported(format!(
                     "op.call node `{}` requires a GraphCallPort",
                     node.id
                 )));
             }
-            if node.op.is_some() && !is_fanout && !is_join && !is_call && !caps.op_run {
+            if is_host && !caps.host_operations {
+                return Err(GraphError::Unsupported(format!(
+                    "NodeExecutionPort does not support host operation node `{}`",
+                    node.id
+                )));
+            }
+            if node.op.is_some() && !is_fanout && !is_join && !is_call && !is_host && !caps.op_run {
                 return Err(GraphError::Unsupported(format!(
                     "NodeExecutionPort does not support Op.run node `{}`",
                     node.id

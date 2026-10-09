@@ -506,6 +506,15 @@ pub(crate) fn select_route(
         }
     }
 }
+pub(crate) fn interruption_completion(reason: &str, route: Option<String>) -> NodeCompletion {
+    NodeCompletion {
+        submission: reason.to_owned(),
+        route,
+        model_requests: 0,
+        output: serde_json::json!({"interrupted": true, "reason": reason}),
+    }
+}
+
 pub(crate) fn edge_key(a: &str, b: &str) -> String {
     format!("{a}|{b}")
 }
@@ -571,11 +580,15 @@ pub(crate) fn execution_request(
         .as_ref()
         .and_then(|name| record.snapshot.ops.get(name))
         .and_then(|value| {
-            value.get("run").cloned().or_else(|| {
-                value
-                    .get("join")
-                    .map(|join| serde_json::json!({"join":join}))
-            })
+            value
+                .get("run")
+                .or_else(|| value.get("host"))
+                .cloned()
+                .or_else(|| {
+                    value
+                        .get("join")
+                        .map(|join| serde_json::json!({"join":join}))
+                })
         });
     let routes = record
         .snapshot
@@ -600,16 +613,21 @@ pub(crate) fn execution_request(
                 .as_ref()
                 .and_then(|name| record.snapshot.ops.get(name))
                 .expect("validated op");
+            let host = op.get("host").is_some();
+            let wall_time_limit_seconds = op
+                .get("wall_time_limit_seconds")
+                .and_then(Value::as_f64)
+                .or_else(|| (!host).then_some(3600.0));
             (
-                NodeKind::OpRun,
+                if host {
+                    NodeKind::OpHost
+                } else {
+                    NodeKind::OpRun
+                },
                 None,
                 String::new(),
                 None,
-                Some(
-                    op.get("wall_time_limit_seconds")
-                        .and_then(Value::as_f64)
-                        .unwrap_or(3600.0),
-                ),
+                wall_time_limit_seconds,
                 op.get("network").and_then(Value::as_bool).unwrap_or(false),
             )
         };

@@ -2,7 +2,9 @@ use super::{ApplicationError, RunApplication};
 use anchor_graph_host::{
     FileGraphBundleLoader, FilePluginCatalog, LoadedGraphBundle, PluginCatalog,
 };
-use anchor_runtime::graph::{GraphError, GraphSnapshot, PluginBinding};
+use anchor_runtime::graph::{
+    GraphError, GraphSnapshot, ParallelBranchStatus, PluginBinding, RunStatus, RunStore,
+};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 
@@ -109,8 +111,40 @@ impl RunApplication {
         let mut graphs = Vec::new();
         for name in names {
             let active_runs = self.active_runs(Some(&name)).await;
+            let mut active_nodes = std::collections::BTreeSet::new();
+            for run_id in &active_runs {
+                if let Some(record) = self.store().load(run_id).map_err(ApplicationError::from)?
+                    && record.status == RunStatus::Running
+                {
+                    if let Some(cursor) = record.cursor {
+                        let waiting = record
+                            .snapshot
+                            .nodes
+                            .iter()
+                            .find(|node| node.id == cursor.node_id)
+                            .and_then(|node| node.op.as_ref())
+                            .and_then(|name| record.snapshot.ops.get(name))
+                            .and_then(|operation| operation.get("host"))
+                            .and_then(|operation| operation.get("operation"))
+                            .and_then(Value::as_str)
+                            == Some(crate::assistant::WAIT_INPUT);
+                        if !waiting {
+                            active_nodes.insert(cursor.node_id);
+                        }
+                    }
+                    if let Some(parallel) = record.parallel {
+                        for branch in parallel.branches {
+                            if branch.status == ParallelBranchStatus::Running
+                                && let Some(cursor) = branch.cursor
+                            {
+                                active_nodes.insert(cursor.node_id);
+                            }
+                        }
+                    }
+                }
+            }
             let missing = !self.graph_bundle_path(&name).join("graph.json").is_file();
-            graphs.push(json!({"graph":name,"running":active_runs.first(),"active_runs":active_runs,"missing":missing}));
+            graphs.push(json!({"graph":name,"running":active_runs.first(),"active_runs":active_runs,"active_nodes":active_nodes,"missing":missing}));
         }
         Ok(json!({"graphs":graphs}))
     }

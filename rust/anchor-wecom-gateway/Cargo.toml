@@ -6,7 +6,11 @@ license.workspace = true
 description = "Rust-native WeCom channel transport adapter"
 
 [dependencies]
+aes = "0.8"
+base64 = "0.22"
+cbc = "0.1"
 futures.workspace = true
+md-5 = "0.10"
 reqwest = { version = "=0.12.28", default-features = false, features = ["json", "rustls-tls"] }
 rusqlite = { version = "=0.40.2", features = ["bundled"] }
 rustix = { version = "=1.1.5", features = ["fs", "process"] }

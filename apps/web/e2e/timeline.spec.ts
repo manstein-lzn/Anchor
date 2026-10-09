@@ -203,3 +203,57 @@ test('timeline hints fit the viewport at both edges and dismiss without blocking
   await expect(tooltip).not.toBeVisible();
   await expect(page.getByRole('dialog', { name: '运行详情' })).toContainText('Run · right');
 });
+
+test('a resident Run draws only the windows it executed, not its idle lifetime', async ({ page }) => {
+  await page.clock.setFixedTime(new Date('2026-09-30T12:00:00'));
+  const graph = JSON.parse(readFileSync('../../examples/graphs/academic-gated.json', 'utf8'));
+  const resident = {
+    run: 'assistant-1', graph: 'wecom-persistent-assistant', status: 'running', running: true,
+    started: '2026-09-28T08:00:00', updated: '2026-09-30T11:30:00', executed: ['wait_input', 'assistant'],
+    objective: '常驻助手', trigger: { source: 'channel' },
+    activity: [
+      { start: '2026-09-28T09:00:00', end: '2026-09-28T09:20:00' },
+      { start: '2026-09-30T10:00:00', end: '2026-09-30T10:10:00' },
+      { start: '2026-09-30T11:30:00', end: '2026-09-30T11:30:00', running: true },
+    ],
+  };
+  // An instance admitted but not yet given a Turn: it must be marked where it started, never
+  // stretched across the day it was waiting in.
+  const idle = { ...resident, run: 'assistant-idle', started: '2026-09-30T08:00:00', updated: '2026-09-30T08:00:00', activity: [] };
+  const runs = [resident, idle];
+  await page.route('**/graphs', route => route.fulfill({ json: { graphs: [{ graph: resident.graph, running: resident.run }] } }));
+  await page.route('**/graphs/*', route => route.fulfill({ json: { definition: graph } }));
+  await page.route('**/runs', route => route.fulfill({ json: { runs } }));
+  await page.route('**/runs/*', route => route.fulfill({ json: { state: { ...resident, input: {} } } }));
+  await page.route('**/timeline*', route => route.fulfill({ json: { runs, schedules: [], scheduled: [] } }));
+  await page.goto('/');
+  await page.getByRole('button', { name: '运行看板', exact: true }).click();
+  await expect(page.locator('.timeline-run')).toHaveCount(4);
+  const today = page.locator('.timeline-day.today');
+  await expect(today.locator('.timeline-run')).toHaveCount(3);
+  const placed = await today.locator('.timeline-run').evaluateAll(entries => entries.map(entry => {
+    const track = entry.parentElement!.getBoundingClientRect();
+    const bar = entry.querySelector('i')!.getBoundingClientRect();
+    return { left: (bar.x - track.x) / track.width, right: (bar.x + bar.width - track.x) / track.width };
+  }));
+  expect(placed[0].left).toBeCloseTo(8 / 24, 2);
+  expect(placed[1].left).toBeCloseTo(10 / 24, 2);
+  expect(placed[1].right).toBeCloseTo((10 * 60 + 10) / (24 * 60), 2);
+  expect(placed[2].left).toBeCloseTo(11.5 / 24, 2);
+  expect(placed[2].right).toBeCloseTo(12 / 24, 2);
+  // The idle instance stays a marker at its start instead of covering the day.
+  const idleBar = (await today.locator('.timeline-run[data-run-id="assistant-idle"] i').boundingBox())!;
+  expect(idleBar.width).toBeLessThan(12);
+  // The hours between the turns stay empty: no bar reaches back into idle waiting.
+  expect(placed[1].left).toBeGreaterThan(0.4);
+  expect(placed[2].left - placed[1].right).toBeGreaterThan(0.04);
+  await page.screenshot({ path: 'test-results/timeline-resident-windows.png' });
+  await today.locator('.timeline-run[data-run-id="assistant-idle"]').click();
+  await expect(page.getByRole('dialog', { name: '运行详情' })).toContainText('等待下一轮输入');
+  await page.keyboard.press('Escape');
+  await today.locator('.timeline-run[data-run-id="assistant-1"]').first().click();
+  const preview = page.getByRole('dialog', { name: '运行详情' });
+  await expect(preview).toContainText('活动时段');
+  await expect(preview).toContainText('3 段');
+  await expect(preview).toContainText('等待期间不算执行');
+});

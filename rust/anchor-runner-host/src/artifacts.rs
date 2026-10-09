@@ -28,6 +28,7 @@ mod links;
 mod manifest;
 mod previous;
 mod workspace;
+mod workspace_binding;
 use manifest::{FileHash, Manifest, context_hash};
 
 #[derive(Clone)]
@@ -47,6 +48,9 @@ impl HostArtifacts {
     /// Returns a validated path without creating a workspace.
     pub(crate) fn workspace_path(&self, key: &InvocationKey) -> Result<PathBuf, GraphError> {
         validate_key(key)?;
+        if let Some(path) = self.bound_workspace_path(key)? {
+            return Ok(path);
+        }
         let path = self.workspace_root.join(&key.run_id).join(key_hash(key));
         checked_path(&path)?;
         Ok(path)
@@ -326,7 +330,7 @@ impl HostArtifacts {
                     None
                 }
             }
-            ArtifactKind::Fanout | ArtifactKind::Join => None,
+            ArtifactKind::Fanout | ArtifactKind::Join | ArtifactKind::Interruption => None,
         };
         let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let temporary = self.root.join(format!(
@@ -343,11 +347,8 @@ impl HostArtifacts {
                 let files_dir = temporary.join("files");
                 fs::create_dir(&files_dir)?;
                 let files = if context.kind != ArtifactKind::GraphCall {
-                    let filename = if context.kind == ArtifactKind::Fanout {
-                        "fanout.json"
-                    } else {
-                        "join.json"
-                    };
+                    let filename = manifest::control_filename(context.kind)
+                        .ok_or_else(|| corrupt("unsupported control artifact kind"))?;
                     let bytes =
                         serde_json::to_vec(&manifest::control_output(completion, context.kind))
                             .map_err(|error| corrupt(error.to_string()))?;
@@ -585,8 +586,12 @@ impl ArtifactPort for HostArtifacts {
             if files.is_empty() {
                 return Ok(Vec::new());
             }
-            let workspace = self.workspace_path(call_key)?;
+            validate_key(call_key)?;
             let (snapshot, manifest) = self.load_snapshot(commit)?;
+            let workspace = match self.prepare_bound_workspace(call_key, &[], None, None)? {
+                Some(workspace) => workspace,
+                None => self.workspace_path(call_key)?,
+            };
             fs::create_dir_all(&workspace)?;
             checked_path(&workspace)?;
             remove_stale_result_dirs(&workspace)?;

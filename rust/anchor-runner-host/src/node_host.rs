@@ -2,9 +2,9 @@
 use super::{HostArtifacts, create_durable_directory, write_durable};
 use crate::{local_inputs::LocalInputs, op, tool_host};
 use anchor_runtime::graph::{
-    CompletionFact, FileRunStore, GraphError, GraphRunRecord, InvocationKey, NodeCompletion,
-    NodeExecutionCapabilities, NodeExecutionOutcome, NodeExecutionPort, NodeExecutionRequest,
-    NodeKind, PluginBinding, RecoveryDecision, RunStore,
+    CommitRef, CompletionFact, FileRunStore, GraphError, GraphRunRecord, InvocationKey,
+    NodeCompletion, NodeExecutionCapabilities, NodeExecutionOutcome, NodeExecutionPort,
+    NodeExecutionRequest, NodeKind, PluginBinding, RecoveryDecision, RunStore,
 };
 use anchor_runtime::{NetworkPolicy, SandboxError, SandboxPort, SandboxRequest, SandboxStatus};
 use anchor_sandbox_bwrap::BubblewrapSandbox;
@@ -19,6 +19,7 @@ use std::{
     time::Duration,
 };
 
+mod assistant;
 mod contracts;
 mod conversation;
 mod media;
@@ -38,6 +39,7 @@ pub(crate) fn conversation_hint_for(
 }
 
 pub(crate) struct HostNodes {
+    pub(crate) control: crate::HostControl,
     pub(crate) sandbox: std::sync::Arc<BubblewrapSandbox>,
     pub(crate) allowed_commands: Vec<String>,
     pub(crate) artifacts: HostArtifacts,
@@ -105,6 +107,29 @@ impl HostIoResolver {
 
     pub(crate) fn local_inputs_configured(&self) -> bool {
         self.local_inputs.configured()
+    }
+
+    /// Prepare the one writable tree this invocation owns.
+    ///
+    /// A handed-over assistant Run seeds its work node's scene from the Run it
+    /// took the instance over from; every other preparation is the plain
+    /// unbound/committed-seed behaviour. The seed decision is a durable host fact
+    /// (`crate::assistant::handover_workspace_source`), never graph content or
+    /// user input.
+    pub(crate) fn prepare_node_workspace(
+        &self,
+        key: &InvocationKey,
+        inputs: &[CommitRef],
+    ) -> Result<PathBuf, String> {
+        let seed =
+            crate::assistant::handover_workspace_source(self.local_inputs.state_root(), key)?;
+        self.artifacts
+            .prepare_workspace_from(key, inputs, seed.as_ref())
+            .map_err(|error| error.to_string())
+    }
+
+    pub(crate) fn persistent_workspace(&self, key: &InvocationKey) -> Result<bool, String> {
+        crate::assistant::source(self.local_inputs.state_root(), key).map(|source| source.is_some())
     }
 
     pub(crate) fn validate_plugin_configuration(
@@ -186,6 +211,11 @@ impl HostIoResolver {
         if let Some(mount) = self.channel_inputs(key)?.mount {
             mounts.push(mount);
         }
+        mounts.extend(
+            self.pending_channel_inputs(key)?
+                .into_iter()
+                .filter_map(|inputs| inputs.mount),
+        );
         Ok(mounts)
     }
 
@@ -249,9 +279,13 @@ impl HostIoResolver {
 
 impl NodeHostResolver for HostIoResolver {
     fn prompt_images(&self, request: &NodeExecutionRequest) -> Result<Vec<NodeImage>, String> {
-        Ok(self
-            .channel_inputs(&request.key)?
-            .images
+        let mut images = self.channel_inputs(&request.key)?.images;
+        images.extend(
+            self.pending_channel_inputs(&request.key)?
+                .into_iter()
+                .flat_map(|inputs| inputs.images),
+        );
+        Ok(images
             .into_iter()
             .map(|image| NodeImage {
                 data: image.bytes,
@@ -279,9 +313,9 @@ impl NodeHostResolver for HostIoResolver {
     }
 
     fn workspace(&self, request: &NodeExecutionRequest) -> Result<PathBuf, String> {
-        self.artifacts
-            .prepare_workspace(&request.key, &request.input_commits)
-            .map_err(|error| error.to_string())
+        let workspace = self.prepare_node_workspace(&request.key, &request.input_commits)?;
+        self.seed_assistant_workspace(&request.key, &workspace)?;
+        Ok(workspace)
     }
 
     fn tools<'a>(&'a self, request: &'a NodeExecutionRequest) -> ToolResolution<'a> {
@@ -476,6 +510,7 @@ impl HostNodes {
         key: &InvocationKey,
         completion: NodeCompletion,
     ) -> Result<NodeExecutionOutcome, GraphError> {
+        create_durable_directory(&self.facts_root)?;
         let bytes =
             serde_json::to_vec(&completion).map_err(|e| GraphError::CorruptRun(e.to_string()))?;
         write_durable(
@@ -607,6 +642,7 @@ impl NodeExecutionPort for HostNodes {
         NodeExecutionCapabilities {
             agent: self.goose_nodes.is_some(),
             op_run: true,
+            host_operations: true,
             exact_provider_request_budget: false,
         }
     }
@@ -621,7 +657,13 @@ impl NodeExecutionPort for HostNodes {
     ) -> Pin<Box<dyn std::future::Future<Output = Result<CompletionFact, GraphError>> + Send + 'a>>
     {
         Box::pin(async move {
+            if let Some(fact) = self.assistant_completion_fact(key)? {
+                return Ok(fact);
+            }
             let host = load_host_completion_fact(&self.facts_root, key)?;
+            if let CompletionFact::Completed(completion) = &host {
+                self.settle_assistant_reply(key, completion)?;
+            }
             if crate::run_data::legacy_invocation_exists(
                 self.io_resolver.local_inputs.state_root(),
                 key,
@@ -655,6 +697,25 @@ impl NodeExecutionPort for HostNodes {
         ))
     }
     fn execute<'a>(
+        &'a self,
+        request: NodeExecutionRequest,
+    ) -> Pin<
+        Box<dyn std::future::Future<Output = Result<NodeExecutionOutcome, GraphError>> + Send + 'a>,
+    > {
+        if request.kind == NodeKind::OpHost {
+            return Box::pin(self.execute_host_operation(request));
+        }
+        match crate::assistant::source(self.io_resolver.local_inputs.state_root(), &request.key) {
+            Ok(Some(_)) => return Box::pin(self.execute_assistant_request(request)),
+            Ok(None) => {}
+            Err(error) => return Box::pin(async move { Err(GraphError::Unsupported(error)) }),
+        }
+        self.execute_regular(request)
+    }
+}
+
+impl HostNodes {
+    fn execute_regular<'a>(
         &'a self,
         request: NodeExecutionRequest,
     ) -> Pin<

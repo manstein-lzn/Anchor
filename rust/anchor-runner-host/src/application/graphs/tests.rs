@@ -101,8 +101,8 @@ async fn list_and_read_preserve_configured_alias_and_missing_projection() {
     assert_eq!(
         listed,
         json!({"graphs": [
-            {"graph":"another","running":null,"active_runs":[],"missing":false},
-            {"graph":"fixture","running":null,"active_runs":[],"missing":false}
+            {"graph":"another","running":null,"active_runs":[],"active_nodes":[],"missing":false},
+            {"graph":"fixture","running":null,"active_runs":[],"active_nodes":[],"missing":false}
         ]})
     );
     let configured = application.read_graph("fixture").unwrap();
@@ -119,7 +119,7 @@ async fn list_and_read_preserve_configured_alias_and_missing_projection() {
         .with_configured_graph("missing".into(), root.path().join("deployment"));
     assert_eq!(
         absent.list_graphs().await.unwrap(),
-        json!({"graphs":[{"graph":"missing","running":null,"active_runs":[],"missing":true}]})
+        json!({"graphs":[{"graph":"missing","running":null,"active_runs":[],"active_nodes":[],"missing":true}]})
     );
     let catalog_only =
         RunApplication::new(root.path().join("other-state"), root.path().join("absent"));
@@ -141,6 +141,49 @@ fn load_distinguishes_missing_and_invalid_bundles() {
         application.load_graph("invalid"),
         Err(GraphManagementError::Invalid(_))
     ));
+}
+
+#[tokio::test]
+async fn active_nodes_require_a_live_executor_and_running_record() {
+    let (_root, application) = fixture();
+    let (path, bundle) = application.load_graph("fixture").unwrap();
+    let mut record = GraphRunRecord::create(bundle.snapshot, json!({})).unwrap();
+    record.status = RunStatus::Running;
+    record.invocations.insert("work".into(), 1);
+    record.passes.insert("work".into(), 1);
+    record.cursor = Some(anchor_runtime::graph::RunCursor {
+        node_id: "work".into(),
+        key: anchor_runtime::graph::InvocationKey {
+            run_id: record.run_id.clone(),
+            graph_digest: record.graph_digest.clone(),
+            node_id: "work".into(),
+            invocation: 1,
+        },
+        input_commits: Vec::new(),
+        prepared_input: json!({}),
+    });
+    application.store().save(&record).unwrap();
+    assert_eq!(
+        application.list_graphs().await.unwrap()["graphs"][0]["active_nodes"],
+        json!([])
+    );
+    application.active.lock().await.insert(
+        record.run_id.clone(),
+        crate::application::ActiveRun {
+            graph_path: RunApplication::graph_identity(&path).unwrap(),
+            control: crate::application::new_control(),
+        },
+    );
+    assert_eq!(
+        application.list_graphs().await.unwrap()["graphs"][0]["active_nodes"],
+        json!(["work"])
+    );
+    record.status = RunStatus::Paused;
+    application.store().save(&record).unwrap();
+    assert_eq!(
+        application.list_graphs().await.unwrap()["graphs"][0]["active_nodes"],
+        json!([])
+    );
 }
 
 #[tokio::test]

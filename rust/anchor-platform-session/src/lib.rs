@@ -66,6 +66,22 @@ pub struct AttachmentManifestEntry {
     pub media_type: Option<String>,
 }
 
+/// The turn and Run an admitted channel message belongs to. `run_id` is absent
+/// while admission has not created the Run yet.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChannelInboundRun {
+    pub session_id: String,
+    pub turn_id: String,
+    pub run_id: Option<String>,
+}
+
+/// One admitted channel message that still has no confirmed reply.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChannelPendingMessage {
+    pub text: String,
+    pub attachments: usize,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ChannelInboundRequest {
     pub inbound_id: String,
@@ -104,6 +120,15 @@ pub struct ChannelInboundAdmission {
     pub relation: ChannelInboundRelation,
     pub turn: Turn,
     pub previous_run: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ChannelAssistant {
+    pub session_id: String,
+    pub run_id: String,
+    pub wait_node: String,
+    pub work_node: String,
+    pub reply_node: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -265,6 +290,18 @@ pub struct Turn {
     pub runs: Vec<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+/// When one Turn of a Session was executing, for a Run that outlives a single
+/// Turn. It carries no prompt, delivery or execution detail: the only fact it
+/// exposes is the interval work was actually attributed to a Run.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TurnWindow {
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    /// The Turn had not reached a terminal status when this was read, so its
+    /// window has no recorded end yet.
+    pub running: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]

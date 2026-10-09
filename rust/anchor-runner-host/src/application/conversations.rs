@@ -117,6 +117,40 @@ impl RunApplication {
         let Some(metadata) = self.metadata(run_id)? else {
             return Ok(());
         };
+        if let Some(source) = metadata.assistant.as_ref() {
+            let turn_status = match status {
+                RunStatus::Failed | RunStatus::Aborted => TurnStatus::Failed,
+                RunStatus::Stopped => TurnStatus::Stopped,
+                _ => return Ok(()),
+            };
+            let sessions = SessionStore::open(self.data_root.join("platform/sessions.sqlite"))
+                .map_err(|error| ApplicationError::Storage(error.to_string()))?;
+            if sessions
+                .get_channel_assistant(&source.owner, &source.session)
+                .map_err(|error| ApplicationError::Storage(error.to_string()))?
+                .is_none_or(|assistant| assistant.run_id != run_id)
+            {
+                return Ok(());
+            }
+            for turn in sessions
+                .list_turns(&source.owner, &source.session)
+                .map_err(|error| ApplicationError::Storage(error.to_string()))?
+            {
+                if turn.status == TurnStatus::Running {
+                    sessions
+                        .finish_turn(
+                            &source.owner,
+                            &source.session,
+                            &turn.id,
+                            turn_status,
+                            Some("assistant execution stopped"),
+                        )
+                        .map_err(|error| ApplicationError::Storage(error.to_string()))?;
+                }
+            }
+            crate::assistant::signal(&source.session).notify_waiters();
+            return Ok(());
+        }
         let Some(channel) = metadata.channel.as_ref() else {
             return Ok(());
         };
@@ -233,6 +267,7 @@ impl RunApplication {
         graph_path: &Path,
     ) -> Result<Vec<(RunMetadata, GraphRunRecord)>, ApplicationError> {
         let identity = Self::graph_identity(graph_path)?;
+        let identity_key = identity.to_string_lossy().into_owned();
         let mut entries = Vec::new();
         for (id, record) in self.records()? {
             let Some(metadata) = self.metadata(&id)? else {
@@ -257,41 +292,68 @@ impl RunApplication {
         if entries.is_empty() {
             return Ok(entries);
         }
-        let referenced = entries
+        // Deleted links keep their place through their tombstones: each one names
+        // the predecessor the deleted Run itself held, so the surviving history
+        // stays a single path whatever order links were removed in.
+        let bridges = crate::run_deletions::list(&self.data_root)
+            .map_err(ApplicationError::Storage)?
+            .into_iter()
+            .filter(|deletion| {
+                deletion.explains(&identity_key, &source.session, &source.reply_node)
+            })
+            .collect::<Vec<_>>();
+        let bridge = |id: &str| bridges.iter().find(|deletion| deletion.run_id() == id);
+        let mut referenced = entries
             .iter()
-            .filter_map(|(metadata, _)| metadata.conversation.as_ref()?.previous_run.as_deref())
+            .filter_map(|(metadata, _)| metadata.conversation.as_ref()?.previous_run.clone())
             .collect::<BTreeSet<_>>();
+        referenced.extend(
+            bridges
+                .iter()
+                .filter_map(|deletion| deletion.previous_run().map(str::to_owned)),
+        );
         let heads = entries
             .iter()
-            .filter(|(metadata, _)| !referenced.contains(metadata.run_id.as_str()))
+            .filter(|(metadata, _)| !referenced.contains(&metadata.run_id))
             .collect::<Vec<_>>();
+        if heads.is_empty() {
+            // Every surviving link is the predecessor of a deleted one, so the
+            // Session has no live chain: the next accepted turn starts one.
+            return Ok(Vec::new());
+        }
         if heads.len() != 1 {
             return Err(ApplicationError::Conflict(
                 "Session Run lineage is not a single chain".into(),
             ));
         }
-        let mut seen = BTreeSet::new();
-        let mut at = Some(heads[0].0.run_id.as_str());
+        let mut visited = BTreeSet::new();
+        let mut covered = BTreeSet::new();
+        let mut at = Some(heads[0].0.run_id.clone());
         while let Some(id) = at {
-            if !seen.insert(id) {
+            if !visited.insert(id.clone()) {
                 return Err(ApplicationError::Conflict(
                     "Session Run lineage contains a cycle".into(),
                 ));
             }
-            let (metadata, _) = entries
-                .iter()
-                .find(|(metadata, _)| metadata.run_id == id)
-                .ok_or_else(|| {
-                    ApplicationError::Conflict(
+            let Some((metadata, _)) = entries.iter().find(|(metadata, _)| metadata.run_id == id)
+            else {
+                // A deleted Run is bridged by its tombstone; anything else is
+                // retained corruption.
+                let Some(deletion) = bridge(&id) else {
+                    return Err(ApplicationError::Conflict(
                         "Session Run lineage has a missing predecessor".into(),
-                    )
-                })?;
+                    ));
+                };
+                at = deletion.previous_run().map(str::to_owned);
+                continue;
+            };
+            covered.insert(id);
             at = metadata
                 .conversation
                 .as_ref()
-                .and_then(|source| source.previous_run.as_deref());
+                .and_then(|source| source.previous_run.clone());
         }
-        if seen.len() != entries.len() {
+        if covered.len() != entries.len() {
             return Err(ApplicationError::Conflict(
                 "Session Run lineage is disconnected".into(),
             ));
@@ -399,6 +461,181 @@ impl RunApplication {
             ));
         }
         Ok(())
+    }
+
+    /// A channel Turn whose reply is still pending or of unknown outcome keeps
+    /// its Run: the frozen reply is what a later verification is derived from,
+    /// and deleting it would fake a settled delivery.
+    pub(super) fn ensure_channel_delivery_settled(
+        &self,
+        metadata: &RunMetadata,
+    ) -> Result<(), ApplicationError> {
+        let Some(channel) = metadata.channel.as_ref() else {
+            return Ok(());
+        };
+        let unsettled = SessionStore::open(self.data_root.join("platform/sessions.sqlite"))
+            .map_err(|error| ApplicationError::Storage(error.to_string()))?
+            .list_unfinished_channel_deliveries(&channel.owner, &channel.session)
+            .map_err(|error| ApplicationError::Storage(error.to_string()))?
+            .into_iter()
+            .any(|delivery| delivery.turn_id == channel.turn);
+        if unsettled {
+            return Err(ApplicationError::Conflict(
+                "Run has an unsettled channel delivery; settle it before deleting the record"
+                    .into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Decide whether one conversation Run may be deleted on its own.
+    ///
+    /// Conversation Runs form one chain per Session, and a later Run reads the
+    /// Run it was handed over from while it executes: it inherits that Run's
+    /// stable workspace scene, mounts its `/previous` snapshot, and takes its
+    /// Goose invocation identity as the native predecessor. A Run is therefore
+    /// only deletable once nothing that can still execute reads it:
+    ///
+    /// - it must not be the current assistant instance, which the Session still
+    ///   points at (retire that instance first);
+    /// - it must have no unsettled channel delivery;
+    /// - every later Run that names it must either be unable to execute again
+    ///   or have completed the first invocation of every node that reads it.
+    ///
+    /// Any link may go, in any order: its tombstone keeps the place it held, so
+    /// the surviving lineage stays a single path.
+    pub(super) fn ensure_conversation_delete_allowed(
+        &self,
+        record: &GraphRunRecord,
+        metadata: &RunMetadata,
+        active: &HashMap<String, ActiveRun>,
+    ) -> Result<(), ApplicationError> {
+        if metadata.conversation.is_none() {
+            return Err(ApplicationError::Invalid(
+                "Run has no conversation identity".into(),
+            ));
+        }
+        if active.contains_key(&record.run_id) {
+            return Err(ApplicationError::Conflict(
+                "that Run is still running".into(),
+            ));
+        }
+        self.ensure_current_assistant_is_replaced(metadata)?;
+        for successor_id in self.conversation_successors(&record.run_id)? {
+            let Some(successor_metadata) = self.metadata(&successor_id)? else {
+                continue;
+            };
+            let successor = self.store().load(&successor_id)?;
+            if self.successor_reads_predecessor(record, &successor_metadata, successor.as_ref())? {
+                return Err(ApplicationError::Conflict(format!(
+                    "Run is retained as the previous turn of a conversation: the newer Run `{successor_id}` still inherits from it on its first execution"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Every Run whose immutable metadata names this Run as its predecessor.
+    ///
+    /// Metadata is listed instead of Run records because a handover that
+    /// committed its binding and metadata but died before admitting the Run
+    /// still retains the predecessor it needs to be admitted at all.
+    fn conversation_successors(&self, run_id: &str) -> Result<Vec<String>, ApplicationError> {
+        let mut successors = Vec::new();
+        for id in crate::application::metadata::ids(&self.data_root)? {
+            if id == run_id {
+                continue;
+            }
+            if self
+                .metadata(&id)?
+                .and_then(|metadata| metadata.conversation)
+                .is_some_and(|source| source.previous_run.as_deref() == Some(run_id))
+            {
+                successors.push(id);
+            }
+        }
+        Ok(successors)
+    }
+
+    fn ensure_current_assistant_is_replaced(
+        &self,
+        metadata: &RunMetadata,
+    ) -> Result<(), ApplicationError> {
+        let Some(assistant) = metadata.assistant.as_ref() else {
+            return Ok(());
+        };
+        let current = SessionStore::open(self.data_root.join("platform/sessions.sqlite"))
+            .map_err(|error| ApplicationError::Storage(error.to_string()))?
+            .get_channel_assistant(&assistant.owner, &assistant.session)
+            .map_err(|error| ApplicationError::Storage(error.to_string()))?;
+        if current.is_some_and(|current| current.run_id == metadata.run_id) {
+            return Err(ApplicationError::Conflict(
+                "this Run is the current assistant instance; retire it before deleting its record"
+                    .into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// True while this later Run can still read the Run it names as its
+    /// predecessor. Every such read happens while the later Run executes the
+    /// first invocation of a node, so a recorded first invocation is the
+    /// durable evidence that the inheritance is complete.
+    fn successor_reads_predecessor(
+        &self,
+        predecessor: &GraphRunRecord,
+        successor_metadata: &RunMetadata,
+        successor: Option<&GraphRunRecord>,
+    ) -> Result<bool, ApplicationError> {
+        let Some(successor) = successor else {
+            // A handover that committed its binding and metadata but not its Run
+            // record still needs this Run to be re-admitted, so its progress is
+            // unknown and this Run stays retained.
+            return Ok(true);
+        };
+        if matches!(
+            successor.status,
+            RunStatus::Completed | RunStatus::Failed | RunStatus::Aborted
+        ) {
+            return Ok(false);
+        }
+        // A Run with its own successor can never resume or recover: the
+        // conversation scope check refuses it, so its history is frozen.
+        if self.has_conversation_successor(&successor.run_id)? {
+            return Ok(false);
+        }
+        let mut reading = BTreeSet::new();
+        for node in &predecessor.snapshot.nodes {
+            let executed = predecessor.invocations.get(&node.id).copied().unwrap_or(0) > 0
+                || predecessor
+                    .results
+                    .get(&node.id)
+                    .is_some_and(|results| !results.is_empty());
+            if executed {
+                reading.insert(node.id.clone());
+            }
+        }
+        if let Some(assistant) = successor_metadata.assistant.as_ref() {
+            reading.insert(assistant.work_node.clone());
+        }
+        for node in reading {
+            if !successor
+                .snapshot
+                .nodes
+                .iter()
+                .any(|candidate| candidate.id == node)
+            {
+                continue;
+            }
+            let injected = successor
+                .results
+                .get(&node)
+                .is_some_and(|results| results.iter().any(|result| result.key.invocation == 1));
+            if !injected {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     pub(super) fn superseded_conversation_ancestor(

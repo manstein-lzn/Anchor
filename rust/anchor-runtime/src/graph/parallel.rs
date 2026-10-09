@@ -128,6 +128,20 @@ impl<'a, S: RunStore, A: ArtifactPort, N: NodeExecutionPort, C: RunControl>
                     self.settle_parallel_completion(record, branch_index, cursor, completion)
                         .await?;
                 }
+                CompletionFact::Yielded { .. } => {
+                    let reason = format!(
+                        "Yielded is not supported inside parallel region for node `{}`",
+                        cursor.node_id
+                    );
+                    let branch = &mut record.parallel.as_mut().unwrap().branches[branch_index];
+                    branch.status = ParallelBranchStatus::Failed;
+                    branch.cursor = None;
+                    branch.error = Some(reason.clone());
+                    record.status = RunStatus::Failed;
+                    record.error = Some(reason.clone());
+                    self.store.save(record)?;
+                    fact_error.get_or_insert(reason);
+                }
                 CompletionFact::Failed(reason) => {
                     let branch = &mut record.parallel.as_mut().unwrap().branches[branch_index];
                     branch.status = ParallelBranchStatus::Failed;
@@ -200,6 +214,21 @@ impl<'a, S: RunStore, A: ArtifactPort, N: NodeExecutionPort, C: RunControl>
                     self.settle_parallel_completion(record, branch_index, cursor, completion)
                         .await?;
                 }
+                NodeExecutionOutcome::Yielded { .. } => {
+                    record.recovery.retain(|pending| pending.key != cursor.key);
+                    let reason = format!(
+                        "Yielded is not supported inside parallel region for node `{}`",
+                        cursor.node_id
+                    );
+                    let branch = &mut record.parallel.as_mut().unwrap().branches[branch_index];
+                    branch.status = ParallelBranchStatus::Failed;
+                    branch.cursor = None;
+                    branch.error = Some(reason.clone());
+                    record.status = RunStatus::Failed;
+                    record.error = Some(reason.clone());
+                    self.store.save(record)?;
+                    terminal_error.get_or_insert(reason);
+                }
                 NodeExecutionOutcome::WaitingRecovery { attempts } => {
                     record.recovery.retain(|pending| pending.key != cursor.key);
                     record
@@ -216,7 +245,7 @@ impl<'a, S: RunStore, A: ArtifactPort, N: NodeExecutionPort, C: RunControl>
                     self.store.save(record)?;
                     stopped = true;
                 }
-                NodeExecutionOutcome::Cancelled => {
+                NodeExecutionOutcome::Cancelled | NodeExecutionOutcome::Suspended => {
                     record.recovery.retain(|pending| pending.key != cursor.key);
                     record.status = RunStatus::Stopped;
                     self.store.save(record)?;
@@ -421,6 +450,7 @@ impl<'a, S: RunStore, A: ArtifactPort, N: NodeExecutionPort, C: RunControl>
                 node_id: cursor.node_id.clone(),
                 key: cursor.key.clone(),
                 completion,
+                interruption: None,
                 commit: commit.clone(),
                 sequence: result_sequence,
             });

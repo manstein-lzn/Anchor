@@ -67,6 +67,7 @@ pub struct GraphNode {
 pub enum NodeKind {
     Agent,
     OpRun,
+    OpHost,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

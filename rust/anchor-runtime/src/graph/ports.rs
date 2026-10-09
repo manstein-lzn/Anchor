@@ -9,6 +9,7 @@ pub enum ArtifactKind {
     Fanout,
     Join,
     GraphCall,
+    Interruption,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -27,13 +28,20 @@ pub trait ArtifactPort: Send + Sync {
         completion: &'a NodeCompletion,
     ) -> Pin<Box<dyn Future<Output = Result<CommitRef, GraphError>> + Send + 'a>>;
     /// Preserve exact input provenance when the host supports linked files.
-    /// Existing adapters retain their original freeze behavior.
+    /// Default adapters reject interruptions rather than freeze the node workspace.
     fn freeze_with_context<'a>(
         &'a self,
         key: &'a InvocationKey,
         completion: &'a NodeCompletion,
-        _context: &'a ArtifactFreezeContext,
+        context: &'a ArtifactFreezeContext,
     ) -> Pin<Box<dyn Future<Output = Result<CommitRef, GraphError>> + Send + 'a>> {
+        if context.kind == ArtifactKind::Interruption {
+            return Box::pin(async {
+                Err(GraphError::Unsupported(
+                    "ArtifactPort must explicitly support interruption control evidence without freezing the node workspace".into(),
+                ))
+            });
+        }
         self.freeze(key, completion)
     }
     /// Read/materialize the exact fixed commit. Implementations must not follow
@@ -213,6 +221,10 @@ pub enum CompletionFact {
     /// for requiring an explicit recovery decision where needed.
     Resumable,
     Completed(NodeCompletion),
+    Yielded {
+        reason: String,
+        route: Option<String>,
+    },
     Failed(String),
     Uncertain(String),
 }
@@ -246,10 +258,10 @@ pub trait NodeExecutionPort: Send + Sync {
             "node executor does not support tool recovery decisions".into(),
         ))
     }
-    /// On `Completed` or `Failed`, the implementation MUST durably write the
+    /// On `Completed`, `Yielded` or `Failed`, the implementation MUST durably write the
     /// matching completion fact before resolving this future. If it cannot
     /// establish whether execution completed it must persist/return Uncertain.
-    /// BudgetExhausted retains the same invocation's resumable checkpoint and
+    /// BudgetExhausted and Suspended retain the same invocation's checkpoint and
     /// MUST NOT publish a completion fact.
     fn execute<'a>(
         &'a self,
@@ -261,6 +273,7 @@ pub trait NodeExecutionPort: Send + Sync {
 pub struct NodeExecutionCapabilities {
     pub agent: bool,
     pub op_run: bool,
+    pub host_operations: bool,
     /// True only when max_provider_requests is enforced as the cumulative
     /// provider request count, rather than translated to a turn count.
     pub exact_provider_request_budget: bool,
@@ -269,6 +282,10 @@ pub struct NodeExecutionCapabilities {
 #[derive(Debug, Clone, PartialEq)]
 pub enum NodeExecutionOutcome {
     Completed(NodeCompletion),
+    Yielded {
+        reason: String,
+        route: Option<String>,
+    },
     /// Unknown external tool effects require an operator decision before this
     /// invocation can advance. The Graph cursor remains unchanged.
     WaitingRecovery {
@@ -277,6 +294,7 @@ pub enum NodeExecutionOutcome {
     BudgetExhausted {
         model_requests: u64,
     },
+    Suspended,
     Cancelled,
     Interrupted {
         reason: String,

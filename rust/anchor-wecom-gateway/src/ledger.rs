@@ -64,6 +64,7 @@ pub(crate) struct ReadyReply {
     pub sender_id: String,
     pub conversation_id: String,
     pub text: String,
+    pub items: Option<String>,
 }
 
 impl Ledger {
@@ -86,8 +87,10 @@ impl Ledger {
             transaction.execute_batch(
                 "CREATE TABLE inbound (event_id TEXT PRIMARY KEY, digest TEXT NOT NULL,
                   callback_id TEXT NOT NULL UNIQUE, sender_id TEXT NOT NULL, conversation_id TEXT NOT NULL,
-                  state TEXT NOT NULL CHECK(state IN ('processing','ready','completed','unknown')), reply TEXT,
-                  event_json TEXT, receipt_key TEXT, receipt_digest TEXT);
+                  state TEXT NOT NULL CHECK(state IN ('processing','ready','completed','unknown','rejected')), reply TEXT,
+                  event_json TEXT, receipt_key TEXT, receipt_digest TEXT, reply_items TEXT,
+                  created_at INTEGER NOT NULL DEFAULT 0,
+                  superseded INTEGER NOT NULL DEFAULT 0);
                  CREATE TABLE deliveries (kind TEXT NOT NULL, request_id TEXT NOT NULL,
                   digest TEXT NOT NULL, wire_id TEXT NOT NULL UNIQUE,
                   status TEXT NOT NULL CHECK(status IN ('confirmed','unknown')),
@@ -99,7 +102,7 @@ impl Ledger {
                   event_id TEXT NOT NULL, event_json TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
                   retry_at INTEGER NOT NULL DEFAULT 0, delivered INTEGER NOT NULL DEFAULT 0
                   CHECK(delivered IN (0,1)));
-                 PRAGMA user_version=2;",
+                 PRAGMA user_version=5;",
             )?;
             transaction.commit()?;
         } else if version == 1 {
@@ -118,7 +121,59 @@ impl Ledger {
                  PRAGMA user_version=2;",
             )?;
             transaction.commit()?;
-        } else if version != 2 {
+        } else if !(2..=5).contains(&version) {
+            return Err(GatewayError::Ledger);
+        }
+        // Re-read the version: an older database may still need later steps.
+        let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        if version == 2 {
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            transaction.execute_batch(
+                "ALTER TABLE inbound ADD COLUMN reply_items TEXT; PRAGMA user_version=3;",
+            )?;
+            transaction.commit()?;
+        }
+        let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        if version == 3 {
+            // v4 adds an admission timestamp and a terminal `rejected` state.
+            // SQLite cannot widen a CHECK constraint in place, so the inbound
+            // table is rebuilt in one transaction. Rows that predate this
+            // column are stamped 0, i.e. "already expired": an undelivered
+            // event from before the recovery window existed must be retired,
+            // not replayed against a reply context that is long gone. New
+            // admissions always carry their real timestamp.
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            transaction.execute_batch(
+                "DROP INDEX IF EXISTS inbound_receipt_key_unique;
+                 ALTER TABLE inbound RENAME TO inbound_legacy_v3;
+                 CREATE TABLE inbound (event_id TEXT PRIMARY KEY, digest TEXT NOT NULL,
+                  callback_id TEXT NOT NULL UNIQUE, sender_id TEXT NOT NULL, conversation_id TEXT NOT NULL,
+                  state TEXT NOT NULL CHECK(state IN ('processing','ready','completed','unknown','rejected')), reply TEXT,
+                  event_json TEXT, receipt_key TEXT, receipt_digest TEXT, reply_items TEXT,
+                  created_at INTEGER NOT NULL DEFAULT 0);
+                 INSERT INTO inbound(event_id,digest,callback_id,sender_id,conversation_id,state,reply,
+                  event_json,receipt_key,receipt_digest,reply_items,created_at)
+                  SELECT event_id,digest,callback_id,sender_id,conversation_id,state,reply,
+                   event_json,receipt_key,receipt_digest,reply_items,0 FROM inbound_legacy_v3;
+                 DROP TABLE inbound_legacy_v3;
+                 CREATE UNIQUE INDEX inbound_receipt_key_unique ON inbound(receipt_key);
+                 PRAGMA user_version=4;",
+            )?;
+            transaction.commit()?;
+        }
+        let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        if version == 4 {
+            // v5 records the Host's decision that a message was cancelled by a
+            // newer one. Arrival order alone cannot decide which turn is live:
+            // a message whose media had to be downloaded first reaches the Host
+            // later and takes the conversation over.
+            connection.execute_batch(
+                "ALTER TABLE inbound ADD COLUMN superseded INTEGER NOT NULL DEFAULT 0;
+                 PRAGMA user_version=5;",
+            )?;
+        } else if version != 5 {
             return Err(GatewayError::Ledger);
         }
         let saved: Option<String> = connection
@@ -207,15 +262,16 @@ impl Ledger {
             ));
         }
         transaction.execute(
-            "INSERT INTO inbound(event_id,digest,callback_id,sender_id,conversation_id,state,event_json)
-             VALUES(?1,?2,?3,?4,?5,'processing',?6)",
+            "INSERT INTO inbound(event_id,digest,callback_id,sender_id,conversation_id,state,event_json,created_at)
+             VALUES(?1,?2,?3,?4,?5,'processing',?6,?7)",
             params![
                 event.event_id,
                 event_digest(event),
                 callback,
                 event.sender_id,
                 event.conversation_id,
-                serde_json::to_string(event).map_err(|_| GatewayError::Ledger)?
+                serde_json::to_string(event).map_err(|_| GatewayError::Ledger)?,
+                unix_millis()?
             ],
         )?;
         transaction.commit()?;
@@ -226,6 +282,7 @@ impl Ledger {
         &self,
         event_id: &str,
         text: &str,
+        items: Option<&str>,
         receipt: Option<&DeliveryReceipt>,
     ) -> Result<(), GatewayError> {
         let mut connection = self.lock()?;
@@ -234,9 +291,9 @@ impl Ledger {
             bind_receipt(&transaction, event_id, receipt)?;
         }
         let changed = transaction.execute(
-            "UPDATE inbound SET state='ready',reply=?2 WHERE event_id=?1
+            "UPDATE inbound SET state='ready',reply=?2,reply_items=?3 WHERE event_id=?1
              AND state IN ('processing','unknown')",
-            params![event_id, text],
+            params![event_id, text, items],
         )?;
         if changed != 1 {
             return Err(GatewayError::Ledger);
@@ -281,7 +338,7 @@ impl Ledger {
     pub fn ready_replies(&self, limit: usize) -> Result<Vec<ReadyReply>, GatewayError> {
         let connection = self.lock()?;
         let mut statement = connection.prepare(
-            "SELECT event_id,callback_id,sender_id,conversation_id,reply FROM inbound
+            "SELECT event_id,callback_id,sender_id,conversation_id,reply,reply_items FROM inbound
              WHERE state='ready' AND NOT EXISTS(SELECT 1 FROM deliveries WHERE kind='reply'
              AND request_id=inbound.event_id) ORDER BY rowid LIMIT ?1",
         )?;
@@ -292,6 +349,31 @@ impl Ledger {
                 sender_id: row.get(2)?,
                 conversation_id: row.get(3)?,
                 text: row.get(4)?,
+                items: row.get(5)?,
+            })
+        })?;
+        rows.map(|row| row.map_err(Into::into)).collect()
+    }
+
+    /// Reply images worth attempting again: the text reply is absent or
+    /// confirmed, never uncertain. The per-image delivery claim still decides
+    /// whether one specific platform send may happen.
+    pub fn pending_media(&self, limit: usize) -> Result<Vec<ReadyReply>, GatewayError> {
+        let connection = self.lock()?;
+        let mut statement = connection.prepare(
+            "SELECT event_id,callback_id,sender_id,conversation_id,reply,reply_items FROM inbound
+             WHERE reply_items IS NOT NULL AND state IN ('ready','completed')
+             AND NOT EXISTS(SELECT 1 FROM deliveries WHERE kind='reply' AND request_id=inbound.event_id
+              AND status='unknown') ORDER BY rowid LIMIT ?1",
+        )?;
+        let rows = statement.query_map([limit as i64], |row| {
+            Ok(ReadyReply {
+                event_id: row.get(0)?,
+                callback_id: row.get(1)?,
+                sender_id: row.get(2)?,
+                conversation_id: row.get(3)?,
+                text: row.get(4)?,
+                items: row.get(5)?,
             })
         })?;
         rows.map(|row| row.map_err(Into::into)).collect()
@@ -305,19 +387,96 @@ impl Ledger {
         Ok(())
     }
 
-    pub fn retryable_events(&self) -> Result<Vec<ChannelEvent>, GatewayError> {
+    /// Retire every undelivered inbound that is older than the recovery
+    /// window. A restart must rescue a message the platform handed over just
+    /// before the process died; it must not replay an event whose reply context
+    /// expired hours ago and whose Run already settled.
+    pub fn retire_stale_inbounds(
+        &self,
+        now: i64,
+        window_millis: i64,
+    ) -> Result<usize, GatewayError> {
+        let cutoff = now.saturating_sub(window_millis.max(0));
+        let changed = self.lock()?.execute(
+            "UPDATE inbound SET state='rejected' WHERE state='unknown' AND created_at < ?1
+             AND NOT EXISTS(
+                 SELECT 1 FROM deliveries
+                 WHERE deliveries.kind='reply' AND deliveries.request_id=inbound.event_id
+             )",
+            [cutoff],
+        )?;
+        Ok(changed)
+    }
+
+    /// Mark one inbound as permanently refused by the Host.
+    pub fn reject(&self, event_id: &str) -> Result<(), GatewayError> {
+        let changed = self.lock()?.execute(
+            "UPDATE inbound SET state='rejected' WHERE event_id=?1
+             AND state IN ('processing','ready','unknown')",
+            [event_id],
+        )?;
+        if changed != 1 {
+            return Err(GatewayError::Ledger);
+        }
+        Ok(())
+    }
+
+    /// Record the Host's decision that this message was cancelled by a newer
+    /// one. Superseded messages stop shadowing the turn that is really running,
+    /// so that turn keeps its progress bubble and its reply.
+    pub fn supersede(&self, event_id: &str) -> Result<(), GatewayError> {
+        self.lock()?.execute(
+            "UPDATE inbound SET superseded=1 WHERE event_id=?1",
+            [event_id],
+        )?;
+        Ok(())
+    }
+
+    /// Whether the Host is still processing this inbound, which is what makes
+    /// a "processing" bubble worth showing.
+    pub fn is_processing(&self, event_id: &str) -> Result<bool, GatewayError> {
+        Ok(self.lock()?.query_row(
+            "SELECT EXISTS(SELECT 1 FROM inbound WHERE event_id=?1 AND state='processing')",
+            [event_id],
+            |row| row.get::<_, bool>(0),
+        )?)
+    }
+
+    /// Whether an inbound is still inside the recovery window, which decides
+    /// whether a failure is worth telling the user about.
+    pub fn is_recent(
+        &self,
+        event_id: &str,
+        now: i64,
+        window_millis: i64,
+    ) -> Result<bool, GatewayError> {
+        let cutoff = now.saturating_sub(window_millis.max(0));
+        Ok(self.lock()?.query_row(
+            "SELECT EXISTS(SELECT 1 FROM inbound WHERE event_id=?1 AND created_at >= ?2)",
+            params![event_id, cutoff],
+            |row| row.get::<_, bool>(0),
+        )?)
+    }
+
+    pub fn retryable_events(
+        &self,
+        now: i64,
+        window_millis: i64,
+    ) -> Result<Vec<ChannelEvent>, GatewayError> {
+        let cutoff = now.saturating_sub(window_millis.max(0));
         let connection = self.lock()?;
         let mut statement = connection.prepare(
             "SELECT inbound.event_id,inbound.digest,inbound.event_json
              FROM inbound
              WHERE inbound.state='unknown' AND inbound.event_json IS NOT NULL
+             AND inbound.created_at >= ?1
              AND NOT EXISTS(
                  SELECT 1 FROM deliveries
                  WHERE deliveries.kind='reply' AND deliveries.request_id=inbound.event_id
              )
              ORDER BY inbound.rowid",
         )?;
-        let rows = statement.query_map([], |row| {
+        let rows = statement.query_map([cutoff], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
@@ -417,6 +576,17 @@ impl Ledger {
         rows.map(|row| row.map_err(Into::into)).collect()
     }
 
+    /// Stop retrying a settlement the Host permanently refused. The reply was
+    /// delivered; only the receipt can never be acknowledged, so the outbox
+    /// entry must not be replayed on every restart.
+    pub fn abandon_settlement(&self, key: &str) -> Result<(), GatewayError> {
+        self.lock()?.execute(
+            "UPDATE settlement_outbox SET delivered=1 WHERE receipt_key=?1 AND delivered=0",
+            [key],
+        )?;
+        Ok(())
+    }
+
     pub fn finish_settlement(&self, key: &str, succeeded: bool) -> Result<(), GatewayError> {
         let connection = self.lock()?;
         let changed = if succeeded {
@@ -451,7 +621,7 @@ impl Ledger {
     ) -> Result<bool, GatewayError> {
         Ok(!self.lock()?.query_row(
             "SELECT EXISTS(SELECT 1 FROM inbound WHERE rowid > (SELECT rowid FROM inbound WHERE event_id=?1)
-             AND sender_id=?2 AND conversation_id=?3)",
+             AND sender_id=?2 AND conversation_id=?3 AND superseded=0)",
             params![event_id, sender_id, conversation_id], |row| row.get::<_, bool>(0),
         )?)
     }

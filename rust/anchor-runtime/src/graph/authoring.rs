@@ -276,13 +276,13 @@ fn parse_ops(value: Option<&Value>) -> Result<BTreeMap<String, Value>, GraphErro
             return Err(invalid(format!("{where_}: a name must be non-empty")));
         }
         let spec = object(value, &where_)?;
-        let executions = ["run", "call", "fanout", "join"]
+        let executions = ["run", "call", "fanout", "join", "host"]
             .iter()
             .filter(|key| spec.contains_key(**key))
             .count();
         if executions != 1 {
             return Err(invalid(format!(
-                "{where_} needs exactly one of `run`, `call`, `fanout` or `join`"
+                "{where_} needs exactly one of `run`, `call`, `fanout`, `join` or `host`"
             )));
         }
         let is_parallel_control = spec.contains_key("fanout") || spec.contains_key("join");
@@ -299,6 +299,7 @@ fn parse_ops(value: Option<&Value>) -> Result<BTreeMap<String, Value>, GraphErro
             &[
                 "run",
                 "call",
+                "host",
                 "reads",
                 "writes",
                 "network",
@@ -319,6 +320,9 @@ fn parse_ops(value: Option<&Value>) -> Result<BTreeMap<String, Value>, GraphErro
             return Err(invalid(format!(
                 "{where_}.run must be a non-empty command string"
             )));
+        }
+        if let Some(host) = spec.get("host") {
+            super::admission::validate_host_operation(host, name)?;
         }
         if let Some(fanout) = spec.get("fanout") {
             let fanout = object(fanout, &format!("{where_}.fanout"))?;
@@ -363,12 +367,14 @@ fn parse_ops(value: Option<&Value>) -> Result<BTreeMap<String, Value>, GraphErro
         }
         let mut normalized = spec.clone();
         normalized.insert("network".into(), Value::Bool(network));
-        normalized.insert(
-            "wall_time_limit_seconds".into(),
-            spec.get("wall_time_limit_seconds")
-                .cloned()
-                .unwrap_or_else(|| json!(3600)),
-        );
+        if !spec.contains_key("host") || spec.contains_key("wall_time_limit_seconds") {
+            normalized.insert(
+                "wall_time_limit_seconds".into(),
+                spec.get("wall_time_limit_seconds")
+                    .cloned()
+                    .unwrap_or_else(|| json!(3600)),
+            );
+        }
         if !reads.is_empty() {
             normalized.insert("reads".into(), json!(reads));
         }

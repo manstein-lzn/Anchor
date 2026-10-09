@@ -75,16 +75,36 @@ impl HostIoResolver {
         }
         let hint = conversation_hint_for(&current, &key.node_id)
             .expect("conversation binding checked above");
+        let graph = crate::application::RunApplication::graph_identity(&current.bundle_source)
+            .map_err(|error| format!("conversation graph identity: {error:?}"))?
+            .to_string_lossy()
+            .into_owned();
         let mut next = binding.previous_run.clone();
         let mut seen = BTreeSet::from([key.run_id.clone()]);
         let mut previous = Vec::new();
         while let Some(id) = next {
+            let Some(metadata) = crate::application::metadata::load(root, &id)
+                .map_err(|error| format!("conversation predecessor: {error:?}"))?
+            else {
+                // A deleted link is bridged by its tombstone: it still names the
+                // predecessor it held, so the walk continues past it. Only a
+                // deletion from this same conversation explains the gap; a plain
+                // missing predecessor stays retained corruption.
+                let deletion = crate::run_deletions::load(root, &id)
+                    .map_err(|error| format!("conversation deletion: {error}"))?
+                    .filter(|deletion| {
+                        deletion.explains(&graph, &binding.session, &binding.reply_node)
+                    })
+                    .ok_or("conversation predecessor metadata is missing")?;
+                if !seen.insert(id.clone()) {
+                    return Err("conversation lineage contains a cycle".into());
+                }
+                next = deletion.previous_run().map(str::to_owned);
+                continue;
+            };
             if !seen.insert(id.clone()) {
                 return Err("conversation lineage contains a cycle".into());
             }
-            let metadata = crate::application::metadata::load(root, &id)
-                .map_err(|error| format!("conversation predecessor: {error:?}"))?
-                .ok_or("conversation predecessor metadata is missing")?;
             let prior_binding = metadata
                 .conversation
                 .as_ref()
@@ -142,7 +162,11 @@ impl HostIoResolver {
             let committed = prior
                 .results
                 .get(&key.node_id)
-                .and_then(|results| results.iter().find(|result| result.key == source))
+                .and_then(|results| {
+                    results
+                        .iter()
+                        .find(|result| result.key == source && result.interruption.is_none())
+                })
                 .map(|result| &result.commit);
             if committed.is_none()
                 && !self
@@ -418,6 +442,100 @@ mod tests {
     }
 
     #[test]
+    fn only_a_deletion_from_the_same_conversation_explains_a_missing_predecessor() {
+        let root = tempfile::tempdir().unwrap();
+        let resolver = resolver(root.path());
+        admit(&resolver, "first", "alice", None);
+        let second = admit(&resolver, "second", "alice", Some("first"));
+        std::fs::remove_file(root.path().join("run-metadata/first.json")).unwrap();
+        std::fs::remove_file(root.path().join("runs/first.json")).unwrap();
+        assert!(
+            resolver
+                .conversation(&second)
+                .err()
+                .unwrap()
+                .contains("metadata is missing")
+        );
+        let graph = crate::application::RunApplication::graph_identity(
+            &root.path().canonicalize().unwrap(),
+        )
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+        // A tombstone from another conversation explains nothing.
+        crate::run_deletions::save(
+            root.path(),
+            &crate::run_deletions::RunDeletion::new("first", &graph, "bob", "agent", None),
+        )
+        .unwrap();
+        assert!(
+            resolver
+                .conversation(&second)
+                .err()
+                .unwrap()
+                .contains("metadata is missing")
+        );
+        std::fs::remove_file(root.path().join("run-deletions/first.json")).unwrap();
+        crate::run_deletions::save(
+            root.path(),
+            &crate::run_deletions::RunDeletion::new("first", &graph, "alice", "agent", None),
+        )
+        .unwrap();
+        assert!(
+            resolver
+                .conversation(&second)
+                .unwrap()
+                .unwrap()
+                .previous
+                .is_empty()
+        );
+    }
+
+    /// A deleted middle link keeps its place: the walk carries on to the older
+    /// Run that still exists instead of stopping at the tombstone.
+    #[test]
+    fn a_deleted_link_bridges_the_walk_to_the_surviving_predecessor() {
+        let root = tempfile::tempdir().unwrap();
+        let resolver = resolver(root.path());
+        let first = admit(&resolver, "first", "alice", None);
+        admit(&resolver, "second", "alice", Some("first"));
+        let third = admit(&resolver, "third", "alice", Some("second"));
+        let graph = crate::application::RunApplication::graph_identity(
+            &root.path().canonicalize().unwrap(),
+        )
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+        crate::run_deletions::save(
+            root.path(),
+            &crate::run_deletions::RunDeletion::new(
+                "second",
+                &graph,
+                "alice",
+                "agent",
+                Some("first"),
+            ),
+        )
+        .unwrap();
+        std::fs::remove_file(root.path().join("run-metadata/second.json")).unwrap();
+        std::fs::remove_file(root.path().join("runs/second.json")).unwrap();
+        let previous = resolver.conversation(&third).unwrap().unwrap().previous;
+        assert_eq!(
+            previous
+                .iter()
+                .map(|record| record.run_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["first"]
+        );
+        // The deleted link's own records are gone; the older one it bridged to
+        // is still offered.
+        assert_eq!(
+            resolver.conversation_predecessors(&third).unwrap(),
+            vec![first]
+        );
+    }
+
+    #[test]
     fn previous_uses_nearest_available_unfinished_node_once() {
         let root = tempfile::tempdir().unwrap();
         let resolver = resolver(root.path());
@@ -447,6 +565,71 @@ mod tests {
                 )
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn interruption_control_artifact_does_not_replace_the_predecessor_draft() {
+        use anchor_runtime::graph::{ArtifactFreezeContext, ArtifactKind, ArtifactPort, RunResult};
+        let root = tempfile::tempdir().unwrap();
+        let resolver = resolver(root.path());
+        let prior = admit(&resolver, "prior", "alice", None);
+        resolver
+            .artifacts
+            .bind_node_workspace(&prior.run_id, &prior.graph_digest, &prior.node_id)
+            .unwrap();
+        let workspace = resolver.artifacts.prepare_workspace(&prior, &[]).unwrap();
+        std::fs::write(workspace.join("draft.txt"), "unfinished draft retained").unwrap();
+        resolver
+            .artifacts
+            .retain_interrupted_workspace(&prior)
+            .unwrap();
+        let completion = NodeCompletion {
+            submission: "input superseded".into(),
+            route: None,
+            model_requests: 0,
+            output: json!({"interrupted":true,"reason":"input superseded"}),
+        };
+        let commit = resolver
+            .artifacts
+            .freeze_with_context(
+                &prior,
+                &completion,
+                &ArtifactFreezeContext {
+                    kind: ArtifactKind::Interruption,
+                    input_commits: Vec::new(),
+                },
+            )
+            .await
+            .unwrap();
+        let mut previous = resolver.run_store.load(&prior.run_id).unwrap().unwrap();
+        previous.sequence = 1;
+        previous.results.insert(
+            "agent".into(),
+            vec![RunResult {
+                sequence: 1,
+                node_id: "agent".into(),
+                key: prior.clone(),
+                completion,
+                commit,
+                interruption: Some("input superseded".into()),
+            }],
+        );
+        resolver.run_store.save(&previous).unwrap();
+        let current = admit(&resolver, "current", "alice", Some("prior"));
+        let conversation = resolver.conversation(&current).unwrap().unwrap();
+        let mount = resolver
+            .previous_mount(&current, &conversation)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            std::fs::read(mount.source.join("draft.txt")).unwrap(),
+            b"unfinished draft retained"
+        );
+        assert!(!mount.source.join("interruption.json").exists());
+        assert_eq!(
+            std::fs::read(workspace.join("draft.txt")).unwrap(),
+            b"unfinished draft retained"
         );
     }
 

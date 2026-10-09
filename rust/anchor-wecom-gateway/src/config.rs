@@ -3,6 +3,9 @@ use std::{collections::BTreeSet, fmt, path::PathBuf, time::Duration};
 use crate::GatewayError;
 
 pub struct GatewayConfig {
+    /// Read-only channel progress projection. Absent means the transport never
+    /// subscribes and keeps showing its static placeholder.
+    pub progress_url: Option<String>,
     pub state_dir: PathBuf,
     pub ws_url: String,
     pub bot_id: String,
@@ -12,12 +15,17 @@ pub struct GatewayConfig {
     pub send_users: BTreeSet<String>,
     pub webhook: Option<WebhookConfig>,
     pub timing: Timing,
+    /// Undelivered inbounds older than this are retired instead of replayed.
+    pub recovery_window: Duration,
+    /// Whether the transport shows the turn's progress in the chat at all.
+    /// On by default; `ANCHOR_WECOM_PROGRESS=0` shows only the final answer.
+    pub progress: bool,
 }
 
 pub struct WebhookConfig {
     pub url: String,
     pub api_key: String,
-    pub timeout: Duration,
+    pub timeout: Option<Duration>,
 }
 
 impl fmt::Debug for GatewayConfig {
@@ -47,6 +55,13 @@ pub struct Timing {
     pub heartbeat_interval: Duration,
     pub reconnect_base: Duration,
     pub reconnect_max: Duration,
+    /// How long an accepted message waits before the transport shows its
+    /// "processing" bubble. A burst of messages therefore collapses into one
+    /// bubble for the newest message instead of one per message.
+    pub ack_delay: Duration,
+    /// How often the open bubble redraws its ellipsis while a step runs. Tests
+    /// raise this to keep an idle animation frame out of their expectations.
+    pub animation_interval: Duration,
 }
 
 impl Default for Timing {
@@ -57,6 +72,8 @@ impl Default for Timing {
             heartbeat_interval: Duration::from_secs(30),
             reconnect_base: Duration::from_secs(1),
             reconnect_max: Duration::from_secs(30),
+            ack_delay: Duration::from_millis(1200),
+            animation_interval: Duration::from_secs(2),
         }
     }
 }
@@ -77,7 +94,10 @@ impl GatewayConfig {
             inbound_users: BTreeSet::new(),
             send_users: BTreeSet::new(),
             webhook: None,
+            progress_url: None,
             timing: Timing::default(),
+            recovery_window: Duration::from_secs(crate::DEFAULT_RECOVERY_WINDOW_SECS),
+            progress: true,
         }
     }
 
@@ -93,14 +113,35 @@ impl GatewayConfig {
         if config.send_users.is_empty() {
             config.send_users = config.inbound_users.clone();
         }
+        if let Ok(value) = std::env::var("ANCHOR_WECOM_RECOVERY_WINDOW_MS") {
+            config.recovery_window = Duration::from_millis(value.parse().map_err(|_| {
+                GatewayError::Invalid("invalid gateway recovery window environment")
+            })?);
+        }
         if let Ok(url) = std::env::var("ANCHOR_WECOM_WS_URL") {
             config.ws_url = url;
+        }
+        if let Ok(value) = std::env::var("ANCHOR_WECOM_PROGRESS") {
+            config.progress = matches!(value.trim(), "1" | "true" | "yes");
+        }
+        if let Ok(url) = std::env::var("ANCHOR_CHANNEL_PROGRESS_URL") {
+            config.progress_url = Some(url);
         }
         if let Ok(url) = std::env::var("ANCHOR_CHANNEL_WEBHOOK_URL") {
             config.webhook = Some(WebhookConfig {
                 url,
                 api_key: required("ANCHOR_API_KEY")?,
-                timeout: Duration::from_secs(130),
+                timeout: match std::env::var("ANCHOR_CHANNEL_WEBHOOK_TIMEOUT_MS") {
+                    Ok(value) => Some(Duration::from_millis(value.parse().map_err(|_| {
+                        GatewayError::Invalid("invalid channel webhook timeout environment")
+                    })?)),
+                    Err(std::env::VarError::NotPresent) => None,
+                    Err(_) => {
+                        return Err(GatewayError::Invalid(
+                            "invalid channel webhook timeout environment",
+                        ));
+                    }
+                },
             });
         }
         for (name, duration) in [
@@ -196,9 +237,15 @@ impl GatewayConfig {
                     "missing or invalid webhook credential",
                 ));
             }
-            if webhook.timeout.is_zero() || webhook.timeout > Duration::from_secs(180) {
+            if webhook.timeout.is_some_and(|timeout| timeout.is_zero()) {
                 return Err(GatewayError::Invalid("invalid webhook timeout"));
             }
+        }
+        if let Some(progress) = &self.progress_url {
+            if progress.len() > 4096 {
+                return Err(GatewayError::Invalid("progress URL exceeds size limit"));
+            }
+            validate_url(progress, false)?;
         }
         for users in [&self.inbound_users, &self.send_users] {
             if users.len() > 1024
@@ -218,6 +265,8 @@ impl GatewayConfig {
             self.timing.heartbeat_interval,
             self.timing.reconnect_base,
             self.timing.reconnect_max,
+            self.timing.ack_delay,
+            self.timing.animation_interval,
         ];
         if durations
             .iter()
@@ -225,6 +274,9 @@ impl GatewayConfig {
             || self.timing.reconnect_base > self.timing.reconnect_max
         {
             return Err(GatewayError::Invalid("invalid gateway timing"));
+        }
+        if self.recovery_window.is_zero() || self.recovery_window > Duration::from_secs(86_400) {
+            return Err(GatewayError::Invalid("invalid gateway recovery window"));
         }
         Ok(())
     }

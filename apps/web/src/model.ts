@@ -28,10 +28,11 @@ export type OurOp = {
   network?: boolean;
   wall_time_limit_seconds?: number;
 } & (
-  | { run: string; call?: never; fanout?: never; join?: never }
-  | { run?: never; call: GraphCall; fanout?: never; join?: never }
-  | { run?: never; call?: never; fanout: { join: string }; join?: never }
-  | { run?: never; call?: never; fanout?: never; join: Record<string, never> }
+  | { run: string; call?: never; fanout?: never; join?: never; host?: never }
+  | { run?: never; call: GraphCall; fanout?: never; join?: never; host?: never }
+  | { run?: never; call?: never; fanout: { join: string }; join?: never; host?: never }
+  | { run?: never; call?: never; fanout?: never; join: Record<string, never>; host?: never }
+  | { run?: never; call?: never; fanout?: never; join?: never; host: { operation: string; [parameter: string]: unknown } }
 );
 
 export type GraphCall = {
@@ -40,12 +41,26 @@ export type GraphCall = {
   result?: { node: string; files?: string[] }; session?: string;
 };
 export type RunTrigger = { source: string; schedule?: string; scheduled_at?: string;
-  graph?: string; run?: string; node?: string; invocation?: number; mode?: 'wait' | 'detach'; root_run?: string };
+  graph?: string; run?: string; node?: string; invocation?: number; mode?: 'wait' | 'detach'; root_run?: string;
+  /** Channel conversations admit one Run per Turn (one-shot) or hand a resident instance over to a
+   *  new Run. Both keep the previous Run as lineage, which is why a turn can only be deleted once
+   *  nothing newer still reads it. */
+  session?: string; reply_node?: string; previous_run?: string | null };
 export type CallRecord = { node: string; invocation: number; graph: string; run: string;
   mode: 'wait' | 'detach'; status: string; active?: boolean; summary?: string; input?: Record<string, unknown>; result?: unknown };
 export type GraphRelationsData = { graphs: { graph: string; schedules: number }[];
   calls: { graph: string; node: string; op: string; target: string; mode: 'wait' | 'detach' }[] };
 export const callModeLabel = (mode: 'wait' | 'detach') => mode === 'wait' ? '等待完成' : '启动后继续';
+
+export type GraphSummary = {
+  graph: string; running: string | null; active_runs?: string[]; active_nodes?: string[];
+  listener?: { platform: string; status: 'connecting' | 'authenticating' | 'authenticated' | 'reconnecting' | 'stopped' | 'unavailable' };
+};
+
+export const listenerLabel = (status: NonNullable<GraphSummary['listener']>['status']) => ({
+  connecting: '正在连接', authenticating: '正在认证', authenticated: '常驻监听',
+  reconnecting: '正在重连', stopped: '监听已停止', unavailable: '监听不可用',
+}[status]);
 
 export type OurGraph = {
   entry: string;
@@ -95,6 +110,7 @@ export type OurNodeResult = {
   files: string[];
   submitted: boolean;
   exit_status: string;
+  interruption?: string | null;
   route: string | null;
   /** This pass, frozen. The workspace is reused across passes, so the commit is what makes one pass
    *  readable after a later one has written over it — and what a downstream node reads the history
@@ -144,6 +160,11 @@ export type OurRun = {
   executed: string[];
   objective: string;
   trigger?: RunTrigger;
+  /** The intervals a Run that outlives one Turn actually worked, oldest first. The host only
+   *  reports these for a resident assistant instance, whose `started` says nothing about when it
+   *  was executing; an absent list means the Run is one continuous execution. `running` marks a
+   *  window whose Turn has not finished, so the view extends it to now instead of inventing an end. */
+  activity?: { start: string; end: string; running?: boolean }[];
 };
 
 export type TimelineItem = { schedule: string; graph: string; scheduled_at: string; run?: string; status: string };
@@ -232,6 +253,7 @@ function nodeState(nodeId: string, graph: OurGraph, state: OurRunState | null): 
   const skipped = state?.skipped?.includes(nodeId) ?? false;
 
   const status = running ? 'running'
+    : result?.exit_status === 'interrupted' ? 'interrupted'
     : result?.submitted ? 'completed'
     : result ? 'failed'
     : skipped ? 'skipped'

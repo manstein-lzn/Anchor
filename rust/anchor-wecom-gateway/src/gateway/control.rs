@@ -23,13 +23,17 @@ pub(super) struct Server {
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Request {
-    token: String,
-    operation: String,
-    request_id: String,
-    userid: String,
-    content: String,
+#[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
+enum Request {
+    Status {
+        token: String,
+    },
+    Send {
+        token: String,
+        request_id: String,
+        userid: String,
+        content: String,
+    },
 }
 
 impl Server {
@@ -98,20 +102,29 @@ async fn dispatch(
     }
     let request: Request = serde_json::from_slice(&bytes)
         .map_err(|_| GatewayError::Invalid("invalid channel request"))?;
-    if !bool::from(request.token.as_bytes().ct_eq(token.as_bytes())) {
+    let request_token = match &request {
+        Request::Status { token } | Request::Send { token, .. } => token,
+    };
+    if !bool::from(request_token.as_bytes().ct_eq(token.as_bytes())) {
         return Err(GatewayError::Invalid("unauthorized channel request"));
     }
-    if request.operation != "send" {
-        return Err(GatewayError::Invalid("unsupported channel operation"));
-    }
-    identity(Some(&json!(request.request_id)), 500)?;
-    identity(Some(&json!(request.userid)), 200)?;
-    if request.content.trim().is_empty() || request.content.len() > MAX_TEXT_BYTES {
+    let Request::Send {
+        request_id,
+        userid,
+        content,
+        ..
+    } = request
+    else {
+        return Ok(json!({"status": *status.borrow()}));
+    };
+    identity(Some(&json!(request_id)), 500)?;
+    identity(Some(&json!(userid)), 200)?;
+    if content.trim().is_empty() || content.len() > MAX_TEXT_BYTES {
         return Err(GatewayError::Invalid(
             "message content is empty or exceeds platform limits",
         ));
     }
-    if !allowed(users, &request.userid) {
+    if !allowed(users, &userid) {
         return Err(GatewayError::Invalid("recipient is not allowed"));
     }
     if *status.borrow() != ConnectionStatus::Authenticated {
@@ -119,9 +132,9 @@ async fn dispatch(
     }
     let (response, result) = oneshot::channel();
     send.try_send(SendRequest {
-        request_id: request.request_id,
-        userid: request.userid,
-        content: request.content,
+        request_id,
+        userid,
+        content,
         response,
     })
     .map_err(|error| match error {

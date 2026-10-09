@@ -1,5 +1,9 @@
 //! Run admission and control. Graph routing and node scheduling belong to GraphRunner.
+pub(crate) mod abandon;
+mod assistants;
+pub(crate) use abandon::AbandonAction;
 mod conversations;
+pub(crate) use assistants::AssistantAdmission;
 pub(crate) mod graphs;
 pub(crate) mod metadata;
 mod plugins;
@@ -146,6 +150,10 @@ impl RunApplication {
 
     pub(crate) async fn recover_detached_at_startup(&self) -> Result<(), ApplicationError> {
         self.recover_detached().await?;
+        // An abandon request accepted just before a crash must still make its
+        // Run terminal: it is the precondition for replacing a Graph's Plugin
+        // resources, and channel assistant recovery follows this step.
+        self.finalize_recorded_abandons_at_startup().await?;
         // A delivery receipt can be committed just before the service exits,
         // leaving its wait parent parked. Reuse ordinary child completion.
         for (id, _) in self.records()? {
@@ -192,6 +200,10 @@ impl RunApplication {
         } else {
             None
         }
+    }
+
+    pub(crate) async fn run_is_active(&self, run_id: &str) -> bool {
+        self.active.lock().await.contains_key(run_id)
     }
 
     pub(crate) fn metadata(&self, run_id: &str) -> Result<Option<RunMetadata>, ApplicationError> {
@@ -246,6 +258,30 @@ impl RunApplication {
         }
         children.sort_by(|a, b| a.run_id.cmp(&b.run_id));
         Ok(children)
+    }
+
+    /// Stop every child Run a parked parent still waits on, plus their pending
+    /// Session deliveries, exactly as an explicit `stop` does.
+    pub(super) async fn stop_wait_children(
+        &self,
+        run_id: &str,
+        wait_children: Vec<String>,
+    ) -> Result<(), ApplicationError> {
+        self.stop_wait_session_children(run_id).await?;
+        for child_id in wait_children {
+            if self.store().load(&child_id)?.is_some_and(|child| {
+                !matches!(
+                    child.status,
+                    RunStatus::Completed
+                        | RunStatus::Failed
+                        | RunStatus::Aborted
+                        | RunStatus::Stopped
+                )
+            }) {
+                let _ = Box::pin(self.control(&child_id, "stop")).await;
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn records(&self) -> Result<Vec<(String, GraphRunRecord)>, ApplicationError> {
@@ -463,6 +499,9 @@ impl RunApplication {
                 self.ensure_conversation_delete_settled(record, &active)?;
             }
         }
+        for (run_id, _) in &targets {
+            self.retire_assistant_for_deletion(run_id)?;
+        }
         let mut conversations = std::collections::BTreeMap::new();
         for (run_id, record) in &targets {
             if let Some(metadata) = self.metadata(run_id)? {
@@ -484,6 +523,23 @@ impl RunApplication {
                 .map_err(ApplicationError::Storage)?;
         }
         for (id, record) in &targets {
+            // Cascade deletion removes whole lineages, but a Host that dies
+            // halfway through must still leave every removed link explained.
+            if let Some(metadata) = self.metadata(id)?
+                && let Some(source) = metadata.conversation.as_ref()
+            {
+                crate::run_deletions::save(
+                    &self.data_root,
+                    &crate::run_deletions::RunDeletion::new(
+                        id,
+                        &Self::graph_identity(&metadata.bundle_source)?.to_string_lossy(),
+                        &source.session,
+                        &source.reply_node,
+                        source.previous_run.as_deref(),
+                    ),
+                )
+                .map_err(ApplicationError::Storage)?;
+            }
             run_data::delete_run_data(record, &self.data_root, workspace_root)
                 .map_err(ApplicationError::Storage)?;
             run_data::remove_run_files(&self.data_root, id).map_err(ApplicationError::Storage)?;
@@ -510,15 +566,21 @@ impl RunApplication {
         }
         let store = self.store();
         let record = store.load(run_id)?.ok_or(ApplicationError::Missing)?;
-        self.reject_conversation_successor(run_id)?;
+        let metadata = self.metadata(run_id)?;
         self.reject_pending_session_delivery(run_id)?;
-        if self
-            .metadata(run_id)?
-            .is_some_and(|metadata| metadata.conversation.is_some())
+        if let Some(metadata) = metadata.as_ref() {
+            self.ensure_channel_delivery_settled(metadata)?;
+        }
+        match metadata
+            .as_ref()
+            .filter(|metadata| metadata.conversation.is_some())
         {
-            return Err(ApplicationError::Conflict(
-                "conversation Runs can only be deleted with their complete Graph lineage".into(),
-            ));
+            // A conversation Run may only go once every later Run has stopped
+            // reading it; see `ensure_conversation_delete_allowed`.
+            Some(metadata) => {
+                self.ensure_conversation_delete_allowed(&record, metadata, &active)?;
+            }
+            None => self.reject_conversation_successor(run_id)?,
         }
         if !record.graph_calls.is_empty() {
             return Err(ApplicationError::Conflict(
@@ -562,6 +624,23 @@ impl RunApplication {
                     "Run artifact identity mismatch".into(),
                 ));
             }
+        }
+        // Durable before anything is removed: a Host that dies in the middle of
+        // this cleanup leaves an explained lineage gap, not corruption.
+        if let Some(metadata) = metadata.as_ref()
+            && let Some(source) = metadata.conversation.as_ref()
+        {
+            crate::run_deletions::save(
+                &self.data_root,
+                &crate::run_deletions::RunDeletion::new(
+                    run_id,
+                    &Self::graph_identity(&metadata.bundle_source)?.to_string_lossy(),
+                    &source.session,
+                    &source.reply_node,
+                    source.previous_run.as_deref(),
+                ),
+            )
+            .map_err(ApplicationError::Storage)?;
         }
         run_data::delete_run_data(&record, &self.data_root, workspace_root)
             .map_err(ApplicationError::Storage)?;
@@ -728,6 +807,14 @@ impl RunApplication {
         if !matches!(operation, "pause" | "resume" | "stop") {
             return Err(ApplicationError::Invalid("unknown Run control".into()));
         }
+        if operation == "resume" && self.abandon_intent(run_id)?.is_some() {
+            // Abandonment is one-way: a resumed Run would continue the round the
+            // operator gave up. The intent is durable, so this holds across a
+            // restart and while the terminal write is still in flight.
+            return Err(ApplicationError::Conflict(
+                "that Run was abandoned; start a new Run instead of resuming it".into(),
+            ));
+        }
         if self
             .metadata(run_id)?
             .is_some_and(|metadata| metadata.session_call.is_some())
@@ -835,6 +922,7 @@ impl RunApplication {
         let is_child = metadata.trigger_source == "graph_call";
         let graph_path = Self::graph_identity(&metadata.bundle_source)?;
         if operation == "resume" {
+            self.ensure_current_assistant(&metadata)?;
             self.check_execution_scope(&metadata, &active)?;
         }
         let graph_lease = if is_child {
@@ -858,28 +946,10 @@ impl RunApplication {
         if operation == "stop" && record.status == RunStatus::WaitingCall {
             record.status = RunStatus::Stopped;
             self.store().save(&record)?;
-            let wait_children = record
-                .graph_calls
-                .values()
-                .filter(|call| call.mode == "wait")
-                .filter_map(|call| call.child_run_id.clone())
-                .collect::<Vec<_>>();
+            let wait_children = wait_child_ids(&record);
             drop(active);
             drop(lease);
-            self.stop_wait_session_children(run_id).await?;
-            for child_id in wait_children {
-                if self.store().load(&child_id)?.is_some_and(|child| {
-                    !matches!(
-                        child.status,
-                        RunStatus::Completed
-                            | RunStatus::Failed
-                            | RunStatus::Aborted
-                            | RunStatus::Stopped
-                    )
-                }) {
-                    let _ = Box::pin(self.control(&child_id, "stop")).await;
-                }
-            }
+            self.stop_wait_children(run_id, wait_children).await?;
             let lease = self.store().acquire_lease(run_id)?;
             if let Some(mut current) = self.store().load(run_id)?
                 && current.status == RunStatus::WaitingCall
@@ -894,6 +964,7 @@ impl RunApplication {
             // Inactive stop preserves cursors and all completion facts; it dispatches no work.
             record.status = RunStatus::Stopped;
             self.store().save(&record)?;
+            self.settle_channel_run(run_id, RunStatus::Stopped)?;
             return Ok(());
         }
         if record.status == RunStatus::BudgetStopped {
@@ -957,6 +1028,13 @@ impl RunApplication {
         if attempt_id <= 0 || invocation == 0 || node_id.is_empty() {
             return Err(ApplicationError::Invalid(
                 "node_id, invocation, and positive attempt_id are required".into(),
+            ));
+        }
+        if self.abandon_intent(run_id)?.is_some() {
+            // A recorded abandon request is one-way: a recovery decision must
+            // not restart the round the operator gave up on.
+            return Err(ApplicationError::Conflict(
+                "that Run was abandoned; start a new Run instead of recovering it".into(),
             ));
         }
         let mut active = self.active.lock().await;
@@ -1146,6 +1224,7 @@ impl RunApplication {
         metadata: &RunMetadata,
         control: HostControl,
     ) -> Result<PreparedExecution, ApplicationError> {
+        self.ensure_current_assistant(metadata)?;
         let ids = record.plugin_bindings.keys().cloned().collect::<Vec<_>>();
         if !ids.is_empty() {
             let resolved = FilePluginCatalog::new(&metadata.bundle_source)
@@ -1392,6 +1471,17 @@ impl RunApplication {
                     }
                 }
             }
+            // A recorded abandon request makes the Run terminal even though the
+            // Runner could only stop it: either the cancellation this request
+            // caused, or a completion that won the race first.
+            let status = match application.finalize_recorded_abandon(&run_id).await {
+                Ok(Some(status)) => status,
+                Ok(None) => status,
+                Err(error) => {
+                    eprintln!("Run {run_id} abandon finalization failed: {error:?}");
+                    status
+                }
+            };
             if let Err(error) = application.settle_channel_run(&run_id, status) {
                 eprintln!("Run {run_id} channel Turn settlement failed: {error:?}");
             }
@@ -1421,6 +1511,17 @@ fn is_unfinished(status: RunStatus) -> bool {
             | RunStatus::BudgetStopped
             | RunStatus::Stopped
     )
+}
+
+/// Child Runs a parked parent still waits on. Only `wait` calls remain part of
+/// the caller's execution; a detach boundary has independent authority.
+fn wait_child_ids(record: &GraphRunRecord) -> Vec<String> {
+    record
+        .graph_calls
+        .values()
+        .filter(|call| call.mode == "wait")
+        .filter_map(|call| call.child_run_id.clone())
+        .collect()
 }
 
 fn storage(error: impl std::fmt::Display) -> ApplicationError {

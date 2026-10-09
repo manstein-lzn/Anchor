@@ -15,14 +15,17 @@ mod channel_media;
 mod channel_sessions;
 mod conversations;
 mod graph_deletion;
+mod graph_listeners;
 mod graph_validation;
 mod oauth;
+mod persistent_assistants;
 mod platform_contract;
 mod plugin_installation;
 mod plugin_library;
 mod production_readiness;
 mod questions;
 mod responses;
+mod run_abandon;
 mod run_plugins;
 mod schedules;
 mod session_calls;
@@ -91,6 +94,7 @@ fn fixture() -> (tempfile::TempDir, ApiState) {
             account: Some("corp-a".into()),
             users: HashSet::from(["*".into()]),
         },
+        channel_descriptors: Default::default(),
         channel_event_locks: Default::default(),
         plugin_checkout: None,
         response_fixture: Some("deterministic response fixture".into()),
@@ -121,6 +125,21 @@ async fn call(app: Router, method: &str, uri: &str, body: Option<&str>) -> (Stat
     (status, value)
 }
 
+/// Read a response body as text: SSE routes answer with an event stream, not
+/// JSON, so the JSON helper cannot inspect them.
+async fn call_text(app: Router, method: &str, uri: &str) -> (StatusCode, String) {
+    let request = Request::builder()
+        .method(method)
+        .uri(uri)
+        .body(Body::empty())
+        .unwrap();
+    let response = app.oneshot(request).await.unwrap();
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), 4 * 1024 * 1024)
+        .await
+        .unwrap();
+    (status, String::from_utf8_lossy(&bytes).to_string())
+}
 #[tokio::test]
 async fn health_and_graph_routes_return_loaded_bundle_projection() {
     let (_root, state) = fixture();

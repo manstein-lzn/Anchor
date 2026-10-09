@@ -9,7 +9,9 @@ use sha2::{Digest, Sha256};
 use std::time::Duration;
 
 const MAX_EVENT_TEXT_BYTES: usize = 100_000;
-const RUN_WAIT: Duration = Duration::from_secs(120);
+/// Interrupted user messages folded into the next Run of the same session.
+const MAX_INTERRUPTED_MESSAGES: usize = 8;
+const MAX_INTERRUPTED_MESSAGE_CHARS: usize = 500;
 const RUN_POLL: Duration = Duration::from_millis(50);
 
 #[derive(Debug, Deserialize)]
@@ -63,7 +65,7 @@ impl WecomEvent {
                 "WeCom Graph and reply node are not configured",
             ));
         }
-        self.validate_payload()?;
+        self.validate_payload(true)?;
         if !config.allows(&self.sender_id) {
             return Err(error(StatusCode::FORBIDDEN, "WeCom user is not allowed"));
         }
@@ -71,14 +73,16 @@ impl WecomEvent {
     }
 
     fn validate_settlement_event(&self) -> Result<(), HttpResponse> {
-        self.validate_payload()
+        // A settlement identifies the event and its receipt. It does not carry
+        // attachment content, because the gateway cannot resend fetched media.
+        self.validate_payload(false)
     }
 
-    fn validate_payload(&self) -> Result<(), HttpResponse> {
+    fn validate_payload(&self, require_content: bool) -> Result<(), HttpResponse> {
         if self.source != "wecom"
             || !matches!(
                 self.message_type.as_str(),
-                "text" | "mixed" | "image" | "file"
+                "text" | "mixed" | "image" | "file" | "voice"
             )
             || self.event_id.trim().is_empty()
             || self.event_id.len() > 500
@@ -88,10 +92,11 @@ impl WecomEvent {
             || self.conversation_id.len() > 200
             || self.reply_target != self.conversation_id
             || self.text.len() > MAX_EVENT_TEXT_BYTES
-            || (self.text.trim().is_empty() && self.attachments.is_empty())
-            || (self.message_type == "text" && !self.attachments.is_empty())
-            || (matches!(self.message_type.as_str(), "image" | "file")
-                && self.attachments.is_empty())
+            || (require_content
+                && (self.text.trim().is_empty() && self.attachments.is_empty()
+                    || (self.message_type == "text" && !self.attachments.is_empty())
+                    || (matches!(self.message_type.as_str(), "image" | "file" | "voice")
+                        && self.attachments.is_empty())))
             || self.metadata.len() != 2
             || self
                 .metadata
@@ -113,13 +118,20 @@ impl WecomEvent {
     }
 
     fn inbound_id(&self) -> String {
-        let mut digest = Sha256::new();
-        digest.update(b"anchor-wecom-inbound-v1\0");
-        digest.update(self.source.as_bytes());
-        digest.update([0]);
-        digest.update(self.event_id.as_bytes());
-        format!("wecom-{:x}", digest.finalize())
+        inbound_id_for(&self.source, &self.event_id)
     }
+}
+
+/// The single definition of a WeCom inbound identity: `sha256` over the domain
+/// tag, the platform source and the platform message id. The admission path and
+/// the read-only progress path must agree on it, so neither may reimplement it.
+pub(super) fn inbound_id_for(source: &str, event_id: &str) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"anchor-wecom-inbound-v1\0");
+    digest.update(source.as_bytes());
+    digest.update([0]);
+    digest.update(event_id.as_bytes());
+    format!("wecom-{:x}", digest.finalize())
 }
 
 pub(super) async fn receive_event(
@@ -167,12 +179,15 @@ pub(super) async fn receive_event(
             })
             .collect(),
     };
-    let (_, bundle) = load_graph_definition(&state, &state.wecom.graph).map_err(|_| {
-        error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "configured WeCom Graph is unavailable",
-        )
-    })?;
+    let (bundle_path, bundle) =
+        load_graph_definition(&state, &state.wecom.graph).map_err(|_| {
+            error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "configured WeCom Graph is unavailable",
+            )
+        })?;
+    let assistant_plan =
+        crate::assistant::AssistantPlan::from_snapshot(&bundle.snapshot, &state.wecom.reply_node);
     if !bundle
         .snapshot
         .nodes
@@ -192,7 +207,6 @@ pub(super) async fn receive_event(
         event.text.clone()
     };
     let owner = private_owner(&state, &headers);
-    let deadline = tokio::time::Instant::now() + RUN_WAIT;
     let lock_key = format!(
         "{}\0{}\0{}\0{}\0{}",
         owner,
@@ -201,6 +215,39 @@ pub(super) async fn receive_event(
         event.conversation_id,
         event.sender_id
     );
+    // Persist the accepted message before serialising on the conversation. The
+    // inbound row is the durable fact that makes an accepted message visible —
+    // the progress projection, pending assistant inputs and supersede
+    // bookkeeping all read it — while the channel lock still guards Run
+    // admission and keeps one conversation strictly serial. Admission stays
+    // idempotent per event and supersedes the previous running Turn inside the
+    // same store transaction, so the winner never depends on lock order.
+    let inbound_id = event.inbound_id();
+    let request = ChannelInboundRequest {
+        inbound_id: inbound_id.clone(),
+        identity: ChannelIdentity {
+            source: "wecom".into(),
+            account: state.wecom.account.clone(),
+            conversation_id: event.conversation_id.clone(),
+            sender_id: event.sender_id.clone(),
+        },
+        graph: state.wecom.graph.clone(),
+        reply_node: state.wecom.reply_node.clone(),
+        text: Some(input_message.clone()),
+        attachments: channel_attachments.clone(),
+        run_id: None,
+        replace_running: true,
+    };
+    let admission = {
+        let state_for_admission = state.clone();
+        let owner_for_admission = owner.clone();
+        blocking(move || {
+            store(&state_for_admission)?
+                .admit_channel_inbound(&owner_for_admission, request)
+                .map_err(session_error)
+        })
+        .await?
+    };
     let channel_lock = {
         let mut locks = state.channel_event_locks.lock().await;
         locks.retain(|_, lock| std::sync::Arc::strong_count(lock) > 1);
@@ -211,85 +258,135 @@ pub(super) async fn receive_event(
     };
     let admitted = {
         let _guard = channel_lock.lock().await;
-        let inbound_id = event.inbound_id();
-        let request = ChannelInboundRequest {
-            inbound_id: inbound_id.clone(),
-            identity: ChannelIdentity {
-                source: "wecom".into(),
-                account: state.wecom.account.clone(),
-                conversation_id: event.conversation_id.clone(),
-                sender_id: event.sender_id.clone(),
-            },
-            graph: state.wecom.graph.clone(),
-            reply_node: state.wecom.reply_node.clone(),
-            text: Some(input_message.clone()),
-            attachments: channel_attachments.clone(),
-            run_id: None,
-            replace_running: true,
-        };
-        let state_for_admission = state.clone();
-        let owner_for_admission = owner.clone();
-        let session_event_id = inbound_id.clone();
-        let (admission, inbound) = blocking(move || {
-            let sessions = store(&state_for_admission)?;
-            let admission = sessions
-                .admit_channel_inbound(&owner_for_admission, request)
-                .map_err(session_error)?;
-            let inbound = sessions
-                .get_channel_inbound(
-                    &owner_for_admission,
-                    &admission.session.id,
-                    &session_event_id,
-                )
-                .map_err(session_error)?;
-            Ok((admission, inbound))
-        })
-        .await?;
-
-        if inbound.relation.superseded_by_turn_id.is_some() {
-            return Ok((StatusCode::OK, Json(json!({"text":"","superseded":true}))));
-        }
-        let run = format!("channel-{}", admission.turn.id);
-        if let Some(previous) = inbound.previous_run.as_deref() {
-            stop_previous_run(&state, previous, deadline).await?;
-        }
+        // Authoritative state under the lock: between admission and
+        // serialisation another message may have superseded this Turn.
         let current =
             read_channel_inbound(&state, &owner, &admission.session.id, &inbound_id).await?;
         if current.relation.superseded_by_turn_id.is_some() {
             return Ok((StatusCode::OK, Json(json!({"text":"","superseded":true}))));
         }
-        let channel = json!({
-            "source":"wecom",
-            "conversation_id":event.conversation_id,
-            "sender_id":event.sender_id,
-            "reply_target":event.reply_target,
-        });
-        let request = crate::application::ConversationAdmission {
-            graph: state.wecom.graph.clone(),
-            run: run.clone(),
-            session: admission.session.id.clone(),
-            reply_node: state.wecom.reply_node.clone(),
-            input: json!({
+        let saved_assistant = store(&state)?
+            .get_channel_assistant(&owner, &admission.session.id)
+            .map_err(session_error)?;
+        let persistent_assistant =
+            assistant_plan.as_ref().is_ok_and(Option::is_some) || saved_assistant.is_some();
+        if persistent_assistant {
+            let run = match saved_assistant {
+                Some(binding) => binding.run_id,
+                None => {
+                    let plan = assistant_plan
+                        .map_err(|message| error(StatusCode::BAD_REQUEST, message))?
+                        .ok_or_else(|| {
+                            error(StatusCode::CONFLICT, "assistant Graph has no input loop")
+                        })?;
+                    let previous_run = match current.previous_run.as_deref() {
+                        Some(previous) if stop_previous_run(&state, previous).await? => {
+                            Some(previous.to_owned())
+                        }
+                        _ => None,
+                    };
+                    let run = format!("assistant-{}", admission.turn.id);
+                    let lease = state
+                        .application
+                        .acquire_graph_lease_waiting(&bundle_path)
+                        .await
+                        .map_err(application_error)?;
+                    state
+                        .application
+                        .admit_assistant(
+                            crate::application::AssistantAdmission {
+                                graph: state.wecom.graph.clone(),
+                                session: admission.session.id.clone(),
+                                owner: owner.clone(),
+                                oauth_owner: super::oauth::binding_owner(&owner),
+                                run,
+                                previous_run,
+                            },
+                            &bundle_path,
+                            bundle,
+                            lease,
+                            plan,
+                        )
+                        .await
+                        .map_err(application_error)?
+                }
+            };
+            let metadata = crate::application::metadata::load(&state.data_root, &run)
+                .map_err(application_error)?
+                .ok_or_else(|| error(StatusCode::CONFLICT, "assistant metadata is missing"))?;
+            if metadata.assistant.as_ref().is_none_or(|binding| {
+                binding.owner != owner || binding.session != admission.session.id
+            }) {
+                return Err(error(
+                    StatusCode::FORBIDDEN,
+                    "assistant binding does not belong to this Session",
+                ));
+            }
+            let mut selected = metadata.clone();
+            selected.run_id = format!("turn-{}", admission.turn.id);
+            selected.attachments = prepared_attachments.manifest();
+            crate::channel_inputs::freeze(&state.data_root, &selected, &prepared_attachments)
+                .map_err(|message| error(StatusCode::CONFLICT, message))?;
+            crate::assistant::signal(&admission.session.id).notify_waiters();
+            AdmittedRun {
+                run_id: run,
+                session: admission.session.id,
+            }
+        } else {
+            assistant_plan.map_err(|message| error(StatusCode::BAD_REQUEST, message))?;
+            let run = format!("channel-{}", admission.turn.id);
+            let previous_run = match current.previous_run.as_deref() {
+                Some(previous) if stop_previous_run(&state, previous).await? => {
+                    Some(previous.to_owned())
+                }
+                _ => None,
+            };
+            let channel = json!({
+                "source":"wecom",
+                "conversation_id":event.conversation_id,
+                "sender_id":event.sender_id,
+                "reply_target":event.reply_target,
+            });
+            // A new message interrupts the previous turn. Whatever the model has
+            // not been asked yet travels with this Run, so the interrupted work
+            // continues with the new information instead of disappearing.
+            let interrupted =
+                read_interrupted_messages(&state, &owner, &admission.session.id, &inbound_id)
+                    .await?;
+            let mut input = json!({
                 "message":input_message,
                 "channel":channel,
                 "session":admission.session.id,
-            }),
-            previous_run: current.previous_run,
-            attachments: std::mem::take(&mut event.attachments),
-            channel_inbound: Some(inbound_id),
-        };
-        let (status, accepted) =
-            super::runs::conversation_run(State(state.clone()), headers.clone(), Ok(Json(request)))
-                .await?;
-        if status != StatusCode::ACCEPTED || accepted.0["run"] != run {
-            return Err(error(
-                StatusCode::BAD_GATEWAY,
-                "WeCom Graph admission returned an unexpected Run",
-            ));
-        }
-        AdmittedRun {
-            run_id: run,
-            session: admission.session.id,
+            });
+            if !interrupted.is_empty() {
+                input["interrupted_messages"] = json!(interrupted);
+            }
+            let request = crate::application::ConversationAdmission {
+                graph: state.wecom.graph.clone(),
+                run: run.clone(),
+                session: admission.session.id.clone(),
+                reply_node: state.wecom.reply_node.clone(),
+                input,
+                previous_run,
+                attachments: std::mem::take(&mut event.attachments),
+                channel_inbound: Some(inbound_id),
+            };
+            let (status, accepted) = super::runs::conversation_run(
+                State(state.clone()),
+                headers.clone(),
+                Ok(Json(request)),
+            )
+            .await?;
+            if status != StatusCode::ACCEPTED || accepted.0["run"] != run {
+                return Err(error(
+                    StatusCode::BAD_GATEWAY,
+                    "WeCom Graph admission returned an unexpected Run",
+                ));
+            }
+            AdmittedRun {
+                run_id: run,
+                session: admission.session.id,
+            }
         }
     };
 
@@ -300,7 +397,6 @@ pub(super) async fn receive_event(
         &admitted.session,
         &event.inbound_id(),
         &admitted.run_id,
-        deadline,
     )
     .await?
     else {
@@ -350,12 +446,21 @@ pub(super) async fn receive_event(
     if delivery.status == ChannelDeliveryStatus::Suppressed {
         return Ok((StatusCode::OK, Json(json!({"text":"","superseded":true}))));
     }
-    let response = json!({
-        "text":reply.text,
-        "session":reply.session,
+    let ChannelReply {
+        session: reply_session,
+        turn: _,
+        text,
+        items,
+    } = reply;
+    let mut response = json!({
+        "text":text,
+        "session":reply_session,
         "run":admitted.run_id,
         "receipt":{"key":key,"content_sha256":content_sha256},
     });
+    if !items.is_empty() {
+        response["msg_item"] = json!(items);
+    }
     Ok((StatusCode::OK, Json(response)))
 }
 
@@ -363,6 +468,7 @@ struct ChannelReply {
     session: String,
     turn: String,
     text: String,
+    items: Vec<Value>,
 }
 
 struct AdmittedRun {
@@ -377,7 +483,6 @@ async fn wait_for_channel_reply(
     session: &str,
     inbound_id: &str,
     run_id: &str,
-    deadline: tokio::time::Instant,
 ) -> Result<Option<ChannelReply>, HttpResponse> {
     loop {
         let inbound = read_channel_inbound(state, owner, session, inbound_id).await?;
@@ -389,6 +494,103 @@ async fn wait_for_channel_reply(
         let record = FileRunStore::new(state.data_root.join("runs"))
             .load(run_id)
             .map_err(|failure| error(StatusCode::INTERNAL_SERVER_ERROR, failure.to_string()))?;
+        if let Some(record) = record.as_ref() {
+            let metadata = crate::application::metadata::load(&state.data_root, run_id)
+                .map_err(application_error)?;
+            if let Some(source) = metadata
+                .as_ref()
+                .and_then(|metadata| metadata.assistant.as_ref())
+            {
+                if source.owner != owner || source.session != session {
+                    return Err(error(
+                        StatusCode::FORBIDDEN,
+                        "assistant reply belongs to another Session",
+                    ));
+                }
+                if let Some(results) = record.results.get(&source.reply_node) {
+                    for result in results.iter().rev() {
+                        let Some(binding) =
+                            crate::assistant::binding(&state.data_root, &result.key)
+                                .map_err(|message| error(StatusCode::CONFLICT, message))?
+                        else {
+                            continue;
+                        };
+                        if binding.turn != inbound.relation.turn_id || binding.inbound != inbound_id
+                        {
+                            continue;
+                        }
+                        if result.completion.output.get("suppressed") == Some(&json!(true)) {
+                            return Ok(None);
+                        }
+                        if result
+                            .completion
+                            .output
+                            .get("reply_for")
+                            .and_then(Value::as_str)
+                            != Some(binding.turn.as_str())
+                            || result.completion.submission.trim().is_empty()
+                        {
+                            return Err(error(
+                                StatusCode::CONFLICT,
+                                "assistant reply identity changed",
+                            ));
+                        }
+                        let commit: anchor_runtime::graph::CommitRef = serde_json::from_value(
+                            result.completion.output["source_commit"].clone(),
+                        )
+                        .map_err(|_| {
+                            error(StatusCode::CONFLICT, "assistant reply source is missing")
+                        })?;
+                        let work_key = anchor_runtime::graph::InvocationKey {
+                            node_id: commit.node_id,
+                            invocation: commit.invocation,
+                            ..result.key.clone()
+                        };
+                        let items = crate::channel_tools::read_reply_images_for_invocation(
+                            &state.data_root,
+                            &work_key,
+                        )
+                        .map_err(|message| error(StatusCode::UNPROCESSABLE_ENTITY, message))?;
+                        if json!(items) != result.completion.output["items"] {
+                            return Err(error(
+                                StatusCode::CONFLICT,
+                                "assistant reply image set changed",
+                            ));
+                        }
+                        if inbound.turn.status == TurnStatus::Running {
+                            store(state)?
+                                .finish_turn(
+                                    owner,
+                                    session,
+                                    &binding.turn,
+                                    TurnStatus::Completed,
+                                    None,
+                                )
+                                .map_err(session_error)?;
+                        }
+                        return Ok(Some(ChannelReply {
+                            session: session.to_owned(),
+                            turn: binding.turn,
+                            text: result.completion.submission.clone(),
+                            items,
+                        }));
+                    }
+                }
+                if matches!(
+                    record.status,
+                    RunStatus::Failed | RunStatus::Aborted | RunStatus::Stopped
+                ) || (matches!(record.status, RunStatus::Ready | RunStatus::Running)
+                    && !state.application.run_is_active(run_id).await)
+                {
+                    return Err(error(
+                        StatusCode::CONFLICT,
+                        "assistant is stopped; explicit resume or a new instance is required",
+                    ));
+                }
+                tokio::time::sleep(RUN_POLL).await;
+                continue;
+            }
+        }
         if let Some(record) = record
             && !state
                 .application
@@ -399,15 +601,7 @@ async fn wait_for_channel_reply(
             match record.status {
                 RunStatus::Completed => {
                     if inbound.turn.status != TurnStatus::Completed {
-                        let elapsed =
-                            deadline.saturating_duration_since(tokio::time::Instant::now());
-                        if elapsed.is_zero() {
-                            return Err(error(
-                                StatusCode::GATEWAY_TIMEOUT,
-                                "WeCom Graph is still running",
-                            ));
-                        }
-                        tokio::time::sleep(RUN_POLL.min(elapsed)).await;
+                        tokio::time::sleep(RUN_POLL).await;
                         continue;
                     }
                     let Some(result) = record
@@ -426,22 +620,17 @@ async fn wait_for_channel_reply(
                             "WeCom reply node produced an empty reply",
                         ));
                     }
-                    let path = state
-                        .data_root
-                        .join("channel-replies")
-                        .join(format!("{run_id}.json"));
-                    if path.try_exists().map_err(|failure| {
-                        error(StatusCode::INTERNAL_SERVER_ERROR, failure.to_string())
-                    })? {
-                        return Err(error(
-                            StatusCode::UNPROCESSABLE_ENTITY,
-                            "rich WeCom replies are not supported by the configured Gateway",
-                        ));
-                    }
+                    // The configured Gateway delivers text plus validated reply
+                    // images. Anything else in the file is refused here rather
+                    // than silently dropped by the transport.
+                    let items =
+                        crate::channel_tools::read_reply_images(&state.data_root, run_id)
+                            .map_err(|failure| error(StatusCode::UNPROCESSABLE_ENTITY, failure))?;
                     return Ok(Some(ChannelReply {
                         session: session.to_owned(),
                         turn: inbound.relation.turn_id,
                         text: result.completion.submission.clone(),
+                        items,
                     }));
                 }
                 RunStatus::Failed | RunStatus::Aborted | RunStatus::Stopped => {
@@ -458,15 +647,47 @@ async fn wait_for_channel_reply(
                 | RunStatus::WaitingRecovery => {}
             }
         }
-        let elapsed = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if elapsed.is_zero() {
-            return Err(error(
-                StatusCode::GATEWAY_TIMEOUT,
-                "WeCom Graph is still running",
-            ));
-        }
-        tokio::time::sleep(RUN_POLL.min(elapsed)).await;
+        tokio::time::sleep(RUN_POLL).await;
     }
+}
+
+/// User messages this session has no confirmed reply for, newest last.
+async fn read_interrupted_messages(
+    state: &ApiState,
+    owner: &str,
+    session: &str,
+    inbound_id: &str,
+) -> Result<Vec<String>, HttpResponse> {
+    let state = state.clone();
+    let owner = owner.to_owned();
+    let session = session.to_owned();
+    let inbound_id = inbound_id.to_owned();
+    blocking(move || {
+        let pending = store(&state)?
+            .pending_channel_messages(&owner, &session, &inbound_id, MAX_INTERRUPTED_MESSAGES)
+            .map_err(session_error)?;
+        Ok(pending
+            .iter()
+            .filter_map(interrupted_text)
+            .collect::<Vec<_>>())
+    })
+    .await
+}
+
+fn interrupted_text(message: &anchor_platform_session::ChannelPendingMessage) -> Option<String> {
+    let text = message.text.trim();
+    let rendered = match (text.is_empty(), message.attachments) {
+        (false, 0) => text.to_owned(),
+        (false, count) => format!("{text}（同一条消息还附带了 {count} 个文件）"),
+        (true, 0) => return None,
+        (true, count) => format!("（用户发来 {count} 个文件，本轮工作区没有挂载这些文件）"),
+    };
+    Some(
+        rendered
+            .chars()
+            .take(MAX_INTERRUPTED_MESSAGE_CHARS)
+            .collect(),
+    )
 }
 
 async fn read_channel_inbound(
@@ -500,16 +721,23 @@ async fn channel_was_superseded(
         .is_some())
 }
 
-async fn stop_previous_run(
+pub(super) async fn stop_previous_run(
     state: &ApiState,
     run_id: &str,
-    deadline: tokio::time::Instant,
-) -> Result<(), HttpResponse> {
+) -> Result<bool, HttpResponse> {
     let active = state.application.active_runs(None).await;
     let record = FileRunStore::new(state.data_root.join("runs"))
         .load(run_id)
-        .map_err(|failure| error(StatusCode::INTERNAL_SERVER_ERROR, failure.to_string()))?
-        .ok_or_else(|| error(StatusCode::CONFLICT, "previous channel Run is missing"))?;
+        .map_err(|failure| error(StatusCode::INTERNAL_SERVER_ERROR, failure.to_string()))?;
+    let Some(record) = record else {
+        if active.contains(&run_id.to_owned()) {
+            return Err(error(
+                StatusCode::CONFLICT,
+                "previous channel Run is active but its durable record is missing",
+            ));
+        }
+        return Ok(false);
+    };
     if (active.contains(&run_id.to_owned())
         || !matches!(
             record.status,
@@ -533,24 +761,25 @@ async fn stop_previous_run(
         let active = state.application.active_runs(None).await;
         let record = FileRunStore::new(state.data_root.join("runs"))
             .load(run_id)
-            .map_err(|failure| error(StatusCode::INTERNAL_SERVER_ERROR, failure.to_string()))?
-            .ok_or_else(|| error(StatusCode::CONFLICT, "previous channel Run is missing"))?;
+            .map_err(|failure| error(StatusCode::INTERNAL_SERVER_ERROR, failure.to_string()))?;
+        let Some(record) = record else {
+            if active.contains(&run_id.to_owned()) {
+                return Err(error(
+                    StatusCode::CONFLICT,
+                    "previous channel Run is active but its durable record is missing",
+                ));
+            }
+            return Ok(false);
+        };
         if !active.contains(&run_id.to_owned())
             && matches!(
                 record.status,
                 RunStatus::Completed | RunStatus::Failed | RunStatus::Aborted | RunStatus::Stopped
             )
         {
-            return Ok(());
+            return Ok(true);
         }
-        let elapsed = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if elapsed.is_zero() {
-            return Err(error(
-                StatusCode::GATEWAY_TIMEOUT,
-                "previous channel Run has not stopped",
-            ));
-        }
-        tokio::time::sleep(RUN_POLL.min(elapsed)).await;
+        tokio::time::sleep(RUN_POLL).await;
     }
 }
 
@@ -613,10 +842,14 @@ async fn settle_delivery_value(
             .map_err(session_error)
     })
     .await?;
+    // An attachment-only message is admitted with a synthesized instruction, so
+    // the platform's own empty text can never match it. The receipt key names
+    // this exact inbound and the identity fields below pin the sender and
+    // conversation, which is what "the same message" means here.
     if inbound.request.identity.source != envelope.event.source
         || inbound.request.identity.conversation_id != envelope.event.conversation_id
         || inbound.request.identity.sender_id != envelope.event.sender_id
-        || inbound.request.text.as_deref() != Some(envelope.event.text.as_str())
+        || inbound.request.text.as_deref().is_none()
     {
         return Err(error(
             StatusCode::NOT_FOUND,

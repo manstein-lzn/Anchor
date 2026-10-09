@@ -131,6 +131,126 @@ fn run_binding_populates_channel_turn_and_session_relations() {
 }
 
 #[test]
+fn turn_windows_report_only_the_turns_this_run_executed() {
+    let (_directory, store) = fixture();
+    let first = store
+        .admit_channel_inbound("owner", request("message-1", "conversation-1"))
+        .unwrap();
+    store
+        .bind_channel_assistant(
+            "owner",
+            &first.session.id,
+            "resident-run-1",
+            "wait_input",
+            "reply",
+            "reply",
+        )
+        .unwrap();
+    store
+        .claim_channel_assistant_input(
+            "owner",
+            &first.session.id,
+            "resident-run-1",
+            "resident-run-1:digest:wait_input:1",
+        )
+        .unwrap()
+        .unwrap();
+    store
+        .finish_turn(
+            "owner",
+            &first.session.id,
+            &first.turn.id,
+            TurnStatus::Completed,
+            None,
+        )
+        .unwrap();
+
+    // The same resident Run keeps taking the Session's next Turn.
+    let second = store
+        .admit_channel_inbound("owner", request("message-2", "conversation-1"))
+        .unwrap();
+    store
+        .claim_channel_assistant_input(
+            "owner",
+            &first.session.id,
+            "resident-run-1",
+            "resident-run-1:digest:wait_input:2",
+        )
+        .unwrap()
+        .unwrap();
+
+    let mut other = request("message-3", "conversation-2");
+    other.run_id = Some("other-run".into());
+    let other = store.admit_channel_inbound("owner", other).unwrap();
+
+    let windows = store.turn_windows_for_run("resident-run-1").unwrap();
+    assert_eq!(windows.len(), 2);
+    assert_eq!(windows[0].created_at, first.turn.created_at);
+    assert!(!windows[0].running);
+    assert!(windows[0].updated_at > first.turn.created_at);
+    assert_eq!(windows[1].created_at, second.turn.created_at);
+    assert!(windows[1].running);
+
+    let other_windows = store.turn_windows_for_run("other-run").unwrap();
+    assert_eq!(other_windows.len(), 1);
+    assert_eq!(other_windows[0].created_at, other.turn.created_at);
+    assert!(
+        store
+            .turn_windows_for_run("unknown-run")
+            .unwrap()
+            .is_empty()
+    );
+    assert!(matches!(
+        store.turn_windows_for_run("../escape"),
+        Err(SessionError::Invalid(_))
+    ));
+}
+
+#[test]
+fn inbound_lookup_resolves_the_run_inside_its_owner_scope() {
+    let (_directory, store) = fixture();
+    // Admission without a Run yet: the message exists but has nothing to watch.
+    let pending = store
+        .admit_channel_inbound("owner", request("message-1", "conversation-1"))
+        .unwrap();
+    let lookup = store
+        .channel_run_for_inbound("owner", "message-1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(lookup.session_id, pending.session.id);
+    assert_eq!(lookup.turn_id, pending.turn.id);
+    assert_eq!(lookup.run_id, None);
+
+    // Once the Run is bound the same lookup reports it. A channel Session runs
+    // one Turn at a time, so the second message opens its own conversation.
+    let mut bound = request("message-2", "conversation-2");
+    bound.run_id = Some("channel-run-2".into());
+    store.admit_channel_inbound("owner", bound).unwrap();
+    let lookup = store
+        .channel_run_for_inbound("owner", "message-2")
+        .unwrap()
+        .unwrap();
+    assert_eq!(lookup.run_id.as_deref(), Some("channel-run-2"));
+
+    // Another owner sees nothing, and the identity is validated.
+    assert!(
+        store
+            .channel_run_for_inbound("other", "message-2")
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .channel_run_for_inbound("owner", "missing")
+            .unwrap()
+            .is_none()
+    );
+    assert_invalid(store.channel_run_for_inbound("owner", ""));
+    assert_invalid(store.channel_run_for_inbound("owner", "bad\nid"));
+    assert_invalid(store.channel_run_for_inbound("", "message-2"));
+}
+
+#[test]
 fn attachment_manifest_is_frozen_and_changes_are_rejected() {
     let (_directory, store) = fixture();
     let original = attachment_request();

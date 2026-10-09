@@ -31,7 +31,7 @@ Anchor 是本地优先、可观察、可恢复的 Agent 工作系统。用户通
 | HTTP、CLI、企业微信请求、身份和协议 | 入口适配器 | 可信来源/请求 |
 | Run 接纳/控制、Session 协调、入口共用用例 | Host 应用服务 | 产品执行身份 |
 | Graph 编译、路由、反馈、并行调度 | Kernel / Runner | Graph IR / Run cursor |
-| Agent/Op 执行、结构化结果、ACP/MCP 接入 | Node Runtime | invocation 与工具观察 |
+| Agent/Op 执行、结构化结果、ACP/MCP、通用 host operation 端口 | Node Runtime；具体 host 能力由宿主适配 | invocation 与工具观察 |
 | 文件、网络、进程、凭证和隔离 | Sandbox / 宿主授权 | 获准能力与冻结输入 |
 | Skill、资源、业务工具和外部系统 | Plugin / Library | 可复用能力资产 |
 | 研究、周报、审查目标与内容验收 | 普通 Graph / Plugin | 业务证据与结论 |
@@ -47,10 +47,10 @@ Anchor 是本地优先、可观察、可恢复的 Agent 工作系统。用户通
 | --- | --- |
 | Plugin | 独立清单、Skill、资源和工具入口；多个节点可以引用同一资产 |
 | AgentNode | Graph 内角色引用、任务、Plugin 与权限；模型在节点 workspace 执行 |
-| OpNode | Graph 内确定性命令、独立调用或配对并行控制 |
+| OpNode | Graph 内确定性命令、独立调用、配对并行控制或获授权 host operation |
 | Graph | 可编辑 JSON、节点、边、接口、目标与 layout |
-| Run | 冻结定义、输入/资源授权、节点工作区、Artifact、路由和工具轨迹 |
-| Session | 长期对话、可信来源、Turn、问题/回答和关联 Run |
+| Run | 冻结定义、启动输入/资源授权、cursor、节点工作区绑定、逐 invocation Artifact、路由和工具轨迹 |
+| Session | 长期对话、可信来源、Turn、幂等、问题/回答和关联 Run；常驻助手 current/历史 binding 与 retire 事实 |
 | Turn | 一次幂等输入或继续请求，保留事件游标、取消与投递身份 |
 | Pilot | 管理和协作入口；系统级 Graph 与保护策略为后续需求 |
 
@@ -63,6 +63,8 @@ Anchor 是本地优先、可观察、可恢复的 Agent 工作系统。用户通
 Graph 默认目标和单次 Run 输入分别保存。手动、计划、Webhook、Responses 与渠道共用接纳，Run 保留触发来源；一次输入不能修改 Graph 默认值。忙碌、停机错过与控制请求的状态必须可解释，计划不另建第二套调度器。
 
 每个节点拥有 workspace。完成后提交不可变 Artifact，输入关联上游节点与具体提交。反馈回访从同 Run 同节点最近已提交产物延续；已开始 invocation 保留现场；跨 Run 不自动继承。只读 Git 输入视图服务审查和 commit 绑定，不是第二套可写历史。
+
+当前常驻助手显式复用同 Run、同节点的稳定可写 workspace，不共用全 Graph 可写目录；逐轮 invocation 与 fs2 Artifact 仍不可变，可写现场数量与历史快照数量是不同指标。新实例的首个 Agent 可从可信、获授权的 previous 提交或中断快照初始化文件一次，而不是每轮复制 `/previous`。普通一次性 Graph 保持既有默认。中断先保存现场 checkpoint，再提交 `Yielded`/`Interruption` 控制证据并沿普通 route 接续，未完成现场不能冒充成功文件或回复。
 
 AgentNode 必须通过原生授权完成工具提交 `summary` 和可选 `route`。普通回答或看似正确的 JSON 不代表完成；缺少必需信息、非法路由或未完成现场核查，应反馈给同一 Agent 修正。机械门禁不能被模型判断替代。
 
@@ -86,6 +88,8 @@ AgentNode 必须通过原生授权完成工具提交 `summary` 和可选 `route`
 
 Session 与 Run 分别拥有状态。Session 只引用真实 Run，不复制另一份运行状态。删除前必须处理关联 Run 和原生历史范围；单条持续会话 Run 删除受共享 scope 约束，不能破坏仍在使用的历史。
 
+常驻实例的 stop/resume 与 explicit retire 分开：stop/resume 保留 current binding 和冻结快照；retire 要求 Run 已真实 Stopped/终态且非 active，Session 的 Running Turn 及 pending/sending/unknown delivery 均阻断退役。退役保留历史、禁止旧 Run resume 或重新绑定，下一条可信消息惰性创建新实例；画布更新不热改旧 Run。Graph cascade 删除先完成保护与退役，再按 owned bindings 清理输入、回复、yield、checkpoint 与执行数据，不把 opt-in 升级变成全历史 workspace 清除。
+
 ## Plugin 与能力积累
 
 Plugin 包含渐进披露的 Skill、资源、工具和可选渠道说明。短目录提供名称、描述和入口；完整内容保留在唯一 Plugin 目录，按需只读读取。工具语言由作者决定，官方工具使用 Rust；第三方工具环境与外部依赖由部署者准备并授权。
@@ -98,9 +102,13 @@ Library 拥有已安装能力、来源摘要和 owner-bound 授权事实。API �
 
 普通企业助手路径为平台事件 → 可信 Session/Turn → 指定普通 Graph → 指定回复节点 → 原来源投递。用户消息不能覆盖服务端选择的 Graph、回复节点、Plugin、路径或权限。
 
-同一 Session 串行，不同用户可以并发同图。新消息结算上一轮后加载绑定的逐节点历史；上轮提交或未完成文件以只读 `/previous` 传递，未完成文件不能冒充成功结果。旧轮迟到回复必须抑制，持续补充不能丢失。
+同一 Session 串行，不同用户可以并发同图。当前 opt-in 常驻助手用普通 `wait_input (Op.host session.wait_input) → assistant (Agent) → reply (Op.host session.reply) → wait_input` 循环表达：首条消息惰性创建 Session 的 current assistant Run，后续 Turn 通过等待节点的固定产物进入同 Run，不覆写启动输入。Kernel 只支持通用 host port，不依赖 Session 或 WeCom；具体身份、等待和投递属于 Host，手动/standalone 默认无此授权。一次性助手仍保留跨 Run 的只读 `/previous` 交接，不原地替换已有 `wecom-assistant`。
 
-附件在可信入口冻结字节、hash 和 MIME，Graph 只读使用本轮输入。图片输入、媒体工具结果、摘要增量与平台回传是不同能力，需分别验收。企业微信欢迎语、语音、卡片、审批和更广渠道产品需求按明确业务接入决定，不能因 SDK 提供接口就宣称已支持。
+新消息打断旧轮，必须等 Goose 与工具执行者真正退出并保存中断事实后再接续；不能用停止整个 Run 后静默复活替代。旧回复 `suppressed` 不算成功，新轮复用绑定的原生历史与本节点现场，持续补充的输入事实应保留，超出当轮有界范围须明确提示。未知业务效果先由 Agent 核查，进程重启仍需显式 resume，不能自动重放。
+
+附件在可信入口冻结字节、hash 和 MIME，Graph 只读使用获准输入。常驻助手当前 Turn 使用 `/in/channel`；仅额外授权当前输入之前、最近 confirmed 投递之后最多最近 8 条中断输入的固定快照，使用 `/in/channel-pending/<turn>`，不全历史挂载。出站媒体按 Turn 隔离并复用 ACK 账本，同 Run 不构成复用上一轮图片的许可。图片输入、媒体工具结果、摘要增量与平台回传是不同能力，需分别验收。企业微信欢迎语、语音、卡片、审批和更广渠道产品需求按明确业务接入决定，不能因 SDK 提供接口就宣称已支持。
+
+Host 首次绑定查询最近 9 条、只授权最近 8 条并保存 `pending_truncated`；`output.interrupted_messages_truncated=true` 时 Agent 必须说明更早中断输入未自动纳入/未完整阅读，不能声称信息全保留。这不扩大历史权限，无数据库 schema 迁移，旧 facts 默认 `false`。
 
 主动发送只允许获授权目标，来源身份与原生调用身份不能由模型伪造。发送 ACK、业务效果和 UI 展示分别记录；断线后的未知结果由 Agent 核查，不盲目重发。公网服务、真实 vision 和实际成员授权单独验收。
 
@@ -118,7 +126,7 @@ RSI 是普通 Graph：从获授权 Run、源码、Graph/Plugin 与公开生态�
 
 最小执行闭包由 Graph、显式 Plugin/工具资源、同一 Runtime 和部署者配置组成。完整平台可组合 WebUI、Session/Pilot、Scheduler 和渠道；精简部署复用同一 Runner，不维护另一套语义。
 
-发行包记录资源与可执行身份，拒绝密钥、未声明资源和可变状态；凭据、host-path grants 与用户数据属于部署环境。包构建、小图通过、真实业务验收和生产数据/配置切换分别记录。旧记录可原地只读盘点，不能冒充新原生会话或双写；生产切换和迁移需独立明确授权。
+发行包记录资源与可执行身份，禁止密钥、未声明资源和可变状态；凭据、host-path grants 与用户数据属于部署环境。包构建、小图通过、真实业务验收和生产数据/配置切换分别记录。旧记录可原地只读盘点，不能冒充新原生会话或双写；生产切换和迁移需独立明确授权。
 
 默认是本机单服务进程。Bearer 白名单不等于完整多租户授权；公开部署必须有对应网络与身份边界。任意外部系统权限与业务审批由对应 Plugin/产品契约决定。
 

@@ -58,7 +58,7 @@ impl GraphSnapshot {
                         node.id
                     ))
                 })?;
-                if ["run", "call", "fanout", "join"]
+                if ["run", "call", "fanout", "join", "host"]
                     .iter()
                     .filter(|key| op.get(**key).is_some())
                     .count()
@@ -71,10 +71,14 @@ impl GraphSnapshot {
                 if let Some(call) = op.get("call") {
                     validate_graph_call(call, op_name)?;
                 }
+                if let Some(host) = op.get("host") {
+                    validate_host_operation(host, op_name)?;
+                }
                 if op.get("run").is_none()
                     && op.get("fanout").is_none()
                     && op.get("join").is_none()
                     && op.get("call").is_none()
+                    && op.get("host").is_none()
                 {
                     return Err(GraphError::Unsupported(format!(
                         "op `{op_name}` has no supported execution capability"
@@ -232,6 +236,15 @@ impl GraphSnapshot {
                         )));
                     }
                     let branch_node = nodes[current];
+                    if branch_node
+                        .op
+                        .as_ref()
+                        .is_some_and(|name| self.ops[name].get("host").is_some())
+                    {
+                        return Err(GraphError::InvalidSnapshot(format!(
+                            "fanout `{fanout}` cannot contain host operation node `{current}`"
+                        )));
+                    }
                     if branch_node.op.as_ref().is_some_and(|name| {
                         self.ops[name].get("fanout").is_some()
                             || self.ops[name].get("join").is_some()
@@ -463,6 +476,22 @@ fn validate_graph_call(call: &Value, op_name: &str) -> Result<(), GraphError> {
     {
         return Err(GraphError::InvalidSnapshot(format!(
             "op.call `{op_name}` session must be a safe name"
+        )));
+    }
+    Ok(())
+}
+
+pub(super) fn validate_host_operation(host: &Value, op_name: &str) -> Result<(), GraphError> {
+    let fields = host.as_object().ok_or_else(|| {
+        GraphError::InvalidSnapshot(format!("op.host `{op_name}` must be an object"))
+    })?;
+    if fields
+        .get("operation")
+        .and_then(Value::as_str)
+        .is_none_or(|operation| operation.trim().is_empty())
+    {
+        return Err(GraphError::InvalidSnapshot(format!(
+            "op.host `{op_name}` operation must be a non-empty string"
         )));
     }
     Ok(())

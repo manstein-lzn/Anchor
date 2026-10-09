@@ -145,6 +145,7 @@ impl SessionStore {
         let mut connection = self.lock()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let mut snapshot = store::read_session(&transaction, owner, session)?;
+        crate::channel::ensure_assistant_run_scope(&transaction, session, run)?;
         let mut turn = turns::find_turn(&transaction, session, turn)?;
         let associate = !turn.runs.iter().any(|existing| existing == run);
         let attach = !snapshot.run_ids.iter().any(|existing| existing == run);

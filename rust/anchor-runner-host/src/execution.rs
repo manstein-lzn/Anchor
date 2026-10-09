@@ -78,6 +78,20 @@ impl PreparedExecution {
             &record.run_id,
         )
         .map_err(|error| format!("local input Run identity unavailable: {error:?}"))?;
+        if record
+            .snapshot
+            .ops
+            .values()
+            .any(|operation| operation.get("host").is_some())
+            && (execution.application.is_none()
+                || metadata
+                    .as_ref()
+                    .is_none_or(|metadata| metadata.assistant.is_none()))
+        {
+            return Err(
+                "Session host operations require an explicitly admitted assistant instance".into(),
+            );
+        }
         if let Some(metadata) = metadata {
             execution.bind_local_inputs(record, &metadata.graph)?;
         } else if !execution.nodes.io_resolver.local_inputs_configured() {

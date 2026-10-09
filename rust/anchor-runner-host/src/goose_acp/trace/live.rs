@@ -103,6 +103,35 @@ impl Drop for LiveTrace {
     }
 }
 
+/// Read-only view of the notifications an *active* invocation has retained.
+///
+/// Returns `None` when nothing is running for that fact. The retention policy
+/// is deliberately untouched: this is an observation of the live projection,
+/// never a new store, and it must not extend a trace's lifetime.
+pub(super) fn notifications(fact: &Path) -> Result<Option<Vec<Value>>, String> {
+    let fact = match fact.canonicalize() {
+        Ok(fact) => fact,
+        Err(_) => return Ok(None),
+    };
+    let projection = registry()
+        .lock()
+        .map_err(|_| "live trace unavailable")?
+        .get(&fact)
+        .and_then(Weak::upgrade);
+    let Some(projection) = projection else {
+        return Ok(None);
+    };
+    let events = {
+        let projection = projection.lock().map_err(|_| "live trace unavailable")?;
+        // Only the current prompt's notifications: restored conversation history
+        // is not work the channel user is watching now.
+        projection
+            .notifications
+            .last_values(projection.prompt_count)
+    };
+    Ok(Some(events))
+}
+
 pub(super) fn snapshot(fact: &Path, session: Option<&str>) -> Result<Option<Vec<Value>>, String> {
     let fact = fact.canonicalize().map_err(|error| error.to_string())?;
     let projection = registry()
@@ -171,6 +200,37 @@ mod tests {
         drop(live);
         assert!(snapshot(&first, Some("native")).unwrap().is_none());
         assert!(LiveTrace::open(&first).is_ok());
+    }
+
+    #[test]
+    fn live_notifications_are_read_only_and_scoped_to_the_retained_prompt() {
+        let root = tempfile::tempdir().unwrap();
+        let fact = root.path().join("fact.json");
+        std::fs::write(&fact, "{}").unwrap();
+        // Nothing is running for an unknown fact.
+        assert!(
+            notifications(&root.path().join("absent.json"))
+                .unwrap()
+                .is_none()
+        );
+        let live = LiveTrace::open(&fact).unwrap();
+        // Registered but not yet bound to a Session: still nothing to observe.
+        assert!(notifications(&fact).unwrap().unwrap().is_empty());
+        live.restore("native", &[notification("native", "history")])
+            .unwrap();
+        // Restored history is not this prompt's work.
+        assert!(notifications(&fact).unwrap().unwrap().is_empty());
+        live.observe(&notification("native", "current")).unwrap();
+        let observed = notifications(&fact).unwrap().unwrap();
+        assert_eq!(observed.len(), 1);
+        assert_eq!(
+            observed[0]["params"]["update"]["content"]["text"],
+            "current"
+        );
+        // The file on disk is untouched: this is an observation, not a store.
+        assert_eq!(std::fs::read_to_string(&fact).unwrap(), "{}");
+        drop(live);
+        assert!(notifications(&fact).unwrap().is_none());
     }
 
     #[test]

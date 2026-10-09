@@ -2257,6 +2257,7 @@ mod session_call_tests {
             NodeExecutionCapabilities {
                 agent: false,
                 op_run: true,
+                host_operations: false,
                 exact_provider_request_budget: true,
             }
         }

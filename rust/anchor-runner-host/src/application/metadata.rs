@@ -86,6 +86,8 @@ pub(crate) struct RunMetadata {
     pub(crate) conversation: Option<ConversationSource>,
     #[serde(default)]
     pub(crate) channel: Option<ChannelRunSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) assistant: Option<AssistantSource>,
     #[serde(default)]
     pub(crate) pilot: Option<PilotRunSource>,
     #[serde(default)]
@@ -113,6 +115,16 @@ pub(crate) struct ChannelRunSource {
     pub(crate) session: String,
     pub(crate) inbound: String,
     pub(crate) turn: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AssistantSource {
+    pub(crate) owner: String,
+    pub(crate) session: String,
+    pub(crate) wait_node: String,
+    pub(crate) work_node: String,
+    pub(crate) reply_node: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -161,6 +173,7 @@ impl RunMetadata {
             graph_call: None,
             conversation: None,
             channel: None,
+            assistant: None,
             pilot: None,
             session_call: None,
             attachments: Vec::new(),
@@ -288,4 +301,41 @@ pub(crate) fn load(root: &Path, id: &str) -> Result<Option<RunMetadata>, Applica
         ));
     }
     Ok(Some(metadata))
+}
+
+/// Every Run id that still has immutable metadata.
+///
+/// Metadata is written before a Run's admitted record, so a handover that died
+/// in between is only visible here. Listings that must not miss such a pending
+/// obligation use this instead of the Run store.
+pub(crate) fn ids(root: &Path) -> Result<Vec<String>, ApplicationError> {
+    let directory = root.join("run-metadata");
+    let entries = match std::fs::read_dir(&directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(ApplicationError::Storage(format!(
+                "Run identity metadata unavailable: {error}"
+            )));
+        }
+    };
+    let mut ids = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|error| ApplicationError::Storage(error.to_string()))?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        // Temporary files are named `.{run_id}.{nanos}.tmp`.
+        let Some(id) = name.strip_suffix(".json") else {
+            continue;
+        };
+        if id.is_empty() || id.starts_with('.') {
+            continue;
+        }
+        ids.push(id.to_owned());
+    }
+    ids.sort();
+    ids.dedup();
+    Ok(ids)
 }

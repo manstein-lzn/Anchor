@@ -145,6 +145,7 @@ impl NodeExecutionPort for Nodes {
         NodeExecutionCapabilities {
             agent: false,
             op_run: true,
+            host_operations: false,
             exact_provider_request_budget: true,
         }
     }
@@ -176,6 +177,7 @@ impl NodeExecutionPort for BudgetOnceNodes {
         NodeExecutionCapabilities {
             agent: false,
             op_run: true,
+            host_operations: false,
             exact_provider_request_budget: true,
         }
     }
@@ -214,6 +216,7 @@ impl NodeExecutionPort for RecoveryOnceNodes {
         NodeExecutionCapabilities {
             agent: false,
             op_run: true,
+            host_operations: false,
             exact_provider_request_budget: true,
         }
     }
@@ -263,6 +266,7 @@ impl NodeExecutionPort for GateNodes {
         NodeExecutionCapabilities {
             agent: false,
             op_run: true,
+            host_operations: false,
             exact_provider_request_budget: true,
         }
     }

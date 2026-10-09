@@ -5,7 +5,7 @@ import {
   type Edge, type Node, type NodeProps,
 } from '@xyflow/react';
 import { Bot, GitFork, GitMerge, Layers, Terminal, Workflow } from 'lucide-react';
-import { asDefinition, toFlowEdges, toFlowNodes, type GraphCall, type OurGraph, type OurRunState } from './model';
+import { asDefinition, listenerLabel, toFlowEdges, toFlowNodes, type GraphCall, type GraphSummary, type OurGraph, type OurRunState } from './model';
 import { layoutWorkflow, NODE_HEIGHT, NODE_WIDTH, type Layout, type Port } from './graph';
 import { RoutedEdge } from './RoutedEdge';
 
@@ -29,7 +29,7 @@ function WorkflowNodeView({ id, data, selected }: NodeProps<WorkflowNode>) {
     <strong title={data.call ? `${data.name} → ${data.call.graph}` : data.name}>{data.call && data.editing ? <button className="call-target-link nodrag" onClick={event => { event.stopPropagation(); data.onOpenTarget?.(data.call!.graph, id); }} disabled={data.targetMissing}>
       {data.call.graph || '未选择目标'} {data.targetMissing ? '· 引用失效' : '↗'}</button> : data.name}</strong>
     <div className="workflow-node-footer" title={data.kind}>
-      {data.editing ? data.call ? `独立运行 · ${data.call.mode === 'wait' ? '等待完成' : '启动后继续'}` : data.kind : <><span>{data.statusLabel || ({ running: '执行中', completed: '已完成', pending: '尚未执行', failed: '失败', skipped: '未选中' }[data.state] ?? data.state)}</span>
+      {data.editing ? data.statusLabel ? <><span>{data.statusLabel}</span><span>{data.kind}</span></> : data.call ? `独立运行 · ${data.call.mode === 'wait' ? '等待完成' : '启动后继续'}` : data.kind : <><span>{data.statusLabel || ({ running: '执行中', completed: '已完成', pending: '尚未执行', failed: '失败', skipped: '未选中' }[data.state] ?? data.state)}</span>
         {data.control && <span title={data.kind}>{data.kind}</span>}
         {data.attempt !== undefined && <span>第 {data.attempt + 1} 次</span>}</>}
     </div>
@@ -49,6 +49,7 @@ const edgeTypes = { routed: RoutedEdge };
 type Pick = { kind: 'node' | 'edge'; id: string } | null;
 type Props = {
   graph: OurGraph; name: string; mode: 'edit' | 'run'; state?: OurRunState | null; editable?: boolean;
+  activity?: GraphSummary;
   targets?: string[]; onOpenTarget?: (target: string, node: string) => void;
   onPick: (pick: Pick) => void;
   onPositions?: (positions: Layout['positions']) => void;
@@ -59,7 +60,7 @@ export function WorkflowCanvas(props: Props) {
   return <ReactFlowProvider key={props.name}><Canvas {...props} /></ReactFlowProvider>;
 }
 
-function Canvas({ graph, name, mode, state = null, editable = false, onPick, onPositions, onConnect, targets, onOpenTarget }: Props) {
+function Canvas({ graph, name, mode, state = null, editable = false, activity, onPick, onPositions, onConnect, targets, onOpenTarget }: Props) {
   const editing = mode === 'edit';
   // Only topology, labels and saved positions invalidate geometry. Polling cannot relayout it.
   const definitionKey = JSON.stringify(asDefinition(graph, name));
@@ -82,11 +83,18 @@ function Canvas({ graph, name, mode, state = null, editable = false, onPick, onP
     return () => { active = false; };
   }, [definitionKey, positionsKey]);
 
-  const nodes = useMemo<WorkflowNode[]>(() => !layout ? [] : toFlowNodes(graph, name, state).map(node => ({
-    id: node.id, type: 'workflow', position: layout.positions[node.id], width: NODE_WIDTH, height: NODE_HEIGHT,
-    data: { ...node.data, entry: node.id === graph.entry, terminal: !graph.edges.some(edge => edge.from === node.id),
-      editing, ports: layout.ports[node.id], onOpenTarget, targetMissing: !!node.data.call && !!targets && !targets.includes(node.data.call.graph) },
-  })), [graph, name, state, editing, layout, targets, onOpenTarget]);
+  const nodes = useMemo<WorkflowNode[]>(() => !layout ? [] : toFlowNodes(graph, name, state).map(node => {
+    const status = editing && activity?.active_nodes?.includes(node.id)
+      ? { state: 'running', statusLabel: '执行中' }
+      : editing && node.id === graph.entry && activity?.listener && !activity.running && !activity.active_runs?.length
+        ? { state: activity.listener.status === 'authenticated' ? 'listening' : 'listener-unavailable', statusLabel: listenerLabel(activity.listener.status) }
+        : {};
+    return {
+      id: node.id, type: 'workflow', position: layout.positions[node.id], width: NODE_WIDTH, height: NODE_HEIGHT,
+      data: { ...node.data, ...status, entry: node.id === graph.entry, terminal: !graph.edges.some(edge => edge.from === node.id),
+        editing, ports: layout.ports[node.id], onOpenTarget, targetMissing: !!node.data.call && !!targets && !targets.includes(node.data.call.graph) },
+    };
+  }), [graph, name, state, editing, activity, layout, targets, onOpenTarget]);
   const [canvasNodes, setCanvasNodes, onNodesChange] = useNodesState(nodes);
   useEffect(() => { if (!dragging) setCanvasNodes(nodes); }, [nodes, dragging, setCanvasNodes]);
   const edges = useMemo<Edge[]>(() => !layout ? [] : toFlowEdges(graph, state).map((edge, index) => {
@@ -140,6 +148,7 @@ function Canvas({ graph, name, mode, state = null, editable = false, onPick, onP
       <Panel position="top-left" className="workflow-legend">
         {editing ? <><span><i />前向连接</span><span><i className="feedback" />循环返回</span></>
           : <><span><i className="walked" />已走过</span><span><i className="unwalked" />未走过</span><span>侧边连接为循环返回</span></>}
+        {editing && activity?.listener && <><span><i className="listening" />常驻监听</span><span><i className="working" />执行中</span></>}
       </Panel>
       {editing && <Panel position="top-right"><button className="arrange-button" disabled={!editable || arranging}
         onClick={() => void arrange()}>自动整理</button></Panel>}

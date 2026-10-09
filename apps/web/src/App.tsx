@@ -11,7 +11,7 @@ import { GraphActions } from './GraphActions';
 import { label } from './execution';
 import {
   type OurAgent, type OurGraph, type OurOp, type OurRun, type OurRunDetail,
-  type TimelineData,
+  type TimelineData, type GraphSummary, listenerLabel,
 } from './model';
 import { validateCallTargets } from './calls';
 import { CallEditor } from './CallEditor';
@@ -30,7 +30,6 @@ import { assignGraphColors } from './graphColors';
 
 const POLL_MS = 3000;
 type Pick = { kind: 'node' | 'edge' | 'agent'; id: string } | null;
-type GraphSummary = { graph: string; running: string | null; active_runs?: string[] };
 type ApiFetcher = <T>(path: string) => Promise<T>;
 
 /** Load the core workbench independently from the optional timeline projection. */
@@ -78,7 +77,7 @@ export function App() {
     try { localStorage.setItem('anchor:view', view === 'runDetail' ? 'runs' : view); }
     catch { /* Navigation still works without browser storage. */ }
   }, [view]);
-  const [graphs, setGraphs] = useState<{ graph: string; running: string | null; active_runs?: string[] }[]>([]);
+  const [graphs, setGraphs] = useState<GraphSummary[]>([]);
   const [relations, setRelations] = useState(false);
   const pendingPick = useRef<string>('');
   const [graphReturn, setGraphReturn] = useState<{ graph: string; node?: string } | null>(null);
@@ -178,6 +177,8 @@ export function App() {
         }
       }
     } catch (error) {
+      setGraphs(previous => previous.map(item => item.listener
+        ? { ...item, listener: { ...item.listener, status: 'unavailable' } } : item));
       const message = (error as Error).message;
       setProblem(error instanceof TypeError || /fetch|network|ECONNREFUSED|proxy error/i.test(message)
         ? '后端 API 暂不可达，请检查 8077 服务及前端代理。'
@@ -315,11 +316,19 @@ export function App() {
   });
 
   const deleteRun = () => perform('删除运行记录', async () => {
-    if (!run || !window.confirm(`确定彻底删除运行记录 ${run} 及其所有文件吗？此操作不可恢复。`)) return;
+    if (!run) return;
+    // A channel turn or resident-assistant instance is one link of a conversation lineage: later
+    // Runs read the Run they were handed over from, so the Host only deletes a link once nothing
+    // newer still reads it and refuses out-of-order deletion with a concrete reason.
+    const conversation = Boolean(detail?.state.trigger?.session);
+    const question = conversation
+      ? `确定删除渠道会话中的这次运行 ${run} 及其文件吗？更早和更新的轮次都会保留；如果更新的轮次仍要从它继承现场，Host 会拒绝并说明是哪一条。此操作不可恢复。`
+      : `确定彻底删除运行记录 ${run} 及其所有文件吗？此操作不可恢复。`;
+    if (!window.confirm(question)) return;
     await api(`/runs/${encodeURIComponent(run)}`, 'DELETE');
     setRun(''); setDetail(null); setNode('');
     await refresh();
-    setNotice({ kind: 'ok', text: '运行记录及其文件已删除。' });
+    setNotice({ kind: 'ok', text: conversation ? '这次会话运行及其文件已删除，更新的轮次保持可用。' : '运行记录及其文件已删除。' });
   });
 
   const deleteGraph = async (target: string) => {
@@ -555,11 +564,13 @@ export function App() {
             </button>
             <div className="library-list">
               {graphs.filter(item => item.graph.toLowerCase().includes(search.toLowerCase())).map(item => (
-                <div key={item.graph} className={`library-item ${item.graph === name ? 'chosen' : ''}`}>
+                <div key={item.graph} className={`library-item ${item.graph === name ? 'chosen' : ''} ${item.listener ? item.active_runs?.length || item.running ? 'listener-working' : item.listener.status === 'authenticated' ? 'listener-listening' : 'listener-unavailable' : ''}`}>
                   <button className="library-row" aria-pressed={item.graph === name}
+                          title={item.listener ? `${item.listener.platform} · ${listenerLabel(item.listener.status)}` : undefined}
                           onClick={() => selectGraph(item.graph)}>
                     <GitBranch size={16} /><span className="library-name" title={item.graph}>{item.graph}</span>
                     {(item.active_runs?.length || item.running) && <span className="pill running">执行中{(item.active_runs?.length ?? 0) > 1 ? ` ${item.active_runs!.length}` : ''}</span>}
+                    {item.listener && !item.active_runs?.length && !item.running && <span className={`pill listener-${item.listener.status}`}>{listenerLabel(item.listener.status)}</span>}
                   </button>
                   <GraphActions graph={item.graph} running={Boolean(item.active_runs?.length || item.running)} busy={busy}
                                 runCount={runs.filter(run => run.graph === item.graph).length} onDelete={deleteGraph} />
@@ -676,7 +687,7 @@ export function App() {
 
             <div className="canvas">
               {doc
-                ? <WorkflowCanvas graph={doc} name={name} mode="edit" editable={editable} targets={graphs.map(item => item.graph)} onOpenTarget={(target, sourceNode) => navigateGraph(target, undefined, true, sourceNode)}
+                ? <WorkflowCanvas graph={doc} name={name} mode="edit" editable={editable} activity={graphs.find(item => item.graph === name)} targets={graphs.map(item => item.graph)} onOpenTarget={(target, sourceNode) => navigateGraph(target, undefined, true, sourceNode)}
                                onPick={value => { setPick(value); if (value) setInspectorOpen(true); }}
                                onPositions={positions => patch({ ...doc, layout: { ...doc.layout, positions } })}
                                onConnect={(from, to) => {

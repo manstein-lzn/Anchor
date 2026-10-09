@@ -79,6 +79,8 @@ pub struct RunResult {
     pub node_id: String,
     pub key: InvocationKey,
     pub completion: NodeCompletion,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interruption: Option<String>,
     pub commit: CommitRef,
     pub sequence: u64,
 }
@@ -419,10 +421,10 @@ impl GraphRunRecord {
                 "serial cursor cannot coexist with a parallel activation".into(),
             ));
         }
+        let regions = self.snapshot.parallel_regions().map_err(|error| {
+            GraphError::CorruptRun(format!("invalid parallel snapshot: {error}"))
+        })?;
         if let Some(activation) = &self.parallel {
-            let regions = self.snapshot.parallel_regions().map_err(|error| {
-                GraphError::CorruptRun(format!("invalid parallel snapshot: {error}"))
-            })?;
             let region = regions.get(&activation.fanout_node).ok_or_else(|| {
                 GraphError::CorruptRun("parallel activation references unknown fanout".into())
             })?;
@@ -583,6 +585,31 @@ impl GraphRunRecord {
                 }
                 previous_invocation = result.key.invocation;
                 previous_sequence = result.sequence;
+                if let Some(reason) = &result.interruption {
+                    let routes = self
+                        .snapshot
+                        .edges
+                        .iter()
+                        .filter(|edge| edge.from_node == *map_node_id)
+                        .map(|edge| edge.to_node.clone())
+                        .collect::<Vec<_>>();
+                    if result.completion
+                        != interruption_completion(reason, result.completion.route.clone())
+                        || select_route(&result.completion, &routes).is_err()
+                        || regions.values().any(|region| {
+                            region.fanout == *map_node_id
+                                || region.join == *map_node_id
+                                || region
+                                    .branches
+                                    .iter()
+                                    .any(|branch| branch.contains(map_node_id))
+                        })
+                    {
+                        return Err(GraphError::CorruptRun(format!(
+                            "invalid interruption control evidence for node `{map_node_id}`"
+                        )));
+                    }
+                }
                 results_by_identity.insert(
                     (map_node_id.as_str(), result.key.invocation),
                     result.sequence,

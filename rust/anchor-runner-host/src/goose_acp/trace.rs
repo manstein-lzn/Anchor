@@ -27,6 +27,23 @@ fn read_json(root: &Path, name: &str) -> Result<Option<Value>, String> {
         .map_err(|_| "Goose trace resource is malformed".into())
 }
 
+/// Notifications retained by a currently running invocation, or `None` when
+/// that invocation is not live. Read-only and best-effort: a missing or
+/// unregistered invocation is never an error for the caller.
+pub(crate) fn live_notifications(
+    state: &Path,
+    key: &InvocationKey,
+) -> Result<Option<Vec<Value>>, String> {
+    let stem = GooseNodePort::stem(key);
+    for directory in ["goose-acp", "goose-acp-spike"] {
+        let fact = state.join(directory).join(format!("{stem}.json"));
+        if let Some(notifications) = live::notifications(&fact)? {
+            return Ok(Some(notifications));
+        }
+    }
+    Ok(None)
+}
+
 pub(crate) fn trace_messages(state: &Path, key: &InvocationKey) -> Result<Vec<Value>, String> {
     let stem = GooseNodePort::stem(key);
     let mut selected = None;
