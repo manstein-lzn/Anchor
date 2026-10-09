@@ -16,7 +16,8 @@ cargo +stable run --manifest-path rust/Cargo.toml -p anchor-devtools -- regressi
 Neither alias enables a retired runtime or adds a second Runner.
 
 The CLI checks executable permissions and SHA256
-`bdf35eb00d8dcc0218fe1150a3673446f351ea699ed579062628351f00cac340` before invoking Cargo.
+`71e76c412597b2ecd96ed20d0706e7666f31c018216e7cb5d65c5ca5c44824a7` (the Anchor-built
+lean Goose ACP binary from `scripts/build-goose-acp.sh`) before invoking Cargo.
 It does not download Goose or load `.env`. It strips inherited `ANCHOR_*`,
 `GOOSE_*`, `OPENAI_*`, `ANTHROPIC_*` and `DEEPSEEK_*` configuration and forwards
 only the verified Goose path and isolated test evidence directory.

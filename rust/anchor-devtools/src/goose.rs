@@ -1,7 +1,7 @@
 use super::*;
 
 const GOOSE_VERSION: &str = "1.53.0";
-const GOOSE_SHA256: &str = "bdf35eb00d8dcc0218fe1150a3673446f351ea699ed579062628351f00cac340";
+const GOOSE_SHA256: &str = "71e76c412597b2ecd96ed20d0706e7666f31c018216e7cb5d65c5ca5c44824a7";
 const SUITES: &[&str] = &[
     "goose_acp",
     "goose_pilot",

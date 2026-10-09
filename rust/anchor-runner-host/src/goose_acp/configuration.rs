@@ -35,7 +35,10 @@ pub(super) fn command(
     let sandbox = sandbox
         .with_readonly_grants(std::slice::from_ref(&grant))
         .map_err(|error| error.to_string())?;
-    let mut process = anchor_runtime::SandboxRequest::new(directory, ["/tools/goose", "acp"]);
+    // The packaged Goose is the Anchor-built lean ACP server (`goose-acp`), which speaks
+    // ACP on stdio directly and takes `--with-builtin` as its only argument. The upstream
+    // `goose acp` subcommand form belongs to the full CLI and is intentionally not used.
+    let mut process = anchor_runtime::SandboxRequest::new(directory, ["/tools/goose"]);
     process.readonly_inputs.push(grant);
     process.network = anchor_runtime::NetworkPolicy::Enabled;
     process.cancellation = cancellation;

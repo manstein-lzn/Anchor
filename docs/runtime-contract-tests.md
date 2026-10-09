@@ -7,7 +7,7 @@ GraphRunner、Goose ACP、授权 MCP、Bubblewrap 和 Artifact，只替换模型
 
 ## 标准命令
 
-从仓库根目录运行，显式指定已经审查的 Goose v1.53.0 x86_64 musl binary：
+从仓库根目录运行，显式指定已经审查的 Anchor 自建 lean Goose ACP 二进制（[构建脚本](../scripts/build-goose-acp.sh)，上游 v1.53.0 源码）：
 
 ```sh
 ANCHOR_GOOSE_BINARY=/absolute/path/to/goose \
@@ -22,7 +22,7 @@ cargo +stable run --manifest-path rust/Cargo.toml -p anchor-devtools --locked --
 
 需要固定依赖支持的 stable Rust、Linux、Git、Bubblewrap 和可用的
 user/mount/network namespace。入口在测试前校验 Goose 可执行权限和 SHA256
-`bdf35eb00d8dcc0218fe1150a3673446f351ea699ed579062628351f00cac340`，
+`71e76c412597b2ecd96ed20d0706e7666f31c018216e7cb5d65c5ca5c44824a7`，
 不下载 binary、不加载 `.env`。缺 binary、digest 不符、构建失败、必要测试
 未执行或证据缺失均不能算通过。
 

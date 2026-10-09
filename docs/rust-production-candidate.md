@@ -34,8 +34,8 @@ dependencies and the stable Rust toolchain.
 
 ## Run
 
-Provide the already-reviewed Goose v1.53.0 binary required by
-`anchor-distribution`:
+Provide the Anchor-built lean Goose ACP binary (`scripts/build-goose-acp.sh`,
+upstream v1.53.0 sources) required by `anchor-distribution`:
 
 ```sh
 anchor-devtools regression candidate \

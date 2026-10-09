@@ -27,7 +27,7 @@ use std::{
 use tokio::sync::{Semaphore, oneshot};
 
 pub const MODEL: &str = "fixture-goose";
-pub const GOOSE_SHA256: &str = "bdf35eb00d8dcc0218fe1150a3673446f351ea699ed579062628351f00cac340";
+pub const GOOSE_SHA256: &str = "71e76c412597b2ecd96ed20d0706e7666f31c018216e7cb5d65c5ca5c44824a7";
 pub const SUMMARY_REQUEST: &str =
     "Please summarize the conversation history provided in the system prompt.";
 
@@ -738,7 +738,7 @@ impl Host {
         assert_eq!(
             digest(&goose),
             GOOSE_SHA256,
-            "Goose binary differs from official pinned v1.53.0 x86_64 musl asset"
+            "Goose binary differs from the pinned Anchor-built lean v1.53.0 ACP binary (scripts/build-goose-acp.sh)"
         );
         let base = crate::fixture::Host::new(graph);
         let version = Command::new(&goose)
@@ -751,7 +751,14 @@ impl Host {
             .output()
             .unwrap();
         assert!(version.status.success(), "Goose version probe failed");
-        assert_eq!(String::from_utf8(version.stdout).unwrap().trim(), "1.53.0");
+        let reported = String::from_utf8(version.stdout).unwrap();
+        // The full CLI prints `1.53.0`; the lean ACP-only binary prints `goose-acp 1.53.0`.
+        // Both entry points must report the pinned Goose version.
+        let version_token = reported.split_whitespace().last().unwrap_or_default();
+        assert_eq!(
+            version_token, "1.53.0",
+            "unexpected Goose version output: {reported:?}"
+        );
         Self {
             binary: base.root.path().join("anchor-runner-host"),
             base,

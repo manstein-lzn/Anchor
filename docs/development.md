@@ -37,6 +37,8 @@ ANCHOR_GOOSE_BINARY=/absolute/path/to/goose \
   regression fixture
 ```
 
+`ANCHOR_GOOSE_BINARY` 指向 [构建脚本](../scripts/build-goose-acp.sh) 产出的 Anchor 自建 lean Goose ACP 二进制；该脚本固定上游源码与 musl 工具链摘要、校验静态 ELF，并可复现 digest。
+
 浏览器测试使用 Node 本地 Provider 与实际 Rust Host/Goose；执行方式见回归指南。release 包用 [原生候选回归](rust-production-candidate.md) 检查。大型 RSI、深度研究、周报和真实业务服务按低频内容验收单独运行。
 
 测试报告只写实际命令、结果和证据，区分失败、跳过、未配置、未覆盖与真实模型请求。并发超时先独立复跑受影响用例，只有新的失败或未决风险才扩大验证，不重复跑已通过全量。

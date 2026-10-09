@@ -69,7 +69,7 @@ fs2 Artifact 的文件及谱系是节点产物权威；只读 Git 输入视图�
 
 ## Goose 与恢复
 
-固定 Goose v1.53.0 x86_64 musl 二进制 SHA256 为 `bdf35eb00d8dcc0218fe1150a3673446f351ea699ed579062628351f00cac340`。AgentNode 与 Pilot 共用 ACP/MCP 接入。Host 绑定二进制、模型/endpoint、原生 Session 和 invocation，恢复时不静默更换模型或新建替代历史。
+Goose 固定为 v1.53.0；Anchor 用上游同一份源码的 lean ACP-only 入口构建静态 x86_64 musl 二进制（recipe 见 [构建脚本](../scripts/build-goose-acp.sh)），SHA256 为 `71e76c412597b2ecd96ed20d0706e7666f31c018216e7cb5d65c5ca5c44824a7`。它与官方完整 CLI 共用 `goose::acp::server::run`，但不带 Anchor 不使用的 CLI、调度器、bundled MCP 和平台扩展。AgentNode 与 Pilot 共用 ACP/MCP 接入。Host 绑定二进制、模型/endpoint、原生 Session 和 invocation，恢复时不静默更换模型或新建替代历史；更换二进制即改变恢复身份，未收束的 invocation fail-closed，不会被静默接管。
 
 AgentNode 通过授权完成工具提交 `summary` 和可选 `route`；普通回答不能完成节点。Host 校验路由、核查回执与必要产物后提交 Run 事实。业务工具效果发生但返回结果缺失时，保存观察事实；继续原生会话后，Agent 先核查 workspace、Artifact 和可用业务状态，再决定下一步。工具不会自动重放，外部副作用不承诺 exactly-once。
 
