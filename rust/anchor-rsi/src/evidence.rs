@@ -143,23 +143,48 @@ impl Evidence {
         result.walk(&config.source, "code", false)?;
         result.source_changes(&config.source)?;
         result.schedules(config.rust_state.as_ref().unwrap_or(&config.data))?;
+        // Deployment graph definitions live in the bundle catalog. The workspace
+        // layout keeps them only in the legacy workspace-per-graph form, so a
+        // workspace without `runs/` is the current per-invocation layout and is
+        // not reported as a missing definition.
+        let mut deployment_graphs = 0usize;
+        let catalog = config.data.join("catalog");
+        if catalog.is_dir() {
+            for bundle in sorted_dirs(&catalog)? {
+                let definition = bundle.join("graph.json");
+                if definition.is_file() {
+                    result.file(&definition, &config.data, "graphs")?;
+                    deployment_graphs += 1;
+                }
+            }
+        }
         let workspaces = config.data.join("workspaces");
         if workspaces.is_dir() {
             for directory in sorted_dirs(&workspaces)? {
-                result.file(&directory.join("graph.json"), &config.data, "graphs")?;
+                // A workspace either declares its own graph definition (legacy
+                // workspace-per-graph layout) or holds per-invocation directories.
+                let definition = directory.join("graph.json");
+                if definition.is_file() {
+                    result.file(&definition, &config.data, "graphs")?;
+                    deployment_graphs += 1;
+                }
                 let runs = directory.join("runs");
-                if runs.is_dir() {
-                    for run in sorted_dirs(&runs)? {
-                        result.run(
-                            &run.join("run.json"),
-                            &config.data,
-                            directory.file_name().unwrap().to_string_lossy().as_ref(),
-                        )?;
-                    }
+                if !runs.is_dir() {
+                    continue;
+                }
+                for run in sorted_dirs(&runs)? {
+                    result.run(
+                        &run.join("run.json"),
+                        &config.data,
+                        directory.file_name().unwrap().to_string_lossy().as_ref(),
+                    )?;
                 }
             }
         } else {
             result.issue("graphs/runs", "workspace directory is absent");
+        }
+        if deployment_graphs == 0 {
+            result.issue("graphs", "no deployment graph definition found");
         }
         for kind in ["plugins", "skills"] {
             let root = config.data.join("library").join(kind);
@@ -238,7 +263,25 @@ impl Evidence {
     }
 
     fn schedules(&mut self, root: &Path) -> Result<(), String> {
-        let path = root.join("state/schedules.json");
+        // The Rust state root is passed either as the data root
+        // (`<root>/state/schedules.json`) or as the state root itself
+        // (`<root>/schedules.json`). Probe both, record which one was used, and
+        // report a definite reason instead of a false absence.
+        let candidates = [
+            root.join("schedules.json"),
+            root.join("state/schedules.json"),
+        ];
+        let resolved = candidates.iter().find(|candidate| candidate.is_file());
+        let path = resolved.cloned().unwrap_or_else(|| candidates[1].clone());
+        let locator = resolved
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| {
+                format!(
+                    "no schedule snapshot at {} or {}",
+                    candidates[0].display(),
+                    candidates[1].display()
+                )
+            });
         let snapshot = (|| -> Result<Value, String> {
             safe_path(&path)?;
             let metadata = fs::metadata(&path).map_err(|error| error.to_string())?;
@@ -249,15 +292,15 @@ impl Evidence {
                 .map_err(|error| error.to_string())
         })();
         let record = match snapshot {
-            Ok(value) => json!({"status":"ok","snapshot":value}),
+            Ok(value) => json!({"status":"ok","source":locator,"snapshot":value}),
             Err(reason) => {
-                self.issue("runs/schedules.json", &reason);
-                json!({"status":"unavailable","reason":reason})
+                self.issue("runs/schedules.json", &format!("{locator}: {reason}"));
+                json!({"status":"unavailable","source":locator,"reason":reason})
             }
         };
         let mut record = record;
         record["limitations"] = json!(
-            "Only the granted root's default state/schedules.json is covered; custom external paths and actual trigger delivery are not verified."
+            "Only the granted root's schedule snapshot is covered; custom external paths and actual trigger delivery are not verified."
         );
         let original = serde_json::to_string_pretty(&record).map_err(|error| error.to_string())?;
         redact::json(&mut record);
@@ -506,7 +549,11 @@ impl Evidence {
         )
     }
 
-    fn run(&mut self, path: &Path, root: &Path, graph: &str) -> Result<(), String> {
+    /// Collect one Run record.
+    ///
+    /// `source` labels which state root the record came from; the graph itself is
+    /// identified by the record's own snapshot and digest.
+    fn run(&mut self, path: &Path, root: &Path, source: &str) -> Result<(), String> {
         if let Err(reason) = safe_path(path) {
             self.issue("runs", &reason);
             return Ok(());
@@ -534,61 +581,115 @@ impl Evidence {
                 return Ok(());
             }
         };
-        let mut projection = json!({"graph":graph,"source_locator":path.display().to_string(),"run":raw.get("run_id").and_then(Value::as_str).map(str::to_owned).unwrap_or_else(||path.parent().and_then(|p|p.file_name()).unwrap_or_default().to_string_lossy().to_string())});
-        for key in [
-            "status",
-            "started",
-            "updated",
-            "created_at",
-            "updated_at",
-            "graph_digest",
-            "sequence",
-        ] {
+        let snapshot = raw.get("snapshot");
+        let objective = snapshot
+            .and_then(|snapshot| snapshot.get("objective"))
+            .and_then(Value::as_str);
+        let entry = snapshot
+            .and_then(|snapshot| snapshot.get("entry"))
+            .and_then(Value::as_str);
+        let nodes = snapshot
+            .and_then(|snapshot| snapshot.get("nodes"))
+            .and_then(Value::as_array)
+            .map(|nodes| {
+                nodes
+                    .iter()
+                    .filter_map(|node| node.get("id").and_then(Value::as_str))
+                    .take(MAX_GRAPH_NODES)
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let digest = raw
+            .get("graph_digest")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        // `graph` identifies the graph itself. The previous constant label only
+        // said which state root the record came from, which is kept as `source`.
+        let graph = match (entry, objective) {
+            (Some(entry), Some(objective)) => format!(
+                "{entry}@{} ({})",
+                short_digest(digest),
+                one_line(objective, 80)
+            ),
+            (Some(entry), None) => format!("{entry}@{}", short_digest(digest)),
+            _ => format!("{source}@{}", short_digest(digest)),
+        };
+        let mut projection = json!({
+            "graph": graph,
+            "source": source,
+            "graph_digest": digest,
+            "graph_objective": objective,
+            "graph_entry": entry,
+            "graph_nodes": nodes,
+            "source_locator": path.display().to_string(),
+            "run": raw.get("run_id").and_then(Value::as_str).map(str::to_owned).unwrap_or_else(||path.parent().and_then(|p|p.file_name()).unwrap_or_default().to_string_lossy().to_string()),
+        });
+        for key in ["status", "started", "updated", "created_at", "updated_at"] {
             if let Some(value) = raw.get(key)
                 && (value.is_string() || value.is_number() || value.is_null())
             {
                 projection[key] = value.clone();
             }
         }
-        // Presence is mechanical metadata. Omitted bodies cannot establish
-        // that their fields are absent from the original Run record.
+        for key in ["format", "sequence"] {
+            if let Some(value) = raw.get(key).and_then(Value::as_u64) {
+                projection[key] = json!(value);
+            }
+        }
+        // Real values, not presence booleans: `Option`/`Vec` fields are always
+        // serialized, so a boolean cannot say whether anything happened.
+        // `error` is always serialized by the runtime (nullable), so projecting it
+        // as null is honest. `reason` is not a Run record field: only project it
+        // when the record actually carries one instead of inventing a null.
+        projection["error"] = raw.get("error").cloned().unwrap_or(Value::Null);
+        if let Some(reason) = raw.get("reason") {
+            projection["reason"] = reason.clone();
+        }
+        projection["cursor"] = cursor_projection(raw.get("cursor"));
+        projection["parallel"] = parallel_projection(raw.get("parallel"));
+        let (fanout, join) = activation_projection(&raw);
+        projection["fanout"] = fanout;
+        projection["join"] = join;
+        projection["recovery"] = json!({
+            "pending": raw.get("recovery").and_then(Value::as_array).map_or(0, Vec::len),
+            "submissions": raw.get("recovery_submissions").and_then(Value::as_array).map_or(0, Vec::len),
+        });
+        projection["results"] = results_projection(raw.get("results"));
+        projection["invocations"] = raw.get("invocations").cloned().unwrap_or_else(|| json!({}));
+        projection["input_keys"] = json!(
+            raw.get("input")
+                .and_then(Value::as_object)
+                .map(|input| input
+                    .keys()
+                    .take(MAX_INPUT_KEYS)
+                    .cloned()
+                    .collect::<Vec<_>>())
+                .unwrap_or_default()
+        );
+        // Presence stays only where absence is real: records written before
+        // format 8 genuinely have no `started`/`updated`.
+        projection["source_field_presence"] = json!({
+            "started": raw.get("started").is_some(),
+            "updated": raw.get("updated").is_some(),
+            "reason": raw.get("reason").is_some(),
+        });
         let omitted = [
-            "reason",
-            "error",
-            "exit_status",
-            "exit_code",
-            "status_reason",
-            "failure_class",
+            "snapshot",
             "input",
-            "objective",
-            "cursor",
-            "nodes",
-            "runs",
-            "results",
-            "messages",
-            "history",
-            "trace",
-            "checkpoint",
+            "decided",
+            "graph_calls",
+            "plugin_bindings",
         ];
-        let presence = omitted
-            .iter()
-            .chain(["graph_digest", "graph_revision", "code_version", "commit"].iter())
-            .map(|key| ((*key).to_owned(), json!(raw.get(*key).is_some())))
-            .collect::<serde_json::Map<String, Value>>();
-        projection["source_field_presence"] = Value::Object(presence);
         projection["projection_omitted"] = json!(
             omitted
                 .iter()
                 .filter(|key| raw.get(**key).is_some())
                 .collect::<Vec<_>>()
         );
-        let timestamp = ["updated", "updated_at", "started", "created_at"]
-            .iter()
-            .find_map(|key| {
-                raw.get(key)
-                    .and_then(Value::as_str)
-                    .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-            });
+        let started = parse_time(&raw, "started").or_else(|| parse_time(&raw, "created_at"));
+        let updated = parse_time(&raw, "updated").or_else(|| parse_time(&raw, "updated_at"));
+        let timestamp = updated.or(started);
         projection["within_last_seven_days"] = timestamp.map_or(Value::Null, |time| {
             json!(time >= self.captured_at - Duration::days(7) && time <= self.captured_at)
         });
@@ -597,6 +698,11 @@ impl Evidence {
         } else {
             json!("timestamp unavailable; not inferred from file mtime")
         };
+        if let (Some(started), Some(updated)) = (started, updated)
+            && updated >= started
+        {
+            projection["duration_ms"] = json!((updated - started).num_milliseconds());
+        }
         redact::json(&mut projection);
         let content = serde_json::to_string_pretty(&projection).map_err(|e| e.to_string())?;
         // Original hashes bind the private record without retaining its body.
@@ -770,4 +876,158 @@ fn sorted_dirs(root: &Path) -> Result<Vec<PathBuf>, String> {
         .collect::<Vec<_>>();
     paths.sort();
     Ok(paths)
+}
+
+/// Bounded graph identity limits so a large deployment graph cannot inflate the
+/// projection without bound.
+const MAX_GRAPH_NODES: usize = 64;
+const MAX_INPUT_KEYS: usize = 32;
+
+/// Short stable form of a graph digest used in labels.
+fn short_digest(digest: &str) -> String {
+    digest.chars().take(12).collect()
+}
+
+/// Collapse text into one bounded line for a label.
+fn one_line(text: &str, limit: usize) -> String {
+    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut out = collapsed.chars().take(limit).collect::<String>();
+    if collapsed.chars().count() > limit {
+        out.push('…');
+    }
+    out
+}
+
+/// Parse an RFC 3339 timestamp field from a Run record.
+fn parse_time(raw: &Value, key: &str) -> Option<DateTime<Utc>> {
+    raw.get(key)
+        .and_then(Value::as_str)
+        .and_then(|text| DateTime::parse_from_rfc3339(text).ok())
+        .map(|time| time.with_timezone(&Utc))
+}
+
+/// Project the cursor identity without its prepared input.
+fn cursor_projection(value: Option<&Value>) -> Value {
+    let Some(cursor) = value.filter(|value| !value.is_null()) else {
+        return Value::Null;
+    };
+    json!({
+        "node_id": cursor.get("node_id").cloned().unwrap_or(Value::Null),
+        "key": cursor.get("key").cloned().unwrap_or(Value::Null),
+    })
+}
+
+/// Project a live parallel activation.
+fn parallel_projection(value: Option<&Value>) -> Value {
+    let Some(parallel) = value.filter(|value| !value.is_null()) else {
+        return Value::Null;
+    };
+    let branches = parallel
+        .get("branches")
+        .and_then(Value::as_array)
+        .map(|branches| {
+            branches
+                .iter()
+                .map(|branch| {
+                    json!({
+                        "branch_id": branch.get("branch_id").cloned().unwrap_or(Value::Null),
+                        "entry": branch.get("entry").cloned().unwrap_or(Value::Null),
+                        "status": branch.get("status").cloned().unwrap_or(Value::Null),
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    json!({
+        "activation_id": parallel.get("activation_id").cloned().unwrap_or(Value::Null),
+        "fanout_node": parallel.get("fanout_node").cloned().unwrap_or(Value::Null),
+        "join_node": parallel.get("join_node").cloned().unwrap_or(Value::Null),
+        "fanout_invocation": parallel.get("fanout_invocation").cloned().unwrap_or(Value::Null),
+        "branches": branches,
+    })
+}
+
+/// Project the fanout and join activations as recorded in completed node results.
+///
+/// A completed Run clears `parallel`, so the activation survives only in the
+/// fanout node's output (`fanout`/`join`) and the join node's `branches` array.
+fn activation_projection(raw: &Value) -> (Value, Value) {
+    let outputs = raw
+        .get("results")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flat_map(|results| results.values())
+        .filter_map(Value::as_array)
+        .flatten()
+        .filter_map(|attempt| attempt.get("completion"))
+        .filter_map(|completion| completion.get("output"))
+        .collect::<Vec<_>>();
+    let mut fanout = Value::Null;
+    let mut join = Value::Null;
+    for output in outputs {
+        if fanout.is_null() && output.get("fanout").is_some() {
+            fanout = json!({
+                "activation_id": output.get("activation_id").cloned().unwrap_or(Value::Null),
+                "fanout_node": output.get("fanout").cloned().unwrap_or(Value::Null),
+                "join_node": output.get("join").cloned().unwrap_or(Value::Null),
+                "branches": output.get("branches").cloned().unwrap_or(Value::Null),
+            });
+        }
+        if join.is_null()
+            && output
+                .get("branches")
+                .and_then(Value::as_array)
+                .is_some_and(|branches| {
+                    branches
+                        .iter()
+                        .any(|branch| branch.get("branch_id").is_some())
+                })
+        {
+            let branches = output["branches"]
+                .as_array()
+                .map(|branches| {
+                    branches
+                        .iter()
+                        .map(|branch| {
+                            json!({
+                                "branch_id": branch.get("branch_id").cloned().unwrap_or(Value::Null),
+                                "entry": branch.get("entry").cloned().unwrap_or(Value::Null),
+                                "output": branch.get("output").cloned().unwrap_or(Value::Null),
+                                "status": branch.get("status").cloned().unwrap_or(Value::Null),
+                            })
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            join = json!({
+                "activation_id": output.get("activation_id").cloned().unwrap_or(Value::Null),
+                "branches": branches,
+            });
+        }
+    }
+    (fanout, join)
+}
+
+/// Per-node attempt summary from the persisted results.
+fn results_projection(value: Option<&Value>) -> Value {
+    let Some(results) = value.and_then(Value::as_object) else {
+        return json!({});
+    };
+    let mut out = serde_json::Map::new();
+    for (node, attempts) in results {
+        let Some(attempts) = attempts.as_array() else {
+            continue;
+        };
+        let last = attempts.last();
+        out.insert(
+            node.clone(),
+            json!({
+                "attempts": attempts.len(),
+                "last_sequence": attempts.iter().filter_map(|attempt| attempt.get("sequence").and_then(Value::as_u64)).max(),
+                "last_exit_code": last.and_then(|attempt| attempt.get("completion")).and_then(|completion| completion.get("output")).and_then(|output| output.get("exit_code")).cloned(),
+                "last_route": last.and_then(|attempt| attempt.get("completion")).and_then(|completion| completion.get("route")).cloned(),
+            }),
+        );
+    }
+    Value::Object(out)
 }

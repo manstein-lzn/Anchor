@@ -124,7 +124,7 @@ fn missing_required_roots_fail_and_optional_roots_record_limits() {
 #[test]
 fn run_metadata_excludes_prompts_and_records_seven_day_basis() {
     let (_temp, config) = setup();
-    let run = json!({"run_id":"run-new","status":"completed","updated":chrono::Utc::now().to_rfc3339(),"reason":"private termination reason","error":"private provider error body","exit_status":"private exit details","objective":"private prompt","messages":["private conversation"],"cursor":{"prompt":"private cursor"},"results":{"work":{"output":"private model text"}}});
+    let run = json!({"run_id":"run-new","status":"completed","updated":chrono::Utc::now().to_rfc3339(),"error":"private provider error body","exit_status":"private exit details","objective":"private prompt","messages":["private conversation"],"cursor":{"prompt":"private cursor"},"results":{"work":{"output":"private model text"}}});
     write(
         &config.data,
         "workspaces/review/runs/run-new/run.json",
@@ -138,34 +138,32 @@ fn run_metadata_excludes_prompts_and_records_seven_day_basis() {
         .find(|entry| entry.domain == "runs")
         .unwrap();
     let page = evidence.read(&entry.path, 0, 200).unwrap().to_string();
+    // Prompt-ish and body fields stay out of the projection.
     for private in [
-        "private termination reason",
-        "private provider error body",
         "private exit details",
         "private prompt",
         "private conversation",
         "private cursor",
         "private model text",
     ] {
-        assert!(!page.contains(private));
+        assert!(!page.contains(private), "{private}");
     }
-    assert!(page.contains("within_last_seven_days"));
-    assert!(page.contains("true"));
     let projected: Value =
         serde_json::from_str(&fs::read_to_string(evidence_root.join(&entry.frozen_file)).unwrap())
             .unwrap();
-    assert_eq!(projected["source_field_presence"]["error"], true);
-    assert_eq!(projected["source_field_presence"]["reason"], true);
-    assert_eq!(projected["source_field_presence"]["exit_status"], true);
-    assert_eq!(projected["source_field_presence"]["exit_code"], false);
-    assert!(
-        projected["projection_omitted"]
-            .as_array()
-            .unwrap()
-            .contains(&json!("error"))
-    );
-    assert!(projected.get("error").is_none());
+    // The failure reason is operationally important: it is projected as redacted
+    // text instead of being replaced by a presence boolean.
+    assert_eq!(projected["error"], json!("private provider error body"));
     assert!(projected.get("reason").is_none());
+    // Presence survives only where absence is real.
+    assert_eq!(projected["source_field_presence"]["started"], false);
+    assert_eq!(projected["source_field_presence"]["updated"], true);
+    assert_eq!(projected["cursor"]["node_id"], Value::Null);
+    assert_eq!(projected["results"]["work"]["attempts"], Value::Null);
+    assert_eq!(projected["recovery"]["pending"], 0);
+    assert_eq!(projected["parallel"], Value::Null);
+    assert!(page.contains("within_last_seven_days"));
+    assert!(page.contains("true"));
 }
 
 #[cfg(unix)]
@@ -333,4 +331,144 @@ async fn real_http_mcp_service_lists_and_reads_frozen_evidence() {
     assert_eq!(value["lines"][0]["text"], "one");
     let _ = client.cancel().await;
     server.abort();
+}
+
+#[test]
+fn deployment_catalog_graphs_and_state_root_schedules_are_collected() {
+    let (_temp, mut config) = setup();
+    write(
+        &config.data,
+        "catalog/rsi/graph.json",
+        r#"{"objective":"weekly review","entry":"collect","nodes":[]}"#,
+    );
+    write(
+        &config.data,
+        "catalog/wecom/graph.json",
+        r#"{"objective":"assistant","entry":"start","nodes":[]}"#,
+    );
+    // The Rust state root may be handed over as the state directory itself.
+    let state = config.data.join("state");
+    config.rust_state = Some(state.clone());
+    write(
+        &state,
+        "schedules.json",
+        r#"{"schedules":[{"graph":"rsi","enabled":true}]}"#,
+    );
+    let evidence_root = config.evidence.clone();
+    let evidence = Evidence::collect(config).unwrap();
+    assert_eq!(evidence.index("graphs", 0, 20).unwrap()["count"], 2);
+    assert!(
+        !evidence
+            .issues
+            .iter()
+            .any(|issue| issue["path"] == "runs/schedules.json"),
+        "{:?}",
+        evidence.issues
+    );
+    // The schedule snapshot is resolved from the state root itself, not from a
+    // nested `state/` directory.
+    let entry = evidence
+        .entries
+        .values()
+        .find(|entry| entry.path == "runs/schedules.json")
+        .unwrap();
+    let projected: Value =
+        serde_json::from_str(&fs::read_to_string(evidence_root.join(&entry.frozen_file)).unwrap())
+            .unwrap();
+    assert_eq!(projected["status"], "ok");
+    assert_eq!(projected["snapshot"]["schedules"][0]["graph"], "rsi");
+    assert!(
+        projected["source"]
+            .as_str()
+            .unwrap()
+            .ends_with("state/schedules.json"),
+        "{}",
+        projected["source"]
+    );
+}
+
+#[test]
+fn run_projection_reports_timestamps_activation_recovery_and_failure() {
+    let (_temp, config) = setup();
+    let run = json!({
+        "format": 8,
+        "run_id": "run-8",
+        "graph_digest": "0123456789abcdef0123456789abcdef",
+        "snapshot": {
+            "objective": "weekly review of Anchor",
+            "entry": "collect",
+            "nodes": [{"id": "collect"}, {"id": "gate"}]
+        },
+        "status": "failed",
+        "started": "2026-10-09T10:00:00.000Z",
+        "updated": "2026-10-09T10:02:30.500Z",
+        "error": "worker failed: Goose ended without a validated final_result",
+        "sequence": 42,
+        "cursor": {
+            "node_id": "collect",
+            "key": {"node_id": "collect", "invocation": 2},
+            "prepared_input": {"secret": "do-not-copy"}
+        },
+        "recovery": [{"node_id": "collect"}],
+        "recovery_submissions": [{"node_id": "collect"}],
+        "results": {
+            "fork": [{"sequence": 3, "completion": {"output": {
+                "activation_id": "parallel:fork:1",
+                "fanout": "fork",
+                "join": "join",
+                "branches": [["left"], ["right"]]
+            }}}],
+            "join": [{"sequence": 9, "completion": {"route": "ok", "output": {
+                "activation_id": "parallel:fork:1",
+                "branches": [
+                    {"branch_id": "parallel:fork:1:branch:0", "entry": "left", "output": "left", "status": "completed"},
+                    {"branch_id": "parallel:fork:1:branch:1", "entry": "right", "output": "right", "status": "failed"}
+                ]
+            }}}],
+            "collect": [{"sequence": 5, "completion": {"output": {"exit_code": 0, "stdout": "private body"}}}]
+        }
+    });
+    write(
+        &config.data,
+        "workspaces/x/runs/run-8/run.json",
+        &run.to_string(),
+    );
+    let evidence_root = config.evidence.clone();
+    let evidence = Evidence::collect(config).unwrap();
+    let entry = evidence
+        .entries
+        .values()
+        .find(|entry| entry.domain == "runs")
+        .unwrap();
+    let projected: Value =
+        serde_json::from_str(&fs::read_to_string(evidence_root.join(&entry.frozen_file)).unwrap())
+            .unwrap();
+    assert_eq!(projected["format"], 8);
+    assert_eq!(projected["time_basis"], "declared timestamp");
+    assert_eq!(projected["duration_ms"], 150500);
+    assert_eq!(projected["graph_entry"], "collect");
+    assert_eq!(projected["graph_nodes"], json!(["collect", "gate"]));
+    assert!(
+        projected["graph"]
+            .as_str()
+            .unwrap()
+            .starts_with("collect@0123456789ab"),
+        "{}",
+        projected["graph"]
+    );
+    assert_eq!(
+        projected["error"],
+        "worker failed: Goose ended without a validated final_result"
+    );
+    assert_eq!(projected["recovery"]["pending"], 1);
+    assert_eq!(projected["recovery"]["submissions"], 1);
+    assert_eq!(projected["fanout"]["fanout_node"], "fork");
+    assert_eq!(projected["fanout"]["join_node"], "join");
+    assert_eq!(projected["join"]["branches"][0]["status"], "completed");
+    assert_eq!(projected["join"]["branches"][1]["status"], "failed");
+    assert_eq!(projected["results"]["collect"]["attempts"], 1);
+    assert_eq!(projected["results"]["collect"]["last_exit_code"], 0);
+    assert_eq!(projected["cursor"]["node_id"], "collect");
+    assert!(!projected.to_string().contains("do-not-copy"));
+    assert!(!projected.to_string().contains("private body"));
 }

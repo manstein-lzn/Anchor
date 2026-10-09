@@ -80,9 +80,19 @@ cannot prove the truth of model claims. Source checks and human assessment remai
 necessary before implementing proposals. Long-term improvement is a separate
 acceptance criterion from one completed report.
 
-Run projections include `source_field_presence` and `projection_omitted`: a field
-omitted from review evidence may still exist in the original record. Presence
-never authorizes exposing its private contents.
+Run projections carry the record's own graph identity (`graph`, `graph_entry`,
+`graph_objective`, `graph_nodes`) instead of a constant label, plus `format`,
+`started`/`updated` and `duration_ms` when the producer recorded timestamps.
+Real values are projected for `error`, `cursor`, `recovery` (pending and
+submission counts), the parallel activation (`parallel`, `fanout`, `join` with
+`branches[].status`) and a per-node `results` summary. `source_field_presence`
+is kept only where absence is real (`started`, `updated`, `reason`); it never
+stands in for a value, and presence never authorizes exposing private contents.
+`projection_omitted` lists only the bodies left out entirely (`snapshot`,
+`input`, `decided`, `graph_calls`, `plugin_bindings`). Deployment graph
+definitions are collected from `catalog/*/graph.json`; the schedule snapshot is
+resolved from the granted Rust state root (`schedules.json` or
+`state/schedules.json`).
 
 Historical report and correction acceptance in A61 remains in the development
 ledger. The former launch and revision commands can be inspected at commit
