@@ -254,24 +254,30 @@ fn native_goose_channel_two_turns_restart_reuse_history_but_not_workspace() {
     assert!(history.to_string().contains(&first_nonce));
     assert!(history.to_string().contains(&second_nonce));
     assert!(history.as_array().unwrap().len() > first_history.as_array().unwrap().len());
-    for (method, path) in [
-        ("POST", format!("/runs/{first}/resume")),
-        ("DELETE", format!("/runs/{first}")),
-        ("DELETE", format!("/runs/{second}")),
-    ] {
-        let (status, rejected) = server.request(method, &path, None);
-        assert_eq!(status, 409, "{rejected}");
-    }
-    assert_eq!(
-        fs::read(
-            host.base
-                .root
-                .path()
-                .join("state/runs")
-                .join(format!("{first}.json"))
-        )
-        .unwrap(),
-        frozen_record
+    // A superseded Run stays frozen across the restart and `resume` still
+    // refuses it. Deleting it is now allowed once the newer Run is settled: the
+    // deletion removes exactly that Run's record and leaves a tombstone, and
+    // replaying the newer submission still resolves to it without reading the
+    // deleted link.
+    let (status, rejected) = server.request("POST", &format!("/runs/{first}/resume"), None);
+    assert_eq!(status, 409, "{rejected}");
+    let first_record = host
+        .base
+        .root
+        .path()
+        .join("state/runs")
+        .join(format!("{first}.json"));
+    assert_eq!(fs::read(&first_record).unwrap(), frozen_record);
+    let (status, deleted) = server.request("DELETE", &format!("/runs/{first}"), None);
+    assert_eq!(status, 204, "{deleted}");
+    assert!(!first_record.exists());
+    assert!(
+        host.base
+            .root
+            .path()
+            .join("state/run-deletions")
+            .join(format!("{first}.json"))
+            .is_file()
     );
     assert_eq!(submit(&server, &second_request), second);
     assert_eq!(provider.requests().len(), 6);
@@ -283,7 +289,8 @@ fn native_goose_channel_two_turns_restart_reuse_history_but_not_workspace() {
             "first_fact":first_fact,"second_fact":second_fact,"native_process":second_process,
             "prior_native_history":first_history,"native_history":history,
             "previous_readonly":true,"separate_workspaces_and_artifacts":true,
-            "worker_artifact":worker_artifact,"old_resume_and_single_run_delete_rejected":true,
+            "worker_artifact":worker_artifact,"superseded_resume_rejected":true,
+            "settled_predecessor_deleted":true,
             "idempotent_submission_model_requests":0
         }),
     );
