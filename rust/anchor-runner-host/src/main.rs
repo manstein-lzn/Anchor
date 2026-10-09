@@ -274,6 +274,9 @@ fn make_host_with_control(
     let work_root = env_path("ANCHOR_RUNNER_WORKSPACE_ROOT")?;
     let _ = run_id;
     create_durable_directory(&state.join("artifacts")).map_err(|e| e.to_string())?;
+    // Authorized roots are canonicalized when the sandbox is built, so the
+    // retention root must exist before then.
+    create_durable_directory(&state.join("spill")).map_err(|e| e.to_string())?;
     create_durable_directory(&work_root).map_err(|e| e.to_string())?;
     let commands = env::var("ANCHOR_RUNNER_ALLOWED_COMMANDS")
         .map_err(|_| "ANCHOR_RUNNER_ALLOWED_COMMANDS is required".to_owned())?;
@@ -290,6 +293,10 @@ fn make_host_with_control(
     .authorize_readonly_input_root(state.join("artifacts"))
     .authorize_readonly_destination_root("/in")
     .authorize_readonly_destination_root("/plugins")
+    // Node command output beyond the stream previews is retained here and
+    // mounted read-only at /spill.
+    .authorize_readonly_destination_root("/spill")
+    .authorize_spill_root(state.join("spill"))
     .allow_network();
     // Plugin bundles are immutable host inputs.  The standalone runner and
     // the service API both expose their accepted bundle/catalog roots through

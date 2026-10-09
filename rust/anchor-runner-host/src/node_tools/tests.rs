@@ -34,38 +34,61 @@ struct Fixture {
     workspace: PathBuf,
     source: PathBuf,
     sandbox: Arc<BubblewrapSandbox>,
+    spill: Option<PathBuf>,
 }
 impl Fixture {
     fn new() -> Self {
+        Self::build(false)
+    }
+    /// A fixture whose policy authorizes output retention.
+    fn retaining() -> Self {
+        Self::build(true)
+    }
+    fn build(retain: bool) -> Self {
         let directory = tempfile::tempdir().unwrap();
         let workspace = directory.path().join("workspace");
         let source = directory.path().join("input.txt");
         std::fs::create_dir(&workspace).unwrap();
         std::fs::write(&source, "immutable-input").unwrap();
+        let spill_root = directory.path().join("spill");
+        std::fs::create_dir(&spill_root).unwrap();
+        let mut policy = BubblewrapPolicy::new("bwrap", ["sh", "cat"])
+            .authorize_workspace_root(&workspace)
+            .authorize_readonly_input_root(directory.path())
+            .authorize_readonly_destination_root("/in");
+        if retain {
+            policy = policy
+                .authorize_spill_root(&spill_root)
+                .authorize_readonly_destination_root("/spill");
+        }
         let sandbox = Arc::new(
-            BubblewrapSandbox::new(
-                BubblewrapPolicy::new("bwrap", ["sh", "cat"])
-                    .authorize_workspace_root(&workspace)
-                    .authorize_readonly_input_root(directory.path())
-                    .authorize_readonly_destination_root("/in"),
-            )
-            .expect("these integration tests require working Bubblewrap isolation"),
+            BubblewrapSandbox::new(policy)
+                .expect("these integration tests require working Bubblewrap isolation"),
         );
         Self {
             directory,
             workspace,
             source,
             sandbox,
+            spill: retain.then(|| spill_root.join("run")),
         }
     }
+    /// The host directory holding retained output, if the policy authorizes it.
+    fn spill_directory(&self) -> Option<PathBuf> {
+        self.spill.clone()
+    }
     fn tools(&self, cancellation: Cancellation) -> NodeTools {
-        NodeTools::new(
+        let tools = NodeTools::new(
             Arc::new(Inner),
             Arc::clone(&self.sandbox),
             self.workspace.clone(),
             vec![ReadOnlyInput::new(&self.source, "/in/producer/report.txt")],
             cancellation,
-        )
+        );
+        match &self.spill {
+            Some(directory) => tools.with_spill(SpillDirectory::new(directory, "/spill")),
+            None => tools,
+        }
     }
 }
 fn cancellation() -> Cancellation {
@@ -85,12 +108,15 @@ async fn run(tools: &NodeTools, command: &[&str]) -> Value {
 async fn graph_network_intent_is_applied_and_host_authority_still_limits_it() {
     use tokio::io::AsyncWriteExt;
     let fixture = Fixture::new();
-    let refused = run(
-        &fixture.tools(cancellation()).with_network(true),
-        &["sh", "-c", "true"],
-    )
-    .await;
-    assert_eq!(refused["status"], "not_executed");
+    let refused = fixture
+        .tools(cancellation())
+        .with_network(true)
+        .call(RUN_TOOL_NAME, json!({"command":["sh","-c","true"]}))
+        .await
+        .expect_err("the fixture policy does not authorize network access")
+        .to_string();
+    assert!(refused.contains("not_executed"), "{refused}");
+    assert!(refused.contains("not authorized"), "{refused}");
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let server = tokio::spawn(async move {
@@ -193,9 +219,19 @@ async fn real_bwrap_hides_host_files_and_enforces_command_allowlist() {
         vec!["printf", "forbidden"],
         vec!["/usr/bin/printf", "forbidden"],
     ] {
-        let result = run(&tools, &command).await;
-        assert_eq!(result["status"], "not_executed");
-        assert!(!result["error"].as_str().unwrap().is_empty());
+        let refused = tools
+            .call(RUN_TOOL_NAME, json!({"command": command}))
+            .await
+            .expect_err("a command outside the allowlist must be refused")
+            .to_string();
+        // The refusal is a tool error (so the model sees isError) and it names
+        // the commands that would work.
+        assert!(refused.contains("not_executed"), "{refused}");
+        assert!(refused.contains("not authorized"), "{refused}");
+        assert!(
+            refused.contains("Authorized commands in this sandbox: cat, sh"),
+            "{refused}"
+        );
     }
     let result = run(&tools, &["/bin/cat", "/in/producer/report.txt"]).await;
     assert_eq!(result["exit_code"], 0);
@@ -230,10 +266,13 @@ async fn strict_arguments_and_other_tool_forwarding() {
         json!({"command":["cat"],"workspace":"/tmp"}),
         json!({}),
     ] {
-        let result = tools.call(RUN_TOOL_NAME, arguments).await.unwrap();
-        let result = result[0].as_json().unwrap();
-        assert_eq!(result["status"], "not_executed");
-        assert!(!result["error"].as_str().unwrap().is_empty());
+        let refused = tools
+            .call(RUN_TOOL_NAME, arguments)
+            .await
+            .expect_err("invalid arguments must be refused without executing")
+            .to_string();
+        assert!(refused.contains("not_executed"), "{refused}");
+        assert!(refused.contains("invalid arguments"), "{refused}");
     }
 }
 
@@ -267,9 +306,16 @@ async fn owned_node_tools_are_static_arc_ports_with_owned_invocation_context() {
 async fn unauthorized_command_returns_feedback_and_next_authorized_cat_succeeds() {
     let fixture = Fixture::new();
     let tools = fixture.tools(cancellation());
-    let result = run(&tools, &["od", "/in/producer/report.txt"]).await;
-    assert_eq!(result["status"], "not_executed");
-    assert!(result["error"].as_str().unwrap().contains("not authorized"));
+    let refused = tools
+        .call(
+            RUN_TOOL_NAME,
+            json!({"command": ["od", "/in/producer/report.txt"]}),
+        )
+        .await
+        .expect_err("od is not in the fixture allowlist")
+        .to_string();
+    assert!(refused.contains("not authorized"), "{refused}");
+    assert!(refused.contains("cat, sh"), "{refused}");
     let result = run(&tools, &["cat", "/in/producer/report.txt"]).await;
     assert_eq!(result["status"], "completed");
     assert_eq!(result["exit_code"], 0);
@@ -309,4 +355,155 @@ async fn real_bwrap_cancellation_is_an_error_after_command_starts() {
     };
     let (result, ()) = tokio::join!(command, stop);
     assert!(matches!(result, Err(ToolError::Failed(reason)) if reason.contains("cancelled")));
+}
+
+#[tokio::test]
+async fn run_description_states_limits_authorized_commands_and_retention() {
+    let fixture = Fixture::retaining();
+    let tools = fixture.tools(cancellation());
+    let definitions = tools.definitions();
+    let definition = definitions
+        .iter()
+        .find(|tool| tool.name == RUN_TOOL_NAME)
+        .expect("anchor_run is defined");
+    let description = &definition.description;
+    assert!(
+        description.contains("Authorized commands: cat, sh"),
+        "{description}"
+    );
+    assert!(description.contains("killed after 30s"), "{description}");
+    assert!(description.contains("64 KiB preview"), "{description}");
+    assert!(description.contains("/spill"), "{description}");
+    assert!(
+        description.contains("non-zero exit code is a normal result"),
+        "{description}"
+    );
+    // Without an authorized retention root the description must not promise it.
+    let plain = Fixture::new().tools(cancellation());
+    let definitions = plain.definitions();
+    let definition = definitions
+        .iter()
+        .find(|tool| tool.name == RUN_TOOL_NAME)
+        .unwrap();
+    assert!(
+        definition
+            .description
+            .contains("longer output is discarded"),
+        "{}",
+        definition.description
+    );
+}
+
+#[tokio::test]
+async fn long_output_is_retained_read_only_and_readable_when_authorized() {
+    let fixture = Fixture::retaining();
+    let tools = fixture.tools(cancellation());
+    let result = run(
+        &tools,
+        &[
+            "sh",
+            "-c",
+            "i=0; while [ $i -lt 4000 ]; do echo aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; i=$((i+1)); done",
+        ],
+    )
+    .await;
+    assert_eq!(result["status"], "completed", "{result}");
+    assert_eq!(result["incomplete"], false, "{result}");
+    assert!(
+        result["stdout"]
+            .as_str()
+            .unwrap()
+            .contains("[truncated:66464-bytes;"),
+        "{result}"
+    );
+    assert!(
+        result["hint"].as_str().unwrap().contains("full_output"),
+        "{result}"
+    );
+    let retained = result["full_output"]
+        .as_array()
+        .expect("retained paths")
+        .clone();
+    assert_eq!(retained.len(), 1, "{result}");
+    let visible = retained[0].as_str().unwrap();
+    assert!(visible.starts_with("/spill/"), "{visible}");
+
+    // The stream is covered by the preview plus the retained remainder, so
+    // nothing was lost: 132000 bytes written, 65536 shown, 66464 retained.
+    let remainder = 4000 * 33 - 65536;
+    let directory = fixture.spill_directory().unwrap();
+    let files = std::fs::read_dir(&directory)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect::<Vec<_>>();
+    assert_eq!(files.len(), 1, "{files:?}");
+    assert_eq!(
+        std::fs::read(&files[0]).unwrap().len(),
+        remainder,
+        "the retained remainder must complete the preview"
+    );
+
+    // ...and the sandbox can read it with an authorized command.
+    let probe = format!("wc -c < {visible}");
+    let read = run(&tools, &["sh", "-c", probe.as_str()]).await;
+    assert_eq!(
+        read["stdout"].as_str().unwrap().trim(),
+        remainder.to_string(),
+        "{read}"
+    );
+}
+
+#[tokio::test]
+async fn without_an_authorized_spill_root_long_output_is_discarded() {
+    let fixture = Fixture::new();
+    let tools = fixture
+        .tools(cancellation())
+        .with_spill(SpillDirectory::new(
+            fixture.directory.path().join("unauthorized"),
+            "/spill",
+        ));
+    let result = run(
+        &tools,
+        &[
+            "sh",
+            "-c",
+            "i=0; while [ $i -lt 4000 ]; do echo aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; i=$((i+1)); done",
+        ],
+    )
+    .await;
+    assert_eq!(result["incomplete"], true, "{result}");
+    assert!(result.get("full_output").is_none(), "{result}");
+    assert!(
+        result["hint"].as_str().unwrap().contains("not retained"),
+        "{result}"
+    );
+}
+
+#[tokio::test]
+async fn timed_out_commands_report_a_narrowing_hint() {
+    let fixture = Fixture::retaining();
+    let mut tools = fixture.tools(cancellation());
+    // The command wall clock is a constant in production; the test shortens it.
+    tools.timeout = Duration::from_secs(1);
+    let result = run(&tools, &["sh", "-c", "sleep 5"]).await;
+    assert_eq!(result["status"], "timed_out", "{result}");
+    let hint = result["hint"].as_str().expect("a timeout explains itself");
+    assert!(hint.contains("wall-clock limit"), "{hint}");
+    assert!(hint.contains("narrow"), "{hint}");
+}
+
+#[test]
+fn prune_spill_keeps_only_the_newest_retained_streams() {
+    let directory = tempfile::tempdir().unwrap();
+    for index in 0..5 {
+        std::fs::write(directory.path().join(format!("stdout-{index}.spill")), "x").unwrap();
+    }
+    std::fs::write(directory.path().join("notes.txt"), "keep me").unwrap();
+    prune_spill(directory.path(), 2).unwrap();
+    let mut retained = std::fs::read_dir(directory.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    retained.sort();
+    assert_eq!(retained, ["notes.txt", "stdout-3.spill", "stdout-4.spill"]);
 }

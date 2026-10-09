@@ -141,6 +141,25 @@ impl std::fmt::Debug for BubblewrapSandbox {
 }
 
 impl BubblewrapSandbox {
+    /// Host-approved command basenames, sorted so diagnostics stay stable.
+    ///
+    /// The allowlist itself is host authority; exposing the names lets the tool
+    /// layer tell a model which commands it may actually use.
+    pub fn allowed_commands(&self) -> Vec<String> {
+        let mut commands = self.allowed_commands.iter().cloned().collect::<Vec<_>>();
+        commands.sort();
+        commands
+    }
+
+    /// Whether a host directory is covered by an authorized spill root.
+    ///
+    /// Callers use this to decide whether output retention is actually available
+    /// before promising it to a model; the adapter still re-checks the resolved
+    /// path when a request is executed.
+    pub fn authorizes_spill_root(&self, path: &Path) -> bool {
+        self.spill_roots.iter().any(|root| path.starts_with(root))
+    }
+
     /// Construct an adapter only after confirming the configured binary can
     /// make a user/mount/network namespace on this host.
     pub fn new(policy: BubblewrapPolicy) -> Result<Self, SandboxError> {

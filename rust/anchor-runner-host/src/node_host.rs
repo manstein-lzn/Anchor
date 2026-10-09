@@ -392,6 +392,21 @@ impl NodeHostResolver for HostIoResolver {
                     &readonly_inputs,
                 )
                 .await?;
+            // Output beyond the stream previews is retained host-side and mounted
+            // read-only at /spill, so a model can read what was cut off.
+            let spill = crate::node_tools::SpillDirectory::new(
+                self.local_inputs
+                    .state_root()
+                    .join("spill")
+                    .join(&request.key.run_id)
+                    .join(
+                        workspace
+                            .file_name()
+                            .map(|name| name.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| request.key.node_id.clone()),
+                    ),
+                "/spill",
+            );
             let tools = std::sync::Arc::new(
                 crate::node_tools::NodeTools::new(
                     crate::channel_tools::wrap(
@@ -409,6 +424,7 @@ impl NodeHostResolver for HostIoResolver {
                     readonly_inputs,
                     request.cancellation.clone(),
                 )
+                .with_spill(spill)
                 .with_environment(self.mcp.environment.clone())
                 .with_network(request.network),
             ) as std::sync::Arc<dyn anchor_runtime::ToolPort>;
