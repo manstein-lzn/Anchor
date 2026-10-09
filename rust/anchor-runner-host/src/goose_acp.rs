@@ -166,6 +166,70 @@ fn store_fact(path: &Path, fact: &Fact) -> Result<(), GraphError> {
     Ok(())
 }
 
+/// Why one Goose invocation did not produce a node completion.
+///
+/// This decides whether the Run may resume the invocation. A definitive ACP
+/// protocol or completion-contract violation is known to have produced no
+/// completion, so a resume could only replay work that already happened; those
+/// become terminal node failures. Everything else (transport, session, tools,
+/// host IO, cleanup) leaves the outcome unknown, so the invocation stays
+/// resumable and a human or the agent must inspect the scene first.
+#[derive(Debug)]
+enum InvocationFailure {
+    /// Deterministic completion-contract violation reported by the agent layer.
+    Contract(String),
+    /// Unknown or externally caused failure; the invocation stays resumable.
+    Uncertain(String),
+}
+
+impl InvocationFailure {
+    fn reason(&self) -> &str {
+        match self {
+            Self::Contract(reason) | Self::Uncertain(reason) => reason,
+        }
+    }
+}
+
+/// Plain string errors default to resumable: only the explicit contract checks
+/// below may turn an invocation into a terminal failure.
+impl From<String> for InvocationFailure {
+    fn from(reason: String) -> Self {
+        Self::Uncertain(reason)
+    }
+}
+
+impl From<&str> for InvocationFailure {
+    fn from(reason: &str) -> Self {
+        Self::Uncertain(reason.to_owned())
+    }
+}
+
+/// Map a failed invocation to a node outcome.
+///
+/// The fixture spike keeps its historical behaviour (any non-cancel failure is
+/// terminal) because it exists to exercise spike negatives. Native invocations
+/// only fail terminally when the agent layer itself reported a contract
+/// violation; unknown outcomes stay `Interrupted` so they can be resumed after
+/// inspection.
+fn failure_outcome(
+    fixture: bool,
+    cancelled: bool,
+    failure: InvocationFailure,
+) -> NodeExecutionOutcome {
+    if cancelled {
+        return NodeExecutionOutcome::Cancelled;
+    }
+    if fixture {
+        return NodeExecutionOutcome::Failed {
+            reason: failure.reason().to_owned(),
+        };
+    }
+    match failure {
+        InvocationFailure::Contract(reason) => NodeExecutionOutcome::Failed { reason },
+        InvocationFailure::Uncertain(reason) => NodeExecutionOutcome::Interrupted { reason },
+    }
+}
+
 impl GooseNodePort {
     pub(crate) fn from_env(
         state: &Path,
@@ -471,7 +535,7 @@ impl GooseNodePort {
         if request.cancellation.load(Ordering::Relaxed) {
             result = Err("Goose invocation was cancelled before publication".into());
         } else if let Some(error) = close.err().or_else(|| tool_close.err()) {
-            result = Err(format!("Goose cleanup failed: {error}"));
+            result = Err(format!("Goose cleanup failed: {error}").into());
         }
         write_durable(
             &self.facts.join(format!("{stem}.evidence.json")),
@@ -489,7 +553,8 @@ impl GooseNodePort {
                 store_fact(&fact_path, &fact)?;
                 Ok(NodeExecutionOutcome::Completed(completion))
             }
-            Err(reason) => {
+            Err(failure) => {
+                let reason = failure.reason().to_owned();
                 fact.reason = Some(format!(
                     "{reason}; native Goose history retained; {}",
                     if self.fixture {
@@ -499,15 +564,11 @@ impl GooseNodePort {
                     }
                 ));
                 store_fact(&fact_path, &fact)?;
-                if request.cancellation.load(Ordering::Relaxed) {
-                    Ok(NodeExecutionOutcome::Cancelled)
-                } else if !self.fixture {
-                    Ok(NodeExecutionOutcome::Interrupted {
-                        reason: fact.reason.unwrap(),
-                    })
-                } else {
-                    Ok(NodeExecutionOutcome::Failed { reason })
-                }
+                Ok(failure_outcome(
+                    self.fixture,
+                    request.cancellation.load(Ordering::Relaxed),
+                    failure,
+                ))
             }
         }
     }
@@ -525,7 +586,7 @@ impl GooseNodePort {
         conversation: Option<&mut conversation::ConversationScope>,
         prompt_images: &[crate::node_host::NodeImage],
         live: &trace::LiveTrace,
-    ) -> Result<NodeCompletion, String> {
+    ) -> Result<NodeCompletion, InvocationFailure> {
         let restored = fact.session_id.clone();
         let opened = session::open(
             connection,
@@ -615,7 +676,9 @@ impl GooseNodePort {
             Ok(prompted) => prompted,
             Err(error) => {
                 evidence["notifications"] = json!(live.prompt_notifications()?);
-                return Err(error);
+                // A transport or session failure leaves the real outcome unknown:
+                // keep the invocation resumable so it can be inspected first.
+                return Err(error.into());
             }
         };
         evidence["prompt_result"] = response.clone();
@@ -636,13 +699,15 @@ impl GooseNodePort {
             "observed_usage_notifications_of_current_prompt"
         });
         if response["stopReason"] != "end_turn" {
-            return Err(format!(
+            return Err(InvocationFailure::Contract(format!(
                 "Goose prompt stopped without completion: {}",
                 response["stopReason"]
-            ));
+            )));
         }
         if *bridge.state.after_completion.lock().await {
-            return Err("Goose attempted tools after final_result".into());
+            return Err(InvocationFailure::Contract(
+                "Goose attempted tools after final_result".into(),
+            ));
         }
         let output = bridge
             .state
@@ -650,7 +715,9 @@ impl GooseNodePort {
             .lock()
             .await
             .clone()
-            .ok_or("Goose ended without a validated final_result")?;
+            .ok_or_else(|| {
+                InvocationFailure::Contract("Goose ended without a validated final_result".into())
+            })?;
         Ok(NodeCompletion {
             submission: output["summary"].as_str().unwrap().to_owned(),
             route: output["route"].as_str().map(str::to_owned),
@@ -680,5 +747,74 @@ mod tests {
         ] {
             assert!(upstream_url(value).is_err(), "{value}");
         }
+    }
+
+    #[test]
+    fn contract_violations_fail_the_node_instead_of_leaving_it_resumable() {
+        for reason in [
+            "Goose prompt stopped without completion: max_tokens",
+            "Goose attempted tools after final_result",
+            "Goose ended without a validated final_result",
+        ] {
+            assert!(
+                matches!(
+                    failure_outcome(false, false, InvocationFailure::Contract(reason.to_owned())),
+                    NodeExecutionOutcome::Failed { .. }
+                ),
+                "{reason}"
+            );
+        }
+    }
+
+    #[test]
+    fn uncertain_invocations_stay_resumable_and_cancellation_wins() {
+        assert!(matches!(
+            failure_outcome(
+                false,
+                false,
+                InvocationFailure::Uncertain("transport failed".into())
+            ),
+            NodeExecutionOutcome::Interrupted { .. }
+        ));
+        assert!(matches!(
+            failure_outcome(
+                false,
+                true,
+                InvocationFailure::Uncertain("transport failed".into())
+            ),
+            NodeExecutionOutcome::Cancelled
+        ));
+        assert!(matches!(
+            failure_outcome(false, true, InvocationFailure::Contract("bad stop".into())),
+            NodeExecutionOutcome::Cancelled
+        ));
+    }
+
+    #[test]
+    fn fixture_spike_keeps_terminal_failures() {
+        assert!(matches!(
+            failure_outcome(
+                true,
+                false,
+                InvocationFailure::Uncertain("transport failed".into())
+            ),
+            NodeExecutionOutcome::Failed { .. }
+        ));
+    }
+
+    #[test]
+    fn plain_errors_default_to_uncertain() {
+        assert!(matches!(
+            InvocationFailure::from("transport failed".to_owned()),
+            InvocationFailure::Uncertain(_)
+        ));
+        assert!(matches!(
+            InvocationFailure::from("transport failed"),
+            InvocationFailure::Uncertain(_)
+        ));
+        assert_eq!(
+            InvocationFailure::Uncertain("transport failed".into()).reason(),
+            "transport failed"
+        );
     }
 }
