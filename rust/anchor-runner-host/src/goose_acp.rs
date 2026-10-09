@@ -457,6 +457,16 @@ impl GooseNodePort {
         )
         .await
         .map_err(GraphError::Unsupported)?;
+        // Expose the same bridge on a UNIX socket so a sandbox that shares no
+        // network with the host can reach it through `anchor-net-relay`. The path
+        // must stay short: the kernel caps a socket path at `sun_path`.
+        let bridge_socket = std::env::temp_dir().join(format!(
+            "anchor-bridge-{}.sock",
+            &format!("{:x}", Sha256::digest(directory.display().to_string()))[..16]
+        ));
+        bridge
+            .expose_on_unix_socket(&bridge_socket)
+            .map_err(GraphError::Unsupported)?;
         let command = configuration::command(
             &self.sandbox,
             &directory,
@@ -532,6 +542,7 @@ impl GooseNodePort {
         evidence["tool_calls"] = json!(bridge.state.calls.lock().await.clone());
         evidence["tool_calls_dropped"] = json!(bridge.state.dropped_calls.load(Ordering::SeqCst));
         evidence["process_directory"] = json!(directory);
+        evidence["bridge_socket"] = json!(bridge_socket);
         evidence["close_error"] = json!(close.as_ref().err());
         evidence["tool_close_error"] = json!(tool_close.as_ref().err());
         if request.cancellation.load(Ordering::Relaxed) {

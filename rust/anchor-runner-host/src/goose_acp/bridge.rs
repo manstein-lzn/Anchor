@@ -22,7 +22,7 @@ use rmcp::{
 };
 use serde_json::{Value, json};
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
@@ -49,6 +49,10 @@ pub(super) struct Bridge {
     pub(super) url: String,
     pub(super) token: String,
     pub(super) state: Arc<BridgeState>,
+    /// Loopback address the HTTP listener actually bound.
+    address: std::net::SocketAddr,
+    /// UNIX socket this bridge is additionally exposed on, if any.
+    socket: std::sync::Mutex<Option<PathBuf>>,
     stop: CancellationToken,
     task: tokio::task::JoinHandle<()>,
 }
@@ -492,6 +496,29 @@ async fn completion(
     }
 }
 
+/// Forward UNIX-socket connections to the bridge's loopback listener.
+async fn forward_unix(
+    listener: tokio::net::UnixListener,
+    address: std::net::SocketAddr,
+    stop: CancellationToken,
+) {
+    loop {
+        let accepted = tokio::select! {
+            accepted = listener.accept() => accepted,
+            _ = stop.cancelled() => return,
+        };
+        let Ok((mut inbound, _)) = accepted else {
+            return;
+        };
+        tokio::spawn(async move {
+            let Ok(mut outbound) = tokio::net::TcpStream::connect(address).await else {
+                return;
+            };
+            let _ = tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await;
+        });
+    }
+}
+
 fn response_tool_names(bytes: &[u8]) -> Result<Vec<String>, String> {
     let text = std::str::from_utf8(bytes).map_err(|error| error.to_string())?;
     let mut names = std::collections::BTreeMap::<u64, String>::new();
@@ -657,12 +684,45 @@ impl Bridge {
             url: format!("http://{address}"),
             token,
             state,
+            address,
+            socket: std::sync::Mutex::new(None),
             stop,
             task,
         })
     }
 
+    /// Additionally expose the bridge on a UNIX socket.
+    ///
+    /// A node sandbox that shares no network with the host reaches the bridge
+    /// through an in-sandbox relay: the relay listens on that sandbox's own
+    /// loopback and forwards to this socket, which the host mounts read-only.
+    pub(super) fn expose_on_unix_socket(&self, path: &Path) -> Result<(), String> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        }
+        let _ = std::fs::remove_file(path);
+        let listener = tokio::net::UnixListener::bind(path).map_err(|error| error.to_string())?;
+        *self
+            .socket
+            .lock()
+            .map_err(|_| "bridge socket lock poisoned".to_owned())? = Some(path.to_path_buf());
+        let address = self.address;
+        let stop = self.stop.clone();
+        tokio::spawn(forward_unix(listener, address, stop));
+        Ok(())
+    }
+
+    /// Remove the extra UNIX socket, if one was bound.
+    fn remove_socket(&self) {
+        if let Ok(mut socket) = self.socket.lock()
+            && let Some(path) = socket.take()
+        {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
     pub(super) fn stop(&self) {
+        self.remove_socket();
         self.state.accepting.store(false, Ordering::SeqCst);
         self.state.cancellation.store(true, Ordering::SeqCst);
         self.stop.cancel();
@@ -670,6 +730,7 @@ impl Bridge {
     }
 
     pub(super) async fn close(&self) -> Result<(), String> {
+        self.remove_socket();
         self.state.accepting.store(false, Ordering::SeqCst);
         self.state.cancellation.store(true, Ordering::SeqCst);
         let settle = async {
@@ -789,6 +850,25 @@ mod tests {
                 Err(ToolError::Failed("cancelled tool settled".into()))
             })
         }
+    }
+
+    #[tokio::test]
+    async fn unix_socket_exposes_the_loopback_listener() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (bridge, _tools) = slow_bridge(false).await;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("bridge.sock");
+        bridge.expose_on_unix_socket(&path).unwrap();
+        let mut stream = tokio::net::UnixStream::connect(&path).await.unwrap();
+        let request = format!(
+            "GET /unknown HTTP/1.1\r\nhost: bridge\r\nauthorization: Bearer {}\r\nconnection: close\r\n\r\n",
+            bridge.token
+        );
+        stream.write_all(request.as_bytes()).await.unwrap();
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).await.unwrap();
+        let text = String::from_utf8_lossy(&response);
+        assert!(text.starts_with("HTTP/1.1 404"), "{text}");
     }
 
     async fn slow_bridge(fixture: bool) -> (Bridge, Arc<SlowTools>) {
