@@ -1,0 +1,87 @@
+[
+  {
+    "task": "t1-config",
+    "arm": "treatment",
+    "repetition": 1,
+    "returncode": 0,
+    "status": "completed",
+    "error": null,
+    "passed": true,
+    "check_output": "",
+    "elapsed_s": 10.2,
+    "usage": {
+      "messages": 8,
+      "input_tokens": 24082,
+      "output_tokens": 1406,
+      "cost_usd": 0.001238
+    }
+  },
+  {
+    "task": "t2-script-bug",
+    "arm": "treatment",
+    "repetition": 1,
+    "returncode": 0,
+    "status": "completed",
+    "error": null,
+    "passed": true,
+    "check_output": "",
+    "elapsed_s": 18.7,
+    "usage": {
+      "messages": 12,
+      "input_tokens": 49872,
+      "output_tokens": 2937,
+      "cost_usd": 0.002525
+    }
+  },
+  {
+    "task": "t3-rename",
+    "arm": "treatment",
+    "repetition": 1,
+    "returncode": 0,
+    "status": "completed",
+    "error": null,
+    "passed": true,
+    "check_output": "",
+    "elapsed_s": 14.6,
+    "usage": {
+      "messages": 13,
+      "input_tokens": 47615,
+      "output_tokens": 1919,
+      "cost_usd": 0.001783
+    }
+  },
+  {
+    "task": "t4-surgical-edit",
+    "arm": "treatment",
+    "repetition": 1,
+    "returncode": 0,
+    "status": "completed",
+    "error": null,
+    "passed": true,
+    "check_output": "",
+    "elapsed_s": 53.2,
+    "usage": {
+      "messages": 14,
+      "input_tokens": 89041,
+      "output_tokens": 5811,
+      "cost_usd": 0.004499
+    }
+  },
+  {
+    "task": "t5-version-bump",
+    "arm": "treatment",
+    "repetition": 1,
+    "returncode": 0,
+    "status": "completed",
+    "error": null,
+    "passed": true,
+    "check_output": "",
+    "elapsed_s": 12.7,
+    "usage": {
+      "messages": 10,
+      "input_tokens": 34918,
+      "output_tokens": 1940,
+      "cost_usd": 0.001773
+    }
+  }
+]

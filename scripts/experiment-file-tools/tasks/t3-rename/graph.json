@@ -1,0 +1,32 @@
+{
+  "objective": "rename a function across two files",
+  "entry": "seed",
+  "agents": {
+    "worker": {
+      "model": "models.worker",
+      "instructions": "`/in/seed/helper.py` defines `fetch` and `/in/seed/app.py` imports it and prints `fetch() + 1`. Copy both into your workspace, rename `fetch` to `load` in both files so `python3 app.py` still prints 42, and leave both files in place. Read files from /in/seed/ (read-only); your own /workspace is writable. When the task is done, call final_result alone with a short summary and route `done`.",
+      "wall_time_limit_seconds": 240
+    }
+  },
+  "ops": {
+    "seed": {
+      "run": "sh -c \"printf '%s\\n' 'def fetch():' '    return 41' > helper.py; printf '%s\\n' 'from helper import fetch' 'print(fetch() + 1)' > app.py\""
+    }
+  },
+  "nodes": [
+    {
+      "id": "seed",
+      "op": "seed"
+    },
+    {
+      "id": "worker",
+      "agent": "worker"
+    }
+  ],
+  "edges": [
+    {
+      "from": "seed",
+      "to": "worker"
+    }
+  ]
+}

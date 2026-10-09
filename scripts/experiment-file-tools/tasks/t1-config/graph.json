@@ -1,0 +1,32 @@
+{
+  "objective": "adjust a JSON configuration",
+  "entry": "seed",
+  "agents": {
+    "worker": {
+      "model": "models.worker",
+      "instructions": "Copy /in/seed/config.json into your workspace, set `retries` to 7 and `timeout_seconds` to 30, keep it valid JSON with exactly those two keys, and leave no other files behind. Read files from /in/seed/ (read-only); your own /workspace is writable. When the task is done, call final_result alone with a short summary and route `done`.",
+      "wall_time_limit_seconds": 240
+    }
+  },
+  "ops": {
+    "seed": {
+      "run": "sh -c \"printf '{\\042retries\\042: 3, \\042timeout_seconds\\042: 10}\\n' > config.json\""
+    }
+  },
+  "nodes": [
+    {
+      "id": "seed",
+      "op": "seed"
+    },
+    {
+      "id": "worker",
+      "agent": "worker"
+    }
+  ],
+  "edges": [
+    {
+      "from": "seed",
+      "to": "worker"
+    }
+  ]
+}

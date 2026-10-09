@@ -1,0 +1,32 @@
+{
+  "objective": "fix a shell script that prints the wrong total",
+  "entry": "seed",
+  "agents": {
+    "worker": {
+      "model": "models.worker",
+      "instructions": "`sum.sh` should print the sum of 1..4 but prints 9. Copy /in/seed/sum.sh into your workspace, fix it so `sh sum.sh` prints exactly 10, and keep it a shell script. Read files from /in/seed/ (read-only); your own /workspace is writable. When the task is done, call final_result alone with a short summary and route `done`.",
+      "wall_time_limit_seconds": 240
+    }
+  },
+  "ops": {
+    "seed": {
+      "run": "sh -c \"printf '%s\\n' 'i=1' 'total=0' 'while [ $i -le 4 ]; do total=$((total + i - 1)); i=$((i + 1)); done' 'echo $total' > sum.sh\""
+    }
+  },
+  "nodes": [
+    {
+      "id": "seed",
+      "op": "seed"
+    },
+    {
+      "id": "worker",
+      "agent": "worker"
+    }
+  ],
+  "edges": [
+    {
+      "from": "seed",
+      "to": "worker"
+    }
+  ]
+}

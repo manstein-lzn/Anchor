@@ -1,0 +1,32 @@
+{
+  "objective": "bump one version across five files with different syntaxes",
+  "entry": "seed",
+  "agents": {
+    "worker": {
+      "model": "models.worker",
+      "instructions": "Five files under /in/seed each mention version `1.2.3` in a different syntax (`app.py`, `chart.yaml`, `package.json`, `build.sh`, `NOTES.md`). Copy them into your workspace and bump every mention to `2.0.0`, leaving no mention of `1.2.3` anywhere, then add a line `bumped to 2.0.0` to `NOTES.md`. Read files from /in/seed/ (read-only); your own /workspace is writable. When the task is done, call final_result alone with a short summary and route `done`.",
+      "wall_time_limit_seconds": 240
+    }
+  },
+  "ops": {
+    "seed": {
+      "run": "sh -c \"printf '%s\\n' 'VERSION = \"1.2.3\"' > app.py; printf '%s\\n' 'version: 1.2.3' > chart.yaml; printf '%s\\n' '{\"version\": \"1.2.3\"}' > package.json; printf '%s\\n' 'VERSION=1.2.3' > build.sh; printf '%s\\n' 'release 1.2.3' > NOTES.md\""
+    }
+  },
+  "nodes": [
+    {
+      "id": "seed",
+      "op": "seed"
+    },
+    {
+      "id": "worker",
+      "agent": "worker"
+    }
+  ],
+  "edges": [
+    {
+      "from": "seed",
+      "to": "worker"
+    }
+  ]
+}

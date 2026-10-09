@@ -1,0 +1,32 @@
+{
+  "objective": "change one value in a large file without touching the rest",
+  "entry": "seed",
+  "agents": {
+    "worker": {
+      "model": "models.worker",
+      "instructions": "`/in/seed/data.txt` has 400 lines of the form `key_<n>=<n>`. Copy it into your workspace and change the value of `key_237` from 237 to 9990, changing **nothing else** \u2014 every other line must stay byte-identical. Read files from /in/seed/ (read-only); your own /workspace is writable. When the task is done, call final_result alone with a short summary and route `done`.",
+      "wall_time_limit_seconds": 240
+    }
+  },
+  "ops": {
+    "seed": {
+      "run": "sh -c \"i=1; while [ $i -le 400 ]; do printf 'key_%s=%s\\n' \"$i\" \"$i\"; i=$((i + 1)); done > data.txt\""
+    }
+  },
+  "nodes": [
+    {
+      "id": "seed",
+      "op": "seed"
+    },
+    {
+      "id": "worker",
+      "agent": "worker"
+    }
+  ],
+  "edges": [
+    {
+      "from": "seed",
+      "to": "worker"
+    }
+  ]
+}
