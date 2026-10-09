@@ -96,8 +96,12 @@ fn descend(mut parent: File, path: &Path, create: bool) -> io::Result<Option<Fil
             _ => return Err(unsafe_entry("root or ancestor is not a directory")),
         }
         let child = File::from(openat(&parent, name, DIRECTORY_FLAGS, Mode::empty())?);
-        if Stamp::of(&metadata) != Stamp::of(&fstat(&child)?) {
-            return Err(unsafe_entry("directory changed during inspection"));
+        // Only a *replaced* component is a swap race. Comparing whole stamps also
+        // treats a component that merely changed as replaced, which makes every
+        // walk through a shared ancestor such as `/tmp` fail whenever a sibling
+        // process or test thread creates or removes an unrelated entry.
+        if !same_object(&metadata, &fstat(&child)?) {
+            return Err(unsafe_entry("directory was replaced during inspection"));
         }
         parent = child;
     }
@@ -131,6 +135,10 @@ pub(super) fn regular(directory: &File, name: &str) -> io::Result<File> {
         OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
         Mode::empty(),
     )?);
+    // This file's bytes are read or hashed right after opening, so a file that
+    // was replaced *or modified* between the two calls must fail closed here.
+    // That is why this check keeps the whole stamp while the traversal check in
+    // `descend` only compares identity.
     if Stamp::of(&metadata) != Stamp::of(&fstat(&file)?) {
         return Err(unsafe_entry("file changed during inspection"));
     }
@@ -220,6 +228,15 @@ impl Stamp {
             changed: metadata.st_ctime as i128 * 1_000_000_000 + metadata.st_ctime_nsec as i128,
         }
     }
+}
+
+/// True while both stats still describe the same filesystem object.
+///
+/// Walking a path and opening each component must not be a swap race, and that
+/// is all a traversal check has to prove: an ancestor that merely changed — a
+/// sibling entry created or removed in it — is not a replaced ancestor.
+pub(super) fn same_object(first: &Stat, second: &Stat) -> bool {
+    first.st_dev == second.st_dev && first.st_ino == second.st_ino
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize)]

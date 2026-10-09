@@ -908,3 +908,35 @@ fn blocked_credential_review_does_not_create_preparation_output() {
     assert!(blockers_contain(&report, "explicit review"));
     assert!(!output.exists());
 }
+
+/// A shared ancestor that merely *changes* is not a replaced ancestor.
+///
+/// `descend` used to compare whole directory stamps (size, links, mtime, ctime)
+/// between `statat` and `openat`. Every walk descends through `/tmp`, so any
+/// sibling test thread or process creating or removing a temp entry made the
+/// walk report "unsafe … changed during inspection" and turned a clean report
+/// into `blocked` — which is what made the cutover suite flake under a full
+/// workspace run. Identity is what a swap check needs; a modified parent is not
+/// a swap.
+#[test]
+fn a_changed_ancestor_is_not_a_replaced_ancestor() {
+    use rustix::fs::fstat;
+
+    let root = tempfile::tempdir().unwrap();
+    let directory = filesystem::directory(root.path(), false).unwrap().unwrap();
+    let before = fstat(&directory).unwrap();
+    fs::write(root.path().join("sibling"), "an unrelated entry").unwrap();
+    let after = fstat(&directory).unwrap();
+    // The directory really did change …
+    assert_ne!(
+        filesystem::Stamp::of(&before),
+        filesystem::Stamp::of(&after)
+    );
+    // … but it is still the same object, so a traversal must accept it.
+    assert!(filesystem::same_object(&before, &after));
+
+    let other = tempfile::tempdir().unwrap();
+    let other = filesystem::directory(other.path(), false).unwrap().unwrap();
+    assert!(!filesystem::same_object(&before, &fstat(&other).unwrap()));
+    assert!(filesystem::same_object(&after, &after));
+}
