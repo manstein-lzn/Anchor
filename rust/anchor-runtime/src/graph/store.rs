@@ -40,6 +40,9 @@ impl RunStore for FileRunStore {
         Ok(Some(record))
     }
     fn save(&self, record: &GraphRunRecord) -> Result<(), GraphError> {
+        // The store persists what it is given: stamping `updated` is the writer's
+        // job (the Runner does it in `persist`), so the in-memory record and the
+        // stored record always agree on the mutation time.
         record.validate()?;
         let path = self.path(&record.run_id)?;
         fs::create_dir_all(&self.root)?;

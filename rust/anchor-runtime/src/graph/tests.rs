@@ -1757,7 +1757,7 @@ async fn format_one_cursor_migrates_under_lease_and_persists_once() {
 
     // Loading migrates in memory, without writing outside the Runner lease.
     let loaded = store.load(&id).unwrap().unwrap();
-    assert_eq!(loaded.format, 7);
+    assert_eq!(loaded.format, RUN_RECORD_FORMAT);
     assert_eq!(loaded.invocations["one"], 1);
     assert_eq!(loaded.passes["one"], 1);
     let persisted: Value =
@@ -1770,7 +1770,7 @@ async fn format_one_cursor_migrates_under_lease_and_persists_once() {
     assert_eq!(result.invocations["one"], 1);
     assert_eq!(result.passes["one"], 1);
     let persisted = store.load(&id).unwrap().unwrap();
-    assert_eq!(persisted.format, 7);
+    assert_eq!(persisted.format, RUN_RECORD_FORMAT);
     assert_eq!(persisted.invocations["one"], 1);
     assert_eq!(persisted.passes["one"], 1);
 
@@ -1805,7 +1805,7 @@ async fn format_one_terminal_run_migrates_without_changing_counters() {
     .unwrap();
 
     let loaded = store.load(&id).unwrap().unwrap();
-    assert_eq!(loaded.format, 7);
+    assert_eq!(loaded.format, RUN_RECORD_FORMAT);
     assert_eq!(loaded.passes["one"], 3);
     assert_eq!(loaded.invocations["one"], 3);
     let result = GraphRunner::new(&store, &artifacts, &nodes, &control)
@@ -1814,7 +1814,7 @@ async fn format_one_terminal_run_migrates_without_changing_counters() {
         .unwrap();
     assert_eq!(result.status, RunStatus::Completed);
     let persisted = store.load(&id).unwrap().unwrap();
-    assert_eq!(persisted.format, 7);
+    assert_eq!(persisted.format, RUN_RECORD_FORMAT);
     assert_eq!(persisted.passes["one"], 3);
     assert_eq!(persisted.invocations["one"], 3);
     assert!(nodes.calls.lock().unwrap().is_empty());
@@ -2303,7 +2303,7 @@ fn run_format_two_migrates_to_parallel_aware_format_three() {
     value.as_object_mut().unwrap().remove("parallel");
     let mut loaded: GraphRunRecord = serde_json::from_value(value).unwrap();
     loaded.migrate_format().unwrap();
-    assert_eq!(loaded.format, 7);
+    assert_eq!(loaded.format, RUN_RECORD_FORMAT);
     assert!(loaded.parallel.is_none());
     loaded.validate().unwrap();
 }
@@ -2319,7 +2319,7 @@ fn run_format_three_migrates_graph_calls_and_plugin_bindings_to_current_format()
     value.as_object_mut().unwrap().remove("plugin_bindings");
     let mut record: GraphRunRecord = serde_json::from_value(value).unwrap();
     record.migrate_format().unwrap();
-    assert_eq!(record.format, 7);
+    assert_eq!(record.format, RUN_RECORD_FORMAT);
     assert!(record.graph_calls.is_empty());
     assert!(record.plugin_bindings.is_empty());
     record.validate().unwrap();
@@ -2338,7 +2338,7 @@ fn run_format_six_migrates_recovery_submissions_to_current_format() {
         .remove("recovery_submissions");
     let mut record: GraphRunRecord = serde_json::from_value(value).unwrap();
     record.migrate_format().unwrap();
-    assert_eq!(record.format, 7);
+    assert_eq!(record.format, RUN_RECORD_FORMAT);
     assert!(record.recovery_submissions.is_empty());
     record.validate().unwrap();
 }
@@ -2498,7 +2498,7 @@ async fn parallel_file_store_roundtrip_preserves_activation_and_branch_cursors()
             .iter()
             .any(|branch| branch.cursor.is_some())
     );
-    assert_eq!(loaded.format, 7);
+    assert_eq!(loaded.format, RUN_RECORD_FORMAT);
     loaded.validate().unwrap();
     let completed_before_resume = activation
         .branches
@@ -3941,4 +3941,122 @@ async fn graph_runner_preserves_recorded_runtime_scenarios() {
             );
         }
     }
+}
+
+#[test]
+fn created_records_carry_started_and_updated_timestamps() {
+    let record = GraphRunRecord::create(graph(&["one"], &[], "one"), Value::Null).unwrap();
+    assert_eq!(record.format, RUN_RECORD_FORMAT);
+    for stamp in [&record.started, &record.updated] {
+        let text = stamp.as_deref().expect("new records carry both timestamps");
+        assert!(text.ends_with('Z'), "{text}");
+        assert!(text.len() >= 20, "{text}");
+    }
+    record.validate().unwrap();
+}
+
+#[test]
+fn format_seven_migrates_to_current_without_inventing_timestamps() {
+    let mut original = GraphRunRecord::create(graph(&["one"], &[], "one"), Value::Null).unwrap();
+    original.cursor = Some(RunCursor {
+        node_id: "one".into(),
+        key: InvocationKey {
+            run_id: original.run_id.clone(),
+            graph_digest: original.graph_digest.clone(),
+            node_id: "one".into(),
+            invocation: 1,
+        },
+        input_commits: vec![],
+        prepared_input: Value::Null,
+    });
+    // A Run that retains a cursor is not `Ready`; `Stopped` is the resumable
+    // state migration must preserve. The cursor also has to agree with the
+    // invocation facts it belongs to.
+    original.status = RunStatus::Stopped;
+    original.invocations.insert("one".into(), 1);
+    original.passes.insert("one".into(), 1);
+    let cursor = original.cursor.clone();
+    let mut value = serde_json::to_value(&original).unwrap();
+    value["format"] = serde_json::json!(7);
+    value.as_object_mut().unwrap().remove("started");
+    value.as_object_mut().unwrap().remove("updated");
+    let mut record: GraphRunRecord = serde_json::from_value(value).unwrap();
+    assert!(record.started.is_none() && record.updated.is_none());
+    record.migrate_format().unwrap();
+    assert_eq!(record.format, RUN_RECORD_FORMAT);
+    // A real creation time cannot be recovered, so migration must not invent one,
+    // and the cursor semantics must survive unchanged.
+    assert!(record.started.is_none(), "{:?}", record.started);
+    assert!(record.updated.is_none(), "{:?}", record.updated);
+    assert_eq!(record.cursor, cursor);
+    record.validate().unwrap();
+}
+
+#[test]
+fn newer_run_formats_are_refused_instead_of_guessed() {
+    let mut value = serde_json::to_value(
+        GraphRunRecord::create(graph(&["one"], &[], "one"), Value::Null).unwrap(),
+    )
+    .unwrap();
+    value["format"] = serde_json::json!(RUN_RECORD_FORMAT + 1);
+    let mut record: GraphRunRecord = serde_json::from_value(value).unwrap();
+    let error = record.migrate_format().unwrap_err().to_string();
+    assert!(error.contains("unsupported graph run format"), "{error}");
+}
+
+#[tokio::test]
+async fn reentering_a_terminal_run_does_not_advance_the_write_stamp() {
+    let root = std::env::temp_dir().join(format!(
+        "anchor-run-reentry-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let store = FileRunStore::new(&root);
+    let artifacts = MemoryArtifacts::default();
+    let nodes = FakeNodes::default();
+    let control = Control::default();
+    let mut record = GraphRunRecord::create(graph(&["one"], &[], "one"), Value::Null).unwrap();
+    record.status = RunStatus::Completed;
+    record.updated = Some("1970-01-01T00:00:00.000Z".into());
+    store.save(&record).unwrap();
+    let runner = GraphRunner::new(&store, &artifacts, &nodes, &control);
+    let returned = runner.run(record.clone()).await.unwrap();
+    assert_eq!(returned, record);
+    // Re-entry is a read: the stored record keeps its original write stamp.
+    assert_eq!(store.load(&record.run_id).unwrap().as_ref(), Some(&record));
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn persist_stamps_updated_and_keeps_memory_in_step_with_disk() {
+    let root = std::env::temp_dir().join(format!(
+        "anchor-run-stamp-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let store = FileRunStore::new(&root);
+    let artifacts = MemoryArtifacts::default();
+    let nodes = FakeNodes::default();
+    let control = Control::default();
+    let mut record = GraphRunRecord::create(graph(&["one"], &[], "one"), Value::Null).unwrap();
+    let started = record.started.clone();
+    record.updated = Some("1970-01-01T00:00:00.000Z".into());
+    GraphRunner::new(&store, &artifacts, &nodes, &control)
+        .persist(&mut record)
+        .unwrap();
+    let stamped = record.updated.as_deref().expect("persist stamps updated");
+    assert!(stamped > "1970-01-01T00:00:00.000Z", "{stamped}");
+    assert!(stamped.ends_with('Z'), "{stamped}");
+    let loaded = store.load(&record.run_id).unwrap().unwrap();
+    // The stored record and the in-memory record must not disagree about facts.
+    assert_eq!(loaded, record);
+    assert_eq!(loaded.started, started, "started is never rewritten");
+    assert_eq!(loaded.format, RUN_RECORD_FORMAT);
+    let _ = fs::remove_dir_all(&root);
 }

@@ -732,6 +732,7 @@ impl RunApplication {
         // Metadata is saved first: a crash can leave unused metadata, never an accepted
         // Run without its immutable Graph identity. The response follows both saves.
         metadata::save(&self.data_root, &metadata)?;
+        record.touch();
         self.store().save(&record)?;
         active.insert(
             run_id.clone(),
@@ -945,6 +946,7 @@ impl RunApplication {
         }
         if operation == "stop" && record.status == RunStatus::WaitingCall {
             record.status = RunStatus::Stopped;
+            record.touch();
             self.store().save(&record)?;
             let wait_children = wait_child_ids(&record);
             drop(active);
@@ -955,6 +957,7 @@ impl RunApplication {
                 && current.status == RunStatus::WaitingCall
             {
                 current.status = RunStatus::Stopped;
+                current.touch();
                 self.store().save(&current)?;
             }
             drop(lease);
@@ -963,6 +966,7 @@ impl RunApplication {
         if operation == "stop" {
             // Inactive stop preserves cursors and all completion facts; it dispatches no work.
             record.status = RunStatus::Stopped;
+            record.touch();
             self.store().save(&record)?;
             self.settle_channel_run(run_id, RunStatus::Stopped)?;
             return Ok(());
@@ -1194,15 +1198,18 @@ impl RunApplication {
             // The Harness abort intent and journal close are already durable.
             record.status = RunStatus::Aborted;
             record.error = Some(format!("{} aborted by operator", node_id));
+            record.touch();
             self.store().save(&record)?;
             return Ok(());
         }
         if !record.recovery.is_empty() {
             record.status = RunStatus::WaitingRecovery;
+            record.touch();
             self.store().save(&record)?;
             return Ok(());
         }
         record.status = RunStatus::Running;
+        record.touch();
         self.store().save(&record)?;
         self.check_store()?;
         active.insert(

@@ -167,10 +167,28 @@ pub struct ParallelActivation {
     pub branches: Vec<ParallelBranchRecord>,
 }
 
+/// Current persisted Graph Run record format. Readers migrate older formats and
+/// reject newer ones instead of guessing what changed.
+pub const RUN_RECORD_FORMAT: u32 = 8;
+
+/// RFC 3339 UTC timestamp used for `started`/`updated` on Run records.
+pub(crate) fn timestamp_now() -> String {
+    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GraphRunRecord {
     pub format: u32,
+    /// RFC 3339 UTC when the record was created. Absent on records written
+    /// before format 8: the real creation time is unknown and is deliberately
+    /// not inferred from file mtime.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started: Option<String>,
+    /// RFC 3339 UTC of the last persisted mutation; writers refresh it through
+    /// [`GraphRunRecord::touch`] immediately before saving.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated: Option<String>,
     pub run_id: String,
     pub graph_digest: String,
     pub snapshot: GraphSnapshot,
@@ -229,8 +247,11 @@ impl GraphRunRecord {
         let run_id = run_id.into();
         validate_component(&run_id)?;
         let input = merge_values(&snapshot.input, &input, &Value::Null);
+        let now = timestamp_now();
         Ok(Self {
-            format: 7,
+            format: RUN_RECORD_FORMAT,
+            started: Some(now.clone()),
+            updated: Some(now),
             run_id,
             graph_digest,
             snapshot,
@@ -254,6 +275,15 @@ impl GraphRunRecord {
         })
     }
 
+    /// Mark the record as written now.
+    ///
+    /// Writers (the Runner and the Host's operator paths) call this immediately
+    /// before persisting, so the stored record says when it was last updated and
+    /// the in-memory record agrees with it.
+    pub fn touch(&mut self) {
+        self.updated = Some(timestamp_now());
+    }
+
     /// Returns node IDs in first durable completion order.
     /// The persisted `results` map is keyed by node ID and therefore cannot
     /// itself represent execution order.
@@ -270,7 +300,7 @@ impl GraphRunRecord {
 
     pub(crate) fn validate(&self) -> Result<(), GraphError> {
         validate_component(&self.run_id)?;
-        if self.format != 7 {
+        if self.format != RUN_RECORD_FORMAT {
             return Err(GraphError::CorruptRun(format!(
                 "unsupported graph run format {}",
                 self.format
@@ -832,9 +862,15 @@ impl GraphRunRecord {
             6 => {
                 self.recovery_submissions = Vec::new();
                 self.format = 7;
+                self.migrate_format()
+            }
+            7 => {
+                // Format 8 adds `started`/`updated`. Migrated records keep both
+                // absent because their real timestamps cannot be recovered.
+                self.format = 8;
                 Ok(())
             }
-            7 => Ok(()),
+            8 => Ok(()),
             other => Err(GraphError::CorruptRun(format!(
                 "unsupported graph run format {other}"
             ))),

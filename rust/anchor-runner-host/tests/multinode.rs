@@ -121,6 +121,8 @@ fn serial_bundle_transfers_exact_readonly_snapshots_and_reloads_without_reexecut
     fs::write(producer_work.join("source.txt"), "changed after commit").unwrap();
     let response = finish(spawn(root.path(), &graph, "serial"));
     assert_eq!(response["status"], "completed", "{response}");
+    // Re-entering a completed Run is a read: the stored record must stay
+    // byte-identical, including its write stamp.
     assert_eq!(saved, record(root.path(), "serial"));
     assert_eq!(
         file(root.path(), &saved, "producer", "source.txt"),

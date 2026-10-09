@@ -108,6 +108,8 @@ fn paired_parallel_nodes_overlap_and_join_delivers_exact_branch_files() {
         }
     }
     assert_eq!(finish(spawn(root.path(), &graph))["status"], "completed");
+    // Re-entering a completed Run is a read: the stored record must stay
+    // byte-identical, including its write stamp.
     assert_eq!(saved, record(root.path()));
 }
 

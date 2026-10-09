@@ -19,16 +19,29 @@ impl<'a, S: RunStore, A: ArtifactPort, N: NodeExecutionPort, C: RunControl>
             control,
         }
     }
+    /// Persist the record after stamping when it was last written.
+    ///
+    /// The Runner is the only production writer of Graph Run records, so stamping
+    /// here keeps the in-memory record and the stored record in agreement instead
+    /// of making the store rewrite the caller's view of the facts.
+    pub(super) fn persist(&self, record: &mut GraphRunRecord) -> Result<(), GraphError> {
+        record.touch();
+        self.store.save(record)
+    }
     pub async fn run(&self, mut record: GraphRunRecord) -> Result<GraphRunRecord, GraphError> {
         record.migrate_format()?;
         record.validate()?;
         self.admit_capabilities(&record.snapshot)?;
         let _lease = self.store.acquire_lease(&record.run_id)?;
+        // Keep the stored copy so an admission that changes nothing does not
+        // rewrite the record (and does not advance its write stamp).
+        let mut loaded: Option<GraphRunRecord> = None;
         if let Some(mut saved) = self.store.load(&record.run_id)? {
             saved.migrate_format()?;
             if saved != record {
                 return Err(GraphError::RunConflict);
             }
+            loaded = Some(saved);
         }
         // Upgrade an in-flight record written by the earlier R5 counter timing:
         // it persisted a cursor before dispatch, but counted only completed nodes.
@@ -46,13 +59,20 @@ impl<'a, S: RunStore, A: ArtifactPort, N: NodeExecutionPort, C: RunControl>
             record.status,
             RunStatus::Failed | RunStatus::Completed | RunStatus::Aborted
         ) {
-            self.store.save(&record)?;
+            // Re-entering a terminal Run is a read. Write only when this admission
+            // actually changed the record (for example the cursor upgrade above),
+            // so re-entry stays idempotent and the write stamp stays meaningful.
+            if loaded.as_ref().is_none_or(|saved| saved != &record) {
+                self.persist(&mut record)?;
+            }
             return Ok(record);
         }
         if record.status == RunStatus::WaitingRecovery {
             // Recovery is an explicit operator action. Re-entering GraphRunner
             // directly must not turn a waiting record into ordinary resume.
-            self.store.save(&record)?;
+            if loaded.as_ref().is_none_or(|saved| saved != &record) {
+                self.persist(&mut record)?;
+            }
             return Ok(record);
         }
         if let Err(reason) = self.bind_plugin_manifests(&mut record) {
@@ -60,20 +80,20 @@ impl<'a, S: RunStore, A: ArtifactPort, N: NodeExecutionPort, C: RunControl>
         }
         record.status = RunStatus::Running;
         record.error = None;
-        self.store.save(&record)?;
+        self.persist(&mut record)?;
         loop {
             if self.control.stop_requested() {
                 record.status = RunStatus::Stopped;
-                self.store.save(&record)?;
+                self.persist(&mut record)?;
                 return Ok(record);
             }
             if self.control.pause_requested() && record.cursor.is_none() {
                 record.status = RunStatus::Paused;
-                self.store.save(&record)?;
+                self.persist(&mut record)?;
                 return Ok(record);
             }
             if propagate_inactive_edges(&mut record)? {
-                self.store.save(&record)?;
+                self.persist(&mut record)?;
             }
             if record.parallel.as_ref().is_some_and(|activation| {
                 activation
@@ -92,7 +112,7 @@ impl<'a, S: RunStore, A: ArtifactPort, N: NodeExecutionPort, C: RunControl>
                 } else {
                     RunStatus::Stopped
                 };
-                self.store.save(&record)?;
+                self.persist(&mut record)?;
                 return Ok(record);
             };
             if record.cursor.is_none() {
@@ -250,11 +270,11 @@ impl<'a, S: RunStore, A: ArtifactPort, N: NodeExecutionPort, C: RunControl>
                     .insert(cursor.node_id.clone(), cursor.key.invocation);
                 *record.passes.entry(cursor.node_id.clone()).or_default() += 1;
                 record.status = RunStatus::Running;
-                self.store.save(&record)?; // durable before dispatch
+                self.persist(&mut record)?; // durable before dispatch
             }
             if self.control.stop_requested() {
                 record.status = RunStatus::Stopped;
-                self.store.save(&record)?;
+                self.persist(&mut record)?;
                 return Ok(record);
             }
             let cursor = record.cursor.clone().expect("cursor established");
@@ -406,7 +426,7 @@ impl<'a, S: RunStore, A: ArtifactPort, N: NodeExecutionPort, C: RunControl>
                             },
                         );
                         record.status = RunStatus::Stopped;
-                        self.store.save(&record)?;
+                        self.persist(&mut record)?;
                         return Ok(record);
                     }
                     match call_outcome {
@@ -424,7 +444,7 @@ impl<'a, S: RunStore, A: ArtifactPort, N: NodeExecutionPort, C: RunControl>
                                 },
                             );
                             record.status = RunStatus::WaitingCall;
-                            self.store.save(&record)?;
+                            self.persist(&mut record)?;
                             return Ok(record);
                         }
                         GraphCallOutcome::Detached { child_run_id } if mode == "detach" => {
@@ -600,12 +620,12 @@ impl<'a, S: RunStore, A: ArtifactPort, N: NodeExecutionPort, C: RunControl>
             } else {
                 if self.control.pause_requested() {
                     record.status = RunStatus::Paused;
-                    self.store.save(&record)?;
+                    self.persist(&mut record)?;
                     return Ok(record);
                 }
                 if self.control.stop_requested() {
                     record.status = RunStatus::Stopped;
-                    self.store.save(&record)?;
+                    self.persist(&mut record)?;
                     return Ok(record);
                 }
                 let request = execution_request(&record, &cursor, self.control.cancellation())?;
@@ -629,39 +649,39 @@ impl<'a, S: RunStore, A: ArtifactPort, N: NodeExecutionPort, C: RunControl>
                             }
                         }));
                         record.status = RunStatus::WaitingRecovery;
-                        self.store.save(&record)?;
+                        self.persist(&mut record)?;
                         return Ok(record);
                     }
                     NodeExecutionOutcome::BudgetExhausted { .. } => {
                         record.recovery.retain(|pending| pending.key != cursor.key);
                         record.status = RunStatus::BudgetStopped;
-                        self.store.save(&record)?;
+                        self.persist(&mut record)?;
                         return Ok(record);
                     }
                     NodeExecutionOutcome::Suspended => {
                         record.recovery.retain(|pending| pending.key != cursor.key);
                         record.status = RunStatus::Paused;
-                        self.store.save(&record)?;
+                        self.persist(&mut record)?;
                         return Ok(record);
                     }
                     NodeExecutionOutcome::Cancelled => {
                         record.recovery.retain(|pending| pending.key != cursor.key);
                         record.status = RunStatus::Stopped;
-                        self.store.save(&record)?;
+                        self.persist(&mut record)?;
                         return Ok(record);
                     }
                     NodeExecutionOutcome::Interrupted { reason } => {
                         record.recovery.retain(|pending| pending.key != cursor.key);
                         record.status = RunStatus::Stopped;
                         record.error = Some(reason);
-                        self.store.save(&record)?;
+                        self.persist(&mut record)?;
                         return Ok(record);
                     }
                     NodeExecutionOutcome::Aborted => {
                         record.recovery.retain(|pending| pending.key != cursor.key);
                         record.status = RunStatus::Aborted;
                         record.error = Some(format!("{} aborted by operator", cursor.node_id));
-                        self.store.save(&record)?;
+                        self.persist(&mut record)?;
                         return Ok(record);
                     }
                     NodeExecutionOutcome::Failed { reason } => {
@@ -777,7 +797,7 @@ impl<'a, S: RunStore, A: ArtifactPort, N: NodeExecutionPort, C: RunControl>
             }
             record.cursor = None;
             record.status = RunStatus::Running;
-            self.store.save(&record)?;
+            self.persist(&mut record)?;
         }
     }
     pub(super) fn refuse_edges(
@@ -916,7 +936,7 @@ impl<'a, S: RunStore, A: ArtifactPort, N: NodeExecutionPort, C: RunControl>
     ) -> Result<GraphRunRecord, GraphError> {
         record.status = RunStatus::Failed;
         record.error = Some(reason);
-        self.store.save(&record)?;
+        self.persist(&mut record)?;
         Ok(record)
     }
 
