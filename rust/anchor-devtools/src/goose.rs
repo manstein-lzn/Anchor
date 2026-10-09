@@ -8,6 +8,7 @@ const SUITES: &[&str] = &[
     "goose_elicitation",
     "goose_media",
     "goose_conversation",
+    "goose_persistent_assistant",
     "goose_channel",
     "goose_compaction",
     "goose_pilot_compaction",

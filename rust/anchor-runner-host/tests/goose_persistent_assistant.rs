@@ -212,7 +212,7 @@ fn evidence(host: &Host, provider: &Provider, run: &str, checks: Value) {
     assert_eq!(controlled["real_model_requests"], 0);
     let root = host.base.root.path();
     fs::write(provider.root.join("evidence.json"), serde_json::to_vec_pretty(&json!({
-        "status":"passed","runtime":"real Host/GraphRunner/Goose ACP/authorized MCP with deterministic local Provider",
+        "status":"passed","runtime":"real Goose native loop over ACP",
         "real_model_requests":controlled["real_model_requests"],"goose_version":"1.53.0",
         "goose_binary_sha256":goose::GOOSE_SHA256,"provider_url":provider.url,
         "host_binary_sha256":goose::digest(&root.join("anchor-runner-host")),

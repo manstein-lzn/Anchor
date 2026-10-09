@@ -24,6 +24,7 @@ fn commands_select_standard_ignored_goose_suites() {
     assert!(SUITES.contains(&"goose_trace"));
     assert!(SUITES.contains(&"goose_session_calls"));
     assert!(SUITES.contains(&"goose_library"));
+    assert!(SUITES.contains(&"goose_persistent_assistant"));
     for suite in SUITES {
         let command = test_command("/workspace/rust/Cargo.toml", suite);
         assert!(command.windows(2).any(|pair| pair == ["--test", *suite]));
