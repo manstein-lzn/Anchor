@@ -81,15 +81,29 @@ Goose 拥有 Agent loop、Provider、原生会话和上下文压缩；Anchor 拥
 
 ## 快速开始
 
-### 环境要求
+### 运行方式与环境要求
 
-- Linux x86_64
-- Rust stable、`rustup` 和 Git
-- Node.js 20.19+ 或 22.12+，以及 npm
-- Bubblewrap（`bwrap`）和可用的 user/mount/network namespace
-- 如果要运行 AgentNode 或 Pilot：Anchor 构建的固定 Goose ACP 二进制，以及一个兼容 OpenAI API 的模型端点
+从源码开发和运行预构建发行包使用同一套 Host 与 Runtime，所需环境有所不同：
 
-### 启动本地开发服务
+| 依赖 | 从源码构建与开发 | 运行完整发行包 |
+| --- | --- | --- |
+| Linux x86_64 | 需要 | 需要，并满足包内二进制的系统兼容要求 |
+| Rust stable、`rustup` | 构建 Rust 和固定 Goose 时需要 | 不需要 |
+| Node.js、npm | 构建 WebUI、运行 Vite 时需要；Node.js 20.19+ 或 22.12+ | 不需要；Rust Host 直接提供编译后的 WebUI |
+| Git、`sh`、Bubblewrap | 需要，沙箱须有可用的 user/mount/network namespace | 同样需要 |
+| 固定 Goose ACP 二进制 | 按下文脚本构建并配置 | 发行包已包含 `bin/goose` |
+| 系统动态库 | 满足所构建 ELF 的依赖 | 按 `runtime-manifest.json` 中 Host 和工具的 ELF 依赖准备 |
+| 模型与外部服务配置 | 运行相应 Agent/Plugin 时需要 | 同样需要；凭据和状态放在包外 |
+
+### 使用预构建发行包
+
+完整 `anchor-runtime/` 包包含 Host、固定 Goose、Graph bundle 和声明的 Plugin 资源；使用 WebUI 的包还需包含编译后的 `web/`。安装环境满足上表后，配置包外的数据目录、权限和模型，再直接运行 `bin/anchor-runner-host serve`，或交给 systemd 管理。部署步骤见[生产部署指南](docs/rust-production-deployment.md)。
+
+只有一个 `anchor-runner-host` 可执行文件时，还需要配齐 Goose、Graph/Plugin 资源和所需 Web 资产。官方发行不依赖 Python；第三方 Plugin 若使用其他语言，其运行环境由该 Plugin 的声明决定。Goose 是静态 musl 二进制，Host 和工具仍可能依赖动态库，具体以发行 manifest 为准。
+
+`scripts/dev.sh` 会运行 Node 并启动 Vite，适用于下面的开发路径；成品包直接运行 Host 时不使用该脚本，也无需在目标机重建 Goose 或 WebUI。
+
+### 从源码启动本地开发服务
 
 ```sh
 npm --prefix apps/web ci
@@ -109,7 +123,7 @@ cp .env.example .env
 ./scripts/dev.sh restart
 ```
 
-### 启用 AgentNode 与 Pilot
+### 从源码启用 AgentNode 与 Pilot
 
 先构建仓库固定的 Goose v1.53.0 lean ACP 二进制。脚本会固定上游源码、musl 工具链和 SHA256，并检查静态 ELF；首次构建需要网络和几分钟时间。
 
@@ -134,7 +148,7 @@ ANCHOR_MODEL_WIRE_API=responses
 
 保存后执行 `./scripts/dev.sh restart`。示例 Graph 中的 `models.academic` 在没有单独配置别名时会回退到 `ANCHOR_MODEL_NAME`；需要区分不同模型时再设置 `ANCHOR_MODEL_ALIASES`。凭据只放在部署环境；不要写入 Graph、Plugin、发行包或 Git。完整配置、监听地址、API key 和各数据根见[使用指南](docs/usage.md)。
 
-### 第一次运行
+### 第一次运行开发示例
 
 1. 在 WebUI 打开 `dev` Graph，确认 Host 和 WebUI 都处于 ready。
 2. 运行内置的 `true` Op，查看 Run 的路径和完成状态。
