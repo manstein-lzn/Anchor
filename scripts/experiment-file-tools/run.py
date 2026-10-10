@@ -22,9 +22,9 @@ def dotenv(path):
     return values
 
 
-def host_environment(env, state, work, bundle, tasks_root):
+def host_environment(env, state, work, bundle, tasks_root, host_env=None):
     goose = env["ANCHOR_GOOSE_BINARY"]
-    return {
+    built = {
         "PATH": "/usr/bin:/bin",
         "LANG": "C.UTF-8",
         "TZ": "UTC",
@@ -54,9 +54,11 @@ def host_environment(env, state, work, bundle, tasks_root):
         ),
         "RUST_LOG": "warn",
     }
+    built.update({k: str(v) for k, v in (host_env or {}).items()})
+    return built
 
 
-def run_once(host, task, env, arm, out_root, repetition, timeout):
+def run_once(host, task, env, arm, out_root, repetition, timeout, host_env=None):
     work = out_root / arm / task.name / f"rep{repetition}"
     if work.exists():
         shutil.rmtree(work)
@@ -85,7 +87,7 @@ def run_once(host, task, env, arm, out_root, repetition, timeout):
         input=struct.pack(">I", len(payload)) + payload,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        env=host_environment(env, state, work_root, bundle, task.root),
+        env=host_environment(env, state, work_root, bundle, task.root, host_env),
         cwd=work,
         timeout=timeout,
     )
@@ -106,8 +108,13 @@ def run_once(host, task, env, arm, out_root, repetition, timeout):
         timeout=60,
     )
     usage = node_usage(state)
+    evidence = " ".join(
+        path.read_text(errors="replace")
+        for path in (state / "goose-acp").glob("*.evidence.json")
+    )
     return {
         "task": task.name,
+        "used_disclosure": "anchor_tools" in evidence,
         "arm": arm,
         "repetition": repetition,
         "returncode": process.returncode,
@@ -159,6 +166,7 @@ def main():
     parser.add_argument("--repetitions", type=int, default=1)
     parser.add_argument("--only")
     parser.add_argument("--timeout", type=int, default=900)
+    parser.add_argument("--host-env", default="{}", help="JSON object of extra Host env")
     options = parser.parse_args()
     env = dotenv(options.env_file)
     tasks = sorted(
@@ -172,7 +180,14 @@ def main():
     for task in tasks:
         for repetition in range(1, options.repetitions + 1):
             result = run_once(
-                pathlib.Path(options.host), task, env, options.arm, out_root, repetition, options.timeout
+                pathlib.Path(options.host),
+                task,
+                env,
+                options.arm,
+                out_root,
+                repetition,
+                options.timeout,
+                json.loads(options.host_env),
             )
             results.append(result)
             print(json.dumps(result, ensure_ascii=False), flush=True)

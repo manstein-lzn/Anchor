@@ -1183,3 +1183,9 @@ SSE `message` 的 data 为标准 Vercel chunk，`id` 为已提交到 SQLite 的�
   新场景（披露强制打开）：先直接调 `anchor__wecom-wecom_wecom_get_user` → 被 Goose 拒绝（模型看到 `not advertised`），且**业务侧没有任何调用**（断言只有 token + member 两次），证明拦截发生在桥之前；随后 `anchor_tools` 检索 → `anchor_tools_call` 调用同一个插件工具 → 拿到插件真实结果（member 信息）→ 写产物 → `final_result` 完成；同时断言模型工具面**恰好 6 个**（插件工具确实隐藏）、verify 节点产物正确。
   验证：闸门 **13 套件/73 场景全绿**（`evidence42`）；全量 workspace 1277 passed / 1 failed，失败项为 `anchor-wecom-gateway --test transport` 的 `slow_callback_does_not_block_control_and_older_reply_is_suppressed`——该 crate **不依赖 `anchor-runner-host`、本会话未改动过**，且该用例单独跑通过（既有并发抖动，非本切片引入）；`clippy -D warnings`（全工作区）与 `rustfmt --check` 干净。
   未关闭：自动规则在"真实工具数"下的端到端触发仍未覆盖（只有纯函数单测）；真实 provider 下模型是否主动先检索再调用仍未验证。
+- 2026-10-10：**真实 provider 验证"模型会不会用披露层"**（用实验台的确定性任务 + 真实 deepseek-flash，只替换模型传输）。
+  设计：新任务 `t6-discover`（读 `/in/seed/data.txt` 第 237 行并写入工作区 `result.txt`，独立产物检查）。A 组（披露）：`ANCHOR_NODE_TOOL_DISCLOSURE=1` + `ANCHOR_NODE_ALWAYS_VISIBLE=[]`——模型手里**只有两个披露工具**（`anchor_tools`/`anchor_tools_call`）+ 完成工具，连 `anchor_run` 都不可见；B 组（基线）：披露关闭、四个工具全部可见。两组都只授权 `sh,true` 命令。各 2 次重复。
+  结果：**两组都是 2/2 通过**；A 组两次都**先 `anchor_tools` 检索**（`used_disclosure=true`）再完成任务——**没人告诉它怎么用披露层，它自己发现并用了**。代价也测到了：A 组 7–9 次模型请求 / $0.00095–0.00148 / 8.7–12.2s，B 组 5 次 / $0.00078–0.00094 / 7.5–8.1s，即"先检索"多花 **1–2 个回合、约 1.2–1.9× token**。这正好印证阈值规则：隐藏工具很少时这点开销不划算（阈值 >3），而当隐藏工具很多时，一次检索（几百 token）换来每请求约 24k token 的节省（见前面 200 工具的测量）。
+  顺带发现（记录，未追因）：给节点加 `ANCHOR_NODE_ALWAYS_VISIBLE`（JSON 数组，默认不变）以支持"连自己的工具也按需取用"的实验配置；另外 op 的 `run` 字符串里**外层双引号 + 内层双引号**同时出现时，本机实测 `$i` 未被展开（`sh: [: -le: unary operator expected`，产物为空），改成外层单引号（`sh -c '…'`）后正常——同一文本用 `shlex`+exec 手工执行却正常，说明 Host 侧的命令解析与普通 shell 分词不完全一致，**原因未查清**，先按可用写法记录。
+  产物：`scripts/experiment-file-tools/`（harness、`t6-discover`、`results-discovery/*.json`）。
+  未关闭：模型在**真实插件工具**（而非 `anchor_run`/`anchor_read`）上的检索→调用只在确定性场景验证过；自动规则（阈值触发）的真实端到端仍未跑。

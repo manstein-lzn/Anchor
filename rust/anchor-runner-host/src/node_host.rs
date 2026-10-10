@@ -442,7 +442,10 @@ impl NodeHostResolver for HostIoResolver {
                 }
                 None => tools,
             };
-            Ok(crate::tool_disclosure::maybe_wrap(tools, always_visible))
+            Ok(crate::tool_disclosure::maybe_wrap(
+                tools,
+                crate::tool_disclosure::always_visible(always_visible),
+            ))
         })
     }
 }

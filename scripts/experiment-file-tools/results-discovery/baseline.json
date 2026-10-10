@@ -1,0 +1,38 @@
+[
+  {
+    "task": "t6-discover",
+    "used_disclosure": false,
+    "arm": "baseline",
+    "repetition": 1,
+    "returncode": 0,
+    "status": "completed",
+    "error": null,
+    "passed": true,
+    "check_output": "",
+    "elapsed_s": 7.5,
+    "usage": {
+      "messages": 5,
+      "input_tokens": 12542,
+      "output_tokens": 925,
+      "cost_usd": 0.000781
+    }
+  },
+  {
+    "task": "t6-discover",
+    "used_disclosure": false,
+    "arm": "baseline",
+    "repetition": 2,
+    "returncode": 0,
+    "status": "completed",
+    "error": null,
+    "passed": true,
+    "check_output": "",
+    "elapsed_s": 8.1,
+    "usage": {
+      "messages": 5,
+      "input_tokens": 13135,
+      "output_tokens": 1227,
+      "cost_usd": 0.000938
+    }
+  }
+]

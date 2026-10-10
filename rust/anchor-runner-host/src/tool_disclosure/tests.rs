@@ -271,6 +271,23 @@ fn disclosure_keeps_the_advertised_schema_bounded() {
 }
 
 #[test]
+fn always_visible_accepts_a_host_override() {
+    assert_eq!(
+        parse_always_visible(r#"["anchor_run"]"#).unwrap(),
+        vec!["anchor_run".to_owned()]
+    );
+    assert_eq!(
+        parse_always_visible("[]").unwrap(),
+        Vec::<String>::new(),
+        "a host may hide everything behind the disclosure tools"
+    );
+    assert!(
+        parse_always_visible("anchor_run").is_none(),
+        "a malformed override falls back to the node's defaults"
+    );
+}
+
+#[test]
 fn disclosure_waits_until_the_meta_tools_pay_for_themselves() {
     assert!(!should_disclose(None, 0));
     assert!(!should_disclose(None, MIN_HIDDEN_FOR_DISCLOSURE));

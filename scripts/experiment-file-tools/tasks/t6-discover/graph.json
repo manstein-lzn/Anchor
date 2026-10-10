@@ -1,0 +1,32 @@
+{
+  "objective": "read one line from a long seeded file and write it back",
+  "entry": "seed",
+  "agents": {
+    "worker": {
+      "model": "models.worker",
+      "instructions": "\u628a `/in/seed/data.txt` \u7b2c 237 \u884c\u7684\u5185\u5bb9\u539f\u6837\u5199\u5165\u4f60\u5de5\u4f5c\u533a\u7684 `result.txt`\uff0c\u6587\u4ef6\u91cc\u53ea\u5199\u8fd9\u4e00\u884c\uff08\u4e0d\u8981\u884c\u53f7\u3001\u4e0d\u8981\u591a\u4f59\u7a7a\u767d\uff09\u3002\u6ce8\u610f\uff1a\u672c\u8282\u70b9\u53ea\u6388\u6743\u4e86\u6781\u5c11\u7684\u547d\u4ee4\uff0c\u8bfb\u53d6\u957f\u6587\u4ef6\u9700\u8981\u501f\u52a9\u5bbf\u4e3b\u63d0\u4f9b\u7684\u5de5\u5177\uff1b\u5199\u5b8c\u6587\u4ef6\u540e\u7528 final_result \u6c47\u62a5\u3002",
+      "wall_time_limit_seconds": 240
+    }
+  },
+  "ops": {
+    "seed": {
+      "run": "sh -c 'i=1; while [ $i -le 400 ]; do printf \"line_%s=%s\\n\" $i $i; i=$((i+1)); done > data.txt'"
+    }
+  },
+  "nodes": [
+    {
+      "id": "seed",
+      "op": "seed"
+    },
+    {
+      "id": "worker",
+      "agent": "worker"
+    }
+  ],
+  "edges": [
+    {
+      "from": "seed",
+      "to": "worker"
+    }
+  ]
+}

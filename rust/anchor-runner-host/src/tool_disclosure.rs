@@ -79,6 +79,21 @@ fn should_disclose(flag: Option<&str>, hidden: usize) -> bool {
     }
 }
 
+/// Which tools keep their place in the list, given the node's defaults.
+///
+/// A host may narrow the always-visible set with `ANCHOR_NODE_ALWAYS_VISIBLE` (a JSON
+/// array of tool names) when a node should reach even its own tools on demand.
+pub(crate) fn always_visible(defaults: Vec<String>) -> Vec<String> {
+    match std::env::var("ANCHOR_NODE_ALWAYS_VISIBLE") {
+        Ok(configured) => parse_always_visible(&configured).unwrap_or(defaults),
+        Err(_) => defaults,
+    }
+}
+
+fn parse_always_visible(configured: &str) -> Option<Vec<String>> {
+    serde_json::from_str::<Vec<String>>(configured).ok()
+}
+
 /// Whether the host forced disclosure, so the node boundary text only claims what
 /// the model is certain to see. Automatic disclosure is explained by the meta
 /// tools' own descriptions.
