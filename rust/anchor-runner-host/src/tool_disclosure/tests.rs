@@ -226,7 +226,9 @@ fn realistic(name: &str, index: usize) -> ToolDefinition {
 }
 
 fn schema_bytes(definitions: &[ToolDefinition]) -> usize {
-    serde_json::to_vec(definitions).expect("serialize definitions").len()
+    serde_json::to_vec(definitions)
+        .expect("serialize definitions")
+        .len()
 }
 
 #[test]
@@ -236,13 +238,14 @@ fn disclosure_keeps_the_advertised_schema_bounded() {
     let mut reported = Vec::new();
     for count in [1usize, 10, 60, 200] {
         let inner = Arc::new(Fake {
-            definitions: (0..count).map(|i| realistic(&format!("plugin_tool_{i}"), i)).collect(),
+            definitions: (0..count)
+                .map(|i| realistic(&format!("plugin_tool_{i}"), i))
+                .collect(),
             calls: Mutex::new(Vec::new()),
         });
         let raw = schema_bytes(&inner.definitions());
-        let disclosed = schema_bytes(
-            &wrap(inner, DisclosurePolicy::new(["anchor_run"])).definitions(),
-        );
+        let disclosed =
+            schema_bytes(&wrap(inner, DisclosurePolicy::new(["anchor_run"])).definitions());
         reported.push((count, raw, disclosed));
         println!(
             "tools={count:>4}  raw={raw:>7}B (~{:>5} tok)  disclosed={disclosed:>5}B (~{:>4} tok)",
@@ -264,5 +267,47 @@ fn disclosure_keeps_the_advertised_schema_bounded() {
     assert!(
         raw > disclosed * 20,
         "{count} tools must cost far more undiscosed ({raw}B) than disclosed ({disclosed}B)"
+    );
+}
+
+#[test]
+fn disclosure_waits_until_the_meta_tools_pay_for_themselves() {
+    assert!(!should_disclose(None, 0));
+    assert!(!should_disclose(None, MIN_HIDDEN_FOR_DISCLOSURE));
+    assert!(should_disclose(None, MIN_HIDDEN_FOR_DISCLOSURE + 1));
+    assert!(should_disclose(Some("1"), 0), "the host can force it");
+    assert!(!should_disclose(Some("0"), 100), "the host can forbid it");
+    assert!(
+        should_disclose(Some("nonsense"), MIN_HIDDEN_FOR_DISCLOSURE + 1),
+        "an unrecognised value falls back to the measured rule"
+    );
+}
+
+#[test]
+fn the_threshold_is_a_deliberate_margin_past_the_measured_crossover() {
+    let measure = |hidden: usize| {
+        let inner = Arc::new(Fake {
+            definitions: (0..hidden)
+                .map(|i| realistic(&format!("plugin_tool_{i}"), i))
+                .collect(),
+            calls: Mutex::new(Vec::new()),
+        });
+        let raw = schema_bytes(&inner.definitions());
+        let disclosed =
+            schema_bytes(&wrap(inner, DisclosurePolicy::new(["anchor_run"])).definitions());
+        (raw, disclosed)
+    };
+    // At the threshold we still list everything, even though the meta tools already
+    // break even: the margin absorbs tools whose schemas are larger than the fixture's.
+    let (raw_at, disclosed_at) = measure(MIN_HIDDEN_FOR_DISCLOSURE);
+    assert!(
+        raw_at > disclosed_at,
+        "the margin costs a small win at the threshold: {raw_at} vs {disclosed_at}"
+    );
+    // One tool past it, disclosure wins clearly.
+    let (raw_above, disclosed_above) = measure(MIN_HIDDEN_FOR_DISCLOSURE + 1);
+    assert!(
+        disclosed_above * 2 < raw_above,
+        "past the threshold disclosure must win: {raw_above} vs {disclosed_above}"
     );
 }

@@ -234,7 +234,7 @@ impl GoosePilot {
             configuration::boundary_text(&configuration::BoundaryFacts {
                 isolated: self.relay.is_isolated(),
                 wall_clock: None,
-                disclosure: crate::tool_disclosure::enabled(),
+                disclosure: crate::tool_disclosure::forced(),
             }),
         ));
         let command = configuration::command(

@@ -22,6 +22,11 @@ pub(crate) const SEARCH_TOOL: &str = "anchor_tools";
 /// Call one of those tools by name.
 pub(crate) const CALL_TOOL: &str = "anchor_tools_call";
 
+/// Below this many hidden tools the two meta tools cost more than the schemas they
+/// replace (measured: one tool costs 489 B listed against 890 B disclosed, so the
+/// crossover is around two or three hidden tools).
+const MIN_HIDDEN_FOR_DISCLOSURE: usize = 3;
+
 const DEFAULT_PAGE: usize = 50;
 const MAX_PAGE: usize = 200;
 const SUMMARY_CHARS: usize = 160;
@@ -48,14 +53,36 @@ pub(crate) fn maybe_wrap(
     inner: Arc<dyn ToolPort>,
     always_visible: impl IntoIterator<Item = impl Into<String>>,
 ) -> Arc<dyn ToolPort> {
-    if !enabled() {
+    let policy = DisclosurePolicy::new(always_visible);
+    let hidden = inner
+        .definitions()
+        .into_iter()
+        .filter(|definition| !policy.listed(&definition.name))
+        .count();
+    let flag = std::env::var("ANCHOR_NODE_TOOL_DISCLOSURE").ok();
+    if !should_disclose(flag.as_deref(), hidden) {
         return inner;
     }
-    wrap(inner, DisclosurePolicy::new(always_visible))
+    wrap(inner, policy)
 }
 
-/// Whether this host discloses tools on demand.
-pub(crate) fn enabled() -> bool {
+/// The decision, kept pure so it is testable without the process environment.
+///
+/// `1` forces disclosure, `0` disables it, and anything else (including an
+/// unrecognised value) discloses only when the node mounts enough hidden tools for
+/// the meta tools to pay for themselves.
+fn should_disclose(flag: Option<&str>, hidden: usize) -> bool {
+    match flag {
+        Some("0") => false,
+        Some("1") => true,
+        _ => hidden > MIN_HIDDEN_FOR_DISCLOSURE,
+    }
+}
+
+/// Whether the host forced disclosure, so the node boundary text only claims what
+/// the model is certain to see. Automatic disclosure is explained by the meta
+/// tools' own descriptions.
+pub(crate) fn forced() -> bool {
     std::env::var("ANCHOR_NODE_TOOL_DISCLOSURE").as_deref() == Ok("1")
 }
 
@@ -68,13 +95,20 @@ struct DisclosedTools {
     policy: DisclosurePolicy,
 }
 
+impl DisclosurePolicy {
+    /// Whether a tool keeps its place in the model's tool list under this policy.
+    fn listed(&self, name: &str) -> bool {
+        DisclosedTools::is_meta(name) || self.always_visible.iter().any(|held| held == name)
+    }
+}
+
 impl DisclosedTools {
     fn is_meta(name: &str) -> bool {
         name == SEARCH_TOOL || name == CALL_TOOL
     }
 
     fn listed(&self, name: &str) -> bool {
-        Self::is_meta(name) || self.policy.always_visible.iter().any(|held| held == name)
+        self.policy.listed(name)
     }
 
     /// One line per tool is enough to decide whether to look closer.

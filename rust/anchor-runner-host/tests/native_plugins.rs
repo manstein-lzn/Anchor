@@ -156,7 +156,12 @@ fn native_goose_reads_plugin_skill_and_calls_rust_stdio_mcp() {
         "ops":{"verify":{"run":"sh -c 'cat /in/worker/evidence.txt > verified.txt'"}},
         "nodes":[{"id":"worker","agent":"worker","plugins":["wecom"]},{"id":"verify","op":"verify"}],
         "edges":[{"from":"worker","to":"verify"}]
-    })).native();
+    }))
+    .native()
+    // This scenario drives the plugin tools *directly*, and Goose refuses a tool that
+    // was not advertised in the turn, so a disclosed node cannot call them that way.
+    // The on-demand path is covered by the disclosure scenario instead.
+    .with_extra_environment([("ANCHOR_NODE_TOOL_DISCLOSURE", "0")]);
     let plugin = package(&host.base, "wecom");
     let path = plugin.join("plugin.json");
     let original_skill = fs::read(plugin.join("skills/wecom/SKILL.md")).unwrap();
