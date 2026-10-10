@@ -55,6 +55,8 @@ ANCHOR_GOOSE_RELAY_BINARY=/absolute/path/to/anchor-net-relay
 
 沙箱网络**默认隔离**：只要 `ANCHOR_GOOSE_BINARY` 同目录（或 `ANCHOR_GOOSE_RELAY_BINARY` 指定的绝对路径）存在沙箱中继 `anchor-net-relay`，Goose 就运行在自己的网络命名空间里，只能通过沙箱内中继经 UNIX socket 到达 Host bridge 与模型代理，真实 provider 凭据只留在宿主侧。发行包把中继放在 `bin/anchor-net-relay`（与 Host 同目录），部署时与 Goose 二进制放同一目录即可。设 `ANCHOR_GOOSE_LOCAL_NETWORK=0` 回到共享宿主网络（此时**必须**显式 `ANCHOR_GOOSE_ALLOW_SHARED_NETWORK=1`，该模式不是 loopback-only 隔离）；找不到中继二进制时同样回退到共享模式并需要该开关。`anchor-devtools preflight` 会校验隔离模式下的中继二进制存在。
 
+工具披露（AgentNode）：默认**自动**——当某个节点挂载的工具里会有超过 3 个被藏起来时，宿主只列出 Anchor 自己的核心工具加两个披露工具 `anchor_tools`（一行摘要检索、分页）与 `anchor_tools_call`（按名调用），其余工具用时再取；被藏起来的工具**无法被直接调用**（Goose 会拒绝当轮未广告的调用），只能经 `anchor_tools_call` 到达。隐藏工具不超过 3 个时不披露（两个元工具本身约 890 字节，比省下的 schema 更贵）。`ANCHOR_NODE_TOOL_DISCLOSURE=1` 强制披露、`=0` 关闭；`ANCHOR_NODE_ALWAYS_VISIBLE`（JSON 数组）可收窄始终可见的工具集合。
+
 模型调用默认由 Host 代理：Goose 进程只拿到 Host bridge 的 loopback 地址和一次性 token，provider 端点与真实 API key 留在宿主侧，宿主用真实响应流式回传。`ANCHOR_MODEL_DIRECT=1` 是显式回滚开关，会让沙箱像早期版本那样自己持有端点与凭据并直接拨号；仅在代理出问题时临时使用。
 
 `ANCHOR_GOOSE_ALLOW_SHARED_NETWORK=1` 是 Goose 进程的明确网络接入决定；业务工具和节点仍受 Host/Sandbox 授权。配置与凭据留在部署环境，不放进 Graph 包或版本库。
