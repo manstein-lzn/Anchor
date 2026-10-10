@@ -1,4 +1,4 @@
-use super::{bridge::Bridge, transport::AcpConnection};
+use super::{bridge::Bridge, configuration, transport::AcpConnection};
 use anchor_runtime::Cancellation;
 use serde_json::{Value, json};
 use std::time::Duration;
@@ -55,11 +55,14 @@ pub(super) async fn open(
     // `enabledExtensions` restricts the session to exactly these extensions, so the
     // builtin that injects the per-turn persistent instructions (`tom`, "Top Of
     // Mind") must be listed explicitly; otherwise the host boundary never reaches
-    // the model even though `GOOSE_MOIM_MESSAGE_TEXT` is set.
+    // the model even though `GOOSE_MOIM_MESSAGE_TEXT` is set. Further builtins are
+    // opt-in disclosure layers.
+    let mut enabled = vec![json!({"type":"mcp","server":server})];
+    for name in configuration::enabled_builtins()? {
+        enabled.push(json!({"type":"builtin","name":name}));
+    }
     let mut params = json!({"cwd":"/workspace","mcpServers":[server.clone()],
-        "_meta":{"hidden":true,"sessionTitle":"Anchor",
-            "enabledExtensions":[{"type":"mcp","server":server},
-                {"type":"builtin","name":"tom"}]}});
+        "_meta":{"hidden":true,"sessionTitle":"Anchor","enabledExtensions":enabled}});
     if let Some(id) = restored {
         params["sessionId"] = json!(id);
     }

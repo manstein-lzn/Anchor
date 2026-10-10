@@ -104,6 +104,40 @@ const SOCKET_MOUNT: &str = "/tools/anchor-bridge.sock";
 /// Loopback address the relay serves inside an isolated sandbox.
 pub(super) const RELAY_LISTEN: &str = "127.0.0.1:9080";
 
+/// Goose builtins a session may load, alongside Anchor's own MCP server.
+///
+/// `tom` is required for the per-turn boundary text; other names are opt-in so a
+/// disclosure layer (for example `code_execution`) can be enabled deliberately
+/// instead of by default.
+pub(super) fn enabled_builtins() -> Result<Vec<String>, String> {
+    match std::env::var("ANCHOR_GOOSE_ENABLED_EXTENSIONS") {
+        Ok(configured) => parse_enabled_builtins(&configured),
+        Err(_) => Ok(default_enabled_builtins()),
+    }
+}
+
+/// The per-turn boundary text depends on `tom`, so it is always the default.
+fn default_enabled_builtins() -> Vec<String> {
+    vec!["tom".to_owned()]
+}
+
+fn parse_enabled_builtins(configured: &str) -> Result<Vec<String>, String> {
+    let names = serde_json::from_str::<Vec<String>>(configured)
+        .map_err(|_| "ANCHOR_GOOSE_ENABLED_EXTENSIONS must be a JSON array of names".to_owned())?;
+    for name in &names {
+        if name.is_empty()
+            || !name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        {
+            return Err(
+                "ANCHOR_GOOSE_ENABLED_EXTENSIONS names must be simple identifiers".to_owned(),
+            );
+        }
+    }
+    Ok(names)
+}
+
 /// The facts a Goose sandbox should state to the model up front, so the agent
 /// learns its boundary instead of discovering it by failing.
 pub(super) struct BoundaryFacts {
@@ -1061,6 +1095,21 @@ mod tests {
         assert!(shared.contains("共享宿主网络"), "{shared}");
         assert!(!shared.contains("秒"), "{shared}");
         assert!(!shared.contains("secret"), "{shared}");
+    }
+
+    #[test]
+    fn enabled_builtins_default_to_the_boundary_provider_only() {
+        assert_eq!(default_enabled_builtins(), vec!["tom".to_owned()]);
+        assert_eq!(
+            parse_enabled_builtins(r#"["tom","todo","skills"]"#).unwrap(),
+            vec!["tom".to_owned(), "todo".into(), "skills".into()]
+        );
+        for invalid in ["tom", "{}", r#"[1]"#, r#"["bad name"]"#, r#"[""]"#] {
+            assert!(
+                parse_enabled_builtins(invalid).is_err(),
+                "{invalid} must be rejected"
+            );
+        }
     }
 
     #[test]
