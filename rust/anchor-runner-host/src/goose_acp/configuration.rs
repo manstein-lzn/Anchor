@@ -174,10 +174,13 @@ pub(super) fn boundary_text(facts: &BoundaryFacts) -> String {
         ));
     }
     if facts.disclosure {
-        text.push_str(
-            "- 能力：可用工具按需披露——先用 `anchor_tools` 检索，再用 `anchor_tools_call` 调用；\
+        // Reference the constants so the prompt cannot drift from the port.
+        text.push_str(&format!(
+            "- 能力：可用工具按需披露——先用 `{}` 检索，再用 `{}` 调用；\
              可用集合由宿主授权决定，列表之外的工具无法调用。\n",
-        );
+            crate::tool_disclosure::SEARCH_TOOL,
+            crate::tool_disclosure::CALL_TOOL,
+        ));
     }
     text.push_str("- 授权：对外发送消息、提交业务操作或改动宿主配置，都需要用户明确授权。");
     text
