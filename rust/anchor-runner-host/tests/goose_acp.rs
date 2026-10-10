@@ -2,6 +2,7 @@
 #[path = "support/runtime_fixture.rs"]
 mod fixture;
 #[path = "support/goose_fixture.rs"]
+#[allow(dead_code)]
 mod goose;
 
 use goose::{Gate, Host, Provider, Step, command, complete, tool_definition, tool_feedback};

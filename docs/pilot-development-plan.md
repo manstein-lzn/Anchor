@@ -1178,3 +1178,8 @@ SSE `message` 的 data 为标准 Vercel chunk，`id` 为已提交到 SQLite 的�
   验证：单测 10 项（阈值的四种组合、阈值处的保守余量、阈值后收益 > 2 倍、披露后 schema 上界不随工具数增长）；闸门 **13 套件/72 场景全绿**；全量 workspace **1278 passed/0 failed**；`clippy -D warnings`（全工作区）、`rustfmt --check` 干净。
   未关闭：①披露模式下**插件工具**的"检索→调用"端到端未覆盖（目前只有用 `anchor_run` 的端到端场景 + 单测）；②**自动规则**的端到端触发未覆盖（只有纯函数单测）；③真实 provider 下模型是否会主动先检索再调用仍未验证。
   更正与结论（同日补充）：①上面 2026-10-10 那条里"隐藏≠禁止"的说法作废（原因见该条内的更正）；②执行层事实是 **Goose 拒绝当轮未广告的工具调用**（`-32600 … was not advertised for this model turn`），因此隐藏工具**只能经 `anchor_tools_call`** 到达（该路径走被包装端口自己的 `call`）。
+- 2026-10-10：补上**披露模式下插件工具**的端到端覆盖（也就是生产默认会走的那条路），并加"直接调用被拒"的反向断言。
+  改法：①fixture 增加 `Step::named(name, args)`——按**模型可见的原始工具名**发调用、绕过"必须被广告"的查找，因为反向用例本身就是要发一个未被广告的调用；②把插件打包与图抽成共用辅助（`graph()`、`install_plugin()`），避免两个插件场景复制粘贴；③原插件场景显式 pin `ANCHOR_NODE_TOOL_DISCLOSURE=0`（它测的是"直接使用插件工具"）。
+  新场景（披露强制打开）：先直接调 `anchor__wecom-wecom_wecom_get_user` → 被 Goose 拒绝（模型看到 `not advertised`），且**业务侧没有任何调用**（断言只有 token + member 两次），证明拦截发生在桥之前；随后 `anchor_tools` 检索 → `anchor_tools_call` 调用同一个插件工具 → 拿到插件真实结果（member 信息）→ 写产物 → `final_result` 完成；同时断言模型工具面**恰好 6 个**（插件工具确实隐藏）、verify 节点产物正确。
+  验证：闸门 **13 套件/73 场景全绿**（`evidence42`）；全量 workspace 1277 passed / 1 failed，失败项为 `anchor-wecom-gateway --test transport` 的 `slow_callback_does_not_block_control_and_older_reply_is_suppressed`——该 crate **不依赖 `anchor-runner-host`、本会话未改动过**，且该用例单独跑通过（既有并发抖动，非本切片引入）；`clippy -D warnings`（全工作区）与 `rustfmt --check` 干净。
+  未关闭：自动规则在"真实工具数"下的端到端触发仍未覆盖（只有纯函数单测）；真实 provider 下模型是否主动先检索再调用仍未验证。

@@ -33,6 +33,8 @@ pub const SUMMARY_REQUEST: &str =
 
 pub enum Reply {
     Tool(&'static str, Value),
+    /// Emit a call with this exact tool name, whether or not it was advertised.
+    Named(String, Value),
     Text(&'static str),
     Summary(String),
     ContextLengthExceeded,
@@ -52,6 +54,18 @@ impl Step {
     pub fn tool(suffix: &'static str, arguments: Value) -> Self {
         Self {
             reply: Reply::Tool(suffix, arguments),
+            feedback: None,
+            summary: false,
+            request_contains: None,
+            usage: (11, 7),
+            preface: None,
+        }
+    }
+
+    /// Call a tool by its exact model-facing name, advertised or not.
+    pub fn named(name: impl Into<String>, arguments: Value) -> Self {
+        Self {
+            reply: Reply::Named(name.into(), arguments),
             feedback: None,
             summary: false,
             request_contains: None,
@@ -510,6 +524,23 @@ async fn completion(
     }
     let mut selected_tool = Value::Null;
     let finish = match reply {
+        Reply::Named(name, arguments) => {
+            // Deliberately bypasses the advertised-tool lookup: the scenario wants to
+            // exercise what the agent does with a name it was not offered.
+            selected_tool = json!({"function": {"name": name.clone()}});
+            chunks.push(chunk(json!({"tool_calls":[{"index":0,"id":format!("call-{sequence}"),"type":"function","function":{"name":name,"arguments":""}}]}), Value::Null));
+            let arguments = arguments.to_string();
+            for fragment in [
+                &arguments[..arguments.len() / 2],
+                &arguments[arguments.len() / 2..],
+            ] {
+                chunks.push(chunk(
+                    json!({"tool_calls":[{"index":0,"function":{"arguments":fragment}}]}),
+                    Value::Null,
+                ));
+            }
+            "tool_calls"
+        }
         Reply::Tool(suffix, mut arguments) => {
             let definition = match tool_definition(&request, suffix) {
                 Ok(definition) => definition,

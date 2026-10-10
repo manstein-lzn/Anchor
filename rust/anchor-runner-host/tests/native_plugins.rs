@@ -139,32 +139,20 @@ fn bind(host: &Host, plugin: &str) {
     }).to_string()).unwrap();
 }
 
-#[test]
-#[ignore = "requires pinned Goose binary and native WeCom tools"]
-fn native_goose_reads_plugin_skill_and_calls_rust_stdio_mcp() {
-    let business = BusinessFixture::new();
-    let provider = goose::Provider::new("goose-native-wecom-plugin", vec![
-        goose::command("set -eu; cat /plugins/wecom/skills/wecom/SKILL.md > skill.txt; if printf corrupt >> /plugins/wecom/skills/wecom/SKILL.md 2>/dev/null; then exit 7; fi; printf readonly-package-confirmed"),
-        goose::Step::tool("wecom-wecom_wecom_get_user", json!({"userid":"member-fixture"})).after("readonly-package-confirmed"),
-        goose::command("printf 'member-fixture: Native fixture user\n' > report.txt; cp report.txt evidence.txt; cat report.txt").after("Native fixture user"),
-        goose::complete("verify").after("member-fixture: Native fixture user"),
-        goose::Step::text("Plugin instructions and member lookup verified"),
-    ]);
-    let host = goose::Host::new(&json!({
+fn graph() -> Value {
+    json!({
         "entry":"worker","agents":{"worker":{"model":goose::MODEL,"network":true,
             "instructions":"Read the mounted WeCom SKILL, query the fixture member, save the returned member in report.txt and evidence.txt, then finish with route verify."}},
         "ops":{"verify":{"run":"sh -c 'cat /in/worker/evidence.txt > verified.txt'"}},
         "nodes":[{"id":"worker","agent":"worker","plugins":["wecom"]},{"id":"verify","op":"verify"}],
         "edges":[{"from":"worker","to":"verify"}]
-    }))
-    .native()
-    // This scenario drives the plugin tools *directly*, and Goose refuses a tool that
-    // was not advertised in the turn, so a disclosed node cannot call them that way.
-    // The on-demand path is covered by the disclosure scenario instead.
-    .with_extra_environment([("ANCHOR_NODE_TOOL_DISCLOSURE", "0")]);
+    })
+}
+
+/// Package the WeCom plugin against the fixture endpoint and bind it to the Run.
+fn install_plugin(host: &goose::Host, business: &BusinessFixture) -> PathBuf {
     let plugin = package(&host.base, "wecom");
     let path = plugin.join("plugin.json");
-    let original_skill = fs::read(plugin.join("skills/wecom/SKILL.md")).unwrap();
     let mut manifest = read_json(&path);
     manifest["mcpServers"]["wecom"]["env"] = json!({
         "WECOM_API_BASE_URL":business.endpoint,"WECOM_CORP_ID":"fixture-corp",
@@ -176,6 +164,28 @@ fn native_goose_reads_plugin_skill_and_calls_rust_stdio_mcp() {
         .remove("optional_env_vars");
     fs::write(path, manifest.to_string()).unwrap();
     bind(&host.base, "wecom");
+    plugin
+}
+
+#[test]
+#[ignore = "requires pinned Goose binary and native WeCom tools"]
+fn native_goose_reads_plugin_skill_and_calls_rust_stdio_mcp() {
+    let business = BusinessFixture::new();
+    let provider = goose::Provider::new("goose-native-wecom-plugin", vec![
+        goose::command("set -eu; cat /plugins/wecom/skills/wecom/SKILL.md > skill.txt; if printf corrupt >> /plugins/wecom/skills/wecom/SKILL.md 2>/dev/null; then exit 7; fi; printf readonly-package-confirmed"),
+        goose::Step::tool("wecom-wecom_wecom_get_user", json!({"userid":"member-fixture"})).after("readonly-package-confirmed"),
+        goose::command("printf 'member-fixture: Native fixture user\n' > report.txt; cp report.txt evidence.txt; cat report.txt").after("Native fixture user"),
+        goose::complete("verify").after("member-fixture: Native fixture user"),
+        goose::Step::text("Plugin instructions and member lookup verified"),
+    ]);
+    let host = goose::Host::new(&graph())
+        .native()
+        // This scenario drives the plugin tools *directly*, and Goose refuses a tool
+        // that was not advertised in the turn, so a disclosed node cannot call them
+        // that way. The on-demand path has its own scenario below.
+        .with_extra_environment([("ANCHOR_NODE_TOOL_DISCLOSURE", "0")]);
+    let plugin = install_plugin(&host, &business);
+    let original_skill = fs::read(plugin.join("skills/wecom/SKILL.md")).unwrap();
     let response = host.run(&provider);
     assert_eq!(response["status"], "completed", "{response}");
     provider.assert_consumed();
@@ -219,6 +229,98 @@ fn native_goose_reads_plugin_skill_and_calls_rust_stdio_mcp() {
         json!({
             "native_rust_plugin":true,"plugin_skill_readonly":true,"business_calls":calls,
             "python_required":false,"production_calls":0,"case_source":"tests/native_plugins.rs"
+        }),
+    );
+}
+
+#[test]
+#[ignore = "requires pinned Goose binary and native WeCom tools"]
+fn native_goose_reaches_a_hidden_plugin_tool_through_disclosure() {
+    // The plugin's tools are not advertised in this node: a direct call must be
+    // refused by the agent, and the only way in is the disclosure tool.
+    let business = BusinessFixture::new();
+    let provider = goose::Provider::new(
+        "goose-native-wecom-disclosure",
+        vec![
+            goose::Step::named(
+                "anchor__wecom-wecom_wecom_get_user",
+                json!({"userid":"member-fixture"}),
+            ),
+            goose::Step::tool("anchor_tools", json!({"query":"get_user"})).after("not advertised"),
+            goose::Step::tool(
+                "anchor_tools_call",
+                json!({
+                    "name":"wecom-wecom_wecom_get_user",
+                    "arguments":{"userid":"member-fixture"}
+                }),
+            )
+            .after("wecom-wecom_wecom_get_user"),
+            goose::command(
+                "printf 'member-fixture: Native fixture user\n' > evidence.txt; cat evidence.txt",
+            )
+            .after("member-fixture"),
+            goose::complete("verify").after("member-fixture: Native fixture user"),
+            goose::Step::text("hidden plugin tool reached through disclosure"),
+        ],
+    );
+    let host = goose::Host::new(&graph())
+        .native()
+        .with_extra_environment([("ANCHOR_NODE_TOOL_DISCLOSURE", "1")]);
+    install_plugin(&host, &business);
+    let response = host.run(&provider);
+    assert_eq!(response["status"], "completed", "{response}");
+    provider.assert_consumed();
+
+    let mut advertised = provider.requests()[0]["tools"]
+        .as_array()
+        .expect("tools")
+        .iter()
+        .filter_map(|tool| tool["function"]["name"].as_str().map(str::to_owned))
+        .collect::<Vec<_>>();
+    advertised.sort();
+    assert_eq!(
+        advertised,
+        [
+            "anchor__anchor_edit",
+            "anchor__anchor_read",
+            "anchor__anchor_run",
+            "anchor__anchor_tools",
+            "anchor__anchor_tools_call",
+            "anchor__final_result"
+        ],
+        "plugin tools stay hidden: the model must discover them"
+    );
+
+    let saved = host.record("fixture");
+    assert_eq!(
+        host.base.file(&saved, "worker", "evidence.txt"),
+        b"member-fixture: Native fixture user\n"
+    );
+    assert_eq!(
+        host.base.file(&saved, "verify", "verified.txt"),
+        b"member-fixture: Native fixture user\n"
+    );
+    let calls = business.calls.0.lock().unwrap().clone();
+    assert_eq!(
+        calls,
+        vec![json!({"kind":"token"}), json!({"kind":"member"})],
+        "the refused direct call must not reach the plugin"
+    );
+    let conversation = host.native_conversation("fixture", "worker", 1);
+    assert!(
+        conversation.to_string().contains("not advertised"),
+        "the refusal must be visible to the model"
+    );
+    host.evidence(
+        &provider,
+        "fixture",
+        json!({
+            "case_source":"tests/native_plugins.rs",
+            "plugin_tools_hidden":true,
+            "direct_call_refused_before_the_bridge":true,
+            "reached_the_tool_through_disclosure":true,
+            "business_calls":calls,
+            "production_calls":0
         }),
     );
 }
