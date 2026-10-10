@@ -198,3 +198,71 @@ async fn summaries_are_truncated_to_one_bounded_line() {
     assert_eq!(summary.chars().count(), SUMMARY_CHARS + 1, "{summary}");
     assert!(summary.ends_with('…'), "{summary}");
 }
+
+/// A plugin-shaped tool: name, a two-line description and a small argument schema.
+fn realistic(name: &str, index: usize) -> ToolDefinition {
+    ToolDefinition::new(
+        ToolName::new(name).expect("tool name"),
+        format!(
+            "Perform capability number {index} against the configured tenant resource.\n\
+             Use when the task needs capability {index}; returns a structured result."
+        ),
+        json!({
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "description": "resource identifier"},
+                "options": {
+                    "type": "object",
+                    "properties": {
+                        "limit": {"type": "integer", "description": "maximum rows"},
+                        "mode": {"type": "string", "enum": ["fast", "thorough"]}
+                    }
+                }
+            },
+            "required": ["target"],
+            "additionalProperties": false
+        }),
+    )
+}
+
+fn schema_bytes(definitions: &[ToolDefinition]) -> usize {
+    serde_json::to_vec(definitions).expect("serialize definitions").len()
+}
+
+#[test]
+fn disclosure_keeps_the_advertised_schema_bounded() {
+    // What a model request carries is exactly the advertised definitions, so this
+    // is the per-request schema cost for a node with `count` mounted tools.
+    let mut reported = Vec::new();
+    for count in [1usize, 10, 60, 200] {
+        let inner = Arc::new(Fake {
+            definitions: (0..count).map(|i| realistic(&format!("plugin_tool_{i}"), i)).collect(),
+            calls: Mutex::new(Vec::new()),
+        });
+        let raw = schema_bytes(&inner.definitions());
+        let disclosed = schema_bytes(
+            &wrap(inner, DisclosurePolicy::new(["anchor_run"])).definitions(),
+        );
+        reported.push((count, raw, disclosed));
+        println!(
+            "tools={count:>4}  raw={raw:>7}B (~{:>5} tok)  disclosed={disclosed:>5}B (~{:>4} tok)",
+            raw / 4,
+            disclosed / 4
+        );
+    }
+    // The advertised set is always the declared tools plus the two meta tools, so it
+    // cannot grow with the number of mounted tools.
+    let disclosed = reported
+        .iter()
+        .map(|(_, _, disclosed)| *disclosed)
+        .collect::<Vec<_>>();
+    assert!(
+        disclosed.windows(2).all(|pair| pair[0] == pair[1]),
+        "disclosed schema size must not depend on the mounted tool count: {disclosed:?}"
+    );
+    let (count, raw, disclosed) = *reported.last().expect("measured");
+    assert!(
+        raw > disclosed * 20,
+        "{count} tools must cost far more undiscosed ({raw}B) than disclosed ({disclosed}B)"
+    );
+}
