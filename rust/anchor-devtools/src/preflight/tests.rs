@@ -146,6 +146,10 @@ impl Fixture {
         self.env.insert(name.into(), configured.into());
     }
 
+    fn remove(&mut self, name: &str) {
+        self.env.remove(name);
+    }
+
     fn path(&self, name: &str) -> PathBuf {
         PathBuf::from(&self.env[name])
     }
@@ -271,6 +275,35 @@ fn rejects_wrong_pin_model_placeholder_and_missing_shared_network_authorization(
         let error = fixture.check().unwrap_err();
         assert!(error.contains(expected), "{error}");
     }
+}
+
+#[test]
+fn isolation_defaults_to_a_relay_beside_the_goose_binary() {
+    let mut fixture = Fixture::new();
+    // No ANCHOR_GOOSE_LOCAL_NETWORK and no shared-network opt-in: the shipped relay
+    // is what decides, exactly like the runtime.
+    fixture.remove("ANCHOR_GOOSE_ALLOW_SHARED_NETWORK");
+    let relay = fixture.runtime.join("bin/anchor-net-relay");
+    fs::write(&relay, "fixture: never executed").unwrap();
+    set_mode(&relay, 0o755);
+    assert_eq!(fixture.check().unwrap()["status"], "passed");
+
+    // Without the relay the same configuration must ask for the shared-network opt-in.
+    fs::remove_file(&relay).unwrap();
+    let error = fixture.check().unwrap_err();
+    assert!(error.contains("ANCHOR_GOOSE_ALLOW_SHARED_NETWORK"), "{error}");
+}
+
+#[test]
+fn explicit_isolation_requires_a_relay_that_exists() {
+    let mut fixture = Fixture::new();
+    fixture.set("ANCHOR_GOOSE_LOCAL_NETWORK", "1");
+    fixture.remove("ANCHOR_GOOSE_ALLOW_SHARED_NETWORK");
+    let error = fixture.check().unwrap_err();
+    assert!(error.contains("anchor-net-relay"), "{error}");
+    fixture.set("ANCHOR_GOOSE_RELAY_BINARY", "/nonexistent/anchor-net-relay");
+    let error = fixture.check().unwrap_err();
+    assert!(error.contains("anchor-net-relay"), "{error}");
 }
 
 #[test]

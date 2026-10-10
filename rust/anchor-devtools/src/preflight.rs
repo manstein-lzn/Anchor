@@ -52,21 +52,42 @@ fn check_with_pin(env: &BTreeMap<String, String>, goose_sha256: &str) -> Result<
     {
         return Err("ANCHOR_MODEL_CONTEXT_WINDOW must be a positive integer".into());
     }
-    let isolated = value(env, "ANCHOR_GOOSE_LOCAL_NETWORK", "") == "1";
+    // Mirrors the runtime decision: `0` shares the host network, `1` isolates, and
+    // an unset value isolates whenever a relay ships beside the pinned Goose binary.
+    let relay = relay_path(env);
+    let isolated = match value(env, "ANCHOR_GOOSE_LOCAL_NETWORK", "") {
+        "0" => false,
+        "1" => true,
+        _ => relay.as_deref().is_some_and(std::path::Path::is_file),
+    };
     if !isolated && required(env, "ANCHOR_GOOSE_ALLOW_SHARED_NETWORK")? != "1" {
         return Err(
-            "Goose needs either ANCHOR_GOOSE_ALLOW_SHARED_NETWORK=1 (shared host network) or ANCHOR_GOOSE_LOCAL_NETWORK=1 (isolated sandbox)".into(),
+            "Goose needs either ANCHOR_GOOSE_ALLOW_SHARED_NETWORK=1 (shared host network) or an anchor-net-relay binary beside ANCHOR_GOOSE_BINARY (isolated sandbox)".into(),
         );
     }
-    if isolated {
-        let relay = required(env, "ANCHOR_GOOSE_RELAY_BINARY")?;
-        if !std::path::Path::new(relay).is_file() {
-            return Err("ANCHOR_GOOSE_RELAY_BINARY must point at the sandbox relay binary".into());
-        }
+    if isolated && !relay.as_deref().is_some_and(std::path::Path::is_file) {
+        return Err(
+            "isolated Goose needs an anchor-net-relay binary beside ANCHOR_GOOSE_BINARY or ANCHOR_GOOSE_RELAY_BINARY".into(),
+        );
     }
     let runtime_root = runtime::check(env, goose_sha256)?;
     check_mutable_roots(env, &runtime_root)?;
     Ok(json!({"status": "passed"}))
+}
+
+/// The relay the runtime would use: an explicit path, else the one shipped beside
+/// the pinned Goose binary.
+fn relay_path(env: &BTreeMap<String, String>) -> Option<std::path::PathBuf> {
+    if let Some(configured) = env
+        .get("ANCHOR_GOOSE_RELAY_BINARY")
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        return Some(std::path::PathBuf::from(configured));
+    }
+    let binary = env.get("ANCHOR_GOOSE_BINARY")?.trim();
+    (!binary.is_empty())
+        .then(|| std::path::Path::new(binary).with_file_name("anchor-net-relay"))
 }
 
 fn value<'env>(env: &'env BTreeMap<String, String>, name: &str, default: &'env str) -> &'env str {
