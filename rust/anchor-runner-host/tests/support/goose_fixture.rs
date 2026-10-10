@@ -848,6 +848,7 @@ impl Host {
                     "ANCHOR_GOOSE_LOCAL_NETWORK",
                     "ANCHOR_GOOSE_RELAY_BINARY",
                     "ANCHOR_MODEL_CONTEXT_WINDOW",
+                    "ANCHOR_NODE_TOOL_DISCLOSURE",
                 ]
                 .into_iter()
                 .filter_map(|name| std::env::var(name).ok().map(|value| (name, value))),

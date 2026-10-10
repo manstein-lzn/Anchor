@@ -1160,3 +1160,11 @@ SSE `message` 的 data 为标准 Vercel chunk，`id` 为已提交到 SQLite 的�
   改法（小、默认不变）：新增 `ANCHOR_GOOSE_ENABLED_EXTENSIONS`（JSON 数组，默认 `["tom"]`）作为会见披露层的显式开关；`configuration::enabled_builtins` 负责解析与校验（纯函数 `parse_enabled_builtins` 可单测），`session::open` 按它组装 `enabledExtensions`（Anchor MCP + 这些内建）。默认行为与之前完全一致。
   验证：配置单测 21 passed（含默认值、合法数组、非法 JSON/数字/空名/含空格名被拒）；默认模式闸门 **13 套件/71 场景全绿**；`clippy -D warnings`、`rustfmt --check` 干净。
   未关闭：Code Mode 的**体积与运行时成本未量**（已用带 `code-mode` feature 的构建脚本在独立构建根后台重建，结果待收）；**"Code Mode 下 Anchor 的完成契约/工具事实是否成立"仍未验证**（feature 不在构建里时无法测，这是重编后的第一件事）；`ext_manager` 的"可用集合"来源与按需启用行为也未验证。
+- 2026-10-10：**工具级渐进披露落在 Anchor 自己的工具链上**（不动 Goose、不引入 V8）。动机来自三条事实：`ext_manager` 只能按"服务器"粒度启用（Anchor 是单一聚合 MCP），Code Mode 要内嵌 Deno/V8（`code-mode` → `pctx_code_mode` → `pctx_executor` → `deno_core`），且它与 Anchor 完成契约的兼容性未知。
+  改法：新增一个只改变"可见面"的装饰器 `tool_disclosure.rs`，插在组合链末端（`plugins → channel_tools::wrap → NodeTools → [装饰器] → bridge`）：
+  · 始终可见：Anchor 自己的 `anchor_run`/`anchor_read`/`anchor_edit`（有原生会话时再加 `anchor_conversation_history`）与完成工具；
+  · 其余工具（插件、通道）改由两个元工具按需使用：`anchor_tools`（检索：一行摘要、只读标记、分页与上限，索引**直接取自被包装端口的 `definitions()`**，单一事实来源、不会漂移）与 `anchor_tools_call`（按名调用，结果**原样返回**）；
+  · 装饰器**不新增授权、不新增状态**：调用仍经被包装端口，因此桥照旧观察得到、回执照发、错误语义与审计形状不变；未知名/元工具递归/缺参数都给出可执行拒绝；
+  · 开关 `ANCHOR_NODE_TOOL_DISCLOSURE=1`（**默认关**），开启时节点边界文本（MOIM）多一行说明检索与调用方式。
+  验证：装饰器单测 7 项（只列声明与元工具、检索分页/上限/query 过滤、调用透传且结果不变、拒绝元工具与未知名且不触达内部、只读标记、摘要单行截断）；配置单测 21 项；**端到端场景**（披露开启）：模型工具面恰好 6 个（Anchor 4 个 + 2 个元工具，已钉住），`anchor_tools` 检索 → `anchor_tools_call` 嵌套执行命令 → 新回执 → `final_result` 回执匹配 → 运行完成、产物抵达 verify 节点；**两种模式整闸门都 13 套件/72 场景全绿**（披露打开时既有 72 个场景零回归，证明"隐藏≠禁止"：未列出的工具仍可被显式调用）。
+  未关闭：默认关闭；未在真实 provider 上验证"模型会不会正确使用这套披露"（只在确定性场景里验证了机制）；插件很多时的真实 token 收益未量化。

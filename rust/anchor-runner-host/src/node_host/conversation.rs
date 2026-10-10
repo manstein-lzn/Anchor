@@ -9,7 +9,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::{collections::BTreeSet, future::Future, sync::Arc};
 
-const HISTORY_TOOL: &str = "anchor_conversation_history";
+pub(super) const HISTORY_TOOL: &str = "anchor_conversation_history";
 
 pub(super) struct Conversation {
     pub key: String,

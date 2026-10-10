@@ -122,6 +122,81 @@ fn native_goose_direct_model_transport_requires_observed_tool_receipt() {
 
 #[test]
 #[ignore = "requires pinned Goose binary"]
+fn native_goose_disclosed_tools_round_trip_keeps_the_completion_contract() {
+    // With on-demand disclosure the model sees Anchor's own tools plus the two
+    // disclosure tools, and a call made through them still reaches the bridge, so
+    // the receipt-bound completion contract is unchanged.
+    let provider = Provider::new(
+        "goose-native-disclosure",
+        vec![
+            Step::tool("anchor_tools", json!({"query": "run"})),
+            Step::tool(
+                "anchor_tools_call",
+                json!({
+                    "name": "anchor_run",
+                    "arguments": {"command": ["sh", "-c", "printf 'disclosed' > evidence.txt"]}
+                }),
+            )
+            .after("anchor_run"),
+            complete("verify").after("anchor_receipt"),
+            Step::text("disclosure complete"),
+        ],
+    );
+    let host = Host::new(&graph())
+        .native()
+        .with_extra_environment([("ANCHOR_NODE_TOOL_DISCLOSURE", "1")]);
+    let server = host.serve(&provider);
+    let run = server.trigger();
+    let response = server.wait_status(&run, "completed");
+    assert_eq!(response["state"]["status"], "completed", "{response}");
+    provider.assert_consumed();
+    let requests = provider.requests();
+    let names = requests
+        .iter()
+        .flat_map(|request| {
+            request["tools"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|tool| tool["function"]["name"].as_str().map(str::to_owned))
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let mut surface = names.clone();
+    surface.sort_unstable();
+    surface.dedup();
+    assert_eq!(
+        surface,
+        [
+            "anchor__anchor_edit",
+            "anchor__anchor_read",
+            "anchor__anchor_run",
+            "anchor__anchor_tools",
+            "anchor__anchor_tools_call",
+            "anchor__final_result"
+        ],
+        "disclosure keeps Anchor's own tools and the two disclosure tools, nothing else"
+    );
+    let saved = host.record(&run);
+    assert_artifact(&host, &saved, "verify", "verified.txt", b"disclosed");
+    let history = host.native_conversation(&run, "worker", 1);
+    assert_native_tool_response(&history, "anchor__anchor_tools", "anchor_run");
+    assert_native_tool_response(&history, "anchor__anchor_tools_call", "exit_code");
+    host.evidence(
+        &provider,
+        &run,
+        json!({
+            "case_source":"tests/goose_acp.rs",
+            "disclosure_tools_advertised":true,
+            "invoke_reached_the_bridge":true,
+            "receipt_bound_completion_after_indirection":true
+        }),
+    );
+}
+
+#[test]
+#[ignore = "requires pinned Goose binary"]
 fn native_goose_turn_context_carries_the_host_boundary() {
     // The host states the node boundary every turn through Goose's persistent
     // instructions, so the agent learns its limits instead of discovering them.

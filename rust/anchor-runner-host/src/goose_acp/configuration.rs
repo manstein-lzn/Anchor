@@ -145,6 +145,8 @@ pub(super) struct BoundaryFacts {
     pub isolated: bool,
     /// Wall-clock budget for this node, when the graph sets one.
     pub wall_clock: Option<std::time::Duration>,
+    /// Whether tools are disclosed on demand rather than listed up front.
+    pub disclosure: bool,
 }
 
 /// Host-authored boundary statement, injected every turn through Goose's
@@ -170,6 +172,12 @@ pub(super) fn boundary_text(facts: &BoundaryFacts) -> String {
             "- 预算：本节点墙钟上限约 {} 秒，到点会被强制中断；优先交付可用结果。\n",
             limit.as_secs()
         ));
+    }
+    if facts.disclosure {
+        text.push_str(
+            "- 能力：可用工具按需披露——先用 `anchor_tools` 检索，再用 `anchor_tools_call` 调用；\
+             可用集合由宿主授权决定，列表之外的工具无法调用。\n",
+        );
     }
     text.push_str("- 授权：对外发送消息、提交业务操作或改动宿主配置，都需要用户明确授权。");
     text
@@ -1081,6 +1089,7 @@ mod tests {
         let isolated = boundary_text(&BoundaryFacts {
             isolated: true,
             wall_clock: Some(std::time::Duration::from_secs(240)),
+            disclosure: false,
         });
         assert!(isolated.contains("/workspace 可写"), "{isolated}");
         assert!(isolated.contains("没有外网访问"), "{isolated}");
@@ -1091,8 +1100,16 @@ mod tests {
         let shared = boundary_text(&BoundaryFacts {
             isolated: false,
             wall_clock: None,
+            disclosure: false,
         });
         assert!(shared.contains("共享宿主网络"), "{shared}");
+        let disclosed = boundary_text(&BoundaryFacts {
+            isolated: true,
+            wall_clock: None,
+            disclosure: true,
+        });
+        assert!(disclosed.contains("anchor_tools"), "{disclosed}");
+        assert!(!shared.contains("anchor_tools"), "{shared}");
         assert!(!shared.contains("秒"), "{shared}");
         assert!(!shared.contains("secret"), "{shared}");
     }

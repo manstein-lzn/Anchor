@@ -428,10 +428,21 @@ impl NodeHostResolver for HostIoResolver {
                 .with_environment(self.mcp.environment.clone())
                 .with_network(request.network),
             ) as std::sync::Arc<dyn anchor_runtime::ToolPort>;
-            Ok(match conversation {
-                Some(conversation) => self.conversation_tools(tools, &request.key, conversation),
+            // Tools a node's completion and continuity depend on stay listed; the rest
+            // (plugins, channel tools) becomes reachable on demand.
+            let mut always_visible = vec![
+                crate::node_tools::RUN_TOOL_NAME.to_owned(),
+                crate::node_tools::READ_TOOL_NAME.to_owned(),
+                crate::node_tools::EDIT_TOOL_NAME.to_owned(),
+            ];
+            let tools = match conversation {
+                Some(conversation) => {
+                    always_visible.push(crate::node_host::conversation::HISTORY_TOOL.to_owned());
+                    self.conversation_tools(tools, &request.key, conversation)
+                }
                 None => tools,
-            })
+            };
+            Ok(crate::tool_disclosure::maybe_wrap(tools, always_visible))
         })
     }
 }
