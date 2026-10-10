@@ -228,11 +228,19 @@ impl GoosePilot {
             .allow_network(),
         )
         .map_err(|error| error.to_string())?;
+        let mut environment = self.models.environment(binding, &endpoint, &bridge.token);
+        environment.push(anchor_runtime::SandboxEnvironment::new(
+            "GOOSE_MOIM_MESSAGE_TEXT",
+            configuration::boundary_text(&configuration::BoundaryFacts {
+                isolated: self.relay.is_isolated(),
+                wall_clock: None,
+            }),
+        ));
         let command = configuration::command(
             &sandbox,
             &directory,
             &self.binary,
-            self.models.environment(binding, &endpoint, &bridge.token),
+            environment,
             request.cancellation.clone(),
             &transport,
         )?;

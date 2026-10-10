@@ -86,8 +86,7 @@ fn relay_path(env: &BTreeMap<String, String>) -> Option<std::path::PathBuf> {
         return Some(std::path::PathBuf::from(configured));
     }
     let binary = env.get("ANCHOR_GOOSE_BINARY")?.trim();
-    (!binary.is_empty())
-        .then(|| std::path::Path::new(binary).with_file_name("anchor-net-relay"))
+    (!binary.is_empty()).then(|| std::path::Path::new(binary).with_file_name("anchor-net-relay"))
 }
 
 fn value<'env>(env: &'env BTreeMap<String, String>, name: &str, default: &'env str) -> &'env str {

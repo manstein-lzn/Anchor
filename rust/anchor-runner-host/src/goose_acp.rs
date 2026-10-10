@@ -487,11 +487,21 @@ impl GooseNodePort {
             .map_err(GraphError::Unsupported)?;
         let transport = self.relay.transport(bridge_socket.clone());
         let endpoint = transport.endpoint(&bridge.url);
+        // State the node boundary every turn through Goose's persistent
+        // instructions: mounts, network, budget and the host authorization rule.
+        let mut environment = self.models.environment(&binding, &endpoint, &bridge.token);
+        environment.push(anchor_runtime::SandboxEnvironment::new(
+            "GOOSE_MOIM_MESSAGE_TEXT",
+            configuration::boundary_text(&configuration::BoundaryFacts {
+                isolated: self.relay.is_isolated(),
+                wall_clock: timeout,
+            }),
+        ));
         let command = configuration::command(
             &self.sandbox,
             &directory,
             &self.binary,
-            self.models.environment(&binding, &endpoint, &bridge.token),
+            environment,
             request.cancellation.clone(),
             &transport,
         )

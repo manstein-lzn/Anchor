@@ -291,7 +291,10 @@ fn isolation_defaults_to_a_relay_beside_the_goose_binary() {
     // Without the relay the same configuration must ask for the shared-network opt-in.
     fs::remove_file(&relay).unwrap();
     let error = fixture.check().unwrap_err();
-    assert!(error.contains("ANCHOR_GOOSE_ALLOW_SHARED_NETWORK"), "{error}");
+    assert!(
+        error.contains("ANCHOR_GOOSE_ALLOW_SHARED_NETWORK"),
+        "{error}"
+    );
 }
 
 #[test]

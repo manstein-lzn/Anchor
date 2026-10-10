@@ -122,6 +122,62 @@ fn native_goose_direct_model_transport_requires_observed_tool_receipt() {
 
 #[test]
 #[ignore = "requires pinned Goose binary"]
+fn native_goose_turn_context_carries_the_host_boundary() {
+    // The host states the node boundary every turn through Goose's persistent
+    // instructions, so the agent learns its limits instead of discovering them.
+    let provider = Provider::new(
+        "goose-native-boundary",
+        vec![
+            command("printf 'boundary-check' > evidence.txt"),
+            complete("verify"),
+            Step::text("boundary complete"),
+        ],
+    );
+    let host = Host::new(&graph()).native();
+    let server = host.serve(&provider);
+    let run = server.trigger();
+    let response = server.wait_status(&run, "completed");
+    assert_eq!(response["state"]["status"], "completed", "{response}");
+    provider.assert_consumed();
+    let boundary = provider
+        .requests()
+        .into_iter()
+        .filter(|request| request.to_string().contains("节点边界（宿主声明"))
+        .collect::<Vec<_>>();
+    assert!(
+        boundary.len() >= 2,
+        "the boundary must ride every turn, saw {} of {} requests",
+        boundary.len(),
+        provider.requests().len()
+    );
+    for (index, request) in boundary.iter().enumerate() {
+        let text = request.to_string();
+        assert!(text.contains("/workspace 可写"), "turn {index}: {text}");
+        assert!(text.contains("需要用户明确授权"), "turn {index}: {text}");
+        assert!(text.contains("anchor_run"), "turn {index}: {text}");
+        let isolated = text.contains("没有外网访问");
+        let shared = text.contains("共享宿主网络");
+        assert!(
+            isolated ^ shared,
+            "turn {index} must state exactly one network mode: {text}"
+        );
+    }
+    let saved = host.record(&run);
+    assert_artifact(&host, &saved, "worker", "evidence.txt", b"boundary-check");
+    host.evidence(
+        &provider,
+        &run,
+        json!({
+            "case_source":"tests/goose_acp.rs",
+            "boundary_injected_every_turn":true,
+            "network_mode_stated_exactly_once":true,
+            "host_authorization_rule_stated":true
+        }),
+    );
+}
+
+#[test]
+#[ignore = "requires pinned Goose binary"]
 fn native_goose_file_tools_read_and_edit_through_the_bridge() {
     // One variable: the structured file tools. Everything else matches the
     // existing native scenario, and the verify node proves the edit reached the
@@ -379,9 +435,22 @@ fn assert_native_record(host: &Host, provider: &Provider, run: &str, completed: 
     let extensions = native["session"]["_meta"]["extensionResults"]
         .as_array()
         .unwrap();
-    assert_eq!(extensions.len(), 1, "only Anchor MCP may load");
-    assert_eq!(extensions[0]["name"], "anchor");
-    assert_eq!(extensions[0]["success"], true);
+    // Exactly the Anchor MCP server plus Goose's builtin per-turn context provider
+    // (`tom`, listed in `enabledExtensions`); anything else loading here is a
+    // regression in the session's extension surface.
+    let mut loaded = extensions
+        .iter()
+        .map(|extension| {
+            assert_eq!(extension["success"], true, "{extension}");
+            extension["name"].as_str().unwrap()
+        })
+        .collect::<Vec<_>>();
+    loaded.sort_unstable();
+    assert_eq!(
+        loaded,
+        ["anchor", "tom"],
+        "only Anchor MCP and the builtin context provider may load"
+    );
     let conversation = host.native_conversation(run, "worker", 1);
     let (_, run_response) =
         assert_native_tool_response(&conversation, "anchor__anchor_run", "fixture-written");

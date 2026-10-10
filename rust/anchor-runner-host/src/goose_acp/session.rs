@@ -52,9 +52,14 @@ pub(super) async fn open(
     }
     let server = json!({"type":"http","name":"anchor", "url":format!("{endpoint}/mcp"),
         "headers":[{"name":"Authorization","value":format!("Bearer {}", bridge.token)}]});
+    // `enabledExtensions` restricts the session to exactly these extensions, so the
+    // builtin that injects the per-turn persistent instructions (`tom`, "Top Of
+    // Mind") must be listed explicitly; otherwise the host boundary never reaches
+    // the model even though `GOOSE_MOIM_MESSAGE_TEXT` is set.
     let mut params = json!({"cwd":"/workspace","mcpServers":[server.clone()],
         "_meta":{"hidden":true,"sessionTitle":"Anchor",
-            "enabledExtensions":[{"type":"mcp","server":server}]}});
+            "enabledExtensions":[{"type":"mcp","server":server},
+                {"type":"builtin","name":"tom"}]}});
     if let Some(id) = restored {
         params["sessionId"] = json!(id);
     }

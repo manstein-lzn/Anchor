@@ -104,6 +104,43 @@ const SOCKET_MOUNT: &str = "/tools/anchor-bridge.sock";
 /// Loopback address the relay serves inside an isolated sandbox.
 pub(super) const RELAY_LISTEN: &str = "127.0.0.1:9080";
 
+/// The facts a Goose sandbox should state to the model up front, so the agent
+/// learns its boundary instead of discovering it by failing.
+pub(super) struct BoundaryFacts {
+    /// Whether the sandbox has its own network namespace.
+    pub isolated: bool,
+    /// Wall-clock budget for this node, when the graph sets one.
+    pub wall_clock: Option<std::time::Duration>,
+}
+
+/// Host-authored boundary statement, injected every turn through Goose's
+/// persistent instructions (`GOOSE_MOIM_MESSAGE_TEXT`).
+///
+/// Only facts the model cannot read anywhere else belong here: mounts, network,
+/// budget and the host authorization rule. Command limits, timeouts and output
+/// retention already live in the `anchor_run` description, so they are only
+/// pointed at to avoid drift and duplicated tokens.
+pub(super) fn boundary_text(facts: &BoundaryFacts) -> String {
+    let mut text = String::from(
+        "节点边界（宿主声明，始终有效）：\n\
+         - 文件：/workspace 可写；/in 与 /plugins 只读。\n\
+         - 命令：只能通过 anchor_run 使用其说明中列出的授权命令。\n",
+    );
+    text.push_str(if facts.isolated {
+        "- 网络：沙箱没有外网访问（无 DNS、无出口）；模型请求由宿主代理，凭据不在沙箱内。\n"
+    } else {
+        "- 网络：沙箱共享宿主网络。\n"
+    });
+    if let Some(limit) = facts.wall_clock {
+        text.push_str(&format!(
+            "- 预算：本节点墙钟上限约 {} 秒，到点会被强制中断；优先交付可用结果。\n",
+            limit.as_secs()
+        ));
+    }
+    text.push_str("- 授权：对外发送消息、提交业务操作或改动宿主配置，都需要用户明确授权。");
+    text
+}
+
 /// Isolated-sandbox settings shared by every Goose sandbox (nodes and Pilot).
 ///
 /// The opt-in is read once per port; the relay binary defaults to the one shipped
@@ -1003,6 +1040,27 @@ mod tests {
                 binding.identity
             );
         }
+    }
+
+    #[test]
+    fn boundary_text_states_network_budget_and_authorization() {
+        let isolated = boundary_text(&BoundaryFacts {
+            isolated: true,
+            wall_clock: Some(std::time::Duration::from_secs(240)),
+        });
+        assert!(isolated.contains("/workspace 可写"), "{isolated}");
+        assert!(isolated.contains("没有外网访问"), "{isolated}");
+        assert!(isolated.contains("240 秒"), "{isolated}");
+        assert!(isolated.contains("需要用户明确授权"), "{isolated}");
+        assert!(isolated.contains("anchor_run"), "{isolated}");
+
+        let shared = boundary_text(&BoundaryFacts {
+            isolated: false,
+            wall_clock: None,
+        });
+        assert!(shared.contains("共享宿主网络"), "{shared}");
+        assert!(!shared.contains("秒"), "{shared}");
+        assert!(!shared.contains("secret"), "{shared}");
     }
 
     #[test]
