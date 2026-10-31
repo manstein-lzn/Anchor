@@ -10,6 +10,8 @@
 
 唯一 worker 表属于 KernelRuns：同步登记后才返回触发结果，guard 在退出、abort 或未 poll future 丢弃时释放。abandon 同步结算并等待 worker 排空；stop 先提交停止再取消；pause 通过持久意图与事件在结果后的派发边界消费，无停止标志轮询。逐条规则和 Session 单写入者审计见 [M3 规则表](../experiments/constitution-host-preflight/m3/rules-session-audit.md)。
 
+列表先枚举 Kernel 的 `run/` 标识，再读取各 Run；进度、相位和操作投影共用本次读出的视图。活动查询从上述 worker 表筛选，只核查匹配的活动 Run；会话接替从既有元数据查找候选，再核查后继是否已接纳，不扫描无关 Run 的历史。通用 `project_run` 仍重新观察调用方传入的旧视图，写操作继续独立校验。Kernel Store 的完整历史读取、费用计算与崩溃恢复契约保持原样，没有新增持久索引或状态缓存。
+
 [围栏测试](../rust/anchor-runner-host/tests/run_access_fence.rs) 扫描 `anchor-runner-host/src/**/*.rs`，对 `RunStatus`、`GraphRunRecord`、`RunStore`、`FileRunStore`、`GraphRunner`、`RunCursor` 六种内部类型的精确标识符逐次计数。[业务基线](../rust/anchor-runner-host/run-access-fence.txt) 是逐文件上限：超过上限或清单外业务文件出现引用会失败；下降或删除文件时提示同步降低清单，不自动改写它。
 
 扫描排除 `tests/`、`*tests.rs` 和精确 `#[cfg(test)]` 所保护的项，包括外部测试模块；跳过该项后恢复扫描，不丢弃同文件后续生产代码。注释和字面量不计数，导入、完整路径、别名声明和宏输入中的类型标识符计数。不展开宏或执行名称解析，不追踪别名使用、glob 导入和推断类型；因此围栏不是所有直接字段读写的静态证明，仍须结合规则表核查各入口并封装内部可变状态。

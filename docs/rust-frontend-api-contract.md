@@ -12,14 +12,22 @@ React/TypeScript WebUI 调用 Rust Host 的资源 API。Host 可直接托管编�
 | `POST /graph-validation` | `{definition:{...}}` 校验而不保存/执行；无效输入与语义诊断区分 |
 | `GET /graphs/{graph}/delete-precondition` | 返回 `{graph,precondition}` 与 ETag，`no-store`；交互确认在打开时捕获版本 |
 | `DELETE /graphs/{graph}` | Web/Pilot 确认使用捕获的版本；HTTP 发送 `If-Match: "{precondition}"`，资源变化或重建返回 409。省略头保留显式无条件兼容语义；活动/可继续 Run、定义或未结算调用引用仍阻止删除，只清本 Graph 数据 |
-| `POST /trigger` | `{graph,input?}` 接纳为 `{run,graph}`，busy 冲突；所有新 Run 走 Kernel，携带已移除的 `execution` 字段返回400；不接受调用方绝对路径 |
+| `POST /trigger` | `{graph,input?,workspace_bindings?}` 接纳为 `{run,graph}`，busy 冲突；所有新 Run 走 Kernel，携带已移除的 `execution` 字段返回400；绑定形如 `{target_node:{run,node}}`，只接受来源 Run/节点身份，不接受路径 |
 | `GET /runs`、`GET /runs/{run}` | 状态、路径/轮次、trace、节点、调用、Plugin 与触发来源 |
 | `POST /runs/{run}/pause\|stop\|resume` | pause 等当前节点提交后在下一派发边界等待人；stop 立即提交停止并取消 worker；显式 resume 保存未知效果的核查提示后，让 Agent 在同一原生 Session 中核查后继续；返回实际 operation，保留 snapshot/input/身份 |
 | `GET /runs/{run}/files/{node}`、`.../{path}` | 不可变 Artifact 文件、预览/下载；拒绝 host-path 越权 |
+| `GET /api/artifacts/{id}/files`、`.../{path}` | 固定交付清单与预览/下载，来源 Run 删除后显式保留的交付仍可读；过期字节返回 410 |
+| `POST /api/artifacts/{id}/retention` | `{retained: boolean}` 显式保留/释放，经 Kernel 记录；已过期内容不能重新保留 |
+| `POST /workspaces/bind` | `{source_run,source_node,target_run,target_node}` 显式复用获授权资源，拒绝活动目标和任意宿主路径 |
+| `GET /runs/{id}/workspaces/{node}`、`DELETE /workspaces/{resource}` | 读取 Kernel 绑定；无引用、无执行者且归属明确后释放资源 |
 | `GET /graph-relations`、`GET /channel-sessions` | 真实定义、调用与可信来源投影 |
 | `GET /timeline`、`/schedules` | Run 与计划事实；时间戳未知如实披露，不编造历史 |
 
 `GET/PUT /graphs/{graph}` 的 `plugin_activation: {mode,graph_digest}` 表示配置生效规则：`next_turn` 为常驻助手，`new_run` 为普通 Graph，不表示外部插件已可用。`GET /channel-sessions/{session}/assistant` 另投影 `plugin_update: {state,message?}`，状态为 `current/pending/restart_required/unavailable`；未知或读取失败不能显示为已生效。Web 在保存后提示下一条消息生效，活动 Graph 打开已有运行，渠道 Graph 打开助手管理，避免重复 trigger。
+
+文件列表来自交付清单，返回 `artifact`、`artifact_availability`、`files: [{path,size}]`，不枚举可写工作区。节点详情同时投影 `artifact_error`；available/expired/missing/corrupt 区分字节可用、过期、缺失和损坏，一份历史产物不可用不会使整个 Run 详情失败。Web 用固定 Artifact URL 预览和下载，保留过期版本的清单与明确提示。
+
+`workspace_bindings` 由获授权的 Host 调用者在接纳新 Run 时显式提供；键是目标 Graph 节点，值引用既有 `{run,node}`。Host 校验目标节点、来源与排他执行状态，并在 Run 启动前保存绑定事实；Graph/模型不能传绝对路径或任意 Workspace ID。
 
 Run 详情的 state.error 保留字符串：failed 时与 Kernel 结算投影 reason 一致，其他相位为空；时间线继续显示原始失败原因。state.recovery 保留数组，由已接受 Kernel history 的当前 invocation 观察扣除人工决定后投影；记录中不再存这些展示字段。
 
@@ -46,6 +54,8 @@ Session API 包括创建/重命名/删除、消息、Turn、SSE、停止、问�
 带 key 的 Pilot 创建使用私有 Session 身份；显式提供 `id` 时须沿用 `pilot-private-` 前缀，无 key 的显式 ID 契约不变。Web 新建和首次发送共用创建操作，浏览器按当前凭据摘要保存未确认 key；创建失败或响应没有非空字符串 Session ID 时保留重试身份，成功才清除，不存储凭据原文。持久存储不可用时在当前页面内保留 key，迟到响应不能清除较新创建的 key。Responses 的请求身份包含输入、固定模型、stream 和 previous_response_id；首轮 Session 与每轮 Turn 都稳定复用，已有在跑或终态 Turn 不再次接纳模型执行，SSE 重试回放已有事件。不同续接关系不能复用同一 key。
 
 Pilot `schedule_create` 接受可选 `request_id`，与 HTTP key 使用同一 owner 范围及创建用例。Scheduler 的创建 key 与原始 graph/rule/input 同原子快照持久化；重试先查已提交事实，不因原 once 时间已过或 Graph 后来移除而重新创建。编辑计划后返回当前计划但不重写原创建内容；计划删除后原 key 返回 409，不复活。旧 `schedules.json` 数组继续可读写；首次有 key 的创建写为 `{version:1,schedules:[...],creation_requests:[...]}`，未知版本不加载，请求记录不进入 API 投影。
+
+定时 Run 与网页手动触发使用同一安装身份和凭据作用域转换。需要机器人通知时，计划仍传普通 Graph 的 `input`，由已挂载渠道 Plugin 的执行节点按[发送授权契约](wecom-assistant.md#业务工具与附件边界)显式选择机器人；不新增计划字段，也不自动把执行结果投递到 Session。
 
 Pilot `POST /sessions/{session}/turns` 接受 `{request_id,message?,attachments?}`，文字与附件至少有一项；附件项为 `{name,data_base64,media_type?}`。同一 `request_id` 必须保持原文字与附件内容，`resume:true` 不能同时提交新文字或附件。输入限制为 16 个文件、单个 20 MiB、合计 50 MiB；其中图片只接受 PNG/JPEG/WebP，最多 8 张、单张 10 MiB、图片合计 20 MiB。只有该上传路由放宽至 72 MiB 请求体。
 
@@ -86,9 +96,11 @@ Web 异步操作反馈绑定发起时的上下文：删除旧 Run 的迟到响�
 | `GET /plugins/{plugin}/credentials`、`PUT/DELETE /plugins/{plugin}/credentials/{target}/{field}` | owner-bound 字段状态：缺失、已保存、声明失配、部署管理；修改核验当前授权摘要，不返回原值 |
 | `POST /plugins/install-preflight`、`POST /plugins/{plugin}/uninstall-preflight` | 候选或卸载影响预检；安装接收 GitHub tree URL 或受限普通文件列表，不接受宿主任意路径 |
 | `GET /plugins/preflights`、`GET/DELETE /plugins/preflights/{token}`、`POST /plugins/preflights/{token}/confirm` | owner-bound 预检、操作观察与精确确认；确认复用 Library 发布锁和应用前置条件，同一操作不重复执行 |
-| `GET/PUT /channels/{platform}/configuration`、`POST /channels/{platform}/enabled` | 复用渠道管理适配器与 supervisor；启停携带预期绑定，保存/启用与实际连接分别投影 |
+| `GET /channels`、`GET/PUT /graphs/{graph}/channel`、`POST /graphs/{graph}/channel/enabled` | 按 Graph 管理机器人，复用渠道适配器与 Host supervisor；启停携带 `{enabled,expected_binding}`，保存的启用意图与实际连接分别投影；重复启用修复失效监听，实际重启时 `changed=true` |
 | `GET /channel-sessions/{session}`、`.../assistant`、`POST .../assistant/retire`、`DELETE /channel-sessions/{session}` | 校验渠道 owner，复用 current binding、静止与未结算投递限制；退役不会立刻创建新实例 |
 | `POST /schedules`、`PUT/DELETE /schedules/{schedule}` | 新建、编辑、暂停/启用与删除共享计划；更新保留 ID/创建时间，输入修改保留下次时点，改规则或重新启用只安排未来执行 |
+
+渠道 `listener` 在渠道 API、Pilot 和 `GET /graphs` 中使用同一观察：`connecting/authenticating/reconnecting` 表示正在连接，`authenticated` 表示已认证，停用为 `stopped`，失管或已发布的控制接口失联为 `unavailable`。`restart_required` 覆盖启用后守护任务缺失、已结束、资源可用但监听失联及账号变化；前端不能统一解释为账号变化。资源不齐时先检查 `available` 和凭据字段状态。正常、启动或重连中的重复启用返回 `changed=false`，不打断连接；同一绑定的修复不改成员、凭据和 callback key。
 
 渠道助手的 `plugin_update` 是 Graph 插件配置与已冻结 Turn 策略的比较，不是连接健康检查。读取使用同一 Graph 锁文件的共享租约，并发读取互不排斥；保存、准入和授权写入仍要求独占，冲突保持 fail-closed。真正的读取失败或写锁占用仍返回 `state: unavailable` 及原因，不改动会话、Run 或 Plugin 权限。
 

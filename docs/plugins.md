@@ -64,7 +64,13 @@ Pilot 与 AgentNode 共用 `PluginDisclosureCatalog` 和 `ToolDisclosure`。`anc
 
 官方学术 CLI、Docmost 附件 MCP、WeCom 应用 MCP 和机器人 Gateway 都是 Rust 二进制。Docmost Plugin 的远端 HTTP MCP 使用 Host 注入的共享 `api_key`；本地 `anchor-docmost-tools` 只上传授权的 `/in/publish/assets` 普通文件，不绕过发布门禁。
 
-操作员仍可登记第三方工具的显式 entrypoint、environment 和 imports。Host 保留解释器符号链接、版本化解释器、显式环境路径及 PYTHONPATH 等外部格式兼容；使用其他语言的第三方工具由部署者提供其运行环境。这不增加官方构建、运行或回归的解释器依赖。环境必须由操作员稳定维护，Graph 与 Plugin 不自行安装依赖或扩大挂载。
+操作员仍可登记第三方工具的显式 entrypoint、environment 和 imports。Library 的 `tools/<id>/tool.json` 可选 `plugin` 字段把该登记限定到指定 Plugin 的 MCP 启动；省略则沿用部署共享环境。限定登记不会进入普通节点命令或其他 Plugin，带依赖视图的 MCP 也保留自己的限定登记。登记由 Host 启动读取，变更需要重启 Host。Host 保留解释器符号链接、版本化解释器、显式环境路径及 PYTHONPATH 等外部格式兼容；使用其他语言的第三方工具由部署者提供其运行环境。这不增加官方构建、运行或回归的解释器依赖。环境必须由操作员稳定维护，Graph 与 Plugin 不自行安装依赖或扩大挂载。
+
+## Git 项目维护
+
+`git` 是普通本地 MCP Plugin，调用沙箱 PATH 中的本机 Git，与 AgentNode/Pilot 的编辑、命令工具共用 `/workspace`；安装它不需要修改或重启 Host。`git_run` 接受原生 Git 参数，可克隆、维护分支、查看差异、提交和推送。`git` 本地入口始终可用，SSH/HTTPS 入口分别在相应凭据完整后出现；凭据复用 owner-bound 插件配置，只注入对应 MCP，不自动继承宿主 SSH 身份。远程操作沿既有联网授权，本地开发可离线。插件不独立实施仓库/分支权限，实际访问范围由 Git 服务账号决定。安装、参数和验证边界见 [Git Plugin](../rust/anchor-git-tools/README.md)。
+
+操作员也可通过 `plugin="git"` 的工具登记只读授权原有 SSH 路径，并配置 `ssh_config`，由 `host` MCP 入口复用原有身份、主机信任与别名；仅填写配置路径不会扩大沙箱挂载。该宿主授权接入需要支持限定登记的 Host，普通 Git 插件安装仍独立于它。`Host key verification failed` 只说明主机信任校验失败，不能推断私钥缺失。
 
 ## Pilot 获取、开发与交付
 

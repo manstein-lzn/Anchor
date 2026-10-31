@@ -26,15 +26,15 @@ audit-join → analyze → review-fanout
 audit-context ←────── 重新专项审查 ────────────┘
 ```
 
-整个流程属于同一个 Graph、一次 Run。五个专项拥有各自工作区和模型上下文；research 与其他四个审查同时进行，依赖审查等联网取证完成后开始。join 等全部分支成功，再让综合节点工作。综合之后，第二组配对 fanout/join 并行进行事实评审与提案评审，避免数量/引用核对挤占风险与回滚审查。
+整个流程属于同一个 Graph、一次 Run。五个专项拥有各自工作区和模型上下文；同一节点反馈重入时延续自己的 Goose 原生会话与 Workspace，不要求模型自行翻找完整旧对话。不同节点与不同 Run 默认隔离；跨 Run 续接仍须显式授权。research 与其他四个审查同时进行，依赖审查等联网取证完成后开始。join 等全部分支成功，再让综合节点工作。综合之后，第二组配对 fanout/join 并行进行事实评审与提案评审，避免数量/引用核对挤占风险与回滚审查。
 
-`anchor-rsi collect` 使用既有 Rust evidence 模块，动态发现授权源码、部署 Graph、公开 Plugin/Skill 资源和 Run 元数据；同时冻结源码 Git 变更及默认 `state/schedules.json`。索引记录原始与脱敏快照哈希、采集时间和缺失范围。凭证、环境、缓存、私有运行记录、符号链接、二进制和超过 8 MiB 的文件被排除并记录限制。自定义宿主路径不会从 Graph 中自动获得授权；自定义计划存储未落在默认路径时明确记为未覆盖。
+`anchor-rsi collect` 使用既有 Rust evidence 模块，动态发现授权源码、部署 Graph、公开 Plugin/Skill 资源和 Run 元数据；同时只读查询源码仓库的 Git 状态/近期改动及默认 `state/schedules.json`。Git 仅作为项目变化审查输入，不参与 Artifact 身份、文件归档或历史报告校验。索引记录原始与脱敏快照哈希、采集时间和缺失范围。凭证、环境、缓存、`.claude` 工具状态树（含旧开发 worktree）、私有运行记录、符号链接、二进制和超过 8 MiB 的文件被排除并记录限制。自定义宿主路径不会从 Graph 中自动获得授权；自定义计划存储未落在默认路径时明确记为未覆盖。
 
-`run-index.json` 索引发现的历史 Run，`runs.json` 保存机械投影及七天窗口。索引区分本周与历史记录，缺少时间戳不算本周成功样本。每个虚拟证据路径对应冻结文件，可回查状态、错误及原始记录中存在的字段；`source_field_presence` 和 `projection_omitted` 区分不存在与未采集。完整聊天、trace、checkpoint 和隐藏推理不进入证据。冻结绑定只证明资源身份，不能恢复未保存的历史 Plugin 实现字节。
+`run-index.json` 索引发现的历史 Run，`runs.json` 保存机械投影及七天窗口。采集经 Kernel `HistoryReader` 读取 `<state>/kernel-runs`，相位来自 Kernel，更新时间来自 Host observation；不读取旧 `runs/*.json`。部署 Graph 从当前 `catalog` 发现。索引区分本周与历史记录，缺少时间戳不算本周成功样本。每个虚拟证据路径对应冻结文件，可回查状态、错误及原始记录中存在的字段；`source_field_presence` 和 `projection_omitted` 区分不存在与未采集。完整聊天、trace、checkpoint 和隐藏推理不进入证据。冻结绑定只证明资源身份，不能恢复未保存的历史 Plugin 实现字节。
 
 每个领域先读 `domains/<领域>.json`，按失败、本周变更、历史提案选择重点，不要求把全部源码/历史读进上下文。专项输出 `findings.json/md`，区分 observed/inferred/unknown，列出证据位置、实际已读范围、未覆盖范围和局限。综合先读取这些发现及 `join.json`，再按冲突和因果关系回查原始证据。索引覆盖、模型实际审查和结论正确性分别报告。
 
-`anchor-rsi research` 从冻结依赖声明查询公开注册表与 GitHub 元数据，复用 Rust ecosystem 工具，不加载部署凭证。当前覆盖动态发现的直接依赖；Rust、npm 及第三方项目声明解析不要求安装这些语言的解释器。HTTPS 来源限定为 crates.io、PyPI、npm 和 GitHub；不使用环境代理或自动重定向。超时、响应大小和限流失败都保留为证据，不能写为查询成功。
+`anchor-rsi research` 从冻结依赖声明查询公开注册表与 GitHub 元数据，复用 Rust ecosystem 工具，不加载部署凭证。反馈重入时仅替换自己生成的 `research/files`、`research/dependencies` 及索引，保留工作区其他文件，旧查询文件不混入新交付。当前覆盖动态发现的直接依赖；Rust、npm 及第三方项目声明解析不要求安装这些语言的解释器。HTTPS 来源限定为 crates.io、PyPI、npm 和 GitHub；不使用环境代理或自动重定向。超时、响应大小和限流失败都保留为证据，不能写为查询成功。
 
 公开版本与仓库元数据只是生态信号，不证明功能收益、升级兼容性或实际安装状态。社区讨论、私有信息、传递依赖与不支持的声明格式不属于完整覆盖；报告须保留相应局限。
 
@@ -44,11 +44,13 @@ audit-context ←────── 重新专项审查 ────────�
 - `evolution.json`：带 ID、证据、风险、验收和回滚条件的提案台账；
 - `sources.md`：本地文件字段/路径、外部 URL、抓取时间和限制。
 
-`previous.json` 保存已验证的成功发布历史及操作员明确授予的历史报告。原生 Run 历史按 publish Artifact 身份和 manifest 文件哈希核验；无法验证时记录错误，不拿未提交工作区替代历史。`previous-index.json` 提供冻结历史路径，模型按需读取完整提案。每个历史 ID 都必须在新一期 proposals 或 carry_forward 中处理，不可静默消失；resolved 需要新的实施及验证证据，证据不足用 continue/hold。
+`previous.json` 保存已验证的成功发布历史及操作员明确授予的历史报告。原生 Run 历史经共享 Artifact reader 取得只读租约，核验 publish 的完整引用、manifest、视图描述、过期状态和相关文件摘要；无法验证时记录错误，不拿未提交工作区替代历史。终节点发布完成前也会生成轻量只读视图，相同内容链接到已有对象。`previous-index.json` 提供冻结历史路径，模型按需读取完整提案。每个历史 ID 都必须在新一期 proposals 或 carry_forward 中处理，不可静默消失；resolved 需要新的实施及验证证据，证据不足用 continue/hold。
 
-两个评审节点不能修改稿件。`review` 是普通 Op：校验两份评审绑定当前 analyze commit、各自匹配 review-join commit，再合并独立检查与意见。任一 open/拒绝不能被另一方通过覆盖；发布保留 review-manifest.json。`gate` 除四项评审及 reviewed_commit 外，还验证五个领域发现的格式/证据文件、本次 join 的分支 commit、时间窗口、提案 ID 唯一性及历史连续性。普通问题返回 analyze；专项产物不完整或评审明确要求补查时返回 audit-context，复用本次采集窗口并重新审查。audit-context 将 gate.txt 保存为 audit-feedback.txt，再进入 fanout，保证各分支收到跨反馈边的具体修正要求；首次审查标记 FIRST_AUDIT。无效引用反馈包括原路径，专项引用使用实际文件，目录清单引用索引。证据存在和 schema 合法不能机械证明语义正确，内容仍由独立评审核查。不使用固定轮数假装任务已经收敛。
+两个评审节点不能修改稿件。`review` 是普通 Op：校验两份评审的 `reviewed_artifact` 绑定当前 analyze Artifact 与清单摘要、各自完整引用匹配 review-join 的 `CommitRef`，再合并独立检查与意见。任一 open/拒绝不能被另一方通过覆盖；发布保留 review-manifest.json。`gate` 除四项评审及 `reviewed_artifact` 外，还验证五个领域发现的格式/证据文件、本次 join 的分支 Artifact 引用、时间窗口、提案 ID 唯一性及历史连续性。普通问题返回 analyze；专项产物不完整或评审明确要求补查时返回 audit-context，复用本次采集窗口并重新审查。audit-context 将 gate.txt 保存为 audit-feedback.txt，再进入 fanout，保证各分支收到跨反馈边的具体修正要求；首次审查标记 FIRST_AUDIT。无效引用反馈包括原路径，专项引用使用实际文件，目录清单引用索引。证据存在和 schema 合法不能机械证明语义正确，内容仍由独立评审核查。不使用固定轮数假装任务已经收敛。
 
-修订轮优先读取反馈、当前稿件和相关证据；后续评审优先比较分析 commit 差异与旧问题。正式报告不重复叙述评审轮数/提交ID/逐字修改流水账，过程留在 review.json、gate.txt 和 Git 中。这样避免新增过程性矛盾导致无效回路；重要新事实错误仍必须修正。
+修订轮优先读取反馈、当前稿件和相关证据；后续评审先比较只读输入 `.anchor-artifact.json` 中相关文件摘要与旧问题，正文差异只读相关文件。正式报告不重复叙述评审轮数/Artifact ID/逐字修改流水账，过程留在 review.json、gate.txt 和 Artifact 描述中。这样避免新增过程性矛盾导致无效回路；重要新事实错误仍必须修正。
+
+每个 Agent 的 `final_result.files` 显式列出本轮交付；Op 按 `writes` 生成选集。`reviewed_artifact` 为 `{artifact:{id,node_id,invocation},manifest_sha256}`，值从宿主描述原样复制。门禁只读取相关清单文件，不依赖宿主生成 Git 仓库。真实源码 Git 变更仍是独立证据。
 
 limited 仅用于已明确限定的证据缺口或纯文字偏好；已查证的事实错误、矛盾、无依据因果和改动无法满足验收均须退回修订。未采集不等于不存在，文档记载的验收与本轮可独立复核的原始产物分别说明。流程成功也不等于内容通过，仍需源证据抽查。
 
@@ -86,7 +88,9 @@ cargo build --manifest-path rust/Cargo.toml -p anchor-rsi --locked
 
 RSI Graph 不自动提交、合并或部署代码，不自动改 Graph/Plugin，不重放历史外部副作用，也不把模型声称完成当成事实。`evolution.json` 的状态为 proposed/continue/hold/resolved；resolved 是有依据的复查判断，不代表本次 RSI 执行过改动。实际修改由维护者在隔离工作区完成，再用保留案例和相关测试验证。
 
-定向验证为 `cargo test --manifest-path rust/Cargo.toml -p anchor-rsi --locked --test business --test evidence`；Graph JSON 静态编译由 `anchor-runtime` 的 shipped-example 作者契约测试覆盖，不启动模型。它们验证正确发布、独立评审拒绝、commit/hash/window mismatch、安全提案门禁、冻结读取和历史 ID 连续性。真实 Goose/provider 的大型业务 Graph、公开业务服务与报告质量需另行验收；历史证据不算本轮新验收，单次报告也不证明长期改进收益。
+2026-10-31：新数据根的真实 Run `rust-18e35d456fbfe745` 已 done、Gate PASS，8 个发布文件的 HTTP 下载、内容摘要及后续历史读回通过；原生会话 12 次反馈续接已核验。见[执行证据](../.local/rust/clean-20261031-final/evidence/verification.json)和[发布报告](../.local/rust/clean-20261031-final/state/artifacts/fs2-d512ad1cc2be9624ced12b0223a43be5b0cca91e5507ef25386c31722fa365be/view/rsi-report.md)。内容抽查保留一项不采纳决定：`RSI-host-assembly-reuse` 虽为 hold，仍建议用 inode/descriptor 缓存取代内容校验，与挂载时发现篡改的契约不符；不实施该方向，冻结产物不改写。详见[内容抽查](../.local/rust/clean-20261031-final/evidence/content-spot-check.json)。
+
+定向验证为 `cargo test --manifest-path rust/Cargo.toml -p anchor-rsi --locked --test business --test weekly --test evidence`；Graph JSON 静态编译由 `anchor-runtime` 的 shipped-example 作者契约测试覆盖，不启动模型。它们验证正确发布、独立评审拒绝、Artifact identity/hash/window mismatch、安全提案门禁、冻结读取和历史 ID 连续性。真实 Goose/provider 的大型业务 Graph、公开业务服务与报告质量需另行验收；历史证据不算本轮新验收，单次报告也不证明长期改进收益。
 
 ## 信号驱动的变体
 

@@ -35,6 +35,12 @@ Runtime IR 保存稳定展开节点、路由/反馈/并行、输入与权限、�
 
 作者模型断言、固定展开样例与 HTTP CRUD 测试位于 Rust crate 的测试范围。测试样例不执行另一个语言解析器；具体本轮结果见 [开发台账](pilot-development-plan.md)。历史快照只用于解释先前兼容来源。
 
+## 文件交付
+
+Agent 完成必须调用 `final_result`，显式提供 `files: string[]`；纯文字使用 `[]`。路径相对 `/workspace`，允许选择目录并递归交付；禁止根目录、通配符、路径逃逸和选中链接/特殊文件。普通二进制、可执行位和空目录受支持。节点 `writes` 声明必交项，必须存在且被 `files` 覆盖；漏项在接受完成前返回可修正错误。`Op.run` 直接按 `writes` 交付；没有 `writes` 的 Op 仅交付文字/JSON 输出。
+
+工作现场不会逐 invocation 复制或还原；未交付文件继续留在同一工作区。下游只读 `/in/<node>` 仅含该版本的交付，`.anchor-artifact.json` 提供固定 Artifact 引用、清单摘要及文件摘要。需要编辑上游文件时自行只复制所需文件。项目 Git、依赖和缓存无需为归档搬到临时目录。新 Run 默认独立，跨 Run 共享由 Host 显式绑定资源；Goose 仍负责原生会话续接。
+
 ## 模型选择
 
 Agent 的 `model` 可填写 `models.default.flash`、`models.default.pro`、`models.backup.flash` 或 `models.backup.pro`，分别读取设置页中的服务和模型。省略 `model` 或使用 `models.default` 时选择 default Flash。每个新节点 invocation 读取当时保存的配置，同一 Run 的后续节点与常驻助手下一轮也适用；进行中的 invocation 和同 invocation 恢复保留其模型/服务绑定。backup 仅在明确选择时使用，不自动降级。
@@ -60,8 +66,8 @@ Op 在 `run`、`call`、`fanout`、`join`、`host` 中恰好选择一种。`host
 
 - `session.wait_input` 只在可信助手 binding 的 Session 内领取输入，并持久绑定等待 invocation 与 Turn；恢复/重试仍读取同一 Turn。等待不调用模型，不继承 `Op.run` 的默认命令超时，支持暂停/取消。本轮内容位于等待节点 commit 的 `output`（`message`、`channel`、`attachments`、`session`、`turn`、`interrupted_messages`），Agent 读取 `committed_inputs`，不得把冻结的 Run 启动 `input` 当作下一轮消息。
 - `session.reply` 只读取本 Turn 经普通边交接的确切 Agent commit，校验 `source_commit`、`reply_for` 与本轮图片集合，然后结算 Turn 并路由回等待；不要求整个 Run Completed，不读取一个长期 Run 的“最新产物”替代本轮身份。平台 ACK/unknown 属于既有投递账本，不由节点完成状态代替。
-- 新输入中断旧 Agent 后，执行端口须等执行者真正退出，先持久保存现场 checkpoint 与 `CompletionFact::Yielded`，再返回 `NodeExecutionOutcome::Yielded`。Runner 记录 `interruption` 并冻结 `ArtifactKind::Interruption` 控制 Artifact，沿普通合法 route 到回复节点；旧轮 `suppressed` 后返回等待，不冒充 Agent 成功或业务回复。控制 Artifact 不冻结未完成 workspace 为成功文件；不支持中断控制证据的 Artifact 适配器须 fail-closed。普通 `Cancelled`/`Interrupted` 停止语义不因这一扩展被改写。
-- 常驻实例内同节点 workspace 稳定，逐轮 invocation、fs2 文件快照和历史 API 的 commit 身份仍独立不可变。输入和文件授权来自可信 Turn/binding：当前 `/in/channel`，最多最近 8 条尚未越过 confirmed 边界的中断输入快照 `/in/channel-pending/<turn>`，不接受作者 JSON 或模型输出自行指定全历史路径。
+- 新输入中断旧 Agent 后，执行端口须等执行者真正退出，保留可写现场并持久保存 `CompletionFact::Yielded`，再返回 `NodeExecutionOutcome::Yielded`。Runner 记录 `interruption` 并冻结 `ArtifactKind::Interruption` 控制 Artifact，沿普通合法 route 到回复节点；旧轮 `suppressed` 后返回等待，不冒充 Agent 成功或业务回复。控制 Artifact 不冻结未完成 workspace 为成功文件；不支持中断控制证据的 Artifact 适配器须 fail-closed。普通 `Cancelled`/`Interrupted` 停止语义不因这一扩展被改写。
+- 所有节点的 workspace 默认按 `(Run, node)` 稳定复用；逐轮 invocation 和显式交付的 Artifact 身份独立不可变。输入和文件授权来自可信 Turn/binding：当前 `/in/channel`，最多最近 8 条尚未越过 confirmed 边界的中断输入快照 `/in/channel-pending/<turn>`，不接受作者 JSON 或模型输出自行指定全历史路径。
 
 首次 wait binding 查询最近 9 条、实际只授权最近 8 条并持久保存 `pending_truncated`；等待产物同时输出 `interrupted_messages_truncated`。当 `output.interrupted_messages_truncated=true`，Agent 必须如实说明更早中断输入未自动纳入/未完整阅读，不能声称信息全保留或借此请求全历史挂载。该标记无需额外数据库 schema 迁移，旧 binding facts 缺省 `false`。
 

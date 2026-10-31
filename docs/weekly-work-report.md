@@ -60,7 +60,7 @@ mkdir -p "$ANCHOR_RUNNER_LOCAL_INPUTS_ROOT/weekly-work-report"
 
 生成的 `local-inputs.json` 是本机专用的绝对路径配置，不是共享 Graph、导出包或通用模板；不要随 Graph 分发。`discovery.json` 也含本机路径，应保留在操作员控制的本地。Host 继续使用既有的绝对路径 grant、只读挂载和按 Run 冻结契约，发现命令只打印候选配置，不修改 Host 权限、不绕过授权、不增加新的描述符 schema。包装图不继承或代替核心授权：配置放在被调用的 `weekly-work-report` 下，不是 `weekly-work-report-docmost` 下。路径或授权改变后需重新核对，再启动新 Run；旧 Run 仍受冻结事实校验。
 
-核心运行需要 Git、`jq`（评审 JSON 检查）、既有沙箱 Shell/`anchor-route` 和原生 `anchor-rsi`，不依赖外部 `tar` 或 `zstd` 命令：`weekly-publish` 使用 Rust tar 库在原生组装中生成图片归档，压缩 DeepSeek 历史由采集器使用 Rust zstd 库在进程内解码。上面的操作员安装步骤使用本机 `jq` 提取授权配置。只有可选 Docmost 包装图额外使用沙箱内的 `tar` 解开图片归档，并使用 `jq` 做目标输入预检。发现目录不是工具安装或依赖授权；操作员仍须确保对应路径所需的命令在相应环境中可用。Goose/provider 配置由宿主提供，不能放进 Graph 或历史授权文件。
+核心运行需要 `jq`（评审 JSON 检查）、既有沙箱 Shell/`anchor-route` 和原生 `anchor-rsi`，不依赖外部 `tar` 或 `zstd` 命令：`weekly-publish` 使用 Rust tar 库在原生组装中生成图片归档，压缩 DeepSeek 历史由采集器使用 Rust zstd 库在进程内解码。上面的操作员安装步骤使用本机 `jq` 提取授权配置。只有可选 Docmost 包装图额外使用沙箱内的 `tar` 解开图片归档，并使用 `jq` 做目标输入预检。发现目录不是工具安装或依赖授权；操作员仍须确保对应路径所需的命令在相应环境中可用。Goose/provider 配置由宿主提供，不能放进 Graph 或历史授权文件。
 
 ## 时间窗口与定时
 
@@ -86,9 +86,11 @@ mkdir -p "$ANCHOR_RUNNER_LOCAL_INPUTS_ROOT/weekly-work-report"
 
 评审使用与作者分开的模型上下文，但默认仍是同一模型，不等于跨模型验证。先只读正文与图的文字内容，记下读者能复述的重点和阅读障碍，再回查证据；依次判断 `business`、`reasoning`、`writing`、`facts`。不能进行视觉检查时如实说明方式和边界。表达与结构问题交回 `write`，项目理解和事实判断问题交回 `understand`，不固定修改轮数，不以纯润色阻断交付。
 
-`review.md` 保存可阅读反馈，`review.json` 为每个阻断项保留 ID、位置、可定位证据、影响、修法、验收条件和解决依据。复审逐项核销旧问题，不能删掉旧问题制造通过。普通 Op `gate` 调用 `anchor-rsi weekly-gate`，复用 `anchor-route` 分流；只有四项全部通过、没有未解决阻断项、旧问题逐项保留且评审绑定当前稿件 Git commit，才能进入 `publish`。`weekly-publish` 组装前再次核对该 commit；格式不合法、旧稿评审或遗漏旧问题均失败。
+`review.md` 保存可阅读反馈，`review.json` 为每个阻断项保留 ID、位置、可定位证据、影响、修法、验收条件和解决依据。复审逐项核销旧问题，不能删掉旧问题制造通过。普通 Op `gate` 调用 `anchor-rsi weekly-gate`，复用 `anchor-route` 分流；只有四项全部通过、没有未解决阻断项、旧问题逐项保留且评审的 `reviewed_artifact` 绑定当前稿件的完整 Artifact 引用和清单摘要，才能进入 `publish`。`weekly-publish` 组装前再次核对该引用与清单摘要；格式不合法、旧稿评审或遗漏旧问题均失败。
 
-组装检查 Markdown 本地图片路径、普通文件和 SVG XML，图片须位于 `assets/`，拒绝路径穿越与符号链接。SVG 只允许静态图表，拒绝脚本、事件属性、`foreignObject`、外部引用和不安全 CSS。`weekly-publish` 在原生组装中使用 Rust tar 库将已验证的 `assets/` 写成 `assets.tar`，不调用外部归档命令，也不向归档加入会话历史或凭证。语义质量仍取决于模型判断，确定性门禁不能保证零错误。
+`reviewed_artifact` 使用 `{artifact:{id,node_id,invocation},manifest_sha256}`，从 `/in/write/.anchor-artifact.json` 原样读取。Agent 完成时显式提供 `final_result.files`；写作节点交付报告、来源和 `assets/`，纯文字完成使用空数组。
+
+组装仅读取交付描述中的相关文件；图片清单来自该描述，不扫描工作区。它检查 Markdown 本地图片路径、普通文件和 SVG XML，图片须位于 `assets/`，拒绝路径穿越与符号链接。SVG 只允许静态图表，拒绝脚本、事件属性、`foreignObject`、外部引用和不安全 CSS。`weekly-publish` 在原生组装中使用 Rust tar 库将已验证的 `assets/` 写成 `assets.tar`，不调用外部归档命令，也不向归档加入会话历史或凭证。同一工作区重复采集只清除过期的生成明细，重复组装只替换已校验的图片集；其他现场文件保留，旧明细和图片不进入新交付。语义质量仍取决于模型判断，确定性门禁不能保证零错误。
 
 ## Docmost 包装图
 
@@ -112,7 +114,7 @@ mkdir -p "$ANCHOR_RUNNER_LOCAL_INPUTS_ROOT/weekly-work-report"
 
 成功后 `docmost.json` 记录空间、父页面、报告页面、创建或更新操作及实际返回的页面与附件元数据。只发布正式报告和图片，来源清单、评审与会话底稿不自动上传。缺少凭据、目标不唯一、权限、网络或远端调用失败均不能伪造成功；核心本地交付不受包装图后续发布失败影响，已发生的外部效果也不自动回滚。
 
-如另需企业微信提醒，可由操作员在本机包装图的 `docmost` 后连接普通 `Op.call` `detach` 到已有企微助手 Graph，明确指定获准的既有私聊 Session；共享示例不预置 Session 或个人账号。只传正式报告与 `docmost.json`，不传来源或评审。调用接纳不等于通知完成，通知失败不应重跑核心或撤销已完成发布，ACK 未知不自动重发。
+如另需企业微信提醒，可由操作员在本机包装图的 `docmost` 后增加挂载渠道 Plugin 的通知 Agent，按[发送授权契约](wecom-assistant.md#业务工具与附件边界)显式指定已有机器人的 `bot_graph` 和获准的 `userid`，调用 `wecom_send_message` 并核对回执；共享示例不预置机器人或个人账号。只传正式报告与 `docmost.json`，不传来源或评审。通知不需要借用对话 Session；失败不应重跑核心或撤销已完成发布，ACK 未知不自动重发。
 
 ## 验证边界
 

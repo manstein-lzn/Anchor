@@ -27,6 +27,7 @@
 | Runtime 或发行验证 | [确定性回归](runtime-contract-tests.md)、[候选回归](rust-production-candidate.md) |
 | 部署与运行预检 | [部署](rust-production-deployment.md) |
 | 渠道与业务 Graph | [企业微信](wecom-assistant.md)、[RSI](rsi.md)、[周报](weekly-work-report.md) |
+| RSI 反馈轮与 Agent 会话延续 | [当前契约与验收边界](rsi-agent-session-continuity.md) |
 | 理解 Goose 接入取舍 | [接入决定](goose-runtime-migration.md) |
 | 宪法迁移最终说明与后续决定 | [最终说明](anchor-runtime-migration-overview.md)、[M5 最终测量与待决清单](../experiments/constitution-host-preflight/final/measurement.md)、[规则审计](../experiments/constitution-host-preflight/final/rules-audit.md)、[测试登记](../experiments/constitution-host-preflight/final/test-mapping-summary.md)；历史实施与门槛见 [任务书](constitution-migration-task.md)、[工作记录](constitution-refactor-log.md)、[M4 交回](../experiments/constitution-host-preflight/m4/verification.md)、[Run 门面](run-access-facade.md) |
 | 后续 MCP 按需连接 | [未实施路线](goose-native-capability-reuse-plan.md) |

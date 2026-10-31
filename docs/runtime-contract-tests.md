@@ -17,7 +17,7 @@ M4 起按迁移任务书 §10.19 只在 master 工作目录执行，使用标准
 export CARGO_TARGET_DIR=/tmp/anchor-goose-regression-target
 export CARGO_BUILD_JOBS=2
 cargo +stable build --manifest-path rust/Cargo.toml --locked \
-  -p anchor-runner-host -p anchor-sandbox-bwrap -p anchor-wecom-tools -p anchor-docmost-tools --bins
+  -p anchor-runner-host -p anchor-sandbox-bwrap -p anchor-wecom-tools -p anchor-docmost-tools -p anchor-git-tools --bins
 cargo +stable build --manifest-path rust/Cargo.toml --locked \
   -p anchor-mcp-host --example http_fixture
 

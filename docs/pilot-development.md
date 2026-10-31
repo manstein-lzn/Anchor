@@ -61,6 +61,14 @@ requirements、constraints、extras、marker、递归文件和 editable 由 pip 
 
 默认 Cargo、命名工具链、shell 和原 Cargo 绝对路径经过同一入口，Rustc 绑定冻结工具链。沙箱 `/proc` 只显示自己的 PID namespace；只有联网允许下精确直接执行 `rustup toolchain install` 才授予工具链写权限，并禁止 self-update、不改共享 default。`Cargo.toml`/`Cargo.lock` 管理 crate，正式交付为普通 Plugin 二进制。Pilot 命令上限 600 秒，AgentNode 上限由部署配置，默认 30 秒。
 
+## AgentNode 项目开发边界
+
+常驻 AgentNode 的稳定工作区支持跨 Turn 编辑、Git 仓库及构建测试，沿用相同的共享解释器和宿主工具登记；Pilot 的 `development_prepare` 和 `anchor_run(project=...)` 私有环境管理并未自动开放给 AgentNode。项目还需要匹配版本的编译器、可达的依赖来源和已有任务联网授权。Git 身份不等于工具链或系统服务授权。
+
+每次命令独立创建沙箱，`/tmp` 和网络 namespace 不跨命令保留；环境变量和工作目录需在命令中重新设置。服务与集成测试可在同一条命令内协同运行，后台服务不会因此获得跨命令生命周期。宿主 loopback、Docker socket、数据库及 GUI 也不自动可用。AgentNode 命令默认上限 30 秒，部署可用 `ANCHOR_NODE_COMMAND_TIMEOUT_SECONDS` 提高，仍受节点的时间预算限制。
+
+AgentNode 完成时通过 `final_result.files` 显式交付文件或目录，`writes` 是必交子集；未选中的依赖、构建缓存、链接及项目 `.git` 留在稳定工作区，不扫描或复制。交付只接受普通文件和目录，二进制、可执行位和空目录受支持。完成与中断不生成整树备份；后续 invocation 继续原现场，原生会话仍由 Goose 续接。工作区机制不提供后台服务、系统包或额外网络权限；所需工具链继续经宿主授权。验收边界见 [当前台账](pilot-development-plan.md)。
+
 ## 候选准备、测试与交付
 
 1. 在 Session 工作区实际获取或开发候选，记录来源 commit/摘要。审查、准备与导入只暂存代码，排除 `mutable` 数据，候选数据位置初始为空。

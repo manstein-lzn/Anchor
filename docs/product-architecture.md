@@ -72,9 +72,9 @@ Pilot 开发环境是 Session 每项目一份私有可写现场，引用共享�
 
 Graph 默认目标和单次 Run 输入分别保存。手动、计划、Webhook、Responses 与渠道共用接纳，Run 保留触发来源；一次输入不能修改 Graph 默认值。忙碌、停机错过与控制请求的状态必须可解释，计划不另建第二套调度器。
 
-每个节点拥有 workspace。完成后提交不可变 Artifact，输入关联上游节点与具体提交。反馈回访从同 Run 同节点最近已提交产物延续；已开始 invocation 保留现场；跨 Run 不自动继承。只读 Git 输入视图服务审查和 commit 绑定，不是第二套可写历史。
+每个节点的 invocation 继续使用同一 `(Run, node)` 可写 Workspace；新 Run 默认获得独立现场，跨 Run 复用需要 Host 显式授权绑定资源。完成时 Agent 选择文件或目录形成不可变 Artifact，`writes` 是必交子集；Op 与控制节点也使用同一套显式交付契约。下游读取固定 Artifact 版本，不改变工作区字节。
 
-当前常驻助手显式复用同 Run、同节点的稳定可写 workspace，不共用全 Graph 可写目录；逐轮 invocation 与 fs2 Artifact 仍不可变，可写现场数量与历史快照数量是不同指标。新实例的首个 Agent 可从可信、获授权的 previous 提交或中断快照初始化文件一次，而不是每轮复制 `/previous`。普通一次性 Graph 保持既有默认。中断先保存现场 checkpoint，再提交 `Yielded`/`Interruption` 控制证据并沿普通 route 接续，未完成现场不能冒充成功文件或回复。
+Artifact 只保存被选择的文件内容，按内容去重；不复制完整项目、依赖、缓存或 `.git`，也不为失败和中断建立全目录 checkpoint。普通失败、中断和取消保留现场供后续 invocation 核查与继续；Run 删除释放它拥有的现场和交付引用，独立保留的 Artifact 或共享 Workspace 按自身引用回收。助手与其他 Graph 使用同一工作区和交付机制。
 
 AgentNode 必须通过原生授权完成工具提交 `summary` 和可选 `route`。普通回答或看似正确的 JSON 不代表完成；缺少必需信息、非法路由或未完成现场核查，应反馈给同一 Agent 修正。机械门禁不能被模型判断替代。
 
@@ -100,7 +100,7 @@ AgentNode 必须通过原生授权完成工具提交 `summary` 和可选 `route`
 
 Session 与 Run 分别拥有状态。Session 只引用真实 Run，不复制另一份运行状态。删除前必须处理关联 Run 和原生历史范围；单条持续会话 Run 删除受共享 scope 约束，不能破坏仍在使用的历史。
 
-常驻实例的 stop/resume 与 explicit retire 分开：stop/resume 保留 current binding 和冻结快照；retire 要求 Run 已真实 Stopped/终态且非 active，Session 的 Running Turn 及 pending/sending/unknown delivery 均阻断退役。退役保留历史、禁止旧 Run resume 或重新绑定，下一条可信消息惰性创建新实例；Graph 结构更新不热改旧 Run；操作员保存常驻助手的插件选择和节点联网权限后，各 Session 在下一 Turn 冻结并应用，当前 Turn 和恢复保持原权限，历史和工作文件继续复用。Graph cascade 删除先完成保护与退役，再按 owned bindings 清理输入、回复、yield、checkpoint 与执行数据，不把 opt-in 升级变成全历史 workspace 清除。
+常驻实例的 stop/resume 与 explicit retire 分开：stop/resume 保留当前 Run、Session 与 Workspace 绑定；retire 要求 Run 已真实 Stopped/终态且非 active，Session 的 Running Turn 及 pending/sending/unknown delivery 均阻断退役。退役保留对话历史、禁止旧 Run resume 或重新绑定，下一条可信消息惰性创建新实例；Graph 结构更新不热改旧 Run；操作员保存常驻助手的插件选择和节点联网权限后，各 Session 在下一 Turn 冻结并应用，当前 Turn 和恢复保持原权限，工作文件通过已授权 Workspace 资源绑定继续使用。Graph cascade 删除先完成保护与退役，再按 owned bindings 清理输入、回复、yield 与执行数据，并释放 Workspace/Artifact 引用。
 
 ## Plugin 与能力积累
 

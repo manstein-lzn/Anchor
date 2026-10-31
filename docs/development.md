@@ -10,6 +10,8 @@
 
 ## 工作节奏
 
+`dev.sh` 的 5173 入口统一转发到 Host，提供已构建的 WebUI；前端源码热更新单独使用 `npm --prefix apps/web run dev -- --port 5174`，不能替换试用入口，避免浏览器保留的开发依赖缓存因重建失效。
+
 先确定归属层、事实所有者和小契约，交付可运行的垂直切片。Agent loop、模型历史与 compaction 复用 Goose；Graph、Run、Artifact、Sandbox、Library 和 Session/Turn 由 Anchor 保持唯一事实。
 
 独立且契约稳定的工作包可在隔离 worktree 中并行，一个路径只保留一个实际编辑者。主轨负责共享 manifest、集成、review 和验收；获得足够证据后直接集成，不反复等待报告。变更应聚焦，避免为形式化拆分建设额外平台。

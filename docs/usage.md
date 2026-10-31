@@ -20,7 +20,7 @@ cd Anchor
 ./scripts/dev.sh start
 ```
 
-启动后打开 <http://127.0.0.1:5173>，先在「设置 → 模型服务」保存 default Flash，再回到 Pilot 对话。Vite 将 API 请求转发到 <http://127.0.0.1:8077> 的 Rust Host；Host 也提供已构建的 WebUI。脚本使用 `.local/rust`，分别保存 catalog、state、workspace 和 Library；首次向可编辑 catalog 导入 8 张现有示例图，向 Library 安装 5 个官方 Plugin 及本地工具；不自动运行 Graph、调用模型或启用渠道。首次 `start` 自动执行锁定的 `npm ci`、增量构建 debug Host/relay、准备 `.local/bin/goose` 并构建缺少或已更新的 Web 资产。Goose 配方自动安装固定工具链的 musl target 和已校验的交叉编译器；首次需要联网，后续复用产物；Goose 版本、补丁或配方变动时才重新准备。`setup` 准备依赖和插件但不启动服务，示例 Graph 在 Host 启动后导入；`status`/`stop` 不下载或构建。缺少系统工具时提示具体缺项；源码构建成功后使用本机产物，不检查跨机器固定二进制摘要。
+启动后打开 <http://127.0.0.1:5173>，先在「设置 → 模型服务」保存 default Flash，再回到 Pilot 对话。5173 统一转发到 <http://127.0.0.1:8077> 的 Rust Host，页面使用已构建的 WebUI，不加载 Vite 开发依赖。脚本使用 `.local/rust`，分别保存 catalog、state、workspace 和 Library；首次向可编辑 catalog 导入 8 张现有示例图，向 Library 安装 5 个官方 Plugin 及本地工具；不自动运行 Graph、调用模型或启用渠道。首次 `start` 自动执行锁定的 `npm ci`、增量构建 debug Host/relay、准备 `.local/bin/goose` 并构建缺少或已更新的 Web 资产。Goose 配方自动安装固定工具链的 musl target 和已校验的交叉编译器；首次需要联网，后续复用产物；Goose 版本、补丁或配方变动时才重新准备。`setup` 准备依赖和插件但不启动服务，示例 Graph 在 Host 启动后导入；`status`/`stop` 不下载或构建。缺少系统工具时提示具体缺项；源码构建成功后使用本机产物，不检查跨机器固定二进制摘要。
 
 默认使用 `rust/target/debug`（或 `CARGO_TARGET_DIR/debug`），不自动选取旧 release 产物；指定自定义 Host/relay 时要求路径已经可执行。拉取更新或修改代码后执行 `./scripts/dev.sh restart`，脚本完成增量构建和必要的 Web 资产更新。开发脚本和 Vite 均不加载 `.env`；旧文件存在也不会执行其中内容。可选的路径、端口等覆盖只取显式进程设置，见 [脚本](../scripts/dev.sh) 和下方部署参数。
 
@@ -116,6 +116,8 @@ WebUI「设置 → 模型服务」固定提供 `default`、`backup` 两组，每
 「插件库」支持从本机目录或 GitHub 目录链接安装插件，预检展示来源、权限和替换影响，确认后执行。安装期间可离开页面或刷新，再从操作列表查看进度；Host 重启后按 Library 实际状态重新检查。插件详情可配置、轮换和清除声明的凭据，也可预检卸载影响后确认卸载。被运行或会话引用的插件按 Host 前置条件处理。
 
 「运行 → 定时计划」可创建、编辑、暂停、启用和删除计划，支持一次性、固定间隔、每天、每周和每月，按服务所在时区执行。重新启用只安排未来时点；暂停或删除计划不会删除既有 Run。
+
+需要定时发送企业微信通知时，在执行节点挂载渠道 Plugin，并在任务输入与指令中明确机器人 Graph 和真实接收人，见[定时通知配置](wecom-assistant.md#业务工具与附件边界)。
 
 企业微信入口在「图编排 → 消息触发」绑定当前工作流并启停，每个 Host 仍只有一个入口。绑定其他工作流时先保存当前图的绑定，再启用。「运行看板 → 消息会话」查看各对话的实例、打开 Run，以及按 Host 允许的操作停止、恢复、退役或清理。监听图的「查看会话」也打开同一管理界面；具体权限与恢复边界见 [企业微信](wecom-assistant.md)。
 

@@ -12,7 +12,7 @@
 > - 把"消息触发"对话框并入 Plugin 详情；
 > - 顺带修复"模型拒绝一次，助手就停了"。
 >
-> 本卡只做多机器人和上面这几件附带的事。卡片交互、后台 Run、主动投递、Pilot 和助手合并、飞书，都在 §9 里列为后续方向，这次不做。
+> 本卡完成多机器人及上述附带改动。2026-10-28 用户授权补齐普通任务使用已有机器人主动通知的契约，见 R1；向 Session 注入任务或结果仍属于 §9 的后续方向。
 
 ## 1. 现状（读码结论，行号以 2e19d22 为准）
 
@@ -59,7 +59,7 @@
 
 **规则：**
 
-- **R1 用途由形态决定。** 只有机器人 Graph 才会启动网关。普通 Graph 挂企业微信 Plugin，只拿到它的应用 API 工具（`wecom_send_text` 等），不启动网关，不需要机器人凭据，也拿不到 `wecom_send_message`。
+- **R1 网关归机器人 Graph，发送权归节点挂载。** 只有机器人 Graph 启动网关、保存机器人凭据。普通 Graph 的 Agent 节点显式挂载渠道 Plugin 后可调用 `wecom_send_message(bot_graph, userid, content)`，必须指定已有机器人的 Graph；每次发送由 Host 核对同 owner、同 Plugin、当前有效启用及 `send_users`。挂载授权的是该 owner 下使用此 Plugin 的机器人发送能力，不允许跨 owner 或使用未挂载的渠道。常驻助手固定使用自己的机器人，保留原 `userid/content` 参数；只有助手工作节点提供 `wecom_attach_image`。不按唯一机器人猜目标，不创建新网关，不注入 Session/Turn。
 - **R2 一张常驻 Graph 最多挂一个渠道 Plugin。** 保存 Graph 时校验。
 - **R3 机器人凭据按 Graph 存放。** `channel.json` 的 `required_environment`（BotID/Secret）存在绑定名下。Plugin 的 MCP 凭据（自建应用的 CorpID/Secret）仍按 Plugin 共用，和现在一样。
 - **R4 一个机器人账号最多被一个已启用的绑定使用，整个 Host 范围都算。** 企微只允许一个机器人保持一条长连接，新连接会把旧的踢掉。所以启用时如果发现账号已被别的绑定占用，就拒绝，并说明是被哪张 Graph 占用了。
@@ -104,8 +104,8 @@
   - 结构修改仍沿用现有的"先退役再保存"规则。
 - **Graph 删除**：见 D6。
 - **节点工具**：
-  - `wecom_send_message` 和 `wecom_attach_image` 只在机器人 Graph 的 Agent 节点上出现。
-  - 它们连接的是这张 Graph 自己那个网关的 descriptor，收件人名单取绑定里的 `send_users`，不再读进程级环境变量。
+  - 按 R1 区分任务主动发送和助手图文回复；两者复用同一 Host 工具和现有网关控制通道。
+  - 发送前读取应用服务的有效绑定投影，核对 owner、Plugin、启用状态和 `send_users`；不再由工具直接读取绑定文件或缓存名单。目标 Graph 保存在 Goose 原生调用参数中，原调用身份、幂等与未知效果处理沿用原链路。
 - **网关环境变量**：
   - 继续透传调优参数：`ANCHOR_WECOM_WS_URL`、各项超时、`DEBUG`、`PROGRESS`。
   - 删除那些会覆盖绑定内容的变量：`ANCHOR_WECOM_{GRAPH,REPLY_NODE,USERS,SEND_USERS}`，以及进程级的 `WECOM_BOT_ID/SECRET`。
@@ -122,7 +122,7 @@
 
 **和常驻助手共用、必须保留的部分：**
 - `previous_run` 交接链：退役后新开实例要靠它，`call.session` 也在用；
-- `/previous` 挂载；
+- 显式授权的稳定 Workspace 资源交接；
 - Goose 会话的前后接续；
 - 删除墓碑；
 - `stop_previous_run`；
@@ -233,7 +233,7 @@
 | T4 | 第二张 Graph 填了相同的 BotID 并尝试启用 | 拒绝（R4），提示占用它的 Graph 名；第一个机器人不受影响 |
 | T5 | 两个机器人收到 event_id 相同的消息 | 各自的进度只指向自己的 Run |
 | T6 | 修改 A 的凭据 | B 的凭据和运行状态都不变；读取接口拿不到任何凭据明文 |
-| T7 | 普通 Graph 挂企业微信 Plugin 运行 | 不启动网关，节点上没有 `wecom_send_message`，能拿到应用 API 工具 |
+| T7 | 普通 Graph 挂企业微信 Plugin 运行 | 不启动网关；发送必须显式指定同 owner、同 Plugin 的有效机器人并通过其接收人名单；没有图片回复工具。未挂载的节点不获得机器人发送工具 |
 | T8 | 常驻 Graph 的 Agent 节点挂两个渠道 Plugin | 保存被拒绝（R2） |
 | T9 | 绑定处于启用状态时，从节点上卸下渠道 Plugin，或者删除这张 Graph | 拒绝（D6=A）；停用之后可以执行，绑定、凭据和网关目录被清掉 |
 | T10 | 账号已有属于其他 Graph 的会话时启用 | 拒绝（D7=A），提示要清理的会话 |
@@ -271,7 +271,7 @@
 - 回调密钥和 Graph 一一对应：一把密钥只能访问自己 Graph 的 `/channels/<graph>/…`，旧的 `anchor-channel-api-` 形式不再接受（T3）。
 - 进度查询和入站去重按规范账号限定范围（T5），会话数据库结构不变。
 - 进程环境不再提供渠道凭据；执行快照只包含 MCP 目标，网关凭据只交给它自己的 Supervisor。
-- 渠道工具只注入机器人 Graph 的助手节点，使用该 Graph 的 descriptor 和 `send_users`（T7、T11）。
+- S3 当时仅向机器人 Graph 的助手节点注入渠道工具；2026-10-28 的 R1 修订补上普通任务显式选择已有机器人发送的授权关系（T7），助手仍固定使用自己的机器人（T11）。
 - 管理 API 和 Pilot 工具已按 §5 换成按 Graph 的形式。
 - 已覆盖：T1、T3、T4、T5、T7、T8、T9、T10、T11、T12、T19 的定向测试，以及固定 Goose 的渠道、常驻助手、插件轮次集成测试。T2、T6 由适配器测试覆盖（两个 Graph 各自的绑定、凭据目标互不影响），尚未用两个真实网关进程端到端验证。
 
