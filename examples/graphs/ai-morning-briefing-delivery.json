@@ -1,0 +1,71 @@
+{
+  "entry": "prepare",
+  "objective": "接收调用方已发布晨报的确切凭证，只导出该版本 PDF 和原有导读，通过明确授权的现有企业微信机器人发送给指定成员，保存平台回执供原常驻助手后续对话读取。作为生产流程的有限分发子图，不独立定时，不重新研究或渲染，不重新选择最新版。",
+  "input": {
+    "bot_graph": "wecom-persistent-assistant",
+    "userid": null
+  },
+  "agents": {
+    "preparer": {
+      "model": "models.default.flash",
+      "network": false,
+      "writes": [
+        "delivery"
+      ],
+      "instructions": "先读取 ai-morning-briefing Skill 并核对 briefing.issue 的实际 schema。本图只分发调用方指定的正式版本。读取 /in/call/publication.json 的 publication；缺失或 publication 为空时失败，不自行寻找当日最新版。调用 briefing.issue(issue_date=该凭证的 issue_date,revision=该凭证的 revision,output_dir=\"delivery\")，两个版本字段均须明确传入。只读取和导出，不调用 context/render/publish，不修改原文、导读或凭证。稳定 workspace 若已有完整导出，先核对已导出的 publication 与调用方相同并继续同一版本；导出不完整时如实失败，不换版本或清空目录重试。工具或版本核对失败时不进入发送。实际成功后 final_result route=\"verify\"，files:[\"delivery\"]。"
+    },
+    "sender": {
+      "model": "models.default.flash",
+      "network": false,
+      "reads": [
+        "delivery",
+        "delivery.json"
+      ],
+      "writes": [
+        "receipt.json"
+      ],
+      "instructions": "读取 wecom Skill 和 /in/verify/delivery.json。这是已授权的晨报投递任务，仅使用该文件中已由代码固定的 bot_graph、userid、content、pdf_path 与 context_files；路径已是只读输入的绝对路径，不再添加前缀或改写。调用一次 wecom_send_file(bot_graph,userid,path=pdf_path,content,context_files)，发送指定版本 PDF 和原有两三条导读。将工具真实完整返回保存 receipt.json。只有文件和导读均获得平台 ACK 才声称发送成功；平台确认不代表已读。文件已确认但导读失败时准确记录部分结果，不重发 PDF。超时、未知结果或错误不得换身份重试或另用发送工具补发，不编造回执。已有 receipt.json 时先核查现场：已确认成功就交付原回执，未知状态如实失败。完成时 final_result files:[\"receipt.json\"]；summary 简短说明实际投递结果。"
+    }
+  },
+  "nodes": [
+    {
+      "id": "prepare",
+      "agent": "preparer",
+      "plugins": [
+        "ai-morning-briefing"
+      ]
+    },
+    {
+      "id": "verify",
+      "op": "verify"
+    },
+    {
+      "id": "send",
+      "agent": "sender",
+      "plugins": [
+        "wecom"
+      ]
+    }
+  ],
+  "edges": [
+    {
+      "from": "prepare",
+      "to": "verify"
+    },
+    {
+      "from": "verify",
+      "to": "send"
+    }
+  ],
+  "ops": {
+    "verify": {
+      "reads": [
+        "delivery"
+      ],
+      "writes": [
+        "delivery.json"
+      ],
+      "run": "set -eu\njq -e -s '.[0].publication == .[1].publication and .[0].publication != null' /in/call/publication.json /in/prepare/delivery/publication.json > /dev/null\npdf_name=$(jq -r '.publication.issue_date | \"AI每日晨报_\" + gsub(\"-\"; \"\") + \".pdf\"' /in/call/publication.json)\nexpected_pdf=$(jq -r '.publication.pdf_sha256' /in/call/publication.json)\nexpected_report=$(jq -r '.publication.report_sha256' /in/call/publication.json)\nprintf '%s  %s\\n%s  %s\\n' \"$expected_pdf\" \"/in/prepare/delivery/$pdf_name\" \"$expected_report\" /in/prepare/delivery/report.json | sha256sum -c - > /dev/null\njq -n --argjson recipient \"$ANCHOR_INPUT\" --arg pdf \"/in/prepare/delivery/$pdf_name\" --slurpfile publication /in/call/publication.json --slurpfile report /in/prepare/delivery/report.json '{bot_graph:$recipient.bot_graph,userid:$recipient.userid,publication:$publication[0].publication,pdf_path:$pdf,context_files:[\"/in/prepare/delivery/report.json\",\"/in/prepare/delivery/publication.json\"],content:(\"## AI 每日晨报 · \" + $publication[0].publication.issue_date + \"\\n\\n\" + ($report[0].intro | map(\"- \" + .) | join(\"\\n\")))}' > delivery.json"
+    }
+  }
+}
