@@ -1,5 +1,5 @@
 /** Application navigation and cross-page references. Page owners retain drafts and subscribe to Host projections. */
-import { Anchor, Activity, GitBranch, MessageSquare, PanelLeftClose, PanelRightClose, Plug, Settings2 } from 'lucide-react';
+import { Anchor, Activity, GitBranch, MessageSquare, Plug, Settings2 } from 'lucide-react';
 import { lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent } from 'react';
 import type { OurRun, OurRunDetail } from './model';
 import { GraphRelations } from './GraphRelations';
@@ -11,7 +11,6 @@ import { ChannelSessions } from './ChannelSessions';
 import { CreateGraphDialog, RunInputDialog } from './WorkbenchDialogs';
 import { anchorRef, anchorTarget, type AnchorRef } from './links';
 import { api } from './api';
-import { ToolButton } from './ui';
 import { Timeline } from './Timeline';
 import { assignGraphColors } from './graphColors';
 import { graphSaveNotice, useGraphEditor, type WorkbenchNotice } from './useGraphEditor';
@@ -29,8 +28,6 @@ const recentRuns = (runs: OurRun[], graph: string) => runs
   .sort((a, b) => Date.parse(b.updated || b.started) - Date.parse(a.updated || a.started));
 
 export function App() {
-  const [libraryOpen, setLibraryOpen] = useState(true);
-  const [inspectorOpen, setInspectorOpen] = useState(true);
   const [view, setView] = useState<WorkbenchView>(() => {
     try {
       const saved = localStorage.getItem('anchor:view');
@@ -59,7 +56,7 @@ export function App() {
   const [chat, setChat] = useState('');
   const navigation = useRef(0);
   useEffect(() => { navigation.current += 1; }, [view, name, run]);
-  const editor = useGraphEditor(name, graphs, setNotice, () => setInspectorOpen(true));
+  const editor = useGraphEditor(name, graphs, setNotice);
   const { doc, dirty, selectedNode } = editor;
   const detail = useRunDetail(run, view === 'runDetail', runs);
   const graphColors = useMemo(() => assignGraphColors([
@@ -158,7 +155,7 @@ export function App() {
     if (!selectGraph(target)) return;
     if (remember) setGraphReturn(previous);
     editor.focusNode(target, targetNode);
-    setInspectorOpen(true); setView('graph'); setRelations(false);
+    setView('graph'); setRelations(false);
   };
   const navigateRun = async (targetRun: string, targetGraph: string, targetNode = '') => {
     if (!selectGraph(targetGraph)) return;
@@ -206,8 +203,7 @@ export function App() {
   };
 
   return (
-    <div className={`app-shell ${libraryOpen ? '' : 'hide-library'} ${inspectorOpen ? '' : 'hide-inspector'}`}
-         onClickCapture={followReference}>
+    <div className="app-shell" onClickCapture={followReference}>
       <header className="topbar">
         <div className="brand"><span className="brand-mark"><Anchor size={20} /></span>Anchor</div>
         <nav className="product-switch" aria-label="工作台">
@@ -220,17 +216,13 @@ export function App() {
         <div className="connection" title={problem || '服务已连接'}><span className={`status-dot ${problem ? 'bad' : ''}`} />
           {problem ? '连接中断' : '服务在线'}
         </div>
-        {(view === 'graph' || view === 'runDetail') && <div className="panel-toggles">
-          <ToolButton icon={PanelLeftClose} label="切换侧边栏" aria-pressed={libraryOpen} onClick={() => setLibraryOpen(!libraryOpen)} />
-          <ToolButton icon={PanelRightClose} label="切换详情面板" aria-pressed={inspectorOpen} onClick={() => setInspectorOpen(!inspectorOpen)} />
-        </div>}
       </header>
       {problem && <div className="connection-error" role="alert">{problem}</div>}
       {view === 'runs' && notice && <p className={`notice ${notice.kind}`} role="status">{notice.text}</p>}
 
       <PageActivity active={view === 'pilot'}><Suspense fallback={openingPage}><Pilot session={chat} onSession={setChat} initialDraft={assistance} onDraftConsumed={() => setAssistance('')} onSettings={() => setView('settings')} /></Suspense></PageActivity>
       <Suspense fallback={openingPage}>{view === 'plugins' ? <PluginManagement /> : view === 'settings' ? <SettingsPage /> : view === 'runs' ? (
-        <Workspace running>
+        <Workspace running inspector={false}>
           {timelineProblem ? <main className="main"><p className="timeline-error" role="alert">
             运行时间线无法加载：{timelineProblem} <button onClick={() => void refresh()}>重新连接</button>
           </p></main> : <Timeline data={timeline} graphs={graphs.map(item => item.graph)} graphColors={graphColors}
@@ -240,12 +232,12 @@ export function App() {
       ) : view === 'runDetail' ? <RunDetailPage name={name} graphs={graphs} dirty={dirty} busy={busy}
         notice={notice} run={run} node={node} targetPath={targetPath} detail={detail} selectGraph={selectGraph}
         onPilot={() => askPilot('run')} trigger={trigger} onTimeline={() => setView('runs')} navigateRun={navigateRun} controlRun={controlRun}
-        deleteRun={deleteRun} onNode={id => { setNode(id); setInspectorOpen(true); }} />
+        deleteRun={deleteRun} onNode={setNode} />
         : null}</Suspense>
       <PageActivity active={view === 'graph'}><GraphEditorPage name={name} editor={editor} graphs={graphs} runs={runs} graphColors={graphColors}
           busy={busy} notice={notice} setNotice={setNotice} selectGraph={selectGraph} create={create}
           onPilot={() => askPilot('graph')} deleteGraph={deleteGraph} save={save} check={check} trigger={trigger} openRun={openRun} navigateGraph={navigateGraph}
-          onInspect={() => setInspectorOpen(true)} onRelations={() => setRelations(true)} graphReturn={graphReturn}
+          onRelations={() => setRelations(true)} graphReturn={graphReturn}
           onReturn={() => { if (graphReturn) navigateGraph(graphReturn.graph, graphReturn.node); setGraphReturn(null); }} /></PageActivity>
       {sessions && <ChannelSessions onOpenRun={(id, graph) => void navigateRun(id, graph)} close={() => setSessions(false)} />}
       {relations && <GraphRelations graph={name} close={() => setRelations(false)} onOpen={navigateGraph} />}

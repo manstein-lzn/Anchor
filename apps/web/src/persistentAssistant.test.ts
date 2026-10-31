@@ -10,7 +10,8 @@ const state: OurRunState = {
     assistant: {
       node_id: 'assistant', pass_number: 1, submission: 'superseded by a newer Turn',
       files: ['interruption.json'], submitted: false, exit_status: 'interrupted',
-      interruption: 'superseded by a newer Turn', route: 'reply', commit: 'fs2-control',
+      interruption: 'superseded by a newer Turn', route: 'reply',
+      artifact: { id: 'fs2-control', node_id: 'assistant', invocation: 1 }, artifact_availability: 'available',
     },
   },
 };

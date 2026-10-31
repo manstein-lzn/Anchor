@@ -1,6 +1,7 @@
 # Local data and environments may contain user history; never package them.
 .venv/
 .local/
+/.claude/worktrees/
 /research_*/
 __pycache__/
 *.py[cod]

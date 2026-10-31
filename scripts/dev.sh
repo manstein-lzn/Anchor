@@ -232,8 +232,8 @@ start_web() {
   elif endpoint_open "$web_url"; then
     echo "External service at $web_url (not managed by dev.sh)"
   else
-    nohup setsid "$repo/apps/web/node_modules/.bin/vite" \
-      "$repo/apps/web" --host 127.0.0.1 --port "$web_port" --strictPort \
+    nohup setsid "$repo/apps/web/node_modules/.bin/vite" preview \
+      "$repo/apps/web" --outDir "$ANCHOR_RUNNER_WEB_ROOT" --host 127.0.0.1 --port "$web_port" --strictPort \
       >"$state/vite.log" 2>&1 < /dev/null 9>&- &
     record_pid "$!" "$web_pid"
     ready web "$web_pid" "$state/vite.log"

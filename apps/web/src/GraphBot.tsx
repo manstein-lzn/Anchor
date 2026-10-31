@@ -48,6 +48,10 @@ export function GraphBot({ graph, pluginId, saved }: { graph: string; pluginId: 
     catch (cause) { if (alive.current) { setError(reason(cause)); refresh(); } return false; }
     finally { if (alive.current) setBusy(false); }
   };
+  const setEnabled = (enabled: boolean, message: string) => {
+    if (!status?.binding) return;
+    void mutate(() => api<BotStatus>(`${path(graph)}/enabled`, 'POST', { enabled, expected_binding: status.binding }), message);
+  };
   const heading = <div className="plugin-management-heading"><h3>此 Graph 的机器人</h3>
     {saved && <button type="button" onClick={refresh} disabled={busy}><RefreshCw size={14} />刷新状态</button>}</div>;
   if (!saved) return <section className="plugin-details-section graph-bot" aria-label="此 Graph 的机器人">{heading}
@@ -64,8 +68,8 @@ export function GraphBot({ graph, pluginId, saved }: { graph: string; pluginId: 
     {status?.owner_matches === false ? <p className="channels-message">此 Graph 的机器人属于另一位管理者，当前身份无法查看或修改。</p>
       : status && <>
         {other && <p className="channels-message warn">此 Graph 的机器人当前使用插件 <code>{other}</code>。</p>}
-        {status.restart_required && <p className="channels-message warn">账户身份已变更。请先停用机器人，再启用，使网关使用新账户。</p>}
-        {read === 'ready' && status.enabled && listener === 'unavailable' && <p className="channels-message warn">机器人已启用，但无法确认网关连接。请检查插件、凭据和 Host 日志；可停用后重新启用。</p>}
+        {status.restart_required && <p className="channels-message warn">网关需要重新启动。请检查插件和凭据，资源可用后点击「恢复连接」。</p>}
+        {read === 'ready' && status.enabled && listener === 'unavailable' && !status.restart_required && <p className="channels-message warn">机器人已启用，但无法确认网关连接。请检查插件、凭据和 Host 日志。</p>}
         <Members status={status} busy={busy} save={members => mutate(
           () => api<BotStatus>(path(graph), 'PUT', members), '成员已保存；启用后按新名单接收消息。',
         )} />
@@ -75,11 +79,13 @@ export function GraphBot({ graph, pluginId, saved }: { graph: string; pluginId: 
           {status.enabled ? <p className="channels-message">机器人已启用。停用后才能修改凭据。</p>
             : <PluginCredentials pluginId={pluginId} endpoint={`${path(graph)}/credentials`} onChanged={refresh} />}
         </div>
-        <div className="channels-enable"><button type="button" className={status.enabled ? '' : 'primary'} disabled={busy || !status.binding} onClick={() => {
-          if (!status.binding) return;
-          void mutate(() => api<BotStatus>(`${path(graph)}/enabled`, 'POST', { enabled: !status.enabled, expected_binding: status.binding }),
-            status.enabled ? '机器人已停用。现有实例的运行状态请在运行看板的消息会话中管理。' : '启用请求已完成；连接状态以网关实际状态为准。');
-        }}>{busy ? '正在处理…' : status.enabled ? '停用机器人' : '启用机器人'}</button><small>{status.binding ? '启停不会停止或退役已有实例。' : '先保存成员名单，再启用。'}</small></div>
+        <div className="channels-enable"><button type="button" className={status.enabled ? '' : 'primary'} disabled={busy || !status.binding} onClick={() => setEnabled(!status.enabled,
+          status.enabled ? '机器人已停用。现有实例的运行状态请在运行看板的消息会话中管理。' : '启用请求已完成；连接状态以网关实际状态为准。',
+        )}>{busy ? '正在处理…' : status.enabled ? '停用机器人' : '启用机器人'}</button>
+          {status.enabled && status.restart_required && status.available !== false && <button type="button" disabled={busy || read !== 'ready' || !status.binding} onClick={() => setEnabled(true,
+            '恢复请求已完成；连接状态以网关实际状态为准。',
+          )}>恢复连接</button>}
+          <small>{status.binding ? '启停不会停止或退役已有实例。' : '先保存成员名单，再启用。'}</small></div>
       </>}
   </section>;
 }

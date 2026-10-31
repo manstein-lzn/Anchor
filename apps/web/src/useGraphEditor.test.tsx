@@ -14,7 +14,7 @@ describe('Graph plugin activation metadata', () => {
   let root: Root;
   let container: HTMLDivElement;
   let editor: ReturnType<typeof useGraphEditor>;
-  const Harness = ({ name }: { name: string }) => { editor = useGraphEditor(name, [{ graph: name, running: null }], () => {}, () => {}); return null; };
+  const Harness = ({ name }: { name: string }) => { editor = useGraphEditor(name, [{ graph: name, running: null }], () => {}); return null; };
   const render = async (name = 'g') => { await act(async () => root.render(<Harness name={name} />)); };
   beforeEach(() => {
     vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);

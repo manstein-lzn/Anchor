@@ -14,8 +14,7 @@ export const graphSaveNotice = (activation?: GraphPluginActivation, checked = fa
   : checked ? '校验通过，工作流已保存。' : '已保存。';
 
 /** Owns the current editing snapshot and its history, independent of visible page. */
-export function useGraphEditor(name: string, graphs: GraphSummary[], setNotice: (notice: WorkbenchNotice) => void,
-  onInspect: () => void) {
+export function useGraphEditor(name: string, graphs: GraphSummary[], setNotice: (notice: WorkbenchNotice) => void) {
   const [loaded, setLoaded] = useState('');
   const [document, setDoc] = useState<OurGraph | null>(null);
   const [activation, setActivation] = useState<GraphPluginActivation>();
@@ -132,7 +131,7 @@ export function useGraphEditor(name: string, graphs: GraphSummary[], setNotice: 
     while (doc.nodes.some(item => item.id === id) || doc.ops?.[id]) id = `${calling ? 'call' : 'command'}${suffix++}`;
     patch({ ...doc, entry: doc.entry || id, nodes: [...doc.nodes, { id, op: id }], ops: { ...doc.ops,
       [id]: calling ? { call: { graph: graphs.find(item => item.graph !== name)?.graph ?? '', mode: 'wait' } } : { run: 'true' } } });
-     setPick({ kind: 'node', id }); onInspect();
+    setPick({ kind: 'node', id });
   };
 
   const addParallel = async () => {
@@ -143,7 +142,7 @@ export function useGraphEditor(name: string, graphs: GraphSummary[], setNotice: 
       if (current !== revision.current) return;
       if (docRef.current !== doc) { setNotice({ kind: 'bad', text: '工作流已更新，请重新添加并行区域。' }); return; }
       const added = addParallelRegion(doc, model);
-      patch(added.graph); setPick({ kind: 'node', id: added.fanout }); onInspect();
+      patch(added.graph); setPick({ kind: 'node', id: added.fanout });
     } catch (error) { if (current === revision.current) setNotice({ kind: 'bad', text: reason(error) }); }
   };
 

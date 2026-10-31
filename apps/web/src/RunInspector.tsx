@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { FolderOpen, MessageSquare, SlidersHorizontal } from 'lucide-react';
 import { Files } from './Files';
 import { Transcript } from './Transcript';
@@ -9,8 +9,8 @@ import { tracePassKeys } from './parallel';
 import { runNodePresentation, runPhase, runPhaseLabel } from './runPresentation';
 
 /** Inspection state is local to the selected run/node, independent of graph editing. */
-export function RunInspector({ run, node, detail, targetPath = '', onOpenRun }:
-  { run: string; node: string; detail: OurRunDetail | null; targetPath?: string; onOpenRun?: (run: string, graph: string, node?: string) => void }) {
+export function RunInspector({ run, node, detail, targetPath = '', onOpenRun, controls }:
+  { run: string; node: string; detail: OurRunDetail | null; targetPath?: string; onOpenRun?: (run: string, graph: string, node?: string) => void; controls?: ReactNode }) {
   const [tab, setTab] = useState<'talk' | 'files' | 'plugins'>(targetPath ? 'files' : 'talk');
   const [pass, setPass] = useState('');
   const passes = useMemo(() => tracePassKeys(detail?.traces, node), [detail, node]);
@@ -26,6 +26,7 @@ export function RunInspector({ run, node, detail, targetPath = '', onOpenRun }:
   return <aside className="inspector">
     <div className="section-heading">
       <h3><SlidersHorizontal size={15} />{node || '执行详情'}</h3>
+      {controls}
       {node && <div className="product-switch inspector-tabs" aria-label="节点详情">
         <button aria-pressed={tab === 'talk'} className={tab === 'talk' ? 'chosen' : ''}
           onClick={() => setTab('talk')}><MessageSquare size={14} />对话</button>
@@ -53,7 +54,9 @@ export function RunInspector({ run, node, detail, targetPath = '', onOpenRun }:
     {!node ? <EmptyState icon={MessageSquare} title="探索一次执行">
       在画布中选择节点，查看它的思考、执行过程和生成的文件。
     </EmptyState> : tab === 'plugins' ? <Plugins key={`${run}/${node}`} recorded={detail?.plugins?.[node] ?? []} />
-    : tab === 'files' ? <><p className="inspector-note">显示 {node} 当前工作区的文件；历史轮次的对话不会改变这里的最新文件。</p><Files run={run} node={node} targetPath={targetPath} /></> : <>
+    : tab === 'files' ? <><p className="inspector-note">显示 {node}{result?.artifact ? ` 第 ${result.artifact.invocation} 轮` : ''}交付的固定版本文件。</p>
+      <Files key={result?.artifact?.id ?? `${run}/${node}`} run={run} node={node} artifact={result?.artifact}
+        availability={result?.artifact_availability} targetPath={targetPath} /></> : <>
       <div className="node-summary">
         <span className={`pill ${nodeStatus}`}>{nodeLabel}</span>
         <span>已执行 {detail?.state.passes[node] ?? 0} 轮</span>

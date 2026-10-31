@@ -113,6 +113,9 @@ export function kindOf(node: OurNode): 'agent' | 'op' | 'subgraph' {
   return node.graph ? 'subgraph' : node.op ? 'op' : 'agent';
 }
 
+export type ArtifactRef = { id: string; node_id: string; invocation: number };
+export type ArtifactAvailability = 'available' | 'expired' | 'missing' | 'corrupt';
+
 export type OurNodeResult = {
   node_id: string;
   pass_number: number;
@@ -122,10 +125,10 @@ export type OurNodeResult = {
   exit_status: string;
   interruption?: string | null;
   route: string | null;
-  /** This pass, frozen. The workspace is reused across passes, so the commit is what makes one pass
-   *  readable after a later one has written over it — and what a downstream node reads the history
-   *  through. */
-  commit?: string;
+  /** The immutable delivery of this pass; file access stays pinned after later workspace writes. */
+  artifact?: ArtifactRef;
+  artifact_availability?: ArtifactAvailability;
+  artifact_error?: string | null;
   /** What this pass was handed, as `[node, commit]`. The pointers are pinned, so this is what makes
    *  "what did this node read" answerable rather than reconstructable. */
   inputs?: [string, string][];
@@ -197,9 +200,10 @@ export type TraceMessage = {
   contents?: unknown[];
 };
 
-/** One file in a node's workspace, as the listing reports it. */
+/** One explicitly delivered file, as the Artifact inventory reports it. */
 export type OurFile = { path: string; size: number };
-export type OurFileList = { node: string; files: OurFile[]; truncated: boolean };
+export type OurFileList = { node?: string; artifact?: ArtifactRef; artifact_availability?: ArtifactAvailability;
+  files: OurFile[]; truncated: boolean };
 
 /** One file's contents. `binary` is the difference between "this is the text" and "download it": a
  *  mangled decode would be worse than saying so. */

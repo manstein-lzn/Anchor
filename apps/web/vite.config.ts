@@ -1,26 +1,32 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 
+const apiTarget = process.env.ANCHOR_WEB_API_URL || 'http://127.0.0.1:8077';
+
 export default defineConfig({
   envDir: false,
   plugins: [react()],
   optimizeDeps: { include: ['elkjs/lib/elk.bundled.js', 'libavoid-js'] },
+  preview: {
+    proxy: { '/': { target: apiTarget, changeOrigin: true } },
+  },
   server: {
     host: '127.0.0.1',
     port: 5173,
     strictPort: true,
     proxy: {
-      '/graph-relations': { target: process.env.ANCHOR_WEB_API_URL || 'http://127.0.0.1:8077', changeOrigin: true },
-      '/channel-sessions': { target: process.env.ANCHOR_WEB_API_URL || 'http://127.0.0.1:8077', changeOrigin: true },
-      '/channels': { target: process.env.ANCHOR_WEB_API_URL || 'http://127.0.0.1:8077', changeOrigin: true },
-      '/settings': { target: process.env.ANCHOR_WEB_API_URL || 'http://127.0.0.1:8077', changeOrigin: true },
-      '/sessions': { target: process.env.ANCHOR_WEB_API_URL || 'http://127.0.0.1:8077', changeOrigin: true },
-      '/plugins': { target: process.env.ANCHOR_WEB_API_URL || 'http://127.0.0.1:8077', changeOrigin: true },
-      '/graphs': { target: process.env.ANCHOR_WEB_API_URL || 'http://127.0.0.1:8077', changeOrigin: true },
-      '/runs': { target: process.env.ANCHOR_WEB_API_URL || 'http://127.0.0.1:8077', changeOrigin: true },
-      '/timeline': { target: process.env.ANCHOR_WEB_API_URL || 'http://127.0.0.1:8077', changeOrigin: true },
-      '/schedules': { target: process.env.ANCHOR_WEB_API_URL || 'http://127.0.0.1:8077', changeOrigin: true },
-      '/trigger': { target: process.env.ANCHOR_WEB_API_URL || 'http://127.0.0.1:8077', changeOrigin: true },
+      '/api': { target: apiTarget, changeOrigin: true },
+      '/graph-relations': { target: apiTarget, changeOrigin: true },
+      '/channel-sessions': { target: apiTarget, changeOrigin: true },
+      '/channels': { target: apiTarget, changeOrigin: true },
+      '/settings': { target: apiTarget, changeOrigin: true },
+      '/sessions': { target: apiTarget, changeOrigin: true },
+      '/plugins': { target: apiTarget, changeOrigin: true },
+      '/graphs': { target: apiTarget, changeOrigin: true },
+      '/runs': { target: apiTarget, changeOrigin: true },
+      '/timeline': { target: apiTarget, changeOrigin: true },
+      '/schedules': { target: apiTarget, changeOrigin: true },
+      '/trigger': { target: apiTarget, changeOrigin: true },
     },
   },
 });

@@ -1,11 +1,18 @@
 import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
-import { Maximize2, Minimize2 } from 'lucide-react';
+import { Maximize2, Minimize2, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen } from 'lucide-react';
+import { ToolButton } from './ui';
 
 type Widths = { left?: number; right?: number };
+type WorkspaceControls = {
+  openInspector: () => void; sidebarControl: ReactNode; inspectorControls: ReactNode; restoreControls: ReactNode;
+};
 const WIDTHS_KEY = 'anchor.workspace.widths';
 
-/** Widths belong to the workbench, so editing and execution use the same drag behavior. */
-export function Workspace({ running = false, children }: { running?: boolean; children: ReactNode }) {
+/** Each page owns panel visibility; widths and controls share the same behavior. */
+export function Workspace({ running = false, sidebar = false, inspector = true, selection, children }: {
+  running?: boolean; sidebar?: boolean; inspector?: boolean; selection?: unknown;
+  children: ReactNode | ((controls: WorkspaceControls) => ReactNode);
+}) {
   const root = useRef<HTMLDivElement>(null);
   const drag = useRef<{ side: 'left' | 'right'; x: number; width: number } | null>(null);
   const [widths, setWidths] = useState<Widths>(() => {
@@ -17,6 +24,15 @@ export function Workspace({ running = false, children }: { running?: boolean; ch
     } catch { return {}; }
   });
   const [maximized, setMaximized] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [inspectorOpen, setInspectorOpen] = useState(true);
+  const inspectedSelection = useRef(selection);
+  useEffect(() => {
+    if (selection !== inspectedSelection.current) {
+      inspectedSelection.current = selection;
+      if (selection) setInspectorOpen(true);
+    }
+  }, [selection]);
   useEffect(() => {
     try { localStorage.setItem(WIDTHS_KEY, JSON.stringify(widths)); }
     catch { /* Resizing still works when browser storage is unavailable. */ }
@@ -35,17 +51,22 @@ export function Workspace({ running = false, children }: { running?: boolean; ch
       area.clientWidth - otherWidth - 280));
     setWidths(previous => ({ ...previous, [side]: Math.round(Math.max(minimum, Math.min(maximum, width))) }));
   };
-  return <div ref={root} className={`workspace ${running ? 'running' : ''} ${maximized ? 'inspector-maximized' : ''}`} style={{
+  const sidebarControl = <ToolButton icon={PanelLeftClose} label="收起工作流列表" onClick={() => setSidebarOpen(false)} />;
+  const inspectorControls = <div className="panel-heading-actions">
+    <ToolButton icon={maximized ? Minimize2 : Maximize2} label={maximized ? '恢复详情面板' : '最大化详情面板'}
+      aria-pressed={maximized} onClick={() => setMaximized(value => !value)} />
+    <ToolButton icon={PanelRightClose} label="收起详情面板" onClick={() => { setInspectorOpen(false); setMaximized(false); }} />
+  </div>;
+  const restoreControls = <>
+    {sidebar && !sidebarOpen && <ToolButton icon={PanelLeftOpen} label="展开工作流列表" onClick={() => setSidebarOpen(true)} />}
+    {inspector && !inspectorOpen && <ToolButton icon={PanelRightOpen} label="展开详情面板" onClick={() => setInspectorOpen(true)} />}
+  </>;
+  return <div ref={root} className={`workspace ${running ? 'running' : ''} ${!sidebar || !sidebarOpen ? 'hide-library' : ''} ${!inspector || !inspectorOpen ? 'hide-inspector' : ''} ${maximized ? 'inspector-maximized' : ''}`} style={{
     '--sidebar-width': widths.left === undefined ? undefined : `${widths.left}px`,
     '--inspector-width': widths.right === undefined ? undefined : `${widths.right}px`,
   } as CSSProperties}>
-    {children}
-    <button className="inspector-maximize" aria-label={maximized ? '恢复详情面板' : '最大化详情面板'}
-      title={maximized ? '恢复详情面板' : '最大化详情面板'} aria-pressed={maximized}
-      onClick={() => setMaximized(value => !value)}>
-      {maximized ? <Minimize2 size={15} /> : <Maximize2 size={15} />}
-    </button>
-    {(['left', 'right'] as const).map(side => <div key={side}
+    {typeof children === 'function' ? children({ openInspector: () => setInspectorOpen(true), sidebarControl, inspectorControls, restoreControls }) : children}
+    {(['left', 'right'] as const).filter(side => side === 'left' ? sidebar && sidebarOpen : inspector && inspectorOpen).map(side => <div key={side}
       className={`panel-resizer resizer-${side}`} role="separator" tabIndex={0}
       aria-label={side === 'left' ? '调整侧边栏宽度' : '调整详情面板宽度'}
       aria-orientation="vertical" aria-valuemin={side === 'left' ? 160 : 220}

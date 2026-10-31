@@ -66,6 +66,19 @@ describe('a Graph bot', () => {
     expect(button('启用机器人').disabled).toBe(true);
   });
 
+  it('repairs a failed enabled gateway without disabling the bot or changing its binding', async () => {
+    status = { ...status, enabled: true, available: true, listener: 'unavailable', restart_required: true };
+    const binding = status.binding;
+    await render(<GraphBot graph="helper" pluginId="wecom" saved />);
+    expect(container.textContent).toContain('网关需要重新启动');
+    expect(container.textContent).not.toContain('账户身份已变更');
+    await act(async () => button('恢复连接').click());
+    expect(requests().filter(request => request.method !== 'GET')).toEqual([
+      { path: '/graphs/helper/channel/enabled', method: 'POST', body: { enabled: true, expected_binding: binding } },
+    ]);
+    expect(container.textContent).toContain('常驻监听');
+  });
+
   it('lists only the Graphs using this Plugin from the library', async () => {
     await render(<PluginBots pluginId="wecom" />);
     expect(container.textContent).toContain('helper');

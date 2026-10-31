@@ -22,10 +22,11 @@ export function RunDetailPage({ name, graphs, dirty, busy, notice, run, node, ta
   const cursors = activeNodes(detail?.state);
   const cursorLabel = runPhaseLabel(detail?.projection);
   return (
-        <Workspace running>
+        <Workspace running selection={`${run}/${node}/${targetPath}`}>{({ openInspector, inspectorControls, restoreControls }) => <>
           <main className="main timeline-inspector">
             <div className="document-header"><div className="document-title"><h2>{name || '运行概览'}</h2></div>
               <div className="document-context-actions">
+                {restoreControls}
                 <select aria-label="当前工作流" value={name} onChange={event => selectGraph(event.target.value)}>
                   {graphs.map(item => <option key={item.graph} value={item.graph}>{item.graph}{item.running ? '（执行中）' : ''}</option>)}
                 </select>
@@ -55,11 +56,11 @@ export function RunDetailPage({ name, graphs, dirty, busy, notice, run, node, ta
               </> : <span className="hint">选一次运行，或触发一次。</span>}
             </div>
             {detail?.definition && <WorkflowCanvas graph={detail.definition} name={detail.graph} mode="run" state={detail.state} projection={detail.projection}
-              onPick={value => { if (value?.kind === 'node') { onNode(value.id); } }} />}
+              onPick={value => { if (value?.kind === 'node') { onNode(value.id); openInspector(); } }} />}
             {detail && !detail.definition && <p className="problem" role="alert">该运行缺少冻结拓扑，无法显示运行画布。请更新 Host 后重试。</p>}
             <div className="canvas-bottom"><span className="legend"><i className="dot running" />执行中<i className="dot finished" />已完成<i className="dot failed" />失败</span><span className="canvas-caption">点击节点查看对话与产物</span></div>
           </main>
-          <RunInspector key={`${run}/${node}/${targetPath}`} run={run} node={node} detail={detail} targetPath={targetPath} onOpenRun={navigateRun} />
-        </Workspace>
+          <RunInspector key={`${run}/${node}/${targetPath}`} run={run} node={node} detail={detail} targetPath={targetPath} onOpenRun={navigateRun} controls={inspectorControls} />
+        </>}</Workspace>
   );
 }

@@ -26,11 +26,11 @@ type Props = {
   selectGraph: (graph: string) => boolean; create: () => Promise<void>; deleteGraph: (graph: string, precondition: string) => Promise<void>;
   save: () => Promise<void>; check: () => Promise<void>; trigger: () => Promise<void>;
   openRun: (run: OurRun) => void; navigateGraph: (graph: string, node?: string, remember?: boolean, sourceNode?: string) => void;
-  onPilot: () => void; onInspect: () => void; onRelations: () => void; graphReturn: { graph: string; node?: string } | null; onReturn: () => void;
+  onPilot: () => void; onRelations: () => void; graphReturn: { graph: string; node?: string } | null; onReturn: () => void;
 };
 /** Graph-only controls are local; the editor owner survives cross-page navigation. */
 export function GraphEditorPage({ name, editor, graphs, runs, graphColors, busy, notice, setNotice,
-  selectGraph, create, deleteGraph, save, check, trigger, openRun, navigateGraph, onInspect,
+  selectGraph, create, deleteGraph, save, check, trigger, openRun, navigateGraph,
   onRelations, graphReturn, onReturn, onPilot }: Props) {
   const { doc, dirty, pick, setPick, patch, selectedNode, selectedOp, selectedAgent, selectedEdge,
     selectedPlugins, setPlugins, patchNode, patchAgent, patchEdge, patchOperation, addNode, addOperation,
@@ -58,9 +58,9 @@ export function GraphEditorPage({ name, editor, graphs, runs, graphColors, busy,
     return () => window.removeEventListener('resize', dismiss);
   }, []);
   return <>
-        <Workspace>
+        <Workspace sidebar selection={pick}>{({ openInspector, sidebarControl, inspectorControls, restoreControls }) => <>
           <aside className="library">
-            <div className="section-heading"><h3><FolderOpen size={15} />工作流</h3><span className="count">{graphs.length}</span></div>
+            <div className="section-heading"><h3><FolderOpen size={15} />工作流</h3><div className="panel-heading-actions"><span className="count">{graphs.length}</span>{sidebarControl}</div></div>
             <label className="search-field"><Search size={15} /><input aria-label="搜索工作流" placeholder="搜索工作流…" value={search} onChange={event => setSearch(event.target.value)} /></label>
             <button ref={newGraphButton} className="new-graph" onClick={() => void create()} disabled={busy}>
               <Plus size={16} />新建图
@@ -116,6 +116,7 @@ export function GraphEditorPage({ name, editor, graphs, runs, graphColors, busy,
                 <span className={`document-state ${dirty ? 'unsaved' : ''}`}>{dirty ? '● 未保存' : doc ? '所有更改已保存' : '选择或创建工作流'}</span>
               </div>
               <div className="document-actions">
+                {restoreControls}
                 <button disabled={!name} onClick={onPilot}>在 Pilot 中协助</button>
                 <button onClick={() => onRelations()}>工作流关系</button>
                 {graphReturn && <button onClick={onReturn}>返回来源工作流 ←</button>}
@@ -185,7 +186,7 @@ export function GraphEditorPage({ name, editor, graphs, runs, graphColors, busy,
             <div className="canvas">
               {doc
                 ? <WorkflowCanvas graph={doc} name={name} mode="edit" editable={editable} activity={graphs.find(item => item.graph === name)} targets={graphs.map(item => item.graph)} onOpenTarget={(target, sourceNode) => navigateGraph(target, undefined, true, sourceNode)}
-                               onPick={value => { setPick(value); if (value) onInspect(); }}
+                               onPick={value => { setPick(value); if (value) openInspector(); }}
                                onPositions={positions => patch({ ...doc, layout: { ...doc.layout, positions } })}
                                onConnect={(from, to) => {
                                  if (doc.edges.some(edge => edge.from === from && edge.to === to)) {
@@ -206,7 +207,7 @@ export function GraphEditorPage({ name, editor, graphs, runs, graphColors, busy,
           </main>
 
           <aside className="inspector">
-            <div className="section-heading"><h3><SlidersHorizontal size={15} />{pick ? '选中项属性' : '工作流设置'}</h3></div>
+            <div className="section-heading"><h3><SlidersHorizontal size={15} />{pick ? '选中项属性' : '工作流设置'}</h3>{inspectorControls}</div>
             {selectedNode && !selectedNode.op && !selectedNode.graph && <Suspense fallback={<p role="status">正在打开插件设置…</p>}><Plugins
               key={`${name}/${selectedNode.id}`} selected={selectedPlugins} disabled={!editable}
               activationMode={editor.pluginActivation?.mode} onChange={setPlugins} graph={{ name, saved: !dirty }} /></Suspense>}
@@ -376,7 +377,7 @@ export function GraphEditorPage({ name, editor, graphs, runs, graphColors, busy,
               {pick ? `已选中 ${pick.kind} ${pick.id}` : '未选中 · 显示图本身的字段'}
             </div>
           </aside>
-        </Workspace>
+        </>}</Workspace>
       {palette && doc && <Modal title="添加节点" close={() => setPalette(false)}>
         <div className="node-palette">
           <button onClick={() => { addParallel(); setPalette(false); }}><strong>并行分支</strong><small>在入口前添加展开、两个智能体分支和配对收束</small></button>

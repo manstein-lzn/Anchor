@@ -5,7 +5,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { RunInspector } from './RunInspector';
 import type { OurRunDetail, RunProjection } from './model';
 
-vi.mock('./Files', () => ({ Files: () => null }));
 vi.mock('./Plugins', () => ({ Plugins: () => null }));
 vi.mock('./Transcript', () => ({ Transcript: () => null }));
 
@@ -23,7 +22,7 @@ describe('Run Inspector status projection', () => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     element = document.createElement('div'); document.body.appendChild(element); root = createRoot(element);
   });
-  afterEach(async () => { await act(async () => root.unmount()); element.remove(); });
+  afterEach(async () => { await act(async () => root.unmount()); element.remove(); vi.unstubAllGlobals(); });
 
   it.each([
     [{ phase: 'executing' }, '等待接续'],
@@ -52,5 +51,25 @@ describe('Run Inspector status projection', () => {
     await render(detail);
     expect(element.querySelector('.node-summary .pill')?.textContent).toBe('已提交');
     expect(element.textContent).toContain('frozen result');
+  });
+
+  it.each([
+    ['expired', '交付文件已过期'], ['missing', '交付文件不可用'], ['corrupt', '交付文件不可用'],
+  ] as const)('shows %s delivery metadata without requesting file bytes', async (availability, message) => {
+    const detail = fixture();
+    const artifact = { id: 'fs2-delivered', node_id: 'worker', invocation: 3 };
+    detail.state.nodes.worker = { node_id: 'worker', pass_number: 3, submission: 'Report ready', files: ['report.md'],
+      submitted: true, exit_status: 'completed', route: null, artifact, artifact_availability: availability };
+    const fetchMock = vi.fn().mockResolvedValue(Response.json({ artifact, artifact_availability: availability,
+      files: [{ path: 'report.md', size: 21 }], truncated: false }));
+    vi.stubGlobal('fetch', fetchMock);
+    await act(async () => root.render(<RunInspector run="run" node="worker" detail={detail} targetPath="report.md" />));
+    expect(element.querySelector('.inspector-note')?.textContent).toContain('第 3 轮交付的固定版本文件');
+    expect(element.textContent).toContain(message);
+    expect(element.querySelector('.file-name')?.textContent).toContain('report.md');
+    expect((element.querySelector('.file-name') as HTMLButtonElement).disabled).toBe(true);
+    expect((element.querySelector('[aria-label="下载 report.md"]') as HTMLButtonElement).disabled).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0][0]).toBe('/api/artifacts/fs2-delivered/files');
   });
 });

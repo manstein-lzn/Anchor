@@ -22,17 +22,29 @@ describe('file downloads', () => {
   });
   afterEach(async () => { await act(async () => root.unmount()); container.remove(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
-  it('downloads a Run file and revokes its object URL on unmount', async () => {
-    fetchMock.mockResolvedValueOnce(Response.json({ node: 'work', files: [{ path: 'folder/a b.txt', size: 4 }], truncated: false }))
+  it('downloads the fixed delivery and revokes its object URL on unmount', async () => {
+    const artifact = { id: 'fs2-frozen', node_id: 'work', invocation: 2 };
+    fetchMock.mockResolvedValueOnce(Response.json({ node: 'work', artifact, artifact_availability: 'available', files: [{ path: 'folder/a b.txt', size: 4 }], truncated: false }))
       .mockResolvedValueOnce(new Response('data', { headers: { 'Content-Type': 'text/plain' } }));
-    await act(async () => root.render(<Files run="run" node="work" />));
+    await act(async () => root.render(<Files run="run" node="work" artifact={artifact} />));
+    expect(fetchMock.mock.calls[0][0]).toBe('/api/artifacts/fs2-frozen/files');
     await act(async () => (container.querySelector('[aria-label="下载 a b.txt"]') as HTMLButtonElement).click());
     const [path, init] = fetchMock.mock.calls.at(-1)!;
-    expect(path).toBe('/runs/run/files/work/folder/a%20b.txt?download=1');
+    expect(path).toBe('/api/artifacts/fs2-frozen/files/folder/a%20b.txt?download=1');
     expect(new Headers(init.headers).has('Authorization')).toBe(false);
     expect(createObjectURL).toHaveBeenCalledOnce();
     await act(async () => root.render(null));
     expect(revokeObjectURL).toHaveBeenCalledWith('blob:download');
+  });
+
+  it('keeps the inventory when delivered bytes expire during preview', async () => {
+    const artifact = { id: 'fs2-frozen', node_id: 'work', invocation: 2 };
+    fetchMock.mockResolvedValueOnce(Response.json({ artifact, artifact_availability: 'available', files: [{ path: 'report.md', size: 4 }], truncated: false }))
+      .mockResolvedValueOnce(Response.json({ error: 'expired bytes' }, { status: 410 }));
+    await act(async () => root.render(<Files run="run" node="work" artifact={artifact} targetPath="report.md" />));
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain('交付文件已过期');
+    expect(container.querySelector('.file-name')?.textContent).toContain('report.md');
+    expect(fetchMock.mock.calls.at(-1)?.[0]).toBe('/api/artifacts/fs2-frozen/files/report.md');
   });
 
   it('shows the same download failure and permits retry for a Pilot attachment', async () => {

@@ -30,7 +30,7 @@ describe('workbench page subscriptions', () => {
     await act(async () => vi.advanceTimersByTimeAsync(9000));
     expect(api).toHaveBeenCalledTimes(4);
     await render('runs');
-    expect(vi.mocked(api).mock.calls.slice(-3).map(([path]) => path)).toEqual(['/graphs', '/runs', expect.stringContaining('/timeline?')]);
+    expect(vi.mocked(api).mock.calls.slice(-2).map(([path]) => path)).toEqual(['/graphs', expect.stringContaining('/timeline?')]);
     await render('graph');
     expect(vi.mocked(api).mock.calls.slice(-2).map(([path]) => path)).toEqual(['/graphs', '/runs']);
   });
@@ -114,15 +114,17 @@ describe('workbench page subscriptions', () => {
     vi.mocked(api).mockImplementation(async path => path === '/graphs' ? { graphs: [{ graph: 'g' }] }
       : path === '/runs' ? { runs: [] } : new Promise(resolve => { release = resolve; }));
     await render('runs');
-    const signal = vi.mocked(api).mock.calls[2][3]!;
+    const signal = vi.mocked(api).mock.calls[1][3]!;
+    expect(state.graphs.map(item => item.graph)).toEqual(['g']);
+    expect(state.timeline).toBeNull();
     await act(async () => vi.advanceTimersByTimeAsync(9000));
-    expect(api).toHaveBeenCalledTimes(3);
+    expect(api).toHaveBeenCalledTimes(2);
     expect(signal.aborted).toBe(false);
     const timeline = { runs: [], scheduled: [], schedules: [] };
     await act(async () => release(timeline));
     expect(state.timeline).toEqual(timeline);
     await act(async () => vi.advanceTimersByTimeAsync(3000));
-    expect(api).toHaveBeenCalledTimes(6);
+    expect(api).toHaveBeenCalledTimes(4);
   });
 
   it('keeps the new page request in flight when an aborted response settles late', async () => {

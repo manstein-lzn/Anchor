@@ -4,21 +4,28 @@ import type { GraphSummary, OurRun, TimelineData } from './model';
 
 export type WorkbenchView = 'graph' | 'runs' | 'runDetail' | 'pilot' | 'plugins' | 'settings';
 type ApiFetcher = <T>(path: string) => Promise<T>;
+type WorkbenchData = {
+  graphs: GraphSummary[];
+  runs: OurRun[];
+  timeline?: TimelineData | null;
+  timelineProblem?: string;
+};
 
 /** Timeline is an optional projection, requested only by its page. */
-export async function loadWorkbenchData(apiCall: ApiFetcher, timelinePath?: string) {
-  const [graphList, runList] = await Promise.all([
-    apiCall<{ graphs: GraphSummary[] }>('/graphs'),
-    apiCall<{ runs: OurRun[] }>('/runs'),
-  ]);
-  if (!timelinePath) return { graphs: graphList.graphs, runs: runList.runs };
-  try {
-    const timeline = await apiCall<TimelineData>(timelinePath);
-    return { graphs: graphList.graphs, runs: runList.runs, timeline, timelineProblem: '' };
-  } catch (error) {
-    return { graphs: graphList.graphs, runs: runList.runs, timeline: null,
-      timelineProblem: error instanceof Error ? error.message : String(error) };
-  }
+export async function loadWorkbenchData(apiCall: ApiFetcher, timelinePath?: string,
+  publish?: (data: Partial<WorkbenchData>) => void): Promise<WorkbenchData> {
+  const graphRequest = apiCall<{ graphs: GraphSummary[] }>('/graphs').then(data => { publish?.(data); return data; });
+  // The timeline already contains this page's Runs. Read the full list only
+  // for consumers outside the board, or if the timeline is unavailable.
+  const runRequest = (timelinePath
+    ? apiCall<TimelineData>(timelinePath)
+      .then(timeline => ({ runs: timeline.runs, timeline, timelineProblem: '' }))
+      .catch(async error => ({ ...(await apiCall<{ runs: OurRun[] }>('/runs')), timeline: null,
+        timelineProblem: error instanceof Error ? error.message : String(error) }))
+    : apiCall<{ runs: OurRun[] }>('/runs'))
+    .then(data => { publish?.(data); return data; });
+  const [graphList, runList] = await Promise.all([graphRequest, runRequest]);
+  return { ...graphList, ...runList };
 }
 
 function timelinePath(page: number) {
@@ -48,16 +55,20 @@ export function useWorkbenchData(view: WorkbenchView) {
     const controller = new AbortController();
     request.current = controller;
     const read: ApiFetcher = path => api(path, 'GET', undefined, controller.signal);
+    const publish = (data: Partial<WorkbenchData>) => {
+      if (controller.signal.aborted || current !== version.current) return;
+      const { graphs, runs } = data;
+      if (graphs) setGraphs(previous => JSON.stringify(previous) === JSON.stringify(graphs) ? previous : graphs);
+      if (runs) setRuns(previous => JSON.stringify(previous) === JSON.stringify(runs) ? previous : runs);
+      if ('timeline' in data) { setTimeline(data.timeline ?? null); setTimelineProblem(data.timelineProblem ?? ''); }
+    };
     try {
       // A first visit to Pilot still verifies the Host's API-key requirement once.
       // After that the Pilot owns its session requests, without background workbench polling.
-      const data = subscribed ? await loadWorkbenchData(read, page === null ? undefined : timelinePath(page))
-        : { ...(await read<{ graphs: GraphSummary[] }>('/graphs')) };
+      if (subscribed) await loadWorkbenchData(read, page === null ? undefined : timelinePath(page), publish);
+      else publish(await read<{ graphs: GraphSummary[] }>('/graphs'));
       if (controller.signal.aborted || current !== version.current) return;
       authenticated.current = true;
-      setGraphs(previous => JSON.stringify(previous) === JSON.stringify(data.graphs) ? previous : data.graphs);
-      if ('runs' in data) setRuns(previous => JSON.stringify(previous) === JSON.stringify(data.runs) ? previous : data.runs);
-      if ('timeline' in data) { setTimeline(data.timeline ?? null); setTimelineProblem(data.timelineProblem ?? ''); }
       setProblem('');
     } catch (error) {
       if (controller.signal.aborted || current !== version.current) return;

@@ -29,6 +29,24 @@ describe('loadWorkbenchData', () => {
       timeline: null,
       timelineProblem: 'GET /timeline → 404',
     });
-    expect(calls).toEqual(['/graphs', '/runs', '/timeline?days=30']);
+    expect(calls).toEqual(['/graphs', '/timeline?days=30', '/runs']);
+  });
+
+  it('publishes the timeline without waiting for Graphs or requesting Runs twice', async () => {
+    const calls: string[] = [];
+    let finishGraphs!: (value: { graphs: [] }) => void;
+    const timeline = { runs: [], scheduled: [], schedules: [] };
+    const updates: unknown[] = [];
+    const api = <T>(path: string): Promise<T> => {
+      calls.push(path);
+      return (path === '/graphs' ? new Promise<{ graphs: [] }>(resolve => { finishGraphs = resolve; })
+        : Promise.resolve(timeline)) as Promise<T>;
+    };
+    const request = loadWorkbenchData(api, '/timeline?days=30', data => updates.push(data));
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(calls).toEqual(['/graphs', '/timeline?days=30']);
+    expect(updates).toEqual([{ runs: [], timeline, timelineProblem: '' }]);
+    finishGraphs({ graphs: [] });
+    await expect(request).resolves.toEqual({ graphs: [], runs: [], timeline, timelineProblem: '' });
   });
 });
