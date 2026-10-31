@@ -4,11 +4,6 @@
     "start_ticks": 281573542,
     "executable_sha256": "984578f85d9bc460a8868f53236f8e99c04bc61d69f616993adcb67cb42d2f15"
   },
-  "mlcad_host": {
-    "pid": 116772,
-    "start_ticks": 281192943,
-    "executable_sha256": "3c46154cbab89e3401c9f4228763b50b81a5b23a8ca5220173da17afe133bf94"
-  },
   "web_index": {
     "path": "/home/mansteinl/Anchor/apps/web/dist/index.html",
     "file_sha256": "d9fa3264dc682da846ecaaffe45d2c13e18bcb20edd6b28a5a271616c34ebd14",

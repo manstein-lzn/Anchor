@@ -34,4 +34,4 @@ python3 real_provider_acceptance.py \
 
 仅剩解包 store、缺少 wheel/源码时，旧只读视图可继续使用，私有空 venv/pip 可以离线重建，私有包不能直接从 store 重新安装。恢复包需可获取的安装来源，工具不会自动回退旧视图。本次没有第三方构建后端/native 包兼容性、reflink/空间收益、大依赖压力或线上部署验收；正式安装仍没有强制成功业务测试/测试依赖锁门禁。
 
-2026-10-13 后续按用户明确授权部署到当前开发 Host，并清空 Pilot、企业微信和所属 Goose 对话历史。构建源码与上述 16 项摘要一致；release SHA256 `50331ca988d1991b4f97052588401f68b4b55b6c78d8fde98fef2fd12b56f104`，实际运行身份与部署文件相同，health/ready 正常，13 张 Session 表全为空。4 个 Graph、5 个正式 Plugin、共享包、配置与独立 MLCAD 实例保留，非对话 RSI Run 保留。本次未重复真实 Provider 业务；部署事实与 A225 验收身份分别记录，见 [deployment.json](deployment.json) 和台账 A226。
+2026-10-13 后续按用户明确授权部署到当前开发 Host，并清空 Pilot、企业微信和所属 Goose 对话历史。构建源码与上述 16 项摘要一致；release SHA256 `50331ca988d1991b4f97052588401f68b4b55b6c78d8fde98fef2fd12b56f104`，实际运行身份与部署文件相同，health/ready 正常，13 张 Session 表全为空。4 个 Graph、5 个正式 Plugin、共享包与配置保留，非对话 RSI Run 保留。本次未重复真实 Provider 业务；部署事实与 A225 验收身份分别记录，见 [deployment.json](deployment.json) 和台账 A226。

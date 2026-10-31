@@ -49,6 +49,6 @@ Pilot 与最终 Node 绑定不同 Host 构建。最后生产变化是回执指�
 
 这是预置隔离 Library 的能力披露与执行验收，不是 Plugin 安装、外部业务、1,000 个 MCP server 并发连接或部署验收。MCP 懒连接、Goose Code Mode 仍未实施。能力摘要使 Agent 能主动选择，但不能保证任意模型每轮都选择正确或从不多读。
 
-Web 子 Agent 最初误把 build 写入正在使用的 `apps/web/dist`；主 Agent 已从前次部署产物恢复全部原文件并核对 manifest，未重启 Host。后续所有 build 使用隔离 outDir。修正记录 `.local/plugin-capability-context-20261013/web-build-correction.json`；8077 当前静态入口仍为原摘要 `d9fa3264…`。5173 是 Vite dev server，HTML 含开发注入，不能拿其响应与 dist HTML 直接比字节。收尾身份核对见 [deployment-identity.json](deployment-identity.json)：原 Host PID 184037/摘要及独立 MLCAD PID 116772/start_ticks/摘要保持一致。
+Web 子 Agent 最初误把 build 写入正在使用的 `apps/web/dist`；主 Agent 已从前次部署产物恢复全部原文件并核对 manifest，未重启 Host。后续所有 build 使用隔离 outDir。修正记录 `.local/plugin-capability-context-20261013/web-build-correction.json`；8077 当前静态入口仍为原摘要 `d9fa3264…`。5173 是 Vite dev server，HTML 含开发注入，不能拿其响应与 dist HTML 直接比字节。收尾身份核对见 [deployment-identity.json](deployment-identity.json)：原 Host PID 184037/摘要保持一致。
 
-代码与验收证据随本次提交固化，未部署；没有改模型配置、共享依赖或独立 MLCAD 运行。
+代码与验收证据随本次提交固化，未部署；没有改模型配置或共享依赖。

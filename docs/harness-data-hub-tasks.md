@@ -8,7 +8,7 @@
 - **顺序**：先做 P0，交回；再做 P1，交回。两个阶段互不依赖，但分开提交、分开交回、分开审查。
 - **纪律**：遵守 [开发约定](../AGENTS.md)。
   - 只暂存自己改的路径，不用 `git reset`、`checkout`、`clean`、`stash` 丢弃改动；
-  - 未跟踪的 `mlcad25*` 和 `wecom-persistent-run-development-guide.tmp.md` 不是你的，不要动；
+  - 未跟踪的 `wecom-persistent-run-development-guide.tmp.md` 是其他工作流的草稿，不要动；
   - 不推送；
   - 提交前跑 `scripts/check-sensitive-wording.sh`。
 - **交回内容**：

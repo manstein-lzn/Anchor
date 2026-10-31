@@ -20,7 +20,7 @@
 | 实际任务 | 发现 Plugin、读取概览/说明、正确 Skill 和随机 token 资源、取得完整 schema、真实调用；Node 保存产物后原生完成 |
 | 结果 | Pilot/Node completed；独立 MCP 日志、随机 token、total=42、JSON 产物、实际目标 trace 与回执一致；无关 Skill 正文未加载 |
 | 清理 | Session DELETE 200，Host exit 0，listener closed，无 panic 或存活所属子进程 |
-| 既有现场 | `.env` 和共享 Python 解释器字节不变；当前部署、8077/5173 和独立 8078 未更新 |
+| 既有现场 | `.env` 和共享 Python 解释器字节不变；当前部署、8077/5173 未更新 |
 
 ## 实际检查命令
 

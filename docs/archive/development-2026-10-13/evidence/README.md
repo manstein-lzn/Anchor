@@ -4,6 +4,5 @@
 
 - `development_environment_20261013/`：私有 Python 开发环境验收。
 - `plugin_disclosure_20261013/`：Plugin 渐进式披露研究与验收。
-- `mlcad25-tuning/`：Graph 节点 Plugin MCP 故障及修复复测记录。
 
 根目录中的本地 `research_*` 工作副本不纳入版本管理；需要提交的历史证据统一放在本归档入口下。
