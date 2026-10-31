@@ -438,7 +438,20 @@ impl McpHost {
     ) -> Result<Vec<ToolResultContent>, McpHostError> {
         let response = self.call_raw(tool_name, arguments).await?;
         if response.is_error.unwrap_or(false) {
-            return Err(McpHostError::Call("remote tool reported failure".into()));
+            let details = contents::result_contents(&response)?
+                .into_iter()
+                .filter_map(|part| match part {
+                    ToolResultContent::Text { text } => Some(text),
+                    ToolResultContent::Json { value } => Some(value.to_string()),
+                    ToolResultContent::Image { .. } => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            return Err(McpHostError::Call(if details.is_empty() {
+                "remote tool reported failure".into()
+            } else {
+                details
+            }));
         }
         contents::result_contents(&response)
     }
@@ -607,7 +620,16 @@ mod tests {
         let response = CallToolResult::error(vec![ContentBlock::text("remote failure")]);
         assert!(matches!(
             host.call_contents("echo", serde_json::json!({"response": response})).await,
-            Err(McpHostError::Call(message)) if message == "remote tool reported failure"
+            Err(McpHostError::Call(message)) if message == "remote failure"
+        ));
+        let mut response = CallToolResult::structured(serde_json::json!({
+            "exit_code":128,"stderr":"Host key verification failed."
+        }));
+        response.is_error = Some(true);
+        assert!(matches!(
+            host.call_contents("echo", serde_json::json!({"response": response})).await,
+            Err(McpHostError::Call(message)) if message.contains("Host key verification failed.")
+                && message.contains("128")
         ));
         assert!(matches!(
             host.call_contents("not_bound", Value::Null).await,

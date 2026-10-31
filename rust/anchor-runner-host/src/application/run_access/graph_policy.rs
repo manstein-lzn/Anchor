@@ -4,7 +4,7 @@ use crate::application::{
     new_control, storage,
 };
 use crate::run_metadata::{self as metadata, AssistantSource, ConversationSource, RunMetadata};
-use crate::{HostArtifacts, assistant::AssistantPlan, execution::PreparedExecution};
+use crate::{assistant::AssistantPlan, execution::PreparedExecution};
 use anchor_graph_host::LoadedGraphBundle;
 use anchor_platform_session::SessionStore;
 use anchor_runtime::graph::{GraphRunRecord, RunLease};
@@ -137,10 +137,6 @@ impl RunApplication {
         });
         let lease = self.run_leases().acquire_lease(&run)?;
         metadata::save(&self.data_root, &metadata)?;
-        let artifacts = HostArtifacts::new(
-            self.data_root.join("artifacts"),
-            crate::env_path("ANCHOR_RUNNER_WORKSPACE_ROOT").map_err(ApplicationError::Invalid)?,
-        );
         let control = new_control();
         let execution = PreparedExecution::prepare_with_catalog(
             &record,
@@ -152,9 +148,6 @@ impl RunApplication {
         execution
             .bind_local_inputs(&record, &graph)
             .map_err(ApplicationError::Invalid)?;
-        for node in &record.snapshot.nodes {
-            artifacts.bind_node_workspace(&run, &record.graph_digest, &node.id)?;
-        }
         self.kernel_runs(true)?
             .expect("Run store initialized")
             .create(&record, u64::MAX)?;

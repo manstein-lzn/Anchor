@@ -26,6 +26,8 @@ mod webhooks;
 #[allow(clippy::result_large_err)]
 mod wecom;
 mod wecom_progress;
+mod workspaces;
+#[cfg(test)]
 use super::*;
 use crate::application::{ApplicationError, RunApplication};
 use crate::deployment::configured_pilot_graph;
@@ -1117,6 +1119,18 @@ fn router_with_readiness_and_web_root(
         .route("/runs/{run}/{operation}", post(control))
         .route("/runs/{run}/files/{node}", get(list_files))
         .route("/runs/{run}/files/{node}/{*path}", get(read_file))
+        .route("/api/artifacts/{id}/files", get(list_artifact_files))
+        .route("/api/artifacts/{id}/files/{*path}", get(read_artifact_file))
+        .route("/api/artifacts/{id}/retention", post(retain_artifact))
+        .route("/workspaces/bind", post(workspaces::bind_workspace))
+        .route(
+            "/runs/{id}/workspaces/{*node}",
+            get(workspaces::workspace_binding),
+        )
+        .route(
+            "/workspaces/{resource}",
+            axum::routing::delete(workspaces::release_workspace),
+        )
         .route("/timeline", get(timeline))
         .layer(RequestBodyLimitLayer::new(2 * 1024 * 1024))
         .merge(plugin_management::router())

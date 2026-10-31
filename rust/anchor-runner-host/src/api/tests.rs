@@ -621,6 +621,7 @@ async fn trigger_persists_run_and_projects_list_detail_and_control() {
         serde_json::from_slice(&std::fs::read(state.bundle_root.join("graph.json")).unwrap())
             .unwrap();
     definition["ops"]["work"]["run"] = json!("sh -c 'printf rust-artifact > report.txt'");
+    definition["ops"]["work"]["writes"] = json!(["report.txt"]);
     std::fs::write(state.bundle_root.join("graph.json"), definition.to_string()).unwrap();
     let app = router(state.clone());
     let (status, started) = call(
@@ -651,6 +652,16 @@ async fn trigger_persists_run_and_projects_list_detail_and_control() {
         .unwrap()
         .unwrap();
     let key = &record.results["work"][0].key;
+    let artifact = &record.results["work"][0].commit;
+    let artifact_base = format!("/api/artifacts/{}/files", artifact.id);
+    assert_eq!(
+        detail["state"]["nodes"]["work"]["artifact"],
+        json!(artifact)
+    );
+    assert_eq!(
+        detail["state"]["nodes"]["work"]["artifact_availability"],
+        "available"
+    );
     {
         let root = state.data_root.join("goose-acp");
         std::fs::create_dir_all(&root).unwrap();
@@ -697,6 +708,11 @@ async fn trigger_persists_run_and_projects_list_detail_and_control() {
     let (status, files) = call(app.clone(), "GET", &format!("/runs/{run}/files/work"), None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(files["files"][0]["path"], "report.txt");
+    let (status, fixed_files) = call(app.clone(), "GET", &artifact_base, None).await;
+    assert_eq!(status, StatusCode::OK, "{fixed_files}");
+    assert_eq!(fixed_files["artifact"], json!(artifact));
+    assert_eq!(fixed_files["artifact_availability"], "available");
+    assert_eq!(fixed_files["files"], files["files"]);
     let (status, body) = call(
         app.clone(),
         "GET",
@@ -706,47 +722,106 @@ async fn trigger_persists_run_and_projects_list_detail_and_control() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["text"], "rust-artifact");
-    let download = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri(format!("/runs/{run}/files/work/report.txt?download=1"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(download.status(), StatusCode::OK);
-    assert_eq!(
-        download.headers()[header::CONTENT_DISPOSITION],
-        "attachment"
-    );
-    assert_eq!(
-        &to_bytes(download.into_body(), 1024).await.unwrap()[..],
-        b"rust-artifact"
-    );
+    for base in [format!("/runs/{run}/files/work"), artifact_base.clone()] {
+        let download = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("{base}/report.txt?download=1"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(download.status(), StatusCode::OK);
+        assert_eq!(
+            download.headers()[header::CONTENT_DISPOSITION],
+            "attachment"
+        );
+        assert_eq!(
+            &to_bytes(download.into_body(), 1024).await.unwrap()[..],
+            b"rust-artifact"
+        );
+    }
     let (status, timeline) = call(app.clone(), "GET", "/timeline?days=30", None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(timeline["runs"][0]["run"], run);
     assert_eq!(timeline["capabilities"]["scheduling"], true);
-    let traversal = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri(format!("/runs/{run}/files/work/%2e%2e/manifest.json"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(traversal.status(), StatusCode::BAD_REQUEST);
+    for base in [format!("/runs/{run}/files/work"), artifact_base.clone()] {
+        let traversal = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("{base}/%2e%2e/manifest.json"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(traversal.status(), StatusCode::BAD_REQUEST);
+    }
     wait_idle(&state).await;
     let (status, _) = call(app.clone(), "POST", &format!("/runs/{run}/pause"), None).await;
     assert_eq!(status, StatusCode::CONFLICT);
+    let retention = format!("/api/artifacts/{}/retention", artifact.id);
+    let (status, retained) = call(
+        app.clone(),
+        "POST",
+        &retention,
+        Some(r#"{"retained":true}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{retained}");
+    assert_eq!(retained["retained"], true);
+    assert_eq!(retained["artifact"], json!(artifact));
     let (status, _) = call(app.clone(), "DELETE", &format!("/runs/{run}"), None).await;
     assert_eq!(status, StatusCode::NO_CONTENT);
-    let (status, _) = call(app, "GET", &format!("/runs/{run}"), None).await;
+    let (status, _) = call(app.clone(), "GET", &format!("/runs/{run}"), None).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, delivered) = call(
+        app.clone(),
+        "GET",
+        &format!("{artifact_base}/report.txt"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{delivered}");
+    assert_eq!(delivered["text"], "rust-artifact");
+    let (status, released) = call(
+        app.clone(),
+        "POST",
+        &retention,
+        Some(r#"{"retained":false}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{released}");
+    state
+        .application
+        .reclaim(
+            &crate::retention::Policy {
+                max_age: None,
+                max_bytes: Some(0),
+            },
+            &state.workspace_root,
+            chrono::Utc::now().timestamp(),
+        )
+        .await
+        .unwrap();
+    let (status, expired) = call(app.clone(), "GET", &artifact_base, None).await;
+    assert_eq!(status, StatusCode::OK, "{expired}");
+    assert_eq!(expired["artifact_availability"], "expired");
+    assert_eq!(expired["files"], files["files"]);
+    for suffix in ["report.txt", "report.txt?download=1"] {
+        let (status, body) = call(
+            app.clone(),
+            "GET",
+            &format!("{artifact_base}/{suffix}"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::GONE, "{body}");
+        assert_eq!(body["error"], "交付文件已过期");
+    }
 }
 
 #[tokio::test]
@@ -1316,7 +1391,7 @@ async fn wait_idle(state: &ApiState) {
 
 fn two_node_definition(second_command: &str) -> Value {
     json!({"objective":"frozen","entry":"first","agents":{},
-        "ops":{"first":{"run":"sh -c 'sleep 0.1; printf once >> count.txt'"},"second":{"run":second_command}},
+        "ops":{"first":{"run":"sh -c 'sleep 0.1; printf once >> count.txt'","writes":["count.txt"]},"second":{"run":second_command}},
         "nodes":[{"id":"first","op":"first","plugins":[]},{"id":"second","op":"second","plugins":[]}],
         "edges":[{"from":"first","to":"second"}]})
 }
@@ -1369,7 +1444,8 @@ async fn pause_resume_uses_same_frozen_run_after_graph_edit_and_service_object_r
     let (root, mut state) = fixture();
     let _env_guard = PROCESS_ENV.lock().await;
     set_host_env(root.path());
-    let original = two_node_definition("sh -c 'cat /in/first/count.txt > frozen.txt'");
+    let mut original = two_node_definition("sh -c 'cat /in/first/count.txt > frozen.txt'");
+    original["ops"]["second"]["writes"] = json!(["frozen.txt"]);
     write_graph_bundle(&state.bundle_root, &original).unwrap();
     let app = router(state.clone());
     let run = start_and_pause(&state, &app).await;
@@ -1445,7 +1521,7 @@ async fn active_run_can_update_graph_and_finishes_from_its_admitted_snapshot() {
     let _env_guard = PROCESS_ENV.lock().await;
     set_host_env(root.path());
     let original = json!({"objective":"active snapshot","entry":"work","agents":{},
-        "ops":{"work":{"run":"sh -c 'sleep 0.4; printf original > snapshot.txt'"}},
+        "ops":{"work":{"run":"sh -c 'sleep 0.4; printf original > snapshot.txt'","writes":["snapshot.txt"]}},
         "nodes":[{"id":"work","op":"work","plugins":[]}],"edges":[]});
     write_graph_bundle(&state.bundle_root, &original).unwrap();
     let app = router(state.clone());
@@ -2256,8 +2332,8 @@ async fn waiting_parent_rejects_child_grant_drift_then_restores_same_child_witho
     write_graph_bundle(&child_bundle, &json!({
         "objective":"child grant recovery", "entry":"slow", "agents":{},
         "ops":{
-            "slow":{"run":"printf once >> count.txt; sleep 2"},
-            "finish":{"run":"cat /local-inputs/history/source.txt > result.txt; cat /in/slow/count.txt"}
+            "slow":{"run":"printf once >> count.txt; sleep 2","writes":["count.txt"]},
+            "finish":{"run":"cat /local-inputs/history/source.txt > result.txt; cat /in/slow/count.txt","writes":["result.txt"]}
         },
         "nodes":[{"id":"slow","op":"slow","plugins":[]},{"id":"finish","op":"finish","plugins":[]}],
         "edges":[{"from":"slow","to":"finish"}]

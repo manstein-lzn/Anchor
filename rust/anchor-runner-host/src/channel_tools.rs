@@ -6,7 +6,7 @@
 //! adapter to deliver.
 
 use crate::channel_replies::{MAX_IMAGE_BYTES, MAX_IMAGE_COUNT, MAX_IMAGE_TOTAL_BASE64};
-use crate::tool_names::{IMAGE_TOOL, SEND_TOOL};
+use crate::tool_names::{IMAGE_TOOL, SEND_FILE_TOOL, SEND_TOOL};
 
 use anchor_runtime::{
     Cancellation, ReadOnlyInput, ToolDefinition, ToolError, ToolName, ToolPort, ToolResultContent,
@@ -34,6 +34,8 @@ use tokio::{
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SendArguments {
+    #[serde(default)]
+    bot_graph: Option<String>,
     userid: String,
     content: String,
 }
@@ -44,43 +46,64 @@ struct ImageArguments {
     path: String,
 }
 
-/// Add channel tools only to a bot Graph's assistant node (R1): the Run is the
-/// Graph's persistent assistant, this is its Agent node, and the node mounts
-/// the bot's channel Plugin. Any other node that mounts the same Plugin keeps
-/// only the Plugin's own application tools.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileArguments {
+    #[serde(default)]
+    bot_graph: Option<String>,
+    userid: String,
+    path: String,
+    content: String,
+    #[serde(default)]
+    context_files: Vec<String>,
+}
+
+/// A mounted channel Plugin grants outbound access to this owner's enabled
+/// bots using that Plugin. Ordinary tasks must name the bot explicitly;
+/// assistants remain bound to their own bot and alone can attach reply images.
 pub(crate) fn wrap(
     inner: std::sync::Arc<dyn ToolPort>,
     bindings: &[anchor_runtime::graph::PluginBinding],
     key: anchor_runtime::graph::InvocationKey,
-    state_root: PathBuf,
+    application: crate::application::RunApplication,
     workspace: PathBuf,
     readonly_inputs: Vec<ReadOnlyInput>,
     cancellation: Cancellation,
 ) -> std::sync::Arc<dyn ToolPort> {
-    let Ok(Some(metadata)) = crate::run_metadata::load(&state_root, &key.run_id) else {
+    let Ok(Some(metadata)) = application.metadata(&key.run_id) else {
+        return inner;
+    };
+    let Some(owner) = metadata.oauth_owner else {
         return inner;
     };
     if metadata
         .assistant
         .as_ref()
-        .is_none_or(|assistant| assistant.work_node != key.node_id)
+        .is_some_and(|source| source.work_node != key.node_id)
     {
         return inner;
     }
-    let Ok(Some(binding)) =
-        crate::channel_supervisor::management::saved_binding(&state_root, &metadata.graph)
-    else {
-        return inner;
-    };
-    if !bindings.iter().any(|mounted| mounted.id == binding.plugin) {
+    let catalog = crate::plugin_library::Catalog::new(application.library_root());
+    let channels = bindings
+        .iter()
+        .filter(|binding| {
+            catalog
+                .channels(&binding.id)
+                .is_ok_and(|channels| channels.iter().any(|channel| channel.platform == "wecom"))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if channels.is_empty() {
         return inner;
     }
     std::sync::Arc::new(ChannelTools {
         inner,
         key,
-        descriptor: crate::channel_supervisor::descriptor_path(&state_root, &metadata.graph),
-        send_users: binding.send_users,
-        state_root,
+        assistant_graph: metadata.assistant.map(|_| metadata.graph),
+        channels,
+        owner,
+        state_root: application.data_root.clone(),
+        application,
         workspace,
         readonly_inputs,
         cancellation,
@@ -91,10 +114,10 @@ struct ChannelTools {
     inner: std::sync::Arc<dyn ToolPort>,
     key: anchor_runtime::graph::InvocationKey,
     state_root: PathBuf,
-    /// This bot Graph's own gateway.
-    descriptor: PathBuf,
-    /// The bot binding's recipients for proactive messages.
-    send_users: Vec<String>,
+    application: crate::application::RunApplication,
+    owner: String,
+    channels: Vec<anchor_runtime::graph::PluginBinding>,
+    assistant_graph: Option<String>,
     workspace: PathBuf,
     readonly_inputs: Vec<ReadOnlyInput>,
     cancellation: Cancellation,
@@ -109,9 +132,7 @@ fn uncertain() -> ToolError {
 fn read_regular(path: &Path, limit: usize) -> Result<Vec<u8>, ToolError> {
     use rustix::fs::{Mode, OFlags, open, openat};
     let failure = || {
-        ToolError::Failed(
-            "image must be a regular file without symlinks and within its byte limit".into(),
-        )
+        ToolError::Failed("file must be regular, without symlinks and within its byte limit".into())
     };
     if !path.is_absolute() {
         return Err(failure());
@@ -174,8 +195,8 @@ impl ChannelTools {
         }
     }
 
-    fn control_endpoint(&self) -> Result<(PathBuf, String), ToolError> {
-        let raw = fs::read(&self.descriptor)
+    fn control_endpoint(descriptor: &Path) -> Result<(PathBuf, String), ToolError> {
+        let raw = fs::read(descriptor)
             .map_err(|_| ToolError::Failed("WeCom gateway descriptor is unavailable".into()))?;
         let value: Value = serde_json::from_slice(&raw)
             .map_err(|_| ToolError::Failed("invalid gateway descriptor".into()))?;
@@ -193,12 +214,62 @@ impl ChannelTools {
         }
     }
 
-    fn allowed_recipient(&self, userid: &str) -> bool {
-        userid != "@all"
-            && self
+    fn send_endpoint(&self, args: &SendArguments) -> Result<(PathBuf, String), ToolError> {
+        let graph = match (&self.assistant_graph, args.bot_graph.as_deref()) {
+            (Some(own), Some(requested)) if own != requested => {
+                return Err(ToolError::Failed(
+                    "an assistant can only send through its own bot".into(),
+                ));
+            }
+            (Some(own), _) => own.as_str(),
+            (None, Some(graph)) => graph,
+            (None, None) => {
+                return Err(ToolError::Failed(
+                    "bot_graph is required for task notifications".into(),
+                ));
+            }
+        };
+        if !anchor_runtime::identifier::is_name(graph) {
+            return Err(ToolError::Failed("invalid bot_graph".into()));
+        }
+        let bot = self
+            .application
+            .channel_snapshot(graph)
+            .map_err(|_| ToolError::Failed("bot configuration is unavailable".into()))?
+            .filter(|bot| {
+                bot.enabled && crate::credential_store::binding_owner(&bot.owner) == self.owner
+            })
+            .ok_or_else(|| {
+                ToolError::Failed("bot is unavailable or not authorized for this Run".into())
+            })?;
+        let binding = self
+            .channels
+            .iter()
+            .find(|binding| binding.id == bot.binding.plugin)
+            .ok_or_else(|| {
+                ToolError::Failed("the bot's channel Plugin is not mounted by this node".into())
+            })?;
+        crate::plugin_library::Catalog::new(self.application.library_root())
+            .checked_definition(
+                &binding.id,
+                crate::plugin_library::ExpectedDefinition::Authorization(binding),
+            )
+            .map_err(|_| {
+                ToolError::Failed("channel Plugin authorization changed; start a new Run".into())
+            })?;
+        if args.userid == "@all"
+            || !bot
+                .binding
                 .send_users
                 .iter()
-                .any(|value| value == "*" || value == userid)
+                .any(|user| user == "*" || user == &args.userid)
+        {
+            return Err(ToolError::Failed("recipient is not allowed".into()));
+        }
+        let descriptor = bot
+            .descriptor
+            .ok_or_else(|| ToolError::Failed("WeCom gateway descriptor is unavailable".into()))?;
+        Self::control_endpoint(&descriptor)
     }
 
     fn reply_path(&self) -> Result<PathBuf, ToolError> {
@@ -231,10 +302,7 @@ impl ChannelTools {
         mounts.extend(
             self.readonly_inputs
                 .iter()
-                .filter(|input| {
-                    input.destination.starts_with("/in")
-                        || input.destination == Path::new("/previous")
-                })
+                .filter(|input| input.destination.starts_with("/in"))
                 .map(|input| (input.source.as_path(), input.destination.as_path())),
         );
         mounts.sort_by_key(|(_, dest)| std::cmp::Reverse(dest.components().count()));
@@ -349,14 +417,11 @@ impl ChannelTools {
                 "this Run has been stopped; channel operation cancelled".into(),
             ));
         }
-        if args.userid.trim().is_empty()
-            || args.content.trim().is_empty()
-            || !self.allowed_recipient(&args.userid)
-        {
+        if args.userid.trim().is_empty() || args.content.trim().is_empty() {
             return Err(ToolError::Failed("recipient is not allowed".into()));
         }
+        let (socket, token) = self.send_endpoint(&args)?;
         let request_id = self.send_request_id()?;
-        let (socket, token) = self.control_endpoint()?;
         let payload = json!({"operation":"send","request_id":request_id,"userid":args.userid,"content":args.content,"token":token});
         if args.content.len() > 20480 || args.userid.chars().count() > 200 {
             return Err(ToolError::Failed(
@@ -366,17 +431,204 @@ impl ChannelTools {
         self.deliver(socket, payload).await
     }
 
+    /// The source must already be an immutable selected delivery. Retention
+    /// preserves those exact bytes for the recipient's next assistant Turn.
+    fn notification_file(
+        &self,
+        value: &str,
+    ) -> Result<(anchor_platform_session::ChannelNotificationFile, Vec<u8>), ToolError> {
+        use anchor_runtime::artifact::{ArtifactDescriptor, is_delivery_path};
+        let value = Path::new(value);
+        for input in self
+            .readonly_inputs
+            .iter()
+            .filter(|input| input.destination.starts_with("/in"))
+        {
+            let Ok(relative) = value.strip_prefix(&input.destination) else {
+                continue;
+            };
+            let Some(relative) = relative.to_str().filter(|path| is_delivery_path(path)) else {
+                continue;
+            };
+            let descriptor = ArtifactDescriptor::read(&input.source).map_err(ToolError::Failed)?;
+            // /in also includes untrusted uploaded/local files. A descriptor
+            // inside one of those inputs cannot grant another Artifact.
+            let artifacts = crate::HostArtifacts::new(
+                self.state_root.join("artifacts"),
+                self.workspace.clone(),
+            );
+            let reference = artifacts
+                .reference(&descriptor.artifact.id)
+                .map_err(|error| ToolError::Failed(error.to_string()))?
+                .filter(|reference| reference == &descriptor.artifact)
+                .ok_or_else(|| {
+                    ToolError::Failed("notification source is not a Host delivery".into())
+                })?;
+            let view = artifacts
+                .files_path(&reference)
+                .map_err(|error| ToolError::Failed(error.to_string()))?;
+            if input
+                .source
+                .canonicalize()
+                .map_err(|error| ToolError::Failed(error.to_string()))?
+                != view
+                    .canonicalize()
+                    .map_err(|error| ToolError::Failed(error.to_string()))?
+            {
+                return Err(ToolError::Failed(
+                    "notification source is not the authorized Host delivery view".into(),
+                ));
+            }
+            let entry = descriptor
+                .files
+                .get(relative)
+                .ok_or_else(|| ToolError::Failed("file is not selected by this delivery".into()))?;
+            if entry.bytes > crate::attachments::MAX_FILE_BYTES as u64 {
+                return Err(ToolError::Failed("file exceeds the 20 MiB limit".into()));
+            }
+            let bytes = descriptor
+                .read_file(&input.source, relative)
+                .map_err(ToolError::Failed)?;
+            let name = relative.rsplit('/').next().unwrap_or_default();
+            if !crate::attachments::safe_name(name) {
+                return Err(ToolError::Failed("invalid notification filename".into()));
+            }
+            return Ok((
+                anchor_platform_session::ChannelNotificationFile {
+                    artifact_id: descriptor.artifact.id,
+                    path: relative.into(),
+                    name: name.into(),
+                },
+                bytes,
+            ));
+        }
+        Err(ToolError::Failed("send_file requires a committed read-only /in delivery; select the file in the producing node's final_result first".into()))
+    }
+
+    async fn send_file(&self, args: FileArguments) -> Result<Value, ToolError> {
+        use anchor_platform_session::{
+            ChannelConversationKind, ChannelIdentity, ChannelNotification,
+        };
+        self.check_active()?;
+        let text = SendArguments {
+            bot_graph: args.bot_graph.clone(),
+            userid: args.userid.clone(),
+            content: args.content.clone(),
+        };
+        let (socket, token) = self.send_endpoint(&text)?;
+        if args.content.trim().is_empty()
+            || args.content.len() > 20480
+            || args.context_files.len() > 3
+        {
+            return Err(ToolError::Failed(
+                "a bounded introduction and at most three context files are required".into(),
+            ));
+        }
+        let request_id = self.send_request_id()?;
+        let graph = self
+            .assistant_graph
+            .as_deref()
+            .or(args.bot_graph.as_deref())
+            .expect("send_endpoint validated bot_graph");
+        let bot = self
+            .application
+            .channel_snapshot(graph)
+            .map_err(|_| ToolError::Failed("bot configuration is unavailable".into()))?
+            .ok_or_else(|| ToolError::Failed("bot configuration is unavailable".into()))?;
+        let sessions = crate::assistant::sessions(&self.state_root).map_err(ToolError::Failed)?;
+        let session = sessions
+            .channel_session_for_identity(
+                &bot.owner,
+                &ChannelIdentity {
+                    source: "wecom".into(),
+                    account: bot.account.clone(),
+                    conversation_kind: ChannelConversationKind::Single,
+                    conversation_id: args.userid.clone(),
+                    sender_id: args.userid.clone(),
+                },
+            )
+            .map_err(|error| ToolError::Failed(error.to_string()))?
+            .filter(|session| session.graph == graph)
+            .ok_or_else(|| {
+                ToolError::Failed(
+                    "recipient must have an existing private conversation with this bot".into(),
+                )
+            })?;
+        let (file, bytes) = self.notification_file(&args.path)?;
+        if bytes.len() < 5 {
+            return Err(ToolError::Failed(
+                "platform files must contain at least five bytes".into(),
+            ));
+        }
+        let filename = file.name.clone();
+        let mut files = vec![file];
+        for path in &args.context_files {
+            let (file, _) = self.notification_file(path)?;
+            if files.iter().any(|existing| existing.name == file.name) {
+                return Err(ToolError::Failed(
+                    "notification filenames must be distinct".into(),
+                ));
+            }
+            files.push(file);
+        }
+        for id in files
+            .iter()
+            .map(|file| &file.artifact_id)
+            .collect::<std::collections::BTreeSet<_>>()
+        {
+            self.application
+                .retain_delivery(id, true, &self.workspace)
+                .map_err(|error| {
+                    ToolError::Failed(format!("could not retain notification delivery: {error:?}"))
+                })?;
+        }
+        let payload = json!({"operation":"send_file","request_id":format!("{request_id}-file"),"userid":args.userid,
+            "name":filename,"data_base64":STANDARD.encode(&bytes),"md5":format!("{:x}", Md5::digest(&bytes)),"token":token});
+        // Recheck revocation immediately before each platform effect.
+        self.send_endpoint(&text)?;
+        let file_ack = self.deliver(socket, payload).await?;
+        // Preserve the confirmed file even if the separate introduction fails
+        // or execution is cancelled after the file's ACK.
+        let notification = ChannelNotification {
+            id: request_id.clone(),
+            source_run: self.key.run_id.clone(),
+            content: args.content.clone(),
+            files,
+        };
+        sessions.record_channel_notification(&bot.owner, &session.id, &notification)
+            .map_err(|error| ToolError::Failed(format!("platform acknowledged the file but Session recording failed: {error}; do not resend with a new identity")))?;
+        let introduction = async {
+            let (socket, token) = self.send_endpoint(&text)?;
+            self.deliver(
+                socket,
+                json!({"operation":"send","request_id":format!("{request_id}-intro"),
+            "userid":args.userid,"content":args.content,"token":token}),
+            )
+            .await
+        }.await.map_err(|error| ToolError::Failed(format!("file confirmed and saved for the next Turn; introduction not confirmed: {error}; do not resend the file")))?;
+        Ok(
+            json!({"accepted":true,"notification":notification,"file":file_ack,"introduction":introduction}),
+        )
+    }
+
     async fn deliver(&self, socket: PathBuf, payload: Value) -> Result<Value, ToolError> {
         self.check_active()?;
+        let is_file = payload.get("operation").and_then(Value::as_str) == Some("send_file");
+        let byte_limit = if is_file {
+            28 * 1024 * 1024 + 4096
+        } else {
+            65536
+        };
+        let seconds = if is_file { 180 } else { 20 };
         let mut bytes =
             serde_json::to_vec(&payload).map_err(|e| ToolError::Failed(e.to_string()))?;
         bytes.push(b'\n');
-        if bytes.len() > 64 * 1024 {
+        if bytes.len() > byte_limit {
             return Err(ToolError::Failed(
                 "message or identifier exceeds platform limits".into(),
             ));
         }
-        let value = timeout(Duration::from_secs(20), async {
+        let value = timeout(Duration::from_secs(seconds), async {
             let mut stream = UnixStream::connect(socket).await.map_err(|_| uncertain())?;
             self.check_active()?;
             stream.write_all(&bytes).await.map_err(|_| uncertain())?;
@@ -416,17 +668,41 @@ impl ChannelTools {
 impl ToolPort for ChannelTools {
     fn definitions(&self) -> Vec<ToolDefinition> {
         let mut definitions = self.inner.definitions();
+        let mut schema = json!({"type":"object","properties":{"userid":{"type":"string"},"content":{"type":"string"}},"required":["userid","content"],"additionalProperties":false});
+        if self.assistant_graph.is_none() {
+            schema["properties"]["bot_graph"] = json!({"type":"string","description":"The explicitly selected Graph whose enabled bot will send this notification. The bot must belong to this Run's owner and use a channel Plugin mounted by this node."});
+            schema["required"]
+                .as_array_mut()
+                .expect("required fields")
+                .push(json!("bot_graph"));
+        }
         definitions.push(ToolDefinition::new(ToolName::new(SEND_TOOL).expect("static tool name"),
             "Send Markdown to an explicitly authorized WeCom userid. The gateway owns delivery and idempotency; an error or timeout is not automatically retried.",
-            json!({"type":"object","properties":{"userid":{"type":"string"},"content":{"type":"string"}},"required":["userid","content"],"additionalProperties":false})));
-        definitions.push(ToolDefinition::new(ToolName::new(IMAGE_TOOL).expect("static tool name"),
+            schema));
+        let mut schema = json!({"type":"object","properties":{
+            "userid":{"type":"string"},"path":{"type":"string","description":"Exact file in a committed read-only /in delivery."},
+            "content":{"type":"string","description":"Concise Markdown introduction sent after the file."},
+            "context_files":{"type":"array","items":{"type":"string"},"maxItems":3,"description":"Selected committed companion files for the recipient's later discussion; these are not sent to WeCom."}},
+            "required":["userid","path","content"],"additionalProperties":false});
+        if self.assistant_graph.is_none() {
+            schema["properties"]["bot_graph"] = json!({"type":"string"});
+            schema["required"]
+                .as_array_mut()
+                .expect("required")
+                .push(json!("bot_graph"));
+        }
+        definitions.push(ToolDefinition::new(ToolName::new(SEND_FILE_TOOL).expect("static tool name"),
+            "Send one committed file (up to 20 MiB), then a Markdown introduction through the authorized bot. Requires an existing private conversation. A file ACK retains its exact selected delivery/context for the recipient's next assistant Turn; the separate introduction can still fail. Success requires both ACKs. Unknown results must not be resent automatically.", schema));
+        if self.assistant_graph.is_some() {
+            definitions.push(ToolDefinition::new(ToolName::new(IMAGE_TOOL).expect("static tool name"),
             "Attach one validated PNG/JPEG from /workspace or an authorized read-only /in input to the final WeCom reply. This prepares the image; it does not send immediately.",
             json!({"type":"object","properties":{"path":{"type":"string"}},"required":["path"],"additionalProperties":false})));
+        }
         definitions
     }
 
     fn is_read_only(&self, name: &str) -> bool {
-        if name == SEND_TOOL || name == IMAGE_TOOL {
+        if name == SEND_TOOL || name == SEND_FILE_TOOL || name == IMAGE_TOOL {
             false
         } else {
             self.inner.is_read_only(name)
@@ -444,7 +720,16 @@ impl ToolPort for ChannelTools {
                     .map_err(|e| ToolError::Failed(format!("invalid WeCom send arguments: {e}")))?;
                 return Ok(vec![ToolResultContent::json(self.send(args).await?)]);
             }
+            if name == SEND_FILE_TOOL {
+                let args: FileArguments = serde_json::from_value(arguments).map_err(|error| {
+                    ToolError::Failed(format!("invalid WeCom file arguments: {error}"))
+                })?;
+                return Ok(vec![ToolResultContent::json(self.send_file(args).await?)]);
+            }
             if name == IMAGE_TOOL {
+                if self.assistant_graph.is_none() {
+                    return Err(ToolError::Unknown(name.into()));
+                }
                 self.check_active()?;
                 let args: ImageArguments = serde_json::from_value(arguments).map_err(|e| {
                     ToolError::Failed(format!("invalid WeCom image arguments: {e}"))
@@ -462,419 +747,4 @@ impl ToolPort for ChannelTools {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::{Arc, atomic::AtomicBool};
-    struct Empty;
-    impl ToolPort for Empty {
-        fn definitions(&self) -> Vec<ToolDefinition> {
-            vec![]
-        }
-        fn call<'a>(
-            &'a self,
-            name: &'a str,
-            _: Value,
-        ) -> Pin<Box<dyn Future<Output = Result<Vec<ToolResultContent>, ToolError>> + Send + 'a>>
-        {
-            Box::pin(async move { Err(ToolError::Unknown(name.into())) })
-        }
-    }
-    fn tools(root: &Path) -> ChannelTools {
-        fs::create_dir_all(root.join("workspace")).unwrap();
-        let key = anchor_runtime::graph::InvocationKey {
-            run_id: "run".into(),
-            graph_digest: "digest".into(),
-            node_id: "reply".into(),
-            invocation: 1,
-        };
-        // Reply images belong to the assistant Turn this invocation answers.
-        crate::assistant::save_immutable(
-            &root
-                .join("assistant-invocations")
-                .join(format!("{}.json", crate::host_fs::invocation_stem(&key))),
-            &crate::assistant::TurnBinding {
-                key: key.clone(),
-                wait_key: "wait".into(),
-                inbound: "inbound".into(),
-                turn: "turn-1".into(),
-                pending_inbounds: Vec::new(),
-                pending_truncated: false,
-            },
-        )
-        .unwrap();
-        ChannelTools {
-            inner: Arc::new(Empty),
-            key,
-            state_root: root.into(),
-            descriptor: root.join("missing-control.json"),
-            send_users: vec!["alice".into()],
-            workspace: root.join("workspace"),
-            readonly_inputs: vec![
-                ReadOnlyInput::new(root.join("input"), "/in/channel"),
-                ReadOnlyInput::new(root.join("plugin"), "/plugins/wecom"),
-            ],
-            cancellation: Arc::new(AtomicBool::new(false)),
-        }
-    }
-    fn png() -> Vec<u8> {
-        let mut out = std::io::Cursor::new(Vec::new());
-        image::DynamicImage::new_rgb8(2, 2)
-            .write_to(&mut out, ImageFormat::Png)
-            .unwrap();
-        out.into_inner()
-    }
-    #[test]
-    fn goose_gateway_send_refuses_before_connecting_or_inventing_an_attempt() {
-        let root = tempfile::tempdir().unwrap();
-        let host = tools(root.path());
-        assert!(
-            host.send_request_id()
-                .unwrap_err()
-                .to_string()
-                .contains("no message was sent")
-        );
-        assert!(!host.state_root.join("io-harness").exists());
-    }
-
-    fn delivery_payload(request_id: &str) -> Value {
-        json!({"operation":"send","request_id":request_id,"userid":"fixture-user","content":"same body","token":"fixture-token"})
-    }
-
-    async fn gateway_request(stream: &mut UnixStream) -> Value {
-        let mut bytes = Vec::new();
-        BufReader::new(stream)
-            .read_until(b'\n', &mut bytes)
-            .await
-            .unwrap();
-        serde_json::from_slice(&bytes).unwrap()
-    }
-
-    #[tokio::test]
-    async fn scoped_concurrent_calls_with_identical_bodies_have_independent_acks() {
-        use crate::goose_tool_context::{GooseToolIdentity, scope};
-        let root = tempfile::tempdir().unwrap();
-        let host = tools(root.path());
-        let socket = root.path().join("gateway.sock");
-        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
-        let gateway = async {
-            let mut payloads = Vec::new();
-            for _ in 0..2 {
-                let (mut stream, _) = listener.accept().await.unwrap();
-                let payload = gateway_request(&mut stream).await;
-                let response = json!({"accepted":true,"request_id":payload["request_id"]});
-                stream
-                    .write_all(format!("{response}\n").as_bytes())
-                    .await
-                    .unwrap();
-                payloads.push(payload);
-            }
-            payloads
-        };
-        let send = |tool_call: &str| {
-            scope(
-                Some(GooseToolIdentity {
-                    key: host.key.clone(),
-                    session: "fixture-session".into(),
-                    tool_call: tool_call.into(),
-                }),
-                async {
-                    let request_id = host.send_request_id().unwrap();
-                    host.deliver(socket.clone(), delivery_payload(&request_id))
-                        .await
-                        .unwrap()
-                },
-            )
-        };
-        let (first, second, payloads) =
-            tokio::join!(send("native-first"), send("native-second"), gateway);
-        assert_ne!(first["request_id"], second["request_id"]);
-        assert_eq!(payloads.len(), 2);
-        assert_eq!(payloads[0]["content"], payloads[1]["content"]);
-        assert!(host.send_request_id().is_err());
-    }
-
-    #[tokio::test]
-    async fn late_cancellation_preserves_confirmed_gateway_ack() {
-        let root = tempfile::tempdir().unwrap();
-        let host = tools(root.path());
-        let socket = root.path().join("gateway.sock");
-        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
-        let gateway = async {
-            let (mut stream, _) = listener.accept().await.unwrap();
-            let payload = gateway_request(&mut stream).await;
-            host.cancellation.store(true, Ordering::SeqCst);
-            stream
-                .write_all(
-                    format!(
-                        "{}\n",
-                        json!({"accepted":true,"request_id":payload["request_id"]})
-                    )
-                    .as_bytes(),
-                )
-                .await
-                .unwrap();
-        };
-        let (result, _) = tokio::join!(
-            host.deliver(socket, delivery_payload("fixture-request")),
-            gateway
-        );
-        assert_eq!(result.unwrap()["accepted"], true);
-        assert!(host.check_active().is_err());
-    }
-
-    #[tokio::test]
-    async fn stopped_or_unauthorized_calls_do_not_connect() {
-        let root = tempfile::tempdir().unwrap();
-        let host = tools(root.path());
-        let socket = root.path().join("gateway.sock");
-        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
-        let error = host
-            .call(SEND_TOOL, json!({"userid":"@all","content":"blocked"}))
-            .await
-            .unwrap_err();
-        assert!(error.to_string().contains("recipient is not allowed"));
-        let error = host.call(SEND_TOOL, json!({"userid":"fixture-user","content":"blocked","agent-tool-call-request-id":"spoofed"})).await.unwrap_err();
-        assert!(error.to_string().contains("invalid WeCom send arguments"));
-        host.cancellation.store(true, Ordering::SeqCst);
-        assert!(
-            host.deliver(socket, delivery_payload("fixture-request"))
-                .await
-                .is_err()
-        );
-        assert!(
-            timeout(Duration::from_millis(20), listener.accept())
-                .await
-                .is_err()
-        );
-    }
-
-    #[tokio::test]
-    async fn missing_or_wrong_invocation_identity_never_opens_the_socket() {
-        use crate::goose_tool_context::{GooseToolIdentity, scope};
-        let root = tempfile::tempdir().unwrap();
-        let host = tools(root.path());
-        let socket = root.path().join("gateway.sock");
-        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
-        let mut wrong_key = host.key.clone();
-        wrong_key.invocation += 1;
-        for identity in [
-            None,
-            Some(GooseToolIdentity {
-                key: wrong_key,
-                session: "fixture-session".into(),
-                tool_call: "native-call".into(),
-            }),
-        ] {
-            let result = scope(identity, async {
-                let request_id = host.send_request_id()?;
-                host.deliver(socket.clone(), delivery_payload(&request_id))
-                    .await
-            })
-            .await;
-            assert!(
-                result
-                    .unwrap_err()
-                    .to_string()
-                    .contains("no message was sent")
-            );
-        }
-        assert!(
-            timeout(Duration::from_millis(20), listener.accept())
-                .await
-                .is_err()
-        );
-    }
-
-    #[tokio::test]
-    async fn missing_malformed_or_mismatched_ack_is_uncertain_and_never_retried() {
-        for response in [
-            "",
-            "not-json\n",
-            "{\"accepted\":false}\n",
-            "{\"accepted\":true,\"request_id\":\"wrong\"}\n",
-        ] {
-            let root = tempfile::tempdir().unwrap();
-            let host = tools(root.path());
-            let socket = root.path().join("gateway.sock");
-            let listener = tokio::net::UnixListener::bind(&socket).unwrap();
-            let gateway = async {
-                let (mut stream, _) = listener.accept().await.unwrap();
-                gateway_request(&mut stream).await;
-                stream.write_all(response.as_bytes()).await.unwrap();
-            };
-            let (result, _) = tokio::join!(
-                host.deliver(socket, delivery_payload("fixture-request")),
-                gateway
-            );
-            assert!(
-                result
-                    .unwrap_err()
-                    .to_string()
-                    .contains("do not resend automatically")
-            );
-            assert!(
-                timeout(Duration::from_millis(20), listener.accept())
-                    .await
-                    .is_err()
-            );
-        }
-    }
-    #[tokio::test]
-    async fn saved_reply_images_are_revalidated_before_the_gateway_delivers_them() {
-        let root = tempfile::tempdir().unwrap();
-        let host = tools(root.path());
-        fs::write(host.workspace.join("image.png"), png()).unwrap();
-        host.call(IMAGE_TOOL, json!({"path":"image.png"}))
-            .await
-            .unwrap();
-        let path = host.reply_path().unwrap();
-        let items = crate::channel_replies::read_reply_images_at(&path).unwrap();
-        assert_eq!(items.len(), 1);
-        assert_eq!(items[0]["msgtype"], "image");
-
-        // A digest that no longer matches the bytes must not reach the channel.
-        let mut tampered: Vec<Value> = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-        tampered[0]["image"]["md5"] = json!("0".repeat(32));
-        fs::write(&path, serde_json::to_vec(&tampered).unwrap()).unwrap();
-        assert!(crate::channel_replies::read_reply_images_at(&path).is_err());
-
-        // Foreign item shapes are refused instead of being silently downgraded.
-        for foreign in [
-            json!([{"msgtype":"file","image":{"base64":"AA==","md5":"0".repeat(32)}}]),
-            json!([{"msgtype":"image"}]),
-            json!([{"msgtype":"image","image":{"base64":"AA==","md5":"0".repeat(32),"extra":1}}]),
-        ] {
-            fs::write(&path, serde_json::to_vec(&foreign).unwrap()).unwrap();
-            assert!(crate::channel_replies::read_reply_images_at(&path).is_err());
-        }
-        assert!(
-            crate::channel_replies::read_reply_images_at(
-                &root.path().join("channel-replies/unregistered-run.json")
-            )
-            .unwrap()
-            .is_empty()
-        );
-    }
-
-    #[tokio::test]
-    async fn channel_image_is_scoped_durable_deduplicated_and_cancellable() {
-        let root = tempfile::tempdir().unwrap();
-        let host = tools(root.path());
-        fs::write(host.workspace.join("image.png"), png()).unwrap();
-        host.call(IMAGE_TOOL, json!({"path":"image.png"}))
-            .await
-            .unwrap();
-        let reopened = tools(root.path());
-        let duplicate = reopened
-            .call(IMAGE_TOOL, json!({"path":"/workspace/image.png"}))
-            .await
-            .unwrap();
-        assert_eq!(duplicate[0].as_json().unwrap()["duplicate"], true);
-        let saved: Vec<Value> =
-            serde_json::from_slice(&fs::read(host.reply_path().unwrap()).unwrap()).unwrap();
-        assert_eq!(saved.len(), 1);
-        assert_eq!(
-            STANDARD
-                .decode(saved[0]["image"]["base64"].as_str().unwrap())
-                .unwrap(),
-            png()
-        );
-        host.cancellation.store(true, Ordering::Relaxed);
-        assert!(
-            host.call(IMAGE_TOOL, json!({"path":"image.png"}))
-                .await
-                .is_err()
-        );
-        host.cancellation.store(false, Ordering::Relaxed);
-        assert!(
-            host.send(SendArguments {
-                userid: "@all".into(),
-                content: "blocked".into()
-            })
-            .await
-            .is_err()
-        );
-        assert!(
-            host.send(SendArguments {
-                userid: "mallory".into(),
-                content: "blocked".into()
-            })
-            .await
-            .is_err()
-        );
-        // Without saved Run metadata the node is not a bot's assistant node.
-        let plain: Arc<dyn ToolPort> = Arc::new(Empty);
-        assert!(
-            wrap(
-                plain,
-                &[],
-                host.key.clone(),
-                root.path().into(),
-                host.workspace,
-                vec![],
-                host.cancellation
-            )
-            .definitions()
-            .is_empty()
-        );
-    }
-    #[test]
-    fn channel_image_rejects_escape_symlinks_fifo_corruption_and_oversize() {
-        let root = tempfile::tempdir().unwrap();
-        let host = tools(root.path());
-        fs::create_dir(root.path().join("input")).unwrap();
-        fs::write(root.path().join("input/good.png"), png()).unwrap();
-        assert!(host.image_item("/in/channel/good.png").is_ok());
-        for path in [
-            "/etc/passwd",
-            "../input/good.png",
-            "/plugins/wecom/secret",
-            "/workspace/.git/config",
-        ] {
-            assert!(host.image_item(path).is_err(), "{path}");
-        }
-        std::os::unix::fs::symlink(root.path().join("input"), host.workspace.join("link")).unwrap();
-        std::os::unix::fs::symlink(
-            root.path().join("input/good.png"),
-            host.workspace.join("link.png"),
-        )
-        .unwrap();
-        assert!(host.image_item("link/good.png").is_err());
-        assert!(host.image_item("link.png").is_err());
-        let dir = rustix::fs::open(
-            &host.workspace,
-            rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::DIRECTORY,
-            rustix::fs::Mode::empty(),
-        )
-        .unwrap();
-        rustix::fs::mkfifoat(&dir, "pipe", rustix::fs::Mode::RUSR).unwrap();
-        assert!(host.image_item("pipe").is_err());
-        fs::write(host.workspace.join("corrupt.png"), b"\x89PNG\r\n\x1a\n").unwrap();
-        assert!(host.image_item("corrupt.png").is_err());
-        fs::File::create(host.workspace.join("large.png"))
-            .unwrap()
-            .set_len(MAX_IMAGE_BYTES as u64 + 1)
-            .unwrap();
-        assert!(host.image_item("large.png").is_err());
-    }
-    #[test]
-    fn channel_image_reply_count_and_total_limits() {
-        let root = tempfile::tempdir().unwrap();
-        let host = tools(root.path());
-        for n in 0..MAX_IMAGE_COUNT {
-            host.save_image(json!({"image":{"md5":n.to_string(),"base64":"YQ=="}}))
-                .unwrap();
-        }
-        assert!(
-            host.save_image(json!({"image":{"md5":"extra","base64":"YQ=="}}))
-                .is_err()
-        );
-        fs::remove_file(host.reply_path().unwrap()).unwrap();
-        assert!(
-            host.save_image(
-                json!({"image":{"md5":"huge","base64":"a".repeat(MAX_IMAGE_TOTAL_BASE64+1)}})
-            )
-            .is_err()
-        );
-    }
-}
+mod tests;

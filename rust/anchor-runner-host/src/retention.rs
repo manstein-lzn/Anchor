@@ -94,6 +94,7 @@ pub(crate) fn select(
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(crate) struct Report {
     pub(crate) removed: usize,
+    pub(crate) expired_artifacts: usize,
     pub(crate) freed_bytes: u64,
     /// Runs selected but refused by the deletion path, with the reason.
     pub(crate) skipped: Vec<(String, String)>,
@@ -104,7 +105,7 @@ pub(crate) struct Report {
 impl Report {
     pub(crate) fn line(&self) -> Option<String> {
         let alarm = self.facts_bytes > FACTS_ALARM_BYTES;
-        if self.removed == 0 && self.skipped.is_empty() && !alarm {
+        if self.removed == 0 && self.expired_artifacts == 0 && self.skipped.is_empty() && !alarm {
             return None;
         }
         let mut line = format!(
@@ -113,6 +114,12 @@ impl Report {
             self.freed_bytes >> 20,
             self.remaining_bytes >> 20
         );
+        if self.expired_artifacts > 0 {
+            line.push_str(&format!(
+                "; expired {} delivery version(s)",
+                self.expired_artifacts
+            ));
+        }
         if !self.skipped.is_empty() {
             let reasons = self
                 .skipped
@@ -268,6 +275,7 @@ mod tests {
         assert_eq!(Report::default().line(), None);
         let report = Report {
             removed: 2,
+            expired_artifacts: 0,
             freed_bytes: 3 << 20,
             skipped: vec![("r1".into(), "still referenced".into())],
             remaining_bytes: 7 << 20,

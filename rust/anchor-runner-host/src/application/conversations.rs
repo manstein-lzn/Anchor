@@ -113,12 +113,10 @@ impl RunApplication {
         &self,
         run_id: &str,
     ) -> Result<bool, ApplicationError> {
-        for (id, _) in self.run_views()? {
-            if self
-                .metadata(&id)?
-                .and_then(|metadata| metadata.conversation)
-                .is_some_and(|source| source.previous_run.as_deref() == Some(run_id))
-            {
+        // Metadata also reserves pending handovers; only an admitted successor
+        // supersedes execution. Unrelated Run history is not part of this fact.
+        for id in self.conversation_successors(run_id)? {
+            if self.read_run(&id)?.is_some() {
                 return Ok(true);
             }
         }
@@ -141,8 +139,8 @@ impl RunApplication {
     ///
     /// Conversation Runs form one chain per Session, and a later Run reads the
     /// Run it was handed over from while it executes: it inherits that Run's
-    /// stable workspace scene, mounts its `/previous` snapshot, and takes its
-    /// Goose invocation identity as the native predecessor. A Run is therefore
+    /// authorized stable workspace resource and takes its Goose invocation
+    /// identity as the native predecessor. A Run is therefore
     /// only deletable once nothing that can still execute reads it:
     ///
     /// - it must not be the current assistant instance, which the Session still

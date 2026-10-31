@@ -1,0 +1,132 @@
+{
+  "name": "Git",
+  "description": "使用本机 Git 在 Agent 工作区克隆仓库、检查差异、维护分支、提交与推送；支持独立配置的 SSH 或 HTTPS 凭据。",
+  "network": false,
+  "skills": "skills/",
+  "configuration": {
+    "fields": {
+      "author_name": {
+        "type": "string",
+        "label": "提交者姓名",
+        "required": false
+      },
+      "author_email": {
+        "type": "string",
+        "label": "提交者邮箱",
+        "required": false
+      },
+      "ssh_private_key": {
+        "type": "secret",
+        "label": "SSH 私钥（无口令，单行 Base64）",
+        "required": false
+      },
+      "ssh_known_hosts": {
+        "type": "string",
+        "label": "SSH known_hosts 内容",
+        "required": false
+      },
+      "https_url": {
+        "type": "url",
+        "label": "HTTPS 凭据适用地址（可包含仓库路径）",
+        "required": false
+      },
+      "https_username": {
+        "type": "string",
+        "label": "HTTPS 用户名",
+        "required": false
+      },
+      "https_token": {
+        "type": "secret",
+        "label": "HTTPS Token",
+        "required": false
+      },
+      "ssh_config": {
+        "type": "string",
+        "label": "已授权的本机 SSH 配置路径",
+        "required": false
+      }
+    },
+    "environment": {
+      "git": {
+        "ANCHOR_GIT_AUTHOR_NAME": "author_name",
+        "ANCHOR_GIT_AUTHOR_EMAIL": "author_email"
+      },
+      "ssh": {
+        "ANCHOR_GIT_AUTHOR_NAME": "author_name",
+        "ANCHOR_GIT_AUTHOR_EMAIL": "author_email",
+        "ANCHOR_GIT_SSH_PRIVATE_KEY": "ssh_private_key",
+        "ANCHOR_GIT_SSH_KNOWN_HOSTS": "ssh_known_hosts"
+      },
+      "https": {
+        "ANCHOR_GIT_AUTHOR_NAME": "author_name",
+        "ANCHOR_GIT_AUTHOR_EMAIL": "author_email",
+        "ANCHOR_GIT_HTTPS_URL": "https_url",
+        "ANCHOR_GIT_HTTPS_USERNAME": "https_username",
+        "ANCHOR_GIT_HTTPS_TOKEN": "https_token"
+      },
+      "host": {
+        "ANCHOR_GIT_AUTHOR_NAME": "author_name",
+        "ANCHOR_GIT_AUTHOR_EMAIL": "author_email",
+        "ANCHOR_GIT_SSH_CONFIG": "ssh_config"
+      }
+    }
+  },
+  "mcpServers": {
+    "git": {
+      "command": "bin/anchor-git-tools",
+      "args": [],
+      "cwd": ".",
+      "tool_timeout_sec": 605,
+      "env": {
+        "ANCHOR_GIT_WORKSPACE": "/workspace",
+        "ANCHOR_GIT_AUTHOR_NAME": "${ANCHOR_GIT_AUTHOR_NAME:-}",
+        "ANCHOR_GIT_AUTHOR_EMAIL": "${ANCHOR_GIT_AUTHOR_EMAIL:-}"
+      }
+    },
+    "ssh": {
+      "command": "bin/anchor-git-tools",
+      "args": [],
+      "cwd": ".",
+      "tool_timeout_sec": 605,
+      "env": {
+        "ANCHOR_GIT_WORKSPACE": "/workspace",
+        "ANCHOR_GIT_AUTHOR_NAME": "${ANCHOR_GIT_AUTHOR_NAME:-}",
+        "ANCHOR_GIT_AUTHOR_EMAIL": "${ANCHOR_GIT_AUTHOR_EMAIL:-}"
+      },
+      "optional_env_vars": [
+        "ANCHOR_GIT_SSH_PRIVATE_KEY",
+        "ANCHOR_GIT_SSH_KNOWN_HOSTS"
+      ]
+    },
+    "https": {
+      "command": "bin/anchor-git-tools",
+      "args": [],
+      "cwd": ".",
+      "tool_timeout_sec": 605,
+      "env": {
+        "ANCHOR_GIT_WORKSPACE": "/workspace",
+        "ANCHOR_GIT_AUTHOR_NAME": "${ANCHOR_GIT_AUTHOR_NAME:-}",
+        "ANCHOR_GIT_AUTHOR_EMAIL": "${ANCHOR_GIT_AUTHOR_EMAIL:-}"
+      },
+      "optional_env_vars": [
+        "ANCHOR_GIT_HTTPS_URL",
+        "ANCHOR_GIT_HTTPS_USERNAME",
+        "ANCHOR_GIT_HTTPS_TOKEN"
+      ]
+    },
+    "host": {
+      "command": "bin/anchor-git-tools",
+      "args": [],
+      "cwd": ".",
+      "tool_timeout_sec": 605,
+      "env": {
+        "ANCHOR_GIT_WORKSPACE": "/workspace",
+        "ANCHOR_GIT_AUTHOR_NAME": "${ANCHOR_GIT_AUTHOR_NAME:-}",
+        "ANCHOR_GIT_AUTHOR_EMAIL": "${ANCHOR_GIT_AUTHOR_EMAIL:-}"
+      },
+      "optional_env_vars": [
+        "ANCHOR_GIT_SSH_CONFIG"
+      ]
+    }
+  }
+}

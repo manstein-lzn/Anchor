@@ -79,6 +79,14 @@ impl RunApplication {
         let observed = self
             .read_run(&supplied.record.run_id)?
             .ok_or(ApplicationError::Missing)?;
+        self.project_observed_run(&observed, metadata)
+    }
+
+    fn project_observed_run(
+        &self,
+        observed: &RunView<'_>,
+        metadata: Option<&RunMetadata>,
+    ) -> Result<RunProjection, ApplicationError> {
         let record = observed.record.as_ref();
         let view = &observed.lifecycle;
         let mut projection = RunProjection::from_view(view);
@@ -133,7 +141,7 @@ impl RunApplication {
     }
     pub(crate) async fn projected_runs(&self) -> Result<Vec<Value>, ApplicationError> {
         let mut runs = Vec::new();
-        for (id, record) in self.raw_records()? {
+        for (id, view) in self.run_views()? {
             let metadata = self.metadata(&id)?;
             let (graph, created, mut trigger) = metadata
                 .as_ref()
@@ -166,17 +174,9 @@ impl RunApplication {
                 trigger["reply_node"] = json!(source.reply_node);
                 trigger["previous_run"] = json!(source.previous_run);
             }
-            let view = self.read_run(&id)?.ok_or(ApplicationError::Missing)?;
             let progress = view.progress();
             let executed = progress.executed_nodes();
-            let projection = self
-                .project_run(
-                    &self
-                        .read_run(&record.run_id)?
-                        .ok_or(ApplicationError::Missing)?,
-                    metadata.as_ref(),
-                )
-                .await?;
+            let projection = self.project_observed_run(&view, metadata.as_ref())?;
             runs.push(json!({"session_call":metadata.as_ref().and_then(|m| m.session_call.as_ref()),"run":id,"graph":graph,"running":projection.active,"projection":projection,"started":created,"updated":projection.updated,"executed":executed,"objective":progress.snapshot.objective,"trigger":trigger}));
         }
         Ok(runs)
@@ -184,38 +184,19 @@ impl RunApplication {
 
     pub(crate) async fn pilot_run_list(&self) -> Result<Value, ApplicationError> {
         let mut runs = Vec::new();
-        for (id, record) in self.raw_records()? {
+        for (id, view) in self.run_views()? {
             let metadata = self.metadata(&id)?;
-            let projection = self
-                .project_run(
-                    &self
-                        .read_run(&record.run_id)?
-                        .ok_or(ApplicationError::Missing)?,
-                    metadata.as_ref(),
-                )
-                .await?;
+            let projection = self.project_observed_run(&view, metadata.as_ref())?;
             runs.push(json!({"run":id,"projection":projection}));
         }
         Ok(json!({"runs":runs}))
     }
 
     pub(crate) async fn pilot_run_status(&self, run: &str) -> Result<Value, ApplicationError> {
-        let record = self
-            .raw_records()?
-            .into_iter()
-            .find(|(id, _)| id == run)
-            .ok_or(ApplicationError::Missing)?
-            .1;
+        let view = self.read_run(run)?.ok_or(ApplicationError::Missing)?;
         let metadata = self.metadata(run)?;
-        let projection = self
-            .project_run(
-                &self
-                    .read_run(&record.run_id)?
-                    .ok_or(ApplicationError::Missing)?,
-                metadata.as_ref(),
-            )
-            .await?;
-        let mut progress = serde_json::to_value(record)
+        let projection = self.project_observed_run(&view, metadata.as_ref())?;
+        let mut progress = serde_json::to_value(view.record.as_ref())
             .map_err(|error| ApplicationError::Storage(error.to_string()))?;
         progress
             .as_object_mut()

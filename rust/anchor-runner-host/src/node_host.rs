@@ -15,7 +15,6 @@ use anchor_runtime::graph::{
 use anchor_runtime::{NetworkPolicy, SandboxError, SandboxPort, SandboxRequest, SandboxStatus};
 use anchor_sandbox_bwrap::BubblewrapSandbox;
 use serde_json::json;
-use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     io::{self, Write},
@@ -42,41 +41,6 @@ pub(crate) use contracts::{
     NodeConversationHint, NodeHostResolver, NodeImage, ResolutionError, ResolvedNodeTools,
     ToolResolution,
 };
-
-/// The declared outputs (`writes`) absent from `workspace`, in declared
-/// order. An entry may name a file or a directory; a symlink counts as
-/// present without being followed, since the snapshot refuses it anyway.
-pub(crate) fn missing_outputs(workspace: &Path, writes: &[String]) -> Vec<String> {
-    writes
-        .iter()
-        .filter(|path| std::fs::symlink_metadata(workspace.join(path)).is_err())
-        .cloned()
-        .collect()
-}
-
-/// Why a node that ended without its declared outputs did not produce them.
-pub(crate) fn missing_outputs_reason(missing: &[String]) -> String {
-    format!(
-        "declared output(s) missing from /workspace: {}",
-        missing
-            .iter()
-            .map(|path| format!("`{path}`"))
-            .collect::<Vec<_>>()
-            .join(", ")
-    )
-}
-
-pub(crate) fn conversation_hint_for(
-    metadata: &crate::run_metadata::RunMetadata,
-    node: &str,
-) -> Option<NodeConversationHint> {
-    let binding = metadata.conversation.as_ref()?;
-    let identity = serde_json::to_vec(&(&metadata.bundle_source, &binding.session, node))
-        .expect("host conversation identity is serializable");
-    Some(NodeConversationHint {
-        key: format!("{:x}", Sha256::digest(identity)),
-    })
-}
 
 pub(crate) struct HostNodes {
     pub(crate) sandbox: std::sync::Arc<BubblewrapSandbox>,

@@ -1,6 +1,6 @@
-# Rust WeCom Text Transport
+# Rust WeCom Channel Transport
 
-`anchor-wecom-gateway` is an operator-configured channel transport. It does not own Session/Turn, create Graph Runs, run an Agent, supervise its own process, or provide attachment extraction and upload.
+`anchor-wecom-gateway` is an operator-configured channel transport. It does not own Session/Turn, create Graph Runs, run an Agent, supervise its own process, or extract attachment contents.
 
 ## Plugin And Runtime Packaging
 
@@ -54,6 +54,34 @@ Only HTTP 200 acknowledges a settlement. Other statuses, transport errors and ti
 
 Disconnect, rejection, timeout, process kill, and late ACK remain unconfirmed; restart never automatically resends an unknown platform request. This is conservative at-most-once dispatch, not exactly-once external delivery. If callback processing is interrupted before a durable reply claim exists, restart retries the same Host event; Host admission must therefore remain idempotent. If a reply claim already exists, restart does not call the Host or resend that platform reply.
 
+## Proactive Files
+
+The private control socket accepts one file through the same configured bot and
+`send_users` allowlist as proactive Markdown:
+
+```json
+{"operation":"send_file","token":"<control token>","request_id":"<stable delivery id>","userid":"<recipient>","name":"AI每日晨报_20261031.pdf","data_base64":"<file bytes>","md5":"<lowercase digest>"}
+```
+
+Files range from 5 bytes to 20 MiB; filenames are at most 256 UTF-8 bytes. The control request allows the corresponding
+base64 body plus a 64 KiB envelope; text/status requests keep their 64 KiB limit.
+The gateway checks filename, bytes and digest, then uses its existing
+three-stage media upload on the active connection and sends `aibot_send_msg`
+with `msgtype=file`. It returns `accepted=true` only after the final message ACK,
+not after upload. The stable request ID binds recipient, filename and bytes;
+confirmed retries return `duplicate=true` without uploading again.
+This envelope matches the official SDK's
+[`sendMediaMessage(chatid, 'file', mediaId)`](https://github.com/WecomTeam/aibot-node-sdk)
+implementation; upload bounds follow the
+[long-connection protocol](https://developer.work.weixin.qq.com/document/path/101463).
+
+Upload failure or disconnect before dispatch creates no delivery claim and can
+be retried with the same identity. Once the final send is claimed, rejection,
+timeout, disconnect or restart leaves the existing `unknown` fact and prevents
+automatic resend. File bytes are not copied into a second durable store; the
+Host owns the source Artifact and any conversation handoff. Local transport
+tests cover these contracts; they do not establish public WeCom delivery.
+
 ## Verification
 
 Run the crate's unit, local WebSocket/HTTP transport, and process tests with:
@@ -62,4 +90,4 @@ Run the crate's unit, local WebSocket/HTTP transport, and process tests with:
 cargo +stable test --manifest-path rust/Cargo.toml -p anchor-wecom-gateway --all-targets --locked
 ```
 
-These tests do not demonstrate public WeCom delivery, attachment handling, Host process supervision, or production deployment. The Host owns Session/Run replacement and cancellation; the Gateway suppresses stale replies and recovers durable callback/delivery facts but does not supervise its own process.
+These tests do not demonstrate public WeCom delivery, Host process supervision, or production deployment. The Host owns Session/Run replacement and cancellation; the Gateway suppresses stale replies and recovers durable callback/delivery facts but does not supervise its own process.

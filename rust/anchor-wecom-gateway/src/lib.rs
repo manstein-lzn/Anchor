@@ -25,6 +25,11 @@ pub const MAX_TEXT_BYTES: usize = 20_480;
 pub const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
 pub const MAX_IMAGE_COUNT: usize = 10;
 pub const MAX_IMAGE_TOTAL_BASE64: usize = 14 * 1024 * 1024;
+/// The bot file upload API accepts at most 20 MiB per file. The private control
+/// request carries one base64 file plus a small JSON envelope.
+pub const MAX_OUTBOUND_FILE_BYTES: usize = 20 * 1024 * 1024;
+pub const MAX_CONTROL_REQUEST_BYTES: usize =
+    MAX_OUTBOUND_FILE_BYTES.div_ceil(3) * 4 + MAX_REQUEST_BYTES;
 /// One upload chunk plus its base64 encoding and envelope. The 512 KiB payload
 /// matches the chunk size the previous transport used against the platform.
 pub const MEDIA_CHUNK_BYTES: usize = 512 * 1024;
@@ -58,6 +63,8 @@ pub enum GatewayError {
     UnsupportedMedia,
     #[error("platform media could not be retrieved and decrypted")]
     Media,
+    #[error("platform media upload failed; no message was dispatched")]
+    MediaUpload,
     #[error("private gateway state is unavailable or unsafe")]
     PrivateState,
     #[error("gateway state directory is already leased")]

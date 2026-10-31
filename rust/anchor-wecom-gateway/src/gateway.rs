@@ -22,7 +22,7 @@ use tokio::{
 use crate::{
     ChannelEvent, DeliveryFact, GatewayConfig, GatewayError,
     ledger::{Ledger, SettlementStatus, current_time_millis},
-    media::{ImageItem, MediaFetcher, media_send_digest, reply_images},
+    media::{MediaFetcher, MediaItem, media_send_digest, reply_images},
     private_state::PrivateState,
     protocol::{ConversationScope, digest},
     webhook::{Webhook, WebhookReply},
@@ -32,7 +32,7 @@ const MAX_IN_FLIGHT: usize = 32;
 /// Concurrent media uploads. Uploads interleave with text delivery on the same
 /// connection, so they stay well below the text concurrency limit.
 const MAX_MEDIA_IN_FLIGHT: usize = 4;
-/// In-session retries for one retryable upload step before the image is
+/// In-session retries for one retryable upload step before the media is
 /// abandoned. A platform send is never retried in-session.
 const MAX_MEDIA_ATTEMPTS: u32 = 3;
 
@@ -201,17 +201,35 @@ impl Drop for RunningGateway {
 }
 
 struct SendRequest {
+    delivery: ProactiveDelivery,
+    content: SendContent,
+}
+
+enum SendContent {
+    Markdown(String),
+    File(MediaItem),
+}
+
+struct ProactiveDelivery {
     request_id: String,
     userid: String,
-    content: String,
     response: oneshot::Sender<Result<Value, GatewayError>>,
 }
 
 impl SendRequest {
     fn digest(&self) -> String {
-        digest(&serde_json::to_vec(&json!([self.userid, self.content])).expect("serializable send"))
+        let value = match &self.content {
+            // Keep the existing text delivery identity stable.
+            SendContent::Markdown(content) => json!([self.delivery.userid, content]),
+            SendContent::File(item) => {
+                json!([self.delivery.userid, "file", item.name, digest(&item.bytes),])
+            }
+        };
+        digest(&serde_json::to_vec(&value).expect("serializable send"))
     }
+}
 
+impl ProactiveDelivery {
     fn complete(self, duplicate: bool) {
         let mut result = json!({"accepted": true, "request_id": self.request_id});
         if duplicate {
@@ -228,7 +246,7 @@ impl SendRequest {
 struct PendingDelivery {
     wire_id: String,
     event_id: Option<String>,
-    request: Option<SendRequest>,
+    request: Option<ProactiveDelivery>,
     deadline: tokio::time::Instant,
 }
 
@@ -305,18 +323,57 @@ impl Drop for Subscription {
     }
 }
 
-/// One reply image moving through the platform media protocol. Upload is
+/// One file or reply image moving through the platform media protocol. Upload is
 /// retryable and invisible to the user; the send is claimed durably first so an
 /// interrupted send is never repeated.
 struct MediaJob {
-    event_id: String,
-    callback_id: String,
-    sender_id: String,
-    index: usize,
-    item: ImageItem,
+    target: MediaTarget,
+    item: MediaItem,
     send_digest: String,
     attempts: u32,
     stage: MediaStage,
+}
+
+enum MediaTarget {
+    Reply {
+        event_id: String,
+        callback_id: String,
+        sender_id: String,
+        index: usize,
+    },
+    Proactive(ProactiveDelivery),
+}
+
+impl MediaTarget {
+    fn identity(&self) -> (&'static str, String) {
+        match self {
+            Self::Reply {
+                event_id, index, ..
+            } => ("image", format!("{event_id}:{index}")),
+            Self::Proactive(request) => ("send", request.request_id.clone()),
+        }
+    }
+
+    fn key(&self) -> String {
+        let (kind, identity) = self.identity();
+        format!("{kind}:{identity}")
+    }
+
+    fn replies_to(&self, event: &str) -> bool {
+        matches!(self, Self::Reply { event_id, .. } if event_id == event)
+    }
+
+    fn complete(self, duplicate: bool) {
+        if let Self::Proactive(request) = self {
+            request.complete(duplicate);
+        }
+    }
+
+    fn fail(self, error: GatewayError) {
+        if let Self::Proactive(request) = self {
+            request.fail(error);
+        }
+    }
 }
 
 enum MediaStage {
@@ -334,12 +391,13 @@ enum MediaStep {
 }
 
 struct MediaPending {
-    event_id: String,
-    index: usize,
+    job_key: String,
+    reply_event_id: Option<String>,
     step: MediaStep,
     /// Durable delivery identity for this platform send. The image message
     /// reuses the callback's platform `req_id`, which the text reply already
-    /// owns, so the ledger keys the send by callback and image index.
+    /// owns, so the ledger keys that send by callback and image index. Proactive
+    /// files use their own platform request ID.
     ledger_wire: String,
     deadline: tokio::time::Instant,
 }
@@ -573,15 +631,19 @@ impl Driver {
         Ok(())
     }
 
-    fn enqueue_media(&mut self, reply: &crate::ledger::ReadyReply, index: usize, item: ImageItem) {
-        if self
-            .media
-            .iter()
-            .any(|job| job.event_id == reply.event_id && job.index == index)
+    fn enqueue_media(&mut self, reply: &crate::ledger::ReadyReply, index: usize, item: MediaItem) {
+        let target = MediaTarget::Reply {
+            event_id: reply.event_id.clone(),
+            callback_id: reply.callback_id.clone(),
+            sender_id: reply.sender_id.clone(),
+            index,
+        };
+        let key = target.key();
+        if self.media.iter().any(|job| job.target.key() == key)
             || self
                 .media_pending
                 .values()
-                .any(|pending| pending.event_id == reply.event_id && pending.index == index)
+                .any(|pending| pending.job_key == key)
         {
             return;
         }
@@ -590,10 +652,7 @@ impl Driver {
             return;
         };
         self.media.push_back(MediaJob {
-            event_id: reply.event_id.clone(),
-            callback_id: reply.callback_id.clone(),
-            sender_id: reply.sender_id.clone(),
-            index,
+            target,
             item,
             send_digest,
             attempts: 0,
@@ -627,11 +686,17 @@ impl Driver {
         let position = self
             .media
             .iter()
-            .position(|job| job.event_id == pending.event_id && job.index == pending.index);
+            .position(|job| job.target.key() == pending.job_key);
         if code != 0 {
             self.report(GatewayError::Unconfirmed);
             if let Some(position) = position {
-                self.retry_or_drop_media(position);
+                if pending.step == MediaStep::Send {
+                    if let Some(job) = self.media.remove(position) {
+                        job.target.fail(GatewayError::Unconfirmed);
+                    }
+                } else {
+                    self.retry_or_drop_media(position);
+                }
             }
             return Ok(());
         }
@@ -661,7 +726,9 @@ impl Driver {
             },
             MediaStep::Send => {
                 self.ledger.confirm(&pending.ledger_wire)?;
-                self.media.remove(position);
+                if let Some(job) = self.media.remove(position) {
+                    job.target.complete(false);
+                }
             }
         }
         Ok(())
@@ -672,8 +739,8 @@ impl Driver {
         job.attempts += 1;
         if job.attempts < MAX_MEDIA_ATTEMPTS {
             job.stage = MediaStage::Init;
-        } else {
-            self.media.remove(position);
+        } else if let Some(job) = self.media.remove(position) {
+            job.target.fail(GatewayError::MediaUpload);
         }
     }
 
@@ -683,17 +750,18 @@ impl Driver {
             return Ok(());
         };
         self.report(GatewayError::Unconfirmed);
-        if pending.step == MediaStep::Send {
-            self.media
-                .retain(|job| job.event_id != pending.event_id || job.index != pending.index);
-            return Ok(());
-        }
         if let Some(position) = self
             .media
             .iter()
-            .position(|job| job.event_id == pending.event_id && job.index == pending.index)
+            .position(|job| job.target.key() == pending.job_key)
         {
-            self.retry_or_drop_media(position);
+            if pending.step == MediaStep::Send {
+                if let Some(job) = self.media.remove(position) {
+                    job.target.fail(GatewayError::Unconfirmed);
+                }
+            } else {
+                self.retry_or_drop_media(position);
+            }
         }
         Ok(())
     }
@@ -793,16 +861,16 @@ impl Driver {
     }
 
     fn reject_disconnected(&self, request: SendRequest) {
-        if request.response.is_closed() {
+        if request.delivery.response.is_closed() {
             return;
         }
         match self
             .ledger
-            .previous("send", &request.request_id, &request.digest())
+            .previous("send", &request.delivery.request_id, &request.digest())
         {
-            Ok(true) => request.complete(true),
-            Ok(false) => request.fail(GatewayError::Disconnected),
-            Err(error) => request.fail(error),
+            Ok(true) => request.delivery.complete(true),
+            Ok(false) => request.delivery.fail(GatewayError::Disconnected),
+            Err(error) => request.delivery.fail(error),
         }
     }
 
@@ -813,12 +881,20 @@ impl Driver {
         // interrupted image send may already have reached the platform, so its
         // durable claim keeps it unknown and it is never repeated.
         for job in std::mem::take(&mut self.media) {
-            match job.stage {
-                MediaStage::Sending { .. } => {}
-                _ => self.media.push_back(MediaJob {
+            if let MediaTarget::Proactive(request) = job.target {
+                match self
+                    .ledger
+                    .previous("send", &request.request_id, &job.send_digest)
+                {
+                    Ok(true) => request.complete(true),
+                    Ok(false) => request.fail(GatewayError::Disconnected),
+                    Err(error) => request.fail(error),
+                }
+            } else if !matches!(job.stage, MediaStage::Sending { .. }) {
+                self.media.push_back(MediaJob {
                     stage: MediaStage::Init,
                     ..job
-                }),
+                });
             }
         }
         for (_, pending) in std::mem::take(&mut self.pending) {
@@ -846,7 +922,7 @@ impl Driver {
                 // The text reply's outcome is unknown, so this turn has no
                 // confirmed user-visible answer. A late image the user cannot
                 // match to a reply is not dispatched; its queued job is dropped.
-                self.media.retain(|job| job.event_id != event_id);
+                self.media.retain(|job| !job.target.replies_to(&event_id));
             }
         } else if confirmed {
             self.ledger.confirm(&pending.wire_id)?;

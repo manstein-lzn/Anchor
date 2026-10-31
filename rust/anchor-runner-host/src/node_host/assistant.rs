@@ -41,80 +41,6 @@ fn provider_reply(kind: &str) -> String {
     }
 }
 
-impl HostIoResolver {
-    pub(super) fn seed_assistant_workspace(
-        &self,
-        key: &InvocationKey,
-        workspace: &std::path::Path,
-    ) -> Result<(), String> {
-        let root = self.local_inputs.state_root();
-        let Some(source) = assistant::source(root, key)? else {
-            return Ok(());
-        };
-        if key.invocation != 1 || key.node_id != source.work_node {
-            return Ok(());
-        }
-        // A handed-over instance already received its predecessor's live scene
-        // inside the preparation lock. Copying the committed mount over it here
-        // would replace newer uncommitted files with older committed bytes.
-        if assistant::handover_workspace_source(root, key, &self.artifacts)?.is_some() {
-            return Ok(());
-        }
-        let fact_path = root
-            .join("assistant-seeds")
-            .join(format!("{}.json", fact_stem(key)));
-        if let Some(saved) = assistant::read_json::<Value>(&fact_path)? {
-            if saved.get("key")
-                != Some(&serde_json::to_value(key).map_err(|error| error.to_string())?)
-            {
-                return Err("assistant seed identity changed".into());
-            }
-            return Ok(());
-        }
-        let previous = self
-            .conversation(key)?
-            .map(|conversation| self.previous_mount(key, &conversation))
-            .transpose()?
-            .flatten();
-        if let Some(previous) = previous.as_ref() {
-            copy_seed(&previous.source, workspace)?;
-        }
-        assistant::save_immutable(
-            &fact_path,
-            &json!({"key":key,"previous":previous.map(|input| input.source)}),
-        )
-    }
-}
-
-fn copy_seed(source: &std::path::Path, destination: &std::path::Path) -> Result<(), String> {
-    for entry in std::fs::read_dir(source).map_err(|error| error.to_string())? {
-        let entry = entry.map_err(|error| error.to_string())?;
-        let kind = entry.file_type().map_err(|error| error.to_string())?;
-        let target = destination.join(entry.file_name());
-        if kind.is_dir() {
-            crate::create_durable_directory(&target).map_err(|error| error.to_string())?;
-            copy_seed(&entry.path(), &target)?;
-        } else if kind.is_file() {
-            if target.exists()
-                && !std::fs::symlink_metadata(&target)
-                    .map_err(|error| error.to_string())?
-                    .is_file()
-            {
-                return Err("assistant seed target is not a file".into());
-            }
-            std::fs::copy(entry.path(), &target).map_err(|error| error.to_string())?;
-            std::fs::File::open(target)
-                .and_then(|file| file.sync_all())
-                .map_err(|error| error.to_string())?;
-        } else {
-            return Err("assistant seed contains an unsupported file".into());
-        }
-    }
-    std::fs::File::open(destination)
-        .and_then(|file| file.sync_all())
-        .map_err(|error| error.to_string())
-}
-
 impl HostNodes {
     fn yield_assistant(
         &self,
@@ -122,9 +48,6 @@ impl HostNodes {
         route: String,
         provider_failure: Option<String>,
     ) -> Result<CompletionFact, GraphError> {
-        if self.artifacts.workspace_path(key)?.exists() {
-            self.artifacts.retain_interrupted_workspace(key)?;
-        }
         let fact = YieldFact {
             key: key.clone(),
             reason: if provider_failure.is_some() {
@@ -328,6 +251,10 @@ impl HostNodes {
                                     .map(|input| input.relation.inbound_id)
                                     .collect(),
                                 truncated,
+                                assistant::sessions(root)
+                                    .map_err(graph_error)?
+                                    .latest_channel_notification(&source.owner, &source.session)
+                                    .map_err(graph_error)?,
                             )
                             .map_err(graph_error)?;
                         }
@@ -368,11 +295,15 @@ impl HostNodes {
                             json!({"message":message.request.text,"channel":message.request.identity,"turn":message.relation.turn_id,"attachments":attachments})
                         }).collect::<Vec<_>>();
                         let output = json!({
+                            "files":["input.json"],
                             "message":input.request.text,
                             "channel":input.request.identity,
                             "attachments":input.request.attachments,
                             "session":source.session,
                             "turn":input.relation.turn_id,
+                            "latest_notification": assistant::binding(root, &request.key)
+                                .map_err(graph_error)?.and_then(|binding| binding.notification)
+                                .map(crate::channel_notifications::projection),
                             "interrupted_messages":interrupted,
                             "interrupted_messages_truncated":assistant::binding(root, &request.key).map_err(graph_error)?.is_some_and(|binding| binding.pending_truncated),
                         });
@@ -419,7 +350,7 @@ impl HostNodes {
                             submission: "superseded reply suppressed".into(),
                             route: Some(source.wait_node),
                             model_requests: 0,
-                            output: json!({"suppressed":true,"reply_for":input.relation.turn_id}),
+                            output: json!({"files":[],"suppressed":true,"reply_for":input.relation.turn_id}),
                         },
                     );
                 }
@@ -446,7 +377,7 @@ impl HostNodes {
                         submission: provider_reply(&kind),
                         route: Some(source.wait_node),
                         model_requests: 0,
-                        output: json!({"reply_for":input.relation.turn_id,"source_commit":commit,
+                        output: json!({"files":[],"reply_for":input.relation.turn_id,"source_commit":commit,
                             "items":[],"host_reply":"provider_rejected","provider_failure":kind}),
                     }
                 } else {
@@ -460,7 +391,7 @@ impl HostNodes {
                         submission: completion.submission,
                         route: Some(source.wait_node),
                         model_requests: 0,
-                        output: json!({"reply_for":input.relation.turn_id,"source_commit":commit,"items":items}),
+                        output: json!({"files":[],"reply_for":input.relation.turn_id,"source_commit":commit,"items":items}),
                     }
                 };
                 let outcome = self.complete(&request.key, reply.clone())?;

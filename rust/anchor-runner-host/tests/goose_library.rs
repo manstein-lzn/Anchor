@@ -22,7 +22,7 @@ fn graph() -> Value {
         "agents":{"worker":{"model":"models.worker","instructions":"Discover the current demo Skill with anchor_plugin_read section skills, read the selected Skill, verify that its mount is read-only, save the exact Skill in skill.txt, and finish with route verify."}},
         "ops":{
             "gate":{"run":"sh -c 'set -eu; : > gate-entered; while [ ! -e proceed ]; do sleep 0.05; done'"},
-            "verify":{"run":"sh -c 'set -eu; cat /in/worker/skill.txt > verified.txt'"}
+            "verify":{"writes":["verified.txt"],"run":"sh -c 'set -eu; cat /in/worker/skill.txt > verified.txt'"}
         },
         "nodes":[{"id":"gate","op":"gate"},{"id":"worker","agent":"worker","plugins":["demo"]},{"id":"verify","op":"verify"}],
         "edges":[{"from":"gate","to":"worker"},{"from":"worker","to":"verify"}]
@@ -48,7 +48,7 @@ fn a_library_update_during_a_run_reaches_native_execution_with_current_skills() 
                 "set -eu; cat /plugins/demo/skills/current/SKILL.md > skill.txt; test \"$(cat skill.txt)\" = fixture-installed-instructions-v2; if printf corrupt >> /plugins/demo/skills/current/SKILL.md 2>/dev/null; then exit 7; fi; cat skill.txt",
             )
             .after(REPLACEMENT),
-            complete("verify").after(REPLACEMENT),
+            complete("verify").files(&["skill.txt"]).after(REPLACEMENT),
         ],
     );
     let host = Host::new(&json!({
@@ -102,13 +102,7 @@ fn a_library_update_during_a_run_reaches_native_execution_with_current_skills() 
         installed.digest
     );
     assert!(provider.requests().is_empty());
-    let work = root.join("work").join(run);
-    let gate_marker = goose::file_inventory(&work)
-        .into_iter()
-        .find(|file| file["path"].as_str().unwrap().ends_with("/gate-entered"))
-        .expect("the Op gate owns its workspace marker");
-    let gate_workspace = work.join(gate_marker["path"].as_str().unwrap());
-    let gate_workspace = gate_workspace.parent().unwrap();
+    let gate_workspace = host.base.workspace(run, "gate");
     fs::remove_dir_all(source.join("skills/demo")).unwrap();
     fs::create_dir_all(source.join("skills/current")).unwrap();
     fs::write(source.join("skills/current/SKILL.md"), REPLACEMENT).unwrap();

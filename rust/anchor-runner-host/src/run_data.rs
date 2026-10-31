@@ -11,7 +11,7 @@ use crate::host_fs::invocation_stem as key_hash;
 use anchor_runtime::graph::{GraphRunRecord, InvocationKey};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 fn owns_invocation(record: &GraphRunRecord, key: &InvocationKey) -> bool {
     key.run_id == record.run_id
@@ -281,22 +281,6 @@ fn remove_assistant_file_if_exists(path: &Path) -> Result<(), String> {
     remove_file_if_exists(path)
 }
 
-/// Frozen artifact locations for a Run, including legacy completion files.
-/// Only ids that are a single safe path component are considered.
-pub(crate) fn artifact_paths(record: &GraphRunRecord, artifacts_root: &Path) -> Vec<PathBuf> {
-    let mut paths = Vec::new();
-    for result in record.results.values().flatten() {
-        let id = result.commit.id.as_str();
-        if anchor_runtime::identifier::is_name(id) {
-            paths.push(artifacts_root.join(id));
-            paths.push(artifacts_root.join(format!("{id}.json")));
-        }
-    }
-    paths.sort();
-    paths.dedup();
-    paths
-}
-
 fn remove_io_recovery_intents(data_root: &Path, stem: &str) {
     let directory = data_root.join("io-harness").join("facts");
     let Ok(entries) = std::fs::read_dir(&directory) else {
@@ -311,8 +295,9 @@ fn remove_io_recovery_intents(data_root: &Path, stem: &str) {
     }
 }
 
-/// Delete every durable artifact, fact, io-harness store (including WAL/SHM and
-/// recovery sidecars), and workspace owned by this Run. Missing files are fine.
+/// Delete execution facts and io-harness stores (including WAL/SHM and
+/// recovery sidecars), and default workspace owned by this Run. Shared resource
+/// scenes have an independent lifecycle. Missing files are fine.
 pub(crate) fn delete_run_data(
     record: &GraphRunRecord,
     extra_keys: &[InvocationKey],
@@ -320,6 +305,9 @@ pub(crate) fn delete_run_data(
     workspace_root: &Path,
 ) -> Result<(), String> {
     let bindings = assistant_bindings(record, extra_keys, data_root)?;
+    crate::workspaces::Workspaces::new(workspace_root.into())
+        .release_run(&record.run_id)
+        .map_err(|error| error.to_string())?;
     crate::assistant_plugins::cleanup(data_root, record)?;
     let mut turns = bindings
         .iter()
@@ -403,13 +391,6 @@ pub(crate) fn delete_run_data(
             );
         }
         remove_io_recovery_intents(data_root, &io_stem);
-    }
-    for path in artifact_paths(record, &data_root.join("artifacts")) {
-        if path.is_dir() {
-            std::fs::remove_dir_all(&path).map_err(|error| error.to_string())?;
-        } else if path.exists() {
-            std::fs::remove_file(&path).map_err(|error| error.to_string())?;
-        }
     }
     if anchor_runtime::identifier::is_name(&record.run_id) {
         crate::channel_inputs::remove(data_root, &record.run_id)?;

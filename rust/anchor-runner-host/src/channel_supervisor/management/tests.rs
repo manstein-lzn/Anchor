@@ -45,6 +45,7 @@ printf '%s' "$ANCHOR_API_KEY" > "$o/callback"
 printf '%s' "$ANCHOR_CHANNEL_WEBHOOK_URL" > "$o/webhook"
 printf '%s' "$ANCHOR_WECOM_USERS" > "$o/users"
 printf '%s' "$ANCHOR_WECOM_SEND_USERS" > "$o/send-users"
+printf '%s' "$$" > "$o/pid"
 printf 'x' >> "$o/starts"
 trap 'printf stopped > "$o/stopped"; exit 0' TERM
 while :; do sleep 0.02; done
@@ -464,6 +465,11 @@ async fn bindings_reload_per_graph_and_reject_another_owner_or_live_rebinding() 
 
 #[tokio::test]
 async fn concurrent_enables_start_one_gateway_and_disabling_waits_for_shutdown() {
+    use tokio::{
+        io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+        net::UnixListener,
+    };
+
     let _guard = crate::PROCESS_ENV_LOCK.lock().await;
     let _environment = Environment::cleared(FIELDS);
     let fixture = Fixture::new();
@@ -472,11 +478,71 @@ async fn concurrent_enables_start_one_gateway_and_disabling_waits_for_shutdown()
         fixture.adapter.set_enabled("local", "alpha", true),
         fixture.adapter.set_enabled("local", "alpha", true)
     );
-    first.unwrap();
-    second.unwrap();
+    let first = first.unwrap();
+    let second = second.unwrap();
+    assert_eq!(first["changed"], true);
+    assert_eq!(second["changed"], false);
+    assert_eq!(second["listener"], "connecting");
+    assert_eq!(second["restart_required"], false);
     fixture.wait_for("alpha", "starts").await;
     let previous_key = fixture.read("alpha", "callback");
     assert_eq!(fixture.read("alpha", "starts"), "x");
+    // The control endpoint becomes available after process startup. Its live
+    // readiness wins over the supervisor's initial connecting observation.
+    let directory = super::super::state_directory(&fixture.root.path().join("state"), "alpha");
+    let socket = directory.join("control.sock");
+    let control = UnixListener::bind(&socket).unwrap();
+    fs::write(
+        directory.join("control.json"),
+        json!({"socket":socket,"token":"fixture-control"}).to_string(),
+    )
+    .unwrap();
+    let (live_status, observed) = tokio::sync::watch::channel("authenticated");
+    let control_task = tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = control.accept().await.unwrap();
+            let mut request = String::new();
+            BufReader::new(&mut stream)
+                .read_line(&mut request)
+                .await
+                .unwrap();
+            assert_eq!(
+                serde_json::from_str::<Value>(&request).unwrap()["token"],
+                "fixture-control"
+            );
+            let response = format!("{{\"status\":\"{}\"}}\n", *observed.borrow());
+            stream.write_all(response.as_bytes()).await.unwrap();
+        }
+    });
+    for expected in ["authenticating", "authenticated", "reconnecting"] {
+        live_status.send_replace(expected);
+        let unchanged = fixture
+            .adapter
+            .set_enabled("local", "alpha", true)
+            .await
+            .unwrap();
+        assert_eq!(unchanged["listener"], expected);
+        assert_eq!(unchanged["changed"], false);
+        assert_eq!(unchanged["restart_required"], false);
+    }
+    control_task.abort();
+    let _ = control_task.await;
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while status(&fixture, "alpha").await["listener"] != "unavailable" {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(status(&fixture, "alpha").await["restart_required"], true);
+    let repaired = fixture
+        .adapter
+        .set_enabled("local", "alpha", true)
+        .await
+        .unwrap();
+    assert_eq!(repaired["changed"], true);
+    assert_eq!(repaired["listener"], "connecting");
+    assert!(fixture.adapter.callback(&previous_key).is_some());
     let (disabled, enabled) = tokio::join!(
         fixture.adapter.set_enabled("local", "alpha", false),
         fixture.adapter.set_enabled("local", "alpha", true)
@@ -490,6 +556,122 @@ async fn concurrent_enables_start_one_gateway_and_disabling_waits_for_shutdown()
         .await
         .unwrap();
     assert_eq!(status(&fixture, "alpha").await["listener"], "stopped");
+}
+
+#[tokio::test]
+async fn a_gateway_outlives_the_pilot_executor_that_enabled_it_and_still_restarts() {
+    let _guard = crate::PROCESS_ENV_LOCK.lock().await;
+    let _environment = Environment::cleared(FIELDS);
+    let fixture = Fixture::new();
+    fixture.prepare("alpha", "alice", "alpha-bot").await;
+    fixture.prepare("beta", "bob", "beta-bot").await;
+    fixture
+        .adapter
+        .set_enabled("local", "beta", true)
+        .await
+        .unwrap();
+    fixture.wait_for("beta", "starts").await;
+    let adapter = fixture.adapter.clone();
+    let observed = fixture.observed("alpha", "starts");
+    // Pilot executes a Turn on its own current-thread runtime and destroys it
+    // when the Turn ends. The Host adapter was opened on the outer runtime.
+    tokio::task::spawn_blocking(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            adapter.set_enabled("local", "alpha", true).await.unwrap();
+            tokio::time::timeout(Duration::from_secs(3), async {
+                while !observed.is_file() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+        });
+    })
+    .await
+    .unwrap();
+    let pid =
+        rustix::process::Pid::from_raw(fixture.read("alpha", "pid").parse().unwrap()).unwrap();
+    // Even a subsequent process failure must be recovered after Pilot ends.
+    let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while fixture.read("alpha", "starts").len() < 2 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the gateway lost its supervisor when the Pilot executor ended");
+    assert_eq!(
+        fixture.read("beta", "starts"),
+        "x",
+        "another bot must stay connected"
+    );
+    assert_eq!(status(&fixture, "alpha").await["enabled"], true);
+    fixture.adapter.shutdown().await;
+}
+
+#[tokio::test]
+async fn enabling_a_bot_with_a_finished_supervisor_repairs_it_without_changing_its_binding() {
+    let _guard = crate::PROCESS_ENV_LOCK.lock().await;
+    let _environment = Environment::cleared(FIELDS);
+    let fixture = Fixture::new();
+    fixture.prepare("alpha", "alice", "alpha-bot").await;
+    fixture
+        .adapter
+        .set_enabled("local", "alpha", true)
+        .await
+        .unwrap();
+    fixture.wait_for("alpha", "starts").await;
+    let key = fixture.read("alpha", "callback");
+    let path = fixture.adapter.root.join("graphs/alpha.json");
+    let saved = fs::read(&path).unwrap();
+    {
+        let supervisors = fixture.adapter.supervisors.lock().await;
+        let task = supervisors.get("alpha").unwrap().task.as_ref().unwrap();
+        task.abort();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !task.is_finished() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        // Keep the finished handle in the map: its presence is not health.
+    }
+    let stopped = status(&fixture, "alpha").await;
+    assert_eq!(stopped["enabled"], true);
+    assert_eq!(stopped["listener"], "unavailable");
+    assert_eq!(stopped["restart_required"], true);
+    let repaired = fixture
+        .adapter
+        .set_enabled("local", "alpha", true)
+        .await
+        .unwrap();
+    assert_eq!(repaired["changed"], true);
+    assert_eq!(repaired["listener"], "connecting");
+    assert_eq!(repaired["restart_required"], false);
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while fixture.read("alpha", "starts").len() < 2 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(fs::read(path).unwrap(), saved);
+    assert_eq!(fixture.read("alpha", "callback"), key);
+    assert!(fixture.adapter.callback(&key).is_some());
+    assert_eq!(
+        fixture
+            .adapter
+            .set_enabled("local", "alpha", true)
+            .await
+            .unwrap()["changed"],
+        false
+    );
+    fixture.adapter.shutdown().await;
 }
 
 #[tokio::test]

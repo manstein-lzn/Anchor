@@ -1,4 +1,8 @@
 //! Real subprocess + Bubblewrap acceptance, with no model/provider dependency.
+#[allow(dead_code)]
+#[path = "support/runtime_fixture.rs"]
+mod fixture;
+
 use anchor_kernel::{FileStore, Resource, Store};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -10,13 +14,13 @@ use std::{
     time::{Duration, Instant},
 };
 
-fn graph(commands: &[(&str, &str)]) -> Value {
+fn graph(commands: &[(&str, &str, &[&str])]) -> Value {
     let mut ops = serde_json::Map::new();
-    for (name, command) in commands {
-        ops.insert((*name).into(), json!({"run":command}));
+    for (name, command, writes) in commands {
+        ops.insert((*name).into(), json!({"run":command,"writes":writes}));
     }
     json!({"objective":"native file pipeline","entry":commands[0].0,"ops":ops,
-        "nodes":commands.iter().map(|(name,_)|json!({"id":name,"op":name})).collect::<Vec<_>>(),
+        "nodes":commands.iter().map(|(name,_,_)|json!({"id":name,"op":name})).collect::<Vec<_>>(),
         "edges":commands.windows(2).map(|pair|json!({"from":pair[0].0,"to":pair[1].0})).collect::<Vec<_>>()})
 }
 fn spawn(root: &Path, graph: &Value, run: &str) -> Child {
@@ -77,38 +81,53 @@ fn record(root: &Path, run: &str) -> Value {
 }
 
 fn workspace(root: &Path, key: &Value) -> std::path::PathBuf {
+    let run = key["run_id"].as_str().unwrap();
+    let node = key["node_id"].as_str().unwrap();
+    if root
+        .join("work")
+        .join(run)
+        .join(".node-workspaces")
+        .join(format!("{:x}", Sha256::digest(node.as_bytes())))
+        .join("binding.json")
+        .exists()
+    {
+        return fixture::workspace_path(&root.join("work"), run, node);
+    }
     let identity = format!(
-        "{}:{}:{}:{}",
-        key["run_id"].as_str().unwrap(),
+        "{}\0{}\0{}",
+        run,
         key["graph_digest"].as_str().unwrap(),
-        key["node_id"].as_str().unwrap(),
-        key["invocation"].as_u64().unwrap()
+        node,
     );
     root.join("work")
-        .join(key["run_id"].as_str().unwrap())
-        .join(format!("{:x}", Sha256::digest(identity.as_bytes())))
+        .join(".resources")
+        .join(format!("wr1-{:x}", Sha256::digest(identity.as_bytes())))
+        .join("files")
 }
 fn file(root: &Path, record: &Value, node: &str, name: &str) -> Vec<u8> {
     let id = record["results"][node][0]["commit"]["id"].as_str().unwrap();
-    fs::read(
-        root.join("state/artifacts")
-            .join(id)
-            .join("files")
-            .join(name),
-    )
-    .unwrap()
+    fixture::artifact_file(&root.join("state/artifacts").join(id), name)
 }
 
 #[test]
 fn serial_bundle_transfers_exact_readonly_snapshots_and_reloads_without_reexecution() {
     let root = tempfile::tempdir().unwrap();
     let graph = graph(&[
-        ("producer", "sh -c 'printf native-evidence > source.txt'"),
+        (
+            "producer",
+            "sh -c 'printf native-evidence > source.txt'",
+            &["source.txt"],
+        ),
         (
             "transform",
             "sh -c 'if printf corrupt > /in/producer/source.txt; then exit 4; fi; cat /in/producer/source.txt > report.txt'",
+            &["report.txt"],
         ),
-        ("verify", "sh -c 'cat /in/transform/report.txt > final.txt'"),
+        (
+            "verify",
+            "sh -c 'cat /in/transform/report.txt > final.txt'",
+            &["final.txt"],
+        ),
     ]);
     let response = finish(spawn(root.path(), &graph, "serial"));
     assert_eq!(response["projection"]["outcome"], "done", "{response}");
@@ -141,7 +160,7 @@ fn serial_bundle_transfers_exact_readonly_snapshots_and_reloads_without_reexecut
 #[test]
 fn known_failure_stops_the_pipeline_and_does_not_create_downstream_workspace() {
     let root = tempfile::tempdir().unwrap();
-    let graph = graph(&[("fail", "false"), ("never", "true")]);
+    let graph = graph(&[("fail", "false", &[]), ("never", "true", &[])]);
     let response = finish(spawn(root.path(), &graph, "failure"));
     assert_eq!(response["projection"]["outcome"], "failed", "{response}");
     let saved = record(root.path(), "failure");
@@ -162,8 +181,9 @@ fn an_op_that_exits_zero_without_its_declared_outputs_fails() {
         (
             "nested",
             "sh -c 'mkdir -p out && printf x > out/report.json && mkdir data'",
+            &["report.json", "data"],
         ),
-        ("never", "true"),
+        ("never", "true", &[]),
     ]);
     graph["ops"]["nested"]["writes"] = json!(["report.json", "data"]);
     graph["ops"]["never"]["reads"] = json!(["report.json"]);
@@ -171,7 +191,7 @@ fn an_op_that_exits_zero_without_its_declared_outputs_fails() {
     assert_eq!(response["projection"]["outcome"], "failed", "{response}");
     let reason = response.to_string();
     assert!(
-        reason.contains("declared output(s) missing from /workspace: `report.json`"),
+        reason.contains("selected delivery path does not exist: report.json"),
         "{response}"
     );
     // A declared directory that exists counts as written.
@@ -192,8 +212,8 @@ fn an_op_that_exits_zero_without_its_declared_outputs_fails() {
 fn killed_host_keeps_unknown_node_effects_and_never_replays_them() {
     let root = tempfile::tempdir().unwrap();
     let graph = graph(&[
-        ("slow", "sh -c 'printf once >> attempts.txt; sleep 20'"),
-        ("never", "true"),
+        ("slow", "sh -c 'printf once >> attempts.txt; sleep 20'", &[]),
+        ("never", "true", &[]),
     ]);
     let mut child = spawn(root.path(), &graph, "interrupted");
     let deadline = Instant::now() + Duration::from_secs(10);

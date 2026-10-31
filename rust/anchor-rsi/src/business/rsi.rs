@@ -1,8 +1,9 @@
 use super::{
-    array, copy, digest, git_head, object, read, relative, required, text, verify_commit,
-    write_json,
+    array, artifact_identity, artifact_object, artifact_text, copy_artifact, digest, object, read,
+    relative, required, text, verify_artifact, write_json,
 };
 use crate::evidence::{Entry, safe_path};
+use anchor_runtime::artifact::{ARTIFACT_DESCRIPTOR_FILE, ArtifactDescriptor};
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -207,18 +208,28 @@ fn references(
                 .strip_prefix("/in/")
                 .ok_or("evidence path must begin with /in/")?;
             required(reference, "locator")?;
-            let path = relative(inputs, path)?;
-            if coverage && path.is_dir() {
+            let resolved = relative(inputs, path)?;
+            if coverage && resolved.is_dir() {
                 continue;
             }
-            read(&path)?;
+            let (node, name) = path
+                .split_once('/')
+                .ok_or("evidence needs an input file path")?;
+            let directory = inputs.join(node);
+            let descriptor = ArtifactDescriptor::read(&directory)
+                .map_err(|reason| format!("/in/{path}: {reason}"))?;
+            if name != ARTIFACT_DESCRIPTOR_FILE {
+                descriptor
+                    .read_file(&directory, name)
+                    .map_err(|reason| format!("/in/{path}: {reason}"))?;
+            }
         }
     }
     Ok(())
 }
 
 fn joined(inputs: &Path, manifest: &str, expected: usize) -> Result<Vec<(String, Value)>, String> {
-    let value = object(&inputs.join(manifest).join("join.json"))?;
+    let value = artifact_object(&inputs.join(manifest), "join.json")?;
     let branches = array(&value, "branches")?;
     if branches.len() != expected {
         return Err(format!("{manifest} requires exactly {expected} branches"));
@@ -241,7 +252,7 @@ fn joined(inputs: &Path, manifest: &str, expected: usize) -> Result<Vec<(String,
         let commit = records[0]
             .get("commit")
             .ok_or("join branch has no commit")?;
-        verify_commit(&directory, commit, name)?;
+        verify_artifact(&directory, commit, name)?;
         commits.push((name.into(), commit.clone()));
     }
     Ok(commits)
@@ -250,7 +261,7 @@ fn joined(inputs: &Path, manifest: &str, expected: usize) -> Result<Vec<(String,
 fn validate_audits(inputs: &Path, frozen: Option<&FrozenEvidence>) -> Result<(), String> {
     let mut domains = BTreeSet::new();
     for (name, _) in joined(inputs, "audit-join", DOMAINS.len())? {
-        let data = object(&inputs.join(&name).join("findings.json"))?;
+        let data = artifact_object(&inputs.join(&name), "findings.json")?;
         let domain = required(&data, "domain")?;
         if !DOMAINS.contains(&domain) || !domains.insert(domain.to_owned()) {
             return Err("unknown or duplicate specialist domain".into());
@@ -311,11 +322,11 @@ fn collect_ids(value: &Value, ids: &mut BTreeSet<String>) {
 }
 
 fn validate_proposals(inputs: &Path, frozen: Option<&FrozenEvidence>) -> Result<(), String> {
-    let evolution = object(&inputs.join("analyze/evolution.json"))?;
+    let evolution = artifact_object(&inputs.join("analyze"), "evolution.json")?;
     let index = if let Some(frozen) = frozen {
         frozen.index.clone()
     } else {
-        object(&inputs.join("collect/evidence/index.json"))?
+        artifact_object(&inputs.join("collect"), "evidence/index.json")?
     };
     let window = json!({"start":index["window_start"],"end_exclusive":index["window_end"]});
     if window["start"].is_null() || window["end_exclusive"].is_null() {
@@ -391,7 +402,7 @@ fn validate_proposals(inputs: &Path, frozen: Option<&FrozenEvidence>) -> Result<
     } else {
         let mut ids = BTreeSet::new();
         collect_ids(
-            &object(&inputs.join("collect/evidence/previous.json"))?,
+            &artifact_object(&inputs.join("collect"), "evidence/previous.json")?,
             &mut ids,
         );
         ids
@@ -406,15 +417,15 @@ fn validate_proposals(inputs: &Path, frozen: Option<&FrozenEvidence>) -> Result<
 }
 
 fn safety_issues(inputs: &Path) -> Result<Vec<Value>, String> {
-    let value = object(&inputs.join("analyze/evolution.json"))?.to_string()
+    let value = artifact_object(&inputs.join("analyze"), "evolution.json")?.to_string()
         + "\n"
-        + &text(&inputs.join("analyze/rsi-report.md"))?;
+        + &artifact_text(&inputs.join("analyze"), "rsi-report.md")?;
     Ok(UNSAFE.iter().chain(OVERSTRONG.iter()).filter(|phrase| value.contains(**phrase))
         .map(|phrase| json!({"id":format!("safety/{phrase}"),"status":"open","domain":"report","location":"evolution.json/rsi-report.md","evidence":phrase,"required_change":"保留权限、脱敏和证据保护；限定主张范围，不以扩大暴露或无依据的历史首次/完备因果断言放行","acceptance":"提案和报告保留保护边界与可核查事实范围"})).collect())
 }
 
 pub fn aggregate(inputs: &Path, previous: &Value) -> Result<Value, String> {
-    let commit = git_head(&inputs.join("analyze"))?;
+    let artifact = artifact_identity(&inputs.join("analyze"))?;
     let mut checks = CHECKS
         .iter()
         .map(|key| ((*key).into(), Value::Bool(false)))
@@ -435,10 +446,10 @@ pub fn aggregate(inputs: &Path, previous: &Value) -> Result<Value, String> {
         }
         let mut decisions = Vec::new();
         for (name, joined_commit) in branches {
-            let review = object(&inputs.join(&name).join("review.json"))?;
-            if review["reviewed_commit"] != commit {
+            let review = artifact_object(&inputs.join(&name), "review.json")?;
+            if review["reviewed_artifact"] != artifact {
                 return Err(format!(
-                    "{name}: reviewed_commit differs from current analysis"
+                    "{name}: reviewed_artifact differs from current analysis"
                 ));
             }
             let decision = required(&review, "decision")?;
@@ -464,7 +475,7 @@ pub fn aggregate(inputs: &Path, previous: &Value) -> Result<Value, String> {
                 checks.insert(key.into(), owned[key].clone());
             }
             required(&review, "summary")?;
-            if text(&inputs.join(&name).join("review.md"))?
+            if artifact_text(&inputs.join(&name), "review.md")?
                 .trim()
                 .is_empty()
             {
@@ -503,7 +514,7 @@ pub fn aggregate(inputs: &Path, previous: &Value) -> Result<Value, String> {
                 return Err("a reviewer cannot approve open issues or failed checks".into());
             }
             decisions.push(decision.to_owned());
-            reviewers.push(json!({"node":name,"commit":joined_commit,"reviewed_commit":commit,"decision":decision}));
+            reviewers.push(json!({"node":name,"artifact":joined_commit,"reviewed_artifact":artifact,"decision":decision}));
             summaries.push(format!("{name}: {}", required(&review, "summary")?));
         }
         if decisions.iter().any(|decision| decision == "reaudit") {
@@ -527,7 +538,7 @@ pub fn aggregate(inputs: &Path, previous: &Value) -> Result<Value, String> {
         }
     };
     Ok(
-        json!({"decision":decision,"reviewed_commit":commit,"checks":checks,"issues":issues,"reviewers":reviewers,"summary":summaries.join("\n")}),
+        json!({"decision":decision,"reviewed_artifact":artifact,"checks":checks,"issues":issues,"reviewers":reviewers,"summary":summaries.join("\n")}),
     )
 }
 
@@ -545,7 +556,10 @@ pub fn evaluate(inputs: &Path, frozen: Option<&FrozenEvidence>) -> (String, Vec<
     }
     let result = (|| -> Result<(), String> {
         for name in ["rsi-report.md", "evolution.json", "sources.md"] {
-            if text(&inputs.join("analyze").join(name))?.trim().is_empty() {
+            if artifact_text(&inputs.join("analyze"), name)?
+                .trim()
+                .is_empty()
+            {
                 return Err(format!("missing nonempty {name}"));
             }
         }
@@ -554,9 +568,9 @@ pub fn evaluate(inputs: &Path, frozen: Option<&FrozenEvidence>) -> (String, Vec<
         if !safety.is_empty() {
             return Err(format!("proposal safety/scope gate refused: {safety:?}"));
         }
-        let review = object(&inputs.join("review/review.json"))?;
-        if review["reviewed_commit"] != git_head(&inputs.join("analyze"))? {
-            return Err("review does not correspond to current analysis commit".into());
+        let review = artifact_object(&inputs.join("review"), "review.json")?;
+        if review["reviewed_artifact"] != artifact_identity(&inputs.join("analyze"))? {
+            return Err("review does not correspond to current analysis Artifact".into());
         }
         if frozen.is_some() {
             if review["passed"] != true || !array(&review, "issues")?.is_empty() {
@@ -579,19 +593,22 @@ pub fn evaluate(inputs: &Path, frozen: Option<&FrozenEvidence>) -> (String, Vec<
             let recomputed = aggregate(inputs, &json!({}))?;
             for field in [
                 "decision",
-                "reviewed_commit",
+                "reviewed_artifact",
                 "checks",
                 "issues",
                 "reviewers",
             ] {
                 if review[field] != recomputed[field] {
                     return Err(
-                        "combined review differs from its independent commit-bound inputs".into(),
+                        "combined review differs from its independent Artifact-bound inputs".into(),
                     );
                 }
             }
         }
-        if text(&inputs.join("review/review.md"))?.trim().is_empty() {
+        if artifact_text(&inputs.join("review"), "review.md")?
+            .trim()
+            .is_empty()
+        {
             return Err("human-readable review is missing".into());
         }
         Ok(())
@@ -599,14 +616,14 @@ pub fn evaluate(inputs: &Path, frozen: Option<&FrozenEvidence>) -> (String, Vec<
     match result {
         Ok(()) => (
             "publish".into(),
-            vec!["review, branch commits, evidence and proposal continuity verified".into()],
+            vec!["review, branch Artifacts, evidence and proposal continuity verified".into()],
         ),
         Err(reason) => {
             let reaudit = frozen.is_none()
-                && object(&inputs.join("review/review.json")).is_ok_and(|review| {
+                && artifact_object(&inputs.join("review"), "review.json").is_ok_and(|review| {
                     review["decision"] == "reaudit"
-                        && git_head(&inputs.join("analyze"))
-                            .is_ok_and(|head| review["reviewed_commit"] == head)
+                        && artifact_identity(&inputs.join("analyze"))
+                            .is_ok_and(|artifact| review["reviewed_artifact"] == artifact)
                 });
             (
                 (if reaudit { "audit-context" } else { "analyze" }).into(),
@@ -646,22 +663,24 @@ pub fn assemble(
         return Err(format!("publication refused: {}", reasons.join("; ")));
     }
     for name in ["rsi-report.md", "evolution.json", "sources.md"] {
-        copy(&inputs.join("analyze").join(name), &output.join(name))?;
+        copy_artifact(&inputs.join("analyze"), name, &output.join(name))?;
     }
     for name in ["review.json", "review.md"] {
-        copy(&inputs.join("review").join(name), &output.join(name))?;
+        copy_artifact(&inputs.join("review"), name, &output.join(name))?;
     }
-    copy(
-        &inputs.join("audit-join/join.json"),
+    copy_artifact(
+        &inputs.join("audit-join"),
+        "join.json",
         &output.join("audit-manifest.json"),
     )?;
     if frozen.is_none() {
-        copy(
-            &inputs.join("review-join/join.json"),
+        copy_artifact(
+            &inputs.join("review-join"),
+            "join.json",
             &output.join("review-manifest.json"),
         )?;
     }
-    copy(&inputs.join("gate/gate.txt"), &output.join("gate.txt"))?;
+    copy_artifact(&inputs.join("gate"), "gate.txt", &output.join("gate.txt"))?;
     Ok(())
 }
 

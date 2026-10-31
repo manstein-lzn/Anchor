@@ -112,6 +112,8 @@ fn admission_options() -> AdmissionOptions {
         trigger: Default::default(),
         pilot: None,
         oauth_owner: None,
+        workspace_bindings: Default::default(),
+        workspace_root: None,
     }
 }
 

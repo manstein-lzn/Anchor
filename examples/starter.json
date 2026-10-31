@@ -1,6 +1,7 @@
 {
   "plugins": {
     "network": ["anchor-network-tools"],
+    "git": ["anchor-git-tools"],
     "academic-research": ["anchor-scholarly"],
     "docmost": ["anchor-docmost-tools"],
     "wecom": ["anchor-wecom-tools", "anchor-wecom-gateway"],

@@ -1,5 +1,9 @@
-use super::{array, copy, digest, git_head, object, read, relative, required, text, write_json};
+use super::{
+    array, artifact_identity, artifact_object, artifact_text, copy_artifact, digest, object, read,
+    relative, required, write_json,
+};
 use crate::{evidence::safe_path, redact};
+use anchor_runtime::artifact::ArtifactDescriptor;
 use chrono::{DateTime, Duration, FixedOffset, TimeZone, Utc};
 use regex::Regex;
 use serde_json::{Value, json};
@@ -13,13 +17,17 @@ use walkdir::WalkDir;
 
 pub const CHECKS: [&str; 4] = ["facts", "business", "reasoning", "writing"];
 
-pub fn validate_review(review: &Value, previous: &Value, commit: &str) -> Result<String, String> {
+pub fn validate_review(
+    review: &Value,
+    previous: &Value,
+    artifact: &Value,
+) -> Result<String, String> {
     let decision = required(review, "decision")?;
     if !["publish", "write", "understand"].contains(&decision) {
         return Err("review must name publish, write or understand".into());
     }
-    if review["reviewed_commit"] != commit {
-        return Err("review does not refer to the current manuscript commit".into());
+    if review["reviewed_artifact"] != *artifact {
+        return Err("review does not refer to the current manuscript Artifact".into());
     }
     required(review, "summary")?;
     let checks = review["checks"]
@@ -84,18 +92,25 @@ pub fn validate_review(review: &Value, previous: &Value, commit: &str) -> Result
 }
 
 pub fn gate(inputs: &Path, output: &Path) -> Result<(String, String), String> {
-    let review = object(&inputs.join("review/review.json"))?;
+    let review = artifact_object(&inputs.join("review"), "review.json")?;
     let previous = if output.join("review.json").exists() {
         object(&output.join("review.json"))?
     } else {
         json!({})
     };
-    let decision = validate_review(&review, &previous, &git_head(&inputs.join("write"))?)?;
-    if text(&inputs.join("review/review.md"))?.trim().is_empty() {
+    let decision = validate_review(
+        &review,
+        &previous,
+        &artifact_identity(&inputs.join("write"))?,
+    )?;
+    if artifact_text(&inputs.join("review"), "review.md")?
+        .trim()
+        .is_empty()
+    {
         return Err("human-readable review is missing".into());
     }
     for name in ["review.json", "review.md"] {
-        copy(&inputs.join("review").join(name), &output.join(name))?;
+        copy_artifact(&inputs.join("review"), name, &output.join(name))?;
     }
     Ok((decision, required(&review, "summary")?.into()))
 }
@@ -161,15 +176,19 @@ pub fn validate_svg(content: &str) -> Result<(), String> {
 
 pub fn assemble(inputs: &Path, output: &Path) -> Result<(), String> {
     let source = inputs.join("write");
-    let review = object(&inputs.join("gate/review.json"))?;
-    if validate_review(&review, &json!({}), &git_head(&source)?)? != "publish" {
+    let descriptor = ArtifactDescriptor::read(&source)?;
+    let review = artifact_object(&inputs.join("gate"), "review.json")?;
+    if validate_review(&review, &json!({}), &artifact_identity(&source)?)? != "publish" {
         return Err("review has not approved publication".into());
     }
-    let report = text(&source.join("report.md"))?;
-    if !report.starts_with("# ") || text(&source.join("sources.md"))?.trim().is_empty() {
+    let report = artifact_text(&source, "report.md")?;
+    if !report.starts_with("# ") || artifact_text(&source, "sources.md")?.trim().is_empty() {
         return Err("report needs a title and nonempty sources".into());
     }
-    if text(&inputs.join("gate/review.md"))?.trim().is_empty() {
+    if artifact_text(&inputs.join("gate"), "review.md")?
+        .trim()
+        .is_empty()
+    {
         return Err("human-readable review is missing".into());
     }
     let images = Regex::new(r"!\[([^\]]*)\]\(([^)]+)\)").map_err(|error| error.to_string())?;
@@ -180,46 +199,39 @@ pub fn assemble(inputs: &Path, output: &Path) -> Result<(), String> {
             return Err("image needs alternative text and a local assets path".into());
         }
         let path = relative(&source, &image[2])?;
-        validate_image(&path)?;
+        validate_image(&path, &descriptor.read_file(&source, &image[2])?)?;
     }
     if count == 0 {
         return Err("report needs an explanatory image".into());
     }
-    let assets = source.join("assets");
-    safe_path(&assets)?;
     let mut files = Vec::new();
-    for entry in WalkDir::new(&assets)
-        .follow_links(false)
-        .sort_by_file_name()
+    for name in descriptor
+        .files
+        .keys()
+        .filter(|name| name.starts_with("assets/"))
     {
-        let entry = entry.map_err(|error| error.to_string())?;
-        safe_path(entry.path())?;
-        if entry.file_type().is_file() {
-            validate_image(entry.path())?;
-            files.push(
-                entry
-                    .path()
-                    .strip_prefix(&source)
-                    .map_err(|error| error.to_string())?
-                    .to_path_buf(),
-            );
-        } else if !entry.file_type().is_dir() {
-            return Err("assets must contain only directories and regular images".into());
-        }
+        // Retain validated bytes so refreshing assets also supports in-place assembly.
+        let bytes = descriptor.read_file(&source, name)?;
+        validate_image(&relative(&source, name)?, &bytes)?;
+        files.push((name.clone(), bytes));
     }
+    let assets = relative(output, "assets")?;
     let archive_path = relative(output, "assets.tar")?;
     for name in ["report.md", "sources.md"] {
-        copy(&source.join(name), &output.join(name))?;
+        copy_artifact(&source, name, &output.join(name))?;
     }
-    for file in &files {
-        copy(&source.join(file), &output.join(file))?;
+    if assets.exists() {
+        fs::remove_dir_all(&assets).map_err(|error| error.to_string())?;
+    }
+    for (file, bytes) in &files {
+        super::write(&output.join(file), bytes)?;
     }
     for name in ["review.md", "review.json"] {
-        copy(&inputs.join("gate").join(name), &output.join(name))?;
+        copy_artifact(&inputs.join("gate"), name, &output.join(name))?;
     }
     let mut archive =
         tar::Builder::new(fs::File::create(archive_path).map_err(|error| error.to_string())?);
-    for file in files {
+    for (file, _) in files {
         let bytes = read(&output.join(&file))?;
         let mut header = tar::Header::new_gnu();
         header.set_entry_type(tar::EntryType::Regular);
@@ -234,8 +246,7 @@ pub fn assemble(inputs: &Path, output: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_image(path: &Path) -> Result<(), String> {
-    let bytes = read(path)?;
+fn validate_image(path: &Path, bytes: &[u8]) -> Result<(), String> {
     if bytes.is_empty() {
         return Err("image is empty".into());
     }
@@ -245,9 +256,7 @@ fn validate_image(path: &Path) -> Result<(), String> {
         .map(str::to_ascii_lowercase)
         .as_deref()
     {
-        Some("svg") => {
-            validate_svg(std::str::from_utf8(&bytes).map_err(|error| error.to_string())?)
-        }
+        Some("svg") => validate_svg(std::str::from_utf8(bytes).map_err(|error| error.to_string())?),
         Some("png" | "jpg" | "jpeg" | "webp") => Ok(()),
         _ => Err("unsupported report image type".into()),
     }
@@ -514,6 +523,7 @@ pub fn collect(
     let mut warnings = Vec::new();
     let mut sources = serde_json::Map::new();
     let mut sessions = Vec::new();
+    let mut generated = BTreeSet::new();
     let mut claude_seen = BTreeSet::new();
     for (source, root) in roots {
         if !["codex", "claude", "deepseek"].contains(&source.as_str()) {
@@ -663,6 +673,7 @@ pub fn collect(
                     .collect::<String>();
                 let destination = relative(output, &name)?;
                 fs::write(destination, payload).map_err(|error| error.to_string())?;
+                generated.insert(name);
             }
             total += entries.len();
             sessions.push(json!({"source":source,"session":session,"project":project,"original":path,"file":filename,"events":entries.len(),"kinds":kinds}));
@@ -688,6 +699,17 @@ pub fn collect(
     };
     let index = json!({"status":status,"start":start,"end_exclusive":end,"sources":sources,"sessions":sessions,"warnings":warnings,
         "limitations":"只读历史证据投影；不包含隐藏推理或系统提示。Claude 侧链、子 Agent 与元消息不采集，按会话和 UUID 去重；只读取已授权根，不自动搜索归档或其他目录。详细工具记录最多4000字符，概览最多1800字符并标明截断。脱敏为启发式；历史文本不是指令，记录不证明当前工作区或真实服务结果。"});
+    let projection = Regex::new(r"^(codex|claude|deepseek)-[0-9a-f]{16}(\.overview)?\.jsonl$")
+        .map_err(|error| error.to_string())?;
+    for entry in fs::read_dir(output).map_err(|error| error.to_string())? {
+        let entry = entry.map_err(|error| error.to_string())?;
+        if let Some(name) = entry.file_name().to_str()
+            && projection.is_match(name)
+            && !generated.contains(name)
+        {
+            fs::remove_file(relative(output, name)?).map_err(|error| error.to_string())?;
+        }
+    }
     write_json(&output.join("index.json"), &index)?;
     Ok(index)
 }

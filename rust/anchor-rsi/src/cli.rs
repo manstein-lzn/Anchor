@@ -128,16 +128,17 @@ async fn research(root: &Path, output: &Path) -> Result<(), String> {
         &root.join("dependencies/declarations.json"),
     )?)
     .map_err(|error| error.to_string())?;
+    let collected = business::object(&root.join("index.json"))?;
     safe_path(output)?;
-    if output.exists()
-        && fs::read_dir(output)
-            .map_err(|error| error.to_string())?
-            .next()
-            .is_some()
-    {
-        return Err("research output must be empty".into());
+    // These generated subtrees belong to research; the rest of the stable
+    // workspace remains in place. Old hashes must not enter the next delivery.
+    for name in ["files", "dependencies"] {
+        let directory = business::relative(output, name)?;
+        if directory.exists() {
+            fs::remove_dir_all(&directory).map_err(|error| error.to_string())?;
+        }
+        fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
     }
-    fs::create_dir_all(output.join("files")).map_err(|error| error.to_string())?;
     let ecosystem = Ecosystem::new()?;
     let mut entries = serde_json::Map::new();
     let mut results = Vec::new();
@@ -161,7 +162,6 @@ async fn research(root: &Path, output: &Path) -> Result<(), String> {
         ));
         results.push(value);
     }
-    let collected = business::object(&root.join("index.json"))?;
     business::write_json(
         &output.join("index.json"),
         &json!({"format":1,"captured_at":collected["captured_at"],"window_start":collected["window_start"],"window_end":collected["window_end"],"entries":entries}),
@@ -170,7 +170,7 @@ async fn research(root: &Path, output: &Path) -> Result<(), String> {
         &output.join("ecosystem.json"),
         &json!({"pages":results,"dependency_count":declarations.len()}),
     )?;
-    fs::write(output.join("sources.md"), sources).map_err(|error| error.to_string())
+    fs::write(business::relative(output, "sources.md")?, sources).map_err(|error| error.to_string())
 }
 
 pub async fn run(arguments: &[String]) -> Result<(), String> {
@@ -299,4 +299,48 @@ pub async fn run(arguments: &[String]) -> Result<(), String> {
         _ => return Err(format!("unknown command {command}\n{HELP}")),
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn research_replaces_generated_files_when_reentering_a_stable_workspace() {
+        let temp = tempfile::tempdir().unwrap();
+        let evidence = temp.path().join("evidence");
+        let output = temp.path().join("research");
+        business::write_json(&evidence.join("dependencies/declarations.json"), &json!([])).unwrap();
+        business::write_json(
+            &evidence.join("index.json"),
+            &json!({"captured_at":"2026-10-31T00:00:00Z","window_start":"2026-10-24T00:00:00Z","window_end":"2026-10-31T00:00:00Z"}),
+        )
+        .unwrap();
+        research(&evidence, &output).await.unwrap();
+        fs::write(output.join("files/obsolete.txt"), "old research").unwrap();
+        fs::write(output.join("dependencies/ecosystem-obsolete.json"), "{}").unwrap();
+        fs::write(output.join("notes.txt"), "retained workspace note").unwrap();
+
+        research(&evidence, &output).await.unwrap();
+
+        assert!(fs::read_dir(output.join("files")).unwrap().next().is_none());
+        assert!(
+            fs::read_dir(output.join("dependencies"))
+                .unwrap()
+                .next()
+                .is_none()
+        );
+        assert_eq!(
+            business::object(&output.join("index.json")).unwrap()["entries"],
+            json!({})
+        );
+        assert_eq!(
+            business::object(&output.join("ecosystem.json")).unwrap()["pages"],
+            json!([])
+        );
+        assert_eq!(
+            fs::read_to_string(output.join("notes.txt")).unwrap(),
+            "retained workspace note"
+        );
+    }
 }

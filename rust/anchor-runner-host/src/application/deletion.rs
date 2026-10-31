@@ -202,10 +202,7 @@ impl RunApplication {
             if let Some(metadata) = self.metadata(run_id)? {
                 crate::conversation_resources::retain(&self.data_root, record, &metadata)?;
                 for node in &record.progress().snapshot.nodes {
-                    if let Some(hint) = crate::node_host::conversation_hint_for(&metadata, &node.id)
-                    {
-                        conversations.insert(hint.key);
-                    }
+                    conversations.insert(metadata.node_conversation_key(&node.id));
                 }
             }
         }
@@ -294,10 +291,24 @@ impl RunApplication {
         if policy.disabled() {
             return Ok(report);
         }
+        let artifacts =
+            crate::HostArtifacts::new(self.data_root.join("artifacts"), workspace_root.into());
+        let before = artifacts
+            .storage_bytes()
+            .map_err(|error| ApplicationError::Storage(error.to_string()))?
+            + self
+                .run_views()?
+                .iter()
+                .map(|(_, view)| self.run_bytes(&view.progress(), workspace_root))
+                .collect::<Result<Vec<_>, _>>()?
+                .into_iter()
+                .sum::<u64>();
+        let collected = self.reclaim_deliveries(policy, workspace_root, now)?;
+        report.expired_artifacts = collected.expired.len();
         let mut settled = Vec::new();
-        let mut total = 0;
+        let mut total = collected.remaining_bytes;
         for (id, view) in self.run_views()? {
-            let bytes = self.run_bytes(&view.progress(), workspace_root);
+            let bytes = self.run_bytes(&view.progress(), workspace_root)?;
             total += bytes;
             // Only a settled Run that no worker holds is a candidate; a waiting
             // Run still has a human, a child or an effect that may answer it.
@@ -330,8 +341,6 @@ impl RunApplication {
             match self.delete_run(&candidate.run_id, workspace_root).await {
                 Ok(()) => {
                     report.removed += 1;
-                    report.freed_bytes += candidate.bytes;
-                    report.remaining_bytes = report.remaining_bytes.saturating_sub(candidate.bytes);
                 }
                 Err(error) => report.skipped.push((
                     candidate.run_id,
@@ -344,29 +353,47 @@ impl RunApplication {
                 )),
             }
         }
+        report.remaining_bytes = artifacts
+            .storage_bytes()
+            .map_err(|error| ApplicationError::Storage(error.to_string()))?
+            + self
+                .run_views()?
+                .iter()
+                .map(|(_, view)| self.run_bytes(&view.progress(), workspace_root))
+                .collect::<Result<Vec<_>, _>>()?
+                .into_iter()
+                .sum::<u64>();
+        report.freed_bytes = before.saturating_sub(report.remaining_bytes);
+        if policy
+            .max_bytes
+            .is_some_and(|limit| report.remaining_bytes > limit)
+        {
+            report.skipped.push((
+                "storage".into(),
+                "remaining data is retained or required by current work".into(),
+            ));
+        }
         Ok(report)
     }
 
-    /// The bytes a Run's deletion frees, by the same places it removes: its
-    /// workspaces, its artifacts and its spill. Goose process state and facts
-    /// are small beside them and left out of the estimate.
-    fn run_bytes(&self, run: &super::run_access::RunProgress<'_>, workspace_root: &Path) -> u64 {
-        let artifacts = self.data_root.join("artifacts");
-        let mut commits = run
-            .results
-            .values()
-            .flatten()
-            .map(|result| result.commit.id.as_str())
-            .filter(|id| anchor_runtime::identifier::is_name(id))
-            .collect::<Vec<_>>();
-        commits.sort();
-        commits.dedup();
-        crate::retention::size(&workspace_root.join(run.run_id))
-            + crate::retention::size(&self.data_root.join("spill").join(run.run_id))
-            + commits
-                .into_iter()
-                .map(|id| crate::retention::size(&artifacts.join(id)))
-                .sum::<u64>()
+    /// Only Run-owned working data. Artifact objects are measured once for
+    /// the entire store; explicitly shared Workspaces have their own lifecycle.
+    fn run_bytes(
+        &self,
+        run: &super::run_access::RunProgress<'_>,
+        workspace_root: &Path,
+    ) -> Result<u64, ApplicationError> {
+        let workspaces = crate::workspaces::Workspaces::new(workspace_root.into());
+        let mut bytes = crate::retention::size(&workspace_root.join(run.run_id))
+            + crate::retention::size(&self.data_root.join("spill").join(run.run_id));
+        for resource in workspaces
+            .resources()?
+            .into_iter()
+            .filter(|resource| resource.owner_run.as_deref() == Some(run.run_id))
+        {
+            bytes += crate::retention::size(&workspaces.resource_path(&resource.resource_id)?);
+        }
+        Ok(bytes)
     }
 }
 

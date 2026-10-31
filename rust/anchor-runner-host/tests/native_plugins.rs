@@ -107,8 +107,7 @@ impl Drop for BusinessFixture {
 }
 
 fn package(host: &Host, name: &str) -> PathBuf {
-    let binary = PathBuf::from(env!("CARGO_BIN_EXE_anchor-runner-host"))
-        .with_file_name(format!("anchor-{name}-tools"));
+    let binary = fixture::host_binary().with_file_name(format!("anchor-{name}-tools"));
     assert!(
         binary.is_file(),
         "Build native tools with cargo build -p anchor-wecom-tools --bins"
@@ -153,7 +152,7 @@ fn graph() -> Value {
     json!({
         "entry":"worker","agents":{"worker":{"model":goose::MODEL,"network":true,
             "instructions":"Read the mounted WeCom SKILL, query the fixture member, save the returned member in report.txt and evidence.txt, then finish with route verify."}},
-        "ops":{"verify":{"run":"sh -c 'cat /in/worker/evidence.txt > verified.txt'"}},
+        "ops":{"verify":{"writes":["verified.txt"],"run":"sh -c 'cat /in/worker/evidence.txt > verified.txt'"}},
         "nodes":[{"id":"worker","agent":"worker","plugins":["wecom"]},{"id":"verify","op":"verify"}],
         "edges":[{"from":"worker","to":"verify"}]
     })
@@ -188,7 +187,7 @@ fn native_goose_reads_plugin_skill_and_calls_rust_stdio_mcp() {
         goose::command("set -eu; cat /plugins/wecom/skills/wecom/SKILL.md > skill.txt; if printf corrupt >> /plugins/wecom/skills/wecom/SKILL.md 2>/dev/null; then exit 7; fi; printf readonly-package-confirmed"),
         goose::Step::tool("wecom-wecom_wecom_get_user", json!({"userid":"member-fixture"})).after("readonly-package-confirmed"),
         goose::command("printf 'member-fixture: Native fixture user\n' > report.txt; cp report.txt evidence.txt; cat report.txt").after("Native fixture user"),
-        goose::complete("verify").after("member-fixture: Native fixture user"),
+        goose::complete("verify").files(&["report.txt", "evidence.txt", "skill.txt"]).after("member-fixture: Native fixture user"),
 
     ]);
     let host = goose::Host::new(&graph())
@@ -289,7 +288,9 @@ fn native_goose_reaches_a_hidden_plugin_tool_through_disclosure() {
                 "printf 'member-fixture: Native fixture user\n' > evidence.txt; cat evidence.txt",
             )
             .after("member-fixture"),
-            goose::complete("verify").after("member-fixture: Native fixture user"),
+            goose::complete("verify")
+                .files(&["evidence.txt"])
+                .after("member-fixture: Native fixture user"),
         ],
     );
     let host = goose::Host::new(&graph())
@@ -354,5 +355,127 @@ fn native_goose_reaches_a_hidden_plugin_tool_through_disclosure() {
             "business_calls":calls,
             "production_calls":0
         }),
+    );
+}
+
+#[test]
+#[ignore = "requires pinned Goose binary, native Git tools and local Bubblewrap"]
+fn native_goose_maintains_a_git_worktree_shared_with_node_tools() {
+    let git = |cwd: &str, args: &[&str]| {
+        goose::Step::tool(
+            "anchor_tools_call",
+            json!({
+                "name":"git-git_git_run","arguments":{"cwd":cwd,"args":args}
+            }),
+        )
+    };
+    let provider = goose::Provider::new("goose-native-git-worktree", vec![
+        goose::Step::tool("anchor_tools", json!({"query":"git_run"})),
+        goose::Step::tool("anchor_tool_detail", json!({"name":"git-git_git_run"})).after("git-git_git_run"),
+        goose::Step::tool("anchor_plugin_read", json!({"plugin":"git","section":"skill","path":"skills/git/SKILL.md"})),
+        git(".", &["--version"]).after("git_run"),
+        git(".", &["init","--bare","remote.git"]).after("git version"),
+        git(".", &["clone","remote.git","project"]).after("exit_code"),
+        goose::Step::tool("anchor_edit", json!({"path":"project/answer.txt","content":"42\n"})).after("exit_code"),
+        goose::command("set -eu; cd project; test \"$(cat answer.txt)\" = 42; git status --short; printf 'project-test-passed\\n' > /workspace/report.txt; cat /workspace/report.txt").after("sha256_after"),
+        git("project", &["switch","-c","fix/answer"]).after("project-test-passed"),
+        git("project", &["add","--","answer.txt"]).after("exit_code"),
+        git("project", &["commit","-m","Fix answer from AgentNode"]).after("exit_code"),
+        git("project", &["push","-u","origin","fix/answer"]).after("Fix answer"),
+        // Git itself invokes the packaged helper using the Host-injected
+        // configuration; raw credentials must never reach native history.
+        goose::Step::tool("anchor_tool_detail", json!({"name":"git-https_git_run"})).after("exit_code"),
+        goose::Step::tool("anchor_tools_call", json!({"name":"git-https_git_run","arguments":{"cwd":"project","args":["-c", "alias.credential-check=!printf 'protocol=https\\nhost=git.example\\npath=team/project.git\\n\\n' | git credential fill", "credential-check"]}})).after("git-https_git_run"),
+        goose::Step::tool("anchor_tool_detail", json!({"name":"git-host_git_run"})).after("[REDACTED]"),
+        goose::Step::tool("anchor_tools_call", json!({"name":"git-host_git_run","arguments":{"args":["-c", "alias.ssh-fixture=!sh -c \"$GIT_SSH_COMMAND -G anchor-fixture\"", "ssh-fixture"]}})).after("git-host_git_run"),
+        git(".", &["--git-dir=remote.git","show","fix/answer:answer.txt"]).after("fixture.example"),
+        goose::command("set -eu; git -C project diff --exit-code; test -z \"$(git -C project status --porcelain)\"; git --git-dir=remote.git log fix/answer --format='%s|%an|%ae'; cat report.txt").after("42"),
+        goose::complete("verify").files(&["report.txt", "project/answer.txt"]).after("project-test-passed"),
+    ]);
+    let host = goose::Host::new(&json!({
+        "entry":"worker","agents":{"worker":{"model":goose::MODEL,"network":false,
+            "instructions":"Use the Git Plugin with native Git and the node workspace to develop, test, commit and push a fixture change. Never print configured credentials."}},
+        "ops":{"verify":{"writes":["verified.txt"],"run":"sh -c 'cat /in/worker/report.txt > verified.txt'"}},
+        "nodes":[{"id":"worker","agent":"worker","plugins":["git"]},{"id":"verify","op":"verify"}],
+        "edges":[{"from":"worker","to":"verify"}]
+    })).native().with_extra_environment([("ANCHOR_NODE_TOOL_DISCLOSURE","1")]);
+    let library_root = host.base.root.path().to_path_buf();
+    let host = host.with_extra_environment([("ANCHOR_RUNNER_LIBRARY_ROOT", library_root)]);
+    let source = host.base.root.path().join("checkout/git");
+    fs::create_dir_all(source.join("bin")).unwrap();
+    fs::create_dir_all(source.join("skills/git")).unwrap();
+    fs::write(
+        source.join("plugin.json"),
+        include_bytes!("../../../plugins/git/plugin.json"),
+    )
+    .unwrap();
+    fs::write(
+        source.join("skills/git/SKILL.md"),
+        include_bytes!("../../../plugins/git/skills/git/SKILL.md"),
+    )
+    .unwrap();
+    let binary = fixture::host_binary().with_file_name("anchor-git-tools");
+    assert!(binary.is_file(), "build anchor-git-tools --bins first");
+    fs::copy(binary, source.join("bin/anchor-git-tools")).unwrap();
+    anchor_library::Library::new(host.base.root.path())
+        .install_directory("git", &source, false)
+        .unwrap();
+    bind(&host.base, "git");
+    let ssh = host.base.root.path().join("operator-ssh");
+    fs::create_dir(&ssh).unwrap();
+    fs::write(ssh.join("config"), format!("Host anchor-fixture\n  HostName fixture.example\n  User fixture-user\n  IdentityFile {}/identity\n  UserKnownHostsFile {}/known_hosts\n", ssh.display(), ssh.display())).unwrap();
+    fs::create_dir_all(host.base.root.path().join("tools/git-host-ssh")).unwrap();
+    fs::write(
+        host.base.root.path().join("tools/git-host-ssh/tool.json"),
+        json!({
+            "plugin":"git", "entrypoint":"/usr/bin/ssh", "imports":[ssh]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let server = host.serve(&provider);
+    let (status, configuration) = server.request("GET", "/plugins/git/configuration", None);
+    assert_eq!(status, 200, "{configuration}");
+    let (status, configured) = server.request("PUT", "/plugins/git/configuration", Some(&json!({
+        "authorization_digest":configuration["authorization_digest"],"revision":configuration["revision"],
+        "fields":{
+            "author_name":{"action":"set","value":"Anchor fixture"},
+            "author_email":{"action":"set","value":"fixture@example.invalid"},
+            "https_url":{"action":"set","value":"https://git.example/team/project.git"},
+            "https_username":{"action":"set","value":"oauth2"},
+            "https_token":{"action":"set","value":"fixture-private-git-token"},
+            "ssh_config":{"action":"set","value":ssh.join("config")}
+        }
+    })));
+    assert_eq!(status, 200, "{configured}");
+    let run = server.trigger();
+    server.wait_status(&run, "completed");
+    provider.assert_consumed();
+    let record = host.record(&run);
+    assert_eq!(
+        host.base.file(&record, "worker", "project/answer.txt"),
+        b"42\n"
+    );
+    assert_eq!(
+        host.base.file(&record, "verify", "verified.txt"),
+        b"project-test-passed\n"
+    );
+    let history = host.native_conversation(&run, "worker", 1).to_string();
+    assert!(history.contains("Fix answer from AgentNode|Anchor fixture|fixture@example.invalid"));
+    assert!(!history.contains("fixture-private-git-token"));
+    assert!(
+        !provider
+            .requests()
+            .iter()
+            .any(|request| request.to_string().contains("fixture-private-git-token"))
+    );
+    host.evidence(
+        &provider,
+        &run,
+        json!({"case_source":"tests/native_plugins.rs",
+        "native_git":true,"shared_workspace":true,"clone_edit_test_commit_push":true,
+        "git_credential_helper":true,"credentials_absent_from_history":true,
+        "host_ssh_configuration":true,"operator_plugin_scoped_imports":true,
+        "real_git_service_requests":0,"real_model_requests":0}),
     );
 }

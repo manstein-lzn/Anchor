@@ -17,6 +17,7 @@ use crate::{
 
 mod accounts;
 mod assistant;
+mod notifications;
 
 pub(crate) use assistant::ensure_assistant_run_scope;
 

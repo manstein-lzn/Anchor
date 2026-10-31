@@ -4,7 +4,7 @@ use crate::run_metadata::{
 };
 use anchor_kernel::Outcome;
 use anchor_runtime::graph::{
-    GraphCallStatus, GraphSnapshot, InvocationKey,
+    ArtifactPort, GraphCallStatus, GraphSnapshot, InvocationKey,
     test_support::{Artifacts, Scripted, ScriptedCalls},
 };
 use serde_json::json;
@@ -25,8 +25,16 @@ fn definition(name: &str) -> serde_json::Value {
 }
 
 fn create(application: &RunApplication, graph: &str, id: &str) -> GraphRunRecord {
+    create_definition(application, graph, id, definition(graph))
+}
+
+fn create_definition(
+    application: &RunApplication,
+    graph: &str,
+    id: &str,
+    definition: serde_json::Value,
+) -> GraphRunRecord {
     let path = application.catalog_root.join(graph);
-    let definition = definition(graph);
     crate::application::graphs::write_graph_bundle(&path, &definition).unwrap();
     let record =
         GraphRunRecord::create_with_id(GraphSnapshot::admit(definition).unwrap(), json!({}), id)
@@ -70,10 +78,16 @@ async fn complete(application: &RunApplication, workspace: &Path, id: &str) -> G
         invocation: 1,
     };
     std::fs::create_dir_all(artifacts.workspace_path(&key).unwrap()).unwrap();
-    let resource = runs
-        .drive(id, &artifacts, &nodes(), cancellation())
-        .await
-        .unwrap();
+    let completion = crate::application::run_access::fixtures::completion(json!({}));
+    let commit = artifacts.freeze(&key, &completion).await.unwrap();
+    crate::application::run_access::fixtures::complete(
+        application,
+        id,
+        "work",
+        completion,
+        Some(commit),
+    );
+    let resource = runs.load(id).unwrap().unwrap();
     assert_eq!(
         resource.phase(),
         Some(&Phase::Settled {
@@ -150,7 +164,12 @@ async fn kernel_graph_delete_removes_only_its_run_data_and_preserves_other_graph
     assert!(application.load_run("target-run").unwrap().is_none());
     assert!(application.metadata("target-run").unwrap().is_none());
     assert!(!target_workspace.exists());
-    assert!(!artifact.exists());
+    assert_eq!(
+        application
+            .delivery_listing(&target.results["work"][0].commit.id, &workspace)
+            .unwrap()["artifact_availability"],
+        "expired"
+    );
     assert!(!recordings.exists());
     assert!(!local.exists());
     for suffix in ["json", "model.json", "recovery-7.json"] {
@@ -233,6 +252,124 @@ async fn kernel_delete_rechecks_active_worker_even_with_a_settled_resource() {
             .join("kernel-run-observations/draining.json")
             .exists()
     );
+}
+
+#[tokio::test]
+async fn kernel_single_delete_checks_native_scope_before_releasing_workspace_or_facts() {
+    let (_root, application, workspace) = fixture();
+    let definition = json!({"objective":"Run-owned native conversation","entry":"work",
+        "agents":{"worker":{"model":"fixture-goose"}},
+        "nodes":[{"id":"work","agent":"worker"}],"edges":[]});
+    let workspaces = crate::workspaces::Workspaces::new(workspace.clone());
+    let process = workspace.join(".goose-process");
+    let mut owned = Vec::new();
+    for id in ["target-run", "other-run"] {
+        let record = create_definition(&application, "target", id, definition.clone());
+        let key = InvocationKey {
+            run_id: id.into(),
+            graph_digest: record.graph_digest,
+            node_id: "work".into(),
+            invocation: 1,
+        };
+        application
+            .ensure_node_workspace_binding(&key, &workspaces)
+            .unwrap();
+        std::fs::write(workspaces.path(&key).unwrap().join("draft.txt"), id).unwrap();
+        let metadata = application.metadata(id).unwrap().unwrap();
+        assert!(metadata.conversation.is_none());
+        let scope = format!("gc1-{}", metadata.node_conversation_key("work"));
+        let directory = process.join("conversations").join(&scope);
+        std::fs::create_dir_all(&directory).unwrap();
+        let binding = json!({"version":1,"scope":scope,"binary_sha256":"fixture-binary",
+            "model_binding":"fixture-model","session_id":"fixture-session","latest":key});
+        std::fs::write(
+            directory.join("scope.json"),
+            serde_json::to_vec(&binding).unwrap(),
+        )
+        .unwrap();
+        let fact = application
+            .data_root
+            .join("goose-acp")
+            .join(format!("{}.json", crate::host_fs::invocation_stem(&key)));
+        std::fs::create_dir_all(fact.parent().unwrap()).unwrap();
+        std::fs::write(
+            &fact,
+            serde_json::to_vec(&json!({
+                "version":2,"key":key,"binary_sha256":"fixture-binary",
+                "model_binding":"fixture-model","session_id":"fixture-session",
+                "conversation_scope":scope,"completion":null,"reason":null,
+                "tool_observation":null
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        owned.push((key, scope, directory, fact));
+    }
+    complete(&application, &workspace, "target-run").await;
+    let (target, scope, target_scope, target_fact) = &owned[0];
+    let (other, _, other_scope, other_fact) = &owned[1];
+    let target_workspace = workspaces.path(target).unwrap();
+    let other_workspace = workspaces.path(other).unwrap();
+    let binding = application
+        .node_workspace_binding("target-run", "work")
+        .unwrap();
+    let resource_id = binding["binding"]["resource_id"].as_str().unwrap();
+    let resource_fact_id = format!("workspaces/{resource_id}");
+    let resource = application.file_fact(&resource_fact_id).unwrap();
+    let target_model = std::fs::read(target_fact).unwrap();
+    let other_model = std::fs::read(other_fact).unwrap();
+    let other_native = std::fs::read(other_scope.join("scope.json")).unwrap();
+    let locks = process.join("conversation-locks");
+    std::fs::create_dir_all(&locks).unwrap();
+    let lease = anchor_file_lease::FileLease::acquire(
+        std::fs::File::create(locks.join(format!("{scope}.lock"))).unwrap(),
+        rustix::fs::FlockOperation::NonBlockingLockExclusive,
+    )
+    .unwrap();
+
+    assert!(matches!(
+        application.delete_run("target-run", &workspace).await,
+        Err(ApplicationError::Storage(message)) if message.contains("already active")
+    ));
+    assert_eq!(
+        application
+            .node_workspace_binding("target-run", "work")
+            .unwrap(),
+        binding
+    );
+    assert_eq!(application.file_fact(&resource_fact_id).unwrap(), resource);
+    assert!(workspaces.is_bound(target).unwrap());
+    assert_eq!(workspaces.resource(target).unwrap(), resource_id);
+    assert_eq!(
+        std::fs::read(target_workspace.join("draft.txt")).unwrap(),
+        b"target-run"
+    );
+    assert_eq!(std::fs::read(target_fact).unwrap(), target_model);
+    assert!(target_scope.exists());
+    assert!(application.load_run("target-run").unwrap().is_some());
+    assert!(application.metadata("target-run").unwrap().is_some());
+
+    drop(lease);
+    application
+        .delete_run("target-run", &workspace)
+        .await
+        .unwrap();
+    assert!(!target_scope.exists());
+    assert!(!target_fact.exists());
+    assert!(!target_workspace.exists());
+    assert!(application.load_run("target-run").unwrap().is_none());
+    assert!(application.metadata("target-run").unwrap().is_none());
+    assert_eq!(
+        std::fs::read(other_scope.join("scope.json")).unwrap(),
+        other_native
+    );
+    assert_eq!(std::fs::read(other_fact).unwrap(), other_model);
+    assert_eq!(
+        std::fs::read(other_workspace.join("draft.txt")).unwrap(),
+        b"other-run"
+    );
+    assert!(workspaces.is_bound(other).unwrap());
+    assert!(application.load_run("other-run").unwrap().is_some());
 }
 
 #[tokio::test]
@@ -464,7 +601,12 @@ async fn kernel_single_delete_rechecks_frozen_artifact_and_recovers_after_reopen
         .delete_run("artifact-run", &workspace)
         .await
         .unwrap();
-    assert!(!artifact.exists());
+    assert_eq!(
+        reopened
+            .delivery_listing(&record.results["work"][0].commit.id, &workspace)
+            .unwrap()["artifact_availability"],
+        "expired"
+    );
     assert!(reopened.load_run("artifact-run").unwrap().is_none());
     drop(reopened);
     let reopened = RunApplication::new(data, catalog);

@@ -100,6 +100,8 @@ pub fn run_goose_fixture(options: &FixtureOptions) -> io::Result<FixtureResult> 
         "anchor-wecom-tools",
         "-p",
         "anchor-docmost-tools",
+        "-p",
+        "anchor-git-tools",
         "--bins",
         "--locked",
     ];

@@ -29,8 +29,10 @@ use tokio::{
 };
 
 const SEND_TOOL: &str = "wecom_send_message";
+const SEND_FILE_TOOL: &str = "wecom_send_file";
 const USER: &str = "fixture-authorized-user";
 const CONTENT: &str = "identical fixture message; never delivered to WeCom";
+const PDF: &[u8] = b"%PDF-notification-fixture";
 const TOKEN: &str = "fixture-private-gateway-token";
 const CASE_SOURCE: &str = "tests/goose_channel.rs";
 
@@ -103,10 +105,18 @@ impl Gateway {
                                         let _ = reader.get_mut().write_all(b"{\"status\":\"authenticated\"}\n").await;
                                         return;
                                     }
-                                    assert_eq!(payload["operation"], "send");
                                     assert_eq!(payload["userid"], USER);
-                                    assert_eq!(payload["content"], CONTENT);
                                     assert_eq!(payload["token"], TOKEN);
+                                    match payload["operation"].as_str().unwrap() {
+                                        "send" => assert_eq!(payload["content"], CONTENT),
+                                        "send_file" => {
+                                            use base64::{Engine as _, engine::general_purpose::STANDARD};
+                                            assert_eq!(payload["name"], "morning.pdf");
+                                            assert_eq!(payload["md5"], format!("{:x}", md5::Md5::digest(PDF)));
+                                            assert_eq!(STANDARD.decode(payload["data_base64"].as_str().unwrap()).unwrap(), PDF);
+                                        }
+                                        operation => panic!("unexpected gateway operation: {operation}"),
+                                    }
                                     let mut public_payload = payload.clone();
                                     public_payload.as_object_mut().unwrap().remove("token");
                                     let effect: Value = client.post(&effects).json(&public_payload).send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
@@ -349,6 +359,187 @@ fn assert_no_legacy_attempts(host: &Host) {
 }
 
 #[test]
+#[ignore = "requires pinned Goose binary; channel delivery is strictly local"]
+fn confirmed_file_notification_joins_the_existing_assistant_with_exact_selected_context() {
+    use anchor_platform_session::SessionStore;
+
+    let provider = Provider::new(
+        "goose-channel-file-notification",
+        vec![
+            command("printf assistant-ready > state.txt; cat state.txt"),
+            complete("reply").after("assistant-ready"),
+        ],
+    );
+    let gateway = Gateway::new(&provider, Delivery::Ack);
+    let host = gateway.bind_host(Host::new(&graph()).default_runtime());
+    let task = host.base.root.path().join("notification-task");
+    fs::create_dir_all(&task).unwrap();
+    fs::write(task.join("graph.json"), json!({
+        "objective":"Deliver one committed report and preserve its exact discussion context",
+        "entry":"produce",
+        "ops":{
+            "produce":{"run":"sh -c 'printf %s %PDF-notification-fixture > morning.pdf; printf original-report-evidence > report.txt; printf unrelated-delivery-file > unrelated.txt'","writes":["morning.pdf","report.txt","unrelated.txt"]},
+            "deliver":{"call":{
+                "graph":"notification-delivery","mode":"wait",
+                "input_map":{"bot_graph":"/bot_graph","userid":"/userid"},
+                "files":[{"node":"produce","path":"morning.pdf","as":"morning.pdf"},{"node":"produce","path":"report.txt","as":"report.txt"}],
+                "result":{"node":"worker","files":["evidence.txt"]}
+            }}
+        },
+        "nodes":[{"id":"produce","op":"produce"},{"id":"deliver","op":"deliver"}],
+        "edges":[{"from":"produce","to":"deliver"}]
+    }).to_string()).unwrap();
+    fs::write(
+        task.join("manifest.json"),
+        json!({"format":1,"graph":"graph.json","plugins":[]}).to_string(),
+    )
+    .unwrap();
+    let delivery = host.base.root.path().join("notification-delivery");
+    fs::create_dir_all(&delivery).unwrap();
+    fs::write(delivery.join("graph.json"), json!({
+        "entry":"prepare",
+        "agents":{"worker":{"model":goose::MODEL,"instructions":"Send only the prepared PDF and report to the explicit input bot_graph and userid, inspect the ACK, then finish with route done.","network":false}},
+        "ops":{
+            "prepare":{"run":"cp /in/call/morning.pdf morning.pdf; cp /in/call/report.txt report.txt","writes":["morning.pdf","report.txt"]},
+            "done":{"run":"true"}
+        },
+        "nodes":[{"id":"prepare","op":"prepare"},{"id":"worker","agent":"worker","plugins":["wecom"]},{"id":"done","op":"done"}],
+        "edges":[{"from":"prepare","to":"worker"},{"from":"worker","to":"done"}]
+    }).to_string()).unwrap();
+    fs::write(
+        delivery.join("manifest.json"),
+        json!({"format":1,"graph":"graph.json","plugins":[{"id":"wecom"}]}).to_string(),
+    )
+    .unwrap();
+    let server = host.serve(&provider);
+    let mut first_event = event("notification-existing-conversation");
+    first_event["event"]["conversation_id"] = json!(USER);
+    first_event["event"]["reply_target"] = json!(USER);
+    let (status, first) = server.request("POST", "/channels/fixture/events", Some(&first_event));
+    assert_eq!(status, 200, "{first}");
+    let assistant = first["run"].as_str().unwrap();
+    answered(&host, assistant, 1);
+    let native_before = host.native_fact(assistant, "worker", 1);
+    provider.assert_consumed();
+
+    provider.append(vec![
+        Step::tool(
+            SEND_FILE_TOOL,
+            json!({
+                "bot_graph":"fixture","userid":USER,"path":"/in/prepare/morning.pdf",
+                "content":CONTENT,"context_files":["/in/prepare/report.txt"]
+            }),
+        ),
+        command("printf confirmed-report-delivery > evidence.txt; cat evidence.txt")
+            .after("accepted"),
+        complete("done")
+            .files(&["evidence.txt"])
+            .after("confirmed-report-delivery"),
+    ]);
+    let (status, accepted) = server.request(
+        "POST",
+        "/trigger",
+        Some(&json!({"graph":"notification-task","input":{"bot_graph":"fixture","userid":USER}})),
+    );
+    assert_eq!(status, 202, "{accepted}");
+    let source_run = accepted["run"].as_str().unwrap();
+    let parent = server.wait_status(source_run, "completed");
+    let delivery_run = parent["calls"][0]["run"].as_str().unwrap();
+    assert_eq!(parent["calls"][0]["graph"], "notification-delivery");
+    provider.assert_consumed();
+    let requests = gateway.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0]["operation"], "send_file");
+    assert_eq!(requests[1]["operation"], "send");
+    let sessions =
+        SessionStore::open(host.base.state_root().join("platform/sessions.sqlite")).unwrap();
+    let session = first["session"].as_str().unwrap();
+    let notification = sessions
+        .latest_channel_notification("local", session)
+        .unwrap()
+        .unwrap();
+    assert_eq!(notification.source_run, delivery_run);
+    assert_eq!(host.record(delivery_run)["input"]["userid"], USER);
+    assert_eq!(host.record(delivery_run)["input"]["bot_graph"], "fixture");
+    assert_eq!(
+        host.base
+            .file(&host.record(source_run), "deliver", "result/evidence.txt"),
+        b"confirmed-report-delivery"
+    );
+    assert_eq!(notification.content, CONTENT);
+    assert_eq!(notification.files.len(), 2);
+    assert_eq!(notification.files[0].name, "morning.pdf");
+    assert_eq!(notification.files[1].name, "report.txt");
+    assert_eq!(
+        host.record(assistant)["results"]["worker"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+
+    // The source workspace may change or disappear; discussion must still
+    // use only the selected immutable delivery, never the current workspace.
+    fs::write(
+        host.base
+            .workspace(source_run, "produce")
+            .join("report.txt"),
+        "changed-after-delivery",
+    )
+    .unwrap();
+    let prefix = format!("/in/notifications/{}", notification.id);
+    provider.append(vec![
+        command(&format!("set -eu; test \"$(cat state.txt)\" = assistant-ready; test \"$(cat '{prefix}/report.txt')\" = original-report-evidence; test \"$(cat '{prefix}/morning.pdf')\" = %PDF-notification-fixture; test ! -e '{prefix}/unrelated.txt'; if printf changed > '{prefix}/report.txt'; then exit 91; fi; cat '{prefix}/report.txt' > evidence.txt; printf selected-report-readonly"))
+            .expect_request_contains("notification-report-followup"),
+        complete("reply")
+            .files(&["evidence.txt"])
+            .after("selected-report-readonly"),
+    ]);
+    let mut followup = first_event.clone();
+    followup["event"]["event_id"] = json!("notification-report-followup");
+    followup["event"]["text"] = json!("notification-report-followup");
+    followup["event"]["metadata"]["request_id"] = json!("notification-report-followup");
+    let (status, reply) = server.request("POST", "/channels/fixture/events", Some(&followup));
+    assert_eq!(status, 200, "{reply}");
+    assert_eq!(reply["run"], first["run"]);
+    assert_eq!(reply["session"], first["session"]);
+    answered(&host, assistant, 2);
+    provider.assert_consumed();
+    let native_after = host.native_fact(assistant, "worker", 2);
+    assert_eq!(native_after["session_id"], native_before["session_id"]);
+    let saved = host.record(assistant);
+    let projected =
+        &saved["results"]["wait_input"][1]["completion"]["output"]["latest_notification"];
+    assert_eq!(projected["id"], notification.id);
+    assert_eq!(
+        projected["files"][1]["artifact_id"],
+        notification.files[1].artifact_id
+    );
+    assert_eq!(
+        fixture::artifact_file(
+            &host.base.state_root().join("artifacts").join(
+                saved["results"]["worker"][1]["commit"]["id"]
+                    .as_str()
+                    .unwrap()
+            ),
+            "evidence.txt",
+        ),
+        b"original-report-evidence"
+    );
+    assert_eq!(gateway.requests(), requests);
+    host.evidence(
+        &provider,
+        assistant,
+        json!({
+            "case_source":CASE_SOURCE,"notification":notification,"gateway_requests":requests,
+            "same_assistant_run":true,"same_host_session":true,"same_native_session":true,
+            "no_synthetic_user_turn":true,"selected_context_readonly":true,
+            "source_workspace_changed_without_changing_report":true,"real_channel_deliveries":0
+        }),
+    );
+}
+
+#[test]
 #[ignore = "requires pinned Goose binary"]
 fn native_goose_identical_channel_messages_have_distinct_native_ids_and_gateway_acks() {
     let provider = Provider::new(
@@ -358,7 +549,9 @@ fn native_goose_identical_channel_messages_have_distinct_native_ids_and_gateway_
             send(USER).after("accepted"),
             command("printf channel-two-confirmed > evidence.txt; cat evidence.txt")
                 .after("accepted"),
-            complete("reply").after("channel-two-confirmed"),
+            complete("reply")
+                .files(&["evidence.txt"])
+                .after("channel-two-confirmed"),
         ],
     );
     let gateway = Gateway::new(&provider, Delivery::Ack);
@@ -437,7 +630,9 @@ fn native_goose_unauthorized_channel_recipient_is_rejected_before_gateway_connec
             send("fixture-other-user").after("recipient is not allowed"),
             command("printf channel-unauthorized-rejected > evidence.txt; cat evidence.txt")
                 .after("recipient is not allowed"),
-            complete("reply").after("channel-unauthorized-rejected"),
+            complete("reply")
+                .files(&["evidence.txt"])
+                .after("channel-unauthorized-rejected"),
         ],
     );
     let gateway = Gateway::new(&provider, Delivery::Ack);
@@ -516,9 +711,9 @@ fn native_goose_unknown_channel_result_resumes_same_session_and_inspects_without
     pending.join().unwrap();
     assert_eq!(provider.requests().len(), 1);
     provider.append(vec![
-        complete("reply"),
+        complete("reply").files(&["evidence.txt"]),
         command(&format!("set -eu; curl --silent --show-error --fail --max-time 5 --noproxy '*' '{}/effects' > evidence.txt; cat evidence.txt", business.url)).after("final_result.observed_receipt must match"),
-        complete("reply").after("effect_count"),
+        complete("reply").files(&["evidence.txt"]).after("effect_count"),
     ]);
     let restarted = host.serve(&provider);
     let (status, accepted) = restarted.request("POST", &format!("/runs/{run}/resume"), None);

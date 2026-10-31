@@ -102,6 +102,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn supersession_requires_an_admitted_successor_and_only_reads_its_history() {
+        let root = tempfile::tempdir().unwrap();
+        let application = RunApplication::new(root.path().into(), root.path().join("catalog"));
+        std::fs::create_dir_all(&application.catalog_root).unwrap();
+        for id in ["parent", "unrelated"] {
+            fixtures::create(&application, &fixtures::work_record(id));
+        }
+        let parent_metadata = metadata(&application, "parent");
+        crate::run_metadata::save(&application.data_root, &parent_metadata).unwrap();
+        let successor = fixtures::work_record("successor");
+        let mut pending = RunMetadata::new(
+            successor.run_id.clone(),
+            "fixture".into(),
+            successor.graph_digest.clone(),
+            &application.catalog_root,
+        )
+        .unwrap();
+        pending.conversation = Some(crate::run_metadata::ConversationSource {
+            session: "session".into(),
+            reply_node: "worker".into(),
+            previous_run: Some("parent".into()),
+        });
+        crate::run_metadata::save(&application.data_root, &pending).unwrap();
+        let parent = fixtures::view(&application, "parent");
+        std::fs::write(
+            application
+                .data_root
+                .join("kernel-runs/run%2Funrelated/history.jsonl"),
+            b"invalid record\n",
+        )
+        .unwrap();
+        assert!(application.read_run("unrelated").is_err());
+        let projection = application
+            .project_run(&parent, Some(&parent_metadata))
+            .await
+            .unwrap();
+        assert!(!projection.superseded);
+        assert!(projection.actions.resume);
+        fixtures::create(&application, &successor);
+        let projection = application
+            .project_run(&parent, Some(&parent_metadata))
+            .await
+            .unwrap();
+        assert!(projection.superseded);
+        assert!(!projection.actions.resume);
+    }
+
+    #[tokio::test]
     async fn pending_control_and_session_coordination_are_observed_once() {
         let root = tempfile::tempdir().unwrap();
         let application = RunApplication::new(root.path().into(), root.path().join("catalog"));

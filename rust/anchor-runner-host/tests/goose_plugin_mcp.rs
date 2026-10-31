@@ -139,8 +139,11 @@ fn graph_agent_calls_its_sandboxed_stdio_plugin_and_publishes_an_artifact() {
             Step::tool("demo-service_echo", json!({"value":"graph-node"})),
             command("printf 'ready:graph-node\n' > notes.md; cat notes.md")
                 .after("ready:graph-node"),
-            Step::tool("final_result", json!({"summary":"fixture complete"}))
-                .after("ready:graph-node"),
+            Step::tool(
+                "final_result",
+                json!({"files":["notes.md"],"summary":"fixture complete"}),
+            )
+            .after("ready:graph-node"),
         ],
     );
     let host = host();

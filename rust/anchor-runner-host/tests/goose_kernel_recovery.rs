@@ -14,7 +14,7 @@ fn kernel_observed_native_effect_accepts_durable_completed_or_abort_without_repl
     for abort in [false, true] {
         let graph = json!({"objective":"Inspect an interrupted native tool effect", "entry":"worker",
             "agents":{"worker":{"model":"models.worker","instructions":"Inspect existing workspace facts before continuing. Never repeat an unknown effect. Finish with final_result route verify after a fresh tool observation."}},
-            "ops":{"verify":{"run":"sh -c 'test \"$(cat /in/worker/effects.txt)\" = once; cat /in/worker/effects.txt > verified.txt'"}},
+            "ops":{"verify":{"writes":["verified.txt"],"run":"sh -c 'test \"$(cat /in/worker/effects.txt)\" = once; cat /in/worker/effects.txt > verified.txt'"}},
             "nodes":[{"id":"worker","agent":"worker"},{"id":"verify","op":"verify"}], "edges":[{"from":"worker","to":"verify"}]});
         let provider = Provider::new(
             if abort {
@@ -72,7 +72,7 @@ fn kernel_observed_native_effect_accepts_durable_completed_or_abort_without_repl
             );
             provider.append(vec![
                 command("set -eu; test \"$(cat effects.txt)\" = once; printf inspected; cat effects.txt").expect_request_contains("The operator inspected effects.txt"),
-                complete("verify").after("inspectedonce"),
+                complete("verify").files(&["effects.txt"]).after("inspectedonce"),
             ]);
         }
         let (status, response) =

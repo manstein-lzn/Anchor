@@ -603,6 +603,7 @@ fn seed_running_assistant_round(
         &claimed,
         Vec::new(),
         false,
+        None,
     )
     .unwrap();
     let mut saved = RunMetadata::new(

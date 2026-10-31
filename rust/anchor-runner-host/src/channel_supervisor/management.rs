@@ -1,6 +1,7 @@
 //! Host-owned bot bindings, one per persistent assistant Graph, each with its
 //! own supervised gateway. Persisted values are configuration facts, not a new
 //! channel runtime or environment asset.
+use super::status::ConnectionStatus;
 use super::{ChannelSupervisor, ManagedChannelLaunch, random_token};
 use crate::application::{
     ApplicationError,
@@ -76,6 +77,7 @@ impl ChannelFact {
 
 pub(crate) struct ChannelManagementAdapter {
     configuration: ChannelHostConfiguration,
+    host_runtime: tokio::runtime::Handle,
     root: PathBuf,
     facts: RwLock<BTreeMap<String, ChannelFact>>,
     /// Binding files that exist but cannot be read, by Graph. Each stays out
@@ -90,6 +92,8 @@ pub(crate) struct ChannelManagementAdapter {
 
 impl ChannelManagementAdapter {
     pub(crate) fn open(configuration: ChannelHostConfiguration) -> Result<Self, String> {
+        let host_runtime = tokio::runtime::Handle::try_current()
+            .map_err(|_| "channel management requires the Host runtime")?;
         let root = configuration.data_root.join("platform/channels");
         crate::host_fs::directory(&root)?;
         let metadata = fs::metadata(&root).map_err(|_| "channel configuration root unavailable")?;
@@ -134,6 +138,7 @@ impl ChannelManagementAdapter {
         }
         Ok(Self {
             configuration,
+            host_runtime,
             root,
             facts: RwLock::new(facts),
             damaged,
@@ -383,6 +388,7 @@ impl ChannelManagementAdapter {
         let credentials = self.credentials(graph, fact, &definition, &channel)?;
         Self::complete(&channel, &credentials)?;
         ChannelSupervisor::start_managed(
+            &self.host_runtime,
             &self.configuration.graph_path(graph),
             &self.configuration.library_root,
             &self.configuration.data_root,
@@ -456,6 +462,7 @@ impl ChannelManagementAdapter {
     }
 
     async fn public_status(&self, owner: &str, graph: &str) -> Result<Value, ApplicationError> {
+        let supervisors = self.supervisors.lock().await;
         if self.damaged.contains_key(graph) {
             return Ok(json!({"graph":graph,"platform":PLATFORM,"configured":true,
                 "damaged":true,"enabled":false,"listener":"unavailable","mutable":false}));
@@ -489,27 +496,42 @@ impl ChannelManagementAdapter {
             }
             Err(_) => (false, Vec::new(), None),
         };
+        let supervisor = supervisors.get(graph);
+        let supervised = supervisor.is_some_and(ChannelSupervisor::is_running);
         let listener = if !fact.enabled {
-            json!("stopped")
+            ConnectionStatus::Stopped
         } else if !available {
-            json!("unavailable")
+            ConnectionStatus::Unavailable
         } else {
-            serde_json::to_value(
-                super::status::read(&super::descriptor_path(
-                    &self.configuration.data_root,
-                    graph,
-                ))
-                .await,
-            )
-            .map_err(|_| storage("channel status encoding failed"))?
+            self.listener_status(graph, supervisor).await
         };
         Ok(
             json!({"graph":graph,"platform":PLATFORM,"configured":true,"owner_matches":true,
             "mutable":true,"enabled":fact.enabled,"available":available,
             "reply_node":admitted.ok(),"binding":fact.binding(),"credentials":credentials,
             "listener":listener,"account":account,
-            "restart_required":fact.enabled && fact.account != account}),
+            "restart_required":fact.enabled && (fact.account != account || !supervised
+                || (available && matches!(listener, ConnectionStatus::Unavailable | ConnectionStatus::Stopped)))}),
         )
+    }
+
+    async fn listener_status(
+        &self,
+        graph: &str,
+        supervisor: Option<&ChannelSupervisor>,
+    ) -> ConnectionStatus {
+        let Some(supervisor) = supervisor.filter(|supervisor| supervisor.is_running()) else {
+            return ConnectionStatus::Unavailable;
+        };
+        match super::status::read(&super::descriptor_path(
+            &self.configuration.data_root,
+            graph,
+        ))
+        .await
+        {
+            ConnectionStatus::Unavailable => supervisor.fallback_status(),
+            observed => observed,
+        }
     }
 
     fn runtime_state(&self, graph: &str, fact: ChannelFact) -> ChannelRuntimeState {
@@ -569,7 +591,7 @@ impl ChannelManagementPort for ChannelManagementAdapter {
         binding: ChannelBinding,
     ) -> BoxFuture<'a, Result<Value, ApplicationError>> {
         Box::pin(async move {
-            let _supervisors = self.supervisors.lock().await;
+            let supervisors = self.supervisors.lock().await;
             self.assert_owner(owner, graph)?;
             binding.validate()?;
             let previous = self.fact(graph)?;
@@ -604,6 +626,7 @@ impl ChannelManagementPort for ChannelManagementAdapter {
                 self.admission(graph, &fact)?;
                 self.publish(graph, fact)?;
             }
+            drop(supervisors);
             let mut result = self.public_status(owner, graph).await?;
             result["changed"] = json!(changed);
             Ok(result)
@@ -620,7 +643,7 @@ impl ChannelManagementPort for ChannelManagementAdapter {
             let mut supervisors = self.supervisors.lock().await;
             self.assert_owner(owner, graph)?;
             let mut fact = self.fact(graph)?.ok_or(ApplicationError::Missing)?;
-            let changed = fact.enabled != enabled;
+            let mut changed = fact.enabled != enabled;
             if enabled {
                 // Validate all credentials before saving an enabled intent.
                 self.admission(graph, &fact)?;
@@ -630,7 +653,16 @@ impl ChannelManagementPort for ChannelManagementAdapter {
                 // Re-enabling a saved-enabled bot that is not running must
                 // pass the same account checks as a first enable.
                 let account = self.register_account(&fact.owner, &credentials)?;
-                if changed || fact.account != account {
+                let needs_start = changed
+                    || supervisors
+                        .get(graph)
+                        .is_none_or(|supervisor| !supervisor.is_running())
+                    || matches!(
+                        self.listener_status(graph, supervisors.get(graph)).await,
+                        ConnectionStatus::Unavailable | ConnectionStatus::Stopped
+                    )
+                    || fact.account != account;
+                if needs_start {
                     self.check_account(graph, owner, account.as_deref())?;
                 }
                 if changed {
@@ -642,9 +674,13 @@ impl ChannelManagementPort for ChannelManagementAdapter {
                     fact.account = account;
                     self.publish(graph, fact.clone())?;
                 }
-                if !supervisors.contains_key(graph) {
+                if needs_start {
+                    if let Some(mut previous) = supervisors.remove(graph) {
+                        previous.shutdown().await;
+                    }
                     let started = self.start(graph, &fact).await?;
                     supervisors.insert(graph.to_owned(), started);
+                    changed = true;
                 }
             } else {
                 if changed {
@@ -655,6 +691,7 @@ impl ChannelManagementPort for ChannelManagementAdapter {
                     active.shutdown().await;
                 }
             }
+            drop(supervisors);
             let mut result = self.public_status(owner, graph).await?;
             result["changed"] = json!(changed);
             Ok(result)
@@ -769,24 +806,6 @@ fn token_matches(expected: &str, key: &str) -> bool {
         .zip(right.iter())
         .fold(0u8, |difference, (left, right)| difference | (left ^ right))
         == 0
-}
-
-/// The saved binding of one Graph's bot. Node tools of that Graph's Runs read
-/// it for the recipients they may address; the Host adapter owns every write.
-pub(crate) fn saved_binding(
-    data_root: &Path,
-    graph: &str,
-) -> Result<Option<ChannelBinding>, String> {
-    if !anchor_runtime::identifier::is_name(graph) {
-        return Ok(None);
-    }
-    let path = data_root
-        .join("platform/channels/graphs")
-        .join(format!("{graph}.json"));
-    if fs::symlink_metadata(&path).is_err() {
-        return Ok(None);
-    }
-    read_fact(&path).map(|fact| Some(fact.binding()))
 }
 
 type Facts = (BTreeMap<String, ChannelFact>, BTreeMap<String, String>);

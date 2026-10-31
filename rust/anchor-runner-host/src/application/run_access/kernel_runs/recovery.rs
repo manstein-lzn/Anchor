@@ -80,8 +80,15 @@ impl KernelRuns {
         id: &str,
     ) -> Result<(Vec<PendingRecovery>, Vec<RecoverySubmission>), ApplicationError> {
         let resource = self.load(id)?.ok_or(ApplicationError::Missing)?;
+        self.resource_recovery(&resource)
+    }
+
+    pub(in crate::application::run_access) fn resource_recovery(
+        &self,
+        resource: &Resource,
+    ) -> Result<(Vec<PendingRecovery>, Vec<RecoverySubmission>), ApplicationError> {
         Self::project_recovery(
-            &resource,
+            resource,
             self.kernel.history(&resource.id).map_err(kernel_error)?,
         )
     }

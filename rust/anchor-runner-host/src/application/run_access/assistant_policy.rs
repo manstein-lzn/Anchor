@@ -182,6 +182,7 @@ mod tests {
             turn: turn.into(),
             pending_inbounds: Vec::new(),
             pending_truncated: false,
+            notification: None,
         };
         crate::assistant::save_immutable(&binding_path(root, key), &binding).unwrap();
         binding

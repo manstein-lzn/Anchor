@@ -125,7 +125,7 @@ impl HostIoResolver {
                         plugins,
                         &mounted.bindings,
                         request.key.clone(),
-                        self.local_inputs.state_root().to_path_buf(),
+                        self.run_application(),
                         workspace.clone(),
                         readonly_inputs.clone(),
                         request.cancellation.clone(),
@@ -151,12 +151,12 @@ impl HostIoResolver {
                     crate::tool_names::EDIT_TOOL_NAME.to_owned(),
                 ];
                 let tools = match conversation {
-                    Some(conversation) => {
+                    Some(conversation) if conversation.cross_run => {
                         always_visible
                             .push(crate::node_host::conversation::HISTORY_TOOL.to_owned());
                         self.conversation_tools(tools, &request.key, conversation)
                     }
-                    None => tools,
+                    _ => tools,
                 };
                 let (tools, plugin_instructions) = crate::tool_disclosure::maybe_wrap(
                     tools,
@@ -283,13 +283,8 @@ impl HostIoResolver {
         plugin_mounts: Vec<anchor_runtime::ReadOnlyInput>,
     ) -> Result<PreparedNodeLaunch, ResolutionError> {
         let workspace = self.workspace(request)?;
-        let mut local_inputs = self.local_input_mounts(&request.key)?;
+        let local_inputs = self.local_input_mounts(&request.key)?;
         let conversation = self.conversation(&request.key)?;
-        if let Some(conversation) = &conversation
-            && let Some(mount) = self.previous_mount(&request.key, conversation)?
-        {
-            local_inputs.push(mount);
-        }
         // Everything this invocation mounts is granted on the invocation
         // itself: the Run policy is the deployment floor, not a list of
         // per-Run trees (a parent Run cannot know its children's Plugins or

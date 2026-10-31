@@ -1,4 +1,5 @@
 use super::*;
+use sha2::{Digest, Sha256};
 
 fn assistant_fixture(
     installed: &[&str],
@@ -130,6 +131,7 @@ async fn freeze(
         turn: turn.into(),
         pending_inbounds: vec![],
         pending_truncated: false,
+        notification: None,
     };
     let path = resolver
         .local_inputs

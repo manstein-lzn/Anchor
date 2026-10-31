@@ -1,8 +1,10 @@
+mod support;
+
 use anchor_rsi::{
     business::{
-        git_head,
+        artifact_identity,
         rsi::{self, FrozenEvidence},
-        verify_commit,
+        verify_artifact,
     },
     evidence::{Config, Evidence},
 };
@@ -18,31 +20,17 @@ fn write(path: &Path, value: &Value) {
     fs::write(path, serde_json::to_vec_pretty(value).unwrap()).unwrap();
 }
 
-fn git(root: &Path, arguments: &[&str]) {
-    let result = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(arguments)
-        .env("GIT_AUTHOR_NAME", "Fixture")
-        .env("GIT_AUTHOR_EMAIL", "fixture@example.invalid")
-        .env("GIT_COMMITTER_NAME", "Fixture")
-        .env("GIT_COMMITTER_EMAIL", "fixture@example.invalid")
-        .output()
-        .unwrap();
-    assert!(
-        result.status.success(),
-        "{}",
-        String::from_utf8_lossy(&result.stderr)
-    );
+fn freeze(root: &Path, node: &str, invocation: u64) -> Value {
+    let selected: &[&str] = match node {
+        "collect" => &["evidence"],
+        "analyze" => &["evolution.json", "rsi-report.md", "sources.md"],
+        "audit-join" | "review-join" => &["join.json"],
+        "review" | "fact-review" | "proposal-review" => &["review.json", "review.md"],
+        "gate" => &["gate.txt"],
+        _ => &["findings.json"],
+    };
+    support::artifact(root, node, invocation, selected)
 }
-
-fn freeze(directory: &Path, message: &str) -> String {
-    git(directory, &["init", "--quiet"]);
-    git(directory, &["add", "."]);
-    git(directory, &["commit", "--quiet", "-m", message]);
-    git_head(directory).unwrap()
-}
-
 struct Fixture {
     temp: tempfile::TempDir,
     inputs: PathBuf,
@@ -99,7 +87,7 @@ impl Fixture {
                 &json!({"domain":domain,"summary":"Reviewed frozen evidence with explicit limits",
                 "coverage":{"read":["code/policy.rs"],"not_reviewed":["remaining evidence"],"limitations":["fixture evidence only"]},"findings":[]}),
             );
-            let commit = freeze(&directory, "specialist findings");
+            let commit = freeze(&directory, &name, 1)["artifact"].clone();
             branches.push(json!({"output":name,"nodes":[{"node":name,"commit":commit}]}));
         }
         write(
@@ -121,18 +109,23 @@ impl Fixture {
             "code/policy.rs, frozen projection line 1\n",
         )
         .unwrap();
-        let commit = freeze(&inputs.join("analyze"), "analysis");
+        freeze(&inputs.join("analyze"), "analyze", 1);
+        let artifact = artifact_identity(&inputs.join("analyze")).unwrap();
         write(
             &inputs.join("review/review.json"),
-            &json!({"passed":true,"reviewed_commit":commit,"issues":[],"coverage":["proposal source contract"],"limitations":["no real provider"]}),
+            &json!({"passed":true,"reviewed_artifact":artifact,"issues":[],"coverage":["proposal source contract"],"limitations":["no real provider"]}),
         );
         fs::write(
             inputs.join("review/review.md"),
             "Approved independent review\n",
         )
         .unwrap();
+        freeze(&inputs.join("review"), "review", 1);
         fs::create_dir(inputs.join("gate")).unwrap();
         fs::write(inputs.join("gate/gate.txt"), "PASS\ntarget=publish\n").unwrap();
+        for node in ["collect", "audit-join", "gate"] {
+            freeze(&inputs.join(node), node, 1);
+        }
         Self {
             temp,
             inputs,
@@ -147,6 +140,35 @@ impl Fixture {
     }
     fn write(&self, name: &str, value: &Value) {
         write(&self.inputs.join(name), value);
+        let node = name.split('/').next().unwrap();
+        if self
+            .inputs
+            .join(node)
+            .join(anchor_runtime::artifact::ARTIFACT_DESCRIPTOR_FILE)
+            .exists()
+        {
+            freeze(&self.inputs.join(node), node, 1);
+        }
+    }
+    fn approve_analysis(&self) {
+        freeze(&self.inputs.join("analyze"), "analyze", 2);
+        let mut review = self.read("review/review.json");
+        review["reviewed_artifact"] = artifact_identity(&self.inputs.join("analyze")).unwrap();
+        self.write("review/review.json", &review);
+    }
+    fn join(&self, manifest: &str, nodes: &[&str]) {
+        let branches: Vec<_> = nodes
+            .iter()
+            .map(|node| {
+                let descriptor = freeze(&self.inputs.join(node), node, 1);
+                json!({"output":node,"nodes":[{"node":node,"commit":descriptor["artifact"]}]})
+            })
+            .collect();
+        self.write(
+            &format!("{manifest}/join.json"),
+            &json!({"branches":branches}),
+        );
+        freeze(&self.inputs.join(manifest), manifest, 1);
     }
     fn evaluate(&self) -> String {
         rsi::evaluate(
@@ -158,7 +180,8 @@ impl Fixture {
 }
 
 #[test]
-fn native_gate_accepts_bound_publication_and_refuses_decision_commit_hash_and_window_mismatches() {
+fn native_gate_accepts_bound_publication_and_refuses_decision_artifact_hash_and_window_mismatches()
+{
     let fixture = Fixture::new();
     assert_eq!(fixture.evaluate(), "publish");
     let approved = fixture.read("review/review.json");
@@ -167,7 +190,7 @@ fn native_gate_accepts_bound_publication_and_refuses_decision_commit_hash_and_wi
     fixture.write("review/review.json", &review);
     assert_eq!(fixture.evaluate(), "analyze");
     review = approved.clone();
-    review["reviewed_commit"] = json!("wrong-commit");
+    review["reviewed_artifact"] = json!("wrong-artifact");
     fixture.write("review/review.json", &review);
     assert_eq!(fixture.evaluate(), "analyze");
     fixture.write("review/review.json", &approved);
@@ -175,16 +198,20 @@ fn native_gate_accepts_bound_publication_and_refuses_decision_commit_hash_and_wi
     let mut wrong = valid.clone();
     wrong["proposals"][0]["evidence"][0]["sha256"] = json!("0".repeat(64));
     fixture.write("analyze/evolution.json", &wrong);
+    fixture.approve_analysis();
     assert_eq!(fixture.evaluate(), "analyze");
     wrong = valid.clone();
     wrong["proposals"][0]["collection_window"]["start"] = json!("2020-01-01T00:00:00Z");
     fixture.write("analyze/evolution.json", &wrong);
+    fixture.approve_analysis();
     assert_eq!(fixture.evaluate(), "analyze");
     wrong = valid.clone();
     wrong["carry_forward"] = json!([]);
     fixture.write("analyze/evolution.json", &wrong);
+    fixture.approve_analysis();
     assert_eq!(fixture.evaluate(), "analyze");
     fixture.write("analyze/evolution.json", &valid);
+    fixture.approve_analysis();
     let entry = &fixture.index["entries"]["code/policy.rs"];
     fs::write(
         fixture
@@ -199,6 +226,13 @@ fn native_gate_accepts_bound_publication_and_refuses_decision_commit_hash_and_wi
 #[test]
 fn dual_reviews_cannot_waive_one_another_or_unsafe_proposals() {
     let fixture = Fixture::new();
+    let fanout = fixture.inputs.join("audit-fanout");
+    fs::create_dir(&fanout).unwrap();
+    support::artifact(&fanout, "audit-fanout", 1, &[]);
+    let descriptor_reference = json!({
+        "path":"/in/audit-fanout/.anchor-artifact.json",
+        "locator":"artifact.node_id"
+    });
     let frozen_file = fixture.index["entries"]["code/policy.rs"]["frozen_file"]
         .as_str()
         .unwrap();
@@ -207,12 +241,27 @@ fn dual_reviews_cannot_waive_one_another_or_unsafe_proposals() {
     for domain in ["runs", "code", "graphs", "plugins", "dependencies"] {
         let name = format!("{domain}-audit/findings.json");
         let mut audit = fixture.read(&name);
-        audit["coverage"]["read"] = json!([reference]);
+        audit["coverage"]["read"] = json!([reference, descriptor_reference]);
+        audit["findings"] = json!([{
+            "id":"fanout-identity", "kind":"observed", "confidence":"high",
+            "claim":"The mounted fanout descriptor records its Artifact identity",
+            "evidence":[descriptor_reference]
+        }]);
         fixture.write(&name, &audit);
     }
+    fixture.join(
+        "audit-join",
+        &[
+            "runs-audit",
+            "code-audit",
+            "graphs-audit",
+            "plugins-audit",
+            "dependencies-audit",
+        ],
+    );
     fixture.write("collect/evidence/previous.json", &json!({"reports":[]}));
     fixture.write("analyze/evolution.json", &json!({"window":{"start":fixture.index["window_start"],"end_exclusive":fixture.index["window_end"]},"proposals":[],"carry_forward":[]}));
-    let commit = git_head(&fixture.inputs.join("analyze")).unwrap();
+    let artifact = artifact_identity(&fixture.inputs.join("analyze")).unwrap();
     let mut branches = Vec::new();
     for (name, checks) in [
         ("fact-review", json!({"facts":true,"research":true})),
@@ -221,16 +270,17 @@ fn dual_reviews_cannot_waive_one_another_or_unsafe_proposals() {
             json!({"architecture":true,"writing":true}),
         ),
     ] {
-        fixture.write(&format!("{name}/review.json"), &json!({"decision":"publish","reviewed_commit":commit,"checks":checks,"issues":[],"summary":"Independent domain checks passed"}));
+        fixture.write(&format!("{name}/review.json"), &json!({"decision":"publish","reviewed_artifact":artifact,"checks":checks,"issues":[],"summary":"Independent domain checks passed"}));
         fs::write(
             fixture.inputs.join(name).join("review.md"),
             "Approved independent checks",
         )
         .unwrap();
-        let head = freeze(&fixture.inputs.join(name), "review");
+        let head = freeze(&fixture.inputs.join(name), name, 1)["artifact"].clone();
         branches.push(json!({"output":name,"nodes":[{"node":name,"commit":head}]}));
     }
     fixture.write("review-join/join.json", &json!({"branches":branches}));
+    freeze(&fixture.inputs.join("review-join"), "review-join", 1);
     let approved = rsi::aggregate(&fixture.inputs, &json!({})).unwrap();
     assert_eq!(approved["decision"], "publish");
     fixture.write("review/review.json", &approved);
@@ -239,6 +289,7 @@ fn dual_reviews_cannot_waive_one_another_or_unsafe_proposals() {
     review["decision"] = json!("revise");
     review["checks"]["facts"] = json!(false);
     fixture.write("fact-review/review.json", &review);
+    fixture.join("review-join", &["fact-review", "proposal-review"]);
     assert_eq!(
         rsi::aggregate(&fixture.inputs, &json!({})).unwrap()["decision"],
         "revise"
@@ -249,6 +300,7 @@ fn dual_reviews_cannot_waive_one_another_or_unsafe_proposals() {
         "# RSI\n关闭脱敏\n",
     )
     .unwrap();
+    freeze(&fixture.inputs.join("analyze"), "analyze", 2);
     assert!(
         rsi::aggregate(&fixture.inputs, &json!({})).unwrap()["issues"]
             .as_array()
@@ -259,26 +311,29 @@ fn dual_reviews_cannot_waive_one_another_or_unsafe_proposals() {
 }
 
 #[test]
-fn typed_join_reference_binds_identity_and_mounted_bytes() {
+fn typed_join_reference_binds_full_identity_manifest_and_selected_bytes() {
     let temp = tempfile::tempdir().unwrap();
     fs::write(temp.path().join("findings.json"), "{}\n").unwrap();
-    let identity = format!("fs2-{}", "a".repeat(64));
-    let expected = json!({"id":identity,"node_id":"code-audit","invocation":1});
-    let message = format!(
-        "Anchor Artifact {identity}\nArtifact-Node: code-audit\nArtifact-Invocation: 1\nManifest-SHA256: {}",
-        "b".repeat(64)
+    let descriptor = freeze(temp.path(), "code-audit", 1);
+    let expected = &descriptor["artifact"];
+    let artifact = verify_artifact(temp.path(), expected, "code-audit").unwrap();
+    artifact.read_file(temp.path(), "findings.json").unwrap();
+    assert!(
+        artifact
+            .read_file(
+                temp.path(),
+                anchor_runtime::artifact::ARTIFACT_DESCRIPTOR_FILE
+            )
+            .is_err()
     );
-    freeze(temp.path(), &message);
-    verify_commit(temp.path(), &expected, "code-audit").unwrap();
     let mut wrong = expected.clone();
     wrong["invocation"] = json!(2);
-    assert!(verify_commit(temp.path(), &wrong, "code-audit").is_err());
+    assert!(verify_artifact(temp.path(), &wrong, "code-audit").is_err());
+    wrong = expected.clone();
+    wrong["node_id"] = json!("graph-audit");
+    assert!(verify_artifact(temp.path(), &wrong, "code-audit").is_err());
     fs::write(temp.path().join("findings.json"), "{\"tampered\":true}\n").unwrap();
-    assert!(
-        verify_commit(temp.path(), &expected, "code-audit")
-            .unwrap_err()
-            .contains("mounted artifact bytes")
-    );
+    assert!(artifact.read_file(temp.path(), "findings.json").is_err());
 }
 
 #[test]
@@ -318,14 +373,15 @@ fn business_cli_publishes_only_after_rechecking_native_review_and_frozen_hashes(
     fixture.write("review/review.json", &review);
     assert!(!run().status.success());
     review["passed"] = json!(true);
-    review["reviewed_commit"] = json!("stale");
+    review["reviewed_artifact"] = json!("stale");
     fixture.write("review/review.json", &review);
     assert!(!run().status.success());
-    review["reviewed_commit"] = json!(git_head(&fixture.inputs.join("analyze")).unwrap());
+    review["reviewed_artifact"] = artifact_identity(&fixture.inputs.join("analyze")).unwrap();
     fixture.write("review/review.json", &review);
     let mut proposals = fixture.read("analyze/evolution.json");
     proposals["proposals"][0]["evidence"][0]["sha256"] = json!("bad hash");
     fixture.write("analyze/evolution.json", &proposals);
+    fixture.approve_analysis();
     assert!(!run().status.success());
     let frozen = FrozenEvidence::load(&fixture.evidence_root).unwrap();
     frozen.validate_reference(&fixture.reference, true).unwrap();

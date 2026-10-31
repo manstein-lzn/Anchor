@@ -40,9 +40,14 @@ impl RunApplication {
         let mut nodes = serde_json::Map::new();
         for (name, results) in &record.results {
             if let Some(result) = results.last() {
-                let files = artifacts
-                    .list_files(&result.commit)
-                    .map_err(|error| RunHttpError::Unprocessable(error.to_string()))?;
+                let (files, availability, artifact_error) =
+                    match artifacts.availability(&result.commit) {
+                        Ok(availability) => match artifacts.list_files(&result.commit) {
+                            Ok(files) => (files, json!(availability), None),
+                            Err(error) => (Vec::new(), json!("missing"), Some(error.to_string())),
+                        },
+                        Err(error) => (Vec::new(), json!("corrupt"), Some(error.to_string())),
+                    };
                 nodes.insert(
                     name.clone(),
                     json!({
@@ -55,6 +60,9 @@ impl RunApplication {
                         "interruption":result.interruption,
                         "route":result.completion.route,
                         "commit":result.commit.id,
+                        "artifact":result.commit,
+                        "artifact_availability":availability,
+                        "artifact_error":artifact_error,
                         "inputs":[]
                     }),
                 );
@@ -392,7 +400,8 @@ mod tests {
                 serde_json::to_string(&json!({"worker":{
                     "node_id":"worker","pass_number":1,"submission":"fixture result","files":[],
                     "submitted":true,"exit_status":null,"interruption":null,"route":null,
-                    "commit":result.commit.id,"inputs":[]
+                    "commit":result.commit.id,"artifact":result.commit,
+                    "artifact_availability":"available","artifact_error":null,"inputs":[]
                 }}))
                 .unwrap()
             } else {

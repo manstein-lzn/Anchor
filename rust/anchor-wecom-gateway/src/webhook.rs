@@ -5,12 +5,12 @@ use crate::{
     ChannelEvent, GatewayError, MAX_MEDIA_REQUEST_BYTES, MAX_MEDIA_RESPONSE_BYTES,
     MAX_REQUEST_BYTES, MAX_TEXT_BYTES, WebhookConfig,
     ledger::{DeliveryReceipt, PendingSettlement},
-    media::{ImageItem, rejected_response_field, reply_images},
+    media::{MediaItem, rejected_response_field, reply_images},
 };
 
 pub(crate) struct WebhookReply {
     pub text: Option<String>,
-    pub items: Vec<ImageItem>,
+    pub items: Vec<MediaItem>,
     pub receipt: Option<DeliveryReceipt>,
     pub superseded: bool,
 }

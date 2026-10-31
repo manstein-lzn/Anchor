@@ -6,7 +6,7 @@ use fixture::{Host, wait_until};
 use serde_json::{Value, json};
 
 fn graph() -> Value {
-    json!({"entry":"seed","ops":{"seed":{"run":"sh -c 'printf standard-host > report.txt'"}},
+    json!({"entry":"seed","ops":{"seed":{"run":"sh -c 'printf standard-host > report.txt'","writes":["report.txt"]}},
         "nodes":[{"id":"seed","op":"seed"}],"edges":[]})
 }
 

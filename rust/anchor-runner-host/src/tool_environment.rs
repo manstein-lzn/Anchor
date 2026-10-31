@@ -6,7 +6,7 @@ use anchor_runtime::{ReadOnlyInput, SandboxEnvironment, SandboxRequest};
 use anchor_sandbox_bwrap::BubblewrapPolicy;
 use serde::Deserialize;
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs,
     io::Read,
     os::unix::fs::PermissionsExt,
@@ -30,6 +30,8 @@ pub(crate) struct ToolEnvironment {
     imports: Vec<PathBuf>,
     /// Operator-registered GPU/accelerator device nodes a tool may reach.
     devices: Vec<PathBuf>,
+    /// Operator grants selected only when this Plugin launches an MCP server.
+    plugin_environments: BTreeMap<String, ToolEnvironment>,
     rust: Option<RustDevelopment>,
     python: Option<PythonDevelopment>,
     // Formal Plugins may use the shared interpreter independently of Pilot's
@@ -197,6 +199,8 @@ mod tests;
 
 #[derive(Deserialize)]
 struct ToolSpec {
+    /// Omit for the existing deployment-wide tool environment.
+    plugin: Option<String>,
     entrypoint: PathBuf,
     environment: Option<PathBuf>,
     #[serde(default)]
@@ -854,6 +858,18 @@ impl ToolEnvironment {
                 &fs::read(directory.join("tool.json")).map_err(|e| format!("tool {id}: {e}"))?,
             )
             .map_err(|e| format!("tool {id}: {e}"))?;
+            let target = match &spec.plugin {
+                Some(plugin) => {
+                    if !anchor_runtime::identifier::is_plugin_id(plugin) {
+                        return Err(format!("tool {id}: invalid Plugin scope"));
+                    }
+                    result
+                        .plugin_environments
+                        .entry(plugin.clone())
+                        .or_default()
+                }
+                None => &mut result,
+            };
             let entry = if spec.entrypoint.is_absolute() {
                 spec.entrypoint
             } else {
@@ -878,10 +894,10 @@ impl ToolEnvironment {
             {
                 return Err(format!("tool {id}: entrypoint is not executable"));
             }
-            result
+            target
                 .mounts
                 .push(ReadOnlyInput::new(&directory, format!("/tools/{id}/files")));
-            result
+            target
                 .mounts
                 .push(ReadOnlyInput::new(&entry, format!("/tools/{id}/run")));
             if let Some(environment) = spec.environment {
@@ -893,13 +909,13 @@ impl ToolEnvironment {
                         "tool {id}: entrypoint must belong to its absolute environment directory"
                     ));
                 }
-                result.mount_at_original_path(&environment)?;
+                target.mount_at_original_path(&environment)?;
                 let bin = environment.join("bin");
                 if bin.is_dir() {
                     let canonical_bin = bin.canonicalize().map_err(|e| e.to_string())?;
                     for directory in [bin, canonical_bin] {
-                        if !result.dirs.contains(&directory) {
-                            result.dirs.push(directory);
+                        if !target.dirs.contains(&directory) {
+                            target.dirs.push(directory);
                         }
                     }
                 }
@@ -910,11 +926,11 @@ impl ToolEnvironment {
                     if !seen.insert(python.clone()) {
                         return Err(format!("tool {id}: interpreter symlink cycle"));
                     }
-                    let target = fs::read_link(&python).map_err(|e| e.to_string())?;
-                    python = if target.is_absolute() {
-                        target
+                    let link_target = fs::read_link(&python).map_err(|e| e.to_string())?;
+                    python = if link_target.is_absolute() {
+                        link_target
                     } else {
-                        python.parent().unwrap().join(target)
+                        python.parent().unwrap().join(link_target)
                     };
                     let parent = python.parent().ok_or("invalid interpreter path")?;
                     let prefix = if parent.file_name().is_some_and(|name| name == "bin") {
@@ -922,23 +938,54 @@ impl ToolEnvironment {
                     } else {
                         parent
                     };
-                    result.mount_at_original_path(prefix)?;
+                    target.mount_at_original_path(prefix)?;
                 }
             }
             for import in spec.imports {
-                result.mount_at_original_path(&import)?;
-                if !result.imports.contains(&import) {
-                    result.imports.push(import);
+                target.mount_at_original_path(&import)?;
+                if !target.imports.contains(&import) {
+                    target.imports.push(import);
                 }
             }
             for device in spec.devices {
                 let resolved = validate_device_grant(&device)?;
-                if !result.devices.contains(&resolved) {
-                    result.devices.push(resolved);
+                if !target.devices.contains(&resolved) {
+                    target.devices.push(resolved);
                 }
             }
         }
         Ok(result)
+    }
+
+    /// Select an operator-registered Plugin grant without exposing it to node
+    /// shell commands or another Plugin. The default environment remains intact.
+    pub(crate) fn for_plugin(&self, plugin: &str, include_global: bool) -> Self {
+        let mut selected = if include_global {
+            self.clone()
+        } else {
+            Self::default()
+        };
+        let grant = self.plugin_environments.get(plugin).cloned();
+        selected.plugin_environments.clear();
+        if let Some(grant) = grant {
+            for mount in grant.mounts {
+                if !selected.mounts.contains(&mount) {
+                    selected.mounts.push(mount);
+                }
+            }
+            for (paths, extra) in [
+                (&mut selected.dirs, grant.dirs),
+                (&mut selected.imports, grant.imports),
+                (&mut selected.devices, grant.devices),
+            ] {
+                for path in extra {
+                    if !paths.contains(&path) {
+                        paths.push(path);
+                    }
+                }
+            }
+        }
+        selected
     }
 
     fn mount_at_original_path(&mut self, path: &Path) -> Result<(), String> {
@@ -1013,6 +1060,7 @@ impl ToolEnvironment {
         let sandbox = sandbox
             .with_readonly_grants(&self.mounts)
             .and_then(|sandbox| sandbox.with_executable_dirs(&self.dirs))
+            .and_then(|sandbox| sandbox.with_device_grants(&self.devices))
             .map_err(|error| error.to_string())?;
         Ok(if self.rust.is_some() {
             sandbox.with_pid_namespace_proc()

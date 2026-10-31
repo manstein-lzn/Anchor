@@ -1,0 +1,39 @@
+{
+  "name": "DeepSeek 联网检索",
+  "description": "调用 DeepSeek 官方 Search 与 Fetch API，检索网络并读取原文；原始响应和实际抓取时间完整保存在任务工作区，支持可追溯的新闻与研究证据。",
+  "network": true,
+  "skills": "skills/",
+  "configuration": {
+    "fields": {
+      "base_url": {
+        "type": "url",
+        "label": "DeepSeek API 地址",
+        "default": "https://api.deepseek.com"
+      },
+      "api_key": {
+        "type": "secret",
+        "label": "DeepSeek API Key"
+      }
+    },
+    "environment": {
+      "web": {
+        "ANCHOR_DEEPSEEK_BASE_URL": "base_url",
+        "ANCHOR_DEEPSEEK_API_KEY": "api_key"
+      }
+    }
+  },
+  "mcpServers": {
+    "web": {
+      "command": "bin/anchor-deepseek-tools",
+      "cwd": ".",
+      "tool_timeout_sec": 100,
+      "env_vars": [
+        "ANCHOR_DEEPSEEK_BASE_URL",
+        "ANCHOR_DEEPSEEK_API_KEY"
+      ],
+      "env": {
+        "ANCHOR_DEEPSEEK_WORKSPACE": "/workspace"
+      }
+    }
+  }
+}

@@ -14,17 +14,23 @@ pub(crate) struct KernelCallNodes<'a, A, N> {
     application: &'a RunApplication,
     artifacts: &'a A,
     nodes: &'a N,
+    workspaces: crate::workspaces::Workspaces,
 }
-impl<'a, A, N> KernelCallNodes<'a, A, N> {
-    pub(crate) fn new(application: &'a RunApplication, artifacts: &'a A, nodes: &'a N) -> Self {
+impl<'a, N> KernelCallNodes<'a, crate::HostArtifacts, N> {
+    pub(crate) fn new(
+        application: &'a RunApplication,
+        artifacts: &'a crate::HostArtifacts,
+        nodes: &'a N,
+    ) -> Self {
         Self {
             application,
             artifacts,
             nodes,
+            workspaces: artifacts.workspaces(),
         }
     }
 }
-impl<A: ArtifactPort, N: NodeExecutionPort> NodeExecutionPort for KernelCallNodes<'_, A, N> {
+impl<N: NodeExecutionPort> NodeExecutionPort for KernelCallNodes<'_, crate::HostArtifacts, N> {
     fn capabilities(&self) -> NodeExecutionCapabilities {
         self.nodes.capabilities()
     }
@@ -47,7 +53,12 @@ impl<A: ArtifactPort, N: NodeExecutionPort> NodeExecutionPort for KernelCallNode
         &'a self,
         key: &'a InvocationKey,
     ) -> Pin<Box<dyn Future<Output = Result<CompletionFact, GraphError>> + Send + 'a>> {
-        self.nodes.completion_fact(key)
+        Box::pin(async move {
+            self.application
+                .ensure_node_workspace_binding(key, &self.workspaces)
+                .map_err(application_error)?;
+            self.nodes.completion_fact(key).await
+        })
     }
     fn record_recovery_decision(
         &self,
@@ -61,7 +72,12 @@ impl<A: ArtifactPort, N: NodeExecutionPort> NodeExecutionPort for KernelCallNode
         &'a self,
         request: NodeExecutionRequest,
     ) -> Pin<Box<dyn Future<Output = Result<NodeExecutionOutcome, GraphError>> + Send + 'a>> {
-        self.nodes.execute(request)
+        Box::pin(async move {
+            self.application
+                .ensure_node_workspace_binding(&request.key, &self.workspaces)
+                .map_err(application_error)?;
+            self.nodes.execute(request).await
+        })
     }
 }
 
@@ -155,7 +171,7 @@ impl<A: ArtifactPort> CallRunAccess for KernelCallAccess<'_, A> {
     }
 }
 
-impl<A: ArtifactPort, N: NodeExecutionPort> GraphCallPort for KernelCallNodes<'_, A, N> {
+impl<N: NodeExecutionPort> GraphCallPort for KernelCallNodes<'_, crate::HostArtifacts, N> {
     fn call<'a>(
         &'a self,
         identity: &'a CallIdentity,
@@ -165,6 +181,15 @@ impl<A: ArtifactPort, N: NodeExecutionPort> GraphCallPort for KernelCallNodes<'_
         cancellation: Cancellation,
     ) -> Pin<Box<dyn Future<Output = Result<GraphCallOutcome, GraphError>> + Send + 'a>> {
         Box::pin(async move {
+            let key = InvocationKey {
+                run_id: identity.parent_run_id.clone(),
+                graph_digest: identity.parent_graph_digest.clone(),
+                node_id: identity.node_id.clone(),
+                invocation: identity.invocation,
+            };
+            self.application
+                .ensure_node_workspace_binding(&key, &self.workspaces)
+                .map_err(application_error)?;
             let store = KernelCallAccess {
                 application: self.application,
                 artifacts: self.artifacts,
@@ -210,13 +235,47 @@ impl<A: ArtifactPort, N: NodeExecutionPort> GraphCallPort for KernelCallNodes<'_
                         Err(GraphError::InvalidSnapshot(reason))
                     }
                 }
-                outcome => outcome,
+                outcome => {
+                    let completion = match &outcome {
+                        Ok(GraphCallOutcome::Completed {
+                            child_run_id,
+                            output,
+                        }) => Some(
+                            scheduler::graph_call_completion(spec, child_run_id, output.clone()).1,
+                        ),
+                        Ok(GraphCallOutcome::Detached { child_run_id }) => Some(
+                            scheduler::graph_call_completion(
+                                spec,
+                                child_run_id,
+                                serde_json::Value::Null,
+                            )
+                            .1,
+                        ),
+                        _ => None,
+                    };
+                    if let Some(completion) = completion {
+                        // Result export reserved this exact invocation. Its
+                        // durable owner excludes another writer after the
+                        // export's process lease drops and before publication.
+                        self.artifacts
+                            .freeze_with_context(
+                                &key,
+                                &completion,
+                                &ArtifactFreezeContext {
+                                    kind: ArtifactKind::GraphCall,
+                                    input_commits: commits.to_vec(),
+                                },
+                            )
+                            .await?;
+                    }
+                    outcome
+                }
             }
         })
     }
 }
 
-impl<A: ArtifactPort, N: NodeExecutionPort> ChildExecutionPort for KernelCallNodes<'_, A, N> {
+impl<N: NodeExecutionPort> ChildExecutionPort for KernelCallNodes<'_, crate::HostArtifacts, N> {
     fn execute<'a>(
         &'a self,
         child: CallRun,

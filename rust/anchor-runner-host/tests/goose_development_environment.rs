@@ -97,12 +97,12 @@ fn private_development_editable_and_formal_delivery_remain_independent_after_ses
         Step::text("Private editable was retested and an independent candidate business tool was installed after native confirmation.").after("installed"),
         Step::tool("env-probe-service_probe",json!({"value":"formal-before-delete"})),
         goose::command("printf formal-before-delete > proof.txt").after("formal-before-delete"),
-        Step::tool("final_result",json!({"summary":"formal-before-delete"})),
+        Step::tool("final_result",json!({"files":["proof.txt"],"summary":"formal-before-delete"})),
         Step::tool("platform_status",json!({})),
         Step::text("A new Session sees the surviving installed Plugin."),
         Step::tool("env-probe-service_probe",json!({"value":"formal-after-delete"})),
         goose::command("printf formal-after-delete > proof.txt").after("formal-after-delete"),
-        Step::tool("final_result",json!({"summary":"formal-after-delete"})),
+        Step::tool("final_result",json!({"files":["proof.txt"],"summary":"formal-after-delete"})),
     ]);
     let host=Host::new(&json!({"entry":"seed","ops":{"seed":{"run":"true"}},"nodes":[{"id":"seed","op":"seed"}],"edges":[]})).default_runtime().with_allowed_commands("sh,cat,git,true,python3.12");
     let sources = host.base.root.path().join("wheels");

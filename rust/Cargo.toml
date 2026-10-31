@@ -1,5 +1,5 @@
 [workspace]
-members = ["anchor-file-lease", "anchor-kernel", "anchor-facts", "anchor-hub", "anchor-eval", "anchor-runtime", "anchor-sandbox-bwrap", "anchor-mcp-host", "anchor-runner-host", "anchor-graph-host", "anchor-rsi", "anchor-platform-session", "anchor-wecom-tools", "anchor-docmost-tools", "anchor-network-tools", "anchor-devtools", "anchor-scholarly", "anchor-library", "anchor-wecom-gateway", "anchor-distribution"]
+members = ["anchor-file-lease", "anchor-workspace-files", "anchor-kernel", "anchor-facts", "anchor-hub", "anchor-eval", "anchor-runtime", "anchor-sandbox-bwrap", "anchor-mcp-host", "anchor-runner-host", "anchor-graph-host", "anchor-rsi", "anchor-platform-session", "anchor-wecom-tools", "anchor-docmost-tools", "anchor-network-tools", "anchor-deepseek-tools", "anchor-briefing-tools", "anchor-git-tools", "anchor-devtools", "anchor-scholarly", "anchor-library", "anchor-wecom-gateway", "anchor-distribution"]
 resolver = "2"
 
 [workspace.package]

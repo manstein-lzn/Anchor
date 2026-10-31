@@ -135,6 +135,8 @@ pub(crate) struct TurnBinding {
     pub(crate) pending_inbounds: Vec<String>,
     #[serde(default)]
     pub(crate) pending_truncated: bool,
+    #[serde(default)]
+    pub(crate) notification: Option<anchor_platform_session::ChannelNotification>,
 }
 
 fn binding_path(root: &Path, key: &InvocationKey) -> PathBuf {
@@ -222,7 +224,7 @@ pub(crate) fn sessions(root: &Path) -> Result<SessionStore, String> {
 /// Run is the current instance and that the named Run was retired into it. The
 /// handed-over Run must be the same assistant instance of the same Graph, so a
 /// plain conversation predecessor, a user input or a path string can never
-/// authorize a copy. Only the first preparation of the instance's own work node
+/// authorize a resource binding. Only the first preparation of the instance's own work node
 /// inherits a scene.
 pub(crate) fn handover_predecessor(
     root: &Path,
@@ -277,7 +279,7 @@ pub(crate) fn handover_predecessor(
         return Err("assistant handover predecessor identity changed".into());
     }
     // The handover is real. From here on the facts must agree, so a mismatch is
-    // retained corruption instead of a silently skipped copy.
+    // retained corruption instead of a silently skipped binding.
     let Some(prior) = crate::run_metadata::load(root, previous)
         .map_err(|error| format!("assistant handover source: {error:?}"))?
     else {
@@ -479,6 +481,7 @@ pub(crate) fn bind(
     inbound: &ChannelInboundAdmission,
     pending_inbounds: Vec<String>,
     pending_truncated: bool,
+    notification: Option<anchor_platform_session::ChannelNotification>,
 ) -> Result<TurnBinding, String> {
     let binding = TurnBinding {
         key: key.clone(),
@@ -487,6 +490,7 @@ pub(crate) fn bind(
         turn: inbound.relation.turn_id.clone(),
         pending_inbounds,
         pending_truncated,
+        notification,
     };
     save_immutable(&binding_path(root, key), &binding)?;
     Ok(binding)
@@ -550,6 +554,7 @@ pub(crate) fn bind_request(
                 &input,
                 prior.pending_inbounds,
                 prior.pending_truncated,
+                prior.notification,
             )?;
             return Ok(Some(input));
         }
@@ -1058,7 +1063,9 @@ mod tests {
             .bind_node_workspace(&old.run_id, &old.graph_digest, &old.node_id)
             .unwrap();
         let scene = artifacts.prepare_workspace(&old, &[]).unwrap();
+        let execution = artifacts.workspaces().acquire(&old).unwrap();
         std::fs::write(scene.join("draft.md"), "retained work").unwrap();
+        execution.finish_interrupted().unwrap();
         // Completed invocations can advance without preparing a newer workspace.
         for _ in 0..8 {
             for node in ["wait_input", "assistant", "reply"] {
@@ -1116,8 +1123,11 @@ mod tests {
         // A present but unreadable intermediate ownership fact is corruption,
         // rather than permission to jump to an older scene.
         let state = artifacts.workspace_path(&middle).unwrap();
-        std::fs::create_dir_all(&state).unwrap();
-        std::fs::write(state.join("unowned.md"), "unowned").unwrap();
+        std::fs::write(
+            state.parent().unwrap().join("owner.json"),
+            "invalid owner fact",
+        )
+        .unwrap();
         assert!(handover_workspace_source(&fixture.root, &new, &artifacts).is_err());
     }
 }

@@ -1,4 +1,4 @@
-use super::tests::{completion, fixture, key, workspace};
+use super::tests::{completion, completion_with_files, fixture, key, workspace};
 use super::*;
 use anchor_runtime::graph::CallFileSelection;
 use serde_json::json;
@@ -46,11 +46,14 @@ async fn committed_child_result(artifacts: &HostArtifacts, run_id: &str) -> Comm
         node_id: "answer".into(),
         invocation: 1,
     };
-    let workspace = artifacts.workspace_path(&child).unwrap();
+    let workspace = artifacts.prepare_workspace(&child, &[]).unwrap();
     fs::create_dir_all(workspace.join("nested")).unwrap();
     fs::write(workspace.join("nested/answer.md"), "child-result").unwrap();
     fs::write(workspace.join("summary.txt"), "summary").unwrap();
-    artifacts.freeze(&child, &completion()).await.unwrap()
+    artifacts
+        .freeze(&child, &completion_with_files(&["nested", "summary.txt"]))
+        .await
+        .unwrap()
 }
 
 fn call_selection(node: &str, path: &str, alias: &str) -> CallFileSelection {
@@ -178,7 +181,7 @@ async fn serial_fanout_branches_join_forward_exact_files_and_control_json_withou
         6
     );
     let manifest = artifacts.load_snapshot(&join).unwrap().1;
-    assert_eq!(manifest.format, 2);
+    assert_eq!(manifest.format, 3);
     assert_eq!(manifest.context.unwrap().input_commits, [left, right]);
 }
 
@@ -188,7 +191,7 @@ async fn completion_output_cannot_forge_file_provenance_and_normal_node_requires
     let secret = freeze(&artifacts, "unrelated", ArtifactKind::Node, &[]).await;
     let node = key("work");
     let forged = NodeCompletion {
-        output: json!({"input_commits":[secret],"branches":[{"commit":secret}]}),
+        output: json!({"input_commits":[secret],"branches":[{"commit":secret}],"files":["nested","report draft.txt"]}),
         ..completion()
     };
     assert!(
@@ -313,13 +316,17 @@ async fn corrupt_missing_cross_run_digest_and_cyclic_links_are_rejected() {
                 .is_err(),
             "{corruption}"
         );
-        assert!(artifacts.files_path(&last).is_err(), "{corruption}");
-        assert!(artifacts.resolve(&last).await.is_err(), "{corruption}");
+        if corruption == "checksum" {
+            assert!(artifacts.files_path(&last).is_err());
+            assert!(artifacts.resolve(&last).await.is_err());
+        } else {
+            assert!(artifacts.resolve(&last).await.is_ok());
+        }
     }
 }
 
 #[tokio::test]
-async fn context_retry_is_immutable_and_old_fs1_remains_readable() {
+async fn context_retry_is_immutable() {
     let (_temp, artifacts) = fixture();
     let parent = freeze(&artifacts, "parent", ArtifactKind::Node, &[]).await;
     let context = ArtifactFreezeContext {
@@ -348,42 +355,6 @@ async fn context_retry_is_immutable_and_old_fs1_remains_readable() {
             .await,
         Err(GraphError::RunConflict)
     ));
-
-    let (path, mut manifest) = artifacts.load_snapshot(&parent).unwrap();
-    if path.join("git-view").exists() {
-        fs::remove_dir_all(path.join("git-view")).unwrap();
-        fs::remove_file(path.join(".git-view.lock")).unwrap();
-    }
-    manifest.format = 1;
-    manifest.context = None;
-    manifest.context_sha256 = None;
-    fs::write(
-        path.join("manifest.json"),
-        serde_json::to_vec(&manifest).unwrap(),
-    )
-    .unwrap();
-    let legacy = legacy_commit_for(&manifest.key);
-    fs::rename(path, artifacts.root.join(&legacy.id)).unwrap();
-    fs::remove_dir_all(artifacts.workspace_path(&manifest.key).unwrap()).unwrap();
-    assert_eq!(
-        artifacts.resolve(&legacy).await.unwrap(),
-        serde_json::to_value(completion()).unwrap()
-    );
-    assert_eq!(
-        artifacts
-            .freeze(&manifest.key, &completion())
-            .await
-            .unwrap(),
-        legacy
-    );
-    assert_eq!(
-        destinations(
-            &artifacts
-                .input_mounts(&[legacy], "run-1", "digest-1")
-                .unwrap()
-        ),
-        ["/in/parent"]
-    );
 }
 
 #[tokio::test]
@@ -411,14 +382,12 @@ async fn op_call_files_and_result_round_trip_through_workspaces() {
         .await
         .unwrap();
     // Tampering with a staged file fails closed on re-stage and on mount.
-    fs::write(
-        artifacts
-            .call_inputs_path(child_run)
-            .unwrap()
-            .join("input/report.txt"),
-        "tampered",
-    )
-    .unwrap();
+    let staged_file = artifacts
+        .call_inputs_path(child_run)
+        .unwrap()
+        .join("input/report.txt");
+    fs::remove_file(&staged_file).unwrap();
+    fs::write(staged_file, "tampered").unwrap();
     assert!(
         artifacts
             .stage_call_inputs(child_run, std::slice::from_ref(&producer), &selections)
@@ -486,11 +455,11 @@ async fn op_call_files_and_result_round_trip_through_workspaces() {
         node_id: "answer".into(),
         invocation: 1,
     };
-    let answer_workspace = artifacts.workspace_path(&child_answer).unwrap();
+    let answer_workspace = artifacts.prepare_workspace(&child_answer, &[]).unwrap();
     fs::create_dir_all(answer_workspace.join("nested")).unwrap();
     fs::write(answer_workspace.join("nested/answer.md"), "child-result").unwrap();
     let answer = artifacts
-        .freeze(&child_answer, &completion())
+        .freeze(&child_answer, &completion_with_files(&["nested"]))
         .await
         .unwrap();
 
@@ -510,7 +479,7 @@ async fn op_call_files_and_result_round_trip_through_workspaces() {
     let call_commit = artifacts
         .freeze_with_context(
             &call_key,
-            &completion(),
+            &completion_with_files(&["result"]),
             &ArtifactFreezeContext {
                 kind: ArtifactKind::GraphCall,
                 input_commits: vec![producer],
@@ -900,7 +869,10 @@ async fn export_call_result_files_is_idempotent_across_transfer_and_swap_breakpo
 
     // Crash before the swap: a partial temporary tree is reclaimed and the
     // published result stays complete.
-    let stale = call_ws.join(format!(".result-{}-000001.tmp", std::process::id()));
+    let stale = artifacts
+        .call_result_staging(&call_key)
+        .unwrap()
+        .join("next");
     fs::create_dir_all(stale.join("nested")).unwrap();
     fs::write(stale.join("nested/answer.md"), "partial").unwrap();
     artifacts
@@ -915,7 +887,10 @@ async fn export_call_result_files_is_idempotent_across_transfer_and_swap_breakpo
 
     // Crash mid-swap: `result` was renamed aside and the replacement never
     // landed. A retry restores the complete tree.
-    let half = call_ws.join(format!(".result-old-{}-000002.tmp", std::process::id()));
+    let half = artifacts
+        .call_result_staging(&call_key)
+        .unwrap()
+        .join("old");
     fs::rename(call_ws.join("result"), &half).unwrap();
     assert!(!call_ws.join("result").exists());
     artifacts
@@ -954,18 +929,23 @@ async fn graph_call_freeze_is_idempotent_and_refuses_interrupted_exports() {
         kind: ArtifactKind::GraphCall,
         input_commits: vec![producer.clone()],
     };
+    let (_, completion) = anchor_runtime::graph::scheduler::graph_call_completion(
+        &json!({"mode":"wait"}),
+        "child-run",
+        json!({"result":{"commit":commit,"files":files}}),
+    );
 
     artifacts
         .export_call_result_files(&call_key, &commit, &files)
         .await
         .unwrap();
     let call_commit = artifacts
-        .freeze_with_context(&call_key, &completion(), &context)
+        .freeze_with_context(&call_key, &completion, &context)
         .await
         .unwrap();
     assert_eq!(
         artifacts
-            .freeze_with_context(&call_key, &completion(), &context)
+            .freeze_with_context(&call_key, &completion, &context)
             .await
             .unwrap(),
         call_commit
@@ -976,16 +956,44 @@ async fn graph_call_freeze_is_idempotent_and_refuses_interrupted_exports() {
     fs::write(call_ws.join("result/nested/answer.md"), "changed").unwrap();
     assert_eq!(
         artifacts
-            .freeze_with_context(&call_key, &completion(), &context)
+            .freeze_with_context(&call_key, &completion, &context)
             .await
             .unwrap(),
         call_commit
     );
 
+    // Publication retries use the original delivery even after child expiry
+    // and a different Run has acquired the shared mutable scene.
+    let workspaces = artifacts.workspaces();
+    let resource = workspaces.resource(&call_key).unwrap();
+    let target = InvocationKey {
+        run_id: "another-run".into(),
+        ..call_key.clone()
+    };
+    workspaces.bind_resource(&target, &resource).unwrap();
+    let owner = workspaces.acquire(&target).unwrap();
+    artifacts
+        .collect(&Default::default(), std::slice::from_ref(&commit.id))
+        .unwrap();
+    assert_eq!(
+        artifacts
+            .export_call_result_files(&call_key, &commit, &files)
+            .await
+            .unwrap(),
+        files
+    );
+    assert!(matches!(
+        artifacts
+            .export_call_result_files(&call_key, &commit, &["summary.txt".into()])
+            .await,
+        Err(GraphError::RunConflict)
+    ));
+    owner.finish_interrupted().unwrap();
+
     // Conflicting completion or context stay fail-closed.
     let changed = NodeCompletion {
         submission: "different".into(),
-        ..completion()
+        ..completion.clone()
     };
     assert!(matches!(
         artifacts
@@ -999,38 +1007,53 @@ async fn graph_call_freeze_is_idempotent_and_refuses_interrupted_exports() {
     };
     assert!(matches!(
         artifacts
-            .freeze_with_context(&call_key, &completion(), &changed_context)
+            .freeze_with_context(&call_key, &completion, &changed_context)
             .await,
         Err(GraphError::RunConflict)
     ));
 
-    // An interrupted export (a surviving `.result-*` entry) refuses to freeze
-    // instead of committing a partial or empty result tree.
+    // A pending Host export marker refuses to publish a partial result tree.
     let other_key = key("notify-interrupted");
-    let other_ws = artifacts.workspace_path(&other_key).unwrap();
+    let other_ws = artifacts.prepare_workspace(&other_key, &[]).unwrap();
     fs::create_dir_all(other_ws.join("result")).unwrap();
     fs::write(other_ws.join("result/answer.md"), "partial").unwrap();
-    fs::create_dir_all(other_ws.join(format!(".result-old-{}-000003.tmp", std::process::id())))
-        .unwrap();
+    let staging = artifacts.call_result_staging(&other_key).unwrap();
+    fs::create_dir_all(&staging).unwrap();
+    fs::write(staging.join("pending.json"), "{}").unwrap();
     let other_context = ArtifactFreezeContext {
         kind: ArtifactKind::GraphCall,
         input_commits: vec![producer],
     };
     assert!(
         artifacts
-            .freeze_with_context(&other_key, &completion(), &other_context)
+            .freeze_with_context(
+                &other_key,
+                &completion_with_files(&["result"]),
+                &other_context
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        artifacts
+            .freeze_with_context(&other_key, &completion_with_files(&[]), &other_context)
             .await
             .is_err()
     );
 
     // Once the interrupted export is completed, the same freeze succeeds.
+    let commit = committed_child_result(&artifacts, "next-child-run").await;
     artifacts
         .export_call_result_files(&other_key, &commit, &files)
         .await
         .unwrap();
     assert!(
         artifacts
-            .freeze_with_context(&other_key, &completion(), &other_context)
+            .freeze_with_context(
+                &other_key,
+                &completion_with_files(&["result"]),
+                &other_context
+            )
             .await
             .is_ok()
     );

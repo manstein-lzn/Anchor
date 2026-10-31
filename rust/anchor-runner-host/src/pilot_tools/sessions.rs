@@ -13,26 +13,16 @@ impl PilotTools {
         if !anchor_runtime::identifier::is_name(&run) {
             return Err(failed());
         }
-        let record = self
+        let commit = self
             .application
-            .run_views()
-            .map_err(|_| failed())?
-            .into_iter()
-            .find(|(id, _)| id == &run)
-            .ok_or_else(failed)?
-            .1;
-        let progress = record.progress();
-        let result = progress
-            .results
-            .get(&node)
-            .and_then(|results| results.last())
-            .ok_or_else(failed)?;
-        let artifacts = HostArtifacts::new(
-            self.data_root.join("artifacts"),
-            self.workspace_root.clone(),
-        );
-        let files = artifacts.files_path(&result.commit).map_err(|_| failed())?;
-        let text = text_resource(&files, &path)?;
+            .node_delivery(&run, &node)
+            .map_err(|_| failed())?;
+        let opened = self
+            .application
+            .open_delivery_file(&commit.id, &path, &self.workspace_root)
+            .map_err(|_| failed())?;
+        let (file, _lease) = opened.into_parts();
+        let text = text_resource(file)?;
         Ok(json!({"run":run,"node":node,"path":path,"text":text}))
     }
 

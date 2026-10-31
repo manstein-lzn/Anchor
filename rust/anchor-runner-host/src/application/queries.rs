@@ -6,7 +6,7 @@ impl RunApplication {
             crate::run_metadata::graph_identity(&self.graph_bundle_path(name)).ok()
         });
         let mut ids = Vec::new();
-        for (id, run) in self.run_views().unwrap_or_default() {
+        for id in self.registered_run_ids().unwrap_or_default() {
             let matches_graph = graph_path.as_ref().is_none_or(|path| {
                 self.metadata(&id).ok().flatten().is_some_and(|metadata| {
                     crate::run_metadata::graph_identity(&metadata.bundle_source)
@@ -15,7 +15,7 @@ impl RunApplication {
                         == Some(path)
                 })
             });
-            if run.active() && matches_graph {
+            if matches_graph && self.run_is_active(&id).await {
                 ids.push(id);
             }
         }

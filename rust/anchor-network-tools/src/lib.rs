@@ -4,18 +4,9 @@
 mod package;
 pub use package::package_plugin;
 
-use std::{
-    collections::BTreeMap,
-    fs::File,
-    io::Write,
-    path::{Component, Path},
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
-    time::Duration,
-};
+use std::{collections::BTreeMap, path::Path, sync::Arc, time::Duration};
 
+use anchor_workspace_files::WorkspaceFiles;
 use rmcp::{
     RoleServer, ServerHandler,
     model::{
@@ -24,9 +15,6 @@ use rmcp::{
     },
     service::RequestContext,
 };
-use rustix::fs::{
-    AtFlags, Mode, OFlags, RenameFlags, mkdirat, open, openat, renameat_with, unlinkat,
-};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -34,7 +22,6 @@ use sha2::{Digest, Sha256};
 type Error = Box<dyn std::error::Error + Send + Sync>;
 const MAX_TEXT: usize = 1024 * 1024;
 const MAX_DOWNLOAD: usize = 64 * 1024 * 1024;
-static DOWNLOAD_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -71,7 +58,7 @@ pub struct Download {
 #[derive(Clone)]
 pub struct NetworkServer {
     client: reqwest::Client,
-    workspace: Arc<File>,
+    workspace: WorkspaceFiles,
 }
 
 impl NetworkServer {
@@ -82,11 +69,7 @@ impl NetworkServer {
                 .redirect(reqwest::redirect::Policy::limited(5))
                 .user_agent("Anchor-Network/0.1")
                 .build()?,
-            workspace: Arc::new(File::from(open(
-                workspace.as_ref(),
-                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-                Mode::empty(),
-            )?)),
+            workspace: WorkspaceFiles::new(workspace)?,
         })
     }
 
@@ -128,14 +111,7 @@ impl NetworkServer {
         if request.max_bytes == 0 || request.max_bytes > MAX_DOWNLOAD {
             return Err("max_bytes must be between 1 and 67108864".into());
         }
-        let relative = Path::new(&request.path);
-        if relative.components().next().is_none()
-            || !relative
-                .components()
-                .all(|component| matches!(component, Component::Normal(_)))
-        {
-            return Err("path must be a relative file path inside the task workspace".into());
-        }
+        WorkspaceFiles::validate_relative(&request.path)?;
         let response = self
             .client
             .get(http_url(&request.url)?)
@@ -147,73 +123,10 @@ impl NetworkServer {
         if truncated {
             return Err("download exceeds max_bytes; no file was saved".into());
         }
-        // Each directory is pinned by a descriptor; concurrent renames or
-        // symlink swaps cannot redirect a download out of this workspace.
-        let mut parent = self.workspace.try_clone()?;
-        for component in relative.parent().into_iter().flat_map(Path::components) {
-            match mkdirat(&parent, component.as_os_str(), Mode::from_raw_mode(0o755)) {
-                Ok(()) | Err(rustix::io::Errno::EXIST) => {}
-                Err(error) => return Err(error.into()),
-            }
-            parent = File::from(openat(
-                &parent,
-                component.as_os_str(),
-                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-                Mode::empty(),
-            )?);
-        }
-        let target = relative.file_name().ok_or("path must name a file")?;
-        // Do not turn the directory FD into `/proc/self/fd/...`: ordinary
-        // Plugin sandboxes intentionally do not mount proc.  A unique file
-        // opened relative to the pinned directory keeps the same confinement
-        // and lets renameat(NOREPLACE) publish it atomically without following
-        // a target symlink or overwriting an existing file.
-        let (temporary_name, mut temporary) = open_download_temp(&parent)?;
-        let result = (|| {
-            temporary.write_all(&bytes)?;
-            temporary.sync_all()?;
-            renameat_with(
-                &parent,
-                &temporary_name,
-                &parent,
-                target,
-                RenameFlags::NOREPLACE,
-            )?;
-            parent.sync_all()?;
-            Ok::<_, Error>(())
-        })();
-        if result.is_err() {
-            let _ = unlinkat(&parent, &temporary_name, AtFlags::empty());
-        }
-        result?;
+        self.workspace.write_new(&request.path, &bytes)?;
         Ok(json!({"url":url,"path":request.path,"bytes":bytes.len(),
             "sha256":format!("{:x}",Sha256::digest(&bytes))}))
     }
-}
-
-fn open_download_temp(parent: &File) -> Result<(String, File), Error> {
-    for _ in 0..32 {
-        let sequence = DOWNLOAD_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let name = format!(
-            ".anchor-download-{}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |duration| duration.as_nanos()),
-            sequence
-        );
-        match openat(
-            parent,
-            &name,
-            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::from_raw_mode(0o600),
-        ) {
-            Ok(file) => return Ok((name, File::from(file))),
-            Err(error) if error == rustix::io::Errno::EXIST => continue,
-            Err(error) => return Err(error.into()),
-        }
-    }
-    Err("unable to allocate a unique temporary download file".into())
 }
 
 fn http_url(value: &str) -> Result<reqwest::Url, Error> {

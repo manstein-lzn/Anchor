@@ -1,4 +1,4 @@
-//! Node workspace and frozen input authorization.
+//! Node workspace binding and frozen input authorization.
 use super::*;
 
 impl HostIoResolver {
@@ -6,50 +6,15 @@ impl HostIoResolver {
         self.local_inputs.configured()
     }
 
-    /// Prepare the one writable tree this invocation owns.
-    ///
-    /// A handed-over assistant Run seeds its work node's scene from the Run it
-    /// took the instance over from; every other preparation is the plain
-    /// unbound/committed-seed behaviour. The seed decision is a durable host fact
-    /// (`crate::assistant::handover_workspace_source`), never graph content or
-    /// user input.
+    /// Prepare the resource whose grant the upper application adapter recorded.
     pub(crate) fn prepare_node_workspace(
         &self,
         key: &InvocationKey,
         inputs: &[CommitRef],
     ) -> Result<PathBuf, String> {
-        let seed = crate::assistant::handover_workspace_source(
-            self.local_inputs.state_root(),
-            key,
-            &self.artifacts,
-        )?;
-        if let Some(source) = seed {
-            let prior = self
-                .load_run(&source.run_id)
-                .map_err(|error| error.to_string())?
-                .ok_or("assistant workspace source Run is missing")?;
-            let current = self
-                .load_run(&key.run_id)
-                .map_err(|error| error.to_string())?
-                .ok_or("assistant workspace target Run is missing")?;
-            self.artifacts
-                .prepare_workspace_from_handover(
-                    key,
-                    inputs,
-                    &source,
-                    &prior.snapshot,
-                    &current.snapshot,
-                )
-                .map_err(|error| error.to_string())
-        } else {
-            self.artifacts
-                .prepare_workspace_from(key, inputs, None)
-                .map_err(|error| error.to_string())
-        }
-    }
-
-    pub(crate) fn persistent_workspace(&self, key: &InvocationKey) -> Result<bool, String> {
-        crate::assistant::source(self.local_inputs.state_root(), key).map(|source| source.is_some())
+        self.artifacts
+            .prepare_workspace(key, inputs)
+            .map_err(|error| error.to_string())
     }
 
     pub(crate) fn bind_local_inputs(
@@ -126,6 +91,30 @@ impl HostIoResolver {
                 .into_iter()
                 .filter_map(|inputs| inputs.mount),
         );
+        if let Some(binding) = crate::assistant::binding(self.local_inputs.state_root(), key)?
+            && let Some(notification) = binding.notification
+        {
+            for file in &notification.files {
+                let commit = self
+                    .artifacts
+                    .reference(&file.artifact_id)
+                    .map_err(|error| error.to_string())?
+                    .ok_or("notification delivery is missing")?;
+                let view = self
+                    .artifacts
+                    .files_path(&commit)
+                    .map_err(|error| error.to_string())?;
+                // Check the exact selected file; the full source delivery is never mounted.
+                let _read = self
+                    .artifacts
+                    .open_file(&commit, &file.path)
+                    .map_err(|error| error.to_string())?;
+                mounts.push(anchor_runtime::ReadOnlyInput::new(
+                    view.join(&file.path),
+                    crate::channel_notifications::file_path(&notification.id, &file.name),
+                ));
+            }
+        }
         Ok(mounts)
     }
 }

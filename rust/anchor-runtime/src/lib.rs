@@ -1,5 +1,6 @@
 use std::sync::{Arc, atomic::AtomicBool};
 
+pub mod artifact;
 pub mod graph;
 pub mod identifier;
 pub mod sandbox;

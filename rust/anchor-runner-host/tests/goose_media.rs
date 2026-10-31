@@ -304,7 +304,7 @@ fn graph() -> Value {
             "model":"models.worker","network":true,
             "instructions":"Write evidence.txt with Anchor tools, observe the media Plugin result, and use its observed receipt to finish via final_result with route verify."
         }},
-        "ops":{"verify":{"run":"sh -c 'set -eu; cat /in/worker/evidence.txt > verified.txt'"}},
+        "ops":{"verify":{"writes":["verified.txt"],"run":"sh -c 'set -eu; cat /in/worker/evidence.txt > verified.txt'"}},
         "nodes":[{"id":"worker","agent":"worker","plugins":[PLUGIN]},
                  {"id":"verify","op":"verify"}],
         "edges":[{"from":"worker","to":"verify"}]
@@ -543,12 +543,14 @@ fn native_goose_mixed_media_preserves_blocks_vision_wire_receipt_and_artifacts()
             Step::tool(
                 "final_result",
                 json!({
-                    "summary":"guessed receipt must not complete","route":"verify",
+                    "files":[],"summary":"guessed receipt must not complete","route":"verify",
                     "observed_receipt":"guessed-image-receipt"
                 }),
             )
             .after(LAST_TEXT),
-            complete("verify").after("final_result.observed_receipt must match"),
+            complete("verify")
+                .files(&["evidence.txt"])
+                .after("final_result.observed_receipt must match"),
         ],
         VISION_MODEL,
     );
@@ -754,11 +756,14 @@ fn native_goose_media_restart_checks_same_session_without_reissuing_effect() {
         vec![
             command("printf media-workspace-checked > evidence.txt; cat evidence.txt"),
             Step::tool(EXPOSED_TOOL, json!({"mode":"mixed"})).after("media-workspace-checked"),
-            complete("verify").after(LAST_TEXT).gated(&gate),
-            complete("verify"),
+            complete("verify")
+                .files(&["evidence.txt"])
+                .after(LAST_TEXT)
+                .gated(&gate),
+            complete("verify").files(&["evidence.txt"]),
             Step::tool(EXPOSED_TOOL, json!({"mode":"inspect"}))
                 .after("final_result.observed_receipt must match"),
-            complete("verify").after(LAST_TEXT),
+            complete("verify").files(&["evidence.txt"]).after(LAST_TEXT),
         ],
         VISION_MODEL,
     );

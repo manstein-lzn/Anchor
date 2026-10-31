@@ -577,8 +577,8 @@ async fn publishing_graph_preserves_plugin_conversation_history_and_child_runs()
 
 fn seed_legacy_scope(state: &ApiState, run: &str, node: &str) -> (PathBuf, PathBuf, PathBuf) {
     let metadata = state.application.metadata(run).unwrap().unwrap();
-    let hint = crate::node_host::conversation_hint_for(&metadata, node).unwrap();
-    let scope = format!("nc1-{:x}", Sha256::digest(hint.key.as_bytes()));
+    let hint = metadata.node_conversation_key(node);
+    let scope = format!("nc1-{:x}", Sha256::digest(hint.as_bytes()));
     let io_root = state.data_root.join("io-harness/store");
     let directory = io_root.join("conversations").join(&scope);
     let framework_root = io_root.join("conversation-roots").join(&scope);

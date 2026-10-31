@@ -1,118 +1,65 @@
 use super::*;
 
-const FILE_LIST_CAP: usize = 1000;
 const FILE_PREVIEW_CAP: usize = 1024 * 1024;
 
-#[allow(clippy::result_large_err)]
-pub(super) fn workspace_path(
-    state: &ApiState,
-    run: &str,
-    node: &str,
-    relative: Option<&str>,
-) -> Result<PathBuf, HttpResponse> {
-    if run.is_empty()
-        || node.is_empty()
-        || !run
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))
-        || !node
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || "-_./".contains(c))
-    {
-        return Err(error(StatusCode::BAD_REQUEST, "invalid Run or node id"));
-    }
-    let snapshot = state
-        .application
-        .channel_file_snapshot(run, node)
-        .map_err(|message| error(StatusCode::INTERNAL_SERVER_ERROR, message))?
-        .ok_or_else(|| error(StatusCode::NOT_FOUND, "no such run"))?;
-    let commit = snapshot
-        .commit
-        .ok_or_else(|| error(StatusCode::NOT_FOUND, "node has no committed file snapshot"))?;
-    let artifacts = HostArtifacts::new(
-        state.data_root.join("artifacts"),
-        state.workspace_root.clone(),
-    );
-    let root = artifacts
-        .files_path(&commit)
-        .map_err(|e| error(StatusCode::UNPROCESSABLE_ENTITY, e.to_string()))?;
-    let path = if let Some(relative) = relative {
-        let relative_path = std::path::Path::new(relative);
-        if relative_path.is_absolute()
-            || relative_path.components().any(|component| {
-                matches!(
-                    component,
-                    std::path::Component::ParentDir
-                        | std::path::Component::RootDir
-                        | std::path::Component::Prefix(_)
-                )
-            })
-        {
-            return Err(error(StatusCode::BAD_REQUEST, "invalid file path"));
+fn delivery_error(error: crate::application::run_access::ArtifactAccessError) -> HttpResponse {
+    use crate::application::run_access::ArtifactAccessError;
+    use crate::artifacts::ArtifactAvailability;
+    match error {
+        ArtifactAccessError::Application(crate::application::ApplicationError::Invalid(
+            message,
+        )) => super::error(StatusCode::BAD_REQUEST, message),
+        ArtifactAccessError::Application(error) => application_error(error),
+        ArtifactAccessError::Unavailable(ArtifactAvailability::Expired) => {
+            super::error(StatusCode::GONE, "交付文件已过期")
         }
-        root.join(relative_path)
-    } else {
-        root.clone()
-    };
-    let canonical_root = root
-        .canonicalize()
-        .map_err(|_| error(StatusCode::NOT_FOUND, "no such node"))?;
-    let canonical = path
-        .canonicalize()
-        .map_err(|_| error(StatusCode::NOT_FOUND, "no such file"))?;
-    if !canonical.starts_with(&canonical_root) {
-        return Err(error(
-            StatusCode::BAD_REQUEST,
-            "file path escapes node workspace",
-        ));
+        ArtifactAccessError::Unavailable(_) => {
+            super::error(StatusCode::NOT_FOUND, "交付文件不可用")
+        }
     }
-    Ok(canonical)
 }
 
 pub(super) async fn list_files(
     State(state): State<ApiState>,
     AxumPath((run, node)): AxumPath<(String, String)>,
 ) -> Result<Json<Value>, HttpResponse> {
-    let workspace = workspace_path(&state, &run, &node, None)?;
-    let mut files = Vec::new();
-    let mut stack = vec![workspace.clone()];
-    while let Some(directory) = stack.pop() {
-        for entry in std::fs::read_dir(&directory)
-            .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        {
-            let entry =
-                entry.map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-            let path = entry.path();
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if name == ".git" {
-                continue;
-            }
-            let file_type = entry
-                .file_type()
-                .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-            if file_type.is_symlink() {
-                continue;
-            }
-            if path.is_dir() {
-                stack.push(path);
-                continue;
-            }
-            if !path.is_file() {
-                continue;
-            }
-            files.push(json!({"path":path.strip_prefix(&workspace).unwrap_or(&path).to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/"),"size":entry.metadata().map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?.len()}));
-            if files.len() >= FILE_LIST_CAP {
-                break;
-            }
-        }
-        if files.len() >= FILE_LIST_CAP {
-            break;
-        }
-    }
-    files.sort_by(|left, right| left["path"].as_str().cmp(&right["path"].as_str()));
-    Ok(Json(
-        json!({"node":node,"files":files,"truncated":files.len() >= FILE_LIST_CAP}),
-    ))
+    let commit = state
+        .application
+        .node_delivery(&run, &node)
+        .map_err(application_error)?;
+    let mut listing = state
+        .application
+        .delivery_listing(&commit.id, &state.workspace_root)
+        .map_err(application_error)?;
+    listing["node"] = json!(node);
+    Ok(Json(listing))
+}
+
+pub(super) async fn list_artifact_files(
+    State(state): State<ApiState>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Json<Value>, HttpResponse> {
+    state
+        .application
+        .delivery_listing(&id, &state.workspace_root)
+        .map(Json)
+        .map_err(application_error)
+}
+
+pub(super) async fn retain_artifact(
+    State(state): State<ApiState>,
+    AxumPath(id): AxumPath<String>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, HttpResponse> {
+    let retained = body
+        .get("retained")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| error(StatusCode::BAD_REQUEST, "retained must be a boolean"))?;
+    state
+        .application
+        .retain_delivery(&id, retained, &state.workspace_root)
+        .map(Json)
+        .map_err(delivery_error)
 }
 
 pub(super) async fn read_file(
@@ -120,33 +67,56 @@ pub(super) async fn read_file(
     AxumPath((run, node, path)): AxumPath<(String, String, String)>,
     Query(query): Query<HashMap<String, String>>,
 ) -> Result<HttpResponse, HttpResponse> {
-    let target = workspace_path(&state, &run, &node, Some(&path))?;
-    let metadata =
-        std::fs::metadata(&target).map_err(|_| error(StatusCode::NOT_FOUND, "no such file"))?;
-    if !metadata.is_file() {
-        return Err(error(StatusCode::NOT_FOUND, "no such file"));
-    }
+    let commit = state
+        .application
+        .node_delivery(&run, &node)
+        .map_err(application_error)?;
+    delivery_response(&state, &commit.id, &path, &query).await
+}
+
+pub(super) async fn read_artifact_file(
+    State(state): State<ApiState>,
+    AxumPath((id, path)): AxumPath<(String, String)>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Result<HttpResponse, HttpResponse> {
+    delivery_response(&state, &id, &path, &query).await
+}
+
+async fn delivery_response(
+    state: &ApiState,
+    id: &str,
+    path: &str,
+    query: &HashMap<String, String>,
+) -> Result<HttpResponse, HttpResponse> {
+    let opened = state
+        .application
+        .open_delivery_file(id, path, &state.workspace_root)
+        .map_err(delivery_error)?;
+    let size = opened.bytes;
+    let (file, lease) = opened.into_parts();
     if query.get("download").map(String::as_str) == Some("1") {
-        let file = tokio::fs::File::open(&target)
-            .await
-            .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        let stream = axum::body::Body::from_stream(tokio_util::io::ReaderStream::new(file));
+        use futures_util::StreamExt;
+        let stream =
+            tokio_util::io::ReaderStream::new(tokio::fs::File::from_std(file)).map(move |chunk| {
+                let _guard = &lease;
+                chunk
+            });
         return Ok((
             [
                 (header::CONTENT_TYPE, "application/octet-stream"),
                 (header::CONTENT_DISPOSITION, "attachment"),
             ],
-            stream,
+            axum::body::Body::from_stream(stream),
         )
             .into_response());
     }
+    let _lease = lease;
     use std::io::Read;
     let mut bytes = Vec::new();
-    std::fs::File::open(&target)
-        .and_then(|file| file.take(FILE_PREVIEW_CAP as u64).read_to_end(&mut bytes))
+    file.take(FILE_PREVIEW_CAP as u64)
+        .read_to_end(&mut bytes)
         .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let truncated = metadata.len() > bytes.len() as u64;
-    // A multibyte character split at the preview boundary is not binary data.
+    let truncated = size > bytes.len() as u64;
     if truncated
         && let Err(error) = std::str::from_utf8(&bytes)
         && error.error_len().is_none()
@@ -157,9 +127,12 @@ pub(super) async fn read_file(
     let text = if binary {
         String::new()
     } else {
-        String::from_utf8_lossy(&bytes[..bytes.len().min(FILE_PREVIEW_CAP)]).into_owned()
+        String::from_utf8_lossy(&bytes).into_owned()
     };
-    Ok(Json(json!({"path":path,"size":metadata.len(),"binary":binary,"text":text,"truncated":truncated})).into_response())
+    Ok(
+        Json(json!({"path":path,"size":size,"binary":binary,"text":text,"truncated":truncated}))
+            .into_response(),
+    )
 }
 
 /// Read the durable rich channel reply prepared by a Rust AgentNode.  It is

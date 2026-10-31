@@ -18,7 +18,10 @@ fn graph() -> Value {
 }
 
 fn finish(summary: &str) -> Step {
-    Step::tool("final_result", json!({"summary":summary,"route":"done"}))
+    Step::tool(
+        "final_result",
+        json!({"files":[],"summary":summary,"route":"done"}),
+    )
 }
 
 fn configure_responses(server: &HttpHost, provider: &Provider) {
@@ -86,7 +89,7 @@ fn no_followup(rejected: bool) {
         script.push(command("printf inspected"));
         script.push(Step::tool(
             "final_result",
-            json!({"summary":"bad receipt", "route":"done", "observed_receipt":"guessed"}),
+            json!({"files":[],"summary":"bad receipt", "route":"done", "observed_receipt":"guessed"}),
         ));
     }
     // Any additional model request is an unscripted fixture error. In particular,
@@ -163,7 +166,7 @@ fn mixed_completion(duplicate: bool) {
     let extra = if duplicate {
         (
             "final_result",
-            json!({"summary":"conflicting candidate","route":"done"}),
+            json!({"files":[],"summary":"conflicting candidate","route":"done"}),
         )
     } else {
         (
@@ -178,7 +181,7 @@ fn mixed_completion(duplicate: bool) {
             Step::batch(vec![
                 (
                     "final_result",
-                    json!({"summary":"mixed candidate","route":"done"}),
+                    json!({"files":[],"summary":"mixed candidate","route":"done"}),
                 ),
                 extra,
             ]),
@@ -227,9 +230,9 @@ fn completion_waits_for_declared_outputs_then_is_correctable() {
         "completion-declared-outputs",
         vec![
             command("mkdir -p review && printf '{}' > review/review.json"),
-            finish("nested output must not commit"),
+            finish("nested output must not commit").files(&["review.json"]),
             command("printf '{}' > review.json"),
-            finish("declared output written"),
+            finish("declared output written").files(&["review.json"]),
         ],
     );
     let host = Host::new(&graph).native();
@@ -243,7 +246,7 @@ fn completion_waits_for_declared_outputs_then_is_correctable() {
     assert!(
         calls[1]["result"]
             .to_string()
-            .contains("declared output(s) missing from /workspace: `review.json`"),
+            .contains("selected delivery path does not exist: review.json"),
         "{}",
         calls[1]
     );

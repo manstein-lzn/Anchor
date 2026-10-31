@@ -657,6 +657,10 @@ impl McpToolConfig {
             )
             .into()),
             "stdio" => {
+                let tool_environment = self.environment.for_plugin(
+                    &definition.plugin_id,
+                    grant.and_then(|grant| grant.view()).is_none(),
+                );
                 let SandboxLaunch {
                     sandbox,
                     workspace,
@@ -684,8 +688,7 @@ impl McpToolConfig {
                 {
                     // Standalone entrypoints use their granted mount; interpreters
                     // keep their explicit path so PATH cannot select another version.
-                    program = self
-                        .environment
+                    program = tool_environment
                         .visible_entrypoint(Path::new(command))
                         .map(|path| path.to_string_lossy().into_owned())
                         .unwrap_or_else(|| command.to_owned());
@@ -711,26 +714,27 @@ impl McpToolConfig {
                 // every other server keeps today's behaviour.
                 match grant {
                     Some(grant) => {
-                        if grant.view().is_none() {
-                            self.environment.apply(&mut request);
-                        }
+                        tool_environment.apply(&mut request);
                         grant.apply(&mut request);
                     }
-                    None => self.environment.apply(&mut request),
+                    None => tool_environment.apply(&mut request),
                 }
                 request.network = if network {
                     NetworkPolicy::Enabled
                 } else {
                     NetworkPolicy::Disabled
                 };
+                let sandbox = tool_environment
+                    .grant_sandbox(sandbox)
+                    .map_err(|error| format!("MCP server `{key}` tool grant failed: {error}"))?;
                 let sandbox = if grant.and_then(|grant| grant.view()).is_none() {
-                    self.environment
-                        .grant_mcp_python(sandbox, &mut request)
+                    tool_environment
+                        .grant_mcp_python(&sandbox, &mut request)
                         .map_err(|error| {
                             format!("MCP server `{key}` Python grant failed: {error}")
                         })?
                 } else {
-                    sandbox.clone()
+                    sandbox
                 };
                 let command = sandbox.isolated_command(request).map_err(|error| {
                     let reason = format!("MCP server `{key}` sandbox launch rejected: {error}");
@@ -1219,6 +1223,7 @@ impl LiveMcpTools {
                     || exposed == FAKE_ECHO_TOOL
                     || exposed == crate::tool_names::RUN_TOOL_NAME
                     || exposed == crate::tool_names::SEND_TOOL
+                    || exposed == crate::tool_names::SEND_FILE_TOOL
                     || exposed == crate::tool_names::IMAGE_TOOL
                 {
                     return Err(format!(

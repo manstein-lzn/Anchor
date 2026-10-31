@@ -5,6 +5,7 @@ mod assistant;
 mod assistant_plugins;
 mod attachments;
 mod channel_inputs;
+mod channel_notifications;
 mod channel_replies;
 mod channel_supervisor;
 mod channel_tools;
@@ -53,6 +54,7 @@ mod tool_disclosure;
 mod tool_environment;
 mod tool_host;
 mod tool_names;
+mod workspaces;
 use durable_write::write_durable;
 use node_host::HostNodes;
 #[cfg(test)]
@@ -527,8 +529,8 @@ async fn handle(request: Request, configuration: &Arc<HostConfiguration>) -> Res
                     reason: "unsupported protocol version".into(),
                 };
             }
-            let application = match standalone_application(configuration) {
-                Ok(application) => application,
+            let data_root = match configuration.state_root() {
+                Ok(root) => root,
                 Err(reason) => {
                     return Response::Rejected {
                         version: 1,
@@ -537,8 +539,13 @@ async fn handle(request: Request, configuration: &Arc<HostConfiguration>) -> Res
                     };
                 }
             };
-            match application.read_run(&run_id) {
-                Ok(Some(view)) => standalone_response(&application, view, run_id, request_id).await,
+            match application::run_access::status_projection(data_root, &run_id) {
+                Ok(Some(projection)) => Response::Run {
+                    version: 1,
+                    request_id,
+                    run_id,
+                    projection,
+                },
                 Ok(None) => Response::Missing {
                     version: 1,
                     request_id,

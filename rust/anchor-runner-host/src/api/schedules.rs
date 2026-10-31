@@ -314,7 +314,13 @@ pub(super) async fn tick_schedules(state: &ApiState, now: NaiveDateTime) -> Resu
                 "scheduled_at": format_local_datetime(at),
             }
         });
-        match super::runs::trigger_as_owner(state.clone(), payload, state.owner.clone()).await {
+        match super::runs::trigger_as_owner(
+            state.clone(),
+            payload,
+            super::oauth::binding_owner(&state.owner),
+        )
+        .await
+        {
             Ok((status, _)) if status.is_success() => {}
             Ok((status, _)) => eprintln!("schedule occurrence skipped with HTTP {status}"),
             Err(response) => eprintln!(

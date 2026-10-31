@@ -3,7 +3,8 @@ use std::collections::{BTreeSet, VecDeque};
 
 impl HostArtifacts {
     /// BFS chooses the nearest immutable version of each node. All reachable
-    /// links are still validated, including shadowed historical ancestors.
+    /// links are validated from metadata, including shadowed historical ancestors.
+    /// Content is opened only for the selected visible version at mount/read time.
     pub(super) fn expanded_snapshots(
         &self,
         commits: &[CommitRef],

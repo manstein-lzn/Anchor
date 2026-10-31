@@ -1,4 +1,5 @@
 #[path = "../../src/host_fs.rs"]
+#[allow(unused_imports)]
 mod host_fs;
 
 use axum::{
@@ -80,6 +81,14 @@ impl Step {
         let mut step = Self::text("");
         step.reply = Reply::Batch(calls);
         step
+    }
+
+    pub fn files(mut self, paths: &[&str]) -> Self {
+        let Reply::Tool("final_result", arguments) = &mut self.reply else {
+            panic!("files belongs to a final_result fixture step");
+        };
+        arguments["files"] = json!(paths);
+        self
     }
 
     /// Select a real returned receipt, counting backwards through tool feedback.
@@ -192,7 +201,7 @@ pub fn command(script: &str) -> Step {
 pub fn complete(route: &str) -> Step {
     Step::tool(
         "final_result",
-        json!({"summary":"fixture complete","route":route}),
+        json!({"summary":"fixture complete","route":route,"files":[]}),
     )
 }
 

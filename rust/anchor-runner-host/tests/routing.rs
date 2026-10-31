@@ -246,6 +246,7 @@ case "$verdict" in
   *) anchor-route --to bad --reason rejected ;;
 esac"#;
     let mut definition = graph(command);
+    definition["ops"]["gate"]["writes"] = json!(["report.txt"]);
     definition["ops"]["branch"]["run"] = json!("cat /in/gate/report.txt");
     let response = finish(spawn(
         root.path(),

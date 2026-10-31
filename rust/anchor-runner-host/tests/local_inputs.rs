@@ -81,7 +81,7 @@ fn record(root: &Path, run: &str) -> Value {
 fn collect_graph() -> Value {
     json!({
         "entry":"collect", "ops":{
-            "collect":{"run":"set -eu; cat /local-inputs/history/source.txt > evidence.txt; ! touch /local-inputs/history/forbidden; printf granted"},
+            "collect":{"run":"set -eu; cat /local-inputs/history/source.txt > evidence.txt; ! touch /local-inputs/history/forbidden; printf granted","writes":["evidence.txt"]},
             "other":{"run":"test ! -e /local-inputs/history/source.txt && cat /in/collect/evidence.txt"}
         },
         "nodes":[{"id":"collect","op":"collect"},{"id":"other","op":"other"}],

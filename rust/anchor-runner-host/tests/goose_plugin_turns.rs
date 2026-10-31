@@ -146,7 +146,10 @@ fn save(server: &HttpHost, mounted: bool) -> Value {
 }
 
 fn finish(summary: &'static str) -> Step {
-    Step::tool("final_result", json!({"summary":summary,"route":"reply"}))
+    Step::tool(
+        "final_result",
+        json!({"files":[],"summary":summary,"route":"reply"}),
+    )
 }
 
 fn echo(value: &'static str) -> Step {

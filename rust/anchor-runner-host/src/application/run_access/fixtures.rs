@@ -385,7 +385,12 @@ fn submit_completion(
     commit
 }
 
-pub(crate) fn completion(output: serde_json::Value) -> NodeCompletion {
+pub(crate) fn completion(mut output: serde_json::Value) -> NodeCompletion {
+    output
+        .as_object_mut()
+        .unwrap()
+        .entry("files")
+        .or_insert_with(|| json!([]));
     NodeCompletion {
         submission: "fixture result".into(),
         route: None,

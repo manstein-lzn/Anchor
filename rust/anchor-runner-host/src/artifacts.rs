@@ -1,8 +1,15 @@
-//! Host-owned, immutable file snapshots behind the shared ArtifactPort.
+//! Host-owned immutable deliveries, content objects and read-only input views.
 
-use crate::host_fs::invocation_stem as key_hash;
+use crate::host_fs::{invocation_stem as key_hash, validate_component, validate_key};
 use anchor_runtime::{
     ReadOnlyInput,
+    artifact::{
+        ARTIFACT_DESCRIPTOR_FILE, ArtifactDescriptor, ArtifactSelection,
+        store::{
+            checked_path, commit_for, corrupt, manifest_reference, require_directory, require_file,
+            valid_fs_id, valid_sha256, validate_file_relative,
+        },
+    },
     graph::{
         ArtifactFreezeContext, ArtifactKind, ArtifactPort, CallFileSelection, CommitRef,
         GraphError, InvocationKey, NodeCompletion,
@@ -16,7 +23,7 @@ use std::{
     fs,
     future::Future,
     io::{Read, Write},
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
     pin::Pin,
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -24,13 +31,16 @@ use std::{
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 const FILE_BUFFER_BYTES: usize = 64 * 1024;
 
-mod git;
+mod lifecycle;
 mod links;
 mod manifest;
-mod previous;
+mod objects;
 mod workspace;
 mod workspace_binding;
+pub(crate) use lifecycle::{ArtifactAvailability, ArtifactGcReport, ArtifactRead};
 use manifest::{FileHash, Manifest, context_hash};
+pub(crate) use objects::validate_selection;
+use objects::{selected_paths, set_executable};
 
 #[derive(Clone)]
 pub(crate) struct HostArtifacts {
@@ -46,15 +56,70 @@ impl HostArtifacts {
         }
     }
 
-    /// Returns a validated path without creating a workspace.
-    pub(crate) fn workspace_path(&self, key: &InvocationKey) -> Result<PathBuf, GraphError> {
-        validate_key(key)?;
-        if let Some(path) = self.bound_workspace_path(key)? {
-            return Ok(path);
+    pub(crate) fn publish_owned(
+        &self,
+        key: &InvocationKey,
+        completion: &NodeCompletion,
+        context: &ArtifactFreezeContext,
+    ) -> Result<CommitRef, GraphError> {
+        self.freeze_snapshot(key, completion, context)
+    }
+
+    pub(crate) fn input_lease(&self) -> Result<anchor_file_lease::FileLease, GraphError> {
+        self.store_lease(false)
+    }
+
+    pub(crate) fn visible_inputs(
+        &self,
+        commits: &[CommitRef],
+    ) -> Result<Vec<CommitRef>, GraphError> {
+        Ok(self
+            .expanded_snapshots(commits, None)?
+            .into_iter()
+            .map(|(path, manifest)| CommitRef {
+                id: path.file_name().unwrap().to_str().unwrap().to_owned(),
+                node_id: manifest.key.node_id,
+                invocation: manifest.key.invocation,
+            })
+            .collect())
+    }
+
+    pub(crate) fn reference(&self, id: &str) -> Result<Option<CommitRef>, GraphError> {
+        if !valid_fs_id(id) {
+            return Err(corrupt("invalid artifact reference"));
         }
-        let path = self.workspace_root.join(&key.run_id).join(key_hash(key));
-        checked_path(&path)?;
-        Ok(path)
+        let path = self.root.join(id).join("manifest.json");
+        match fs::symlink_metadata(&path) {
+            Ok(_) => require_file(&path)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        }
+        let manifest: Manifest =
+            serde_json::from_slice(&fs::read(path)?).map_err(|error| corrupt(error.to_string()))?;
+        Ok(Some(manifest_reference(id, &manifest)?))
+    }
+
+    fn published_commit(&self, key: &InvocationKey) -> Option<CommitRef> {
+        let commit = commit_for(key);
+        self.root.join(&commit.id).exists().then_some(commit)
+    }
+
+    fn freeze_with_workspace(
+        &self,
+        key: &InvocationKey,
+        completion: &NodeCompletion,
+        context: &ArtifactFreezeContext,
+    ) -> Result<CommitRef, GraphError> {
+        if self.published_commit(key).is_some()
+            || !matches!(context.kind, ArtifactKind::Node | ArtifactKind::GraphCall)
+        {
+            return self.freeze_snapshot(key, completion, context);
+        }
+        self.prepare_workspace(key, &context.input_commits)?;
+        let lease = self.workspaces().acquire(key)?;
+        let commit = self.publish_owned(key, completion, context)?;
+        lease.finish_published()?;
+        Ok(commit)
     }
 
     pub(crate) fn input_mounts(
@@ -63,6 +128,7 @@ impl HostArtifacts {
         run_id: &str,
         graph_digest: &str,
     ) -> Result<Vec<ReadOnlyInput>, GraphError> {
+        let _lease = self.store_lease(false)?;
         let mut mounts: Vec<ReadOnlyInput> = Vec::new();
         for (path, manifest) in self.expanded_snapshots(commits, Some((run_id, graph_digest)))? {
             let destination = Path::new("/in").join(&manifest.key.node_id);
@@ -73,7 +139,7 @@ impl HostArtifacts {
                 return Err(corrupt("artifact mount paths overlap"));
             }
             mounts.push(ReadOnlyInput::new(
-                self.git_projection(&path, &manifest)?,
+                self.artifact_view(&path, &manifest)?,
                 destination,
             ));
         }
@@ -185,16 +251,35 @@ impl HostArtifacts {
         Ok(())
     }
 
-    /// The caller must first authorize the CommitRef through durable Run results.
-    pub(crate) fn files_path(&self, commit: &CommitRef) -> Result<PathBuf, GraphError> {
-        self.load_snapshot(commit)
-            .map(|(path, _)| path.join("files"))
+    fn call_result_staging(&self, key: &InvocationKey) -> Result<PathBuf, GraphError> {
+        Ok(self
+            .workspaces()
+            .staging_directory(key)?
+            .join(format!("call-{}", key_hash(key))))
     }
 
-    /// Lists only files declared by a fully verified immutable snapshot.
-    /// Callers must first authorize the CommitRef through the Run record.
+    fn ensure_export_complete(&self, key: &InvocationKey) -> Result<(), GraphError> {
+        let pending = self.call_result_staging(key)?.join("pending.json");
+        checked_path(&pending)?;
+        if pending.exists() {
+            return Err(corrupt(
+                "result export was interrupted; refusing to publish a partial call result",
+            ));
+        }
+        Ok(())
+    }
+
+    /// The caller must first authorize this fixed reference. The view is a
+    /// rebuildable projection, never the authority for delivered bytes.
+    pub(crate) fn files_path(&self, commit: &CommitRef) -> Result<PathBuf, GraphError> {
+        let _lease = self.store_lease(false)?;
+        let (path, manifest) = self.read_snapshot(commit)?;
+        self.artifact_view(&path, &manifest)
+    }
+
+    /// Listing and result resolution read metadata only, including after expiry.
     pub(crate) fn list_files(&self, commit: &CommitRef) -> Result<Vec<(String, u64)>, GraphError> {
-        let (_, manifest) = self.load_snapshot(commit)?;
+        let (_, manifest) = self.read_snapshot(commit)?;
         Ok(manifest
             .files
             .into_iter()
@@ -202,63 +287,13 @@ impl HostArtifacts {
             .collect())
     }
 
+    #[cfg(test)]
     fn load_snapshot(&self, commit: &CommitRef) -> Result<(PathBuf, Manifest), GraphError> {
-        self.expanded_snapshots(std::slice::from_ref(commit), None)?
-            .into_iter()
-            .next()
-            .ok_or_else(|| corrupt("artifact is missing"))
+        self.read_snapshot(commit)
     }
 
     fn read_snapshot(&self, commit: &CommitRef) -> Result<(PathBuf, Manifest), GraphError> {
-        if !valid_fs_id(&commit.id) {
-            return Err(GraphError::Unsupported(
-                "legacy artifacts have no file snapshot".into(),
-            ));
-        }
-        validate_relative(&commit.node_id)?;
-        let path = self.root.join(&commit.id);
-        require_directory(&path)?;
-        let manifest_path = path.join("manifest.json");
-        require_file(&manifest_path)?;
-        let manifest: Manifest = serde_json::from_slice(&fs::read(manifest_path)?)
-            .map_err(|error| corrupt(error.to_string()))?;
-        validate_key(&manifest.key)?;
-        let expected = if manifest.format == 1 {
-            legacy_commit_for(&manifest.key)
-        } else {
-            commit_for(&manifest.key)
-        };
-        if expected != *commit {
-            return Err(corrupt("artifact identity or format mismatch"));
-        }
-        manifest.validate_context()?;
-        let mut entries = fs::read_dir(&path)?
-            .map(|entry| entry.map(|entry| entry.file_name()))
-            .collect::<Result<Vec<_>, _>>()?;
-        entries.sort();
-        for name in ["git-view", ".git-view.lock"] {
-            if let Some(index) = entries.iter().position(|entry| entry == name) {
-                if name == "git-view" {
-                    require_directory(&path.join(name))?;
-                } else {
-                    require_file(&path.join(name))?;
-                }
-                entries.remove(index);
-            }
-        }
-        if entries
-            != [
-                std::ffi::OsString::from("files"),
-                std::ffi::OsString::from("manifest.json"),
-            ]
-        {
-            return Err(corrupt("artifact contains undeclared resources"));
-        }
-        let (files, directories) = scan_tree(&path.join("files"), None)?;
-        if manifest.files != files || manifest.directories != directories {
-            return Err(corrupt("artifact file digest or tree mismatch"));
-        }
-        Ok((path, manifest))
+        anchor_runtime::artifact::store::read_snapshot(&self.root, commit)
     }
 
     fn freeze_snapshot(
@@ -268,142 +303,80 @@ impl HostArtifacts {
         context: &ArtifactFreezeContext,
     ) -> Result<CommitRef, GraphError> {
         validate_key(key)?;
-        checked_path(&self.root)?;
-        let root_existed = self.root.exists();
-        fs::create_dir_all(&self.root)?;
-        require_directory(&self.root)?;
-        if !root_existed {
-            for ancestor in self
-                .root
-                .ancestors()
-                .filter(|path| !path.as_os_str().is_empty())
+        let _lease = self.store_lease(true)?;
+        let commit = self
+            .published_commit(key)
+            .unwrap_or_else(|| commit_for(key));
+        let published = self.root.join(&commit.id);
+        // A published invocation is authoritative even if its old workspace or
+        // input bytes changed or expired before Kernel accepted its result.
+        if published.exists() {
+            let (path, old) = self.read_snapshot(&commit)?;
+            if old.key != *key
+                || old.completion != *completion
+                || old.context.as_ref() != Some(context)
             {
-                fs::File::open(ancestor)?.sync_all()?;
+                return Err(GraphError::RunConflict);
             }
-            if !self.root.is_absolute() {
-                fs::File::open(".")?.sync_all()?;
-            }
+            self.artifact_view(&path, &old)?;
+            return Ok(commit);
         }
         self.expanded_snapshots(
             &context.input_commits,
             Some((&key.run_id, &key.graph_digest)),
         )?;
-        let legacy = legacy_commit_for(key);
-        let commit = if fs::symlink_metadata(self.root.join(&legacy.id)).is_ok() {
-            if context.kind != ArtifactKind::Node || !context.input_commits.is_empty() {
-                return Err(GraphError::Unsupported(
-                    "cannot add provenance to an existing fs1 artifact".into(),
-                ));
-            }
-            legacy
-        } else {
-            commit_for(key)
-        };
-        let published = self.root.join(&commit.id);
-        if fs::symlink_metadata(&published).is_ok() {
-            let (_, old) = self.load_snapshot(&commit)?;
-            if old.key != *key
-                || old.completion != *completion
-                || old.context.as_ref().is_some_and(|old| old != context)
-            {
-                return Err(GraphError::RunConflict);
-            }
-            return Ok(commit);
-        }
-        let workspace = match context.kind {
-            ArtifactKind::Node => {
-                let workspace = self.workspace_path(key)?;
-                require_directory(&workspace)?;
-                Some(workspace)
-            }
-            // A Graph call node has no sandbox workspace of its own, but a wait
-            // call copies explicitly selected child results into `<workspace>/result/`.
-            // Freezing that directory is what makes them readable downstream.
-            ArtifactKind::GraphCall => {
-                let workspace = self.workspace_path(key)?;
-                if workspace.is_dir() {
-                    // Refuse to freeze a result tree that an interrupted export
-                    // left half-published, otherwise an empty or partial
-                    // `result/` would be committed as the call output.
-                    ensure_export_complete(&workspace)?;
-                    Some(workspace)
+        let (files, directories) = match context.kind {
+            ArtifactKind::Node | ArtifactKind::GraphCall => {
+                let selection =
+                    ArtifactSelection::from_output(&completion.output).map_err(corrupt)?;
+                if context.kind == ArtifactKind::GraphCall {
+                    self.ensure_export_complete(key)?;
+                }
+                if selection.paths.is_empty() {
+                    (BTreeMap::new(), vec![])
                 } else {
-                    None
+                    let workspace = self.workspace_path(key)?;
+                    let selected = selected_paths(&workspace, &selection)?;
+                    let mut files = BTreeMap::new();
+                    for (name, source) in selected.files {
+                        files.insert(name, self.store_object(&source)?);
+                    }
+                    (files, selected.directories)
                 }
             }
-            ArtifactKind::Fanout | ArtifactKind::Join | ArtifactKind::Interruption => None,
+            ArtifactKind::Fanout | ArtifactKind::Join | ArtifactKind::Interruption => {
+                let filename = manifest::control_filename(context.kind).unwrap();
+                let bytes = serde_json::to_vec(&manifest::control_output(completion, context.kind))
+                    .map_err(|error| corrupt(error.to_string()))?;
+                (
+                    BTreeMap::from([(filename.to_owned(), self.store_bytes(&bytes)?)]),
+                    vec![],
+                )
+            }
         };
-        let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let manifest = Manifest {
+            format: 3,
+            key: key.clone(),
+            completion: completion.clone(),
+            files,
+            directories,
+            context: Some(context.clone()),
+            context_sha256: Some(context_hash(context)?),
+        };
+        manifest.validate_context()?;
         let temporary = self.root.join(format!(
             ".{}.{}.{}.tmp",
             commit.id,
             std::process::id(),
-            sequence
+            TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir(&temporary)?;
         let result = (|| {
-            let (files, directories) = if let Some(workspace) = &workspace {
-                scan_workspace(workspace, Some(&temporary.join("files")))?
-            } else {
-                let files_dir = temporary.join("files");
-                fs::create_dir(&files_dir)?;
-                let files = if context.kind != ArtifactKind::GraphCall {
-                    let filename = manifest::control_filename(context.kind)
-                        .ok_or_else(|| corrupt("unsupported control artifact kind"))?;
-                    let bytes =
-                        serde_json::to_vec(&manifest::control_output(completion, context.kind))
-                            .map_err(|error| corrupt(error.to_string()))?;
-                    let mut file = fs::OpenOptions::new()
-                        .create_new(true)
-                        .write(true)
-                        .open(files_dir.join(filename))?;
-                    file.write_all(&bytes)?;
-                    file.sync_all()?;
-                    BTreeMap::from([(
-                        filename.to_owned(),
-                        FileHash {
-                            sha256: format!("{:x}", Sha256::digest(&bytes)),
-                            bytes: bytes.len() as u64,
-                        },
-                    )])
-                } else {
-                    BTreeMap::new()
-                };
-                fs::File::open(&files_dir)?.sync_all()?;
-                (files, vec![])
-            };
-            let manifest = Manifest {
-                format: 2,
-                key: key.clone(),
-                completion: completion.clone(),
-                files,
-                directories,
-                context: Some(context.clone()),
-                context_sha256: Some(context_hash(context)?),
-            };
-            let bytes =
-                serde_json::to_vec(&manifest).map_err(|error| corrupt(error.to_string()))?;
-            let mut file = fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(temporary.join("manifest.json"))?;
-            file.write_all(&bytes)?;
-            file.sync_all()?;
+            write_json_atomic(&temporary.join("manifest.json"), &manifest)?;
             fs::File::open(&temporary)?.sync_all()?;
-            if let Err(error) = fs::rename(&temporary, &published) {
-                if fs::symlink_metadata(&published).is_err() {
-                    return Err(error.into());
-                }
-                let (_, old) = self.load_snapshot(&commit)?;
-                if old.key != *key
-                    || old.completion != *completion
-                    || old.context.as_ref() != Some(context)
-                {
-                    return Err(GraphError::RunConflict);
-                }
-            }
+            fs::rename(&temporary, &published)?;
             fs::File::open(&self.root)?.sync_all()?;
-            self.load_snapshot(&commit)?;
+            self.artifact_view(&published, &manifest)?;
             Ok(commit)
         })();
         if temporary.exists() {
@@ -420,7 +393,7 @@ impl ArtifactPort for HostArtifacts {
         completion: &'a NodeCompletion,
     ) -> Pin<Box<dyn Future<Output = Result<CommitRef, GraphError>> + Send + 'a>> {
         Box::pin(async move {
-            self.freeze_snapshot(
+            self.freeze_with_workspace(
                 key,
                 completion,
                 &ArtifactFreezeContext {
@@ -437,7 +410,7 @@ impl ArtifactPort for HostArtifacts {
         completion: &'a NodeCompletion,
         context: &'a ArtifactFreezeContext,
     ) -> Pin<Box<dyn Future<Output = Result<CommitRef, GraphError>> + Send + 'a>> {
-        Box::pin(async move { self.freeze_snapshot(key, completion, context) })
+        Box::pin(async move { self.freeze_with_workspace(key, completion, context) })
     }
 
     fn resolve<'a>(
@@ -445,15 +418,7 @@ impl ArtifactPort for HostArtifacts {
         commit: &'a CommitRef,
     ) -> Pin<Box<dyn Future<Output = Result<Value, GraphError>> + Send + 'a>> {
         Box::pin(async move {
-            let completion = if valid_fs_id(&commit.id) {
-                self.load_snapshot(commit)?.1.completion
-            } else {
-                validate_component(&commit.id)?;
-                let path = self.root.join(format!("{}.json", commit.id));
-                require_file(&path)?;
-                serde_json::from_slice::<NodeCompletion>(&fs::read(path)?)
-                    .map_err(|error| corrupt(error.to_string()))?
-            };
+            let completion = self.read_snapshot(commit)?.1.completion;
             serde_json::to_value(completion).map_err(|error| corrupt(error.to_string()))
         })
     }
@@ -466,8 +431,18 @@ impl ArtifactPort for HostArtifacts {
     ) -> Pin<Box<dyn Future<Output = Result<(), GraphError>> + Send + 'a>> {
         Box::pin(async move {
             if selections.is_empty() {
+                let bundle = self.call_inputs_path(child_run_id)?;
+                if bundle.exists() || self.call_inputs_manifest_path(child_run_id)?.exists() {
+                    return self.verify_call_inputs_bundle(
+                        child_run_id,
+                        &bundle,
+                        Some(parents),
+                        Some(selections),
+                    );
+                }
                 return Ok(());
             }
+            let _lease = self.store_lease(false)?;
             // Reject a malformed selection before any durable side effect: a
             // duplicate alias would otherwise publish a bundle the verifier
             // must reject, leaving the child permanently unable to admit.
@@ -523,7 +498,7 @@ impl ArtifactPort for HostArtifacts {
             let result = (|| {
                 let mut files = Vec::with_capacity(selections.len());
                 for selection in selections {
-                    let (source_root, _) = snapshots
+                    let (source_root, manifest) = snapshots
                         .iter()
                         .find(|(_, manifest)| manifest.key.node_id == selection.node)
                         .ok_or_else(|| {
@@ -532,11 +507,27 @@ impl ArtifactPort for HostArtifacts {
                                 selection.node
                             ))
                         })?;
-                    let source = source_root.join("files").join(&selection.path);
-                    checked_path(&source)?;
-                    require_file(&source)?;
-                    let (sha256, bytes) =
-                        copy_regular_file(&source, &temporary.join(&selection.alias))?;
+                    self.require_not_expired(&CommitRef {
+                        id: source_root
+                            .file_name()
+                            .unwrap()
+                            .to_str()
+                            .unwrap()
+                            .to_owned(),
+                        node_id: manifest.key.node_id.clone(),
+                        invocation: manifest.key.invocation,
+                    })?;
+                    let recorded = manifest
+                        .files
+                        .get(&selection.path)
+                        .ok_or_else(|| corrupt("Op.call source is not a delivered file"))?;
+                    let source = self.verified_object(recorded)?;
+                    let destination = temporary.join(&selection.alias);
+                    if let Some(parent) = destination.parent() {
+                        fs::create_dir_all(parent)?;
+                    }
+                    fs::hard_link(&source, &destination)?;
+                    let (sha256, bytes) = (recorded.sha256.clone(), recorded.bytes);
                     files.push(CallInputFile {
                         node: selection.node.clone(),
                         path: selection.path.clone(),
@@ -584,22 +575,74 @@ impl ArtifactPort for HostArtifacts {
         files: &'a [String],
     ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, GraphError>> + Send + 'a>> {
         Box::pin(async move {
+            validate_key(call_key)?;
+            {
+                let _lease = self.store_lease(false)?;
+                if let Some(published) = self.published_commit(call_key) {
+                    let (_, old) = self.read_snapshot(&published)?;
+                    let requested = files
+                        .iter()
+                        .map(|name| format!("result/{name}"))
+                        .collect::<std::collections::BTreeSet<_>>();
+                    let delivered = old
+                        .files
+                        .keys()
+                        .cloned()
+                        .collect::<std::collections::BTreeSet<_>>();
+                    let child =
+                        serde_json::to_value(commit).map_err(|error| corrupt(error.to_string()))?;
+                    let requested_files =
+                        serde_json::to_value(files).map_err(|error| corrupt(error.to_string()))?;
+                    if old
+                        .context
+                        .as_ref()
+                        .is_none_or(|context| context.kind != ArtifactKind::GraphCall)
+                        || old.completion.output.pointer("/result/commit") != Some(&child)
+                        || old.completion.output.pointer("/result/files") != Some(&requested_files)
+                        || requested != delivered
+                    {
+                        return Err(GraphError::RunConflict);
+                    }
+                    return Ok(files.to_vec());
+                }
+            }
             if files.is_empty() {
                 return Ok(Vec::new());
             }
-            validate_key(call_key)?;
-            let (snapshot, manifest) = self.load_snapshot(commit)?;
-            let workspace = match self.prepare_bound_workspace(call_key, &[], None, None)? {
-                Some(workspace) => workspace,
-                None => self.workspace_path(call_key)?,
-            };
+            let workspace = self.prepare_workspace(call_key, &[])?;
+            // Dropping this process lock keeps the pending invocation owner.
+            // Only publication (or an explicit interruption fact) releases it.
+            let _workspace_lease = self.workspaces().acquire(call_key)?;
+            let _lease = self.store_lease(false)?;
+            let (_, manifest) = self.read_snapshot(commit)?;
+            self.require_not_expired(commit)?;
             fs::create_dir_all(&workspace)?;
             checked_path(&workspace)?;
-            remove_stale_result_dirs(&workspace)?;
-            let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-            let temporary =
-                workspace.join(format!(".result-{}-{}.tmp", std::process::id(), sequence));
-            let _ = fs::remove_dir_all(&temporary);
+            let staging = self.call_result_staging(call_key)?;
+            crate::host_fs::directory(&staging).map_err(corrupt)?;
+            let request = CallResultExport {
+                format: 1,
+                child: commit.clone(),
+                files: files.to_vec(),
+            };
+            let request_path = staging.join("request.json");
+            if request_path.exists() {
+                require_file(&request_path)?;
+                let previous: CallResultExport = serde_json::from_slice(&fs::read(&request_path)?)
+                    .map_err(|error| corrupt(error.to_string()))?;
+                if previous != request {
+                    return Err(GraphError::RunConflict);
+                }
+            } else {
+                write_json_atomic(&request_path, &request)?;
+            }
+            let pending = staging.join("pending.json");
+            write_json_atomic(&pending, &request)?;
+            let temporary = staging.join("next");
+            if temporary.exists() {
+                require_directory(&temporary)?;
+                fs::remove_dir_all(&temporary)?;
+            }
             fs::create_dir(&temporary)?;
             let copied = (|| {
                 let mut copied = Vec::with_capacity(files.len());
@@ -608,15 +651,14 @@ impl ArtifactPort for HostArtifacts {
                     let recorded = manifest.files.get(name).ok_or_else(|| {
                         corrupt(format!("result file `{name}` is not in the child commit"))
                     })?;
-                    let source = snapshot.join("files").join(name);
-                    checked_path(&source)?;
-                    require_file(&source)?;
+                    let source = self.verified_object(recorded)?;
                     let (sha256, bytes) = copy_regular_file(&source, &temporary.join(name))?;
                     if sha256 != recorded.sha256 || bytes != recorded.bytes {
                         return Err(corrupt(format!(
                             "result file `{name}` changed after the child commit was verified"
                         )));
                     }
+                    set_executable(&temporary.join(name), recorded.executable, false)?;
                     copied.push(name.clone());
                 }
                 sync_tree_dirs(&temporary)?;
@@ -629,18 +671,38 @@ impl ArtifactPort for HostArtifacts {
                     return Err(error);
                 }
             };
-            // Atomically replace `<workspace>/result` so a crash during transfer
-            // never leaves a partial result tree for the freeze to commit.
+            // All staging and the pending marker live beside the Workspace,
+            // in Host-owned state on the same filesystem. No project scan is
+            // needed to detect an incomplete transfer or recover a swap.
             let target = workspace.join("result");
-            let result = publish_directory(&temporary, &target);
-            if temporary.exists() {
-                let _ = fs::remove_dir_all(&temporary);
+            let old = staging.join("old");
+            if old.exists() {
+                require_directory(&old)?;
+                fs::remove_dir_all(&old)?;
             }
-            result?;
+            if target.exists() {
+                require_directory(&target)?;
+                fs::rename(&target, &old)?;
+            }
+            fs::rename(&temporary, &target)?;
             fs::File::open(&workspace)?.sync_all()?;
+            fs::File::open(&staging)?.sync_all()?;
+            fs::remove_file(pending)?;
+            if old.exists() {
+                fs::remove_dir_all(old)?;
+            }
+            fs::File::open(staging)?.sync_all()?;
             Ok(copied)
         })
     }
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CallResultExport {
+    format: u32,
+    child: CommitRef,
+    files: Vec<String>,
 }
 
 /// Durable, immutable record binding one child `/in/call` bundle to the exact
@@ -676,6 +738,12 @@ fn copy_regular_file(source: &Path, destination: &Path) -> Result<(String, u64),
         .truncate(true)
         .write(true)
         .open(destination)?;
+    let result = hash_copy(&mut input, &mut output)?;
+    output.sync_all()?;
+    Ok(result)
+}
+
+fn hash_copy(mut input: impl Read, mut output: impl Write) -> Result<(String, u64), GraphError> {
     let mut buffer = vec![0_u8; FILE_BUFFER_BYTES];
     let mut hash = Sha256::new();
     let mut bytes = 0_u64;
@@ -688,14 +756,12 @@ fn copy_regular_file(source: &Path, destination: &Path) -> Result<(String, u64),
         if count == 0 {
             break;
         }
-        let chunk = &buffer[..count];
-        hash.update(chunk);
+        hash.update(&buffer[..count]);
+        output.write_all(&buffer[..count])?;
         bytes = bytes
             .checked_add(count as u64)
             .ok_or_else(|| corrupt("file size overflow"))?;
-        output.write_all(chunk)?;
     }
-    output.sync_all()?;
     Ok((format!("{:x}", hash.finalize()), bytes))
 }
 
@@ -724,66 +790,6 @@ fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<(), GraphEr
     file.sync_all()?;
     fs::rename(&temporary, path)?;
     fs::File::open(parent)?.sync_all()?;
-    Ok(())
-}
-
-fn publish_directory(temporary: &Path, target: &Path) -> Result<(), GraphError> {
-    match fs::symlink_metadata(target) {
-        Ok(metadata) => {
-            if !metadata.is_dir() {
-                return Err(corrupt("result destination is not a directory"));
-            }
-            checked_path(target)?;
-            let old = target.with_file_name(format!(
-                ".result-old-{}-{}.tmp",
-                std::process::id(),
-                TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
-            ));
-            let _ = fs::remove_dir_all(&old);
-            fs::rename(target, &old)?;
-            fs::rename(temporary, target)?;
-            let _ = fs::remove_dir_all(&old);
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            fs::rename(temporary, target)?;
-        }
-        Err(error) => return Err(error.into()),
-    }
-    Ok(())
-}
-
-fn remove_stale_result_dirs(workspace: &Path) -> Result<(), GraphError> {
-    for entry in fs::read_dir(workspace)? {
-        let entry = entry?;
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if name.starts_with(".result") {
-            let path = entry.path();
-            checked_path(&path)?;
-            if entry.file_type()?.is_dir() {
-                fs::remove_dir_all(&path)?;
-            } else {
-                fs::remove_file(&path)?;
-            }
-        }
-    }
-    Ok(())
-}
-
-/// A Graph call workspace is only mutated by `export_call_result_files`, which
-/// publishes `<workspace>/result` through a temporary `.result-*` tree. Any
-/// surviving `.result-*` entry means an export was interrupted, so the freeze
-/// fails closed instead of committing a partial result tree.
-fn ensure_export_complete(workspace: &Path) -> Result<(), GraphError> {
-    checked_path(workspace)?;
-    for entry in fs::read_dir(workspace)? {
-        let entry = entry?;
-        if entry.file_name().to_string_lossy().starts_with(".result") {
-            return Err(corrupt(
-                "result export was interrupted; refusing to freeze a partial call result",
-            ));
-        }
-    }
     Ok(())
 }
 
@@ -852,28 +858,8 @@ fn scan_hash_directory(
         if kind.is_dir() {
             scan_hash_directory(root, &path, files)?;
         } else if kind.is_file() {
-            let mut buffer = vec![0_u8; FILE_BUFFER_BYTES];
-            let mut file = fs::File::open(&path)?;
-            let mut hash = Sha256::new();
-            let mut bytes = 0_u64;
-            loop {
-                let count = match file.read(&mut buffer) {
-                    Ok(count) => count,
-                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-                    Err(error) => return Err(error.into()),
-                };
-                if count == 0 {
-                    break;
-                }
-                hash.update(&buffer[..count]);
-                bytes = bytes
-                    .checked_add(count as u64)
-                    .ok_or_else(|| corrupt("call input size overflow"))?;
-            }
-            if files
-                .insert(relative, (format!("{:x}", hash.finalize()), bytes))
-                .is_some()
-            {
+            let (sha256, bytes) = hash_copy(fs::File::open(&path)?, std::io::sink())?;
+            if files.insert(relative, (sha256, bytes)).is_some() {
                 return Err(corrupt("duplicate call input file"));
             }
         } else {
@@ -881,216 +867,6 @@ fn scan_hash_directory(
                 "call input symlinks and special files are not supported",
             ));
         }
-    }
-    Ok(())
-}
-
-fn corrupt(message: impl Into<String>) -> GraphError {
-    GraphError::CorruptRun(message.into())
-}
-fn commit_for(key: &InvocationKey) -> CommitRef {
-    CommitRef {
-        id: format!("fs2-{}", key_hash(key)),
-        node_id: key.node_id.clone(),
-        invocation: key.invocation,
-    }
-}
-fn legacy_commit_for(key: &InvocationKey) -> CommitRef {
-    CommitRef {
-        id: format!("fs1-{}", key_hash(key)),
-        node_id: key.node_id.clone(),
-        invocation: key.invocation,
-    }
-}
-fn valid_fs_id(id: &str) -> bool {
-    id.strip_prefix("fs1-")
-        .or_else(|| id.strip_prefix("fs2-"))
-        .is_some_and(|suffix| {
-            suffix.len() == 64
-                && suffix
-                    .bytes()
-                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-        })
-}
-fn validate_component(value: &str) -> Result<(), GraphError> {
-    if !anchor_runtime::identifier::is_name(value) {
-        return Err(corrupt("unsafe artifact identity component"));
-    }
-    Ok(())
-}
-fn validate_relative(value: &str) -> Result<(), GraphError> {
-    if value.is_empty() || value.contains('\\') || value.split('/').any(|part| part.is_empty()) {
-        return Err(corrupt("unsafe artifact relative path"));
-    }
-    for part in value.split('/') {
-        validate_component(part)?;
-    }
-    Ok(())
-}
-fn validate_file_relative(value: &str) -> Result<(), GraphError> {
-    if value.is_empty()
-        || value.contains('\\')
-        || value.chars().any(char::is_control)
-        || value
-            .split('/')
-            .any(|part| part.is_empty() || part == "." || part == "..")
-    {
-        return Err(corrupt("unsafe artifact file path"));
-    }
-    Ok(())
-}
-fn validate_key(key: &InvocationKey) -> Result<(), GraphError> {
-    validate_component(&key.run_id)?;
-    validate_component(&key.graph_digest)?;
-    validate_relative(&key.node_id)?;
-    if key.invocation == 0 {
-        return Err(corrupt("artifact invocation must be positive"));
-    }
-    Ok(())
-}
-fn checked_path(path: &Path) -> Result<(), GraphError> {
-    let mut current = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::RootDir | Component::Normal(_) => current.push(component.as_os_str()),
-            _ => return Err(corrupt("unsafe host artifact path")),
-        }
-        match fs::symlink_metadata(&current) {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
-                return Err(corrupt("artifact symlinks are not supported"));
-            }
-            Ok(_) => (),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
-            Err(error) => return Err(error.into()),
-        }
-    }
-    Ok(())
-}
-fn require_directory(path: &Path) -> Result<(), GraphError> {
-    checked_path(path)?;
-    if !fs::symlink_metadata(path)?.is_dir() {
-        return Err(corrupt("artifact directory required"));
-    }
-    Ok(())
-}
-fn require_file(path: &Path) -> Result<(), GraphError> {
-    checked_path(path)?;
-    if !fs::symlink_metadata(path)?.is_file() {
-        return Err(corrupt("artifact regular file required"));
-    }
-    Ok(())
-}
-
-fn scan_tree(
-    root: &Path,
-    destination: Option<&Path>,
-) -> Result<(BTreeMap<String, FileHash>, Vec<String>), GraphError> {
-    require_directory(root)?;
-    let mut files = BTreeMap::new();
-    let mut directories = Vec::new();
-    scan_directory(root, root, destination, &mut files, &mut directories, false)?;
-    directories.sort();
-    Ok((files, directories))
-}
-fn scan_workspace(
-    root: &Path,
-    destination: Option<&Path>,
-) -> Result<(BTreeMap<String, FileHash>, Vec<String>), GraphError> {
-    require_directory(root)?;
-    let mut files = BTreeMap::new();
-    let mut directories = Vec::new();
-    scan_directory(root, root, destination, &mut files, &mut directories, true)?;
-    directories.sort();
-    Ok((files, directories))
-}
-fn scan_directory(
-    root: &Path,
-    current: &Path,
-    destination: Option<&Path>,
-    files: &mut BTreeMap<String, FileHash>,
-    directories: &mut Vec<String>,
-    exclude_workspace_git: bool,
-) -> Result<(), GraphError> {
-    if let Some(destination) = destination {
-        fs::create_dir(destination)?;
-    }
-    for entry in fs::read_dir(current)? {
-        let entry = entry?;
-        // Git metadata belongs to the host projection, never the Agent's
-        // writable files or its configuration and hooks.
-        if exclude_workspace_git && current == root && entry.file_name() == ".git" {
-            continue;
-        }
-        let path = entry.path();
-        checked_path(&path)?;
-        let relative = path
-            .strip_prefix(root)
-            .map_err(|_| corrupt("artifact path escapes root"))?
-            .to_str()
-            .ok_or_else(|| corrupt("artifact paths must be UTF-8"))?
-            .to_owned();
-        validate_file_relative(&relative)?;
-        let kind = entry.file_type()?;
-        if kind.is_dir() {
-            directories.push(relative);
-            let next = destination.map(|destination| destination.join(entry.file_name()));
-            scan_directory(
-                root,
-                &path,
-                next.as_deref(),
-                files,
-                directories,
-                exclude_workspace_git,
-            )?;
-        } else if kind.is_file() {
-            let mut source = fs::File::open(&path)?;
-            let mut copy = destination
-                .map(|destination| {
-                    fs::OpenOptions::new()
-                        .create_new(true)
-                        .write(true)
-                        .open(destination.join(entry.file_name()))
-                })
-                .transpose()?;
-            let mut buffer = vec![0_u8; FILE_BUFFER_BYTES];
-            let mut hash = Sha256::new();
-            let mut bytes = 0_u64;
-            loop {
-                let count = match source.read(&mut buffer) {
-                    Ok(count) => count,
-                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-                    Err(error) => return Err(error.into()),
-                };
-                if count == 0 {
-                    break;
-                }
-                let chunk = &buffer[..count];
-                hash.update(chunk);
-                bytes = bytes
-                    .checked_add(count as u64)
-                    .ok_or_else(|| corrupt("artifact file size overflow"))?;
-                if let Some(copy) = &mut copy {
-                    copy.write_all(chunk)?;
-                }
-            }
-            if let Some(copy) = copy {
-                copy.sync_all()?;
-            }
-            files.insert(
-                relative,
-                FileHash {
-                    sha256: format!("{:x}", hash.finalize()),
-                    bytes,
-                },
-            );
-        } else {
-            return Err(corrupt(
-                "artifact symlinks and special files are not supported",
-            ));
-        }
-    }
-    if let Some(destination) = destination {
-        fs::File::open(destination)?.sync_all()?;
     }
     Ok(())
 }

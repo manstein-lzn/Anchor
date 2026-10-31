@@ -111,7 +111,7 @@ async fn kernel_op_call_wait_hands_off_input_map_files_and_selected_result() {
             "entry":"answer",
             "input":{"default":"child-default"},
             "agents":{},
-            "ops":{"answer":{"run":"sh -c \"cat /in/call/input/report.txt > answer.md; cat answer.md\""}},
+            "ops":{"answer":{"run":"sh -c \"cat /in/call/input/report.txt > answer.md; cat answer.md\"","writes":["answer.md"]}},
             "nodes":[{"id":"answer","op":"answer","plugins":[]}],
             "edges":[]
         }))
@@ -129,7 +129,7 @@ async fn kernel_op_call_wait_hands_off_input_map_files_and_selected_result() {
         "input":{"topic":"default-topic"},
         "agents":{},
         "ops":{
-            "produce":{"run":"sh -c \"printf 'parent-report\\n' > report.md\""},
+            "produce":{"run":"sh -c \"printf 'parent-report\\n' > report.md\"","writes":["report.md"]},
             "notify":{"call":{"graph":"child","mode":"wait",
                 "input":{"constant":"yes"},
                 "input_map":{"topic":"/topic"},

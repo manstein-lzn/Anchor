@@ -1,5 +1,6 @@
 //! Isolated Host fixtures shared by Goose tests. No dotenv or inherited credentials.
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -7,6 +8,36 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+
+pub fn artifact_file(artifact: &Path, name: &str) -> Vec<u8> {
+    let manifest: Value =
+        serde_json::from_slice(&fs::read(artifact.join("manifest.json")).unwrap()).unwrap();
+    let file = &manifest["files"][name];
+    let hash = file["sha256"].as_str().unwrap();
+    let bytes = fs::read(artifact.parent().unwrap().join("objects").join(hash).join(
+        if file["executable"] == true {
+            "executable"
+        } else {
+            "data"
+        },
+    ))
+    .unwrap();
+    assert_eq!(bytes.len() as u64, file["bytes"].as_u64().unwrap());
+    assert_eq!(format!("{:x}", Sha256::digest(&bytes)), hash);
+    bytes
+}
+
+pub fn workspace_path(root: &Path, run: &str, node: &str) -> PathBuf {
+    let binding = root
+        .join(run)
+        .join(".node-workspaces")
+        .join(format!("{:x}", Sha256::digest(node.as_bytes())))
+        .join("binding.json");
+    let binding: Value = serde_json::from_slice(&fs::read(binding).unwrap()).unwrap();
+    root.join(".resources")
+        .join(binding["resource_id"].as_str().unwrap())
+        .join("files")
+}
 
 pub fn wait_until(description: &str, mut condition: impl FnMut() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(15);
@@ -29,6 +60,12 @@ pub struct Host {
     allowed_commands: String,
 }
 
+pub fn host_binary() -> PathBuf {
+    std::env::var_os("ANCHOR_TEST_HOST_BINARY")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_anchor-runner-host")))
+}
+
 impl Host {
     pub fn new(graph: &Value) -> Self {
         let root = tempfile::tempdir().unwrap();
@@ -46,9 +83,7 @@ impl Host {
         )
         .unwrap();
         let binary = root.path().join("anchor-runner-host");
-        let source = std::env::var_os("ANCHOR_TEST_HOST_BINARY")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_anchor-runner-host")));
+        let source = host_binary();
         assert!(
             source.is_absolute() && source.is_file(),
             "fixture Host binary must be an existing absolute path"
@@ -206,17 +241,37 @@ impl Host {
     }
 
     pub fn file(&self, record: &Value, node: &str, name: &str) -> Vec<u8> {
-        fs::read(self.artifact(record, node).join("files").join(name)).unwrap()
+        artifact_file(&self.artifact(record, node), name)
+    }
+
+    pub fn workspace(&self, run: &str, node: &str) -> PathBuf {
+        workspace_path(&self.root.path().join("work"), run, node)
     }
 
     pub fn workspace_files(&self, run: &str, name: &str) -> Vec<Vec<u8>> {
-        let root = self.root.path().join("work").join(run);
+        let root = self.root.path().join("work");
         let mut files = Vec::new();
-        visit_files(&root, &root, &mut |path, _| {
-            if path.file_name().is_some_and(|file| file == name) {
-                files.push(fs::read(path).unwrap());
-            }
-        });
+        let mut resources = std::collections::BTreeSet::new();
+        let bindings = match fs::read_dir(root.join(run).join(".node-workspaces")) {
+            Ok(bindings) => bindings,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return files,
+            Err(error) => panic!("workspace bindings: {error}"),
+        };
+        for entry in bindings {
+            let binding: Value = serde_json::from_slice(
+                &fs::read(entry.unwrap().path().join("binding.json")).unwrap(),
+            )
+            .unwrap();
+            resources.insert(binding["resource_id"].as_str().unwrap().to_owned());
+        }
+        for resource in resources {
+            let workspace = root.join(".resources").join(resource).join("files");
+            visit_files(&workspace, &workspace, &mut |path, _| {
+                if path.file_name().is_some_and(|file| file == name) {
+                    files.push(fs::read(path).unwrap());
+                }
+            });
+        }
         files
     }
 }
@@ -363,9 +418,7 @@ fn visit_files(root: &Path, directory: &Path, visitor: &mut impl FnMut(&Path, &s
     for entry in entries {
         let path = entry.path();
         if entry.file_type().unwrap().is_dir() {
-            if entry.file_name() != "git-view" && entry.file_name() != ".git" {
-                visit_files(root, &path, visitor);
-            }
+            visit_files(root, &path, visitor);
         } else if entry.file_type().unwrap().is_file() {
             visitor(&path, path.strip_prefix(root).unwrap().to_str().unwrap());
         }

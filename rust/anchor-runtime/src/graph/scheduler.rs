@@ -9,6 +9,7 @@ use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
 use std::{collections::VecDeque, panic::AssertUnwindSafe};
 
 mod calls;
+pub use calls::graph_call_completion;
 mod execution;
 pub use execution::{dispatch_input, observation_stop};
 #[cfg(test)]

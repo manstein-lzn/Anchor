@@ -80,16 +80,20 @@ pub(super) async fn graphs(State(state): State<ApiState>) -> Result<Json<Value>,
         .channel_snapshots()
         .map_err(application_error)?;
     for channel in channels {
-        let Some(descriptor) = channel.descriptor else {
+        if channel.descriptor.is_none() {
             continue;
-        };
+        }
         if let Some(graph) = projection["graphs"].as_array_mut().and_then(|graphs| {
             graphs
                 .iter_mut()
                 .find(|graph| graph["graph"] == channel.graph)
         }) {
-            let status = crate::channel_supervisor::status::read(&descriptor).await;
-            graph["listener"] = json!({"platform":"wecom","status":status});
+            let status = state
+                .application
+                .channel_status(&channel.owner, &channel.graph)
+                .await
+                .map_err(application_error)?;
+            graph["listener"] = json!({"platform":"wecom","status":status["listener"]});
         }
     }
     Ok(Json(projection))

@@ -16,6 +16,11 @@ impl RunApplication {
         options: AdmissionOptions,
         graph_lease: Box<dyn RunLease>,
     ) -> Result<String, ApplicationError> {
+        if !options.workspace_bindings.is_empty() && options.workspace_root.is_none() {
+            return Err(ApplicationError::Invalid(
+                "workspace bindings require a configured Host workspace root".into(),
+            ));
+        }
         options
             .trigger
             .validate()
@@ -83,6 +88,14 @@ impl RunApplication {
         let runs = self.kernel_runs(true)?.expect("Run store initialized");
         metadata::save(&self.data_root, &metadata)?;
         runs.create(&record, u64::MAX)?;
+        if !options.workspace_bindings.is_empty() {
+            let workspaces = crate::workspaces::Workspaces::new(
+                options
+                    .workspace_root
+                    .expect("workspace bindings have a Host workspace root"),
+            );
+            self.bind_admission_workspaces(&record, &options.workspace_bindings, &workspaces)?;
+        }
         drop(active);
         drop(plugin_lease);
         drop(graph_lease);

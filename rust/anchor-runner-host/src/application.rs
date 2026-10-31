@@ -31,6 +31,7 @@ use anchor_runtime::graph::GraphRunRecord;
 use anchor_runtime::graph::{GraphError, RunLease};
 use serde_json::Value;
 use std::{
+    collections::BTreeMap,
     path::{Path, PathBuf},
     sync::{Arc, atomic::AtomicBool},
 };
@@ -49,6 +50,15 @@ pub(crate) struct AdmissionOptions {
     pub(crate) trigger: RunTrigger,
     pub(crate) pilot: Option<metadata::PilotRunSource>,
     pub(crate) oauth_owner: Option<String>,
+    pub(crate) workspace_bindings: BTreeMap<String, WorkspaceAdmissionBinding>,
+    pub(crate) workspace_root: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct WorkspaceAdmissionBinding {
+    pub(crate) run: String,
+    pub(crate) node: String,
 }
 
 impl From<crate::run_metadata::MetadataError> for ApplicationError {

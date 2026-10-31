@@ -252,8 +252,8 @@ fn parent_graph(mode: &str, marker: &str) -> Value {
     json!({
         "objective":"native Goose call.session public API fixture","entry":"publish","agents":{},
         "ops":{
-            "publish":{"run":format!("sh -c 'printf %s {marker} > request.txt'")},
-            "invoke":{"call":call},"after":{"run":after}
+            "publish":{"run":format!("sh -c 'printf %s {marker} > request.txt'"),"writes":["request.txt"]},
+            "invoke":{"call":call},"after":{"run":after,"writes":if mode == "wait" { vec!["parent-result.txt", "parent-effects.txt"] } else { vec!["parent-result.txt"] }}
         },
         "nodes":[{"id":"publish","op":"publish"},{"id":"invoke","op":"invoke"},{"id":"after","op":"after"}],
         "edges":[{"from":"publish","to":"invoke"},{"from":"invoke","to":"after"}]
@@ -265,7 +265,7 @@ fn child_graph() -> Value {
         "objective":"same Goose conversation with isolated Run workspaces","entry":"worker",
         "agents":{"worker":{"model":"models.worker","instructions":
             "Use authorized Anchor tools, inspect actual history and workspace, never replay a side effect, then final_result with route verify."}},
-        "ops":{"verify":{"run":"sh -c 'set -eu; cat /in/worker/evidence.txt > verified.txt; cat /in/worker/effects.txt > verified-effects.txt'"}},
+        "ops":{"verify":{"writes":["verified.txt","verified-effects.txt"],"run":"sh -c 'set -eu; cat /in/worker/evidence.txt > verified.txt; cat /in/worker/effects.txt > verified-effects.txt'"}},
         "nodes":[{"id":"worker","agent":"worker"},{"id":"verify","op":"verify"}],
         "edges":[{"from":"worker","to":"verify"}]
     })
@@ -294,7 +294,9 @@ fn child_steps(marker: &str) -> Vec<Step> {
         command(&format!(
             "set -eu; test ! -e evidence.txt; test ! -e effects.txt; test ! -e /previous/evidence.txt; test \"$(cat /in/call/request.txt)\" = '{marker}'; if printf corrupt > /in/call/request.txt; then exit 93; fi; printf once >> effects.txt; cat /in/call/request.txt > evidence.txt; cat evidence.txt"
         )),
-        complete("verify").after("exit_code"),
+        complete("verify")
+            .files(&["evidence.txt", "effects.txt"])
+            .after("exit_code"),
     ]
 }
 
@@ -728,10 +730,10 @@ fn native_goose_session_call_yield_restart_continue_same_run_without_replay() {
     assert_eq!(record_bytes(&host, &child, "run-metadata"), frozen_metadata);
     assert_eq!(provider.requests().len(), 2);
     provider.append(vec![
-        complete("verify").expect_request_contains(&call_marker),
+        complete("verify").files(&["evidence.txt", "effects.txt"]).expect_request_contains(&call_marker),
         command(&format!("set -eu; test \"$(cat effects.txt)\" = once; test \"$(cat evidence.txt)\" = '{call_marker}'; test \"$(cat /in/call/request.txt)\" = '{call_marker}'; printf inspected-once; cat evidence.txt"))
             .after("final_result.observed_receipt must match"),
-        complete("verify").after("inspected-once"),
+        complete("verify").files(&["evidence.txt", "effects.txt"]).after("inspected-once"),
     ]);
     let (status, continued) = execution(&server, &child, SESSION, None);
     fs::write(
@@ -884,10 +886,10 @@ fn native_goose_session_call_recovers_unknown_effect_by_inspection_without_repla
 
     let gate = Gate::new();
     provider.append(vec![
-        complete("verify").expect_request_contains("Its external effect is unknown").gated(&gate),
+        complete("verify").files(&["evidence.txt", "effects.txt"]).expect_request_contains("Its external effect is unknown").gated(&gate),
         command(&format!("set -eu; test \"$(cat effects.txt)\" = once; test \"$(cat evidence.txt)\" = '{marker}'; printf inspected-once; cat evidence.txt"))
             .after("final_result.observed_receipt must match"),
-        complete("verify").after("inspected-once"),
+        complete("verify").files(&["evidence.txt", "effects.txt"]).after("inspected-once"),
     ]);
     execute(&server, &child, None);
     gate.wait_entered();

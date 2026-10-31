@@ -29,22 +29,20 @@ pub(crate) fn retain<'record>(
     };
     let graph = crate::run_metadata::graph_identity(&metadata.bundle_source)?;
     for node in &record.snapshot.nodes {
-        if let Some(hint) = crate::node_host::conversation_hint_for(metadata, &node.id) {
-            let ownership = Ownership {
-                format: 1,
-                graph: graph.clone(),
-                session: conversation.session.clone(),
-                node: node.id.clone(),
-                hint: hint.key,
-            };
-            crate::assistant::save_immutable(
-                &data
-                    .join("conversation-resources")
-                    .join(format!("{}.json", ownership.hint)),
-                &ownership,
-            )
-            .map_err(ApplicationError::Storage)?;
-        }
+        let ownership = Ownership {
+            format: 1,
+            graph: graph.clone(),
+            session: conversation.session.clone(),
+            node: node.id.clone(),
+            hint: metadata.node_conversation_key(&node.id),
+        };
+        crate::assistant::save_immutable(
+            &data
+                .join("conversation-resources")
+                .join(format!("{}.json", ownership.hint)),
+            &ownership,
+        )
+        .map_err(ApplicationError::Storage)?;
     }
     Ok(())
 }

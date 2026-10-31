@@ -54,7 +54,7 @@
       "writes": [
         "critique.md"
       ],
-      "instructions": "独立检验研究解释。读取 /in/frame/framing.md、/in/investigate/research.md、sources.md，自己上轮 critique.md，以及研究笔记中对论文评审问题的回应。先核实上轮阻断问题是否被新证据、撤回或限定主张解决；再使用已挂载的学术调研 Plugin 寻找能改变核心结论的反例、混淆因素和竞争解释。可联网核验。critique.md 用普通文字说明判断及证据依据；区分阻断核心回答的问题与可选扩展，不把未知自动视为必须无限研究。要求补证时给出具体问题、为何影响结论以及什么观察能解决它；不能只要求‘更深入’。核心问题有证据支持、重要反例得到处理、结论边界诚实即可进入写作，不要求所有开放问题消失。最后明确下一步决策（frame、investigate 或 synthesize），通过结构化完成结果提交。"
+      "instructions": "独立检验研究解释。读取 /in/frame/framing.md、/in/investigate/research.md、sources.md，自己上轮 critique.md，以及研究笔记中对论文评审问题的回应。先核实上轮阻断问题是否被新证据、撤回或限定主张解决；再使用已挂载的学术调研 Plugin 寻找能改变核心结论的反例、混淆因素和竞争解释。可联网核验。critique.md 用普通文字说明判断及证据依据；区分阻断核心回答的问题与可选扩展，不把未知自动视为必须无限研究。要求补证时给出具体问题、为何影响结论以及什么观察能解决它；不能只要求‘更深入’。核心问题有证据支持、重要反例得到处理、结论边界诚实即可进入写作，不要求所有开放问题消失。最后在 critique.md 末尾单独写一行 DECISION: frame、DECISION: investigate 或 DECISION: synthesize，且全文仅保留一个这样的决策行，通过结构化完成结果提交。"
     },
     "synthesizer": {
       "model": "models.default.flash",
@@ -85,7 +85,7 @@
       "writes": [
         "review.md"
       ],
-      "instructions": "独立评审 /in/synthesize/answer.md，结合 /in/investigate/research.md、sources.md、/in/frame/framing.md、/in/challenge/critique.md。先读取自己已有 review.md，逐项验收旧问题：已解决、仍阻断或已有依据撤回；已核实且未改变的部分不要求重写。检查修订有无引入新的实质错误，并按需使用已挂载的学术调研 Plugin 抽查争议原文。新问题只有影响核心回答、真实性或证据可信度才阻断，说明位置、证据、影响及可验收的修法；润色和扩展建议不得阻断。深度体现为机制解释、竞争解释的辨析与有依据的边界，不强求‘认知修正表’或预注册叙事。review.md 保留未解决问题和解决依据，普通文字即可。通过标准是核心问题得到有证据的回答、重要反例被处理、主张与证据强度一致、学术结构和引用完整；不追求零未知。最后明确 research、frame、writing 或 pass 决策，并通过结构化完成结果提交。"
+      "instructions": "独立评审 /in/synthesize/answer.md，结合 /in/investigate/research.md、sources.md、/in/frame/framing.md、/in/challenge/critique.md。先读取自己已有 review.md，逐项验收旧问题：已解决、仍阻断或已有依据撤回；已核实且未改变的部分不要求重写。检查修订有无引入新的实质错误，并按需使用已挂载的学术调研 Plugin 抽查争议原文。新问题只有影响核心回答、真实性或证据可信度才阻断，说明位置、证据、影响及可验收的修法；润色和扩展建议不得阻断。深度体现为机制解释、竞争解释的辨析与有依据的边界，不强求‘认知修正表’或预注册叙事。review.md 保留未解决问题和解决依据，普通文字即可。通过标准是核心问题得到有证据的回答、重要反例被处理、主张与证据强度一致、学术结构和引用完整；不追求零未知。最后在 review.md 末尾单独写一行 DECISION: research、DECISION: frame、DECISION: writing 或 DECISION: pass，且全文仅保留一个这样的决策行，并通过结构化完成结果提交。"
     }
   },
   "ops": {

@@ -159,6 +159,22 @@ pub struct ChannelAssistant {
     pub reply_node: String,
 }
 
+/// A confirmed proactive delivery, separate from user input and its Turns.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ChannelNotification {
+    pub id: String,
+    pub source_run: String,
+    pub content: String,
+    pub files: Vec<ChannelNotificationFile>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ChannelNotificationFile {
+    pub artifact_id: String,
+    pub path: String,
+    pub name: String,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ChannelDeliveryRequest {
     pub key: String,

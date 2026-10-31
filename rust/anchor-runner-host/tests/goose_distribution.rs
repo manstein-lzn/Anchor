@@ -113,14 +113,14 @@ fn extracted_goose_runtime_resumes_without_sources_or_replaying_workspace_effect
         "goose-source-free-distribution",
         vec![
             command("set -eu; test ! -e effect.txt; printf once > effect.txt; cat effect.txt"),
-            complete("verify").gated(&gate),
+            complete("verify").files(&["effect.txt"]).gated(&gate),
         ],
     );
     let host = Host::new(&json!({
         "objective":"Inspect and resume the same Goose invocation from extracted Runtime binaries",
         "entry":"worker",
         "agents":{"worker":{"model":"models.worker","instructions":"Inspect workspace facts, write effect.txt exactly once, and finish with route verify."}},
-        "ops":{"verify":{"run":"sh -c 'set -eu; test \"$(cat /in/worker/effect.txt)\" = once; if printf corrupt >> /in/worker/effect.txt 2>/dev/null; then exit 7; fi; cat /in/worker/effect.txt > verified.txt'"}},
+        "ops":{"verify":{"writes":["verified.txt"],"run":"sh -c 'set -eu; test \"$(cat /in/worker/effect.txt)\" = once; if printf corrupt >> /in/worker/effect.txt 2>/dev/null; then exit 7; fi; cat /in/worker/effect.txt > verified.txt'"}},
         "nodes":[{"id":"worker","agent":"worker"},{"id":"verify","op":"verify"}],
         "edges":[{"from":"worker","to":"verify"}]
     })).default_runtime();
@@ -249,7 +249,7 @@ fn extracted_goose_runtime_resumes_without_sources_or_replaying_workspace_effect
     .unwrap();
     provider.append(vec![
         command("set -eu; test \"$(cat effect.txt)\" = once; cat effect.txt").after("once"),
-        complete("verify").after("once"),
+        complete("verify").files(&["effect.txt"]).after("once"),
     ]);
     let mut restarted = host.serve(&provider);
     let (status, resumed) = restarted.request("POST", &format!("/runs/{run}/resume"), None);

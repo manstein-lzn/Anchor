@@ -298,6 +298,197 @@ async fn confirmed_send_is_bound_to_identity_content_and_survives_token_rotation
     reopened.shutdown().await.unwrap();
 }
 
+fn file_request(request_id: &str, name: &str, bytes: &[u8]) -> Value {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    use md5::{Digest as _, Md5};
+
+    json!({"operation":"send_file", "request_id":request_id, "userid":"alice",
+        "name":name, "data_base64":STANDARD.encode(bytes),
+        "md5":format!("{:x}", Md5::digest(bytes))})
+}
+
+#[tokio::test]
+async fn proactive_file_uploads_exact_bytes_and_confirms_only_the_final_send() {
+    use anchor_wecom_gateway::MEDIA_CHUNK_BYTES;
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+
+    let root = tempfile::tempdir().unwrap();
+    let mut platform = Platform::new(Some(0)).await;
+    let mut settings = config(root.path(), &platform, None);
+    settings.timing.ack_timeout = Duration::from_secs(2);
+    let path = settings.socket_path();
+    let gateway = start_authenticated(settings).await;
+    let mut bytes = b"%PDF-1.7\n".to_vec();
+    bytes.resize(MEDIA_CHUNK_BYTES + 16, b'x');
+    let request = file_request("daily-report", "AI每日晨报_20261031.pdf", &bytes);
+    for (field, value) in [
+        ("userid", json!("@all")),
+        ("md5", json!("0".repeat(32))),
+        ("name", json!("../report.pdf")),
+    ] {
+        let mut invalid = request.clone();
+        invalid[field] = value;
+        assert!(control(&path, TOKEN, invalid).await["error"].is_string());
+    }
+    assert!(control(&path, "wrong-token", request.clone()).await["error"].is_string());
+    let pending_path = path.clone();
+    let pending_request = request.clone();
+    let pending = tokio::spawn(async move { control(&pending_path, TOKEN, pending_request).await });
+    let init = platform.next("aibot_upload_media_init").await;
+    assert_eq!(
+        init["body"],
+        json!({"type":"file", "filename":"AI每日晨报_20261031.pdf",
+        "total_size":bytes.len(), "total_chunks":2, "md5":request["md5"]})
+    );
+    platform
+        .acknowledge_body(&init, 0, json!({"upload_id":"report-upload"}))
+        .await;
+    let mut uploaded = Vec::new();
+    for index in 0..2 {
+        let chunk = platform.next("aibot_upload_media_chunk").await;
+        assert_eq!(chunk["body"]["chunk_index"], index);
+        assert_eq!(chunk["body"]["upload_id"], "report-upload");
+        uploaded.extend(
+            STANDARD
+                .decode(chunk["body"]["base64_data"].as_str().unwrap())
+                .unwrap(),
+        );
+        platform.acknowledge(&chunk, 0).await;
+    }
+    assert_eq!(uploaded, bytes);
+    let finish = platform.next("aibot_upload_media_finish").await;
+    platform
+        .acknowledge_body(&finish, 0, json!({"media_id":"report-media"}))
+        .await;
+    let wire = platform.next("aibot_send_msg").await;
+    assert_eq!(
+        wire["body"],
+        json!({"chatid":"alice", "chat_type":1, "msgtype":"file",
+        "file":{"media_id":"report-media"}})
+    );
+    assert!(!pending.is_finished());
+    wait_fact(&gateway, "daily-report", DeliveryStatus::Unknown).await;
+    platform.acknowledge(&wire, 0).await;
+    assert_eq!(
+        pending.await.unwrap(),
+        json!({"accepted":true,"request_id":"daily-report"})
+    );
+    wait_fact(&gateway, "daily-report", DeliveryStatus::Confirmed).await;
+    assert_eq!(
+        control(&path, TOKEN, request.clone()).await["duplicate"],
+        true
+    );
+    for changed in [
+        file_request("daily-report", "changed.pdf", &bytes),
+        file_request(
+            "daily-report",
+            "AI每日晨报_20261031.pdf",
+            b"%PDF-1.7 changed",
+        ),
+        send_request("daily-report", "alice", "different message kind"),
+    ] {
+        assert!(
+            control(&path, TOKEN, changed).await["error"]
+                .as_str()
+                .unwrap()
+                .contains("different content or identity")
+        );
+    }
+    gateway.shutdown().await.unwrap();
+    let reopened = start_authenticated(config(root.path(), &platform, None)).await;
+    assert_eq!(control(&path, TOKEN, request).await["duplicate"], true);
+    platform.no_command("aibot_upload_media_init").await;
+    platform.no_command("aibot_send_msg").await;
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn proactive_file_failure_distinguishes_upload_from_unknown_platform_send() {
+    let root = tempfile::tempdir().unwrap();
+    let mut platform = Platform::new(Some(0)).await;
+    let settings = config(root.path(), &platform, None);
+    let path = settings.socket_path();
+    let gateway = start_authenticated(settings).await;
+
+    // A rejected upload creates no delivery claim and remains safe to retry.
+    let request = file_request("upload-retry", "report.pdf", b"%PDF-1.7 first issue");
+    let pending_path = path.clone();
+    let pending_request = request.clone();
+    let pending = tokio::spawn(async move { control(&pending_path, TOKEN, pending_request).await });
+    for _ in 0..3 {
+        let init = platform.next("aibot_upload_media_init").await;
+        platform.acknowledge(&init, 400).await;
+    }
+    assert!(
+        pending.await.unwrap()["error"]
+            .as_str()
+            .unwrap()
+            .contains("no message was dispatched")
+    );
+    assert!(gateway.delivery_facts().unwrap().is_empty());
+    let pending_path = path.clone();
+    let pending = tokio::spawn(async move { control(&pending_path, TOKEN, request).await });
+    platform
+        .acknowledge_upload("retry-upload", "retry-media")
+        .await;
+    let wire = platform.next("aibot_send_msg").await;
+    platform.acknowledge(&wire, 0).await;
+    assert_eq!(pending.await.unwrap()["accepted"], true);
+
+    for failure in ["timeout", "rejected", "disconnected"] {
+        let request = file_request(failure, "report.pdf", b"%PDF-1.7 uncertain issue");
+        let pending_path = path.clone();
+        let pending_request = request.clone();
+        let pending =
+            tokio::spawn(async move { control(&pending_path, TOKEN, pending_request).await });
+        platform
+            .acknowledge_upload("unknown-upload", "unknown-media")
+            .await;
+        let wire = platform.next("aibot_send_msg").await;
+        match failure {
+            "rejected" => platform.acknowledge(&wire, 400).await,
+            "disconnected" => platform.close().await,
+            _ => {}
+        }
+        assert!(
+            pending.await.unwrap()["error"]
+                .as_str()
+                .unwrap()
+                .contains("unconfirmed")
+        );
+        if failure == "disconnected" {
+            platform.next("aibot_subscribe").await;
+            gateway
+                .wait_authenticated(Duration::from_secs(2))
+                .await
+                .unwrap();
+        } else {
+            platform.acknowledge(&wire, 0).await;
+        }
+        assert!(
+            control(&path, TOKEN, request).await["error"]
+                .as_str()
+                .unwrap()
+                .contains("previous delivery")
+        );
+        wait_fact(&gateway, failure, DeliveryStatus::Unknown).await;
+    }
+    gateway.shutdown().await.unwrap();
+    let reopened = start_authenticated(config(root.path(), &platform, None)).await;
+    for failure in ["timeout", "rejected", "disconnected"] {
+        let request = file_request(failure, "report.pdf", b"%PDF-1.7 uncertain issue");
+        assert!(
+            control(&path, TOKEN, request).await["error"]
+                .as_str()
+                .unwrap()
+                .contains("previous delivery")
+        );
+    }
+    platform.no_command("aibot_upload_media_init").await;
+    platform.no_command("aibot_send_msg").await;
+    reopened.shutdown().await.unwrap();
+}
+
 #[tokio::test]
 async fn timeout_rejection_and_disconnect_stay_unknown_across_reconnect_and_restart() {
     let root = tempfile::tempdir().unwrap();

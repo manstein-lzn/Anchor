@@ -8,10 +8,11 @@ acceptance asset; its full Goose execution has not been revalidated.
 At startup it freezes a view of the operator-authorized source and deployment:
 
 - source code, documentation, manifests and dependency declarations;
-- dynamically discovered `workspaces/*/graph.json`;
+- dynamically discovered `catalog/*/graph.json`;
 - deployed public Plugin/Skill resources;
-- all discovered Run metadata, with a separate last-seven-days flag based on
-  declared timestamps (missing timestamps remain unknown);
+- current Kernel Run resources from the authorized `kernel-runs` store, with a
+  separate last-seven-days flag based on recorded timestamps (missing timestamps
+  remain unknown);
 - optionally previous review reports and one Rust state root.
 
 Prompts, conversations, checkpoints and model traces are not Run evidence.
@@ -64,7 +65,8 @@ provides the read-only evidence MCP service and deterministic business commands:
 `native-publish`, `weekly-discover`, `weekly-collect`, `weekly-gate` and
 `weekly-publish`.
 Use `anchor-rsi --help` for arguments. Gates call the existing Host
-`anchor-route`; publishing rechecks review, commit and evidence bindings.
+`anchor-route`; publishing rechecks review, Artifact identity, manifest digest
+and evidence bindings. Artifact publication does not create a Git repository.
 
 The Graph uses the existing Host/Runner with operator-authorized local inputs
 and a canonical Plugin MCP endpoint. Install and schedule it through the normal
@@ -95,16 +97,25 @@ acceptance criterion from one completed report.
 Run projections carry the record's own graph identity (`graph`, `graph_entry`,
 `graph_objective`, `graph_nodes`) instead of a constant label, plus `format`,
 `started`/`updated` and `duration_ms` when the producer recorded timestamps.
-Real values are projected for `error`, `cursor`, `recovery` (pending and
-submission counts), the parallel activation (`parallel`, `fanout`, `join` with
-`branches[].status`) and a per-node `results` summary. `source_field_presence`
+Lifecycle status and failure reasons come from Kernel facts; update timestamps
+come from Host observations. Projections include the parallel activation
+(`parallel`, `fanout`, `join` with `branches[].status`) and a per-node `results`
+summary. Task cursor and recovery details are not collected; their omission
+does not mean zero activity. `source_field_presence`
 is kept only where absence is real (`started`, `updated`, `reason`); it never
 stands in for a value, and presence never authorizes exposing private contents.
 `projection_omitted` lists only the bodies left out entirely (`snapshot`,
-`input`, `decided`, `graph_calls`, `plugin_bindings`). Deployment graph
+`input`, `decided`, `graph_calls`, `plugin_bindings`, `environments`). Deployment graph
 definitions are collected from `catalog/*/graph.json`; the schedule snapshot is
 resolved from the granted Rust state root (`schedules.json` or
 `state/schedules.json`).
+
+Published reports are read through the shared Artifact store reader under its
+read lease. It checks the full Artifact reference, manifest and view descriptor,
+expiry, and relevant file hashes. Terminal publication creates the lightweight
+view before it completes; unchanged bytes use links to content objects. An
+expired or unverifiable report is recorded as unavailable, never replaced with
+an uncommitted Workspace.
 
 Historical report and correction acceptance in A61 remains in the development
 ledger. The former launch and revision commands can be inspected at commit

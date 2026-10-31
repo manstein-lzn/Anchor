@@ -125,11 +125,12 @@ impl HostNodes {
         };
         match result.status {
             SandboxStatus::Completed if result.exit_code == Some(0) => {
-                // Exit 0 without a declared output is not success: downstream
-                // nodes would read a file that is not there.
-                let missing = super::missing_outputs(&workspace, &request.writes);
-                if !missing.is_empty() {
-                    let reason = super::missing_outputs_reason(&missing);
+                let selection =
+                    anchor_runtime::artifact::ArtifactSelection::new(request.writes.clone())
+                        .map_err(GraphError::Unsupported)?;
+                if let Err(reason) =
+                    crate::artifacts::validate_selection(&workspace, &selection, &request.writes)
+                {
                     write_durable(
                         &self
                             .facts_root
@@ -143,7 +144,7 @@ impl HostNodes {
                     submission,
                     route,
                     model_requests: 0,
-                    output: json!({"stdout":result.stdout,"stderr":result.stderr,"exit_code":result.exit_code}),
+                    output: json!({"stdout":result.stdout,"stderr":result.stderr,"exit_code":result.exit_code,"files":selection.paths}),
                 })
             }
             SandboxStatus::Cancelled => Ok(NodeExecutionOutcome::Cancelled),
@@ -248,6 +249,52 @@ impl NodeExecutionPort for HostNodes {
     ) -> Pin<
         Box<dyn std::future::Future<Output = Result<NodeExecutionOutcome, GraphError>> + Send + 'a>,
     > {
+        Box::pin(async move {
+            let key = request.key.clone();
+            let inputs = request.input_commits.clone();
+            self.io_resolver
+                .prepare_node_workspace(&key, &inputs)
+                .map_err(GraphError::Unsupported)?;
+            let lease = self.artifacts.workspaces().acquire(&key)?;
+            let input_lease = self.artifacts.lease_inputs(&inputs)?;
+            let outcome = self.execute_dispatch(request).await;
+            drop(input_lease);
+            match &outcome {
+                Ok(NodeExecutionOutcome::Completed(completion)) => {
+                    self.artifacts.publish_owned(
+                        &key,
+                        completion,
+                        &anchor_runtime::graph::ArtifactFreezeContext {
+                            kind: anchor_runtime::graph::ArtifactKind::Node,
+                            input_commits: inputs,
+                        },
+                    )?;
+                    lease.finish_published()?;
+                }
+                Ok(
+                    NodeExecutionOutcome::Cancelled
+                    | NodeExecutionOutcome::Suspended
+                    | NodeExecutionOutcome::Failed { .. }
+                    | NodeExecutionOutcome::Yielded { .. }
+                    | NodeExecutionOutcome::BudgetExhausted { .. }
+                    | NodeExecutionOutcome::Aborted,
+                ) => lease.finish_interrupted()?,
+                // The same invocation may inspect and resume. A different
+                // writer cannot take an unresolved scene over.
+                _ => (),
+            }
+            outcome
+        })
+    }
+}
+
+impl HostNodes {
+    fn execute_dispatch<'a>(
+        &'a self,
+        request: NodeExecutionRequest,
+    ) -> Pin<
+        Box<dyn std::future::Future<Output = Result<NodeExecutionOutcome, GraphError>> + Send + 'a>,
+    > {
         if let Some(nodes) = &self.goose_nodes {
             match nodes.pending_recovery(&request.key) {
                 Ok(attempts) if !attempts.is_empty() => {
@@ -302,22 +349,7 @@ impl HostNodes {
                 ))
             });
         }
-        Box::pin(async move {
-            let cancellation = request.cancellation.clone();
-            let timeout =
-                Duration::try_from_secs_f64(request.wall_time_limit_seconds.unwrap_or(3600.0))
-                    .map_err(|_| GraphError::Unsupported("invalid node wall time".into()))?;
-            let cancel = async {
-                while !cancellation.load(Ordering::Relaxed) {
-                    tokio::time::sleep(Duration::from_millis(25)).await;
-                }
-            };
-            tokio::select! {
-                biased;
-                _ = cancel => Ok(NodeExecutionOutcome::Cancelled),
-                result = tokio::time::timeout(timeout, self.execute_node(request)) => result
-                    .map_err(|_| GraphError::Unsupported("node wall time exceeded; unfinished effects are uncertain".into()))?,
-            }
-        })
+        // Sandbox owns timeout/cancellation and waits for process cleanup.
+        Box::pin(self.execute_node(request))
     }
 }

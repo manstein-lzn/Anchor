@@ -1,373 +1,220 @@
-use super::tests::{completion, fixture, key};
+use super::tests::{completion_with_files, fixture, key};
 use super::*;
-use std::process::Command;
-
-async fn freeze_node(
-    artifacts: &HostArtifacts,
-    key: &InvocationKey,
-    inputs: &[CommitRef],
-) -> CommitRef {
-    artifacts
-        .freeze_with_context(
-            key,
-            &completion(),
-            &ArtifactFreezeContext {
-                kind: ArtifactKind::Node,
-                input_commits: inputs.to_vec(),
-            },
-        )
-        .await
-        .unwrap()
-}
-
-fn git(files: &Path, arguments: &[&str]) -> String {
-    let output = Command::new("git")
-        .arg("--git-dir")
-        .arg(files.join(".git"))
-        .args(arguments)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8(output.stdout).unwrap().trim().to_owned()
-}
+use anchor_kernel::{FileStore, Outcome, Phase, Store};
+use anchor_rsi::evidence::{Config, Evidence};
+use anchor_runtime::graph::{GraphRunRecord, GraphSnapshot, RunResult, validator};
+use serde_json::json;
 
 #[tokio::test]
-async fn git_projection_commit_message_binds_typed_artifact_identity() {
-    let (_temp, artifacts) = fixture();
-    let invocation = key("write");
-    let workspace = artifacts.prepare_workspace(&invocation, &[]).unwrap();
-    fs::write(workspace.join("report.md"), "bound artifact\n").unwrap();
-    let commit = freeze_node(&artifacts, &invocation, &[]).await;
-    let source = artifacts
-        .input_mounts(std::slice::from_ref(&commit), "run-1", "digest-1")
-        .unwrap()
-        .remove(0)
-        .source;
-    let message = git(&source, &["show", "-s", "--format=%B", "HEAD"]);
-    assert!(message.starts_with(&format!(
-        "Anchor Artifact {}\nArtifact-Node: {}\nArtifact-Invocation: {}\nManifest-SHA256: ",
-        commit.id, commit.node_id, commit.invocation
-    )));
-    let digest = message
-        .strip_prefix(&format!(
-            "Anchor Artifact {}\nArtifact-Node: {}\nArtifact-Invocation: {}\nManifest-SHA256: ",
-            commit.id, commit.node_id, commit.invocation
-        ))
-        .unwrap();
-    assert_eq!(digest.len(), 64);
-    assert!(digest.bytes().all(|byte| byte.is_ascii_hexdigit()));
-}
+async fn terminal_delivery_is_readable_by_rsi_without_a_downstream_mount_and_rejects_expired_views()
+{
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
-#[tokio::test]
-async fn revisit_preserves_own_files_but_not_pending_work_and_restart_keeps_edits() {
-    let (_temp, artifacts) = fixture();
-    let first = key("write");
-    let first_workspace = artifacts.prepare_workspace(&first, &[]).unwrap();
-    fs::create_dir_all(first_workspace.join("assets/empty")).unwrap();
-    fs::write(first_workspace.join("research.md"), "first evidence\n").unwrap();
-    fs::write(first_workspace.join("answer.md"), "first draft\n").unwrap();
-    let first_commit = freeze_node(&artifacts, &first, &[]).await;
-    fs::write(first_workspace.join("uncommitted.txt"), "must not inherit").unwrap();
-    fs::write(
-        first_workspace.join("research.md"),
-        "pending, not committed",
-    )
+    let (temp, artifacts) = fixture();
+    let snapshot = GraphSnapshot::from_authoring(json!({
+        "objective":"weekly review of Anchor",
+        "entry":"publish",
+        "agents":{"worker":{"model":"models.default","instructions":"publish report"}},
+        "nodes":[{"id":"publish","agent":"worker"}],
+        "edges":[]
+    }))
     .unwrap();
-
-    let review = key("review");
-    let review_workspace = artifacts
-        .prepare_workspace(&review, std::slice::from_ref(&first_commit))
-        .unwrap();
-    assert!(!review_workspace.join("research.md").exists());
-    fs::write(review_workspace.join("feedback.md"), "extend evidence").unwrap();
-    let feedback = freeze_node(&artifacts, &review, std::slice::from_ref(&first_commit)).await;
-    let second = InvocationKey {
-        invocation: 2,
-        ..first.clone()
+    let mut record = GraphRunRecord::create_with_id(snapshot, Value::Null, "run-1").unwrap();
+    let first = InvocationKey {
+        graph_digest: record.graph_digest.clone(),
+        ..key("publish")
     };
-    let second_workspace = artifacts
-        .prepare_workspace(&second, std::slice::from_ref(&feedback))
-        .unwrap();
-    assert_ne!(first_workspace, second_workspace);
-    assert_eq!(
-        fs::read_to_string(second_workspace.join("research.md")).unwrap(),
-        "first evidence\n"
-    );
-    assert_eq!(
-        fs::read_to_string(second_workspace.join("answer.md")).unwrap(),
-        "first draft\n"
-    );
-    assert!(second_workspace.join("assets/empty").is_dir());
-    assert!(!second_workspace.join("uncommitted.txt").exists());
-    fs::write(
-        second_workspace.join("research.md"),
-        "first evidence\nsecond evidence\n",
-    )
-    .unwrap();
-    fs::write(second_workspace.join("interrupted.txt"), "in progress").unwrap();
-    assert_eq!(
-        artifacts
-            .prepare_workspace(&second, std::slice::from_ref(&feedback))
-            .unwrap(),
-        second_workspace
-    );
-    assert_eq!(
-        fs::read_to_string(second_workspace.join("interrupted.txt")).unwrap(),
-        "in progress"
-    );
-    let second_commit = freeze_node(&artifacts, &second, std::slice::from_ref(&feedback)).await;
-    let frozen = artifacts.files_path(&first_commit).unwrap();
-    assert_eq!(
-        fs::read_to_string(frozen.join("research.md")).unwrap(),
-        "first evidence\n"
-    );
-    assert_eq!(
-        fs::read_to_string(
-            artifacts
-                .files_path(&second_commit)
-                .unwrap()
-                .join("answer.md")
-        )
-        .unwrap(),
-        "first draft\n"
-    );
-    let third = InvocationKey {
-        invocation: 3,
-        ..first.clone()
-    };
-    let third_workspace = artifacts
-        .prepare_workspace(&third, std::slice::from_ref(&second_commit))
-        .unwrap();
-    assert_eq!(
-        fs::read_to_string(third_workspace.join("research.md")).unwrap(),
-        "first evidence\nsecond evidence\n"
-    );
-
-    let other_run = InvocationKey {
-        run_id: "other-run".into(),
-        ..second.clone()
-    };
-    assert!(
-        artifacts
-            .prepare_workspace(&other_run, std::slice::from_ref(&feedback))
-            .is_err()
-    );
-    let other_workspace = artifacts.prepare_workspace(&other_run, &[]).unwrap();
-    assert_ne!(other_workspace, second_workspace);
-    assert_eq!(fs::read_dir(other_workspace).unwrap().count(), 0);
-    assert!(
-        artifacts
-            .prepare_workspace(
-                &InvocationKey {
-                    graph_digest: "wrong-digest".into(),
-                    ..second
-                },
-                &[feedback]
-            )
-            .is_err()
-    );
-}
-
-#[tokio::test]
-async fn git_head_is_pinned_and_changes_with_the_draft() {
-    let (_temp, artifacts) = fixture();
-    let first = key("write");
     let workspace = artifacts.prepare_workspace(&first, &[]).unwrap();
-    fs::write(workspace.join("report.md"), "Original draft\n").unwrap();
-    let original = freeze_node(&artifacts, &first, &[]).await;
-    let original_mount = artifacts
-        .input_mounts(std::slice::from_ref(&original), "run-1", "digest-1")
-        .unwrap()
-        .remove(0);
-    let original_head = git(&original_mount.source, &["rev-parse", "HEAD"]);
+    fs::create_dir_all(workspace.join(".git/hooks")).unwrap();
+    fs::write(workspace.join(".git/config"), "project Git configuration").unwrap();
+    fs::write(workspace.join("rsi-report.md"), "Original draft\n").unwrap();
+    fs::write(
+        workspace.join("evolution.json"),
+        r#"{"proposals":[{"id":"P-before"}]}"#,
+    )
+    .unwrap();
+    fs::write(workspace.join("sources.md"), "Verified source\n").unwrap();
+    fs::write(workspace.join("unused.bin"), "Unrelated bytes\n").unwrap();
+    let completion = completion_with_files(&[
+        "rsi-report.md",
+        "evolution.json",
+        "sources.md",
+        "unused.bin",
+    ]);
+    let original = artifacts.freeze(&first, &completion).await.unwrap();
+    // Terminal publication itself prepares the view; no consumer has mounted it.
+    let original_view = artifacts.root.join(&original.id).join("view");
+    let descriptor = ArtifactDescriptor::read(&original_view).unwrap();
+    assert_eq!(descriptor.artifact, original);
     assert_eq!(
-        git(&original_mount.source, &["show", "HEAD:report.md"]),
-        "Original draft"
+        descriptor.manifest_sha256,
+        format!(
+            "{:x}",
+            Sha256::digest(
+                fs::read(artifacts.root.join(&original.id).join("manifest.json")).unwrap()
+            )
+        )
     );
+    assert!(!original_view.join(".git").exists());
+    assert!(workspace.join(".git/config").exists());
+    let (_, manifest) = artifacts.load_snapshot(&original).unwrap();
     assert_eq!(
-        artifacts.freeze(&first, &completion()).await.unwrap(),
+        fs::metadata(original_view.join("rsi-report.md"))
+            .unwrap()
+            .ino(),
+        fs::metadata(
+            artifacts
+                .object_path(&manifest.files["rsi-report.md"])
+                .unwrap()
+        )
+        .unwrap()
+        .ino()
+    );
+
+    record.results.insert(
+        "publish".into(),
+        vec![RunResult {
+            node_id: "publish".into(),
+            key: first.clone(),
+            plugin_views: Default::default(),
+            plugin_digests: Default::default(),
+            completion: completion.clone(),
+            interruption: None,
+            commit: original.clone(),
+            sequence: 1,
+        }],
+    );
+    let mut resource = validator::run_resource(&record, 100).unwrap();
+    resource.task.as_mut().unwrap().phase = Phase::Settled {
+        result: Outcome::Done,
+    };
+    FileStore::new(temp.path().join("kernel-runs"))
+        .unwrap()
+        .create(&resource)
+        .unwrap();
+    let source = temp.path().join("source");
+    let data = temp.path().join("data");
+    fs::create_dir(&source).unwrap();
+    fs::create_dir(&data).unwrap();
+    let mut config = Config {
+        source,
+        data,
+        rust_state: Some(temp.path().into()),
+        previous: None,
+        evidence: temp.path().join("evidence"),
+    };
+    // The collector opens the existing store lease read-only and reads only
+    // the three report files, even if an unrelated view entry is absent.
+    let lock = artifacts.root.join(".store.lock");
+    fs::set_permissions(&lock, fs::Permissions::from_mode(0o444)).unwrap();
+    fs::remove_file(original_view.join("unused.bin")).unwrap();
+    let evidence = Evidence::collect(config.clone()).unwrap();
+    let previous = format!("previous/published-{}/evolution.json", original.id);
+    assert!(
+        evidence
+            .read(&previous, 0, 100)
+            .unwrap()
+            .to_string()
+            .contains("P-before")
+    );
+    fs::set_permissions(&lock, fs::Permissions::from_mode(0o644)).unwrap();
+
+    // Both the descriptor and relevant bytes remain bound to the manifest.
+    let descriptor_path = original_view.join(ARTIFACT_DESCRIPTOR_FILE);
+    let mut changed = descriptor.clone();
+    changed.artifact.invocation += 1;
+    fs::remove_file(&descriptor_path).unwrap();
+    fs::write(&descriptor_path, serde_json::to_vec(&changed).unwrap()).unwrap();
+    config.evidence = temp.path().join("wrong-identity-evidence");
+    let invalid = Evidence::collect(config.clone()).unwrap();
+    assert!(!invalid.entries.contains_key(&previous));
+    assert!(
+        invalid
+            .issues
+            .iter()
+            .any(|issue| { issue["reason"] == "published report could not be verified" })
+    );
+    fs::write(&descriptor_path, serde_json::to_vec(&descriptor).unwrap()).unwrap();
+    fs::remove_file(original_view.join("evolution.json")).unwrap();
+    fs::write(original_view.join("evolution.json"), "changed report bytes").unwrap();
+    config.evidence = temp.path().join("wrong-bytes-evidence");
+    let invalid = Evidence::collect(config.clone()).unwrap();
+    assert!(!invalid.entries.contains_key(&previous));
+
+    // A retry uses the already-published bytes and can repair a missing view.
+    fs::remove_dir_all(&original_view).unwrap();
+    assert_eq!(
+        artifacts.freeze(&first, &completion).await.unwrap(),
         original
     );
     assert_eq!(
-        git(&original_mount.source, &["rev-parse", "HEAD"]),
-        original_head
+        ArtifactDescriptor::read(&original_view).unwrap(),
+        descriptor
     );
 
+    // Simulate collection stopping after its tombstone, before deleting view.
+    let expired = artifacts.root.join(&original.id).join("expired.json");
+    fs::write(&expired, b"{\"format\":1}").unwrap();
+    config.evidence = temp.path().join("expired-evidence");
+    let invalid = Evidence::collect(config).unwrap();
+    assert!(original_view.is_dir());
+    assert!(!invalid.entries.contains_key(&previous));
+    fs::remove_file(expired).unwrap();
     let second = InvocationKey {
         invocation: 2,
         ..first
     };
-    let workspace = artifacts
-        .prepare_workspace(&second, std::slice::from_ref(&original))
+    assert_eq!(
+        artifacts
+            .prepare_workspace(&second, std::slice::from_ref(&original))
+            .unwrap(),
+        workspace
+    );
+    fs::write(workspace.join("rsi-report.md"), "Revised draft\n").unwrap();
+    let revised = artifacts
+        .freeze_with_context(
+            &second,
+            &completion,
+            &ArtifactFreezeContext {
+                kind: ArtifactKind::Node,
+                input_commits: vec![original.clone()],
+            },
+        )
+        .await
         .unwrap();
-    fs::write(workspace.join("report.md"), "Revised draft\n").unwrap();
-    let revised = freeze_node(&artifacts, &second, std::slice::from_ref(&original)).await;
-    let revised_mount = artifacts
-        .input_mounts(std::slice::from_ref(&revised), "run-1", "digest-1")
-        .unwrap()
-        .remove(0);
-    let revised_head = git(&revised_mount.source, &["rev-parse", "HEAD"]);
-    assert_ne!(original_head, revised_head);
+    assert_ne!(original, revised);
     assert_eq!(
-        git(&revised_mount.source, &["rev-parse", "HEAD^"]),
-        original_head
+        descriptor
+            .read_file(&original_view, "rsi-report.md")
+            .unwrap(),
+        b"Original draft\n"
     );
-    assert!(
-        git(&revised_mount.source, &["diff", &original_head, "HEAD"]).contains("+Revised draft")
-    );
+    let revised_view = artifacts.files_path(&revised).unwrap();
     assert_eq!(
-        git(&original_mount.source, &["rev-parse", "HEAD"]),
-        original_head
+        ArtifactDescriptor::read(&revised_view)
+            .unwrap()
+            .read_file(&revised_view, "rsi-report.md")
+            .unwrap(),
+        b"Revised draft\n"
     );
+    fs::remove_dir_all(&original_view).unwrap();
+    let rebuilt = artifacts.files_path(&original).unwrap();
+    assert_eq!(ArtifactDescriptor::read(&rebuilt).unwrap(), descriptor);
     assert_eq!(
-        git(&original_mount.source, &["rev-list", "--count", "HEAD"]),
-        "1"
+        artifacts
+            .visible_inputs(std::slice::from_ref(&revised))
+            .unwrap(),
+        std::slice::from_ref(&revised)
     );
-    fs::remove_dir_all(artifacts.root.join(&original.id).join("git-view")).unwrap();
-    let rebuilt = artifacts
-        .input_mounts(std::slice::from_ref(&original), "run-1", "digest-1")
-        .unwrap()
-        .remove(0);
-    assert_eq!(git(&rebuilt.source, &["rev-parse", "HEAD"]), original_head);
-}
-
-#[tokio::test]
-async fn agent_git_configuration_is_ignored_and_nested_business_files_survive() {
-    let (temp, artifacts) = fixture();
-    let first = key("write");
-    let workspace = artifacts.prepare_workspace(&first, &[]).unwrap();
-    fs::create_dir_all(workspace.join(".git/hooks")).unwrap();
-    let sentinel = temp.path().join("untrusted-hook-ran");
-    fs::write(
-        workspace.join(".git/config"),
-        format!(
-            "[core]\n hooksPath = {}\n",
-            workspace.join(".git/hooks").display()
-        ),
-    )
-    .unwrap();
-    fs::write(
-        workspace.join(".git/hooks/post-commit"),
-        format!("#!/bin/sh\ntouch {}\n", sentinel.display()),
-    )
-    .unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(
-            workspace.join(".git/hooks/post-commit"),
-            fs::Permissions::from_mode(0o755),
+    artifacts
+        .collect(
+            &std::collections::BTreeSet::from([revised.id.clone()]),
+            &[original.id],
         )
         .unwrap();
-    }
-    fs::create_dir_all(workspace.join("business/.git")).unwrap();
-    fs::write(
-        workspace.join("business/.git/reference.txt"),
-        "business content",
-    )
-    .unwrap();
-    fs::write(workspace.join(".gitignore"), "report.md\n").unwrap();
-    fs::write(workspace.join(".gitattributes"), "*.md filter=untrusted\n").unwrap();
-    fs::write(workspace.join("report.md"), "must be included").unwrap();
-    let commit = freeze_node(&artifacts, &first, &[]).await;
-    let files = artifacts.files_path(&commit).unwrap();
-    assert!(!files.join(".git").exists());
-    assert!(files.join("business/.git/reference.txt").is_file());
-    let mount = artifacts
-        .input_mounts(std::slice::from_ref(&commit), "run-1", "digest-1")
-        .unwrap()
-        .remove(0);
-    assert_eq!(
-        git(&mount.source, &["show", "HEAD:report.md"]),
-        "must be included"
-    );
-    assert_eq!(
-        git(&mount.source, &["show", "HEAD:business/.git/reference.txt"]),
-        "business content"
-    );
-    assert!(!sentinel.exists());
-}
-
-#[tokio::test]
-async fn git_projection_tampering_never_changes_authoritative_snapshot() {
-    for corruption in ["file", "head", "config", "hook", "manifest", "half"] {
-        let (_temp, artifacts) = fixture();
-        let first = key("write");
-        let workspace = artifacts.prepare_workspace(&first, &[]).unwrap();
-        fs::write(workspace.join("report.md"), "original").unwrap();
-        let commit = freeze_node(&artifacts, &first, &[]).await;
-        let source = artifacts
-            .input_mounts(std::slice::from_ref(&commit), "run-1", "digest-1")
-            .unwrap()
-            .remove(0)
-            .source;
-        match corruption {
-            "file" => fs::write(source.join("report.md"), "tampered").unwrap(),
-            "head" => fs::write(
-                source.join(".git/HEAD"),
-                "0000000000000000000000000000000000000000\n",
-            )
-            .unwrap(),
-            "config" => fs::write(
-                source.join(".git/config"),
-                "[include]\n path = /untrusted\n",
-            )
-            .unwrap(),
-            "hook" => {
-                fs::create_dir(source.join(".git/hooks")).unwrap();
-            }
-            "manifest" => {
-                fs::write(source.parent().unwrap().join("projection.json"), "{}").unwrap()
-            }
-            "half" => fs::remove_file(source.parent().unwrap().join("projection.json")).unwrap(),
-            _ => unreachable!(),
-        }
-        assert!(
-            artifacts
-                .input_mounts(std::slice::from_ref(&commit), "run-1", "digest-1")
-                .is_err(),
-            "{corruption}"
-        );
-        assert_eq!(
-            fs::read_to_string(artifacts.files_path(&commit).unwrap().join("report.md")).unwrap(),
-            "original"
-        );
-    }
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn workspace_seed_and_git_projection_symlinks_are_rejected() {
-    use std::os::unix::fs::symlink;
-    let (temp, artifacts) = fixture();
-    let first = key("write");
-    let workspace = artifacts.prepare_workspace(&first, &[]).unwrap();
-    fs::write(workspace.join("report.md"), "original").unwrap();
-    let commit = freeze_node(&artifacts, &first, &[]).await;
-    let source = artifacts
-        .input_mounts(std::slice::from_ref(&commit), "run-1", "digest-1")
-        .unwrap()
-        .remove(0)
-        .source;
-    fs::remove_file(source.join("report.md")).unwrap();
-    symlink(workspace.join("report.md"), source.join("report.md")).unwrap();
     assert!(
         artifacts
-            .input_mounts(std::slice::from_ref(&commit), "run-1", "digest-1")
-            .is_err()
+            .input_mounts(&[revised], "run-1", &record.graph_digest)
+            .is_ok()
     );
-
-    let second = InvocationKey {
-        invocation: 2,
-        ..first
-    };
-    let second_workspace = artifacts.workspace_path(&second).unwrap();
-    let outside = temp.path().join("outside");
-    fs::create_dir(&outside).unwrap();
-    symlink(outside, second_workspace).unwrap();
-    assert!(artifacts.prepare_workspace(&second, &[commit]).is_err());
 }

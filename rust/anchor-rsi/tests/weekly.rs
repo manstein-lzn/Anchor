@@ -1,6 +1,8 @@
-use anchor_rsi::business::{git_head, weekly};
+mod support;
+
+use anchor_rsi::business::{artifact_identity, weekly};
 use serde_json::{Value, json};
-use std::{fs, io::Read, path::Path, process::Command};
+use std::{fs, io::Read, path::Path};
 
 fn write(root: &Path, name: &str, value: &str) {
     let path = root.join(name);
@@ -8,27 +10,29 @@ fn write(root: &Path, name: &str, value: &str) {
     fs::write(path, value).unwrap();
 }
 
-fn git(root: &Path, arguments: &[&str]) {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(arguments)
-        .env("GIT_AUTHOR_NAME", "Fixture")
-        .env("GIT_AUTHOR_EMAIL", "fixture@example.invalid")
-        .env("GIT_COMMITTER_NAME", "Fixture")
-        .env("GIT_COMMITTER_EMAIL", "fixture@example.invalid")
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+fn review(artifact: &Value) -> Value {
+    json!({"decision":"publish","reviewed_artifact":artifact,"summary":"Approved after independent review",
+        "checks":{"facts":true,"business":true,"reasoning":true,"writing":true},"issues":[]})
 }
 
-fn review(commit: &str) -> Value {
-    json!({"decision":"publish","reviewed_commit":commit,"summary":"Approved after independent review",
-        "checks":{"facts":true,"business":true,"reasoning":true,"writing":true},"issues":[]})
+fn approve(inputs: &Path) {
+    support::artifact(
+        &inputs.join("write"),
+        "write",
+        3,
+        &["report.md", "sources.md", "assets"],
+    );
+    write(
+        inputs,
+        "gate/review.json",
+        &review(&artifact_identity(&inputs.join("write")).unwrap()).to_string(),
+    );
+    support::artifact(
+        &inputs.join("gate"),
+        "gate",
+        2,
+        &["review.json", "review.md"],
+    );
 }
 
 fn issue(status: &str) -> Value {
@@ -37,44 +41,49 @@ fn issue(status: &str) -> Value {
 }
 
 #[test]
-fn review_requires_current_commit_all_checks_and_carried_issue_resolutions() {
-    let mut current = review("current");
+fn review_requires_current_artifact_all_checks_and_carried_issue_resolutions() {
+    let artifact = json!({"artifact":{"id":"current","node_id":"write","invocation":1},"manifest_sha256":"current-manifest"});
+    let mut current = review(&artifact);
     assert_eq!(
-        weekly::validate_review(&current, &json!({}), "current").unwrap(),
+        weekly::validate_review(&current, &json!({}), &artifact).unwrap(),
         "publish"
     );
     assert!(
-        weekly::validate_review(&current, &json!({}), "new-draft")
-            .unwrap_err()
-            .contains("current manuscript")
+        weekly::validate_review(
+            &current,
+            &json!({}),
+            &json!({"artifact":{"id":"new-draft"},"manifest_sha256":"new-manifest"})
+        )
+        .unwrap_err()
+        .contains("current manuscript")
     );
     let previous = json!({"issues":[issue("open")]});
     assert!(
-        weekly::validate_review(&current, &previous, "current")
+        weekly::validate_review(&current, &previous, &artifact)
             .unwrap_err()
             .contains("carried forward")
     );
     current["issues"] = json!([issue("resolved")]);
-    assert!(weekly::validate_review(&current, &previous, "current").is_ok());
+    assert!(weekly::validate_review(&current, &previous, &artifact).is_ok());
     current["issues"][0]["resolution"] = json!("");
-    assert!(weekly::validate_review(&current, &previous, "current").is_err());
+    assert!(weekly::validate_review(&current, &previous, &artifact).is_err());
     current["issues"] = json!([issue("open")]);
-    assert!(weekly::validate_review(&current, &previous, "current").is_err());
+    assert!(weekly::validate_review(&current, &previous, &artifact).is_err());
     current["decision"] = json!("write");
     current["checks"]["writing"] = json!(false);
     assert_eq!(
-        weekly::validate_review(&current, &previous, "current").unwrap(),
+        weekly::validate_review(&current, &previous, &artifact).unwrap(),
         "write"
     );
     current["checks"]["facts"] = json!(false);
-    assert!(weekly::validate_review(&current, &previous, "current").is_err());
+    assert!(weekly::validate_review(&current, &previous, &artifact).is_err());
     current["decision"] = json!("understand");
     assert_eq!(
-        weekly::validate_review(&current, &previous, "current").unwrap(),
+        weekly::validate_review(&current, &previous, &artifact).unwrap(),
         "understand"
     );
     current["checks"]["facts"] = json!("true");
-    assert!(weekly::validate_review(&current, &previous, "current").is_err());
+    assert!(weekly::validate_review(&current, &previous, &artifact).is_err());
 }
 
 #[test]
@@ -102,7 +111,7 @@ fn svg_preserves_static_diagrams_and_refuses_active_or_external_content() {
 }
 
 #[test]
-fn report_assembly_rechecks_commit_links_and_svg_before_producing_output() {
+fn report_assembly_rechecks_artifact_links_and_svg_before_producing_output() {
     let temp = tempfile::tempdir().unwrap();
     let inputs = temp.path().join("in");
     let output = temp.path().join("output");
@@ -127,12 +136,16 @@ fn report_assembly_rechecks_commit_links_and_svg_before_producing_output() {
         "<svg><text>Detail</text></svg>",
     );
     let draft = inputs.join("write");
-    git(&draft, &["init", "--quiet"]);
-    git(&draft, &["add", "."]);
-    git(&draft, &["commit", "--quiet", "-m", "first draft"]);
-    let head = git_head(&draft).unwrap();
+    support::artifact(&draft, "write", 1, &["report.md", "sources.md", "assets"]);
+    let head = artifact_identity(&draft).unwrap();
     write(&inputs, "gate/review.json", &review(&head).to_string());
     write(&inputs, "gate/review.md", "Independent checks passed\n");
+    support::artifact(
+        &inputs.join("gate"),
+        "gate",
+        1,
+        &["review.json", "review.md"],
+    );
     fs::create_dir(&output).unwrap();
     weekly::assemble(&inputs, &output).unwrap();
     assert_eq!(
@@ -158,6 +171,43 @@ fn report_assembly_rechecks_commit_links_and_svg_before_producing_output() {
             Path::new("assets/stages.svg")
         ]
     );
+    drop(archive);
+    write(&output, "notes.txt", "Keep workspace notes\n");
+    fs::remove_file(draft.join("assets/nested/detail.svg")).unwrap();
+    write(
+        &inputs,
+        "write/assets/current.svg",
+        "<svg><text>Current</text></svg>",
+    );
+    approve(&inputs);
+    weekly::assemble(&inputs, &output).unwrap();
+    assert!(!output.join("assets/nested").exists());
+    assert_eq!(
+        fs::read(output.join("assets/current.svg")).unwrap(),
+        fs::read(draft.join("assets/current.svg")).unwrap()
+    );
+    assert_eq!(
+        fs::read_to_string(output.join("notes.txt")).unwrap(),
+        "Keep workspace notes\n"
+    );
+    let mut archive = tar::Archive::new(fs::File::open(output.join("assets.tar")).unwrap());
+    let paths = archive
+        .entries()
+        .unwrap()
+        .map(|entry| entry.unwrap().path().unwrap().into_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        paths,
+        [
+            Path::new("assets/current.svg"),
+            Path::new("assets/stages.svg")
+        ]
+    );
+    weekly::assemble(&inputs, &draft).unwrap();
+    assert_eq!(
+        fs::read_to_string(draft.join("assets/current.svg")).unwrap(),
+        "<svg><text>Current</text></svg>"
+    );
     #[cfg(unix)]
     {
         let unsafe_output = temp.path().join("unsafe-output");
@@ -177,14 +227,21 @@ fn report_assembly_rechecks_commit_links_and_svg_before_producing_output() {
             fs::read_to_string(temp.path().join("external.tar")).unwrap(),
             "must not overwrite"
         );
+        fs::remove_file(unsafe_output.join("assets.tar")).unwrap();
+        std::os::unix::fs::symlink(draft.join("assets"), unsafe_output.join("assets")).unwrap();
+        assert!(
+            weekly::assemble(&inputs, &unsafe_output)
+                .unwrap_err()
+                .contains("symlink")
+        );
+        assert!(draft.join("assets/current.svg").exists());
     }
     write(
         &inputs,
         "write/report.md",
         "# Revised report\n\n![项目阶段变化](assets/stages.svg)\n",
     );
-    git(&draft, &["add", "."]);
-    git(&draft, &["commit", "--quiet", "-m", "revised draft"]);
+    support::artifact(&draft, "write", 2, &["report.md", "sources.md", "assets"]);
     assert!(
         weekly::assemble(&inputs, &output)
             .unwrap_err()
@@ -193,24 +250,30 @@ fn report_assembly_rechecks_commit_links_and_svg_before_producing_output() {
     write(
         &inputs,
         "gate/review.json",
-        &review(&git_head(&draft).unwrap()).to_string(),
+        &review(&artifact_identity(&draft).unwrap()).to_string(),
     );
     write(
         &inputs,
         "write/assets/stages.svg",
         "<svg><script>unsafe</script></svg>",
     );
+    approve(&inputs);
     assert!(weekly::assemble(&inputs, &output).is_err());
     write(
         &inputs,
         "write/report.md",
         "# Report\n\n![wrong](assets/../../gate/review.md)\n",
     );
+    approve(&inputs);
     assert!(weekly::assemble(&inputs, &output).is_err());
     assert!(
         !fs::read_to_string(output.join("report.md"))
             .unwrap()
             .contains("Revised")
+    );
+    assert_eq!(
+        fs::read_to_string(output.join("assets/stages.svg")).unwrap(),
+        "<svg><text>阶段变化</text></svg>"
     );
 }
 
@@ -233,15 +296,19 @@ fn report_assembly_rejects_symlink_figures() {
     )
     .unwrap();
     let draft = inputs.join("write");
-    git(&draft, &["init", "--quiet"]);
-    git(&draft, &["add", "."]);
-    git(&draft, &["commit", "--quiet", "-m", "fixture"]);
+    support::artifact(&draft, "write", 1, &["report.md", "sources.md", "assets"]);
     write(
         &inputs,
         "gate/review.json",
-        &review(&git_head(&draft).unwrap()).to_string(),
+        &review(&artifact_identity(&draft).unwrap()).to_string(),
     );
     write(&inputs, "gate/review.md", "Approved");
+    support::artifact(
+        &inputs.join("gate"),
+        "gate",
+        1,
+        &["review.json", "review.md"],
+    );
     assert!(
         weekly::assemble(&inputs, &temp.path().join("output"))
             .unwrap_err()
@@ -283,12 +350,8 @@ fn collection_keeps_window_latest_generation_public_messages_and_limits() {
     write(&deepseek, "one/session.jsonl", &format!("{old}\n"));
     write(&deepseek, "one/session.v2.jsonl", &format!("{current}\n"));
     let output = temp.path().join("evidence");
-    let index = weekly::collect(
-        &[("codex".into(), codex_root), ("deepseek".into(), deepseek)],
-        &output,
-        Some("2026-10-08T09:00:00+08:00"),
-    )
-    .unwrap();
+    let roots = [("codex".into(), codex_root), ("deepseek".into(), deepseek)];
+    let index = weekly::collect(&roots, &output, Some("2026-10-08T09:00:00+08:00")).unwrap();
     assert_eq!(index["sources"]["codex"]["events_in_window"], 2);
     assert_eq!(index["sources"]["deepseek"]["files_scanned"], 1);
     assert_eq!(index["sources"]["deepseek"]["events_in_window"], 1);
@@ -311,6 +374,34 @@ fn collection_keeps_window_latest_generation_public_messages_and_limits() {
     ] {
         assert!(!all.contains(forbidden), "{forbidden}");
     }
+    write(&output, "notes.txt", "Keep workspace notes\n");
+    write(
+        &output,
+        "codex-manual.jsonl",
+        "Manually retained evidence\n",
+    );
+    let repeated = weekly::collect(&roots, &output, Some("2026-10-20T09:00:00+08:00")).unwrap();
+    assert_eq!(repeated["status"], "no_events");
+    assert!(repeated["sessions"].as_array().unwrap().is_empty());
+    for session in index["sessions"].as_array().unwrap() {
+        let filename = session["file"].as_str().unwrap();
+        assert!(!output.join(filename).exists());
+        assert!(
+            !output
+                .join(filename.replace(".jsonl", ".overview.jsonl"))
+                .exists()
+        );
+    }
+    for (name, expected) in [
+        ("notes.txt", "Keep workspace notes\n"),
+        ("codex-manual.jsonl", "Manually retained evidence\n"),
+    ] {
+        assert_eq!(fs::read_to_string(output.join(name)).unwrap(), expected);
+    }
+    assert_eq!(
+        serde_json::from_slice::<Value>(&fs::read(output.join("index.json")).unwrap()).unwrap(),
+        repeated
+    );
     assert!(
         weekly::collect(
             &[],

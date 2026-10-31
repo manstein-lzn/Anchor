@@ -2,6 +2,7 @@ use super::{tests::record, tests::write, *};
 use crate::assistant::TurnBinding;
 use anchor_runtime::graph::{CommitRef, NodeCompletion, RunResult};
 use serde_json::json;
+use std::path::PathBuf;
 
 fn key(record: &GraphRunRecord, invocation: u64) -> InvocationKey {
     InvocationKey {
@@ -131,8 +132,8 @@ fn cleanup_enumerates_frontier_results_and_uncommitted_bindings_without_crossing
 
     assert!(owned.iter().all(|path| !path.exists()));
     assert!(!work.join(&target.run_id).exists());
-    assert!(!own_artifact.exists());
-    assert!(!own_artifact.with_extension("json").exists());
+    assert!(own_artifact.exists());
+    assert!(own_artifact.with_extension("json").exists());
     assert_saved(&other_saved);
     assert_eq!(std::fs::read(foreign_artifact).unwrap(), b"foreign");
 }
@@ -217,12 +218,14 @@ fn partial_delete_keeps_binding_authority_until_cleanup_can_be_replayed() {
             "{blocked}"
         );
         assert!(binding_path(&data, &bound_key).exists(), "{blocked}");
-        assert!(
-            !data
-                .join("channel-inputs")
-                .join(format!("turn-{}", turn(9)))
-                .exists()
-        );
+        if blocked != "workspace" {
+            assert!(
+                !data
+                    .join("channel-inputs")
+                    .join(format!("turn-{}", turn(9)))
+                    .exists()
+            );
+        }
         assert_saved(&other_saved);
 
         if blocked == "workspace" {

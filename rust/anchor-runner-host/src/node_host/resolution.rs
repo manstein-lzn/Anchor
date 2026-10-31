@@ -21,8 +21,12 @@ impl NodeHostResolver for HostIoResolver {
         &self,
         request: &NodeExecutionRequest,
     ) -> Result<Option<NodeConversationHint>, String> {
-        self.conversation(&request.key)
-            .map(|conversation| conversation.map(|value| NodeConversationHint { key: value.key }))
+        self.conversation(&request.key).map(|conversation| {
+            conversation.map(|value| NodeConversationHint {
+                key: value.key,
+                cross_run: value.cross_run,
+            })
+        })
     }
 
     fn resolve_plugins(&self, ids: &[String]) -> Result<Vec<PluginBinding>, String> {
@@ -46,9 +50,7 @@ impl NodeHostResolver for HostIoResolver {
     }
 
     fn workspace(&self, request: &NodeExecutionRequest) -> Result<PathBuf, String> {
-        let workspace = self.prepare_node_workspace(&request.key, &request.input_commits)?;
-        self.seed_assistant_workspace(&request.key, &workspace)?;
-        Ok(workspace)
+        self.prepare_node_workspace(&request.key, &request.input_commits)
     }
 
     fn tools<'a>(&'a self, request: &'a NodeExecutionRequest) -> ToolResolution<'a> {

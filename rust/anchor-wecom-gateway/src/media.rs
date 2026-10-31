@@ -1,11 +1,12 @@
-//! Validated reply media for the WeCom bot long connection.
+//! Validated outbound media for the WeCom bot long connection.
 //!
 //! The platform silently ignores `stream.msg_item` on long connections, so a
 //! reply image is uploaded over the same connection
 //! (`aibot_upload_media_init`/`_chunk`/`_finish`) and then sent as its own
 //! `aibot_respond_msg`. The Host already validated the file it read from disk;
 //! this module re-checks shape, bounds and digest so the transport never
-//! uploads an unverified blob.
+//! uploads an unverified blob. Proactive files reuse that upload protocol and
+//! are sent with `aibot_send_msg` after the final upload acknowledgement.
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use cbc::cipher::{BlockDecryptMut as _, KeyIvInit as _, block_padding::NoPadding};
@@ -18,16 +19,17 @@ use std::time::Duration;
 use crate::{
     GatewayError, INBOUND_FETCH_TIMEOUT_SECS, MAX_IMAGE_BYTES, MAX_IMAGE_COUNT,
     MAX_IMAGE_TOTAL_BASE64, MAX_INBOUND_FILE_BYTES, MAX_INBOUND_FILES, MAX_INBOUND_TOTAL_BYTES,
-    MEDIA_CHUNK_BYTES,
+    MAX_OUTBOUND_FILE_BYTES, MEDIA_CHUNK_BYTES,
 };
 
-pub(crate) struct ImageItem {
+pub(crate) struct MediaItem {
+    pub(crate) kind: &'static str,
     pub(crate) name: String,
     pub(crate) bytes: Vec<u8>,
     pub(crate) md5: String,
 }
 
-impl ImageItem {
+impl MediaItem {
     pub(crate) fn chunk_count(&self) -> usize {
         self.bytes.len().div_ceil(MEDIA_CHUNK_BYTES).max(1)
     }
@@ -43,7 +45,7 @@ impl ImageItem {
 ///
 /// Exactly `[{"msgtype":"image","image":{"base64":…,"md5":…}}]` is accepted;
 /// every other shape is rejected instead of being forwarded to the platform.
-pub(crate) fn reply_images(value: Option<&Value>) -> Result<Vec<ImageItem>, GatewayError> {
+pub(crate) fn reply_images(value: Option<&Value>) -> Result<Vec<MediaItem>, GatewayError> {
     let Some(value) = value else {
         return Ok(Vec::new());
     };
@@ -107,7 +109,8 @@ pub(crate) fn reply_images(value: Option<&Value>) -> Result<Vec<ImageItem>, Gate
                 "reply image digest does not match its content",
             ));
         }
-        parsed.push(ImageItem {
+        parsed.push(MediaItem {
+            kind: "image",
             name: name.into(),
             bytes,
             md5: declared.into(),
@@ -118,7 +121,7 @@ pub(crate) fn reply_images(value: Option<&Value>) -> Result<Vec<ImageItem>, Gate
 
 /// Persist validated items in the same shape [`reply_images`] accepts, so a
 /// restarted gateway can resume an unsent reply image.
-pub(crate) fn encode_images(items: &[ImageItem]) -> Result<Option<String>, GatewayError> {
+pub(crate) fn encode_images(items: &[MediaItem]) -> Result<Option<String>, GatewayError> {
     if items.is_empty() {
         return Ok(None);
     }
@@ -142,7 +145,7 @@ pub(crate) fn encode_images(items: &[ImageItem]) -> Result<Option<String>, Gatew
 pub(crate) fn media_send_digest(
     sender_id: &str,
     conversation_id: &str,
-    item: &ImageItem,
+    item: &MediaItem,
 ) -> Result<String, GatewayError> {
     let bound = serde_json::to_vec(&serde_json::json!([
         sender_id,
@@ -151,6 +154,48 @@ pub(crate) fn media_send_digest(
     ]))
     .map_err(|_| GatewayError::Ledger)?;
     Ok(crate::protocol::digest(&bound))
+}
+
+/// A proactive file is handed over as bytes, never as an arbitrary Host path.
+pub(crate) fn outbound_file(
+    name: String,
+    encoded: &str,
+    declared_md5: &str,
+) -> Result<MediaItem, GatewayError> {
+    if name.trim().is_empty()
+        || name.len() > 256
+        || name
+            .chars()
+            .any(|ch| ch.is_control() || matches!(ch, '/' | '\\'))
+        || matches!(name.as_str(), "." | "..")
+    {
+        return Err(GatewayError::Invalid("invalid outbound filename"));
+    }
+    if encoded.len() > MAX_OUTBOUND_FILE_BYTES.div_ceil(3) * 4 {
+        return Err(GatewayError::Invalid(
+            "outbound file exceeds the size limit",
+        ));
+    }
+    let bytes = STANDARD
+        .decode(encoded)
+        .map_err(|_| GatewayError::Invalid("outbound file is not valid base64"))?;
+    if bytes.len() < 5 || bytes.len() > MAX_OUTBOUND_FILE_BYTES {
+        return Err(GatewayError::Invalid(
+            "outbound file size is outside the supported range",
+        ));
+    }
+    let md5 = format!("{:x}", <Md5 as md5::Digest>::digest(&bytes));
+    if md5 != declared_md5 {
+        return Err(GatewayError::Invalid(
+            "outbound file digest does not match its content",
+        ));
+    }
+    Ok(MediaItem {
+        kind: "file",
+        name,
+        bytes,
+        md5,
+    })
 }
 
 /// Whether a response object carries a field this transport cannot deliver.

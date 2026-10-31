@@ -168,13 +168,14 @@ fn responses_graph_agent_preserves_reasoning_and_authorized_completion_receipt()
             command("printf responses-artifact > evidence.txt; cat evidence.txt")
                 .with_reasoning(items[0].clone()),
             complete("verify")
+                .files(&["evidence.txt"])
                 .after("responses-artifact")
                 .with_reasoning(items[1].clone()),
         ],
     );
     let graph = json!({"entry":"worker",
         "agents":{"worker":{"model":"models.default.flash","instructions":"Use authorized tools to write evidence.txt, inspect the actual output, then final_result with route verify."}},
-        "ops":{"verify":{"run":"sh -c 'cat /in/worker/evidence.txt > verified.txt'"}},
+        "ops":{"verify":{"writes":["verified.txt"],"run":"sh -c 'cat /in/worker/evidence.txt > verified.txt'"}},
         "nodes":[{"id":"worker","agent":"worker"},{"id":"verify","op":"verify"}],
         "edges":[{"from":"worker","to":"verify"}]});
     let host = Host::new(&graph).default_runtime();

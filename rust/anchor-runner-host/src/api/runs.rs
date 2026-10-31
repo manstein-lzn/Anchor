@@ -44,6 +44,17 @@ pub(super) async fn trigger_as_owner(
     trigger
         .validate()
         .map_err(|message| error(StatusCode::BAD_REQUEST, message))?;
+    let workspace_bindings = body
+        .get("workspace_bindings")
+        .map(|value| serde_json::from_value(value.clone()))
+        .transpose()
+        .map_err(|failure: serde_json::Error| {
+            error(
+                StatusCode::BAD_REQUEST,
+                format!("invalid workspace_bindings: {failure}"),
+            )
+        })?
+        .unwrap_or_default();
     let path = graph_path(&state, requested)?;
     let graph_lease = state
         .application
@@ -62,6 +73,8 @@ pub(super) async fn trigger_as_owner(
                 trigger,
                 pilot: None,
                 oauth_owner: Some(oauth_owner),
+                workspace_bindings,
+                workspace_root: Some(state.workspace_root.clone()),
             },
             graph_lease,
         )

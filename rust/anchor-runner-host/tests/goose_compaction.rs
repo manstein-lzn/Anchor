@@ -53,7 +53,7 @@ fn graph() -> Value {
         "entry":"worker",
         "agents":{"worker":{"model":"models.worker","instructions":
             "Read the mounted Plugin instructions and workspace with authorized Anchor tools. After compaction or interruption, inspect current facts instead of repeating effects. Finish with final_result, route verify, and a newly observed receipt."}},
-        "ops":{"verify":{"run":
+        "ops":{"verify":{"writes":["verified.txt","verified-plugin.txt","verified-effects.txt"],"run":
             "sh -c 'set -eu; test \"$(cat /in/worker/effects.txt)\" = once; cat /in/worker/evidence.txt > verified.txt; cat /in/worker/plugin-after.txt > verified-plugin.txt; cat /in/worker/effects.txt > verified-effects.txt'"}},
         "nodes":[{"id":"worker","agent":"worker","plugins":[PLUGIN]},
                  {"id":"verify","op":"verify"}],
@@ -138,7 +138,7 @@ fn checkpoint(host: &Host, provider: &Provider, run: &str, label: &str) {
             "run":host.record(run),
             "fact":host.native_fact(run,"worker",1),
             "history":host.native_conversation(run,"worker",1),
-            "workspace":goose::file_inventory(&host.base.root.path().join("work").join(run))
+            "workspace":goose::file_inventory(&host.base.workspace(run, "worker"))
         }))
         .unwrap(),
     )
@@ -300,7 +300,7 @@ fn stale_completion(old_receipt: &str) -> Step {
     Step::tool(
         "final_result",
         json!({
-            "summary":"An old receipt must not complete this resumed invocation.",
+            "files":[],"summary":"An old receipt must not complete this resumed invocation.",
             "route":"verify","observed_receipt":old_receipt
         }),
     )
@@ -351,7 +351,7 @@ fn native_goose_entry_compaction_rereads_readonly_plugin_and_workspace_before_gr
         Step::tool(
             "final_result",
             json!({
-                "summary":"The previous receipt must not complete the resumed invocation.",
+                "files":[],"summary":"The previous receipt must not complete the resumed invocation.",
                 "route":"verify","observed_receipt":old_receipt
             }),
         )
@@ -364,7 +364,7 @@ fn native_goose_entry_compaction_rereads_readonly_plugin_and_workspace_before_gr
         )
         .after("compaction"),
         facts.reread().after("Plugin marker"),
-        complete("verify").after("plugin-workspace-reread"),
+        complete("verify").files(&["evidence.txt", "plugin-after.txt", "effects.txt"]).after("plugin-workspace-reread"),
     ]);
     resume(&server, &run);
     server.wait_status(&run, "completed");
@@ -460,7 +460,7 @@ fn native_goose_compacted_effect_survives_host_kill_and_is_inspected_without_rep
         command(&format!(
             "set -eu; test \"$(cat effects.txt)\" = once; cat {SKILL}; cat workspace.txt; test ! -e post-effects.txt; printf '%s' '{effect}' >> post-effects.txt; cat post-effects.txt; printf '\\npost-compaction-effect-written\\n'"
         )).expect_request_contains(&facts.summary),
-        complete("verify").after("post-compaction-effect-written").gated(&reply_gate),
+        complete("verify").files(&["evidence.txt", "plugin-after.txt", "effects.txt", "post-effects.txt"]).after("post-compaction-effect-written").gated(&reply_gate),
     ]);
     resume(&server, &run);
     reply_gate.wait_entered();
@@ -499,7 +499,7 @@ fn native_goose_compacted_effect_survives_host_kill_and_is_inspected_without_rep
         command(&format!(
             "set -eu; test \"$(cat effects.txt)\" = once; test \"$(cat post-effects.txt)\" = '{effect}'; cat {SKILL} > plugin-after.txt; if printf corrupt >> {SKILL} 2>/dev/null; then exit 95; fi; cat workspace.txt > evidence.txt; cat plugin-after.txt evidence.txt effects.txt post-effects.txt; printf '\\nplugin-workspace-reread\\n'"
         )).after("final_result.observed_receipt must match"),
-        complete("verify").after("plugin-workspace-reread"),
+        complete("verify").files(&["evidence.txt", "plugin-after.txt", "effects.txt", "post-effects.txt"]).after("plugin-workspace-reread"),
     ]);
     let restarted = host.serve(&provider);
     assert_eq!(
@@ -636,7 +636,9 @@ fn native_goose_cancelled_summarizer_stays_incomplete_then_resumes_from_plugin_a
         facts
             .reread()
             .after("final_result.observed_receipt must match"),
-        complete("verify").after("plugin-workspace-reread"),
+        complete("verify")
+            .files(&["evidence.txt", "plugin-after.txt", "effects.txt"])
+            .after("plugin-workspace-reread"),
     ]);
     resume(&restarted, &run);
     restarted.wait_status(&run, "completed");
@@ -695,7 +697,9 @@ fn native_goose_context_length_error_compacts_same_prompt_and_rereads_plugin_wit
                 .expect_request_contains(&facts.workspace),
             Step::summary(&facts.summary).expect_request_contains(&facts.workspace),
             facts.reread().expect_request_contains(&facts.summary),
-            complete("verify").after("plugin-workspace-reread"),
+            complete("verify")
+                .files(&["evidence.txt", "plugin-after.txt", "effects.txt"])
+                .after("plugin-workspace-reread"),
         ],
     );
     let host = Host::new(&graph())

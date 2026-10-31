@@ -1,9 +1,7 @@
-//! Trusted cross-Run inputs. Framework Session owns dialogue; this adapter
-//! exposes only same-node predecessor files and the existing native trace.
+//! Run/node native continuity and explicitly authorized cross-Run inputs.
+//! Framework Session owns dialogue and its recovery cursor.
 use super::*;
-use anchor_runtime::{
-    ReadOnlyInput, ToolDefinition, ToolError, ToolName, ToolPort, ToolResultContent,
-};
+use anchor_runtime::{ToolDefinition, ToolError, ToolName, ToolPort, ToolResultContent};
 use serde::Deserialize;
 use serde_json::Value;
 use std::{collections::BTreeSet, future::Future, sync::Arc};
@@ -12,6 +10,7 @@ pub(super) const HISTORY_TOOL: &str = "anchor_conversation_history";
 
 pub(super) struct Conversation {
     pub key: String,
+    pub cross_run: bool,
     previous: Vec<GraphRunRecord>,
 }
 
@@ -87,14 +86,17 @@ impl HostIoResolver {
         else {
             return Ok(None);
         };
-        let Some(binding) = &current.conversation else {
-            return Ok(None);
-        };
         if current.graph_digest != key.graph_digest {
             return Err("conversation invocation differs from admitted Graph".into());
         }
-        let hint = conversation_hint_for(&current, &key.node_id)
-            .expect("conversation binding checked above");
+        let hint = current.node_conversation_key(&key.node_id);
+        let Some(binding) = &current.conversation else {
+            return Ok(Some(Conversation {
+                key: hint,
+                cross_run: false,
+                previous: Vec::new(),
+            }));
+        };
         let graph = crate::run_metadata::graph_identity(&current.bundle_source)
             .map_err(|error| format!("conversation graph identity: {error:?}"))?
             .to_string_lossy()
@@ -151,58 +153,10 @@ impl HostIoResolver {
             previous.push(record);
         }
         Ok(Some(Conversation {
-            key: hint.key,
+            key: hint,
+            cross_run: true,
             previous,
         }))
-    }
-
-    pub(super) fn previous_mount(
-        &self,
-        key: &InvocationKey,
-        conversation: &Conversation,
-    ) -> Result<Option<ReadOnlyInput>, String> {
-        if key.invocation != 1 {
-            return Ok(None);
-        }
-        for prior in &conversation.previous {
-            let Some(invocation) = self
-                .conversation_invocations(prior, &key.node_id)?
-                .last()
-                .copied()
-            else {
-                continue;
-            };
-            let source = InvocationKey {
-                run_id: prior.run_id.clone(),
-                graph_digest: prior.graph_digest.clone(),
-                node_id: key.node_id.clone(),
-                invocation,
-            };
-            let committed = prior
-                .results
-                .get(&key.node_id)
-                .and_then(|results| {
-                    results
-                        .iter()
-                        .find(|result| result.key == source && result.interruption.is_none())
-                })
-                .map(|result| &result.commit);
-            if committed.is_none()
-                && !self
-                    .artifacts
-                    .workspace_path(&source)
-                    .map_err(|error| error.to_string())?
-                    .exists()
-            {
-                continue;
-            }
-            return self
-                .artifacts
-                .previous_input(key, &source, committed)
-                .map(Some)
-                .map_err(|error| error.to_string());
-        }
-        Ok(None)
     }
 
     pub(super) fn conversation_tools(
@@ -411,6 +365,54 @@ mod tests {
     }
 
     #[test]
+    fn unbound_runs_keep_node_history_without_sharing_other_runs() {
+        let root = tempfile::tempdir().unwrap();
+        let resolver = resolver(root.path());
+        let first = admit(&resolver, "first", "alice", None);
+        let second = admit(&resolver, "second", "alice", None);
+        for key in [&first, &second] {
+            let mut current = metadata::load(root.path(), &key.run_id).unwrap().unwrap();
+            current.conversation = None;
+            metadata::save(root.path(), &current).unwrap();
+        }
+        let next = InvocationKey {
+            invocation: 3,
+            ..first.clone()
+        };
+        let conversation = resolver.conversation(&first).unwrap().unwrap();
+        assert!(!conversation.cross_run);
+        assert_eq!(
+            conversation.key,
+            resolver.conversation(&next).unwrap().unwrap().key
+        );
+        assert_ne!(
+            conversation.key,
+            resolver.conversation(&second).unwrap().unwrap().key
+        );
+        assert_eq!(
+            resolver.conversation_predecessors(&next).unwrap(),
+            vec![
+                InvocationKey {
+                    invocation: 2,
+                    ..first.clone()
+                },
+                first.clone()
+            ]
+        );
+        assert!(
+            resolver
+                .conversation_predecessors(&second)
+                .unwrap()
+                .is_empty()
+        );
+        let changed_graph = InvocationKey {
+            graph_digest: "another-graph".into(),
+            ..first
+        };
+        assert!(resolver.conversation(&changed_graph).is_err());
+    }
+
+    #[test]
     fn only_pending_session_calls_include_settled_successors_for_native_resume() {
         use crate::run_metadata::{GraphCallSource, SessionCall, SessionContext};
         let root = tempfile::tempdir().unwrap();
@@ -568,101 +570,6 @@ mod tests {
         assert_eq!(
             resolver.conversation_predecessors(&third).unwrap(),
             vec![first]
-        );
-    }
-
-    #[test]
-    fn previous_uses_nearest_available_unfinished_node_once() {
-        let root = tempfile::tempdir().unwrap();
-        let resolver = resolver(root.path());
-        let prior = admit(&resolver, "prior", "alice", None);
-        admit(&resolver, "empty", "alice", Some("prior"));
-        let current = admit(&resolver, "current", "alice", Some("empty"));
-        let workspace = resolver.artifacts.workspace_path(&prior).unwrap();
-        std::fs::create_dir_all(&workspace).unwrap();
-        std::fs::write(workspace.join("draft.txt"), "unfinished").unwrap();
-        let conversation = resolver.conversation(&current).unwrap().unwrap();
-        let mount = resolver
-            .previous_mount(&current, &conversation)
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            std::fs::read_to_string(mount.source.join("draft.txt")).unwrap(),
-            "unfinished"
-        );
-        assert!(
-            resolver
-                .previous_mount(
-                    &InvocationKey {
-                        invocation: 2,
-                        ..current
-                    },
-                    &conversation
-                )
-                .unwrap()
-                .is_none()
-        );
-    }
-
-    #[tokio::test]
-    async fn interruption_control_artifact_does_not_replace_the_predecessor_draft() {
-        use anchor_runtime::graph::{ArtifactFreezeContext, ArtifactKind, ArtifactPort};
-        let root = tempfile::tempdir().unwrap();
-        let resolver = resolver(root.path());
-        let prior = admit(&resolver, "prior", "alice", None);
-        resolver
-            .artifacts
-            .bind_node_workspace(&prior.run_id, &prior.graph_digest, &prior.node_id)
-            .unwrap();
-        let workspace = resolver.artifacts.prepare_workspace(&prior, &[]).unwrap();
-        std::fs::write(workspace.join("draft.txt"), "unfinished draft retained").unwrap();
-        resolver
-            .artifacts
-            .retain_interrupted_workspace(&prior)
-            .unwrap();
-        let completion = NodeCompletion {
-            submission: "input superseded".into(),
-            route: None,
-            model_requests: 0,
-            output: json!({"interrupted":true,"reason":"input superseded"}),
-        };
-        let commit = resolver
-            .artifacts
-            .freeze_with_context(
-                &prior,
-                &completion,
-                &ArtifactFreezeContext {
-                    kind: ArtifactKind::Interruption,
-                    input_commits: Vec::new(),
-                },
-            )
-            .await
-            .unwrap();
-        let application = test_runs::application(resolver.state_root());
-        fixtures::control(&application, &prior.run_id, "resume", "resumed");
-        fixtures::interrupted(
-            &application,
-            &prior.run_id,
-            "agent",
-            completion,
-            Some(commit),
-            "input superseded",
-        );
-        drop(application);
-        let current = admit(&resolver, "current", "alice", Some("prior"));
-        let conversation = resolver.conversation(&current).unwrap().unwrap();
-        let mount = resolver
-            .previous_mount(&current, &conversation)
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            std::fs::read(mount.source.join("draft.txt")).unwrap(),
-            b"unfinished draft retained"
-        );
-        assert!(!mount.source.join("interruption.json").exists());
-        assert_eq!(
-            std::fs::read(workspace.join("draft.txt")).unwrap(),
-            b"unfinished draft retained"
         );
     }
 

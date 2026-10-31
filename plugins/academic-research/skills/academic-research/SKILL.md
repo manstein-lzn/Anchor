@@ -4,18 +4,11 @@
 
 ## 工具入口
 
-文献工具是 `/tools/scholarly/run`。先用 `--help` 或子命令的 `--help` 查询参数；命令在当前节点工作区执行，是否可联网由节点权限决定。
+通过工具发现入口列出本 Plugin 的 scholarly MCP 工具：`scholarly_sources`、`scholarly_search`、`scholarly_search_many`、`scholarly_read`、`scholarly_read_many`、`scholarly_citations`。按工具 schema 传参数，例如检索用 `query` 和 `source`，阅读用 `url`，引用链用 `identifier` 和 `direction`。
 
-```bash
-/tools/scholarly/run sources
-/tools/scholarly/run search --query "retrieval augmented generation evaluation" --source crossref
-/tools/scholarly/run read --url "https://arxiv.org/pdf/2005.11401"
-/tools/scholarly/run citations --identifier 2005.11401 --direction cited_by
-```
+支持 Crossref、arXiv、OpenAlex 检索，以及批量检索和阅读。工具返回 JSON；需要保留的原始材料写到 `/workspace`，交付时显式列出文件。工具错误不是“未发现证据”。遇到限流或来源不可用时换来源、调整检索策略，或诚实报告限制。
 
-支持 Crossref、arXiv、OpenAlex 检索，以及 `search-many`、`read-many` 批量操作。工具向标准输出返回 JSON；需要保留时重定向到 `/workspace` 中的文件。非零退出表示调用失败，不是“未发现证据”。遇到限流或来源不可用时换来源、调整检索策略，或诚实报告限制。
-
-长文返回 `next_offset` 或 `next_page_start` 时，分别传给 `--offset` 或 `--page-start` 继续读取。摘要、正文片段和已阅读全文是不同状态，不得混淆。
+长文返回 `next_offset` 或 `next_page_start` 时，分别传给 `offset` 或 `page_start` 继续读取。摘要、正文片段和已阅读全文是不同状态，不得混淆。
 
 ## 阅读与判断
 

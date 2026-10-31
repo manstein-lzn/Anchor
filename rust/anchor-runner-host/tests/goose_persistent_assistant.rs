@@ -141,7 +141,10 @@ fn group_event(user: &str, identity: &str, group: &str, text: &str) -> Value {
 }
 
 fn finish(summary: &'static str) -> Step {
-    Step::tool("final_result", json!({"summary":summary,"route":"reply"}))
+    Step::tool(
+        "final_result",
+        json!({"files":[],"summary":summary,"route":"reply"}),
+    )
 }
 
 fn submit(server: &HttpHost, body: &Value, expected: &str) -> Value {
@@ -214,26 +217,24 @@ fn waiting(host: &Host, run: &str, replies: usize) -> Value {
 }
 
 fn workspace(host: &Host, run: &str) -> PathBuf {
-    host.base
-        .root
-        .path()
-        .join("work")
-        .join(run)
-        .join("nodes")
-        .join(format!("{:x}", Sha256::digest(b"assistant")))
+    host.base.workspace(run, "assistant")
 }
 
 fn artifact(host: &Host, saved: &Value, invocation: usize) -> PathBuf {
     let commit = &saved["results"]["assistant"][invocation - 1]["commit"];
     let identity = commit["id"].as_str().unwrap();
-    assert!(identity.starts_with("fs2-"), "{commit}");
+    assert_eq!(commit["node_id"], "assistant", "{commit}");
     host.base.root.path().join("state/artifacts").join(identity)
 }
 
 fn snapshot_inventory(artifact: &Path) -> Value {
+    let manifest = fixture::read_json(artifact.join("manifest.json"));
+    for name in manifest["files"].as_object().unwrap().keys() {
+        fixture::artifact_file(artifact, name);
+    }
     json!({
         "manifest_sha256":goose::digest(&artifact.join("manifest.json")),
-        "files":goose::file_inventory(&artifact.join("files"))
+        "files":manifest["files"]
     })
 }
 
@@ -532,16 +533,16 @@ fn group_members_share_native_history_while_private_and_other_groups_are_isolate
 
 #[test]
 #[ignore = "requires pinned real Goose binary and local Bubblewrap"]
-fn two_turns_reuse_run_workspace_and_native_session_without_mutating_fs2_snapshots() {
+fn two_turns_reuse_run_workspace_and_native_session_without_mutating_delivered_versions() {
     let provider = Provider::new(
         "goose-persistent-assistant-two-turns",
         vec![
             command("set -eu; test ! -e state.txt; pwd > cwd.txt; printf first > state.txt; printf first > first.txt; printf turn-one-written")
                 .expect_request_contains("persistent-first-input"),
-            finish("persistent-first-reply").after("turn-one-written"),
+            finish("persistent-first-reply").files(&["state.txt"]).after("turn-one-written"),
             command("set -eu; test \"$(cat state.txt)\" = first; test \"$(cat first.txt)\" = first; test \"$(pwd)\" = \"$(cat cwd.txt)\"; printf second > state.txt; printf second > second.txt; printf turn-two-updated")
                 .expect_request_contains("persistent-second-input"),
-            finish("persistent-second-reply").after("turn-two-updated"),
+            finish("persistent-second-reply").files(&["state.txt"]).after("turn-two-updated"),
         ],
     );
     let host = host();
@@ -560,7 +561,7 @@ fn two_turns_reuse_run_workspace_and_native_session_without_mutating_fs2_snapsho
     let first_inventory = snapshot_inventory(&first_artifact);
     assert_eq!(fs::read(directory.join("state.txt")).unwrap(), b"first");
     assert_eq!(
-        fs::read(first_artifact.join("files/state.txt")).unwrap(),
+        fixture::artifact_file(&first_artifact, "state.txt"),
         b"first"
     );
     let first_native = native_round(&host, &provider, run, 1);
@@ -589,7 +590,7 @@ fn two_turns_reuse_run_workspace_and_native_session_without_mutating_fs2_snapsho
     let second_artifact = artifact(&host, &second_saved, 2);
     assert_ne!(first_artifact, second_artifact);
     assert_eq!(
-        fs::read(second_artifact.join("files/state.txt")).unwrap(),
+        fixture::artifact_file(&second_artifact, "state.txt"),
         b"second"
     );
     assert_eq!(snapshot_inventory(&first_artifact), first_inventory);
@@ -644,7 +645,7 @@ fn new_input_interrupts_gated_execution_suppresses_late_reply_and_retains_uncomm
             finish("must-not-deliver-late-old-reply").after("old-draft-ready").gated(&old_gate),
             command("set -eu; test \"$(cat draft.txt)\" = uncommitted-draft; test ! -e resumed.txt; printf inspected > resumed.txt; printf retained-draft-inspected")
                 .expect_request_contains("persistent-replacement-input").gated(&new_gate),
-            finish("replacement-reply-after-inspection").after("retained-draft-inspected"),
+            finish("replacement-reply-after-inspection").files(&["draft.txt", "resumed.txt"]).after("retained-draft-inspected"),
         ],
     );
     let host = host();
@@ -738,11 +739,11 @@ fn new_input_interrupts_gated_execution_suppresses_late_reply_and_retains_uncomm
     );
     let committed = artifact(&host, &saved, 2);
     assert_eq!(
-        fs::read(committed.join("files/draft.txt")).unwrap(),
+        fixture::artifact_file(&committed, "draft.txt"),
         b"uncommitted-draft"
     );
     assert_eq!(
-        fs::read(committed.join("files/resumed.txt")).unwrap(),
+        fixture::artifact_file(&committed, "resumed.txt"),
         b"inspected"
     );
     assert!(
@@ -781,8 +782,8 @@ fn concurrent_users_keep_separate_runs_workspaces_and_native_histories() {
                 .expect_request_contains("alice-private-first-input").gated(&alice_gate),
             command("set -eu; test ! -e owner.txt; printf bob > owner.txt; printf bob-first-workspace")
                 .expect_request_contains("bob-private-first-input").gated(&bob_gate),
-            finish("alice-private-first-reply").after("alice-first-workspace"),
-            finish("bob-private-first-reply").after("bob-first-workspace"),
+            finish("alice-private-first-reply").files(&["owner.txt"]).after("alice-first-workspace"),
+            finish("bob-private-first-reply").files(&["owner.txt"]).after("bob-first-workspace"),
             command("set -eu; test \"$(cat owner.txt)\" = alice; printf continued > continued.txt; printf alice-workspace-continued")
                 .expect_request_contains("alice-private-followup-input"),
             finish("alice-private-followup-reply").after("alice-workspace-continued"),
@@ -1015,7 +1016,9 @@ fn host_restart_requires_explicit_resume_when_automatic_recovery_is_disabled() {
         vec![
             command("set -eu; printf restart-seed > restart.txt; printf restart-seed-written")
                 .expect_request_contains("persistent-restart-first-input"),
-            finish("persistent-restart-first-reply").after("restart-seed-written"),
+            finish("persistent-restart-first-reply")
+                .files(&["restart.txt"])
+                .after("restart-seed-written"),
         ],
     );
     let host = host_without_auto_resume();
@@ -1230,7 +1233,7 @@ fn host_restart_recovers_only_the_canonical_account_and_preserves_legacy_history
         vec![
             command("set -eu; printf canonical-account-seed > account.txt; printf canonical-account-seed-written")
                 .expect_request_contains("persistent-account-first-input"),
-            finish("persistent-account-first-reply").after("canonical-account-seed-written"),
+            finish("persistent-account-first-reply").files(&["account.txt"]).after("canonical-account-seed-written"),
             command("set -eu; test \"$(cat account.txt)\" = canonical-account-seed; printf continued > continued.txt; printf canonical-account-workspace-inherited")
                 .expect_request_contains("persistent-account-second-input"),
             finish("persistent-account-second-reply").after("canonical-account-workspace-inherited"),
@@ -1495,7 +1498,9 @@ fn host_restart_automatically_resumes_the_instance_with_its_workspace_and_sessio
                 "set -eu; printf auto-resume-seed > inherited.txt; printf auto-resume-seed-written",
             )
             .expect_request_contains("persistent-auto-resume-first-input"),
-            finish("persistent-auto-resume-first-reply").after("auto-resume-seed-written"),
+            finish("persistent-auto-resume-first-reply")
+                .files(&["inherited.txt"])
+                .after("auto-resume-seed-written"),
         ],
     );
     let host = host();
@@ -1769,7 +1774,9 @@ fn reply_images_are_bound_to_exact_turn_receipts_and_not_reused_by_text_only_tur
                 json!({"path":"/workspace/outgoing.png"}),
             )
             .after("red-image-created"),
-            finish("persistent-red-reply").after("attached"),
+            finish("persistent-red-reply")
+                .files(&["outgoing.png"])
+                .after("attached"),
             command("set -eu; test -f outgoing.png; printf red-not-reattached")
                 .expect_request_contains("persistent-after-red-input"),
             finish("persistent-after-red-reply").after("red-not-reattached"),
@@ -1779,7 +1786,9 @@ fn reply_images_are_bound_to_exact_turn_receipts_and_not_reused_by_text_only_tur
                 json!({"path":"/workspace/outgoing.png"}),
             )
             .after("blue-image-created"),
-            finish("persistent-blue-reply").after("attached"),
+            finish("persistent-blue-reply")
+                .files(&["outgoing.png"])
+                .after("attached"),
             command("set -eu; test -f outgoing.png; printf blue-not-reattached")
                 .expect_request_contains("persistent-after-blue-input"),
             finish("persistent-after-blue-reply").after("blue-not-reattached"),
@@ -1853,13 +1862,13 @@ fn reply_images_are_bound_to_exact_turn_receipts_and_not_reused_by_text_only_tur
     let saved = waiting(&host, run, 4);
     assert_eq!(runs(&host).len(), 1);
     assert_eq!(
-        fs::read(artifact(&host, &saved, 1).join("files/outgoing.png")).unwrap(),
+        fixture::artifact_file(&artifact(&host, &saved, 1), "outgoing.png"),
         STANDARD
             .decode(red["data_base64"].as_str().unwrap())
             .unwrap()
     );
     assert_eq!(
-        fs::read(artifact(&host, &saved, 3).join("files/outgoing.png")).unwrap(),
+        fixture::artifact_file(&artifact(&host, &saved, 3), "outgoing.png"),
         STANDARD
             .decode(blue["data_base64"].as_str().unwrap())
             .unwrap()
@@ -2032,11 +2041,11 @@ fn interrupted_file_is_readonly_in_pending_scope_until_replacement_reply_is_conf
 
 #[test]
 #[ignore = "requires pinned real Goose binary and local Bubblewrap"]
-fn retired_instance_rejects_resume_and_new_instance_seeds_workspace_and_native_session_once() {
+fn retired_instance_rejects_resume_and_new_instance_binds_workspace_and_native_session_once() {
     let provider = Provider::new("goose-persistent-assistant-retire-handoff", vec![
         command("set -eu; printf committed-once > retirement-seed.txt; printf retirement-seed-written")
             .expect_request_contains("persistent-retirement-first-input"),
-        finish("persistent-retirement-first-reply").after("retirement-seed-written"),
+        finish("persistent-retirement-first-reply").files(&["retirement-seed.txt"]).after("retirement-seed-written"),
         command("set -eu; test \"$(cat retirement-seed.txt)\" = committed-once; printf updated > retirement-seed.txt; printf handoff-inspected > new-instance.txt; printf retired-workspace-seed-inspected")
             .expect_request_contains("persistent-retirement-new-instance-input"),
         finish("persistent-retirement-new-instance-reply").after("retired-workspace-seed-inspected"),
@@ -2104,7 +2113,13 @@ fn retired_instance_rejects_resume_and_new_instance_seeds_workspace_and_native_s
         new_native["conversation_scope"],
         old_native["conversation_scope"]
     );
-    assert_ne!(workspace(&host, run), workspace(&host, old_run));
+    assert_eq!(workspace(&host, run), workspace(&host, old_run));
+    let inherited = fs::metadata(workspace(&host, run)).unwrap();
+    let original = fs::metadata(workspace(&host, old_run)).unwrap();
+    assert_eq!(
+        (inherited.dev(), inherited.ino()),
+        (original.dev(), original.ino())
+    );
     let metadata = fixture::read_json(
         host.base
             .root
@@ -2190,13 +2205,13 @@ fn attachments_are_readonly_and_turn_scoped_while_native_history_keeps_distinct_
         vec![
             command("set -eu; test \"$(cat /in/channel/notes.txt)\" = first-turn-attachment; test -f /in/channel/first.png; test ! -e /in/channel/second.png; if printf forbidden > /in/channel/notes.txt; then exit 91; fi; if printf forbidden > /in/channel/first.png; then exit 92; fi; cat /in/channel/notes.txt > saved-note.txt; printf first-image-checked")
                 .expect_request_contains("persistent-first-image-input"),
-            finish("persistent-first-image-reply").after("first-image-checked"),
+            finish("persistent-first-image-reply").files(&["saved-note.txt"]).after("first-image-checked"),
             command("set -eu; test ! -e /in/channel/notes.txt; test ! -e /in/channel/first.png; test ! -e /in/channel/second.png; test \"$(cat saved-note.txt)\" = first-turn-attachment; printf text-turn-no-attachments")
                 .expect_request_contains("persistent-text-only-input"),
             finish("persistent-text-only-reply").after("text-turn-no-attachments"),
             command("set -eu; test \"$(cat /in/channel/notes.txt)\" = second-turn-attachment; test ! -e /in/channel/first.png; test -f /in/channel/second.png; test \"$(cat saved-note.txt)\" = first-turn-attachment; if printf forbidden > /in/channel/notes.txt; then exit 93; fi; if printf forbidden > /in/channel/second.png; then exit 94; fi; cat /in/channel/notes.txt > second-note.txt; printf second-image-checked")
                 .expect_request_contains("persistent-second-image-input"),
-            finish("persistent-second-image-reply").after("second-image-checked"),
+            finish("persistent-second-image-reply").files(&["saved-note.txt", "second-note.txt"]).after("second-image-checked"),
         ],
         "gpt-4o",
     );
@@ -2273,11 +2288,11 @@ fn attachments_are_readonly_and_turn_scoped_while_native_history_keeps_distinct_
     assert_eq!(images, vec![first_url, second_url]);
     let committed = artifact(&host, &saved, 3);
     assert_eq!(
-        fs::read(committed.join("files/saved-note.txt")).unwrap(),
+        fixture::artifact_file(&committed, "saved-note.txt"),
         b"first-turn-attachment"
     );
     assert_eq!(
-        fs::read(committed.join("files/second-note.txt")).unwrap(),
+        fixture::artifact_file(&committed, "second-note.txt"),
         b"second-turn-attachment"
     );
     assert_eq!(snapshot_inventory(&first_artifact), first_inventory);

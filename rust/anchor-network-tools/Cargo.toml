@@ -6,6 +6,7 @@ license.workspace = true
 description = "Native HTTP tools for the Anchor task networking Plugin"
 
 [dependencies]
+anchor-workspace-files = { path = "../anchor-workspace-files" }
 rmcp = { workspace = true, features = ["server", "transport-io"] }
 reqwest = { version = "=0.12.28", default-features = false, features = ["rustls-tls"] }
 serde = { workspace = true }

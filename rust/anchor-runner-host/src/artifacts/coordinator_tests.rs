@@ -32,7 +32,9 @@ impl NodeExecutionPort for Nodes<'_> {
                 &request.key.run_id,
                 &request.key.graph_digest,
             )?;
-            let workspace = self.0.workspace_path(&request.key)?;
+            let workspace = self
+                .0
+                .prepare_workspace(&request.key, &request.input_commits)?;
             fs::create_dir_all(&workspace)?;
             if request.key.node_id == "downstream" {
                 for node in ["producer", "left1", "left2", "right"] {
@@ -66,7 +68,7 @@ impl NodeExecutionPort for Nodes<'_> {
                 submission: request.key.node_id.clone(),
                 route: None,
                 model_requests: 0,
-                output: json!({"node":request.key.node_id}),
+                output: json!({"node":request.key.node_id,"files":[format!("{}.txt", request.key.node_id)]}),
             }))
         })
     }

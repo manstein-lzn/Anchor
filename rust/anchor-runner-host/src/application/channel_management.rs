@@ -90,8 +90,9 @@ pub(crate) struct ChannelPlan {
 
 /// The single rule for "this Graph is a bot Graph": a persistent assistant
 /// whose Agent node mounts a channel Plugin. `None` for any other Graph, which
-/// may still mount the same Plugin for its application tools (R1). More than
-/// one channel Plugin on the assistant is refused (R2).
+/// may mount the same Plugin for application tools and explicitly addressed
+/// notifications (R1). More than one channel Plugin on the assistant is
+/// refused (R2).
 pub(crate) fn channel_plan(
     snapshot: &GraphSnapshot,
     library: &Path,

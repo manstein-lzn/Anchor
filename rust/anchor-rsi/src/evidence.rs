@@ -2,6 +2,11 @@ use crate::{
     ecosystem::{Dependency, discover},
     redact,
 };
+use anchor_kernel::{HistoryReader, Outcome, Phase, Waiter};
+use anchor_runtime::{
+    artifact::store::ArtifactStoreReader,
+    graph::{GraphRunRecord, validator},
+};
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -31,6 +36,7 @@ pub const LIMITATIONS: &[&str] = &[
     "Line locators refer to frozen projections; JSON formatting and redaction can change original line positions.",
     "Files above 8 MiB, binary/non-UTF8 files, symlinks and credential-named files are excluded with records.",
     "Run evidence contains mechanical metadata only; no prompts, messages, traces, checkpoints or reasoning.",
+    "Kernel task cursor and recovery details are not collected in Run projections; omitted fields do not mean zero activity.",
     "Optional roots and unavailable timestamps are explicitly reported; missing time is not counted as recent activity.",
 ];
 
@@ -143,10 +149,7 @@ impl Evidence {
         result.walk(&config.source, "code", false)?;
         result.source_changes(&config.source)?;
         result.schedules(config.rust_state.as_ref().unwrap_or(&config.data))?;
-        // Deployment graph definitions live in the bundle catalog. The workspace
-        // layout keeps them only in the legacy workspace-per-graph form, so a
-        // workspace without `runs/` is the current per-invocation layout and is
-        // not reported as a missing definition.
+        // Deployment graph definitions live in the bundle catalog.
         let mut deployment_graphs = 0usize;
         let catalog = config.data.join("catalog");
         if catalog.is_dir() {
@@ -157,31 +160,6 @@ impl Evidence {
                     deployment_graphs += 1;
                 }
             }
-        }
-        let workspaces = config.data.join("workspaces");
-        if workspaces.is_dir() {
-            for directory in sorted_dirs(&workspaces)? {
-                // A workspace either declares its own graph definition (legacy
-                // workspace-per-graph layout) or holds per-invocation directories.
-                let definition = directory.join("graph.json");
-                if definition.is_file() {
-                    result.file(&definition, &config.data, "graphs")?;
-                    deployment_graphs += 1;
-                }
-                let runs = directory.join("runs");
-                if !runs.is_dir() {
-                    continue;
-                }
-                for run in sorted_dirs(&runs)? {
-                    result.run(
-                        &run.join("run.json"),
-                        &config.data,
-                        directory.file_name().unwrap().to_string_lossy().as_ref(),
-                    )?;
-                }
-            }
-        } else {
-            result.issue("graphs/runs", "workspace directory is absent");
         }
         if deployment_graphs == 0 {
             result.issue("graphs", "no deployment graph definition found");
@@ -197,19 +175,7 @@ impl Evidence {
         if let Some(root) = config.rust_state {
             safe_path(&root)?;
             if root.is_dir() {
-                let runs = root.join("runs");
-                if runs.is_dir() {
-                    safe_path(&runs)?;
-                    for entry in fs::read_dir(&runs).map_err(|e| e.to_string())? {
-                        let path = entry.map_err(|e| e.to_string())?.path();
-                        if path.extension().is_some_and(|e| e == "json") {
-                            result.run(&path, &root, "rust-native")?;
-                            result.published_report(&path, &root)?;
-                        }
-                    }
-                } else {
-                    result.issue("runs", "optional Rust state has no runs directory");
-                }
+                result.kernel_runs(&root)?;
             } else {
                 result.issue("runs", "configured optional Rust state root is missing");
             }
@@ -355,107 +321,73 @@ impl Evidence {
         )
     }
 
-    fn published_report(&mut self, path: &Path, root: &Path) -> Result<(), String> {
-        let raw: Value = match fs::read(path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        {
-            Some(value) => value,
-            None => return Ok(()),
+    fn published_report(&mut self, record: &GraphRunRecord, root: &Path) {
+        let Some(result) = record.results.get("publish").and_then(|items| items.last()) else {
+            return;
         };
-        if raw["status"] != "completed" {
-            return Ok(());
-        }
-        let Some(result) = raw
-            .pointer("/results/publish")
-            .and_then(Value::as_array)
-            .and_then(|items| items.last())
-        else {
-            return Ok(());
-        };
-        let commit = &result["commit"];
-        let Some(identity) = commit["id"].as_str() else {
-            self.issue(
-                "previous",
-                "published result has no native artifact identity",
-            );
-            return Ok(());
-        };
-        let check = (|| -> Result<Vec<(String, String)>, String> {
-            let key = &result["key"];
-            let run = key["run_id"]
-                .as_str()
-                .ok_or("missing published run identity")?;
-            let graph = key["graph_digest"]
-                .as_str()
-                .ok_or("missing published graph identity")?;
-            let invocation = key["invocation"]
-                .as_u64()
-                .ok_or("missing publish invocation")?;
-            let durable = format!("{run}:{graph}:publish:{invocation}");
-            let hash = format!("{:x}", Sha256::digest(durable.as_bytes()));
-            if ![format!("fs1-{hash}"), format!("fs2-{hash}")].contains(&identity.to_owned())
-                || commit["node_id"] != "publish"
-                || commit["invocation"] != invocation
-                || key["node_id"] != "publish"
-                || raw["run_id"] != run
-                || raw["graph_digest"] != graph
+        let check = (|| -> Result<(String, Vec<(String, String)>), String> {
+            let commit = &result.commit;
+            let key = &result.key;
+            if commit.node_id != "publish"
+                || commit.invocation != key.invocation
+                || key.node_id != "publish"
+                || record.run_id != key.run_id
+                || record.graph_digest != key.graph_digest
             {
-                return Err("published artifact identity differs from its Run".into());
+                return Err("published Artifact identity differs from its Run".into());
             }
-            let artifact = root.join("artifacts").join(identity);
-            let manifest = crate::business::object(&artifact.join("manifest.json"))?;
-            if manifest["key"] != *key {
-                return Err("published manifest differs from recorded invocation".into());
-            }
-            let files = manifest["files"]
-                .as_object()
-                .ok_or("published manifest has no file inventory")?;
-            if !files.contains_key("evolution.json") {
-                return Ok(Vec::new());
+            let artifact_root = root.join("artifacts");
+            let store =
+                ArtifactStoreReader::open(&artifact_root).map_err(|error| error.to_string())?;
+            let view = store.read_view(commit).map_err(|error| error.to_string())?;
+            if !view.descriptor.files.contains_key("evolution.json") {
+                return Ok((commit.id.clone(), Vec::new()));
             }
             let mut output = Vec::new();
             for name in ["evolution.json", "rsi-report.md", "sources.md"] {
-                let bytes = crate::business::read(&artifact.join("files").join(name))?;
-                let declared = files.get(name).ok_or("published report is incomplete")?;
-                if declared["sha256"] != crate::business::digest(&bytes)
-                    || declared["bytes"] != bytes.len() as u64
+                if view
+                    .descriptor
+                    .files
+                    .get(name)
+                    .is_some_and(|file| file.bytes > MAX_FILE)
                 {
-                    return Err("published report bytes differ from their frozen manifest".into());
+                    return Err("published report exceeds 8 MiB limit".into());
                 }
+                let bytes = view.read_file(name)?;
                 output.push((
                     name.into(),
                     String::from_utf8(bytes).map_err(|error| error.to_string())?,
                 ));
             }
-            Ok(output)
+            Ok((commit.id.clone(), output))
         })();
         match check {
-            Ok(files) => {
+            Ok((identity, files)) => {
                 for (name, original) in files {
                     let projection = if name.ends_with(".json") {
-                        let mut value: Value =
-                            serde_json::from_str(&original).map_err(|error| error.to_string())?;
-                        redact::json(&mut value);
-                        serde_json::to_string_pretty(&value).map_err(|error| error.to_string())?
+                        match serde_json::from_str::<Value>(&original) {
+                            Ok(mut value) => {
+                                redact::json(&mut value);
+                                serde_json::to_string_pretty(&value).unwrap_or_default()
+                            }
+                            Err(_) => redact::text(&original),
+                        }
                     } else {
                         redact::text(&original)
                     };
-                    self.add(
+                    if let Err(error) = self.add(
                         &format!("previous/published-{identity}/{name}"),
                         "previous",
-                        "completed Run publish artifact",
+                        "completed Kernel Run publish Artifact",
                         &original,
                         &projection,
-                    )?;
+                    ) {
+                        self.issue("previous", &error);
+                    }
                 }
             }
-            Err(reason) => self.issue(
-                "previous",
-                &format!("published report could not be verified: {reason}"),
-            ),
+            Err(_) => self.issue("previous", "published report could not be verified"),
         }
-        Ok(())
     }
 
     fn walk(&mut self, root: &Path, domain: &str, reports_only: bool) -> Result<(), String> {
@@ -504,7 +436,7 @@ impl Evidence {
         let virtual_path = format!("{namespace}/{}", relative.display());
         if relative.components().any(|c| {
             let name = c.as_os_str().to_string_lossy();
-            redact::excluded(&name) && !(domain == "graphs" && name == "workspaces")
+            redact::excluded(&name)
         }) {
             self.issue(&virtual_path, "credential or private runtime file skipped");
             return Ok(());
@@ -549,38 +481,97 @@ impl Evidence {
         )
     }
 
-    /// Collect one Run record.
-    ///
-    /// `source` labels which state root the record came from; the graph itself is
-    /// identified by the record's own snapshot and digest.
-    fn run(&mut self, path: &Path, root: &Path, source: &str) -> Result<(), String> {
-        if let Err(reason) = safe_path(path) {
-            self.issue("runs", &reason);
+    fn kernel_runs(&mut self, root: &Path) -> Result<(), String> {
+        let store_root = root.join("kernel-runs");
+        if !store_root.is_dir() {
+            self.issue("runs", "configured Rust state has no kernel-runs store");
             return Ok(());
         }
-        let metadata = fs::metadata(path).map_err(|e| e.to_string())?;
-        if !metadata.is_file() {
-            self.issue("runs", "non-regular Run record skipped");
-            return Ok(());
-        }
-        if metadata.len() > MAX_FILE {
-            self.issue("runs", "run JSON exceeds 8 MiB; metadata unavailable");
-            return Ok(());
-        }
-        let original = match fs::read_to_string(path) {
-            Ok(value) => value,
+        safe_path(&store_root)?;
+        let reader = match HistoryReader::open(&store_root) {
+            Ok(reader) => reader,
             Err(_) => {
-                self.issue("runs", "run metadata is unreadable");
+                self.issue("runs", "Kernel Run store is unreadable");
                 return Ok(());
             }
         };
-        let raw: Value = match serde_json::from_str(&original) {
-            Ok(value) => value,
+        let ids = match reader.list("run/") {
+            Ok(ids) => ids,
             Err(_) => {
-                self.issue("runs", "run JSON is invalid");
+                self.issue("runs", "Kernel Run index is unreadable");
                 return Ok(());
             }
         };
+        let mut count = 0;
+        for id in ids {
+            let resource = match reader.load(&id) {
+                Ok(Some(resource)) if resource.validator == validator::GRAPH_VALIDATOR => resource,
+                Ok(_) => continue,
+                Err(_) => {
+                    self.issue("runs", "Kernel Run resource is unreadable");
+                    continue;
+                }
+            };
+            let record = match validator::record_of(&resource) {
+                Ok(record) if validator::run_resource_id(&record.run_id) == id => record,
+                _ => {
+                    self.issue("runs", "Kernel Run resource identity or state is invalid");
+                    continue;
+                }
+            };
+            let Some(task) = &resource.task else {
+                self.issue("runs", "Graph Run resource has no lifecycle state");
+                continue;
+            };
+            let original = serde_json::to_string(&resource).map_err(|error| error.to_string())?;
+            if original.len() as u64 > MAX_FILE {
+                self.issue("runs", "Kernel Run exceeds 8 MiB; metadata unavailable");
+                continue;
+            }
+            let updated = match read_observation(root, &record.run_id) {
+                Ok(updated) => updated,
+                Err(_) => {
+                    self.issue("runs", "Kernel Run update observation is unreadable");
+                    None
+                }
+            };
+            let mut raw = serde_json::to_value(&record).map_err(|error| error.to_string())?;
+            let (status, reason, error) = lifecycle_projection(&task.phase);
+            raw["status"] = json!(status);
+            if let Some(reason) = reason {
+                raw["reason"] = reason;
+            }
+            raw["error"] = error;
+            if let Some(updated) = updated {
+                raw["updated"] = json!(updated);
+            }
+            let locator = format!("kernel-runs/{id}");
+            self.run_projection(raw, &original, "rust-kernel", &locator, &record.run_id)?;
+            if matches!(
+                task.phase,
+                Phase::Settled {
+                    result: Outcome::Done
+                }
+            ) {
+                self.published_report(&record, root);
+            }
+            count += 1;
+        }
+        if count == 0 {
+            self.issue("runs", "Kernel Run store contains no Graph Run resources");
+        }
+        Ok(())
+    }
+
+    /// Project only safe operational facts from the current Kernel Run record.
+    fn run_projection(
+        &mut self,
+        raw: Value,
+        original: &str,
+        source: &str,
+        source_locator: &str,
+        run_id: &str,
+    ) -> Result<(), String> {
         let snapshot = raw.get("snapshot");
         let objective = snapshot
             .and_then(|snapshot| snapshot.get("objective"))
@@ -622,8 +613,8 @@ impl Evidence {
             "graph_objective": objective,
             "graph_entry": entry,
             "graph_nodes": nodes,
-            "source_locator": path.display().to_string(),
-            "run": raw.get("run_id").and_then(Value::as_str).map(str::to_owned).unwrap_or_else(||path.parent().and_then(|p|p.file_name()).unwrap_or_default().to_string_lossy().to_string()),
+            "source_locator": source_locator,
+            "run": run_id,
         });
         for key in ["status", "started", "updated", "created_at", "updated_at"] {
             if let Some(value) = raw.get(key)
@@ -646,15 +637,10 @@ impl Evidence {
         if let Some(reason) = raw.get("reason") {
             projection["reason"] = reason.clone();
         }
-        projection["cursor"] = cursor_projection(raw.get("cursor"));
         projection["parallel"] = parallel_projection(raw.get("parallel"));
         let (fanout, join) = activation_projection(&raw);
         projection["fanout"] = fanout;
         projection["join"] = join;
-        projection["recovery"] = json!({
-            "pending": raw.get("recovery").and_then(Value::as_array).map_or(0, Vec::len),
-            "submissions": raw.get("recovery_submissions").and_then(Value::as_array).map_or(0, Vec::len),
-        });
         projection["results"] = results_projection(raw.get("results"));
         projection["invocations"] = raw.get("invocations").cloned().unwrap_or_else(|| json!({}));
         projection["input_keys"] = json!(
@@ -707,18 +693,11 @@ impl Evidence {
         redact::json(&mut projection);
         let content = serde_json::to_string_pretty(&projection).map_err(|e| e.to_string())?;
         // Original hashes bind the private record without retaining its body.
-        let relative = path.strip_prefix(root).map_err(|e| e.to_string())?;
         let virtual_path = format!(
             "runs/{:x}.json",
-            Sha256::digest(format!("{graph}:{}", relative.display()).as_bytes())
+            Sha256::digest(format!("{graph}:{run_id}").as_bytes())
         );
-        self.add(
-            &virtual_path,
-            "runs",
-            &path.display().to_string(),
-            &original,
-            &content,
-        )
+        self.add(&virtual_path, "runs", source_locator, original, &content)
     }
 
     fn add(
@@ -907,18 +886,51 @@ fn parse_time(raw: &Value, key: &str) -> Option<DateTime<Utc>> {
         .map(|time| time.with_timezone(&Utc))
 }
 
-/// Project the cursor identity without its prepared input.
-fn cursor_projection(value: Option<&Value>) -> Value {
-    let Some(cursor) = value.filter(|value| !value.is_null()) else {
-        return Value::Null;
+fn read_observation(root: &Path, run_id: &str) -> Result<Option<String>, String> {
+    if !anchor_runtime::identifier::is_name(run_id) {
+        return Err("invalid Run observation identity".into());
+    }
+    let path = root
+        .join("kernel-run-observations")
+        .join(format!("{run_id}.json"));
+    safe_path(&path)?;
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.to_string()),
     };
-    json!({
-        "node_id": cursor.get("node_id").cloned().unwrap_or(Value::Null),
-        "key": cursor.get("key").cloned().unwrap_or(Value::Null),
-    })
+    let value: Value = serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+    Ok(value
+        .get("updated")
+        .and_then(Value::as_str)
+        .map(str::to_owned))
 }
 
-/// Project a live parallel activation.
+fn lifecycle_projection(phase: &Phase) -> (String, Option<Value>, Value) {
+    match phase {
+        Phase::Executing => ("running".into(), None, Value::Null),
+        Phase::Waiting { waiter } => {
+            let reason = match waiter {
+                Waiter::Human { reason } => json!(reason),
+                Waiter::Child { task } => json!({"on":"child","task":task}),
+                Waiter::Effect { effect } => json!({"on":"effect","effect":effect}),
+            };
+            ("waiting".into(), Some(reason), Value::Null)
+        }
+        Phase::Settled { result } => match result {
+            Outcome::Done => ("completed".into(), None, Value::Null),
+            Outcome::Failed { reason, detail } => (
+                "failed".into(),
+                Some(json!(format!("{reason:?}"))),
+                json!(detail),
+            ),
+            Outcome::Escalated { detail } => ("escalated".into(), None, json!(detail)),
+            Outcome::Unknown { detail } => ("unknown".into(), None, json!(detail)),
+            Outcome::Aborted { detail } => ("aborted".into(), None, json!(detail)),
+        },
+    }
+}
+
 fn parallel_projection(value: Option<&Value>) -> Value {
     let Some(parallel) = value.filter(|value| !value.is_null()) else {
         return Value::Null;

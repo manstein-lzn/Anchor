@@ -51,6 +51,11 @@ impl RunApplication {
         workspace_root: &Path,
         deletion: &RunDeletionBatch,
     ) -> Result<(), String> {
+        self.release_run_workspace_facts(
+            run_id,
+            &crate::workspaces::Workspaces::new(workspace_root.into()),
+        )
+        .map_err(|error| format!("{error:?}"))?;
         crate::run_data::delete_run_data(
             &record.record,
             &record
@@ -63,6 +68,8 @@ impl RunApplication {
         )?;
         deletion
             .remove(run_id)
+            .map_err(|error| format!("{error:?}"))?;
+        self.release_run_deliveries(run_id, workspace_root)
             .map_err(|error| format!("{error:?}"))?;
         crate::run_data::remove_run_files(&self.data_root, run_id)
     }
@@ -157,7 +164,24 @@ impl RunApplication {
                 run_id,
                 workspace_root,
             )?;
+        } else if let Some(metadata) = &metadata {
+            for node in record
+                .snapshot
+                .nodes
+                .iter()
+                .filter(|node| node.agent.is_some())
+            {
+                crate::goose_acp::remove_conversation(
+                    &workspace_root.join(".goose-process"),
+                    &metadata.node_conversation_key(&node.id),
+                )
+                .map_err(ApplicationError::Storage)?;
+            }
         }
+        self.release_run_workspace_facts(
+            run_id,
+            &crate::workspaces::Workspaces::new(workspace_root.into()),
+        )?;
         crate::run_data::delete_run_data(
             record,
             &view
@@ -170,6 +194,7 @@ impl RunApplication {
         )
         .map_err(ApplicationError::Storage)?;
         deletion.remove(run_id)?;
+        self.release_run_deliveries(run_id, workspace_root)?;
         crate::run_data::remove_run_files(&self.data_root, run_id)
             .map_err(ApplicationError::Storage)
     }

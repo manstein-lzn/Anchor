@@ -46,7 +46,7 @@ async fn kernel_restart_dispatches_detach_child_only_with_staged_call_inputs() {
                 submission: "done".into(),
                 route: None,
                 model_requests: 0,
-                output: json!({}),
+                output: json!({"files":["report.txt"]}),
             },
         )
         .await

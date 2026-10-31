@@ -1,6 +1,7 @@
 use super::RunView;
 use crate::application::{ApplicationError, RunApplication, storage};
 use anchor_runtime::graph::{GraphError, GraphRunRecord};
+use serde_json::Value;
 use std::path::Path;
 
 fn reject_legacy(data_root: &Path, run_id: &str) -> Result<(), GraphError> {
@@ -50,13 +51,24 @@ pub(crate) fn load(data_root: &Path, run_id: &str) -> Result<Option<RunView<'sta
     Ok(Some(view))
 }
 
+pub(crate) fn status_projection(
+    data_root: &Path,
+    run_id: &str,
+) -> Result<Option<Value>, GraphError> {
+    load(data_root, run_id)?
+        .map(|view| {
+            serde_json::to_value(super::projection::RunProjection::from_view(&view.lifecycle))
+                .map_err(|error| GraphError::CorruptRun(error.to_string()))
+        })
+        .transpose()
+}
+
 impl RunApplication {
     pub(crate) fn durable_input_workspaces(
         &self,
         workspace_root: &Path,
     ) -> Result<Vec<std::path::PathBuf>, ApplicationError> {
-        let artifacts =
-            crate::HostArtifacts::new(self.data_root.join("artifacts"), workspace_root.into());
+        let workspaces = crate::workspaces::Workspaces::new(workspace_root.into());
         let mut paths = std::collections::BTreeSet::new();
         for (_, record) in self.raw_records()? {
             for node in &record.snapshot.nodes {
@@ -76,16 +88,7 @@ impl RunApplication {
                     node_id: node.id.clone(),
                     invocation: 1,
                 };
-                if let Some(owner) = artifacts.initialized_workspace_owner(&key)? {
-                    paths.insert(artifacts.workspace_path(&owner)?);
-                } else {
-                    for key in crate::run_data::invocation_keys(&record)
-                        .into_iter()
-                        .filter(|key| key.node_id == node.id)
-                    {
-                        paths.insert(artifacts.workspace_path(&key)?);
-                    }
-                }
+                paths.insert(workspaces.path(&key)?);
             }
         }
         Ok(paths.into_iter().collect())
@@ -103,9 +106,7 @@ impl RunApplication {
             .map(|view| view.and_then(|view| view.lifecycle.updated))
     }
 
-    pub(in crate::application::run_access) fn raw_records(
-        &self,
-    ) -> Result<Vec<(String, GraphRunRecord)>, ApplicationError> {
+    fn run_ids(&self) -> Result<Vec<String>, ApplicationError> {
         let root = self.data_root.join("runs");
         match std::fs::read_dir(root) {
             Ok(entries) => {
@@ -123,8 +124,18 @@ impl RunApplication {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(storage(error)),
         }
-        let mut records = self.kernel_records()?;
-        records.sort_by(|a, b| a.0.cmp(&b.0));
+        self.kernel_run_ids()
+    }
+
+    pub(in crate::application::run_access) fn raw_records(
+        &self,
+    ) -> Result<Vec<(String, GraphRunRecord)>, ApplicationError> {
+        let mut records = Vec::new();
+        for id in self.run_ids()? {
+            if let Some(record) = self.load_run_impl(&id)? {
+                records.push((id, record));
+            }
+        }
         Ok(records)
     }
 
@@ -147,13 +158,12 @@ impl RunApplication {
         &self,
         run_id: &str,
     ) -> Result<Option<RunView<'static>>, ApplicationError> {
-        let Some(owner) = self.kernel_owner(run_id)? else {
+        let Some((owner, resource)) = self.kernel_resource(run_id)? else {
             return Ok(None);
         };
-        let resource = owner.load(run_id)?.ok_or(ApplicationError::Missing)?;
         let lifecycle = owner.view(&resource)?;
         let record = super::kernel_runs::KernelRuns::record(&resource)?;
-        let (recovery, _) = owner.recovery_facts(run_id)?;
+        let (recovery, _) = owner.resource_recovery(&resource)?;
         let mut view = RunView::from_kernel(record, lifecycle).with_kernel_frontier(&resource)?;
         view.recovery = recovery;
         view.session_coordinated = self
@@ -163,14 +173,13 @@ impl RunApplication {
     }
 
     pub(crate) fn run_views(&self) -> Result<Vec<(String, RunView<'static>)>, ApplicationError> {
-        self.raw_records()?
-            .into_iter()
-            .map(|(id, _)| {
-                self.read_run(&id)?
-                    .map(|view| (id, view))
-                    .ok_or(ApplicationError::Missing)
-            })
-            .collect()
+        let mut views = Vec::new();
+        for id in self.run_ids()? {
+            if let Some(view) = self.read_run(&id)? {
+                views.push((id, view));
+            }
+        }
+        Ok(views)
     }
 
     pub(crate) fn runs_for_graph(

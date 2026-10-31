@@ -1,0 +1,26 @@
+{
+  "purpose": "Daily discovery entry points; follow candidate events to primary evidence. These are not a company whitelist or automatic endorsements of article claims.",
+  "lanes": {
+    "international": [
+      {"id":"techmeme","name":"Techmeme","entries":["https://www.techmeme.com/feed.xml","https://www.techmeme.com/"],"coverage":"International technology, AI, chips, infrastructure and business; event clusters link multiple reports."},
+      {"id":"tldr-ai","name":"TLDR AI","entries":["https://tldr.tech/ai/archives"],"coverage":"Weekday AI model, research and engineering-tool selections; open the actual dated issue."}
+    ],
+    "china": [
+      {"id":"qbitai","name":"量子位","entries":["https://www.qbitai.com/feed","https://www.qbitai.com/"],"coverage":"Chinese AI models, robotics, vehicles and commercialization."},
+      {"id":"zhidx","name":"智东西、芯东西、车东西","entries":["https://www.zhidx.com/","https://zhidx.com/aichip001","https://chedongxi.com/"],"coverage":"Chips, robotics, hardware and autonomous driving; some lists require further search."},
+      {"id":"ijiwei","name":"爱集微","entries":["https://www.laoyaoba.com/api/rss/hbb","https://laoyaoba.com/"],"coverage":"Chinese semiconductors, supply chain, listed companies and commercialization. The feed may contain malformed XML; inspect actual returned content and use the public list if needed."}
+    ],
+    "technical": [
+      {"id":"ainews","name":"AI News / Latent Space","entries":["https://latent.space/news/"],"coverage":"Dated AI model, agent, developer-tool, research and community briefings; inspect current relevant issues and their original links."},
+      {"id":"arxiv","name":"arXiv","entries":["https://arxiv.org/list/cs.AI/recent","https://arxiv.org/list/cs.LG/recent","https://arxiv.org/list/cs.RO/recent"],"coverage":"Research discovery; check original abstract/paper dates, authors and actual contribution. A preprint is not independent validation."}
+    ]
+  },
+  "search_lane": "Independently search all five interests in Chinese and English, including less visible new teams, Chinese financing, drones, space computing and edge models. No fixed company list. Record actual searches, failures and gaps.",
+  "rules": [
+    "Use the frozen issue window from prepare; the date of a digest is not the event or original publication date.",
+    "An entry page or RSS item is a discovery lead. Fetch the relevant article or issue, then trace selected events to original evidence.",
+    "Try a different entry or scoped search when an entry fails; preserve failure evidence instead of repeatedly fetching the same address.",
+    "Multiple reposts of one announcement or interview are one evidence lineage.",
+    "Expand beyond these entry points when the day's events justify it; no source quotas or company quotas."
+  ]
+}

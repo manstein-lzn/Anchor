@@ -52,7 +52,10 @@ fn managed_configuration_rotates_atomically_without_restarting_or_changing_live_
             if gated { echo.gated(&gate) } else { echo },
             command("cat configuration-log; printf 'ready:managed\n' > notes.md")
                 .after("ready:managed"),
-            Step::tool("final_result", json!({"summary":"configuration checked"})),
+            Step::tool(
+                "final_result",
+                json!({"files":["notes.md","configuration-log"],"summary":"configuration checked"}),
+            ),
         ]
     };
     let provider = Provider::new(

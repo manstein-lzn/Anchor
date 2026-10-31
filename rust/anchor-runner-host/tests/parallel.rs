@@ -1,4 +1,8 @@
 //! Tests the real host boundary, not just parallel fake execution ports.
+#[allow(dead_code)]
+#[path = "support/runtime_fixture.rs"]
+mod fixture;
+
 use anchor_kernel::{FileStore, Resource, Store};
 use serde_json::{Value, json};
 use std::{
@@ -11,10 +15,10 @@ use std::{
 
 fn graph(left: &str, right: &str) -> Value {
     json!({"objective":"parallel files","entry":"seed","ops":{
-        "seed":{"run":"sh -c 'printf seed > seed.txt'"},
+        "seed":{"run":"sh -c 'printf seed > seed.txt'","writes":["seed.txt"]},
         "fork":{"fanout":{"join":"join"}}, "join":{"join":{}},
-        "left":{"run":left},"right":{"run":right},
-        "combine":{"run":"sh -c 'cat /in/left/result.txt /in/right/result.txt > combined.txt; cat /in/join/join.json > join-copy.json'"}},
+        "left":{"run":left,"writes":["result.txt"]},"right":{"run":right,"writes":["result.txt"]},
+        "combine":{"run":"sh -c 'cat /in/left/result.txt /in/right/result.txt > combined.txt; cat /in/join/join.json > join-copy.json'","writes":["combined.txt","join-copy.json"]}},
         "nodes":[{"id":"seed","op":"seed"},{"id":"fork","op":"fork"},{"id":"left","op":"left"},{"id":"right","op":"right"},{"id":"join","op":"join"},{"id":"combine","op":"combine"}],
         "edges":[{"from":"seed","to":"fork"},{"from":"fork","to":"left"},{"from":"fork","to":"right"},{"from":"left","to":"join"},{"from":"right","to":"join"},{"from":"join","to":"combine"}]})
 }
@@ -74,13 +78,7 @@ fn record(root: &Path) -> Value {
 
 fn file(root: &Path, saved: &Value, node: &str, path: &str) -> Vec<u8> {
     let commit = saved["results"][node][0]["commit"]["id"].as_str().unwrap();
-    fs::read(
-        root.join("state/artifacts")
-            .join(commit)
-            .join("files")
-            .join(path),
-    )
-    .unwrap()
+    fixture::artifact_file(&root.join("state/artifacts").join(commit), path)
 }
 // Keep a generous overlap window: Bubblewrap startup and fsync scheduling can
 // be delayed under the full workspace test load. Kernel concurrency itself is
@@ -90,7 +88,10 @@ const BRANCH: &str = "sh -c 'date +%s%N > start.txt; sleep 2; test ! -e /in/righ
 #[test]
 fn paired_parallel_nodes_overlap_and_join_delivers_exact_branch_files() {
     let root = tempfile::tempdir().unwrap();
-    let graph = graph(BRANCH, BRANCH);
+    let mut graph = graph(BRANCH, BRANCH);
+    for node in ["left", "right"] {
+        graph["ops"][node]["writes"] = json!(["result.txt", "start.txt", "end.txt"]);
+    }
     let response = finish(spawn(root.path(), &graph));
     assert_eq!(response["projection"]["outcome"], "done", "{response}");
     let saved = record(root.path());

@@ -1,0 +1,20 @@
+{
+  "name": "AI 每日晨报",
+  "description": "维护已发布晨报与本期时间窗口，将经过来源核查的中文晨报渲染为 A4 PDF，逐页检查后发布本地正式版本。",
+  "network": false,
+  "mutable": [
+    "data/"
+  ],
+  "skills": "skills/",
+  "mcpServers": {
+    "briefing": {
+      "command": "bin/anchor-briefing-tools",
+      "cwd": ".",
+      "tool_timeout_sec": 180,
+      "env": {
+        "ANCHOR_BRIEFING_WORKSPACE": "/workspace",
+        "ANCHOR_BRIEFING_ROOT": "."
+      }
+    }
+  }
+}

@@ -1,0 +1,21 @@
+[package]
+name = "anchor-briefing-tools"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "AI morning briefing publication and deterministic PDF tools"
+
+[dependencies]
+anchor-file-lease = { path = "../anchor-file-lease" }
+anchor-workspace-files = { path = "../anchor-workspace-files" }
+base64 = "=0.22.1"
+chrono = { version = "0.4", features = ["serde"] }
+lopdf = "=0.42.0"
+rmcp = { workspace = true, features = ["server", "transport-io"] }
+roxmltree = "=0.20.0"
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tempfile = "=3.27.0"
+tokio = { workspace = true, features = ["io-std", "io-util"] }
+url = "=2.5.8"

@@ -10,8 +10,11 @@ use tokio::{
     task::JoinSet,
 };
 
-use super::{ConnectionStatus, SendRequest, stopping};
-use crate::{GatewayError, MAX_REQUEST_BYTES, MAX_TEXT_BYTES, config::allowed, protocol::identity};
+use super::{ConnectionStatus, ProactiveDelivery, SendContent, SendRequest, stopping};
+use crate::{
+    GatewayError, MAX_CONTROL_REQUEST_BYTES, MAX_REQUEST_BYTES, MAX_TEXT_BYTES, config::allowed,
+    media::outbound_file, protocol::identity,
+};
 
 pub(super) struct Server {
     pub listener: UnixListener,
@@ -33,6 +36,14 @@ enum Request {
         request_id: String,
         userid: String,
         content: String,
+    },
+    SendFile {
+        token: String,
+        request_id: String,
+        userid: String,
+        name: String,
+        data_base64: String,
+        md5: String,
     },
 }
 
@@ -90,12 +101,13 @@ async fn dispatch(
     let mut bytes = Vec::new();
     tokio::time::timeout(
         Duration::from_secs(5),
-        BufReader::new(stream.take((MAX_REQUEST_BYTES + 1) as u64)).read_until(b'\n', &mut bytes),
+        BufReader::new(stream.take((MAX_CONTROL_REQUEST_BYTES + 1) as u64))
+            .read_until(b'\n', &mut bytes),
     )
     .await
     .map_err(|_| GatewayError::Invalid("channel request timed out"))?
     .map_err(|_| GatewayError::Invalid("invalid channel request"))?;
-    if bytes.len() > MAX_REQUEST_BYTES || bytes.last() != Some(&b'\n') {
+    if bytes.len() > MAX_CONTROL_REQUEST_BYTES || bytes.last() != Some(&b'\n') {
         return Err(GatewayError::Invalid(
             "channel request is oversized or missing NDJSON newline",
         ));
@@ -103,27 +115,48 @@ async fn dispatch(
     let request: Request = serde_json::from_slice(&bytes)
         .map_err(|_| GatewayError::Invalid("invalid channel request"))?;
     let request_token = match &request {
-        Request::Status { token } | Request::Send { token, .. } => token,
+        Request::Status { token }
+        | Request::Send { token, .. }
+        | Request::SendFile { token, .. } => token,
     };
     if !bool::from(request_token.as_bytes().ct_eq(token.as_bytes())) {
         return Err(GatewayError::Invalid("unauthorized channel request"));
     }
-    let Request::Send {
-        request_id,
-        userid,
-        content,
-        ..
-    } = request
-    else {
-        return Ok(json!({"status": *status.borrow()}));
+    if !matches!(request, Request::SendFile { .. }) && bytes.len() > MAX_REQUEST_BYTES {
+        return Err(GatewayError::Invalid(
+            "channel request exceeds text request limits",
+        ));
+    }
+    let (request_id, userid, content) = match request {
+        Request::Status { .. } => return Ok(json!({"status": *status.borrow()})),
+        Request::Send {
+            request_id,
+            userid,
+            content,
+            ..
+        } => {
+            if content.trim().is_empty() || content.len() > MAX_TEXT_BYTES {
+                return Err(GatewayError::Invalid(
+                    "message content is empty or exceeds platform limits",
+                ));
+            }
+            (request_id, userid, SendContent::Markdown(content))
+        }
+        Request::SendFile {
+            request_id,
+            userid,
+            name,
+            data_base64,
+            md5,
+            ..
+        } => (
+            request_id,
+            userid,
+            SendContent::File(outbound_file(name, &data_base64, &md5)?),
+        ),
     };
     identity(Some(&json!(request_id)), 500)?;
     identity(Some(&json!(userid)), 200)?;
-    if content.trim().is_empty() || content.len() > MAX_TEXT_BYTES {
-        return Err(GatewayError::Invalid(
-            "message content is empty or exceeds platform limits",
-        ));
-    }
     if !allowed(users, &userid) {
         return Err(GatewayError::Invalid("recipient is not allowed"));
     }
@@ -132,10 +165,12 @@ async fn dispatch(
     }
     let (response, result) = oneshot::channel();
     send.try_send(SendRequest {
-        request_id,
-        userid,
+        delivery: ProactiveDelivery {
+            request_id,
+            userid,
+            response,
+        },
         content,
-        response,
     })
     .map_err(|error| match error {
         mpsc::error::TrySendError::Full(_) => GatewayError::Invalid("channel send queue is full"),

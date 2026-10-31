@@ -38,6 +38,7 @@ url = "=2.5.8"
 tempfile = "3"
 
 [dev-dependencies]
+anchor-rsi = { path = "../anchor-rsi" }
 anchor-runtime = { path = "../anchor-runtime", features = ["test-fixtures"] }
 anchor-distribution = { path = "../anchor-distribution" }
 anchor-wecom-gateway = { path = "../anchor-wecom-gateway" }

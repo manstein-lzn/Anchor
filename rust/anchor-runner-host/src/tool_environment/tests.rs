@@ -888,6 +888,7 @@ fn a_same_named_rustup_entry_cannot_get_shared_toolchain_write_permission() {
         dirs: vec![bin.clone(), other.clone()],
         imports: vec![],
         devices: vec![],
+        plugin_environments: BTreeMap::new(),
         rust: Some(RustDevelopment {
             proxy: proxy.clone(),
             home: home.clone(),
@@ -1073,6 +1074,56 @@ async fn existing_tool_manifest_runs_shell_with_imports_and_readonly_dependencie
         fs::read_to_string(root.path().join("imports/provided.sh")).unwrap(),
         "value='external-tool-result'\n"
     );
+}
+
+#[tokio::test]
+async fn plugin_scoped_tool_imports_never_reach_node_shell_or_other_plugins() {
+    let root = tempfile::tempdir().unwrap();
+    let library = fixture(root.path());
+    let manifest = library.join("tools/sample/tool.json");
+    let mut spec: serde_json::Value =
+        serde_json::from_slice(&fs::read(&manifest).unwrap()).unwrap();
+    spec["plugin"] = json!("git");
+    fs::write(&manifest, spec.to_string()).unwrap();
+    let tools = ToolEnvironment::load(&library).unwrap();
+    let workspace = root.path().join("workspace");
+    fs::create_dir(&workspace).unwrap();
+    let base = BubblewrapSandbox::new(
+        tools
+            .authorize(BubblewrapPolicy::new("bwrap", ["sh"]).authorize_workspace_root(&workspace)),
+    )
+    .unwrap();
+    let imported = root.path().join("imports/provided.sh");
+    for environment in [&tools, &tools.for_plugin("other", true)] {
+        let mut request = SandboxRequest::new(
+            &workspace,
+            ["sh", "-c", &format!("test ! -e {}", imported.display())],
+        );
+        environment.apply(&mut request);
+        assert_eq!(base.run(request).await.unwrap().exit_code, Some(0));
+        let mut forged = SandboxRequest::new(&workspace, ["sh", "-c", "true"]);
+        forged.readonly_inputs.push(ReadOnlyInput::new(
+            imported.parent().unwrap(),
+            imported.parent().unwrap(),
+        ));
+        assert!(base.run(forged).await.is_err());
+    }
+    for include_global in [true, false] {
+        let environment = tools.for_plugin("git", include_global);
+        let sandbox = environment.grant_sandbox(&base).unwrap();
+        let mut request = SandboxRequest::new(
+            &workspace,
+            [
+                "sh",
+                "-c",
+                &format!(". {}; printf '%s' \"$value\"", imported.display()),
+            ],
+        );
+        environment.apply(&mut request);
+        let result = sandbox.run(request).await.unwrap();
+        assert_eq!(result.exit_code, Some(0), "{result:?}");
+        assert_eq!(result.stdout, "external-tool-result");
+    }
 }
 
 #[test]

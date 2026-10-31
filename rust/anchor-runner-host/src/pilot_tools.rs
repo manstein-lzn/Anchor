@@ -27,8 +27,6 @@ mod sessions;
 
 use crate::{
     application::{AdmissionOptions, RunApplication},
-    artifacts::HostArtifacts,
-    resource_read::open_resource,
     run_metadata::{PilotRunSource, RunTrigger},
     tool_host,
 };
@@ -541,7 +539,7 @@ pub(crate) const PILOT_TOOLS: &[PilotToolSpec] = &[
     },
     PilotToolSpec {
         name: "channel_enable",
-        description: "Start or stop one Graph's bot Gateway through the existing Host supervisor after native user confirmation. Missing credentials remain unavailable; acceptance is not external connection proof.",
+        description: "Start or stop one Graph's bot Gateway through the Host supervisor after native user confirmation. Enabling an already enabled bot repairs missing or unavailable supervision; healthy, connecting and reconnecting bots keep their existing connection. Connecting/authenticating/reconnecting mean work is in progress; authenticated confirms readiness. restart_required means an enable request is needed after checking resources. Missing credentials must be configured first; acceptance is not external connection proof.",
         parameters: || json!({"type":"object","properties":{"graph":{"type":"string"},"enabled":{"type":"boolean"}},"required":["graph","enabled"],"additionalProperties":false}),
         authority: ToolAuthority::Confirm,
         effect: ToolEffect::HostFact,
@@ -868,11 +866,9 @@ pub(crate) fn workspace_directory(workspace: &Path, relative: &str) -> Result<Pa
     Ok(candidate)
 }
 
-fn text_resource(root: &Path, relative: &str) -> Result<String, ToolError> {
+fn text_resource(file: impl Read) -> Result<String, ToolError> {
     let mut bytes = Vec::new();
-    open_resource(root, relative)
-        .map_err(|_| failed())?
-        .take(1024 * 1024 + 1)
+    file.take(1024 * 1024 + 1)
         .read_to_end(&mut bytes)
         .map_err(|_| failed())?;
     if bytes.len() > 1024 * 1024 {

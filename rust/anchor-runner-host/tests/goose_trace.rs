@@ -16,7 +16,7 @@ fn graph() -> Value {
         "objective":"Inspect native live trace without treating drafts as completion",
         "entry":"worker",
         "agents":{"worker":{"model":"models.worker","instructions":"Inspect workspace facts before submitting final_result with route verify. Ordinary text is not completion."}},
-        "ops":{"verify":{"run":"sh -c 'set -eu; test \"$(cat /in/worker/effect.txt)\" = once; cat /in/worker/effect.txt > verified.txt'"}},
+        "ops":{"verify":{"writes":["verified.txt"],"run":"sh -c 'set -eu; test \"$(cat /in/worker/effect.txt)\" = once; cat /in/worker/effect.txt > verified.txt'"}},
         "nodes":[{"id":"worker","agent":"worker"},{"id":"verify","op":"verify"}],
         "edges":[{"from":"worker","to":"verify"}]
     })
@@ -65,7 +65,7 @@ fn live_trace_precedes_completion_and_final_artifacts_remain_authoritative() {
         vec![
             command("set -eu; test ! -e effect.txt; printf once > effect.txt; cat effect.txt")
                 .with_preface(DRAFT),
-            complete("verify").gated(&gate),
+            complete("verify").files(&["effect.txt"]).gated(&gate),
         ],
     );
     let host = Host::new(&graph()).default_runtime();
@@ -100,7 +100,7 @@ fn stopped_live_trace_survives_restart_without_replaying_the_effect() {
         vec![
             command("set -eu; test ! -e effect.txt; printf once > effect.txt; cat effect.txt")
                 .with_preface(DRAFT),
-            complete("verify").gated(&gate),
+            complete("verify").files(&["effect.txt"]).gated(&gate),
         ],
     );
     let host = Host::new(&graph()).default_runtime();
@@ -125,7 +125,7 @@ fn stopped_live_trace_survives_restart_without_replaying_the_effect() {
     drop(server);
     provider.append(vec![
         command("set -eu; test \"$(cat effect.txt)\" = once; cat effect.txt").after("once"),
-        complete("verify").after("once"),
+        complete("verify").files(&["effect.txt"]).after("once"),
     ]);
     let restarted = host.serve(&provider);
     let (status, detail) = restarted.request("GET", &format!("/runs/{run}"), None);

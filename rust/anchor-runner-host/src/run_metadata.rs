@@ -2,6 +2,7 @@
 use crate::create_durable_directory;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::{
     collections::VecDeque,
     fs::OpenOptions,
@@ -213,6 +214,21 @@ pub(crate) fn now_nanos() -> u128 {
 }
 
 impl RunMetadata {
+    pub(crate) fn node_conversation_key(&self, node: &str) -> String {
+        let identity = match &self.conversation {
+            Some(binding) => serde_json::to_vec(&(&self.bundle_source, &binding.session, node)),
+            None => serde_json::to_vec(&(
+                "run",
+                &self.run_id,
+                &self.bundle_source,
+                &self.graph_digest,
+                node,
+            )),
+        }
+        .expect("host conversation identity is serializable");
+        format!("{:x}", Sha256::digest(identity))
+    }
+
     pub(crate) fn new(
         run_id: String,
         graph: String,

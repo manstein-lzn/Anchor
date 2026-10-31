@@ -1,7 +1,11 @@
+use anchor_kernel::{FileStore, Outcome, Phase, Reason, Store};
 use anchor_rsi::{
     ecosystem::Ecosystem,
     evidence::{Config, Evidence},
     mcp::RsiService,
+};
+use anchor_runtime::graph::{
+    CommitRef, GraphRunRecord, GraphSnapshot, InvocationKey, NodeCompletion, RunResult, validator,
 };
 use serde_json::{Value, json};
 use std::{fs, path::Path, sync::Arc, time::Duration};
@@ -46,12 +50,74 @@ fn setup() -> (tempfile::TempDir, Config) {
     )
 }
 
+fn graph_record(run_id: &str, nodes: &[&str]) -> GraphRunRecord {
+    let graph_nodes = nodes
+        .iter()
+        .map(|id| json!({"id":id,"agent":"worker"}))
+        .collect::<Vec<_>>();
+    let edges = nodes
+        .windows(2)
+        .map(|pair| json!({"from":pair[0],"to":pair[1]}))
+        .collect::<Vec<_>>();
+    let snapshot = GraphSnapshot::from_authoring(json!({
+        "objective":"weekly review of Anchor",
+        "entry":nodes[0],
+        "agents":{"worker":{"model":"models.default","instructions":"private prompt"}},
+        "nodes":graph_nodes,
+        "edges":edges
+    }))
+    .unwrap();
+    GraphRunRecord::create_with_id(snapshot, Value::Null, run_id).unwrap()
+}
+
+fn run_result(
+    record: &GraphRunRecord,
+    node: &str,
+    invocation: u64,
+    sequence: u64,
+    output: Value,
+) -> RunResult {
+    RunResult {
+        node_id: node.into(),
+        key: InvocationKey {
+            run_id: record.run_id.clone(),
+            graph_digest: record.graph_digest.clone(),
+            node_id: node.into(),
+            invocation,
+        },
+        plugin_views: Default::default(),
+        plugin_digests: Default::default(),
+        completion: NodeCompletion {
+            submission: String::new(),
+            route: None,
+            model_requests: 0,
+            output,
+        },
+        interruption: None,
+        commit: CommitRef {
+            id: format!("artifact-{node}-{invocation}"),
+            node_id: node.into(),
+            invocation,
+        },
+        sequence,
+    }
+}
+
+fn store_run(state: &Path, record: &GraphRunRecord, phase: Phase) {
+    let mut resource = validator::run_resource(record, 100).unwrap();
+    resource.task.as_mut().unwrap().phase = phase;
+    FileStore::new(state.join("kernel-runs"))
+        .unwrap()
+        .create(&resource)
+        .unwrap();
+}
+
 #[test]
 fn discovers_new_graphs_and_dependencies_and_freezes_source() {
     let (_temp, config) = setup();
     write(
         &config.data,
-        "workspaces/new-graph/graph.json",
+        "catalog/new-graph/graph.json",
         r#"{"objective":"new graph","agents":{},"nodes":[]}"#,
     );
     write(
@@ -123,19 +189,23 @@ fn missing_required_roots_fail_and_optional_roots_record_limits() {
 
 #[test]
 fn run_metadata_excludes_prompts_and_records_seven_day_basis() {
-    let (_temp, config) = setup();
-    let run = json!({"run_id":"run-new","status":"completed","updated":chrono::Utc::now().to_rfc3339(),"error":"private provider error body","exit_status":"private exit details","objective":"private prompt","messages":["private conversation"],"cursor":{"prompt":"private cursor"},"results":{"work":{"output":"private model text"}}});
+    let (_temp, mut config) = setup();
+    let state = config.data.join("state");
+    let mut record = graph_record("run-new", &["work"]);
+    record.input = json!({"prompt":"private prompt","conversation":"private conversation"});
+    store_run(&state, &record, Phase::Executing);
     write(
-        &config.data,
-        "workspaces/review/runs/run-new/run.json",
-        &run.to_string(),
+        &state,
+        "kernel-run-observations/run-new.json",
+        &json!({"updated":chrono::Utc::now().to_rfc3339()}).to_string(),
     );
+    config.rust_state = Some(state.clone());
     let evidence_root = config.evidence.clone();
     let evidence = Evidence::collect(config).unwrap();
     let entry = evidence
         .entries
         .values()
-        .find(|entry| entry.domain == "runs")
+        .find(|entry| entry.domain == "runs" && entry.path != "runs/schedules.json")
         .unwrap();
     let page = evidence.read(&entry.path, 0, 200).unwrap().to_string();
     // Prompt-ish and body fields stay out of the projection.
@@ -145,23 +215,22 @@ fn run_metadata_excludes_prompts_and_records_seven_day_basis() {
         "private conversation",
         "private cursor",
         "private model text",
+        &state.display().to_string(),
     ] {
         assert!(!page.contains(private), "{private}");
     }
     let projected: Value =
         serde_json::from_str(&fs::read_to_string(evidence_root.join(&entry.frozen_file)).unwrap())
             .unwrap();
-    // The failure reason is operationally important: it is projected as redacted
-    // text instead of being replaced by a presence boolean.
-    assert_eq!(projected["error"], json!("private provider error body"));
+    assert_eq!(projected["status"], "running");
+    assert_eq!(projected["error"], Value::Null);
     assert!(projected.get("reason").is_none());
-    // Presence survives only where absence is real.
-    assert_eq!(projected["source_field_presence"]["started"], false);
+    assert_eq!(projected["source_field_presence"]["started"], true);
     assert_eq!(projected["source_field_presence"]["updated"], true);
-    assert_eq!(projected["cursor"]["node_id"], Value::Null);
-    assert_eq!(projected["results"]["work"]["attempts"], Value::Null);
-    assert_eq!(projected["recovery"]["pending"], 0);
+    assert_eq!(projected["results"], json!({}));
+    assert!(projected.get("recovery").is_none());
     assert_eq!(projected["parallel"], Value::Null);
+    assert_eq!(projected["source_locator"], "kernel-runs/run/run-new");
     assert!(page.contains("within_last_seven_days"));
     assert!(page.contains("true"));
 }
@@ -173,6 +242,11 @@ fn rejects_credentials_symlinks_unknown_absolute_and_parent_paths() {
     let (temp, config) = setup();
     write(&config.source, ".env", "secret-environment-value");
     write(&config.source, "secrets.json", r#"{"token":"private"}"#);
+    write(
+        &config.source,
+        ".claude/worktrees/old-checkout/src/example.rs",
+        "stale-checkout-code",
+    );
     write(
         &config.source,
         "src/example.rs",
@@ -188,6 +262,7 @@ fn rejects_credentials_symlinks_unknown_absolute_and_parent_paths() {
     for path in [
         "code/.env",
         "code/secrets.json",
+        "code/.claude/worktrees/old-checkout/src/example.rs",
         "code/src/escape.txt",
         "/etc/passwd",
         "code/../outside.txt",
@@ -391,62 +466,82 @@ fn deployment_catalog_graphs_and_state_root_schedules_are_collected() {
 }
 
 #[test]
-fn run_projection_reports_timestamps_activation_recovery_and_failure() {
-    let (_temp, config) = setup();
-    let run = json!({
-        "format": 8,
-        "run_id": "run-8",
-        "graph_digest": "0123456789abcdef0123456789abcdef",
-        "snapshot": {
-            "objective": "weekly review of Anchor",
-            "entry": "collect",
-            "nodes": [{"id": "collect"}, {"id": "gate"}]
-        },
-        "status": "failed",
-        "started": "2026-10-09T10:00:00.000Z",
-        "updated": "2026-10-09T10:02:30.500Z",
-        "error": "worker failed: Goose ended without a validated final_result",
-        "sequence": 42,
-        "cursor": {
-            "node_id": "collect",
-            "key": {"node_id": "collect", "invocation": 2},
-            "prepared_input": {"secret": "do-not-copy"}
-        },
-        "recovery": [{"node_id": "collect"}],
-        "recovery_submissions": [{"node_id": "collect"}],
-        "results": {
-            "fork": [{"sequence": 3, "completion": {"output": {
-                "activation_id": "parallel:fork:1",
-                "fanout": "fork",
-                "join": "join",
-                "branches": [["left"], ["right"]]
-            }}}],
-            "join": [{"sequence": 9, "completion": {"route": "ok", "output": {
-                "activation_id": "parallel:fork:1",
-                "branches": [
-                    {"branch_id": "parallel:fork:1:branch:0", "entry": "left", "output": "left", "status": "completed"},
-                    {"branch_id": "parallel:fork:1:branch:1", "entry": "right", "output": "right", "status": "failed"}
-                ]
-            }}}],
-            "collect": [{"sequence": 5, "completion": {"output": {"exit_code": 0, "stdout": "private body"}}}]
-        }
-    });
-    write(
-        &config.data,
-        "workspaces/x/runs/run-8/run.json",
-        &run.to_string(),
+fn run_projection_reports_timestamps_activation_and_failure() {
+    let (_temp, mut config) = setup();
+    let state = config.data.join("state");
+    let mut record = graph_record("run-8", &["collect", "gate"]);
+    record.started = Some("2026-10-09T10:00:00.000Z".into());
+    record.sequence = 42;
+    record.input = json!({"secret":"do-not-copy"});
+    record.invocations.insert("collect".into(), 2);
+    record.results.insert(
+        "fork".into(),
+        vec![run_result(
+            &record,
+            "fork",
+            1,
+            3,
+            json!({
+                "activation_id":"parallel:fork:1",
+                "fanout":"fork",
+                "join":"join",
+                "branches":[["left"],["right"]]
+            }),
+        )],
     );
+    record.results.insert(
+        "join".into(),
+        vec![run_result(
+            &record,
+            "join",
+            1,
+            9,
+            json!({
+                "activation_id":"parallel:fork:1",
+                "branches":[
+                    {"branch_id":"parallel:fork:1:branch:0","entry":"left","output":"left","status":"completed"},
+                    {"branch_id":"parallel:fork:1:branch:1","entry":"right","output":"right","status":"failed"}
+                ]
+            }),
+        )],
+    );
+    record.results.insert(
+        "collect".into(),
+        vec![run_result(
+            &record,
+            "collect",
+            2,
+            5,
+            json!({"exit_code":0,"stdout":"private body"}),
+        )],
+    );
+    store_run(
+        &state,
+        &record,
+        Phase::Settled {
+            result: Outcome::Failed {
+                reason: Reason::Unclassified,
+                detail: "worker failed: Goose ended without a validated final_result".into(),
+            },
+        },
+    );
+    write(
+        &state,
+        "kernel-run-observations/run-8.json",
+        r#"{"updated":"2026-10-09T10:02:30.500Z"}"#,
+    );
+    config.rust_state = Some(state);
     let evidence_root = config.evidence.clone();
     let evidence = Evidence::collect(config).unwrap();
     let entry = evidence
         .entries
         .values()
-        .find(|entry| entry.domain == "runs")
+        .find(|entry| entry.domain == "runs" && entry.path != "runs/schedules.json")
         .unwrap();
     let projected: Value =
         serde_json::from_str(&fs::read_to_string(evidence_root.join(&entry.frozen_file)).unwrap())
             .unwrap();
-    assert_eq!(projected["format"], 8);
+    assert_eq!(projected["format"], 15);
     assert_eq!(projected["time_basis"], "declared timestamp");
     assert_eq!(projected["duration_ms"], 150500);
     assert_eq!(projected["graph_entry"], "collect");
@@ -455,7 +550,7 @@ fn run_projection_reports_timestamps_activation_recovery_and_failure() {
         projected["graph"]
             .as_str()
             .unwrap()
-            .starts_with("collect@0123456789ab"),
+            .starts_with(&format!("collect@{}", &record.graph_digest[..12])),
         "{}",
         projected["graph"]
     );
@@ -463,15 +558,14 @@ fn run_projection_reports_timestamps_activation_recovery_and_failure() {
         projected["error"],
         "worker failed: Goose ended without a validated final_result"
     );
-    assert_eq!(projected["recovery"]["pending"], 1);
-    assert_eq!(projected["recovery"]["submissions"], 1);
+    assert!(projected.get("recovery").is_none());
     assert_eq!(projected["fanout"]["fanout_node"], "fork");
     assert_eq!(projected["fanout"]["join_node"], "join");
     assert_eq!(projected["join"]["branches"][0]["status"], "completed");
     assert_eq!(projected["join"]["branches"][1]["status"], "failed");
     assert_eq!(projected["results"]["collect"]["attempts"], 1);
     assert_eq!(projected["results"]["collect"]["last_exit_code"], 0);
-    assert_eq!(projected["cursor"]["node_id"], "collect");
+    assert!(projected.get("cursor").is_none());
     assert!(!projected.to_string().contains("do-not-copy"));
     assert!(!projected.to_string().contains("private body"));
 }

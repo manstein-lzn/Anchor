@@ -36,7 +36,7 @@ async fn explicit_kernel_probe_runs_real_host_ops_and_projects_existing_queries(
     let _env = PROCESS_ENV.lock().await;
     set_host_env(root.path());
     let definition = json!({"objective":"kernel probe","entry":"a","agents":{},
-        "ops":{"work":{"run":"sh -c 'printf kernel-artifact > report.txt'"}},
+        "ops":{"work":{"run":"sh -c 'printf kernel-artifact > report.txt'","writes":["report.txt"]}},
         "nodes":[{"id":"a","op":"work"},{"id":"b","op":"work"},{"id":"c","op":"work"}],
         "edges":[{"from":"a","to":"b"},{"from":"b","to":"c"}]});
     std::fs::write(state.bundle_root.join("graph.json"), definition.to_string()).unwrap();
@@ -121,7 +121,7 @@ async fn kernel_read_view_http_tracks_running_human_wait_and_settlement_with_hos
                 Ok(NodeExecutionOutcome::Completed(NodeCompletion {
                     submission: "late".into(),
                     route: None,
-                    output: json!({}),
+                    output: json!({"files":[]}),
                     model_requests: 1,
                 }))
             })
@@ -232,7 +232,7 @@ async fn legacy_and_kernel_http_share_executing_paused_and_settled_projections()
     write_graph_bundle(&state.bundle_root, &json!({
         "objective":"HTTP lifecycle comparison","entry":"work","agents":{},
         "ops":{
-            "work":{"run":"printf ready > gate.ready; while [ ! -f gate.release ]; do sleep 0.02; done; printf once > report.txt","wall_time_limit_seconds":15},
+            "work":{"run":"printf ready > gate.ready; while [ ! -f gate.release ]; do sleep 0.02; done; printf once > report.txt","writes":["report.txt"],"wall_time_limit_seconds":15},
             "finish":{"run":"true"}
         },
         "nodes":[{"id":"work","op":"work"},{"id":"finish","op":"finish"}],

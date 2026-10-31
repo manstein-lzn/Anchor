@@ -58,7 +58,7 @@ fn completion() -> NodeCompletion {
         submission: "fixture result".into(),
         route: None,
         model_requests: 3,
-        output: json!({"proof":"host-port"}),
+        output: json!({"proof":"host-port","files":[]}),
     }
 }
 impl NodeExecutionPort for Nodes {

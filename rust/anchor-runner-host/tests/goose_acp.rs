@@ -15,7 +15,7 @@ fn graph() -> Value {
         "objective":"real Goose native loop with deterministic local transport", "entry":"worker",
         "agents":{"worker":{"model":"fixture-goose","instructions":"Use the provided Anchor tools. Write evidence.txt, inspect tool feedback, then final_result with route verify.","wall_time_limit_seconds":40}},
         "ops":{
-            "verify":{"run":"sh -c 'set -eu; cat /in/worker/evidence.txt > verified.txt'"},
+            "verify":{"writes":["verified.txt"],"run":"sh -c 'set -eu; cat /in/worker/evidence.txt > verified.txt'"},
             "unused":{"run":"sh -c 'printf wrong-branch > wrong.txt'"}
         },
         "nodes":[{"id":"worker","agent":"worker"},{"id":"verify","op":"verify"},{"id":"unused","op":"unused"}],
@@ -30,7 +30,9 @@ fn native_goose_direct_model_transport_requires_observed_tool_receipt() {
         "goose-native-direct-receipt",
         vec![
             command("printf 'native-goose-evidence\\n' > evidence.txt; cat evidence.txt"),
-            complete("verify").after("native-goose-evidence"),
+            complete("verify")
+                .files(&["evidence.txt"])
+                .after("native-goose-evidence"),
         ],
     );
     let mut definition = graph();
@@ -123,6 +125,149 @@ fn native_goose_direct_model_transport_requires_observed_tool_receipt() {
 
 #[test]
 #[ignore = "requires pinned Goose binary"]
+fn native_goose_feedback_continues_node_history_without_crossing_node_or_run_boundaries() {
+    let definition = json!({
+        "objective":"continue a node's native conversation after feedback", "entry":"worker",
+        "agents":{"shared":{"model":"fixture-goose","reads":["evidence.txt"],"writes":["evidence.txt"],"instructions":"Inspect the authorized workspace and feedback with Anchor tools, then choose an allowed route."}},
+        "ops":{
+            "feedback":{"reads":["evidence.txt"],"writes":["feedback.txt"],"run":"sh -c 'set -eu; test \"$(cat /in/worker/evidence.txt)\" = workspace-retained; printf revise > feedback.txt'"},
+            "done":{"reads":["evidence.txt"],"writes":["verified.txt"],"run":"sh -c 'set -eu; cat /in/peer/evidence.txt > verified.txt'"}
+        },
+        "nodes":[{"id":"worker","agent":"shared"},{"id":"feedback","op":"feedback"},{"id":"peer","agent":"shared"},{"id":"done","op":"done"}],
+        "edges":[{"from":"worker","to":"feedback"},{"from":"feedback","to":"worker"},{"from":"worker","to":"peer"},{"from":"peer","to":"done"}]
+    });
+    let markers = [
+        "first-run-dialogue-only-741c",
+        "second-run-dialogue-only-8ea2",
+    ];
+    let provider = Provider::new("goose-native-feedback-continuity", vec![]);
+    let host = Host::new(&definition).native();
+    let server = host.serve(&provider);
+    let mut identities = Vec::new();
+    let mut runs = Vec::new();
+    for (index, &marker) in markers.iter().enumerate() {
+        let offset = provider.requests().len();
+        provider.append(vec![
+            // The marker never enters a file, input, or completion summary.
+            command("set -eu; test ! -e evidence.txt; printf 'workspace-retained\\n' > evidence.txt; cat evidence.txt")
+                .with_preface(marker),
+            complete("feedback")
+                .files(&["evidence.txt"])
+                .after("workspace-retained"),
+            command("set -eu; test \"$(cat evidence.txt)\" = workspace-retained; test \"$(cat /in/feedback/feedback.txt)\" = revise; printf feedback-workspace-retained")
+                .expect_request_contains(marker),
+            complete("peer")
+                .files(&["evidence.txt"])
+                .after("feedback-workspace-retained"),
+            command("set -eu; test ! -e evidence.txt; printf 'peer-isolated\\n' > evidence.txt; cat evidence.txt"),
+            complete("done")
+                .files(&["evidence.txt"])
+                .after("peer-isolated"),
+        ]);
+        let run = server.trigger();
+        let response = server.wait_status(&run, "completed");
+        assert_eq!(response["projection"]["outcome"], "done", "{response}");
+        provider.assert_consumed();
+        let saved = host.record(&run);
+        assert_eq!(saved["invocations"]["worker"], 2);
+        assert_eq!(saved["invocations"]["peer"], 1);
+        assert_artifact(
+            &host,
+            &saved,
+            "worker",
+            "evidence.txt",
+            b"workspace-retained\n",
+        );
+        assert_artifact(&host, &saved, "done", "verified.txt", b"peer-isolated\n");
+
+        let requests = provider.requests();
+        let requests = &requests[offset..];
+        assert_eq!(requests.len(), 6);
+        assert!(!requests[0]["messages"].to_string().contains(marker));
+        let previous = requests[1]["messages"].as_array().unwrap();
+        let continued = requests[2]["messages"].as_array().unwrap();
+        assert!(
+            previous
+                .iter()
+                .any(|message| message.to_string().contains(marker))
+        );
+        assert!(
+            continued
+                .iter()
+                .any(|message| message.to_string().contains(marker))
+        );
+        assert!(
+            continued.starts_with(previous),
+            "the model must receive the original message prefix unchanged: {previous:?} -> {continued:?}"
+        );
+        assert!(
+            requests[4..]
+                .iter()
+                .all(|request| !request["messages"].to_string().contains(marker)),
+            "the other node uses the same role but must not inherit worker's dialogue"
+        );
+        if index > 0 {
+            assert!(
+                requests.iter().all(|request| {
+                    !request["messages"].to_string().contains(markers[index - 1])
+                }),
+                "an unbound new Run must not inherit the preceding Run's dialogue"
+            );
+        }
+
+        let (first, first_native, first_process) = host.native_record(&run, "worker", 1);
+        let (second, second_native, second_process) = host.native_record(&run, "worker", 2);
+        let (peer, peer_native, peer_process) = host.native_record(&run, "peer", 1);
+        assert!(first["conversation_scope"].is_string());
+        assert!(first["session_id"].is_string());
+        assert_eq!(first["conversation_scope"], second["conversation_scope"]);
+        assert_eq!(first_process, second_process);
+        assert_eq!(first["session_id"], second["session_id"]);
+        assert_eq!(first_native["continuation"], false);
+        assert_eq!(second_native["continuation"], true);
+        assert_eq!(second_native["resume"], false);
+        assert!(
+            second_native["restored_history"]
+                .as_array()
+                .is_some_and(|history| !history.is_empty())
+        );
+        assert!(peer["conversation_scope"].is_string());
+        assert_ne!(first["conversation_scope"], peer["conversation_scope"]);
+        assert_ne!(first_process, peer_process);
+        assert_eq!(peer_native["continuation"], false);
+        // Native IDs may repeat in separate databases; storage is part of identity.
+        assert_ne!(
+            (&first_process, &first["session_id"]),
+            (&peer_process, &peer["session_id"])
+        );
+        for (scope, process, session) in &identities {
+            assert_ne!(scope, &first["conversation_scope"]);
+            assert_ne!(process, &first_process);
+            assert_ne!((process, session), (&first_process, &first["session_id"]));
+        }
+        identities.push((
+            first["conversation_scope"].clone(),
+            first_process,
+            first["session_id"].clone(),
+        ));
+        runs.push(run);
+    }
+    host.evidence(
+        &provider,
+        &runs[0],
+        json!({
+            "dialogue_only_marker_reaches_feedback_invocation":true,
+            "model_message_prefix_preserved":true,
+            "workspace_retained":true,
+            "same_role_nodes_isolated":true,
+            "unbound_runs_isolated":true,
+            "runs":runs
+        }),
+    );
+}
+
+#[test]
+#[ignore = "requires pinned Goose binary"]
 fn native_goose_disclosed_tools_round_trip_keeps_the_completion_contract() {
     // With on-demand disclosure the model sees Anchor's own tools plus the five
     // disclosure tools, and a call made through them still reaches the bridge, so
@@ -140,7 +285,9 @@ fn native_goose_disclosed_tools_round_trip_keeps_the_completion_contract() {
                 }),
             )
             .after("anchor_run"),
-            complete("verify").after("anchor_receipt"),
+            complete("verify")
+                .files(&["evidence.txt"])
+                .after("anchor_receipt"),
         ],
     );
     let host = Host::new(&graph())
@@ -223,7 +370,7 @@ fn native_goose_turn_context_carries_the_host_boundary() {
         "goose-native-boundary",
         vec![
             command("printf 'boundary-check' > evidence.txt"),
-            complete("verify"),
+            complete("verify").files(&["evidence.txt"]),
         ],
     );
     let host = Host::new(&graph()).native();
@@ -287,7 +434,7 @@ fn native_goose_file_tools_read_and_edit_through_the_bridge() {
             )
             .after("two"),
             command("grep -c ONE evidence.txt").after("sha256_after"),
-            complete("verify").after("1"),
+            complete("verify").files(&["evidence.txt"]).after("1"),
         ],
     );
     let host = Host::new(&graph()).native();
@@ -331,7 +478,7 @@ fn native_goose_unknown_external_effect_reopens_same_session_and_checks_before_c
         Step::tool("anchor_run", json!({"command":["sh","-c",format!(
             "set -e; curl --silent --show-error --fail --max-time 5 --noproxy '*' '{}/effects' > evidence.txt; cat evidence.txt", business.url
         )]})).after("final_result.observed_receipt must match"),
-        complete("verify").after("effect_count"),
+        complete("verify").files(&["evidence.txt"]).after("effect_count"),
     ]);
     let mut definition = graph();
     definition["agents"]["worker"]["network"] = json!(true);
@@ -421,9 +568,11 @@ fn native_goose_rejects_guessed_receipt_then_accepts_observed_result() {
             command("printf native > evidence.txt; cat evidence.txt"),
             Step::tool(
                 "final_result",
-                json!({"summary":"must reject","route":"verify","observed_receipt":"guessed-before-tool-result"}),
+                json!({"files":[],"summary":"must reject","route":"verify","observed_receipt":"guessed-before-tool-result"}),
             ),
-            complete("verify").after("final_result.observed_receipt must match"),
+            complete("verify")
+                .files(&["evidence.txt"])
+                .after("final_result.observed_receipt must match"),
         ],
     );
     let host = Host::new(&graph()).native();
@@ -701,7 +850,9 @@ fn real_goose_tools_route_artifacts_and_completed_restart_without_provider_repla
             command(
                 "set -eu; printf goose-evidence > evidence.txt; printf once > effects.txt; printf fixture-written",
             ),
-            complete("verify").after("fixture-written"),
+            complete("verify")
+                .files(&["evidence.txt", "effects.txt"])
+                .after("fixture-written"),
             Step::text("Fixture finished.").after(""),
         ],
     );
@@ -743,8 +894,10 @@ fn real_goose_invalid_route_feedback_is_corrected_before_branch_commit() {
         "goose-route-correction",
         vec![
             command("printf goose-evidence > evidence.txt; printf fixture-written"),
-            complete("unknown").after("fixture-written"),
-            complete("verify").after(""),
+            complete("unknown")
+                .files(&["evidence.txt"])
+                .after("fixture-written"),
+            complete("verify").files(&["evidence.txt"]).after(""),
             Step::text("Corrected fixture finished.").after(""),
         ],
     );
@@ -798,7 +951,9 @@ fn denied_command_and_absolute_path(native: bool) {
         ))
         .after(""),
         command("printf goose-evidence > evidence.txt; printf fixture-written").after(""),
-        complete("verify").after("fixture-written"),
+        complete("verify")
+            .files(&["evidence.txt"])
+            .after("fixture-written"),
     ];
     if !native {
         script.push(Step::text("Sandbox fixture finished.").after(""));
@@ -927,7 +1082,9 @@ fn real_goose_business_after_final_result_is_rejected_without_commit() {
         "goose-post-final-rejection",
         vec![
             command("printf goose-evidence > evidence.txt; printf fixture-written"),
-            complete("verify").after("fixture-written"),
+            complete("verify")
+                .files(&["evidence.txt"])
+                .after("fixture-written"),
             command("printf forbidden > after-final.txt").after("fixture complete"),
             Step::text("Post-completion business call was refused.")
                 .after("tools after node completion are refused"),

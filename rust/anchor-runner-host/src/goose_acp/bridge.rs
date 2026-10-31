@@ -60,15 +60,10 @@ pub(super) struct DeclaredOutputs {
 }
 
 impl DeclaredOutputs {
-    fn missing(&self) -> Result<(), String> {
-        let missing = crate::node_host::missing_outputs(&self.workspace, &self.writes);
-        if missing.is_empty() {
-            return Ok(());
-        }
-        Err(format!(
-            "final_result refused: {}. Write them at those paths, relative to /workspace, then call final_result again. No completion was recorded.",
-            crate::node_host::missing_outputs_reason(&missing)
-        ))
+    fn validate(&self, completion: &Value) -> Result<(), String> {
+        let selection = anchor_runtime::artifact::ArtifactSelection::from_output(completion)?;
+        crate::artifacts::validate_selection(&self.workspace, &selection, &self.writes)
+            .map_err(|error| format!("final_result refused: {error}. Correct the files or delivery list, then call final_result again. No completion was recorded."))
     }
 }
 
@@ -251,7 +246,7 @@ impl ServerHandler for McpBridge {
                 let completion =
                     validate_completion(&completion, &self.state.routes).and_then(|completion| {
                         match &self.state.outputs {
-                            Some(outputs) => outputs.missing().map(|()| completion),
+                            Some(outputs) => outputs.validate(&completion).map(|()| completion),
                             None => Ok(completion),
                         }
                     });
@@ -481,17 +476,21 @@ pub(super) fn completion_schema(routes: &[String]) -> Value {
         json!({"type":"string","enum":routes})
     };
     let required = if routes.len() > 1 {
-        json!(["summary", "route"])
+        json!(["summary", "files", "route"])
     } else {
-        json!(["summary"])
+        json!(["summary", "files"])
     };
-    json!({"type":"object","properties":{"summary":{"type":"string","minLength":1},"route":route},
+    json!({"type":"object","properties":{"summary":{"type":"string","minLength":1},"route":route,
+        "files":{"type":"array","items":{"type":"string"},"description":"Complete list of workspace-relative files or directories to deliver. Directories export recursively. Use [] for text only; include every declared writes output. The remaining workspace stays private and is not archived."}},
         "required":required,"additionalProperties":false})
 }
 
 pub(super) fn validate_completion(value: &Value, routes: &[String]) -> Result<Value, String> {
     let object = value.as_object().ok_or("completion must be an object")?;
-    if object.keys().any(|key| key != "summary" && key != "route") {
+    if object
+        .keys()
+        .any(|key| key != "summary" && key != "route" && key != "files")
+    {
         return Err("unknown completion field".into());
     }
     let summary = value["summary"]
@@ -503,7 +502,8 @@ pub(super) fn validate_completion(value: &Value, routes: &[String]) -> Result<Va
         Some(Value::String(route)) if routes.contains(route) => Some(route.clone()),
         _ => return Err("completion route is not an allowed outgoing route".into()),
     };
-    Ok(json!({"summary":summary,"route":route}))
+    let files = anchor_runtime::artifact::ArtifactSelection::from_output(value)?.paths;
+    Ok(json!({"summary":summary,"route":route,"files":files}))
 }
 
 async fn authorize(
@@ -1277,6 +1277,7 @@ mod tests {
                     "final_result",
                     json!({
                         "summary":"This receipt must not complete the node.",
+                        "files":[],
                         "observed_receipt":rejected_receipt
                     }),
                     "rejected-final",
@@ -1297,6 +1298,7 @@ mod tests {
                 "final_result",
                 json!({
                     "summary":"Observed the failed business result and latest discovery result.",
+                    "files":[],
                     "observed_receipt":discovered["anchor_receipt"]
                 }),
                 "accepted-final",
@@ -1348,7 +1350,7 @@ mod tests {
         );
         assert!(!tools.finished.load(Ordering::SeqCst));
 
-        let submit = json!({"summary":"accepted candidate"});
+        let submit = json!({"summary":"accepted candidate","files":[]});
         let accepted = client
             .call_tool(native_request("final_result", submit.clone(), "final", 1))
             .await
@@ -1377,7 +1379,7 @@ mod tests {
         for request in [
             native_request(
                 "final_result",
-                json!({"summary":"conflicting candidate"}),
+                json!({"summary":"conflicting candidate","files":[]}),
                 "conflict",
                 1,
             ),
@@ -1426,8 +1428,8 @@ mod tests {
             .auth_header(bridge.token.clone());
         let client = ().serve(StreamableHttpClientTransport::from_config(config)).await.unwrap();
         for submit in [
-            json!({"summary":"missing"}),
-            json!({"summary":"old","observed_receipt":"old"}),
+            json!({"summary":"missing","files":[]}),
+            json!({"summary":"old","observed_receipt":"old","files":[]}),
         ] {
             assert_eq!(
                 client
@@ -1448,7 +1450,7 @@ mod tests {
         let accepted = client
             .call_tool(native_request(
                 "final_result",
-                json!({"summary":"inspected", "observed_receipt":output["anchor_receipt"]}),
+                json!({"summary":"inspected", "observed_receipt":output["anchor_receipt"],"files":[]}),
                 "final",
                 1,
             ))
@@ -1572,8 +1574,12 @@ mod tests {
             assert!(validate_completion(&value, &routes).is_err());
         }
         assert_eq!(
-            validate_completion(&json!({"summary":"done","route":"retry"}), &routes).unwrap(),
-            json!({"summary":"done","route":"retry"})
+            validate_completion(
+                &json!({"summary":"done","route":"retry","files":[]}),
+                &routes
+            )
+            .unwrap(),
+            json!({"summary":"done","route":"retry","files":[]})
         );
     }
 
@@ -1587,24 +1593,26 @@ mod tests {
         // The blind-03 reviewer wrote into a subdirectory.
         std::fs::create_dir(workspace.path().join("review")).unwrap();
         std::fs::write(workspace.path().join("review/review.json"), "{}").unwrap();
-        let refused = outputs.missing().unwrap_err();
-        assert!(refused.starts_with("final_result refused: declared output(s) missing from /workspace: `review.json`, `data`."), "{refused}");
+        let completion = json!({"files":["review.json","data"]});
+        let refused = outputs.validate(&completion).unwrap_err();
+        assert!(refused.starts_with("final_result refused:"), "{refused}");
         assert!(refused.contains("No completion was recorded"), "{refused}");
         std::fs::write(workspace.path().join("review.json"), "{}").unwrap();
         std::fs::create_dir(workspace.path().join("data")).unwrap();
-        assert_eq!(outputs.missing(), Ok(()));
+        assert_eq!(outputs.validate(&completion), Ok(()));
+        assert!(outputs.validate(&json!({"files":[]})).is_err());
     }
 
     #[test]
     fn no_route_and_single_route_are_explicit() {
         assert_eq!(
-            validate_completion(&json!({"summary":"done"}), &[]).unwrap(),
-            json!({"summary":"done","route":null})
+            validate_completion(&json!({"summary":"done","files":[]}), &[]).unwrap(),
+            json!({"summary":"done","route":null,"files":[]})
         );
         assert!(validate_completion(&json!({"summary":"done","route":"bad"}), &[]).is_err());
         assert_eq!(
-            validate_completion(&json!({"summary":"done"}), &["ok".into()]).unwrap(),
-            json!({"summary":"done","route":"ok"})
+            validate_completion(&json!({"summary":"done","files":[]}), &["ok".into()]).unwrap(),
+            json!({"summary":"done","route":"ok","files":[]})
         );
     }
 

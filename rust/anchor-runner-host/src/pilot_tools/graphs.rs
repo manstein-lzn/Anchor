@@ -89,6 +89,8 @@ impl PilotTools {
                         turn: self.turn.clone(),
                     }),
                     oauth_owner: Some(crate::api::oauth::binding_owner(&self.owner)),
+                    workspace_bindings: Default::default(),
+                    workspace_root: None,
                 },
                 lease,
             )

@@ -110,6 +110,7 @@ pub(crate) fn excluded(name: &str) -> bool {
     matches!(
         name.as_str(),
         ".git"
+            | ".claude"
             | ".env"
             | ".venv"
             | "venv"

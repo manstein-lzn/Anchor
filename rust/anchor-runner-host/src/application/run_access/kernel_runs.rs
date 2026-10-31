@@ -52,6 +52,7 @@ pub(crate) struct KernelRuns {
     // Deletion reserves inactive Runs across filesystem cleanup. Registration,
     // creation and controls take active before this mutex.
     deleting: Mutex<BTreeSet<String>>,
+    pub(super) file_facts: Mutex<()>,
     pause_root: std::path::PathBuf,
     _lease: anchor_file_lease::FileLease,
 }
@@ -104,10 +105,17 @@ impl KernelRuns {
         kernel
             .install(GRAPH_VALIDATOR, Arc::new(GraphValidator))
             .map_err(kernel_error)?;
+        kernel
+            .install(
+                super::file_facts::FILE_VALIDATOR,
+                Arc::new(super::file_facts::HostFiles),
+            )
+            .map_err(kernel_error)?;
         Ok(Self {
             kernel,
             active: Arc::default(),
             deleting: Mutex::default(),
+            file_facts: Mutex::default(),
             pause_root: root
                 .parent()
                 .expect("state root")
@@ -365,6 +373,13 @@ impl RunApplication {
         &self,
         id: &str,
     ) -> Result<Option<Arc<KernelRuns>>, ApplicationError> {
+        Ok(self.kernel_resource(id)?.map(|(owner, _)| owner))
+    }
+
+    pub(in crate::application::run_access) fn kernel_resource(
+        &self,
+        id: &str,
+    ) -> Result<Option<(Arc<KernelRuns>, Resource)>, ApplicationError> {
         if !anchor_runtime::identifier::is_name(id) {
             return Err(ApplicationError::Invalid("invalid Run id".into()));
         }
@@ -372,20 +387,28 @@ impl RunApplication {
         let Some(runs) = self.kernel_runs(false)? else {
             return Ok(None);
         };
-        if runs.load(id)?.is_none() {
+        let Some(resource) = runs.load(id)? else {
             return Ok(None);
-        }
+        };
         self.reject_legacy_run(id)?;
-        Ok(Some(runs))
+        Ok(Some((runs, resource)))
+    }
+
+    pub(crate) fn registered_run_ids(&self) -> Result<Vec<String>, ApplicationError> {
+        let Some(owner) = self.kernel_runs(false)? else {
+            return Ok(Vec::new());
+        };
+        let mut ids: Vec<_> = owner.active.lock().unwrap().keys().cloned().collect();
+        ids.sort();
+        Ok(ids)
     }
     pub(in crate::application::run_access) fn load_run_impl(
         &self,
         id: &str,
     ) -> Result<Option<GraphRunRecord>, ApplicationError> {
-        if let Some(runs) = self.kernel_owner(id)? {
-            return runs.load(id)?.as_ref().map(KernelRuns::record).transpose();
-        }
-        Ok(None)
+        self.kernel_resource(id)?
+            .map(|(_, resource)| KernelRuns::record(&resource))
+            .transpose()
     }
     #[cfg(not(test))]
     pub(in crate::application::run_access) fn load_run(
@@ -405,31 +428,20 @@ impl RunApplication {
     ) -> Result<Option<GraphRunRecord>, ApplicationError> {
         self.load_run_impl(id)
     }
-    pub(in crate::application::run_access) fn kernel_records(
+    pub(in crate::application::run_access) fn kernel_run_ids(
         &self,
-    ) -> Result<Vec<(String, GraphRunRecord)>, ApplicationError> {
+    ) -> Result<Vec<String>, ApplicationError> {
         let Some(runs) = self.kernel_runs(false)? else {
             return Ok(Vec::new());
         };
-        let mut records = Vec::new();
-        for id in runs
+        Ok(runs
             .kernel
             .store()
-            .list("")
+            .list("run/")
             .map_err(|e| ApplicationError::Storage(e.to_string()))?
-        {
-            if let Some(resource) = runs
-                .kernel
-                .load(&id)
-                .map_err(kernel_error)?
-                .filter(|r| r.validator == GRAPH_VALIDATOR)
-            {
-                let id = record_of(&resource)?.run_id;
-                self.reject_legacy_run(&id)?;
-                records.push((id, KernelRuns::record(&resource)?));
-            }
-        }
-        Ok(records)
+            .into_iter()
+            .map(|id| id.strip_prefix("run/").expect("Run namespace").to_owned())
+            .collect())
     }
 }
 

@@ -1,0 +1,9 @@
+[package]
+name = "anchor-workspace-files"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Confined, atomic creation of workspace delivery files"
+
+[dependencies]
+rustix = { version = "=1.1.5", features = ["fs"] }

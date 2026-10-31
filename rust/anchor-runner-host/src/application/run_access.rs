@@ -6,23 +6,27 @@ use super::{RunApplication, new_control, storage};
 use anchor_kernel::{Outcome, Phase, Waiter};
 mod abandon;
 mod admission;
+mod artifact_files;
 mod assistant_policy;
 mod channels;
 mod control;
 mod conversations;
 mod deletion;
 mod dispatch;
+mod file_facts;
 mod graph_policy;
+pub(crate) use artifact_files::ArtifactAccessError;
 pub(crate) mod http;
 pub(super) mod projection;
 mod reads;
 mod recovery;
 mod session_calls;
 mod store;
+pub(crate) mod workspaces;
 
 pub(crate) use assistant_policy::{graph_lease, graph_read_lease};
 pub(crate) use projection::projected_run_is_unfinished;
-pub(crate) use reads::load;
+pub(crate) use reads::{load, status_projection};
 use store::wait_child_ids;
 
 use super::{ApplicationError, RunMetadata};

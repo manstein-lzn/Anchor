@@ -14,7 +14,7 @@ use tokio_tungstenite::{
 
 use super::{
     ConnectionStatus, Driver, MAX_IN_FLIGHT, MAX_MEDIA_IN_FLIGHT, MediaJob, MediaPending,
-    MediaStage, MediaStep, PendingDelivery, SendRequest, stopping,
+    MediaStage, MediaStep, MediaTarget, PendingDelivery, SendContent, SendRequest, stopping,
 };
 use crate::{
     GatewayError, MAX_MEDIA_FRAME_BYTES, MAX_REQUEST_BYTES,
@@ -243,52 +243,80 @@ impl Driver {
         socket: &mut Socket,
         request: SendRequest,
     ) -> Result<bool, GatewayError> {
-        if request.response.is_closed() {
+        if request.delivery.response.is_closed() {
             return Ok(true);
         }
         let digest = request.digest();
-        match self.ledger.previous("send", &request.request_id, &digest) {
+        match self
+            .ledger
+            .previous("send", &request.delivery.request_id, &digest)
+        {
             Ok(true) => {
-                request.complete(true);
+                request.delivery.complete(true);
                 return Ok(true);
             }
             Err(error) => {
-                request.fail(error);
+                request.delivery.fail(error);
                 return Ok(true);
             }
             Ok(false) => {}
         }
-        if self.pending.len() >= MAX_IN_FLIGHT {
-            request.fail(GatewayError::Invalid(
+        if self.pending.len() + self.media.len() >= MAX_IN_FLIGHT {
+            request.delivery.fail(GatewayError::Invalid(
                 "platform send concurrency limit reached",
             ));
             return Ok(true);
         }
+        let SendRequest { delivery, content } = request;
+        let content = match content {
+            SendContent::Markdown(content) => content,
+            SendContent::File(item) => {
+                let target = MediaTarget::Proactive(delivery);
+                if self
+                    .media
+                    .iter()
+                    .any(|job| job.target.key() == target.key())
+                {
+                    target.fail(GatewayError::Conflict(
+                        "file delivery is already being prepared",
+                    ));
+                    return Ok(true);
+                }
+                self.media.push_back(MediaJob {
+                    target,
+                    item,
+                    send_digest: digest,
+                    attempts: 0,
+                    stage: MediaStage::Init,
+                });
+                return Ok(true);
+            }
+        };
         let wire_id = identifier("send");
         let value = frame(
             "aibot_send_msg",
             &wire_id,
-            json!({"chatid": request.userid, "chat_type": 1, "msgtype":"markdown",
-                "markdown":{"content":request.content}}),
+            json!({"chatid": delivery.userid, "chat_type": 1, "msgtype":"markdown",
+                "markdown":{"content":content}}),
         );
         let data = match encode(value) {
             Ok(data) => data,
             Err(error) => {
-                request.fail(error);
+                delivery.fail(error);
                 return Ok(true);
             }
         };
         match self
             .ledger
-            .claim("send", &request.request_id, &digest, &wire_id)
+            .claim("send", &delivery.request_id, &digest, &wire_id)
         {
             Ok(true) => {}
             Ok(false) => {
-                request.complete(true);
+                delivery.complete(true);
                 return Ok(true);
             }
             Err(error) => {
-                request.fail(error);
+                delivery.fail(error);
                 return Ok(true);
             }
         }
@@ -297,7 +325,7 @@ impl Driver {
             PendingDelivery {
                 wire_id: wire_id.clone(),
                 event_id: None,
-                request: Some(request),
+                request: Some(delivery),
                 deadline: Instant::now() + self.config.timing.ack_timeout,
             },
         );
@@ -397,7 +425,7 @@ impl Driver {
         Ok(sent)
     }
 
-    /// Advance reply-image uploads. One pass sends at most one frame per job;
+    /// Advance media uploads. One pass sends at most one frame per job;
     /// each frame waits for its correlated acknowledgement before the next step.
     async fn dispatch_media(&mut self, socket: &mut Socket) -> Result<bool, GatewayError> {
         let queued = self.media.len();
@@ -409,39 +437,72 @@ impl Driver {
             // Reply images and the text share one platform `req_id`, so their
             // acknowledgements are indistinguishable: keep a single media step
             // in flight per event, and wait until the text stops being pending.
-            let busy = self
-                .media_pending
-                .values()
-                .any(|pending| pending.event_id == job.event_id)
-                || self.pending.contains_key(&job.callback_id);
+            let job_key = job.target.key();
+            let busy = self.media_pending.values().any(|pending| {
+                if pending.job_key == job_key {
+                    return true;
+                }
+                let MediaTarget::Reply { event_id, .. } = &job.target else {
+                    return false;
+                };
+                pending.reply_event_id.as_ref() == Some(event_id)
+            }) || matches!(&job.target, MediaTarget::Reply { callback_id, .. }
+                    if self.pending.contains_key(callback_id));
             if busy || self.media_pending.len() >= MAX_MEDIA_IN_FLIGHT {
                 deferred.push(job);
                 continue;
             }
-            if !crate::config::allowed(&self.config.inbound_users, &job.sender_id)
-                || !self.ledger.is_latest_event(&job.event_id)?
-            {
-                continue;
+            match &job.target {
+                MediaTarget::Reply {
+                    event_id,
+                    sender_id,
+                    ..
+                } => {
+                    if !crate::config::allowed(&self.config.inbound_users, sender_id)
+                        || !self.ledger.is_latest_event(event_id)?
+                    {
+                        continue;
+                    }
+                }
+                MediaTarget::Proactive(request) => {
+                    if request.response.is_closed() {
+                        continue;
+                    }
+                    if !crate::config::allowed(&self.config.send_users, &request.userid) {
+                        job.target
+                            .fail(GatewayError::Invalid("recipient is not allowed"));
+                        continue;
+                    }
+                }
             }
             // A send that already happened, or whose outcome is unknown, must
             // never be repeated: skip the upload instead of spending platform
             // round trips only to refuse the send at the end.
-            match self.ledger.previous(
-                "image",
-                &format!("{}:{}", job.event_id, job.index),
-                &job.send_digest,
-            ) {
+            let (kind, request_id) = job.target.identity();
+            match self.ledger.previous(kind, &request_id, &job.send_digest) {
                 Ok(false) => {}
-                Ok(true) => continue,
-                Err(GatewayError::PreviousUnconfirmed) => {
-                    self.report(GatewayError::PreviousUnconfirmed);
+                Ok(true) => {
+                    job.target.complete(true);
                     continue;
                 }
-                Err(error) => return Err(error),
+                Err(GatewayError::PreviousUnconfirmed) => {
+                    self.report(GatewayError::PreviousUnconfirmed);
+                    job.target.fail(GatewayError::PreviousUnconfirmed);
+                    continue;
+                }
+                Err(error @ GatewayError::Conflict(_)) => {
+                    job.target.fail(error);
+                    continue;
+                }
+                Err(error) => {
+                    job.target.fail(error.clone());
+                    return Err(error);
+                }
             }
             match self.media_step(socket, &mut job).await? {
                 StepOutcome::Sent => deferred.push(job),
-                StepOutcome::Dropped => {}
+                StepOutcome::Completed(duplicate) => job.target.complete(duplicate),
+                StepOutcome::Failed(error) => job.target.fail(error),
                 StepOutcome::Disconnected => {
                     deferred.push(job);
                     self.media.extend(deferred);
@@ -458,7 +519,12 @@ impl Driver {
         socket: &mut Socket,
         job: &mut MediaJob,
     ) -> Result<StepOutcome, GatewayError> {
-        let ledger_wire = format!("{}:{}", job.callback_id, job.index);
+        let ledger_wire = match &job.target {
+            MediaTarget::Reply {
+                callback_id, index, ..
+            } => format!("{callback_id}:{index}"),
+            MediaTarget::Proactive(_) => identifier("send-file"),
+        };
         let (command, wire_id, body, step) = match job.stage {
             MediaStage::Init => {
                 let wire_id = identifier("media-init");
@@ -466,7 +532,7 @@ impl Driver {
                     "aibot_upload_media_init",
                     wire_id,
                     json!({
-                        "type": "image",
+                        "type": job.item.kind,
                         "filename": job.item.name,
                         "total_size": job.item.bytes.len(),
                         "total_chunks": job.item.chunk_count(),
@@ -502,33 +568,41 @@ impl Driver {
                 }
             }
             MediaStage::Sending { ref media_id } => {
-                let request_id = format!("{}:{}", job.event_id, job.index);
+                let (kind, request_id) = job.target.identity();
                 match self
                     .ledger
-                    .claim("image", &request_id, &job.send_digest, &ledger_wire)
+                    .claim(kind, &request_id, &job.send_digest, &ledger_wire)
                 {
                     Ok(true) => {}
-                    Ok(false) => return Ok(StepOutcome::Dropped),
+                    Ok(false) => return Ok(StepOutcome::Completed(true)),
                     Err(GatewayError::PreviousUnconfirmed) => {
                         self.report(GatewayError::PreviousUnconfirmed);
-                        return Ok(StepOutcome::Dropped);
+                        return Ok(StepOutcome::Failed(GatewayError::PreviousUnconfirmed));
                     }
                     Err(error) => return Err(error),
                 }
-                (
-                    "aibot_respond_msg",
-                    job.callback_id.clone(),
-                    json!({"msgtype": "image", "image": {"media_id": media_id}}),
-                    MediaStep::Send,
-                )
+                let mut body = json!({"msgtype": job.item.kind});
+                body[job.item.kind] = json!({"media_id": media_id});
+                let (command, wire_id) = match &job.target {
+                    MediaTarget::Reply { callback_id, .. } => {
+                        ("aibot_respond_msg", callback_id.clone())
+                    }
+                    MediaTarget::Proactive(request) => {
+                        body["chatid"] = json!(request.userid);
+                        body["chat_type"] = json!(1);
+                        ("aibot_send_msg", ledger_wire.clone())
+                    }
+                };
+                (command, wire_id, body, MediaStep::Send)
             }
         };
         let data = encode_media(frame(command, &wire_id, body))?;
         let sent = write(socket, data, self.config.timing.ack_timeout).await;
         if super::diagnostics() {
             eprintln!(
-                "anchor-wecom-gateway: media step {} for {}:{} written={sent}",
-                command, job.event_id, job.index
+                "anchor-wecom-gateway: media step {} for {} written={sent}",
+                command,
+                job.target.key()
             );
         }
         if !sent {
@@ -537,8 +611,11 @@ impl Driver {
         self.media_pending.insert(
             wire_id,
             MediaPending {
-                event_id: job.event_id.clone(),
-                index: job.index,
+                job_key: job.target.key(),
+                reply_event_id: match &job.target {
+                    MediaTarget::Reply { event_id, .. } => Some(event_id.clone()),
+                    MediaTarget::Proactive(_) => None,
+                },
                 step,
                 ledger_wire,
                 deadline: Instant::now() + self.config.timing.ack_timeout,
@@ -550,7 +627,8 @@ impl Driver {
 
 enum StepOutcome {
     Sent,
-    Dropped,
+    Completed(bool),
+    Failed(GatewayError),
     Disconnected,
 }
 

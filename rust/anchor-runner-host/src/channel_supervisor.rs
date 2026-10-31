@@ -11,7 +11,8 @@ use std::{
 };
 use tokio::{
     process::{Child, Command},
-    sync::Notify,
+    runtime::Handle,
+    sync::{Notify, watch},
     task::JoinHandle,
     time::{Instant, sleep},
 };
@@ -85,6 +86,7 @@ pub(crate) struct ManagedChannelLaunch {
 pub(crate) struct ChannelSupervisor {
     shutdown: std::sync::Arc<Notify>,
     task: Option<JoinHandle<()>>,
+    fallback: watch::Receiver<status::ConnectionStatus>,
     cleanup_paths: Vec<(PathBuf, PathBuf)>,
 }
 
@@ -109,6 +111,7 @@ pub(crate) fn descriptor_path(state_root: &Path, graph: &str) -> PathBuf {
 
 impl ChannelSupervisor {
     pub(crate) async fn start_managed(
+        host_runtime: &Handle,
         bundle_root: &Path,
         library_root: &Path,
         state_root: &Path,
@@ -211,12 +214,28 @@ impl ChannelSupervisor {
             }),
         };
         let shutdown = std::sync::Arc::new(Notify::new());
-        let task = tokio::spawn(supervise(vec![launch], shutdown.clone()));
+        let (status, fallback) = watch::channel(status::ConnectionStatus::Connecting);
+        // A Pilot Turn owns a temporary runtime. Its caller may start a bot,
+        // but the Host runtime must own both supervision and child IO.
+        let task = host_runtime.spawn(supervise(vec![launch], shutdown.clone(), status));
         Ok(Self {
             shutdown,
             task: Some(task),
+            fallback,
             cleanup_paths: vec![(descriptor, control_socket)],
         })
+    }
+
+    fn is_running(&self) -> bool {
+        self.task.as_ref().is_some_and(|task| !task.is_finished())
+    }
+
+    fn fallback_status(&self) -> status::ConnectionStatus {
+        if self.is_running() {
+            *self.fallback.borrow()
+        } else {
+            status::ConnectionStatus::Unavailable
+        }
     }
 
     pub(crate) async fn shutdown(&mut self) {
@@ -297,7 +316,11 @@ fn discover(bundle_root: &Path, library_root: &Path) -> io::Result<Vec<Discovere
     Ok(channels.into_values().collect())
 }
 
-async fn supervise(launches: Vec<LaunchSpec>, shutdown: std::sync::Arc<Notify>) {
+async fn supervise(
+    launches: Vec<LaunchSpec>,
+    shutdown: std::sync::Arc<Notify>,
+    status: watch::Sender<status::ConnectionStatus>,
+) {
     let mut children = (0..launches.len())
         .map(|_| None::<Child>)
         .collect::<Vec<_>>();
@@ -313,6 +336,7 @@ async fn supervise(launches: Vec<LaunchSpec>, shutdown: std::sync::Arc<Notify>) 
                 .as_ref()
                 .is_some_and(|guard| !guard.valid())
             {
+                status.send_replace(status::ConnectionStatus::Unavailable);
                 if let Some(mut child) = children[index].take() {
                     stop_child(&mut child).await;
                 }
@@ -341,12 +365,23 @@ async fn supervise(launches: Vec<LaunchSpec>, shutdown: std::sync::Arc<Notify>) 
                         restart_at[index] = now + restart_delay();
                     }
                 }
+                if children[index].is_none() {
+                    status.send_replace(status::ConnectionStatus::Reconnecting);
+                } else if launch.descriptor.is_file() {
+                    // Once published, a missing/unresponsive control endpoint
+                    // is unavailable; do not keep calling it initial startup.
+                    status.send_replace(status::ConnectionStatus::Unavailable);
+                }
             }
             if children[index].is_none() && now >= restart_at[index] {
                 remove_launch_control_paths(launch);
                 match spawn(launch) {
-                    Ok(child) => children[index] = Some(child),
+                    Ok(child) => {
+                        children[index] = Some(child);
+                        status.send_replace(status::ConnectionStatus::Connecting);
+                    }
                     Err(error) => {
+                        status.send_replace(status::ConnectionStatus::Reconnecting);
                         eprintln!(
                             "anchor channel {} failed to start: {}; retrying",
                             launch.platform, error
@@ -699,6 +734,7 @@ mod tests {
                 })
                 .unwrap_or_default();
             let result = ChannelSupervisor::start_managed(
+                &Handle::current(),
                 root.path(),
                 root.path(),
                 &root.path().join("state"),
@@ -729,6 +765,7 @@ mod tests {
             .path()
             .join(format!("state-{}", TEST_ID.fetch_add(1, Ordering::Relaxed)));
         let mut supervisor = ChannelSupervisor::start_managed(
+            &Handle::current(),
             root.path(),
             root.path(),
             &state,
@@ -766,6 +803,7 @@ mod tests {
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
         refresh_manifest(root.path(), &["mounted"]);
         let mut supervisor = ChannelSupervisor::start_managed(
+            &Handle::current(),
             root.path(),
             root.path(),
             &state,

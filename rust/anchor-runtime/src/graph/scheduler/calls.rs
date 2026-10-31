@@ -4,6 +4,44 @@ use super::{execution::StampedSubmission, *};
 use crate::graph::validator::{CallSubmission, DispatchKind, call_identity};
 use anchor_kernel::{Evidence, Waiter};
 
+/// The Runtime and Host publication boundary use one Call delivery contract.
+pub fn graph_call_completion(
+    spec: &Value,
+    child_run_id: &str,
+    output: Value,
+) -> (Value, NodeCompletion) {
+    let output = if spec["mode"] == "detach" {
+        serde_json::json!({"graph":spec["graph"],"run_id":child_run_id,
+            "mode":"detach","status":"accepted"})
+    } else {
+        output
+    };
+    let files = output
+        .pointer("/result/files")
+        .and_then(Value::as_array)
+        .map(|files| {
+            files
+                .iter()
+                .filter_map(Value::as_str)
+                .map(|file| Value::String(format!("result/{file}")))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let mut delivery = output.clone();
+    if let Some(fields) = delivery.as_object_mut() {
+        fields.insert("files".into(), Value::Array(files));
+    } else {
+        delivery = serde_json::json!({"value":output,"files":files});
+    }
+    let completion = NodeCompletion {
+        submission: output.to_string(),
+        route: None,
+        output: delivery,
+        model_requests: 0,
+    };
+    (output, completion)
+}
+
 impl<S: Store, A: ArtifactPort + ?Sized, N: NodeExecutionPort + ?Sized>
     KernelScheduler<'_, S, A, N>
 {
@@ -103,18 +141,7 @@ impl<S: Store, A: ArtifactPort + ?Sized, N: NodeExecutionPort + ?Sized>
         child_run_id: String,
         output: Value,
     ) -> Result<(CallSubmission, Option<Evidence>), GraphError> {
-        let output = if spec["mode"] == "detach" {
-            serde_json::json!({"graph":spec["graph"],"run_id":child_run_id,
-                "mode":"detach","status":"accepted"})
-        } else {
-            output
-        };
-        let completion = NodeCompletion {
-            submission: output.to_string(),
-            route: None,
-            output: output.clone(),
-            model_requests: 0,
-        };
+        let (output, completion) = graph_call_completion(spec, &child_run_id, output);
         let commit = self
             .artifacts
             .freeze_with_context(

@@ -13,6 +13,7 @@ pub(crate) struct NodeImage {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct NodeConversationHint {
     pub(crate) key: String,
+    pub(crate) cross_run: bool,
 }
 
 /// Why a resolver could not assemble a node's tools.

@@ -1,13 +1,7 @@
 //! Filesystem primitives shared by Host storage and runtime services.
 
-use anchor_runtime::graph::InvocationKey;
-use sha2::{Digest, Sha256};
+pub use anchor_runtime::artifact::store::{invocation_stem, validate_component, validate_key};
 use std::path::Path;
-
-/// The existing lowercase SHA-256 filename stem, without each caller's prefix.
-pub(crate) fn invocation_stem(key: &InvocationKey) -> String {
-    format!("{:x}", Sha256::digest(key.durable_key().as_bytes()))
-}
 
 /// Create durable private directories without following symlinks in the path.
 /// Error text is retained from the original Pilot helper for existing callers.

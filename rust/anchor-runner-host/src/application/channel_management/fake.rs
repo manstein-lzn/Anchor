@@ -140,7 +140,20 @@ impl ChannelManagementPort for FakeChannels {
         owner: &'a str,
         graph: &'a str,
     ) -> BoxFuture<'a, Result<Value, ApplicationError>> {
-        Box::pin(async move { Ok(Self::public(self.get(graph).as_ref(), owner, graph)) })
+        Box::pin(async move {
+            let state = self.get(graph);
+            let mut result = Self::public(state.as_ref(), owner, graph);
+            if let Some(state) = state.filter(|state| state.owner == owner) {
+                result["listener"] = if !state.enabled {
+                    json!("stopped")
+                } else if let Some(descriptor) = state.descriptor {
+                    json!(crate::channel_supervisor::status::read(&descriptor).await)
+                } else {
+                    json!("unavailable")
+                };
+            }
+            Ok(result)
+        })
     }
 
     fn configure<'a>(
