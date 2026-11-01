@@ -351,12 +351,10 @@ fn make_host_with_control(
     .authorize_spill_root(state.join("spill"))
     .allow_network();
     // Each invocation authorizes its current Plugin views and mutable paths;
-    // the deployment policy does not grant the entire Library. The deployment's
-    // Rust grant serves Graph nodes as it serves Pilot.
+    // the deployment policy does not grant the entire Library.
     let tool_environment = tool_environment::ToolEnvironment::for_library(
         application.library_root_override.as_deref(),
-    )?
-    .with_pilot_rust()?;
+    )?;
     let sandbox = Arc::new(
         BubblewrapSandbox::new(tool_environment.authorize(policy)).map_err(|e| e.to_string())?,
     );
