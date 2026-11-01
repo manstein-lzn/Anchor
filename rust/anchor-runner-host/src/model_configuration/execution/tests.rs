@@ -736,3 +736,70 @@ fn rejected_edits_and_reads_preserve_the_published_configuration_and_do_not_expo
             .contains("private-stored-key")
     );
 }
+
+#[test]
+fn reference_validation_and_runtime_share_resolution_and_name_unavailable_references() {
+    let (_root, configuration) = fixture();
+    for reference in [
+        None,
+        Some("models.default"),
+        Some("models.default.flash"),
+        Some("models.default.pro"),
+        Some("models.backup.flash"),
+        Some("models.backup.pro"),
+    ] {
+        configuration.validate_reference(reference).unwrap();
+    }
+    save_slot(
+        &configuration,
+        "default",
+        "https://provider.example/v1",
+        "fast",
+        "pro",
+        json!({"action":"set","value":"test-key"}),
+    );
+    for reference in ["claude-sonnet-4-5", "default", "models.unknown"] {
+        let error = configuration
+            .validate_reference(Some(reference))
+            .unwrap_err();
+        assert!(
+            error.contains(reference) && error.contains(MODEL_REFERENCES),
+            "{error}"
+        );
+        let runtime = configuration
+            .execution_snapshot(None, Some(reference))
+            .err()
+            .unwrap();
+        assert!(runtime.contains(&error), "{runtime}");
+        assert!(!runtime.contains("no model service configured"));
+    }
+    legacy(&configuration);
+    for reference in ["models.research", "legacy-default"] {
+        configuration.validate_reference(Some(reference)).unwrap();
+        configuration
+            .execution_snapshot(None, Some(reference))
+            .unwrap();
+    }
+    // Removing a configured alias invalidates new invocations, not retained ones.
+    let mut managed = configuration.load().unwrap();
+    managed.current.aliases.clear();
+    configuration.publish(&managed).unwrap();
+    let error = configuration
+        .execution_snapshot(None, Some("models.research"))
+        .err()
+        .unwrap();
+    assert!(error.contains("models.research") && error.contains("accepted references"));
+    save_slot(
+        &configuration,
+        "default",
+        "https://provider.example/v1",
+        "fast",
+        "",
+        json!({"action":"keep"}),
+    );
+    let error = configuration
+        .execution_snapshot(None, Some("models.default.pro"))
+        .err()
+        .unwrap();
+    assert!(error.contains("models.default.pro") && error.contains("no model configured"));
+}

@@ -39,13 +39,15 @@ Runtime IR 保存稳定展开节点、路由/反馈/并行、输入与权限、�
 
 Agent 完成必须调用 `final_result`，显式提供 `files: string[]`；纯文字使用 `[]`。路径相对 `/workspace`，允许选择目录并递归交付；禁止根目录、通配符、路径逃逸和选中链接/特殊文件。普通二进制、可执行位和空目录受支持。节点 `writes` 声明必交项，必须存在且被 `files` 覆盖；漏项在接受完成前返回可修正错误。`Op.run` 直接按 `writes` 交付；没有 `writes` 的 Op 仅交付文字/JSON 输出。
 
-工作现场不会逐 invocation 复制或还原；未交付文件继续留在同一工作区。下游只读 `/in/<node>` 仅含该版本的交付，`.anchor-artifact.json` 提供固定 Artifact 引用、清单摘要及文件摘要。需要编辑上游文件时自行只复制所需文件。项目 Git、依赖和缓存无需为归档搬到临时目录。新 Run 默认独立，跨 Run 共享由 Host 显式绑定资源；Goose 仍负责原生会话续接。
+每个节点有自己的稳定 `/workspace`，并非同 Run 共享目录；工作现场不会逐 invocation 复制或还原，未交付文件继续留在该节点工作区。下游通过边关联的 commit 获得只读 `/in/<源节点 ID>`，仅含该版本的显式交付；`reads` 声明输入契约，不把上游工作区共享或自动复制到当前 `/workspace`。`.anchor-artifact.json` 提供固定 Artifact 引用、清单摘要及文件摘要。需要编辑上游文件时自行只复制所需文件。项目 Git、依赖和缓存无需为归档搬到临时目录。新 Run 默认独立，跨 Run 共享由 Host 显式绑定资源；Goose 仍负责原生会话续接。
 
 ## 模型选择
 
 Agent 的 `model` 可填写 `models.default.flash`、`models.default.pro`、`models.backup.flash` 或 `models.backup.pro`，分别读取设置页中的服务和模型。省略 `model` 或使用 `models.default` 时选择 default Flash。每个新节点 invocation 读取当时保存的配置，同一 Run 的后续节点与常驻助手下一轮也适用；进行中的 invocation 和同 invocation 恢复保留其模型/服务绑定。backup 仅在明确选择时使用，不自动降级。
 
-default 尚未保存时兼容旧托管默认配置；已保存但缺少所选模型或密钥时执行失败，不回退旧配置。上述四个设置引用以外，仅已有托管配置中的显式别名保留旧映射；不读取 `ANCHOR_MODEL_ALIASES` 或其他环境模型服务字段。新 Graph 使用上述设置引用，仓库示例已按此选择模型。旧 invocation 即使用过与新设置引用同名的别名，恢复时仍核对原绑定，不自动改写用户 Graph。模型请求和历史仍由 Goose 原生 Provider/Session 承担。
+Host 的 Graph 校验、新建和更新共用执行选择旁的引用检查；未知引用返回原值和可接受列表，不把 provider 模型名或 `default` 当成设置引用。此检查不探测凭据或网络，命名引用尚未配置服务时仍可保存。保存后配置变化导致调用无法选择模型时，Run 通过既有人类等待事实显示具体引用及原因，Pilot `run_status` 与 HTTP 共用该投影。
+
+default 尚未保存时兼容旧托管默认配置；已保存但缺少所选模型或密钥时暂停并等待修正，不回退旧配置。上述四个设置引用以外，仅已有托管配置中的显式别名保留旧映射；不读取 `ANCHOR_MODEL_ALIASES` 或其他环境模型服务字段。新 Graph 使用上述设置引用，仓库示例已按此选择模型。旧 invocation 即使用过与新设置引用同名的别名，恢复时仍核对原绑定，不自动改写用户 Graph。模型请求和历史仍由 Goose 原生 Provider/Session 承担。
 
 ## Host Op 与常驻助手
 

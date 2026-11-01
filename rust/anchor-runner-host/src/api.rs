@@ -278,7 +278,14 @@ pub async fn serve(configuration: Arc<crate::HostConfiguration>) -> io::Result<(
     );
     let mut application = RunApplication::new(data_root.clone(), catalog_root.clone())
         .with_host_configuration(configuration)
-        .with_runtime_configuration(runtime_configuration);
+        .with_runtime_configuration(runtime_configuration)
+        .with_model_configuration(
+            model_configuration.clone(),
+            (crate::goose_acp::runtime_mode() == "goose-acp-spike")
+                .then(|| crate::goose_acp::configuration::ModelRegistry::from_env(true))
+                .transpose()
+                .map_err(io::Error::other)?,
+        );
     let configured_graph_entry = configured_bundle
         .is_some()
         .then(|| (graph_name.clone(), bundle_root.clone()));

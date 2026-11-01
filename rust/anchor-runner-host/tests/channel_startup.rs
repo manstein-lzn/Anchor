@@ -10,7 +10,7 @@ use std::{fs, os::unix::fs::PermissionsExt};
 fn a_bot_configured_on_its_graph_starts_its_gateway_and_the_graph_stays_editable() {
     let mut graph = json!({
         "objective":"editable channel", "entry":"wait_input",
-        "agents":{"worker":{"model":"fixture"}},
+        "agents":{"worker":{"model":"models.default.flash"}},
         "ops":{
             "wait_input":{"host":{"operation":"session.wait_input"}},
             "reply":{"host":{"operation":"session.reply"}}

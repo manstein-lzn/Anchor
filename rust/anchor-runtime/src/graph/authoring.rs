@@ -274,7 +274,10 @@ fn parse_agents(value: Option<&Value>) -> Result<BTreeMap<String, AgentDefinitio
                 "{where_}: put plugins on the AgentNode, not the shared role"
             )));
         }
-        let model = required_string(spec.get("model"), &format!("{where_}.model"))?;
+        let model = match spec.get("model") {
+            None => String::new(),
+            value => required_string(value, &format!("{where_}.model"))?,
+        };
         let instructions = spec
             .get("instructions")
             .map(|value| {

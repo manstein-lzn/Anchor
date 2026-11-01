@@ -614,3 +614,26 @@ async fn parallel_region_counts_module_activation_once_and_enforces_reentry_ceil
         }
     }
 }
+
+#[tokio::test]
+async fn omitted_agent_model_reaches_the_host_as_no_reference() {
+    let snapshot = GraphSnapshot::from_authoring(serde_json::json!({
+        "entry":"work", "agents":{"worker":{}},
+        "nodes":[{"id":"work","agent":"worker"}], "edges":[]
+    }))
+    .unwrap();
+    let (kernel, id) = kernel(snapshot);
+    let (nodes, _events) = Nodes::new(&[], &[]);
+    KernelScheduler {
+        kernel: &kernel,
+        observer: None,
+        boundary: None,
+        artifacts: &Artifacts,
+        nodes: &nodes,
+        cancellation: Arc::new(AtomicBool::new(false)),
+    }
+    .run(&id)
+    .await
+    .unwrap();
+    assert!(nodes.requests.lock().unwrap()[0].model.is_none());
+}

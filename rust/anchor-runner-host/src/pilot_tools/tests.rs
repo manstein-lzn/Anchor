@@ -410,6 +410,21 @@ async fn graph_authoring_tools_share_a_usable_example_on_an_empty_catalog() {
     let definition = parameter["examples"][0].clone();
     let description = parameter["description"].as_str().unwrap();
     assert!(description.contains(&definition.to_string()));
+    for fact in [
+        crate::model_configuration::MODEL_REFERENCES,
+        "final_result",
+        "files",
+        "own stable /workspace",
+        "/in/<source-node>",
+        "read-only",
+        "writes",
+        "reads",
+    ] {
+        assert!(
+            description.contains(fact),
+            "missing authoring contract: {fact}"
+        );
+    }
     let snapshot = GraphSnapshot::from_authoring(definition.clone()).unwrap();
     assert_eq!(snapshot.ops["hello"]["writes"], json!(["hello.txt"]));
     assert_eq!(

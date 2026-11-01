@@ -18,7 +18,8 @@ pub(super) fn definition_parameter() -> Value {
     json!({
         "type":"object",
         "description":format!(
-            "Graph authoring JSON. ops and agents are objects keyed by definition name. Each agent requires model; instructions is optional. nodes is a list of {{id,op}} or {{id,agent}} referencing those names; entry is a node ID; edges is a list of {{from,to}}. Op run is a shell command string, not an argv array. Put reads, writes and network on the op/agent definition; put installed Plugin IDs in an AgentNode's plugins list. Commands run in /workspace; writes lists relative output files. Minimal definition: {example}"
+            "Graph authoring JSON. ops and agents are objects keyed by definition name. Agent model references: {}; omit model for default Flash. instructions is optional; agents must finish by calling final_result with files (use [] for text only). nodes is a list of {{id,op}} or {{id,agent}} referencing those names; entry is a node ID; edges is a list of {{from,to}}. Op run is a shell command string, not an argv array. Put reads, writes and network on the op/agent definition; put installed Plugin IDs in an AgentNode's plugins list. Each node has its own stable /workspace, not a shared directory. Agent final_result.files selects delivered paths relative to /workspace; writes lists required deliveries (Op run delivers writes directly). Downstream nodes receive committed artifacts read-only at /in/<source-node>; copy needed files into their own /workspace to edit. reads declares inputs, not workspace sharing. Minimal definition: {example}",
+            crate::model_configuration::MODEL_REFERENCES
         ),
         "examples":[example]
     })
@@ -32,7 +33,7 @@ impl PilotTools {
         self.application
             .create_graph(&graph, arguments.get("definition").cloned())
             .await
-            .map_err(|failure| ToolError::Failed(format!("Graph creation rejected: {failure:?}")))
+            .map_err(|failure| ToolError::Failed(format!("Graph creation rejected: {failure}")))
     }
 
     pub(super) async fn graph_update(&self, arguments: &Value) -> Result<Value, ToolError> {
@@ -50,7 +51,7 @@ impl PilotTools {
         self.application
             .update_graph_from_agent(&graph, definition)
             .await
-            .map_err(|failure| ToolError::Failed(format!("Graph update rejected: {failure:?}")))
+            .map_err(|failure| ToolError::Failed(format!("Graph update rejected: {failure}")))
     }
 
     pub(super) async fn graph_run(&self, arguments: &Value) -> Result<Value, ToolError> {
@@ -64,7 +65,7 @@ impl PilotTools {
         let path = self
             .application
             .graph_path_checked(&graph)
-            .map_err(|failure| ToolError::Failed(format!("Graph unavailable: {failure:?}")))?;
+            .map_err(|failure| ToolError::Failed(format!("Graph unavailable: {failure}")))?;
         let lease = self
             .application
             .graph_admission_lease(&path)
@@ -72,7 +73,7 @@ impl PilotTools {
         let (path, bundle) = self
             .application
             .load_graph(&graph)
-            .map_err(|failure| ToolError::Failed(format!("Graph unavailable: {failure:?}")))?;
+            .map_err(|failure| ToolError::Failed(format!("Graph unavailable: {failure}")))?;
         let run = self
             .application
             .admit(

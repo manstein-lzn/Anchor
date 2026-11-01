@@ -17,6 +17,10 @@ impl RunApplication {
         let _catalog_guard = self.graph_catalog_mutation_guard().await;
         let path = self.graph_path_checked(name)?;
         let _graph_lease = self.acquire_graph_lease_waiting(&path).await?;
+        let active = self.admission.lock().await;
+        let identity = crate::run_metadata::graph_identity(&path)
+            .map_err(crate::application::ApplicationError::from)?;
+        self.check_graph_runs_deletable(&self.runs_for_graph(&identity)?, &active)?;
         self.capture_graph_delete_precondition(name, &path)
     }
 

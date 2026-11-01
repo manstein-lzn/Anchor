@@ -745,6 +745,13 @@ pub(crate) const PILOT_TOOLS: &[PilotToolSpec] = &[
         effect: ToolEffect::Control,
     },
     PilotToolSpec {
+        name: "run_abandon",
+        description: "Permanently finish an unfinished Run as aborted after fresh native user confirmation; unlike stop, it cannot resume. Keeps history, artifacts and workspace. Use for waiting/human or stopped Runs that block a new Run or Graph deletion; approval is never a model argument.",
+        parameters: || single("run"),
+        authority: ToolAuthority::Confirm,
+        effect: ToolEffect::Control,
+    },
+    PilotToolSpec {
         name: "artifact_read",
         description: "Read a committed UTF-8 artifact (at most 1 MiB), not a live workspace",
         parameters: || json!({"type":"object","properties":{"run":{"type":"string"},"node":{"type":"string"},"path":{"type":"string"}},"required":["run","node","path"],"additionalProperties":false}),

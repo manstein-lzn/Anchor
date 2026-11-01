@@ -102,6 +102,21 @@ impl RunApplication {
     ) -> Result<GraphSnapshot, GraphValidationFailure> {
         let snapshot = GraphSnapshot::from_authoring(definition.clone())
             .map_err(GraphValidationFailure::Authoring)?;
+        for (name, agent) in &snapshot.agents {
+            let reference = (!agent.model.is_empty()).then_some(agent.model.as_str());
+            let result = if let Some(models) = &self.fixture_models {
+                models.resolve(reference).map(|_| ())
+            } else if let Some(configuration) = &self.model_configuration {
+                configuration.validate_reference(reference)
+            } else {
+                Ok(())
+            };
+            result.map_err(|reason| {
+                GraphValidationFailure::Authoring(GraphError::InvalidSnapshot(format!(
+                    "agent {name:?}: {reason}"
+                )))
+            })?;
+        }
         crate::reject_snapshot(&snapshot)
             .map_err(GraphError::Unsupported)
             .map_err(GraphValidationFailure::Unavailable)?;
@@ -200,9 +215,7 @@ impl RunApplication {
                 "edges": []
             })
         });
-        if let Ok(snapshot) = GraphSnapshot::from_authoring(definition.clone()) {
-            super::channel_management::channel_plan(&snapshot, self.library_root())?;
-        }
+        self.validate_graph(&definition)?;
         create_graph_bundle_from_catalog(&path, &definition, self.library_root())?;
         Ok(json!({"graph":name,"definition":definition}))
     }

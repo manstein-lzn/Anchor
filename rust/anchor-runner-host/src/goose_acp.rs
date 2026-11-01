@@ -503,15 +503,22 @@ impl GooseNodePort {
         let retained_binding = retained
             .as_ref()
             .and_then(|fact| fact.model_binding.as_deref());
-        let models = match &self.models {
-            ExecutionModels::Fixture(models) => models.as_ref().clone(),
-            ExecutionModels::Managed(configuration) => configuration
-                .execution_snapshot(retained_binding, request.model.as_deref())
-                .map_err(GraphError::Unsupported)?,
+        let selection = (|| {
+            let models = match &self.models {
+                ExecutionModels::Fixture(models) => models.as_ref().clone(),
+                ExecutionModels::Managed(configuration) => {
+                    configuration.execution_snapshot(retained_binding, request.model.as_deref())?
+                }
+            };
+            let binding = models.resolve(request.model.as_deref())?;
+            Ok::<_, String>((models, binding))
+        })();
+        let (models, binding) = match selection {
+            Ok(selected) => selected,
+            // No model request has started. Use the existing resumable human
+            // wait so both HTTP and Pilot expose the actual configuration error.
+            Err(reason) => return Ok(NodeExecutionOutcome::Interrupted { reason }),
         };
-        let binding = models
-            .resolve(request.model.as_deref())
-            .map_err(GraphError::Unsupported)?;
         let resumed = retained.is_some();
         let mut conversation = match conversation_hint.filter(|_| !self.fixture) {
             Some(hint) => {

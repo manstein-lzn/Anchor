@@ -481,6 +481,15 @@ async fn guarded_delete_rechecks_unfinished_runs_created_after_the_snapshot() {
     let (root, application) = fixture();
     let expected = delete_snapshot(&application, "fixture").await;
     stopped_run(&application, "fixture", "unfinished");
+    // Refuse before showing a native form, and recheck after an earlier form.
+    let preflight = application
+        .graph_delete_precondition("fixture")
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        preflight.contains("unfinished Run `unfinished`") && preflight.contains("stop or abandon")
+    );
     let reason = assert_conflict_unchanged(
         &application,
         "fixture",

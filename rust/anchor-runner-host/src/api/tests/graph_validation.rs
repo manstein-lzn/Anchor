@@ -422,3 +422,55 @@ async fn graph_validation_does_not_mutate() {
         assert_eq!(filesystem(root.path()), before);
     }
 }
+
+#[tokio::test]
+async fn http_validate_create_and_update_share_host_model_reference_admission() {
+    let (_root, mut state) = fixture();
+    state.application = state
+        .application
+        .with_model_configuration(state.model_configuration.clone(), None);
+    let app = router(state.clone());
+    let valid = json!({"entry":"work", "agents":{"worker":{}},
+        "nodes":[{"id":"work","agent":"worker"}], "edges":[]});
+    let (status, created) = call(
+        app.clone(),
+        "POST",
+        "/graphs",
+        Some(&json!({"name":"saved-model", "definition":valid}).to_string()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    for model in ["claude-sonnet-4-5", "default"] {
+        let mut invalid = valid.clone();
+        invalid["agents"]["worker"]["model"] = json!(model);
+        for (method, path, body) in [
+            ("POST", "/graph-validation", json!({"definition":invalid})),
+            (
+                "POST",
+                "/graphs",
+                json!({"name":"invalid-model","definition":invalid}),
+            ),
+            ("PUT", "/graphs/saved-model", json!({"definition":invalid})),
+        ] {
+            let (status, result) = call(app.clone(), method, path, Some(&body.to_string())).await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{result}");
+            let error = result["error"].as_str().unwrap();
+            assert!(
+                error.contains(model)
+                    && error.contains(crate::model_configuration::MODEL_REFERENCES),
+                "{result}"
+            );
+        }
+    }
+    assert_eq!(
+        state.application.read_graph("saved-model").unwrap()["definition"],
+        valid
+    );
+    assert!(
+        !state
+            .application
+            .graph_path_checked("invalid-model")
+            .unwrap()
+            .exists()
+    );
+}

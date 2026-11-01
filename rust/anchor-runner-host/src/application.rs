@@ -104,6 +104,8 @@ pub(crate) struct RunApplication {
     /// a valid deployment, not an error.
     dependency_provision: Option<Arc<crate::dependency_provision::DependencyProvisioner>>,
     runtime_configuration: Option<Arc<crate::runtime_configuration::RuntimeConfiguration>>,
+    model_configuration: Option<Arc<crate::model_configuration::ModelConfiguration>>,
+    fixture_models: Option<crate::goose_acp::configuration::ModelRegistry>,
     /// A Pilot Turn keeps the same interpreter and preparation grant for all
     /// of its tools, including an explicitly unavailable provisioner. The
     /// shared configuration remains available for preparing the next Turn.
@@ -287,6 +289,8 @@ impl RunApplication {
             catalog_mutations: Arc::new(Mutex::new(())),
             dependency_provision: None,
             runtime_configuration: None,
+            model_configuration: None,
+            fixture_models: None,
             frozen_runtime_snapshot: None,
             schedules: None,
             oauth: None,
@@ -294,6 +298,16 @@ impl RunApplication {
             executor: tokio::runtime::Handle::try_current().ok(),
             kernel_run_owner: Arc::default(),
         }
+    }
+
+    pub(crate) fn with_model_configuration(
+        mut self,
+        configuration: Arc<crate::model_configuration::ModelConfiguration>,
+        fixture_models: Option<crate::goose_acp::configuration::ModelRegistry>,
+    ) -> Self {
+        self.model_configuration = Some(configuration);
+        self.fixture_models = fixture_models;
+        self
     }
 
     pub(crate) fn with_host_configuration(

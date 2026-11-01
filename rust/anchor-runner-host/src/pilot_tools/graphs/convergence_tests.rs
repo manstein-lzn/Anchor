@@ -73,3 +73,101 @@ async fn validation_shares_acceptance_with_application_and_redacts_private_failu
         }
     }
 }
+
+#[tokio::test]
+async fn pilot_validate_create_and_update_share_host_model_reference_validation() {
+    let (_root, mut tools) = fixture();
+    tools
+        .sessions
+        .create(
+            "local",
+            anchor_platform_session::CreateSession {
+                id: Some("pilot".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let (turn, _) = tools
+        .sessions
+        .create_turn("local", "pilot", "author", None)
+        .unwrap();
+    tools.turn = turn.id;
+    let configuration = std::sync::Arc::new(
+        crate::model_configuration::ModelConfiguration::from_env(&tools.data_root).unwrap(),
+    );
+    tools.application = tools
+        .application
+        .with_model_configuration(configuration.clone(), None);
+    let valid = json!({"entry":"work","agents":{"worker":{"model":"models.default.flash"}},
+        "nodes":[{"id":"work","agent":"worker"}],"edges":[]});
+    tools
+        .graph_create(&json!({"name":"saved","definition":valid}))
+        .await
+        .unwrap();
+    for model in ["claude-sonnet-4-5", "default"] {
+        let mut definition = valid.clone();
+        definition["agents"]["worker"]["model"] = json!(model);
+        let result = tools
+            .graph_validate(&json!({"definition":definition}))
+            .await
+            .unwrap();
+        assert_eq!(result["valid"], false);
+        let error = result["error"].as_str().unwrap();
+        assert!(error.contains(model) && error.contains("models.backup.pro"));
+        assert!(
+            tools
+                .application
+                .validate_graph(&definition)
+                .unwrap_err()
+                .to_string()
+                .contains(error)
+        );
+        assert!(
+            tools
+                .graph_create(&json!({"name":"invalid","definition":definition}))
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains(error)
+        );
+        assert!(
+            tools
+                .graph_update(&json!({"graph":"saved","definition":definition}))
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains(error)
+        );
+        assert!(
+            !tools
+                .application
+                .graph_path_checked("invalid")
+                .unwrap()
+                .exists()
+        );
+        assert_eq!(
+            tools.application.read_graph("saved").unwrap()["definition"],
+            valid
+        );
+    }
+    // The spike's deterministic model name uses exactly its runtime registry.
+    let fixture =
+        crate::goose_acp::configuration::ModelRegistry::from_values(true, |name| match name {
+            "ANCHOR_GOOSE_OPENAI_HOST" => Some("http://127.0.0.1:9999".into()),
+            "ANCHOR_GOOSE_MODEL" => Some("fixture-local".into()),
+            _ => None,
+        })
+        .unwrap();
+    tools.application = tools
+        .application
+        .with_model_configuration(configuration, Some(fixture));
+    let mut definition = valid;
+    definition["agents"]["worker"]["model"] = json!("fixture-local");
+    assert_eq!(
+        tools
+            .graph_validate(&json!({"definition":definition}))
+            .await
+            .unwrap()["valid"],
+        true
+    );
+}

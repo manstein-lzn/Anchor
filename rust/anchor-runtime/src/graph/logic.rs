@@ -543,7 +543,7 @@ pub(crate) fn execution_request(
         if let Some(agent) = agent {
             (
                 NodeKind::Agent,
-                Some(agent.model.clone()),
+                (!agent.model.is_empty()).then(|| agent.model.clone()),
                 agent.instructions.clone(),
                 agent.max_steps,
                 Some(agent.wall_time_limit_seconds.unwrap_or(3600.0)),

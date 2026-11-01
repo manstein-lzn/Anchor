@@ -5,6 +5,8 @@ use super::{
     *,
 };
 
+pub(crate) const MODEL_REFERENCES: &str = "models.default.flash, models.default.pro, models.backup.flash, models.backup.pro (omitted or models.default = default Flash)";
+
 const DEFAULT_REFERENCE: &str = "models.default.flash";
 const RETAINED_UNAVAILABLE: &str = "the retained model provider credential is unavailable; open Settings to restore its key or start a new Session";
 
@@ -43,7 +45,47 @@ impl ModelConfiguration {
         binding: Option<&str>,
         reference: Option<&str>,
     ) -> Result<ModelRegistry, String> {
-        self.execution_from(&self.load()?, binding, reference)
+        self.load()
+            .and_then(|managed| self.execution_from(&managed, binding, reference))
+            .map_err(|error| {
+                format!(
+                    "agent model reference {:?}: {error}",
+                    reference.unwrap_or(DEFAULT_REFERENCE)
+                )
+            })
+    }
+
+    /// Check reference resolution, not credentials or provider reachability.
+    pub(crate) fn validate_reference(&self, reference: Option<&str>) -> Result<(), String> {
+        self.validate_reference_from(&self.load()?, reference)
+    }
+
+    fn validate_reference_from(
+        &self,
+        managed: &ManagedModel,
+        reference: Option<&str>,
+    ) -> Result<(), String> {
+        if selection(reference).is_some() {
+            return Ok(());
+        }
+        // Reuse the existing managed mapping, including deterministic providers.
+        if self
+            .registry(managed, &managed.current, true)
+            .and_then(|registry| registry.resolve(reference))
+            .is_ok()
+        {
+            return Ok(());
+        }
+        let aliases = managed.current.aliases.keys().cloned().collect::<Vec<_>>();
+        Err(format!(
+            "unknown agent model reference {:?}; accepted references: {MODEL_REFERENCES}{}",
+            reference.unwrap_or_default(),
+            if aliases.is_empty() {
+                String::new()
+            } else {
+                format!("; configured aliases: {}", aliases.join(", "))
+            }
+        ))
     }
 
     fn execution_from(
@@ -52,6 +94,9 @@ impl ModelConfiguration {
         binding: Option<&str>,
         reference: Option<&str>,
     ) -> Result<ModelRegistry, String> {
+        if binding.is_none() {
+            self.validate_reference_from(managed, reference)?;
+        }
         let Some((slot, tier, canonical)) = selection(reference) else {
             // Existing explicit aliases retain their original legacy meaning.
             return self.legacy_snapshot(managed, binding, reference);

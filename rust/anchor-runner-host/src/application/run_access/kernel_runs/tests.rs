@@ -21,6 +21,7 @@ enum Mode {
     PauseLastGate,
     Crash(bool),
     Recovery,
+    ModelUnavailable,
 }
 struct Nodes {
     root: std::path::PathBuf,
@@ -96,6 +97,16 @@ impl NodeExecutionPort for Nodes {
             self.trace.lock().unwrap().push(request.key.clone());
             let first = self.once.swap(false, Ordering::AcqRel);
             match self.mode {
+                Mode::ModelUnavailable => {
+                    let configuration =
+                        crate::model_configuration::ModelConfiguration::from_env(&self.root)
+                            .unwrap();
+                    let reason = configuration
+                        .execution_snapshot(None, Some("unconfigured-model"))
+                        .err()
+                        .unwrap();
+                    return Ok(NodeExecutionOutcome::Interrupted { reason });
+                }
                 Mode::Fail => {
                     return Ok(NodeExecutionOutcome::Failed {
                         reason: "known failure".into(),
@@ -801,4 +812,30 @@ fn broken_host_observation_never_blocks_kernel_control_or_lifecycle_reads() {
     assert!(view.actions().resume);
     runs.control(&record.run_id, "abandon", None).unwrap();
     assert!(runs.load(&record.run_id).unwrap().unwrap().is_settled());
+}
+
+#[tokio::test]
+async fn model_configuration_wait_is_visible_in_existing_pilot_projection() {
+    let (root, application, runs, record) = setup("model-wait", 100);
+    let port = Nodes::new(&root.path().join("facts"), Mode::ModelUnavailable);
+    runs.drive(&record.run_id, &Artifacts, &port, cancel())
+        .await
+        .unwrap();
+    let status = application.pilot_run_status(&record.run_id).await.unwrap();
+    assert_eq!(status["projection"]["phase"], "waiting");
+    assert_eq!(status["projection"]["waiting_for"], "human");
+    assert_eq!(status["projection"]["active"], false);
+    assert!(
+        status["projection"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("unconfigured-model")
+    );
+    assert_eq!(status["record"]["results"], json!({}));
+    // The explanation is an existing Kernel wait fact, also visible after reopen.
+    let projection =
+        crate::application::run_access::status_projection(&application.data_root, &record.run_id)
+            .unwrap()
+            .unwrap();
+    assert_eq!(projection["reason"], status["projection"]["reason"]);
 }

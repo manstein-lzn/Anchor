@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 mod connection_test;
 mod execution;
+pub(crate) use execution::MODEL_REFERENCES;
 mod providers;
 pub(crate) use providers::{ProviderTest, ProviderUpdate};
 

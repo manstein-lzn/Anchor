@@ -114,6 +114,41 @@ impl RunApplication {
         Ok(callers.into_iter().collect())
     }
 
+    /// Shared refusal checks for native confirmation and the reserved deletion.
+    pub(super) fn check_graph_runs_deletable(
+        &self,
+        targets: &[(String, super::run_access::RunView<'_>)],
+        active: &(),
+    ) -> Result<(), ApplicationError> {
+        for (run_id, record) in targets {
+            self.reject_pending_session_delivery(run_id)?;
+            if record.active() {
+                return Err(ApplicationError::Conflict(
+                    "Graph still has active execution; stop or abandon the Run first".into(),
+                ));
+            }
+            if !record.is_settled() {
+                let conversation = self
+                    .metadata(run_id)?
+                    .is_some_and(|metadata| metadata.conversation.is_some());
+                if !conversation
+                    || (!record.is_quiescent() && !self.has_conversation_successor(run_id)?)
+                {
+                    return Err(ApplicationError::Conflict(format!(
+                        "Graph has unfinished Run `{run_id}`; stop or abandon the Run first (stopped Runs remain unfinished; abandon makes them terminal)"
+                    )));
+                }
+            }
+            if self
+                .metadata(run_id)?
+                .is_some_and(|metadata| metadata.conversation.is_some())
+            {
+                self.ensure_conversation_delete_settled(record, active)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Delete an unreferenced Graph and its own terminal Run data.
     /// Current Graph definitions and unfinished Run snapshots keep their call
     /// targets alive; completed history does not prevent deletion.
@@ -168,32 +203,7 @@ impl RunApplication {
                 )));
             }
         }
-        for (run_id, record) in &targets {
-            self.reject_pending_session_delivery(run_id)?;
-            if record.active() {
-                return Err(ApplicationError::Conflict(
-                    "Graph still has active execution".into(),
-                ));
-            }
-            if !record.is_settled() {
-                let conversation = self
-                    .metadata(run_id)?
-                    .is_some_and(|metadata| metadata.conversation.is_some());
-                if !conversation
-                    || (!record.is_quiescent() && !self.has_conversation_successor(run_id)?)
-                {
-                    return Err(ApplicationError::Conflict(format!(
-                        "Graph has unfinished Run `{run_id}`; resume it, or stop and delete its record before deleting the Graph"
-                    )));
-                }
-            }
-            if self
-                .metadata(run_id)?
-                .is_some_and(|metadata| metadata.conversation.is_some())
-            {
-                self.ensure_conversation_delete_settled(record, &active)?;
-            }
-        }
+        self.check_graph_runs_deletable(&targets, &active)?;
         for (run_id, _) in &targets {
             self.retire_assistant_for_deletion(run_id)?;
         }

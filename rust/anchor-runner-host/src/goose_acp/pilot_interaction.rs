@@ -39,7 +39,11 @@ pub(crate) fn definitions() -> Vec<ToolDefinition> {
             .filter(|tool| {
                 matches!(
                     tool.name,
-                    "session_network" | "plugin_mount" | "channel_configure" | "channel_enable"
+                    "session_network"
+                        | "plugin_mount"
+                        | "channel_configure"
+                        | "channel_enable"
+                        | "run_abandon"
                 )
             })
             .map(|tool| ToolDefinition {
@@ -147,6 +151,9 @@ pub(super) async fn call(
     if name == "plugin_uninstall" {
         return uninstall(tools, arguments, peer, cancellation).await;
     }
+    if name == "run_abandon" {
+        return abandon(tools, arguments, peer, cancellation).await;
+    }
     if !matches!(name, "ask_user" | "graph_delete") {
         // Falling through to ask_user would show a generic form the model fills
         // in, which is exactly what a confirmed tool must never do.
@@ -240,6 +247,102 @@ pub(super) async fn call(
     } else {
         serde_json::to_value(result).map_err(|_| failure("native answer serialization failed"))?
     };
+    Ok(vec![ToolResultContent::text(value.to_string())])
+}
+
+/// Native confirmation binds one immutable Run identity, never a model-supplied approval.
+fn abandon_target(arguments: &serde_json::Map<String, Value>) -> Result<&str, ToolError> {
+    if arguments.len() != 1 {
+        return Err(failure(
+            "run_abandon accepts only run; confirmation cannot be supplied by the model",
+        ));
+    }
+    arguments
+        .get("run")
+        .and_then(Value::as_str)
+        .filter(|run| anchor_runtime::identifier::is_name(run))
+        .ok_or_else(|| failure("run must be a valid Run ID"))
+}
+
+async fn apply_abandon_answer(
+    tools: &PilotTools,
+    run: &str,
+    digest: &str,
+    accepted: bool,
+    confirm: bool,
+    cancellation: &Cancellation,
+) -> Result<Value, ToolError> {
+    active(tools, cancellation)?;
+    if !accepted || !confirm {
+        return Ok(json!({"abandoned":false,"run":run}));
+    }
+    let current = tools
+        .application
+        .pilot_run_status(run)
+        .await
+        .map_err(|error| failure(application_reason(error)))?;
+    if current["record"]["graph_digest"].as_str() != Some(digest) {
+        return Err(failure(
+            "Run identity changed; request a fresh abandon confirmation",
+        ));
+    }
+    let outcome = tools
+        .application
+        .abandon_run(run, None)
+        .await
+        .map_err(|error| {
+            failure(format!(
+                "Run abandon rejected: {}",
+                application_reason(error)
+            ))
+        })?;
+    Ok(
+        json!({"abandoned":true,"run":run,"action":outcome.action.as_str(),
+        "reason":outcome.reason,"requested_at":outcome.requested_at}),
+    )
+}
+
+async fn abandon(
+    tools: &PilotTools,
+    arguments: &serde_json::Map<String, Value>,
+    peer: Peer<RoleServer>,
+    cancellation: &Cancellation,
+) -> Result<Vec<ToolResultContent>, ToolError> {
+    let run = abandon_target(arguments)?;
+    let status = tools
+        .application
+        .pilot_run_status(run)
+        .await
+        .map_err(|error| failure(application_reason(error)))?;
+    if status["projection"]["actions"]["abandon"] != true {
+        return Err(failure("Run cannot be abandoned; inspect run_status"));
+    }
+    let digest = status["record"]["graph_digest"]
+        .as_str()
+        .ok_or_else(|| failure("Run identity unavailable"))?;
+    let form = peer.create_elicitation(ElicitRequestParams::FormElicitationParams {
+        meta: None,
+        message: format!("确认永久结束 Run「{run}」（Graph 摘要 {digest}）？将停止执行并标记为 aborted，之后不能恢复。历史、产物和 workspace 保留，不会删除。"),
+        requested_schema: native_schema(json!({"type":"object","properties":{"confirm":{"type":"boolean","title":"确认永久结束此 Run（不可恢复）","default":false}},"required":["confirm"],"additionalProperties":false}))?,
+    });
+    tokio::pin!(form);
+    let answer = tokio::select! {
+        result = &mut form => result.map_err(|_| failure("native user confirmation could not complete"))?,
+        _ = async {
+            while !cancellation.load(Ordering::Acquire) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        } => return Err(failure("Pilot was cancelled while waiting for the user")),
+    };
+    let value = apply_abandon_answer(
+        tools,
+        run,
+        digest,
+        answer.action == ElicitationAction::Accept,
+        checked(answer.content.as_ref(), "confirm"),
+        cancellation,
+    )
+    .await?;
     Ok(vec![ToolResultContent::text(value.to_string())])
 }
 
@@ -1073,6 +1176,116 @@ mod uninstall_tool_tests {
             context: None,
         };
         (root, tools)
+    }
+
+    #[tokio::test]
+    async fn run_abandon_requires_native_consent_and_reuses_terminal_application_control() {
+        use crate::application::run_access::fixtures;
+        let (_root, mut tools) = fixture();
+        let (turn, _) = tools
+            .sessions
+            .create_turn("local", "pilot", "abandon", None)
+            .unwrap();
+        tools.turn = turn.id;
+        assert_eq!(
+            crate::pilot_tools::authority("run_abandon"),
+            Some(crate::pilot_tools::ToolAuthority::Confirm)
+        );
+        let definition = definitions()
+            .into_iter()
+            .find(|tool| tool.name == "run_abandon")
+            .unwrap();
+        assert_eq!(definition.parameters["additionalProperties"], false);
+        for arguments in [
+            json!({"run":"stuck","confirm":true}),
+            json!({"run":"../stuck"}),
+            json!({"confirmed":true}),
+        ] {
+            assert!(abandon_target(arguments.as_object().unwrap()).is_err());
+        }
+        let record = fixtures::work_record("stuck");
+        fixtures::create(&tools.application, &record);
+        crate::run_metadata::save(
+            &tools.data_root,
+            &crate::run_metadata::RunMetadata::new(
+                "stuck".into(),
+                "fixture".into(),
+                record.graph_digest.clone(),
+                &tools.library_root.join("fixture"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        fixtures::control(
+            &tools.application,
+            "stuck",
+            "stop",
+            "Goose ended without a validated final_result",
+        );
+        let before = tools.application.pilot_run_status("stuck").await.unwrap();
+        let cancellation = Cancellation::default();
+        for (accepted, confirm) in [(false, true), (true, false)] {
+            let answer = apply_abandon_answer(
+                &tools,
+                "stuck",
+                &record.graph_digest,
+                accepted,
+                confirm,
+                &cancellation,
+            )
+            .await
+            .unwrap();
+            assert_eq!(answer["abandoned"], false);
+            assert_eq!(
+                tools.application.pilot_run_status("stuck").await.unwrap(),
+                before
+            );
+            assert!(tools.application.abandon_intent("stuck").unwrap().is_none());
+        }
+        assert!(
+            apply_abandon_answer(&tools, "stuck", "changed-digest", true, true, &cancellation)
+                .await
+                .is_err()
+        );
+        cancellation.store(true, Ordering::Release);
+        assert!(
+            apply_abandon_answer(
+                &tools,
+                "stuck",
+                &record.graph_digest,
+                true,
+                true,
+                &cancellation
+            )
+            .await
+            .is_err()
+        );
+        cancellation.store(false, Ordering::Release);
+        let answer = apply_abandon_answer(
+            &tools,
+            "stuck",
+            &record.graph_digest,
+            true,
+            true,
+            &cancellation,
+        )
+        .await
+        .unwrap();
+        assert_eq!(answer["abandoned"], true);
+        assert_eq!(answer["action"], "abandoned");
+        let status = tools.application.pilot_run_status("stuck").await.unwrap();
+        assert_eq!(status["projection"]["outcome"], "aborted");
+        assert_eq!(status["record"]["snapshot"], before["record"]["snapshot"]);
+        assert!(tools.application.control("stuck", "resume").await.is_err());
+        assert_eq!(
+            tools
+                .application
+                .abandon_intent("stuck")
+                .unwrap()
+                .unwrap()
+                .reason,
+            "operator"
+        );
     }
 
     fn candidate(root: &Path, name: &str, data: &[u8]) -> PathBuf {

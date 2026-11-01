@@ -2,6 +2,12 @@
 
 本文说明当前实现的工具行为与边界。Plugin 清单、执行披露和安装契约见 [Plugin](plugins.md)，共享依赖不变量见 [依赖标准](plugin-dependencies.md)，实际通过范围见 [当前验收与待办](pilot-development-plan.md)。
 
+## Graph 编写与 Run 收束
+
+`graph_validate`、`graph_create`、`graph_update` 的共享定义 schema 直接说明设置模型引用、`final_result.files` 完成要求及节点独立工作区与只读 Artifact 交接；校验与保存使用同一 Host 引用规则，未知值返回可修正诊断。
+
+`run_stop` 只请求停止，仍可恢复，不能解除未完成 Run 对新运行或删除的阻挡。`run_abandon` 需当前 Turn 的原生用户确认，绑定 Run ID 和冻结 Graph 摘要，调用现有应用层 abandon：永久标记 aborted、等待执行收束，保留历史、workspace 和产物。模型参数不能携带确认；取消、未勾选或 Turn 已失效不执行。`graph_delete` 在请求确认前检查未完成 Run，提示先停止或 abandon；确认后仍校验精确内容绑定并重新检查现场。此处为工具与契约测试覆盖，不代表真实 provider 的新用户端到端验收已完成。
+
 ## 基础环境与工作区
 
 完整平台 Pilot 使用内置管理指令，空 catalog 可以启动，不需要占位业务 Graph。普通 Turn 与 Responses 共用接纳路径；`previous_response_id` 继续原 Session，独立请求使用独立工作区。

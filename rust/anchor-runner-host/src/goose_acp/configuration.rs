@@ -318,7 +318,7 @@ pub(crate) struct ModelBinding {
 }
 
 impl ModelRegistry {
-    pub(super) fn from_env(fixture: bool) -> Result<Self, String> {
+    pub(crate) fn from_env(fixture: bool) -> Result<Self, String> {
         let mut invalid_unicode = None;
         let registry = Self::from_values(fixture, |name| match std::env::var(name) {
             Ok(value) => Some(value),
