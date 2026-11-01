@@ -19,7 +19,7 @@
 
 1. **边界没有单一来源。** 沙箱策略在 `main.rs:337`、`pilot_tools.rs:59`、`goose_acp/pilot.rs:290`、`application/development_environment.rs:667`、`dependency_provision/build.rs:41` 分别构造，之后在节点准备、`Op.run`、`anchor_run`、Plugin 视图和开发环境里各自叠加挂载与联网。没有一个值能回答「这次调用拿到了什么」。
 2. **自装工具不可见。** `PATH` 固定为注册工具目录加 `/usr/bin:/bin`（`anchor-sandbox-bwrap` 的 `make_path`）。Agent 装到 `$HOME/.local/bin`、`$HOME/.cargo/bin` 的程序要写绝对路径才能运行。
-3. **Graph 节点没有 Rust。** 宿主的 Rust 工具链只经 `with_pilot_rust` 给 Pilot。
+3. **本机没配 Rust。** 节点准备经运行配置快照，把部署的 Rust 授权同时给 Graph 节点和 Pilot；本机部署此前没有设置 `ANCHOR_PILOT_RUSTUP`。
 4. **规则没告诉 Agent。** `anchor_run` 的描述只列命令白名单，没写 `HOME=/workspace` 可写且持久、`/usr` 只读、没有 root、凭据只在 git 工具里。
 5. **现场跨版本只在少数情况继承。** 只改插件或联网的 Graph 版本可以交接现场，结构或指令改变就不继承（[企业微信契约](wecom-assistant.md)）。
 6. **环境不在事实里。** `AgentConfiguration` 没有边界摘要；`ToolCall.program` 对 `sh -c` 只记 `sh`。
