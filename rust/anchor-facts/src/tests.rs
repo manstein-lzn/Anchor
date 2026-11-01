@@ -259,6 +259,14 @@ fn tool_calls_without_shell_program_keep_their_json() {
     let written = serde_json::to_value(&fact).unwrap();
     assert!(written.get("shell_program").is_none());
     assert_eq!(written, old);
+    // Adding a workspace observation kind must not change older trace records.
+    let old_observation = json!({
+        "version": VERSION,
+        "invocation": invocation(),
+        "facts": [old],
+    });
+    let observation: Observation = serde_json::from_value(old_observation.clone()).unwrap();
+    assert_eq!(serde_json::to_value(observation).unwrap(), old_observation);
 }
 
 #[test]
@@ -288,6 +296,18 @@ fn every_fact_kind_round_trips_with_its_tag() {
             compaction: false,
         },
         tool_call_fact(true),
+        Fact::WorkspaceFingerprint {
+            phase: FingerprintPhase::Start,
+            head: Some("a".repeat(40)),
+            dirty: Some(false),
+            files: BTreeMap::from([("Cargo.lock".into(), text_digest("lock"))]),
+        },
+        Fact::WorkspaceFingerprint {
+            phase: FingerprintPhase::End,
+            head: None,
+            dirty: None,
+            files: BTreeMap::new(),
+        },
     ];
     let observation = Observation {
         version: VERSION,
@@ -301,7 +321,20 @@ fn every_fact_kind_round_trips_with_its_tag() {
         .iter()
         .map(|fact| fact["kind"].clone())
         .collect();
-    assert_eq!(kinds, vec!["lifecycle", "model_turn", "tool_call"]);
+    assert_eq!(
+        kinds,
+        vec![
+            "lifecycle",
+            "model_turn",
+            "tool_call",
+            "workspace_fingerprint",
+            "workspace_fingerprint",
+        ]
+    );
+    assert_eq!(value["facts"][3]["phase"], "start");
+    assert_eq!(value["facts"][4]["phase"], "end");
+    assert!(value["facts"][4].get("head").is_none());
+    assert!(value["facts"][4].get("dirty").is_none());
     assert_eq!(
         serde_json::from_value::<Observation>(value).unwrap(),
         observation

@@ -31,6 +31,7 @@ mod conversation;
 pub(crate) mod envelope;
 mod execution;
 mod facts;
+pub(crate) mod fingerprint;
 mod inputs;
 mod media;
 mod mounts;

@@ -173,6 +173,8 @@ Run 的暂停/停止请求与节点已收束是不同事实。恢复保留 Graph
 
 Host 对外 trace 投影 ACP 消息、工具观察和媒体，支持增量读取与重开节点。该投影用于观察，不代替 Goose 原生历史。真实模型、vision 与长会话效果必须分别验收。`ToolCall.shell_program` 仅对 shell 的 `-c` 脚本（含 `-lc`、`-ec` 等短选项组合）启发式记录首个命令的 basename，只是归因提示，不改变原始 argv 的 `program`；旧事实缺失时为 `None`，空值不序列化。
 
+Goose 节点在首个模型轮次前和会话、工具清理后采集 `WorkspaceFingerprint`，以 `phase=start/end`、git HEAD、`dirty` 和根目录已知锁文件的相对路径 → SHA-256 随同一次 invocation 事实提交；未创建首个提交时 HEAD 为 `None`，可选空值不序列化，旧记录不变。固定脚本只在同一 envelope 的 `command_sandbox()` 内执行 git 与摘要工具，不问宿主 git、不扩授权；非 git 现场、采集失败或输出异常省略该事实，不影响 invocation，真实 Provider 端到端尚未验收。
+
 Host 的 trace 证据与 `write_durable` 文件通过同目录临时文件写入、文件 fsync、原子替换及父目录 fsync 发布；已打开的读取保持完整旧版本，重新打开只见完整已发布版本，不因并发写读到空文件或半份 JSON。该保证针对单文件，不将 invocation fact 与 trace 证据包装成跨文件事务；字段格式、发布顺序和恢复校验不变。[调用点与回归](runtime-contract-tests.md#trace-证据与宿主持久文件的原子发布)。
 
 ## Session、渠道与入口

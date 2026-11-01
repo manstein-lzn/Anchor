@@ -50,12 +50,13 @@ use std::{
 };
 use transport::AcpConnection;
 
-/// What the model was shown besides its instructions: Plugin instructions
-/// and tool definitions, as digests for the configuration manifest.
+/// Frozen disclosure/configuration and workspace boundary observations for
+/// the invocation's single harness-fact submission.
 struct Disclosed {
     plugin_instructions_sha256: String,
     tools_sha256: String,
     envelope: crate::node_host::envelope::InvocationEnvelope,
+    fingerprints: Vec<anchor_facts::Fact>,
 }
 
 pub(crate) struct GooseNodePort {
@@ -596,7 +597,7 @@ impl GooseNodePort {
                 plugin_instructions: resolved.plugin_instructions,
                 observation_path: (!self.fixture).then(|| fact_path.clone()),
                 outputs: bridge::DeclaredOutputs {
-                    workspace: resolved.workspace,
+                    workspace: resolved.workspace.clone(),
                     writes: request.writes.clone(),
                 },
             },
@@ -687,6 +688,16 @@ impl GooseNodePort {
             "binary_sha256":self.binary_sha256,"model":binding.model,"notifications":[],
             "fixture_transport":if self.fixture {Some("loopback")} else {None},"real_model_calls":null,
             "model_binding":binding.identity,"resume":resumed,"continuation":!resumed && fact.session_id.is_some(),"budget_enforcement":false});
+        // Workspace and envelope are ready; no model request has started yet.
+        let mut fingerprints = Vec::with_capacity(2);
+        fingerprints.extend(
+            crate::node_host::fingerprint::capture(
+                &resolved.envelope,
+                &resolved.workspace,
+                anchor_facts::FingerprintPhase::Start,
+            )
+            .await,
+        );
         let mut result = self
             .prompt(
                 &mut connection,
@@ -728,6 +739,16 @@ impl GooseNodePort {
         });
         evidence["close_error"] = json!(close.as_ref().err());
         evidence["tool_close_error"] = json!(tool_close.as_ref().err());
+        // ACP and bridge tools have drained. Both boundaries are submitted with
+        // this invocation's other observations, never as separate trace writes.
+        fingerprints.extend(
+            crate::node_host::fingerprint::capture(
+                &resolved.envelope,
+                &resolved.workspace,
+                anchor_facts::FingerprintPhase::End,
+            )
+            .await,
+        );
         if request.cancellation.load(Ordering::Relaxed) {
             result = Err("Goose invocation was cancelled before publication".into());
         } else if let Some(error) = close.err().or_else(|| tool_close.err()) {
@@ -753,6 +774,7 @@ impl GooseNodePort {
                     plugin_instructions_sha256,
                     tools_sha256,
                     envelope: resolved.envelope,
+                    fingerprints,
                 },
                 &evidence,
                 started_at_ms,
@@ -848,12 +870,13 @@ impl GooseNodePort {
             node_id: request.key.node_id.clone(),
             invocation: request.key.invocation,
         };
-        let facts = facts::observations(
+        let mut facts = facts::observations(
             evidence,
             started_at_ms,
             crate::fact_recorder::now_ms(),
             outcome,
         );
+        facts.extend(disclosed.fingerprints);
         match tokio::task::spawn_blocking(move || {
             configuration.host_sha256 = crate::fact_recorder::host_sha256();
             recorder.record(

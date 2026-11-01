@@ -1,6 +1,6 @@
 # 常驻工程 Graph：项目现场与执行边界（设计）
 
-状态：整体设计未完成；第 2 片 Workspace 交接及第 3 片公共 envelope/环境坐标已实现，待真实验收。全部实现后按开发约定改写为当前契约并退出活跃入口。
+状态：整体设计未完成；第 2 片 Workspace 交接及第 3 片公共 envelope/环境坐标、现场指纹已实现，待真实验收。全部实现后按开发约定改写为当前契约并退出活跃入口。
 
 ## 目标
 
@@ -22,7 +22,7 @@
 3. **本机没配 Rust。** 节点准备经运行配置快照，把部署的 Rust 授权同时给 Graph 节点和 Pilot；本机部署此前没有设置 `ANCHOR_PILOT_RUSTUP`。
 4. **规则没告诉 Agent。** `anchor_run` 的描述只列命令白名单，没写 `HOME=/workspace` 可写且持久、`/usr` 只读、没有 root、凭据只在 git 工具里。
 5. **现场跨版本交接已实现，待真实验收。** 复用现有可信交接链，同一 owner、会话、Graph 来源（`bundle_source`）与同名 work 节点继承 Workspace，指令或结构改变不再切断现场；不新增资源键或 Graph 字段。Plugin 权限仍只在插件/联网改动兼容时继承（[企业微信契约](wecom-assistant.md#停止恢复与退役)）。
-6. **环境坐标已实现，待真实验收。** `AgentConfiguration.envelope_sha256` 引用同一 facts 根的不可变规范描述，hub 可展示、读取并按该字段分组；旧记录缺失字段时摘要不变。现场指纹与 shell 首个程序名未做，`ToolCall.program` 对 `sh -c` 仍只记 `sh`。
+6. **环境坐标与现场指纹已实现，待真实验收。** `AgentConfiguration.envelope_sha256` 引用同一 facts 根的不可变规范描述，hub 可展示、读取并按该字段分组；旧记录缺失字段时摘要不变。Goose invocation 开始/结束的现场指纹在同一命令沙箱内采集，失败省略；shell 首个程序名已作为启发式字段记录，`ToolCall.program` 对 `sh -c` 仍只记 `sh`。
 
 已实测（2026-11-01）：本机 bwrap 0.4.0 在 bwrap 内再起 bwrap 成功，所以 Anchor 自己的沙箱测试能在项目现场里跑。pixi 本机未安装。
 
@@ -69,7 +69,7 @@ Workspace 交接复用 `conversation.previous_run` 与 Session 的可信交接�
 | 事实 | 位置 | 用途 |
 | --- | --- | --- |
 | `envelope_sha256`（已实现，待真实验收） | `AgentConfiguration`，空值不序列化，旧记录摘要不变；规范描述复用 `state/kernel-facts` 内 `config/{envelope_sha256}`、`validator/configuration` 的内容寻址与幂等创建 | hub signals/configurations 显示环境坐标；读取单个配置同时得到描述；contrast/gate 可按 `envelope_sha256` 分组 |
-| 现场指纹：开始和结束时的 git HEAD、工作树是否有改动、已知锁文件摘要（`pixi.lock`、`Cargo.lock`、`rust-toolchain.toml`、`uv.lock`、`package-lock.json`） | 每次 invocation 的 trace 新增一种 Fact | 不复制文件也能归因到具体一步；环境变化可见 |
+| 现场指纹（已实现，待真实验收）：开始和结束时的 git HEAD、工作树是否有改动、根目录已知锁文件摘要（`pixi.lock`、`Cargo.lock`、`rust-toolchain.toml`、`uv.lock`、`package-lock.json`） | Goose invocation 的 trace 新增 `WorkspaceFingerprint` Fact，`phase=start/end`，采集失败或非 git 现场省略；Op.run 尚未接入 | 不复制文件也能归因到具体一步；环境变化可见 |
 | `sh -c` 脚本的首个程序名 | `ToolCall` 新增可选字段，标明是启发式 | 按程序统计失败不退化 |
 | 测试/CI 结果、push 是否被接受、后来是否被回滚、用户是否纠正 | `grade/{run}`，由宿主或 CI 记录，不由模型自评 | 真实质量信号 |
 
@@ -83,7 +83,7 @@ Workspace 交接复用 `conversation.previous_run` 与 Session 的可信交接�
 
 1. **垂直切片（Run 内）。** 常驻助手挂 git 与 `network` Plugin；节点拿到 Rust 工具链和 `PATH` 约定；真实 Provider 经企业微信完成 Anchor 的 clone → 改一处小问题 → 相关 `cargo test` → push `master`。暴露的环境问题在这一片修掉。
 2. **现场跟着 Graph 走（已实现，待真实验收）。** 复用可信交接链，按同 owner、会话、Graph 来源与同名 work 节点继承现有资源，不新建资源键；真实验收：改 Graph 指令后发新消息，Agent 在原现场继续，不重新 clone。
-3. **边界收口与事实（公共 envelope 已实现，待真实验收）。** 节点准备和 `Op.run` 共用执行边界；`envelope_sha256` 与规范描述进入现有 facts 清单，hub 可展示、读取和切分。**未做**：现场指纹、shell 首个程序名、`anchor_run` 描述调整及 A/B；Plugin MCP/Pilot/依赖构建边界迁移不在本片。
+3. **边界收口与事实（公共 envelope、现场指纹已实现，待真实验收）。** 节点准备和 `Op.run` 共用执行边界；`envelope_sha256` 与规范描述进入现有 facts 清单，hub 可展示、读取和切分；Goose invocation 开始/结束指纹随同一次事实提交，shell 首个程序名已作为启发式字段记录。**未做**：`anchor_run` 描述调整及 A/B；Plugin MCP/Pilot/依赖构建边界迁移不在本片。
 4. **pixi。** 宿主提供固定版本 pixi；验收：在一个需要系统库的小项目上，Agent 用 pixi 装好依赖并跑通测试，锁文件进入提交。
 
 ## 未定事项

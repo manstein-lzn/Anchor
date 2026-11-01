@@ -16,7 +16,7 @@ use anchor_kernel::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
 /// Judges observation records: only host code may record, and only facts
 /// about the invocation the resource is named after.
@@ -195,6 +195,18 @@ pub struct Observation {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Fact {
+    /// What the workspace looked like, taken inside its own command sandbox.
+    WorkspaceFingerprint {
+        phase: FingerprintPhase,
+        /// None for an unborn HEAD; never records a ref name or repository URL.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        head: Option<String>,
+        /// None when git is unavailable inside the command sandbox.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dirty: Option<bool>,
+        /// Known lock files that exist, as relative path -> SHA-256.
+        files: BTreeMap<String, String>,
+    },
     /// When the invocation ran and how it ended.
     Lifecycle {
         started_at_ms: u64,
@@ -261,6 +273,14 @@ pub enum Fact {
         ok: bool,
         failure: Option<Failure>,
     },
+}
+
+/// The invocation boundary at which the workspace was observed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FingerprintPhase {
+    Start,
+    End,
 }
 
 /// How a command a tool ran ended.
