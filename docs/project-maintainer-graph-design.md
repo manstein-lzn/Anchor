@@ -1,6 +1,6 @@
 # 常驻工程 Graph：项目现场与执行边界（设计）
 
-状态：设计，未实现。实现完成后按开发约定改写为当前契约并退出活跃入口。
+状态：整体设计未完成；第 2 片 Workspace 交接已实现，待真实验收。全部实现后按开发约定改写为当前契约并退出活跃入口。
 
 ## 目标
 
@@ -21,7 +21,7 @@
 2. **自装工具不可见。** `PATH` 固定为注册工具目录加 `/usr/bin:/bin`（`anchor-sandbox-bwrap` 的 `make_path`）。Agent 装到 `$HOME/.local/bin`、`$HOME/.cargo/bin` 的程序要写绝对路径才能运行。
 3. **本机没配 Rust。** 节点准备经运行配置快照，把部署的 Rust 授权同时给 Graph 节点和 Pilot；本机部署此前没有设置 `ANCHOR_PILOT_RUSTUP`。
 4. **规则没告诉 Agent。** `anchor_run` 的描述只列命令白名单，没写 `HOME=/workspace` 可写且持久、`/usr` 只读、没有 root、凭据只在 git 工具里。
-5. **现场跨版本只在少数情况继承。** 只改插件或联网的 Graph 版本可以交接现场，结构或指令改变就不继承（[企业微信契约](wecom-assistant.md)）。
+5. **现场跨版本交接已实现，待真实验收。** 复用现有可信交接链，同一 owner、会话、Graph 来源（`bundle_source`）与同名 work 节点继承 Workspace，指令或结构改变不再切断现场；不新增资源键或 Graph 字段。Plugin 权限仍只在插件/联网改动兼容时继承（[企业微信契约](wecom-assistant.md#停止恢复与退役)）。
 6. **环境不在事实里。** `AgentConfiguration` 没有边界摘要；`ToolCall.program` 对 `sh -c` 只记 `sh`。
 
 已实测（2026-11-01）：本机 bwrap 0.4.0 在 bwrap 内再起 bwrap 成功，所以 Anchor 自己的沙箱测试能在项目现场里跑。pixi 本机未安装。
@@ -51,12 +51,12 @@
 
 ### 3. 现场跟着 Graph 走
 
-常驻工程节点的 Workspace 资源归属从（Run、Graph 摘要、节点）改为（Library 中 Graph 的稳定身份、节点）。Graph 改版本、Run 退役或重建后，新 Run 的同名节点绑定同一个资源。
+Workspace 交接复用 `conversation.previous_run` 与 Session 的可信交接链，与 Goose 原生历史采用同一身份规则：同一 owner、同一 session、同一 Graph 来源（`bundle_source`）、同名 work 节点。旧实例退役后，Graph 指令或结构改变的新 Run 继续绑定原 Workspace 资源，不复制目录、不重新 clone，也不新建存储、资源键或 Graph 字段。
 
-- 单写者不变：同一资源同时只允许一个活动 Run 绑定，沿用现有执行租约和发布/中断事实。
-- Goose 原生历史仍按现有规则：指令或结构改变不继承历史。Agent 开始工作时先核查现场（`git status`、`git log`），这本来就是恢复路径。
-- 资源只在用户删除 Graph 或显式释放时回收。
-- 只对声明了项目现场的节点生效；其他节点保持 `(Run,node)` 现场，已交付 Artifact 不受影响。
+- work 节点改名、换 Graph 来源、换会话或 owner 是新现场边界；wait/reply 改名不切断同名 work 节点的现场，每环仍按各自实例校验身份、交接证书、退役事实与 digest。
+- 单写者不变：沿用执行租约和发布/中断事实，旧执行者和本地工具进程退出且候选已结算后才能转交。连续重启跳过未准备现场的中间实例，不越过身份边界。
+- Goose 原生历史规则不变，已支持跨退役与指令改变接续。Agent 开始工作时先核查现场（`git status`、`git log`）；Plugin 权限仍按插件/联网兼容规则继承，不随现场扩大。
+- 已共享资源按既有保留与显式释放规则回收，删除来源 Run 不删除共享现场；其他节点仍默认使用独立 `(Run,node)` 现场，已交付 Artifact 保持固定版本。
 
 ### 4. 交付就是 git
 
@@ -82,7 +82,7 @@
 按「先跑通一条，再收口」排序。每片结束删除被替代的路径，并跑相关子集测试。
 
 1. **垂直切片（Run 内）。** 常驻助手挂 git 与 `network` Plugin；节点拿到 Rust 工具链和 `PATH` 约定；真实 Provider 经企业微信完成 Anchor 的 clone → 改一处小问题 → 相关 `cargo test` → push `master`。暴露的环境问题在这一片修掉。
-2. **现场跟着 Graph 走。** 改资源归属；验收：改 Graph 指令后发新消息，Agent 在原现场继续，不重新 clone。
+2. **现场跟着 Graph 走（已实现，待真实验收）。** 复用可信交接链，按同 owner、会话、Graph 来源与同名 work 节点继承现有资源，不新建资源键；真实验收：改 Graph 指令后发新消息，Agent 在原现场继续，不重新 clone。
 3. **边界收口与事实。** envelope 函数替换节点执行的三处叠加；记录 `envelope_sha256`、现场指纹和 shell 首个程序名；hub 能按这些字段切分。描述写实做 A/B。
 4. **pixi。** 宿主提供固定版本 pixi；验收：在一个需要系统库的小项目上，Agent 用 pixi 装好依赖并跑通测试，锁文件进入提交。
 

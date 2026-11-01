@@ -32,15 +32,8 @@ impl HostArtifacts {
         key: &InvocationKey,
         inputs: &[CommitRef],
         source: &InvocationKey,
-        source_graph: &anchor_runtime::graph::GraphSnapshot,
-        target_graph: &anchor_runtime::graph::GraphSnapshot,
     ) -> Result<PathBuf, GraphError> {
-        if source_graph.digest()? != source.graph_digest
-            || target_graph.digest()? != key.graph_digest
-            || source.node_id != key.node_id
-            || source.run_id == key.run_id
-            || !crate::assistant_plugins::compatible(source_graph, target_graph, &key.node_id)
-        {
+        if source.node_id != key.node_id || source.run_id == key.run_id {
             return Err(corrupt("workspace handover Graph identity changed"));
         }
         let workspaces = self.workspaces();

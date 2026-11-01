@@ -241,7 +241,7 @@ Graph 是插件选择的唯一可编辑来源。Host 在 `wait_input` 领取消�
 
 Kernel 的 `NodeExecutionPort::invocation_plugin_authority` 默认关闭，普通 Graph 继续校验 Run 准入基线；Host 仅为可信常驻助手启用，由同一 Turn 快照约束挂载、MCP、沙箱和网络。当前 Turn 重试不重读 Graph；启动交接只沿该 Turn 的持久化 `runs` 关联验证前驱并继承权限，新 Turn 直接读取当前配置，不沿 `conversation.previous_run` 跨历史轮次追溯。启动清理仅保留已验证 current 助手中已认领、未被新消息替代的 Turn，Pilot 与孤立执行继续按原规则中断。插件卸载保护仍可执行的 Turn 引用，Run/Graph 删除清理各自拥有的快照与授权事实。
 
-正常插件切换保留 Run、Goose 原生会话和稳定 workspace。重启需要新 Run 接续时，Host 核对同一会话的交接链，并仅对插件/联网差异登记精确 workspace 来源与目标；连续重启产生的未准备实例不能成为空现场来源，普通跨 Graph 复制仍被拒绝。显式退役后可以接纳节点改名的合法新版；每个交接 binding 先核对所属实例的元数据，再判断版本兼容，不要求旧 wait/reply 名称等于新版本。结构或指令变化不继承旧实例的未提交现场，仍可按既有会话规则从已提交产物初始化；连续未准备实例的回溯也止于该版本边界，身份事实不一致仍报错。
+正常插件切换保留 Run、Goose 原生会话和稳定 Workspace。新 Run 接续时，Host 沿可信交接链核对同一 owner、同一 Session、同一 Graph 来源（`bundle_source`）与同名 work 节点，再绑定原 Workspace 资源；指令或结构改变不切断现场，不新增资源键或 Graph 字段。连续重启跳过未准备现场的中间实例；work 节点改名、换来源、换会话或 owner 则开新现场。每个交接 binding 仍核对所属实例的元数据、证书、退役事实与各自 digest，不要求旧 wait/reply 名称等于新版本，身份事实不一致仍报错。执行租约与持久的发布/中断事实继续保护单写者，已交付 Artifact 不变；Plugin 权限继承仍要求只有插件/联网差异，当前 Turn 冻结规则不变。
 
 ### 渠道适配与监听
 

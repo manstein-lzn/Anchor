@@ -32,7 +32,6 @@ mod goose {
 
 use goose::{Gate, Host, HttpHost, Provider, Step, command, wait_until};
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf, thread, time::Duration};
 
 const ALICE: &str = "plugin-turn-alice";
@@ -183,13 +182,7 @@ fn waiting(host: &Host, run: &str, replies: usize) -> Value {
 }
 
 fn workspace(host: &Host, run: &str) -> PathBuf {
-    host.base
-        .root
-        .path()
-        .join("work")
-        .join(run)
-        .join("nodes")
-        .join(format!("{:x}", Sha256::digest(b"assistant")))
+    host.base.workspace(run, "assistant")
 }
 
 fn records(host: &Host, server: &HttpHost) -> Vec<Value> {
@@ -552,7 +545,7 @@ fn retirement_and_idle_restart(wait: &str, evidence_name: &str) {
             .expect_request_contains("retired-original-input"),
         finish("retired-original-reply").after("retired-workspace-written"),
         echo("current-before-restart").expect_request_contains("retired-new-instance-input"),
-        command("set -eu; test ! -e retired-live-only.txt; test \"$(cat retired.txt)\" = retired-instance; printf current-instance > current.txt; printf current-workspace-written")
+        command("set -eu; test \"$(cat retired-live-only.txt)\" = 'uncommitted prior scene'; test \"$(cat retired.txt)\" = retired-instance; printf current-instance > current.txt; printf current-workspace-written")
             .after("turn:current-before-restart"),
         finish("retired-new-instance-reply").after("current-workspace-written"),
         echo("current-after-restart").expect_request_contains("retired-restart-new-input"),
@@ -615,6 +608,7 @@ fn retirement_and_idle_restart(wait: &str, evidence_name: &str) {
     assert_eq!(current["session"], first["session"]);
     let current_record = waiting(&host, current_run, 1);
     assert_ne!(current_record["snapshot"], original["snapshot"]);
+    assert_eq!(workspace(&host, current_run), workspace(&host, old_run));
     confirm_response(&server, "retired-new-instance-input", &current);
     let native = host.native_fact(current_run, "assistant", 1);
     assert_eq!(provider.requests().len(), 5);
@@ -630,11 +624,12 @@ fn retirement_and_idle_restart(wait: &str, evidence_name: &str) {
     let (status, binding) = restarted.request("GET", &assistant_path, None);
     assert_eq!(status, 200, "{binding}");
     let resumed = binding["assistant"]["run_id"].as_str().unwrap().to_owned();
-    assert_ne!(resumed, current_run);
+    assert_eq!(resumed, current_run);
     wait_until("idle recovery waiting in the current workflow", || {
         let record = host.record(&resumed);
         assert_eq!(record["projection"]["phase"], "executing", "{record}");
-        record["frontier"][0]["node_id"] == wait && record["results"].get("reply").is_none()
+        assert_eq!(record["results"], current_record["results"]);
+        record["frontier"][0]["node_id"] == wait
     });
     assert_eq!(
         provider.requests().len(),
@@ -648,8 +643,8 @@ fn retirement_and_idle_restart(wait: &str, evidence_name: &str) {
         "retired-restart-new-reply",
     );
     assert_eq!(next["run"], resumed);
-    let completed = waiting(&host, &resumed, 1);
-    let new_turn = completed["results"][wait][0]["completion"]["output"]["turn"]
+    let completed = waiting(&host, &resumed, 2);
+    let new_turn = completed["results"][wait][1]["completion"]["output"]["turn"]
         .as_str()
         .unwrap();
     let previous_turn = current_record["results"][wait][0]["completion"]["output"]["turn"]
@@ -665,7 +660,7 @@ fn retirement_and_idle_restart(wait: &str, evidence_name: &str) {
         vec![resumed.clone()]
     );
     assert_eq!(
-        host.native_fact(&resumed, "assistant", 1)["session_id"],
+        host.native_fact(&resumed, "assistant", 2)["session_id"],
         native["session_id"]
     );
     let requests = provider.requests();
@@ -681,9 +676,10 @@ fn retirement_and_idle_restart(wait: &str, evidence_name: &str) {
         json!({
             "retired":retired,"published":saved,"responses":[first,current,next],
             "explicit_retirement_then_instruction_and_plugin_change":true,
-            "current_wait_node":wait,"retired_uncommitted_scene_not_inherited":true,
-            "previous_committed_files_seeded":true,
-            "idle_restart_no_model_call":true,"fresh_turn_belongs_only_to_current_run":true,
+            "current_wait_node":wait,"retired_uncommitted_scene_inherited":true,
+            "same_workspace_resource_after_graph_change":true,
+            "idle_restart_in_place":true,"idle_restart_no_model_call":true,
+            "fresh_turn_belongs_only_to_current_run":true,
             "current_plugin_called_after_restart":true,"current_workspace_and_native_session_retained":true,
             "old_retirement_boundary_not_used_for_permission_inheritance":true
         }),
