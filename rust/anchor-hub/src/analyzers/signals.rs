@@ -59,6 +59,7 @@ pub struct Coordinate {
     pub node: Option<String>,
     pub model: Option<String>,
     pub tools: Option<String>,
+    pub envelope: Option<String>,
     pub host: Option<String>,
 }
 
@@ -246,6 +247,7 @@ fn situate(query: &Query, configs: impl IntoIterator<Item = String>) -> (Vec<Coo
                 node: manifest.map(|m| m.node_id.clone()),
                 model: manifest.map(|m| m.model.clone()),
                 tools: manifest.map(|m| short(&m.tools_sha256).to_owned()),
+                envelope: manifest.map(|m| short(&m.envelope_sha256).to_owned()),
                 host: manifest.map(|m| short(&m.host_sha256).to_owned()),
                 config: digest,
             }

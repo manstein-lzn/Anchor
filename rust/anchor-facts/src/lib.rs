@@ -106,6 +106,10 @@ pub struct AgentConfiguration {
     /// [`tools_digest`].
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub tools_sha256: String,
+    /// Digest of the common invocation environment, whose canonical description
+    /// is another immutable manifest at `configuration_id(envelope_sha256)`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub envelope_sha256: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -151,7 +155,7 @@ pub fn tools_digest<'a>(tools: impl IntoIterator<Item = (&'a str, &'a str, &'a V
 /// Objects with their keys sorted, recursively. With serde_json's
 /// `preserve_order`, which other crates in a build may enable, maps keep
 /// insertion order, so equal values could otherwise hash differently.
-fn canonical(value: &Value) -> Value {
+pub fn canonical(value: &Value) -> Value {
     match value {
         Value::Object(map) => {
             let mut entries: Vec<_> = map.iter().collect();

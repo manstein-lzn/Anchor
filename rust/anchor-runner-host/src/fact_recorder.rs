@@ -111,12 +111,15 @@ impl FactRecorder {
     pub(crate) fn record(
         &self,
         configuration: &AgentConfiguration,
+        envelope: Value,
         invocation: &Invocation,
         facts: Vec<Fact>,
     ) -> Recording {
         let started = Instant::now();
         let mut recording = Recording::default();
-        if let Err(error) = self.submit_all(configuration, invocation, facts, &mut recording) {
+        if let Err(error) =
+            self.submit_all(configuration, envelope, invocation, facts, &mut recording)
+        {
             recording.error = Some(error.to_string());
         }
         recording.elapsed_ms = started.elapsed().as_millis() as u64;
@@ -126,10 +129,19 @@ impl FactRecorder {
     fn submit_all(
         &self,
         configuration: &AgentConfiguration,
+        envelope: Value,
         invocation: &Invocation,
         facts: Vec<Fact>,
         recording: &mut Recording,
     ) -> Result<(), KernelError> {
+        self.create(
+            Resource::new(
+                anchor_facts::configuration_id(&configuration.envelope_sha256),
+                anchor_facts::CONFIGURATION,
+                envelope,
+            )
+            .configured(&configuration.envelope_sha256),
+        )?;
         let digest = configuration.digest();
         let manifest =
             serde_json::to_value(configuration.clone().normalized()).expect("manifest serializes");
@@ -199,6 +211,7 @@ mod tests {
             routes: vec!["verify".into()],
             host_sha256: host_sha256(),
             tools_sha256: anchor_facts::tools_digest([]),
+            envelope_sha256: anchor_facts::text_digest("{\"network\":false}"),
         }
     }
 
@@ -242,20 +255,40 @@ mod tests {
     fn observations_land_in_their_own_root_under_their_configuration() {
         let state = tempfile::tempdir().unwrap();
         let recorder = FactRecorder::open(state.path()).unwrap();
-        let recording = recorder.record(&configuration(), &invocation(), facts());
+        let recording = recorder.record(
+            &configuration(),
+            serde_json::json!({"network":false}),
+            &invocation(),
+            facts(),
+        );
         assert!(recording.accepted, "{recording:?}");
         assert_eq!((recording.facts, recording.error), (2, None));
         // A resumed invocation appends to the same trace.
-        let again = recorder.record(&configuration(), &invocation(), facts());
+        let again = recorder.record(
+            &configuration(),
+            serde_json::json!({"network":false}),
+            &invocation(),
+            facts(),
+        );
         assert!(again.accepted);
 
         let reader = HistoryReader::open(state.path().join(ROOT)).unwrap();
         let digest = configuration().digest();
         assert_eq!(reader.list("trace/").unwrap(), vec![invocation().trace()]);
-        assert_eq!(
-            reader.list("config/").unwrap(),
-            vec![anchor_facts::configuration_id(&digest)]
-        );
+        let mut manifests = vec![
+            anchor_facts::configuration_id(&digest),
+            anchor_facts::configuration_id(&configuration().envelope_sha256),
+        ];
+        manifests.sort();
+        assert_eq!(reader.list("config/").unwrap(), manifests);
+        let envelope = reader
+            .load(&anchor_facts::configuration_id(
+                &configuration().envelope_sha256,
+            ))
+            .unwrap()
+            .unwrap();
+        assert_eq!(envelope.state, serde_json::json!({"network":false}));
+        assert_eq!(envelope.version, 0);
         let history = reader.history(&invocation().trace()).unwrap();
         assert_eq!(history.len(), 2);
         let first: Observation =
@@ -285,7 +318,12 @@ mod tests {
     fn an_invocation_without_observations_is_not_recorded_as_empty() {
         let state = tempfile::tempdir().unwrap();
         let recorder = FactRecorder::open(state.path()).unwrap();
-        let recording = recorder.record(&configuration(), &invocation(), Vec::new());
+        let recording = recorder.record(
+            &configuration(),
+            serde_json::json!({"network":false}),
+            &invocation(),
+            Vec::new(),
+        );
         assert!(!recording.accepted);
         assert_eq!(recording.reason, Some(Reason::ContentInvalid));
     }

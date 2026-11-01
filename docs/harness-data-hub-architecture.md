@@ -108,7 +108,7 @@ anchor-kernel  ◄──  anchor-facts  ◄──  anchor-runner-host   （写�
   - `model_turn`：token、费用、耗时、首 token 时间、`messageId`、观察时间。注意观察时间是 Host 收到用量报告的时间，Goose 要等这一轮请求的工具调用跑完才报告，所以它不是模型响应结束的时间；一轮最晚在它的第一个工具调用开始时结束（P3 用真实数据发现，见 [P3 报告](../experiments/harness-hub/p3/report.md)）；
   - `tool_call`：工具名、参数形状摘要、开始和结束时间、Goose 的 `toolCallId`、它回应的是第几次模型请求、是否成功、失败类别。
 - **配置清单** `AgentConfiguration`：Graph 摘要、节点、模型及绑定、Goose 二进制、提示词摘要、Plugin 说明摘要、Plugin 身份、路由。摘要与 Plugin 和路由的顺序无关。
-  - P6 起还记录 `host_sha256`（Host 可执行文件的摘要）和 `tools_sha256`（交给模型的工具定义摘要，与顺序和键序无关）。这样，只在工具行为或工具定义上不同的两个 Harness，会记成不同的配置，受控实验靠它分组。两个字段为空时不序列化，旧清单的摘要不变。
+  - P6 起还记录 `host_sha256`（Host 可执行文件的摘要）和 `tools_sha256`（交给模型的工具定义摘要，与顺序和键序无关）。Graph 公共执行边界另记 `envelope_sha256`，规范 JSON 复用同根 `config/{envelope_sha256}` 不可变资源；signals/configurations 显示其短摘要，读取单个配置同时返回环境描述，contrast/gate 支持按该字段分组。三个字段为空时不序列化，旧清单的摘要不变。
 - **不带业务内容**：工具参数只记形状摘要，错误只记类别，提示词只记摘要。
 
 - **评分**（P4 已实现）：

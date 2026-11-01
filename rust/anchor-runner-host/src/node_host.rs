@@ -12,7 +12,7 @@ use anchor_runtime::graph::{
     NodeExecutionCapabilities, NodeExecutionOutcome, NodeExecutionPort, NodeExecutionRequest,
     NodeKind, PluginBinding, RecoveryDecision,
 };
-use anchor_runtime::{NetworkPolicy, SandboxError, SandboxPort, SandboxRequest, SandboxStatus};
+use anchor_runtime::{SandboxError, SandboxPort, SandboxRequest, SandboxStatus};
 use anchor_sandbox_bwrap::BubblewrapSandbox;
 use serde_json::json;
 use std::{
@@ -28,6 +28,7 @@ mod assistant;
 mod configuration;
 mod contracts;
 mod conversation;
+pub(crate) mod envelope;
 mod execution;
 mod facts;
 mod inputs;

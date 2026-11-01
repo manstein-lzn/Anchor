@@ -135,6 +135,7 @@ fn owner_snapshot_preserves_shared_http_and_stdio_credential_bytes() {
     .unwrap();
     assert_eq!(config.configuration_revisions["demo"], 1);
     assert!(config.configuration_bindings.contains_key("demo"));
+    assert_eq!(config.credential_process_plugins(), vec!["demo"]);
     let local = &config.servers["demo-local"];
     let named = named_view(&local.config, &local.declaration, None, "demo").unwrap();
     let (_, _, environment, _) =

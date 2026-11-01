@@ -327,7 +327,10 @@ fn configurations(query: &Query, args: &Value) -> Result<Value, String> {
         .filter(|(digest, _)| digest.starts_with(prefix))
         .collect();
     if let [(digest, manifest)] = matching.as_slice() {
-        return Ok(json!({"digest": digest, "manifest": manifest}));
+        return Ok(json!({
+            "digest": digest, "manifest": manifest,
+            "envelope": query.manifest(&manifest.envelope_sha256),
+        }));
     }
     let mut used: BTreeMap<&str, usize> = BTreeMap::new();
     for invocation in query.invocations() {
@@ -346,6 +349,7 @@ fn configurations(query: &Query, args: &Value) -> Result<Value, String> {
                 "plugins": manifest.plugins.iter().map(|p| &p.id).collect::<Vec<_>>(),
                 "host": manifest.host_sha256.get(..12),
                 "tools": manifest.tools_sha256.get(..12),
+                "envelope": manifest.envelope_sha256.get(..12),
                 "invocations": used.get(digest).copied().unwrap_or(0),
             })
         })

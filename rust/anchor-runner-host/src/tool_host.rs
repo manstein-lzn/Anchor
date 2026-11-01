@@ -312,6 +312,21 @@ impl McpToolConfig {
         })
     }
 
+    /// Local MCP processes with host configuration/credential selectors. Only
+    /// Plugin ids leave this boundary, never resolved values or configuration.
+    pub(crate) fn credential_process_plugins(&self) -> Vec<String> {
+        self.servers
+            .values()
+            .filter(|server| {
+                server.config.get("command").is_some()
+                    && !anchor_graph_host::mcp_environment_fields(&server.declaration).is_empty()
+            })
+            .map(|server| server.plugin_id.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
     pub(crate) fn declares_stdio(&self, binding: &PluginBinding) -> bool {
         self.servers.values().any(|server| {
             server.plugin_id == binding.id

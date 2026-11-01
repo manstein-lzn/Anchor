@@ -33,6 +33,13 @@ use tokio::{
 };
 
 const WORKSPACE_MOUNT: &str = "/workspace";
+/// Environment every sandboxed command gets, whatever the request adds. The
+/// workspace is the persistent HOME; the other two keep it writable and clean.
+pub const FIXED_ENVIRONMENT: [(&str, &str); 3] = [
+    ("HOME", WORKSPACE_MOUNT),
+    ("TMPDIR", "/tmp"),
+    ("PYTHONDONTWRITEBYTECODE", "1"),
+];
 const BWRAP_INFO_FD: i32 = 200;
 const SYSTEM_DIRS: &[&str] = &["/usr", "/bin", "/lib", "/lib64", "/sbin"];
 const SYSTEM_FILES: &[&str] = &[
@@ -185,6 +192,35 @@ impl BubblewrapSandbox {
         let mut commands = self.allowed_commands.iter().cloned().collect::<Vec<_>>();
         commands.sort();
         commands
+    }
+
+    /// Fixed sandbox grants, without host workspace/input/spill roots. Exact
+    /// invocation mounts are included; callers must abstract transient inputs
+    /// before recording this as an environment identity. This observes authority
+    /// only and does not change the mounts or environment of any command.
+    pub fn describe_boundary(&self) -> serde_json::Value {
+        let readonly = SYSTEM_DIRS
+            .iter()
+            .chain(SYSTEM_FILES)
+            .filter(|path| Path::new(path).exists())
+            .map(|path| (PathBuf::from(path), PathBuf::from(path)))
+            .chain(self.readonly_grants.iter().cloned())
+            .map(|(source, destination)| {
+                serde_json::json!({"destination": destination, "source": source})
+            })
+            .collect::<Vec<_>>();
+        let writable = [WORKSPACE_MOUNT, "/tmp"]
+            .into_iter()
+            .map(PathBuf::from)
+            .chain(self.writable_grants.iter().map(|(_, path)| path.clone()))
+            .collect::<Vec<_>>();
+        serde_json::json!({
+            "allowed_commands": self.allowed_commands(),
+            "network_allowed": self.allow_network,
+            "pid_namespace_proc": self.pid_namespace_proc,
+            "readonly": readonly,
+            "writable": writable,
+        })
     }
 
     /// Whether a host directory is covered by an authorized spill root.
@@ -775,11 +811,11 @@ impl BubblewrapSandbox {
                 path_string(device),
             ]);
         }
-        // A granted accelerator device comes with the read-only /sys view its
-        // driver enumerates devices through. Sandboxes without a device grant
-        // keep the minimal mount set.
-        if !resolved.devices.is_empty() && Path::new("/sys").exists() {
-            args.extend(["--ro-bind".into(), "/sys".into(), "/sys".into()]);
+        // A granted accelerator device comes with a read-only view of /sys that
+        // its driver enumerates devices through. Sandboxes without a device
+        // grant keep the minimal mount set.
+        if let Some(view) = device_sys_view(&resolved.devices) {
+            args.extend(["--ro-bind".into(), view.into(), view.into()]);
         }
         if include_info_fd {
             args.extend(["--info-fd".into(), BWRAP_INFO_FD.to_string()]);
@@ -807,9 +843,7 @@ impl BubblewrapSandbox {
             .args(argv)
             .env_clear()
             .env("PATH", make_path(&resolved.tool_dirs))
-            .env("HOME", WORKSPACE_MOUNT)
-            .env("TMPDIR", "/tmp")
-            .env("PYTHONDONTWRITEBYTECODE", "1")
+            .envs(FIXED_ENVIRONMENT)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -874,9 +908,7 @@ impl SandboxPort for BubblewrapSandbox {
                 .args(argv)
                 .env_clear()
                 .env("PATH", make_path(&resolved.tool_dirs))
-                .env("HOME", WORKSPACE_MOUNT)
-                .env("TMPDIR", "/tmp")
-                .env("PYTHONDONTWRITEBYTECODE", "1")
+                .envs(FIXED_ENVIRONMENT)
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
@@ -1243,6 +1275,12 @@ fn reject_symlink_components(base: &Path, relative: &Path) -> Result<(), Sandbox
         }
     }
     Ok(())
+}
+
+/// The read-only /sys view a granted device needs, if this host has one. The
+/// launch argv and the observed boundary both read this rule from here.
+pub fn device_sys_view(devices: &[PathBuf]) -> Option<&'static str> {
+    (!devices.is_empty() && Path::new("/sys").exists()).then_some("/sys")
 }
 
 fn make_path(tool_dirs: &[PathBuf]) -> String {

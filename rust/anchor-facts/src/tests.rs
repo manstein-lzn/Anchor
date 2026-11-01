@@ -36,6 +36,7 @@ fn configuration() -> AgentConfiguration {
         routes: vec!["verify".into(), "done".into()],
         host_sha256: String::new(),
         tools_sha256: String::new(),
+        envelope_sha256: String::new(),
     }
 }
 
@@ -376,9 +377,20 @@ fn manifests_without_harness_identity_keep_their_digest() {
     // the same: the fields are left out when empty.
     let old = configuration();
     let json = serde_json::to_value(&old).unwrap();
-    assert!(json.get("host_sha256").is_none() && json.get("tools_sha256").is_none());
+    assert!(
+        json.get("host_sha256").is_none()
+            && json.get("tools_sha256").is_none()
+            && json.get("envelope_sha256").is_none()
+    );
+    assert_eq!(
+        old.digest(),
+        "1df310017104f6f90b3eca87a5193d2c2427162b5813f31246b8c2ca29218f4d"
+    );
     let read: AgentConfiguration = serde_json::from_value(json).unwrap();
     assert_eq!(read.digest(), old.digest());
+    let mut envelope = configuration();
+    envelope.envelope_sha256 = "e".into();
+    assert_ne!(envelope.digest(), old.digest());
     let mut harness = configuration();
     harness.host_sha256 = "h".into();
     assert_ne!(harness.digest(), old.digest());

@@ -120,7 +120,40 @@ fn native_goose_direct_model_transport_requires_observed_tool_receipt() {
             .find("fixture-only-not-a-secret")
             .is_none()
     );
-    host.evidence(&provider, &run, json!({"native_direct_model_transport":true,"receipt_bound_completion":true,"no_arbitrary_wall_time":true,"default_runtime":true,"public_goose_trace":true}));
+    let facts =
+        anchor_kernel::HistoryReader::open(host.base.state_root().join("kernel-facts")).unwrap();
+    let trace = anchor_facts::Invocation {
+        run_id: run.clone(),
+        graph_digest: saved["graph_digest"].as_str().unwrap().into(),
+        node_id: "worker".into(),
+        invocation: 1,
+    }
+    .trace();
+    let records = facts.history(&trace).unwrap();
+    let configuration = records[0].stamp.config().unwrap();
+    let configuration = facts
+        .load(&anchor_facts::configuration_id(configuration))
+        .unwrap()
+        .unwrap()
+        .state;
+    let envelope_sha256 = configuration["envelope_sha256"].as_str().unwrap();
+    assert_eq!(envelope_sha256.len(), 64);
+    let envelope = facts
+        .load(&anchor_facts::configuration_id(envelope_sha256))
+        .unwrap()
+        .unwrap()
+        .state;
+    assert_eq!(
+        anchor_facts::text_digest(&anchor_facts::canonical(&envelope).to_string()),
+        envelope_sha256
+    );
+    assert!(!envelope.to_string().contains(&run));
+    assert!(
+        !envelope
+            .to_string()
+            .contains(host.base.root.path().to_str().unwrap())
+    );
+    host.evidence(&provider, &run, json!({"native_direct_model_transport":true,"receipt_bound_completion":true,"no_arbitrary_wall_time":true,"default_runtime":true,"public_goose_trace":true,"configuration":configuration,"envelope":envelope}));
 }
 
 #[test]
@@ -706,9 +739,14 @@ fn assert_native_record(host: &Host, provider: &Provider, run: &str, completed: 
         let (request, response) =
             assert_native_tool_response(&conversation, "anchor__final_result", "fixture complete");
         assert_eq!(request["toolCall"]["value"]["arguments"]["route"], "verify");
+        let mut files = request["toolCall"]["value"]["arguments"]["files"]
+            .as_array()
+            .unwrap()
+            .clone();
+        files.sort_by_key(Value::to_string);
         assert_eq!(
             native_response_value(&response),
-            json!({"summary":"fixture complete","route":"verify"})
+            json!({"summary":"fixture complete","route":"verify", "files":files})
         );
     }
     for request in provider.requests() {

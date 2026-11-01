@@ -58,9 +58,15 @@ impl HostIoResolver {
                 let PreparedNodeLaunch {
                     workspace,
                     readonly_inputs,
-                    sandbox,
+                    envelope,
                     conversation,
-                } = self.prepare_tool_launch(request, &environment, prepared.mounts)?;
+                } = self.prepare_tool_launch(
+                    request,
+                    environment.clone(),
+                    prepared.mounts,
+                    mounted.network,
+                    prepared.mcp.credential_process_plugins(),
+                )?;
                 let mut mcp = prepared.mcp;
                 self.retain_plugin_configuration(&request.key, mcp.configuration_bindings.clone())
                     .await?;
@@ -97,7 +103,7 @@ impl HostIoResolver {
                     &mounted.bindings,
                     mounted.network,
                     Some(crate::tool_host::SandboxLaunch {
-                        sandbox: &sandbox,
+                        sandbox: &envelope.sandbox,
                         workspace: &workspace,
                         readonly_inputs: &readonly_inputs,
                         plugin_views: &plugin_views,
@@ -130,17 +136,13 @@ impl HostIoResolver {
                         readonly_inputs.clone(),
                         request.cancellation.clone(),
                     ),
-                    sandbox,
+                    envelope.sandbox.clone(),
                     workspace.clone(),
                     readonly_inputs,
                     request.cancellation.clone(),
                 )
                 .with_spill(spill)
-                .with_environment(environment)
-                .with_network(mounted.network)
-                .with_timeout_ceiling(crate::node_tools::command_timeout_ceiling(
-                    request.wall_time_limit_seconds,
-                ));
+                .with_envelope(&envelope);
                 let tools =
                     std::sync::Arc::new(node_tools) as std::sync::Arc<dyn anchor_runtime::ToolPort>;
                 // Tools a node's completion and continuity depend on stay listed; the rest
@@ -168,6 +170,7 @@ impl HostIoResolver {
                     plugins: mounted.bindings,
                     plugin_instructions,
                     workspace,
+                    envelope,
                 })
             }
             .await;
@@ -180,7 +183,7 @@ impl HostIoResolver {
 struct PreparedNodeLaunch {
     workspace: PathBuf,
     readonly_inputs: Vec<anchor_runtime::ReadOnlyInput>,
-    sandbox: std::sync::Arc<BubblewrapSandbox>,
+    envelope: envelope::InvocationEnvelope,
     conversation: Option<conversation::Conversation>,
 }
 
@@ -279,24 +282,23 @@ impl HostIoResolver {
     fn prepare_tool_launch(
         &self,
         request: &NodeExecutionRequest,
-        environment: &crate::tool_environment::ToolEnvironment,
+        environment: crate::tool_environment::ToolEnvironment,
         plugin_mounts: Vec<anchor_runtime::ReadOnlyInput>,
+        network: bool,
+        credential_plugins: Vec<String>,
     ) -> Result<PreparedNodeLaunch, ResolutionError> {
         let workspace = self.workspace(request)?;
         let local_inputs = self.local_input_mounts(&request.key)?;
         let conversation = self.conversation(&request.key)?;
-        // Everything this invocation mounts is granted on the invocation
-        // itself: the Run policy is the deployment floor, not a list of
-        // per-Run trees (a parent Run cannot know its children's Plugins or
-        // environments).
-        let mut grants = local_inputs.clone();
-        grants.extend(plugin_mounts.iter().cloned());
-        let sandbox = std::sync::Arc::new(
-            environment
-                .grant_sandbox(&self.sandbox)?
-                .with_readonly_grants(&grants)
-                .map_err(|error| error.to_string())?,
-        );
+        let envelope = envelope::invocation_envelope(
+            &self.sandbox,
+            environment,
+            &plugin_mounts,
+            network,
+            &local_inputs,
+            credential_plugins,
+            request.wall_time_limit_seconds,
+        )?;
         let mut readonly_inputs = self
             .artifacts
             .input_mounts(
@@ -310,7 +312,7 @@ impl HostIoResolver {
         Ok(PreparedNodeLaunch {
             workspace,
             readonly_inputs,
-            sandbox,
+            envelope,
             conversation,
         })
     }

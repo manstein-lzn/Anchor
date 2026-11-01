@@ -55,6 +55,7 @@ use transport::AcpConnection;
 struct Disclosed {
     plugin_instructions_sha256: String,
     tools_sha256: String,
+    envelope: crate::node_host::envelope::InvocationEnvelope,
 }
 
 pub(crate) struct GooseNodePort {
@@ -751,6 +752,7 @@ impl GooseNodePort {
                 Disclosed {
                     plugin_instructions_sha256,
                     tools_sha256,
+                    envelope: resolved.envelope,
                 },
                 &evidence,
                 started_at_ms,
@@ -838,6 +840,7 @@ impl GooseNodePort {
             // finishing on the first invocation.
             host_sha256: String::new(),
             tools_sha256: disclosed.tools_sha256,
+            envelope_sha256: disclosed.envelope.digest(),
         };
         let invocation = anchor_facts::Invocation {
             run_id: request.key.run_id.clone(),
@@ -853,7 +856,12 @@ impl GooseNodePort {
         );
         match tokio::task::spawn_blocking(move || {
             configuration.host_sha256 = crate::fact_recorder::host_sha256();
-            recorder.record(&configuration, &invocation, facts)
+            recorder.record(
+                &configuration,
+                disclosed.envelope.describe(),
+                &invocation,
+                facts,
+            )
         })
         .await
         {

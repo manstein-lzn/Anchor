@@ -104,35 +104,6 @@ async fn run(tools: &NodeTools, command: &[&str]) -> Value {
         .clone()
 }
 
-#[test]
-fn command_ceiling_stays_thirty_seconds_unless_the_deployment_raises_it() {
-    use std::time::Duration;
-    // Historical default: the deployment grants nothing, so a node budget does
-    // not widen the command ceiling on its own.
-    assert_eq!(
-        super::resolve_command_ceiling(None, None),
-        Duration::from_secs(30)
-    );
-    assert_eq!(
-        super::resolve_command_ceiling(None, Some(3600.0)),
-        Duration::from_secs(30)
-    );
-    // An explicit deployment grant widens it, never beyond the node budget.
-    assert_eq!(
-        super::resolve_command_ceiling(Some(86400), Some(3600.0)),
-        Duration::from_secs(3600)
-    );
-    assert_eq!(
-        super::resolve_command_ceiling(Some(86400), Some(1.0e9)),
-        Duration::from_secs(86400)
-    );
-    // Zero or garbage configuration never removes the default.
-    assert_eq!(
-        super::resolve_command_ceiling(Some(0), Some(3600.0)),
-        Duration::from_secs(30)
-    );
-}
-
 #[tokio::test]
 async fn direct_rustc_uses_the_frozen_grant_and_rejects_unrelated_host_commands() {
     use std::os::unix::fs::PermissionsExt;

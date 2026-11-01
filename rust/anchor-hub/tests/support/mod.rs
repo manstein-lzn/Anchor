@@ -81,6 +81,7 @@ pub fn configuration(node: &str) -> AgentConfiguration {
         routes: Vec::new(),
         host_sha256: "host".into(),
         tools_sha256: "tools".into(),
+        envelope_sha256: anchor_facts::text_digest("{\"network\":false}"),
     }
 }
 
@@ -267,6 +268,14 @@ impl World {
     ) {
         self.clock.set(at);
         if let Some(manifest) = manifest {
+            let _ = self.facts.create(
+                Resource::new(
+                    anchor_facts::configuration_id(&manifest.envelope_sha256),
+                    anchor_facts::CONFIGURATION,
+                    serde_json::json!({"network": manifest.envelope_sha256 == anchor_facts::text_digest("{\"network\":true}")}),
+                )
+                .configured(&manifest.envelope_sha256),
+            );
             let _ = self.facts.create(
                 Resource::new(
                     anchor_facts::configuration_id(digest),

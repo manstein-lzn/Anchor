@@ -41,7 +41,12 @@ impl<'a> Query<'a> {
         self.facts.configurations.get(digest)
     }
 
-    /// Every configuration manifest, by digest.
+    /// A content-addressed environment description in the same fact root.
+    pub fn manifest(&self, digest: &str) -> Option<&'a serde_json::Value> {
+        self.facts.manifests.get(digest)
+    }
+
+    /// Every Agent configuration manifest, by digest.
     pub fn configurations(&self) -> impl Iterator<Item = (&'a str, &'a AgentConfiguration)> {
         self.facts
             .configurations

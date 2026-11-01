@@ -11,5 +11,5 @@ goose_acp/pilot_interaction/channel_management.rs 0 2 0 # G8-channel-interaction
 local_inputs.rs 1 0 0 # G1-local-inputs: local_inputs.rs；随 G2 保留 RunProgress 输入校验与挂载契约
 node_host.rs 3 0 0 # G2-node-host: node_host.rs；NodeHost 持 RunApplication 与默认 reader；端口接线预算 +70 行，列为架构欠债
 node_host/conversation.rs 1 0 0 # G2-node-conversation: node_host/conversation.rs；随 G2 保留历史投影的 RunApplication 查询端口
-node_host/preparation.rs 0 4 0 # G5-node-preparation: node_host/preparation.rs；随 G2/G8 保留 sandbox 工具与渠道包装装配；已删除工具名反向引用
+node_host/preparation.rs 0 3 0 # G5-node-preparation: node_host/preparation.rs；随 G2/G8 保留 sandbox 工具与渠道包装装配；已删除工具名反向引用
 pilot_host.rs 0 3 0 # G9-pilot-host: pilot_host.rs；保留 Pilot Turn 具体执行端口；端口接线预算 +35 行，列为架构欠债

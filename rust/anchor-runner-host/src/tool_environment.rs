@@ -1060,6 +1060,23 @@ impl ToolEnvironment {
         policy
     }
 
+    /// Host-generated aliases live in fresh temporary directories, but their
+    /// authority is the stable sandbox destination, not that directory's name.
+    pub(crate) fn generated_mount_source(&self, source: &Path) -> Option<String> {
+        self._launchers.iter().find_map(|launcher| {
+            let root = launcher.path().canonicalize().ok()?;
+            let relative = source.strip_prefix(&root).ok()?;
+            let mount = self
+                .mounts
+                .iter()
+                .find(|mount| mount.source == launcher.path())?;
+            Some(format!(
+                "host-generated:{}",
+                mount.destination.join(relative).display()
+            ))
+        })
+    }
+
     pub(crate) fn grant_sandbox(
         &self,
         sandbox: &anchor_sandbox_bwrap::BubblewrapSandbox,

@@ -145,6 +145,8 @@ pub struct Facts<'a> {
     pub resources: &'a BTreeMap<(String, String), Entry>,
     /// Configuration manifests by digest.
     pub configurations: &'a BTreeMap<String, AgentConfiguration>,
+    /// Other immutable configuration manifests (currently invocation envelopes).
+    pub manifests: &'a BTreeMap<String, serde_json::Value>,
     /// Per invocation, the details of its tool calls in call order, where
     /// the execution port's evidence was found.
     pub details: &'a BTreeMap<InvocationId, Vec<Detail>>,
@@ -155,6 +157,7 @@ pub trait FactTable {
     fn insert(&mut self, row: Row);
     fn resource(&mut self, entry: Entry);
     fn configuration(&mut self, digest: String, manifest: AgentConfiguration);
+    fn manifest(&mut self, digest: String, manifest: serde_json::Value);
     fn details(&mut self, invocation: InvocationId, details: Vec<Detail>);
     fn facts(&self) -> Facts<'_>;
 }
@@ -164,6 +167,7 @@ pub struct MemoryTable {
     rows: Vec<Row>,
     resources: BTreeMap<(String, String), Entry>,
     configurations: BTreeMap<String, AgentConfiguration>,
+    manifests: BTreeMap<String, serde_json::Value>,
     details: BTreeMap<InvocationId, Vec<Detail>>,
 }
 
@@ -178,6 +182,9 @@ impl FactTable for MemoryTable {
     fn configuration(&mut self, digest: String, manifest: AgentConfiguration) {
         self.configurations.insert(digest, manifest);
     }
+    fn manifest(&mut self, digest: String, manifest: serde_json::Value) {
+        self.manifests.insert(digest, manifest);
+    }
     fn details(&mut self, invocation: InvocationId, details: Vec<Detail>) {
         self.details.insert(invocation, details);
     }
@@ -186,6 +193,7 @@ impl FactTable for MemoryTable {
             rows: &self.rows,
             resources: &self.resources,
             configurations: &self.configurations,
+            manifests: &self.manifests,
             details: &self.details,
         }
     }
@@ -282,6 +290,12 @@ impl Projector {
                 && manifest.digest() == digest
             {
                 table.configuration(digest.to_owned(), manifest);
+            } else if resource.validator == anchor_facts::CONFIGURATION
+                && let Some(digest) = id.strip_prefix("config/")
+                && anchor_facts::text_digest(&anchor_facts::canonical(&resource.state).to_string())
+                    == digest
+            {
+                table.manifest(digest.to_owned(), resource.state.clone());
             }
             let read = self.read.entry((root.clone(), id.clone())).or_default();
             for record in source.history_after(&id, *read)? {

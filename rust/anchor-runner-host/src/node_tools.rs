@@ -1,6 +1,9 @@
 //! AgentNode command tools delegated to the host-authorized Bubblewrap adapter.
 
-use crate::tool_names::{EDIT_TOOL_NAME, READ_TOOL_NAME, RUN_TOOL_NAME};
+use crate::{
+    node_host::envelope::DEFAULT_TIMEOUT,
+    tool_names::{EDIT_TOOL_NAME, READ_TOOL_NAME, RUN_TOOL_NAME},
+};
 
 use anchor_runtime::{
     Cancellation, NetworkPolicy, ReadOnlyInput, SandboxError, SandboxPort, SandboxRequest,
@@ -30,35 +33,6 @@ const READ_MAX_LINES: usize = 400;
 /// Byte ceiling for one `anchor_read` preview.
 const READ_MAX_BYTES: usize = 256 * 1024;
 
-/// Wall-clock limit for one `anchor_run` command.
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// Deployment ceiling for one `anchor_run` command.
-///
-/// The default stays the historical thirty seconds so an existing deployment
-/// keeps the same behaviour. A deployment that runs long experiments raises it
-/// with `ANCHOR_NODE_COMMAND_TIMEOUT_SECONDS`, and the effective ceiling never
-/// exceeds the node's own wall-clock budget: a command cannot outlive its node.
-pub(crate) fn command_timeout_ceiling(wall_time_limit_seconds: Option<f64>) -> Duration {
-    let configured = std::env::var("ANCHOR_NODE_COMMAND_TIMEOUT_SECONDS")
-        .ok()
-        .and_then(|value| value.trim().parse::<u64>().ok());
-    resolve_command_ceiling(configured, wall_time_limit_seconds)
-}
-
-fn resolve_command_ceiling(
-    configured: Option<u64>,
-    wall_time_limit_seconds: Option<f64>,
-) -> Duration {
-    let configured = configured
-        .filter(|value| *value > 0)
-        .map(Duration::from_secs)
-        .unwrap_or(DEFAULT_TIMEOUT);
-    let node = wall_time_limit_seconds
-        .and_then(|seconds| Duration::try_from_secs_f64(seconds).ok())
-        .unwrap_or(DEFAULT_TIMEOUT);
-    configured.min(node).max(DEFAULT_TIMEOUT)
-}
 /// Bytes retained per stream before the remainder is spilled or dropped.
 const DEFAULT_PREVIEW_BYTES: usize = 64 * 1024;
 /// Bounded retention for output beyond the previews.
@@ -127,6 +101,16 @@ impl NodeTools {
             preview_bytes: DEFAULT_PREVIEW_BYTES,
             development_projects: None,
         }
+    }
+
+    pub(crate) fn with_envelope(
+        mut self,
+        envelope: &crate::node_host::envelope::InvocationEnvelope,
+    ) -> Self {
+        self.sandbox = Arc::new(envelope.command_sandbox());
+        self.with_environment(envelope.environment.clone())
+            .with_network(envelope.network == NetworkPolicy::Enabled)
+            .with_timeout_ceiling(envelope.timeout_ceiling)
     }
 
     pub fn with_environment(

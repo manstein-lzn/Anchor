@@ -506,6 +506,7 @@ fn rank_and_proportion_tests_match_known_values() {
 fn experiment(world: &World) {
     let mut variant = support::configuration("worker");
     variant.host_sha256 = "host-b".into();
+    variant.envelope_sha256 = anchor_facts::text_digest("{\"network\":true}");
     for n in 0..6u64 {
         let (arm, run) = if n % 2 == 0 {
             (support::configuration("worker"), format!("a{n}"))
@@ -612,6 +613,18 @@ fn contrast_compares_arms_on_quality_first_then_cost() {
     }
     .analyze(&Query::new(table.facts(), None));
     assert_eq!(by_model.summary["arms"], json!(["flash"]));
+    let by_envelope = Contrast {
+        by: "envelope_sha256".into(),
+        reference: None,
+    }
+    .analyze(&Query::new(table.facts(), None));
+    assert_eq!(
+        by_envelope.summary["arms"],
+        json!([
+            support::configuration("worker").envelope_sha256,
+            anchor_facts::text_digest("{\"network\":true}")
+        ])
+    );
 }
 
 /// One observed, accepted worker invocation: `turns` model turns, then the
@@ -726,6 +739,10 @@ fn signals_rank_beaten_harnesses_and_exemplars_with_stable_ids() {
     assert_eq!(beaten.coordinates.len(), 1);
     assert_eq!(beaten.coordinates[0].config, slow.digest());
     assert_eq!(beaten.coordinates[0].host.as_deref(), Some("host-b"));
+    assert_eq!(
+        beaten.coordinates[0].envelope.as_deref(),
+        Some(&slow.envelope_sha256[..12])
+    );
     assert!(
         beaten.detail.contains("score 1.000 against 0.000"),
         "{}",
@@ -914,6 +931,11 @@ fn the_mcp_server_answers_bounded_reads_and_sees_appends() {
         json!({"digest": &fast.digest()[..10]}),
     );
     assert_eq!(manifest["manifest"]["host_sha256"], json!("host"));
+    assert_eq!(
+        manifest["manifest"]["envelope_sha256"],
+        json!(fast.envelope_sha256)
+    );
+    assert_eq!(manifest["envelope"], json!({"network":false}));
     let listed = read(&mut hub, "configurations", json!({}));
     assert!(listed["total"].as_u64().unwrap() >= 2);
 

@@ -69,18 +69,24 @@ impl HostNodes {
             .io_resolver
             .tool_environment()
             .map_err(GraphError::Unsupported)?;
-        let sandbox = environment
-            .grant_sandbox(&self.sandbox)
-            .map_err(GraphError::Unsupported)?
-            .with_pid_namespace_proc()
-            .with_readonly_grants(&local_inputs)
-            .and_then(|sandbox| sandbox.with_readonly_grants(std::slice::from_ref(&route_helper)))
-            .map_err(|error| GraphError::Unsupported(error.to_string()))?;
-        let network = self
+        let mounted = self
             .io_resolver
             .mounted_plugins(&request)
-            .map_err(GraphError::Unsupported)?
-            .network;
+            .map_err(GraphError::Unsupported)?;
+        let envelope = envelope::invocation_envelope(
+            &self.sandbox,
+            environment,
+            &[],
+            mounted.network,
+            &local_inputs,
+            Vec::new(),
+            request.wall_time_limit_seconds,
+        )
+        .map_err(GraphError::Unsupported)?;
+        let sandbox = envelope
+            .command_sandbox()
+            .with_readonly_grants(std::slice::from_ref(&route_helper))
+            .map_err(|error| GraphError::Unsupported(error.to_string()))?;
         let mut sandbox_request = SandboxRequest {
             writable_inputs: Vec::new(),
             workspace: workspace.clone(),
@@ -95,12 +101,8 @@ impl HostNodes {
                 anchor_runtime::SandboxEnvironment::new("ANCHOR_ROUTES", request.routes.join(",")),
                 anchor_runtime::SandboxEnvironment::new("ANCHOR_INPUT", input),
             ],
-            network: if network {
-                NetworkPolicy::Enabled
-            } else {
-                NetworkPolicy::Disabled
-            },
-            timeout: Duration::from_secs_f64(request.wall_time_limit_seconds.unwrap_or(3600.0)),
+            network: envelope.network,
+            timeout: envelope.op_timeout,
             max_output_bytes: 64 * 1024,
             spill: None,
             cancellation: request.cancellation.clone(),
@@ -109,7 +111,9 @@ impl HostNodes {
         // authority: an Op.run reaches them by absolute path, and nothing else
         // grants them.
         op::add_route_helper(&mut sandbox_request, route_helper);
-        environment.apply_to_workspace_command(&mut sandbox_request);
+        envelope
+            .environment
+            .apply_to_workspace_command(&mut sandbox_request);
         self.start(&request.key)?;
         let result = match sandbox.run(sandbox_request).await {
             Ok(result) => result,

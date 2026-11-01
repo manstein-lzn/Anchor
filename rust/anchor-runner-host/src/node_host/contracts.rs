@@ -82,6 +82,7 @@ pub(crate) struct ResolvedNodeTools {
     pub(crate) plugin_instructions: String,
     /// The host path of the workspace the tools write into.
     pub(crate) workspace: std::path::PathBuf,
+    pub(crate) envelope: super::envelope::InvocationEnvelope,
 }
 
 pub(crate) type ToolResolution<'resolver> =
