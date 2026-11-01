@@ -116,6 +116,7 @@ pub fn call(
         arguments_shape: anchor_facts::arguments_shape(&arguments),
         path: arguments["path"].as_str().map(anchor_facts::path_class),
         program: anchor_facts::command_program(&arguments),
+        shell_program: None,
         command: None,
         started_at_ms: Some(span.0),
         ended_at_ms: Some(span.1),

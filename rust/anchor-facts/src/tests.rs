@@ -48,6 +48,7 @@ fn tool_call_fact(ok: bool) -> Fact {
         arguments_shape: arguments_shape(&json!({"command": ["cat", "x"]})),
         path: None,
         program: Some("cat".into()),
+        shell_program: None,
         command: None,
         started_at_ms: Some(10),
         ended_at_ms: Some(25),
@@ -236,6 +237,28 @@ fn failures_are_classified_from_the_host_refusal_wording() {
     for (error, class) in cases {
         assert_eq!(classify_failure(error), class, "{error}");
     }
+}
+
+#[test]
+fn tool_calls_without_shell_program_keep_their_json() {
+    let old = json!({
+        "kind": "tool_call", "tool": "anchor_run",
+        "tool_call_id": "call_1", "model_request": 1,
+        "arguments_shape": "shape", "program": "sh",
+        "started_at_ms": 1, "ended_at_ms": 2,
+        "ok": true, "failure": null
+    });
+    let fact: Fact = serde_json::from_value(old.clone()).unwrap();
+    assert!(matches!(
+        &fact,
+        Fact::ToolCall {
+            shell_program: None,
+            ..
+        }
+    ));
+    let written = serde_json::to_value(&fact).unwrap();
+    assert!(written.get("shell_program").is_none());
+    assert_eq!(written, old);
 }
 
 #[test]

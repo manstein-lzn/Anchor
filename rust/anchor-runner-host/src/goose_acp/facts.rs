@@ -46,6 +46,7 @@ pub(super) fn observations(
                 .as_str()
                 .map(anchor_facts::path_class),
             program: anchor_facts::command_program(&call["arguments"]),
+            shell_program: shell_program(&call["arguments"]),
             command: ok
                 .then(|| command_result(&call["result"]))
                 .flatten()
@@ -68,6 +69,44 @@ pub(super) fn observations(
         resumed: evidence["resume"].as_bool().unwrap_or(false),
     });
     facts
+}
+
+/// Heuristic attribution only (启发式), never shell execution or a full parser.
+/// Quotes and common prefixes are stripped; expansions are not evaluated.
+fn shell_program(arguments: &Value) -> Option<String> {
+    let argv = arguments["command"].as_array()?;
+    if !matches!(
+        anchor_facts::command_program(arguments)?.as_str(),
+        "sh" | "bash" | "dash" | "zsh" | "ash"
+    ) {
+        return None;
+    }
+    let mut args = argv.iter().skip(1);
+    let script = loop {
+        let flags = args.next()?.as_str()?.strip_prefix('-')?;
+        if !flags.starts_with('-') && flags.contains('c') {
+            break args.next()?.as_str()?;
+        }
+    };
+    for word in shlex::Shlex::new(script) {
+        let word = word.trim_start_matches(['!', '(', '{']);
+        let first = word.split(['|', '&', ';', '<', '>', ')', '}']).next()?;
+        let assignment = first.split_once('=').is_some_and(|(name, _)| {
+            !name.is_empty()
+                && name.bytes().enumerate().all(|(i, c)| {
+                    c == b'_' || c.is_ascii_alphabetic() || (i > 0 && c.is_ascii_digit())
+                })
+        });
+        if first.is_empty() || assignment || matches!(first, "time" | "command" | "exec" | "env") {
+            if first.len() != word.len() {
+                return None;
+            }
+            continue;
+        }
+        let name = first.rsplit('/').next()?;
+        return (!name.is_empty() && !first.starts_with(['$', '`'])).then(|| name.to_owned());
+    }
+    None
 }
 
 /// The JSON body a command tool answered with: the bridge wraps the tool's
@@ -177,6 +216,73 @@ mod tests {
         let recorded = format!("{facts:?}");
         assert!(!recorded.contains("sandbox policy"));
         assert!(!recorded.contains("done"));
+    }
+
+    #[test]
+    fn shell_commands_record_an_attribution_hint_without_changing_the_program() {
+        for (command, expected_program, expected_hint) in [
+            (json!(["sh", "-c", "cargo test"]), "sh", "cargo"),
+            (json!(["/bin/sh", "-eu", "-c", "cargo test"]), "sh", "cargo"),
+            (
+                json!(["bash", "--noprofile", "-c", "cargo test"]),
+                "bash",
+                "cargo",
+            ),
+            (json!(["sh", "-lc", "cargo test"]), "sh", "cargo"),
+            (json!(["sh", "-ec", "cargo test"]), "sh", "cargo"),
+            (
+                json!([
+                    "sh",
+                    "--",
+                    "-c",
+                    "A=value env B=value command exec '/bin/cargo' test; echo done"
+                ]),
+                "sh",
+                "cargo",
+            ),
+            (json!(["sh", "-c", "cd x && cargo test"]), "sh", "cd"),
+        ] {
+            let evidence = json!({"tool_calls": [{
+                "tool": "anchor_run", "arguments": {"command": command},
+                "result": {"ok": true}
+            }]});
+            let facts = observations(&evidence, 0, 1, Outcome::Completed);
+            assert!(
+                matches!(
+                    &facts[0],
+                    Fact::ToolCall { program, shell_program: Some(hint), .. }
+                        if program.as_deref() == Some(expected_program) && hint == expected_hint
+                ),
+                "{facts:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn commands_without_a_shell_script_do_not_record_an_attribution_hint() {
+        for command in [
+            json!(["cargo", "test"]),
+            json!(["sh", "script.sh"]),
+            json!(["sh", "-c"]),
+            json!(["sh", "-c", ""]),
+            json!(["python3", "-c", "print(1)"]),
+        ] {
+            let evidence = json!({"tool_calls": [{
+                "tool": "anchor_run", "arguments": {"command": command},
+                "result": {"ok": true}
+            }]});
+            let facts = observations(&evidence, 0, 1, Outcome::Completed);
+            assert!(
+                matches!(
+                    &facts[0],
+                    Fact::ToolCall {
+                        shell_program: None,
+                        ..
+                    }
+                ),
+                "{facts:?}"
+            );
+        }
     }
 
     #[test]

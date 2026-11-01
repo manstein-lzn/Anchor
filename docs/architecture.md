@@ -171,7 +171,7 @@ AgentNode 通过授权完成工具提交 `summary` 和可选 `route`；普通回
 
 Run 的暂停/停止请求与节点已收束是不同事实。恢复保留 Graph 进度、invocation、原生 Session 和中断记录；重启不会自动执行未结算业务或确认。旧执行器记录保留旧身份，可识别和拒绝冒充 Goose 游标；清理源码不迁移旧数据。
 
-Host 对外 trace 投影 ACP 消息、工具观察和媒体，支持增量读取与重开节点。该投影用于观察，不代替 Goose 原生历史。真实模型、vision 与长会话效果必须分别验收。
+Host 对外 trace 投影 ACP 消息、工具观察和媒体，支持增量读取与重开节点。该投影用于观察，不代替 Goose 原生历史。真实模型、vision 与长会话效果必须分别验收。`ToolCall.shell_program` 仅对 shell 的 `-c` 脚本（含 `-lc`、`-ec` 等短选项组合）启发式记录首个命令的 basename，只是归因提示，不改变原始 argv 的 `program`；旧事实缺失时为 `None`，空值不序列化。
 
 Host 的 trace 证据与 `write_durable` 文件通过同目录临时文件写入、文件 fsync、原子替换及父目录 fsync 发布；已打开的读取保持完整旧版本，重新打开只见完整已发布版本，不因并发写读到空文件或半份 JSON。该保证针对单文件，不将 invocation fact 与 trace 证据包装成跨文件事务；字段格式、发布顺序和恢复校验不变。[调用点与回归](runtime-contract-tests.md#trace-证据与宿主持久文件的原子发布)。
 

@@ -454,6 +454,7 @@ impl<'a> Invocation<'a> {
                     ended_at_ms,
                     ok,
                     failure,
+                    ..
                 } => Some(Call {
                     tool,
                     tool_call_id: tool_call_id.as_deref(),

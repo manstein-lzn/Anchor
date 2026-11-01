@@ -233,6 +233,7 @@ mod tests {
                 arguments_shape: anchor_facts::arguments_shape(&serde_json::json!({})),
                 path: None,
                 program: None,
+                shell_program: None,
                 command: None,
                 started_at_ms: Some(1),
                 ended_at_ms: Some(2),

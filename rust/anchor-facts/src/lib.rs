@@ -245,6 +245,11 @@ pub enum Fact {
         /// its arguments. Records from before this field read as `None`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         program: Option<String>,
+        /// Heuristic attribution hint: the first command's base name in a shell
+        /// `-c` script (including short-option combinations such as `-lc`).
+        /// This does not change `program`, which remains the interpreter.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        shell_program: Option<String>,
         /// For a tool that runs a command, how the command ended. The call
         /// succeeds whenever the host ran the command, so `ok` says nothing
         /// about the command itself. Records from before this field read as
