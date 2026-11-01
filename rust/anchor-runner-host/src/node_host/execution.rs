@@ -72,6 +72,7 @@ impl HostNodes {
         let sandbox = environment
             .grant_sandbox(&self.sandbox)
             .map_err(GraphError::Unsupported)?
+            .with_pid_namespace_proc()
             .with_readonly_grants(&local_inputs)
             .and_then(|sandbox| sandbox.with_readonly_grants(std::slice::from_ref(&route_helper)))
             .map_err(|error| GraphError::Unsupported(error.to_string()))?;
@@ -108,7 +109,7 @@ impl HostNodes {
         // authority: an Op.run reaches them by absolute path, and nothing else
         // grants them.
         op::add_route_helper(&mut sandbox_request, route_helper);
-        environment.apply(&mut sandbox_request);
+        environment.apply_to_workspace_command(&mut sandbox_request);
         self.start(&request.key)?;
         let result = match sandbox.run(sandbox_request).await {
             Ok(result) => result,

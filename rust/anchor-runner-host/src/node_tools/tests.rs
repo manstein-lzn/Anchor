@@ -554,6 +554,28 @@ async fn real_bwrap_cancellation_is_an_error_after_command_starts() {
 }
 
 #[tokio::test]
+async fn a_program_installed_under_home_runs_by_name() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = Fixture::new();
+    let bin = fixture.workspace.join(".local/bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let program = bin.join("installed-by-agent");
+    // Toolchains locate their files through /proc/self/exe.
+    std::fs::write(
+        &program,
+        "#!/bin/sh\ntest -e /proc/self/exe && printf \"$HOME\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let result = run(
+        &fixture.tools(cancellation()),
+        &["sh", "-c", "installed-by-agent"],
+    )
+    .await;
+    assert_eq!(result["stdout"], "/workspace", "{result}");
+}
+
+#[tokio::test]
 async fn run_description_states_limits_authorized_commands_and_retention() {
     let fixture = Fixture::retaining();
     let tools = fixture.tools(cancellation());
@@ -567,6 +589,7 @@ async fn run_description_states_limits_authorized_commands_and_retention() {
         description.contains("Authorized commands: cat, sh"),
         "{description}"
     );
+    assert!(description.contains("~/.local/bin"), "{description}");
     assert!(description.contains("defaults to 30s"), "{description}");
     assert!(description.contains("up to 30s"), "{description}");
     assert!(description.contains("64 KiB preview"), "{description}");

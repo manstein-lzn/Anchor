@@ -19,6 +19,12 @@ use std::{
 
 const PILOT_RUST_BIN: &str = "/tools/anchor-pilot-rust/bin";
 const PILOT_CARGO_HOME: &str = "/workspace/.anchor-rust/cargo";
+/// Where common installers put programs under HOME (`/workspace`).
+pub(crate) const WORKSPACE_HOME_BINS: [&str; 3] = [
+    "/workspace/.pixi/bin",
+    "/workspace/.cargo/bin",
+    "/workspace/.local/bin",
+];
 const PILOT_PYTHON_BIN: &str = "/tools/anchor-pilot-python/bin";
 const PYTHON_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const PYTHON_VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(1);
@@ -611,13 +617,14 @@ impl ToolEnvironment {
             .with_readonly_grants(&self.mounts)
             .map_err(|error| error.to_string())?
             .with_executable_dirs(&self.dirs)
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| error.to_string())?
+            // Toolchains find their own files through /proc/self/exe. Only the
+            // command's private PID namespace is visible.
+            .with_pid_namespace_proc();
         if let Some(rust) = &self.rust {
             // This is the deployment-authorized Pilot Rust context, including
-            // shell build scripts that invoke Cargo. It only exposes the
-            // command's private PID namespace; toolchain writes remain a
+            // shell build scripts that invoke Cargo. Toolchain writes remain a
             // separate grant for the exact direct Rustup entrypoint below.
-            scoped = scoped.with_pid_namespace_proc();
             if request.command.first().is_some_and(|command| {
                 Path::new(command)
                     .file_name()
@@ -1087,6 +1094,44 @@ impl ToolEnvironment {
                     .is_some_and(|name| name == "run"))
             .then(|| mount.destination.clone())
         })
+    }
+
+    /// A command the agent or the Graph runs in its own workspace also finds
+    /// programs installed under its persistent HOME. They follow host tool
+    /// directories, so a registered tool stays the default, and precede the
+    /// system directories. Plugin MCP processes use [`Self::apply`] only:
+    /// workspace content must never replace a program a credentialed Plugin runs.
+    pub(crate) fn apply_to_workspace_command(&self, request: &mut SandboxRequest) {
+        self.apply(request);
+        let path = request
+            .environment
+            .iter()
+            .find(|variable| variable.key == "PATH")
+            .map(|variable| variable.value().to_owned())
+            .unwrap_or_else(|| {
+                request
+                    .tool_dirs
+                    .iter()
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .chain(["/usr/bin".into(), "/bin".into()])
+                    .collect::<Vec<_>>()
+                    .join(":")
+            });
+        let mut home = WORKSPACE_HOME_BINS.join(":");
+        if self.rust.is_some() {
+            // `cargo install` writes below the Session's CARGO_HOME.
+            home = format!("{home}:{PILOT_CARGO_HOME}/bin");
+        }
+        let path = match path.strip_suffix("/usr/bin:/bin") {
+            Some(tools) => format!("{tools}{home}:/usr/bin:/bin"),
+            None => format!("{path}:{home}"),
+        };
+        request
+            .environment
+            .retain(|variable| variable.key != "PATH");
+        request
+            .environment
+            .push(SandboxEnvironment::new("PATH", path));
     }
 
     pub fn apply(&self, request: &mut SandboxRequest) {

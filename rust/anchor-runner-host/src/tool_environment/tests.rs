@@ -1177,6 +1177,30 @@ fn tool_manifests_grant_exact_device_nodes_and_nothing_broader() {
 }
 
 #[test]
+fn only_workspace_commands_search_home_after_registered_tools() {
+    let root = tempfile::tempdir().unwrap();
+    let tools = ToolEnvironment::load(&fixture(root.path())).unwrap();
+    let mut plugin = SandboxRequest::new(root.path(), ["sh"]);
+    tools.apply(&mut plugin);
+    assert!(!plugin.environment.iter().any(|v| v.key == "PATH"));
+    let mut command = SandboxRequest::new(root.path(), ["sh"]);
+    tools.apply_to_workspace_command(&mut command);
+    let path = command
+        .environment
+        .iter()
+        .find(|v| v.key == "PATH")
+        .unwrap()
+        .value()
+        .to_owned();
+    let registered = command.tool_dirs[0].to_string_lossy().into_owned();
+    assert!(
+        path.starts_with(&registered)
+            && path.ends_with(&format!(":{}:/usr/bin:/bin", WORKSPACE_HOME_BINS.join(":"))),
+        "{path}"
+    );
+}
+
+#[test]
 fn malformed_tool_grants_are_rejected_and_mcp_explicit_environment_is_preserved() {
     let root = tempfile::tempdir().unwrap();
     let library = fixture(root.path());

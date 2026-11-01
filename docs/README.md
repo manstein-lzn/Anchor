@@ -26,6 +26,7 @@
 | Host 依赖方向与重复规则收敛（进行中） | [任务书](host-convergence-task.md) |
 | Runtime 或发行验证 | [确定性回归](runtime-contract-tests.md)、[候选回归](rust-production-candidate.md) |
 | 部署与运行预检 | [部署](rust-production-deployment.md) |
+| 常驻工程 Graph（设计，未实现） | [项目现场与执行边界](project-maintainer-graph-design.md) |
 | 渠道与业务 Graph | [企业微信](wecom-assistant.md)、[RSI](rsi.md)、[周报](weekly-work-report.md) |
 | RSI 反馈轮与 Agent 会话延续 | [当前契约与验收边界](rsi-agent-session-continuity.md) |
 | 理解 Goose 接入取舍 | [接入决定](goose-runtime-migration.md) |

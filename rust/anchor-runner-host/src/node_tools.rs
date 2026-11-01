@@ -206,9 +206,14 @@ impl NodeTools {
         format!(
             "Run an authorized command as an argv array (no shell) in the node sandbox. \
              The working directory is /workspace and is writable; /in and /plugins are read-only inputs. \
+             HOME is /workspace and persists with it; programs installed under {} are on PATH. \
+             System directories are read-only and there is no root, so install into HOME instead. \
              Authorized commands: {}. \
              The command defaults to {}s; timeout_seconds may request up to {}s. Each stream keeps a {} KiB preview{}. \
              A non-zero exit code is a normal result: read `status`, `exit_code`, `stdout`, `stderr` and `incomplete`.",
+            crate::tool_environment::WORKSPACE_HOME_BINS
+                .map(|bin| bin.replacen("/workspace", "~", 1))
+                .join(", "),
             self.authorized_commands_summary(),
             self.timeout.as_secs(),
             self.timeout_ceiling.as_secs(),
@@ -773,7 +778,7 @@ impl ToolPort for NodeTools {
                 spill: self.spill_policy()?,
                 cancellation: self.cancellation.clone(),
             };
-            self.environment.apply(&mut request);
+            self.environment.apply_to_workspace_command(&mut request);
             let sandbox = self
                 .environment
                 .sandbox_for_command(&self.sandbox, &mut request)
