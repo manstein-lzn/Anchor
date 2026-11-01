@@ -263,6 +263,7 @@ mod tests {
                 python: None,
                 python_enabled: false,
                 rust: None,
+                pixi: None,
                 provisioner: None,
             },
         ));
@@ -300,6 +301,7 @@ mod tests {
                 python: Some(python.to_path_buf()),
                 python_enabled: true,
                 rust: None,
+                pixi: None,
                 provisioner: None,
             },
         );

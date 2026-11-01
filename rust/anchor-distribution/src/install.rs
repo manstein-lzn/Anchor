@@ -1,8 +1,8 @@
 //! A fresh private platform installation. Model settings belong to the Host
 //! management store; release files and mutable platform facts are disjoint.
 use crate::{
-    GOOSE_SHA256, PackageError, PlatformPackageInventory, RUSTUP_INIT_SHA256, Result, UV_SHA256,
-    archive, filesystem::absolute, filesystem::open_path, validation,
+    GOOSE_SHA256, PIXI_SHA256, PackageError, PlatformPackageInventory, RUSTUP_INIT_SHA256, Result,
+    UV_SHA256, archive, filesystem::absolute, filesystem::open_path, validation,
 };
 use flate2::read::GzDecoder;
 use rustix::fs::{RenameFlags, renameat_with};
@@ -41,7 +41,13 @@ pub struct PlatformInstallReport {
 }
 
 pub fn install_platform(request: &PlatformInstallRequest) -> Result<PlatformInstallReport> {
-    install(request, GOOSE_SHA256, UV_SHA256, RUSTUP_INIT_SHA256)
+    install(
+        request,
+        GOOSE_SHA256,
+        UV_SHA256,
+        RUSTUP_INIT_SHA256,
+        PIXI_SHA256,
+    )
 }
 
 fn install(
@@ -49,6 +55,7 @@ fn install(
     goose_sha256: &str,
     uv_sha256: &str,
     rustup_sha256: &str,
+    pixi_sha256: &str,
 ) -> Result<PlatformInstallReport> {
     if request.sha256.len() != 64 || !request.sha256.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(invalid("archive SHA256 must be a trusted 64-digit digest"));
@@ -102,7 +109,14 @@ fn install(
     fs::create_dir(&release)?;
     unpack_platform(snapshot, &release)?;
     let runtime = release.join("anchor-runtime");
-    validate_runtime(&runtime, goose_sha256, uv_sha256, rustup_sha256, false)?;
+    validate_runtime(
+        &runtime,
+        goose_sha256,
+        uv_sha256,
+        rustup_sha256,
+        pixi_sha256,
+        false,
+    )?;
     let config = staging.path().join("config");
     fs::create_dir(&config)?;
     fs::set_permissions(&config, fs::Permissions::from_mode(0o700))?;
@@ -227,7 +241,14 @@ fn unpack_platform(file: File, release: &Path) -> Result<()> {
 /// Check an installed platform against the same fixed runtime contract used at installation.
 pub fn validate_platform_runtime(runtime: &Path) -> Result<()> {
     open_path(runtime)?;
-    validate_runtime(runtime, GOOSE_SHA256, UV_SHA256, RUSTUP_INIT_SHA256, true)
+    validate_runtime(
+        runtime,
+        GOOSE_SHA256,
+        UV_SHA256,
+        RUSTUP_INIT_SHA256,
+        PIXI_SHA256,
+        true,
+    )
 }
 
 fn validate_runtime(
@@ -235,6 +256,7 @@ fn validate_runtime(
     goose_sha256: &str,
     uv_sha256: &str,
     rustup_sha256: &str,
+    pixi_sha256: &str,
     read_only: bool,
 ) -> Result<()> {
     // Installed releases use this same validator. Reject links and special entries before reading files.
@@ -247,14 +269,20 @@ fn validate_runtime(
             "runtime manifest must be an ordinary file no larger than 16 MiB",
         ));
     }
-    let manifest: PlatformPackageInventory = serde_json::from_reader(manifest_file)?;
-    if manifest.format != 2
-        || manifest.kind != "platform"
+    let manifest: serde_json::Value = serde_json::from_reader(manifest_file)?;
+    // Reject obsolete archives before decoding the required bootstrap inventory.
+    if manifest.get("format").and_then(serde_json::Value::as_u64) != Some(3) {
+        return Err(invalid(
+            "installation requires the pinned format-3 platform archive",
+        ));
+    }
+    let manifest: PlatformPackageInventory = serde_json::from_value(manifest)?;
+    if manifest.kind != "platform"
         || manifest.goose_sha256 != goose_sha256
         || manifest.goose_version != crate::GOOSE_VERSION
     {
         return Err(invalid(
-            "installation requires the pinned format-2 platform archive",
+            "installation requires the pinned format-3 platform archive",
         ));
     }
     for (tool, path, digest, version, source) in [
@@ -271,6 +299,13 @@ fn validate_runtime(
             rustup_sha256,
             crate::RUSTUP_INIT_VERSION,
             crate::RUSTUP_INIT_SOURCE,
+        ),
+        (
+            &manifest.bootstrap.pixi,
+            "bin/pixi",
+            pixi_sha256,
+            crate::PIXI_VERSION,
+            crate::PIXI_SOURCE,
         ),
     ] {
         if tool.path != path
@@ -300,6 +335,7 @@ fn validate_runtime(
                 | "bin/goose"
                 | "bin/uv"
                 | "bin/rustup-init"
+                | "bin/pixi"
         ) && !resource.path.starts_with("plugins/network/")
             && !resource.path.starts_with("web/")
         {
@@ -336,7 +372,7 @@ fn validate_runtime(
             let runtime = validation::elf_runtime(&root.join(&resource.path))?;
             if matches!(
                 resource.path.as_str(),
-                "bin/goose" | "bin/uv" | "bin/rustup-init"
+                "bin/goose" | "bin/uv" | "bin/rustup-init" | "bin/pixi"
             ) && (runtime.interpreter.is_some() || !runtime.needed.is_empty())
             {
                 return Err(invalid(
@@ -367,6 +403,7 @@ fn validate_runtime(
         ("bin/goose", goose_sha256),
         ("bin/uv", uv_sha256),
         ("bin/rustup-init", rustup_sha256),
+        ("bin/pixi", pixi_sha256),
     ] {
         if !manifest
             .files

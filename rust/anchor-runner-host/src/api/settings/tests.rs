@@ -152,6 +152,7 @@ async fn runtime_get_reports_the_configured_python_full_version() {
             python: Some(python),
             python_enabled: true,
             rust: None,
+            pixi: None,
             provisioner: None,
         },
     ));

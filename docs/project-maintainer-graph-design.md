@@ -84,7 +84,7 @@ Workspace 交接复用 `conversation.previous_run` 与 Session 的可信交接�
 1. **垂直切片（Run 内）。** 常驻助手挂 git 与 `network` Plugin；节点拿到 Rust 工具链和 `PATH` 约定；真实 Provider 经企业微信完成 Anchor 的 clone → 改一处小问题 → 相关 `cargo test` → push `master`。暴露的环境问题在这一片修掉。
 2. **现场跟着 Graph 走（已实现，待真实验收）。** 复用可信交接链，按同 owner、会话、Graph 来源与同名 work 节点继承现有资源，不新建资源键；真实验收：改 Graph 指令后发新消息，Agent 在原现场继续，不重新 clone。
 3. **边界收口与事实（公共 envelope、现场指纹已实现，待真实验收）。** 节点准备和 `Op.run` 共用执行边界；`envelope_sha256` 与规范描述进入现有 facts 清单，hub 可展示、读取和切分；Goose invocation 开始/结束指纹随同一次事实提交，shell 首个程序名已作为启发式字段记录。**未做**：`anchor_run` 描述调整及 A/B；Plugin MCP/Pilot/依赖构建边界迁移不在本片。
-4. **pixi。** 宿主提供固定版本 pixi；验收：在一个需要系统库的小项目上，Agent 用 pixi 装好依赖并跑通测试，锁文件进入提交。
+4. **pixi（已实现，待真实验收）。** format-3 release 固定交付 pixi 0.83.0，Host 从已验证的发行清单只读挂载到 Graph Agent 命令与 Pilot 的 PATH；不走手写注册或托管安装，开发部署可用 `ANCHOR_PILOT_PIXI` 授权。**尚未验收**：Agent 在需要系统库的小项目上用 pixi 安装依赖、跑通项目测试并将锁文件纳入提交。本片只验证交付与沙箱授权决定，未执行 pixi 或真实 Provider 端到端。
 
 ## 未定事项
 

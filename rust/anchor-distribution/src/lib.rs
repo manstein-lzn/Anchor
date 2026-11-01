@@ -11,9 +11,10 @@ pub use install::{
     platform_command_with_listen, validate_platform_runtime,
 };
 pub use platform::{
-    BootstrapInventory, BootstrapTool, PlatformPackageInventory, PlatformPackageReport,
-    PlatformPackageRequest, RUSTUP_INIT_SHA256, RUSTUP_INIT_SOURCE, RUSTUP_INIT_VERSION, UV_SHA256,
-    UV_SOURCE, UV_VERSION, build_platform_package,
+    BootstrapInventory, BootstrapTool, PIXI_SHA256, PIXI_SOURCE, PIXI_VERSION,
+    PlatformPackageInventory, PlatformPackageReport, PlatformPackageRequest, RUSTUP_INIT_SHA256,
+    RUSTUP_INIT_SOURCE, RUSTUP_INIT_VERSION, UV_SHA256, UV_SOURCE, UV_VERSION,
+    build_platform_package,
 };
 pub use validation::{ElfIdentity, ElfRuntime};
 

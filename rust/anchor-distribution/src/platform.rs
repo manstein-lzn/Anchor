@@ -22,6 +22,10 @@ pub const RUSTUP_INIT_SHA256: &str =
     "9cd3fda5fd293890e36ab271af6a786ee22084b5f6c2b83fd8323cec6f0992c1";
 pub const RUSTUP_INIT_SOURCE: &str =
     "https://static.rust-lang.org/rustup/archive/1.29.0/x86_64-unknown-linux-musl/rustup-init";
+pub const PIXI_VERSION: &str = "0.83.0";
+pub const PIXI_SHA256: &str = "50571451e96f4a82cf675cd83baaf66fff9b718f0aaf153900b9faf4c29bd401";
+pub const PIXI_SOURCE: &str =
+    "https://github.com/prefix-dev/pixi/releases/download/v0.83.0/pixi-x86_64-unknown-linux-musl";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlatformPackageRequest {
@@ -34,6 +38,7 @@ pub struct PlatformPackageRequest {
     pub network_tools: PathBuf,
     pub uv: PathBuf,
     pub rustup_init: PathBuf,
+    pub pixi: PathBuf,
     pub output: PathBuf,
 }
 
@@ -51,6 +56,7 @@ pub struct BootstrapTool {
 pub struct BootstrapInventory {
     pub uv: BootstrapTool,
     pub rustup_init: BootstrapTool,
+    pub pixi: BootstrapTool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -77,7 +83,14 @@ pub struct PlatformPackageReport {
 }
 
 pub fn build_platform_package(request: &PlatformPackageRequest) -> Result<PlatformPackageReport> {
-    prepare(request, GOOSE_SHA256, UV_SHA256, RUSTUP_INIT_SHA256)?.publish()
+    prepare(
+        request,
+        GOOSE_SHA256,
+        UV_SHA256,
+        RUSTUP_INIT_SHA256,
+        PIXI_SHA256,
+    )?
+    .publish()
 }
 
 struct PreparedPlatform {
@@ -108,6 +121,7 @@ fn prepare(
     goose_sha256: &str,
     uv_sha256: &str,
     rustup_sha256: &str,
+    pixi_sha256: &str,
 ) -> Result<PreparedPlatform> {
     validation::version(env!("CARGO_PKG_VERSION"))?;
     let output = Output::new(&request.output)?;
@@ -142,6 +156,7 @@ fn prepare(
         (&request.platform_launcher, "bin/anchor-platform"),
         (&request.uv, "bin/uv"),
         (&request.rustup_init, "bin/rustup-init"),
+        (&request.pixi, "bin/pixi"),
         (
             &request.network_tools,
             "plugins/network/bin/anchor-network-tools",
@@ -154,6 +169,7 @@ fn prepare(
         ("bin/goose", goose_sha256, "Goose v1.53.0"),
         ("bin/uv", uv_sha256, "uv 0.11.6"),
         ("bin/rustup-init", rustup_sha256, "rustup-init 1.29.0"),
+        ("bin/pixi", pixi_sha256, "pixi 0.83.0"),
     ] {
         if resource(&entries, path)?.sha256 != digest {
             return Err(PackageError::Invalid(format!(
@@ -212,13 +228,13 @@ fn prepare(
             let runtime = validation::elf_runtime(&path)?;
             if matches!(
                 file.path.as_str(),
-                "bin/goose" | "bin/uv" | "bin/rustup-init"
+                "bin/goose" | "bin/uv" | "bin/rustup-init" | "bin/pixi"
             ) && (runtime.interpreter.is_some() || !runtime.needed.is_empty())
             {
                 // The delivery bootstrap must not need an interpreter or the
                 // development toolchain it exists to prepare.
                 return Err(PackageError::Invalid(
-                    "Goose, uv and rustup-init must be static musl executables".into(),
+                    "Goose, uv, rustup-init and pixi must be static musl executables".into(),
                 ));
             }
             executables.push(ExecutableIdentity {
@@ -236,7 +252,7 @@ fn prepare(
     }
     generated_file(root, "README.md", PLATFORM_README.as_bytes(), &mut entries)?;
     let inventory = PlatformPackageInventory {
-        format: 2,
+        format: 3,
         kind: "platform".into(),
         builder_version: env!("CARGO_PKG_VERSION").into(),
         goose_version: GOOSE_VERSION.into(),
@@ -254,6 +270,12 @@ fn prepare(
                 version: RUSTUP_INIT_VERSION.into(),
                 sha256: rustup_sha256.into(),
                 source: RUSTUP_INIT_SOURCE.into(),
+            },
+            pixi: BootstrapTool {
+                path: "bin/pixi".into(),
+                version: PIXI_VERSION.into(),
+                sha256: pixi_sha256.into(),
+                source: PIXI_SOURCE.into(),
             },
         },
         plugins,
@@ -278,7 +300,7 @@ fn prepare(
 
 const PLATFORM_README: &str = "# Anchor platform\n\n\
 This archive contains the Anchor Host, fixed Goose, sandbox network relay,\n\
-compiled WebUI, native network Plugin and pinned uv/Rustup bootstrap tools.\n\
+compiled WebUI, native network Plugin and pinned uv/Rustup/pixi bootstrap tools.\n\
 It contains no business Graph, Python interpreter, Rust toolchain, user model\n\
 configuration, credentials or mutable runtime state. Platform startup uses the\n\
 same Host and Runtime Kernel as standalone Graph packages.\n\n\

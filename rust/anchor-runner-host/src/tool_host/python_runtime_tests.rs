@@ -63,6 +63,7 @@ fn environment(python: &Path, enabled: bool) -> crate::tool_environment::ToolEnv
             python: Some(python.to_owned()),
             python_enabled: enabled,
             rust: None,
+            pixi: None,
             provisioner: None,
         })
         .unwrap()

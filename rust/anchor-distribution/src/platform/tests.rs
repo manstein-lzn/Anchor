@@ -49,7 +49,8 @@ impl Fixture {
             platform_launcher: executable.clone(),
             network_tools: executable.clone(),
             uv: executable.clone(),
-            rustup_init: executable,
+            rustup_init: executable.clone(),
+            pixi: executable,
             web,
             output: root.path().join("platform.tar.gz"),
         };
@@ -61,7 +62,14 @@ impl Fixture {
     }
 
     pub fn package(&self) -> Result<PlatformPackageReport> {
-        prepare(&self.request, &self.digest, &self.digest, &self.digest)?.publish()
+        prepare(
+            &self.request,
+            &self.digest,
+            &self.digest,
+            &self.digest,
+            &self.digest,
+        )?
+        .publish()
     }
 
     pub fn extract(&self, destination: &Path) {
@@ -79,7 +87,7 @@ fn platform_has_no_business_graph_and_exact_bootstrap_and_network_inventory() {
     let second = fixture.package().unwrap();
     assert_eq!(first.sha256, second.sha256);
     assert_eq!(first.inventory, second.inventory);
-    assert_eq!(first.inventory.format, 2);
+    assert_eq!(first.inventory.format, 3);
     assert_eq!(first.inventory.kind, "platform");
     assert_eq!(first.inventory.bootstrap.uv.version, UV_VERSION);
     assert_eq!(first.inventory.bootstrap.uv.source, UV_SOURCE);
@@ -88,7 +96,25 @@ fn platform_has_no_business_graph_and_exact_bootstrap_and_network_inventory() {
         first.inventory.bootstrap.rustup_init.path,
         "bin/rustup-init"
     );
-    assert_eq!(first.inventory.executables.len(), 8);
+    assert_eq!(
+        first.inventory.bootstrap.pixi,
+        BootstrapTool {
+            path: "bin/pixi".into(),
+            version: PIXI_VERSION.into(),
+            source: PIXI_SOURCE.into(),
+            sha256: fixture.digest.clone(),
+        }
+    );
+    assert_eq!(PIXI_VERSION, "0.83.0");
+    assert_eq!(
+        PIXI_SOURCE,
+        "https://github.com/prefix-dev/pixi/releases/download/v0.83.0/pixi-x86_64-unknown-linux-musl"
+    );
+    assert_eq!(
+        PIXI_SHA256,
+        "50571451e96f4a82cf675cd83baaf66fff9b718f0aaf153900b9faf4c29bd401"
+    );
+    assert_eq!(first.inventory.executables.len(), 9);
     assert_eq!(first.inventory.plugins.len(), 1);
     assert_eq!(first.inventory.plugins[0].id, "network");
     assert!(
@@ -137,6 +163,7 @@ fn public_platform_api_cannot_override_fixed_goose_or_bootstrap_pins() {
             &fixture.request,
             &fixture.digest,
             UV_SHA256,
+            &fixture.digest,
             &fixture.digest
         )
         .err()
@@ -149,12 +176,26 @@ fn public_platform_api_cannot_override_fixed_goose_or_bootstrap_pins() {
             &fixture.request,
             &fixture.digest,
             &fixture.digest,
-            RUSTUP_INIT_SHA256
+            RUSTUP_INIT_SHA256,
+            &fixture.digest
         )
         .err()
         .unwrap()
         .to_string()
         .contains("rustup-init 1.29.0")
+    );
+    assert!(
+        prepare(
+            &fixture.request,
+            &fixture.digest,
+            &fixture.digest,
+            &fixture.digest,
+            PIXI_SHA256
+        )
+        .err()
+        .unwrap()
+        .to_string()
+        .contains("pixi 0.83.0")
     );
     assert!(!fixture.request.output.exists());
 }
@@ -194,6 +235,7 @@ fn platform_rechecks_sources_and_refuses_archive_overwrite() {
         &fixture.digest,
         &fixture.digest,
         &fixture.digest,
+        &fixture.digest,
     )
     .unwrap();
     fs::write(fixture.request.web.join("added.css"), "body{}\n").unwrap();
@@ -211,17 +253,34 @@ fn platform_rechecks_sources_and_refuses_archive_overwrite() {
 
 #[test]
 fn bootstrap_must_be_static_even_when_private_test_pins_match() {
-    let mut fixture = Fixture::new();
-    let dynamic = fixture.root.path().join("dynamic-uv");
-    fs::copy("/usr/bin/true", &dynamic).unwrap();
-    let digest = format!("{:x}", Sha256::digest(fs::read(&dynamic).unwrap()));
-    fixture.request.uv = dynamic;
-    assert!(
-        prepare(&fixture.request, &fixture.digest, &digest, &fixture.digest)
+    for name in ["uv", "pixi"] {
+        let mut fixture = Fixture::new();
+        let dynamic = fixture.root.path().join("dynamic-bootstrap");
+        fs::copy("/usr/bin/true", &dynamic).unwrap();
+        let digest = format!("{:x}", Sha256::digest(fs::read(&dynamic).unwrap()));
+        let mut uv_digest = fixture.digest.as_str();
+        let mut pixi_digest = fixture.digest.as_str();
+        if name == "uv" {
+            fixture.request.uv = dynamic;
+            uv_digest = &digest;
+        } else {
+            fixture.request.pixi = dynamic;
+            pixi_digest = &digest;
+        }
+        assert!(
+            prepare(
+                &fixture.request,
+                &fixture.digest,
+                uv_digest,
+                &fixture.digest,
+                pixi_digest
+            )
             .err()
             .unwrap()
             .to_string()
-            .contains("static musl")
-    );
-    assert!(!fixture.request.output.exists());
+            .contains("static musl"),
+            "{name}"
+        );
+        assert!(!fixture.request.output.exists());
+    }
 }

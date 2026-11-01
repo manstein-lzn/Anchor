@@ -9,8 +9,9 @@ dependencies, or change deployment permissions.
 A platform release has no business Graph. The same Host and Kernel serve Pilot
 against an initially empty catalog. The required native network Plugin ships as
 an importable candidate; Host seeds it into the Library without enabling a
-Session's network permission. Fixed uv and Rustup bootstrap tools are native
-static executables; Python versions, Rust toolchains and packages are prepared
+Session's network permission. Fixed uv, Rustup and pixi bootstrap tools are native
+static executables; pixi is mounted read-only on agent and Pilot command PATH
+without registration or installation. Python versions, Rust toolchains and packages are prepared
 on demand under the mutable state root, one shared installation per version.
 
 ```sh
@@ -19,15 +20,15 @@ anchor-distribution --platform --host /reviewed/anchor-runner-host \
   --sandbox-network /reviewed/anchor-sandbox-network \
   --platform-launcher /reviewed/anchor-platform \
   --network-tools /reviewed/anchor-network-tools --web /reviewed/web-dist \
-  --uv /reviewed/uv --rustup-init /reviewed/rustup-init \
+  --uv /reviewed/uv --rustup-init /reviewed/rustup-init --pixi /reviewed/pixi \
   --output /existing/output/platform.tar.gz
 ```
 
 All platform inputs are required. The public API is
 `build_platform_package(&PlatformPackageRequest) -> Result<PlatformPackageReport>`.
-The archive has `runtime-manifest.json` format 2 with `kind: "platform"`, a
+The archive has `runtime-manifest.json` format 3 with `kind: "platform"`, a
 top-level admitted `plugins` inventory, and
-`bootstrap.uv`/`bootstrap.rustup_init` identities containing package-relative
+`bootstrap.uv`/`bootstrap.rustup_init`/`bootstrap.pixi` identities containing package-relative
 `path`, fixed `version`, `source` and executable `sha256`. There is no `bundle`
 field or `bundle/` tree. The original Graph package below keeps format 1 and its
 strict admission checks.
@@ -41,6 +42,7 @@ anchor-runtime/
   bin/anchor-platform
   bin/uv
   bin/rustup-init
+  bin/pixi
   plugins/network/plugin.json
   plugins/network/skills/network/SKILL.md
   plugins/network/bin/anchor-network-tools
@@ -56,8 +58,15 @@ from its official versioned GitHub release (archive SHA256
 Rustup 1.29.0 x86_64 Linux musl, SHA256
 `9cd3fda5fd293890e36ab271af6a786ee22084b5f6c2b83fd8323cec6f0992c1`, from
 `https://static.rust-lang.org/rustup/archive/1.29.0/x86_64-unknown-linux-musl/rustup-init`.
+The third pin is pixi 0.83.0 x86_64 Linux musl, SHA256
+`50571451e96f4a82cf675cd83baaf66fff9b718f0aaf153900b9faf4c29bd401`, from
+`https://github.com/prefix-dev/pixi/releases/download/v0.83.0/pixi-x86_64-unknown-linux-musl`.
+It is a self-contained executable, not a managed language installation; its
+caches remain under the writable workspace HOME. Development deployments without
+a release can authorize an executable with `ANCHOR_PILOT_PIXI=/absolute/path`;
+no version probe is run for that override.
 There is no pin bypass. `scripts/prepare-platform-bootstrap.sh --output NEW_DIR`
-fetches and verifies these two native build inputs without installing a language
+fetches and verifies these three native build inputs without installing a language
 environment. `scripts/build-platform-release.sh --goose PINNED_ELF --output NEW.tar.gz`
 builds the required Rust binaries and WebUI and packages them. It never loads the
 developer `.env` or copies platform state into the release.

@@ -1,7 +1,26 @@
 //! Filesystem primitives shared by Host storage and runtime services.
 
 pub use anchor_runtime::artifact::store::{invocation_stem, validate_component, validate_key};
-use std::path::Path;
+use std::{
+    fs,
+    os::unix::fs::PermissionsExt,
+    path::{Path, PathBuf},
+};
+
+/// Resolve a deployment executable without launching it.
+pub(crate) fn executable(path: &Path) -> Result<PathBuf, String> {
+    if !path.is_absolute() {
+        return Err("must be an absolute path".into());
+    }
+    let path = path
+        .canonicalize()
+        .map_err(|error| format!("is unavailable: {error}"))?;
+    let metadata = fs::metadata(&path).map_err(|error| format!("is unavailable: {error}"))?;
+    if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
+        return Err("must be an executable regular file".into());
+    }
+    Ok(path)
+}
 
 /// Create durable private directories without following symlinks in the path.
 /// Error text is retained from the original Pilot helper for existing callers.

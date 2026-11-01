@@ -461,6 +461,7 @@ async fn unchanged_candidate_reprepares_for_a_new_turn_interpreter_and_retains_t
         python: Some(toolchain.python.clone()),
         python_enabled: true,
         rust: None,
+        pixi: None,
         provisioner: Some(old_provisioner.clone()),
     };
     let configuration = Arc::new(RuntimeConfiguration::from_snapshot_for_test(
@@ -518,6 +519,7 @@ async fn unchanged_candidate_reprepares_for_a_new_turn_interpreter_and_retains_t
         python: Some(new_python.clone()),
         python_enabled: true,
         rust: None,
+        pixi: None,
         provisioner: Some(new_provisioner.clone()),
     });
     let same_turn = old_turn

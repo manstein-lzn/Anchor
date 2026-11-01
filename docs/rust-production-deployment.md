@@ -1,7 +1,7 @@
 # Rust platform deployment
 
-The format-2 platform archive contains the Host, fixed Goose, compiled WebUI,
-network Plugin, network relay and fixed uv/Rustup bootstrap tools. The installed
+The format-3 platform archive contains the Host, fixed Goose, compiled WebUI,
+network Plugin, network relay and fixed uv/Rustup/pixi bootstrap tools. The installed
 `anchor-platform start` command derives release and private data paths from its
 own location and clears inherited deployment and credential settings. Neither
 installation nor startup loads `.env`, `anchor.env` or `model.env`.
@@ -62,7 +62,7 @@ drop-in by replacing `ExecStart` with the same launcher plus `start --listen`.
 This does not change model or Plugin configuration.
 
 An optional operator preflight reuses the launcher's exact command configuration.
-It checks the fixed format-2 runtime inventory, selected executables, private
+It checks the fixed format-3 runtime inventory, selected executables, private
 mutable roots, available system tools and writer lease. It does not start the
 service, call a model or inspect credential values. Run it while the Host is
 stopped; an active writer is a failure:

@@ -150,6 +150,7 @@ impl NodeTools {
         let mut commands = self.sandbox.allowed_commands();
         commands.extend(self.environment.pilot_command_aliases());
         commands.extend(self.environment.pilot_rust_command_aliases());
+        commands.extend(self.environment.pixi_command_aliases());
         commands.sort();
         commands.dedup();
         if commands.is_empty() {

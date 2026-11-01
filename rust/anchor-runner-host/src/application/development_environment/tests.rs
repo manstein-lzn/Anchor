@@ -374,6 +374,7 @@ async fn legacy_view_is_preserved_and_store_only_offline_install_is_explicitly_u
             python: None,
             python_enabled: false,
             rust: None,
+            pixi: None,
             provisioner: None,
         },
     );

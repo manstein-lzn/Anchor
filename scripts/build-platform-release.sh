@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Build-time tooling only. Never reads the developer .env or platform state.
+# Build-time tooling only, with pinned uv, Rustup and pixi bootstrap tools.
+# Never reads the developer .env or platform state.
 set -euo pipefail
 repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 
@@ -9,7 +10,7 @@ Usage: scripts/build-platform-release.sh --goose PINNED_ELF --output NEW.tar.gz
        [--build-root DIRECTORY] [--skip-build]
 
 Build Host, network relay, sandbox networking, native platform launcher and
-network MCP plus WebUI, prepare fixed uv/Rustup tools, and create a format-2
+network MCP plus WebUI, prepare fixed uv/Rustup/pixi tools, and create a format-3
 platform archive without a business Graph. Does not run or deploy the Host.
 --skip-build packages existing <build-root>/target/release binaries and WebUI.
 Operator build requirements: Rust stable, Node/npm, curl, tar, coreutils.
@@ -58,4 +59,5 @@ done
   --platform-launcher "$inputs/anchor-platform" \
   --web "$repo/apps/web/dist" --network-tools "$inputs/anchor-network-tools" \
   --uv "$build_root/bootstrap/uv" --rustup-init "$build_root/bootstrap/rustup-init" \
+  --pixi "$build_root/bootstrap/pixi" \
   --output "$output"

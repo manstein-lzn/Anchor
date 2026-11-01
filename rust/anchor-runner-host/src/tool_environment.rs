@@ -25,6 +25,7 @@ pub(crate) const WORKSPACE_HOME_BINS: [&str; 3] = [
     "/workspace/.cargo/bin",
     "/workspace/.local/bin",
 ];
+const PILOT_PIXI_BIN: &str = "/tools/anchor-pixi/bin";
 const PILOT_PYTHON_BIN: &str = "/tools/anchor-pilot-python/bin";
 const PYTHON_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const PYTHON_VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(1);
@@ -40,6 +41,7 @@ pub(crate) struct ToolEnvironment {
     plugin_environments: BTreeMap<String, ToolEnvironment>,
     rust: Option<RustDevelopment>,
     python: Option<PythonDevelopment>,
+    pixi: Option<PathBuf>,
     // Formal Plugins may use the shared interpreter independently of Pilot's
     // authoring switch. This capability contains only read-only Python mounts.
     mcp_python: Option<Arc<ToolEnvironment>>,
@@ -434,19 +436,8 @@ impl ToolEnvironment {
     }
 
     pub(crate) fn configure_pilot_python(&mut self, configured: &Path) -> Result<(), String> {
-        if !configured.is_absolute() {
-            return Err(format!("{PYTHON_INTERPRETER_ENV} must be an absolute path"));
-        }
-        let interpreter = configured
-            .canonicalize()
-            .map_err(|error| format!("{PYTHON_INTERPRETER_ENV} is unavailable: {error}"))?;
-        let metadata = fs::metadata(&interpreter)
-            .map_err(|error| format!("{PYTHON_INTERPRETER_ENV} is unavailable: {error}"))?;
-        if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
-            return Err(format!(
-                "{PYTHON_INTERPRETER_ENV} must be an executable regular file"
-            ));
-        }
+        let interpreter = crate::host_fs::executable(configured)
+            .map_err(|error| format!("{PYTHON_INTERPRETER_ENV} {error}"))?;
         let bin = interpreter
             .parent()
             .filter(|path| path.file_name().is_some_and(|name| name == "bin"))
@@ -498,6 +489,40 @@ impl ToolEnvironment {
             .push(ReadOnlyInput::new(launchers.path(), PILOT_PYTHON_BIN));
         self._launchers.push(Arc::new(launchers));
         Ok(())
+    }
+
+    pub(crate) fn configure_pixi(&mut self, binary: &Path) -> Result<(), String> {
+        let binary = crate::host_fs::executable(binary).map_err(|error| format!("pixi {error}"))?;
+        self.mounts.push(ReadOnlyInput::new(
+            &binary,
+            format!("{PILOT_PIXI_BIN}/pixi"),
+        ));
+        self.pixi = Some(binary);
+        Ok(())
+    }
+
+    fn normalize_pixi_command(&self, request: &mut SandboxRequest) {
+        let Some(pixi) = &self.pixi else {
+            return;
+        };
+        if request.command.first().is_some_and(|command| {
+            command == "pixi"
+                || Path::new(command) == pixi
+                || (Path::new(command).is_absolute()
+                    && Path::new(command)
+                        .canonicalize()
+                        .is_ok_and(|path| path == *pixi))
+        }) {
+            request.command[0] = format!("{PILOT_PIXI_BIN}/pixi");
+        }
+    }
+
+    pub(crate) fn pixi_command_aliases(&self) -> Vec<String> {
+        if self.pixi.is_some() {
+            vec!["pixi".into()]
+        } else {
+            Vec::new()
+        }
     }
 
     fn normalize_pilot_python_command(&self, request: &mut SandboxRequest) -> bool {
@@ -613,6 +638,7 @@ impl ToolEnvironment {
         request: &mut SandboxRequest,
     ) -> Result<anchor_sandbox_bwrap::BubblewrapSandbox, String> {
         self.normalize_pilot_python_command(request);
+        self.normalize_pixi_command(request);
         let mut scoped = sandbox
             .with_readonly_grants(&self.mounts)
             .map_err(|error| error.to_string())?
@@ -819,6 +845,9 @@ impl ToolEnvironment {
                 self._launchers.extend(grant._launchers.clone());
             }
             self.mcp_python = Some(Arc::new(grant));
+        }
+        if let Some(pixi) = &snapshot.pixi {
+            self.configure_pixi(pixi)?;
         }
         if let Some(rust) = &snapshot.rust {
             self.configure_pilot_rust(&rust.proxy, &rust.home, &rust.cargo)?;
@@ -1135,6 +1164,9 @@ impl ToolEnvironment {
                     .join(":")
             });
         let mut home = WORKSPACE_HOME_BINS.join(":");
+        if self.pixi.is_some() {
+            home = format!("{PILOT_PIXI_BIN}:{home}");
+        }
         if self.rust.is_some() {
             // `cargo install` writes below the Session's CARGO_HOME.
             home = format!("{home}:{PILOT_CARGO_HOME}/bin");

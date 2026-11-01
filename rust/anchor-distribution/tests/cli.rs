@@ -41,6 +41,7 @@ fn cli_exposes_the_agreed_inputs_without_a_pin_bypass() {
         "--network-tools",
         "--uv",
         "--rustup-init",
+        "--pixi",
         "--output",
     ] {
         assert!(help.contains(argument), "{argument}");
@@ -64,6 +65,34 @@ fn cli_platform_requires_native_bootstrap_and_rejects_graph_mode_inputs() {
         .unwrap();
     assert!(String::from_utf8_lossy(&result.stderr).contains("--platform requires --net-relay"));
     assert_failure(result);
+    let missing_pixi = command()
+        .args([
+            "--platform",
+            "--host",
+            "/unused/host",
+            "--goose",
+            "/unused/goose",
+            "--net-relay",
+            "/unused/relay",
+            "--sandbox-network",
+            "/unused/network",
+            "--platform-launcher",
+            "/unused/launcher",
+            "--network-tools",
+            "/unused/tools",
+            "--web",
+            "/unused/web",
+            "--uv",
+            "/unused/uv",
+            "--rustup-init",
+            "/unused/rustup-init",
+            "--output",
+            "/unused/platform.tar.gz",
+        ])
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&missing_pixi.stderr).contains("--platform requires --pixi"));
+    assert_failure(missing_pixi);
     assert_failure(
         command()
             .args([

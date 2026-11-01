@@ -127,6 +127,8 @@ async fn direct_rustc_uses_the_frozen_grant_and_rejects_unrelated_host_commands(
     }
     std::fs::copy("/usr/bin/false", other.join("rustc")).unwrap();
     std::fs::copy("/usr/bin/true", bin.join("unrelated")).unwrap();
+    let pixi = fixture.directory.path().join("host-pixi");
+    std::fs::copy("/usr/bin/true", &pixi).unwrap();
     std::fs::write(cargo.join("credentials.toml"), "private-host-credential").unwrap();
     let snapshot = crate::runtime_configuration::RuntimeSnapshot {
         python: None,
@@ -137,6 +139,7 @@ async fn direct_rustc_uses_the_frozen_grant_and_rejects_unrelated_host_commands(
             cargo: cargo.clone(),
             toolchain: Some("stable-x86_64-unknown-linux-gnu".into()),
         }),
+        pixi: Some(pixi),
         provisioner: None,
     };
     let environment = crate::tool_environment::ToolEnvironment::default()
@@ -161,7 +164,7 @@ async fn direct_rustc_uses_the_frozen_grant_and_rejects_unrelated_host_commands(
         .unwrap()
         .description;
     assert!(
-        description.contains("Authorized commands: cargo, cat, rustc, rustup, sh"),
+        description.contains("Authorized commands: cargo, cat, pixi, rustc, rustup, sh"),
         "{description}"
     );
     for command in [

@@ -7,8 +7,9 @@ usage() {
   cat <<'HELP'
 Usage: scripts/prepare-platform-bootstrap.sh --output NEW_DIRECTORY
 
-Download reviewed x86_64 Linux musl uv 0.11.6 and rustup-init 1.29.0, verify
-fixed SHA256 values, and publish two executable inputs for platform packaging.
+Download reviewed x86_64 Linux musl uv 0.11.6, rustup-init 1.29.0 and pixi
+0.83.0, verify fixed SHA256 values, and publish three executable inputs for
+platform packaging.
 The parent directory must exist. Existing outputs are never replaced.
 HELP
 }
@@ -47,8 +48,13 @@ curl --silent --show-error --fail --location --proto '=https' --tlsv1.2 \
   https://static.rust-lang.org/rustup/archive/1.29.0/x86_64-unknown-linux-musl/rustup-init \
   --output "$staging/rustup-init"
 printf '%s  %s\n' 9cd3fda5fd293890e36ab271af6a786ee22084b5f6c2b83fd8323cec6f0992c1 "$staging/rustup-init" | sha256sum --check --status
-chmod 0755 "$staging/uv" "$staging/rustup-init"
+curl --silent --show-error --fail --location --proto '=https' --tlsv1.2 \
+  --connect-timeout 15 --max-time 180 \
+  https://github.com/prefix-dev/pixi/releases/download/v0.83.0/pixi-x86_64-unknown-linux-musl \
+  --output "$staging/pixi"
+printf '%s  %s\n' 50571451e96f4a82cf675cd83baaf66fff9b718f0aaf153900b9faf4c29bd401 "$staging/pixi" | sha256sum --check --status
+chmod 0755 "$staging/uv" "$staging/rustup-init" "$staging/pixi"
 mv -T --no-clobber -- "$staging" "$destination"
 [[ ! -d "$staging" ]] || { printf 'A concurrent preparation published the output.\n' >&2; exit 1; }
 trap - EXIT
-printf 'uv: %s/uv\nrustup-init: %s/rustup-init\n' "$destination" "$destination"
+printf 'uv: %s/uv\nrustup-init: %s/rustup-init\npixi: %s/pixi\n' "$destination" "$destination" "$destination"

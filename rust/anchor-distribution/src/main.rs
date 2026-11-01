@@ -49,6 +49,8 @@ struct Arguments {
     uv: Option<PathBuf>,
     #[arg(long, value_name = "ELF", requires = "platform")]
     rustup_init: Option<PathBuf>,
+    #[arg(long, value_name = "ELF", requires = "platform")]
+    pixi: Option<PathBuf>,
     #[arg(long)]
     output: PathBuf,
 }
@@ -95,6 +97,7 @@ fn package(arguments: Arguments) -> anchor_distribution::Result<String> {
             network_tools: required(arguments.network_tools, "--network-tools")?,
             uv: required(arguments.uv, "--uv")?,
             rustup_init: required(arguments.rustup_init, "--rustup-init")?,
+            pixi: required(arguments.pixi, "--pixi")?,
             output: arguments.output,
         };
         return Ok(serde_json::to_string(&build_platform_package(&request)?)?);

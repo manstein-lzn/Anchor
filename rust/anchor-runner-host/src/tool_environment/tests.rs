@@ -895,6 +895,7 @@ fn a_same_named_rustup_entry_cannot_get_shared_toolchain_write_permission() {
             toolchain: None,
         }),
         python: None,
+        pixi: None,
         mcp_python: None,
         _launchers: vec![],
     };
@@ -1180,9 +1181,37 @@ fn tool_manifests_grant_exact_device_nodes_and_nothing_broader() {
 fn only_workspace_commands_search_home_after_registered_tools() {
     let root = tempfile::tempdir().unwrap();
     let tools = ToolEnvironment::load(&fixture(root.path())).unwrap();
+    assert!(tools.pixi_command_aliases().is_empty());
+    let pixi = root.path().join("host-pixi");
+    fs::copy("/usr/bin/true", &pixi).unwrap();
+    let tools = tools
+        .with_runtime_snapshot(&crate::runtime_configuration::RuntimeSnapshot {
+            python: None,
+            python_enabled: false,
+            rust: None,
+            pixi: Some(pixi.clone()),
+            provisioner: None,
+        })
+        .unwrap();
+    assert_eq!(tools.pixi_command_aliases(), ["pixi"]);
     let mut plugin = SandboxRequest::new(root.path(), ["sh"]);
     tools.apply(&mut plugin);
     assert!(!plugin.environment.iter().any(|v| v.key == "PATH"));
+    let mut explicit_plugin = SandboxRequest::new(root.path(), ["sh"]);
+    explicit_plugin.environment.push(SandboxEnvironment::new(
+        "PATH",
+        "/plugins/private/bin:/usr/bin:/bin",
+    ));
+    tools.apply(&mut explicit_plugin);
+    assert_eq!(
+        explicit_plugin
+            .environment
+            .iter()
+            .find(|v| v.key == "PATH")
+            .unwrap()
+            .value(),
+        "/plugins/private/bin:/usr/bin:/bin"
+    );
     let mut command = SandboxRequest::new(root.path(), ["sh"]);
     tools.apply_to_workspace_command(&mut command);
     let path = command
@@ -1195,9 +1224,38 @@ fn only_workspace_commands_search_home_after_registered_tools() {
     let registered = command.tool_dirs[0].to_string_lossy().into_owned();
     assert!(
         path.starts_with(&registered)
-            && path.ends_with(&format!(":{}:/usr/bin:/bin", WORKSPACE_HOME_BINS.join(":"))),
+            && path.ends_with(&format!(
+                ":{PILOT_PIXI_BIN}:{}:/usr/bin:/bin",
+                WORKSPACE_HOME_BINS.join(":")
+            )),
         "{path}"
     );
+    let sandbox =
+        BubblewrapSandbox::new(tools.authorize(
+            BubblewrapPolicy::new("bwrap", ["sh"]).authorize_workspace_root(root.path()),
+        ))
+        .unwrap();
+    for entry in ["pixi".to_owned(), pixi.to_string_lossy().into_owned()] {
+        let mut request = SandboxRequest::new(root.path(), [entry]);
+        tools.apply_to_workspace_command(&mut request);
+        assert!(
+            request
+                .readonly_inputs
+                .contains(&ReadOnlyInput::new(&pixi, format!("{PILOT_PIXI_BIN}/pixi")))
+        );
+        assert!(request.writable_inputs.is_empty());
+        assert!(sandbox.isolated_command(request.clone()).is_err());
+        let scoped = tools.sandbox_for_command(&sandbox, &mut request).unwrap();
+        assert_eq!(request.command[0], format!("{PILOT_PIXI_BIN}/pixi"));
+        // Build the validated command but never spawn the fixture or pixi.
+        assert!(scoped.isolated_command(request).is_ok());
+    }
+    let mut ungranted = SandboxRequest::new(root.path(), ["pixi"]);
+    let scoped = ToolEnvironment::default()
+        .sandbox_for_command(&sandbox, &mut ungranted)
+        .unwrap();
+    assert_eq!(ungranted.command, ["pixi"]);
+    assert!(scoped.isolated_command(ungranted).is_err());
 }
 
 #[test]

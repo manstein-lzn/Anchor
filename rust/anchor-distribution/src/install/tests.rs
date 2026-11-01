@@ -23,7 +23,13 @@ fn admitted_install(
     fixture: &Fixture,
     request: &PlatformInstallRequest,
 ) -> Result<PlatformInstallReport> {
-    install(request, &fixture.digest, &fixture.digest, &fixture.digest)
+    install(
+        request,
+        &fixture.digest,
+        &fixture.digest,
+        &fixture.digest,
+        &fixture.digest,
+    )
 }
 
 #[test]
@@ -223,6 +229,7 @@ fn installer_refuses_links_duplicates_non_platform_payload_and_unlisted_paths() 
             &fixture.digest,
             &fixture.digest,
             &fixture.digest,
+            &fixture.digest,
             false
         )
         .is_err()
@@ -282,6 +289,7 @@ fn installed_runtime_validation_uses_read_only_modes_and_needs_no_config_directo
         &fixture.digest,
         &fixture.digest,
         &fixture.digest,
+        &fixture.digest,
         true,
     )
     .unwrap();
@@ -291,8 +299,51 @@ fn installed_runtime_validation_uses_read_only_modes_and_needs_no_config_directo
             &fixture.digest,
             &fixture.digest,
             &fixture.digest,
+            &fixture.digest,
             false
         )
         .is_err()
     );
+    let path = report.release_root.join("runtime-manifest.json");
+    let original: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+    for (field, value) in [
+        ("version", "0.0.0"),
+        ("source", "https://example.com/pixi"),
+        ("path", "bin/other"),
+        ("sha256", PIXI_SHA256),
+    ] {
+        let mut manifest = original.clone();
+        // Public validation must reject a different pixi identity, before
+        // inspecting fixture payload hashes against production pins.
+        manifest["goose_sha256"] = crate::GOOSE_SHA256.into();
+        manifest["bootstrap"]["uv"]["sha256"] = crate::UV_SHA256.into();
+        manifest["bootstrap"]["rustup_init"]["sha256"] = crate::RUSTUP_INIT_SHA256.into();
+        manifest["bootstrap"]["pixi"]["sha256"] = PIXI_SHA256.into();
+        manifest["bootstrap"]["pixi"][field] = if field == "sha256" {
+            "0".repeat(64).into()
+        } else {
+            value.into()
+        };
+        fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        let error = validate_platform_runtime(&report.release_root)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("bootstrap identity differs"),
+            "{field}: {error}"
+        );
+    }
+    let mut obsolete = original;
+    obsolete["format"] = 2.into();
+    obsolete["bootstrap"]
+        .as_object_mut()
+        .unwrap()
+        .remove("pixi");
+    fs::write(&path, serde_json::to_vec(&obsolete).unwrap()).unwrap();
+    let error = validate_platform_runtime(&report.release_root)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("format-3"), "{error}");
+    make_directories_writable(&request.install_root).unwrap();
 }

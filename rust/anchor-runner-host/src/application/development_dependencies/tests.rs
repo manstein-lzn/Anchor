@@ -92,6 +92,7 @@ async fn a_runtime_published_by_another_session_only_changes_new_turn_dependency
         python: None,
         python_enabled: false,
         rust: None,
+        pixi: None,
         provisioner: None,
     };
     let configuration = Arc::new(RuntimeConfiguration::from_snapshot_for_test(
@@ -110,6 +111,7 @@ async fn a_runtime_published_by_another_session_only_changes_new_turn_dependency
         python: Some(chain.python.clone()),
         python_enabled: true,
         rust: None,
+        pixi: None,
         provisioner: Some(old_provisioner.clone()),
     };
     configuration.publish_snapshot_for_test(old_snapshot.clone());
@@ -120,6 +122,7 @@ async fn a_runtime_published_by_another_session_only_changes_new_turn_dependency
         python: Some(new_python.clone()),
         python_enabled: true,
         rust: None,
+        pixi: None,
         provisioner: Some(new_provisioner),
     });
     assert_eq!(

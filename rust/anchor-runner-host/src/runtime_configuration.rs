@@ -60,6 +60,7 @@ pub(crate) struct RuntimeSnapshot {
     pub(crate) python: Option<PathBuf>,
     pub(crate) python_enabled: bool,
     pub(crate) rust: Option<RustInstallation>,
+    pub(crate) pixi: Option<PathBuf>,
     pub(crate) provisioner: Option<Arc<DependencyProvisioner>>,
 }
 
@@ -77,6 +78,7 @@ struct BootstrapTool {
 struct BootstrapTools {
     uv: Option<BootstrapTool>,
     rustup_init: Option<BootstrapTool>,
+    pixi: Option<BootstrapTool>,
 }
 
 pub(crate) struct RuntimeConfiguration {
@@ -86,6 +88,7 @@ pub(crate) struct RuntimeConfiguration {
     external_python: Option<PathBuf>,
     external_python_enabled: Option<bool>,
     external_rust: Option<RustInstallation>,
+    pixi: Option<PathBuf>,
     external_provision: Option<DependencyProvisionConfig>,
     external_fields: BTreeSet<&'static str>,
     release: Option<PathBuf>,
@@ -150,9 +153,17 @@ pub(crate) fn install_release_network(library_root: &Path) -> Result<(), String>
 
 impl RuntimeConfiguration {
     pub(crate) fn from_env(state: &Path, library: &Path, bwrap: PathBuf) -> Result<Self, String> {
+        Self::from_env_with_release(state, library, bwrap, release_root()?)
+    }
+
+    fn from_env_with_release(
+        state: &Path,
+        library: &Path,
+        bwrap: PathBuf,
+        release: Option<PathBuf>,
+    ) -> Result<Self, String> {
         let root = state.join("managed");
         crate::host_fs::directory(&root)?;
-        let release = release_root()?;
         let bootstrap = if let Some(release) = &release {
             let manifest: Value = serde_json::from_slice(
                 &fs::read(release.join("runtime-manifest.json"))
@@ -203,6 +214,12 @@ impl RuntimeConfiguration {
                 })
             })
             .transpose()?;
+        let pixi = optional_path("ANCHOR_PILOT_PIXI")
+            .map(|path| {
+                crate::host_fs::executable(&path)
+                    .map_err(|error| format!("ANCHOR_PILOT_PIXI {error}"))
+            })
+            .transpose()?;
         let external_fields = [
             "ANCHOR_DEPENDENCIES_PYTHON",
             "ANCHOR_PILOT_PYTHON_ENABLED",
@@ -213,23 +230,30 @@ impl RuntimeConfiguration {
             "ANCHOR_PILOT_RUSTUP",
             "ANCHOR_PILOT_RUSTUP_HOME",
             "ANCHOR_PILOT_CARGO_HOME",
+            "ANCHOR_PILOT_PIXI",
         ]
         .into_iter()
         .filter(|field| std::env::var_os(field).is_some())
         .collect();
-        let result = Self {
+        let mut result = Self {
             root,
             library: library.into(),
             bwrap,
             external_python,
             external_python_enabled,
             external_rust,
+            pixi,
             external_provision,
             external_fields,
             release,
             bootstrap,
             current: std::sync::RwLock::new(None),
         };
+        // Release files are read-only. Resolve and hash pixi only at startup;
+        // status queries and each invocation reuse this verified deployment grant.
+        if result.pixi.is_none() {
+            result.pixi = result.bootstrap_tool("pixi").ok();
+        }
         let snapshot = result.snapshot_fields(result.fields()?)?;
         *result
             .current
@@ -304,6 +328,7 @@ impl RuntimeConfiguration {
         let tool = match name {
             "uv" => self.bootstrap.uv.as_ref(),
             "rustup_init" => self.bootstrap.rustup_init.as_ref(),
+            "pixi" => self.bootstrap.pixi.as_ref(),
             _ => None,
         }
         .ok_or_else(|| {
@@ -319,21 +344,16 @@ impl RuntimeConfiguration {
                 .components()
                 .any(|component| !matches!(component, std::path::Component::Normal(_)))
             || tool.sha256.len() != 64
+            || !tool.sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
             || tool.version.is_empty()
             || !tool.source.starts_with("https://")
         {
             return Err("invalid native bootstrap tool identity".into());
         }
-        let path = root
-            .join(&tool.path)
-            .canonicalize()
-            .map_err(|error| format!("native bootstrap tool unavailable: {error}"))?;
+        let path = crate::host_fs::executable(&root.join(&tool.path))
+            .map_err(|error| format!("native bootstrap tool {error}"))?;
         if !path.starts_with(root) {
             return Err("native bootstrap tool escapes release".into());
-        }
-        let metadata = fs::metadata(&path).map_err(|error| error.to_string())?;
-        if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
-            return Err("native bootstrap tool is not executable".into());
         }
         let mut reader = fs::File::open(&path).map_err(|error| error.to_string())?;
         let mut digest = Sha256::new();
@@ -375,6 +395,7 @@ impl RuntimeConfiguration {
             external_python: None,
             external_python_enabled: None,
             external_rust: None,
+            pixi: snapshot.pixi.clone(),
             external_provision: None,
             external_fields: BTreeSet::new(),
             release: None,
@@ -438,6 +459,7 @@ impl RuntimeConfiguration {
             python,
             python_enabled,
             rust,
+            pixi: self.pixi.clone(),
             provisioner,
         })
     }
@@ -462,12 +484,21 @@ impl RuntimeConfiguration {
         let rust = snapshot
             .as_ref()
             .and_then(|snapshot| snapshot.rust.as_ref());
+        let pixi_available = snapshot
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.pixi.is_some());
+        // An external executable is authorized, but its version is not probed.
+        let pixi_version = pixi_available
+            .then_some(self.bootstrap.pixi.as_ref())
+            .flatten()
+            .filter(|_| !self.external_fields.contains("ANCHOR_PILOT_PIXI"))
+            .map(|tool| tool.version.as_str());
         let python_bootstrap_available = self.bootstrap_tool("uv").is_ok();
         let python_prepare_available = self.external_python_enabled != Some(false)
             && !self.python_preparation_fields_conflict()
             && ((self.external_python.is_some() && self.external_provision.is_some())
                 || python_bootstrap_available);
-        json!({"python_bootstrap_available":python_bootstrap_available, "python_prepare_available":python_prepare_available, "rust_bootstrap_available":self.bootstrap_tool("rustup_init").is_ok(), "python_configuration_owner":if self.external_fields.contains("ANCHOR_DEPENDENCIES_PYTHON") {"deployment"} else {"host"}, "rust_configuration_owner":if self.external_fields.contains("ANCHOR_PILOT_RUSTUP") {"deployment"} else {"host"}, "python_default_version":"3.12", "rust_default_toolchain":"stable", "python_configured":python.is_some_and(|path| path.is_file()), "python_enabled":snapshot.as_ref().is_some_and(|snapshot| snapshot.python_enabled), "python_explicitly_disabled":self.external_python_enabled == Some(false), "python_path":python, "rust_configured":rust.is_some_and(|installation| installation.proxy.is_file()), "rust_toolchain":rust.and_then(|installation| installation.toolchain.as_ref())})
+        json!({"pixi_available":pixi_available, "pixi_version":pixi_version, "python_bootstrap_available":python_bootstrap_available, "python_prepare_available":python_prepare_available, "rust_bootstrap_available":self.bootstrap_tool("rustup_init").is_ok(), "python_configuration_owner":if self.external_fields.contains("ANCHOR_DEPENDENCIES_PYTHON") {"deployment"} else {"host"}, "rust_configuration_owner":if self.external_fields.contains("ANCHOR_PILOT_RUSTUP") {"deployment"} else {"host"}, "python_default_version":"3.12", "rust_default_toolchain":"stable", "python_configured":python.is_some_and(|path| path.is_file()), "python_enabled":snapshot.as_ref().is_some_and(|snapshot| snapshot.python_enabled), "python_explicitly_disabled":self.external_python_enabled == Some(false), "python_path":python, "rust_configured":rust.is_some_and(|installation| installation.proxy.is_file()), "rust_toolchain":rust.and_then(|installation| installation.toolchain.as_ref())})
     }
 
     async fn preparation_lease(
@@ -876,6 +907,7 @@ esac
             external_python: None,
             external_python_enabled: None,
             external_rust: None,
+            pixi: None,
             external_provision: None,
             external_fields: BTreeSet::new(),
             release: Some(release),
@@ -887,16 +919,114 @@ esac
                     source: "https://example.com/uv".into(),
                 }),
                 rustup_init: None,
+                pixi: None,
             },
             current: std::sync::RwLock::new(Some(RuntimeSnapshot {
                 python: None,
                 python_enabled: false,
                 rust: None,
+                pixi: None,
                 provisioner: None,
             })),
         };
         (root, configuration)
     }
+    #[tokio::test]
+    async fn pixi_release_is_verified_once_and_deployment_override_is_validated_without_execution()
+    {
+        use crate::test_support::Environment;
+        let _guard = crate::PROCESS_ENV_LOCK.lock().await;
+        let mut environment = Environment::cleared(&[
+            "ANCHOR_DEPENDENCIES_PYTHON",
+            "ANCHOR_DEPENDENCIES_SOURCES",
+            "ANCHOR_DEPENDENCIES_UV",
+            "ANCHOR_DEPENDENCIES_UV_SHA256",
+            "ANCHOR_DEPENDENCIES_BUILD_ROOT",
+            "ANCHOR_PILOT_PYTHON",
+            "ANCHOR_PILOT_PYTHON_ENABLED",
+            "ANCHOR_PILOT_RUSTUP",
+            "ANCHOR_PILOT_RUSTUP_HOME",
+            "ANCHOR_PILOT_CARGO_HOME",
+            "ANCHOR_PILOT_PIXI",
+        ]);
+        let root = tempfile::tempdir().unwrap();
+        let state = root.path().join("state");
+        let library = root.path().join("library");
+        let load = |release| {
+            RuntimeConfiguration::from_env_with_release(&state, &library, "bwrap".into(), release)
+        };
+        let missing = load(None).unwrap();
+        assert_eq!(missing.status()["pixi_available"], false);
+        assert_eq!(missing.status()["pixi_version"], Value::Null);
+        assert!(missing.snapshot().unwrap().pixi.is_none());
+        let release = root.path().join("release");
+        fs::create_dir_all(release.join("bin")).unwrap();
+        let pixi = release.join("bin/pixi");
+        // A fixture executable is only hashed and mounted, never launched.
+        fs::copy("/usr/bin/true", &pixi).unwrap();
+        let digest = format!("{:x}", Sha256::digest(fs::read(&pixi).unwrap()));
+        fs::write(release.join("runtime-manifest.json"), serde_json::to_vec(&json!({
+            "bootstrap": {"pixi": {
+                "path": "bin/pixi", "sha256": digest, "version": "0.83.0",
+                "source": "https://github.com/prefix-dev/pixi/releases/download/v0.83.0/pixi-x86_64-unknown-linux-musl"
+            }}
+        })).unwrap()).unwrap();
+        let configuration = load(Some(release.clone())).unwrap();
+        assert_eq!(configuration.status()["pixi_available"], true);
+        assert_eq!(configuration.status()["pixi_version"], "0.83.0");
+        assert_eq!(configuration.snapshot().unwrap().pixi, Some(pixi.clone()));
+        fs::write(&pixi, "changed fixture bytes").unwrap();
+        // The immutable release grant is frozen at construction, not rehashed
+        // on platform_status or when another runtime snapshot is prepared.
+        assert_eq!(configuration.status()["pixi_available"], true);
+        assert_eq!(
+            configuration
+                .snapshot_fields(ManagedFields::default())
+                .unwrap()
+                .pixi,
+            Some(pixi.clone())
+        );
+        let mismatch = load(Some(release.clone())).unwrap();
+        assert_eq!(mismatch.status()["pixi_available"], false);
+        assert!(mismatch.status()["pixi_version"].is_null());
+        assert!(mismatch.snapshot().unwrap().pixi.is_none());
+        fs::remove_file(&pixi).unwrap();
+        assert_eq!(
+            load(Some(release.clone())).unwrap().status()["pixi_available"],
+            false
+        );
+
+        fs::copy("/usr/bin/true", &pixi).unwrap();
+        let external = root.path().join("deployment-pixi");
+        fs::copy("/usr/bin/true", &external).unwrap();
+        environment.set("ANCHOR_PILOT_PIXI", &external);
+        for release in [None, Some(release.clone())] {
+            let configuration = load(release).unwrap();
+            assert_eq!(configuration.status()["pixi_available"], true);
+            assert!(configuration.status()["pixi_version"].is_null());
+            assert_eq!(
+                configuration.snapshot().unwrap().pixi,
+                Some(external.clone())
+            );
+            assert!(configuration.external_fields.contains("ANCHOR_PILOT_PIXI"));
+            assert!(configuration.fields().unwrap() == ManagedFields::default());
+        }
+        let non_executable = root.path().join("non-executable");
+        fs::write(&non_executable, "fixture").unwrap();
+        for invalid in [
+            PathBuf::from("relative-pixi"),
+            root.path().join("absent"),
+            release.clone(),
+            non_executable,
+        ] {
+            environment.set("ANCHOR_PILOT_PIXI", invalid);
+            let error = load(Some(release.clone()))
+                .err()
+                .expect("bad deployment pixi must fail startup");
+            assert!(error.contains("ANCHOR_PILOT_PIXI"), "{error}");
+        }
+    }
+
     #[tokio::test]
     async fn managed_bootstrap_is_verified_probed_published_and_repeat_is_idempotent() {
         let (_root, configuration) = fixture();
@@ -1172,6 +1302,7 @@ cp "$CARGO_HOME/bin/rustup" "$CARGO_HOME/bin/rustc"
         assert_eq!(after.python, before.python);
         assert_eq!(after.python_enabled, before.python_enabled);
         assert_eq!(after.rust, before.rust);
+        assert_eq!(after.pixi, before.pixi);
         match (&after.provisioner, &before.provisioner) {
             (Some(after), Some(before)) => assert!(Arc::ptr_eq(after, before)),
             (None, None) => {}

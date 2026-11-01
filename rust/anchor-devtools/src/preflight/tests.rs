@@ -494,6 +494,25 @@ fn rejects_inventory_tampering_duplicate_unsafe_missing_and_symlinked_files() {
 #[test]
 fn rejects_runtime_platform_executable_inventory_and_mode_drift() {
     let fixture = Fixture::new();
+    // Platform admission belongs to the installer validator, including its
+    // version gate before the strict bootstrap inventory is decoded.
+    for format in [2, 3] {
+        fixture.edit_manifest(|manifest| {
+            manifest["kind"] = json!("platform");
+            manifest["format"] = json!(format);
+        });
+        let error = super::runtime::check(&fixture.env, &fixture.goose_sha256).unwrap_err();
+        assert_eq!(
+            error,
+            anchor_distribution::validate_platform_runtime(&fixture.runtime)
+                .unwrap_err()
+                .to_string()
+        );
+        if format == 2 {
+            assert!(error.contains("format-3"), "{error}");
+        }
+    }
+    fixture.write_manifest();
     fixture.edit_manifest(|manifest| manifest["platform"]["bits"] = json!(32));
     fixture.rejects("64-bit little-endian");
     fixture.write_manifest();

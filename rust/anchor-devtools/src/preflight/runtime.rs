@@ -72,7 +72,7 @@ pub(super) fn check(env: &BTreeMap<String, String>, goose_sha256: &str) -> Resul
         &fs::read(manifest_path).map_err(|_| "runtime-manifest.json is missing or invalid")?,
     )
     .map_err(|_| "runtime-manifest.json is missing or invalid")?;
-    if manifest.get("format").and_then(Value::as_u64) == Some(2) {
+    if manifest.get("kind").and_then(Value::as_str) == Some("platform") {
         anchor_distribution::validate_platform_runtime(&root).map_err(|error| error.to_string())?;
         check_paths(env, &root, false, goose_sha256)?;
         for executable in manifest["executables"]
