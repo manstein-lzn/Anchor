@@ -6,6 +6,7 @@ license = "MIT"
 description = "Read-only native RSI evidence MCP plugin"
 
 [dependencies]
+anchor-mcp-host = { path = "../anchor-mcp-host" }
 anchor-kernel = { path = "../anchor-kernel" }
 anchor-runtime = { path = "../anchor-runtime" }
 axum = "0.8"

@@ -8,7 +8,9 @@ use rmcp::{
     ServiceExt,
     model::{CallToolRequestParams, ClientInfo, Tool},
     service::{RoleClient, RunningService},
-    transport::StreamableHttpClientTransport,
+    transport::{
+        StreamableHttpClientTransport, streamable_http_server::session::local::LocalSessionManager,
+    },
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -30,6 +32,17 @@ pub fn initialize_crypto_provider() {
     // RMCP's reqwest 0.13 no-provider feature requires an installed provider
     // even when ring is the only compiled backend. Preserve an existing one.
     let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
+/// Sessions for a loopback MCP server owned by an invocation or process.
+/// The owner must close sessions or shut down its serving runtime; the HTTP
+/// cancellation token alone only stops SSE streams.
+pub fn local_session_manager() -> Arc<LocalSessionManager> {
+    let mut manager = LocalSessionManager::default();
+    // Running tools and unanswered elicitation are not idle. The bridge
+    // explicitly drains sessions; the RSI server exits with its process.
+    manager.session_config.keep_alive = None;
+    Arc::new(manager)
 }
 
 /// A credential whose value is never included in Debug output or serde state.

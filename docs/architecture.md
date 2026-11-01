@@ -207,6 +207,8 @@ Pilot 接纳保存网络和工具授权快照，执行启动时读取一次 `Run
 
 Pilot 接纳在 Session gate 内保存 Turn、冻结挂载并登记取消；环境探测、OAuth、MCP 启动与 Goose 执行在 gate 外进行。结束前显式关闭持有的 MCP 端口。Goose Bridge 先等待实际工具收束，再通过 Axum graceful shutdown 关闭 HTTP 连接、调用固定 rmcp 的公开 Session 关闭接口并等待 handler 释放引用；abort 仅用于失败兜底，关闭失败保留不确定结果。节点启动取消先通知资源所有者再等待清理，不从外层直接丢掉正在启动 MCP 的 future。
 
+本机 Streamable HTTP MCP 的 Goose Bridge 与 RSI 服务共用 [session manager 构造器](../rust/anchor-mcp-host/src/lib.rs)，仅关闭 rmcp 的 300 秒空闲回收；长工具调用和等待 elicitation 回答不算会话失效，初始化与业务操作超时不变。[Bridge 契约测试](../rust/anchor-runner-host/src/goose_acp/bridge.rs)通过虚拟时间验证超过五分钟的调用及后续 MCP 请求；真实 Provider 场景尚未复验。正常 Bridge 关闭仍排空会话；Drop 也异步关闭剩余 rmcp 会话并释放 handler，RSI 随独立进程退出。
+
 Pilot 清理保存 format 1 的不可变归属绑定 `state/platform/pilot-resources/<scope-hash>.json`，包含 owner、Session、创建时间、workspace 与 Goose 根。接纳和删除都在 Session gate 内重新核对当前行，防旧请求删除或接入同 ID 重建的 Session；删除持 Goose 原生 execution lease，仅清理对应 workspace、原生历史、候选准备与 mount 快照，成功后再删 Session 行，部分失败保留归属以供重试，已安装 Plugin 不随 Session 删除。mount 快照保持旧路径编码，按真实 Turn 集合与 format 1/2 JSON 中精确的 Session/Turn 身份逐文件回收，路径及读取不跟随符号链接；其他 Session、未知文件和归属不符的快照保留，只有空目录可移除。Graph 会话另用 `state/conversation-resources/<scope-hint>.json` 保留 Graph/Session/node 的共享 scope 归属；幸存 Run 或 metadata-only handoff 保留引用，最后引用释放时在原生 lease 内清理。Run lineage 墓碑仍只解释缺失前驱，不作为 Goose 恢复游标。
 
 普通助手由 Graph 执行。可信入口绑定来源、Session、Graph 与结果节点；同 Session 串行，私聊按成员隔离，群聊按群共享。渠道只接纳常驻助手形状，每条消息一个 Run 的旧形态与 `/conversation-runs` 已移除；逐节点会话 scope 不跨会话、Graph 或节点复用。

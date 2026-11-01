@@ -9,7 +9,7 @@ description = "Host-owned MCP client adapter for Anchor Rust runtime"
 anchor-runtime = { path = "../anchor-runtime" }
 base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
-rmcp = { workspace = true, features = ["transport-child-process", "reqwest-tls-no-provider"] }
+rmcp = { workspace = true, features = ["transport-child-process", "reqwest-tls-no-provider", "server", "transport-streamable-http-server"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 http = "1"
 serde = { workspace = true }
@@ -22,6 +22,5 @@ tempfile = "3"
 axum = "0.8"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "net"] }
 tokio-util = "0.7"
-rmcp = { workspace = true, features = ["server", "transport-streamable-http-server"] }
 rcgen = "0.14"
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }

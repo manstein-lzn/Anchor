@@ -27,9 +27,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ecosystem,
     };
     let cancellation = CancellationToken::new();
+    let sessions = anchor_mcp_host::local_session_manager();
     let mcp: StreamableHttpService<RsiService, LocalSessionManager> = StreamableHttpService::new(
         move || Ok(service.clone()),
-        Default::default(),
+        sessions.clone(),
         StreamableHttpServerConfig::default()
             .with_sse_keep_alive(None)
             .with_cancellation_token(cancellation.child_token()),

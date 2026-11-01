@@ -310,6 +310,7 @@ name = "anchor-rsi"
 version = "0.1.0"
 dependencies = [
  "anchor-kernel",
+ "anchor-mcp-host",
  "anchor-runtime",
  "axum",
  "chrono",

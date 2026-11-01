@@ -767,7 +767,7 @@ impl Bridge {
             state: state.clone(),
             _release: Arc::new(HandlerRelease(Some(handler_released))),
         };
-        let sessions = Arc::new(LocalSessionManager::default());
+        let sessions = anchor_mcp_host::local_session_manager();
         let service: StreamableHttpService<McpBridge, LocalSessionManager> =
             StreamableHttpService::new(
                 move || Ok(handler.clone()),
@@ -951,6 +951,22 @@ impl Drop for Bridge {
         self.cancel();
         if let Some(task) = self.task.get_mut().take() {
             task.abort();
+        }
+        // Without an idle reaper, each worker holds its own manager reference.
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            let sessions = self.sessions.clone();
+            runtime.spawn(async move {
+                let ids = sessions
+                    .sessions
+                    .read()
+                    .await
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>();
+                for id in ids {
+                    let _ = sessions.close_session(&id).await;
+                }
+            });
         }
     }
 }
@@ -1185,6 +1201,74 @@ mod tests {
         .unwrap()
         .unwrap();
         let _ = client.cancel().await;
+    }
+
+    #[tokio::test]
+    async fn drop_releases_mcp_handler_while_client_remains_open() {
+        let (bridge, _tools) = slow_bridge(false).await;
+        let config = StreamableHttpClientTransportConfig::with_uri(format!("{}/mcp", bridge.url))
+            .auth_header(bridge.token.clone());
+        let client = ().serve(StreamableHttpClientTransport::from_config(config)).await.unwrap();
+        client.list_all_tools().await.unwrap();
+        let released = bridge.handler_closed.lock().await.take().unwrap();
+
+        drop(bridge);
+        tokio::time::timeout(std::time::Duration::from_secs(3), released)
+            .await
+            .expect("dropping the bridge must release its MCP handler")
+            .expect("handler release notification must arrive");
+        let _ = client.cancel().await;
+    }
+
+    #[tokio::test]
+    async fn mcp_session_survives_a_tool_call_longer_than_five_minutes() {
+        let directory = tempfile::tempdir().unwrap();
+        let fact_path = directory.path().join("invocation.json");
+        super::super::store_fact(&fact_path, &native_fact()).unwrap();
+        let (bridge, tools) = slow_bridge_at(false, Some(fact_path)).await;
+        let config = StreamableHttpClientTransportConfig::with_uri(format!("{}/mcp", bridge.url))
+            .auth_header(bridge.token.clone());
+        let client = Arc::new(
+            ().serve(StreamableHttpClientTransport::from_config(config))
+                .await
+                .unwrap(),
+        );
+        let entered = tools.entered.notified();
+        let called = client.clone();
+        let call = tokio::spawn(async move {
+            called
+                .call_tool(native_request(
+                    "anchor_tools_call",
+                    json!({"name":"wait","arguments":{}}),
+                    "long-call",
+                    1,
+                ))
+                .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(3), entered)
+            .await
+            .unwrap();
+
+        // Pause only after HTTP initialization and tool entry: no network I/O
+        // needs to race the virtual clock, and no MCP progress keeps it alive.
+        tokio::time::pause();
+        tokio::time::advance(std::time::Duration::from_secs(301)).await;
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        tokio::time::resume();
+        assert!(
+            !call.is_finished(),
+            "the long tool call lost its MCP session"
+        );
+        tools.cancellation.store(true, Ordering::SeqCst);
+        let response = tokio::time::timeout(std::time::Duration::from_secs(3), call)
+            .await
+            .expect("the long tool result must arrive on the original MCP session")
+            .unwrap()
+            .expect("the original MCP session must remain usable");
+        assert_eq!(response.is_error, Some(true));
+        client.list_all_tools().await.unwrap();
+        bridge.close().await.unwrap();
+        let _ = Arc::try_unwrap(client).ok().unwrap().cancel().await;
     }
 
     #[tokio::test]
