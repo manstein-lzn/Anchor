@@ -55,7 +55,8 @@ pub(crate) fn is_fake_fixture(binding: &PluginBinding) -> bool {
 pub struct McpToolConfig {
     servers: BTreeMap<String, ResolvedMcpServer>,
     // Declarations intentionally disabled by the existing optional environment
-    // contract are different from missing host configuration.
+    // contract are different from missing host configuration. A server that
+    // declares channel identity also starts here until the Host attests it.
     disabled: BTreeSet<String>,
     pub(crate) environment: crate::tool_environment::ToolEnvironment,
     oauth_library_root: Option<PathBuf>,
@@ -280,6 +281,9 @@ impl McpToolConfig {
                         existing.plugin_id, existing.name, binding.id, server_name
                     ).into());
                 }
+                if !anchor_graph_host::channel_identity_headers(&definition.config).is_empty() {
+                    disabled.insert(key.clone());
+                }
                 servers.insert(
                     key.clone(),
                     ResolvedMcpServer {
@@ -325,6 +329,59 @@ impl McpToolConfig {
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect()
+    }
+
+    /// Give each server that declared `channel_identity_headers` the channel
+    /// facts of the one message this invocation answers. Such a server never
+    /// launches without them: with no trusted single-sender message, or a
+    /// value that cannot be a header, it stays disabled instead of being called
+    /// under another identity. Servers without the declaration are unaffected.
+    pub(crate) fn attest_channel_identity(
+        &mut self,
+        identity: Option<&anchor_platform_session::ChannelIdentity>,
+    ) {
+        for (key, server) in &mut self.servers {
+            let declared = anchor_graph_host::channel_identity_headers(&server.declaration);
+            if declared.is_empty() {
+                continue;
+            }
+            let values = identity.and_then(|identity| {
+                declared
+                    .into_iter()
+                    .map(|(header, field)| {
+                        let value = match field.as_str() {
+                            "source" => Some(identity.source.clone()),
+                            "account" => identity.account.clone(),
+                            "conversation_kind" => {
+                                Some(identity.conversation_kind.as_str().to_owned())
+                            }
+                            "conversation_id" => Some(identity.conversation_id.clone()),
+                            "sender_id" => Some(identity.sender_id.clone()),
+                            _ => None,
+                        }?;
+                        axum::http::HeaderValue::from_str(&value).ok()?;
+                        Some((header, value))
+                    })
+                    .collect::<Option<Vec<_>>>()
+            });
+            match (
+                values,
+                server
+                    .config
+                    .get_mut("headers")
+                    .and_then(Value::as_object_mut),
+            ) {
+                (Some(values), Some(headers)) => {
+                    for (header, value) in values {
+                        headers.insert(header, Value::String(value));
+                    }
+                    self.disabled.remove(key);
+                }
+                _ => {
+                    self.disabled.insert(key.clone());
+                }
+            }
+        }
     }
 
     pub(crate) fn declares_stdio(&self, binding: &PluginBinding) -> bool {
@@ -446,7 +503,17 @@ impl McpToolConfig {
                         },
                     )
                     .await;
+                let attested = self.servers.get(&key).is_some_and(|server| {
+                    !anchor_graph_host::channel_identity_headers(&server.declaration).is_empty()
+                });
                 let result = match connection {
+                    // A connection test answers no channel member, so a server
+                    // that requires the Host to attest one is never connected.
+                    Ok(live) if live.hosts.is_empty() && attested => {
+                        let _ = live.shutdown().await;
+                        json!({"target":target,"status":"unsupported",
+                            "message":"该 MCP 目标需要宿主附带渠道成员身份，只在机器人处理成员消息时连接；连接测试不代表任何成员，因此未建立连接。"})
+                    }
                     Ok(live) if live.hosts.is_empty() => {
                         let _ = live.shutdown().await;
                         json!({"target":target,"status":"unsupported",

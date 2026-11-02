@@ -53,6 +53,9 @@ pub struct ServerReview {
     /// Environment variable names whose absence disables the server.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub optional_environment: Vec<String>,
+    /// `header=field` pairs of channel identity the Host attests to this server.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub channel_identity: Vec<String>,
 }
 
 /// One declared service-level channel entry point.
@@ -194,6 +197,10 @@ pub(crate) fn summarize(
             .then(|| "oauth".to_owned()),
             environment,
             optional_environment,
+            channel_identity: anchor_graph_host::channel_identity_headers(config)
+                .into_iter()
+                .map(|(header, field)| format!("{header}={field}"))
+                .collect(),
         });
     }
     servers.sort_by(|left, right| left.name.cmp(&right.name));

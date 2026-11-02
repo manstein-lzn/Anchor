@@ -357,3 +357,151 @@ async fn stdio_requires_the_sandbox_launcher() {
     let error = config.bind(&[binding("stdio")], false).await.err().unwrap();
     assert!(error.contains("sandbox launcher"));
 }
+
+fn identity(sender: &str) -> anchor_platform_session::ChannelIdentity {
+    anchor_platform_session::ChannelIdentity {
+        source: "wecom".into(),
+        account: Some("corp".into()),
+        conversation_kind: anchor_platform_session::ChannelConversationKind::Single,
+        conversation_id: sender.into(),
+        sender_id: sender.into(),
+    }
+}
+
+fn identity_config(endpoint: &str) -> McpToolConfig {
+    let mut config = config(endpoint, &[]);
+    let declaration = json!({"type":"http","url":endpoint,"headers":{},
+        "channel_identity_headers":{"X-Channel-Sender":"sender_id","X-Channel-Kind":"conversation_kind"}});
+    let server = config.servers.get_mut("fixture-plugin-fixture").unwrap();
+    server.declaration = declaration.clone();
+    server.config = declaration;
+    config.disabled.insert("fixture-plugin-fixture".into());
+    config
+}
+
+#[tokio::test]
+async fn declared_channel_identity_reaches_only_the_declaring_server_from_the_host() {
+    let seen = Arc::new(std::sync::Mutex::new(
+        Vec::<(Option<String>, Option<String>)>::new(),
+    ));
+    let fixture = {
+        let cancellation = CancellationToken::new();
+        let handler = Fixture {
+            calls: Arc::new(AtomicUsize::new(0)),
+        };
+        let service: StreamableHttpService<Fixture, LocalSessionManager> =
+            StreamableHttpService::new(
+                move || Ok(handler.clone()),
+                Default::default(),
+                StreamableHttpServerConfig::default()
+                    .with_sse_keep_alive(None)
+                    .with_cancellation_token(cancellation.child_token()),
+            );
+        let record = seen.clone();
+        let app = Router::new()
+            .nest_service("/mcp", service)
+            .layer(middleware::from_fn(move |request: Request, next: Next| {
+                let record = record.clone();
+                let header = |name: &str| {
+                    request
+                        .headers()
+                        .get(name)
+                        .and_then(|v| v.to_str().ok())
+                        .map(str::to_owned)
+                };
+                let observed = (header("x-channel-sender"), header("x-channel-kind"));
+                record.lock().unwrap().push(observed);
+                async move { next.run(request).await }
+            }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/mcp", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (endpoint, cancellation, task)
+    };
+    let bindings = [binding("fixture")];
+
+    // Without an attested message the declaring server never launches.
+    let mut config = identity_config(&fixture.0);
+    config.attest_channel_identity(None);
+    let live = config.bind(&bindings, true).await.unwrap();
+    assert!(live.definitions().is_empty());
+    live.shutdown().await.unwrap();
+    assert!(seen.lock().unwrap().is_empty());
+
+    // A header value that cannot be sent keeps it disabled as well.
+    let mut config = identity_config(&fixture.0);
+    config.attest_channel_identity(Some(&identity("bad\nsender")));
+    let live = config.bind(&bindings, true).await.unwrap();
+    assert!(live.definitions().is_empty());
+    live.shutdown().await.unwrap();
+
+    let mut config = identity_config(&fixture.0);
+    config.attest_channel_identity(Some(&identity("alice")));
+    let live = config.bind(&bindings, true).await.unwrap();
+    assert_eq!(live.definitions().len(), 2);
+    live.call("fixture-plugin-fixture_echo", json!({"value":"x"}))
+        .await
+        .unwrap();
+    live.shutdown().await.unwrap();
+    let requests = seen.lock().unwrap().clone();
+    assert!(!requests.is_empty());
+    assert!(
+        requests
+            .iter()
+            .all(|request| request == &(Some("alice".to_owned()), Some("single".to_owned())))
+    );
+
+    // A server without the declaration receives no channel identity.
+    seen.lock().unwrap().clear();
+    let mut plain = config_plain(&fixture.0);
+    plain.attest_channel_identity(Some(&identity("alice")));
+    let live = plain.bind(&bindings, true).await.unwrap();
+    assert_eq!(live.definitions().len(), 2);
+    live.shutdown().await.unwrap();
+    assert!(
+        seen.lock()
+            .unwrap()
+            .iter()
+            .all(|request| request == &(None, None))
+    );
+    fixture.1.cancel();
+    fixture.2.abort();
+}
+
+#[tokio::test]
+async fn a_connection_test_never_connects_a_server_that_requires_channel_identity() {
+    // The endpoint is never contacted: the server stays disabled before transport.
+    let config = identity_config("http://127.0.0.1:9/mcp");
+    let workspace = tempfile::tempdir().unwrap();
+    let sandbox = BubblewrapSandbox::new(
+        anchor_sandbox_bwrap::BubblewrapPolicy::new("bwrap", ["sh"])
+            .authorize_workspace_root(workspace.path()),
+    )
+    .unwrap();
+    let results = config
+        .test_connections(
+            &[binding("fixture")],
+            SandboxLaunch {
+                sandbox: &sandbox,
+                workspace: workspace.path(),
+                readonly_inputs: &[],
+                plugin_views: &BTreeMap::new(),
+            },
+        )
+        .await;
+    assert_eq!(results.len(), 1, "{results:?}");
+    assert_eq!(results[0]["status"], "unsupported");
+    assert!(
+        results[0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("渠道成员身份"),
+        "{results:?}"
+    );
+}
+
+fn config_plain(endpoint: &str) -> McpToolConfig {
+    config(endpoint, &[])
+}

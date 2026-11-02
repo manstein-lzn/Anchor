@@ -63,3 +63,26 @@ fn remote_authority_keeps_credential_selectors_but_ignores_literal_rotation() {
     scope[0].config["oauth_scope"] = serde_json::json!("write");
     assert_ne!(before, plugin_authorization_digest(&scope, true, &[]));
 }
+
+#[test]
+fn channel_identity_disclosure_is_part_of_the_authority_only_when_declared() {
+    let server = |config| {
+        vec![McpServerDefinition {
+            name: "api".into(),
+            config,
+        }]
+    };
+    let plain =
+        serde_json::json!({"url":"https://example.test/mcp","bearer_token_env_var":"TOKEN"});
+    let mut disclosed = plain.clone();
+    disclosed["channel_identity_headers"] = serde_json::json!({"X-Sender":"sender_id"});
+    let mut other = plain.clone();
+    other["channel_identity_headers"] = serde_json::json!({"X-Sender":"conversation_id"});
+    let base = plugin_authorization_digest(&server(plain), true, &[]);
+    let granted = plugin_authorization_digest(&server(disclosed), true, &[]);
+    assert_ne!(base, granted);
+    assert_ne!(
+        granted,
+        plugin_authorization_digest(&server(other), true, &[])
+    );
+}

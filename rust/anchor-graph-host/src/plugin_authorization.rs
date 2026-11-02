@@ -30,7 +30,7 @@ pub(crate) fn plugin_authorization_digest(
                 }
             });
             let references = host_environment_references(config);
-            serde_json::json!({
+            let mut grant = serde_json::json!({
                 "name": server.name,
                 "transport": config.get("type").and_then(Value::as_str)
                     .unwrap_or(if command.is_some() { "stdio" } else { "http" }),
@@ -45,7 +45,13 @@ pub(crate) fn plugin_authorization_digest(
                 "oauth_resource": config.get("oauth_resource"),
                 "oauth_client_id": config.get("oauth_client_id"),
                 "oauth_scope": config.get("oauth_scope"),
-            })
+            });
+            // Disclosing the channel sender is a Host grant. Only declarations
+            // that request it change; every existing authority stays identical.
+            if let Some(headers) = config.get("channel_identity_headers") {
+                grant["channel_identity_headers"] = headers.clone();
+            }
+            grant
         }).collect::<Vec<_>>(),
         "network": network,
         "mutable": mutable,

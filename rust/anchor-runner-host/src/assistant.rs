@@ -607,6 +607,17 @@ pub(crate) fn pending_inputs(
         .collect()
 }
 
+/// The identity a Turn answers when every folded message shares it.
+pub(crate) fn single_identity<'a>(
+    current: &anchor_platform_session::ChannelIdentity,
+    folded: impl IntoIterator<Item = &'a anchor_platform_session::ChannelIdentity>,
+) -> Option<anchor_platform_session::ChannelIdentity> {
+    folded
+        .into_iter()
+        .all(|other| other == current)
+        .then(|| current.clone())
+}
+
 pub(crate) fn graph_error(error: impl std::fmt::Display) -> GraphError {
     GraphError::Unsupported(error.to_string())
 }
@@ -1173,5 +1184,20 @@ mod tests {
         )
         .unwrap();
         assert!(handover_workspace_source(&fixture.root, &new, &artifacts).is_err());
+    }
+
+    #[test]
+    fn a_turn_attests_one_identity_only_when_every_folded_message_shares_it() {
+        let member = |sender: &str| ChannelIdentity {
+            source: "wecom".into(),
+            account: Some("corp".into()),
+            conversation_kind: anchor_platform_session::ChannelConversationKind::Group,
+            conversation_id: "group".into(),
+            sender_id: sender.into(),
+        };
+        let alice = member("alice");
+        assert_eq!(single_identity(&alice, []), Some(alice.clone()));
+        assert_eq!(single_identity(&alice, [&alice]), Some(alice.clone()));
+        assert_eq!(single_identity(&alice, [&member("bob")]), None);
     }
 }

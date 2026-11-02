@@ -77,6 +77,7 @@ impl HostIoResolver {
                     mounted.network,
                 )
                 .await?;
+                mcp.attest_channel_identity(self.attested_channel(&request.key)?.as_ref());
                 let plugin_views = prepared.views;
                 let mut disclosure = prepared.disclosure;
                 self.remember_plugin_observation(

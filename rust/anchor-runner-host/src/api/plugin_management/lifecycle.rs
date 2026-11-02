@@ -446,7 +446,7 @@ async fn build_install(
         "already_installed":precondition.already_installed(),"source":source,"resources":review.resources,"resource_bytes":review.resource_bytes,
         "skills":review.skills,"servers":review.servers.iter().map(|server|json!({"name":server.name,"transport":server.transport,"auth":server.auth,
             "command":server.command,"argument_count":server.args.len(),"remote_origin":server.url.as_ref().and_then(|value|url::Url::parse(value).ok()).map(|url|url.origin().ascii_serialization()),
-            "environment":server.environment,"optional_environment":server.optional_environment})).collect::<Vec<_>>(),
+            "environment":server.environment,"optional_environment":server.optional_environment,"channel_identity":server.channel_identity})).collect::<Vec<_>>(),
         "channels":review.channels,"warnings":review.warnings,"inline_values":review.inline_values,"binary_without_source":review.binary_without_source,
         "graphs":precondition.impact.graphs,"coverage":precondition.impact.coverage,
         "dependencies":precondition.dependencies.as_ref().map(|plan|json!({"sources":plan.sources.iter().map(|source| url::Url::parse(source).ok().filter(|url| matches!(url.scheme(), "https" | "http")).map(|url| url.origin().ascii_serialization()).unwrap_or_else(|| "部署授权的本地包目录".into())).collect::<Vec<_>>(),"interpreter":plan.interpreter,"lock_digest":plan.lock_digest,"packages":plan.packages}))});

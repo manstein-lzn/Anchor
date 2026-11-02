@@ -28,6 +28,8 @@ MCP 默认只读取 owner 的托管配置；进程中存在同名环境变量不
 
 Pilot 的 MCP 凭据请求在创建时绑定配置 revision 与不含凭据值的连接身份，提交前在同一写入锁内重新校验；配置变化、清除或旧请求同步失败后，旧表单不能覆盖新值。配置变更后可在同一 Turn 申请新请求；升级前没有版本绑定的待填写 MCP 请求需重新申请，不自动授权提交。渠道凭据保留独立生命周期。
 
+HTTP MCP 可声明 `channel_identity_headers`，例如 `{"X-Channel-Sender":"sender_id"}`，请 Host 证明本次回答的是哪位渠道成员。可选字段为 `source`、`account`、`conversation_kind`、`conversation_id`、`sender_id`；值只来自 Host 已准入的渠道输入，不来自模型、配置或工具参数。同名 Header 不能出现在 `headers`、`http_headers`、`env_http_headers` 中，也不能是 `Authorization`。声明属于宿主授权，计入 `authorization_digest` 并在安装审阅中显示；未声明的 Plugin 授权不变。声明了的 server 只在常驻助手处理渠道消息时连接：非渠道调用、一轮里折叠了不同成员的消息、或值无法作为 Header 发送时，该 server 不启动，其他 server 照常。连接测试不代表任何成员，因此不连接此类 server，结果为“不支持”并说明原因。服务端应同时校验 Plugin 自己的凭据，只信任来自该凭据请求中的这些 Header。
+
 连接测试复用执行时的准备、权限、沙箱及 MCP transport，只进行初始化与工具发现，不调用业务工具。返回结果绑定配置 revision；测试期间配置改变则标记结果过期。stdio 发现成功只证明本地工具可启动，不证明上游 Key 有效。测试成功、远程认证和真实业务验收分别记录。
 
 ## 工具与模型边界

@@ -317,6 +317,7 @@ fn validate_mcp(
             "oauth_resource",
             "oauth_client_id",
             "oauth_scope",
+            "channel_identity_headers",
         ]
     };
     if let Some(key) = server.keys().find(|key| !allowed.contains(&key.as_str())) {
@@ -518,6 +519,73 @@ fn validate_mcp(
             return Err(invalid(format!(
                 "Plugin {id}, server {name}: choose headers or http_headers, not both"
             )));
+        }
+        if server.contains_key("channel_identity_headers") {
+            validate_channel_identity_headers(server).map_err(|reason| {
+                invalid(format!(
+                    "Plugin {id}, server {name}: channel_identity_headers {reason}"
+                ))
+            })?;
+        }
+    }
+    Ok(())
+}
+
+/// Channel facts the Host may attest to an HTTP MCP server for the message it
+/// is answering. The values come only from the Host's admitted channel input.
+const CHANNEL_IDENTITY_FIELDS: &[&str] = &[
+    "source",
+    "account",
+    "conversation_kind",
+    "conversation_id",
+    "sender_id",
+];
+
+/// The declared `(header, channel field)` pairs of one MCP server.
+pub fn channel_identity_headers(config: &Value) -> Vec<(String, String)> {
+    config
+        .get("channel_identity_headers")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flatten()
+        .filter_map(|(header, field)| Some((header.clone(), field.as_str()?.to_owned())))
+        .collect()
+}
+
+fn validate_channel_identity_headers(
+    server: &serde_json::Map<String, Value>,
+) -> Result<(), &'static str> {
+    let declared = server
+        .get("channel_identity_headers")
+        .and_then(Value::as_object)
+        .filter(|declared| !declared.is_empty())
+        .ok_or("must map at least one header name to a channel identity field")?;
+    // Static configuration can never supply or shadow a Host-attested value.
+    let configured = ["headers", "http_headers", "env_http_headers"]
+        .iter()
+        .filter_map(|key| server.get(*key).and_then(Value::as_object))
+        .flat_map(|values| values.keys())
+        .map(|name| name.to_ascii_lowercase())
+        .collect::<BTreeSet<_>>();
+    let mut seen = BTreeSet::new();
+    for (header, field) in declared {
+        let lower = header.to_ascii_lowercase();
+        if http::HeaderName::from_bytes(header.as_bytes()).is_err()
+            || lower == "authorization"
+            || !seen.insert(lower.clone())
+        {
+            return Err("contains an invalid, duplicate or authorization header name");
+        }
+        if configured.contains(&lower) {
+            return Err("cannot reuse a header that configuration already supplies");
+        }
+        if field
+            .as_str()
+            .is_none_or(|field| !CHANNEL_IDENTITY_FIELDS.contains(&field))
+        {
+            return Err(
+                "values must be channel identity fields: source, account, conversation_kind, conversation_id or sender_id",
+            );
         }
     }
     Ok(())

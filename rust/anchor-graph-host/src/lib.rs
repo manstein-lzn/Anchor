@@ -27,7 +27,7 @@ pub use graph_call::{
     CallRun, CallRunAccess, ChildExecutionPort, InProcessGraphHost, child_run_id,
 };
 pub use graph_catalog::{ChildRunControl, GraphCatalog, PluginReferenceLeaseFuture};
-pub use mcp::{McpServerDefinition, host_environment_references};
+pub use mcp::{McpServerDefinition, channel_identity_headers, host_environment_references};
 pub use plugin_catalog::{
     ChannelDefinition, FilePluginCatalog, PluginCatalog, PluginDefinition, PluginMetadata,
 };
