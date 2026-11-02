@@ -140,6 +140,8 @@ Host 的 `plugin_library` 统一拥有 Catalog/Library 构造、可取消发布�
 
 `plugin_library::tools` 提供共用准备与连接/披露挂接步骤，OAuth 复用 `McpToolConfig::authorize_oauth`；Pilot 保持逐项软失败，Node 保持批量硬失败、OAuth 前保留配置、连接前记录观察。
 
+声明 `channel_identity_headers` 的 HTTP MCP 在准备时默认停用；常驻助手 invocation 由 `McpToolConfig::attest_channel_identity` 从本次回答的那条已准入渠道输入取发送者身份写入请求头，模型、配置和工具参数都不能提供或覆盖。非渠道调用、同一 Turn 折叠了不同成员的消息或值不能作为 Header 时保持停用；连接测试不代表任何成员，不连接此类 server。字段与校验见 [Plugin 连接配置](plugins.md#连接配置与凭据)。
+
 AgentNode 和 Pilot 的正式工具准备在同一短 Library lease 内读取一份 `PluginDefinition`，由它生成绑定、MCP 配置、挂载、依赖视图及只读披露目录；释放后才做 OAuth/MCP 网络启动。目录再与实际工具装配的 Plugin/server/remote-tool 归属关联，不解析工具名前缀猜所属资产。提示词只提供固定的发现入口，不平铺全部 Plugin/Skill 路径，不另存提示词事实。此锁保证准备期间的读取一致性，不是历史代码快照；释放之后的更新仍可替换当前代码或回收旧视图，不能据此承诺旧进程可复现。Plugin 的 `mutable` 授权独立于 Python 依赖：无 Python 包的插件也可使用声明的数据目录；`plugin.json`、`.mcp.json` 与外置 MCP 声明文件必须属于不可变代码。升级逐项替换代码、保留数据；多条目更新中途失败如实报告。依赖规则见 [依赖标准](plugin-dependencies.md)，验证范围见 [验收摘要](pilot-development-plan.md)。
 
 Library 的 `PluginMetadata` 是列表使用的实时目录投影，与携带资源内容摘要和执行绑定的 `PluginDefinition` 分型；两者共用清单、资源路径和配置校验，只有完整定义读取代码字节并计算身份。Web 插件库与会话列表复用目录投影，不创建另一个持久目录或授权事实；目录读取放在阻塞工作线程，列表显示按批次渲染，搜索覆盖全部结果。
@@ -249,7 +251,7 @@ Kernel 的 `NodeExecutionPort::invocation_plugin_authority` 默认关闭，普�
 
 ### 渠道适配与监听
 
-`call.session` 继承的是绑定会话与显式输入映射，持有稳定来源身份。未知发送效果由 Agent 核查，ACK 与效果事实分别保存。一张常驻助手 Graph 对应一个机器人（[设计卡 004](design-cards/004-multi-bot-channels.md)）：每个启用的绑定由 Host 监管一个原生 WeCom Gateway，状态目录 `channels/graphs/<Graph 摘要>/` 与回调路由 `/channels/<graph>/…` 按 Graph 分开，回调密钥只能访问本 Graph 的路由。Gateway 接受私聊与群内 @ 回调，群按 chatid 共用进度与最新输入判断，允许名单和回执仍核对真实 actor。私聊 image/file/voice 及群 mixed 中的媒体由网关下载短时 URL、做 AES-256-CBC 解密，再交给 Host 冻结 SHA-256/大小/MIME 并只读挂载 `/in/channel`；临时 URL 与 AES key 不进入 Host 或 ledger。出站图片使用 Host 校验的 `channel-replies` 项，由网关三阶段上传换 `media_id` 后按原回调回复，发送前 durable claim、未确认结果不重发。不新增主动群发；任意文件出站、video 与真实公网投递/文档理解仍按具体场景验收。
+`call.session` 继承的是绑定会话与显式输入映射，持有稳定来源身份。未知发送效果由 Agent 核查，ACK 与效果事实分别保存。一张常驻助手 Graph 对应一个机器人（[设计卡 004](design-cards/004-multi-bot-channels.md)）：每个启用的绑定由 Host 监管一个原生 WeCom Gateway，状态目录 `channels/graphs/<Graph 摘要>/` 与回调路由 `/channels/<graph>/…` 按 Graph 分开，回调密钥只能访问本 Graph 的路由。Gateway 接受私聊与群内 @ 回调，群按 chatid 共用进度与最新输入判断，允许名单和回执仍核对真实 actor；绑定设为 `private_only` 时，名单内成员的群消息只得到固定提示，不准入、不创建 Session/Turn/Run。私聊 image/file/voice 及群 mixed 中的媒体由网关下载短时 URL、做 AES-256-CBC 解密，再交给 Host 冻结 SHA-256/大小/MIME 并只读挂载 `/in/channel`；临时 URL 与 AES key 不进入 Host 或 ledger。出站图片使用 Host 校验的 `channel-replies` 项，由网关三阶段上传换 `media_id` 后按原回调回复，发送前 durable claim、未确认结果不重发。不新增主动群发；任意文件出站、video 与真实公网投递/文档理解仍按具体场景验收。
 
 Gateway 常驻连接与 Graph Run 的执行状态分别投影。Supervisor 及其子进程 IO 固定归 Host 启动时的执行器所有，Pilot Turn 的临时执行器退出不会取消监听；进程退出沿既有监督循环重启，网络断线由 Gateway 重连。`GET /graphs`、渠道 API 和 Pilot 使用同一状态观察：优先读取鉴权的私有 NDJSON `status`，进程已启动而控制接口尚未发布时显示 `connecting`，退出后的重试显示 `reconnecting`；守护任务已结束或已发布的控制接口失联显示 `unavailable`，不会冒充在线或返回控制凭据。已认证、认证中、停止仍分别投影。`GET /graphs` 只为有效启用的机器人返回 `listener`。`active_nodes` 来自仍有宿主执行者的 Running Run 游标及正在执行的并行分支，不把遗留游标当成当前工作。
 
