@@ -135,7 +135,13 @@ async fn malformed_bindings_unknown_graphs_and_model_credentials_or_approval_are
     let mut request = arguments();
     request["send_users"] = json!([]);
     assert!(configuration_arguments(&request).is_err());
+    let mut request = arguments();
+    request["private_only"] = json!("yes");
+    assert!(configuration_arguments(&request).is_err());
+    request["private_only"] = json!(true);
+    assert!(configuration_arguments(&request).unwrap().1.private_only);
     let (_, members) = configuration_arguments(&arguments()).unwrap();
+    assert!(!members.private_only);
     for graph in ["missing", "../task", ""] {
         assert!(
             tools

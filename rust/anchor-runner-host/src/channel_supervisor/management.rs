@@ -58,6 +58,9 @@ struct ChannelFact {
     plugin: String,
     users: Vec<String>,
     send_users: Vec<String>,
+    // Omitted when false, so bindings without it keep their saved bytes.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    private_only: bool,
     enabled: bool,
     authorization_digest: String,
     callback_key: String,
@@ -71,6 +74,7 @@ impl ChannelFact {
             plugin: self.plugin.clone(),
             users: self.users.clone(),
             send_users: self.send_users.clone(),
+            private_only: self.private_only,
         }
     }
 }
@@ -614,6 +618,7 @@ impl ChannelManagementPort for ChannelManagementAdapter {
                     plugin: binding.plugin,
                     users: binding.users,
                     send_users: binding.send_users,
+                    private_only: binding.private_only,
                     enabled: false,
                     authorization_digest: digest,
                     callback_key: match previous {

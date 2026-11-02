@@ -29,7 +29,7 @@
 在 Web 中，选中 Graph 的 Agent 节点，打开所挂渠道 Plugin 的详情，「此 Graph 的机器人」一栏可以保存成员、设置凭据、启停并查看网关状态；草稿未保存时先保存 Graph。从插件库打开同一 Plugin 只列出在用它的 Graph。Pilot 使用 `channel_status`、`channel_configure`、`channel_enable`，凭据用带 `graph` 的 `credential_request`。两者调用同一组管理 API：
 
 - `GET /channels`：列出所有机器人绑定，属于其他 owner 的只显示 Graph 名和 `owner_matches: false`；
-- `GET`/`PUT /graphs/{graph}/channel`：查看状态，或保存 `{users, send_users}`；
+- `GET`/`PUT /graphs/{graph}/channel`：查看状态，或保存 `{users, send_users, private_only?}`；
 - `POST /graphs/{graph}/channel/enabled`：`{enabled, expected_binding}`；
 - `GET /graphs/{graph}/channel/credentials`，`PUT`/`DELETE /graphs/{graph}/channel/credentials/{field}`：只返回字段状态，不返回明文。
 
@@ -64,6 +64,8 @@ Host 为每个启用的绑定启动一个 ChannelSupervisor，按该 Graph 助�
 常驻助手是普通三节点循环：`wait_input (Op.host session.wait_input) → assistant (Agent) → reply (Op.host session.reply) → wait_input`，不在 Kernel 中加入 Session/WeCom 依赖或专用 Runner。首条可信消息惰性创建该 Session 的 current assistant Run；后续每条输入仍有独立 Turn，但复用 Run、cursor、同节点稳定 workspace 与逐节点 Goose 原生历史。等待节点把本轮输入作为不可变产物交给 Agent，不覆写 `Run.input`，空闲等待不调用模型。Session 保存 Turn/幂等、current 与历史 binding、retire 事实；Run 拥有执行进度，逐轮 invocation 与显式选择的 Artifact 交付不可变，不因工作目录复用而合并。
 
 等待输入时，无待领输入和同一 key 的幂等重读仅需一致的只读事务，不争用 SQLite 写锁。观察到待领输入不代表已获得领取权：必须结束读事务后获取写事务，再核验当前绑定、同一 key 是否已被领取及此刻最新的候选输入；并发替换、完成、领取或交接均以写事务中的事实为准，不把旧读快照升级成写事务。
+
+`private_only=true` 的机器人只接收私聊：允许名单内成员在群内 @ 它时，Host 直接回复固定提示“我只在私聊中回复，请直接私聊我。”，不准入、不创建 Session/Turn/Run，也不进入任何对话上下文；名单外成员仍被拒绝。默认 `false`，保持下面的群共享行为。
 
 私聊按成员隔离；群内 @ 机器人时，同群不同成员共享 Session、current Run 和对话上下文，私聊、不同群及不同机器人账号彼此隔离。每条输入及中断输入保留真实发言者，允许名单仍检查该成员。群必须有平台 `chatid`，回复沿原回调 `req_id` 返回；不新增主动群发能力。
 

@@ -28,13 +28,20 @@ pub(crate) fn configuration_arguments(
 ) -> Result<(String, ChannelMembers), ToolError> {
     only(
         arguments,
-        &["graph", "users", "send_users"],
+        &["graph", "users", "send_users", "private_only"],
         "provide only the bot's graph and members; credentials and approval are not model arguments",
     )?;
     let graph = parameter(arguments, "graph")?;
+    let private_only = match arguments.get("private_only") {
+        None => false,
+        Some(value) => value
+            .as_bool()
+            .ok_or_else(|| rejected("private_only must be a boolean"))?,
+    };
     let members = ChannelMembers {
         users: members(arguments, "users")?,
         send_users: members(arguments, "send_users")?,
+        private_only,
     };
     // Validate the member lists before asking the user; the Plugin is the
     // Graph's and is checked again by the application use case.
@@ -42,6 +49,7 @@ pub(crate) fn configuration_arguments(
         plugin: "unchecked".into(),
         users: members.users.clone(),
         send_users: members.send_users.clone(),
+        private_only: members.private_only,
     }
     .validate()
     .map_err(channel_error)?;

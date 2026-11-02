@@ -27,6 +27,8 @@
 .channels-binding input, .channels-binding textarea { width: 100%; padding: 7px 9px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--surface); color: var(--ink); font: 12px var(--font-code); }
 .channels-binding textarea { resize: vertical; min-height: 58px; line-height: 1.6; }
 .channels-binding input:disabled, .channels-binding textarea:disabled { background: var(--panel); color: var(--muted); }
+.channels-binding .channels-checkbox { flex-direction: row; align-items: center; gap: 7px; }
+.channels-binding .channels-checkbox input { width: auto; padding: 0; margin: 0; accent-color: var(--accent); }
 .channels-field-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .channels-field-help { color: var(--muted); font-size: 11px; margin: 10px 0 14px; }
 .channels-form-actions { display: flex; gap: 8px; flex-wrap: wrap; }
