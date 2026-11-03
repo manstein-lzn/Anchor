@@ -37,7 +37,7 @@ for (const width of [1440, 390]) {
       }
       if (path === `/graphs/${graph}/channel/enabled`) {
         const { enabled, expected_binding } = route.request().postDataJSON();
-        expect(expected_binding).toEqual({ ...binding, users: ['alice'], send_users: [] });
+        expect(expected_binding).toEqual({ ...binding, users: ['alice'], send_users: [], private_only: true });
         configuration = { ...configuration, enabled, listener: enabled ? 'authenticated' : 'stopped' };
         return route.fulfill({ json: configuration });
       }
@@ -60,12 +60,14 @@ for (const width of [1440, 390]) {
     await expect(bot).toContainText('尚未保存成员');
     await expect(bot.getByRole('button', { name: '启用机器人', exact: true })).toBeDisabled();
     await bot.getByLabel('允许接收的成员').fill('alice');
+    await bot.getByRole('checkbox', { name: /只接收私聊/ }).check();
     await bot.getByRole('button', { name: '保存成员', exact: true }).click();
     await expect(bot).toContainText('成员已保存');
     await expect(bot.getByRole('region', { name: '插件凭据', exact: true })).toContainText(`channel_wecom@${graph}`);
     await bot.getByRole('button', { name: '启用机器人', exact: true }).click();
     await expect(bot).toContainText('常驻监听');
     await expect(bot.getByLabel('允许接收的成员')).toBeDisabled();
+    await expect(bot.getByRole('checkbox', { name: /只接收私聊/ })).toBeChecked();
     await expect(bot.getByRole('region', { name: '插件凭据', exact: true })).toHaveCount(0);
     expect(await dialog.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
     await page.screenshot({ path: info.outputPath(`graph-bot-${width}.png`), fullPage: true });

@@ -264,6 +264,25 @@ impl HostIoResolver {
         Ok(())
     }
 
+    /// The channel identity of the one message this assistant invocation
+    /// answers, read from the admitted input rather than anything the model
+    /// produced. `None` outside a channel Turn, or when the Turn also folds in
+    /// messages from another conversation member.
+    pub(super) fn attested_channel(
+        &self,
+        key: &InvocationKey,
+    ) -> Result<Option<anchor_platform_session::ChannelIdentity>, String> {
+        let root = self.local_inputs.state_root();
+        let Some(input) = crate::assistant::input(root, key)? else {
+            return Ok(None);
+        };
+        let pending = crate::assistant::pending_inputs(root, key)?;
+        Ok(crate::assistant::single_identity(
+            &input.request.identity,
+            pending.iter().map(|other| &other.request.identity),
+        ))
+    }
+
     pub(super) fn oauth_owner_for_run(&self, run_id: &str) -> Result<Option<String>, String> {
         crate::run_metadata::load(self.local_inputs.state_root(), run_id)
             .map(|metadata| metadata.and_then(|metadata| metadata.oauth_owner))

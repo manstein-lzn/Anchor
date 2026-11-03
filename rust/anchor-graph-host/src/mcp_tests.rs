@@ -222,3 +222,45 @@ fn url_templates_support_full_urls_schemes_hosts_and_ports() {
         .unwrap();
     assert_eq!(servers[0].config["url"], "http://127.0.0.1:8080/mcp");
 }
+
+#[test]
+fn channel_identity_headers_are_declared_only_for_http_and_never_configured() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("plugins/identity");
+    fs::create_dir_all(&dir).unwrap();
+    let catalog = FilePluginCatalog::new(tmp.path());
+    let write = |server: serde_json::Value| {
+        fs::write(
+            dir.join("plugin.json"),
+            serde_json::json!({"name":"Identity","mcpServers":{"api":server}}).to_string(),
+        )
+        .unwrap();
+    };
+    write(
+        serde_json::json!({"url":"https://example.test/mcp","channel_identity_headers":{"X-Channel-Sender":"sender_id","X-Channel-Kind":"conversation_kind"}}),
+    );
+    let servers = catalog.mcp_servers("identity", false).unwrap();
+    let mut declared = channel_identity_headers(&servers[0].config);
+    // JSON object order depends on workspace feature unification.
+    declared.sort();
+    assert_eq!(
+        declared,
+        [
+            ("X-Channel-Kind".to_owned(), "conversation_kind".to_owned()),
+            ("X-Channel-Sender".to_owned(), "sender_id".to_owned()),
+        ]
+    );
+    for invalid in [
+        serde_json::json!({"command":"echo","channel_identity_headers":{"X-Sender":"sender_id"}}),
+        serde_json::json!({"url":"https://example.test/mcp","channel_identity_headers":{}}),
+        serde_json::json!({"url":"https://example.test/mcp","channel_identity_headers":{"X-Sender":"text"}}),
+        serde_json::json!({"url":"https://example.test/mcp","channel_identity_headers":{"Authorization":"sender_id"}}),
+        serde_json::json!({"url":"https://example.test/mcp","channel_identity_headers":{"bad header":"sender_id"}}),
+        serde_json::json!({"url":"https://example.test/mcp","headers":{"x-sender":"forged"},"channel_identity_headers":{"X-Sender":"sender_id"}}),
+        serde_json::json!({"url":"https://example.test/mcp","env_http_headers":{"X-Sender":"FORGED"},"channel_identity_headers":{"X-Sender":"sender_id"}}),
+        serde_json::json!({"url":"https://example.test/mcp","channel_identity_headers":{"X-Sender":"sender_id","x-sender":"source"}}),
+    ] {
+        write(invalid.clone());
+        assert!(catalog.mcp_servers("identity", false).is_err(), "{invalid}");
+    }
+}

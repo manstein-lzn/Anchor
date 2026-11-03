@@ -9,6 +9,7 @@ use sha2::{Digest, Sha256};
 use std::time::Duration;
 
 const MAX_EVENT_TEXT_BYTES: usize = 100_000;
+pub(crate) const PRIVATE_ONLY_NOTICE: &str = "我只在私聊中回复，请直接私聊我。";
 const RUN_POLL: Duration = Duration::from_millis(50);
 
 #[cfg(test)]
@@ -145,6 +146,7 @@ struct BotSettings {
     reply_node: String,
     account: Option<String>,
     users: HashSet<String>,
+    private_only: bool,
 }
 
 impl BotSettings {
@@ -188,6 +190,7 @@ fn current_settings(
         graph: channel.graph,
         reply_node,
         account: channel.account,
+        private_only: channel.binding.private_only,
         users: channel.binding.users.into_iter().collect(),
     })
 }
@@ -211,6 +214,13 @@ pub(super) async fn receive_event(
     let owner = private_owner(&state, &headers);
     let config = current_settings(&state, &owner, &graph)?;
     envelope.event.validate(&config)?;
+    // A private-only bot answers a group message with a fixed notice. The
+    // message is not admitted, so it creates no Session, Turn or Run.
+    if config.private_only
+        && envelope.event.conversation_kind() != Some(ChannelConversationKind::Single)
+    {
+        return Ok((StatusCode::OK, Json(json!({"text": PRIVATE_ONLY_NOTICE}))));
+    }
     let prepared_attachments = crate::channel_inputs::prepare(&envelope.event.attachments)
         .map_err(|failure| error(StatusCode::BAD_REQUEST, failure))?;
     let attachment_entries = prepared_attachments.manifest();

@@ -791,3 +791,37 @@ async fn persistent_assistant_progress_reports_before_the_live_trace_registers()
     }
     let _ = tokio::time::timeout(std::time::Duration::from_secs(3), registration).await;
 }
+
+#[tokio::test]
+async fn a_private_only_bot_answers_groups_with_a_notice_and_admits_nothing() {
+    use crate::application::channel_management::fake::FakeChannels;
+    let (root, mut state) = fixture();
+    let mut bot = FakeChannels::bot("fixture", "local", "work", &["user-1"]);
+    bot.binding.private_only = true;
+    state.application = state
+        .application
+        .clone()
+        .with_channel_management(Arc::new(FakeChannels::new().with(bot)));
+    let app = router_with_web_root(state.clone(), root.path().join("web"));
+    let (status, reply) = call(
+        app.clone(),
+        "POST",
+        "/channels/fixture/events",
+        Some(&group_event("group-1", "user-1", "group-a", "hello").to_string()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{reply}");
+    assert_eq!(reply["text"], super::super::wecom::PRIVATE_ONLY_NOTICE);
+    assert!(state.application.records().unwrap().is_empty());
+    assert!(!state.data_root.join("platform/sessions.sqlite").exists());
+
+    // An unauthorized group member is still refused, not answered.
+    let (status, _) = call(
+        app,
+        "POST",
+        "/channels/fixture/events",
+        Some(&group_event("group-2", "user-2", "group-a", "hello").to_string()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}

@@ -8,7 +8,7 @@ export type PluginReview = { state?: 'preparing' | 'ready' | 'running' | 'succee
   network?: boolean; mutable_paths?: string[]; authorization_digest?: string; expires_at: number; graphs: string[]; coverage: Coverage; refusal?: string | null;
   mutable?: { path: string; bytes: number | null }[]; sessions?: string[]; unfinished_runs?: string[];
   replacing?: boolean; already_installed?: boolean; binary_without_source?: boolean; warnings?: string[];
-  resources?: string[]; resource_bytes?: number; skills?: string[]; servers?: { name: string; transport: string; environment: string[]; command?: string; remote_origin?: string; argument_count?: number }[];
+  resources?: string[]; resource_bytes?: number; skills?: string[]; servers?: { name: string; transport: string; environment: string[]; command?: string; remote_origin?: string; argument_count?: number; channel_identity?: string[] }[];
   channels?: { platform: string; required_environment: string[] }[]; dependencies?: unknown; existing_digest?: string | null };
 
 function Impact({ review }: { review: PluginReview }) {
@@ -159,7 +159,7 @@ export function PluginInstall({ pluginId, onChanged, close, initialReview }: { p
         <p>运行联网需求：{review.network ? '需要授权的网络能力' : '未声明'}{review.mutable_paths?.length ? ` · 可写路径：${review.mutable_paths.join('、')}` : ' · 未声明可写路径'}</p>
         <p>{review.resources?.length ?? 0} 个发布文件 · {human(review.resource_bytes ?? 0)}{review.already_installed ? ' · 已安装相同内容，本次可修复依赖视图' : ''}</p>
         {!!review.skills?.length && <p>技能：{review.skills.join('、')}</p>}
-        {!!review.servers?.length && <ul>{review.servers.map(server => <li key={server.name}>MCP {server.name} · {server.transport}{server.command ? ` · 入口 ${server.command}` : ''}{server.remote_origin ? ` · 远程服务 ${server.remote_origin}` : ''}{server.environment.length ? ` · 凭据字段 ${server.environment.join('、')}` : ''}</li>)}</ul>}
+        {!!review.servers?.length && <ul>{review.servers.map(server => <li key={server.name}>MCP {server.name} · {server.transport}{server.command ? ` · 入口 ${server.command}` : ''}{server.remote_origin ? ` · 远程服务 ${server.remote_origin}` : ''}{server.environment.length ? ` · 凭据字段 ${server.environment.join('、')}` : ''}{server.channel_identity?.length ? ` · 向该服务提供渠道成员身份 ${server.channel_identity.join('、')}` : ''}</li>)}</ul>}
         {!!review.channels?.length && <ul>{review.channels.map(channel => <li key={channel.platform}>渠道 {channel.platform} · {channel.required_environment.join('、')}</li>)}</ul>}
         {!!review.dependencies && <details><summary>已锁定的依赖</summary><pre>{JSON.stringify(review.dependencies, null, 2)}</pre></details>}
         <details><summary>发布文件清单</summary><ul>{review.resources?.map(path => <li key={path}><code>{path}</code></li>)}</ul></details>

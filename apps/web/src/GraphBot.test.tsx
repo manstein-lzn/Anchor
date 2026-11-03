@@ -55,8 +55,8 @@ describe('a Graph bot', () => {
     expect(container.textContent).toContain('停用后才能修改凭据');
     const writes = requests().filter(request => request.method !== 'GET');
     expect(writes).toEqual([
-      { path: '/graphs/helper/channel', method: 'PUT', body: { users: ['alice'], send_users: ['alice', 'bob'] } },
-      { path: '/graphs/helper/channel/enabled', method: 'POST', body: { enabled: true, expected_binding: { plugin: 'wecom', users: ['alice'], send_users: ['alice', 'bob'] } } },
+      { path: '/graphs/helper/channel', method: 'PUT', body: { users: ['alice'], send_users: ['alice', 'bob'], private_only: false } },
+      { path: '/graphs/helper/channel/enabled', method: 'POST', body: { enabled: true, expected_binding: { plugin: 'wecom', users: ['alice'], send_users: ['alice', 'bob'], private_only: false } } },
     ]);
   });
 

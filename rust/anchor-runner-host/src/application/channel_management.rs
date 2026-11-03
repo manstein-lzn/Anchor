@@ -23,6 +23,10 @@ pub(crate) struct ChannelBinding {
     pub(crate) plugin: String,
     pub(crate) users: Vec<String>,
     pub(crate) send_users: Vec<String>,
+    /// Answer only one-to-one conversations. Group messages get a fixed
+    /// notice and never reach the Graph, so no shared group context exists.
+    #[serde(default)]
+    pub(crate) private_only: bool,
 }
 
 /// The member lists an operator chooses; the Plugin comes from the Graph.
@@ -31,6 +35,8 @@ pub(crate) struct ChannelBinding {
 pub(crate) struct ChannelMembers {
     pub(crate) users: Vec<String>,
     pub(crate) send_users: Vec<String>,
+    #[serde(default)]
+    pub(crate) private_only: bool,
 }
 
 impl ChannelBinding {
@@ -265,6 +271,7 @@ impl RunApplication {
             plugin: plan.plugin,
             users: members.users,
             send_users: members.send_users,
+            private_only: members.private_only,
         };
         binding.validate()?;
         port.configure(owner, graph, binding.normalized()).await

@@ -118,6 +118,7 @@ while :; do sleep 0.02; done
             plugin: "gateway".into(),
             users: vec![user.into()],
             send_users: vec![user.into()],
+            private_only: false,
         }
     }
 
@@ -443,6 +444,23 @@ async fn bindings_reload_per_graph_and_reject_another_owner_or_live_rebinding() 
     assert_eq!(
         fs::metadata(&path).unwrap().permissions().mode() & 0o777,
         0o600
+    );
+    // A binding that leaves private_only false keeps the bytes it had before
+    // the field existed; true is saved and survives a reload.
+    let saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert!(saved.get("private_only").is_none());
+    let mut private = Fixture::binding("alice");
+    private.private_only = true;
+    reopened.configure("local", "alpha", private).await.unwrap();
+    let saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(saved["private_only"], true);
+    assert!(
+        reopened
+            .snapshot("alpha")
+            .unwrap()
+            .unwrap()
+            .binding
+            .private_only
     );
 
     // Removing the Graph's binding deletes its credentials and gateway state

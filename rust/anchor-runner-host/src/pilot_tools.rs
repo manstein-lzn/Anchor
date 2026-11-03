@@ -532,8 +532,8 @@ pub(crate) const PILOT_TOOLS: &[PilotToolSpec] = &[
     },
     PilotToolSpec {
         name: "channel_configure",
-        description: "Configure the bot of a persistent assistant Graph whose Agent node mounts the channel Plugin: its authorized incoming/outgoing users, after native user confirmation. Each Graph is its own bot. Credentials use credential_request with server channel_<platform> and the same graph.",
-        parameters: || json!({"type":"object","properties":{"graph":{"type":"string"},"users":{"type":"array","items":{"type":"string"}},"send_users":{"type":"array","items":{"type":"string"}}},"required":["graph","users","send_users"],"additionalProperties":false}),
+        description: "Configure the bot of a persistent assistant Graph whose Agent node mounts the channel Plugin: its authorized incoming/outgoing users and whether it answers only one-to-one conversations (private_only, default false), after native user confirmation. Each Graph is its own bot. Credentials use credential_request with server channel_<platform> and the same graph.",
+        parameters: || json!({"type":"object","properties":{"graph":{"type":"string"},"users":{"type":"array","items":{"type":"string"}},"send_users":{"type":"array","items":{"type":"string"}},"private_only":{"type":"boolean"}},"required":["graph","users","send_users"],"additionalProperties":false}),
         authority: ToolAuthority::Confirm,
         effect: ToolEffect::HostFact,
     },

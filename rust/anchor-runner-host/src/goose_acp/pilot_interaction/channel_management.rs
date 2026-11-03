@@ -22,11 +22,16 @@ pub(super) async fn policy(
                 .channel_bot_plan(&graph)
                 .map_err(|error| failure(application_reason(error)))?;
             let message = format!(
-                "配置 Graph {graph} 的机器人：回复节点 {}，渠道 Plugin {}。允许接收用户 [{}]，允许发送用户 [{}]。配置不会启用联网或挂载 Plugin；凭据通过专用输入控件提供。",
+                "配置 Graph {graph} 的机器人：回复节点 {}，渠道 Plugin {}。允许接收用户 [{}]，允许发送用户 [{}]，{}。配置不会启用联网或挂载 Plugin；凭据通过专用输入控件提供。",
                 plan.work_node,
                 plan.plugin,
                 members.users.join(", "),
-                members.send_users.join(", ")
+                members.send_users.join(", "),
+                if members.private_only {
+                    "只接收私聊"
+                } else {
+                    "接收私聊和群聊"
+                }
             );
             (message, Some((graph, members)), None)
         }
