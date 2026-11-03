@@ -1,6 +1,7 @@
 /** Application navigation and cross-page references. Page owners retain drafts and subscribe to Host projections. */
 import { Anchor, Activity, GitBranch, MessageSquare, Plug, Settings2 } from 'lucide-react';
 import { lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent } from 'react';
+import { ChunkBoundary } from './ChunkBoundary';
 import type { OurRun, OurRunDetail } from './model';
 import { GraphRelations } from './GraphRelations';
 import { Workspace } from './Workspace';
@@ -220,8 +221,8 @@ export function App() {
       {problem && <div className="connection-error" role="alert">{problem}</div>}
       {view === 'runs' && notice && <p className={`notice ${notice.kind}`} role="status">{notice.text}</p>}
 
-      <PageActivity active={view === 'pilot'}><Suspense fallback={openingPage}><Pilot session={chat} onSession={setChat} initialDraft={assistance} onDraftConsumed={() => setAssistance('')} onSettings={() => setView('settings')} /></Suspense></PageActivity>
-      <Suspense fallback={openingPage}>{view === 'plugins' ? <PluginManagement /> : view === 'settings' ? <SettingsPage /> : view === 'runs' ? (
+      <PageActivity active={view === 'pilot'}><ChunkBoundary><Suspense fallback={openingPage}><Pilot session={chat} onSession={setChat} initialDraft={assistance} onDraftConsumed={() => setAssistance('')} onSettings={() => setView('settings')} /></Suspense></ChunkBoundary></PageActivity>
+      <ChunkBoundary><Suspense fallback={openingPage}>{view === 'plugins' ? <PluginManagement /> : view === 'settings' ? <SettingsPage /> : view === 'runs' ? (
         <Workspace running inspector={false}>
           {timelineProblem ? <main className="main"><p className="timeline-error" role="alert">
             运行时间线无法加载：{timelineProblem} <button onClick={() => void refresh()}>重新连接</button>
@@ -233,7 +234,7 @@ export function App() {
         notice={notice} run={run} node={node} targetPath={targetPath} detail={detail} selectGraph={selectGraph}
         onPilot={() => askPilot('run')} trigger={trigger} onTimeline={() => setView('runs')} navigateRun={navigateRun} controlRun={controlRun}
         deleteRun={deleteRun} onNode={setNode} />
-        : null}</Suspense>
+        : null}</Suspense></ChunkBoundary>
       <PageActivity active={view === 'graph'}><GraphEditorPage name={name} editor={editor} graphs={graphs} runs={runs} graphColors={graphColors}
           busy={busy} notice={notice} setNotice={setNotice} selectGraph={selectGraph} create={create}
           onPilot={() => askPilot('graph')} deleteGraph={deleteGraph} save={save} check={check} trigger={trigger} openRun={openRun} navigateGraph={navigateGraph}
