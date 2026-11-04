@@ -58,7 +58,7 @@ To validate a source-free provider-free distribution after a release build:
 
 The script retains its evidence under `.local/rust-runtime-package-*/` and checks
 Op-only packaging. For a package including pinned Goose, WebUI and an actual
-AgentNode, use the [local production-candidate regression](../../rust-production-candidate.md).
+AgentNode, use the [local production-candidate regression](../../runtime-contract-tests.md#release-与-source-free-候选).
 
 The packaged pause/restart/resume smoke uses a deterministic Op-only Graph:
 

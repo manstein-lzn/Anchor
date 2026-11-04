@@ -1,6 +1,8 @@
 # 小任务：Goose trace 证据改为原子写入（master）
 
-已完成：共享 durable writer 的六处调用均使用同目录原子替换，已有权限位和 JSON 字节保持不变；新增确定性交错及持续并发回归，旧实现在第一次交错发布即失败。workspace 1,999/0/123、Goose 完整 ignored 120/0/0、标准入口 105/0/0 及 105 份有效证据通过，严格 Clippy/格式通过。调用点逐项判断见 [Runtime 回归契约](runtime-contract-tests.md#trace-证据与宿主持久文件的原子发布)，原始输出见[本机证据](../.local/trace-evidence-atomic-20261019/README.md)。未新增真实 Provider 或部署验收；下文保留原任务要求，不作为当前待办。
+> 历史归档：保留当时的任务要求、结论与证据，不作为当前待办；现行入口见[文档目录](../../README.md)。
+
+已完成：共享 durable writer 的六处调用均使用同目录原子替换，已有权限位和 JSON 字节保持不变；新增确定性交错及持续并发回归，旧实现在第一次交错发布即失败。workspace 1,999/0/123、Goose 完整 ignored 120/0/0、标准入口 105/0/0 及 105 份有效证据通过，严格 Clippy/格式通过。调用点逐项判断见 [Runtime 回归契约](../../architecture.md#宿主持久写入与清理)，原始输出见[本机证据](../../../.local/trace-evidence-atomic-20261019/README.md)。未新增真实 Provider 或部署验收；下文保留原任务要求，不作为当前待办。
 
 编制：2026-10-19。来源：`constitution-core` 分支合并验证时，发现了一个 master 上同样存在的读写竞态。
 

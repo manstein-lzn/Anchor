@@ -1,12 +1,12 @@
 # H1 存储边界预检（历史证据，切分已决定）
 
-2026-10-16 用户已决定：H1 仅删除兼容，FileStore 随 H2 接入，C2 在 H3 验收；原停止点已解除，本文后续为当时证据。当前结果见[H1 工作记录](../../../docs/constitution-refactor-log.md#h1旧格式清理实现完成)与[验证证据](verification.md)。
+2026-10-16 用户已决定：H1 仅删除兼容，FileStore 随 H2 接入，C2 在 H3 验收；原停止点已解除，本文后续为当时证据。当前结果见[H1 工作记录](../../../docs/archive/runtime-migration-2026-10-20/constitution-refactor-log.md#h1旧格式清理实现完成)与[验证证据](verification.md)。
 
 K0.1 验收结论保持通过。本预检未实施 H1，未修改内核、GraphValidator 或 Host 生产路径。
 
 ## 已确认的阶段依赖
 
-[计划 H1](../../../docs/constitution-host-integration-plan.md#h1内核存储接入与旧格式清理)要求 Host 改用内核 FileStore，并清零 Run 的直接保存；替换 Runner 则排在 H2，生命周期迁移排在 H3。
+[计划 H1](../../../docs/archive/design-records-2026-11-04/constitution-host-integration-plan.md#h1内核存储接入与旧格式清理)要求 Host 改用内核 FileStore，并清零 Run 的直接保存；替换 Runner 则排在 H2，生命周期迁移排在 H3。
 
 - 旧 [Runner](../../../rust/anchor-runtime/src/graph/runner.rs) 的 `persist`（27 行）直接保存整份 Run；254–270 行在派发前保存 cursor、invocations、passes。保存节点完成结果之外还有执行开始事实，不能机械换成 NodeSubmission。
 - 当前 [GraphValidator](../../../rust/anchor-runtime/src/graph/validator.rs) 的 `judge`（445 行）只接受开放空位上的节点结果或 CallSubmission；NodeSubmission 使用 `deny_unknown_fields`，没有任意状态替换或执行开始动作。

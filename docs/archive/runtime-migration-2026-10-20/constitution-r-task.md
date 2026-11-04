@@ -1,8 +1,10 @@
 # R 任务书：统一 Run 读模型探针（含锁释放收口）
 
-当前结论（2026-10-17）：**R0 与 R 已完成本地交付，待审查；读取侧结论为“需要重想”**。R0 `cb2219c` 已同步 master `6394e28`；R 实现 `54e664e`。包含保留适配的同口径判断点82→90，未达到减少50%的门槛。原生读模型可运行，旧消费者仍需原record兼容，严格单View输入未验收。四crate1299通过/0失败/112原有忽略，另Library74、FileLease3通过；Kernel零diff。当前证据见[测量](../experiments/constitution-host-preflight/r/measurement.md)与[验证](../experiments/constitution-host-preflight/r/verification.md)。后续待审查旧读取契约，本文保留本刀验收口径，不自动启动H3–H6。
+> 历史归档：保留当时的任务要求、结论与证据，不作为当前待办；现行入口见[文档目录](../../README.md)。
 
-编制：2026-10-17。前置：P 探针已验收（`ff09f2c`、`1d1ba54`，见 [measurement.md](../experiments/constitution-host-preflight/p/measurement.md)）。**时限 2 个工作日**，到期无论做到哪都交回。
+当前结论（2026-10-17）：**R0 与 R 已完成本地交付，待审查；读取侧结论为“需要重想”**。R0 `cb2219c` 已同步 master `6394e28`；R 实现 `54e664e`。包含保留适配的同口径判断点82→90，未达到减少50%的门槛。原生读模型可运行，旧消费者仍需原record兼容，严格单View输入未验收。四crate1299通过/0失败/112原有忽略，另Library74、FileLease3通过；Kernel零diff。当前证据见[测量](../../../experiments/constitution-host-preflight/r/measurement.md)与[验证](../../../experiments/constitution-host-preflight/r/verification.md)。后续待审查旧读取契约，本文保留本刀验收口径，不自动启动H3–H6。
+
+编制：2026-10-17。前置：P 探针已验收（`ff09f2c`、`1d1ba54`，见 [measurement.md](../../../experiments/constitution-host-preflight/p/measurement.md)）。**时限 2 个工作日**，到期无论做到哪都交回。
 
 ## 为什么做这一刀
 

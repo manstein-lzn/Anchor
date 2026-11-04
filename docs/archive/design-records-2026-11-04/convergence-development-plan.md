@@ -1,8 +1,10 @@
 # Anchor 收敛与能力补齐：开发方案
 
-编制日期：2026-10-14。实施授权仅覆盖 **W1**；W2–W5 仍待审核、未授权。验收结论见 [当前验收与待办](pilot-development-plan.md)。
+> 历史归档（2026-11-04）：保留当时的推导、授权范围、过程与证据，不作为新的实施授权；当前行为见[架构](../../architecture.md)，未关闭事项见[统一台账](../../pilot-development-plan.md)。
 
-本文是实施交接入口，不是进度台账。当前实现以 [architecture.md](architecture.md) 为准，产品目标与不变量以 [product-architecture.md](product-architecture.md) 为准，实际交付、失败与证据只记 [开发台账](pilot-development-plan.md)。方向讨论见 [以提交为细腰](submission-narrow-waist.md)；本方案吸收了对该讨论稿的评审意见，不以它为实施依据。
+编制日期：2026-10-14。实施授权仅覆盖 **W1**；W2–W5 仍待审核、未授权。验收结论见 [当前验收与待办](../../pilot-development-plan.md)。
+
+本文是实施交接入口，不是进度台账。当前实现以 [architecture.md](../../architecture.md) 为准，产品目标与不变量以 [product-architecture.md](../../product-architecture.md) 为准，实际交付、失败与证据只记 [开发台账](../../pilot-development-plan.md)。方向讨论见 [以提交为细腰](submission-narrow-waist.md)；本方案吸收了对该讨论稿的评审意见，不以它为实施依据。
 
 ## 1. 结论与依据
 
@@ -43,7 +45,7 @@
 2. **W4、W5 是新增能力。** W4 改变产品语义，必须先取得用户决定；W5 只读，不新增运行时写路径。
 3. **区分"重复的同一规则"与"看起来相似的不同规则"。** 不做机械替换，每个调用点逐一分类。
 4. **度量改善用"同一规则的独立判断点数量"，不用代码行数。**
-5. 遵守 [AGENTS.md](../AGENTS.md)：同一路径单一编辑者；先定向测试，切片完成后一次全量；不 reset/checkout/clean；只提交实际修改的路径。
+5. 遵守 [AGENTS.md](../../../AGENTS.md)：同一路径单一编辑者；先定向测试，切片完成后一次全量；不 reset/checkout/clean；只提交实际修改的路径。
 
 ## 3. 工作包总览
 
@@ -57,13 +59,13 @@
 
 建议顺序：W1 → W5 与 W3 并行 → W2 → W4（在用户决定之后）。
 
-W1 的验收结论已转入 [当前验收与待办](pilot-development-plan.md)；后续工作不因本表列出而自动进入实施。
+W1 的验收结论已转入 [当前验收与待办](../../pilot-development-plan.md)；后续工作不因本表列出而自动进入实施。
 
 ---
 
 ## 4. W1：Run 状态与执行者观察
 
-本工作包只收拢已有判断，不改变状态、持久格式、权限、错误文本或恢复行为。当前接口与归属见 [当前架构](architecture.md#执行链与所有权)，验收结论与证据见 [当前验收与待办](pilot-development-plan.md)。
+本工作包只收拢已有判断，不改变状态、持久格式、权限、错误文本或恢复行为。当前接口与归属见 [当前架构](../../architecture.md#执行链与所有权)，验收结论与证据见 [当前验收与待办](../../pilot-development-plan.md)。
 
 实施与验收边界：
 
@@ -151,7 +153,7 @@ W1 的验收结论已转入 [当前验收与待办](pilot-development-plan.md)�
 
 ### 7.2 与现行产品决定的冲突
 
-[product-architecture.md](product-architecture.md) 写明"预算控制暂不作为交付门槛，优先完成任务"；[企微助手文档](wecom-assistant.md) 写明 Host 等待路径不设默认模型耗时上限。**W4 会改变这两项决定，未经用户明确批准不得实施。**
+[product-architecture.md](../../product-architecture.md) 写明"预算控制暂不作为交付门槛，优先完成任务"；[企微助手文档](../../wecom-assistant.md) 写明 Host 等待路径不设默认模型耗时上限。**W4 会改变这两项决定，未经用户明确批准不得实施。**
 
 ### 7.3 已有基础
 

@@ -1,15 +1,17 @@
 # 宪法内核接入 Host：临时开发计划
 
-编制日期：2026-10-16。当前迁移以 [M1–M5 任务书](constitution-migration-task.md) 为准；本计划的 H3–H6 划分已被取代，约束 C1–C6 与 §2 语义仍有效。
+> 历史归档（2026-11-04）：保留当时的推导、授权范围、过程与证据，不作为新的实施授权；当前行为见[架构](../../architecture.md)，未关闭事项见[统一台账](../../pilot-development-plan.md)。
 
-M1–M4 已验收，§10.20 M5 的测量、探针复核与文档收尾完成，迁移任务结束并交回。最终测量基点为 master `e60374f`；全部新 Run 共用 KernelScheduler，C2 save 0 / mutation 0，Kernel 相对 `0859373` 零 diff，30,000 例快照不变。本轮 workspace 2,200 / 0 / 126、fmt/围栏通过；Web 359 及构建和完整固定 Goose 123 / 0 / 0 引用已验 M4，M5 未重跑完整 Goose。最终逐 crate/规则/测试统计、探针重建和宪法复核见 [M5 最终测量](../experiments/constitution-host-preflight/final/measurement.md)；W4、真实模型完整业务、渠道实网、部署、时间与保留政策等见其“迁移后待决清单”。旧 worktree/分支保留，不推送。
+编制日期：2026-10-16。当前迁移以 [M1–M5 任务书](../runtime-migration-2026-10-20/constitution-migration-task.md) 为准；本计划的 H3–H6 划分已被取代，约束 C1–C6 与 §2 语义仍有效。
 
-K0.1 审查见 [结论](../experiments/constitution-host-preflight/k01/review.md)；已批准的 K0.2 FileStore 删除与资源租约见 [工作记录](constitution-refactor-log.md#k02filestore-删除与资源租约)。Kernel 自 `0859373` 零 diff。H2.1、P、R 的历史度量不代表当前实现；M3 逐规则审计按独立判断体计数。
+M1–M4 已验收，§10.20 M5 的测量、探针复核与文档收尾完成，迁移任务结束并交回。最终测量基点为 master `e60374f`；全部新 Run 共用 KernelScheduler，C2 save 0 / mutation 0，Kernel 相对 `0859373` 零 diff，30,000 例快照不变。本轮 workspace 2,200 / 0 / 126、fmt/围栏通过；Web 359 及构建和完整固定 Goose 123 / 0 / 0 引用已验 M4，M5 未重跑完整 Goose。最终逐 crate/规则/测试统计、探针重建和宪法复核见 [M5 最终测量](../../../experiments/constitution-host-preflight/final/measurement.md)；W4、真实模型完整业务、渠道实网、部署、时间与保留政策等见其“迁移后待决清单”。旧 worktree/分支保留，不推送。
+
+K0.1 审查见 [结论](../../../experiments/constitution-host-preflight/k01/review.md)；已批准的 K0.2 FileStore 删除与资源租约见 [工作记录](../runtime-migration-2026-10-20/constitution-refactor-log.md#k02filestore-删除与资源租约)。Kernel 自 `0859373` 零 diff。H2.1、P、R 的历史度量不代表当前实现；M3 逐规则审计按独立判断体计数。
 
 - 当前工作目录：`/home/mansteinl/Anchor`，分支 master；旧 constitution-core worktree 只读保留。
 - 起点 commit：`7c196d8`
-- 设计依据：[anchor-constitution.md](anchor-constitution.md)
-- 工作记录：[constitution-refactor-log.md](constitution-refactor-log.md)（每一刀完成后必须更新）
+- 设计依据：[anchor-constitution.md](../../anchor-constitution.md)
+- 工作记录：[constitution-refactor-log.md](../runtime-migration-2026-10-20/constitution-refactor-log.md)（每一刀完成后必须更新）
 
 本文是临时计划，只服务于这一阶段。阶段完成并验收后，结论并入工作记录，本文可删除。
 
@@ -19,9 +21,9 @@ K0.1 审查见 [结论](../experiments/constitution-host-preflight/k01/review.md
 
 开工前按顺序读：
 
-1. [AGENTS.md](../AGENTS.md)：仓库纪律（不 reset/checkout/clean，只提交实际改动的路径）。
-2. [anchor-constitution.md](anchor-constitution.md) 第 1–5 节：宪法与原语。
-3. [constitution-refactor-log.md](constitution-refactor-log.md)：已完成的 K0–K3、语义变更 S1–S9。
+1. [AGENTS.md](../../../AGENTS.md)：仓库纪律（不 reset/checkout/clean，只提交实际改动的路径）。
+2. [anchor-constitution.md](../../anchor-constitution.md) 第 1–5 节：宪法与原语。
+3. [constitution-refactor-log.md](../runtime-migration-2026-10-20/constitution-refactor-log.md)：已完成的 K0–K3、语义变更 S1–S9。
 4. 代码：`rust/anchor-kernel/`（新内核）、`rust/anchor-runtime/src/graph/validator.rs`（Graph 校验器）、`validator/differential.rs`（差分测试）。
 
 ### 已完成的部分（不要重做）
@@ -116,7 +118,7 @@ K0.1 审查见 [结论](../experiments/constitution-host-preflight/k01/review.md
 - H1 **不要求**接入 `anchor_kernel::FileStore`，也不要求清零直接写入。FileStore 接入随 H2 的调度器一起落地；C2 零直接写入在 H3 结束时验收。
 - 中间态单一权威：迁移前 Run 仍由旧 RunStore 负责，不得双写，不得把旧状态包装成内核已裁决事实。
 
-H1 结果、删除测试清单及 16 save / 36 mutation 基线见[工作记录](constitution-refactor-log.md#h1旧格式清理实现完成)；验证范围见[H1 证据](../experiments/constitution-host-preflight/h1/verification.md)。
+H1 结果、删除测试清单及 16 save / 36 mutation 基线见[工作记录](../runtime-migration-2026-10-20/constitution-refactor-log.md#h1旧格式清理实现完成)；验证范围见[H1 证据](../../../experiments/constitution-host-preflight/h1/verification.md)。
 
 ### H2：调度器 + 执行者，替换 `GraphRunner`
 

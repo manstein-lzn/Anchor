@@ -1,8 +1,10 @@
 # 全量迁移任务书：Host 全部 Run 走内核，删除旧 Runner
 
+> 历史归档：保留当时的任务要求、结论与证据，不作为当前待办；现行入口见[文档目录](../../README.md)。
+
 编制：2026-10-19。决定：用户选择全量迁移（见工作记录"R2 审查结论"）。目标是**统一定律、崩溃与计费正确、删除旧 Runner**，不是让 Host 变小。起点：`d915314`（R2 停止现场）。
 
-**当前状态（2026-10-20）**：M1、M1.5、M2、M3、M4 已验收。§10.20 M5 的测量、探针复核和收尾完成，按本任务书交回，迁移任务结束。固定基点 master `e60374f`，C2 save 0 / mutation 0，Kernel 相对 `0859373` 零 diff；本轮 workspace 2,200 / 0 / 126、fmt 与围栏通过。M4 的 Web 359 及构建、完整固定 Goose 123 / 0 / 0 沿用已验结果，本轮未重跑完整 Goose。最终数据、脚本和未验边界见 [M5 最终测量](../experiments/constitution-host-preflight/final/measurement.md)，后续决定见其中“迁移后待决清单”。以下 M1.5 条款为历史口径，后续覆盖以 §10.10–§10.20 为准：
+**当前状态（2026-10-20）**：M1、M1.5、M2、M3、M4 已验收。§10.20 M5 的测量、探针复核和收尾完成，按本任务书交回，迁移任务结束。固定基点 master `e60374f`，C2 save 0 / mutation 0，Kernel 相对 `0859373` 零 diff；本轮 workspace 2,200 / 0 / 126、fmt 与围栏通过。M4 的 Web 359 及构建、完整固定 Goose 123 / 0 / 0 沿用已验结果，本轮未重跑完整 Goose。最终数据、脚本和未验边界见 [M5 最终测量](../../../experiments/constitution-host-preflight/final/measurement.md)，后续决定见其中“迁移后待决清单”。以下 M1.5 条款为历史口径，后续覆盖以 §10.10–§10.20 为准：
 
 1. 按 §10.2 合并 `master`，冲突逐文件登记；合并后 workspace 与 Web 全绿。
 2. 按 §10.3 用 master 的 Goose 锁定版本跑全部 Goose 忽略测试，原样贴出结果。**注意**：master 目前的 Goose 基线本身就是坏的（extensions/add 返回 -32603，由 master 的 G0 任务处理，见 `/home/mansteinl/Anchor/docs/goose-baseline-task.md`）。G0 修复之前，门槛改为"相对 master 基线没有新增失败"。master 侧基线**优先使用 G0 交回的失败名单**；如果 G0 还没交回，就用临时干净 worktree 在本次合并的那个 master 提交上跑，例如 `git worktree add /tmp/master-base <提交>`，用完删除。**不得**在 `/home/mansteinl/Anchor` 上跑基线，因为那里有其他 agent 正在修改。Goose 套件不要和 G0 同时跑：G0 正在跑时，先完成合并和规则表，Goose 对照放到最后。M1 时分支锁定的是旧摘要，本机没有对应二进制，所以不能执行；合并后不再适用这个理由。
@@ -13,7 +15,7 @@ S19–S24、S26 已由用户批准（2026-10-19）。M3 的前置条件见 §10.
 
 本文取代上位计划 H3–H6 的阶段划分；上位计划的约束 C1–C6、§2.1 调度器、§2.2 执行者语义仍然有效。
 
-当前进度（2026-10-20）：M5 已完成并交回，M1–M5 迁移任务结束；未推送、未删除旧 worktree/分支。S19–S24、S26、S27 已批准，S25 作废，S4 由 S27 结清。W4、完整真实模型 Provider 业务、外部渠道实网、部署联合验收及保留策略等留在 [迁移后待决清单](../experiments/constitution-host-preflight/final/measurement.md#迁移后待决清单)，不提供旧 Run 迁移工具；本轮未清理开发状态。
+当前进度（2026-10-20）：M5 已完成并交回，M1–M5 迁移任务结束；未推送、未删除旧 worktree/分支。S19–S24、S26、S27 已批准，S25 作废，S4 由 S27 结清。W4、完整真实模型 Provider 业务、外部渠道实网、部署联合验收及保留策略等留在 [迁移后待决清单](../../../experiments/constitution-host-preflight/final/measurement.md#迁移后待决清单)，不提供旧 Run 迁移工具；本轮未清理开发状态。
 
 ## 0. 工作方式（先读）
 

@@ -1,6 +1,6 @@
 # P3 数据中枢读侧：报告
 
-执行：2026-10-21，按 [总体架构](../../../docs/harness-data-hub-architecture.md) 第 6、7、9 节和 [任务书](../../../docs/harness-data-hub-tasks.md)，由主 Agent 直接实现。
+执行：2026-10-21，按 [总体架构](../../../docs/harness-data-hub.md#当前职责与依赖) 第 6、7、9 节和 [任务书](../../../docs/archive/design-records-2026-11-04/harness-data-hub-tasks.md)，由主 Agent 直接实现。
 
 ## 做了什么
 

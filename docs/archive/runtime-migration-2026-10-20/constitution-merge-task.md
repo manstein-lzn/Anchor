@@ -1,5 +1,7 @@
 # constitution-core 合入 master：master 侧须知
 
+> 历史归档：保留当时的任务要求、结论与证据，不作为当前待办；现行入口见[文档目录](../../README.md)。
+
 编制：2026-10-20。用户已批准把 `constitution-core` 合入 master。合并后，Run 的运行时整体换成新内核，旧的 `GraphRunner`、`RunStore`、`RunStatus` 全部删除。业务代码继续通过 `application/run_access` 门面访问 Run，门面接口不变。
 
 ## 你现在要做的

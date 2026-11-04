@@ -12,11 +12,11 @@
 
 完整平台 Pilot 使用内置管理指令，空 catalog 可以启动，不需要占位业务 Graph。普通 Turn 与 Responses 共用接纳路径；`previous_response_id` 继续原 Session，独立请求使用独立工作区。
 
-浏览器“设置”可以保存 `default/backup × flash/pro` 两组服务信息、测试连接以及初始化 Python/Rust，不要求先启动 Pilot。新 Pilot Turn 与 Graph 节点调用读取已保存的默认模型或显式模型引用，当前调用保持冻结；backup 仅供显式选择，不自动降级。旧执行配置与绑定保留，模型保存、连接测试与真实任务验收分别判断。密钥不进入模型上下文。选择契约见 [Graph 作者契约](rust-graph-authoring-contract.md)，配置边界见 [使用指南](usage.md#模型与-goose)。
+浏览器“设置”可以保存 `default/backup × flash/pro` 两组服务信息、测试连接以及初始化 Python/Rust，不要求先启动 Pilot。新 Pilot Turn 与 Graph 节点调用读取已保存的默认模型或显式模型引用，当前调用保持冻结；backup 仅供显式选择，不自动降级。旧执行配置与绑定保留，模型保存、连接测试与真实任务验收分别判断。密钥不进入模型上下文。选择契约见 [Graph 作者契约](rust-graph-authoring-contract.md)，配置边界见 [使用指南](usage.md#配置模型)。
 
 `RuntimeConfiguration` 是 Python、Rust、uv 和来源的唯一解析入口。`runtime_prepare` 按冻结的任务联网授权初始化，探测成功后才发布 `state/managed/runtime-config.json`（format 1）和内存快照。完整平台默认使用公共 PyPI；显式部署字段归部署者管理，Pilot 不覆盖，也不双写 `.env`。配置解释器路径不等于启用依赖准备。
 
-没有完整发行包的开发部署，已有解释器可与显式登记的 `ANCHOR_DEPENDENCIES_UV`、`ANCHOR_DEPENDENCIES_UV_SHA256`、`ANCHOR_DEPENDENCIES_SOURCES` 配套使用，可选进程设置见 [使用指南](usage.md#host-根目录与权限)，无需环境文件。Host 校验固定工具摘要并复用原依赖准备器；不会自行从 PATH 寻找工具或扩大来源授权。设置页按实际准备条件开放 Python 初始化，缺少工具时仍允许使用已有解释器，并说明缺失项。
+没有完整发行包的开发部署，已有解释器可与显式登记的 `ANCHOR_DEPENDENCIES_UV`、`ANCHOR_DEPENDENCIES_UV_SHA256`、`ANCHOR_DEPENDENCIES_SOURCES` 配套使用，可选进程设置见 [部署指南](rust-production-deployment.md#operator-process-settings)，无需环境文件。Host 校验固定工具摘要并复用原依赖准备器；不会自行从 PATH 寻找工具或扩大来源授权。设置页按实际准备条件开放 Python 初始化，缺少工具时仍允许使用已有解释器，并说明缺失项。
 
 Python 执行还需启用授权：显式部署由 `ANCHOR_PILOT_PYTHON_ENABLED` 控制；未显式指定时，`runtime_prepare` 成功后可以发布 Host 管理的启用事实。显式禁止不能被初始化覆盖。
 
@@ -26,7 +26,7 @@ Pilot 在 `<workspace_root>/pilot/<hash(owner,session)>` 工作，跨 Turn 保�
 
 文件工具通过目录 FD 和 no-follow 相对操作防止路径逃逸，允许解析到工作区内的符号链接。编辑采用临时文件及原子 rename。`anchor_read` 每页文本预算 256 KiB；首行超预算会报错，使用 `anchor_run` 检查有界字节范围。完整文件摘要和编辑仍读取整个文件，内存随文件大小增长。
 
-执行启动时冻结 `RuntimeSnapshot`，包括尚未配置的状态；当前 Turn 不因其他请求更新配置而获得解释器、工具或权限。后续 Turn 和 Graph 节点重新读取 Host 当前配置。网络与挂载行为见 [任务联网](network-plugin.md)。
+执行启动时冻结 `RuntimeSnapshot`，包括尚未配置的状态；当前 Turn 不因其他请求更新配置而获得解释器、工具或权限。后续 Turn 和 Graph 节点重新读取 Host 当前配置。网络与挂载行为见 [任务联网](plugins.md#pilot-任务联网)。
 
 ## Python 项目
 

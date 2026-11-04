@@ -4,7 +4,7 @@
 
 2026-10-06，用户确认将此前的 Rust Runtime Kernel 替代扩大为完整 Rust 服务端与官方工具/集成；保留现有 React/TypeScript WebUI。本文是目标决定，不是已实现声明。
 
-同日后续决定：AgentNode 与 Pilot 统一迁移到 Goose + ACP，最终移除 io-harness/Rig；暂不实现预算控制、不将其作为迁移门槛。框架选型结束，实施与最短出口见 [Goose-only Runtime 迁移决定](../../goose-runtime-migration.md)。
+同日后续决定：AgentNode 与 Pilot 统一迁移到 Goose + ACP，最终移除 io-harness/Rig；暂不实现预算控制、不将其作为迁移门槛。框架选型结束，实施与最短出口见 [Goose-only Runtime 迁移决定](../../architecture.md#goose-与恢复)。
 
 ## 目标
 

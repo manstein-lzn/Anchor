@@ -1,6 +1,6 @@
 # P4 评测任务集：报告
 
-执行：2026-10-21，按 [总体架构](../../../docs/harness-data-hub-architecture.md) 第 5.2、5.4、6 节和第 11 节的 P4，由主 Agent 直接实现。代码在 [`experiments/harness-hub/eval/`](../eval/)；原始运行数据在 `.local/harness-hub-p4/`，不入库。
+执行：2026-10-21，按 [总体架构](../../../docs/harness-data-hub.md#当前职责与依赖) 第 5.2、5.4、6 节和第 11 节的 P4，由主 Agent 直接实现。代码在 [`experiments/harness-hub/eval/`](../eval/)；原始运行数据在 `.local/harness-hub-p4/`，不入库。
 
 ## 做了什么
 

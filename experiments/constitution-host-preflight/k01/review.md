@@ -1,6 +1,6 @@
 # K0.1 独立验收
 
-审查对象：`88a6e41a1c71d5d0bc9ae2da3e5127ac75e4efee`。依据：[D1–D5 与九项门槛](../../../docs/constitution-preflight-decision.md)，并核对 Claude Code 会话 `40258599-7ff8-4bc8-907b-d0a4ee21d58d` 中的授权。该授权包含 D4 中断扩展；节点失败结算仍属于 H2。
+审查对象：`88a6e41a1c71d5d0bc9ae2da3e5127ac75e4efee`。依据：[D1–D5 与九项门槛](../../../docs/archive/design-records-2026-11-04/constitution-preflight-decision.md)，并核对 Claude Code 会话 `40258599-7ff8-4bc8-907b-d0a4ee21d58d` 中的授权。该授权包含 D4 中断扩展；节点失败结算仍属于 H2。
 
 ## 结论
 

@@ -1,6 +1,8 @@
 # Goose 能力复用与按需激活路线
 
-2026-10-13。用户目标：遵循 Anchor 哲学，尽量复用 Goose 的执行机制，提高稳定性和质量。本文件记录路线判断及尚未实现的边界；原生 API 实验见 [证据](archive/development-2026-10-13/evidence/plugin_disclosure_20261013/native-activation/README.md)，进度见开发台账 A223，当前实现仍以 [architecture.md](architecture.md) 为准。
+> 历史归档（2026-11-04）：保留当时的推导、授权范围、过程与证据，不作为新的实施授权；当前行为见[架构](../../architecture.md)，未关闭事项见[统一台账](../../pilot-development-plan.md)。
+
+2026-10-13。用户目标：遵循 Anchor 哲学，尽量复用 Goose 的执行机制，提高稳定性和质量。本文件记录路线判断及尚未实现的边界；原生 API 实验见 [证据](../development-2026-10-13/evidence/plugin_disclosure_20261013/native-activation/README.md)，进度见开发台账 A223，当前实现仍以 [architecture.md](../../architecture.md) 为准。
 
 ## 职责与复用原则
 

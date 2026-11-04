@@ -19,7 +19,9 @@ npm --prefix apps/web ci
 The development script uses `.local/rust`, starts with an editable empty catalog,
 and submits no model work at startup. It never sources dotenv files. Vite serves development UI at port 5173;
 the Host API and compiled UI use port 8077. Rebuild changed backend code before
-restarting. See [usage](../../docs/usage.md) for root and model configuration.
+restarting. See [usage](../../docs/usage.md#配置模型) for model configuration and
+[operator process settings](../../docs/rust-production-deployment.md#operator-process-settings)
+for explicit Host roots.
 
 For a platform installation, run `release/anchor-runtime/bin/anchor-platform start`;
 the launcher supplies fixed tools and private data roots without environment files.
@@ -48,7 +50,7 @@ CLI syntax is available through `anchor-runner-host --help`.
 
 Detailed contracts and limitations live in the [current architecture](../../docs/architecture.md),
 [Web API contract](../../docs/rust-frontend-api-contract.md),
-[Graph composition](../../docs/graph-composition-design.md),
+[Graph composition](../../docs/rust-graph-authoring-contract.md#组合与调用),
 [Plugin guide](../../docs/plugins.md) and [WeCom guide](../../docs/wecom-assistant.md).
 No existing production catalog, records or credentials are migrated by startup.
 
@@ -70,7 +72,7 @@ node histories, workspace/Artifact contents, identity and recovery.
 Use [native development tools](../anchor-devtools/README.md) for regression,
 and preflight. The
 [distribution builder](../anchor-distribution/README.md) creates source-free
-packages; the [candidate regression](../../docs/rust-production-candidate.md)
+packages; the [candidate regression](../../docs/runtime-contract-tests.md#release-与-source-free-候选)
 checks release Host, Web, Goose and packaged official tools together.
 
 Real providers, full business content, public services, target-system deployment

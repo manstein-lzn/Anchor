@@ -2,7 +2,7 @@
 
 日期：2026-10-06。分支：`codex/goose-acp-spike`。本文是 A112 初始验证的历史快照；当前实现见 [当前架构](../../../architecture.md)。
 
-同日后续用户已决定统一迁移 Goose，并暂不实施预算控制，见 [Goose-only Runtime 迁移决定](../../../goose-runtime-migration.md)。本文保留 A112 的实际验证与限制，不将方向决定回填为 Goose 产品已完整验收；下文状态以验证当日为准。
+同日后续用户已决定统一迁移 Goose，并暂不实施预算控制，见 [Goose-only Runtime 迁移决定](../../../architecture.md#goose-与恢复)。本文保留 A112 的实际验证与限制，不将方向决定回填为 Goose 产品已完整验收；下文状态以验证当日为准。
 
 ## 本轮结论
 

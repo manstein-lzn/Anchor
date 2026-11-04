@@ -1,6 +1,6 @@
 # M3：C2 写入点去向
 
-本表逐项对应 [H1 的 C2 起点](../../../docs/constitution-refactor-log.md#h2h3-直接写入棘轮起点)：16 处 `save` 与 36 处 mutation，两个数字分别计数，不相加为生命周期规则数。基线行号保持原样；当前位置以函数名为稳定定位。范围是 `anchor-runner-host`、`anchor-graph-host` 的生产 `GraphRunRecord`，不含测试、不可变身份 metadata、Session/Goose 自有事实。纯构造器和局部变量整体重绑定不计字段 mutation。
+本表逐项对应 [H1 的 C2 起点](../../../docs/archive/runtime-migration-2026-10-20/constitution-refactor-log.md#h2h3-直接写入棘轮起点)：16 处 `save` 与 36 处 mutation，两个数字分别计数，不相加为生命周期规则数。基线行号保持原样；当前位置以函数名为稳定定位。范围是 `anchor-runner-host`、`anchor-graph-host` 的生产 `GraphRunRecord`，不含测试、不可变身份 metadata、Session/Goose 自有事实。纯构造器和局部变量整体重绑定不计字段 mutation。
 
 当前源码的 C2：save **16 → 0**，mutation **36 → 0**。standalone 与其他准入入口共用纯构造器，16 处旧 `save` 和 36 处旧 mutation 均已退出。此文是写入迁移审计，不是 M3 验收结论。
 

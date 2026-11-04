@@ -80,6 +80,55 @@ own required startup and writer-lock checks. Do not configure two Hosts to write
 one state root. The flagless preflight remains available for explicit operator
 process settings used by standalone Graph deployments; it requires no env file.
 
+## Operator process settings
+
+These settings belong to explicitly configured source/standalone Host processes.
+The installed platform launcher supplies its own reviewed paths and controls,
+and does not inherit arbitrary deployment or credential settings. This table is
+not an environment-file template for the installed platform service. Source
+startup and its Goose build/cache are documented in the
+[development guide](development.md).
+
+| Setting | Ownership and behavior |
+| --- | --- |
+| `ANCHOR_RUNNER_BUNDLE_ROOT`, `ANCHOR_RUNNER_GRAPH_NAME` | Optional deployment-managed entry bundle and Graph identity; HTTP cannot rewrite that Graph. Do not set them for ordinary editable business Graphs. |
+| `ANCHOR_RUNNER_CATALOG_ROOT` | Editable Graph catalog. |
+| `ANCHOR_RUNNER_STATE_ROOT` | Kernel Run facts, Sessions/Turns, schedules, channels and writer lock. |
+| `ANCHOR_RUNNER_WORKSPACE_ROOT` | Node workspaces, inputs, Artifacts and native sessions. |
+| `ANCHOR_RUNNER_LIBRARY_ROOT` | Canonical installed Plugin/tool Library; falls back to the catalog root, never to a guessed directory beside the bundle. Without a configured Library or catalog root, Plugin operations fail explicitly. |
+| `ANCHOR_RUNNER_WEB_ROOT` | Compiled WebUI, such as `apps/web/dist`. |
+| `ANCHOR_RUNNER_LISTEN` | Loopback only, default `127.0.0.1:8077`; remote access is described below. |
+| `ANCHOR_RUNNER_ALLOWED_COMMANDS` | Explicitly authorized commands, such as `sh,git`; a model-supplied path does not grant access. |
+| `ANCHOR_DEPENDENCIES_PYTHON`, `ANCHOR_PILOT_PYTHON_ENABLED` | Existing Python interpreter and optional Pilot authorization for a development deployment; full-platform users initialize through the WebUI. |
+| `ANCHOR_DEPENDENCIES_UV`, `ANCHOR_DEPENDENCIES_UV_SHA256`, `ANCHOR_DEPENDENCIES_SOURCES` | Register a fixed dependency tool, digest and allowed sources together. The full platform supplies these through its release inventory. |
+| `ANCHOR_MODEL_CONTEXT_WINDOW` | Optional positive context limit, passed to Goose as `GOOSE_CONTEXT_LIMIT` instead of model-name inference, which may be unreliable for aliases. |
+| `ANCHOR_NODE_TOOL_DISCLOSURE`, `ANCHOR_NODE_ALWAYS_VISIBLE` | Force disclosure (`1`), disable it (`0`), or retain the automatic default; the second setting is a JSON array narrowing the always-visible set. See [Plugin disclosure](plugins.md#发现与读取). |
+| `ANCHOR_PLUGIN_EXTERNAL_CONFIGURATION` | Explicitly deployment-managed Plugin fields; see [connection configuration](plugins.md#连接配置与凭据). |
+| `ANCHOR_RETENTION_DAYS`, `ANCHOR_RETENTION_MAX_GB` | Defaults 30 days / 20 GB; `0` or `off` disables the respective limit. Startup and hourly reclamation use the existing protected deletion path; see [retention](design-cards/003-data-retention.md#8-批准与实现2026-10-23). |
+
+Keep mutable roots outside the release and separate by responsibility. Before
+listening, the Host validates resources, writable roots and the deployment-writer
+lease; only one Host may write a state root. External tool environments and local
+inputs require explicit registration/authorization. Existing interpreters do not
+imply that all dependency tools are available; the WebUI reports missing tools
+and keeps deployment-managed versions read-only.
+
+Goose uses its own network namespace by default when `anchor-net-relay` is beside
+the configured Goose binary, or at the absolute `ANCHOR_GOOSE_RELAY_BINARY` path.
+The reviewed platform supplies the relay in `bin/`. The relay connects through a
+UNIX socket to the Host bridge/model proxy; provider credentials stay on the Host.
+Setting `ANCHOR_GOOSE_LOCAL_NETWORK=0`, or omitting the relay, selects shared host
+networking and requires explicit `ANCHOR_GOOSE_ALLOW_SHARED_NETWORK=1`. This is
+not loopback-only isolation and does not authorize business tools. Preflight
+checks that the relay exists when isolated mode is selected; do not weaken
+isolation to fix environment failures.
+
+Model calls use the Host proxy by default; Goose receives a bridge address and
+one-time token, not the provider endpoint/key. `ANCHOR_MODEL_DIRECT=1` is an
+explicit temporary rollback for proxy diagnosis: it puts the endpoint and
+credentials back in the Sandbox process. Model settings and credentials still
+belong to Host-managed storage, never to a Graph/Plugin archive or repository.
+
 ## Channels and remote access
 
 Install and configure the channel Plugin in the WebUI, then bind and enable its
@@ -101,6 +150,17 @@ streaming, disable proxy buffering and permit long-lived SSE connections.
 `{"status":"ready"}`; a missing or invalid selected Graph returns HTTP 503.
 These checks do not call a model or establish external service availability.
 Inspect `journalctl -u anchor.service` for Host and gateway failures.
+
+Model endpoints, protocols, names and API keys come from Host-managed storage;
+`ANCHOR_MODEL_URL/API_KEY/NAME/WIRE_API/ALIASES` are not configuration or fallback
+sources. Existing managed configuration can prefill default address/protocol/Flash
+before its first save, leaving Pro empty; saving at the original address can retain
+the existing key. After saving, missing fields or keys fail explicitly instead of
+falling back to the old service. Historical provider credentials for unfinished
+tasks can be updated or cleared in the WebUI's collapsed credential section.
+Old `.env` and `config/model.env` files are neither imported nor overwritten or
+deleted; verify and save the current service in the WebUI. New installations do
+not accept `--model-config`.
 
 Keep existing installations, state and workspace roots intact. Do not replace an
 existing installation with the fresh installer, copy an older release over live

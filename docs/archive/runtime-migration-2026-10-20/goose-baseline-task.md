@@ -1,6 +1,8 @@
 # G0 任务书：恢复固定 Goose 回归基线（master）
 
-任务已完成：`250435d` 经 `3b7d1d9` 合入 master，原 worktree 与分支按用户要求清理。固定 Goose 不变；三项残留在 F1 完成后由 `cc99091` 单独修正。当前标准命令、比较基线、断言修正理由与验证边界见 [Runtime 回归](runtime-contract-tests.md)。下文保留原任务要求，不作为当前待办。
+> 历史归档：保留当时的任务要求、结论与证据，不作为当前待办；现行入口见[文档目录](../../README.md)。
+
+任务已完成：`250435d` 经 `3b7d1d9` 合入 master，原 worktree 与分支按用户要求清理。固定 Goose 不变；三项残留在 F1 完成后由 `cc99091` 单独修正。当前标准命令、比较基线、断言修正理由与验证边界见 [Runtime 回归](../../runtime-contract-tests.md)。下文保留原任务要求，不作为当前待办。
 
 编制：2026-10-19。适用分支：`master`（`/home/mansteinl/Anchor`）。**优先级高**：master 的门面任务（F1/F2）和 `constitution-core` 的迁移任务，都以这组测试作为验收门槛。
 

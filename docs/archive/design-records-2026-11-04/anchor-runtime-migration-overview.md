@@ -1,6 +1,8 @@
 # Anchor 运行时重建：设计、过程与现状
 
-版本：2026-10-20。M1–M4 已验收，M5 按任务书 §10.20 完成最终测量与收尾并交回，迁移任务结束。本文是迁移的最终说明；逐项数据和未验范围见 [M5 最终测量](../experiments/constitution-host-preflight/final/measurement.md)，历史执行要求见文末任务书索引。
+> 历史归档（2026-11-04）：保留当时的推导、授权范围、过程与证据，不作为新的实施授权；当前行为见[架构](../../architecture.md)，未关闭事项见[统一台账](../../pilot-development-plan.md)。
+
+版本：2026-10-20。M1–M4 已验收，M5 按任务书 §10.20 完成最终测量与收尾并交回，迁移任务结束。本文是迁移的最终说明；逐项数据和未验范围见 [M5 最终测量](../../../experiments/constitution-host-preflight/final/measurement.md)，历史执行要求见文末任务书索引。
 
 ---
 
@@ -24,9 +26,9 @@
 
 **做了什么。** 把 Anchor 中负责"运行一个 Graph"的那部分（Run 的运行时）从头重建。旧实现是一个推模型的 `GraphRunner`：它自己选节点、调用执行、等结果、决定下一步，Run 的状态由多处代码直接改写。新实现以一部"宪法"为依据：所有改变都是**提交**，由一个很小的**内核**统一裁决、记录、结算、测量；Graph 的规则写成纯函数的**校验器**；调度器只负责派活和把结果交回去。
 
-**现在在哪里。** 所有新 Run 统一走 Kernel，旧 Runner 已删除；Graph schema 15 不再保存 error/recovery/recovery_submissions/updated，失败和恢复展示来自 Kernel 结算/history。M4 已验收。M5 在固定 master `e60374f` 复核探针可重建，完成逐 crate、规则、C2 和测试函数度量：C2 0/0，Kernel 对 `0859373` 零 diff；本轮 workspace 2,200 / 0 / 126、fmt/围栏通过，Web 359 及构建、完整固定 Goose 123 / 0 / 0 引用 M4。迁移工作已交回，最终数据与后续决定见 [M5 测量](../experiments/constitution-host-preflight/final/measurement.md)；真实模型完整业务、渠道实网、部署及长期/规模压力未验。
+**现在在哪里。** 所有新 Run 统一走 Kernel，旧 Runner 已删除；Graph schema 15 不再保存 error/recovery/recovery_submissions/updated，失败和恢复展示来自 Kernel 结算/history。M4 已验收。M5 在固定 master `e60374f` 复核探针可重建，完成逐 crate、规则、C2 和测试函数度量：C2 0/0，Kernel 对 `0859373` 零 diff；本轮 workspace 2,200 / 0 / 126、fmt/围栏通过，Web 359 及构建、完整固定 Goose 123 / 0 / 0 引用 M4。迁移工作已交回，最终数据与后续决定见 [M5 测量](../../../experiments/constitution-host-preflight/final/measurement.md)；真实模型完整业务、渠道实网、部署及长期/规模压力未验。
 
-**内核冻结基点（2026-10-20 更新）。** 数据中枢 P1 给内核加了只记录、不参与裁决的事实：时间、因果引用、Principal 携带的配置摘要、资源创建戳，以及只读的 `HistoryReader`；经过两轮独立审查后曾冻结为 `e172e05`，随后按第一性原理删除了全局序号和内核层的因果引用；简化版审查通过，**新的冻结基点 C1 为 `9a5fa57`**，原基点是 `0859373`。此后 `git diff 9a5fa57 -- rust/anchor-kernel` 必须为空，除非另有经过审查的内核变更。详见 [P1 验证与审查](../experiments/harness-hub/p1/verification.md)。
+**内核冻结基点（2026-10-20 更新）。** 数据中枢 P1 给内核加了只记录、不参与裁决的事实：时间、因果引用、Principal 携带的配置摘要、资源创建戳，以及只读的 `HistoryReader`；经过两轮独立审查后曾冻结为 `e172e05`，随后按第一性原理删除了全局序号和内核层的因果引用；简化版审查通过，**新的冻结基点 C1 为 `9a5fa57`**，原基点是 `0859373`。此后 `git diff 9a5fa57 -- rust/anchor-kernel` 必须为空，除非另有经过审查的内核变更。详见 [P1 验证与审查](../../../experiments/harness-hub/p1/verification.md)。
 
 **得到了什么。**
 
@@ -298,7 +300,7 @@ R2 曾把 pause 当成 stop 的别名，导致十多个 API 测试失败，原�
 
 ### 8.2 没达到预期的
 
-- **代码量**：固定区间 fc558e2→e60374f，Rust 生产删除 6,459、新增 12,930，净增 6,471 行；测试删除 7,043、新增 29,468，净增 22,425 行。内联测试已分开；区间包含独立 master 工作，不能全部归因于迁移。行数未达到 Host 变小的预期，也不代替规则收敛验收。口径与逐 crate 表见 [M5 最终测量](../experiments/constitution-host-preflight/final/measurement.md#按-crate-的-rust-行数)。
+- **代码量**：固定区间 fc558e2→e60374f，Rust 生产删除 6,459、新增 12,930，净增 6,471 行；测试删除 7,043、新增 29,468，净增 22,425 行。内联测试已分开；区间包含独立 master 工作，不能全部归因于迁移。行数未达到 Host 变小的预期，也不代替规则收敛验收。口径与逐 crate 表见 [M5 最终测量](../../../experiments/constitution-host-preflight/final/measurement.md#按-crate-的-rust-行数)。
 - **Host 复杂度**：Session、授权、投递层的复杂度没有变化，这是 §5.2 的结论。
 - **测量**：探针已经在产出数据，但还缺时间、任务类别、模型这几个坐标。
 
@@ -315,15 +317,15 @@ R2 曾把 pause 当成 stop 的别名，导致十多个 API 测试失败，原�
 
 ### 9.1 迁移已交回
 
-M1–M4 已验收；M5 按 §10.20 完成测量、探针复核及宪法复核，迁移任务结束。最终交回见 [measurement.md](../experiments/constitution-host-preflight/final/measurement.md)。未推送、未删除旧 worktree/分支；这些操作仍由用户决定。
+M1–M4 已验收；M5 按 §10.20 完成测量、探针复核及宪法复核，迁移任务结束。最终交回见 [measurement.md](../../../experiments/constitution-host-preflight/final/measurement.md)。未推送、未删除旧 worktree/分支；这些操作仍由用户决定。
 
 ### 9.2 迁移后待决问题
 
-当前事实与决定者统一维护在 [M5 迁移后待决清单](../experiments/constitution-host-preflight/final/measurement.md#迁移后待决清单)：旧数据离线迁移已由用户决定不提供；W4、时间事实、history/points 保留政策、完整真实模型业务/渠道实网/部署验收，以及旧 worktree/分支的删除时机仍由对应决定者处理。M5 不替用户裁定，也不把固定 Goose 或单个真实模型小图扩大为这些验收。
+当前事实与决定者统一维护在 [M5 迁移后待决清单](../../../experiments/constitution-host-preflight/final/measurement.md#迁移后待决清单)：旧数据离线迁移已由用户决定不提供；W4、时间事实、history/points 保留政策、完整真实模型业务/渠道实网/部署验收，以及旧 worktree/分支的删除时机仍由对应决定者处理。M5 不替用户裁定，也不把固定 Goose 或单个真实模型小图扩大为这些验收。
 
 ### 9.3 迁移的目的与后续方向
 
-这次迁移主要是为了 [Harness 数据中枢](harness-data-hub.md) 做准备：在统一的内核历史之上，不涉及业务语义，分析并优化 Harness 本身，包括 Graph、Plugin、内核以及它们的组合。2026-10-20 用户已确认：时间必须作为事实记录，所有事实统一走 `Kernel::submit`，以算法分析为主。事实采集规范、内核变更提案和后续顺序见该文档；保留策略仍待决定。
+这次迁移主要是为了 [Harness 数据中枢](../../harness-data-hub.md) 做准备：在统一的内核历史之上，不涉及业务语义，分析并优化 Harness 本身，包括 Graph、Plugin、内核以及它们的组合。2026-10-20 用户已确认：时间必须作为事实记录，所有事实统一走 `Kernel::submit`，以算法分析为主。事实采集规范、内核变更提案和后续顺序见该文档；保留策略仍待决定。
 
 
 ---
@@ -375,10 +377,10 @@ M1–M4 已验收；M5 按 §10.20 完成测量、探针复核及宪法复核，
 | 文档 | 用途 |
 | --- | --- |
 | `docs/anchor-constitution.md` | 宪法与架构，是设计的唯一依据 |
-| `docs/constitution-refactor-log.md` | 工作记录：每一刀的事实、S 条目、K0.x |
-| `docs/constitution-migration-task.md` | 全量迁移任务书，§10 起是逐次审查结论（以最新一节为准） |
-| `docs/constitution-host-integration-plan.md` | 早期 Host 接入计划，其中的约束 C1–C6 仍然有效 |
+| [工作记录](../runtime-migration-2026-10-20/constitution-refactor-log.md) | 历史事实、S 条目、K0.x |
+| [全量迁移任务书](../runtime-migration-2026-10-20/constitution-migration-task.md) | §10 起保留逐次审查结论，迁移任务已结束 |
+| `docs/archive/design-records-2026-11-04/constitution-host-integration-plan.md` | 早期 Host 接入计划，其中的约束 C1–C6 仍然有效 |
 | `docs/run-access-facade.md` | 门面的规则表与边界 |
 | `docs/runtime-contract-tests.md` | Goose 回归的标准命令与环境要求 |
 | `experiments/constitution-host-preflight/final/` | 固定基点最终测量、脚本、测试登记、规则清单及后续决定 |
-| master `docs/constitution-merge-task.md` | 合并步骤（master 侧） |
+| [合入须知](../runtime-migration-2026-10-20/constitution-merge-task.md) | 当时 master 侧的合并步骤，不作为当前操作指令 |

@@ -106,7 +106,7 @@ mkdir -p "$ANCHOR_RUNNER_LOCAL_INPUTS_ROOT/weekly-work-report"
 
 入口 `validate` 用普通 Op 检查两项为非空白字符串，失败时不调用核心或远端服务；这是输入检查，不是宿主授权。目标对象与权限仍由 Docmost 工具和宿主校验，不能从报告、历史或模型偏好猜测。
 
-结果选择遵循 [call-report.json](../examples/graphs/call-report.json) 与 [Graph 组合契约](graph-composition-design.md)：`report` 是包装图中的调用节点，目标结果节点是核心的 `publish`，发布 Agent 的返回输入位于 **`/in/report/result/`**，不是 `/in/publish/`。当前 Host 的 `export_call_result_files` 逐项校验普通文件，不展开目录或通配符，因此不把 `assets/` 直接写入 `result.files`。包装图选择 `report.md`、`sources.md`、`assets.tar`、`review.json`、`review.md`，再把核心生成的图片归档解到自己的 `/workspace/assets/`；不需要更改通用 Call 或复制业务流水线。
+结果选择遵循 [call-report.json](../examples/graphs/call-report.json) 与 [Graph 组合契约](rust-graph-authoring-contract.md#组合与调用)：`report` 是包装图中的调用节点，目标结果节点是核心的 `publish`，发布 Agent 的返回输入位于 **`/in/report/result/`**，不是 `/in/publish/`。当前 Host 的 `export_call_result_files` 逐项校验普通文件，不展开目录或通配符，因此不把 `assets/` 直接写入 `result.files`。包装图选择 `report.md`、`sources.md`、`assets.tar`、`review.json`、`review.md`，再把核心生成的图片归档解到自己的 `/workspace/assets/`；不需要更改通用 Call 或复制业务流水线。
 
 发布时用报告第一行一级标题作为子页面标题，只在发布副本去掉该行。按操作员指定的精确名称选择唯一空间与根下父页面，父页面不存在才创建；报告完整标题精确匹配唯一子页面后原位更新，不存在才创建，歧义则停止。先读取既有页面核对空间与父页面，不删除、移动或修改其他页面；超时或未知外部效果先核对目标，不盲目重建。
 

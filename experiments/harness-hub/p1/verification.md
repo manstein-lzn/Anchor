@@ -1,6 +1,6 @@
 # P1 内核变更：验证与审查请求
 
-执行：2026-10-20，按 [任务书 §P1](../../../docs/harness-data-hub-tasks.md#p1-内核变更时间因果配置只读读取)，由主 Agent 直接实现。字段的实际形状和选择理由见 [总体架构 5.1](../../../docs/harness-data-hub-architecture.md#51-内核变更p1-已实现复审通过已冻结为-c1)。
+执行：2026-10-20，按 [任务书 §P1](../../../docs/archive/design-records-2026-11-04/harness-data-hub-tasks.md#p1-内核变更时间因果配置只读读取)，由主 Agent 直接实现。字段的实际形状和选择理由见 [总体架构 5.1](../../../docs/harness-data-hub.md#当前职责与依赖)。
 
 ## 改动范围
 
@@ -257,7 +257,7 @@ P1 改动了内核。按宪法"提议和裁决分离"的原则，应由另一个
 
 接受审查结论：**`9a5fa57` 替换 `e172e05`，成为新的冻结基点 C1。** 从此 `git diff 9a5fa57 -- rust/anchor-kernel` 必须为空，除非另有经过审查的内核变更。
 
-已知边界按审查意见补全，登记在 [总体架构 5.1](../../../docs/harness-data-hub-architecture.md) 的"已知边界"中：
+已知边界按审查意见补全，登记在 [总体架构 5.1](../../../docs/harness-data-hub.md#当前职责与依赖) 的"已知边界"中：
 
 1. **同一个 id 删除后重建**：如果它旧的 effect 资源还在，后果不只是新 effect 撞名（记录已经提交、创建时返回 `Exists`）。旧 effect 处在 `unknown` 状态时，按前缀查找未知 effect 的判断会把它算到新资源头上，新资源的 Execute 会被拒绝，这会影响裁决。这个问题按 seq 命名时就已存在，不是本次引入的。
    - 现在走不到的原因：**生产 Host 不创建 effect 和 pending 资源**。原文"Run id 带时间戳"不准确，Run id 还有 `turn-{turn_id}` 这样的形式。

@@ -1,6 +1,8 @@
 # 审查决定：Host 接入预检阻塞
 
-日期：2026-10-16。审查对象：`9ac9ade`、`35ac2b1`，[预检审查产物](../experiments/constitution-host-preflight/review.md)。
+> 历史归档（2026-11-04）：保留当时的推导、授权范围、过程与证据，不作为新的实施授权；当前行为见[架构](../../architecture.md)，未关闭事项见[统一台账](../../pilot-development-plan.md)。
+
+日期：2026-10-16。审查对象：`9ac9ade`、`35ac2b1`，[预检审查产物](../../../experiments/constitution-host-preflight/review.md)。
 
 ## 结论
 

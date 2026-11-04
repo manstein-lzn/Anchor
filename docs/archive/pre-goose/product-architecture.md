@@ -10,7 +10,7 @@
 
 2026-09-26 收敛决定：用户要的是保存 Agent 工作记录、重开原会话后继续工作。一般会话恢复以持续写入的工作 JSONL 为依据，由 Agent 查询现场、检查文件和运行测试后续做；不建设通用审批平台或跨存储事务。2026-10-03 用户进一步收敛 Rust io-harness 的未决副作用路径：保留原 Graph Run 与 invocation，普通“继续”将未决工具事实作为恢复上下文交给 Agent；不自动重放，也不把 Retry、Completed、Abort 暴露为用户流程。外部副作用仍不承诺 exactly-once。开发顺序与验收状态只维护在 [Pilot 开发计划](../../pilot-development-plan.md)。
 
-当前方向（2026-10-06 用户决定）：Rust-native AgentNode 与 Pilot 统一使用 Goose，通过 ACP 交互、MCP 暴露授权工具；io-harness 与 Rig 的依赖和执行实现移除，历史记录不能冒充 Goose 恢复游标。Goose 承担 Agent loop、Provider、原生会话与 compaction；Anchor 不自研第二套通用 Harness，继续拥有 Graph/Run/Artifact/Sandbox/Plugin 和平台 Session/Turn 事实。预算控制暂不列为迁移门槛，优先完成任务；权限、取消和现场核查后继续不放弃。实施取舍见 [Goose-only Runtime 迁移决定](../../goose-runtime-migration.md)，生产部署与数据切换仍独立验收。记忆和计划不列为 Anchor 自研模块，研究目标与证据验收属于研究 Graph/Plugin 业务。
+当前方向（2026-10-06 用户决定）：Rust-native AgentNode 与 Pilot 统一使用 Goose，通过 ACP 交互、MCP 暴露授权工具；io-harness 与 Rig 的依赖和执行实现移除，历史记录不能冒充 Goose 恢复游标。Goose 承担 Agent loop、Provider、原生会话与 compaction；Anchor 不自研第二套通用 Harness，继续拥有 Graph/Run/Artifact/Sandbox/Plugin 和平台 Session/Turn 事实。预算控制暂不列为迁移门槛，优先完成任务；权限、取消和现场核查后继续不放弃。实施取舍见 [Goose-only Runtime 迁移决定](../../architecture.md#goose-与恢复)，生产部署与数据切换仍独立验收。记忆和计划不列为 Anchor 自研模块，研究目标与证据验收属于研究 Graph/Plugin 业务。
 
 历史方向（2026-10-03，执行框架选择已被上述 Goose 决定替代）：用户不要求 Rust 完全兼容旧 Python 平台或 Harness，开发阶段曾统一使用 io-harness 负责 Agent loop、上下文、单节点持久化和恢复，Rig 只负责 Provider transport。原有证据和记录保留，不自动认作 Goose 产品验收。现有 Python/PydanticAI/Harness 是独立 legacy 宿主，不能反向决定 Rust-native 产品核心。
 
@@ -379,7 +379,7 @@ WebSocket 的共同特点是：连接长期保持、客户端和平台双向发�
 
 ### 定期任务完成后通知助手用户（2026-09-30 需求讨论，方案未冻结）
 
-后续讨论调整：用户明确要求先解决通用 Graph 组合，并确认保留内联子图与独立 Graph 调用两种能力。下文“任务结果订阅”是先前候选建议，未获采纳为实现方向，不作为本轮实现合同。周报通知将作为节点发起独立 Graph 调用的验证案例；冻结设计见 [Graph 组合与独立调用](../../graph-composition-design.md)，当前实现与验收分别见架构和开发台账。
+后续讨论调整：用户明确要求先解决通用 Graph 组合，并确认保留内联子图与独立 Graph 调用两种能力。下文“任务结果订阅”是先前候选建议，未获采纳为实现方向，不作为本轮实现合同。周报通知将作为节点发起独立 Graph 调用的验证案例；冻结设计见 [Graph 组合与独立调用](../../rust-graph-authoring-contract.md#组合与调用)，当前实现与验收分别见架构和开发台账。
 
 用户提出具体场景：已有 weekly-work-report 定期任务完成后，由 Anchor 助手在企业微信提醒本人，并讨论该需求与跨 Graph 联动的关系。此前已经记录长任务关联原会话、结果沿来源返回的目标，但尚未确定或交付通用的 Run 完成订阅与跨 Graph 事件触发。
 
@@ -507,4 +507,4 @@ P0 时的历史问题与框架核查见 [Pilot 对话体验与 Pydantic 接入�
 
 ### 同一 Run 内的局部并行（2026-10-01 首期接入）
 
-用户确认以一一配对的 fanoutOp / joinOp 在同一个 Graph Run 内展开和收束多个并行 AgentNode。节点继续属于原 Run，作者无需为每个分支创建独立 Graph；普通节点保留既有路由语义。调度器有序更新运行状态，区域内允许多个节点同时执行。LLM 只负责局部任务，运行时负责分支激活、等待与收束。首期支持独立串行分支和全部成功后收束，失败取消同伴，保留停止及恢复身份；禁止嵌套和分支间交叉，支持整个区域的反馈循环。真实模型与真实后端浏览器验收分别记录；RSI 应用侧的并行审查与内容质量另见 A30。详见 [组合设计](../../graph-composition-design.md) 和开发台账 A31。
+用户确认以一一配对的 fanoutOp / joinOp 在同一个 Graph Run 内展开和收束多个并行 AgentNode。节点继续属于原 Run，作者无需为每个分支创建独立 Graph；普通节点保留既有路由语义。调度器有序更新运行状态，区域内允许多个节点同时执行。LLM 只负责局部任务，运行时负责分支激活、等待与收束。首期支持独立串行分支和全部成功后收束，失败取消同伴，保留停止及恢复身份；禁止嵌套和分支间交叉，支持整个区域的反馈循环。真实模型与真实后端浏览器验收分别记录；RSI 应用侧的并行审查与内容质量另见 A30。详见 [组合设计](../../rust-graph-authoring-contract.md#组合与调用) 和开发台账 A31。

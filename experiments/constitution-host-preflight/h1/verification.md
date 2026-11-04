@@ -1,6 +1,6 @@
 # H1 旧格式清理验证
 
-2026-10-16。范围按用户修订决定：H1 只删除旧格式兼容并建立直接写入基线；FileStore 随 H2 接入，C2 在 H3 验收。实现结论、语义 S9/S15、逐名删除测试及 16 save / 36 mutation 的全部文件:行号/用途见[工作记录](../../../docs/constitution-refactor-log.md#h1旧格式清理实现完成)。
+2026-10-16。范围按用户修订决定：H1 只删除旧格式兼容并建立直接写入基线；FileStore 随 H2 接入，C2 在 H3 验收。实现结论、语义 S9/S15、逐名删除测试及 16 save / 36 mutation 的全部文件:行号/用途见[工作记录](../../../docs/archive/runtime-migration-2026-10-20/constitution-refactor-log.md#h1旧格式清理实现完成)。
 
 ## 最终命令与结果
 

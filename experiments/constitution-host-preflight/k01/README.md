@@ -1,6 +1,6 @@
 # K0.1：限定内核修订与中断校验验收
 
-日期：2026-10-16。源码起点：`0b71475`；授权依据：[审查决定 D1–D5](../../../docs/constitution-preflight-decision.md)。主 Agent 集成预算/生命周期，两个 subagent 分别实现存储与中断校验，主 Agent 审查并验证。K0.1 单独提交审查，H1–H6 尚未开始。
+日期：2026-10-16。源码起点：`0b71475`；授权依据：[审查决定 D1–D5](../../../docs/archive/design-records-2026-11-04/constitution-preflight-decision.md)。主 Agent 集成预算/生命周期，两个 subagent 分别实现存储与中断校验，主 Agent 审查并验证。K0.1 单独提交审查，H1–H6 尚未开始。
 
 ## 九项检查
 
@@ -14,7 +14,7 @@
 | 6. D5：任何身份等待写入拒绝、计费、不影响调用 | `waiting_rejects_non_lifecycle_work_for_every_identity_and_charges_it` 覆盖 Agent/Code/Human、Write/Execute/Settle/非生命周期 Request；另测过期、无授权与未知控制词。迟到 Code 正式反例 `stopped_task_refuses_a_late_code_result_without_advancing_state`。Op.call 的 5,000 例原差分保持不变 |
 | 7. 三组差分 20,000 例、断言不放宽 | 串行 10,000、并行 5,000、调用 5,000；最终 all-targets 内执行。差分源码唯一变化是初始化器补 `interruption: None`；逐字节还原该新增行后与起点完全一致，见[结构核对](structure.json) |
 | 8. 依赖不变 | `git diff 35ac2b1 -- rust/anchor-kernel/Cargo.toml` 为空；主 `Cargo.lock` 亦无变化。Record、Waiter、Phase 定义未增加字段或变体 |
-| 9. 登记语义变更 | [工作记录 S10–S14](../../../docs/constitution-refactor-log.md#语义变更记录)分别记录计费、历史恢复、Code 阻塞、中断及等待门禁；未删除或放宽既有测试 |
+| 9. 登记语义变更 | [工作记录 S10–S14](../../../docs/archive/runtime-migration-2026-10-20/constitution-refactor-log.md#语义变更记录)分别记录计费、历史恢复、Code 阻塞、中断及等待门禁；未删除或放宽既有测试 |
 
 ## 实现选择与边界
 

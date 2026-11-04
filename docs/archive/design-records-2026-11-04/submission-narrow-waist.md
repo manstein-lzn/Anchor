@@ -1,8 +1,10 @@
 # 以提交为细腰：Anchor 的确定性架构方向
 
+> 历史归档（2026-11-04）：保留当时的推导、授权范围、过程与证据，不作为新的实施授权；当前行为见[架构](../../architecture.md)，未关闭事项见[统一台账](../../pilot-development-plan.md)。
+
 编制日期：2026-10-14。状态：**方向讨论稿，未实现，未授权实施**。
 
-本文记录与用户讨论形成的架构方向：Anchor 应以什么作为唯一的公共接口（"细腰"），以及由此推出的内核、Graph、协作、度量与自进化形态。它不是实现清单，也不是进度台账。当前实现以 [architecture.md](architecture.md) 为准，产品目标与不变量以 [product-architecture.md](product-architecture.md) 为准，实际交付只记 [开发台账](pilot-development-plan.md)。
+本文记录与用户讨论形成的架构方向：Anchor 应以什么作为唯一的公共接口（"细腰"），以及由此推出的内核、Graph、协作、度量与自进化形态。它不是实现清单，也不是进度台账。当前实现以 [architecture.md](../../architecture.md) 为准，产品目标与不变量以 [product-architecture.md](../../product-architecture.md) 为准，实际交付只记 [开发台账](../../pilot-development-plan.md)。
 
 文中区分三类内容：**已确认的方向**（用户在讨论中明确同意）、**推导结论**（由方向推出，尚待实践验证）、**假设**（需要用代码或数据核实）。
 

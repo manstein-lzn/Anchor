@@ -1,6 +1,6 @@
 # §10.11：master F1/F2 合并验证
 
-父提交为本分支 `2582528` 与 master `d968ba5`，使用 merge，不 rebase。19 个冲突路径逐项登记在[工作记录](../../../docs/constitution-refactor-log.md)。门面公共接口采用 master 的安全 RunView、读取与意图操作；已批准的三相位、独立 pause、Kernel 准入、子调用、删除与 Probe 放在同一门面背后。默认入口仍是旧 Runner。Kernel 显式入口由 workspace 中的 Host 确定性与随机回归覆盖；完整 Goose ignored 沿既有默认路径执行，不代表 M2 的 Kernel 原生 Goose 能力已全量验收。
+父提交为本分支 `2582528` 与 master `d968ba5`，使用 merge，不 rebase。19 个冲突路径逐项登记在[工作记录](../../../docs/archive/runtime-migration-2026-10-20/constitution-refactor-log.md)。门面公共接口采用 master 的安全 RunView、读取与意图操作；已批准的三相位、独立 pause、Kernel 准入、子调用、删除与 Probe 放在同一门面背后。默认入口仍是旧 Runner。Kernel 显式入口由 workspace 中的 Host 确定性与随机回归覆盖；完整 Goose ignored 沿既有默认路径执行，不代表 M2 的 Kernel 原生 Goose 能力已全量验收。
 
 这次验证只验收合并，不宣布 M2 完成。并行 Call 裁决扩展仍按 §8 待批；常驻助手打断、执行结果补齐和原生人工恢复决定仍待实现。M3 未开始，未执行真实模型 Provider、生产数据迁移或部署。
 

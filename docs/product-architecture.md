@@ -6,11 +6,11 @@
 
 Anchor 是本地优先、可观察、可恢复的 Agent 工作系统。用户通过 Graph 表达任务拆分、检查、返工和交付，通过 Plugin 积累可复用能力，通过 Run 检查执行证据，通过 Session 持续协作。
 
-核心对象是 Graph、AgentNode、OpNode、Plugin、Run 和 Session。依赖声明属于插件，平台提供共享存储与每插件版本一份视图，见 [依赖标准](plugin-dependencies.md)。研究、周报、企业助手与递归改进由普通 Graph/Plugin 表达，业务阶段归业务所有者。
+核心交付是最小 Runtime 基础设施；Graph JSON 和 Plugin 工程是可独立传播、安装和持续交付的资产。研究、周报、常驻机器人与递归改进由普通 Graph/Plugin 表达，不为每个业务派生一套 Runtime。
 
-Pilot 的管家目标是：Anchor 独立部署、配置模型后，用户通过 Pilot 初始化基础环境，管理 Graph、Plugin 和依赖内容的完整生命周期，包括安装、检查、更新/回退和删除，并通过普通沙箱命令开发、自测和交付。优先验收 Python，概念不限语言；共享资源保持唯一事实来源，开发方法由 Pilot 决定。
+目标体验是：安装原生包、打开 WebUI、配置首个模型，然后把 Graph/Plugin 文件或归档交给 Pilot。Pilot 帮用户理解资产、准备依赖与环境、请求必要的账号凭据和权限，完成安装、检查、运行及后续开发、更新/回退和删除；不能把收到文件视为已获宿主授权。工具语言由作者选择，开发方法由 Pilot 决定。当前支持范围和入口见 [使用指南](usage.md)，具体开发契约见 [Pilot 开发](pilot-development.md)。
 
-后端、共享 Runtime 和官方工具使用 Rust；WebUI 保持 React/TypeScript。AgentNode 与 Pilot 统一使用固定 Goose，通过 ACP 交互、MCP 暴露授权工具。Goose 拥有 Agent loop、Provider、原生历史与 compaction；Anchor 拥有产品事实与宿主权限，不建设第二套通用 Agent 框架。预算控制暂不作为交付门槛，优先完成任务。
+后端、共享 Runtime 和官方工具使用 Rust；WebUI 使用 React/TypeScript。AgentNode 与 Pilot 共用固定 Goose 的 ACP/MCP 接入；Goose 拥有 Agent loop、Provider、原生历史与 compaction，Anchor 拥有产品事实与宿主权限，不建设第二套通用 Agent 框架。用户已决定不设默认任务预算，模型正常工作就继续；时间和成本必须记录为事实，不据此另造预算门禁。
 
 长期方向是多用户工作中枢：用户可以直接提出任务，由 Copilot 选择或临时构建 Graph，保留来源和访问范围，并把结果返回原用户。系统 Pilot Graph、临时 Graph 的可见性/保留期限、主动工作策略和自动发布授权尚未冻结；不能把方向当作已经授权在线自改或跨用户读取。
 
@@ -26,109 +26,67 @@ Pilot 的管家目标是：Anchor 独立部署、配置模型后，用户通过 
 
 ## 架构指导：新能力放在哪里
 
-依赖从交互边缘指向稳定执行契约。核心执行不反向依赖 HTTP、聊天平台、研究领域或 Web 页面。
+依赖从入口指向应用服务、Kernel/Runner、Node Runtime 和 Sandbox；核心不反向依赖 HTTP、聊天平台、研究领域或 Web 页面。Graph/Run、Session/Turn、Library/Plugin、Node Runtime/Sandbox 分别拥有自己的事实和不变量，WebUI 只投影这些事实。具体模块与写入边界以 [当前架构](architecture.md#执行链与所有权) 和 [开发约定](../AGENTS.md) 为准。
 
-| 变化内容 | 归属 | 事实所有者 |
-| --- | --- | --- |
-| HTTP、CLI、企业微信请求、身份和协议 | 入口适配器 | 可信来源/请求 |
-| Run 接纳/控制、Session 协调、入口共用用例 | Host 应用服务 | 产品执行身份 |
-| Graph 编译、路由、反馈、并行调度 | Kernel / Runner | Graph IR / Run cursor |
-| Agent/Op 执行、结构化结果、ACP/MCP、通用 host operation 端口 | Node Runtime；具体 host 能力由宿主适配 | invocation 与工具观察 |
-| 文件、网络、进程、凭证和隔离 | Sandbox / 宿主授权 | 获准能力与冻结输入 |
-| Skill、资源、业务工具和外部系统 | Plugin / Library | 可复用能力资产 |
-| 解释器、依赖包与工具链（插件依赖） | Host 统一解析基础环境与正式来源；插件持有运行依赖，Session 持私有开发现场及临时候选/旧视图引用，Library 持共享存储与只读视图 | Host 管理配置、归属与授权；Plugin 依赖声明；Session 项目文件与实际开发现场；共享存储中的（包、版本） |
-| 研究、周报、审查目标与内容验收 | 普通 Graph / Plugin | 业务证据与结论 |
-| 画布、时间线、会话与文件展示 | WebUI | 对既有事实的投影 |
+业务目标、内容验收和外部系统能力先放普通 Graph/Plugin；有证据表明共用执行契约存在缺口，才改核心。复用已有框架和事实所有者，不为未观察到的问题预建平台。
 
-Graph、Plugin 各有一份权威资产，其余位置只保存引用。依赖声明跟随插件，私有开发现场跟随 Session，不新增命名环境资产；取舍原因见 [依赖标准的背景](plugin-dependencies.md#背景与动机)。
-
-采用 Ports and Adapters 隔离外部入口；遵循 Clean Architecture 依赖方向；用限界上下文明确 Graph/Run、Session/Turn、Library/Plugin、Node Runtime/Sandbox 的事实和不变量。只采用有用的边界，不引入完整 DDD 仪式、微服务、事件溯源、CQRS 或通用依赖注入框架。
-
-新设计依次确认：已授权用户结果或已观察失败；现有框架/契约能否复用；唯一事实所有者；失败、取消和恢复语义；可执行验收。小型可逆选择直接推进。改变用户结果、持久化迁移、权限、并发或恢复语义的重要决定需明确记录；文档用于后续开发，不是额外审批平台。
-
-任务联网通过 `network` Plugin 主动或依赖启用，Host/Sandbox 执行授权。Pilot 默认启用任务联网以完成初始化与开发，用户可以明确关闭；默认不扩大业务节点或渠道权限。行为契约见 [任务联网](network-plugin.md)。
+Graph、Plugin 各有一份权威资产，其余位置只保存引用。依赖声明跟随插件，私有开发现场跟随 Session，不新增命名环境资产；取舍原因见 [依赖标准](plugin-dependencies.md#背景与动机)。网络、文件、进程与凭据由 Host/Sandbox 授权，不由资产说明或模型输出授予。
 
 ## 对象与所有权
 
 | 对象 | 内容与生命周期 |
 | --- | --- |
-| Plugin | 独立清单、Skill、资源和工具入口；多个节点可以引用同一资产 |
-| 插件依赖 | 插件声明自己的包依赖；平台共享存储按（包、版本）只存一份字节，每个插件版本一份视图；每次节点调用解析当前 Plugin 并记录实际观察到的依赖视图 |
+| Plugin | 可分发工程，包含独立清单、Skill、资源和工具入口；多个节点引用同一资产，依赖跟随声明 |
 | AgentNode | Graph 内角色引用、任务、Plugin 与权限；模型在节点 workspace 执行 |
 | OpNode | Graph 内确定性命令、独立调用、配对并行控制或获授权 host operation |
 | Graph | 可编辑 JSON、节点、边、接口、目标与 layout |
-| Run | 冻结定义、启动输入/资源授权、cursor、节点工作区绑定、逐 invocation Artifact、路由和工具轨迹 |
-| Session | 长期对话、可信来源、Turn、幂等、问题/回答和关联 Run；常驻助手 current/历史 binding 与 retire 事实 |
-| Turn | 一次幂等输入或继续请求，保留事件游标、取消与投递身份 |
-| Pilot | 管理和协作入口；完整平台不依赖业务 Graph，可初始化基础环境、开发并交付 Plugin，以及管理 Graph、联网/挂载、凭据、渠道与计划；各业务的真实验收范围见台账，自升级交接策略仍未冻结 |
-
-Pilot 开发环境是 Session 每项目一份私有可写现场，引用共享只读解释器。项目文件作为重建基线，试装允许偏离；默认准备保留现场，显式重建或生命周期结束才释放。候选和正式 Plugin 按正式声明独立准备、测试和交付。具体行为见 [Pilot 开发](pilot-development.md)。
+| Run | 一次执行的冻结定义、输入与资源授权，以及执行进度、工作区绑定、交付和观察记录 |
+| Session / Turn | 长期协作及一次幂等输入或继续请求，保存来源、对话、关联 Run 与投递身份；不复制 Run 状态 |
+| Pilot | 不依赖业务 Graph 的管理和协作入口；管理资产、环境、凭据、渠道与计划，自升级交接策略仍未冻结 |
 
 共享 `agents` 只是角色配置复用，不是独立 Agent 注册库。Plugin 直接挂在 AgentNode，不通过角色继承、默认合并或复制；OpNode 不隐式取得 Plugin 能力。
 
 ## Graph、工作区与产物
 
-作者模型与 Runtime IR 分层：用户继续使用 Graph JSON，编译层负责模块展开、拓扑/接口/读写校验和资源绑定。IR 的限制必须在接纳前明确反馈。未知展示字段不能误当执行权限；支持边界由 [作者契约](rust-graph-authoring-contract.md) 和测试固定。
+用户编写和传播 Graph JSON，不需要直接维护 Runtime IR。编译限制必须在接纳前明确反馈，展示字段不能变成执行权限；语法、组合、输入与交付规则统一见 [作者契约](rust-graph-authoring-contract.md)。
 
-Graph 默认目标和单次 Run 输入分别保存。手动、计划、Webhook、Responses 与渠道共用接纳，Run 保留触发来源；一次输入不能修改 Graph 默认值。忙碌、停机错过与控制请求的状态必须可解释，计划不另建第二套调度器。
+Graph 默认目标与单次 Run 输入分开。手动、计划、Webhook、Responses 与渠道共用接纳并保留来源；一次请求不能改写 Graph 默认值，计划不另建第二套执行引擎。
 
-每个节点的 invocation 继续使用同一 `(Run, node)` 可写 Workspace；新 Run 默认获得独立现场，跨 Run 复用需要 Host 显式授权绑定资源。完成时 Agent 选择文件或目录形成不可变 Artifact，`writes` 是必交子集；Op 与控制节点也使用同一套显式交付契约。下游读取固定 Artifact 版本，不改变工作区字节。
-
-Artifact 只保存被选择的文件内容，按内容去重；不复制完整项目、依赖、缓存或 `.git`，也不为失败和中断建立全目录 checkpoint。普通失败、中断和取消保留现场供后续 invocation 核查与继续；Run 删除释放它拥有的现场和交付引用，独立保留的 Artifact 或共享 Workspace 按自身引用回收。助手与其他 Graph 使用同一工作区和交付机制。
-
-AgentNode 必须通过原生授权完成工具提交 `summary` 和可选 `route`。普通回答或看似正确的 JSON 不代表完成；缺少必需信息、非法路由或未完成现场核查，应反馈给同一 Agent 修正。机械门禁不能被模型判断替代。
+Workspace 是可继续核查的工作现场，Artifact 是显式选择的不可变交付，不能互相冒充。下游读取固定交付版本；不为每次失败复制完整项目、依赖和缓存。跨 Run 共享现场须由 Host 显式绑定授权资源，删除按所有权与引用回收。Agent 的普通回答不等于节点已完成，完成必须经过授权提交和机械校验。
 
 ### 组合、调用与并行
 
-内联 Graph 模块属于同一个 Run；独立 `Op.call` 产生父子关联 Run。`wait` 等结果，`detach` 保留独立生命周期；目标只读取显式映射输入和选定产物。定义关系由 Graph 派生，调用关系保存为实际执行事实，不增加订阅平台。
-
-`call.session` 交接到操作员选择并绑定用户的会话。用户新消息优先，系统调用保留来源身份；等待、让位、后台接续和恢复必须复用同一 Runner/Session 协调。投递使用已授权 Plugin 网关，不另建消息执行引擎。
-
-配对 fanout/join 允许同一 Run 中独立串行分支并发，全部成功后收束，失败取消同伴。首期禁止嵌套、分支交叉及未支持的区域内调用；整个区域可参与反馈循环。禁止将模型内部的并行想法作为调度许可。
+内联模块、独立子 Run、会话调用和同 Run 配对并行是不同执行关系，不能混成一种生命周期。定义关系从 Graph 派生，调用关系保存为执行事实；输入只经显式映射，模型内部并行想法不构成调度许可。具体边界、失败和恢复语义见 [组合与调用](rust-graph-authoring-contract.md#组合与调用)。
 
 ## Session、对话与恢复
 
-平台 Session/Turn 保存用户输入、运行关联、问题/回答与 SSE 投递；Goose 保存原生模型历史。刷新或重开页面按稳定 Session/Turn 和事件游标读取，不再次提交旧请求。原生会话绑定 Graph/节点/用户、模型与 endpoint，不能静默切换或借用另一用户历史。
+平台 Session/Turn 保存用户输入、运行关联、提问与投递，Goose 保存原生模型历史；两者不另造一份对方的权威。刷新或重开页面读取已保存事实，不重新提交旧请求；恢复不能静默换模型、替换原生历史或借用另一用户的历史。
 
-必要提问由原生 elicitation 接入，同一 Turn 等待有效回答。重复相同回答幂等，冲突回答拒绝；保存回答不等于破坏性工具已经完成。删除 Graph 的确认绑定准确目标和资源前置条件，目标变化、取消或重启不能复用旧确认。
+必要提问和确认直接留在当时的对话位置，按原顺序可回看，不另设一套历史入口。保存回答不等于工具已经完成；破坏性操作的确认绑定准确目标和前置条件，目标变化、取消或重启不能复用旧确认。
 
-提问、用户填写的回答及确认或拒绝直接放在当时的对话记录中，按原有顺序可回看。正在等待回答时显示必要的表单，完成后成为普通对话消息；不另设“历史提问”汇总入口。
+普通“继续”保留执行进度、调用身份与原生 Session。工具可能已生效但结果缺失时，先保存中断与观察事实，再由 Agent 核查现场和可用外部状态，决定继续、补偿或询问用户。内部恢复字段不包装成用户审批流程，任意外部副作用不承诺 exactly-once，部署回滚不自动撤销业务效果。
 
-普通“继续”保留 Run cursor、invocation 和原生 Session。工具可能已生效但结果缺失时，Host 保存中断与观察事实，Agent 核查 workspace、Artifact 和可用外部状态后决定继续、补偿或询问用户。底层 fail-closed 可以保留，但内部恢复字段不包装成用户审批流程。
-
-停止请求被接受与节点停止是两个时点。重启后恢复已保存事实，不自动执行未结算任务或重放确认。任意外部副作用不承诺 exactly-once，部署回滚也不自动撤销业务效果。
-
-Session 与 Run 分别拥有状态。Session 只引用真实 Run，不复制另一份运行状态。删除前必须处理关联 Run 和原生历史范围；单条持续会话 Run 删除受共享 scope 约束，不能破坏仍在使用的历史。
-
-常驻实例的 stop/resume 与 explicit retire 分开：stop/resume 保留当前 Run、Session 与 Workspace 绑定；retire 要求 Run 已真实 Stopped/终态且非 active，Session 的 Running Turn 及 pending/sending/unknown delivery 均阻断退役。退役保留对话历史、禁止旧 Run resume 或重新绑定，下一条可信消息惰性创建新实例；Graph 结构更新不热改旧 Run；操作员保存常驻助手的插件选择和节点联网权限后，各 Session 在下一 Turn 冻结并应用，当前 Turn 和恢复保持原权限，工作文件通过已授权 Workspace 资源绑定继续使用。Graph cascade 删除先完成保护与退役，再按 owned bindings 清理输入、回复、yield 与执行数据，并释放 Workspace/Artifact 引用。
+停止请求已接受不等于执行者已退出；stop/resume 与退役是不同动作。重启可以按已保存身份恢复符合条件的渠道助手，但不重放未知效果或旧确认。Graph 结构不热改旧 Run，常驻助手的获准插件/联网变化按 Turn 生效，当前 Turn 及其恢复保持原授权。删除与退役不能破坏仍被引用的历史、现场或未结算投递；详细条件以 [恢复](architecture.md#goose-与恢复) 和 [常驻助手契约](architecture.md#常驻助手实例) 为准。
 
 ## Plugin 与能力积累
 
-Plugin 包含 Skill、资源、工具和可选渠道说明，工具语言由作者决定。Host 为 Pilot 提供通用开发、候选准备/测试和正式安装接口，统一管理基础环境与授权；Session 保存临时开发现场，Library 保存正式能力及共享依赖。显式部署配置保持外部归属，Plugin 声明不能扩大宿主权限。
+Host 管理基础环境、部署配置与授权，Session 保存私有开发现场，Library 保存正式 Plugin、共享依赖和连接配置中的授权事实。候选准备、自测与正式交付复用同一套接口，不因工具语言不同另建管理体系；具体行为见 [Plugin](plugins.md)、[依赖标准](plugin-dependencies.md) 和 [Pilot 开发](pilot-development.md)。
 
-Pilot 与 AgentNode 共用从 Library 真身及授权事实派生的发现、读取和调用契约。有界能力摘要随 Goose 系统提示保留，完整说明、Skill、资源和 schema 按需读取；摘要、搜索和管理查询不赋予执行权限。当前 Turn 保持冻结授权，能力变化的生效与接续由 Host 决定，停止或新用户请求优先；变化不授权重做已完成任务。具体行为见 [Plugin](plugins.md#发现与读取) 和 [Session 契约](architecture.md#session渠道与入口)。
+Pilot 与 AgentNode 共用从 Library 和授权事实派生的发现、读取与调用规则。说明、摘要、搜索和管理查询不是执行授权；Graph/Plugin 包不携带凭据，不扩大宿主权限。知识库自动编译与通用 Plugin 市场暂缓。
 
-Plugin 说明不是权限策略。文件路径、网络、工具、凭据和控制动作由 Host/Sandbox 强制校验。Graph/Plugin 包不能包含密钥或扩大宿主授权；模型输出不构成授权。知识库自动编译与通用 Plugin 市场暂缓；受授权的插件依赖安装已进入管家目标（见 [插件依赖标准](plugin-dependencies.md)）。
-
-Library 拥有已安装能力、来源摘要和 owner-bound OAuth 事实，Host 拥有基础环境配置、私有凭据和输入请求。API 与 Pilot 通过稳定用例管理，不直接修改其他模块的私有 SQL 表、锁或字典。Plugin 代码和依赖视图由 Library 管理；Run 不冻结 Plugin 版本，节点调用使用当前 Library 版本，并将实际视图记入 Run 观察。开发引用保护只限临时资源，不变成 Run 历史环境绑定。Pilot 对工作区的 Rustup/Cargo 和 Python 使用权来自 Host 授权，不能由 Plugin 声明扩大。
+冻结 Run 定义或 Turn 授权不等于固定 Plugin 代码版本；节点调用使用当前 Library 版本，并记录实际代码与依赖视图观察。能力变化不能授权重做已完成任务，开发引用保护也不变成 Run 的历史环境绑定。
 
 ## 渠道与多用户工作
 
-普通企业助手路径为平台事件 → 可信 Session/Turn → 指定普通 Graph → 指定回复节点 → 原来源投递。用户消息不能覆盖服务端选择的 Graph、回复节点、Plugin、路径或权限。
+渠道路径是平台事件 → 可信 Session/Turn → 指定普通 Graph → 原来源投递。用户消息不能覆盖服务端选择的 Graph、回复节点、Plugin、路径或权限；原生调用身份和发送目标不能由模型伪造。
 
-同一 Session 串行，不同用户可以并发同图。当前 opt-in 常驻助手用普通 `wait_input (Op.host session.wait_input) → assistant (Agent) → reply (Op.host session.reply) → wait_input` 循环表达：首条消息惰性创建 Session 的 current assistant Run，后续 Turn 通过等待节点的固定产物进入同 Run，不覆写启动输入。Kernel 只支持通用 host port，不依赖 Session 或 WeCom；具体身份、等待和投递属于 Host，手动/standalone 默认无此授权。渠道不再接纳每条消息一个 Run 的旧形态。
+同一 Session 串行，不同用户可以并发同图。常驻助手由普通等待、工作、回复循环表达；长连接监管、消息身份和投递属于 Host/渠道，不进入 Kernel，也不默认授予手动或独立宿主。
 
-新消息打断旧轮，必须等 Goose 与工具执行者真正退出并保存中断事实后再接续；不能用停止整个 Run 后静默复活替代。旧回复 `suppressed` 不算成功，新轮复用绑定的原生历史与本节点现场，持续补充的输入事实应保留，超出当轮有界范围须明确提示。未知业务效果先由 Agent 核查，进程重启仍需显式 resume，不能自动重放。
-
-附件在可信入口冻结字节、hash 和 MIME，Graph 只读使用获准输入。常驻助手当前 Turn 使用 `/in/channel`；仅额外授权当前输入之前、最近 confirmed 投递之后最多最近 8 条中断输入的固定快照，使用 `/in/channel-pending/<turn>`，不全历史挂载。出站媒体按 Turn 隔离并复用 ACK 账本，同 Run 不构成复用上一轮图片的许可。图片输入、媒体工具结果、摘要增量与平台回传是不同能力，需分别验收。企业微信欢迎语、语音、卡片、审批和更广渠道产品需求按明确业务接入决定，不能因 SDK 提供接口就宣称已支持。
-
-Host 首次绑定查询最近 9 条、只授权最近 8 条并保存 `pending_truncated`；`output.interrupted_messages_truncated=true` 时 Agent 必须说明更早中断输入未自动纳入/未完整阅读，不能声称信息全保留。这不扩大历史权限，无数据库 schema 迁移，旧 facts 默认 `false`。
-
-主动发送只允许获授权目标，来源身份与原生调用身份不能由模型伪造。发送 ACK、业务效果和 UI 展示分别记录；断线后的未知结果由 Agent 核查，不盲目重发。公网服务、真实 vision 和实际成员授权单独验收。
+新消息打断旧轮，须等 Goose 与工具执行者真正退出并保存中断事实后再接续。附件及中断输入只在获准范围内使用，范围截断必须明确提示，不能声称读过全部历史；出站媒体按 Turn 隔离。发送 ACK、业务效果与 UI 展示分开记录，断线后的未知结果不盲目重发。各媒体、主动发送与平台功能按具体业务独立验收，不因 SDK 存在接口就宣称支持；渠道与启动恢复细节见 [当前架构](architecture.md#session渠道与入口) 和 [企业微信](wecom-assistant.md)。
 
 ## RSI 与研究应用
 
-RSI 是普通 Graph：从获授权 Run、源码、Graph/Plugin 与公开生态采集证据，五领域并行审查，经综合、独立评审和确定性门禁形成提案。证据目录随项目演进，不固定几百篇论文或依赖仓库名单；动态覆盖与未知必须可追溯。
+RSI 是普通 Graph/Plugin：从获授权 Run、源码、资产与公开生态采集证据，经综合、独立评审和确定性门禁形成提案。证据范围随项目演进，覆盖与未知必须可追溯；具体切片见 [RSI](rsi.md)。
 
 优先改善已有 Graph/Plugin。只有证据表明通用执行缺口，才修改核心。候选改动在隔离 workspace 验证，使用来源明确及未参与修改的保留案例比较。发现需求、生成候选、回归通过、获准发布和长期改善是不同状态。
 
@@ -140,24 +98,24 @@ RSI 是普通 Graph：从获授权 Run、源码、Graph/Plugin 与公开生态�
 
 最小执行闭包由 Graph、显式 Plugin/工具资源、同一 Runtime 和部署者配置组成。完整平台可组合 WebUI、Session/Pilot、Scheduler 和渠道；精简部署复用同一 Runner，不维护另一套语义。
 
-发行包记录资源与可执行身份，禁止密钥、未声明资源和可变状态；凭据、host-path grants 与用户数据属于部署环境。包构建、小图通过、真实业务验收和生产数据/配置切换分别记录。旧记录可原地只读盘点，不能冒充新原生会话或双写；生产切换和迁移需独立明确授权。
+发行包记录资源与可执行身份，不包含凭据、未声明资源或用户可变状态；凭据、host-path grants 与用户数据属于部署环境。用户应能下载发行物试用，而非必须 clone 和编译。构建成功、小图通过、真实业务验收和生产切换分别记录，迁移及生产切换需独立明确授权；原生包与服务运维见 [部署指南](rust-production-deployment.md)。
 
-默认是本机单服务进程。Bearer 白名单不等于完整多租户授权；公开部署必须有对应网络与身份边界。任意外部系统权限与业务审批由对应 Plugin/产品契约决定。
+当前管理面是本机单服务、loopback 访问，没有登录平台；远程使用须由 SSH 或外部认证代理建立边界，不把已有内部凭据机制当作多租户授权。外部系统权限与业务审批由对应 Plugin/产品契约决定。
 
 ## API 与用户界面
 
-WebUI 与 Pilot 使用同一资源 API，稳定 ID、状态、错误和游标是公共契约。Graph 编辑保留 layout；Run 视图展示路径、轮次、控制请求、节点对话/工具、文件与 Artifact。聊天中的 `#anchor/...` 引用进入已有对象页面并能返回会话，不增加对象视图系统。
+WebUI 与 Pilot 使用同一资源 API；稳定 ID、状态、错误和游标是公共契约。Graph 编辑保留 layout，Run 展示真实执行与交付，聊天对象引用进入已有页面并能返回会话，不另建对象视图系统。
 
-Pilot 的消息允许文字、文件与图片组合，回复允许展示图片和下载交付文件。Host 保存不可变原件，Session/Turn 保存归属与引用；网页上传和企微媒体接收复用公共附件处理，分别保留入口身份与授权。执行只读取获准输入，图片通过原生 ACP 内容交给 Goose；交付文件固定发布时的版本，不随之后工作区编辑变化。界面按 Host 的真实文件引用显示和下载，文档解析由获授权工具承担。
+Pilot 输入和回复支持文字、文件与图片；Host 保存不可变原件及归属，执行只读获准输入，交付固定发布时的文件版本，不随工作区后续编辑变化。上传、渠道媒体与原生工具结果复用附件基础能力，但保留各自身份和授权；文档解析由获授权工具承担。
 
-Health 与 readiness 分开。Responses 仅提供冻结的子集，Webhook、计划和手动输入共用 Run 接纳。浏览器刷新不能再次执行模型或外部副作用；API 缺失不能用空数组或假状态掩盖。具体路径见 [Web API 契约](rust-frontend-api-contract.md) 和 [使用指南](usage.md)。
+Health 与 readiness 分开，Responses 只承诺明确的子集。刷新不能再次执行模型或外部副作用，API 缺失不能用假状态掩盖；接口、附件和对话投影以 [API 契约](rust-frontend-api-contract.md) 为准。
 
 长期可见计划、上下文用量、跨会话附件整理、编辑后分支、导出和更深的 Copilot 联动保留为产品需求，按明确切片决定，不自动进入本轮开发。
 
 ## 验收与明确不做
 
-运行时回归默认使用小型 Graph 和确定性本地 Provider，实际经过 Host、Kernel、Goose ACP、授权 MCP 与 Sandbox，检查最终结果、节点历史和 workspace。低成本回归与少量真实模型兼容检查、大型业务内容验收分别进行，不能彼此冒充。
+确定性运行时回归、真实模型兼容、业务内容与最终部署验收不能彼此冒充，方法见 [Runtime 回归](runtime-contract-tests.md)。当前结论与未关闭事项统一见 [验收摘要](pilot-development-plan.md)，不在方向文档复制验收清单。
 
 不自造模型循环、通用记忆/计划平台、第二套 Runner、通用审批平台、未知效果人工处置平台、跨存储原子事务、外部 exactly-once 保证或云工作流集群。不把隐藏提示词当控制 API，不为未观察到的问题预建平台。
 
-当前验收结论与未关闭事项见 [验收摘要](pilot-development-plan.md)，未冻结的产品需求保留在本文。早期方向与迁移证据见 [历史归档](archive/README.md)，旧依赖和内部格式不约束当前核心。
+未冻结的产品需求保留在本文；早期方向与迁移证据见 [历史归档](archive/README.md)，历史命令、旧依赖和内部格式不约束当前核心。

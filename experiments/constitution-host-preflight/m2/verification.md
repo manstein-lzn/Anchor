@@ -3,7 +3,7 @@
 M2 的本地实现与验收按任务书 §10.12 收尾，最终结果见 [M2 交回](completion-verification.md)。常驻助手、执行结果与未知效果人工决定均在 Run 门面后接通；默认仍是旧 Runner，M3 未开始。并行分支 Op.call 复用 Host 既有准入拒绝，属于产品规则，不扩展校验器，见 [准入边界](parallel-call-boundary.md)。Trace 的并发读取根因、修复前五次稳定失败和原子发布说明见 [根因确认](trace-publication.md)。本页以下保留各切片的验证范围；最终验收不拼接旧结果冒充一次命令。
 ## FileStore 删除存储切片
 
-Store trait 和 MemoryStore 未改；FileStore 提供获批 remove，rename/sync/remove/sync，load 幂等清理遗留目录，资源锁文件单独留存。定向 7 项、Kernel 全量 44 项及 clippy 通过，详见 [存储操作与证据](deletion-boundary.md)。存储切片提交为 `0859373`，依赖与资源租约已按 §10.11 追认为 K0.2；当前 C1 以该提交为基线，后续 Kernel 零 diff，见[锁序与边界](../../../docs/constitution-refactor-log.md#k02filestore-删除与资源租约)。
+Store trait 和 MemoryStore 未改；FileStore 提供获批 remove，rename/sync/remove/sync，load 幂等清理遗留目录，资源锁文件单独留存。定向 7 项、Kernel 全量 44 项及 clippy 通过，详见 [存储操作与证据](deletion-boundary.md)。存储切片提交为 `0859373`，依赖与资源租约已按 §10.11 追认为 K0.2；当前 C1 以该提交为基线，后续 Kernel 零 diff，见[锁序与边界](../../../docs/archive/runtime-migration-2026-10-20/constitution-refactor-log.md#k02filestore-删除与资源租约)。
 
 ## Host 删除、Probe 与串行 Call
 

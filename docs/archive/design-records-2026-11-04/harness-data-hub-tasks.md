@@ -1,12 +1,14 @@
 # Harness 数据中枢：任务书
 
-编制：2026-10-20。架构见 [总体架构](harness-data-hub-architecture.md)，目标和原则见 [方向文档](harness-data-hub.md)。本文按阶段编号，用户会让执行 Agent "读 §P0"或"读 §P1"。
+> 历史归档（2026-11-04）：保留当时的推导、授权范围、过程与证据，不作为新的实施授权；当前行为见[架构](../../architecture.md)，未关闭事项见[统一台账](../../pilot-development-plan.md)。
+
+编制：2026-10-20。架构见 [总体架构](../../harness-data-hub.md#当前职责与依赖)，目标和原则见 [方向文档](../../harness-data-hub.md)。本文按阶段编号，用户会让执行 Agent "读 §P0"或"读 §P1"。
 
 ## 通用约定
 
 - **执行者**：原宪法迁移分支 Agent，在 `/home/mansteinl/Anchor` 的 master 上工作。
 - **顺序**：先做 P0，交回；再做 P1，交回。两个阶段互不依赖，但分开提交、分开交回、分开审查。
-- **纪律**：遵守 [开发约定](../AGENTS.md)。
+- **纪律**：遵守 [开发约定](../../../AGENTS.md)。
   - 只暂存自己改的路径，不用 `git reset`、`checkout`、`clean`、`stash` 丢弃改动；
   - 未跟踪的 `wecom-persistent-run-development-guide.tmp.md` 是其他工作流的草稿，不要动；
   - 不推送；
@@ -36,7 +38,7 @@
 
 ## §P0 噪声测量
 
-**状态（2026-10-20）：已完成。** 用户改为由主 Agent 直接推进，结论见 [P0 报告](../experiments/harness-hub/p0/report.md)：
+**状态（2026-10-20）：已完成。** 用户改为由主 Agent 直接推进，结论见 [P0 报告](../../../experiments/harness-hub/p0/report.md)：
 
 - 受控对比在统计上可行，但多步任务的波动主要来自路径长度，需要按轨迹分层或折算到每轮；
 - 两个任务的质量都在上限，需要 P4 的评测任务集；
@@ -138,7 +140,7 @@
 
 ## §P1 内核变更：时间、因果、配置、只读读取
 
-**状态（2026-10-20）：已实现，两轮独立审查通过后（`e172e05`），又按第一性原理做了简化：删除全局序号和内核层的因果引用。简化版审查通过，新的冻结基点 C1 为 `9a5fa57`。** 下面是原任务书，第 2、3 项已被简化取代，见 [P1 验证与审查](../experiments/harness-hub/p1/verification.md)。
+**状态（2026-10-20）：已实现，两轮独立审查通过后（`e172e05`），又按第一性原理做了简化：删除全局序号和内核层的因果引用。简化版审查通过，新的冻结基点 C1 为 `9a5fa57`。** 下面是原任务书，第 2、3 项已被简化取代，见 [P1 验证与审查](../../../experiments/harness-hub/p1/verification.md)。
 
 ### 目的
 
@@ -202,7 +204,7 @@
 
 ### 文档
 
-- 更新 [总体架构](harness-data-hub-architecture.md) 第 5.1 节，写入实际的字段名、选择和提交号；
+- 更新 [总体架构](../../harness-data-hub.md#当前职责与依赖) 第 5.1 节，写入实际的字段名、选择和提交号；
 - 在 [迁移最终说明](anchor-runtime-migration-overview.md) 里记录新的冻结基点。
 
 ### 交回
@@ -216,7 +218,7 @@
 
 ## §P2 事实词汇表与记录适配器
 
-**状态（2026-10-21）：已完成，由主 Agent 直接实现。** 见 [P2 报告](../experiments/harness-hub/p2/report.md)；实现形状见 [总体架构 5.2、5.3](harness-data-hub-architecture.md#52-anchor-facts事实词汇表p2-已实现)。
+**状态（2026-10-21）：已完成，由主 Agent 直接实现。** 见 [P2 报告](../../../experiments/harness-hub/p2/report.md)；实现形状见 [总体架构 5.2、5.3](../../harness-data-hub.md#观察配置与评分)。
 
 - 新 crate `anchor-facts`：资源命名、Validator、内容格式、配置清单和摘要、参数形状摘要、失败分类。
 - Host 记录器 `fact_recorder.rs`：观察事实存在执行端口自己的数据根 `state/kernel-facts/`，每次 AgentNode 调用提交一条记录。
@@ -227,7 +229,7 @@
 
 ## §P3 数据中枢读侧
 
-**状态（2026-10-21）：已完成，由主 Agent 直接实现，G1 通过。** 见 [P3 报告](../experiments/harness-hub/p3/report.md)；实现形状见 [总体架构第 6 节](harness-data-hub-architecture.md#6-读侧组件anchor-hubp3-已实现-l0l4)。
+**状态（2026-10-21）：已完成，由主 Agent 直接实现，G1 通过。** 见 [P3 报告](../../../experiments/harness-hub/p3/report.md)；实现形状见 [总体架构第 6 节](../../harness-data-hub.md#当前读侧契约)。
 
 - 新 crate `anchor-hub`：L0 来源、L1 增量投影、L2 轨迹代数、体检报告和停滞检测两个分析器、CLI（`health`、`stall --follow`、`rows`）。只依赖内核和 `anchor-facts`，没有任何 crate 依赖它，不写任何数据根，由围栏测试守住。
 - G1 用 30 次真实 Flash 运行发现：
@@ -240,7 +242,7 @@
 
 ## §P4 评测任务集
 
-**状态（2026-10-21）：已完成，由主 Agent 直接实现。** 见 [P4 报告](../experiments/harness-hub/p4/report.md)；代码在 `experiments/harness-hub/eval/`。
+**状态（2026-10-21）：已完成，由主 Agent 直接实现。** 见 [P4 报告](../../../experiments/harness-hub/p4/report.md)；代码在 `experiments/harness-hub/eval/`。
 
 - **评分成为事实**：
   - `anchor-facts` 增加资源 `grade/{run}`、`validator/grade` 和 `GraderOnly`，模型不能评分；
@@ -270,7 +272,7 @@
 
 ### 实验 1：修复三处工具接口缺陷（2026-10-21，已完成，采纳）
 
-方案和结果见 [实验 1](../experiments/harness-hub/p6/experiment-1.md)。方案在运行前写定，判定规则没有在看到结果后修改。
+方案和结果见 [实验 1](../../../experiments/harness-hub/p6/experiment-1.md)。方案在运行前写定，判定规则没有在看到结果后修改。
 
 - **准备**：
   - 配置清单增加 `host_sha256` 和 `tools_sha256`（提交 `1af26b1`），让只在 Harness 上不同的两组能被中枢分开；
@@ -297,7 +299,7 @@
 
 ### 目的
 
-旧的 RSI Graph（[RSI](rsi.md)）让 Agent 按领域分工，逐个读原始证据。这样读取量随 Run、Graph、Plugin 的数量线性增长，异构数据会分散注意力，结论也局限在已有的 Graph 和代码里。
+旧的 RSI Graph（[RSI](../../rsi.md)）让 Agent 按领域分工，逐个读原始证据。这样读取量随 Run、Graph、Plugin 的数量线性增长，异构数据会分散注意力，结论也局限在已有的 Graph 和代码里。
 
 P7 改成两部分分工：
 
@@ -356,9 +358,9 @@ P7 改成两部分分工：
 
 ### Graph 第一轮验收（2026-10-21）
 
-[rsi-signals](../examples/graphs/rsi-signals.json) 与只读 stdio Plugin 已实现，显式 fanout/join 并行四个调查槽和 explore；角色说明明显短于旧 RSI。提议包含层级、信号、证据、指标/坐标/现值/预期/质量及验证条件，gate 拦截质量下降和缺字段。
+[rsi-signals](../../../examples/graphs/rsi-signals.json) 与只读 stdio Plugin 已实现，显式 fanout/join 并行四个调查槽和 explore；角色说明明显短于旧 RSI。提议包含层级、信号、证据、指标/坐标/现值/预期/质量及验证条件，gate 拦截质量下降和缺字段。
 
-一次真实默认 Flash 盲测 **2/3，未通过内容验收**：找回 `anchor_run/project` 和 `anchor_edit/workspace`，未明确找回 `anchor_read/workspace`。评审为 REVISE，gate 随后因沙箱 Python 别名不可用失败，未发布。解释器选择已修正，保存输入的无模型 Host 回放正确返回 triage；未重跑模型或补签完整流程。成本 19,949,171 tokens、358 工具调用、12 次 records；explore 另有直接读取原始 A 目录，不能用 records 数代替全部读取量。完整提议、评分、轨迹与边界见 [P7 报告](../experiments/harness-hub/p7/report.md)。
+一次真实默认 Flash 盲测 **2/3，未通过内容验收**：找回 `anchor_run/project` 和 `anchor_edit/workspace`，未明确找回 `anchor_read/workspace`。评审为 REVISE，gate 随后因沙箱 Python 别名不可用失败，未发布。解释器选择已修正，保存输入的无模型 Host 回放正确返回 triage；未重跑模型或补签完整流程。成本 19,949,171 tokens、358 工具调用、12 次 records；explore 另有直接读取原始 A 目录，不能用 records 数代替全部读取量。完整提议、评分、轨迹与边界见 [P7 报告](../../../experiments/harness-hub/p7/report.md)。
 
 ### P7 当前待办
 

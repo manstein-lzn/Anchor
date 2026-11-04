@@ -44,4 +44,4 @@ Web 保留原恢复成功、时间、几何、产物和操作断言。human 恢�
 
 11 个 API 失败不是通过删除用例、增加忽略或修改非状态断言消除。定向复跑后的现场包含：①pause alias 在提交前取消，缺少原完成产物；②恢复会因已开始但没有终态结果而拒绝自动重放；③Paused/BudgetStopped 的新静止规则会改变旧占用/准入拒绝；④Session pause alias 原 409 变 202。第一、二项涉及执行与恢复事实，第三、四项涉及旧预期与新行为，均需任务书层面裁定后才能继续。
 
-断言变更、S19–S26 待审查项与未完成验收，见 [测量交回](measurement.md) 和 [工作记录](../../../docs/constitution-refactor-log.md#r2停止交回2026-10-19)。
+断言变更、S19–S26 待审查项与未完成验收，见 [测量交回](measurement.md) 和 [工作记录](../../../docs/archive/runtime-migration-2026-10-20/constitution-refactor-log.md#r2停止交回2026-10-19)。

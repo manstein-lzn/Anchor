@@ -99,7 +99,7 @@
 
 当前开发部署仍为原 Host PID 184037，SHA256 `984578f85d9bc460a8868f53236f8e99c04bc61d69f616993adcb67cb42d2f15`，显式配置 `ANCHOR_NODE_TOOL_DISCLOSURE=0`；隔离验收显式使用 `=1`。本次未更改 8077/5173、独立 8078、模型配置或共享依赖。
 
-2026-10-13 后续 A223：Goose 原生动态扩展的两项确定性接口实验完成，明确 ACP add 的轮内刷新缺口、原生 manager 的全量 schema 与管理边界。后续按需激活的实施方向见 [能力复用路线](../../goose-native-capability-reuse-plan.md)；此实验不关闭 MCP 懒连接，不改变 A222 的真实验收身份。
+2026-10-13 后续 A223：Goose 原生动态扩展的两项确定性接口实验完成，明确 ACP add 的轮内刷新缺口、原生 manager 的全量 schema 与管理边界。后续按需激活的实施方向见 [能力复用路线](../design-records-2026-11-04/goose-native-capability-reuse-plan.md)；此实验不关闭 MCP 懒连接，不改变 A222 的真实验收身份。
 
 ## 持续能力摘要与会话挂载更新（A224）
 

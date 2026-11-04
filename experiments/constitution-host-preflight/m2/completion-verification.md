@@ -80,7 +80,7 @@ Probe 的真实 Host/Kernel fixture 样本与按校验器、身份、动作、�
 
 四个极限：智能增长不改变宿主盖章和人工目的；规模增长仍按资源单写入者与纯 Graph 裁决隔离；时间增长只追加 Kernel history，人工观察不改写未知工具结果，测量投影可重建；有对手时身份、成本、路由和已结算/等待中的迟到结果仍由原边界裁决。新适配未把 Goose、Graph、Session 或恢复业务放进 Kernel。恢复历史扫描随单 Run 历史增长，未做无限规模性能承诺。
 
-S 候选 0；既有业务断言放宽 0、删除测试 0、旧测试新增 ignore 0，均在 [工作记录](../../../docs/constitution-refactor-log.md#m2-1012门面后能力补齐与交回) 登记。旧助手断言原样 include，新 fixture 的 cursor/prepare passes 仅为测试兼容投影，绝不写回持久事实。C2 棘轮和删除行数属于 M3 之后，本轮不报虚假清零。
+S 候选 0；既有业务断言放宽 0、删除测试 0、旧测试新增 ignore 0，均在 [工作记录](../../../docs/archive/runtime-migration-2026-10-20/constitution-refactor-log.md#m2-1012门面后能力补齐与交回) 登记。旧助手断言原样 include，新 fixture 的 cursor/prepare passes 仅为测试兼容投影，绝不写回持久事实。C2 棘轮和删除行数属于 M3 之后，本轮不报虚假清零。
 
 停止条件未触发。并行 Call 的先前疑点已由 §10.12 裁定，内核未再修改。收尾发现 master 已推进到 cc919d1（原子发布与网关确定性时序修复）；已通过合并提交 523dba4 同步该提交，不 rebase。两处冲突已逐文件登记在工作记录：验收文档保留双方结论，trace writer 使用 master 共享原子发布，双方回归均保留。
 

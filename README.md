@@ -13,6 +13,8 @@
 
 Anchor 是一个**个人 agent 平台**：作者用自己的工作和生活负载在跑它，用它承接反复占用时间和注意力的事，再用它自己的执行记录改进它自己。
 
+安装与使用看[使用指南](docs/usage.md)；从源码运行或参与开发，看[开发指南](docs/development.md)。
+
 它不是给陌生人的 SaaS，也不是又一个拖图工具。它回答的是更窄的问题：
 
 > 大模型是概率系统。要让它在真实业务上长期工作，需要什么样的条件？
@@ -51,7 +53,7 @@ Anchor 的选择是：**先把执行变成事实，再谈智能。**
 说清边界比列功能更有用：
 
 - **不是多租户云平台。** 单进程、本机、一个安装身份，面向 Linux x86_64；没有 HA、滚动升级和集中告警。
-- **不追求第一小时的顺滑。** 要编译 Rust、装 Bubblewrap、用固定版 Goose，上手成本是真的。
+- **不是免配置的业务套件。** 源码启动需要构建工具，source-free 发行包仍需目标机系统依赖；模型服务、账号凭据和第三方 Plugin 依赖由用户配置或授权，Pilot 协助完成。
 - **不承诺外部副作用的 exactly-once。** 它承诺的是：未知的操作不会被当成已知重放，事后能查清发生了什么。
 - **隔离强度是短板。** Bubblewrap 是沙箱方案里较轻的一端，Host 与图执行同进程。它在记账上很严，在隔离上一般。
 
@@ -68,19 +70,21 @@ Anchor 的选择是：**先把执行变成事实，再谈智能。**
 | 触发与渠道 | 手动、计划、Webhook、Responses、企业微信；一张常驻助手 Graph 对应一个机器人，每会话一个常驻 Run，重启原地接续 |
 | 自我改进 | `rsi` Graph 采集执行记录与代码，并行专项审查，机械门禁校验证据与提案，产出带验收和回滚条件的变更提议 |
 
-首次启动提供 7 张示例 Graph 和 5 个官方 Plugin。建议先跑不需要模型的 `call-report`，再配置模型尝试 `revise-loop` 和 `plugin-research`；清单见[上手示例](examples/README.md)。
+源码启动提供示例 Graph 与官方 Plugin，清单见[上手示例](examples/README.md)。建议先跑不需要模型的 `call-report`，再配置模型尝试 `revise-loop` 和 `plugin-research`。
 
 ## 快速开始
+
+从源码启动：
 
 ```sh
 git clone https://github.com/manstein-lzn/Anchor.git
 cd Anchor
-./scripts/dev.sh start     # 首次编译 Host、WebUI 与固定版 Goose，需要几分钟
+./scripts/dev.sh start
 ```
 
-打开 <http://127.0.0.1:5173>，在「设置 → 模型服务」填服务地址、协议、API key 和模型名，即可与 Pilot 对话。无需 `.env`，凭据存在 Host 私有存储里。`scripts/dev.sh` 使用独立的 `.local/rust` 数据根，不会接管仓库里已有的 Graph 和运行记录。
+打开 <http://127.0.0.1:5173>，先在「设置 → 模型服务」配置 default Flash，再与 Pilot 对话。无需 `.env`，凭据存在 Host 私有存储里。系统依赖、固定 Goose 构建及源码启动方式见[开发指南](docs/development.md)。
 
-需要 Linux + Rust stable + Node.js 20.19+/22.12+ + Git + Bubblewrap + slirp4netns；细分要求见[使用指南](docs/usage.md#安装与本地启动)。
+已有经校验的 source-free 平台归档时，按[使用指南](docs/usage.md)安装到全新目录并运行随包 launcher；长期运行的 systemd 配置归[部署指南](docs/rust-production-deployment.md)。目标机不需要 Rust 或 Node 构建环境，但仍需满足运行依赖和沙箱要求。
 
 ## 当前状态
 
@@ -90,24 +94,9 @@ cd Anchor
 
 | 想了解 | 从这里开始 |
 | --- | --- |
-| 安装、Graph、Run、Session | [使用指南](docs/usage.md) |
-| 当前实现与事实所有者 | [当前架构](docs/architecture.md) |
-| 产品边界、执行不变量、设计原则 | [产品与系统架构](docs/product-architecture.md) |
-| 为什么值得投入：执行记录与自我改进 | [Harness 数据中枢](docs/harness-data-hub.md) |
-| 自我改进的具体做法 | [RSI](docs/rsi.md) |
-| Plugin、Skill、MCP | [Plugin 指南](docs/plugins.md) |
-| 企业微信助手 | [企业微信指南](docs/wecom-assistant.md) |
-| 验收结论与待办 | [验收台账](docs/pilot-development-plan.md) |
-
-## 开发
-
-```sh
-./scripts/test.sh                        # cargo test，测试临时文件放 tmpfs
-cargo +stable clippy --manifest-path rust/Cargo.toml --workspace --all-targets --locked -- -D warnings
-npm --prefix apps/web test && npm --prefix apps/web run build
-```
-
-开始改动前请读 [AGENTS.md](AGENTS.md)。Kernel 契约冻结，业务代码只能通过 `application/run_access` 门面读写 Run。
+| 安装、配置模型、交给 Pilot 使用 | [使用指南](docs/usage.md) |
+| 源码启动、修改代码、运行检查 | [开发指南](docs/development.md) |
+| 编写 Graph/Plugin、查架构或部署契约 | [完整文档目录](docs/README.md) |
 
 ## 许可证
 

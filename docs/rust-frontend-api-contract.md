@@ -41,7 +41,7 @@ Run 列表、详情、时间线、子调用及 Pilot Run 查询共用 `projectio
 
 Session Call 拒绝通用 pause/resume；未绑定的排队调用不在启动时自动执行。暂停或预算保留中的 conversation 仍占有当前轮，须显式 stop 或结算后才能交接。普通显式 resume 与认证 Session-call 共用核查接续：先登记原生 pending 观察，逐项持久化“先核查，不盲目重放”的提示，再 Human release，沿同一原生 Session 继续；后台自动恢复不执行该释放。人工 Completed/Abort 决定 API 仍可供已知结果的直接裁定，保留持久化先于控制、幂等、冲突和 Abort 约束；不把核查提示当成工具成功或模型完成。已放弃后的历史观察仍保留，但不阻止新轮次。Run/Graph 删除继续受 Session、调用引用、worker 和相位约束。并行分支 Op.call 属于 Host 准入拒绝的组合。
 
-旧 `<state>/runs/*.json` 与旧 GraphRunRecord 格式不读取、不兼容，返回具名错误。Anchor 尚未投入生产，不提供离线迁移工具；本地状态清理范围见 M3 交回。已批准 S19–S24、S26 的相位与未知效果语义继续有效；W4、真实模型 Provider 与部署仍未验。
+旧 `<state>/runs/*.json` 与 format 1–14 GraphRunRecord 不读取、不兼容，返回具名错误；当前为 format 15，不提供旧数据转换工具。相位与未知效果契约以本节和 [Run 门面](run-access-facade.md) 为准；默认预算的用户决定、各真实 Provider 场景与部署验收分别见[统一台账](pilot-development-plan.md)，不以旧迁移阶段的状态概括当前全部能力。
 
 Run 详情另返回 `definition: {entry,nodes,edges,ops}`，仅来自该 Run 的冻结 snapshot，包含已展开的 inline 模块。它是只读展示拓扑，不含作者 layout、脚本、指令、输入及 host 参数，不能当作完整可重运行的作者定义；当前 Graph 的修改、损坏、移除或未保存草稿均不改变它。Run 文件与 Pilot 附件统一通过鉴权 Blob 下载并显示失败反馈。
 
@@ -71,7 +71,7 @@ Plugin API 提供 catalog、安装/移除与 owner-bound 授权事务。OAuth、
 
 `GET /plugins` 返回当前目录信息，不返回代码 `digest` 或使用说明；`GET /plugins/{id}` 按需提供完整详情、`digest` 和使用说明。HTTP、Pilot 与 `GET /sessions/{id}/plugins` 共用基础目录读取与健康观察：`definitionValid` 表示清单/声明路径结构有效，`dependenciesReady: bool|null` 表示当前依赖视图就绪；`contextAuthorized`、`connectionVerified` 没有实际证据时为 null。基础 `available` 由前两项决定，Session 可叠加上下文否决，不代表执行授权或连接成功。清单损坏项保留不可用行，Session 中缺失插件的已开启引用也保留以便撤销。启用仍校验完整定义和依赖；关闭不要求插件健康，保留归属、归档、required 和发布并发约束。列表不读取全部代码、生成 digest 或执行绑定；完整定义只在详情、挂载启用和执行时读取。
 
-Graph、Pilot、Library、历史 Run 共用插件设置的控件、排序、筛选、加载、错误及反馈；页面只提供上下文与操作适配。Web/Responses 新 Pilot 共用创建用例设置默认 network 挂载，通用 Session 创建及既有会话不改变。新增角色与首次并行区域通过共享角色构造消费 `GET /settings/model` 的 `execution.default_reference`，不在 Web 维护另一套模型默认值。
+Graph、Pilot、Library、历史 Run 共用插件设置的控件、排序、筛选、加载、错误及反馈；页面只提供上下文与操作适配。Web/Responses 新 Pilot 共用创建用例设置默认 network 挂载，通用 Session 创建及既有会话不改变。新增角色与首次并行区域通过共享角色构造消费 `GET /settings/model` 的 `execution.default_reference`，不在 Web 维护另一套模型默认值；设置读取失败不猜默认引用，迟到响应不覆盖更新后的草稿，用户显式选择和旧别名保留原义。
 
 可信渠道入口绑定会话、真实发言者、Graph、回复节点与本地冻结附件。`ChannelIdentity.conversation_kind` 可为 `single/group`，缺省 single 且序列化省略；群按 conversation 共享 Session，sender 始终表示本条消息的真实成员。WeCom 对应字段仍为 `metadata.chat_type`。同 Session 串行，私聊/不同群隔离；中断输入保留 actor，回执核对 actor、kind 与 conversation。普通 Graph 和 Pilot 管理入口分别接纳，不把助手业务交给管理 Agent。
 

@@ -2,7 +2,7 @@
 
 > 历史快照：保留当时设计与证据，不代表当前实现或待办。当前入口见 [文档目录](../../README.md)。
 
-2026-10-06 后续目标已确定为 [Goose-only Runtime](../../goose-runtime-migration.md)，预算控制暂不实施。Rust Host/Kernel 使用 Goose ACP，io-harness/Rig 的依赖、执行器和实验原型已移除。AgentNode、Pilot、恢复、渠道 Session、Library、OAuth 与 source-free package 均有分片证据；最新候选包用确定性本地 Provider 完成 Host/Web/Goose/Plugin Graph、重启及副作用幂等验收，未调用外部业务服务。此分支尚未切换生产服务、配置或数据，也未在目标发行版验证 systemd/动态库依赖；真实 Docmost、WeCom 和公共学术服务验收按计划暂缓。实现与验收边界见 [Rust 部署指南](../../rust-production-deployment.md)、[候选回归](../../rust-production-candidate.md) 和 [开发台账](../../pilot-development-plan.md)。
+2026-10-06 后续目标已确定为 [Goose-only Runtime](../../architecture.md#goose-与恢复)，预算控制暂不实施。Rust Host/Kernel 使用 Goose ACP，io-harness/Rig 的依赖、执行器和实验原型已移除。AgentNode、Pilot、恢复、渠道 Session、Library、OAuth 与 source-free package 均有分片证据；最新候选包用确定性本地 Provider 完成 Host/Web/Goose/Plugin Graph、重启及副作用幂等验收，未调用外部业务服务。此分支尚未切换生产服务、配置或数据，也未在目标发行版验证 systemd/动态库依赖；真实 Docmost、WeCom 和公共学术服务验收按计划暂缓。实现与验收边界见 [Rust 部署指南](../../rust-production-deployment.md)、[候选回归](../../runtime-contract-tests.md#release-与-source-free-候选) 和 [开发台账](../../pilot-development-plan.md)。
 
 本文说明当前实现，不是完整产品目标。产品目标和待讨论需求见 [产品与系统架构](product-architecture.md)，当前工作与验收见 [开发台账](../../pilot-development-plan.md)；Plugin 的当前格式与边界见 [Plugin 设计](../../plugins.md)；操作方式见 [使用指南](usage.md)。
 
@@ -221,7 +221,7 @@ research 从本次冻结 manifest、可选/开发依赖和包注册表项目链�
 
 ## 独立 Graph 调用
 
-同 Run 的局部并行与独立调用分别表达，具体见下节及 [组合设计](../../graph-composition-design.md)。
+同 Run 的局部并行与独立调用分别表达，具体见下节及 [组合设计](../../rust-graph-authoring-contract.md#组合与调用)。
 
 下列完整调用与 `session` 语义目前对应 Python 宿主；Rust 宿主已完成 A99 所述的 wait 子图 `input_map/files/result` 转交、真实本机 Plugin/MCP child 执行及 A82 的 wait/detach 生命周期与父子运行投影，并由 A86 补齐本地 child/Artifact 恢复硬化。Rust 仍未接通嵌套调用、真实业务 MCP 或跨存储故障窗口；`call.session` 已接通 wait/detach 与本地 ACK 验收，具体差异以开发台账与 Rust 迁移计划为准。
 

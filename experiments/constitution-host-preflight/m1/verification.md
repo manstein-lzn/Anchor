@@ -1,6 +1,6 @@
 # M1：完成 R2 的本地验收
 
-2026-10-19。起点 `d915314`，工作区 `constitution-core`。范围按 [全量迁移任务书 §1](../../../docs/constitution-migration-task.md#1-m1完成-r2对外状态词汇)，在本里程碑交回；M2–M5 未开始。源码与本证据同属本次 M1 提交。**本地完成，交回统一审查；没有触发 §8 必须停下条件。**
+2026-10-19。起点 `d915314`，工作区 `constitution-core`。范围按 [全量迁移任务书 §1](../../../docs/archive/runtime-migration-2026-10-20/constitution-migration-task.md#1-m1完成-r2对外状态词汇)，在本里程碑交回；M2–M5 未开始。源码与本证据同属本次 M1 提交。**本地完成，交回统一审查；没有触发 §8 必须停下条件。**
 
 ## 实现与验收边界
 
@@ -48,7 +48,7 @@ Kernel 与生产 GraphValidator 零改动；未新增 Code 提交种类、执行
 
 ## 断言与审查
 
-- 既有期望修改：Rust 26 处（20 处断言期望、6 处轮询目标）、Web 4 处；参数展开和 schema fixture 增补另列，不混算宏数量。[Rust](rust-assertions.md)、[Web](web-assertions.md) 与 [工作记录三表](../../../docs/constitution-refactor-log.md#m1完成-r2-对外词汇2026-10-19)。
+- 既有期望修改：Rust 26 处（20 处断言期望、6 处轮询目标）、Web 4 处；参数展开和 schema fixture 增补另列，不混算宏数量。[Rust](rust-assertions.md)、[Web](web-assertions.md) 与 [工作记录三表](../../../docs/archive/runtime-migration-2026-10-20/constitution-refactor-log.md#m1完成-r2-对外词汇2026-10-19)。
 - 新增测试：Rust 8、Web 5；删除 0、新增 ignore 0。业务行为断言没有放宽。
 - S25 作废；S19–S24、S26 七条保持待批，无新增 S 编号。S21 的 conversation 交接约束保留在 Session 层，S23 的旧预算写入拒绝仍未迁。
 - 无须修改 Kernel/Validator，没有触发 §8 必须停下条件。按 §0 在 M1 交回统一审查。

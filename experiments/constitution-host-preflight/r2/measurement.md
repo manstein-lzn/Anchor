@@ -62,7 +62,7 @@ PilotTurn 读 Session Turn；listener、投递、parallel 分支和节点已提�
 | S25 | HTTP/Pilot pause 从等待节点边界 → stop 即时取消；未完成结果、恢复与 Session 拒绝行为均受影响，已触发停止现场 |
 | S26 | 原缺观察的 Kernel 时间查询报不可用 → updated:null；旧 Run mtime 精确来源保留，时间不影响控制 |
 
-断言逐项见工作记录 [R2 附录](../../../docs/constitution-refactor-log.md#r2停止交回2026-10-19)，另有 [Rust 清单](rust-assertions.md)、[Web 清单](web-assertions.md)。没有因暂停别名失败而删测试、加 ignore 或修改非状态产物断言。
+断言逐项见工作记录 [R2 附录](../../../docs/archive/runtime-migration-2026-10-20/constitution-refactor-log.md#r2停止交回2026-10-19)，另有 [Rust 清单](rust-assertions.md)、[Web 清单](web-assertions.md)。没有因暂停别名失败而删测试、加 ignore 或修改非状态产物断言。
 
 ## 三个问题
 

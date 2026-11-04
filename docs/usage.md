@@ -1,177 +1,95 @@
 # 使用指南
 
-当前安装使用 Rust Host、固定 Goose 与编译后的 WebUI。完整平台安装后直接运行 `release/anchor-runtime/bin/anchor-platform start`，自动定位随包资源及 `data/` 下的私有目录，再在 WebUI 配置模型、Plugin 和开发环境，全程不要求 `.env`。完整安装与 systemd 操作见 [部署指南](rust-production-deployment.md)；下文介绍仓库开发方式和产品操作。
+普通用户按本页完成安装、配置模型和使用 Pilot；不需要先阅读架构文档。要从源码启动，请看[开发指南](development.md)。
 
-## 安装与本地启动
+## 支持环境
 
-需要 Linux x86_64、Git、Bubblewrap、slirp4netns、Rust stable（通过 rustup 安装），以及 Node.js 20.19+ 或 22.12+。构建固定 Goose 还需要 C 编译工具、curl、patch、rsync、binutils、util-linux 和 coreutils。沙箱需要可用的 user/mount/network namespace；脚本会先实际探测，失败时停止并提示，不使用共享宿主网络绕过。模型调用和 Plugin 网络权限分别配置。
+source-free 完整平台归档面向 Linux x86_64，目标机需要 Bubblewrap、slirp4netns、Git、shell、CA 证书、系统链接器及发行 inventory 所列的动态库。Rust 与 Node 是构建机依赖，不是目标运行环境要求；系统依赖由操作员准备，归档不会安装它们。
 
-Debian/Ubuntu 可先安装系统工具：
+沙箱需要系统允许隔离 namespace；安装了工具不等于系统策略允许实际执行。模型尚未配置、Python/Rust 尚未准备是正常的首次配置状态，Host 仍可打开 WebUI 做配置。具体依赖与预检边界见[部署指南](rust-production-deployment.md)。
 
-```sh
-sudo apt-get install build-essential curl git bubblewrap slirp4netns patch rsync binutils util-linux
-```
+## 安装与打开 WebUI
 
-Rust/rustup 和符合上述版本的 Node.js/npm 需预先安装。启动脚本不会自动使用 sudo 或修改系统的 namespace 策略。
+取得经审查的完整平台归档及可信构建报告中的 SHA256。manifest 只是文件 inventory，不是签名；不要只凭归档自己声明的摘要建立信任。操作员使用仓库的安装脚本安装到全新目录，再运行随包 launcher：
 
 ```sh
-git clone https://github.com/manstein-lzn/Anchor.git
-cd Anchor
-./scripts/dev.sh start
+scripts/install-platform.sh --archive /reviewed/platform.tar.gz \
+  --sha256 TRUSTED_BUILD_REPORT_SHA256 --install-root /existing/parent/anchor
+/existing/parent/anchor/release/anchor-runtime/bin/anchor-platform start
 ```
 
-启动后打开 <http://127.0.0.1:5173>，先在「设置 → 模型服务」保存 default Flash，再回到 Pilot 对话。5173 统一转发到 <http://127.0.0.1:8077> 的 Rust Host，页面使用已构建的 WebUI，不加载 Vite 开发依赖。脚本使用 `.local/rust`，分别保存 catalog、state、workspace 和 Library；首次向可编辑 catalog 导入 8 张现有示例图，向 Library 安装 5 个官方 Plugin 及本地工具；不自动运行 Graph、调用模型或启用渠道。首次 `start` 自动执行锁定的 `npm ci`、增量构建 debug Host/relay、准备 `.local/bin/goose` 并构建缺少或已更新的 Web 资产。Goose 配方自动安装固定工具链的 musl target 和已校验的交叉编译器；首次需要联网，后续复用产物；Goose 版本、补丁或配方变动时才重新准备。`setup` 准备依赖和插件但不启动服务，示例 Graph 在 Host 启动后导入；`status`/`stop` 不下载或构建。缺少系统工具时提示具体缺项；源码构建成功后使用本机产物，不检查跨机器固定二进制摘要。
+安装器不启动服务或注册开机自启，也不覆盖已有目录；不提供在位升级或旧 Python 部署数据的迁移工具。模型、运行记录、工作区和环境放在安装根的私有 `data/` 下，不写入只读 release。不要用全新安装器覆盖已有现场。
 
-默认使用 `rust/target/debug`（或 `CARGO_TARGET_DIR/debug`），不自动选取旧 release 产物；指定自定义 Host/relay 时要求路径已经可执行。拉取更新或修改代码后执行 `./scripts/dev.sh restart`，脚本完成增量构建和必要的 Web 资产更新。开发脚本和 Vite 均不加载 `.env`；旧文件存在也不会执行其中内容。可选的路径、端口等覆盖只取显式进程设置，见 [脚本](../scripts/dev.sh) 和下方部署参数。
+长期运行时，由操作员按[systemd 部署步骤](rust-production-deployment.md#run-under-systemd)准备服务账号、数据归属并安装[服务模板](../deploy/systemd/anchor.service)，然后执行 `sudo systemctl enable --now anchor.service`。模板使用同一个 launcher，提供开机自启和失败重启（`Restart=on-failure`）；这不是卡死检测，也不等于所有业务已经过长期稳定性验收。
+
+本机打开 <http://127.0.0.1:8077>。**Anchor 没有内置登录，只监听 loopback。** 在服务器上运行时，从自己的电脑建立隧道：
 
 ```sh
-./scripts/dev.sh restart
-./scripts/dev.sh stop
+ssh -N -L 8077:127.0.0.1:8077 user@server
 ```
 
-只操作脚本持有的 PID；启动前检查端口与当前运行任务。重启会中断活动节点，之后应查看持久记录并继续。现有 `.local/demo`、旧环境和运行历史不会被自动迁移或清理。
+随后在自己电脑打开同一地址。也可由操作员配置带认证的反向代理，不要直接暴露管理接口；长连接代理要求见[部署指南](rust-production-deployment.md#channels-and-remote-access)。
 
-## 附带的 Graph 与 Plugin
+## 配置模型
 
-源码启动后，工作流列表中可直接打开 `call-report`、`call-worker`、`revise-loop`、`parallel-audit`、`plugin-research`、`deep-academic-research` 和 `wecom-persistent-assistant`。建议先运行 `call-report`，输入 `{"report_code":"DEMO-001"}`；它仅使用 Op 和子工作流，无需模型。保存 default Flash 后可尝试写作或调研图。
+打开「设置 → 模型服务」，先填好 `default` 服务的地址、协议（`chat` 或 `responses`）、API key 和 `flash` 模型名并保存，即可使用 Pilot。地址接受 HTTPS，或用于本地测试的 HTTP loopback IP 地址；不能包含 URL 用户凭据、query 或 fragment。
 
-插件库已安装联网、学术调研、Docmost、企微和 Anchor 管家。Docmost、企微的服务配置仍在网页按需填写；首次安装不会自动连接账号或启用监听。图与插件的用途、配置条件及其他示例见[上手示例](../examples/README.md)。
+`pro` 与 `backup` 可按需配置。两组服务独立保存，密钥不回显、不保存在浏览器；不要把凭据写进 Graph、Plugin 包或聊天。更换服务地址或协议需要重新填密钥，清除后不会退回旧环境值。无需编辑 `.env`。
 
-导入只在首次执行：同名内容不覆盖，后续源码更新/重启也保留用户修改和删除。显式指定 entry bundle、自定义 Host 或外部服务不自动导入。这是源码启动行为，完整平台发行包仍按自己的清单交付。
+「测试 Flash / Pro」会发送小请求，可能产生费用；测试不保存草稿，保存也不会自动测试。若显示「已连接，但没有收到完整模型结果」，只证明收到响应，尚未验证模型输出。认证失败、权限错误、限流等按页面的实际错误处理。
 
-## 模型与 Goose
+**保存后下一 Turn 使用新配置，当前执行中的一轮保持原配置，无需重启。** Pilot 默认使用 default Flash；Graph 未指定模型时同样如此。backup 仅供显式选择，**不会自动接管失败任务**。
 
-源码启动固定 Goose v1.53.0、仓库补丁和上游 Cargo.lock，构建静态 x86_64 musl lean ACP-only 二进制，不含完整 CLI、调度器、bundled MCP 与平台扩展。`scripts/dev.sh start` 调用[构建脚本](../scripts/build-goose-acp.sh)准备本机产物，并自动将实际摘要传给 Host，同时定位 relay 隔离模型控制网络。源码用户无需设置 `ANCHOR_GOOSE_BINARY_SHA256`。
+未配置模型时发送失败，页面会在确认缺项后提供「前往模型设置」，保留文字与附件，保存后可返回重试。旧配置和恢复凭据的边界见[部署指南](rust-production-deployment.md#health-failures-and-existing-data)。
 
-下载完整平台包时，安装器按该包的发行规则核验二进制，工具已随包提供；当前固定发行产物说明见[发行 builder](../rust/anchor-distribution/README.md)。源码启动不受该成品摘要约束。
+## 交给 Pilot 搭建 Graph 和 Plugin
 
-Host 可以在没有模型配置时启动。Pilot 发送消息或继续回复遇到服务不可用时，网页读取 Host 的默认模型执行状态；确认配置尚未齐备后，提示先配置默认服务的地址、Flash 模型和 API key，并提供「前往模型设置」按钮。原文字和附件保留，保存设置后返回即可重试；已配置或状态读取失败时保留原错误，不推断是配置缺失。
+Pilot 可以用自然语言查询、创建和管理 Graph、Run、Plugin 与产物。把 Graph JSON、Plugin 工程文件或它们的压缩包作为附件交给 Pilot，让它先检查内容、依赖、权限和当前环境，再协助配置；这不是任意压缩包都能自动安装的保证。
 
-WebUI「设置 → 模型服务」固定提供 `default`、`backup` 两组，每组填写服务地址、接口协议、模型服务商提供的 API key，以及 `flash`、`pro` 两个模型名。两组独立保存，可只填写一部分；未填全会显示待配置。密钥不回显、不保存在浏览器，即使两组地址相同，也能分别使用和清除不同账户的密钥。连接测试会区分模型服务的认证失败（401）、权限拒绝（403）、接口错误、限流和临时故障，不把 Anchor 管理接口的 400 显示为上游服务状态。
+完整平台从空业务 Graph catalog 开始，不预装全部业务示例。Plugin 先安装到 Library，再按需要挂载；安装和启用是两回事，挂载变更从后续 Turn 生效，说明文件本身不安装环境或授予权限。源码启动的示例用途见[上手示例](../examples/README.md)。
 
-点击「测试 Flash」或「测试 Pro」会发送一条小请求，可能产生少量费用；测试不保存草稿，保存也不会自动测试。**保存后，Pilot 下一轮使用 default 的 Flash 模型；当前正在执行的一轮保持原配置，无需重启服务。** 已有对话会保留历史。Graph 未指定模型时也使用 default Flash，可明确选择两组服务的 Flash/Pro；backup 不会自动接管失败任务。旧配置可预填 default 的地址、协议与 Flash，Pro 留空；首次在原地址保存可沿用密钥，随后各自独立。更换地址或协议需重新填密钥。
+需要 Python/Rust 时，在「设置 → 开发环境」初始化，明确允许联网下载后再执行；可查看进度、停止、失败后重试。关闭页面不会取消初始化，重新打开可继续查看状态。已有 Python 可点「刷新状态」检测；已有解释器不代表全部依赖工具齐备，缺项以页面说明为准。
 
-测试等待上限为 20 秒。显示「已连接，但没有收到完整模型结果」时，说明服务已经响应，本次还没验证到模型输出；不能据此认定密钥错误或网络不通，也不能当作模型已可用。
+安装第三方 Plugin 前会审阅来源、工具与权限，需要时由用户确认；服务账号、凭据及外部依赖授权仍由用户提供。凭据在插件详情中填写和测试，不要直接发给 Pilot。「已保存」只表示配置已保存，「工具发现成功」也不证明具体业务操作成功。显示「由部署管理」的字段由操作员维护。
 
-模型服务地址、协议、模型名与 API key 只从 Host 私有管理存储读取，环境变量中的 `ANCHOR_MODEL_URL/API_KEY/NAME/WIRE_API/ALIASES` 不再作为配置或回退源。default 尚未保存时，仅兼容已有托管配置；保存之后缺少字段或密钥会明确失败，不退回旧服务。历史服务凭据用于恢复旧任务，可在网页折叠的凭据区域更新或清除。旧 `.env` 和安装中的 `config/model.env` 不会自动导入、覆盖或删除；请在 WebUI 核对并保存当前服务。新安装不接受 `--model-config`。
+Graph 是可传播的 JSON 定义，Plugin 是包含 `plugin.json`、Skill 和资源的工程，可声明 stdio/HTTP MCP 与运行依赖；分发资产不应包含用户凭据。编写或分发自己的资产时，再查[Graph 作者契约](rust-graph-authoring-contract.md)、[Plugin 契约](plugins.md)和[Pilot 开发](pilot-development.md)。
 
-仅准备源码依赖、不启动服务：
+## Graph、运行与常驻机器人
 
-```sh
-./scripts/dev.sh setup
-```
+- 在 WebUI 创建或打开 Graph，编辑节点、连线、布局和所挂 Plugin，保存后校验。「运行工作流」填写 JSON 对象输入，运行会冻结当时的定义和输入，不随后续编辑改变。Graph/Run 页面可把对象引用带入 Pilot 草稿，发送后请它协助。
+- 「插件库」支持从本机目录或 GitHub 目录链接预检、安装与更新；展示来源、权限与替换影响后确认。操作中离开或刷新页面不等于取消，可返回查看进度。卸载前也会检查运行/会话引用与影响。
+- 「运行 → 定时计划」支持一次性、固定间隔、每天、每周和每月，按服务所在时区执行。重新启用只安排未来时点；暂停或删除计划不删除既有 Run。
+- 企业微信按**一张常驻助手 Graph 一个机器人**配置，各 Graph 分别启停，不是整个 Host 只有一个入口。同一个 Bot 账号不能同时被两张已启用的 Graph 使用。「运行看板 → 消息会话」管理各对话实例；连接、成员和通知配置见[企业微信指南](wecom-assistant.md)。Host 监管网关，不要重复启动独立网关。
 
-手动重建 Goose 时使用 `scripts/build-goose-acp.sh --output "$PWD/.local/bin/goose"`；日常启动的 `--ensure` 按配方输入标记和本机输出校验和复用缓存，输入更新或文件缺失/损坏则重新构建。`.sha256` 和 `.build-record.json` 是可重建的构建记录，摘要不要求与其他机器相同。源码、交叉编译器的下载仍核验固定摘要，依赖按 `--locked` 编译。
+## 对话、历史与恢复
 
-完整平台启动器直接定位随包二进制，不从调用进程继承部署或凭据设置。开发者可显式覆盖 `ANCHOR_GOOSE_BINARY`、`ANCHOR_GOOSE_RELAY_BINARY` 等路径；默认源码启动会在所选 Goose 输出路径准备本机产物并自动传递其摘要。
+Pilot Session 保存长期对话与运行关联；刷新会接回同一 Turn，**关闭页面不等于停止执行**。必要提问在当前 Turn 内回答，删除确认绑定具体目标；服务重启不会重放旧确认，回答已保存也不代表外部操作已经完成。
 
-`ANCHOR_MODEL_CONTEXT_WINDOW`（正整数，可选）会作为 `GOOSE_CONTEXT_LIMIT` 传给 Goose，覆盖它按模型名推断的上下文窗口——本机部署用别名与 OpenAI 兼容端点时该推断不可靠。
+Run 页面可查看路径、状态、节点对话、工具请求/结果、workspace 与 Artifact。暂停/停止请求先保存，节点收束后才显示最终状态；删除受活动执行、会话与 Graph 调用引用限制。
 
-网页中的接口协议为 `chat` 或 `responses`。URL 接受 HTTPS，或仅用于本地测试的 HTTP loopback IP endpoint；拒绝 URL 用户凭据、query 和 fragment。Graph 的四个设置引用与旧别名规则见 [作者契约](rust-graph-authoring-contract.md#模型选择)。每个新 invocation 冻结绑定；恢复同一个未完成 invocation 仍使用原模型与服务。
+服务或进程中断后，先看已保存状态和外部现场，再让 Agent 核查并继续原 Run。**对结果未知的发送、写入等操作，不盲目重放。** 重启服务、恢复 Run 和外部动作完成是三件不同的事。
 
-沙箱网络**默认隔离**：只要 `ANCHOR_GOOSE_BINARY` 同目录（或 `ANCHOR_GOOSE_RELAY_BINARY` 指定的绝对路径）存在沙箱中继 `anchor-net-relay`，Goose 就运行在自己的网络命名空间里，只能通过沙箱内中继经 UNIX socket 到达 Host bridge 与模型代理，真实 provider 凭据只留在宿主侧。发行包把中继放在 `bin/anchor-net-relay`（与 Host 同目录），部署时与 Goose 二进制放同一目录即可。设 `ANCHOR_GOOSE_LOCAL_NETWORK=0` 回到共享宿主网络（此时**必须**显式 `ANCHOR_GOOSE_ALLOW_SHARED_NETWORK=1`，该模式不是 loopback-only 隔离）；找不到中继二进制时同样回退到共享模式并需要该开关。`anchor-devtools preflight` 会校验隔离模式下的中继二进制存在。
+已结束 Run 和未受保护的历史交付默认按 30 天或 20 GB 容量限制回收；当前执行/恢复所需内容受保护，Harness 事实与评分不随之回收。需要长期保留的文件应另行备份，详细规则与调整入口见[保留策略](design-cards/003-data-retention.md#8-批准与实现2026-10-23)。
 
-工具披露（AgentNode）：默认**自动**——当某个节点挂载的工具里会有超过 3 个被藏起来时，宿主只列出 Anchor 自己的核心工具加两个披露工具 `anchor_tools`（一行摘要检索、分页）与 `anchor_tools_call`（按名调用），其余工具用时再取；被藏起来的工具**无法被直接调用**（Goose 会拒绝当轮未广告的调用），只能经 `anchor_tools_call` 到达。隐藏工具不超过 3 个时不披露（两个元工具本身约 890 字节，比省下的 schema 更贵）。`ANCHOR_NODE_TOOL_DISCLOSURE=1` 强制披露、`=0` 关闭；`ANCHOR_NODE_ALWAYS_VISIBLE`（JSON 数组）可收窄始终可见的工具集合。
+## 日常操作与常见失败
 
-模型调用默认由 Host 代理：Goose 进程只拿到 Host bridge 的 loopback 地址和一次性 token，provider 端点与真实 API key 留在宿主侧，宿主用真实响应流式回传。`ANCHOR_MODEL_DIRECT=1` 是显式回滚开关，会让沙箱像早期版本那样自己持有端点与凭据并直接拨号；仅在代理出问题时临时使用。
+按模板配置 systemd 服务后，使用系统原有命令；手动启动的 launcher 不会因执行这些命令而自动纳入 systemd：
 
-`ANCHOR_GOOSE_ALLOW_SHARED_NETWORK=1` 是 Goose 进程的明确网络接入决定；业务工具和节点仍受 Host/Sandbox 授权。模型配置与凭据保存在 Host 的私有管理存储，不放进部署环境、Graph 包或版本库。
-
-「设置 → 开发环境」可初始化 Python 和 Rust，显示进度、停止并在失败后重试。完整发行包提供固定的初始化工具；初始化前需要勾选允许联网下载。关闭页面不会取消初始化，重新打开会读取 Host 上的操作状态。Python 当前版本自动检测，点击「刷新状态」会重新读取，不需要联网或初始化。已有解释器不代表依赖准备工具齐备；缺少工具时页面会禁用初始化并说明原因，已有解释器仍可使用。源码开发部署也可通过显式进程设置登记固定 uv、摘要与软件源，检查时复用原解释器，见下方部署参数；部署管理的版本只读显示，不能在网页修改。完整平台安装自动提供这些固定工具。
-
-## 配置插件与 MCP
-
-在插件库打开插件详情，填写服务地址及访问凭据后保存，再点击「测试连接」。Docmost 的网页操作与附件工具共用一份 Key；轮换后下一次调用直接使用新值，无需编辑 `.env` 或重启。更换服务地址时需要重新填写 Key；清除后后续调用会提示缺失，不会使用旧环境值。
-
-「已保存」只表示 Host 保存成功；「初始化与工具发现成功」也不代表页面写入或附件上传已通过。凭据不会回显。默认配置属于当前登录身份，旧共享 local Session 不会自动获得个人凭据。
-
-仅当部署者通过 `ANCHOR_PLUGIN_EXTERNAL_CONFIGURATION` 明确托管字段时，网页显示「由部署管理」。具体声明及恢复边界见 [Plugin 连接配置](plugins.md#连接配置与凭据)。
-
-## Host 根目录与权限
-
-| 配置 | 用途 |
+| 操作 | 命令 |
 | --- | --- |
-| `ANCHOR_RUNNER_BUNDLE_ROOT` | 可选的部署管理入口 bundle；对应 Graph 禁止经 HTTP 改写，普通业务 Graph 不设置此项 |
-| `ANCHOR_RUNNER_CATALOG_ROOT` | 可编辑 Graph catalog |
-| `ANCHOR_RUNNER_STATE_ROOT` | RunStore、Session/Turn、计划、渠道和锁 |
-| `ANCHOR_RUNNER_WORKSPACE_ROOT` | 节点 workspace、Artifact、输入与原生会话 |
-| `ANCHOR_RUNNER_LIBRARY_ROOT` | 已安装 Plugin/tool 与授权资源；**插件只有这一处家**。未设置时回退到 `CATALOG_ROOT`（单根部署把库根与图目录放同一处）；两者都没设的部署没有插件家，插件相关操作具名拒绝——**不会**退到 `BUNDLE_ROOT` 旁边（图包只带引用，不是插件家） |
-| `ANCHOR_RUNNER_WEB_ROOT` | `apps/web/dist` 或发行 Web 目录 |
-| `ANCHOR_RUNNER_GRAPH_NAME` | 可选的部署管理入口 Graph 名，与 bundle 使用同一身份及修改保护 |
-| `ANCHOR_RUNNER_LISTEN` | 默认 `127.0.0.1:8077` |
-| `ANCHOR_RUNNER_ALLOWED_COMMANDS` | 显式命令列表，例如 `sh,git` |
-| `ANCHOR_RUNNER_LISTEN` | 必须监听 loopback（默认 `127.0.0.1:8077`）。Anchor 没有登录，远程访问经 SSH 隧道或操作员自己的已认证入口；旧配置里的 `ANCHOR_API_KEYS` 会让 Host 拒绝启动，删掉即可 |
-| `ANCHOR_DEPENDENCIES_PYTHON`、`ANCHOR_PILOT_PYTHON_ENABLED` | 开发部署已有 Python 路径及可选 Pilot 使用许可；完整平台在网页初始化 |
-| `ANCHOR_DEPENDENCIES_UV`、`ANCHOR_DEPENDENCIES_UV_SHA256`、`ANCHOR_DEPENDENCIES_SOURCES` | 开发部署显式登记固定依赖工具与软件源；三项配套，完整平台由发行 manifest 提供 |
-| `ANCHOR_RETENTION_DAYS`、`ANCHOR_RETENTION_MAX_GB` | 已结束 Run 的自动回收：超过天数（默认 30），或 Run 数据总量超过上限（默认 20 GB，从最旧的删起），就回收。启动时执行一次，之后每小时一次。`0` 或 `off` 关闭对应限制；数据中枢的事实和评分不回收。见[设计卡 003](design-cards/003-data-retention.md) |
+| 查看服务状态 | `systemctl status anchor.service` |
+| 最近日志 / 持续查看 | `journalctl -u anchor.service -n 100` / `journalctl -u anchor.service -f` |
+| 启动 / 停止 / 重启 | `sudo systemctl start anchor.service` / `sudo systemctl stop anchor.service` / `sudo systemctl restart anchor.service` |
+| 检查开机自启 | `systemctl is-enabled anchor.service` |
 
-可写根应彼此隔离并在 release 外。Host 在监听前验证 bundle、探测可写根并获取 deployment-writer lease；同一 state root 只允许一个 writer。第三方工具环境与本地输入只按明确注册/授权挂载，不因模型提出路径就允许读取。
+私有数据保存在 `<install-root>/data`；标准服务模板使用 `/var/lib/anchor/platform/data`，不是只读运行时文件的一部分。停止 writer 后再做一致性备份；不要让手动 launcher 与 systemd 服务同时写同一份数据。
 
-正式平台部署使用 [systemd 模板](../deploy/systemd/anchor.service)，由安装启动器设置以上路径与控制参数，无需环境文件。服务只监听本机，没有登录；需要远程访问时由操作员自行加一层认证入口。
+| 现象 | 处理 |
+| --- | --- |
+| Bubblewrap 或沙箱执行失败 | 检查系统依赖、namespace 策略及当前授权，不通过降低隔离或放宽权限绕过 |
+| 服务未启动或没有开机自启 | 核对服务模板、账号与数据权限，按部署步骤启用；完成归档安装不代表服务已启动 |
+| Pilot 提示默认模型未配置 | 在「设置 → 模型服务」保存 default Flash，返回原草稿重试 |
+| Plugin 缺依赖、凭据或权限 | 在开发环境/插件详情补齐所需配置或授权，不能用安装成功替代运行验证 |
+| 运行中断或动作结果未知 | 查看原 Run 和外部效果，让 Agent 核查后继续，不覆盖安装或重复发送 |
 
-## Graph 与 WebUI
-
-在 WebUI 创建或打开 Graph，编辑 Agent/Op、边、反馈、子图、布局和 Plugin。保存时编译并校验，运行时冻结定义/输入。「运行工作流」打开输入表单，校验 JSON 对象并保留该工作流上次填写的草稿。Graph 和 Run 页面可把对象引用带入 Pilot 草稿，由用户发送后开始协助。仓库示例位于 [examples/graphs](../examples/graphs)，安装所需官方工具后可以通过 Graph API 导入。
-
-「插件库」支持从本机目录或 GitHub 目录链接安装插件，预检展示来源、权限和替换影响，确认后执行。安装期间可离开页面或刷新，再从操作列表查看进度；Host 重启后按 Library 实际状态重新检查。插件详情可配置、轮换和清除声明的凭据，也可预检卸载影响后确认卸载。被运行或会话引用的插件按 Host 前置条件处理。
-
-「运行 → 定时计划」可创建、编辑、暂停、启用和删除计划，支持一次性、固定间隔、每天、每周和每月，按服务所在时区执行。重新启用只安排未来时点；暂停或删除计划不会删除既有 Run。
-
-需要定时发送企业微信通知时，在执行节点挂载渠道 Plugin，并在任务输入与指令中明确机器人 Graph 和真实接收人，见[定时通知配置](wecom-assistant.md#业务工具与附件边界)。
-
-企业微信入口在「图编排 → 消息触发」绑定当前工作流并启停，每个 Host 仍只有一个入口。绑定其他工作流时先保存当前图的绑定，再启用。「运行看板 → 消息会话」查看各对话的实例、打开 Run，以及按 Host 允许的操作停止、恢复、退役或清理。监听图的「查看会话」也打开同一管理界面；具体权限与恢复边界见 [企业微信](wecom-assistant.md)。
-
-```sh
-curl -X POST http://127.0.0.1:8077/graphs \
-  -H 'Content-Type: application/json' \
-  --data '{"name":"research"}'
-node -e 'const fs=require("fs");process.stdout.write(JSON.stringify({definition:JSON.parse(fs.readFileSync("examples/graphs/deep-academic-research.json","utf8"))}))' | \
-  curl -X PUT http://127.0.0.1:8077/graphs/research \
-    -H 'Content-Type: application/json' --data-binary @-
-```
-
-本机 API 不需要凭据。Graph PUT 的接受格式、资源错误和诊断以 [Web API 契约](rust-frontend-api-contract.md) 为准。Plugin 必须先安装到 Host canonical Library；名称存在不代表外部服务或模型凭据可用。
-
-AgentNode 负责模型工作，OpNode 负责确定性命令/调用。Plugin 直接挂到 AgentNode。反馈边允许带具体总结返工，节点在同 Run 的已提交产物基础上继续；读写声明、只读输入和 Sandbox 权限由运行时检查。研究完成来自目标与证据，不能以轮次数代替内容验收。
-
-内联模块展开到同一 Run。`Op.call` 的 `wait`/`detach` 产生可追溯父子 Run；`call.session` 保留可信用户/来源。配对 `fanout`/`join` 允许独立串行分支并发并统一收束；嵌套、交叉或不支持的调用组合保存/接纳时拒绝。定义见 [组合设计](graph-composition-design.md)。
-
-## Run、历史与恢复
-
-Run 页面呈现实际路径、轮次、状态、节点对话、工具请求/结果、workspace 与 Artifact。节点之间通过不可变产物和只读输入交接，Git 视图可用于提交绑定的审查。Artifact 是产物权威，前端缓存和模型摘要不是执行记录。
-
-暂停/停止请求先保存，节点收束后才显示最终状态。继续原 Run 保留 cursor、invocation 与 Goose 原生 Session。进程中断可能留下工具结果未知事实；Agent 读取已保存历史和现场，核查效果后继续，运行时不盲目重放外部操作。
-
-删除会检查活动执行和 Graph 调用引用。持续会话中的 Run 共享原生 scope，单条删除受到限制；整 Graph 删除仍遵守调用/执行与精确确认门禁。已开始 Run 不因 Graph 编辑改变身份。
-
-## Pilot Session
-
-Pilot 用自然语言查询和管理 Graph、Run、Plugin 与 Artifact。Session 保留长期对话和运行关联；每次输入使用稳定 `request_id`，刷新通过 SSE 游标接回同一 Turn。页面关闭不等于停止执行。
-
-```text
-POST /sessions
-POST /sessions/{session}/turns
-GET  /sessions/{session}/messages
-GET  /sessions/{session}/turns/{turn}/events?after=<cursor>
-POST /sessions/{session}/stop
-GET  /sessions/{session}/turns/{turn}/questions
-POST /sessions/{session}/turns/{turn}/questions/{question}/answer
-```
-
-必要提问保持同一 Turn；回答可接受、拒绝或取消，重复相同回答幂等。删除确认绑定精确目标与资源状态。服务重启中断在途问题，不重放旧确认；保存回答不代表外部操作已经完成。
-
-## Plugin 与业务示例
-
-Plugin 保留 `plugin.json`、Skill 和资源，MCP 可用 stdio 或 HTTP。官方可执行文件使用 Rust，并在沙箱只读挂载。第三方 Plugin 可声明自己的运行环境，需部署者准备并授权；清单不是自动安装器。
-
-详细操作见 [Plugin 指南](plugins.md)。企业助手、学术研究、RSI 和周报分别见 [企业微信](wecom-assistant.md)、[RSI](rsi.md) 和 [周报](weekly-work-report.md)。Host 自动监管 Graph 声明的原生 WeCom Gateway；不要同时为同一渠道启动第二个独立网关。
-
-Docmost、公网企业微信与公共学术服务需要实际配置与真实业务验收。确定性本地测试检查接线、权限、结果、历史和文件，不证明业务内容质量或公网协议已经全部通过。
-
-## 触发、健康与发行
-
-手动 `/trigger`、Webhook、计划与 Responses 子集使用相同 Run 接纳。`/health` 返回进程存活，`/ready` 在配置 Graph 可用时返回 ready；它们不发送模型请求。Responses SSE 经反向代理时需要关闭缓冲并允许长连接。
-
-发行使用 [anchor-distribution](../rust/anchor-distribution/README.md)，构建后的 Web、固定 Goose、Host 与显式 Plugin 二进制进入受审闭包，状态和密钥留在包外。预检与候选验证使用 `anchor-devtools`，见 [部署指南](rust-production-deployment.md) 和 [候选回归](rust-production-candidate.md)。
-
-日常维护运行 [确定性小图](runtime-contract-tests.md)，真实模型兼容、目标机部署和大型业务内容验收单独安排。旧数据可原地只读保留，不自动导入或覆盖；本地候选通过也不等于生产服务与历史数据已切换。
+归档构建和确定性回归不代表目标机、真实模型、第三方服务或 Pilot 盲装已端到端通过。验收边界见[当前结论](pilot-development-plan.md)；API 集成、打包和运维参数分别见[完整文档目录](README.md)。

@@ -1,6 +1,8 @@
 # 宪法内核重构：工作记录
 
-起点为分支 `constitution-core`（基于 master `fc558e2`）；M3 已快进 master，M4 起只在 `/home/mansteinl/Anchor` 工作。旧分支 worktree 只读保留。设计依据：[docs/anchor-constitution.md](anchor-constitution.md)；概念验证：[experiments/constitution-poc](../experiments/constitution-poc/README.md)。
+> 历史归档：保留当时的任务要求、结论与证据，不作为当前待办；现行入口见[文档目录](../../README.md)。
+
+起点为分支 `constitution-core`（基于 master `fc558e2`）；M3 已快进 master，M4 起只在 `/home/mansteinl/Anchor` 工作。旧分支 worktree 只读保留。设计依据：[docs/anchor-constitution.md](../../anchor-constitution.md)；概念验证：[experiments/constitution-poc](../../../experiments/constitution-poc/README.md)。
 
 本文记录每一刀的实际结果、数字和语义变更。它是分支内的工作记录，不是进度台账。
 
@@ -107,14 +109,14 @@
 
 ## K0.1：内核修订与中断事实
 
-按[审查决定 D1–D5](constitution-preflight-decision.md)完成限定范围实现；`88a6e41` 的[独立验收](../experiments/constitution-host-preflight/k01/review.md)九项通过，未发现阻塞问题。**当前状态：H1 已验收，下一步 H2**。K0.1 切片当时未修改 Host、旧 Runner 和现有内核测试断言。
+按[审查决定 D1–D5](../design-records-2026-11-04/constitution-preflight-decision.md)完成限定范围实现；`88a6e41` 的[独立验收](../../../experiments/constitution-host-preflight/k01/review.md)九项通过，未发现阻塞问题。**当前状态：H1 已验收，下一步 H2**。K0.1 切片当时未修改 Host、旧 Runner 和现有内核测试断言。
 
 - **D1**：选择从历史求和；两种 Store 的 `load` 共用成本投影，`spent` 为所有记录 `stamp.cost` 的饱和和，不再依赖版本化快照。打回、拒绝、版本过期、待定及已结算后的拒绝都计费，计费本身不推进版本。版本过期后以 `cost=0` 重提同一工作；超预算仍立即结算失败，结算推进版本。待定批准写入目标任务时的观察记录也遵守预算。
 - **D2**：换行闭合才是完整记录；追加前截去尾部未闭合字节，保留完整记录原始字节。任何闭合坏行（包括末尾坏行、空行和无效 UTF-8）均报 `Corrupt`；末尾合法 JSON 若没有换行，也不算已提交记录。崩溃窗口仍从完整记录恢复，不重新执行。
 - **D3 / D5**：Code 的 stop 必须有 Observation；人的等待只能由人 resume。等待中所有身份的非生命周期提交由内核拒绝并计费。等待中的非生命周期提交统一返回 `TaskWaiting`；若该次成本同时超预算，D1 仍将任务结算为预算失败，不应用节点内容。
 - **D4**：可选 `NodeSubmission.interruption` 仅 Code 可携带，Agent 显式传 `null` 也拒绝。沿用既有规范中断 completion 与普通路由，写入 `RunResult.interruption`，保留现有并行区域边界；普通 Agent 提交序列化省略空中断字段。校验器不冻结或读取产物，`ArtifactKind::Interruption` 的执行者义务留给 H4；Host 的 suppressed 与投递账本未迁移。
 
-原三个反例已成为内核正式回归，并保留隔离旧源码上的失败证据；另新增迟到 Code 结果、全部裁决计费、重试、损坏历史和中断校验测试。三组差分只补构造字段 `interruption: None`，断言和 20,000 例规模均未改。九项检查、实际命令和结果见[本轮验收产物](../experiments/constitution-host-preflight/k01/README.md)。
+原三个反例已成为内核正式回归，并保留隔离旧源码上的失败证据；另新增迟到 Code 结果、全部裁决计费、重试、损坏历史和中断校验测试。三组差分只补构造字段 `interruption: None`，断言和 20,000 例规模均未改。九项检查、实际命令和结果见[本轮验收产物](../../../experiments/constitution-host-preflight/k01/README.md)。
 
 内核依赖、Record 格式、Waiter 与 Phase 变体均未增加。原预检目录保留为回归，原始失败 JSON 保持历史身份。**已知未决项**：崩溃后宿主重复提交的去重/重复计费本轮不处理；从历史求和的读取开销未做规模验收；固定 Goose、真实 Provider 与 Host 新调度路径不在 K0.1 验收范围。
 
@@ -221,11 +223,11 @@ S1、S2 在差分测试中被显式映射（S2：旧 `Stopped` 且存在停止�
 
 ## Host 接入预检：停止于内核边界
 
-在 `d0f9b61` 上复现成本丢失、残缺尾行后接受记录不可恢复及 Code 无法进入等待人，按 C1 停止；原始观察与结构基线保留在[预检产物](../experiments/constitution-host-preflight/review.md)。审查随后将迟到 Code 结果从“不阻塞”改为 D5 必修；现由上述 K0.1 覆盖，旧建议不再作为实施依据。
+在 `d0f9b61` 上复现成本丢失、残缺尾行后接受记录不可恢复及 Code 无法进入等待人，按 C1 停止；原始观察与结构基线保留在[预检产物](../../../experiments/constitution-host-preflight/review.md)。审查随后将迟到 Code 结果从“不阻塞”改为 D5 必修；现由上述 K0.1 覆盖，旧建议不再作为实施依据。
 
 ## H1：旧格式清理（实现完成）
 
-H1 已验收，下一步 H2。`445d278` 之后用户独立重跑确认 45 targets、1278 通过、0 失败、112 忽略，Clippy 与 fmt 通过。`ddadb17` 的旧授权单一门方向已获认可，但其测试问题被验收拒绝，由 `H1 补充：旧授权单一门` 一节的修正提交补齐（夹具过时、覆盖恢复见该节）。用户已决定 H1 仅做兼容删除；FileStore 随 H2 调度器接入，C2 零直接写入在 H3 结束验收。原[存储边界预检](../experiments/constitution-host-preflight/h1/review.md)保留为历史证据，不再是当前停止条件。
+H1 已验收，下一步 H2。`445d278` 之后用户独立重跑确认 45 targets、1278 通过、0 失败、112 忽略，Clippy 与 fmt 通过。`ddadb17` 的旧授权单一门方向已获认可，但其测试问题被验收拒绝，由 `H1 补充：旧授权单一门` 一节的修正提交补齐（夹具过时、覆盖恢复见该节）。用户已决定 H1 仅做兼容删除；FileStore 随 H2 调度器接入，C2 零直接写入在 H3 结束验收。原[存储边界预检](../../../experiments/constitution-host-preflight/h1/review.md)保留为历史证据，不再是当前停止条件。
 
 已删除格式自动迁移、managed-environment 遗留字段、旧授权升级、Deleted 调用标记及旧 cursor 计数补写。旧 Run 格式、遗留 environments、缺失授权摘要、Deleted 标记和旧 cursor 均具名拒绝，说明需离线迁移；读取不重写原始字节。当前持久化记录必须为对象，非对象序列也具名拒绝；解码保留 serde 已知字段重复键及未知字段拒绝，不经 Value 覆盖字段。未修改内核、GraphValidator 或三组差分测试；仍由旧 RunStore 单独负责 Run，无内核双写或新提交契约。
 
@@ -344,7 +346,7 @@ Linux flock 特性：fork 后父子进程同时持有锁文件 fd 副本，直�
 | rust/anchor-graph-host/src/graph_call.rs:301 | `record.plugin_bindings_initialized = true` | 标记 child Plugin bindings 已初始化。 |
 
 
-RunStatus 直接赋值 11 站点已包括在 mutation 中；旧 Runtime Runner 的内部写入不在 Host 目录计数内，它随 H2 替换。基线只盘点写点，不证明并发恢复语义已迁移。验证命令、结果和未覆盖边界见[H1 验证证据](../experiments/constitution-host-preflight/h1/verification.md)。
+RunStatus 直接赋值 11 站点已包括在 mutation 中；旧 Runtime Runner 的内部写入不在 Host 目录计数内，它随 H2 替换。基线只盘点写点，不证明并发恢复语义已迁移。验证命令、结果和未覆盖边界见[H1 验证证据](../../../experiments/constitution-host-preflight/h1/verification.md)。
 
 ## H2.1：本地确定性验收完成
 
@@ -352,15 +354,15 @@ RunStatus 直接赋值 11 站点已包括在 mutation 中；旧 Runtime Runner �
 
 串行 10000（node_failed=772）、并行失败组 5000（node_failed=775、multi_failure_waves=6、ceiling_preempted_failures=2）、调用 5000 均通过。用户“继续”后采用交回建议，原无失败回归使用同一组 5000 个 seed 单独保留原门槛：parallel_activations=5048；失败组仍为4775，不伪装成超过5000。失败哈希、注入概率、seed范围、原阈值均不变。
 
-Runtime 127通过，另2 doctest通过；fmt、Clippy通过，内核diff为空。Kernel与Host未改，复用本轮此前37与1120通过/112忽略结果。真实Provider和Goose未新增验收。详细Tally及原始日志见[H2.1验收](../experiments/constitution-host-preflight/h2/h21-completion.md)。后续改为新版任务书的串行探针P；原H2.2/H2.3不再推进。
+Runtime 127通过，另2 doctest通过；fmt、Clippy通过，内核diff为空。Kernel与Host未改，复用本轮此前37与1120通过/112忽略结果。真实Provider和Goose未新增验收。详细Tally及原始日志见[H2.1验收](../../../experiments/constitution-host-preflight/h2/h21-completion.md)。后续改为新版任务书的串行探针P；原H2.2/H2.3不再推进。
 
 ## P：串行 Kernel 探针本地交付完成
 
 实现提交 `ff09f2c feat(host): kernel-path probe for serial Runs (P)`。同一Host准入显式选择 `execution=kernel_probe`，Run只由Kernel FileStore保存，调度器复用现有请求授权与NodeExecutionPort/ArtifactPort；默认旧Runner保留。Human stop/resume/abandon经Kernel裁决，接受后再取消worker；未知效果带Observation等待人核查，迟到结果进入拒绝历史，不自动重放。状态是Phase的只读投影，同ID双权威拒绝；未改Kernel与生产Graph裁决。
 
-七类应用层场景、1000个共享生成器seed对照及真实Op.run/Bubblewrap/Artifact路径通过。Kernel37、Runtime127另2 doctest、runner-host1083/0失败/112忽略、graph-host46/0失败；fmt、Clippy与sandbox构建通过。真实Goose/Provider未执行，固定二进制未配置。证据及全部最终命令见[P验收](../experiments/constitution-host-preflight/p/verification.md)。
+七类应用层场景、1000个共享生成器seed对照及真实Op.run/Bubblewrap/Artifact路径通过。Kernel37、Runtime127另2 doctest、runner-host1083/0失败/112忽略、graph-host46/0失败；fmt、Clippy与sandbox构建通过。真实Goose/Provider未执行，固定二进制未配置。证据及全部最终命令见[P验收](../../../experiments/constitution-host-preflight/p/verification.md)。
 
-测量去重包络：旧193个语法判断点/1416源码行，新51个/472行（新增449行）；旧包络含未迁能力，不能把差值当同等能力净收益，实际删除旧生命周期实现0行。全Host粗估与口径、逐点源码位置、Unsupported和查询适配耦合见[测量与未决](../experiments/constitution-host-preflight/p/measurement.md)。fanout/join、Call、常驻助手、pause、真实Goose attempt恢复与Kernel Run删除未迁；P任务已交付，后续迁移范围按审查结论再定。
+测量去重包络：旧193个语法判断点/1416源码行，新51个/472行（新增449行）；旧包络含未迁能力，不能把差值当同等能力净收益，实际删除旧生命周期实现0行。全Host粗估与口径、逐点源码位置、Unsupported和查询适配耦合见[测量与未决](../../../experiments/constitution-host-preflight/p/measurement.md)。fanout/join、Call、常驻助手、pause、真实Goose attempt恢复与Kernel Run删除未迁；P任务已交付，后续迁移范围按审查结论再定。
 
 ## P 与 H2.1 审查结论（2026-10-17）
 
@@ -374,9 +376,9 @@ R0 `cb2219c` 提供唯一 FileLease，在Drop显式释放，覆盖提前返回�
 
 R `54e664e` 引入只读RunView（Phase、Graph passes、worker、宿主updated），按相位派生动作；Session条件继续由调用者处理。接受提交后记录Host观察文件，不读取Kernel路径或mtime；观察失败不改变控制。旧Runner适配和原生JSON兼容边界单列，旧Failed的缺省原因用Unclassified，不虚构原因码，也不回写兼容记录。
 
-结论为**需要重想**：同口径I/M/W判断点82→90。四个消费者生产RunStatus引用清零，但旧Ready/Running、Paused/Stopped、预算/recovery与P孤立driver启动等规则没有消失，不能全归属Session/授权。旧适配仍读取原record，严格的单RunView输入未闭合，不记为统一迁移完成。H3–H6继续暂缓，待审查旧显示/动作契约。测量、逐项保留规则和剩余18个原文件估算见[R测量](../experiments/constitution-host-preflight/r/measurement.md)。
+结论为**需要重想**：同口径I/M/W判断点82→90。四个消费者生产RunStatus引用清零，但旧Ready/Running、Paused/Stopped、预算/recovery与P孤立driver启动等规则没有消失，不能全归属Session/授权。旧适配仍读取原record，严格的单RunView输入未闭合，不记为统一迁移完成。H3–H6继续暂缓，待审查旧显示/动作契约。测量、逐项保留规则和剩余18个原文件估算见[R测量](../../../experiments/constitution-host-preflight/r/measurement.md)。
 
-最终Kernel37、Runtime127+2 doctest、runner-host1087/112原有忽略、graph-host46、Library74、FileLease3通过，0失败；比四crate基线新增4项，另R0新增3项锁测试。fmt、Clippy和sandbox构建通过；Kernel相对6ee2b0e、生产GraphValidator相对P均零diff。真实Goose/Provider、Web与部署未新增验收。原始命令、输出、HTTP/动作/字节兼容测试及未覆盖边界见[R验证](../experiments/constitution-host-preflight/r/verification.md)。
+最终Kernel37、Runtime127+2 doctest、runner-host1087/112原有忽略、graph-host46、Library74、FileLease3通过，0失败；比四crate基线新增4项，另R0新增3项锁测试。fmt、Clippy和sandbox构建通过；Kernel相对6ee2b0e、生产GraphValidator相对P均零diff。真实Goose/Provider、Web与部署未新增验收。原始命令、输出、HTTP/动作/字节兼容测试及未覆盖边界见[R验证](../../../experiments/constitution-host-preflight/r/verification.md)。
 
 ## R 审查结论与 R2 决定（2026-10-17）
 
@@ -389,7 +391,7 @@ R `54e664e` 引入只读RunView（Phase、Graph passes、worker、宿主updated�
 
 源码 `74a4dec`：Run 对外收敛为 executing / waiting / settled + waiter/outcome/reason/active/actions/updated；旧状态只经一个有损映射函数进入读视图，HTTP/Pilot pause 接为 stop 别名，Web 使用新事实。**R2 已停止、未验收**：pause 即时取消后，原“当前节点完成并留下 1 条结果”的非状态断言实得 0；Session 原 pause 拒绝也变为有效 stop。未修改实际 stop/resume/abandon 规则、未改这些非状态断言，按任务书 §7 交回。审查需决定是否授权调整原暂停测试场景，或保留对外暂停能力；不以探针提交代表验收通过。
 
-同口径测量 **82→90→92**，Web 状态分支 **81→79**，需要重想；H3–H6 继续暂缓。保留 Session 写回和内部 record 桥均计回，没有通过搬移制造收益。当前证据：[测量](../experiments/constitution-host-preflight/r2/measurement.md)、[92 点逐项](../experiments/constitution-host-preflight/r2/decisions.md)、[实际验证与停止现场](../experiments/constitution-host-preflight/r2/verification.md)。
+同口径测量 **82→90→92**，Web 状态分支 **81→79**，需要重想；H3–H6 继续暂缓。保留 Session 写回和内部 record 桥均计回，没有通过搬移制造收益。当前证据：[测量](../../../experiments/constitution-host-preflight/r2/measurement.md)、[92 点逐项](../../../experiments/constitution-host-preflight/r2/decisions.md)、[实际验证与停止现场](../../../experiments/constitution-host-preflight/r2/verification.md)。
 
 Rust API 定向 188 过/11 失败，最终针对 11 例复跑仍失败；映射/动作/静止 3 例、投影 4 例、pending 1 例通过。application 最终子集 113 过/1 候选进程回收时序失败，该例独立复跑通过；1000 seed 已在初轮通过。fmt/clippy/sandbox 构建通过，Kernel 零 diff。六 crate 全量未执行；Web 33 文件/285 测试与 build 通过，定向 e2e 9 过/1 选择器失败，修复后该例独立通过。真实 Goose/Provider、部署、同一 HTTP 的旧/Kernel 三阶段对照仍未验收。
 
@@ -410,7 +412,7 @@ S 候选 8 条，全部待批：
 
 ### R2 断言修改附录
 
-以下逐项列出测试名、旧/新断言及 S 候选。Rust **84 条展开断言修改 + 6 条轮询目标**，另加别名检查 2 条；Web **30 处直接表达式修改**，参数实例/fixture 间接变化单列。两侧统计单位不同，不相加冒充 assert 宏数量。原非状态结果、返回码、权限、时间和产物断言均保留；pending token 被删除后的替换不再检验原展示优先级，已明确登记 S24。完整机读附表：[Rust](../experiments/constitution-host-preflight/r2/rust-assertions.json)；审计副本：[Rust](../experiments/constitution-host-preflight/r2/rust-assertions.md)、[Web](../experiments/constitution-host-preflight/r2/web-assertions.md)。
+以下逐项列出测试名、旧/新断言及 S 候选。Rust **84 条展开断言修改 + 6 条轮询目标**，另加别名检查 2 条；Web **30 处直接表达式修改**，参数实例/fixture 间接变化单列。两侧统计单位不同，不相加冒充 assert 宏数量。原非状态结果、返回码、权限、时间和产物断言均保留；pending token 被删除后的替换不再检验原展示优先级，已明确登记 S24。完整机读附表：[Rust](../../../experiments/constitution-host-preflight/r2/rust-assertions.json)；审计副本：[Rust](../../../experiments/constitution-host-preflight/r2/rust-assertions.md)、[Web](../../../experiments/constitution-host-preflight/r2/web-assertions.md)。
 
 #### 逐项既有断言、轮询与新增别名检查
 
@@ -858,7 +860,7 @@ fixture 的间接断言变化与未覆盖边界：
 
 HTTP、Pilot、Web 共用四动作；Session call 通用 pause/resume 仍拒绝。物理静止不等于 Session 可交接：conversation 暂停或预算等待时保留当前轮占有，显式 stop 或结算后才允许交接/删除；原 409、产物、不重放与投递断言保持。已删除仅供旧调用点使用的 `observed_liveness` 包装，直接复用同一 RunView 与静止规则。
 
-本地验证：workspace 1922 通过、0 失败、115 既有忽略；Web 290 通过、build 通过，fmt/clippy/C1 通过。结果与命令见 [M1 验收](../experiments/constitution-host-preflight/m1/verification.md)。真实 Goose/Provider、native 浏览器端到端未执行，不作为已验收能力。M2–M5 尚未开始；不再以读侧判断点下降 50% 决定迁移，R/R2 历史测量保持原样。
+本地验证：workspace 1922 通过、0 失败、115 既有忽略；Web 290 通过、build 通过，fmt/clippy/C1 通过。结果与命令见 [M1 验收](../../../experiments/constitution-host-preflight/m1/verification.md)。真实 Goose/Provider、native 浏览器端到端未执行，不作为已验收能力。M2–M5 尚未开始；不再以读侧判断点下降 50% 决定迁移，R/R2 历史测量保持原样。
 
 ### S 候选
 
@@ -911,7 +913,7 @@ S25 按任务书作废；无新增 S 编号。其余 7 条（S19–S24、S26）*
 | MW03 | pilot-rust / Goose Pilot controls…：control_requested=pause → projection executing+active；新增独立 operation=pause 工具回执检查；S24/M1 |
 | MW04 | 同上 / Run pill：已暂停 → 等待你处理：paused；M1/S25 作废 |
 
-逐项参数、原/新值与 fixture schema 清单：[Rust](../experiments/constitution-host-preflight/m1/rust-assertions.md)、[Web](../experiments/constitution-host-preflight/m1/web-assertions.md)。R2 登记仍代表当时现场，本节覆盖已作废的别名断言。
+逐项参数、原/新值与 fixture schema 清单：[Rust](../../../experiments/constitution-host-preflight/m1/rust-assertions.md)、[Web](../../../experiments/constitution-host-preflight/m1/web-assertions.md)。R2 登记仍代表当时现场，本节覆盖已作废的别名断言。
 
 ### 删除测试映射
 
@@ -945,7 +947,7 @@ S21 的影响已核查：
 
 ## M1.5：master 同步与语义规则清点（2026-10-19）
 
-先以 `c6454c3` 合并 `master@2b3b7a2`，再按 §10.8 仅合入 F0 `e3a5778`；使用 merge，未 rebase，未合入 F1 `06f7b8a` 及后续提交。M1 的独立 pause 与新相位词汇保持；master 的模型托管配置、Plugin 配置/测试、源代码启动和消息入口迁移保留。Kernel 相对 `6ee2b0e`、生产 GraphValidator 相对 M1 均无改动。规则清单与验证结果见 [M1.5 证据](../experiments/constitution-host-preflight/m15/verification.md)。
+先以 `c6454c3` 合并 `master@2b3b7a2`，再按 §10.8 仅合入 F0 `e3a5778`；使用 merge，未 rebase，未合入 F1 `06f7b8a` 及后续提交。M1 的独立 pause 与新相位词汇保持；master 的模型托管配置、Plugin 配置/测试、源代码启动和消息入口迁移保留。Kernel 相对 `6ee2b0e`、生产 GraphValidator 相对 M1 均无改动。规则清单与验证结果见 [M1.5 证据](../../../experiments/constitution-host-preflight/m15/verification.md)。
 
 ### 冲突解决
 
@@ -1018,7 +1020,7 @@ M1.5 通过。合并提交为 `c6454c3`（master@2b3b7a2）和 `aae4bb3`（仅 F
 
 按迁移任务书 §10.10 开工，第一项并行能力开工时确认了 §8 停止条件：旧 Runner 已支持并行分支内共享模块作用域与重入上限；GraphValidator 的 run_resource 明确拒绝，parallel_frontier 也没有模块激活裁决。仅接通调度器无法关闭 M2 的全部 Unsupported；该扩展现已获用户批准，Kernel 不需改动。
 
-同一 Graph 的确定性复现通过：旧侧两分支各执行一次、模块计数为 1，重入按上限失败；内核准入返回具名 Unsupported。既有模块测试独立通过。初次诊断未改生产代码与既有测试；规则计数沿用 M1.5 源快照，不声称收敛。边界、最小扩展范围、完整临时测试源码与实际命令见 [M2 证据](../experiments/constitution-host-preflight/m2/verification.md)。触发停止后未执行无关全量或 Goose 验证。
+同一 Graph 的确定性复现通过：旧侧两分支各执行一次、模块计数为 1，重入按上限失败；内核准入返回具名 Unsupported。既有模块测试独立通过。初次诊断未改生产代码与既有测试；规则计数沿用 M1.5 源快照，不声称收敛。边界、最小扩展范围、完整临时测试源码与实际命令见 [M2 证据](../../../experiments/constitution-host-preflight/m2/verification.md)。触发停止后未执行无关全量或 Goose 验证。
 
 ### S 候选
 
@@ -1044,7 +1046,7 @@ M1.5 通过。合并提交为 `c6454c3`（master@2b3b7a2）和 `aae4bb3`（仅 F
 
 旧 Runner 模块上限用例已复制到内核，增加两次激活、异序与延迟进入、成员/嵌套计数重置、上限后迟到成功/失败覆盖。当前分支的原并行生成器会清空模块计数且生成无作用域分支，因此另增 5,000 个共享/独立模块样本，原种群、seed、注入概率、业务断言与覆盖阈值保持不变。模块样本为无失败注入且高模块上限的补充，模块上限/迟到失败由定向测试验收。
 
-Runtime 全部单元、集成和 doctest 分阶段通过，原三组差分、S17/S18 独立 seed 与新增模块组通过；fmt 与 runtime all-targets clippy 通过。新增单元测试 5，既有断言修改 0，既有测试删除 0，新增 ignore 0。命令、完整 Tally 与原始输出入口见 [M2 验证](../experiments/constitution-host-preflight/m2/verification.md)。这完成校验器前置切片，Host 并行调度与其余 M2 能力仍未完成；未新增 Goose 或真实模型 Provider 验收。
+Runtime 全部单元、集成和 doctest 分阶段通过，原三组差分、S17/S18 独立 seed 与新增模块组通过；fmt 与 runtime all-targets clippy 通过。新增单元测试 5，既有断言修改 0，既有测试删除 0，新增 ignore 0。命令、完整 Tally 与原始输出入口见 [M2 验证](../../../experiments/constitution-host-preflight/m2/verification.md)。这完成校验器前置切片，Host 并行调度与其余 M2 能力仍未完成；未新增 Goose 或真实模型 Provider 验收。
 
 
 ### Host 多槽位调度切片与删除存储边界
@@ -1053,7 +1055,7 @@ KernelScheduler 以开放槽位唯一标识管理并发执行，已完成的单�
 
 旧 Runner 的异序分支/join、分支失败及共享模块重入用例复制到实际调度器；另覆盖无波次后继、停止后迟到与恢复、端口错误/panic 的兄弟收集。Host FileStore 路径验证并行 pause 在当前结果提交后进入人的等待、兄弟迟到留史、不取消执行、draining 时拒绝 resume，以及恢复不重复执行。实际调度器另跑串行 10,000、并行失败 5,000、原无失败并行 5,000、模块 5,000；复用既有 S18 检查器，原断言与门槛未改。validator/differential 的可见性只在 cfg(test) 下扩大，裁决规则未改变。
 
-此时发现下一项必须停下的具体边界：Store/FileStore 没有公开删除操作；Host 不拥有其私有资源路径编码。仅改 phase/worker 前置条件无法完成 Run/Graph 删除。未复制私有布局、未加隐藏资源的持久标记、未改 Kernel。按任务书 §8 交回；最小建议为只给具体 FileStore 增加 remove(id)，无需扩充 Store trait 或生命周期。现场与授权范围见 [删除边界](../experiments/constitution-host-preflight/m2/deletion-boundary.md)。M2 未完成，Op.call 等后续切片与 M3 未开工。
+此时发现下一项必须停下的具体边界：Store/FileStore 没有公开删除操作；Host 不拥有其私有资源路径编码。仅改 phase/worker 前置条件无法完成 Run/Graph 删除。未复制私有布局、未加隐藏资源的持久标记、未改 Kernel。按任务书 §8 交回；最小建议为只给具体 FileStore 增加 remove(id)，无需扩充 Store trait 或生命周期。现场与授权范围见 [删除边界](../../../experiments/constitution-host-preflight/m2/deletion-boundary.md)。M2 未完成，Op.call 等后续切片与 M3 未开工。
 
 | 登记 | 数量与结论 |
 | --- | --- |
@@ -1062,32 +1064,32 @@ KernelScheduler 以开放槽位唯一标识管理并发执行，已完成的单�
 | 删除测试映射 | 0；既有测试均保留，无新增 ignore |
 | 新增测试 | Runtime 9（含 3 组实际调度器随机对照），Host 1 |
 
-本次只完成并行垂直切片并记录存储边界，不替代完整 M2 验收。实际命令与结果见 [M2 验证](../experiments/constitution-host-preflight/m2/verification.md)；未新增 workspace/Web/Goose/真实模型 Provider 验收。
+本次只完成并行垂直切片并记录存储边界，不替代完整 M2 验收。实际命令与结果见 [M2 验证](../../../experiments/constitution-host-preflight/m2/verification.md)；未新增 workspace/Web/Goose/真实模型 Provider 验收。
 
 
 ### 已批准的 FileStore 删除操作
 
 用户已批准具体 FileStore 的 remove(id)，原存储边界解除。删除通过 rename 到 `.deleting-<encode(id)>` 后 sync parent、remove_dir_all 后再次 sync parent 完成；读取幂等清理遗留目录，正常与删除目录并存时保留正常资源。单资源读写/删除复用 anchor-file-lease，锁文件位于独立 `.locks` 目录并留存，list 不暴露内部目录。Store trait、MemoryStore、Kernel 生命周期、Reason/Phase/Waiter 均不改。
 
-新增存储测试 7 项通过，包含两线程 100 轮并发 load/remove（同实例和独立实例）；Kernel 全量 44 通过、clippy 通过，无旧断言修改/删除。当前例外只涉及 FileStore 存储、锁依赖和测试，kernel.rs/model.rs/lib.rs 相对 6ee2b0e 零 diff。实际命令与证据见 [M2 存储操作](../experiments/constitution-host-preflight/m2/deletion-boundary.md)。Host 删除与其余 M2 切片继续，不将存储测试当作真实 Provider 或完整 M2 验收。
+新增存储测试 7 项通过，包含两线程 100 轮并发 load/remove（同实例和独立实例）；Kernel 全量 44 通过、clippy 通过，无旧断言修改/删除。当前例外只涉及 FileStore 存储、锁依赖和测试，kernel.rs/model.rs/lib.rs 相对 6ee2b0e 零 diff。实际命令与证据见 [M2 存储操作](../../../experiments/constitution-host-preflight/m2/deletion-boundary.md)。Host 删除与其余 M2 切片继续，不将存储测试当作真实 Provider 或完整 M2 验收。
 
 ### Host Run/Graph 删除
 
-Kernel 删除已接到 run_access 门面和获批 FileStore.remove。删除预留与 create/control/drive 注册互斥，排队 worker 重新读存储后才可执行；Run/Graph 清理保留旧 Session、引用、对话继任和 wait-child 保护。新增 10 项定向回归、Host bin/tests clippy 与围栏通过，旧业务断言无改动。删除业务内部类型围栏 3 → 1；测试围栏文件原样。证据与保留清理边界见 [Host 删除](../experiments/constitution-host-preflight/m2/host-deletion.md)。
+Kernel 删除已接到 run_access 门面和获批 FileStore.remove。删除预留与 create/control/drive 注册互斥，排队 worker 重新读存储后才可执行；Run/Graph 清理保留旧 Session、引用、对话继任和 wait-child 保护。新增 10 项定向回归、Host bin/tests clippy 与围栏通过，旧业务断言无改动。删除业务内部类型围栏 3 → 1；测试围栏文件原样。证据与保留清理边界见 [Host 删除](../../../experiments/constitution-host-preflight/m2/host-deletion.md)。
 
 ### Host Kernel 测量投影
 
-任务书 §10.4 Probe 已接到 KernelRuns.open。投影只消费 Point，按只读 JSONL 追加；启动从保留的 Graph history 重建，不参与裁决、恢复、投递或删除。投影 I/O 失败只诊断。新增 3 项定向用例通过，覆盖实际 Host 并行派发、人的控制、拒绝、重建与投影故障；样本含 12 个 Point（accepted 7 / returned 2 / refused 3），见 [分组统计与命令](../experiments/constitution-host-preflight/m2/probe-counts.json)。无跨 Run 时序保证，已删除资源的历史不在重建范围；未新增对外 API、Kernel 字段或业务断言修改。
+任务书 §10.4 Probe 已接到 KernelRuns.open。投影只消费 Point，按只读 JSONL 追加；启动从保留的 Graph history 重建，不参与裁决、恢复、投递或删除。投影 I/O 失败只诊断。新增 3 项定向用例通过，覆盖实际 Host 并行派发、人的控制、拒绝、重建与投影故障；样本含 12 个 Point（accepted 7 / returned 2 / refused 3），见 [分组统计与命令](../../../experiments/constitution-host-preflight/m2/probe-counts.json)。无跨 Run 时序保证，已删除资源的历史不在重建范围；未新增对外 API、Kernel 字段或业务断言修改。
 
 ### 串行 Op.call 与启动恢复
 
 串行 Call 的父子 Run 均走 Kernel。共享 InProcessGraphHost 保留准入、身份核查、输入暂存与结果导出；宿主在 Bound 持久化后执行或观察子 Run，并提交 resume 及 Completed/Failed/Uncertain。父 worker 释放与子 Run 结算交错时重新核查持久等待，结算只释放一次。detached child 启动恢复按 Kernel Executing 相位选取，完成事实先于执行检查；已有 `.started` 时带 Observation 停止等待人核查，不重放效果。
 
-新增 Code 提交 AdmissionFailed，处理宿主在准入锁内证明不存在子 Run 资源和准入元数据的失败，保持 graph_calls 为空。任务书 §8 允许登记后新增 Code 提交；已 Bound 的调用不能使用该提交抹去事实，Agent 无权使用。登记与实测失败现场见 [call-admission.md](../experiments/constitution-host-preflight/m2/call-admission.md)。
+新增 Code 提交 AdmissionFailed，处理宿主在准入锁内证明不存在子 Run 资源和准入元数据的失败，保持 graph_calls 为空。任务书 §8 允许登记后新增 Code 提交；已 Bound 的调用不能使用该提交抹去事实，Agent 无权使用。登记与实测失败现场见 [call-admission.md](../../../experiments/constitution-host-preflight/m2/call-admission.md)。
 
-4 项复制的 API 用例、3 项 Runtime 调用用例、Done/Failed/Unknown 回调竞态、2 项 Kernel 重启用例和原旧路径重启用例通过。5,000 seed 调用对照通过：waited 957、detached 1,140、failed 514、unknown 392。三 crate 回归通过；随后最终恢复选择改动由定向重启用例验证，最终 clippy/fmt 通过，完整 target 及日志哈希见 [call-checks.json](../experiments/constitution-host-preflight/m2/call-checks.json)。既有业务断言修改 0、删除 0、新增 ignore 0。
+4 项复制的 API 用例、3 项 Runtime 调用用例、Done/Failed/Unknown 回调竞态、2 项 Kernel 重启用例和原旧路径重启用例通过。5,000 seed 调用对照通过：waited 957、detached 1,140、failed 514、unknown 392。三 crate 回归通过；随后最终恢复选择改动由定向重启用例验证，最终 clippy/fmt 通过，完整 target 及日志哈希见 [call-checks.json](../../../experiments/constitution-host-preflight/m2/call-checks.json)。既有业务断言修改 0、删除 0、新增 ignore 0。
 
-并行 Call 组合仍触发 §8：准入已允许，但 parallel_frontier 固定派发 Work，绕过调用端口。此裁决扩展不在并行模块授权中，已保留可执行诊断和四点建议，见 [parallel-call-boundary.md](../experiments/constitution-host-preflight/m2/parallel-call-boundary.md)。M2 未完成；助手、执行结果与人工恢复决定仍未关闭。新增 §10.11 要求当前切片提交后立即合并 master F1/F2，剩余能力在统一门面后实现，不能继续沿旧入口形状扩展。
+并行 Call 组合仍触发 §8：准入已允许，但 parallel_frontier 固定派发 Work，绕过调用端口。此裁决扩展不在并行模块授权中，已保留可执行诊断和四点建议，见 [parallel-call-boundary.md](../../../experiments/constitution-host-preflight/m2/parallel-call-boundary.md)。M2 未完成；助手、执行结果与人工恢复决定仍未关闭。新增 §10.11 要求当前切片提交后立即合并 master F1/F2，剩余能力在统一门面后实现，不能继续沿旧入口形状扩展。
 
 ## K0.2：FileStore 删除与资源租约
 
@@ -1101,7 +1103,7 @@ Host `.writer.lock` 暂不能删除。资源租约只保护一次文件操作；
 
 ## §10.11：同步 master F1/F2
 
-按任务书 §10.11，以 `2582528` 为本分支父提交、`d968ba5` 为 master 父提交执行 merge，不 rebase。采用 master 的安全 RunView、读取与意图操作接口；保留本分支已批准的新相位、独立 pause、对外词汇和 M2 Kernel 路径。默认入口仍是旧 Runner，不在本次合并中开始 M3。以下登记合并产生的 19 个冲突路径及处理依据；合并回归通过，见[合并验证](../experiments/constitution-host-preflight/m2/merge-verification.md)。
+按任务书 §10.11，以 `2582528` 为本分支父提交、`d968ba5` 为 master 父提交执行 merge，不 rebase。采用 master 的安全 RunView、读取与意图操作接口；保留本分支已批准的新相位、独立 pause、对外词汇和 M2 Kernel 路径。默认入口仍是旧 Runner，不在本次合并中开始 M3。以下登记合并产生的 19 个冲突路径及处理依据；合并回归通过，见[合并验证](../../../experiments/constitution-host-preflight/m2/merge-verification.md)。
 
 | 冲突路径 | 处理依据 |
 | --- | --- |
@@ -1127,17 +1129,17 @@ Host `.writer.lock` 暂不能删除。资源租约只保护一次文件操作；
 
 接口移动涉及的 `run_access/admission`、`abandon`、`conversations`、`dispatch`、`deletion`、`recovery`、`projection`、`reads` 等新路径属于以上冲突的归属调整，不另建第二套业务规则。K0.2 的依赖、资源租约与 C1 基线见前节，本次合并不扩大 Kernel 授权范围。
 
-本次合并回归通过：workspace 128 个 target，2,113 / 0 / 123；严格 workspace/all-targets clippy、fmt、Web 311 项及构建通过；固定 Goose 完整串行 ignored 为 120 / 0 / 0，满足 §10.11 的无失败门槛。C1 相对 `0859373` 零 diff，围栏测试与 master 字节一致，业务引用为 0。合并修复保留 Kernel 显式选择、operation 回执、当前 invocation、投递/删除与父 stop 子调用的原业务保护；另修复 trace evidence 原子发布竞态并补齐插件披露报告身份。原先失败和独立复跑均保留在[合并验证与断言登记](../experiments/constitution-host-preflight/m2/merge-verification.md)，不以定向通过抹去失败。本次不验收 M2 完成；并行 Call 裁决扩展仍按 §8 待批，助手、执行结果补齐、原生人工恢复决定、真实 Provider 和生产数据迁移仍未关闭。
+本次合并回归通过：workspace 128 个 target，2,113 / 0 / 123；严格 workspace/all-targets clippy、fmt、Web 311 项及构建通过；固定 Goose 完整串行 ignored 为 120 / 0 / 0，满足 §10.11 的无失败门槛。C1 相对 `0859373` 零 diff，围栏测试与 master 字节一致，业务引用为 0。合并修复保留 Kernel 显式选择、operation 回执、当前 invocation、投递/删除与父 stop 子调用的原业务保护；另修复 trace evidence 原子发布竞态并补齐插件披露报告身份。原先失败和独立复跑均保留在[合并验证与断言登记](../../../experiments/constitution-host-preflight/m2/merge-verification.md)，不以定向通过抹去失败。本次不验收 M2 完成；并行 Call 裁决扩展仍按 §8 待批，助手、执行结果补齐、原生人工恢复决定、真实 Provider 和生产数据迁移仍未关闭。
 
 ## M2 §10.12：门面后能力补齐与交回
 
-§10.12 已纠正先前并行 Call 的范围判断：Host 从 `82a726d` 起就由共用 reject_snapshot 拒绝该组合。默认与 Kernel 路径均复用该产品准入规则，HTTP 422 在任何 Run、metadata、Artifact 副作用前返回；不修改 parallel_frontier 或 Call 校验器。前文“待批扩展”已被本结论取代，见 [准入边界](../experiments/constitution-host-preflight/m2/parallel-call-boundary.md)。
+§10.12 已纠正先前并行 Call 的范围判断：Host 从 `82a726d` 起就由共用 reject_snapshot 拒绝该组合。默认与 Kernel 路径均复用该产品准入规则，HTTP 422 在任何 Run、metadata、Artifact 副作用前返回；不修改 parallel_frontier 或 Call 校验器。前文“待批扩展”已被本结论取代，见 [准入边界](../../../experiments/constitution-host-preflight/m2/parallel-call-boundary.md)。
 
 KernelScheduler 补齐 Yielded、预算、Interrupted、Suspended/Cancelled 和人放弃的端口结果；不再有“后续切片”能力拒绝。Yielded 在冻结前验证路由，冻结 Interruption 产物后由 Code Write 提交；预算以宿主实际 model_requests 成本及 Observation stop，等待人恢复，不裁定 W4。常驻助手经既有 admit_assistant_run 门面显式选择 Kernel，绑定与活动 invocation 由 frontier 派生，结算回调继续交给 Session；默认仍用旧 Runner。完整助手回归发现空闲 wait_input 未接收 pause 事件，保留原断言修复为每 worker Notify 唤醒、Suspended 后由原调度边界提交 stop；不取消工作、不新增轮询。两个删除测试构造器只补对应事件字段。
 
 未知效果 API 由门面内 Kernel history 投影和执行端口接通。先持久化人工核查事实，再提交 Human 控制；普通 resume 和可用动作均阻止未核查 attempt，多个 pending 全部核查后才释放。相同决定幂等，冲突或持久化失败不释放，排空/删除预留互斥；已结算不重启。原生 Goose 只追加现有 tool_observation.operator_decision，不制造工具结果、NodeCompletion 或 Goose history。新原生工具观察带开始时间；attempt ID 基于稳定工具身份，step=0 表示没有旧 Harness step，旧时间缺失显示 unknown。
 
-Trace 原子发布是 `490c000` 已有实现，本轮确认了截断/并发读取的机制根因。修复前同一回归连续 5 次断言失败，原子替换后通过；原首轮 500 的瞬时字节不可获取，不声称逐字还原。具体 fsync/rename 顺序见 [根因确认](../experiments/constitution-host-preflight/m2/trace-publication.md)。
+Trace 原子发布是 `490c000` 已有实现，本轮确认了截断/并发读取的机制根因。修复前同一回归连续 5 次断言失败，原子替换后通过；原首轮 500 的瞬时字节不可获取，不声称逐字还原。具体 fsync/rename 顺序见 [根因确认](../../../experiments/constitution-host-preflight/m2/trace-publication.md)。
 
 ### S 候选
 
@@ -1159,7 +1161,7 @@ Trace 原子发布是 `490c000` 已有实现，本轮确认了截断/并发读�
 | --- | --- |
 | 无 | 既有测试删除 0，旧测试新增 ignore 0。新 Goose target 的 ignored 属性保留对真实 pinned Goose/Bubblewrap 的依赖。 |
 
-M2 的最终命令、原样 Goose target 结果、失败与复跑、规则清单及宪法检验统一见 [M2 交回](../experiments/constitution-host-preflight/m2/completion-verification.md)。C1 相对 `0859373` 零 diff，围栏与 master F2 字节一致；本轮没有 Kernel 修改。M3 未开始，默认切换与删除旧 Runner 由用户决定。真实模型 Provider、生产迁移与部署均未新增验收。
+M2 的最终命令、原样 Goose target 结果、失败与复跑、规则清单及宪法检验统一见 [M2 交回](../../../experiments/constitution-host-preflight/m2/completion-verification.md)。C1 相对 `0859373` 零 diff，围栏与 master F2 字节一致；本轮没有 Kernel 修改。M3 未开始，默认切换与删除旧 Runner 由用户决定。真实模型 Provider、生产迁移与部署均未新增验收。
 
 ### §10.12 收尾同步 master
 
@@ -1175,9 +1177,9 @@ main.rs 与 goose_acp.rs 自动合并；恢复模块和助手接入均保留。�
 
 ## M3 §10.13：唯一 Kernel 路径与旧执行器退出
 
-先以 `0d029eb` 冻结旧侧 30,000 个 seed（串行 10,000、并行有失败/无失败各 5,000、模块 5,000、Call 5,000），两个命名空间分别完成旧执行与快照双对照后才删除旧 Runner。快照头、比较契约与尺寸见 [冻结基线](../experiments/constitution-host-preflight/m3/snapshots/README.md)。M3 首轮固定 Goose 完整验收失败，恢复业务断言冲突触发任务书 §8；该现场保留在下文。§10.15 已裁定按 master 的显式恢复契约继续，后续结论见本节末尾。
+先以 `0d029eb` 冻结旧侧 30,000 个 seed（串行 10,000、并行有失败/无失败各 5,000、模块 5,000、Call 5,000），两个命名空间分别完成旧执行与快照双对照后才删除旧 Runner。快照头、比较契约与尺寸见 [冻结基线](../../../experiments/constitution-host-preflight/m3/snapshots/README.md)。M3 首轮固定 Goose 完整验收失败，恢复业务断言冲突触发任务书 §8；该现场保留在下文。§10.15 已裁定按 master 的显式恢复契约继续，后续结论见本节末尾。
 
-全部新 Run 默认 Kernel，HTTP 不再接收 execution 选择。旧存储仅具名拒绝；GraphRunRecord 格式 14 不再保存生命周期或 cursor。唯一生命周期来自 Kernel Phase，唯一 worker 表是 KernelRuns.active。Host、standalone、Graph/Session Call 与助手共用该执行路径，旧执行器、旧存储类型、兼容投影和控制轮询均退出。C2 的 [16 save / 36 mutation 去向](../experiments/constitution-host-preflight/m3/c2-destinations.md) 已逐项清零；[规则与 Session 所有权](../experiments/constitution-host-preflight/m3/rules-session-audit.md) 单独审计，不用消费者数量冒充规则计数。
+全部新 Run 默认 Kernel，HTTP 不再接收 execution 选择。旧存储仅具名拒绝；GraphRunRecord 格式 14 不再保存生命周期或 cursor。唯一生命周期来自 Kernel Phase，唯一 worker 表是 KernelRuns.active。Host、standalone、Graph/Session Call 与助手共用该执行路径，旧执行器、旧存储类型、兼容投影和控制轮询均退出。C2 的 [16 save / 36 mutation 去向](../../../experiments/constitution-host-preflight/m3/c2-destinations.md) 已逐项清零；[规则与 Session 所有权](../../../experiments/constitution-host-preflight/m3/rules-session-audit.md) 单独审计，不用消费者数量冒充规则计数。
 
 ### S 候选
 
@@ -1204,11 +1206,11 @@ main.rs 与 goose_acp.rs 自动合并；恢复模块和助手接入均保留。�
 
 | 范围 | 映射与理由 |
 | --- | --- |
-| Runtime 原主模块 73 项 | [逐项映射](../experiments/constitution-host-preflight/m3/runtime-test-mapping.md)，原测试名全部保留；夹具改为真实 Kernel 提交，损坏记录测试只修改用于验证拒绝的测试副本。 |
-| Host 39 个消失函数 | [逐项映射](../experiments/constitution-host-preflight/m3/host-test-mapping.md)，包含重命名、合并、旧机制退出及无规则 forwarder；每项给出等价目标或行为退出理由。 |
+| Runtime 原主模块 73 项 | [逐项映射](../../../experiments/constitution-host-preflight/m3/runtime-test-mapping.md)，原测试名全部保留；夹具改为真实 Kernel 提交，损坏记录测试只修改用于验证拒绝的测试副本。 |
+| Host 39 个消失函数 | [逐项映射](../../../experiments/constitution-host-preflight/m3/host-test-mapping.md)，包含重命名、合并、旧机制退出及无规则 forwarder；每项给出等价目标或行为退出理由。 |
 | Goose 重复 12 项 | 同一模块曾被两个 target 编译，M2 的 136 比字面 124 多 12；只删除重复 target，12 个普通 assistant 场景保留，名单与实际最终计数在交回证据。 |
 
-按用户 §10.13 决定不做生产数据迁移，不修改现有开发状态；交回提供 [新开发状态根与保留范围](../experiments/constitution-host-preflight/m3/local-development-state.md)。W4、真实模型 Provider、外部渠道与部署不由固定 Goose/本地 Provider 验收代替。M4/M5 由用户后续授权；本分支不自行合回 master。
+按用户 §10.13 决定不做生产数据迁移，不修改现有开发状态；交回提供 [新开发状态根与保留范围](../../../experiments/constitution-host-preflight/m3/local-development-state.md)。W4、真实模型 Provider、外部渠道与部署不由固定 Goose/本地 Provider 验收代替。M4/M5 由用户后续授权；本分支不自行合回 master。
 
 
 ### M3 结束同步 master
@@ -1228,11 +1230,11 @@ main.rs 与 goose_acp.rs 自动合并；恢复模块和助手接入均保留。�
 
 ### M3 §8 停止交回（2026-10-20）
 
-合并后普通 workspace 为 2,153 / 0 / 125（129 targets），Web 39 文件 333 项及构建通过，严格 clippy/fmt、sandbox/Host/helper 构建通过。merge `b61c325` 的提交说明误写 2,154，实际日志为 2,153；不改写历史。固定 Goose 完整 Host ignored 为 **110 / 12 / 0**（41 targets），退出码 101；122 项全部实际执行，12 项失败逐项独立复跑全部再次失败，原样结果与最终确认见 [交回](../experiments/constitution-host-preflight/m3/verification.md) 和 [checks.json](../experiments/constitution-host-preflight/m3/checks.json)。Host、固定 Goose 与 helper 的运行前后身份一致，使用独立 target `/tmp/anchor-goose-regression-target-core`。
+合并后普通 workspace 为 2,153 / 0 / 125（129 targets），Web 39 文件 333 项及构建通过，严格 clippy/fmt、sandbox/Host/helper 构建通过。merge `b61c325` 的提交说明误写 2,154，实际日志为 2,153；不改写历史。固定 Goose 完整 Host ignored 为 **110 / 12 / 0**（41 targets），退出码 101；122 项全部实际执行，12 项失败逐项独立复跑全部再次失败，原样结果与最终确认见 [交回](../../../experiments/constitution-host-preflight/m3/verification.md) 和 [checks.json](../../../experiments/constitution-host-preflight/m3/checks.json)。Host、固定 Goose 与 helper 的运行前后身份一致，使用独立 target `/tmp/anchor-goose-regression-target-core`。
 
-业务断言冲突：旧普通 Run/渠道恢复要求一次显式 resume 后由 Agent 在同一原生 Session 核查并继续；M2 人工恢复用例要求这次 resume 只发现并停驻，直到显式决定。两者均禁止重放未知效果。按任务书 §8，本轮不修改这些业务断言或普通恢复语义，待用户裁定；[现场与选项](../experiments/constitution-host-preflight/m3/recovery-contract-decision.md)。这不是已批准的 S 变更，既有 S27 仍是本轮唯一 S 候选。
+业务断言冲突：旧普通 Run/渠道恢复要求一次显式 resume 后由 Agent 在同一原生 Session 核查并继续；M2 人工恢复用例要求这次 resume 只发现并停驻，直到显式决定。两者均禁止重放未知效果。按任务书 §8，本轮不修改这些业务断言或普通恢复语义，待用户裁定；[现场与选项](../../../experiments/constitution-host-preflight/m3/recovery-contract-decision.md)。这不是已批准的 S 变更，既有 S27 仍是本轮唯一 S 候选。
 
-其余未关闭项为 spike/会话身份已知失败映射、人工 recovery 重入锁、配置与 MCP 预检错误映射，以及三项仍读旧 runs 目录的夹具。只读定位与建议边界见 [完整回归清单](../experiments/constitution-host-preflight/m3/goose-regressions.md)；本轮未实施这些修复，不能把它们写成已通过。停止条件触发后的交回提交只更新证据与当前结论。
+其余未关闭项为 spike/会话身份已知失败映射、人工 recovery 重入锁、配置与 MCP 预检错误映射，以及三项仍读旧 runs 目录的夹具。只读定位与建议边界见 [完整回归清单](../../../experiments/constitution-host-preflight/m3/goose-regressions.md)；本轮未实施这些修复，不能把它们写成已通过。停止条件触发后的交回提交只更新证据与当前结论。
 
 C2 save 0、mutation 0；Kernel 相对 `0859373` 零 diff，GraphValidator 裁决未改；旧类型扫描零命中。业务断言放宽 0，既有测试新增 ignore 0。M3 未达到 Goose 零失败门槛，不合回 master，不自动开展 M4/M5。真实模型 Provider、外部渠道与部署未验，W4 未裁定；旧数据迁移工具按用户 §10.13 决定取消，开发状态处理见交回链接。
 
@@ -1264,25 +1266,25 @@ C2 save 0、mutation 0；Kernel 相对 `0859373` 零 diff，GraphValidator 裁�
 | A12 Plugin Turn 夹具 | 三个原场景用 GET /runs + Kernel 只读 record 取代已删除的 runs 目录读取；同 Run/workspace/Session、冻结 Graph/plugin_bindings、Alice/Bob 权限隔离和后续撤权断言不变。 |
 | A13 resolver 类型保持 | 原已完成 future 不重 poll 回归增加 KnownFailure 分支，分别断言 Graph、Host、KnownFailure 分类；不通过捕获所有 Unsupported 或错误文字匹配放宽边界。 |
 
-原 A1–A10 与 Runtime 73 项、Host 39 项逐项映射继续有效；本轮只增加上表人工恢复测试改名映射，没有删除业务测试或新增既有 ignore。最终命令、原样结果和未覆盖范围统一见 [§10.15 交回](../experiments/constitution-host-preflight/m3/completion-verification.md)。
+原 A1–A10 与 Runtime 73 项、Host 39 项逐项映射继续有效；本轮只增加上表人工恢复测试改名映射，没有删除业务测试或新增既有 ignore。最终命令、原样结果和未覆盖范围统一见 [§10.15 交回](../../../experiments/constitution-host-preflight/m3/completion-verification.md)。
 
 
-§10.15 最终结果：workspace **2,153 / 0 / 125**，Web **333 / 0** 及构建通过，完整固定 Goose **122 / 0 / 0**，原 12 项失败逐项独跑各 **1 / 0 / 0**，严格 Clippy/fmt 通过；Host/Goose/helper 采证前后身份相同。首个 workspace 有一项旧动作期待失败，单独修正/复测后最终全量通过，首轮日志如实保留。[最终证据](../experiments/constitution-host-preflight/m3/completion-verification.md) 与 [逐 target 原样结果](../experiments/constitution-host-preflight/m3/completion-checks.json)。C1 零 diff、C2 save 0/mutation 0、旧类型扫描零、围栏不变。M3 已通过 §10.16 独立复验；§10.17 批准 S27、结清 S4 并授权合并。§10.18 要求先合入 `dfd3427` 并重跑门槛，交回审查后由 master 一侧快进；本分支不自动开展 M4/M5。
+§10.15 最终结果：workspace **2,153 / 0 / 125**，Web **333 / 0** 及构建通过，完整固定 Goose **122 / 0 / 0**，原 12 项失败逐项独跑各 **1 / 0 / 0**，严格 Clippy/fmt 通过；Host/Goose/helper 采证前后身份相同。首个 workspace 有一项旧动作期待失败，单独修正/复测后最终全量通过，首轮日志如实保留。[最终证据](../../../experiments/constitution-host-preflight/m3/completion-verification.md) 与 [逐 target 原样结果](../../../experiments/constitution-host-preflight/m3/completion-checks.json)。C1 零 diff、C2 save 0/mutation 0、旧类型扫描零、围栏不变。M3 已通过 §10.16 独立复验；§10.17 批准 S27、结清 S4 并授权合并。§10.18 要求先合入 `dfd3427` 并重跑门槛，交回审查后由 master 一侧快进；本分支不自动开展 M4/M5。
 
 
 ### M3 §10.18：同步 master 与合并验收
 
-`376b256` 提交用户审查与 S27/S4 裁定；merge `cf23ea8` 的另一父提交为 master `dfd3427`。三处内容冲突按业务采用 master、执行保留 Kernel 处理，Session crate 与 master 字节一致。每个 Kernel worker 锁点及查询正文哈希的结论见 [冲突与专项审计](../experiments/constitution-host-preflight/m3/merge-conflicts.md)；保留 master 查询锁、live metadata 和 canonical-account 重启回归，未移植旧执行器表。
+`376b256` 提交用户审查与 S27/S4 裁定；merge `cf23ea8` 的另一父提交为 master `dfd3427`。三处内容冲突按业务采用 master、执行保留 Kernel 处理，Session crate 与 master 字节一致。每个 Kernel worker 锁点及查询正文哈希的结论见 [冲突与专项审计](../../../experiments/constitution-host-preflight/m3/merge-conflicts.md)；保留 master 查询锁、live metadata 和 canonical-account 重启回归，未移植旧执行器表。
 
-全部门槛通过：workspace **2,197 / 0 / 126**（132 targets）、Web **356** 及构建、浏览器 **10 / 0**、完整固定 Goose **123 / 0 / 0**（41 targets）；新增 canonical-account 用例独跑亦通过，七个二进制身份前后一致。C1 零 diff、C2 save 0/mutation 0、围栏不变，master 新增 45 个 Rust 测试全部保留。3 类机械夹具/词汇适配，删除测试 0、既有测试新增 ignore 0、业务断言放宽 0、新增 S 0；S27 已批准并结清 S4。[最终交回及逐 target 证据](../experiments/constitution-host-preflight/m3/merge-verification.md)。
+全部门槛通过：workspace **2,197 / 0 / 126**（132 targets）、Web **356** 及构建、浏览器 **10 / 0**、完整固定 Goose **123 / 0 / 0**（41 targets）；新增 canonical-account 用例独跑亦通过，七个二进制身份前后一致。C1 零 diff、C2 save 0/mutation 0、围栏不变，master 新增 45 个 Rust 测试全部保留。3 类机械夹具/词汇适配，删除测试 0、既有测试新增 ignore 0、业务断言放宽 0、新增 S 0；S27 已批准并结清 S4。[最终交回及逐 target 证据](../../../experiments/constitution-host-preflight/m3/merge-verification.md)。
 
 本分支包含 `dfd3427`，待审查后由 master 一侧快进；未修改 master 工作区，M4/M5 未开始。W4、真实模型 Provider、外部渠道实网与部署仍未验。
 
 ### M4 §10.19：字段归属与旧机制收尾
 
-M3 已快进 master，M4 在 /home/mansteinl/Anchor 实施。GraphRunRecord 删除 error/recovery/recovery_submissions/updated 及 touch，恢复读取归 RunView 的 Kernel history 投影，失败原因归 Kernel 结算；HTTP 展示键保留，Web 失败及恢复提示保留。sequence/format 的保留理由及全部业务字段归属见 [字段表](../experiments/constitution-host-preflight/m4/field-disposition.md)；四个指定 CompletionFact 均为当前执行端口协议，无可删。schema 15 对旧 1–14 及旧字段具名拒绝，不迁移开发数据。
+M3 已快进 master，M4 在 /home/mansteinl/Anchor 实施。GraphRunRecord 删除 error/recovery/recovery_submissions/updated 及 touch，恢复读取归 RunView 的 Kernel history 投影，失败原因归 Kernel 结算；HTTP 展示键保留，Web 失败及恢复提示保留。sequence/format 的保留理由及全部业务字段归属见 [字段表](../../../experiments/constitution-host-preflight/m4/field-disposition.md)；四个指定 CompletionFact 均为当前执行端口协议，无可删。schema 15 对旧 1–14 及旧字段具名拒绝，不迁移开发数据。
 
-M4 全部门槛通过：workspace 2,200 / 0 / 126、Web 359 及构建、完整固定 Goose 123 / 0 / 0，七个二进制身份前后一致；Clippy/fmt、围栏、C1/C2 通过。结论及最终证据集中于 [M4 交回](../experiments/constitution-host-preflight/m4/verification.md)，不以本段代替验收。
+M4 全部门槛通过：workspace 2,200 / 0 / 126、Web 359 及构建、完整固定 Goose 123 / 0 / 0，七个二进制身份前后一致；Clippy/fmt、围栏、C1/C2 通过。结论及最终证据集中于 [M4 交回](../../../experiments/constitution-host-preflight/m4/verification.md)，不以本段代替验收。
 
 #### S 候选
 
@@ -1294,20 +1296,20 @@ M4 全部门槛通过：workspace 2,200 / 0 / 126、Web 359 及构建、完整�
 
 | 范围 | 处置 |
 | --- | --- |
-| M4A1–M4A9 | 状态展示、旧记录容器/时间、C6 及机制名称共 9 类；[逐项登记](../experiments/constitution-host-preflight/m4/assertion-mapping.md)。业务断言放宽 0，新增 3 项 Web 展示/动作回归。 |
+| M4A1–M4A9 | 状态展示、旧记录容器/时间、C6 及机制名称共 9 类；[逐项登记](../../../experiments/constitution-host-preflight/m4/assertion-mapping.md)。业务断言放宽 0，新增 3 项 Web 展示/动作回归。 |
 
 #### 删除测试映射
 
 | 范围 | 映射 |
 | --- | --- |
-| 旧机制测试及 helper | 34 个函数改名或等价替换；删除测试 0、新增既有 ignore 0、冻结快照修改 0；[机器清单](../experiments/constitution-host-preflight/m4/test-mapping.json)。 |
+| 旧机制测试及 helper | 34 个函数改名或等价替换；删除测试 0、新增既有 ignore 0、冻结快照修改 0；[机器清单](../../../experiments/constitution-host-preflight/m4/test-mapping.json)。 |
 
 M5 未开始，不推送；W4、真实模型 Provider、外部渠道实网与部署未验。
 
 
 ### M5 §10.20：最终测量与迁移交回
 
-M1–M4 已验收。任务书先单独提交为 e60374f，M5 以该 master 提交冻结全部度量；完成后迁移任务结束。C2 仍为 save 0 / mutation 0，Kernel 相对 0859373 零 diff。逐 crate 生产/测试行数、八类规则两版位点、手写 Session/授权/执行端口判断、测试函数与历史登记汇总统一见 [最终测量](../experiments/constitution-host-preflight/final/measurement.md)，不再沿用 P/R 的包络数字作为当前结论。
+M1–M4 已验收。任务书先单独提交为 e60374f，M5 以该 master 提交冻结全部度量；完成后迁移任务结束。C2 仍为 save 0 / mutation 0，Kernel 相对 0859373 零 diff。逐 crate 生产/测试行数、八类规则两版位点、手写 Session/授权/执行端口判断、测试函数与历史登记汇总统一见 [最终测量](../../../experiments/constitution-host-preflight/final/measurement.md)，不再沿用 P/R 的包络数字作为当前结论。
 
 探针没有新增实现：schema 15 保留数据目录的在线点与 history 重建全等，截断/缺失原生重建不改变 resource/history；现有 Probe 三测试通过并保留 12 点样本。M5 仅改文档与测量脚本；因基点相对 M4 有独立 RSI 源码更新，重跑 workspace 2,200 / 0 / 126、fmt/围栏通过。Web 359 与构建、完整固定 Goose 123 / 0 / 0 引用 M4，未重跑完整 Goose；原始日志未入库。
 
@@ -1315,6 +1317,6 @@ M1–M4 已验收。任务书先单独提交为 e60374f，M5 以该 master 提�
 | --- | --- |
 | S 候选 | 0，无语义/Kernel/Graph 裁决修改；历史有效 S 8 条及去向见最终测试汇总。 |
 | 断言修改 | 0，业务断言无放宽。 |
-| 删除测试映射 | 删除 0、新 ignore 0，无需新增等价替换映射；M1–M4 各阶段条数与链接见 [登记汇总](../experiments/constitution-host-preflight/final/test-mapping-summary.md)。 |
+| 删除测试映射 | 删除 0、新 ignore 0，无需新增等价替换映射；M1–M4 各阶段条数与链接见 [登记汇总](../../../experiments/constitution-host-preflight/final/test-mapping-summary.md)。 |
 
-W4、完整真实模型 Provider 业务、渠道实网、部署、时间事实与保留政策不由本次测量裁定；生产离线迁移用户已决定不提供，旧 worktree/分支何时删除由用户决定。统一登记在 [迁移后待决清单](../experiments/constitution-host-preflight/final/measurement.md#迁移后待决清单)。本轮未推送、未清理开发数据、未删除旧 worktree/分支；长期、规模与对抗压力未验。
+W4、完整真实模型 Provider 业务、渠道实网、部署、时间事实与保留政策不由本次测量裁定；生产离线迁移用户已决定不提供，旧 worktree/分支何时删除由用户决定。统一登记在 [迁移后待决清单](../../../experiments/constitution-host-preflight/final/measurement.md#迁移后待决清单)。本轮未推送、未清理开发数据、未删除旧 worktree/分支；长期、规模与对抗压力未验。

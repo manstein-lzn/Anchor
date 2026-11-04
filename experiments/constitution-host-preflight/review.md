@@ -11,7 +11,7 @@
 
 另有待定契约：Code 报告未知效果时，`Request{control:"stop"}` 被 `HumanOnly` 拒绝。GraphValidator 只接受普通节点/调用写入，也不能表达该等待。这不是把 Code 盖章为 Human 的理由。H4 中断亦未表达：`NodeSubmission` 无 interruption，`record_result` 固定写 `None`。普通成功结果不能代替中断事实。
 
-触发[计划](../../docs/constitution-host-integration-plan.md) C1 和第 5 节：**“需要修改 `anchor-kernel` 才能继续”**。依约停止实现，交付可编译的预检/证据提交；未添加任意覆盖 Run 的 Validator、停止轮询或身份绕过。
+触发[计划](../../docs/archive/design-records-2026-11-04/constitution-host-integration-plan.md) C1 和第 5 节：**“需要修改 `anchor-kernel` 才能继续”**。依约停止实现，交付可编译的预检/证据提交；未添加任意覆盖 Run 的 Validator、停止轮询或身份绕过。
 
 建议审查放行的具体范围：
 

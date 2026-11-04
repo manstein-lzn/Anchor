@@ -47,24 +47,24 @@ M4 已有证据为 workspace 2,200 / 0 / 126、Web 359 和 Host 完整 ignored 1
 | 阶段 | 登记数量与口径 | 证据 |
 | --- | --- | --- |
 | M1 | Rust 26 处（20 断言期望、6 轮询目标），Web 4 处；fixture schema 增补另列 | [Rust 逐项](../m1/rust-assertions.md)、[Web 逐项](../m1/web-assertions.md) |
-| M1.5 | Rust 21 处（M15R01–21），Web fixture 1 处（M15W01）；范围编号按实际序号展开，不按表格行数 | [M1.5 登记](../../../docs/constitution-refactor-log.md) |
-| M2 并行模块、Host 多槽位、删除、Probe、Call 切片 | 既有业务断言变更 0；新测试/差分组不混算旧断言变更 | [M2 分阶段登记](../../../docs/constitution-refactor-log.md)、[M2 验证](../m2/verification.md) |
+| M1.5 | Rust 21 处（M15R01–21），Web fixture 1 处（M15W01）；范围编号按实际序号展开，不按表格行数 | [M1.5 登记](../../../docs/archive/runtime-migration-2026-10-20/constitution-refactor-log.md) |
+| M2 并行模块、Host 多槽位、删除、Probe、Call 切片 | 既有业务断言变更 0；新测试/差分组不混算旧断言变更 | [M2 分阶段登记](../../../docs/archive/runtime-migration-2026-10-20/constitution-refactor-log.md)、[M2 验证](../m2/verification.md) |
 | M2 §10.11 合并 | MRG01–11，共 11 组状态/投影登记；相对合并前分支新增 2 组，其余为继承适配 | [合并登记](../m2/merge-verification.md) |
-| M2 §10.12 与收尾同步 | 原助手 12 项业务断言原样复用；旧业务放宽 0；测试兼容投影 1 组，收尾同步权限夹具 1 组；新覆盖数量不计旧断言修改 | [§10.12 登记与收尾](../../../docs/constitution-refactor-log.md)、[完成交回](../m2/completion-verification.md) |
-| M3 §10.13 与 §10.15 | A1–A10 共 10 类，A11–A13 追加 3 类，共 13 类；其中人工恢复为用户裁定的 M2 行为更正 | [M3 登记](../../../docs/constitution-refactor-log.md)、[§10.15 追加](../../../docs/constitution-refactor-log.md) |
-| M3 结束同步与 §10.18 | 结束同步登记 3 个适配文件；§10.18 交回为 3 类机械适配，范围有继承关系，不再次累加到 A1–A13 | [同步登记](../../../docs/constitution-refactor-log.md)、[§10.18 交回](../m3/merge-verification.md) |
+| M2 §10.12 与收尾同步 | 原助手 12 项业务断言原样复用；旧业务放宽 0；测试兼容投影 1 组，收尾同步权限夹具 1 组；新覆盖数量不计旧断言修改 | [§10.12 登记与收尾](../../../docs/archive/runtime-migration-2026-10-20/constitution-refactor-log.md)、[完成交回](../m2/completion-verification.md) |
+| M3 §10.13 与 §10.15 | A1–A10 共 10 类，A11–A13 追加 3 类，共 13 类；其中人工恢复为用户裁定的 M2 行为更正 | [M3 登记](../../../docs/archive/runtime-migration-2026-10-20/constitution-refactor-log.md)、[§10.15 追加](../../../docs/archive/runtime-migration-2026-10-20/constitution-refactor-log.md) |
+| M3 结束同步与 §10.18 | 结束同步登记 3 个适配文件；§10.18 交回为 3 类机械适配，范围有继承关系，不再次累加到 A1–A13 | [同步登记](../../../docs/archive/runtime-migration-2026-10-20/constitution-refactor-log.md)、[§10.18 交回](../m3/merge-verification.md) |
 | M4 §10.19 | M4A1–M4A9，共 9 类；新增 Web 3 项，业务放宽 0 | [M4 逐项](../m4/assertion-mapping.md) |
 
 ## 删除、改名与等价去向
 
 | 阶段 | 数量与边界 | 证据 |
 | --- | --- | --- |
-| M1、M1.5 | 删除测试均为 0；未对既有测试新增 ignore | [M1 Rust](../m1/rust-assertions.md)、[M1 Web](../m1/web-assertions.md)、[M1.5](../../../docs/constitution-refactor-log.md) |
-| M2 前置各切片 / §10.12 | 删除既有测试 0；未对既有测试新增 ignore | [M2 登记](../../../docs/constitution-refactor-log.md)、[§10.12](../../../docs/constitution-refactor-log.md) |
+| M1、M1.5 | 删除测试均为 0；未对既有测试新增 ignore | [M1 Rust](../m1/rust-assertions.md)、[M1 Web](../m1/web-assertions.md)、[M1.5](../../../docs/archive/runtime-migration-2026-10-20/constitution-refactor-log.md) |
+| M2 前置各切片 / §10.12 | 删除既有测试 0；未对既有测试新增 ignore | [M2 登记](../../../docs/archive/runtime-migration-2026-10-20/constitution-refactor-log.md)、[§10.12](../../../docs/archive/runtime-migration-2026-10-20/constitution-refactor-log.md) |
 | M2 §10.11 合并 | 5 行去向登记，覆盖 1 个退出的旧 Deleted 参数分支、6 个原位改名、2 个既有等价映射、1 个 M1.5 改名、1 个函数拆分为 2 场景；整项业务覆盖删除 0 | [合并映射](../m2/merge-verification.md) |
 | M3 Runtime | 73 个原测试逐项映射并保留名称，包含测试 helper；随后 M4 的改名另登记 | [73 项](../m3/runtime-test-mapping.md) |
 | M3 Host / Graph host | 39 个消失函数名逐项给出改名、合并、等价覆盖或旧机制退出理由；39 不等于删除 39 个业务测试 | [39 项](../m3/host-test-mapping.md) |
-| M3 Goose / §10.15 | 删除重复 target 1 个，重复执行 12 项由默认 target 保留；人工恢复函数改名 1 项；未删除这些业务场景 | [Goose 映射](../m3/goose-regressions.md)、[§10.15 准备与改名](../../../docs/constitution-refactor-log.md) |
+| M3 Goose / §10.15 | 删除重复 target 1 个，重复执行 12 项由默认 target 保留；人工恢复函数改名 1 项；未删除这些业务场景 | [Goose 映射](../m3/goose-regressions.md)、[§10.15 准备与改名](../../../docs/archive/runtime-migration-2026-10-20/constitution-refactor-log.md) |
 | M3 §10.18 | 本轮删除 0、既有测试新增 ignore 0；master 新增 45 个 Rust 测试名全保留 | [合并交回](../m3/merge-verification.md)、[45 项](../m3/merge-test-inventory.json) |
 | M4 | 34 个函数（含 helper）改名/等价替换，删除 0、既有测试新增 ignore 0、冻结快照修改 0 | [34 项机器映射](../m4/test-mapping.json)、[断言登记](../m4/assertion-mapping.md) |
 
@@ -74,4 +74,4 @@ M4 已有证据为 workspace 2,200 / 0 / 126、Web 359 和 Host 完整 ignored 1
 
 M1–M4 当前有效并已批准的编号共 8 个：M1 的 S19–S24、S26 共 7 个，M3 的 S27 共 1 个。M1.5、M2 各切片与 §10.11/§10.12、M3 §10.15/§10.18、M4 新增均为 0。S25 作废，不计有效候选；S27 承接并结清历史 S4，不再重复计 S4。W4 尚待决定，不计已批准 S。
 
-证据：[M1 与 M1.5](../../../docs/constitution-refactor-log.md)、[M2 各切片](../../../docs/constitution-refactor-log.md)、[M2 完成](../m2/completion-verification.md)、[M3 §10.15](../m3/completion-verification.md)、[M3 §10.18](../m3/merge-verification.md)、[M4](../m4/verification.md)。
+证据：[M1 与 M1.5](../../../docs/archive/runtime-migration-2026-10-20/constitution-refactor-log.md)、[M2 各切片](../../../docs/archive/runtime-migration-2026-10-20/constitution-refactor-log.md)、[M2 完成](../m2/completion-verification.md)、[M3 §10.15](../m3/completion-verification.md)、[M3 §10.18](../m3/merge-verification.md)、[M4](../m4/verification.md)。

@@ -223,7 +223,7 @@ Session 删除不删除正式安装 Plugin、共享包存储或共享工具链�
 
 1. 根目录 [AGENTS.md](../../../AGENTS.md) 和本文件，恢复用户确认的目标与四片顺序。
 2. [开发台账](pilot-development-plan.md) 的最新相关记录，判断有哪些实际交付；没有完成记录不能因为本计划存在就视作完成。
-3. [产品与系统架构的归属规则](../../product-architecture.md#架构指导新能力放在哪里)、[当前架构](../../architecture.md) 的 Pilot/Goose/Plugin 相关章节、[任务联网契约](../../network-plugin.md)。
+3. [产品与系统架构的归属规则](../../product-architecture.md#架构指导新能力放在哪里)、[当前架构](../../architecture.md) 的 Pilot/Goose/Plugin 相关章节、[任务联网契约](../../plugins.md#pilot-任务联网)。
 4. `git status --short`、本次涉及路径的 diff 和第 5 节的代码，核对计划编写后已经发生的变化；只读取相关路径，不重跑此前已获得的全部证据。
 
 ### 必须保留的上下文

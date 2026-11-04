@@ -1,6 +1,6 @@
 # P2 事实记录：报告
 
-执行：2026-10-21，按 [总体架构](../../../docs/harness-data-hub-architecture.md) 第 5.2、5.3 节和 [任务书 §P2](../../../docs/harness-data-hub-tasks.md#p2-事实词汇表与记录适配器)，由主 Agent 直接实现。
+执行：2026-10-21，按 [总体架构](../../../docs/harness-data-hub.md#当前职责与依赖) 第 5.2、5.3 节和 [任务书 §P2](../../../docs/archive/design-records-2026-11-04/harness-data-hub-tasks.md#p2-事实词汇表与记录适配器)，由主 Agent 直接实现。
 
 ## 做了什么
 

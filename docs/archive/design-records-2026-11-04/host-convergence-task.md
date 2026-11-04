@@ -1,12 +1,14 @@
 # Host 收敛任务书
 
+> 历史归档（2026-11-04）：保留当时的推导、授权范围、过程与证据，不作为新的实施授权；当前行为见[架构](../../architecture.md)，未关闭事项见[统一台账](../../pilot-development-plan.md)。
+
 目标：`anchor-runner-host` 的依赖方向与文档一致，每条规则只剩一份实现。不改用户可见行为、HTTP JSON、磁盘路径与字节、权限边界；行数下降是结果，不是指标。
 
 本页是交给开发 Agent 的任务书。每项完成后由架构负责人验收，验收结论写回本页「状态」列，过程留在提交说明。
 
 ## 现状（2026-10-25，master `e3e8384`）
 
-- `runner-host` 生产代码约 58k 行，是单个二进制 crate，约 70 个模块平铺在 `main.rs` 下，`pub(crate)` 在全 crate 可见。唯一有测试固定的边界是 [Run 访问围栏](run-access-facade.md)。
+- `runner-host` 生产代码约 58k 行，是单个二进制 crate，约 70 个模块平铺在 `main.rs` 下，`pub(crate)` 在全 crate 可见。唯一有测试固定的边界是 [Run 访问围栏](../../run-access-facade.md)。
 - 下层反向依赖上层：非入口模块对 `crate::application` 有 73 处引用（20 个文件），对入口适配模块（`api`、`pilot_tools`、`node_tools`、`channel_tools`）有 34 处（14 个文件）。约 50 处是 `application::metadata` 的读写，它实际是 Run 元数据存储，只是放在了 `application` 下。
 - 同一规则存在多份实现，部分已经分叉：
   - Plugin id 有两种规则。Library、graph-host、runtime authoring 和 `api.rs:660` 要求首字节为字母或数字；`pilot_tools::identifier` 不要求，却被凭据和插件配置拿去校验 Plugin id（例如 `credential_store.rs:353`、`plugin_configuration.rs:63`）。
@@ -33,12 +35,12 @@
 
 | 任务 | 规模 | 依赖 | 状态 |
 | --- | --- | --- | --- |
-| H0 依赖方向围栏 | S | — | 已验收（`a0de84b`）；实测基线 58 / 35 / 1，[证据](../experiments/host-convergence/h0/verification.md) |
-| H1 共享原语与已分叉规则 | M | H0 | 已验收（7dd8204）；依赖计数 58 / 23 / 1；本机已安装 Plugin id 均合规，[证据](../experiments/host-convergence/h1/verification.md) |
-| H2 Run 元数据下沉 | M | H1 | 已验收（ebc9919）；依赖计数 25 / 23 / 1，服务 → 用例减少 33（按下文确认口径），[证据](../experiments/host-convergence/h2/verification.md) |
-| H3 配置只在组合根读取 | M | H2 | 已验收（c87ef57）；本机已保存模型设置通过新校验；四变量在入口各读一次，模型保存与执行共用类型化校验；依赖计数 25 / 23 / 1，[证据](../experiments/host-convergence/h3/verification.md) |
-| H4 Plugin 领域单一主人 | L | H3；调研可提前 | 已验收（3a8096c）；生产 +288 行；构造外部 0 / 0，依赖计数 22 / 23 / 1，[证据](../experiments/host-convergence/h4/verification.md) |
-| H5 剩余反向依赖清零 | M | H4 | 已验收（f948880）；生产 51,251（净 -5）；未登记项 0/0/0，35 处登记为命名欠债，见 layer-fence.txt，[证据](../experiments/host-convergence/h5/verification.md) |
+| H0 依赖方向围栏 | S | — | 已验收（`a0de84b`）；实测基线 58 / 35 / 1，[证据](../../../experiments/host-convergence/h0/verification.md) |
+| H1 共享原语与已分叉规则 | M | H0 | 已验收（7dd8204）；依赖计数 58 / 23 / 1；本机已安装 Plugin id 均合规，[证据](../../../experiments/host-convergence/h1/verification.md) |
+| H2 Run 元数据下沉 | M | H1 | 已验收（ebc9919）；依赖计数 25 / 23 / 1，服务 → 用例减少 33（按下文确认口径），[证据](../../../experiments/host-convergence/h2/verification.md) |
+| H3 配置只在组合根读取 | M | H2 | 已验收（c87ef57）；本机已保存模型设置通过新校验；四变量在入口各读一次，模型保存与执行共用类型化校验；依赖计数 25 / 23 / 1，[证据](../../../experiments/host-convergence/h3/verification.md) |
+| H4 Plugin 领域单一主人 | L | H3；调研可提前 | 已验收（3a8096c）；生产 +288 行；构造外部 0 / 0，依赖计数 22 / 23 / 1，[证据](../../../experiments/host-convergence/h4/verification.md) |
+| H5 剩余反向依赖清零 | M | H4 | 已验收（f948880）；生产 51,251（净 -5）；未登记项 0/0/0，35 处登记为命名欠债，见 layer-fence.txt，[证据](../../../experiments/host-convergence/h5/verification.md) |
 
 规模：S 约半天，M 约 1–2 天，L 约 3–5 天（按 Agent 工作量估计）。
 
@@ -115,7 +117,7 @@
 | G9-pilot-host | `pilot_host.rs`（基线 :10、855、875） | 0 / 3 / 0 | 保留 Pilot Turn 具体执行端口；端口接线预算 +35 行，暂不实施，保留为架构欠债 |
 | G10-candidate-context | `application/plugin_candidates.rs`（基线 :357，C01） | 0 / 0 / 1 | 随 G9 保留候选自测的 PilotTurnContext；待 Turn 执行端口及所需参数拆分关闭 |
 
-这些是仍存在的反向依赖，不表示实际三类引用已经清零。命名标识固定在 `tests/layer_fence.rs`，文件路径、上限和保留理由写在 `layer-fence.txt` 对应行注释中。验证命令、删除路径、计数与偏离见 [H5 交回](../experiments/host-convergence/h5/verification.md)。
+这些是仍存在的反向依赖，不表示实际三类引用已经清零。命名标识固定在 `tests/layer_fence.rs`，文件路径、上限和保留理由写在 `layer-fence.txt` 对应行注释中。验证命令、删除路径、计数与偏离见 [H5 交回](../../../experiments/host-convergence/h5/verification.md)。
 
 架构验收结论（2026-10-26）：H5 通过。生产 51,256 → 51,251（净 -5），未登记项 0/0/0，35 处命名欠债登记在 `layer-fence.txt`。H0–H5 Host 生产行数累计 +295，本轮以依赖方向理顺为主，瘦身发生在 H1（-80）和 H5（-5）。G2/G8/G9 三组端口接线（合计预算 +140 行）未实施，作为后续单独立项的架构欠债。本收敛任务到此结束。
 
@@ -130,7 +132,7 @@
   - 生产代码行数前后的变化；
   - 偏离本页的地方及理由。
 - 不读取 `.local/` 下的设置、凭据和运行状态；不部署、不推送。
-- 遵守 [开发约定](../AGENTS.md)，包括措辞规则。
+- 遵守 [开发约定](../../../AGENTS.md)，包括措辞规则。
 
 ## 并行方式
 

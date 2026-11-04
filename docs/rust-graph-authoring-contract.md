@@ -9,7 +9,7 @@
 
 ## 两层模型
 
-作者模型表达 `agents`、`ops`、内联 `graphs`、`nodes`、`edges`、目标/接口、输入输出、读写/网络声明、Plugin 和 `layout`。角色只复用配置，Plugin 直接挂节点。
+作者模型表达 `agents`、`ops`、内联 `graphs`、`nodes`、`edges`、目标/接口、输入输出、读写/网络声明、Plugin 和 `layout`。角色只复用配置，Plugin 直接挂节点；Op 在 `run`、`call`、`fanout`、`join`、`host` 中恰好选择一种。
 
 Runtime IR 保存稳定展开节点、路由/反馈/并行、输入与权限、绑定 Plugin 和执行所需事实。它不承载编辑器布局，也不能静默忽略模型、读写、调用模式或权限。未知字段与不支持组合必须在编译/接纳时明确诊断，不能伪装为可运行配置。
 
@@ -28,12 +28,62 @@ Runtime IR 保存稳定展开节点、路由/反馈/并行、输入与权限、�
 | 设置 host Op | 保留 operation JSON；宿主能力、入口授权与普通命令执行分别检查 |
 | 设置反馈 | 检查出口和轮次，保留同 Run 文件延续与恢复身份 |
 | 挂载 Plugin | 已安装资源校验与摘要绑定；未安装/越权明确拒绝 |
-| 内联模块 | 节点身份稳定，原模块与 layout 往返保存 |
-| fanout/join | 配对、独立分支、收束和失败边界提前校验 |
-| 独立 Call | 目标、wait/detach、输入映射与父子事实明确 |
 | 修改 layout | 仅保存展示信息，不扩大执行权限 |
 
 作者模型断言、固定展开样例与 HTTP CRUD 测试位于 Rust crate 的测试范围。测试样例不执行另一个语言解析器；具体本轮结果见 [开发台账](pilot-development-plan.md)。历史快照只用于解释先前兼容来源。
+
+## 组合与调用
+
+| 组合 | 身份与用途 |
+| --- | --- |
+| 内联模块 | 同一作者文件的 `graphs` 展开到当前 Run，节点身份稳定，原模块与 layout 可往返保存；折叠子图只是编辑投影，不另建 Run |
+| 独立调用 | `Op.call` 接纳目标 Graph 的独立 Run，保存源 Run/节点/轮次及父子引用 |
+| 配对并行 | `fanout → 独立串行分支 → join` 属于当前 Run，分支各有节点现场和不可变产物 |
+
+普通 Edge 保留路由含义，不隐式广播或变成跨 Run 连线。定义中“引用了谁”与一次执行“启动了哪个 Run”分别投影。
+
+### 独立 Graph Call
+
+节点继续通过 `op` 引用 `ops.<name>.call`，字段如下：
+
+| 字段 | 行为 |
+| --- | --- |
+| `graph` | 可静态解析的目标 Graph |
+| `mode` | `wait` 或 `detach` |
+| `input` | 常量输入 |
+| `input_map` | 目标顶层键到源 input 的 JSON Pointer |
+| `files` | 从调用节点可见的上游已提交输入选择 `node/path/as` |
+| `result` | wait 选择目标 `node/files` 结果 |
+| `session` | 操作员指定、绑定用户的既有会话；输入中的 ID 不授予历史或投递权限 |
+
+文件在子 Run 只读挂载到 `/in/call`，返回文件位于调用节点 `result/`。调用关联保存在 Run 事实中，并进入节点完成和产物 manifest 投影；凭据、宿主路径和整个源 workspace 不随普通输入传递。
+
+| 生命周期 | wait：等待完成 | detach：接纳后继续 |
+| --- | --- | --- |
+| 调用节点成功 | 目标成功且所选结果可读取 | 目标已持久接纳，有可追溯引用 |
+| 目标随后失败 | 调用节点按失败路径结算 | 目标保存失败事实，父成功不被改写 |
+| 停止父 Run | 请求停止该调用创建的目标 | 已接纳目标独立继续，可单独停止 |
+| 服务重启 | 找回同一目标，再等待/读取结果 | 找回原接纳事实，不创建第二个目标 |
+
+稳定调用身份绑定父 Run/Graph 摘要、完整节点 ID、invocation 和调用定义摘要，据此派生固定 child Run ID；重试核对同一目标。首次接纳保存目标快照与实际输入，普通恢复不创建替代 Run，循环下一轮是新调用。目标校验/接纳失败不能标成成功，也不把忙碌拒绝称作排队。
+
+不同独立调用默认可并发。同一助手 Session 的后台请求串行，不抢占用户对话；新用户输入要求后台让出并等待实际退出，后续恢复同一 Run。Graph 完成与平台投递分别记录，ACK 未知沿网关账本核查，不自动重发。
+
+当前不支持动态目标、跨 Graph 递归调用或级联删除整条历史调用链。历史双向引用参与删除保护，外部效果不因停止或重试自动回滚。
+
+### 同 Run 配对 fanout 与 join
+
+`fanout: {"join": "节点 ID"}` 指向唯一 `join: {}`，配对只写一次，分支由边派生。至少两条分支，每条是互不重叠的串行链，在同一 join 收束；禁止外部进入分支、越界、内部选择/循环、嵌套并行及区域内 Call/Host Op。整个区域前后的选择和反馈循环仍可使用，非法组合在编译/接纳时明确拒绝。
+
+join 仅在本轮所有分支成功且提交结果后推进一次。分支失败请求停止同伴，保留已提交结果及未完成事实，join 不放行；用户停止取消活动节点，暂停在活动节点结算后按节点边界生效。
+
+节点身份、workspace、trace 和 commit 仍属于原 Run。`join.json` 绑定本次 fanout 轮次与各分支 commit，下游通过只读输入读取证据；再次进入区域时不复用上轮进度。分支游标、提交进度与并行激活由同一 Runner 协调，恢复、重复完成和停止后迟到结果不产生额外收束；持久格式及兼容边界见[当前架构](architecture.md#执行链与所有权)。
+
+### 关系与运行展示
+
+编辑画布区分子图与“调用工作流”，展示目标、等待方式、输入和结果选择。调用节点与目标 Run 状态分别显示，父 Run 完成后目标仍运行是合法结果；父子页面保留双向导航。
+
+定义关系从 Graph 派生，关系入口是一跳/全部关系列表，可定位来源节点，不另存关系或新增关系编辑器。运行看板按各 Run 展示，实际调用关联属于 Run 详情。
 
 ## 文件交付
 
@@ -51,7 +101,7 @@ default 尚未保存时兼容旧托管默认配置；已保存但缺少所选模
 
 ## Host Op 与常驻助手
 
-Op 在 `run`、`call`、`fanout`、`join`、`host` 中恰好选择一种。`host` 必须为 JSON object，`operation` 必须为非空字符串；其余参数由 Kernel 原样保留并通过 `NodeExecutionPort` 交给宿主，不解析为 Session/WeCom 类型，也不授予隐式 Plugin、网络或文件权限。`NodeExecutionCapabilities.host_operations` 默认关闭；支持普通 `Op.run` 不等于支持 host operation。当前 Host 只接入获准助手的 `session.wait_input` 和 `session.reply`，未知 operation 明确拒绝；Graph 能保存不代表手动或 standalone 入口获得 Session 授权。
+`host` 必须为 JSON object，`operation` 必须为非空字符串；其余参数由 Kernel 原样保留并通过 `NodeExecutionPort` 交给宿主，不解析为 Session/WeCom 类型，也不授予隐式 Plugin、网络或文件权限。`NodeExecutionCapabilities.host_operations` 默认关闭；支持普通 `Op.run` 不等于支持 host operation。当前 Host 只接入获准助手的 `session.wait_input` 和 `session.reply`，未知 operation 明确拒绝；Graph 能保存不代表手动或 standalone 入口获得 Session 授权。
 
 当前助手的两项 Op 定义为：
 
@@ -64,7 +114,7 @@ Op 在 `run`、`call`、`fanout`、`join`、`host` 中恰好选择一种。`host
 }
 ```
 
-完整 opt-in 样例见 [wecom-persistent-assistant.json](../examples/graphs/wecom-persistent-assistant.json)。这是普通 `wait_input (Op) → assistant (Agent) → reply (Op) → wait_input`，不是新节点类型或专用 Runner；渠道只接纳这一形状。当前渠道 Host 接纳要求恰好一个等待 Op、一个 Agent 和一个回复 Op，入口是等待节点，三条普通边构成上述循环，不设置节点 `max_rounds` 或模块轮次上限。渠道配置的结果节点仍为 Agent `assistant`，与投递 Op `reply` 分别绑定；Kernel 的通用 host port 本身不限定这套业务形状。host Op 当前不能放入并行区域。
+完整 opt-in 样例见 [wecom-persistent-assistant.json](../examples/graphs/wecom-persistent-assistant.json)。这是普通 `wait_input (Op) → assistant (Agent) → reply (Op) → wait_input`，不是新节点类型或专用 Runner；渠道只接纳这一形状。当前渠道 Host 接纳要求恰好一个等待 Op、一个 Agent 和一个回复 Op，入口是等待节点，三条普通边构成上述循环，不设置节点 `max_rounds` 或模块轮次上限。渠道配置的结果节点仍为 Agent `assistant`，与投递 Op `reply` 分别绑定；Kernel 的通用 host port 本身不限定这套业务形状。
 
 - `session.wait_input` 只在可信助手 binding 的 Session 内领取输入，并持久绑定等待 invocation 与 Turn；恢复/重试仍读取同一 Turn。等待不调用模型，不继承 `Op.run` 的默认命令超时，支持暂停/取消。本轮内容位于等待节点 commit 的 `output`（`message`、`channel`、`attachments`、`session`、`turn`、`interrupted_messages`），Agent 读取 `committed_inputs`，不得把冻结的 Run 启动 `input` 当作下一轮消息。
 - `session.reply` 只读取本 Turn 经普通边交接的确切 Agent commit，校验 `source_commit`、`reply_for` 与本轮图片集合，然后结算 Turn 并路由回等待；不要求整个 Run Completed，不读取一个长期 Run 的“最新产物”替代本轮身份。平台 ACK/unknown 属于既有投递账本，不由节点完成状态代替。
@@ -77,8 +127,10 @@ Op 在 `run`、`call`、`fanout`、`join`、`host` 中恰好选择一种。`host
 
 ## 当前边界
 
-保存校验不验证模型凭据、真实网络、业务内容质量或所有用户 Graph 的执行结果。Plugin 闭包来自宿主 canonical catalog，不从请求接受任意本地路径。精确累计预算、嵌套并行、分支交叉和区域内 Call 等未支持能力应明确拒绝。
+保存校验不验证模型凭据、真实网络、业务内容质量或所有用户 Graph 的执行结果。Plugin 闭包来自宿主 canonical catalog，不从请求接受任意本地路径。精确累计预算等未支持能力应明确拒绝；组合限制见[组合与调用](#组合与调用)。
 
 现有 Graph 字段可解析不等于已完成运行级兼容；RSI、周报和深度研究需要其工具、输入与门禁分别验收。目标设计中的编辑器扩展也不能自动视为支持。独立包可以隐藏 Runtime 源码，但 Graph、Skill 和资源仍是用户资产。
+
+[历史组合设计](archive/development-2026-10-13/graph-composition-design.md)只用于查证原型、旧执行器与阶段验收，不能代替当前 Goose 路径的验证；当前结果统一记录在[验收台账](pilot-development-plan.md)。
 
 共享职责与运行不变量见 [产品架构](product-architecture.md)，当前实现见 [当前架构](architecture.md)。

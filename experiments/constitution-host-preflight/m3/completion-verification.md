@@ -36,7 +36,7 @@ M3 的实现与规定回归已完成，待用户审查 S27（承接 S4）并决�
 
 人工恢复用例改名为 `kernel_observed_native_effect_accepts_durable_completed_or_abort_without_replay`：固定 Goose 产生实际未知效果、强杀 Host 后，夹具以实际 Code + Observation 提交准备已登记 pending，不再用普通 resume 准备。保留 Completed/Abort 202、效果一次、same Session、观察落盘、幂等 202、冲突 409、Abort 无新模型请求和无旧 runs 文件断言。唯一退出的恢复断言是裁定明确更正的“第二次普通 resume 必须 409”，动作投影改为允许显式核查。
 
-更正逐条登记为 [M2 行为更正：恢复回到 master 契约](../../../docs/constitution-refactor-log.md#m3-1015m2-行为更正恢复回到-master-契约)，不新增 S 候选。M3 断言登记共 13 类（原 A1–A10，续加 A11–A13）；原 [Runtime 73 项映射](runtime-test-mapping.md)、[Host 39 项映射](host-test-mapping.md) 与重复 target 12 项映射保留，另列上述人工恢复改名。业务断言放宽 0，既有测试新增 ignore 0。
+更正逐条登记为 [M2 行为更正：恢复回到 master 契约](../../../docs/archive/runtime-migration-2026-10-20/constitution-refactor-log.md#m3-1015m2-行为更正恢复回到-master-契约)，不新增 S 候选。M3 断言登记共 13 类（原 A1–A10，续加 A11–A13）；原 [Runtime 73 项映射](runtime-test-mapping.md)、[Host 39 项映射](host-test-mapping.md) 与重复 target 12 项映射保留，另列上述人工恢复改名。业务断言放宽 0，既有测试新增 ignore 0。
 
 ## 原 12 项失败的单独复跑
 

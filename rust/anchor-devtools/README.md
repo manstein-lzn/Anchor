@@ -74,7 +74,7 @@ It does not contact a provider or start the service. See the
 
 `anchor-devtools regression candidate` builds Web and release binaries, reuses
 the Host's extracted-runtime fixture and saves actual command/evidence reports.
-See [candidate regression](../../docs/rust-production-candidate.md).
+See [candidate regression](../../docs/runtime-contract-tests.md#release-与-source-free-候选).
 
 Target paths default to `CARGO_TARGET_DIR` or `/tmp/anchor-native-regression-target`;
 evidence defaults to a new private directory under the system temporary directory.

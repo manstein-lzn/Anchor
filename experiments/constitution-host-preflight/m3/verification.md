@@ -20,7 +20,7 @@
 | `e4a9c68` | 快照比较格式整理。 |
 | `6e91e5c` | 唯一 Kernel 执行权威，删除旧实现，迁移夹具与控制/恢复/会话路径。 |
 
-在 M3 结束同步时，以 `6e91e5c` 为分支父提交合并 master `0aa5197` 一次，merge、不 rebase。实际冲突为 `main.rs` 与 `run_access/reads.rs`；master 的启动清理、Web 与 Pilot 业务修复保留，上游旧夹具接到本分支 Kernel 门面。逐文件依据见[工作记录](../../../docs/constitution-refactor-log.md#m3-结束同步-master)。merge 提交为 `b61c325`，workspace 最终为 2,153 / 0 / 125（129 targets）。提交说明误写 2,154，实际日志与本文为 2,153。
+在 M3 结束同步时，以 `6e91e5c` 为分支父提交合并 master `0aa5197` 一次，merge、不 rebase。实际冲突为 `main.rs` 与 `run_access/reads.rs`；master 的启动清理、Web 与 Pilot 业务修复保留，上游旧夹具接到本分支 Kernel 门面。逐文件依据见[工作记录](../../../docs/archive/runtime-migration-2026-10-20/constitution-refactor-log.md#m3-结束同步-master)。merge 提交为 `b61c325`，workspace 最终为 2,153 / 0 / 125（129 targets）。提交说明误写 2,154，实际日志与本文为 2,153。
 
 ## 检查
 
@@ -57,7 +57,7 @@
 - Rust 的 `GraphRunner|RunStatus|FileRunStore|stop_requested|pause_requested` 扫描零命中；三个 principal 改为 `anchor/executor`、`anchor/host`、`anchor/operator`。测量 Probe 的本义保留。
 - [八类规则、27 行 Session 所有权及三个条件/四极限](rules-session-audit.md) 按独立判断体列明；不以调用者数量或行数宣称规则收敛。
 - [Runtime 原 73 项逐项映射](runtime-test-mapping.md)，原测试名全保留；[Host 39 个消失函数逐项映射](host-test-mapping.md)，包含改名、合并和已退出旧机制，不等于删除 39 项业务能力。业务断言放宽 0，既有测试新增 ignore 0。
-- S 候选 1：S27（承接 S4），退役只移动 Session current 指针，未结算 Run 仍可 abandon。10 类断言修改及删除映射登记在[工作记录](../../../docs/constitution-refactor-log.md#m3-1013唯一-kernel-路径与旧执行器退出)。本轮无新增 Code 提交种类。
+- S 候选 1：S27（承接 S4），退役只移动 Session current 指针，未结算 Run 仍可 abandon。10 类断言修改及删除映射登记在[工作记录](../../../docs/archive/runtime-migration-2026-10-20/constitution-refactor-log.md#m3-1013唯一-kernel-路径与旧执行器退出)。本轮无新增 Code 提交种类。
 
 与 M2 最终交回 2,139 / 0 / 136 相比，workspace 通过数增加 14、忽略数减少 11；其中删除重复编译的 12 个 ignored，新增 Session-call 恢复 ignored 1。Web 311 → 333，增加 22。计数变化不能作为新增业务能力或恢复验收的替代证明。
 

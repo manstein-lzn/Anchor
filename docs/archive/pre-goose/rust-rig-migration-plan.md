@@ -4,7 +4,7 @@
 
 > 历史迁移资料：io-harness/Rig 源码、实验原型与回归入口已移除，本文中的旧命令和路径仅用于追溯当时证据。当前执行、开发和部署以 Goose-only 迁移决定（历史路径 `goose-runtime-migration.md`）、[当前架构](architecture.md) 和 开发台账（历史路径 `pilot-development-plan.md`） 为准；旧源码可从 Git 历史回查。
 
-2026-10-06 后续决定：本文保留旧 io-harness/Rig 路线的历史边界与证据。当前目标已改为 [Goose-only Runtime](../../goose-runtime-migration.md)，暂不实施预算控制；不要依本文件继续扩展旧 Agent 装配或将其误认为最终依赖。
+2026-10-06 后续决定：本文保留旧 io-harness/Rig 路线的历史边界与证据。当前目标已改为 [Goose-only Runtime](../../architecture.md#goose-与恢复)，暂不实施预算控制；不要依本文件继续扩展旧 Agent 装配或将其误认为最终依赖。
 
 ## 当前状态（2026-10-06）
 
