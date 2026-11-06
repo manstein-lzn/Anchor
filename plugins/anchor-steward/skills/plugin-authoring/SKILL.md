@@ -1,64 +1,27 @@
-# 插件适配与激活
+---
+name: plugin-authoring
+description: 适配、准备、自测和审查 Anchor Plugin；安装与挂载保留原生确认。
+---
 
-用户要求获取、配置或开发 Plugin 后，你负责检查本地能力、拉取或编写源码、适配清单、准备依赖、在沙箱内自测，最后交出一份带实际测试与审查信息的候选目录。用户只讨论方案时先讨论，不执行。安装保留原生人工确认；安装后指导用户在插件面板挂载，从下一 Turn 使用。
+# Plugin 开发
 
-## 边界
+先用 Pilot `plugin_list` / `plugin_read` 检查已安装能力，再决定复用或开发。管理读取不授予执行权限。候选放本 Session `/workspace`；`anchor_read` / `anchor_edit` 的 `path` 和候选工具的 `directory` 均为工作区相对路径。覆盖已有文件前先读取并遵守实际编辑 schema 的摘要检查。
 
-- Pilot 的普通 Turn 和 Responses 使用同一 Session 工作区与工具：`anchor_read`、`anchor_edit` 的 path 和 `plugin_review`、`plugin_prepare`、`plugin_test`、`plugin_install` 的 directory 都相对 `/workspace`；下一 Turn 可以继续，不能读取别的 Session 或任意宿主目录。`anchor_edit` 整体替换已有文件前先读摘要，或使用有匹配次数检查的文本替换。
-- 下载、git、Cargo、依赖准备和候选 MCP 都按本 Turn 冻结的任务联网权限执行。用户明确禁止联网优先，候选的 `network:true` 不能给自己授权。没有网络时复用本地包与工具链，缺少依赖如实说明。
-- 你不能自己把插件装进 Library：安装必须由人在原生表单里点确认。你也不能给自己增加权限、工具或插件绑定，不能修改或删除定义你自己的那张图，不能安装为自己提供指令的 Plugin——这些都要操作员在操作员接口里做。
-- 凭证只以环境变量**名字**出现。不要把任何 token、API key、凭据写进插件目录、对话或命令参数。
+## 清单与边界
 
-## 目录契约
+- 必需 `plugin.json`，至少 `name`；ID 由安装目录/安装参数决定，不添加根字段 `id`。纯 Skill 可只写 `name`、`description`、`skills: "skills/"`，并提供 `instructions.md` 与 `skills/<名称>/SKILL.md`，不需要 MCP。
+- 当前根字段白名单：`name`、`description`、`version`、`author`、`homepage`、`repository`、`license`、`keywords`、`interface`、`skills`、`mcpServers`、`configuration`、`dependencies`、`network`、`mutable`、`hooks`、`commands`、`agents`、`apps`。最后四项可被识别但不是额外执行入口；不要把根白名单误用于 server 内部字段。未知字段会报错，以 `plugin_review` 的实际诊断修正，不猜参数。
+- MCP 可在 `mcpServers` 或外置 `.mcp.json` 声明；stdio 用 `command` / `args`，HTTP 用 `url`，入口优先插件内相对路径。Python 正式依赖只写顶层 `"dependencies": {"python": ["idna==3.6"]}`，视图解释器为 `${ANCHOR_PLUGIN_VIEW}/bin/python`；不再使用旧 `environment` / `anchor.environment`。
+- 可变数据以根字段 `mutable` 显式声明相对路径；不能覆盖清单或 MCP 配置。不要借此修改代码。包只交付普通文件/目录，不依赖链接、`.git`、开发 venv 或宿主绝对路径。Rust 二进制同时带源码、锁文件和构建说明。
+- `configuration.fields` / `configuration.environment` 声明所需连接字段；凭据通过 Host 专用表单或 OAuth 配置，不进入源码、命令、URL、聊天和包。候选测试不继承同 ID 正式 Plugin 的凭据或 OAuth。不要复制凭据或自行读取宿主环境。
+- 联网需求写根字段 `network: true`（HTTP MCP 自动产生需求）；这只是声明，不给当前 Turn 授权。依赖获取、构建、候选 MCP 均服从已冻结网络与沙箱。
 
-一个 Plugin 是「一个目录 + `plugin.json`」：
+## 候选到交付
 
-```text
-<插件目录>/
-├── plugin.json          # 必需；至少要有 name
-├── skills/<name>/SKILL.md
-├── .mcp.json            # 可选，等价于 plugin.json 里的 mcpServers
-└── bin/…                # 入口程序或脚本，推荐用相对路径引用
-```
+1. 仅在用户已授权的范围内实际获取获准来源并构建，记录固定 commit 或内容摘要；未获授权或只讨论方案时，只说明所需步骤，不执行。按需读取 Python/Rust Skill，开发依赖不自动变成正式依赖。
+2. `plugin_prepare({"directory":"candidate"})` 准备候选摘要与正式 Python 依赖的临时视图；不安装、不挂载。
+3. `plugin_test({"directory":"candidate"})` 真实启动 MCP、列工具。需要业务验证时传实际 `server`、`tool`、`arguments`；仅发现工具或 `business_tested:false` 不能声称业务通过。纯 Skill 没有 MCP，不凭空添加业务调用。内容改变后重做准备与测试。
+4. `plugin_review({"directory":"candidate"})` 核对文件、指纹、入口、依赖与配置告警；交付来源、改动、测试摘要及未测边界。
+5. 用户要求安装时调用 `plugin_install({"directory":"candidate","id":"example"})`，由原生表单确认；模型不能传确认值，取消不安装。安装不等于挂载，启用仍走 `plugin_mount` 的原生确认或用户 HTTP/页面开关。当前 Turn 冻结；变化生效后结束当前 Turn，由 Host 自动续接，不重做已完成副作用。
 
-`plugin.json` 里 `mcpServers` 的字段是**白名单**，出现未支持的字段会直接拒绝整包：
-
-- stdio（有 `command`）：`type`、`enabled`、`startup_timeout_sec`、`tool_timeout_sec`、`command`、`args`、`cwd`、`env`、`env_vars`、`optional_env_vars`
-- HTTP：`type`、`enabled`、`startup_timeout_sec`、`tool_timeout_sec`、`url`、`headers`、`http_headers`、`env_http_headers`、`bearer_token_env_var`、`auth`、`oauth_resource`、`oauth_client_id`、`oauth_scope`
-
-规则：
-
-- 任务工具需要联网时，在清单**顶层**声明 `"network": true`。HTTP MCP 的联网需求由宿主自动识别；stdio 业务客户端必须声明。挂载该 Plugin 后会依赖启用已安装的 `network` Plugin，但不会覆盖用户明确禁止联网。`network` 不是 `mcpServers` 的字段，也不是 Python 包依赖；没有启用者的任务工具在无网沙箱中运行。
-
-- **未列出的字段会被拒绝**（例如上游清单里的 `dependencies`、`requirements`、`hooks`、`commands`、`agents`）。适配的主要工作之一就是把清单收敛到这个白名单。
-- 凭证只能引用环境变量名：`env_vars` / `optional_env_vars`（stdio）、`bearer_token_env_var`、`env_http_headers`（HTTP）。`env` 和 `headers` 里写死值会随包分发，审查会标记它。
-- `auth: "oauth"` 不能与静态 `Authorization`（`bearer_token_env_var`/`headers`）同时出现，会被拒绝。
-- `optional_env_vars` 缺失时该 server **不会被启动**：想让它一定运行就不要用这个字段。
-- 入口优先写相对路径（如 `bin/run`）。绝对路径必须属于宿主授权的工具环境。Python 第三方包写在清单顶层 `dependencies.python`，需要视图解释器时使用 `${ANCHOR_PLUGIN_VIEW}/bin/python`；调用 `plugin_prepare` 和 `plugin_test` 让宿主按授权来源处理，不修改宿主 Python 环境。Rust 使用部署共享 Cargo/rustup，按项目 `Cargo.toml`/`Cargo.lock` 构建；不要创建另一套工具链管理器。
-- 符号链接、`.git` 不会被安装；目录里只放真的目录和普通文件。包内不要出现 `.env` 或其他凭证文件。
-
-## 标准流程
-
-1. **核查并获取**：先用 `plugin_list`、`plugin_read` 查看相关已安装能力、源码资源、依赖和工具，决定复用或开发。用户提供仓库或 HTTP 来源时实际获取到自己的工作区；保留仓库 commit 或下载内容摘要，不用移动的分支名充当最终版本。
-2. **读懂**：读上游清单、入口和它真正要执行的东西；先判断这是 stdio 还是 HTTP，需要哪些环境变量。
-3. **适配**：把清单收敛到上面的白名单；入口改成相对路径或登记过的工具环境；把凭证改成环境变量引用；不要顺手改上游代码而不记录。
-4. **准备与自测**：对同一候选调用 `plugin_prepare`，记录候选摘要和实际锁定依赖；再用 `plugin_test` 真实启动 MCP、列工具，并传 `server`、`tool`、`arguments` 调用与需求相关的业务工具。仅列工具是协议发现，`business_tested:false` 不证明业务正确。候选测试不获取宿主凭据；需要真实凭据的部分留待安装、授权和挂载后验证。修改候选后重新准备/测试新摘要，失败、超时和取消不能记成通过。
-5. **整理产物**：最终目录必须自包含。编译出的二进制必须同时带上可读源码和构建说明（这是审查规则：没有源码的二进制，人无法审查，也就不该被激活）。
-6. **构建与依赖**：Python 写 `"dependencies": {"python": ["包==版本"]}`，候选准备使用 Session 私有视图，正式安装复用共享存储但生成独立正式视图。Rust 先查看 `plugin_prepare.rust_development` 披露的已装工具链；优先 `cargo build --locked`，指定版本用 `cargo +<已安装版本> build --locked`。只有项目确实要求新版本、宿主已配置共享 Rustup 且 Turn 允许联网时，才直接执行 `rustup toolchain install <版本>`。不要改共享 default、self-update 或写自造 linker/环境变量去绕过沙箱；构建命令可按实际需要传 `timeout_seconds`，最高 600 秒。把稳定入口放在候选 `bin/`，保留源码、锁文件与构建说明，不让正式入口引用开发工作区。旧 `environment` / `anchor.environment` 机制已删除。
-7. **交审查**：先用 `plugin_review`（宿主工具，只传工作区内的相对目录）看一眼指纹、将执行的内容和告警，不满意就回去改；满意后调用 `plugin_install` 申请安装。`plugin_install` 只接受 `directory`（和可选的 `id`）——**确认字段不能由你提供**，它会把待批内容弹给操作员，操作员点确认才会真的装进库。取消、忽略、超时都算不批；同一指纹已装过会直接告诉你「已是最新」。缺少源码的编译产物默认装不进去，除非操作员额外勾一次「接受无法阅读的产物」，所以尽量把源码一起交出去。操作员也可以自己用 `anchor-library --root <Library> install --directory <候选目录> --id <id> --review` 看同一份审查单，再执行安装。
-
-## 交给人的审查单里要有什么
-
-- 来源：仓库地址 + 固定 commit（不是分支名）。
-- 候选目录的内容指纹与文件清单。
-- 相对上游改了什么（逐条，能对得上）。
-- 将来会被执行的东西：每个 server 的传输方式、命令与参数、或 URL 与授权方式。
-- 需要哪些环境变量**名字**（值不出现）。
-- 依赖锁文件；编译产物则要有源码与构建命令，保证以后能离线重建。
-- 实际被测摘要、依赖/工具链和业务调用结果；安装确认、已安装、已挂载和下一 Turn 实际可用分别核查。取消或恢复时先读取保存的文件和工具观察，再继续，不盲目重放不确定结果。
-
-## 明确不要做
-
-- 不要在运行期联网安装依赖、不要调用包管理器去改宿主的 Python/Node 环境。
-- 不要为了让包「能跑」而放宽权限、去掉沙箱挂载或把凭证写进包。
-- 不要把「没验证过」说成可用。自测通过和「人已批准激活」是两个不同状态，分别如实报告。
+不能安装替换正在为自己提供指令的 Plugin，不能修改/删除定义自己的 Graph；交操作员维护。安装目前不强制绑定此前成功业务测试，不能把确认当作测试门禁。中断先核查候选和已保存结果，不盲目重放安装。

@@ -149,6 +149,211 @@ fn evidence(host: &Host, provider: &Provider, checks: Value) {
     );
 }
 
+#[test]
+#[ignore = "requires pinned Goose binary and Bubblewrap"]
+fn anchor_dev_http_mount_discloses_selected_guidance_without_changing_execution_facts() {
+    let provider = Provider::new(
+        "pilot-anchor-dev-guidance",
+        vec![
+            Step::tool("plugin_list", json!({"plugin":"anchor-steward"})),
+            Step::tool("anchor_plugins", json!({"plugin":"anchor-steward"}))
+                .after("Anchor Dev"),
+            Step::tool("platform_status", json!({})).after("next_offset"),
+            goose::command("printf retained-project > project-marker.txt"),
+            Step::text("Installed guidance is not mounted; existing commands still work."),
+            Step::tool("anchor_plugins", json!({"plugin":"anchor-steward"}))
+                .expect_request_contains("Anchor Dev"),
+            Step::tool(
+                "anchor_plugin_read",
+                json!({"plugin":"anchor-steward","section":"instructions"}),
+            )
+            .after("Anchor Dev"),
+            Step::tool(
+                "anchor_plugin_read",
+                json!({"plugin":"anchor-steward","section":"skills"}),
+            )
+            .after("稳定 Plugin ID"),
+            Step::tool(
+                "anchor_plugin_read",
+                json!({"plugin":"anchor-steward","section":"skill","path":"skills/graph-authoring/SKILL.md"}),
+            )
+            .after("graph-authoring"),
+            Step::text("Read only the selected Graph guidance.").after("files: []"),
+            Step::tool("anchor_plugins", json!({"plugin":"anchor-steward"})),
+            Step::tool(
+                "anchor_plugin_read",
+                json!({"plugin":"anchor-steward","section":"instructions"}),
+            )
+            .after("next_offset"),
+            Step::tool("platform_status", json!({})),
+            Step::tool("anchor_run", json!({"command":["cat","project-marker.txt"]})),
+            Step::text("Guidance is off; the workspace and runtime remain unchanged.")
+                .after("retained-project"),
+        ],
+    );
+    let host = Host::new(&graph()).default_runtime();
+    let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../plugins/anchor-steward")
+        .canonicalize()
+        .unwrap();
+    anchor_library::Library::new(host.base.root.path())
+        .install_directory("anchor-steward", &source, false)
+        .unwrap();
+    let instructions = fs::read_to_string(source.join("instructions.md")).unwrap();
+    let selected = fs::read_to_string(source.join("skills/graph-authoring/SKILL.md")).unwrap();
+    let unselected = fs::read_to_string(source.join("skills/python-development/SKILL.md")).unwrap();
+    // Seed an existing Host-managed runtime fact without preparing or downloading.
+    let runtime_path = host.base.state_root().join("managed/runtime-config.json");
+    fs::create_dir_all(runtime_path.parent().unwrap()).unwrap();
+    fs::write(
+        &runtime_path,
+        json!({
+            "format":1,"python":null,"python_enabled":false,"sources":null,"rust":null
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let runtime_before = fs::read(&runtime_path).unwrap();
+    let server = host.serve(&provider);
+    create(&server, "anchor-dev");
+    let first = submit(
+        &server,
+        "anchor-dev",
+        "unmounted",
+        "Find installed development guidance without enabling it; keep a project marker.",
+    );
+    let first = wait(&server, "anchor-dev", &first, "completed");
+    let workspace = workspace_with(&host, "project-marker.txt");
+    let workspace_before = goose::file_inventory(&workspace);
+    let (status, mounted) = server.request(
+        "POST",
+        "/sessions/anchor-dev/plugins/anchor-steward",
+        Some(&json!({"on":true})),
+    );
+    assert_eq!(status, 200, "{mounted}");
+    let second = submit(
+        &server,
+        "anchor-dev",
+        "mounted",
+        "Read Anchor Dev's entry and only its Graph authoring Skill.",
+    );
+    let second = wait(&server, "anchor-dev", &second, "completed");
+    assert_eq!(goose::file_inventory(&workspace), workspace_before);
+    let (status, disabled) = server.request(
+        "POST",
+        "/sessions/anchor-dev/plugins/anchor-steward",
+        Some(&json!({"on":false})),
+    );
+    assert_eq!(status, 200, "{disabled}");
+    let third = submit(
+        &server,
+        "anchor-dev",
+        "disabled",
+        "Check execution disclosure after disabling guidance, then inspect runtime and the saved project.",
+    );
+    let third = wait(&server, "anchor-dev", &third, "completed");
+    provider.assert_consumed();
+    assert_eq!(first["goose"], second["goose"]);
+    assert_eq!(first["goose"], third["goose"]);
+    assert_eq!(goose::file_inventory(&workspace), workspace_before);
+    assert_eq!(fs::read(&runtime_path).unwrap(), runtime_before);
+
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 15);
+    let system = |request: &Value| {
+        request["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|message| message["role"] == "system")
+            .filter_map(|message| message["content"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    for (index, request) in requests.iter().enumerate() {
+        let prompt = system(request);
+        assert!(prompt.contains("Current Anchor Plugin capabilities for this invocation."));
+        if (5..10).contains(&index) {
+            assert!(prompt.contains("\"id\":\"anchor-steward\""), "{prompt}");
+            assert!(prompt.contains("\"name\":\"Anchor Dev\""));
+            assert!(prompt.contains("\"tool_count\":0"));
+        } else {
+            assert!(!prompt.contains("\"id\":\"anchor-steward\""), "{prompt}");
+        }
+        assert!(
+            !prompt.contains(&instructions),
+            "full entry injected into system prompt"
+        );
+        assert!(
+            !prompt.contains(&selected),
+            "full Skill injected into system prompt"
+        );
+        assert!(
+            !request
+                .to_string()
+                .contains(&serde_json::to_string(&unselected).unwrap())
+        );
+        assert!(goose::tool_definition(request, "anchor_run").is_ok());
+        assert!(goose::tool_definition(request, "runtime_prepare").is_ok());
+    }
+    let feedback =
+        |index: usize| goose::tool_feedback(&requests[index]).last().unwrap()["content"].clone();
+    let payload = |index: usize| {
+        let contents: Value = serde_json::from_str(feedback(index).as_str().unwrap()).unwrap();
+        contents[0]["value"].clone()
+    };
+    assert_eq!(payload(2)["plugins"], json!([]));
+    assert_eq!(payload(6)["plugins"][0]["id"], "anchor-steward");
+    for (index, body) in [(7, &instructions), (9, &selected)] {
+        let read = payload(index);
+        assert_eq!(read["text"], body.as_str());
+        assert_eq!(read["end_of_file"], true);
+    }
+    let skills = payload(8);
+    assert_eq!(skills["skills"].as_array().unwrap().len(), 6);
+    for name in [
+        "plugin-authoring",
+        "graph-authoring",
+        "rust-development",
+        "python-development",
+        "pixi-development",
+        "git-workflow",
+    ] {
+        assert!(
+            skills["skills"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|skill| { skill["path"] == format!("skills/{name}/SKILL.md") })
+        );
+    }
+    assert_eq!(payload(11)["plugins"], json!([]));
+    assert!(
+        feedback(12)
+            .to_string()
+            .contains("not available in this catalog"),
+        "{}",
+        feedback(12)
+    );
+    assert_eq!(
+        payload(3),
+        payload(13),
+        "guidance switch changed runtime capabilities"
+    );
+    evidence(
+        &host,
+        &provider,
+        json!({
+            "installed_default_unmounted":true,
+            "http_mount_next_turn_summary":true,
+            "real_entry_and_selected_skill_read":true,
+            "disabled_execution_read_denied":true,
+            "workspace_and_runtime_unchanged":true,
+            "scripted_provider_not_model_autonomy":true
+        }),
+    );
+}
+
 struct Sources {
     root: tempfile::TempDir,
     url: String,

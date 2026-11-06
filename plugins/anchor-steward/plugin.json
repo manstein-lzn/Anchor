@@ -1,5 +1,5 @@
 {
-  "name": "Anchor 管家",
-  "description": "为常驻助手提供 Anchor 自身的运维契约：第三方插件的适配、自测与激活审查边界，以及人工确认要求。只提供说明，不含 MCP server。",
+  "name": "Anchor Dev",
+  "description": "按需读取的 Anchor 开发指导：Plugin、Graph、Rust、Python、pixi 与 Git 工作流。纯 Skill，不提供 MCP、不授予联网或工具权限。",
   "skills": "skills/"
 }

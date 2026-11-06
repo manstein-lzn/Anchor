@@ -225,7 +225,7 @@ Pilot 的 Graph validate/create/update 工具共用作者格式说明与最小�
 
 Pilot 的任务联网由 `network` Plugin 提供入口；新 Pilot 默认、主动/依赖启用、明确禁止和 Turn 冻结统一见 [Plugin 联网契约](plugins.md#pilot-任务联网)。渠道与普通 Graph 不获得 Pilot 默认；带 Session 的节点仍受自身权限上限约束，Provider 控制通道独立。
 
-Pilot 的普通 Turn 与 Responses 共用接纳、Session 工作区及现有文件/命令工具。Host 的 `RuntimeConfiguration` 统一解析基础环境，Session 持有私有开发现场，Library 持有候选引用和正式 Plugin；显式部署字段仍由部署者管理。准备、命令、测试、正式交付及清理的具体行为见 [Pilot 开发契约](pilot-development.md)。
+Pilot 的普通 Turn 与 Responses 共用接纳、Session 工作区及现有文件/命令工具。内置指令保留管理职责、工具发现、授权确认、冻结恢复及事实核验；具体开发方法由纯 Skill 的 Anchor Dev（稳定 ID `anchor-steward`）按需披露，覆盖 Graph、Plugin、Rust、Python、pixi 和 Git。Git 工具仍属于独立 Plugin，启用开发说明不扩大授权。Host 的 `RuntimeConfiguration` 统一解析基础环境，Session 持有私有开发现场，Library 持有候选引用和正式 Plugin；显式部署字段仍由部署者管理。准备、命令、测试、正式交付及清理的具体行为见 [Pilot 开发契约](pilot-development.md)。
 
 Pilot 接纳保存网络和工具授权快照，执行启动时读取一次 `RuntimeSnapshot` 并冻结基础解释器和依赖准备器，包括“尚未配置”的状态；当前执行不会因其他请求更新配置而获得新能力。运行时探测和 MCP 启动不持全局接纳 gate。对话内联网授权、挂载、环境准备或凭据配置保存事实后请求幂等 continuation，当前 Turn 收束后通过同一 `PilotService::admit` 接纳下一 Turn，Web 跟随新 Turn。停止、删除、归属变化或未收束执行不能自动接续；重新接纳核查已保存请求，不重放准备或业务工具。Graph 后续节点从 Host 当前配置及当前 Library 装配，保持既有热替换语义。
 

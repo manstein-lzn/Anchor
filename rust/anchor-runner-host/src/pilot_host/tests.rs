@@ -3,6 +3,54 @@ use anchor_platform_session::CreateSession;
 use serde_json::json;
 use std::time::Duration;
 
+#[test]
+fn builtin_guidance_keeps_host_boundaries_and_discovers_development_skills_on_demand() {
+    for boundary in [
+        "Anchor Pilot",
+        "anchor_plugins",
+        "anchor_plugin_read",
+        "plugin_list/plugin_read",
+        "plugin_mount",
+        "原生确认",
+        "当前 Turn 冻结",
+        "Host 在同一 Session 自动续接",
+        "纯 Skill 开关只控制指导披露",
+        "credential_request",
+        "oauth_status",
+        "channel_status",
+        "run_abandon",
+        "graph_delete",
+        "session_wait/run_status/graph_read",
+        "#anchor/graph/<id>",
+        "#anchor/run/<id>",
+        "#anchor/artifact/<run>/<node>/<path>",
+        "不能安装替换为自己提供指令的 Plugin",
+    ] {
+        assert!(
+            INSTRUCTIONS.contains(boundary),
+            "missing Host boundary: {boundary}"
+        );
+    }
+    for tutorial in [
+        "development_prepare",
+        "runtime_prepare",
+        "dependencies.python",
+        "Cargo.toml",
+        "requirements",
+        "pip",
+        "rebuild",
+        "discard",
+        "plugin_prepare",
+        "plugin_test",
+    ] {
+        assert!(
+            !INSTRUCTIONS.contains(tutorial),
+            "development tutorial remains built-in: {tutorial}"
+        );
+    }
+    assert!(INSTRUCTIONS.chars().count() < 1800);
+}
+
 #[tokio::test]
 async fn continuation_facts_keep_stop_interrupt_supersession_and_replay_distinct() {
     let fixture = Fixture::new();

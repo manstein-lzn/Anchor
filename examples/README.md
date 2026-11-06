@@ -22,9 +22,11 @@
 | `academic-research` | 学术检索、原文读取和研究 Skill | 无需仓库附带的账号；访问情况取决于实际论文服务 |
 | `docmost` | 页面 MCP 与图片附件工具 | 在插件详情填写 Docmost URL 和 API key |
 | `wecom` | 企微工具、Gateway 和使用说明 | 机器人按 Graph 配置，见上；默认不连接 |
-| `anchor-steward` | Anchor 插件开发和适配说明 | 无额外服务配置 |
+| `anchor-steward`（Anchor Dev） | Graph、Plugin、Rust、Python、pixi 与 Git 工作流的按需 Skill | 在 Pilot 插件面板启用；纯说明，无 MCP server |
 
 插件的本地 Rust 工具随源码首次准备编译和安装，用户不用手动复制二进制。模型、插件连接和渠道配置仍由网页管理，不附带任何凭据。
+
+Anchor Dev 保留目录 ID `anchor-steward`，启用后 Pilot 按需读取开发方法，不会自动初始化环境、启用 Git 或授予联网。使用 Git 工具需单独启用 `git`，远端访问仍按 Host 权限与凭据配置执行。关闭 Anchor Dev 只移除后续 Turn 的方法披露，不删除源码、环境和缓存，也不撤销其他已授权工具。
 
 ## 用户修改与其他示例
 

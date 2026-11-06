@@ -12,6 +12,10 @@ library/plugins/<id>/
 
 Graph 的 AgentNode 保存 Plugin 目录 ID。Library 校验清单与 Skill 路径，Host 在节点调用时按当前安装内容只读挂载到 `/plugins/<id>`，实际依赖视图记入 Run 观察；升级从下一次节点调用起生效，已提交步骤不重放。Plugin 文件由安装流程或操作员维护，Graph 无权添加任意宿主路径。
 
+## 内置开发说明
+
+源码初始列表安装 Anchor Dev（目录 ID `anchor-steward`）及独立 `git` Plugin。Anchor Dev 仅包含入口说明和 Graph、Plugin、Rust、Python、pixi、Git 六项按需 Skill，不含 MCP server；在 Pilot 插件面板启用后才进入执行披露。它不自动启用 Git、初始化环境或扩大联网与凭据权限。Git 工具仍由 `git` 的挂载和 Host 配置控制。关闭 Anchor Dev 不删除共享工具链、项目或缓存，也不撤销其他已授权工具；具体环境边界见 [Pilot 开发契约](pilot-development.md)。
+
 ## 连接配置与凭据
 
 Plugin 声明配置需求，Host 保存每个 owner 的一份默认连接配置。Web 的插件详情提供普通字段、凭据设置/轮换/清除与显式连接测试；Pilot 的专用凭据表单映射到同一事实。配置属于 Host，不修改 Library 清单，也不随 Plugin/Graph 包分发。
