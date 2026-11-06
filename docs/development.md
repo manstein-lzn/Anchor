@@ -16,7 +16,7 @@
 sudo apt-get install build-essential curl git bubblewrap slirp4netns patch rsync binutils util-linux coreutils
 ```
 
-Rust/rustup 和符合上述版本的 Node.js/npm 需预先安装。开发脚本先实际探测 user/mount/network namespace；失败时停止并报告原因，不使用共享宿主网络绕过。脚本不会自动使用 sudo 或修改系统策略；模型调用和 Plugin 网络权限分别配置。
+Rust/rustup 和符合上述版本的 Node.js/npm 需预先安装。开发脚本先实际探测隔离 namespace 与私有 PID namespace 的 `/proc` 挂载能力，Host 启动时也独立检查；失败时停止并报告原因，不使用共享宿主网络绕过。脚本不会自动使用 sudo 或修改系统策略；模型调用和 Plugin 网络权限分别配置。
 
 ```sh
 git clone https://github.com/manstein-lzn/Anchor.git

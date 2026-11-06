@@ -195,6 +195,13 @@ pub async fn serve(configuration: Arc<crate::HostConfiguration>) -> io::Result<(
             "ANCHOR_API_KEYS was removed: Anchor no longer has API key login; unset it",
         ));
     }
+    anchor_sandbox_bwrap::BubblewrapSandbox::check_available(&configuration.bwrap).map_err(
+        |error| {
+            io::Error::other(format!(
+                "required sandbox capabilities are unavailable: {error}"
+            ))
+        },
+    )?;
     let owner = sessions::installation_owner(&data_root)?;
     let catalog_root = configuration.catalog_root.clone().unwrap_or_else(|| {
         if configured_bundle.is_none() {

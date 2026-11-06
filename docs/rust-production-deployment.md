@@ -7,11 +7,23 @@ own location and clears inherited deployment and credential settings. Neither
 installation nor startup loads `.env`, `anchor.env` or `model.env`.
 
 Model services, Plugin credentials, Graphs, channels, schedules and Python/Rust
-initialization use the existing Host-managed WebUI flows. Missing model settings
-do not prevent opening the WebUI; Pilot directs the user to Settings when needed.
+initialization use the existing Host-managed WebUI flows. Once the required
+sandbox baseline is available, missing model settings or an unprepared
+Python/Rust environment do not prevent opening the WebUI for first configuration;
+Pilot directs the user to Settings when needed.
 The installer supports fresh roots only. The legacy Python deployment was
 removed; no legacy inventory or migration tool is provided. This guide does not
 establish an in-place upgrade or migration contract.
+
+Every Host `serve` checks Bubblewrap's isolated namespaces and a fresh `/proc`
+mount in its private PID namespace before the Host creates mutable directories,
+cleans startup state, imports bundled Plugins, recovers Runs or binds HTTP.
+Failure reports the cause and exits nonzero; it does not bind the host's proc,
+share host namespaces or change Docker or host security policies as a fallback.
+Passing this check establishes only the namespace/private-proc baseline, not the
+network helper path or every Sandbox capability.
+Source-build regression and ordinary Ubuntu Docker failure-path evidence are in
+the [startup verification record](../.local/sandbox-startup-20261104/verification.md).
 
 ## Install a reviewed platform
 

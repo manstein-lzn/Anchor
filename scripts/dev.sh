@@ -128,10 +128,10 @@ check_start_prerequisites() {
   require_command git "Install Git."
   require_command curl "Install curl."
   require_command setsid "Install util-linux."
-  require_command bwrap "Install Bubblewrap and enable user/mount/network namespaces."
+  require_command bwrap "Install Bubblewrap; isolated namespaces and a private /proc mount are required."
   require_command slirp4netns "Install slirp4netns for isolated plugin networking."
-  if ! bwrap --die-with-parent --unshare-all --ro-bind / / -- /bin/true; then
-    echo "Bubblewrap cannot create the required namespaces. Check the host's user namespace policy; sandbox isolation remains required." >&2
+  if ! bwrap --unshare-all --die-with-parent --ro-bind / / --proc /proc -- /bin/true; then
+    echo "Bubblewrap cannot create the required namespaces with a private /proc. Check the host or container sandbox policy; sandbox isolation remains required." >&2
     return 1
   fi
 }

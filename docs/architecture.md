@@ -133,6 +133,8 @@ AgentNode 引用角色与节点级 `plugins`，角色只复用模型、指令和
 
 Host 分别配置 bundle、catalog、state、workspace 和 Library 根。release 目录只读；可写根放在 release 外。Host 在监听前验证配置并持有 state-root `deployment-writer` 锁。开发脚本使用独立数据根，旧本地记录不会被重新接管。
 
+HTTP Host 完成监听配置的廉价校验后，通过 `anchor-sandbox-bwrap` 的共享探针检查隔离 namespace 及私有 PID namespace 的新 `/proc` 挂载；检查先于安装身份读取、建目录、启动清理、官方 Plugin 导入、Run 恢复和 HTTP 绑定。必备沙箱环境不满足时保留具体原因并非零退出，不回退到宿主 proc 或共享 namespace，也不修改 Docker 或宿主策略。缺少模型配置或尚未准备 Python/Rust 不属于这项失败，沙箱基线可用时 WebUI 仍支持首次配置。此探针只验证 namespace/私有 proc 基线，不证明网络 helper 链路或全部沙箱能力可用。
+
 `ANCHOR_BWRAP`、`ANCHOR_RUNNER_LIBRARY_ROOT`、`ANCHOR_RUNNER_CATALOG_ROOT`、`ANCHOR_RUNNER_STATE_ROOT` 由 `main.rs` 在进程入口各读取一次，形成 `HostConfiguration` 交给组合根。`RunApplication` 在已有 state/catalog 根之外只保存 Library 覆盖与 bwrap；Pilot 和工具装配接收这些已解析参数，执行准备接收入口提供的 reader，启动清理接收惰性的工作区枚举回调。Library 的显式根优先于调用方已解析的 catalog 根；工具环境仍只从显式 Library 根加载，保留原回退语义。[配置围栏](../rust/anchor-runner-host/tests/configuration_fence.rs)限制四个变量名的生产字面量归属；其他环境读取尚未迁移，清单见 [H3 交回](../experiments/host-convergence/h3/environment-inventory.md)。
 
 ```text

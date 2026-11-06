@@ -6,7 +6,9 @@
 
 source-free 完整平台归档面向 Linux x86_64，目标机需要 Bubblewrap、slirp4netns、Git、shell、CA 证书、系统链接器及发行 inventory 所列的动态库。Rust 与 Node 是构建机依赖，不是目标运行环境要求；系统依赖由操作员准备，归档不会安装它们。
 
-沙箱需要系统允许隔离 namespace；安装了工具不等于系统策略允许实际执行。模型尚未配置、Python/Rust 尚未准备是正常的首次配置状态，Host 仍可打开 WebUI 做配置。具体依赖与预检边界见[部署指南](rust-production-deployment.md)。
+系统必须允许 Bubblewrap 创建隔离 namespace，并在私有 PID namespace 挂载新的 `/proc`。不满足时 Host 报告原因并非零退出，不初始化 Host 数据、恢复 Run 或监听 HTTP，也不自动修改宿主策略或降低隔离要求。通过这项基线检查也不代表全部网络或工具已可用。
+
+模型尚未配置、Python/Rust 尚未准备是正常的首次配置状态，不阻止在沙箱基线可用时打开 WebUI。
 
 ## 安装与打开 WebUI
 
@@ -86,7 +88,7 @@ Run 页面可查看路径、状态、节点对话、工具请求/结果、worksp
 
 | 现象 | 处理 |
 | --- | --- |
-| Bubblewrap 或沙箱执行失败 | 检查系统依赖、namespace 策略及当前授权，不通过降低隔离或放宽权限绕过 |
+| `Can't mount proc ... Operation not permitted` 等沙箱基线错误 | 当前系统不满足运行条件；查看日志定位系统策略，不改成共享 namespace 或宿主 `/proc` 绕过 |
 | 服务未启动或没有开机自启 | 核对服务模板、账号与数据权限，按部署步骤启用；完成归档安装不代表服务已启动 |
 | Pilot 提示默认模型未配置 | 在「设置 → 模型服务」保存 default Flash，返回原草稿重试 |
 | Plugin 缺依赖、凭据或权限 | 在开发环境/插件详情补齐所需配置或授权，不能用安装成功替代运行验证 |

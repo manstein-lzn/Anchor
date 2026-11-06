@@ -256,12 +256,17 @@ fn source_examples_preserve_plugin_edits_and_do_not_restore_deletions() {
 }
 
 #[test]
-fn source_setup_reports_namespace_failure_before_builds_or_downloads() {
+fn source_setup_reports_proc_failure_before_builds_or_downloads() {
     let checkout = SourceCheckout::new();
-    executable(&checkout.tools.join("bwrap"), "#!/bin/sh\nexit 1\n");
+    executable(
+        &checkout.tools.join("bwrap"),
+        "#!/bin/sh\nfor argument do\n  if [ \"$argument\" = --proc ]; then\n    echo \"bwrap: Can't mount proc on /newroot/proc: Operation not permitted\" >&2\n    exit 1\n  fi\ndone\nexit 0\n",
+    );
     let output = checkout.run("setup", &[]);
     assert!(!output.status.success(), "{output:?}");
-    assert!(String::from_utf8_lossy(&output.stderr).contains("namespace"));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("required namespaces with a private /proc"));
+    assert!(stderr.contains("Can't mount proc on /newroot/proc: Operation not permitted"));
     assert!(checkout.log().is_empty());
 }
 

@@ -1,9 +1,9 @@
 //! Host-owned Bubblewrap adapter for the runtime sandbox port.
 //!
 //! Process creation and filesystem authority stay here, outside the runtime
-//! kernel. Construction probes that Bubblewrap can create a namespace; a host
-//! where that probe fails gets an unavailable adapter, never an unisolated
-//! fallback.
+//! kernel. Construction probes isolated namespaces and a private proc mount;
+//! a host where that probe fails gets an unavailable adapter, never an
+//! unisolated fallback.
 
 use std::{
     collections::HashSet,
@@ -232,8 +232,14 @@ impl BubblewrapSandbox {
         self.spill_roots.iter().any(|root| path.starts_with(root))
     }
 
+    /// Check the required isolation without creating workspace or runtime state.
+    /// Private proc is required by host commands, but remains an invocation grant.
+    pub fn check_available(binary: &Path) -> Result<(), SandboxError> {
+        checked_binary(binary).map(|_| ())
+    }
+
     /// Construct an adapter only after confirming the configured binary can
-    /// make a user/mount/network namespace on this host.
+    /// create isolated namespaces and mount their private proc on this host.
     pub fn new(policy: BubblewrapPolicy) -> Result<Self, SandboxError> {
         if policy.allowed_commands.is_empty() {
             return Err(SandboxError::InvalidRequest(
@@ -283,19 +289,7 @@ impl BubblewrapSandbox {
             .collect::<Result<Vec<_>, _>>()?;
         let spill_roots = canonical_roots(policy.spill_roots, "spill")?;
         let writable_input_roots = canonical_roots(policy.writable_input_roots, "writable input")?;
-        let binary = if policy.binary.components().count() == 1 {
-            find_on_path(&policy.binary).ok_or_else(|| {
-                SandboxError::Unavailable(format!(
-                    "Bubblewrap binary not found: {}",
-                    policy.binary.display()
-                ))
-            })?
-        } else {
-            fs::canonicalize(&policy.binary).map_err(|error| {
-                SandboxError::Unavailable(format!("Bubblewrap binary unavailable: {error}"))
-            })?
-        };
-        probe(&binary)?;
+        let binary = checked_binary(&policy.binary)?;
         Ok(Self {
             binary,
             allowed_commands: policy.allowed_commands,
@@ -1298,6 +1292,20 @@ fn find_on_path(binary: &Path) -> Option<PathBuf> {
         .find(|candidate| candidate.is_file())
 }
 
+fn checked_binary(binary: &Path) -> Result<PathBuf, SandboxError> {
+    let binary = if binary.components().count() == 1 {
+        find_on_path(binary).ok_or_else(|| {
+            SandboxError::Unavailable(format!("Bubblewrap binary not found: {}", binary.display()))
+        })?
+    } else {
+        fs::canonicalize(binary).map_err(|error| {
+            SandboxError::Unavailable(format!("Bubblewrap binary unavailable: {error}"))
+        })?
+    };
+    probe(&binary)?;
+    Ok(binary)
+}
+
 fn network_helper() -> Option<PathBuf> {
     let executable = std::env::current_exe().ok()?;
     let directory = executable.parent()?;
@@ -1318,14 +1326,25 @@ fn network_helper() -> Option<PathBuf> {
 
 fn probe(binary: &Path) -> Result<(), SandboxError> {
     let result = std::process::Command::new(binary)
-        .args(["--unshare-all", "--ro-bind", "/", "/", "--", "true"])
+        .args([
+            "--unshare-all",
+            "--die-with-parent",
+            "--ro-bind",
+            "/",
+            "/",
+            "--proc",
+            "/proc",
+            "--",
+            "/bin/true",
+        ])
         .env_clear()
         .output()
         .map_err(|error| SandboxError::Unavailable(format!("Bubblewrap probe failed: {error}")))?;
     if !result.status.success() {
         let detail = String::from_utf8_lossy(&result.stderr);
         return Err(SandboxError::Unavailable(format!(
-            "Bubblewrap cannot create an isolated namespace: {}",
+            "Bubblewrap cannot create isolated namespaces with a private /proc ({}): {}",
+            result.status,
             detail.trim()
         )));
     }
