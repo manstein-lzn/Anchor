@@ -246,3 +246,122 @@ fn store_cost_sum_saturates_instead_of_overflowing() {
     let dir = tempfile::tempdir().unwrap();
     assert_costs_saturate(&FileStore::new(dir.path()).unwrap());
 }
+
+#[test]
+fn cached_facts_follow_other_writers_replacement_truncation_and_same_length_corruption() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = FileStore::new(dir.path()).unwrap();
+    store.create(&resource()).unwrap();
+    store.commit(RUN, &rejected_record(1, 2)).unwrap();
+    assert_eq!(store.history_len(RUN).unwrap(), 1);
+    assert_eq!(store.record_entries(RUN).unwrap()[0].stamp.cost(), 2);
+
+    let other = FileStore::new(dir.path()).unwrap();
+    other.commit(RUN, &rejected_record(2, 3)).unwrap();
+    assert_eq!(store.history_len(RUN).unwrap(), 2);
+    assert_eq!(
+        store.load(RUN).unwrap().unwrap().task.unwrap().budget.spent,
+        5
+    );
+
+    let path = history_path(dir.path());
+    let mut replacement = serde_json::to_vec(&rejected_record(3, 7)).unwrap();
+    replacement.push(b'\n');
+    let tmp = path.with_extension("replacement");
+    fs::write(&tmp, &replacement).unwrap();
+    fs::rename(&tmp, &path).unwrap();
+    assert_eq!(store.history_len(RUN).unwrap(), 1);
+    assert_eq!(
+        store.load(RUN).unwrap().unwrap().task.unwrap().budget.spent,
+        7
+    );
+
+    replacement[0] = b'!';
+    fs::write(&path, replacement).unwrap();
+    assert!(matches!(
+        store.record_entries(RUN),
+        Err(StoreError::Corrupt(_))
+    ));
+    assert!(matches!(store.load(RUN), Err(StoreError::Corrupt(_))));
+    fs::write(&path, []).unwrap();
+    assert_eq!(store.history_len(RUN).unwrap(), 0);
+    assert_eq!(
+        store.load(RUN).unwrap().unwrap().task.unwrap().budget.spent,
+        0
+    );
+}
+
+#[test]
+fn cached_load_recovers_lost_state_without_trusting_snapshot_cost_or_counting_a_torn_tail() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = FileStore::new(dir.path()).unwrap();
+    let original = resource();
+    store.create(&original).unwrap();
+    let mut after = original.clone();
+    after.version = 1;
+    after.state = json!({"changed": true});
+    after.task.as_mut().unwrap().budget.spent = 999;
+    let accepted = Verdict {
+        effect: Effect::Accepted,
+        verification: Verification::Mechanical,
+        reason: Reason::Ok,
+    };
+    store
+        .commit(RUN, &record(1, 2, accepted, Some(after)))
+        .unwrap();
+    store.commit(RUN, &rejected_record(2, 3)).unwrap();
+    fs::write(
+        dir.path().join("run%2Fstorage/resource.json"),
+        serde_json::to_vec(&original).unwrap(),
+    )
+    .unwrap();
+    let mut bytes = fs::read(history_path(dir.path())).unwrap();
+    bytes.extend(serde_json::to_vec(&rejected_record(3, 99)).unwrap());
+    fs::write(history_path(dir.path()), bytes).unwrap();
+    for reader in [&store, &FileStore::new(dir.path()).unwrap()] {
+        let restored = reader.load(RUN).unwrap().unwrap();
+        assert_eq!(restored.version, 1);
+        assert_eq!(restored.state, json!({"changed": true}));
+        assert_eq!(restored.task.unwrap().budget.spent, 5);
+        assert_eq!(reader.history_len(RUN).unwrap(), 2);
+        let entries: Vec<_> = reader
+            .history(RUN)
+            .unwrap()
+            .into_iter()
+            .map(RecordEntry::from)
+            .collect();
+        assert_eq!(reader.record_entries(RUN).unwrap(), entries);
+    }
+    store.commit(RUN, &rejected_record(3, 4)).unwrap();
+    assert_eq!(store.history_len(RUN).unwrap(), 3);
+    assert_eq!(
+        store.load(RUN).unwrap().unwrap().task.unwrap().budget.spent,
+        9
+    );
+}
+
+#[test]
+fn locally_appended_facts_obey_the_same_decoder_limits_as_cold_history() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = FileStore::new(dir.path()).unwrap();
+    store.create(&resource()).unwrap();
+    let mut record = rejected_record(1, 0);
+    let mut content = json!(null);
+    for _ in 0..140 {
+        content = json!([content]);
+    }
+    record.submission.content = content;
+    let encoded = serde_json::to_vec(&record).unwrap();
+    // A discarded partial tail can have exactly the appended line's length.
+    fs::write(history_path(dir.path()), vec![b'x'; encoded.len() + 1]).unwrap();
+    assert_eq!(store.history_len(RUN).unwrap(), 0);
+    store.commit(RUN, &record).unwrap();
+    for reader in [&store, &FileStore::new(dir.path()).unwrap()] {
+        assert!(matches!(reader.history(RUN), Err(StoreError::Corrupt(_))));
+        assert!(matches!(reader.load(RUN), Err(StoreError::Corrupt(_))));
+        assert!(matches!(
+            reader.record_entries(RUN),
+            Err(StoreError::Corrupt(_))
+        ));
+    }
+}

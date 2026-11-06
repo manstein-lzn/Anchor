@@ -1,0 +1,134 @@
+{
+  "base": "a097b38",
+  "date": "2026-11-06",
+  "environment": {
+    "rust": "1.99.0",
+    "profile": "dev opt-level=1,debug=0",
+    "build_jobs": 1,
+    "http_runtime": "single Tokio runtime, in-process real Axum router",
+    "allocator": "default; no arena or allocator changes",
+    "source": "private copy; no conversation contents retained in evidence"
+  },
+  "history": {
+    "bytes": 288355398,
+    "records": 525,
+    "resource_bytes": 1054468,
+    "actions": {
+      "write": 525
+    }
+  },
+  "http": {
+    "cycles": 12,
+    "before": {
+      "history_bytes": 288355398,
+      "cold_runs_ms": 2980.721,
+      "pair_p50_ms": 4451.305,
+      "pair_p95_ms": 4572.675,
+      "rss_before_kib": 23680,
+      "rss_warm_kib": 1135660,
+      "rss_after_kib": 1136440,
+      "hwm_kib": 1136440,
+      "warm_rchar": 13866402661
+    },
+    "after": {
+      "history_bytes": 288355398,
+      "cold_runs_ms": 984.425,
+      "pair_p50_ms": 32.315,
+      "pair_p95_ms": 35.294,
+      "rss_before_kib": 24380,
+      "rss_warm_kib": 47028,
+      "rss_after_kib": 48780,
+      "hwm_kib": 48780,
+      "warm_rchar": 25343555
+    },
+    "synthetic_after": {
+      "history_bytes": 67662374,
+      "cold_runs_ms": 18.636,
+      "pair_p50_ms": 0.554,
+      "pair_p95_ms": 0.822,
+      "rss_before_kib": 20740,
+      "rss_warm_kib": 26244,
+      "rss_after_kib": 27012,
+      "hwm_kib": 27012,
+      "warm_rchar": 12638724
+    },
+    "after_post_review": {
+      "history_bytes": 288355398,
+      "cold_runs_ms": 941.74,
+      "pair_p50_ms": 32.941,
+      "pair_p95_ms": 46.229,
+      "rss_before_kib": 24336,
+      "rss_warm_kib": 47040,
+      "rss_after_kib": 48732,
+      "hwm_kib": 48732,
+      "warm_rchar": 25343562
+    }
+  },
+  "kernel": {
+    "before": {
+      "cold_load_ms": 1228.295,
+      "warm_load_p50_ms": 931.568,
+      "warm_load_rchar": 3472919990,
+      "submit_ms": 1940.86,
+      "submit_rchar": 578828034,
+      "rss_start_kib": 981980,
+      "rss_end_kib": 974360,
+      "hwm_kib": 1003368
+    },
+    "after": {
+      "cold_load_ms": 737.983,
+      "warm_load_p50_ms": 2.576,
+      "warm_load_rchar": 12655210,
+      "submit_ms": 27.362,
+      "submit_rchar": 1062765,
+      "rss_start_kib": 13044,
+      "rss_end_kib": 17580,
+      "hwm_kib": 19084
+    }
+  },
+  "limitations": [
+    "Not a 32-worker sustained production soak",
+    "No proof of allocator fragmentation causality",
+    "No real provider, external messaging, or production deployment",
+    "Existing record-per-snapshot disk growth is unchanged"
+  ],
+  "validation": {
+    "kernel": {
+      "passed": 60,
+      "failed": 0
+    },
+    "runtime": {
+      "passed": 159,
+      "failed": 0
+    },
+    "host_first_full": {
+      "passed": 1089,
+      "failed": 2,
+      "ignored": 3,
+      "failure_reason": "isolated target lacked sandbox network helper"
+    },
+    "host_failures_rerun": {
+      "passed": 2,
+      "failed": 0,
+      "conditions": "helper built; removed RLIMIT_AS because helper needs a larger virtual address reservation"
+    },
+    "host_targeted_final": {
+      "passed": 40,
+      "failed": 0
+    },
+    "architecture_fences": {
+      "passed": 5,
+      "failed": 0
+    },
+    "strict_kernel_clippy": "passed",
+    "strict_host_clippy": "blocked by pre-existing result_large_err/useless_borrows_in_formatting on Rust 1.99; changed paths have no diagnostics",
+    "strict_combined_clippy": "blocked first by pre-existing anchor-rsi chunks_exact_to_as_chunks lint",
+    "goose_end_to_end": "not run: installed binary digest differs from fixed regression digest",
+    "independent_kernel_review": "passed after fixes for same-file snapshot recovery, decoder consistency, and explicit cache invalidation",
+    "host_post_review_rebuild": {
+      "passed": 5,
+      "failed": 0
+    },
+    "host_clippy_with_existing_lints_allowed": "passed --no-deps -D warnings -A clippy::result_large_err -A clippy::useless_borrows_in_formatting"
+  }
+}

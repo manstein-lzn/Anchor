@@ -42,7 +42,7 @@ pub(crate) fn load(data_root: &Path, run_id: &str) -> Result<Option<RunView<'sta
     let lifecycle = super::kernel_runs::KernelRuns::project(&resource, false, updated)
         .map_err(|error| GraphError::CorruptRun(format!("Run view: {error:?}")))?;
     let history = store
-        .history(&resource.id)
+        .record_entries(&resource.id)
         .map_err(|error| GraphError::CorruptRun(error.to_string()))?;
     let (recovery, _) = super::kernel_runs::KernelRuns::project_recovery(&resource, history)
         .map_err(|error| GraphError::CorruptRun(format!("Run recovery view: {error:?}")))?;

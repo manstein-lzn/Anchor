@@ -121,6 +121,7 @@ mod conversations;
 mod graph_deletion;
 mod graph_listeners;
 mod graph_validation;
+mod history_performance;
 mod kernel_probe;
 mod oauth;
 mod persistent_assistants;

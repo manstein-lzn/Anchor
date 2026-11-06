@@ -1,5 +1,5 @@
 //! Disposable measurement projection. Run history remains the authority.
-use anchor_kernel::{Point, Probe, Record, Store};
+use anchor_kernel::{Point, Probe, RecordEntry, Store};
 use anchor_runtime::graph::validator::GRAPH_VALIDATOR;
 use std::{
     fs::{File, OpenOptions},
@@ -38,7 +38,7 @@ impl HostProbe {
             if resource.validator != GRAPH_VALIDATOR {
                 continue;
             }
-            for record in store.history(&id)? {
+            for record in store.record_entries(&id)? {
                 write_point(&mut temporary, &point_of(&record, &resource.validator))?;
             }
         }
@@ -76,7 +76,7 @@ fn write_point(writer: &mut impl Write, point: &Point) -> Result<(), Box<dyn std
     Ok(())
 }
 
-fn point_of(record: &Record, validator: &str) -> Point {
+fn point_of(record: &RecordEntry, validator: &str) -> Point {
     Point {
         component: record
             .submission
