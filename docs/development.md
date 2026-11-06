@@ -82,6 +82,8 @@ rust/target/release/anchor-network-tools package-plugin /absolute/path/to/candid
 git diff 9a5fa57 -- rust/anchor-kernel
 ```
 
+本次长历史性能修复是经独立审查的冻结外例外，范围仅为存储读取/摘要、无快照观察接口及去除重复读取；不扩展裁决、持久格式、预算或恢复规则。审查与验证边界见[证据](../experiments/kernel-history-performance/README.md)。本例外不授权其他 Kernel 改动。
+
 ## 验证
 
 开发时先跑相关 crate/测试子集；垂直切片或跨模块语义完成后再执行一次必要的整体回归。同一工作流复用 `CARGO_TARGET_DIR`，独立并行构建使用不同 target，不覆盖正在采证的二进制。普通文档与低影响可逆改动检查链接/格式即可，不增加镜像式测试。
