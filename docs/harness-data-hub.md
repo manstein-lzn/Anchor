@@ -161,7 +161,7 @@ CLI 提供 `health`、`profile`、`stall`、`contrast`、`gate`、`signals`、`r
 
 ## 验收边界与证据
 
-完整用量、可空字段与输入等待观察已通过本地契约回归；固定 Goose＋本地确定性 Provider 验证了成功与取消时的用量落盘，超过 64 轮及恢复计数由确定性单测覆盖。同源历史复核保留旧缺失轮次和未知成本，未补造等待事实。该切片尚未部署，不作为真实 Provider 或线上告警效果验收；当前结论见[验收台账](pilot-development-plan.md)，原始结果见[本地验证](../.local/rsi-optimization-20261106-113634/verification.md)。
+完整用量、可空字段与输入等待观察已通过本地契约回归；固定 Goose＋本地确定性 Provider 验证了成功与取消时的用量落盘，超过 64 轮及恢复计数由确定性单测覆盖。同源历史复核保留旧缺失轮次和未知成本，未补造历史观察。2026-11-06 配套记录器与读侧已部署：六个原助手在同 Run 恢复等待，各新增一条 accepted `input_wait=true`，Hub v2 只读核对 `waiting_input_tasks=6`，旧历史前缀不变；本轮没有新增模型/工具观察，不作为真实 Provider、新用量记录器业务效果或长期告警效果验收。当前结论见[验收台账](pilot-development-plan.md)，原始结果见[本地验证](../.local/rsi-optimization-20261106-113634/verification.md)与[上线核验](../.local/rsi-rollout-20261106-140628/evidence/verification.json)。
 
 已有记录、读侧、评分和受控实验结论分别见 [P1](../experiments/harness-hub/p1/verification.md)、[P2](../experiments/harness-hub/p2/report.md)、[P3](../experiments/harness-hub/p3/report.md)、[P4](../experiments/harness-hub/p4/report.md) 与[实验 1](../experiments/harness-hub/p6/experiment-1.md)；噪声与样本量依据见 [P0](../experiments/harness-hub/p0/report.md)。这些是各自阶段证据，不是当前所有接口、新构建或全部业务的联合验收。
 

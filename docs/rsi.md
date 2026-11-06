@@ -90,7 +90,7 @@ cargo build --manifest-path rust/Cargo.toml -p anchor-rsi --locked
 
 RSI Graph 不自动提交、合并或部署代码，不自动改 Graph/Plugin，不重放历史外部副作用，也不把模型声称完成当成事实。`evolution.json` 的状态为 proposed/continue/hold/resolved；resolved 是有依据的复查判断，不代表本次 RSI 执行过改动。实际修改由维护者在隔离工作区完成，再用保留案例和相关测试验证。
 
-mutable 剪枝已通过本地采集回归及同授权根复核：保留 11 份 Plugin 清单、全部源码路径和 9 张 Graph，Plugin 冻结投影由 480,613 降至 115,720 字节；移除的是 45 个可变归档条目和一项 Library 锁文件。此结果仅验证采集范围与噪音减少，不代表 token、质量或模型成本收益；未重跑大型 RSI 或更新生产服务。当前状态与证据见[验收台账](pilot-development-plan.md)和[采集对照](../.local/rsi-optimization-20261106-113634/before-after.json)。
+mutable 剪枝已通过本地采集回归及同授权根复核：保留 11 份 Plugin 清单、全部源码路径和 9 张 Graph，Plugin 冻结投影由 480,613 降至 115,720 字节；移除的是 45 个可变归档条目和一项 Library 锁文件。此结果仅验证采集范围与噪音减少，不代表 token、质量或模型成本收益。2026-11-06 生产采集器已更新，RSI 与周报的 local-inputs 仅切换工具路径，原数据授权根及历史冻结输入保持不变，新路径对后续 Run 生效；本轮未重跑大型 RSI。当前状态与证据见[验收台账](pilot-development-plan.md)、[采集对照](../.local/rsi-optimization-20261106-113634/before-after.json)和[上线核验](../.local/rsi-rollout-20261106-140628/evidence/verification.json)。
 
 2026-10-31：新数据根的真实 Run `rust-18e35d456fbfe745` 已 done、Gate PASS，8 个发布文件的 HTTP 下载、内容摘要及后续历史读回通过；原生会话 12 次反馈续接已核验。见[执行证据](../.local/rust/clean-20261031-final/evidence/verification.json)和[发布报告](../.local/rust/clean-20261031-final/state/artifacts/fs2-d512ad1cc2be9624ced12b0223a43be5b0cca91e5507ef25386c31722fa365be/view/rsi-report.md)。内容抽查保留一项不采纳决定：`RSI-host-assembly-reuse` 虽为 hold，仍建议用 inode/descriptor 缓存取代内容校验，与挂载时发现篡改的契约不符；不实施该方向，冻结产物不改写。详见[内容抽查](../.local/rust/clean-20261031-final/evidence/content-spot-check.json)。
 
