@@ -130,6 +130,10 @@ fn native_goose_direct_model_transport_requires_observed_tool_receipt() {
     }
     .trace();
     let records = facts.history(&trace).unwrap();
+    let usage_fact = assert_usage_observation(&records, &native, anchor_facts::Outcome::Completed);
+    assert!(usage_fact.complete);
+    assert_eq!(usage_fact.messages, 2);
+    assert_eq!(usage_fact.omitted_turns, 0);
     let configuration = records[0].stamp.config().unwrap();
     let configuration = facts
         .load(&anchor_facts::configuration_id(configuration))
@@ -153,7 +157,7 @@ fn native_goose_direct_model_transport_requires_observed_tool_receipt() {
             .to_string()
             .contains(host.base.root.path().to_str().unwrap())
     );
-    host.evidence(&provider, &run, json!({"native_direct_model_transport":true,"receipt_bound_completion":true,"no_arbitrary_wall_time":true,"default_runtime":true,"public_goose_trace":true,"configuration":configuration,"envelope":envelope}));
+    host.evidence(&provider, &run, json!({"native_direct_model_transport":true,"receipt_bound_completion":true,"no_arbitrary_wall_time":true,"default_runtime":true,"public_goose_trace":true,"configuration":configuration,"envelope":envelope,"persisted_model_usage":usage_fact}));
 }
 
 #[test]
@@ -679,6 +683,64 @@ fn assert_artifact(host: &Host, saved: &Value, node: &str, name: &str, expected:
     assert_eq!(manifest["files"][name]["bytes"], expected.len());
 }
 
+fn assert_usage_observation(
+    records: &[anchor_kernel::Record],
+    native: &Value,
+    outcome: anchor_facts::Outcome,
+) -> anchor_facts::ModelUsage {
+    use anchor_facts::{Fact, ModelUsage, Observation};
+    let observations = records
+        .iter()
+        .filter_map(|record| {
+            serde_json::from_value::<Observation>(record.submission.content.clone())
+                .ok()
+                .map(|observation| (record, observation))
+        })
+        .filter(|(_, observation)| {
+            observation
+                .facts
+                .iter()
+                .any(|fact| matches!(fact, Fact::ModelUsage { .. }))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(observations.len(), 1, "{observations:?}");
+    let (record, observation) = &observations[0];
+    assert!(record.verdict.is_accepted(), "{record:?}");
+    let usage = observation
+        .facts
+        .iter()
+        .find_map(|fact| match fact {
+            Fact::ModelUsage { usage } => Some(usage),
+            _ => None,
+        })
+        .unwrap();
+    let expected: ModelUsage = serde_json::from_value(native["usage"].clone()).unwrap();
+    assert_eq!(usage, &expected);
+    assert_eq!(usage.messages, usage.sampled_turns + usage.omitted_turns);
+    assert_eq!(
+        usage.sampled_turns,
+        observation
+            .facts
+            .iter()
+            .filter(|fact| matches!(fact, Fact::ModelTurn { .. }))
+            .count() as u64
+    );
+    let lifecycles = observation
+        .facts
+        .iter()
+        .filter_map(|fact| match fact {
+            Fact::Lifecycle {
+                model_turns,
+                outcome,
+                ..
+            } => Some((*model_turns, *outcome)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(lifecycles, [(usage.messages, outcome)]);
+    usage.clone()
+}
+
 fn assert_native_record(host: &Host, provider: &Provider, run: &str, completed: bool) {
     let (fact, native, process) = host.native_record(run, "worker", 1);
     assert_eq!(fact["binary_sha256"], goose::GOOSE_SHA256);
@@ -1084,8 +1146,14 @@ fn cancel_settles_and_restart_does_not_invoke_provider(native: bool) {
     gate.wait_entered();
     let (status, accepted) = server.request("POST", &format!("/runs/{run}/stop"), None);
     assert_eq!(status, 202, "{accepted}");
-    gate.open();
+    if !native {
+        gate.open();
+    }
     server.wait_status(&run, "stopped");
+    // Keep the native response blocked until cancellation has saved partial usage.
+    if native {
+        gate.open();
+    }
     let stopped = host.record(&run);
     assert!(stopped["results"].get("verify").is_none());
     assert!(stopped["results"].get("unused").is_none());
@@ -1095,22 +1163,42 @@ fn cancel_settles_and_restart_does_not_invoke_provider(native: bool) {
     );
     let requests = provider.requests();
     assert_eq!(requests.len(), 2);
-    if native {
-        assert!(host.native_fact(&run, "worker", 1)["completion"].is_null());
+    let usage_fact = if native {
+        let (fact, native, _) = host.native_record(&run, "worker", 1);
+        assert!(fact["completion"].is_null());
         assert!(
             host.native_conversation(&run, "worker", 1)
                 .to_string()
                 .contains("fixture-written")
         );
+        let facts = anchor_kernel::HistoryReader::open(host.base.state_root().join("kernel-facts"))
+            .unwrap();
+        let trace = anchor_facts::Invocation {
+            run_id: run.clone(),
+            graph_digest: stopped["graph_digest"].as_str().unwrap().into(),
+            node_id: "worker".into(),
+            invocation: 1,
+        }
+        .trace();
+        let usage = assert_usage_observation(
+            &facts.history(&trace).unwrap(),
+            &native,
+            anchor_facts::Outcome::Cancelled,
+        );
+        assert!(!usage.complete);
+        assert_eq!(usage.messages, 1);
+        assert_eq!(usage.omitted_turns, 0);
+        Some(usage)
     } else {
         assert_native_record(&host, &provider, &run, false);
-    }
+        None
+    };
     drop(server);
     let restarted = host.serve(&provider);
     restarted.wait_status(&run, "stopped");
     assert_eq!(host.record(&run), stopped);
     assert_eq!(provider.requests(), requests);
-    host.evidence(&provider, &run, json!({"stop_submitted":true,"stop_settled":true,"downstream_started":false,"restart_requests":0,"tool_effects":1}));
+    host.evidence(&provider, &run, json!({"stop_submitted":true,"stop_settled":true,"downstream_started":false,"restart_requests":0,"tool_effects":1,"persisted_model_usage":usage_fact}));
 }
 
 #[test]

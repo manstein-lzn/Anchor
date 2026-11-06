@@ -113,7 +113,7 @@ impl Analyzer for Signals {
         "signals"
     }
     fn version(&self) -> u32 {
-        1
+        2
     }
     /// Grades are used when there are any: without them there is no front.
     fn needs(&self) -> &'static [Need] {
@@ -202,7 +202,7 @@ fn tier(code: &str) -> u8 {
         | "invocation_not_completed"
         | "startup_heavy"
         | "not_accepted"
-        | "stalled_task" => 2,
+        | "idle_task" => 2,
         "idle_gap" | "slow_tool_call" | "slow_model_turn" | "parked_task" | "command_nonzero" => 1,
         _ => 0,
     }
@@ -426,12 +426,16 @@ fn front(
     invocations: &[Invocation],
     signals: &mut Vec<Signal>,
 ) -> BTreeMap<String, Vec<Harness>> {
-    let by_run = group_by(invocations.iter().filter(|i| !i.traces.is_empty()), |i| {
-        i.run_id.as_str()
-    });
+    let by_run = group_by(invocations.iter(), |i| i.run_id.as_str());
     let mut tasks: BTreeMap<String, BTreeMap<Vec<String>, Vec<Measured>>> = BTreeMap::new();
     for (run, graded) in query.grades() {
         let Some(observed) = by_run.get(run) else {
+            continue;
+        };
+        let Some(tokens) = crate::query::usage(observed.iter().copied()).total_tokens() else {
+            continue;
+        };
+        let Some(agent_ms) = crate::query::agent_ms(observed.iter().copied()) else {
             continue;
         };
         let configs: BTreeSet<String> = observed
@@ -452,16 +456,8 @@ fn front(
             .or_default()
             .push(Measured {
                 score: graded.grade.score(),
-                tokens: observed
-                    .iter()
-                    .flat_map(|i| i.turns())
-                    .map(|t| t.total_tokens)
-                    .sum::<u64>() as f64,
-                agent_ms: observed
-                    .iter()
-                    .flat_map(|i| i.lifecycles())
-                    .map(|l| l.ended_at_ms.saturating_sub(l.started_at_ms))
-                    .sum::<u64>() as f64,
+                tokens: tokens as f64,
+                agent_ms: agent_ms as f64,
                 grade: graded.row.key.clone(),
             });
     }
@@ -541,7 +537,9 @@ fn exemplars(query: &Query, invocations: &[Invocation]) -> Vec<Signal> {
                     .map_or("?", |m| short(&m.graph_digest))
             ),
         };
-        let tokens = invocation.turns().iter().map(|t| t.total_tokens).sum();
+        let Some(tokens) = invocation.usage().total_tokens() else {
+            continue;
+        };
         groups
             .entry((scope, invocation.node_id.clone()))
             .or_default()

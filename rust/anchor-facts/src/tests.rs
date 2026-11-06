@@ -287,9 +287,9 @@ fn every_fact_kind_round_trips_with_its_tag() {
             observed_at_ms: Some(5),
             elapsed_ms: Some(4),
             time_to_first_token_ms: None,
-            input_tokens: 10,
-            output_tokens: 2,
-            total_tokens: 12,
+            input_tokens: Some(10),
+            output_tokens: Some(2),
+            total_tokens: Some(12),
             cache_read_tokens: Some(8),
             cache_write_tokens: None,
             cost_usd: Some(0.001),
@@ -308,6 +308,10 @@ fn every_fact_kind_round_trips_with_its_tag() {
             dirty: None,
             files: BTreeMap::new(),
         },
+        Fact::ModelUsage {
+            usage: ModelUsage::default(),
+        },
+        Fact::InputWait { waiting: true },
     ];
     let observation = Observation {
         version: VERSION,
@@ -329,6 +333,8 @@ fn every_fact_kind_round_trips_with_its_tag() {
             "tool_call",
             "workspace_fingerprint",
             "workspace_fingerprint",
+            "model_usage",
+            "input_wait",
         ]
     );
     assert_eq!(value["facts"][3]["phase"], "start");
@@ -338,6 +344,69 @@ fn every_fact_kind_round_trips_with_its_tag() {
     assert_eq!(
         serde_json::from_value::<Observation>(value).unwrap(),
         observation
+    );
+}
+
+#[test]
+fn usage_accounting_validates_detail_omissions_and_field_coverage() {
+    let kernel = kernel();
+    let usage = ModelUsage {
+        complete: true,
+        messages: 70,
+        sampled_turns: 0,
+        omitted_turns: 70,
+        total_tokens: Some(840),
+        cost_usd: Some(0.001),
+        reported_turns: UsageReportedTurns {
+            total_tokens: 70,
+            cost_usd: 1,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let observation = Observation {
+        version: VERSION,
+        invocation: invocation(),
+        facts: vec![
+            Fact::ModelUsage { usage },
+            Fact::Lifecycle {
+                started_at_ms: 1,
+                ended_at_ms: 9,
+                outcome: Outcome::Completed,
+                model_turns: 70,
+                tool_calls: 0,
+                tool_calls_dropped: 0,
+                resumed: false,
+            },
+        ],
+    };
+    let content = serde_json::to_value(observation).unwrap();
+    assert_eq!(
+        record(&kernel, &recorder("cfg"), content.clone()),
+        Reason::Ok
+    );
+    for (path, bad) in [
+        ("/facts/0/usage/omitted_turns", json!(69)),
+        ("/facts/0/usage/sampled_turns", json!(1)),
+        ("/facts/0/usage/reported_turns/total_tokens", json!(71)),
+        ("/facts/0/usage/reported_turns/cost_usd", json!(0)),
+        ("/facts/0/usage/compaction_messages", json!(71)),
+        ("/facts/1/model_turns", json!(69)),
+    ] {
+        let mut invalid = content.clone();
+        *invalid.pointer_mut(path).unwrap() = bad;
+        assert_eq!(
+            record(&kernel, &recorder("cfg"), invalid),
+            Reason::ContentInvalid,
+            "{path}"
+        );
+    }
+    let mut twice = content;
+    let duplicated = twice["facts"][0].clone();
+    twice["facts"].as_array_mut().unwrap().push(duplicated);
+    assert_eq!(
+        record(&kernel, &recorder("cfg"), twice),
+        Reason::ContentInvalid
     );
 }
 

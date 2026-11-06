@@ -54,12 +54,16 @@ anchor-kernel <- anchor-facts <- anchor-runner-host   记录
 | `config/{digest}` | 不可变配置清单，`validator/configuration` 守住内容寻址；配置身份不同不改写旧清单 |
 | `grade/{run}` | `Grade { version, run_id, task, task_version, checks: [{ name, passed }] }`；检查项名字唯一、不含业务值，重新评分追加历史 |
 
-观察包含四类事实：
+观察包含以下事实：
 
 - `lifecycle`：调用开始、结束、结局、模型轮数、工具次数、丢弃计数和是否恢复。
-- `model_turn`：输入、输出、缓存 token、费用及可用的耗时、首 token 时间、消息标识。用量报告的观察时间晚于该轮工具执行，不是模型响应结束时间；时间线计算不应把工具耗时重复算成模型耗时。
+- `model_usage`：本次 prompt 已观察到的完整用量汇总、prompt 是否正常结束、各字段报告轮数，以及明细保留/省略轮数。汇总不限于前 64 轮，不混入 Goose 原生 Session 的跨调用累计数；字段只报告一部分时，数值是已报告部分，不代表总成本。
+- `model_turn`：最多前 64 轮的输入、输出、缓存 token、费用及可用的耗时、首 token 时间、消息标识；缺字段为 `null`，不是零。用量报告的观察时间晚于该轮工具执行，不是模型响应结束时间；时间线计算不应把工具耗时重复算成模型耗时。
 - `tool_call`：工具名、参数形状摘要、调用标识、模型请求序号、时间、成功与失败类别；可选的路径类别和命令程序名不保存完整路径或 argv。`shell_program` 只是 shell 首个命令的启发式归因，不替换原程序名；工具调用成功不代表内部命令零退出，另看 `CommandEnd`。
 - `workspace_fingerprint`：Goose invocation 开始、结束时的 git HEAD、dirty 与已知锁文件相对路径和摘要。在同一命令沙箱中采集，不借宿主执行仓库配置；采集失败或非 git 现场省略，不影响调用。
+- `input_wait`：已授权 `session.wait_input` 接收器进入/退出等待的宿主观察，只含 `waiting`；时间由 Kernel 盖章，不含用户或消息内容，也不伪造 Agent/模型配置。
+
+以上为当前版本 1 词汇的扩展；新工具读取旧事实，无需改写历史。旧工具不保证理解新事实种类或可空字段，部署时须使用配套记录器与读侧。
 
 `AgentConfiguration` 绑定 Graph、节点、模型及绑定、Goose、指令摘要、Plugin 身份与说明摘要、路由；Plugin 和路由等集合规范排序。`host_sha256`、`tools_sha256` 区分 Harness 和工具定义，`envelope_sha256` 引用同根不可变环境描述；空字段不序列化，旧清单摘要不因新增可选字段改变。环境描述不含凭据值或 Run/Workspace 来源路径，具体沙箱边界仍由[当前架构](architecture.md)定义。
 
@@ -69,7 +73,9 @@ anchor-kernel <- anchor-facts <- anchor-runner-host   记录
 
 Host 仅经 [`fact_recorder`](../rust/anchor-runner-host/src/fact_recorder.rs) 写观察；同一 state 的执行端口共用记录器和单写入租约。观察位于执行端口的 `state/kernel-facts/`，不与 Run 的裁决争用同一数据根或资源版本。
 
-Bridge 观察工具调用，usage 接收模型用量；调用结束后由 `GooseNodePort` 组装配置和全部观察，**每个 invocation 提交一条记录**，不逐 token、流式片段或单个工具事实提交。记录失败写入 invocation evidence 的 `fact_recording`，不妨碍执行；调用中途崩溃仍可能丢失本次观察。
+Bridge 观察工具调用，usage 接收模型用量；每次 Goose 执行 attempt 结束后由 `GooseNodePort` 将配置、用量汇总和有界明细一并提交，不逐 token、流式片段或单个工具事实提交。prompt 返回错误时也保存已收到的用量，并标为不完整；同 invocation 恢复可有多条 attempt 记录，只按汇总累计，不再次累加对应明细。记录失败写入 invocation evidence 的 `fact_recording`，不妨碍执行；进程中途崩溃仍可能丢失本次观察。
+
+输入接收器复用同一个 `FactRecorder` 和 trace，仅在进入/退出等待时追加宿主观察，不随轮询反复写入；领取输入、取消或正常释放时退出等待。同 key 恢复的首次观察也写入，避免沿用旧 attempt 的等待状态。此类记录不算模型 attempt、模型恢复或无结果模型调用；不改变 Session 领取、排队、打断和恢复语义。
 
 Pilot 会话、Op 节点尚无同等完整观察，Run 节点结果提交尚未盖完整配置摘要；Op 耗时可从相邻 Run 记录推算，串行时准确、并行时只是上界。缺记录或缺 usage 是未知，不是零成本。
 
@@ -89,7 +95,11 @@ Pilot 会话、Op 节点尚无同等完整观察，Run 节点结果提交尚未�
 
 层次只向下依赖，IO 仅在 L0、L4。`HistoryReader` 不取得写租约、不创建文件，只读换行结束的完整记录；资源并发删除视为不存在。作为写入者的 Host 仍通过原 Run 门面和租约读写，不改用中枢绕开串行化。
 
-事实键为“数据根 + 资源 id + 本资源历史位置”。投影保留主体、时间、配置、动作、裁决、任务状态和结构化观察，不带原提交的业务正文；配置清单须通过摘要校验。Run 节点槽位与观察 invocation 关联，因果标识缺失时保留缺口，不伪造关系。最新被接受评分用于当前质量比较，旧评分仍在历史。
+事实键为“数据根 + 资源 id + 本资源历史位置”。投影保留主体、时间、配置、动作、裁决、任务状态和结构化观察，不带原提交的业务正文；配置清单须通过摘要校验。Run 节点槽位与已接纳观察 invocation 关联，因果标识缺失时保留缺口，不伪造关系。最新被接受评分用于当前质量比较，旧评分仍在历史。
+
+用量统一投影为 `complete`、`legacy_complete`、`partial`、`unknown`。旧记录只有正常结束且 lifecycle 轮数与明细数严格一致时才视为明细数量完整；旧记录中已写成零的缺字段无法追溯恢复。费用/token 比较按对应字段的完整覆盖筛选，质量评分仍保留；不将无模型观察的调用补成零成本，也不补造历史缺失的轮次。逐轮分布明确标为有界样本，不代表全部轮次。
+
+`agent_ms` 只在所需模型 attempt 的生命周期均已记录时给出完整时间，`observed_agent_ms` 保留已知部分；普通 Op 和宿主等待观察不当作模型工作。64 轮明细截断不影响完整 lifecycle 起止时间，已记录的失败/中断时间也不被抹去。若首个已保存模型 attempt 已标记恢复，则此前成本与时间未知；现有恢复布尔值仍不足以发现任意中间 attempt 的记录丢失。
 
 另有**可选调用明细**：L4 可从获授权路径下的 `goose-acp/*.evidence.json` 读取参数与结果的有界头部，供 `calls` 下钻。明细不混进权威事实行，不影响缺明细时的事实读取；它可能含业务值，不能把“事实投影不带业务正文”扩大为全部 MCP 输出均无业务内容。数据目录和证据键也可能暴露本机路径，授权与分发须按实际读取范围处理。
 
@@ -99,13 +109,17 @@ Pilot 会话、Op 节点尚无同等完整观察，Run 节点结果提交尚未�
 
 | 分析 | 用途与限制 |
 | --- | --- |
-| `health`、`stall` | 记录完整性、质量检查、工具/命令失败、规则触发、启动空档、慢调用和停滞；报告不直接控制 Run |
+| `health`、`stall` | 记录/用量完整性、质量检查、工具/命令失败、规则触发、活动未知、启动空档和慢调用；报告不直接控制 Run |
 | `profile` | 分任务或 Graph 展示成本分布、轮数、上下文增长、模型/工具耗时及高低成本差异，不把测量写成因果结论 |
 | `contrast` | 按配置字段分组比较评分、Agent 时间、token、轮数和工具失败，默认 `host_sha256`；跨任务按对照归一化，统计比较不代替受控输入 |
 | `gate` | 对受控实验做质量非劣判定并保留任务级损失检查；只输出判定，不自动采纳变体或写配置 |
 | `signals` | 将问题和正向范例压成有界表，供 Agent 选择后下钻，而不是读取全部运行史 |
 
 `signals` 按类型、位置与 detail 形态合并发现，不把不同失败类别混为一条；信号有稳定 id、权重、受影响范围、配置/Graph/节点/模型/工具/Host/环境坐标和证据计数，每条最多引用 5 个事实键。信号和范例默认各保留 20 条，未展示项按类型计入 `omitted`。
+
+`stall` 版本 2 将旧 `stalled_task` 改为 `idle_task`：长期无记录只说明活动未知，不证明卡住。执行中 Run 若有尚无节点结果、最后已接纳状态为 `input_wait=true` 的接收器，则计入 `waiting_input_tasks`，不报该 Run 的 `idle_task`；节点结果优先于遗留等待状态。最近已接纳观察也推进活动时钟。没有新等待事实的旧 Run 不按节点名猜测；等待事实不是进程存活心跳，也不证明并行分支全部健康。模型/工具时间缺失、明细省略或工具事实丢弃时，不把未覆盖区间诊断为已证空闲；MCP 标明时间线完整性与 gap 的观察范围。
+
+`health`、`profile`、`contrast`、`signals` 的上述完整性/可空成本语义对应输出版本 2；`gate` 保留版本 1 的质量判定，不因成本未知删除质量样本，也不据此宣告节省。
 
 评分任务的 Harness 前沿比较平均质量、token、Agent 时间，至少 3 个 Run 才参与；支配需三个维度均不差，且质量优势超过 0.05 或成本差异通过统计检验。它不保证方差和尾部更好。`frugal_route`、`rare_route` 是可调查的低成本或少见路线，不等于已经发现可推广的优化。工具路线按调用顺序组装并合并连续重复；同形状换值后恢复、路径类别、工具失败和命令非零退出分别解释，旧记录缺字段不能倒推具体参数。
 
@@ -146,6 +160,8 @@ CLI 提供 `health`、`profile`、`stall`、`contrast`、`gate`、`signals`、`r
 - **保留政策**：history、`points.jsonl` 与内容库的保留策略仍待用户决定，见[待决清单](../experiments/constitution-host-preflight/final/measurement.md#迁移后待决清单)。可丢弃投影不授权删除权威历史；不静默新增保留期限、旧数据迁移或清理规则。
 
 ## 验收边界与证据
+
+完整用量、可空字段与输入等待观察已通过本地契约回归；固定 Goose＋本地确定性 Provider 验证了成功与取消时的用量落盘，超过 64 轮及恢复计数由确定性单测覆盖。同源历史复核保留旧缺失轮次和未知成本，未补造等待事实。该切片尚未部署，不作为真实 Provider 或线上告警效果验收；当前结论见[验收台账](pilot-development-plan.md)，原始结果见[本地验证](../.local/rsi-optimization-20261106-113634/verification.md)。
 
 已有记录、读侧、评分和受控实验结论分别见 [P1](../experiments/harness-hub/p1/verification.md)、[P2](../experiments/harness-hub/p2/report.md)、[P3](../experiments/harness-hub/p3/report.md)、[P4](../experiments/harness-hub/p4/report.md) 与[实验 1](../experiments/harness-hub/p6/experiment-1.md)；噪声与样本量依据见 [P0](../experiments/harness-hub/p0/report.md)。这些是各自阶段证据，不是当前所有接口、新构建或全部业务的联合验收。
 

@@ -248,6 +248,7 @@ fn health_reports_each_irregularity_with_its_records() {
             ("unobserved_invocation", "r1/critic#1".into()),
             ("observation_without_result", "r1/ghost#1".into()),
             ("invocation_not_completed", "r1/ghost#1".into()),
+            ("usage_incomplete", "r1/ghost#1".into()),
             ("tool_failures", "tool anchor_run".into()),
             ("tool_failures", "tool anchor_read".into()),
             ("call_corrected", "tool anchor_run".into()),
@@ -260,10 +261,17 @@ fn health_reports_each_irregularity_with_its_records() {
     assert_eq!(finding(&report, "call_corrected").evidence.len(), 2);
 
     let time = &report.summary["time"];
-    let shares = ["model_share", "tool_share", "unobserved_share"]
-        .map(|k| time[k].as_f64().unwrap())
-        .iter()
-        .sum::<f64>();
+    assert!(time["model_share"].is_null());
+    assert!(time["unobserved_share"].is_null());
+    assert_eq!(time["timeline_complete"], false);
+    let shares = [
+        "observed_model_share",
+        "tool_share",
+        "uncovered_observation_share",
+    ]
+    .map(|k| time[k].as_f64().unwrap())
+    .iter()
+    .sum::<f64>();
     assert!((shares - 1.0).abs() < 0.01, "{time}");
     let steps = &report.summary["steps"];
     assert_eq!(steps["observed_overhead_ms"]["min"], json!(150));
@@ -306,17 +314,18 @@ fn health_flags_a_configuration_that_waits_long_before_the_model() {
 }
 
 #[test]
-fn stall_finds_stalled_runs_silences_slow_calls_and_loops() {
+fn stall_finds_idle_runs_silences_slow_calls_and_loops() {
     let world = World::new();
     support::r1(&world);
     support::r2(&world);
     let (table, _) = project(&world);
-    let now = 136_200 + 16 * 60_000;
+    // The accepted observation at 200_000 is newer than the Run result.
+    let now = 200_000 + 16 * 60_000;
     let report = Stall::default().analyze(&Query::new(table.facts(), Some(now)));
     assert_eq!(
         codes(&report),
         BTreeSet::from([
-            ("stalled_task", "run/r2".into()),
+            ("idle_task", "run/r2".into()),
             ("idle_gap", "r2/worker#1".into()),
             ("slow_tool_call", "tool anchor_run".into()),
             ("repeated_failure", "r2/worker#1".into()),
@@ -336,8 +345,101 @@ fn stall_finds_stalled_runs_silences_slow_calls_and_loops() {
     );
 
     // Not yet idle long enough: no task finding.
-    let early = Stall::default().analyze(&Query::new(table.facts(), Some(136_200 + 60_000)));
-    assert!(!early.findings.iter().any(|f| f.code == "stalled_task"));
+    let early = Stall::default().analyze(&Query::new(table.facts(), Some(200_000 + 60_000)));
+    assert!(!early.findings.iter().any(|f| f.code == "idle_task"));
+}
+
+fn observe_input_wait(world: &World, run: &str, node: &str, at: u64, waiting: bool) {
+    world.clock.set(at);
+    let invocation = anchor_facts::Invocation {
+        run_id: run.into(),
+        graph_digest: "g".into(),
+        node_id: node.into(),
+        invocation: 1,
+    };
+    let trace = invocation.trace();
+    if world.facts.load(&trace).unwrap().is_none() {
+        world
+            .facts
+            .create(Resource::new(
+                &trace,
+                anchor_facts::OBSERVATION,
+                json!(null),
+            ))
+            .unwrap();
+    }
+    let seen = world.facts.load(&trace).unwrap().unwrap().version;
+    let verdict = world
+        .facts
+        .submit(
+            &anchor_kernel::Principal::new(
+                anchor_facts::RECORDER_ID,
+                anchor_kernel::PrincipalKind::Code,
+            ),
+            0,
+            anchor_kernel::Submission::new(&trace, seen, anchor_kernel::Action::Write).content(
+                json!(anchor_facts::Observation {
+                    version: anchor_facts::VERSION,
+                    invocation,
+                    facts: vec![anchor_facts::Fact::InputWait { waiting }],
+                }),
+            ),
+        )
+        .unwrap();
+    assert!(verdict.is_accepted());
+}
+
+#[test]
+fn input_wait_facts_not_node_names_distinguish_waiting_from_unknown_idle_activity() {
+    let world = World::new();
+    world.run("receiver", 1);
+    world.run("wait_input", 1);
+    observe_input_wait(&world, "receiver", "arbitrary-node", 10, true);
+    let (table, _) = project(&world);
+    let now = 2 * 60 * 60_000;
+    let report = Stall::default().analyze(&Query::new(table.facts(), Some(now)));
+    assert_eq!(
+        codes(&report),
+        BTreeSet::from([("idle_task", "run/wait_input".into())])
+    );
+    assert_eq!(report.summary["waiting_input_tasks"], json!(1));
+    assert!(
+        finding(&report, "idle_task")
+            .detail
+            .contains("activity unknown")
+    );
+    let health = Health.analyze(&Query::new(table.facts(), Some(now)));
+    assert!(!health.findings.iter().any(|finding| {
+        matches!(
+            finding.code,
+            "observation_without_result" | "configuration_unknown"
+        )
+    }));
+
+    // A freshly claimed input is activity, even before its node result exists.
+    observe_input_wait(&world, "receiver", "arbitrary-node", now, false);
+    let (table, _) = project(&world);
+    let report = Stall::default().analyze(&Query::new(table.facts(), Some(now + 1)));
+    assert_eq!(report.summary["waiting_input_tasks"], json!(0));
+    assert!(
+        !report
+            .findings
+            .iter()
+            .any(|finding| finding.subject == "run/receiver")
+    );
+    let late = Stall::default().analyze(&Query::new(table.facts(), Some(now + 16 * 60_000)));
+    assert!(codes(&late).contains(&("idle_task", "run/receiver".into())));
+    let health = Health.analyze(&Query::new(table.facts(), None));
+    assert_eq!(health.summary["invocations"]["resumed"], json!(0));
+
+    // A committed result invalidates a stale waiting observation, even if its
+    // closing observation was lost. No Graph scheduling is reimplemented here.
+    observe_input_wait(&world, "receiver", "arbitrary-node", now + 2, true);
+    world.result("receiver", "arbitrary-node#1", now + 3, 0, false);
+    let (table, _) = project(&world);
+    let report = Stall::default().analyze(&Query::new(table.facts(), Some(now + 16 * 60_000)));
+    assert_eq!(report.summary["waiting_input_tasks"], json!(0));
+    assert!(codes(&report).contains(&("idle_task", "run/receiver".into())));
 }
 
 #[test]
@@ -459,7 +561,9 @@ fn grades_join_their_runs_and_failing_checks_are_reported() {
     assert_eq!(quality["mean_score"], json!(0.5));
     assert_eq!(quality["checks"]["total"], json!(0.333));
     assert_eq!(quality["checks"]["unpaid"], json!(0.667));
-    assert_eq!(quality["tokens"]["n"], json!(3));
+    // All three grades count, but r1 has an unobserved paid invocation and
+    // r3 has no model observations. Neither is a zero-cost sample.
+    assert_eq!(quality["tokens"]["n"], json!(1));
     // r1 also observed its ghost invocation, under its own configuration.
     assert_eq!(quality["configurations"], json!(2));
     // Every check that fails in any Run is reported, at its rate, once r3's

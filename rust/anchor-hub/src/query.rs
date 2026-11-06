@@ -82,7 +82,7 @@ impl<'a> Query<'a> {
         let mut found: BTreeMap<(String, String, u64), Invocation<'a>> = BTreeMap::new();
         for row in self.facts.rows {
             let (run, node, invocation) = match &row.body {
-                Body::Observation(observation) => {
+                Body::Observation(observation) if row.verdict.effect == Effect::Accepted => {
                     let id = &observation.invocation;
                     (id.run_id.as_str(), id.node_id.as_str(), id.invocation)
                 }
@@ -207,7 +207,7 @@ pub struct Invocation<'a> {
     pub invocation: u64,
     /// The accepted node result in the Run's history.
     pub result: Option<&'a Row>,
-    /// Observation records; more than one when the invocation was resumed.
+    /// Accepted observation history: Host state edges and Goose attempts.
     pub traces: Vec<Trace<'a>>,
     /// Its tool calls at the value level, from the execution port's
     /// evidence, in call order; empty where none was found.
@@ -225,6 +225,165 @@ pub struct Lifecycle {
     pub resumed: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageCoverage {
+    Complete,
+    LegacyComplete,
+    Partial,
+    Unknown,
+}
+
+/// The reported portion remains visible even when a field or an attempt is
+/// incomplete. Cost comparisons use the checked accessors, not those sums.
+#[derive(Debug, Clone, Serialize)]
+pub struct Usage {
+    pub coverage: UsageCoverage,
+    pub attempts: usize,
+    pub legacy_attempts: usize,
+    pub unknown_attempts: usize,
+    pub totals: anchor_facts::ModelUsage,
+}
+
+impl Default for Usage {
+    fn default() -> Self {
+        Self {
+            coverage: UsageCoverage::Unknown,
+            attempts: 0,
+            legacy_attempts: 0,
+            unknown_attempts: 0,
+            totals: anchor_facts::ModelUsage {
+                complete: true,
+                ..Default::default()
+            },
+        }
+    }
+}
+
+impl Usage {
+    pub fn complete(&self) -> bool {
+        matches!(
+            self.coverage,
+            UsageCoverage::Complete | UsageCoverage::LegacyComplete
+        )
+    }
+
+    pub fn details_complete(&self) -> bool {
+        self.complete() && self.totals.omitted_turns == 0
+    }
+
+    fn field<T: Copy>(&self, value: Option<T>, reported: u64) -> Option<T> {
+        (self.complete() && reported == self.totals.messages && reported > 0)
+            .then_some(value)
+            .flatten()
+    }
+
+    pub fn total_tokens(&self) -> Option<u64> {
+        self.field(
+            self.totals.total_tokens,
+            self.totals.reported_turns.total_tokens,
+        )
+    }
+
+    pub fn input_tokens(&self) -> Option<u64> {
+        self.field(
+            self.totals.input_tokens,
+            self.totals.reported_turns.input_tokens,
+        )
+    }
+
+    pub fn output_tokens(&self) -> Option<u64> {
+        self.field(
+            self.totals.output_tokens,
+            self.totals.reported_turns.output_tokens,
+        )
+    }
+
+    pub fn cache_read_tokens(&self) -> Option<u64> {
+        self.field(
+            self.totals.cache_read_tokens,
+            self.totals.reported_turns.cache_read_tokens,
+        )
+    }
+
+    pub fn cost_usd(&self) -> Option<f64> {
+        self.field(self.totals.cost_usd, self.totals.reported_turns.cost_usd)
+    }
+
+    pub fn elapsed_ms(&self) -> Option<u64> {
+        self.field(
+            self.totals.elapsed_ms,
+            self.totals.reported_turns.elapsed_ms,
+        )
+    }
+
+    fn add(&mut self, usage: &anchor_facts::ModelUsage) {
+        self.totals.complete &= usage.complete;
+        self.totals.messages += usage.messages;
+        self.totals.sampled_turns += usage.sampled_turns;
+        self.totals.omitted_turns += usage.omitted_turns;
+        self.totals.compaction_messages += usage.compaction_messages;
+        macro_rules! merge {
+            ($($field:ident),+) => {$({
+                if let Some(value) = usage.$field {
+                    *self.totals.$field.get_or_insert(Default::default()) += value;
+                }
+                self.totals.reported_turns.$field += usage.reported_turns.$field;
+            })+};
+        }
+        merge!(
+            input_tokens,
+            output_tokens,
+            total_tokens,
+            cache_read_tokens,
+            cache_write_tokens,
+            cost_usd,
+            elapsed_ms
+        );
+    }
+
+    fn refresh(&mut self) {
+        self.coverage = if self.attempts == 0 || self.totals.messages == 0 {
+            UsageCoverage::Unknown
+        } else if self.totals.complete && self.unknown_attempts == 0 {
+            if self.legacy_attempts == 0 {
+                UsageCoverage::Complete
+            } else {
+                UsageCoverage::LegacyComplete
+            }
+        } else {
+            UsageCoverage::Partial
+        };
+    }
+}
+
+/// Combine attempts without adding their retained ModelTurn samples a second
+/// time. Missing observations with a positive model-request stamp stay unknown.
+pub fn usage<'a>(invocations: impl IntoIterator<Item = &'a Invocation<'a>>) -> Usage {
+    let mut combined = Usage::default();
+    for invocation in invocations {
+        let one = invocation.usage();
+        combined.attempts += one.attempts;
+        combined.legacy_attempts += one.legacy_attempts;
+        combined.unknown_attempts += one.unknown_attempts;
+        combined.add(&one.totals);
+    }
+    combined.refresh();
+    combined
+}
+
+/// Complete lifecycle time, independent of token/detail coverage. Ordinary
+/// zero-cost Ops and Host input-wait edges carry no model time to add.
+pub fn agent_ms<'a>(invocations: impl IntoIterator<Item = &'a Invocation<'a>>) -> Option<u64> {
+    let mut times = invocations
+        .into_iter()
+        .filter(|invocation| invocation.has_model_work())
+        .map(Invocation::agent_ms)
+        .peekable();
+    times.peek()?;
+    times.try_fold(0u64, |total, one| total.checked_add(one?))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct Turn<'a> {
     pub index: u64,
@@ -232,9 +391,9 @@ pub struct Turn<'a> {
     pub observed_at_ms: Option<u64>,
     pub elapsed_ms: Option<u64>,
     pub time_to_first_token_ms: Option<u64>,
-    pub input_tokens: u64,
-    pub output_tokens: u64,
-    pub total_tokens: u64,
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub total_tokens: Option<u64>,
     pub cache_read_tokens: Option<u64>,
     pub compaction: bool,
 }
@@ -362,6 +521,104 @@ pub fn covered(spans: impl IntoIterator<Item = Range<u64>>) -> u64 {
 impl<'a> Invocation<'a> {
     pub fn key(&self) -> String {
         format!("{}/{}#{}", self.run_id, self.node_id, self.invocation)
+    }
+
+    pub fn waiting_for_input(&self) -> bool {
+        self.result.is_none()
+            && self
+                .facts()
+                .filter_map(|fact| match fact {
+                    anchor_facts::Fact::InputWait { waiting } => Some(*waiting),
+                    _ => None,
+                })
+                .last()
+                == Some(true)
+    }
+
+    pub fn has_model_observations(&self) -> bool {
+        self.facts().any(model_observation)
+    }
+
+    pub fn has_model_work(&self) -> bool {
+        self.has_model_observations() || self.result.is_some_and(|row| row.cost > 0)
+    }
+
+    pub fn observed_agent_ms(&self) -> u64 {
+        self.lifecycles()
+            .iter()
+            .map(|life| life.ended_at_ms.saturating_sub(life.started_at_ms))
+            .sum()
+    }
+
+    pub fn agent_ms(&self) -> Option<u64> {
+        if self.usage().unknown_attempts > 0 {
+            return None;
+        }
+        let mut attempts = self.model_traces().peekable();
+        attempts.peek()?;
+        attempts
+            .all(|trace| {
+                trace
+                    .observation
+                    .facts
+                    .iter()
+                    .any(|fact| matches!(fact, anchor_facts::Fact::Lifecycle { .. }))
+            })
+            .then(|| self.observed_agent_ms())
+    }
+
+    pub fn timeline_complete(&self) -> bool {
+        self.usage().details_complete()
+            && self
+                .turns()
+                .iter()
+                .all(|turn| turn.observed_at_ms.is_some() && turn.elapsed_ms.is_some())
+            && self
+                .calls()
+                .iter()
+                .all(|call| call.started_at_ms.is_some() && call.ended_at_ms.is_some())
+            && self
+                .lifecycles()
+                .iter()
+                .all(|life| life.tool_calls_dropped == 0)
+    }
+
+    pub fn usage(&self) -> Usage {
+        let mut usage = Usage::default();
+        for trace in self.model_traces() {
+            if usage.attempts == 0
+                && trace
+                    .observation
+                    .facts
+                    .iter()
+                    .any(|fact| matches!(fact, anchor_facts::Fact::Lifecycle { resumed: true, .. }))
+            {
+                // A retained session resumed work whose prior attempt was not
+                // recorded. Session accumulated counters cannot fill that gap.
+                usage.unknown_attempts += 1;
+            }
+            usage.attempts += 1;
+            if let Some(total) = trace.observation.facts.iter().find_map(|fact| match fact {
+                anchor_facts::Fact::ModelUsage { usage } => Some(usage),
+                _ => None,
+            }) {
+                usage.add(total);
+            } else {
+                usage.add(&legacy_usage(trace));
+                usage.legacy_attempts += 1;
+            }
+        }
+        if usage.attempts == 0 && self.result.is_some_and(|row| row.cost > 0) {
+            usage.unknown_attempts = 1;
+        }
+        usage.refresh();
+        usage
+    }
+
+    fn model_traces(&self) -> impl Iterator<Item = &Trace<'a>> {
+        self.traces
+            .iter()
+            .filter(|trace| trace.observation.facts.iter().any(model_observation))
     }
 
     fn facts(&self) -> impl Iterator<Item = &'a anchor_facts::Fact> + '_ {
@@ -518,19 +775,35 @@ impl<'a> Invocation<'a> {
     /// no later than the first call answering it starts, and its elapsed
     /// time reaches back from there.
     pub fn turn_spans(&self) -> Vec<(u64, Range<u64>)> {
-        let calls = self.calls();
-        self.turns()
+        self.traces
             .iter()
-            .filter_map(|turn| {
-                let reported = turn.reported_span()?;
-                let first_call = calls
-                    .iter()
-                    .filter(|c| c.model_request == turn.index)
-                    .filter_map(|c| c.started_at_ms)
-                    .min();
-                let end = first_call.map_or(reported.end, |start| start.min(reported.end));
-                let start = end.saturating_sub(turn.elapsed_ms?);
-                Some((turn.index, start..end))
+            .flat_map(|trace| {
+                trace.observation.facts.iter().filter_map(|fact| {
+                    let anchor_facts::Fact::ModelTurn {
+                        index,
+                        observed_at_ms: Some(observed),
+                        elapsed_ms: Some(elapsed),
+                        ..
+                    } = fact
+                    else {
+                        return None;
+                    };
+                    let first_call = trace
+                        .observation
+                        .facts
+                        .iter()
+                        .filter_map(|fact| match fact {
+                            anchor_facts::Fact::ToolCall {
+                                model_request,
+                                started_at_ms,
+                                ..
+                            } if model_request == index => *started_at_ms,
+                            _ => None,
+                        })
+                        .min();
+                    let end = first_call.map_or(*observed, |start| start.min(*observed));
+                    Some((*index, end.saturating_sub(*elapsed)..end))
+                })
             })
             .collect()
     }
@@ -595,6 +868,73 @@ impl<'a> Invocation<'a> {
         }
         gaps
     }
+}
+
+fn model_observation(fact: &anchor_facts::Fact) -> bool {
+    matches!(
+        fact,
+        anchor_facts::Fact::Lifecycle { .. }
+            | anchor_facts::Fact::ModelUsage { .. }
+            | anchor_facts::Fact::ModelTurn { .. }
+            | anchor_facts::Fact::ToolCall { .. }
+    )
+}
+
+// Remove this fallback when retained histories all carry ModelUsage. Old
+// observations are not rewritten: equality only proves detail-count coverage;
+// optional cache, time and cost fields keep their own reporting counts.
+fn legacy_usage(trace: &Trace<'_>) -> anchor_facts::ModelUsage {
+    use anchor_facts::{Fact, ModelUsage};
+    let mut usage = ModelUsage::default();
+    let mut lives = Vec::new();
+    for fact in &trace.observation.facts {
+        match fact {
+            Fact::Lifecycle {
+                model_turns,
+                outcome,
+                ..
+            } => lives.push((*model_turns, *outcome)),
+            Fact::ModelTurn {
+                input_tokens,
+                output_tokens,
+                total_tokens,
+                cache_read_tokens,
+                cache_write_tokens,
+                cost_usd,
+                elapsed_ms,
+                compaction,
+                ..
+            } => {
+                usage.sampled_turns += 1;
+                usage.compaction_messages += u64::from(*compaction);
+                macro_rules! add {
+                    ($field:ident, $value:expr) => {
+                        if let Some(value) = $value {
+                            *usage.$field.get_or_insert(Default::default()) += value;
+                            usage.reported_turns.$field += 1;
+                        }
+                    };
+                }
+                add!(input_tokens, *input_tokens);
+                add!(output_tokens, *output_tokens);
+                add!(total_tokens, *total_tokens);
+                add!(cache_read_tokens, *cache_read_tokens);
+                add!(cache_write_tokens, *cache_write_tokens);
+                add!(cost_usd, *cost_usd);
+                add!(elapsed_ms, *elapsed_ms);
+            }
+            _ => {}
+        }
+    }
+    usage.messages = lives
+        .iter()
+        .map(|(messages, _)| *messages)
+        .sum::<u64>()
+        .max(usage.sampled_turns);
+    usage.omitted_turns = usage.messages.saturating_sub(usage.sampled_turns);
+    usage.complete =
+        lives.as_slice() == [(usage.sampled_turns, Outcome::Completed)] && usage.sampled_turns > 0;
+    usage
 }
 
 // ---------------------------------------------------------------------------

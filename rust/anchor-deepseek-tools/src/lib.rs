@@ -134,7 +134,7 @@ impl DeepSeekServer {
             .json(&body)
             .send()
             .await;
-        let (status, response_value, complete) = match result {
+        let (status, response_value, transport_failure) = match result {
             Ok(response) => {
                 let status = response.status().as_u16();
                 match response.bytes().await {
@@ -143,16 +143,20 @@ impl DeepSeekServer {
                             .replace(self.api_key.as_str(), "[credential redacted]");
                         let value = serde_json::from_str::<Value>(&text)
                             .unwrap_or_else(|_| json!({"non_json_body": text}));
-                        (Some(status), value, true)
+                        (Some(status), value, None)
                     }
                     Err(error) => (
                         Some(status),
                         json!({"transport_error":error.to_string()}),
-                        false,
+                        Some(transport_failure_details(&error)),
                     ),
                 }
             }
-            Err(error) => (None, json!({"transport_error":error.to_string()}), false),
+            Err(error) => (
+                None,
+                json!({"transport_error":error.to_string()}),
+                Some(transport_failure_details(&error)),
+            ),
         };
         let response_valid = match operation {
             "search" => response_value.get("results").is_some_and(Value::is_array),
@@ -162,19 +166,46 @@ impl DeepSeekServer {
                 .is_some_and(|content| !content.trim().is_empty()),
             _ => false,
         };
+        // This status is returned by the Fetch/Search service, not the source URL.
+        let failure = match status {
+            Some(status) if !(200..300).contains(&status) => Some(json!({
+                "layer": "service",
+                "code": "http_error",
+                "retryable": matches!(status, 408 | 429 | 500..=599),
+            })),
+            _ => transport_failure.or_else(|| {
+                (!response_valid).then(|| {
+                    json!({
+                        "layer": "response",
+                        "code": "invalid_response",
+                        "retryable": false,
+                    })
+                })
+            }),
+        };
         let envelope = json!({
             "format": 1,
             "kind": operation,
             "request": body,
             "fetched_at": Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
             "http_status": status,
-            "ok": complete && response_valid && status.is_some_and(|status| (200..300).contains(&status)),
+            "http_status_scope": "service",
+            "ok": failure.is_none(),
+            "failure": failure,
             "response": response_value,
         });
         self.files
             .write_new(&save_as, envelope.to_string().as_bytes())?;
         Ok(preview(envelope, save_as))
     }
+}
+
+fn transport_failure_details(error: &reqwest::Error) -> Value {
+    json!({
+        "layer": "transport",
+        "code": if error.is_timeout() { "timeout" } else { "transport_error" },
+        "retryable": error.is_timeout(),
+    })
 }
 
 fn endpoint_url(base: &str) -> Result<Url, Error> {

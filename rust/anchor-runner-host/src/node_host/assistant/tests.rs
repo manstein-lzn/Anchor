@@ -192,6 +192,93 @@ async fn receive(nodes: &HostNodes, key: &InvocationKey) -> NodeCompletion {
     completion
 }
 
+fn input_wait_observations(root: &std::path::Path, key: &InvocationKey) -> Vec<bool> {
+    let reader =
+        anchor_kernel::HistoryReader::open(root.join("state").join(crate::fact_recorder::ROOT))
+            .unwrap();
+    assert!(reader.list("config/").unwrap().is_empty());
+    let trace = anchor_facts::Invocation {
+        run_id: key.run_id.clone(),
+        graph_digest: key.graph_digest.clone(),
+        node_id: key.node_id.clone(),
+        invocation: key.invocation,
+    }
+    .trace();
+    reader
+        .history(&trace)
+        .unwrap()
+        .into_iter()
+        .flat_map(|record| {
+            assert!(record.verdict.is_accepted());
+            assert_eq!(record.stamp.config(), None);
+            serde_json::from_value::<anchor_facts::Observation>(record.submission.content)
+                .unwrap()
+                .facts
+        })
+        .map(|fact| match fact {
+            anchor_facts::Fact::InputWait { waiting } => waiting,
+            _ => panic!("wait operation recorded model facts"),
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn empty_input_wait_records_only_state_changes_and_closes_on_cancellation() {
+    let (root, nodes, _store, _session, key) = fixture();
+    let request = request(&key, vec![]);
+    let cancellation = request.cancellation.clone();
+    let mut pending = Box::pin(nodes.execute(request));
+    tokio::select! {
+        result = &mut pending => panic!("empty receiver returned: {result:?}"),
+        _ = tokio::time::sleep(Duration::from_millis(600)) => {},
+    }
+    assert_eq!(input_wait_observations(root.path(), &key), vec![true]);
+    cancellation.store(true, Ordering::Release);
+    let result = tokio::time::timeout(Duration::from_secs(2), pending)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(result, NodeExecutionOutcome::Cancelled));
+    assert_eq!(
+        input_wait_observations(root.path(), &key),
+        vec![true, false]
+    );
+}
+
+#[test]
+fn resumed_input_wait_records_its_first_state_and_drop_closes_a_pending_receiver() {
+    let (root, _nodes, _store, _session, key) = fixture();
+    let state = root.path().join("state");
+    {
+        // A crashed attempt left an opening fact without a closing one.
+        let recorder = crate::fact_recorder::FactRecorder::shared(&state).unwrap();
+        let recorded = recorder.record_host(
+            &anchor_facts::Invocation {
+                run_id: key.run_id.clone(),
+                graph_digest: key.graph_digest.clone(),
+                node_id: key.node_id.clone(),
+                invocation: key.invocation,
+            },
+            vec![anchor_facts::Fact::InputWait { waiting: true }],
+        );
+        assert!(recorded.accepted, "{recorded:?}");
+    }
+    let mut resumed = InputWaitObservation::new(&state, &key);
+    resumed.set_waiting(false);
+    resumed.set_waiting(false);
+    assert_eq!(
+        input_wait_observations(root.path(), &key),
+        vec![true, false]
+    );
+    resumed.set_waiting(true);
+    resumed.set_waiting(true);
+    drop(resumed);
+    assert_eq!(
+        input_wait_observations(root.path(), &key),
+        vec![true, false, true, false]
+    );
+}
+
 #[tokio::test]
 async fn task_input_mounts_only_selected_artifact_files_without_channel_identity() {
     let (_root, nodes, store, session, key) = fixture();

@@ -37,8 +37,9 @@ impl Default for Contrast {
 pub(super) struct Measured {
     pub(super) first_at: u64,
     pub(super) score: f64,
-    pub(super) agent_ms: f64,
-    pub(super) tokens: f64,
+    pub(super) agent_ms: Option<f64>,
+    observed_agent_ms: u64,
+    pub(super) tokens: Option<f64>,
     pub(super) turns: f64,
     pub(super) calls: u64,
     pub(super) failed_calls: u64,
@@ -50,7 +51,7 @@ impl Analyzer for Contrast {
         "contrast"
     }
     fn version(&self) -> u32 {
-        1
+        2
     }
     fn needs(&self) -> &'static [Need] {
         &[Need::Time, Need::Observations, Need::Grades]
@@ -115,17 +116,23 @@ impl Analyzer for Contrast {
                 per_task.insert(task.clone(), json!({"arms": row}));
                 continue;
             };
-            let base_ms = mean(base.iter().map(|r| r.agent_ms));
-            let base_tokens = mean(base.iter().map(|r| r.tokens));
+            let base_ms = mean_present(base.iter().filter_map(|r| r.agent_ms));
+            let base_tokens = mean_present(base.iter().filter_map(|r| r.tokens));
             let mut against = BTreeMap::new();
             for (arm, runs) in arms {
                 let normalized = pooled.entry(arm.as_str()).or_default();
-                normalized
-                    .0
-                    .extend(runs.iter().map(|r| r.agent_ms / base_ms.max(1.0)));
-                normalized
-                    .1
-                    .extend(runs.iter().map(|r| r.tokens / base_tokens.max(1.0)));
+                if let Some(base_ms) = base_ms {
+                    normalized.0.extend(
+                        runs.iter()
+                            .filter_map(|r| r.agent_ms.map(|ms| ms / base_ms.max(1.0))),
+                    );
+                }
+                if let Some(base_tokens) = base_tokens {
+                    normalized.1.extend(
+                        runs.iter()
+                            .filter_map(|r| r.tokens.map(|tokens| tokens / base_tokens.max(1.0))),
+                    );
+                }
                 if arm == reference {
                     continue;
                 }
@@ -147,9 +154,9 @@ impl Analyzer for Contrast {
                     arm.clone(),
                     json!({
                         "score_change": round(score_change),
-                        "agent_ms_ratio": round(mean(runs.iter().map(|r| r.agent_ms)) / base_ms.max(1.0)),
+                        "agent_ms_ratio": mean_present(runs.iter().filter_map(|r| r.agent_ms)).zip(base_ms).map(|(ours, base)| round(ours / base.max(1.0))),
                         "agent_ms_p": test(base, runs, |r| r.agent_ms),
-                        "tokens_ratio": round(mean(runs.iter().map(|r| r.tokens)) / base_tokens.max(1.0)),
+                        "tokens_ratio": mean_present(runs.iter().filter_map(|r| r.tokens)).zip(base_tokens).map(|(ours, base)| round(ours / base.max(1.0))),
                         "tokens_p": test(base, runs, |r| r.tokens),
                         "turns_ratio": round(mean(runs.iter().map(|r| r.turns)) / mean(base.iter().map(|r| r.turns)).max(1.0)),
                     }),
@@ -168,10 +175,17 @@ impl Analyzer for Contrast {
         for arm in &order {
             let (ms, tokens) = pooled.get(arm).cloned().unwrap_or_default();
             let (failed, calls) = failures.get(arm).copied().unwrap_or_default();
+            let runs: Vec<_> = tasks
+                .values()
+                .filter_map(|arms| arms.get(*arm))
+                .flatten()
+                .collect();
             let mut line = json!({
-                "runs": ms.len(),
-                "agent_ms_relative": round(mean(ms.iter().copied())),
-                "tokens_relative": round(mean(tokens.iter().copied())),
+                "runs": runs.len(),
+                "agent_ms_relative": mean_present(ms.iter().copied()).map(round),
+                "runs_with_complete_agent_time": runs.iter().filter(|r| r.agent_ms.is_some()).count(),
+                "tokens_relative": mean_present(tokens.iter().copied()).map(round),
+                "runs_with_complete_tokens": runs.iter().filter(|r| r.tokens.is_some()).count(),
                 "tool_calls": calls,
                 "tool_failure_rate": round(failed as f64 / calls.max(1) as f64),
             });
@@ -182,12 +196,18 @@ impl Analyzer for Contrast {
                 line["agent_ms_p"] = json!(ms_test.map(|t| round(t.p)));
                 line["tokens_p"] = json!(tokens_test.map(|t| round(t.p)));
                 line["tool_failure_p"] = json!(failure_p.map(round));
-                for (what, p, value) in [
-                    ("agent time", ms_test.map(|t| t.p), mean(ms.iter().copied())),
+                for (what, p, value, samples) in [
+                    (
+                        "agent time",
+                        ms_test.map(|t| t.p),
+                        mean(ms.iter().copied()),
+                        ms.len(),
+                    ),
                     (
                         "tokens",
                         tokens_test.map(|t| t.p),
                         mean(tokens.iter().copied()),
+                        tokens.len(),
                     ),
                 ] {
                     if p.is_some_and(|p| p < SIGNIFICANT) {
@@ -198,7 +218,7 @@ impl Analyzer for Contrast {
                                 "{what} {:.1}% of {} over {} graded Runs (p={:.3})",
                                 value * 100.0,
                                 short(reference),
-                                ms.len(),
+                                samples,
                                 p.unwrap_or(1.0)
                             ),
                             evidence: Vec::new(),
@@ -240,7 +260,7 @@ impl Contrast {
         for (run, graded) in query.grades() {
             let observed: Vec<&&Invocation> = by_run
                 .get(run)
-                .map(|v| v.iter().filter(|i| !i.traces.is_empty()).collect())
+                .map(|v| v.iter().filter(|i| i.has_model_observations()).collect())
                 .unwrap_or_default();
             let arms: BTreeSet<String> = observed
                 .iter()
@@ -252,6 +272,8 @@ impl Contrast {
             };
             let lifecycles: Vec<_> = observed.iter().flat_map(|i| i.lifecycles()).collect();
             let calls: Vec<_> = observed.iter().flat_map(|i| i.calls()).collect();
+            let usage =
+                crate::query::usage(by_run.get(run).into_iter().flat_map(|v| v.iter().copied()));
             tasks
                 .entry(format!(
                     "{} v{}",
@@ -267,16 +289,13 @@ impl Contrast {
                         .min()
                         .unwrap_or(0),
                     score: graded.grade.score(),
-                    agent_ms: lifecycles
-                        .iter()
-                        .map(|l| l.ended_at_ms.saturating_sub(l.started_at_ms))
-                        .sum::<u64>() as f64,
-                    tokens: observed
-                        .iter()
-                        .flat_map(|i| i.turns())
-                        .map(|t| t.total_tokens)
-                        .sum::<u64>() as f64,
-                    turns: observed.iter().map(|i| i.turns().len()).sum::<usize>() as f64,
+                    agent_ms: crate::query::agent_ms(
+                        by_run.get(run).into_iter().flat_map(|v| v.iter().copied()),
+                    )
+                    .map(|ms| ms as f64),
+                    observed_agent_ms: observed.iter().map(|i| i.observed_agent_ms()).sum(),
+                    tokens: usage.total_tokens().map(|tokens| tokens as f64),
+                    turns: usage.totals.messages as f64,
                     calls: calls.len() as u64,
                     failed_calls: calls.iter().filter(|c| !c.ok).count() as u64,
                     grade: graded.row.key.clone(),
@@ -304,18 +323,26 @@ fn describe(runs: &[Measured]) -> Value {
         "runs": runs.len(),
         "mean_score": round(mean(runs.iter().map(|r| r.score))),
         "pass_rate": round(runs.iter().filter(|r| r.score >= 1.0).count() as f64 / runs.len().max(1) as f64),
-        "agent_ms": summarize(runs.iter().map(|r| r.agent_ms as u64)),
-        "tokens": summarize(runs.iter().map(|r| r.tokens as u64)),
+        "agent_ms": summarize(runs.iter().filter_map(|r| r.agent_ms.map(|ms| ms as u64))),
+        "observed_agent_ms": summarize(runs.iter().map(|r| r.observed_agent_ms)),
+        "runs_with_incomplete_agent_time": runs.iter().filter(|r| r.agent_ms.is_none()).count(),
+        "tokens": summarize(runs.iter().filter_map(|r| r.tokens.map(|tokens| tokens as u64))),
+        "runs_with_incomplete_tokens": runs.iter().filter(|r| r.tokens.is_none()).count(),
         "turns": summarize(runs.iter().map(|r| r.turns as u64)),
         "tool_failures": runs.iter().map(|r| r.failed_calls).sum::<u64>(),
         "tool_calls": runs.iter().map(|r| r.calls).sum::<u64>(),
     })
 }
 
-fn test(a: &[Measured], b: &[Measured], value: impl Fn(&Measured) -> f64) -> Value {
-    let a: Vec<f64> = a.iter().map(&value).collect();
-    let b: Vec<f64> = b.iter().map(&value).collect();
+fn test(a: &[Measured], b: &[Measured], value: impl Fn(&Measured) -> Option<f64>) -> Value {
+    let a: Vec<f64> = a.iter().filter_map(&value).collect();
+    let b: Vec<f64> = b.iter().filter_map(&value).collect();
     json!(mann_whitney(&a, &b).map(|t| round(t.p)))
+}
+
+fn mean_present(values: impl Iterator<Item = f64>) -> Option<f64> {
+    let values: Vec<_> = values.collect();
+    (!values.is_empty()).then(|| mean(values.into_iter()))
 }
 
 fn mean(values: impl Iterator<Item = f64>) -> f64 {

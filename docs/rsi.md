@@ -30,6 +30,8 @@ audit-context ←────── 重新专项审查 ────────�
 
 `anchor-rsi collect` 使用既有 Rust evidence 模块，动态发现授权源码、部署 Graph、公开 Plugin/Skill 资源和 Run 元数据；同时只读查询源码仓库的 Git 状态/近期改动及默认 `state/schedules.json`。Git 仅作为项目变化审查输入，不参与 Artifact 身份、文件归档或历史报告校验。索引记录原始与脱敏快照哈希、采集时间和缺失范围。凭证、环境、缓存、`.claude` 工具状态树（含旧开发 worktree）、私有运行记录、符号链接、二进制和超过 8 MiB 的文件被排除并记录限制。自定义宿主路径不会从 Graph 中自动获得授权；自定义计划存储未落在默认路径时明确记为未覆盖。
 
+Plugin 实现证据复用 GraphHost 的清单资源分类：声明的 `mutable` 路径在检查条目类型和递归前剪枝，不采集业务归档正文。已安装 Library Plugin 缺少或无法解析清单时跳过该资产并记录限制，不退回全目录采集。源码只在根本身、`plugins/<id>`、`examples/**/plugins/<id>` 识别 Plugin 资产；其他已授权源码目录保持普通代码范围，不因 fixture 中出现 `plugin.json` 就隐藏代码。独立 Skill、源码 Git 元数据和显式授予的历史报告根仍有各自范围，mutable 剪枝不构成整个授权源码树的访问控制。
+
 `run-index.json` 索引发现的历史 Run，`runs.json` 保存机械投影及七天窗口。采集经 Kernel `HistoryReader` 读取 `<state>/kernel-runs`，相位来自 Kernel，更新时间来自 Host observation；不读取旧 `runs/*.json`。部署 Graph 从当前 `catalog` 发现。索引区分本周与历史记录，缺少时间戳不算本周成功样本。每个虚拟证据路径对应冻结文件，可回查状态、错误及原始记录中存在的字段；`source_field_presence` 和 `projection_omitted` 区分不存在与未采集。完整聊天、trace、checkpoint 和隐藏推理不进入证据。冻结绑定只证明资源身份，不能恢复未保存的历史 Plugin 实现字节。
 
 每个领域先读 `domains/<领域>.json`，按失败、本周变更、历史提案选择重点，不要求把全部源码/历史读进上下文。专项输出 `findings.json/md`，区分 observed/inferred/unknown，列出证据位置、实际已读范围、未覆盖范围和局限。综合先读取这些发现及 `join.json`，再按冲突和因果关系回查原始证据。索引覆盖、模型实际审查和结论正确性分别报告。
@@ -87,6 +89,8 @@ cargo build --manifest-path rust/Cargo.toml -p anchor-rsi --locked
 ## 边界和验收
 
 RSI Graph 不自动提交、合并或部署代码，不自动改 Graph/Plugin，不重放历史外部副作用，也不把模型声称完成当成事实。`evolution.json` 的状态为 proposed/continue/hold/resolved；resolved 是有依据的复查判断，不代表本次 RSI 执行过改动。实际修改由维护者在隔离工作区完成，再用保留案例和相关测试验证。
+
+mutable 剪枝已通过本地采集回归及同授权根复核：保留 11 份 Plugin 清单、全部源码路径和 9 张 Graph，Plugin 冻结投影由 480,613 降至 115,720 字节；移除的是 45 个可变归档条目和一项 Library 锁文件。此结果仅验证采集范围与噪音减少，不代表 token、质量或模型成本收益；未重跑大型 RSI 或更新生产服务。当前状态与证据见[验收台账](pilot-development-plan.md)和[采集对照](../.local/rsi-optimization-20261106-113634/before-after.json)。
 
 2026-10-31：新数据根的真实 Run `rust-18e35d456fbfe745` 已 done、Gate PASS，8 个发布文件的 HTTP 下载、内容摘要及后续历史读回通过；原生会话 12 次反馈续接已核验。见[执行证据](../.local/rust/clean-20261031-final/evidence/verification.json)和[发布报告](../.local/rust/clean-20261031-final/state/artifacts/fs2-d512ad1cc2be9624ced12b0223a43be5b0cca91e5507ef25386c31722fa365be/view/rsi-report.md)。内容抽查保留一项不采纳决定：`RSI-host-assembly-reuse` 虽为 hold，仍建议用 inode/descriptor 缓存取代内容校验，与挂载时发现篡改的契约不符；不实施该方向，冻结产物不改写。详见[内容抽查](../.local/rust/clean-20261031-final/evidence/content-spot-check.json)。
 

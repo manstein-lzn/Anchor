@@ -2,6 +2,7 @@ use crate::{
     ecosystem::{Dependency, discover},
     redact,
 };
+use anchor_graph_host::{MutablePaths, mutable_paths_from_manifest};
 use anchor_kernel::{HistoryReader, Outcome, Phase, Waiter};
 use anchor_runtime::{
     artifact::store::ArtifactStoreReader,
@@ -18,7 +19,6 @@ use std::{
     path::{Component, Path, PathBuf},
     sync::Mutex,
 };
-use walkdir::WalkDir;
 
 pub const DOMAINS: [&str; 6] = [
     "code",
@@ -35,6 +35,8 @@ pub const LIMITATIONS: &[&str] = &[
     "Redaction is heuristic, not a complete security audit; projections are not executable source replacements.",
     "Line locators refer to frozen projections; JSON formatting and redaction can change original line positions.",
     "Files above 8 MiB, binary/non-UTF8 files, symlinks and credential-named files are excluded with records.",
+    "Declared Plugin mutable entries are pruned before file-type inspection or recursive collection; source Git metadata and explicitly granted previous-report roots have separate scopes.",
+    "Source Plugin roots are recognized at the source root, plugins/<id>, and examples/**/plugins/<id>; other source layouts remain ordinary authorized code, not inferred Plugin catalogs.",
     "Run evidence contains mechanical metadata only; no prompts, messages, traces, checkpoints or reasoning.",
     "Kernel task cursor and recovery details are not collected in Run projections; omitted fields do not mean zero activity.",
     "Optional roots and unavailable timestamps are explicitly reported; missing time is not counted as recent activity.",
@@ -392,74 +394,202 @@ impl Evidence {
 
     fn walk(&mut self, root: &Path, domain: &str, reports_only: bool) -> Result<(), String> {
         safe_path(root)?;
-        let output_root = self.root.clone();
-        let mut skipped = Vec::new();
-        for entry in WalkDir::new(root).follow_links(false).sort_by_file_name().into_iter().filter_entry(|entry| {
-            let included = entry.path() == root || (!redact::excluded(&entry.file_name().to_string_lossy()) && !entry.path().starts_with(&output_root));
-            if !included { skipped.push(json!({"path":format!("{domain}/{}",entry.path().strip_prefix(root).unwrap().display()),"reason":"excluded credential/runtime/cache path"})); }
-            included
-        }) {
-            match entry {
-                Ok(entry) if entry.file_type().is_symlink() => self.issue(&format!("{domain}/{}",entry.path().strip_prefix(root).unwrap().display()), "symlink skipped"),
-                Ok(entry) if entry.file_type().is_file() => {
-                    let extension = entry.path().extension().and_then(|e| e.to_str()).unwrap_or("");
-                    if reports_only && !matches!(extension,"md"|"json"|"txt") { continue; }
-                    if !reports_only && !matches!(extension,"rs"|"py"|"js"|"jsx"|"ts"|"tsx"|"css"|"html"|"md"|"toml"|"json"|"yaml"|"yml"|"txt"|"sh"|"lock"|"c"|"h"|"in"|"cfg"|"ini") && !matches!(entry.file_name().to_str(), Some("Dockerfile"|"Makefile"|"LICENSE")) { continue; }
-                    self.file(entry.path(), root, domain)?;
+        let plugin_library =
+            domain == "plugins" && root.file_name().is_some_and(|name| name == "plugins");
+        self.walk_directory(root, root, domain, reports_only, None, plugin_library)
+    }
+
+    fn walk_directory(
+        &mut self,
+        root: &Path,
+        directory: &Path,
+        domain: &str,
+        reports_only: bool,
+        inherited_plugin: Option<(&Path, &MutablePaths)>,
+        plugin_library: bool,
+    ) -> Result<(), String> {
+        let requires_manifest = plugin_library && directory != root && inherited_plugin.is_none();
+        let classify_plugin =
+            requires_manifest || (domain == "code" && source_plugin_directory(root, directory));
+        let own_mutable = if inherited_plugin.is_none() && classify_plugin {
+            let manifest_path = directory.join("plugin.json");
+            match fs::symlink_metadata(&manifest_path) {
+                Ok(_) => {
+                    let Some(original) = self.file(&manifest_path, root, domain)? else {
+                        self.issue(
+                            &evidence_path(root, directory, domain)?,
+                            "Plugin resource classification unavailable; subtree skipped",
+                        );
+                        return Ok(());
+                    };
+                    let mutable = serde_json::from_str::<Value>(&original)
+                        .map_err(|error| error.to_string())
+                        .and_then(|manifest| mutable_paths_from_manifest(&manifest));
+                    match mutable {
+                        Ok(mutable) => Some(mutable),
+                        Err(error) => {
+                            self.issue(
+                                &evidence_path(root, &manifest_path, domain)?,
+                                &format!(
+                                    "Plugin resource classification failed; subtree skipped: {}",
+                                    redact::text(&error)
+                                ),
+                            );
+                            return Ok(());
+                        }
+                    }
                 }
-                Ok(_) => (),
-                Err(error) => self.issue(domain, &format!("directory scan failed: {}",error.io_error().map(|e| e.kind().to_string()).unwrap_or_default())),
+                Err(error) if error.kind() == io::ErrorKind::NotFound && !requires_manifest => None,
+                Err(error) => {
+                    self.issue(
+                        &evidence_path(root, directory, domain)?,
+                        &format!(
+                            "Plugin manifest unavailable; subtree skipped: {}",
+                            error.kind()
+                        ),
+                    );
+                    return Ok(());
+                }
+            }
+        } else {
+            None
+        };
+        let plugin = own_mutable
+            .as_ref()
+            .map(|mutable| (directory, mutable))
+            .or(inherited_plugin);
+        let entries = match fs::read_dir(directory) {
+            Ok(entries) => entries,
+            Err(error) => {
+                self.issue(
+                    &evidence_path(root, directory, domain)?,
+                    &format!("directory scan failed: {}", error.kind()),
+                );
+                return Ok(());
+            }
+        };
+        let mut children = Vec::new();
+        for entry in entries {
+            match entry {
+                Ok(entry) => children.push(entry),
+                Err(error) => self.issue(
+                    &evidence_path(root, directory, domain)?,
+                    &format!("directory scan failed: {}", error.kind()),
+                ),
             }
         }
-        self.issues.extend(skipped);
+        children.sort_by_key(|entry| entry.file_name());
+        for entry in children {
+            let path = entry.path();
+            let virtual_path = evidence_path(root, &path, domain)?;
+            // Data belongs to the Plugin. Do not inspect even its entry type.
+            if plugin.is_some_and(|(plugin_root, mutable)| {
+                mutable.covers(&path.strip_prefix(plugin_root).unwrap().to_string_lossy())
+            }) {
+                self.issue(&virtual_path, "declared Plugin mutable path skipped");
+                continue;
+            }
+            let name = entry.file_name();
+            if redact::excluded(&name.to_string_lossy()) || path.starts_with(&self.root) {
+                self.issue(&virtual_path, "excluded credential/runtime/cache path");
+                continue;
+            }
+            if own_mutable.is_some() && name == "plugin.json" {
+                continue;
+            }
+            let kind = match entry.file_type() {
+                Ok(kind) => kind,
+                Err(error) => {
+                    self.issue(
+                        &virtual_path,
+                        &format!("entry type unavailable: {}", error.kind()),
+                    );
+                    continue;
+                }
+            };
+            if kind.is_symlink() {
+                self.issue(&virtual_path, "symlink skipped");
+            } else if kind.is_dir() {
+                self.walk_directory(root, &path, domain, reports_only, plugin, plugin_library)?;
+            } else if kind.is_file() && !(plugin_library && directory == root) {
+                let extension = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+                if reports_only && !matches!(extension, "md" | "json" | "txt") {
+                    continue;
+                }
+                if !reports_only
+                    && !matches!(
+                        extension,
+                        "rs" | "py"
+                            | "js"
+                            | "jsx"
+                            | "ts"
+                            | "tsx"
+                            | "css"
+                            | "html"
+                            | "md"
+                            | "toml"
+                            | "json"
+                            | "yaml"
+                            | "yml"
+                            | "txt"
+                            | "sh"
+                            | "lock"
+                            | "c"
+                            | "h"
+                            | "in"
+                            | "cfg"
+                            | "ini"
+                    )
+                    && !matches!(name.to_str(), Some("Dockerfile" | "Makefile" | "LICENSE"))
+                {
+                    continue;
+                }
+                self.file(&path, root, domain)?;
+            }
+        }
         Ok(())
     }
 
-    fn file(&mut self, path: &Path, root: &Path, domain: &str) -> Result<(), String> {
-        if !path.exists() {
-            self.issue(domain, "declared file is absent");
-            return Ok(());
-        }
+    fn file(&mut self, path: &Path, root: &Path, domain: &str) -> Result<Option<String>, String> {
         if let Err(reason) = safe_path(path) {
             self.issue(domain, &reason);
-            return Ok(());
+            return Ok(None);
         }
         let relative = path.strip_prefix(root).map_err(|e| e.to_string())?;
-        let namespace = if domain == "plugins" {
-            format!(
-                "{domain}/{}",
-                root.file_name().unwrap_or_default().to_string_lossy()
-            )
-        } else {
-            domain.to_owned()
-        };
-        let virtual_path = format!("{namespace}/{}", relative.display());
+        let virtual_path = evidence_path(root, path, domain)?;
         if relative.components().any(|c| {
             let name = c.as_os_str().to_string_lossy();
             redact::excluded(&name)
         }) {
             self.issue(&virtual_path, "credential or private runtime file skipped");
-            return Ok(());
+            return Ok(None);
         }
-        let metadata = fs::metadata(path).map_err(|e| e.to_string())?;
+        let metadata = match fs::symlink_metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                self.issue(&virtual_path, "declared file is absent");
+                return Ok(None);
+            }
+            Err(error) => return Err(error.to_string()),
+        };
         if !metadata.is_file() {
             self.issue(&virtual_path, "non-regular file skipped");
-            return Ok(());
+            return Ok(None);
         }
         if metadata.len() > MAX_FILE {
             self.issue(&virtual_path, "file exceeds 8 MiB limit");
-            return Ok(());
+            return Ok(None);
         }
         let original = match fs::read_to_string(path) {
             Ok(text) => text,
             Err(_) => {
                 self.issue(&virtual_path, "unreadable or non-UTF8 file");
-                return Ok(());
+                return Ok(None);
             }
         };
         if original.contains('\0') {
             self.issue(&virtual_path, "binary file skipped");
-            return Ok(());
+            return Ok(None);
         }
         let projection = if path.extension().is_some_and(|e| e == "json") {
             match serde_json::from_str::<Value>(&original) {
@@ -478,7 +608,8 @@ impl Evidence {
             &path.display().to_string(),
             &original,
             &projection,
-        )
+        )?;
+        Ok(Some(original))
     }
 
     fn kernel_runs(&mut self, root: &Path) -> Result<(), String> {
@@ -844,6 +975,31 @@ impl Evidence {
         }
         Ok(path)
     }
+}
+
+fn source_plugin_directory(root: &Path, directory: &Path) -> bool {
+    if directory == root {
+        return true;
+    }
+    let relative = directory.strip_prefix(root).unwrap();
+    let components = relative.iter().collect::<Vec<_>>();
+    (components.len() == 2 && components[0] == "plugins")
+        || (components.len() >= 3
+            && components[0] == "examples"
+            && components[components.len() - 2] == "plugins")
+}
+
+fn evidence_path(root: &Path, path: &Path, domain: &str) -> Result<String, String> {
+    let relative = path.strip_prefix(root).map_err(|error| error.to_string())?;
+    let namespace = if domain == "plugins" {
+        format!(
+            "{domain}/{}",
+            root.file_name().unwrap_or_default().to_string_lossy()
+        )
+    } else {
+        domain.to_owned()
+    };
+    Ok(format!("{namespace}/{}", relative.display()))
 }
 
 fn sorted_dirs(root: &Path) -> Result<Vec<PathBuf>, String> {

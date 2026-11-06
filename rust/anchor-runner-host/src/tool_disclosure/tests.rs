@@ -170,11 +170,20 @@ async fn invoke_refuses_meta_tools_unknown_names_and_missing_arguments() {
         .await
         .expect_err("meta tools are not callable through the indirection");
     assert!(failure.to_string().contains("disclosure tool"), "{failure}");
-    let failure = port
-        .call(CALL_TOOL, json!({"name": "not_mounted"}))
-        .await
-        .expect_err("unknown tools are refused");
-    assert!(failure.to_string().contains("anchor_tools"), "{failure}");
+    for name in ["not_mounted", "web.search"] {
+        for entrypoint in [DETAIL_TOOL, CALL_TOOL] {
+            let failure = port
+                .call(entrypoint, json!({"name": name}))
+                .await
+                .expect_err("unknown tools are refused");
+            let message = failure.to_string();
+            assert!(message.contains("use anchor_tools"), "{failure}");
+            assert!(message.contains("current authorized names"), "{failure}");
+            for advertised in ["plugin_mail", "plugin_report", "anchor_run"] {
+                assert!(!message.contains(advertised), "{failure}");
+            }
+        }
+    }
     let failure = port
         .call(CALL_TOOL, json!({}))
         .await

@@ -234,7 +234,7 @@ fn outcome(invocation: &Invocation) -> String {
 /// cost.
 fn brief(query: &Query, invocation: &Invocation) -> Value {
     let calls = invocation.calls();
-    let turns = invocation.turns();
+    let usage = invocation.usage();
     let grades = query.grades();
     let grade = grades.get(invocation.run_id.as_str()).map(|graded| {
         json!({
@@ -248,13 +248,12 @@ fn brief(query: &Query, invocation: &Invocation) -> Value {
         "config": invocation.config(),
         "accepted": invocation.result.is_some(),
         "outcome": outcome(invocation),
-        "agent_ms": invocation
-            .lifecycles()
-            .iter()
-            .map(|l| l.ended_at_ms.saturating_sub(l.started_at_ms))
-            .sum::<u64>(),
-        "tokens": turns.iter().map(|t| t.total_tokens).sum::<u64>(),
-        "turns": turns.len(),
+        "agent_ms": invocation.agent_ms(),
+        "observed_agent_ms": invocation.observed_agent_ms(),
+        "tokens": usage.total_tokens(),
+        "turns": usage.totals.messages,
+        "usage": usage,
+        "timeline_complete": invocation.timeline_complete(),
         "calls": calls.len(),
         "failed_calls": calls.iter().filter(|c| !c.ok).count(),
         "route": route_label(&invocation.route()),
@@ -316,6 +315,7 @@ fn invocation(query: &Query, args: &Value) -> Result<Value, String> {
         "turns": bounded(found.turns()),
         "calls": bounded(found.calls()),
         "gaps": bounded(gaps),
+        "gap_scope": "uncovered_observations_not_confirmed_idle",
         "evidence": found.evidence(),
     }))
 }

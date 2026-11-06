@@ -16,7 +16,8 @@ use std::{
 
 use anchor_facts::{AgentConfiguration, Fact, Invocation, Observation};
 use anchor_kernel::{
-    Action, FileStore, Kernel, KernelError, Reason, Resource, StoreError, Submission,
+    Action, FileStore, Kernel, KernelError, Principal, PrincipalKind, Reason, Resource, StoreError,
+    Submission,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -115,11 +116,23 @@ impl FactRecorder {
         invocation: &Invocation,
         facts: Vec<Fact>,
     ) -> Recording {
+        self.record_observations(Some((configuration, envelope)), invocation, facts)
+    }
+
+    /// Host operations have observations, but no Agent or model configuration.
+    pub(crate) fn record_host(&self, invocation: &Invocation, facts: Vec<Fact>) -> Recording {
+        self.record_observations(None, invocation, facts)
+    }
+
+    fn record_observations(
+        &self,
+        configuration: Option<(&AgentConfiguration, Value)>,
+        invocation: &Invocation,
+        facts: Vec<Fact>,
+    ) -> Recording {
         let started = Instant::now();
         let mut recording = Recording::default();
-        if let Err(error) =
-            self.submit_all(configuration, envelope, invocation, facts, &mut recording)
-        {
+        if let Err(error) = self.submit_all(configuration, invocation, facts, &mut recording) {
             recording.error = Some(error.to_string());
         }
         recording.elapsed_ms = started.elapsed().as_millis() as u64;
@@ -128,35 +141,41 @@ impl FactRecorder {
 
     fn submit_all(
         &self,
-        configuration: &AgentConfiguration,
-        envelope: Value,
+        configuration: Option<(&AgentConfiguration, Value)>,
         invocation: &Invocation,
         facts: Vec<Fact>,
         recording: &mut Recording,
     ) -> Result<(), KernelError> {
-        self.create(
-            Resource::new(
-                anchor_facts::configuration_id(&configuration.envelope_sha256),
-                anchor_facts::CONFIGURATION,
-                envelope,
-            )
-            .configured(&configuration.envelope_sha256),
-        )?;
-        let digest = configuration.digest();
-        let manifest =
-            serde_json::to_value(configuration.clone().normalized()).expect("manifest serializes");
-        self.create(
-            Resource::new(
-                anchor_facts::configuration_id(&digest),
-                anchor_facts::CONFIGURATION,
-                manifest,
-            )
-            .configured(&digest),
-        )?;
+        let principal = if let Some((configuration, envelope)) = configuration {
+            self.create(
+                Resource::new(
+                    anchor_facts::configuration_id(&configuration.envelope_sha256),
+                    anchor_facts::CONFIGURATION,
+                    envelope,
+                )
+                .configured(&configuration.envelope_sha256),
+            )?;
+            let digest = configuration.digest();
+            let manifest = serde_json::to_value(configuration.clone().normalized())
+                .expect("manifest serializes");
+            self.create(
+                Resource::new(
+                    anchor_facts::configuration_id(&digest),
+                    anchor_facts::CONFIGURATION,
+                    manifest,
+                )
+                .configured(&digest),
+            )?;
+            anchor_facts::recorder(&digest)
+        } else {
+            Principal::new(anchor_facts::RECORDER_ID, PrincipalKind::Code)
+        };
         let trace = invocation.trace();
-        self.create(
-            Resource::new(&trace, anchor_facts::OBSERVATION, Value::Null).configured(&digest),
-        )?;
+        let mut resource = Resource::new(&trace, anchor_facts::OBSERVATION, Value::Null);
+        if let Some(digest) = &principal.config {
+            resource = resource.configured(digest);
+        }
+        self.create(resource)?;
         recording.facts = facts.len() as u64;
         let content = serde_json::to_value(Observation {
             version: anchor_facts::VERSION,
@@ -172,7 +191,7 @@ impl FactRecorder {
             .ok_or_else(|| KernelError::Store(StoreError::Missing(trace.clone())))?
             .version;
         let verdict = self.kernel.submit(
-            &anchor_facts::recorder(&digest),
+            &principal,
             0,
             Submission::new(&trace, seen, Action::Write).content(content),
         )?;

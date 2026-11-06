@@ -192,9 +192,81 @@ pub struct Observation {
     pub facts: Vec<Fact>,
 }
 
+/// Per-prompt accounting, not the native session's accumulated counters.
+/// Values sum the reported part; `reported_turns` describes each field's
+/// coverage. A completed prompt can still have unreported fields.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ModelUsage {
+    pub complete: bool,
+    pub messages: u64,
+    pub sampled_turns: u64,
+    pub omitted_turns: u64,
+    pub compaction_messages: u64,
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub total_tokens: Option<u64>,
+    pub cache_read_tokens: Option<u64>,
+    pub cache_write_tokens: Option<u64>,
+    pub cost_usd: Option<f64>,
+    pub elapsed_ms: Option<u64>,
+    pub reported_turns: UsageReportedTurns,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UsageReportedTurns {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_write_tokens: u64,
+    pub cost_usd: u64,
+    pub elapsed_ms: u64,
+}
+
+impl ModelUsage {
+    fn valid(&self) -> bool {
+        self.sampled_turns.checked_add(self.omitted_turns) == Some(self.messages)
+            && self.compaction_messages <= self.messages
+            && [
+                (
+                    self.input_tokens.is_some(),
+                    self.reported_turns.input_tokens,
+                ),
+                (
+                    self.output_tokens.is_some(),
+                    self.reported_turns.output_tokens,
+                ),
+                (
+                    self.total_tokens.is_some(),
+                    self.reported_turns.total_tokens,
+                ),
+                (
+                    self.cache_read_tokens.is_some(),
+                    self.reported_turns.cache_read_tokens,
+                ),
+                (
+                    self.cache_write_tokens.is_some(),
+                    self.reported_turns.cache_write_tokens,
+                ),
+                (self.cost_usd.is_some(), self.reported_turns.cost_usd),
+                (self.elapsed_ms.is_some(), self.reported_turns.elapsed_ms),
+            ]
+            .into_iter()
+            .all(|(present, count)| count <= self.messages && present == (count > 0))
+            && self
+                .cost_usd
+                .is_none_or(|cost| cost.is_finite() && cost >= 0.0)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Fact {
+    /// Entry to or exit from the host's authorized input receiver. The
+    /// observation's Kernel stamp supplies the time; no participant data.
+    InputWait { waiting: bool },
+    /// Full observed accounting plus explicit field and detail coverage.
+    ModelUsage { usage: ModelUsage },
     /// What the workspace looked like, taken inside its own command sandbox.
     WorkspaceFingerprint {
         phase: FingerprintPhase,
@@ -229,9 +301,9 @@ pub enum Fact {
         observed_at_ms: Option<u64>,
         elapsed_ms: Option<u64>,
         time_to_first_token_ms: Option<u64>,
-        input_tokens: u64,
-        output_tokens: u64,
-        total_tokens: u64,
+        input_tokens: Option<u64>,
+        output_tokens: Option<u64>,
+        total_tokens: Option<u64>,
         cache_read_tokens: Option<u64>,
         cache_write_tokens: Option<u64>,
         cost_usd: Option<f64>,
@@ -459,13 +531,42 @@ impl Validator for Observations {
             Ok(observation)
                 if observation.version == VERSION
                     && !observation.facts.is_empty()
-                    && observation.invocation.trace() == ctx.resource.id =>
+                    && observation.invocation.trace() == ctx.resource.id
+                    && valid_usage(&observation.facts) =>
             {
                 // The trace's own state stays empty: the facts are its history.
                 Judgement::accept(ctx.resource.state.clone(), Verification::Asserted)
             }
             _ => Judgement::returned(Reason::ContentInvalid),
         }
+    }
+}
+
+fn valid_usage(facts: &[Fact]) -> bool {
+    let usages: Vec<_> = facts
+        .iter()
+        .filter_map(|fact| match fact {
+            Fact::ModelUsage { usage } => Some(usage),
+            _ => None,
+        })
+        .collect();
+    match usages.as_slice() {
+        [] => true,
+        [usage] => {
+            let turns = facts
+                .iter()
+                .filter(|fact| matches!(fact, Fact::ModelTurn { .. }))
+                .count() as u64;
+            let lives: Vec<_> = facts
+                .iter()
+                .filter_map(|fact| match fact {
+                    Fact::Lifecycle { model_turns, .. } => Some(*model_turns),
+                    _ => None,
+                })
+                .collect();
+            usage.valid() && usage.sampled_turns == turns && lives == [usage.messages]
+        }
+        _ => false,
     }
 }
 

@@ -309,6 +309,7 @@ dependencies = [
 name = "anchor-rsi"
 version = "0.1.0"
 dependencies = [
+ "anchor-graph-host",
  "anchor-kernel",
  "anchor-mcp-host",
  "anchor-runtime",

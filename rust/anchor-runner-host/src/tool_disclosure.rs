@@ -13,6 +13,12 @@ const MIN_HIDDEN_FOR_DISCLOSURE: usize = 3;
 #[cfg(test)]
 const SUMMARY_CHARS: usize = 160;
 
+fn unavailable_tool(name: &str) -> ToolError {
+    plugin_disclosure::rejected(format!(
+        "`{name}` is not available in this invocation; use anchor_tools to discover current authorized names before reading a schema or calling a tool"
+    ))
+}
+
 pub(crate) struct DisclosurePolicy {
     always_visible: Vec<String>,
 }
@@ -98,7 +104,7 @@ impl ToolDisclosure {
             "Search the complete host-authorized tool inventory with AND terms, optional exact name/Plugin and bounded paging. Results include real Plugin/server/tool ownership. Fetch anchor_tool_detail {name} for its complete description and parameter schema, then call anchor_tools_call {name,arguments}. Exact name and offset paging reach entries omitted from initial context; reread after compaction.",
             json!({"type":"object","properties":{"query":{"type":"string"},"name":{"type":"string"},"plugin":{"type":"string"},"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":plugin_disclosure::MAX_PAGE}},"additionalProperties":false})));
         definitions.push(ToolDefinition::new(ToolName::new(DETAIL_TOOL).unwrap(),
-            "Get the exact host-authorized tool's full description, input parameter schema and Plugin ownership. The schema is complete or a clear size error is returned; it is never silently truncated. Invoke with anchor_tools_call using these constraints.",
+            "Get the host-authorized tool's full description, input parameter schema and Plugin ownership. Use an exact name returned by anchor_tools, not a name inferred from history. The schema is complete or a clear size error is returned; it is never silently truncated. Invoke with anchor_tools_call using these constraints.",
             json!({"type":"object","properties":{"name":{"type":"string"}},"required":["name"],"additionalProperties":false})));
         definitions.push(ToolDefinition::new(ToolName::new(CALL_TOOL).unwrap(),
             "Call a host-authorized tool by its exact name and object arguments after reading anchor_tool_detail. The result, errors, media, native confirmation and cancellation retain the target tool's semantics. Never use this for final_result (node completion) or disclosure tools; call those directly.",
@@ -129,9 +135,7 @@ impl ToolDisclosure {
     ) -> Result<(String, Value), ToolError> {
         let (name, arguments) = resolve_call(name, arguments)?;
         if !is_meta(&name) && !self.contains(&name) {
-            return Err(plugin_disclosure::rejected(format!(
-                "`{name}` is not available in this invocation; use anchor_tools"
-            )));
+            return Err(unavailable_tool(&name));
         }
         Ok((name, arguments))
     }
@@ -175,9 +179,7 @@ impl ToolDisclosure {
                     .definitions
                     .iter()
                     .find(|definition| definition.name == name)
-                    .ok_or_else(|| {
-                        plugin_disclosure::rejected("tool is not available in this invocation")
-                    })?;
+                    .ok_or_else(|| unavailable_tool(name))?;
                 plugin_disclosure::bounded(
                     json!({"name":name,"description":definition.description,"parameters":definition.parameters,"read_only":self.is_read_only(name),"owner":self.catalog.owners.get(name),"complete":true}),
                 )?

@@ -160,6 +160,304 @@ fn discovers_new_graphs_and_dependencies_and_freezes_source() {
 }
 
 #[test]
+fn plugin_resources_prune_declared_state_without_hiding_ordinary_source_fixtures() {
+    let (temp, config) = setup();
+    let plugins = [
+        (
+            &config.data,
+            "library/plugins/probe",
+            "plugins/plugins/probe",
+        ),
+        (&config.source, "plugins/probe", "code/plugins/probe"),
+        (
+            &config.source,
+            "examples/bundle/plugins/probe",
+            "code/examples/bundle/plugins/probe",
+        ),
+    ];
+    for (root, directory, _) in plugins {
+        write(
+            root,
+            &format!("{directory}/plugin.json"),
+            &json!({
+                "name":"Probe", "mutable":["journal/", "runtime/queue/", "cursor.json", "external/"]
+            })
+            .to_string(),
+        );
+        for path in [
+            "journal/entry.txt",
+            "journal/.env",
+            "runtime/queue/job.json",
+            "cursor.json",
+        ] {
+            write(
+                root,
+                &format!("{directory}/{path}"),
+                "business-state-marker",
+            );
+        }
+        for path in [
+            "skills/SKILL.md",
+            "journalism/code.rs",
+            "runtime/queue-backup.json",
+            "cursor.json.txt",
+        ] {
+            write(root, &format!("{directory}/{path}"), "public-code-marker");
+        }
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(
+                temp.path().join("outside"),
+                root.join(directory).join("external"),
+            )
+            .unwrap();
+            std::os::unix::fs::symlink(
+                "/no-such-target",
+                root.join(directory).join("journal/link"),
+            )
+            .unwrap();
+        }
+    }
+    write(temp.path(), "outside/marker.txt", "outside-marker");
+    write(
+        &config.data,
+        "library/plugins/.install.lock",
+        "not-plugin-code",
+    );
+    write(
+        &config.source,
+        "tests/fixtures/plugin.json",
+        "invalid fixture JSON",
+    );
+    write(
+        &config.source,
+        "tests/fixtures/example.rs",
+        "fixture-source-marker",
+    );
+    write(
+        &config.source,
+        "tests/fixtures/nested/plugin.json",
+        r#"{"name":"Fixture","mutable":["snapshots/"]}"#,
+    );
+    write(
+        &config.source,
+        "tests/fixtures/nested/snapshots/example.rs",
+        "fixture-source-marker",
+    );
+    let evidence = Evidence::collect(config.clone()).unwrap();
+    for (_, _, prefix) in plugins {
+        for path in [
+            "plugin.json",
+            "skills/SKILL.md",
+            "journalism/code.rs",
+            "runtime/queue-backup.json",
+            "cursor.json.txt",
+        ] {
+            assert!(
+                evidence.entries.contains_key(&format!("{prefix}/{path}")),
+                "{prefix}/{path}"
+            );
+        }
+        assert!(!evidence.entries.keys().any(|path| {
+            path.starts_with(&format!("{prefix}/journal/"))
+                || path.starts_with(&format!("{prefix}/runtime/queue/"))
+                || path == &format!("{prefix}/cursor.json")
+                || path.starts_with(&format!("{prefix}/external/"))
+        }));
+        for path in ["journal", "runtime/queue", "cursor.json"] {
+            assert!(evidence.issues.iter().any(|issue| {
+                issue["path"] == format!("{prefix}/{path}")
+                    && issue["reason"] == "declared Plugin mutable path skipped"
+            }));
+        }
+        assert!(
+            !evidence.issues.iter().any(|issue| {
+                issue["path"]
+                    .as_str()
+                    .is_some_and(|path| path.starts_with(&format!("{prefix}/journal/")))
+            }),
+            "mutable subtree must not be enumerated"
+        );
+        #[cfg(unix)]
+        assert!(
+            evidence.issues.iter().any(|issue| {
+                issue["path"] == format!("{prefix}/external")
+                    && issue["reason"] == "declared Plugin mutable path skipped"
+            }),
+            "the mutable entry must be pruned before symlink inspection"
+        );
+    }
+    assert!(
+        evidence
+            .entries
+            .contains_key("code/tests/fixtures/plugin.json")
+    );
+    assert!(
+        evidence
+            .entries
+            .contains_key("code/tests/fixtures/example.rs")
+    );
+    assert!(
+        evidence
+            .entries
+            .contains_key("code/tests/fixtures/nested/snapshots/example.rs")
+    );
+    assert!(
+        !evidence
+            .entries
+            .contains_key("plugins/plugins/.install.lock")
+    );
+    let frozen = evidence
+        .entries
+        .values()
+        .map(|entry| fs::read_to_string(config.evidence.join(&entry.frozen_file)).unwrap())
+        .collect::<String>();
+    assert!(!frozen.contains("business-state-marker"));
+    assert!(!frozen.contains("outside-marker"));
+}
+
+#[test]
+fn unavailable_plugin_classification_never_falls_back_to_a_generic_scan() {
+    let (_temp, config) = setup();
+    let invalid = [
+        ("broken-json", "{".to_owned()),
+        ("not-object", "[]".to_owned()),
+        ("not-array", json!({"mutable":"journal/"}).to_string()),
+        ("escapes", json!({"mutable":["../journal/"]}).to_string()),
+        ("manifest", json!({"mutable":["plugin.json//"]}).to_string()),
+        ("default-mcp", json!({"mutable":[".mcp.json"]}).to_string()),
+        (
+            "external-mcp",
+            json!({"mutable":["journal/"],"mcpServers":"./journal/mcp.json"}).to_string(),
+        ),
+    ];
+    for (id, manifest) in &invalid {
+        write(
+            &config.data,
+            &format!("library/plugins/{id}/plugin.json"),
+            manifest,
+        );
+        write(
+            &config.data,
+            &format!("library/plugins/{id}/journal/entry.txt"),
+            "unclassified-state-marker",
+        );
+        write(
+            &config.data,
+            &format!("library/plugins/{id}/public.rs"),
+            "unclassified-code-marker",
+        );
+    }
+    write(
+        &config.data,
+        "library/plugins/no-manifest/journal/entry.txt",
+        "unclassified-state-marker",
+    );
+    write(&config.source, "plugins/broken/plugin.json", "{");
+    write(
+        &config.source,
+        "plugins/broken/journal/entry.txt",
+        "unclassified-state-marker",
+    );
+    let evidence = Evidence::collect(config).unwrap();
+    assert!(
+        !evidence
+            .entries
+            .keys()
+            .any(|path| path.contains("/journal/") || path.ends_with("/public.rs"))
+    );
+    for (id, _) in invalid {
+        assert!(
+            evidence
+                .entries
+                .contains_key(&format!("plugins/plugins/{id}/plugin.json"))
+        );
+        assert!(evidence.issues.iter().any(|issue| {
+            issue["path"] == format!("plugins/plugins/{id}/plugin.json")
+                && issue["reason"]
+                    .as_str()
+                    .unwrap()
+                    .contains("subtree skipped")
+        }));
+    }
+    assert!(evidence.issues.iter().any(|issue| {
+        issue["path"] == "plugins/plugins/no-manifest"
+            && issue["reason"]
+                .as_str()
+                .unwrap()
+                .contains("manifest unavailable")
+    }));
+    assert!(
+        evidence
+            .entries
+            .contains_key("code/plugins/broken/plugin.json")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn plugin_directories_and_manifests_never_follow_symlinks() {
+    use std::os::unix::fs::symlink;
+    let (temp, config) = setup();
+    write(temp.path(), "outside/plugin.json", r#"{"name":"Outside"}"#);
+    write(temp.path(), "outside/report.txt", "outside-marker");
+    fs::create_dir_all(config.data.join("library/plugins/bad-manifest")).unwrap();
+    symlink(
+        temp.path().join("outside"),
+        config.data.join("library/plugins/linked"),
+    )
+    .unwrap();
+    symlink(
+        temp.path().join("outside/plugin.json"),
+        config.data.join("library/plugins/bad-manifest/plugin.json"),
+    )
+    .unwrap();
+    write(
+        &config.data,
+        "library/plugins/bad-manifest/report.txt",
+        "unclassified-state-marker",
+    );
+    let evidence = Evidence::collect(config).unwrap();
+    assert!(
+        !evidence
+            .entries
+            .keys()
+            .any(|path| path.starts_with("plugins/plugins/"))
+    );
+    assert!(
+        evidence
+            .issues
+            .iter()
+            .any(|issue| issue["reason"] == "symlink skipped")
+    );
+    assert!(
+        evidence
+            .issues
+            .iter()
+            .any(|issue| issue["reason"] == "symlinks are not authorized")
+    );
+}
+
+#[test]
+fn an_explicit_source_plugin_root_uses_its_own_resource_classification() {
+    let (_temp, config) = setup();
+    write(
+        &config.source,
+        "plugin.json",
+        r#"{"name":"Source Plugin","mutable":["journal/"]}"#,
+    );
+    write(
+        &config.source,
+        "journal/report.txt",
+        "business-state-marker",
+    );
+    let evidence = Evidence::collect(config).unwrap();
+    assert!(evidence.entries.contains_key("code/plugin.json"));
+    assert!(evidence.entries.contains_key("code/src/new.rs"));
+    assert!(!evidence.entries.contains_key("code/journal/report.txt"));
+}
+
+#[test]
 fn missing_required_roots_fail_and_optional_roots_record_limits() {
     let (_temp, mut config) = setup();
     config.source = config.source.join("missing");

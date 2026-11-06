@@ -994,6 +994,15 @@ impl GooseNodePort {
                 &observer,
             )
             .await;
+        let metrics = tally.metrics(prompted.is_ok());
+        evidence["usage"] = metrics.clone();
+        evidence["observed_model_requests"] = metrics["messages"].clone();
+        evidence["compaction_messages"] = metrics["compaction_messages"].clone();
+        evidence["model_requests_scope"] = json!(if self.fixture {
+            "fixture_proxy_requests"
+        } else {
+            "observed_usage_notifications_of_current_prompt"
+        });
         let (response, notifications) = match prompted {
             Ok(prompted) => prompted,
             Err(error) => {
@@ -1011,15 +1020,6 @@ impl GooseNodePort {
         };
         evidence["prompt_result"] = response.clone();
         evidence["notifications"] = json!(notifications);
-        let metrics = tally.metrics();
-        evidence["usage"] = metrics.clone();
-        evidence["observed_model_requests"] = metrics["messages"].clone();
-        evidence["compaction_messages"] = metrics["compaction_messages"].clone();
-        evidence["model_requests_scope"] = json!(if self.fixture {
-            "fixture_proxy_requests"
-        } else {
-            "observed_usage_notifications_of_current_prompt"
-        });
         if response["stopReason"] != "end_turn" {
             return Err(InvocationFailure::Contract(format!(
                 "Goose prompt stopped without completion: {}",

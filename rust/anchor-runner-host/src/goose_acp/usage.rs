@@ -49,6 +49,7 @@ struct Usage {
     progress: u64,
     last_status: Option<String>,
     samples: Vec<Value>,
+    reported_turns: anchor_facts::UsageReportedTurns,
 }
 
 impl UsageTally {
@@ -80,19 +81,23 @@ impl UsageTally {
     }
 
     /// Aggregated metrics for node evidence, plus the bounded per-message sample.
-    pub(crate) fn metrics(&self) -> Value {
+    pub(crate) fn metrics(&self, complete: bool) -> Value {
         let Ok(usage) = self.inner.lock() else {
             return json!({"unavailable": "usage tally lock poisoned"});
         };
         let mut metrics = json!({
+            "complete": complete,
             "messages": usage.messages,
+            "sampled_turns": usage.samples.len(),
+            "omitted_turns": usage.messages.saturating_sub(usage.samples.len() as u64),
             "compaction_messages": usage.compaction_messages,
-            "input_tokens": usage.input_tokens,
-            "output_tokens": usage.output_tokens,
-            "total_tokens": usage.total_tokens,
-            "cache_read_tokens": usage.cache_read_tokens,
-            "cache_write_tokens": usage.cache_write_tokens,
-            "elapsed_ms": usage.elapsed_ms,
+            "input_tokens": known(usage.input_tokens, usage.reported_turns.input_tokens),
+            "output_tokens": known(usage.output_tokens, usage.reported_turns.output_tokens),
+            "total_tokens": known(usage.total_tokens, usage.reported_turns.total_tokens),
+            "cache_read_tokens": known(usage.cache_read_tokens, usage.reported_turns.cache_read_tokens),
+            "cache_write_tokens": known(usage.cache_write_tokens, usage.reported_turns.cache_write_tokens),
+            "elapsed_ms": known(usage.elapsed_ms, usage.reported_turns.elapsed_ms),
+            "reported_turns": usage.reported_turns,
             "max_time_to_first_token_ms": usage.max_time_to_first_token_ms,
             "notices": usage.notices,
             "progress": usage.progress,
@@ -154,18 +159,35 @@ impl Usage {
             self.cost_reported = true;
         }
         self.elapsed_ms += number(usage, "elapsedMs");
+        for (field, count) in [
+            ("inputTokens", &mut self.reported_turns.input_tokens),
+            ("outputTokens", &mut self.reported_turns.output_tokens),
+            ("totalTokens", &mut self.reported_turns.total_tokens),
+            (
+                "cacheReadTokens",
+                &mut self.reported_turns.cache_read_tokens,
+            ),
+            (
+                "cacheWriteTokens",
+                &mut self.reported_turns.cache_write_tokens,
+            ),
+            ("elapsedMs", &mut self.reported_turns.elapsed_ms),
+        ] {
+            *count += u64::from(usage[field].as_u64().is_some());
+        }
+        self.reported_turns.cost_usd += u64::from(usage["cost"].as_f64().is_some());
         if let Some(ttft) = usage["timeToFirstTokenMs"].as_u64() {
             self.max_time_to_first_token_ms = self.max_time_to_first_token_ms.max(ttft);
             self.time_to_first_token_ms_reported = true;
         }
         if self.samples.len() < MAX_SAMPLES {
             let mut sample = json!({
-                "input_tokens": input,
-                "output_tokens": output,
-                "total_tokens": total,
+                "input_tokens": number_opt(usage, "inputTokens"),
+                "output_tokens": number_opt(usage, "outputTokens"),
+                "total_tokens": number_opt(usage, "totalTokens"),
                 "is_compaction": is_compaction,
-                "cache_read_tokens": number(usage, "cacheReadTokens"),
-                "cache_write_tokens": number(usage, "cacheWriteTokens"),
+                "cache_read_tokens": number_opt(usage, "cacheReadTokens"),
+                "cache_write_tokens": number_opt(usage, "cacheWriteTokens"),
                 // When the host saw the report: the turn's place in time.
                 "observed_at_ms": crate::fact_recorder::now_ms(),
             });
@@ -217,6 +239,10 @@ impl Usage {
             self.last_status = Some(truncate(message));
         }
     }
+}
+
+fn known(value: u64, reported_turns: u64) -> Option<u64> {
+    (reported_turns > 0).then_some(value)
 }
 
 fn number(value: &Value, key: &str) -> u64 {
@@ -273,7 +299,7 @@ mod tests {
                 "totalTokens":60,"elapsedMs":300,"timeToFirstTokenMs":400,
                 "isCompaction":true}}),
         ));
-        let metrics = tally.metrics();
+        let metrics = tally.metrics(true);
         assert_eq!(metrics["messages"], json!(2));
         assert_eq!(metrics["compaction_messages"], json!(1));
         assert_eq!(metrics["input_tokens"], json!(150));
@@ -298,7 +324,7 @@ mod tests {
             "params":{"sessionUpdate":"usage_update","used":4096,"size":128000,
                 "accumulatedInputTokens":900,"accumulatedOutputTokens":120,
                 "accumulatedCost":0.25}}));
-        let metrics = tally.metrics();
+        let metrics = tally.metrics(true);
         assert_eq!(metrics["messages"], json!(1));
         assert_eq!(metrics["total_tokens"], json!(12));
         assert_eq!(metrics["context_used"], json!(4096));
@@ -319,7 +345,7 @@ mod tests {
             "status_message",
             json!({"status":{"type":"notice","message":"x".repeat(4096)}}),
         ));
-        let metrics = tally.metrics();
+        let metrics = tally.metrics(true);
         assert_eq!(metrics["progress"], json!(1));
         assert_eq!(metrics["notices"], json!(1));
         let status = metrics["last_status"].as_str().unwrap();
@@ -332,7 +358,69 @@ mod tests {
         tally.observe(&json!({"method":"session/update",
             "params":{"update":{"sessionUpdate":"message_usage","usage":{"totalTokens":99}}}}));
         tally.observe(&custom("unknown_variant", json!({"whatever":1})));
-        assert_eq!(tally.metrics()["messages"], json!(0));
-        assert_eq!(tally.metrics()["total_tokens"], json!(0));
+        assert_eq!(tally.metrics(true)["messages"], json!(0));
+        assert_eq!(tally.metrics(true)["total_tokens"], Value::Null);
+    }
+
+    #[test]
+    fn full_accounting_survives_bounded_details_and_marks_field_coverage() {
+        let tally = UsageTally::default();
+        for index in 0..70 {
+            let mut usage =
+                json!({"inputTokens":10,"outputTokens":2,"totalTokens":12,"elapsedMs":7});
+            if index == 0 {
+                usage["cost"] = json!(0.001);
+            }
+            tally.observe(&custom(
+                "message_usage",
+                json!({"messageId":format!("m{index}"),"usage":usage}),
+            ));
+        }
+        let metrics = tally.metrics(true);
+        let aggregate: anchor_facts::ModelUsage = serde_json::from_value(metrics.clone()).unwrap();
+        assert_eq!(aggregate.messages, 70);
+        assert_eq!(aggregate.sampled_turns, 64);
+        assert_eq!(aggregate.omitted_turns, 6);
+        assert_eq!(metrics["samples"].as_array().unwrap().len(), 64);
+        assert_eq!(aggregate.total_tokens, Some(840));
+        assert_eq!(aggregate.reported_turns.total_tokens, 70);
+        assert_eq!(aggregate.elapsed_ms, Some(490));
+        assert_eq!(aggregate.cost_usd, Some(0.001));
+        assert_eq!(aggregate.reported_turns.cost_usd, 1);
+        assert_eq!(aggregate.cache_read_tokens, None);
+        assert_eq!(aggregate.reported_turns.cache_read_tokens, 0);
+    }
+
+    #[test]
+    fn interrupted_and_resumed_prompts_keep_only_their_own_observed_usage() {
+        let interrupted = UsageTally::default();
+        interrupted.observe(&custom(
+            "message_usage",
+            json!({"usage":{"totalTokens":12}}),
+        ));
+        interrupted.observe(&custom(
+            "usage_update",
+            json!({"accumulatedInputTokens":99999,"accumulatedCost":3.0}),
+        ));
+        let first = interrupted.metrics(false);
+        assert_eq!(first["complete"], false);
+        assert_eq!(first["total_tokens"], 12);
+        assert_eq!(first["input_tokens"], Value::Null);
+        assert_eq!(first["samples"][0]["input_tokens"], Value::Null);
+        assert_eq!(first["samples"][0]["output_tokens"], Value::Null);
+
+        let resumed = UsageTally::default();
+        resumed.observe(&custom(
+            "message_usage",
+            json!({"usage":{"totalTokens":15}}),
+        ));
+        resumed.observe(&custom(
+            "usage_update",
+            json!({"accumulatedInputTokens":99999,"accumulatedCost":3.0}),
+        ));
+        let second = resumed.metrics(true);
+        assert_eq!(second["messages"], 1);
+        assert_eq!(second["total_tokens"], 15);
+        assert_eq!(second["cost_usd"], Value::Null);
     }
 }

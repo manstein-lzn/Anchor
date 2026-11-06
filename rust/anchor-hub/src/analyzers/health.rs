@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use super::{Analyzer, Finding, Need, Report, unmet};
 use crate::query::{
     Call, Effect, GapPlace, Invocation, Key, Outcome, Query, Status, covered, group_by,
-    node_result, summarize,
+    node_result, summarize, usage,
 };
 
 /// Evidence cited per finding, at most. Signals count the Runs a finding
@@ -30,7 +30,7 @@ impl Analyzer for Health {
         "health"
     }
     fn version(&self) -> u32 {
-        1
+        2
     }
     /// Without these, the sections that use them are left out; the kernel
     /// sections never need them.
@@ -180,7 +180,7 @@ fn tasks(query: &Query, report: &mut Report) {
 fn coverage(query: &Query, invocations: &[Invocation], report: &mut Report) {
     let observed_runs: BTreeSet<&str> = invocations
         .iter()
-        .filter(|i| !i.traces.is_empty())
+        .filter(|i| i.has_model_observations())
         .map(|i| i.run_id.as_str())
         .collect();
     let known_runs: BTreeSet<String> = query
@@ -191,7 +191,7 @@ fn coverage(query: &Query, invocations: &[Invocation], report: &mut Report) {
     let mut unobserved = Vec::new();
     let mut orphans = Vec::new();
     for invocation in invocations {
-        match (invocation.result, invocation.traces.is_empty()) {
+        match (invocation.result, !invocation.has_model_observations()) {
             // A node that spent model requests in a Run whose other
             // invocations were observed: the recorder missed this one.
             (Some(result), true)
@@ -199,41 +199,79 @@ fn coverage(query: &Query, invocations: &[Invocation], report: &mut Report) {
             {
                 unobserved.push(invocation)
             }
-            (None, false) if known_runs.contains(&invocation.run_id) => orphans.push(invocation),
+            (None, false)
+                if known_runs.contains(&invocation.run_id) && !invocation.waiting_for_input() =>
+            {
+                orphans.push(invocation)
+            }
             _ => {}
         }
-        for life in invocation.lifecycles() {
-            let turns = invocation.turns().len() as u64;
-            let calls = invocation.calls().len() as u64 + life.tool_calls_dropped;
-            if invocation.traces.len() == 1
-                && (turns != life.model_turns || calls != life.tool_calls)
-            {
-                report.findings.push(Finding {
-                    code: "counts_disagree",
-                    subject: invocation.key(),
-                    detail: format!(
-                        "lifecycle reports {} turns and {} calls; {} turns and {} calls recorded",
-                        life.model_turns, life.tool_calls, turns, calls
-                    ),
-                    evidence: invocation.evidence(),
-                });
+        for trace in &invocation.traces {
+            let facts = &trace.observation.facts;
+            let turns = facts
+                .iter()
+                .filter(|f| matches!(f, anchor_facts::Fact::ModelTurn { .. }))
+                .count() as u64;
+            let recorded_calls = facts
+                .iter()
+                .filter(|f| matches!(f, anchor_facts::Fact::ToolCall { .. }))
+                .count() as u64;
+            let omitted_turns = facts
+                .iter()
+                .find_map(|f| match f {
+                    anchor_facts::Fact::ModelUsage { usage } => Some(usage.omitted_turns),
+                    _ => None,
+                })
+                .unwrap_or(0);
+            for fact in facts {
+                let anchor_facts::Fact::Lifecycle {
+                    model_turns,
+                    tool_calls,
+                    tool_calls_dropped,
+                    outcome,
+                    ..
+                } = fact
+                else {
+                    continue;
+                };
+                let calls = recorded_calls + tool_calls_dropped;
+                if turns + omitted_turns != *model_turns || calls != *tool_calls {
+                    report.findings.push(Finding {
+                        code: "counts_disagree",
+                        subject: invocation.key(),
+                        detail: format!(
+                            "lifecycle reports {} turns and {} calls; {} turns and {} calls recorded",
+                            model_turns, tool_calls, turns, calls
+                        ),
+                        evidence: invocation.evidence(),
+                    });
+                }
+                if *tool_calls_dropped > 0 {
+                    report.findings.push(Finding {
+                        code: "tool_calls_dropped",
+                        subject: invocation.key(),
+                        detail: format!("{} tool call(s) not recorded", tool_calls_dropped),
+                        evidence: invocation.evidence(),
+                    });
+                }
+                if *outcome != Outcome::Completed {
+                    report.findings.push(Finding {
+                        code: "invocation_not_completed",
+                        subject: invocation.key(),
+                        detail: format!("ended {}", json!(outcome)),
+                        evidence: invocation.evidence(),
+                    });
+                }
             }
-            if life.tool_calls_dropped > 0 {
-                report.findings.push(Finding {
-                    code: "tool_calls_dropped",
-                    subject: invocation.key(),
-                    detail: format!("{} tool call(s) not recorded", life.tool_calls_dropped),
-                    evidence: invocation.evidence(),
-                });
-            }
-            if life.outcome != Outcome::Completed {
-                report.findings.push(Finding {
-                    code: "invocation_not_completed",
-                    subject: invocation.key(),
-                    detail: format!("ended {}", json!(life.outcome)),
-                    evidence: invocation.evidence(),
-                });
-            }
+        }
+        let usage = invocation.usage();
+        if invocation.has_model_observations() && usage.total_tokens().is_none() {
+            report.findings.push(Finding {
+                code: "usage_incomplete",
+                subject: invocation.key(),
+                detail: format!("model usage {:?}; {} observed turn(s), {} detail(s) omitted; complete token total unknown", usage.coverage, usage.totals.messages, usage.totals.omitted_turns),
+                evidence: invocation.evidence(),
+            });
         }
         let unclosed: Vec<Call> = invocation
             .calls()
@@ -253,9 +291,9 @@ fn coverage(query: &Query, invocations: &[Invocation], report: &mut Report) {
         "invocations",
         json!({
             "count": invocations.len(),
-            "observed": invocations.iter().filter(|i| !i.traces.is_empty()).count(),
+            "observed": invocations.iter().filter(|i| i.has_model_observations()).count(),
             "with_result": invocations.iter().filter(|i| i.result.is_some()).count(),
-            "resumed": invocations.iter().filter(|i| i.traces.len() > 1).count(),
+            "resumed": invocations.iter().filter(|i| i.lifecycles().len() > 1 || i.lifecycles().iter().any(|l| l.resumed)).count(),
             "unobserved_with_model_requests": unobserved.len(),
             "observed_without_result": orphans.len(),
             "runs_observed": observed_runs.len(),
@@ -482,9 +520,13 @@ fn tools(invocations: &[Invocation], report: &mut Report) {
 fn turns(invocations: &[Invocation], report: &mut Report) {
     let observed: Vec<&Invocation> = invocations
         .iter()
-        .filter(|i| !i.traces.is_empty())
+        .filter(|i| i.has_model_observations())
         .collect();
     let turns: Vec<_> = observed.iter().flat_map(|i| i.turns()).collect();
+    let usage = usage(invocations.iter());
+    let timeline_complete =
+        usage.details_complete() && observed.iter().all(|i| i.timeline_complete());
+    report.summary.insert("usage", json!(usage));
     let (mut model, mut tool, mut total) = (0_u64, 0_u64, 0_u64);
     let mut gaps: BTreeMap<GapPlace, Vec<u64>> = BTreeMap::new();
     for invocation in &observed {
@@ -509,17 +551,17 @@ fn turns(invocations: &[Invocation], report: &mut Report) {
     report.summary.insert(
         "turns",
         json!({
-            "per_invocation": summarize(observed.iter().map(|i| i.turns().len() as u64)),
-            "total_tokens": summarize(turns.iter().map(|t| t.total_tokens)),
-            "input_tokens": summarize(turns.iter().map(|t| t.input_tokens)),
-            "output_tokens": summarize(turns.iter().map(|t| t.output_tokens)),
-            "elapsed_ms": summarize(turns.iter().filter_map(|t| t.elapsed_ms)),
+            "per_invocation": summarize(observed.iter().map(|i| i.usage().totals.messages)),
+            "detail_scope": "bounded_samples",
+            "sampled_turns": usage.totals.sampled_turns,
+            "omitted_turns": usage.totals.omitted_turns,
+            "total_tokens": summarize(observed.iter().filter(|i| i.usage().total_tokens().is_some()).flat_map(|i| i.turns()).filter_map(|t| t.total_tokens)),
+            "input_tokens": summarize(observed.iter().filter(|i| i.usage().input_tokens().is_some()).flat_map(|i| i.turns()).filter_map(|t| t.input_tokens)),
+            "output_tokens": summarize(observed.iter().filter(|i| i.usage().output_tokens().is_some()).flat_map(|i| i.turns()).filter_map(|t| t.output_tokens)),
+            "elapsed_ms": summarize(observed.iter().filter(|i| i.usage().elapsed_ms().is_some()).flat_map(|i| i.turns()).filter_map(|t| t.elapsed_ms)),
             "time_to_first_token_ms": summarize(turns.iter().filter_map(|t| t.time_to_first_token_ms)),
-            "cache_read_share": share(
-                turns.iter().filter_map(|t| t.cache_read_tokens).sum::<u64>() as usize,
-                turns.iter().map(|t| t.input_tokens).sum::<u64>() as usize,
-            ),
-            "compactions": turns.iter().filter(|t| t.compaction).count(),
+            "cache_read_share": usage.cache_read_tokens().zip(usage.input_tokens()).map(|(cache, input)| share(cache as usize, input as usize)),
+            "compactions": usage.complete().then_some(usage.totals.compaction_messages),
         }),
     );
     // Shares of invocation time: the model working, tools running, and the
@@ -527,10 +569,14 @@ fn turns(invocations: &[Invocation], report: &mut Report) {
     report.summary.insert(
         "time",
         json!({
+            "scope": "recorded_invocation_lifecycles",
             "invocation_ms": total,
-            "model_share": part(model),
+            "model_share": usage.elapsed_ms().map(part),
+            "observed_model_share": part(model),
             "tool_share": part(tool),
-            "unobserved_share": part(gaps.values().flatten().sum()),
+            "timeline_complete": timeline_complete,
+            "unobserved_share": timeline_complete.then(|| part(gaps.values().flatten().sum())),
+            "uncovered_observation_share": part(gaps.values().flatten().sum()),
             "unobserved": gaps.iter().map(|(place, ms)| (
                 json!(place).as_str().unwrap_or_default().to_owned(),
                 json!({"share": part(ms.iter().sum()), "ms": summarize(ms.iter().copied())}),
@@ -550,7 +596,7 @@ fn steps(query: &Query, invocations: &[Invocation], report: &mut Report) {
                 .iter()
                 .map(|l| l.ended_at_ms.saturating_sub(l.started_at_ms))
                 .sum();
-            (!i.traces.is_empty()).then_some((&i.result?.key, ms))
+            i.has_model_observations().then_some((&i.result?.key, ms))
         })
         .collect();
     let (mut unobserved, mut outside) = (BTreeMap::<String, Vec<u64>>::new(), Vec::new());
@@ -580,7 +626,7 @@ fn steps(query: &Query, invocations: &[Invocation], report: &mut Report) {
 /// Per configuration: the same node under different configurations is what
 /// a later comparison would contrast.
 fn configurations(query: &Query, invocations: &[Invocation], report: &mut Report) {
-    let observed = invocations.iter().filter(|i| !i.traces.is_empty());
+    let observed = invocations.iter().filter(|i| i.has_model_observations());
     let by_config = group_by(observed, |i| i.config().unwrap_or("").to_owned());
     let mut summary = BTreeMap::new();
     for (digest, invocations) in &by_config {
@@ -589,6 +635,7 @@ fn configurations(query: &Query, invocations: &[Invocation], report: &mut Report
         // activity, the harness's fixed cost before the model is asked.
         let startup: Vec<(u64, u64)> = invocations
             .iter()
+            .filter(|i| i.timeline_complete())
             .flat_map(|i| {
                 let gaps = i.gaps();
                 i.lifecycles().into_iter().filter_map(move |life| {
@@ -614,9 +661,10 @@ fn configurations(query: &Query, invocations: &[Invocation], report: &mut Report
                 "plugins": manifest.map(|m| m.plugins.len()),
                 "known": manifest.is_some(),
                 "invocations": invocations.len(),
-                "turns": summarize(invocations.iter().map(|i| i.turns().len() as u64)),
+                "turns": summarize(invocations.iter().map(|i| i.usage().totals.messages)),
                 "tool_calls": summarize(invocations.iter().map(|i| i.calls().len() as u64)),
-                "tokens": summarize(invocations.iter().map(|i| i.turns().iter().map(|t| t.total_tokens).sum())),
+                "tokens": summarize(invocations.iter().filter_map(|i| i.usage().total_tokens())),
+                "usage": usage(invocations.iter().copied()),
                 "duration_ms": summarize(invocations.iter().flat_map(|i| i.lifecycles()).map(|l| l.ended_at_ms.saturating_sub(l.started_at_ms))),
                 "startup_ms": summarize(startup.iter().map(|(gap, _)| *gap)),
                 "startup_share": startup_share,
@@ -632,7 +680,7 @@ fn configurations(query: &Query, invocations: &[Invocation], report: &mut Report
                     manifest.map_or("?", |m| m.node_id.as_str())
                 ),
                 detail: format!(
-                    "{:.0}% of invocation time passes before the first model request (median {} ms)",
+                    "{:.0}% of invocation time passes before the first observed activity (median {} ms)",
                     part * 100.0,
                     summarize(startup.iter().map(|(gap, _)| *gap)).map_or(0, |s| s.median)
                 ),
@@ -673,18 +721,12 @@ fn quality(query: &Query, invocations: &[Invocation], report: &mut Report) {
                 .iter()
                 .copied()
         };
-        let tokens = runs.iter().map(|run| {
-            of_run(run)
-                .flat_map(|i| i.turns())
-                .map(|t| t.total_tokens)
-                .sum::<u64>()
-        });
-        let agent_ms = runs.iter().map(|run| {
-            of_run(run)
-                .flat_map(|i| i.lifecycles())
-                .map(|l| l.ended_at_ms.saturating_sub(l.started_at_ms))
-                .sum::<u64>()
-        });
+        let run_tokens = |run: &str| usage(of_run(run)).total_tokens();
+        let tokens: Vec<_> = runs.iter().filter_map(|run| run_tokens(run)).collect();
+        let agent_ms: Vec<_> = runs
+            .iter()
+            .filter_map(|run| crate::query::agent_ms(of_run(run)))
+            .collect();
         let tool_calls = runs
             .iter()
             .map(|run| of_run(run).map(|i| i.calls().len() as u64).sum::<u64>());
@@ -712,17 +754,13 @@ fn quality(query: &Query, invocations: &[Invocation], report: &mut Report) {
                 "pass_rate": share(graded.iter().filter(|g| g.grade.passed()).count(), graded.len()),
                 "checks": checks.iter().map(|(name, (passed, _))| (*name, share(*passed, graded.len()))).collect::<BTreeMap<_, _>>(),
                 "configurations": configs.len(),
-                "tokens": summarize(tokens),
-                "agent_ms": summarize(agent_ms),
+                "tokens": summarize(tokens.iter().copied()),
+                "runs_with_incomplete_tokens": runs.len() - tokens.len(),
+                "agent_ms": summarize(agent_ms.iter().copied()),
+                "runs_with_incomplete_agent_time": runs.len() - agent_ms.len(),
                 "tool_calls": summarize(tool_calls),
             }),
         );
-        let run_tokens = |run: &str| -> u64 {
-            of_run(run)
-                .flat_map(|i| i.turns())
-                .map(|t| t.total_tokens)
-                .sum()
-        };
         for (name, (passed, failed)) in checks {
             if graded.len() < FAILING_RUNS || passed == graded.len() {
                 continue;
@@ -739,7 +777,7 @@ fn quality(query: &Query, invocations: &[Invocation], report: &mut Report) {
                 let picked: Vec<u64> = runs
                     .iter()
                     .filter(|run| failing_runs.contains(*run) == pick)
-                    .map(|run| run_tokens(run))
+                    .filter_map(|run| run_tokens(run))
                     .collect();
                 (!picked.is_empty()).then(|| picked.iter().sum::<u64>() / picked.len() as u64)
             };

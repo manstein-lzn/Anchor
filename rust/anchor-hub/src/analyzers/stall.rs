@@ -1,4 +1,4 @@
-//! Stall detection: Runs that stopped moving, and within invocations the
+//! Stall candidates: Runs without recent records, and within invocations the
 //! stretches where nothing was observed, tool calls and model turns far
 //! slower than their peers, and the same failing call repeated.
 
@@ -10,7 +10,7 @@ use super::{Analyzer, Finding, Mode, Need, Report, unmet};
 use crate::query::{Activity, Call, Invocation, Query, Status, group_by, repeats, summarize};
 
 pub struct Stall {
-    /// An unsettled task with nothing recorded for this long has stalled.
+    /// An unsettled task with nothing recorded for this long is idle.
     pub idle_ms: u64,
     /// A gap, tool call or model turn is flagged only when it is at least
     /// this long ...
@@ -38,7 +38,7 @@ impl Analyzer for Stall {
         "stall"
     }
     fn version(&self) -> u32 {
-        1
+        2
     }
     fn needs(&self) -> &'static [Need] {
         &[Need::Time, Need::Observations]
@@ -59,10 +59,10 @@ impl Analyzer for Stall {
             "thresholds",
             json!({"idle_ms": self.idle_ms, "floor_ms": self.floor_ms, "factor": self.factor, "repeats": self.repeats, "now": query.now()}),
         );
-        if !report.not_applicable.contains(&Need::Time) {
-            self.tasks(query, &mut report);
-        }
         let invocations = query.invocations();
+        if !report.not_applicable.contains(&Need::Time) {
+            self.tasks(query, &invocations, &mut report);
+        }
         if report.not_applicable.is_empty() {
             self.gaps(&invocations, &mut report);
             self.slow(&invocations, &mut report);
@@ -78,16 +78,36 @@ impl Stall {
         self.floor_ms.max(median.saturating_mul(self.factor))
     }
 
-    fn tasks(&self, query: &Query, report: &mut Report) {
+    fn tasks(&self, query: &Query, invocations: &[Invocation], report: &mut Report) {
         let Some(now) = query.now() else {
             return;
         };
         let mut idle = 0;
+        let mut waiting_input = 0;
         for task in query.tasks() {
             let Some(status) = task.entry.status else {
                 continue;
             };
-            let Some(last) = task.last_at() else {
+            let run = task.entry.id.strip_prefix("run/");
+            let observed: Vec<_> = invocations
+                .iter()
+                .filter(|invocation| run == Some(invocation.run_id.as_str()))
+                .collect();
+            if status == Status::Executing
+                && observed
+                    .iter()
+                    .any(|invocation| invocation.waiting_for_input())
+            {
+                waiting_input += 1;
+                continue;
+            }
+            let last_observed = observed
+                .iter()
+                .flat_map(|invocation| &invocation.traces)
+                .filter(|trace| trace.row.verdict.is_accepted())
+                .filter_map(|trace| trace.row.at)
+                .max();
+            let Some(last) = task.last_at().into_iter().chain(last_observed).max() else {
                 continue;
             };
             if status.is_settled() || now.saturating_sub(last) < self.idle_ms {
@@ -95,7 +115,7 @@ impl Stall {
             }
             idle += 1;
             let code = if status == Status::Executing {
-                "stalled_task"
+                "idle_task"
             } else {
                 "parked_task"
             };
@@ -103,7 +123,7 @@ impl Stall {
                 code,
                 subject: task.entry.id.clone(),
                 detail: format!(
-                    "{} with nothing recorded for {} min",
+                    "{} with nothing recorded for {} min; current activity unknown, not proof of a stall",
                     json!(status).to_string().trim_matches('"'),
                     now.saturating_sub(last) / 60_000
                 ),
@@ -116,11 +136,15 @@ impl Stall {
             });
         }
         report.summary.insert("idle_tasks", json!(idle));
+        report
+            .summary
+            .insert("waiting_input_tasks", json!(waiting_input));
     }
 
     fn gaps(&self, invocations: &[Invocation], report: &mut Report) {
         let all: Vec<u64> = invocations
             .iter()
+            .filter(|invocation| invocation.timeline_complete())
             .flat_map(|i| i.gaps())
             .map(|g| g.ms())
             .collect();
@@ -131,7 +155,10 @@ impl Stall {
         report
             .summary
             .insert("gap_ms", json!({"distribution": summary, "bar": bar}));
-        for invocation in invocations {
+        for invocation in invocations
+            .iter()
+            .filter(|invocation| invocation.timeline_complete())
+        {
             let calls = invocation.calls();
             for gap in invocation.gaps().into_iter().filter(|g| g.ms() >= bar) {
                 report.findings.push(Finding {

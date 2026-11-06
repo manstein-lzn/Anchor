@@ -18,7 +18,11 @@ pub(super) fn observations(
         .as_array()
         .cloned()
         .unwrap_or_default();
-    let mut facts = Vec::with_capacity(samples.len() + calls.len() + 1);
+    let mut facts = Vec::with_capacity(samples.len() + calls.len() + 2);
+    if let Ok(usage) = serde_json::from_value::<anchor_facts::ModelUsage>(evidence["usage"].clone())
+    {
+        facts.push(Fact::ModelUsage { usage });
+    }
     for (index, sample) in samples.iter().enumerate() {
         facts.push(Fact::ModelTurn {
             index: index as u64 + 1,
@@ -26,9 +30,9 @@ pub(super) fn observations(
             observed_at_ms: sample["observed_at_ms"].as_u64(),
             elapsed_ms: sample["elapsed_ms"].as_u64(),
             time_to_first_token_ms: sample["time_to_first_token_ms"].as_u64(),
-            input_tokens: sample["input_tokens"].as_u64().unwrap_or(0),
-            output_tokens: sample["output_tokens"].as_u64().unwrap_or(0),
-            total_tokens: sample["total_tokens"].as_u64().unwrap_or(0),
+            input_tokens: sample["input_tokens"].as_u64(),
+            output_tokens: sample["output_tokens"].as_u64(),
+            total_tokens: sample["total_tokens"].as_u64(),
             cache_read_tokens: sample["cache_read_tokens"].as_u64(),
             cache_write_tokens: sample["cache_write_tokens"].as_u64(),
             cost_usd: sample["cost_usd"].as_f64(),
@@ -137,6 +141,47 @@ mod tests {
     use super::*;
     use anchor_facts::Failure;
     use serde_json::json;
+
+    #[test]
+    fn bounded_turn_details_do_not_bound_persisted_usage_even_after_interruption() {
+        let tally = crate::goose_acp::usage::UsageTally::default();
+        for _ in 0..70 {
+            tally.observe(&json!({"method":"_goose/unstable/session/update",
+                "params":{"sessionUpdate":"message_usage","usage":{"totalTokens":12}}}));
+        }
+        let facts = observations(
+            &json!({"usage":tally.metrics(false)}),
+            1,
+            9,
+            Outcome::Interrupted,
+        );
+        assert!(matches!(&facts[0], Fact::ModelUsage { usage }
+            if usage.messages == 70 && usage.total_tokens == Some(840) && !usage.complete
+                && usage.sampled_turns == 64 && usage.omitted_turns == 6));
+        assert!(matches!(
+            &facts[1],
+            Fact::ModelTurn {
+                input_tokens: None,
+                output_tokens: None,
+                total_tokens: Some(12),
+                ..
+            }
+        ));
+        assert_eq!(
+            facts
+                .iter()
+                .filter(|f| matches!(f, Fact::ModelTurn { .. }))
+                .count(),
+            64
+        );
+        assert!(matches!(
+            facts.last(),
+            Some(Fact::Lifecycle {
+                model_turns: 70,
+                ..
+            })
+        ));
+    }
 
     #[test]
     fn evidence_becomes_turns_calls_and_a_lifecycle_without_business_values() {

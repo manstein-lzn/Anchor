@@ -34,6 +34,58 @@ struct YieldFact {
     provider_failure: Option<String>,
 }
 
+struct InputWaitObservation {
+    recorder: Option<Arc<crate::fact_recorder::FactRecorder>>,
+    invocation: anchor_facts::Invocation,
+    waiting: Option<bool>,
+}
+
+impl InputWaitObservation {
+    fn new(root: &std::path::Path, key: &InvocationKey) -> Self {
+        let recorder = match crate::fact_recorder::FactRecorder::shared(root) {
+            Ok(recorder) => Some(recorder),
+            Err(error) => {
+                eprintln!("input wait observation unavailable: {error}");
+                None
+            }
+        };
+        Self {
+            recorder,
+            invocation: anchor_facts::Invocation {
+                run_id: key.run_id.clone(),
+                graph_digest: key.graph_digest.clone(),
+                node_id: key.node_id.clone(),
+                invocation: key.invocation,
+            },
+            // A resumed invocation may have left a persisted waiting=true.
+            waiting: None,
+        }
+    }
+
+    fn set_waiting(&mut self, waiting: bool) {
+        // Polling and unrelated wakeups must not append another waiting record.
+        if self.waiting == Some(waiting) {
+            return;
+        }
+        self.waiting = Some(waiting);
+        if let Some(recorder) = &self.recorder {
+            let recording = recorder.record_host(
+                &self.invocation,
+                vec![anchor_facts::Fact::InputWait { waiting }],
+            );
+            if !recording.accepted {
+                eprintln!("input wait observation not accepted: {recording:?}");
+            }
+        }
+    }
+}
+
+impl Drop for InputWaitObservation {
+    fn drop(&mut self) {
+        self.set_waiting(false);
+    }
+}
+
 /// The Host's reply when the provider rejected a Turn. Only the classification
 /// is shown: raw provider text may quote the user's content or internal detail.
 fn provider_reply(kind: &str) -> String {
@@ -255,6 +307,7 @@ impl HostNodes {
                     .transpose()
                     .map_err(|error| graph_error(format!("pause event unavailable: {error:?}")))?
                     .flatten();
+                let mut observation = InputWaitObservation::new(root, &request.key);
                 loop {
                     let notified = signal.notified();
                     tokio::pin!(notified);
@@ -272,6 +325,7 @@ impl HostNodes {
                         )
                         .map_err(graph_error)?;
                     if let Some(input) = input {
+                        observation.set_waiting(false);
                         if assistant::binding(root, &request.key)
                             .map_err(graph_error)?
                             .is_none()
@@ -389,6 +443,7 @@ impl HostNodes {
                             },
                         );
                     }
+                    observation.set_waiting(true);
                     tokio::select! {
                         _ = async {
                             match &kernel_pause {
