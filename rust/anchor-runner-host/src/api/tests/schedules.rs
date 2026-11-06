@@ -64,7 +64,7 @@ async fn schedules_crud_reload_and_timeline_keep_platform_contract() {
 }
 
 #[tokio::test]
-async fn busy_due_schedule_skips_existing_admission_without_creating_a_run() {
+async fn busy_due_schedule_retains_its_occurrence_until_admission() {
     let (root, state) = fixture();
     let _env_guard = PROCESS_ENV.lock().await;
     set_host_env(root.path());
@@ -85,6 +85,9 @@ async fn busy_due_schedule_skips_existing_admission_without_creating_a_run() {
                 .to_string(),
             next_at: due.format("%Y-%m-%dT%H:%M:%S").to_string(),
             enabled: true,
+            delegation: None,
+            remaining: None,
+            group: None,
         });
         store.persist().unwrap();
     }
@@ -92,16 +95,196 @@ async fn busy_due_schedule_skips_existing_admission_without_creating_a_run() {
         .await
         .unwrap();
     assert_eq!(state.application.records().unwrap().len(), count_before);
-    let store = state.schedules.lock().unwrap();
-    assert!(
-        !store
-            .items
-            .iter()
-            .find(|item| item.id == "busy-test")
-            .unwrap()
-            .enabled
-    );
+    {
+        let store = state.schedules.lock().unwrap();
+        assert!(
+            store
+                .items
+                .iter()
+                .find(|item| item.id == "busy-test")
+                .unwrap()
+                .enabled
+        );
+    }
     assert!(state.application.metadata(&run).unwrap().is_some());
+    state.application.abandon_run(&run, None).await.unwrap();
+    crate::api::schedules::tick_schedules(&state, due + chrono::Duration::minutes(10))
+        .await
+        .unwrap();
+    wait_idle(&state).await;
+    assert_eq!(state.application.records().unwrap().len(), count_before + 1);
+    assert!(!state.schedules.lock().unwrap().items[0].enabled);
+    crate::api::schedules::tick_schedules(&state, due + chrono::Duration::minutes(20))
+        .await
+        .unwrap();
+    assert_eq!(state.application.records().unwrap().len(), count_before + 1);
+}
+
+#[tokio::test]
+async fn late_finite_schedule_replays_an_admitted_occurrence_after_cursor_write_failure() {
+    let _env_guard = PROCESS_ENV.lock().await;
+    let (root, state) = fixture();
+    set_host_env(root.path());
+    let due = (Local::now().naive_local() - chrono::Duration::hours(1))
+        .with_nanosecond(0)
+        .unwrap();
+    let local = |at: NaiveDateTime| at.format("%Y-%m-%dT%H:%M:%S").to_string();
+    let path = {
+        let mut store = state.schedules.lock().unwrap();
+        store.items.push(crate::api::schedules::ScheduleItem {
+            id: "finite".into(),
+            graph: "fixture".into(),
+            rule: json!({"type":"interval","seconds":60}),
+            input: json!({}),
+            created_at: local(due - chrono::Duration::minutes(1)),
+            next_at: local(due),
+            enabled: true,
+            delegation: None,
+            remaining: Some(2),
+            group: None,
+        });
+        store.persist().unwrap();
+        store.path.clone()
+    };
+    let blocker = root.path().join("not-a-directory");
+    std::fs::write(&blocker, "file").unwrap();
+    state.schedules.lock().unwrap().path = blocker.join("schedules.json");
+    let late = due + chrono::Duration::hours(2);
+    assert!(
+        crate::api::schedules::tick_schedules(&state, late)
+            .await
+            .is_err()
+    );
+    wait_idle(&state).await;
+    let records = state.application.records().unwrap();
+    assert_eq!(records.len(), 1);
+    let receipt = state
+        .application
+        .metadata(&records[0].0)
+        .unwrap()
+        .unwrap()
+        .request
+        .unwrap();
+    assert!(matches!(
+        state
+            .application
+            .delete_run(&records[0].0, &state.workspace_root)
+            .await,
+        Err(crate::application::ApplicationError::Conflict(_))
+    ));
+    {
+        let mut store = state.schedules.lock().unwrap();
+        assert_eq!(store.items[0].next_at, local(due));
+        assert_eq!(store.items[0].remaining, Some(2));
+        assert!(store.items[0].enabled);
+        store.path = path;
+    }
+    let graph_file = state.bundle_root.join("graph.json");
+    let retained_graph = root.path().join("retained-graph.json");
+    std::fs::rename(&graph_file, &retained_graph).unwrap();
+    crate::api::schedules::tick_schedules(&state, late)
+        .await
+        .unwrap();
+    std::fs::rename(&retained_graph, &graph_file).unwrap();
+    assert_eq!(state.application.records().unwrap().len(), 1);
+    state
+        .application
+        .check_scheduled_run_deletion(&receipt.id)
+        .unwrap();
+    {
+        let store = state.schedules.lock().unwrap();
+        assert_eq!(
+            store.items[0].next_at,
+            local(due + chrono::Duration::minutes(1))
+        );
+        assert_eq!(store.items[0].remaining, Some(1));
+        assert!(store.items[0].enabled);
+    }
+    crate::api::schedules::tick_schedules(&state, late)
+        .await
+        .unwrap();
+    wait_idle(&state).await;
+    assert_eq!(state.application.records().unwrap().len(), 2);
+    {
+        let store = state.schedules.lock().unwrap();
+        assert!(!store.items[0].enabled);
+        assert_eq!(store.items[0].remaining, Some(0));
+    }
+    crate::api::schedules::tick_schedules(&state, late)
+        .await
+        .unwrap();
+    let mut accepted = state
+        .application
+        .records()
+        .unwrap()
+        .into_iter()
+        .map(|(id, _)| {
+            let metadata = state.application.metadata(&id).unwrap().unwrap();
+            assert_eq!(metadata.schedule.as_deref(), Some("finite"));
+            metadata.scheduled_at.unwrap()
+        })
+        .collect::<Vec<_>>();
+    accepted.sort();
+    assert_eq!(
+        accepted,
+        [local(due), local(due + chrono::Duration::minutes(1))]
+    );
+}
+
+#[test]
+fn timeline_keeps_late_occurrences_pending_and_limits_finite_future_plans() {
+    let (_root, state) = fixture();
+    let now = NaiveDateTime::parse_from_str("2026-10-06T12:00:00", "%Y-%m-%dT%H:%M:%S").unwrap();
+    let start = now - chrono::Duration::days(1);
+    let end = now + chrono::Duration::days(1);
+    let future_end = now + chrono::Duration::days(8);
+    let cursor = now - chrono::Duration::hours(1);
+    state.schedules.lock().unwrap().items = vec![crate::api::schedules::ScheduleItem {
+        id: "finite".into(),
+        graph: "fixture".into(),
+        rule: json!({"type":"interval","seconds":3600}),
+        input: json!({}),
+        created_at: (cursor - chrono::Duration::hours(1))
+            .format("%Y-%m-%dT%H:%M:%S")
+            .to_string(),
+        next_at: cursor.format("%Y-%m-%dT%H:%M:%S").to_string(),
+        enabled: true,
+        delegation: None,
+        remaining: Some(3),
+        group: None,
+    }];
+    let projected =
+        crate::api::schedules::timeline_projection(&state, now, start, end, future_end, &[])
+            .unwrap();
+    assert_eq!(
+        projected
+            .iter()
+            .map(|value| value["status"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["pending", "pending", "planned"]
+    );
+    state.schedules.lock().unwrap().items[0].enabled = false;
+    let paused =
+        crate::api::schedules::timeline_projection(&state, now, start, end, future_end, &[])
+            .unwrap();
+    assert!(
+        paused.is_empty(),
+        "paused pending times are not missed executions"
+    );
+    let accepted = json!({"run":"accepted", "trigger":{"schedule":"finite",
+        "scheduled_at":cursor.format("%Y-%m-%dT%H:%M:%S").to_string()},
+        "projection":{"phase":"settled"}});
+    let actual = crate::api::schedules::timeline_projection(
+        &state,
+        now,
+        start,
+        end,
+        future_end,
+        &[accepted],
+    )
+    .unwrap();
+    assert_eq!(actual[0]["run"], "accepted");
+    assert_eq!(actual[0]["status"], "settled");
 }
 
 #[test]
@@ -144,6 +327,9 @@ fn timeline_marks_persisted_admission_blockers_busy_across_history_pages() {
                 .to_string(),
             next_at: at.format("%Y-%m-%dT%H:%M:%S").to_string(),
             enabled: false,
+            delegation: None,
+            remaining: None,
+            group: None,
         }];
         let run = json!({
             "run":"blocking-run", "graph":"fixture", "projection":{"phase": if status == "paused" {"waiting"} else {"executing"}},
@@ -159,35 +345,13 @@ fn timeline_marks_persisted_admission_blockers_busy_across_history_pages() {
 }
 
 #[test]
-fn reload_accepts_legacy_schedule_array_and_skips_downtime_occurrences() {
+fn reload_accepts_legacy_schedule_array_and_retains_downtime_occurrences() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("state/schedules.json");
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(&path, r#"[{"id":"daily","graph":"fixture","rule":{"type":"daily","time":"09:00"},"input":{"x":1},"created_at":"2026-10-01T08:00:00","next_at":"2026-10-06T09:00:00","enabled":true},{"id":"once","graph":"fixture","rule":{"type":"once","at":"2026-10-05T09:00:00"},"input":{},"created_at":"2026-10-01T08:00:00","next_at":"2026-10-05T09:00:00","enabled":true}]"#).unwrap();
     let schedules = crate::api::schedules::ScheduleStore::open(path.clone()).unwrap();
-    let (model_configuration, runtime_management) =
-        crate::api::tests::management_fixture(root.path());
-    let state = crate::api::ApiState {
-        model_configuration,
-        runtime_management,
-        bundle_root: root.path().join("bundle"),
-        catalog_root: root.path().to_path_buf(),
-        application: crate::application::RunApplication::new(
-            root.path().join("runs"),
-            root.path().to_path_buf(),
-        ),
-        data_root: root.path().join("runs"),
-        workspace_root: root.path().join("workspaces"),
-        graph_name: "fixture".into(),
-        owner: "local".into(),
-        schedules,
-        pilots: crate::pilot_host::PilotService::default(),
-        channel_event_locks: Default::default(),
-        response_fixture: None,
-    };
-    let now = NaiveDateTime::parse_from_str("2026-10-06T09:01:00", "%Y-%m-%dT%H:%M:%S").unwrap();
-    crate::api::schedules::skip_missed_schedules(&state, now).unwrap();
-    drop(state);
+    drop(schedules);
     let reloaded = crate::api::schedules::ScheduleStore::open(path).unwrap();
     let store = reloaded.lock().unwrap();
     assert_eq!(
@@ -197,10 +361,10 @@ fn reload_accepts_legacy_schedule_array_and_skips_downtime_occurrences() {
             .find(|item| item.id == "daily")
             .unwrap()
             .next_at,
-        "2026-10-07T09:00:00"
+        "2026-10-06T09:00:00"
     );
     assert!(
-        !store
+        store
             .items
             .iter()
             .find(|item| item.id == "once")

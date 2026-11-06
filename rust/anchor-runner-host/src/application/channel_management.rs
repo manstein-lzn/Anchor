@@ -40,6 +40,18 @@ pub(crate) struct ChannelMembers {
 }
 
 impl ChannelBinding {
+    pub(crate) fn allows_inbound(&self, userid: &str) -> bool {
+        Self::allows_user(&self.users, userid)
+    }
+
+    pub(crate) fn allows_outbound(&self, userid: &str) -> bool {
+        Self::allows_user(&self.send_users, userid)
+    }
+
+    fn allows_user(users: &[String], userid: &str) -> bool {
+        userid != "@all" && users.iter().any(|user| user == "*" || user == userid)
+    }
+
     pub(crate) fn validate(&self) -> Result<(), ApplicationError> {
         if !anchor_runtime::identifier::is_plugin_id(&self.plugin) {
             return Err(ApplicationError::Invalid("invalid channel binding".into()));

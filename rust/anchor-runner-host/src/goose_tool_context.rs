@@ -27,7 +27,12 @@ fn valid_identifier(value: &str, maximum: usize) -> bool {
     !value.trim().is_empty() && value.len() <= maximum && !value.chars().any(char::is_control)
 }
 
-pub(crate) fn channel_request_id(key: &InvocationKey) -> Result<String, ToolError> {
+fn request_id(
+    key: &InvocationKey,
+    operation: &str,
+    domain: &[u8],
+    prefix: &str,
+) -> Result<String, ToolError> {
     TOOL_IDENTITY
         .try_with(|identity| {
             let identity = identity.as_ref().ok_or_else(invalid_identity)?;
@@ -41,19 +46,31 @@ pub(crate) fn channel_request_id(key: &InvocationKey) -> Result<String, ToolErro
             {
                 return Err(invalid_identity());
             }
-            let binding = serde_json::to_vec(&(
-                key,
-                &identity.session,
-                &identity.tool_call,
-                crate::tool_names::SEND_TOOL,
-            ))
-            .map_err(|_| invalid_identity())?;
+            let binding =
+                serde_json::to_vec(&(key, &identity.session, &identity.tool_call, operation))
+                    .map_err(|_| invalid_identity())?;
             let mut digest = Sha256::new();
-            digest.update(b"anchor-goose-channel-send-v1\0");
+            digest.update(domain);
             digest.update(binding);
-            Ok(format!("channel-send-{:x}", digest.finalize()))
+            Ok(format!("{prefix}{:x}", digest.finalize()))
         })
         .map_err(|_| invalid_identity())?
+}
+
+pub(crate) fn channel_request_id(key: &InvocationKey) -> Result<String, ToolError> {
+    request_id(
+        key,
+        crate::tool_names::SEND_TOOL,
+        b"anchor-goose-channel-send-v1\0",
+        "channel-send-",
+    )
+}
+
+pub(crate) fn operation_request_id(
+    key: &InvocationKey,
+    operation: &str,
+) -> Result<String, ToolError> {
+    request_id(key, operation, b"anchor-goose-operation-v1\0", "operation-")
 }
 
 #[cfg(test)]

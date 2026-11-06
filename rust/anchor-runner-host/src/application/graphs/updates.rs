@@ -112,11 +112,18 @@ impl RunApplication {
             }
             self.reject_pending_session_delivery(&run_id)?;
         }
-        if origin == UpdateOrigin::Operator && effect["mode"] == "next_turn" {
+        if origin == UpdateOrigin::Operator
+            && (effect["mode"] == "next_turn"
+                || next
+                    .nodes
+                    .iter()
+                    .flat_map(|node| &node.plugins)
+                    .any(|plugin| plugin.graph_tasks.is_some()))
+        {
             // Record approval before publishing the Graph. The receipt has no
             // effect until the authoritative Graph matches its exact digest.
-            crate::assistant_plugins::publish(&self.data_root, &path, &next, self.library_root())
-                .map_err(invalid)?;
+            self.publish_graph_task_permissions(&path, &next)
+                .map_err(GraphManagementError::from)?;
         }
         write_graph_bundle_from_catalog(&path, &definition, self.library_root())?;
         Ok(json!({"graph":name,"definition":definition,"plugin_activation":effect}))

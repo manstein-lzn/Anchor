@@ -88,6 +88,23 @@ pub(crate) struct ResolvedNodeTools {
 pub(crate) type ToolResolution<'resolver> =
     Pin<Box<dyn Future<Output = Result<ResolvedNodeTools, ResolutionError>> + Send + 'resolver>>;
 
+/// The composing Host supplies its adapters; the runtime resolver supplies only
+/// the already prepared invocation authority. No business service lookup here.
+pub(crate) struct ToolAssembly<'a> {
+    pub(crate) plugins: Arc<dyn ToolPort>,
+    pub(crate) bindings: &'a [PluginBinding],
+    pub(crate) request: &'a NodeExecutionRequest,
+    pub(crate) workspace: &'a std::path::Path,
+    pub(crate) readonly_inputs: &'a [anchor_runtime::ReadOnlyInput],
+    pub(crate) envelope: &'a super::envelope::InvocationEnvelope,
+    pub(crate) runtime: Option<crate::runtime_configuration::RuntimeSnapshot>,
+    pub(crate) disclosure: &'a mut crate::plugin_disclosure::PluginDisclosureCatalog,
+}
+
+pub(crate) trait NodeToolAssembly: Send + Sync {
+    fn assemble(&self, input: ToolAssembly<'_>) -> Result<Arc<dyn ToolPort>, String>;
+}
+
 pub(crate) trait NodeHostResolver: Send + Sync {
     fn prompt_images(&self, request: &NodeExecutionRequest) -> Result<Vec<NodeImage>, String>;
     fn conversation_hint(

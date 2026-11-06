@@ -441,6 +441,7 @@ async fn kernel_call_rechecks_a_child_that_settled_before_parent_worker_release(
             root: root.path().into(),
             state: state.data_root.clone(),
             application: Some(state.application.clone()),
+            task: None,
         };
         catalog
             .record_child_admission(&child_id, "child", &child.snapshot, &[], &identity, "wait")

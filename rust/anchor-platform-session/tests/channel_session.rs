@@ -54,6 +54,14 @@ fn rejected_unclaimed_input_is_terminal_and_cannot_be_claimed_later() {
         .admit_channel_inbound("owner", request("rejected", "conversation-1"))
         .unwrap();
     let session = &admitted.session.id;
+    assert_eq!(
+        store.channel_identity("owner", session).unwrap(),
+        request("rejected", "conversation-1").identity
+    );
+    assert!(matches!(
+        store.channel_identity("other-owner", session),
+        Err(SessionError::Missing)
+    ));
     assert!(matches!(
         store.reject_unclaimed_channel_inbound("other-owner", session, "rejected", "stopped"),
         Err(SessionError::Missing)

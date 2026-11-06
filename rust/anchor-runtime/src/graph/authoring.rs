@@ -170,9 +170,9 @@ fn plugin_refs(value: Option<&Value>, where_: &str) -> Result<Vec<PluginRef>, Gr
             // declaration has always meant "this Graph needs it".
             Value::String(name) => PluginRef::required(valid_plugin_ref(name, where_)?),
             Value::Object(object) => {
-                let unknown = object
-                    .keys()
-                    .find(|key| !matches!(key.as_str(), "id" | "required" | "default"));
+                let unknown = object.keys().find(|key| {
+                    !matches!(key.as_str(), "id" | "required" | "default" | "graph_tasks")
+                });
                 if let Some(key) = unknown {
                     return Err(invalid(format!(
                         "{where_}: unsupported Plugin reference field: {key}"
@@ -208,6 +208,16 @@ fn plugin_refs(value: Option<&Value>, where_: &str) -> Result<Vec<PluginRef>, Gr
                     id,
                     required,
                     default,
+                    graph_tasks: object
+                        .get("graph_tasks")
+                        .map(|policy| {
+                            serde_json::from_value::<Option<GraphTaskPolicy>>(policy.clone())
+                        })
+                        .transpose()
+                        .map_err(|error| {
+                            invalid(format!("{where_}: invalid graph_tasks: {error}"))
+                        })?
+                        .flatten(),
                 }
             }
             _ => {
@@ -216,6 +226,7 @@ fn plugin_refs(value: Option<&Value>, where_: &str) -> Result<Vec<PluginRef>, Gr
                 )));
             }
         };
+        reference.validate_graph_tasks()?;
         if !result.iter().any(|prior| prior.id == reference.id) {
             result.push(reference);
         }
@@ -1388,6 +1399,49 @@ mod tests {
         ] {
             assert!(parse(bad.clone()).is_err(), "{bad} must be refused");
         }
+    }
+
+    #[test]
+    fn graph_task_policy_is_closed_and_part_of_the_snapshot() {
+        let parse = |reference: Value| {
+            GraphSnapshot::from_authoring(json!({
+                "entry": "worker",
+                "agents": {"worker": {"model": "test"}},
+                "nodes": [{"id": "worker", "agent": "worker", "plugins": [reference]}]
+            }))
+        };
+        let closed = parse(json!({"id": "graph-tasks", "graph_tasks": {}})).unwrap();
+        assert_eq!(
+            closed.nodes[0].plugins[0].graph_tasks,
+            Some(GraphTaskPolicy::default())
+        );
+        let allowed = parse(json!({"id": "graph-tasks", "graph_tasks": {
+            "graphs": ["morning-brief"], "create_graphs": true,
+            "plugins": ["web-search"], "network": true, "commands": true,
+            "develop_plugins": true
+        }}))
+        .unwrap();
+        let serialized = serde_json::to_value(&allowed).unwrap();
+        assert_eq!(GraphSnapshot::admit(serialized.clone()).unwrap(), allowed);
+        assert_ne!(closed.digest().unwrap(), allowed.digest().unwrap());
+        for reference in [
+            json!({"id": "other", "graph_tasks": {}}),
+            json!({"id": "graph-tasks", "graph_tasks": {"unknown": true}}),
+            json!({"id": "graph-tasks", "graph_tasks": {"network": "yes"}}),
+            json!({"id": "graph-tasks", "graph_tasks": {"graphs": ["../other"]}}),
+            json!({"id": "graph-tasks", "graph_tasks": {"plugins": ["bad plugin"]}}),
+        ] {
+            assert!(parse(reference.clone()).is_err(), "{reference}");
+            let mut snapshot = serialized.clone();
+            snapshot["nodes"][0]["plugins"] = json!([reference]);
+            assert!(GraphSnapshot::admit(snapshot).is_err());
+        }
+        let mut invalid = allowed;
+        invalid.nodes[0].plugins[0].id = "other".into();
+        assert!(
+            invalid.validate().is_err(),
+            "typed snapshots enforce the same policy boundary"
+        );
     }
 
     /// The old declaration is refused by name, and the refusal says what replaced it.

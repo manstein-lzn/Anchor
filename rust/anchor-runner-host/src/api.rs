@@ -328,9 +328,6 @@ pub async fn serve(configuration: Arc<crate::HostConfiguration>) -> io::Result<(
         .recover_detached_at_startup()
         .await
         .map_err(|_| io::Error::other("startup Run recovery failed"))?;
-    if let Err(error) = skip_missed_schedules(&state, chrono::Local::now().naive_local()) {
-        return Err(io::Error::other(error));
-    }
     let listener = tokio::net::TcpListener::bind(&listen).await?;
     let callback_listen = listener.local_addr()?.to_string();
     state.application = state.application.clone().with_oauth_management(Arc::new(
@@ -367,6 +364,9 @@ pub async fn serve(configuration: Arc<crate::HostConfiguration>) -> io::Result<(
         configured_bundle.is_none() || configured_graph_ready,
     ));
     start_schedule_ticker(state.clone());
+    state
+        .application
+        .start_task_result_delivery(state.workspace_root.clone());
     schedules::start_retention(state.clone(), retention);
     let app = router_with_readiness(state, ready.clone());
     let shutdown_ready = ready.clone();
@@ -1118,6 +1118,7 @@ fn router_with_readiness_and_web_root(
             get(get_channel_session).delete(delete_channel_session),
         )
         .route("/schedules", get(list_schedules).post(create_schedule))
+        .route("/schedules/{schedule}/assign", post(assign_schedule))
         .route(
             "/schedules/{schedule}",
             axum::routing::delete(delete_schedule).put(update_schedule),

@@ -1,18 +1,23 @@
 use super::*;
 use crate::assistant::{self, graph_error};
-use anchor_platform_session::TurnStatus;
+use anchor_platform_session::{AssistantInput, TurnStatus};
 use anchor_runtime::graph::ArtifactPort;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::sync::{Arc, atomic::AtomicBool};
 
-fn stopped_input(input: &anchor_platform_session::ChannelInboundAdmission) -> bool {
-    input.relation.superseded_by_turn_id.is_some()
+fn stopped_input(input: &AssistantInput) -> bool {
+    input
+        .user()
+        .is_some_and(|input| input.relation.superseded_by_turn_id.is_some())
         || matches!(
-            input.turn.status,
+            input.turn().status,
             TurnStatus::Interrupted | TurnStatus::Stopped | TurnStatus::Failed
         )
 }
+
+#[cfg(test)]
+mod tests;
 
 const SUPERSEDED: &str = "input superseded by a newer Turn";
 const PROVIDER_REJECTED: &str = "model provider rejected the request";
@@ -147,30 +152,74 @@ impl HostNodes {
         let Some(source) = assistant::source(root, key).map_err(graph_error)? else {
             return Ok(());
         };
-        if key.node_id != source.reply_node
-            || completion.output.get("suppressed") == Some(&json!(true))
-        {
+        if key.node_id != source.reply_node {
             return Ok(());
         }
         let input = assistant::input(root, key)
             .map_err(graph_error)?
             .ok_or_else(|| graph_error("assistant reply has no input binding"))?;
         if completion.output.get("reply_for").and_then(Value::as_str)
-            != Some(input.relation.turn_id.as_str())
+            != Some(input.turn().id.as_str())
         {
             return Err(GraphError::CorruptRun(
                 "assistant reply belongs to another Turn".into(),
             ));
         }
-        if input.relation.superseded_by_turn_id.is_none()
-            && input.turn.status == TurnStatus::Running
-        {
+        if let AssistantInput::Task(task) = &input {
+            if completion.output.get("task_result_handled") == Some(&json!(true)) {
+                if completion.output.get("task_result").and_then(Value::as_str)
+                    != Some(&task.result.id)
+                    || completion.output.get("suppressed") != Some(&json!(true))
+                {
+                    return Err(GraphError::CorruptRun(
+                        "task result reply identity changed".into(),
+                    ));
+                }
+                if !stopped_input(&input) {
+                    let binding = assistant::binding(root, key)
+                        .map_err(graph_error)?
+                        .ok_or_else(|| graph_error("task result reply has no binding"))?;
+                    let sessions = assistant::sessions(root).map_err(graph_error)?;
+                    if sessions
+                        .get_channel_assistant(&source.owner, &source.session)
+                        .map_err(graph_error)?
+                        .is_none_or(|current| current.run_id != key.run_id)
+                    {
+                        return Ok(());
+                    }
+                    if let Err(error) = sessions.finish_task_result(
+                        &source.owner,
+                        &source.session,
+                        &key.run_id,
+                        &binding.wait_key,
+                    ) {
+                        let interrupted = sessions
+                            .get_assistant_input(
+                                &source.owner,
+                                &source.session,
+                                &key.run_id,
+                                &binding.wait_key,
+                            )
+                            .map_err(graph_error)?
+                            .is_some_and(|current| stopped_input(&current));
+                        if !interrupted {
+                            return Err(graph_error(error));
+                        }
+                    }
+                }
+            }
+            return Ok(());
+        }
+        if completion.output.get("suppressed") == Some(&json!(true)) {
+            return Ok(());
+        }
+        if !stopped_input(&input) && input.turn().status == TurnStatus::Running {
             assistant::sessions(root)
                 .map_err(graph_error)?
                 .finish_turn(
                     &source.owner,
                     &source.session,
-                    &input.relation.turn_id,
+                    &input.turn().id,
                     TurnStatus::Completed,
                     None,
                 )
@@ -215,7 +264,7 @@ impl HostNodes {
                     }
                     let input = assistant::sessions(root)
                         .map_err(graph_error)?
-                        .claim_channel_assistant_input(
+                        .claim_assistant_input(
                             &source.owner,
                             &source.session,
                             &request.key.run_id,
@@ -227,16 +276,20 @@ impl HostNodes {
                             .map_err(graph_error)?
                             .is_none()
                         {
-                            let mut pending = assistant::sessions(root)
-                                .map_err(graph_error)?
-                                .pending_channel_assistant_inputs(
-                                    &source.owner,
-                                    &source.session,
-                                    &request.key.run_id,
-                                    &input.relation.inbound_id,
-                                    9,
-                                )
-                                .map_err(graph_error)?;
+                            let mut pending = if let Some(user) = input.user() {
+                                assistant::sessions(root)
+                                    .map_err(graph_error)?
+                                    .pending_channel_assistant_inputs(
+                                        &source.owner,
+                                        &source.session,
+                                        &request.key.run_id,
+                                        &user.relation.inbound_id,
+                                        9,
+                                    )
+                                    .map_err(graph_error)?
+                            } else {
+                                Vec::new()
+                            };
                             let truncated = pending.len() > 8;
                             if truncated {
                                 pending.remove(0);
@@ -251,17 +304,21 @@ impl HostNodes {
                                     .map(|input| input.relation.inbound_id)
                                     .collect(),
                                 truncated,
-                                assistant::sessions(root)
-                                    .map_err(graph_error)?
-                                    .latest_channel_notification(&source.owner, &source.session)
-                                    .map_err(graph_error)?,
+                                if input.user().is_some() {
+                                    assistant::sessions(root)
+                                        .map_err(graph_error)?
+                                        .latest_channel_notification(&source.owner, &source.session)
+                                        .map_err(graph_error)?
+                                } else {
+                                    None
+                                },
                             )
                             .map_err(graph_error)?;
                         }
                         self.io_resolver
                             .freeze_assistant_plugins(
                                 &request.key,
-                                &input.relation.turn_id,
+                                &input.turn().id,
                                 true,
                                 request.cancellation.clone(),
                             )
@@ -276,7 +333,7 @@ impl HostNodes {
                         )
                         .map_err(graph_error)?;
                         if !selected.attachments.is_empty()
-                            && input.relation.superseded_by_turn_id.is_none()
+                            && !stopped_input(&input)
                             && !crate::channel_inputs::input_directory(root, &selected.run_id)
                                 .map_err(graph_error)?
                                 .join("input.json")
@@ -294,7 +351,9 @@ impl HostNodes {
                             }
                             json!({"message":message.request.text,"channel":message.request.identity,"turn":message.relation.turn_id,"attachments":attachments})
                         }).collect::<Vec<_>>();
-                        let output = json!({
+                        let output = match &input {
+                            AssistantInput::User(input) => json!({
+                            "source":"user",
                             "files":["input.json"],
                             "message":input.request.text,
                             "channel":input.request.identity,
@@ -306,7 +365,13 @@ impl HostNodes {
                                 .map(crate::channel_notifications::projection),
                             "interrupted_messages":interrupted,
                             "interrupted_messages_truncated":assistant::binding(root, &request.key).map_err(graph_error)?.is_some_and(|binding| binding.pending_truncated),
-                        });
+                            }),
+                            AssistantInput::Task(input) => json!({
+                                "files":["input.json"], "source":"task_result",
+                                "session":source.session, "turn":input.turn.id,
+                                "task_result": assistant::task_result_projection(&input.result),
+                            }),
+                        };
                         let workspace = self
                             .io_resolver
                             .prepare_node_workspace(&request.key, &request.input_commits)
@@ -350,7 +415,7 @@ impl HostNodes {
                             submission: "superseded reply suppressed".into(),
                             route: Some(source.wait_node),
                             model_requests: 0,
-                            output: json!({"files":[],"suppressed":true,"reply_for":input.relation.turn_id}),
+                            output: json!({"files":[],"suppressed":true,"reply_for":input.turn().id}),
                         },
                     );
                 }
@@ -367,6 +432,28 @@ impl HostNodes {
                     invocation: commit.invocation,
                     ..request.key.clone()
                 };
+                if let AssistantInput::Task(task) = &input {
+                    if completion.output.get("interrupted") == Some(&json!(true)) {
+                        // Keep the result pending; recovery resumes the assistant,
+                        // not the already completed source Graph.
+                        return Err(graph_error(
+                            "task result processing was interrupted; result remains pending",
+                        ));
+                    }
+                    let reply = NodeCompletion {
+                        submission: "task result handled without an automatic channel reply".into(),
+                        route: Some(source.wait_node),
+                        model_requests: 0,
+                        output: json!({"files":[],"suppressed":true,"reply_for":task.turn.id,
+                            "task_result":task.result.id,"task_result_handled":true,"source_commit":commit,"items":[]}),
+                    };
+                    let outcome = self.complete(&request.key, reply.clone())?;
+                    self.settle_assistant_reply(&request.key, &reply)?;
+                    return Ok(outcome);
+                }
+                let user = input
+                    .user()
+                    .ok_or_else(|| graph_error("reply source is missing"))?;
                 let reply = if completion.output.get("interrupted") == Some(&json!(true)) {
                     // Only a provider rejection recorded by the Host may answer
                     // for an interrupted Agent; it never carries Agent images.
@@ -377,7 +464,7 @@ impl HostNodes {
                         submission: provider_reply(&kind),
                         route: Some(source.wait_node),
                         model_requests: 0,
-                        output: json!({"files":[],"reply_for":input.relation.turn_id,"source_commit":commit,
+                        output: json!({"files":[],"reply_for":user.relation.turn_id,"source_commit":commit,
                             "items":[],"host_reply":"provider_rejected","provider_failure":kind}),
                     }
                 } else {
@@ -391,7 +478,7 @@ impl HostNodes {
                         submission: completion.submission,
                         route: Some(source.wait_node),
                         model_requests: 0,
-                        output: json!({"files":[],"reply_for":input.relation.turn_id,"source_commit":commit,"items":items}),
+                        output: json!({"files":[],"reply_for":user.relation.turn_id,"source_commit":commit,"items":items}),
                     }
                 };
                 let outcome = self.complete(&request.key, reply.clone())?;

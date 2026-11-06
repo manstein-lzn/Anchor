@@ -141,9 +141,13 @@ fn session_fixture_with_snapshot(
         sandbox(&workspace),
         std::sync::Arc::new(tool_host::PluginToolHost::new(Vec::<String>::new())),
         tool_host::McpToolConfig::default(),
-        LocalInputs::new(state, None).unwrap(),
+        LocalInputs::new(state.clone(), None).unwrap(),
         mounts.clone(),
         None,
+        crate::execution::tool_assembly::new(crate::application::RunApplication::new(
+            state,
+            library.clone(),
+        )),
     )
     .with_library_root(Some(library));
     let request = NodeExecutionRequest {

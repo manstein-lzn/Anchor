@@ -21,6 +21,7 @@ fn local_recurrence_rules_validate_and_skip_nonexistent_month_dates() {
         .is_err()
     );
     assert!(normalize_rule(&json!({"type":"interval","seconds":true}), None).is_err());
+    assert!(normalize_rule(&json!({"type":"interval","seconds":i64::MAX}), None).is_err());
     assert!(normalize_rule(&json!({"type":"weekly","time":"09:00","weekdays":[]}), None).is_err());
     assert!(normalize_rule(&json!({"type":"monthly","time":"09:00","day":32}), None).is_err());
 
@@ -42,5 +43,21 @@ fn local_recurrence_rules_validate_and_skip_nonexistent_month_dates() {
     assert_eq!(
         next_after(&monthly, dt("2026-02-01T00:00:00")).unwrap(),
         dt("2026-03-31T09:30:00")
+    );
+}
+
+#[test]
+fn finite_calendar_projection_counts_occurrences_before_the_requested_window() {
+    let rule = json!({"type":"weekly","time":"09:00","weekdays":[0,2,4]});
+    assert_eq!(
+        occurrences(
+            &rule,
+            dt("2026-10-05T09:00:00"),
+            dt("2026-10-07T00:00:00"),
+            dt("2026-10-14T00:00:00"),
+            Some(3)
+        )
+        .unwrap(),
+        [dt("2026-10-07T09:00:00"), dt("2026-10-09T09:00:00")]
     );
 }

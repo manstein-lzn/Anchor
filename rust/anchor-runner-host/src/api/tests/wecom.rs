@@ -600,7 +600,7 @@ fn seed_running_assistant_round(
             invocation,
         },
         wait_key,
-        &claimed,
+        &anchor_platform_session::AssistantInput::User(Box::new(claimed)),
         Vec::new(),
         false,
         None,

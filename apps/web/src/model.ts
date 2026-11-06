@@ -92,7 +92,11 @@ export type OurGraph = {
  */
 /// A node's Plugin declaration: a bare id (older Graphs, and what the editor
 /// writes) or the object form that says whether the Graph needs it.
-export type NodePluginRef = string | { id: string; required?: boolean; default?: boolean };
+export type GraphTaskPolicy = {
+  graphs?: string[]; create_graphs?: boolean; plugins?: string[];
+  network?: boolean; commands?: boolean; develop_plugins?: boolean;
+};
+export type NodePluginRef = string | { id: string; required?: boolean; default?: boolean; graph_tasks?: GraphTaskPolicy };
 export type OurNode = { id: string; agent?: string; op?: string; graph?: string; with?: string; plugins?: NodePluginRef[] };
 
 export type Plugin = {

@@ -40,6 +40,7 @@ mod resource_read;
 mod runtime_configuration;
 mod runtime_management;
 use artifacts::HostArtifacts;
+mod graph_task_tools;
 mod node_host;
 mod node_tools;
 mod oauth_http;
@@ -48,6 +49,7 @@ mod retention;
 mod run_data;
 mod run_deletions;
 mod run_metadata;
+mod task_delegation;
 #[cfg(test)]
 mod test_support;
 mod tool_disclosure;
@@ -380,6 +382,7 @@ fn make_host_with_control(
             local_inputs::LocalInputs::from_env(state.clone())?,
             session_mounts,
             deployment::configured_pilot_graph(),
+            execution::tool_assembly::new(application.clone()),
         )
         .with_library_root(library_root)
         .with_runtime_configuration(runtime_configuration),

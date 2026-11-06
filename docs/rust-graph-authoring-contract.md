@@ -32,6 +32,28 @@ Runtime IR 保存稳定展开节点、路由/反馈/并行、输入与权限、�
 
 作者模型断言、固定展开样例与 HTTP CRUD 测试位于 Rust crate 的测试范围。测试样例不执行另一个语言解析器；具体本轮结果见 [开发台账](pilot-development-plan.md)。历史快照只用于解释先前兼容来源。
 
+## 按需 Graph 任务授权
+
+`PluginRef` 可为官方 `graph-tasks` 添加节点级 `graph_tasks`，不为其他 Plugin 接受此字段。未声明的能力默认关闭，省略整个字段保留既有 Graph 的序列化与摘要。它是操作员授权策略，不是每次调用的模型参数：
+
+```json
+{
+  "id": "graph-tasks",
+  "graph_tasks": {
+    "graphs": ["ai-morning-briefing"],
+    "create_graphs": true,
+    "plugins": ["network"],
+    "network": true,
+    "commands": false,
+    "develop_plugins": true
+  }
+}
+```
+
+将它放在所需 AgentNode 的 `plugins` 数组。`graphs` 选择既有资产，其静态调用闭包和原有能力由操作员保存时批准；`plugins`、`network`、`commands` 限制 Agent 新建的 Graph，不重写既有目标。`develop_plugins` 独立授权候选准备/测试，不隐含 `create_graphs`、正式安装或新增宿主权限。校验与执行都由 Host 收窄，不能通过 `Op.run`、Agent 的 `anchor_run`、Plugin 派生网络或静态调用绕过能力上限。受委派 Graph 不允许 `graph-tasks`、Host Op 或 `call.session`。
+
+源 Graph 在操作员界面保存后才有授权收据；直接写文件、Agent 保存或只新建资产不构成批准。普通 Run 接纳、助手 Turn 领取冻结原授权；同 Turn 恢复保持不变，后续派发还须满足当前授权。工具创建的 Graph 是正常资产，仅允许本作用域更新；调用不自动复制源 workspace、聊天历史或凭据。有 Session 的助手经 `wait_input` 接收任务完成结果，不尝试再次 run 已活动的助手。完整契约见 [Graph 任务](plugins.md#graph-任务)与[结果输入](architecture.md#按需-graph-任务与结果输入)。
+
 ## 组合与调用
 
 | 组合 | 身份与用途 |
@@ -116,10 +138,12 @@ default 尚未保存时兼容旧托管默认配置；已保存但缺少所选模
 
 完整 opt-in 样例见 [wecom-persistent-assistant.json](../examples/graphs/wecom-persistent-assistant.json)。这是普通 `wait_input (Op) → assistant (Agent) → reply (Op) → wait_input`，不是新节点类型或专用 Runner；渠道只接纳这一形状。当前渠道 Host 接纳要求恰好一个等待 Op、一个 Agent 和一个回复 Op，入口是等待节点，三条普通边构成上述循环，不设置节点 `max_rounds` 或模块轮次上限。渠道配置的结果节点仍为 Agent `assistant`，与投递 Op `reply` 分别绑定；Kernel 的通用 host port 本身不限定这套业务形状。
 
-- `session.wait_input` 只在可信助手 binding 的 Session 内领取输入，并持久绑定等待 invocation 与 Turn；恢复/重试仍读取同一 Turn。等待不调用模型，不继承 `Op.run` 的默认命令超时，支持暂停/取消。本轮内容位于等待节点 commit 的 `output`（`message`、`channel`、`attachments`、`session`、`turn`、`interrupted_messages`），Agent 读取 `committed_inputs`，不得把冻结的 Run 启动 `input` 当作下一轮消息。
+- `session.wait_input` 只在可信助手 binding 的 Session 内领取输入，并持久绑定等待 invocation 与 Turn；恢复/重试仍读取同一 Turn。等待不调用模型，不继承 `Op.run` 的默认命令超时，支持暂停/取消。用户输入位于等待节点 commit 的 `output`（`message`、`channel`、`attachments`、`session`、`turn`、`interrupted_messages`）；任务结果使用 `source:"task_result"` 和独立 `task_result`，不提供伪造的渠道身份。Agent 读取 `committed_inputs`，不得把冻结的 Run 启动 `input` 当作下一轮消息。
 - `session.reply` 只读取本 Turn 经普通边交接的确切 Agent commit，校验 `source_commit`、`reply_for` 与本轮图片集合，然后结算 Turn 并路由回等待；不要求整个 Run Completed，不读取一个长期 Run 的“最新产物”替代本轮身份。平台 ACK/unknown 属于既有投递账本，不由节点完成状态代替。
 - 新输入中断旧 Agent 后，执行端口须等执行者真正退出，保留可写现场并持久保存 `CompletionFact::Yielded`，再返回 `NodeExecutionOutcome::Yielded`。Runner 记录 `interruption` 并冻结 `ArtifactKind::Interruption` 控制 Artifact，沿普通合法 route 到回复节点；旧轮 `suppressed` 后返回等待，不冒充 Agent 成功或业务回复。控制 Artifact 不冻结未完成 workspace 为成功文件；不支持中断控制证据的 Artifact 适配器须 fail-closed。普通 `Cancelled`/`Interrupted` 停止语义不因这一扩展被改写。
 - 所有节点的 workspace 默认按 `(Run, node)` 稳定复用；逐轮 invocation 和显式交付的 Artifact 身份独立不可变。输入和文件授权来自可信 Turn/binding：当前 `/in/channel`，最多最近 8 条尚未越过 confirmed 边界的中断输入快照 `/in/channel-pending/<turn>`，不接受作者 JSON 或模型输出自行指定全历史路径。
+
+任务结果走同一等待/工作/回复循环，但 `reply` 只确认处理并返回等待，不自动向渠道发正文或回复图片。助手须按用户策略显式发送；若目标 Graph 已自行完成发送，只核对其回执，不能重复通知。结果文件只读挂载 `/in/tasks/<result>/<name>`。待处理用户先于结果，结果之间 FIFO；用户中断后结果保留待处理状态，已发生的工具效果须核查，不能盲目重做。这不是通用事件触发 API，也未改变普通用户消息的既有替换规则。
 
 首次 wait binding 查询最近 9 条、实际只授权最近 8 条并持久保存 `pending_truncated`；等待产物同时输出 `interrupted_messages_truncated`。当 `output.interrupted_messages_truncated=true`，Agent 必须如实说明更早中断输入未自动纳入/未完整阅读，不能声称信息全保留或借此请求全历史挂载。该标记无需额外数据库 schema 迁移，旧 binding facts 缺省 `false`。
 

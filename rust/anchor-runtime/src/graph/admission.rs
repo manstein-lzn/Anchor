@@ -33,6 +33,9 @@ impl GraphSnapshot {
         let mut ids = BTreeSet::new();
         for node in &self.nodes {
             validate_node_id(&node.id)?;
+            for plugin in &node.plugins {
+                plugin.validate_graph_tasks()?;
+            }
             if !ids.insert(node.id.as_str()) {
                 return Err(GraphError::InvalidSnapshot(format!(
                     "duplicate node id `{}`",

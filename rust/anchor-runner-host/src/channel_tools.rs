@@ -31,11 +31,14 @@ use tokio::{
     time::timeout,
 };
 
+mod task_delivery;
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SendArguments {
     #[serde(default)]
     bot_graph: Option<String>,
+    #[serde(default)]
     userid: String,
     content: String,
 }
@@ -51,6 +54,7 @@ struct ImageArguments {
 struct FileArguments {
     #[serde(default)]
     bot_graph: Option<String>,
+    #[serde(default)]
     userid: String,
     path: String,
     content: String,
@@ -215,6 +219,14 @@ impl ChannelTools {
     }
 
     fn send_endpoint(&self, args: &SendArguments) -> Result<(PathBuf, String), ToolError> {
+        let task = self.task_delivery_context()?;
+        if let Some(task) = &task
+            && args.userid != task.identity.sender_id
+        {
+            return Err(ToolError::Failed(
+                "task results can only be delivered to their original private conversation".into(),
+            ));
+        }
         let graph = match (&self.assistant_graph, args.bot_graph.as_deref()) {
             (Some(own), Some(requested)) if own != requested => {
                 return Err(ToolError::Failed(
@@ -242,6 +254,26 @@ impl ChannelTools {
             .ok_or_else(|| {
                 ToolError::Failed("bot is unavailable or not authorized for this Run".into())
             })?;
+        if let Some(task) = &task {
+            let sessions =
+                crate::assistant::sessions(&self.state_root).map_err(ToolError::Failed)?;
+            let selected = sessions
+                .channel_session_for_identity(
+                    &bot.owner,
+                    &anchor_platform_session::ChannelIdentity {
+                        account: bot.account.clone(),
+                        ..task.identity.clone()
+                    },
+                )
+                .map_err(|error| ToolError::Failed(error.to_string()))?;
+            if !selected
+                .is_some_and(|session| session.id == task.source.session && session.graph == graph)
+            {
+                return Err(ToolError::Failed(
+                    "the task's original bot conversation is no longer available".into(),
+                ));
+            }
+        }
         let binding = self
             .channels
             .iter()
@@ -257,13 +289,7 @@ impl ChannelTools {
             .map_err(|_| {
                 ToolError::Failed("channel Plugin authorization changed; start a new Run".into())
             })?;
-        if args.userid == "@all"
-            || !bot
-                .binding
-                .send_users
-                .iter()
-                .any(|user| user == "*" || user == &args.userid)
-        {
+        if !bot.binding.allows_outbound(&args.userid) {
             return Err(ToolError::Failed("recipient is not allowed".into()));
         }
         let descriptor = bot
@@ -272,12 +298,19 @@ impl ChannelTools {
         Self::control_endpoint(&descriptor)
     }
 
-    fn reply_path(&self) -> Result<PathBuf, ToolError> {
-        let binding = crate::assistant::binding(&self.state_root, &self.key)
+    fn reply_binding(&self) -> Result<Option<crate::assistant::TurnBinding>, ToolError> {
+        if self.assistant_graph.is_none() {
+            return Ok(None);
+        }
+        Ok(crate::assistant::binding(&self.state_root, &self.key)
             .map_err(ToolError::Failed)?
-            .ok_or_else(|| {
-                ToolError::Failed("reply images require a trusted Turn binding".into())
-            })?;
+            .filter(|binding| binding.input_kind == crate::assistant::InputKind::User))
+    }
+
+    fn reply_path(&self) -> Result<PathBuf, ToolError> {
+        let binding = self.reply_binding()?.ok_or_else(|| {
+            ToolError::Failed("reply images require a trusted user Turn binding".into())
+        })?;
         Ok(self
             .state_root
             .join("channel-replies")
@@ -411,24 +444,29 @@ impl ChannelTools {
         Ok(json!({"attached":true,"count":values.len()}))
     }
 
-    async fn send(&self, args: SendArguments) -> Result<Value, ToolError> {
+    async fn send(&self, mut args: SendArguments) -> Result<Value, ToolError> {
         if self.cancellation.load(Ordering::Relaxed) {
             return Err(ToolError::Failed(
                 "this Run has been stopped; channel operation cancelled".into(),
             ));
         }
+        self.bind_task_recipient(&mut args.userid)?;
         if args.userid.trim().is_empty() || args.content.trim().is_empty() {
             return Err(ToolError::Failed("recipient is not allowed".into()));
         }
         let (socket, token) = self.send_endpoint(&args)?;
-        let request_id = self.send_request_id()?;
+        let request_id = self.delivery_request_id(&args.userid, None)?;
         let payload = json!({"operation":"send","request_id":request_id,"userid":args.userid,"content":args.content,"token":token});
         if args.content.len() > 20480 || args.userid.chars().count() > 200 {
             return Err(ToolError::Failed(
                 "message or identifier exceeds platform limits".into(),
             ));
         }
-        self.deliver(socket, payload).await
+        let mut receipt = self.deliver(socket, payload).await.map_err(|error| {
+            ToolError::Failed(format!("message {request_id} was not confirmed: {error}"))
+        })?;
+        receipt["status"] = json!("confirmed");
+        Ok(receipt)
     }
 
     /// The source must already be an immutable selected delivery. Retention
@@ -439,6 +477,11 @@ impl ChannelTools {
     ) -> Result<(anchor_platform_session::ChannelNotificationFile, Vec<u8>), ToolError> {
         use anchor_runtime::artifact::{ArtifactDescriptor, is_delivery_path};
         let value = Path::new(value);
+        if self.assistant_graph.is_some()
+            && (value.starts_with("/in/tasks") || value.starts_with("/in/notifications"))
+        {
+            return self.selected_notification_file(value);
+        }
         for input in self
             .readonly_inputs
             .iter()
@@ -479,37 +522,90 @@ impl ChannelTools {
                     "notification source is not the authorized Host delivery view".into(),
                 ));
             }
-            let entry = descriptor
+            descriptor
                 .files
                 .get(relative)
                 .ok_or_else(|| ToolError::Failed("file is not selected by this delivery".into()))?;
-            if entry.bytes > crate::attachments::MAX_FILE_BYTES as u64 {
-                return Err(ToolError::Failed("file exceeds the 20 MiB limit".into()));
-            }
-            let bytes = descriptor
-                .read_file(&input.source, relative)
-                .map_err(ToolError::Failed)?;
             let name = relative.rsplit('/').next().unwrap_or_default();
             if !crate::attachments::safe_name(name) {
                 return Err(ToolError::Failed("invalid notification filename".into()));
             }
-            return Ok((
+            return Self::read_notification_file(
+                &artifacts,
+                &reference,
                 anchor_platform_session::ChannelNotificationFile {
                     artifact_id: descriptor.artifact.id,
                     path: relative.into(),
                     name: name.into(),
                 },
-                bytes,
-            ));
+            );
         }
         Err(ToolError::Failed("send_file requires a committed read-only /in delivery; select the file in the producing node's final_result first".into()))
     }
 
-    async fn send_file(&self, args: FileArguments) -> Result<Value, ToolError> {
+    fn selected_notification_file(
+        &self,
+        value: &Path,
+    ) -> Result<(anchor_platform_session::ChannelNotificationFile, Vec<u8>), ToolError> {
+        let missing = || ToolError::Failed("file is not selected for this assistant Turn".into());
+        let file = crate::assistant::selected_input_files(&self.state_root, &self.key)
+            .map_err(ToolError::Failed)?
+            .into_iter()
+            .find_map(|(file, path)| (path == value).then_some(file))
+            .ok_or_else(missing)?;
+        let artifacts =
+            crate::HostArtifacts::new(self.state_root.join("artifacts"), self.workspace.clone());
+        let commit = artifacts
+            .reference(&file.artifact_id)
+            .map_err(|error| ToolError::Failed(error.to_string()))?
+            .ok_or_else(missing)?;
+        let source = artifacts
+            .files_path(&commit)
+            .map_err(|error| ToolError::Failed(error.to_string()))?
+            .join(&file.path);
+        if !self
+            .readonly_inputs
+            .iter()
+            .any(|input| input.destination == value && input.source == source)
+        {
+            return Err(missing());
+        }
+        Self::read_notification_file(&artifacts, &commit, file)
+    }
+
+    fn read_notification_file(
+        artifacts: &crate::HostArtifacts,
+        commit: &anchor_runtime::graph::CommitRef,
+        file: anchor_platform_session::ChannelNotificationFile,
+    ) -> Result<(anchor_platform_session::ChannelNotificationFile, Vec<u8>), ToolError> {
+        // Read authoritative bytes rather than trusting a copy in the view.
+        let read = artifacts
+            .open_file(commit, &file.path)
+            .map_err(|error| ToolError::Failed(error.to_string()))?;
+        if read.bytes > crate::attachments::MAX_FILE_BYTES as u64 {
+            return Err(ToolError::Failed("file exceeds the 20 MiB limit".into()));
+        }
+        let mut bytes = Vec::new();
+        read.file
+            .take(read.bytes + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|error| ToolError::Failed(error.to_string()))?;
+        Ok((file, bytes))
+    }
+
+    async fn send_file(&self, mut args: FileArguments) -> Result<Value, ToolError> {
         use anchor_platform_session::{
             ChannelConversationKind, ChannelIdentity, ChannelNotification,
         };
         self.check_active()?;
+        self.bind_task_recipient(&mut args.userid)?;
+        let task = self.task_delivery_context()?;
+        let source_run = match &task {
+            Some(task) => task.result.source_run.clone().ok_or_else(|| {
+                ToolError::Failed("a task without a source Run cannot send a file".into())
+            })?,
+            None => self.key.run_id.clone(),
+        };
         let text = SendArguments {
             bot_graph: args.bot_graph.clone(),
             userid: args.userid.clone(),
@@ -524,7 +620,6 @@ impl ChannelTools {
                 "a bounded introduction and at most three context files are required".into(),
             ));
         }
-        let request_id = self.send_request_id()?;
         let graph = self
             .assistant_graph
             .as_deref()
@@ -536,31 +631,47 @@ impl ChannelTools {
             .map_err(|_| ToolError::Failed("bot configuration is unavailable".into()))?
             .ok_or_else(|| ToolError::Failed("bot configuration is unavailable".into()))?;
         let sessions = crate::assistant::sessions(&self.state_root).map_err(ToolError::Failed)?;
-        let session = sessions
-            .channel_session_for_identity(
-                &bot.owner,
-                &ChannelIdentity {
-                    source: "wecom".into(),
-                    account: bot.account.clone(),
-                    conversation_kind: ChannelConversationKind::Single,
-                    conversation_id: args.userid.clone(),
-                    sender_id: args.userid.clone(),
-                },
+        let session = if let Some(task) = &task {
+            Some(
+                sessions
+                    .get(&bot.owner, &task.source.session)
+                    .map_err(|error| ToolError::Failed(error.to_string()))?,
             )
-            .map_err(|error| ToolError::Failed(error.to_string()))?
-            .filter(|session| session.graph == graph)
-            .ok_or_else(|| {
-                ToolError::Failed(
-                    "recipient must have an existing private conversation with this bot".into(),
+        } else {
+            sessions
+                .channel_session_for_identity(
+                    &bot.owner,
+                    &ChannelIdentity {
+                        source: "wecom".into(),
+                        account: bot.account.clone(),
+                        conversation_kind: ChannelConversationKind::Single,
+                        conversation_id: args.userid.clone(),
+                        sender_id: args.userid.clone(),
+                    },
                 )
-            })?;
+                .map_err(|error| ToolError::Failed(error.to_string()))?
+        }
+        .filter(|session| session.graph == graph)
+        .ok_or_else(|| {
+            ToolError::Failed(
+                "recipient must have an existing private conversation with this bot".into(),
+            )
+        })?;
         let (file, bytes) = self.notification_file(&args.path)?;
+        let request_id = self.delivery_request_id(&args.userid, Some(&file))?;
         if bytes.len() < 5 {
             return Err(ToolError::Failed(
                 "platform files must contain at least five bytes".into(),
             ));
         }
-        let filename = file.name.clone();
+        // Task input aliases keep mounts unique; the recipient gets the
+        // producer's committed filename, not an internal queue alias.
+        let filename = Path::new(&file.path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| crate::attachments::safe_name(name))
+            .ok_or_else(|| ToolError::Failed("invalid notification filename".into()))?
+            .to_owned();
         let mut files = vec![file];
         for path in &args.context_files {
             let (file, _) = self.notification_file(path)?;
@@ -586,17 +697,21 @@ impl ChannelTools {
             "name":filename,"data_base64":STANDARD.encode(&bytes),"md5":format!("{:x}", Md5::digest(&bytes)),"token":token});
         // Recheck revocation immediately before each platform effect.
         self.send_endpoint(&text)?;
-        let file_ack = self.deliver(socket, payload).await?;
+        let file_ack = self.deliver(socket, payload).await.map_err(|error| {
+            ToolError::Failed(format!(
+                "file {request_id}-file was not confirmed: {error}; keep this delivery identity when checking its outcome"
+            ))
+        })?;
         // Preserve the confirmed file even if the separate introduction fails
         // or execution is cancelled after the file's ACK.
         let notification = ChannelNotification {
             id: request_id.clone(),
-            source_run: self.key.run_id.clone(),
+            source_run,
             content: args.content.clone(),
             files,
         };
         sessions.record_channel_notification(&bot.owner, &session.id, &notification)
-            .map_err(|error| ToolError::Failed(format!("platform acknowledged the file but Session recording failed: {error}; do not resend with a new identity")))?;
+            .map_err(|error| ToolError::Failed(format!("file {request_id}-file confirmed but Session recording failed: {error}; introduction {request_id}-intro was not dispatched; do not resend with a new identity")))?;
         let introduction = async {
             let (socket, token) = self.send_endpoint(&text)?;
             self.deliver(
@@ -605,9 +720,9 @@ impl ChannelTools {
             "userid":args.userid,"content":args.content,"token":token}),
             )
             .await
-        }.await.map_err(|error| ToolError::Failed(format!("file confirmed and saved for the next Turn; introduction not confirmed: {error}; do not resend the file")))?;
+        }.await.map_err(|error| ToolError::Failed(format!("file {request_id}-file confirmed and saved for the next Turn; introduction {request_id}-intro not confirmed: {error}; do not resend the file with a new identity")))?;
         Ok(
-            json!({"accepted":true,"notification":notification,"file":file_ack,"introduction":introduction}),
+            json!({"accepted":true,"status":"confirmed","request_id":request_id,"notification":notification,"file_status":"confirmed","file":file_ack,"introduction_status":"confirmed","introduction":introduction}),
         )
     }
 
@@ -668,7 +783,14 @@ impl ChannelTools {
 impl ToolPort for ChannelTools {
     fn definitions(&self) -> Vec<ToolDefinition> {
         let mut definitions = self.inner.definitions();
+        let task = self.task_delivery_context().ok().flatten().is_some();
         let mut schema = json!({"type":"object","properties":{"userid":{"type":"string"},"content":{"type":"string"}},"required":["userid","content"],"additionalProperties":false});
+        if task {
+            schema["properties"]["userid"]["description"] = json!(
+                "Omit to use this task result's original private conversation. A different recipient is not allowed."
+            );
+            schema["required"] = json!(["content"]);
+        }
         if self.assistant_graph.is_none() {
             schema["properties"]["bot_graph"] = json!({"type":"string","description":"The explicitly selected Graph whose enabled bot will send this notification. The bot must belong to this Run's owner and use a channel Plugin mounted by this node."});
             schema["required"]
@@ -677,13 +799,23 @@ impl ToolPort for ChannelTools {
                 .push(json!("bot_graph"));
         }
         definitions.push(ToolDefinition::new(ToolName::new(SEND_TOOL).expect("static tool name"),
-            "Send Markdown to an explicitly authorized WeCom userid. The gateway owns delivery and idempotency; an error or timeout is not automatically retried.",
+            if task {
+                "Send Markdown to this task result's original private conversation; omit userid. The logical delivery ID survives interruptions and new Turns. Repeating identical arguments reads a confirmed gateway receipt; unknown outcomes or changed content are refused without another platform send. Do not change the recipient, identity or content to retry. The returned receipt is recorded by the Host, not copied from an Agent-authored file."
+            } else {
+                "Send Markdown to an explicitly authorized WeCom userid. The gateway owns delivery and idempotency; an error or timeout is not automatically retried."
+            },
             schema));
         let mut schema = json!({"type":"object","properties":{
             "userid":{"type":"string"},"path":{"type":"string","description":"Exact file in a committed read-only /in delivery."},
             "content":{"type":"string","description":"Concise Markdown introduction sent after the file."},
             "context_files":{"type":"array","items":{"type":"string"},"maxItems":3,"description":"Selected committed companion files for the recipient's later discussion; these are not sent to WeCom."}},
             "required":["userid","path","content"],"additionalProperties":false});
+        if task {
+            schema["properties"]["userid"]["description"] = json!(
+                "Omit to use this task result's original private conversation. A different recipient is not allowed."
+            );
+            schema["required"] = json!(["path", "content"]);
+        }
         if self.assistant_graph.is_none() {
             schema["properties"]["bot_graph"] = json!({"type":"string"});
             schema["required"]
@@ -692,8 +824,12 @@ impl ToolPort for ChannelTools {
                 .push(json!("bot_graph"));
         }
         definitions.push(ToolDefinition::new(ToolName::new(SEND_FILE_TOOL).expect("static tool name"),
-            "Send one committed file (up to 20 MiB), then a Markdown introduction through the authorized bot. Requires an existing private conversation. A file ACK retains its exact selected delivery/context for the recipient's next assistant Turn; the separate introduction can still fail. Success requires both ACKs. Unknown results must not be resent automatically.", schema));
-        if self.assistant_graph.is_some() {
+            if task {
+                "Send one selected task file (up to 20 MiB), then its Markdown introduction to the original private conversation; omit userid. The producer's filename is preserved. File and introduction share one logical identity across interrupted Turns. Repeating identical arguments reads confirmed gateway receipts; unknown outcomes or changed content are refused without resending those messages. Do not rewrite the introduction or choose a new identity to retry. Success requires both ACKs; a file ACK alone still retains that file for later discussion. The Host records actual receipts, so no Agent-authored receipt file is needed."
+            } else {
+                "Send one committed file (up to 20 MiB), then a Markdown introduction through the authorized bot. Requires an existing private conversation. A file ACK retains its exact selected delivery/context for the recipient's next assistant Turn; the separate introduction can still fail. Success requires both ACKs. Unknown results must not be resent automatically."
+            }, schema));
+        if self.reply_binding().is_ok_and(|binding| binding.is_some()) {
             definitions.push(ToolDefinition::new(ToolName::new(IMAGE_TOOL).expect("static tool name"),
             "Attach one validated PNG/JPEG from /workspace or an authorized read-only /in input to the final WeCom reply. This prepares the image; it does not send immediately.",
             json!({"type":"object","properties":{"path":{"type":"string"}},"required":["path"],"additionalProperties":false})));
@@ -727,7 +863,7 @@ impl ToolPort for ChannelTools {
                 return Ok(vec![ToolResultContent::json(self.send_file(args).await?)]);
             }
             if name == IMAGE_TOOL {
-                if self.assistant_graph.is_none() {
+                if self.reply_binding()?.is_none() {
                     return Err(ToolError::Unknown(name.into()));
                 }
                 self.check_active()?;

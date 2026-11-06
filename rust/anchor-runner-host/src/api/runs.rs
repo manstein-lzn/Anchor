@@ -55,18 +55,10 @@ pub(super) async fn trigger_as_owner(
             )
         })?
         .unwrap_or_default();
-    let path = graph_path(&state, requested)?;
-    let graph_lease = state
-        .application
-        .graph_admission_lease(&path)
-        .map_err(application_error)?;
-    let (path, bundle) = load_graph_definition(&state, requested)?;
     let run_id = state
         .application
-        .admit(
-            requested.to_owned(),
-            &path,
-            bundle,
+        .admit_graph_with_options(
+            requested,
             input,
             crate::application::AdmissionOptions {
                 objective,
@@ -76,7 +68,8 @@ pub(super) async fn trigger_as_owner(
                 workspace_bindings,
                 workspace_root: Some(state.workspace_root.clone()),
             },
-            graph_lease,
+            None,
+            None,
         )
         .await
         .map_err(application_error)?;

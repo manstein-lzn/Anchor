@@ -117,16 +117,34 @@ Graph cascade 删除须先保护仍 active/未收束执行、共享历史与未�
 
 显式挂载 Plugin 才能查询或操作业务系统。需要联网的 MCP 要求节点 `network=true`，仍受宿主授权；Plugin 更新不能扩大已接纳 Run 的权限。Bot ID/Secret 与自建应用的 Corp ID/Agent ID/Secret 是两套凭证。
 
-- 常驻助手的 `wecom_send_message(userid, content)` 通过本 Graph 的受限宿主控制通道主动发送 Markdown；普通回复不重复调用发送工具。普通任务的 Agent 节点挂载渠道 Plugin 后使用 `wecom_send_message(bot_graph, userid, content)`，必须显式指定已有机器人的 Graph 名，不能根据唯一绑定猜测目标。挂载授予该 owner 下使用此 Plugin 的机器人发送能力；Host 每次发送前复核同 owner、同 Plugin、当前有效启用状态与该机器人的 `send_users`。停用、删除、移除授权或变更声明后旧工具实例也不能绕过当前校验。定时任务沿用同一工具、原生调用身份和网关投递账本，不另建连接，不向 Session 注入任务或自动转发最终回复。
+- 常驻助手的 `wecom_send_message(userid, content)` 通过本 Graph 的受限宿主控制通道主动发送 Markdown；普通回复不重复调用发送工具。普通任务的 Agent 节点挂载渠道 Plugin 后使用 `wecom_send_message(bot_graph, userid, content)`，必须显式指定已有机器人的 Graph 名，不能根据唯一绑定猜测目标。挂载授予该 owner 下使用此 Plugin 的机器人发送能力；Host 每次发送前复核同 owner、同 Plugin、当前有效启用状态与该机器人的 `send_users`。停用、删除、移除授权或变更声明后旧工具实例也不能绕过当前校验。普通定时任务的直接通知沿用同一工具、原生调用身份和网关投递账本，不另建连接，不自动转发最终回复；显式 `graph-tasks` 委派另有下述原 Session 结果输入路径。
 - `wecom_send_file(bot_graph, userid, path, content, context_files?)` 通过同一网关发送已提交的只读 `/in` 文件（5 字节至 20 MiB），随后发送导读；助手省略 `bot_graph`，固定使用自己的机器人。接收人须已有该机器人的私聊，最多三个附属交付文件只留给后续讨论。Host 核对真实 Artifact 视图及选中文件，上传完成和文件消息 ACK 是不同阶段；只有文件、导读均确认才返回完整成功。未知结果不自动重发。
 - `wecom_attach_image(path)` 是受限回复节点工具，选择工作区或授权只读输入中的真实 PNG/JPEG。登记图片不等于平台成功投递：Host 在交给网关前会重新校验数量、单张/合计大小、PNG/JPEG 与 md5，网关再用三阶段上传换 `media_id` 并以原始回调帧单独发出一条 image 消息，投递结果记录在网关 `deliveries`（`image:<inbound>:<index>`）中，只有确认后才算平台接收。
 - 自建应用 MCP 由 `anchor-wecom-tools` 提供 `wecom_send_text`、`wecom_send_markdown` 和 `wecom_get_user`，另行配置 `WECOM_CORP_ID`、`WECOM_AGENT_ID`、`WECOM_SECRET`。未配置的可选 MCP 不影响基础机器人聊天。
 
 定时通知仍通过现有 `/schedules` 创建普通 Graph 的计划。把已授权的目标放进 `input`，例如 `{"bot_graph":"wecom-persistent-assistant","userid":"实际成员账号"}`，在执行节点挂载渠道 Plugin，并在指令中要求使用这些字段发送通知和核对实际回执。节点不需要 Session 或任务联网授权；发送工具本身走宿主控制通道。计划不新增机器人配置字段，旧计划不自动选择机器人或补发历史消息。手动和定时触发统一把安装身份转换为相同的凭据作用域，适用于 `local` 和旧 API key 身份的安装。
 
+### 助手按需安排任务
+
+在机器人 Graph 的工作 AgentNode 挂载官方 `graph-tasks`，用插件设置勾选可见 Graph，并按需授权构建 Graph、候选 Plugin 准备/测试及新建 Graph 的能力上限，由操作员保存。下一 Turn 才读取新授权；正在工作或恢复中的 Turn 不扩大权限。未部署新 Host 或 Library 尚无此 Plugin 时，配置文件存在不等于功能已经启用。使用和字段见 [Graph 任务](plugins.md#graph-任务)。
+
+用户可以在原私聊请求“每周一至周五上午 9 点给我 AI 晨报”。助手用工具查找并读取已授权 Graph；无合适资产且允许创建时，构建普通 Graph、验证后保存，再设置已有 Scheduler 的计划。计划按 Host 本地时区启动，不保证研究恰在 9 点完成，周一至周五也不包含节假日计算。可指定一次、多个时刻、有限次数或持续重复；次数按成功接纳 Run 扣减，不以报告质量或投递成功扣减。
+
+任务完成、等待处理或计划无法启动时，结果以独立来源排入最初的 Session，不冒充用户来信、不重新启动同一助手 Run、不自动发送正文。`wait_input` 在用户消息之后按 FIFO 领取结果；成功只挂载终结节点的确切成品 `/in/tasks/<result>/<name>`，失败或受阻提供真实诊断。原助手按原任务授权通知原用户，任务轮工具固定原机器人及原私聊收件人，不因该机器人也允许另一成员就准许转发。任务轮不提供 `wecom_attach_image` 回复图片工具；`wecom_send_file` 保留成品原文件名，普通回复 Op 只确认已处理输入，不代表已经投递。
+
+不同成员仍有不同私聊 Session、上下文、计划作用域和结果队列；群内按原群 Session 规则，不把它当作成员私有对话。结果不打断用户，用户输入可以打断结果处理，未处理结果保留。停止的助手不因结果到达而自动恢复；恢复后再处理积压结果。当前保留既有用户消息替换策略，尚非可配置的全序优先级调度。原有计划不会自动迁移；操作员可通过 `POST /schedules/{id}/assign` 明确原 Session、授权请求说明和新的生产输入，保持原 ID、规则、下一时刻及历史事实。不伪造用户消息或原生工具调用；已接纳的旧 Run 不补签任务来源。
+
+在途任务、未处理结果和仍保留的委派计划会阻止删除原会话或源助手 Graph；须先处理结果、结清任务并显式取消计划，不能靠暂停计划或删除接收方来丢弃回调。停止、退役和重启仍按既有生命周期处理，不自动取消这些任务。
+
+候选 Plugin 可以在已授权沙箱中编写、准备和测试，但不自动成为正式 Library 资产、不挂到当前 Turn，也不能凭自测通过取得凭据。正式安装及新增能力继续经已有操作员流程。原生工具委派、同 Run 唤醒、多结果与打断已用固定 Goose 和本地确定性 Provider 验证；服务上线状态、真实 Provider 自主选图/开发及企业微信业务验收分别记录于 [当前台账](pilot-development-plan.md)，本地结果不替代真实业务验收。
+
+### 已发送文件的后续讨论
+
 文件 ACK 后，Host 复用既有 Artifact 保留事实，并向接收人的原 Session 记录 `channel.notification.confirmed`，包含关联导读、来源 Run 和选定文件引用；不另存文件副本，也不生成用户 Turn 或改写 Goose 历史。导读是独立发送，该事件只证明文件已确认。下一次 `session.wait_input` 将最近通知固定到 Turn binding，输出 `latest_notification`，只读挂载 `/in/notifications/<id>/<name>`；正在进行的 Turn 不换版，旧 ACK 重放不使版本回退。助手据此读取已发送正文和版本，无需搜索旧 Run。文件和导读都确认后才报告完整交付；后者失败时保留文件事实并准确说明部分结果。
 
-晨报由[生产图](../examples/graphs/ai-morning-briefing.json)在正式发布后以 `Op.call(mode=wait)` 调用[分发子图](../examples/graphs/ai-morning-briefing-delivery.json)，只有生产图每日 07:30 一个计划。计划明确给出 `bot_graph`、真实 `userid` 与 `send_not_before:"09:05"`；生产提前完成时等待至当期日期的上海时间 09:05，晚于该时刻则直接分发，显式 `null` 表示立即分发。调用传递本次已提交的发布凭证，子图只导出该日期与版本，代码核对凭证及 PDF／正文摘要，并固定任务收件人及原文导读；父图取得真实回执后才完成，不启动新的常驻助手实例。2026-10-31 真实 Provider 已用正式 revision 6 跑通发布完成关卡、时间约束、Graph Call 和企微发送，文件及导读的网关账本均为 confirmed；原助手 Run 和 Session 保留，27 个期刊归档文件未变。主子图及单计划已部署，临时验证图已清理。本次沿用已验收报告，未重跑研究；原会话与精确文件的后续问答由真实 Goose／本地 Provider 集成测试验过，首次定时执行与用户真实追问尚待观察。证据见[串联分发验收](../.local/rust/morning-briefing/chained-delivery-20261031/acceptance.json)，前次业务与投递验收见[联动记录](../.local/rust/morning-briefing/assistant-delivery-20261031/acceptance.json)。
+晨报使用一条每日 07:30 的生产计划，由原 VIP 助手持有。生产 Graph 负责研究、审核、渲染和正式发布，发布工具直接导出确切版本的日名 PDF、`report.json`、`publication.json`；最后的代码节点核对 PDF/正文摘要和本次已审核稿件，按上海时间等待至 `send_not_before`（默认 `09:05`，显式 `null` 为立即交接），只提交这三份成品。生产图不持有机器人或用户身份，也不再调用专用分发 Graph。原助手收到成功结果后，按原授权发送 PDF 与正式正文中的原文导读；失败、等待处理或计划准入受阻也回同一个 Session，由助手说明情况。
+
+任务结果重领时，文件及导读沿用同一逻辑投递身份，不随新的 Turn、助手实例或原生 tool call 改变。网关既有账本保存真实 ACK：confirmed 读回，unknown 停止自动重发，改写同一投递内容报冲突。文件确认后保留原 Session 的报告上下文，导读仍须单独确认；无需 Agent 手写 `receipt.json`。旧生产/分发 Run 的失败和补投事实保留，不把它们当作新链路的验收。当前部署、测试范围及外部业务证据统一见[验收台账](pilot-development-plan.md)。
 
 Rust Host 支持可信入口提交规范化 Base64 附件，冻结 SHA-256、大小与 MIME，并以 `/in/channel` 只读挂载；常驻助手按可信当前 Turn 保存和选择，不把 Run 的所有历史附件开放给模型。入口拒绝宿主路径、非法文件名、伪造类型和越界数据；Goose/provider 是否能理解图片需单独验证。
 

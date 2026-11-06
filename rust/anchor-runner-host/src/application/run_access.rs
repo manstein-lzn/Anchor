@@ -6,6 +6,7 @@ use super::{RunApplication, new_control, storage};
 use anchor_kernel::{Outcome, Phase, Waiter};
 mod abandon;
 mod admission;
+pub(crate) use admission::admission_request;
 mod artifact_files;
 mod assistant_policy;
 mod channels;
@@ -281,6 +282,13 @@ impl<'record> RunView<'record> {
                 waiter: Waiter::Child { .. }
             }
         )
+    }
+
+    pub(crate) fn child_run_ids(&self) -> impl Iterator<Item = &str> {
+        self.record
+            .graph_calls
+            .values()
+            .filter_map(|call| call.child_run_id.as_deref())
     }
 
     pub(crate) fn waits_for_invocation(&self, node: &str, invocation: u64) -> bool {

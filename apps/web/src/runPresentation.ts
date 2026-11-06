@@ -16,7 +16,7 @@ const supersededLabel = '已由新实例接替';
 export function runPhaseLabel(value?: RunProjection | string | null): string {
   if (!value) return '运行状态不可用';
   if (typeof value === 'string') return ({ executing: '执行中', waiting: '等待处理', settled: '已结算',
-    unavailable: '运行状态不可用', planned: '已计划', missed_busy: '忙碌错过', missed_downtime: '停机错过',
+    unavailable: '运行状态不可用', planned: '已计划', pending: '等待启动', pending_busy: '忙碌待启动', missed_busy: '忙碌错过', missed_downtime: '停机错过',
   }[value] ?? label(value));
   if (value.superseded && !value.active && value.outcome !== 'done') {
     if (value.phase !== 'settled') return supersededLabel;

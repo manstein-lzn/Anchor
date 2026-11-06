@@ -90,6 +90,13 @@ impl RunApplication {
         let record = &view.record;
         let metadata = self.metadata(run_id)?;
         self.reject_pending_session_delivery(run_id)?;
+        self.reject_pending_task_result(run_id)?;
+        if let Some(request) = metadata
+            .as_ref()
+            .and_then(|metadata| metadata.request.as_ref())
+        {
+            self.check_scheduled_run_deletion(&request.id)?;
+        }
         match metadata
             .as_ref()
             .filter(|metadata| metadata.conversation.is_some())

@@ -201,10 +201,34 @@ impl<N: NodeExecutionPort> GraphCallPort for KernelCallNodes<'_, crate::HostArti
                 .record
                 .graph_calls
                 .contains_key(&identity.durable_key());
+            let metadata = self
+                .application
+                .metadata(&identity.parent_run_id)
+                .map_err(application_error)?
+                .ok_or_else(|| GraphError::CorruptRun("missing Call parent metadata".into()))?;
+            let task = match metadata.task {
+                Some(origin) => Some(origin),
+                None => match metadata.graph_call.as_ref() {
+                    Some(source) => {
+                        let root = self
+                            .application
+                            .metadata(&source.root_run)
+                            .map_err(application_error)?
+                            .ok_or_else(|| {
+                                GraphError::CorruptRun(
+                                    "missing Call root metadata; task authority is unknown".into(),
+                                )
+                            })?;
+                        root.task
+                    }
+                    None => None,
+                },
+            };
             let catalog = crate::execution::HostGraphCatalog {
                 root: self.application.catalog_root.clone(),
                 state: self.application.data_root.clone(),
                 application: Some(self.application.clone()),
+                task,
             };
             let plugins = Catalog::new(self.application.library_root().to_path_buf());
             let host = InProcessGraphHost::new(&catalog, &store, self.artifacts, self.nodes)
@@ -452,5 +476,87 @@ impl RunApplication {
             let prepared = self.prepare_resume(&record, &metadata, control.clone())?;
             self.spawn_kernel(record, prepared, control)
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{application::run_access::fixtures, run_metadata};
+    use serde_json::json;
+    use std::sync::{Arc, atomic::AtomicBool};
+
+    #[tokio::test]
+    async fn missing_call_root_cannot_fall_back_to_unrestricted_task_admission() {
+        let root = tempfile::tempdir().unwrap();
+        let application =
+            RunApplication::new(root.path().join("state"), root.path().join("catalog"));
+        let record = GraphRunRecord::create_with_id(
+            GraphSnapshot::from_authoring(json!({
+                "entry":"call","agents":{},
+                "ops":{"call":{"call":{"graph":"grandchild","mode":"wait"}}},
+                "nodes":[{"id":"call","op":"call"}],"edges":[]
+            }))
+            .unwrap(),
+            json!({}),
+            "orphan-child",
+        )
+        .unwrap();
+        fixtures::create(&application, &record);
+        crate::host_fs::directory(&application.graph_bundle_path("child")).unwrap();
+        let metadata = run_metadata::RunMetadata::graph_call_child(
+            record.run_id.clone(),
+            "child".into(),
+            record.graph_digest.clone(),
+            &application.graph_bundle_path("child"),
+            run_metadata::GraphCallSource {
+                parent_run: "missing-root".into(),
+                parent_graph: "root".into(),
+                parent_graph_digest: "root-digest".into(),
+                node: "call".into(),
+                invocation: 1,
+                mode: "detach".into(),
+                root_run: "missing-root".into(),
+            },
+        )
+        .unwrap();
+        run_metadata::save(&application.data_root, &metadata).unwrap();
+        let artifacts = crate::HostArtifacts::new(
+            application.data_root.join("artifacts"),
+            root.path().join("workspaces"),
+        );
+        let nodes = test_support::Scripted {
+            seed: 0,
+            inject_failures: false,
+            trace: Default::default(),
+            calls: Default::default(),
+        };
+        let calls = KernelCallNodes::new(&application, &artifacts, &nodes);
+        let identity = CallIdentity {
+            parent_run_id: record.run_id.clone(),
+            parent_graph_digest: record.graph_digest.clone(),
+            node_id: "call".into(),
+            invocation: 1,
+            call_spec_digest: "fixture".into(),
+        };
+        let error = GraphCallPort::call(
+            &calls,
+            &identity,
+            &record.snapshot.ops["call"]["call"],
+            &json!({}),
+            &[],
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(&error, GraphError::CorruptRun(reason) if reason.contains("missing Call root metadata")),
+            "{error:?}"
+        );
+        assert_eq!(
+            run_metadata::ids(&application.data_root).unwrap(),
+            [record.run_id]
+        );
+        assert_eq!(application.records().unwrap().len(), 1);
     }
 }

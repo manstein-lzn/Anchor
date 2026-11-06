@@ -1,0 +1,11 @@
+.graph-task-policy { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--plugin-line); }
+.graph-task-policy h3, .graph-task-policy h4 { margin: 0 0 8px; color: var(--plugin-ink); font-size: 13px; font-weight: 600; }
+.graph-task-policy fieldset { min-width: 0; }
+.graph-task-policy legend { margin: 8px 0; color: var(--plugin-ink); font-size: 12px; font-weight: 600; }
+.graph-task-policy .graph-task-option { display: flex; align-items: flex-start; gap: 8px; margin: 0 0 10px; color: var(--plugin-ink); font-size: 12px; line-height: 1.5; }
+.graph-task-option input { flex: none; width: 15px; height: 15px; margin: 2px 0 0; }
+.graph-task-option span { min-width: 0; overflow-wrap: anywhere; }
+.graph-task-option small { display: block; color: var(--plugin-muted); font-size: 11px; }
+.graph-task-policy .graph-task-search { margin-bottom: 8px; }
+.graph-task-targets { max-height: 220px; margin-bottom: 12px; overflow-y: auto; }
+.graph-task-targets > .plugin-message { margin-bottom: 10px; }

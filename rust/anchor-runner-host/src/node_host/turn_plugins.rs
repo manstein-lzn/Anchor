@@ -93,7 +93,7 @@ impl HostIoResolver {
         // A pre-upgrade Turn that already froze its Session policy must retain
         // the admitted Graph grants. Newly claimed input can read current desired.
         let use_desired_graph = use_desired_graph && legacy.is_none();
-        let (snapshot, authority) = if use_desired_graph {
+        let (snapshot, authority, task_grants) = if use_desired_graph {
             let current = anchor_graph_host::FileGraphBundleLoader::new(&metadata.bundle_source)
                 .with_library_root(self.plugin_library_root()?)
                 .load()
@@ -103,14 +103,18 @@ impl HostIoResolver {
                 return Err("assistant_graph_restart_required: Graph structure changed; stop and retire the assistant to apply it".into());
             }
             let digest = current.digest().map_err(|error| error.to_string())?;
-            let authority = match assistant_plugins::publication(root, &metadata.bundle_source, &digest)? {
-                Some(publication) => publication.bindings,
-                None if digest == admitted.graph_digest => admitted.plugin_bindings.clone(),
+            let (authority, task_grants) = match assistant_plugins::publication(root, &metadata.bundle_source, &digest)? {
+                Some(publication) => (publication.bindings.clone(), Some(publication.task_grants())),
+                None if digest == admitted.graph_digest => (admitted.plugin_bindings.clone(), metadata.task_grants.clone()),
                 None => return Err("Graph Plugin permissions have no operator authorization; save the Graph from the operator interface".into()),
             };
-            (current, authority)
+            (current, authority, task_grants)
         } else {
-            (admitted.snapshot.clone(), admitted.plugin_bindings.clone())
+            (
+                admitted.snapshot.clone(),
+                admitted.plugin_bindings.clone(),
+                metadata.task_grants.clone(),
+            )
         };
         let mounts = if let Some(legacy) = legacy {
             legacy
@@ -222,6 +226,7 @@ impl HostIoResolver {
             reasons,
             by_declaration: resolved.by_declaration,
             by_switch: resolved.by_switch,
+            task_grants,
         };
         crate::assistant::save_immutable(
             &assistant_plugins::turn_path(root, &key.run_id, &source.session, turn),

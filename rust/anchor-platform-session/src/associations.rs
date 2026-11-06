@@ -147,47 +147,58 @@ impl SessionStore {
         let mut snapshot = store::read_session(&transaction, owner, session)?;
         crate::channel::ensure_assistant_run_scope(&transaction, session, run)?;
         let mut turn = turns::find_turn(&transaction, session, turn)?;
-        let associate = !turn.runs.iter().any(|existing| existing == run);
-        let attach = !snapshot.run_ids.iter().any(|existing| existing == run);
-        if associate || attach {
-            snapshot.updated_at = Utc::now();
-            if attach {
-                snapshot.run_ids.push(run.into());
-            }
-            store::write_session(&transaction, owner, &snapshot)?;
-            if attach {
-                store::append_event(
-                    &transaction,
-                    &snapshot,
-                    "run.attached",
-                    BTreeMap::from([("run".into(), json!(run))]),
-                )?;
-            }
-            if associate {
-                let previous: i64 = transaction.query_row(
-                    "SELECT COALESCE(MAX(seq), 0) FROM turn_runs WHERE turn_id = ?1",
-                    [&turn.id],
-                    |row| row.get(0),
-                )?;
-                let seq = previous
-                    .checked_add(1)
-                    .ok_or_else(|| SessionError::Storage("Turn run sequence exhausted".into()))?;
-                transaction.execute(
-                    "INSERT INTO turn_runs(turn_id, run_id, seq) VALUES (?1, ?2, ?3)",
-                    params![turn.id, run, seq],
-                )?;
-                store::append_event(
-                    &transaction,
-                    &snapshot,
-                    "turn.run_associated",
-                    BTreeMap::from([("turn".into(), json!(turn.id)), ("run".into(), json!(run))]),
-                )?;
-                turn.runs.push(run.into());
-            }
-        }
+        associate_run(&transaction, owner, &mut snapshot, &mut turn, run)?;
         transaction.commit()?;
         Ok(turn)
     }
+}
+
+pub(crate) fn associate_run(
+    connection: &Connection,
+    owner: &str,
+    snapshot: &mut crate::Session,
+    turn: &mut Turn,
+    run: &str,
+) -> Result<(), SessionError> {
+    let associate = !turn.runs.iter().any(|existing| existing == run);
+    let attach = !snapshot.run_ids.iter().any(|existing| existing == run);
+    if associate || attach {
+        snapshot.updated_at = Utc::now();
+        if attach {
+            snapshot.run_ids.push(run.into());
+        }
+        store::write_session(connection, owner, snapshot)?;
+        if attach {
+            store::append_event(
+                connection,
+                snapshot,
+                "run.attached",
+                BTreeMap::from([("run".into(), json!(run))]),
+            )?;
+        }
+        if associate {
+            let previous: i64 = connection.query_row(
+                "SELECT COALESCE(MAX(seq), 0) FROM turn_runs WHERE turn_id = ?1",
+                [&turn.id],
+                |row| row.get(0),
+            )?;
+            let seq = previous
+                .checked_add(1)
+                .ok_or_else(|| SessionError::Storage("Turn run sequence exhausted".into()))?;
+            connection.execute(
+                "INSERT INTO turn_runs(turn_id, run_id, seq) VALUES (?1, ?2, ?3)",
+                params![turn.id, run, seq],
+            )?;
+            store::append_event(
+                connection,
+                snapshot,
+                "turn.run_associated",
+                BTreeMap::from([("turn".into(), json!(turn.id)), ("run".into(), json!(run))]),
+            )?;
+            turn.runs.push(run.into());
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn project_turn(connection: &Connection, mut turn: Turn) -> Result<Turn, SessionError> {

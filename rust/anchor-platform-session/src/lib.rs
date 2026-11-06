@@ -150,6 +150,48 @@ pub struct ChannelInboundAdmission {
     pub previous_run: Option<String>,
 }
 
+/// A delegated task completion or blocked status, never a participant message.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct TaskResult {
+    pub id: String,
+    /// Schedule admission can fail before any Run exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_run: Option<String>,
+    pub outcome: String,
+    pub content: Value,
+    pub files: Vec<ChannelNotificationFile>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct TaskResultAdmission {
+    pub result: TaskResult,
+    pub turn: Turn,
+    pub run_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(tag = "source", content = "input", rename_all = "snake_case")]
+pub enum AssistantInput {
+    User(Box<ChannelInboundAdmission>),
+    Task(Box<TaskResultAdmission>),
+}
+
+impl AssistantInput {
+    pub fn turn(&self) -> &Turn {
+        match self {
+            Self::User(input) => &input.turn,
+            Self::Task(input) => &input.turn,
+        }
+    }
+
+    pub fn user(&self) -> Option<&ChannelInboundAdmission> {
+        match self {
+            Self::User(input) => Some(input),
+            Self::Task(_) => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ChannelAssistant {
     pub session_id: String,

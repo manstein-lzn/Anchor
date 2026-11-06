@@ -1,4 +1,4 @@
-//! Session-owned preparation and bounded MCP probes. These are host use cases,
+//! Scope-owned preparation and bounded MCP probes. These are host use cases,
 //! not published Library assets or a second Agent loop.
 
 use super::{ApplicationError, RunApplication};
@@ -15,6 +15,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     io::Write,
     path::{Path, PathBuf},
+    sync::Arc,
     time::Duration,
 };
 
@@ -39,6 +40,14 @@ pub(crate) struct PreparedCandidate {
     library_root: PathBuf,
     _dependency_scope: Option<anchor_library::DevelopmentScope>,
     _lease: anchor_file_lease::FileLease,
+}
+
+/// Frozen execution authority shared by Pilot and authorized node probes.
+#[derive(Clone)]
+pub(crate) struct CandidateTestContext {
+    pub(crate) sandbox: Arc<anchor_sandbox_bwrap::BubblewrapSandbox>,
+    pub(crate) workspace: PathBuf,
+    pub(crate) access: DependencyAccess,
 }
 
 fn invalid(error: impl std::fmt::Display) -> ApplicationError {
@@ -354,10 +363,10 @@ impl RunApplication {
     pub(crate) async fn test_plugin_candidate(
         &self,
         prepared: &PreparedCandidate,
-        context: &crate::pilot_tools::PilotTurnContext,
+        context: &CandidateTestContext,
         invocation: Option<(&str, &str, Value)>,
     ) -> Result<Value, ApplicationError> {
-        let access = context.dependency_access();
+        let access = &context.access;
         access.check().map_err(invalid)?;
         let catalog = Catalog::new(&prepared.root);
         let definition = catalog.definition(&prepared.fact.id).map_err(invalid)?;

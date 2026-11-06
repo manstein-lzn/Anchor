@@ -40,8 +40,8 @@ mod resolution;
 mod turn_plugins;
 
 pub(crate) use contracts::{
-    NodeConversationHint, NodeHostResolver, NodeImage, ResolutionError, ResolvedNodeTools,
-    ToolResolution,
+    NodeConversationHint, NodeHostResolver, NodeImage, NodeToolAssembly, ResolutionError,
+    ResolvedNodeTools, ToolAssembly, ToolResolution,
 };
 
 pub(crate) struct HostNodes {
@@ -78,6 +78,7 @@ pub(crate) struct HostIoResolver {
     mounts: std::sync::Arc<dyn PluginMountSource>,
     /// Operator configuration supplied by the composing Host, not an HTTP entrypoint.
     pilot_graph: Option<String>,
+    tool_assembly: std::sync::Arc<dyn NodeToolAssembly>,
 }
 
 use facts::fact_stem;
@@ -97,6 +98,7 @@ impl HostIoResolver {
         local_inputs: LocalInputs,
         mounts: std::sync::Arc<dyn PluginMountSource>,
         pilot_graph: Option<String>,
+        tool_assembly: std::sync::Arc<dyn NodeToolAssembly>,
     ) -> Self {
         Self {
             artifacts,
@@ -111,6 +113,7 @@ impl HostIoResolver {
             local_inputs,
             mounts,
             pilot_graph,
+            tool_assembly,
         }
     }
 

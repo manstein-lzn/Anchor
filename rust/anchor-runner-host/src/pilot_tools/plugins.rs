@@ -58,7 +58,7 @@ impl PilotTools {
             return Ok(result);
         }
         self.application
-            .test_plugin_candidate(&prepared, context, invocation)
+            .test_plugin_candidate(&prepared, &context.candidate_test_context(), invocation)
             .await
             .map_err(|error| rejected(format!("Plugin candidate test failed: {error:?}")))
     }

@@ -289,6 +289,17 @@ impl SessionStore {
                 })?
                 .collect::<Result<Vec<_>, _>>()?
                 .into_iter()
+                .map(|(owner, session, turn, run)| {
+                    let run = match run {
+                        Some(run) => Some(run),
+                        None => {
+                            crate::channel::recoverable_task_run(&transaction, &session, &turn)?
+                        }
+                    };
+                    Ok((owner, session, turn, run))
+                })
+                .collect::<Result<Vec<_>, SessionError>>()?
+                .into_iter()
                 .filter(|(_, _, _, run)| !run.as_ref().is_some_and(|run| recoverable.contains(run)))
                 .map(|(owner, session, turn, _)| (owner, session, turn))
                 .collect::<Vec<_>>()

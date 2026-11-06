@@ -83,6 +83,8 @@ AgentNode 完成时通过 `final_result.files` 显式交付文件或目录，`wr
 
 ## 候选准备、测试与交付
 
+普通 AgentNode 若挂载 `graph-tasks` 且操作员为该节点开启 `develop_plugins`，也可在自己的稳定 workspace 编写候选，并通过 `graph_tasks_plugin_prepare/test` 复用本节的候选准备与测试用例。候选保存于 Host 的委派作用域，沙箱、网络与 runtime 沿当前 invocation 冻结；不因此开放 Pilot 的私有环境管理、安装确认或管理权限。Agent 可以临时开发候选，不等于能把它直接安装并挂到当前 Turn；正式交付仍执行下述预检与确认。Graph 自身可否创建及可用哪些已安装 Plugin 是另一项节点授权，见 [Graph 任务](plugins.md#graph-任务)。
+
 1. 在 Session 工作区实际获取或开发候选，记录来源 commit/摘要。审查、准备与导入只暂存代码，排除 `mutable` 数据，候选数据位置初始为空。
 2. `plugin_prepare` 按正式 `dependencies.python` 在所属 Goose scope 的 `candidates/` 准备代码摘要、依赖锁和临时只读视图；不借用项目私有 venv，不发布正式视图。
 3. `plugin_test` 实际启动 MCP、读取工具表，并可按 `server`/`tool`/`arguments` 做业务调用；结果区分协议启动与 `business_tested`。源码改变后按新摘要重新测试。

@@ -91,29 +91,27 @@ impl HostIoResolver {
                 .into_iter()
                 .filter_map(|inputs| inputs.mount),
         );
-        if let Some(binding) = crate::assistant::binding(self.local_inputs.state_root(), key)?
-            && let Some(notification) = binding.notification
+        for (file, destination) in
+            crate::assistant::selected_input_files(self.local_inputs.state_root(), key)?
         {
-            for file in &notification.files {
-                let commit = self
-                    .artifacts
-                    .reference(&file.artifact_id)
-                    .map_err(|error| error.to_string())?
-                    .ok_or("notification delivery is missing")?;
-                let view = self
-                    .artifacts
-                    .files_path(&commit)
-                    .map_err(|error| error.to_string())?;
-                // Check the exact selected file; the full source delivery is never mounted.
-                let _read = self
-                    .artifacts
-                    .open_file(&commit, &file.path)
-                    .map_err(|error| error.to_string())?;
-                mounts.push(anchor_runtime::ReadOnlyInput::new(
-                    view.join(&file.path),
-                    crate::channel_notifications::file_path(&notification.id, &file.name),
-                ));
-            }
+            let commit = self
+                .artifacts
+                .reference(&file.artifact_id)
+                .map_err(|error| error.to_string())?
+                .ok_or("selected Artifact delivery is missing")?;
+            let view = self
+                .artifacts
+                .files_path(&commit)
+                .map_err(|error| error.to_string())?;
+            // Mount only the selected immutable file, never its source directory.
+            let _read = self
+                .artifacts
+                .open_file(&commit, &file.path)
+                .map_err(|error| error.to_string())?;
+            mounts.push(anchor_runtime::ReadOnlyInput::new(
+                view.join(&file.path),
+                destination,
+            ));
         }
         Ok(mounts)
     }

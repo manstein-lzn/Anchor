@@ -1,0 +1,5 @@
+{
+  "name": "Graph Tasks",
+  "description": "Discover authorized Graphs, delegate asynchronous work, schedule repeated tasks, and handle returned results. Host tools enforce the node's Graph task policy; this Skill grants no authority itself.",
+  "skills": "skills/"
+}

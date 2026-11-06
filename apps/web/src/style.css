@@ -648,6 +648,7 @@ details.call pre {
 .timeline-entry.executing .timeline-duration { box-shadow: inset 0 0 0 1px #ffffff88; }
 .timeline-entry.waiting .timeline-duration { box-shadow: inset 0 -2px #c45c56; }
 .timeline-point { position: absolute; inset: 0; border: 2px solid var(--graph-color, #668499); border-radius: inherit; background: #fff; }
+.timeline-entry:is(.pending, .pending_busy) .timeline-point { background: var(--graph-color, #668499); box-shadow: 0 0 0 2px #fff inset; }
 .timeline-entry:is(.missed_busy, .missed_downtime) .timeline-point,
 .timeline-legend i.missed_busy { background: linear-gradient(45deg, transparent 40%, var(--graph-color, #718079) 40% 60%, transparent 60%); }
 .timeline-no-events { position: absolute; top: 24px; left: 5px; color: #8f9d95; font-size: 11px; }

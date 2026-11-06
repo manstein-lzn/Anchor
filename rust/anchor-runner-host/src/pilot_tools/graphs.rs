@@ -62,24 +62,10 @@ impl PilotTools {
             Some(Value::String(value)) => Some(value.clone()),
             _ => return Err(ToolError::Failed("objective must be a string".into())),
         };
-        let path = self
-            .application
-            .graph_path_checked(&graph)
-            .map_err(|failure| ToolError::Failed(format!("Graph unavailable: {failure}")))?;
-        let lease = self
-            .application
-            .graph_admission_lease(&path)
-            .map_err(|failure| ToolError::Failed(format!("Run admission rejected: {failure:?}")))?;
-        let (path, bundle) = self
-            .application
-            .load_graph(&graph)
-            .map_err(|failure| ToolError::Failed(format!("Graph unavailable: {failure}")))?;
         let run = self
             .application
-            .admit(
-                graph.clone(),
-                &path,
-                bundle,
+            .admit_graph_with_options(
+                &graph,
                 arguments.get("input").cloned().unwrap_or_else(|| json!({})),
                 AdmissionOptions {
                     objective,
@@ -93,7 +79,8 @@ impl PilotTools {
                     workspace_bindings: Default::default(),
                     workspace_root: None,
                 },
-                lease,
+                None,
+                None,
             )
             .await
             .map_err(|failure| ToolError::Failed(format!("Run admission rejected: {failure:?}")))?;

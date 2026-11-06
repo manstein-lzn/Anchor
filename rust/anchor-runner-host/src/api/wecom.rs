@@ -593,7 +593,10 @@ async fn wait_for_channel_reply(
                 else {
                     continue;
                 };
-                if binding.turn != inbound.relation.turn_id || binding.inbound != inbound_id {
+                if binding.input_kind != crate::assistant::InputKind::User
+                    || binding.turn != inbound.relation.turn_id
+                    || binding.inbound != inbound_id
+                {
                     continue;
                 }
                 if result.suppressed {

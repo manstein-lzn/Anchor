@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { intervalFacts, timelineEntries, timelineNeedsAttention } from './Timeline';
+import { intervalFacts, schedulePlanNote, timelineEntries, timelineNeedsAttention } from './Timeline';
 import { assignGraphColors } from './graphColors';
 import type { OurRun } from './model';
 
@@ -115,5 +115,10 @@ describe('shared Run status and attention projection', () => {
     recovering.projection = { phase: 'settled', outcome: 'done', active: false, reason: null, updated: null, actions: { pause: false, stop: false, resume: false, abandon: false } };
     expect(timelineNeedsAttention(entry)).toBe(false);
     expect(timelineNeedsAttention({ status: 'missed_busy' })).toBe(true);
+    expect(timelineNeedsAttention({ status: 'pending' })).toBe(true);
+    expect(timelineNeedsAttention({ status: 'pending_busy' })).toBe(true);
+    expect(schedulePlanNote('pending')).toContain('不会因延迟而丢弃');
+    expect(schedulePlanNote('pending_busy')).toContain('空闲后继续尝试启动');
+    expect(schedulePlanNote('missed_busy')).toContain('历史记录');
   });
 });

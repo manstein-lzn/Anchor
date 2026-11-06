@@ -24,6 +24,10 @@ fn group_members_share_current_assistant_and_preserve_real_actor_per_turn() {
         .admit_channel_inbound("owner", inbound("alice-1", "alice"))
         .unwrap();
     let session = &alice.session.id;
+    let identity = store.channel_identity("owner", session).unwrap();
+    assert_eq!(identity.conversation_kind, ChannelConversationKind::Group);
+    assert_eq!(identity.conversation_id, "shared-group");
+    assert!(identity.sender_id.is_empty());
     assert_eq!(
         alice
             .session

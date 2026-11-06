@@ -13,6 +13,9 @@ use std::collections::BTreeMap;
 
 const MAX_WAIT_KEY_BYTES: usize = 4096;
 
+mod task_inputs;
+pub(crate) use task_inputs::{is_task_turn, recoverable_task_run};
+
 enum BindingScope {
     Current,
     Retained,
@@ -282,6 +285,14 @@ impl SessionStore {
         if let Some(inbound) = carried {
             record_run_association(&transaction, owner, &mut snapshot, &inbound, to_run, true)?;
         }
+        task_inputs::handover_task_input(
+            &transaction,
+            owner,
+            &mut snapshot,
+            from_run,
+            to_run,
+            to_wait_key,
+        )?;
         touch_channel_session(
             &transaction,
             owner,
@@ -553,68 +564,13 @@ impl SessionStore {
         run: &str,
         key: &str,
     ) -> Result<Option<ChannelInboundAdmission>, SessionError> {
-        validate_input_lookup(owner, session, run, key)?;
-        let mut connection = self.lock()?;
-        {
-            let transaction = connection.transaction()?;
-            require_assistant(&transaction, owner, session, run, BindingScope::Current)?;
-            if let Some(inbound) = read_input(&transaction, session, run, key)? {
-                let admission = inbound_admission(&transaction, &inbound)?;
-                transaction.commit()?;
-                return Ok(Some(admission));
-            }
-            let pending = read_pending_input(&transaction, session)?.is_some();
-            transaction.commit()?;
-            if !pending {
-                return Ok(None);
-            }
-        }
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let mut snapshot =
-            require_assistant(&transaction, owner, session, run, BindingScope::Current)?;
-        if let Some(inbound) = read_input(&transaction, session, run, key)? {
-            let admission = inbound_admission(&transaction, &inbound)?;
-            transaction.commit()?;
-            return Ok(Some(admission));
-        }
-        let inbound = read_pending_input(&transaction, session)?;
-        let Some(inbound) = inbound else {
-            transaction.commit()?;
-            return Ok(None);
-        };
-        if inbound
-            .run_id
-            .as_deref()
-            .is_some_and(|existing| existing != run)
-        {
-            return Err(SessionError::Conflict(
-                "assistant input is already bound to a different Run".into(),
-            ));
-        }
-        transaction.execute(
-            "INSERT INTO channel_assistant_inputs(session_id, run_id, key, turn_id) VALUES (?1, ?2, ?3, ?4)",
-            params![session, run, key, inbound.turn_id],
-        )?;
-        let newly_bound = inbound.run_id.is_none();
-        if newly_bound {
-            transaction.execute(
-                "UPDATE channel_inbounds SET run_id = ?3 WHERE session_id = ?1 AND turn_id = ?2",
-                params![session, inbound.turn_id, run],
-            )?;
-        }
-        record_run_association(
-            &transaction,
-            owner,
-            &mut snapshot,
-            &inbound,
-            run,
-            newly_bound,
-        )?;
-        let updated = read_inbound_by_turn(&transaction, session, &inbound.turn_id)?
-            .ok_or(SessionError::Missing)?;
-        let admission = inbound_admission(&transaction, &updated)?;
-        transaction.commit()?;
-        Ok(Some(admission))
+        self.claim_input(owner, session, run, key, false)
+            .map(|input| {
+                input.and_then(|input| match input {
+                    crate::AssistantInput::User(input) => Some(*input),
+                    crate::AssistantInput::Task(_) => None,
+                })
+            })
     }
 
     /// The wait invocation that claimed one Turn, for read-only projections.
@@ -649,17 +605,48 @@ impl SessionStore {
         run: &str,
         key: &str,
     ) -> Result<Option<ChannelInboundAdmission>, SessionError> {
-        validate_input_lookup(owner, session, run, key)?;
-        let mut connection = self.lock()?;
-        let transaction = connection.transaction()?;
-        require_assistant(&transaction, owner, session, run, BindingScope::Retained)?;
-        let admission = read_input(&transaction, session, run, key)?
-            .as_ref()
-            .map(|inbound| inbound_admission(&transaction, inbound))
-            .transpose()?;
-        transaction.commit()?;
-        Ok(admission)
+        self.get_assistant_input(owner, session, run, key)
+            .map(|input| {
+                input.and_then(|input| match input {
+                    crate::AssistantInput::User(input) => Some(*input),
+                    crate::AssistantInput::Task(_) => None,
+                })
+            })
     }
+}
+
+fn claim_user_input(
+    connection: &Connection,
+    owner: &str,
+    snapshot: &mut Session,
+    run: &str,
+    key: &str,
+    inbound: &StoredInbound,
+) -> Result<ChannelInboundAdmission, SessionError> {
+    if inbound
+        .run_id
+        .as_deref()
+        .is_some_and(|existing| existing != run)
+    {
+        return Err(SessionError::Conflict(
+            "assistant input is already bound to a different Run".into(),
+        ));
+    }
+    connection.execute(
+        "INSERT INTO channel_assistant_inputs(session_id, run_id, key, turn_id) VALUES (?1, ?2, ?3, ?4)",
+        params![snapshot.id, run, key, inbound.turn_id],
+    )?;
+    let newly_bound = inbound.run_id.is_none();
+    if newly_bound {
+        connection.execute(
+            "UPDATE channel_inbounds SET run_id = ?3 WHERE session_id = ?1 AND turn_id = ?2",
+            params![snapshot.id, inbound.turn_id, run],
+        )?;
+    }
+    record_run_association(connection, owner, snapshot, inbound, run, newly_bound)?;
+    let updated = read_inbound_by_turn(connection, &snapshot.id, &inbound.turn_id)?
+        .ok_or(SessionError::Missing)?;
+    inbound_admission(connection, &updated)
 }
 
 fn validate_assistant_lookup(owner: &str, session: &str, run: &str) -> Result<(), SessionError> {
@@ -885,8 +872,10 @@ mod tests {
         let writer = Connection::open(&path).unwrap();
         writer.execute_batch("BEGIN IMMEDIATE").unwrap();
         let input = store.claim_channel_assistant_input("owner", &session, "run-a", "wait/2");
+        let generic = store.claim_assistant_input("owner", &session, "run-a", "wait/2");
         writer.execute_batch("ROLLBACK").unwrap();
         assert!(matches!(input, Ok(None)), "{input:?}");
+        assert!(matches!(generic, Ok(None)), "{generic:?}");
     }
 
     #[test]
@@ -913,9 +902,11 @@ mod tests {
         let writer = Connection::open(&path).unwrap();
         writer.execute_batch("BEGIN IMMEDIATE").unwrap();
         let replay = store.claim_channel_assistant_input("owner", &session, "run-a", "wait/1");
+        let generic = store.claim_assistant_input("owner", &session, "run-a", "wait/1");
         writer.execute_batch("ROLLBACK").unwrap();
         let replay = replay.unwrap();
         assert_eq!(replay.unwrap().turn.id, claimed.turn.id);
+        assert_eq!(generic.unwrap().unwrap().turn().id, claimed.turn.id);
     }
 
     #[test]

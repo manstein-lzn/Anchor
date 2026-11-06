@@ -48,6 +48,9 @@ async fn graph_relations_projects_catalog_calls_and_schedule_counts() {
         created_at: "2026-10-08T10:00:00".into(),
         next_at: "2026-10-09T10:00:00".into(),
         enabled: true,
+        delegation: None,
+        remaining: None,
+        group: None,
     });
 
     let (status, relations) = call(router(state), "GET", "/graph-relations", None).await;
@@ -82,6 +85,9 @@ async fn graph_relations_preserves_schedule_count_when_bundle_is_missing() {
         created_at: "2026-10-08T10:00:00".into(),
         next_at: "2026-10-09T10:00:00".into(),
         enabled: true,
+        delegation: None,
+        remaining: None,
+        group: None,
     });
 
     let (status, relations) = call(router(state), "GET", "/graph-relations", None).await;

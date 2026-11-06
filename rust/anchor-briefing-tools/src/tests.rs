@@ -16,7 +16,11 @@ fn issue_exports_a_pinned_revision_and_never_substitutes_another_day() {
         report_sha256: Some(digest(report)),
         pdf_sha256: digest(b"first pdf"),
         imported_baseline: false,
-        visual_review: None,
+        visual_review: Some(VisualReview {
+            approved: true,
+            pages_reviewed: vec![1],
+            notes: "Original archived visual review.".into(),
+        }),
     };
     server
         .archive(
@@ -27,8 +31,16 @@ fn issue_exports_a_pinned_revision_and_never_substitutes_another_day() {
             ],
         )
         .unwrap();
+    let archive = root.path().join("data/issues/2026-10-31");
+    let original_publication: Value =
+        serde_json::from_slice(&fs::read(archive.join("0001/publication.json")).unwrap()).unwrap();
+    assert_eq!(
+        original_publication,
+        serde_json::to_value(&publication).unwrap()
+    );
     publication.revision = 2;
     publication.pdf_sha256 = digest(b"revised pdf");
+    publication.visual_review.as_mut().unwrap().notes = "Revised publication visual review.".into();
     server
         .archive(
             &publication,
@@ -38,6 +50,22 @@ fn issue_exports_a_pinned_revision_and_never_substitutes_another_day() {
             ],
         )
         .unwrap();
+    let archive_snapshot = || {
+        ["0001", "0002"]
+            .into_iter()
+            .flat_map(|revision| {
+                let directory = archive.join(revision);
+                ["publication.json", "briefing.pdf", "report.json"]
+                    .into_iter()
+                    .map(move |name| directory.join(name))
+            })
+            .map(|path| {
+                let bytes = fs::read(&path).unwrap();
+                (path, bytes)
+            })
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    let archived_before_export = archive_snapshot();
     let issue = server
         .issue(IssueRequest {
             issue_date: Some("2026-10-31".into()),
@@ -45,11 +73,45 @@ fn issue_exports_a_pinned_revision_and_never_substitutes_another_day() {
             output_dir: "pinned".into(),
         })
         .unwrap();
-    assert_eq!(issue["publication"]["revision"], 1);
+    let manifest_path = workspace
+        .path()
+        .join(issue["publication_path"].as_str().unwrap());
+    let manifest_bytes = fs::read(&manifest_path).unwrap();
+    let manifest: Value = serde_json::from_slice(&manifest_bytes).unwrap();
+    assert_eq!(issue["publication"], original_publication);
+    assert_eq!(manifest["publication"], original_publication);
+    assert_ne!(
+        manifest["publication"]["visual_review"]["notes"],
+        publication.visual_review.as_ref().unwrap().notes
+    );
+    assert_eq!(manifest["pdf_path"], issue["pdf_path"]);
+    assert_eq!(manifest["report_path"], issue["report_path"]);
     assert_eq!(
         fs::read(workspace.path().join(issue["pdf_path"].as_str().unwrap())).unwrap(),
         b"first pdf"
     );
+    assert_eq!(
+        fs::read(
+            workspace
+                .path()
+                .join(issue["report_path"].as_str().unwrap())
+        )
+        .unwrap(),
+        report
+    );
+    assert_eq!(archive_snapshot(), archived_before_export);
+    assert_eq!(
+        server
+            .issue(IssueRequest {
+                issue_date: Some("2026-10-31".into()),
+                revision: Some(1),
+                output_dir: "pinned".into(),
+            })
+            .unwrap(),
+        issue
+    );
+    assert_eq!(fs::read(&manifest_path).unwrap(), manifest_bytes);
+    assert_eq!(archive_snapshot(), archived_before_export);
     assert!(
         server
             .issue(IssueRequest {
@@ -61,11 +123,53 @@ fn issue_exports_a_pinned_revision_and_never_substitutes_another_day() {
             .to_string()
             .contains("not available")
     );
-    fs::write(
-        root.path().join("data/issues/2026-10-31/0002/briefing.pdf"),
-        b"changed",
-    )
-    .unwrap();
+    assert!(!workspace.path().join("missing").exists());
+
+    fs::write(archive.join("0002/report.json"), b"changed report").unwrap();
+    let archived_before_failure = archive_snapshot();
+    let partial = workspace.path().join("changed-report");
+    fs::create_dir(&partial).unwrap();
+    fs::write(partial.join("keep.txt"), b"keep export failure evidence").unwrap();
+    assert!(
+        server
+            .issue(IssueRequest {
+                issue_date: Some("2026-10-31".into()),
+                revision: None,
+                output_dir: "changed-report".into(),
+            })
+            .unwrap_err()
+            .to_string()
+            .contains("archived report differs from its published identity")
+    );
+    let partial_pdf = partial.join(
+        Path::new(issue["pdf_path"].as_str().unwrap())
+            .file_name()
+            .unwrap(),
+    );
+    assert_eq!(fs::read(&partial_pdf).unwrap(), b"revised pdf");
+    assert!(!partial.join("report.json").exists());
+    assert!(!partial.join("publication.json").exists());
+    assert_eq!(archive_snapshot(), archived_before_failure);
+    assert!(
+        server
+            .issue(IssueRequest {
+                issue_date: Some("2026-10-31".into()),
+                revision: Some(2),
+                output_dir: "changed-report".into(),
+            })
+            .is_err()
+    );
+    assert_eq!(fs::read(&partial_pdf).unwrap(), b"revised pdf");
+    assert_eq!(
+        fs::read(partial.join("keep.txt")).unwrap(),
+        b"keep export failure evidence"
+    );
+    assert!(!partial.join("publication.json").exists());
+    assert_eq!(fs::read(&manifest_path).unwrap(), manifest_bytes);
+    assert_eq!(archive_snapshot(), archived_before_failure);
+
+    fs::write(archive.join("0002/briefing.pdf"), b"changed").unwrap();
+    let archived_before_failure = archive_snapshot();
     assert!(
         server
             .issue(IssueRequest {
@@ -77,6 +181,8 @@ fn issue_exports_a_pinned_revision_and_never_substitutes_another_day() {
             .to_string()
             .contains("published identity")
     );
+    assert!(!workspace.path().join("changed").exists());
+    assert_eq!(archive_snapshot(), archived_before_failure);
 }
 
 #[test]
@@ -185,6 +291,7 @@ fn publication_rejects_an_inspection_for_different_report_without_advancing_hist
         report_path: "report.json".into(),
         pdf_path: "briefing.pdf".into(),
         inspection_path: "inspection.json".into(),
+        export_dir: publication_dir(),
         visual_review: VisualReview {
             approved: true,
             pages_reviewed: vec![1],
@@ -243,6 +350,7 @@ fn publishes_checked_pdfs_with_stable_daily_identity_and_retry_without_moving_cu
                 .as_str()
                 .ok_or("no inspection")?
                 .into(),
+            export_dir: format!("published-{name}"),
             visual_review: VisualReview {
                 approved: true,
                 pages_reviewed: vec![1],
@@ -250,8 +358,16 @@ fn publishes_checked_pdfs_with_stable_daily_identity_and_retry_without_moving_cu
             },
         })
     };
-    let first = make("first", day_one, 0)?;
-    let published = server.publish(serde_json::from_value(serde_json::to_value(&first)?)?)?;
+    let mut first = make("first", day_one, 0)?;
+    first.export_dir = "published".into();
+    let original_notes = first.visual_review.notes.clone();
+    let mut default_request = serde_json::to_value(&first)?;
+    default_request
+        .as_object_mut()
+        .unwrap()
+        .remove("export_dir");
+    let published = server.publish(serde_json::from_value(default_request)?)?;
+    assert_eq!(published["publication_path"], "published/publication.json");
     let revised = server.publish(make("revised", day_one, 1)?)?;
     assert_eq!(
         published["publication"]["issue_id"],
@@ -264,9 +380,40 @@ fn publishes_checked_pdfs_with_stable_daily_identity_and_retry_without_moving_cu
         revised["publication"]["issue_id"]
     );
     assert_eq!(next["publication"]["revision"], 1);
+    let archived_publication_path = root
+        .path()
+        .join("data/issues")
+        .join(day_one.to_string())
+        .join("0001/publication.json");
+    let archived_publication_bytes = fs::read(&archived_publication_path)?;
+    first.visual_review.notes = "Additional retry observations are not a new publication.".into();
     let retry = server.publish(first)?;
     assert_eq!(retry["changed"], false);
     assert_eq!(retry["publication"], published["publication"]);
+    assert_eq!(retry["publication_path"], published["publication_path"]);
+    assert!(retry.get("export_error").is_none());
+    assert_eq!(
+        fs::read(&archived_publication_path)?,
+        archived_publication_bytes
+    );
+    assert_eq!(server.publications()?.len(), 3);
+    let issue = server.issue(IssueRequest {
+        issue_date: Some(day_one.to_string()),
+        revision: Some(1),
+        output_dir: "export-original".into(),
+    })?;
+    let manifest: Value = serde_json::from_slice(&fs::read(
+        workspace
+            .path()
+            .join(issue["publication_path"].as_str().ok_or("no manifest")?),
+    )?)?;
+    let archived_publication: Value = serde_json::from_slice(&archived_publication_bytes)?;
+    assert_eq!(issue["publication"], published["publication"]);
+    assert_eq!(manifest["publication"], archived_publication);
+    assert_eq!(
+        manifest["publication"]["visual_review"]["notes"],
+        original_notes
+    );
     let stale = make("stale", day_one, 2)?;
     assert!(
         server
@@ -275,13 +422,38 @@ fn publishes_checked_pdfs_with_stable_daily_identity_and_retry_without_moving_cu
             .to_string()
             .contains("newer cutoff")
     );
+    let mut blocked = make("blocked", day_two, 2)?;
+    let blocked_directory = workspace.path().join(&blocked.export_dir);
+    fs::create_dir(&blocked_directory)?;
+    let blocked_pdf =
+        blocked_directory.join(format!("AI每日晨报_{}.pdf", day_two.format("%Y%m%d")));
+    fs::write(&blocked_pdf, b"keep partial export evidence")?;
+    let accepted = server.publish(serde_json::from_value(serde_json::to_value(&blocked)?)?)?;
+    assert_eq!(accepted["changed"], true);
+    assert_eq!(accepted["publication"]["revision"], 2);
+    assert!(accepted["export_error"].is_string());
+    assert!(accepted.get("publication_path").is_none());
+    assert_eq!(server.publications()?.len(), 4);
+    blocked.visual_review.notes = "A retry cannot rewrite accepted review notes.".into();
+    let blocked_retry = server.publish(serde_json::from_value(serde_json::to_value(&blocked)?)?)?;
+    assert_eq!(blocked_retry["changed"], false);
+    assert_eq!(blocked_retry["publication"], accepted["publication"]);
+    assert!(blocked_retry["export_error"].is_string());
+    assert!(!blocked_directory.join("publication.json").exists());
+    assert_eq!(fs::read(&blocked_pdf)?, b"keep partial export evidence");
+    blocked.export_dir = "recovered-export".into();
+    let recovered = server.publish(blocked)?;
+    assert_eq!(recovered["changed"], false);
+    assert_eq!(recovered["publication"], accepted["publication"]);
+    assert!(recovered.get("export_error").is_none());
+    assert_eq!(server.publications()?.len(), 4);
     let context = server.context(ContextRequest {
         output_dir: "context".into(),
     })?;
-    assert_eq!(context["previous"]["publication"], next["publication"]);
+    assert_eq!(context["previous"]["publication"], recovered["publication"]);
     assert_eq!(
         context["search_window_start"],
-        next["publication"]["cutoff"]
+        recovered["publication"]["cutoff"]
     );
     Ok(())
 }

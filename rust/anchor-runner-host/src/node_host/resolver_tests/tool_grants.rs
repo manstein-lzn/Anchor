@@ -41,6 +41,10 @@ async fn resolver_returns_owned_anchor_tools_under_admitted_plugin_authority() {
         LocalInputs::new(root.path().to_path_buf(), None).unwrap(),
         fixed(&[]),
         None,
+        crate::execution::tool_assembly::new(crate::application::RunApplication::new(
+            root.path().into(),
+            root.path().into(),
+        )),
     )
     .with_library_root(Some(root.path().to_path_buf()));
 
@@ -180,6 +184,10 @@ async fn agent_tools_mount_plugins_without_a_run_policy_grant() {
         LocalInputs::new(state.clone(), None).unwrap(),
         fixed(&[]),
         None,
+        crate::execution::tool_assembly::new(crate::application::RunApplication::new(
+            state.clone(),
+            library.clone(),
+        )),
     )
     .with_library_root(Some(library));
     let request = NodeExecutionRequest {
@@ -281,6 +289,10 @@ async fn agent_command_tools_receive_only_the_nodes_frozen_local_inputs() {
         local,
         fixed(&[]),
         None,
+        crate::execution::tool_assembly::new(crate::application::RunApplication::new(
+            state.clone(),
+            root.path().into(),
+        )),
     );
     let mut request = NodeExecutionRequest {
         key: InvocationKey {

@@ -24,9 +24,13 @@ fn module(path: &str, name: &str) -> bool {
 // These are architectural roles, not baseline exemptions. In particular,
 // node_host remains a service even though the Run fence treats it as runtime.
 fn layer(path: &str) -> Layer {
-    if matches!(path, "main.rs" | "execution.rs") || path.starts_with("bin/") {
+    if matches!(
+        path,
+        "main.rs" | "execution.rs" | "execution/tool_assembly.rs"
+    ) || path.starts_with("bin/")
+    {
         Layer::Composition
-    } else if ["api", "pilot_tools", "node_tools"]
+    } else if ["api", "pilot_tools", "node_tools", "graph_task_tools"]
         .iter()
         .any(|name| module(path, name))
         || path == "channel_tools.rs"
@@ -42,7 +46,9 @@ fn layer(path: &str) -> Layer {
 fn target_layer(name: &str) -> Layer {
     match name {
         "application" => Layer::Application,
-        "api" | "pilot_tools" | "node_tools" | "channel_tools" => Layer::Adapter,
+        "api" | "pilot_tools" | "node_tools" | "channel_tools" | "graph_task_tools" => {
+            Layer::Adapter
+        }
         _ => Layer::Service,
     }
 }
@@ -122,7 +128,12 @@ fn check_count(
 
 #[test]
 fn layer_classification() {
-    for path in ["main.rs", "execution.rs", "bin/anchor-net-relay.rs"] {
+    for path in [
+        "main.rs",
+        "execution.rs",
+        "execution/tool_assembly.rs",
+        "bin/anchor-net-relay.rs",
+    ] {
         assert_eq!(layer(path), Layer::Composition, "{path}");
     }
     for path in [
@@ -133,6 +144,7 @@ fn layer_classification() {
         "node_tools.rs",
         "node_tools/library.rs",
         "channel_tools.rs",
+        "graph_task_tools.rs",
     ] {
         assert_eq!(layer(path), Layer::Adapter, "{path}");
     }
@@ -201,7 +213,6 @@ fn dependency_counting() {
 // Keep layer roles and per-file maxima enforced even for named debts.
 fn named_exception(path: &str) -> Option<&'static str> {
     match path {
-        "application/plugin_candidates.rs" => Some("G10-candidate-context"),
         "assistant.rs" => Some("G1-assistant-run"),
         "assistant_plugins.rs" => Some("G1-assistant-plugins"),
         "channel_supervisor/management.rs" => Some("G3-channel-management"),
@@ -212,7 +223,6 @@ fn named_exception(path: &str) -> Option<&'static str> {
         "local_inputs.rs" => Some("G1-local-inputs"),
         "node_host.rs" => Some("G2-node-host"),
         "node_host/conversation.rs" => Some("G2-node-conversation"),
-        "node_host/preparation.rs" => Some("G5-node-preparation"),
         "pilot_host.rs" => Some("G9-pilot-host"),
         _ => None,
     }

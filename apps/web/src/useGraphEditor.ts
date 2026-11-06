@@ -3,7 +3,7 @@ import { api, reason } from './api';
 import { createAgent, defaultModelReference } from './agentAuthoring';
 import { validateCallTargets } from './calls';
 import { addParallelRegion } from './parallel';
-import type { GraphPluginActivation, GraphSummary, NodePluginRef, OurGraph, OurOp } from './model';
+import type { GraphPluginActivation, GraphSummary, GraphTaskPolicy, NodePluginRef, OurGraph, OurOp } from './model';
 
 export type GraphPick = { kind: 'node' | 'edge' | 'agent'; id: string } | null;
 export type WorkbenchNotice = { kind: 'ok' | 'bad'; text: string } | null;
@@ -87,7 +87,7 @@ export function useGraphEditor(name: string, graphs: GraphSummary[], setNotice: 
   const selectedAgent = pick?.kind === 'agent' && doc ? doc.agents?.[pick.id] : undefined;
   const selectedEdge = pick?.kind === 'edge' && doc ? doc.edges[Number(pick.id)] : undefined;
 
-  // A node's `plugins` may be written as bare ids or as `{id, required, default}`;
+  // A node's `plugins` may be bare ids or carry requirement and capability policy;
   // the editor works on ids and preserves whatever declaration each keeps.
   const pluginRefs: NodePluginRef[] = selectedNode?.plugins ?? [];
   const selectedPlugins = pluginRefs.map(item => typeof item === 'string' ? item : item.id);
@@ -96,6 +96,13 @@ export function useGraphEditor(name: string, graphs: GraphSummary[], setNotice: 
       const prior = pluginRefs.find(item => (typeof item === 'string' ? item : item.id) === id);
       return prior ?? id;
     }),
+  });
+  const graphTaskRef = pluginRefs.find(item => (typeof item === 'string' ? item : item.id) === 'graph-tasks');
+  const graphTaskPolicy: GraphTaskPolicy | undefined = graphTaskRef === undefined ? undefined
+    : typeof graphTaskRef === 'string' ? {} : graphTaskRef.graph_tasks ?? {};
+  const setGraphTaskPolicy = (policy: GraphTaskPolicy) => patchNode({
+    plugins: pluginRefs.map(item => (typeof item === 'string' ? item : item.id) === 'graph-tasks'
+      ? { ...(typeof item === 'string' ? { id: item } : item), graph_tasks: policy } : item),
   });
   const patchNode = (fields: Partial<{ id: string; agent: string; with: string; plugins: NodePluginRef[] }>) => {
     if (!doc || !selectedNode) return;
@@ -200,7 +207,7 @@ export function useGraphEditor(name: string, graphs: GraphSummary[], setNotice: 
   }, [doc]);
 
   return { doc, dirty, pluginActivation, pick, setPick, patch, undo, redo, canUndo: Boolean(past.length), canRedo: Boolean(future.length),
-    focusNode, save, selectedNode, selectedOp, selectedAgent, selectedEdge, selectedPlugins, setPlugins,
+    focusNode, save, selectedNode, selectedOp, selectedAgent, selectedEdge, selectedPlugins, setPlugins, graphTaskPolicy, setGraphTaskPolicy,
     patchNode, patchAgent, patchEdge, patchOperation, addNode, addOperation, addParallel, addAgent, duplicateNode,
     removePicked, entry, routing };
 }

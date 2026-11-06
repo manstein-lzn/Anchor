@@ -1,9 +1,7 @@
 {
   "entry": "validate",
-  "objective": "生成便于快速浏览的中文《AI每日晨报》：通过四路独立发现、事件聚合、三路原文核实与综合编辑主动调查五类 AI 产业进展，精选真实新事件，按重要性排列，每条通常两三句话说明新变化与具体关注点，并链接已核读的一手原文。整期以约 4–5 页为目标，通过更多有价值的独立事件、具体证据和必要分析充实内容，不设固定条数。延续样刊的 A4 青绿编号版式、正常字号和自然分页，不以空白、重复或冗长单条凑页数。依据上期正式内容与实际上海时间确定窗口，完成独立事实与编辑审核、PDF 逐页视觉检查和本地发布。成品只呈现读者需要的新闻，不附内部核查或防御性说明。正式发布后按上海时间等待至指定发送时刻，通过 Graph Call 将本次发布凭证交给分发子图，经明确指定的机器人发送给明确指定的用户，并保留原助手会话的报告上下文。",
+  "objective": "生成便于快速浏览的中文《AI每日晨报》：通过四路独立发现、事件聚合、三路原文核实与综合编辑主动调查五类 AI 产业进展，精选真实新事件，按重要性排列，每条通常两三句话说明新变化与具体关注点，并链接已核读的一手原文。整期以约 4–5 页为目标，通过更多有价值的独立事件、具体证据和必要分析充实内容，不设固定条数。延续样刊的 A4 青绿编号版式、正常字号和自然分页，不以空白、重复或冗长单条凑页数。依据上期正式内容与实际上海时间确定窗口，完成独立事实与编辑审核、PDF 逐页视觉检查和本地发布。成品只呈现读者需要的新闻，不附内部核查或防御性说明。正式发布后按上海时间等待至指定交付时刻，最终仅交付工具生成的 PDF、report.json 和精确 publication.json，由委派任务的原助手接收结果并依用户授权处理发送；本图不指定机器人或用户、不创建计划、不发送消息。",
   "input": {
-    "bot_graph": "wecom-persistent-assistant",
-    "userid": null,
     "send_not_before": "09:05"
   },
   "agents": {
@@ -135,15 +133,14 @@
         "context"
       ],
       "writes": [
-        "feedback.json",
-        "publication.json"
+        "feedback.json"
       ],
-      "instructions": "你负责把已独立评审通过的晨报实际渲染、逐页观察并本地发布。先读 ai-morning-briefing Skill。必须已经经过 publish_gate；来源与冻结窗口从 /in/write/research.json 读取。核对 /in/review/review.json 的 decision=publish_gate、六项 checks 全通过、无 open，reviewed_artifact 与 /in/write/.anchor-artifact.json 的完整身份一致。否则写具体 feedback.json 回 write 或 repair，不能跳过评审。\n把 /in/write/report.json 原字节复制到工作区 report.json，调用 briefing.render(report_path=\"report.json\",output_dir=尚不存在的相对目录)。首次可用 delivery，反馈重入选择新的目录，保留旧文件但不交付。以工具真实返回读取 PDF、inspection 与 preview_paths；不要猜文件名、不要复用旧检查、自行改通过标志或为凑页修改新闻内容。对每个实际 preview_path 分别调用 briefing.preview(path)，在 MCP 返回的图片中真正观察每一页，检查文字、分组、编号、页码、来源、裁切与重叠。anchor_read 的 PNG 二进制元数据、图片路径或文字说明均不算视觉检查，未收到真实图片或无法看图时不得填写 approved=true。\n核对实际页数与约 4–5 页目标；不足 4 页且仍有可靠独立候选时回 write 补入，调查不足时回 repair 拓展；超过 5 页时回 write 去除重复和次要细节。充分调查后信息确实不足的较短版本按 Skill 保留内部依据，不能直接把两页短讯当作达标，不调整字号或空白凑页。正文或版式内容问题写反馈回 write，缺来源与关键事实回 repair；不可修改的工具/渲染器或权限故障如实失败，不用反馈轮数掩盖。反馈具体指出页码/条目、问题证据、修法与验收。全部静态与逐页视觉检查通过后保存 visual-review.json，按真实页码填写 approved、pages_reviewed、notes，并调用 publish(report_path, pdf_path, inspection_path, visual_review)。只有工具返回成功的 issue_id/revision 才算正式发布，把完整返回保存到 publication.json；不直接写插件 data/，不发送消息。尚未正式发布（含反馈与工具失败）时 publication.json 固定保存 {\"publication\":null,\"changed\":false}，明确表示本次没有发布，不得编造发布凭证。\n反馈分支生成 feedback.json，decision=write 或 repair，完成时 route 与之相同，files:[\"feedback.json\",\"publication.json\"]。成功后生成 decision=complete、issues=[] 的 feedback.json，final_result route=\"complete\"；files 必须逐项包含 feedback.json、report.json、visual-review.json、publication.json 及本次工具实际返回的 PDF、inspection、每张 PNG 的相对路径。禁止递归选择整个 delivery/ 混入旧产物。summary 用两三句话点出本期主要变化并附真实 PDF 交付路径；issue_id、revision、摘要和检查过程留在 publication.json 等内部产物，不写进读者导读，不声称定时或外部发送完成。"
+      "instructions": "你负责把已独立评审通过的晨报实际渲染、逐页观察并本地发布。先读 ai-morning-briefing Skill。必须已经经过 publish_gate；来源与冻结窗口从 /in/write/research.json 读取。核对 /in/review/review.json 的 decision=publish_gate、六项 checks 全通过、无 open，reviewed_artifact 与 /in/write/.anchor-artifact.json 的完整身份一致。否则写具体 feedback.json 回 write 或 repair，不能跳过评审。\n把 /in/write/report.json 原字节复制到工作区 report.json，调用 briefing.render(report_path=\"report.json\",output_dir=尚不存在的相对目录)。首次可用 delivery，反馈重入选择新的目录，保留旧文件但不交付。以工具真实返回读取 PDF、inspection 与 preview_paths；不要猜文件名、不要复用旧检查、自行改通过标志或为凑页修改新闻内容。对每个实际 preview_path 分别调用 briefing.preview(path)，在 MCP 返回的图片中真正观察每一页，检查文字、分组、编号、页码、来源、裁切与重叠。anchor_read 的 PNG 二进制元数据、图片路径或文字说明均不算视觉检查，未收到真实图片或无法看图时不得填写 approved=true。\n核对实际页数与约 4–5 页目标；不足 4 页且仍有可靠独立候选时回 write 补入，调查不足时回 repair 拓展；超过 5 页时回 write 去除重复和次要细节。充分调查后信息确实不足的较短版本按 Skill 保留内部依据，不能直接把两页短讯当作达标，不调整字号或空白凑页。正文或版式内容问题写反馈回 write，缺来源与关键事实回 repair；不可修改的工具/渲染器或权限故障如实失败，不用反馈轮数掩盖。反馈具体指出页码/条目、问题证据、修法与验收。全部静态与逐页视觉检查通过后保存 visual-review.json，按真实页码填写 approved、pages_reviewed、notes，并调用 publish(report_path, pdf_path, inspection_path, visual_review, export_dir=\"published\")。工具自行正式归档并导出精确的 published/publication.json、published/report.json 与 PDF，不再另行调用 issue，也不由模型转写工具返回 JSON。只有工具返回的非空 publication 才是已正式发布的事实；存在 export_error 表示已发布但交接失败，不等于未发布。成功凭证只使用工具写出的 published/publication.json，不手写、拼装、改写或复制成根目录 publication.json，不从 visual-review.json 重建归档备注；相同 report/PDF 重试必须保留原始 publication 及 notes。不直接写插件 data/，不发送消息。\n重入时先核查现场；完整 published/ 只有在确切版本、本次 report/PDF 双摘要和全部文件一致时才可由工具复用，部分目录不清空、不覆盖、不改选最新版。publish 返回 export_error、缺少完整导出或明确已发布但交接失败时，保留正式事实，不回 write/repair 或填写 publication=null；写 feedback.json 为 decision=complete、status=failed、summary 说明已发布但交接未完成并附实际错误、issues 保留问题，final_result route=\"complete\"、files:[\"feedback.json\"]，由完成关卡结算失败，不进入等待。publish 结果不明时先核查工具观察和归档现场，不能冒充未发布或已成功。\n尚未正式发布的反馈分支，publication.json 固定保存 {\"publication\":null,\"changed\":false}，feedback.json 的 decision=write 或 repair，完成时 route 与之相同，files:[\"feedback.json\",\"publication.json\"]。正式发布且完整导出成功后生成 decision=complete、issues=[] 的 feedback.json，final_result route=\"complete\"；files 必须逐项包含 feedback.json、report.json、visual-review.json、published/publication.json、published/report.json、工具实际返回的 published/ PDF，以及本次渲染的 inspection、每张 PNG 的相对路径，不交付根目录成功凭证。禁止递归选择整个渲染目录或 published/ 混入其他产物。最终 wait_delivery 以代码校验正式 PDF/正文双摘要及当前已审核正文，等待到指定上海时间后只交付 published/ 下 PDF、report.json、publication.json 三件成品，预览与内部证据留在上游 Artifact。原委派助手接收任务结果后依用户策略选择发送，本图不指定机器人/用户、不创建计划或发送消息。summary 用两三句话点出本期主要变化并附真实 PDF 交付路径；issue_id、revision、摘要和检查过程留在内部产物，不写进读者导读，不声称外部发送完成。"
     }
   },
   "ops": {
     "validate": {
-      "run": "printf '%s' \"$ANCHOR_INPUT\" | jq -e '([.bot_graph,.userid] | all(.[]; type == \"string\" and test(\"[^[:space:]]\"))) and (.send_not_before == null or (.send_not_before | type == \"string\" and test(\"^([01][0-9]|2[0-3]):[0-5][0-9]$\")))' > /dev/null"
+      "run": "printf '%s' \"$ANCHOR_INPUT\" | jq -e '.send_not_before == null or (.send_not_before | type == \"string\" and test(\"^([01][0-9]|2[0-3]):[0-5][0-9]$\"))' > /dev/null"
     },
     "discover-fanout": {
       "fanout": {
@@ -170,40 +167,19 @@
     },
     "complete": {
       "reads": [
-        "feedback.json",
-        "publication.json"
+        "feedback.json"
       ],
-      "run": "jq -e -s 'length == 2 and (.[0] | .decision == \"complete\" and .status != \"failed\" and (.issues | type == \"array\" and all(.[]; .status != \"open\"))) and (.[1].publication | (.issue_id | type == \"string\" and length > 0) and (.revision | type == \"number\" and . >= 1 and floor == .) and (.pdf_sha256 | type == \"string\" and test(\"^[0-9a-f]{64}$\")))' /in/render_publish/feedback.json /in/render_publish/publication.json"
+      "run": "set -eu\njq -e -s 'if length != 1 then error(\"briefing completion: expected one feedback document\") else .[0] | if .decision == \"complete\" and .status != \"failed\" and (.issues | type == \"array\" and all(.[]; .status != \"open\")) then true else error(\"briefing completion rejected: \" + (.summary // \"feedback is not successful\")) end end' /in/render_publish/feedback.json > /dev/null\njq -e -s 'if length != 1 then error(\"briefing completion: expected one publication document\") else .[0] | (.publication | type == \"object\") and (.publication.issue_date | type == \"string\" and test(\"^[0-9]{4}-[0-9]{2}-[0-9]{2}$\")) and (.publication.issue_id == (\"ai-daily-\" + (.publication.issue_date | gsub(\"-\"; \"\")))) and (.publication.revision | type == \"number\" and . >= 1 and floor == .) and ([.publication.pdf_sha256,.publication.report_sha256] | all(.[]; type == \"string\" and test(\"^[0-9a-f]{64}$\"))) and (.pdf_path == (\"published/AI每日晨报_\" + (.publication.issue_date | gsub(\"-\"; \"\")) + \".pdf\")) and (.report_path == \"published/report.json\") end' /in/render_publish/published/publication.json > /dev/null"
     },
     "wait_delivery": {
       "reads": [
-        "publication.json"
+        "report.json"
+      ],
+      "writes": [
+        "published"
       ],
       "wall_time_limit_seconds": 86400,
-      "run": "set -eu\nsend_time=$(printf '%s' \"$ANCHOR_INPUT\" | jq -r '.send_not_before // empty')\nif [ -n \"$send_time\" ]; then\n  issue_date=$(jq -r '.publication.issue_date' /in/render_publish/publication.json)\n  target=$(date -d \"$issue_date $send_time +0800\" +%s)\n  remaining=$((target - $(date +%s)))\n  if [ \"$remaining\" -gt 0 ]; then sleep \"$remaining\"; fi\nfi\nprintf 'Briefing ready for delivery\\n'"
-    },
-    "deliver": {
-      "call": {
-        "graph": "ai-morning-briefing-delivery",
-        "mode": "wait",
-        "input_map": {
-          "bot_graph": "/bot_graph",
-          "userid": "/userid"
-        },
-        "files": [
-          {
-            "node": "render_publish",
-            "path": "publication.json",
-            "as": "publication.json"
-          }
-        ],
-        "result": {
-          "node": "send",
-          "files": [
-            "receipt.json"
-          ]
-        }
-      }
+      "run": "set -eu\nmanifest=/in/render_publish/published/publication.json\npdf=$(jq -er '.pdf_path' \"$manifest\")\npdf_sha=$(jq -er '.publication.pdf_sha256' \"$manifest\")\nreport_sha=$(jq -er '.publication.report_sha256' \"$manifest\")\nif ! printf '%s  %s\\n' \"$pdf_sha\" \"/in/render_publish/$pdf\" | sha256sum -c -; then\n  printf '%s\\n' 'briefing handoff: PDF digest check failed' >&2\n  exit 1\nfi\nif ! printf '%s  %s\\n' \"$report_sha\" /in/render_publish/published/report.json | sha256sum -c -; then\n  printf '%s\\n' 'briefing handoff: report digest check failed' >&2\n  exit 1\nfi\nif ! printf '%s  %s\\n' \"$report_sha\" /in/write/report.json | sha256sum -c -; then\n  printf '%s\\n' 'briefing handoff: published report differs from current approved draft' >&2\n  exit 1\nfi\nsend_time=$(printf '%s' \"$ANCHOR_INPUT\" | jq -r '.send_not_before // empty')\nif [ -n \"$send_time\" ]; then\n  issue_date=$(jq -er '.publication.issue_date' \"$manifest\")\n  target=$(date -d \"$issue_date $send_time +0800\" +%s)\n  remaining=$((target - $(date +%s)))\n  if [ \"$remaining\" -gt 0 ]; then sleep \"$remaining\"; fi\nfi\nmkdir -p published\ncp \"/in/render_publish/$pdf\" published/\ncp /in/render_publish/published/report.json /in/render_publish/published/publication.json published/\nprintf 'Briefing product ready for the originating assistant\\n'"
     }
   },
   "nodes": [
@@ -345,10 +321,6 @@
     {
       "id": "wait_delivery",
       "op": "wait_delivery"
-    },
-    {
-      "id": "deliver",
-      "op": "deliver"
     }
   ],
   "edges": [
@@ -467,10 +439,6 @@
     {
       "from": "complete",
       "to": "wait_delivery"
-    },
-    {
-      "from": "wait_delivery",
-      "to": "deliver"
     }
   ]
 }

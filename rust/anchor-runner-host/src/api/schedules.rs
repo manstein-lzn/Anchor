@@ -1,4 +1,5 @@
 use super::*;
+use crate::task_delegation::TaskOrigin;
 use chrono::{Datelike, Duration, Local, NaiveDateTime, NaiveTime, Timelike};
 use rustix::fs::FlockOperation;
 use serde::{Deserialize, Serialize};
@@ -21,7 +22,7 @@ pub(super) type ScheduleStoreHandle = Arc<Mutex<ScheduleStore>>;
 mod management;
 pub(super) use management::*;
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ScheduleItem {
     pub(super) id: String,
@@ -33,6 +34,12 @@ pub(super) struct ScheduleItem {
     pub(super) next_at: String,
     #[serde(default = "default_enabled")]
     pub(super) enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) delegation: Option<TaskOrigin>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) remaining: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) group: Option<String>,
 }
 
 fn empty_object() -> Value {
@@ -46,7 +53,21 @@ pub(super) struct ScheduleStore {
     pub(super) path: PathBuf,
     pub(super) items: Vec<ScheduleItem>,
     creation_requests: Vec<ScheduleCreationRequest>,
+    in_flight: std::collections::BTreeSet<String>,
     _owner_lease: anchor_file_lease::FileLease,
+}
+
+struct ScheduleDispatchLease {
+    store: ScheduleStoreHandle,
+    id: String,
+}
+
+impl Drop for ScheduleDispatchLease {
+    fn drop(&mut self) {
+        if let Ok(mut store) = self.store.lock() {
+            store.in_flight.remove(&self.id);
+        }
+    }
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -55,6 +76,8 @@ struct ScheduleCreationRequest {
     key: String,
     content: Value,
     schedule: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    group: Option<String>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -126,6 +149,12 @@ impl ScheduleStore {
                 .map_err(|_| format!("invalid schedule {} next_at", item.id))?;
             normalize_rule(&item.rule, None)
                 .map_err(|message| format!("invalid schedule {} rule: {message}", item.id))?;
+            if item.enabled && item.remaining == Some(0) {
+                return Err(format!(
+                    "enabled schedule {} has no remaining admissions",
+                    item.id
+                ));
+            }
         }
         // The file lease supplements the deployment writer lease: different
         // state roots may still be configured to share this exact JSON path.
@@ -133,6 +162,7 @@ impl ScheduleStore {
             path,
             items,
             creation_requests,
+            in_flight: Default::default(),
             _owner_lease: owner_lease,
         }));
         if create_empty {
@@ -197,37 +227,6 @@ impl ScheduleStore {
     }
 }
 
-pub(super) fn skip_missed_schedules(state: &ApiState, now: NaiveDateTime) -> Result<(), String> {
-    let mut store = state
-        .schedules
-        .lock()
-        .map_err(|_| "schedule store unavailable")?;
-    let previous = store.items.clone();
-    let mut changed = false;
-    for item in &mut store.items {
-        if !item.enabled
-            || parse_local_datetime(&item.next_at).map_err(|message| message.to_string())? > now
-        {
-            continue;
-        }
-        if rule_type(&item.rule)? == "once" {
-            item.enabled = false;
-        } else {
-            let next = next_after(&item.rule, now)?;
-            item.next_at = format_local_datetime(next);
-        }
-        changed = true;
-    }
-    if !changed {
-        return Ok(());
-    }
-    if let Err(message) = store.persist() {
-        store.items = previous;
-        return Err(message);
-    }
-    Ok(())
-}
-
 /// Retention (design card 003): one pass now, then one every interval. The
 /// first tick of a Tokio interval is immediate. A pass that fails is logged
 /// and retried at the next tick; it never stops the Host.
@@ -272,64 +271,142 @@ pub(super) fn start_schedule_ticker(state: ApiState) {
 }
 
 pub(super) async fn tick_schedules(state: &ApiState, now: NaiveDateTime) -> Result<(), String> {
-    let due = {
-        let mut store = state
+    let mut due = {
+        let store = state
             .schedules
             .lock()
             .map_err(|_| "schedule store unavailable")?;
         let mut due = Vec::new();
-        let previous = store.items.clone();
-        let mut changed = false;
-        for item in &mut store.items {
-            if !item.enabled {
+        for item in &store.items {
+            if !item.enabled || store.in_flight.contains(&item.id) {
                 continue;
             }
             let at = parse_local_datetime(&item.next_at)?;
-            if at > now {
-                continue;
+            if at <= now {
+                due.push((at, item.clone()));
             }
-            if rule_type(&item.rule)? == "once" {
-                item.enabled = false;
-            } else {
-                item.next_at = format_local_datetime(next_after(&item.rule, now)?);
-            }
-            changed = true;
-            if now - at <= Duration::seconds(1) {
-                due.push((item.graph.clone(), item.input.clone(), item.id.clone(), at));
-            }
-        }
-        if changed && let Err(message) = store.persist() {
-            store.items = previous;
-            return Err(message);
         }
         due
     };
-    for (graph, input, identifier, at) in due {
-        let payload = json!({
-            "graph": graph,
-            "input": input,
-            "trigger": {
-                "source": "schedule",
-                "schedule": identifier,
-                "scheduled_at": format_local_datetime(at),
-            }
-        });
-        match super::runs::trigger_as_owner(
-            state.clone(),
-            payload,
-            super::oauth::binding_owner(&state.owner),
-        )
-        .await
+    due.sort_by(|(left_at, left), (right_at, right)| {
+        (left_at, &left.id).cmp(&(right_at, &right.id))
+    });
+    // A plan's persisted next_at is its earliest unaccepted occurrence. Retry
+    // that identity after busy/errors or a crash before the cursor was saved.
+    for (at, item) in due {
+        let next = if rule_type(&item.rule)? == "once" || item.remaining == Some(1) {
+            None
+        } else {
+            Some(format_local_datetime(next_after(&item.rule, at)?))
+        };
         {
-            Ok((status, _)) if status.is_success() => {}
-            Ok((status, _)) => eprintln!("schedule occurrence skipped with HTTP {status}"),
-            Err(response) => eprintln!(
-                "schedule occurrence skipped with HTTP {}",
-                response.status()
-            ),
+            let mut store = state
+                .schedules
+                .lock()
+                .map_err(|_| "schedule store unavailable")?;
+            if store.items.iter().find(|current| current.id == item.id) != Some(&item)
+                || !store.in_flight.insert(item.id.clone())
+            {
+                continue;
+            }
+        }
+        let _dispatch = ScheduleDispatchLease {
+            store: state.schedules.clone(),
+            id: item.id.clone(),
+        };
+        let trigger = serde_json::from_value(json!({
+            "source":"schedule", "schedule":item.id, "scheduled_at":item.next_at,
+        }))
+        .map_err(|error| format!("schedule trigger: {error}"))?;
+        let request_id = occurrence_request_id(&item.id, &item.next_at);
+        let admitted = if let Some(origin) = &item.delegation {
+            state
+                .application
+                .admit_delegated_graph(origin, &item.graph, item.input.clone(), request_id, trigger)
+                .await
+        } else {
+            state
+                .application
+                .admit_graph_request(
+                    &item.graph,
+                    item.input.clone(),
+                    None,
+                    trigger,
+                    Some(super::oauth::binding_owner(&state.owner)),
+                    Some(request_id),
+                )
+                .await
+        };
+        match admitted {
+            Ok(_) => {
+                let mut store = state
+                    .schedules
+                    .lock()
+                    .map_err(|_| "schedule store unavailable")?;
+                let Some(index) = store.items.iter().position(|current| current.id == item.id)
+                else {
+                    return Err("an in-flight schedule disappeared".into());
+                };
+                let mut accepted = item.clone();
+                if let Some(remaining) = &mut accepted.remaining {
+                    *remaining = remaining.saturating_sub(1);
+                }
+                match next {
+                    Some(next) => accepted.next_at = next,
+                    None => accepted.enabled = false,
+                }
+                store.items[index] = accepted;
+                if let Err(message) = store.persist() {
+                    store.items[index] = item;
+                    return Err(message);
+                }
+            }
+            Err(error) => {
+                eprintln!(
+                    "schedule {} occurrence {} remains pending: {error:?}",
+                    item.id, item.next_at
+                );
+                if let Some(origin) = &item.delegation {
+                    state
+                        .application
+                        .record_schedule_blocked(
+                            origin,
+                            &item.id,
+                            &item.next_at,
+                            &item.graph,
+                            &error,
+                        )
+                        .map_err(|failure| {
+                            format!("record pending schedule notification: {failure:?}")
+                        })?;
+                }
+            }
         }
     }
     Ok(())
+}
+
+fn occurrence_request_id(schedule: &str, at: &str) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"anchor-schedule-occurrence-v1\0");
+    digest.update(serde_json::to_vec(&(schedule, at)).expect("schedule identity is serializable"));
+    format!("schedule-{:x}", digest.finalize())
+}
+
+fn schedule_projection(item: &ScheduleItem) -> Value {
+    let mut value = serde_json::to_value(item).expect("schedule is serializable");
+    value
+        .as_object_mut()
+        .expect("schedule is an object")
+        .remove("delegation");
+    if let Some(origin) = &item.delegation
+        && let crate::task_delegation::TaskOriginSource::OperatorAssignment { instruction, .. } =
+            &origin.source
+    {
+        value["assignment"] = json!({"session":origin.session,"graph":origin.graph,
+            "node_id":origin.node_id(),"source":"operator_assignment","instruction":instruction});
+    }
+    value
 }
 
 #[allow(clippy::result_large_err)]
@@ -351,25 +428,47 @@ pub(super) fn timeline_projection(
     for item in &schedules.items {
         let created = parse_local_datetime(&item.created_at)
             .map_err(|message| error(StatusCode::INTERNAL_SERVER_ERROR, message))?;
-        let mut candidates = occurrences(&item.rule, created, start, end)
+        let cursor = parse_local_datetime(&item.next_at)
             .map_err(|message| error(StatusCode::INTERNAL_SERVER_ERROR, message))?;
-        candidates.extend(
-            occurrences(
-                &item.rule,
-                created,
-                now.date().and_hms_opt(0, 0, 0).unwrap(),
-                future_end,
-            )
-            .map_err(|message| error(StatusCode::INTERNAL_SERVER_ERROR, message))?,
-        );
+        let first = next_after(&item.rule, created)
+            .map_err(|message| error(StatusCode::INTERNAL_SERVER_ERROR, message))?;
+        let history_end = if !item.enabled && item.delegation.is_none() && item.remaining.is_none()
+        {
+            cursor + Duration::seconds(1)
+        } else {
+            cursor
+        }
+        .min(now + Duration::seconds(1));
+        let mut candidates = occurrences(&item.rule, first, start, end.min(history_end), None)
+            .map_err(|message| error(StatusCode::INTERNAL_SERVER_ERROR, message))?;
+        if item.enabled {
+            for (from, to) in [
+                (start, end),
+                (now.date().and_hms_opt(0, 0, 0).unwrap(), future_end),
+            ] {
+                candidates.extend(
+                    occurrences(&item.rule, cursor, from, to, item.remaining)
+                        .map_err(|message| error(StatusCode::INTERNAL_SERVER_ERROR, message))?,
+                );
+            }
+        }
+        // Accepted Runs remain history even after timing edits or a pause;
+        // a paused scoped cursor itself is not a missed execution.
+        candidates.extend(runs.iter().filter_map(|run| {
+            if run.pointer("/trigger/schedule").and_then(Value::as_str) != Some(&item.id) {
+                return None;
+            }
+            let at = run
+                .pointer("/trigger/scheduled_at")
+                .and_then(Value::as_str)
+                .and_then(|value| parse_local_datetime(value).ok())?;
+            ((start <= at && at < end) || (now.date() <= at.date() && at < future_end))
+                .then_some(at)
+        }));
         candidates.sort_unstable();
         candidates.dedup();
         for at in candidates {
             let scheduled_at = format_local_datetime(at);
-            if at > now {
-                projected.push(json!({"schedule":item.id,"graph":item.graph,"scheduled_at":scheduled_at,"status":"planned"}));
-                continue;
-            }
             if let Some(run) = runs.iter().find(|run| {
                 run.pointer("/trigger/schedule").and_then(Value::as_str) == Some(&item.id)
                     && run.pointer("/trigger/scheduled_at").and_then(Value::as_str)
@@ -377,8 +476,12 @@ pub(super) fn timeline_projection(
             }) {
                 projected.push(
                     json!({"schedule":item.id,"graph":item.graph,"scheduled_at":scheduled_at,
-                    "run":run.get("run"),"status":run.get("status")}),
+                    "run":run.get("run"),"status":run.pointer("/projection/phase").and_then(Value::as_str).unwrap_or("unavailable")}),
                 );
+                continue;
+            }
+            if at > now {
+                projected.push(json!({"schedule":item.id,"graph":item.graph,"scheduled_at":scheduled_at,"status":"planned"}));
                 continue;
             }
             let busy = runs.iter().any(|run| {
@@ -408,7 +511,9 @@ pub(super) fn timeline_projection(
             });
             projected.push(
                 json!({"schedule":item.id,"graph":item.graph,"scheduled_at":scheduled_at,
-                "status":if busy {"missed_busy"} else {"missed_downtime"}}),
+                "status":if item.enabled && at >= cursor {
+                    if busy {"pending_busy"} else {"pending"}
+                } else if busy {"missed_busy"} else {"missed_downtime"}}),
             );
         }
     }
@@ -423,8 +528,13 @@ pub(super) fn timeline_schedules(state: &ApiState) -> Result<Value, HttpResponse
             "schedule store unavailable",
         )
     })?;
-    serde_json::to_value(&store.items)
-        .map_err(|message| error(StatusCode::INTERNAL_SERVER_ERROR, message.to_string()))
+    Ok(json!(
+        store
+            .items
+            .iter()
+            .map(schedule_projection)
+            .collect::<Vec<_>>()
+    ))
 }
 
 fn parse_projected_time(value: &str) -> Option<NaiveDateTime> {
@@ -462,8 +572,8 @@ fn normalize_rule(value: &Value, now: Option<NaiveDateTime>) -> Result<Value, St
             }
             let seconds = object
                 .get("seconds")
-                .and_then(Value::as_u64)
-                .filter(|value| *value > 0)
+                .and_then(Value::as_i64)
+                .filter(|value| *value > 0 && Duration::try_seconds(*value).is_some())
                 .ok_or("interval.seconds must be a positive integer")?;
             Ok(json!({"type":"interval","seconds":seconds}))
         }
@@ -559,15 +669,19 @@ fn next_after(rule: &Value, after: NaiveDateTime) -> Result<NaiveDateTime, Strin
 
 fn occurrences(
     rule: &Value,
-    created: NaiveDateTime,
+    first: NaiveDateTime,
     start: NaiveDateTime,
     end: NaiveDateTime,
+    limit: Option<u32>,
 ) -> Result<Vec<NaiveDateTime>, String> {
+    if start >= end || limit == Some(0) {
+        return Ok(vec![]);
+    }
     let rule = normalize_rule(rule, None)?;
     let kind = rule_type(&rule)?;
     if kind == "once" {
         let at = parse_local_datetime(rule["at"].as_str().ok_or("once.at is missing")?)?;
-        return Ok(if start <= at && at < end {
+        return Ok(if first <= at && start <= at && at < end {
             vec![at]
         } else {
             vec![]
@@ -579,10 +693,8 @@ fn occurrences(
             .as_i64()
             .ok_or("interval.seconds is invalid")?;
         let step = Duration::seconds(seconds);
-        let first = created
-            .checked_add_signed(step)
-            .ok_or("interval out of range")?;
         let mut cursor = first;
+        let mut index = 0_u64;
         if cursor < start {
             let elapsed = start.signed_duration_since(cursor).num_seconds();
             let count = (elapsed / seconds).max(0);
@@ -590,27 +702,33 @@ fn occurrences(
             cursor = cursor
                 .checked_add_signed(Duration::seconds(advance))
                 .ok_or("interval out of range")?;
+            index = count as u64;
             while cursor < start {
                 cursor = cursor
                     .checked_add_signed(step)
                     .ok_or("interval out of range")?;
+                index += 1;
             }
         }
-        while cursor < end {
-            if cursor >= created {
-                result.push(cursor);
-            }
+        while cursor < end && limit.is_none_or(|limit| index < u64::from(limit)) {
+            result.push(cursor);
+            index += 1;
             cursor = cursor
                 .checked_add_signed(step)
                 .ok_or("interval out of range")?;
         }
         return Ok(result);
     }
-    let mut current = next_after(&rule, start - Duration::seconds(1))?;
-    while current < end {
-        if current >= created {
+    let mut current = first;
+    if limit.is_none() && current < start {
+        current = next_after(&rule, start - Duration::seconds(1))?;
+    }
+    let mut index = 0_u64;
+    while current < end && limit.is_none_or(|limit| index < u64::from(limit)) {
+        if current >= start {
             result.push(current);
         }
+        index += 1;
         current = next_after(&rule, current)?;
     }
     Ok(result)
@@ -659,3 +777,11 @@ mod tests;
 #[cfg(test)]
 #[path = "schedules_management_tests.rs"]
 mod management_tests;
+
+#[cfg(test)]
+#[path = "schedules_tasks_tests.rs"]
+mod task_tests;
+
+#[cfg(test)]
+#[path = "schedules_assignment_tests.rs"]
+mod assignment_tests;

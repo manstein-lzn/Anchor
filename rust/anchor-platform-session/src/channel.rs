@@ -20,6 +20,7 @@ mod assistant;
 mod notifications;
 
 pub(crate) use assistant::ensure_assistant_run_scope;
+pub(crate) use assistant::{is_task_turn, recoverable_task_run};
 
 const MAX_CHANNEL_VALUE_BYTES: usize = 256;
 const MAX_INBOUND_ID_BYTES: usize = 128;
@@ -35,6 +36,52 @@ const MAX_DELIVERY_ERROR_BYTES: usize = 4 * 1024;
 type IdentityParts = (String, String, String, String, String);
 
 impl SessionStore {
+    /// The immutable channel binding, not the last participant's message. Group
+    /// Sessions therefore have no sender; callers must not infer a private target.
+    pub fn channel_identity(
+        &self,
+        owner: &str,
+        session: &str,
+    ) -> Result<ChannelIdentity, SessionError> {
+        store::validate_lookup(owner, session)?;
+        let connection = self.lock()?;
+        store::read_session(&connection, owner, session)?;
+        let (source, account, kind, conversation_id, participant_id): IdentityParts = connection
+            .query_row(
+                "SELECT source, account, conversation_kind, conversation_id, participant_id
+                 FROM channel_sessions WHERE owner = ?1 AND session_id = ?2",
+                params![owner, session],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or(SessionError::Missing)?;
+        let account = accounts::canonical_account(&connection, owner, &source, &account)?;
+        let conversation_kind = match kind.as_str() {
+            "single" => ChannelConversationKind::Single,
+            "group" => ChannelConversationKind::Group,
+            _ => {
+                return Err(SessionError::Storage(
+                    "invalid channel conversation kind".into(),
+                ));
+            }
+        };
+        Ok(ChannelIdentity {
+            source,
+            account: (!account.is_empty()).then_some(account),
+            conversation_kind,
+            conversation_id,
+            sender_id: participant_id,
+        })
+    }
+
     pub fn admit_channel_inbound(
         &self,
         owner: &str,
@@ -116,12 +163,14 @@ impl SessionStore {
             ));
         }
         let previous = if let Some(mut previous) = previous {
-            let previous_relation = read_inbound_by_turn(&transaction, &session.id, &previous.id)?
-                .ok_or_else(|| {
-                    SessionError::Storage(
-                        "running channel Turn has no inbound relation; refusing replacement".into(),
-                    )
-                })?;
+            let previous_relation = read_inbound_by_turn(&transaction, &session.id, &previous.id)?;
+            if previous_relation.is_none()
+                && !is_task_turn(&transaction, &session.id, &previous.id)?
+            {
+                return Err(SessionError::Storage(
+                    "running channel Turn has no input relation; refusing replacement".into(),
+                ));
+            }
             turns::finish(
                 &transaction,
                 owner,
@@ -130,7 +179,7 @@ impl SessionStore {
                 TurnStatus::Interrupted,
                 Some("superseded by a newer channel message"),
             )?;
-            Some(previous_relation)
+            previous_relation
         } else {
             None
         };
@@ -360,6 +409,11 @@ impl SessionStore {
         if !snapshot.run_ids.is_empty() {
             return Err(SessionError::Conflict(
                 "channel Sessions with retained runs cannot be deleted".into(),
+            ));
+        }
+        if !Self::pending_results(&transaction, session)?.is_empty() {
+            return Err(SessionError::Conflict(
+                "channel Session has unhandled task results".into(),
             ));
         }
         let unfinished: bool = transaction.query_row(
@@ -842,18 +896,8 @@ fn validate_manifest(manifest: &AttachmentManifest) -> Result<(), SessionError> 
     let mut paths = BTreeSet::new();
     let mut total = 0u64;
     for file in &manifest.files {
-        if file.name.is_empty()
-            || file.name.len() > 200
-            || file.name == "."
-            || file.name == ".."
-            || Path::new(&file.name)
-                .file_name()
-                .and_then(|name| name.to_str())
-                != Some(file.name.as_str())
-            || file.name.contains('\\')
-            || file.name.chars().any(char::is_control)
-            || !names.insert(file.name.clone())
-        {
+        validate_file_name(&file.name)?;
+        if !names.insert(file.name.clone()) {
             return Err(SessionError::Invalid(
                 "channel attachment names must be unique safe file names".into(),
             ));
@@ -899,6 +943,19 @@ fn validate_manifest(manifest: &AttachmentManifest) -> Result<(), SessionError> 
         return Err(SessionError::Invalid(
             "channel attachment manifest is too large".into(),
         ));
+    }
+    Ok(())
+}
+
+fn validate_file_name(name: &str) -> Result<(), SessionError> {
+    if name.is_empty()
+        || name.len() > 200
+        || matches!(name, "." | "..")
+        || Path::new(name).file_name().and_then(|name| name.to_str()) != Some(name)
+        || name.contains('\\')
+        || name.chars().any(char::is_control)
+    {
+        return Err(SessionError::Invalid("invalid selected file name".into()));
     }
     Ok(())
 }

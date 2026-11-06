@@ -70,6 +70,17 @@ pub(crate) struct Publication {
     source: PathBuf,
     pub(crate) graph_digest: String,
     pub(crate) bindings: BTreeMap<String, PluginBinding>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) task_graphs: BTreeMap<String, String>,
+}
+
+impl Publication {
+    pub(crate) fn task_grants(&self) -> crate::task_delegation::GraphTaskGrants {
+        crate::task_delegation::GraphTaskGrants {
+            bindings: self.bindings.clone(),
+            targets: self.task_graphs.clone(),
+        }
+    }
 }
 
 fn publication_path(root: &Path, source: &Path, digest: &str) -> Result<PathBuf, String> {
@@ -83,20 +94,39 @@ fn publication_path(root: &Path, source: &Path, digest: &str) -> Result<PathBuf,
 
 /// Called only by the operator Graph save path while holding its Graph lease.
 /// Agent-authored Graph updates must never call this authorization operation.
+#[cfg(test)]
 pub(crate) fn publish(
     root: &Path,
     source: &Path,
     snapshot: &GraphSnapshot,
     library_root: &Path,
 ) -> Result<(), String> {
+    publish_with_tasks(root, source, snapshot, library_root, &BTreeMap::new())
+}
+
+pub(crate) fn publish_with_tasks(
+    root: &Path,
+    source: &Path,
+    snapshot: &GraphSnapshot,
+    library_root: &Path,
+    tasks: &BTreeMap<String, GraphSnapshot>,
+) -> Result<(), String> {
     let _library = crate::plugin_library::PluginLibrary::new(library_root)
         .catalog_read_guard()
         .map_err(|error| error.to_string())?;
     let catalog = Catalog::new(library_root);
-    let ids = snapshot
-        .nodes
-        .iter()
-        .flat_map(|node| node.plugins.iter().map(|plugin| plugin.id.clone()))
+    let ids = std::iter::once(snapshot)
+        .chain(tasks.values())
+        .flat_map(|snapshot| &snapshot.nodes)
+        .flat_map(|node| &node.plugins)
+        .flat_map(|plugin| {
+            std::iter::once(plugin.id.clone()).chain(
+                plugin
+                    .graph_tasks
+                    .iter()
+                    .flat_map(|policy| policy.plugins.iter().cloned()),
+            )
+        })
         .collect::<std::collections::BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
@@ -107,7 +137,30 @@ pub(crate) fn publish(
         .map(|binding| (binding.id.clone(), binding))
         .collect::<BTreeMap<_, _>>();
     // A dependency-derived network grant is authorized with the same publication.
-    if snapshot.agents.values().any(|agent| agent.network)
+    let network_required = ids.iter().any(|id| {
+        catalog
+            .metadata(id)
+            .is_ok_and(|metadata| crate::plugin_network::metadata_requires_network(&metadata))
+    }) || std::iter::once(snapshot)
+        .chain(tasks.values())
+        .any(|snapshot| {
+            snapshot.agents.values().any(|agent| agent.network)
+                || snapshot
+                    .ops
+                    .values()
+                    .any(|op| op.get("network").and_then(serde_json::Value::as_bool) == Some(true))
+                || snapshot
+                    .nodes
+                    .iter()
+                    .flat_map(|node| &node.plugins)
+                    .any(|plugin| {
+                        plugin
+                            .graph_tasks
+                            .as_ref()
+                            .is_some_and(|policy| policy.network)
+                    })
+        });
+    if network_required
         && let Ok(mut network) = catalog.resolve(&[crate::plugin_network::NETWORK_PLUGIN.into()])
         && let Some(network) = network.pop()
     {
@@ -120,8 +173,18 @@ pub(crate) fn publish(
             .map_err(|error| format!("Graph identity unavailable: {error:?}"))?,
         graph_digest: digest.clone(),
         bindings,
+        task_graphs: tasks
+            .iter()
+            .map(|(name, snapshot)| {
+                snapshot
+                    .digest()
+                    .map(|digest| (name.clone(), digest))
+                    .map_err(|error| error.to_string())
+            })
+            .collect::<Result<_, _>>()?,
     };
     if let Some(existing) = self::publication(root, source, &digest)?
+        && existing.task_graphs == publication.task_graphs
         && existing.bindings.len() == publication.bindings.len()
         && existing.bindings.iter().all(|(id, frozen)| {
             publication
@@ -189,6 +252,8 @@ pub(crate) struct TurnPluginPolicy {
     pub(crate) reasons: Vec<String>,
     pub(crate) by_declaration: Vec<String>,
     pub(crate) by_switch: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) task_grants: Option<crate::task_delegation::GraphTaskGrants>,
 }
 
 pub(crate) fn turn_path(root: &Path, run: &str, session: &str, turn: &str) -> PathBuf {

@@ -1,12 +1,13 @@
 //! Shared bounded attachment bytes and immutable storage; identity belongs to callers.
 use crate::create_durable_directory;
+use crate::host_fs::sync_directory;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use image::ImageFormat;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeSet,
-    fs::{self, File, OpenOptions},
+    fs::{self, OpenOptions},
     io::{Read, Write},
     path::{Component, Path, PathBuf},
 };
@@ -196,12 +197,6 @@ pub(crate) fn checked_path(path: &Path) -> Result<(), String> {
         }
     }
     Ok(())
-}
-
-pub(crate) fn sync_directory(path: &Path) -> Result<(), String> {
-    File::open(path)
-        .and_then(|directory| directory.sync_all())
-        .map_err(|error| error.to_string())
 }
 
 pub(crate) fn write_file(path: &Path, bytes: &[u8]) -> Result<(), String> {

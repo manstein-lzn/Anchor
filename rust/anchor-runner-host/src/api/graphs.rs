@@ -51,14 +51,6 @@ fn graph_management_error(failure: GraphManagementError) -> HttpResponse {
 }
 
 #[allow(clippy::result_large_err)]
-pub(super) fn graph_path(state: &ApiState, name: &str) -> Result<PathBuf, HttpResponse> {
-    state
-        .application
-        .graph_path_checked(name)
-        .map_err(graph_management_error)
-}
-
-#[allow(clippy::result_large_err)]
 pub(super) fn load_graph_definition(
     state: &ApiState,
     name: &str,

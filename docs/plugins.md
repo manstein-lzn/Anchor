@@ -16,6 +16,14 @@ Graph 的 AgentNode 保存 Plugin 目录 ID。Library 校验清单与 Skill 路�
 
 源码初始列表安装 Anchor Dev（目录 ID `anchor-steward`）及独立 `git` Plugin。Anchor Dev 仅包含入口说明和 Graph、Plugin、Rust、Python、pixi、Git 六项按需 Skill，不含 MCP server；在 Pilot 插件面板启用后才进入执行披露。它不自动启用 Git、初始化环境或扩大联网与凭据权限。Git 工具仍由 `git` 的挂载和 Host 配置控制。关闭 Anchor Dev 不删除共享工具链、项目或缓存，也不撤销其他已授权工具；具体环境边界见 [Pilot 开发契约](pilot-development.md)。
 
+## Graph 任务
+
+官方 `graph-tasks` 随源码初始列表提供，但不自动挂载或授权。它不启动自己的 MCP server；挂到 AgentNode 后，由 Host 将 `graph_tasks_*` 工具关联到该 Plugin 的按需披露目录。仅安装或打开 Session 开关不够：须在 Graph 编辑器给这个节点选择可见 Graph，按需开启构建 Graph、候选 Plugin 开发和新建 Graph 的能力上限，再由操作员保存。新建或 Agent 编写的源 Graph 也须经这一保存步骤；已开始的普通 Run 或已冻结 Turn 不因此扩大权限。字段示例见 [作者契约](rust-graph-authoring-contract.md#按需-graph-任务授权)。
+
+既有目标按批准的确切定义及静态调用闭包执行；新建 Graph 只能用节点授权的已安装 Plugin、网络与沙箱命令。Agent 不能修改源助手或无关资产，不能让子图继续委派任务。后续运行同时检查原授权与当前授权，撤回可见范围立即收窄；资产改版不自动执行未经批准的新内容。身份、请求键和结果路由由 Host 派生，不接受模型传入。普通独立宿主若没有这些 Host 端口，不因携带此 Skill 而获得调度或 Session 能力。
+
+工具支持立即异步运行、一次/多时刻/有限次数/重复计划，以及原会话的结果处理；即时调用遇到同 Graph 未结束 Run 返回冲突，计划则保留未接纳时刻等待重试。候选 `prepare`/`test` 复用当前沙箱与环境，只验证所测范围，不安装、不挂载、不取得新增凭据；正式安装仍走既有预检和确认。完成结果与用户来信分开，发送消息须核对实际渠道回执。调度、冻结与恢复的事实归属见 [当前架构](architecture.md#按需-graph-任务与结果输入)。
+
 ## 连接配置与凭据
 
 Plugin 声明配置需求，Host 保存每个 owner 的一份默认连接配置。Web 的插件详情提供普通字段、凭据设置/轮换/清除与显式连接测试；Pilot 的专用凭据表单映射到同一事实。配置属于 Host，不修改 Library 清单，也不随 Plugin/Graph 包分发。

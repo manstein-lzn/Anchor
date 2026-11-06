@@ -261,13 +261,19 @@ pub(super) async fn delete_channel_session(
     AxumPath(session): AxumPath<String>,
 ) -> Result<Json<Value>, HttpResponse> {
     let owner = private_owner(&state, &headers);
-    blocking(move || {
-        store(&state)?
-            .delete_channel_session(&owner, &session)
-            .map_err(channel_error)?;
-        Ok(Json(json!({"deleted": session})))
-    })
-    .await
+    state
+        .application
+        .delete_task_session(&owner, &session)
+        .await
+        .map_err(|failure| {
+            channel_error(match failure {
+                ApplicationError::Missing => SessionError::Missing,
+                ApplicationError::Conflict(reason) => SessionError::Conflict(reason),
+                ApplicationError::Invalid(reason) => SessionError::Invalid(reason),
+                ApplicationError::Storage(reason) => SessionError::Storage(reason),
+            })
+        })?;
+    Ok(Json(json!({"deleted": session})))
 }
 
 pub(super) async fn get_channel_session(
@@ -287,4 +293,137 @@ pub(super) async fn get_channel_session(
         Ok(Json(json!({"session": session})))
     })
     .await
+}
+
+#[cfg(test)]
+mod deletion_tests {
+    use super::*;
+    use crate::application::scheduling::{
+        ScheduleManagementPort, TaskScheduleRequest, TaskScheduleUpdate,
+    };
+    use crate::task_delegation::TaskOrigin;
+    use anchor_platform_session::{ChannelIdentity, TurnStatus};
+    use anchor_runtime::graph::{GraphTaskPolicy, InvocationKey};
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn session_delete_endpoint_preserves_paused_task_plans_until_cancelled() {
+        let (_root, state) = crate::api::tests::fixture();
+        let sessions = store(&state).unwrap();
+        let admitted = sessions
+            .admit_channel_inbound(
+                "local",
+                ChannelInboundRequest {
+                    inbound_id: "initial".into(),
+                    identity: ChannelIdentity {
+                        source: "wecom".into(),
+                        account: Some("bot".into()),
+                        conversation_kind: Default::default(),
+                        conversation_id: "alice".into(),
+                        sender_id: "alice".into(),
+                    },
+                    graph: "fixture".into(),
+                    reply_node: "work".into(),
+                    text: Some("later".into()),
+                    attachments: Default::default(),
+                    run_id: None,
+                    replace_running: false,
+                },
+            )
+            .unwrap();
+        let session = admitted.session.id;
+        sessions
+            .finish_turn(
+                "local",
+                &session,
+                &admitted.turn.id,
+                TurnStatus::Completed,
+                None,
+            )
+            .unwrap();
+        let origin = TaskOrigin {
+            owner: "local".into(),
+            session: Some(session.clone()),
+            graph: "fixture".into(),
+            source: crate::task_delegation::TaskOriginSource::AgentDelegation {
+                key: InvocationKey {
+                    run_id: "retired-source".into(),
+                    graph_digest: "a".repeat(64),
+                    node_id: "work".into(),
+                    invocation: 1,
+                },
+            },
+            authorization_digest: "a".repeat(64),
+            policy: GraphTaskPolicy::default(),
+            bindings: Default::default(),
+            targets: Default::default(),
+        };
+        let adapter =
+            crate::api::schedules::ScheduleManagementAdapter::new(state.schedules.clone());
+        let request = TaskScheduleRequest {
+            graph: "fixture".into(),
+            rules: vec![json!({"type":"daily","time":"09:00"})],
+            input: json!({}),
+            remaining: Some(2),
+            request_id: "retained-plan".into(),
+        };
+        let created = adapter.create_tasks(&origin, &request).unwrap();
+        let id = created["schedules"][0]["id"].as_str().unwrap();
+        adapter
+            .update_task(
+                &origin,
+                id,
+                &TaskScheduleUpdate {
+                    graph: request.graph.clone(),
+                    rule: request.rules[0].clone(),
+                    input: request.input.clone(),
+                    enabled: false,
+                    remaining: request.remaining,
+                },
+            )
+            .unwrap();
+        adapter
+            .check_task_origin_deletion(&|candidate| Ok(candidate.owner == "another-owner"))
+            .unwrap();
+        adapter
+            .check_task_origin_deletion(&|candidate| {
+                Ok(candidate.session.as_deref() == Some("another-session"))
+            })
+            .unwrap();
+        assert!(matches!(
+            adapter.check_task_origin_deletion(&|_| Err(ApplicationError::Storage(
+                "unreadable identity".into()
+            ))),
+            Err(ApplicationError::Storage(_))
+        ));
+        let app = crate::api::router(state.clone());
+        let route = format!("/channel-sessions/{session}");
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(&route)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert!(sessions.get("local", &session).is_ok());
+        adapter.delete_task(&origin, id).unwrap();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(&route)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(sessions.get("local", &session), Err(SessionError::Missing));
+    }
 }

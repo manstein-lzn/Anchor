@@ -352,6 +352,37 @@ async fn real_bwrap_hides_host_files_and_enforces_command_allowlist() {
 }
 
 #[tokio::test]
+async fn generated_graph_command_limit_keeps_files_and_plugins_without_exposing_commands() {
+    let fixture = Fixture::new();
+    let tools = fixture.tools(cancellation()).with_command_authority(false);
+    assert_eq!(
+        tools
+            .definitions()
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>(),
+        ["echo", READ_TOOL_NAME, EDIT_TOOL_NAME]
+    );
+    let result = tools
+        .call(RUN_TOOL_NAME, json!({"command":["sh","-c","touch bypass"]}))
+        .await;
+    assert!(result.unwrap_err().to_string().contains("not authorized"));
+    assert!(!fixture.workspace.join("bypass").exists());
+    tools
+        .call(
+            EDIT_TOOL_NAME,
+            json!({"path":"report.md","content":"report"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(fixture.workspace.join("report.md")).unwrap(),
+        "report"
+    );
+    assert!(tools.call("echo", json!({})).await.is_ok());
+}
+
+#[tokio::test]
 async fn strict_arguments_and_other_tool_forwarding() {
     let fixture = Fixture::new();
     let tools = fixture.tools(cancellation());

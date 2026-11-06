@@ -210,7 +210,11 @@ export function GraphEditorPage({ name, editor, graphs, runs, graphColors, busy,
             <div className="section-heading"><h3><SlidersHorizontal size={15} />{pick ? '选中项属性' : '工作流设置'}</h3>{inspectorControls}</div>
             {selectedNode && !selectedNode.op && !selectedNode.graph && <Suspense fallback={<p role="status">正在打开插件设置…</p>}><Plugins
               key={`${name}/${selectedNode.id}`} selected={selectedPlugins} disabled={!editable}
-              activationMode={editor.pluginActivation?.mode} onChange={setPlugins} graph={{ name, saved: !dirty }} /></Suspense>}
+              activationMode={editor.pluginActivation?.mode} onChange={setPlugins} graph={{ name, saved: !dirty }}
+              graphTasks={editor.graphTaskPolicy === undefined ? undefined : {
+                graphs: graphs.filter(item => item.graph !== name).map(item => item.graph),
+                value: editor.graphTaskPolicy, onChange: editor.setGraphTaskPolicy,
+              }} /></Suspense>}
             <fieldset disabled={!editable}>
               {selectedNode && doc && <>
                 <div className="inspector-kind">

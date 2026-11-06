@@ -1,6 +1,9 @@
 use super::*;
 use anchor_graph_host::PluginCatalog;
 use std::sync::{Arc, atomic::AtomicBool};
+
+mod task_delivery;
+mod task_gateway;
 struct Empty;
 impl ToolPort for Empty {
     fn definitions(&self) -> Vec<ToolDefinition> {
@@ -40,6 +43,7 @@ fn tools(root: &Path) -> ChannelTools {
             key: key.clone(),
             wait_key: "wait".into(),
             inbound: "inbound".into(),
+            input_kind: Default::default(),
             turn: "turn-1".into(),
             pending_inbounds: Vec::new(),
             pending_truncated: false,
@@ -289,6 +293,14 @@ async fn notification_files_require_the_authoritative_delivery_view() {
     assert_eq!(file.artifact_id, commit.id);
     assert_eq!(bytes, b"published-report");
     assert!(host.notification_file("/workspace/report.txt").is_err());
+    host.assistant_graph = None;
+    for node in ["tasks", "notifications"] {
+        host.readonly_inputs = vec![ReadOnlyInput::new(&view, format!("/in/{node}"))];
+        assert!(
+            host.notification_file(&format!("/in/{node}/report.txt"))
+                .is_ok()
+        );
+    }
 
     // Uploaded/local inputs can copy a genuine descriptor and its bytes; that
     // still cannot grant the recipient access to the named Host Artifact.

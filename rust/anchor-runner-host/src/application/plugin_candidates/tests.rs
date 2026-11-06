@@ -158,7 +158,7 @@ async fn candidate_host_templates_are_rejected_before_any_server_launch_or_conne
             .unwrap();
         let result = tokio::time::timeout(
             Duration::from_secs(2),
-            application.test_plugin_candidate(&prepared, &context, None),
+            application.test_plugin_candidate(&prepared, &context.candidate_test_context(), None),
         )
         .await
         .expect("candidate permission checks must happen before starting a server");
@@ -314,7 +314,11 @@ async fn candidate_does_not_inherit_an_installed_plugins_owner_credentials() {
         .await
         .unwrap();
     let result = application
-        .test_plugin_candidate(&prepared, &context, Some(("probe", "probe", json!({}))))
+        .test_plugin_candidate(
+            &prepared,
+            &context.candidate_test_context(),
+            Some(("probe", "probe", json!({}))),
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -349,7 +353,7 @@ async fn candidate_does_not_inherit_an_installed_plugins_owner_credentials() {
             .await
             .unwrap();
         let result = application
-            .test_plugin_candidate(&prepared, &context, None)
+            .test_plugin_candidate(&prepared, &context.candidate_test_context(), None)
             .await;
         let Err(ApplicationError::Invalid(reason)) = result else {
             panic!("candidate credential references must be rejected");
@@ -531,7 +535,7 @@ async fn unchanged_candidate_reprepares_for_a_new_turn_interpreter_and_retains_t
     let result = old_turn
         .test_plugin_candidate(
             &same_turn,
-            &old_context,
+            &old_context.candidate_test_context(),
             Some(("probe", "probe", json!({}))),
         )
         .await
@@ -600,14 +604,18 @@ async fn unchanged_candidate_reprepares_for_a_new_turn_interpreter_and_retains_t
     std::fs::remove_file(&view_python).unwrap();
     std::os::unix::fs::symlink(&toolchain.python, &view_python).unwrap();
     assert!(matches!(
-        new_turn.test_plugin_candidate(&prepared, &new_context, None).await,
+        new_turn.test_plugin_candidate(&prepared, &new_context.candidate_test_context(), None).await,
         Err(ApplicationError::Invalid(reason)) if reason.contains("prepared interpreter")
     ));
     assert!(!new_context.workspace.join("probe-started").exists());
     std::fs::remove_file(&view_python).unwrap();
     std::os::unix::fs::symlink(&new_python, &view_python).unwrap();
     let result = new_turn
-        .test_plugin_candidate(&prepared, &new_context, Some(("probe", "probe", json!({}))))
+        .test_plugin_candidate(
+            &prepared,
+            &new_context.candidate_test_context(),
+            Some(("probe", "probe", json!({}))),
+        )
         .await
         .unwrap();
     let report = &result["call"]["output"][0]["value"];
@@ -791,7 +799,7 @@ async fn candidate_prepares_calls_offline_and_installs_independently_of_its_sess
     let result = application
         .test_plugin_candidate(
             &prepared,
-            &context,
+            &context.candidate_test_context(),
             Some((
                 "probe",
                 "probe",
@@ -939,10 +947,11 @@ async fn candidate_startup_and_call_cancellation_reap_the_actual_processes() {
             tokio::time::sleep(Duration::from_millis(150)).await;
             cancel.store(true, Ordering::Release);
         };
+        let test_context = context.candidate_test_context();
         let (result, ()) = tokio::join!(
             application.test_plugin_candidate(
                 &prepared,
-                &context,
+                &test_context,
                 Some(("probe", "probe", json!({})))
             ),
             cancel_after_start
@@ -967,7 +976,7 @@ async fn candidate_startup_and_call_cancellation_reap_the_actual_processes() {
         assert_ne!(prepared.fact.digest, replacement.fact.digest);
         assert!(
             application
-                .test_plugin_candidate(&replacement, &context, None)
+                .test_plugin_candidate(&replacement, &context.candidate_test_context(), None)
                 .await
                 .is_ok()
         );

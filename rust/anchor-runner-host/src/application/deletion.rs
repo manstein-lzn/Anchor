@@ -120,16 +120,25 @@ impl RunApplication {
         targets: &[(String, super::run_access::RunView<'_>)],
         active: &(),
     ) -> Result<(), ApplicationError> {
+        self.check_task_runs_deletion(&targets.iter().map(|(run, _)| run.clone()).collect())?;
         for (run_id, record) in targets {
+            let metadata = self.metadata(run_id)?;
             self.reject_pending_session_delivery(run_id)?;
+            self.reject_pending_task_result(run_id)?;
+            if let Some(request) = metadata
+                .as_ref()
+                .and_then(|metadata| metadata.request.as_ref())
+            {
+                self.check_scheduled_run_deletion(&request.id)?;
+            }
             if record.active() {
                 return Err(ApplicationError::Conflict(
                     "Graph still has active execution; stop or abandon the Run first".into(),
                 ));
             }
             if !record.is_settled() {
-                let conversation = self
-                    .metadata(run_id)?
+                let conversation = metadata
+                    .as_ref()
                     .is_some_and(|metadata| metadata.conversation.is_some());
                 if !conversation
                     || (!record.is_quiescent() && !self.has_conversation_successor(run_id)?)
@@ -139,8 +148,8 @@ impl RunApplication {
                     )));
                 }
             }
-            if self
-                .metadata(run_id)?
+            if metadata
+                .as_ref()
                 .is_some_and(|metadata| metadata.conversation.is_some())
             {
                 self.ensure_conversation_delete_settled(record, active)?;
@@ -174,6 +183,7 @@ impl RunApplication {
         _graph_lease: Box<dyn RunLease>,
     ) -> Result<usize, ApplicationError> {
         let graph_path = crate::run_metadata::graph_identity(bundle_path)?;
+        let task_ownership = super::graph_tasks::task_graph_ownership_path(self, graph_name)?;
         let callers = self.graph_callers(&graph_path)?;
         if !callers.is_empty() {
             return Err(ApplicationError::Conflict(format!(
@@ -183,6 +193,12 @@ impl RunApplication {
         }
         self.check_channel_graph_deletion(graph_name)?;
         let active = self.admission.lock().await;
+        // Outstanding work still depends on this Graph's authorization publications.
+        self.check_task_origin_deletion(&|origin| {
+            Ok(origin.graph == graph_name
+                || crate::run_metadata::graph_identity(&self.graph_bundle_path(&origin.graph))?
+                    == graph_path)
+        })?;
         let mut targets = self.runs_for_graph(&graph_path)?;
         let deletion = self
             .reserve_run_deletions(&targets.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>())?;
@@ -258,6 +274,13 @@ impl RunApplication {
         self.remove_channel_binding(graph_name).await?;
         if bundle_path.is_dir() {
             std::fs::remove_dir_all(bundle_path).map_err(storage)?;
+        }
+        match std::fs::remove_file(&task_ownership) {
+            Ok(()) => {
+                crate::host_fs::sync_directory(task_ownership.parent().unwrap()).map_err(storage)?
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(storage(error)),
         }
         Ok(targets.len())
     }
@@ -411,7 +434,12 @@ impl RunApplication {
 mod retention_tests {
     use super::super::run_access::fixtures;
     use super::*;
+    use crate::application::scheduling::ScheduleManagementPort;
     use crate::retention::Policy;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
 
     const DAY: i64 = 86_400;
 
@@ -420,6 +448,109 @@ mod retention_tests {
         let application = RunApplication::new(root.path().into(), root.path().join("catalog"));
         std::fs::create_dir_all(&application.catalog_root).unwrap();
         (root, application)
+    }
+
+    struct PendingCursor(AtomicBool);
+
+    impl ScheduleManagementPort for PendingCursor {
+        fn list(&self) -> Result<Value, ApplicationError> {
+            unreachable!()
+        }
+        fn create(&self, _: &str, _: &Value, _: &Value) -> Result<Value, ApplicationError> {
+            unreachable!()
+        }
+        fn update(
+            &self,
+            _: &str,
+            _: &str,
+            _: &Value,
+            _: &Value,
+            _: bool,
+        ) -> Result<Value, ApplicationError> {
+            unreachable!()
+        }
+        fn delete(&self, _: &str) -> Result<Value, ApplicationError> {
+            unreachable!()
+        }
+
+        fn check_run_deletion(&self, request_id: &str) -> Result<(), ApplicationError> {
+            assert_eq!(request_id, "schedule-request");
+            if self.0.load(Ordering::Acquire) {
+                Err(ApplicationError::Conflict(
+                    "schedule cursor has not confirmed this admission".into(),
+                ))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn unconfirmed_schedule_receipts_survive_single_and_cascade_deletion() {
+        for cascade in [false, true] {
+            let (root, application) = application();
+            let cursor = Arc::new(PendingCursor(AtomicBool::new(true)));
+            let application = application.with_schedule_management(cursor.clone());
+            let definition = serde_json::json!({"objective":"receipt fixture","entry":"work",
+                "ops":{"work":{"run":"true"}},"nodes":[{"id":"work","op":"work"}],"edges":[]});
+            let bundle = application.graph_bundle_path("scheduled");
+            graphs::write_graph_bundle(&bundle, &definition).unwrap();
+            let (_, loaded) = application.load_graph("scheduled").unwrap();
+            let record = anchor_runtime::graph::GraphRunRecord::create_with_id(
+                loaded.snapshot,
+                serde_json::json!({}),
+                "scheduled-run",
+            )
+            .unwrap();
+            fixtures::create(&application, &record);
+            fixtures::finish(&application, &record.run_id);
+            let mut metadata = super::super::RunMetadata::new(
+                record.run_id.clone(),
+                "scheduled".into(),
+                record.graph_digest,
+                &bundle,
+            )
+            .unwrap();
+            metadata.request = Some(super::super::run_access::admission_request(
+                "schedule-request".into(),
+                "scheduled",
+                &record.input,
+                &None,
+            ));
+            metadata::save(&application.data_root, &metadata).unwrap();
+            let workspaces = root.path().join("workspaces");
+            let refused = if cascade {
+                application
+                    .delete_graph("scheduled", &bundle, &workspaces)
+                    .await
+                    .map(|_| ())
+            } else {
+                application.delete_run("scheduled-run", &workspaces).await
+            };
+            assert!(
+                matches!(refused, Err(ApplicationError::Conflict(reason)) if reason.contains("cursor"))
+            );
+            assert!(application.read_run("scheduled-run").unwrap().is_some());
+            assert!(application.metadata("scheduled-run").unwrap().is_some());
+            assert!(bundle.is_dir());
+            cursor.0.store(false, Ordering::Release);
+            if cascade {
+                assert_eq!(
+                    application
+                        .delete_graph("scheduled", &bundle, &workspaces)
+                        .await
+                        .unwrap(),
+                    1
+                );
+                assert!(!bundle.exists());
+            } else {
+                application
+                    .delete_run("scheduled-run", &workspaces)
+                    .await
+                    .unwrap();
+            }
+            assert!(application.read_run("scheduled-run").unwrap().is_none());
+        }
     }
 
     /// Settle time as the Host's observer records it, moved into the past.

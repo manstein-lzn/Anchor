@@ -459,6 +459,16 @@ impl PilotTurnContext {
             cancellation: self.cancellation.clone(),
         }
     }
+
+    pub(crate) fn candidate_test_context(
+        &self,
+    ) -> crate::application::plugin_candidates::CandidateTestContext {
+        crate::application::plugin_candidates::CandidateTestContext {
+            sandbox: self.sandbox.clone(),
+            workspace: self.workspace.clone(),
+            access: self.dependency_access(),
+        }
+    }
 }
 
 /// A tool that takes no arguments.
@@ -847,31 +857,7 @@ fn rejected(reason: impl Into<String>) -> ToolError {
 /// The model never names a host path: it names a workspace-relative directory,
 /// and this resolves and confines it. Symlinks that leave the workspace, `..`,
 /// and absolute paths are refused before any review work happens.
-pub(crate) fn workspace_directory(workspace: &Path, relative: &str) -> Result<PathBuf, ToolError> {
-    let path = Path::new(relative);
-    if relative.is_empty()
-        || relative.contains('\0')
-        || path.is_absolute()
-        || path
-            .components()
-            .any(|component| !matches!(component, std::path::Component::Normal(_)))
-    {
-        return Err(rejected(
-            "directory must be a workspace-relative path without `.` or `..` components",
-        ));
-    }
-    let root = workspace
-        .canonicalize()
-        .map_err(|_| rejected("the assistant workspace is unavailable"))?;
-    let candidate = root
-        .join(path)
-        .canonicalize()
-        .map_err(|_| rejected("the candidate directory does not exist"))?;
-    if !candidate.starts_with(&root) || !candidate.is_dir() {
-        return Err(rejected("the candidate directory escapes the workspace"));
-    }
-    Ok(candidate)
-}
+pub(crate) use crate::host_fs::workspace_directory;
 
 fn text_resource(file: impl Read) -> Result<String, ToolError> {
     let mut bytes = Vec::new();

@@ -1,6 +1,5 @@
 # Per src-relative file maxima: service_application service_adapter application_adapter.
 # Layer roles stay fixed. Named debts are pinned in tests/layer_fence.rs; lower maxima after migration.
-application/plugin_candidates.rs 0 0 1 # G10-candidate-context: application/plugin_candidates.rs；随 G9 保留 PilotTurnContext，候选参数拆分延后
 assistant.rs 1 0 0 # G1-assistant-run: assistant.rs；随 G2 保留 Run 交接查询，避免拆分在线 owner 语义
 assistant_plugins.rs 2 0 0 # G1-assistant-plugins: assistant_plugins.rs；随 G2 保留 Run 授权投影与租约调用
 channel_supervisor/management.rs 2 0 0 # G3-channel-management: channel_supervisor/management.rs；随 G8/G9 保留渠道用例契约与错误映射
@@ -11,5 +10,4 @@ goose_acp/pilot_interaction/channel_management.rs 0 2 0 # G8-channel-interaction
 local_inputs.rs 1 0 0 # G1-local-inputs: local_inputs.rs；随 G2 保留 RunProgress 输入校验与挂载契约
 node_host.rs 3 0 0 # G2-node-host: node_host.rs；NodeHost 持 RunApplication 与默认 reader；端口接线预算 +70 行，列为架构欠债
 node_host/conversation.rs 1 0 0 # G2-node-conversation: node_host/conversation.rs；随 G2 保留历史投影的 RunApplication 查询端口
-node_host/preparation.rs 0 3 0 # G5-node-preparation: node_host/preparation.rs；随 G2/G8 保留 sandbox 工具与渠道包装装配；已删除工具名反向引用
 pilot_host.rs 0 3 0 # G9-pilot-host: pilot_host.rs；保留 Pilot Turn 具体执行端口；端口接线预算 +35 行，列为架构欠债

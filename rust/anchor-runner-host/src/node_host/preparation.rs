@@ -5,11 +5,30 @@ impl HostIoResolver {
     pub(super) fn tool_environment(
         &self,
     ) -> Result<crate::tool_environment::ToolEnvironment, String> {
+        self.tool_environment_snapshot()
+            .map(|(environment, _)| environment)
+    }
+
+    fn tool_environment_snapshot(
+        &self,
+    ) -> Result<
+        (
+            crate::tool_environment::ToolEnvironment,
+            Option<crate::runtime_configuration::RuntimeSnapshot>,
+        ),
+        String,
+    > {
+        let snapshot = self
+            .runtime_configuration
+            .as_ref()
+            .map(|configuration| configuration.snapshot())
+            .transpose()?;
         let environment = self.mcp.environment.clone();
-        match &self.runtime_configuration {
-            Some(configuration) => environment.with_runtime_snapshot(&configuration.snapshot()?),
-            None => Ok(environment),
-        }
+        let environment = match &snapshot {
+            Some(snapshot) => environment.with_runtime_snapshot(snapshot)?,
+            None => environment,
+        };
+        Ok((environment, snapshot))
     }
 
     pub(crate) fn validate_plugin_configuration(
@@ -49,7 +68,7 @@ impl HostIoResolver {
             // host-side string into `ResolutionError::Host`, while the environment
             // sites keep their own cause.
             let resolved: Result<ResolvedNodeTools, ResolutionError> = async move {
-                let environment = self.tool_environment()?;
+                let (environment, runtime) = self.tool_environment_snapshot()?;
                 // The first fallible step names the error type, so every later `?`
                 // converts a host-side reason into `ResolutionError::Host` while the
                 // environment sites keep their own cause.
@@ -112,40 +131,16 @@ impl HostIoResolver {
                     &mut disclosure,
                 )
                 .await?;
-                // Output beyond the stream previews is retained host-side and mounted
-                // read-only at /spill, so a model can read what was cut off.
-                let spill = crate::node_tools::SpillDirectory::new(
-                    self.local_inputs
-                        .state_root()
-                        .join("spill")
-                        .join(&request.key.run_id)
-                        .join(
-                            workspace
-                                .file_name()
-                                .map(|name| name.to_string_lossy().into_owned())
-                                .unwrap_or_else(|| request.key.node_id.clone()),
-                        ),
-                    "/spill",
-                );
-                let node_tools = crate::node_tools::NodeTools::new(
-                    crate::channel_tools::wrap(
-                        plugins,
-                        &mounted.bindings,
-                        request.key.clone(),
-                        self.run_application(),
-                        workspace.clone(),
-                        readonly_inputs.clone(),
-                        request.cancellation.clone(),
-                    ),
-                    envelope.sandbox.clone(),
-                    workspace.clone(),
-                    readonly_inputs,
-                    request.cancellation.clone(),
-                )
-                .with_spill(spill)
-                .with_envelope(&envelope);
-                let tools =
-                    std::sync::Arc::new(node_tools) as std::sync::Arc<dyn anchor_runtime::ToolPort>;
+                let tools = self.tool_assembly.assemble(ToolAssembly {
+                    plugins,
+                    bindings: &mounted.bindings,
+                    request,
+                    workspace: &workspace,
+                    readonly_inputs: &readonly_inputs,
+                    envelope: &envelope,
+                    runtime,
+                    disclosure: &mut disclosure,
+                })?;
                 // Tools a node's completion and continuity depend on stay listed; the rest
                 // (plugins, channel tools) becomes reachable on demand.
                 let mut always_visible = vec![

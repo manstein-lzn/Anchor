@@ -276,6 +276,9 @@ impl HostIoResolver {
         let Some(input) = crate::assistant::input(root, key)? else {
             return Ok(None);
         };
+        let Some(input) = input.user() else {
+            return Ok(None);
+        };
         let pending = crate::assistant::pending_inputs(root, key)?;
         Ok(crate::assistant::single_identity(
             &input.request.identity,

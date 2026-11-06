@@ -16,6 +16,9 @@ mod goose {
     }
 }
 
+#[path = "goose_persistent_assistant/task_inputs.rs"]
+mod task_inputs;
+
 use anchor_graph_host::{FilePluginCatalog, PluginCatalog};
 use anchor_platform_session::{ChannelDeliveryStatus, SessionStore, TurnStatus};
 use anchor_runtime::graph::{GraphRunRecord, RunResult};
@@ -239,6 +242,7 @@ fn snapshot_inventory(artifact: &Path) -> Value {
 }
 
 fn evidence(host: &Host, provider: &Provider, run: &str, checks: Value) {
+    let case_source = checks["case_source"].as_str().unwrap_or(CASE_SOURCE);
     assert!(host.base.resource_for(run).is_some());
     assert!(
         !host
@@ -273,8 +277,8 @@ fn evidence(host: &Host, provider: &Provider, run: &str, checks: Value) {
         "goose_binary_sha256":goose::GOOSE_SHA256,"provider_url":provider.url,
         "host_binary_sha256":goose::digest(&root.join("anchor-runner-host")),
         "test_binary_sha256":goose::digest(&std::env::current_exe().unwrap()),
-        "test_source_sha256":goose::digest(&Path::new(env!("CARGO_MANIFEST_DIR")).join(CASE_SOURCE)),
-        "graph":fixture::read_json(root.join("bundle/graph.json")),
+        "test_source_sha256":goose::digest(&Path::new(env!("CARGO_MANIFEST_DIR")).join(case_source)),
+        "graph":saved["snapshot"],
         "run":saved,"native_facts":facts,"provider_requests":provider.requests(),"checks":checks,
         "native_goose_conversation":host.native_conversation(run,"assistant",invocation),
         "workspace_files":goose::file_inventory(&root.join("work")),

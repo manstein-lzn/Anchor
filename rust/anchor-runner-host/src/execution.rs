@@ -11,6 +11,8 @@ use sha2::Digest;
 use std::collections::BTreeMap;
 use std::{future::Future, pin::Pin};
 
+pub(crate) mod tool_assembly;
+
 pub(crate) struct PreparedExecution {
     artifacts: HostArtifacts,
     nodes: HostNodes,
@@ -306,6 +308,7 @@ pub(crate) struct HostGraphCatalog {
     pub(crate) root: std::path::PathBuf,
     pub(crate) state: std::path::PathBuf,
     pub(crate) application: Option<RunApplication>,
+    pub(crate) task: Option<crate::task_delegation::TaskOrigin>,
 }
 
 struct PluginReferenceLease {
@@ -563,10 +566,34 @@ impl GraphCatalog for HostGraphCatalog {
         run_id: &str,
         graph: &str,
         snapshot: &GraphSnapshot,
-        _plugins: &[PluginBinding],
+        plugins: &[PluginBinding],
         identity: &CallIdentity,
         mode: &str,
     ) -> Result<(), GraphError> {
+        // Child admission invokes this after resolving Plugins under its
+        // Library lease, not before waiting for a concurrent publication.
+        let application = self.application.as_ref();
+        let _empty_task_catalog = if self.task.is_some() && plugins.is_empty() {
+            crate::plugin_library::PluginLibrary::new(
+                application
+                    .ok_or_else(|| {
+                        GraphError::Unsupported("task authorization unavailable".into())
+                    })?
+                    .library_root(),
+            )
+            .catalog_read_guard()
+            .map_err(|error| GraphError::Unsupported(format!("task Plugin catalog: {error}")))?
+        } else {
+            None
+        };
+        if let Some(origin) = &self.task {
+            application
+                .ok_or_else(|| GraphError::Unsupported("task authorization unavailable".into()))?
+                .authorize_task_call_snapshot(origin, graph, snapshot)
+                .map_err(|error| {
+                    GraphError::Unsupported(format!("delegated static call: {error:?}"))
+                })?;
+        }
         let path = self.path(graph)?;
         crate::local_inputs::LocalInputs::from_env(self.state.clone())
             .and_then(|inputs| {
@@ -768,6 +795,7 @@ mod graph_call_ancestry_tests {
             root: state.join("graphs"),
             state: state.to_path_buf(),
             application: None,
+            task: None,
         }
     }
 

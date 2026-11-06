@@ -179,6 +179,7 @@ mod tests {
             key: key.clone(),
             wait_key: "wait".into(),
             inbound: "inbound".into(),
+            input_kind: Default::default(),
             turn: turn.into(),
             pending_inbounds: Vec::new(),
             pending_truncated: false,

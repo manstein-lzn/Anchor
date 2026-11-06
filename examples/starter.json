@@ -5,7 +5,8 @@
     "academic-research": ["anchor-scholarly"],
     "docmost": ["anchor-docmost-tools"],
     "wecom": ["anchor-wecom-tools", "anchor-wecom-gateway"],
-    "anchor-steward": []
+    "anchor-steward": [],
+    "graph-tasks": []
   },
   "graphs": [
     "call-worker",

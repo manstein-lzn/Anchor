@@ -5,6 +5,25 @@ use std::sync::Arc;
 
 use fake::FakeChannels;
 
+#[test]
+fn channel_membership_keeps_explicit_wildcard_and_broadcast_rules_identical_for_both_directions() {
+    let mut binding = runtime().binding;
+    assert!(binding.allows_inbound("member"));
+    assert!(binding.allows_outbound("member"));
+    assert!(!binding.allows_inbound("another-member"));
+    assert!(!binding.allows_outbound("another-member"));
+    binding.users = vec!["*".into()];
+    binding.send_users = vec!["*".into()];
+    assert!(binding.allows_inbound("another-member"));
+    assert!(binding.allows_outbound("another-member"));
+    assert!(!binding.allows_inbound("@all"));
+    assert!(!binding.allows_outbound("@all"));
+    binding.users.clear();
+    binding.send_users.clear();
+    assert!(!binding.allows_inbound("member"));
+    assert!(!binding.allows_outbound("member"));
+}
+
 fn runtime() -> ChannelRuntimeState {
     let mut state = FakeChannels::bot("graph", "owner", "assistant", &["member"]);
     state.account = Some("canonical".into());

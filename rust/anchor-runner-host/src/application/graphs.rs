@@ -216,6 +216,11 @@ impl RunApplication {
             })
         });
         self.validate_graph(&definition)?;
+        if super::graph_tasks::task_graph_ownership_path(self, name)?.exists() {
+            return Err(GraphManagementError::Conflict(
+                "this Graph name is reserved by a retained task creation".into(),
+            ));
+        }
         create_graph_bundle_from_catalog(&path, &definition, self.library_root())?;
         Ok(json!({"graph":name,"definition":definition}))
     }
@@ -277,7 +282,7 @@ fn snapshot_plugin_ids(snapshot: &GraphSnapshot) -> Vec<String> {
         .collect()
 }
 
-fn create_graph_bundle_from_catalog(
+pub(super) fn create_graph_bundle_from_catalog(
     path: &Path,
     definition: &Value,
     catalog_root: &Path,
@@ -352,7 +357,7 @@ pub(crate) fn write_graph_bundle(
     Ok(())
 }
 
-fn write_graph_bundle_from_catalog(
+pub(super) fn write_graph_bundle_from_catalog(
     path: &Path,
     definition: &Value,
     catalog_root: &Path,

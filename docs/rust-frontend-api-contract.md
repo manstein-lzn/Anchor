@@ -55,7 +55,17 @@ Session API 包括创建/重命名/删除、消息、Turn、SSE、停止、问�
 
 Pilot `schedule_create` 接受可选 `request_id`，与 HTTP key 使用同一 owner 范围及创建用例。Scheduler 的创建 key 与原始 graph/rule/input 同原子快照持久化；重试先查已提交事实，不因原 once 时间已过或 Graph 后来移除而重新创建。编辑计划后返回当前计划但不重写原创建内容；计划删除后原 key 返回 409，不复活。旧 `schedules.json` 数组继续可读写；首次有 key 的创建写为 `{version:1,schedules:[...],creation_requests:[...]}`，未知版本不加载，请求记录不进入 API 投影。
 
-定时 Run 与网页手动触发使用同一安装身份和凭据作用域转换。需要机器人通知时，计划仍传普通 Graph 的 `input`，由已挂载渠道 Plugin 的执行节点按[发送授权契约](wecom-assistant.md#业务工具与附件边界)显式选择机器人；不新增计划字段，也不自动把执行结果投递到 Session。
+计划统一按 Host 本地时间使用 once、interval、daily、weekly、monthly 规则，不引入 cron、独立时区或节假日历。`next_at` 是最早尚未接纳的时点；忙碌、Host 离线或接纳失败不再跳过该时点。每轮 tick 每个计划最多接纳一次，从原计划时点推算下一次，而非从实际启动时间漂移。每个时点使用稳定请求身份接纳普通 Run；Run 已持久化但计划游标保存失败时，重试复用该 Run，不重复执行。有限次数按已接纳 Run 递减，不按 tick、失败尝试或完成结果递减。
+
+计划当前游标仍引用的 Run 回执不能通过 Run 删除、Graph 级联删除或自动回收移除，停用计划不解除保护；游标推进或取消计划后解除。重放已接纳 Run 只返回既有事实，不启动或恢复其 worker，也不因 Graph 后来修改、移除或授权撤回而重跑。仅有元数据而没有 Run 的中断接纳不是成功回执，继续接纳须保持相同快照并通过当前授权；显式移除计划及回执后的再次执行不属于去重保证。
+
+挂载 `graph-tasks` 的 Agent 通过受限宿主工具复用同一 ScheduleStore 和准入；不是 Pilot 全局计划权限。作用域由原生 invocation 固定为 owner、来源 Graph、来源节点及 Session；无 Session 时使用来源 Run。模型不能自报作用域或借计划 ID 查询、修改其他作用域的计划。单规则可设置 `remaining` 次数；多个一次性时点以 `group` 原子创建和删除，最多 128 个，不接受混合重复规则或重复时点。创建请求的去重和删除后不复活规则同样适用，部分成员被删除后不补建整组。
+
+委派计划在现有文件中保存可选 `remaining`、`group` 与私有授权快照；API、时间线和工具投影不返回该授权快照。工具列出的计划另带派生 `pending`，表示已启用且最早时点已到。后续派发仍复核原授权和当前授权，不能借旧计划扩大能力。作用域工具的暂停/启用保留待接纳时点；HTTP/Pilot 操作员重新启用仍只安排未来时点。待接纳时点的 Graph、规则和输入不可改写，应取消后另建；暂停、删除计划不删除已接纳 Run。
+
+`GET /timeline` 把已到但尚未接纳的有效时点投影为 `pending` 或 `pending_busy`，未来有效时点为 `planned`；有限计划不投影超过剩余次数的时点，停用计划不投影未来执行。旧历史中的 `missed_busy`、`missed_downtime` 仍可表示此前未执行且已越过游标的时点，不能用于描述仍会重试的当前时点。已接纳时点关联真实 Run 及其相位。
+
+普通定时 Run 与网页手动触发使用同一安装身份和凭据作用域转换。需要机器人通知时，计划仍可传普通 Graph 的 `input`，由已挂载渠道 Plugin 的执行节点按[发送授权契约](wecom-assistant.md#业务工具与附件边界)显式选择机器人；普通计划不自动把结果注入 Session。`graph-tasks` 的受限委派使用原始可信来源关联结果，由来源 Agent 决定后续处理与发送，不让 Scheduler 直接代发消息。
 
 Pilot `POST /sessions/{session}/turns` 接受 `{request_id,message?,attachments?}`，文字与附件至少有一项；附件项为 `{name,data_base64,media_type?}`。同一 `request_id` 必须保持原文字与附件内容，`resume:true` 不能同时提交新文字或附件。输入限制为 16 个文件、单个 20 MiB、合计 50 MiB；其中图片只接受 PNG/JPEG/WebP，最多 8 张、单张 10 MiB、图片合计 20 MiB。只有该上传路由放宽至 72 MiB 请求体。
 
@@ -98,7 +108,8 @@ Web 异步操作反馈绑定发起时的上下文：删除旧 Run 的迟到响�
 | `GET /plugins/preflights`、`GET/DELETE /plugins/preflights/{token}`、`POST /plugins/preflights/{token}/confirm` | owner-bound 预检、操作观察与精确确认；确认复用 Library 发布锁和应用前置条件，同一操作不重复执行 |
 | `GET /channels`、`GET/PUT /graphs/{graph}/channel`、`POST /graphs/{graph}/channel/enabled` | 按 Graph 管理机器人，复用渠道适配器与 Host supervisor；启停携带 `{enabled,expected_binding}`，保存的启用意图与实际连接分别投影；重复启用修复失效监听，实际重启时 `changed=true` |
 | `GET /channel-sessions/{session}`、`.../assistant`、`POST .../assistant/retire`、`DELETE /channel-sessions/{session}` | 校验渠道 owner，复用 current binding、静止与未结算投递限制；退役不会立刻创建新实例 |
-| `POST /schedules`、`PUT/DELETE /schedules/{schedule}` | 新建、编辑、暂停/启用与删除共享计划；更新保留 ID/创建时间，输入修改保留下次时点，改规则或重新启用只安排未来执行 |
+| `POST /schedules`、`PUT/DELETE /schedules/{schedule}` | 操作员新建、编辑、暂停/启用与删除共享计划；更新保留 ID/创建时间，未来输入修改保留下次时点，改规则或重新启用只安排未来执行；已到的时点不接受内容改写 |
+| `POST /schedules/{schedule}/assign` | `{session,instruction,input?}` 把尚未到期、未在准入中的普通计划交给原机器人的既有私聊助手；保留 ID、Graph、规则、创建时间、下一时点、次数及启停状态，只原子更新输入和来源。instruction 非空且至多 8192 字节；核验旧输入的机器人/收件人与 Session 一致、当前发送权限、节点任务授权及目标确切版本。不启动助手、不创建用户 Turn、不迁移已接纳 Run。相同请求幂等，已委派计划不能重绑或借重试更新授权；`assignment` 投影返回来源说明而不返回授权快照 |
 
 渠道 `listener` 在渠道 API、Pilot 和 `GET /graphs` 中使用同一观察：`connecting/authenticating/reconnecting` 表示正在连接，`authenticated` 表示已认证，停用为 `stopped`，失管或已发布的控制接口失联为 `unavailable`。`restart_required` 覆盖启用后守护任务缺失、已结束、资源可用但监听失联及账号变化；前端不能统一解释为账号变化。资源不齐时先检查 `available` 和凭据字段状态。正常、启动或重连中的重复启用返回 `changed=false`，不打断连接；同一绑定的修复不改成员、凭据和 callback key。
 

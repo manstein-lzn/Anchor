@@ -77,6 +77,7 @@ pub(crate) struct NodeTools {
     timeout_ceiling: Duration,
     preview_bytes: usize,
     development_projects: Option<(PathBuf, PathBuf)>,
+    commands_allowed: bool,
 }
 
 impl NodeTools {
@@ -100,6 +101,7 @@ impl NodeTools {
             timeout_ceiling: DEFAULT_TIMEOUT,
             preview_bytes: DEFAULT_PREVIEW_BYTES,
             development_projects: None,
+            commands_allowed: true,
         }
     }
 
@@ -118,6 +120,11 @@ impl NodeTools {
         environment: crate::tool_environment::ToolEnvironment,
     ) -> Self {
         self.environment = environment;
+        self
+    }
+
+    pub(crate) fn with_command_authority(mut self, allowed: bool) -> Self {
+        self.commands_allowed = allowed;
         self
     }
 
@@ -635,11 +642,13 @@ impl ToolPort for NodeTools {
         if self.development_projects.is_some() {
             run["properties"]["project"] = json!({"type":"string","description":"Prepared workspace-relative Python project. Runs inside this directory using its private venv/pip/PATH, or its preserved read-only legacy view until explicit rebuild. Use '.' for workspace root. Same-project commands and preparation serialize; interrupted pip may partially change state, so inspect before continuing."});
         }
-        definitions.push(ToolDefinition::new(
-            ToolName::new(RUN_TOOL_NAME).expect("static tool name"),
-            self.run_description(),
-            run,
-        ));
+        if self.commands_allowed {
+            definitions.push(ToolDefinition::new(
+                ToolName::new(RUN_TOOL_NAME).expect("static tool name"),
+                self.run_description(),
+                run,
+            ));
+        }
         definitions.push(ToolDefinition::new(
             ToolName::new(READ_TOOL_NAME).expect("static tool name"),
             self.read_description(),
@@ -696,6 +705,11 @@ impl ToolPort for NodeTools {
             }
             if self.cancellation.load(Ordering::Relaxed) {
                 return Err(ToolError::Failed("anchor_run was cancelled".into()));
+            }
+            if !self.commands_allowed {
+                return Err(ToolError::Failed(
+                    "anchor_run is not authorized for this generated Graph".into(),
+                ));
             }
             let arguments: RunArguments = match serde_json::from_value(arguments) {
                 Ok(arguments) => arguments,

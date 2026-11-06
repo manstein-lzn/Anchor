@@ -51,6 +51,7 @@ fn corrupt_or_foreign_turn_policy_fails_closed() {
             reasons: vec![],
             by_declaration: vec![],
             by_switch: vec![],
+            task_grants: None,
         })
         .unwrap(),
     )
@@ -148,6 +149,7 @@ fn owned_policy(root: &Path, run: &str) -> GraphRunRecord {
         reasons: vec![],
         by_declaration: vec![],
         by_switch: vec![],
+        task_grants: None,
     };
     crate::assistant::save_immutable(&turn_path(root, run, "session", "turn"), &policy).unwrap();
     mark_initialized(root, run).unwrap();

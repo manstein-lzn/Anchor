@@ -58,6 +58,33 @@ describe('Graph plugin activation metadata', () => {
     expect(graphSaveNotice({ mode: 'future_mode', graph_digest: 'g' } as unknown as GraphPluginActivation)).toBe('已保存。');
   });
 
+  it('edits graph task policy without losing Plugin requirements, defaults or unknown selected ids', async () => {
+    const plugins = [
+      { id: 'graph-tasks', required: false, default: true, graph_tasks: { graphs: ['research'] } },
+      { id: 'unavailable-plugin', required: false, default: false },
+      'required-tool',
+    ];
+    vi.mocked(api).mockResolvedValueOnce({ definition: { ...definition, nodes: [{ ...definition.nodes[0], plugins }] } });
+    await render();
+    await act(async () => editor.setPick({ kind: 'node', id: 'assistant' }));
+    expect(editor.graphTaskPolicy).toEqual({ graphs: ['research'] });
+    await act(async () => editor.setPlugins([...editor.selectedPlugins, 'another-tool']));
+    await act(async () => editor.setGraphTaskPolicy({ ...editor.graphTaskPolicy, create_graphs: true, plugins: ['search'] }));
+    expect(editor.selectedNode?.plugins).toEqual([
+      { ...plugins[0] as object, graph_tasks: { graphs: ['research'], create_graphs: true, plugins: ['search'] } },
+      plugins[1], plugins[2], 'another-tool',
+    ]);
+    await act(async () => editor.undo());
+    expect(editor.graphTaskPolicy).toEqual({ graphs: ['research'] });
+    await act(async () => editor.redo());
+    vi.mocked(api).mockResolvedValueOnce({ plugin_activation: nextTurn });
+    await act(async () => { await editor.save(); });
+    expect(vi.mocked(api).mock.calls.at(-1)?.[2]).toEqual({ definition: editor.doc });
+    await act(async () => editor.setPlugins(['unavailable-plugin', 'required-tool']));
+    expect(editor.graphTaskPolicy).toBeUndefined();
+    expect(editor.selectedNode?.plugins).toEqual([plugins[1], plugins[2]]);
+  });
+
   it('creates roles from the Host default reference and retains explicit legacy aliases', async () => {
     const legacy = { ...definition, agents: { assistant: { model: 'models.academic' } } };
     vi.mocked(api).mockResolvedValueOnce({ definition: legacy });

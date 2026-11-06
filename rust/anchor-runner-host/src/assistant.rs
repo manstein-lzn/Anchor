@@ -1,7 +1,7 @@
 use crate::application::run_access;
 use crate::host_fs::invocation_stem as stem;
 use crate::run_metadata::{AssistantSource, RunMetadata};
-use anchor_platform_session::{ChannelInboundAdmission, SessionStore};
+use anchor_platform_session::{AssistantInput, ChannelInboundAdmission, SessionStore};
 use anchor_runtime::graph::{GraphError, GraphSnapshot, InvocationKey, NodeExecutionRequest};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -124,12 +124,28 @@ impl AssistantPlan {
     }
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum InputKind {
+    #[default]
+    User,
+    Task,
+}
+
+impl InputKind {
+    fn is_user(&self) -> bool {
+        *self == Self::User
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct TurnBinding {
     pub(crate) key: InvocationKey,
     pub(crate) wait_key: String,
     pub(crate) inbound: String,
+    #[serde(default, skip_serializing_if = "InputKind::is_user")]
+    pub(crate) input_kind: InputKind,
     pub(crate) turn: String,
     #[serde(default)]
     pub(crate) pending_inbounds: Vec<String>,
@@ -462,16 +478,28 @@ pub(crate) fn bind(
     root: &Path,
     key: &InvocationKey,
     wait_key: String,
-    inbound: &ChannelInboundAdmission,
+    input: &AssistantInput,
     pending_inbounds: Vec<String>,
     pending_truncated: bool,
     notification: Option<anchor_platform_session::ChannelNotification>,
 ) -> Result<TurnBinding, String> {
+    if matches!(input, AssistantInput::Task(_))
+        && (!pending_inbounds.is_empty() || pending_truncated || notification.is_some())
+    {
+        return Err("task input cannot fold channel input or notification context".into());
+    }
     let binding = TurnBinding {
         key: key.clone(),
         wait_key,
-        inbound: inbound.relation.inbound_id.clone(),
-        turn: inbound.relation.turn_id.clone(),
+        inbound: match input {
+            AssistantInput::User(input) => input.relation.inbound_id.clone(),
+            AssistantInput::Task(input) => input.result.id.clone(),
+        },
+        input_kind: match input {
+            AssistantInput::User(_) => InputKind::User,
+            AssistantInput::Task(_) => InputKind::Task,
+        },
+        turn: input.turn().id.clone(),
         pending_inbounds,
         pending_truncated,
         notification,
@@ -480,10 +508,53 @@ pub(crate) fn bind(
     Ok(binding)
 }
 
-pub(crate) fn input(
+pub(crate) fn task_file_path(id: &str, name: &str) -> PathBuf {
+    PathBuf::from("/in/tasks").join(id).join(name)
+}
+
+pub(crate) fn selected_input_files(
     root: &Path,
     key: &InvocationKey,
-) -> Result<Option<ChannelInboundAdmission>, String> {
+) -> Result<Vec<(anchor_platform_session::ChannelNotificationFile, PathBuf)>, String> {
+    match input(root, key)? {
+        Some(AssistantInput::Task(input)) => Ok(input
+            .result
+            .files
+            .into_iter()
+            .map(|file| {
+                let path = task_file_path(&input.result.id, &file.name);
+                (file, path)
+            })
+            .collect()),
+        Some(AssistantInput::User(_)) => Ok(binding(root, key)?
+            .and_then(|binding| binding.notification)
+            .into_iter()
+            .flat_map(|notification| {
+                notification.files.into_iter().map(move |file| {
+                    let path =
+                        crate::channel_notifications::file_path(&notification.id, &file.name);
+                    (file, path)
+                })
+            })
+            .collect()),
+        None => Ok(Vec::new()),
+    }
+}
+
+pub(crate) fn task_result_projection(
+    result: &anchor_platform_session::TaskResult,
+) -> serde_json::Value {
+    serde_json::json!({
+        "id":result.id, "source_run":result.source_run, "outcome":result.outcome,
+        "content":result.content,
+        "files":result.files.iter().map(|file| serde_json::json!({
+            "name":file.name,"path":task_file_path(&result.id, &file.name),"artifact_id":file.artifact_id,
+        })).collect::<Vec<_>>(),
+        "reply_policy":"No automatic channel reply. Follow the original authorized task request and current proactive-send tools when notification is appropriate. This is a task completion or blocked status, not a participant message. A blocked status is not completion; schedule admission may have no source Run. If interrupted, inspect native tool observations and actual external receipts before repeating effects. Handling this input does not by itself prove external delivery.",
+    })
+}
+
+pub(crate) fn input(root: &Path, key: &InvocationKey) -> Result<Option<AssistantInput>, String> {
     let Some(source) = source(root, key)? else {
         return Ok(None);
     };
@@ -491,7 +562,7 @@ pub(crate) fn input(
         return Ok(None);
     };
     let input = sessions(root)?
-        .get_channel_assistant_input(
+        .get_assistant_input(
             &source.owner,
             &source.session,
             &key.run_id,
@@ -499,7 +570,15 @@ pub(crate) fn input(
         )
         .map_err(|error| error.to_string())?
         .ok_or("assistant input binding is missing")?;
-    if input.relation.turn_id != binding.turn || input.relation.inbound_id != binding.inbound {
+    let matches = match &input {
+        AssistantInput::User(input) => {
+            binding.input_kind == InputKind::User && input.relation.inbound_id == binding.inbound
+        }
+        AssistantInput::Task(input) => {
+            binding.input_kind == InputKind::Task && input.result.id == binding.inbound
+        }
+    };
+    if input.turn().id != binding.turn || !matches {
         return Err("assistant input identity changed".into());
     }
     Ok(Some(input))
@@ -508,7 +587,7 @@ pub(crate) fn input(
 pub(crate) fn bind_request(
     root: &Path,
     request: &NodeExecutionRequest,
-) -> Result<Option<ChannelInboundAdmission>, String> {
+) -> Result<Option<AssistantInput>, String> {
     let Some(source) = source(root, &request.key)? else {
         return Ok(None);
     };
@@ -523,7 +602,7 @@ pub(crate) fn bind_request(
         };
         if let Some(prior) = binding(root, &predecessor)? {
             let input = sessions(root)?
-                .get_channel_assistant_input(
+                .get_assistant_input(
                     &source.owner,
                     &source.session,
                     &request.key.run_id,
@@ -554,7 +633,15 @@ pub(crate) fn attachment_metadata(
     let Some(input) = input(root, key)? else {
         return Ok(metadata.clone());
     };
-    Ok(attachment_metadata_for_input(metadata, &input))
+    match input {
+        AssistantInput::User(input) => Ok(attachment_metadata_for_input(metadata, &input)),
+        AssistantInput::Task(input) => {
+            let mut selected = metadata.clone();
+            selected.run_id = format!("turn-{}", input.turn.id);
+            selected.attachments.clear();
+            Ok(selected)
+        }
+    }
 }
 
 pub(crate) fn attachment_metadata_for_input(

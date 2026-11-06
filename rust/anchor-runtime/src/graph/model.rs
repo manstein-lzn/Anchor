@@ -69,12 +69,25 @@ pub struct GraphNode {
 /// *optional* Plugin off, but never a required one. A bare string in an older
 /// Graph means `required: true`, which is what "declared" always meant.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(from = "PluginRefRepr")]
+#[serde(try_from = "PluginRefRepr")]
 pub struct PluginRef {
     pub id: String,
     pub required: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default: Option<bool>,
+    pub graph_tasks: Option<GraphTaskPolicy>,
+}
+
+/// Host-enforced delegation limits for the official graph-tasks Plugin.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct GraphTaskPolicy {
+    pub graphs: Vec<String>,
+    pub create_graphs: bool,
+    pub plugins: Vec<String>,
+    pub network: bool,
+    pub commands: bool,
+    pub develop_plugins: bool,
 }
 
 /// A reference as it is *written*: a bare id, or the full object.
@@ -82,7 +95,7 @@ pub struct PluginRef {
 /// Snapshots and Run records written before the object form carry `["id"]`; they
 /// must keep loading, and a bare id has always meant "required".
 #[derive(Debug, Clone, Deserialize)]
-#[serde(untagged)]
+#[serde(untagged, deny_unknown_fields)]
 enum PluginRefRepr {
     Id(String),
     Full {
@@ -91,6 +104,8 @@ enum PluginRefRepr {
         required: bool,
         #[serde(default)]
         default: Option<bool>,
+        #[serde(default)]
+        graph_tasks: Option<GraphTaskPolicy>,
     },
 }
 
@@ -103,37 +118,48 @@ enum PluginRefRepr {
 /// written. `required: true` with no `default` is precisely the old form --
 /// whether it arrived as a string or as `{"id":…,"required":true}` -- so both
 /// collapse to `"id"` and old records keep validating. An optional reference, or
-/// one that names a default, still writes the object.
+/// one that names a default or delegation policy, still writes the object.
 impl Serialize for PluginRef {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        if self.required && self.default.is_none() {
+        if self.required && self.default.is_none() && self.graph_tasks.is_none() {
             return serializer.serialize_str(&self.id);
         }
         use serde::ser::SerializeStruct;
-        let mut state = serializer.serialize_struct("PluginRef", 3)?;
+        let fields =
+            2 + usize::from(self.default.is_some()) + usize::from(self.graph_tasks.is_some());
+        let mut state = serializer.serialize_struct("PluginRef", fields)?;
         state.serialize_field("id", &self.id)?;
         state.serialize_field("required", &self.required)?;
         if let Some(default) = self.default {
             state.serialize_field("default", &default)?;
         }
+        if let Some(policy) = &self.graph_tasks {
+            state.serialize_field("graph_tasks", policy)?;
+        }
         state.end()
     }
 }
 
-impl From<PluginRefRepr> for PluginRef {
-    fn from(repr: PluginRefRepr) -> Self {
-        match repr {
+impl TryFrom<PluginRefRepr> for PluginRef {
+    type Error = GraphError;
+
+    fn try_from(repr: PluginRefRepr) -> Result<Self, Self::Error> {
+        let reference = match repr {
             PluginRefRepr::Id(id) => Self::required(id),
             PluginRefRepr::Full {
                 id,
                 required,
                 default,
+                graph_tasks,
             } => Self {
                 id,
                 required,
                 default,
+                graph_tasks,
             },
-        }
+        };
+        reference.validate_graph_tasks()?;
+        Ok(reference)
     }
 }
 
@@ -147,7 +173,34 @@ impl PluginRef {
             id: id.into(),
             required: true,
             default: None,
+            graph_tasks: None,
         }
+    }
+
+    pub(crate) fn validate_graph_tasks(&self) -> Result<(), GraphError> {
+        let Some(policy) = &self.graph_tasks else {
+            return Ok(());
+        };
+        if self.id != "graph-tasks" {
+            return Err(GraphError::InvalidSnapshot(
+                "graph_tasks is only valid on the graph-tasks Plugin reference".into(),
+            ));
+        }
+        for graph in &policy.graphs {
+            if !crate::identifier::is_name(graph) {
+                return Err(GraphError::InvalidSnapshot(format!(
+                    "graph_tasks contains an invalid Graph name: {graph}"
+                )));
+            }
+        }
+        for plugin in &policy.plugins {
+            if !crate::identifier::is_plugin_id(plugin) {
+                return Err(GraphError::InvalidSnapshot(format!(
+                    "graph_tasks contains an invalid Plugin id: {plugin}"
+                )));
+            }
+        }
+        Ok(())
     }
 }
 

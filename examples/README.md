@@ -23,10 +23,11 @@
 | `docmost` | 页面 MCP 与图片附件工具 | 在插件详情填写 Docmost URL 和 API key |
 | `wecom` | 企微工具、Gateway 和使用说明 | 机器人按 Graph 配置，见上；默认不连接 |
 | `anchor-steward`（Anchor Dev） | Graph、Plugin、Rust、Python、pixi 与 Git 工作流的按需 Skill | 在 Pilot 插件面板启用；纯说明，无 MCP server |
+| `graph-tasks`（Graph Tasks） | AgentNode 按需选择/构建 Graph、异步委派与设置计划 | 在 Graph 编辑器挂载并保存节点可见范围与能力上限；不自动授权或安装候选 Plugin |
 
 插件的本地 Rust 工具随源码首次准备编译和安装，用户不用手动复制二进制。模型、插件连接和渠道配置仍由网页管理，不附带任何凭据。
 
-Anchor Dev 保留目录 ID `anchor-steward`，启用后 Pilot 按需读取开发方法，不会自动初始化环境、启用 Git 或授予联网。使用 Git 工具需单独启用 `git`，远端访问仍按 Host 权限与凭据配置执行。关闭 Anchor Dev 只移除后续 Turn 的方法披露，不删除源码、环境和缓存，也不撤销其他已授权工具。
+Anchor Dev 保留目录 ID `anchor-steward`，启用后 Pilot 按需读取开发方法，不会自动初始化环境、启用 Git 或授予联网。使用 Git 工具需单独启用 `git`，远端访问仍按 Host 权限与凭据配置执行。关闭 Anchor Dev 只移除后续 Turn 的方法披露，不删除源码、环境和缓存，也不撤销其他已授权工具。Graph Tasks 的节点授权与结果输入规则见[使用契约](../docs/plugins.md#graph-任务)。
 
 ## 用户修改与其他示例
 
@@ -36,8 +37,8 @@ Anchor Dev 保留目录 ID `anchor-steward`，启用后 Pilot 按需读取开发
 
 [graphs/](graphs/) 仍提供其他现有示例。RSI、周报及 Docmost 周报包装图依赖明确授权的本机输入目录和附加工具，按 [RSI](../docs/rsi.md)、[周报](../docs/weekly-work-report.md) 配置后导入；Python 依赖探针用于开发验证，按需从插件库安装并准备 Python 环境。这些内容未列为默认上手项目。
 
-[AI 每日晨报](graphs/ai-morning-briefing.json) 是可选业务图：共用一次冻结的时间窗口与上期基线，四路并行发现 → 聚合去重与选题 → 三路并行核实原文 → 写作、独立评审与定向修补 → PDF 渲染、逐页视觉检查与本地发布。[来源入口](../plugins/ai-morning-briefing/skills/ai-morning-briefing/sources.json) 随 Plugin 分发，覆盖国内、国际、技术社区和独立搜索；入口用于发现线索，最终事实回到一手发布或可靠媒体原始采访调查，不限制公司名单。发布关卡核对六项评审结论和所审稿件身份；返工保留时间窗口和未受影响内容。整期以约 4–5 页为目标，每条通常两三句话、按重要性排序，保持正常字号自然分页，核查过程留在内部记录。安装 [DeepSeek 联网检索](../plugins/deepseek-web/plugin.json) 和 [晨报](../plugins/ai-morning-briefing/plugin.json) 插件，在前者配置官方 DeepSeek API key；研究、写作与评审使用 `models.default`，视觉检查使用支持图片的 `models.backup.flash`。正式发布后通过 `Op.call(mode=wait)` 调用分发子图，生产和发送只有一个定时入口。运行输入须明确指定 `bot_graph`、真实 `userid`；`send_not_before` 默认为上海时间 `09:05`，提前完成等待至该时刻，生产晚于该时刻则直接发送；手动立即交付可显式传 `null`。
+[AI 每日晨报](graphs/ai-morning-briefing.json) 是可选业务图：共用一次冻结的时间窗口与上期基线，四路并行发现 → 聚合去重与选题 → 三路并行核实原文 → 写作、独立评审与定向修补 → PDF 渲染、逐页视觉检查与本地发布。[来源入口](../plugins/ai-morning-briefing/skills/ai-morning-briefing/sources.json) 随 Plugin 分发，覆盖国内、国际、技术社区和独立搜索；入口用于发现线索，最终事实回到一手发布或可靠媒体原始采访调查，不限制公司名单。发布关卡核对六项评审结论和所审稿件身份；返工保留时间窗口和未受影响内容。整期以约 4–5 页为目标，每条通常两三句话、按重要性排序，保持正常字号自然分页，核查过程留在内部记录。安装 [DeepSeek 联网检索](../plugins/deepseek-web/plugin.json) 和 [晨报](../plugins/ai-morning-briefing/plugin.json) 插件，在前者配置官方 DeepSeek API key；研究、写作与评审使用 `models.default`，视觉检查使用支持图片的 `models.backup.flash`。
 
 两个工具分别由 `anchor-deepseek-tools package-plugin <新目录>` 和 `anchor-briefing-tools package-plugin <新目录> <Typst可执行文件>` 打包，沿用 Library 安装入口；渲染还需要系统 Poppler 与 Noto CJK SC、DejaVu 字体。已发布期刊只归档正文、PDF 和检查信息，下一次运行自动读取最近成功版本与上一日期刊以便去重；同日期刊保持身份并增加修订号。检索以实际窗口为主，适当重叠回查未刊的重要漏项，保留真实日期。可用 `anchor-briefing-tools seed-baseline <插件目录> <PDF> <日期> <截止时间> <窗口起点>` 导入首次参考稿，时间须有明确时区；该操作仅接受空档案。
 
-[晨报分发](graphs/ai-morning-briefing-delivery.json) 是由生产图调用、有限结束的分发子图，与晨报和企微 Plugin 一起导入。调用显式传递 `bot_graph`、真实 `userid` 和已提交的 `publication.json`；该成员须已有与目标机器人的私聊。子图通过 `briefing.issue` 导出凭证中指定的日期与版本，代码核对凭证和 PDF／正文摘要，并从任务输入固定收件人、从正式正文生成导读；不再重新选取最新版。发送节点用 `wecom_send_file` 等待文件及导读回执，父图取得 `receipt.json` 后才完成。文件确认后，原助手下一 Turn 自动获得选定文件的只读引用，不新建对话或扫描历史。只给生产图创建每日计划，不给子图单独定时；计划启动时间遵循宿主当地时区，发送时间约束固定为上海时区。配置与实际验收见[企微契约](../docs/wecom-assistant.md)。
+生产图只交付确切版本的日名 PDF、`report.json` 和工具导出的 `publication.json`，不包含渠道、收件人或分发子图。`send_not_before` 默认上海时间 `09:05`；提前完成等待至该时刻，生产晚于该时刻则直接交接，显式 `null` 表示立即交接。让已有助手通过 `graph-tasks` 持有生产计划，或由操作员显式迁移原普通计划；成功、失败和受阻回原 Session，助手按原请求用自己的渠道工具发送。原文件和导读分别以实际 ACK 为准，未知效果不盲重发。计划启动时间仍遵循 Host 本地时区。配置与验收见[企微契约](../docs/wecom-assistant.md)。

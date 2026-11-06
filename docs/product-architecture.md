@@ -14,6 +14,8 @@ Anchor 是本地优先、可观察、可恢复的 Agent 工作系统。用户通
 
 长期方向是多用户工作中枢：用户可以直接提出任务，由 Copilot 选择或临时构建 Graph，保留来源和访问范围，并把结果返回原用户。系统 Pilot Graph、临时 Graph 的可见性/保留期限、主动工作策略和自动发布授权尚未冻结；不能把方向当作已经授权在线自改或跨用户读取。
 
+短期已有显式授权的 `graph-tasks` 垂直切片：普通 AgentNode 选择或构建限定能力的 Graph，复用 Scheduler 和 Kernel Run，完成结果作为原 Session 的独立输入交给现有 `wait_input`。这不要求把 Pilot 绑定为聊天机器人，也不先重写常驻 Run 的生命周期。当前创建物是正常 catalog 资产并有作用域归属，不隐含私有资产目录、自动过期或自动安装 Plugin；可配置的全序优先级与任意事件源仍属后续设计。现状归 [当前架构](architecture.md#按需-graph-任务与结果输入)。
+
 ## 不可动摇的设计原则
 
 - Graph 是用户资产，定义与一次 Run 的记录分开；编辑 Graph 不静默改变已开始的 Run。

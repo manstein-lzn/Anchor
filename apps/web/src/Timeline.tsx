@@ -20,14 +20,20 @@ const duration = (ms: number) => {
 };
 const hasRunEnd = (run: OurRun) => !!run.updated?.trim() && Number.isFinite(Date.parse(run.updated));
 export const timelineNeedsAttention = (entry: { run?: OurRun; status: string }) => entry.run
-  ? runNeedsAttention(entry.run) : entry.status.startsWith('missed_');
+  ? runNeedsAttention(entry.run) : entry.status.startsWith('missed_') || ['pending', 'pending_busy'].includes(entry.status);
+export const schedulePlanNote = (status: string) => ({
+  planned: '这是计划开始的时点，实际时长将在执行后显示。',
+  pending: '该时点已到，正在等待宿主接受执行；不会因延迟而丢弃。',
+  pending_busy: 'Graph 当前忙碌，该时点保留在队列中，空闲后继续尝试启动。',
+  missed_busy: '历史记录：Graph 在该时点忙碌，本次未执行，也不会补跑。',
+}[status] ?? '该历史计划未执行，也不会补跑；错过原因以服务端记录为准。');
 type Entry = { id: string; graph: string; start: number; end: number; status: string; source: string;
   /** The Run has not finished this interval, so its end grows with the clock rather than a record. */
   open?: boolean;
   /** The Run reports its own execution windows, so this bar is one of them (or its start marker). */
   resident?: boolean; run?: OurRun; plan?: TimelineItem };
 type PlacedEntry = Entry & { lane: number };
-type Filter = 'all' | 'executing' | 'settled' | 'attention' | 'planned' | 'waiting';
+type Filter = 'all' | 'executing' | 'settled' | 'attention' | 'planned' | 'waiting' | 'pending';
 
 /** One Run's bars. A resident instance reports the intervals it actually worked; drawing its whole
  *  lifetime instead would paint every idle wait as execution and join the days into one line. An
@@ -145,6 +151,7 @@ export function Timeline({ data, graphs, graphColors: sharedGraphColors, page, o
     if (chainFilter && (!entry.run || (entry.run.trigger?.root_run ?? entry.run.run) !== chainFilter)) return false;
     if (filter === 'attention') return timelineNeedsAttention(entry);
     if (filter === 'settled') return entry.run?.projection?.phase === 'settled';
+    if (filter === 'pending') return ['pending', 'pending_busy'].includes(entry.status);
     return filter === 'all' || entry.status === filter;
   }).sort((a, b) => a.start - b.start);
   const rowData = rows.map(date => {
@@ -207,7 +214,7 @@ export function Timeline({ data, graphs, graphColors: sharedGraphColors, page, o
         <div className="timeline-filters">
           <select aria-label="筛选 Graph" value={graphFilter} onChange={event => setGraphFilter(event.target.value)}><option value="">全部 Graph</option>{graphs.map(name => <option key={name}>{name}</option>)}</select>
           <select aria-label="筛选状态" value={filter} onChange={event => setFilter(event.target.value as Filter)}>
-            <option value="all">全部状态</option><option value="executing">执行中</option><option value="settled">已结算</option><option value="attention">仅异常 / 错过</option><option value="planned">仅未来计划</option><option value="waiting">等待处理</option>
+            <option value="all">全部状态</option><option value="executing">执行中</option><option value="settled">已结算</option><option value="attention">仅异常 / 待启动 / 错过</option><option value="planned">仅未来计划</option><option value="pending">等待启动的计划</option><option value="waiting">等待处理</option>
           </select>
           <select aria-label="筛选触发方式" value={sourceFilter} onChange={event => setSourceFilter(event.target.value)}><option value="">全部触发方式</option><option value="manual">手动</option><option value="schedule">定时</option><option value="webhook">Webhook</option><option value="graph_call">工作流调用</option><option value="channel">消息</option></select>
           <select aria-label="筛选调用链" value={chainFilter} onChange={event => setChainFilter(event.target.value)}><option value="">全部调用链</option>
@@ -311,7 +318,7 @@ function RunPreview({ entry, data, onClose, onOpen, onOpenRun }: { entry: Entry;
     </dl>
     {run?.trigger?.source === 'graph_call' && run.trigger.run && run.trigger.graph && <button className="full-button"
       onClick={() => onOpenRun?.(run.trigger!.run!, run.trigger!.graph!)}>查看来源运行 ↖</button>}
-    {entry.plan && <p className="preview-note">{entry.status === 'planned' ? '这是计划开始的时点，实际时长将在执行后显示。' : entry.status === 'missed_busy' ? 'Graph 在该时点忙碌，本次未执行，也不会补跑。' : '该计划未执行，也不会补跑；错过原因以服务端记录为准。'}</p>}
+    {entry.plan && <p className="preview-note">{schedulePlanNote(entry.status)}</p>}
     {detail?.state.error && <p className="timeline-error" role="alert">{detail.state.error}</p>}
     <section className="preview-input"><h3>运行输入</h3>{error ? <p role="alert">{error} <button onClick={() => setAttempt(value => value + 1)}>重试</button></p> : run && !detail ? <p>正在读取…</p> : <pre>{JSON.stringify(run ? detail?.state.input ?? {} : schedule?.input ?? {}, null, 2)}</pre>}</section>
     {run && <><p className="timeline-muted">Run · {run.run}</p><button className="primary preview-open" onClick={() => onOpen(run)}>查看节点与产物<ArrowUpRight size={16} /></button></>}

@@ -148,11 +148,15 @@ impl RunApplication {
         }
         let inventory = artifacts.inventory().map_err(storage)?;
         for (run_id, view) in self.run_views()? {
-            let pending_delivery = self.metadata(&run_id)?.is_some_and(|metadata| {
+            let pending_delivery = if let Some(metadata) = self.metadata(&run_id)? {
                 metadata
                     .session_call
+                    .as_ref()
                     .is_some_and(|call| call.status == "pending")
-            });
+                    || self.task_result_delivery_pending(&metadata)?
+            } else {
+                false
+            };
             if view.is_settled() && !view.active() && !pending_delivery {
                 continue;
             }

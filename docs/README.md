@@ -12,6 +12,7 @@
 | --- | --- |
 | 编写、校验、交付及组合 Graph JSON | [Graph 作者契约](rust-graph-authoring-contract.md) |
 | Plugin 清单、安装、权限、凭据与依赖 | [Plugin](plugins.md)、[依赖标准](plugin-dependencies.md) |
+| Agent 按需调用/创建 Graph、设置计划与处理完成结果 | [Graph 任务](plugins.md#graph-任务)、[结果输入契约](architecture.md#按需-graph-任务与结果输入) |
 | 让 Pilot 开发、准备环境、自测和交付 | [Pilot 开发](pilot-development.md)；联网规则归 [Plugin](plugins.md#pilot-任务联网) |
 | 找示例或配置业务能力 | [上手示例](../examples/README.md)、[企业微信](wecom-assistant.md)、[RSI](rsi.md)、[周报](weekly-work-report.md) |
 

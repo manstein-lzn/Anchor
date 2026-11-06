@@ -41,6 +41,13 @@ pub(crate) struct RunTrigger {
 }
 
 impl RunTrigger {
+    fn source_name(&self) -> &'static str {
+        match self.source {
+            TriggerSource::Manual => "manual",
+            TriggerSource::Schedule => "schedule",
+        }
+    }
+
     pub(crate) fn validate(&self) -> Result<(), String> {
         match self.source {
             TriggerSource::Manual if self.schedule.is_some() || self.scheduled_at.is_some() => {
@@ -71,12 +78,14 @@ impl RunTrigger {
         }
     }
 
+    pub(crate) fn matches_metadata(&self, metadata: &RunMetadata) -> bool {
+        metadata.trigger_source == self.source_name()
+            && metadata.schedule == self.schedule
+            && metadata.scheduled_at == self.scheduled_at
+    }
+
     pub(crate) fn apply(self, metadata: &mut RunMetadata) {
-        metadata.trigger_source = match self.source {
-            TriggerSource::Manual => "manual",
-            TriggerSource::Schedule => "schedule",
-        }
-        .into();
+        metadata.trigger_source = self.source_name().into();
         metadata.schedule = self.schedule;
         metadata.scheduled_at = self.scheduled_at;
     }
@@ -114,6 +123,19 @@ pub(crate) struct RunMetadata {
     pub(crate) schedule: Option<String>,
     #[serde(default)]
     pub(crate) scheduled_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) request: Option<AdmissionRequest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) task: Option<crate::task_delegation::TaskOrigin>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) task_grants: Option<crate::task_delegation::GraphTaskGrants>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AdmissionRequest {
+    pub(crate) id: String,
+    pub(crate) content_digest: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -253,6 +275,9 @@ impl RunMetadata {
             attachments: Vec::new(),
             schedule: None,
             scheduled_at: None,
+            request: None,
+            task: None,
+            task_grants: None,
         })
     }
 

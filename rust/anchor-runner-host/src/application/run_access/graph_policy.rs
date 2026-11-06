@@ -122,6 +122,10 @@ impl RunApplication {
             source,
         )?;
         metadata.trigger_source = "channel".into();
+        metadata.task_grants =
+            crate::assistant_plugins::publication(&self.data_root, source, &record.graph_digest)
+                .map_err(ApplicationError::Invalid)?
+                .map(|receipt| receipt.task_grants());
         metadata.oauth_owner = Some(oauth_owner);
         metadata.conversation = Some(ConversationSource {
             session: session.clone(),

@@ -291,6 +291,10 @@ mod tests {
             LocalInputs::new(root.to_owned(), None).unwrap(),
             Arc::new(crate::plugin_mounts::SessionMounts::open(root).unwrap()),
             None,
+            crate::execution::tool_assembly::new(crate::application::RunApplication::new(
+                root.into(),
+                root.into(),
+            )),
         )
         .with_library_root(Some(root.to_path_buf()))
     }

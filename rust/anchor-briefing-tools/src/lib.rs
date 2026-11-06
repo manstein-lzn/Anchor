@@ -95,6 +95,11 @@ pub struct PublishRequest {
     pub pdf_path: String,
     pub inspection_path: String,
     pub visual_review: VisualReview,
+    #[serde(default = "publication_dir")]
+    pub export_dir: String,
+}
+fn publication_dir() -> String {
+    "published".into()
 }
 
 #[derive(Deserialize)]
@@ -270,7 +275,27 @@ impl BriefingServer {
             request.output_dir,
             issue_date.replace('-', "")
         );
-        self.files.write_new(&pdf_path, &pdf)?;
+        let manifest = format!("{}/publication.json", request.output_dir);
+        let existing = if self.workspace.join(&manifest).try_exists()? {
+            Some(serde_json::from_slice::<Value>(&fs::read(
+                self.input(&manifest)?,
+            )?)?)
+        } else {
+            None
+        };
+        // Reuse only a complete, byte-identical export after a lost tool result.
+        // A partial directory remains evidence and is never overwritten.
+        let export = |path: &str, bytes: &[u8]| -> Result<(), Error> {
+            if existing.is_some() {
+                if fs::read(self.input(path)?)? != bytes {
+                    return Err("existing export differs from the exact published version".into());
+                }
+                Ok(())
+            } else {
+                self.files.write_new(path, bytes)
+            }
+        };
+        export(&pdf_path, &pdf)?;
         let mut result = json!({"publication":publication,"pdf_path":pdf_path});
         for (name, field) in [
             ("report.json", "report_path"),
@@ -285,18 +310,29 @@ impl BriefingServer {
                     return Err("archived report differs from its published identity".into());
                 }
                 let target = format!("{}/{name}", request.output_dir);
-                self.files.write_new(&target, &bytes)?;
+                export(&target, &bytes)?;
                 result[field] = target.into();
+            } else if name == "report.json" && publication.report_sha256.is_some() {
+                return Err("archived report is missing".into());
             }
         }
-        let manifest = format!("{}/publication.json", request.output_dir);
-        self.files
-            .write_new(&manifest, &serde_json::to_vec_pretty(&result)?)?;
+        match existing {
+            Some(existing) if existing != result => {
+                return Err(
+                    "existing export manifest differs from the exact published version".into(),
+                );
+            }
+            Some(_) => {}
+            None => self
+                .files
+                .write_new(&manifest, &serde_json::to_vec_pretty(&result)?)?,
+        }
         result["publication_path"] = manifest.into();
         Ok(result)
     }
 
     pub fn publish(&self, request: PublishRequest) -> Result<Value, Error> {
+        WorkspaceFiles::validate_relative(&request.export_dir)?;
         let report_path = self.input(&request.report_path)?;
         let report = render::load_report(&report_path)?;
         let report_value = serde_json::to_value(report)?;
@@ -339,7 +375,7 @@ impl BriefingServer {
         if let Some((existing, _)) = publications.iter().find(|(entry, _)| {
             entry.report_sha256.as_deref() == Some(&report_sha) && entry.pdf_sha256 == pdf_sha
         }) {
-            return Ok(json!({"publication":existing, "changed":false}));
+            return Ok(self.export_published(existing, false, request.export_dir));
         }
         if publications
             .last()
@@ -383,7 +419,29 @@ impl BriefingServer {
                 ("inspection.json", serde_json::to_vec_pretty(&inspection)?),
             ],
         )?;
-        Ok(json!({"publication":publication,"changed":true}))
+        Ok(self.export_published(&publication, true, request.export_dir))
+    }
+
+    fn export_published(
+        &self,
+        publication: &Publication,
+        changed: bool,
+        output_dir: String,
+    ) -> Value {
+        match self.issue(IssueRequest {
+            issue_date: Some(publication.issue_date.clone()),
+            revision: Some(publication.revision),
+            output_dir,
+        }) {
+            Ok(mut exported) => {
+                exported["changed"] = changed.into();
+                exported
+            }
+            // The publication is already authoritative even when handoff fails.
+            Err(error) => {
+                json!({"publication":publication,"changed":changed,"export_error":error.to_string()})
+            }
+        }
     }
 
     fn publication_lease(&self) -> Result<FileLease, Error> {
@@ -501,7 +559,7 @@ impl ServerHandler for BriefingServer {
                 ),
                 tool(
                     "issue",
-                    "Export the exact published briefing for issue_date (defaults to actual Asia/Shanghai date) and optional revision into a new workspace directory. Verifies archived hashes; never substitutes a different date. Use the returned publication identity for delivery and discussion.",
+                    "Export the exact published briefing for issue_date (defaults to actual Asia/Shanghai date) and optional revision. Verifies archived hashes and only reuses an existing complete identical export; partial directories are not overwritten. Never substitutes a different date.",
                     json!({"issue_date":{"type":"string"},"revision":{"type":"integer","minimum":1},"output_dir":{"type":"string"}}),
                     json!(["output_dir"]),
                 ),
@@ -519,8 +577,8 @@ impl ServerHandler for BriefingServer {
                 ),
                 tool(
                     "publish",
-                    "Publish only this exact statically checked and visually approved PDF. Same-day editions keep issue identity and increment revision; the next run reads the last successful publication.",
-                    json!({"report_path":{"type":"string"},"pdf_path":{"type":"string"},"inspection_path":{"type":"string"},"visual_review":{"type":"object","properties":{"approved":{"type":"boolean"},"pages_reviewed":{"type":"array","items":{"type":"integer","minimum":1}},"notes":{"type":"string"}},"required":["approved","pages_reviewed","notes"],"additionalProperties":false}}),
+                    "Publish the exact checked PDF and export its canonical publication.json, PDF and report to export_dir (default published). Deliver these tool-written files without reconstructing the receipt. Repeating the same report/PDF preserves the original publication and notes. An export_error means publication succeeded but handoff failed; never report it as unpublished.",
+                    json!({"report_path":{"type":"string"},"pdf_path":{"type":"string"},"inspection_path":{"type":"string"},"export_dir":{"type":"string","default":"published"},"visual_review":{"type":"object","properties":{"approved":{"type":"boolean"},"pages_reviewed":{"type":"array","items":{"type":"integer","minimum":1}},"notes":{"type":"string"}},"required":["approved","pages_reviewed","notes"],"additionalProperties":false}}),
                     json!([
                         "report_path",
                         "pdf_path",
@@ -573,8 +631,12 @@ impl ServerHandler for BriefingServer {
         };
         match result {
             Ok(value) => {
-                let mut result =
-                    CallToolResult::success(vec![ContentBlock::text(value.to_string())]);
+                let content = vec![ContentBlock::text(value.to_string())];
+                let mut result = if value.get("export_error").is_some() {
+                    CallToolResult::error(content)
+                } else {
+                    CallToolResult::success(content)
+                };
                 result.structured_content = Some(value);
                 Ok(result)
             }

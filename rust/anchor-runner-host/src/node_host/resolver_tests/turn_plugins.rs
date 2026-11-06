@@ -128,6 +128,7 @@ async fn freeze(
         key: request.key.clone(),
         wait_key: wait.durable_key(),
         inbound: format!("in-{turn}"),
+        input_kind: Default::default(),
         turn: turn.into(),
         pending_inbounds: vec![],
         pending_truncated: false,

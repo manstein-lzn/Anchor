@@ -114,12 +114,13 @@ pub(super) fn invocation_envelope(
         local_inputs
             .iter()
             .map(|input| {
-                // Channel Turn/notification suffixes are transient, as are source trees.
+                // Input IDs and source trees do not change the capability boundary.
                 [
                     "/local-inputs",
                     "/in/channel",
                     "/in/channel-pending",
                     "/in/notifications",
+                    "/in/tasks",
                 ]
                 .into_iter()
                 .find(|category| input.destination.starts_with(category))
