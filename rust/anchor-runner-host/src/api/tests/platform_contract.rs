@@ -1,7 +1,14 @@
 use super::*;
 
 fn persisted_updated(state: &ApiState, run: &str) -> String {
-    state.application.run_updated(run).unwrap().unwrap()
+    state
+        .application
+        .read_run(run)
+        .unwrap()
+        .unwrap()
+        .updated()
+        .unwrap()
+        .to_owned()
 }
 
 #[tokio::test]

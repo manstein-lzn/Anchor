@@ -72,10 +72,6 @@ fn read_contract_exposes_timestamp_and_reserves_unmapped_outcomes() {
     fixtures::create(&application, &record("timestamp"));
     let view = fixtures::view(&application, "timestamp");
     assert!(view.updated().is_some());
-    assert_eq!(
-        view.updated(),
-        application.run_updated("timestamp").unwrap().as_deref()
-    );
     for (wire, expected) in [
         ("escalated", RunOutcome::Escalated),
         ("unknown", RunOutcome::Unknown),

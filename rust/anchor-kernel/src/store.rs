@@ -177,6 +177,24 @@ impl FileStore {
         })
     }
 
+    /// Read cached history facts without cloning their submissions.
+    ///
+    /// Holds the resource lease throughout `read`, without holding the history
+    /// cache mutex. The callback must not reenter the same resource lease
+    /// through this or another store instance. Its return value cannot borrow
+    /// from the entries slice.
+    pub fn with_record_entries<T>(
+        &self,
+        id: &str,
+        read: impl FnOnce(&[RecordEntry]) -> T,
+    ) -> Result<T, StoreError> {
+        let _lease = self.lease(id)?;
+        self.finish_removal(id)?;
+        self.with_history(id, &self.dir(id)?.join("history.jsonl"), |index, _| {
+            Ok(read(&index.entries))
+        })
+    }
+
     /// Physically remove a resource and all of its history. The caller owns
     /// authorization and must exclude new writers for the resource's lifetime.
     /// The directory rename is the deletion's visibility boundary; a later
@@ -415,11 +433,7 @@ impl Store for FileStore {
     }
 
     fn record_entries(&self, id: &str) -> Result<Vec<RecordEntry>, StoreError> {
-        let _lease = self.lease(id)?;
-        self.finish_removal(id)?;
-        self.with_history(id, &self.dir(id)?.join("history.jsonl"), |index, _| {
-            Ok(index.entries.clone())
-        })
+        self.with_record_entries(id, <[RecordEntry]>::to_vec)
     }
 
     fn history_len(&self, id: &str) -> Result<usize, StoreError> {
