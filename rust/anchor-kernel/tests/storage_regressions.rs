@@ -248,6 +248,49 @@ fn store_cost_sum_saturates_instead_of_overflowing() {
 }
 
 #[test]
+fn borrowed_record_projection_refreshes_after_own_append_and_external_replacement() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = FileStore::new(dir.path()).unwrap();
+    store.create(&resource()).unwrap();
+    let project = || {
+        store
+            .with_record_entries(RUN, |entries| {
+                entries
+                    .iter()
+                    .map(|entry| {
+                        entry.submission.content["recovery"]
+                            .as_u64()
+                            .ok_or("missing recovery fact")
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .unwrap()
+            .unwrap()
+    };
+    assert!(project().is_empty());
+
+    let mut appended = rejected_record(1, 2);
+    appended.submission.content = json!({"recovery": 11});
+    store.commit(RUN, &appended).unwrap();
+    assert_eq!(project(), vec![11]);
+
+    let mut replacement = rejected_record(2, 7);
+    replacement.submission.content = json!({"recovery": 22});
+    let path = history_path(dir.path());
+    let mut bytes = serde_json::to_vec(&replacement).unwrap();
+    bytes.push(b'\n');
+    let tmp = path.with_extension("replacement");
+    fs::write(&tmp, bytes).unwrap();
+    fs::rename(&tmp, &path).unwrap();
+
+    assert_eq!(project(), vec![22]);
+    assert_eq!(
+        store.record_entries(RUN).unwrap(),
+        vec![RecordEntry::from(replacement)]
+    );
+}
+
+#[test]
 fn cached_facts_follow_other_writers_replacement_truncation_and_same_length_corruption() {
     let dir = tempfile::tempdir().unwrap();
     let store = FileStore::new(dir.path()).unwrap();

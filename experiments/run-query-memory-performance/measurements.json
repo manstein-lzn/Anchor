@@ -1,0 +1,6459 @@
+{
+  "schema_version": 1,
+  "baseline_revision": "6cbfdaee0303aea1d244d6c0a6be48b54ff12bcb",
+  "benchmark_sha256": "5593ad0e132ed164e7d18688352978929b7b73c013da4e5360a5808397c8a1ff",
+  "product_diff_sha256": "7e1da617fa93de7762dd3dc149882cacc698a18b865240602c42ce104e9e5235",
+  "binaries": {
+    "baseline": {
+      "sha256": "730a7a6606d67cdefcbb685a523471d5d7a094d04afa2d48703273fec4c1e0dc",
+      "executable": "baseline-host-tests"
+    },
+    "fixed": {
+      "sha256": "18982242b42b0d780564818873b535afafd8b06acaa732d53c46d669eb49d156",
+      "executable": "fixed-host-tests"
+    }
+  },
+  "environment": {
+    "kernel": "Linux 6.18.33.2-microsoft-standard-WSL2 x86_64 GNU/Linux",
+    "glibc": "glibc 2.39",
+    "rustc": "rustc 1.99.0 (b940084d7 2026-09-28)",
+    "profile": "dev/test opt-level=1 debug=0",
+    "build_jobs": 1
+  },
+  "design": {
+    "fixture": "synthetic",
+    "independent_processes": 20,
+    "repetitions_per_case": 5,
+    "interleaved_case_order": true,
+    "runtime_worker_threads": 32,
+    "observed_worker_threads": [
+      7
+    ],
+    "concurrency": 8,
+    "pairs_per_process": 64,
+    "warmup_pairs_per_process": 16,
+    "measured_pairs_per_process": 48
+  },
+  "http_output": {
+    "all_processes_equal_after_timestamp_normalization": true,
+    "normalization_keys": [
+      "started",
+      "updated"
+    ],
+    "normalized_sha256": "23cab2e1116111f923b1b85df04645de97f3967eaa9a11865ce6dd0947033859",
+    "normalized_response": {
+      "runs": {
+        "runs": [
+          {
+            "session_call": null,
+            "run": "history-perf",
+            "graph": "fixture",
+            "running": false,
+            "projection": {
+              "phase": "executing",
+              "reason": null,
+              "active": false,
+              "actions": {
+                "pause": false,
+                "stop": true,
+                "resume": true,
+                "abandon": true
+              },
+              "updated": "<timestamp>"
+            },
+            "started": "<timestamp>",
+            "updated": "<timestamp>",
+            "executed": [],
+            "objective": "test",
+            "trigger": {
+              "source": "manual",
+              "schedule": null,
+              "scheduled_at": null
+            }
+          }
+        ]
+      },
+      "timeline": {
+        "from": "2026-10-10T00:00:00",
+        "to": "2026-11-09T00:00:00",
+        "runs": [
+          {
+            "session_call": null,
+            "run": "history-perf",
+            "graph": "fixture",
+            "running": false,
+            "projection": {
+              "phase": "executing",
+              "reason": null,
+              "active": false,
+              "actions": {
+                "pause": false,
+                "stop": true,
+                "resume": true,
+                "abandon": true
+              },
+              "updated": "<timestamp>"
+            },
+            "started": "<timestamp>",
+            "updated": "<timestamp>",
+            "executed": [],
+            "objective": "test",
+            "trigger": {
+              "source": "manual",
+              "schedule": null,
+              "scheduled_at": null
+            }
+          }
+        ],
+        "scheduled": [],
+        "schedules": [],
+        "capabilities": {
+          "scheduling": true
+        }
+      }
+    }
+  },
+  "summary": [
+    {
+      "variant": "baseline",
+      "malloc_arena_max": null,
+      "repetitions": 5,
+      "median": {
+        "rss_before_kib": 24860,
+        "rss_warm_kib": 52836,
+        "rss_after_kib": 53084,
+        "hwm_kib": 53084,
+        "pair_p50_ms": 2.158146,
+        "pair_p95_ms": 2.601896,
+        "pairs_per_second": 2689.0772873865635,
+        "warm_rchar": 50551531
+      },
+      "range": {
+        "rss_before_kib": [
+          22040,
+          25080
+        ],
+        "rss_warm_kib": [
+          49024,
+          52944
+        ],
+        "rss_after_kib": [
+          49024,
+          53928
+        ],
+        "hwm_kib": [
+          49024,
+          53928
+        ],
+        "pair_p50_ms": [
+          2.098791,
+          2.3162640000000003
+        ],
+        "pair_p95_ms": [
+          2.434707,
+          2.6466
+        ],
+        "pairs_per_second": [
+          2579.7208999958298,
+          2764.7536759992076
+        ],
+        "warm_rchar": [
+          50551531,
+          50551531
+        ]
+      },
+      "glibc_after_median": {
+        "arena_bytes": 26869760,
+        "allocated_bytes": 1410848,
+        "free_bytes": 25448512,
+        "mmap_bytes": 0,
+        "mmap_regions": 0,
+        "free_chunks": 609,
+        "main_arena_releasable_top_bytes": 80352
+      }
+    },
+    {
+      "variant": "fixed",
+      "malloc_arena_max": null,
+      "repetitions": 5,
+      "median": {
+        "rss_before_kib": 25424,
+        "rss_warm_kib": 48780,
+        "rss_after_kib": 48780,
+        "hwm_kib": 48780,
+        "pair_p50_ms": 1.825413,
+        "pair_p95_ms": 2.31891,
+        "pairs_per_second": 3063.6713237236604,
+        "warm_rchar": 50551531
+      },
+      "range": {
+        "rss_before_kib": [
+          25168,
+          25468
+        ],
+        "rss_warm_kib": [
+          48548,
+          49020
+        ],
+        "rss_after_kib": [
+          48548,
+          49020
+        ],
+        "hwm_kib": [
+          48548,
+          49020
+        ],
+        "pair_p50_ms": [
+          1.741228,
+          1.9937829999999999
+        ],
+        "pair_p95_ms": [
+          2.097705,
+          2.771665
+        ],
+        "pairs_per_second": [
+          2971.980354962189,
+          3422.096089463858
+        ],
+        "warm_rchar": [
+          50551531,
+          50551531
+        ]
+      },
+      "glibc_after_median": {
+        "arena_bytes": 22171648,
+        "allocated_bytes": 1380384,
+        "free_bytes": 20790208,
+        "mmap_bytes": 0,
+        "mmap_regions": 0,
+        "free_chunks": 460,
+        "main_arena_releasable_top_bytes": 80368
+      }
+    },
+    {
+      "variant": "baseline",
+      "malloc_arena_max": "2",
+      "repetitions": 5,
+      "median": {
+        "rss_before_kib": 24960,
+        "rss_warm_kib": 41648,
+        "rss_after_kib": 42676,
+        "hwm_kib": 45004,
+        "pair_p50_ms": 3.010475,
+        "pair_p95_ms": 3.59728,
+        "pairs_per_second": 1990.4455297164393,
+        "warm_rchar": 50551531
+      },
+      "range": {
+        "rss_before_kib": [
+          24852,
+          25208
+        ],
+        "rss_warm_kib": [
+          40156,
+          44148
+        ],
+        "rss_after_kib": [
+          41052,
+          44660
+        ],
+        "hwm_kib": [
+          44156,
+          45920
+        ],
+        "pair_p50_ms": [
+          2.8859519999999996,
+          4.091126
+        ],
+        "pair_p95_ms": [
+          3.528529,
+          5.039866
+        ],
+        "pairs_per_second": [
+          1503.0118008032157,
+          2138.045300102052
+        ],
+        "warm_rchar": [
+          50551531,
+          50551531
+        ]
+      },
+      "glibc_after_median": {
+        "arena_bytes": 12677120,
+        "allocated_bytes": 1332352,
+        "free_bytes": 11335872,
+        "mmap_bytes": 0,
+        "mmap_regions": 0,
+        "free_chunks": 495,
+        "main_arena_releasable_top_bytes": 1706448
+      }
+    },
+    {
+      "variant": "fixed",
+      "malloc_arena_max": "2",
+      "repetitions": 5,
+      "median": {
+        "rss_before_kib": 25276,
+        "rss_warm_kib": 40832,
+        "rss_after_kib": 41252,
+        "hwm_kib": 41252,
+        "pair_p50_ms": 2.190992,
+        "pair_p95_ms": 2.498198,
+        "pairs_per_second": 2751.028641131122,
+        "warm_rchar": 50551531
+      },
+      "range": {
+        "rss_before_kib": [
+          25164,
+          25468
+        ],
+        "rss_warm_kib": [
+          39124,
+          41820
+        ],
+        "rss_after_kib": [
+          39124,
+          41820
+        ],
+        "hwm_kib": [
+          40184,
+          41820
+        ],
+        "pair_p50_ms": [
+          2.083167,
+          2.856509
+        ],
+        "pair_p95_ms": [
+          2.393329,
+          4.485714
+        ],
+        "pairs_per_second": [
+          2075.598575603181,
+          2981.4266437055403
+        ],
+        "warm_rchar": [
+          50551531,
+          50551531
+        ]
+      },
+      "glibc_after_median": {
+        "arena_bytes": 11087872,
+        "allocated_bytes": 1298592,
+        "free_bytes": 9798976,
+        "mmap_bytes": 0,
+        "mmap_regions": 0,
+        "free_chunks": 418,
+        "main_arena_releasable_top_bytes": 1181040
+      }
+    }
+  ],
+  "samples": [
+    {
+      "benchmark": "repeated_run_and_timeline_queries_do_not_reread_snapshot_history",
+      "fixture": "synthetic",
+      "malloc_arena_max": null,
+      "glibc_tunables": null,
+      "runtime_worker_threads": 32,
+      "observed_worker_threads": 7,
+      "concurrency": 8,
+      "total_pairs": 64,
+      "warmup_pairs": 16,
+      "measured_pairs": 48,
+      "history_bytes": 67662374,
+      "resource_bytes": 525202,
+      "cold_runs_ms": 18.575366,
+      "pair_p50_ms": 2.162112,
+      "pair_p95_ms": 2.560012,
+      "pair_latency_ms": [
+        1.742977,
+        2.236501,
+        2.1138879999999998,
+        2.3324819999999997,
+        2.136257,
+        2.352564,
+        2.31906,
+        0.5731780000000001,
+        1.431364,
+        1.821267,
+        2.135914,
+        2.309491,
+        2.3375589999999997,
+        2.482901,
+        2.527543,
+        1.080122,
+        1.701948,
+        2.0897620000000003,
+        2.437651,
+        2.556057,
+        2.589201,
+        2.560012,
+        2.639075,
+        1.244593,
+        1.859039,
+        2.1971830000000003,
+        2.28988,
+        2.37505,
+        2.3995599999999997,
+        2.4890480000000004,
+        2.531397,
+        0.9962960000000001,
+        1.7008830000000001,
+        1.837902,
+        2.133612,
+        2.162112,
+        2.193832,
+        2.31061,
+        2.344452,
+        1.042948,
+        1.8075459999999999,
+        1.962328,
+        2.103584,
+        2.130759,
+        2.135927,
+        2.1795080000000002,
+        2.312251,
+        0.781114
+      ],
+      "warmup_pair_latency_ms": [
+        4.234824,
+        4.243618000000001,
+        4.516272,
+        4.564826,
+        4.625166,
+        4.691534,
+        4.799546,
+        0.79421,
+        2.000702,
+        2.092596,
+        2.112644,
+        2.240988,
+        2.2406219999999997,
+        2.301652,
+        2.2566919999999997,
+        0.5874079999999999
+      ],
+      "elapsed_seconds": 0.017849989,
+      "pairs_per_second": 2689.0772873865635,
+      "rss_before_kib": 25080,
+      "rss_warm_kib": 52576,
+      "rss_after_kib": 53084,
+      "hwm_kib": 53084,
+      "warm_rchar": 50551531,
+      "process_before": {
+        "rss_kib": 25080,
+        "hwm_kib": 25080,
+        "rchar": 16474,
+        "glibc": {
+          "arena_bytes": 5718016,
+          "allocated_bytes": 903888,
+          "free_bytes": 4814128,
+          "mmap_bytes": 0,
+          "mmap_regions": 0,
+          "free_chunks": 110,
+          "main_arena_releasable_top_bytes": 80352
+        }
+      },
+      "process_cold": {
+        "rss_kib": 31500,
+        "hwm_kib": 31500,
+        "rchar": 68733936,
+        "glibc": {
+          "arena_bytes": 8007680,
+          "allocated_bytes": 1010352,
+          "free_bytes": 6997328,
+          "mmap_bytes": 0,
+          "mmap_regions": 0,
+          "free_chunks": 111,
+          "main_arena_releasable_top_bytes": 80352
+        }
+      },
+      "process_warm": {
+        "rss_kib": 52576,
+        "hwm_kib": 52576,
+        "rchar": 85589445,
+        "glibc": {
+          "arena_bytes": 26349568,
+          "allocated_bytes": 1273392,
+          "free_bytes": 25076176,
+          "mmap_bytes": 0,
+          "mmap_regions": 0,
+          "free_chunks": 533,
+          "main_arena_releasable_top_bytes": 80352
+        }
+      },
+      "process_after": {
+        "rss_kib": 53084,
+        "hwm_kib": 53084,
+        "rchar": 136140976,
+        "glibc": {
+          "arena_bytes": 26869760,
+          "allocated_bytes": 1421248,
+          "free_bytes": 25448512,
+          "mmap_bytes": 0,
+          "mmap_regions": 0,
+          "free_chunks": 613,
+          "main_arena_releasable_top_bytes": 80352
+        }
+      },
+      "batches": [
+        {
+          "stage": "warmup",
+          "pairs_completed": 8,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 52560,
+            "hwm_kib": 52560,
+            "rchar": 77162849,
+            "glibc": {
+              "arena_bytes": 26333184,
+              "allocated_bytes": 1227008,
+              "free_bytes": 25106176,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 517,
+              "main_arena_releasable_top_bytes": 80352
+            }
+          }
+        },
+        {
+          "stage": "warmup",
+          "pairs_completed": 16,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 52576,
+            "hwm_kib": 52576,
+            "rchar": 85587835,
+            "glibc": {
+              "arena_bytes": 26349568,
+              "allocated_bytes": 1270272,
+              "free_bytes": 25079296,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 539,
+              "main_arena_releasable_top_bytes": 80352
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 24,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 52576,
+            "hwm_kib": 52576,
+            "rchar": 94014431,
+            "glibc": {
+              "arena_bytes": 26349568,
+              "allocated_bytes": 1302320,
+              "free_bytes": 25047248,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 570,
+              "main_arena_releasable_top_bytes": 80352
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 32,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 53084,
+            "hwm_kib": 53084,
+            "rchar": 102439417,
+            "glibc": {
+              "arena_bytes": 26869760,
+              "allocated_bytes": 1330976,
+              "free_bytes": 25538784,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 513,
+              "main_arena_releasable_top_bytes": 80352
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 40,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 53084,
+            "hwm_kib": 53084,
+            "rchar": 110864404,
+            "glibc": {
+              "arena_bytes": 26869760,
+              "allocated_bytes": 1357536,
+              "free_bytes": 25512224,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 597,
+              "main_arena_releasable_top_bytes": 80352
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 48,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 53084,
+            "hwm_kib": 53084,
+            "rchar": 119289391,
+            "glibc": {
+              "arena_bytes": 26869760,
+              "allocated_bytes": 1383744,
+              "free_bytes": 25486016,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 567,
+              "main_arena_releasable_top_bytes": 80352
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 56,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 53084,
+            "hwm_kib": 53084,
+            "rchar": 127714378,
+            "glibc": {
+              "arena_bytes": 26869760,
+              "allocated_bytes": 1405088,
+              "free_bytes": 25464672,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 600,
+              "main_arena_releasable_top_bytes": 80352
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 64,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 53084,
+            "hwm_kib": 53084,
+            "rchar": 136139365,
+            "glibc": {
+              "arena_bytes": 26869760,
+              "allocated_bytes": 1418528,
+              "free_bytes": 25451232,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 618,
+              "main_arena_releasable_top_bytes": 80352
+            }
+          }
+        }
+      ],
+      "variant": "baseline",
+      "repetition": 1,
+      "order": 1
+    },
+    {
+      "benchmark": "repeated_run_and_timeline_queries_do_not_reread_snapshot_history",
+      "fixture": "synthetic",
+      "malloc_arena_max": null,
+      "glibc_tunables": null,
+      "runtime_worker_threads": 32,
+      "observed_worker_threads": 7,
+      "concurrency": 8,
+      "total_pairs": 64,
+      "warmup_pairs": 16,
+      "measured_pairs": 48,
+      "history_bytes": 67662374,
+      "resource_bytes": 525202,
+      "cold_runs_ms": 18.101995,
+      "pair_p50_ms": 1.967664,
+      "pair_p95_ms": 2.563816,
+      "pair_latency_ms": [
+        1.7438420000000001,
+        1.864017,
+        1.991294,
+        1.967664,
+        1.947671,
+        2.0395309999999998,
+        2.1188079999999996,
+        0.712226,
+        2.0189909999999998,
+        2.03029,
+        2.039375,
+        2.046838,
+        2.044708,
+        2.084705,
+        2.071513,
+        0.503828,
+        1.733863,
+        1.818125,
+        1.917351,
+        1.840669,
+        1.881957,
+        1.934701,
+        1.947254,
+        0.423697,
+        1.524191,
+        1.631882,
+        1.7673999999999999,
+        1.936514,
+        2.2002520000000003,
+        2.182731,
+        2.2414650000000003,
+        0.8517349999999999,
+        1.7821420000000001,
+        1.9200199999999998,
+        2.049717,
+        2.022913,
+        2.086787,
+        2.090615,
+        2.1297170000000003,
+        0.761131,
+        1.789551,
+        2.269543,
+        2.559444,
+        2.563816,
+        2.580971,
+        2.5670089999999997,
+        2.555742,
+        0.4216
+      ],
+      "warmup_pair_latency_ms": [
+        4.2857590000000005,
+        4.382146,
+        4.401318000000001,
+        4.410108999999999,
+        4.401442,
+        4.528383000000001,
+        4.527679,
+        0.66944,
+        1.635167,
+        1.815407,
+        1.908631,
+        2.023893,
+        2.1771960000000004,
+        2.35066,
+        2.394466,
+        0.7108369999999999
+      ],
+      "elapsed_seconds": 0.016150847,
+      "pairs_per_second": 2971.980354962189,
+      "rss_before_kib": 25468,
+      "rss_warm_kib": 48780,
+      "rss_after_kib": 48780,
+      "hwm_kib": 48780,
+      "warm_rchar": 50551531,
+      "process_before": {
+        "rss_kib": 25468,
+        "hwm_kib": 25468,
+        "rchar": 16462,
+        "glibc": {
+          "arena_bytes": 5718016,
+          "allocated_bytes": 904640,
+          "free_bytes": 4813376,
+          "mmap_bytes": 0,
+          "mmap_regions": 0,
+          "free_chunks": 116,
+          "main_arena_releasable_top_bytes": 80368
+        }
+      },
+      "process_cold": {
+        "rss_kib": 31764,
+        "hwm_kib": 31764,
+        "rchar": 68733924,
+        "glibc": {
+          "arena_bytes": 8011776,
+          "allocated_bytes": 1010144,
+          "free_bytes": 7001632,
+          "mmap_bytes": 0,
+          "mmap_regions": 0,
+          "free_chunks": 105,
+          "main_arena_releasable_top_bytes": 80368
+        }
+      },
+      "process_warm": {
+        "rss_kib": 48780,
+        "hwm_kib": 48780,
+        "rchar": 85589433,
+        "glibc": {
+          "arena_bytes": 22175744,
+          "allocated_bytes": 1275936,
+          "free_bytes": 20899808,
+          "mmap_bytes": 0,
+          "mmap_regions": 0,
+          "free_chunks": 430,
+          "main_arena_releasable_top_bytes": 80368
+        }
+      },
+      "process_after": {
+        "rss_kib": 48780,
+        "hwm_kib": 48780,
+        "rchar": 136140964,
+        "glibc": {
+          "arena_bytes": 22175744,
+          "allocated_bytes": 1383424,
+          "free_bytes": 20792320,
+          "mmap_bytes": 0,
+          "mmap_regions": 0,
+          "free_chunks": 483,
+          "main_arena_releasable_top_bytes": 80368
+        }
+      },
+      "batches": [
+        {
+          "stage": "warmup",
+          "pairs_completed": 8,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 45708,
+            "hwm_kib": 45708,
+            "rchar": 77162837,
+            "glibc": {
+              "arena_bytes": 19030016,
+              "allocated_bytes": 1229312,
+              "free_bytes": 17800704,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 374,
+              "main_arena_releasable_top_bytes": 80368
+            }
+          }
+        },
+        {
+          "stage": "warmup",
+          "pairs_completed": 16,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 48780,
+            "hwm_kib": 48780,
+            "rchar": 85587823,
+            "glibc": {
+              "arena_bytes": 22175744,
+              "allocated_bytes": 1272864,
+              "free_bytes": 20902880,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 430,
+              "main_arena_releasable_top_bytes": 80368
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 24,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 48780,
+            "hwm_kib": 48780,
+            "rchar": 94014419,
+            "glibc": {
+              "arena_bytes": 22175744,
+              "allocated_bytes": 1297456,
+              "free_bytes": 20878288,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 490,
+              "main_arena_releasable_top_bytes": 80368
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 32,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 48780,
+            "hwm_kib": 48780,
+            "rchar": 102439405,
+            "glibc": {
+              "arena_bytes": 22175744,
+              "allocated_bytes": 1318912,
+              "free_bytes": 20856832,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 447,
+              "main_arena_releasable_top_bytes": 80368
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 40,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 48780,
+            "hwm_kib": 48780,
+            "rchar": 110864392,
+            "glibc": {
+              "arena_bytes": 22175744,
+              "allocated_bytes": 1336240,
+              "free_bytes": 20839504,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 440,
+              "main_arena_releasable_top_bytes": 80368
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 48,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 48780,
+            "hwm_kib": 48780,
+            "rchar": 119289379,
+            "glibc": {
+              "arena_bytes": 22175744,
+              "allocated_bytes": 1354304,
+              "free_bytes": 20821440,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 437,
+              "main_arena_releasable_top_bytes": 80368
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 56,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 48780,
+            "hwm_kib": 48780,
+            "rchar": 127714366,
+            "glibc": {
+              "arena_bytes": 22175744,
+              "allocated_bytes": 1370128,
+              "free_bytes": 20805616,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 443,
+              "main_arena_releasable_top_bytes": 80368
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 64,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 48780,
+            "hwm_kib": 48780,
+            "rchar": 136139353,
+            "glibc": {
+              "arena_bytes": 22175744,
+              "allocated_bytes": 1380144,
+              "free_bytes": 20795600,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 485,
+              "main_arena_releasable_top_bytes": 80368
+            }
+          }
+        }
+      ],
+      "variant": "fixed",
+      "repetition": 1,
+      "order": 2
+    },
+    {
+      "benchmark": "repeated_run_and_timeline_queries_do_not_reread_snapshot_history",
+      "fixture": "synthetic",
+      "malloc_arena_max": "2",
+      "glibc_tunables": null,
+      "runtime_worker_threads": 32,
+      "observed_worker_threads": 7,
+      "concurrency": 8,
+      "total_pairs": 64,
+      "warmup_pairs": 16,
+      "measured_pairs": 48,
+      "history_bytes": 67662374,
+      "resource_bytes": 525202,
+      "cold_runs_ms": 19.030697999999997,
+      "pair_p50_ms": 3.002833,
+      "pair_p95_ms": 3.5440519999999998,
+      "pair_latency_ms": [
+        2.4156590000000002,
+        2.755621,
+        3.038236,
+        3.002402,
+        3.034231,
+        3.1987140000000003,
+        3.409582,
+        1.545526,
+        2.6715380000000004,
+        2.812104,
+        3.164325,
+        3.3083549999999997,
+        3.348092,
+        3.3216650000000003,
+        3.494828,
+        1.235492,
+        2.293941,
+        3.002833,
+        3.108861,
+        3.249066,
+        3.302626,
+        3.5440519999999998,
+        3.738788,
+        1.810573,
+        2.268351,
+        2.367325,
+        2.7583719999999996,
+        3.141291,
+        3.439216,
+        3.4611899999999998,
+        3.4729409999999996,
+        1.453058,
+        2.326655,
+        2.439629,
+        2.8307710000000004,
+        2.863436,
+        2.907472,
+        3.273885,
+        3.555758,
+        1.372286,
+        2.585804,
+        2.765629,
+        2.888672,
+        3.0620830000000003,
+        3.222377,
+        3.2603839999999997,
+        3.3811280000000004,
+        1.261768
+      ],
+      "warmup_pair_latency_ms": [
+        4.779593,
+        4.722848,
+        4.913837,
+        5.431475,
+        5.286184,
+        5.496969,
+        5.653079,
+        0.817839,
+        2.6342119999999998,
+        3.116116,
+        3.060592,
+        3.0610709999999997,
+        3.1697800000000003,
+        3.264067,
+        3.315367,
+        0.7098789999999999
+      ],
+      "elapsed_seconds": 0.024115204,
+      "pairs_per_second": 1990.4455297164393,
+      "rss_before_kib": 24960,
+      "rss_warm_kib": 44148,
+      "rss_after_kib": 44660,
+      "hwm_kib": 44660,
+      "warm_rchar": 50551531,
+      "process_before": {
+        "rss_kib": 24960,
+        "hwm_kib": 24960,
+        "rchar": 16469,
+        "glibc": {
+          "arena_bytes": 1409024,
+          "allocated_bytes": 831680,
+          "free_bytes": 577344,
+          "mmap_bytes": 0,
+          "mmap_regions": 0,
+          "free_chunks": 83,
+          "main_arena_releasable_top_bytes": 72624
+        }
+      },
+      "process_cold": {
+        "rss_kib": 31108,
+        "hwm_kib": 31108,
+        "rchar": 68733931,
+        "glibc": {
+          "arena_bytes": 3510272,
+          "allocated_bytes": 939328,
+          "free_bytes": 2570944,
+          "mmap_bytes": 0,
+          "mmap_regions": 0,
+          "free_chunks": 76,
+          "main_arena_releasable_top_bytes": 72624
+        }
+      },
+      "process_warm": {
+        "rss_kib": 44148,
+        "hwm_kib": 44148,
+        "rchar": 85589440,
+        "glibc": {
+          "arena_bytes": 14282752,
+          "allocated_bytes": 1212976,
+          "free_bytes": 13069776,
+          "mmap_bytes": 0,
+          "mmap_regions": 0,
+          "free_chunks": 410,
+          "main_arena_releasable_top_bytes": 1181840
+        }
+      },
+      "process_after": {
+        "rss_kib": 44660,
+        "hwm_kib": 44660,
+        "rchar": 136140971,
+        "glibc": {
+          "arena_bytes": 14807040,
+          "allocated_bytes": 1332352,
+          "free_bytes": 13474688,
+          "mmap_bytes": 0,
+          "mmap_regions": 0,
+          "free_chunks": 495,
+          "main_arena_releasable_top_bytes": 1706448
+        }
+      },
+      "batches": [
+        {
+          "stage": "warmup",
+          "pairs_completed": 8,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 43764,
+            "hwm_kib": 44148,
+            "rchar": 77162844,
+            "glibc": {
+              "arena_bytes": 13758464,
+              "allocated_bytes": 1168816,
+              "free_bytes": 12589648,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 361,
+              "main_arena_releasable_top_bytes": 657552
+            }
+          }
+        },
+        {
+          "stage": "warmup",
+          "pairs_completed": 16,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 44148,
+            "hwm_kib": 44148,
+            "rchar": 85587830,
+            "glibc": {
+              "arena_bytes": 14282752,
+              "allocated_bytes": 1209296,
+              "free_bytes": 13073456,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 421,
+              "main_arena_releasable_top_bytes": 1181840
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 24,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 44148,
+            "hwm_kib": 44148,
+            "rchar": 94014426,
+            "glibc": {
+              "arena_bytes": 14282752,
+              "allocated_bytes": 1244800,
+              "free_bytes": 13037952,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 421,
+              "main_arena_releasable_top_bytes": 1182160
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 32,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 44660,
+            "hwm_kib": 44660,
+            "rchar": 102439412,
+            "glibc": {
+              "arena_bytes": 14807040,
+              "allocated_bytes": 1267856,
+              "free_bytes": 13539184,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 427,
+              "main_arena_releasable_top_bytes": 1706448
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 40,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 44660,
+            "hwm_kib": 44660,
+            "rchar": 110864399,
+            "glibc": {
+              "arena_bytes": 14807040,
+              "allocated_bytes": 1286480,
+              "free_bytes": 13520560,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 467,
+              "main_arena_releasable_top_bytes": 1706448
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 48,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 44660,
+            "hwm_kib": 44660,
+            "rchar": 119289386,
+            "glibc": {
+              "arena_bytes": 14807040,
+              "allocated_bytes": 1302640,
+              "free_bytes": 13504400,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 481,
+              "main_arena_releasable_top_bytes": 1706448
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 56,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 44660,
+            "hwm_kib": 44660,
+            "rchar": 127714373,
+            "glibc": {
+              "arena_bytes": 14807040,
+              "allocated_bytes": 1318112,
+              "free_bytes": 13488928,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 503,
+              "main_arena_releasable_top_bytes": 1706448
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 64,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 44660,
+            "hwm_kib": 44660,
+            "rchar": 136139360,
+            "glibc": {
+              "arena_bytes": 14807040,
+              "allocated_bytes": 1328960,
+              "free_bytes": 13478080,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 479,
+              "main_arena_releasable_top_bytes": 1706448
+            }
+          }
+        }
+      ],
+      "variant": "baseline",
+      "repetition": 1,
+      "order": 3
+    },
+    {
+      "benchmark": "repeated_run_and_timeline_queries_do_not_reread_snapshot_history",
+      "fixture": "synthetic",
+      "malloc_arena_max": "2",
+      "glibc_tunables": null,
+      "runtime_worker_threads": 32,
+      "observed_worker_threads": 7,
+      "concurrency": 8,
+      "total_pairs": 64,
+      "warmup_pairs": 16,
+      "measured_pairs": 48,
+      "history_bytes": 67662374,
+      "resource_bytes": 525202,
+      "cold_runs_ms": 17.895419,
+      "pair_p50_ms": 2.7996190000000003,
+      "pair_p95_ms": 3.27873,
+      "pair_latency_ms": [
+        2.977617,
+        2.977326,
+        3.01965,
+        3.032941,
+        3.2437139999999998,
+        3.27873,
+        3.320841,
+        0.421814,
+        2.1522059999999996,
+        2.907657,
+        2.917561,
+        3.1378719999999998,
+        3.224781,
+        3.235708,
+        3.327916,
+        0.767502,
+        2.553989,
+        2.725636,
+        2.738316,
+        2.9121110000000003,
+        2.946042,
+        2.963066,
+        3.002271,
+        0.807693,
+        1.635124,
+        1.995918,
+        2.737919,
+        2.7996190000000003,
+        2.87929,
+        2.903511,
+        2.9462450000000002,
+        0.44591,
+        1.869864,
+        1.9638609999999999,
+        2.1399359999999996,
+        2.091195,
+        2.7584419999999996,
+        2.798345,
+        2.9291679999999998,
+        0.9072760000000001,
+        2.638895,
+        2.709524,
+        2.7012579999999997,
+        2.7993319999999997,
+        2.8610160000000002,
+        3.0466360000000003,
+        3.1021389999999998,
+        0.7812490000000001
+      ],
+      "warmup_pair_latency_ms": [
+        2.759438,
+        2.855349,
+        3.884888,
+        4.051362999999999,
+        3.9745730000000004,
+        3.972112,
+        4.245692,
+        0.625836,
+        2.5154880000000004,
+        2.668545,
+        2.8313539999999997,
+        2.9196410000000004,
+        3.065655,
+        3.126367,
+        3.13447,
+        0.5057809999999999
+      ],
+      "elapsed_seconds": 0.021273757,
+      "pairs_per_second": 2256.301037940783,
+      "rss_before_kib": 25244,
+      "rss_warm_kib": 39220,
+      "rss_after_kib": 39220,
+      "hwm_kib": 40572,
+      "warm_rchar": 50551531,
+      "process_before": {
+        "rss_kib": 25244,
+        "hwm_kib": 25244,
+        "rchar": 16457,
+        "glibc": {
+          "arena_bytes": 1404928,
+          "allocated_bytes": 833376,
+          "free_bytes": 571552,
+          "mmap_bytes": 0,
+          "mmap_regions": 0,
+          "free_chunks": 83,
+          "main_arena_releasable_top_bytes": 70016
+        }
+      },
+      "process_cold": {
+        "rss_kib": 31656,
+        "hwm_kib": 31656,
+        "rchar": 68733919,
+        "glibc": {
+          "arena_bytes": 3735552,
+          "allocated_bytes": 939040,
+          "free_bytes": 2796512,
+          "mmap_bytes": 0,
+          "mmap_regions": 0,
+          "free_chunks": 77,
+          "main_arena_releasable_top_bytes": 70016
+        }
+      },
+      "process_warm": {
+        "rss_kib": 39220,
+        "hwm_kib": 40572,
+        "rchar": 85589428,
+        "glibc": {
+          "arena_bytes": 8962048,
+          "allocated_bytes": 1191184,
+          "free_bytes": 7770864,
+          "mmap_bytes": 0,
+          "mmap_regions": 0,
+          "free_chunks": 364,
+          "main_arena_releasable_top_bytes": 132352
+        }
+      },
+      "process_after": {
+        "rss_kib": 39220,
+        "hwm_kib": 40572,
+        "rchar": 136140959,
+        "glibc": {
+          "arena_bytes": 8962048,
+          "allocated_bytes": 1293008,
+          "free_bytes": 7669040,
+          "mmap_bytes": 0,
+          "mmap_regions": 0,
+          "free_chunks": 405,
+          "main_arena_releasable_top_bytes": 132352
+        }
+      },
+      "batches": [
+        {
+          "stage": "warmup",
+          "pairs_completed": 8,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 37172,
+            "hwm_kib": 39832,
+            "rchar": 77162832,
+            "glibc": {
+              "arena_bytes": 6864896,
+              "allocated_bytes": 1154256,
+              "free_bytes": 5710640,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 275,
+              "main_arena_releasable_top_bytes": 134240
+            }
+          }
+        },
+        {
+          "stage": "warmup",
+          "pairs_completed": 16,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 39220,
+            "hwm_kib": 40572,
+            "rchar": 85587818,
+            "glibc": {
+              "arena_bytes": 8962048,
+              "allocated_bytes": 1187616,
+              "free_bytes": 7774432,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 349,
+              "main_arena_releasable_top_bytes": 132352
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 24,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 39220,
+            "hwm_kib": 40572,
+            "rchar": 94014414,
+            "glibc": {
+              "arena_bytes": 8962048,
+              "allocated_bytes": 1212256,
+              "free_bytes": 7749792,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 335,
+              "main_arena_releasable_top_bytes": 132352
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 32,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 39220,
+            "hwm_kib": 40572,
+            "rchar": 102439400,
+            "glibc": {
+              "arena_bytes": 8962048,
+              "allocated_bytes": 1229296,
+              "free_bytes": 7732752,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 385,
+              "main_arena_releasable_top_bytes": 132352
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 40,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 40116,
+            "hwm_kib": 40572,
+            "rchar": 110864387,
+            "glibc": {
+              "arena_bytes": 10010624,
+              "allocated_bytes": 1243392,
+              "free_bytes": 8767232,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 381,
+              "main_arena_releasable_top_bytes": 1180928
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 48,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 39220,
+            "hwm_kib": 40572,
+            "rchar": 119289374,
+            "glibc": {
+              "arena_bytes": 8962048,
+              "allocated_bytes": 1257008,
+              "free_bytes": 7705040,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 397,
+              "main_arena_releasable_top_bytes": 132352
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 56,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 40628,
+            "hwm_kib": 40628,
+            "rchar": 127714361,
+            "glibc": {
+              "arena_bytes": 10534912,
+              "allocated_bytes": 1276336,
+              "free_bytes": 9258576,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 421,
+              "main_arena_releasable_top_bytes": 1705216
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 64,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 39220,
+            "hwm_kib": 40572,
+            "rchar": 136139348,
+            "glibc": {
+              "arena_bytes": 8962048,
+              "allocated_bytes": 1289952,
+              "free_bytes": 7672096,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 379,
+              "main_arena_releasable_top_bytes": 132352
+            }
+          }
+        }
+      ],
+      "variant": "fixed",
+      "repetition": 1,
+      "order": 4
+    },
+    {
+      "benchmark": "repeated_run_and_timeline_queries_do_not_reread_snapshot_history",
+      "fixture": "synthetic",
+      "malloc_arena_max": "2",
+      "glibc_tunables": null,
+      "runtime_worker_threads": 32,
+      "observed_worker_threads": 7,
+      "concurrency": 8,
+      "total_pairs": 64,
+      "warmup_pairs": 16,
+      "measured_pairs": 48,
+      "history_bytes": 67662374,
+      "resource_bytes": 525202,
+      "cold_runs_ms": 18.672718,
+      "pair_p50_ms": 2.083167,
+      "pair_p95_ms": 2.393329,
+      "pair_latency_ms": [
+        1.320634,
+        1.666637,
+        1.767236,
+        1.95612,
+        2.057125,
+        2.381898,
+        2.412083,
+        1.251484,
+        1.684961,
+        1.96433,
+        2.258378,
+        2.316696,
+        2.366038,
+        2.3055820000000002,
+        2.3297410000000003,
+        0.954511,
+        1.704616,
+        1.999439,
+        2.1856150000000003,
+        2.2094240000000003,
+        2.16931,
+        2.393329,
+        2.440406,
+        0.8954920000000001,
+        1.204606,
+        2.087769,
+        2.2243470000000003,
+        2.171761,
+        2.228008,
+        2.356945,
+        2.351502,
+        0.41999600000000004,
+        1.795558,
+        1.961226,
+        1.9199270000000002,
+        2.009513,
+        2.093993,
+        2.122204,
+        2.083167,
+        0.602711,
+        1.886455,
+        1.961945,
+        2.140949,
+        2.06894,
+        2.1754729999999998,
+        2.181437,
+        2.245306,
+        0.633491
+      ],
+      "warmup_pair_latency_ms": [
+        2.665522,
+        3.007001,
+        3.177079,
+        3.16804,
+        3.374297,
+        3.5403100000000003,
+        3.3822710000000002,
+        0.885555,
+        1.8496759999999999,
+        2.4817329999999997,
+        2.6645060000000003,
+        2.7410289999999997,
+        2.8052490000000003,
+        2.773114,
+        2.78602,
+        1.1832259999999999
+      ],
+      "elapsed_seconds": 0.016099675,
+      "pairs_per_second": 2981.4266437055403,
+      "rss_before_kib": 25276,
+      "rss_warm_kib": 40832,
+      "rss_after_kib": 41340,
+      "hwm_kib": 41340,
+      "warm_rchar": 50551531,
+      "process_before": {
+        "rss_kib": 25276,
+        "hwm_kib": 25276,
+        "rchar": 16457,
+        "glibc": {
+          "arena_bytes": 1409024,
+          "allocated_bytes": 834288,
+          "free_bytes": 574736,
+          "mmap_bytes": 0,
+          "mmap_regions": 0,
+          "free_chunks": 78,
+          "main_arena_releasable_top_bytes": 71008
+        }
+      },
+      "process_cold": {
+        "rss_kib": 31772,
+        "hwm_kib": 31772,
+        "rchar": 68733919,
+        "glibc": {
+          "arena_bytes": 3407872,
+          "allocated_bytes": 941168,
+          "free_bytes": 2466704,
+          "mmap_bytes": 0,
+          "mmap_regions": 0,
+          "free_chunks": 68,
+          "main_arena_releasable_top_bytes": 71008
+        }
+      },
+      "process_warm": {
+        "rss_kib": 40832,
+        "hwm_kib": 40832,
+        "rchar": 85589428,
+        "glibc": {
+          "arena_bytes": 10563584,
+          "allocated_bytes": 1198368,
+          "free_bytes": 9365216,
+          "mmap_bytes": 0,
+          "mmap_regions": 0,
+          "free_chunks": 383,
+          "main_arena_releasable_top_bytes": 1180112
+        }
+      },
+      "process_after": {
+        "rss_kib": 41340,
+        "hwm_kib": 41340,
+        "rchar": 136140959,
+        "glibc": {
+          "arena_bytes": 11087872,
+          "allocated_bytes": 1288896,
+          "free_bytes": 9798976,
+          "mmap_bytes": 0,
+          "mmap_regions": 0,
+          "free_chunks": 418,
+          "main_arena_releasable_top_bytes": 1704400
+        }
+      },
+      "batches": [
+        {
+          "stage": "warmup",
+          "pairs_completed": 8,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 37884,
+            "hwm_kib": 38648,
+            "rchar": 77162832,
+            "glibc": {
+              "arena_bytes": 7417856,
+              "allocated_bytes": 1156992,
+              "free_bytes": 6260864,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 305,
+              "main_arena_releasable_top_bytes": 656784
+            }
+          }
+        },
+        {
+          "stage": "warmup",
+          "pairs_completed": 16,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 40832,
+            "hwm_kib": 40832,
+            "rchar": 85587818,
+            "glibc": {
+              "arena_bytes": 10563584,
+              "allocated_bytes": 1195232,
+              "free_bytes": 9368352,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 374,
+              "main_arena_releasable_top_bytes": 1180112
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 24,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 41340,
+            "hwm_kib": 41340,
+            "rchar": 94014414,
+            "glibc": {
+              "arena_bytes": 11087872,
+              "allocated_bytes": 1218704,
+              "free_bytes": 9869168,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 345,
+              "main_arena_releasable_top_bytes": 1704400
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 32,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 41340,
+            "hwm_kib": 41340,
+            "rchar": 102439400,
+            "glibc": {
+              "arena_bytes": 11087872,
+              "allocated_bytes": 1237248,
+              "free_bytes": 9850624,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 422,
+              "main_arena_releasable_top_bytes": 1704400
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 40,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 41340,
+            "hwm_kib": 41340,
+            "rchar": 110864387,
+            "glibc": {
+              "arena_bytes": 11087872,
+              "allocated_bytes": 1251488,
+              "free_bytes": 9836384,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 391,
+              "main_arena_releasable_top_bytes": 1704400
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 48,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 41340,
+            "hwm_kib": 41340,
+            "rchar": 119289374,
+            "glibc": {
+              "arena_bytes": 11087872,
+              "allocated_bytes": 1263968,
+              "free_bytes": 9823904,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 402,
+              "main_arena_releasable_top_bytes": 1704400
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 56,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 41340,
+            "hwm_kib": 41340,
+            "rchar": 127714361,
+            "glibc": {
+              "arena_bytes": 11087872,
+              "allocated_bytes": 1278624,
+              "free_bytes": 9809248,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 385,
+              "main_arena_releasable_top_bytes": 1704400
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 64,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 41340,
+            "hwm_kib": 41340,
+            "rchar": 136139348,
+            "glibc": {
+              "arena_bytes": 11087872,
+              "allocated_bytes": 1285840,
+              "free_bytes": 9802032,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 401,
+              "main_arena_releasable_top_bytes": 1704400
+            }
+          }
+        }
+      ],
+      "variant": "fixed",
+      "repetition": 2,
+      "order": 5
+    },
+    {
+      "benchmark": "repeated_run_and_timeline_queries_do_not_reread_snapshot_history",
+      "fixture": "synthetic",
+      "malloc_arena_max": "2",
+      "glibc_tunables": null,
+      "runtime_worker_threads": 32,
+      "observed_worker_threads": 7,
+      "concurrency": 8,
+      "total_pairs": 64,
+      "warmup_pairs": 16,
+      "measured_pairs": 48,
+      "history_bytes": 67662374,
+      "resource_bytes": 525202,
+      "cold_runs_ms": 20.403315000000003,
+      "pair_p50_ms": 2.8859519999999996,
+      "pair_p95_ms": 3.59728,
+      "pair_latency_ms": [
+        2.690301,
+        2.826075,
+        3.024651,
+        3.050436,
+        3.154948,
+        3.243377,
+        3.342019,
+        0.955195,
+        1.613985,
+        1.638561,
+        2.254124,
+        2.454651,
+        2.671559,
+        2.743684,
+        2.750327,
+        1.463713,
+        2.539065,
+        2.7308190000000003,
+        2.889418,
+        3.064007,
+        3.019479,
+        3.1274319999999998,
+        3.193625,
+        1.145426,
+        2.932584,
+        3.188367,
+        3.2703849999999997,
+        3.398295,
+        3.59728,
+        3.625733,
+        3.62539,
+        0.7823180000000001,
+        2.182483,
+        2.464505,
+        2.7036059999999997,
+        2.852313,
+        2.8859519999999996,
+        3.133621,
+        3.214673,
+        0.755,
+        2.701384,
+        2.803592,
+        2.937935,
+        3.02228,
+        3.096109,
+        3.117164,
+        3.261174,
+        0.851804
+      ],
+      "warmup_pair_latency_ms": [
+        5.4103900000000005,
+        5.636563,
+        5.447707,
+        5.476317,
+        5.364599,
+        5.683857,
+        5.560154000000001,
+        0.696076,
+        2.882569,
+        2.9308609999999997,
+        3.119798,
+        3.1776069999999996,
+        3.506128,
+        3.681079,
+        3.792096,
+        1.188304
+      ],
+      "elapsed_seconds": 0.022450413,
+      "pairs_per_second": 2138.045300102052,
+      "rss_before_kib": 24852,
+      "rss_warm_kib": 40540,
+      "rss_after_kib": 42972,
+      "hwm_kib": 44156,
+      "warm_rchar": 50551531,
+      "process_before": {
+        "rss_kib": 24852,
+        "hwm_kib": 24852,
+        "rchar": 16469,
+        "glibc": {
+          "arena_bytes": 1409024,
+          "allocated_bytes": 831664,
+          "free_bytes": 577360,
+          "mmap_bytes": 0,
+          "mmap_regions": 0,
+          "free_chunks": 74,
+          "main_arena_releasable_top_bytes": 72592
+        }
+      },
+      "process_cold": {
+        "rss_kib": 31292,
+        "hwm_kib": 31292,
+        "rchar": 68733931,
+        "glibc": {
+          "arena_bytes": 3702784,
+          "allocated_bytes": 939248,
+          "free_bytes": 2763536,
+          "mmap_bytes": 0,
+          "mmap_regions": 0,
+          "free_chunks": 80,
+          "main_arena_releasable_top_bytes": 72592
+        }
+      },
+      "process_warm": {
+        "rss_kib": 40540,
+        "hwm_kib": 44156,
+        "rchar": 85589440,
+        "glibc": {
+          "arena_bytes": 10399744,
+          "allocated_bytes": 1204080,
+          "free_bytes": 9195664,
+          "mmap_bytes": 0,
+          "mmap_regions": 0,
+          "free_chunks": 400,
+          "main_arena_releasable_top_bytes": 134576
+        }
+      },
+      "process_after": {
+        "rss_kib": 42972,
+        "hwm_kib": 44156,
+        "rchar": 136140971,
+        "glibc": {
+          "arena_bytes": 13021184,
+          "allocated_bytes": 1332176,
+          "free_bytes": 11689008,
+          "mmap_bytes": 0,
+          "mmap_regions": 0,
+          "free_chunks": 498,
+          "main_arena_releasable_top_bytes": 1707504
+        }
+      },
+      "batches": [
+        {
+          "stage": "warmup",
+          "pairs_completed": 8,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 40668,
+            "hwm_kib": 44156,
+            "rchar": 77162844,
+            "glibc": {
+              "arena_bytes": 10530816,
+              "allocated_bytes": 1156368,
+              "free_bytes": 9374448,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 401,
+              "main_arena_releasable_top_bytes": 658864
+            }
+          }
+        },
+        {
+          "stage": "warmup",
+          "pairs_completed": 16,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 40540,
+            "hwm_kib": 44156,
+            "rchar": 85587830,
+            "glibc": {
+              "arena_bytes": 10399744,
+              "allocated_bytes": 1201056,
+              "free_bytes": 9198688,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 416,
+              "main_arena_releasable_top_bytes": 134576
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 24,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 42460,
+            "hwm_kib": 44156,
+            "rchar": 94014426,
+            "glibc": {
+              "arena_bytes": 12496896,
+              "allocated_bytes": 1236112,
+              "free_bytes": 11260784,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 437,
+              "main_arena_releasable_top_bytes": 1183216
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 32,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 42460,
+            "hwm_kib": 44156,
+            "rchar": 102439412,
+            "glibc": {
+              "arena_bytes": 12496896,
+              "allocated_bytes": 1258704,
+              "free_bytes": 11238192,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 449,
+              "main_arena_releasable_top_bytes": 1183216
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 40,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 42972,
+            "hwm_kib": 44156,
+            "rchar": 110864399,
+            "glibc": {
+              "arena_bytes": 13021184,
+              "allocated_bytes": 1275712,
+              "free_bytes": 11745472,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 477,
+              "main_arena_releasable_top_bytes": 1707504
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 48,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 42972,
+            "hwm_kib": 44156,
+            "rchar": 119289386,
+            "glibc": {
+              "arena_bytes": 13021184,
+              "allocated_bytes": 1294256,
+              "free_bytes": 11726928,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 477,
+              "main_arena_releasable_top_bytes": 1707504
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 56,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 42972,
+            "hwm_kib": 44156,
+            "rchar": 127714373,
+            "glibc": {
+              "arena_bytes": 13021184,
+              "allocated_bytes": 1314064,
+              "free_bytes": 11707120,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 516,
+              "main_arena_releasable_top_bytes": 1707504
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 64,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 42972,
+            "hwm_kib": 44156,
+            "rchar": 136139360,
+            "glibc": {
+              "arena_bytes": 13021184,
+              "allocated_bytes": 1329120,
+              "free_bytes": 11692064,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 511,
+              "main_arena_releasable_top_bytes": 1707504
+            }
+          }
+        }
+      ],
+      "variant": "baseline",
+      "repetition": 2,
+      "order": 6
+    },
+    {
+      "benchmark": "repeated_run_and_timeline_queries_do_not_reread_snapshot_history",
+      "fixture": "synthetic",
+      "malloc_arena_max": null,
+      "glibc_tunables": null,
+      "runtime_worker_threads": 32,
+      "observed_worker_threads": 7,
+      "concurrency": 8,
+      "total_pairs": 64,
+      "warmup_pairs": 16,
+      "measured_pairs": 48,
+      "history_bytes": 67662374,
+      "resource_bytes": 525202,
+      "cold_runs_ms": 18.429238,
+      "pair_p50_ms": 1.825293,
+      "pair_p95_ms": 2.097705,
+      "pair_latency_ms": [
+        1.413255,
+        1.707512,
+        1.701688,
+        1.950625,
+        1.938903,
+        2.097705,
+        2.0743850000000004,
+        0.6528210000000001,
+        1.710183,
+        1.73252,
+        1.787079,
+        1.72923,
+        1.895102,
+        1.802758,
+        2.035966,
+        0.578011,
+        1.870676,
+        1.8236299999999999,
+        1.8561750000000001,
+        1.925752,
+        1.9569219999999998,
+        1.9531560000000001,
+        2.108316,
+        0.43433499999999997,
+        1.798569,
+        1.825293,
+        1.808962,
+        1.83816,
+        1.785498,
+        1.829317,
+        1.9912530000000002,
+        0.44771999999999995,
+        1.794645,
+        1.820233,
+        1.8140100000000001,
+        1.7581339999999999,
+        1.835986,
+        1.845357,
+        1.943143,
+        0.417173,
+        1.084915,
+        1.8713499999999998,
+        1.871238,
+        1.857632,
+        1.87921,
+        1.88004,
+        2.159656,
+        1.145981
+      ],
+      "warmup_pair_latency_ms": [
+        3.2690330000000003,
+        4.184146,
+        4.210914,
+        4.540263,
+        4.4846189999999995,
+        4.657566999999999,
+        4.627481,
+        0.9539610000000001,
+        2.0264599999999997,
+        2.115825,
+        2.24145,
+        2.3142869999999998,
+        2.368306,
+        2.289532,
+        2.492959,
+        0.499257
+      ],
+      "elapsed_seconds": 0.014372889,
+      "pairs_per_second": 3339.620865366733,
+      "rss_before_kib": 25168,
+      "rss_warm_kib": 49020,
+      "rss_after_kib": 49020,
+      "hwm_kib": 49020,
+      "warm_rchar": 50551531,
+      "process_before": {
+        "rss_kib": 25168,
+        "hwm_kib": 25168,
+        "rchar": 16462,
+        "glibc": {
+          "arena_bytes": 5718016,
+          "allocated_bytes": 904640,
+          "free_bytes": 4813376,
+          "mmap_bytes": 0,
+          "mmap_regions": 0,
+          "free_chunks": 113,
+          "main_arena_releasable_top_bytes": 80368
+        }
+      },
+      "process_cold": {
+        "rss_kib": 32080,
+        "hwm_kib": 32080,
+        "rchar": 68733924,
+        "glibc": {
+          "arena_bytes": 8007680,
+          "allocated_bytes": 1010000,
+          "free_bytes": 6997680,
+          "mmap_bytes": 0,
+          "mmap_regions": 0,
+          "free_chunks": 99,
+          "main_arena_releasable_top_bytes": 80368
+        }
+      },
+      "process_warm": {
+        "rss_kib": 49020,
+        "hwm_kib": 49020,
+        "rchar": 85589433,
+        "glibc": {
+          "arena_bytes": 22171648,
+          "allocated_bytes": 1274976,
+          "free_bytes": 20896672,
+          "mmap_bytes": 0,
+          "mmap_regions": 0,
+          "free_chunks": 424,
+          "main_arena_releasable_top_bytes": 80368
+        }
+      },
+      "process_after": {
+        "rss_kib": 49020,
+        "hwm_kib": 49020,
+        "rchar": 136140964,
+        "glibc": {
+          "arena_bytes": 22171648,
+          "allocated_bytes": 1371776,
+          "free_bytes": 20799872,
+          "mmap_bytes": 0,
+          "mmap_regions": 0,
+          "free_chunks": 460,
+          "main_arena_releasable_top_bytes": 80368
+        }
+      },
+      "batches": [
+        {
+          "stage": "warmup",
+          "pairs_completed": 8,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 45948,
+            "hwm_kib": 45948,
+            "rchar": 77162837,
+            "glibc": {
+              "arena_bytes": 19025920,
+              "allocated_bytes": 1229184,
+              "free_bytes": 17796736,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 368,
+              "main_arena_releasable_top_bytes": 80368
+            }
+          }
+        },
+        {
+          "stage": "warmup",
+          "pairs_completed": 16,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 49020,
+            "hwm_kib": 49020,
+            "rchar": 85587823,
+            "glibc": {
+              "arena_bytes": 22171648,
+              "allocated_bytes": 1272992,
+              "free_bytes": 20898656,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 427,
+              "main_arena_releasable_top_bytes": 80368
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 24,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 49020,
+            "hwm_kib": 49020,
+            "rchar": 94014419,
+            "glibc": {
+              "arena_bytes": 22171648,
+              "allocated_bytes": 1295296,
+              "free_bytes": 20876352,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 460,
+              "main_arena_releasable_top_bytes": 80368
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 32,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 49020,
+            "hwm_kib": 49020,
+            "rchar": 102439405,
+            "glibc": {
+              "arena_bytes": 22171648,
+              "allocated_bytes": 1318880,
+              "free_bytes": 20852768,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 443,
+              "main_arena_releasable_top_bytes": 80368
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 40,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 49020,
+            "hwm_kib": 49020,
+            "rchar": 110864392,
+            "glibc": {
+              "arena_bytes": 22171648,
+              "allocated_bytes": 1333792,
+              "free_bytes": 20837856,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 426,
+              "main_arena_releasable_top_bytes": 80368
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 48,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 49020,
+            "hwm_kib": 49020,
+            "rchar": 119289379,
+            "glibc": {
+              "arena_bytes": 22171648,
+              "allocated_bytes": 1347792,
+              "free_bytes": 20823856,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 438,
+              "main_arena_releasable_top_bytes": 80368
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 56,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 49020,
+            "hwm_kib": 49020,
+            "rchar": 127714366,
+            "glibc": {
+              "arena_bytes": 22171648,
+              "allocated_bytes": 1360544,
+              "free_bytes": 20811104,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 451,
+              "main_arena_releasable_top_bytes": 80368
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 64,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 49020,
+            "hwm_kib": 49020,
+            "rchar": 136139353,
+            "glibc": {
+              "arena_bytes": 22171648,
+              "allocated_bytes": 1369056,
+              "free_bytes": 20802592,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 462,
+              "main_arena_releasable_top_bytes": 80368
+            }
+          }
+        }
+      ],
+      "variant": "fixed",
+      "repetition": 2,
+      "order": 7
+    },
+    {
+      "benchmark": "repeated_run_and_timeline_queries_do_not_reread_snapshot_history",
+      "fixture": "synthetic",
+      "malloc_arena_max": null,
+      "glibc_tunables": null,
+      "runtime_worker_threads": 32,
+      "observed_worker_threads": 7,
+      "concurrency": 8,
+      "total_pairs": 64,
+      "warmup_pairs": 16,
+      "measured_pairs": 48,
+      "history_bytes": 67662374,
+      "resource_bytes": 525202,
+      "cold_runs_ms": 18.475716,
+      "pair_p50_ms": 2.3162640000000003,
+      "pair_p95_ms": 2.6466,
+      "pair_latency_ms": [
+        1.856984,
+        2.0186599999999997,
+        2.0999339999999997,
+        2.3344720000000003,
+        2.6447670000000003,
+        2.62146,
+        2.628478,
+        1.018238,
+        2.0494440000000003,
+        2.339939,
+        2.37729,
+        2.4012320000000003,
+        2.410119,
+        2.558088,
+        2.590448,
+        0.903493,
+        2.093861,
+        2.3925,
+        2.416747,
+        2.536483,
+        2.593963,
+        2.554695,
+        2.68645,
+        0.680024,
+        1.315955,
+        2.1659040000000003,
+        2.061099,
+        2.386706,
+        2.638964,
+        2.6466,
+        2.8668050000000003,
+        1.65431,
+        1.778846,
+        2.194517,
+        2.217769,
+        2.229549,
+        2.30553,
+        2.326963,
+        2.3449489999999997,
+        0.638666,
+        2.151561,
+        2.128301,
+        2.2313110000000003,
+        2.221748,
+        2.3162640000000003,
+        2.4376160000000002,
+        2.425709,
+        0.635112
+      ],
+      "warmup_pair_latency_ms": [
+        4.78789,
+        4.820209,
+        5.281351,
+        5.922663,
+        5.903631000000001,
+        5.910398,
+        6.136254,
+        1.469347,
+        2.290113,
+        2.554052,
+        2.929278,
+        3.044841,
+        3.306631,
+        3.546255,
+        3.661906,
+        0.921835
+      ],
+      "elapsed_seconds": 0.018606664,
+      "pairs_per_second": 2579.7208999958298,
+      "rss_before_kib": 22040,
+      "rss_warm_kib": 49024,
+      "rss_after_kib": 49024,
+      "hwm_kib": 49024,
+      "warm_rchar": 50551531,
+      "process_before": {
+        "rss_kib": 22040,
+        "hwm_kib": 22040,
+        "rchar": 16474,
+        "glibc": {
+          "arena_bytes": 5718016,
+          "allocated_bytes": 905664,
+          "free_bytes": 4812352,
+          "mmap_bytes": 0,
+          "mmap_regions": 0,
+          "free_chunks": 108,
+          "main_arena_releasable_top_bytes": 80352
+        }
+      },
+      "process_cold": {
+        "rss_kib": 27904,
+        "hwm_kib": 27904,
+        "rchar": 68733936,
+        "glibc": {
+          "arena_bytes": 7917568,
+          "allocated_bytes": 1013632,
+          "free_bytes": 6903936,
+          "mmap_bytes": 0,
+          "mmap_regions": 0,
+          "free_chunks": 111,
+          "main_arena_releasable_top_bytes": 80352
+        }
+      },
+      "process_warm": {
+        "rss_kib": 49024,
+        "hwm_kib": 49024,
+        "rchar": 85589445,
+        "glibc": {
+          "arena_bytes": 26255360,
+          "allocated_bytes": 1271216,
+          "free_bytes": 24984144,
+          "mmap_bytes": 0,
+          "mmap_regions": 0,
+          "free_chunks": 527,
+          "main_arena_releasable_top_bytes": 80352
+        }
+      },
+      "process_after": {
+        "rss_kib": 49024,
+        "hwm_kib": 49024,
+        "rchar": 136140976,
+        "glibc": {
+          "arena_bytes": 26255360,
+          "allocated_bytes": 1418144,
+          "free_bytes": 24837216,
+          "mmap_bytes": 0,
+          "mmap_regions": 0,
+          "free_chunks": 614,
+          "main_arena_releasable_top_bytes": 80352
+        }
+      },
+      "batches": [
+        {
+          "stage": "warmup",
+          "pairs_completed": 8,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 49016,
+            "hwm_kib": 49016,
+            "rchar": 77162849,
+            "glibc": {
+              "arena_bytes": 26247168,
+              "allocated_bytes": 1228496,
+              "free_bytes": 25018672,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 527,
+              "main_arena_releasable_top_bytes": 80352
+            }
+          }
+        },
+        {
+          "stage": "warmup",
+          "pairs_completed": 16,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 49024,
+            "hwm_kib": 49024,
+            "rchar": 85587835,
+            "glibc": {
+              "arena_bytes": 26255360,
+              "allocated_bytes": 1268992,
+              "free_bytes": 24986368,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 535,
+              "main_arena_releasable_top_bytes": 80352
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 24,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 49024,
+            "hwm_kib": 49024,
+            "rchar": 94014431,
+            "glibc": {
+              "arena_bytes": 26255360,
+              "allocated_bytes": 1307984,
+              "free_bytes": 24947376,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 586,
+              "main_arena_releasable_top_bytes": 80352
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 32,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 49024,
+            "hwm_kib": 49024,
+            "rchar": 102439417,
+            "glibc": {
+              "arena_bytes": 26255360,
+              "allocated_bytes": 1332912,
+              "free_bytes": 24922448,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 592,
+              "main_arena_releasable_top_bytes": 80352
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 40,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 49024,
+            "hwm_kib": 49024,
+            "rchar": 110864404,
+            "glibc": {
+              "arena_bytes": 26255360,
+              "allocated_bytes": 1358608,
+              "free_bytes": 24896752,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 586,
+              "main_arena_releasable_top_bytes": 80352
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 48,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 49024,
+            "hwm_kib": 49024,
+            "rchar": 119289391,
+            "glibc": {
+              "arena_bytes": 26255360,
+              "allocated_bytes": 1380944,
+              "free_bytes": 24874416,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 589,
+              "main_arena_releasable_top_bytes": 80352
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 56,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 49024,
+            "hwm_kib": 49024,
+            "rchar": 127714378,
+            "glibc": {
+              "arena_bytes": 26255360,
+              "allocated_bytes": 1399824,
+              "free_bytes": 24855536,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 627,
+              "main_arena_releasable_top_bytes": 80352
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 64,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 49024,
+            "hwm_kib": 49024,
+            "rchar": 136139365,
+            "glibc": {
+              "arena_bytes": 26255360,
+              "allocated_bytes": 1415440,
+              "free_bytes": 24839920,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 618,
+              "main_arena_releasable_top_bytes": 80352
+            }
+          }
+        }
+      ],
+      "variant": "baseline",
+      "repetition": 2,
+      "order": 8
+    },
+    {
+      "benchmark": "repeated_run_and_timeline_queries_do_not_reread_snapshot_history",
+      "fixture": "synthetic",
+      "malloc_arena_max": null,
+      "glibc_tunables": null,
+      "runtime_worker_threads": 32,
+      "observed_worker_threads": 7,
+      "concurrency": 8,
+      "total_pairs": 64,
+      "warmup_pairs": 16,
+      "measured_pairs": 48,
+      "history_bytes": 67662374,
+      "resource_bytes": 525202,
+      "cold_runs_ms": 17.590763,
+      "pair_p50_ms": 1.741228,
+      "pair_p95_ms": 2.117552,
+      "pair_latency_ms": [
+        1.373259,
+        1.6101159999999999,
+        1.837101,
+        2.08984,
+        2.1220470000000002,
+        2.117552,
+        2.135173,
+        0.95233,
+        1.693528,
+        1.848176,
+        1.798129,
+        1.863715,
+        1.873373,
+        1.890341,
+        2.019537,
+        0.403725,
+        1.528397,
+        1.651708,
+        1.751079,
+        1.7542090000000001,
+        1.762257,
+        1.880849,
+        1.884587,
+        0.64627,
+        1.620012,
+        1.614619,
+        1.6796039999999999,
+        1.741228,
+        1.742941,
+        1.7505540000000002,
+        1.912675,
+        0.682295,
+        1.583444,
+        1.5824159999999998,
+        1.64332,
+        1.704638,
+        1.810398,
+        1.9420240000000002,
+        1.9978919999999998,
+        0.629047,
+        1.532272,
+        1.750561,
+        1.7106059999999998,
+        1.730068,
+        1.703745,
+        1.729086,
+        1.938977,
+        0.409725
+      ],
+      "warmup_pair_latency_ms": [
+        3.645448,
+        3.657218,
+        3.815547,
+        3.9144030000000005,
+        4.0168349999999995,
+        4.003039,
+        3.9623369999999998,
+        0.9824409999999999,
+        1.700516,
+        1.693621,
+        1.691659,
+        2.160289,
+        2.259607,
+        2.2679750000000003,
+        2.328825,
+        0.8612169999999999
+      ],
+      "elapsed_seconds": 0.014026491,
+      "pairs_per_second": 3422.096089463858,
+      "rss_before_kib": 25452,
+      "rss_warm_kib": 48908,
+      "rss_after_kib": 48908,
+      "hwm_kib": 48908,
+      "warm_rchar": 50551531,
+      "process_before": {
+        "rss_kib": 25452,
+        "hwm_kib": 25452,
+        "rchar": 16462,
+        "glibc": {
+          "arena_bytes": 5718016,
+          "allocated_bytes": 906400,
+          "free_bytes": 4811616,
+          "mmap_bytes": 0,
+          "mmap_regions": 0,
+          "free_chunks": 107,
+          "main_arena_releasable_top_bytes": 80368
+        }
+      },
+      "process_cold": {
+        "rss_kib": 32012,
+        "hwm_kib": 32012,
+        "rchar": 68733924,
+        "glibc": {
+          "arena_bytes": 7716864,
+          "allocated_bytes": 1011216,
+          "free_bytes": 6705648,
+          "mmap_bytes": 0,
+          "mmap_regions": 0,
+          "free_chunks": 104,
+          "main_arena_releasable_top_bytes": 80368
+        }
+      },
+      "process_warm": {
+        "rss_kib": 48908,
+        "hwm_kib": 48908,
+        "rchar": 85589433,
+        "glibc": {
+          "arena_bytes": 21880832,
+          "allocated_bytes": 1276144,
+          "free_bytes": 20604688,
+          "mmap_bytes": 0,
+          "mmap_regions": 0,
+          "free_chunks": 408,
+          "main_arena_releasable_top_bytes": 80368
+        }
+      },
+      "process_after": {
+        "rss_kib": 48908,
+        "hwm_kib": 48908,
+        "rchar": 136140964,
+        "glibc": {
+          "arena_bytes": 21880832,
+          "allocated_bytes": 1380384,
+          "free_bytes": 20500448,
+          "mmap_bytes": 0,
+          "mmap_regions": 0,
+          "free_chunks": 455,
+          "main_arena_releasable_top_bytes": 80368
+        }
+      },
+      "batches": [
+        {
+          "stage": "warmup",
+          "pairs_completed": 8,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 45836,
+            "hwm_kib": 45836,
+            "rchar": 77162837,
+            "glibc": {
+              "arena_bytes": 18735104,
+              "allocated_bytes": 1229920,
+              "free_bytes": 17505184,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 357,
+              "main_arena_releasable_top_bytes": 80368
+            }
+          }
+        },
+        {
+          "stage": "warmup",
+          "pairs_completed": 16,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 48908,
+            "hwm_kib": 48908,
+            "rchar": 85587823,
+            "glibc": {
+              "arena_bytes": 21880832,
+              "allocated_bytes": 1273120,
+              "free_bytes": 20607712,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 414,
+              "main_arena_releasable_top_bytes": 80368
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 24,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 48908,
+            "hwm_kib": 48908,
+            "rchar": 94014419,
+            "glibc": {
+              "arena_bytes": 21880832,
+              "allocated_bytes": 1299952,
+              "free_bytes": 20580880,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 437,
+              "main_arena_releasable_top_bytes": 80368
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 32,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 48908,
+            "hwm_kib": 48908,
+            "rchar": 102439405,
+            "glibc": {
+              "arena_bytes": 21880832,
+              "allocated_bytes": 1320784,
+              "free_bytes": 20560048,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 419,
+              "main_arena_releasable_top_bytes": 80368
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 40,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 48908,
+            "hwm_kib": 48908,
+            "rchar": 110864392,
+            "glibc": {
+              "arena_bytes": 21880832,
+              "allocated_bytes": 1337936,
+              "free_bytes": 20542896,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 421,
+              "main_arena_releasable_top_bytes": 80368
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 48,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 48908,
+            "hwm_kib": 48908,
+            "rchar": 119289379,
+            "glibc": {
+              "arena_bytes": 21880832,
+              "allocated_bytes": 1351968,
+              "free_bytes": 20528864,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 445,
+              "main_arena_releasable_top_bytes": 80368
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 56,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 48908,
+            "hwm_kib": 48908,
+            "rchar": 127714366,
+            "glibc": {
+              "arena_bytes": 21880832,
+              "allocated_bytes": 1369696,
+              "free_bytes": 20511136,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 442,
+              "main_arena_releasable_top_bytes": 80368
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 64,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 48908,
+            "hwm_kib": 48908,
+            "rchar": 136139353,
+            "glibc": {
+              "arena_bytes": 21880832,
+              "allocated_bytes": 1376720,
+              "free_bytes": 20504112,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 458,
+              "main_arena_releasable_top_bytes": 80368
+            }
+          }
+        }
+      ],
+      "variant": "fixed",
+      "repetition": 3,
+      "order": 9
+    },
+    {
+      "benchmark": "repeated_run_and_timeline_queries_do_not_reread_snapshot_history",
+      "fixture": "synthetic",
+      "malloc_arena_max": null,
+      "glibc_tunables": null,
+      "runtime_worker_threads": 32,
+      "observed_worker_threads": 7,
+      "concurrency": 8,
+      "total_pairs": 64,
+      "warmup_pairs": 16,
+      "measured_pairs": 48,
+      "history_bytes": 67662374,
+      "resource_bytes": 525202,
+      "cold_runs_ms": 18.735457,
+      "pair_p50_ms": 2.133115,
+      "pair_p95_ms": 2.601896,
+      "pair_latency_ms": [
+        1.4736,
+        1.822479,
+        2.025812,
+        1.9963419999999998,
+        2.372836,
+        2.619025,
+        2.603428,
+        1.757112,
+        1.832899,
+        1.9617319999999998,
+        2.258689,
+        2.2136299999999998,
+        2.383901,
+        2.601896,
+        2.579456,
+        1.067896,
+        2.020256,
+        2.0539769999999997,
+        1.988559,
+        2.2063159999999997,
+        2.21448,
+        2.2918399999999997,
+        2.383255,
+        0.6959810000000001,
+        1.852637,
+        1.846096,
+        1.903783,
+        2.133115,
+        2.139528,
+        2.272314,
+        2.3221439999999998,
+        0.783376,
+        1.951174,
+        2.0735430000000004,
+        2.1704179999999997,
+        2.1110510000000002,
+        2.193082,
+        2.201123,
+        2.203723,
+        0.545694,
+        1.5209270000000001,
+        1.817112,
+        2.315325,
+        2.385979,
+        2.363151,
+        2.414238,
+        2.441542,
+        1.3328879999999999
+      ],
+      "warmup_pair_latency_ms": [
+        4.4124170000000005,
+        4.621713000000001,
+        4.802045,
+        4.947604,
+        5.2482359999999995,
+        5.390314,
+        5.423373000000001,
+        1.19769,
+        2.004783,
+        1.814954,
+        2.681909,
+        2.799451,
+        2.945687,
+        2.9771360000000002,
+        3.243124,
+        1.2936759999999998
+      ],
+      "elapsed_seconds": 0.017870127,
+      "pairs_per_second": 2686.046943035156,
+      "rss_before_kib": 25036,
+      "rss_warm_kib": 52944,
+      "rss_after_kib": 52944,
+      "hwm_kib": 52944,
+      "warm_rchar": 50551531,
+      "process_before": {
+        "rss_kib": 25036,
+        "hwm_kib": 25036,
+        "rchar": 16474,
+        "glibc": {
+          "arena_bytes": 5718016,
+          "allocated_bytes": 905680,
+          "free_bytes": 4812336,
+          "mmap_bytes": 0,
+          "mmap_regions": 0,
+          "free_chunks": 111,
+          "main_arena_releasable_top_bytes": 80352
+        }
+      },
+      "process_cold": {
+        "rss_kib": 31456,
+        "hwm_kib": 31456,
+        "rchar": 68733936,
+        "glibc": {
+          "arena_bytes": 8044544,
+          "allocated_bytes": 1012416,
+          "free_bytes": 7032128,
+          "mmap_bytes": 0,
+          "mmap_regions": 0,
+          "free_chunks": 106,
+          "main_arena_releasable_top_bytes": 80352
+        }
+      },
+      "process_warm": {
+        "rss_kib": 52944,
+        "hwm_kib": 52944,
+        "rchar": 85589445,
+        "glibc": {
+          "arena_bytes": 26386432,
+          "allocated_bytes": 1271328,
+          "free_bytes": 25115104,
+          "mmap_bytes": 0,
+          "mmap_regions": 0,
+          "free_chunks": 517,
+          "main_arena_releasable_top_bytes": 80352
+        }
+      },
+      "process_after": {
+        "rss_kib": 52944,
+        "hwm_kib": 52944,
+        "rchar": 136140976,
+        "glibc": {
+          "arena_bytes": 26386432,
+          "allocated_bytes": 1405472,
+          "free_bytes": 24980960,
+          "mmap_bytes": 0,
+          "mmap_regions": 0,
+          "free_chunks": 498,
+          "main_arena_releasable_top_bytes": 80352
+        }
+      },
+      "batches": [
+        {
+          "stage": "warmup",
+          "pairs_completed": 8,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 52936,
+            "hwm_kib": 52936,
+            "rchar": 77162849,
+            "glibc": {
+              "arena_bytes": 26378240,
+              "allocated_bytes": 1229056,
+              "free_bytes": 25149184,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 518,
+              "main_arena_releasable_top_bytes": 80352
+            }
+          }
+        },
+        {
+          "stage": "warmup",
+          "pairs_completed": 16,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 52944,
+            "hwm_kib": 52944,
+            "rchar": 85587835,
+            "glibc": {
+              "arena_bytes": 26386432,
+              "allocated_bytes": 1268000,
+              "free_bytes": 25118432,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 522,
+              "main_arena_releasable_top_bytes": 80352
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 24,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 52944,
+            "hwm_kib": 52944,
+            "rchar": 94014431,
+            "glibc": {
+              "arena_bytes": 26386432,
+              "allocated_bytes": 1303984,
+              "free_bytes": 25082448,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 582,
+              "main_arena_releasable_top_bytes": 80352
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 32,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 52944,
+            "hwm_kib": 52944,
+            "rchar": 102439417,
+            "glibc": {
+              "arena_bytes": 26386432,
+              "allocated_bytes": 1322368,
+              "free_bytes": 25064064,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 559,
+              "main_arena_releasable_top_bytes": 80352
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 40,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 52944,
+            "hwm_kib": 52944,
+            "rchar": 110864404,
+            "glibc": {
+              "arena_bytes": 26386432,
+              "allocated_bytes": 1345936,
+              "free_bytes": 25040496,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 557,
+              "main_arena_releasable_top_bytes": 80352
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 48,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 52944,
+            "hwm_kib": 52944,
+            "rchar": 119289391,
+            "glibc": {
+              "arena_bytes": 26386432,
+              "allocated_bytes": 1369264,
+              "free_bytes": 25017168,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 550,
+              "main_arena_releasable_top_bytes": 80352
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 56,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 52944,
+            "hwm_kib": 52944,
+            "rchar": 127714378,
+            "glibc": {
+              "arena_bytes": 26386432,
+              "allocated_bytes": 1388240,
+              "free_bytes": 24998192,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 609,
+              "main_arena_releasable_top_bytes": 80352
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 64,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 52944,
+            "hwm_kib": 52944,
+            "rchar": 136139365,
+            "glibc": {
+              "arena_bytes": 26386432,
+              "allocated_bytes": 1401936,
+              "free_bytes": 24984496,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 502,
+              "main_arena_releasable_top_bytes": 80352
+            }
+          }
+        }
+      ],
+      "variant": "baseline",
+      "repetition": 3,
+      "order": 10
+    },
+    {
+      "benchmark": "repeated_run_and_timeline_queries_do_not_reread_snapshot_history",
+      "fixture": "synthetic",
+      "malloc_arena_max": "2",
+      "glibc_tunables": null,
+      "runtime_worker_threads": 32,
+      "observed_worker_threads": 7,
+      "concurrency": 8,
+      "total_pairs": 64,
+      "warmup_pairs": 16,
+      "measured_pairs": 48,
+      "history_bytes": 67662374,
+      "resource_bytes": 525202,
+      "cold_runs_ms": 18.103049,
+      "pair_p50_ms": 2.856509,
+      "pair_p95_ms": 4.485714,
+      "pair_latency_ms": [
+        2.009481,
+        2.693082,
+        2.787275,
+        3.068031,
+        3.0276520000000002,
+        3.098507,
+        3.193662,
+        0.5291939999999999,
+        1.9026830000000001,
+        2.60134,
+        2.594068,
+        2.621245,
+        2.856509,
+        2.8323850000000004,
+        2.872016,
+        0.646615,
+        2.73821,
+        2.71407,
+        2.7578590000000003,
+        3.0215609999999997,
+        3.020598,
+        3.105966,
+        3.1789449999999997,
+        0.741923,
+        1.9679440000000001,
+        2.234464,
+        2.865226,
+        3.069173,
+        3.024442,
+        3.147679,
+        3.160777,
+        0.7595259999999999,
+        1.8549529999999999,
+        2.4805859999999997,
+        2.574606,
+        2.7453260000000004,
+        2.8917,
+        2.927432,
+        2.9327989999999997,
+        0.773329,
+        3.1323689999999997,
+        3.852891,
+        4.238119,
+        4.405062,
+        4.485714,
+        4.6898979999999995,
+        4.69002,
+        0.714607
+      ],
+      "warmup_pair_latency_ms": [
+        2.7135029999999998,
+        2.717304,
+        3.067372,
+        3.261728,
+        3.329298,
+        3.763135,
+        4.178129,
+        1.361954,
+        1.421159,
+        2.238019,
+        2.497351,
+        2.431963,
+        2.4766459999999997,
+        2.580056,
+        2.5599920000000003,
+        0.5830390000000001
+      ],
+      "elapsed_seconds": 0.023125859,
+      "pairs_per_second": 2075.598575603181,
+      "rss_before_kib": 25452,
+      "rss_warm_kib": 39124,
+      "rss_after_kib": 39124,
+      "hwm_kib": 40184,
+      "warm_rchar": 50551531,
+      "process_before": {
+        "rss_kib": 25452,
+        "hwm_kib": 25452,
+        "rchar": 16457,
+        "glibc": {
+          "arena_bytes": 1409024,
+          "allocated_bytes": 832896,
+          "free_bytes": 576128,
+          "mmap_bytes": 0,
+          "mmap_regions": 0,
+          "free_chunks": 77,
+          "main_arena_releasable_top_bytes": 72672
+        }
+      },
+      "process_cold": {
+        "rss_kib": 31600,
+        "hwm_kib": 31600,
+        "rchar": 68733919,
+        "glibc": {
+          "arena_bytes": 3702784,
+          "allocated_bytes": 937792,
+          "free_bytes": 2764992,
+          "mmap_bytes": 0,
+          "mmap_regions": 0,
+          "free_chunks": 66,
+          "main_arena_releasable_top_bytes": 72672
+        }
+      },
+      "process_warm": {
+        "rss_kib": 39124,
+        "hwm_kib": 39524,
+        "rchar": 85589428,
+        "glibc": {
+          "arena_bytes": 8925184,
+          "allocated_bytes": 1192672,
+          "free_bytes": 7732512,
+          "mmap_bytes": 0,
+          "mmap_regions": 0,
+          "free_chunks": 335,
+          "main_arena_releasable_top_bytes": 134016
+        }
+      },
+      "process_after": {
+        "rss_kib": 39124,
+        "hwm_kib": 40184,
+        "rchar": 136140959,
+        "glibc": {
+          "arena_bytes": 8925184,
+          "allocated_bytes": 1300032,
+          "free_bytes": 7625152,
+          "mmap_bytes": 0,
+          "mmap_regions": 0,
+          "free_chunks": 403,
+          "main_arena_releasable_top_bytes": 134016
+        }
+      },
+      "batches": [
+        {
+          "stage": "warmup",
+          "pairs_completed": 8,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 39996,
+            "hwm_kib": 39996,
+            "rchar": 77162832,
+            "glibc": {
+              "arena_bytes": 9949184,
+              "allocated_bytes": 1154224,
+              "free_bytes": 8794960,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 271,
+              "main_arena_releasable_top_bytes": 1683232
+            }
+          }
+        },
+        {
+          "stage": "warmup",
+          "pairs_completed": 16,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 39124,
+            "hwm_kib": 39524,
+            "rchar": 85587818,
+            "glibc": {
+              "arena_bytes": 8925184,
+              "allocated_bytes": 1189392,
+              "free_bytes": 7735792,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 311,
+              "main_arena_releasable_top_bytes": 134016
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 24,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 39124,
+            "hwm_kib": 39644,
+            "rchar": 94014414,
+            "glibc": {
+              "arena_bytes": 8925184,
+              "allocated_bytes": 1218352,
+              "free_bytes": 7706832,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 375,
+              "main_arena_releasable_top_bytes": 134016
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 32,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 40020,
+            "hwm_kib": 40020,
+            "rchar": 102439400,
+            "glibc": {
+              "arena_bytes": 9973760,
+              "allocated_bytes": 1242080,
+              "free_bytes": 8731680,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 359,
+              "main_arena_releasable_top_bytes": 1182592
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 40,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 39124,
+            "hwm_kib": 40092,
+            "rchar": 110864387,
+            "glibc": {
+              "arena_bytes": 8925184,
+              "allocated_bytes": 1257888,
+              "free_bytes": 7667296,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 399,
+              "main_arena_releasable_top_bytes": 134016
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 48,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 39124,
+            "hwm_kib": 40092,
+            "rchar": 119289374,
+            "glibc": {
+              "arena_bytes": 8925184,
+              "allocated_bytes": 1271360,
+              "free_bytes": 7653824,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 396,
+              "main_arena_releasable_top_bytes": 134016
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 56,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 40532,
+            "hwm_kib": 40532,
+            "rchar": 127714361,
+            "glibc": {
+              "arena_bytes": 10498048,
+              "allocated_bytes": 1286128,
+              "free_bytes": 9211920,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 408,
+              "main_arena_releasable_top_bytes": 1706880
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 64,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 39124,
+            "hwm_kib": 40184,
+            "rchar": 136139348,
+            "glibc": {
+              "arena_bytes": 8925184,
+              "allocated_bytes": 1296720,
+              "free_bytes": 7628464,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 400,
+              "main_arena_releasable_top_bytes": 134016
+            }
+          }
+        }
+      ],
+      "variant": "fixed",
+      "repetition": 3,
+      "order": 11
+    },
+    {
+      "benchmark": "repeated_run_and_timeline_queries_do_not_reread_snapshot_history",
+      "fixture": "synthetic",
+      "malloc_arena_max": "2",
+      "glibc_tunables": null,
+      "runtime_worker_threads": 32,
+      "observed_worker_threads": 7,
+      "concurrency": 8,
+      "total_pairs": 64,
+      "warmup_pairs": 16,
+      "measured_pairs": 48,
+      "history_bytes": 67662374,
+      "resource_bytes": 525202,
+      "cold_runs_ms": 19.096038,
+      "pair_p50_ms": 4.091126,
+      "pair_p95_ms": 5.039866,
+      "pair_latency_ms": [
+        2.5255199999999998,
+        2.6159070000000004,
+        3.74718,
+        4.2205960000000005,
+        4.494059,
+        4.502239,
+        4.540423,
+        0.753352,
+        3.3593889999999997,
+        3.396795,
+        3.9993190000000003,
+        4.091126,
+        4.060691,
+        4.0728919999999995,
+        4.16827,
+        0.760786,
+        2.597776,
+        3.0729759999999997,
+        5.002994,
+        5.039866,
+        5.08528,
+        5.006803,
+        5.158361,
+        0.745112,
+        2.417625,
+        2.4813579999999997,
+        4.294722,
+        4.527945,
+        4.540846999999999,
+        4.646126000000001,
+        4.791133,
+        0.562157,
+        2.3160390000000004,
+        2.431458,
+        3.9620200000000003,
+        4.108726,
+        4.120234,
+        4.152601,
+        4.168053,
+        0.697272,
+        2.036106,
+        2.0878289999999997,
+        4.163163999999999,
+        4.365455,
+        4.353275,
+        4.376035,
+        4.433463000000001,
+        0.662567
+      ],
+      "warmup_pair_latency_ms": [
+        4.1104519999999996,
+        4.163856,
+        5.183676,
+        5.399150000000001,
+        5.51658,
+        5.680223,
+        5.932245,
+        0.884889,
+        3.415617,
+        3.495266,
+        3.702232,
+        3.813231,
+        4.03651,
+        4.296485,
+        4.387364000000001,
+        0.783292
+      ],
+      "elapsed_seconds": 0.031935877,
+      "pairs_per_second": 1503.0118008032157,
+      "rss_before_kib": 25208,
+      "rss_warm_kib": 41648,
+      "rss_after_kib": 42500,
+      "hwm_kib": 45920,
+      "warm_rchar": 50551531,
+      "process_before": {
+        "rss_kib": 25208,
+        "hwm_kib": 25208,
+        "rchar": 16469,
+        "glibc": {
+          "arena_bytes": 1409024,
+          "allocated_bytes": 833232,
+          "free_bytes": 575792,
+          "mmap_bytes": 0,
+          "mmap_regions": 0,
+          "free_chunks": 77,
+          "main_arena_releasable_top_bytes": 71008
+        }
+      },
+      "process_cold": {
+        "rss_kib": 31756,
+        "hwm_kib": 31756,
+        "rchar": 68733931,
+        "glibc": {
+          "arena_bytes": 3735552,
+          "allocated_bytes": 940016,
+          "free_bytes": 2795536,
+          "mmap_bytes": 0,
+          "mmap_regions": 0,
+          "free_chunks": 75,
+          "main_arena_releasable_top_bytes": 71008
+        }
+      },
+      "process_warm": {
+        "rss_kib": 41648,
+        "hwm_kib": 44892,
+        "rchar": 85589440,
+        "glibc": {
+          "arena_bytes": 11038720,
+          "allocated_bytes": 1200384,
+          "free_bytes": 9838336,
+          "mmap_bytes": 0,
+          "mmap_regions": 0,
+          "free_chunks": 405,
+          "main_arena_releasable_top_bytes": 1244560
+        }
+      },
+      "process_after": {
+        "rss_kib": 42500,
+        "hwm_kib": 45920,
+        "rchar": 136140971,
+        "glibc": {
+          "arena_bytes": 12042240,
+          "allocated_bytes": 1324944,
+          "free_bytes": 10717296,
+          "mmap_bytes": 0,
+          "mmap_regions": 0,
+          "free_chunks": 495,
+          "main_arena_releasable_top_bytes": 1707408
+        }
+      },
+      "batches": [
+        {
+          "stage": "warmup",
+          "pairs_completed": 8,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 39156,
+            "hwm_kib": 41732,
+            "rchar": 77162844,
+            "glibc": {
+              "arena_bytes": 8486912,
+              "allocated_bytes": 1159328,
+              "free_bytes": 7327584,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 357,
+              "main_arena_releasable_top_bytes": 134544
+            }
+          }
+        },
+        {
+          "stage": "warmup",
+          "pairs_completed": 16,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 41648,
+            "hwm_kib": 44892,
+            "rchar": 85587830,
+            "glibc": {
+              "arena_bytes": 11038720,
+              "allocated_bytes": 1197072,
+              "free_bytes": 9841648,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 405,
+              "main_arena_releasable_top_bytes": 1244560
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 24,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 41972,
+            "hwm_kib": 44892,
+            "rchar": 94014426,
+            "glibc": {
+              "arena_bytes": 11501568,
+              "allocated_bytes": 1230176,
+              "free_bytes": 10271392,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 448,
+              "main_arena_releasable_top_bytes": 1183120
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 32,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 41588,
+            "hwm_kib": 44892,
+            "rchar": 102439412,
+            "glibc": {
+              "arena_bytes": 10977280,
+              "allocated_bytes": 1254976,
+              "free_bytes": 9722304,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 453,
+              "main_arena_releasable_top_bytes": 658832
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 40,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 41076,
+            "hwm_kib": 45920,
+            "rchar": 110864399,
+            "glibc": {
+              "arena_bytes": 10452992,
+              "allocated_bytes": 1273920,
+              "free_bytes": 9179072,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 475,
+              "main_arena_releasable_top_bytes": 134544
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 48,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 41076,
+            "hwm_kib": 45920,
+            "rchar": 119289386,
+            "glibc": {
+              "arena_bytes": 10452992,
+              "allocated_bytes": 1293296,
+              "free_bytes": 9159696,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 517,
+              "main_arena_releasable_top_bytes": 134544
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 56,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 42492,
+            "hwm_kib": 45920,
+            "rchar": 127714373,
+            "glibc": {
+              "arena_bytes": 12034048,
+              "allocated_bytes": 1308096,
+              "free_bytes": 10725952,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 490,
+              "main_arena_releasable_top_bytes": 1707408
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 64,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 42500,
+            "hwm_kib": 45920,
+            "rchar": 136139360,
+            "glibc": {
+              "arena_bytes": 12042240,
+              "allocated_bytes": 1321344,
+              "free_bytes": 10720896,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 500,
+              "main_arena_releasable_top_bytes": 1707408
+            }
+          }
+        }
+      ],
+      "variant": "baseline",
+      "repetition": 3,
+      "order": 12
+    },
+    {
+      "benchmark": "repeated_run_and_timeline_queries_do_not_reread_snapshot_history",
+      "fixture": "synthetic",
+      "malloc_arena_max": "2",
+      "glibc_tunables": null,
+      "runtime_worker_threads": 32,
+      "observed_worker_threads": 7,
+      "concurrency": 8,
+      "total_pairs": 64,
+      "warmup_pairs": 16,
+      "measured_pairs": 48,
+      "history_bytes": 67662374,
+      "resource_bytes": 525202,
+      "cold_runs_ms": 18.799776,
+      "pair_p50_ms": 3.010702,
+      "pair_p95_ms": 3.528529,
+      "pair_latency_ms": [
+        2.115587,
+        3.0634490000000003,
+        3.276507,
+        3.218534,
+        3.343756,
+        3.307148,
+        3.392744,
+        0.559326,
+        2.318166,
+        2.66595,
+        2.5929680000000004,
+        2.7726610000000003,
+        3.010702,
+        3.0964840000000002,
+        3.109633,
+        0.751762,
+        2.299641,
+        2.411425,
+        2.380847,
+        2.591462,
+        2.7061110000000004,
+        2.803857,
+        2.974964,
+        0.9077860000000001,
+        2.087068,
+        2.862471,
+        3.316453,
+        3.325222,
+        3.528529,
+        3.7172389999999997,
+        3.673562,
+        0.720333,
+        2.9360150000000003,
+        3.2671,
+        3.248252,
+        3.4225890000000003,
+        3.3699950000000003,
+        3.47812,
+        3.514504,
+        0.771885,
+        2.8330640000000002,
+        2.8756950000000003,
+        3.17611,
+        3.221817,
+        3.217012,
+        3.458385,
+        3.437404,
+        0.8246829999999999
+      ],
+      "warmup_pair_latency_ms": [
+        5.120688,
+        5.069184,
+        5.262553,
+        5.046260999999999,
+        5.267971,
+        5.432085,
+        5.689981,
+        0.959071,
+        2.205617,
+        2.793233,
+        2.978383,
+        3.331478,
+        3.380904,
+        3.698482,
+        3.8653049999999998,
+        1.967613
+      ],
+      "elapsed_seconds": 0.023705479,
+      "pairs_per_second": 2024.848348350185,
+      "rss_before_kib": 24900,
+      "rss_warm_kib": 43188,
+      "rss_after_kib": 42676,
+      "hwm_kib": 45004,
+      "warm_rchar": 50551531,
+      "process_before": {
+        "rss_kib": 24900,
+        "hwm_kib": 24900,
+        "rchar": 16469,
+        "glibc": {
+          "arena_bytes": 1404928,
+          "allocated_bytes": 833840,
+          "free_bytes": 571088,
+          "mmap_bytes": 0,
+          "mmap_regions": 0,
+          "free_chunks": 78,
+          "main_arena_releasable_top_bytes": 69952
+        }
+      },
+      "process_cold": {
+        "rss_kib": 31036,
+        "hwm_kib": 31036,
+        "rchar": 68733931,
+        "glibc": {
+          "arena_bytes": 3506176,
+          "allocated_bytes": 940656,
+          "free_bytes": 2565520,
+          "mmap_bytes": 0,
+          "mmap_regions": 0,
+          "free_chunks": 77,
+          "main_arena_releasable_top_bytes": 69952
+        }
+      },
+      "process_warm": {
+        "rss_kib": 43188,
+        "hwm_kib": 44616,
+        "rchar": 85589440,
+        "glibc": {
+          "arena_bytes": 13201408,
+          "allocated_bytes": 1209424,
+          "free_bytes": 11991984,
+          "mmap_bytes": 0,
+          "mmap_regions": 0,
+          "free_chunks": 430,
+          "main_arena_releasable_top_bytes": 656016
+        }
+      },
+      "process_after": {
+        "rss_kib": 42676,
+        "hwm_kib": 45004,
+        "rchar": 136140971,
+        "glibc": {
+          "arena_bytes": 12677120,
+          "allocated_bytes": 1341248,
+          "free_bytes": 11335872,
+          "mmap_bytes": 0,
+          "mmap_regions": 0,
+          "free_chunks": 499,
+          "main_arena_releasable_top_bytes": 131728
+        }
+      },
+      "batches": [
+        {
+          "stage": "warmup",
+          "pairs_completed": 8,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 44212,
+            "hwm_kib": 44516,
+            "rchar": 77162844,
+            "glibc": {
+              "arena_bytes": 14249984,
+              "allocated_bytes": 1166560,
+              "free_bytes": 13083424,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 351,
+              "main_arena_releasable_top_bytes": 1704592
+            }
+          }
+        },
+        {
+          "stage": "warmup",
+          "pairs_completed": 16,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 43188,
+            "hwm_kib": 44616,
+            "rchar": 85587830,
+            "glibc": {
+              "arena_bytes": 13201408,
+              "allocated_bytes": 1206752,
+              "free_bytes": 11994656,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 444,
+              "main_arena_releasable_top_bytes": 656016
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 24,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 43700,
+            "hwm_kib": 44748,
+            "rchar": 94014426,
+            "glibc": {
+              "arena_bytes": 13725696,
+              "allocated_bytes": 1237216,
+              "free_bytes": 12488480,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 433,
+              "main_arena_releasable_top_bytes": 1180304
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 32,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 44084,
+            "hwm_kib": 44748,
+            "rchar": 102439412,
+            "glibc": {
+              "arena_bytes": 14249984,
+              "allocated_bytes": 1264512,
+              "free_bytes": 12985472,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 468,
+              "main_arena_releasable_top_bytes": 1704592
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 40,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 42676,
+            "hwm_kib": 44748,
+            "rchar": 110864399,
+            "glibc": {
+              "arena_bytes": 12677120,
+              "allocated_bytes": 1290912,
+              "free_bytes": 11386208,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 454,
+              "main_arena_releasable_top_bytes": 131728
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 48,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 44084,
+            "hwm_kib": 45004,
+            "rchar": 119289386,
+            "glibc": {
+              "arena_bytes": 14249984,
+              "allocated_bytes": 1305008,
+              "free_bytes": 12944976,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 459,
+              "main_arena_releasable_top_bytes": 1704592
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 56,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 43188,
+            "hwm_kib": 45004,
+            "rchar": 127714373,
+            "glibc": {
+              "arena_bytes": 13201408,
+              "allocated_bytes": 1323008,
+              "free_bytes": 11878400,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 475,
+              "main_arena_releasable_top_bytes": 656016
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 64,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 42676,
+            "hwm_kib": 45004,
+            "rchar": 136139360,
+            "glibc": {
+              "arena_bytes": 12677120,
+              "allocated_bytes": 1337280,
+              "free_bytes": 11339840,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 515,
+              "main_arena_releasable_top_bytes": 131728
+            }
+          }
+        }
+      ],
+      "variant": "baseline",
+      "repetition": 4,
+      "order": 13
+    },
+    {
+      "benchmark": "repeated_run_and_timeline_queries_do_not_reread_snapshot_history",
+      "fixture": "synthetic",
+      "malloc_arena_max": "2",
+      "glibc_tunables": null,
+      "runtime_worker_threads": 32,
+      "observed_worker_threads": 7,
+      "concurrency": 8,
+      "total_pairs": 64,
+      "warmup_pairs": 16,
+      "measured_pairs": 48,
+      "history_bytes": 67662374,
+      "resource_bytes": 525202,
+      "cold_runs_ms": 18.358528,
+      "pair_p50_ms": 2.190992,
+      "pair_p95_ms": 2.498198,
+      "pair_latency_ms": [
+        1.37119,
+        2.187697,
+        2.144816,
+        2.190992,
+        2.182455,
+        2.323305,
+        2.301417,
+        0.547743,
+        2.182767,
+        2.3077129999999997,
+        2.3339239999999997,
+        2.293284,
+        2.491768,
+        2.517755,
+        2.498198,
+        0.433975,
+        1.38437,
+        2.0938499999999998,
+        2.114624,
+        2.13068,
+        2.244133,
+        2.256734,
+        2.334919,
+        0.501412,
+        2.02193,
+        2.1267389999999997,
+        2.1076469999999996,
+        2.285854,
+        2.309579,
+        2.253708,
+        2.27557,
+        0.432566,
+        1.809043,
+        2.0594810000000003,
+        2.116425,
+        2.2335749999999996,
+        2.2434260000000004,
+        2.3058359999999998,
+        2.307149,
+        0.43363,
+        2.068975,
+        2.1045,
+        2.2956119999999998,
+        2.33033,
+        2.5118229999999997,
+        2.4727170000000003,
+        2.457504,
+        0.40261
+      ],
+      "warmup_pair_latency_ms": [
+        2.724254,
+        3.232475,
+        3.2274399999999996,
+        3.22866,
+        3.357855,
+        3.2781450000000003,
+        3.315507,
+        0.548463,
+        2.067033,
+        2.033898,
+        2.186332,
+        2.142932,
+        2.209517,
+        2.229723,
+        2.307947,
+        0.474435
+      ],
+      "elapsed_seconds": 0.017448019,
+      "pairs_per_second": 2751.028641131122,
+      "rss_before_kib": 25164,
+      "rss_warm_kib": 41252,
+      "rss_after_kib": 41252,
+      "hwm_kib": 41252,
+      "warm_rchar": 50551531,
+      "process_before": {
+        "rss_kib": 25164,
+        "hwm_kib": 25164,
+        "rchar": 16457,
+        "glibc": {
+          "arena_bytes": 1409024,
+          "allocated_bytes": 834624,
+          "free_bytes": 574400,
+          "mmap_bytes": 0,
+          "mmap_regions": 0,
+          "free_chunks": 84,
+          "main_arena_releasable_top_bytes": 71024
+        }
+      },
+      "process_cold": {
+        "rss_kib": 31624,
+        "hwm_kib": 31624,
+        "rchar": 68733919,
+        "glibc": {
+          "arena_bytes": 3375104,
+          "allocated_bytes": 940624,
+          "free_bytes": 2434480,
+          "mmap_bytes": 0,
+          "mmap_regions": 0,
+          "free_chunks": 66,
+          "main_arena_releasable_top_bytes": 71024
+        }
+      },
+      "process_warm": {
+        "rss_kib": 41252,
+        "hwm_kib": 41252,
+        "rchar": 85589428,
+        "glibc": {
+          "arena_bytes": 11116544,
+          "allocated_bytes": 1192112,
+          "free_bytes": 9924432,
+          "mmap_bytes": 0,
+          "mmap_regions": 0,
+          "free_chunks": 394,
+          "main_arena_releasable_top_bytes": 1186480
+        }
+      },
+      "process_after": {
+        "rss_kib": 41252,
+        "hwm_kib": 41252,
+        "rchar": 136140959,
+        "glibc": {
+          "arena_bytes": 11116544,
+          "allocated_bytes": 1298592,
+          "free_bytes": 9817952,
+          "mmap_bytes": 0,
+          "mmap_regions": 0,
+          "free_chunks": 423,
+          "main_arena_releasable_top_bytes": 1186480
+        }
+      },
+      "batches": [
+        {
+          "stage": "warmup",
+          "pairs_completed": 8,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 41252,
+            "hwm_kib": 41252,
+            "rchar": 77162832,
+            "glibc": {
+              "arena_bytes": 11116544,
+              "allocated_bytes": 1154176,
+              "free_bytes": 9962368,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 300,
+              "main_arena_releasable_top_bytes": 1186480
+            }
+          }
+        },
+        {
+          "stage": "warmup",
+          "pairs_completed": 16,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 41252,
+            "hwm_kib": 41252,
+            "rchar": 85587818,
+            "glibc": {
+              "arena_bytes": 11116544,
+              "allocated_bytes": 1190160,
+              "free_bytes": 9926384,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 362,
+              "main_arena_releasable_top_bytes": 1186480
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 24,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 41252,
+            "hwm_kib": 41252,
+            "rchar": 94014414,
+            "glibc": {
+              "arena_bytes": 11116544,
+              "allocated_bytes": 1216464,
+              "free_bytes": 9900080,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 362,
+              "main_arena_releasable_top_bytes": 1186480
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 32,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 41252,
+            "hwm_kib": 41252,
+            "rchar": 102439400,
+            "glibc": {
+              "arena_bytes": 11116544,
+              "allocated_bytes": 1236256,
+              "free_bytes": 9880288,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 372,
+              "main_arena_releasable_top_bytes": 1186480
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 40,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 41252,
+            "hwm_kib": 41252,
+            "rchar": 110864387,
+            "glibc": {
+              "arena_bytes": 11116544,
+              "allocated_bytes": 1253456,
+              "free_bytes": 9863088,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 367,
+              "main_arena_releasable_top_bytes": 1186480
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 48,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 41252,
+            "hwm_kib": 41252,
+            "rchar": 119289374,
+            "glibc": {
+              "arena_bytes": 11116544,
+              "allocated_bytes": 1269824,
+              "free_bytes": 9846720,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 383,
+              "main_arena_releasable_top_bytes": 1186480
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 56,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 41252,
+            "hwm_kib": 41252,
+            "rchar": 127714361,
+            "glibc": {
+              "arena_bytes": 11116544,
+              "allocated_bytes": 1283264,
+              "free_bytes": 9833280,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 382,
+              "main_arena_releasable_top_bytes": 1186480
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 64,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 41252,
+            "hwm_kib": 41252,
+            "rchar": 136139348,
+            "glibc": {
+              "arena_bytes": 11116544,
+              "allocated_bytes": 1295776,
+              "free_bytes": 9820768,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 397,
+              "main_arena_releasable_top_bytes": 1186480
+            }
+          }
+        }
+      ],
+      "variant": "fixed",
+      "repetition": 4,
+      "order": 14
+    },
+    {
+      "benchmark": "repeated_run_and_timeline_queries_do_not_reread_snapshot_history",
+      "fixture": "synthetic",
+      "malloc_arena_max": null,
+      "glibc_tunables": null,
+      "runtime_worker_threads": 32,
+      "observed_worker_threads": 7,
+      "concurrency": 8,
+      "total_pairs": 64,
+      "warmup_pairs": 16,
+      "measured_pairs": 48,
+      "history_bytes": 67662374,
+      "resource_bytes": 525202,
+      "cold_runs_ms": 18.342074999999998,
+      "pair_p50_ms": 2.098791,
+      "pair_p95_ms": 2.6095990000000002,
+      "pair_latency_ms": [
+        2.4343369999999998,
+        2.490414,
+        2.564073,
+        2.6095990000000002,
+        2.6132400000000002,
+        2.600383,
+        2.664066,
+        0.553812,
+        1.5806,
+        1.904214,
+        1.977959,
+        2.364459,
+        2.375838,
+        2.431168,
+        2.45202,
+        1.145207,
+        1.8269090000000001,
+        1.9967560000000002,
+        2.025077,
+        2.039318,
+        2.063632,
+        2.1949650000000003,
+        2.310515,
+        0.660839,
+        1.7303410000000001,
+        1.9848829999999997,
+        2.124726,
+        2.144685,
+        2.148533,
+        2.313322,
+        2.329607,
+        0.978823,
+        1.720988,
+        1.9647929999999998,
+        2.098791,
+        2.040903,
+        2.112559,
+        2.091517,
+        2.16123,
+        0.7193539999999999,
+        1.603095,
+        1.842593,
+        1.999355,
+        2.108331,
+        2.308176,
+        2.3785260000000004,
+        2.3741589999999997,
+        1.062154
+      ],
+      "warmup_pair_latency_ms": [
+        4.264071,
+        4.631414,
+        4.2476709999999995,
+        5.137582,
+        5.358307,
+        5.610971999999999,
+        5.6792229999999995,
+        1.302213,
+        1.9391269999999998,
+        2.340939,
+        2.495876,
+        2.538899,
+        2.5155350000000003,
+        2.565333,
+        2.634581,
+        0.555542
+      ],
+      "elapsed_seconds": 0.017361402,
+      "pairs_per_second": 2764.7536759992076,
+      "rss_before_kib": 24804,
+      "rss_warm_kib": 52836,
+      "rss_after_kib": 53348,
+      "hwm_kib": 53348,
+      "warm_rchar": 50551531,
+      "process_before": {
+        "rss_kib": 24804,
+        "hwm_kib": 24804,
+        "rchar": 16474,
+        "glibc": {
+          "arena_bytes": 5718016,
+          "allocated_bytes": 904336,
+          "free_bytes": 4813680,
+          "mmap_bytes": 0,
+          "mmap_regions": 0,
+          "free_chunks": 109,
+          "main_arena_releasable_top_bytes": 80352
+        }
+      },
+      "process_cold": {
+        "rss_kib": 31456,
+        "hwm_kib": 31456,
+        "rchar": 68733936,
+        "glibc": {
+          "arena_bytes": 8011776,
+          "allocated_bytes": 1012336,
+          "free_bytes": 6999440,
+          "mmap_bytes": 0,
+          "mmap_regions": 0,
+          "free_chunks": 108,
+          "main_arena_releasable_top_bytes": 80352
+        }
+      },
+      "process_warm": {
+        "rss_kib": 52836,
+        "hwm_kib": 52836,
+        "rchar": 85589445,
+        "glibc": {
+          "arena_bytes": 26349568,
+          "allocated_bytes": 1269760,
+          "free_bytes": 25079808,
+          "mmap_bytes": 0,
+          "mmap_regions": 0,
+          "free_chunks": 526,
+          "main_arena_releasable_top_bytes": 80352
+        }
+      },
+      "process_after": {
+        "rss_kib": 53348,
+        "hwm_kib": 53348,
+        "rchar": 136140976,
+        "glibc": {
+          "arena_bytes": 26873856,
+          "allocated_bytes": 1407792,
+          "free_bytes": 25466064,
+          "mmap_bytes": 0,
+          "mmap_regions": 0,
+          "free_chunks": 609,
+          "main_arena_releasable_top_bytes": 80352
+        }
+      },
+      "batches": [
+        {
+          "stage": "warmup",
+          "pairs_completed": 8,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 52824,
+            "hwm_kib": 52824,
+            "rchar": 77162849,
+            "glibc": {
+              "arena_bytes": 26337280,
+              "allocated_bytes": 1228960,
+              "free_bytes": 25108320,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 522,
+              "main_arena_releasable_top_bytes": 80352
+            }
+          }
+        },
+        {
+          "stage": "warmup",
+          "pairs_completed": 16,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 52836,
+            "hwm_kib": 52836,
+            "rchar": 85587835,
+            "glibc": {
+              "arena_bytes": 26349568,
+              "allocated_bytes": 1267728,
+              "free_bytes": 25081840,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 528,
+              "main_arena_releasable_top_bytes": 80352
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 24,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 53348,
+            "hwm_kib": 53348,
+            "rchar": 94014431,
+            "glibc": {
+              "arena_bytes": 26873856,
+              "allocated_bytes": 1302960,
+              "free_bytes": 25570896,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 591,
+              "main_arena_releasable_top_bytes": 80352
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 32,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 53348,
+            "hwm_kib": 53348,
+            "rchar": 102439417,
+            "glibc": {
+              "arena_bytes": 26873856,
+              "allocated_bytes": 1332448,
+              "free_bytes": 25541408,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 522,
+              "main_arena_releasable_top_bytes": 80352
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 40,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 53348,
+            "hwm_kib": 53348,
+            "rchar": 110864404,
+            "glibc": {
+              "arena_bytes": 26873856,
+              "allocated_bytes": 1353488,
+              "free_bytes": 25520368,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 631,
+              "main_arena_releasable_top_bytes": 80352
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 48,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 53348,
+            "hwm_kib": 53348,
+            "rchar": 119289391,
+            "glibc": {
+              "arena_bytes": 26873856,
+              "allocated_bytes": 1372992,
+              "free_bytes": 25500864,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 570,
+              "main_arena_releasable_top_bytes": 80352
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 56,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 53348,
+            "hwm_kib": 53348,
+            "rchar": 127714378,
+            "glibc": {
+              "arena_bytes": 26873856,
+              "allocated_bytes": 1391696,
+              "free_bytes": 25482160,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 623,
+              "main_arena_releasable_top_bytes": 80352
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 64,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 53348,
+            "hwm_kib": 53348,
+            "rchar": 136139365,
+            "glibc": {
+              "arena_bytes": 26873856,
+              "allocated_bytes": 1405040,
+              "free_bytes": 25468816,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 612,
+              "main_arena_releasable_top_bytes": 80352
+            }
+          }
+        }
+      ],
+      "variant": "baseline",
+      "repetition": 4,
+      "order": 15
+    },
+    {
+      "benchmark": "repeated_run_and_timeline_queries_do_not_reread_snapshot_history",
+      "fixture": "synthetic",
+      "malloc_arena_max": null,
+      "glibc_tunables": null,
+      "runtime_worker_threads": 32,
+      "observed_worker_threads": 7,
+      "concurrency": 8,
+      "total_pairs": 64,
+      "warmup_pairs": 16,
+      "measured_pairs": 48,
+      "history_bytes": 67662374,
+      "resource_bytes": 525202,
+      "cold_runs_ms": 19.688786999999998,
+      "pair_p50_ms": 1.9937829999999999,
+      "pair_p95_ms": 2.31891,
+      "pair_latency_ms": [
+        1.98169,
+        1.916671,
+        2.280296,
+        2.342336,
+        2.295662,
+        2.325061,
+        2.313833,
+        0.438697,
+        1.709397,
+        1.83182,
+        1.950006,
+        1.94476,
+        2.0227019999999998,
+        1.9937829999999999,
+        2.1557749999999998,
+        0.746424,
+        2.0134760000000003,
+        1.932119,
+        1.969813,
+        2.071877,
+        2.037548,
+        2.096266,
+        2.083383,
+        0.516775,
+        1.8112,
+        1.92166,
+        1.874361,
+        1.940783,
+        2.020042,
+        2.085915,
+        2.2247149999999998,
+        0.571994,
+        1.521929,
+        1.709055,
+        1.904849,
+        2.176508,
+        2.197948,
+        2.22443,
+        0.481717,
+        2.31891,
+        1.2082,
+        1.9979429999999998,
+        1.96268,
+        2.042393,
+        2.0190859999999997,
+        2.042131,
+        2.073005,
+        1.015642
+      ],
+      "warmup_pair_latency_ms": [
+        3.851199,
+        3.993094,
+        4.314624,
+        4.302818,
+        4.428844000000001,
+        4.439926000000001,
+        4.475626,
+        1.075132,
+        2.0992200000000003,
+        2.1502980000000003,
+        2.1526549999999998,
+        2.172194,
+        2.320805,
+        2.7526450000000002,
+        2.822807,
+        0.9513590000000001
+      ],
+      "elapsed_seconds": 0.015667477,
+      "pairs_per_second": 3063.6713237236604,
+      "rss_before_kib": 25424,
+      "rss_warm_kib": 48548,
+      "rss_after_kib": 48548,
+      "hwm_kib": 48548,
+      "warm_rchar": 50551531,
+      "process_before": {
+        "rss_kib": 25424,
+        "hwm_kib": 25424,
+        "rchar": 16462,
+        "glibc": {
+          "arena_bytes": 5718016,
+          "allocated_bytes": 906480,
+          "free_bytes": 4811536,
+          "mmap_bytes": 0,
+          "mmap_regions": 0,
+          "free_chunks": 112,
+          "main_arena_releasable_top_bytes": 80368
+        }
+      },
+      "process_cold": {
+        "rss_kib": 31744,
+        "hwm_kib": 31744,
+        "rchar": 68733924,
+        "glibc": {
+          "arena_bytes": 8007680,
+          "allocated_bytes": 1011664,
+          "free_bytes": 6996016,
+          "mmap_bytes": 0,
+          "mmap_regions": 0,
+          "free_chunks": 111,
+          "main_arena_releasable_top_bytes": 80368
+        }
+      },
+      "process_warm": {
+        "rss_kib": 48548,
+        "hwm_kib": 48548,
+        "rchar": 85589433,
+        "glibc": {
+          "arena_bytes": 22171648,
+          "allocated_bytes": 1278512,
+          "free_bytes": 20893136,
+          "mmap_bytes": 0,
+          "mmap_regions": 0,
+          "free_chunks": 427,
+          "main_arena_releasable_top_bytes": 80368
+        }
+      },
+      "process_after": {
+        "rss_kib": 48548,
+        "hwm_kib": 48548,
+        "rchar": 136140964,
+        "glibc": {
+          "arena_bytes": 22171648,
+          "allocated_bytes": 1381440,
+          "free_bytes": 20790208,
+          "mmap_bytes": 0,
+          "mmap_regions": 0,
+          "free_chunks": 461,
+          "main_arena_releasable_top_bytes": 80368
+        }
+      },
+      "batches": [
+        {
+          "stage": "warmup",
+          "pairs_completed": 8,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 45476,
+            "hwm_kib": 45476,
+            "rchar": 77162837,
+            "glibc": {
+              "arena_bytes": 19025920,
+              "allocated_bytes": 1231344,
+              "free_bytes": 17794576,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 376,
+              "main_arena_releasable_top_bytes": 80368
+            }
+          }
+        },
+        {
+          "stage": "warmup",
+          "pairs_completed": 16,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 48548,
+            "hwm_kib": 48548,
+            "rchar": 85587823,
+            "glibc": {
+              "arena_bytes": 22171648,
+              "allocated_bytes": 1275424,
+              "free_bytes": 20896224,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 432,
+              "main_arena_releasable_top_bytes": 80368
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 24,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 48548,
+            "hwm_kib": 48548,
+            "rchar": 94014419,
+            "glibc": {
+              "arena_bytes": 22171648,
+              "allocated_bytes": 1299008,
+              "free_bytes": 20872640,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 470,
+              "main_arena_releasable_top_bytes": 80368
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 32,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 48548,
+            "hwm_kib": 48548,
+            "rchar": 102439405,
+            "glibc": {
+              "arena_bytes": 22171648,
+              "allocated_bytes": 1317536,
+              "free_bytes": 20854112,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 420,
+              "main_arena_releasable_top_bytes": 80368
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 40,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 48548,
+            "hwm_kib": 48548,
+            "rchar": 110864392,
+            "glibc": {
+              "arena_bytes": 22171648,
+              "allocated_bytes": 1335024,
+              "free_bytes": 20836624,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 443,
+              "main_arena_releasable_top_bytes": 80368
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 48,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 48548,
+            "hwm_kib": 48548,
+            "rchar": 119289379,
+            "glibc": {
+              "arena_bytes": 22171648,
+              "allocated_bytes": 1353360,
+              "free_bytes": 20818288,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 430,
+              "main_arena_releasable_top_bytes": 80368
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 56,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 48548,
+            "hwm_kib": 48548,
+            "rchar": 127714366,
+            "glibc": {
+              "arena_bytes": 22171648,
+              "allocated_bytes": 1369424,
+              "free_bytes": 20802224,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 445,
+              "main_arena_releasable_top_bytes": 80368
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 64,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 48548,
+            "hwm_kib": 48548,
+            "rchar": 136139353,
+            "glibc": {
+              "arena_bytes": 22171648,
+              "allocated_bytes": 1378720,
+              "free_bytes": 20792928,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 465,
+              "main_arena_releasable_top_bytes": 80368
+            }
+          }
+        }
+      ],
+      "variant": "fixed",
+      "repetition": 4,
+      "order": 16
+    },
+    {
+      "benchmark": "repeated_run_and_timeline_queries_do_not_reread_snapshot_history",
+      "fixture": "synthetic",
+      "malloc_arena_max": null,
+      "glibc_tunables": null,
+      "runtime_worker_threads": 32,
+      "observed_worker_threads": 7,
+      "concurrency": 8,
+      "total_pairs": 64,
+      "warmup_pairs": 16,
+      "measured_pairs": 48,
+      "history_bytes": 67662374,
+      "resource_bytes": 525202,
+      "cold_runs_ms": 18.454709,
+      "pair_p50_ms": 2.158146,
+      "pair_p95_ms": 2.434707,
+      "pair_latency_ms": [
+        1.67391,
+        2.0652589999999997,
+        2.158146,
+        2.10744,
+        2.280368,
+        2.4618930000000003,
+        2.434707,
+        1.126552,
+        1.624681,
+        2.137028,
+        2.115302,
+        2.2036170000000004,
+        2.202621,
+        2.261351,
+        2.244475,
+        0.5835210000000001,
+        2.110449,
+        2.138258,
+        2.156523,
+        2.229111,
+        2.2709509999999997,
+        2.279228,
+        2.310867,
+        0.682775,
+        2.116634,
+        2.093582,
+        2.1025679999999998,
+        2.20768,
+        2.237028,
+        2.23258,
+        2.531513,
+        0.654168,
+        1.788565,
+        1.9195080000000002,
+        2.2624910000000003,
+        2.239064,
+        2.265924,
+        2.286319,
+        2.3029479999999998,
+        0.707152,
+        1.5414599999999998,
+        1.823164,
+        2.122227,
+        2.374808,
+        2.396728,
+        2.425355,
+        2.4172730000000002,
+        1.327353
+      ],
+      "warmup_pair_latency_ms": [
+        3.093369,
+        4.324405,
+        5.312825,
+        5.685681,
+        5.831837,
+        5.725555,
+        2.7964040000000003,
+        5.808178,
+        1.895215,
+        2.0550260000000002,
+        2.0063720000000003,
+        2.334164,
+        2.475808,
+        2.532102,
+        2.573486,
+        0.9148109999999999
+      ],
+      "elapsed_seconds": 0.017843619,
+      "pairs_per_second": 2690.037262059899,
+      "rss_before_kib": 24860,
+      "rss_warm_kib": 52904,
+      "rss_after_kib": 53928,
+      "hwm_kib": 53928,
+      "warm_rchar": 50551531,
+      "process_before": {
+        "rss_kib": 24860,
+        "hwm_kib": 24860,
+        "rchar": 16474,
+        "glibc": {
+          "arena_bytes": 5718016,
+          "allocated_bytes": 905232,
+          "free_bytes": 4812784,
+          "mmap_bytes": 0,
+          "mmap_regions": 0,
+          "free_chunks": 114,
+          "main_arena_releasable_top_bytes": 80352
+        }
+      },
+      "process_cold": {
+        "rss_kib": 31488,
+        "hwm_kib": 31488,
+        "rchar": 68733936,
+        "glibc": {
+          "arena_bytes": 8044544,
+          "allocated_bytes": 1011104,
+          "free_bytes": 7033440,
+          "mmap_bytes": 0,
+          "mmap_regions": 0,
+          "free_chunks": 117,
+          "main_arena_releasable_top_bytes": 80352
+        }
+      },
+      "process_warm": {
+        "rss_kib": 52904,
+        "hwm_kib": 52904,
+        "rchar": 85589445,
+        "glibc": {
+          "arena_bytes": 26370048,
+          "allocated_bytes": 1269152,
+          "free_bytes": 25100896,
+          "mmap_bytes": 0,
+          "mmap_regions": 0,
+          "free_chunks": 529,
+          "main_arena_releasable_top_bytes": 80352
+        }
+      },
+      "process_after": {
+        "rss_kib": 53928,
+        "hwm_kib": 53928,
+        "rchar": 136140976,
+        "glibc": {
+          "arena_bytes": 27418624,
+          "allocated_bytes": 1410848,
+          "free_bytes": 26007776,
+          "mmap_bytes": 0,
+          "mmap_regions": 0,
+          "free_chunks": 591,
+          "main_arena_releasable_top_bytes": 80352
+        }
+      },
+      "batches": [
+        {
+          "stage": "warmup",
+          "pairs_completed": 8,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 52904,
+            "hwm_kib": 52904,
+            "rchar": 77162849,
+            "glibc": {
+              "arena_bytes": 26370048,
+              "allocated_bytes": 1224496,
+              "free_bytes": 25145552,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 499,
+              "main_arena_releasable_top_bytes": 80352
+            }
+          }
+        },
+        {
+          "stage": "warmup",
+          "pairs_completed": 16,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 52904,
+            "hwm_kib": 52904,
+            "rchar": 85587835,
+            "glibc": {
+              "arena_bytes": 26370048,
+              "allocated_bytes": 1265920,
+              "free_bytes": 25104128,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 529,
+              "main_arena_releasable_top_bytes": 80352
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 24,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 52904,
+            "hwm_kib": 52904,
+            "rchar": 94014431,
+            "glibc": {
+              "arena_bytes": 26370048,
+              "allocated_bytes": 1297600,
+              "free_bytes": 25072448,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 568,
+              "main_arena_releasable_top_bytes": 80352
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 32,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 53928,
+            "hwm_kib": 53928,
+            "rchar": 102439417,
+            "glibc": {
+              "arena_bytes": 27418624,
+              "allocated_bytes": 1323520,
+              "free_bytes": 26095104,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 495,
+              "main_arena_releasable_top_bytes": 80352
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 40,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 53928,
+            "hwm_kib": 53928,
+            "rchar": 110864404,
+            "glibc": {
+              "arena_bytes": 27418624,
+              "allocated_bytes": 1344784,
+              "free_bytes": 26073840,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 565,
+              "main_arena_releasable_top_bytes": 80352
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 48,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 53928,
+            "hwm_kib": 53928,
+            "rchar": 119289391,
+            "glibc": {
+              "arena_bytes": 27418624,
+              "allocated_bytes": 1367152,
+              "free_bytes": 26051472,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 622,
+              "main_arena_releasable_top_bytes": 80352
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 56,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 53928,
+            "hwm_kib": 53928,
+            "rchar": 127714378,
+            "glibc": {
+              "arena_bytes": 27418624,
+              "allocated_bytes": 1384224,
+              "free_bytes": 26034400,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 568,
+              "main_arena_releasable_top_bytes": 80352
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 64,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 53928,
+            "hwm_kib": 53928,
+            "rchar": 136139365,
+            "glibc": {
+              "arena_bytes": 27418624,
+              "allocated_bytes": 1408128,
+              "free_bytes": 26010496,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 594,
+              "main_arena_releasable_top_bytes": 80352
+            }
+          }
+        }
+      ],
+      "variant": "baseline",
+      "repetition": 5,
+      "order": 17
+    },
+    {
+      "benchmark": "repeated_run_and_timeline_queries_do_not_reread_snapshot_history",
+      "fixture": "synthetic",
+      "malloc_arena_max": null,
+      "glibc_tunables": null,
+      "runtime_worker_threads": 32,
+      "observed_worker_threads": 7,
+      "concurrency": 8,
+      "total_pairs": 64,
+      "warmup_pairs": 16,
+      "measured_pairs": 48,
+      "history_bytes": 67662374,
+      "resource_bytes": 525202,
+      "cold_runs_ms": 17.934783,
+      "pair_p50_ms": 1.825413,
+      "pair_p95_ms": 2.771665,
+      "pair_latency_ms": [
+        1.411934,
+        1.4454120000000001,
+        1.669411,
+        2.161445,
+        2.263,
+        2.346009,
+        2.38989,
+        0.815246,
+        1.179322,
+        1.474456,
+        1.341779,
+        1.889473,
+        2.162512,
+        2.277155,
+        2.279195,
+        1.097322,
+        1.825413,
+        2.0457180000000004,
+        2.531596,
+        2.5273779999999997,
+        2.779526,
+        2.882646,
+        2.771665,
+        1.154558,
+        1.312997,
+        1.693808,
+        1.640459,
+        1.86999,
+        2.06006,
+        2.038157,
+        2.186582,
+        0.621672,
+        1.0966960000000001,
+        1.538574,
+        1.770376,
+        1.8888530000000001,
+        1.795278,
+        1.893453,
+        1.983527,
+        0.5886119999999999,
+        1.447095,
+        1.478169,
+        1.804244,
+        1.762734,
+        1.892573,
+        2.0078750000000003,
+        2.089563,
+        0.8558399999999999
+      ],
+      "warmup_pair_latency_ms": [
+        3.41869,
+        3.719782,
+        3.700006,
+        4.570437999999999,
+        4.6523650000000005,
+        4.760431,
+        4.736146,
+        1.574382,
+        1.09618,
+        1.41802,
+        2.228735,
+        2.295112,
+        2.211481,
+        2.477973,
+        1.398497,
+        2.4564790000000003
+      ],
+      "elapsed_seconds": 0.015901246,
+      "pairs_per_second": 3018.6313701454587,
+      "rss_before_kib": 25256,
+      "rss_warm_kib": 48760,
+      "rss_after_kib": 48760,
+      "hwm_kib": 48760,
+      "warm_rchar": 50551531,
+      "process_before": {
+        "rss_kib": 25256,
+        "hwm_kib": 25256,
+        "rchar": 16462,
+        "glibc": {
+          "arena_bytes": 5718016,
+          "allocated_bytes": 905792,
+          "free_bytes": 4812224,
+          "mmap_bytes": 0,
+          "mmap_regions": 0,
+          "free_chunks": 116,
+          "main_arena_releasable_top_bytes": 80368
+        }
+      },
+      "process_cold": {
+        "rss_kib": 31908,
+        "hwm_kib": 31908,
+        "rchar": 68733924,
+        "glibc": {
+          "arena_bytes": 7716864,
+          "allocated_bytes": 1011008,
+          "free_bytes": 6705856,
+          "mmap_bytes": 0,
+          "mmap_regions": 0,
+          "free_chunks": 107,
+          "main_arena_releasable_top_bytes": 80368
+        }
+      },
+      "process_warm": {
+        "rss_kib": 48760,
+        "hwm_kib": 48760,
+        "rchar": 85589433,
+        "glibc": {
+          "arena_bytes": 21880832,
+          "allocated_bytes": 1275440,
+          "free_bytes": 20605392,
+          "mmap_bytes": 0,
+          "mmap_regions": 0,
+          "free_chunks": 426,
+          "main_arena_releasable_top_bytes": 80368
+        }
+      },
+      "process_after": {
+        "rss_kib": 48760,
+        "hwm_kib": 48760,
+        "rchar": 136140964,
+        "glibc": {
+          "arena_bytes": 21880832,
+          "allocated_bytes": 1375232,
+          "free_bytes": 20505600,
+          "mmap_bytes": 0,
+          "mmap_regions": 0,
+          "free_chunks": 426,
+          "main_arena_releasable_top_bytes": 80368
+        }
+      },
+      "batches": [
+        {
+          "stage": "warmup",
+          "pairs_completed": 8,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 45688,
+            "hwm_kib": 45688,
+            "rchar": 77162837,
+            "glibc": {
+              "arena_bytes": 18735104,
+              "allocated_bytes": 1230352,
+              "free_bytes": 17504752,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 372,
+              "main_arena_releasable_top_bytes": 80368
+            }
+          }
+        },
+        {
+          "stage": "warmup",
+          "pairs_completed": 16,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 48760,
+            "hwm_kib": 48760,
+            "rchar": 85587823,
+            "glibc": {
+              "arena_bytes": 21880832,
+              "allocated_bytes": 1273392,
+              "free_bytes": 20607440,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 429,
+              "main_arena_releasable_top_bytes": 80368
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 24,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 48760,
+            "hwm_kib": 48760,
+            "rchar": 94014419,
+            "glibc": {
+              "arena_bytes": 21880832,
+              "allocated_bytes": 1296928,
+              "free_bytes": 20583904,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 476,
+              "main_arena_releasable_top_bytes": 80368
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 32,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 48760,
+            "hwm_kib": 48760,
+            "rchar": 102439405,
+            "glibc": {
+              "arena_bytes": 21880832,
+              "allocated_bytes": 1315440,
+              "free_bytes": 20565392,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 426,
+              "main_arena_releasable_top_bytes": 80368
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 40,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 48760,
+            "hwm_kib": 48760,
+            "rchar": 110864392,
+            "glibc": {
+              "arena_bytes": 21880832,
+              "allocated_bytes": 1333744,
+              "free_bytes": 20547088,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 442,
+              "main_arena_releasable_top_bytes": 80368
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 48,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 48760,
+            "hwm_kib": 48760,
+            "rchar": 119289379,
+            "glibc": {
+              "arena_bytes": 21880832,
+              "allocated_bytes": 1348912,
+              "free_bytes": 20531920,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 426,
+              "main_arena_releasable_top_bytes": 80368
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 56,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 48760,
+            "hwm_kib": 48760,
+            "rchar": 127714366,
+            "glibc": {
+              "arena_bytes": 21880832,
+              "allocated_bytes": 1364768,
+              "free_bytes": 20516064,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 446,
+              "main_arena_releasable_top_bytes": 80368
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 64,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 48760,
+            "hwm_kib": 48760,
+            "rchar": 136139353,
+            "glibc": {
+              "arena_bytes": 21880832,
+              "allocated_bytes": 1371744,
+              "free_bytes": 20509088,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 430,
+              "main_arena_releasable_top_bytes": 80368
+            }
+          }
+        }
+      ],
+      "variant": "fixed",
+      "repetition": 5,
+      "order": 18
+    },
+    {
+      "benchmark": "repeated_run_and_timeline_queries_do_not_reread_snapshot_history",
+      "fixture": "synthetic",
+      "malloc_arena_max": "2",
+      "glibc_tunables": null,
+      "runtime_worker_threads": 32,
+      "observed_worker_threads": 7,
+      "concurrency": 8,
+      "total_pairs": 64,
+      "warmup_pairs": 16,
+      "measured_pairs": 48,
+      "history_bytes": 67662374,
+      "resource_bytes": 525202,
+      "cold_runs_ms": 19.011579,
+      "pair_p50_ms": 3.010475,
+      "pair_p95_ms": 4.112928,
+      "pair_latency_ms": [
+        2.747893,
+        2.8977429999999997,
+        3.2123310000000003,
+        4.001206,
+        4.129487,
+        4.112928,
+        4.340119,
+        0.588145,
+        2.357327,
+        3.280835,
+        3.3440269999999996,
+        3.7270440000000002,
+        3.82143,
+        3.8250770000000003,
+        3.9481209999999995,
+        0.57872,
+        2.323592,
+        2.621267,
+        2.808392,
+        3.685855,
+        3.763914,
+        3.940624,
+        3.9240150000000003,
+        0.6088480000000001,
+        2.240036,
+        2.6202,
+        2.706807,
+        3.211767,
+        3.3148280000000003,
+        3.688181,
+        3.8219090000000002,
+        1.567908,
+        2.383279,
+        3.007727,
+        3.010475,
+        3.1561570000000003,
+        3.215098,
+        3.299915,
+        3.351319,
+        0.6210519999999999,
+        2.053832,
+        2.454113,
+        2.5406920000000004,
+        2.7104820000000003,
+        2.9578059999999997,
+        2.886315,
+        3.1313500000000003,
+        0.7883830000000001
+      ],
+      "warmup_pair_latency_ms": [
+        5.380434,
+        5.605823,
+        5.662188,
+        5.576842,
+        5.883333,
+        5.8477049999999995,
+        6.30051,
+        0.909254,
+        3.2191110000000003,
+        3.2913349999999997,
+        3.539862,
+        3.59859,
+        3.809387,
+        3.812462,
+        4.047714,
+        0.924175
+      ],
+      "elapsed_seconds": 0.026548034,
+      "pairs_per_second": 1808.0434882673421,
+      "rss_before_kib": 25116,
+      "rss_warm_kib": 40156,
+      "rss_after_kib": 41052,
+      "hwm_kib": 45016,
+      "warm_rchar": 50551531,
+      "process_before": {
+        "rss_kib": 25116,
+        "hwm_kib": 25116,
+        "rchar": 16469,
+        "glibc": {
+          "arena_bytes": 1409024,
+          "allocated_bytes": 833968,
+          "free_bytes": 575056,
+          "mmap_bytes": 0,
+          "mmap_regions": 0,
+          "free_chunks": 76,
+          "main_arena_releasable_top_bytes": 72640
+        }
+      },
+      "process_cold": {
+        "rss_kib": 31520,
+        "hwm_kib": 31520,
+        "rchar": 68733931,
+        "glibc": {
+          "arena_bytes": 3739648,
+          "allocated_bytes": 941424,
+          "free_bytes": 2798224,
+          "mmap_bytes": 0,
+          "mmap_regions": 0,
+          "free_chunks": 79,
+          "main_arena_releasable_top_bytes": 72640
+        }
+      },
+      "process_warm": {
+        "rss_kib": 40156,
+        "hwm_kib": 44040,
+        "rchar": 85589440,
+        "glibc": {
+          "arena_bytes": 10067968,
+          "allocated_bytes": 1211600,
+          "free_bytes": 8856368,
+          "mmap_bytes": 0,
+          "mmap_regions": 0,
+          "free_chunks": 421,
+          "main_arena_releasable_top_bytes": 133696
+        }
+      },
+      "process_after": {
+        "rss_kib": 41052,
+        "hwm_kib": 45016,
+        "rchar": 136140971,
+        "glibc": {
+          "arena_bytes": 10985472,
+          "allocated_bytes": 1333584,
+          "free_bytes": 9651888,
+          "mmap_bytes": 0,
+          "mmap_regions": 0,
+          "free_chunks": 478,
+          "main_arena_releasable_top_bytes": 134176
+        }
+      },
+      "batches": [
+        {
+          "stage": "warmup",
+          "pairs_completed": 8,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 40156,
+            "hwm_kib": 43624,
+            "rchar": 77162844,
+            "glibc": {
+              "arena_bytes": 10067968,
+              "allocated_bytes": 1165232,
+              "free_bytes": 8902736,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 363,
+              "main_arena_releasable_top_bytes": 133696
+            }
+          }
+        },
+        {
+          "stage": "warmup",
+          "pairs_completed": 16,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 40156,
+            "hwm_kib": 44040,
+            "rchar": 85587830,
+            "glibc": {
+              "arena_bytes": 10067968,
+              "allocated_bytes": 1208048,
+              "free_bytes": 8859920,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 422,
+              "main_arena_releasable_top_bytes": 133696
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 24,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 41692,
+            "hwm_kib": 44988,
+            "rchar": 94014426,
+            "glibc": {
+              "arena_bytes": 11640832,
+              "allocated_bytes": 1236480,
+              "free_bytes": 10404352,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 444,
+              "main_arena_releasable_top_bytes": 1706560
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 32,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 41564,
+            "hwm_kib": 44988,
+            "rchar": 102439412,
+            "glibc": {
+              "arena_bytes": 11509760,
+              "allocated_bytes": 1257344,
+              "free_bytes": 10252416,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 443,
+              "main_arena_releasable_top_bytes": 133696
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 40,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 42588,
+            "hwm_kib": 45016,
+            "rchar": 110864399,
+            "glibc": {
+              "arena_bytes": 12558336,
+              "allocated_bytes": 1277936,
+              "free_bytes": 11280400,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 466,
+              "main_arena_releasable_top_bytes": 657984
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 48,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 43484,
+            "hwm_kib": 45016,
+            "rchar": 119289386,
+            "glibc": {
+              "arena_bytes": 13606912,
+              "allocated_bytes": 1297856,
+              "free_bytes": 12309056,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 470,
+              "main_arena_releasable_top_bytes": 1706560
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 56,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 43484,
+            "hwm_kib": 45016,
+            "rchar": 127714373,
+            "glibc": {
+              "arena_bytes": 13606912,
+              "allocated_bytes": 1313984,
+              "free_bytes": 12292928,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 506,
+              "main_arena_releasable_top_bytes": 1706832
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 64,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 41052,
+            "hwm_kib": 45016,
+            "rchar": 136139360,
+            "glibc": {
+              "arena_bytes": 10985472,
+              "allocated_bytes": 1329936,
+              "free_bytes": 9655536,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 492,
+              "main_arena_releasable_top_bytes": 134176
+            }
+          }
+        }
+      ],
+      "variant": "baseline",
+      "repetition": 5,
+      "order": 19
+    },
+    {
+      "benchmark": "repeated_run_and_timeline_queries_do_not_reread_snapshot_history",
+      "fixture": "synthetic",
+      "malloc_arena_max": "2",
+      "glibc_tunables": null,
+      "runtime_worker_threads": 32,
+      "observed_worker_threads": 7,
+      "concurrency": 8,
+      "total_pairs": 64,
+      "warmup_pairs": 16,
+      "measured_pairs": 48,
+      "history_bytes": 67662374,
+      "resource_bytes": 525202,
+      "cold_runs_ms": 18.538381,
+      "pair_p50_ms": 2.15855,
+      "pair_p95_ms": 2.43908,
+      "pair_latency_ms": [
+        1.725594,
+        2.0676319999999997,
+        2.1476580000000003,
+        2.1263810000000003,
+        2.349449,
+        2.3282220000000002,
+        2.400764,
+        0.920418,
+        1.4872159999999999,
+        2.3001940000000003,
+        2.31489,
+        2.3548839999999998,
+        2.4141660000000003,
+        2.43908,
+        2.4911109999999996,
+        1.228769,
+        2.0186520000000003,
+        2.084683,
+        2.15855,
+        2.2011079999999996,
+        2.139154,
+        2.202779,
+        2.24031,
+        0.412998,
+        1.597841,
+        2.027648,
+        2.054952,
+        2.089492,
+        2.158079,
+        2.113892,
+        2.2183110000000004,
+        0.439317,
+        1.8690499999999999,
+        2.165618,
+        2.2692419999999998,
+        2.23199,
+        2.236222,
+        2.316664,
+        2.442947,
+        0.860368,
+        2.0743020000000003,
+        2.122459,
+        2.182511,
+        2.252829,
+        2.2487280000000003,
+        2.333372,
+        2.375788,
+        0.416249
+      ],
+      "warmup_pair_latency_ms": [
+        3.43117,
+        3.3417730000000003,
+        3.642944,
+        3.7742809999999998,
+        3.816006,
+        3.716207,
+        3.736011,
+        0.466734,
+        2.078497,
+        2.075546,
+        2.35503,
+        2.428581,
+        2.379234,
+        2.48991,
+        2.560056,
+        0.7870140000000001
+      ],
+      "elapsed_seconds": 0.016501608,
+      "pairs_per_second": 2908.8074325847515,
+      "rss_before_kib": 25468,
+      "rss_warm_kib": 41820,
+      "rss_after_kib": 41820,
+      "hwm_kib": 41820,
+      "warm_rchar": 50551531,
+      "process_before": {
+        "rss_kib": 25468,
+        "hwm_kib": 25468,
+        "rchar": 16457,
+        "glibc": {
+          "arena_bytes": 1409024,
+          "allocated_bytes": 834752,
+          "free_bytes": 574272,
+          "mmap_bytes": 0,
+          "mmap_regions": 0,
+          "free_chunks": 82,
+          "main_arena_releasable_top_bytes": 70992
+        }
+      },
+      "process_cold": {
+        "rss_kib": 31880,
+        "hwm_kib": 31880,
+        "rchar": 68733919,
+        "glibc": {
+          "arena_bytes": 3735552,
+          "allocated_bytes": 941024,
+          "free_bytes": 2794528,
+          "mmap_bytes": 0,
+          "mmap_regions": 0,
+          "free_chunks": 79,
+          "main_arena_releasable_top_bytes": 70992
+        }
+      },
+      "process_warm": {
+        "rss_kib": 41820,
+        "hwm_kib": 41820,
+        "rchar": 85589428,
+        "glibc": {
+          "arena_bytes": 11472896,
+          "allocated_bytes": 1201936,
+          "free_bytes": 10270960,
+          "mmap_bytes": 0,
+          "mmap_regions": 0,
+          "free_chunks": 341,
+          "main_arena_releasable_top_bytes": 1181040
+        }
+      },
+      "process_after": {
+        "rss_kib": 41820,
+        "hwm_kib": 41820,
+        "rchar": 136140959,
+        "glibc": {
+          "arena_bytes": 11472896,
+          "allocated_bytes": 1305328,
+          "free_bytes": 10167568,
+          "mmap_bytes": 0,
+          "mmap_regions": 0,
+          "free_chunks": 426,
+          "main_arena_releasable_top_bytes": 1181040
+        }
+      },
+      "batches": [
+        {
+          "stage": "warmup",
+          "pairs_completed": 8,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 40796,
+            "hwm_kib": 40796,
+            "rchar": 77162832,
+            "glibc": {
+              "arena_bytes": 10424320,
+              "allocated_bytes": 1160608,
+              "free_bytes": 9263712,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 310,
+              "main_arena_releasable_top_bytes": 1181040
+            }
+          }
+        },
+        {
+          "stage": "warmup",
+          "pairs_completed": 16,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 41820,
+            "hwm_kib": 41820,
+            "rchar": 85587818,
+            "glibc": {
+              "arena_bytes": 11472896,
+              "allocated_bytes": 1198368,
+              "free_bytes": 10274528,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 357,
+              "main_arena_releasable_top_bytes": 1181040
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 24,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 41820,
+            "hwm_kib": 41820,
+            "rchar": 94014414,
+            "glibc": {
+              "arena_bytes": 11472896,
+              "allocated_bytes": 1227040,
+              "free_bytes": 10245856,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 391,
+              "main_arena_releasable_top_bytes": 1181040
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 32,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 41820,
+            "hwm_kib": 41820,
+            "rchar": 102439400,
+            "glibc": {
+              "arena_bytes": 11472896,
+              "allocated_bytes": 1246080,
+              "free_bytes": 10226816,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 384,
+              "main_arena_releasable_top_bytes": 1181040
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 40,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 41820,
+            "hwm_kib": 41820,
+            "rchar": 110864387,
+            "glibc": {
+              "arena_bytes": 11472896,
+              "allocated_bytes": 1261360,
+              "free_bytes": 10211536,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 406,
+              "main_arena_releasable_top_bytes": 1181040
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 48,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 41820,
+            "hwm_kib": 41820,
+            "rchar": 119289374,
+            "glibc": {
+              "arena_bytes": 11472896,
+              "allocated_bytes": 1277200,
+              "free_bytes": 10195696,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 412,
+              "main_arena_releasable_top_bytes": 1181040
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 56,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 41820,
+            "hwm_kib": 41820,
+            "rchar": 127714361,
+            "glibc": {
+              "arena_bytes": 11472896,
+              "allocated_bytes": 1291424,
+              "free_bytes": 10181472,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 417,
+              "main_arena_releasable_top_bytes": 1181040
+            }
+          }
+        },
+        {
+          "stage": "measured",
+          "pairs_completed": 64,
+          "observed_worker_threads": 7,
+          "process": {
+            "rss_kib": 41820,
+            "hwm_kib": 41820,
+            "rchar": 136139348,
+            "glibc": {
+              "arena_bytes": 11472896,
+              "allocated_bytes": 1301568,
+              "free_bytes": 10171328,
+              "mmap_bytes": 0,
+              "mmap_regions": 0,
+              "free_chunks": 439,
+              "main_arena_releasable_top_bytes": 1181040
+            }
+          }
+        }
+      ],
+      "variant": "fixed",
+      "repetition": 5,
+      "order": 20
+    }
+  ],
+  "limitations": [
+    "One synthetic Run, not production history or a long-running process.",
+    "Observed seven worker threads in this workload; 32 configured workers are not evidence of 32 saturated workers.",
+    "Pair timing includes the in-process router, response decoding/assertions and batch instrumentation; no real HTTP network or Provider.",
+    "mallinfo2 allocated/free counters are allocator accounting, not exact live Rust object sizes or resident free pages.",
+    "Shared WSL host; the brief interleaved repetitions do not establish tail-latency or long-run guarantees."
+  ]
+}

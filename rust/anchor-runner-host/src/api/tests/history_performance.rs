@@ -1,13 +1,61 @@
 //! HTTP behavior and process I/O against snapshot-heavy, isolated history.
 use super::*;
 use anchor_kernel::{FileStore, Store};
+use std::collections::HashSet;
 use std::io::Write;
+use std::thread::{self, ThreadId};
 use std::time::Instant;
 
-fn memory_and_reads() -> (u64, u64, u64) {
-    fn field(path: &str, name: &str) -> u64 {
-        std::fs::read_to_string(path)
-            .unwrap()
+#[derive(serde::Serialize)]
+struct ProcessSample {
+    rss_kib: u64,
+    hwm_kib: u64,
+    rchar: u64,
+    glibc: Value,
+}
+
+fn allocation_stats() -> Value {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        // glibc >= 2.33. These counters include allocator metadata and tcache;
+        // allocated bytes are not a measurement of live Rust object sizes.
+        #[repr(C)]
+        struct Mallinfo2 {
+            arena: usize,
+            ordblks: usize,
+            smblks: usize,
+            hblks: usize,
+            hblkhd: usize,
+            usmblks: usize,
+            fsmblks: usize,
+            uordblks: usize,
+            fordblks: usize,
+            keepcost: usize,
+        }
+        unsafe extern "C" {
+            fn mallinfo2() -> Mallinfo2;
+        }
+        // SAFETY: mallinfo2 has no arguments; the structure matches glibc's ABI.
+        let stats = unsafe { mallinfo2() };
+        json!({
+            "arena_bytes": stats.arena,
+            "allocated_bytes": stats.uordblks,
+            "free_bytes": stats.fordblks,
+            "mmap_bytes": stats.hblkhd,
+            "mmap_regions": stats.hblks,
+            "free_chunks": stats.ordblks,
+            "main_arena_releasable_top_bytes": stats.keepcost
+        })
+    }
+    #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+    {
+        Value::Null
+    }
+}
+
+fn memory_and_reads() -> ProcessSample {
+    fn field(contents: &str, name: &str) -> u64 {
+        contents
             .lines()
             .find_map(|line| {
                 line.strip_prefix(name)?
@@ -18,14 +66,55 @@ fn memory_and_reads() -> (u64, u64, u64) {
             })
             .unwrap()
     }
-    (
-        field("/proc/self/status", "VmRSS:"),
-        field("/proc/self/status", "VmHWM:"),
-        field("/proc/self/io", "rchar:"),
-    )
+    let glibc = allocation_stats();
+    let status = std::fs::read_to_string("/proc/self/status").unwrap();
+    let io = std::fs::read_to_string("/proc/self/io").unwrap();
+    ProcessSample {
+        rss_kib: field(&status, "VmRSS:"),
+        hwm_kib: field(&status, "VmHWM:"),
+        rchar: field(&io, "rchar:"),
+        glibc,
+    }
 }
 
-#[tokio::test]
+async fn query_batch(
+    router: &Router,
+    baseline: &Arc<(Value, Value)>,
+) -> (Vec<f64>, HashSet<ThreadId>) {
+    let ready = Arc::new(tokio::sync::Barrier::new(8));
+    let mut tasks = tokio::task::JoinSet::new();
+    for _ in 0..8 {
+        let router = router.clone();
+        let baseline = Arc::clone(baseline);
+        let ready = Arc::clone(&ready);
+        tasks.spawn(async move {
+            ready.wait().await;
+            let started = Instant::now();
+            let list_worker = thread::current().id();
+            let (status, listed) = call(router.clone(), "GET", "/runs", None).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(listed, baseline.0);
+            let timeline_worker = thread::current().id();
+            let (status, timeline) = call(router, "GET", "/timeline?days=30", None).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(timeline, baseline.1);
+            (
+                started.elapsed().as_secs_f64() * 1000.0,
+                [list_worker, timeline_worker, thread::current().id()],
+            )
+        });
+    }
+    let mut samples = Vec::with_capacity(8);
+    let mut workers = HashSet::new();
+    while let Some(result) = tasks.join_next().await {
+        let (elapsed_ms, observed) = result.unwrap();
+        samples.push(elapsed_ms);
+        workers.extend(observed);
+    }
+    (samples, workers)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 32)]
 #[ignore = "process-wide I/O benchmark; run alone with --ignored --exact --nocapture"]
 async fn repeated_run_and_timeline_queries_do_not_reread_snapshot_history() {
     let (root, state) = fixture();
@@ -83,6 +172,9 @@ async fn repeated_run_and_timeline_queries_do_not_reread_snapshot_history() {
         .unwrap();
     }
     let history_bytes = std::fs::metadata(&path).unwrap().len();
+    let resource_bytes = std::fs::metadata(resource_dir.join("resource.json"))
+        .unwrap()
+        .len();
     let router = router(state);
     let before = memory_and_reads();
     let started = Instant::now();
@@ -90,33 +182,85 @@ async fn repeated_run_and_timeline_queries_do_not_reread_snapshot_history() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(first["runs"].as_array().unwrap().len(), 1);
     let cold = started.elapsed();
-    let warm_start = memory_and_reads();
-    let mut samples = Vec::new();
-    for _ in 0..12 {
-        let start = Instant::now();
-        let (status, listed) = call(router.clone(), "GET", "/runs", None).await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(listed, first);
-        let (status, _) = call(router.clone(), "GET", "/timeline?days=30", None).await;
-        assert_eq!(status, StatusCode::OK);
-        samples.push(start.elapsed().as_secs_f64() * 1000.0);
+    let (status, timeline) = call(router.clone(), "GET", "/timeline?days=30", None).await;
+    assert_eq!(status, StatusCode::OK);
+    // Responses are compared within this process. Cross-process baseline_json
+    // comparisons must normalize started/updated timestamps first.
+    let baseline = Arc::new((first, timeline));
+    let cold_end = memory_and_reads();
+    let mut workers = HashSet::new();
+    let mut warm_samples = Vec::with_capacity(16);
+    let mut batches = Vec::with_capacity(8);
+    for batch in 1..=2 {
+        let (samples, observed) = query_batch(&router, &baseline).await;
+        let worker_count = observed.len();
+        workers.extend(observed);
+        warm_samples.extend(samples);
+        batches.push(json!({
+            "stage": "warmup", "pairs_completed": batch * 8,
+            "observed_worker_threads": worker_count, "process": memory_and_reads()
+        }));
     }
-    samples.sort_by(f64::total_cmp);
+    let warm_start = memory_and_reads();
+    let mut samples = Vec::with_capacity(48);
+    // Batch-boundary sampling observes retained memory after responses drop.
+    // The timer excludes fixture construction, cold requests and warmup.
+    let started = Instant::now();
+    for batch in 3..=8 {
+        let (batch_samples, observed) = query_batch(&router, &baseline).await;
+        let worker_count = observed.len();
+        workers.extend(observed);
+        samples.extend(batch_samples);
+        batches.push(json!({
+            "stage": "measured", "pairs_completed": batch * 8,
+            "observed_worker_threads": worker_count, "process": memory_and_reads()
+        }));
+    }
+    let elapsed = started.elapsed().as_secs_f64();
     let after = memory_and_reads();
+    let warm_rchar = after.rchar - warm_start.rchar;
+    let mut ranked = samples.clone();
+    ranked.sort_by(f64::total_cmp);
+    // Nearest-rank percentiles over individual pairs, not batch averages.
+    let percentile = |percent: usize| ranked[(ranked.len() * percent).div_ceil(100) - 1];
     println!(
-        "history_bytes={history_bytes} cold_runs_ms={:.3} pair_p50_ms={:.3} pair_p95_ms={:.3} rss_before_kib={} rss_warm_kib={} rss_after_kib={} hwm_kib={} warm_rchar={}",
-        cold.as_secs_f64() * 1000.0,
-        samples[6],
-        samples[11],
-        before.0,
-        warm_start.0,
-        after.0,
-        after.1,
-        after.2 - warm_start.2
+        "{}",
+        json!({
+            "benchmark": "repeated_run_and_timeline_queries_do_not_reread_snapshot_history",
+            "fixture": if source.is_some() { "history_copy" } else { "synthetic" },
+            "malloc_arena_max": std::env::var("MALLOC_ARENA_MAX").ok(),
+            "glibc_tunables": std::env::var("GLIBC_TUNABLES").ok(),
+            "runtime_worker_threads": 32,
+            "observed_worker_threads": workers.len(),
+            "concurrency": 8,
+            "total_pairs": 64,
+            "warmup_pairs": 16,
+            "measured_pairs": samples.len(),
+            "history_bytes": history_bytes,
+            "resource_bytes": resource_bytes,
+            "cold_runs_ms": cold.as_secs_f64() * 1000.0,
+            "pair_p50_ms": percentile(50),
+            "pair_p95_ms": percentile(95),
+            "pair_latency_ms": samples,
+            "warmup_pair_latency_ms": warm_samples,
+            "elapsed_seconds": elapsed,
+            "pairs_per_second": ranked.len() as f64 / elapsed,
+            "rss_before_kib": before.rss_kib,
+            "rss_warm_kib": warm_start.rss_kib,
+            "rss_after_kib": after.rss_kib,
+            "hwm_kib": after.hwm_kib,
+            "warm_rchar": warm_rchar,
+            "process_before": before,
+            "process_cold": cold_end,
+            "process_warm": warm_start,
+            "process_after": after,
+            "batches": batches,
+            "baseline_json": {"runs": baseline.0, "timeline": baseline.1}
+        })
     );
     // Current state must still be read. Whole snapshot histories must not be.
     assert!(
-        after.2 - warm_start.2 < history_bytes,
+        warm_rchar < history_bytes,
         "warm polling reread the history"
     );
 }

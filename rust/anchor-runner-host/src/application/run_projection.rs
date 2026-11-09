@@ -219,7 +219,7 @@ mod tests {
                 .unwrap();
             let expected = format!(
                 "{prefix}{}}}",
-                serde_json::to_string(&application.run_updated(id).unwrap()).unwrap()
+                serde_json::to_string(&view.updated()).unwrap()
             );
             assert_eq!(
                 serde_json::to_vec(&projection).unwrap(),

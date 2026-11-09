@@ -183,10 +183,10 @@ impl<'record> RunView<'record> {
 
     fn with_kernel_frontier(
         mut self,
-        resource: &anchor_kernel::Resource,
-    ) -> Result<Self, anchor_runtime::graph::GraphError> {
-        if !resource.is_settled() {
-            self.frontier = anchor_runtime::graph::validator::GraphValidator::frontier(resource)?
+        frontier: Vec<anchor_runtime::graph::validator::Dispatch>,
+    ) -> Self {
+        if !self.is_settled() {
+            self.frontier = frontier
                 .into_iter()
                 .map(|dispatch| anchor_runtime::graph::scheduler::DispatchInput {
                     node_id: dispatch.node.id.clone(),
@@ -202,7 +202,7 @@ impl<'record> RunView<'record> {
                 })
                 .collect();
         }
-        Ok(self)
+        self
     }
 
     #[allow(

@@ -6,6 +6,7 @@ use anchor_kernel::{Evidence, Waiter};
 use anchor_runtime::graph::{
     InvocationKey, PendingRecovery, RecoveryAttempt, RecoveryDecision, RecoverySubmission,
 };
+use serde::Deserialize;
 
 impl KernelRuns {
     /// Persist a native effect observation discovered by an explicit resume.
@@ -80,29 +81,31 @@ impl KernelRuns {
         id: &str,
     ) -> Result<(Vec<PendingRecovery>, Vec<RecoverySubmission>), ApplicationError> {
         let resource = self.load(id)?.ok_or(ApplicationError::Missing)?;
-        self.resource_recovery(&resource)
+        let record = record_of(&resource)?;
+        let frontier = GraphValidator::frontier_from_record(&record)?;
+        self.resource_recovery(&resource, &record, &frontier)
     }
 
     pub(in crate::application::run_access) fn resource_recovery(
         &self,
         resource: &Resource,
+        record: &GraphRunRecord,
+        frontier: &[anchor_runtime::graph::validator::Dispatch],
     ) -> Result<(Vec<PendingRecovery>, Vec<RecoverySubmission>), ApplicationError> {
-        Self::project_recovery(
-            resource,
-            self.kernel
-                .store()
-                .record_entries(&resource.id)
-                .map_err(|error| kernel_error(error.into()))?,
-        )
+        self.kernel
+            .store()
+            .with_record_entries(&resource.id, |history| {
+                Self::project_recovery(record, frontier, history)
+            })
+            .map_err(|error| kernel_error(error.into()))?
     }
 
     /// Pure projection shared by the live facade and read-only disk access.
     pub(in crate::application::run_access) fn project_recovery(
-        resource: &Resource,
-        history: Vec<anchor_kernel::RecordEntry>,
+        record: &GraphRunRecord,
+        frontier: &[anchor_runtime::graph::validator::Dispatch],
+        history: &[anchor_kernel::RecordEntry],
     ) -> Result<(Vec<PendingRecovery>, Vec<RecoverySubmission>), ApplicationError> {
-        let record = record_of(resource)?;
-        let frontier = GraphValidator::frontier(resource)?;
         let mut pending = Vec::new();
         let mut decisions: Vec<RecoverySubmission> = Vec::new();
         for entry in history {
@@ -114,7 +117,7 @@ impl KernelRuns {
                 && entry.stamp.principal().kind == PrincipalKind::Human
                 && let Some(value) = content.get("recovery_decision")
             {
-                let decision: RecoverySubmission = serde_json::from_value(value.clone())
+                let decision: RecoverySubmission = RecoverySubmission::deserialize(value)
                     .map_err(|e| ApplicationError::Storage(e.to_string()))?;
                 decisions.push(decision);
             }
@@ -128,9 +131,9 @@ impl KernelRuns {
                 content.get("invocation"),
                 content.get("attempts").filter(|a| a.is_array()),
             ) {
-                let key: InvocationKey = serde_json::from_value(key.clone())
+                let key: InvocationKey = InvocationKey::deserialize(key)
                     .map_err(|e| ApplicationError::Storage(e.to_string()))?;
-                let attempts: Vec<RecoveryAttempt> = serde_json::from_value(attempts.clone())
+                let attempts: Vec<RecoveryAttempt> = Vec::<RecoveryAttempt>::deserialize(attempts)
                     .map_err(|e| ApplicationError::Storage(e.to_string()))?;
                 if key.run_id == record.run_id
                     && key.graph_digest == record.graph_digest
