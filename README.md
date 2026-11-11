@@ -67,10 +67,10 @@ Anchor 的选择是：**先把执行变成事实，再谈智能。**
 | 运行 | 路径、节点对话、工具轨迹、工作区、Artifact；暂停、停止、继续、受保护删除 |
 | 持续协作 | Session/Turn、SSE 重连、必要提问、原生会话续聊与压缩 |
 | 能力插拔 | Plugin = Skill + 资源 + stdio/HTTP MCP + 凭据引用；Library 安装后由 Graph 显式引用 |
-| 触发与渠道 | 手动、计划、Webhook、Responses、企业微信；一张常驻助手 Graph 对应一个机器人，每会话一个常驻 Run，重启原地接续 |
+| 触发与渠道 | 手动、计划、Webhook、Responses、[企业微信](docs/wecom-assistant.md)、[飞书](docs/feishu-assistant.md)；一张常驻助手 Graph 对应一个机器人，每会话一个常驻 Run，重启原地接续 |
 | 自我改进 | `rsi` Graph 采集执行记录与代码，并行专项审查，机械门禁校验证据与提案，产出带验收和回滚条件的变更提议 |
 
-原生包交付 Runtime、WebUI、固定 Goose，以及 network、Git、Anchor Dev 和 Graph Tasks Plugin；业务 Graph 与其他 Plugin 作为独立资产交给 Pilot 审阅、安装和配置，不随运行时全部预装。Graph Tasks 须在 AgentNode 显式选择可见 Graph 与能力上限，才能按需委派或设置计划，见[使用契约](docs/plugins.md#graph-任务)。源码启动另有[上手示例](examples/README.md)。
+原生包交付 Runtime、WebUI、固定 Goose，以及 `network`、`graph-tasks`、`feishu`、`wecom` 四个系统 Plugin，另预装普通 Plugin `git` 与 Anchor Dev（`anchor-steward`）；业务 Graph 与其他 Plugin 作为独立资产交给 Pilot 审阅、安装和配置，不随运行时全部预装。预装不自动授予联网权限、启用渠道或配置凭据。Graph Tasks 须在 AgentNode 显式选择可见 Graph 与能力上限，才能按需委派或设置计划，见[使用契约](docs/plugins.md#graph-任务)。源码启动另有[上手示例](examples/README.md)。
 
 ## 快速开始
 

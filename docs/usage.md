@@ -49,7 +49,7 @@ ssh -N -L 8077:127.0.0.1:8077 user@server
 
 Pilot 可以用自然语言查询、创建和管理 Graph、Run、Plugin 与产物。把 Graph JSON、Plugin 工程文件或它们的压缩包作为附件交给 Pilot，让它先检查内容、依赖、权限和当前环境，再协助配置；这不是任意压缩包都能自动安装的保证。
 
-原生包预装 `network`、`git`、**Anchor Dev** 和 **Graph Tasks**，不附带全部业务示例 Graph。在 Pilot 插件面板启用 Anchor Dev（稳定 ID `anchor-steward`），可按需读取 Graph、Plugin、Rust、Python、pixi 和 Git 开发说明；需要 Git 工具时另行启用 `git`。Graph Tasks（`graph-tasks`）用于普通 AgentNode 的按需选图、构建、委派和计划，须在 Graph 编辑器配置节点的可见范围与能力上限并保存，见[Graph 任务](plugins.md#graph-任务)。安装和启用是两回事，挂载变更从后续 Turn 生效，Skill 本身不安装环境或授予权限。关闭 Anchor Dev 不删除源码、环境或缓存，也不撤销独立授权的命令工具。
+原生包预装 `network`、`graph-tasks`、`feishu`、`wecom` 四个系统 Plugin，以及普通 Plugin `git` 与 **Anchor Dev**（稳定 ID `anchor-steward`），不附带全部业务示例 Graph。在 Pilot 插件面板启用 Anchor Dev，可按需读取 Graph、Plugin、Rust、Python、pixi 和 Git 开发说明；需要 Git 工具时另行启用 `git`。Graph Tasks（`graph-tasks`）用于普通 AgentNode 的按需选图、构建、委派和计划，须在 Graph 编辑器配置节点的可见范围与能力上限并保存，见[Graph 任务](plugins.md#graph-任务)。安装和启用是两回事，预装不自动启用渠道、配置凭据或授予联网权限；挂载变更从后续 Turn 生效，Skill 本身不安装环境或授予权限。关闭 Anchor Dev 不删除源码、环境或缓存，也不撤销独立授权的命令工具。
 
 需要 Python/Rust 时，在「设置 → 开发环境」初始化，明确允许联网下载后再执行；可查看进度、停止、失败后重试。关闭页面不会取消初始化，重新打开可继续查看状态。已有 Python 可点「刷新状态」检测；已有解释器不代表全部依赖工具齐备，缺项以页面说明为准。
 
@@ -62,7 +62,7 @@ Graph 是可传播的 JSON 定义，Plugin 是包含 `plugin.json`、Skill 和�
 - 在 WebUI 创建或打开 Graph，编辑节点、连线、布局和所挂 Plugin，保存后校验。「运行工作流」填写 JSON 对象输入，运行会冻结当时的定义和输入，不随后续编辑改变。Graph/Run 页面可把对象引用带入 Pilot 草稿，发送后请它协助。
 - 「插件库」支持从本机目录或 GitHub 目录链接预检、安装与更新；展示来源、权限与替换影响后确认。操作中离开或刷新页面不等于取消，可返回查看进度。卸载前也会检查运行/会话引用与影响。
 - 「运行 → 定时计划」支持一次性、固定间隔、每天、每周和每月，按服务所在时区执行。重新启用只安排未来时点；暂停或删除计划不删除既有 Run。
-- 企业微信按**一张常驻助手 Graph 一个机器人**配置，各 Graph 分别启停，不是整个 Host 只有一个入口。同一个 Bot 账号不能同时被两张已启用的 Graph 使用。「运行看板 → 消息会话」管理各对话实例；连接、成员和通知配置见[企业微信指南](wecom-assistant.md)。Host 监管网关，不要重复启动独立网关。
+- 企业微信与飞书均按**一张常驻助手 Graph 一个机器人**配置，各 Graph 分别启停，不是整个 Host 只有一个入口。同一个 Bot 账号不能同时被两张已启用的 Graph 使用。「运行看板 → 消息会话」管理各对话实例；连接、成员和通知配置见[企业微信指南](wecom-assistant.md)与[飞书指南](feishu-assistant.md)。Host 监管网关，不要重复启动独立网关。
 
 ## 对话、历史与恢复
 

@@ -1,10 +1,13 @@
 # Rust platform deployment
 
 The format-3 platform archive contains the Host, fixed Goose, compiled WebUI,
-network, Git and Anchor Dev Plugins, network relay and fixed uv/Rustup/pixi bootstrap tools.
+four system Plugins (`network`, `graph-tasks`, `feishu`, `wecom`), ordinary Git
+and Anchor Dev Plugins (`git`, `anchor-steward`), network relay and fixed
+uv/Rustup/pixi bootstrap tools.
 Anchor Dev keeps the stable ID `anchor-steward` and provides six on-demand development
 Skills without an MCP server. Enable it in Pilot separately from the Git tools;
-preinstallation does not grant network access or configure credentials. The installed
+preinstallation does not grant network access or Graph delegation, activate
+channels or configure credentials. The installed
 `anchor-platform start` command derives release and private data paths from its
 own location and clears inherited deployment and credential settings. Neither
 installation nor startup loads `.env`, `anchor.env` or `model.env`.
