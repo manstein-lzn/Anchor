@@ -1,15 +1,17 @@
 import { useEffect, useState } from 'react';
 import { RefreshCw } from 'lucide-react';
 import { api, reason } from './api';
-import type { GraphPluginActivation, GraphTaskPolicy, Plugin } from './model';
+import type { GraphPluginActivation, GraphTaskPolicy, NetworkMode, Plugin } from './model';
 import { PluginDetails, PluginSettings, pluginSettingStatus } from './PluginPanel';
 import { LibraryPluginDetails } from './LibraryPluginDetails';
 import { GraphTaskPolicyEditor } from './GraphTaskPolicyEditor';
+import { NetworkPolicy } from './NetworkPolicy';
 
 /** Graph owns draft references; Run owns captured metadata; the Library owns current definitions. */
-export function Plugins({ selected, onChange, disabled = false, recorded, management = false, onChanged, refreshRevision = 0, activationMode, graph, graphTasks }:
+export function Plugins({ selected, onChange, disabled = false, recorded, management = false, onChanged, refreshRevision = 0, activationMode, graph, graphTasks, network, networkOnly = false }:
   { selected?: string[]; onChange?: (ids: string[]) => void; disabled?: boolean; recorded?: Plugin[]; management?: boolean; onChanged?: () => void; refreshRevision?: number; activationMode?: GraphPluginActivation['mode']; graph?: { name: string; saved: boolean };
-    graphTasks?: { graphs: string[]; value: GraphTaskPolicy; onChange: (policy: GraphTaskPolicy) => void } }) {
+    graphTasks?: { graphs: string[]; value: GraphTaskPolicy; onChange: (policy: GraphTaskPolicy) => void };
+    network?: { mode: NetworkMode; onChange: (mode: NetworkMode) => void }; networkOnly?: boolean }) {
   const [catalog, setCatalog] = useState<Plugin[]>([]);
   const [catalogKnown, setCatalogKnown] = useState(false);
   const [error, setError] = useState('');
@@ -33,7 +35,11 @@ export function Plugins({ selected, onChange, disabled = false, recorded, manage
     .map(id => ({ id, name: id, description: '', available: catalogKnown ? false : undefined,
       error: catalogKnown ? '插件未在库中找到' : undefined, unconfirmed: !catalogKnown }))];
   const selectedIds = new Set(selected ?? []);
-  const status = (plugin: CatalogItem) => pluginSettingStatus(plugin, { selected: selectedIds.has(plugin.id),
+  const isNetwork = (plugin: Plugin) => plugin.id === 'network' && network !== undefined;
+  const isSelected = (plugin: Plugin) => isNetwork(plugin) ? network!.mode === 'enabled' : selectedIds.has(plugin.id);
+  const status = (plugin: CatalogItem) => isNetwork(plugin)
+    ? `${network!.mode === 'denied' ? '已禁止联网' : network!.mode === 'enabled' ? '主动启用' : '自动 · 按依赖启用'}${plugin.available === false ? ' · 不可用' : ''}`
+    : pluginSettingStatus(plugin, { selected: isSelected(plugin),
     status: plugin.unconfirmed ? '已选择 · 状态未确认' : undefined }, { recorded: recorded !== undefined, management });
   return <section className="plugin-panel plugins-panel" aria-label={recorded !== undefined ? '运行插件记录' : management ? '已安装插件' : '节点插件配置'}>
     <div className="plugin-panel-header"><div><p className="plugin-panel-context">{recorded !== undefined ? '本次运行' : management ? '共享库' : '节点能力'}</p><h3>插件</h3></div>
@@ -41,14 +47,17 @@ export function Plugins({ selected, onChange, disabled = false, recorded, manage
         onClick={() => setRevision(value => value + 1)}><RefreshCw size={14} />刷新</button>}
     </div>
     <p className="plugin-panel-note">{recorded !== undefined ? '本次运行保存的绑定记录，不代表实际调用或任务成功。' : management ? '打开详情可管理凭据、更新版本或检查卸载影响。' : activationMode === 'next_turn' ? '保存后，各会话从下一条消息使用新配置；当前轮继续完成。' : '更改保存后用于后续运行。'}</p>
-    <PluginSettings key={`${recorded !== undefined}/${management}`} items={items}
-      setting={plugin => ({ selected: selectedIds.has(plugin.id), disabled, status: status(plugin) })}
+    <PluginSettings key={`${recorded !== undefined}/${management}`} items={networkOnly ? items.filter(plugin => plugin.id === 'network') : items}
+      setting={plugin => ({ selected: isSelected(plugin), disabled, status: status(plugin) })}
+      control={plugin => isNetwork(plugin) ? null : undefined}
       onToggle={onChange ? plugin => onChange(selectedIds.has(plugin.id)
         ? (selected ?? []).filter(id => id !== plugin.id) : [...(selected ?? []), plugin.id]) : undefined}
       onDetails={setOpened} loading={loading} error={error} retry={() => setRevision(value => value + 1)}
       recorded={recorded !== undefined} management={management}
       empty={<div className="plugin-empty"><strong>{recorded !== undefined ? '没有插件绑定记录' : '还没有安装插件'}</strong>
-        <p>{recorded !== undefined ? '此运行没有保存插件绑定信息。' : management ? '从“安装或导入插件”选择插件目录或 GitHub 链接。' : '告诉 Pilot 你需要什么能力。安装完成后刷新，即可为节点选择插件。'}</p></div>} />
+        <p>{recorded !== undefined ? '此运行没有保存插件绑定信息。' : networkOnly ? '无法读取联网系统能力，请检查插件库后刷新。' : management ? '从“安装或导入插件”选择插件目录或 GitHub 链接。' : '告诉 Pilot 你需要什么能力。安装完成后刷新，即可为节点选择插件。'}</p></div>}>
+      {plugin => isNetwork(plugin) && <NetworkPolicy mode={network!.mode} onChange={network!.onChange} disabled={disabled} scope="node" />}
+    </PluginSettings>
     {graphTasks && selectedIds.has('graph-tasks') && <GraphTaskPolicyEditor {...graphTasks} disabled={disabled}
       catalog={catalog} catalogKnown={catalogKnown} loading={loading} onDetails={setOpened} />}
     {opened && (recorded !== undefined ? <PluginDetails plugin={opened} status={status(opened)} recorded close={() => setOpened(null)} />

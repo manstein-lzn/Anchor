@@ -2,7 +2,7 @@
 //! application operations as the Pilot; credential values go only to the
 //! credential store.
 use super::*;
-use crate::application::channel_management::{ChannelBinding, ChannelMembers, PLATFORM};
+use crate::application::channel_management::{ChannelBinding, ChannelMembers};
 
 pub(super) fn router() -> Router<ApiState> {
     Router::new()
@@ -142,7 +142,7 @@ async fn credentials(
             state.application.library_root(),
             &private_owner(&state, &headers),
             &plan.plugin,
-            &crate::credential_store::channel_target(PLATFORM, &graph),
+            &crate::credential_store::channel_target(plan.platform.as_str(), &graph),
         )
         .map(Json)
         .map_err(|reason| error(StatusCode::CONFLICT, reason))
@@ -210,7 +210,7 @@ async fn mutate(
             state.application.library_root(),
             &owner,
             &plan.plugin,
-            &crate::credential_store::channel_target(PLATFORM, &graph),
+            &crate::credential_store::channel_target(plan.platform.as_str(), &graph),
             &field,
             &digest,
             value.as_deref(),

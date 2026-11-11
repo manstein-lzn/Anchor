@@ -19,7 +19,6 @@ mod goose {
 #[path = "goose_persistent_assistant/task_inputs.rs"]
 mod task_inputs;
 
-use anchor_graph_host::{FilePluginCatalog, PluginCatalog};
 use anchor_platform_session::{ChannelDeliveryStatus, SessionStore, TurnStatus};
 use anchor_runtime::graph::{GraphRunRecord, RunResult};
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -30,7 +29,7 @@ use sha2::{Digest, Sha256};
 use std::{
     fs,
     io::Cursor,
-    os::unix::fs::{MetadataExt, PermissionsExt},
+    os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
     thread,
     time::Duration,
@@ -71,45 +70,30 @@ fn host() -> Host {
 }
 
 fn host_for(definition: &Value) -> Host {
-    host_with_channel_fields(definition, &[])
-}
-
-fn host_with_channel_fields(definition: &Value, fields: &[&str]) -> Host {
     let mut definition = definition.clone();
     for node in definition["nodes"].as_array_mut().unwrap() {
         if node.get("agent").is_some() {
-            node["plugins"] = json!(["wecom"]);
+            node["plugins"] = json!(["wecom",{"id":"network","network":"denied"}]);
         }
     }
     let host = Host::new(&definition)
         .default_runtime()
-        .with_bot("fixture", &[ALICE, BOB]);
+        .with_bot("fixture", &[ALICE, BOB])
+        .with_bot_credential("WECOM_BOT_ID", "fixture-bot")
+        .with_bot_credential("WECOM_BOT_SECRET", "fixture-secret")
+        .with_extra_environment([("ANCHOR_WECOM_WS_URL", "ws://127.0.0.1:1")]);
     // Deployment routing settings do not enable a channel by themselves. Give
     // the real supervisor an isolated channel process; these tests submit HTTP
     // events directly and verify Run lifecycles, not external WeCom delivery.
     let bundle = host.base.root.path().join("bundle");
-    let plugin = host.base.root.path().join("plugins/wecom");
-    fs::create_dir_all(plugin.join("bin")).unwrap();
-    fs::write(
-        plugin.join("plugin.json"),
-        json!({"name":"Persistent assistant channel fixture"}).to_string(),
-    )
-    .unwrap();
-    fs::write(
-        plugin.join("channel.json"),
-        json!({
-            "platform":"wecom", "transport":"websocket", "entrypoint":"bin/gateway",
-            "required_environment":fields
-        })
-        .to_string(),
-    )
-    .unwrap();
-    let gateway = plugin.join("bin/gateway");
-    fs::write(&gateway, "#!/bin/sh\nexec /bin/sleep 3600\n").unwrap();
-    fs::set_permissions(&gateway, fs::Permissions::from_mode(0o700)).unwrap();
+    fixture::install_system_plugin(
+        host.base.root.path(),
+        anchor_graph_host::SystemPlugin::Wecom,
+    );
     fs::write(
         bundle.join("manifest.json"),
-        json!({"format":1,"graph":"graph.json","plugins":[{"id":"wecom"}]}).to_string(),
+        json!({"format":1,"graph":"graph.json","plugins":[{"id":"wecom"},{"id":"network"}]})
+            .to_string(),
     )
     .unwrap();
     host
@@ -1246,8 +1230,7 @@ fn host_restart_recovers_only_the_canonical_account_and_preserves_legacy_history
     let bot_id = "persistent-fixture-account-bot";
     let canonical_account = format!("wecom:{:x}", Sha256::digest(bot_id.as_bytes()));
     let legacy_account = format!(" {bot_id} ");
-    let host = host_with_channel_fields(&graph(), &["WECOM_BOT_ID"])
-        .with_bot_credential("WECOM_BOT_ID", bot_id);
+    let host = host_for(&graph()).with_bot_credential("WECOM_BOT_ID", bot_id);
     let mut server = host.serve(&provider);
     let first_event = event(
         ALICE,
@@ -1727,26 +1710,6 @@ fn confirm_reply(
     settled["delivery"].clone()
 }
 
-fn install_image_plugin(host: &Host) {
-    let bundle = host.base.root.path().join("bundle");
-    let plugin = host.base.root.path().join("plugins/wecom");
-    fs::create_dir_all(plugin.join("skills/channel")).unwrap();
-    fs::write(plugin.join("plugin.json"), json!({
-        "name":"WeCom reply-image fixture","description":"Resource-only authorized channel image tools; no real delivery.","skills":"./skills"
-    }).to_string()).unwrap();
-    fs::write(plugin.join("skills/channel/SKILL.md"), "---\nname: fixture-reply-image\ndescription: Prepare a turn-scoped reply image.\n---\nUse wecom_attach_image to prepare a validated workspace PNG. Do not send external messages.\n").unwrap();
-    let binding = FilePluginCatalog::new(host.base.root.path())
-        .resolve(&["wecom".into()])
-        .unwrap()
-        .remove(0);
-    assert!(binding.mcp_servers.is_empty());
-    fs::write(
-        bundle.join("manifest.json"),
-        json!({"format":1,"graph":"graph.json","plugins":[{"id":binding.id}]}).to_string(),
-    )
-    .unwrap();
-}
-
 fn reply_picture(picture: &Value) -> Value {
     let encoded = picture["data_base64"].as_str().unwrap();
     let bytes = STANDARD.decode(encoded).unwrap();
@@ -1801,7 +1764,6 @@ fn reply_images_are_bound_to_exact_turn_receipts_and_not_reused_by_text_only_tur
     let mut definition = graph();
     definition["nodes"][1]["plugins"] = json!(["wecom"]);
     let host = host_for(&definition).with_allowed_commands("sh,cat,git,true,base64");
-    install_image_plugin(&host);
     let server = host.serve(&provider);
     let specifications = [
         (

@@ -37,6 +37,14 @@ impl Fixture {
         fs::write(&executable, &bytes).unwrap();
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
         let digest = format!("{:x}", Sha256::digest(&bytes));
+        let channel_binary = |name: &str| {
+            let path = root.path().join(name);
+            let mut specific = bytes.clone();
+            specific.extend_from_slice(name.as_bytes());
+            fs::write(&path, specific).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+            path
+        };
         let web = root.path().join("web");
         fs::create_dir(&web).unwrap();
         fs::write(web.join("index.html"), "<html>Anchor</html>\n").unwrap();
@@ -48,6 +56,10 @@ impl Fixture {
             sandbox_network: executable.clone(),
             platform_launcher: executable.clone(),
             network_tools: executable.clone(),
+            git_tools: executable.clone(),
+            wecom_tools: channel_binary("anchor-wecom-tools"),
+            feishu_gateway: channel_binary("anchor-feishu-gateway"),
+            wecom_gateway: channel_binary("anchor-wecom-gateway"),
             uv: executable.clone(),
             rustup_init: executable.clone(),
             pixi: executable,
@@ -80,7 +92,7 @@ impl Fixture {
 }
 
 #[test]
-fn platform_has_no_business_graph_and_exact_bootstrap_and_network_inventory() {
+fn platform_has_no_business_graph_and_exact_bootstrap_and_official_plugin_inventory() {
     let mut fixture = Fixture::new();
     let first = fixture.package().unwrap();
     fixture.request.output = fixture.root.path().join("second.tar.gz");
@@ -114,15 +126,105 @@ fn platform_has_no_business_graph_and_exact_bootstrap_and_network_inventory() {
         PIXI_SHA256,
         "50571451e96f4a82cf675cd83baaf66fff9b718f0aaf153900b9faf4c29bd401"
     );
-    assert_eq!(first.inventory.executables.len(), 9);
-    assert_eq!(first.inventory.plugins.len(), 1);
-    assert_eq!(first.inventory.plugins[0].id, "network");
+    assert_eq!(first.inventory.executables.len(), 13);
+    assert_eq!(
+        first
+            .inventory
+            .plugins
+            .iter()
+            .map(|plugin| plugin.id.as_str())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([
+            "network",
+            "graph-tasks",
+            "feishu",
+            "wecom",
+            "git",
+            "anchor-steward",
+        ]),
+    );
+    let starter: serde_json::Value =
+        serde_json::from_str(include_str!("../../../../examples/starter.json")).unwrap();
+    for plugin in &first.inventory.plugins {
+        assert!(
+            starter["plugins"][&plugin.id].is_array(),
+            "official Plugin {} is missing from source onboarding",
+            plugin.id
+        );
+    }
+    let network = first
+        .inventory
+        .plugins
+        .iter()
+        .find(|plugin| plugin.id == "network")
+        .unwrap();
     assert!(
-        first.inventory.plugins[0]
+        network
             .resources
             .contains(&"bin/anchor-network-tools".into())
     );
-    assert_eq!(first.inventory.plugins[0].mcp_servers, ["http"]);
+    assert_eq!(network.mcp_servers, ["http"]);
+    let git = first
+        .inventory
+        .plugins
+        .iter()
+        .find(|plugin| plugin.id == "git")
+        .unwrap();
+    assert!(git.resources.contains(&"bin/anchor-git-tools".into()));
+    assert_eq!(git.mcp_servers, ["git", "host", "https", "ssh"]);
+    let dev = first
+        .inventory
+        .plugins
+        .iter()
+        .find(|plugin| plugin.id == "anchor-steward")
+        .unwrap();
+    assert!(dev.mcp_servers.is_empty());
+    assert_eq!(dev.resources.len(), 8);
+    let tasks = first
+        .inventory
+        .plugins
+        .iter()
+        .find(|plugin| plugin.id == "graph-tasks")
+        .unwrap();
+    assert!(tasks.mcp_servers.is_empty());
+    assert_eq!(tasks.resources.len(), 2);
+    for (id, binaries) in [
+        (
+            "feishu",
+            [("bin/anchor-feishu-gateway", &fixture.request.feishu_gateway)].as_slice(),
+        ),
+        (
+            "wecom",
+            [
+                ("bin/anchor-wecom-tools", &fixture.request.wecom_tools),
+                ("bin/anchor-wecom-gateway", &fixture.request.wecom_gateway),
+            ]
+            .as_slice(),
+        ),
+    ] {
+        let plugin = first
+            .inventory
+            .plugins
+            .iter()
+            .find(|plugin| plugin.id == id)
+            .unwrap();
+        assert!(plugin.resources.contains(&"channel.json".into()));
+        for (relative, source) in binaries {
+            assert!(plugin.resources.contains(&(*relative).to_owned()));
+            let path = format!("plugins/{id}/{relative}");
+            let executable = first
+                .inventory
+                .executables
+                .iter()
+                .find(|executable| executable.path == path)
+                .unwrap();
+            assert_eq!(
+                executable.sha256,
+                format!("{:x}", Sha256::digest(fs::read(source).unwrap())),
+                "{path}",
+            );
+        }
+    }
     assert!(
         first
             .inventory
@@ -136,12 +238,35 @@ fn platform_has_no_business_graph_and_exact_bootstrap_and_network_inventory() {
     assert!(!runtime.join("bundle").exists());
     assert!(runtime.join("web/index.html").is_file());
     assert_eq!(
-        FilePluginCatalog::new(&runtime)
-            .resolve(&["network".into()])
-            .unwrap()[0]
-            .digest,
-        first.inventory.plugins[0].digest
+        release_plugin_inventory(&runtime).unwrap(),
+        first.inventory.plugins
     );
+    for plugin in release_plugins() {
+        for (relative, expected) in plugin.files {
+            let path = format!("plugins/{}/{relative}", plugin.id);
+            assert_eq!(fs::read(runtime.join(&path)).unwrap(), *expected, "{path}");
+        }
+    }
+    let expected_paths = release_plugin_resources()
+        .map(|(path, _)| path)
+        .collect::<BTreeSet<_>>();
+    let actual_paths = first
+        .inventory
+        .files
+        .iter()
+        .filter(|file| file.path.starts_with("plugins/"))
+        .map(|file| file.path.clone())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(actual_paths, expected_paths);
+    for file in &first.inventory.files {
+        let bytes = fs::read(runtime.join(&file.path)).unwrap();
+        assert_eq!(
+            file.sha256,
+            format!("{:x}", Sha256::digest(&bytes)),
+            "{}",
+            file.path
+        );
+    }
     assert!(
         !serde_json::to_string(&first.inventory)
             .unwrap()
@@ -282,5 +407,74 @@ fn bootstrap_must_be_static_even_when_private_test_pins_match() {
             "{name}"
         );
         assert!(!fixture.request.output.exists());
+    }
+}
+
+#[test]
+fn embedded_official_resources_cover_the_source_public_files_exactly() {
+    fn files(root: &Path, path: &Path, found: &mut BTreeSet<String>) {
+        for entry in fs::read_dir(path).unwrap() {
+            let entry = entry.unwrap();
+            let kind = entry.file_type().unwrap();
+            if kind.is_dir() {
+                files(root, &entry.path(), found);
+            } else {
+                assert!(kind.is_file(), "official sources must not contain links");
+                found.insert(
+                    entry
+                        .path()
+                        .strip_prefix(root)
+                        .unwrap()
+                        .to_str()
+                        .unwrap()
+                        .into(),
+                );
+            }
+        }
+    }
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    for plugin in release_plugins() {
+        let mut actual = BTreeSet::new();
+        files(&repo, &repo.join("plugins").join(plugin.id), &mut actual);
+        let expected = plugin
+            .files
+            .iter()
+            .map(|(path, _)| format!("plugins/{}/{path}", plugin.id))
+            .collect();
+        assert_eq!(
+            actual, expected,
+            "update the explicit public resource inventory for {}",
+            plugin.id
+        );
+    }
+}
+
+#[test]
+fn platform_rejects_missing_or_non_elf_plugin_tools_and_gateways() {
+    for name in [
+        "network-tools",
+        "git-tools",
+        "wecom-tools",
+        "feishu-gateway",
+        "wecom-gateway",
+    ] {
+        for missing in [true, false] {
+            let mut fixture = Fixture::new();
+            let path = fixture.root.path().join("invalid-binary");
+            if !missing {
+                fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            match name {
+                "network-tools" => fixture.request.network_tools = path,
+                "git-tools" => fixture.request.git_tools = path,
+                "wecom-tools" => fixture.request.wecom_tools = path,
+                "feishu-gateway" => fixture.request.feishu_gateway = path,
+                "wecom-gateway" => fixture.request.wecom_gateway = path,
+                _ => unreachable!(),
+            }
+            assert!(fixture.package().is_err(), "{name}, missing={missing}");
+            assert!(!fixture.request.output.exists());
+        }
     }
 }

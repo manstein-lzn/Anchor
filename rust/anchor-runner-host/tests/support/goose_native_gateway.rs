@@ -138,11 +138,16 @@ fn scheduled_task_uses_selected_bot_with_legacy_owner_and_platform_ack() {
             ),
             command("printf scheduled-gateway-confirmed > evidence.txt; cat evidence.txt")
                 .after("accepted"),
-            complete("done").after("scheduled-gateway-confirmed"),
+            complete("done")
+                .after("scheduled-gateway-confirmed")
+                .files(&["evidence.txt"]),
         ],
     );
     let gateway = Transport::new();
-    let host = gateway.bind_host(Host::new(&graph()).default_runtime());
+    let host = gateway
+        .bind_host(Host::new(&graph()).default_runtime())
+        .with_extra_environment([("ANCHOR_NODE_TOOL_DISCLOSURE", "0")])
+        .with_extra_environment(fixture::wecom_mcp_environment("http://127.0.0.1:1"));
     // Model the installation that previously used API key login. Its persisted
     // principal differs from the credential binding scope recorded on Runs.
     let owner = format!("api:{}", "a".repeat(64));
@@ -224,6 +229,7 @@ fn scheduled_task_uses_selected_bot_with_legacy_owner_and_platform_ack() {
             .contains(&json!("bot_graph"))
     );
     assert!(tool_definition(&provider.requests()[0], "wecom_attach_image").is_err());
+    assert!(tool_definition(&provider.requests()[0], "wecom-wecom_wecom_get_user").is_err());
     let frames = gateway.frames.lock().unwrap().clone();
     let deliveries = gateway.finish();
     assert_eq!(frames.len(), 1);
@@ -252,6 +258,7 @@ fn scheduled_task_uses_selected_bot_with_legacy_owner_and_platform_ack() {
             "actual_schedule_ticker":true,"legacy_owner_credential_scope":true,
             "explicit_bot_graph":"fixture","task_without_session_or_network":true,
             "actual_rust_gateway":true,"platform_acks":frames,"deliveries":deliveries,
+            "business_mcp_configured_but_not_exposed_without_task_network":true,
             "real_channel_deliveries":0
         }),
     );
@@ -267,12 +274,14 @@ fn native_goose_sends_through_actual_rust_gateway_and_correlates_platform_acks()
             send(USER).after("accepted"),
             command("printf native-gateway-two-confirmed > evidence.txt; cat evidence.txt")
                 .after("accepted"),
-            complete("reply").after("native-gateway-two-confirmed"),
+            complete("reply")
+                .after("native-gateway-two-confirmed")
+                .files(&["evidence.txt"]),
         ],
     );
     let gateway = Transport::new();
     let host = gateway.bind_host(Host::new(&graph()).default_runtime());
-    let plugin = install_resource_plugin(&host, &gateway.descriptor);
+    let plugin = install_resource_plugin(&host);
     let server = host.serve(&provider);
     let run = ask(&server, "goose-channel-native-gateway");
     let frames = gateway.frames.lock().unwrap().clone();

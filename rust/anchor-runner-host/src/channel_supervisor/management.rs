@@ -6,8 +6,8 @@ use super::{ChannelSupervisor, ManagedChannelLaunch, random_token};
 use crate::application::{
     ApplicationError,
     channel_management::{
-        ChannelBinding, ChannelCallback, ChannelManagementPort, ChannelRuntimeState, PLATFORM,
-        channel_plan,
+        ChannelBinding, ChannelCallback, ChannelManagementPort, ChannelPlatform,
+        ChannelRuntimeState, channel_plan,
     },
 };
 use crate::plugin_library::Catalog;
@@ -54,6 +54,9 @@ impl ChannelHostConfiguration {
 #[serde(deny_unknown_fields)]
 struct ChannelFact {
     format: u32,
+    // Format 2 omits the platform for WeCom; other channels name it explicitly.
+    #[serde(default, skip_serializing_if = "is_wecom")]
+    platform: ChannelPlatform,
     owner: String,
     plugin: String,
     users: Vec<String>,
@@ -77,6 +80,10 @@ impl ChannelFact {
             private_only: self.private_only,
         }
     }
+}
+
+fn is_wecom(platform: &ChannelPlatform) -> bool {
+    *platform == ChannelPlatform::Wecom
 }
 
 pub(crate) struct ChannelManagementAdapter {
@@ -137,7 +144,7 @@ impl ChannelManagementAdapter {
         let (facts, damaged) = read_facts(&root.join("graphs"))?;
         for (graph, reason) in &damaged {
             eprintln!(
-                "anchor channel wecom: the bot binding of Graph {graph} is unusable ({reason}); repair or remove it"
+                "anchor channel: the bot binding of Graph {graph} is unusable ({reason}); repair or remove it"
             );
         }
         Ok(Self {
@@ -165,18 +172,23 @@ impl ChannelManagementAdapter {
             {
                 // Credentials changed outside the API take the same account
                 // checks as enabling; a conflict keeps this bot stopped.
-                let account = match self.register_account(&fact.owner, &credentials).and_then(
-                    |account| {
+                let account = match self
+                    .register_account(&fact.owner, fact.platform, &credentials)
+                    .and_then(|account| {
                         if fact.account != account {
-                            self.check_account(&graph, &fact.owner, account.as_deref())?;
+                            self.check_account(
+                                &graph,
+                                &fact.owner,
+                                fact.platform,
+                                account.as_deref(),
+                            )?;
                         }
                         Ok(account)
-                    },
-                ) {
+                    }) {
                     Ok(account) => account,
                     Err(error) => {
                         eprintln!(
-                            "anchor channel wecom: the bot of Graph {graph} stays stopped: {error:?}"
+                            "anchor channel: the bot of Graph {graph} stays stopped: {error:?}"
                         );
                         continue;
                     }
@@ -191,7 +203,7 @@ impl ChannelManagementAdapter {
                     supervisors.insert(graph, started);
                 }
                 Err(_) => eprintln!(
-                    "anchor channel wecom: the saved bot of Graph {graph} is currently unavailable"
+                    "anchor channel: the saved bot of Graph {graph} is currently unavailable"
                 ),
             }
         }
@@ -219,11 +231,37 @@ impl ChannelManagementAdapter {
     fn register_account(
         &self,
         owner: &str,
+        platform: ChannelPlatform,
         credentials: &BTreeMap<String, String>,
     ) -> Result<Option<String>, ApplicationError> {
         credentials
-            .get("WECOM_BOT_ID")
-            .map(|identity| register_account(&self.configuration, owner, identity).map_err(storage))
+            .get(platform.account_field())
+            .map(|identity| {
+                let account = platform.account_identity(identity);
+                // Existing WeCom identities share their original aliases. Feishu
+                // starts with a single canonical account and needs no migration.
+                let aliases = if platform == ChannelPlatform::Wecom {
+                    vec![
+                        identity.to_owned(),
+                        identity.trim().to_owned(),
+                        format!("wecom:{:x}", Sha256::digest(identity.as_bytes())),
+                    ]
+                } else {
+                    Vec::new()
+                };
+                crate::host_fs::directory(&self.configuration.data_root.join("platform"))
+                    .map_err(storage)?;
+                anchor_platform_session::SessionStore::open(
+                    self.configuration
+                        .data_root
+                        .join("platform/sessions.sqlite"),
+                )
+                .and_then(|sessions| {
+                    sessions.register_channel_account(owner, platform.as_str(), &account, &aliases)
+                })
+                .map_err(|_| storage("channel account identity registration failed"))?;
+                Ok(account)
+            })
             .transpose()
     }
 
@@ -314,16 +352,20 @@ impl ChannelManagementAdapter {
     fn channel(
         definition: PluginMetadata,
     ) -> Result<(PluginMetadata, ChannelDefinition), ApplicationError> {
-        let channel = definition
+        let mut channels = definition
             .channels
             .iter()
-            .find(|channel| channel.platform == PLATFORM)
-            .cloned()
-            .ok_or_else(|| {
-                ApplicationError::Invalid(
-                    "the installed Plugin has no wecom channel declaration".into(),
-                )
-            })?;
+            .filter(|channel| ChannelPlatform::parse(&channel.platform).is_some());
+        let channel = channels.next().cloned().ok_or_else(|| {
+            ApplicationError::Invalid(
+                "the installed Plugin has no supported channel declaration".into(),
+            )
+        })?;
+        if channels.next().is_some() {
+            return Err(ApplicationError::Invalid(
+                "a channel Plugin must declare one supported platform".into(),
+            ));
+        }
         Ok((definition, channel))
     }
 
@@ -334,10 +376,11 @@ impl ChannelManagementAdapter {
         definition: &PluginMetadata,
         channel: &ChannelDefinition,
     ) -> Result<BTreeMap<String, String>, ApplicationError> {
-        if crate::credential_store::channel_authorization(definition, &channel.platform)
-            .map_err(storage)?
-            .1
-            != fact.authorization_digest
+        if channel.platform != fact.platform.as_str()
+            || crate::credential_store::channel_authorization(definition, &channel.platform)
+                .map_err(storage)?
+                .1
+                != fact.authorization_digest
         {
             return Err(ApplicationError::Conflict(
                 "channel declarations changed; disable and configure the bot again".into(),
@@ -347,7 +390,7 @@ impl ChannelManagementAdapter {
             &self.configuration.data_root,
             &crate::credential_store::binding_owner(&fact.owner),
             definition,
-            &crate::credential_store::channel_target(PLATFORM, graph),
+            &crate::credential_store::channel_target(fact.platform.as_str(), graph),
         )
         .map_err(storage)
     }
@@ -370,12 +413,15 @@ impl ChannelManagementAdapter {
 
     /// The Graph still admits as this binding's bot; returns its reply node.
     fn admission(&self, graph: &str, fact: &ChannelFact) -> Result<String, ApplicationError> {
+        fact.binding().validate_for_platform(fact.platform)?;
         let bundle = FileGraphBundleLoader::new(self.configuration.graph_path(graph))
             .with_library_root(&self.configuration.library_root)
             .load()
             .map_err(|_| ApplicationError::Missing)?;
         match channel_plan(&bundle.snapshot, &self.configuration.library_root)? {
-            Some(plan) if plan.plugin == fact.plugin => Ok(plan.work_node),
+            Some(plan) if plan.plugin == fact.plugin && plan.platform == fact.platform => {
+                Ok(plan.work_node)
+            }
             _ => Err(ApplicationError::Invalid(
                 crate::application::channel_management::NOT_A_BOT.into(),
             )),
@@ -400,7 +446,7 @@ impl ChannelManagementAdapter {
             ManagedChannelLaunch {
                 graph: graph.into(),
                 plugin: fact.plugin.clone(),
-                platform: PLATFORM.into(),
+                platform: fact.platform.as_str().into(),
                 credentials,
                 users: fact.users.clone(),
                 send_users: fact.send_users.clone(),
@@ -418,6 +464,7 @@ impl ChannelManagementAdapter {
         &self,
         graph: &str,
         owner: &str,
+        platform: ChannelPlatform,
         account: Option<&str>,
     ) -> Result<(), ApplicationError> {
         let Some(account) = account else {
@@ -442,13 +489,13 @@ impl ChannelManagementAdapter {
             .map_err(|_| storage("channel Sessions unavailable"))?
         {
             if session.graph == graph
-                || session.channel.get("source").map(String::as_str) != Some(PLATFORM)
+                || session.channel.get("source").map(String::as_str) != Some(platform.as_str())
             {
                 continue;
             }
             let saved = session.channel.get("account").map_or("", String::as_str);
             if sessions
-                .canonical_channel_account(owner, PLATFORM, saved)
+                .canonical_channel_account(owner, platform.as_str(), saved)
                 .map_err(|_| storage("channel Sessions unavailable"))?
                 == account
             {
@@ -468,16 +515,28 @@ impl ChannelManagementAdapter {
     async fn public_status(&self, owner: &str, graph: &str) -> Result<Value, ApplicationError> {
         let supervisors = self.supervisors.lock().await;
         if self.damaged.contains_key(graph) {
-            return Ok(json!({"graph":graph,"platform":PLATFORM,"configured":true,
+            return Ok(json!({"graph":graph,"configured":true,
                 "damaged":true,"enabled":false,"listener":"unavailable","mutable":false}));
         }
         let Some(fact) = self.fact(graph)? else {
-            return Ok(json!({"graph":graph,"platform":PLATFORM,"configured":false,
+            let platform = FileGraphBundleLoader::new(self.configuration.graph_path(graph))
+                .with_library_root(&self.configuration.library_root)
+                .load()
+                .ok()
+                .and_then(|bundle| {
+                    channel_plan(&bundle.snapshot, &self.configuration.library_root)
+                        .ok()
+                        .flatten()
+                })
+                .map(|plan| plan.platform);
+            return Ok(json!({"graph":graph,"platform":platform,"configured":false,
                 "enabled":false,"listener":"stopped","mutable":true}));
         };
         if fact.owner != owner {
-            return Ok(json!({"graph":graph,"platform":PLATFORM,"configured":true,
-                "owner_matches":false,"mutable":false}));
+            return Ok(
+                json!({"graph":graph,"platform":fact.platform,"configured":true,
+                "owner_matches":false,"mutable":false}),
+            );
         }
         let admitted = self.admission(graph, &fact);
         let (available, credentials, account) = match self.metadata(&fact.plugin) {
@@ -495,7 +554,10 @@ impl ChannelManagementAdapter {
                 let complete = values
                     .as_ref()
                     .is_ok_and(|values| Self::complete(&channel, values).is_ok());
-                let account = values.as_ref().ok().and_then(account_identity);
+                let account = values
+                    .as_ref()
+                    .ok()
+                    .and_then(|values| account_identity(fact.platform, values));
                 (admitted.is_ok() && complete, fields, account)
             }
             Err(_) => (false, Vec::new(), None),
@@ -510,7 +572,7 @@ impl ChannelManagementAdapter {
             self.listener_status(graph, supervisor).await
         };
         Ok(
-            json!({"graph":graph,"platform":PLATFORM,"configured":true,"owner_matches":true,
+            json!({"graph":graph,"platform":fact.platform,"configured":true,"owner_matches":true,
             "mutable":true,"enabled":fact.enabled,"available":available,
             "reply_node":admitted.ok(),"binding":fact.binding(),"credentials":credentials,
             "listener":listener,"account":account,
@@ -547,13 +609,14 @@ impl ChannelManagementAdapter {
                 .is_ok_and(|(definition, channel)| {
                     self.credentials(graph, &fact, &definition, &channel)
                         .is_ok_and(|values| {
-                            account_identity(&values) == fact.account
+                            account_identity(fact.platform, &values) == fact.account
                                 && Self::complete(&channel, &values).is_ok()
                         })
                 });
         ChannelRuntimeState {
             graph: graph.into(),
             owner: fact.owner.clone(),
+            platform: fact.platform,
             binding: fact.binding(),
             reply_node,
             enabled,
@@ -604,16 +667,31 @@ impl ChannelManagementPort for ChannelManagementAdapter {
                     "stop this Graph's bot before changing its members".into(),
                 ));
             }
-            let (definition, _) = self.definition(&binding.plugin)?;
-            let digest = crate::credential_store::channel_authorization(&definition, PLATFORM)
-                .map_err(storage)?
-                .1;
+            let (definition, channel) = self.definition(&binding.plugin)?;
+            let platform =
+                ChannelPlatform::parse(&channel.platform).ok_or(ApplicationError::Missing)?;
+            binding.validate_for_platform(platform)?;
+            if previous
+                .as_ref()
+                .is_some_and(|fact| fact.platform != platform)
+            {
+                // The retained delivery ledger is pinned to its original platform/account.
+                return Err(ApplicationError::Conflict(
+                    "this Graph already has a bot binding for another platform; use a separate Graph"
+                        .into(),
+                ));
+            }
+            let digest =
+                crate::credential_store::channel_authorization(&definition, platform.as_str())
+                    .map_err(storage)?
+                    .1;
             let changed = previous.as_ref().is_none_or(|fact| {
                 fact.binding() != binding || fact.authorization_digest != digest
             });
             if changed {
                 let fact = ChannelFact {
                     format: FORMAT,
+                    platform,
                     owner: owner.into(),
                     plugin: binding.plugin,
                     users: binding.users,
@@ -657,7 +735,7 @@ impl ChannelManagementPort for ChannelManagementAdapter {
                 Self::complete(&channel, &credentials)?;
                 // Re-enabling a saved-enabled bot that is not running must
                 // pass the same account checks as a first enable.
-                let account = self.register_account(&fact.owner, &credentials)?;
+                let account = self.register_account(&fact.owner, fact.platform, &credentials)?;
                 let needs_start = changed
                     || supervisors
                         .get(graph)
@@ -668,7 +746,7 @@ impl ChannelManagementPort for ChannelManagementAdapter {
                     )
                     || fact.account != account;
                 if needs_start {
-                    self.check_account(graph, owner, account.as_deref())?;
+                    self.check_account(graph, owner, fact.platform, account.as_deref())?;
                 }
                 if changed {
                     fact.enabled = true;
@@ -739,11 +817,13 @@ impl ChannelManagementPort for ChannelManagementAdapter {
             }
             // Credentials may exist without a binding (entered before the
             // members) or under a Plugin the Graph no longer mounts.
-            crate::credential_store::delete_channel_graph(
-                &self.configuration.data_root,
-                &crate::credential_store::channel_target(PLATFORM, graph),
-            )
-            .map_err(storage)?;
+            for platform in ChannelPlatform::ALL {
+                crate::credential_store::delete_channel_graph(
+                    &self.configuration.data_root,
+                    &crate::credential_store::channel_target(platform.as_str(), graph),
+                )
+                .map_err(storage)?;
+            }
             let state = super::state_directory(&self.configuration.data_root, graph);
             if fs::symlink_metadata(&state).is_ok() {
                 fs::remove_dir_all(&state)
@@ -768,40 +848,13 @@ fn storage(reason: impl Into<String>) -> ApplicationError {
     ApplicationError::Storage(reason.into())
 }
 
-fn account_identity(credentials: &BTreeMap<String, String>) -> Option<String> {
+fn account_identity(
+    platform: ChannelPlatform,
+    credentials: &BTreeMap<String, String>,
+) -> Option<String> {
     credentials
-        .get("WECOM_BOT_ID")
-        .map(|identity| wecom_account_identity(identity))
-}
-
-pub(crate) fn wecom_account_identity(identity: &str) -> String {
-    format!("wecom:{:x}", Sha256::digest(identity.trim().as_bytes()))
-}
-
-fn register_account(
-    configuration: &ChannelHostConfiguration,
-    owner: &str,
-    identity: &str,
-) -> Result<String, String> {
-    let account = wecom_account_identity(identity);
-    crate::host_fs::directory(&configuration.data_root.join("platform"))?;
-    anchor_platform_session::SessionStore::open(
-        configuration.data_root.join("platform/sessions.sqlite"),
-    )
-    .and_then(|sessions| {
-        sessions.register_channel_account(
-            owner,
-            PLATFORM,
-            &account,
-            &[
-                identity.to_owned(),
-                identity.trim().to_owned(),
-                format!("wecom:{:x}", Sha256::digest(identity.as_bytes())),
-            ],
-        )
-    })
-    .map_err(|_| "channel account identity registration failed".to_owned())?;
-    Ok(account)
+        .get(platform.account_field())
+        .map(|identity| platform.account_identity(identity))
 }
 
 fn token_matches(expected: &str, key: &str) -> bool {
@@ -839,7 +892,7 @@ fn read_facts(directory: &Path) -> Result<Facts, String> {
             .filter(|graph| anchor_runtime::identifier::is_name(graph))
         else {
             eprintln!(
-                "anchor channel wecom: ignoring {} in the bot bindings directory",
+                "anchor channel: ignoring {} in the bot bindings directory",
                 path.display()
             );
             continue;
@@ -884,7 +937,7 @@ fn read_fact(path: &Path) -> Result<ChannelFact, String> {
     let fact: ChannelFact =
         serde_json::from_slice(&bytes).map_err(|_| "channel configuration is invalid")?;
     fact.binding()
-        .validate()
+        .validate_for_platform(fact.platform)
         .map_err(|_| "channel configuration binding is invalid")?;
     if fact.format != FORMAT
         || fact.owner.is_empty()

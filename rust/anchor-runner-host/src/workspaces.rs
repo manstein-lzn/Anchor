@@ -219,6 +219,30 @@ impl Workspaces {
         Ok(owner.map(|owner| owner.key))
     }
 
+    /// The application has certified a stopped predecessor. Only its exact
+    /// owner may be interrupted, after all writers have released the OS lease.
+    pub(crate) fn interrupt_stopped_owner(&self, key: &InvocationKey) -> Result<(), GraphError> {
+        validate_key(key)?;
+        let _registry = self.registry_lease()?;
+        let resource = self.resource(key)?;
+        self.read_resource(&resource)?;
+        let directory = self.resource_directory(&resource)?;
+        let execution = lease(&directory.join("execution.lock"))?;
+        let owner = read_owner(&directory)?.ok_or(GraphError::RunConflict)?;
+        if owner.key != *key {
+            return Err(GraphError::RunConflict);
+        }
+        if owner.release.is_none() {
+            WorkspaceExecutionLease {
+                owner_path: directory.join("owner.json"),
+                owner,
+                _lease: execution,
+            }
+            .finish_interrupted()?;
+        }
+        Ok(())
+    }
+
     /// Bind a Host-authorized resource id. No Graph-supplied host path enters
     /// this service. Sharing promotes the scene out of per-Run deletion.
     pub(crate) fn bind_resource(

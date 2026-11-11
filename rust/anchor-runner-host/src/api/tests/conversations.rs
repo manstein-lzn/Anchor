@@ -389,7 +389,7 @@ fn seed_call_fixture(
             .unwrap();
     // A bundle references Plugins by id; the code lives in the Library.
     record.plugin_bindings = Catalog::new(&state.catalog_root)
-        .resolve(&bundle.plugins)
+        .resolve_snapshot(&record.snapshot)
         .unwrap()
         .into_iter()
         .map(|plugin| (plugin.id.clone(), plugin))
@@ -455,7 +455,7 @@ async fn publishing_graph_preserves_plugin_conversation_history_and_child_runs()
     )
     .unwrap();
     first.plugin_bindings = Catalog::new(&state.catalog_root)
-        .resolve(&bundle.plugins)
+        .resolve_snapshot(&bundle.snapshot)
         .unwrap()
         .into_iter()
         .map(|plugin| (plugin.id.clone(), plugin))
@@ -477,9 +477,13 @@ async fn publishing_graph_preserves_plugin_conversation_history_and_child_runs()
     fixtures::create(&state.application, &first);
     fixtures::control(&state.application, &first.run_id, "stop", "stopped");
     let first_bytes = kernel_resource(&state, "plugin-first").unwrap();
+    crate::test_system_plugin(
+        &state.catalog_root,
+        anchor_graph_host::SystemPlugin::Network,
+    );
     let mut updated = definition;
     updated["objective"] = json!("next Graph version");
-    updated["agents"]["worker"]["network"] = json!(true);
+    updated["nodes"][0]["plugins"] = json!(["demo", {"id":"network","network":"enabled"}]);
     let update = json!({"definition":updated}).to_string();
     assert_eq!(
         call(app.clone(), "PUT", "/graphs/fixture", Some(&update))
@@ -565,13 +569,21 @@ async fn publishing_graph_preserves_plugin_conversation_history_and_child_runs()
     );
     for run in ["plugin-first", "plugin-next"] {
         let record = store.load(run).unwrap().unwrap();
-        assert!(!record.snapshot.agents["worker"].network);
+        assert_eq!(
+            record.snapshot.node_network_mode(&record.snapshot.nodes[0]),
+            anchor_runtime::graph::NetworkMode::Auto
+        );
+        assert!(!record.plugin_bindings.contains_key("network"));
     }
     // Children admitted from the newly published definition use its permission;
     // their stopped/running states do not prevent later publication either.
     for run in ["plugin-wait-child", "plugin-detached-child"] {
         let record = store.load(run).unwrap().unwrap();
-        assert!(record.snapshot.agents["worker"].network);
+        assert_eq!(
+            record.snapshot.node_network_mode(&record.snapshot.nodes[0]),
+            anchor_runtime::graph::NetworkMode::Enabled
+        );
+        assert!(record.plugin_bindings.contains_key("network"));
     }
 }
 
@@ -969,10 +981,16 @@ async fn graph_node_plugins_project_expanded_nodes_and_legacy_metadata_remains_r
     assert_eq!(status, StatusCode::OK, "{changed}");
     let (status, graph) = call(app, "GET", "/graphs/fixture", None).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(graph["definition"], authoring);
+    assert_eq!(
+        graph["definition"],
+        GraphSnapshot::normalize_network_authoring(authoring, false)
+    );
     // The projection carries the declaration: a required reference with no
     // default is written as the bare id it always was.
-    assert_eq!(graph["node_plugins"], json!({"stage/inside":["demo"]}));
+    assert_eq!(
+        graph["node_plugins"],
+        json!({"stage/inside":["demo", {"id":"network","required":false,"network":"auto"}]})
+    );
     let metadata = RunMetadata::new(
         "legacy-run".into(),
         "fixture".into(),

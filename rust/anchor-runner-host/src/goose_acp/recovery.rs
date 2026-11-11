@@ -64,16 +64,50 @@ fn record_decision(
     Ok(())
 }
 
+fn recovery_fact(facts: &Path, key: &InvocationKey) -> Result<Option<Fact>, GraphError> {
+    let fact = read_fact(&facts.join(format!("{}.json", crate::host_fs::invocation_stem(key))))?;
+    if fact
+        .as_ref()
+        .is_some_and(|f| f.version != 2 || f.key != *key)
+    {
+        return Err(GraphError::CorruptRun(
+            "native recovery invocation identity changed".into(),
+        ));
+    }
+    Ok(fact)
+}
+
+fn pending_attempt(fact: &Fact) -> Option<RecoveryAttempt> {
+    if fact
+        .tool_observation
+        .as_ref()
+        .is_some_and(|o| o.get("operator_decision").is_some())
+    {
+        None
+    } else {
+        attempt(fact)
+    }
+}
+
+/// Read unknown effects without preparing a Provider or changing native history.
+pub(crate) fn pending_invocation_recovery(
+    state: &Path,
+    key: &InvocationKey,
+) -> Result<Vec<RecoveryAttempt>, GraphError> {
+    Ok(recovery_fact(&state.join("goose-acp"), key)?
+        .as_ref()
+        .and_then(pending_attempt)
+        .into_iter()
+        .collect())
+}
+
 impl GooseNodePort {
     fn recovery_fact(&self, key: &InvocationKey) -> Result<Option<Fact>, GraphError> {
-        let fact = read_fact(
-            &self
-                .facts
-                .join(format!("{}.json", crate::host_fs::invocation_stem(key))),
-        )?;
-        if fact.as_ref().is_some_and(|f| {
-            self.fixture || f.version != 2 || f.key != *key || f.binary_sha256 != self.binary_sha256
-        }) {
+        let fact = recovery_fact(&self.facts, key)?;
+        if fact
+            .as_ref()
+            .is_some_and(|f| self.fixture || f.binary_sha256 != self.binary_sha256)
+        {
             return Err(GraphError::CorruptRun(
                 "native recovery invocation identity changed".into(),
             ));
@@ -87,14 +121,7 @@ impl GooseNodePort {
         let Some(fact) = self.recovery_fact(key)? else {
             return Ok(Vec::new());
         };
-        if fact
-            .tool_observation
-            .as_ref()
-            .is_some_and(|o| o.get("operator_decision").is_some())
-        {
-            return Ok(Vec::new());
-        }
-        Ok(attempt(&fact).into_iter().collect())
+        Ok(pending_attempt(&fact).into_iter().collect())
     }
     pub(crate) fn record_recovery_decision(
         &self,

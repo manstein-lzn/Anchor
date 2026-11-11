@@ -9,8 +9,19 @@ use serde_json::Value;
 use std::time::Duration;
 use tokio::sync::{mpsc, watch};
 
-use super::ProgressLine;
-use crate::protocol::ConversationScope;
+use crate::ConversationScope;
+
+/// One status line the Host projection observed for an admitted event.
+pub struct ProgressLine {
+    pub event_id: String,
+    pub scope: ConversationScope,
+    pub content: String,
+    /// Stable category token, absent when the Host predates it.
+    pub category: Option<String>,
+    /// 1-based tool step, absent for guidance lines.
+    pub step: Option<u32>,
+    pub settled: bool,
+}
 
 /// Matches the Host's own stream limit so a stuck subscription cannot outlive
 /// the turn it describes.
@@ -27,7 +38,7 @@ const MAX_CONTENT_CHARS: usize = 600;
 /// Spawn the per-event progress subscription. Returns immediately; the task
 /// owns its own lifecycle and ends on `settled`, on cancellation, on the
 /// stream ending, or at the hard limit.
-pub(super) fn subscribe(
+pub fn subscribe(
     url: String,
     api_key: Option<String>,
     event_id: String,
@@ -40,13 +51,15 @@ pub(super) fn subscribe(
         if *cancel.borrow() {
             return;
         }
-        eprintln!("anchor-wecom-gateway: progress subscription started {event_id}");
+        eprintln!("anchor-channel-transport: progress subscription started {event_id}");
         // Progress is an observation, never a delivery fact: every outcome of
         // this task is simply dropped.
         let mut attempts = 0;
+        let deadline = tokio::time::Instant::now() + STREAM_LIMIT;
         loop {
             let outcome = tokio::select! {
                 _ = cancel.changed() => return,
+                _ = tokio::time::sleep_until(deadline) => return,
                 outcome = read(
                     url.clone(),
                     api_key.clone(),
@@ -64,11 +77,13 @@ pub(super) fn subscribe(
                     }
                 }
                 Outcome::NotYetAdmitted => {
-                    eprintln!("anchor-wecom-gateway: progress stream unavailable {event_id}");
+                    eprintln!("anchor-channel-transport: progress stream unavailable {event_id}");
                     return;
                 }
                 Outcome::Unavailable(reason) => {
-                    eprintln!("anchor-wecom-gateway: progress stream failed {event_id}: {reason}");
+                    eprintln!(
+                        "anchor-channel-transport: progress stream failed {event_id}: {reason}"
+                    );
                     return;
                 }
                 Outcome::Closed => return,
@@ -93,11 +108,7 @@ async fn read(
     scope: ConversationScope,
     sender: mpsc::UnboundedSender<ProgressLine>,
 ) -> Outcome {
-    let Ok(client) = reqwest::Client::builder()
-        .no_proxy()
-        .timeout(READ_TIMEOUT)
-        .build()
-    else {
+    let Ok(client) = crate::http_client(None) else {
         return Outcome::Unavailable("client unavailable".into());
     };
     let mut request = client.get(event_url(&url, &event_id));
@@ -114,7 +125,7 @@ async fn read(
     if !response.status().is_success() {
         return Outcome::Unavailable(format!("status {}", response.status().as_u16()));
     }
-    eprintln!("anchor-wecom-gateway: progress stream connected {event_id}");
+    eprintln!("anchor-channel-transport: progress stream connected {event_id}");
     let started = tokio::time::Instant::now();
     let mut buffer = Vec::new();
     let mut lines = 0usize;
@@ -128,6 +139,9 @@ async fn read(
             Ok(Ok(None)) => return Outcome::Closed,
             _ => return Outcome::Closed,
         };
+        if buffer.len().saturating_add(chunk.len()) > crate::MAX_REQUEST_BYTES {
+            return Outcome::Closed;
+        }
         buffer.extend_from_slice(&chunk);
         while let Some(end) = find_event_end(&buffer) {
             let event = buffer.drain(..end).collect::<Vec<u8>>();
@@ -181,7 +195,7 @@ async fn read(
     }
 }
 
-/// The Host route is `/channels/{platform}/progress/{event_id}`; the configured
+/// The Host route is `/channels/{graph}/progress/{event_id}`; the configured
 /// value is the base path, so the identity is appended as one encoded segment.
 fn event_url(base: &str, event_id: &str) -> String {
     format!(
@@ -318,6 +332,57 @@ mod tests {
             assert_eq!(line.step, step);
             assert!(!line.settled);
         }
+        assert!(receiver.recv().await.is_none());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn cancellation_drops_a_subscription_waiting_for_http_headers() {
+        use axum::{Router, routing::get};
+        use std::sync::Arc;
+        use tokio::{net::TcpListener, sync::Notify};
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let entered = Arc::new(Notify::new());
+        let waiting = entered.clone();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().route(
+                    "/{event}",
+                    get(move || {
+                        let waiting = waiting.clone();
+                        async move {
+                            waiting.notify_one();
+                            std::future::pending::<String>().await
+                        }
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+        });
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let (cancel, cancelled) = watch::channel(false);
+        let task = subscribe(
+            format!("http://{address}"),
+            None,
+            "event".into(),
+            ConversationScope::Group {
+                conversation_id: "group".into(),
+            },
+            sender,
+            cancelled,
+        );
+        tokio::time::timeout(Duration::from_secs(2), entered.notified())
+            .await
+            .unwrap();
+        cancel.send_replace(true);
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .unwrap()
+            .unwrap();
         assert!(receiver.recv().await.is_none());
         server.abort();
     }

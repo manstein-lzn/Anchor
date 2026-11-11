@@ -5,6 +5,7 @@
     "academic-research": ["anchor-scholarly"],
     "docmost": ["anchor-docmost-tools"],
     "wecom": ["anchor-wecom-tools", "anchor-wecom-gateway"],
+    "feishu": ["anchor-feishu-gateway"],
     "anchor-steward": [],
     "graph-tasks": []
   },
@@ -15,6 +16,7 @@
     "parallel-audit",
     "plugin-research",
     "deep-academic-research",
-    "wecom-persistent-assistant"
+    "wecom-persistent-assistant",
+    "feishu-persistent-assistant"
   ]
 }

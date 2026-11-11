@@ -1,7 +1,9 @@
 use super::{ApplicationError, RunApplication};
 use crate::plugin_library::Catalog;
 use anchor_graph_host::{FileGraphBundleLoader, LoadedGraphBundle, PluginCatalog};
-use anchor_runtime::graph::{GraphError, GraphSnapshot, PluginBinding};
+#[cfg(test)]
+use anchor_runtime::graph::PluginBinding;
+use anchor_runtime::graph::{GraphError, GraphSnapshot};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 
@@ -100,8 +102,11 @@ impl RunApplication {
         &self,
         definition: &Value,
     ) -> Result<GraphSnapshot, GraphValidationFailure> {
-        let snapshot = GraphSnapshot::from_authoring(definition.clone())
-            .map_err(GraphValidationFailure::Authoring)?;
+        let snapshot = GraphSnapshot::from_authoring(GraphSnapshot::normalize_network_authoring(
+            definition.clone(),
+            false,
+        ))
+        .map_err(GraphValidationFailure::Authoring)?;
         for (name, agent) in &snapshot.agents {
             let reference = (!agent.model.is_empty()).then_some(agent.model.as_str());
             let result = if let Some(models) = &self.fixture_models {
@@ -120,9 +125,8 @@ impl RunApplication {
         crate::reject_snapshot(&snapshot)
             .map_err(GraphError::Unsupported)
             .map_err(GraphValidationFailure::Unavailable)?;
-        let ids = snapshot_plugin_ids(&snapshot);
         Catalog::new(self.library_root().to_path_buf())
-            .resolve(&ids)
+            .resolve_snapshot(&snapshot)
             .map_err(GraphValidationFailure::Unavailable)?;
         // R2: one channel Plugin per persistent assistant.
         super::channel_management::channel_plan(&snapshot, self.library_root()).map_err(|_| {
@@ -163,6 +167,7 @@ impl RunApplication {
             }
         }
         names.sort();
+        let completed_tasks = self.completed_task_graphs(&names);
         let mut graphs = Vec::new();
         for name in names {
             let active_runs = self.active_runs(Some(&name)).await;
@@ -173,21 +178,27 @@ impl RunApplication {
                 }
             }
             let missing = !self.graph_bundle_path(&name).join("graph.json").is_file();
-            graphs.push(json!({"graph":name,"running":active_runs.first(),"active_runs":active_runs,"active_nodes":active_nodes,"missing":missing}));
+            let mut graph = json!({"graph":name,"running":active_runs.first(),"active_runs":active_runs,"active_nodes":active_nodes,"missing":missing});
+            if active_runs.is_empty() && completed_tasks.contains(&name) {
+                graph["completed_task"] = json!(true);
+            }
+            graphs.push(graph);
         }
         Ok(json!({"graphs":graphs}))
     }
 
     pub(crate) fn read_graph(&self, name: &str) -> Result<Value, GraphManagementError> {
         let (_path, bundle) = self.load_graph(name)?;
-        let node_plugins = bundle
-            .snapshot
+        let definition =
+            GraphSnapshot::normalize_network_authoring(bundle.authoring_definition, true);
+        let projected = GraphSnapshot::from_authoring(definition.clone()).map_err(invalid)?;
+        let node_plugins = projected
             .nodes
             .iter()
             .map(|node| (node.id.clone(), json!(node.plugins)))
             .collect::<serde_json::Map<_, _>>();
         Ok(
-            json!({"graph":name,"definition":bundle.authoring_definition,"node_plugins":node_plugins,
+            json!({"graph":name,"definition":definition,"node_plugins":node_plugins,
             "plugin_activation":updates::activation(&bundle.snapshot)?}),
         )
     }
@@ -215,6 +226,7 @@ impl RunApplication {
                 "edges": []
             })
         });
+        let definition = GraphSnapshot::normalize_network_authoring(definition, false);
         self.validate_graph(&definition)?;
         if super::graph_tasks::task_graph_ownership_path(self, name)?.exists() {
             return Err(GraphManagementError::Conflict(
@@ -250,6 +262,7 @@ fn storage(failure: impl std::fmt::Display) -> GraphManagementError {
 ///
 /// A bundle carries ids only, so every consumer that needs the code a Run will
 /// actually use resolves it here — from the Library.
+#[cfg(test)]
 pub(crate) fn referenced_plugin_bindings(
     library_root: &Path,
     ids: &[String],
@@ -264,12 +277,11 @@ pub(crate) fn referenced_plugin_bindings(
 fn resolve_graph_definition(
     definition: &Value,
     catalog_root: &Path,
-) -> Result<(GraphSnapshot, Catalog, Vec<PluginBinding>), GraphError> {
+) -> Result<GraphSnapshot, GraphError> {
     let snapshot = GraphSnapshot::from_authoring(definition.clone())?;
-    let ids = snapshot_plugin_ids(&snapshot);
     let catalog = Catalog::new(catalog_root.to_path_buf());
-    let bindings = catalog.resolve(&ids)?;
-    Ok((snapshot, catalog, bindings))
+    catalog.resolve_snapshot(&snapshot)?;
+    Ok(snapshot)
 }
 
 fn snapshot_plugin_ids(snapshot: &GraphSnapshot) -> Vec<String> {
@@ -372,17 +384,16 @@ pub(super) fn write_graph_bundle_from_catalog(
         })?;
     // Resolving here is a validation of the export, not a copy: the Plugin stays
     // in the Library, which is the only place it exists.
-    let (_, _catalog, bindings) =
-        resolve_graph_definition(definition, catalog_root).map_err(invalid)?;
+    let snapshot = resolve_graph_definition(definition, catalog_root).map_err(invalid)?;
     std::fs::create_dir_all(path).map_err(storage)?;
     // Do not mutate Plugin resources here. In a supported single-root deployment
     // path/plugins is the canonical Library, not a stale bundle copy. Other
     // embedded Plugin copies are rejected by load_graph before an update.
     let graph_tmp = path.join(".graph.json.tmp");
     let manifest_tmp = path.join(".manifest.json.tmp");
-    let references = bindings
-        .iter()
-        .map(|binding| json!({"id": binding.id}))
+    let references = snapshot_plugin_ids(&snapshot)
+        .into_iter()
+        .map(|id| json!({"id": id}))
         .collect::<Vec<_>>();
     let write_result = (|| -> Result<(), String> {
         std::fs::write(

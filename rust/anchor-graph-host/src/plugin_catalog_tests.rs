@@ -3,6 +3,210 @@ use crate::plugin_test_support::{catalog_with_dependency_plugin, catalog_with_pl
 use crate::views_root;
 use std::fs;
 
+fn network_snapshot(mode: &str, plugins: &[&str]) -> GraphSnapshot {
+    let mut plugins = plugins
+        .iter()
+        .map(|id| serde_json::json!(id))
+        .collect::<Vec<_>>();
+    plugins.push(serde_json::json!({"id":"network","network":mode,"required":true,"default":true}));
+    GraphSnapshot::from_authoring(serde_json::json!({
+        "objective":"network policy", "agents":{"role":{}},
+        "nodes":[{"id":"work","agent":"role","plugins":plugins}], "edges":[]
+    }))
+    .unwrap()
+}
+
+#[test]
+fn snapshot_resolution_distinguishes_policy_from_a_required_provider() {
+    let root = tempfile::tempdir().unwrap();
+    let catalog = FilePluginCatalog::new(root.path());
+    for (id, manifest) in [
+        ("offline", serde_json::json!({"name":"Offline"})),
+        (
+            "online",
+            serde_json::json!({"name":"Online","network":true}),
+        ),
+        (
+            "remote",
+            serde_json::json!({"name":"Remote","mcpServers":{"api":{"url":"https://example.test/mcp"}}}),
+        ),
+    ] {
+        let directory = root.path().join("plugins").join(id);
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join("plugin.json"), manifest.to_string()).unwrap();
+        assert_eq!(
+            catalog.metadata(id).unwrap().requires_network(),
+            id != "offline"
+        );
+        assert_eq!(
+            catalog.definition(id).unwrap().requires_network(),
+            id != "offline"
+        );
+    }
+
+    for (mode, plugin, expected) in [
+        ("denied", None, Vec::new()),
+        ("auto", None, Vec::new()),
+        ("auto", Some("offline"), vec!["offline"]),
+        ("denied", Some("online"), vec!["online"]),
+        ("denied", Some("remote"), vec!["remote"]),
+    ] {
+        let ids = plugin.into_iter().collect::<Vec<_>>();
+        let snapshot = network_snapshot(mode, &ids);
+        assert!(!catalog.snapshot_requires_network(&snapshot).unwrap());
+        let bindings = catalog.resolve_snapshot(&snapshot).unwrap();
+        assert_eq!(
+            bindings
+                .iter()
+                .map(|binding| binding.id.as_str())
+                .collect::<Vec<_>>(),
+            expected
+        );
+    }
+    for (mode, ids) in [
+        ("enabled", vec![]),
+        ("auto", vec!["online"]),
+        ("auto", vec!["remote"]),
+    ] {
+        let snapshot = network_snapshot(mode, &ids);
+        assert!(catalog.snapshot_requires_network(&snapshot).unwrap());
+        assert!(
+            catalog
+                .resolve_snapshot(&snapshot)
+                .unwrap_err()
+                .to_string()
+                .contains("network")
+        );
+    }
+
+    crate::plugin_test_support::system_plugin(root.path(), SystemPlugin::Network);
+    for (mode, ids, expected) in [
+        ("enabled", vec![], vec!["network"]),
+        ("auto", vec!["offline"], vec!["offline"]),
+        ("auto", vec!["online"], vec!["network", "online"]),
+        ("auto", vec!["remote"], vec!["network", "remote"]),
+        ("denied", vec!["remote"], vec!["remote"]),
+    ] {
+        let snapshot = network_snapshot(mode, &ids);
+        let digest = snapshot.digest().unwrap();
+        let bindings = catalog.resolve_snapshot(&snapshot).unwrap();
+        assert_eq!(
+            bindings
+                .iter()
+                .map(|binding| binding.id.as_str())
+                .collect::<Vec<_>>(),
+            expected
+        );
+        assert_eq!(snapshot.digest().unwrap(), digest);
+    }
+    fs::remove_file(root.path().join("plugins/online/plugin.json")).unwrap();
+    assert!(
+        catalog
+            .snapshot_requires_network(&network_snapshot("auto", &["online"]))
+            .is_err()
+    );
+}
+
+#[test]
+fn catalogs_without_metadata_resolve_only_explicit_network_requirements() {
+    #[derive(Default)]
+    struct Catalog(std::sync::Mutex<Vec<String>>);
+    impl PluginCatalog for Catalog {
+        fn resolve(&self, ids: &[String]) -> Result<Vec<PluginBinding>, GraphError> {
+            *self.0.lock().unwrap() = ids.to_vec();
+            Ok(Vec::new())
+        }
+    }
+    let catalog = Catalog::default();
+    for (mode, expected) in [
+        ("denied", vec!["offline"]),
+        ("auto", vec!["offline"]),
+        ("enabled", vec!["network", "offline"]),
+    ] {
+        catalog
+            .resolve_snapshot(&network_snapshot(mode, &["offline"]))
+            .unwrap();
+        assert_eq!(*catalog.0.lock().unwrap(), expected);
+    }
+}
+
+#[test]
+fn system_identity_requires_the_releases_public_resources_and_inventory() {
+    let root = tempfile::tempdir().unwrap();
+    let catalog = FilePluginCatalog::new(root.path());
+    for plugin in crate::all_system_plugins() {
+        crate::plugin_test_support::system_plugin(root.path(), *plugin);
+        let definition = catalog.definition(plugin.id()).unwrap();
+        assert_eq!(definition.system, Some(*plugin));
+        assert_eq!(catalog.metadata(plugin.id()).unwrap().system, Some(*plugin));
+        assert_eq!(definition.metadata().system, Some(*plugin));
+        assert_eq!(SystemPlugin::from_id(plugin.id()), Some(*plugin));
+
+        let skill = plugin
+            .public_files()
+            .iter()
+            .find(|(path, _)| path.ends_with("SKILL.md"))
+            .unwrap()
+            .0;
+        fs::write(definition.directory.join(skill), "modified public content").unwrap();
+        assert!(catalog.definition(plugin.id()).is_err());
+        assert!(catalog.metadata(plugin.id()).is_err());
+        assert!(catalog.channels(plugin.id()).is_err());
+        assert!(catalog.mcp_servers(plugin.id(), false).is_err());
+        crate::plugin_test_support::system_plugin(root.path(), *plugin);
+
+        let extra = definition.directory.join("unexpected.txt");
+        fs::write(&extra, "not a platform resource").unwrap();
+        assert!(catalog.definition(plugin.id()).is_err());
+        fs::remove_file(extra).unwrap();
+        assert!(catalog.definition(plugin.id()).is_ok());
+    }
+    assert_eq!(SystemPlugin::from_id("git"), None);
+    assert_eq!(SystemPlugin::from_id("anchor-steward"), None);
+}
+
+#[test]
+fn extensions_cannot_assert_system_identity_or_claim_host_channel_platforms() {
+    let root = tempfile::tempdir().unwrap();
+    let directory = root.path().join("plugins/extension");
+    fs::create_dir_all(&directory).unwrap();
+    let manifest = directory.join("plugin.json");
+    fs::write(&manifest, r#"{"name":"Extension","system":true}"#).unwrap();
+    let catalog = FilePluginCatalog::new(root.path());
+    assert!(catalog.definition("extension").is_err());
+    fs::write(&manifest, r#"{"name":"Extension"}"#).unwrap();
+    assert_eq!(catalog.definition("extension").unwrap().system, None);
+    for plugin in [SystemPlugin::Feishu, SystemPlugin::Wecom] {
+        let channel = plugin
+            .public_files()
+            .iter()
+            .find(|(path, _)| *path == "channel.json")
+            .unwrap()
+            .1;
+        fs::write(directory.join("channel.json"), channel).unwrap();
+        assert!(catalog.definition("extension").is_err());
+        assert!(catalog.channels("extension").is_err());
+    }
+    fs::remove_file(directory.join("channel.json")).unwrap();
+    fs::rename(directory, root.path().join("plugins/graph-tasks")).unwrap();
+    assert!(catalog.definition("graph-tasks").is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn system_executables_must_remain_executable() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    crate::plugin_test_support::system_plugin(root.path(), SystemPlugin::Network);
+    let path = root.path().join("plugins/network/bin/anchor-network-tools");
+    fs::set_permissions(path, fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(
+        FilePluginCatalog::new(root.path())
+            .metadata("network")
+            .is_err()
+    );
+}
+
 #[test]
 fn a_network_requirement_is_strict_and_part_of_the_approved_plugin_code() {
     let (tmp, catalog) = catalog_with_dependency_plugin();

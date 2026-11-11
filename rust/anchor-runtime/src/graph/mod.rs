@@ -22,6 +22,7 @@ pub use model::*;
 mod admission;
 mod authoring;
 mod logic;
+mod network;
 pub(crate) use logic::*;
 mod state;
 pub use state::*;

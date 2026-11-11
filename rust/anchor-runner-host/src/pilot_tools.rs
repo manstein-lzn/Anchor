@@ -122,9 +122,13 @@ pub(crate) async fn frozen_turn_tools(
     };
     let (mut bindings, mut reasons) =
         crate::node_host::session_plugin_mounts(library_root, &fixture, &frozen.switches)?;
-    let network = crate::plugin_network::apply(
+    let network = crate::plugin_network::apply_node(
         library_root,
         &mut bindings,
+        crate::plugin_network::session_mode(
+            &frozen.snapshot.mounts,
+            frozen.snapshot.network_allowed,
+        ),
         frozen.snapshot.network_allowed,
         &mut reasons,
     )?;
@@ -1097,12 +1101,7 @@ mod frozen_mounts_tests {
                 )
                 .unwrap();
             let path = root.path().to_path_buf();
-            std::fs::create_dir_all(path.join("plugins/network")).unwrap();
-            std::fs::write(
-                path.join("plugins/network/plugin.json"),
-                json!({"name":"联网","network":true}).to_string(),
-            )
-            .unwrap();
+            crate::test_network_plugin(&path);
             let workspace_root = path.join("workspaces");
             std::fs::create_dir_all(&workspace_root).unwrap();
             Self {
@@ -1341,6 +1340,7 @@ mod frozen_mounts_tests {
     #[tokio::test]
     async fn an_installed_plugin_with_an_http_server_reaches_the_pilots_tool_list() {
         let _env = crate::PROCESS_ENV_LOCK.lock().await;
+        let _commands = EnvVar::set("ANCHOR_RUNNER_ALLOWED_COMMANDS", "true");
         let fixture = Fixture::new();
         let server = http_mcp_fixture().await;
         let plugin = fixture.root.join("plugins/demo");
@@ -1371,6 +1371,7 @@ mod frozen_mounts_tests {
     #[tokio::test]
     async fn network_denial_excludes_host_http_mcp_and_is_frozen_for_the_turn() {
         let _env = crate::PROCESS_ENV_LOCK.lock().await;
+        let _commands = EnvVar::set("ANCHOR_RUNNER_ALLOWED_COMMANDS", "true");
         let fixture = Fixture::new();
         let server = http_mcp_fixture().await;
         let plugin = fixture.root.join("plugins/remote");
@@ -1409,38 +1410,6 @@ mod frozen_mounts_tests {
         assert!(plugin_port(&allowed, "remote-api_echo").is_some());
     }
 
-    fn network_binary() -> PathBuf {
-        let executable = std::env::current_exe().unwrap();
-        let profile = executable.parent().unwrap().parent().unwrap();
-        let target = profile.parent().unwrap();
-        let mut build = std::process::Command::new("cargo");
-        build
-            .args([
-                "build",
-                "--offline",
-                "-p",
-                "anchor-network-tools",
-                "--manifest-path",
-            ])
-            .arg(
-                Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .parent()
-                    .unwrap()
-                    .join("Cargo.toml"),
-            )
-            .env("CARGO_TARGET_DIR", target);
-        if profile.file_name().is_some_and(|name| name == "release") {
-            build.arg("--release");
-        }
-        let output = build.output().unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        profile.join("anchor-network-tools")
-    }
-
     #[tokio::test]
     async fn a_real_stdio_client_connects_only_with_the_network_capability_and_denial_does_not_break_offline_tools()
      {
@@ -1448,16 +1417,17 @@ mod frozen_mounts_tests {
         let _commands = EnvVar::set("ANCHOR_RUNNER_ALLOWED_COMMANDS", "sh,cat,printf,true");
 
         let fixture = Fixture::new();
-        let executable = network_binary();
         // The same network client installed as an offline Plugin: it must run,
         // but a connection to the Host's listener must be denied by the kernel.
-        for id in ["network", "probe"] {
-            let directory = fixture.root.join("plugins").join(id);
-            std::fs::create_dir_all(directory.join("bin")).unwrap();
-            std::fs::copy(&executable, directory.join("bin/anchor-network-tools")).unwrap();
-            std::fs::write(directory.join("plugin.json"), json!({"name":id,"network":id == "network",
-                "mcpServers":{"http":{"command":"bin/anchor-network-tools","env":{"ANCHOR_NETWORK_WORKSPACE":"/workspace"}}}}).to_string()).unwrap();
-        }
+        let directory = fixture.root.join("plugins/probe");
+        std::fs::create_dir_all(directory.join("bin")).unwrap();
+        std::fs::copy(
+            crate::test_network_binary(),
+            directory.join("bin/anchor-network-tools"),
+        )
+        .unwrap();
+        std::fs::write(directory.join("plugin.json"), json!({"name":"Offline probe","network":false,
+            "mcpServers":{"http":{"command":"bin/anchor-network-tools","env":{"ANCHOR_NETWORK_WORKSPACE":"/workspace"}}}}).to_string()).unwrap();
         let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let seen = hits.clone();
         let socket = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
@@ -1511,9 +1481,10 @@ mod frozen_mounts_tests {
             .sessions
             .set_network_allowed("local", "sess", false, "operator")
             .unwrap();
+        std::fs::remove_dir_all(fixture.root.join("plugins/network")).unwrap();
         let (denied, reasons) = fixture.freeze("denied").await;
         assert!(plugin_port(&denied, "network-http_request").is_none());
-        assert!(reasons.iter().any(|reason| reason.contains("禁止联网")));
+        assert!(reasons.is_empty(), "{reasons:?}");
         let port = plugin_port(&denied, "probe-http_request").unwrap();
         assert!(
             port.call("probe-http_request", json!({"url":url}))

@@ -95,6 +95,10 @@ for tool in anchor-runner-host anchor-net-relay; do
 done
 cat > "$CARGO_TARGET_DIR/debug/anchor-library" <<'INSTALL'
 #!/bin/sh
+if [ "$8" = --review ]; then
+  printf '{"kind":"extension","digest":"fixture"}\n'
+  exit 0
+fi
 mkdir -p "$2/plugins/$7"
 cp -R "$5/." "$2/plugins/$7/"
 INSTALL

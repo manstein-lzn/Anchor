@@ -9,8 +9,8 @@ usage() {
 Usage: scripts/build-platform-release.sh --goose PINNED_ELF --output NEW.tar.gz
        [--build-root DIRECTORY] [--skip-build]
 
-Build Host, network relay, sandbox networking, native platform launcher and
-network MCP plus WebUI, prepare fixed uv/Rustup/pixi tools, and create a format-3
+Build Host, network relay, sandbox networking, native platform launcher,
+network/Git/WeCom MCPs and Feishu/WeCom gateways plus WebUI, prepare fixed uv/Rustup/pixi tools, and create a format-3
 platform archive without a business Graph. Does not run or deploy the Host.
 --skip-build packages existing <build-root>/target/release binaries and WebUI.
 Operator build requirements: Rust stable, Node/npm, curl, tar, coreutils.
@@ -38,7 +38,8 @@ target="$build_root/target"
 if (( !skip_build )); then
   cargo +stable build --manifest-path "$repo/rust/Cargo.toml" --locked --release \
     --target-dir "$target" -p anchor-runner-host -p anchor-sandbox-bwrap \
-    -p anchor-network-tools -p anchor-distribution --bins
+    -p anchor-network-tools -p anchor-git-tools -p anchor-wecom-tools \
+    -p anchor-feishu-gateway -p anchor-wecom-gateway -p anchor-distribution --bins
   npm --prefix "$repo/apps/web" ci
   npm --prefix "$repo/apps/web" run build
 fi
@@ -47,7 +48,7 @@ if [[ ! -d "$build_root/bootstrap" ]]; then
 fi
 inputs=$(mktemp -d "$build_root/package-inputs.XXXXXXXX")
 trap 'rm -rf -- "$inputs"' EXIT
-for binary in anchor-distribution anchor-runner-host anchor-net-relay anchor-sandbox-network anchor-platform anchor-network-tools; do
+for binary in anchor-distribution anchor-runner-host anchor-net-relay anchor-sandbox-network anchor-platform anchor-network-tools anchor-git-tools anchor-wecom-tools anchor-feishu-gateway anchor-wecom-gateway; do
   # Cargo output may be hardlinked to target/deps; packaging admits independent
   # ordinary copies and records precisely these bytes.
   cp -- "$target/release/$binary" "$inputs/$binary"
@@ -58,6 +59,10 @@ done
   --sandbox-network "$inputs/anchor-sandbox-network" \
   --platform-launcher "$inputs/anchor-platform" \
   --web "$repo/apps/web/dist" --network-tools "$inputs/anchor-network-tools" \
+  --git-tools "$inputs/anchor-git-tools" \
+  --wecom-tools "$inputs/anchor-wecom-tools" \
+  --feishu-gateway "$inputs/anchor-feishu-gateway" \
+  --wecom-gateway "$inputs/anchor-wecom-gateway" \
   --uv "$build_root/bootstrap/uv" --rustup-init "$build_root/bootstrap/rustup-init" \
   --pixi "$build_root/bootstrap/pixi" \
   --output "$output"

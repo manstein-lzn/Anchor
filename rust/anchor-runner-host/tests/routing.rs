@@ -1,4 +1,7 @@
 //! End-to-end tests for deterministic Op routing through the production Host.
+#[allow(dead_code)]
+#[path = "support/runtime_fixture.rs"]
+mod fixture;
 use anchor_kernel::{FileStore, Store};
 use serde_json::{Value, json};
 use std::{
@@ -40,11 +43,19 @@ fn spawn_with_library(
     library: Option<&Path>,
 ) -> Child {
     let bundle = root.join("bundle");
+    let plugins = anchor_runtime::graph::GraphSnapshot::from_authoring(graph.clone())
+        .unwrap()
+        .nodes
+        .into_iter()
+        .flat_map(|node| node.plugins.into_iter().map(|plugin| plugin.id))
+        .collect::<std::collections::BTreeSet<_>>();
     fs::create_dir_all(&bundle).unwrap();
     fs::write(bundle.join("graph.json"), graph.to_string()).unwrap();
     fs::write(
         bundle.join("manifest.json"),
-        r#"{"format":1,"graph":"graph.json","plugins":[]}"#,
+        json!({"format":1,"graph":"graph.json","plugins":plugins.into_iter().map(|id| json!({"id":id}))
+            .collect::<Vec<_>>()})
+        .to_string(),
     )
     .unwrap();
     let mut command = Command::new(env!("CARGO_BIN_EXE_anchor-runner-host"));
@@ -53,6 +64,7 @@ fn spawn_with_library(
         command.env("ANCHOR_RUNNER_LIBRARY_ROOT", library);
     }
     let mut child = command
+        .env("ANCHOR_RUNNER_CATALOG_ROOT", root.join("catalog"))
         .env("ANCHOR_RUNNER_STATE_ROOT", root.join("state"))
         .env("ANCHOR_RUNNER_WORKSPACE_ROOT", root.join("work"))
         .env("ANCHOR_RUNNER_BUNDLE_ROOT", bundle)
@@ -305,8 +317,8 @@ fn op_network_declaration_controls_business_network_access() {
         "bash -c 'printf business-network-authorized > /dev/tcp/{business_address}/{port}'"
     );
     let mut definition = json!({
-        "entry":"network", "ops":{"connect":{"run":shell,"network":false}},
-        "nodes":[{"id":"network","op":"connect"}], "edges":[]
+        "entry":"network", "ops":{"connect":{"run":shell}},
+        "nodes":[{"id":"network","op":"connect","plugins":[{"id":"network","network":"denied"}]}], "edges":[]
     });
     let denied = finish(spawn(
         root.path(),
@@ -340,7 +352,11 @@ fn op_network_declaration_controls_business_network_access() {
             }
         }
     });
-    definition["ops"]["connect"]["network"] = json!(true);
+    fixture::install_system_plugin(
+        &root.path().join("catalog"),
+        anchor_graph_host::SystemPlugin::Network,
+    );
+    definition["nodes"][0]["plugins"][0]["network"] = json!("enabled");
     let allowed = finish(spawn(
         root.path(),
         "network-enabled",

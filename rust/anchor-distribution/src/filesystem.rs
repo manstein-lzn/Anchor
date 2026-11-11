@@ -422,14 +422,20 @@ pub(crate) struct Output {
 
 impl Output {
     pub(crate) fn new(path: &Path) -> Result<Self> {
+        Self::with_extension(path, ".tar.gz")
+    }
+
+    pub(crate) fn with_extension(path: &Path, extension: &str) -> Result<Self> {
         let path = absolute(path)?;
         let name = path
             .file_name()
             .and_then(|name| name.to_str())
-            .ok_or_else(|| PackageError::Invalid("output must name a new tar.gz file".into()))?;
+            .ok_or_else(|| PackageError::Invalid("output must name a new file".into()))?;
         validation::safe_component(name)?;
-        if !name.ends_with(".tar.gz") {
-            return Err(PackageError::Invalid("output must end in .tar.gz".into()));
+        if !name.ends_with(extension) {
+            return Err(PackageError::Invalid(format!(
+                "output must end in {extension}"
+            )));
         }
         let directory = open_path(
             path.parent()
@@ -521,4 +527,14 @@ impl Output {
             .map_err(|_| PackageError::PublicationUncertain(self.path.clone()))?;
         Ok(())
     }
+}
+
+pub(crate) fn make_directories_writable(path: &Path) -> Result<()> {
+    if fs::symlink_metadata(path)?.is_dir() {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+        for entry in fs::read_dir(path)? {
+            make_directories_writable(&entry?.path())?;
+        }
+    }
+    Ok(())
 }

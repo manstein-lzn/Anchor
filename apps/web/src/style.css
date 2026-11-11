@@ -261,6 +261,10 @@ input[type=checkbox] { accent-color: var(--accent); }
 .search-field input:focus { outline: none; }
 .new-graph { display: flex; align-items: center; justify-content: center; gap: 6px; width: 100%; padding: 4px 8px; cursor: pointer; border-radius: var(--radius); margin-bottom: 12px; background: var(--surface); color: var(--accent); border: 1px solid var(--line); font-weight: 500; min-height: var(--control-height); font-size: 12px; }
 .library-list { display: flex; flex-direction: column; gap: 2px; }
+.completed-tasks { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 8px; }
+.completed-tasks-toggle { display: flex; align-items: center; gap: 5px; width: 100%; min-height: var(--control-height); padding: 4px 0; border: 0; background: transparent; color: var(--muted); font: inherit; font-size: 11px; text-align: left; cursor: pointer; }
+.completed-tasks-toggle > span:first-of-type { flex: 1; }
+.completed-tasks-toggle[aria-expanded="false"] > svg { transform: rotate(-90deg); }
 .library-row { display: flex; align-items: center; width: 100%; text-align: left; font: inherit; color: inherit; cursor: pointer; background: transparent; border: 1px solid transparent; border-radius: var(--radius); justify-content: flex-start; padding: 7px 8px; gap: 7px; font-size: 12px; }
 .library-row svg { color: #85958c; }
 .library-row.chosen { background: #e7f1eb; border-color: #d4e5da; color: #226346; font-weight: 600; }

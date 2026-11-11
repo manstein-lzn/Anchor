@@ -178,6 +178,43 @@ fn plugin_mounts_are_read_by_session_id_and_an_absent_session_is_no_override() {
 }
 
 #[test]
+fn network_policy_is_one_owner_bound_transaction_and_event_without_new_session_fields() {
+    let (_directory, path, store) = fixture();
+    create(&store, "owner", "network-policy");
+    let before = store.get("owner", "network-policy").unwrap();
+    assert!(
+        store
+            .set_network_policy("other", "network-policy", true, true, "other")
+            .is_err()
+    );
+    assert_eq!(store.get("owner", "network-policy").unwrap(), before);
+    for (enabled, allowed) in [(true, true), (false, false), (false, true)] {
+        let updated = store
+            .set_network_policy("owner", "network-policy", enabled, allowed, "operator")
+            .unwrap();
+        assert_eq!(updated.plugin_mounts.get("network"), Some(&enabled));
+        assert_eq!(updated.network_allowed, allowed);
+        let events = store.events("owner", "network-policy", 0).unwrap();
+        let event = events.last().unwrap();
+        assert_eq!(event.kind, "session.network.changed");
+        assert_eq!(event.data.get("enabled"), Some(&json!(enabled)));
+        assert_eq!(event.data.get("allowed"), Some(&json!(allowed)));
+        store
+            .set_network_policy("owner", "network-policy", enabled, allowed, "operator")
+            .unwrap();
+        assert_eq!(
+            store.events("owner", "network-policy", 0).unwrap().len(),
+            events.len()
+        );
+    }
+    let reopened = SessionStore::open(path).unwrap();
+    assert_eq!(
+        reopened.plugin_policy("network-policy").unwrap(),
+        (BTreeMap::from([("network".into(), false)]), true)
+    );
+}
+
+#[test]
 fn sessions_mounting_counts_every_owner_and_ignores_switches_that_are_off() {
     let (_directory, _path, store) = fixture();
     create(&store, "owner-a", "session-a");

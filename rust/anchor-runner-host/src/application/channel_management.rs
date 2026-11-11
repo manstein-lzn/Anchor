@@ -12,8 +12,46 @@ use std::{
     path::{Path, PathBuf},
 };
 
-/// The only channel platform this Host supports.
-pub(crate) const PLATFORM: &str = "wecom";
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ChannelPlatform {
+    #[default]
+    Wecom,
+    Feishu,
+}
+
+impl ChannelPlatform {
+    pub(crate) const ALL: [Self; 2] = [Self::Wecom, Self::Feishu];
+
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|platform| platform.as_str() == value)
+    }
+
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Wecom => "wecom",
+            Self::Feishu => "feishu",
+        }
+    }
+
+    pub(crate) fn account_field(self) -> &'static str {
+        match self {
+            Self::Wecom => "WECOM_BOT_ID",
+            Self::Feishu => "FEISHU_APP_ID",
+        }
+    }
+
+    pub(crate) fn account_identity(self, identity: &str) -> String {
+        use sha2::{Digest, Sha256};
+        format!(
+            "{}:{:x}",
+            self.as_str(),
+            Sha256::digest(identity.trim().as_bytes())
+        )
+    }
+}
 
 /// The operator-approved settings of one Graph's bot. The Graph is the
 /// binding's key; the reply node is derived from the Graph, never configured.
@@ -40,6 +78,19 @@ pub(crate) struct ChannelMembers {
 }
 
 impl ChannelBinding {
+    pub(crate) fn validate_for_platform(
+        &self,
+        platform: ChannelPlatform,
+    ) -> Result<(), ApplicationError> {
+        self.validate()?;
+        if platform == ChannelPlatform::Feishu && !self.private_only {
+            return Err(ApplicationError::Invalid(
+                "Feishu supports private chats only; private_only must be true".into(),
+            ));
+        }
+        Ok(())
+    }
+
     pub(crate) fn allows_inbound(&self, userid: &str) -> bool {
         Self::allows_user(&self.users, userid)
     }
@@ -104,6 +155,7 @@ impl ChannelBinding {
 pub(crate) struct ChannelPlan {
     pub(crate) work_node: String,
     pub(crate) plugin: String,
+    pub(crate) platform: ChannelPlatform,
 }
 
 /// The single rule for "this Graph is a bot Graph": a persistent assistant
@@ -124,16 +176,21 @@ pub(crate) fn channel_plan(
         .iter()
         .find(|node| node.id == plan.work_node)
         .ok_or(ApplicationError::Missing)?;
-    let mut channels = node.plugins.iter().filter(|reference| {
+    let mut channels = node.plugins.iter().flat_map(|reference| {
         catalog
             .channels(&reference.id)
-            .is_ok_and(|channels| channels.iter().any(|channel| channel.platform == PLATFORM))
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(move |channel| {
+                ChannelPlatform::parse(&channel.platform).map(|platform| (reference, platform))
+            })
     });
     match (channels.next(), channels.next()) {
         (None, _) => Ok(None),
-        (Some(plugin), None) => Ok(Some(ChannelPlan {
+        (Some((plugin, platform)), None) => Ok(Some(ChannelPlan {
             work_node: plan.work_node,
             plugin: plugin.id.clone(),
+            platform,
         })),
         (Some(_), Some(_)) => Err(ApplicationError::Invalid(TWO_CHANNELS.into())),
     }
@@ -145,6 +202,7 @@ pub(crate) fn channel_plan(
 pub(crate) struct ChannelRuntimeState {
     pub(crate) graph: String,
     pub(crate) owner: String,
+    pub(crate) platform: ChannelPlatform,
     pub(crate) binding: ChannelBinding,
     /// The Graph's assistant node while the Graph still admits as this bot.
     pub(crate) reply_node: Option<String>,
@@ -227,7 +285,7 @@ impl RunApplication {
         })?;
         let current = port
             .snapshot(&saved.graph)?
-            .filter(|current| source == PLATFORM && current.enabled)
+            .filter(|current| source == current.platform.as_str() && current.enabled)
             .ok_or_else(|| {
                 ApplicationError::Conflict("channel Session's Graph has no enabled bot".into())
             })?;
@@ -285,7 +343,7 @@ impl RunApplication {
             send_users: members.send_users,
             private_only: members.private_only,
         };
-        binding.validate()?;
+        binding.validate_for_platform(plan.platform)?;
         port.configure(owner, graph, binding.normalized()).await
     }
 
@@ -330,7 +388,7 @@ impl RunApplication {
         }
         if enabled {
             let plan = self.channel_bot_plan(graph)?;
-            if plan.plugin != state.binding.plugin {
+            if plan.plugin != state.binding.plugin || plan.platform != state.platform {
                 return Err(ApplicationError::Conflict(
                     "the Graph mounts a different channel Plugin; configure the bot again".into(),
                 ));
@@ -362,7 +420,9 @@ impl RunApplication {
         };
         if let Some(state) = port.snapshot(graph)?
             && state.saved_enabled
-            && plan.is_none_or(|plan| plan.plugin != state.binding.plugin)
+            && plan.is_none_or(|plan| {
+                plan.plugin != state.binding.plugin || plan.platform != state.platform
+            })
         {
             return Err(ApplicationError::Conflict(STOP_FIRST.into()));
         }

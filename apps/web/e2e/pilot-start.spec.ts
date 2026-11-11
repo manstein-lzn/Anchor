@@ -56,7 +56,7 @@ async function fixture(page: Page, options: { failFirstTurn?: boolean; firstTurn
     if (path === '/sessions/start-session/plugins') {
       facts.pluginReads++;
       return route.fulfill({ json: { plugins: [{ id: 'network', name: '联网', on: true,
-        explicitOn: true, available: true, networkProvider: true, networkAllowed: true, networkPermission: true }] } });
+        explicitOn: true, available: true, networkProvider: true, networkAllowed: true, networkMode: 'enabled' }] } });
     }
     if (path === '/sessions/start-session/turns') {
       if (method !== 'POST') return route.fulfill({ json: { turns } });
@@ -151,7 +151,7 @@ test('the first task creates one session and moves the same composer into the co
   expect(facts.turnWrites[0].message).toBe(prompt);
   await expect(page.getByRole('button', { name: '展开插件面板', exact: true })).toHaveAttribute('aria-expanded', 'false');
   await page.getByRole('button', { name: '展开插件面板', exact: true }).click();
-  await expect(page.getByRole('switch', { name: '取消挂载 联网', exact: true })).toBeVisible();
+  await expect(page.getByRole('combobox', { name: '联网策略', exact: true })).toHaveValue('enabled');
   await input.fill('后续草稿保留');
   await page.getByRole('button', { name: '收起插件面板', exact: true }).click();
   await expect(input).toHaveValue('后续草稿保留');

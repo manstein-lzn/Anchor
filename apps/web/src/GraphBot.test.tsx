@@ -12,17 +12,19 @@ describe('a Graph bot', () => {
   let root: Root;
   let fetchMock: ReturnType<typeof vi.fn>;
   let status: Record<string, unknown>;
+  let channelPlugin: string;
   const requests = () => fetchMock.mock.calls.map(([path, init]) => ({ path, method: init?.method ?? 'GET', body: init?.body ? JSON.parse(init.body) : undefined }));
   const button = (name: string) => [...container.querySelectorAll<HTMLButtonElement>('button')].find(item => item.textContent === name)!;
   const render = async (node: React.ReactNode) => { await act(async () => root.render(node)); };
   beforeEach(() => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     container = document.createElement('div'); document.body.appendChild(container); root = createRoot(container);
-    status = { graph: 'helper', configured: true, owner_matches: true, mutable: true, enabled: false, listener: 'stopped',
-      binding: { plugin: 'wecom', users: ['alice'], send_users: [] } };
+    channelPlugin = 'wecom';
+    status = { graph: 'helper', platform: 'wecom', configured: true, owner_matches: true, mutable: true, enabled: false, listener: 'stopped',
+      binding: { plugin: channelPlugin, users: ['alice'], send_users: [] } };
     fetchMock = vi.fn(async (path: string, init: RequestInit = {}) => {
       if (path === '/graphs/helper/channel') {
-        if (init.method === 'PUT') status = { ...status, binding: { plugin: 'wecom', ...JSON.parse(String(init.body)) } };
+        if (init.method === 'PUT') status = { ...status, binding: { plugin: channelPlugin, ...JSON.parse(String(init.body)) } };
         return response(200, status);
       }
       if (path === '/graphs/helper/channel/enabled') { status = { ...status, enabled: JSON.parse(String(init.body)).enabled, listener: 'authenticated' }; return response(200, status); }
@@ -41,6 +43,10 @@ describe('a Graph bot', () => {
 
   it('saves members, uses this Graph\'s credentials and enables with the saved binding', async () => {
     await render(<GraphBot graph="helper" pluginId="wecom" saved />);
+    expect(container.textContent).toContain('企业微信消息到达时');
+    expect(container.textContent).toContain('Bot ID 和 Secret');
+    expect(container.textContent).toContain('允许主动发送的成员');
+    expect(container.querySelector<HTMLInputElement>('input[type="checkbox"]')?.disabled).toBe(false);
     expect(container.querySelector('[data-testid="credentials"]')?.textContent).toBe('wecom /graphs/helper/channel/credentials');
     const send = container.querySelectorAll('textarea')[1];
     await act(async () => {
@@ -61,9 +67,40 @@ describe('a Graph bot', () => {
   });
 
   it('cannot be enabled before members are saved', async () => {
-    status = { graph: 'helper', configured: false, enabled: false, listener: 'stopped', mutable: true };
+    status = { graph: 'helper', platform: 'wecom', configured: false, enabled: false, listener: 'stopped', mutable: true };
     await render(<GraphBot graph="helper" pluginId="wecom" saved />);
     expect(button('启用机器人').disabled).toBe(true);
+  });
+
+  it('uses the unconfigured platform fact for Feishu setup and saves a private-only open_id binding', async () => {
+    channelPlugin = 'chat-gateway';
+    status = { graph: 'helper', platform: 'feishu', configured: false, enabled: false, listener: 'stopped', mutable: true };
+    await render(<GraphBot graph="helper" pluginId={channelPlugin} saved />);
+    expect(container.textContent).toContain('飞书消息到达时');
+    expect(container.textContent).toContain('App ID 和 App Secret');
+    expect(container.textContent).toContain('保持本机 Host 在线');
+    expect(container.textContent).toContain('im.message.receive_v1');
+    expect(container.textContent).toContain('发布应用版本');
+    expect(container.textContent).not.toContain('企业微信');
+    expect(container.textContent).not.toContain('群内 @');
+    expect(container.textContent).not.toContain('主动发送');
+    expect(container.querySelector('[data-testid="credentials"]')?.textContent).toBe('chat-gateway /graphs/helper/channel/credentials');
+    const privateOnly = container.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+    expect(privateOnly.checked).toBe(true);
+    expect(privateOnly.disabled).toBe(true);
+    await act(async () => {
+      for (const textarea of container.querySelectorAll('textarea')) {
+        expect(textarea.placeholder).toContain('open_id');
+        Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(textarea, 'ou_alice');
+        textarea.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+    });
+    await act(async () => button('保存成员').click());
+    await act(async () => button('启用机器人').click());
+    expect(requests().filter(request => request.method !== 'GET')).toEqual([
+      { path: '/graphs/helper/channel', method: 'PUT', body: { users: ['ou_alice'], send_users: ['ou_alice'], private_only: true } },
+      { path: '/graphs/helper/channel/enabled', method: 'POST', body: { enabled: true, expected_binding: { plugin: channelPlugin, users: ['ou_alice'], send_users: ['ou_alice'], private_only: true } } },
+    ]);
   });
 
   it('repairs a failed enabled gateway without disabling the bot or changing its binding', async () => {

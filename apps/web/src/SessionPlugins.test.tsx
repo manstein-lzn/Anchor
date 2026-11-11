@@ -115,26 +115,31 @@ describe('the session plugin panel', () => {
     expect(container.textContent).toContain('还没有安装插件');
   });
 
-  it('shows dependency activation separately from the direct switch and applies network denial to every row', async () => {
+  it('uses one network policy control and applies denial to every row without an ordinary mount write', async () => {
     const networking = plugin({ id: 'network', name: '联网', on: true, explicitOn: false,
-      networkProvider: true, networkAllowed: true, networkPermission: true, enabledBy: ['research'] });
+      networkProvider: true, networkAllowed: true, networkMode: 'auto', enabledBy: ['research'] });
     const research = plugin({ id: 'research', name: '学术调研', on: true, requiresNetwork: true, networkAllowed: true });
     fetchMock.mockResolvedValueOnce(response(200, { plugins: [networking, research] }));
     fetchMock.mockResolvedValueOnce(response(200, { plugins: [
-      { ...networking, networkAllowed: false, networkPermission: false, available: false, error: '当前任务已禁止联网' },
+      { ...networking, networkAllowed: false, networkMode: 'denied', available: false, error: '当前任务已禁止联网' },
       { ...research, networkAllowed: false, available: false, error: '该插件需要联网：当前任务已禁止联网' },
     ] }));
     await draw();
     expect(container.textContent).toContain('由学术调研依赖启用');
-    expect(switches()[0].getAttribute('aria-checked')).toBe('false');
+    expect(switches()).toHaveLength(1);
+    expect(container.querySelector('[role="switch"][aria-label$=" 联网"]')).toBeNull();
     expect(container.textContent).toContain('2 已挂载');
-    const deny = [...container.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent === '禁止联网')!;
-    await act(async () => { deny.click(); });
+    const policy = container.querySelector<HTMLSelectElement>('.plugin-network-policy select')!;
+    expect(policy.value).toBe('auto');
+    await act(async () => { policy.value = 'denied'; policy.dispatchEvent(new Event('change', { bubbles: true })); });
     expect(posts()[0][0]).toBe('/sessions/s-1/network');
-    expect(posts()[0][1]).toMatchObject({ body: JSON.stringify({ allowed: false }) });
+    expect(posts()[0][1]).toMatchObject({ body: JSON.stringify({ mode: 'denied' }) });
+    expect(posts()).toHaveLength(1);
     expect(container.textContent).toContain('已禁止联网');
     expect(container.textContent).toContain('该插件需要联网：当前任务已禁止联网');
-    expect(container.textContent).toContain('允许联网');
+    expect(policy.value).toBe('denied');
+    expect(policy.disabled).toBe(false);
+    expect(container.textContent).toContain('插件依赖不能重新启用');
     expect(container.textContent).toContain('已保存，下次发消息时使用新设置');
   });
 
@@ -166,13 +171,26 @@ describe('the session plugin panel', () => {
     fetchMock.mockResolvedValueOnce(response(200, { plugins: [plugin({ id: 'network', name: '联网',
       networkProvider: true, networkAllowed: true, on: true, explicitOn: true })] }));
     await draw();
-    const policy = [...container.querySelectorAll<HTMLButtonElement>('.plugin-network-policy button')][0];
-    expect(policy.textContent).toBe('联网许可未知');
+    const policy = container.querySelector<HTMLSelectElement>('.plugin-network-policy select')!;
+    expect(policy.selectedOptions[0].textContent).toBe('联网策略未知');
     expect(policy.disabled).toBe(true);
     expect(container.textContent).not.toContain('已禁止联网');
     await act(async () => { policy.click(); });
     expect(posts()).toHaveLength(0);
-    expect(switches()[0].getAttribute('aria-checked')).toBe('true');
+    expect(switches()).toHaveLength(0);
+  });
+
+  it('retains the confirmed network mode after a failed save and never schedules a continuation', async () => {
+    fetchMock.mockResolvedValueOnce(response(200, { plugins: [plugin({ id: 'network', name: '联网',
+      networkProvider: true, networkMode: 'denied', networkAllowed: false })] }));
+    fetchMock.mockResolvedValueOnce(response(503, { error: '联网策略暂时无法保存' }));
+    const onContinuation = vi.fn();
+    await act(async () => root.render(<SessionPlugins session="s-1" onContinuation={onContinuation} />));
+    const policy = container.querySelector<HTMLSelectElement>('.plugin-network-policy select')!;
+    await act(async () => { policy.value = 'auto'; policy.dispatchEvent(new Event('change', { bubbles: true })); });
+    expect(policy.value).toBe('denied');
+    expect(container.textContent).toContain('联网策略暂时无法保存');
+    expect(onContinuation).not.toHaveBeenCalled();
   });
 
   it('sends one switch at a time while the first is still waiting on the Host', async () => {

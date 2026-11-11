@@ -15,13 +15,15 @@ import { Modal } from './ui';
 import type { Turn } from './PilotTurn';
 import { PluginSettings, pluginSettingStatus, type PluginInformation } from './PluginPanel';
 import { LibraryPluginDetails } from './LibraryPluginDetails';
+import { NetworkPolicy } from './NetworkPolicy';
+import type { NetworkMode } from './model';
 import './SessionPlugins.css';
 
 /** One installed Plugin as the Host reports it for a session. */
 export type SessionPlugin = PluginInformation & {
   required?: boolean; on?: boolean;
   explicitOn?: boolean; requiresNetwork?: boolean; networkProvider?: boolean;
-  networkAllowed?: boolean; networkPermission?: boolean; enabledBy?: string[];
+  networkAllowed?: boolean; networkMode?: NetworkMode; enabledBy?: string[];
 };
 
 export type PluginMountEffect = {
@@ -58,7 +60,7 @@ export function withPlugin(list: SessionPlugin[], plugin: SessionPlugin): Sessio
 
 /** A required Plugin has no switch to make, and one switch is already waiting on the Host. */
 export function maySwitch(plugin: SessionPlugin, inFlight: boolean): boolean {
-  return !plugin.required && !inFlight && (plugin.available !== false || (plugin.explicitOn ?? plugin.on) === true);
+  return !plugin.networkProvider && !plugin.required && !inFlight && (plugin.available !== false || (plugin.explicitOn ?? plugin.on) === true);
 }
 
 /** Turn the server's `error` into the line under the row, verbatim. */
@@ -185,19 +187,20 @@ export function SessionPlugins({ session, defaultOpen, onContinuation, continuat
       if (mounted.current && version === sessionVersion.current) { inFlight.current = false; setPending(''); }
     }
   };
-  const changeNetwork = async (plugin: SessionPlugin) => {
-    if (inFlight.current || typeof plugin.networkPermission !== 'boolean') return;
+  const changeNetwork = async (plugin: SessionPlugin, mode: NetworkMode) => {
+    if (inFlight.current || plugin.networkMode === undefined || mode === plugin.networkMode) return;
     inFlight.current = true;
     const version = sessionVersion.current;
     setPending(plugin.id);
     setRowError(current => { const next = { ...current }; delete next[plugin.id]; return next; });
     try {
       const result = await api<{ plugins: SessionPlugin[] }>(
-        `/sessions/${encodeURIComponent(session)}/network`, 'POST', { allowed: !plugin.networkPermission });
+        `/sessions/${encodeURIComponent(session)}/network`, 'POST', { mode });
+      if (!Array.isArray(result.plugins)) throw new Error('插件列表响应无效，请刷新后重试。');
       if (!mounted.current || version !== sessionVersion.current) return;
       listRevision.current += 1;
       setPlugins(result.plugins);
-      // The network permission API saves policy without scheduling continuation.
+      // Network policy is saved without scheduling continuation.
       setChanges(current => ({ ...current, [plugin.id]: { effect: { status: 'next_turn' } } }));
     } catch (error) {
       if (mounted.current && version === sessionVersion.current) setRowError(current => ({ ...current, [plugin.id]: mountProblem(error) }));
@@ -209,9 +212,9 @@ export function SessionPlugins({ session, defaultOpen, onContinuation, continuat
   const knowsCount = !!session && (plugins.length > 0 || (loaded && !listError));
   const loading = !!session && !loaded && !plugins.length && !listError;
   const pluginStatus = (plugin: SessionPlugin) => {
-    const direct = plugin.explicitOn ?? plugin.on;
     if (plugin.networkProvider) {
-      const enabled = direct ? '主动启用' : plugin.on ? '依赖启用' : '未启用';
+      const enabled = plugin.networkMode === undefined ? '联网策略未知' : plugin.networkMode === 'denied' ? '已禁止联网'
+        : plugin.networkMode === 'enabled' ? '主动启用' : plugin.on ? '自动 · 依赖启用' : '自动 · 未启用';
       return plugin.available === false ? `${enabled} · 不可用` : enabled;
     }
     return pluginSettingStatus(plugin, { selected: plugin.on === true }, { selectedLabel: '已挂载', unselectedLabel: '未挂载' });
@@ -229,21 +232,13 @@ export function SessionPlugins({ session, defaultOpen, onContinuation, continuat
           required: plugin.required, pending: pending === plugin.id, status: pluginStatus(plugin),
           problem: rowError[plugin.id], notice: changes[plugin.id] ? mountNotice(changes[plugin.id], continuation?.session === session ? continuation : null) : undefined })}
         onToggle={plugin => void toggle(plugin)} onDetails={setOpened}
+        control={plugin => plugin.networkProvider ? null : undefined}
         empty={<div className="plugin-empty"><strong>{session ? '还没有安装插件' : '为对话选择能力'}</strong>
           <p>{session ? '告诉 Pilot 你需要什么能力。安装完成后，插件会自动出现在这里。' : '先开始或选择一个对话，再为 Pilot 挂载需要的插件。'}</p></div>}>
         {plugin => {
-          const direct = plugin.explicitOn ?? plugin.on;
           const dependents = (plugin.enabledBy ?? []).map(id => plugins.find(item => item.id === id)?.name || id);
-          return <>
-          {plugin.networkProvider && <div className="plugin-network-policy">
-            <p>{dependents.length ? `${direct ? '主动启用 · ' : ''}由${dependents.join('、')}依赖启用` : direct ? '已主动启用' : '未启用'}
-              {' · '}{typeof plugin.networkPermission !== 'boolean' ? '联网许可未知'
-                : plugin.networkPermission === false ? '已禁止联网' : plugin.networkAllowed ? '网络访问已允许' : '网络访问未启用'}</p>
-            <button type="button" disabled={pending === plugin.id || typeof plugin.networkPermission !== 'boolean'}
-              onClick={() => void changeNetwork(plugin)}>
-              {typeof plugin.networkPermission !== 'boolean' ? '联网许可未知' : plugin.networkPermission === false ? '允许联网' : '禁止联网'}</button>
-          </div>}
-          </>;
+          return plugin.networkProvider && <NetworkPolicy mode={plugin.networkMode} onChange={mode => void changeNetwork(plugin, mode)}
+            pending={pending === plugin.id} scope="session" effective={plugin.networkAllowed} enabledBy={dependents} />;
         }}
       </PluginSettings>
     </div>

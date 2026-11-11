@@ -5,12 +5,12 @@ use crate::{
     Result, add_snapshots, archive, collect_environment, filesystem::Output, filesystem::Snapshot,
     generated_file, resource, validation,
 };
-use anchor_graph_host::{FilePluginCatalog, PluginCatalog};
+use anchor_graph_host::{FilePluginCatalog, PluginCatalog, all_system_plugins};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, File},
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
 pub const UV_VERSION: &str = "0.11.6";
@@ -27,6 +27,148 @@ pub const PIXI_SHA256: &str = "50571451e96f4a82cf675cd83baaf66fff9b718f0aaf15390
 pub const PIXI_SOURCE: &str =
     "https://github.com/prefix-dev/pixi/releases/download/v0.83.0/pixi-x86_64-unknown-linux-musl";
 
+// System resources come from the shared Host-owned inventory. Only ordinary
+// preinstalled Plugins live here; bundling does not change their lifecycle.
+struct ReleasePlugin {
+    id: &'static str,
+    files: &'static [(&'static str, &'static [u8])],
+    executables: &'static [&'static str],
+}
+
+const PREINSTALLED_PLUGINS: &[ReleasePlugin] = &[
+    ReleasePlugin {
+        id: "git",
+        files: &[
+            (
+                "plugin.json",
+                include_bytes!("../../../plugins/git/plugin.json").as_slice(),
+            ),
+            (
+                "skills/git/SKILL.md",
+                include_bytes!("../../../plugins/git/skills/git/SKILL.md").as_slice(),
+            ),
+        ],
+        executables: &["bin/anchor-git-tools"],
+    },
+    ReleasePlugin {
+        id: "anchor-steward",
+        files: &[
+            (
+                "plugin.json",
+                include_bytes!("../../../plugins/anchor-steward/plugin.json").as_slice(),
+            ),
+            (
+                "instructions.md",
+                include_bytes!("../../../plugins/anchor-steward/instructions.md").as_slice(),
+            ),
+            (
+                "skills/plugin-authoring/SKILL.md",
+                include_bytes!("../../../plugins/anchor-steward/skills/plugin-authoring/SKILL.md")
+                    .as_slice(),
+            ),
+            (
+                "skills/graph-authoring/SKILL.md",
+                include_bytes!("../../../plugins/anchor-steward/skills/graph-authoring/SKILL.md")
+                    .as_slice(),
+            ),
+            (
+                "skills/rust-development/SKILL.md",
+                include_bytes!("../../../plugins/anchor-steward/skills/rust-development/SKILL.md")
+                    .as_slice(),
+            ),
+            (
+                "skills/python-development/SKILL.md",
+                include_bytes!(
+                    "../../../plugins/anchor-steward/skills/python-development/SKILL.md"
+                )
+                .as_slice(),
+            ),
+            (
+                "skills/pixi-development/SKILL.md",
+                include_bytes!("../../../plugins/anchor-steward/skills/pixi-development/SKILL.md")
+                    .as_slice(),
+            ),
+            (
+                "skills/git-workflow/SKILL.md",
+                include_bytes!("../../../plugins/anchor-steward/skills/git-workflow/SKILL.md")
+                    .as_slice(),
+            ),
+        ],
+        executables: &[],
+    },
+];
+
+fn release_plugins() -> impl Iterator<Item = ReleasePlugin> {
+    all_system_plugins()
+        .iter()
+        .map(|plugin| ReleasePlugin {
+            id: plugin.id(),
+            files: plugin.public_files(),
+            executables: plugin.executables(),
+        })
+        .chain(PREINSTALLED_PLUGINS.iter().map(|plugin| ReleasePlugin {
+            id: plugin.id,
+            files: plugin.files,
+            executables: plugin.executables,
+        }))
+}
+
+pub(crate) fn release_plugin_resources() -> impl Iterator<Item = (String, u32)> {
+    release_plugins().flat_map(|plugin| {
+        plugin
+            .files
+            .iter()
+            .map(move |(path, _)| (format!("plugins/{}/{path}", plugin.id), 0o644))
+            .chain(
+                plugin
+                    .executables
+                    .iter()
+                    .map(move |path| (format!("plugins/{}/{path}", plugin.id), 0o755)),
+            )
+    })
+}
+
+pub(crate) fn release_plugin_resource_mode(path: &str) -> Option<u32> {
+    release_plugin_resources().find_map(|(file, mode)| (file == path).then_some(mode))
+}
+
+pub(crate) fn release_plugin_inventory(root: &Path) -> Result<Vec<PluginInventory>> {
+    for plugin in release_plugins() {
+        for (relative, expected) in plugin.files {
+            let path = format!("plugins/{}/{relative}", plugin.id);
+            if fs::read(root.join(&path))? != *expected {
+                return Err(PackageError::Invalid(format!(
+                    "platform Plugin resource differs from official bytes: {path}"
+                )));
+            }
+        }
+    }
+    let ids = release_plugins()
+        .map(|plugin| plugin.id.into())
+        .collect::<Vec<_>>();
+    FilePluginCatalog::new(root)
+        .resolve(&ids)
+        .map_err(|error| {
+            PackageError::Invalid(format!("platform Plugins failed shared admission: {error}"))
+        })
+        .map(|bindings| {
+            bindings
+                .into_iter()
+                .map(|binding| {
+                    // JSON object iteration can differ between builder and Host builds.
+                    let mut mcp_servers = binding.mcp_servers;
+                    mcp_servers.sort();
+                    PluginInventory {
+                        id: binding.id,
+                        digest: binding.digest,
+                        resources: binding.resources,
+                        mcp_servers,
+                    }
+                })
+                .collect()
+        })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlatformPackageRequest {
     pub host: PathBuf,
@@ -36,6 +178,10 @@ pub struct PlatformPackageRequest {
     pub platform_launcher: PathBuf,
     pub web: PathBuf,
     pub network_tools: PathBuf,
+    pub git_tools: PathBuf,
+    pub wecom_tools: PathBuf,
+    pub feishu_gateway: PathBuf,
+    pub wecom_gateway: PathBuf,
     pub uv: PathBuf,
     pub rustup_init: PathBuf,
     pub pixi: PathBuf,
@@ -129,23 +275,15 @@ fn prepare(
         .prefix("anchor-platform-distribution-")
         .tempdir()?;
     let root = staging.path();
-    for directory in [
-        "bin",
-        "plugins/network/bin",
-        "plugins/network/skills/network",
-    ] {
-        fs::create_dir_all(root.join(directory))?;
-    }
-    let mut entries = BTreeMap::from([(String::new(), None)]);
-    for directory in [
-        "bin",
-        "plugins",
-        "plugins/network",
-        "plugins/network/bin",
-        "plugins/network/skills",
-        "plugins/network/skills/network",
-    ] {
-        entries.insert(directory.into(), None);
+    fs::create_dir_all(root.join("bin"))?;
+    let mut entries = BTreeMap::from([(String::new(), None), ("bin".into(), None)]);
+    for (path, _) in release_plugin_resources() {
+        let mut path = path.as_str();
+        while let Some((parent, _)) = path.rsplit_once('/') {
+            fs::create_dir_all(root.join(parent))?;
+            entries.insert(parent.into(), None);
+            path = parent;
+        }
     }
     let mut snapshots = Vec::new();
     for (source, path) in [
@@ -160,6 +298,16 @@ fn prepare(
         (
             &request.network_tools,
             "plugins/network/bin/anchor-network-tools",
+        ),
+        (&request.git_tools, "plugins/git/bin/anchor-git-tools"),
+        (&request.wecom_tools, "plugins/wecom/bin/anchor-wecom-tools"),
+        (
+            &request.feishu_gateway,
+            "plugins/feishu/bin/anchor-feishu-gateway",
+        ),
+        (
+            &request.wecom_gateway,
+            "plugins/wecom/bin/anchor-wecom-gateway",
         ),
     ] {
         snapshots.push(Snapshot::file(source, root, path)?);
@@ -177,34 +325,14 @@ fn prepare(
             )));
         }
     }
-    for (path, bytes) in [
-        (
-            "plugins/network/plugin.json",
-            include_bytes!("../../../plugins/network/plugin.json").as_slice(),
-        ),
-        (
-            "plugins/network/skills/network/SKILL.md",
-            include_bytes!("../../../plugins/network/skills/network/SKILL.md").as_slice(),
-        ),
-    ] {
-        generated_file(root, path, bytes, &mut entries)?;
-        validation::resource_content(&root.join(path), path)?;
+    for plugin in release_plugins() {
+        for (relative, bytes) in plugin.files {
+            let path = format!("plugins/{}/{relative}", plugin.id);
+            generated_file(root, &path, bytes, &mut entries)?;
+            validation::resource_content(&root.join(&path), &path)?;
+        }
     }
-    let plugins = FilePluginCatalog::new(root)
-        .resolve(&["network".into()])
-        .map_err(|error| {
-            PackageError::Invalid(format!(
-                "native network Plugin failed shared admission: {error}"
-            ))
-        })?
-        .into_iter()
-        .map(|binding| PluginInventory {
-            id: binding.id,
-            digest: binding.digest,
-            resources: binding.resources,
-            mcp_servers: binding.mcp_servers,
-        })
-        .collect();
+    let plugins = release_plugin_inventory(root)?;
     let web = Snapshot::tree(&request.web, root, "web")?;
     add_snapshots(&mut entries, std::slice::from_ref(&web))?;
     snapshots.push(web);
@@ -300,7 +428,7 @@ fn prepare(
 
 const PLATFORM_README: &str = "# Anchor platform\n\n\
 This archive contains the Anchor Host, fixed Goose, sandbox network relay,\n\
-compiled WebUI, native network Plugin and pinned uv/Rustup/pixi bootstrap tools.\n\
+compiled WebUI, system network/Graph Tasks/Feishu/WeCom Plugins, ordinary Git/Anchor Dev Plugins, and pinned uv/Rustup/pixi bootstrap tools.\n\
 It contains no business Graph, Python interpreter, Rust toolchain, user model\n\
 configuration, credentials or mutable runtime state. Platform startup uses the\n\
 same Host and Runtime Kernel as standalone Graph packages.\n\n\
@@ -310,7 +438,7 @@ Keep this release read-only and mutable roots outside it. Bootstrap identity\n\
 is discovered from the Host's release; Pilot prepares Python/Rust on demand\n\
 into the Host's managed data root. User model configuration and network consent\n\
 are supplied outside this archive. Shipping the network Plugin does not grant\n\
-task network permission.\n\n\
+task network permission or activate channels and delegated task tools.\n\n\
 The supported machine must have Bubblewrap, slirp4netns, Git, shell, CA certificates and\n\
 runtime libraries named in the executable inventory. Rust compilation also\n\
 needs an authorized system linker. The distribution builder does not install\n\

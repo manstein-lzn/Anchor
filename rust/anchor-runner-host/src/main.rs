@@ -77,6 +77,74 @@ const MAX_FRAME: usize = 1024 * 1024;
 #[cfg(test)]
 pub(crate) static PROCESS_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+#[cfg(test)]
+pub(crate) fn test_system_plugin(root: &std::path::Path, plugin: anchor_graph_host::SystemPlugin) {
+    use std::os::unix::fs::PermissionsExt;
+    let directory = root.join("plugins").join(plugin.id());
+    for (relative, bytes) in plugin.public_files() {
+        let path = directory.join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, bytes).unwrap();
+    }
+    for relative in plugin.executables() {
+        let path = directory.join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"#!/bin/sh\nexit 1\n").unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn test_network_binary() -> PathBuf {
+    static BINARY: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    BINARY
+        .get_or_init(|| {
+            let executable = std::env::current_exe().unwrap();
+            let profile = executable.parent().unwrap().parent().unwrap();
+            let mut build = std::process::Command::new("cargo");
+            build
+                .args([
+                    "build",
+                    "--offline",
+                    "--locked",
+                    "-p",
+                    "anchor-network-tools",
+                    "-p",
+                    "anchor-sandbox-bwrap",
+                    "--bins",
+                    "--manifest-path",
+                ])
+                .arg(
+                    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                        .parent()
+                        .unwrap()
+                        .join("Cargo.toml"),
+                )
+                .env("CARGO_TARGET_DIR", profile.parent().unwrap());
+            if profile.file_name().is_some_and(|name| name == "release") {
+                build.arg("--release");
+            }
+            let output = build.output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            profile.join("anchor-network-tools")
+        })
+        .clone()
+}
+
+#[cfg(test)]
+pub(crate) fn test_network_plugin(root: &std::path::Path) {
+    test_system_plugin(root, anchor_graph_host::SystemPlugin::Network);
+    std::fs::copy(
+        test_network_binary(),
+        root.join("plugins/network/bin/anchor-network-tools"),
+    )
+    .unwrap();
+}
+
 fn create_durable_directory(path: &std::path::Path) -> io::Result<()> {
     // This general helper follows symlinks; host_fs::directory deliberately does not.
     std::fs::create_dir_all(path)?;
@@ -222,9 +290,6 @@ fn reject_snapshot(snapshot: &GraphSnapshot) -> Result<(), String> {
             .get("run")
             .and_then(Value::as_str)
             .ok_or_else(|| "Op.call requires further host integration".to_owned())?;
-        if !node.plugins.is_empty() {
-            return Err("Op.run cannot execute Plugins".into());
-        }
         if command.trim().is_empty() || command.contains('\0') {
             return Err("Op.run must be a non-empty shell command without NUL bytes".into());
         }
@@ -663,7 +728,23 @@ async fn execute_snapshot_with_control(
         .snapshot
         .nodes
         .iter()
-        .flat_map(|node| node.plugins.iter().map(|plugin| plugin.id.clone()))
+        .flat_map(|node| {
+            node.plugins
+                .iter()
+                .filter(|plugin| plugin.id != "network")
+                .map(|plugin| plugin.id.clone())
+        })
+        .chain(
+            expected
+                .snapshot
+                .nodes
+                .iter()
+                .any(|node| {
+                    expected.snapshot.node_network_mode(node)
+                        == anchor_runtime::graph::NetworkMode::Enabled
+                })
+                .then(|| "network".to_owned()),
+        )
         .collect::<std::collections::BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
@@ -702,8 +783,12 @@ async fn execute_snapshot_with_control(
     // reference is saved, so uninstall cannot pass between those two facts.
     let plugin_bindings = match library_root.as_ref() {
         Some(root) => {
-            match crate::application::graphs::referenced_plugin_bindings(root, &plugin_ids) {
-                Ok(bindings) => bindings,
+            use anchor_graph_host::PluginCatalog;
+            match crate::plugin_library::Catalog::new(root).resolve_snapshot(&expected.snapshot) {
+                Ok(bindings) => bindings
+                    .into_iter()
+                    .map(|binding| (binding.id.clone(), binding))
+                    .collect(),
                 Err(error) => {
                     return Response::Rejected {
                         version: 1,

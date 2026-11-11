@@ -85,6 +85,40 @@ describe('Graph plugin activation metadata', () => {
     expect(editor.selectedNode?.plugins).toEqual([plugins[1], plugins[2]]);
   });
 
+  it('keeps denied networking node-local through plugin selection and preserves unnormalized legacy role fields', async () => {
+    const network = { id: 'network', required: false, default: true, network: 'enabled' as const };
+    const legacy = { ...definition, agents: { assistant: { model: 'models.default.flash', network: true } },
+      nodes: [{ ...definition.nodes[0], plugins: [network, 'research'] }, { id: 'other', agent: 'assistant', plugins: ['network'] }] };
+    vi.mocked(api).mockResolvedValueOnce({ definition: legacy });
+    await render();
+    await act(async () => editor.setPick({ kind: 'node', id: 'assistant' }));
+    expect(editor.networkMode).toBe('enabled');
+    await act(async () => editor.setNetworkMode('denied'));
+    await act(async () => editor.setPlugins([...editor.selectedPlugins, 'another-tool']));
+    expect(editor.selectedNode?.plugins).toEqual([{ ...network, network: 'denied' }, 'research', 'another-tool']);
+    expect(editor.doc?.nodes[1].plugins).toEqual(['network']);
+    expect(editor.doc?.agents?.assistant.network).toBe(true);
+    await act(async () => editor.setNetworkMode('auto'));
+    expect(editor.selectedNode?.plugins?.[0]).toEqual({ ...network, network: 'auto' });
+    await act(async () => editor.setPick({ kind: 'agent', id: 'assistant' }));
+    await act(async () => editor.patchAgent({ instructions: 'Only this instruction changes' }));
+    expect(editor.selectedAgent?.network).toBe(true);
+  });
+
+  it('adds an explicit network-only command policy without editing the shared Op', async () => {
+    vi.mocked(api).mockResolvedValueOnce({ definition: { entry: 'build', nodes: [{ id: 'build', op: 'build' }],
+      ops: { build: { run: 'true' } }, edges: [] } });
+    await render();
+    await act(async () => editor.setPick({ kind: 'node', id: 'build' }));
+    expect(editor.networkMode).toBe('auto');
+    await act(async () => editor.setNetworkMode('denied'));
+    expect(editor.selectedNode?.plugins).toEqual([{ id: 'network', network: 'denied' }]);
+    expect(editor.selectedOp).toEqual({ run: 'true' });
+    await act(async () => editor.undo());
+    expect(editor.selectedNode?.plugins).toBeUndefined();
+    expect(editor.networkMode).toBe('auto');
+  });
+
   it('creates roles from the Host default reference and retains explicit legacy aliases', async () => {
     const legacy = { ...definition, agents: { assistant: { model: 'models.academic' } } };
     vi.mocked(api).mockResolvedValueOnce({ definition: legacy });
@@ -92,7 +126,7 @@ describe('Graph plugin activation metadata', () => {
     vi.mocked(api).mockResolvedValueOnce({ execution: { default_reference: 'models.backup.pro' } });
     await act(async () => editor.addAgent());
     expect(vi.mocked(api).mock.calls.at(-1)?.[0]).toBe('/settings/model');
-    expect(editor.doc?.agents?.agent).toEqual({ model: 'models.backup.pro', network: false, instructions: '' });
+    expect(editor.doc?.agents?.agent).toEqual({ model: 'models.backup.pro', instructions: '' });
     expect(editor.doc?.agents?.assistant.model).toBe('models.academic');
   });
 
@@ -101,7 +135,7 @@ describe('Graph plugin activation metadata', () => {
     await render();
     vi.mocked(api).mockResolvedValueOnce({ execution: { default_reference: 'models.default.flash' } });
     await act(async () => editor.addParallel());
-    expect(editor.doc?.agents?.['parallel-agent']).toEqual({ model: 'models.default.flash', network: false, instructions: '' });
+    expect(editor.doc?.agents?.['parallel-agent']).toEqual({ model: 'models.default.flash', instructions: '' });
   });
 
   it('does not overwrite intervening draft changes while reading model settings', async () => {

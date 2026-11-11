@@ -2,6 +2,9 @@ use super::*;
 use anchor_platform_session::{ChannelIdentity, ChannelInboundRequest, SessionStore, TurnStatus};
 use anchor_runtime::graph::{GraphRunRecord, InvocationKey};
 
+#[path = "wecom_channel_events.rs"]
+mod channel_events;
+
 fn event(text: &str) -> Value {
     json!({
         "event": {
@@ -337,12 +340,7 @@ async fn wecom_event_body_limit_admits_attachment_sized_events_only() {
 }
 
 fn inbound_id_for(event_id: &str) -> String {
-    let mut digest = Sha256::new();
-    digest.update(b"anchor-wecom-inbound-v1\0");
-    digest.update(b"wecom");
-    digest.update([0]);
-    digest.update(event_id.as_bytes());
-    format!("wecom-{:x}", digest.finalize())
+    super::super::wecom::inbound_id_for("wecom", event_id)
 }
 
 /// A persistent assistant has no per-message Run, and its `reply` node is an Op
@@ -545,29 +543,61 @@ fn seed_running_assistant_round(
     event_id: &str,
     invocation: u64,
 ) -> (String, String, InvocationKey, std::path::PathBuf) {
+    let mut body = event("看看工作区");
+    body["event"]["event_id"] = json!(event_id);
+    seed_running_assistant_round_for_event(state, definition, &body, invocation)
+}
+
+fn seed_running_assistant_round_for_event(
+    state: &ApiState,
+    definition: &Value,
+    body: &Value,
+    invocation: u64,
+) -> (String, String, InvocationKey, std::path::PathBuf) {
     use anchor_runtime::graph::GraphSnapshot;
     use sha2::{Digest, Sha256};
 
     std::fs::create_dir_all(state.data_root.join("platform")).unwrap();
     write_graph_bundle(&state.bundle_root, definition).unwrap();
     let owner = "local";
+    let event = &body["event"];
     let sessions = SessionStore::open(state.data_root.join("platform/sessions.sqlite")).unwrap();
+    let uploaded: Vec<crate::channel_inputs::UploadedAttachment> =
+        serde_json::from_value(event["attachments"].clone()).unwrap();
+    let attachments = crate::channel_inputs::prepare(&uploaded)
+        .unwrap()
+        .manifest()
+        .into_iter()
+        .map(|file| anchor_platform_session::AttachmentManifestEntry {
+            path: format!("/in/channel/{}", file.name),
+            name: file.name,
+            sha256: file.sha256,
+            size: file.size,
+            media_type: file.media_type,
+        })
+        .collect();
     let admission = sessions
         .admit_channel_inbound(
             owner,
             ChannelInboundRequest {
-                inbound_id: inbound_id_for(event_id),
+                inbound_id: super::super::wecom::inbound_id_for(
+                    event["source"].as_str().unwrap(),
+                    event["event_id"].as_str().unwrap(),
+                ),
                 identity: ChannelIdentity {
                     conversation_kind: Default::default(),
-                    source: "wecom".into(),
+                    source: event["source"].as_str().unwrap().into(),
                     account: Some("corp-a".into()),
-                    conversation_id: "conversation-1".into(),
-                    sender_id: "user-1".into(),
+                    conversation_id: event["conversation_id"].as_str().unwrap().into(),
+                    sender_id: event["sender_id"].as_str().unwrap().into(),
                 },
                 graph: "fixture".into(),
                 reply_node: "assistant".into(),
-                text: Some("看看工作区".into()),
-                attachments: Default::default(),
+                text: Some(event["text"].as_str().unwrap().into()),
+                attachments: anchor_platform_session::AttachmentManifest {
+                    format: 1,
+                    files: attachments,
+                },
                 run_id: None,
                 replace_running: true,
             },

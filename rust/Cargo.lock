@@ -85,6 +85,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "anchor-channel-transport"
+version = "0.1.0"
+dependencies = [
+ "anchor-file-lease",
+ "axum",
+ "base64 0.22.1",
+ "futures",
+ "md-5",
+ "reqwest 0.12.28",
+ "rusqlite",
+ "rustix",
+ "serde",
+ "serde_json",
+ "sha2",
+ "subtle",
+ "thiserror",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "anchor-deepseek-tools"
 version = "0.1.0"
 dependencies = [
@@ -170,6 +191,26 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+]
+
+[[package]]
+name = "anchor-feishu-gateway"
+version = "0.1.0"
+dependencies = [
+ "anchor-channel-transport",
+ "axum",
+ "base64 0.22.1",
+ "futures",
+ "md-5",
+ "prost",
+ "reqwest 0.12.28",
+ "rusqlite",
+ "rustix",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite",
 ]
 
 [[package]]
@@ -339,6 +380,7 @@ dependencies = [
  "agent-client-protocol-schema",
  "anchor-distribution",
  "anchor-facts",
+ "anchor-feishu-gateway",
  "anchor-file-lease",
  "anchor-graph-host",
  "anchor-kernel",
@@ -361,6 +403,7 @@ dependencies = [
  "png",
  "reqwest 0.12.28",
  "rmcp",
+ "rusqlite",
  "rustix",
  "serde",
  "serde_json",
@@ -434,7 +477,7 @@ name = "anchor-wecom-gateway"
 version = "0.1.0"
 dependencies = [
  "aes",
- "anchor-file-lease",
+ "anchor-channel-transport",
  "axum",
  "base64 0.22.1",
  "cbc",
@@ -446,9 +489,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "subtle",
  "tempfile",
- "thiserror",
  "tokio",
  "tokio-tungstenite",
  "uuid",
@@ -611,6 +652,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "31b698c5f9a010f6573133b09e0de5408834d0c82f8d7475a89fc1867a71cd90"
 dependencies = [
  "axum-core",
+ "base64 0.22.1",
  "bytes",
  "form_urlencoded",
  "futures-util",
@@ -623,14 +665,17 @@ dependencies = [
  "matchit",
  "memchr",
  "mime",
+ "multer",
  "percent-encoding",
  "pin-project-lite",
  "serde_core",
  "serde_json",
  "serde_path_to_error",
  "serde_urlencoded",
+ "sha1",
  "sync_wrapper",
  "tokio",
+ "tokio-tungstenite",
  "tower",
  "tower-layer",
  "tower-service",
@@ -1972,6 +2017,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a6cb138bb79a146c1bd460005623e142ef0181e3d0219cb493e02f7d08a35695"
 
 [[package]]
+name = "itertools"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2b192c782037fadd9cfa75548310488aabdbf3d2da73885b31bd0abd03351285"
+dependencies = [
+ "either",
+]
+
+[[package]]
 name = "itoa"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2336,6 +2390,23 @@ checksum = "bb85c154ba489f01b25c0d36ae69a87e4a1c73a72631fc6c0eb6dde34a73e44b"
 dependencies = [
  "num-traits",
  "pxfm",
+]
+
+[[package]]
+name = "multer"
+version = "3.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "83e87776546dc87511aa5ee218730c92b666d7264ab6ed41f9d215af9cd5224b"
+dependencies = [
+ "bytes",
+ "encoding_rs",
+ "futures-util",
+ "http",
+ "httparse",
+ "memchr",
+ "mime",
+ "spin",
+ "version_check",
 ]
 
 [[package]]
@@ -2777,6 +2848,29 @@ dependencies = [
  "tokio",
  "tracing",
  "windows",
+]
+
+[[package]]
+name = "prost"
+version = "0.14.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d2ea70524a2f82d518bce41317d0fae74151505651af45faf1ffbd6fd33f0568"
+dependencies = [
+ "bytes",
+ "prost-derive",
+]
+
+[[package]]
+name = "prost-derive"
+version = "0.14.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b570b25f7617e43d59005d0990ccb79e950a423952cea19671b7a876da390adf"
+dependencies = [
+ "anyhow",
+ "itertools",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -3711,6 +3805,12 @@ dependencies = [
  "libc",
  "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "spin"
+version = "0.9.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3763264f6b73151db08c50ff20d7d8a0b8796e021cdea7ceedad07b80155fa0e"
 
 [[package]]
 name = "sqlite-wasm-rs"

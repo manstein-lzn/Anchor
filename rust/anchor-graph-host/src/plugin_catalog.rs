@@ -9,18 +9,42 @@ use crate::resources::{
     collect_skill_files, inside_directory, inside_file, read_object, read_object_bytes,
     reject_symlink_components, relative_of, resource_files, valid_reference,
 };
-use crate::{dependencies, invalid, mcp};
-use anchor_runtime::graph::GraphError;
+use crate::{SystemPlugin, dependencies, invalid, mcp};
+use anchor_runtime::graph::{GraphError, GraphSnapshot, NetworkMode, PluginBinding};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 /// Resolves installed filesystem Plugins to secret-free immutable identities.
 pub trait PluginCatalog: Send + Sync {
-    fn resolve(
-        &self,
-        ids: &[String],
-    ) -> Result<Vec<anchor_runtime::graph::PluginBinding>, GraphError>;
+    fn resolve(&self, ids: &[String]) -> Result<Vec<PluginBinding>, GraphError>;
+
+    /// Bind executable resources, not a node's offline/automatic policy reference.
+    /// Catalogs with declaration metadata also derive Auto's provider dependency.
+    fn resolve_snapshot(&self, snapshot: &GraphSnapshot) -> Result<Vec<PluginBinding>, GraphError> {
+        self.resolve(&snapshot_plugin_ids(
+            snapshot,
+            snapshot
+                .nodes
+                .iter()
+                .any(|node| snapshot.node_network_mode(node) == NetworkMode::Enabled),
+        ))
+    }
+}
+
+fn snapshot_plugin_ids(snapshot: &GraphSnapshot, network: bool) -> Vec<String> {
+    let mut ids = snapshot
+        .nodes
+        .iter()
+        .flat_map(|node| node.plugins.iter())
+        .filter(|reference| reference.id != SystemPlugin::Network.id())
+        .map(|reference| reference.id.clone())
+        .collect::<BTreeSet<_>>();
+    if network {
+        ids.insert(SystemPlugin::Network.id().to_owned());
+    }
+    ids.into_iter().collect()
 }
 
 /// Filesystem catalog rooted at the library directory containing `plugins/`.
@@ -35,6 +59,8 @@ pub struct FilePluginCatalog {
 #[derive(Debug, Clone, PartialEq)]
 pub struct PluginDefinition {
     pub id: String,
+    /// Verified platform identity; a manifest cannot request this classification.
+    pub system: Option<SystemPlugin>,
     pub directory: PathBuf,
     pub name: String,
     pub description: String,
@@ -66,6 +92,7 @@ pub struct PluginDefinition {
 #[derive(Debug, Clone, PartialEq)]
 pub struct PluginMetadata {
     pub id: String,
+    pub system: Option<SystemPlugin>,
     pub directory: PathBuf,
     pub name: String,
     pub description: String,
@@ -86,10 +113,24 @@ struct PluginInventory {
     manifest_bytes: Vec<u8>,
 }
 
+/// Operator-only evidence for an explicit System Plugin upgrade. This cannot
+/// produce an execution binding or confer a platform capability identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SystemPluginInspection {
+    pub digest: String,
+    pub resources: Vec<String>,
+    pub mutable: MutablePaths,
+}
+
 impl PluginDefinition {
+    pub fn requires_network(&self) -> bool {
+        declaration_requires_network(self.network, &self.mcp_servers)
+    }
+
     pub fn metadata(&self) -> PluginMetadata {
         PluginMetadata {
             id: self.id.clone(),
+            system: self.system,
             directory: self.directory.clone(),
             name: self.name.clone(),
             description: self.description.clone(),
@@ -120,6 +161,19 @@ impl PluginDefinition {
     }
 }
 
+impl PluginMetadata {
+    pub fn requires_network(&self) -> bool {
+        declaration_requires_network(self.network, &self.mcp_servers)
+    }
+}
+
+fn declaration_requires_network(network: bool, servers: &[McpServerDefinition]) -> bool {
+    network
+        || servers
+            .iter()
+            .any(|server| server.config.get("url").is_some())
+}
+
 /// Service-level channel metadata.  Channels are not MCP servers and are
 /// supervised by the host separately from AgentNode execution.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -148,18 +202,7 @@ impl FilePluginCatalog {
             configuration_resources,
             manifest_bytes,
         } = self.inventory(id)?;
-        let mut hash = Sha256::new();
-        for relative in &resources {
-            hash.update(relative.as_bytes());
-            if relative == "plugin.json" {
-                hash.update(Sha256::digest(&manifest_bytes));
-            } else {
-                hash.update(Sha256::digest(std::fs::read(
-                    metadata.directory.join(relative),
-                )?));
-            }
-        }
-        let digest = format!("{:x}", hash.finalize());
+        let digest = resource_digest(&metadata.directory, &resources, &manifest_bytes)?;
         let authorization_digest =
             metadata
                 .configuration
@@ -170,6 +213,7 @@ impl FilePluginCatalog {
                 ));
         Ok(PluginDefinition {
             id: metadata.id,
+            system: metadata.system,
             directory: metadata.directory,
             name: metadata.name,
             description: metadata.description,
@@ -191,12 +235,56 @@ impl FilePluginCatalog {
     }
 
     /// Read live catalog information through the same manifest, resource-path and configuration
-    /// validation as execution definitions, without reading code bytes or computing their digest.
+    /// validation as execution definitions, without computing their code digest. System Plugin
+    /// identity additionally checks the small public resources against this Anchor release.
     pub fn metadata(&self, id: &str) -> Result<PluginMetadata, GraphError> {
         Ok(self.inventory(id)?.metadata)
     }
 
+    /// A denied policy never needs a provider. Auto derives its need only from
+    /// the same validated Plugin declarations used for execution.
+    pub fn snapshot_requires_network(&self, snapshot: &GraphSnapshot) -> Result<bool, GraphError> {
+        for node in &snapshot.nodes {
+            match snapshot.node_network_mode(node) {
+                NetworkMode::Denied => {}
+                NetworkMode::Enabled => return Ok(true),
+                NetworkMode::Auto => {
+                    for plugin in &node.plugins {
+                        if plugin.id != SystemPlugin::Network.id()
+                            && self.metadata(&plugin.id)?.requires_network()
+                        {
+                            return Ok(true);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(false)
+    }
+
+    /// Inspect old installed bytes before an operator reviews an explicit upgrade.
+    /// Previous-release public resources are allowed here, never in execution reads.
+    pub fn inspect_system_plugin(
+        &self,
+        system: SystemPlugin,
+    ) -> Result<SystemPluginInspection, GraphError> {
+        let inventory = self.read_inventory(system.id(), false)?;
+        Ok(SystemPluginInspection {
+            digest: resource_digest(
+                &inventory.metadata.directory,
+                &inventory.resources,
+                &inventory.manifest_bytes,
+            )?,
+            resources: inventory.resources,
+            mutable: inventory.metadata.mutable,
+        })
+    }
+
     fn inventory(&self, id: &str) -> Result<PluginInventory, GraphError> {
+        self.read_inventory(id, true)
+    }
+
+    fn read_inventory(&self, id: &str, verify_system: bool) -> Result<PluginInventory, GraphError> {
         let (root, dir) = self.plugin_dir(id)?;
         let manifest_path = dir.join("plugin.json");
         reject_symlink_components(&dir, &manifest_path)?;
@@ -283,6 +371,10 @@ impl FilePluginCatalog {
         // The digest covers *code* only: a declared mutable path changes while
         // the Plugin runs, so it can never be part of "which code is this".
         let resources = resource_files(&dir, &mutable)?;
+        let system = verify_system.then(|| SystemPlugin::from_id(id)).flatten();
+        if let Some(system) = system {
+            system.verify(&dir, &resources, &manifest_bytes)?;
+        }
 
         let mcp_servers =
             mcp::servers_from_manifest(id, &root, &dir, &manifest, &dependencies, false)?;
@@ -314,6 +406,7 @@ impl FilePluginCatalog {
         Ok(PluginInventory {
             metadata: PluginMetadata {
                 id: id.into(),
+                system,
                 directory: dir,
                 name,
                 description,
@@ -339,6 +432,9 @@ impl FilePluginCatalog {
         id: &str,
         resolve_env: bool,
     ) -> Result<Vec<McpServerDefinition>, GraphError> {
+        if SystemPlugin::from_id(id).is_some() {
+            self.metadata(id)?;
+        }
         let (root, dir) = self.plugin_dir(id)?;
         mcp::servers_from_dir(id, &root, &dir, resolve_env)
     }
@@ -383,8 +479,7 @@ impl FilePluginCatalog {
 
     /// Return validated service-level channel declarations from `channel.json`.
     pub fn channels(&self, id: &str) -> Result<Vec<ChannelDefinition>, GraphError> {
-        let (_root, dir) = self.plugin_dir(id)?;
-        channels_from_dir(id, &dir)
+        Ok(self.metadata(id)?.channels)
     }
 
     /// Return the canonical installed Plugin directory after validating the
@@ -437,12 +532,33 @@ impl FilePluginCatalog {
     }
 }
 
+fn resource_digest(
+    directory: &Path,
+    resources: &[String],
+    manifest_bytes: &[u8],
+) -> Result<String, GraphError> {
+    let mut hash = Sha256::new();
+    for relative in resources {
+        hash.update(relative.as_bytes());
+        if relative == "plugin.json" {
+            hash.update(Sha256::digest(manifest_bytes));
+        } else {
+            hash.update(Sha256::digest(std::fs::read(directory.join(relative))?));
+        }
+    }
+    Ok(format!("{:x}", hash.finalize()))
+}
+
 impl PluginCatalog for FilePluginCatalog {
-    fn resolve(
-        &self,
-        ids: &[String],
-    ) -> Result<Vec<anchor_runtime::graph::PluginBinding>, GraphError> {
+    fn resolve(&self, ids: &[String]) -> Result<Vec<PluginBinding>, GraphError> {
         ids.iter().map(|id| self.plugin(id)).collect()
+    }
+
+    fn resolve_snapshot(&self, snapshot: &GraphSnapshot) -> Result<Vec<PluginBinding>, GraphError> {
+        self.resolve(&snapshot_plugin_ids(
+            snapshot,
+            self.snapshot_requires_network(snapshot)?,
+        ))
     }
 }
 
@@ -479,6 +595,14 @@ fn channels_from_dir(id: &str, dir: &Path) -> Result<Vec<ChannelDefinition>, Gra
     {
         return Err(invalid(format!(
             "Plugin {id}: channel platform is required"
+        )));
+    }
+    if let Some(system) = SystemPlugin::from_id(platform)
+        .filter(|system| matches!(system, SystemPlugin::Feishu | SystemPlugin::Wecom))
+        && system.id() != id
+    {
+        return Err(invalid(format!(
+            "Plugin {id}: channel platform {platform} is owned by its Anchor System Plugin"
         )));
     }
     if spec.get("transport").and_then(Value::as_str) != Some("websocket") {

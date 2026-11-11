@@ -13,7 +13,7 @@
 
 Anchor 是一个**个人 agent 平台**：作者用自己的工作和生活负载在跑它，用它承接反复占用时间和注意力的事，再用它自己的执行记录改进它自己。
 
-安装与使用看[使用指南](docs/usage.md)；从源码运行或参与开发，看[开发指南](docs/development.md)。
+安装试用直接看[使用指南](docs/usage.md)；从源码运行或参与开发，看[开发指南](docs/development.md)。
 
 它不是给陌生人的 SaaS，也不是又一个拖图工具。它回答的是更窄的问题：
 
@@ -53,7 +53,7 @@ Anchor 的选择是：**先把执行变成事实，再谈智能。**
 说清边界比列功能更有用：
 
 - **不是多租户云平台。** 单进程、本机、一个安装身份，面向 Linux x86_64；没有 HA、滚动升级和集中告警。
-- **不是免配置的业务套件。** 源码启动需要构建工具，source-free 发行包仍需目标机系统依赖；模型服务、账号凭据和第三方 Plugin 依赖由用户配置或授权，Pilot 协助完成。
+- **不是免配置的业务套件。** 原生安装包省去源码构建；模型服务、账号凭据和第三方 Plugin 依赖仍需用户配置或授权，Pilot 协助完成。
 - **不承诺外部副作用的 exactly-once。** 它承诺的是：未知的操作不会被当成已知重放，事后能查清发生了什么。
 - **隔离强度是短板。** Bubblewrap 是沙箱方案里较轻的一端，Host 与图执行同进程。它在记账上很严，在隔离上一般。
 
@@ -70,21 +70,21 @@ Anchor 的选择是：**先把执行变成事实，再谈智能。**
 | 触发与渠道 | 手动、计划、Webhook、Responses、企业微信；一张常驻助手 Graph 对应一个机器人，每会话一个常驻 Run，重启原地接续 |
 | 自我改进 | `rsi` Graph 采集执行记录与代码，并行专项审查，机械门禁校验证据与提案，产出带验收和回滚条件的变更提议 |
 
-源码启动提供示例 Graph 与官方 Plugin，清单见[上手示例](examples/README.md)。建议先跑不需要模型的 `call-report`，再配置模型尝试 `revise-loop` 和 `plugin-research`。
+原生包交付 Runtime、WebUI、固定 Goose，以及 network、Git、Anchor Dev 和 Graph Tasks Plugin；业务 Graph 与其他 Plugin 作为独立资产交给 Pilot 审阅、安装和配置，不随运行时全部预装。Graph Tasks 须在 AgentNode 显式选择可见 Graph 与能力上限，才能按需委派或设置计划，见[使用契约](docs/plugins.md#graph-任务)。源码启动另有[上手示例](examples/README.md)。
 
 ## 快速开始
 
-从源码启动：
+当前二进制 Preview 面向 **Ubuntu 22.04/24.04 LTS amd64** 的普通宿主机或完整虚拟机，需要运行中的 systemd 和可用的 Bubblewrap 沙箱。安装包已在本地构建，**GitHub Release 尚未发布**。
+
+拿到经校验的 DEB 后，在全新目标机安装（将文件名替换为实际版本）：
 
 ```sh
-git clone https://github.com/manstein-lzn/Anchor.git
-cd Anchor
-./scripts/dev.sh start
+sudo apt install ./anchor_VERSION-REVISION_amd64.deb
+anchor status
+anchor open
 ```
 
-打开 <http://127.0.0.1:5173>，先在「设置 → 模型服务」配置 default Flash，再与 Pilot 对话。无需 `.env`，凭据存在 Host 私有存储里。系统依赖、固定 Goose 构建及源码启动方式见[开发指南](docs/development.md)。
-
-已有经校验的 source-free 平台归档时，按[使用指南](docs/usage.md)安装到全新目录并运行随包 launcher；长期运行的 systemd 配置归[部署指南](docs/rust-production-deployment.md)。目标机不需要 Rust 或 Node 构建环境，但仍需满足运行依赖和沙箱要求。
+打开 <http://127.0.0.1:8077>，先在「设置 → 模型服务」配置 default Flash，再与 Pilot 对话。无需 clone、Rust、Node 或 `.env`。当前包**只支持全新安装，不支持升级或重装**；卸载（包括 purge）保留数据和账号。完整操作与常见失败见[使用指南](docs/usage.md)；要从源码运行或修改代码，见[开发指南](docs/development.md)。
 
 ## 当前状态
 

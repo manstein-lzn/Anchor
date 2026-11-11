@@ -55,10 +55,11 @@
 .plugin-empty strong { color: var(--plugin-ink); font-size: 14px; font-weight: 600; }
 .plugin-empty p { margin: 0; }
 .plugin-empty button { margin-top: 4px; font-size: 12px; }
-.plugin-network-policy { display: flex; flex: 1 0 100%; align-items: flex-start; justify-content: space-between; flex-wrap: wrap; gap: 6px; padding-top: 4px; }
-.plugin-network-policy p { flex: 1; min-width: 0; margin: 0; color: var(--plugin-muted); font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
-.plugin-network-policy button { flex: none; padding: 2px 6px; min-height: 26px; font-size: 11px; }
-.plugin-panel :is(button, input):focus-visible, .plugin-card :is(button, input):focus-visible,
+.plugin-network-policy { display: grid; flex: 1 0 100%; grid-template-columns: minmax(0, 1fr); gap: 6px; min-width: 0; padding-top: 4px; }
+.plugin-network-policy label { margin: 0; color: var(--plugin-ink); font-size: 11px; }
+.plugin-network-policy select { width: 100%; min-width: 0; margin: 0; padding: 5px 6px; font: inherit; font-size: 12px; }
+.plugin-network-policy p { min-width: 0; margin: 0; color: var(--plugin-muted); font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
+.plugin-panel :is(button, input, select):focus-visible, .plugin-card :is(button, input, select):focus-visible,
 .plugin-details :is(button, a):focus-visible { outline: 2px solid var(--plugin-accent); outline-offset: 3px; }
 .modal.plugin-details { width: min(680px, calc(100vw - 24px)); max-width: calc(100vw - 24px); border-color: var(--plugin-line); color: var(--plugin-ink); }
 .plugin-details .modal-content { gap: 18px; padding: 24px; }

@@ -1,6 +1,6 @@
-//! Read-only progress projection for an admitted WeCom message.
+//! Read-only progress projection for an admitted channel message.
 //!
-//! The WeCom transport can update one chat bubble in place, so the channel can
+//! Channel transports can update a status message in place, so the channel can
 //! show what the agent is doing instead of a static placeholder. This endpoint
 //! observes work that is already happening: it reads the notifications an active
 //! Goose invocation retains in memory, maps them to a fixed vocabulary of short
@@ -19,7 +19,7 @@ use axum::{
 use futures_util::Stream;
 use serde_json::Value;
 use std::{
-    collections::{BTreeSet, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     convert::Infallible,
     time::{Duration, Instant},
 };
@@ -27,7 +27,7 @@ use std::{
 const POLL_INTERVAL: Duration = Duration::from_millis(300);
 const STREAM_LIMIT: Duration = Duration::from_secs(300);
 /// A turn never shows more than this many progress lines.
-const MAX_UPDATES: usize = 15;
+const MAX_UPDATES: usize = 64;
 const MAX_LINE_CHARS: usize = 600;
 const PREPARING: &str = "正在准备…";
 const LINE_FINAL_RESULT: &str = "正在整理回复";
@@ -87,20 +87,21 @@ pub(super) async fn wecom_progress(
     let after = query.after.unwrap_or(0).max(last);
     let owner = private_owner(&state, &headers);
     // Message ids are unique per bot only: the Graph's own account scopes them.
-    let account = state
+    let channel = state
         .application
         .channel_snapshot(&graph)
         .map_err(application_error)?
-        .and_then(|channel| channel.account)
-        .unwrap_or_default();
-    let inbound = wecom::inbound_id_for("wecom", &event_id);
+        .ok_or_else(|| error(StatusCode::NOT_FOUND, "no such channel event"))?;
+    let source = channel.platform.as_str();
+    let account = channel.account.unwrap_or_default();
+    let inbound = wecom::inbound_id_for(source, &event_id);
     let lookup_state = state.clone();
     let lookup_owner = owner.clone();
     let lookup_account = account.clone();
     let lookup_inbound = inbound.clone();
     let found = blocking(move || {
         store(&lookup_state)?
-            .channel_run_for_inbound(&lookup_owner, "wecom", &lookup_account, &lookup_inbound)
+            .channel_run_for_inbound(&lookup_owner, source, &lookup_account, &lookup_inbound)
             .map_err(session_error)
     })
     .await?;
@@ -111,6 +112,7 @@ pub(super) async fn wecom_progress(
         state: state.clone(),
         owner,
         account,
+        source,
         inbound,
         after,
         emitted: BTreeSet::new(),
@@ -140,6 +142,7 @@ struct Cursor {
     state: ApiState,
     owner: String,
     account: String,
+    source: &'static str,
     inbound: String,
     after: u64,
     emitted: BTreeSet<String>,
@@ -156,9 +159,10 @@ impl Cursor {
         let owner = self.owner.clone();
         let account = self.account.clone();
         let inbound = self.inbound.clone();
+        let source = self.source;
         let lookup = tokio::task::spawn_blocking(move || {
             store(&state)?
-                .channel_run_for_inbound(&owner, "wecom", &account, &inbound)
+                .channel_run_for_inbound(&owner, source, &account, &inbound)
                 .map_err(session_error)
         })
         .await;
@@ -366,7 +370,7 @@ fn update_payload(seq: u64, item: &ProgressItem) -> Value {
 }
 
 /// Pure projection: retained Goose notifications in, channel-safe status lines
-/// out. Only `tool_call` notifications are read. `agent_message_chunk`,
+/// out. Only `tool_call` and its correlated status updates are read. `agent_message_chunk`,
 /// `agent_thought_chunk` and `user_message_chunk` are ignored outright, and no
 /// tool argument, path, result or title is ever copied into the output.
 ///
@@ -375,37 +379,73 @@ fn update_payload(seq: u64, item: &ProgressItem) -> Value {
 /// Turn, and the guidance line is the only honest thing to show for it.
 fn progress_projection(notifications: &[Value], guidance: bool) -> Vec<ProgressItem> {
     let mut items = Vec::new();
-    let mut seen = BTreeSet::new();
+    let mut calls = BTreeMap::<String, ToolProgress>::new();
     let mut steps = 0u32;
     for event in notifications {
         if event["method"] != "session/update" {
             continue;
         }
         let update = &event["params"]["update"];
-        if update["sessionUpdate"].as_str() != Some("tool_call") {
-            continue;
-        }
         let Some(id) = update["toolCallId"].as_str() else {
             continue;
         };
-        if !seen.insert(id.to_owned()) {
-            continue;
+        match update["sessionUpdate"].as_str() {
+            Some("tool_call") if !calls.contains_key(id) => {
+                let (line, category) = tool_line(update);
+                let repeated = items
+                    .last()
+                    .is_some_and(|item: &ProgressItem| item.line == line);
+                // Collapsed repeats share their category step; completion still
+                // belongs to the actual tool id, never its title or arguments.
+                if !repeated {
+                    steps += 1;
+                    items.push(ProgressItem {
+                        id: format!("tool:{id}"),
+                        line: line.to_owned(),
+                        category,
+                        step: Some(steps),
+                    });
+                }
+                calls.insert(
+                    id.to_owned(),
+                    ToolProgress {
+                        line,
+                        category,
+                        step: steps,
+                        status: "pending",
+                    },
+                );
+            }
+            Some("tool_call_update") => {
+                let Some(call) = calls.get_mut(id) else {
+                    continue;
+                };
+                let Some(status @ ("in_progress" | "completed" | "failed")) =
+                    update["status"].as_str()
+                else {
+                    continue;
+                };
+                if call.status == status || matches!(call.status, "completed" | "failed") {
+                    continue;
+                }
+                call.status = match status {
+                    "completed" => "completed",
+                    "failed" => "failed",
+                    _ => "in_progress",
+                };
+                let line = tool_status_line(call);
+                if items.last().is_some_and(|item| item.line == line) {
+                    continue;
+                }
+                items.push(ProgressItem {
+                    id: format!("tool:{id}:{status}"),
+                    line: line.to_owned(),
+                    category: call.category,
+                    step: Some(call.step),
+                });
+            }
+            _ => continue,
         }
-        let (line, category) = tool_line(update);
-        if items
-            .last()
-            .is_some_and(|item: &ProgressItem| item.line == line)
-        {
-            continue;
-        }
-        // Collapsed repeats never consume a step number.
-        steps += 1;
-        items.push(ProgressItem {
-            id: format!("tool:{id}"),
-            line: line.to_owned(),
-            category,
-            step: Some(steps),
-        });
         if items.len() >= MAX_UPDATES {
             break;
         }
@@ -430,6 +470,33 @@ fn progress_projection(notifications: &[Value], guidance: bool) -> Vec<ProgressI
     items
 }
 
+struct ToolProgress {
+    line: &'static str,
+    category: &'static str,
+    step: u32,
+    status: &'static str,
+}
+
+fn tool_status_line(call: &ToolProgress) -> &'static str {
+    match (call.category, call.status) {
+        (CATEGORY_READ_FILE, "completed") => "文件查看已结束",
+        (CATEGORY_READ_FILE, "failed") => "文件查看失败",
+        (CATEGORY_COMMAND, "completed") => "工作区命令已结束",
+        (CATEGORY_COMMAND, "failed") => "工作区命令失败",
+        (CATEGORY_HISTORY, "completed") => "历史记录查看已结束",
+        (CATEGORY_HISTORY, "failed") => "历史记录查看失败",
+        (CATEGORY_IMAGE, "completed") => "图片准备已结束",
+        (CATEGORY_IMAGE, "failed") => "图片准备失败",
+        (CATEGORY_PLUGIN, "completed") => "业务查询已结束",
+        (CATEGORY_PLUGIN, "failed") => "业务查询失败",
+        (CATEGORY_FINAL_RESULT, "completed") => "回复整理已结束",
+        (CATEGORY_FINAL_RESULT, "failed") => "回复整理失败",
+        (_, "completed") => "工具处理已结束",
+        (_, "failed") => "工具处理失败",
+        _ => call.line,
+    }
+}
+
 /// The projection of a stream whose notifications may still be empty.
 ///
 /// The endpoint always asks [`progress_projection`] for the guidance line; this
@@ -442,7 +509,6 @@ fn progress_items(notifications: &[Value]) -> Vec<ProgressItem> {
 fn tool_line(update: &Value) -> (&'static str, &'static str) {
     let tool = update["_meta"]["goose"]["toolCall"]["toolName"]
         .as_str()
-        .or_else(|| update["title"].as_str())
         .unwrap_or_default();
     tool_line_for(tool, update)
 }
@@ -957,13 +1023,79 @@ mod tests {
     }
 
     #[test]
-    fn title_is_used_when_the_native_tool_name_is_absent() {
+    fn argument_bearing_titles_are_not_used_as_tool_identity() {
         let notifications = vec![json!({"method":"session/update","params":{"update":{
-            "sessionUpdate":"tool_call","toolCallId":"call-1","title":"anchor_run",
+            "sessionUpdate":"tool_call","toolCallId":"call-1","title":"anchor_run: cat /etc/passwd",
             "rawInput":{"command":["cat","/etc/passwd"]}
         }}})];
         let items = progress_items(&notifications);
-        assert_eq!(items[1].line, LINE_FILE);
+        assert_eq!(items[1].line, LINE_DEFAULT);
         assert!(!items.iter().any(|item| item.line.contains("/etc/passwd")));
+    }
+
+    #[test]
+    fn sparse_native_lifecycle_updates_keep_identity_step_and_resume_order() {
+        let mut call = tool_call(
+            "call-1",
+            "anchor__anchor_run",
+            json!({"command":["cat","/in/private"]}),
+        );
+        // Pending is the ACP default and is absent on the pinned Goose wire.
+        call["params"]["update"]
+            .as_object_mut()
+            .unwrap()
+            .remove("status");
+        let mut notifications = vec![call];
+        let mut emitted = BTreeSet::new();
+        assert_eq!(
+            steps(&new_progress(&notifications, 0, &mut emitted)),
+            vec![
+                (1, PREPARING, CATEGORY_PREPARING, None),
+                (2, LINE_FILE, CATEGORY_READ_FILE, Some(1)),
+            ]
+        );
+        for (id, status) in [
+            ("unpaired", Some("failed")),
+            ("call-1", None),
+            ("call-1", Some("in_progress")),
+            ("call-1", Some("completed")),
+            ("call-1", Some("failed")),
+        ] {
+            notifications.push(json!({"method":"session/update","params":{"update":{
+                "sessionUpdate":"tool_call_update","toolCallId":id,"status":status,
+                "title":"private title","content":[{"text":"private output"}],"rawOutput":"private result"
+            }}}));
+        }
+        assert_eq!(
+            steps(&new_progress(&notifications, 0, &mut emitted)),
+            vec![(3, "文件查看已结束", CATEGORY_READ_FILE, Some(1)),]
+        );
+        let resumed = new_progress(&notifications, 2, &mut BTreeSet::new());
+        assert_eq!(
+            steps(&resumed),
+            vec![(3, "文件查看已结束", CATEGORY_READ_FILE, Some(1))]
+        );
+        let rendered = update_payload(3, &resumed[0].1).to_string();
+        assert!(!rendered.contains("private"));
+        assert!(new_progress(&notifications, 0, &mut emitted).is_empty());
+    }
+
+    #[test]
+    fn failed_tool_is_an_activity_not_a_successful_reply() {
+        let notifications = vec![
+            tool_call(
+                "call-1",
+                "anchor__anchor_run",
+                json!({"command":["sh","-c","private-command"]}),
+            ),
+            json!({"method":"session/update","params":{"update":{
+                "sessionUpdate":"tool_call_update","toolCallId":"call-1","status":"failed",
+                "content":[{"text":"private failure"}]
+            }}}),
+        ];
+        let items = progress_items(&notifications);
+        assert_eq!(items[2].line, "工作区命令失败");
+        assert_eq!(items[1].step, items[2].step);
+        assert_eq!(update_payload(3, &items[2])["settled"], false);
     }
 }

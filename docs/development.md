@@ -8,7 +8,7 @@
 
 ## 源码启动
 
-本节只介绍源码开发；完整平台的安装和日常操作请看[使用指南](usage.md)，目标机不需要下面的构建工具。
+这里只适用于开发者；下载原生安装包试用请看[使用指南](usage.md)，目标机不需要下面的构建工具。
 
 需要 Linux x86_64、Git、Bubblewrap、slirp4netns、Rust stable（通过 rustup 安装）和 Node.js 20.19+ 或 22.12+ / npm。构建固定 Goose 还需要 C 编译工具、curl、patch、rsync、binutils、util-linux 和 coreutils。Debian/Ubuntu 可先安装系统工具：
 
@@ -41,7 +41,7 @@ cd Anchor
 
 默认源码启动按 [starter 清单](../examples/starter.json) 一次性准备官方 Plugin、工具和依赖，Plugin 仍经 Library 安装器发布。`setup` 不启动 Host 或导入 Graph；`start`/`restart` 在脚本管理的 Host 就绪后，才经现有 API 导入示例 Graph。不自动运行 Graph、调用模型、连接业务账号或启用渠道。
 
-`.source-starter.json` 只记录源码启动器的初次准备，不是 Graph/Plugin 的事实来源。导入内容成为用户可编辑副本，已有同名内容、用户后续修改和删除不被覆盖或重新引入；显式指定 entry bundle、自定义 Host 或外部服务时跳过源码导入。示例用途与配置条件见[上手示例](../examples/README.md)，不能据此推断完整平台发行包也附带全部业务示例。
+`.source-starter.json` 只记录源码启动器的初次准备，不是 Graph/Plugin 的事实来源。导入内容成为用户可编辑副本，已有同名内容、用户后续修改和删除不被覆盖或重新引入；显式指定 entry bundle、自定义 Host 或外部服务时跳过源码导入。示例用途与配置条件见[上手示例](../examples/README.md)，不能据此推断原生运行时包也附带全部业务示例。
 
 前端源码热更新单独使用 `npm --prefix apps/web run dev -- --port 5174`，不能替换试用入口，避免浏览器保留的开发依赖缓存因重建失效。
 
@@ -55,7 +55,7 @@ cd Anchor
 
 发行 builder 与固定 Goose 回归另有固定二进制摘要要求，本机源码构建成功不代表该产物可用于发行打包或这些回归。完整平台安装器核验随包工具，不要求最终用户构建 Goose；分别见[发行 builder](../rust/anchor-distribution/README.md)与[标准回归命令](runtime-contract-tests.md#标准命令)。
 
-## Network Plugin 候选
+## 系统 Plugin 维护
 
 原生工具已有候选打包入口，从仓库根目录执行：
 
@@ -64,7 +64,20 @@ cargo build --manifest-path rust/Cargo.toml -p anchor-network-tools --release --
 rust/target/release/anchor-network-tools package-plugin /absolute/path/to/candidate/network
 ```
 
-父目录 `/absolute/path/to/candidate` 必须已存在，目标 `network` 目录必须不存在；设置了 `CARGO_TARGET_DIR` 时，第二条命令改用该 target 下的 `release/anchor-network-tools`。[打包实现](../rust/anchor-network-tools/src/package.rs)输出 `plugin.json`、`skills/network/SKILL.md` 和 `bin/anchor-network-tools`，不覆盖已安装 Plugin。结果只是候选，仍须走 [Library 审阅与安装](plugins.md)，不自动挂载或授予网络权限。
+父目录 `/absolute/path/to/candidate` 必须已存在，目标 `network` 目录必须不存在；设置了 `CARGO_TARGET_DIR` 时，第二条命令改用该 target 下的 `release/anchor-network-tools`。[打包实现](../rust/anchor-network-tools/src/package.rs)输出 `plugin.json`、`skills/network/SKILL.md` 和 `bin/anchor-network-tools`，不覆盖已安装 Plugin。结果只是候选，不自动挂载或授予网络权限。
+
+`network`、`graph-tasks`、`feishu`、`wecom` 受系统身份保护，不能使用普通 `install --replace-existing` 或 Web/Pilot 普通安装路径发布。完整发行首次安装从已验证 inventory 引导；操作员维护复用 [Library](plugins.md#系统插件与普通插件) 的专用命令：
+
+```sh
+anchor-library --root /absolute/path/to/library inspect-system --id network
+anchor-library --root /absolute/path/to/library install-system \
+  --id network --directory /absolute/path/to/candidate/network --digest <reviewed-candidate-digest>
+anchor-library --root /absolute/path/to/library upgrade-system \
+  --id network --directory /absolute/path/to/candidate/network \
+  --digest <reviewed-candidate-digest> --existing-digest <reviewed-installed-digest>
+```
+
+`install-system` 只接纳缺失项，`upgrade-system` 同时核对已安装代码和候选摘要，在原 Library 发布锁内执行；旧版本损坏或并发变化不能静默覆盖。系统升级属于操作员/发行维护，不授权 Agent 自行升级 Host、扩大权限或部署。代码更改、确定性回归、真实 Provider/渠道验收和生产切换是分开的事实。
 
 ## 工作节奏
 

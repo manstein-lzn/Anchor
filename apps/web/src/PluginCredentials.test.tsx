@@ -63,6 +63,30 @@ describe('standalone plugin management', () => {
     expect(localStorage.length).toBe(0); expect(sessionStorage.length).toBe(0);
   });
 
+  it('configures dynamic Feishu app fields through this Graph\'s credentials endpoint', async () => {
+    const endpoint = '/graphs/feishu-assistant/channel/credentials';
+    const data = { plugin: 'chat-gateway', targets: [{ target: 'channel_feishu@feishu-assistant', kind: 'channel', authorization_digest: 'feishu-digest',
+      fields: ['FEISHU_APP_ID', 'FEISHU_APP_SECRET'].map(field => ({ field, state: 'missing', editable: true })) }] };
+    fetchMock.mockResolvedValueOnce(response(200, data));
+    await act(async () => root.render(<PluginCredentials pluginId="chat-gateway" endpoint={endpoint} />));
+    expect(container.textContent).toContain('channel_feishu@feishu-assistant');
+    expect(container.textContent).toContain('设置 FEISHU_APP_ID');
+    expect(container.textContent).toContain('设置 FEISHU_APP_SECRET');
+    expect(container.textContent).not.toContain('WECOM');
+    for (const field of ['FEISHU_APP_ID', 'FEISHU_APP_SECRET']) {
+      await click(`设置 ${field}`);
+      const input = container.querySelector<HTMLInputElement>('input[type="password"]')!;
+      input.value = `ephemeral-${field}`;
+      data.targets[0].fields.find(item => item.field === field)!.state = 'configured';
+      fetchMock.mockResolvedValueOnce(response(200, data));
+      await act(async () => container.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })));
+      expect(fetchMock.mock.calls.at(-1)?.[0]).toBe(`${endpoint}/${field}`);
+      expect(fetchMock.mock.calls.at(-1)?.[1]).toMatchObject({ method: 'PUT', body: JSON.stringify({ authorization_digest: 'feishu-digest', value: `ephemeral-${field}` }) });
+      expect(input.value).toBe('');
+      expect(container.textContent).toContain(`轮换 ${field}`);
+    }
+  });
+
 
   it('protects a legacy draft from focus refresh and clears detached inputs on target switch', async () => {
     fetchMock.mockResolvedValue(response(200, metadata()));

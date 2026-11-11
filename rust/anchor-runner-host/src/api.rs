@@ -52,7 +52,7 @@ use schedules::*;
 use serde_json::{Value, json};
 use sessions::*;
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, HashMap},
     env, io,
     path::{Path, PathBuf},
     sync::{
@@ -231,7 +231,7 @@ pub async fn serve(configuration: Arc<crate::HostConfiguration>) -> io::Result<(
         );
     }
     let library_root = configuration.library_root(&catalog_root);
-    crate::runtime_configuration::install_release_network(library_root)
+    crate::runtime_configuration::install_release_plugins(library_root)
         .map_err(io::Error::other)?;
     // Start-up reclamation is best effort: a Library that cannot be swept (a busy
     // writer, an unreadable manifest) must never keep the host from starting, and
@@ -761,13 +761,23 @@ fn session_plugin_rows(
         row["explicitOn"] = row["on"].clone();
         row["networkAllowed"] = json!(network.allowed);
         row["networkPermission"] = json!(session.network_allowed);
+        row["networkMode"] = json!(crate::plugin_network::session_mode(
+            &session.plugin_mounts,
+            session.network_allowed
+        ));
         if id == crate::plugin_network::NETWORK_PLUGIN {
             row["on"] = json!(network.enabled);
             row["enabledBy"] = json!(network.enabled_by);
         }
         if let Some(problem) = network.errors.get(&id) {
-            row["available"] = json!(false);
-            row["contextAuthorized"] = json!(false);
+            let host_channel = definitions
+                .get(&id)
+                .is_some_and(|metadata| metadata.system.is_some() && !metadata.channels.is_empty());
+            if !host_channel {
+                row["available"] = json!(false);
+                row["contextAuthorized"] = json!(false);
+            }
+            row["networkToolsAvailable"] = json!(false);
             row["error"] = json!(problem);
         }
     }
@@ -811,6 +821,16 @@ async fn set_session_plugin(
         .get("on")
         .and_then(Value::as_bool)
         .ok_or_else(|| error(StatusCode::BAD_REQUEST, "on must be a boolean"))?;
+    if plugin == crate::plugin_network::NETWORK_PLUGIN {
+        // Remove this alias after the installed client uses the mode endpoint.
+        return set_session_network(
+            State(state),
+            headers,
+            AxumPath(identifier),
+            Json(json!({"mode": if on { "enabled" } else { "denied" }})),
+        )
+        .await;
+    }
     if !anchor_runtime::identifier::is_plugin_id(&plugin) {
         return Err(error(
             StatusCode::BAD_REQUEST,
@@ -925,6 +945,55 @@ fn session_plugin_mount_target(
     Ok((sessions, owner))
 }
 
+#[derive(Clone, Copy)]
+enum SessionNetworkUpdate {
+    Mode(anchor_runtime::graph::NetworkMode),
+    Permission(bool),
+}
+
+#[allow(clippy::result_large_err)]
+fn session_network_target(
+    state: &ApiState,
+    headers: &HeaderMap,
+    identifier: &str,
+    update: SessionNetworkUpdate,
+) -> Result<(anchor_platform_session::SessionStore, String, bool, bool), HttpResponse> {
+    use anchor_runtime::graph::NetworkMode;
+    let (sessions, owner, session) = owned_session(state, headers, identifier)?;
+    if session.status == anchor_platform_session::SessionStatus::Archived {
+        return Err(error(
+            StatusCode::CONFLICT,
+            "该会话已归档，不能再改变联网权限",
+        ));
+    }
+    let (enabled, allowed) = match update {
+        SessionNetworkUpdate::Mode(mode) => {
+            if !session.graph.is_empty() || !session.channel.is_empty() {
+                return Err(error(
+                    StatusCode::CONFLICT,
+                    "渠道会话的联网能力由工作流插件配置管理",
+                ));
+            }
+            if mode == NetworkMode::Enabled {
+                crate::plugin_view::prepare_for_plugin(
+                    state.application.library_root(),
+                    crate::plugin_network::NETWORK_PLUGIN,
+                )
+                .map_err(|_| error(StatusCode::CONFLICT, "network system Plugin is unavailable"))?;
+            }
+            (mode == NetworkMode::Enabled, mode != NetworkMode::Denied)
+        }
+        SessionNetworkUpdate::Permission(allowed) => (
+            session
+                .plugin_mounts
+                .get(crate::plugin_network::NETWORK_PLUGIN)
+                == Some(&true),
+            allowed,
+        ),
+    };
+    Ok((sessions, owner, enabled, allowed))
+}
+
 #[allow(clippy::result_large_err)]
 async fn set_session_network(
     State(state): State<ApiState>,
@@ -932,24 +1001,53 @@ async fn set_session_network(
     AxumPath(identifier): AxumPath<String>,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, HttpResponse> {
-    blocking(move || {
-        let fields = body
-            .as_object()
-            .filter(|fields| fields.len() == 1 && fields.contains_key("allowed"))
-            .ok_or_else(|| error(StatusCode::BAD_REQUEST, "provide allowed only"))?;
-        let allowed = fields["allowed"]
-            .as_bool()
-            .ok_or_else(|| error(StatusCode::BAD_REQUEST, "allowed must be a boolean"))?;
-        let (sessions, owner, session) = owned_session(&state, &headers, &identifier)?;
-        if session.status == anchor_platform_session::SessionStatus::Archived {
-            return Err(error(
-                StatusCode::CONFLICT,
-                "该会话已归档，不能再改变联网权限",
-            ));
+    let fields = body
+        .as_object()
+        .filter(|fields| {
+            fields.len() == 1 && (fields.contains_key("mode") || fields.contains_key("allowed"))
+        })
+        .ok_or_else(|| error(StatusCode::BAD_REQUEST, "provide network mode only"))?;
+    let update = if let Some(mode) = fields.get("mode") {
+        SessionNetworkUpdate::Mode(serde_json::from_value(mode.clone()).map_err(|_| {
+            error(
+                StatusCode::BAD_REQUEST,
+                "mode must be auto, enabled or denied",
+            )
+        })?)
+    } else {
+        // Remove this request compatibility after the installed client migrates.
+        // It changes the existing ceiling without turning a disabled mount on.
+        SessionNetworkUpdate::Permission(
+            fields["allowed"]
+                .as_bool()
+                .ok_or_else(|| error(StatusCode::BAD_REQUEST, "allowed must be a boolean"))?,
+        )
+    };
+    let pilot_guard = state.pilots.plugin_mount_guard().await;
+    let catalog_guard = state.application.graph_catalog_mutation_guard().await;
+    blocking({
+        let (state, headers, identifier) = (state.clone(), headers.clone(), identifier.clone());
+        move || {
+            session_network_target(&state, &headers, &identifier, update)?;
+            Ok(())
         }
+    })
+    .await?;
+    let lease = state
+        .application
+        .plugin_reference_lease()
+        .await
+        .map_err(application_error)?;
+    blocking(move || {
+        let (pilot_guard, catalog_guard, lease) = (pilot_guard, catalog_guard, lease);
+        let (sessions, owner, enabled, allowed) =
+            session_network_target(&state, &headers, &identifier, update)?;
         let updated = sessions
-            .set_network_allowed(&owner, &identifier, allowed, &owner)
+            .set_network_policy(&owner, &identifier, enabled, allowed, &owner)
             .map_err(session_error)?;
+        drop(lease);
+        drop(catalog_guard);
+        drop(pilot_guard);
         Ok(Json(
             json!({"plugins": session_plugin_rows(&state, &updated)?}),
         ))

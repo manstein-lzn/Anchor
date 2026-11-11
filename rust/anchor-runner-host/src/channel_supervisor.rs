@@ -157,7 +157,42 @@ impl ChannelSupervisor {
         }
         let control_token = random_token("anchor-channel-control")?;
         let base = channel_base_url(listen, &managed.graph);
-        environment.insert("WECOM_CHANNEL_STATE".into(), state_dir.clone().into());
+        let (state_field, users_field, send_users_field, tuning): (&str, &str, &str, &[&str]) =
+            match managed.platform.as_str() {
+                "wecom" => (
+                    "WECOM_CHANNEL_STATE",
+                    "ANCHOR_WECOM_USERS",
+                    "ANCHOR_WECOM_SEND_USERS",
+                    &[
+                        "ANCHOR_WECOM_WS_URL",
+                        "ANCHOR_WECOM_CONNECT_MS",
+                        "ANCHOR_WECOM_ACK_MS",
+                        "ANCHOR_WECOM_HEARTBEAT_MS",
+                        "ANCHOR_WECOM_RECONNECT_MS",
+                        "ANCHOR_WECOM_RECONNECT_MAX_MS",
+                        "ANCHOR_WECOM_ACK_DELAY_MS",
+                        "ANCHOR_WECOM_RECOVERY_WINDOW_MS",
+                        "ANCHOR_WECOM_DEBUG",
+                        "ANCHOR_WECOM_PROGRESS",
+                    ],
+                ),
+                "feishu" => (
+                    "FEISHU_CHANNEL_STATE",
+                    "ANCHOR_FEISHU_USERS",
+                    "ANCHOR_FEISHU_SEND_USERS",
+                    &[
+                        "ANCHOR_FEISHU_API_BASE_URL",
+                        "ANCHOR_FEISHU_CONNECT_MS",
+                        "ANCHOR_FEISHU_HTTP_MS",
+                        "ANCHOR_FEISHU_HEARTBEAT_MS",
+                        "ANCHOR_FEISHU_RECONNECT_MS",
+                        "ANCHOR_FEISHU_RECONNECT_MAX_MS",
+                        "ANCHOR_FEISHU_RECOVERY_WINDOW_MS",
+                    ],
+                ),
+                _ => return Err(io::Error::other("unsupported channel platform")),
+            };
+        environment.insert(state_field.into(), state_dir.clone().into());
         environment.insert(
             "ANCHOR_CHANNEL_WEBHOOK_URL".into(),
             format!("{base}/events").into(),
@@ -178,28 +213,17 @@ impl ChannelSupervisor {
         );
         // Operator tuning passes through; who may talk to the bot is the
         // binding's, never the process environment's.
-        for name in [
-            "ANCHOR_WECOM_WS_URL",
-            "ANCHOR_WECOM_CONNECT_MS",
-            "ANCHOR_WECOM_ACK_MS",
-            "ANCHOR_WECOM_HEARTBEAT_MS",
-            "ANCHOR_WECOM_RECONNECT_MS",
-            "ANCHOR_WECOM_RECONNECT_MAX_MS",
-            "ANCHOR_WECOM_ACK_DELAY_MS",
-            "ANCHOR_WECOM_RECOVERY_WINDOW_MS",
-            "ANCHOR_WECOM_DEBUG",
-            "ANCHOR_WECOM_PROGRESS",
-            "ANCHOR_CHANNEL_WEBHOOK_TIMEOUT_MS",
-        ] {
+        for name in tuning
+            .iter()
+            .copied()
+            .chain(["ANCHOR_CHANNEL_WEBHOOK_TIMEOUT_MS"])
+        {
             if let Some(value) = env::var_os(name) {
                 environment.insert(name.into(), value);
             }
         }
-        environment.insert("ANCHOR_WECOM_USERS".into(), managed.users.join(",").into());
-        environment.insert(
-            "ANCHOR_WECOM_SEND_USERS".into(),
-            managed.send_users.join(",").into(),
-        );
+        environment.insert(users_field.into(), managed.users.join(",").into());
+        environment.insert(send_users_field.into(), managed.send_users.join(",").into());
         let launch = LaunchSpec {
             platform: definition.platform.clone(),
             executable: channel.executable.clone(),
@@ -272,7 +296,9 @@ fn discover(bundle_root: &Path, library_root: &Path) -> io::Result<Vec<Discovere
         .snapshot
         .nodes
         .iter()
-        .flat_map(|node| node.plugins.iter().map(|reference| reference.id.clone()))
+        .flat_map(|node| node.plugins.iter())
+        .filter(|reference| reference.id != crate::plugin_network::NETWORK_PLUGIN)
+        .map(|reference| reference.id.clone())
         .collect::<BTreeSet<_>>();
     let catalog = Catalog::new(library_root);
     let mut channels = BTreeMap::<String, DiscoveredChannel>::new();
@@ -503,7 +529,7 @@ fn channel_base_url(listen: &str, graph: &str) -> String {
 mod tests {
     use super::*;
     use anchor_graph_host::PluginCatalog;
-    use serde_json::{Value, json};
+    use serde_json::json;
     use std::{
         fs,
         os::unix::fs::PermissionsExt,
@@ -519,6 +545,11 @@ mod tests {
         let mut summaries = Vec::new();
         for (plugin, platform, entrypoint) in channels {
             let plugin_dir = root.path().join("plugins").join(plugin);
+            if let Some(system) = anchor_graph_host::SystemPlugin::from_id(plugin) {
+                crate::test_system_plugin(root.path(), system);
+                plugin_ids.push((*plugin).to_owned());
+                continue;
+            }
             let executable = plugin_dir.join(entrypoint);
             fs::create_dir_all(executable.parent().unwrap()).unwrap();
             fs::write(
@@ -611,9 +642,15 @@ mod tests {
     fn launch(credentials: BTreeMap<String, String>) -> ManagedChannelLaunch {
         ManagedChannelLaunch {
             graph: "bot".into(),
-            plugin: "mounted".into(),
+            plugin: "wecom".into(),
             platform: "wecom".into(),
-            credentials,
+            credentials: BTreeMap::from([
+                ("WECOM_BOT_ID".into(), "fixture-bot".into()),
+                ("WECOM_BOT_SECRET".into(), "fixture-token".into()),
+            ])
+            .into_iter()
+            .chain(credentials)
+            .collect(),
             users: vec!["member".into()],
             send_users: vec!["member".into()],
             callback_key: "callback".into(),
@@ -631,27 +668,7 @@ mod tests {
         fs::create_dir_all(&bundle).unwrap();
         // The Plugin, with its channel declaration and entrypoint, lives once.
         let plugin = library.join("plugins/wecom");
-        fs::create_dir_all(&plugin).unwrap();
-        fs::write(
-            plugin.join("plugin.json"),
-            json!({"name":"WeCom","skills":"skills/"}).to_string(),
-        )
-        .unwrap();
-        fs::create_dir_all(plugin.join("skills")).unwrap();
-        fs::write(plugin.join("skills/SKILL.md"), "code").unwrap();
-        fs::write(
-            plugin.join("channel.json"),
-            json!({"platform":"wecom","transport":"websocket","entrypoint":"bin/gateway"})
-                .to_string(),
-        )
-        .unwrap();
-        fs::create_dir_all(plugin.join("bin")).unwrap();
-        fs::write(plugin.join("bin/gateway"), "#!/bin/sh\nexit 0\n").unwrap();
-        fs::set_permissions(
-            plugin.join("bin/gateway"),
-            fs::Permissions::from_mode(0o700),
-        )
-        .unwrap();
+        crate::test_system_plugin(&library, anchor_graph_host::SystemPlugin::Wecom);
         fs::write(
             bundle.join("graph.json"),
             json!({
@@ -677,7 +694,10 @@ mod tests {
         assert_eq!(discovered[0].definition.platform, "wecom");
         assert_eq!(
             discovered[0].executable,
-            plugin.join("bin/gateway").canonicalize().unwrap(),
+            plugin
+                .join("bin/anchor-wecom-gateway")
+                .canonicalize()
+                .unwrap(),
             "the entrypoint comes from the Library"
         );
         // With the bundle root as the Library root there is nothing to find: this
@@ -693,22 +713,22 @@ mod tests {
 
     #[test]
     fn discovers_only_channels_mounted_by_the_graph() {
-        let root = bundle(&[("mounted", "wecom", "bin/gateway")]);
+        let root = bundle(&[("wecom", "wecom", "bin/anchor-wecom-gateway")]);
         let discovered = discover(root.path(), root.path()).unwrap();
         assert_eq!(discovered.len(), 1);
         assert_eq!(discovered[0].definition.platform, "wecom");
         assert!(
             discovered[0]
                 .executable
-                .ends_with("plugins/mounted/bin/gateway")
+                .ends_with("plugins/wecom/bin/anchor-wecom-gateway")
         );
     }
 
     #[test]
     fn rejects_conflicting_platform_declarations() {
         let root = bundle(&[
-            ("first", "wecom", "bin/gateway"),
-            ("second", "wecom", "bin/gateway"),
+            ("first", "fixture", "bin/gateway"),
+            ("second", "fixture", "bin/gateway"),
         ]);
         let error =
             discover(root.path(), root.path()).expect_err("duplicate channel must fail closed");
@@ -721,46 +741,44 @@ mod tests {
 
     #[tokio::test]
     async fn missing_or_blank_required_channel_environment_fails_before_spawn() {
-        let root = bundle(&[("mounted", "wecom", "bin/gateway")]);
-        let channel = root.path().join("plugins/mounted/channel.json");
-        let mut value: Value = serde_json::from_slice(&fs::read(&channel).unwrap()).unwrap();
-        value["required_environment"] = json!(["ANCHOR_CHANNEL_TEST_REQUIRED"]);
-        fs::write(&channel, value.to_string()).unwrap();
-        refresh_manifest(root.path(), &["mounted"]);
+        let root = bundle(&[("wecom", "wecom", "bin/anchor-wecom-gateway")]);
         for value in [None, Some(""), Some("   ")] {
             let credentials = value
-                .map(|value| {
-                    BTreeMap::from([("ANCHOR_CHANNEL_TEST_REQUIRED".to_owned(), value.to_owned())])
-                })
+                .map(|value| BTreeMap::from([("WECOM_BOT_ID".to_owned(), value.to_owned())]))
                 .unwrap_or_default();
+            let mut launch = launch(credentials);
+            if value.is_none() {
+                launch.credentials.remove("WECOM_BOT_ID");
+            }
             let result = ChannelSupervisor::start_managed(
                 &Handle::current(),
                 root.path(),
                 root.path(),
                 &root.path().join("state"),
                 "127.0.0.1:8077",
-                launch(credentials),
+                launch,
             )
             .await;
             let error = match result {
                 Err(error) => error,
                 Ok(_) => panic!("missing or blank channel credential must fail closed: {value:?}"),
             };
-            assert!(error.to_string().contains("ANCHOR_CHANNEL_TEST_REQUIRED"));
+            assert!(error.to_string().contains("WECOM_BOT_ID"));
         }
     }
 
     #[tokio::test]
     async fn exited_channel_is_restarted_and_shutdown_reaps_it() {
-        let root = bundle(&[("mounted", "wecom", "bin/gateway")]);
-        let executable = root.path().join("plugins/mounted/bin/gateway");
+        let root = bundle(&[("wecom", "wecom", "bin/anchor-wecom-gateway")]);
+        let executable = root.path().join("plugins/wecom/bin/anchor-wecom-gateway");
+        let count = root.path().join("restart-count");
         fs::write(
             &executable,
-            "#!/bin/sh\nprintf x >> restart-count\nexit 0\n",
+            format!("#!/bin/sh\nprintf x >> '{}'\nexit 0\n", count.display()),
         )
         .unwrap();
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
-        refresh_manifest(root.path(), &["mounted"]);
+        refresh_manifest(root.path(), &["wecom"]);
         let state = root
             .path()
             .join(format!("state-{}", TEST_ID.fetch_add(1, Ordering::Relaxed)));
@@ -776,20 +794,19 @@ mod tests {
         .unwrap();
         tokio::time::sleep(POLL_INTERVAL * 2 + restart_delay() * 2).await;
         supervisor.shutdown().await;
-        let count = fs::read_to_string(root.path().join("plugins/mounted/restart-count"))
-            .unwrap_or_default();
+        let count = fs::read_to_string(count).unwrap_or_default();
         assert!(count.len() >= 2, "channel was not restarted: {count:?}");
     }
 
     #[tokio::test]
     async fn restart_removes_stale_control_files() {
-        let root = bundle(&[("mounted", "wecom", "bin/gateway")]);
+        let root = bundle(&[("wecom", "wecom", "bin/anchor-wecom-gateway")]);
         let state = root
             .path()
             .join(format!("state-{}", TEST_ID.fetch_add(1, Ordering::Relaxed)));
         let descriptor = state_directory(&state, "bot").join("control.json");
         let socket = state_directory(&state, "bot").join("control.sock");
-        let executable = root.path().join("plugins/mounted/bin/gateway");
+        let executable = root.path().join("plugins/wecom/bin/anchor-wecom-gateway");
         fs::write(
             &executable,
             format!(
@@ -801,7 +818,7 @@ mod tests {
         )
         .unwrap();
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
-        refresh_manifest(root.path(), &["mounted"]);
+        refresh_manifest(root.path(), &["wecom"]);
         let mut supervisor = ChannelSupervisor::start_managed(
             &Handle::current(),
             root.path(),

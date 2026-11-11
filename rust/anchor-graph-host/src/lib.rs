@@ -14,6 +14,7 @@ mod plugin_authorization;
 mod plugin_catalog;
 mod plugin_configuration;
 mod resources;
+mod system_plugins;
 
 pub use bundle::{
     BundlePluginReference, FileGraphBundleLoader, GraphBundleManifest, LoadedGraphBundle,
@@ -30,11 +31,13 @@ pub use graph_catalog::{ChildRunControl, GraphCatalog, PluginReferenceLeaseFutur
 pub use mcp::{McpServerDefinition, channel_identity_headers, host_environment_references};
 pub use plugin_catalog::{
     ChannelDefinition, FilePluginCatalog, PluginCatalog, PluginDefinition, PluginMetadata,
+    SystemPluginInspection,
 };
 pub use plugin_configuration::{
     PluginConfiguration, PluginConfigurationField, PluginConfigurationFieldType,
     mcp_environment_fields,
 };
+pub use system_plugins::{SystemPlugin, all_system_plugins};
 
 use anchor_runtime::graph::GraphError;
 

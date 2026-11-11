@@ -132,6 +132,14 @@ impl Fixture {
 
     fn first_party_plugin(&self, id: &str) -> PathBuf {
         let directory = self.request.bundle.join("plugins").join(id);
+        if let Some(system) = anchor_graph_host::SystemPlugin::from_id(id) {
+            self.system_plugin(system);
+            self.write_bundle(&[id]);
+            if !system.executables().is_empty() {
+                fs::remove_dir_all(directory.join("bin")).unwrap();
+            }
+            return directory;
+        }
         fs::create_dir_all(directory.join("skills").join(id)).unwrap();
         let source = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../plugins")
@@ -139,7 +147,6 @@ impl Fixture {
         fs::copy(source.join("plugin.json"), directory.join("plugin.json")).unwrap();
         let application_binary = match id {
             "docmost" => Some("anchor-docmost-tools"),
-            "wecom" => Some("anchor-wecom-tools"),
             _ => None,
         };
         if let Some(binary) = application_binary {
@@ -164,6 +171,20 @@ impl Fixture {
             fs::remove_dir_all(directory.join("bin")).unwrap();
         }
         directory
+    }
+
+    fn system_plugin(&self, system: anchor_graph_host::SystemPlugin) {
+        let directory = self.request.bundle.join("plugins").join(system.id());
+        for (relative, bytes) in system.public_files() {
+            let file = directory.join(relative);
+            fs::create_dir_all(file.parent().unwrap()).unwrap();
+            fs::write(file, bytes).unwrap();
+        }
+        for relative in system.executables() {
+            let file = directory.join(relative);
+            fs::create_dir_all(file.parent().unwrap()).unwrap();
+            fs::copy("/usr/bin/false", file).unwrap();
+        }
     }
 
     fn wecom_gateway_binary(&self) -> PathBuf {
@@ -209,6 +230,94 @@ fn public_api_requires_the_fixed_goose_identity() {
     assert_eq!(GOOSE_VERSION, "1.53.0");
     assert_eq!(GOOSE_SHA256.len(), 64);
     assert!(!fixture.request.output.exists());
+}
+
+#[test]
+fn graph_network_policy_packages_only_its_executable_closure_without_changing_authority() {
+    use anchor_graph_host::SystemPlugin;
+    for (mode, requires_network, needs_provider) in [
+        ("denied", false, false),
+        ("denied", true, false),
+        ("auto", false, false),
+        ("enabled", false, true),
+        ("auto", true, true),
+    ] {
+        let mut fixture = Fixture::new();
+        let mut references = vec![json!({"id":"network","network":mode})];
+        let mut ids = vec!["network"];
+        if requires_network {
+            let plugin = fixture.plugin().join("plugin.json");
+            fs::write(plugin, json!({"name":"Demo","network":true}).to_string()).unwrap();
+            references.push(json!("demo"));
+            ids.push("demo");
+        }
+        let graph = json!({"entry":"work","agents":{"worker":{"model":"fixture"}},
+            "nodes":[{"id":"work","agent":"worker","plugins":references}],"edges":[]});
+        fs::write(fixture.request.bundle.join("graph.json"), graph.to_string()).unwrap();
+        fs::write(
+            fixture.request.bundle.join("manifest.json"),
+            json!({"format":1,"graph":"graph.json",
+            "plugins":ids.iter().map(|id| json!({"id":id})).collect::<Vec<_>>()})
+            .to_string(),
+        )
+        .unwrap();
+        let graph_digest = digest(&fixture.request.bundle.join("graph.json"));
+        let manifest_digest = digest(&fixture.request.bundle.join("manifest.json"));
+        if needs_provider {
+            assert!(
+                fixture.prepared().is_err(),
+                "{mode}: missing network provider accepted"
+            );
+            assert!(!fixture.request.output.exists());
+            fixture.system_plugin(SystemPlugin::Network);
+        }
+        let report = fixture.package().unwrap();
+        assert_eq!(report.inventory.bundle.graph_sha256, graph_digest);
+        assert_eq!(report.inventory.bundle.manifest_sha256, manifest_digest);
+        let plugins = &report.inventory.bundle.plugins;
+        assert_eq!(
+            plugins.iter().any(|plugin| plugin.id == "network"),
+            needs_provider
+        );
+        assert_eq!(
+            plugins.iter().any(|plugin| plugin.id == "demo"),
+            requires_network
+        );
+        let extracted = tempfile::tempdir().unwrap();
+        tar::Archive::new(GzDecoder::new(File::open(&report.output).unwrap()))
+            .unpack(extracted.path())
+            .unwrap();
+        let runtime = extracted.path().join("anchor-runtime");
+        assert_eq!(digest(&runtime.join("bundle/graph.json")), graph_digest);
+        assert_eq!(
+            digest(&runtime.join("bundle/manifest.json")),
+            manifest_digest
+        );
+        let bundle = FileGraphBundleLoader::new(runtime.join("bundle"))
+            .load()
+            .unwrap();
+        let bindings = FilePluginCatalog::new(&runtime)
+            .resolve_snapshot(&bundle.snapshot)
+            .unwrap();
+        assert_eq!(bindings.len(), plugins.len());
+        for binding in bindings {
+            assert!(
+                plugins
+                    .iter()
+                    .any(|plugin| plugin.id == binding.id && plugin.digest == binding.digest)
+            );
+        }
+        if !needs_provider {
+            assert!(!runtime.join("plugins/network").exists());
+            fixture.system_plugin(SystemPlugin::Network);
+            fixture.request.output = fixture.root.path().join("undeclared-provider.tar.gz");
+            assert!(
+                fixture.prepared().is_err(),
+                "unneeded provider was silently shipped"
+            );
+            assert!(!fixture.request.output.exists());
+        }
+    }
 }
 
 #[test]

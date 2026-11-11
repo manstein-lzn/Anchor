@@ -271,6 +271,30 @@ pub fn tool_feedback(request: &Value) -> Vec<Value> {
         .collect()
 }
 
+pub fn assert_role_system_prompt(request: &Value, role: &str) -> String {
+    let messages = request["messages"].as_array().unwrap();
+    let system = messages
+        .iter()
+        .filter(|message| message["role"] == "system")
+        .filter_map(|message| message["content"].as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(system.matches(role).count(), 1, "missing or repeated role");
+    assert!(
+        !system.to_ascii_lowercase().contains("goose"),
+        "runtime branding remained in the system prompt"
+    );
+    assert!(!system.contains("AAIF"));
+    assert!(
+        messages
+            .iter()
+            .filter(|message| message["role"] != "system")
+            .all(|message| !message["content"].to_string().contains(role)),
+        "role instructions must not be repeated in conversation history"
+    );
+    system
+}
+
 pub fn is_summary_request(request: &Value) -> bool {
     request["messages"]
         .as_array()
@@ -868,6 +892,7 @@ pub struct Host {
     extra_environment: Vec<(OsString, OsString)>,
     bot: Option<(String, Vec<String>)>,
     bot_credentials: Vec<(String, String)>,
+    bot_control_descriptor: Option<PathBuf>,
 }
 
 impl Host {
@@ -942,6 +967,7 @@ impl Host {
             extra_environment: Vec::new(),
             bot: None,
             bot_credentials: Vec::new(),
+            bot_control_descriptor: None,
         }
     }
 
@@ -962,6 +988,12 @@ impl Host {
         self.bot_credentials
             .push((field.to_owned(), value.to_owned()));
         self
+    }
+
+    /// Substitute only the isolated private-control endpoint after the canonical
+    /// gateway starts; the endpoint may be a protocol fixture or a real native gateway.
+    pub fn set_bot_control_descriptor(&mut self, descriptor: &Path) {
+        self.bot_control_descriptor = Some(descriptor.to_owned());
     }
 
     pub fn with_allowed_commands(mut self, commands: &str) -> Self {
@@ -1184,6 +1216,19 @@ impl Host {
         });
         if let Some((graph, users)) = &self.bot {
             server.enable_bot(graph, users, &self.bot_credentials);
+            if let Some(source) = &self.bot_control_descriptor {
+                let digest = format!("{:x}", Sha256::digest(graph.as_bytes()));
+                let destination = self
+                    .base
+                    .state_root()
+                    .join("channels/graphs")
+                    .join(&digest[..16])
+                    .join("control.json");
+                wait_until("canonical gateway control descriptor", || {
+                    destination.is_file()
+                });
+                fs::copy(source, destination).unwrap();
+            }
         }
         server
     }

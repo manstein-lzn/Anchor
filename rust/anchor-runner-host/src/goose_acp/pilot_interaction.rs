@@ -1404,6 +1404,7 @@ mod uninstall_tool_tests {
     async fn configured_instruction_plugins_remain_protected_for_install_and_uninstall() {
         let _env_guard = crate::PROCESS_ENV_LOCK.lock().await;
         let (root, tools) = fixture();
+        crate::test_system_plugin(root.path(), anchor_graph_host::SystemPlugin::Network);
         install(&tools, candidate(root.path(), "Demo", b"precious"), "demo").await;
         tools.application.update_graph(
             "fixture",

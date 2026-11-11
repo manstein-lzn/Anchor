@@ -115,6 +115,67 @@ impl GraphCatalog for OrdinaryCatalog {
     }
 }
 
+#[tokio::test]
+async fn child_admission_resolves_network_policy_without_requiring_an_offline_provider() {
+    struct Catalog(GraphSnapshot);
+    impl GraphCatalog for Catalog {
+        fn snapshot(&self, _: &str) -> Result<Option<GraphSnapshot>, GraphError> {
+            Ok(Some(self.0.clone()))
+        }
+
+        fn bundle(&self, _: &str) -> Result<Option<LoadedGraphBundle>, GraphError> {
+            Ok(Some(LoadedGraphBundle {
+                authoring_definition: serde_json::to_value(&self.0).unwrap(),
+                snapshot: self.0.clone(),
+                plugins: vec!["network".into()],
+            }))
+        }
+
+        fn graph_ancestry(&self, _: &str) -> Result<Vec<String>, GraphError> {
+            Ok(vec!["parent".into()])
+        }
+    }
+    for mode in ["denied", "auto", "enabled"] {
+        let root = tempfile::tempdir().unwrap();
+        let runs = Runs::new(root.path());
+        let artifacts = Artifacts::default();
+        let nodes = Nodes::default();
+        let plugins = FilePluginCatalog::new(root.path());
+        let snapshot = GraphSnapshot::from_authoring(json!({
+            "objective":"offline child", "ops":{"work":{"run":"true"}},
+            "nodes":[{"id":"work","op":"work","plugins":[{"id":"network","network":mode}]}], "edges":[]
+        })).unwrap();
+        let digest = snapshot.digest().unwrap();
+        let catalog = Catalog(snapshot);
+        let executor = Executor {
+            runs: &runs,
+            artifacts: &artifacts,
+            nodes: &nodes,
+            plugins: Some(&plugins),
+        };
+        let host = InProcessGraphHost::new(&catalog, &runs, &artifacts, &nodes)
+            .with_plugin_catalog(&plugins)
+            .with_child_executor(&executor, false);
+        let spec = json!({"graph":"child","mode":"wait"});
+        let (identity, input) = parent_call(&runs, &spec);
+        let result = host
+            .call(&identity, &spec, &input, &[], Cancellation::default())
+            .await;
+        if mode == "enabled" {
+            assert!(result.unwrap_err().to_string().contains("network"));
+            assert!(runs.load(&child_run_id(&identity)).unwrap().is_none());
+        } else {
+            assert!(matches!(
+                result.unwrap(),
+                GraphCallOutcome::Completed { .. }
+            ));
+            let child = runs.load(&child_run_id(&identity)).unwrap().unwrap();
+            assert_eq!(child.record.snapshot.digest().unwrap(), digest);
+            assert!(child.record.plugin_bindings.is_empty());
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 enum SessionAction {
     Waiting,

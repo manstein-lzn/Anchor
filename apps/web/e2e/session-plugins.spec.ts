@@ -62,45 +62,51 @@ async function openPilot(page: Page) {
   await expect(page.getByLabel('发送给 Anchor Pilot')).toBeEnabled();
 }
 
-test('networking shows dependency activation and updates authorization for the whole Plugin list', async ({ page }) => {
-  let direct = false;
+test('one network policy controls dependency activation and global denial for the whole Plugin list', async ({ page }) => {
+  let mode: 'auto' | 'enabled' | 'denied' = 'auto';
   let research = false;
-  let permission = true;
+  const writes: string[] = [];
+  const direct = () => mode === 'enabled';
+  const permission = () => mode !== 'denied';
   const rows = (): SessionPlugin[] => [
     { id: 'academic-research', name: '学术调研', on: research, explicitOn: research,
-      requiresNetwork: true, available: permission || !research, networkAllowed: permission && (direct || research),
-      error: permission || !research ? null : '该插件需要联网：当前任务已禁止联网' },
+      requiresNetwork: true, available: permission() || !research, networkAllowed: permission() && (direct() || research),
+      error: permission() || !research ? null : '该插件需要联网：当前任务已禁止联网' },
     { id: 'network', name: '联网', description: '启用任务工具的网络访问。', networkProvider: true,
-      on: direct || research, explicitOn: direct, enabledBy: research ? ['academic-research'] : [],
-      networkPermission: permission, networkAllowed: permission && (direct || research), available: permission,
-      error: permission ? null : '当前任务已禁止联网' },
+      on: permission() && (direct() || research), explicitOn: direct(), enabledBy: research ? ['academic-research'] : [],
+      networkMode: mode, networkAllowed: permission() && (direct() || research), available: permission(),
+      error: permission() ? null : '当前任务已禁止联网' },
   ];
   await page.route('**/sessions/*/plugins', route => route.fulfill({ json: { plugins: rows() } }));
   await page.route('**/sessions/*/plugins/*', route => {
     const id = new URL(route.request().url()).pathname.split('/').at(-1)!;
-    if (id === 'network') direct = route.request().postDataJSON().on;
-    else research = route.request().postDataJSON().on;
+    writes.push(id);
+    research = route.request().postDataJSON().on;
     return route.fulfill({ json: { plugin: rows().find(row => row.id === id), plugins: rows() } });
   });
   await page.route('**/sessions/*/network', route => {
-    permission = route.request().postDataJSON().allowed;
+    mode = route.request().postDataJSON().mode;
     return route.fulfill({ json: { plugins: rows() } });
   });
   await openPilot(page);
   await page.getByRole('button', { name: '展开插件面板', exact: true }).click();
   const rail = page.getByRole('complementary', { name: '会话插件挂载' });
   await rail.getByRole('switch', { name: '挂载 学术调研', exact: true }).click();
-  await expect(rail.getByText('由学术调研依赖启用 · 网络访问已允许')).toBeVisible();
-  await expect(rail.getByRole('switch', { name: '挂载 联网', exact: true })).toHaveAttribute('aria-checked', 'false');
-  await rail.getByRole('switch', { name: '挂载 联网', exact: true }).click();
-  await expect(rail.getByText('主动启用 · 由学术调研依赖启用 · 网络访问已允许')).toBeVisible();
-  await rail.getByRole('switch', { name: '取消挂载 联网', exact: true }).click();
-  await expect(rail.getByText('由学术调研依赖启用 · 网络访问已允许')).toBeVisible();
-  await rail.getByRole('button', { name: '禁止联网', exact: true }).click();
+  const policy = rail.getByRole('combobox', { name: '联网策略', exact: true });
+  await expect(rail.locator('.plugin-network-policy')).toContainText('由学术调研依赖启用');
+  await expect(policy).toHaveValue('auto');
+  await expect(rail.getByRole('switch', { name: /联网/ })).toHaveCount(0);
+  await policy.selectOption('enabled');
+  await expect(rail.locator('.plugin-network-policy')).toContainText('主动启用联网');
+  await policy.selectOption('auto');
+  await expect(rail.locator('.plugin-network-policy')).toContainText('由学术调研依赖启用');
+  await policy.selectOption('denied');
   await expect(rail.getByText('不可用：该插件需要联网：当前任务已禁止联网')).toBeVisible();
-  await rail.getByRole('button', { name: '允许联网', exact: true }).click();
+  await expect(rail.locator('.plugin-network-policy')).toContainText('插件依赖不能重新启用');
+  await policy.selectOption('auto');
   await rail.getByRole('switch', { name: '取消挂载 学术调研', exact: true }).click();
-  await expect(rail.getByText('未启用 · 网络访问未启用')).toBeVisible();
+  await expect(rail.locator('.plugin-network-policy')).toContainText('当前网络访问未启用');
+  expect(writes).toEqual(['academic-research', 'academic-research']);
   await page.screenshot({ path: test.info().outputPath('network-plugin.png') });
 });
 

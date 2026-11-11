@@ -61,6 +61,21 @@ impl RunApplication {
             })?;
             let source_fact: BindingFact = decode(source_fact)?;
             require_binding(&source_fact, &source)?;
+            let prior = self
+                .read_run(&source.run_id)?
+                .ok_or(ApplicationError::Missing)?;
+            require_node(&prior.record, &source)?;
+            self.ensure_predecessor_settled(&prior, &())?;
+            if !crate::goose_acp::pending_invocation_recovery(&self.data_root, &source)?.is_empty()
+            {
+                return Err(ApplicationError::Conflict(
+                    "workspace predecessor has an unresolved native tool observation".into(),
+                ));
+            }
+            // A process crash drops the OS lease but cannot publish the
+            // interruption. The certified, stopped owner can now record it;
+            // neither a tool result nor an Artifact is manufactured here.
+            workspaces.interrupt_stopped_owner(&source)?;
             workspaces.check_bind_resource(key, &source_fact.binding.resource_id)?;
             self.promote_workspace_resource(&source_fact.binding.resource_id, workspaces)?;
             source_fact.binding.resource_id

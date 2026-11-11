@@ -31,16 +31,14 @@ fn task_host(definition: &Value) -> Host {
     fs::write(bundle.join("graph.json"), definition.to_string()).unwrap();
     fs::write(
         bundle.join("manifest.json"),
-        json!({"format":1,"graph":"graph.json","plugins":[{"id":"wecom"},{"id":"graph-tasks"}]})
+        json!({"format":1,"graph":"graph.json","plugins":[{"id":"wecom"},{"id":"graph-tasks"},{"id":"network"}]})
             .to_string(),
     )
     .unwrap();
-    let official = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugins/graph-tasks");
-    let installed = host.base.root.path().join("plugins/graph-tasks");
-    fs::create_dir_all(installed.join("skills/graph-tasks")).unwrap();
-    for path in ["plugin.json", "skills/graph-tasks/SKILL.md"] {
-        fs::copy(official.join(path), installed.join(path)).unwrap();
-    }
+    fixture::install_system_plugin(
+        host.base.root.path(),
+        anchor_graph_host::SystemPlugin::GraphTasks,
+    );
     host
 }
 
@@ -54,7 +52,7 @@ struct TaskNoticeGateway {
 }
 
 impl TaskNoticeGateway {
-    fn bind(host: &Host) -> Self {
+    fn bind(host: &mut Host) -> Self {
         let root = tempfile::tempdir().unwrap();
         let socket = root.path().join("control.sock");
         let listener = UnixListener::bind(&socket).unwrap();
@@ -65,15 +63,7 @@ impl TaskNoticeGateway {
             json!({"socket":socket,"token":"private-task-fixture"}).to_string(),
         )
         .unwrap();
-        let gateway = host.base.root.path().join("plugins/wecom/bin/gateway");
-        fs::write(
-            &gateway,
-            format!(
-                "#!/bin/sh\nset -eu\ncat '{}' > \"$ANCHOR_CHANNEL_CONTROL_DESCRIPTOR\"\nexec /bin/sleep 3600\n",
-                descriptor.display()
-            ),
-        )
-        .unwrap();
+        host.set_bot_control_descriptor(&descriptor);
         let requests = Arc::new(Mutex::new(Vec::new()));
         let received = requests.clone();
         let stopped = Arc::new(AtomicBool::new(false));
@@ -172,10 +162,11 @@ fn operator_assigned_schedule_wakes_the_original_assistant_to_deliver_success_an
     );
     let mut definition = graph();
     definition["nodes"][1]["plugins"] = json!([
-        "wecom",{"id":"graph-tasks","graph_tasks":{"graphs":["morning-source","broken-source"]}}
+        "wecom",{"id":"graph-tasks","graph_tasks":{"graphs":["morning-source","broken-source"]}},
+        {"id":"network","network":"denied"}
     ]);
-    let host = task_host(&definition);
-    let gateway = TaskNoticeGateway::bind(&host);
+    let mut host = task_host(&definition);
+    let gateway = TaskNoticeGateway::bind(&mut host);
     for (name, operation) in [
         (
             "morning-source",
@@ -385,8 +376,10 @@ fn agent_delegates_an_authorized_graph_and_its_real_completion_wakes_the_same_se
         finish("private-result-processed-no-automatic-send").after("delegated-result-observed"),
     ]);
     let mut definition = graph();
-    definition["nodes"][1]["plugins"] =
-        json!(["wecom",{"id":"graph-tasks","graph_tasks":{"graphs":["morning-source"]}}]);
+    definition["nodes"][1]["plugins"] = json!([
+        "wecom",{"id":"graph-tasks","graph_tasks":{"graphs":["morning-source"]}},
+        {"id":"network","network":"denied"}
+    ]);
     let host = task_host(&definition);
     let source = host.base.root.path().join("morning-source");
     fs::create_dir_all(&source).unwrap();

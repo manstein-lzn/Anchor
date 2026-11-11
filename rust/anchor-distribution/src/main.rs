@@ -33,10 +33,12 @@ struct Arguments {
     scholarly: Option<PathBuf>,
     #[arg(long, value_name = "ELF", conflicts_with = "platform")]
     docmost_tools: Option<PathBuf>,
-    #[arg(long, value_name = "ELF", conflicts_with = "platform")]
+    #[arg(long, value_name = "ELF")]
     wecom_tools: Option<PathBuf>,
-    #[arg(long, value_name = "ELF", conflicts_with = "platform")]
+    #[arg(long, value_name = "ELF")]
     wecom_gateway: Option<PathBuf>,
+    #[arg(long, value_name = "ELF", requires = "platform")]
+    feishu_gateway: Option<PathBuf>,
     #[arg(long, value_name = "ELF", requires = "platform")]
     net_relay: Option<PathBuf>,
     #[arg(long, value_name = "ELF", requires = "platform")]
@@ -45,6 +47,8 @@ struct Arguments {
     platform_launcher: Option<PathBuf>,
     #[arg(long, value_name = "ELF", requires = "platform")]
     network_tools: Option<PathBuf>,
+    #[arg(long, value_name = "ELF", requires = "platform")]
+    git_tools: Option<PathBuf>,
     #[arg(long, value_name = "ELF", requires = "platform")]
     uv: Option<PathBuf>,
     #[arg(long, value_name = "ELF", requires = "platform")]
@@ -95,6 +99,10 @@ fn package(arguments: Arguments) -> anchor_distribution::Result<String> {
             platform_launcher: required(arguments.platform_launcher, "--platform-launcher")?,
             web: required(arguments.web, "--web")?,
             network_tools: required(arguments.network_tools, "--network-tools")?,
+            git_tools: required(arguments.git_tools, "--git-tools")?,
+            wecom_tools: required(arguments.wecom_tools, "--wecom-tools")?,
+            feishu_gateway: required(arguments.feishu_gateway, "--feishu-gateway")?,
+            wecom_gateway: required(arguments.wecom_gateway, "--wecom-gateway")?,
             uv: required(arguments.uv, "--uv")?,
             rustup_init: required(arguments.rustup_init, "--rustup-init")?,
             pixi: required(arguments.pixi, "--pixi")?,

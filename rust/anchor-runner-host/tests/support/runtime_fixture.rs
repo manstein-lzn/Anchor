@@ -66,6 +66,56 @@ pub fn host_binary() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_anchor-runner-host")))
 }
 
+/// Stage exactly this release's public resources and the selected native build.
+/// Reserved identities must exercise the same admission path as distribution.
+pub fn install_system_plugin(
+    root: &Path,
+    system: anchor_graph_host::SystemPlugin,
+) -> anchor_library::InstallOutcome {
+    use anchor_graph_host::FilePluginCatalog;
+    let source = tempfile::tempdir().unwrap();
+    let package = source.path().join("plugins").join(system.id());
+    for (relative, bytes) in system.public_files() {
+        let path = package.join(relative);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, bytes).unwrap();
+    }
+    for relative in system.executables() {
+        let path = package.join(relative);
+        let binary = host_binary().with_file_name(Path::new(relative).file_name().unwrap());
+        assert!(
+            binary.is_file(),
+            "build native system executable {}",
+            binary.display()
+        );
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::copy(binary, path).unwrap();
+    }
+    let definition = FilePluginCatalog::new(source.path())
+        .definition(system.id())
+        .unwrap();
+    anchor_library::Library::new(root)
+        .install_system_directory(system, &package, &definition.digest)
+        .unwrap()
+}
+
+pub fn wecom_mcp_environment(endpoint: &str) -> Vec<(&'static str, String)> {
+    let fields = [
+        "WECOM_API_BASE_URL",
+        "WECOM_CORP_ID",
+        "WECOM_AGENT_ID",
+        "WECOM_SECRET",
+    ];
+    vec![
+        ("WECOM_API_BASE_URL", endpoint.into()),
+        ("WECOM_CORP_ID", "fixture-corp".into()),
+        ("WECOM_AGENT_ID", "1".into()),
+        ("WECOM_SECRET", "fixture-secret".into()),
+        ("ANCHOR_PLUGIN_EXTERNAL_CONFIGURATION", json!({"wecom":fields.into_iter()
+            .map(|field| (format!("wecom.{field}"), json!(field))).collect::<serde_json::Map<_, _>>()}).to_string()),
+    ]
+}
+
 impl Host {
     pub fn new(graph: &Value) -> Self {
         let root = tempfile::tempdir().unwrap();
@@ -258,10 +308,12 @@ impl Host {
             Err(error) => panic!("workspace bindings: {error}"),
         };
         for entry in bindings {
-            let binding: Value = serde_json::from_slice(
-                &fs::read(entry.unwrap().path().join("binding.json")).unwrap(),
-            )
-            .unwrap();
+            let bytes = match fs::read(entry.unwrap().path().join("binding.json")) {
+                Ok(bytes) => bytes,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => panic!("workspace binding: {error}"),
+            };
+            let binding: Value = serde_json::from_slice(&bytes).unwrap();
             resources.insert(binding["resource_id"].as_str().unwrap().to_owned());
         }
         for resource in resources {

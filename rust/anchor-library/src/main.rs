@@ -2,6 +2,7 @@
 
 use std::{path::PathBuf, process::ExitCode};
 
+use anchor_graph_host::{FilePluginCatalog, SystemPlugin};
 use anchor_library::{InstallRequest, Library};
 use clap::{Parser, Subcommand};
 use serde_json::Value;
@@ -38,6 +39,32 @@ enum Operation {
         /// without touching the Library.
         #[arg(long)]
         review: bool,
+    },
+    /// Bootstrap one missing System Plugin from an operator-admitted Anchor build.
+    /// Canonical public resources and the exact reviewed digest must match; no replacement.
+    InstallSystem {
+        #[arg(long)]
+        directory: PathBuf,
+        #[arg(long)]
+        id: String,
+        #[arg(long)]
+        digest: String,
+    },
+    /// Inspect installed old-release bytes without granting an execution identity.
+    InspectSystem {
+        #[arg(long)]
+        id: String,
+    },
+    /// Explicitly upgrade reviewed old bytes to an admitted Anchor release.
+    UpgradeSystem {
+        #[arg(long)]
+        directory: PathBuf,
+        #[arg(long)]
+        id: String,
+        #[arg(long)]
+        digest: String,
+        #[arg(long)]
+        existing_digest: String,
     },
     /// Remove dependency views and store entries no living view references.
     ///
@@ -91,6 +118,54 @@ fn run(cli: Cli) -> Result<(Value, ExitCode), String> {
     let root = cli.root;
     let library = Library::new(root.clone());
     match cli.command {
+        Operation::InspectSystem { id } => {
+            let system = system_id(&id)?;
+            let _guard = library
+                .catalog_read_guard()
+                .map_err(|error| error.to_string())?;
+            let inspection = FilePluginCatalog::new(&root)
+                .inspect_system_plugin(system)
+                .map_err(|error| error.to_string())?;
+            Ok((
+                serde_json::json!({"id": id, "digest": inspection.digest,
+                "resources": inspection.resources, "mutable": inspection.mutable,
+                "executionAuthorized": false}),
+                ExitCode::SUCCESS,
+            ))
+        }
+        Operation::UpgradeSystem {
+            directory,
+            id,
+            digest,
+            existing_digest,
+        } => {
+            let system = system_id(&id)?;
+            library
+                .upgrade_system_directory(system, directory, &digest, &existing_digest)
+                .map(|outcome| {
+                    (
+                        serde_json::to_value(outcome).unwrap_or(Value::Null),
+                        ExitCode::SUCCESS,
+                    )
+                })
+                .map_err(|error| error.to_string())
+        }
+        Operation::InstallSystem {
+            directory,
+            id,
+            digest,
+        } => {
+            let system = system_id(&id)?;
+            library
+                .install_system_directory(system, directory, &digest)
+                .map(|outcome| {
+                    (
+                        serde_json::to_value(outcome).unwrap_or(Value::Null),
+                        ExitCode::SUCCESS,
+                    )
+                })
+                .map_err(|error| error.to_string())
+        }
         Operation::Install {
             source,
             directory,
@@ -154,4 +229,9 @@ fn run(cli: Cli) -> Result<(Value, ExitCode), String> {
             })
             .map_err(|error| error.to_string()),
     }
+}
+
+fn system_id(id: &str) -> Result<SystemPlugin, String> {
+    SystemPlugin::from_id(id)
+        .ok_or_else(|| "this operation requires an Anchor-owned System Plugin ID".to_owned())
 }

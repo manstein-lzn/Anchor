@@ -7,7 +7,7 @@ import './Channels.css';
 
 type Binding = { plugin: string; users: string[]; send_users: string[]; private_only?: boolean };
 type BotStatus = {
-  graph: string; configured: boolean; mutable?: boolean; enabled?: boolean; owner_matches?: boolean; available?: boolean;
+  graph: string; platform: string; configured: boolean; mutable?: boolean; enabled?: boolean; owner_matches?: boolean; available?: boolean;
   binding?: Binding; listener?: NonNullable<GraphSummary['listener']>['status']; account?: string | null; restart_required?: boolean;
 };
 type Channels = { channels: BotStatus[] };
@@ -58,8 +58,11 @@ export function GraphBot({ graph, pluginId, saved }: { graph: string; pluginId: 
     <p className="channels-message">机器人按已保存的 Graph 配置。请先保存 Graph，再配置成员、凭据和启用。</p></section>;
   const listener = read === 'ready' ? status?.listener ?? 'unavailable' : 'unavailable';
   const other = status?.binding && status.binding.plugin !== pluginId ? status.binding.plugin : '';
+  const feishu = status?.platform === 'feishu';
+  const platformName = feishu ? '飞书' : status?.platform === 'wecom' ? '企业微信' : '渠道';
   return <section className="plugin-details-section graph-bot" aria-label="此 Graph 的机器人">{heading}
-    <p>企业微信消息到达时唤醒此工作流，每段对话接续自己的运行实例。对话在运行看板的「消息会话」中管理。</p>
+    <p>{platformName}消息到达时唤醒此工作流，每段对话接续自己的运行实例。对话在运行看板的「消息会话」中管理。</p>
+    {feishu && <p className="channels-field-help">当前仅支持单聊文本，不支持群聊、图片或文件。先保存成员和应用凭据并启用机器人，保持本机 Host 在线；确认长连接已建立后，再到飞书开放平台「事件与回调」保存「使用长连接接收事件」，订阅「接收消息 im.message.receive_v1」，发布应用版本并确认测试成员在应用可用范围内。</p>}
     {(error || readError) && <div className="channels-message bad" role="alert"><strong>读取或操作未完成</strong><p>{[error, readError].filter(Boolean).join('；')}</p><span>检查服务和资源状态后重试。请求超时后请先刷新，核查实际结果。</span></div>}
     {notice && <p className="channels-message good" role="status"><Check size={15} />{notice}</p>}
     <div className={`channels-signal ${listener === 'authenticated' ? 'connected' : ''}`}><Radio size={19} />
@@ -74,7 +77,7 @@ export function GraphBot({ graph, pluginId, saved }: { graph: string; pluginId: 
           () => api<BotStatus>(path(graph), 'PUT', members), '成员已保存；启用后按新名单接收消息。',
         )} />
         <div className="channels-credentials"><h3>机器人账户与凭据</h3>
-          <p>Bot ID 和 Secret 只属于此 Graph 的机器人。机器人启用时不能修改，停用后再轮换或清除。</p>
+          <p>{feishu ? '飞书自建应用的 App ID 和 App Secret' : status.platform === 'wecom' ? 'Bot ID 和 Secret' : '渠道账户与凭据'}只属于此 Graph 的机器人。机器人启用时不能修改，停用后再轮换或清除。</p>
           {status.account && <p className="channels-account">当前账户指纹 <code title={status.account}>{status.account.slice(0, 22)}…</code></p>}
           {status.enabled ? <p className="channels-message">机器人已启用。停用后才能修改凭据。</p>
             : <PluginCredentials pluginId={pluginId} endpoint={`${path(graph)}/credentials`} onChanged={refresh} />}
@@ -91,10 +94,11 @@ export function GraphBot({ graph, pluginId, saved }: { graph: string; pluginId: 
 }
 
 function Members({ status, busy, save }: { status: BotStatus; busy: boolean; save: (members: { users: string[]; send_users: string[]; private_only: boolean }) => Promise<boolean> }) {
+  const feishu = status.platform === 'feishu';
   const savedUsers = (status.binding?.users ?? []).join('\n');
   const savedSend = (status.binding?.send_users ?? []).join('\n');
   const [users, setUsers] = useState(savedUsers);
-  const savedPrivate = Boolean(status.binding?.private_only);
+  const savedPrivate = feishu || Boolean(status.binding?.private_only);
   const [sendUsers, setSendUsers] = useState(savedSend);
   const [privateOnly, setPrivateOnly] = useState(savedPrivate);
   const [dirty, setDirty] = useState(false);
@@ -102,14 +106,14 @@ function Members({ status, busy, save }: { status: BotStatus; busy: boolean; sav
   const disabled = Boolean(status.enabled) || busy;
   return <form className="channels-binding" onSubmit={event => {
     event.preventDefault(); if (disabled) return;
-    void save({ users: recipients(users), send_users: recipients(sendUsers), private_only: privateOnly }).then(done => { if (done) setDirty(false); });
+    void save({ users: recipients(users), send_users: recipients(sendUsers), private_only: feishu || privateOnly }).then(done => { if (done) setDirty(false); });
   }}>
     <div className="channels-section-title"><h3>成员</h3>{status.enabled && <small>停用机器人后可修改</small>}</div>
     <fieldset disabled={disabled}>
-      <label>允许接收的成员<textarea rows={3} value={users} onChange={event => { setUsers(event.target.value); setDirty(true); }} placeholder="每行一个成员 ID" /></label>
-      <label>允许主动发送的成员<textarea rows={3} value={sendUsers} onChange={event => { setSendUsers(event.target.value); setDirty(true); }} placeholder="每行一个成员 ID；需显式填写，包含要回复的成员" /></label>
-      <label className="channels-checkbox"><input type="checkbox" checked={privateOnly} onChange={event => { setPrivateOnly(event.target.checked); setDirty(true); }} />只接收私聊（群内 @ 只回复一条提示，不进入对话）</label>
-    </fieldset><p className="channels-field-help">成员 ID 以换行或逗号分隔。空接收名单拒绝所有成员；<code>*</code> 允许所有成员。接收名单不为空时，主动发送名单也必须填写。</p>
+      <label>允许接收的成员<textarea rows={3} value={users} onChange={event => { setUsers(event.target.value); setDirty(true); }} placeholder={feishu ? '每行一个成员 open_id' : '每行一个成员 ID'} /></label>
+      <label>{feishu ? '允许回复的成员' : '允许主动发送的成员'}<textarea rows={3} value={sendUsers} onChange={event => { setSendUsers(event.target.value); setDirty(true); }} placeholder={feishu ? '每行一个成员 open_id；需显式填写，包含要回复的成员' : '每行一个成员 ID；需显式填写，包含要回复的成员'} /></label>
+      <label className="channels-checkbox"><input type="checkbox" checked={privateOnly} disabled={feishu} onChange={event => { setPrivateOnly(event.target.checked); setDirty(true); }} />{feishu ? '只接收私聊（当前仅支持单聊文本）' : '只接收私聊（群内 @ 只回复一条提示，不进入对话）'}</label>
+    </fieldset><p className="channels-field-help">{feishu ? '填写此飞书应用下的成员 open_id' : '成员 ID'}，以换行或逗号分隔。空接收名单拒绝所有成员；<code>*</code> 允许所有成员。接收名单不为空时，{feishu ? '回复名单' : '主动发送名单'}也必须填写。</p>
     <div className="channels-form-actions"><button type="submit" disabled={disabled}><Check size={14} />保存成员</button>
       {dirty && <button type="button" disabled={busy} onClick={() => setDirty(false)}>恢复已保存值</button>}</div>
   </form>;

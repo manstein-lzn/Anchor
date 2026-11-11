@@ -32,6 +32,27 @@ Runtime IR 保存稳定展开节点、路由/反馈/并行、输入与权限、�
 
 作者模型断言、固定展开样例与 HTTP CRUD 测试位于 Rust crate 的测试范围。测试样例不执行另一个语言解析器；具体本轮结果见 [开发台账](pilot-development-plan.md)。历史快照只用于解释先前兼容来源。
 
+## 节点联网策略
+
+AgentNode 与 `Op.run` 的任务联网配置写在节点的 `plugins`，不是共享角色或命令定义的开关：
+
+```json
+{
+  "id": "work",
+  "agent": "researcher",
+  "plugins": [
+    {"id": "network", "network": "auto"},
+    {"id": "deepseek-web"}
+  ]
+}
+```
+
+`auto` 仅按本次挂载的其他 Plugin 声明或远程 MCP 需求启用联网；`enabled` 主动启用；`denied` 禁止所有任务工具联网，依赖不能覆盖。策略受宿主和 Session 上界约束，不改变模型 Provider 或渠道连接。相同角色可由不同节点使用不同策略。`Op.run` 只接受 `network` 引用，不能借此挂载普通 Plugin；其余 Op 不接受插件引用。`network` 字段不能写在其他 Plugin 上，冲突的重复引用明确报错。
+
+联网引用是策略，不参加普通 `required/default` 挂载规则；源 manifest 仍精确包含全部引用。实际执行资源绑定由共享 snapshot resolver 计算：`denied` 或没有联网需求的 `auto` 不需要 provider；`enabled` 或确有依赖需求的 `auto` 必须解析有效的系统 provider。不存在或损坏不能以裸网络许可替代。
+
+Host 对新建、校验和保存使用统一作者规范化：未给策略的新定义写为 `auto`，新定义的裸 `network` 引用按主动开启处理。打开旧 Graph 时，旧角色/命令的 `network: true/false` 分别投影为节点的 `enabled/denied`，旧定义缺省离线也投影为 `denied`；已有显式节点策略优先。打开只返回可编辑投影，保存才更新资产，不批量修改现有权限。旧 Run 快照、摘要和同 Turn 恢复仍使用原事实，不通过规范化重写历史；旧字段读取在本机作者资产迁移并核对后可删除。
+
 ## 按需 Graph 任务授权
 
 `PluginRef` 可为官方 `graph-tasks` 添加节点级 `graph_tasks`，不为其他 Plugin 接受此字段。未声明的能力默认关闭，省略整个字段保留既有 Graph 的序列化与摘要。它是操作员授权策略，不是每次调用的模型参数：
@@ -42,7 +63,7 @@ Runtime IR 保存稳定展开节点、路由/反馈/并行、输入与权限、�
   "graph_tasks": {
     "graphs": ["ai-morning-briefing"],
     "create_graphs": true,
-    "plugins": ["network"],
+    "plugins": [],
     "network": true,
     "commands": false,
     "develop_plugins": true
@@ -51,6 +72,8 @@ Runtime IR 保存稳定展开节点、路由/反馈/并行、输入与权限、�
 ```
 
 将它放在所需 AgentNode 的 `plugins` 数组。`graphs` 选择既有资产，其静态调用闭包和原有能力由操作员保存时批准；`plugins`、`network`、`commands` 限制 Agent 新建的 Graph，不重写既有目标。`develop_plugins` 独立授权候选准备/测试，不隐含 `create_graphs`、正式安装或新增宿主权限。校验与执行都由 Host 收窄，不能通过 `Op.run`、Agent 的 `anchor_run`、Plugin 派生网络或静态调用绕过能力上限。受委派 Graph 不允许 `graph-tasks`、Host Op 或 `call.session`。
+
+`graph_tasks.network` 是子任务的联网上界，不是当前助手的联网开关；子任务策略引用不额外占用 `graph_tasks.plugins` 允许列表。上界为 false 时，即使子图写 `enabled` 或业务插件依赖联网也不能执行；显式 `denied` 不因上界为 true 而开启。
 
 源 Graph 在操作员界面保存后才有授权收据；直接写文件、Agent 保存或只新建资产不构成批准。普通 Run 接纳、助手 Turn 领取冻结原授权；同 Turn 恢复保持不变，后续派发还须满足当前授权。工具创建的 Graph 是正常资产，仅允许本作用域更新；调用不自动复制源 workspace、聊天历史或凭据。有 Session 的助手经 `wait_input` 接收任务完成结果，不尝试再次 run 已活动的助手。完整契约见 [Graph 任务](plugins.md#graph-任务)与[结果输入](architecture.md#按需-graph-任务与结果输入)。
 

@@ -5,25 +5,39 @@
 use std::{collections::BTreeMap, path::Path};
 
 use crate::plugin_library::Catalog;
-use anchor_graph_host::{McpServerDefinition, PluginCatalog, PluginDefinition, PluginMetadata};
-use anchor_runtime::graph::PluginBinding;
+use anchor_graph_host::{PluginCatalog, PluginDefinition, PluginMetadata};
+use anchor_runtime::graph::{GraphSnapshot, NetworkMode, PluginBinding};
 
 pub(crate) const NETWORK_PLUGIN: &str = "network";
 const MISSING_NETWORK: &str = "联网能力未安装或声明无效：需要 network Plugin（network: true）";
 
+pub(crate) fn session_mode(mounts: &BTreeMap<String, bool>, allowed: bool) -> NetworkMode {
+    if !allowed {
+        NetworkMode::Denied
+    } else if mounts.get(NETWORK_PLUGIN) == Some(&true) {
+        NetworkMode::Enabled
+    } else {
+        NetworkMode::Auto
+    }
+}
+
+/// Shared by approval and delegated-Graph admission. Denied requirements cannot
+/// turn into an executable network grant, including on command nodes.
+pub(crate) fn snapshot_requires_network(
+    root: &Path,
+    snapshot: &GraphSnapshot,
+) -> Result<bool, String> {
+    Catalog::new(root)
+        .snapshot_requires_network(snapshot)
+        .map_err(|error| error.to_string())
+}
+
 pub(crate) fn requires_network(plugin: &PluginDefinition) -> bool {
-    declaration_requires_network(plugin.network, &plugin.mcp_servers)
+    plugin.requires_network()
 }
 
 pub(crate) fn metadata_requires_network(plugin: &PluginMetadata) -> bool {
-    declaration_requires_network(plugin.network, &plugin.mcp_servers)
-}
-
-fn declaration_requires_network(network: bool, servers: &[McpServerDefinition]) -> bool {
-    network
-        || servers
-            .iter()
-            .any(|server| server.config.get("url").is_some())
+    plugin.requires_network()
 }
 
 pub(crate) struct NetworkResolution {
@@ -118,21 +132,37 @@ fn resolve_with(
 /// Apply the same capability resolution the Session UI reports. Network-needed
 /// tools stay absent when denied; offline tools still run in a network namespace
 /// without host connectivity.
-pub(crate) fn apply(
+pub(crate) fn apply_node(
     root: &Path,
     bindings: &mut Vec<PluginBinding>,
-    permission: bool,
+    mode: NetworkMode,
+    ceiling: bool,
     reasons: &mut Vec<String>,
 ) -> Result<bool, String> {
-    let ids = bindings
+    if mode != NetworkMode::Enabled {
+        bindings.retain(|binding| binding.id != NETWORK_PLUGIN);
+    }
+    let mut ids = bindings
         .iter()
         .map(|binding| binding.id.clone())
         .collect::<Vec<_>>();
-    let resolution = resolve(root, &ids, permission);
+    if mode == NetworkMode::Enabled && !ids.iter().any(|id| id == NETWORK_PLUGIN) {
+        ids.push(NETWORK_PLUGIN.to_owned());
+    }
+    let resolution = resolve(root, &ids, ceiling && mode != NetworkMode::Denied);
+    if !bindings.iter().any(|binding| binding.id == NETWORK_PLUGIN)
+        && let Some(problem) = resolution.errors.get(NETWORK_PLUGIN)
+    {
+        reasons.push(format!("Plugin `{NETWORK_PLUGIN}`: {problem}"));
+    }
     bindings.retain(|binding| {
         if let Some(problem) = resolution.errors.get(&binding.id) {
             reasons.push(format!("Plugin `{}`: {problem}", binding.id));
-            false
+            // Channel delivery is Host control-plane traffic. Its optional MCP
+            // business APIs remain subject to the task's network policy.
+            Catalog::new(root)
+                .metadata(&binding.id)
+                .is_ok_and(|metadata| metadata.system.is_some() && !metadata.channels.is_empty())
         } else {
             true
         }

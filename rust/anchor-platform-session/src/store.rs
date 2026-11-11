@@ -285,6 +285,35 @@ impl SessionStore {
         })
     }
 
+    /// The network Plugin's complete policy is one transaction. Readers never
+    /// observe an intermediate permission/mount pair during a mode change.
+    pub fn set_network_policy(
+        &self,
+        owner: &str,
+        id: &str,
+        enabled: bool,
+        allowed: bool,
+        actor: &str,
+    ) -> Result<Session, SessionError> {
+        self.mutate(owner, id, |_, session| {
+            if session.network_allowed == allowed
+                && session.plugin_mounts.get("network") == Some(&enabled)
+            {
+                return Ok(None);
+            }
+            session.network_allowed = allowed;
+            session.plugin_mounts.insert("network".into(), enabled);
+            Ok(Some((
+                "session.network.changed",
+                BTreeMap::from([
+                    ("allowed".into(), json!(allowed)),
+                    ("enabled".into(), json!(enabled)),
+                    ("actor".into(), json!(actor)),
+                ]),
+            )))
+        })
+    }
+
     /// Every Session that mounts this Plugin, across every owner.
     ///
     /// Uninstalling a Plugin has to know who still holds it, and a node call only

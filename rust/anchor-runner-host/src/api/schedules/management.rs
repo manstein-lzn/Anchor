@@ -1,7 +1,7 @@
 //! The shared schedule mutation adapter and its HTTP entry points.
 use super::*;
 use crate::application::scheduling::{
-    ScheduleAssignmentTarget, TaskScheduleRequest, TaskScheduleUpdate,
+    GraphScheduleReference, ScheduleAssignmentTarget, TaskScheduleRequest, TaskScheduleUpdate,
 };
 use crate::task_delegation::TaskOriginSource;
 
@@ -24,6 +24,25 @@ impl crate::application::scheduling::ScheduleManagementPort for ScheduleManageme
             .lock()
             .map_err(|_| schedule_store_unavailable())?;
         Ok(json!({"schedules": store.items.iter().map(schedule_projection).collect::<Vec<_>>()}))
+    }
+
+    fn graph_references(&self) -> Result<Vec<GraphScheduleReference>, ApplicationError> {
+        let store = self
+            .store
+            .lock()
+            .map_err(|_| schedule_store_unavailable())?;
+        store
+            .items
+            .iter()
+            .map(|item| {
+                Ok(GraphScheduleReference {
+                    graph: item.graph.clone(),
+                    request_id: occurrence_request_id(&item.id, &item.next_at),
+                    once: rule_type(&item.rule).map_err(ApplicationError::Invalid)? == "once",
+                    enabled: item.enabled,
+                })
+            })
+            .collect()
     }
 
     fn check_run_deletion(&self, request_id: &str) -> Result<(), ApplicationError> {

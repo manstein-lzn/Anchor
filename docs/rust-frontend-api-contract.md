@@ -6,7 +6,7 @@ React/TypeScript WebUI 调用 Rust Host 的资源 API。Host 可直接托管编�
 
 | API | 契约 |
 | --- | --- |
-| `GET /graphs`、`GET /graphs/{graph}` | Graph 身份、定义与活动 Run，保留作者 JSON/layout |
+| `GET /graphs`、`GET /graphs/{graph}` | Graph 身份、定义与活动 Run，保留作者 layout；联网兼容字段按节点策略投影 |
 | `POST /graphs` | `{name,definition?}` 创建普通 Graph |
 | `PUT /graphs/{graph}` | `{definition:{...}}` 编译并保存，通过 Library 绑定资源；常驻助手插件/联网调整下一 Turn 生效，存在 current 助手时结构修改返回 409 |
 | `POST /graph-validation` | `{definition:{...}}` 校验而不保存/执行；无效输入与语义诊断区分 |
@@ -24,6 +24,12 @@ React/TypeScript WebUI 调用 Rust Host 的资源 API。Host 可直接托管编�
 | `GET /timeline`、`/schedules` | Run 与计划事实；时间戳未知如实披露，不编造历史 |
 
 `GET/PUT /graphs/{graph}` 的 `plugin_activation: {mode,graph_digest}` 表示配置生效规则：`next_turn` 为常驻助手，`new_run` 为普通 Graph，不表示外部插件已可用。`GET /channel-sessions/{session}/assistant` 另投影 `plugin_update: {state,message?}`，状态为 `current/pending/restart_required/unavailable`；未知或读取失败不能显示为已生效。Web 在保存后提示下一条消息生效，活动 Graph 打开已有运行，渠道 Graph 打开助手管理，避免重复 trigger。
+
+Graph 联网策略由节点的 `plugins` 引用承载：`{id:"network",network:"auto"|"enabled"|"denied",required?,default?}`。`network` 字段只允许用于 `network` 引用；AgentNode 可同时声明普通 Plugin，`Op.run` 只接受联网引用，其他 Op 不接受 Plugin 挂载。编辑只改变本节点引用，保留已有 `required/default`、其他插件和共享角色/命令。联网引用不参与普通默认/必需挂载计算，保留字段不能覆盖三态策略。三态的授权及旧格式读取边界归 [Plugin 联网契约](plugins.md#pilot-任务联网)与 [Graph 作者契约](rust-graph-authoring-contract.md)，`graph_tasks.network` 仍只约束新建子任务，不控制当前助手。
+
+创建、保存和任务 Graph 的作者输入统一归一化为节点策略；新输入无旧联网字段、也无联网引用时按 `auto` 解释，无插件节点不为此增加空引用。单图 GET 只转换返回草稿，将旧角色/命令的联网 true 保留为 `enabled`，false 或缺省保留为 `denied`；无插件旧节点也保留明确的 denied 引用，避免后续选择插件意外开放网络。读取不改磁盘，`plugin_activation.graph_digest` 仍对应原保存定义，既有 Run snapshot/digest 和 Session 的已禁止状态不改写。
+
+`GET /graphs` 保留完整有效目录，已成功收束的一次性任务项可附 `completed_task:true`；省略或 false 均留在主列表。该字段由应用服务按任务归属、现有计划、真实 Run、结果处理及共享引用派生，规则见[Graph 任务](architecture.md#按需-graph-任务与结果输入)，不能由前端按名称或时间自行推断。Web 默认将标记项收进“已完成的一次性任务”，保留展开、搜索、定义和运行历史入口；主列表计数不包含收纳项。再次安排或执行时投影撤销标记，不写归档状态。单图读取和运行历史不因收纳消失，计划及持久文件不因此清理。
 
 文件列表来自交付清单，返回 `artifact`、`artifact_availability`、`files: [{path,size}]`，不枚举可写工作区。节点详情同时投影 `artifact_error`；available/expired/missing/corrupt 区分字节可用、过期、缺失和损坏，一份历史产物不可用不会使整个 Run 详情失败。Web 用固定 Artifact URL 预览和下载，保留过期版本的清单与明确提示。
 
@@ -81,9 +87,23 @@ Plugin API 提供 catalog、安装/移除与 owner-bound 授权事务。OAuth、
 
 `GET /plugins` 返回当前目录信息，不返回代码 `digest` 或使用说明；`GET /plugins/{id}` 按需提供完整详情、`digest` 和使用说明。HTTP、Pilot 与 `GET /sessions/{id}/plugins` 共用基础目录读取与健康观察：`definitionValid` 表示清单/声明路径结构有效，`dependenciesReady: bool|null` 表示当前依赖视图就绪；`contextAuthorized`、`connectionVerified` 没有实际证据时为 null。基础 `available` 由前两项决定，Session 可叠加上下文否决，不代表执行授权或连接成功。清单损坏项保留不可用行，Session 中缺失插件的已开启引用也保留以便撤销。启用仍校验完整定义和依赖；关闭不要求插件健康，保留归属、归档、required 和发布并发约束。列表不读取全部代码、生成 digest 或执行绑定；完整定义只在详情、挂载启用和执行时读取。
 
-Graph、Pilot、Library、历史 Run 共用插件设置的控件、排序、筛选、加载、错误及反馈；页面只提供上下文与操作适配。Web/Responses 新 Pilot 共用创建用例设置默认 network 挂载，通用 Session 创建及既有会话不改变。新增角色与首次并行区域通过共享角色构造消费 `GET /settings/model` 的 `execution.default_reference`，不在 Web 维护另一套模型默认值；设置读取失败不猜默认引用，迟到响应不覆盖更新后的草稿，用户显式选择和旧别名保留原义。
+当前 Library、详情与 Session 行同时返回生命周期投影：`kind:"system"|"extension"`、`canUninstall:boolean`、`canReplace:boolean`、`updateSource:"anchor-release"|"extension"`。系统保留身份为 `network`、`graph-tasks`、`feishu`、`wecom`，完整系统身份还须通过发行资源校验；损坏目录仍显示 system 且两个写入能力均为 false，同时保持不可用。Web 只在对应能力明确为 true 时显示更新或卸载，未知能力不提供写入入口，不能以 ID、名称或 `available` 反推；系统详情说明随 Anchor 升级，普通 API、Pilot 与 CLI 发布仍在事实所有者处阻止替换或卸载。历史 Run 只显示保存的元数据，不用当前目录补写生命周期事实。
+
+| 会话插件 API | 契约 |
+| --- | --- |
+| `GET /sessions/{id}/plugins` | 返回已安装、声明或已开启但缺失的插件行，保留 `on`、`explicitOn`、`required` 与健康投影 |
+| `POST /sessions/{id}/plugins/{plugin}` | `{on:boolean}` 修改插件挂载，返回确认的行/列表及生效反馈；联网改用专门策略 API，其他插件可能按既有规则安排当前回复后的接续 |
+| `POST /sessions/{id}/network` | 仅提交 `{mode}`，值为 `auto` / `enabled` / `denied`，原子更新既有 Session 挂载与联网上限，返回完整 `{plugins:[...]}`；不触发接续，归档会话返回 409，渠道/Graph 会话改由 Graph 节点管理 |
+
+联网行通过 `networkProvider:true` 标识，返回保存的 `networkMode`、当前 `networkAllowed` 与依赖来源 `enabledBy:[id]`；`requiresNetwork` 表示 Plugin 的需求，不是授权。`on` 可表示主动或依赖启用，`explicitOn` 只表示主动挂载，均不能替代三态策略或有效访问。Web 不向联网行提供普通挂载开关；Graph 与 Session 复用同一三态控件，但前者只改草稿，后者只采用 Host 确认的结果。策略缺失时显示未知并禁用修改；已禁止联网而产生的不可用不锁死策略控件，开启仍由 Host 重新校验。写入失败保留最后确认模式与错误，网络策略变更只影响下一 Turn，进行中和重试的 Turn 使用首次冻结授权。
+
+旧 Web 的 `{allowed:boolean}` 请求暂读入相同 Session 事实，安装中的客户端切换后删除兼容入口；新 Web 不再提交此格式或同时提交 mode/allowed。`auto` 的依赖启用不写另一份策略，`denied` 对任务工具整体生效，依赖不能恢复网络；模型与渠道控制连接不属于任务工具联网。权限语义与 Plugin 失效处理见 [Plugin](plugins.md#pilot-任务联网)。
+
+Graph、Pilot、Library、历史 Run 共用插件设置的控件、排序、筛选、加载、错误及反馈；页面只提供上下文与操作适配。Web/Responses 新 Pilot 共用创建用例设置默认 `enabled`，通用 Session 创建及既有会话不改变；渠道和业务 Graph 不增加此默认。新增角色与首次并行区域通过共享角色构造消费 `GET /settings/model` 的 `execution.default_reference`，不写旧角色 `network:false`，也不在 Web 维护另一套模型默认值；设置读取失败不猜默认引用，迟到响应不覆盖更新后的草稿，用户显式选择和旧别名保留原义。
 
 可信渠道入口绑定会话、真实发言者、Graph、回复节点与本地冻结附件。`ChannelIdentity.conversation_kind` 可为 `single/group`，缺省 single 且序列化省略；群按 conversation 共享 Session，sender 始终表示本条消息的真实成员。WeCom 对应字段仍为 `metadata.chat_type`。同 Session 串行，私聊/不同群隔离；中断输入保留 actor，回执核对 actor、kind 与 conversation。普通 Graph 和 Pilot 管理入口分别接纳，不把助手业务交给管理 Agent。
+
+同一渠道管理入口支持 `wecom` 和 `feishu`，状态的 `platform` 来自已保存的 Graph/绑定；未配置的有效机器人 Graph 也返回平台。成员配置仍为 `{users,send_users,private_only}`，飞书当前要求 `private_only:true`，两个名单分别授权私聊接收和回复，成员为应用范围内 `open_id`。凭据字段由声明投影，飞书为 `FEISHU_APP_ID` / `FEISHU_APP_SECRET`，不在 Web 硬编码另一套凭据协议。`POST /channels/{graph}/events` 共用入站和结算逻辑，来源必须匹配绑定；飞书接受 single 的 text/image/file，文本禁止附件，媒体准入须有经过现有附件校验的字节，结算不要求再次携带媒体，metadata 的 request_id 须等于 event_id。`GET /channels/{graph}/progress/{event_id}` 复用只读 Goose 工具活动投影，不能成为投递或恢复事实。Graph listener 同样返回实际平台。旧企微回执和身份格式保持不变，飞书独立使用 `feishu_reply` / `channel-feishu-reply:`，Markdown 只改变传输展示，见[渠道契约](feishu-assistant.md)。
 
 Webhook 与 Responses 共用接纳和身份校验。Responses 只实现冻结子集，不能宣称兼容完整 API；SSE 代理需关闭缓冲。`/health` 是 liveness，`/ready` 是配置 Graph readiness，不检查模型网络。
 

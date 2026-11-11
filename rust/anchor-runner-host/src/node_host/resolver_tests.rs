@@ -44,6 +44,10 @@ fn library_with(root: &Path, ids: &[&str]) -> PathBuf {
     let library = root.join("library");
     std::fs::create_dir_all(library.join("plugins")).unwrap();
     for id in ids {
+        if let Some(system) = anchor_graph_host::SystemPlugin::from_id(id) {
+            crate::test_system_plugin(&library, system);
+            continue;
+        }
         let directory = library.join("plugins").join(id);
         std::fs::create_dir_all(&directory).unwrap();
         std::fs::write(

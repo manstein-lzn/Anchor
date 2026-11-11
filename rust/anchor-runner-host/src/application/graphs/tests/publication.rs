@@ -13,6 +13,10 @@ async fn publishing_network_and_plugin_changes_preserves_live_runs_and_library_b
             catalog.join("assistant")
         };
         for (id, network) in [("offline", false), ("network", true)] {
+            if let Some(system) = anchor_graph_host::SystemPlugin::from_id(id) {
+                crate::test_system_plugin(&catalog, system);
+                continue;
+            }
             let plugin = catalog.join("plugins").join(id);
             std::fs::create_dir_all(&plugin).unwrap();
             std::fs::write(
@@ -53,6 +57,7 @@ async fn publishing_network_and_plugin_changes_preserves_live_runs_and_library_b
         let mut next = original;
         next["agents"]["worker"]["network"] = json!(true);
         next["nodes"][0]["plugins"] = json!(["offline", "network"]);
+        let next = GraphSnapshot::normalize_network_authoring(next, false);
         application
             .update_graph("assistant", next.clone())
             .await
@@ -68,7 +73,12 @@ async fn publishing_network_and_plugin_changes_preserves_live_runs_and_library_b
             next
         );
         let (_, published) = application.load_graph("assistant").unwrap();
-        assert!(published.snapshot.agents["worker"].network);
+        assert_eq!(
+            published
+                .snapshot
+                .node_network_mode(&published.snapshot.nodes[0]),
+            anchor_runtime::graph::NetworkMode::Enabled
+        );
         assert_eq!(published.snapshot.nodes[0].plugins.len(), 2);
         assert!(!record.snapshot.agents["worker"].network);
         assert_eq!(record.plugin_bindings.len(), 1);

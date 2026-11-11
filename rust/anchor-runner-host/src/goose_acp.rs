@@ -145,6 +145,8 @@ pub(crate) fn has_invocation_fact(state: &Path, key: &InvocationKey) -> Result<b
     Ok(started)
 }
 
+pub(crate) use recovery::pending_invocation_recovery;
+
 struct CancelTools(Cancellation);
 
 impl Drop for CancelTools {
@@ -922,6 +924,7 @@ impl GooseNodePort {
             bridge,
             endpoint,
             restored.as_deref(),
+            &request.instructions,
             binding,
             &request.cancellation,
             deadline,
@@ -943,8 +946,8 @@ impl GooseNodePort {
         }
         live.restore(&session_id, &history)?;
         let mut prompt = format!(
-            "{}\n{}\nAnchor node input: {}\nUse only the anchor MCP tools. The real business workspace is accessed through anchor_run. Inspect tool results, then call final_result alone with a nonempty summary, an explicit files list of workspace-relative delivery paths ([] for text only), and an allowed route: {:?}. Include every declared output. Only selected files/directories are archived; the writable project stays in place. Ordinary text is not a node completion. Do not request other capabilities.",
-            request.instructions, request.task, request.input, request.routes
+            "{}\nAnchor node input: {}\nUse only the anchor MCP tools. The real business workspace is accessed through anchor_run. Inspect tool results, then call final_result alone with a nonempty summary, an explicit files list of workspace-relative delivery paths ([] for text only), and an allowed route: {:?}. Include every declared output. Only selected files/directories are archived; the writable project stays in place. Ordinary text is not a node completion. Do not request other capabilities.",
+            request.task, request.input, request.routes
         );
         if !self.fixture {
             prompt.push_str(" After any authorized non-completion tool batch, including discovery and read-only tools, copy an anchor_receipt from any returned result in the most recent batch into final_result.observed_receipt. Call final_result alone in a later batch after observing those results. A final_result in the same batch as any other tool is rejected. Inspect existing results or use authorized read-only tools when needed; do not repeat business operations merely to obtain a receipt. Read mounted Plugin instructions through the authorized tools as needed.");

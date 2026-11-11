@@ -312,6 +312,10 @@ fn graph() -> Value {
 }
 
 fn install_plugin(host: &Host, media: &MediaFixture) -> Value {
+    fixture::install_system_plugin(
+        host.base.root.path(),
+        anchor_graph_host::SystemPlugin::Network,
+    );
     let bundle = host.base.root.path().join("bundle");
     let plugin = host.base.root.path().join("checkout").join(PLUGIN);
     fs::create_dir_all(plugin.join("skills/media")).unwrap();
@@ -613,7 +617,7 @@ fn native_goose_mixed_media_preserves_blocks_vision_wire_receipt_and_artifacts()
     );
     assert_eq!(
         fact["completion"]["output"],
-        json!({"summary":"fixture complete","route":"verify"})
+        json!({"summary":"fixture complete","route":"verify","files":["evidence.txt"]})
     );
     let saved = assert_artifacts(&host, "fixture");
     let snapshot = media.snapshot();

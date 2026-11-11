@@ -1,5 +1,9 @@
 use super::*;
-use crate::application::{WECOM_REPLY_KEY_PREFIX, WECOM_REPLY_KIND, run_access};
+use crate::application::{
+    WECOM_REPLY_KEY_PREFIX, WECOM_REPLY_KIND,
+    channel_management::{ChannelBinding, ChannelPlatform, ChannelRuntimeState},
+    run_access,
+};
 use anchor_platform_session::{
     AttachmentManifest, AttachmentManifestEntry, ChannelConversationKind, ChannelDeliveryRequest,
     ChannelDeliveryStatus, ChannelIdentity, ChannelInboundRequest, TurnStatus,
@@ -19,13 +23,13 @@ mod channel_management_tests;
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct EventEnvelope {
-    event: WecomEvent,
+    event: ChannelEvent,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SettlementEnvelope {
-    event: WecomEvent,
+    event: ChannelEvent,
     settlement: GatewaySettlement,
 }
 
@@ -47,8 +51,8 @@ enum GatewaySettlementStatus {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct WecomEvent {
-    source: String,
+struct ChannelEvent {
+    source: ChannelPlatform,
     event_id: String,
     sender_id: String,
     conversation_id: String,
@@ -59,11 +63,30 @@ struct WecomEvent {
     attachments: Vec<crate::channel_inputs::UploadedAttachment>,
 }
 
-impl WecomEvent {
+impl ChannelEvent {
     fn validate(&self, config: &BotSettings) -> Result<(), HttpResponse> {
+        self.validate_source(config.platform)?;
         self.validate_payload(true)?;
         if !config.allows(&self.sender_id) {
-            return Err(error(StatusCode::FORBIDDEN, "WeCom user is not allowed"));
+            return Err(error(StatusCode::FORBIDDEN, "channel user is not allowed"));
+        }
+        if self.source == ChannelPlatform::Feishu
+            && !config.binding.allows_outbound(&self.sender_id)
+        {
+            return Err(error(
+                StatusCode::FORBIDDEN,
+                "channel user is not authorized to receive replies",
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_source(&self, platform: ChannelPlatform) -> Result<(), HttpResponse> {
+        if self.source != platform {
+            return Err(error(
+                StatusCode::FORBIDDEN,
+                "event source does not match this Graph's channel platform",
+            ));
         }
         Ok(())
     }
@@ -75,11 +98,19 @@ impl WecomEvent {
     }
 
     fn validate_payload(&self, require_content: bool) -> Result<(), HttpResponse> {
-        if self.source != "wecom"
-            || !matches!(
+        let supported_shape = match self.source {
+            ChannelPlatform::Wecom => matches!(
                 self.message_type.as_str(),
                 "text" | "mixed" | "image" | "file" | "voice"
-            )
+            ),
+            ChannelPlatform::Feishu => {
+                matches!(self.message_type.as_str(), "text" | "image" | "file")
+                    && self.conversation_kind() == Some(ChannelConversationKind::Single)
+                    && self.metadata.get("request_id").and_then(Value::as_str)
+                        == Some(self.event_id.as_str())
+            }
+        };
+        if !supported_shape
             || self.event_id.trim().is_empty()
             || self.event_id.len() > 500
             || self.sender_id.trim().is_empty()
@@ -88,9 +119,9 @@ impl WecomEvent {
             || self.conversation_id.len() > 200
             || self.reply_target != self.conversation_id
             || self.text.len() > MAX_EVENT_TEXT_BYTES
+            || (self.message_type == "text" && !self.attachments.is_empty())
             || (require_content
                 && (self.text.trim().is_empty() && self.attachments.is_empty()
-                    || (self.message_type == "text" && !self.attachments.is_empty())
                     || (matches!(self.message_type.as_str(), "image" | "file" | "voice")
                         && self.attachments.is_empty())))
             || self.metadata.len() != 2
@@ -107,14 +138,32 @@ impl WecomEvent {
         {
             return Err(error(
                 StatusCode::BAD_REQUEST,
-                "invalid or unsupported WeCom text event",
+                "invalid or unsupported channel event",
             ));
         }
         Ok(())
     }
 
     fn inbound_id(&self) -> String {
-        inbound_id_for(&self.source, &self.event_id)
+        inbound_id_for(self.source.as_str(), &self.event_id)
+    }
+
+    fn reply_kind(&self) -> &'static str {
+        match self.source {
+            ChannelPlatform::Wecom => WECOM_REPLY_KIND,
+            ChannelPlatform::Feishu => "feishu_reply",
+        }
+    }
+
+    fn reply_key_prefix(&self) -> &'static str {
+        match self.source {
+            ChannelPlatform::Wecom => WECOM_REPLY_KEY_PREFIX,
+            ChannelPlatform::Feishu => "channel-feishu-reply:",
+        }
+    }
+
+    fn delivery_key(&self, session: &str) -> String {
+        format!("{}{session}:{}", self.reply_key_prefix(), self.inbound_id())
     }
 
     fn conversation_kind(&self) -> Option<ChannelConversationKind> {
@@ -126,32 +175,33 @@ impl WecomEvent {
     }
 }
 
-/// The single definition of a WeCom inbound identity: `sha256` over the domain
-/// tag, the platform source and the platform message id. The admission path and
-/// the read-only progress path must agree on it, so neither may reimplement it.
+/// Admission and progress share this identity. Keep the WeCom domain and
+/// prefix byte-for-byte stable so historical inbounds and receipts still match.
 pub(super) fn inbound_id_for(source: &str, event_id: &str) -> String {
     let mut digest = Sha256::new();
-    digest.update(b"anchor-wecom-inbound-v1\0");
+    digest.update(b"anchor-");
+    digest.update(source.as_bytes());
+    digest.update(b"-inbound-v1\0");
     digest.update(source.as_bytes());
     digest.update([0]);
     digest.update(event_id.as_bytes());
-    format!("wecom-{:x}", digest.finalize())
+    format!("{source}-{:x}", digest.finalize())
 }
 
 /// The binding a callback addresses. The Graph comes from the route, which
 /// the auth layer already matched against the caller's callback key; the
 /// account, reply node and members are the Host's, never the event's.
 struct BotSettings {
+    platform: ChannelPlatform,
     graph: String,
     reply_node: String,
     account: Option<String>,
-    users: HashSet<String>,
-    private_only: bool,
+    binding: ChannelBinding,
 }
 
 impl BotSettings {
     fn allows(&self, user: &str) -> bool {
-        self.users.contains("*") || self.users.contains(user)
+        self.binding.allows_inbound(user)
     }
 }
 
@@ -161,6 +211,31 @@ fn current_settings(
     owner: &str,
     graph: &str,
 ) -> Result<BotSettings, HttpResponse> {
+    let channel = current_channel(state, owner, graph)?;
+    let reply_node = match channel.reply_node {
+        Some(reply_node) if channel.enabled => reply_node,
+        _ => {
+            return Err(error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "this Graph's bot is stopped",
+            ));
+        }
+    };
+    Ok(BotSettings {
+        platform: channel.platform,
+        graph: channel.graph,
+        reply_node,
+        account: channel.account,
+        binding: channel.binding,
+    })
+}
+
+#[allow(clippy::result_large_err)]
+fn current_channel(
+    state: &ApiState,
+    owner: &str,
+    graph: &str,
+) -> Result<ChannelRuntimeState, HttpResponse> {
     let channel = state
         .application
         .channel_snapshot(graph)
@@ -177,22 +252,7 @@ fn current_settings(
             "this Graph's bot belongs to another owner",
         ));
     }
-    let reply_node = match channel.reply_node {
-        Some(reply_node) if channel.enabled => reply_node,
-        _ => {
-            return Err(error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "this Graph's bot is stopped",
-            ));
-        }
-    };
-    Ok(BotSettings {
-        graph: channel.graph,
-        reply_node,
-        account: channel.account,
-        private_only: channel.binding.private_only,
-        users: channel.binding.users.into_iter().collect(),
-    })
+    Ok(channel)
 }
 
 pub(super) async fn receive_event(
@@ -202,7 +262,7 @@ pub(super) async fn receive_event(
     body: axum::body::Bytes,
 ) -> Result<(StatusCode, Json<Value>), HttpResponse> {
     let payload: Value = serde_json::from_slice(&body)
-        .map_err(|_| error(StatusCode::BAD_REQUEST, "invalid WeCom event envelope"))?;
+        .map_err(|_| error(StatusCode::BAD_REQUEST, "invalid channel event envelope"))?;
     if payload.get("settlement").is_some() {
         return Ok((
             StatusCode::OK,
@@ -210,13 +270,13 @@ pub(super) async fn receive_event(
         ));
     }
     let envelope: EventEnvelope = serde_json::from_value(payload)
-        .map_err(|_| error(StatusCode::BAD_REQUEST, "invalid WeCom event envelope"))?;
+        .map_err(|_| error(StatusCode::BAD_REQUEST, "invalid channel event envelope"))?;
     let owner = private_owner(&state, &headers);
     let config = current_settings(&state, &owner, &graph)?;
     envelope.event.validate(&config)?;
     // A private-only bot answers a group message with a fixed notice. The
     // message is not admitted, so it creates no Session, Turn or Run.
-    if config.private_only
+    if config.binding.private_only
         && envelope.event.conversation_kind() != Some(ChannelConversationKind::Single)
     {
         return Ok((StatusCode::OK, Json(json!({"text": PRIVATE_ONLY_NOTICE}))));
@@ -253,7 +313,7 @@ pub(super) async fn receive_event(
     let (bundle_path, bundle) = load_graph_definition(&state, &config.graph).map_err(|_| {
         error(
             StatusCode::SERVICE_UNAVAILABLE,
-            "configured WeCom Graph is unavailable",
+            "configured channel Graph is unavailable",
         )
     })?;
     if !bundle
@@ -264,7 +324,7 @@ pub(super) async fn receive_event(
     {
         return Err(error(
             StatusCode::SERVICE_UNAVAILABLE,
-            "configured WeCom reply node is not in the Graph",
+            "configured channel reply node is not in the Graph",
         ));
     }
     // A channel only drives a persistent assistant. A Graph without the
@@ -274,7 +334,7 @@ pub(super) async fn receive_event(
         .ok_or_else(|| {
             error(
                 StatusCode::CONFLICT,
-                "configured WeCom Graph is not a persistent assistant; a channel requires the session.wait_input, Agent, session.reply loop",
+                "configured channel Graph is not a persistent assistant; a channel requires the session.wait_input, Agent, session.reply loop",
             )
         })?;
 
@@ -297,8 +357,8 @@ pub(super) async fn receive_event(
         identity: ChannelIdentity {
             conversation_kind: event
                 .conversation_kind()
-                .expect("validated WeCom chat type"),
-            source: "wecom".into(),
+                .expect("validated channel chat type"),
+            source: event.source.as_str().into(),
             account: config.account.clone(),
             conversation_id: event.conversation_id.clone(),
             sender_id: event.sender_id.clone(),
@@ -349,7 +409,7 @@ pub(super) async fn receive_event(
                 }
                 return Err(error(
                     StatusCode::CONFLICT,
-                    "WeCom input was already rejected before execution",
+                    "channel input was already rejected before execution",
                 ));
             }
             let run = match saved_assistant {
@@ -442,15 +502,18 @@ pub(super) async fn receive_event(
         return Ok((StatusCode::OK, Json(json!({"text":"","superseded":true}))));
     };
 
+    if event.source == ChannelPlatform::Feishu && !reply.items.is_empty() {
+        return Err(error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "this channel does not support reply attachments",
+        ));
+    }
+
     let content_sha256 = format!("{:x}", Sha256::digest(reply.text.as_bytes()));
-    let key = format!(
-        "{WECOM_REPLY_KEY_PREFIX}{}:{}",
-        reply.session,
-        event.inbound_id()
-    );
+    let key = event.delivery_key(&reply.session);
     let delivery_request = ChannelDeliveryRequest {
         key: key.clone(),
-        kind: WECOM_REPLY_KIND.into(),
+        kind: event.reply_kind().into(),
         content_sha256: content_sha256.clone(),
     };
     let session = reply.session.clone();
@@ -531,7 +594,7 @@ async fn reject_unclaimed_input(
                 &owner,
                 &session,
                 &inbound_id,
-                "WeCom input was rejected before execution",
+                "channel input was rejected before execution",
             )
             .map_err(session_error)?;
         Ok(())
@@ -746,21 +809,34 @@ async fn settle_delivery_value(
     graph: &str,
     payload: Value,
 ) -> Result<Json<Value>, HttpResponse> {
-    let envelope: SettlementEnvelope = serde_json::from_value(payload)
-        .map_err(|_| error(StatusCode::BAD_REQUEST, "invalid WeCom settlement envelope"))?;
+    let envelope: SettlementEnvelope = serde_json::from_value(payload).map_err(|_| {
+        error(
+            StatusCode::BAD_REQUEST,
+            "invalid channel settlement envelope",
+        )
+    })?;
+    let owner = private_owner(state, headers);
+    // Current platform/owner still fence the callback, but changed admission
+    // settings must not invalidate an already-issued historical receipt.
+    let channel = current_channel(state, &owner, graph)?;
+    envelope.event.validate_source(channel.platform)?;
     envelope.event.validate_settlement_event()?;
 
     let inbound_id = envelope.event.inbound_id();
-    let Some(key_suffix) = envelope.settlement.key.strip_prefix(WECOM_REPLY_KEY_PREFIX) else {
+    let Some(key_suffix) = envelope
+        .settlement
+        .key
+        .strip_prefix(envelope.event.reply_key_prefix())
+    else {
         return Err(error(
             StatusCode::BAD_REQUEST,
-            "invalid WeCom delivery receipt key",
+            "invalid channel delivery receipt key",
         ));
     };
     let Some((session, key_inbound_id)) = key_suffix.split_once(':') else {
         return Err(error(
             StatusCode::BAD_REQUEST,
-            "invalid WeCom delivery receipt key",
+            "invalid channel delivery receipt key",
         ));
     };
     let key = &envelope.settlement.key;
@@ -771,15 +847,14 @@ async fn settle_delivery_value(
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
         || session.is_empty()
         || key_inbound_id != inbound_id
-        || key.as_str() != format!("{WECOM_REPLY_KEY_PREFIX}{session}:{inbound_id}").as_str()
+        || *key != envelope.event.delivery_key(session)
     {
         return Err(error(
             StatusCode::BAD_REQUEST,
-            "WeCom delivery receipt does not match its event",
+            "channel delivery receipt does not match its event",
         ));
     }
 
-    let owner = private_owner(state, headers);
     let lookup_state = state.clone();
     let lookup_owner = owner.clone();
     let lookup_session = session.to_owned();
@@ -795,7 +870,7 @@ async fn settle_delivery_value(
     // this exact inbound and the identity fields below pin the sender and
     // conversation, which is what "the same message" means here.
     if inbound.request.graph != graph
-        || inbound.request.identity.source != envelope.event.source
+        || inbound.request.identity.source != envelope.event.source.as_str()
         || Some(inbound.request.identity.conversation_kind) != envelope.event.conversation_kind()
         || inbound.request.identity.conversation_id != envelope.event.conversation_id
         || inbound.request.identity.sender_id != envelope.event.sender_id
@@ -803,7 +878,7 @@ async fn settle_delivery_value(
     {
         return Err(error(
             StatusCode::NOT_FOUND,
-            "WeCom settlement does not match an admitted message",
+            "channel settlement does not match an admitted message",
         ));
     }
 
@@ -814,7 +889,7 @@ async fn settle_delivery_value(
     };
     let request = ChannelDeliveryRequest {
         key: key.clone(),
-        kind: WECOM_REPLY_KIND.into(),
+        kind: envelope.event.reply_kind().into(),
         content_sha256: envelope.settlement.content_sha256,
     };
     let settle_state = state.clone();

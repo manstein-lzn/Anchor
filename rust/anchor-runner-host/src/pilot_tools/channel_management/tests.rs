@@ -9,12 +9,12 @@ fn fixture() -> (tempfile::TempDir, PilotTools, Arc<FakeChannels>) {
     std::fs::create_dir_all(&graph).unwrap();
     crate::application::channel_management::fake::install_channel_plugin(
         &root.path().join("catalog"),
-        "gateway",
+        "wecom",
     );
-    std::fs::write(graph.join("graph.json"),json!({"entry":"wait","agents":{"reply":{"model":"fixture","instructions":"fixture"}},"ops":{"wait":{"host":{"operation":"session.wait_input"}},"deliver":{"host":{"operation":"session.reply"}}},"nodes":[{"id":"wait","op":"wait"},{"id":"reply","agent":"reply","plugins":["gateway"]},{"id":"deliver","op":"deliver"}],"edges":[{"from":"wait","to":"reply"},{"from":"reply","to":"deliver"},{"from":"deliver","to":"wait"}]}).to_string()).unwrap();
+    std::fs::write(graph.join("graph.json"),json!({"entry":"wait","agents":{"reply":{"model":"fixture","instructions":"fixture"}},"ops":{"wait":{"host":{"operation":"session.wait_input"}},"deliver":{"host":{"operation":"session.reply"}}},"nodes":[{"id":"wait","op":"wait"},{"id":"reply","agent":"reply","plugins":["wecom"]},{"id":"deliver","op":"deliver"}],"edges":[{"from":"wait","to":"reply"},{"from":"reply","to":"deliver"},{"from":"deliver","to":"wait"}]}).to_string()).unwrap();
     std::fs::write(
         graph.join("manifest.json"),
-        json!({"format":1,"graph":"graph.json","plugins":[{"id":"gateway"}]}).to_string(),
+        json!({"format":1,"graph":"graph.json","plugins":[{"id":"wecom"}]}).to_string(),
     )
     .unwrap();
     std::fs::create_dir_all(root.path().join("state/platform")).unwrap();
@@ -88,7 +88,7 @@ async fn channel_mutations_require_an_owned_active_turn_and_leave_session_execut
         .unwrap();
     // The confirmation carries the saved binding, Plugin included.
     let binding = port.get("task").unwrap().binding;
-    assert_eq!(binding.plugin, "gateway");
+    assert_eq!(binding.plugin, "wecom");
     tools
         .enable_channel_approved(&graph, true, &binding)
         .await

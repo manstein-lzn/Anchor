@@ -35,6 +35,16 @@ impl GraphSnapshot {
             validate_node_id(&node.id)?;
             for plugin in &node.plugins {
                 plugin.validate_graph_tasks()?;
+                if node
+                    .plugins
+                    .iter()
+                    .any(|other| other.id == plugin.id && other != plugin)
+                {
+                    return Err(GraphError::InvalidSnapshot(format!(
+                        "node `{}` has conflicting Plugin references for `{}`",
+                        node.id, plugin.id
+                    )));
+                }
             }
             if !ids.insert(node.id.as_str()) {
                 return Err(GraphError::InvalidSnapshot(format!(
@@ -61,6 +71,15 @@ impl GraphSnapshot {
                         node.id
                     ))
                 })?;
+                if !node.plugins.is_empty()
+                    && (op.get("run").is_none()
+                        || node.plugins.iter().any(|plugin| plugin.id != "network"))
+                {
+                    return Err(GraphError::InvalidSnapshot(format!(
+                        "node `{}`: only the network system Plugin is supported on Op.run",
+                        node.id
+                    )));
+                }
                 if ["run", "call", "fanout", "join", "host"]
                     .iter()
                     .filter(|key| op.get(**key).is_some())

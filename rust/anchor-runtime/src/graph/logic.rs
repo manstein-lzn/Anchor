@@ -483,15 +483,10 @@ pub(crate) fn merge_values(default: &Value, override_value: &Value, node_value: 
     }
     merge(&merge(default, override_value), node_value)
 }
-pub(crate) fn node_task(
-    objective: &str,
-    instructions: &str,
-    local_instruction: &str,
-    input: &Value,
-) -> String {
+pub(crate) fn node_task(objective: &str, local_instruction: &str, input: &Value) -> String {
     let input_guidance = "\n\nUpstream artifacts, when present, are mounted read-only under `/in/<node-id>`. Use `find /in` to inspect the files available to this node; write deliverables in `/workspace`.";
     format!(
-        "Objective:\n{objective}\n\nInstructions:\n{instructions}{}{}\n\nInput:\n{}",
+        "Objective:\n{objective}{}{}\n\nInput:\n{}",
         if local_instruction.is_empty() {
             String::new()
         } else {
@@ -539,7 +534,7 @@ pub(crate) fn execution_request(
         .filter(|edge| edge.from_node == node.id)
         .map(|edge| edge.to_node.clone())
         .collect::<Vec<_>>();
-    let (kind, model, instructions, max_provider_requests, wall_time_limit_seconds, network) =
+    let (kind, model, instructions, max_provider_requests, wall_time_limit_seconds) =
         if let Some(agent) = agent {
             (
                 NodeKind::Agent,
@@ -547,7 +542,6 @@ pub(crate) fn execution_request(
                 agent.instructions.clone(),
                 agent.max_steps,
                 Some(agent.wall_time_limit_seconds.unwrap_or(3600.0)),
-                agent.network,
             )
         } else {
             let op = node
@@ -570,7 +564,6 @@ pub(crate) fn execution_request(
                 String::new(),
                 None,
                 wall_time_limit_seconds,
-                op.get("network").and_then(Value::as_bool).unwrap_or(false),
             )
         };
     let local_instruction = node
@@ -595,12 +588,35 @@ pub(crate) fn execution_request(
             })
             .unwrap_or_default(),
     };
+    let mode = record.snapshot.node_network_mode(node);
+    let mut plugins = node
+        .plugins
+        .iter()
+        .filter(|reference| reference.id != "network")
+        .map(|reference| {
+            record
+                .plugin_bindings
+                .get(&reference.id)
+                .cloned()
+                .ok_or_else(|| {
+                    GraphError::CorruptRun(format!(
+                        "Run has no frozen Plugin binding for `{}`",
+                        reference.id
+                    ))
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if mode != NetworkMode::Denied
+        && !plugins.iter().any(|binding| binding.id == "network")
+        && let Some(binding) = record.plugin_bindings.get("network")
+    {
+        plugins.push(binding.clone());
+    }
     Ok(NodeExecutionRequest {
         key: input.key.clone(),
         model,
         task: node_task(
             &record.snapshot.objective,
-            &instructions,
             local_instruction,
             &input.prepared_input,
         ),
@@ -608,25 +624,10 @@ pub(crate) fn execution_request(
         routes,
         input: input.prepared_input.clone(),
         input_commits: input.input_commits.clone(),
-        plugins: node
-            .plugins
-            .iter()
-            .map(|reference| {
-                record
-                    .plugin_bindings
-                    .get(&reference.id)
-                    .cloned()
-                    .ok_or_else(|| {
-                        GraphError::CorruptRun(format!(
-                            "Run has no frozen Plugin binding for `{}`",
-                            reference.id
-                        ))
-                    })
-            })
-            .collect::<Result<Vec<_>, _>>()?,
+        plugins,
         max_provider_requests,
         wall_time_limit_seconds,
-        network,
+        network: mode != NetworkMode::Denied,
         kind,
         operation,
         writes,
@@ -677,7 +678,13 @@ pub(crate) fn authorized_execution_request<N: NodeExecutionPort + ?Sized>(
         .nodes
         .iter()
         .find(|node| node.id == input.node_id)
-        .is_some_and(|node| !node.plugins.is_empty())
+        .is_some_and(|node| {
+            node.plugins.iter().any(|reference| {
+                reference.id != "network"
+                    || reference.network.is_none()
+                    || reference.network == Some(NetworkMode::Enabled)
+            })
+        })
         && !record.plugin_bindings_initialized
     {
         return Err(GraphError::Unsupported(

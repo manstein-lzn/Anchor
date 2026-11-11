@@ -44,9 +44,13 @@ impl HostNodes {
             &request.key.graph_digest,
         )?;
         readonly_inputs.extend(local_inputs.clone());
-        if !request.plugins.is_empty() {
+        if request
+            .plugins
+            .iter()
+            .any(|plugin| plugin.id != crate::plugin_network::NETWORK_PLUGIN)
+        {
             return Err(GraphError::Unsupported(
-                "Op.run cannot execute Plugins".into(),
+                "Op.run accepts only the network system Plugin".into(),
             ));
         }
         let command = request

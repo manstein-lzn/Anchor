@@ -27,8 +27,19 @@ pub(crate) struct ScheduleAssignmentTarget {
     pub(crate) delegation: Option<TaskOrigin>,
 }
 
+#[derive(Clone)]
+pub(crate) struct GraphScheduleReference {
+    pub(crate) graph: String,
+    pub(crate) request_id: String,
+    pub(crate) once: bool,
+    pub(crate) enabled: bool,
+}
+
 pub(crate) trait ScheduleManagementPort: Send + Sync {
     fn list(&self) -> Result<Value, ApplicationError>;
+    fn graph_references(&self) -> Result<Vec<GraphScheduleReference>, ApplicationError> {
+        Ok(Vec::new())
+    }
     fn check_run_deletion(&self, _request_id: &str) -> Result<(), ApplicationError> {
         Ok(())
     }

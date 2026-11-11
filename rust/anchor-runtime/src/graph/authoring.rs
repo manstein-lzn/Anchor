@@ -171,7 +171,10 @@ fn plugin_refs(value: Option<&Value>, where_: &str) -> Result<Vec<PluginRef>, Gr
             Value::String(name) => PluginRef::required(valid_plugin_ref(name, where_)?),
             Value::Object(object) => {
                 let unknown = object.keys().find(|key| {
-                    !matches!(key.as_str(), "id" | "required" | "default" | "graph_tasks")
+                    !matches!(
+                        key.as_str(),
+                        "id" | "required" | "default" | "graph_tasks" | "network"
+                    )
                 });
                 if let Some(key) = unknown {
                     return Err(invalid(format!(
@@ -208,6 +211,13 @@ fn plugin_refs(value: Option<&Value>, where_: &str) -> Result<Vec<PluginRef>, Gr
                     id,
                     required,
                     default,
+                    network: object
+                        .get("network")
+                        .map(|mode| serde_json::from_value::<NetworkMode>(mode.clone()))
+                        .transpose()
+                        .map_err(|error| {
+                            invalid(format!("{where_}: invalid network policy: {error}"))
+                        })?,
                     graph_tasks: object
                         .get("graph_tasks")
                         .map(|policy| {
@@ -227,7 +237,14 @@ fn plugin_refs(value: Option<&Value>, where_: &str) -> Result<Vec<PluginRef>, Gr
             }
         };
         reference.validate_graph_tasks()?;
-        if !result.iter().any(|prior| prior.id == reference.id) {
+        if let Some(prior) = result.iter().find(|prior| prior.id == reference.id) {
+            if prior != &reference {
+                return Err(invalid(format!(
+                    "{where_}: conflicting Plugin references for `{}`",
+                    reference.id
+                )));
+            }
+        } else {
             result.push(reference);
         }
     }
@@ -568,9 +585,10 @@ fn parse_body(
             )));
         }
         let plugins = plugin_refs(spec.get("plugins"), &format!("{node_where}.plugins"))?;
-        if !plugins.is_empty() && !matches!(kind, AuthorNodeKind::Agent(_)) {
+        if !plugins.is_empty() && !matches!(kind, AuthorNodeKind::Agent(_) | AuthorNodeKind::Op(_))
+        {
             return Err(invalid(format!(
-                "{node_where}: plugins can only be attached to an AgentNode"
+                "{node_where}: plugins cannot be attached to a module node"
             )));
         }
         nodes.push(AuthorNode {
@@ -751,7 +769,7 @@ fn expand(
                     agent: None,
                     op: Some(op.clone()),
                     input: None,
-                    plugins: Vec::new(),
+                    plugins: node.plugins.clone(),
                     max_rounds: node.max_rounds.or(ceiling),
                 });
                 result.scopes.insert(flat.clone(), prefix.to_owned());

@@ -1,6 +1,5 @@
 use std::collections::BTreeMap;
 
-use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
@@ -9,47 +8,7 @@ use crate::{GatewayError, MAX_TEXT_BYTES, media::InboundMedia};
 const MAX_MIXED_ITEMS: usize = 32;
 const MAX_MEDIA_ITEMS: usize = 16;
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ChannelEvent {
-    pub source: String,
-    pub event_id: String,
-    pub sender_id: String,
-    pub conversation_id: String,
-    pub text: String,
-    pub reply_target: String,
-    pub message_type: String,
-    pub metadata: BTreeMap<String, Value>,
-    pub attachments: Vec<Value>,
-}
-
-/// A shared group has one live turn even when a different member speaks next.
-/// The enum keeps a private conversation separate from a group with the same ID.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum ConversationScope {
-    Single {
-        sender_id: String,
-        conversation_id: String,
-    },
-    Group {
-        conversation_id: String,
-    },
-}
-
-impl ChannelEvent {
-    pub(crate) fn conversation_scope(&self) -> ConversationScope {
-        if self.metadata.get("chat_type").and_then(Value::as_str) == Some("group") {
-            ConversationScope::Group {
-                conversation_id: self.conversation_id.clone(),
-            }
-        } else {
-            // Stored private events predate explicit chat types.
-            ConversationScope::Single {
-                sender_id: self.sender_id.clone(),
-                conversation_id: self.conversation_id.clone(),
-            }
-        }
-    }
-}
+pub use anchor_channel_transport::{ChannelEvent, ConversationScope, digest};
 
 pub fn normalize_message(frame: &Value) -> Result<Option<ChannelEvent>, GatewayError> {
     if frame.get("cmd").and_then(Value::as_str) != Some("aibot_msg_callback") {
@@ -215,14 +174,4 @@ pub fn stream_id(event_id: &str) -> String {
 
 pub(crate) fn frame(cmd: &str, request_id: &str, body: Value) -> Value {
     json!({"cmd": cmd, "headers": {"req_id": request_id}, "body": body})
-}
-
-pub(crate) fn event_digest(event: &ChannelEvent) -> String {
-    let mut bound = event.clone();
-    bound.metadata.remove("request_id");
-    digest(&serde_json::to_vec(&bound).expect("serializable channel event"))
-}
-
-pub(crate) fn digest(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
 }

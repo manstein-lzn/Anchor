@@ -112,7 +112,10 @@ async fn list_and_read_preserve_configured_alias_and_missing_projection() {
     assert_eq!(configured["graph"], "fixture");
     assert_eq!(aliased["graph"], "bundle");
     assert_eq!(configured["definition"], aliased["definition"]);
-    assert_eq!(configured["node_plugins"], json!({"work":[]}));
+    assert_eq!(
+        configured["node_plugins"],
+        json!({"work":[{"id":"network","required":false,"network":"denied"}]})
+    );
     assert_eq!(
         application.load_graph("fixture").unwrap().0,
         application.load_graph("bundle").unwrap().0
@@ -196,6 +199,7 @@ async fn crud_round_trips_default_and_authoring_definition_without_http() {
         .update_graph("new-graph", replacement.clone())
         .await
         .unwrap();
+    let replacement = GraphSnapshot::normalize_network_authoring(replacement, false);
     assert_eq!(updated["graph"], "new-graph");
     assert_eq!(updated["definition"], replacement);
     assert_eq!(updated["plugin_activation"]["mode"], "new_run");

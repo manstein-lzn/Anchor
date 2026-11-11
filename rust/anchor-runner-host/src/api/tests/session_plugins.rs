@@ -6,6 +6,10 @@ use crate::test_support::EnvVar;
 
 /// One installed Plugin, exactly as the Library stores it.
 fn write_plugin(state: &ApiState, id: &str, manifest: Value) {
+    if let Some(system) = anchor_graph_host::SystemPlugin::from_id(id) {
+        crate::test_system_plugin(&state.catalog_root, system);
+        return;
+    }
     let plugin = state.catalog_root.join("plugins").join(id);
     std::fs::create_dir_all(&plugin).unwrap();
     std::fs::write(plugin.join("plugin.json"), manifest.to_string()).unwrap();

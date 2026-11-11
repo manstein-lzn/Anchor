@@ -22,15 +22,14 @@ async fn fixture() -> (tempfile::TempDir, RunApplication, TaskOrigin) {
         )
         .unwrap();
     }
-    let official = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugins/graph-tasks");
-    let installed = application.library_root().join("plugins/graph-tasks");
-    std::fs::create_dir_all(installed.join("skills/graph-tasks")).unwrap();
-    std::fs::copy(official.join("plugin.json"), installed.join("plugin.json")).unwrap();
-    std::fs::copy(
-        official.join("skills/graph-tasks/SKILL.md"),
-        installed.join("skills/graph-tasks/SKILL.md"),
-    )
-    .unwrap();
+    crate::test_system_plugin(
+        application.library_root(),
+        anchor_graph_host::SystemPlugin::GraphTasks,
+    );
+    crate::test_system_plugin(
+        application.library_root(),
+        anchor_graph_host::SystemPlugin::Network,
+    );
     let selected = json!({
         "entry":"work","agents":{"role":{"model":"fixture"}},
         "nodes":[{"id":"work","agent":"role","plugins":[{"id":"offline"}]}],"edges":[]
@@ -167,7 +166,7 @@ async fn delegated_static_child_rechecks_authority_at_locked_persistence_boundar
     drop(lease);
     let _publication = publication.await.unwrap();
     let bindings = Catalog::new(application.library_root())
-        .resolve(&bundle.plugins)
+        .resolve_snapshot(&bundle.snapshot)
         .unwrap();
     assert!(!origin.bindings["offline"].same_authorization(&bindings[0]));
     let identity = CallIdentity {

@@ -356,6 +356,7 @@ impl GoosePilot {
             bridge,
             endpoint,
             restored.as_deref(),
+            &request.instructions,
             &binding,
             &request.cancellation,
             None,
@@ -443,8 +444,7 @@ impl GoosePilot {
             Ok(())
         };
         let prompt = format!(
-            "{}\nOnly use the authorized anchor MCP tools; no node final_result is available. Continue the same native Session. Missing tool results do not prove an operation did not occur; inspect saved facts and actual state before repeating any uncertain action. Latest durable Anchor tool observation: {}\nUser message: {}",
-            request.instructions,
+            "Only use the authorized anchor MCP tools; no node final_result is available. Continue the same native Session. Missing tool results do not prove an operation did not occur; inspect saved facts and actual state before repeating any uncertain action. Latest durable Anchor tool observation: {}\nUser message: {}",
             json!(observation),
             request.prompt
         );

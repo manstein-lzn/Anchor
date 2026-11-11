@@ -1,0 +1,11 @@
+{
+  "platform": "feishu",
+  "transport": "websocket",
+  "entrypoint": "bin/anchor-feishu-gateway",
+  "description": "Feishu self-built application bot: private text messages over a managed long connection",
+  "required_environment": [
+    "FEISHU_APP_ID",
+    "FEISHU_APP_SECRET"
+  ],
+  "sdk": "anchor-feishu-gateway"
+}

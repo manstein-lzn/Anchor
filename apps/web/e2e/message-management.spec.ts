@@ -1,15 +1,18 @@
 import { test, expect } from '@playwright/test';
 import { runProjectionFixture } from './fixtures/runProjection';
 
-for (const width of [1440, 390]) {
-  test(`a Graph's bot and its conversations use Graph and Run entries at ${width}px`, async ({ page }, info) => {
+for (const platform of ['wecom', 'feishu']) for (const width of [1440, 390]) {
+  test(`a ${platform} Graph's bot and its conversations use Graph and Run entries at ${width}px`, async ({ page }, info) => {
     await page.setViewportSize({ width, height: 900 });
     await page.addInitScript(() => localStorage.setItem('anchor:view', 'channels'));
     const definition = { objective: '消息触发测试', entry: 'assistant', agents: { assistant: { model: 'fixture' } },
       nodes: [{ id: 'assistant', agent: 'assistant', plugins: ['gateway'] }], edges: [] };
     const graph = 'message-workflow';
+    const member = platform === 'feishu' ? 'ou_alice' : 'alice';
     const binding = { plugin: 'gateway', users: [] as string[], send_users: [] as string[] };
-    let configuration: Record<string, unknown> = { graph, configured: false, enabled: false, listener: 'stopped', mutable: true };
+    let configuration: Record<string, unknown> = { graph, platform, configured: false, enabled: false, listener: 'stopped', mutable: true };
+    const credentials = { plugin: 'gateway', targets: [{ target: `channel_${platform}@${graph}`, kind: 'channel', authorization_digest: 'fixture', fields:
+      (platform === 'feishu' ? ['FEISHU_APP_ID', 'FEISHU_APP_SECRET'] : ['WECOM_BOT_ID']).map(field => ({ field, state: 'configured', editable: true })) }] };
     const writes: { path: string; method: string; body: unknown }[] = [];
     const problems: string[] = [];
     page.on('pageerror', error => problems.push(error.message));
@@ -22,26 +25,26 @@ for (const width of [1440, 390]) {
       const path = new URL(route.request().url()).pathname;
       const method = route.request().method();
       if (method !== 'GET') writes.push({ path, method, body: route.request().postDataJSON() });
-      if (path === '/graphs') return route.fulfill({ json: { graphs: [{ graph, running: null, listener: { platform: 'wecom', status: configuration.listener } }] } });
+      if (path === '/graphs') return route.fulfill({ json: { graphs: [{ graph, running: null, listener: { platform, status: configuration.listener } }] } });
       if (path === `/graphs/${graph}`) return route.fulfill({ json: { definition } });
       if (path === '/runs') return route.fulfill({ json: { runs: [] } });
       if (path === '/timeline') return route.fulfill({ json: { runs: [], schedules: [], scheduled: [] } });
       if (path === '/plugins') return route.fulfill({ json: { plugins: [{ id: 'gateway', name: 'gateway', description: '' }] } });
-      if (path === '/plugins/gateway') return route.fulfill({ json: { id: 'gateway', name: 'gateway', description: '', channels: [{ platform: 'wecom' }] } });
+      if (path === '/plugins/gateway') return route.fulfill({ json: { id: 'gateway', name: 'gateway', description: '', channels: [{ platform }] } });
       if (path === '/plugins/gateway/configuration') return route.fulfill({ status: 404, json: { error: 'no configuration' } });
       if (path === '/plugins/gateway/credentials') return route.fulfill({ json: { plugin: 'gateway', targets: [] } });
-      if (path === `/graphs/${graph}/channel/credentials`) return route.fulfill({ json: { plugin: 'gateway', targets: [{ target: `channel_wecom@${graph}`, kind: 'channel', authorization_digest: 'fixture', fields: [{ field: 'WECOM_BOT_ID', state: 'configured', editable: true }] }] } });
+      if (path === `/graphs/${graph}/channel/credentials`) return route.fulfill({ json: credentials });
       if (path === `/graphs/${graph}/channel`) {
         if (method === 'PUT') configuration = { ...configuration, configured: true, owner_matches: true, binding: { ...binding, ...route.request().postDataJSON() } };
         return route.fulfill({ json: configuration });
       }
       if (path === `/graphs/${graph}/channel/enabled`) {
         const { enabled, expected_binding } = route.request().postDataJSON();
-        expect(expected_binding).toEqual({ ...binding, users: ['alice'], send_users: [], private_only: true });
+        expect(expected_binding).toEqual({ ...binding, users: [member], send_users: [member], private_only: true });
         configuration = { ...configuration, enabled, listener: enabled ? 'authenticated' : 'stopped' };
         return route.fulfill({ json: configuration });
       }
-      if (path === '/channel-sessions') return route.fulfill({ json: { sessions: [{ id: 'conversation', title: 'Alice 的对话', graph, platform: 'wecom' }] } });
+      if (path === '/channel-sessions') return route.fulfill({ json: { sessions: [{ id: 'conversation', title: 'Alice 的对话', graph, platform }] } });
       if (path === '/channel-sessions/conversation') return route.fulfill({ json: { session: { run_ids: [run.run] } } });
       if (path === '/channel-sessions/conversation/assistant') return route.fulfill({ json: { assistant: { run_id: run.run, wait_node: 'assistant', work_node: 'assistant', reply_node: 'assistant' }, needs_recovery: false } });
       if (path === '/channel-sessions/conversation/deliveries/unresolved') return route.fulfill({ json: { deliveries: [] } });
@@ -59,18 +62,24 @@ for (const width of [1440, 390]) {
     const bot = dialog.getByRole('region', { name: '此 Graph 的机器人', exact: true });
     await expect(bot).toContainText('尚未保存成员');
     await expect(bot.getByRole('button', { name: '启用机器人', exact: true })).toBeDisabled();
-    await bot.getByLabel('允许接收的成员').fill('alice');
-    await bot.getByRole('checkbox', { name: /只接收私聊/ }).check();
+    await bot.getByLabel('允许接收的成员').fill(member);
+    await bot.getByLabel(platform === 'feishu' ? '允许回复的成员' : '允许主动发送的成员').fill(member);
+    if (platform === 'feishu') {
+      await expect(bot).toContainText('App ID 和 App Secret');
+      await expect(bot).toContainText('im.message.receive_v1');
+      await expect(bot.getByRole('checkbox', { name: /只接收私聊/ })).toBeDisabled();
+    } else await bot.getByRole('checkbox', { name: /只接收私聊/ }).check();
     await bot.getByRole('button', { name: '保存成员', exact: true }).click();
     await expect(bot).toContainText('成员已保存');
-    await expect(bot.getByRole('region', { name: '插件凭据', exact: true })).toContainText(`channel_wecom@${graph}`);
+    await expect(bot.getByRole('region', { name: '插件凭据', exact: true })).toContainText(`channel_${platform}@${graph}`);
+    for (const field of credentials.targets[0].fields) await expect(bot.getByRole('button', { name: `轮换 ${field.field}`, exact: true })).toBeVisible();
     await bot.getByRole('button', { name: '启用机器人', exact: true }).click();
     await expect(bot).toContainText('常驻监听');
     await expect(bot.getByLabel('允许接收的成员')).toBeDisabled();
     await expect(bot.getByRole('checkbox', { name: /只接收私聊/ })).toBeChecked();
     await expect(bot.getByRole('region', { name: '插件凭据', exact: true })).toHaveCount(0);
     expect(await dialog.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
-    await page.screenshot({ path: info.outputPath(`graph-bot-${width}.png`), fullPage: true });
+    await page.screenshot({ path: info.outputPath(`graph-bot-${platform}-${width}.png`), fullPage: true });
     await page.keyboard.press('Escape');
     await expect(dialog).not.toBeVisible();
     await page.getByRole('button', { name: '查看会话', exact: true }).click();
@@ -85,7 +94,7 @@ for (const width of [1440, 390]) {
     await expect(conversations).toContainText('等待消息');
     await expect(conversations.getByRole('button', { name: '退役实例', exact: true })).toBeDisabled();
     expect(await conversations.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
-    await page.screenshot({ path: info.outputPath(`message-sessions-${width}.png`), fullPage: true });
+    await page.screenshot({ path: info.outputPath(`message-sessions-${platform}-${width}.png`), fullPage: true });
     await page.keyboard.press('Escape');
     await expect(conversations).not.toBeVisible();
     await expect(entry).toBeFocused();

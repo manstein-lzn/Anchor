@@ -7,22 +7,12 @@ use std::{collections::BTreeMap, sync::Mutex};
 
 type Inspect = Box<dyn Fn() + Send + Sync>;
 
-/// Install a minimal channel Plugin `id` under `library`, so a Graph mounting
-/// it on its assistant node can be a bot.
+/// Install canonical channel resources; these fixtures never execute the gateway.
 pub(crate) fn install_channel_plugin(library: &std::path::Path, id: &str) {
-    let plugin = library.join("plugins").join(id);
-    std::fs::create_dir_all(plugin.join("bin")).unwrap();
-    std::fs::write(
-        plugin.join("plugin.json"),
-        json!({"name": "Gateway fixture"}).to_string(),
-    )
-    .unwrap();
-    std::fs::write(
-        plugin.join("channel.json"),
-        json!({"platform":"wecom","transport":"websocket","entrypoint":"bin/gateway","required_environment":["WECOM_BOT_ID","WECOM_BOT_SECRET"]}).to_string(),
-    )
-    .unwrap();
-    std::fs::write(plugin.join("bin/gateway"), "#!/bin/sh\n").unwrap();
+    crate::test_system_plugin(
+        library,
+        anchor_graph_host::SystemPlugin::from_id(id).unwrap(),
+    );
 }
 
 #[derive(Default)]
@@ -59,6 +49,7 @@ impl FakeChannels {
         ChannelRuntimeState {
             graph: graph.into(),
             owner: owner.into(),
+            platform: ChannelPlatform::Wecom,
             binding: ChannelBinding {
                 plugin: "wecom".into(),
                 users: users.clone(),
@@ -116,10 +107,12 @@ impl FakeChannels {
         match state {
             None => json!({"graph":graph,"configured":false,"enabled":false}),
             Some(state) if state.owner != owner => {
-                json!({"graph":graph,"configured":true,"owner_matches":false})
+                json!({"graph":graph,"platform":state.platform,"configured":true,"owner_matches":false})
             }
-            Some(state) => json!({"graph":graph,"configured":true,"owner_matches":true,
-                "binding":state.binding,"enabled":state.enabled}),
+            Some(state) => {
+                json!({"graph":graph,"platform":state.platform,"configured":true,"owner_matches":true,
+                "binding":state.binding,"enabled":state.enabled})
+            }
         }
     }
 }
@@ -176,6 +169,9 @@ impl ChannelManagementPort for FakeChannels {
             let state = ChannelRuntimeState {
                 graph: graph.into(),
                 owner: owner.into(),
+                platform: states
+                    .get(graph)
+                    .map_or(ChannelPlatform::Wecom, |state| state.platform),
                 binding,
                 reply_node: None,
                 enabled: false,

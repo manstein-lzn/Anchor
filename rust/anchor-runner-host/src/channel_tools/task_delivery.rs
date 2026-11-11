@@ -20,11 +20,39 @@ impl ChannelTools {
         {
             return Ok(None);
         }
+        let (source, input, identity) = self.private_delivery_context()?;
+        let AssistantInput::Task(input) = input else {
+            return Err(ToolError::Failed(
+                "a trusted task result is required".into(),
+            ));
+        };
+        Ok(Some(TaskDelivery {
+            source,
+            result: input.result,
+            identity,
+        }))
+    }
+
+    /// Both task results and ordinary file sends stay inside the original
+    /// private Turn; the model never chooses a conversation or participant.
+    pub(super) fn private_delivery_context(
+        &self,
+    ) -> Result<
+        (
+            crate::run_metadata::AssistantSource,
+            AssistantInput,
+            ChannelIdentity,
+        ),
+        ToolError,
+    > {
         let invalid = || {
             ToolError::Failed(
-                "this task result no longer belongs to an active private assistant Turn".into(),
+                "this input no longer belongs to an active private assistant Turn".into(),
             )
         };
+        if self.assistant_graph.is_none() {
+            return Err(invalid());
+        }
         let source = crate::assistant::source(&self.state_root, &self.key)
             .map_err(ToolError::Failed)?
             .ok_or_else(invalid)?;
@@ -33,12 +61,14 @@ impl ChannelTools {
         {
             return Err(invalid());
         }
-        let Some(AssistantInput::Task(input)) =
-            crate::assistant::input(&self.state_root, &self.key).map_err(ToolError::Failed)?
-        else {
-            return Err(invalid());
+        let input = crate::assistant::input(&self.state_root, &self.key)
+            .map_err(ToolError::Failed)?
+            .ok_or_else(invalid)?;
+        let run = match &input {
+            AssistantInput::Task(input) => Some(input.run_id.as_str()),
+            AssistantInput::User(input) => input.relation.run_id.as_deref(),
         };
-        if input.run_id != self.key.run_id || input.turn.status != TurnStatus::Running {
+        if run != Some(self.key.run_id.as_str()) || input.turn().status != TurnStatus::Running {
             return Err(invalid());
         }
         let sessions = crate::assistant::sessions(&self.state_root).map_err(ToolError::Failed)?;
@@ -55,18 +85,19 @@ impl ChannelTools {
         let identity = sessions
             .channel_identity(&source.owner, &source.session)
             .map_err(|error| ToolError::Failed(error.to_string()))?;
-        if identity.source != "wecom"
+        if ChannelPlatform::parse(&identity.source).is_none()
             || identity.conversation_kind != ChannelConversationKind::Single
             || identity.sender_id.is_empty()
             || identity.conversation_id.is_empty()
         {
             return Err(invalid());
         }
-        Ok(Some(TaskDelivery {
-            source,
-            result: input.result,
-            identity,
-        }))
+        if let AssistantInput::User(input) = &input
+            && input.request.identity != identity
+        {
+            return Err(invalid());
+        }
+        Ok((source, input, identity))
     }
 
     pub(super) fn bind_task_recipient(&self, userid: &mut String) -> Result<(), ToolError> {

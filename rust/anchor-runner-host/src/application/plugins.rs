@@ -6,7 +6,7 @@ use crate::dependency_provision::{
 };
 use crate::plugin_library::Catalog;
 use crate::plugin_library::PluginLibrary;
-use anchor_graph_host::{plugin_view_path, resolved_library_root, views_root};
+use anchor_graph_host::{SystemPlugin, plugin_view_path, resolved_library_root, views_root};
 use anchor_library::{InstallError, InstallOutcome, PluginReview};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -117,6 +117,7 @@ impl RunApplication {
         access: DependencyAccess,
     ) -> Result<PluginInstallPrecondition, ApplicationError> {
         access.check().map_err(plugin_dependency_error)?;
+        PluginLibrary::validate_extension_install(&id).map_err(plugin_error)?;
         let reviewed = directory.clone();
         let review_root = library_root.clone();
         let (review, existing_digest, authorization_digest, network, mutable) =
@@ -566,6 +567,7 @@ fn plugin_error(failure: InstallError) -> ApplicationError {
 #[derive(Debug, Clone)]
 pub(crate) struct PluginUninstallPrecondition {
     pub(crate) id: String,
+    pub(crate) system: Option<SystemPlugin>,
     pub(crate) name: String,
     pub(crate) digest: String,
     /// The Plugin's own `mutable` declarations with the bytes each one holds.
@@ -586,6 +588,9 @@ pub(crate) struct PluginUninstallPrecondition {
 impl PluginUninstallPrecondition {
     /// Why this Plugin may not be uninstalled right now, naming the holder.
     pub(crate) fn refusal(&self) -> Option<String> {
+        if self.system.is_some() {
+            return Some("System Plugins are owned by Anchor and cannot be uninstalled; disable them in the desired context instead".into());
+        }
         if !self.sessions.is_empty() {
             return Some(format!(
                 "还有 {} 个会话挂着它（{}）：先在所有会话里卸载它，再卸载插件",
@@ -678,29 +683,6 @@ impl RunApplication {
         })?;
         let mut unfinished_runs = self.unfinished_runs_binding(id)?;
         let mut impact = self.plugin_impact(id)?;
-        if id == crate::plugin_network::NETWORK_PLUGIN {
-            let catalog = Catalog::new(library_root);
-            let entries = std::fs::read_dir(library_root.join("plugins"))
-                .map_err(|error| ApplicationError::Storage(error.to_string()))?;
-            for entry in entries {
-                let entry = entry.map_err(|error| ApplicationError::Storage(error.to_string()))?;
-                let dependent = entry.file_name().to_string_lossy().into_owned();
-                if dependent == id
-                    || !catalog
-                        .definition(&dependent)
-                        .is_ok_and(|plugin| crate::plugin_network::requires_network(&plugin))
-                {
-                    continue;
-                }
-                sessions_mounting.extend(
-                    sessions
-                        .sessions_mounting(&dependent)
-                        .map_err(|error| ApplicationError::Storage(error.to_string()))?,
-                );
-                unfinished_runs.extend(self.unfinished_runs_binding(&dependent)?);
-                impact.graphs.extend(self.plugin_impact(&dependent)?.graphs);
-            }
-        }
         sessions_mounting.sort();
         sessions_mounting.dedup();
         unfinished_runs.sort();
@@ -709,6 +691,7 @@ impl RunApplication {
         impact.graphs.dedup();
         Ok(PluginUninstallPrecondition {
             id: definition.id,
+            system: definition.system,
             name: definition.name,
             digest: definition.digest,
             mutable,
@@ -2072,35 +2055,42 @@ mod uninstall_tests {
     }
 
     #[tokio::test]
-    async fn a_session_using_a_network_dependent_plugin_holds_the_network_provider() {
+    async fn system_plugins_cannot_be_uninstalled_even_without_holders() {
         let root = tempfile::tempdir().unwrap();
         let sessions = session_store(root.path());
         let library = root.path().join("library");
-        for id in ["network", "research"] {
-            fs::create_dir_all(library.join("plugins").join(id)).unwrap();
-            fs::write(
-                library.join("plugins").join(id).join("plugin.json"),
-                json!({"name":id,"network":true}).to_string(),
-            )
-            .unwrap();
-        }
-        sessions
-            .set_plugin_mount("local", "sess", "research", true, "operator", "click")
-            .unwrap();
         let application = RunApplication::new(root.path().join("state"), root.path().to_path_buf());
-        let precondition = application
-            .plugin_uninstall_precondition(&library, "network", &sessions)
-            .await
-            .unwrap();
-        assert_eq!(precondition.sessions, ["sess"]);
-        let before = library_bytes(&library);
-        assert!(
-            application
-                .uninstall_plugin_if_unchanged(&library, &precondition, &sessions)
+        for plugin in anchor_graph_host::all_system_plugins() {
+            let directory = library.join("plugins").join(plugin.id());
+            crate::test_system_plugin(&library, *plugin);
+            let precondition = application
+                .plugin_uninstall_precondition(&library, plugin.id(), &sessions)
                 .await
-                .is_err()
-        );
-        assert_eq!(library_bytes(&library), before);
+                .unwrap();
+            assert_eq!(precondition.system, Some(*plugin));
+            assert!(precondition.sessions.is_empty());
+            assert!(precondition.unfinished_runs.is_empty());
+            assert!(precondition.refusal().unwrap().contains("System Plugins"));
+            let before = library_bytes(&library);
+            assert!(
+                application
+                    .uninstall_plugin_if_unchanged(&library, &precondition, &sessions)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(library_bytes(&library), before);
+
+            // An old or fabricated approval cannot bypass the fresh check under both leases.
+            let mut stale = precondition.clone();
+            stale.system = None;
+            assert!(
+                application
+                    .uninstall_plugin_if_unchanged(&library, &stale, &sessions)
+                    .await
+                    .is_err()
+            );
+            assert!(directory.exists());
+        }
     }
 
     #[tokio::test]

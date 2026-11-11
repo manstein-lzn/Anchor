@@ -1,6 +1,22 @@
 use crate::FilePluginCatalog;
 use std::fs;
 
+pub(crate) fn system_plugin(root: &std::path::Path, plugin: crate::SystemPlugin) {
+    let directory = root.join("plugins").join(plugin.id());
+    for (path, bytes) in plugin.public_files() {
+        let target = directory.join(path);
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::write(target, bytes).unwrap();
+    }
+    for path in plugin.executables() {
+        use std::os::unix::fs::PermissionsExt;
+        let target = directory.join(path);
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::write(&target, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+}
+
 /// A Plugin that declares Python dependencies and launches its server on the
 /// interpreter of the view that declaration maps to.
 pub(crate) fn catalog_with_dependency_plugin() -> (tempfile::TempDir, FilePluginCatalog) {

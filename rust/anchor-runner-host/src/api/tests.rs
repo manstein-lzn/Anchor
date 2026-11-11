@@ -549,7 +549,10 @@ async fn graph_crud_binds_plugin_resources_and_removes_stale_bundle_plugins() {
         .load()
         .unwrap();
     // The bundle references the Plugin by id and carries no Plugin bytes.
-    assert_eq!(bundle.plugins, vec!["demo".to_owned()]);
+    assert_eq!(
+        bundle.plugins,
+        vec!["demo".to_owned(), "network".to_owned()]
+    );
     assert!(
         !state.bundle_root.join("plugins").exists(),
         "a bundle must not carry Plugin bytes"

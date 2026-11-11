@@ -1,7 +1,10 @@
 # Rust platform deployment
 
 The format-3 platform archive contains the Host, fixed Goose, compiled WebUI,
-network Plugin, network relay and fixed uv/Rustup/pixi bootstrap tools. The installed
+network, Git and Anchor Dev Plugins, network relay and fixed uv/Rustup/pixi bootstrap tools.
+Anchor Dev keeps the stable ID `anchor-steward` and provides six on-demand development
+Skills without an MCP server. Enable it in Pilot separately from the Git tools;
+preinstallation does not grant network access or configure credentials. The installed
 `anchor-platform start` command derives release and private data paths from its
 own location and clears inherited deployment and credential settings. Neither
 installation nor startup loads `.env`, `anchor.env` or `model.env`.
@@ -24,6 +27,86 @@ Passing this check establishes only the namespace/private-proc baseline, not the
 network helper path or every Sandbox capability.
 Source-build regression and ordinary Ubuntu Docker failure-path evidence are in
 the [startup verification record](../.local/sandbox-startup-20261104/verification.md).
+
+## Native packages
+
+The current binary preview is scoped to Ubuntu 22.04/24.04 LTS amd64. The existing
+x86_64 RPM and amd64 DEB builders wrap the same admitted format-3 platform,
+not separate Runtimes. Rocky Linux 8 remains a packaging target, outside this
+preview's delivery scope. Build on Rocky 8 to retain the glibc 2.28 compatibility
+baseline:
+
+```sh
+scripts/build-native-package.sh --goose PINNED_ELF --output NEW.x86_64.rpm
+scripts/build-native-package.sh --goose PINNED_ELF --output NEW_amd64.deb
+```
+
+The build machine also needs `rpmbuild` or `dpkg-deb` for the selected format;
+the wrapper never installs packages or starts a Host. Review the package and
+its trusted SHA256 before installation. On a fresh target:
+
+```sh
+# Rocky Linux
+sudo dnf install ./anchor-VERSION-RELEASE.x86_64.rpm
+# Ubuntu: use apt rather than dpkg -i so dependencies are resolved
+sudo apt install ./anchor_VERSION-REVISION_amd64.deb
+
+anchor status
+anchor open
+```
+
+DNF/APT resolve the sandbox, Git, certificate, compiler/linker and service dependencies.
+No source checkout, Rust toolchain or Node installation is required on the
+target. Both packages create the non-login `anchor` service account, install a
+root-owned read-only release, and enable/start `anchor.service` on a running
+systemd system. On an inactive image, enable/start it after boot. A desktop
+application entry opens the local WebUI; headless `anchor open` prints its URL.
+Configure the first model service in WebUI Settings before talking to Pilot.
+
+`anchor start`, `stop` and `restart` delegate to normal systemd authorization;
+`anchor logs --follow` delegates to the journal. They do not add a supervisor or
+grant extra host permissions. The native unit preserves the standard service's
+account, control-group shutdown and filesystem restrictions. Its single changed
+entrypoint is `/usr/bin/anchor serve`, which executes the existing fixed platform
+launcher. This uses Rocky's standard executable SELinux label without changing
+policy, labels, booleans or sandbox settings. Ubuntu also retains the host's
+AppArmor and user-namespace policies; installing a DEB does not establish that
+the target kernel permits the required Sandbox operations.
+
+Only fresh installation is supported: existing Anchor home, account/group,
+entrypoints, service units or overrides are refused before unpack. Upgrade and
+reinstallation are also refused. Uninstall stops the service before erasing
+release files and preserves the account and all private data under
+`/var/lib/anchor/platform/data`; preserved data deliberately blocks another fresh
+installation. Debian purge also preserves these facts; it is not a data-reset
+operation. A failed post-install service start does not roll back account/data
+creation (RPM may report only a scriptlet warning). Inspect the journal and
+existing facts rather than deleting them or reinstalling over them. Debian
+configuration retries validate the existing account and exact directory
+ownership/modes before continuing; they do not take over another installation.
+Graphs and third-party Plugin projects remain separate assets, not native
+package payload or deployment configuration.
+
+The previously generated preview passed real offline package transactions on
+Rocky 8.10 and Ubuntu 22.04/24.04 containers, including state preservation and
+configuration failure/retry boundaries. Both Ubuntu versions also started the
+packaged Host and WebUI without a configured model. Raw payload review confirms
+identical runtime/native integration file bytes in RPM and DEB. Those RPM/DEB
+artifacts predate the mandatory namespace/private-proc startup check described
+here; a source update does not update them, and the fresh-install-only restriction
+still applies. These results are not acceptance of that check on the target
+Docker environment, live systemd, target SELinux/AppArmor, real providers or
+Pilot blind installation;
+see the [verification record](../.local/native-install-20261104/evidence/native-verification.md).
+
+The rebuilt Ubuntu DEB `0.1.0-0.20261104.2` includes the mandatory sandbox startup
+check. Its Rust/WebUI/native build, closed payload review, focused regression
+tests and packaged-Host startup-failure probe passed locally. This is a local
+small-group preview build, not a published GitHub Release. Target Ubuntu
+systemd/AppArmor, reboot/crash recovery, real-provider and Pilot end-to-end
+acceptance were not run for this build; they do not block this preview. The
+fresh-install-only restriction is unchanged; see the
+[preview build record](../.local/ubuntu-preview-20261104/evidence/verification.md).
 
 ## Install a reviewed platform
 
@@ -50,6 +133,10 @@ The listener is loopback-only; `start --listen 127.0.0.1:PORT` selects another
 local port. Old environment files are ignored and left untouched.
 
 ## Run under systemd
+
+Rocky and Ubuntu installations should use the native packages above. The following manual
+archive flow does not establish SELinux labeling for its direct launcher path;
+do not disable SELinux to make that example run.
 
 The standard unit uses the same installed launcher and requires no environment
 file. Prepare a fresh installation and give the service user its mutable data:
@@ -97,9 +184,8 @@ process settings used by standalone Graph deployments; it requires no env file.
 These settings belong to explicitly configured source/standalone Host processes.
 The installed platform launcher supplies its own reviewed paths and controls,
 and does not inherit arbitrary deployment or credential settings. This table is
-not an environment-file template for the installed platform service. Source
-startup and its Goose build/cache are documented in the
-[development guide](development.md).
+not an environment-file template for the native service. Source startup and its
+Goose build/cache are documented in the [development guide](development.md).
 
 | Setting | Ownership and behavior |
 | --- | --- |
@@ -131,9 +217,9 @@ The reviewed platform supplies the relay in `bin/`. The relay connects through a
 UNIX socket to the Host bridge/model proxy; provider credentials stay on the Host.
 Setting `ANCHOR_GOOSE_LOCAL_NETWORK=0`, or omitting the relay, selects shared host
 networking and requires explicit `ANCHOR_GOOSE_ALLOW_SHARED_NETWORK=1`. This is
-not loopback-only isolation and does not authorize business tools. Preflight
-checks that the relay exists when isolated mode is selected; do not weaken
-isolation to fix environment failures.
+not loopback-only isolation and does not authorize business tools or bypass the
+mandatory namespace/private-proc startup check. Preflight checks that the relay
+exists when isolated mode is selected; do not weaken isolation to fix Docker.
 
 Model calls use the Host proxy by default; Goose receives a bridge address and
 one-time token, not the provider endpoint/key. `ANCHOR_MODEL_DIRECT=1` is an

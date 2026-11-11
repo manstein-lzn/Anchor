@@ -6,6 +6,10 @@ fn sessions(state: &ApiState) -> SessionStore {
 }
 
 fn network_plugin(state: &ApiState, valid: bool) {
+    if valid {
+        crate::test_network_plugin(&state.catalog_root);
+        return;
+    }
     let directory = state.catalog_root.join("plugins/network");
     std::fs::create_dir_all(&directory).unwrap();
     std::fs::write(
@@ -63,10 +67,28 @@ async fn new_pilot_policy_is_durable_and_explicit_disable_survives_restart_and_n
         app.clone(),
         "POST",
         "/sessions/default-online/network",
-        Some(r#"{"allowed":false}"#),
+        Some(r#"{"mode":"denied"}"#),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{denied}");
+    assert_eq!(
+        sessions(&state)
+            .get("local", "default-online")
+            .unwrap()
+            .plugin_mounts
+            .get("network"),
+        Some(&false)
+    );
+    let events = sessions(&state)
+        .events("local", "default-online", 0)
+        .unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.kind == "session.network.changed")
+            .count(),
+        1
+    );
     let (status, disabled) = call(
         app.clone(),
         "POST",
@@ -283,4 +305,115 @@ async fn legacy_pilot_read_and_responses_continuation_do_not_backfill_empty_moun
     let retained = sessions(&state).get("local", "responses-legacy").unwrap();
     assert!(retained.plugin_mounts.is_empty());
     assert!(!freeze(&state, "responses-legacy", "new-turn").await.network);
+}
+
+#[tokio::test]
+async fn network_modes_validate_before_publication_and_preserve_context_ownership() {
+    let _guard = PROCESS_ENV.lock().await;
+    let (_root, state) = fixture();
+    std::fs::create_dir_all(state.data_root.join("platform")).unwrap();
+    let store = sessions(&state);
+    store
+        .create(
+            "local",
+            CreateSession {
+                id: Some("policy".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let original = store.get("local", "policy").unwrap();
+    let app = router(state.clone());
+    for (body, expected) in [
+        (json!({"mode":"invalid"}), StatusCode::BAD_REQUEST),
+        (json!({"mode":true}), StatusCode::BAD_REQUEST),
+        (
+            json!({"mode":"enabled","allowed":true}),
+            StatusCode::BAD_REQUEST,
+        ),
+        (json!({"mode":"enabled"}), StatusCode::CONFLICT),
+    ] {
+        let (status, result) = call(
+            app.clone(),
+            "POST",
+            "/sessions/policy/network",
+            Some(&body.to_string()),
+        )
+        .await;
+        assert_eq!(status, expected, "{result}");
+        assert_eq!(store.get("local", "policy").unwrap(), original);
+        assert_eq!(store.events("local", "policy", 0).unwrap().len(), 1);
+        assert!(
+            !state.application.library_root().join("plugins").exists(),
+            "a refused request created a Library"
+        );
+    }
+    // Offline policy is useful even when the provider is absent or damaged.
+    for (mode, allowed) in [("denied", false), ("auto", true)] {
+        let (status, result) = call(
+            app.clone(),
+            "POST",
+            "/sessions/policy/network",
+            Some(&json!({"mode":mode}).to_string()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{result}");
+        let saved = store.get("local", "policy").unwrap();
+        assert_eq!(saved.network_allowed, allowed);
+        assert_eq!(saved.plugin_mounts.get("network"), Some(&false));
+        assert!(
+            !state
+                .application
+                .library_root()
+                .join("plugins/network")
+                .exists()
+        );
+    }
+    network_plugin(&state, true);
+    let (status, result) = call(
+        app.clone(),
+        "POST",
+        "/sessions/policy/network",
+        Some(r#"{"mode":"enabled"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    let network = result["plugins"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == "network")
+        .unwrap();
+    assert_eq!(network["networkMode"], "enabled");
+    assert_eq!(network["networkAllowed"], true);
+    for (id, graph, channel) in [
+        ("graph-policy", "workflow", BTreeMap::new()),
+        (
+            "channel-policy",
+            "",
+            BTreeMap::from([("source".into(), "feishu".into())]),
+        ),
+    ] {
+        let original = store
+            .create(
+                "local",
+                CreateSession {
+                    id: Some(id.into()),
+                    graph: graph.into(),
+                    channel,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let (status, result) = call(
+            app.clone(),
+            "POST",
+            &format!("/sessions/{id}/network"),
+            Some(r#"{"mode":"enabled"}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{result}");
+        assert_eq!(store.get("local", id).unwrap(), original);
+        assert_eq!(store.events("local", id, 0).unwrap().len(), 1);
+    }
 }

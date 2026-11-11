@@ -38,7 +38,14 @@ async function plugins(target) {
         await cp(join(repo, 'plugins', id), directory, { recursive: true });
         if (binaries.length) await mkdir(join(directory, 'bin'), { recursive: true });
         for (const binary of binaries) await cp(join(target, binary), join(directory, 'bin', binary));
-        execFileSync(join(target, 'anchor-library'), ['--root', root, 'install', '--directory', directory, '--id', id], { stdio: 'inherit' });
+        const candidate = ['--directory', directory, '--id', id];
+        const review = JSON.parse(execFileSync(join(target, 'anchor-library'),
+          ['--root', root, 'install', ...candidate, '--review'], { encoding: 'utf8' }));
+        if (!['system', 'extension'].includes(review.kind)) throw new Error(`Unknown plugin kind for ${id}`);
+        const publication = review.kind === 'system'
+          ? ['install-system', ...candidate, '--digest', review.digest]
+          : ['install', ...candidate];
+        execFileSync(join(target, 'anchor-library'), ['--root', root, ...publication], { stdio: 'inherit' });
       }
     } finally {
       await rm(staging, { recursive: true, force: true });

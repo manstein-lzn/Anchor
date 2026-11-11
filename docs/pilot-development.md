@@ -4,7 +4,7 @@
 
 ## Anchor Dev 入口
 
-源码初始列表安装 Anchor Dev，沿用稳定 ID `anchor-steward`。在 Pilot 插件面板启用后，通过既有插件披露按需读取 [入口说明](../plugins/anchor-steward/instructions.md) 和 Graph、Plugin、Rust、Python、pixi、Git 六项 Skill；具体开发教程不再重复放入 Pilot 的内置管理指令。内置指令保留职责、工具发现、授权确认、冻结与恢复、事实核验等底线。
+源码初始列表和完整平台发行包都安装 Anchor Dev，沿用稳定 ID `anchor-steward`。在 Pilot 插件面板启用后，通过既有插件披露按需读取 [入口说明](../plugins/anchor-steward/instructions.md) 和 Graph、Plugin、Rust、Python、pixi、Git 六项 Skill；具体开发教程不再重复放入 Pilot 的内置管理指令。内置指令保留职责、工具发现、授权确认、冻结与恢复、事实核验等底线。
 
 Anchor Dev 是纯 Skill 插件，不含 MCP server，不自动初始化环境、安装依赖或启用其他插件。Git 工具与凭据属于独立 `git` Plugin；Python/Rust 初始化与项目环境仍由本文所述 Host 工具管理，pixi 不属于 `runtime_prepare` 的 kind。启用不是授权扩张，关闭只影响后续 Turn 的开发说明披露，不删除项目、工具链或缓存。已有 Library 内容不自动覆盖；若仍是旧版 Anchor 管家，由操作员按既有 Plugin 更新流程更新，不能让当前指令来源自行替换。
 

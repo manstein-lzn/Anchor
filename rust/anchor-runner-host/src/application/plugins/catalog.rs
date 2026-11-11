@@ -2,7 +2,7 @@
 //! A read never prepares dependencies, connects servers or grants execution.
 
 use super::ApplicationError;
-use anchor_graph_host::{PluginDefinition, PluginMetadata};
+use anchor_graph_host::{PluginDefinition, PluginMetadata, SystemPlugin};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 
@@ -31,6 +31,24 @@ impl InstalledPlugin {
 
     /// No private parser input, credential values or Host paths cross this boundary.
     pub(crate) fn project_health(&self, record: &mut Value) {
+        // Reserved ownership survives a damaged installation, but never makes it executable.
+        let system = self
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.system)
+            .or_else(|| SystemPlugin::from_id(&self.id));
+        record["kind"] = json!(if system.is_some() {
+            "system"
+        } else {
+            "extension"
+        });
+        record["canUninstall"] = json!(system.is_none() && self.metadata.is_some());
+        record["canReplace"] = json!(system.is_none() && self.metadata.is_some());
+        record["updateSource"] = json!(if system.is_some() {
+            "anchor-release"
+        } else {
+            "extension"
+        });
         record["definitionValid"] = json!(self.metadata.is_some());
         record["dependenciesReady"] = json!(self.dependencies_ready);
         record["contextAuthorized"] = Value::Null;
@@ -170,5 +188,48 @@ mod tests {
             assert!(!row.to_string().contains(root.path().to_str().unwrap()));
         }
         assert!(!root.path().join("dependencies").exists());
+    }
+
+    #[test]
+    fn catalog_projects_platform_lifecycle_even_when_reserved_resources_are_damaged() {
+        let root = tempfile::tempdir().unwrap();
+        crate::test_system_plugin(root.path(), SystemPlugin::GraphTasks);
+        std::fs::create_dir_all(root.path().join("plugins/extension")).unwrap();
+        std::fs::write(
+            root.path().join("plugins/extension/plugin.json"),
+            r#"{"name":"Extension"}"#,
+        )
+        .unwrap();
+        let catalog = InstalledPluginCatalog::read(root.path()).unwrap();
+        for entry in &catalog.entries {
+            let mut row = json!({});
+            entry.project_health(&mut row);
+            let system = entry.id == "graph-tasks";
+            assert_eq!(row["kind"], if system { "system" } else { "extension" });
+            assert_eq!(row["canUninstall"], !system);
+            assert_eq!(row["canReplace"], !system);
+            assert_eq!(
+                row["updateSource"],
+                if system {
+                    "anchor-release"
+                } else {
+                    "extension"
+                }
+            );
+        }
+        drop(catalog);
+        std::fs::write(
+            root.path().join("plugins/graph-tasks/plugin.json"),
+            r#"{"name":"collision"}"#,
+        )
+        .unwrap();
+        let catalog = InstalledPluginCatalog::read_selected(root.path(), "graph-tasks").unwrap();
+        let mut row = json!({});
+        catalog.entries[0].project_health(&mut row);
+        assert_eq!(row["kind"], "system");
+        assert_eq!(row["available"], false);
+        assert_eq!(row["canUninstall"], false);
+        assert_eq!(row["canReplace"], false);
+        assert!(catalog.definition("graph-tasks").is_err());
     }
 }

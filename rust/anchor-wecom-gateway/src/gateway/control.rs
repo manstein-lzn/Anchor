@@ -1,10 +1,9 @@
-use std::{collections::BTreeSet, time::Duration};
+use std::collections::BTreeSet;
 
+use anchor_channel_transport::control::{authorize, read_request, write_response};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use subtle::ConstantTimeEq;
 use tokio::{
-    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     net::{UnixListener, UnixStream},
     sync::{mpsc, oneshot, watch},
     task::JoinSet,
@@ -83,12 +82,7 @@ async fn handle(
 ) {
     let result = dispatch(&mut stream, token, users, send, status).await;
     let value = result.unwrap_or_else(|error| json!({"error": error.to_string()}));
-    let Ok(mut bytes) = serde_json::to_vec(&value) else {
-        return;
-    };
-    bytes.push(b'\n');
-    let _ = tokio::time::timeout(Duration::from_secs(5), stream.write_all(&bytes)).await;
-    let _ = stream.shutdown().await;
+    write_response(&mut stream, &value).await;
 }
 
 async fn dispatch(
@@ -98,31 +92,14 @@ async fn dispatch(
     send: mpsc::Sender<SendRequest>,
     status: watch::Receiver<ConnectionStatus>,
 ) -> Result<Value, GatewayError> {
-    let mut bytes = Vec::new();
-    tokio::time::timeout(
-        Duration::from_secs(5),
-        BufReader::new(stream.take((MAX_CONTROL_REQUEST_BYTES + 1) as u64))
-            .read_until(b'\n', &mut bytes),
-    )
-    .await
-    .map_err(|_| GatewayError::Invalid("channel request timed out"))?
-    .map_err(|_| GatewayError::Invalid("invalid channel request"))?;
-    if bytes.len() > MAX_CONTROL_REQUEST_BYTES || bytes.last() != Some(&b'\n') {
-        return Err(GatewayError::Invalid(
-            "channel request is oversized or missing NDJSON newline",
-        ));
-    }
-    let request: Request = serde_json::from_slice(&bytes)
-        .map_err(|_| GatewayError::Invalid("invalid channel request"))?;
+    let (request, length): (Request, _) = read_request(stream, MAX_CONTROL_REQUEST_BYTES).await?;
     let request_token = match &request {
         Request::Status { token }
         | Request::Send { token, .. }
         | Request::SendFile { token, .. } => token,
     };
-    if !bool::from(request_token.as_bytes().ct_eq(token.as_bytes())) {
-        return Err(GatewayError::Invalid("unauthorized channel request"));
-    }
-    if !matches!(request, Request::SendFile { .. }) && bytes.len() > MAX_REQUEST_BYTES {
+    authorize(request_token, token)?;
+    if !matches!(request, Request::SendFile { .. }) && length > MAX_REQUEST_BYTES {
         return Err(GatewayError::Invalid(
             "channel request exceeds text request limits",
         ));

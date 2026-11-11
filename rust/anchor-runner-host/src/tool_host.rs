@@ -127,6 +127,7 @@ struct ResolvedMcpServer {
     // are injected; resolved credential bytes must never become templates.
     declaration: Value,
     config: Value,
+    channel_task_network: bool,
 }
 
 impl std::fmt::Debug for ResolvedMcpServer {
@@ -300,6 +301,9 @@ impl McpToolConfig {
                             .config
                             .clone(),
                         config: definition.config,
+                        channel_task_network: declaration.requires_network()
+                            && declaration.system.is_some()
+                            && !declaration.channels.is_empty(),
                     },
                 );
             }
@@ -552,7 +556,7 @@ impl McpToolConfig {
             for server_id in &binding.mcp_servers {
                 let key = server_key(&binding.id, server_id);
                 // A server this host will not launch is skipped.
-                let skipped = server_id == FAKE_SERVER_ID || self.disabled.contains(&key);
+                let skipped = server_id == FAKE_SERVER_ID || self.server_disabled(&key, network);
                 if skipped {
                     continue;
                 }
@@ -674,7 +678,7 @@ impl McpToolConfig {
                     continue;
                 }
                 let key = server_key(&binding.id, server_id);
-                if self.disabled.contains(&key) {
+                if self.server_disabled(&key, network) {
                     continue;
                 }
                 let definition = self
@@ -688,6 +692,15 @@ impl McpToolConfig {
             }
         }
         Ok(())
+    }
+
+    fn server_disabled(&self, key: &str, network: bool) -> bool {
+        self.disabled.contains(key)
+            || (!network
+                && self
+                    .servers
+                    .get(key)
+                    .is_some_and(|server| server.channel_task_network))
     }
 
     async fn connect_one(
@@ -1305,6 +1318,8 @@ impl LiveMcpTools {
                     || exposed == FAKE_ECHO_TOOL
                     || exposed == crate::tool_names::RUN_TOOL_NAME
                     || exposed == crate::tool_names::SEND_TOOL
+                    || exposed == crate::tool_names::FEISHU_SEND_TOOL
+                    || exposed == crate::tool_names::FEISHU_SEND_FILE_TOOL
                     || exposed == crate::tool_names::SEND_FILE_TOOL
                     || exposed == crate::tool_names::IMAGE_TOOL
                 {

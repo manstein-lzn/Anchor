@@ -149,7 +149,11 @@ impl HostIoResolver {
         }
         let resolved = plugin_mounts::resolve(Some(&mounts), &mounts.mounts, &declared, &installed);
         // A desired Graph Plugin cannot disappear silently between save and use.
-        for reference in &node.plugins {
+        for reference in node
+            .plugins
+            .iter()
+            .filter(|reference| reference.id != crate::plugin_network::NETWORK_PLUGIN)
+        {
             let enabled = mounts
                 .mounts
                 .get(&reference.id)
@@ -182,28 +186,25 @@ impl HostIoResolver {
             }
         }
         let mut reasons = resolved.reasons;
-        let agent_network = node
-            .agent
-            .as_ref()
-            .and_then(|name| snapshot.agents.get(name))
-            .is_some_and(|agent| agent.network);
-        let network = crate::plugin_network::apply(
+        let network = crate::plugin_network::apply_node(
             self.plugin_library_root()?,
             &mut bindings,
-            agent_network && mounts.network_allowed,
+            snapshot.node_network_mode(node),
+            mounts.network_allowed,
             &mut reasons,
         )?;
         // Auto-derived network is an explicit, frozen grant too. Initial Runs
         // predate receipts; their host admission already authorized networking.
-        if network && snapshot.digest().map_err(|error| error.to_string())? != admitted.graph_digest
-        {
+        if network {
             let current = bindings
                 .iter()
                 .find(|binding| binding.id == crate::plugin_network::NETWORK_PLUGIN)
                 .ok_or("network authorization binding is missing")?;
-            if !authority
-                .get(&current.id)
-                .is_some_and(|baseline| baseline.same_authorization(current))
+            let approved = authority.get(&current.id);
+            if approved.is_some_and(|baseline| !baseline.same_authorization(current))
+                || approved.is_none()
+                    && snapshot.digest().map_err(|error| error.to_string())?
+                        != admitted.graph_digest
             {
                 return Err(
                     "network Plugin Host authorization changed since Graph permission approval"

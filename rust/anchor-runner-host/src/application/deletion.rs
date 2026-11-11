@@ -53,7 +53,10 @@ impl RunApplication {
     /// this": the candidate set is the one impact scan, which names every Graph
     /// it could not load, and an incomplete scan refuses the deletion instead of
     /// allowing it.
-    fn graph_callers(&self, target_path: &Path) -> Result<Vec<String>, ApplicationError> {
+    pub(in crate::application) fn graph_callers(
+        &self,
+        target_path: &Path,
+    ) -> Result<Vec<String>, ApplicationError> {
         let mut callers = BTreeSet::new();
         let (bundles, considered, total, missing) = match self.impact_scan() {
             graphs::ImpactScan::Read {

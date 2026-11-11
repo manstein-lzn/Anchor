@@ -5,6 +5,9 @@ use anchor_graph_host::PluginCatalog;
 use anchor_platform_session::CreateSession;
 use anchor_runtime::graph::GraphRunRecord;
 
+#[path = "catalog_tests.rs"]
+mod catalog;
+
 pub(super) fn fixture() -> (tempfile::TempDir, RunApplication) {
     let root = tempfile::tempdir().unwrap();
     let application = RunApplication::new(root.path().join("state"), root.path().join("catalog"));
@@ -23,15 +26,14 @@ pub(super) fn fixture() -> (tempfile::TempDir, RunApplication) {
         )
         .unwrap();
     }
-    let official = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugins/graph-tasks");
-    let installed = application.library_root().join("plugins/graph-tasks");
-    std::fs::copy(official.join("plugin.json"), installed.join("plugin.json")).unwrap();
-    std::fs::create_dir_all(installed.join("skills/graph-tasks")).unwrap();
-    std::fs::copy(
-        official.join("skills/graph-tasks/SKILL.md"),
-        installed.join("skills/graph-tasks/SKILL.md"),
-    )
-    .unwrap();
+    crate::test_system_plugin(
+        application.library_root(),
+        anchor_graph_host::SystemPlugin::GraphTasks,
+    );
+    crate::test_system_plugin(
+        application.library_root(),
+        anchor_graph_host::SystemPlugin::Network,
+    );
     (root, application)
 }
 
@@ -309,7 +311,7 @@ async fn cancelled_task_tools_cannot_publish_after_waiting_for_the_catalog_guard
     );
     assert_eq!(
         application.read_task_graph(&origin, graph).unwrap()["definition"],
-        definition
+        GraphSnapshot::normalize_network_authoring(definition, false)
     );
 }
 
@@ -452,7 +454,7 @@ async fn generated_graph_creation_is_scope_owned_idempotent_and_does_not_install
         .unwrap();
     assert_eq!(
         application.read_task_graph(&alice, name).unwrap()["definition"],
-        edited
+        GraphSnapshot::normalize_network_authoring(edited, false)
     );
     let bob_created = application
         .create_task_graph(&bob, definition, "request".into())

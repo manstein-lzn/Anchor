@@ -1,25 +1,90 @@
 # Source-free Anchor packaging
 
-`anchor-distribution` is an operator-facing Rust builder, not a new Runner or an
-installer. It does not execute supplied binaries, call providers, install system
-dependencies, or change deployment permissions.
+`anchor-distribution` provides operator-facing Rust packaging and fresh-install
+tooling, not a new Runner. Its builders do not execute supplied runtime binaries,
+call providers, install system dependencies, or change the build host's services.
+
+## Native RPM and DEB
+
+`scripts/build-native-package.sh --goose PINNED_ELF --output NEW.x86_64.rpm`
+or `--output NEW_amd64.deb` builds the existing platform and its native service
+CLI, then invokes the corresponding Rust builder. Use a Rocky 8 build host for
+the glibc 2.28 baseline. The target formats are Rocky 8 x86_64 and Ubuntu
+22.04/24.04 amd64. `rpmbuild` or `dpkg-deb` is a build requirement, not a target
+requirement; `--skip-build` reuses the reviewed `<build-root>/target/release`
+binaries and compiled WebUI. `--release`/`--rpmbuild` select RPM build options;
+`--revision`/`--dpkg-deb` select Debian build options.
+
+```sh
+anchor-build-rpm --archive /reviewed/platform.tar.gz --sha256 TRUSTED_SHA256 \
+  --cli /reviewed/anchor --release 1.el8 --output /existing/output/anchor.x86_64.rpm
+anchor-build-deb --archive /reviewed/platform.tar.gz --sha256 TRUSTED_SHA256 \
+  --cli /reviewed/anchor --revision 1 --output /existing/output/anchor_amd64.deb
+```
+
+`build_native_rpm(&NativeRpmRequest)` and `build_native_deb(&NativeDebRequest)`
+return their respective reports and reuse one native payload implementation.
+That implementation calls the existing `install_platform` admission into
+private build staging. Only its root-owned read-only release enters the package;
+no credentials, mutable data, business Graph or second install receipt is added.
+The CLI is a separately reviewed x86_64 ELF. RPM byte rewriting/stripping is
+disabled; dpkg-deb archives the admitted payload without modifying binaries and
+normalizes package ownership to root. The admitted inventory and bootstrap pins
+survive unchanged. Reports identify the package, platform archive and CLI by
+SHA256. These hashes are not package signatures.
+
+Native packaging replaces manual account/directory/service setup with shared
+package lifecycle scripts; it does not introduce a second extractor, Runtime or configuration
+store. The native unit is derived from `deploy/systemd/anchor.service` with only
+its entrypoint changed to `/usr/bin/anchor serve`, which execs the existing fixed
+launcher. This standard executable entrypoint needs no SELinux policy edits.
+`anchor` also offers systemd lifecycle/status, journal and local browser commands.
+All persistent facts stay in the existing private data root. Fresh-only takeover,
+upgrade and uninstall boundaries are documented in the
+[deployment guide](../../docs/rust-production-deployment.md#native-packages).
+Debian maintainer prefixes only translate dpkg operations into the shared
+fresh-install/remove lifecycle; configure retries validate existing facts before
+continuing. `deploy/native/test-lifecycle.sh` exercises the scripts without host
+accounts/services; it does not replace actual package transactions or live
+systemd acceptance.
 
 ## Complete platform
 
 A platform release has no business Graph. The same Host and Kernel serve Pilot
-against an initially empty catalog. The required native network Plugin ships as
-an importable candidate; Host seeds it into the Library without enabling a
-Session's network permission. Fixed uv, Rustup and pixi bootstrap tools are native
-static executables; pixi is mounted read-only on agent and Pilot command PATH
-without registration or installation. Python versions, Rust toolchains and packages are prepared
-on demand under the mutable state root, one shared installation per version.
+against an initially empty business catalog. It includes four system Plugins:
+`network`, `graph-tasks`, `feishu` and `wecom`. Their identities and public resources
+come from the shared `anchor-graph-host` system inventory, not an installer's
+self-declared manifest flag. The release includes every native entrypoint,
+including both channel gateways and the WeCom API MCP. They update with Anchor;
+normal Plugin install/update/uninstall paths cannot replace them.
+
+`git` and `anchor-steward` (displayed as **Anchor Dev**) remain ordinary
+preinstalled Plugins. Host imports missing ordinary entries from the admitted
+release inventory without replacing valid installed or user-edited entries.
+Invalid entries stop seeding rather than being overwritten. System resources
+use the release-owned installation path, with exact public-resource and full
+Plugin digest checks. Library visibility does not mount a Plugin into a Session,
+grant Graph delegation, activate a channel, change saved network consent, or
+create credentials. Git remains its own native MCP and credential boundary;
+Anchor Dev is guidance only. Graph Tasks is a Skill whose Host tools require an
+explicit node policy; it cannot self-authorize delegation. Source starters
+already contain these Plugins; existing source checkouts do not need to clone
+Anchor into themselves. Fixed uv, Rustup
+and pixi bootstrap tools are native static executables; pixi is mounted read-only
+on agent and Pilot command PATH without registration or installation. Python
+versions, Rust toolchains and packages are prepared on demand under the mutable
+state root, one shared installation per version.
 
 ```sh
 anchor-distribution --platform --host /reviewed/anchor-runner-host \
   --goose /reviewed/goose --net-relay /reviewed/anchor-net-relay \
   --sandbox-network /reviewed/anchor-sandbox-network \
   --platform-launcher /reviewed/anchor-platform \
-  --network-tools /reviewed/anchor-network-tools --web /reviewed/web-dist \
+  --network-tools /reviewed/anchor-network-tools --git-tools /reviewed/anchor-git-tools \
+  --wecom-tools /reviewed/anchor-wecom-tools \
+  --feishu-gateway /reviewed/anchor-feishu-gateway \
+  --wecom-gateway /reviewed/anchor-wecom-gateway \
+  --web /reviewed/web-dist \
   --uv /reviewed/uv --rustup-init /reviewed/rustup-init --pixi /reviewed/pixi \
   --output /existing/output/platform.tar.gz
 ```
@@ -31,7 +96,14 @@ top-level admitted `plugins` inventory, and
 `bootstrap.uv`/`bootstrap.rustup_init`/`bootstrap.pixi` identities containing package-relative
 `path`, fixed `version`, `source` and executable `sha256`. There is no `bundle`
 field or `bundle/` tree. The original Graph package below keeps format 1 and its
-strict admission checks.
+strict admission checks, without importing the full platform set or granting scheduler/channel authority.
+Build and installation share the system inventory and the ordinary preinstalled
+resource inventory; there is no second system-resource list in the builder.
+Arbitrary additional Plugin directories or files are not admitted.
+Official manifests, channel definitions and guidance must match the embedded
+repository bytes, while separately supplied native MCP and gateway ELFs retain
+inventory identities and hashes.
+A source-file-set regression prevents silently omitting future public resources.
 
 ```text
 anchor-runtime/
@@ -46,6 +118,28 @@ anchor-runtime/
   plugins/network/plugin.json
   plugins/network/skills/network/SKILL.md
   plugins/network/bin/anchor-network-tools
+  plugins/git/plugin.json
+  plugins/git/skills/git/SKILL.md
+  plugins/git/bin/anchor-git-tools
+  plugins/graph-tasks/plugin.json
+  plugins/graph-tasks/skills/graph-tasks/SKILL.md
+  plugins/feishu/plugin.json
+  plugins/feishu/channel.json
+  plugins/feishu/skills/feishu/SKILL.md
+  plugins/feishu/bin/anchor-feishu-gateway
+  plugins/wecom/plugin.json
+  plugins/wecom/channel.json
+  plugins/wecom/skills/wecom/SKILL.md
+  plugins/wecom/bin/anchor-wecom-tools
+  plugins/wecom/bin/anchor-wecom-gateway
+  plugins/anchor-steward/plugin.json
+  plugins/anchor-steward/instructions.md
+  plugins/anchor-steward/skills/plugin-authoring/SKILL.md
+  plugins/anchor-steward/skills/graph-authoring/SKILL.md
+  plugins/anchor-steward/skills/rust-development/SKILL.md
+  plugins/anchor-steward/skills/python-development/SKILL.md
+  plugins/anchor-steward/skills/pixi-development/SKILL.md
+  plugins/anchor-steward/skills/git-workflow/SKILL.md
   web/index.html
   README.md
   runtime-manifest.json
@@ -107,18 +201,18 @@ It does not start a service or update an existing installation.
 ```text
 <install-root>/
   release/anchor-runtime/     read-only release, directories/ELFs 0555, resources 0444
-  config/model.env           optional deployment-managed model data, 0600
+  config/                    empty reserved directory; no model file is read
   data/home/                 private runtime HOME
   data/state/                Host facts, including managed/runtime-config.json
   data/catalog/              empty business Graph catalog
-  data/library/              Library, populated by Host's native network seed
+  data/library/              Library, release-owned system Plugins plus ordinary Git/Anchor Dev seeds
   data/workspaces/           Session and node workspaces
 ```
 
 The native `anchor-platform start` clears inherited environment settings and
-selects installation-owned roots, fixed Goose, isolated model transport and the
-optional private model data. Without that file it injects no model environment
-variables, allowing WebUI settings to take effect. It binds `127.0.0.1:8077`; open
+selects installation-owned roots, fixed Goose and isolated model transport. It
+does not read model environment files or inject model environment variables;
+WebUI-managed settings are authoritative. It binds `127.0.0.1:8077`; open
 that address to configure the service and use Pilot. The
 initial command grant is `sh,git`; Python/Rust execution is granted through the
 Host's managed initialization. It does not inherit the developer machine's
@@ -149,9 +243,8 @@ references `academic-research`, `--scholarly` becomes required. If it references
 must be supplied separately; passing one without its Plugin is rejected. The
 builder places the scholarly ELF at
 `plugins/academic-research/bin/anchor-scholarly` (beside the bundle, in the
-shipped Plugin sources), writes the frozen manifest's Plugin *references*
-(`{"id": …}` — a bundle never carries Plugin bytes) and validates the resulting
-bundle. Native first-party MCP and channel entrypoints are placed under their
+shipped Plugin sources) and validates the resulting bundle without rewriting
+the Graph or its reference-only manifest. Native first-party MCP and channel entrypoints are placed under their
 declared Plugin `bin/` paths and do not use an interpreter or host `PATH`. The builder consumes reviewed,
 already-built target ELFs; it does not build workspace crates or resolve a
 cross-crate install manifest.
@@ -162,6 +255,15 @@ one Library root those Plugins are imported into (`ANCHOR_RUNNER_LIBRARY_ROOT`,
 or `ANCHOR_RUNNER_CATALOG_ROOT` when the deployment keeps one root); the bundle
 directory is a Graph, not a Plugin home, and the host never infers a Library root
 from it.
+
+The shared snapshot resolver determines the shipped executable closure, not the
+manifest's policy-only references. `network: denied` and offline `auto` nodes
+need no network provider. `enabled`, or `auto` with a mounted network-dependent
+Plugin, requires the complete canonical `network` sources and native binary;
+missing resources fail packaging. Unneeded source trees also fail closure
+validation rather than being silently installed. Shipping a provider never
+changes node policy, child-task limits or Host authorization. The source
+manifest retains its exact Graph reference set, including offline policy refs.
 
 Output must be a new
 `.tar.gz` file under an existing, non-symlink directory. Success prints a JSON

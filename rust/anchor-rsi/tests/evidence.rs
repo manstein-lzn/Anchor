@@ -133,7 +133,7 @@ fn discovers_new_graphs_and_dependencies_and_freezes_source() {
     );
     let evidence = Evidence::collect(config.clone()).unwrap();
     assert_eq!(evidence.index("graphs", 0, 20).unwrap()["count"], 1);
-    assert_eq!(evidence.index("plugins", 0, 20).unwrap()["count"], 2);
+    assert_eq!(evidence.index("plugins", 0, 20).unwrap()["count"], 3);
     assert!(evidence.dependencies.iter().any(|d| d.name == "httpx"));
     assert!(evidence.dependencies.iter().any(|d| d.name == "serde"));
     assert!(evidence.dependencies.iter().any(|d| d.name == "react"));
@@ -157,6 +157,198 @@ fn discovers_new_graphs_and_dependencies_and_freezes_source() {
         .to_string();
     assert!(!plugin.contains("do-not-copy"));
     assert!(plugin.contains("REDACTED"));
+}
+
+fn install_system_fixture(config: &Config, plugin: anchor_graph_host::SystemPlugin) {
+    use std::os::unix::fs::PermissionsExt;
+    for (relative, bytes) in plugin.public_files() {
+        for root in [&config.source, &config.data.join("library")] {
+            let path = root.join("plugins").join(plugin.id()).join(relative);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, bytes).unwrap();
+        }
+    }
+    for relative in plugin.executables() {
+        let path = config
+            .data
+            .join("library/plugins")
+            .join(plugin.id())
+            .join(relative);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, b"\0native-body-must-not-enter-evidence").unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+}
+
+fn system_projection(evidence: &Evidence, config: &Config) -> Value {
+    let entry = &evidence.entries["plugins/system-capabilities.json"];
+    assert_eq!(entry.domain, "plugins");
+    serde_json::from_slice(&fs::read(config.evidence.join(&entry.frozen_file)).unwrap()).unwrap()
+}
+
+#[test]
+fn system_capabilities_bind_current_catalog_identity_and_granted_frozen_source_not_history() {
+    use anchor_graph_host::{FilePluginCatalog, SystemPlugin, all_system_plugins};
+    let (_temp, config) = setup();
+    for plugin in all_system_plugins() {
+        install_system_fixture(&config, *plugin);
+    }
+    write(&config.source, "docs/plugins.md", "Plugin contracts.\n");
+    write(
+        &config.source,
+        "rust/anchor-runner-host/src/plugin_network.rs",
+        "// candidate implementation, not a deployed binary attestation\n",
+    );
+    write(
+        &config.source,
+        "plugins/network/skills/network/SKILL.md",
+        "candidate guidance differs from installed release\n",
+    );
+    let library = config.data.join("library");
+    let evidence = Evidence::collect(config.clone()).unwrap();
+    let projection = system_projection(&evidence, &config);
+    assert_eq!(
+        projection["declared_library_source"],
+        library.display().to_string()
+    );
+    assert_eq!(
+        projection["plugins"].as_array().unwrap().len(),
+        all_system_plugins().len()
+    );
+    for plugin in all_system_plugins() {
+        let row = projection["plugins"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["id"] == plugin.id())
+            .unwrap();
+        let definition = FilePluginCatalog::new(&library)
+            .definition(plugin.id())
+            .unwrap();
+        assert_eq!(row["kind"], "system");
+        assert_eq!(row["installed"]["status"], "verified");
+        assert_eq!(row["installed"]["code_digest"], definition.digest);
+        assert_eq!(
+            row["installed"]["authorization_digest"],
+            definition.authorization_digest.as_ref()
+        );
+        assert_eq!(row["installed"]["native_provenance"], "unknown");
+        for resource in row["public_resources"].as_array().unwrap() {
+            assert_eq!(resource["source"]["status"], "collected");
+            let differs =
+                *plugin == SystemPlugin::Network && resource["path"] == "skills/network/SKILL.md";
+            assert_eq!(resource["source_matches_compiled"], !differs);
+        }
+    }
+    let contract = &projection["shared_source_anchors"][0];
+    assert_eq!(contract["status"], "collected");
+    let path = contract["evidence_path"].as_str().unwrap();
+    assert_eq!(contract["sha256"], evidence.entries[path].sha256);
+    assert!(evidence.issues.iter().any(|issue| issue["reason"]
+        == "system Plugin source anchor not collected within the granted source"));
+    fs::write(
+        library.join("plugins/network/bin/anchor-network-tools"),
+        "changed after collect",
+    )
+    .unwrap();
+    fs::write(
+        config.source.join("docs/plugins.md"),
+        "changed after collect",
+    )
+    .unwrap();
+    assert_eq!(system_projection(&evidence, &config), projection);
+    let frozen = evidence
+        .entries
+        .values()
+        .map(|entry| fs::read_to_string(config.evidence.join(&entry.frozen_file)).unwrap())
+        .collect::<String>();
+    assert!(!frozen.contains("native-body-must-not-enter-evidence"));
+    assert!(
+        projection["limitations"]
+            .to_string()
+            .contains("historical implementation bytes")
+    );
+}
+
+#[test]
+fn system_capabilities_distinguish_missing_invalid_and_bounded_unavailable_without_classifying_extensions()
+ {
+    use anchor_graph_host::SystemPlugin;
+    let (_temp, config) = setup();
+    install_system_fixture(&config, SystemPlugin::GraphTasks);
+    write(
+        &config.data,
+        "library/plugins/graph-tasks/plugin.json",
+        r#"{"name":"forged system declaration","system":true,"api_key":"do-not-report-this-value"}"#,
+    );
+    install_system_fixture(&config, SystemPlugin::Wecom);
+    fs::OpenOptions::new()
+        .write(true)
+        .open(
+            config
+                .data
+                .join("library/plugins/wecom/bin/anchor-wecom-tools"),
+        )
+        .unwrap()
+        .set_len(256 * 1024 * 1024 + 1)
+        .unwrap();
+    write(
+        &config.data,
+        "library/plugins/ordinary/plugin.json",
+        r#"{"name":"Ordinary","system":true}"#,
+    );
+    let evidence = Evidence::collect(config.clone()).unwrap();
+    let projection = system_projection(&evidence, &config);
+    let rows = projection["plugins"].as_array().unwrap();
+    for (id, expected) in [
+        ("network", "missing"),
+        ("feishu", "missing"),
+        ("graph-tasks", "invalid"),
+        ("wecom", "unavailable"),
+    ] {
+        let row = rows.iter().find(|row| row["id"] == id).unwrap();
+        assert_eq!(row["installed"]["status"], expected);
+        assert!(row["installed"]["code_digest"].is_null());
+        assert!(row["installed"]["authorization_digest"].is_null());
+        assert!(
+            evidence
+                .issues
+                .iter()
+                .any(|issue| issue["path"] == format!("plugins/plugins/{id}"))
+        );
+    }
+    assert!(!rows.iter().any(|row| row["id"] == "ordinary"));
+    assert!(
+        evidence
+            .entries
+            .contains_key("plugins/plugins/ordinary/plugin.json")
+    );
+    assert!(!projection.to_string().contains("do-not-report-this-value"));
+}
+
+#[cfg(unix)]
+#[test]
+fn system_capability_identity_never_follows_a_native_entrypoint_symlink() {
+    use anchor_graph_host::SystemPlugin;
+    let (temp, config) = setup();
+    install_system_fixture(&config, SystemPlugin::Network);
+    let native = config
+        .data
+        .join("library/plugins/network/bin/anchor-network-tools");
+    fs::remove_file(&native).unwrap();
+    write(temp.path(), "outside-native", "outside-native-body");
+    std::os::unix::fs::symlink(temp.path().join("outside-native"), native).unwrap();
+    let evidence = Evidence::collect(config.clone()).unwrap();
+    let projection = system_projection(&evidence, &config);
+    let row = projection["plugins"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == "network")
+        .unwrap();
+    assert_eq!(row["installed"]["status"], "invalid");
+    assert!(row["installed"]["code_digest"].is_null());
+    assert!(!projection.to_string().contains("outside-native-body"));
 }
 
 #[test]

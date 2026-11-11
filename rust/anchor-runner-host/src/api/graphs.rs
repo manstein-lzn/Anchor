@@ -85,7 +85,7 @@ pub(super) async fn graphs(State(state): State<ApiState>) -> Result<Json<Value>,
                 .channel_status(&channel.owner, &channel.graph)
                 .await
                 .map_err(application_error)?;
-            graph["listener"] = json!({"platform":"wecom","status":status["listener"]});
+            graph["listener"] = json!({"platform":channel.platform,"status":status["listener"]});
         }
     }
     Ok(Json(projection))

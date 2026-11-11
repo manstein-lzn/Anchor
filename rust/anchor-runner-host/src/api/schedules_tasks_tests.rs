@@ -280,6 +280,12 @@ fn schedule_cursor_protects_run_receipts_until_advanced_or_cancelled_even_while_
     let id = created["schedule"]["id"].as_str().unwrap();
     let at = created["schedule"]["next_at"].as_str().unwrap();
     let request_id = occurrence_request_id(id, at);
+    let references = adapter.graph_references().unwrap();
+    assert_eq!(references.len(), 1);
+    assert_eq!(references[0].graph, "task");
+    assert_eq!(references[0].request_id, request_id);
+    assert!(!references[0].once);
+    assert!(references[0].enabled);
     assert!(matches!(
         adapter.check_run_deletion(&request_id),
         Err(ApplicationError::Conflict(_))
@@ -289,6 +295,7 @@ fn schedule_cursor_protects_run_receipts_until_advanced_or_cancelled_even_while_
         store.items[0].enabled = false;
         store.persist().unwrap();
     }
+    assert!(!adapter.graph_references().unwrap()[0].enabled);
     assert!(matches!(
         adapter.check_run_deletion(&request_id),
         Err(ApplicationError::Conflict(_))
@@ -307,4 +314,15 @@ fn schedule_cursor_protects_run_receipts_until_advanced_or_cancelled_even_while_
     ));
     adapter.delete(id).unwrap();
     adapter.check_run_deletion(&next_request).unwrap();
+    assert!(adapter.graph_references().unwrap().is_empty());
+    let once = adapter.create("task", &json!({"type":"once", "at":format_local_datetime(Local::now().naive_local() + Duration::hours(1))}), &json!({})).unwrap();
+    let references = adapter.graph_references().unwrap();
+    assert!(references[0].once);
+    assert_eq!(
+        references[0].request_id,
+        occurrence_request_id(
+            once["schedule"]["id"].as_str().unwrap(),
+            once["schedule"]["next_at"].as_str().unwrap()
+        )
+    );
 }

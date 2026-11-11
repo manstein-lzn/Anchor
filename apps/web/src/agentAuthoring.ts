@@ -10,5 +10,5 @@ export async function defaultModelReference(): Promise<string> {
 }
 
 export function createAgent(model: string): OurAgent {
-  return { model, network: false, instructions: '' };
+  return { model, instructions: '' };
 }

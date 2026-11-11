@@ -20,6 +20,8 @@ use std::{
     sync::Mutex,
 };
 
+mod system_plugins;
+
 pub const DOMAINS: [&str; 6] = [
     "code",
     "graphs",
@@ -38,6 +40,7 @@ pub const LIMITATIONS: &[&str] = &[
     "Declared Plugin mutable entries are pruned before file-type inspection or recursive collection; source Git metadata and explicitly granted previous-report roots have separate scopes.",
     "Source Plugin roots are recognized at the source root, plugins/<id>, and examples/**/plugins/<id>; other source layouts remain ordinary authorized code, not inferred Plugin catalogs.",
     "Run evidence contains mechanical metadata only; no prompts, messages, traces, checkpoints or reasoning.",
+    "System Plugin identities describe the configured current Library, not an attestation of executable provenance or the running Host; historical implementation bytes remain unknown. Native entrypoints are hashed by the shared catalog but never retained as evidence bodies.",
     "Kernel task cursor and recovery details are not collected in Run projections; omitted fields do not mean zero activity.",
     "Optional roots and unavailable timestamps are explicitly reported; missing time is not counted as recent activity.",
 ];
@@ -174,6 +177,7 @@ impl Evidence {
                 result.issue("plugins", &format!("library/{kind} is absent"));
             }
         }
+        result.system_capabilities(&config.data.join("library"))?;
         if let Some(root) = config.rust_state {
             safe_path(&root)?;
             if root.is_dir() {

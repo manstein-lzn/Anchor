@@ -343,6 +343,9 @@ pub(crate) fn resolve(
     let mut by_declaration = Vec::new();
     let mut by_switch = Vec::new();
     for (id, required, default) in declared {
+        if *id == crate::plugin_network::NETWORK_PLUGIN {
+            continue;
+        }
         if !installed.get(*id).copied().unwrap_or(false) {
             reasons.push(format!("Plugin `{id}` is not available in this Library"));
             continue;
@@ -368,7 +371,7 @@ pub(crate) fn resolve(
     // A Plugin the human mounted that the Graph does not declare is still
     // authorized by that click: the Graph's declaration is a default, not a gate.
     for (id, on) in switches {
-        if !*on || mounts.contains_key(id) {
+        if id == crate::plugin_network::NETWORK_PLUGIN || !*on || mounts.contains_key(id) {
             continue;
         }
         if !installed.get(id).copied().unwrap_or(false) {

@@ -34,11 +34,13 @@ fn cli_exposes_the_agreed_inputs_without_a_pin_bypass() {
         "--docmost-tools",
         "--wecom-tools",
         "--wecom-gateway",
+        "--feishu-gateway",
         "--platform",
         "--net-relay",
         "--sandbox-network",
         "--platform-launcher",
         "--network-tools",
+        "--git-tools",
         "--uv",
         "--rustup-init",
         "--pixi",
@@ -50,49 +52,41 @@ fn cli_exposes_the_agreed_inputs_without_a_pin_bypass() {
 }
 
 #[test]
-fn cli_platform_requires_native_bootstrap_and_rejects_graph_mode_inputs() {
-    let result = command()
-        .args([
-            "--platform",
-            "--host",
-            "/unused/host",
-            "--goose",
-            "/unused/goose",
-            "--output",
-            "/unused/platform.tar.gz",
-        ])
-        .output()
-        .unwrap();
-    assert!(String::from_utf8_lossy(&result.stderr).contains("--platform requires --net-relay"));
-    assert_failure(result);
-    let missing_pixi = command()
-        .args([
-            "--platform",
-            "--host",
-            "/unused/host",
-            "--goose",
-            "/unused/goose",
-            "--net-relay",
-            "/unused/relay",
-            "--sandbox-network",
-            "/unused/network",
-            "--platform-launcher",
-            "/unused/launcher",
-            "--network-tools",
-            "/unused/tools",
-            "--web",
-            "/unused/web",
-            "--uv",
-            "/unused/uv",
-            "--rustup-init",
-            "/unused/rustup-init",
-            "--output",
-            "/unused/platform.tar.gz",
-        ])
-        .output()
-        .unwrap();
-    assert!(String::from_utf8_lossy(&missing_pixi.stderr).contains("--platform requires --pixi"));
-    assert_failure(missing_pixi);
+fn cli_platform_requires_the_complete_native_closure_and_rejects_graph_mode_inputs() {
+    let inputs = [
+        ("--host", "/unused/host"),
+        ("--goose", "/unused/goose"),
+        ("--net-relay", "/unused/relay"),
+        ("--sandbox-network", "/unused/network"),
+        ("--platform-launcher", "/unused/launcher"),
+        ("--network-tools", "/unused/network-tools"),
+        ("--git-tools", "/unused/git-tools"),
+        ("--wecom-tools", "/unused/wecom-tools"),
+        ("--feishu-gateway", "/unused/feishu-gateway"),
+        ("--wecom-gateway", "/unused/wecom-gateway"),
+        ("--web", "/unused/web"),
+        ("--uv", "/unused/uv"),
+        ("--rustup-init", "/unused/rustup-init"),
+        ("--pixi", "/unused/pixi"),
+        ("--output", "/unused/platform.tar.gz"),
+    ];
+    for (missing, _) in &inputs[2..inputs.len() - 1] {
+        let mut command = command();
+        command.arg("--platform");
+        for (flag, value) in inputs {
+            if flag != *missing {
+                command.args([flag, value]);
+            }
+        }
+        let output = command.output().unwrap();
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains(&format!("--platform requires {missing}")),
+            "{missing}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_failure(output);
+    }
     assert_failure(
         command()
             .args([
@@ -105,6 +99,23 @@ fn cli_platform_requires_native_bootstrap_and_rejects_graph_mode_inputs() {
                 "/unused/goose",
                 "--output",
                 "/unused/platform.tar.gz",
+            ])
+            .output()
+            .unwrap(),
+    );
+    assert_failure(
+        command()
+            .args([
+                "--bundle",
+                "/unused/bundle",
+                "--host",
+                "/unused/host",
+                "--goose",
+                "/unused/goose",
+                "--feishu-gateway",
+                "/unused/gateway",
+                "--output",
+                "/unused/graph.tar.gz",
             ])
             .output()
             .unwrap(),

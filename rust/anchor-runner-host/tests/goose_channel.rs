@@ -9,7 +9,6 @@ mod goose;
 mod native_gateway;
 
 use anchor_graph_host::FilePluginCatalog;
-use anchor_graph_host::PluginCatalog;
 use anchor_runtime::graph::InvocationKey;
 use goose::{Host, Provider, Step, command, complete, tool_definition, tool_feedback};
 use serde_json::{Value, json};
@@ -183,10 +182,17 @@ impl Drop for Gateway {
 
 /// The bot Graph's assistant is the node under test; its recipients come
 /// from the bot binding, never from the process environment.
-fn bind_bot(host: Host, descriptor: &std::path::Path) -> Host {
-    install_resource_plugin(&host, descriptor);
+fn bind_bot(mut host: Host, descriptor: &std::path::Path) -> Host {
+    install_resource_plugin(&host);
+    host.set_bot_control_descriptor(descriptor);
     host.with_bot("fixture", &[USER])
-        .with_extra_environment([("ANCHOR_ASSISTANT_AUTO_RESUME", "0")])
+        .with_bot_credential("WECOM_BOT_ID", "fixture-bot")
+        .with_bot_credential("WECOM_BOT_SECRET", "fixture-secret")
+        .with_extra_environment([
+            ("ANCHOR_ASSISTANT_AUTO_RESUME", "0"),
+            ("ANCHOR_NODE_TOOL_DISCLOSURE", "0"),
+            ("ANCHOR_WECOM_WS_URL", "ws://127.0.0.1:1"),
+        ])
 }
 
 fn graph() -> Value {
@@ -215,58 +221,28 @@ fn graph() -> Value {
     })
 }
 
-/// A channel Plugin whose gateway process publishes the test's private fake
-/// gateway descriptor as this bot Graph's own control descriptor.
-fn install_resource_plugin(host: &Host, descriptor: &std::path::Path) -> Value {
-    let bundle = host.base.root.path().join("bundle");
+/// Canonical native resources remain intact even when a test substitutes only
+/// the private control socket to exercise ACK loss and authorization behavior.
+fn install_resource_plugin(host: &Host) -> Value {
     let library = host.base.root.path();
-    let plugin = library.join("plugins/wecom");
-    fs::create_dir_all(plugin.join("skills/channel")).unwrap();
-    fs::create_dir_all(plugin.join("bin")).unwrap();
-    fs::write(plugin.join("plugin.json"), json!({
-        "name":"WeCom resource-only fixture",
-        "description":"Host-owned channel tools without an external MCP process or real messages.",
-        "skills":"./skills"
-    }).to_string()).unwrap();
-    fs::write(plugin.join("skills/channel/SKILL.md"),
-        "---\nname: fixture-channel\ndescription: Use host-scoped channel sends.\n---\nUse wecom_send_message for authorized users. Never automatically resend a cancelled or unconfirmed delivery. Inspect external state first.\n").unwrap();
+    let catalog = FilePluginCatalog::new(library);
+    if !library.join("plugins/wecom").exists() {
+        fixture::install_system_plugin(library, anchor_graph_host::SystemPlugin::Wecom);
+        fixture::install_system_plugin(library, anchor_graph_host::SystemPlugin::Network);
+    }
+    let definition = catalog.definition("wecom").unwrap();
+    assert_eq!(
+        definition.system,
+        Some(anchor_graph_host::SystemPlugin::Wecom)
+    );
+    let binding = definition.binding();
     fs::write(
-        plugin.join("channel.json"),
-        json!({"platform":"wecom","transport":"websocket","entrypoint":"bin/gateway","required_environment":[]}).to_string(),
-    )
-    .unwrap();
-    let gateway = plugin.join("bin/gateway");
-    fs::write(
-        &gateway,
-        format!(
-            "#!/bin/sh\nset -eu\ncat '{}' > \"$ANCHOR_CHANNEL_CONTROL_DESCRIPTOR\"\nexec /bin/sleep 3600\n",
-            descriptor.display()
-        ),
-    )
-    .unwrap();
-    fs::set_permissions(&gateway, fs::Permissions::from_mode(0o700)).unwrap();
-    let binding = FilePluginCatalog::new(library)
-        .resolve(&["wecom".into()])
-        .unwrap()
-        .remove(0);
-    let summary = json!({"id":binding.id,"digest":binding.digest,"resources":binding.resources,"mcp_servers":binding.mcp_servers});
-    assert_eq!(summary["mcp_servers"], json!([]));
-    assert!(!plugin.join(".mcp.json").exists());
-    // A persistent assistant reaches the network through the network Plugin.
-    let network = library.join("plugins/network");
-    fs::create_dir_all(&network).unwrap();
-    fs::write(
-        network.join("plugin.json"),
-        r#"{"name":"Fixture task network","network":true}"#,
-    )
-    .unwrap();
-    fs::write(
-        bundle.join("manifest.json"),
+        library.join("bundle/manifest.json"),
         json!({"format":1,"graph":"graph.json","plugins":[{"id":"wecom"},{"id":"network"}]})
             .to_string(),
     )
     .unwrap();
-    summary
+    json!({"id":binding.id,"digest":binding.digest,"resources":binding.resources,"mcp_servers":binding.mcp_servers})
 }
 
 fn event(id: &str) -> Value {
@@ -556,7 +532,7 @@ fn native_goose_identical_channel_messages_have_distinct_native_ids_and_gateway_
     );
     let gateway = Gateway::new(&provider, Delivery::Ack);
     let host = gateway.bind_host(Host::new(&graph()).default_runtime());
-    let plugin = install_resource_plugin(&host, &gateway.descriptor);
+    let plugin = install_resource_plugin(&host);
     let server = host.serve(&provider);
     let run = ask(&server, "goose-channel-identical");
     provider.assert_consumed();
@@ -612,7 +588,7 @@ fn native_goose_identical_channel_messages_have_distinct_native_ids_and_gateway_
         &provider,
         &run,
         json!({
-            "case_source":CASE_SOURCE,"pure_resource_plugin":plugin,
+            "case_source":CASE_SOURCE,"canonical_system_plugin":plugin,
             "identical_bodies_distinct_native_ids":true,"gateway_requests":requests,
             "native_send_requests":sends,"request_id_bound_to_fact_and_goose_ids":true,
             "gateway_acks_observed":2,"real_channel_deliveries":0,"no_harness_attempts":true
@@ -711,7 +687,7 @@ fn native_goose_unknown_channel_result_resumes_same_session_and_inspects_without
     pending.join().unwrap();
     assert_eq!(provider.requests().len(), 1);
     provider.append(vec![
-        complete("reply").files(&["evidence.txt"]),
+        complete("reply"),
         command(&format!("set -eu; curl --silent --show-error --fail --max-time 5 --noproxy '*' '{}/effects' > evidence.txt; cat evidence.txt", business.url)).after("final_result.observed_receipt must match"),
         complete("reply").files(&["evidence.txt"]).after("effect_count"),
     ]);

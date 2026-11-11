@@ -388,6 +388,12 @@ fn goose_pilot_auto_compaction_followup_restart_preserves_native_and_display_his
     assert!(requests[5]["messages"].to_string().contains(CONTINUATION));
     assert!(!goose::is_summary_request(&requests[5]));
     assert!(!requests[5]["messages"].to_string().contains(FIRST_REPLY));
+    for request in requests
+        .iter()
+        .filter(|request| !goose::is_summary_request(request))
+    {
+        goose::assert_role_system_prompt(request, "你是 Anchor Pilot，");
+    }
     let calls = requests.len();
     assert_eq!(submit(&server, "restart", restart_prompt), third);
     assert_eq!(provider.requests().len(), calls);

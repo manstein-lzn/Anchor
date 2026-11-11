@@ -1,0 +1,6 @@
+{
+  "name": "Feishu",
+  "network": false,
+  "description": "Feishu application-bot long connection, private attachments, Markdown replies, live activity, file delivery and original-conversation task notifications through the Host-managed channel.",
+  "skills": "skills/"
+}

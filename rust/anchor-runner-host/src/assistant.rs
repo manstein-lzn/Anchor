@@ -393,6 +393,7 @@ pub(crate) fn handover_workspace_source(
         .ok_or("assistant source binding is missing")?;
     let sessions = sessions(root)?;
     let mut visited = std::collections::BTreeSet::new();
+    let mut inherited_owner = None;
     loop {
         if !visited.insert(previous.run_id.clone()) {
             return Err("assistant workspace handover cycle".into());
@@ -401,7 +402,20 @@ pub(crate) fn handover_workspace_source(
             .initialized_workspace_owner(&previous)
             .map_err(|error| error.to_string())?
         {
-            return Ok(Some(owner));
+            if inherited_owner
+                .as_ref()
+                .is_some_and(|expected| *expected != owner)
+            {
+                return Err("assistant workspace owner differs along the handover chain".into());
+            }
+            if owner.run_id == previous.run_id {
+                if owner.graph_digest != previous.graph_digest || owner.node_id != previous.node_id
+                {
+                    return Err("assistant workspace owner identity changed".into());
+                }
+                return Ok(Some(owner));
+            }
+            inherited_owner = Some(owner);
         }
         let prior = crate::run_metadata::load(root, &previous.run_id)
             .map_err(|error| format!("assistant workspace predecessor unavailable: {error:?}"))?
@@ -411,6 +425,9 @@ pub(crate) fn handover_workspace_source(
             .as_ref()
             .and_then(|conversation| conversation.previous_run.as_deref())
         else {
+            if inherited_owner.is_some() {
+                return Err("assistant workspace owner is outside the handover chain".into());
+            }
             return Ok(None);
         };
         let certified = sessions
@@ -1161,6 +1178,142 @@ mod tests {
                     .unwrap_err()
                     .contains("another instance")
             );
+        }
+    }
+
+    #[test]
+    fn crashed_workspace_handover_requires_stopped_owner_and_resolved_effects() {
+        for state in [
+            "executing",
+            "paused",
+            "budget",
+            "native-pending",
+            "kernel-pending",
+            "foreign-owner",
+            "leased",
+            "stopped",
+            "published",
+        ] {
+            let fixture = fixture();
+            let sessions = sessions(&fixture.root).unwrap();
+            let session = sessions
+                .admit_channel_inbound(OWNER, inbound("one"))
+                .unwrap()
+                .session
+                .id;
+            let old = admit(&fixture, "assistant-old", &session, None);
+            sessions
+                .bind_channel_assistant(
+                    OWNER,
+                    &session,
+                    &old.run_id,
+                    "wait_input",
+                    "assistant",
+                    "reply",
+                )
+                .unwrap();
+            let app = &fixture.application;
+            fixtures::complete(
+                app,
+                &old.run_id,
+                "wait_input",
+                fixtures::completion(json!({})),
+                None,
+            );
+            let workspaces = crate::workspaces::Workspaces::new(fixture.root.join("workspaces"));
+            app.ensure_node_workspace_binding(&old, &workspaces)
+                .unwrap();
+            let scene = workspaces.path(&old).unwrap();
+            std::fs::write(scene.join("draft"), "retained unfinished work").unwrap();
+            let execution = workspaces.acquire(&old).unwrap();
+            let held = match state {
+                "leased" => Some(execution),
+                "published" => {
+                    execution.finish_published().unwrap();
+                    None
+                }
+                _ => {
+                    drop(execution);
+                    None
+                }
+            };
+            if state == "foreign-owner" {
+                let path = scene.parent().unwrap().join("owner.json");
+                let mut owner: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                owner["key"]["run_id"] = json!("another-instance");
+                crate::write_durable(&path, owner.to_string().as_bytes()).unwrap();
+            }
+            match state {
+                "executing" => (),
+                "paused" | "budget" => fixtures::control(app, &old.run_id, "stop", state),
+                "kernel-pending" => {
+                    fixtures::recovery(
+                        app,
+                        &old.run_id,
+                        "assistant",
+                        vec![anchor_runtime::graph::RecoveryAttempt {
+                            attempt_id: 1,
+                            step: 1,
+                            tool: "fixture-effect".into(),
+                            started_at: "unknown".into(),
+                        }],
+                    );
+                }
+                _ => fixtures::control(app, &old.run_id, "stop", "stopped"),
+            }
+            let native = fixture
+                .root
+                .join("goose-acp")
+                .join(format!("{}.json", crate::host_fs::invocation_stem(&old)));
+            if state == "native-pending" {
+                std::fs::create_dir_all(native.parent().unwrap()).unwrap();
+                crate::write_durable(
+                    &native,
+                    json!({
+                        "version":2,"key":old,"binary_sha256":"retained-fixture",
+                        "session_id":"same-native-session","completion":null,"reason":null,
+                        "tool_observation":{"tool":"fixture-effect","arguments":{},"result":null}
+                    })
+                    .to_string()
+                    .as_bytes(),
+                )
+                .unwrap();
+            }
+            let before = std::fs::read(scene.parent().unwrap().join("owner.json")).unwrap();
+            let native_before = std::fs::read(&native).ok();
+            let new = admit(&fixture, "assistant-new", &session, Some(&old.run_id));
+            sessions
+                .handover_channel_assistant(OWNER, &session, &old.run_id, &new.run_id, "new-key")
+                .unwrap();
+            let result = app.ensure_node_workspace_binding(&new, &workspaces);
+            let allowed = matches!(state, "stopped" | "published");
+            assert_eq!(result.is_ok(), allowed, "{state}: {result:?}");
+            assert_eq!(
+                std::fs::read(scene.join("draft")).unwrap(),
+                b"retained unfinished work"
+            );
+            assert_eq!(std::fs::read(&native).ok(), native_before);
+            let after = std::fs::read(scene.parent().unwrap().join("owner.json")).unwrap();
+            if allowed {
+                assert_eq!(workspaces.path(&new).unwrap(), scene);
+                let owner: serde_json::Value = serde_json::from_slice(&after).unwrap();
+                assert_eq!(owner["key"], json!(old));
+                assert_eq!(
+                    owner["release"],
+                    if state == "published" {
+                        "published"
+                    } else {
+                        "interrupted"
+                    }
+                );
+                app.ensure_node_workspace_binding(&new, &workspaces)
+                    .unwrap();
+            }
+            if state != "stopped" {
+                assert_eq!(after, before, "{state}");
+            }
+            drop(held);
         }
     }
 

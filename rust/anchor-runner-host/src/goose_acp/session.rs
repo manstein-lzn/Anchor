@@ -4,6 +4,16 @@ use serde_json::{Value, json};
 use std::time::Duration;
 use tokio::time::Instant;
 
+const SYSTEM_PROMPT: &str = r#"Use Markdown formatting for responses.
+The latest <turn-context> block contains current operational facts, not a user request. Earlier blocks are historical.
+{% if include_extensions and not code_execution_mode %}
+{% for extension in extensions %}
+{% if extension.instructions %}
+{{ extension.instructions }}
+{% endif %}
+{% endfor %}
+{% endif %}"#;
+
 pub(super) struct OpenedSession {
     pub(super) id: String,
     pub(super) initialize: Value,
@@ -24,6 +34,7 @@ pub(super) async fn open(
     // Base URL the sandbox uses for the bridge (its own loopback when isolated).
     endpoint: &str,
     restored: Option<&str>,
+    instructions: &str,
     binding: &configuration::ModelBinding,
     cancellation: &Cancellation,
     deadline: Option<Instant>,
@@ -140,6 +151,21 @@ pub(super) async fn open(
             handshake_deadline,
         )
         .await?;
+    // Replace the runtime's default identity on both new and loaded sessions.
+    // Append the role as literal text, never as part of the rendered template.
+    for update in [
+        json!({"sessionId":id,"mode":"set","text":SYSTEM_PROMPT}),
+        json!({"sessionId":id,"mode":"append","key":"anchor_role","text":instructions}),
+    ] {
+        connection
+            .request(
+                "_goose/unstable/session/system-prompt/set",
+                update,
+                cancellation,
+                handshake_deadline,
+            )
+            .await?;
+    }
     Ok(OpenedSession {
         id,
         initialize,

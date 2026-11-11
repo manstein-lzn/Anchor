@@ -146,6 +146,7 @@ pub struct NodeExecutionRequest {
     /// Provider/model reference selected by the Graph for Agent nodes.
     pub model: Option<String>,
     pub task: String,
+    /// Role guidance, separate from the per-invocation task and input.
     pub instructions: String,
     pub routes: Vec<String>,
     pub input: Value,

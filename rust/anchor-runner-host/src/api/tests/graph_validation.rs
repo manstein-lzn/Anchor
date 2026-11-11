@@ -38,6 +38,10 @@ fn filesystem(root: &Path) -> BTreeMap<PathBuf, Evidence> {
 }
 
 fn install_skill(root: &Path, id: &str) -> PathBuf {
+    if let Some(system) = anchor_graph_host::SystemPlugin::from_id(id) {
+        crate::test_system_plugin(root, system);
+        return root.join("plugins").join(id);
+    }
     let plugin = root.join("plugins").join(id);
     std::fs::create_dir_all(plugin.join("skills/read")).unwrap();
     std::fs::write(
@@ -74,6 +78,7 @@ async fn original_graphs_validate_without_provider_and_without_filesystem_change
         "ANCHOR_RUNNER_ALLOWED_COMMANDS",
     ]);
     let (root, state) = fixture();
+    install_skill(&state.catalog_root, "network");
     let app = router(state.clone());
     let before = filesystem(root.path());
     let cases = [
@@ -121,6 +126,7 @@ async fn business_graph_examples_are_admitted_without_provider_or_side_effects()
     install_skill(&state.catalog_root, "academic-research");
     install_skill(&state.catalog_root, "docmost");
     install_skill(&state.catalog_root, "wecom");
+    install_skill(&state.catalog_root, "network");
     let app = router(state.clone());
     let before = filesystem(root.path());
     let cases = [
@@ -203,6 +209,7 @@ async fn catalog_plugins_are_resolved_and_invalid_resources_are_rejected_readonl
 
     let (root, state) = fixture();
     let plugin = install_skill(&state.catalog_root, "academic-research");
+    install_skill(&state.catalog_root, "network");
     let app = router(state.clone());
     let original: Value = serde_json::from_str(include_str!(
         "../../../../../examples/graphs/plugin-research.json"
@@ -243,6 +250,7 @@ async fn operator_library_has_the_same_precedence_as_graph_save() {
     std::fs::write(catalog_plugin.join("plugin.json"), r#"{"name":12}"#).unwrap();
     let library = root.path().join("operator-library");
     install_skill(&library, "academic-research");
+    install_skill(&library, "network");
     let original = state.application.clone();
     state.application =
         state
@@ -286,6 +294,7 @@ async fn validation_does_not_launch_commands_mcp_or_expand_transport_secrets() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let plugin = install_skill(&state.catalog_root, "demo");
+    install_skill(&state.catalog_root, "network");
     let marker = root.path().join("must-not-be-created");
     let command = format!("touch {}", marker.display());
     std::fs::write(
@@ -464,7 +473,7 @@ async fn http_validate_create_and_update_share_host_model_reference_admission() 
     }
     assert_eq!(
         state.application.read_graph("saved-model").unwrap()["definition"],
-        valid
+        GraphSnapshot::normalize_network_authoring(valid, false)
     );
     assert!(
         !state

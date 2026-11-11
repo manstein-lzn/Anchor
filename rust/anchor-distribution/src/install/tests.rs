@@ -347,3 +347,183 @@ fn installed_runtime_validation_uses_read_only_modes_and_needs_no_config_directo
     assert!(error.contains("format-3"), "{error}");
     make_directories_writable(&request.install_root).unwrap();
 }
+
+#[test]
+fn platform_install_is_repeatable_with_exact_official_plugins_and_no_private_state() {
+    let fixture = Fixture::new();
+    let mut request = request(&fixture);
+    for installation in ["first", "second"] {
+        request.install_root = fixture.root.path().join(installation);
+        let report = admitted_install(&fixture, &request).unwrap();
+        let inventory = validate_runtime(
+            &report.release_root,
+            &fixture.digest,
+            &fixture.digest,
+            &fixture.digest,
+            &fixture.digest,
+            true,
+        )
+        .unwrap();
+        assert_eq!(inventory.plugins.len(), 6);
+        for file in &inventory.files {
+            let path = report.release_root.join(&file.path);
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                file.mode & 0o555
+            );
+            assert_eq!(
+                format!("{:x}", Sha256::digest(fs::read(&path).unwrap())),
+                file.sha256
+            );
+        }
+        for directory in ["config", "data/library", "data/state", "data/catalog"] {
+            assert_eq!(
+                fs::read_dir(request.install_root.join(directory))
+                    .unwrap()
+                    .count(),
+                0,
+                "{directory}"
+            );
+        }
+        make_directories_writable(&request.install_root).unwrap();
+    }
+}
+
+#[test]
+fn installer_rejects_missing_tampered_and_extra_official_plugin_payloads() {
+    let fixture = Fixture::new();
+    fixture.package().unwrap();
+    let extracted = tempfile::tempdir().unwrap();
+    fixture.extract(extracted.path());
+    let root = extracted.path().join("anchor-runtime");
+    let manifest_path = root.join("runtime-manifest.json");
+    let original = fs::read(&manifest_path).unwrap();
+    let inventory: PlatformPackageInventory = serde_json::from_slice(&original).unwrap();
+    let validate = || {
+        validate_runtime(
+            &root,
+            &fixture.digest,
+            &fixture.digest,
+            &fixture.digest,
+            &fixture.digest,
+            false,
+        )
+    };
+    for (path, _) in crate::platform::release_plugin_resources() {
+        let file = root.join(&path);
+        let bytes = fs::read(&file).unwrap();
+        fs::remove_file(&file).unwrap();
+        assert!(validate().is_err(), "missing {path}");
+        fs::write(&file, &bytes).unwrap();
+        let mode = inventory
+            .files
+            .iter()
+            .find(|file| file.path == path)
+            .unwrap()
+            .mode;
+        fs::set_permissions(&file, fs::Permissions::from_mode(mode)).unwrap();
+        let mut changed = bytes.clone();
+        changed[0] ^= 1;
+        fs::write(&file, &changed).unwrap();
+        assert!(validate().is_err(), "tampered {path}");
+        fs::write(&file, &bytes).unwrap();
+        let mut omitted = inventory.clone();
+        omitted.files.retain(|file| file.path != path);
+        fs::write(&manifest_path, serde_json::to_vec(&omitted).unwrap()).unwrap();
+        assert!(validate().is_err(), "unlisted {path}");
+        fs::write(&manifest_path, &original).unwrap();
+    }
+    for id in [
+        "network",
+        "git",
+        "anchor-steward",
+        "graph-tasks",
+        "feishu",
+        "wecom",
+        "unofficial",
+    ] {
+        let path = format!("plugins/{id}/extra.md");
+        let file = root.join(&path);
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(&file, b"unreviewed").unwrap();
+        let mut extra = inventory.clone();
+        extra.files.push(crate::ResourceFile {
+            path,
+            sha256: format!("{:x}", Sha256::digest(b"unreviewed")),
+            size: 10,
+            mode: 0o644,
+        });
+        fs::write(&manifest_path, serde_json::to_vec(&extra).unwrap()).unwrap();
+        assert!(validate().is_err(), "extra {id}");
+        fs::remove_file(&file).unwrap();
+    }
+}
+
+#[test]
+fn official_plugin_bytes_cannot_be_replaced_by_rehashing_the_inventory() {
+    use anchor_graph_host::{FilePluginCatalog, PluginCatalog};
+    let fixture = Fixture::new();
+    fixture.package().unwrap();
+    let extracted = tempfile::tempdir().unwrap();
+    fixture.extract(extracted.path());
+    let root = extracted.path().join("anchor-runtime");
+    let manifest_path = root.join("runtime-manifest.json");
+    let original = fs::read(&manifest_path).unwrap();
+    let inventory: PlatformPackageInventory = serde_json::from_slice(&original).unwrap();
+    for (path, mode) in crate::platform::release_plugin_resources() {
+        if mode != 0o644 {
+            continue;
+        }
+        let file = root.join(&path);
+        let bytes = fs::read(&file).unwrap();
+        let mut changed = bytes.clone();
+        changed.push(b'\n');
+        fs::write(&file, &changed).unwrap();
+        let mut rehashed = inventory.clone();
+        let resource = rehashed
+            .files
+            .iter_mut()
+            .find(|file| file.path == path)
+            .unwrap();
+        resource.size = changed.len() as u64;
+        resource.sha256 = format!("{:x}", Sha256::digest(&changed));
+        let ids = inventory
+            .plugins
+            .iter()
+            .map(|plugin| plugin.id.clone())
+            .collect::<Vec<_>>();
+        match FilePluginCatalog::new(&root).resolve(&ids) {
+            Ok(bindings) => {
+                rehashed.plugins = bindings
+                    .into_iter()
+                    .map(|binding| crate::PluginInventory {
+                        id: binding.id,
+                        digest: binding.digest,
+                        resources: binding.resources,
+                        mcp_servers: binding.mcp_servers,
+                    })
+                    .collect();
+            }
+            Err(error) => {
+                // System identity is already checked by the shared catalog;
+                // ordinary preinstalled resources remain release-validated here.
+                assert!(error.to_string().contains("this Anchor release"), "{error}");
+            }
+        }
+        fs::write(&manifest_path, serde_json::to_vec(&rehashed).unwrap()).unwrap();
+        let error = validate_runtime(
+            &root,
+            &fixture.digest,
+            &fixture.digest,
+            &fixture.digest,
+            &fixture.digest,
+            false,
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("differs from official bytes"),
+            "{path}: {error}"
+        );
+        fs::write(&file, &bytes).unwrap();
+    }
+}

@@ -115,38 +115,92 @@ pub(crate) fn release_root() -> Result<Option<PathBuf>, String> {
         .map_err(|error| error.to_string())
 }
 
-pub(crate) fn install_release_network(library_root: &Path) -> Result<(), String> {
+pub(crate) fn install_release_plugins(library_root: &Path) -> Result<(), String> {
     let Some(release) = release_root()? else {
         return Ok(());
     };
-    let source = release.join("plugins/network");
-    if !source.is_dir() {
-        return Ok(());
+    install_release_plugins_from_release(library_root, &release)
+}
+
+fn install_release_plugins_from_release(library_root: &Path, release: &Path) -> Result<(), String> {
+    let manifest: Value = serde_json::from_slice(
+        &fs::read(release.join("runtime-manifest.json")).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+    if manifest.get("kind").and_then(Value::as_str) == Some("platform") {
+        let plugins = anchor_distribution::platform_plugin_inventory(release)
+            .map_err(|error| error.to_string())?;
+        install_release_plugins_from_inventory(library_root, release, Some(&plugins))
+    } else if release.join("plugins/network").is_dir() {
+        // Standalone Graph delivery retains its existing network-only import.
+        // It uses Library admission, not the full platform inventory validator.
+        install_release_plugins_from_inventory(library_root, release, None)
+    } else {
+        Ok(())
     }
+}
+
+fn install_release_plugins_from_inventory(
+    library_root: &Path,
+    release: &Path,
+    plugins: Option<&[anchor_distribution::PluginInventory]>,
+) -> Result<(), String> {
     let catalog = crate::plugin_library::Catalog::new(library_root);
-    if catalog.definition("network").is_ok() {
-        return Ok(());
-    }
-    if library_root.join("plugins/network").exists() {
-        return Err(
-            "installed network Plugin is invalid; bundled bootstrap will not overwrite it".into(),
-        );
-    }
     let library = crate::plugin_library::PluginLibrary::new(library_root);
-    let review = library
-        .review_directory("network", &source)
-        .map_err(|error| error.to_string())?;
-    if !review.dependencies.is_empty() {
-        return Err("bundled network bootstrap must not need Python dependencies".into());
-    }
-    library
-        .install_directory("network", &source, false)
-        .map_err(|error| error.to_string())?;
-    let plugin = catalog
-        .definition("network")
-        .map_err(|error| error.to_string())?;
-    if !plugin.network {
-        return Err("bundled network bootstrap has invalid network declaration".into());
+    let seeds = match plugins {
+        Some(plugins) => plugins
+            .iter()
+            .map(|plugin| (plugin.id.as_str(), Some(plugin.digest.as_str())))
+            .collect::<Vec<_>>(),
+        None => vec![("network", None)],
+    };
+    for (id, digest) in seeds {
+        if let Ok(installed) = catalog.definition(id) {
+            if installed.system.is_some()
+                && digest.is_some_and(|expected| installed.digest != expected)
+            {
+                return Err(format!(
+                    "installed system Plugin {id} differs from this Anchor release; explicit verified upgrade is required"
+                ));
+            }
+            continue;
+        }
+        // A broken directory or dangling link is still installed user state.
+        match fs::symlink_metadata(library_root.join("plugins").join(id)) {
+            Ok(_) => {
+                return Err(format!(
+                    "installed {id} Plugin is invalid; bundled bootstrap will not overwrite it"
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.to_string()),
+        }
+        let source = release.join("plugins").join(id);
+        let review = library
+            .review_directory(id, &source)
+            .map_err(|error| error.to_string())?;
+        if digest.is_some_and(|digest| review.digest != digest) || !review.dependencies.is_empty() {
+            return Err(format!(
+                "bundled {id} Plugin differs from the admitted release inventory or needs dependencies"
+            ));
+        }
+        if plugins.is_none()
+            && !crate::plugin_library::Catalog::new(release)
+                .definition(id)
+                .map_err(|error| error.to_string())?
+                .network
+        {
+            return Err("bundled network bootstrap has invalid network declaration".into());
+        }
+        if let Some(system) = anchor_graph_host::SystemPlugin::from_id(id) {
+            library
+                .install_system_directory(system, &source, &review.digest)
+                .map_err(|error| error.to_string())?;
+        } else {
+            library
+                .install_directory(id, &source, false)
+                .map_err(|error| error.to_string())?;
+        }
     }
     Ok(())
 }
@@ -880,6 +934,179 @@ async fn run_native(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn release_plugins_fixture() -> (tempfile::TempDir, Vec<anchor_distribution::PluginInventory>) {
+        use anchor_graph_host::PluginCatalog;
+        let root = tempfile::tempdir().unwrap();
+        let release = root.path().join("release");
+        for (id, name, network) in [
+            ("network", "Network", true),
+            ("git", "Git", false),
+            ("anchor-steward", "Anchor Dev", false),
+            ("graph-tasks", "Graph Tasks", false),
+        ] {
+            if let Some(system) = anchor_graph_host::SystemPlugin::from_id(id) {
+                crate::test_system_plugin(&release, system);
+                continue;
+            }
+            let directory = release.join("plugins").join(id);
+            fs::create_dir_all(&directory).unwrap();
+            fs::write(
+                directory.join("plugin.json"),
+                serde_json::to_vec(&json!({"name": name, "network": network})).unwrap(),
+            )
+            .unwrap();
+            fs::write(directory.join("instructions.md"), format!("# {name}\n")).unwrap();
+        }
+        let inventory = anchor_graph_host::FilePluginCatalog::new(&release)
+            .resolve(&[
+                "network".into(),
+                "git".into(),
+                "anchor-steward".into(),
+                "graph-tasks".into(),
+            ])
+            .unwrap()
+            .into_iter()
+            .map(|binding| anchor_distribution::PluginInventory {
+                id: binding.id,
+                digest: binding.digest,
+                resources: binding.resources,
+                mcp_servers: binding.mcp_servers,
+            })
+            .collect();
+        (root, inventory)
+    }
+
+    #[test]
+    fn release_plugins_seed_missing_once_and_preserve_user_code_and_authorization() {
+        let (root, plugins) = release_plugins_fixture();
+        let release = root.path().join("release");
+        let library = root.path().join("library");
+        install_release_plugins_from_inventory(&library, &release, Some(&plugins)).unwrap();
+        let catalog = crate::plugin_library::Catalog::new(&library);
+        for plugin in &plugins {
+            assert_eq!(
+                catalog.definition(&plugin.id).unwrap().digest,
+                plugin.digest
+            );
+        }
+        let git_manifest = library.join("plugins/git/plugin.json");
+        let user_manifest = br#"{"name":"My Git","network":false}"#;
+        fs::write(&git_manifest, user_manifest).unwrap();
+        let dev_instructions = library.join("plugins/anchor-steward/instructions.md");
+        fs::write(&dev_instructions, "user development guidance\n").unwrap();
+        let git_authorization = catalog.definition("git").unwrap().authorization_digest;
+        let dev_authorization = catalog
+            .definition("anchor-steward")
+            .unwrap()
+            .authorization_digest;
+        // A subsequent startup only needs the source for a genuinely missing Plugin.
+        fs::remove_dir_all(release.join("plugins/git")).unwrap();
+        fs::remove_dir_all(release.join("plugins/anchor-steward")).unwrap();
+        fs::remove_dir_all(library.join("plugins/network")).unwrap();
+        install_release_plugins_from_inventory(&library, &release, Some(&plugins)).unwrap();
+        assert_eq!(fs::read(&git_manifest).unwrap(), user_manifest);
+        assert_eq!(
+            fs::read_to_string(dev_instructions).unwrap(),
+            "user development guidance\n"
+        );
+        assert_eq!(
+            catalog.definition("git").unwrap().authorization_digest,
+            git_authorization
+        );
+        assert_eq!(
+            catalog
+                .definition("anchor-steward")
+                .unwrap()
+                .authorization_digest,
+            dev_authorization
+        );
+        assert!(catalog.definition("network").unwrap().network);
+        // Importing a Plugin does not create a Session mount or credential/configuration fact.
+        assert_eq!(fs::read_dir(&library).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn standalone_release_seeds_only_present_network_and_never_replaces_it() {
+        let (root, _) = release_plugins_fixture();
+        let release = root.path().join("release");
+        let library = root.path().join("library");
+        fs::write(
+            release.join("runtime-manifest.json"),
+            br#"{"format":1,"bundle":{"plugins":[{"id":"git"},{"id":"anchor-steward"}]}}"#,
+        )
+        .unwrap();
+        let network = release.join("plugins/network");
+        let hidden = release.join("network-hidden");
+        fs::rename(&network, &hidden).unwrap();
+        install_release_plugins_from_release(&library, &release).unwrap();
+        assert!(!library.exists());
+        fs::rename(&hidden, &network).unwrap();
+        install_release_plugins_from_release(&library, &release).unwrap();
+        assert!(!library.join("plugins/git").exists());
+        assert!(!library.join("plugins/anchor-steward").exists());
+        let installed = library.join("plugins/network/plugin.json");
+        fs::write(&installed, br#"{"name":"My Network","network":true}"#).unwrap();
+        fs::write(network.join("plugin.json"), b"invalid source").unwrap();
+        assert!(install_release_plugins_from_release(&library, &release).is_err());
+        assert_eq!(
+            fs::read(&installed).unwrap(),
+            br#"{"name":"My Network","network":true}"#
+        );
+        fs::write(&installed, b"invalid installed").unwrap();
+        assert!(install_release_plugins_from_release(&library, &release).is_err());
+        assert_eq!(fs::read(&installed).unwrap(), b"invalid installed");
+    }
+
+    #[test]
+    fn release_plugins_seed_refuses_existing_bad_entries_and_changed_sources() {
+        for scenario in ["invalid", "file", "dangling-link", "source-drift"] {
+            let (root, plugins) = release_plugins_fixture();
+            let release = root.path().join("release");
+            let library = root.path().join("library");
+            let plugin = &plugins[0];
+            let destination = library.join("plugins").join(&plugin.id);
+            fs::create_dir_all(destination.parent().unwrap()).unwrap();
+            match scenario {
+                "invalid" => {
+                    fs::create_dir(&destination).unwrap();
+                    fs::write(destination.join("plugin.json"), b"invalid").unwrap();
+                }
+                "file" => fs::write(&destination, b"existing").unwrap(),
+                "dangling-link" => {
+                    std::os::unix::fs::symlink(root.path().join("absent"), &destination).unwrap()
+                }
+                "source-drift" => fs::write(
+                    release
+                        .join("plugins")
+                        .join(&plugin.id)
+                        .join("instructions.md"),
+                    b"changed",
+                )
+                .unwrap(),
+                _ => unreachable!(),
+            }
+            assert!(
+                install_release_plugins_from_inventory(&library, &release, Some(&plugins)).is_err(),
+                "{scenario}"
+            );
+            match scenario {
+                "invalid" => assert_eq!(
+                    fs::read(destination.join("plugin.json")).unwrap(),
+                    b"invalid"
+                ),
+                "file" => assert_eq!(fs::read(&destination).unwrap(), b"existing"),
+                "dangling-link" => assert!(
+                    fs::symlink_metadata(&destination)
+                        .unwrap()
+                        .file_type()
+                        .is_symlink()
+                ),
+                "source-drift" => assert!(!destination.exists()),
+                _ => unreachable!(),
+            }
+        }
+    }
     fn fixture() -> (tempfile::TempDir, RuntimeConfiguration) {
         let root = tempfile::tempdir().unwrap();
         let release = root.path().join("release");

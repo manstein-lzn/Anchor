@@ -6,8 +6,8 @@ use anchor_kernel::{Outcome, Phase};
 use anchor_runtime::Cancellation;
 use anchor_runtime::graph::{
     ArtifactPort, CallFileSelection, CallIdentity, CommitRef, GraphCallOutcome, GraphCallPort,
-    GraphError, GraphRunRecord, InvocationKey, NodeExecutionCapabilities, NodeExecutionOutcome,
-    NodeExecutionPort, NodeExecutionRequest,
+    GraphError, GraphRunRecord, GraphSnapshot, InvocationKey, NetworkMode,
+    NodeExecutionCapabilities, NodeExecutionOutcome, NodeExecutionPort, NodeExecutionRequest,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -74,24 +74,25 @@ impl<'a, R, A, N> InProcessGraphHost<'a, R, A, N> {
     }
 
     /// Configure the filesystem (or other) catalog used to pin Plugin identities.
-    /// The current bindings of the Plugins one bundle references.
-    ///
-    /// A bundle carries ids only, so this is the one resolution path: the Plugin
-    /// catalog the host configured (the Library's `plugins/<id>`).
+    /// Resolve executable resources through the configured Library catalog;
+    /// network policy references alone do not require an installed provider.
     fn resolve_bundle_plugins(
         &self,
-        ids: &[String],
+        snapshot: &GraphSnapshot,
     ) -> Result<Vec<anchor_runtime::graph::PluginBinding>, GraphError> {
-        if ids.is_empty() {
-            return Ok(Vec::new());
+        if let Some(catalog) = self.plugin_catalog {
+            return catalog.resolve_snapshot(snapshot);
         }
-        let catalog = self.plugin_catalog.ok_or_else(|| {
-            GraphError::Unsupported(
+        if snapshot.nodes.iter().any(|node| {
+            snapshot.node_network_mode(node) == NetworkMode::Enabled
+                || node.plugins.iter().any(|plugin| plugin.id != "network")
+        }) {
+            return Err(GraphError::Unsupported(
                 "a called Graph references Plugins, and no Plugin catalog is configured for child Runs"
                     .to_owned(),
-            )
-        })?;
-        catalog.resolve(ids)
+            ));
+        }
+        Ok(Vec::new())
     }
 
     pub fn with_plugin_catalog(mut self, catalog: &'a dyn PluginCatalog) -> Self {
@@ -246,19 +247,22 @@ impl<R: CallRunAccess, A: ArtifactPort, N: NodeExecutionPort> GraphCallPort
                             ))
                         })?;
                     let snapshot = bundle.snapshot;
-                    let _plugin_lease = if bundle.plugins.is_empty() {
-                        None
-                    } else {
+                    let _plugin_lease = if snapshot.nodes.iter().any(|node| {
+                        !node.plugins.is_empty()
+                            || snapshot.node_network_mode(node) == NetworkMode::Enabled
+                    }) {
                         Some(
                             self.catalog
                                 .lock_plugin_references(cancellation.clone())
                                 .await?,
                         )
+                    } else {
+                        None
                     };
                     // A bundle references Plugins by id; the current code and view
                     // live in the Library, which is the only place this layer
                     // resolves them from.
-                    let referenced = self.resolve_bundle_plugins(&bundle.plugins)?;
+                    let referenced = self.resolve_bundle_plugins(&snapshot)?;
                     // Stage the read-only `/in/call` bundle before the child
                     // becomes durable. A crash can therefore never leave a
                     // Ready child (including a startup-recovered detach child)

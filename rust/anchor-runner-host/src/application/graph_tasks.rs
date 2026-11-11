@@ -19,6 +19,7 @@ mod admission_tests;
 mod assignment;
 #[cfg(test)]
 pub(crate) mod assignment_tests;
+mod catalog;
 #[cfg(test)]
 mod tests;
 
@@ -307,22 +308,15 @@ impl RunApplication {
             .nodes
             .iter()
             .flat_map(|node| &node.plugins)
+            .filter(|plugin| plugin.id != crate::plugin_network::NETWORK_PLUGIN)
             .map(|plugin| plugin.id.clone())
             .collect::<BTreeSet<_>>();
         let catalog = crate::plugin_library::Catalog::new(self.library_root());
         use anchor_graph_host::PluginCatalog;
         let mut bindings = catalog.resolve(&ids.iter().cloned().collect::<Vec<_>>())?;
-        // Dependency-derived networking is also a grant, even without agent.network.
-        let network = snapshot.agents.values().any(|agent| agent.network)
-            || snapshot
-                .ops
-                .values()
-                .any(|op| op.get("network").and_then(Value::as_bool) == Some(true))
-            || ids.iter().any(|id| {
-                catalog.metadata(id).is_ok_and(|metadata| {
-                    crate::plugin_network::metadata_requires_network(&metadata)
-                })
-            });
+        let network =
+            crate::plugin_network::snapshot_requires_network(self.library_root(), snapshot)
+                .map_err(invalid)?;
         if network && ids.insert(crate::plugin_network::NETWORK_PLUGIN.into()) {
             bindings.extend(catalog.resolve(&[crate::plugin_network::NETWORK_PLUGIN.into()])?);
         }
@@ -443,10 +437,9 @@ impl RunApplication {
         origin: &TaskOrigin,
         graph: &str,
     ) -> Result<TaskGraphOwnership, ApplicationError> {
-        let owned: TaskGraphOwnership =
-            crate::assistant::read_json(&task_graph_ownership_path(self, graph)?)
-                .map_err(invalid)?
-                .ok_or_else(|| invalid("this Graph is not owned by the task scope"))?;
+        let owned = self
+            .task_graph_ownership_record(graph)?
+            .ok_or_else(|| invalid("this Graph is not owned by the task scope"))?;
         let source = crate::run_metadata::graph_identity(
             &self.graph_path_checked(&origin.graph).map_err(invalid)?,
         )?;
@@ -454,6 +447,13 @@ impl RunApplication {
             return Err(invalid("this Graph belongs to another task scope"));
         }
         Ok(owned)
+    }
+
+    fn task_graph_ownership_record(
+        &self,
+        graph: &str,
+    ) -> Result<Option<TaskGraphOwnership>, ApplicationError> {
+        crate::assistant::read_json(&task_graph_ownership_path(self, graph)?).map_err(invalid)
     }
 
     fn check_generated_task(
@@ -474,7 +474,12 @@ impl RunApplication {
                 "command operations exceed the new-Graph capability limit",
             ));
         }
-        for plugin in snapshot.nodes.iter().flat_map(|node| &node.plugins) {
+        for plugin in snapshot
+            .nodes
+            .iter()
+            .flat_map(|node| &node.plugins)
+            .filter(|plugin| plugin.id != crate::plugin_network::NETWORK_PLUGIN)
+        {
             if !origin.policy.plugins.contains(&plugin.id) || !current.plugins.contains(&plugin.id)
             {
                 return Err(invalid(format!(
@@ -483,21 +488,9 @@ impl RunApplication {
                 )));
             }
         }
-        let catalog = crate::plugin_library::Catalog::new(self.library_root());
-        let network = snapshot.agents.values().any(|agent| agent.network)
-            || snapshot
-                .ops
-                .values()
-                .any(|op| op.get("network").and_then(Value::as_bool) == Some(true))
-            || snapshot
-                .nodes
-                .iter()
-                .flat_map(|node| &node.plugins)
-                .any(|plugin| {
-                    catalog.metadata(&plugin.id).is_ok_and(|metadata| {
-                        crate::plugin_network::metadata_requires_network(&metadata)
-                    })
-                });
+        let network =
+            crate::plugin_network::snapshot_requires_network(self.library_root(), snapshot)
+                .map_err(invalid)?;
         if network && !(origin.policy.network && current.network) {
             return Err(invalid("networking exceeds the new-Graph capability limit"));
         }
@@ -547,6 +540,7 @@ impl RunApplication {
         let path = self.graph_path_checked(&name).map_err(invalid)?;
         let _lease = self.graph_admission_lease(&path)?;
         let request = super::run_access::admission_request(request_id, &name, &definition, &None);
+        let definition = GraphSnapshot::normalize_network_authoring(definition, false);
         if path.exists() {
             let owned = self.task_graph_ownership(origin, &name)?;
             if owned.request != request {
@@ -578,6 +572,7 @@ impl RunApplication {
         graph: &str,
         definition: Value,
     ) -> Result<Value, ApplicationError> {
+        let definition = GraphSnapshot::normalize_network_authoring(definition, false);
         let _catalog = self.graph_catalog_mutation_guard().await;
         self.task_graph_ownership(origin, graph)?;
         let path = self.graph_path_checked(graph).map_err(invalid)?;

@@ -321,12 +321,16 @@ async fn create_graph_publishes_initial_authoring_definition_and_plugins() {
     let body = json!({"name":"initial","definition":definition}).to_string();
     let (status, created) = call(app.clone(), "POST", "/graphs", Some(&body)).await;
     assert_eq!(status, StatusCode::CREATED, "{created}");
+    let definition = GraphSnapshot::normalize_network_authoring(definition, false);
     assert_eq!(created, json!({"graph":"initial","definition":definition}));
     let (status, fetched) = call(app.clone(), "GET", "/graphs/initial", None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(fetched["graph"], "initial");
     assert_eq!(fetched["definition"], definition);
-    assert_eq!(fetched["node_plugins"]["work"], json!(["demo"]));
+    assert_eq!(
+        fetched["node_plugins"]["work"],
+        json!(["demo", {"id":"network","required":false,"network":"auto"}])
+    );
     let bundle = FileGraphBundleLoader::new(state.catalog_root.join("initial"))
         .with_library_root(state.application.library_root())
         .load()

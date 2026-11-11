@@ -546,13 +546,11 @@ impl PluginMountSource for PolicySource {
 async fn graph_network_and_session_denial_are_frozen_instead_of_stale_request_network() {
     let (_root, mut resolver, mut request) = assistant_fixture(&["network", "online"], &[]);
     let library = resolver.plugin_library_root().unwrap().to_path_buf();
-    for id in ["network", "online"] {
-        std::fs::write(
-            library.join("plugins").join(id).join("plugin.json"),
-            json!({"name":id,"network":true}).to_string(),
-        )
-        .unwrap();
-    }
+    std::fs::write(
+        library.join("plugins/online/plugin.json"),
+        json!({"name":"online","network":true}).to_string(),
+    )
+    .unwrap();
     let switches = std::sync::Arc::new(PolicySource {
         network: AtomicBool::new(true),
         switches: BTreeMap::new(),

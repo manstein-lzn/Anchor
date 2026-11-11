@@ -31,8 +31,10 @@ Artifact、节点历史、工作区、Run / Session / Turn 事实
 | [anchor-scholarly](../rust/anchor-scholarly) | 官方学术搜索、论文读取与 MCP |
 | [anchor-docmost-tools](../rust/anchor-docmost-tools)、[anchor-wecom-tools](../rust/anchor-wecom-tools)、[anchor-git-tools](../rust/anchor-git-tools) | 原生业务工具；Git Plugin 调用本机 Git，与节点工具共用工作区 |
 | [anchor-wecom-gateway](../rust/anchor-wecom-gateway) | 企业微信 WebSocket、ACK、去重与私有控制 socket |
+| [anchor-feishu-gateway](../rust/anchor-feishu-gateway) | 飞书企业自建应用长连接、私聊附件、Markdown／进度卡片与文件发送 |
+| [anchor-channel-transport](../rust/anchor-channel-transport) | 两种渠道共用的事件、私有状态/租约、投递账本、回调、状态控制、进度读取及外发文件校验；由原 WeCom 实现迁出 |
 | [anchor-rsi](../rust/anchor-rsi) | RSI/周报采集、证据、评审门禁与安全产物装配；复用 Host 的路由与 Runner |
-| [anchor-distribution](../rust/anchor-distribution) | 受审闭包的 source-free 归档，不执行输入程序 |
+| [anchor-distribution](../rust/anchor-distribution) | 受审闭包的 source-free 归档与原生包，不执行输入程序 |
 | [anchor-devtools](../rust/anchor-devtools) | 确定性回归、候选构建、部署预检与切换盘点 |
 | [apps/web](../apps/web) | Graph 画布、Run 时间线、节点对话、Session 和产物投影 |
 
@@ -54,6 +56,8 @@ Kernel 的未知效果 attempts 与决定从已接受 Kernel history 投影；�
 
 Goose 拥有 Agent loop、Provider、原生会话与 compaction；Anchor 拥有 Graph/Run、宿主授权、Artifact 和平台 Session/Turn。工具记录、API 与 UI 都围绕相同身份，UI 缓存不能成为第二份运行事实。
 
+渠道工作进度由现有 Goose ACP 工具调用及其稀疏状态更新投影成固定短句，不发送内部思考、原始标题、参数或结果，也不保存第二套执行事实。企微流式消息与飞书卡片共用 Host 投影及订阅读取器，进度展示失败不改变 Run 事实。飞书最终回复先停止并串行交接进度写入，在已知且安全的原卡上展示完整 Markdown 答案，不撤回或重复发送；没有可用原卡或最终更新被明确拒绝时，按[渠道契约](feishu-assistant.md#进度格式与文件)降级为单独回复，未知效果不自动补发。最终更新与单独回复共用原内容的投递身份和持久 claim，进度创建本身不代表答案投递。文件接收复用附件冻结／只读挂载，外发复用 Host 文件发送与任务选中产物规则，具体大小、权限及部分确认边界见[飞书契约](feishu-assistant.md#进度格式与文件)。
+
 AgentNode 默认按 Run、Graph 身份和 node 建立稳定原生 scope，同一节点后续 invocation 通过 ACP `session/load` 延续；不同 Run/node 默认隔离。受信任的消息 Session 绑定才能授权跨 Run 延续，Workspace 共享不隐含共享对话。同 invocation 恢复保留冻结绑定与未知效果核查，新 invocation 读取当前模型设置。Run 内原生 scope 在释放 Workspace 和执行事实前清理，使用中的 scope 受同一原生租约保护。旧的 invocation 独立会话不自动拼接或迁移；上下文连续性与 Provider 缓存命中分别验证。
 
 渠道的逻辑账号由配置入口统一生成，兼容别名由 SessionStore 按 owner/source 持久登记；Session 接纳、消息去重与恢复使用同一解析结果。配置表示改变不另建逻辑会话，已有重复历史不自动合并。Host 在渠道配置加载后恢复助手，只有当前部署匹配且未被规范身份会话取代的绑定具备恢复资格；交接的新来源必须仍为 current。详细兼容和暂停边界见[渠道契约](wecom-assistant.md#渠道身份与历史兼容)。
@@ -61,6 +65,8 @@ AgentNode 默认按 Run、Graph 身份和 node 建立稳定原生 scope，同一
 Web 管理与 Pilot 管理调用相同 Host 用例。插件密钥归 owner-bound 凭据存储，安装/卸载沿 Library 预检与发布；模型配置归 `ModelConfiguration`，运行环境归 `RuntimeConfiguration`，渠道由原 `ChannelManagementPort`/supervisor 托管，计划仍归 Scheduler。设置页只管理模型与环境；图编排的「消息触发」配置渠道绑定与启停，运行看板的「消息会话」管理对话实例，凭据复用插件库的同一组件与存储。Web 不保存第二份配置，也不保留顶层渠道页。
 
 HTTP、Session、Pilot 的插件基础目录读取归 `InstalledPluginCatalog`；清单有效性、依赖就绪、上下文授权、连接验证和业务成功是不同事实。目录列表保持轻量，不生成执行绑定；已开启的缺失或损坏 Plugin 仍可撤销，不要求先恢复健康。Graph 的发现、bundle 读取与校验复用 Graph 应用用例，适配器只处理身份、格式和私有诊断脱敏。Web 复用完整设置、下载与行菜单交互，草稿、持久策略和历史绑定不混为一体。字段、条件删除及共享组件契约见 [API](rust-frontend-api-contract.md#sessionlibrary-与渠道)。
+
+`network`、`graph-tasks`、`feishu`、`wecom` 属于会改变 Anchor Host 行为的系统插件。共享 catalog 按编译内置的身份与资源清单验证，不接受清单自行声明系统身份；Git、Anchor Dev 等附带资源仍是普通插件。Library 的普通安装、替换和卸载入口保护系统 ID，包括损坏目录；首次安装和显式系统升级共用原发布锁及资源摘要，不增加插件注册库或第二套授权事实。系统身份不代表当前节点已启用或已授权；Host 联动保留在应用/运行时，Kernel 不依赖渠道或插件业务。维护路径见 [Plugin](plugins.md#系统插件与普通插件)。
 
 Host 托管的模型配置将公开字段、用于恢复的旧绑定和按槽/服务索引的密钥分别表示。执行直接读取保存的槽配置，旧托管字段仅用于未保存 default 时的兼容默认与原显式别名；模型服务字段和凭据不读取环境变量，Web 与执行共用唯一私有存储。新 Turn/invocation 通过 Goose 原生接口选择最新模型并延续历史，当前执行及同 invocation 恢复保留冻结绑定。运行环境初始化和插件安装的进度只描述管理操作，不成为 Agent loop 或通用恢复引擎。接口见 [Web 管理契约](rust-frontend-api-contract.md#web-管理入口)。
 
@@ -116,7 +122,9 @@ Host 的 [Run 访问边界](run-access-facade.md) 对业务内部类型引用实
 
 作者 JSON 定义 `agents`、`ops`、`graphs`、`nodes`、`edges` 和 `layout`。`GraphSnapshot::from_authoring` 编译为执行 IR，保留作者定义供 Web 编辑；内联模块在执行前展开。bundle loader 绑定清单内资源并校验摘要。资源安装与 Graph 保存都经过 canonical Library 校验。
 
-AgentNode 引用角色与节点级 `plugins`，角色只复用模型、指令和权限。Op 定义在 `run`、`call`、`fanout`、`join`、`host` 中恰好选择一种；Op 不继承 Plugin。`Op.host` 通过 `NodeExecutionPort` 交付通用 operation JSON；Kernel 不依赖 Session 存储或 WeCom 协议，具体能力由 Host 实现和授权，手动/standalone 入口默认没有 Session host operation 授权。反馈回访从同 Run 最近已提交产物延续，新 invocation 保留自己的执行现场；普通跨 Run 不自动继承。
+AgentNode 引用角色与节点级 `plugins`，角色复用模型、指令和读写声明；任务联网策略归节点的 `network` 插件引用，不再由共享角色的复选框管理。Op 定义在 `run`、`call`、`fanout`、`join`、`host` 中恰好选择一种；仅 `Op.run` 可使用联网策略引用，不挂载普通 Plugin，其他 Op 不接受 Plugin。`Op.host` 通过 `NodeExecutionPort` 交付通用 operation JSON；Kernel 不依赖 Session 存储或 WeCom 协议，具体能力由 Host 实现和授权，手动/standalone 入口默认没有 Session host operation 授权。反馈回访从同 Run 最近已提交产物延续，新 invocation 保留自己的执行现场；普通跨 Run 不自动继承。
+
+编辑和保存用统一作者投影将旧角色/命令的联网字段转为节点的 `auto/enabled/denied`，旧定义未声明联网也保留禁止边界。新定义缺省为 `auto`；打开旧资产的投影不写回文件，不改既有 Run 快照、摘要或冻结 Turn。资源 manifest 精确列出源定义的引用，实际执行绑定则由共享 snapshot resolver 派生：离线策略标记不要求安装 provider，`enabled` 或 `auto` 的实际联网需求才解析受审的 `network` 资源。两者不互相冒充，细节见 [作者契约](rust-graph-authoring-contract.md#节点联网策略)。
 
 | Runtime 边界 | 职责 |
 | --- | --- |
@@ -193,6 +201,8 @@ AgentNode 与 Pilot 共用 ACP/MCP 接入。当前执行及同 invocation 恢复
 
 固定版 Goose 的 `enabledExtensions` 在新建时追加到默认扩展，加载时保留已存扩展，不能单独用作授权集合。共享 ACP 接入在新建/加载后、首次模型提示前，通过官方 `session/extensions/list`、`remove`、`add` 接口校准为 Anchor MCP 与部署显式允许的原生扩展；默认只保留提供边界指令的 `tom`，不启用 `developer` 的独立文件和 shell 工具。撤销旧扩展保留原生 Session 与历史，不直接修改其数据库；校准失败拒绝本次执行。
 
+AgentNode 的系统角色来自 Graph 的 `instructions`，Pilot 使用自己的产品角色。共享会话入口在新建及加载后，通过原生 `session/system-prompt/set` 替换默认基础提示，再以固定键追加原样角色文本；不注入框架默认身份或项目介绍。基础模板只保留回复格式、当前 `turn-context` 的含义及已授权扩展指导。角色中的模板符号按字面保留，不再将角色重复拼入任务或每轮用户消息；压缩后仍由同一原生系统提示承载。设置失败不发送模型请求，不改写既有对话或已安装的用户 Graph。
+
 Pilot 与 AgentNode 共用从当前授权和 Library 派生的 Plugin/工具目录，通过有界摘要和固定发现入口按需读取。完整分页、读取、调用和兼容开关见 [Plugin 披露契约](plugins.md#发现与读取)。目录是可重建投影，Goose 原生系统提示和 compaction 承载上下文；MCP 仍按准备流程连接，按需连接尚未实施。
 
 AgentNode 通过授权完成工具提交 `summary` 和可选 `route`；普通回答不能完成节点。Goose 为同一次模型响应的全部工具生成可信批次身份，Host 接受最近授权非完成批次中任一实际返回的回执，不依赖工具完成顺序；发现与只读工具也产生回执。完成工具必须独立调用，旧批次、其他 invocation 与猜测回执均不接受。恢复后需重新核查现场，不能拿旧回执直接完成；诊断要求复制实际返回值，可通过授权只读工具核查，不应重复业务操作。
@@ -233,11 +243,13 @@ Pilot 接纳保存网络和工具授权快照，执行启动时读取一次 `Run
 
 网页挂载在 Pilot gate → catalog guard → Library lease 顺序内复核 Session、保存挂载并登记接续。API 保留 `plugin`/`plugins`，增加 `effect`（`next_turn`/`after_current_turn`/`unchanged`，活动源附 `source_turn`）及既有 continuation 投影。仅当前登记执行且仍为最新 Running Pilot Turn 的真实变化请求 `continuation:<source>`；多次切换合并为一次，当前 Turn 保持旧冻结快照，空闲切换不调用模型。仅正常结算后自动接纳；失败、中断、停止、归档或新用户 Turn 取代来源都不唤醒旧任务。自动接续沿原生历史只处理最新用户请求中未完成且已授权的部分，能力变化不构成新的业务任务，也不要求重做已完成结果。Web 跟随宿主来源与后继，重开时处理列表/详情之间已接纳的交接，等待接续仍可停止或发送新消息。
 
-网页网络许可按钮只保存 `network_allowed`，影响后续 Turn；该 API 不返回挂载 `effect`，也不登记自动接续。对话内工具发起的联网授权仍按其既有 continuation 路径处理。
+网页联网插件使用单一三态策略入口，在原 Session 行内一次性保存 `plugin_mounts.network` 与 `network_allowed`，只影响后续 Turn；该 API 不登记自动接续。旧 `allowed` 请求仅兼容已有上界设置，不主动开启已关闭的挂载，安装客户端迁移后删除兼容入口。Graph/渠道会话不能经此三态入口改写节点策略，须由操作员保存 Graph。对话内工具发起的联网授权仍按其既有 continuation 路径处理。
 
 停止与结算/接纳共用 Pilot gate：执行已返回成功但尚未结算时，取消仍结算为 Stopped；来源已经 Completed 时保留该历史，通过幂等 `pilot.continuation.cancelled` 事件取消该来源的后续推进，即使尚无 requested 事件也适用。取消在重启后仍有效；OAuth 回调在交换 token 前和持 gate 发布授权前都核查该事实，迟到回调不能交换/保存 token 或恢复任务。该事件是 Session 控制事实，不是新审批流程或 Agent 恢复日志。
 
 允许联网的沙箱通过独立网络 namespace 与 `anchor-sandbox-network`/slirp4netns 出网，禁用 host-loopback；失败不会退回共享宿主网络。relay 和网络进程在取消、父进程退出及启动失败时收束。Host 的管理 API 没有登录、仅允许 loopback 监听，非 loopback 直接拒绝启动；模型控制通道与任务授权分开。
+
+飞书/企微长连接、收发消息和任务结果投递属于 Host 控制通道；关闭任务联网不关闭这些渠道能力。系统渠道插件的可选 MCP 业务接口仍受节点联网策略约束，禁止时不连接、不暴露；普通联网插件工具同样不装配。渠道能回复不证明任务可以联网，任务离线也不应使已授权的 Host 文件发送失效。
 
 `credential_request` 只发起 owner/Session/Turn、已安装 Plugin、server 和声明字段绑定的专用输入。Web 的 password 控件直接提交 Host，值不进入聊天、工具结果或 Goose 历史；Host 私有 600/700 文件保存凭据，下一 Turn 向该 owner 的正式 MCP 配置注入。取消、删除、过期、版本或授权变化拒绝旧输入，返回 `no-store`/`no-referrer`。`oauth_authorize`/`oauth_status` 复用 Library OAuth transaction 和原 token 流程；Pilot 来源另持关联事实，停止或删除后迟到 callback 不交换 token，也不降级成无来源旧流程。
 
@@ -269,7 +281,7 @@ Run 详情和 Web 节点投影将 `RunResult.interruption` 显示为“已中断
 
 首次 wait binding 查询最近 9 条以检测截断，实际只授权最近 8 条并保存 `pending_truncated`；当 `output.interrupted_messages_truncated=true`，Agent 必须如实说明更早中断输入未自动纳入/未完整阅读，不能声称信息全保留。该标记无需额外数据库 schema 迁移，旧 binding facts 缺省为 `false`。
 
-停止/恢复保留 current binding；停止请求须等到执行者退出和真实 `Stopped`，本进程内的新消息或连接恢复不自动恢复已停止实例。Host 重启时空闲在输入等待的实例在原 Run 上继续，其余按 [助手恢复契约](wecom-assistant.md#停止恢复与退役) 自动交接，均不重放未知效果。`GET /channel-sessions/{session}/assistant` 读取 current 实例；`POST /channel-sessions/{session}/assistant/retire` 接收 `{ "run_id": "…" }`，仅在 Run 已真实 `Stopped` 或终态且非 active、Session 无 Running Turn 和 pending/sending/unknown delivery 时允许退役。retire 保留历史但解除 current，禁止该 Run resume/重新绑定；下一条可信消息才惰性创建新实例。Graph 结构更新不热改旧 Run 快照，合法新版经退役后的新实例接纳；仅助手工作节点的插件选择及对应 Agent 的 network 可经操作员保存，在下一 Turn 应用。仍有 current 助手时，结构变化或 Agent 自行修改其在线权限均拒绝保存。
+停止/恢复保留 current binding；停止请求须等到执行者退出和真实 `Stopped`，本进程内的新消息或连接恢复不自动恢复已停止实例。Host 重启时空闲在输入等待的实例在原 Run 上继续，其余按 [助手恢复契约](wecom-assistant.md#停止恢复与退役) 自动交接，均不重放未知效果。`GET /channel-sessions/{session}/assistant` 读取 current 实例；`POST /channel-sessions/{session}/assistant/retire` 接收 `{ "run_id": "…" }`，仅在 Run 已真实 `Stopped` 或终态且非 active、Session 无 Running Turn 和 pending/sending/unknown delivery 时允许退役。retire 保留历史但解除 current，禁止该 Run resume/重新绑定；下一条可信消息才惰性创建新实例。Graph 结构更新不热改旧 Run 快照，合法新版经退役后的新实例接纳；仅助手工作节点的插件选择及联网策略可经操作员保存，在下一 Turn 应用。仍有 current 助手时，结构变化或 Agent 自行修改其在线权限均拒绝保存。
 
 Graph cascade 删除先保护 active/未收束执行、共享原生历史与未结算投递，再退役目标助手；清理只按 owned Run/Turn/invocation binding 删除输入、回复、yield 和 Run 自有工作区，并释放 Artifact 引用。它不是全 workspace-root 扫除或生产旧数据迁移，部分删除重试保留可核查的所有权事实。
 
@@ -283,6 +295,8 @@ Kernel 的 `NodeExecutionPort::invocation_plugin_authority` 默认关闭，普�
 
 正常插件切换保留 Run、Goose 原生会话和稳定 Workspace。新 Run 接续时，Host 沿可信交接链核对同一 owner、同一 Session、同一 Graph 来源（`bundle_source`）与同名 work 节点，再绑定原 Workspace 资源；指令或结构改变不切断现场，不新增资源键或 Graph 字段。连续重启跳过未准备现场的中间实例；work 节点改名、换来源、换会话或 owner 则开新现场。每个交接 binding 仍核对所属实例的元数据、证书、退役事实与各自 digest，不要求旧 wait/reply 名称等于新版本，身份事实不一致仍报错。执行租约与持久的发布/中断事实继续保护单写者，已交付 Artifact 不变；Plugin 权限继承仍要求只有插件/联网差异，当前 Turn 冻结规则不变。
 
+崩溃遗留的 Workspace 占用仅在上述交接核实后补记中断：实际 owner 必须属于可信前驱链，前驱及其等待子执行均已收束、没有 Kernel 或原生工具待核查结果，并且能够取得独占执行租约。只更新确切旧 invocation 的中断释放，已有发布事实保持不变；不补造工具结果、业务成功或 Artifact，普通资源转授仍须先有持久释放事实。
+
 ### 按需 Graph 任务与结果输入
 
 官方 `graph-tasks` 是 Skill 加 Host 工具适配，不是新 Runner 或第二个任务平台。AgentNode 的 `PluginRef.graph_tasks` 明确选择可发现的 Graph，并分别授权创建 Graph、候选 Plugin 开发，以及新建 Graph 的 Plugin/网络/命令上限；默认全部关闭。Web 编辑器使用既有插件设置组件保存该节点策略。操作员保存源 Graph 时批准目标及其静态调用闭包的确切摘要和 Plugin 权限；普通 Run 在接纳时、助手在领取 Turn 时冻结这些授权。运行中和恢复中的同一 invocation 不因后来保存而获得新增权限。后续派发取原授权与当前授权的交集，目标改版须重新批准并显式续建任务，不静默执行新版本。
@@ -292,6 +306,8 @@ Kernel 的 `NodeExecutionPort::invocation_plugin_authority` 默认关闭，普�
 Agent 委派来源由可信 invocation 派生，模型不能提供 owner、Session、授权或请求身份。操作员也可通过计划归属接口，将尚未到期的普通计划显式交给已有私聊助手：核对原机器人、收件人、Session、源节点及目标确切版本，保留原计划 ID、规则和游标。来源明确区分 `agent_delegation` 的真实 invocation 与 `operator_assignment` 的计划、节点和授权请求说明，不伪造用户 Turn，也不补签已经运行的历史。两种来源共用原授权与当前授权交集及原 Session 作用域。
 
 `RunMetadata` format 2 的 `request`、`task`、`task_grants` 缺省为空；Run 状态仍仅归 Kernel。Agent 创建的 Graph 是正常 catalog 资产，Host 分配 ID；`state/graph-task-ownership/` 仅保存来源、作用域和创建请求，不复制 Graph 定义，也不在可分发 bundle 内夹带宿主私有记录。Agent 只能更新自己作用域创建的资产，不能修改共享资产、源助手或为子任务继续授予委派权。候选准备与测试复用已有 `CandidateTestContext`、依赖准备和沙箱，不安装、不挂载，也不提供宿主凭据；正式交付仍走现有操作员流程。
+
+Graph 列表的 `completed_task:true` 是现有事实的只读投影，不是新增归档状态：仅标记有有效任务归属、所有保留计划均为已停用 once、每个计划当前请求均对应真实成功 Run、全部同图 Run 已成功终结且结果及子任务已收束的 Graph；当前定义须与这些 Run 一致。手工 Graph、渠道绑定、明确选为任务目标或仍被定义/未完成 Run 调用的 Graph 不标记；事实不可读或引用扫描不完整时继续显示在主列表。Web 将标记项默认收进可展开的“已完成的一次性任务”，搜索仍覆盖它们；再次安排、执行或编辑后由新事实自动回到主列表。定义、计划、Run、产物和回执不因收纳删除，既有读取、授权、删除及回收保护不变，不以命名前缀推断一次性用途。
 
 有 Session 的任务在终态且执行者退出后，由 Host 对账实际 Run/Artifact，将稳定结果 ID 写入原 Session 的 `task.result.queued` 事件。等待人或未知外部效果、成品读取或入队受阻、计划派发失败，也通过同一队列记录 `blocked` 状态；正常等待子图不当作失败。派发尚未返回确认的 Run 时，`source_run` 为空，不伪造身份，也不否认可能已保存的接纳事实；同一待接纳时点只通知一次，原游标继续保留，重试先读已有接纳记录，后续完成另有结果事件。Session 拥有待处理、领取和完成事实，不复制 Run 状态，不另存回调状态。`wait_input` 将用户输入与任务结果区分为两类：待处理用户优先，结果按入队顺序逐项领取；结果不会打断用户，用户可以打断结果处理，未处理结果仍可再领。沿用现有用户输入替换策略，尚无可配置的全序优先级调度器。私聊仍按原 Session 隔离，同一 bot 的不同成员不共享任务队列。
 
@@ -305,7 +321,9 @@ Agent 委派来源由可信 invocation 派生，模型不能提供 owner、Sessi
 
 ### 渠道适配与监听
 
-`call.session` 继承的是绑定会话与显式输入映射，持有稳定来源身份。未知发送效果由 Agent 核查，ACK 与效果事实分别保存。一张常驻助手 Graph 对应一个机器人（[设计卡 004](design-cards/004-multi-bot-channels.md)）：每个启用的绑定由 Host 监管一个原生 WeCom Gateway，状态目录 `channels/graphs/<Graph 摘要>/` 与回调路由 `/channels/<graph>/…` 按 Graph 分开，回调密钥只能访问本 Graph 的路由。Gateway 接受私聊与群内 @ 回调，群按 chatid 共用进度与最新输入判断，允许名单和回执仍核对真实 actor；绑定设为 `private_only` 时，名单内成员的群消息只得到固定提示，不准入、不创建 Session/Turn/Run。私聊 image/file/voice 及群 mixed 中的媒体由网关下载短时 URL、做 AES-256-CBC 解密，再交给 Host 冻结 SHA-256/大小/MIME 并只读挂载 `/in/channel`；临时 URL 与 AES key 不进入 Host 或 ledger。出站图片使用 Host 校验的 `channel-replies` 项，由网关三阶段上传换 `media_id` 后按原回调回复，发送前 durable claim、未确认结果不重发。不新增主动群发；任意文件出站、video 与真实公网投递/文档理解仍按具体场景验收。
+Host 按 Graph 所挂渠道 Plugin 的声明选择 `wecom` 或 `feishu`，共用同一管理、Session/Turn、常驻 Graph、Goose ACP 与 Supervisor，不增加平台专用 Runner。绑定 format 2 对 WeCom 仍省略 `platform`，飞书显式保存 `platform:"feishu"`；凭据、逻辑账户、入站身份和投递 key/kind 按来源隔离。回调不能替 Graph 改选来源。飞书接收获准成员的文本、文件和图片私聊，接收和回复名单都校验，必须设置 `private_only:true`；长连接可靠记录及快速确认与异步下载、模型处理分离。最终回复经 HTTPS API 确认，Markdown 卡片只是原回复的传输展示。任务结果轮可显式调用 `feishu_send_message({content})` 通知原私聊，不改变 `session.reply` 的结果轮抑制规则。`feishu_send_file` 复用文件发送授权与 Gateway 账本，用户轮可发送工作文件或授权输入，任务轮仅发送精确选中的不可变产物；模型不能选择机器人或收件人，文件和介绍分别确认。渠道工具按平台发现与执行隔离，飞书不暴露企微媒体工具。群聊、音视频、内联图片外发和任意收件人发送未开放；真实 Provider/飞书已验范围及未覆盖业务见[验收台账](pilot-development-plan.md)。配置、只读附件、进度卡及额外应用权限见[飞书助手](feishu-assistant.md)。
+
+`call.session` 继承的是绑定会话与显式输入映射，持有稳定来源身份。未知发送效果由 Agent 核查，ACK 与效果事实分别保存。一张常驻助手 Graph 对应一个机器人（[设计卡 004](design-cards/004-multi-bot-channels.md)）：每个启用的绑定由 Host 监管一个对应平台的原生 Gateway，状态目录 `channels/graphs/<Graph 摘要>/` 与回调路由 `/channels/<graph>/…` 按 Graph 分开，回调密钥只能访问本 Graph 的路由。企微 Gateway 接受私聊与群内 @ 回调，群按 chatid 共用进度与最新输入判断，允许名单和回执仍核对真实 actor；绑定设为 `private_only` 时，名单内成员的群消息只得到固定提示，不准入、不创建 Session/Turn/Run。私聊 image/file/voice 及群 mixed 中的媒体由网关下载短时 URL、做 AES-256-CBC 解密，再交给 Host 冻结 SHA-256/大小/MIME 并只读挂载 `/in/channel`；临时 URL 与 AES key 不进入 Host 或 ledger。出站图片使用 Host 校验的 `channel-replies` 项，由网关三阶段上传换 `media_id` 后按原回调回复，发送前 durable claim、未确认结果不重发。不新增主动群发；任意文件出站、video 与真实公网投递/文档理解仍按具体场景验收。
 
 Gateway 常驻连接与 Graph Run 的执行状态分别投影。Supervisor 及其子进程 IO 固定归 Host 启动时的执行器所有，Pilot Turn 的临时执行器退出不会取消监听；进程退出沿既有监督循环重启，网络断线由 Gateway 重连。`GET /graphs`、渠道 API 和 Pilot 使用同一状态观察：优先读取鉴权的私有 NDJSON `status`，进程已启动而控制接口尚未发布时显示 `connecting`，退出后的重试显示 `reconnecting`；守护任务已结束或已发布的控制接口失联显示 `unavailable`，不会冒充在线或返回控制凭据。已认证、认证中、停止仍分别投影。`GET /graphs` 只为有效启用的机器人返回 `listener`。`active_nodes` 来自仍有宿主执行者的 Running Run 游标及正在执行的并行分支，不把遗留游标当成当前工作。
 
@@ -329,7 +347,7 @@ WebUI 不需要登录；JSON 请求与 Pilot SSE 各自读取本机 Host，取�
 
 source-free builder 校验固定 Goose、目标 ELF、Graph 闭包、资源摘要与非密钥内容。它支持编译 Web 资产，拒绝脚本/source map、符号/硬链接和未声明资源；打包不会安装依赖或转换用户状态。使用命令见 [发行 builder](../rust/anchor-distribution/README.md)。
 
-完整平台发行使用 format 3、kind `platform`，没有占位业务 Graph，包含 Host、固定 Goose、relay、网络 sidecar、Web、原生 network Plugin、uv/rustup-init/pixi 和 launcher；独立 Graph 格式仍为 format 1。pixi 由经过摘要验证的 release inventory 直接只读挂载并进入 Graph 节点 Agent 命令与 Pilot 的 PATH，不依赖手写工具注册、不需安装或运行时下载；缓存位于可写 Workspace HOME，Plugin MCP 的 PATH 不变。安装器验证摘要和闭包，从私有快照解包，原子发布且拒绝覆盖现有安装。模型输入作为有限字段的数据解析，不执行 shell；launcher 清空继承环境并使用独立 HOME 和数据根，不借开发机解释器或缓存。当前平台要求 Linux x86_64、Bubblewrap、slirp4netns、git/sh/cc、CA 及对应动态库；Python、Rust 和包在安装后按需准备。脚本入口见 [平台交付](../rust/anchor-distribution/README.md#fresh-platform-installation)，验收与部署状态分别以台账为准。
+完整平台发行使用 format 3、kind `platform`，没有占位业务 Graph，包含 Host、固定 Goose、relay、网络 sidecar、Web、四个系统 Plugin（network、Graph Tasks、Feishu、WeCom）、两个普通 Plugin（Git、Anchor Dev）、uv/rustup-init/pixi 和 launcher；独立 Graph 格式仍为 format 1。首次启动从已验证的发行 inventory 将缺少的官方 Plugin 安装到 Library，系统项使用专用接纳路径，已有内容不覆盖，无效已安装目录报错；安装不自动挂载业务 Plugin、启用渠道或授予 Graph 任务策略。pixi 由经过摘要验证的 release inventory 直接只读挂载并进入 Graph 节点 Agent 命令与 Pilot 的 PATH，不依赖手写工具注册、不需安装或运行时下载；缓存位于可写 Workspace HOME，Plugin MCP 的 PATH 不变。安装器验证摘要和闭包，从私有快照解包，原子发布且拒绝覆盖现有安装。模型输入作为有限字段的数据解析，不执行 shell；launcher 清空继承环境并使用独立 HOME 和数据根，不借开发机解释器或缓存。当前平台要求 Linux x86_64、Bubblewrap、slirp4netns、git/sh/cc、CA 及对应动态库；Python、Rust 和包在安装后按需准备。脚本入口见 [平台交付](../rust/anchor-distribution/README.md#fresh-platform-installation)，验收与部署状态分别以台账为准。
 
 常规 [小型 Graph 回归](runtime-contract-tests.md) 执行实际 Host、Runner、Goose、授权 MCP 与 Sandbox，只替换模型传输。检查最终结果、逐节点历史、workspace、Artifact、恢复与幂等；[候选回归](runtime-contract-tests.md#release-与-source-free-候选) 使用 release Host/Web/Goose 的隔离发行包。
 

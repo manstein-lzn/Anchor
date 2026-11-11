@@ -460,7 +460,7 @@ async fn graph_authoring_tools_share_a_usable_example_on_an_empty_catalog() {
             .execute("graph_read", json!({"graph":"hello"}))
             .await
             .unwrap()["definition"],
-        updated
+        GraphSnapshot::normalize_network_authoring(updated, false)
     );
     assert!(tools.application.records().unwrap().is_empty());
 }
@@ -602,7 +602,7 @@ async fn graph_mutations_require_an_owned_running_turn_and_do_not_start_runs() {
             .execute("graph_read", json!({"graph":"new"}))
             .await
             .unwrap()["definition"],
-        updated
+        GraphSnapshot::normalize_network_authoring(updated.clone(), false)
     );
     assert!(tools.application.records().unwrap().is_empty());
     assert!(

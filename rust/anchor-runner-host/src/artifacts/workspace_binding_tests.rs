@@ -59,6 +59,10 @@ fn execution_and_unpublished_candidates_block_transfer_after_restart() {
         workspaces.bind_resource(&target, &resource),
         Err(GraphError::RunConflict)
     ));
+    assert!(matches!(
+        workspaces.interrupt_stopped_owner(&first),
+        Err(GraphError::RunConflict)
+    ));
     drop(execution); // A dropped process lock does not release the candidate.
     let restarted = Workspaces::new(root.path().into());
     assert!(matches!(
@@ -67,6 +71,10 @@ fn execution_and_unpublished_candidates_block_transfer_after_restart() {
     ));
     assert!(matches!(
         restarted.bind_resource(&target, &resource),
+        Err(GraphError::RunConflict)
+    ));
+    assert!(matches!(
+        restarted.interrupt_stopped_owner(&key("first", 2)),
         Err(GraphError::RunConflict)
     ));
     let resumed = restarted.acquire(&first).unwrap();

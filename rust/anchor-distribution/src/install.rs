@@ -2,7 +2,9 @@
 //! management store; release files and mutable platform facts are disjoint.
 use crate::{
     GOOSE_SHA256, PIXI_SHA256, PackageError, PlatformPackageInventory, RUSTUP_INIT_SHA256, Result,
-    UV_SHA256, archive, filesystem::absolute, filesystem::open_path, validation,
+    UV_SHA256, archive,
+    filesystem::{absolute, make_directories_writable, open_path},
+    platform, validation,
 };
 use flate2::read::GzDecoder;
 use rustix::fs::{RenameFlags, renameat_with};
@@ -240,6 +242,12 @@ fn unpack_platform(file: File, release: &Path) -> Result<()> {
 
 /// Check an installed platform against the same fixed runtime contract used at installation.
 pub fn validate_platform_runtime(runtime: &Path) -> Result<()> {
+    platform_plugin_inventory(runtime).map(|_| ())
+}
+
+/// Official Plugins from a release admitted by the installation validator.
+/// Startup imports only these entries, never an arbitrary plugins directory.
+pub fn platform_plugin_inventory(runtime: &Path) -> Result<Vec<crate::PluginInventory>> {
     open_path(runtime)?;
     validate_runtime(
         runtime,
@@ -249,6 +257,7 @@ pub fn validate_platform_runtime(runtime: &Path) -> Result<()> {
         PIXI_SHA256,
         true,
     )
+    .map(|inventory| inventory.plugins)
 }
 
 fn validate_runtime(
@@ -258,7 +267,7 @@ fn validate_runtime(
     rustup_sha256: &str,
     pixi_sha256: &str,
     read_only: bool,
-) -> Result<()> {
+) -> Result<PlatformPackageInventory> {
     // Installed releases use this same validator. Reject links and special entries before reading files.
     let mut actual_files = BTreeSet::new();
     let mut actual_directories = BTreeSet::new();
@@ -336,12 +345,17 @@ fn validate_runtime(
                 | "bin/uv"
                 | "bin/rustup-init"
                 | "bin/pixi"
-        ) && !resource.path.starts_with("plugins/network/")
+        ) && platform::release_plugin_resource_mode(&resource.path).is_none()
             && !resource.path.starts_with("web/")
         {
             return Err(invalid(
                 "platform inventory contains a non-platform resource",
             ));
+        }
+        if platform::release_plugin_resource_mode(&resource.path)
+            .is_some_and(|mode| resource.mode != mode)
+        {
+            return Err(invalid("platform Plugin resource has an unexpected mode"));
         }
         if !declared.insert(resource.path.clone()) || !matches!(resource.mode, 0o644 | 0o755) {
             return Err(invalid("invalid or duplicate platform inventory file"));
@@ -420,7 +434,6 @@ fn validate_runtime(
         "bin/anchor-net-relay",
         "bin/anchor-sandbox-network",
         "bin/anchor-platform",
-        "plugins/network/bin/anchor-network-tools",
     ] {
         if !manifest
             .files
@@ -444,27 +457,24 @@ fn validate_runtime(
             "platform executable inventory has unexpected entries",
         ));
     }
-    use anchor_graph_host::{FilePluginCatalog, PluginCatalog};
-    let bindings = FilePluginCatalog::new(root)
-        .resolve(&["network".into()])
-        .map_err(|_| invalid("platform network Plugin failed shared admission"))?;
-    let network = &bindings[0];
-    if manifest.plugins.len() != 1
-        || manifest.plugins[0].id != "network"
-        || manifest.plugins[0].digest != network.digest
-        || manifest.plugins[0].resources != network.resources
-        || manifest.plugins[0].mcp_servers != network.mcp_servers
-    {
-        return Err(invalid(
-            "platform network Plugin differs from admitted inventory",
-        ));
+    for (path, mode) in platform::release_plugin_resources() {
+        if !manifest
+            .files
+            .iter()
+            .any(|file| file.path == path && file.mode == mode)
+        {
+            return Err(invalid("required official Plugin resource is absent"));
+        }
+    }
+    if manifest.plugins != platform::release_plugin_inventory(root)? {
+        return Err(invalid("platform Plugins differ from admitted inventory"));
     }
     if actual_files != declared || actual_directories != required_directories {
         return Err(invalid(
             "platform archive contains undeclared files or directories",
         ));
     }
-    Ok(())
+    Ok(manifest)
 }
 
 fn enumerate(
@@ -507,16 +517,6 @@ fn make_release_readonly(path: &Path) -> Result<()> {
         )?;
     }
     File::open(path)?.sync_all()?;
-    Ok(())
-}
-
-fn make_directories_writable(path: &Path) -> Result<()> {
-    if fs::symlink_metadata(path)?.is_dir() {
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
-        for entry in fs::read_dir(path)? {
-            make_directories_writable(&entry?.path())?;
-        }
-    }
     Ok(())
 }
 

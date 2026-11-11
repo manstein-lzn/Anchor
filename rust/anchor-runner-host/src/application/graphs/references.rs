@@ -149,7 +149,11 @@ impl RunApplication {
         std::collections::BTreeMap<String, anchor_runtime::graph::PluginBinding>,
         ApplicationError,
     > {
-        crate::application::graphs::referenced_plugin_bindings(self.library_root(), &bundle.plugins)
-            .map_err(ApplicationError::from)
+        use anchor_graph_host::PluginCatalog;
+        Ok(crate::plugin_library::Catalog::new(self.library_root())
+            .resolve_snapshot(&bundle.snapshot)?
+            .into_iter()
+            .map(|binding| (binding.id.clone(), binding))
+            .collect())
     }
 }

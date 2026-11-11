@@ -63,6 +63,7 @@ impl RunApplication {
         definition: Value,
         origin: UpdateOrigin,
     ) -> Result<Value, GraphManagementError> {
+        let definition = GraphSnapshot::normalize_network_authoring(definition, false);
         let _catalog_guard = self.graph_catalog_mutation_guard().await;
         let path = self.graph_path_checked(name)?;
         let _graph_lease = self.graph_admission_lease(&path)?;

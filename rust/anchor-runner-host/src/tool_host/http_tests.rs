@@ -160,6 +160,7 @@ fn config(endpoint: &str, _names: &[&str]) -> McpToolConfig {
                 plugin_directory: PathBuf::from("/tmp/fixture-plugin"),
                 declaration: json!({"type":"http", "url":endpoint, "headers":{}}),
                 config: json!({"type":"http", "url":endpoint, "headers":{}}),
+                channel_task_network: false,
             },
         )]),
     }
@@ -305,6 +306,7 @@ async fn each_server_gets_its_own_prefix_and_duplicate_bindings_connect_once() {
                 plugin_directory: PathBuf::from("/tmp/fixture-plugin"),
                 declaration: json!({"type":"http", "url":second.endpoint, "headers":{}}),
                 config: json!({"type":"http", "url":second.endpoint, "headers":{}}),
+                channel_task_network: false,
             },
         );
         let mut first_binding = binding("fixture");
@@ -352,6 +354,7 @@ async fn stdio_requires_the_sandbox_launcher() {
             plugin_directory: PathBuf::from("/tmp/fixture-plugin"),
             declaration: json!({"type":"stdio", "command":"fixture-mcp", "args":[], "env":{}}),
             config: json!({"type":"stdio", "command":"fixture-mcp", "args":[], "env":{}}),
+            channel_task_network: false,
         },
     );
     let error = config.bind(&[binding("stdio")], false).await.err().unwrap();

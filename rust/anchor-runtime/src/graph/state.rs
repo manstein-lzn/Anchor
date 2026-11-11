@@ -387,8 +387,22 @@ impl GraphRunRecord {
             .snapshot
             .nodes
             .iter()
-            .flat_map(|node| node.plugins.iter().map(|reference| reference.id.clone()))
+            .flat_map(|node| {
+                node.plugins
+                    .iter()
+                    .filter(|reference| reference.id != "network")
+                    .map(|reference| reference.id.clone())
+            })
             .collect::<BTreeSet<_>>();
+        let mut expected = expected;
+        if record
+            .snapshot
+            .nodes
+            .iter()
+            .any(|node| record.snapshot.node_network_mode(node) == NetworkMode::Enabled)
+        {
+            expected.insert("network".to_owned());
+        }
         for binding in plugins {
             if binding.digest.is_empty() || record.plugin_bindings.contains_key(&binding.id) {
                 return Err(GraphError::InvalidSnapshot(
@@ -397,9 +411,23 @@ impl GraphRunRecord {
             }
             record.plugin_bindings.insert(binding.id.clone(), binding);
         }
-        if !record.plugin_bindings.keys().eq(expected.iter()) {
+        let network_possible = record.snapshot.nodes.iter().any(|node| {
+            record.snapshot.node_network_mode(node) != NetworkMode::Denied
+                || node
+                    .plugins
+                    .iter()
+                    .any(|reference| reference.id == "network" && reference.network.is_none())
+        });
+        if expected
+            .iter()
+            .any(|id| !record.plugin_bindings.contains_key(id))
+            || record
+                .plugin_bindings
+                .keys()
+                .any(|id| !(expected.contains(id) || id == "network" && network_possible))
+        {
             return Err(GraphError::InvalidSnapshot(
-                "Plugin admission must bind exactly the Graph's referenced Plugins".into(),
+                "Plugin admission must bind the Graph's executable Plugins and only its authorized network provider".into(),
             ));
         }
         record.plugin_bindings_initialized = true;

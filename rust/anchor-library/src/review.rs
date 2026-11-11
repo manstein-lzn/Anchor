@@ -73,6 +73,8 @@ pub struct ChannelReview {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PluginReview {
     pub id: String,
+    /// Derived from the verified catalog identity, never from a manifest flag.
+    pub kind: &'static str,
     /// The digest the installed Plugin will carry.
     pub digest: String,
     pub name: String,
@@ -240,6 +242,11 @@ pub(crate) fn summarize(
 
     Ok(PluginReview {
         id: id.to_owned(),
+        kind: if definition.system.is_some() {
+            "system"
+        } else {
+            "extension"
+        },
         digest: definition.digest.clone(),
         name: definition.name.clone(),
         description: definition.description.clone(),

@@ -59,6 +59,9 @@ impl PilotTools {
                 if plan.plugin != plugin {
                     return Err(rejected("this Graph's bot uses another Plugin"));
                 }
+                if server != format!("channel_{}", plan.platform.as_str()) {
+                    return Err(rejected("this Graph's bot uses another channel platform"));
+                }
                 format!("{server}@{graph}")
             }
             (true, _) => return Err(rejected("a channel credential requires the bot's graph")),

@@ -42,7 +42,7 @@ export function GraphTaskPolicyEditor({ value, onChange, graphs, catalog, catalo
       <p className="plugin-panel-note">既有工作流按保存时批准的版本执行。以下限制用于新建工作流，不安装插件、不授予宿主凭据，也不修改当前节点配置。</p>
       {(['network', 'commands'] as const).map(field => <label key={field} className="graph-task-option">
         <input type="checkbox" checked={value[field] ?? false} onChange={event => onChange({ ...value, [field]: event.target.checked })} />
-        <span>{field === 'network' ? '允许联网' : '允许执行沙箱命令'}</span>
+        <span>{field === 'network' ? '允许新建的子任务联网（不修改当前助手）' : '允许执行沙箱命令'}</span>
       </label>)}
     </fieldset>
     <h4>新建 Graph 可用插件</h4>

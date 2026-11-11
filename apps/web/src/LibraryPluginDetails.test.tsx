@@ -79,6 +79,30 @@ describe('plugin details ownership and request safety', () => {
     expect(container.textContent).not.toContain('Library 正在发布');
   });
 
+  it.each([
+    { kind: 'system', canUninstall: false, canReplace: false, updateSource: 'anchor-release' },
+    { kind: 'extension', canUninstall: true, canReplace: false, updateSource: 'extension' },
+    { kind: 'extension', canUninstall: false, canReplace: true, updateSource: 'extension' },
+  ] as const)('follows backend lifecycle capabilities for $kind ($canUninstall/$canReplace)', async facts => {
+    fetchMock.mockResolvedValueOnce(response(200, { ...base, ...facts }));
+    await act(async () => root.render(<LibraryPluginDetails plugin={base} status="已安装" management close={vi.fn()} />));
+    const buttons = [...container.querySelectorAll('button')];
+    expect(buttons.some(button => button.textContent === '更新插件')).toBe(facts.canReplace);
+    expect(buttons.some(button => button.textContent === '查看卸载影响')).toBe(facts.canUninstall);
+    if (facts.kind === 'system') {
+      expect(container.textContent).toContain('系统插件');
+      expect(container.textContent).toContain('随 Anchor 升级更新');
+    }
+    expect(fetchMock.mock.calls.every(call => call[1].method === 'GET')).toBe(true);
+  });
+
+  it('does not offer lifecycle writes when the current read fails and capabilities are unknown', async () => {
+    fetchMock.mockResolvedValueOnce(response(503, { error: 'Library 正在发布' }));
+    await act(async () => root.render(<LibraryPluginDetails plugin={base} status="已安装" management close={vi.fn()} />));
+    expect(container.textContent).not.toContain('更新插件');
+    expect(container.textContent).not.toContain('查看卸载影响');
+  });
+
   it('ignores a detail response that arrives after another plugin is opened', async () => {
     let complete: (value: Response) => void = () => undefined;
     fetchMock.mockImplementationOnce(() => new Promise<Response>(resolve => { complete = resolve; }));

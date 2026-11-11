@@ -37,6 +37,7 @@ describe('Graph task authorization editor', () => {
     await act(async () => (container.querySelector('[aria-label="授权新建 Graph 使用 Search"]') as HTMLButtonElement).click());
     expect(policy.plugins).toEqual(['search']);
     expect(container.textContent).toContain('新建 Graph 能力上限');
+    expect(container.textContent).toContain('允许新建的子任务联网（不修改当前助手）');
   });
 
   it('keeps unavailable choices visible for revocation and respects disabled editing', async () => {

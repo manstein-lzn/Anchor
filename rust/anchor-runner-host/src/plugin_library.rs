@@ -3,7 +3,7 @@
 //! order; read guards and publication leases cover only their original scopes.
 use anchor_graph_host::{
     ChannelDefinition, FilePluginCatalog, McpServerDefinition, PluginCatalog, PluginDefinition,
-    PluginMetadata,
+    PluginMetadata, SystemPlugin,
 };
 use anchor_library::{
     DevelopmentError, DevelopmentScope, InstallError, InstallLease, InstallOutcome, Library,
@@ -32,6 +32,12 @@ impl Catalog {
     }
     pub(crate) fn metadata(&self, id: &str) -> Result<PluginMetadata, GraphError> {
         self.inner.metadata(id)
+    }
+    pub(crate) fn snapshot_requires_network(
+        &self,
+        snapshot: &anchor_runtime::graph::GraphSnapshot,
+    ) -> Result<bool, GraphError> {
+        self.inner.snapshot_requires_network(snapshot)
     }
     pub(crate) fn channels(&self, id: &str) -> Result<Vec<ChannelDefinition>, GraphError> {
         self.inner.channels(id)
@@ -100,6 +106,12 @@ impl PluginCatalog for Catalog {
     fn resolve(&self, ids: &[String]) -> Result<Vec<PluginBinding>, GraphError> {
         self.inner.resolve(ids)
     }
+    fn resolve_snapshot(
+        &self,
+        snapshot: &anchor_runtime::graph::GraphSnapshot,
+    ) -> Result<Vec<PluginBinding>, GraphError> {
+        self.inner.resolve_snapshot(snapshot)
+    }
 }
 
 pub(crate) enum ExpectedDefinition<'a> {
@@ -123,6 +135,9 @@ impl PluginLibrary {
         Self {
             inner: Library::new(root),
         }
+    }
+    pub(crate) fn validate_extension_install(id: &str) -> Result<(), InstallError> {
+        Library::validate_extension_install(id)
     }
     pub(crate) fn catalog_read_guard(
         &self,
@@ -151,6 +166,15 @@ impl PluginLibrary {
         replace: bool,
     ) -> Result<InstallOutcome, InstallError> {
         self.inner.install_directory(id, source, replace)
+    }
+    pub(crate) fn install_system_directory(
+        &self,
+        system: SystemPlugin,
+        source: impl AsRef<Path>,
+        expected_digest: &str,
+    ) -> Result<InstallOutcome, InstallError> {
+        self.inner
+            .install_system_directory(system, source, expected_digest)
     }
     pub(crate) fn install_directory_locked(
         &self,
@@ -270,6 +294,7 @@ pub(crate) fn mount_declarations<'a>(
     let authoritative = pilot_authority(declaring_graph, pilot_graph);
     references
         .iter()
+        .filter(|reference| reference.id != crate::plugin_network::NETWORK_PLUGIN)
         .map(|reference| {
             let required = reference.required && authoritative;
             (

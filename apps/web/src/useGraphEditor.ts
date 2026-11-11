@@ -3,7 +3,7 @@ import { api, reason } from './api';
 import { createAgent, defaultModelReference } from './agentAuthoring';
 import { validateCallTargets } from './calls';
 import { addParallelRegion } from './parallel';
-import type { GraphPluginActivation, GraphSummary, GraphTaskPolicy, NodePluginRef, OurGraph, OurOp } from './model';
+import type { GraphPluginActivation, GraphSummary, GraphTaskPolicy, NetworkMode, NodePluginRef, OurGraph, OurOp } from './model';
 
 export type GraphPick = { kind: 'node' | 'edge' | 'agent'; id: string } | null;
 export type WorkbenchNotice = { kind: 'ok' | 'bad'; text: string } | null;
@@ -91,6 +91,14 @@ export function useGraphEditor(name: string, graphs: GraphSummary[], setNotice: 
   // the editor works on ids and preserves whatever declaration each keeps.
   const pluginRefs: NodePluginRef[] = selectedNode?.plugins ?? [];
   const selectedPlugins = pluginRefs.map(item => typeof item === 'string' ? item : item.id);
+  const networkRef = pluginRefs.find(item => (typeof item === 'string' ? item : item.id) === 'network');
+  const networkMode: NetworkMode = networkRef === undefined ? 'auto'
+    : typeof networkRef === 'string' ? 'enabled' : networkRef.network ?? 'enabled';
+  const setNetworkMode = (mode: NetworkMode) => {
+    const next = { ...(typeof networkRef === 'object' ? networkRef : { id: 'network' }), network: mode };
+    patchNode({ plugins: networkRef === undefined ? [...pluginRefs, next]
+      : pluginRefs.map(item => item === networkRef ? next : item) });
+  };
   const setPlugins = (ids: string[]) => patchNode({
     plugins: ids.map(id => {
       const prior = pluginRefs.find(item => (typeof item === 'string' ? item : item.id) === id);
@@ -109,7 +117,7 @@ export function useGraphEditor(name: string, graphs: GraphSummary[], setNotice: 
     patch({ ...doc, nodes: doc.nodes.map(item =>
       item.id === selectedNode.id ? { ...item, ...fields } : item) });
   };
-  const patchAgent = (fields: Partial<{ model: string; network: boolean; instructions: string }>) => {
+  const patchAgent = (fields: Partial<{ model: string; instructions: string }>) => {
     if (!doc || pick?.kind !== 'agent') return;
     const current = doc.agents?.[pick.id] ?? { model: '' };
     patch({ ...doc, agents: { ...doc.agents, [pick.id]: { ...current, ...fields } } });
@@ -207,7 +215,7 @@ export function useGraphEditor(name: string, graphs: GraphSummary[], setNotice: 
   }, [doc]);
 
   return { doc, dirty, pluginActivation, pick, setPick, patch, undo, redo, canUndo: Boolean(past.length), canRedo: Boolean(future.length),
-    focusNode, save, selectedNode, selectedOp, selectedAgent, selectedEdge, selectedPlugins, setPlugins, graphTaskPolicy, setGraphTaskPolicy,
+    focusNode, save, selectedNode, selectedOp, selectedAgent, selectedEdge, selectedPlugins, setPlugins, networkMode, setNetworkMode, graphTaskPolicy, setGraphTaskPolicy,
     patchNode, patchAgent, patchEdge, patchOperation, addNode, addOperation, addParallel, addAgent, duplicateNode,
     removePicked, entry, routing };
 }

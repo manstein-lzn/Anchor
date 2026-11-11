@@ -11,6 +11,8 @@ const FIELDS: &[&str] = &[
 
 use crate::test_support::Environment;
 
+const PLATFORM: &str = "wecom";
+
 /// Two bot Graphs, `alpha` and `beta`, mount the same channel Plugin.
 struct Fixture {
     root: tempfile::TempDir,
@@ -20,22 +22,19 @@ struct Fixture {
     turn: String,
 }
 
-const ASSISTANT: &str = r#"{"entry":"wait","agents":{"reply":{"model":"fixture","instructions":"fixture"}},"ops":{"wait":{"host":{"operation":"session.wait_input"}},"deliver":{"host":{"operation":"session.reply"}}},"nodes":[{"id":"wait","op":"wait"},{"id":"reply","agent":"reply","plugins":["gateway"]},{"id":"deliver","op":"deliver"}],"edges":[{"from":"wait","to":"reply"},{"from":"reply","to":"deliver"},{"from":"deliver","to":"wait"}]}"#;
+const ASSISTANT: &str = r#"{"entry":"wait","agents":{"reply":{"model":"fixture","instructions":"fixture"}},"ops":{"wait":{"host":{"operation":"session.wait_input"}},"deliver":{"host":{"operation":"session.reply"}}},"nodes":[{"id":"wait","op":"wait"},{"id":"reply","agent":"reply","plugins":["wecom"]},{"id":"deliver","op":"deliver"}],"edges":[{"from":"wait","to":"reply"},{"from":"reply","to":"deliver"},{"from":"deliver","to":"wait"}]}"#;
 
 impl Fixture {
     fn new() -> Self {
         let root = tempfile::tempdir().unwrap();
-        let plugin = root.path().join("library/plugins/gateway");
-        fs::create_dir_all(plugin.join("bin")).unwrap();
-        fs::write(
-            plugin.join("plugin.json"),
-            json!({"name":"Fixture gateway"}).to_string(),
-        )
-        .unwrap();
-        fs::write(plugin.join("channel.json"), json!({"platform":"wecom","transport":"websocket","entrypoint":"bin/gateway","required_environment":["WECOM_BOT_ID","WECOM_BOT_SECRET"]}).to_string()).unwrap();
+        let plugin = root.path().join("library/plugins/wecom");
+        crate::test_system_plugin(
+            &root.path().join("library"),
+            anchor_graph_host::SystemPlugin::Wecom,
+        );
         // Each Graph's gateway reports into its own state directory.
         fs::write(
-            plugin.join("bin/gateway"),
+            plugin.join("bin/anchor-wecom-gateway"),
             r#"#!/bin/sh
 o="$WECOM_CHANNEL_STATE/observed"
 mkdir -p "$o"
@@ -53,7 +52,7 @@ while :; do sleep 0.02; done
         )
         .unwrap();
         fs::set_permissions(
-            plugin.join("bin/gateway"),
+            plugin.join("bin/anchor-wecom-gateway"),
             fs::Permissions::from_mode(0o700),
         )
         .unwrap();
@@ -64,7 +63,7 @@ while :; do sleep 0.02; done
         Self::graph(
             root.path(),
             "task",
-            r#"{"entry":"reply","agents":{"reply":{"model":"fixture","instructions":"fixture"}},"nodes":[{"id":"reply","agent":"reply","plugins":["gateway"]}],"edges":[]}"#,
+            r#"{"entry":"reply","agents":{"reply":{"model":"fixture","instructions":"fixture"}},"nodes":[{"id":"reply","agent":"reply","plugins":["wecom"]}],"edges":[]}"#,
         );
         fs::create_dir_all(root.path().join("state/platform")).unwrap();
         let sessions =
@@ -98,7 +97,7 @@ while :; do sleep 0.02; done
         fs::write(directory.join("graph.json"), graph).unwrap();
         fs::write(
             directory.join("manifest.json"),
-            json!({"format":1,"graph":"graph.json","plugins":[{"id":"gateway"}]}).to_string(),
+            json!({"format":1,"graph":"graph.json","plugins":[{"id":"wecom"}]}).to_string(),
         )
         .unwrap();
     }
@@ -115,7 +114,7 @@ while :; do sleep 0.02; done
 
     fn binding(user: &str) -> ChannelBinding {
         ChannelBinding {
-            plugin: "gateway".into(),
+            plugin: "wecom".into(),
             users: vec![user.into()],
             send_users: vec![user.into()],
             private_only: false,
@@ -130,6 +129,17 @@ while :; do sleep 0.02; done
     }
 
     fn credential(&self, graph: &str, field: &str, value: &str) {
+        self.credential_for(graph, "wecom", ChannelPlatform::Wecom, field, value);
+    }
+
+    fn credential_for(
+        &self,
+        graph: &str,
+        plugin: &str,
+        platform: ChannelPlatform,
+        field: &str,
+        value: &str,
+    ) {
         let request = crate::credential_store::request(
             &self.root.path().join("state"),
             &self.root.path().join("library"),
@@ -137,8 +147,8 @@ while :; do sleep 0.02; done
             "local",
             &self.session,
             &self.turn,
-            "gateway",
-            &crate::credential_store::channel_target(PLATFORM, graph),
+            plugin,
+            &crate::credential_store::channel_target(platform.as_str(), graph),
             field,
             "configure local test gateway",
         )
@@ -310,7 +320,7 @@ async fn an_account_with_sessions_of_another_graph_cannot_move() {
     let fixture = Fixture::new();
     fixture.prepare("alpha", "alice", "moving-bot").await;
     fixture.prepare("beta", "alice", "moving-bot").await;
-    let account = wecom_account_identity("moving-bot");
+    let account = ChannelPlatform::Wecom.account_identity("moving-bot");
     fixture
         .sessions
         .create(
@@ -475,7 +485,7 @@ async fn bindings_reload_per_graph_and_reject_another_owner_or_live_rebinding() 
         .join(crate::credential_store::hash(
             crate::credential_store::binding_owner("local").as_bytes(),
         ))
-        .join("gateway/channel_wecom");
+        .join("wecom/channel_wecom");
     assert!(!credentials.join("alpha").exists());
     assert!(credentials.join("beta/WECOM_BOT_ID.json").is_file());
     reopened.remove("alpha").await.unwrap();
@@ -712,7 +722,7 @@ async fn a_graph_that_stops_being_a_bot_stops_its_gateway_and_keeps_its_intent()
                 fixture
                     .root
                     .path()
-                    .join("library/plugins/gateway/plugin.json"),
+                    .join("library/plugins/wecom/plugin.json"),
             )
             .unwrap();
         }
@@ -743,7 +753,7 @@ async fn changed_channel_declarations_disable_the_binding_until_reconfigured() {
         .await
         .unwrap();
     assert!(fixture.adapter.snapshot("alpha").unwrap().unwrap().enabled);
-    let plugin = fixture.root.path().join("library/plugins/gateway");
+    let plugin = fixture.root.path().join("library/plugins/wecom");
     let declaration = fs::read(plugin.join("channel.json")).unwrap();
     let mut changed: Value = serde_json::from_slice(&declaration).unwrap();
     changed["description"] = json!("changed authorization");
@@ -871,7 +881,7 @@ async fn a_restart_keeps_a_bot_stopped_whose_changed_account_is_taken() {
         "local",
         &fixture.session,
         &turn.id,
-        "gateway",
+        "wecom",
         &crate::credential_store::channel_target(PLATFORM, "alpha"),
         "WECOM_BOT_ID",
         "change the bot outside the management API",
@@ -936,9 +946,140 @@ async fn removing_a_graph_deletes_bot_credentials_saved_without_a_binding() {
         .join(crate::credential_store::hash(
             crate::credential_store::binding_owner("local").as_bytes(),
         ))
-        .join("gateway/channel_wecom");
+        .join("wecom/channel_wecom");
     assert!(credentials.join("alpha/WECOM_BOT_ID.json").is_file());
     fixture.adapter.remove("alpha").await.unwrap();
     assert!(!credentials.join("alpha").exists());
     assert!(credentials.join("beta/WECOM_BOT_ID.json").is_file());
+}
+
+#[tokio::test]
+async fn feishu_and_wecom_keep_separate_platforms_credentials_accounts_and_supervisors() {
+    let _guard = crate::PROCESS_ENV_LOCK.lock().await;
+    let fixture = Fixture::new();
+    let plugin = fixture.root.path().join("library/plugins/feishu");
+    crate::test_system_plugin(
+        &fixture.root.path().join("library"),
+        anchor_graph_host::SystemPlugin::Feishu,
+    );
+    fs::write(
+        plugin.join("bin/anchor-feishu-gateway"),
+        r#"#!/bin/sh
+o="$FEISHU_CHANNEL_STATE/observed"
+mkdir -p "$o"
+printf '%s' "$FEISHU_APP_ID" > "$o/account"
+printf '%s' "$FEISHU_APP_SECRET" > "$o/secret"
+printf '%s' "$ANCHOR_API_KEY" > "$o/callback"
+printf '%s' "$ANCHOR_FEISHU_USERS" > "$o/users"
+printf '%s' "$ANCHOR_FEISHU_SEND_USERS" > "$o/send-users"
+printf 'x' >> "$o/starts"
+exec /bin/sleep 3600
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(
+        plugin.join("bin/anchor-feishu-gateway"),
+        fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
+    let mut definition: Value =
+        serde_json::from_str(&ASSISTANT.replace("wecom", "feishu")).unwrap();
+    definition["nodes"][1]["plugins"] = json!(["feishu", {"id":"network","network":"denied"}]);
+    Fixture::graph(fixture.root.path(), "feishu", &definition.to_string());
+    fs::write(
+        fixture.root.path().join("catalog/feishu/manifest.json"),
+        r#"{"format":1,"graph":"graph.json","plugins":[{"id":"feishu"},{"id":"network"}]}"#,
+    )
+    .unwrap();
+    assert!(!fixture.root.path().join("library/plugins/network").exists());
+
+    assert_eq!(status(&fixture, "feishu").await["platform"], "feishu");
+    let mut binding = ChannelBinding {
+        plugin: "feishu".into(),
+        users: vec!["ou_alice".into()],
+        send_users: vec!["ou_alice".into()],
+        private_only: false,
+    };
+    assert!(matches!(
+        fixture
+            .adapter
+            .configure("local", "feishu", binding.clone())
+            .await,
+        Err(ApplicationError::Invalid(_))
+    ));
+    binding.private_only = true;
+    fixture
+        .adapter
+        .configure("local", "feishu", binding)
+        .await
+        .unwrap();
+    fixture.credential_for(
+        "feishu",
+        "feishu",
+        ChannelPlatform::Feishu,
+        "FEISHU_APP_ID",
+        "same-id",
+    );
+    fixture.credential_for(
+        "feishu",
+        "feishu",
+        ChannelPlatform::Feishu,
+        "FEISHU_APP_SECRET",
+        "feishu-value",
+    );
+    fixture.prepare("alpha", "alice", "same-id").await;
+    for graph in ["alpha", "feishu"] {
+        fixture
+            .adapter
+            .set_enabled("local", graph, true)
+            .await
+            .unwrap();
+        fixture.wait_for(graph, "starts").await;
+    }
+    let feishu = fixture.adapter.snapshot("feishu").unwrap().unwrap();
+    let wecom = fixture.adapter.snapshot("alpha").unwrap().unwrap();
+    assert_eq!(feishu.platform, ChannelPlatform::Feishu);
+    assert!(feishu.enabled && wecom.enabled);
+    assert_ne!(feishu.account, wecom.account);
+    assert_eq!(fixture.read("feishu", "secret"), "feishu-value");
+    assert_eq!(fixture.read("alpha", "secret"), "same-id-secret");
+    assert_eq!(fixture.read("feishu", "users"), "ou_alice");
+    assert_eq!(fixture.read("feishu", "send-users"), "ou_alice");
+    assert_ne!(
+        fixture.read("feishu", "callback"),
+        fixture.read("alpha", "callback")
+    );
+    let saved = |graph| {
+        serde_json::from_slice::<Value>(&fs::read(fixture.adapter.path(graph)).unwrap()).unwrap()
+    };
+    assert_eq!(saved("feishu")["platform"], "feishu");
+    assert!(
+        saved("alpha").get("platform").is_none(),
+        "WeCom format 2 representation stays unchanged"
+    );
+    fixture.adapter.shutdown().await;
+    fixture
+        .adapter
+        .set_enabled("local", "alpha", false)
+        .await
+        .unwrap();
+    Fixture::graph(
+        fixture.root.path(),
+        "alpha",
+        &ASSISTANT.replace("wecom", "feishu"),
+    );
+    fs::write(
+        fixture.root.path().join("catalog/alpha/manifest.json"),
+        r#"{"format":1,"graph":"graph.json","plugins":[{"id":"feishu"}]}"#,
+    )
+    .unwrap();
+    assert!(matches!(
+        fixture
+            .adapter
+            .configure("local", "alpha", feishu.binding)
+            .await,
+        Err(ApplicationError::Conflict(_))
+    ));
+    assert_eq!(saved("alpha")["plugin"], "wecom");
+    assert!(saved("alpha").get("platform").is_none());
 }

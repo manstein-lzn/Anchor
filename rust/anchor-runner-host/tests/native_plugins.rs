@@ -11,13 +11,12 @@ use axum::{
     extract::{Query, State},
     routing::get,
 };
-use fixture::{Host, read_json};
+use fixture::Host;
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
     fs,
     path::PathBuf,
-    process::Command,
     sync::{Arc, Mutex, mpsc},
     thread,
 };
@@ -106,33 +105,6 @@ impl Drop for BusinessFixture {
     }
 }
 
-fn package(host: &Host, name: &str) -> PathBuf {
-    let binary = fixture::host_binary().with_file_name(format!("anchor-{name}-tools"));
-    assert!(
-        binary.is_file(),
-        "Build native tools with cargo build -p anchor-wecom-tools --bins"
-    );
-    let destination = host.root.path().join("checkout").join(name);
-    fs::create_dir_all(destination.parent().unwrap()).unwrap();
-    let result = Command::new(&binary)
-        .arg("package-plugin")
-        .arg(&destination)
-        .env_clear()
-        .output()
-        .unwrap();
-    assert!(
-        result.status.success(),
-        "Native package failed: {}",
-        String::from_utf8_lossy(&result.stderr)
-    );
-    for path in ["plugin.json", "skills"].map(|path| destination.join(path)) {
-        assert!(path.exists());
-    }
-    assert!(!destination.join("server.py").exists());
-    assert!(!destination.join("upload_server.py").exists());
-    destination
-}
-
 fn bind(host: &Host, plugin: &str) {
     let binding = FilePluginCatalog::new(host.root.path())
         .resolve(&[plugin.to_owned()])
@@ -158,23 +130,17 @@ fn graph() -> Value {
     })
 }
 
-/// Package the WeCom plugin against the fixture endpoint and bind it to the Run.
-fn install_plugin(host: &goose::Host, business: &BusinessFixture) -> PathBuf {
-    let plugin = package(&host.base, "wecom");
-    let path = plugin.join("plugin.json");
-    let mut manifest = read_json(&path);
-    manifest["mcpServers"]["wecom"]["env"] = json!({
-        "WECOM_API_BASE_URL":business.endpoint,"WECOM_CORP_ID":"fixture-corp",
-        "WECOM_AGENT_ID":"1","WECOM_SECRET":"fixture-secret"
-    });
-    manifest["mcpServers"]["wecom"]
-        .as_object_mut()
-        .unwrap()
-        .remove("optional_env_vars");
-    fs::write(path, manifest.to_string()).unwrap();
-    anchor_library::Library::new(host.base.root.path())
-        .install_directory("wecom", &plugin, false)
-        .unwrap();
+/// Configure the endpoint through authorized deployment fields, never by
+/// editing the canonical system manifest.
+fn install_plugin(host: &goose::Host) -> PathBuf {
+    fixture::install_system_plugin(
+        host.base.root.path(),
+        anchor_graph_host::SystemPlugin::Wecom,
+    );
+    fixture::install_system_plugin(
+        host.base.root.path(),
+        anchor_graph_host::SystemPlugin::Network,
+    );
     bind(&host.base, "wecom");
     host.base.root.path().join("plugins/wecom")
 }
@@ -195,8 +161,9 @@ fn native_goose_reads_plugin_skill_and_calls_rust_stdio_mcp() {
         // This scenario drives the plugin tools *directly*, and Goose refuses a tool
         // that was not advertised in the turn, so a disclosed node cannot call them
         // that way. The on-demand path has its own scenario below.
-        .with_extra_environment([("ANCHOR_NODE_TOOL_DISCLOSURE", "0")]);
-    let plugin = install_plugin(&host, &business);
+        .with_extra_environment([("ANCHOR_NODE_TOOL_DISCLOSURE", "0")])
+        .with_extra_environment(fixture::wecom_mcp_environment(&business.endpoint));
+    let plugin = install_plugin(&host);
     let original_skill = fs::read(plugin.join("skills/wecom/SKILL.md")).unwrap();
     let response = host.run(&provider);
     assert_eq!(response["projection"]["outcome"], "done", "{response}");
@@ -295,8 +262,9 @@ fn native_goose_reaches_a_hidden_plugin_tool_through_disclosure() {
     );
     let host = goose::Host::new(&graph())
         .native()
-        .with_extra_environment([("ANCHOR_NODE_TOOL_DISCLOSURE", "1")]);
-    install_plugin(&host, &business);
+        .with_extra_environment([("ANCHOR_NODE_TOOL_DISCLOSURE", "1")])
+        .with_extra_environment(fixture::wecom_mcp_environment(&business.endpoint));
+    install_plugin(&host);
     let response = host.run(&provider);
     assert_eq!(response["projection"]["outcome"], "done", "{response}");
     provider.assert_consumed();

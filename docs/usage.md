@@ -1,30 +1,31 @@
 # 使用指南
 
-普通用户按本页完成安装、配置模型和使用 Pilot；不需要先阅读架构文档。要从源码启动，请看[开发指南](development.md)。
+普通用户按本页完成安装、配置模型和使用 Pilot；不需要先阅读架构或开发文档。要从源码启动，请看[开发指南](development.md)。
 
 ## 支持环境
 
-source-free 完整平台归档面向 Linux x86_64，目标机需要 Bubblewrap、slirp4netns、Git、shell、CA 证书、系统链接器及发行 inventory 所列的动态库。Rust 与 Node 是构建机依赖，不是目标运行环境要求；系统依赖由操作员准备，归档不会安装它们。
+当前二进制 Preview 仅面向 **Ubuntu 22.04/24.04 LTS amd64**，使用普通宿主机或完整虚拟机、运行中的 systemd。目标机不需要源码、Rust 或 Node，APT 会安装声明的系统依赖。
 
-系统必须允许 Bubblewrap 创建隔离 namespace，并在私有 PID namespace 挂载新的 `/proc`。不满足时 Host 报告原因并非零退出，不初始化 Host 数据、恢复 Run 或监听 HTTP，也不自动修改宿主策略或降低隔离要求。通过这项基线检查也不代表全部网络或工具已可用。
+系统必须允许 Bubblewrap 创建隔离 namespace，并在私有 PID namespace 挂载新的 `/proc`。不满足时 Host 报告原因并非零退出，不初始化 Host 数据、恢复 Run 或监听 HTTP，也不自动修改宿主策略或降低隔离要求。Docker 内部署不在本轮支持范围，能打开容器终端不代表满足这些条件。通过这项基线检查也不代表全部网络或工具已可用。
 
 模型尚未配置、Python/Rust 尚未准备是正常的首次配置状态，不阻止在沙箱基线可用时打开 WebUI。
 
 ## 安装与打开 WebUI
 
-取得经审查的完整平台归档及可信构建报告中的 SHA256。manifest 只是文件 inventory，不是签名；不要只凭归档自己声明的摘要建立信任。操作员使用仓库的安装脚本安装到全新目录，再运行随包 launcher：
+安装包已在本地构建，**GitHub Release 尚未发布**。获得 DEB 与来自可信渠道的 `SHA256SUMS` 后，在同一目录校验并安装；将安装命令里的文件名替换为实际版本：
 
 ```sh
-scripts/install-platform.sh --archive /reviewed/platform.tar.gz \
-  --sha256 TRUSTED_BUILD_REPORT_SHA256 --install-root /existing/parent/anchor
-/existing/parent/anchor/release/anchor-runtime/bin/anchor-platform start
+sha256sum -c SHA256SUMS
+sudo apt install ./anchor_VERSION-REVISION_amd64.deb
+anchor status
+anchor open
 ```
 
-安装器不启动服务或注册开机自启，也不覆盖已有目录；不提供在位升级或旧 Python 部署数据的迁移工具。模型、运行记录、工作区和环境放在安装根的私有 `data/` 下，不写入只读 release。不要用全新安装器覆盖已有现场。
+当前包**只支持全新安装，不支持升级或重装**。已有 Anchor 账号、数据或安装路径会阻止安装；卸载（包括 Debian purge）保留账号和私有数据，不是重置操作。安装后服务启动失败时，先查看日志，不要删数据或尝试覆盖重装。
 
-长期运行时，由操作员按[systemd 部署步骤](rust-production-deployment.md#run-under-systemd)准备服务账号、数据归属并安装[服务模板](../deploy/systemd/anchor.service)，然后执行 `sudo systemctl enable --now anchor.service`。模板使用同一个 launcher，提供开机自启和失败重启（`Restart=on-failure`）；这不是卡死检测，也不等于所有业务已经过长期稳定性验收。
+运行中的 systemd 会在安装时启用并启动 `anchor.service`；在未运行 systemd 的镜像中安装不会启动服务，需要在系统正常引导后执行 `sudo systemctl enable --now anchor.service`。原生服务提供开机自启和失败重启（`Restart=on-failure`），不提供卡死检测，也不等于所有业务已经过长期稳定性验收。包版本、构建与验证边界见[原生安装包](rust-production-deployment.md#native-packages)。
 
-本机打开 <http://127.0.0.1:8077>。**Anchor 没有内置登录，只监听 loopback。** 在服务器上运行时，从自己的电脑建立隧道：
+本机打开 <http://127.0.0.1:8077>；有桌面时也可点击 Anchor 应用入口，无桌面时 `anchor open` 只打印地址。**Anchor 没有内置登录，只监听 loopback。** 在服务器上运行时，从自己的电脑建立隧道：
 
 ```sh
 ssh -N -L 8077:127.0.0.1:8077 user@server
@@ -48,7 +49,7 @@ ssh -N -L 8077:127.0.0.1:8077 user@server
 
 Pilot 可以用自然语言查询、创建和管理 Graph、Run、Plugin 与产物。把 Graph JSON、Plugin 工程文件或它们的压缩包作为附件交给 Pilot，让它先检查内容、依赖、权限和当前环境，再协助配置；这不是任意压缩包都能自动安装的保证。
 
-完整平台从空业务 Graph catalog 开始，不预装全部业务示例。Plugin 先安装到 Library，再按需要挂载；安装和启用是两回事，挂载变更从后续 Turn 生效，说明文件本身不安装环境或授予权限。源码启动的示例用途见[上手示例](../examples/README.md)。
+原生包预装 `network`、`git`、**Anchor Dev** 和 **Graph Tasks**，不附带全部业务示例 Graph。在 Pilot 插件面板启用 Anchor Dev（稳定 ID `anchor-steward`），可按需读取 Graph、Plugin、Rust、Python、pixi 和 Git 开发说明；需要 Git 工具时另行启用 `git`。Graph Tasks（`graph-tasks`）用于普通 AgentNode 的按需选图、构建、委派和计划，须在 Graph 编辑器配置节点的可见范围与能力上限并保存，见[Graph 任务](plugins.md#graph-任务)。安装和启用是两回事，挂载变更从后续 Turn 生效，Skill 本身不安装环境或授予权限。关闭 Anchor Dev 不删除源码、环境或缓存，也不撤销独立授权的命令工具。
 
 需要 Python/Rust 时，在「设置 → 开发环境」初始化，明确允许联网下载后再执行；可查看进度、停止、失败后重试。关闭页面不会取消初始化，重新打开可继续查看状态。已有 Python 可点「刷新状态」检测；已有解释器不代表全部依赖工具齐备，缺项以页面说明为准。
 
@@ -75,23 +76,23 @@ Run 页面可查看路径、状态、节点对话、工具请求/结果、worksp
 
 ## 日常操作与常见失败
 
-按模板配置 systemd 服务后，使用系统原有命令；手动启动的 launcher 不会因执行这些命令而自动纳入 systemd：
+这些命令使用系统原有权限，必要时加 `sudo`；它们不会另起一套进程守护：
 
 | 操作 | 命令 |
 | --- | --- |
-| 查看服务状态 | `systemctl status anchor.service` |
-| 最近日志 / 持续查看 | `journalctl -u anchor.service -n 100` / `journalctl -u anchor.service -f` |
-| 启动 / 停止 / 重启 | `sudo systemctl start anchor.service` / `sudo systemctl stop anchor.service` / `sudo systemctl restart anchor.service` |
+| 状态与 WebUI 地址 | `anchor status` |
+| 最近日志 / 持续查看 | `anchor logs` / `anchor logs --follow` |
+| 启动 / 停止 / 重启 | `anchor start` / `anchor stop` / `anchor restart` |
 | 检查开机自启 | `systemctl is-enabled anchor.service` |
 
-私有数据保存在 `<install-root>/data`；标准服务模板使用 `/var/lib/anchor/platform/data`，不是只读运行时文件的一部分。停止 writer 后再做一致性备份；不要让手动 launcher 与 systemd 服务同时写同一份数据。
+私有数据保存在 `/var/lib/anchor/platform/data`，不是只读运行时文件的一部分。停止后再做一致性备份；不要让两个 Host 写同一份数据。
 
 | 现象 | 处理 |
 | --- | --- |
 | `Can't mount proc ... Operation not permitted` 等沙箱基线错误 | 当前系统不满足运行条件；查看日志定位系统策略，不改成共享 namespace 或宿主 `/proc` 绕过 |
-| 服务未启动或没有开机自启 | 核对服务模板、账号与数据权限，按部署步骤启用；完成归档安装不代表服务已启动 |
+| 安装提示 inactive system | 系统引导且 systemd 运行后启用服务；仅完成解包不代表服务已启动 |
 | Pilot 提示默认模型未配置 | 在「设置 → 模型服务」保存 default Flash，返回原草稿重试 |
 | Plugin 缺依赖、凭据或权限 | 在开发环境/插件详情补齐所需配置或授权，不能用安装成功替代运行验证 |
 | 运行中断或动作结果未知 | 查看原 Run 和外部效果，让 Agent 核查后继续，不覆盖安装或重复发送 |
 
-归档构建和确定性回归不代表目标机、真实模型、第三方服务或 Pilot 盲装已端到端通过。验收边界见[当前结论](pilot-development-plan.md)；API 集成、打包和运维参数分别见[完整文档目录](README.md)。
+本地构建和确定性回归不代表目标机、真实模型、第三方服务或 Pilot 盲装已端到端通过。验收边界见[当前结论](pilot-development-plan.md)；API 集成、打包和运维参数分别见[完整文档目录](README.md)。

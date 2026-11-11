@@ -5,8 +5,11 @@
 //! call its private Unix socket, or persist the final rich reply for the host
 //! adapter to deliver.
 
+use crate::application::channel_management::ChannelPlatform;
 use crate::channel_replies::{MAX_IMAGE_BYTES, MAX_IMAGE_COUNT, MAX_IMAGE_TOTAL_BASE64};
-use crate::tool_names::{IMAGE_TOOL, SEND_FILE_TOOL, SEND_TOOL};
+use crate::tool_names::{
+    FEISHU_SEND_FILE_TOOL, FEISHU_SEND_TOOL, IMAGE_TOOL, SEND_FILE_TOOL, SEND_TOOL,
+};
 
 use anchor_runtime::{
     Cancellation, ReadOnlyInput, ToolDefinition, ToolError, ToolName, ToolPort, ToolResultContent,
@@ -31,6 +34,7 @@ use tokio::{
     time::timeout,
 };
 
+mod feishu;
 mod task_delivery;
 
 #[derive(Deserialize)]
@@ -91,9 +95,11 @@ pub(crate) fn wrap(
     let channels = bindings
         .iter()
         .filter(|binding| {
-            catalog
-                .channels(&binding.id)
-                .is_ok_and(|channels| channels.iter().any(|channel| channel.platform == "wecom"))
+            catalog.channels(&binding.id).is_ok_and(|channels| {
+                channels
+                    .iter()
+                    .any(|channel| ChannelPlatform::parse(&channel.platform).is_some())
+            })
         })
         .cloned()
         .collect::<Vec<_>>();
@@ -189,6 +195,27 @@ fn read_regular(path: &Path, limit: usize) -> Result<Vec<u8>, ToolError> {
 }
 
 impl ChannelTools {
+    fn supports_platform(&self, platform: ChannelPlatform) -> bool {
+        if let Some(graph) = &self.assistant_graph
+            && !self
+                .application
+                .channel_snapshot(graph)
+                .ok()
+                .flatten()
+                .is_some_and(|bot| bot.platform == platform)
+        {
+            return false;
+        }
+        let catalog = crate::plugin_library::Catalog::new(self.application.library_root());
+        self.channels.iter().any(|binding| {
+            catalog.channels(&binding.id).is_ok_and(|channels| {
+                channels
+                    .iter()
+                    .any(|channel| channel.platform == platform.as_str())
+            })
+        })
+    }
+
     fn check_active(&self) -> Result<(), ToolError> {
         if self.cancellation.load(Ordering::Relaxed) {
             Err(ToolError::Failed(
@@ -201,7 +228,7 @@ impl ChannelTools {
 
     fn control_endpoint(descriptor: &Path) -> Result<(PathBuf, String), ToolError> {
         let raw = fs::read(descriptor)
-            .map_err(|_| ToolError::Failed("WeCom gateway descriptor is unavailable".into()))?;
+            .map_err(|_| ToolError::Failed("channel gateway descriptor is unavailable".into()))?;
         let value: Value = serde_json::from_slice(&raw)
             .map_err(|_| ToolError::Failed("invalid gateway descriptor".into()))?;
         let socket = value
@@ -218,13 +245,25 @@ impl ChannelTools {
         }
     }
 
-    fn send_endpoint(&self, args: &SendArguments) -> Result<(PathBuf, String), ToolError> {
+    fn send_endpoint(
+        &self,
+        args: &SendArguments,
+        platform: ChannelPlatform,
+    ) -> Result<(PathBuf, String), ToolError> {
         let task = self.task_delivery_context()?;
-        if let Some(task) = &task
-            && args.userid != task.identity.sender_id
+        let original = if let Some(task) = &task {
+            Some((task.source.clone(), task.identity.clone()))
+        } else if platform == ChannelPlatform::Feishu {
+            let (source, _, identity) = self.feishu_private_context()?;
+            Some((source, identity))
+        } else {
+            None
+        };
+        if let Some((_, identity)) = &original
+            && (args.userid != identity.sender_id || identity.source != platform.as_str())
         {
             return Err(ToolError::Failed(
-                "task results can only be delivered to their original private conversation".into(),
+                "channel sends must use their original private conversation".into(),
             ));
         }
         let graph = match (&self.assistant_graph, args.bot_graph.as_deref()) {
@@ -249,12 +288,15 @@ impl ChannelTools {
             .channel_snapshot(graph)
             .map_err(|_| ToolError::Failed("bot configuration is unavailable".into()))?
             .filter(|bot| {
-                bot.enabled && crate::credential_store::binding_owner(&bot.owner) == self.owner
+                bot.enabled
+                    && bot.platform == platform
+                    && (platform != ChannelPlatform::Feishu || bot.binding.private_only)
+                    && crate::credential_store::binding_owner(&bot.owner) == self.owner
             })
             .ok_or_else(|| {
                 ToolError::Failed("bot is unavailable or not authorized for this Run".into())
             })?;
-        if let Some(task) = &task {
+        if let Some((source, identity)) = &original {
             let sessions =
                 crate::assistant::sessions(&self.state_root).map_err(ToolError::Failed)?;
             let selected = sessions
@@ -262,15 +304,16 @@ impl ChannelTools {
                     &bot.owner,
                     &anchor_platform_session::ChannelIdentity {
                         account: bot.account.clone(),
-                        ..task.identity.clone()
+                        ..identity.clone()
                     },
                 )
                 .map_err(|error| ToolError::Failed(error.to_string()))?;
             if !selected
-                .is_some_and(|session| session.id == task.source.session && session.graph == graph)
+                .is_some_and(|session| session.id == source.session && session.graph == graph)
+                || bot.account != identity.account
             {
                 return Err(ToolError::Failed(
-                    "the task's original bot conversation is no longer available".into(),
+                    "the original bot conversation is no longer available".into(),
                 ));
             }
         }
@@ -289,12 +332,14 @@ impl ChannelTools {
             .map_err(|_| {
                 ToolError::Failed("channel Plugin authorization changed; start a new Run".into())
             })?;
-        if !bot.binding.allows_outbound(&args.userid) {
+        if !bot.binding.allows_outbound(&args.userid)
+            || (platform == ChannelPlatform::Feishu && !bot.binding.allows_inbound(&args.userid))
+        {
             return Err(ToolError::Failed("recipient is not allowed".into()));
         }
         let descriptor = bot
             .descriptor
-            .ok_or_else(|| ToolError::Failed("WeCom gateway descriptor is unavailable".into()))?;
+            .ok_or_else(|| ToolError::Failed("channel gateway descriptor is unavailable".into()))?;
         Self::control_endpoint(&descriptor)
     }
 
@@ -328,7 +373,7 @@ impl ChannelTools {
             .any(|c| matches!(c, Component::ParentDir) || c.as_os_str() == ".git")
         {
             return Err(ToolError::Failed(
-                "image path must stay inside an allowed workspace/input".into(),
+                "file path must stay inside an allowed workspace/input".into(),
             ));
         }
         let mut mounts = vec![(self.workspace.as_path(), Path::new("/workspace"))];
@@ -345,7 +390,7 @@ impl ChannelTools {
             }
         }
         Err(ToolError::Failed(
-            "image path is not visible to this node".into(),
+            "file path is not visible to this node".into(),
         ))
     }
 
@@ -454,7 +499,7 @@ impl ChannelTools {
         if args.userid.trim().is_empty() || args.content.trim().is_empty() {
             return Err(ToolError::Failed("recipient is not allowed".into()));
         }
-        let (socket, token) = self.send_endpoint(&args)?;
+        let (socket, token) = self.send_endpoint(&args, ChannelPlatform::Wecom)?;
         let request_id = self.delivery_request_id(&args.userid, None)?;
         let payload = json!({"operation":"send","request_id":request_id,"userid":args.userid,"content":args.content,"token":token});
         if args.content.len() > 20480 || args.userid.chars().count() > 200 {
@@ -477,8 +522,9 @@ impl ChannelTools {
     ) -> Result<(anchor_platform_session::ChannelNotificationFile, Vec<u8>), ToolError> {
         use anchor_runtime::artifact::{ArtifactDescriptor, is_delivery_path};
         let value = Path::new(value);
-        if self.assistant_graph.is_some()
-            && (value.starts_with("/in/tasks") || value.starts_with("/in/notifications"))
+        if self.task_delivery_context()?.is_some()
+            || (self.assistant_graph.is_some()
+                && (value.starts_with("/in/tasks") || value.starts_with("/in/notifications")))
         {
             return self.selected_notification_file(value);
         }
@@ -593,13 +639,25 @@ impl ChannelTools {
         Ok((file, bytes))
     }
 
-    async fn send_file(&self, mut args: FileArguments) -> Result<Value, ToolError> {
+    async fn send_file(
+        &self,
+        mut args: FileArguments,
+        platform: ChannelPlatform,
+    ) -> Result<Value, ToolError> {
         use anchor_platform_session::{
             ChannelConversationKind, ChannelIdentity, ChannelNotification,
         };
         self.check_active()?;
+        let original = if platform == ChannelPlatform::Feishu {
+            let (source, _, identity) = self.feishu_private_context()?;
+            args.userid = identity.sender_id.clone();
+            Some((source, identity))
+        } else {
+            None
+        };
         self.bind_task_recipient(&mut args.userid)?;
         let task = self.task_delivery_context()?;
+        let direct = platform == ChannelPlatform::Feishu && task.is_none();
         let source_run = match &task {
             Some(task) => task.result.source_run.clone().ok_or_else(|| {
                 ToolError::Failed("a task without a source Run cannot send a file".into())
@@ -611,13 +669,18 @@ impl ChannelTools {
             userid: args.userid.clone(),
             content: args.content.clone(),
         };
-        let (socket, token) = self.send_endpoint(&text)?;
+        let (socket, token) = self.send_endpoint(&text, platform)?;
         if args.content.trim().is_empty()
             || args.content.len() > 20480
             || args.context_files.len() > 3
         {
             return Err(ToolError::Failed(
                 "a bounded introduction and at most three context files are required".into(),
+            ));
+        }
+        if direct && !args.context_files.is_empty() {
+            return Err(ToolError::Failed(
+                "context_files require selected immutable task delivery files".into(),
             ));
         }
         let graph = self
@@ -631,10 +694,14 @@ impl ChannelTools {
             .map_err(|_| ToolError::Failed("bot configuration is unavailable".into()))?
             .ok_or_else(|| ToolError::Failed("bot configuration is unavailable".into()))?;
         let sessions = crate::assistant::sessions(&self.state_root).map_err(ToolError::Failed)?;
-        let session = if let Some(task) = &task {
+        let session = if let Some(source) = task
+            .as_ref()
+            .map(|task| &task.source)
+            .or_else(|| original.as_ref().map(|(source, _)| source))
+        {
             Some(
                 sessions
-                    .get(&bot.owner, &task.source.session)
+                    .get(&bot.owner, &source.session)
                     .map_err(|error| ToolError::Failed(error.to_string()))?,
             )
         } else {
@@ -657,22 +724,27 @@ impl ChannelTools {
                 "recipient must have an existing private conversation with this bot".into(),
             )
         })?;
-        let (file, bytes) = self.notification_file(&args.path)?;
-        let request_id = self.delivery_request_id(&args.userid, Some(&file))?;
-        if bytes.len() < 5 {
+        let (file, bytes, filename) = if direct {
+            let path = self.visible_file(&args.path)?;
+            let bytes = read_regular(&path, crate::attachments::MAX_FILE_BYTES)?;
+            let filename = Self::outgoing_filename(&path)?;
+            (None, bytes, filename)
+        } else {
+            let (file, bytes) = self.notification_file(&args.path)?;
+            // Queue aliases keep mounts unique; send the producer's filename.
+            let filename = Self::outgoing_filename(Path::new(&file.path))?;
+            (Some(file), bytes, filename)
+        };
+        let request_id = self.delivery_request_id(&args.userid, file.as_ref())?;
+        if bytes.is_empty() {
+            return Err(ToolError::Failed("files must not be empty".into()));
+        }
+        if platform == ChannelPlatform::Wecom && bytes.len() < 5 {
             return Err(ToolError::Failed(
                 "platform files must contain at least five bytes".into(),
             ));
         }
-        // Task input aliases keep mounts unique; the recipient gets the
-        // producer's committed filename, not an internal queue alias.
-        let filename = Path::new(&file.path)
-            .file_name()
-            .and_then(|name| name.to_str())
-            .filter(|name| crate::attachments::safe_name(name))
-            .ok_or_else(|| ToolError::Failed("invalid notification filename".into()))?
-            .to_owned();
-        let mut files = vec![file];
+        let mut files = file.into_iter().collect::<Vec<_>>();
         for path in &args.context_files {
             let (file, _) = self.notification_file(path)?;
             if files.iter().any(|existing| existing.name == file.name) {
@@ -693,10 +765,15 @@ impl ChannelTools {
                     ToolError::Failed(format!("could not retain notification delivery: {error:?}"))
                 })?;
         }
-        let payload = json!({"operation":"send_file","request_id":format!("{request_id}-file"),"userid":args.userid,
+        let mut payload = json!({"operation":"send_file","request_id":format!("{request_id}-file"),
             "name":filename,"data_base64":STANDARD.encode(&bytes),"md5":format!("{:x}", Md5::digest(&bytes)),"token":token});
+        Self::address_payload(
+            &mut payload,
+            &args.userid,
+            original.as_ref().map(|(_, identity)| identity),
+        );
         // Recheck revocation immediately before each platform effect.
-        self.send_endpoint(&text)?;
+        self.send_endpoint(&text, platform)?;
         let file_ack = self.deliver(socket, payload).await.map_err(|error| {
             ToolError::Failed(format!(
                 "file {request_id}-file was not confirmed: {error}; keep this delivery identity when checking its outcome"
@@ -704,26 +781,53 @@ impl ChannelTools {
         })?;
         // Preserve the confirmed file even if the separate introduction fails
         // or execution is cancelled after the file's ACK.
-        let notification = ChannelNotification {
+        let notification = (!direct).then(|| ChannelNotification {
             id: request_id.clone(),
             source_run,
             content: args.content.clone(),
             files,
-        };
-        sessions.record_channel_notification(&bot.owner, &session.id, &notification)
+        });
+        if let Some(notification) = &notification {
+            sessions.record_channel_notification(&bot.owner, &session.id, notification)
             .map_err(|error| ToolError::Failed(format!("file {request_id}-file confirmed but Session recording failed: {error}; introduction {request_id}-intro was not dispatched; do not resend with a new identity")))?;
+        }
         let introduction = async {
-            let (socket, token) = self.send_endpoint(&text)?;
-            self.deliver(
-                socket,
-                json!({"operation":"send","request_id":format!("{request_id}-intro"),
-            "userid":args.userid,"content":args.content,"token":token}),
-            )
-            .await
-        }.await.map_err(|error| ToolError::Failed(format!("file {request_id}-file confirmed and saved for the next Turn; introduction {request_id}-intro not confirmed: {error}; do not resend the file with a new identity")))?;
-        Ok(
-            json!({"accepted":true,"status":"confirmed","request_id":request_id,"notification":notification,"file_status":"confirmed","file":file_ack,"introduction_status":"confirmed","introduction":introduction}),
-        )
+            let (socket, token) = self.send_endpoint(&text, platform)?;
+            let mut payload = json!({"operation":"send","request_id":format!("{request_id}-intro"),
+                "content":args.content,"token":token});
+            Self::address_payload(&mut payload, &args.userid, original.as_ref().map(|(_, identity)| identity));
+            self.deliver(socket, payload).await
+        }.await.map_err(|error| {
+            let retained = if notification.is_some() { " and saved for the next Turn" } else { "" };
+            ToolError::Failed(format!("file {request_id}-file confirmed{retained}; introduction {request_id}-intro not confirmed: {error}; do not resend the file with a new identity"))
+        })?;
+        let mut receipt = json!({"accepted":true,"status":"confirmed","request_id":request_id,
+            "file_status":"confirmed","file":file_ack,"introduction_status":"confirmed","introduction":introduction});
+        if let Some(notification) = notification {
+            receipt["notification"] = json!(notification);
+        }
+        Ok(receipt)
+    }
+
+    fn outgoing_filename(path: &Path) -> Result<String, ToolError> {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| crate::attachments::safe_name(name))
+            .map(str::to_owned)
+            .ok_or_else(|| ToolError::Failed("invalid notification filename".into()))
+    }
+
+    fn address_payload(
+        payload: &mut Value,
+        recipient: &str,
+        feishu: Option<&anchor_platform_session::ChannelIdentity>,
+    ) {
+        if let Some(identity) = feishu {
+            payload["open_id"] = json!(recipient);
+            payload["chat_id"] = json!(identity.conversation_id);
+        } else {
+            payload["userid"] = json!(recipient);
+        }
     }
 
     async fn deliver(&self, socket: PathBuf, payload: Value) -> Result<Value, ToolError> {
@@ -783,6 +887,13 @@ impl ChannelTools {
 impl ToolPort for ChannelTools {
     fn definitions(&self) -> Vec<ToolDefinition> {
         let mut definitions = self.inner.definitions();
+        if self.assistant_graph.is_some() && self.supports_platform(ChannelPlatform::Feishu) {
+            definitions.push(feishu::definition());
+            definitions.push(feishu::file_definition());
+        }
+        if !self.supports_platform(ChannelPlatform::Wecom) {
+            return definitions;
+        }
         let task = self.task_delivery_context().ok().flatten().is_some();
         let mut schema = json!({"type":"object","properties":{"userid":{"type":"string"},"content":{"type":"string"}},"required":["userid","content"],"additionalProperties":false});
         if task {
@@ -838,7 +949,12 @@ impl ToolPort for ChannelTools {
     }
 
     fn is_read_only(&self, name: &str) -> bool {
-        if name == SEND_TOOL || name == SEND_FILE_TOOL || name == IMAGE_TOOL {
+        if name == SEND_TOOL
+            || name == SEND_FILE_TOOL
+            || name == IMAGE_TOOL
+            || name == FEISHU_SEND_TOOL
+            || name == FEISHU_SEND_FILE_TOOL
+        {
             false
         } else {
             self.inner.is_read_only(name)
@@ -851,6 +967,32 @@ impl ToolPort for ChannelTools {
         arguments: Value,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<ToolResultContent>, ToolError>> + Send + 'a>> {
         Box::pin(async move {
+            if matches!(name, FEISHU_SEND_TOOL | FEISHU_SEND_FILE_TOOL) {
+                if self.assistant_graph.is_none()
+                    || !self.supports_platform(ChannelPlatform::Feishu)
+                {
+                    return Err(ToolError::Unknown(name.into()));
+                }
+                let receipt = if name == FEISHU_SEND_FILE_TOOL {
+                    let args: feishu::FileArguments =
+                        serde_json::from_value(arguments).map_err(|error| {
+                            ToolError::Failed(format!("invalid Feishu file arguments: {error}"))
+                        })?;
+                    self.send_feishu_file(args).await?
+                } else {
+                    let args: feishu::Arguments =
+                        serde_json::from_value(arguments).map_err(|error| {
+                            ToolError::Failed(format!("invalid Feishu send arguments: {error}"))
+                        })?;
+                    self.send_feishu(args).await?
+                };
+                return Ok(vec![ToolResultContent::json(receipt)]);
+            }
+            if matches!(name, SEND_TOOL | SEND_FILE_TOOL | IMAGE_TOOL)
+                && !self.supports_platform(ChannelPlatform::Wecom)
+            {
+                return Err(ToolError::Unknown(name.into()));
+            }
             if name == SEND_TOOL {
                 let args: SendArguments = serde_json::from_value(arguments)
                     .map_err(|e| ToolError::Failed(format!("invalid WeCom send arguments: {e}")))?;
@@ -860,7 +1002,9 @@ impl ToolPort for ChannelTools {
                 let args: FileArguments = serde_json::from_value(arguments).map_err(|error| {
                     ToolError::Failed(format!("invalid WeCom file arguments: {error}"))
                 })?;
-                return Ok(vec![ToolResultContent::json(self.send_file(args).await?)]);
+                return Ok(vec![ToolResultContent::json(
+                    self.send_file(args, ChannelPlatform::Wecom).await?,
+                )]);
             }
             if name == IMAGE_TOOL {
                 if self.reply_binding()?.is_none() {

@@ -1,6 +1,6 @@
 # 随源码提供的 Graph 与 Plugin
 
-执行 `./scripts/dev.sh start` 后，首次启动会把 [starter.json](starter.json) 中的示例导入可编辑 catalog，并把官方 Plugin 安装到 Library。网页中的 Graph 和插件库可直接查看、修改；安装插件本身不会执行工作流、连接外部账号或启用企微机器人。
+执行 `./scripts/dev.sh start` 后，首次启动会把 [starter.json](starter.json) 中的示例导入可编辑 catalog，并把官方 Plugin 安装到 Library。网页中的 Graph 和插件库可直接查看、修改；安装插件本身不会执行工作流、连接外部账号或启用渠道机器人。
 
 ## 从哪个 Graph 开始
 
@@ -12,6 +12,7 @@
 | `plugin-research` | 单节点学术调研，生成有来源的研究笔记 | default Flash；任务联网 |
 | `deep-academic-research` | 多节点研究、质疑、评审和报告，可能进行多轮模型调用 | default Flash；任务联网 |
 | `wecom-persistent-assistant` | 常驻企微助手模板：这张 Graph 配一个机器人，每个会话一个常驻实例 | default Flash；在 Agent 节点所挂 `wecom` Plugin 详情的「此 Graph 的机器人」中保存成员、设置凭据并启用 |
+| `feishu-persistent-assistant` | 飞书常驻助手模板，长连接私聊、实际工具进度、Markdown 和文件 | default Flash；在 Agent 节点所挂 `feishu` Plugin 详情配置成员 `open_id`、App ID / App Secret 并启用，再在飞书后台保存长连接、订阅接收消息并发布；文件需额外应用权限，见[接入说明](../docs/feishu-assistant.md) |
 
 ## 已安装的 Plugin
 
@@ -22,12 +23,13 @@
 | `academic-research` | 学术检索、原文读取和研究 Skill | 无需仓库附带的账号；访问情况取决于实际论文服务 |
 | `docmost` | 页面 MCP 与图片附件工具 | 在插件详情填写 Docmost URL 和 API key |
 | `wecom` | 企微工具、Gateway 和使用说明 | 机器人按 Graph 配置，见上；默认不连接 |
+| `feishu` | 飞书长连接 Gateway、进度卡、Markdown 及私聊附件 | 应用凭据和接收/回复成员按 Graph 配置；默认不连接，仅向可信原私聊发送文件／任务通知，不提供群聊或任意收件人发送 |
 | `anchor-steward`（Anchor Dev） | Graph、Plugin、Rust、Python、pixi 与 Git 工作流的按需 Skill | 在 Pilot 插件面板启用；纯说明，无 MCP server |
 | `graph-tasks`（Graph Tasks） | AgentNode 按需选择/构建 Graph、异步委派与设置计划 | 在 Graph 编辑器挂载并保存节点可见范围与能力上限；不自动授权或安装候选 Plugin |
 
 插件的本地 Rust 工具随源码首次准备编译和安装，用户不用手动复制二进制。模型、插件连接和渠道配置仍由网页管理，不附带任何凭据。
 
-Anchor Dev 保留目录 ID `anchor-steward`，启用后 Pilot 按需读取开发方法，不会自动初始化环境、启用 Git 或授予联网。使用 Git 工具需单独启用 `git`，远端访问仍按 Host 权限与凭据配置执行。关闭 Anchor Dev 只移除后续 Turn 的方法披露，不删除源码、环境和缓存，也不撤销其他已授权工具。Graph Tasks 的节点授权与结果输入规则见[使用契约](../docs/plugins.md#graph-任务)。
+完整平台发行包也预装 `network`、`git`、Anchor Dev 和 Graph Tasks，不附带业务 Graph。Anchor Dev 保留目录 ID `anchor-steward`，启用后 Pilot 按需读取开发方法，不会自动初始化环境、启用 Git 或授予联网。使用 Git 工具需单独启用 `git`，远端访问仍按 Host 权限与凭据配置执行。关闭 Anchor Dev 只移除后续 Turn 的方法披露，不删除源码、环境和缓存，也不撤销其他已授权工具。Graph Tasks 的节点授权与结果输入规则见[使用契约](../docs/plugins.md#graph-任务)。
 
 ## 用户修改与其他示例
 

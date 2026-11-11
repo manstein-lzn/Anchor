@@ -21,7 +21,9 @@ KernelScheduler、Goose ACP、授权 MCP、Bubblewrap 和 Artifact，只替换�
 export CARGO_TARGET_DIR=/tmp/anchor-goose-regression-target
 export CARGO_BUILD_JOBS=2
 cargo +stable build --manifest-path rust/Cargo.toml --locked \
-  -p anchor-runner-host -p anchor-sandbox-bwrap -p anchor-wecom-tools -p anchor-docmost-tools -p anchor-git-tools --bins
+  -p anchor-runner-host -p anchor-sandbox-bwrap -p anchor-network-tools \
+  -p anchor-wecom-tools -p anchor-wecom-gateway -p anchor-feishu-gateway \
+  -p anchor-docmost-tools -p anchor-git-tools --bins
 cargo +stable build --manifest-path rust/Cargo.toml --locked \
   -p anchor-mcp-host --example http_fixture
 
@@ -113,7 +115,7 @@ helper build 即使没有源码变化也可能切换特性集合；测试命令�
 
 | 套件 | 核查边界 |
 | --- | --- |
-| `goose_acp` | 实际 Agent loop、结构化完成与回执、工具权限、取消、未知效果核查后继续及保留的 spike 反例 |
+| `goose_acp` | 实际 Agent loop、结构化完成与回执、工具权限、取消、未知效果核查后继续、角色系统提示与原生历史隔离及保留的 spike 反例 |
 | `goose_completion` | 成功提交后直接结束、原生工具记录完整、Chat/Responses 同批任意回执、旧回执拒绝与纠正、混批/重复完成拒绝 |
 | `goose_pilot` | 原有授权工具、同原生 Session 续聊/重启、幂等、SSE 重放、变更后的现场核查与取消 |
 | `goose_provider_errors` | 结构化 Provider 错误、认证/额度失败、摘要失败、原始信息不外显、失败请求幂等和同 Session 重启续聊 |
@@ -126,8 +128,8 @@ helper build 即使没有源码变化也可能切换特性集合；测试命令�
 | `goose_plugin_turns` | Graph 保存后下一 Turn 增删插件、当前工具调用冻结、多用户独立生效、改名重建与重启交接保留本轮授权 |
 | `goose_plugin_configuration` | 双 MCP 共用托管配置、轮换后新 invocation 生效且当前调用冻结、清除不回退环境及凭据不进入模型请求 |
 | `goose_channel` | 私有 Unix gateway、原生发送身份、相同正文不同调用、越权拒绝与丢 ACK 后不重发 |
-| `goose_compaction` | Goose 原生压缩、Plugin/现场重读、取消、重启和同 prompt 超窗恢复 |
-| `goose_pilot_compaction` | Pilot 压缩、续聊/重启、显示历史/SSE、摘要取消和变更后核查 |
+| `goose_compaction` | Goose 原生压缩、角色与授权指导保留、Plugin/现场重读、取消、重启和同 prompt 超窗恢复 |
+| `goose_pilot_compaction` | Pilot 压缩、角色系统提示、续聊/重启、显示历史/SSE、摘要取消和变更后核查 |
 | `goose_trace` | prompt 活跃期原生文本/工具结果、状态配对、停止与重启后保留显示和 Artifact |
 | `goose_session_calls` | wait/detach、child Run、Session 映射、local ACK、重启结算及 yield/前台/续行 |
 | `goose_library` | 本地 Library 安装后实际 Goose 小图接线 |
@@ -149,6 +151,29 @@ binary、固定 Goose digest、已完成且无错误的确定性 Provider transc
 恢复日志。Runtime 通过公开 ACP 恢复。缺 usage 是未知，不写成零成本；
 模型调用、完成声明和业务内容质量
 分别记录。
+
+### 飞书私聊专项
+
+`goose_feishu` 不在标准 `SUITES` 中，按需显式执行。先在同一 target 构建
+`anchor-runner-host`、`anchor-sandbox-bwrap` 和 `anchor-feishu-gateway` 的 `--bins`，
+然后沿用上述固定 Goose、relay 与本地联网设置：
+
+```sh
+cargo +stable test --manifest-path rust/Cargo.toml --locked \
+  -p anchor-runner-host --test goose_feishu -- \
+  --ignored --exact private_text_roundtrip_reuses_run_and_native_history_without_duplicate_delivery \
+  --test-threads=1 --nocapture
+```
+
+用例直接加载官方飞书 Graph，替换模型引用；任务通知用例另显式授予 fixture Graph 的
+Graph Tasks 权限。实际监管 Gateway，经过二进制 WebSocket、消息回复/创建 API 对应的
+loopback HTTP fixture、Host 与 Goose，核对两轮私聊、消息去重、ACK、同 Run/原生历史/工作区，
+以及实际 Goose 工具完成事件在最终回复前触发卡片 PATCH、卡片 2.0 Markdown、私聊文件下载与
+只读挂载、生成文件上传／发送、重复媒体不重下／重跑／重发。计划用例另核对原生工具建计划、
+真实 Scheduler/任务 Run、结果轮显式 Markdown 通知及精确选中不可变文件外发、Gateway confirmed
+账本及原始文件名。完整专项用 `--ignored --test-threads=1`，不加 `--exact` 过滤。
+它们不代验真实飞书权限、应用发布或公网收发，
+当前结论见[验收台账](pilot-development-plan.md)。
 
 ## Release 与 Source-Free 候选
 

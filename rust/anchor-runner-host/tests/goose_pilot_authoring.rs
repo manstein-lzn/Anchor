@@ -522,13 +522,10 @@ fn ordinary_turn_acquires_http_and_git_sources_and_freezes_network_across_follow
     let host = Host::new(&graph())
         .default_runtime()
         .with_allowed_commands("sh,cat,git,true,curl,python3");
-    let network = host.base.root.path().join("plugins/network");
-    fs::create_dir_all(&network).unwrap();
-    fs::write(
-        network.join("plugin.json"),
-        r#"{"name":"Fixture task network","network":true}"#,
-    )
-    .unwrap();
+    fixture::install_system_plugin(
+        host.base.root.path(),
+        anchor_graph_host::SystemPlugin::Network,
+    );
     let server = host.serve(&provider);
     create(&server, "authoring");
     let (status, mounted) = server.request(

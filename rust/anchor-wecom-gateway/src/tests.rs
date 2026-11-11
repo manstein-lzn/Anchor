@@ -295,19 +295,19 @@ fn private_state_requires_private_regular_files_and_exclusive_lease() {
     let root = tempfile::tempdir().unwrap();
     let state_dir = root.path().join("state");
     let config = GatewayConfig::new(&state_dir, "bot".into(), "secret".into(), "c".repeat(40));
-    let state = crate::private_state::PrivateState::acquire(&config).unwrap();
+    let state = crate::private_state::PrivateState::acquire(&config.state_dir).unwrap();
     assert_eq!(
         std::fs::metadata(&state_dir).unwrap().permissions().mode() & 0o777,
         0o700
     );
     assert!(matches!(
-        crate::private_state::PrivateState::acquire(&config),
+        crate::private_state::PrivateState::acquire(&config.state_dir),
         Err(GatewayError::AlreadyRunning)
     ));
     drop(state);
     std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
     assert!(matches!(
-        crate::private_state::PrivateState::acquire(&config),
+        crate::private_state::PrivateState::acquire(&config.state_dir),
         Err(GatewayError::PrivateState)
     ));
 }
@@ -469,8 +469,11 @@ fn retryable_events_require_unknown_state_without_reply_claim() {
             .unwrap()
     );
     assert!(ledger.retryable_events(now, window).unwrap().is_empty());
+    assert!(ledger.reject(&event.event_id).is_err());
+    assert!(ledger.pending_settlements(now, 10).unwrap().is_empty());
     ledger.confirm("reply-wire").unwrap();
     assert!(ledger.retryable_events(now, window).unwrap().is_empty());
+    assert!(ledger.reject(&event.event_id).is_err());
 }
 
 #[test]

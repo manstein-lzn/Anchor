@@ -398,10 +398,20 @@ impl HostIoResolver {
             .as_ref()
             .is_some_and(|frozen| frozen.snapshot_unreadable);
         let snapshot = frozen.as_ref().map(|frozen| &frozen.snapshot);
-        if request.plugins.is_empty() && switches.is_empty() {
+        let node = admitted
+            .snapshot
+            .nodes
+            .iter()
+            .find(|node| node.id == key.node_id)
+            .ok_or("admitted Plugin policy node is missing")?;
+        let mode = admitted.snapshot.node_network_mode(node);
+        if request.plugins.is_empty()
+            && switches.is_empty()
+            && mode != anchor_runtime::graph::NetworkMode::Enabled
+        {
             return Ok(MountedPlugins {
                 bindings: Vec::new(),
-                network: request.network && session_turn.is_none(),
+                network: false,
                 reasons: Vec::new(),
                 session: session_turn.map(|(session, _)| session),
                 snapshot: snapshot.is_some(),
@@ -490,25 +500,19 @@ impl HostIoResolver {
                         .pop()
                         .ok_or_else(|| format!("Plugin `{id}` is not available in this Library"))
                 })?;
-            if let Some(admitted_binding) = admitted.plugin_bindings.get(id)
-                && !admitted_binding.same_authorization(&binding)
-            {
-                return Err(format!(
-                    "Plugin `{id}` Host authorization changed since this Graph Run was admitted"
-                ));
-            }
             bindings.push(binding);
         }
-        let network = if let Some(snapshot) = snapshot {
-            crate::plugin_network::apply(
-                self.plugin_library_root()?,
-                &mut bindings,
-                request.network && snapshot.network_allowed,
-                &mut resolved.reasons,
-            )?
-        } else {
-            request.network
-        };
+        // Check selected authority before network policy can hide an altered
+        // Plugin, then recheck the resulting set including a derived provider.
+        self.validate_invocation_plugins(&admitted, request, &bindings)?;
+        let network = crate::plugin_network::apply_node(
+            self.plugin_library_root()?,
+            &mut bindings,
+            mode,
+            snapshot.is_none_or(|snapshot| snapshot.network_allowed),
+            &mut resolved.reasons,
+        )?;
+        self.validate_invocation_plugins(&admitted, request, &bindings)?;
         Ok(MountedPlugins {
             bindings,
             network,

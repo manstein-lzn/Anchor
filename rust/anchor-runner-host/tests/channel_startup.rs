@@ -4,7 +4,7 @@ mod fixture;
 
 use fixture::{Host, wait_until};
 use serde_json::json;
-use std::{fs, os::unix::fs::PermissionsExt};
+use std::fs;
 
 #[test]
 fn a_bot_configured_on_its_graph_starts_its_gateway_and_the_graph_stays_editable() {
@@ -17,7 +17,7 @@ fn a_bot_configured_on_its_graph_starts_its_gateway_and_the_graph_stays_editable
         },
         "nodes":[
             {"id":"wait_input","op":"wait_input"},
-            {"id":"assistant","agent":"worker","plugins":["channel"]},
+            {"id":"assistant","agent":"worker","plugins":["wecom",{"id":"network","network":"denied"}]},
             {"id":"reply","op":"reply"}
         ],
         "edges":[
@@ -31,31 +31,15 @@ fn a_bot_configured_on_its_graph_starts_its_gateway_and_the_graph_stays_editable
     fs::rename(root.join("bundle"), root.join("assistant")).unwrap();
     fs::write(
         root.join("assistant/manifest.json"),
-        json!({"format":1,"graph":"graph.json","plugins":[{"id":"channel"}]}).to_string(),
+        json!({"format":1,"graph":"graph.json","plugins":[{"id":"wecom"},{"id":"network"}]})
+            .to_string(),
     )
     .unwrap();
-    let plugin = root.join("plugins/channel");
-    fs::create_dir_all(plugin.join("bin")).unwrap();
-    fs::write(
-        plugin.join("plugin.json"),
-        r#"{"name":"Local channel fixture"}"#,
-    )
-    .unwrap();
-    fs::write(
-        plugin.join("channel.json"),
-        json!({"platform":"wecom","transport":"websocket","entrypoint":"bin/gateway","required_environment":[]}).to_string(),
-    )
-    .unwrap();
-    let gateway = plugin.join("bin/gateway");
-    fs::write(
-        &gateway,
-        "#!/bin/sh\n: > \"$WECOM_CHANNEL_STATE/started\"\nexec /bin/sleep 60\n",
-    )
-    .unwrap();
-    fs::set_permissions(gateway, fs::Permissions::from_mode(0o700)).unwrap();
+    fixture::install_system_plugin(root, anchor_graph_host::SystemPlugin::Wecom);
 
     let server = host.serve_configured_without_model(|process| {
         process
+            .env("ANCHOR_WECOM_WS_URL", "ws://127.0.0.1:1")
             .env_remove("ANCHOR_RUNNER_GRAPH_NAME")
             .env_remove("ANCHOR_RUNNER_BUNDLE_ROOT");
     });
@@ -65,6 +49,17 @@ fn a_bot_configured_on_its_graph_starts_its_gateway_and_the_graph_stays_editable
         Some(&json!({"users":["fixture-member"],"send_users":["fixture-member"]})),
     );
     assert_eq!(status, 200, "{configured}");
+    let (status, credentials) =
+        server.request("GET", "/graphs/assistant/channel/credentials", None);
+    assert_eq!(status, 200, "{credentials}");
+    for (field, value) in [
+        ("WECOM_BOT_ID", "fixture-bot"),
+        ("WECOM_BOT_SECRET", "fixture-secret"),
+    ] {
+        let (status, saved) = server.request("PUT", &format!("/graphs/assistant/channel/credentials/{field}"),
+            Some(&json!({"authorization_digest":credentials["targets"][0]["authorization_digest"],"value":value})));
+        assert_eq!(status, 200, "{saved}");
+    }
     let (status, enabled) = server.request(
         "POST",
         "/graphs/assistant/channel/enabled",
@@ -74,14 +69,14 @@ fn a_bot_configured_on_its_graph_starts_its_gateway_and_the_graph_stays_editable
     wait_until("the Graph's gateway process", || {
         host.state_root()
             // The gateway state directory is named by a digest of the Graph.
-            .join("channels/graphs/a39a7ffad4a3013f/started")
+            .join("channels/graphs/a39a7ffad4a3013f/control.json")
             .is_file()
     });
     let (status, channel) = server.request("GET", "/graphs/assistant/channel", None);
     assert_eq!(status, 200, "{channel}");
     assert_eq!(channel["enabled"], true);
     assert_eq!(channel["reply_node"], "assistant");
-    assert_eq!(channel["binding"]["plugin"], "channel");
+    assert_eq!(channel["binding"]["plugin"], "wecom");
     let (status, listed) = server.request("GET", "/channels", None);
     assert_eq!(status, 200, "{listed}");
     assert_eq!(listed["channels"][0]["graph"], "assistant");

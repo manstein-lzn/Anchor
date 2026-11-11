@@ -6,6 +6,7 @@ license = "MIT"
 description = "Rust-native Graph host with Sandbox, immutable files and paired parallelism"
 
 [dependencies]
+anchor-distribution = { path = "../anchor-distribution" }
 anchor-file-lease = { path = "../anchor-file-lease" }
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 futures-util = "0.3"
@@ -41,8 +42,9 @@ tempfile = "3"
 tokio = { workspace = true, features = ["test-util"] }
 anchor-rsi = { path = "../anchor-rsi" }
 anchor-runtime = { path = "../anchor-runtime", features = ["test-fixtures"] }
-anchor-distribution = { path = "../anchor-distribution" }
 anchor-wecom-gateway = { path = "../anchor-wecom-gateway" }
+anchor-feishu-gateway = { path = "../anchor-feishu-gateway" }
+rusqlite = { version = "=0.40.2", features = ["bundled"] }
 flate2 = { version = "=1.1.10", default-features = false, features = ["rust_backend"] }
 tar = { version = "=0.4.46", default-features = false }
 tokio-tungstenite = { version = "=0.29.0", default-features = false, features = ["handshake"] }

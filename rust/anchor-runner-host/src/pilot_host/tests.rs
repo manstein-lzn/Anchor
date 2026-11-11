@@ -734,12 +734,7 @@ impl Fixture {
         let data = catalog.join("state");
         let workspace = catalog.join("workspaces");
         std::fs::create_dir_all(data.join("platform")).unwrap();
-        std::fs::create_dir_all(catalog.join("plugins/network")).unwrap();
-        std::fs::write(
-            catalog.join("plugins/network/plugin.json"),
-            json!({"name":"Network fixture","network":true}).to_string(),
-        )
-        .unwrap();
+        crate::test_network_plugin(&catalog);
         let sessions = SessionStore::open(data.join("platform/sessions.sqlite")).unwrap();
         Self {
             _root: root,

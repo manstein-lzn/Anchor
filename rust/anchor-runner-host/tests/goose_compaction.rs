@@ -19,14 +19,11 @@ const SKILL: &str = "/plugins/compaction/skills/inspect/SKILL.md";
 const CONTINUATION: &str = "Your context was compacted.";
 
 fn assert_persistent_plugin_system_prompt(request: &Value) -> String {
-    let system = request["messages"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|message| message["role"] == "system")
-        .filter_map(|message| message["content"].as_str())
-        .collect::<Vec<_>>()
-        .join("\n");
+    let definition = graph();
+    let role = definition["agents"]["worker"]["instructions"]
+        .as_str()
+        .unwrap();
+    let system = goose::assert_role_system_prompt(request, role);
     assert!(system.contains("Current Anchor Plugin capabilities for this invocation."));
     assert!(system.contains("\"id\":\"compaction\""));
     assert!(system.contains("\"description\":\"Inspect durable facts.\""));
@@ -205,8 +202,6 @@ fn assert_artifacts(host: &Host, run: &str, facts: &Facts) -> Value {
     assert_eq!(saved["projection"]["result"]["outcome"], "done", "{saved}");
     for (node, name, expected) in [
         ("worker", "evidence.txt", facts.workspace.as_bytes()),
-        ("worker", "workspace.txt", facts.workspace.as_bytes()),
-        ("worker", "plugin-before.txt", facts.skill.as_bytes()),
         ("worker", "plugin-after.txt", facts.skill.as_bytes()),
         ("worker", "effects.txt", b"once".as_slice()),
         ("verify", "verified.txt", facts.workspace.as_bytes()),
@@ -226,6 +221,20 @@ fn assert_artifacts(host: &Host, run: &str, facts: &Facts) -> Value {
             format!("{:x}", Sha256::digest(expected))
         );
         assert_eq!(manifest["files"][name]["bytes"], expected.len());
+    }
+    let manifest = fixture::read_json(host.base.artifact(&saved, "worker").join("manifest.json"));
+    for (name, expected) in [
+        ("workspace.txt", facts.workspace.as_bytes()),
+        ("plugin-before.txt", facts.skill.as_bytes()),
+    ] {
+        assert_eq!(
+            host.base.workspace_files(run, name),
+            vec![expected.to_vec()]
+        );
+        assert!(
+            manifest["files"].get(name).is_none(),
+            "unselected workspace file was delivered: {name}"
+        );
     }
     assert_eq!(
         fs::read(

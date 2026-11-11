@@ -22,7 +22,7 @@ impl RunApplication {
         let saved = sessions
             .get(owner, session)
             .map_err(super::super::assistants::assistant_session_error)?;
-        if identity.source != channel_management::PLATFORM
+        if identity.source != channel_management::ChannelPlatform::Wecom.as_str()
             || identity.conversation_kind != ChannelConversationKind::Single
             || identity.sender_id.is_empty()
             || identity.conversation_id.is_empty()

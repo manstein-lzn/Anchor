@@ -11,11 +11,11 @@ use tower::ServiceExt;
 fn fixture() -> (tempfile::TempDir, ApiState, Arc<FakeChannels>) {
     let root = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(root.path().join("task")).unwrap();
-    crate::application::channel_management::fake::install_channel_plugin(root.path(), "gateway");
-    std::fs::write(root.path().join("task/graph.json"), r#"{"entry":"wait","agents":{"reply":{"model":"fixture","instructions":"fixture"}},"ops":{"wait":{"host":{"operation":"session.wait_input"}},"deliver":{"host":{"operation":"session.reply"}}},"nodes":[{"id":"wait","op":"wait"},{"id":"reply","agent":"reply","plugins":["gateway"]},{"id":"deliver","op":"deliver"}],"edges":[{"from":"wait","to":"reply"},{"from":"reply","to":"deliver"},{"from":"deliver","to":"wait"}]}"#).unwrap();
+    crate::application::channel_management::fake::install_channel_plugin(root.path(), "wecom");
+    std::fs::write(root.path().join("task/graph.json"), r#"{"entry":"wait","agents":{"reply":{"model":"fixture","instructions":"fixture"}},"ops":{"wait":{"host":{"operation":"session.wait_input"}},"deliver":{"host":{"operation":"session.reply"}}},"nodes":[{"id":"wait","op":"wait"},{"id":"reply","agent":"reply","plugins":["wecom"]},{"id":"deliver","op":"deliver"}],"edges":[{"from":"wait","to":"reply"},{"from":"reply","to":"deliver"},{"from":"deliver","to":"wait"}]}"#).unwrap();
     std::fs::write(
         root.path().join("task/manifest.json"),
-        r#"{"format":1,"graph":"graph.json","plugins":[{"id":"gateway"}]}"#,
+        r#"{"format":1,"graph":"graph.json","plugins":[{"id":"wecom"}]}"#,
     )
     .unwrap();
     let port = Arc::new(FakeChannels::new());
@@ -80,7 +80,7 @@ async fn channel_management_http_is_owner_bound_and_checks_expected_binding() {
     let saved = port.get("task").unwrap();
     assert_eq!(saved.owner, "local");
     // The Plugin comes from the Graph, never from the request.
-    assert_eq!(saved.binding.plugin, "gateway");
+    assert_eq!(saved.binding.plugin, "wecom");
     let binding = serde_json::to_value(&saved.binding).unwrap();
     let mut stale = binding.clone();
     stale["users"] = json!(["bob"]);
@@ -122,7 +122,7 @@ async fn channel_management_http_rejects_secrets_owner_forgery_and_unbound_enabl
         // Graph, node and Plugin are derived, never chosen by the caller.
         ("graph", json!("other")),
         ("reply_node", json!("reply")),
-        ("plugin", json!("gateway")),
+        ("plugin", json!("wecom")),
     ] {
         let mut request = members.clone();
         request[field] = value;
@@ -180,7 +180,7 @@ async fn channel_binding_requires_a_persistent_assistant_graph() {
     let (root, state, port) = fixture();
     let key = "a".repeat(32);
     let members = json!({"users":["alice"],"send_users":["alice"]});
-    let single = r#"{"entry":"reply","agents":{"reply":{"model":"fixture","instructions":"fixture"}},"nodes":[{"id":"reply","agent":"reply","plugins":["gateway"]}],"edges":[]}"#;
+    let single = r#"{"entry":"reply","agents":{"reply":{"model":"fixture","instructions":"fixture"}},"nodes":[{"id":"reply","agent":"reply","plugins":["wecom"]}],"edges":[]}"#;
     let persistent = std::fs::read(root.path().join("task/graph.json")).unwrap();
     std::fs::write(root.path().join("task/graph.json"), single).unwrap();
     let (status, refused) = call(

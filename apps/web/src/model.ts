@@ -55,6 +55,7 @@ export const callModeLabel = (mode: 'wait' | 'detach') => mode === 'wait' ? '等
 
 export type GraphSummary = {
   graph: string; running: string | null; active_runs?: string[]; active_nodes?: string[];
+  completed_task?: boolean;
   listener?: { platform: string; status: 'connecting' | 'authenticating' | 'authenticated' | 'reconnecting' | 'stopped' | 'unavailable' };
 };
 
@@ -96,11 +97,13 @@ export type GraphTaskPolicy = {
   graphs?: string[]; create_graphs?: boolean; plugins?: string[];
   network?: boolean; commands?: boolean; develop_plugins?: boolean;
 };
-export type NodePluginRef = string | { id: string; required?: boolean; default?: boolean; graph_tasks?: GraphTaskPolicy };
+export type NetworkMode = 'auto' | 'enabled' | 'denied';
+export type NodePluginRef = string | { id: string; required?: boolean; default?: boolean; graph_tasks?: GraphTaskPolicy; network?: NetworkMode };
 export type OurNode = { id: string; agent?: string; op?: string; graph?: string; with?: string; plugins?: NodePluginRef[] };
 
 export type Plugin = {
   id: string; name: string; description: string; digest?: string;
+  kind?: 'system' | 'extension'; canUninstall?: boolean; canReplace?: boolean; updateSource?: 'anchor-release' | 'extension';
   skills?: string[];
   unsupported?: string[];
   mcpServers?: Record<string, { transport: string; auth?: string }>;

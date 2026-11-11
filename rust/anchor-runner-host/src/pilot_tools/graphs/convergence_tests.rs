@@ -147,7 +147,7 @@ async fn pilot_validate_create_and_update_share_host_model_reference_validation(
         );
         assert_eq!(
             tools.application.read_graph("saved").unwrap()["definition"],
-            valid
+            GraphSnapshot::normalize_network_authoring(valid.clone(), false)
         );
     }
     // The spike's deterministic model name uses exactly its runtime registry.

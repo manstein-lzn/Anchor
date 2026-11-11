@@ -1,17 +1,19 @@
 mod connection;
 mod control;
 mod feedback;
-mod progress;
 mod status;
 
 use std::{
-    collections::{BTreeMap, HashSet, VecDeque},
+    collections::{BTreeMap, VecDeque},
     sync::Arc,
     time::Duration,
 };
 
-use futures::{FutureExt, StreamExt, future::BoxFuture, stream::FuturesUnordered};
-use serde::Serialize;
+use anchor_channel_transport::{
+    progress::{self, ProgressLine},
+    stopping,
+};
+use futures::{FutureExt, future::BoxFuture, stream::FuturesUnordered};
 use serde_json::{Value, json};
 use tokio::{
     net::UnixListener,
@@ -42,15 +44,7 @@ pub(super) fn diagnostics() -> bool {
     std::env::var("ANCHOR_WECOM_DEBUG").as_deref() == Ok("1")
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ConnectionStatus {
-    Connecting,
-    Authenticating,
-    Authenticated,
-    Reconnecting,
-    Stopped,
-}
+pub use anchor_channel_transport::ConnectionStatus;
 
 pub struct Gateway;
 
@@ -65,7 +59,7 @@ pub struct RunningGateway {
 impl Gateway {
     pub async fn start(mut config: GatewayConfig) -> Result<RunningGateway, GatewayError> {
         config.validate()?;
-        let mut state = PrivateState::acquire(&config)?;
+        let mut state = PrivateState::acquire(&config.state_dir)?;
         let profile = digest(
             &serde_json::to_vec(&json!([config.bot_id, config.ws_url]))
                 .map_err(|_| GatewayError::Ledger)?,
@@ -79,7 +73,7 @@ impl Gateway {
             .map(Arc::new);
         let listener =
             UnixListener::bind(state.socket_path()).map_err(|_| GatewayError::PrivateState)?;
-        if let Err(error) = state.publish(&config) {
+        if let Err(error) = state.publish(&config.control_token) {
             state.cleanup();
             return Err(error);
         }
@@ -93,7 +87,13 @@ impl Gateway {
             let worker_shutdown = shutdown.clone();
             let worker_errors = errors.clone();
             tokio::spawn(async move {
-                settlement_loop(worker_ledger, webhook, worker_shutdown, worker_errors).await;
+                anchor_channel_transport::settlement_loop(
+                    worker_ledger,
+                    webhook.client.clone(),
+                    worker_shutdown,
+                    worker_errors,
+                )
+                .await;
             })
         });
         let control = control::Server {
@@ -286,18 +286,6 @@ pub(super) struct OpenBubble {
 #[derive(Clone, Copy)]
 pub(super) struct AwaitingAck {
     pub(super) deadline: tokio::time::Instant,
-}
-
-/// One status line the Host projection observed for an admitted event.
-pub(super) struct ProgressLine {
-    pub(super) event_id: String,
-    pub(super) scope: ConversationScope,
-    pub(super) content: String,
-    /// Stable category token, absent when the Host predates it.
-    pub(super) category: Option<String>,
-    /// 1-based tool step, absent for guidance lines.
-    pub(super) step: Option<u32>,
-    pub(super) settled: bool,
 }
 
 /// A live progress subscription for one admitted event.
@@ -948,81 +936,4 @@ fn media_identifier(value: &serde_json::Value, key: &str) -> Option<String> {
         .and_then(serde_json::Value::as_str)
         .filter(|text| !text.is_empty() && text.len() <= 512 && !text.chars().any(char::is_control))
         .map(str::to_owned)
-}
-
-async fn settlement_loop(
-    ledger: Arc<Ledger>,
-    webhook: Arc<Webhook>,
-    mut shutdown: watch::Receiver<bool>,
-    errors: broadcast::Sender<GatewayError>,
-) {
-    let mut requests =
-        FuturesUnordered::<BoxFuture<'static, (String, Result<(), GatewayError>)>>::new();
-    let mut active = HashSet::new();
-    let mut retry = tokio::time::interval(Duration::from_millis(100));
-    retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    loop {
-        let capacity = MAX_IN_FLIGHT.saturating_sub(active.len());
-        if capacity > 0 {
-            match current_time_millis()
-                .and_then(|now| ledger.pending_settlements(now, MAX_IN_FLIGHT + active.len()))
-            {
-                Ok(settlements) => {
-                    for settlement in settlements {
-                        if active.contains(&settlement.receipt.key) {
-                            continue;
-                        }
-                        let key = settlement.receipt.key.clone();
-                        let request_webhook = webhook.clone();
-                        active.insert(key.clone());
-                        requests.push(
-                            async move { (key, request_webhook.settle(&settlement).await) }.boxed(),
-                        );
-                        if active.len() >= MAX_IN_FLIGHT {
-                            break;
-                        }
-                    }
-                }
-                Err(error) => {
-                    let _ = errors.send(error);
-                }
-            }
-        }
-        tokio::select! {
-            _ = stopping(&mut shutdown) => break,
-            result = requests.next(), if !requests.is_empty() => {
-                if let Some((key, result)) = result {
-                    active.remove(&key);
-                    match &result {
-                        Ok(()) => {
-                            if let Err(error) = ledger.finish_settlement(&key, true) {
-                                let _ = errors.send(error);
-                            }
-                        }
-                        Err(GatewayError::Rejected) => {
-                            eprintln!(
-                                "anchor-wecom-gateway: settlement refused by the Host; not retrying"
-                            );
-                            if let Err(error) = ledger.abandon_settlement(&key) {
-                                let _ = errors.send(error);
-                            }
-                        }
-                        Err(_) => {
-                            if let Err(error) = ledger.finish_settlement(&key, false) {
-                                let _ = errors.send(error);
-                            }
-                            if let Err(error) = result {
-                                let _ = errors.send(error);
-                            }
-                        }
-                    }
-                }
-            }
-            _ = retry.tick() => {}
-        }
-    }
-}
-
-async fn stopping(shutdown: &mut watch::Receiver<bool>) {
-    let _ = shutdown.wait_for(|stopped| *stopped).await;
 }

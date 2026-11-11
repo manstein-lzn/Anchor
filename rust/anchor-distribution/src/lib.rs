@@ -1,14 +1,18 @@
 #![forbid(unsafe_code)]
 
 mod archive;
+mod deb;
 mod filesystem;
 mod install;
+mod native;
 mod platform;
+mod rpm;
 mod validation;
 
+pub use deb::{NativeDebReport, NativeDebRequest, build_native_deb};
 pub use install::{
     PlatformInstallReport, PlatformInstallRequest, install_platform, platform_command,
-    platform_command_with_listen, validate_platform_runtime,
+    platform_command_with_listen, platform_plugin_inventory, validate_platform_runtime,
 };
 pub use platform::{
     BootstrapInventory, BootstrapTool, PIXI_SHA256, PIXI_SOURCE, PIXI_VERSION,
@@ -16,6 +20,7 @@ pub use platform::{
     RUSTUP_INIT_SOURCE, RUSTUP_INIT_VERSION, UV_SHA256, UV_SOURCE, UV_VERSION,
     build_platform_package,
 };
+pub use rpm::{NativeRpmReport, NativeRpmRequest, build_native_rpm};
 pub use validation::{ElfIdentity, ElfRuntime};
 
 use anchor_graph_host::{
@@ -264,51 +269,8 @@ fn prepare(request: &PackageRequest, goose_sha256: &str) -> Result<PreparedPacka
         .iter()
         .map(|plugin| plugin.id.clone())
         .collect::<Vec<_>>();
-    let mut first_party_added = false;
-    for (plugin_id, server_name, binary_name, source, option_name) in [
-        (
-            "docmost",
-            "attachments",
-            "anchor-docmost-tools",
-            request.docmost_tools.as_deref(),
-            "--docmost-tools",
-        ),
-        (
-            "wecom",
-            "wecom",
-            "anchor-wecom-tools",
-            request.wecom_tools.as_deref(),
-            "--wecom-tools",
-        ),
-    ] {
-        let referenced = plugin_ids.iter().any(|id| id == plugin_id);
-        match (referenced, source) {
-            (true, Some(source)) => {
-                let mut files = BinaryInstallContext {
-                    root,
-                    source_root: root,
-                    plugin_root: &plugin_root,
-                    entries: &mut entries,
-                    snapshots: &mut snapshots,
-                };
-                install_plugin_binary(source, plugin_id, server_name, binary_name, &mut files)?;
-                first_party_added = true;
-            }
-            (true, None) => {
-                return Err(PackageError::Invalid(format!(
-                    "{plugin_id} Plugin requires {option_name} with the {binary_name} ELF"
-                )));
-            }
-            (false, Some(_)) => {
-                return Err(PackageError::Invalid(format!(
-                    "{option_name} requires the {plugin_id} Plugin in the Graph bundle"
-                )));
-            }
-            (false, None) => {}
-        }
-    }
-    let wecom_referenced = plugin_ids.iter().any(|id| id == "wecom");
-    match (wecom_referenced, request.wecom_gateway.as_deref()) {
+    let docmost_referenced = plugin_ids.iter().any(|id| id == "docmost");
+    match (docmost_referenced, request.docmost_tools.as_deref()) {
         (true, Some(source)) => {
             let mut files = BinaryInstallContext {
                 root,
@@ -317,47 +279,72 @@ fn prepare(request: &PackageRequest, goose_sha256: &str) -> Result<PreparedPacka
                 entries: &mut entries,
                 snapshots: &mut snapshots,
             };
-            install_channel_binary(
+            install_plugin_binary(
                 source,
-                "wecom",
-                "wecom",
-                "websocket",
-                "bin/anchor-wecom-gateway",
-                "anchor-wecom-gateway",
+                "docmost",
+                "attachments",
+                "anchor-docmost-tools",
                 &mut files,
             )?;
-            first_party_added = true;
         }
         (true, None) => {
             return Err(PackageError::Invalid(
-                "wecom Plugin requires --wecom-gateway with the anchor-wecom-gateway ELF".into(),
+                "docmost Plugin requires --docmost-tools with the anchor-docmost-tools ELF".into(),
             ));
         }
         (false, Some(_)) => {
             return Err(PackageError::Invalid(
-                "--wecom-gateway requires the wecom Plugin in the Graph bundle".into(),
+                "--docmost-tools requires the docmost Plugin in the Graph bundle".into(),
             ));
         }
         (false, None) => {}
     }
-    if first_party_added {
-        refresh_bundle_manifest(&bundle_root, root, &plugin_ids, &mut entries)?;
+    let wecom_referenced = plugin_ids.iter().any(|id| id == "wecom");
+    // Stage the entire explicitly supplied system Plugin before shared admission:
+    // its catalog identity validates the complete official resource set at once.
+    for (source, binary_name, option_name) in [
+        (
+            request.wecom_tools.as_deref(),
+            "anchor-wecom-tools",
+            "--wecom-tools",
+        ),
+        (
+            request.wecom_gateway.as_deref(),
+            "anchor-wecom-gateway",
+            "--wecom-gateway",
+        ),
+    ] {
+        match (wecom_referenced, source) {
+            (true, Some(source)) => {
+                let mut files = BinaryInstallContext {
+                    root,
+                    source_root: root,
+                    plugin_root: &plugin_root,
+                    entries: &mut entries,
+                    snapshots: &mut snapshots,
+                };
+                install_bundle_binary(source, "wecom", binary_name, &mut files)?;
+            }
+            (true, None) => {
+                return Err(PackageError::Invalid(format!(
+                    "wecom Plugin requires {option_name} with the {binary_name} ELF"
+                )));
+            }
+            (false, Some(_)) => {
+                return Err(PackageError::Invalid(format!(
+                    "{option_name} requires the wecom Plugin in the Graph bundle"
+                )));
+            }
+            (false, None) => {}
+        }
     }
-    let admitted = FileGraphBundleLoader::new(&bundle_root)
-        .load()
-        .map_err(|error| {
-            PackageError::Invalid(format!("Graph bundle failed shared admission: {error}"))
-        })?;
-    let plugin_ids = admitted.plugins.clone();
-    let scholarly_plugin = admitted
-        .plugins
+    let scholarly_plugin = plugin_ids
         .iter()
         .any(|plugin| plugin == "academic-research");
     match (scholarly_plugin, request.scholarly.as_ref()) {
         (true, Some(binary)) => {
             install_scholarly_binary(
                 binary,
-                &plugin_ids,
                 &request.bundle,
                 &plugin_root,
                 &mut entries,
@@ -389,7 +376,7 @@ fn prepare(request: &PackageRequest, goose_sha256: &str) -> Result<PreparedPacka
         graph_sha256: resource(&entries, "bundle/graph.json")?.sha256.clone(),
         manifest_sha256: resource(&entries, "bundle/manifest.json")?.sha256.clone(),
         plugins: source_catalog
-            .resolve(&admitted.plugins)
+            .resolve_snapshot(&admitted.snapshot)
             .map_err(|_| PackageError::Bundle)?
             .into_iter()
             .map(|binding| PluginInventory {
@@ -452,7 +439,6 @@ fn prepare(request: &PackageRequest, goose_sha256: &str) -> Result<PreparedPacka
 
 fn install_scholarly_binary(
     binary: &Path,
-    plugin_ids: &[String],
     source_root: &Path,
     plugin_root: &Path,
     entries: &mut BTreeMap<String, Option<ResourceFile>>,
@@ -504,32 +490,6 @@ fn install_scholarly_binary(
     add_snapshots(entries, std::slice::from_ref(&snapshot))?;
     snapshots.push(snapshot);
 
-    // The declarations are validated against the source tree, and the bundle keeps
-    // referencing them by id.
-    catalog
-        .resolve(plugin_ids)
-        .map_err(|_| PackageError::Bundle)?;
-    let mut bytes = serde_json::to_vec_pretty(&serde_json::json!({
-        "format": 1,
-        "graph": "graph.json",
-        "plugins": plugin_ids
-            .iter()
-            .map(|id| serde_json::json!({"id": id}))
-            .collect::<Vec<_>>()
-    }))?;
-    bytes.push(b'\n');
-    let output_bundle = plugin_root.parent().unwrap().join("bundle");
-    fs::write(output_bundle.join("manifest.json"), &bytes)?;
-    fs::set_permissions(
-        output_bundle.join("manifest.json"),
-        fs::Permissions::from_mode(0o644),
-    )?;
-    let manifest_resource = entries
-        .get_mut("bundle/manifest.json")
-        .and_then(Option::as_mut)
-        .ok_or_else(|| PackageError::Invalid("bundle manifest resource is missing".into()))?;
-    manifest_resource.sha256 = format!("{:x}", Sha256::digest(&bytes));
-    manifest_resource.size = bytes.len() as u64;
     Ok(())
 }
 
@@ -577,46 +537,6 @@ fn install_plugin_binary(
     install_bundle_binary(binary, plugin_id, binary_name, files)
 }
 
-fn install_channel_binary(
-    binary: &Path,
-    plugin_id: &str,
-    platform: &str,
-    transport: &str,
-    entrypoint: &str,
-    sdk: &str,
-    files: &mut BinaryInstallContext<'_>,
-) -> Result<()> {
-    let channel: serde_json::Value = serde_json::from_slice(
-        &fs::read(
-            files
-                .source_root
-                .join("plugins")
-                .join(plugin_id)
-                .join("channel.json"),
-        )
-        .map_err(|_| PackageError::Bundle)?,
-    )
-    .map_err(|_| PackageError::Bundle)?;
-    if channel["platform"] != platform
-        || channel["transport"] != transport
-        || channel["entrypoint"] != entrypoint
-        || channel["sdk"] != sdk
-    {
-        return Err(PackageError::Invalid(format!(
-            "{plugin_id} {platform} channel must use {transport} entrypoint {entrypoint} ({sdk})"
-        )));
-    }
-
-    let binary_name = entrypoint
-        .strip_prefix("bin/")
-        .ok_or_else(|| PackageError::Invalid("channel binary must be under bin/".into()))?;
-    install_bundle_binary(binary, plugin_id, binary_name, files)?;
-    FilePluginCatalog::new(files.source_root)
-        .channels(plugin_id)
-        .map_err(|_| PackageError::Bundle)?;
-    Ok(())
-}
-
 fn install_bundle_binary(
     binary: &Path,
     plugin_id: &str,
@@ -652,41 +572,6 @@ fn install_bundle_binary(
     validation::elf(&files.root.join(&relative))?;
     add_snapshots(files.entries, std::slice::from_ref(&snapshot))?;
     files.snapshots.push(snapshot);
-    Ok(())
-}
-
-/// Rewrite the bundle's manifest as references, validating them against the
-/// Plugin sources that ship beside the bundle.
-fn refresh_bundle_manifest(
-    bundle_root: &Path,
-    source_root: &Path,
-    plugin_ids: &[String],
-    entries: &mut BTreeMap<String, Option<ResourceFile>>,
-) -> Result<()> {
-    FilePluginCatalog::new(source_root)
-        .resolve(plugin_ids)
-        .map_err(|_| PackageError::Bundle)?;
-    let plugins = plugin_ids
-        .iter()
-        .map(|id| serde_json::json!({"id": id}))
-        .collect::<Vec<_>>();
-    let mut bytes = serde_json::to_vec_pretty(&serde_json::json!({
-        "format": 1,
-        "graph": "graph.json",
-        "plugins": plugins
-    }))?;
-    bytes.push(b'\n');
-    fs::write(bundle_root.join("manifest.json"), &bytes)?;
-    fs::set_permissions(
-        bundle_root.join("manifest.json"),
-        fs::Permissions::from_mode(0o644),
-    )?;
-    let manifest = entries
-        .get_mut("bundle/manifest.json")
-        .and_then(Option::as_mut)
-        .ok_or_else(|| PackageError::Invalid("bundle manifest resource is missing".into()))?;
-    manifest.sha256 = format!("{:x}", Sha256::digest(&bytes));
-    manifest.size = bytes.len() as u64;
     Ok(())
 }
 

@@ -44,7 +44,7 @@ pub(crate) fn graph_lease_key(source: &Path) -> Result<String, GraphError> {
     ))
 }
 
-/// Only the work node's Plugin selection and its Agent's network flag are hot.
+/// Only the work node's Plugin selection and network policy are hot.
 pub(crate) fn compatible(admitted: &GraphSnapshot, current: &GraphSnapshot, work: &str) -> bool {
     let normalize = |snapshot: &GraphSnapshot| {
         let mut snapshot = snapshot.clone();
@@ -119,6 +119,7 @@ pub(crate) fn publish_with_tasks(
         .chain(tasks.values())
         .flat_map(|snapshot| &snapshot.nodes)
         .flat_map(|node| &node.plugins)
+        .filter(|plugin| plugin.id != crate::plugin_network::NETWORK_PLUGIN)
         .flat_map(|plugin| {
             std::iter::once(plugin.id.clone()).chain(
                 plugin
@@ -137,33 +138,30 @@ pub(crate) fn publish_with_tasks(
         .map(|binding| (binding.id.clone(), binding))
         .collect::<BTreeMap<_, _>>();
     // A dependency-derived network grant is authorized with the same publication.
-    let network_required = ids.iter().any(|id| {
-        catalog
-            .metadata(id)
-            .is_ok_and(|metadata| crate::plugin_network::metadata_requires_network(&metadata))
-    }) || std::iter::once(snapshot)
-        .chain(tasks.values())
-        .any(|snapshot| {
-            snapshot.agents.values().any(|agent| agent.network)
-                || snapshot
-                    .ops
-                    .values()
-                    .any(|op| op.get("network").and_then(serde_json::Value::as_bool) == Some(true))
+    let mut network_required = false;
+    for snapshot in std::iter::once(snapshot).chain(tasks.values()) {
+        network_required |=
+            crate::plugin_network::snapshot_requires_network(library_root, snapshot)?
                 || snapshot
                     .nodes
                     .iter()
                     .flat_map(|node| &node.plugins)
-                    .any(|plugin| {
-                        plugin
-                            .graph_tasks
-                            .as_ref()
-                            .is_some_and(|policy| policy.network)
-                    })
-        });
-    if network_required
-        && let Ok(mut network) = catalog.resolve(&[crate::plugin_network::NETWORK_PLUGIN.into()])
-        && let Some(network) = network.pop()
-    {
+                    .filter_map(|plugin| plugin.graph_tasks.as_ref())
+                    .any(|policy| {
+                        policy.network
+                            || policy.plugins.iter().any(|id| {
+                                catalog.metadata(id).is_ok_and(|metadata| {
+                                    crate::plugin_network::metadata_requires_network(&metadata)
+                                })
+                            })
+                    });
+    }
+    if network_required {
+        let network = catalog
+            .resolve(&[crate::plugin_network::NETWORK_PLUGIN.into()])
+            .map_err(|error| error.to_string())?
+            .pop()
+            .ok_or("network system Plugin is unavailable")?;
         bindings.insert(network.id.clone(), network);
     }
     let digest = snapshot.digest().map_err(|error| error.to_string())?;

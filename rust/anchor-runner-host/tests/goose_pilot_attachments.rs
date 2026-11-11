@@ -630,13 +630,10 @@ fn goose_pilot_plugin_image_result_is_published_as_turn_attachment() {
         VISION_MODEL,
     );
     let host = Host::new(&graph()).default_runtime();
-    let network = host.base.root.path().join("plugins/network");
-    fs::create_dir_all(&network).unwrap();
-    fs::write(
-        network.join("plugin.json"),
-        json!({"name":"Fixture task network","network":true}).to_string(),
-    )
-    .unwrap();
+    fixture::install_system_plugin(
+        host.base.root.path(),
+        anchor_graph_host::SystemPlugin::Network,
+    );
     let directory = host.base.root.path().join("checkout").join(PLUGIN);
     fs::create_dir_all(&directory).unwrap();
     fs::write(

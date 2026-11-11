@@ -19,7 +19,7 @@ use std::time::Duration;
 use crate::{
     GatewayError, INBOUND_FETCH_TIMEOUT_SECS, MAX_IMAGE_BYTES, MAX_IMAGE_COUNT,
     MAX_IMAGE_TOTAL_BASE64, MAX_INBOUND_FILE_BYTES, MAX_INBOUND_FILES, MAX_INBOUND_TOTAL_BYTES,
-    MAX_OUTBOUND_FILE_BYTES, MEDIA_CHUNK_BYTES,
+    MEDIA_CHUNK_BYTES,
 };
 
 pub(crate) struct MediaItem {
@@ -156,45 +156,22 @@ pub(crate) fn media_send_digest(
     Ok(crate::protocol::digest(&bound))
 }
 
-/// A proactive file is handed over as bytes, never as an arbitrary Host path.
 pub(crate) fn outbound_file(
     name: String,
     encoded: &str,
     declared_md5: &str,
 ) -> Result<MediaItem, GatewayError> {
-    if name.trim().is_empty()
-        || name.len() > 256
-        || name
-            .chars()
-            .any(|ch| ch.is_control() || matches!(ch, '/' | '\\'))
-        || matches!(name.as_str(), "." | "..")
-    {
-        return Err(GatewayError::Invalid("invalid outbound filename"));
-    }
-    if encoded.len() > MAX_OUTBOUND_FILE_BYTES.div_ceil(3) * 4 {
-        return Err(GatewayError::Invalid(
-            "outbound file exceeds the size limit",
-        ));
-    }
-    let bytes = STANDARD
-        .decode(encoded)
-        .map_err(|_| GatewayError::Invalid("outbound file is not valid base64"))?;
-    if bytes.len() < 5 || bytes.len() > MAX_OUTBOUND_FILE_BYTES {
+    let file = anchor_channel_transport::media::outbound_file(name, encoded, declared_md5)?;
+    if file.bytes.len() < 5 {
         return Err(GatewayError::Invalid(
             "outbound file size is outside the supported range",
         ));
     }
-    let md5 = format!("{:x}", <Md5 as md5::Digest>::digest(&bytes));
-    if md5 != declared_md5 {
-        return Err(GatewayError::Invalid(
-            "outbound file digest does not match its content",
-        ));
-    }
     Ok(MediaItem {
         kind: "file",
-        name,
-        bytes,
-        md5,
+        name: file.name,
+        bytes: file.bytes,
+        md5: file.md5,
     })
 }
 

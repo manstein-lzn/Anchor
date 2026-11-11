@@ -2,10 +2,12 @@ import { useEffect, useState, type ReactNode } from 'react';
 import { LoaderCircle, Search } from 'lucide-react';
 import { Markdown } from './markdown';
 import { Modal } from './ui';
+import type { Plugin } from './model';
 import './PluginPanel.css';
 
 export type PluginInformation = {
   id: string; name: string; description?: string; skills?: string[]; digest?: string;
+  kind?: Plugin['kind']; canUninstall?: boolean; canReplace?: boolean; updateSource?: Plugin['updateSource'];
   mcpServers?: Record<string, { transport: string; auth?: string }>;
   mcpServerNames?: string[]; instructions?: string; error?: string | null; unsupported?: string[]; channels?: { platform: string }[];
   available?: boolean; requiresNetwork?: boolean;
@@ -33,11 +35,12 @@ export function pluginSettingStatus(plugin: PluginInformation, state: PluginSett
  * Loading and writes stay with their owners; this component never invents a saved fact. */
 export function PluginSettings<T extends PluginInformation>({ items, setting, onToggle, onDetails, loading = false,
   error = '', retry, recorded = false, management = false, selectedLabel = '已选择', unselectedLabel = '未选择',
-  enableLabel = '选择', disableLabel = '取消选择', empty, children }: {
+  enableLabel = '选择', disableLabel = '取消选择', empty, children, control }: {
   items: T[]; setting: (plugin: T) => PluginSetting; onToggle?: (plugin: T) => void;
   onDetails: (plugin: T) => void; loading?: boolean; error?: string; retry?: () => void;
   recorded?: boolean; management?: boolean; selectedLabel?: string; unselectedLabel?: string;
   enableLabel?: string; disableLabel?: string; empty: ReactNode; children?: (plugin: T) => ReactNode;
+  control?: (plugin: T, setting: PluginSetting) => ReactNode;
 }) {
   const [query, setQuery] = useState('');
   const [filter, setFilter] = useState('all');
@@ -71,14 +74,15 @@ export function PluginSettings<T extends PluginInformation>({ items, setting, on
       const state = setting(plugin);
       const unavailable = !recorded && plugin.available === false;
       const status = pluginSettingStatus(plugin, state, { recorded, management, selectedLabel, unselectedLabel });
+      const customControl = control?.(plugin, state);
       return <PluginCard key={plugin.id} plugin={plugin} status={status} active={!recorded && chosen(plugin)} unavailable={unavailable}
-        onDetails={() => onDetails(plugin)} control={onToggle && !recorded && !management ?
+        onDetails={() => onDetails(plugin)} control={!recorded && !management && (customControl !== undefined ? customControl : onToggle ?
           <button type="button" role="switch" aria-checked={state.selected}
             aria-label={`${state.selected ? disableLabel : enableLabel} ${plugin.name || plugin.id}`}
             className={`session-plugin-switch${state.selected ? ' on' : ''}`}
             disabled={state.disabled || state.required || state.pending || unavailable && !state.selected}
             title={state.required ? '工作流需要此插件，保持挂载' : undefined}
-            aria-busy={state.pending} onClick={() => onToggle(plugin)}><span className="plugin-switch-track" aria-hidden="true" /></button> : undefined}>
+            aria-busy={state.pending} onClick={() => onToggle(plugin)}><span className="plugin-switch-track" aria-hidden="true" /></button> : undefined)}>
         {plugin.requiresNetwork && <p className="plugin-message">需要联网</p>}
         {state.required && <p className="plugin-message is-required">必需 · 工作流需要此插件，保持挂载。</p>}
         {unavailable && <p className="plugin-message is-error">不可用：{plugin.error || 'Host 未给出原因'}</p>}
@@ -135,6 +139,7 @@ export function PluginCard({ plugin, status, active = false, unavailable = false
     </div>
     <p className="plugin-card-description">{plugin.description || '此插件尚未提供用途说明。'}</p>
     <div className="plugin-card-footer"><div className="plugin-card-meta"><span className={`plugin-card-status${unavailable ? ' is-unavailable' : ''}`}>{status}</span>
+      {plugin.kind === 'system' && <span className="plugin-card-status">系统插件</span>}
       {children}</div>
       <button className="plugin-card-details" type="button" aria-label={`查看 ${plugin.name || plugin.id} 的详情`} onClick={onDetails}>详情</button>
     </div>
@@ -152,9 +157,12 @@ export function PluginDetails({ plugin, status, recorded = false, loading = fals
     <div className="plugin-details-overview"><span className="plugin-card-status">{status}</span>
       <p>{plugin.description || '此插件尚未提供用途说明。'}</p>
       <dl className="plugin-details-metadata"><div><dt>标识</dt><dd><code>{plugin.id}</code></dd></div>
+        {plugin.kind && <div><dt>类型</dt><dd>{plugin.kind === 'system' ? '系统插件' : '扩展插件'}</dd></div>}
+        {plugin.updateSource && <div><dt>更新来源</dt><dd>{plugin.updateSource === 'anchor-release' ? 'Anchor 升级' : '插件版本'}</dd></div>}
         {plugin.digest && <div><dt>内容摘要</dt><dd><code>{plugin.digest}</code></dd></div>}
       </dl>
     </div>
+    {!recorded && plugin.updateSource === 'anchor-release' && <p className="plugin-message">此系统能力由 Anchor 提供，随 Anchor 升级更新。</p>}
     {plugin.error && <p className="plugin-message is-error">不可用：{plugin.error}</p>}
     {!!plugin.unsupported?.length && <p className="plugin-message is-error">暂不支持：{plugin.unsupported.join('、')}</p>}
     {loading && <p className="plugin-message" role="status">正在读取插件详情…</p>}

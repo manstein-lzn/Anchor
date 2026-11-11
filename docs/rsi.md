@@ -32,6 +32,8 @@ audit-context ←────── 重新专项审查 ────────�
 
 Plugin 实现证据复用 GraphHost 的清单资源分类：声明的 `mutable` 路径在检查条目类型和递归前剪枝，不采集业务归档正文。已安装 Library Plugin 缺少或无法解析清单时跳过该资产并记录限制，不退回全目录采集。源码只在根本身、`plugins/<id>`、`examples/**/plugins/<id>` 识别 Plugin 资产；其他已授权源码目录保持普通代码范围，不因 fixture 中出现 `plugin.json` 就隐藏代码。独立 Skill、源码 Git 元数据和显式授予的历史报告根仍有各自范围，mutable 剪枝不构成整个授权源码树的访问控制。
 
+`plugins/system-capabilities.json` 复用共享系统 Plugin 身份清单及当前 Library 的同一 Catalog 校验，区分已校验、缺失、无效和超过采集读取上限，记录当前代码与授权声明摘要、声明的 Library 来源，以及授权源码中已冻结的契约、Host 实现和回归文件位置；未采集位置继续保留缺口。原生入口只经 Catalog 计算身份，不保存二进制正文，超过 256 MiB 不读取。系统身份并不证明二进制来源、源码已部署、测试已通过或历史实现字节可恢复；这些边界明确记为未知。它仍属于现有 plugins 领域证据，不增加优化引擎或修改、合并、发布权限。
+
 `run-index.json` 索引发现的历史 Run，`runs.json` 保存机械投影及七天窗口。采集经 Kernel `HistoryReader` 读取 `<state>/kernel-runs`，相位来自 Kernel，更新时间来自 Host observation；不读取旧 `runs/*.json`。部署 Graph 从当前 `catalog` 发现。索引区分本周与历史记录，缺少时间戳不算本周成功样本。每个虚拟证据路径对应冻结文件，可回查状态、错误及原始记录中存在的字段；`source_field_presence` 和 `projection_omitted` 区分不存在与未采集。完整聊天、trace、checkpoint 和隐藏推理不进入证据。冻结绑定只证明资源身份，不能恢复未保存的历史 Plugin 实现字节。
 
 每个领域先读 `domains/<领域>.json`，按失败、本周变更、历史提案选择重点，不要求把全部源码/历史读进上下文。专项输出 `findings.json/md`，区分 observed/inferred/unknown，列出证据位置、实际已读范围、未覆盖范围和局限。综合先读取这些发现及 `join.json`，再按冲突和因果关系回查原始证据。索引覆盖、模型实际审查和结论正确性分别报告。

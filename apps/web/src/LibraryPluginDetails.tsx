@@ -98,7 +98,7 @@ function CurrentLibraryPluginDetails({ plugin, status, problem, close, managemen
     retry={() => setRevision(value => value + 1)} close={close}>
     <PluginConfiguration pluginId={plugin.id} onChanged={onChanged} />
     {!!definition?.channels?.length && (graph ? <GraphBot graph={graph.name} pluginId={plugin.id} saved={graph.saved} /> : <PluginBots pluginId={plugin.id} />)}
-    {management && <section className="plugin-details-section"><div className="plugin-management-heading"><h3>插件版本</h3>
+    {management && information.canReplace === true && <section className="plugin-details-section"><div className="plugin-management-heading"><h3>插件版本</h3>
       <button type="button" onClick={() => setUpdating(true)}>更新插件</button></div></section>}
     {!!oauth.length && <section className="plugin-details-section plugin-authorization"><h3>服务授权 <span>OAuth</span></h3>
       <p>授权保存在当前账户下，供后续任务使用。</p>
@@ -117,8 +117,8 @@ function CurrentLibraryPluginDetails({ plugin, status, problem, close, managemen
       {authError && <p className="plugin-message is-error" role="alert">{authError}</p>}
       {authorizationLink && <a className="plugin-authorization-link" href={authorizationLink} target="_blank" rel="noopener noreferrer">打开授权页面</a>}
     </section>}
-    {management && <PluginUninstall pluginId={plugin.id} onChanged={() => { onChanged?.(); close(); }} />}
+    {management && information.canUninstall === true && <PluginUninstall pluginId={plugin.id} onChanged={() => { onChanged?.(); close(); }} />}
   </PluginDetails>
-    {updating && <PluginInstall pluginId={plugin.id} close={() => setUpdating(false)} onChanged={() => { onChanged?.(); setRevision(value => value + 1); setAuthRevision(value => value + 1); }} />}
+    {updating && information.canReplace === true && <PluginInstall pluginId={plugin.id} close={() => setUpdating(false)} onChanged={() => { onChanged?.(); setRevision(value => value + 1); setAuthRevision(value => value + 1); }} />}
   </>;
 }

@@ -163,9 +163,10 @@ fn native_goose_direct_model_transport_requires_observed_tool_receipt() {
 #[test]
 #[ignore = "requires pinned Goose binary"]
 fn native_goose_feedback_continues_node_history_without_crossing_node_or_run_boundaries() {
+    let role = "You are the evidence reviewer. Inspect the authorized workspace and feedback with Anchor tools, then choose an allowed route. Keep these template examples literal: {{role_name}} {% if ready %}ready{% endif %}.";
     let definition = json!({
         "objective":"continue a node's native conversation after feedback", "entry":"worker",
-        "agents":{"shared":{"model":"fixture-goose","reads":["evidence.txt"],"writes":["evidence.txt"],"instructions":"Inspect the authorized workspace and feedback with Anchor tools, then choose an allowed route."}},
+        "agents":{"shared":{"model":"fixture-goose","reads":["evidence.txt"],"writes":["evidence.txt"],"instructions":role}},
         "ops":{
             "feedback":{"reads":["evidence.txt"],"writes":["feedback.txt"],"run":"sh -c 'set -eu; test \"$(cat /in/worker/evidence.txt)\" = workspace-retained; printf revise > feedback.txt'"},
             "done":{"reads":["evidence.txt"],"writes":["verified.txt"],"run":"sh -c 'set -eu; cat /in/peer/evidence.txt > verified.txt'"}
@@ -220,6 +221,9 @@ fn native_goose_feedback_continues_node_history_without_crossing_node_or_run_bou
         let requests = provider.requests();
         let requests = &requests[offset..];
         assert_eq!(requests.len(), 6);
+        for request in requests {
+            goose::assert_role_system_prompt(request, role);
+        }
         assert!(!requests[0]["messages"].to_string().contains(marker));
         let previous = requests[1]["messages"].as_array().unwrap();
         let continued = requests[2]["messages"].as_array().unwrap();
@@ -526,6 +530,10 @@ fn native_goose_unknown_external_effect_reopens_same_session_and_checks_before_c
     let host = Host::new(&definition)
         .native()
         .with_allowed_commands("sh,cat,curl,sleep,true");
+    fixture::install_system_plugin(
+        host.base.root.path(),
+        anchor_graph_host::SystemPlugin::Network,
+    );
     let mut server = host.serve(&provider);
     let run = server.trigger();
     fixture::wait_until("external effect before native ToolResponse", || {
@@ -1261,50 +1269,39 @@ fn real_goose_business_after_final_result_is_rejected_without_commit() {
 
 #[test]
 #[ignore = "requires pinned Goose binary"]
-fn real_goose_external_effect_then_host_kill_is_spike_failclosed_not_native_safe_recovery() {
+fn real_goose_workspace_effect_then_host_kill_is_spike_failclosed_not_native_safe_recovery() {
     let gate = Gate::new();
-    let provider = Provider::new("goose-external-effect-kill-failclosed", vec![]);
-    let business = provider.serve_effects();
-    let payload = json!({"effect_key":"fixture-external-once"});
+    let provider = Provider::new("goose-workspace-effect-kill-failclosed", vec![]);
+    // Spike has no Plugin support, so task-network side effects belong to the
+    // native recovery case. Keep its own no-replay boundary local to workspace.
     provider.append(vec![
-        Step::tool(
-            "anchor_run",
-            json!({"command":[
-                "curl","--silent","--show-error","--fail","--max-time","5","--noproxy","*",
-                "--request","POST","--header","Content-Type: application/json",
-                "--data",payload.to_string(),format!("{}/effects",business.url)
-            ]}),
-        ),
+        command("set -eu; test ! -e effects.txt; printf once >> effects.txt; printf workspace-effect-once"),
         Step::text("Unfinished fixture response.")
-            .after("external_effect")
+            .after("workspace-effect-once")
             .gated(&gate),
     ]);
-    let mut definition = graph();
-    definition["agents"]["worker"]["network"] = json!(true);
-    let host = Host::new(&definition).with_allowed_commands("curl,sh,cat,true");
+    let host = Host::new(&graph());
     let mut server = host.serve(&provider);
     let run = server.trigger();
     gate.wait_entered();
-    assert_eq!(provider.effects(), vec![payload.clone()]);
+    assert_eq!(
+        host.base.workspace_files(&run, "effects.txt"),
+        vec![b"once".to_vec()]
+    );
     assert_eq!(provider.requests().len(), 2);
     for request in provider.requests() {
         assert_catalog(&request);
     }
     let before = host.native_conversation(&run, "worker", 1);
     let (request, response) =
-        assert_native_tool_response(&before, "anchor__anchor_run", "external_effect");
+        assert_native_tool_response(&before, "anchor__anchor_run", "workspace-effect-once");
     assert_eq!(
         request["toolCall"]["value"]["arguments"]["command"][0],
-        "curl"
+        "sh"
     );
     let result = native_response_value(&response);
     assert_eq!(result[0]["value"]["exit_code"], 0);
-    let external_result: Value =
-        serde_json::from_str(result[0]["value"]["stdout"].as_str().unwrap()).unwrap();
-    assert_eq!(
-        external_result,
-        json!({"external_effect":"once","effect_count":1})
-    );
+    assert_eq!(result[0]["value"]["stdout"], "workspace-effect-once");
     let fact = host.native_fact(&run, "worker", 1);
     assert!(fact["completion"].is_null());
     assert_eq!(fact["binary_sha256"], goose::GOOSE_SHA256);
@@ -1332,7 +1329,10 @@ fn real_goose_external_effect_then_host_kill_is_spike_failclosed_not_native_safe
         "expected explicit spike failclosed limitation: {reason}"
     );
     assert_eq!(provider.requests(), requests);
-    assert_eq!(provider.effects(), vec![payload]);
+    assert_eq!(
+        host.base.workspace_files(&run, "effects.txt"),
+        vec![b"once".to_vec()]
+    );
     assert_eq!(host.native_fact(&run, "worker", 1), fact);
     assert_eq!(host.native_conversation(&run, "worker", 1), before);
     let saved = host.record(&run);
@@ -1344,7 +1344,7 @@ fn real_goose_external_effect_then_host_kill_is_spike_failclosed_not_native_safe
         &run,
         json!({
             "acceptance":"Anchor Goose spike failclosed only, not Goose native safe recovery",
-            "external_fake_effects":1,"blocked_after_effect":true,"host_killed":true,
+            "workspace_effects":1,"blocked_after_effect":true,"host_killed":true,
             "restart_provider_requests":0,"native_conversation_preserved":true,
             "automatic_load_or_replay":false,"safe_native_recovery_proven":false,
             "spike_failure_reason":reason

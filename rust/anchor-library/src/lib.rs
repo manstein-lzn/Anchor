@@ -9,7 +9,7 @@ mod source;
 
 use std::path::{Path, PathBuf};
 
-use anchor_graph_host::FilePluginCatalog;
+use anchor_graph_host::{FilePluginCatalog, SystemPlugin};
 use serde::{Deserialize, Serialize};
 
 pub use development::{DevelopmentError, DevelopmentScope};
@@ -56,6 +56,16 @@ pub enum InstallError {
     InvalidSource,
     #[error("invalid Plugin ID")]
     InvalidId,
+    #[error(
+        "System Plugin `{0}` is owned by Anchor and cannot be installed or replaced through extension installation"
+    )]
+    SystemPluginProtected(String),
+    #[error("System Plugin does not match the admitted Anchor release identity")]
+    SystemPluginMismatch,
+    #[error(
+        "System Plugin declares existing data paths; an explicit data migration is required before upgrade"
+    )]
+    SystemPluginMigrationRequired,
     #[error("Plugin already exists; explicitly request replacement to update it")]
     AlreadyExists,
     #[error("Plugin catalog is being installed; retry after installation finishes")]
@@ -106,6 +116,15 @@ impl Library {
         self.install_with_checkout(request, &GitCheckout)
     }
 
+    /// Shared preflight for extension publishers, including Host approval forms.
+    pub fn validate_extension_install(id: &str) -> Result<(), InstallError> {
+        validate_id(id)?;
+        if SystemPlugin::from_id(id).is_some() {
+            return Err(InstallError::SystemPluginProtected(id.to_owned()));
+        }
+        Ok(())
+    }
+
     pub fn catalog_read_guard(&self) -> Result<Option<anchor_file_lease::FileLease>, InstallError> {
         match filesystem::directory(&self.root.join("plugins"), false) {
             Ok((_, directory)) => filesystem::lease(
@@ -127,12 +146,17 @@ impl Library {
     ) -> Result<InstallOutcome, InstallError> {
         let source = GithubSource::parse(&request.source)?;
         let id = request.id.as_deref().unwrap_or_else(|| source.default_id());
-        validate_id(id)?;
-        self.install_source(id, request.replace_existing, None, |transaction: &Path| {
-            let directory = transaction.join("source");
-            checkout.checkout(&source, &directory)?;
-            Ok(directory.join(source.relative_path()))
-        })
+        self.install_source(
+            id,
+            request.replace_existing,
+            None,
+            Publication::Extension,
+            |transaction: &Path| {
+                let directory = transaction.join("source");
+                checkout.checkout(&source, &directory)?;
+                Ok(directory.join(source.relative_path()))
+            },
+        )
     }
 
     pub fn install_directory(
@@ -141,9 +165,55 @@ impl Library {
         source_dir: impl AsRef<Path>,
         replace_existing: bool,
     ) -> Result<InstallOutcome, InstallError> {
-        validate_id(id)?;
         let source_dir = source_dir.as_ref().to_owned();
-        self.install_source(id, replace_existing, None, |_| Ok(source_dir))
+        self.install_source(id, replace_existing, None, Publication::Extension, |_| {
+            Ok(source_dir)
+        })
+    }
+
+    /// Bootstrap a missing platform resource from an already admitted release.
+    /// Existing content is never replaced, even when its reserved ID collides.
+    pub fn install_system_directory(
+        &self,
+        system: SystemPlugin,
+        source_dir: impl AsRef<Path>,
+        expected_digest: &str,
+    ) -> Result<InstallOutcome, InstallError> {
+        let source_dir = source_dir.as_ref().to_owned();
+        self.install_source(
+            system.id(),
+            false,
+            None,
+            Publication::System {
+                system,
+                expected_digest,
+                expected_existing: None,
+            },
+            |_| Ok(source_dir),
+        )
+    }
+
+    /// Upgrade only the exact existing bytes the operator inspected. Unlike
+    /// bootstrap this is explicit; a Host restart must never invoke it.
+    pub fn upgrade_system_directory(
+        &self,
+        system: SystemPlugin,
+        source_dir: impl AsRef<Path>,
+        expected_digest: &str,
+        expected_existing: &str,
+    ) -> Result<InstallOutcome, InstallError> {
+        let source_dir = source_dir.as_ref().to_owned();
+        self.install_source(
+            system.id(),
+            true,
+            None,
+            Publication::System {
+                system,
+                expected_digest,
+                expected_existing: Some(expected_existing),
+            },
+            |_| Ok(source_dir),
+        )
     }
 
     /// Take the Library's Plugin installation lock for a longer operation.
@@ -183,9 +253,14 @@ impl Library {
         replace_existing: bool,
         lease: &InstallLease,
     ) -> Result<InstallOutcome, InstallError> {
-        validate_id(id)?;
         let source_dir = source_dir.as_ref().to_owned();
-        self.install_source(id, replace_existing, Some(lease), |_| Ok(source_dir))
+        self.install_source(
+            id,
+            replace_existing,
+            Some(lease),
+            Publication::Extension,
+            |_| Ok(source_dir),
+        )
     }
 
     /// Describe a candidate Plugin without publishing it.
@@ -263,8 +338,12 @@ impl Library {
         id: &str,
         replace_existing: bool,
         held: Option<&InstallLease>,
+        publication: Publication<'_>,
         prepare: impl FnOnce(&Path) -> Result<PathBuf, InstallError>,
     ) -> Result<InstallOutcome, InstallError> {
+        if matches!(publication, Publication::Extension) {
+            Self::validate_extension_install(id)?;
+        }
         let (root, _) = filesystem::directory(&self.root, true)?;
         let (plugins, plugins_file) = filesystem::directory(&root.join("plugins"), true)?;
         // The caller may already hold the lock (a host that must cover its whole
@@ -280,6 +359,16 @@ impl Library {
         };
         let destination = plugins.join(id);
         let replacing = filesystem::existing_destination(&destination, replace_existing)?;
+        if matches!(
+            publication,
+            Publication::System {
+                expected_existing: Some(_),
+                ..
+            }
+        ) && !replacing
+        {
+            return Err(InstallError::SystemPluginMismatch);
+        }
         let transaction = tempfile::Builder::new()
             .prefix(".anchor-plugin-")
             .tempdir_in(&plugins)?;
@@ -289,6 +378,15 @@ impl Library {
         let definition = FilePluginCatalog::new(&validation_root)
             .definition(id)
             .map_err(|_| InstallError::InvalidPlugin)?;
+        if let Publication::System {
+            system,
+            expected_digest,
+            ..
+        } = publication
+            && (definition.system != Some(system) || definition.digest != expected_digest)
+        {
+            return Err(InstallError::SystemPluginMismatch);
+        }
         filesystem::sync_tree(&staged)?;
         validation_plugins.sync_all()?;
         std::fs::File::open(&validation_root)?.sync_all()?;
@@ -312,13 +410,35 @@ impl Library {
             // its own (the *old* declaration and the new one) is left alone, and
             // the mutable locations the new declaration needs are provided if they
             // do not exist yet.
-            let installed = FilePluginCatalog::new(&root)
-                .definition(id)
-                .map_err(|_| InstallError::InvalidPlugin)?;
+            let installed_mutable = match publication {
+                Publication::Extension => {
+                    FilePluginCatalog::new(&root)
+                        .definition(id)
+                        .map_err(|_| InstallError::InvalidPlugin)?
+                        .mutable
+                }
+                Publication::System {
+                    system,
+                    expected_existing: Some(expected),
+                    ..
+                } => {
+                    let installed = FilePluginCatalog::new(&root)
+                        .inspect_system_plugin(system)
+                        .map_err(|_| InstallError::InvalidPlugin)?;
+                    if installed.digest != expected {
+                        return Err(InstallError::SystemPluginMismatch);
+                    }
+                    if !installed.mutable.paths().is_empty() {
+                        return Err(InstallError::SystemPluginMigrationRequired);
+                    }
+                    installed.mutable
+                }
+                Publication::System { .. } => return Err(InstallError::SystemPluginMismatch),
+            };
             filesystem::replace_code(
                 &staged,
                 &destination,
-                &installed.mutable,
+                &installed_mutable,
                 &definition.mutable,
             )?;
             // Provided *after* the plan: a location the new declaration adds must
@@ -359,6 +479,16 @@ impl Library {
             directory: destination,
         })
     }
+}
+
+#[derive(Clone, Copy)]
+enum Publication<'a> {
+    Extension,
+    System {
+        system: SystemPlugin,
+        expected_digest: &'a str,
+        expected_existing: Option<&'a str>,
+    },
 }
 
 /// Provide the mutable locations a declaration names, without touching content.

@@ -97,30 +97,32 @@ pub(super) async fn policy(
         .sessions
         .get(&tools.owner, &tools.session)
         .map_err(|error| failure(error.to_string()))?;
+    let network = plugin == crate::plugin_network::NETWORK_PLUGIN;
     let unchanged = session.plugin_mounts.get(plugin) == Some(&on)
-        && (name != "session_network" || session.network_allowed == on);
+        && (!network || session.network_allowed == on);
     if unchanged {
         return Ok(vec![ToolResultContent::json(
             json!({"changed":false,"plugin":plugin,"on":on,"effective_next_turn":false}),
         )]);
     }
-    if name == "session_network" {
+    if network {
         tools
             .sessions
-            .set_network_allowed(&tools.owner, &tools.session, on, &tools.owner)
+            .set_network_policy(&tools.owner, &tools.session, on, on, &tools.owner)
+            .map_err(|error| failure(error.to_string()))?;
+    } else {
+        tools
+            .sessions
+            .set_plugin_mount(
+                &tools.owner,
+                &tools.session,
+                plugin,
+                on,
+                &tools.owner,
+                "Pilot native authorization",
+            )
             .map_err(|error| failure(error.to_string()))?;
     }
-    tools
-        .sessions
-        .set_plugin_mount(
-            &tools.owner,
-            &tools.session,
-            plugin,
-            on,
-            &tools.owner,
-            "Pilot native authorization",
-        )
-        .map_err(|error| failure(error.to_string()))?;
     tools.request_continuation("Session authorization changed")?;
     Ok(vec![ToolResultContent::json(
         json!({"changed":true,"plugin":plugin,"on":on,"effective_next_turn":true,"continuation_requested":true,"guidance":"Finish this Turn now; Anchor will continue this Session with the newly authorized tools."}),

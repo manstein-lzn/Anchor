@@ -22,11 +22,7 @@ pub struct GatewayConfig {
     pub progress: bool,
 }
 
-pub struct WebhookConfig {
-    pub url: String,
-    pub api_key: String,
-    pub timeout: Option<Duration>,
-}
+pub use anchor_channel_transport::WebhookConfig;
 
 impl fmt::Debug for GatewayConfig {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -34,16 +30,6 @@ impl fmt::Debug for GatewayConfig {
             .debug_struct("GatewayConfig")
             .field("credentials", &"[REDACTED]")
             .field("timing", &self.timing)
-            .finish_non_exhaustive()
-    }
-}
-
-impl fmt::Debug for WebhookConfig {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("WebhookConfig")
-            .field("credentials", &"[REDACTED]")
-            .field("timeout", &self.timeout)
             .finish_non_exhaustive()
     }
 }
@@ -194,18 +180,7 @@ impl GatewayConfig {
     }
 
     pub(crate) fn validate(&self) -> Result<(), GatewayError> {
-        if !self.state_dir.is_absolute()
-            || self.state_dir.components().any(|part| {
-                !matches!(
-                    part,
-                    std::path::Component::RootDir | std::path::Component::Normal(_)
-                )
-            })
-        {
-            return Err(GatewayError::Invalid(
-                "state directory must be an absolute normal path",
-            ));
-        }
+        anchor_channel_transport::validate_state_dir(&self.state_dir)?;
         for value in [&self.bot_id, &self.secret, &self.control_token] {
             if value.trim().is_empty() || value.len() > 4096 || value.chars().any(char::is_control)
             {
@@ -296,30 +271,4 @@ fn users(name: &str) -> BTreeSet<String> {
         .collect()
 }
 
-pub(crate) fn allowed(users: &BTreeSet<String>, userid: &str) -> bool {
-    userid != "@all" && (users.contains(userid) || users.contains("*"))
-}
-
-fn validate_url(value: &str, websocket: bool) -> Result<(), GatewayError> {
-    let url =
-        reqwest::Url::parse(value).map_err(|_| GatewayError::Invalid("invalid transport URL"))?;
-    let secure = if websocket { "wss" } else { "https" };
-    let local = if websocket { "ws" } else { "http" };
-    let loopback = url.host_str().is_some_and(|host| {
-        host.trim_matches(['[', ']'])
-            .parse::<std::net::IpAddr>()
-            .is_ok_and(|ip| ip.is_loopback())
-    });
-    if url.host_str().is_none()
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || url.fragment().is_some()
-        || url.query().is_some()
-        || !(url.scheme() == secure || (url.scheme() == local && loopback))
-    {
-        return Err(GatewayError::Invalid(
-            "transport requires TLS or explicit loopback without URL credentials",
-        ));
-    }
-    Ok(())
-}
+pub(crate) use anchor_channel_transport::{allowed, validate_url};

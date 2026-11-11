@@ -32,7 +32,7 @@ mod goose {
 
 use goose::{Gate, Host, HttpHost, Provider, Step, command, wait_until};
 use serde_json::{Value, json};
-use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf, thread, time::Duration};
+use std::{fs, path::PathBuf, thread, time::Duration};
 
 const ALICE: &str = "plugin-turn-alice";
 const BOB: &str = "plugin-turn-bob";
@@ -45,7 +45,7 @@ fn graph(mounted: bool) -> Value {
         "entry":"wait_input",
         "agents":{"assistant":{"model":"models.worker","instructions":"Inspect the current input and authorized tools. Keep the existing workspace and finish with route reply."}},
         "ops":{"wait_input":{"host":{"operation":"session.wait_input"}},"reply":{"host":{"operation":"session.reply"}}},
-        "nodes":[{"id":"wait_input","op":"wait_input"},{"id":"assistant","agent":"assistant","plugins":if mounted {json!(["wecom","demo"])} else {json!(["wecom"])}},{"id":"reply","op":"reply"}],
+        "nodes":[{"id":"wait_input","op":"wait_input"},{"id":"assistant","agent":"assistant","plugins":if mounted {json!(["wecom","demo",{"id":"network","network":"denied"}])} else {json!(["wecom",{"id":"network","network":"denied"}])}},{"id":"reply","op":"reply"}],
         "edges":[{"from":"wait_input","to":"assistant"},{"from":"assistant","to":"reply"},{"from":"reply","to":"wait_input"}]
     })
 }
@@ -55,22 +55,15 @@ fn host(mounted: bool) -> Host {
     let host = Host::new(&definition)
         .default_runtime()
         .with_bot(GRAPH, &[ALICE, BOB])
+        .with_bot_credential("WECOM_BOT_ID", "fixture-bot")
+        .with_bot_credential("WECOM_BOT_SECRET", "fixture-secret")
         .with_extra_environment([
+            ("ANCHOR_WECOM_WS_URL", "ws://127.0.0.1:1".to_owned()),
             ("ANCHOR_NODE_TOOL_DISCLOSURE", "0".to_owned()),
             ("ANCHOR_ASSISTANT_AUTO_RESUME", "0".to_owned()),
         ]);
     let root = host.base.root.path();
-    let channel = root.join("plugins/wecom");
-    fs::create_dir_all(channel.join("bin")).unwrap();
-    fs::write(
-        channel.join("plugin.json"),
-        json!({"name":"Local channel fixture"}).to_string(),
-    )
-    .unwrap();
-    fs::write(channel.join("channel.json"), json!({"platform":"wecom","transport":"websocket","entrypoint":"bin/gateway","required_environment":[]}).to_string()).unwrap();
-    let gateway = channel.join("bin/gateway");
-    fs::write(&gateway, "#!/bin/sh\nexec /bin/sleep 3600\n").unwrap();
-    fs::set_permissions(gateway, fs::Permissions::from_mode(0o700)).unwrap();
+    fixture::install_system_plugin(root, anchor_graph_host::SystemPlugin::Wecom);
     let source = root.join("checkout/demo");
     fs::create_dir_all(&source).unwrap();
     let binary = std::env::current_exe()
@@ -96,7 +89,7 @@ fn host(mounted: bool) -> Host {
     anchor_library::Library::new(root)
         .install_directory("demo", &source, false)
         .unwrap();
-    fs::write(root.join("bundle/manifest.json"), json!({"format":1,"graph":"graph.json","plugins":if mounted {json!([{"id":"wecom"},{"id":"demo"}])} else {json!([{"id":"wecom"}])}}).to_string()).unwrap();
+    fs::write(root.join("bundle/manifest.json"), json!({"format":1,"graph":"graph.json","plugins":if mounted {json!([{"id":"wecom"},{"id":"demo"},{"id":"network"}])} else {json!([{"id":"wecom"},{"id":"network"}])}}).to_string()).unwrap();
     let assistant = root.join(GRAPH);
     fs::create_dir_all(&assistant).unwrap();
     fs::write(assistant.join("graph.json"), definition.to_string()).unwrap();
@@ -204,6 +197,97 @@ fn stop(server: &HttpHost, run: &str) {
 
 fn advertised(request: &Value) -> bool {
     goose::tool_definition(request, "demo-service_echo").is_ok()
+}
+
+#[test]
+#[ignore = "requires pinned Goose, canonical native system Plugins, relay and Bubblewrap"]
+fn system_network_policy_changes_next_turn_without_revoking_the_current_invocation() {
+    let gate = Gate::new();
+    let provider = Provider::new("goose-system-network-turn-policy", vec![]);
+    let business = provider.serve_effects();
+    let effect = |stage: &str| {
+        format!(
+            "curl --silent --show-error --fail --max-time 3 --noproxy '*' --request POST --header 'Content-Type: application/json' --data '{}' '{}/effects'",
+            json!({"stage":stage}),
+            business.url,
+        )
+    };
+    provider.append(vec![
+        command(&format!("printf retained-network-workspace > network.txt; {}", effect("before-change")))
+            .expect_request_contains("network-enabled-input"),
+        command(&effect("frozen-invocation")).after("effect_count").gated(&gate),
+        finish("enabled-reply").after("effect_count"),
+        command(&format!("set -eu; test \"$(cat network.txt)\" = retained-network-workspace; if {}; then exit 91; else printf explicit-network-denied; fi", effect("must-not-connect")))
+            .expect_request_contains("network-denied-input"),
+        finish("denied-reply").after("explicit-network-denied"),
+        command(&effect("automatic-plugin-requirement")).expect_request_contains("network-auto-input"),
+        finish("auto-reply").after("effect_count"),
+    ]);
+    let host = host(false).with_allowed_commands("sh,cat,git,true,curl");
+    fixture::install_system_plugin(
+        host.base.root.path(),
+        anchor_graph_host::SystemPlugin::Network,
+    );
+    let server = host.serve(&provider);
+    let save_mode = |mode: &str| {
+        let mut definition = graph(false);
+        definition["nodes"][1]["plugins"] = json!(["wecom",{"id":"network","network":mode}]);
+        let (status, saved) = server.request(
+            "PUT",
+            &format!("/graphs/{GRAPH}"),
+            Some(&json!({"definition":definition})),
+        );
+        assert_eq!(status, 200, "{saved}");
+        assert_eq!(saved["plugin_activation"]["mode"], "next_turn", "{saved}");
+    };
+    save_mode("enabled");
+    let first = thread::scope(|scope| {
+        let pending =
+            scope.spawn(|| submit(&server, ALICE, "network-enabled-input", "enabled-reply"));
+        gate.wait_entered();
+        save_mode("denied");
+        gate.open();
+        pending.join().unwrap()
+    });
+    let run = first["run"].as_str().unwrap();
+    waiting(&host, run, 1);
+    let native = host.native_fact(run, "assistant", 1);
+    let denied = submit(&server, ALICE, "network-denied-input", "denied-reply");
+    assert_eq!(denied["run"], first["run"]);
+    waiting(&host, run, 2);
+    assert_eq!(
+        provider.effects().len(),
+        2,
+        "denied Turn reached business endpoint"
+    );
+    save_mode("auto");
+    let automatic = submit(&server, ALICE, "network-auto-input", "auto-reply");
+    assert_eq!(automatic["run"], first["run"]);
+    waiting(&host, run, 3);
+    assert_eq!(
+        host.native_fact(run, "assistant", 3)["session_id"],
+        native["session_id"]
+    );
+    assert_eq!(
+        provider.effects(),
+        vec![
+            json!({"stage":"before-change"}),
+            json!({"stage":"frozen-invocation"}),
+            json!({"stage":"automatic-plugin-requirement"}),
+        ]
+    );
+    stop(&server, run);
+    evidence(
+        &host,
+        &provider,
+        &[run],
+        json!({
+            "canonical_system_plugins":true,"current_invocation_network_frozen":true,
+            "next_turn_explicit_denial_enforced":true,"auto_uses_wecom_requirement":true,
+            "same_run_workspace_native_session":true,"business_effects":provider.effects(),
+            "real_channel_deliveries":0,
+        }),
+    );
 }
 
 fn evidence(host: &Host, provider: &Provider, runs: &[&str], checks: Value) {
@@ -393,7 +477,9 @@ fn save_during_actual_tool_keeps_current_turn_and_other_users_adopt_independentl
         wait_until("actual anchor_run tool waiting in Alice workspace", || {
             for record in records(&host, &server) {
                 let candidate = record["run_id"].as_str().unwrap();
-                if candidate != bob_run && workspace(&host, candidate).join("blocked").is_file() {
+                if candidate != bob_run
+                    && !host.base.workspace_files(candidate, "blocked").is_empty()
+                {
                     alice_run = candidate.to_owned();
                     return true;
                 }

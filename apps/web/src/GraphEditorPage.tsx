@@ -1,7 +1,7 @@
-import { Activity, CheckCheck, ChevronDown, Copy, Download, FolderOpen, GitBranch, Plus, Redo2, Save, Search, SlidersHorizontal, Trash2, Undo2, Upload } from 'lucide-react';
+import { Activity, CheckCheck, ChevronDown, Copy, Download, GitBranch, Plus, Redo2, Save, SlidersHorizontal, Trash2, Undo2, Upload } from 'lucide-react';
 import { lazy, Suspense, useEffect, useRef, useState, type CSSProperties } from 'react';
 import { WorkflowCanvas } from './WorkflowCanvas';
-import { GraphActions } from './GraphActions';
+import { GraphLibrary } from './GraphLibrary';
 import { GraphRunButton } from './GraphRunButton';
 import { CallEditor } from './CallEditor';
 import { ParallelEditor } from './ParallelEditor';
@@ -9,7 +9,7 @@ import { Workspace } from './Workspace';
 import { EmptyState, JsonDialog, Modal, ToolButton } from './ui';
 import { runPhase, runPhaseLabel } from './runPresentation';
 import { parallelControl, renameGraphNode } from './parallel';
-import { listenerLabel, type GraphSummary, type OurAgent, type OurGraph, type OurRun } from './model';
+import { type GraphSummary, type OurAgent, type OurGraph, type OurRun } from './model';
 import type { GraphEditor, WorkbenchNotice } from './useGraphEditor';
 
 const Plugins = lazy(() => import('./Plugins').then(module => ({ default: module.Plugins })));
@@ -36,12 +36,10 @@ export function GraphEditorPage({ name, editor, graphs, runs, graphColors, busy,
     selectedPlugins, setPlugins, patchNode, patchAgent, patchEdge, patchOperation, addNode, addOperation,
     addParallel, addAgent, duplicateNode, removePicked, entry, routing } = editor;
   const editable = doc !== null && !busy;
-  const [search, setSearch] = useState('');
   const [palette, setPalette] = useState(false);
   const [json, setJson] = useState<'graph' | 'node' | 'edge' | 'agent' | null>(null);
   const [connect, setConnect] = useState({ source: '', target: '' });
   const upload = useRef<HTMLInputElement>(null);
-  const newGraphButton = useRef<HTMLButtonElement>(null);
   const runHistory = useRef<HTMLDivElement>(null);
   const currentName = useRef(name); currentName.current = name;
   const mounted = useRef(true);
@@ -59,30 +57,8 @@ export function GraphEditorPage({ name, editor, graphs, runs, graphColors, busy,
   }, []);
   return <>
         <Workspace sidebar selection={pick}>{({ openInspector, sidebarControl, inspectorControls, restoreControls }) => <>
-          <aside className="library">
-            <div className="section-heading"><h3><FolderOpen size={15} />工作流</h3><div className="panel-heading-actions"><span className="count">{graphs.length}</span>{sidebarControl}</div></div>
-            <label className="search-field"><Search size={15} /><input aria-label="搜索工作流" placeholder="搜索工作流…" value={search} onChange={event => setSearch(event.target.value)} /></label>
-            <button ref={newGraphButton} className="new-graph" onClick={() => void create()} disabled={busy}>
-              <Plus size={16} />新建图
-            </button>
-            <div className="library-list">
-              {graphs.filter(item => item.graph.toLowerCase().includes(search.toLowerCase())).map(item => (
-                <div key={item.graph} className={`library-item ${item.graph === name ? 'chosen' : ''} ${item.listener ? item.active_runs?.length || item.running ? 'listener-working' : item.listener.status === 'authenticated' ? 'listener-listening' : 'listener-unavailable' : ''}`}>
-                  <button className="library-row" aria-pressed={item.graph === name}
-                          title={item.listener ? `${item.listener.platform} · ${listenerLabel(item.listener.status)}` : undefined}
-                          onClick={() => selectGraph(item.graph)}>
-                    <GitBranch size={16} /><span className="library-name" title={item.graph}>{item.graph}</span>
-                    {(item.active_runs?.length || item.running) && <span className="pill running">执行中{(item.active_runs?.length ?? 0) > 1 ? ` ${item.active_runs!.length}` : ''}</span>}
-                    {item.listener && !item.active_runs?.length && !item.running && <span className={`pill listener-${item.listener.status}`}>{listenerLabel(item.listener.status)}</span>}
-                  </button>
-                  <GraphActions graph={item.graph} running={Boolean(item.active_runs?.length || item.running)} busy={busy}
-                                runCount={runs.filter(run => run.graph === item.graph).length} onDelete={async (target, precondition) => { await deleteGraph(target, precondition); requestAnimationFrame(() => newGraphButton.current?.focus()); }} />
-                </div>
-              ))}
-            </div>
-            {!graphs.length && <EmptyState icon={GitBranch} title="从一个想法开始">新建工作流，连接你的第一个节点。</EmptyState>}
-            {graphs.length > 0 && !graphs.some(item => item.graph.toLowerCase().includes(search.toLowerCase())) && <p className="hint">没有匹配的工作流。</p>}
-            <div className="library-footer">
+          <GraphLibrary graphs={graphs} runs={runs} name={name} busy={busy} selectGraph={selectGraph}
+            create={create} deleteGraph={deleteGraph} sidebarControl={sidebarControl}>
               <input ref={upload} type="file" accept="application/json,.json" hidden
                      aria-label="导入 Graph JSON"
                      onChange={event => {
@@ -106,8 +82,7 @@ export function GraphEditorPage({ name, editor, graphs, runs, graphColors, busy,
                 link.click();
                 URL.revokeObjectURL(link.href);
               }}><Download size={15} />导出</button>
-            </div>
-          </aside>
+          </GraphLibrary>
 
           <main className="main">
             <div className="document-header graph-document-header">
@@ -121,7 +96,7 @@ export function GraphEditorPage({ name, editor, graphs, runs, graphColors, busy,
                 <button onClick={() => onRelations()}>工作流关系</button>
                 {graphReturn && <button onClick={onReturn}>返回来源工作流 ←</button>}
                 <select aria-label="当前工作流" value={name} onChange={event => selectGraph(event.target.value)}>
-                  {graphs.map(item => <option key={item.graph} value={item.graph}>{item.graph}{item.running ? '（执行中）' : ''}</option>)}
+                  {graphs.filter(item => !item.completed_task || item.graph === name).map(item => <option key={item.graph} value={item.graph}>{item.graph}{item.running ? '（执行中）' : ''}</option>)}
                 </select>
                 <GraphRunButton graph={graphs.find(item => item.graph === name)} name={name} dirty={dirty} busy={busy} onClick={trigger} />
                 <button disabled={!editable} onClick={() => void check()}>
@@ -208,8 +183,9 @@ export function GraphEditorPage({ name, editor, graphs, runs, graphColors, busy,
 
           <aside className="inspector">
             <div className="section-heading"><h3><SlidersHorizontal size={15} />{pick ? '选中项属性' : '工作流设置'}</h3>{inspectorControls}</div>
-            {selectedNode && !selectedNode.op && !selectedNode.graph && <Suspense fallback={<p role="status">正在打开插件设置…</p>}><Plugins
+            {selectedNode && !selectedNode.graph && (!selectedNode.op || selectedOp?.run !== undefined) && <Suspense fallback={<p role="status">正在打开插件设置…</p>}><Plugins
               key={`${name}/${selectedNode.id}`} selected={selectedPlugins} disabled={!editable}
+              networkOnly={Boolean(selectedNode.op)} network={{ mode: editor.networkMode, onChange: editor.setNetworkMode }}
               activationMode={editor.pluginActivation?.mode} onChange={setPlugins} graph={{ name, saved: !dirty }}
               graphTasks={editor.graphTaskPolicy === undefined ? undefined : {
                 graphs: graphs.filter(item => item.graph !== name).map(item => item.graph),
@@ -276,11 +252,6 @@ export function GraphEditorPage({ name, editor, graphs, runs, graphColors, busy,
                 <label>模型
                   <input value={selectedAgent.model} maxLength={128}
                          onChange={event => patchAgent({ model: event.target.value })} />
-                </label>
-                <label className="check-label">
-                  <input type="checkbox" checked={selectedAgent.network}
-                         onChange={event => patchAgent({ network: event.target.checked })} />
-                  允许联网（检索文献的节点需要）
                 </label>
                 <label>指令
                   <textarea className="instructions" value={selectedAgent.instructions}

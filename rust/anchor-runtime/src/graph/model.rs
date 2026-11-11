@@ -76,6 +76,16 @@ pub struct PluginRef {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default: Option<bool>,
     pub graph_tasks: Option<GraphTaskPolicy>,
+    pub network: Option<NetworkMode>,
+}
+
+/// Node-owned task networking. A requirement never overrides an explicit denial.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkMode {
+    Auto,
+    Enabled,
+    Denied,
 }
 
 /// Host-enforced delegation limits for the official graph-tasks Plugin.
@@ -106,6 +116,8 @@ enum PluginRefRepr {
         default: Option<bool>,
         #[serde(default)]
         graph_tasks: Option<GraphTaskPolicy>,
+        #[serde(default)]
+        network: Option<NetworkMode>,
     },
 }
 
@@ -121,12 +133,18 @@ enum PluginRefRepr {
 /// one that names a default or delegation policy, still writes the object.
 impl Serialize for PluginRef {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        if self.required && self.default.is_none() && self.graph_tasks.is_none() {
+        if self.required
+            && self.default.is_none()
+            && self.graph_tasks.is_none()
+            && self.network.is_none()
+        {
             return serializer.serialize_str(&self.id);
         }
         use serde::ser::SerializeStruct;
-        let fields =
-            2 + usize::from(self.default.is_some()) + usize::from(self.graph_tasks.is_some());
+        let fields = 2
+            + usize::from(self.default.is_some())
+            + usize::from(self.graph_tasks.is_some())
+            + usize::from(self.network.is_some());
         let mut state = serializer.serialize_struct("PluginRef", fields)?;
         state.serialize_field("id", &self.id)?;
         state.serialize_field("required", &self.required)?;
@@ -135,6 +153,9 @@ impl Serialize for PluginRef {
         }
         if let Some(policy) = &self.graph_tasks {
             state.serialize_field("graph_tasks", policy)?;
+        }
+        if let Some(mode) = &self.network {
+            state.serialize_field("network", mode)?;
         }
         state.end()
     }
@@ -151,11 +172,13 @@ impl TryFrom<PluginRefRepr> for PluginRef {
                 required,
                 default,
                 graph_tasks,
+                network,
             } => Self {
                 id,
                 required,
                 default,
                 graph_tasks,
+                network,
             },
         };
         reference.validate_graph_tasks()?;
@@ -174,10 +197,16 @@ impl PluginRef {
             required: true,
             default: None,
             graph_tasks: None,
+            network: None,
         }
     }
 
     pub(crate) fn validate_graph_tasks(&self) -> Result<(), GraphError> {
+        if self.network.is_some() && self.id != "network" {
+            return Err(GraphError::InvalidSnapshot(
+                "network policy is only valid on the network Plugin reference".into(),
+            ));
+        }
         let Some(policy) = &self.graph_tasks else {
             return Ok(());
         };
@@ -201,6 +230,38 @@ impl PluginRef {
             }
         }
         Ok(())
+    }
+}
+
+impl GraphSnapshot {
+    /// Old snapshots retain their exact bytes and effective ceiling. Remove the
+    /// legacy fallback only after all retained pre-policy Runs have retired.
+    pub fn node_network_mode(&self, node: &GraphNode) -> NetworkMode {
+        if let Some(mode) = node
+            .plugins
+            .iter()
+            .find(|plugin| plugin.id == "network")
+            .and_then(|plugin| plugin.network)
+        {
+            return mode;
+        }
+        let legacy = node
+            .agent
+            .as_ref()
+            .and_then(|name| self.agents.get(name))
+            .is_some_and(|agent| agent.network)
+            || node
+                .op
+                .as_ref()
+                .and_then(|name| self.ops.get(name))
+                .and_then(|op| op.get("network"))
+                .and_then(Value::as_bool)
+                == Some(true);
+        if legacy {
+            NetworkMode::Enabled
+        } else {
+            NetworkMode::Denied
+        }
     }
 }
 

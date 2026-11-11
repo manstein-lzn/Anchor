@@ -214,6 +214,7 @@ async fn direct_rustc_uses_the_frozen_grant_and_rejects_unrelated_host_commands(
 
 #[tokio::test]
 async fn graph_network_intent_is_applied_and_host_authority_still_limits_it() {
+    crate::test_network_binary();
     use tokio::io::AsyncWriteExt;
     let fixture = Fixture::new();
     let refused = fixture
