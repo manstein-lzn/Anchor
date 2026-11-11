@@ -96,8 +96,8 @@ async fn run_status_http_json_bytes_match_the_phase_contract() {
         .unwrap();
         metadata.created = "2026-10-19T00:00:00+00:00".into();
         metadata::save(&state.data_root, &metadata).unwrap();
-        let updated =
-            serde_json::to_string(&state.application.run_updated(scenario).unwrap()).unwrap();
+        let view = state.application.read_run(scenario).unwrap().unwrap();
+        let updated = serde_json::to_string(&view.updated()).unwrap();
         let request = Request::builder().uri("/runs").body(Body::empty()).unwrap();
         let response = router(state).oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);

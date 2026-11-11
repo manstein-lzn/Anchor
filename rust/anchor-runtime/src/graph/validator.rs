@@ -25,6 +25,7 @@ use anchor_kernel::{
     Action, Evidence, JudgeCtx, Judgement, Outcome, Phase, PrincipalKind, Reason, Resource, Slot,
     Submission, Validator, Verification,
 };
+use serde::Deserialize;
 
 use super::*;
 
@@ -185,7 +186,7 @@ pub fn run_resource(record: &GraphRunRecord, budget: u64) -> Result<Resource, Gr
 }
 
 pub fn record_of(resource: &Resource) -> Result<GraphRunRecord, GraphError> {
-    serde_json::from_value(resource.state.clone()).map_err(GraphError::SnapshotDecode)
+    GraphRunRecord::deserialize(&resource.state).map_err(GraphError::SnapshotDecode)
 }
 
 /// Committed inputs of a dispatch: the selected incoming edges' source results.
@@ -508,7 +509,15 @@ impl GraphValidator {
     /// The dispatches the Run would currently accept, computed without
     /// mutating the stored state (the same computation reruns when judged).
     pub fn frontier(resource: &Resource) -> Result<Vec<Dispatch>, GraphError> {
-        let mut record = record_of(resource)?;
+        Self::frontier_owned(record_of(resource)?)
+    }
+
+    /// The same read-only frontier for an already decoded Run record.
+    pub fn frontier_from_record(record: &GraphRunRecord) -> Result<Vec<Dispatch>, GraphError> {
+        Self::frontier_owned(record.clone())
+    }
+
+    fn frontier_owned(mut record: GraphRunRecord) -> Result<Vec<Dispatch>, GraphError> {
         Ok(match prepare(&mut record)? {
             Advance::Open(open) => open,
             Advance::Done | Advance::Failed(_) => Vec::new(),

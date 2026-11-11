@@ -331,8 +331,8 @@ impl KernelRuns {
     pub(crate) fn view(
         &self,
         resource: &Resource,
+        record: &GraphRunRecord,
     ) -> Result<super::run_view::RunView, ApplicationError> {
-        let record = record_of(resource)?;
         Self::project(
             resource,
             self.active(&record.run_id),

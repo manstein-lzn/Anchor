@@ -151,8 +151,15 @@ fn independent_modules_preview_without_entry_and_reset_only_the_submitted_module
     record.module_activations.insert("n/nested".into(), 9);
     let (kernel, id) = kernel(record);
     let initial = complete(&kernel, &id, "start");
+    let record = record_of(&initial).unwrap();
     for _ in 0..3 {
-        assert_eq!(GraphValidator::frontier(&initial).unwrap().len(), 2);
+        let frontier = GraphValidator::frontier(&initial).unwrap();
+        assert_eq!(frontier.len(), 2);
+        assert_eq!(
+            GraphValidator::frontier_from_record(&record).unwrap(),
+            frontier
+        );
+        assert_eq!(record_of(&initial).unwrap(), record);
         assert_eq!(kernel.load(&id).unwrap().unwrap(), initial);
     }
     let resource = complete(&kernel, &id, "m/a");

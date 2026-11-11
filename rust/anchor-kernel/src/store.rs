@@ -7,8 +7,11 @@ use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use crate::model::{Record, Resource};
+use crate::model::{Record, RecordEntry, Resource};
+
+mod history;
 use anchor_file_lease::{FileLease, FlockOperation};
+use history::HistoryIndex;
 use sha2::{Digest, Sha256};
 
 #[derive(Debug, thiserror::Error)]
@@ -39,6 +42,18 @@ pub trait Store: Send + Sync {
     /// before appending. The caller holds the kernel's writer lock.
     fn commit(&self, id: &str, record: &Record) -> Result<(), StoreError>;
     fn history(&self, id: &str) -> Result<Vec<Record>, StoreError>;
+    /// Facts without recovery snapshots, for history projections.
+    fn record_entries(&self, id: &str) -> Result<Vec<RecordEntry>, StoreError> {
+        Ok(self
+            .history(id)?
+            .into_iter()
+            .map(RecordEntry::from)
+            .collect())
+    }
+    /// Complete records, including verdicts that did not advance a version.
+    fn history_len(&self, id: &str) -> Result<usize, StoreError> {
+        Ok(self.record_entries(id)?.len())
+    }
     /// Ids starting with `prefix`, in order.
     fn list(&self, prefix: &str) -> Result<Vec<String>, StoreError>;
 }
@@ -95,6 +110,33 @@ impl Store for MemoryStore {
             .unwrap_or_default())
     }
 
+    fn record_entries(&self, id: &str) -> Result<Vec<RecordEntry>, StoreError> {
+        let inner = self.inner.lock().expect("store lock");
+        Ok(inner
+            .get(id)
+            .map(|(_, history)| {
+                history
+                    .iter()
+                    .map(|record| RecordEntry {
+                        stamp: record.stamp.clone(),
+                        submission: record.submission.clone(),
+                        verdict: record.verdict,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
+    fn history_len(&self, id: &str) -> Result<usize, StoreError> {
+        Ok(self
+            .inner
+            .lock()
+            .expect("store lock")
+            .get(id)
+            .map(|(_, history)| history.len())
+            .unwrap_or(0))
+    }
+
     fn list(&self, prefix: &str) -> Result<Vec<String>, StoreError> {
         Ok(self
             .inner
@@ -122,13 +164,35 @@ fn derive_spent(resource: &mut Resource, history: &[Record]) {
 /// atomically) and `history.jsonl` (append-only, fsynced before the state).
 pub struct FileStore {
     root: PathBuf,
+    histories: Mutex<BTreeMap<String, HistoryIndex>>,
 }
 
 impl FileStore {
     pub fn new(root: impl Into<PathBuf>) -> Result<Self, StoreError> {
         let root = root.into();
         fs::create_dir_all(&root)?;
-        Ok(Self { root })
+        Ok(Self {
+            root,
+            histories: Mutex::new(BTreeMap::new()),
+        })
+    }
+
+    /// Read cached history facts without cloning their submissions.
+    ///
+    /// Holds the resource lease throughout `read`, without holding the history
+    /// cache mutex. The callback must not reenter the same resource lease
+    /// through this or another store instance. Its return value cannot borrow
+    /// from the entries slice.
+    pub fn with_record_entries<T>(
+        &self,
+        id: &str,
+        read: impl FnOnce(&[RecordEntry]) -> T,
+    ) -> Result<T, StoreError> {
+        let _lease = self.lease(id)?;
+        self.finish_removal(id)?;
+        self.with_history(id, &self.dir(id)?.join("history.jsonl"), |index, _| {
+            Ok(read(&index.entries))
+        })
     }
 
     /// Physically remove a resource and all of its history. The caller owns
@@ -139,6 +203,7 @@ impl FileStore {
         let _lease = self.lease(id)?;
         self.finish_removal(id)?;
         let live = self.dir(id)?;
+        self.histories.lock().expect("history cache").remove(id);
         match fs::rename(&live, self.deleting_dir(id)?) {
             Ok(()) => {
                 File::open(&self.root)?.sync_all()?;
@@ -146,6 +211,24 @@ impl FileStore {
             }
             Err(error) => self.absent_directory(&live, error),
         }
+    }
+
+    /// The resource lease protects this entry; unrelated resources never hold
+    /// the cache mutex while scanning a cold history or doing file I/O.
+    fn with_history<T>(
+        &self,
+        id: &str,
+        path: &Path,
+        read: impl FnOnce(&mut HistoryIndex, Option<&mut File>) -> Result<T, StoreError>,
+    ) -> Result<T, StoreError> {
+        let cached = self.histories.lock().expect("history cache").remove(id);
+        let (mut index, mut file) = HistoryIndex::open(path, cached)?;
+        let result = read(&mut index, file.as_mut())?;
+        self.histories
+            .lock()
+            .expect("history cache")
+            .insert(id.into(), index);
+        Ok(result)
     }
 
     fn dir(&self, id: &str) -> Result<PathBuf, StoreError> {
@@ -278,15 +361,9 @@ impl Store for FileStore {
             return Ok(None);
         }
         let mut resource = read_resource(&path)?;
-        let history = history_at(&dir.join("history.jsonl"))?;
-        // Crash window: the record was appended but the state not yet saved.
-        // The record carries the resulting resource, so recovery is a read.
-        if let Some(after) = history.iter().rev().find_map(|r| r.after.as_ref())
-            && after.version > resource.version
-        {
-            resource = after.clone();
-        }
-        derive_spent(&mut resource, &history);
+        self.with_history(id, &dir.join("history.jsonl"), |index, file| {
+            index.restore(&mut resource, file)
+        })?;
         Ok(Some(resource))
     }
 
@@ -301,6 +378,10 @@ impl Store for FileStore {
             }
             Err(e) => return Err(e.into()),
         }
+        self.histories
+            .lock()
+            .expect("history cache")
+            .remove(&resource.id);
         let bytes = serde_json::to_vec(resource).map_err(|e| StoreError::Corrupt(e.to_string()))?;
         write_atomic(&dir.join("resource.json"), &bytes)
     }
@@ -315,19 +396,33 @@ impl Store for FileStore {
         let mut line =
             serde_json::to_vec(record).map_err(|e| StoreError::Corrupt(e.to_string()))?;
         line.push(b'\n');
-        let mut history = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .append(true)
-            .open(dir.join("history.jsonl"))?;
-        trim_incomplete_tail(&mut history)?;
-        history.write_all(&line)?;
-        history.sync_all()?;
-        if let Some(after) = &record.after {
-            let bytes =
-                serde_json::to_vec(after).map_err(|e| StoreError::Corrupt(e.to_string()))?;
-            write_atomic(&dir.join("resource.json"), &bytes)?;
-        }
+        let path = dir.join("history.jsonl");
+        self.with_history(id, &path, |index, _| {
+            let mut history = OpenOptions::new()
+                .create(true)
+                .read(true)
+                .append(true)
+                .open(&path)?;
+            trim_incomplete_tail(&mut history)?;
+            let start = history.metadata()?.len();
+            history.write_all(&line)?;
+            history.sync_all()?;
+            // Serialization can exceed the decoder's recursion limit. Preserve
+            // the durable commit, but cache only facts that a cold read accepts.
+            // Explicit invalidation also covers equal-length torn-tail replacement.
+            if let Ok(decoded) = serde_json::from_slice::<Record>(&line) {
+                index.push(&decoded, start, line.len() as u64);
+                index.written(&history.metadata()?);
+            } else {
+                index.invalidate();
+            }
+            if let Some(after) = &record.after {
+                let bytes =
+                    serde_json::to_vec(after).map_err(|e| StoreError::Corrupt(e.to_string()))?;
+                write_atomic(&dir.join("resource.json"), &bytes)?;
+            }
+            Ok(())
+        })?;
         Ok(())
     }
 
@@ -335,6 +430,18 @@ impl Store for FileStore {
         let _lease = self.lease(id)?;
         self.finish_removal(id)?;
         history_at(&self.dir(id)?.join("history.jsonl"))
+    }
+
+    fn record_entries(&self, id: &str) -> Result<Vec<RecordEntry>, StoreError> {
+        self.with_record_entries(id, <[RecordEntry]>::to_vec)
+    }
+
+    fn history_len(&self, id: &str) -> Result<usize, StoreError> {
+        let _lease = self.lease(id)?;
+        self.finish_removal(id)?;
+        self.with_history(id, &self.dir(id)?.join("history.jsonl"), |index, _| {
+            Ok(index.entries.len())
+        })
     }
 
     fn list(&self, prefix: &str) -> Result<Vec<String>, StoreError> {
@@ -397,18 +504,16 @@ impl HistoryReader {
             Err(error) if absent(&error) => return Ok(None),
             Err(error) => return Err(error.into()),
         };
-        let history = self.history(id)?;
-        // Removal renames the directory. If that happened after the state was
-        // read, the history read above may be empty: the resource is gone.
+        let path = self.root.join(encode(id)?).join("history.jsonl");
+        let (index, mut file) = HistoryIndex::open(&path, None)?;
+        // Removal renames the directory. Recheck after scanning its history.
         if !state.exists() {
             return Ok(None);
         }
-        if let Some(after) = history.iter().rev().find_map(|r| r.after.as_ref())
-            && after.version > resource.version
-        {
-            resource = after.clone();
+        match index.restore(&mut resource, file.as_mut()) {
+            Err(StoreError::Io(error)) if absent(&error) => return Ok(None),
+            result => result?,
         }
-        derive_spent(&mut resource, &history);
         Ok(Some(resource))
     }
 

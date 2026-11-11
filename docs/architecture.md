@@ -116,6 +116,8 @@ Host 的 [Run 访问边界](run-access-facade.md) 对业务内部类型引用实
 | 人的等待 | Human 可 stop；Code 必须附至少一条 `Evidence::Observation` 才可 stop；Agent 不能 stop。只有 Human 能释放人的等待，不新增相位或等待者类型 |
 | 中断 | 携带 `interruption` 的节点提交只接受 Code；Agent 不能自报中断。结果写入 `RunResult.interruption`，控制 Artifact 沿普通路由继续，suppressed 与投递归 Host |
 
+FileStore 的当前状态读取、编号及不需要快照的历史投影共用进程内可丢弃摘要：冷读逐条完整校验，保留 stamp/submission/verdict、饱和累计成本与最后 after 的字节位置，不长期保留每个历史快照；本实例成功同步的追加增量更新摘要。文件身份、大小或修改时间改变时重扫，删除/重建及失败写入不会沿用旧摘要。恢复仍从同一已打开历史文件取得最后 after，成本仍只来自全部 stamp；原 JSONL、resource.json、完整历史接口和资源租约不变。Run recovery 与启动 Probe 使用无快照历史条目，避免查询重新物化全部状态。长历史读取/内存的隔离对照见[验证](../experiments/kernel-history-performance/README.md)；原始快照的磁盘增长仍未关闭。
+
 崩溃后重放同一提交的重复成本不由上述 `StaleVersion` 规则解决；现有未覆盖范围统一见[待办](pilot-development-plan.md#正在收口)。历史决定见[预检审查](archive/design-records-2026-11-04/constitution-preflight-decision.md)。
 
 ## Graph 与节点

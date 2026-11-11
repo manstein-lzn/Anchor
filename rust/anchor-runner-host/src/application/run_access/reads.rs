@@ -41,12 +41,14 @@ pub(crate) fn load(data_root: &Path, run_id: &str) -> Result<Option<RunView<'sta
             .flatten();
     let lifecycle = super::kernel_runs::KernelRuns::project(&resource, false, updated)
         .map_err(|error| GraphError::CorruptRun(format!("Run view: {error:?}")))?;
-    let history = store
-        .history(&resource.id)
-        .map_err(|error| GraphError::CorruptRun(error.to_string()))?;
-    let (recovery, _) = super::kernel_runs::KernelRuns::project_recovery(&resource, history)
+    let frontier = anchor_runtime::graph::validator::GraphValidator::frontier_from_record(&record)?;
+    let (recovery, _) = store
+        .with_record_entries(&resource.id, |history| {
+            super::kernel_runs::KernelRuns::project_recovery(&record, &frontier, history)
+        })
+        .map_err(|error| GraphError::CorruptRun(error.to_string()))?
         .map_err(|error| GraphError::CorruptRun(format!("Run recovery view: {error:?}")))?;
-    let mut view = RunView::from_kernel(record, lifecycle).with_kernel_frontier(&resource)?;
+    let mut view = RunView::from_kernel(record, lifecycle).with_kernel_frontier(frontier);
     view.recovery = recovery;
     Ok(Some(view))
 }
@@ -101,12 +103,9 @@ impl RunApplication {
         Ok(reject_legacy(&self.data_root, run_id)?)
     }
 
-    pub(crate) fn run_updated(&self, run_id: &str) -> Result<Option<String>, ApplicationError> {
-        self.read_run(run_id)
-            .map(|view| view.and_then(|view| view.lifecycle.updated))
-    }
-
-    fn run_ids(&self) -> Result<Vec<String>, ApplicationError> {
+    pub(in crate::application::run_access) fn run_ids(
+        &self,
+    ) -> Result<Vec<String>, ApplicationError> {
         let root = self.data_root.join("runs");
         match std::fs::read_dir(root) {
             Ok(entries) => {
@@ -161,10 +160,12 @@ impl RunApplication {
         let Some((owner, resource)) = self.kernel_resource(run_id)? else {
             return Ok(None);
         };
-        let lifecycle = owner.view(&resource)?;
         let record = super::kernel_runs::KernelRuns::record(&resource)?;
-        let (recovery, _) = owner.resource_recovery(&resource)?;
-        let mut view = RunView::from_kernel(record, lifecycle).with_kernel_frontier(&resource)?;
+        let lifecycle = owner.view(&resource, &record)?;
+        let frontier =
+            anchor_runtime::graph::validator::GraphValidator::frontier_from_record(&record)?;
+        let (recovery, _) = owner.resource_recovery(&resource, &record, &frontier)?;
+        let mut view = RunView::from_kernel(record, lifecycle).with_kernel_frontier(frontier);
         view.recovery = recovery;
         view.session_coordinated = self
             .metadata(run_id)?

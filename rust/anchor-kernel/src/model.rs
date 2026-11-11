@@ -360,6 +360,25 @@ pub struct Record {
     pub after: Option<Resource>,
 }
 
+/// A history fact without its recovery snapshot. Observers use the same
+/// stamps, submissions and verdicts without retaining every resource version.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecordEntry {
+    pub stamp: Stamp,
+    pub submission: Submission,
+    pub verdict: Verdict,
+}
+
+impl From<Record> for RecordEntry {
+    fn from(record: Record) -> Self {
+        Self {
+            stamp: record.stamp,
+            submission: record.submission,
+            verdict: record.verdict,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Validators
 // ---------------------------------------------------------------------------

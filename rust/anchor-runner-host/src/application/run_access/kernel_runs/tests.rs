@@ -801,7 +801,7 @@ fn broken_host_observation_never_blocks_kernel_control_or_lifecycle_reads() {
     std::fs::write(&observations, b"fixture unavailable").unwrap();
     runs.control(&record.run_id, "stop", None).unwrap();
     let resource = runs.load(&record.run_id).unwrap().unwrap();
-    let view = runs.view(&resource).unwrap();
+    let view = runs.view(&resource, &record).unwrap();
     assert!(matches!(
         view.phase,
         Phase::Waiting {

@@ -82,7 +82,7 @@ impl RunApplication {
         self.project_observed_run(&observed, metadata)
     }
 
-    fn project_observed_run(
+    pub(in crate::application::run_access) fn project_observed_run(
         &self,
         observed: &RunView<'_>,
         metadata: Option<&RunMetadata>,
@@ -141,7 +141,10 @@ impl RunApplication {
     }
     pub(crate) async fn projected_runs(&self) -> Result<Vec<Value>, ApplicationError> {
         let mut runs = Vec::new();
-        for (id, view) in self.run_views()? {
+        for id in self.run_ids()? {
+            let Some(view) = self.read_run(&id)? else {
+                continue;
+            };
             let metadata = self.metadata(&id)?;
             let (graph, created, mut trigger) = metadata
                 .as_ref()
@@ -184,7 +187,10 @@ impl RunApplication {
 
     pub(crate) async fn pilot_run_list(&self) -> Result<Value, ApplicationError> {
         let mut runs = Vec::new();
-        for (id, view) in self.run_views()? {
+        for id in self.run_ids()? {
+            let Some(view) = self.read_run(&id)? else {
+                continue;
+            };
             let metadata = self.metadata(&id)?;
             let projection = self.project_observed_run(&view, metadata.as_ref())?;
             runs.push(json!({"run":id,"projection":projection}));

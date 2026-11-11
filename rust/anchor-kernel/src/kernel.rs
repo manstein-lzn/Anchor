@@ -176,19 +176,23 @@ impl<S: Store> Kernel<S> {
             cost,
             at: Some(self.clock.now_ms()),
         };
-        let (verdict, validator, after, effects) = self.adjudicate(&stamp, &submission)?;
+        let Some(resource) = self.store.load(&submission.target)? else {
+            let verdict = Verdict::refused(Reason::UnknownResource);
+            self.measure(&stamp, &submission, "", verdict);
+            return Ok(verdict);
+        };
+        let (verdict, validator, after, effects) =
+            self.adjudicate(&stamp, &submission, resource)?;
         // Record: the target's history gets every verdict, refusals included.
-        if self.store.load(&submission.target)?.is_some() {
-            self.store.commit(
-                &submission.target,
-                &Record {
-                    stamp: stamp.clone(),
-                    submission: submission.clone(),
-                    verdict,
-                    after,
-                },
-            )?;
-        }
+        self.store.commit(
+            &submission.target,
+            &Record {
+                stamp: stamp.clone(),
+                submission: submission.clone(),
+                verdict,
+                after,
+            },
+        )?;
         for mut created in effects {
             // Resources the kernel creates for a submission share its stamp.
             created.created = principal.config.clone().map(|config| Creation {
@@ -206,16 +210,9 @@ impl<S: Store> Kernel<S> {
         &self,
         stamp: &Stamp,
         submission: &Submission,
+        mut resource: Resource,
     ) -> Result<(Verdict, ResourceId, Option<Resource>, Vec<Resource>), KernelError> {
         let principal = &stamp.principal;
-        let Some(mut resource) = self.store.load(&submission.target)? else {
-            return Ok((
-                Verdict::refused(Reason::UnknownResource),
-                String::new(),
-                None,
-                Vec::new(),
-            ));
-        };
         let validator_id = resource.validator.clone();
         let waiting_work =
             matches!(resource.phase(), Some(Phase::Waiting { .. })) && !is_lifecycle(submission);
@@ -468,7 +465,7 @@ impl<S: Store> Kernel<S> {
     fn place(&self, submission: &Submission) -> Result<String, KernelError> {
         Ok(format!(
             "{:012}",
-            self.store.history(&submission.target)?.len() + 1
+            self.store.history_len(&submission.target)? + 1
         ))
     }
 

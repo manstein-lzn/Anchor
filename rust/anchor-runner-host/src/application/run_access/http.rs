@@ -31,8 +31,8 @@ impl RunApplication {
                 error => RunHttpError::Application(error),
             })?
             .ok_or(RunHttpError::Missing)?;
-        let record = view.record.as_ref().clone();
-        let updated = self.run_updated(id)?;
+        let record = view.record.as_ref();
+        let updated = &view.lifecycle.updated;
         let artifacts = HostArtifacts::new(
             self.data_root.join("artifacts"),
             workspace_root.to_path_buf(),
@@ -172,7 +172,7 @@ impl RunApplication {
                     .as_ref()
                     .and_then(|metadata| metadata.graph_call.as_ref());
                 let projection = if let Some(child) = &child {
-                    Some(self.project_run(child, child_metadata.as_ref()).await?)
+                    Some(self.project_observed_run(child, child_metadata.as_ref())?)
                 } else {
                     None
                 };
@@ -205,7 +205,7 @@ impl RunApplication {
                 .read_run(&child_metadata.run_id)
                 .map_err(RunHttpError::Application)?;
             let projection = if let Some(child) = &child {
-                Some(self.project_run(child, Some(&child_metadata)).await?)
+                Some(self.project_observed_run(child, Some(&child_metadata))?)
             } else {
                 None
             };
@@ -244,7 +244,7 @@ impl RunApplication {
                 .join(format!("{id}.json"))
                 .try_exists()
                 .map_err(|error| RunHttpError::Internal(error.to_string()))?;
-        let projection = self.project_run(&view, Some(&metadata)).await?;
+        let projection = self.project_observed_run(&view, Some(&metadata))?;
         let definition = crate::application::run_projection::run_definition(&record.snapshot);
         let error = if projection.outcome == Some("failed") {
             projection.reason.as_deref().unwrap_or_default()
@@ -386,7 +386,7 @@ mod tests {
             .unwrap();
             metadata.created = "2026-10-19T00:00:00+00:00".into();
             metadata::save(root.path(), &metadata).unwrap();
-            let updated = serde_json::to_string(&application.run_updated(id).unwrap()).unwrap();
+            let updated = serde_json::to_string(&view.updated()).unwrap();
             let projection = format!(
                 r#"{{{phase_fields},"reason":{reason},"active":false,"actions":{{"pause":false,"stop":{stop},"resume":{resume},"abandon":{abandon}}},"updated":{updated}}}"#
             );
