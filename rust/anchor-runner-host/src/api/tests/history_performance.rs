@@ -17,7 +17,7 @@ struct ProcessSample {
 fn allocation_stats() -> Value {
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     {
-        // glibc >= 2.33. These counters include allocator metadata and tcache;
+        // These counters include allocator metadata and tcache;
         // allocated bytes are not a measurement of live Rust object sizes.
         #[repr(C)]
         struct Mallinfo2 {
@@ -33,10 +33,21 @@ fn allocation_stats() -> Value {
             keepcost: usize,
         }
         unsafe extern "C" {
-            fn mallinfo2() -> Mallinfo2;
+            fn dlsym(
+                handle: *mut std::ffi::c_void,
+                symbol: *const std::ffi::c_char,
+            ) -> *mut std::ffi::c_void;
         }
-        // SAFETY: mallinfo2 has no arguments; the structure matches glibc's ABI.
-        let stats = unsafe { mallinfo2() };
+        // mallinfo2 is optional (glibc >= 2.33), not a test binary baseline.
+        // SAFETY: the symbol has the expected no-argument glibc ABI when present.
+        let stats = unsafe {
+            let symbol = dlsym(std::ptr::null_mut(), c"mallinfo2".as_ptr());
+            if symbol.is_null() {
+                return Value::Null;
+            }
+            let mallinfo2: unsafe extern "C" fn() -> Mallinfo2 = std::mem::transmute(symbol);
+            mallinfo2()
+        };
         json!({
             "arena_bytes": stats.arena,
             "allocated_bytes": stats.uordblks,

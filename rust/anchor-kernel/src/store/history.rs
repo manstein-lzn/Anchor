@@ -37,9 +37,62 @@ struct Snapshot {
     version: u64,
 }
 
+#[cfg(target_os = "linux")]
+fn watch_history(file: &File) -> Option<File> {
+    use rustix::fs::inotify::{self, CreateFlags, WatchFlags};
+    use std::os::fd::AsRawFd;
+
+    let watch = inotify::init(CreateFlags::NONBLOCK | CreateFlags::CLOEXEC).ok()?;
+    // Follow the opened inode, not a path that may have been replaced.
+    inotify::add_watch(
+        &watch,
+        format!("/proc/self/fd/{}", file.as_raw_fd()),
+        WatchFlags::MODIFY | WatchFlags::ATTRIB | WatchFlags::DELETE_SELF | WatchFlags::MOVE_SELF,
+    )
+    .ok()?;
+    Some(watch.into())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn watch_history(_: &File) -> Option<File> {
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn written_watch(watch: Option<File>, file: &File) -> Option<File> {
+    use rustix::fs::inotify::{ReadFlags, Reader};
+    use rustix::io::Errno;
+    use std::mem::MaybeUninit;
+
+    let Some(watch) = watch else {
+        return watch_history(file);
+    };
+    let mut buffer = [MaybeUninit::uninit(); 512];
+    let mut events = Reader::new(&watch, &mut buffer);
+    // An append emits only a few events. An out-of-contract writer must not
+    // keep this post-commit optimization busy indefinitely.
+    for _ in 0..32 {
+        match events.next() {
+            Ok(event) if (event.events() - (ReadFlags::MODIFY | ReadFlags::ATTRIB)).is_empty() => {}
+            Err(Errno::INTR) => continue,
+            Err(Errno::AGAIN) => return Some(watch),
+            // Never treat overflow, revocation or an unexpected event/error
+            // as part of our append. Dropping the watch forces revalidation.
+            _ => return None,
+        }
+    }
+    None
+}
+
+#[cfg(not(target_os = "linux"))]
+fn written_watch(_: Option<File>, _: &File) -> Option<File> {
+    None
+}
+
 #[derive(Default)]
 pub(super) struct HistoryIndex {
     stamp: Option<FileStamp>,
+    watch: Option<File>,
     pub entries: Vec<RecordEntry>,
     spent: u64,
     after: Option<Snapshot>,
@@ -55,13 +108,17 @@ impl HistoryIndex {
         let stamp = FileStamp::of(&file.metadata()?);
         if let Some(cached) = cached
             && cached.stamp.as_ref() == Some(&stamp)
+            && cached.unchanged()
         {
             return Ok((cached, Some(file)));
         }
         // Only our own durable appends advance the cache incrementally. Any
         // other change (including same-length edits or replacement) validates
         // the entire prefix again, so complete corrupt records remain errors.
-        let mut index = Self::default();
+        let mut index = Self {
+            watch: watch_history(&file),
+            ..Self::default()
+        };
         let mut reader = BufReader::with_capacity(64 * 1024, (&mut file).take(stamp.len));
         let mut line = Vec::new();
         let mut start = 0;
@@ -105,8 +162,22 @@ impl HistoryIndex {
         self.stamp = None;
     }
 
-    pub fn written(&mut self, metadata: &Metadata) {
-        self.stamp = Some(FileStamp::of(metadata));
+    fn unchanged(&self) -> bool {
+        // Coarse timestamps can alias different bytes. Only an empty, live
+        // mutation watch permits reuse; any event (including overflow or
+        // revocation), read error or unavailable watch means a cold read.
+        let Some(mut watch) = self.watch.as_ref() else {
+            return false;
+        };
+        matches!(watch.read(&mut [0; 4096]), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
+    }
+
+    pub fn written(&mut self, file: &File) -> Result<(), StoreError> {
+        // The resource lease excludes other writers. Consume only our own
+        // append events, preserving incremental updates without hiding errors.
+        self.watch = written_watch(self.watch.take(), file);
+        self.stamp = Some(FileStamp::of(&file.metadata()?));
+        Ok(())
     }
 
     pub fn restore(
@@ -141,6 +212,64 @@ impl HistoryIndex {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn identical_metadata_or_an_unavailable_watch_cannot_hide_corruption() {
+        for unavailable_watch in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join("history.jsonl");
+            let mut bytes = serde_json::to_vec(&Record {
+                stamp: crate::Stamp {
+                    principal: crate::Principal::new("host", crate::PrincipalKind::Code),
+                    cost: 2,
+                    at: None,
+                },
+                submission: crate::Submission::new("run/cache", 0, crate::Action::Write),
+                verdict: crate::Verdict::returned(crate::Reason::ContentInvalid),
+                after: None,
+            })
+            .unwrap();
+            bytes.push(b'\n');
+            std::fs::write(&path, &bytes).unwrap();
+            let (mut cached, _) = HistoryIndex::open(&path, None).unwrap();
+            #[cfg(target_os = "linux")]
+            assert!(cached.unchanged());
+            if unavailable_watch {
+                cached.watch = None;
+            }
+            bytes[0] = b'!';
+            std::fs::write(&path, bytes).unwrap();
+            // Deterministically reproduce a coarse filesystem clock even
+            // where this write happens to advance ctime or mtime.
+            cached.stamp = Some(FileStamp::of(&std::fs::metadata(&path).unwrap()));
+            assert!(matches!(
+                HistoryIndex::open(&path, Some(cached)),
+                Err(StoreError::Corrupt(_))
+            ));
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn write_refresh_does_not_hide_a_revoked_watch() {
+        use rustix::fs::inotify::{self, WatchFlags};
+
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("history.jsonl");
+        std::fs::write(&path, []).unwrap();
+        let (mut cached, file) = HistoryIndex::open(&path, None).unwrap();
+        let watch = cached.watch.as_ref().unwrap();
+        let descriptor = inotify::add_watch(watch, &path, WatchFlags::MODIFY).unwrap();
+        inotify::remove_watch(watch, descriptor).unwrap();
+        std::fs::write(&path, b"invalid\n").unwrap();
+
+        cached.written(file.as_ref().unwrap()).unwrap();
+
+        assert!(matches!(
+            HistoryIndex::open(&path, Some(cached)),
+            Err(StoreError::Corrupt(_))
+        ));
+    }
 
     #[test]
     fn recovery_after_path_replacement_keeps_snapshot_and_cost_from_one_history() {

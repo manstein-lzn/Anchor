@@ -95,7 +95,7 @@ anchor-library --root /absolute/path/to/library upgrade-system \
 git diff 9a5fa57 -- rust/anchor-kernel
 ```
 
-本次长历史与 Run 查询性能修复是经独立审查的冻结外例外，范围仅为存储读取/摘要、无快照观察接口、既有历史条目借用及去除重复读取；不扩展裁决、持久格式、预算或恢复规则。审查与验证边界见[长历史证据](../experiments/kernel-history-performance/README.md)与[查询分配证据](../experiments/run-query-memory-performance/README.md)。本例外不授权其他 Kernel 改动。
+本次长历史与 Run 查询性能修复是经独立审查的冻结外例外，范围仅为存储读取/摘要、无快照观察接口、既有历史条目借用及去除重复读取；2026-11-11 用户进一步授权修复低精度文件时间戳下的同长改写失效检测，采用可丢弃修改监视与不可用时完整重读。不扩展裁决、持久格式、预算或恢复规则。审查与验证边界见[长历史证据](../experiments/kernel-history-performance/README.md)、[查询分配证据](../experiments/run-query-memory-performance/README.md)与[缓存修复本机证据](../.local/github-sync-20261111-174316/kernel-cache-fix/README.md)，修改监视的适用范围见[当前架构](architecture.md#kernel-提交与存储)。本例外不授权其他 Kernel 改动。
 
 ## 验证
 

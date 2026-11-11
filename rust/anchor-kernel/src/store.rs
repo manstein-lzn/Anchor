@@ -412,7 +412,7 @@ impl Store for FileStore {
             // Explicit invalidation also covers equal-length torn-tail replacement.
             if let Ok(decoded) = serde_json::from_slice::<Record>(&line) {
                 index.push(&decoded, start, line.len() as u64);
-                index.written(&history.metadata()?);
+                index.written(&history)?;
             } else {
                 index.invalidate();
             }

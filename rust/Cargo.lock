@@ -269,6 +269,7 @@ name = "anchor-kernel"
 version = "0.1.0"
 dependencies = [
  "anchor-file-lease",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",
