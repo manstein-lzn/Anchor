@@ -176,6 +176,8 @@ Artifact 位于 `<state>/artifacts`：format 3 清单保存显式交付路径、
 
 Host 的 `plugin_library` 统一拥有 Catalog/Library 构造、可取消发布租约、定义与摘要重验和 Graph 挂载声明；列表用例建在其共享读取之上。普通观察不新增锁，共享读取保持非阻塞，发布与开发 scope 保持既有生命周期和锁顺序。`plugin_mounts::resolve` 继续拥有 Session 开关合并规则。
 
+节点未声明 Plugin 且不属于 Session 时，挂载解析不读取 Library 目录或取得目录锁，普通 `Op.run` 计划因此不受无关 Plugin 发布阻塞。属于 Session 的调用即使声明为空，仍保留目录锁以及本轮挂载开关和联网授权的冻结规则。
+
 `plugin_library::tools` 提供共用准备与连接/披露挂接步骤，OAuth 复用 `McpToolConfig::authorize_oauth`；Pilot 保持逐项软失败，Node 保持批量硬失败、OAuth 前保留配置、连接前记录观察。
 
 声明 `channel_identity_headers` 的 HTTP MCP 在准备时默认停用；常驻助手 invocation 由 `McpToolConfig::attest_channel_identity` 从本次回答的那条已准入渠道输入取发送者身份写入请求头，模型、配置和工具参数都不能提供或覆盖。非渠道调用、同一 Turn 折叠了不同成员的消息或值不能作为 Header 时保持停用；连接测试不代表任何成员，不连接此类 server。字段与校验见 [Plugin 连接配置](plugins.md#连接配置与凭据)。

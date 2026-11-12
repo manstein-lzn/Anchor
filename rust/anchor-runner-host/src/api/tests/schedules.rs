@@ -64,6 +64,94 @@ async fn schedules_crud_reload_and_timeline_keep_platform_contract() {
 }
 
 #[tokio::test]
+async fn plugin_free_schedule_completes_during_installation_and_replay_keeps_one_execution() {
+    let (root, state) = fixture();
+    let _env_guard = PROCESS_ENV.lock().await;
+    set_host_env(root.path());
+    write_graph_bundle(
+        &state.bundle_root,
+        &json!({
+            "entry":"work", "agents":{},
+            "ops":{"work":{"run":"sh -c 'printf once >> count.txt'", "writes":["count.txt"]}},
+            "nodes":[{"id":"work","op":"work","plugins":[]}], "edges":[]
+        }),
+    )
+    .unwrap();
+    let at = "2026-11-11T09:00:00";
+    {
+        let mut store = state.schedules.lock().unwrap();
+        store.items.push(crate::api::schedules::ScheduleItem {
+            id: "install-overlap".into(),
+            graph: "fixture".into(),
+            rule: json!({"type":"once","at":at}),
+            input: json!({}),
+            created_at: "2026-11-11T08:59:59".into(),
+            next_at: at.into(),
+            enabled: true,
+            delegation: None,
+            remaining: None,
+            group: None,
+        });
+        store.persist().unwrap();
+    }
+    let lease = crate::plugin_library::PluginLibrary::new(state.application.library_root())
+        .install_lease()
+        .unwrap();
+    crate::api::schedules::tick_schedules(
+        &state,
+        NaiveDateTime::parse_from_str(at, "%Y-%m-%dT%H:%M:%S").unwrap(),
+    )
+    .await
+    .unwrap();
+    wait_idle(&state).await;
+    let records = state.application.records().unwrap();
+    assert_eq!(records.len(), 1);
+    let run = &records[0].0;
+    let view = state.application.read_run(run).unwrap().unwrap();
+    assert!(view.has_succeeded(), "{:?}", view.phase());
+    assert!(!view.active());
+    assert!(!state.schedules.lock().unwrap().items[0].enabled);
+    let key = anchor_runtime::graph::InvocationKey {
+        run_id: run.clone(),
+        graph_digest: records[0].1.graph_digest.clone(),
+        node_id: "work".into(),
+        invocation: 1,
+    };
+    let count = HostArtifacts::new(
+        state.data_root.join("artifacts"),
+        state.workspace_root.clone(),
+    )
+    .workspace_path(&key)
+    .unwrap()
+    .join("count.txt");
+    assert_eq!(std::fs::read_to_string(&count).unwrap(), "once");
+    let metadata = state.application.metadata(run).unwrap().unwrap();
+    let trigger = serde_json::from_value(json!({
+        "source":"schedule", "schedule":metadata.schedule, "scheduled_at":metadata.scheduled_at
+    }))
+    .unwrap();
+    assert_eq!(
+        state
+            .application
+            .admit_graph_request(
+                "fixture",
+                json!({}),
+                None,
+                trigger,
+                metadata.oauth_owner,
+                Some(metadata.request.unwrap().id),
+            )
+            .await
+            .unwrap(),
+        *run
+    );
+    assert_eq!(state.application.records().unwrap().len(), 1);
+    assert!(state.application.active_runs(None).await.is_empty());
+    assert_eq!(std::fs::read_to_string(&count).unwrap(), "once");
+    drop(lease);
+}
+
+#[tokio::test]
 async fn busy_due_schedule_retains_its_occurrence_until_admission() {
     let (root, state) = fixture();
     let _env_guard = PROCESS_ENV.lock().await;

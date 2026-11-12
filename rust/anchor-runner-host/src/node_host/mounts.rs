@@ -329,6 +329,22 @@ impl HostIoResolver {
         Ok(None)
     }
 
+    /// Session switches can add Plugins even when the Graph declares none.
+    /// Calls with neither source do not need access to the Library catalog.
+    pub(super) fn mount_catalog_root(
+        &self,
+        request: &NodeExecutionRequest,
+    ) -> Result<Option<&Path>, String> {
+        match self.library_root.as_deref() {
+            Some(root)
+                if !request.plugins.is_empty() || self.session_turn(&request.key)?.is_some() =>
+            {
+                Ok(Some(root))
+            }
+            _ => Ok(None),
+        }
+    }
+
     /// The Plugins this node call actually mounts, and why the others are off.
     ///
     /// The Graph's declaration is a *default*: a required Plugin is always
@@ -350,8 +366,7 @@ impl HostIoResolver {
         request: &NodeExecutionRequest,
     ) -> Result<MountedPlugins, String> {
         let _guard = self
-            .library_root
-            .as_ref()
+            .mount_catalog_root(request)?
             .map(|root| {
                 crate::plugin_library::PluginLibrary::new(root)
                     .catalog_read_guard()
