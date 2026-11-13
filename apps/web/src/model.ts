@@ -49,17 +49,22 @@ export type RunTrigger = { source: string; schedule?: string; scheduled_at?: str
 export type CallRecord = { node: string; invocation: number; graph: string; run: string;
   mode: 'wait' | 'detach'; active?: boolean; projection?: RunProjection | null;
   summary?: string; input?: Record<string, unknown>; result?: unknown };
-export type GraphRelationsData = { graphs: { graph: string; schedules: number }[];
-  calls: { graph: string; node: string; op: string; target: string; mode: 'wait' | 'detach' }[] };
+export type GraphRelationsData = { graphs: { graph: string; objective?: string; task_source?: string; schedules: number }[];
+  calls: { graph: string; node: string; op: string; target: string; mode: 'wait' | 'detach' }[];
+  subscriptions?: { graph: string; target: string; schedule: string; active: boolean; authorized: boolean; not_before?: string | null }[] };
 export const callModeLabel = (mode: 'wait' | 'detach') => mode === 'wait' ? '等待完成' : '启动后继续';
 
 export type GraphSummary = {
   graph: string; running: string | null; active_runs?: string[]; active_nodes?: string[];
+  objective?: string;
+  task_source?: string;
+  schedule_summary?: { total: number; enabled: number; recurring: number };
+  managed_by?: 'dreaming';
   completed_task?: boolean;
   listener?: { platform: string; status: 'connecting' | 'authenticating' | 'authenticated' | 'reconnecting' | 'stopped' | 'unavailable' };
 };
 
-export type GraphPluginActivation = { mode: 'next_turn' | 'new_run'; graph_digest: string };
+export type GraphPluginActivation = { mode: 'next_turn' | 'new_run'; graph_digest: string; shared_schedules?: number; active_subscriptions?: number };
 
 export const listenerLabel = (status: NonNullable<GraphSummary['listener']>['status']) => ({
   connecting: '正在连接', authenticating: '正在认证', authenticated: '常驻监听',
@@ -94,7 +99,7 @@ export type OurGraph = {
 /// A node's Plugin declaration: a bare id (older Graphs, and what the editor
 /// writes) or the object form that says whether the Graph needs it.
 export type GraphTaskPolicy = {
-  graphs?: string[]; create_graphs?: boolean; plugins?: string[];
+  graphs?: string[]; schedules?: string[]; create_graphs?: boolean; plugins?: string[];
   network?: boolean; commands?: boolean; develop_plugins?: boolean;
 };
 export type NetworkMode = 'auto' | 'enabled' | 'denied';

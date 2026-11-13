@@ -673,6 +673,12 @@ fn install_message(precondition: &PluginInstallPrecondition) -> String {
             impact.graphs.len(),
             impact.graphs.join(", ")
         ));
+        if impact.shared_schedules > 0 {
+            message.push_str(&format!(
+                "关联共享计划 {} 个、活跃订阅 {} 条；更新后订阅保持有效并从下一期生效。\n",
+                impact.shared_schedules, impact.active_subscriptions
+            ));
+        }
     }
     if precondition.replacing() && !precondition.already_installed() {
         message.push_str(
@@ -977,6 +983,8 @@ mod tests {
             existing_digest: None,
             impact: PluginImpact {
                 graphs: Vec::new(),
+                shared_schedules: 0,
+                active_subscriptions: 0,
                 coverage: ImpactCoverage::Complete,
             },
             dependencies: Some(PluginDependencyPlan {

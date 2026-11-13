@@ -9,9 +9,14 @@ export type GraphPick = { kind: 'node' | 'edge' | 'agent'; id: string } | null;
 export type WorkbenchNotice = { kind: 'ok' | 'bad'; text: string } | null;
 const serialize = (doc: OurGraph) => JSON.stringify(doc, null, 2) + '\n';
 
-export const graphSaveNotice = (activation?: GraphPluginActivation, checked = false) => activation?.mode === 'next_turn'
-  ? `${checked ? '校验通过。' : ''}已保存，插件配置将在各会话的下一条消息生效。`
-  : checked ? '校验通过，工作流已保存。' : '已保存。';
+export const graphSaveNotice = (activation?: GraphPluginActivation, checked = false) => {
+  const base = activation?.mode === 'next_turn'
+    ? `${checked ? '校验通过。' : ''}已保存，插件配置将在各会话的下一条消息生效。`
+    : checked ? '校验通过，工作流已保存。' : '已保存。';
+  return activation?.shared_schedules
+    ? `${base}关联 ${activation.shared_schedules} 个共享计划、${activation.active_subscriptions ?? 0} 条订阅，将从下一期生效。`
+    : base;
+};
 
 /** Owns the current editing snapshot and its history, independent of visible page. */
 export function useGraphEditor(name: string, graphs: GraphSummary[], setNotice: (notice: WorkbenchNotice) => void) {

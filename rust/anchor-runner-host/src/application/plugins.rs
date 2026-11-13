@@ -45,6 +45,73 @@ pub(crate) struct PluginInstallPrecondition {
     pub(crate) access: DependencyAccess,
 }
 
+/// Private staged bytes shared by Operator and accepted machine publication.
+/// Dependency preparation and authorization gates stay with their callers.
+pub(in crate::application) struct ApprovedPluginInstall {
+    _transaction: tempfile::TempDir,
+    id: String,
+    directory: PathBuf,
+    expected_existing: Option<String>,
+}
+
+pub(in crate::application) fn stage_plugin_install(
+    library_root: &Path,
+    precondition: &PluginInstallPrecondition,
+) -> Result<ApprovedPluginInstall, ApplicationError> {
+    let id = &precondition.review.id;
+    let transaction = tempfile::Builder::new()
+        .prefix(".anchor-plugin-approved-")
+        .tempdir()
+        .map_err(super::storage)?;
+    let (root, review) = PluginLibrary::new(library_root)
+        .stage_directory(id, &precondition.directory, transaction.path())
+        .map_err(plugin_error)?;
+    if review.digest != precondition.review.digest {
+        return Err(ApplicationError::Conflict(
+            "the Plugin candidate changed before publication; review its current content".into(),
+        ));
+    }
+    let existing = Catalog::new(library_root)
+        .definition(id)
+        .ok()
+        .map(|definition| definition.digest);
+    if existing != precondition.existing_digest {
+        return Err(ApplicationError::Conflict(
+            "the installed Plugin changed before publication".into(),
+        ));
+    }
+    Ok(ApprovedPluginInstall {
+        _transaction: transaction,
+        id: id.clone(),
+        directory: root.join("plugins").join(id),
+        expected_existing: precondition.existing_digest.clone(),
+    })
+}
+
+pub(in crate::application) fn commit_plugin_install_locked(
+    library_root: &Path,
+    approved: ApprovedPluginInstall,
+    lease: &anchor_library::InstallLease,
+) -> Result<InstallOutcome, ApplicationError> {
+    let existing = Catalog::new(library_root)
+        .definition(&approved.id)
+        .ok()
+        .map(|definition| definition.digest);
+    if existing != approved.expected_existing {
+        return Err(ApplicationError::Conflict(
+            "the installed Plugin changed before publication".into(),
+        ));
+    }
+    PluginLibrary::new(library_root)
+        .install_directory_locked(
+            &approved.id,
+            &approved.directory,
+            approved.expected_existing.is_some(),
+            lease,
+        )
+        .map_err(plugin_error)
+}
+
 /// The deployment-authorized, resolved answer to one Plugin's declaration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PluginDependencyPlan {
@@ -63,6 +130,36 @@ pub(crate) struct PluginDependencyPlan {
     pub(crate) declaration_digest: String,
 }
 
+impl PluginDependencyPlan {
+    pub(in crate::application) fn from_resolved(
+        provisioner: &crate::dependency_provision::DependencyProvisioner,
+        library_root: &Path,
+        id: &str,
+        declaration_digest: String,
+        resolved: &ResolvedRequirements,
+    ) -> Self {
+        Self {
+            sources: provisioner
+                .config
+                .sources
+                .iter()
+                .map(|source| source.as_str())
+                .collect(),
+            interpreter: resolved.interpreter.clone(),
+            interpreter_path: resolved.interpreter_path.clone(),
+            interpreter_digest: resolved.interpreter_digest.clone(),
+            lock_digest: resolved.lock_digest.clone(),
+            packages: resolved.packages.clone(),
+            view: plugin_view_path(
+                &resolved_library_root(library_root),
+                id,
+                &declaration_digest,
+            ),
+            declaration_digest,
+        }
+    }
+}
+
 /// Who currently depends on one Plugin, as a derived view.
 ///
 /// Never stored: it is a projection over the Graph catalog and the Run records,
@@ -72,6 +169,10 @@ pub(crate) struct PluginDependencyPlan {
 pub(crate) struct PluginImpact {
     /// Saved Graphs that bind this Plugin.
     pub(crate) graphs: Vec<String>,
+    #[serde(default)]
+    pub(crate) shared_schedules: usize,
+    #[serde(default)]
+    pub(crate) active_subscriptions: usize,
     /// How much of the catalog this report actually saw. A Graph this host
     /// cannot load is a gap, never a silent omission: the operator is being
     /// asked to trust a count.
@@ -196,12 +297,6 @@ impl RunApplication {
             ))
         })?;
         let declaration_digest = review.dependencies.declaration_digest();
-        let sources = provisioner
-            .config
-            .sources
-            .iter()
-            .map(|source| source.as_str())
-            .collect::<Vec<_>>();
         let resolved = resolve_requirements_with_access(
             &provisioner.config,
             None,
@@ -258,23 +353,21 @@ impl RunApplication {
                 )));
             }
         }
-        let root = resolved_library_root(library_root);
-        let view = plugin_view_path(&root, &review.id, &declaration_digest);
-        let plan = PluginDependencyPlan {
-            sources,
-            interpreter: resolved.interpreter.clone(),
-            interpreter_path: resolved.interpreter_path.clone(),
-            interpreter_digest: resolved.interpreter_digest.clone(),
-            lock_digest: resolved.lock_digest.clone(),
-            packages: resolved.packages.clone(),
-            view,
+        let plan = PluginDependencyPlan::from_resolved(
+            &provisioner,
+            library_root,
+            &review.id,
             declaration_digest,
-        };
+            &resolved,
+        );
         Ok((Some(plan), Some(resolved)))
     }
 
     /// Which Graphs and unfinished Runs depend on one Plugin right now.
-    fn plugin_impact(&self, id: &str) -> Result<PluginImpact, ApplicationError> {
+    pub(in crate::application) fn plugin_impact(
+        &self,
+        id: &str,
+    ) -> Result<PluginImpact, ApplicationError> {
         let (bundles, coverage) = match self.impact_scan() {
             ImpactScan::Read {
                 bundles,
@@ -291,10 +384,22 @@ impl RunApplication {
             }
         }
         graphs.sort();
+        let mut shared_schedules = 0;
+        let mut active_subscriptions = 0;
+        for graph in &graphs {
+            let (schedules, subscriptions) = self.shared_schedule_impact(graph)?;
+            shared_schedules += schedules;
+            active_subscriptions += subscriptions;
+        }
         // Upgrading is always allowed (standard invariant 7): a Run uses the
         // *current* Plugin and observes it from its next node call, so there is no
         // stranded-Run question to ask and nothing to confirm.
-        Ok(PluginImpact { graphs, coverage })
+        Ok(PluginImpact {
+            graphs,
+            shared_schedules,
+            active_subscriptions,
+            coverage,
+        })
     }
 
     /// Publish the reviewed candidate only if nothing moved since the review.
@@ -329,7 +434,6 @@ impl RunApplication {
             .map_err(plugin_dependency_error)?;
         let id = precondition.review.id.clone();
         let directory = precondition.directory.clone();
-        let replacing = precondition.replacing() && !already_installed;
         {
             let library_root = library_root.clone();
             let id = id.clone();
@@ -382,23 +486,13 @@ impl RunApplication {
         // bytes against the approval while holding the publication lease. The
         // workspace remains editable during dependency preparation, but none
         // of its later bytes can become this installation's input.
-        let (approved_snapshot, directory) = tokio::task::spawn_blocking({
-            let (library_root, id, source) = (library_root.clone(), id.clone(), directory.clone());
-            let (expected_digest, expected_existing) = (precondition.review.digest.clone(), precondition.existing_digest.clone());
-            move || {
-                let transaction = tempfile::Builder::new().prefix(".anchor-plugin-approved-").tempdir()
-                    .map_err(|error| ApplicationError::Storage(error.to_string()))?;
-                let (root, review) = PluginLibrary::new(&library_root).stage_directory(&id, &source, transaction.path()).map_err(plugin_error)?;
-                if review.digest != expected_digest {
-                    return Err(ApplicationError::Conflict("the Plugin candidate changed before publication; review and confirm its current content".into()));
-                }
-                let existing = Catalog::new(&library_root).definition(&id).ok().map(|definition| definition.digest);
-                if existing != expected_existing {
-                    return Err(ApplicationError::Conflict("the installed Plugin changed before publication; review and confirm again".into()));
-                }
-                Ok::<_, ApplicationError>((transaction, root.join("plugins").join(&id)))
-            }
-        }).await.map_err(|_| ApplicationError::Storage("Plugin staging task failed".into()))??;
+        let approved = tokio::task::spawn_blocking({
+            let library_root = library_root.clone();
+            let precondition = precondition.clone();
+            move || stage_plugin_install(&library_root, &precondition)
+        })
+        .await
+        .map_err(|_| ApplicationError::Storage("Plugin staging task failed".into()))??;
         // Dependencies land before the Plugin is published: a failed solve,
         // fetch, unpack or verification must leave the Library and every
         // existing view exactly as they were.
@@ -461,15 +555,12 @@ impl RunApplication {
             .map(|landed| landed.view);
         tokio::task::spawn_blocking(move || {
             let _catalog_guard = catalog_guard;
-            let _approved_snapshot = approved_snapshot;
             let published = precondition
                 .access
                 .check()
                 .map_err(plugin_dependency_error)
                 .and_then(|()| {
-                    PluginLibrary::new(&library_root)
-                        .install_directory_locked(&id, &directory, replacing, &lease)
-                        .map_err(plugin_error)
+                    commit_plugin_install_locked(&library_root, approved, &lease)
                 });
             if let Err(error) = &published
                 && let Some(view) = created_view
@@ -577,6 +668,9 @@ pub(crate) struct PluginUninstallPrecondition {
     pub(crate) sessions: Vec<String>,
     /// Attached Runs that are not terminal and bind it.
     pub(crate) unfinished_runs: Vec<String>,
+    /// Active Dreaming deployments, open candidate preparations or unreadable
+    /// catalog references that still need this Plugin's retained revisions.
+    pub(crate) dreaming: Vec<String>,
     /// Saved Graphs that reference it. Shown on the form, not a refusal: a Graph
     /// that loses a Plugin fails its own next admission, and Graphs are the
     /// operator's to change.
@@ -603,6 +697,12 @@ impl PluginUninstallPrecondition {
                 "还有 {} 个未结束的 Run 绑定它（{}）：等它们结束或先停止/放弃它们，再卸载插件",
                 self.unfinished_runs.len(),
                 self.unfinished_runs.join("、")
+            ));
+        }
+        if !self.dreaming.is_empty() {
+            return Some(format!(
+                "Dreaming 仍持有它的恢复或观察引用（{}）：先撤回或结束相关 Dreaming 变更，再卸载插件",
+                self.dreaming.join("、")
             ));
         }
         None
@@ -683,10 +783,13 @@ impl RunApplication {
         })?;
         let mut unfinished_runs = self.unfinished_runs_binding(id)?;
         let mut impact = self.plugin_impact(id)?;
+        let mut dreaming = self.dreaming_plugin_references(library_root, id, &impact.coverage)?;
         sessions_mounting.sort();
         sessions_mounting.dedup();
         unfinished_runs.sort();
         unfinished_runs.dedup();
+        dreaming.sort();
+        dreaming.dedup();
         impact.graphs.sort();
         impact.graphs.dedup();
         Ok(PluginUninstallPrecondition {
@@ -697,13 +800,14 @@ impl RunApplication {
             mutable,
             sessions: sessions_mounting,
             unfinished_runs,
+            dreaming,
             graphs: impact.graphs,
             coverage: impact.coverage,
         })
     }
 
     /// Attached Runs that are not terminal and bind this Plugin.
-    fn unfinished_runs_binding(&self, id: &str) -> Result<Vec<String>, ApplicationError> {
+    pub(in crate::application) fn unfinished_runs_binding(&self, id: &str) -> Result<Vec<String>, ApplicationError> {
         let mut runs = Vec::new();
         for (run, record) in self.run_views()? {
             if record.is_settled() {
@@ -804,6 +908,30 @@ impl RunApplication {
             let _lease = lease;
             if let Err(error) = access.check() {
                 return (Err(error.to_string()), None);
+            }
+            let library = PluginLibrary::new(&root);
+            let retained = match library.retained_revisions_locked(&_lease) {
+                Ok(retained) => retained,
+                Err(error) => {
+                    return (
+                        Err(format!(
+                            "plugin `{id}` retained revisions could not be inspected: {error}"
+                        )),
+                        None,
+                    );
+                }
+            };
+            let live = std::collections::BTreeSet::new();
+            for revision in retained.into_iter().filter(|revision| revision.id == id) {
+                if let Err(error) = library.release_revision_locked(&revision, &live, &_lease) {
+                    return (
+                        Err(format!(
+                            "plugin `{id}` retained revision `{}` is still in use: {error}",
+                            revision.digest
+                        )),
+                        None,
+                    );
+                }
             }
             let mut removed_views = Vec::new();
             let mut removed_bytes = 0u64;

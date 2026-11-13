@@ -5,7 +5,7 @@ import './PluginManagement.css';
 
 type Coverage = { kind: 'complete' | 'partial' | 'unknown'; reason?: string; considered?: number; total?: number; missing?: { graph: string; reason: string }[] };
 export type PluginReview = { state?: 'preparing' | 'ready' | 'running' | 'succeeded' | 'failed'; error?: string | null; result?: { installed?: boolean; uninstalled?: boolean; digest?: string }; token: string; operation: 'install' | 'uninstall'; plugin: string; name: string; digest: string;
-  network?: boolean; mutable_paths?: string[]; authorization_digest?: string; expires_at: number; graphs: string[]; coverage: Coverage; refusal?: string | null;
+  network?: boolean; mutable_paths?: string[]; authorization_digest?: string; expires_at: number; graphs: string[]; shared_schedules?: number; active_subscriptions?: number; coverage: Coverage; refusal?: string | null;
   mutable?: { path: string; bytes: number | null }[]; sessions?: string[]; unfinished_runs?: string[];
   replacing?: boolean; already_installed?: boolean; binary_without_source?: boolean; warnings?: string[];
   resources?: string[]; resource_bytes?: number; skills?: string[]; servers?: { name: string; transport: string; environment: string[]; command?: string; remote_origin?: string; argument_count?: number; channel_identity?: string[] }[];
@@ -13,6 +13,7 @@ export type PluginReview = { state?: 'preparing' | 'ready' | 'running' | 'succee
 
 function Impact({ review }: { review: PluginReview }) {
   return <><p>{review.graphs.length ? `引用此插件的 Graph：${review.graphs.join('、')}` : '当前未发现 Graph 引用。'}</p>
+    {review.operation === 'install' && !!review.shared_schedules && <p>关联 {review.shared_schedules} 个共享计划、{review.active_subscriptions ?? 0} 条订阅；更新后订阅保持有效并从下一期生效。</p>}
     {review.operation === 'uninstall' && !!review.graphs.length && <p>卸载后，这些 Graph 的下一次运行会因插件缺失而失败。</p>}
     {review.operation === 'install' && review.replacing && <p>更新后，正在运行的任务会在下一次节点调用使用新代码，已完成步骤不会重跑。</p>}
     {review.coverage.kind !== 'complete' && <p className="plugin-message is-error">影响范围未完整读取：{review.coverage.reason

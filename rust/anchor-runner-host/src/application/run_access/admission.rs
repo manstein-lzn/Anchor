@@ -7,10 +7,46 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::path::Path;
 
+mod experiment;
+pub(in crate::application) use experiment::ValidatedExperimentBundle;
+
 enum AdmissionReplay {
     Absent,
     Incomplete(Box<RunMetadata>),
     Accepted(String),
+}
+
+enum AdmissionOrigin {
+    Ordinary(Option<crate::task_delegation::TaskOrigin>),
+    Dreaming(metadata::DreamingRunContext),
+    Experiment {
+        context: metadata::ExperimentRunContext,
+        bundle_digest: String,
+        authority: Option<Box<crate::application::dreaming::experiments::ExperimentAuthority>>,
+    },
+}
+
+impl AdmissionOrigin {
+    fn task(&self) -> Option<&crate::task_delegation::TaskOrigin> {
+        match self {
+            Self::Ordinary(task) => task.as_ref(),
+            _ => None,
+        }
+    }
+
+    fn dreaming(&self) -> Option<&metadata::DreamingRunContext> {
+        match self {
+            Self::Dreaming(context) => Some(context),
+            _ => None,
+        }
+    }
+
+    fn experiment(&self) -> Option<&metadata::ExperimentRunContext> {
+        match self {
+            Self::Experiment { context, .. } => Some(context),
+            _ => None,
+        }
+    }
 }
 
 impl RunApplication {
@@ -32,7 +68,7 @@ impl RunApplication {
             options,
             graph_lease,
             None,
-            None,
+            AdmissionOrigin::Ordinary(None),
         )
         .await
     }
@@ -80,6 +116,7 @@ impl RunApplication {
             ));
         }
         let path = self.graph_path_checked(graph).map_err(graph_error)?;
+        let origin = AdmissionOrigin::Ordinary(task);
         if let Some(request) = &request {
             let _active = self.admission.lock().await;
             if let AdmissionReplay::Accepted(run) = self.admission_replay(
@@ -88,7 +125,7 @@ impl RunApplication {
                 &path,
                 &options,
                 Some(request),
-                task.as_ref(),
+                &origin,
             )? {
                 return Ok(run);
             }
@@ -103,7 +140,53 @@ impl RunApplication {
             options,
             lease,
             request,
-            task,
+            origin,
+        )
+        .await
+    }
+
+    pub(in crate::application) async fn admit_dreaming_graph_request(
+        &self,
+        request_id: &str,
+        trigger: metadata::RunTrigger,
+        context: metadata::DreamingRunContext,
+    ) -> Result<String, ApplicationError> {
+        let input = serde_json::json!({"cycle":context.cycle});
+        let options = AdmissionOptions {
+            objective: None,
+            trigger,
+            pilot: None,
+            oauth_owner: None,
+            workspace_bindings: Default::default(),
+            workspace_root: None,
+        };
+        let request = admission_request(request_id.into(), "dreaming", &input, &None);
+        let path = self.graph_path_checked("dreaming").map_err(graph_error)?;
+        let origin = AdmissionOrigin::Dreaming(context);
+        {
+            let _active = self.admission.lock().await;
+            if let AdmissionReplay::Accepted(run) = self.admission_replay(
+                &admission_run_id(Some(&request)),
+                "dreaming",
+                &path,
+                &options,
+                Some(&request),
+                &origin,
+            )? {
+                return Ok(run);
+            }
+        }
+        let lease = self.graph_admission_lease(&path)?;
+        let (path, bundle) = self.load_graph("dreaming").map_err(graph_error)?;
+        self.admit_with_identity(
+            "dreaming".into(),
+            &path,
+            bundle,
+            input,
+            options,
+            lease,
+            Some(request),
+            origin,
         )
         .await
     }
@@ -118,18 +201,41 @@ impl RunApplication {
         options: AdmissionOptions,
         graph_lease: Box<dyn RunLease>,
         request: Option<metadata::AdmissionRequest>,
-        task: Option<crate::task_delegation::TaskOrigin>,
+        origin: AdmissionOrigin,
     ) -> Result<String, ApplicationError> {
         if let Some(objective) = options.objective.as_ref().filter(|value| !value.is_empty()) {
             bundle.snapshot.objective = objective.clone();
         }
         let graph_path = crate::run_metadata::graph_identity(source)?;
-        let plugin_lease = if bundle.plugins.is_empty() && task.is_none() {
+        if origin.experiment().is_some() {
+            Self::validate_experiment_snapshot(&bundle.snapshot)?;
+        }
+        // Closed assignments have only a denied network marker, never a live
+        // Plugin reference to publish. Its exclusive lease would also prevent
+        // the independent target recheck from taking its ordinary read lease.
+        let plugin_lease = if origin.experiment().is_some()
+            || (bundle.plugins.is_empty() && origin.task().is_none())
+        {
             None
         } else {
             Some(self.plugin_reference_lease().await?)
         };
         let active = self.admission.lock().await;
+        if let AdmissionOrigin::Experiment {
+            authority: Some(authority),
+            ..
+        } = &origin
+        {
+            authority.recheck(self, &input)?;
+            self.frozen_experiment()
+                .ok_or_else(|| {
+                    ApplicationError::Invalid(
+                        "experiment execution capability is unavailable".into(),
+                    )
+                })?
+                .verify()
+                .map_err(ApplicationError::Invalid)?;
+        }
         let run_id = admission_run_id(request.as_ref());
         let existing = match self.admission_replay(
             &run_id,
@@ -137,7 +243,7 @@ impl RunApplication {
             source,
             &options,
             request.as_ref(),
-            task.as_ref(),
+            &origin,
         )? {
             AdmissionReplay::Accepted(run) => return Ok(run),
             AdmissionReplay::Incomplete(existing) => {
@@ -150,8 +256,8 @@ impl RunApplication {
             }
             AdmissionReplay::Absent => None,
         };
-        if let Some(origin) = &task {
-            self.authorize_delegated_snapshot(origin, &graph, &bundle.snapshot)?;
+        if let Some(task) = origin.task() {
+            self.authorize_delegated_snapshot(task, &graph, &bundle.snapshot)?;
         }
         // A service restart does not silently launch another Run over an orphan.
         for (id, record) in self.run_views()? {
@@ -171,7 +277,14 @@ impl RunApplication {
                 }
             }
         }
-        let plugin_bindings = self.bundle_plugin_bindings(&bundle)?;
+        let plugin_bindings = match plugin_lease.as_ref() {
+            Some(lease) => crate::plugin_library::Catalog::new(self.library_root())
+                .resolve_snapshot_locked(&bundle.snapshot, lease)?
+                .into_iter()
+                .map(|binding| (binding.id.clone(), binding))
+                .collect(),
+            None => self.bundle_plugin_bindings(&bundle)?,
+        };
         let record = GraphRunRecord::create_with_plugins(
             bundle.snapshot,
             input,
@@ -182,17 +295,32 @@ impl RunApplication {
         // under one Library lease. Node dispatch resolves the current Plugin
         // again so an update can take effect at the next invocation.
         let control = new_control();
-        let execution = PreparedExecution::prepare_with_catalog(
-            &record,
-            control.clone(),
-            record.plugin_bindings.clone(),
-            self.clone(),
-        )
+        let execution = match origin.dreaming() {
+            Some(context) => PreparedExecution::prepare_dreaming(
+                &record,
+                control.clone(),
+                self.clone(),
+                source,
+                context,
+            ),
+            None => PreparedExecution::prepare_with_catalog(
+                &record,
+                control.clone(),
+                record.plugin_bindings.clone(),
+                self.clone(),
+            ),
+        }
         .map_err(ApplicationError::Invalid)?;
+        if origin.experiment().is_some() {
+            execution
+                .validate_experiment_inputs()
+                .map_err(ApplicationError::Invalid)?;
+        }
         execution
             .bind_local_inputs(&record, &graph)
             .map_err(ApplicationError::Invalid)?;
         self.check_store()?;
+        let first_admission = existing.is_none();
         let mut metadata = existing.unwrap_or(RunMetadata::new(
             run_id.clone(),
             graph.clone(),
@@ -203,7 +331,17 @@ impl RunApplication {
         metadata.pilot = options.pilot;
         metadata.oauth_owner = options.oauth_owner;
         metadata.request = request;
-        metadata.task = task;
+        // Incomplete admission replay preserves its original publication grant,
+        // including absence; later sharing never grants historical authority.
+        if first_admission {
+            metadata.schedule_publication =
+                self.schedule_publication_at_admission(&metadata)?;
+        }
+        match origin {
+            AdmissionOrigin::Ordinary(task) => metadata.task = task,
+            AdmissionOrigin::Dreaming(context) => metadata.dreaming = Some(context),
+            AdmissionOrigin::Experiment { context, .. } => metadata.experiment = Some(context),
+        }
         if metadata.task_grants.is_none()
             && record
                 .snapshot
@@ -238,6 +376,7 @@ impl RunApplication {
         Ok(run_id)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn admission_replay(
         &self,
         run_id: &str,
@@ -245,7 +384,7 @@ impl RunApplication {
         source: &Path,
         options: &AdmissionOptions,
         request: Option<&metadata::AdmissionRequest>,
-        task: Option<&crate::task_delegation::TaskOrigin>,
+        origin: &AdmissionOrigin,
     ) -> Result<AdmissionReplay, ApplicationError> {
         if !options.workspace_bindings.is_empty() && options.workspace_root.is_none() {
             return Err(ApplicationError::Invalid(
@@ -269,10 +408,13 @@ impl RunApplication {
             || existing.graph != graph
             || metadata::graph_identity(&existing.bundle_source)?
                 != metadata::graph_identity(source)?
-            || existing.task.as_ref() != task
+            || existing.task.as_ref() != origin.task()
+            || existing.dreaming.as_ref() != origin.dreaming()
+            || existing.experiment.as_ref() != origin.experiment()
             || existing.oauth_owner != options.oauth_owner
             || existing.pilot != options.pilot
             || !options.trigger.matches_metadata(&existing)
+            || (origin.experiment().is_some() && existing.bundle_source != source)
         {
             return Err(ApplicationError::Conflict(
                 "admission request identity changed".into(),
@@ -281,14 +423,33 @@ impl RunApplication {
         if let Some(run) = self.read_run(run_id)? {
             let content_matches = request.is_some_and(|request| {
                 *request
-                    == admission_request(
-                        request.id.clone(),
-                        graph,
-                        &run.record.input,
-                        &options.objective,
-                    )
+                    == match origin {
+                        AdmissionOrigin::Experiment {
+                            context,
+                            bundle_digest,
+                            ..
+                        } => experiment::admission_request(
+                            request.id.clone(),
+                            graph,
+                            &run.record.input,
+                            context,
+                            bundle_digest,
+                        ),
+                        _ => admission_request(
+                            request.id.clone(),
+                            graph,
+                            &run.record.input,
+                            &options.objective,
+                        ),
+                    }
             });
-            if run.progress().graph_digest != existing.graph_digest || !content_matches {
+            if run.progress().graph_digest != existing.graph_digest
+                || !content_matches
+                || origin.experiment().is_some_and(|context| {
+                    context.snapshot_digest != existing.graph_digest
+                        || context.input_digest != experiment::input_digest(&run.record.input)
+                })
+            {
                 return Err(ApplicationError::Conflict(
                     "admitted Run and its immutable identity metadata disagree".into(),
                 ));
@@ -303,8 +464,12 @@ impl RunApplication {
 fn admission_run_id(request: Option<&metadata::AdmissionRequest>) -> String {
     request.map_or_else(
         || format!("rust-{:x}", metadata::now_nanos()),
-        |request| format!("request-{:x}", Sha256::digest(request.id.as_bytes())),
+        |request| request_run_id(&request.id),
     )
+}
+
+pub(in crate::application) fn request_run_id(request_id: &str) -> String {
+    anchor_facts::experiment::run_id(request_id)
 }
 
 pub(crate) fn admission_request(

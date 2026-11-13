@@ -21,6 +21,35 @@ pub(super) fn activation(snapshot: &GraphSnapshot) -> Result<Value, GraphManagem
 }
 
 impl RunApplication {
+    /// The system seed is creation-only and never issues operator permission
+    /// receipts. Its trusted caller owns the installation intent and provenance.
+    pub(crate) async fn install_dreaming_seed(
+        &self,
+        definition: &Value,
+    ) -> Result<(), GraphManagementError> {
+        let _catalog_guard = self.graph_catalog_mutation_guard().await;
+        let path = self.graph_path_checked("dreaming")?;
+        require_absent_graph(&path)?;
+        let _graph_lease = self.graph_admission_lease(&path)?;
+        let definition = GraphSnapshot::normalize_network_authoring(definition.clone(), false);
+        let expected = self
+            .inspect_graph_definition_static(&definition)
+            .map_err(invalid)?;
+        if super::super::graph_tasks::task_graph_ownership_path(self, "dreaming")?.exists() {
+            return Err(GraphManagementError::Conflict(
+                "this Graph name is reserved by a retained task creation".into(),
+            ));
+        }
+        create_graph_bundle_from_catalog(&path, &definition, self.library_root())?;
+        let (_, installed) = self.load_graph("dreaming")?;
+        if installed.authoring_definition != definition || installed.snapshot != expected {
+            return Err(GraphManagementError::Conflict(
+                "installed Dreaming seed does not match its definition".into(),
+            ));
+        }
+        Ok(())
+    }
+
     pub(crate) fn assistant_plugin_update(&self, run: &str) -> Result<Value, GraphManagementError> {
         let metadata = self
             .metadata(run)?
@@ -127,6 +156,14 @@ impl RunApplication {
                 .map_err(GraphManagementError::from)?;
         }
         write_graph_bundle_from_catalog(&path, &definition, self.library_root())?;
+        let mut effect = effect;
+        let (schedules, subscriptions) = self
+            .shared_schedule_impact(name)
+            .map_err(GraphManagementError::from)?;
+        if schedules > 0 {
+            effect["shared_schedules"] = json!(schedules);
+            effect["active_subscriptions"] = json!(subscriptions);
+        }
         Ok(json!({"graph":name,"definition":definition,"plugin_activation":effect}))
     }
 }

@@ -61,7 +61,7 @@ enum Action {
         precondition: Box<PluginInstallPrecondition>,
         _staging: tempfile::TempDir,
     },
-    Uninstall(PluginUninstallPrecondition),
+    Uninstall(Box<PluginUninstallPrecondition>),
 }
 struct Review {
     owner: String,
@@ -448,7 +448,7 @@ async fn build_install(
             "command":server.command,"argument_count":server.args.len(),"remote_origin":server.url.as_ref().and_then(|value|url::Url::parse(value).ok()).map(|url|url.origin().ascii_serialization()),
             "environment":server.environment,"optional_environment":server.optional_environment,"channel_identity":server.channel_identity})).collect::<Vec<_>>(),
         "channels":review.channels,"warnings":review.warnings,"inline_values":review.inline_values,"binary_without_source":review.binary_without_source,
-        "graphs":precondition.impact.graphs,"coverage":precondition.impact.coverage,
+        "graphs":precondition.impact.graphs,"shared_schedules":precondition.impact.shared_schedules,"active_subscriptions":precondition.impact.active_subscriptions,"coverage":precondition.impact.coverage,
         "dependencies":precondition.dependencies.as_ref().map(|plan|json!({"sources":plan.sources.iter().map(|source| url::Url::parse(source).ok().filter(|url| matches!(url.scheme(), "https" | "http")).map(|url| url.origin().ascii_serialization()).unwrap_or_else(|| "部署授权的本地包目录".into())).collect::<Vec<_>>(),"interpreter":plan.interpreter,"lock_digest":plan.lock_digest,"packages":plan.packages}))});
     Ok((
         Action::Install {
@@ -482,7 +482,10 @@ async fn prepare_uninstall(
             ..Default::default()
         },
     )?;
-    prepared(&token, Ok((Action::Uninstall(precondition), projection)));
+    prepared(
+        &token,
+        Ok((Action::Uninstall(Box::new(precondition)), projection)),
+    );
     status(State(state), headers, AxumPath(token)).await
 }
 #[derive(serde::Deserialize)]
