@@ -37,6 +37,8 @@ Graph 联网策略由节点的 `plugins` 引用承载：`{id:"network",network:"
 
 Run 详情的 state.error 保留字符串：failed 时与 Kernel 结算投影 reason 一致，其他相位为空；时间线继续显示原始失败原因。state.recovery 保留数组，由已接受 Kernel history 的当前 invocation 观察扣除人工决定后投影；记录中不再存这些展示字段。
 
+Run 详情的 `traces` 按节点与 invocation 展示本轮通知，不重复插入每轮恢复的 Session 累计历史；活动 invocation 保留当前轮工具进度。完整会话读取仍使用原有完整历史投影。详情的磁盘读取、JSON 投影和最终序列化在 blocking pool 执行，避免占住渠道和健康检查的异步线程；evidence 身份、Session 归属和文件安全校验保持。Web 明确区分加载、失败和未选择运行，失败可重试，同一 Run 刷新失败保留已加载内容；列表更新不取消在途详情，切换 Run 不接受旧请求晚到结果。
+
 HTTP DTO 是产品投影，不直接输出执行器私有记录。未知结束时间、exit status 或来源必须保持未知；下游失败不能改变上游已提交事实。更新时间来自 Host 对已接受提交的独立观察，不读取文件 mtime。
 
 Run 列表、详情、时间线、子调用及 Pilot Run 查询共用 `projection: {phase,waiting_for?,outcome?,reason,active,superseded?,actions:{pause,stop,resume,abandon},updated}`。phase 为 executing / waiting / settled；waiting 才含 human / child / effect，settled 才含 done / failed / escalated / unknown / aborted。`superseded` 只在同一会话已有更新的 Run 接替它时出现且为 true，此时 Run 不会再执行。旧顶层 status、state.status 和 control_requested、投影 terminal/quiescent/needs_attention 均退出对外 Run 契约；Session Turn、投递、监听与节点结果的状态仍属各自事实。

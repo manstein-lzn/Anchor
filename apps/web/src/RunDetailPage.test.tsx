@@ -14,6 +14,32 @@ const projection = (phase: RunProjection['phase'], extra: Partial<RunProjection>
   phase, active: false, reason: null, updated: null,
   actions: { pause: false, stop: true, resume: true, abandon: true }, ...extra,
 });
+
+describe('Run detail loading feedback', () => {
+  let element: HTMLDivElement; let root: Root;
+  const render = async (loading: boolean, error: string | null, retry = vi.fn()) => act(async () => root.render(
+    <RunDetailPage name="graph" graphs={[]} dirty={false} busy={false} notice={null} run="slow-run" node="" targetPath="" detail={null}
+      detailLoading={loading} detailError={error} retryDetail={retry}
+      onPilot={() => {}} selectGraph={() => true} trigger={async () => {}} onTimeline={() => {}}
+      navigateRun={async () => {}} controlRun={async () => {}} deleteRun={async () => {}} onNode={() => {}} />
+  ));
+  beforeEach(() => {
+    (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+    element = document.createElement('div'); document.body.appendChild(element); root = createRoot(element);
+  });
+  afterEach(async () => { await act(async () => root.unmount()); element.remove(); });
+
+  it('distinguishes loading from a failed detail request and offers retry', async () => {
+    await render(true, null);
+    expect(element.textContent).toContain('正在加载运行详情');
+    expect(element.textContent).not.toContain('选一次运行');
+    const retry = vi.fn();
+    await render(false, 'signal timed out', retry);
+    expect(element.querySelector('[role="alert"]')?.textContent).toContain('signal timed out');
+    await act(async () => element.querySelector<HTMLButtonElement>('[role="alert"] button')!.click());
+    expect(retry).toHaveBeenCalledOnce();
+  });
+});
 const detailFor = (view: RunProjection): OurRunDetail => ({
   run: 'original-run', graph: 'original-graph', definition: frozen, projection: view, nodes: ['module/original'], traces: {},
   state: { objective: 'frozen objective', started: '', updated: '', cursor: null,
@@ -25,6 +51,7 @@ describe('Run-owned canvas and shared operation projection', () => {
   const control = vi.fn(async () => {});
   const render = async (detail: OurRunDetail, name = 'current-editor-graph') => act(async () => root.render(
     <RunDetailPage name={name} graphs={[]} dirty busy={false} notice={null} run={detail.run} node="" targetPath="" detail={detail}
+      detailLoading={false} detailError={null} retryDetail={() => {}}
       onPilot={() => {}} selectGraph={() => true} trigger={async () => {}} onTimeline={() => {}}
       navigateRun={async () => {}} controlRun={control} deleteRun={async () => {}} onNode={() => {}} />,
   ));

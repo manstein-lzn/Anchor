@@ -24,6 +24,24 @@ impl RunApplication {
         id: &str,
         workspace_root: &Path,
     ) -> Result<Value, RunHttpError> {
+        // Disk and JSON work must not monopolize async workers used by health,
+        // channels and other requests. Build the projection on the blocking pool.
+        let application = self.clone();
+        let id = id.to_owned();
+        let workspace_root = workspace_root.to_path_buf();
+        let executor = tokio::runtime::Handle::current();
+        tokio::task::spawn_blocking(move || {
+            executor.block_on(application.build_http_run_detail(&id, &workspace_root))
+        })
+        .await
+        .map_err(|error| RunHttpError::Internal(error.to_string()))?
+    }
+
+    async fn build_http_run_detail(
+        &self,
+        id: &str,
+        workspace_root: &Path,
+    ) -> Result<Value, RunHttpError> {
         let view = self
             .read_run(id)
             .map_err(|error| match error {
@@ -133,7 +151,7 @@ impl RunApplication {
         trace_keys.sort_by_key(|key| key.durable_key());
         trace_keys.dedup();
         for key in trace_keys {
-            let messages = crate::goose_acp::trace_messages(&self.data_root, &key)
+            let messages = crate::goose_acp::run_trace_messages(&self.data_root, &key)
                 .map_err(RunHttpError::Internal)?;
             if !messages.is_empty() {
                 let trace_key = serde_json::to_string(&(&key.node_id, key.invocation))
@@ -273,6 +291,65 @@ mod tests {
     use super::*;
     use crate::run_metadata::{self as metadata, RunMetadata};
     use anchor_runtime::graph::{ArtifactPort, RecoveryAttempt};
+
+    #[tokio::test]
+    async fn detail_projects_current_invocation_without_restored_session_history() {
+        let root = tempfile::tempdir().unwrap();
+        let application = RunApplication::new(root.path().into(), root.path().join("catalog"));
+        let record = fixtures::work_record("detail-history");
+        fixtures::create(&application, &record);
+        let key = application
+            .dispatch_keys("detail-history")
+            .unwrap()
+            .remove(0);
+        metadata::save(
+            root.path(),
+            &RunMetadata::new(
+                "detail-history".into(),
+                "fixture".into(),
+                record.graph_digest,
+                root.path(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let traces = root.path().join("goose-acp");
+        std::fs::create_dir_all(&traces).unwrap();
+        let stem = crate::host_fs::invocation_stem(&key);
+        std::fs::write(
+            traces.join(format!("{stem}.json")),
+            serde_json::to_vec(&json!({
+                "version":2,"key":key,"binary_sha256":"fixture","session_id":"native",
+                "completion":null,"reason":null,"model_binding":null,"tool_observation":null
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let event = |kind: &str, text: &str| {
+            json!({"method":"session/update","params":{
+            "sessionId":"native","update":{"sessionUpdate":kind,"content":{"text":text}}}})
+        };
+        std::fs::write(
+            traces.join(format!("{stem}.evidence.json")),
+            serde_json::to_vec(&json!({
+                "version":1,"runtime":"goose","key":key,
+                "restored_history":[event("agent_message_chunk", "prior turn")],
+                "notifications":[event("user_message_chunk", "current question"),
+                    event("agent_message_chunk", "current reply")]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let detail = application
+            .http_run_detail("detail-history", &root.path().join("workspaces"))
+            .await
+            .unwrap();
+        let trace_key = serde_json::to_string(&("worker", 1)).unwrap();
+        let messages = detail["traces"][trace_key].as_array().unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["text"], "current question");
+        assert_eq!(messages[1]["text"], "current reply");
+    }
 
     #[tokio::test]
     async fn detail_preserves_phase_json_bytes_for_actual_kernel_facts() {
