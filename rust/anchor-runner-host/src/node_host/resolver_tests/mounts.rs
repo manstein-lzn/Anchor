@@ -2,6 +2,81 @@ use super::*;
 use crate::node_host::mounts::MOUNT_EVIDENCE_KEY;
 
 #[test]
+fn plugin_free_schedule_mounts_ignore_installation_but_session_mounts_remain_guarded() {
+    let (_root, resolver, _mounts, mut request) = session_fixture(&[], &[], &[]);
+    request.kind = NodeKind::OpRun;
+    let state = resolver.local_inputs.state_root();
+    let mut metadata = crate::run_metadata::load(state, &request.key.run_id)
+        .unwrap()
+        .unwrap();
+    let pilot = metadata.pilot.take();
+    let trigger: crate::run_metadata::RunTrigger = serde_json::from_value(json!({
+        "source":"schedule", "schedule":"plan", "scheduled_at":"2026-11-11T09:00:00"
+    }))
+    .unwrap();
+    trigger.apply(&mut metadata);
+    crate::run_metadata::save(state, &metadata).unwrap();
+    let lease = crate::plugin_library::PluginLibrary::new(resolver.plugin_library_root().unwrap())
+        .install_lease()
+        .unwrap();
+
+    let mounted = resolver.mounted_plugins(&request).unwrap();
+    assert!(mounted.bindings.is_empty());
+    assert!(!mounted.network);
+    assert!(mounted.session.is_none());
+
+    // Empty Graph declarations do not prove an empty Session policy. Keep its
+    // frozen switches behind the catalog guard, even when they are empty now.
+    metadata.pilot = pilot;
+    crate::run_metadata::save(state, &metadata).unwrap();
+    let error = resolver.mounted_plugins(&request).unwrap_err();
+    assert!(
+        error.contains("Plugin catalog is being installed"),
+        "{error}"
+    );
+    drop(lease);
+    let mounted = resolver.mounted_plugins(&request).unwrap();
+    assert_eq!(mounted.session.as_deref(), Some("session-one"));
+    assert!(!mounted.network);
+}
+
+#[test]
+fn network_enabled_node_still_observes_catalog_installation() {
+    let snapshot = anchor_runtime::graph::GraphSnapshot::admit(json!({
+        "objective":"network mount","entry":"agent",
+        "agents":{"worker":{"model":"fixture"}},
+        "nodes":[{"id":"agent","agent":"worker","plugins":[{
+            "id":"network","required":true,"network":"enabled"
+        }]}],"edges":[]
+    }))
+    .unwrap();
+    let (_root, resolver, _mounts, mut request) = session_fixture_with_snapshot(
+        &["network"],
+        &[("network", true, None)],
+        &[],
+        Some(snapshot),
+    );
+    assert!(request.plugins.iter().any(|plugin| plugin.id == "network"));
+    // The admitted policy still needs the catalog when a caller omits bindings.
+    request.plugins.clear();
+    let state = resolver.local_inputs.state_root();
+    let mut metadata = crate::run_metadata::load(state, &request.key.run_id)
+        .unwrap()
+        .unwrap();
+    metadata.pilot = None;
+    crate::run_metadata::save(state, &metadata).unwrap();
+    let _lease = crate::plugin_library::PluginLibrary::new(resolver.plugin_library_root().unwrap())
+        .install_lease()
+        .unwrap();
+
+    let error = resolver.mounted_plugins(&request).unwrap_err();
+    assert!(
+        error.contains("Plugin catalog is being installed"),
+        "{error}"
+    );
+}
+
+#[test]
 fn a_plugin_authorization_change_still_fails_closed() {
     let (_root, resolver, _mounts, mut request) =
         session_fixture(&["review"], &[("review", true, None)], &[]);

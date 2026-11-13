@@ -235,10 +235,8 @@ impl HostIoResolver {
         // defaults filtered by the Session's switches and frozen for
         // this Turn. Everything below uses this set, so there is one
         // filter point and not several.
-        let mount_lease = match &self.library_root {
-            Some(root)
-                if !request.plugins.is_empty() || self.session_turn(&request.key)?.is_some() =>
-            {
+        let mount_lease = match self.mount_catalog_root(request)? {
+            Some(root) => {
                 let access = crate::dependency_provision::DependencyAccess {
                     network: false,
                     cancellation: request.cancellation.clone(),
@@ -253,7 +251,7 @@ impl HostIoResolver {
                     .map_err(|error| format!("Plugin mount selection is unavailable: {error:?}"))?,
                 )
             }
-            _ => None,
+            None => None,
         };
         let mounted = self.mounted_plugins_unlocked(request)?;
         drop(mount_lease);
