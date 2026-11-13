@@ -329,19 +329,40 @@ impl HostIoResolver {
         Ok(None)
     }
 
-    /// Session switches can add Plugins even when the Graph declares none.
-    /// Calls with neither source do not need access to the Library catalog.
+    /// Session policy may add mounts; an admitted network-enabled node may
+    /// derive the network provider even if its request has no Plugin bindings.
     pub(super) fn mount_catalog_root(
         &self,
         request: &NodeExecutionRequest,
     ) -> Result<Option<&Path>, String> {
-        match self.library_root.as_deref() {
-            Some(root)
-                if !request.plugins.is_empty() || self.session_turn(&request.key)?.is_some() =>
-            {
-                Ok(Some(root))
-            }
-            _ => Ok(None),
+        let Some(root) = self.library_root.as_deref() else {
+            return Ok(None);
+        };
+        if !request.plugins.is_empty() || self.session_turn(&request.key)?.is_some() {
+            return Ok(Some(root));
+        }
+        let admitted = self
+            .load_run(&request.key.run_id)
+            .map_err(|error| format!("load admitted Run Plugin bindings: {error}"))?
+            .ok_or_else(|| {
+                format!(
+                    "Plugin mount resolution requires a durable admitted Run `{}`",
+                    request.key.run_id
+                )
+            })?;
+        let node = admitted
+            .snapshot
+            .nodes
+            .iter()
+            .find(|node| node.id == request.key.node_id)
+            .ok_or("admitted Plugin policy node is missing")?;
+        if !node.plugins.is_empty()
+            || admitted.snapshot.node_network_mode(node)
+                == anchor_runtime::graph::NetworkMode::Enabled
+        {
+            Ok(Some(root))
+        } else {
+            Ok(None)
         }
     }
 

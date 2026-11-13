@@ -50,13 +50,15 @@ fn network_enabled_node_still_observes_catalog_installation() {
         }]}],"edges":[]
     }))
     .unwrap();
-    let (_root, resolver, _mounts, request) = session_fixture_with_snapshot(
+    let (_root, resolver, _mounts, mut request) = session_fixture_with_snapshot(
         &["network"],
         &[("network", true, None)],
         &[],
         Some(snapshot),
     );
     assert!(request.plugins.iter().any(|plugin| plugin.id == "network"));
+    // The admitted policy still needs the catalog when a caller omits bindings.
+    request.plugins.clear();
     let state = resolver.local_inputs.state_root();
     let mut metadata = crate::run_metadata::load(state, &request.key.run_id)
         .unwrap()

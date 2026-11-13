@@ -77,16 +77,25 @@ async fn plugin_free_schedule_completes_during_installation_and_replay_keeps_one
         }),
     )
     .unwrap();
-    let at = "2026-11-11T09:00:00";
+    let first_due = Local::now()
+        .date_naive()
+        .pred_opt()
+        .unwrap()
+        .and_hms_opt(0, 0, 0)
+        .unwrap();
+    let second_due = first_due + chrono::Duration::days(1);
+    let at = first_due.format("%Y-%m-%dT%H:%M:%S").to_string();
     {
         let mut store = state.schedules.lock().unwrap();
         store.items.push(crate::api::schedules::ScheduleItem {
             id: "install-overlap".into(),
             graph: "fixture".into(),
-            rule: json!({"type":"once","at":at}),
+            rule: json!({"type":"daily","time":"00:00"}),
             input: json!({}),
-            created_at: "2026-11-11T08:59:59".into(),
-            next_at: at.into(),
+            created_at: (first_due - chrono::Duration::seconds(1))
+                .format("%Y-%m-%dT%H:%M:%S")
+                .to_string(),
+            next_at: at.clone(),
             enabled: true,
             delegation: None,
             remaining: None,
@@ -97,20 +106,20 @@ async fn plugin_free_schedule_completes_during_installation_and_replay_keeps_one
     let lease = crate::plugin_library::PluginLibrary::new(state.application.library_root())
         .install_lease()
         .unwrap();
-    crate::api::schedules::tick_schedules(
-        &state,
-        NaiveDateTime::parse_from_str(at, "%Y-%m-%dT%H:%M:%S").unwrap(),
-    )
-    .await
-    .unwrap();
+    crate::api::schedules::tick_schedules(&state, first_due)
+        .await
+        .unwrap();
     wait_idle(&state).await;
     let records = state.application.records().unwrap();
     assert_eq!(records.len(), 1);
     let run = &records[0].0;
     let view = state.application.read_run(run).unwrap().unwrap();
-    assert!(view.has_succeeded(), "{:?}", view.phase());
     assert!(!view.active());
-    assert!(!state.schedules.lock().unwrap().items[0].enabled);
+    assert!(view.has_succeeded(), "{:?}", view.phase());
+    assert_eq!(
+        state.schedules.lock().unwrap().items[0].next_at,
+        second_due.format("%Y-%m-%dT%H:%M:%S").to_string()
+    );
     let key = anchor_runtime::graph::InvocationKey {
         run_id: run.clone(),
         graph_digest: records[0].1.graph_digest.clone(),
@@ -148,6 +157,57 @@ async fn plugin_free_schedule_completes_during_installation_and_replay_keeps_one
     assert_eq!(state.application.records().unwrap().len(), 1);
     assert!(state.application.active_runs(None).await.is_empty());
     assert_eq!(std::fs::read_to_string(&count).unwrap(), "once");
+
+    // A completed occurrence must release the Graph for the next scheduled run,
+    // even while installation still holds the catalog's exclusive lease.
+    crate::api::schedules::tick_schedules(&state, second_due)
+        .await
+        .unwrap();
+    wait_idle(&state).await;
+    let records = state.application.records().unwrap();
+    assert_eq!(records.len(), 2);
+    for (id, record) in &records {
+        let view = state.application.read_run(id).unwrap().unwrap();
+        assert!(!view.active());
+        assert!(view.has_succeeded(), "{:?}", view.phase());
+        let key = anchor_runtime::graph::InvocationKey {
+            run_id: id.clone(),
+            graph_digest: record.graph_digest.clone(),
+            node_id: "work".into(),
+            invocation: 1,
+        };
+        let output = HostArtifacts::new(
+            state.data_root.join("artifacts"),
+            state.workspace_root.clone(),
+        )
+        .workspace_path(&key)
+        .unwrap()
+        .join("count.txt");
+        assert_eq!(std::fs::read_to_string(output).unwrap(), "once");
+    }
+    let (status, timeline) = call(router(state.clone()), "GET", "/timeline?days=30", None).await;
+    assert_eq!(status, StatusCode::OK);
+    for due in [first_due, second_due] {
+        let occurrence = timeline["scheduled"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| {
+                item["schedule"] == "install-overlap"
+                    && item["scheduled_at"] == due.format("%Y-%m-%dT%H:%M:%S").to_string()
+            })
+            .unwrap();
+        assert_eq!(occurrence["status"], "settled");
+        assert!(occurrence["run"].is_string());
+    }
+    let schedule = state.schedules.lock().unwrap().items[0].clone();
+    assert!(schedule.enabled);
+    assert_eq!(
+        schedule.next_at,
+        (second_due + chrono::Duration::days(1))
+            .format("%Y-%m-%dT%H:%M:%S")
+            .to_string()
+    );
     drop(lease);
 }
 
