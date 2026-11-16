@@ -5,9 +5,74 @@
 pub use rustix::fs::FlockOperation;
 use std::{
     fs::File,
+    io::{self, Read},
     ops::Deref,
     os::fd::{AsFd, BorrowedFd},
+    path::{Component, Path},
 };
+
+/// Walk an absolute registered path without following a link in any component.
+/// Opening nonblocking prevents a FIFO supplied in place of a file from hanging.
+pub fn open_regular(path: &Path) -> io::Result<File> {
+    let file = open_path(path, false)?;
+    if !file.metadata()?.is_file() {
+        return Err(io::Error::other("regular file required"));
+    }
+    Ok(file)
+}
+
+pub fn open_directory(path: &Path) -> io::Result<File> {
+    open_path(path, true)
+}
+
+fn open_path(path: &Path, directory_only: bool) -> io::Result<File> {
+    use rustix::fs::{Mode, OFlags, open, openat};
+    if !path.is_absolute() {
+        return Err(io::Error::other("registered file path must be absolute"));
+    }
+    let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
+    let mut directory = open("/", flags | OFlags::DIRECTORY, Mode::empty())?;
+    let mut components = path.components().peekable();
+    while let Some(component) = components.next() {
+        let Component::Normal(component) = component else {
+            if component == Component::RootDir {
+                continue;
+            }
+            return Err(io::Error::other("registered file path is not canonical"));
+        };
+        let last = components.peek().is_none();
+        let descriptor = openat(
+            &directory,
+            Path::new(component),
+            if last && !directory_only {
+                flags
+            } else {
+                flags | OFlags::DIRECTORY
+            },
+            Mode::empty(),
+        )?;
+        if last {
+            return Ok(File::from(descriptor));
+        }
+        directory = descriptor;
+    }
+    if directory_only {
+        Ok(directory.into())
+    } else {
+        Err(io::Error::other("registered path must name a file"))
+    }
+}
+
+pub fn read_regular(path: &Path, maximum: usize) -> io::Result<Vec<u8>> {
+    let file = open_regular(path)?;
+    let mut bytes = Vec::new();
+    file.take((maximum as u64).saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > maximum {
+        return Err(io::Error::other("registered file exceeds its size limit"));
+    }
+    Ok(bytes)
+}
 
 #[derive(Debug)]
 pub struct FileLease(File);
@@ -62,6 +127,27 @@ mod tests {
             .truncate(false)
             .open(path)
             .unwrap()
+    }
+    #[test]
+    fn bounded_registered_reads_reject_links_directories_fifos_and_oversize() {
+        use std::os::unix::fs::symlink;
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("input");
+        std::fs::write(&path, b"abc").unwrap();
+        assert_eq!(read_regular(&path, 3).unwrap(), b"abc");
+        assert_eq!(read_regular(&path, usize::MAX).unwrap(), b"abc");
+        assert!(read_regular(&path, 2).is_err());
+        assert!(read_regular(root.path(), 3).is_err());
+        let link = root.path().join("link");
+        symlink(&path, &link).unwrap();
+        assert!(read_regular(&link, 3).is_err());
+        let parent = root.path().join("parent");
+        symlink(root.path(), &parent).unwrap();
+        assert!(read_regular(&parent.join("input"), 3).is_err());
+        let fifo = root.path().join("fifo");
+        rustix::fs::mkfifoat(rustix::fs::CWD, &fifo, rustix::fs::Mode::RWXU).unwrap();
+        assert!(read_regular(&fifo, 3).is_err());
+        assert!(read_regular(Path::new("relative"), 3).is_err());
     }
     #[test]
     fn early_return_releases_even_with_an_inherited_descriptor() {

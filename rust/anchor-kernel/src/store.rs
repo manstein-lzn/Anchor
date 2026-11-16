@@ -10,8 +10,10 @@ use std::sync::Mutex;
 use crate::model::{Record, RecordEntry, Resource};
 
 mod history;
+mod reader;
 use anchor_file_lease::{FileLease, FlockOperation};
 use history::HistoryIndex;
+pub use reader::{HistoryBatch, HistoryCursor, HistoryReadMetrics};
 use sha2::{Digest, Sha256};
 
 #[derive(Debug, thiserror::Error)]
@@ -26,6 +28,8 @@ pub enum StoreError {
     Io(#[from] std::io::Error),
     #[error("stored record is unreadable: {0}")]
     Corrupt(String),
+    #[error("history cursor is no longer valid: {0}")]
+    CursorInvalid(String),
 }
 
 pub trait Store: Send + Sync {

@@ -23,4 +23,7 @@ mod store;
 
 pub use kernel::{Authority, Clock, Kernel, KernelError, Probe, SystemClock, Validators};
 pub use model::*;
-pub use store::{FileStore, HistoryReader, MemoryStore, Store, StoreError};
+pub use store::{
+    FileStore, HistoryBatch, HistoryCursor, HistoryReadMetrics, HistoryReader, MemoryStore, Store,
+    StoreError,
+};
