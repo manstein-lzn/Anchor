@@ -1,4 +1,4 @@
-"""Exercise the shipped RSI Graph's Ops without a provider: each Op's script
+"""Exercise the historical P7 fixture's Ops without a provider: each Op's script
 is taken from the Graph and run as the sandbox would, with its inputs under
 a temporary /in and its grants under a temporary /local-inputs. Profile and
 verify read experiment 1 group B through the built data hub, when both are
@@ -15,11 +15,11 @@ import unittest
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[2]
-GRAPH = json.loads((REPO / 'examples/graphs/rsi-signals.json').read_text())
 HUB = REPO / 'rust/target/debug/anchor-hub'
 DATA = REPO / '.local/harness-hub-p6/exp1/B'
 sys.path.insert(0, str(HERE / 'graph'))
 import build  # noqa: E402
+GRAPH = build.graph()
 
 needs_data = unittest.skipUnless(HUB.is_file() and DATA.is_dir(), 'needs the built hub and exp1/B')
 
@@ -69,10 +69,6 @@ def proposal(pid='P1', **changes):
 
 
 class Built(unittest.TestCase):
-    def test_the_shipped_graph_is_what_build_writes(self):
-        self.assertEqual((REPO / 'examples/graphs/rsi-signals.json').read_text(), build.text(),
-                         'run experiments/harness-hub/p7/graph/build.py')
-
     def test_every_node_with_grants_exists_and_ops_read_what_they_need(self):
         ids = {n['id'] for n in GRAPH['nodes']}
         self.assertLessEqual(set(build.GRANTS), ids)

@@ -5,7 +5,7 @@
     "academic-research": ["anchor-scholarly"],
     "docmost": ["anchor-docmost-tools"],
     "wecom": ["anchor-wecom-tools", "anchor-wecom-gateway"],
-    "feishu": ["anchor-feishu-gateway"],
+    "feishu": ["anchor-feishu-gateway", "lark-cli"],
     "anchor-steward": [],
     "graph-tasks": []
   },

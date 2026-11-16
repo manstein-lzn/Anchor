@@ -13,6 +13,8 @@ HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[2]
 sys.path.insert(0, str(HERE.parent / 'p0'))
 import run_p0  # noqa: E402
+sys.path.insert(0, str(HERE / 'graph'))
+import build  # noqa: E402
 
 
 def replay(collected, root):
@@ -22,7 +24,7 @@ def replay(collected, root):
     for directory in ('bundle', 'home', 'catalog', 'library', 'inputs',
                       'operator/rsi-signals-gate-replay'):
         (root / directory).mkdir(parents=True)
-    graph = json.loads((REPO / 'examples/graphs/rsi-signals.json').read_text())
+    graph = build.graph()
     for node, name in (('synthesize', 'proposals.json'), ('synthesize', 'synthesis.md'),
                        ('review', 'review.md')):
         source = collected / 'artifacts' / node / '1' / name

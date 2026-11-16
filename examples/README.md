@@ -39,6 +39,22 @@
 
 [graphs/](graphs/) 仍提供其他现有示例。RSI、周报及 Docmost 周报包装图依赖明确授权的本机输入目录和附加工具，按 [RSI](../docs/rsi.md)、[周报](../docs/weekly-work-report.md) 配置后导入；Python 依赖探针用于开发验证，按需从插件库安装并准备 Python 环境。这些内容未列为默认上手项目。
 
+## 可选 Codex 项目经理
+
+[飞书项目经理](graphs/feishu-codex-project-manager.json)与[企微项目经理](graphs/wecom-codex-project-manager.json)是独立的常驻助手示例，沿用 `wait_input → manager → reply` 循环。它们通过普通 HTTP MCP [Codex Plugin](../plugins/codex/README.md)管理多个本地项目和并行会话；同一仓库的并行写任务用各自受管 worktree，长任务启动后短等待即回复，不占着聊天窗口轮询到结束。两种渠道分别配置机器人，不合并或自动迁移既有绑定。
+
+操作员须另行启动本机 Bridge、指定 `--allow-root`，安装 `plugins/codex` 并在插件详情设置 `bridge_url`（默认 `http://127.0.0.1:8091`）、Bearer 凭据 `api_key` 和可选 `project_scope`。scope 留空表示 Bridge 白名单内全部项目，填写相对子目录只进一步收窄；配置是同 owner 的共享连接，不是每张 Graph 的独立权限。节点 `network:auto` 由 HTTP MCP 产生联网需求，仍需有效宿主授权。
+
+需要主动跟进时，先导入[巡检子图](graphs/codex-watch-worker.json)，在主图 `manager` 的 `graph-tasks` 设置中审核并保存该目标及依赖授权收据。用户授权后才保存真实轮询计划；导入文件不创建计划或批准权限。子图只检查输入 `targets` 中的实际 `project` / `thread_id`，返回 `codex-watch.json`，不发消息、不启动或操控会话。主助手处理回原 Session 的结果，按授权发送状态变化、阻塞和经核验的完成通知，以真实渠道回执为准；任务轮 `session.reply` 的 handled 不表示已投递。所有目标结束后取消或收窄对应计划，未确定的外部效果不自动重放。
+
+这些示例不加入默认 starter，不自动部署、启用机器人、授予审批或发送消息。清单与 Graph 契约测试不等于真实 Codex provider、周期调度或飞书/企微主动通知已经端到端验收；配置步骤与验证边界见 [Plugin 说明](../plugins/codex/README.md)。
+
+## 可选飞书组织管理员
+
+[组织管理员](graphs/feishu-organization-manager.json)负责 SeeMine、Anchor、Codex Manager 的项目组合规划，沿用常驻 `wait_input → manager → reply` 循环。本配置只挂载 `feishu`，不复制已有 Anchor 项目经理的凭据、不绑定其 Codex 会话，也不自动授予群管理或文档权限。需要独立飞书应用与该应用下的接收/回复成员名单；群内 Bot 协作、跨项目委派与云文档工具仍待接入，不因导入示例而生效。配置及权限清单见[管理员指南](../docs/feishu-organization-manager.md)。本示例不加入默认 starter。
+
+## AI 每日晨报
+
 [AI 每日晨报](graphs/ai-morning-briefing.json) 是可选业务图：共用一次冻结的时间窗口与上期基线，四路并行发现 → 聚合去重与选题 → 三路并行核实原文 → 写作、独立评审与定向修补 → PDF 渲染、逐页视觉检查与本地发布。[来源入口](../plugins/ai-morning-briefing/skills/ai-morning-briefing/sources.json) 随 Plugin 分发，覆盖国内、国际、技术社区和独立搜索；入口用于发现线索，最终事实回到一手发布或可靠媒体原始采访调查，不限制公司名单。发布关卡核对六项评审结论和所审稿件身份；返工保留时间窗口和未受影响内容。整期以约 4–5 页为目标，每条通常两三句话、按重要性排序，保持正常字号自然分页，核查过程留在内部记录。安装 [DeepSeek 联网检索](../plugins/deepseek-web/plugin.json) 和 [晨报](../plugins/ai-morning-briefing/plugin.json) 插件，在前者配置官方 DeepSeek API key；研究、写作与评审使用 `models.default`，视觉检查使用支持图片的 `models.backup.flash`。
 
 两个工具分别由 `anchor-deepseek-tools package-plugin <新目录>` 和 `anchor-briefing-tools package-plugin <新目录> <Typst可执行文件>` 打包，沿用 Library 安装入口；渲染还需要系统 Poppler 与 Noto CJK SC、DejaVu 字体。已发布期刊只归档正文、PDF 和检查信息，下一次运行自动读取最近成功版本与上一日期刊以便去重；同日期刊保持身份并增加修订号。检索以实际窗口为主，适当重叠回查未刊的重要漏项，保留真实日期。可用 `anchor-briefing-tools seed-baseline <插件目录> <PDF> <日期> <截止时间> <窗口起点>` 导入首次参考稿，时间须有明确时区；该操作仅接受空档案。

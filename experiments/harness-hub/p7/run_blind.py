@@ -27,6 +27,8 @@ REPO = HERE.parents[2]
 SOURCE = '1af26b1273acba4fc422e0e2723798dd0d87afa5'
 sys.path.insert(0, str(HERE.parent / 'p0'))
 import run_p0  # noqa: E402
+sys.path.insert(0, str(HERE / 'graph'))
+import build  # noqa: E402
 
 
 def save(path, value):
@@ -50,7 +52,7 @@ def prepare(root, data, source, bindir, run_id, guard):
         stream.extractall(root / 'host-source', filter='data')
     shutil.copytree(REPO / 'rust/anchor-rsi/src', root / 'anchor-rsi-source/src')
     shutil.copytree(REPO / 'rust/anchor-hub/src', root / 'hub-source/src')
-    graph = json.loads((REPO / 'examples/graphs/rsi-signals.json').read_text())
+    graph = build.graph()
     save(root / 'bundle/graph.json', graph)
     save(root / 'bundle/manifest.json',
          {'format': 1, 'graph': 'graph.json', 'plugins': [{'id': 'harness-hub'}]})

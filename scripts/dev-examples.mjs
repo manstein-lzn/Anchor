@@ -20,6 +20,29 @@ const complete = async (root, items) => {
 
 async function plugins(target) {
   const root = process.env.ANCHOR_RUNNER_LIBRARY_ROOT;
+  if (!root) throw new Error('ANCHOR_RUNNER_LIBRARY_ROOT is required');
+  const feishu = join(root, 'plugins', 'feishu');
+  if (await exists(feishu)) {
+    const missing = [];
+    for (const resource of ['bin/lark-cli', 'LICENSE.lark-cli']) {
+      if (!await exists(join(feishu, resource))) missing.push(resource);
+    }
+    if (missing.length) {
+      const quote = value => `'${value.replaceAll("'", "'\\''")}'`;
+      const cli = `${quote(join(target, 'anchor-library'))} --root ${quote(root)}`;
+      const upgrade = [
+        `${cli} upgrade-system`,
+        `--id feishu --directory /absolute/path/to/reviewed/feishu-candidate`,
+        '--digest <reviewed-candidate-digest> --existing-digest <reviewed-installed-digest>',
+      ].join(' \\\n  ');
+      throw new Error(
+        `Existing Feishu Plugin is missing ${missing.join(' and ')}. It was not changed. ` +
+        `Review the old bytes with: ${cli} inspect-system --id feishu\n` +
+        `Prepare and review a candidate as described in docs/development.md (System Plugin maintenance).\n` +
+        `Then explicitly upgrade with:\n${upgrade}`,
+      );
+    }
+  }
   if (await exists(marker(root))) return;
   const pending = [];
   for (const [id, binaries] of Object.entries(starter.plugins)) {
@@ -27,17 +50,30 @@ async function plugins(target) {
   }
   if (pending.length) {
     console.log('Preparing bundled starter plugins...');
-    const packages = [...new Set(['anchor-library', ...pending.flatMap(([, binaries]) => binaries)])];
+    const packages = [...new Set(['anchor-library', ...pending.flatMap(([, binaries]) => binaries)
+      .filter(binary => binary !== 'lark-cli')])];
     execFileSync('cargo', ['build', '--manifest-path', join(repo, 'rust/Cargo.toml'), '--locked',
       ...packages.flatMap(name => ['-p', name]), '--bins'],
     { stdio: 'inherit', env: { ...process.env, CARGO_TARGET_DIR: resolve(target, '..') } });
     const staging = await mkdtemp(join(tmpdir(), 'anchor-starter-'));
     try {
+      let bootstrap;
       for (const [id, binaries] of pending) {
         const directory = join(staging, id);
         await cp(join(repo, 'plugins', id), directory, { recursive: true });
         if (binaries.length) await mkdir(join(directory, 'bin'), { recursive: true });
-        for (const binary of binaries) await cp(join(target, binary), join(directory, 'bin', binary));
+        for (const binary of binaries) {
+          let source = join(target, binary);
+          if (binary === 'lark-cli') {
+            bootstrap ??= join(staging, 'bootstrap');
+            if (!await exists(bootstrap)) {
+              execFileSync(join(repo, 'scripts/prepare-platform-bootstrap.sh'),
+                ['--output', bootstrap], { stdio: 'inherit' });
+            }
+            source = join(bootstrap, 'lark-cli');
+          }
+          await cp(source, join(directory, 'bin', binary));
+        }
         const candidate = ['--directory', directory, '--id', id];
         const review = JSON.parse(execFileSync(join(target, 'anchor-library'),
           ['--root', root, 'install', ...candidate, '--review'], { encoding: 'utf8' }));

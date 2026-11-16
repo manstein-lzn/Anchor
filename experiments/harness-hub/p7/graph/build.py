@@ -1,6 +1,4 @@
-"""Build examples/graphs/rsi-signals.json from the Op scripts in ops/ and
-the agent instructions below. Run it after editing either; test_graph.py
-fails when the Graph and its sources disagree.
+"""Rebuild the historical P7 research fixture, not a shipped Graph.
 
     python3 experiments/harness-hub/p7/graph/build.py
 """
@@ -10,7 +8,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[3]
-GRAPH = REPO / 'examples/graphs/rsi-signals.json'
+GRAPH = HERE / 'rsi-signals.fixture.json'
 SLOTS = 4
 FLASH = 'models.default.flash'
 
