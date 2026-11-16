@@ -46,6 +46,37 @@ fn child_metadata(
 }
 
 #[tokio::test]
+async fn startup_finishes_kernel_initialization_before_background_work() {
+    let root = tempfile::tempdir().unwrap();
+    let state = root.path().join("state");
+    let application = RunApplication::new(state.clone(), root.path().into());
+    assert!(!state.join("kernel-runs").exists());
+    application.recover_detached_at_startup().await.unwrap();
+    let reader = anchor_kernel::HistoryReader::open(state.join("kernel-runs")).unwrap();
+    for id in [
+        "validator/constitution",
+        "validator/human-decision",
+        "validator/effect",
+        anchor_runtime::graph::validator::GRAPH_VALIDATOR,
+    ] {
+        assert!(reader.load(id).unwrap().is_some(), "{id}");
+    }
+    assert!(application.run_views().unwrap().is_empty());
+
+    let damaged = root.path().join("damaged");
+    let partial = damaged.join("kernel-runs/validator%2Feffect");
+    std::fs::create_dir_all(&partial).unwrap();
+    std::fs::write(partial.join("resource.tmp"), b"interrupted").unwrap();
+    let application = RunApplication::new(damaged, root.path().into());
+    assert!(application.recover_detached_at_startup().await.is_err());
+    assert_eq!(
+        std::fs::read(partial.join("resource.tmp")).unwrap(),
+        b"interrupted"
+    );
+    assert!(!partial.join("resource.json").exists());
+}
+
+#[tokio::test]
 async fn predecessor_handover_waits_for_child_terminal_status_and_executor_cleanup() {
     let root = tempfile::tempdir().unwrap();
     let application = RunApplication::new(root.path().join("state"), root.path().into());

@@ -38,9 +38,6 @@ pub(crate) struct ImpactGap {
     pub(crate) reason: String,
 }
 
-/// The scan bound for a derived impact report.
-const ENVIRONMENT_REFERENCE_LIMIT: usize = 200;
-
 /// What an impact scan could see.
 pub(crate) enum ImpactScan {
     Read {
@@ -60,7 +57,7 @@ pub(crate) fn coverage_of(
     total: usize,
     missing: Vec<ImpactGap>,
 ) -> ImpactCoverage {
-    if missing.is_empty() && total <= ENVIRONMENT_REFERENCE_LIMIT {
+    if missing.is_empty() && considered == total {
         ImpactCoverage::Complete
     } else {
         ImpactCoverage::Partial {
@@ -112,8 +109,7 @@ impl RunApplication {
             Err(_) => true,
         });
         let total = candidates.len();
-        let considered = total.min(ENVIRONMENT_REFERENCE_LIMIT);
-        candidates.truncate(ENVIRONMENT_REFERENCE_LIMIT);
+        let considered = total;
 
         let mut bundles = Vec::new();
         let mut missing = Vec::new();

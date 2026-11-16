@@ -35,7 +35,7 @@ impl RunApplication {
         let active = self.admission.lock().await;
         let graph_path = crate::run_metadata::graph_identity(source)?;
         if let Some(saved) = self.metadata(&run)? {
-            let binding = saved.assistant.ok_or_else(|| {
+            let binding = saved.assistant.as_ref().ok_or_else(|| {
                 ApplicationError::Conflict("Run is not an assistant instance".into())
             })?;
             if binding.owner != owner
@@ -46,28 +46,32 @@ impl RunApplication {
                     "assistant instance identity changed".into(),
                 ));
             }
-            let Some(record) = self.read_run(&run)? else {
-                return Err(ApplicationError::Conflict(
-                    "assistant admission is incomplete; inspect retained facts".into(),
-                ));
-            };
-            if record.progress().graph_digest != saved.graph_digest {
-                return Err(ApplicationError::Invalid(
-                    "assistant admission Graph identity changed".into(),
-                ));
+            match self.read_run(&run)? {
+                Some(record) => {
+                    if record.progress().graph_digest != saved.graph_digest {
+                        return Err(ApplicationError::Invalid(
+                            "assistant admission Graph identity changed".into(),
+                        ));
+                    }
+                    SessionStore::open(self.data_root.join("platform/sessions.sqlite"))
+                        .map_err(assistant_session_error)?
+                        .bind_channel_assistant(
+                            &owner,
+                            &session,
+                            &run,
+                            &binding.wait_node,
+                            &binding.work_node,
+                            &binding.reply_node,
+                        )
+                        .map_err(assistant_session_error)?;
+                    return Ok(run);
+                }
+                None => {
+                    return Err(ApplicationError::Conflict(
+                        "assistant admission is incomplete; inspect retained facts".into(),
+                    ));
+                }
             }
-            SessionStore::open(self.data_root.join("platform/sessions.sqlite"))
-                .map_err(assistant_session_error)?
-                .bind_channel_assistant(
-                    &owner,
-                    &session,
-                    &run,
-                    &binding.wait_node,
-                    &binding.work_node,
-                    &binding.reply_node,
-                )
-                .map_err(assistant_session_error)?;
-            return Ok(run);
         }
         for (run_id, record) in self.run_views()? {
             if !record.is_settled() {

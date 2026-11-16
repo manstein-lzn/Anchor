@@ -75,7 +75,9 @@ impl RunApplication {
     }
 
     fn validate_shared_execution(&self, metadata: &RunMetadata) -> Result<(), ApplicationError> {
-        let view = self.read_run(&metadata.run_id)?.ok_or(ApplicationError::Missing)?;
+        let view = self
+            .read_run(&metadata.run_id)?
+            .ok_or(ApplicationError::Missing)?;
         if view.progress().graph_digest != metadata.graph_digest {
             return Err(invalid("shared execution Graph identity changed"));
         }

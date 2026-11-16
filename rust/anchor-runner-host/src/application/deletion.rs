@@ -329,9 +329,20 @@ impl RunApplication {
         }
         let artifacts =
             crate::HostArtifacts::new(self.data_root.join("artifacts"), workspace_root.into());
+        let side_bytes = |root: &Path| {
+            [
+                "meta-experiments",
+                "experiment-bundles",
+                "experiment-executions",
+            ]
+            .into_iter()
+            .map(|dir| crate::retention::size(&root.join(dir)))
+            .sum::<u64>()
+        };
         let before = artifacts
             .storage_bytes()
             .map_err(|error| ApplicationError::Storage(error.to_string()))?
+            + side_bytes(&self.data_root)
             + self
                 .run_views()?
                 .iter()
@@ -346,6 +357,13 @@ impl RunApplication {
         for (id, view) in self.run_views()? {
             let bytes = self.run_bytes(&view.progress(), workspace_root)?;
             total += bytes;
+            // Remove after the installed automation history has been explicitly archived.
+            if self
+                .metadata(&id)?
+                .is_some_and(|metadata| metadata.is_retired_automation())
+            {
+                continue;
+            }
             // Only a settled Run that no worker holds is a candidate; a waiting
             // Run still has a human, a child or an effect that may answer it.
             if view.active() || !matches!(view.phase(), super::run_access::RunPhase::Settled { .. })
@@ -389,9 +407,15 @@ impl RunApplication {
                 )),
             }
         }
+        // Removing Runs drops Artifact links; sweep again before revision reclamation.
+        if report.removed > 0 {
+            let second = self.reclaim_deliveries(policy, workspace_root, now)?;
+            report.expired_artifacts += second.expired.len();
+        }
         report.remaining_bytes = artifacts
             .storage_bytes()
             .map_err(|error| ApplicationError::Storage(error.to_string()))?
+            + side_bytes(&self.data_root)
             + self
                 .run_views()?
                 .iter()
@@ -636,6 +660,77 @@ mod retention_tests {
         assert!(!exists(&application, "first"));
         assert!(!work.join("first").exists());
         assert!(exists(&application, "second") && exists(&application, "third"));
+    }
+
+    #[tokio::test]
+    async fn retiring_automation_keeps_its_history_without_disabling_ordinary_retention() {
+        use anchor_runtime::graph::{ArtifactPort, InvocationKey};
+        let (root, application) = application();
+        let work = root.path().join("work");
+        let legacy = fixtures::work_record("retired-cycle");
+        for record in [&legacy, &fixtures::work_record("ordinary")] {
+            fixtures::create(&application, record);
+            fixtures::finish(&application, &record.run_id);
+            settled_at(&application, &record.run_id, 0);
+        }
+        let mut metadata = super::super::RunMetadata::new(
+            legacy.run_id.clone(),
+            "dreaming".into(),
+            legacy.graph_digest.clone(),
+            root.path(),
+        )
+        .unwrap();
+        metadata.dreaming = Some(crate::run_metadata::DreamingRunContext {
+            schema_version: 1,
+            kind: crate::run_metadata::DreamingRunKind::Cycle,
+            cycle: "cycle/historical".into(),
+            managed_source: "historical".into(),
+        });
+        crate::run_metadata::save(&application.data_root, &metadata).unwrap();
+        let artifacts =
+            crate::HostArtifacts::new(application.data_root.join("artifacts"), work.clone());
+        let mut commits = Vec::new();
+        for (run, node) in [
+            ("retired-cycle", "proof"),
+            ("orphan", "dreaming-window"),
+            ("orphan", "ordinary-gc"),
+        ] {
+            let key = InvocationKey {
+                run_id: run.into(),
+                node_id: node.into(),
+                graph_digest: legacy.graph_digest.clone(),
+                invocation: 1,
+            };
+            let workspace = artifacts.workspace_path(&key).unwrap();
+            std::fs::create_dir_all(&workspace).unwrap();
+            std::fs::write(workspace.join("proof.txt"), "historical evidence").unwrap();
+            commits.push(
+                artifacts
+                    .freeze(
+                        &key,
+                        &fixtures::completion(serde_json::json!({"files":["proof.txt"]})),
+                    )
+                    .await
+                    .unwrap(),
+            );
+        }
+        let now = chrono::Utc::now().timestamp() + 60 * DAY;
+        let report = application.reclaim(&by_age(30), &work, now).await.unwrap();
+        assert_eq!(report.removed, 1, "{report:?}");
+        assert!(exists(&application, "retired-cycle"));
+        assert!(!exists(&application, "ordinary"));
+        assert_eq!(
+            artifacts.availability(&commits[0]).unwrap(),
+            crate::artifacts::ArtifactAvailability::Available
+        );
+        assert_eq!(
+            artifacts.availability(&commits[1]).unwrap(),
+            crate::artifacts::ArtifactAvailability::Available
+        );
+        assert_eq!(
+            artifacts.availability(&commits[2]).unwrap(),
+            crate::artifacts::ArtifactAvailability::Expired
+        );
     }
 
     #[tokio::test]

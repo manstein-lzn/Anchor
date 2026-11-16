@@ -10,6 +10,7 @@ pub(super) const MOUNT_EVIDENCE_KEY: &str = "plugin-mounts";
 #[derive(Debug)]
 pub(super) struct MountedPlugins {
     pub(super) bindings: Vec<PluginBinding>,
+    pub(super) revisions: BTreeMap<String, String>,
     pub(super) network: bool,
     /// One line per Plugin the call named that is *not* mounted, and why.
     pub(super) reasons: Vec<String>,
@@ -237,13 +238,23 @@ impl HostIoResolver {
             return Self::validate_frozen_plugins(&policy, bindings);
         }
         for binding in bindings {
+            if admitted
+                .snapshot
+                .plugin_revision(&binding.id)
+                .is_some_and(|revision| revision != binding.digest)
+            {
+                return Err(format!(
+                    "Plugin `{}` does not match this Run's exact revision",
+                    binding.id,
+                ));
+            }
             let declared = request
                 .plugins
                 .iter()
                 .any(|declared| declared.id == binding.id);
             match (admitted.plugin_bindings.get(&binding.id), declared) {
-                // A Run freezes Host authority, while executable bytes and its
-                // dependency view follow the current installed Plugin.
+                // A Run freezes Host authority. Unpinned code and dependencies
+                // follow the installed Plugin; exact pins were checked above.
                 (Some(frozen), _) if !frozen.same_authorization(binding) => {
                     return Err(format!(
                         "Plugin `{}` Host authorization changed since this Graph Run was admitted",
@@ -394,7 +405,7 @@ impl HostIoResolver {
                     .map_err(|error| format!("Plugin mount catalog is unavailable: {error}"))
             })
             .transpose()?;
-        self.mounted_plugins_unlocked(request)
+        self.mounted_plugins_unlocked(request, None)
     }
 
     /// The async tool path supplies its cancellable publication lease; Op.run
@@ -402,8 +413,9 @@ impl HostIoResolver {
     pub(super) fn mounted_plugins_unlocked(
         &self,
         request: &NodeExecutionRequest,
+        lease: Option<&anchor_library::InstallLease>,
     ) -> Result<MountedPlugins, String> {
-        if let Some(mounted) = self.assistant_mounted_plugins(request)? {
+        if let Some(mounted) = self.assistant_mounted_plugins(request, lease)? {
             return Ok(mounted);
         }
         let key = &request.key;
@@ -447,6 +459,7 @@ impl HostIoResolver {
         {
             return Ok(MountedPlugins {
                 bindings: Vec::new(),
+                revisions: BTreeMap::new(),
                 network: false,
                 reasons: Vec::new(),
                 session: session_turn.map(|(session, _)| session),
@@ -519,25 +532,18 @@ impl HostIoResolver {
             resolved.snapshot = false;
             resolved.reasons.push("no snapshot (unreadable)".to_owned());
         }
-        let mut bindings = Vec::new();
-        for id in resolved.mounts.keys() {
-            // Always resolve current Library code. The Run stores an authorization
-            // baseline; it does not pin executable bytes or dependency views.
-            let binding = self
-                .tools
-                .resolve_fixture_plugins(std::slice::from_ref(id))
-                .ok()
-                .and_then(|mut bindings| bindings.pop())
-                .map(Ok)
-                .unwrap_or_else(|| {
-                    catalog
-                        .resolve(std::slice::from_ref(id))
-                        .map_err(|error| format!("Plugin `{id}` is not available: {error}"))?
-                        .pop()
-                        .ok_or_else(|| format!("Plugin `{id}` is not available in this Library"))
-                })?;
-            bindings.push(binding);
-        }
+        let revisions = crate::plugin_library::revision_declarations(
+            admitted
+                .snapshot
+                .nodes
+                .iter()
+                .flat_map(|node| &node.plugins),
+        );
+        let mut bindings = self.resolve_selected_plugins(
+            &resolved.mounts.keys().cloned().collect::<Vec<_>>(),
+            &revisions,
+            lease,
+        )?;
         // Check selected authority before network policy can hide an altered
         // Plugin, then recheck the resulting set including a derived provider.
         self.validate_invocation_plugins(&admitted, request, &bindings)?;
@@ -551,6 +557,7 @@ impl HostIoResolver {
         self.validate_invocation_plugins(&admitted, request, &bindings)?;
         Ok(MountedPlugins {
             bindings,
+            revisions,
             network,
             reasons: resolved.reasons,
             session: session_turn.map(|(session, _)| session),

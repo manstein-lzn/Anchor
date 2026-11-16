@@ -34,6 +34,8 @@ fn session(sessions: &SessionStore, conversation: &str, assistant: &str) -> Stri
                 attachments: Default::default(),
                 run_id: None,
                 replace_running: false,
+                bot_origin: None,
+                platform_message_id: None,
             },
         )
         .unwrap();

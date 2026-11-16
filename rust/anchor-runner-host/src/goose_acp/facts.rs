@@ -4,6 +4,18 @@
 use anchor_facts::{Fact, Outcome};
 use serde_json::Value;
 
+pub(super) fn request_context(task: &str, input: &Value, evidence: &Value) -> Fact {
+    Fact::RequestContext {
+        task_sha256: anchor_facts::text_digest(task),
+        input_sha256: anchor_facts::text_digest(&anchor_facts::canonical(input).to_string()),
+        input_guidance_digest: evidence
+            .get("input_guidance")
+            .and_then(|guidance| guidance.get("digest"))
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+    }
+}
+
 pub(super) fn observations(
     evidence: &Value,
     started_at_ms: u64,
@@ -384,5 +396,33 @@ mod tests {
         for value in ["secret", "sleep 99", "No such file", "a\\n"] {
             assert!(!recorded.contains(value), "{value}");
         }
+    }
+}
+
+#[cfg(test)]
+mod request_context_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn request_identity_is_canonical_and_is_not_a_second_usage_sample() {
+        let first = request_context(
+            "Input: one",
+            &json!({"b":2,"a":1}),
+            &json!({"input_guidance":{"digest":"guidance-a"}}),
+        );
+        let reordered = request_context(
+            "Input: one",
+            &json!({"a":1,"b":2}),
+            &json!({"input_guidance":{"digest":"guidance-a"}}),
+        );
+        assert_eq!(first, reordered);
+        assert_ne!(
+            first,
+            request_context("Input: two", &json!({"a":1,"b":2}), &json!({}))
+        );
+        assert!(
+            matches!(first,Fact::RequestContext { input_guidance_digest:Some(digest), .. } if digest=="guidance-a")
+        );
     }
 }

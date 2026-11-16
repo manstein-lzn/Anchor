@@ -2,15 +2,40 @@
 
 pub use anchor_runtime::artifact::store::{invocation_stem, validate_component, validate_key};
 use std::{
-    fs,
+    fs, io,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
 };
+
+/// Open an existing directory without following links in any component.
+pub(crate) fn open_directory(path: &Path) -> io::Result<fs::File> {
+    anchor_file_lease::open_directory(&std::path::absolute(path)?)
+}
+
+pub(crate) fn sha256_file(path: &Path) -> Result<String, String> {
+    use sha2::{Digest, Sha256};
+    let mut file = fs::File::open(path).map_err(|error| error.to_string())?;
+    let mut hasher = Sha256::new();
+    io::copy(&mut file, &mut hasher).map_err(|error| error.to_string())?;
+    Ok(format!("{:x}", hasher.finalize()))
+}
 
 pub(crate) fn sync_directory(path: &Path) -> Result<(), String> {
     fs::File::open(path)
         .and_then(|directory| directory.sync_all())
         .map_err(|error| error.to_string())
+}
+
+/// Publish an immutable directory or file without replacing a concurrent winner.
+pub(crate) fn rename_noreplace(source: &Path, target: &Path) -> io::Result<()> {
+    rustix::fs::renameat_with(
+        rustix::fs::CWD,
+        source,
+        rustix::fs::CWD,
+        target,
+        rustix::fs::RenameFlags::NOREPLACE,
+    )
+    .map_err(Into::into)
 }
 
 /// Resolve an author-selected candidate without granting host filesystem paths.

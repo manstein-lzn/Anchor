@@ -2,7 +2,7 @@ use crate::application::run_access;
 use crate::host_fs::invocation_stem as stem;
 use crate::run_metadata::{AssistantSource, RunMetadata};
 use anchor_platform_session::{AssistantInput, ChannelInboundAdmission, SessionStore};
-use anchor_runtime::graph::{GraphError, GraphSnapshot, InvocationKey, NodeExecutionRequest};
+use anchor_runtime::graph::{GraphError, InvocationKey, NodeExecutionRequest};
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
@@ -12,11 +12,25 @@ use std::{
 };
 use tokio::sync::Notify;
 
-pub(crate) const WAIT_INPUT: &str = "session.wait_input";
-pub(crate) const REPLY: &str = "session.reply";
+pub(crate) use anchor_graph_host::{
+    ASSISTANT_REPLY as REPLY, ASSISTANT_WAIT_INPUT as WAIT_INPUT, AssistantPlan,
+};
 
-pub(crate) fn signal(session: &str) -> Arc<Notify> {
-    static SIGNALS: OnceLock<Mutex<std::collections::HashMap<String, Weak<Notify>>>> =
+pub(crate) struct SessionSignal {
+    notification: Notify,
+    pub(crate) input_claim: Arc<tokio::sync::Mutex<()>>,
+}
+
+impl std::ops::Deref for SessionSignal {
+    type Target = Notify;
+
+    fn deref(&self) -> &Self::Target {
+        &self.notification
+    }
+}
+
+pub(crate) fn signal(session: &str) -> Arc<SessionSignal> {
+    static SIGNALS: OnceLock<Mutex<std::collections::HashMap<String, Weak<SessionSignal>>>> =
         OnceLock::new();
     let mut signals = SIGNALS
         .get_or_init(Mutex::default)
@@ -26,102 +40,12 @@ pub(crate) fn signal(session: &str) -> Arc<Notify> {
     if let Some(signal) = signals.get(session).and_then(Weak::upgrade) {
         return signal;
     }
-    let signal = Arc::new(Notify::new());
+    let signal = Arc::new(SessionSignal {
+        notification: Notify::new(),
+        input_claim: Arc::new(tokio::sync::Mutex::new(())),
+    });
     signals.insert(session.to_owned(), Arc::downgrade(&signal));
     signal
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct AssistantPlan {
-    pub(crate) wait_node: String,
-    pub(crate) work_node: String,
-    pub(crate) reply_node: String,
-}
-
-impl AssistantPlan {
-    /// The plan of a persistent assistant Graph, whose only Agent is the work
-    /// node. `None` when the Graph is not an assistant at all.
-    pub(crate) fn discover(snapshot: &GraphSnapshot) -> Result<Option<Self>, String> {
-        let mut agents = snapshot.nodes.iter().filter(|node| node.agent.is_some());
-        match (agents.next(), agents.next()) {
-            (Some(agent), None) => Self::from_snapshot(snapshot, &agent.id),
-            _ => Self::from_snapshot(snapshot, ""),
-        }
-    }
-
-    pub(crate) fn from_snapshot(
-        snapshot: &GraphSnapshot,
-        work_node: &str,
-    ) -> Result<Option<Self>, String> {
-        let operations = snapshot
-            .nodes
-            .iter()
-            .filter_map(|node| {
-                let operation = node
-                    .op
-                    .as_ref()
-                    .and_then(|name| snapshot.ops.get(name))?
-                    .get("host")?
-                    .get("operation")?
-                    .as_str()?;
-                Some((node.id.as_str(), operation))
-            })
-            .collect::<Vec<_>>();
-        if operations.is_empty() {
-            return Ok(None);
-        }
-        let waits = operations
-            .iter()
-            .filter(|(_, operation)| *operation == WAIT_INPUT)
-            .collect::<Vec<_>>();
-        let replies = operations
-            .iter()
-            .filter(|(_, operation)| *operation == REPLY)
-            .collect::<Vec<_>>();
-        if waits.len() != 1
-            || replies.len() != 1
-            || operations.len() != 2
-            || snapshot.nodes.len() != 3
-        {
-            return Err(
-                "a channel assistant requires one input Op, one Agent and one reply Op".into(),
-            );
-        }
-        let plan = Self {
-            wait_node: waits[0].0.to_owned(),
-            work_node: work_node.to_owned(),
-            reply_node: replies[0].0.to_owned(),
-        };
-        if snapshot.entry != plan.wait_node
-            || !snapshot
-                .nodes
-                .iter()
-                .any(|node| node.id == work_node && node.agent.is_some())
-        {
-            return Err("assistant entry must wait for input and the configured result node must be an Agent".into());
-        }
-        let expected = [
-            (&plan.wait_node, &plan.work_node),
-            (&plan.work_node, &plan.reply_node),
-            (&plan.reply_node, &plan.wait_node),
-        ];
-        if snapshot.edges.len() != 3
-            || expected.iter().any(|(from, to)| {
-                !snapshot
-                    .edges
-                    .iter()
-                    .any(|edge| &edge.from_node == *from && &edge.to_node == *to)
-            })
-        {
-            return Err("assistant nodes must form the input, Agent, reply loop".into());
-        }
-        if snapshot.nodes.iter().any(|node| node.max_rounds.is_some())
-            || !snapshot.module_rounds.is_empty()
-        {
-            return Err("a persistent assistant cannot have a finite round ceiling".into());
-        }
-        Ok(Some(plan))
-    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -799,6 +723,8 @@ mod tests {
             attachments: Default::default(),
             run_id: None,
             replace_running: true,
+            bot_origin: None,
+            platform_message_id: None,
         }
     }
 

@@ -6,6 +6,70 @@ use std::sync::Arc;
 use fake::FakeChannels;
 
 #[test]
+fn empty_groups_preserve_legacy_binding_and_members_bytes() {
+    let binding =
+        r#"{"plugin":"feishu","users":["ou_alice"],"send_users":["ou_alice"],"private_only":true}"#;
+    let decoded: ChannelBinding = serde_json::from_str(binding).unwrap();
+    assert!(decoded.groups.is_empty());
+    assert_eq!(serde_json::to_string(&decoded).unwrap(), binding);
+    let members = r#"{"users":["ou_alice"],"send_users":["ou_alice"],"private_only":true}"#;
+    let decoded: ChannelMembers = serde_json::from_str(members).unwrap();
+    assert!(decoded.groups.is_empty());
+    assert_eq!(serde_json::to_string(&decoded).unwrap(), members);
+}
+
+#[test]
+fn feishu_groups_are_explicit_bounded_normalized_and_do_not_authorize_members() {
+    let mut binding = runtime().binding;
+    binding.plugin = "feishu".into();
+    binding
+        .validate_for_platform(ChannelPlatform::Feishu)
+        .unwrap();
+    binding.groups = vec![" oc_beta ".into(), "oc_alpha".into(), "oc_beta".into()];
+    binding
+        .validate_for_platform(ChannelPlatform::Feishu)
+        .unwrap();
+    let binding = binding.normalized();
+    assert_eq!(binding.groups, ["oc_alpha", "oc_beta"]);
+    assert_eq!(binding.users, ["member"]);
+    assert_eq!(binding.send_users, ["member"]);
+    assert!(!binding.allows_inbound("oc_alpha"));
+    assert!(!binding.allows_outbound("oc_alpha"));
+    assert!(
+        binding
+            .validate_for_platform(ChannelPlatform::Wecom)
+            .is_err()
+    );
+    let mut private = binding.clone();
+    private.private_only = true;
+    assert!(
+        private
+            .validate_for_platform(ChannelPlatform::Feishu)
+            .is_err()
+    );
+    private.groups.clear();
+    private
+        .validate_for_platform(ChannelPlatform::Feishu)
+        .unwrap();
+
+    let mut binding = binding;
+    for invalid in [
+        "", "*", "oc_", "ou_alice", "oc_*", "oc_a/b", "oc_a,b", "oc_a b", "oc_a\nb", "oc_群",
+    ] {
+        binding.groups = vec![invalid.into()];
+        assert!(binding.validate().is_err(), "accepted {invalid:?}");
+    }
+    binding.groups = vec![format!("oc_{}", "a".repeat(197))];
+    binding.validate().unwrap();
+    binding.groups[0].push('a');
+    assert!(binding.validate().is_err());
+    binding.groups = (0..1000).map(|n| format!("oc_{n}")).collect();
+    binding.validate().unwrap();
+    binding.groups.push("oc_extra".into());
+    assert!(binding.validate().is_err());
+}
+
+#[test]
 fn channel_membership_keeps_explicit_wildcard_and_broadcast_rules_identical_for_both_directions() {
     let mut binding = runtime().binding;
     assert!(binding.allows_inbound("member"));
@@ -46,6 +110,8 @@ fn request(account: &str) -> ChannelInboundRequest {
         attachments: Default::default(),
         run_id: None,
         replace_running: true,
+        bot_origin: None,
+        platform_message_id: None,
     }
 }
 

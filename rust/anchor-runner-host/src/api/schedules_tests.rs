@@ -5,6 +5,42 @@ fn dt(value: &str) -> NaiveDateTime {
     NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%S").unwrap()
 }
 
+#[tokio::test]
+async fn retired_system_schedule_never_falls_through_to_ordinary_admission() {
+    for prefix in ["dreaming-install-", "dreaming-rebind-"] {
+        let (_root, state) = super::super::tests::fixture();
+        let at = "2026-11-15T03:00:00";
+        {
+            let mut store = state.schedules.lock().unwrap();
+            store.items.push(ScheduleItem {
+                id: "historical-system".into(),
+                graph: "fixture".into(),
+                rule: json!({"type":"once","at":at}),
+                input: json!({}),
+                created_at: at.into(),
+                next_at: at.into(),
+                enabled: true,
+                delegation: None,
+                remaining: None,
+                group: None,
+            });
+            store.creation_requests.push(ScheduleCreationRequest {
+                owner: "local".into(),
+                key: format!("{prefix}historical"),
+                content: json!({"graph":"fixture","input":{},"enabled":false}),
+                schedule: "historical-system".into(),
+                group: None,
+            });
+            store.persist().unwrap();
+        }
+        let path = state.schedules.lock().unwrap().path.clone();
+        let before = fs::read(&path).unwrap();
+        tick_schedules(&state, dt(at)).await.unwrap();
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert!(!state.data_root.exists());
+    }
+}
+
 #[test]
 fn local_recurrence_rules_validate_and_skip_nonexistent_month_dates() {
     let once = json!({"type":"once","at":"2026-10-06T09:30:00"});

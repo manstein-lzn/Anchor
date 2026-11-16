@@ -27,7 +27,7 @@ pub(super) fn invalid(error: impl std::fmt::Display) -> ApplicationError {
     ApplicationError::Invalid(error.to_string())
 }
 
-fn declaration<'a>(
+pub(super) fn declaration<'a>(
     snapshot: &'a GraphSnapshot,
     node: &str,
 ) -> Option<&'a anchor_runtime::graph::PluginRef> {
@@ -190,7 +190,7 @@ impl RunApplication {
 
     /// Future dispatches intersect the original grant with today's operator
     /// grant. A newer save can revoke old work, never enlarge its authority.
-    fn current_task_grant(
+    pub(in crate::application) fn current_task_grant(
         &self,
         origin: &TaskOrigin,
     ) -> Result<(GraphTaskPolicy, Publication), ApplicationError> {
@@ -454,6 +454,22 @@ impl RunApplication {
         graph: &str,
     ) -> Result<Option<TaskGraphOwnership>, ApplicationError> {
         crate::assistant::read_json(&task_graph_ownership_path(self, graph)?).map_err(invalid)
+    }
+
+    pub(in crate::application) fn task_graph_source(
+        &self,
+        graph: &str,
+    ) -> Result<Option<std::path::PathBuf>, ApplicationError> {
+        Ok(self
+            .task_graph_ownership_record(graph)?
+            .filter(|owned| {
+                owned.graph == graph
+                    && !owned.scope.is_empty()
+                    && owned.source.is_absolute()
+                    && !owned.request.id.is_empty()
+                    && !owned.request.content_digest.is_empty()
+            })
+            .map(|owned| owned.source))
     }
 
     fn check_generated_task(
@@ -721,7 +737,7 @@ fn validate_task_structure(snapshot: &GraphSnapshot) -> Result<(), ApplicationEr
     Ok(())
 }
 
-fn call_targets(snapshot: &GraphSnapshot) -> Result<Vec<&str>, ApplicationError> {
+pub(super) fn call_targets(snapshot: &GraphSnapshot) -> Result<Vec<&str>, ApplicationError> {
     snapshot
         .ops
         .values()

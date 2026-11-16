@@ -8,6 +8,8 @@ use anchor_platform_session::{
     ChannelIdentity, ChannelInboundRequest, SessionStore, TaskResult, TurnStatus,
 };
 
+mod cli_tests;
+
 struct FeishuFixture {
     host: ChannelTools,
     channels: Arc<FakeChannels>,
@@ -160,6 +162,8 @@ fn feishu_fixture(root: &Path) -> FeishuFixture {
         attachments: Default::default(),
         run_id: None,
         replace_running: true,
+        bot_origin: None,
+        platform_message_id: None,
     };
     let admitted = sessions
         .admit_channel_inbound("local", inbound.clone())
@@ -328,14 +332,13 @@ async fn feishu_task_tool_derives_private_destination_and_never_exposes_wecom_or
         })
     };
     let original_bot = channels.get("graph").unwrap();
-    for change in 0..7 {
+    for change in 0..6 {
         channels.update("graph", |bot| match change {
             0 => bot.enabled = false,
             1 => bot.account = Some("another-app".into()),
             2 => bot.binding.send_users.clear(),
             3 => bot.platform = ChannelPlatform::Wecom,
-            4 => bot.binding.private_only = false,
-            5 => bot.binding.users.clear(),
+            4 => bot.binding.users.clear(),
             _ => bot.owner = "another-owner".into(),
         });
         assert!(
@@ -350,6 +353,10 @@ async fn feishu_task_tool_derives_private_destination_and_never_exposes_wecom_or
             .await
             .is_err()
     );
+    channels.update("graph", |bot| {
+        bot.binding.private_only = false;
+        bot.binding.groups = vec!["oc_authorized_group".into()];
+    });
     let send = scope(native(), host.call(FEISHU_SEND_TOOL, args.clone()));
     let gateway = async {
         let (mut stream, _) = listener.accept().await.unwrap();
@@ -513,14 +520,13 @@ async fn feishu_user_files_use_visible_bytes_original_recipient_and_native_ident
     std::os::unix::fs::symlink(&input, host.workspace.join("linked.txt")).unwrap();
     let args = json!({"path":"/workspace/report.md","content":"## Your report"});
     let original_bot = channels.get("graph").unwrap();
-    for change in 0..7 {
+    for change in 0..6 {
         channels.update("graph", |bot| match change {
             0 => bot.enabled = false,
             1 => bot.account = Some("another-app".into()),
             2 => bot.binding.send_users.clear(),
             3 => bot.binding.users.clear(),
             4 => bot.owner = "foreign-owner".into(),
-            5 => bot.binding.private_only = false,
             _ => bot.platform = ChannelPlatform::Wecom,
         });
         assert!(
@@ -582,6 +588,10 @@ async fn feishu_user_files_use_visible_bytes_original_recipient_and_native_ident
             .is_err()
     );
 
+    channels.update("graph", |bot| {
+        bot.binding.private_only = false;
+        bot.binding.groups = vec!["oc_authorized_group".into()];
+    });
     let mut ids = Vec::new();
     for (path, name, bytes, native) in [
         (

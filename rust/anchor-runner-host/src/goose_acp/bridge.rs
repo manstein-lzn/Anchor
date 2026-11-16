@@ -533,7 +533,7 @@ async fn completion(
     State(state): State<Arc<BridgeState>>,
     Json(mut body): Json<Value>,
 ) -> Response {
-    if state.cancellation.load(Ordering::Relaxed) {
+    if state.cancellation.load(Ordering::Acquire) {
         return StatusCode::CONFLICT.into_response();
     }
     state.provider_calls.fetch_add(1, Ordering::SeqCst);
@@ -541,6 +541,7 @@ async fn completion(
     let Some(upstream) = state.upstream.as_ref() else {
         return (StatusCode::NOT_FOUND, "model transport is not proxied").into_response();
     };
+
     let response = state
         .client
         .post(upstream.url.clone())
@@ -983,6 +984,10 @@ impl Drop for Bridge {
 }
 
 #[cfg(test)]
+#[path = "bridge/model_proxy_tests.rs"]
+mod model_proxy_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use anchor_runtime::ToolError;
@@ -1012,6 +1017,11 @@ mod tests {
             },
             binary_sha256: "binary".into(),
             model_binding: Some("model".into()),
+            execution_closure_digest: None,
+            frozen_model_digest: None,
+            input_guidance: None,
+            context_checkpoint_digest: None,
+            context_request_digest: None,
             session_id: Some("native-session".into()),
             completion: None,
             reason: None,

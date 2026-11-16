@@ -111,6 +111,12 @@ impl KernelRuns {
                 Arc::new(super::file_facts::HostFiles),
             )
             .map_err(kernel_error)?;
+        kernel
+            .install(
+                super::subscription_facts::VALIDATOR,
+                Arc::new(super::file_facts::HostFiles),
+            )
+            .map_err(kernel_error)?;
         Ok(Self {
             kernel,
             active: Arc::default(),
@@ -521,6 +527,11 @@ impl RunApplication {
         // resources. Settlement is irreversible even for a retained attempt.
         if resource.is_settled() {
             return runs.control(id, "resume", None);
+        }
+        if self.assistant_has_pending_handover(id)? {
+            return Err(ApplicationError::Conflict(
+                "assistant is reserved by an observed handover; reconcile that publication".into(),
+            ));
         }
         let record = KernelRuns::record(&resource)?;
         let metadata = self.metadata(id)?.ok_or(ApplicationError::Missing)?;

@@ -79,6 +79,9 @@ pub(crate) struct ManagedChannelLaunch {
     pub(crate) credentials: BTreeMap<String, String>,
     pub(crate) users: Vec<String>,
     pub(crate) send_users: Vec<String>,
+    pub(crate) groups: Vec<String>,
+    pub(crate) cli_enabled: bool,
+    pub(crate) peer_bots: Vec<String>,
     pub(crate) callback_key: String,
 }
 
@@ -224,6 +227,28 @@ impl ChannelSupervisor {
         }
         environment.insert(users_field.into(), managed.users.join(",").into());
         environment.insert(send_users_field.into(), managed.send_users.join(",").into());
+        if managed.platform == "feishu" {
+            environment.insert(
+                "ANCHOR_FEISHU_CLI_ENABLED".into(),
+                managed.cli_enabled.to_string().into(),
+            );
+            environment.insert(
+                "ANCHOR_FEISHU_PEER_BOTS".into(),
+                managed.peer_bots.join(",").into(),
+            );
+            if managed.cli_enabled {
+                let host = std::env::current_exe()?;
+                let helper = host
+                    .parent()
+                    .ok_or_else(|| io::Error::other("Host directory unavailable"))?
+                    .join("anchor-sandbox-network");
+                environment.insert("ANCHOR_FEISHU_CLI_NETWORK_HELPER".into(), helper.into());
+            }
+            environment.insert(
+                "ANCHOR_FEISHU_GROUPS".into(),
+                managed.groups.join(",").into(),
+            );
+        }
         let launch = LaunchSpec {
             platform: definition.platform.clone(),
             executable: channel.executable.clone(),
@@ -653,6 +678,9 @@ mod tests {
             .collect(),
             users: vec!["member".into()],
             send_users: vec!["member".into()],
+            groups: vec![],
+            cli_enabled: false,
+            peer_bots: Vec::new(),
             callback_key: "callback".into(),
         }
     }

@@ -68,6 +68,16 @@ fn lease(process_root: &Path, scope: &str) -> Result<anchor_file_lease::FileLeas
     Ok(file)
 }
 
+pub(super) fn invocation_lease(
+    process_root: &Path,
+    key: &InvocationKey,
+) -> Result<anchor_file_lease::FileLease, String> {
+    lease(
+        process_root,
+        &format!("invocation-{}", crate::host_fs::invocation_stem(key)),
+    )
+}
+
 fn load(root: &Path) -> Result<Option<Binding>, String> {
     let mut file = match crate::resource_read::open_resource(root, "scope.json") {
         Ok(file) => file,

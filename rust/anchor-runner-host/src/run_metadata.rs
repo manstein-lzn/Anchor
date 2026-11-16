@@ -1,5 +1,6 @@
 //! Durable Run identity metadata and Graph source identity; independent of application use cases.
 use crate::create_durable_directory;
+pub(crate) use anchor_facts::experiment::ExperimentRunContext;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -10,6 +11,9 @@ use std::{
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
+
+#[cfg(test)]
+mod tests;
 
 #[derive(Debug)]
 pub(crate) enum MetadataError {
@@ -22,7 +26,7 @@ fn storage(error: impl std::fmt::Display) -> MetadataError {
     MetadataError::Storage(error.to_string())
 }
 
-#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum TriggerSource {
     #[default]
@@ -30,7 +34,7 @@ enum TriggerSource {
     Schedule,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RunTrigger {
     source: TriggerSource,
@@ -123,12 +127,36 @@ pub(crate) struct RunMetadata {
     pub(crate) schedule: Option<String>,
     #[serde(default)]
     pub(crate) scheduled_at: Option<String>,
+    /// Sharing revision observed at admission; never a recipient list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) schedule_publication: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) request: Option<AdmissionRequest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) task: Option<crate::task_delegation::TaskOrigin>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) task_grants: Option<crate::task_delegation::GraphTaskGrants>,
+    // Remove these readers only after local automation history is explicitly retired.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) dreaming: Option<DreamingRunContext>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) experiment: Option<ExperimentRunContext>,
+}
+
+/// Host-derived provenance, never accepted in a public trigger request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DreamingRunContext {
+    pub(crate) schema_version: u32,
+    pub(crate) kind: DreamingRunKind,
+    pub(crate) cycle: String,
+    pub(crate) managed_source: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum DreamingRunKind {
+    Cycle,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -236,6 +264,10 @@ pub(crate) fn now_nanos() -> u128 {
 }
 
 impl RunMetadata {
+    pub(crate) fn is_retired_automation(&self) -> bool {
+        self.dreaming.is_some() || self.experiment.is_some()
+    }
+
     pub(crate) fn node_conversation_key(&self, node: &str) -> String {
         let identity = match &self.conversation {
             Some(binding) => serde_json::to_vec(&(&self.bundle_source, &binding.session, node)),
@@ -275,9 +307,12 @@ impl RunMetadata {
             attachments: Vec::new(),
             schedule: None,
             scheduled_at: None,
+            schedule_publication: None,
             request: None,
             task: None,
             task_grants: None,
+            dreaming: None,
+            experiment: None,
         })
     }
 
@@ -397,6 +432,41 @@ pub(crate) fn load(root: &Path, id: &str) -> Result<Option<RunMetadata>, Metadat
         return Err(MetadataError::Storage(format!(
             "legacy_channel_run: Run {id} is a per-message channel Run, which is no longer supported; remove it offline before continuing"
         )));
+    }
+    if let Some(context) = &metadata.experiment
+        && (context.schema_version != 1
+            || !anchor_runtime::identifier::is_name(&context.experiment)
+            || !anchor_runtime::identifier::is_name(&context.assignment)
+            || [
+                &context.manifest_digest,
+                &context.snapshot_digest,
+                &context.input_digest,
+            ]
+            .iter()
+            .any(|digest| !anchor_facts::window::is_digest(digest))
+            || context
+                .execution_closure_digest
+                .as_ref()
+                .is_some_and(|digest| !anchor_facts::window::is_digest(digest))
+            || context.snapshot_digest != metadata.graph_digest
+            || metadata.request.is_none()
+            || metadata.dreaming.is_some()
+            || metadata.task.is_some()
+            || metadata.task_grants.is_some()
+            || metadata.assistant.is_some()
+            || metadata.graph_call.is_some()
+            || metadata.conversation.is_some()
+            || metadata.session_call.is_some()
+            || metadata.pilot.is_some()
+            || metadata.oauth_owner.is_some()
+            || !metadata.attachments.is_empty()
+            || metadata.trigger_source != "manual"
+            || metadata.schedule.is_some()
+            || metadata.scheduled_at.is_some())
+    {
+        return Err(MetadataError::Storage(
+            "Run experiment identity is corrupt or mixed with another authority".into(),
+        ));
     }
     Ok(Some(metadata))
 }

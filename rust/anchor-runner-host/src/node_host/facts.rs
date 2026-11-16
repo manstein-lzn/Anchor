@@ -53,6 +53,19 @@ pub(crate) fn load_host_completion_fact(
 }
 
 impl HostNodes {
+    pub(super) fn fail(
+        &self,
+        key: &InvocationKey,
+        reason: String,
+    ) -> Result<NodeExecutionOutcome, GraphError> {
+        create_durable_directory(&self.facts_root)?;
+        write_durable(
+            &self.facts_root.join(format!("{}.failed", fact_stem(key))),
+            reason.as_bytes(),
+        )?;
+        Ok(NodeExecutionOutcome::Failed { reason })
+    }
+
     pub(super) fn start(&self, key: &InvocationKey) -> Result<(), GraphError> {
         create_durable_directory(&self.facts_root)?;
         let path = self.facts_root.join(format!("{}.started", fact_stem(key)));

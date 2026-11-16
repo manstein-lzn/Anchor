@@ -59,6 +59,41 @@ struct Disclosed {
     fingerprints: Vec<anchor_facts::Fact>,
 }
 
+fn agent_configuration(
+    request: &NodeExecutionRequest,
+    binding: &configuration::ModelBinding,
+    runtime_sha256: &str,
+    plugin_instructions_sha256: String,
+    tools_sha256: String,
+    envelope_sha256: String,
+) -> anchor_facts::AgentConfiguration {
+    anchor_facts::AgentConfiguration {
+        version: anchor_facts::CONFIGURATION_VERSION,
+        graph_digest: request.key.graph_digest.clone(),
+        node_id: request.key.node_id.clone(),
+        model: binding.model.clone(),
+        model_binding: binding.identity.clone(),
+        runtime_sha256: runtime_sha256.to_owned(),
+        instructions_sha256: anchor_facts::text_digest(&request.instructions),
+        plugin_instructions_sha256,
+        plugins: request
+            .plugins
+            .iter()
+            .map(|plugin| anchor_facts::PluginIdentity {
+                id: plugin.id.clone(),
+                digest: plugin.digest.clone(),
+                authorization: plugin.authorization_digest.to_string(),
+            })
+            .collect(),
+        routes: request.routes.clone(),
+        // Filled in off the async runtime below: hashing may still be
+        // finishing on the first invocation.
+        host_sha256: String::new(),
+        tools_sha256,
+        envelope_sha256,
+    }
+}
+
 pub(crate) struct GooseNodePort {
     binary: PathBuf,
     binary_sha256: String,
@@ -73,6 +108,7 @@ pub(crate) struct GooseNodePort {
     sandbox: Arc<BubblewrapSandbox>,
     /// Harness facts about each invocation; absent if its store is unavailable.
     recorder: Option<Arc<crate::fact_recorder::FactRecorder>>,
+    extensions: Vec<String>,
 }
 
 enum ExecutionModels {
@@ -98,6 +134,18 @@ struct Fact {
     /// Provider classification of this invocation's latest failed attempt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     provider_failure: Option<String>,
+    // Read-only experiment identity; remove after its local history is retired.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    execution_closure_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    frozen_model_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    input_guidance: Option<crate::harness_guidance::InputGuidance>,
+    // Retained branch identity, not a native Goose recovery cursor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    context_checkpoint_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    context_request_digest: Option<String>,
 }
 
 fn read_fact(path: &Path) -> Result<Option<Fact>, GraphError> {
@@ -157,20 +205,6 @@ impl Drop for CancelTools {
 
 pub(crate) fn runtime_mode() -> String {
     env::var("ANCHOR_RUNNER_AGENT_RUNTIME").unwrap_or_else(|_| "goose".into())
-}
-
-fn file_sha256(path: &Path) -> Result<String, String> {
-    let mut file = fs::File::open(path).map_err(|error| error.to_string())?;
-    let mut digest = Sha256::new();
-    let mut buffer = [0u8; 65536];
-    loop {
-        let count = file.read(&mut buffer).map_err(|error| error.to_string())?;
-        if count == 0 {
-            break;
-        }
-        digest.update(&buffer[..count]);
-    }
-    Ok(format!("{:x}", digest.finalize()))
 }
 
 fn store_fact(path: &Path, fact: &Fact) -> Result<(), GraphError> {
@@ -385,6 +419,7 @@ impl GooseNodePort {
             resolver,
             sandbox,
             recorder,
+            extensions: configuration::enabled_builtins()?,
         }))
     }
 
@@ -406,6 +441,11 @@ impl GooseNodePort {
         {
             return Err(GraphError::CorruptRun(
                 "Goose invocation identity changed".into(),
+            ));
+        }
+        if fact.execution_closure_digest.is_some() || fact.context_checkpoint_digest.is_some() {
+            return Err(GraphError::Unsupported(
+                "retired experiment invocation cannot execute".into(),
             ));
         }
         Ok(match fact.completion {
@@ -438,6 +478,8 @@ impl GooseNodePort {
         &self,
         mut request: NodeExecutionRequest,
     ) -> Result<NodeExecutionOutcome, GraphError> {
+        let _invocation = conversation::invocation_lease(&self.process_root, &request.key)
+            .map_err(GraphError::Unsupported)?;
         match self.completion_fact(&request.key)? {
             CompletionFact::Completed(completion) => {
                 return Ok(NodeExecutionOutcome::Completed(completion));
@@ -502,6 +544,21 @@ impl GooseNodePort {
         let stem = crate::host_fs::invocation_stem(&request.key);
         let fact_path = self.facts.join(format!("{stem}.json"));
         let retained = read_fact(&fact_path)?;
+        // Recovery selects the original advisory snapshot, never today's binding.
+        // Legacy facts predate activation and therefore used the factory text.
+        let input_guidance = match &retained {
+            Some(fact) => fact
+                .input_guidance
+                .clone()
+                .unwrap_or_else(crate::harness_guidance::factory),
+            None => self
+                .resolver
+                .input_guidance(&request)
+                .map_err(GraphError::Unsupported)?,
+        };
+        input_guidance.validate().map_err(GraphError::CorruptRun)?;
+        request.task.push_str("\n\n");
+        request.task.push_str(&input_guidance.content);
         let retained_binding = retained
             .as_ref()
             .and_then(|fact| fact.model_binding.as_deref());
@@ -524,6 +581,10 @@ impl GooseNodePort {
         let resumed = retained.is_some();
         let mut conversation = match conversation_hint.filter(|_| !self.fixture) {
             Some(hint) => {
+                let predecessors = self
+                    .resolver
+                    .conversation_predecessors(&request.key)
+                    .map_err(GraphError::Unsupported)?;
                 match conversation::ConversationScope::open(
                     &self.process_root,
                     &hint.key,
@@ -532,10 +593,7 @@ impl GooseNodePort {
                     &self.binary_sha256,
                     &binding.identity,
                     retained.as_ref(),
-                    &self
-                        .resolver
-                        .conversation_predecessors(&request.key)
-                        .map_err(GraphError::Unsupported)?,
+                    &predecessors,
                 ) {
                     Ok(scope) => Some(scope),
                     // Identity rejection precedes this invocation's model and
@@ -569,7 +627,7 @@ impl GooseNodePort {
         let mut tool_request = request.clone();
         tool_request.cancellation = Arc::new(AtomicBool::new(false));
         let _stop_tools = CancelTools(tool_request.cancellation.clone());
-        let resolved = match resolve_node_tools(
+        let mut resolved = match resolve_node_tools(
             self.resolver.tools(&tool_request),
             &request.cancellation,
             &tool_request.cancellation,
@@ -584,6 +642,7 @@ impl GooseNodePort {
             }
             Err(error) => return Err(error.into_graph_error()),
         };
+        resolved.envelope.bind_input_guidance(&input_guidance);
         // Tools, Plugin identities and persistent summary come from one Host preparation.
         // This includes Session mounts and Library updates since dispatch.
         request.plugins = resolved.plugins;
@@ -672,6 +731,11 @@ impl GooseNodePort {
                 .and_then(|scope| scope.previous_observation.clone()),
             conversation_scope: conversation.as_ref().map(|scope| scope.scope.clone()),
             provider_failure: None,
+            execution_closure_digest: None,
+            frozen_model_digest: None,
+            input_guidance: Some(input_guidance.clone()),
+            context_checkpoint_digest: None,
+            context_request_digest: None,
         });
         if !self.fixture && fact.model_binding.as_deref() != Some(binding.identity.as_str()) {
             bridge.close().await.map_err(GraphError::Unsupported)?;
@@ -698,6 +762,9 @@ impl GooseNodePort {
             "binary_sha256":self.binary_sha256,"model":binding.model,"notifications":[],
             "fixture_transport":if self.fixture {Some("loopback")} else {None},"real_model_calls":null,
             "model_binding":binding.identity,"resume":resumed,"continuation":!resumed && fact.session_id.is_some(),"budget_enforcement":false});
+        evidence["execution_closure_digest"] = json!(fact.execution_closure_digest);
+        evidence["frozen_model_digest"] = json!(fact.frozen_model_digest);
+        evidence["input_guidance"] = input_guidance.identity();
         // Workspace and envelope are ready; no model request has started yet.
         let mut fingerprints = Vec::with_capacity(2);
         fingerprints.extend(
@@ -846,34 +913,14 @@ impl GooseNodePort {
         let Some(recorder) = self.recorder.clone() else {
             return json!({"unavailable": true});
         };
-        let mut configuration = anchor_facts::AgentConfiguration {
-            version: anchor_facts::VERSION,
-            graph_digest: request.key.graph_digest.clone(),
-            node_id: request.key.node_id.clone(),
-            model: binding.model.clone(),
-            model_binding: binding.identity.clone(),
-            runtime_sha256: self.binary_sha256.clone(),
-            instructions_sha256: anchor_facts::text_digest(&format!(
-                "{}\n{}",
-                request.instructions, request.task
-            )),
-            plugin_instructions_sha256: disclosed.plugin_instructions_sha256,
-            plugins: request
-                .plugins
-                .iter()
-                .map(|plugin| anchor_facts::PluginIdentity {
-                    id: plugin.id.clone(),
-                    digest: plugin.digest.clone(),
-                    authorization: plugin.authorization_digest.to_string(),
-                })
-                .collect(),
-            routes: request.routes.clone(),
-            // Filled in off the async runtime below: hashing may still be
-            // finishing on the first invocation.
-            host_sha256: String::new(),
-            tools_sha256: disclosed.tools_sha256,
-            envelope_sha256: disclosed.envelope.digest(),
-        };
+        let mut configuration = agent_configuration(
+            request,
+            binding,
+            &self.binary_sha256,
+            disclosed.plugin_instructions_sha256,
+            disclosed.tools_sha256,
+            disclosed.envelope.digest(),
+        );
         let invocation = anchor_facts::Invocation {
             run_id: request.key.run_id.clone(),
             graph_digest: request.key.graph_digest.clone(),
@@ -886,6 +933,11 @@ impl GooseNodePort {
             crate::fact_recorder::now_ms(),
             outcome,
         );
+        facts.push(facts::request_context(
+            &request.task,
+            &request.input,
+            evidence,
+        ));
         facts.extend(disclosed.fingerprints);
         match tokio::task::spawn_blocking(move || {
             configuration.host_sha256 = crate::fact_recorder::host_sha256();
@@ -933,6 +985,7 @@ impl GooseNodePort {
                 custom_notifications: !self.fixture,
                 form_elicitation: false,
             },
+            Some(&self.extensions),
         )
         .await?;
         evidence["initialize"] = opened.initialize;
@@ -1066,6 +1119,119 @@ impl GooseNodePort {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fact_configuration_is_stable_across_dynamic_requests_and_tracks_static_changes() {
+        use anchor_runtime::graph::{InvocationKey, NodeKind, PluginBinding};
+        use std::collections::BTreeSet;
+        let mut request = NodeExecutionRequest {
+            key: InvocationKey {
+                run_id: "run-0".into(),
+                graph_digest: "graph".into(),
+                node_id: "worker".into(),
+                invocation: 1,
+            },
+            model: None,
+            task: "Input: initial".into(),
+            instructions: "Static role".into(),
+            routes: vec!["done".into()],
+            input: json!({}),
+            input_commits: vec![],
+            plugins: vec![],
+            max_provider_requests: None,
+            wall_time_limit_seconds: None,
+            network: false,
+            kind: NodeKind::Agent,
+            operation: None,
+            writes: vec![],
+            cancellation: Cancellation::default(),
+        };
+        let binding = configuration::ModelBinding {
+            model: "model-a".into(),
+            identity: "binding-a".into(),
+        };
+        let build = |request: &NodeExecutionRequest,
+                     binding: &configuration::ModelBinding,
+                     tools: &str,
+                     envelope: &str| {
+            agent_configuration(
+                request,
+                binding,
+                "runtime",
+                "plugins".into(),
+                tools.into(),
+                envelope.into(),
+            )
+        };
+        let stable = build(&request, &binding, "tools", "envelope");
+        assert_eq!(stable.version, anchor_facts::CONFIGURATION_VERSION);
+        assert_eq!(
+            stable.instructions_sha256,
+            anchor_facts::text_digest("Static role")
+        );
+        let mut configurations = BTreeSet::new();
+        let mut contexts = BTreeSet::new();
+        for index in 0..10 {
+            request.key.run_id = format!("run-{index}");
+            request.task = format!("Input: {{\"item\":{index},\"workspace\":\"/run/{index}\"}}");
+            request.input = json!({"item":index,"workspace":format!("/run/{index}")});
+            configurations.insert(build(&request, &binding, "tools", "envelope").digest());
+            contexts.insert(
+                serde_json::to_string(&facts::request_context(
+                    &request.task,
+                    &request.input,
+                    &json!({}),
+                ))
+                .unwrap(),
+            );
+        }
+        assert_eq!(configurations.len(), 1);
+        assert_eq!(contexts.len(), 10);
+        request.instructions.push_str(" changed");
+        assert_ne!(
+            stable.digest(),
+            build(&request, &binding, "tools", "envelope").digest()
+        );
+        request.instructions = "Static role".into();
+        assert_ne!(
+            stable.digest(),
+            build(&request, &binding, "other-tools", "envelope").digest()
+        );
+        assert_ne!(
+            stable.digest(),
+            build(&request, &binding, "tools", "other-guidance-envelope").digest()
+        );
+        let other_model = configuration::ModelBinding {
+            model: "model-b".into(),
+            identity: "binding-b".into(),
+        };
+        assert_ne!(
+            stable.digest(),
+            build(&request, &other_model, "tools", "envelope").digest()
+        );
+        request.plugins.push(PluginBinding {
+            id: "plugin".into(),
+            digest: "content".into(),
+            resources: vec![],
+            mcp_servers: vec![],
+            authorization_digest: "authorization".try_into().unwrap(),
+        });
+        assert_ne!(
+            stable.digest(),
+            build(&request, &binding, "tools", "envelope").digest()
+        );
+        let plugin = build(&request, &binding, "tools", "envelope");
+        request.plugins[0].resources.push("dynamic-input".into());
+        assert_eq!(
+            plugin.digest(),
+            build(&request, &binding, "tools", "envelope").digest()
+        );
+        request.plugins[0].authorization_digest = "other-authorization".try_into().unwrap();
+        assert_ne!(
+            plugin.digest(),
+            build(&request, &binding, "tools", "envelope").digest()
+        );
+    }
 
     #[tokio::test]
     async fn completed_tool_resolution_errors_are_returned_without_repolling() {

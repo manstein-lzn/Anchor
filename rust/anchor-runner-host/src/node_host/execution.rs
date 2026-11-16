@@ -87,10 +87,15 @@ impl HostNodes {
             request.wall_time_limit_seconds,
         )
         .map_err(GraphError::Unsupported)?;
-        let sandbox = envelope
-            .command_sandbox()
-            .with_readonly_grants(std::slice::from_ref(&route_helper))
-            .map_err(|error| GraphError::Unsupported(error.to_string()))?;
+        let sandbox = envelope.command_sandbox();
+        let frozen_route = sandbox.has_frozen_file(&route_helper.destination);
+        let sandbox = if frozen_route {
+            sandbox
+        } else {
+            sandbox
+                .with_readonly_grants(std::slice::from_ref(&route_helper))
+                .map_err(|error| GraphError::Unsupported(error.to_string()))?
+        };
         let mut sandbox_request = SandboxRequest {
             writable_inputs: Vec::new(),
             workspace: workspace.clone(),
@@ -115,6 +120,11 @@ impl HostNodes {
         // authority: an Op.run reaches them by absolute path, and nothing else
         // grants them.
         op::add_route_helper(&mut sandbox_request, route_helper);
+        if frozen_route {
+            sandbox_request.readonly_inputs.retain(|input| {
+                input.destination != Path::new("/tools/anchor-runtime/anchor-route")
+            });
+        }
         envelope
             .environment
             .apply_to_workspace_command(&mut sandbox_request);
@@ -122,13 +132,7 @@ impl HostNodes {
         let result = match sandbox.run(sandbox_request).await {
             Ok(result) => result,
             Err(SandboxError::InvalidRequest(reason)) => {
-                write_durable(
-                    &self
-                        .facts_root
-                        .join(format!("{}.failed", fact_stem(&request.key))),
-                    reason.as_bytes(),
-                )?;
-                return Ok(NodeExecutionOutcome::Failed { reason });
+                return self.fail(&request.key, reason);
             }
             Err(error) => return Err(GraphError::Unsupported(error.to_string())),
         };
@@ -140,13 +144,7 @@ impl HostNodes {
                 if let Err(reason) =
                     crate::artifacts::validate_selection(&workspace, &selection, &request.writes)
                 {
-                    write_durable(
-                        &self
-                            .facts_root
-                            .join(format!("{}.failed", fact_stem(&request.key))),
-                        reason.as_bytes(),
-                    )?;
-                    return Ok(NodeExecutionOutcome::Failed { reason });
+                    return self.fail(&request.key, reason);
                 }
                 let (submission, route) = read_op_route(&result.stdout);
                 self.complete(&request.key, NodeCompletion {
@@ -165,13 +163,7 @@ impl HostNodes {
                         reason.push_str(output.trim());
                     }
                 }
-                write_durable(
-                    &self
-                        .facts_root
-                        .join(format!("{}.failed", fact_stem(&request.key))),
-                    reason.as_bytes(),
-                )?;
-                Ok(NodeExecutionOutcome::Failed { reason })
+                self.fail(&request.key, reason)
             }
         }
     }
@@ -192,6 +184,17 @@ impl NodeExecutionPort for HostNodes {
             .map_err(GraphError::Unsupported)
     }
     fn invocation_plugin_authority(&self, record: &GraphRunRecord) -> Result<bool, GraphError> {
+        if record
+            .snapshot
+            .nodes
+            .iter()
+            .flat_map(|node| &node.plugins)
+            .any(|reference| reference.revision.is_some())
+        {
+            // Pin-aware preparation verifies the exact source and current
+            // grants; the Runtime's id-only fallback cannot authorize a pin.
+            return Ok(true);
+        }
         crate::assistant_plugins::invocation_authority(
             self.io_resolver.local_inputs.state_root(),
             record,
@@ -204,12 +207,12 @@ impl NodeExecutionPort for HostNodes {
     ) -> Pin<Box<dyn std::future::Future<Output = Result<CompletionFact, GraphError>> + Send + 'a>>
     {
         Box::pin(async move {
-            if let Some(fact) = self.assistant_completion_fact(key)? {
+            if let Some(fact) = self.assistant_completion_fact(key).await? {
                 return Ok(fact);
             }
             let host = load_host_completion_fact(&self.facts_root, key)?;
             if let CompletionFact::Completed(completion) = &host {
-                self.settle_assistant_reply(key, completion)?;
+                self.settle_assistant_reply(key, completion).await?;
             }
             if crate::run_data::legacy_invocation_exists(
                 self.io_resolver.local_inputs.state_root(),

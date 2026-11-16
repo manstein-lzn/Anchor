@@ -2,6 +2,12 @@
 use super::*;
 
 impl NodeHostResolver for HostIoResolver {
+    fn input_guidance(
+        &self,
+        request: &NodeExecutionRequest,
+    ) -> Result<crate::harness_guidance::InputGuidance, String> {
+        self.tool_assembly.input_guidance(request)
+    }
     fn prompt_images(&self, request: &NodeExecutionRequest) -> Result<Vec<NodeImage>, String> {
         let mut images = self.channel_inputs(&request.key)?.images;
         images.extend(
@@ -30,6 +36,25 @@ impl NodeHostResolver for HostIoResolver {
     }
 
     fn resolve_plugins(&self, ids: &[String]) -> Result<Vec<PluginBinding>, String> {
+        self.resolve_selected_plugins(ids, &BTreeMap::new(), None)
+    }
+
+    fn workspace(&self, request: &NodeExecutionRequest) -> Result<PathBuf, String> {
+        self.prepare_node_workspace(&request.key, &request.input_commits)
+    }
+
+    fn tools<'a>(&'a self, request: &'a NodeExecutionRequest) -> ToolResolution<'a> {
+        self.prepare_tools(request)
+    }
+}
+
+impl HostIoResolver {
+    pub(super) fn resolve_selected_plugins(
+        &self,
+        ids: &[String],
+        revisions: &BTreeMap<String, String>,
+        lease: Option<&anchor_library::InstallLease>,
+    ) -> Result<Vec<PluginBinding>, String> {
         let catalog = crate::plugin_library::Catalog::new(self.plugin_library_root()?);
         ids.iter()
             .map(|id| {
@@ -40,20 +65,10 @@ impl NodeHostResolver for HostIoResolver {
                     .map(Ok)
                     .unwrap_or_else(|| {
                         catalog
-                            .resolve(std::slice::from_ref(id))
-                            .map_err(|error| error.to_string())?
-                            .pop()
-                            .ok_or_else(|| format!("Plugin `{id}` is not installed in the Library"))
+                            .binding_for_revision(id, revisions.get(id).map(String::as_str), lease)
+                            .map_err(|error| error.to_string())
                     })
             })
             .collect()
-    }
-
-    fn workspace(&self, request: &NodeExecutionRequest) -> Result<PathBuf, String> {
-        self.prepare_node_workspace(&request.key, &request.input_commits)
-    }
-
-    fn tools<'a>(&'a self, request: &'a NodeExecutionRequest) -> ToolResolution<'a> {
-        self.prepare_tools(request)
     }
 }

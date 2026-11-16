@@ -5,6 +5,9 @@ edition = "2024"
 license = "MIT"
 description = "Rust-native Graph host with Sandbox, immutable files and paired parallelism"
 
+[features]
+live-codex-acceptance = []
+
 [dependencies]
 anchor-channel-transport = { path = "../anchor-channel-transport" }
 anchor-distribution = { path = "../anchor-distribution" }
@@ -40,6 +43,7 @@ url = "=2.5.8"
 tempfile = "3"
 
 [dev-dependencies]
+anchor-codex-bridge = { path = "../anchor-codex-bridge" }
 tokio = { workspace = true, features = ["test-util"] }
 anchor-rsi = { path = "../anchor-rsi" }
 anchor-runtime = { path = "../anchor-runtime", features = ["test-fixtures"] }

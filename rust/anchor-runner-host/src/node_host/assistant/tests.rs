@@ -23,6 +23,8 @@ fn inbound(id: &str) -> ChannelInboundRequest {
         attachments: Default::default(),
         run_id: None,
         replace_running: true,
+        bot_origin: None,
+        platform_message_id: None,
     }
 }
 
@@ -334,6 +336,182 @@ async fn task_input_mounts_only_selected_artifact_files_without_channel_identity
     let selected =
         assistant::attachment_metadata(nodes.io_resolver.state_root(), &saved, &key).unwrap();
     assert!(selected.attachments.is_empty());
+}
+
+#[tokio::test]
+async fn withdrawn_subscription_input_is_suppressed_without_mounting_or_handling_it() {
+    let (_root, nodes, store, session, wait) = fixture();
+    let mut withdrawn = result("withdrawn");
+    withdrawn.content["subscription"] = json!({"id":"removed-subscription"});
+    withdrawn
+        .files
+        .push(anchor_platform_session::ChannelNotificationFile {
+            artifact_id: "unavailable-private-artifact".into(),
+            path: "report.pdf".into(),
+            name: "report.pdf".into(),
+        });
+    store
+        .record_task_result("owner", &session, &withdrawn)
+        .unwrap();
+    store
+        .record_task_result("owner", &session, &result("next"))
+        .unwrap();
+
+    let completion = receive(&nodes, &wait).await;
+    assert_eq!(completion.model_requests, 0);
+    assert_eq!(completion.route.as_deref(), Some("agent"));
+    assert_eq!(completion.output["suppressed"], true);
+    assert!(completion.output.get("task_result").is_none());
+    let turn = completion.output["turn"].as_str().unwrap();
+    assert_eq!(
+        store.get_turn("owner", &session, turn).unwrap().status,
+        TurnStatus::Stopped
+    );
+    let workspace = nodes.artifacts.prepare_workspace(&wait, &[]).unwrap();
+    let projection: Value =
+        serde_json::from_slice(&std::fs::read(workspace.join("input.json")).unwrap()).unwrap();
+    assert_eq!(projection, completion.output);
+    assert!(!projection.to_string().contains("report.pdf"));
+
+    let commit = nodes.artifacts.freeze(&wait, &completion).await.unwrap();
+    let work = InvocationKey {
+        node_id: "agent".into(),
+        ..wait.clone()
+    };
+    let mut work_request = request(&work, vec![commit]);
+    work_request.kind = NodeKind::Agent;
+    work_request.operation = None;
+    assistant::bind_request(nodes.io_resolver.state_root(), &work_request).unwrap();
+    let error = match nodes.io_resolver.prepare_tools(&work_request).await {
+        Err(error) => error,
+        Ok(_) => panic!("withdrawn task prepared tools and private artifacts"),
+    };
+    assert!(
+        matches!(error, crate::node_host::ResolutionError::Host(reason) if reason.contains("authority was withdrawn"))
+    );
+    // This fixture has no Goose node, so a model invocation would fail instead
+    // of reaching the ordinary suppressed work/reply route.
+    assert!(matches!(
+        nodes.execute(work_request).await.unwrap(),
+        NodeExecutionOutcome::Yielded { .. }
+    ));
+    let reply = InvocationKey {
+        node_id: "reply".into(),
+        ..wait.clone()
+    };
+    let input = store
+        .get_assistant_input("owner", &session, &wait.run_id, &wait.durable_key())
+        .unwrap()
+        .unwrap();
+    assistant::bind(
+        nodes.io_resolver.state_root(),
+        &reply,
+        wait.durable_key(),
+        &input,
+        vec![],
+        false,
+        None,
+    )
+    .unwrap();
+    let NodeExecutionOutcome::Completed(suppressed) =
+        nodes.execute(request(&reply, vec![])).await.unwrap()
+    else {
+        panic!("withdrawn task did not return to wait")
+    };
+    assert_eq!(suppressed.route.as_deref(), Some("wait"));
+    assert_eq!(suppressed.output["suppressed"], true);
+    assert!(suppressed.output.get("task_result_handled").is_none());
+    assert!(
+        store
+            .task_result_cancelled("owner", &session, &withdrawn.id)
+            .unwrap()
+    );
+    assert_eq!(
+        store.task_result("owner", &session, &withdrawn.id).unwrap(),
+        Some(withdrawn)
+    );
+    let events = store.events("owner", &session, 0).unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.kind == "task.result.cancelled")
+            .count(),
+        1
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| event.kind == "task.result.handled")
+    );
+    let next = InvocationKey {
+        invocation: 3,
+        ..wait
+    };
+    assert_eq!(
+        receive(&nodes, &next).await.output["task_result"]["id"],
+        "next"
+    );
+}
+
+#[tokio::test]
+async fn completed_subscription_input_preserves_its_historical_completion_after_withdrawal() {
+    let (_root, nodes, store, session, wait) = fixture();
+    let mut handled = result("handled");
+    handled.content["subscription"] = json!({"id":"removed-subscription"});
+    store
+        .record_task_result("owner", &session, &handled)
+        .unwrap();
+    let input = store
+        .claim_assistant_input("owner", &session, &wait.run_id, &wait.durable_key())
+        .unwrap()
+        .unwrap();
+    let work = InvocationKey {
+        node_id: "agent".into(),
+        ..wait.clone()
+    };
+    assistant::bind(
+        nodes.io_resolver.state_root(),
+        &work,
+        wait.durable_key(),
+        &input,
+        vec![],
+        false,
+        None,
+    )
+    .unwrap();
+    crate::test_support::resolve_task_result_silently(
+        &store,
+        "owner",
+        &session,
+        &wait.run_id,
+        &wait.durable_key(),
+    );
+    store
+        .finish_task_result("owner", &session, &wait.run_id, &wait.durable_key())
+        .unwrap();
+    let completion = NodeCompletion {
+        submission: "already handled".into(),
+        route: Some("reply".into()),
+        model_requests: 0,
+        output: json!({"files":[]}),
+    };
+    nodes.complete(&work, completion.clone()).unwrap();
+    assert_eq!(
+        nodes.completion_fact(&work).await.unwrap(),
+        CompletionFact::Completed(completion)
+    );
+    assert!(
+        !store
+            .task_result_cancelled("owner", &session, &handled.id)
+            .unwrap()
+    );
+    assert_eq!(
+        store
+            .get_turn("owner", &session, &input.turn().id)
+            .unwrap()
+            .status,
+        TurnStatus::Completed
+    );
 }
 
 #[tokio::test]

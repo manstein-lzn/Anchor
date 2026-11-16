@@ -17,9 +17,6 @@ impl RunApplication {
         else {
             return BTreeSet::new();
         };
-        if schedules.is_empty() {
-            return BTreeSet::new();
-        }
         let Ok(channels) = self.channel_snapshots() else {
             return BTreeSet::new();
         };
@@ -81,7 +78,7 @@ impl RunApplication {
             .iter()
             .filter(|plan| plan.graph == graph)
             .collect::<Vec<_>>();
-        if plans.is_empty() || plans.iter().any(|plan| !plan.once || plan.enabled) {
+        if plans.iter().any(|plan| !plan.once || plan.enabled) {
             return Ok(false);
         }
         let (path, bundle) = self.load_graph(graph).map_err(invalid)?;
@@ -121,9 +118,9 @@ impl RunApplication {
             }
             ids.insert(id);
         }
-        // A disabled plan may have been paused before admission. Its exact
-        // occurrence must have a real successful Run, not just an old deadline.
-        if !plans.iter().all(|plan| accepted.contains(&plan.request_id)) {
+        // Direct tasks need no plan, but an unused draft is not completed.
+        // Each retained once plan still needs its exact successful admission.
+        if ids.is_empty() || !plans.iter().all(|plan| accepted.contains(&plan.request_id)) {
             return Ok(false);
         }
         self.check_task_runs_deletion(&ids)?;

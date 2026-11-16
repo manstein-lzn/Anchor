@@ -1,7 +1,4 @@
-#[path = "../../src/host_fs.rs"]
-#[allow(unused_imports)]
-mod host_fs;
-
+use anchor_runtime::artifact::store::invocation_stem;
 use axum::{
     Json, Router,
     body::Body,
@@ -59,6 +56,7 @@ pub struct Step {
     feedback: Option<&'static str>,
     summary: bool,
     request_contains: Option<String>,
+    request_selectors: Vec<String>,
     usage: (u32, u32),
     preface: Option<String>,
     receipt_back: usize,
@@ -71,6 +69,7 @@ impl Step {
             feedback: None,
             summary: false,
             request_contains: None,
+            request_selectors: Vec::new(),
             usage: (11, 7),
             preface: None,
             receipt_back: 0,
@@ -104,6 +103,7 @@ impl Step {
             feedback: None,
             summary: false,
             request_contains: None,
+            request_selectors: Vec::new(),
             usage: (11, 7),
             preface: None,
             receipt_back: 0,
@@ -116,6 +116,7 @@ impl Step {
             feedback: None,
             summary: false,
             request_contains: None,
+            request_selectors: Vec::new(),
             usage: (11, 7),
             preface: None,
             receipt_back: 0,
@@ -128,6 +129,7 @@ impl Step {
             feedback: None,
             summary: true,
             request_contains: None,
+            request_selectors: Vec::new(),
             usage: (11, 7),
             preface: None,
             receipt_back: 0,
@@ -140,6 +142,7 @@ impl Step {
             feedback: None,
             summary: false,
             request_contains: None,
+            request_selectors: Vec::new(),
             usage: (11, 7),
             preface: None,
             receipt_back: 0,
@@ -169,6 +172,12 @@ impl Step {
 
     pub fn expect_request_contains(mut self, text: impl Into<String>) -> Self {
         self.request_contains = Some(text.into());
+        self
+    }
+
+    /// Keep each parallel invocation's script ordered without fixing arrival order.
+    pub fn for_request_containing(mut self, text: impl Into<String>) -> Self {
+        self.request_selectors.push(text.into());
         self
     }
 
@@ -438,6 +447,48 @@ struct ProviderState {
     failures: Vec<String>,
     effects: Vec<Value>,
     root: PathBuf,
+    trace_save_interval: usize,
+    pending_trace_updates: usize,
+}
+
+#[cfg(test)]
+#[test]
+fn parallel_scripts_preserve_per_request_order_and_leave_unmatched_steps() {
+    let mut state = ProviderState {
+        script: vec![
+            Step::text("a-specific")
+                .for_request_containing("node-a")
+                .for_request_containing("candidate-advice"),
+            Step::text("a-first").for_request_containing("node-a"),
+            Step::text("a-next").for_request_containing("node-a"),
+            Step::text("b-first").for_request_containing("node-b"),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    assert!(state.take_step(&json!({"node":"unknown"})).is_none());
+    for (node, expected) in [
+        ("node-b", "b-first"),
+        ("node-a", "a-first"),
+        ("node-a", "a-next"),
+    ] {
+        assert!(matches!(
+            state.take_step(&json!({"node":node})).unwrap().reply,
+            Reply::Text(actual) if actual == expected
+        ));
+    }
+    assert!(matches!(
+        state.take_step(&json!({"node":"node-a","advice":"candidate-advice"})).unwrap().reply,
+        Reply::Text(actual) if actual == "a-specific"
+    ));
+    assert!(state.script.is_empty());
+    state.script = vec![Step::text("fifo-first"), Step::text("fifo-next")].into();
+    for expected in ["fifo-first", "fifo-next"] {
+        assert!(matches!(
+            state.take_step(&json!({})).unwrap().reply,
+            Reply::Text(actual) if actual == expected
+        ));
+    }
 }
 
 #[cfg(test)]
@@ -490,8 +541,63 @@ async fn preface_fixture_keeps_text_separate_from_native_tool_arguments() {
     assert_eq!(provider.requests(), vec![request]);
 }
 
+#[cfg(test)]
+#[tokio::test]
+async fn batched_trace_preserves_requests_and_flushes_on_failure_assertion_and_drop() {
+    let provider = Provider::new("batched-trace-selfcheck", vec![Step::text("done")])
+        .with_trace_save_interval(128);
+    let path = provider.root.join("provider.json");
+    let trace = || -> Value { serde_json::from_slice(&fs::read(&path).unwrap()).unwrap() };
+    let request =
+        json!({"model":MODEL,"stream":true,"messages":[{"role":"user","content":"task"}]});
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let response = client
+        .post(format!("{}/v1/chat/completions", provider.url))
+        .json(&request)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(trace()["requests"], json!([]));
+    provider.assert_consumed();
+    assert_eq!(trace()["requests"], json!([request]));
+    let response = client
+        .post(format!("{}/v1/chat/completions", provider.url))
+        .json(&request)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(trace()["requests"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        trace()["failures"],
+        json!(["unscripted completion request"])
+    );
+    provider.append(vec![Step::text("retained")]);
+    assert_eq!(trace()["remaining_replies"], 0);
+    drop(provider);
+    assert_eq!(trace()["remaining_replies"], 1);
+}
+
 impl ProviderState {
-    fn save(&self) {
+    fn take_step(&mut self, request: &Value) -> Option<Step> {
+        let request = request.to_string();
+        let index = self.script.iter().position(|step| {
+            step.request_selectors
+                .iter()
+                .all(|selector| request.contains(selector))
+        })?;
+        self.script.remove(index)
+    }
+
+    fn save(&mut self) {
+        self.pending_trace_updates += 1;
+        if self.pending_trace_updates >= self.trace_save_interval.max(1) {
+            self.save_now();
+        }
+    }
+
+    fn save_now(&mut self) {
         fs::write(
             self.root.join("provider.json"),
             serde_json::to_vec_pretty(&json!({
@@ -507,11 +613,12 @@ impl ProviderState {
             .unwrap(),
         )
         .unwrap();
+        self.pending_trace_updates = 0;
     }
 
     fn fail(&mut self, message: String) -> Response {
         self.failures.push(message.clone());
-        self.save();
+        self.save_now();
         (
             StatusCode::BAD_REQUEST,
             Json(json!({"error":{"message":message,"type":"fixture_failure"}})),
@@ -544,7 +651,7 @@ async fn completion(
             let model = state.model.clone();
             return state.fail(format!("expected {model} with stream=true: {request}"));
         }
-        let Some(step) = state.script.pop_front() else {
+        let Some(step) = state.take_step(&request) else {
             return state.fail("unscripted completion request".into());
         };
         if step.summary != is_summary_request(&request) {
@@ -823,6 +930,14 @@ impl Provider {
         self.state.lock().unwrap().requests.clone()
     }
 
+    /// Large native experiments keep the same transcript but avoid rewriting
+    /// its entire growing history on every request. Failure and shutdown flush.
+    pub fn with_trace_save_interval(self, interval: usize) -> Self {
+        assert!(interval > 0);
+        self.state.lock().unwrap().trace_save_interval = interval;
+        self
+    }
+
     pub fn append(&self, steps: Vec<Step>) {
         let mut state = self.state.lock().unwrap();
         state.script.extend(steps);
@@ -840,7 +955,8 @@ impl Provider {
     }
 
     pub fn assert_consumed(&self) {
-        let state = self.state.lock().unwrap();
+        let mut state = self.state.lock().unwrap();
+        state.save_now();
         assert!(
             state.failures.is_empty(),
             "{:?}; evidence {}",
@@ -864,6 +980,10 @@ impl Drop for Provider {
         if let Some(task) = self.task.take() {
             task.join().unwrap();
         }
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .save_now();
     }
 }
 
@@ -1316,7 +1436,7 @@ impl Host {
             node_id: node.into(),
             invocation,
         };
-        let stem = host_fs::invocation_stem(&key);
+        let stem = invocation_stem(&key);
         let facts = self.base.root.path().join(if self.native {
             "state/goose-acp"
         } else {

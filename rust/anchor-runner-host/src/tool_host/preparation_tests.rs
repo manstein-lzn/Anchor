@@ -8,6 +8,123 @@ use std::{fs, os::unix::fs::PermissionsExt, sync::atomic::AtomicBool, time::Dura
 
 const PLUGIN: &str = "changing";
 
+#[tokio::test]
+async fn live_default_preparation_preserves_canonical_library_and_plugin_symlink_reads() {
+    let root = tempfile::tempdir().unwrap();
+    let library_root = root.path().join("real-library");
+    let alias = root.path().join("library-alias");
+    let source = root.path().join("external-source");
+    fs::create_dir_all(library_root.join("plugins")).unwrap();
+    fs::create_dir_all(source.join("skills/probe")).unwrap();
+    fs::create_dir_all(source.join("data")).unwrap();
+    fs::write(
+        source.join("plugin.json"),
+        r#"{"name":"Linked Skill","skills":"skills/","mutable":["data/"]}"#,
+    )
+    .unwrap();
+    fs::write(source.join("skills/probe/SKILL.md"), "canonical skill").unwrap();
+    fs::write(source.join("data/live.txt"), "live business bytes").unwrap();
+    std::os::unix::fs::symlink(&library_root, &alias).unwrap();
+    std::os::unix::fs::symlink(&source, library_root.join("plugins").join(PLUGIN)).unwrap();
+    let definition = Catalog::new(&alias).definition(PLUGIN).unwrap();
+    let prepared = prepare(&alias, definition.binding()).await;
+    assert_eq!(
+        prepared.mounts,
+        [ReadOnlyInput::new(&source, "/plugins/changing")]
+    );
+    let mut request = SandboxRequest::new(root.path().join("workspace"), vec!["sh"]);
+    prepared.views[PLUGIN].apply(&mut request);
+    assert_eq!(request.writable_inputs[0].source, source.join("data"));
+    assert_eq!(
+        prepared
+            .disclosure
+            .read(&json!({"plugin":PLUGIN,"section":"skill","path":"skills/probe/SKILL.md"}))
+            .unwrap()["text"],
+        "canonical skill"
+    );
+    assert_eq!(
+        fs::read_to_string(source.join("data/live.txt")).unwrap(),
+        "live business bytes"
+    );
+    // The live-read capability does not relax any Library write boundary.
+    let aliased = anchor_library::Library::new(&alias);
+    assert!(matches!(
+        aliased.try_install_lease(),
+        Err(anchor_library::InstallError::UnsafePath)
+    ));
+    drop(prepared);
+    let managed = anchor_library::Library::new(&library_root);
+    let lease = managed.install_lease().unwrap();
+    assert!(matches!(
+        managed.retain_revision_locked(PLUGIN, &source, &definition.digest, None, &lease),
+        Err(anchor_library::RevisionError::Install(
+            anchor_library::InstallError::UnsafePath
+        ))
+    ));
+}
+
+#[tokio::test]
+async fn a_pending_default_publication_is_a_known_outage_but_exact_skill_sources_still_prepare() {
+    let root = tempfile::tempdir().unwrap();
+    let library_root = root.path().join("library");
+    let source = root.path().join("source");
+    fs::create_dir_all(source.join("skills/probe")).unwrap();
+    fs::write(
+        source.join("plugin.json"),
+        r#"{"name":"Skill","skills":"skills/"}"#,
+    )
+    .unwrap();
+    fs::write(source.join("skills/probe/SKILL.md"), "retained skill").unwrap();
+    let library = anchor_library::Library::new(&library_root);
+    let installed = library.install_directory(PLUGIN, &source, false).unwrap();
+    let binding = Catalog::new(&library_root)
+        .definition(PLUGIN)
+        .unwrap()
+        .binding();
+    let lease = library.install_lease().unwrap();
+    library
+        .retain_revision_locked(PLUGIN, &source, &installed.digest, None, &lease)
+        .unwrap();
+    library
+        .set_publication_fence_locked(
+            PLUGIN,
+            &anchor_library::PluginPublicationFence {
+                execute_digest: "a".repeat(64),
+                intent_digest: "b".repeat(64),
+            },
+            &lease,
+        )
+        .unwrap();
+    drop(lease);
+    let default = crate::plugin_library::tools::prepare_plugins_async(
+        vec![binding.clone()],
+        Some(library_root.clone()),
+        PluginToolHost::new(Vec::<String>::new()),
+        Arc::new(AtomicBool::new(false)),
+    )
+    .await;
+    assert!(
+        matches!(default, Err(crate::plugin_view::Unusable::KnownFailure(ref reason)) if reason == "plugin_default_publication_pending")
+    );
+    let pinned = crate::plugin_library::tools::prepare_plugins_for_owner_with_revisions_async(
+        vec![binding],
+        Some(library_root),
+        PluginToolHost::new(Vec::<String>::new()),
+        Arc::new(AtomicBool::new(false)),
+        None,
+        BTreeMap::from([(PLUGIN.to_owned(), installed.digest)]),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        pinned
+            .disclosure
+            .read(&json!({"plugin":PLUGIN,"section":"skill","path":"skills/probe/SKILL.md"}))
+            .unwrap()["text"],
+        "retained skill"
+    );
+}
+
 fn generation(directory: &Path, revision: &str, dependency: &str, remote: Option<&str>) {
     fs::create_dir_all(directory.join("bin")).unwrap();
     fs::create_dir_all(directory.join("skills").join(revision)).unwrap();
@@ -386,4 +503,111 @@ async fn preparation_requires_real_skill_authority_and_deployment_enabled_exact_
     .unwrap();
     assert_eq!(prepared.bindings, [fake_binding()]);
     assert!(prepared.mounts.is_empty());
+}
+
+#[tokio::test]
+async fn exact_revision_prepares_old_code_mcp_and_solve_with_current_mutable_authority() {
+    let root = tempfile::tempdir().unwrap();
+    let library_root = root.path().join("library");
+    let first_source = root.path().join("first");
+    let next_source = root.path().join("next");
+    generation(&first_source, "first", "3.6", None);
+    generation(&next_source, "next", "3.7", None);
+    for source in [&first_source, &next_source] {
+        let path = source.join("plugin.json");
+        let mut manifest: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        manifest["mutable"] = json!(["data/"]);
+        fs::write(path, manifest.to_string()).unwrap();
+    }
+    let library = anchor_library::Library::new(&library_root);
+    library
+        .install_directory(PLUGIN, &first_source, false)
+        .unwrap();
+    let data = library_root.join("plugins/changing/data");
+    fs::write(data.join("counter"), "42").unwrap();
+    let first = Catalog::new(&library_root).definition(PLUGIN).unwrap();
+    let declaration_view = seed_view(&library_root, &first, "3.6");
+    // A real, hashed fixture executable supplies identity only. This test does
+    // not claim Python package execution; the provisioning tests cover that.
+    let interpreter = fs::canonicalize("/bin/sh").unwrap();
+    let lock = format!("idna==3.6 --hash=sha256:{}\n", "a".repeat(64));
+    let identity = anchor_library::DependencyViewIdentity {
+        declaration_digest: first.dependencies.declaration_digest(),
+        lock_digest: format!("{:x}", Sha256::digest(lock.as_bytes())),
+        lock,
+        interpreter: "fixture".into(),
+        interpreter_prefix: interpreter.parent().unwrap().parent().unwrap().to_owned(),
+        interpreter_digest: format!("{:x}", Sha256::digest(fs::read(&interpreter).unwrap())),
+        interpreter_path: interpreter,
+    };
+    let actual_view = identity.view_path(&library_root, PLUGIN);
+    fs::rename(&declaration_view, &actual_view).unwrap();
+    let lease = library.install_lease().unwrap();
+    let revision = library
+        .retain_revision_locked(PLUGIN, &first_source, &first.digest, Some(identity), &lease)
+        .unwrap();
+    library
+        .install_directory_locked(PLUGIN, &next_source, true, &lease)
+        .unwrap();
+    let next = Catalog::new(&library_root).definition(PLUGIN).unwrap();
+    seed_view(&library_root, &next, "3.7");
+    drop(lease);
+    let exact = library.resolve_source(PLUGIN, Some(&first.digest)).unwrap();
+    let exact_definition = exact.definition().clone();
+    drop(exact);
+    let prepared = crate::plugin_library::tools::prepare_plugins_for_owner_with_revisions_async(
+        vec![first.binding()],
+        Some(library_root.clone()),
+        PluginToolHost::new(Vec::<String>::new()),
+        Arc::new(AtomicBool::new(false)),
+        None,
+        BTreeMap::from([(PLUGIN.to_owned(), first.digest.clone())]),
+    )
+    .await
+    .unwrap();
+    assert_generation(&prepared, &exact_definition, "first");
+    assert_eq!(prepared.views[PLUGIN].view(), Some(actual_view.as_path()));
+    assert_eq!(
+        prepared
+            .disclosure
+            .read(&json!({
+                "plugin":PLUGIN,"section":"skill","path":"skills/first/SKILL.md"
+            }))
+            .unwrap()["text"],
+        "first"
+    );
+    let mut request = SandboxRequest::new(root.path().join("workspace"), vec!["sh"]);
+    prepared.views[PLUGIN].apply(&mut request);
+    assert_eq!(request.writable_inputs[0].source, data);
+    assert_eq!(
+        request.writable_inputs[0].destination,
+        Path::new("/plugins/changing/data")
+    );
+    assert_eq!(fs::read_to_string(data.join("counter")).unwrap(), "42");
+    assert_eq!(
+        fs::read_dir(exact_definition.directory.join("data"))
+            .unwrap()
+            .count(),
+        0
+    );
+    assert!(
+        actual_view.is_dir(),
+        "real default installation must retain the exact solve"
+    );
+    let current = prepare(&library_root, next.binding()).await;
+    assert_generation(&current, &next, "next");
+    let lease = library
+        .try_install_lease()
+        .expect("pins must not hold the global catalog lease");
+    assert!(matches!(
+        library.release_revision_locked(&revision, &BTreeSet::new(), &lease),
+        Err(anchor_library::RevisionError::InUse)
+    ));
+    drop(current);
+    drop(prepared);
+    assert!(
+        library
+            .release_revision_locked(&revision, &BTreeSet::new(), &lease)
+            .unwrap()
+    );
 }

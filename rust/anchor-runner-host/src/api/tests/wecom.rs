@@ -228,6 +228,8 @@ async fn settlement_is_pinned_to_the_admitted_message_and_idempotent() {
                 attachments: Default::default(),
                 run_id: None,
                 replace_running: true,
+                bot_origin: None,
+                platform_message_id: None,
             },
         )
         .unwrap();
@@ -492,6 +494,8 @@ async fn an_admitted_message_without_a_run_is_not_finished_lost_or_duplicated() 
         attachments: Default::default(),
         run_id: None,
         replace_running: true,
+        bot_origin: None,
+        platform_message_id: None,
     };
 
     let sessions = SessionStore::open(state.data_root.join("platform/sessions.sqlite")).unwrap();
@@ -585,7 +589,11 @@ fn seed_running_assistant_round_for_event(
                     event["event_id"].as_str().unwrap(),
                 ),
                 identity: ChannelIdentity {
-                    conversation_kind: Default::default(),
+                    conversation_kind: if event["metadata"]["chat_type"] == "group" {
+                        anchor_platform_session::ChannelConversationKind::Group
+                    } else {
+                        anchor_platform_session::ChannelConversationKind::Single
+                    },
                     source: event["source"].as_str().unwrap().into(),
                     account: Some("corp-a".into()),
                     conversation_id: event["conversation_id"].as_str().unwrap().into(),
@@ -600,6 +608,8 @@ fn seed_running_assistant_round_for_event(
                 },
                 run_id: None,
                 replace_running: true,
+                bot_origin: None,
+                platform_message_id: None,
             },
         )
         .unwrap();

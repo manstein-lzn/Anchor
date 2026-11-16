@@ -16,7 +16,7 @@ mod tests;
 const INLINE_SUBMISSION_BYTES: usize = 32 * 1024;
 const INLINE_SUBMISSIONS_BUDGET: usize = 96 * 1024;
 
-fn result_id(run: &str) -> String {
+pub(super) fn result_id(run: &str) -> String {
     format!("task-{:x}", Sha256::digest(run.as_bytes()))
 }
 
@@ -115,6 +115,13 @@ impl RunApplication {
         &self,
         matches: &dyn Fn(&TaskOrigin) -> Result<bool, ApplicationError>,
     ) -> Result<(), ApplicationError> {
+        for subscription in self.subscriptions()? {
+            if subscription.active && matches(&subscription.origin)? {
+                return Err(ApplicationError::Conflict(
+                    "unsubscribe before deleting a subscription Session or source".into(),
+                ));
+            }
+        }
         self.check_task_reference_deletion(&|_, origin| matches(origin))?;
         match self.schedules.as_deref() {
             Some(port) => port.check_task_origin_deletion(matches),
@@ -128,6 +135,28 @@ impl RunApplication {
     ) -> Result<(), ApplicationError> {
         if runs.is_empty() {
             return Ok(());
+        }
+        for id in metadata::ids(&self.data_root)? {
+            if let Some(metadata) = self.metadata(&id)?
+                && metadata.schedule_publication.is_some()
+                && self.subscription_result_pending(&metadata)?
+            {
+                let mut pending = vec![id];
+                let mut seen = BTreeSet::new();
+                while let Some(run) = pending.pop() {
+                    if !seen.insert(run.clone()) {
+                        continue;
+                    }
+                    if runs.contains(&run) {
+                        return Err(ApplicationError::Conflict(
+                            "a schedule subscription still retains this Run or its child".into(),
+                        ));
+                    }
+                    if let Some(view) = self.read_run(&run)? {
+                        pending.extend(view.child_run_ids().map(str::to_owned));
+                    }
+                }
+            }
         }
         self.check_task_reference_deletion(&|metadata, _| Ok(runs.contains(&metadata.run_id)))
     }
@@ -222,9 +251,22 @@ impl RunApplication {
         &self,
         workspace_root: &Path,
     ) -> Result<usize, ApplicationError> {
+        let mut failure = {
+            // A publisher's temporary Graph files do not revoke recipient grants.
+            let _catalog = self.graph_catalog_mutation_guard().await;
+            self.cancel_ineligible_subscription_results().err()
+        };
         let mut delivered = 0;
-        let mut failure = None;
         for run in metadata::ids(&self.data_root)? {
+            match self
+                .deliver_subscription_results(&run, workspace_root)
+                .await
+            {
+                Ok(count) => delivered += count,
+                Err(error) => {
+                    failure.get_or_insert(error);
+                }
+            }
             match self.deliver_task_result(&run, workspace_root).await {
                 Ok(true) => delivered += 1,
                 Ok(false) => {}
@@ -286,7 +328,10 @@ impl RunApplication {
         {
             return Ok(false);
         }
-        let result = match self.task_completion(&metadata, &view, workspace_root).await {
+        let result = match self
+            .task_completion(&metadata, &view, workspace_root, false)
+            .await
+        {
             Ok(result) => result,
             Err(error) => {
                 self.record_run_blocked(&metadata, &view, "result.blocked", &format!("{error:?}"))?;
@@ -301,13 +346,13 @@ impl RunApplication {
         Ok(true)
     }
 
-    async fn task_completion(
+    pub(in crate::application) async fn task_completion(
         &self,
         metadata: &RunMetadata,
         view: &run_access::RunView<'_>,
         workspace_root: &Path,
+        shared: bool,
     ) -> Result<TaskResult, ApplicationError> {
-        let origin = metadata.task.as_ref().ok_or(ApplicationError::Missing)?;
         let projection = self.project_run(view.clone(), Some(metadata)).await?;
         let outcome = projection.outcome.ok_or_else(|| {
             ApplicationError::Conflict("only a terminal task has a completion result".into())
@@ -346,6 +391,9 @@ impl RunApplication {
             .values()
             .filter_map(|results| results.last())
         {
+            if shared && (outcome != "done" || !output_nodes.contains(result.node_id.as_str())) {
+                continue;
+            }
             // Intermediate research, previews and checkpoints remain Run facts,
             // not the assistant's delivery set. Failed tasks have no final files.
             let selected = if outcome == "done" && output_nodes.contains(result.node_id.as_str()) {
@@ -390,6 +438,11 @@ impl RunApplication {
                     "sha256":format!("{:x}", Sha256::digest(&encoded)),
                     "read_tool":"graph_tasks_status"})
                 };
+            let submission = if shared && submission.get("omitted") == Some(&json!(true)) {
+                json!({"omitted":true,"bytes":encoded.len(),"sha256":format!("{:x}", Sha256::digest(&encoded))})
+            } else {
+                submission
+            };
             nodes.push(
                 json!({"node":result.node_id,"invocation":result.key.invocation,
                 "artifact":result.commit,"submission":submission}),
@@ -400,9 +453,9 @@ impl RunApplication {
             source_run: Some(metadata.run_id.clone()),
             outcome: outcome.into(),
             content: json!({"event":"run.completed","graph":metadata.graph,"graph_digest":metadata.graph_digest,
-                "run":metadata.run_id,"request":{"graph":origin.graph,"source":origin.source},
+                "run":metadata.run_id,"request":if shared { serde_json::Value::Null } else { metadata.task.as_ref().map(|origin|json!({"graph":origin.graph,"source":origin.source})).unwrap_or_default() },
                 "output_nodes":output_nodes,
-                "outcome":outcome,"reason":projection.reason,"nodes":nodes}),
+                "outcome":outcome,"reason":if shared { None } else { projection.reason },"nodes":nodes}),
             files,
         })
     }
@@ -411,6 +464,9 @@ impl RunApplication {
         &self,
         metadata: &RunMetadata,
     ) -> Result<bool, ApplicationError> {
+        if self.subscription_result_pending(metadata)? {
+            return Ok(true);
+        }
         let Some(origin) = metadata.task.as_ref() else {
             return Ok(false);
         };

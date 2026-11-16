@@ -229,8 +229,27 @@ impl RunApplication {
         let runs = self.kernel_runs(true)?.expect("Kernel store initialized");
         let _facts = runs.file_facts.lock().unwrap();
         let artifacts = self.delivery_store(workspace_root);
-        let protected = self.protected_deliveries(&runs, &artifacts)?;
+        let mut protected = self.protected_deliveries(&runs, &artifacts)?;
         let inventory = artifacts.inventory().map_err(storage)?;
+        // Remove these holds after the installed automation history is explicitly archived.
+        let retired_runs = self
+            .run_views()?
+            .into_iter()
+            .filter_map(|(id, _)| match self.metadata(&id) {
+                Ok(Some(metadata)) if metadata.is_retired_automation() => Some(Ok(id)),
+                Ok(_) => None,
+                Err(error) => Some(Err(error)),
+            })
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        protected.extend(
+            inventory
+                .iter()
+                .filter(|entry| {
+                    entry.commit.node_id.starts_with("dreaming-")
+                        || retired_runs.contains(&entry.run_id)
+                })
+                .map(|entry| entry.commit.id.clone()),
+        );
         let candidates = inventory
             .iter()
             .filter(|entry| {

@@ -139,6 +139,19 @@ struct ScheduleDeleteArg {
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct SubscribeArg {
+    schedule: String,
+    instruction: String,
+    #[serde(default)]
+    not_before: Option<String>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UnsubscribeArg {
+    id: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CandidateArg {
     directory: String,
     #[serde(default)]
@@ -160,6 +173,13 @@ fn args<T: for<'de> Deserialize<'de>>(value: Value) -> Result<T, ToolError> {
     serde_json::from_value(value)
         .map_err(|error| rejected(format!("invalid graph-tasks arguments: {error}")))
 }
+fn no_args(value: Value) -> Result<(), ToolError> {
+    if value == json!({}) {
+        Ok(())
+    } else {
+        Err(rejected("this tool accepts no parameters"))
+    }
+}
 
 impl GraphTaskTools {
     async fn invoke(&self, name: &str, arguments: Value) -> Result<Value, ToolError> {
@@ -169,10 +189,7 @@ impl GraphTaskTools {
             .map_err(failure)?;
         match name {
             "graph_tasks_list" => {
-                let _: std::collections::BTreeMap<String, Value> = args(arguments.clone())?;
-                if arguments != json!({}) {
-                    return Err(rejected("this tool accepts no parameters"));
-                }
+                no_args(arguments)?;
                 self.application
                     .list_task_graphs(&origin)
                     .await
@@ -241,11 +258,40 @@ impl GraphTaskTools {
                     .map_err(failure)
             }
             "graph_tasks_schedule_list" => {
-                if arguments != json!({}) {
-                    return Err(rejected("this tool accepts no parameters"));
-                }
+                no_args(arguments)?;
                 self.application
                     .list_task_schedules(&origin)
+                    .map_err(failure)
+            }
+            "graph_tasks_schedule_discover" => {
+                no_args(arguments)?;
+                self.application
+                    .discover_task_schedules(&origin)
+                    .map_err(failure)
+            }
+            "graph_tasks_subscriptions" => {
+                no_args(arguments)?;
+                self.application
+                    .list_task_subscriptions(&origin)
+                    .map_err(failure)
+            }
+            "graph_tasks_subscribe" => {
+                let arg: SubscribeArg = args(arguments)?;
+                self.application
+                    .subscribe_task_schedule(
+                        &origin,
+                        &arg.schedule,
+                        &arg.instruction,
+                        arg.not_before.as_deref(),
+                    )
+                    .await
+                    .map_err(failure)
+            }
+            "graph_tasks_unsubscribe" => {
+                let arg: UnsubscribeArg = args(arguments)?;
+                self.application
+                    .unsubscribe_task_schedule(&origin, &arg.id)
+                    .await
                     .map_err(failure)
             }
             "graph_tasks_schedule_create" => {
@@ -367,6 +413,8 @@ impl ToolPort for GraphTaskTools {
                     | "graph_tasks_validate"
                     | "graph_tasks_status"
                     | "graph_tasks_schedule_list"
+                    | "graph_tasks_schedule_discover"
+                    | "graph_tasks_subscriptions"
             )
         } else {
             self.inner.is_read_only(name)
@@ -464,6 +512,30 @@ fn definitions() -> Vec<ToolDefinition> {
             vec![],
         ),
         (
+            "graph_tasks_schedule_discover",
+            "Discover explicitly shared schedules authorized for this node to subscribe to. Does not grant execution, schedule management, producer inputs, or internal Run access.",
+            json!({}),
+            vec![],
+        ),
+        (
+            "graph_tasks_subscriptions",
+            "List this scope's subscriptions and bounded final-result status. Subscription access does not authorize graph_tasks_status on the producer's Runs.",
+            json!({}),
+            vec![],
+        ),
+        (
+            "graph_tasks_subscribe",
+            "Subscribe this conversation to future occurrences of an authorized shared schedule. Creates no Graph, Run, or production schedule; no historical replay. The Host owns the recipient. not_before delays result delivery, not production.",
+            json!({"schedule":{"type":"string","description":"Exact schedule ID returned by graph_tasks_schedule_discover, not a Graph or Run ID."},"instruction":{"type":"string","minLength":1,"description":"User-authorized handling and delivery instructions for future results in this conversation."},"not_before":{"type":"string","pattern":"^([01][0-9]|2[0-3]):[0-5][0-9]$","description":"Optional Host-local HH:mm delivery floor, not a promise of completion at that time."}}),
+            vec!["schedule", "instruction"],
+        ),
+        (
+            "graph_tasks_unsubscribe",
+            "Cancel this scope's subscription by its returned ID. Does not cancel or pause the producer schedule or any Run; does not retract confirmed deliveries.",
+            json!({"id":{"type":"string","description":"Exact subscription ID returned by graph_tasks_subscribe or graph_tasks_subscriptions."}}),
+            vec!["id"],
+        ),
+        (
             "graph_tasks_schedule_create",
             "Persist a scoped schedule. Pass rule OR rules (multiple rules must be once); remaining limits a recurring rule. Busy occurrences remain pending. Returned group cancels a finite set of times together.",
             json!({"graph":graph,"input":input,"rule":rule,"rules":{"type":"array","minItems":1,"items":rule},"remaining":count}),
@@ -511,12 +583,45 @@ mod tests {
             .map(|definition| definition.name.clone())
             .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(names.len(), definitions.len());
-        assert_eq!(names.len(), 14);
+        assert_eq!(names.len(), 18);
         for definition in definitions {
             let schema = serde_json::to_value(&definition).unwrap();
             let text = schema.to_string();
             assert!(!text.contains("request_id") && !text.contains("oauth_owner"));
         }
         assert!(!names.iter().any(|name| name.contains("install")));
+    }
+
+    #[test]
+    fn subscription_arguments_do_not_accept_caller_identity_or_producer_controls() {
+        let definition = definitions()
+            .into_iter()
+            .find(|definition| definition.name == "graph_tasks_subscribe")
+            .unwrap();
+        assert_eq!(definition.parameters["additionalProperties"], false);
+        assert_eq!(
+            definition.parameters["required"],
+            json!(["schedule", "instruction"])
+        );
+        let request = json!({
+            "schedule": "shared-schedule",
+            "instruction": "Send the final report here",
+            "not_before": "09:05"
+        });
+        let accepted = args::<SubscribeArg>(request.clone()).unwrap();
+        assert_eq!(accepted.schedule, "shared-schedule");
+        assert_eq!(accepted.not_before.as_deref(), Some("09:05"));
+        for field in ["owner", "session", "recipient", "graph", "input", "rule"] {
+            let mut supplied = request.clone();
+            supplied[field] = json!("other");
+            assert!(args::<SubscribeArg>(supplied).is_err(), "{field}");
+        }
+        assert!(args::<SubscribeArg>(json!({"schedule":"shared-schedule"})).is_err());
+        assert!(no_args(json!({})).is_ok());
+        assert!(no_args(json!({"session":"other"})).is_err());
+        assert!(no_args(Value::Null).is_err());
+        assert!(no_args(json!([])).is_err());
+        assert!(args::<UnsubscribeArg>(json!({"id":"subscription"})).is_ok());
+        assert!(args::<UnsubscribeArg>(json!({"id":"subscription","schedule":"other"})).is_err());
     }
 }

@@ -112,7 +112,7 @@ pub(super) async fn completion(
         if let Err(message) = retained_reasoning(&request, &state.exchanges) {
             return state.fail(message);
         }
-        let Some(step) = state.script.pop_front() else {
+        let Some(step) = state.take_step(&request) else {
             return state.fail("unscripted Responses request".into());
         };
         if step.summary || step.preface.is_some() {

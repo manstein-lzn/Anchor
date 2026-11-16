@@ -817,6 +817,13 @@ async fn partial_fanout_recovers_after_restart_and_sessions_handle_one_final_art
             .unwrap(),
         Some(AssistantInput::Task(_))
     ));
+    crate::test_support::resolve_task_result_silently(
+        &fixture.sessions,
+        "local",
+        &fixture.alice,
+        "existing-assistant",
+        "result",
+    );
     fixture
         .sessions
         .finish_task_result("local", &fixture.alice, "existing-assistant", "result")
@@ -1059,6 +1066,13 @@ async fn revocation_cancels_unsent_results_but_preserves_running_claim_artifacts
     app.release_run_deliveries(&record.run_id, &fixture.workspace())
         .unwrap();
     assert_available(app, &fixture.workspace(), &commit);
+    crate::test_support::resolve_task_result_silently(
+        &fixture.sessions,
+        "local",
+        &fixture.alice,
+        "existing-assistant",
+        "result",
+    );
     fixture
         .sessions
         .finish_task_result("local", &fixture.alice, "existing-assistant", "result")

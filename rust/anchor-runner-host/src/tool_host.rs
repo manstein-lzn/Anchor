@@ -54,6 +54,7 @@ pub(crate) fn is_fake_fixture(binding: &PluginBinding) -> bool {
 #[derive(Debug, Clone, Default)]
 pub struct McpToolConfig {
     servers: BTreeMap<String, ResolvedMcpServer>,
+    recoverable_servers: BTreeSet<String>,
     // Declarations intentionally disabled by the existing optional environment
     // contract are different from missing host configuration. A server that
     // declares channel identity also starts here until the Host attests it.
@@ -66,6 +67,9 @@ pub struct McpToolConfig {
     pub(crate) configuration_revisions: BTreeMap<String, u64>,
     /// Stable owner/target/source identities; excludes rotating secret values.
     pub(crate) configuration_bindings: BTreeMap<String, String>,
+    /// Only exact revisions retain code/view leases after preparation. Live
+    /// defaults keep their existing release-before-OAuth/install lifecycle.
+    revision_sources: Vec<Arc<anchor_library::ResolvedPluginSource>>,
 }
 
 /// Everything one node invocation provides to a sandboxed MCP launch.
@@ -149,6 +153,30 @@ impl std::fmt::Debug for ResolvedMcpServer {
 }
 
 impl McpToolConfig {
+    pub(crate) fn allow_unavailable_servers(&mut self, servers: Vec<String>) {
+        self.recoverable_servers = servers.into_iter().collect();
+    }
+
+    pub(crate) fn has_local_codex_bridge(&self) -> bool {
+        self.servers.get("codex-codex").is_some_and(|server| {
+            server.plugin_id == "codex"
+                && server.config.get("type").and_then(Value::as_str) == Some("http")
+                && server.config.get("url").and_then(Value::as_str)
+                    == Some("http://127.0.0.1:8091/mcp")
+                && !self.disabled.contains("codex-codex")
+        })
+    }
+
+    pub(crate) fn retain_revision_sources(
+        &mut self,
+        sources: Vec<Arc<anchor_library::ResolvedPluginSource>>,
+    ) {
+        self.revision_sources = sources
+            .into_iter()
+            .filter(|source| source.revision().is_some())
+            .collect();
+    }
+
     /// Resolve the canonical Plugin MCP declarations used by the admitted
     /// Graph. The catalog owns parsing, path checks, and environment expansion;
     /// this adapter only turns those definitions into live host connections.
@@ -310,6 +338,7 @@ impl McpToolConfig {
         }
         Ok(Self {
             servers,
+            recoverable_servers: BTreeSet::new(),
             disabled,
             environment: Default::default(),
             oauth_library_root: Some(root.to_path_buf()),
@@ -317,6 +346,7 @@ impl McpToolConfig {
             startup_timeout: None,
             configuration_revisions,
             configuration_bindings,
+            revision_sources: Vec::new(),
         })
     }
 
@@ -552,6 +582,7 @@ impl McpToolConfig {
         self.validate_bindings(bindings, network)?;
         let mut hosts = BTreeMap::new();
         let mut owners = BTreeMap::new();
+        let mut unavailable = BTreeSet::new();
         for binding in bindings {
             for server_id in &binding.mcp_servers {
                 let key = server_key(&binding.id, server_id);
@@ -607,11 +638,23 @@ impl McpToolConfig {
                 .await;
                 let host = match connected {
                     Ok(host) => host,
+                    Err(PreparationError::Unavailable(_))
+                        if self.recoverable_servers.contains(&key)
+                            && !self
+                                .startup_cancellation
+                                .as_ref()
+                                .is_some_and(|c| c.load(std::sync::atomic::Ordering::Acquire)) =>
+                    {
+                        unavailable.insert(key);
+                        continue;
+                    }
                     Err(reason) => {
                         let cleanup = LiveMcpTools {
                             hosts,
                             owners,
+                            unavailable,
                             _environment: self.environment.clone(),
+                            _revision_sources: self.revision_sources.clone(),
                         }
                         .shutdown()
                         .await
@@ -639,7 +682,9 @@ impl McpToolConfig {
         let live = LiveMcpTools {
             hosts,
             owners,
+            unavailable,
             _environment: self.environment.clone(),
+            _revision_sources: self.revision_sources.clone(),
         };
         if self
             .startup_cancellation
@@ -714,6 +759,11 @@ impl McpToolConfig {
         let timeout = self
             .startup_timeout
             .unwrap_or(std::time::Duration::from_secs(120));
+        let timeout = if self.recoverable_servers.contains(key) {
+            timeout.min(std::time::Duration::from_secs(8))
+        } else {
+            timeout
+        };
         let transport = transport_name(&definition.config)?;
         match transport {
             "http" => {
@@ -742,9 +792,11 @@ impl McpToolConfig {
                         .map_err(|_| format!("MCP server `{key}` startup timed out"))?
                 };
                 result.map_err(|error| {
-                    PreparationError::Unavailable(format!(
-                        "MCP server `{key}` failed to bind: {error}"
-                    ))
+                    let message = format!("MCP server `{key}` failed to bind: {error}");
+                    match error {
+                        McpHostError::Connect(_) => PreparationError::Unavailable(message),
+                        _ => PreparationError::KnownFailure(message),
+                    }
                 })
             }
             "sse" => Err(format!(
@@ -1249,8 +1301,10 @@ fn visible_plugin_value(value: &str, plugin_directory: &Path, plugin_id: &str) -
 pub struct LiveMcpTools {
     hosts: BTreeMap<String, Arc<McpHost>>,
     owners: BTreeMap<String, crate::plugin_disclosure::ToolOwner>,
+    unavailable: BTreeSet<String>,
     // Host-owned launcher files must live as long as the formal MCP server.
     _environment: crate::tool_environment::ToolEnvironment,
+    _revision_sources: Vec<Arc<anchor_library::ResolvedPluginSource>>,
 }
 
 impl ToolPort for LiveMcpTools {
@@ -1320,6 +1374,7 @@ impl LiveMcpTools {
                     || exposed == crate::tool_names::SEND_TOOL
                     || exposed == crate::tool_names::FEISHU_SEND_TOOL
                     || exposed == crate::tool_names::FEISHU_SEND_FILE_TOOL
+                    || exposed == crate::tool_names::FEISHU_CLI_TOOL
                     || exposed == crate::tool_names::SEND_FILE_TOOL
                     || exposed == crate::tool_names::IMAGE_TOOL
                     || exposed == crate::tool_names::TASK_RESULT_RESOLVE_TOOL
@@ -1361,6 +1416,9 @@ pub struct CombinedPluginTools {
 }
 
 impl CombinedPluginTools {
+    pub(crate) fn unavailable_servers(&self) -> &BTreeSet<String> {
+        &self.live.unavailable
+    }
     pub(crate) fn tool_owners(&self) -> BTreeMap<String, crate::plugin_disclosure::ToolOwner> {
         let mut owners = self.live.owners.clone();
         if self.fake.enabled {

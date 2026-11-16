@@ -261,6 +261,7 @@ impl HostArtifacts {
             for directory in &manifest.directories {
                 require_directory(&view.join(directory))?;
             }
+            manifest.verify_control_content(snapshot)?;
             return Ok(view);
         }
         let temporary = snapshot.join(format!(
@@ -285,6 +286,7 @@ impl HostArtifacts {
             sync_tree_dirs(&temporary)?;
             fs::rename(&temporary, &view)?;
             fs::File::open(snapshot)?.sync_all()?;
+            manifest.verify_control_content(snapshot)?;
             Ok(view)
         })();
         if temporary.exists() {

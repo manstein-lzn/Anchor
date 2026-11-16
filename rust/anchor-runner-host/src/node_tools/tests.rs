@@ -935,6 +935,49 @@ async fn file_tools_stay_inside_the_workspace() {
 }
 
 #[tokio::test]
+async fn read_authorized_file_and_directory_inputs_without_granting_adjacent_paths() {
+    let fixture = Fixture::new();
+    let mut tools = fixture.tools(cancellation());
+    let directory = fixture.directory.path().join("reports");
+    std::fs::create_dir(&directory).unwrap();
+    std::fs::write(directory.join("report.txt"), "directory-input").unwrap();
+    tools
+        .readonly_inputs
+        .push(ReadOnlyInput::new(&directory, "/in/reports"));
+    for (path, expected) in [
+        ("/in/producer/report.txt", "immutable-input"),
+        ("/in/reports/report.txt", "directory-input"),
+    ] {
+        let result = call_tool(&tools, READ_TOOL_NAME, json!({"path":path})).await;
+        assert_eq!(result["lines"][0]["text"], expected);
+        assert!(result["sha256"].as_str().is_some());
+        call_tool_error(
+            &tools,
+            EDIT_TOOL_NAME,
+            json!({"path":path,"content":"changed"}),
+        )
+        .await;
+    }
+    for path in [
+        "/in/producer",
+        "/in/producer/report.txt/../report.txt",
+        "/in/producer/other.txt",
+        "/in/reports",
+        "/in/reports/../input.txt",
+    ] {
+        call_tool_error(&tools, READ_TOOL_NAME, json!({"path":path})).await;
+    }
+    std::fs::remove_file(&fixture.source).unwrap();
+    std::os::unix::fs::symlink(directory.join("report.txt"), &fixture.source).unwrap();
+    call_tool_error(
+        &tools,
+        READ_TOOL_NAME,
+        json!({"path":"/in/producer/report.txt"}),
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn file_tools_accept_the_workspace_mount_path_and_name_themselves_in_refusals() {
     let fixture = Fixture::new();
     let tools = fixture.tools(cancellation());

@@ -274,6 +274,21 @@ pub(crate) fn validate_installation_prefix(path: &Path) -> Result<(), String> {
 }
 
 impl ToolEnvironment {
+    pub(crate) fn validate_closed_experiment(&self) -> Result<(), String> {
+        if !self.mounts.is_empty()
+            || !self.dirs.is_empty()
+            || !self.imports.is_empty()
+            || !self.devices.is_empty()
+            || self.rust.is_some()
+            || self.python.is_some()
+            || self.pixi.is_some()
+            || self.mcp_python.is_some()
+        {
+            return Err("closed experiments do not support mutable tool environments, interpreters or device grants".into());
+        }
+        Ok(())
+    }
+
     /// Explicit deployment grants for Pilot development. Never inferred from
     /// HOME, a project rust-toolchain file, or a Plugin declaration.
     pub(crate) fn with_pilot_rust(mut self) -> Result<Self, String> {

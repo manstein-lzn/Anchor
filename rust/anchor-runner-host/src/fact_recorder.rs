@@ -21,7 +21,6 @@ use anchor_kernel::{
 };
 use serde::Serialize;
 use serde_json::Value;
-use sha2::Digest;
 
 pub(crate) const ROOT: &str = "kernel-facts";
 
@@ -50,13 +49,10 @@ pub(crate) fn now_ms() -> u64 {
 pub(crate) fn host_sha256() -> String {
     static HOST: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     HOST.get_or_init(|| {
-        let digest = || -> std::io::Result<String> {
-            let mut file = std::fs::File::open(std::env::current_exe()?)?;
-            let mut hasher = sha2::Sha256::new();
-            std::io::copy(&mut file, &mut hasher)?;
-            Ok(format!("{:x}", hasher.finalize()))
-        };
-        digest().unwrap_or_else(|error| format!("unknown: {error}"))
+        std::env::current_exe()
+            .map_err(|error| error.to_string())
+            .and_then(|path| crate::host_fs::sha256_file(&path))
+            .unwrap_or_else(|error| format!("unknown: {error}"))
     })
     .clone()
 }
@@ -398,5 +394,71 @@ mod tests {
             }
         }
         assert_eq!(writers, vec!["fact_recorder.rs"]);
+    }
+}
+
+#[cfg(test)]
+mod stable_configuration_tests {
+    use super::*;
+    use anchor_kernel::HistoryReader;
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn stable_configuration_records_ten_distinct_attempt_contexts_without_fragmentation() {
+        let root = tempfile::tempdir().unwrap();
+        let recorder = FactRecorder::open(root.path()).unwrap();
+        let envelope = serde_json::json!({"network":false});
+        let configuration = AgentConfiguration {
+            version: anchor_facts::CONFIGURATION_VERSION,
+            graph_digest: "graph".into(),
+            node_id: "worker".into(),
+            model: "model".into(),
+            model_binding: "binding".into(),
+            runtime_sha256: "runtime".into(),
+            instructions_sha256: anchor_facts::text_digest("static role"),
+            plugin_instructions_sha256: anchor_facts::text_digest(""),
+            plugins: vec![],
+            routes: vec![],
+            host_sha256: "host".into(),
+            tools_sha256: "tools".into(),
+            envelope_sha256: anchor_facts::text_digest(
+                &anchor_facts::canonical(&envelope).to_string(),
+            ),
+        };
+        let mut expected = BTreeSet::new();
+        for index in 0..10 {
+            let invocation = Invocation {
+                run_id: format!("run-{index}"),
+                graph_digest: "graph".into(),
+                node_id: "worker".into(),
+                invocation: 1,
+            };
+            let task_sha256 = anchor_facts::text_digest(&format!("Input: {index}"));
+            expected.insert(task_sha256.clone());
+            let facts = vec![Fact::RequestContext {
+                task_sha256,
+                input_sha256: anchor_facts::text_digest(&format!("{index}")),
+                input_guidance_digest: None,
+            }];
+            let recording = recorder.record(&configuration, envelope.clone(), &invocation, facts);
+            assert!(recording.accepted, "{recording:?}");
+        }
+        let reader = HistoryReader::open(root.path().join(ROOT)).unwrap();
+        assert_eq!(reader.list("config/").unwrap().len(), 2);
+        assert_eq!(reader.list("trace/").unwrap().len(), 10);
+        let mut actual = BTreeSet::new();
+        for trace in reader.list("trace/").unwrap() {
+            let history = reader.history(&trace).unwrap();
+            assert_eq!(history.len(), 1);
+            let observation: Observation =
+                serde_json::from_value(history[0].submission.content.clone()).unwrap();
+            assert_eq!(observation.version, anchor_facts::VERSION);
+            for fact in observation.facts {
+                if let Fact::RequestContext { task_sha256, .. } = fact {
+                    actual.insert(task_sha256);
+                }
+            }
+        }
+        assert_eq!(actual, expected);
     }
 }

@@ -5,6 +5,7 @@ fn fixture() -> (tempfile::TempDir, ModelConfiguration) {
     let configuration = ModelConfiguration::new(root.path(), BTreeMap::new()).unwrap();
     (root, configuration)
 }
+
 fn save_slot(
     configuration: &ModelConfiguration,
     slot: &str,

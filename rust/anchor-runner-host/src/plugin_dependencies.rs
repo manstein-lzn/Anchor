@@ -142,15 +142,11 @@ pub(crate) async fn prepare_legacy_fixture(
 /// A temporary view identifies the actual solve and the shared interpreter;
 /// changing the base build must not silently reuse an older Python view.
 pub(crate) fn resolved_view_key(resolved: &ResolvedRequirements) -> String {
-    use sha2::{Digest, Sha256};
-    let bytes = serde_json::to_vec(&(
-        "anchor.development-view.v1",
+    anchor_library::DependencyViewIdentity::key_for(
         &resolved.lock_digest,
         &resolved.interpreter_path,
         &resolved.interpreter_digest,
-    ))
-    .expect("view identity encoding");
-    format!("{:x}", Sha256::digest(bytes))
+    )
 }
 
 #[allow(clippy::too_many_arguments)]

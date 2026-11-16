@@ -18,7 +18,7 @@ mod schedules;
 mod sessions;
 mod settings;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 mod timeline;
 #[allow(clippy::result_large_err)]
 mod turns;
@@ -1218,6 +1218,19 @@ fn router_with_readiness_and_web_root(
         .route("/schedules", get(list_schedules).post(create_schedule))
         .route("/schedules/{schedule}/assign", post(assign_schedule))
         .route(
+            "/schedules/{schedule}/sharing",
+            axum::routing::put(share_schedule),
+        )
+        .route(
+            "/schedules/{schedule}/subscriptions",
+            post(subscribe_schedule),
+        )
+        .route("/schedule-subscriptions", get(list_schedule_subscriptions))
+        .route(
+            "/schedule-subscriptions/{subscription}",
+            axum::routing::delete(unsubscribe_schedule),
+        )
+        .route(
             "/schedules/{schedule}",
             axum::routing::delete(delete_schedule).put(update_schedule),
         )
@@ -1270,74 +1283,17 @@ fn application_error(failure: ApplicationError) -> HttpResponse {
     }
 }
 
-async fn graph_relations(State(state): State<ApiState>) -> Result<Json<Value>, HttpResponse> {
-    let catalog = state
+async fn graph_relations(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, HttpResponse> {
+    let owner = private_owner(&state, &headers);
+    state
         .application
-        .list_graphs()
+        .graph_relations(&owner)
         .await
-        .map_err(graph_projection_error)?;
-    let names = catalog["graphs"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|graph| graph["graph"].as_str().map(str::to_owned))
-        .collect::<Vec<_>>();
-    let mut graphs = Vec::with_capacity(names.len());
-    let mut calls = Vec::new();
-    for name in names {
-        match state.application.load_graph(&name) {
-            Ok((_, bundle)) => {
-                for node in &bundle.snapshot.nodes {
-                    let Some(op_name) = node.op.as_deref() else {
-                        continue;
-                    };
-                    let Some(call) = bundle
-                        .snapshot
-                        .ops
-                        .get(op_name)
-                        .and_then(|op| op.get("call"))
-                        .and_then(Value::as_object)
-                    else {
-                        continue;
-                    };
-                    let (Some(target), Some(mode)) = (
-                        call.get("graph").and_then(Value::as_str),
-                        call.get("mode").and_then(Value::as_str),
-                    ) else {
-                        continue;
-                    };
-                    calls.push(json!({
-                        "graph": name,
-                        "node": node.id,
-                        "op": op_name,
-                        "target": target,
-                        "mode": mode,
-                    }));
-                }
-            }
-            Err(crate::application::graphs::GraphManagementError::Missing(_)) => {}
-            Err(failure) => return Err(graph_projection_error(failure)),
-        }
-        graphs.push(name);
-    }
-    let schedules = state.schedules.lock().map_err(|_| {
-        error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "schedule store unavailable",
-        )
-    })?;
-    let graphs = graphs
-        .into_iter()
-        .map(|graph| {
-            let count = schedules
-                .items
-                .iter()
-                .filter(|item| item.graph == graph)
-                .count();
-            json!({"graph":graph,"schedules":count})
-        })
-        .collect::<Vec<_>>();
-    Ok(Json(json!({"graphs":graphs,"calls":calls})))
+        .map(Json)
+        .map_err(graph_projection_error)
 }
 
 fn graph_projection_error(

@@ -33,6 +33,11 @@ impl RunApplication {
         let Some(source) = metadata.assistant.as_ref() else {
             return Ok(());
         };
+        if self.assistant_has_pending_handover(run_id)? {
+            // New user input is already a Running Turn before being claimed.
+            // The observed handover stops the old executor, not that queue.
+            return Ok(());
+        }
         let Some(turn_status) = channel_turn_status(&phase) else {
             return Ok(());
         };

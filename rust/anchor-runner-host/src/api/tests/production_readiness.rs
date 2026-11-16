@@ -59,8 +59,8 @@ async fn graph_relations_projects_catalog_calls_and_schedule_counts() {
         relations,
         json!({
             "graphs":[
-                {"graph":"caller","schedules":1},
-                {"graph":"fixture","schedules":0}
+                {"graph":"caller","objective":"caller","schedules":1},
+                {"graph":"fixture","objective":"fixture","schedules":0}
             ],
             "calls":[{
                 "graph":"caller",
@@ -68,7 +68,8 @@ async fn graph_relations_projects_catalog_calls_and_schedule_counts() {
                 "op":"invoke",
                 "target":"fixture",
                 "mode":"detach"
-            }]
+            }],
+            "subscriptions":[]
         })
     );
 }
@@ -94,8 +95,77 @@ async fn graph_relations_preserves_schedule_count_when_bundle_is_missing() {
     assert_eq!(status, StatusCode::OK, "{relations}");
     assert_eq!(
         relations,
-        json!({"graphs":[{"graph":"fixture","schedules":1}],"calls":[]})
+        json!({"graphs":[{"graph":"fixture","schedules":1}],"calls":[],"subscriptions":[]})
     );
+}
+
+#[tokio::test]
+async fn graph_relations_derive_subscription_owner_at_the_http_boundary() {
+    let (root, application, _channels, _sessions, session, target) =
+        crate::application::graph_tasks::assignment_tests::prepared().await;
+    let schedules = ScheduleStore::open(root.path().join("schedules.json")).unwrap();
+    let application = application.with_schedule_management(Arc::new(
+        crate::api::schedules::ScheduleManagementAdapter::new(schedules.clone()),
+    ));
+    let created = application
+        .create_schedule_with_request(
+            "producer",
+            &json!({"type":"daily","time":"07:30"}),
+            &target.input,
+            "local",
+            None,
+        )
+        .await
+        .unwrap();
+    let id = created["schedule"]["id"].as_str().unwrap();
+    let mut definition = application
+        .load_graph("assistant")
+        .unwrap()
+        .1
+        .authoring_definition;
+    definition["nodes"][1]["plugins"][1]["graph_tasks"] = json!({"schedules":[id]});
+    application
+        .update_graph("assistant", definition)
+        .await
+        .unwrap();
+    application
+        .share_schedule(
+            "local",
+            id,
+            "Morning report",
+            std::slice::from_ref(&session),
+            true,
+        )
+        .await
+        .unwrap();
+    application
+        .operator_subscribe_schedule(
+            "local",
+            id,
+            &session,
+            "private-instruction-marker",
+            Some("09:05"),
+        )
+        .await
+        .unwrap();
+    let (_fixture_root, mut state) = fixture();
+    state.application = application;
+    state.schedules = schedules;
+    let (status, owned) = call(router(state.clone()), "GET", "/graph-relations", None).await;
+    assert_eq!(status, StatusCode::OK, "{owned}");
+    assert_eq!(
+        owned["subscriptions"],
+        json!([{"graph":"assistant","target":"producer","schedule":id,
+            "active":true,"authorized":true,"not_before":"09:05"}])
+    );
+    assert!(!owned.to_string().contains(&session));
+    assert!(!owned.to_string().contains("private-instruction-marker"));
+    state.owner = "another-owner".into();
+    let (status, other) = call(router(state), "GET", "/graph-relations", None).await;
+    assert_eq!(status, StatusCode::OK, "{other}");
+    assert_eq!(other["subscriptions"], json!([]));
+    assert_eq!(other["graphs"], owned["graphs"]);
+    assert_eq!(other["calls"], owned["calls"]);
 }
 
 #[tokio::test]

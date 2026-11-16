@@ -212,6 +212,7 @@ fn persistent_summary_matches_filtered_tool_owners_in_both_schema_modes() {
     .unwrap();
     let mut catalog = PluginDisclosureCatalog::default();
     catalog.insert(
+        root.path(),
         crate::plugin_library::Catalog::new(root.path())
             .definition("demo")
             .unwrap(),

@@ -48,10 +48,19 @@ impl KernelRuns {
     /// Caller holds file_facts across any corresponding filesystem operation.
     pub(super) fn put_file_fact(&self, id: &str, state: Value) -> Result<(), ApplicationError> {
         let id = format!("files/{id}");
-        let resource = match self.kernel.load(&id).map_err(kernel_error)? {
+        self.put_host_fact(&id, FILE_VALIDATOR, state)
+    }
+
+    pub(super) fn put_host_fact(
+        &self,
+        id: &str,
+        validator: &str,
+        state: Value,
+    ) -> Result<(), ApplicationError> {
+        let resource = match self.kernel.load(id).map_err(kernel_error)? {
             Some(resource) => resource,
             None => {
-                let resource = Resource::new(&id, FILE_VALIDATOR, Value::Null);
+                let resource = Resource::new(id, validator, Value::Null);
                 self.kernel.create(resource.clone()).map_err(kernel_error)?;
                 resource
             }

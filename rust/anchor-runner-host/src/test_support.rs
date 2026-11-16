@@ -62,6 +62,34 @@ impl EnvVar {
     }
 }
 
+pub(crate) fn idle_assistant_environment(root: &std::path::Path) -> Environment {
+    use sha2::Digest;
+    let mut environment = Environment::cleared(&[
+        "ANCHOR_RUNNER_LOCAL_INPUTS_ROOT",
+        "ANCHOR_RUNNER_FAKE_PLUGINS",
+        "ANCHOR_GOOSE_RELAY_BINARY",
+        "ANCHOR_MODEL_ALIASES",
+    ]);
+    let binary = root.join("unstarted-goose");
+    let bytes = b"Assistant handover fixture never starts an Agent";
+    std::fs::write(&binary, bytes).unwrap();
+    environment.set("ANCHOR_GOOSE_BINARY", &binary);
+    environment.set(
+        "ANCHOR_GOOSE_BINARY_SHA256",
+        format!("{:x}", sha2::Sha256::digest(bytes)),
+    );
+    environment.set("ANCHOR_GOOSE_LOCAL_NETWORK", "0");
+    environment.set("ANCHOR_GOOSE_ALLOW_SHARED_NETWORK", "1");
+    environment.set("ANCHOR_RUNNER_WORKSPACE_ROOT", root.join("workspaces"));
+    environment.set("ANCHOR_RUNNER_ALLOWED_COMMANDS", "true");
+    environment.set("ANCHOR_RUNNER_AGENT_RUNTIME", "goose");
+    environment.set("ANCHOR_MODEL_URL", "http://127.0.0.1:1/v1");
+    environment.set("ANCHOR_MODEL_API_KEY", "handover-fixture");
+    environment.set("ANCHOR_MODEL_NAME", "fixture");
+    environment.set("ANCHOR_MODEL_WIRE_API", "chat");
+    environment.set("ANCHOR_MODEL_DIRECT", "0");
+    environment
+}
 pub(crate) fn resolve_task_result_silently(
     store: &anchor_platform_session::SessionStore,
     owner: &str,

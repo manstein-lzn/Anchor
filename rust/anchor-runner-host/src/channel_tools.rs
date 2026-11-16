@@ -5,11 +5,11 @@
 //! call its private Unix socket, or persist the final rich reply for the host
 //! adapter to deliver.
 
-use crate::application::channel_management::ChannelPlatform;
+use crate::channel_platform::ChannelPlatform;
 use crate::channel_replies::{MAX_IMAGE_BYTES, MAX_IMAGE_COUNT, MAX_IMAGE_TOTAL_BASE64};
 use crate::tool_names::{
-    FEISHU_SEND_FILE_TOOL, FEISHU_SEND_TOOL, IMAGE_TOOL, SEND_FILE_TOOL, SEND_TOOL,
-    TASK_RESULT_RESOLVE_TOOL,
+    FEISHU_CLI_TOOL, FEISHU_SEND_FILE_TOOL, FEISHU_SEND_TOOL, IMAGE_TOOL, SEND_FILE_TOOL,
+    SEND_TOOL, TASK_RESULT_RESOLVE_TOOL,
 };
 
 use anchor_runtime::{
@@ -36,6 +36,7 @@ use tokio::{
 };
 
 mod feishu;
+mod feishu_cli;
 mod task_delivery;
 
 #[derive(Deserialize)]
@@ -138,61 +139,14 @@ fn uncertain() -> ToolError {
     ToolError::Failed("channel delivery was not confirmed; do not resend automatically".into())
 }
 
-/// Open each component relative to its descriptor: a sandbox process cannot
-/// replace a checked directory with a symlink between validation and read.
 fn read_regular(path: &Path, limit: usize) -> Result<Vec<u8>, ToolError> {
-    use rustix::fs::{Mode, OFlags, open, openat};
-    let failure = || {
+    let bytes = anchor_file_lease::read_regular(path, limit).map_err(|_| {
         ToolError::Failed("file must be regular, without symlinks and within its byte limit".into())
-    };
-    if !path.is_absolute() {
-        return Err(failure());
+    })?;
+    if bytes.is_empty() {
+        return Err(ToolError::Failed("file must not be empty".into()));
     }
-    let mut directory = open(
-        "/",
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
-        Mode::empty(),
-    )
-    .map_err(|_| failure())?;
-    let components = path
-        .components()
-        .filter(|part| !matches!(part, Component::RootDir))
-        .collect::<Vec<_>>();
-    for (index, part) in components.iter().enumerate() {
-        if !matches!(part, Component::Normal(_)) {
-            return Err(failure());
-        }
-        let last = index + 1 == components.len();
-        let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK;
-        let fd = openat(
-            &directory,
-            Path::new(part.as_os_str()),
-            if last {
-                flags
-            } else {
-                flags | OFlags::DIRECTORY
-            },
-            Mode::empty(),
-        )
-        .map_err(|_| failure())?;
-        if last {
-            let file = fs::File::from(fd);
-            let metadata = file.metadata().map_err(|_| failure())?;
-            if !metadata.is_file() || metadata.len() > limit as u64 {
-                return Err(failure());
-            }
-            let mut bytes = Vec::new();
-            file.take(limit as u64 + 1)
-                .read_to_end(&mut bytes)
-                .map_err(|_| failure())?;
-            if bytes.is_empty() || bytes.len() > limit {
-                return Err(failure());
-            }
-            return Ok(bytes);
-        }
-        directory = fd;
-    }
-    Err(failure())
+    Ok(bytes)
 }
 
 impl ChannelTools {
@@ -291,7 +245,6 @@ impl ChannelTools {
             .filter(|bot| {
                 bot.enabled
                     && bot.platform == platform
-                    && (platform != ChannelPlatform::Feishu || bot.binding.private_only)
                     && crate::credential_store::binding_owner(&bot.owner) == self.owner
             })
             .ok_or_else(|| {
@@ -862,7 +815,17 @@ impl ChannelTools {
         }
         let value = timeout(Duration::from_secs(seconds), async {
             let mut stream = UnixStream::connect(socket).await.map_err(|_| uncertain())?;
+            let subscription = self
+                .task_delivery_context()?
+                .is_some_and(|task| task.result.content.get("subscription").is_some());
+            let gate = if subscription {
+                Some(self.application.graph_catalog_mutation_guard().await)
+            } else {
+                None
+            };
             self.check_active()?;
+            // Sharing changes and send admission serialize at the actual
+            // socket write; gateway ACK waiting never owns the catalog gate.
             self.task_delivery_context()?;
             if matches!(payload["operation"].as_str(), Some("send" | "send_file")) {
                 self.require_open_task_delivery()?;
@@ -871,6 +834,7 @@ impl ChannelTools {
                 self.request_task_delivery(payload)?;
             }
             stream.write_all(&bytes).await.map_err(|_| uncertain())?;
+            drop(gate);
             let mut response = Vec::new();
             use tokio::io::AsyncReadExt;
             BufReader::new(stream)
@@ -905,6 +869,12 @@ impl ToolPort for ChannelTools {
         if self.assistant_graph.is_some() && self.supports_platform(ChannelPlatform::Feishu) {
             definitions.push(feishu::definition());
             definitions.push(feishu::file_definition());
+            if self.feishu_cli_endpoint().is_ok() {
+                definitions.push(feishu_cli::definition());
+            }
+        }
+        if self.task_delivery_context().ok().flatten().is_some() {
+            definitions.push(task_delivery::resolution_definition());
         }
         if self.task_delivery_context().ok().flatten().is_some() {
             definitions.push(task_delivery::resolution_definition());
@@ -972,6 +942,7 @@ impl ToolPort for ChannelTools {
             || name == IMAGE_TOOL
             || name == FEISHU_SEND_TOOL
             || name == FEISHU_SEND_FILE_TOOL
+            || name == FEISHU_CLI_TOOL
             || name == TASK_RESULT_RESOLVE_TOOL
         {
             false
@@ -993,6 +964,12 @@ impl ToolPort for ChannelTools {
                 return Ok(vec![ToolResultContent::json(
                     self.resolve_task_delivery(args).await?,
                 )]);
+            }
+            if name == FEISHU_CLI_TOOL {
+                let args = serde_json::from_value(arguments).map_err(|error| {
+                    ToolError::Failed(format!("invalid Feishu CLI arguments: {error}"))
+                })?;
+                return Ok(vec![ToolResultContent::json(self.feishu_cli(args).await?)]);
             }
             if matches!(name, FEISHU_SEND_TOOL | FEISHU_SEND_FILE_TOOL) {
                 if self.assistant_graph.is_none()

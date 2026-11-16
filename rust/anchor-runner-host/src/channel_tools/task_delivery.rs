@@ -1,7 +1,7 @@
 //! Task result effects keep their identity when a user interrupts processing.
 use super::*;
 use anchor_platform_session::{
-    AssistantInput, ChannelConversationKind, ChannelIdentity, TaskResult, TurnStatus,
+    AssistantInput, ChannelConversationKind, ChannelIdentity, TaskResult,
 };
 use sha2::Sha256;
 
@@ -225,6 +225,13 @@ impl ChannelTools {
                 "a trusted task result is required".into(),
             ));
         };
+        self.application
+            .authorize_subscription_result(&source.owner, &source.session, &input.result)
+            .map_err(|error| {
+                ToolError::Failed(format!(
+                    "subscription delivery is no longer authorized: {error:?}"
+                ))
+            })?;
         Ok(Some(TaskDelivery {
             source,
             result: input.result,
@@ -252,47 +259,16 @@ impl ChannelTools {
         if self.assistant_graph.is_none() {
             return Err(invalid());
         }
-        let source = crate::assistant::source(&self.state_root, &self.key)
-            .map_err(ToolError::Failed)?
-            .ok_or_else(invalid)?;
-        if source.work_node != self.key.node_id
-            || crate::credential_store::binding_owner(&source.owner) != self.owner
-        {
-            return Err(invalid());
-        }
-        let input = crate::assistant::input(&self.state_root, &self.key)
-            .map_err(ToolError::Failed)?
-            .ok_or_else(invalid)?;
-        let run = match &input {
-            AssistantInput::Task(input) => Some(input.run_id.as_str()),
-            AssistantInput::User(input) => input.relation.run_id.as_deref(),
-        };
-        if run != Some(self.key.run_id.as_str()) || input.turn().status != TurnStatus::Running {
-            return Err(invalid());
-        }
-        let sessions = crate::assistant::sessions(&self.state_root).map_err(ToolError::Failed)?;
-        if sessions
-            .get_channel_assistant(&source.owner, &source.session)
-            .map_err(|error| ToolError::Failed(error.to_string()))?
-            .is_none_or(|assistant| assistant.run_id != self.key.run_id)
-            || !sessions
-                .channel_session_is_selected(&source.owner, &source.session)
-                .map_err(|error| ToolError::Failed(error.to_string()))?
-        {
-            return Err(invalid());
-        }
-        let identity = sessions
-            .channel_identity(&source.owner, &source.session)
-            .map_err(|error| ToolError::Failed(error.to_string()))?;
-        if ChannelPlatform::parse(&identity.source).is_none()
+        let context = self
+            .application
+            .active_channel_turn(&self.key)
+            .map_err(|_| invalid())?;
+        let source = context.source;
+        let input = context.input;
+        let identity = context.identity;
+        if crate::credential_store::binding_owner(&source.owner) != self.owner
             || identity.conversation_kind != ChannelConversationKind::Single
             || identity.sender_id.is_empty()
-            || identity.conversation_id.is_empty()
-        {
-            return Err(invalid());
-        }
-        if let AssistantInput::User(input) = &input
-            && input.request.identity != identity
         {
             return Err(invalid());
         }

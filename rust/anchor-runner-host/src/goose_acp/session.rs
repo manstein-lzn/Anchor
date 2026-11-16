@@ -27,20 +27,12 @@ pub(super) struct ClientCapabilities {
     pub form_elicitation: bool,
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(super) async fn open(
+pub(super) async fn initialize(
     connection: &mut AcpConnection,
-    bridge: &Bridge,
-    // Base URL the sandbox uses for the bridge (its own loopback when isolated).
-    endpoint: &str,
-    restored: Option<&str>,
-    instructions: &str,
-    binding: &configuration::ModelBinding,
     cancellation: &Cancellation,
-    deadline: Option<Instant>,
+    deadline: Instant,
     capabilities: ClientCapabilities,
-) -> Result<OpenedSession, String> {
-    let handshake_deadline = deadline.unwrap_or_else(|| Instant::now() + Duration::from_secs(30));
+) -> Result<Value, String> {
     let mut declared =
         json!({"_meta":{"goose":{"customNotifications":capabilities.custom_notifications}}});
     if capabilities.form_elicitation {
@@ -53,7 +45,7 @@ pub(super) async fn open(
             "clientCapabilities":declared,
             "clientInfo":{"name":"anchor","version":"0.1.0"}}),
             cancellation,
-            handshake_deadline,
+            deadline,
         )
         .await?;
     if initialize["protocolVersion"] != 1
@@ -63,6 +55,25 @@ pub(super) async fn open(
     {
         return Err("Goose did not negotiate ACP v1 and HTTP MCP".into());
     }
+    Ok(initialize)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn open(
+    connection: &mut AcpConnection,
+    bridge: &Bridge,
+    // Base URL the sandbox uses for the bridge (its own loopback when isolated).
+    endpoint: &str,
+    restored: Option<&str>,
+    instructions: &str,
+    binding: &configuration::ModelBinding,
+    cancellation: &Cancellation,
+    deadline: Option<Instant>,
+    capabilities: ClientCapabilities,
+    frozen_extensions: Option<&[String]>,
+) -> Result<OpenedSession, String> {
+    let handshake_deadline = deadline.unwrap_or_else(|| Instant::now() + Duration::from_secs(30));
+    let initialize = initialize(connection, cancellation, handshake_deadline, capabilities).await?;
     let server = json!({"type":"http","name":"anchor", "url":format!("{endpoint}/mcp"),
         "headers":[{"name":"Authorization","value":format!("Bearer {}", bridge.token)}]});
     // Goose 1.53 adds its default builtins when creating a session and retains
@@ -70,7 +81,11 @@ pub(super) async fn open(
     // Reconcile through its native extension API before any model prompt. `tom`
     // supplies the persistent boundary text; other builtins are deployment opt-ins.
     let mut enabled = vec![json!({"type":"mcp","server":server})];
-    for name in configuration::enabled_builtins()? {
+    for name in frozen_extensions
+        .map(|extensions| extensions.to_vec())
+        .map(Ok)
+        .unwrap_or_else(configuration::enabled_builtins)?
+    {
         enabled.push(json!({"type":"builtin","name":name}));
     }
     let mut params = json!({"cwd":"/workspace","mcpServers":[server.clone()],

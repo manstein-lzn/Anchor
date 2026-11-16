@@ -117,7 +117,7 @@ impl PilotTools {
         .map_err(|error| rejected(format!("{error:?}")))?;
         let definition = catalog.definition(&plugin).map_err(|_| failed())?;
         let mut disclosure = crate::plugin_disclosure::PluginDisclosureCatalog::default();
-        disclosure.insert(definition);
+        disclosure.insert(&self.library_root, definition);
         let mut selection = arguments.clone();
         if let Some(resource) = arguments.get("resource").and_then(Value::as_str) {
             if arguments.get("section").is_some() || arguments.get("path").is_some() {

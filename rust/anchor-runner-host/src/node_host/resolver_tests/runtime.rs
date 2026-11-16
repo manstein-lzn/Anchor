@@ -167,3 +167,106 @@ async fn node_tool_selection_waits_for_real_plugin_publication_and_returns_curre
         BTreeMap::from([("review".to_owned(), current.digest)])
     );
 }
+
+#[tokio::test]
+async fn a_graph_pin_keeps_skill_only_execution_leased_and_rechecks_current_grants() {
+    let preview = tempfile::tempdir().unwrap();
+    let baseline = crate::plugin_library::Catalog::new(library_with(preview.path(), &["review"]))
+        .definition("review")
+        .unwrap();
+    let snapshot = GraphSnapshot::admit(json!({
+        "objective":"exact source", "entry":"agent", "agents":{"worker":{"model":"fixture"}},
+        "nodes":[{"id":"agent","agent":"worker","plugins":[{"id":"review","revision":baseline.digest}]}],
+        "edges":[]
+    })).unwrap();
+    let (root, resolver, _mounts, request) = session_fixture_with_snapshot(
+        &["review"],
+        &[("review", true, None)],
+        &[],
+        Some(snapshot.clone()),
+    );
+    let library_root = resolver.plugin_library_root().unwrap();
+    let library = anchor_library::Library::new(library_root);
+    let lease = library.install_lease().unwrap();
+    let revision = library
+        .retain_revision_locked(
+            "review",
+            library_root.join("plugins/review"),
+            &baseline.digest,
+            None,
+            &lease,
+        )
+        .unwrap();
+    let catalog = crate::plugin_library::Catalog::new(library_root);
+    assert_eq!(
+        catalog.resolve_snapshot_locked(&snapshot, &lease).unwrap(),
+        [baseline.binding()]
+    );
+    drop(lease);
+    assert_eq!(
+        catalog.resolve_snapshot(&snapshot).unwrap(),
+        [baseline.binding()]
+    );
+    let candidate = root.path().join("candidate");
+    std::fs::create_dir_all(&candidate).unwrap();
+    std::fs::write(candidate.join("plugin.json"), r#"{"name":"review"}"#).unwrap();
+    std::fs::write(
+        candidate.join("instructions.md"),
+        "new default instructions",
+    )
+    .unwrap();
+    let installed = library
+        .install_directory("review", &candidate, true)
+        .unwrap();
+    assert_ne!(installed.digest, baseline.digest);
+    let mounted = resolver.mounted_plugins(&request).unwrap();
+    assert_eq!(mounted.bindings, [baseline.binding()]);
+    let resolved = resolver.tools(&request).await.unwrap();
+    assert_eq!(resolved.plugins, [baseline.binding()]);
+    assert_eq!(
+        resolver.observed_plugin_digests(&request.key),
+        BTreeMap::from([("review".to_owned(), baseline.digest.clone())])
+    );
+    let detail = resolved
+        .tools
+        .call(
+            "anchor_plugin_read",
+            json!({
+                "plugin":"review", "section":"overview"
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(
+        !serde_json::to_string(&detail)
+            .unwrap()
+            .contains("new default instructions")
+    );
+    let lease = library
+        .try_install_lease()
+        .expect("running pins must not hold the global lease");
+    assert!(matches!(
+        library.release_revision_locked(&revision, &std::collections::BTreeSet::new(), &lease),
+        Err(anchor_library::RevisionError::InUse)
+    ));
+    std::fs::write(
+        candidate.join("plugin.json"),
+        r#"{"name":"review","network":true}"#,
+    )
+    .unwrap();
+    library
+        .install_directory_locked("review", &candidate, true, &lease)
+        .unwrap();
+    drop(lease);
+    assert!(
+        resolver.tools(&request).await.is_err(),
+        "old code cannot retain changed grants"
+    );
+    drop(resolved);
+    let lease = library.install_lease().unwrap();
+    assert!(
+        library
+            .release_revision_locked(&revision, &std::collections::BTreeSet::new(), &lease,)
+            .unwrap()
+    );
+}

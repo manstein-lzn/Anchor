@@ -486,6 +486,8 @@ fn assistant_fixture(state: &ApiState) -> (SessionStore, String, String) {
                 attachments: Default::default(),
                 run_id: None,
                 replace_running: true,
+                bot_origin: None,
+                platform_message_id: None,
             },
         )
         .unwrap();

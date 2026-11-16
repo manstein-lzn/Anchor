@@ -26,6 +26,13 @@ impl RunApplication {
         &self,
         ids: &[String],
     ) -> Result<RunDeletionBatch, ApplicationError> {
+        for id in ids {
+            if self.assistant_has_pending_handover(id)? {
+                return Err(ApplicationError::Conflict(
+                    "Run is retained by an observed assistant handover".into(),
+                ));
+            }
+        }
         let Some(runs) = self.kernel_runs(false)? else {
             return Ok(RunDeletionBatch { kernel: None });
         };

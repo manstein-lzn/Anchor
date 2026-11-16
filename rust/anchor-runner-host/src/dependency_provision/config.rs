@@ -9,6 +9,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+pub(crate) use crate::host_fs::sha256_file;
 use sha2::{Digest, Sha256};
 
 /// The one deployment-owned Python interpreter used by dependency preparation
@@ -291,22 +292,6 @@ fn parse_sources(value: &str) -> Result<Vec<PackageSource>, String> {
         return Err("ANCHOR_DEPENDENCIES_SOURCES must name at least one source".into());
     }
     Ok(sources)
-}
-
-/// SHA-256 of one file, in the same hex form the Library uses for identities.
-pub(crate) fn sha256_file(path: &Path) -> Result<String, String> {
-    use std::io::Read;
-    let mut file = std::fs::File::open(path).map_err(|error| error.to_string())?;
-    let mut hasher = Sha256::new();
-    let mut buffer = [0u8; 64 * 1024];
-    loop {
-        let read = file.read(&mut buffer).map_err(|error| error.to_string())?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    Ok(format!("{:x}", hasher.finalize()))
 }
 
 /// SHA-256 of a byte string.

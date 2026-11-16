@@ -1,9 +1,16 @@
+#[path = "goose_feishu/cli.rs"]
+mod cli;
+#[cfg(feature = "live-codex-acceptance")]
+#[path = "goose_feishu/codex.rs"]
+mod codex;
 #[allow(dead_code)]
 #[path = "support/runtime_fixture.rs"]
 mod fixture;
 #[allow(dead_code)]
 #[path = "support/goose_fixture.rs"]
 mod goose;
+#[path = "goose_feishu/post.rs"]
+mod post;
 
 use anchor_feishu_gateway::protocol::{Frame, Header};
 use anchor_platform_session::{SessionEvent, SessionStore, TurnStatus};
@@ -32,6 +39,8 @@ const GRAPH: &str = "feishu-fixture";
 const APP_ID: &str = "cli_fixture_app";
 const APP_SECRET: &str = "fixture-app-secret-not-production";
 const USER: &str = "ou_fixture_alice";
+const GROUP_USER: &str = "ou_fixture_bob";
+const GROUP_CHAT: &str = "oc_fixture_group";
 const CHAT: &str = "oc_fixture_private";
 const FIRST_MESSAGE: &str = "om_fixture_first";
 const SECOND_MESSAGE: &str = "om_fixture_second";
@@ -236,11 +245,17 @@ async fn download(
     RoutePath((message, key)): RoutePath<(String, String)>,
     Query(query): Query<std::collections::BTreeMap<String, String>>,
     headers: HeaderMap,
-) -> (HeaderMap, &'static [u8]) {
+) -> (HeaderMap, Vec<u8>) {
     assert_eq!(headers["authorization"], "Bearer fixture-tenant-token");
-    assert_eq!(message, FILE_MESSAGE);
-    assert_eq!(key, FILE_KEY);
-    assert_eq!(query["type"], "file");
+    let (content_type, bytes) = if message == FILE_MESSAGE {
+        assert_eq!(key, FILE_KEY);
+        assert_eq!(query["type"], "file");
+        ("text/plain", FILE_BYTES.to_vec())
+    } else {
+        assert_eq!(message, FIRST_MESSAGE);
+        assert_eq!(query["type"], "image");
+        ("image/png", post::image(&key))
+    };
     state
         .facts
         .lock()
@@ -248,11 +263,12 @@ async fn download(
         .downloads
         .push(json!({"message_id":message,"file_key":key,"type":query["type"]}));
     let mut headers = HeaderMap::new();
-    headers.insert("content-type", "text/plain".parse().unwrap());
-    (headers, FILE_BYTES)
+    headers.insert("content-type", content_type.parse().unwrap());
+    (headers, bytes)
 }
 
 struct Platform {
+    group: bool,
     api_base_url: String,
     state: Arc<PlatformState>,
     outbound: mpsc::UnboundedSender<Frame>,
@@ -284,6 +300,9 @@ impl Platform {
                 .unwrap()
                 .block_on(async move {
                     let app = Router::new()
+                        .route("/open-apis/bot/v3/info", get(|| async {
+                            Json(json!({"code":0,"bot":{"open_id":"ou_fixture_bot"}}))
+                        }))
                         .route("/callback/ws/endpoint", post(endpoint))
                         .route("/open-apis/auth/v3/tenant_access_token/internal", post(token))
                         .route("/open-apis/im/v1/messages/{message}/reply", post(reply))
@@ -347,6 +366,7 @@ impl Platform {
                 });
         });
         Self {
+            group: false,
             api_base_url,
             state,
             outbound,
@@ -360,6 +380,26 @@ impl Platform {
     }
 
     fn send_content(&self, seq: u64, message: &str, kind: &str, content: Value) {
+        let (chat, chat_type, sender, content, mentions) = if self.group {
+            let content = match kind {
+                "text" => json!({"text":format!("@_user_1 {}", content["text"].as_str().unwrap())}),
+                "post" => content,
+                unexpected => panic!("unsupported group fixture message: {unexpected}"),
+            };
+            (
+                GROUP_CHAT,
+                "group",
+                if message == SECOND_MESSAGE {
+                    GROUP_USER
+                } else {
+                    USER
+                },
+                content,
+                json!([{"key":"@_user_1","id":{"open_id":"ou_fixture_bot"},"mentioned_type":"bot"}]),
+            )
+        } else {
+            (CHAT, "p2p", USER, content, json!([]))
+        };
         let wire_id = format!("transport_{seq}");
         let frame = Frame {
             seq_id: seq,
@@ -373,9 +413,9 @@ impl Platform {
                 "schema":"2.0",
                 "header":{"app_id":APP_ID,"event_type":"im.message.receive_v1","event_id":format!("evt_{message}")},
                 "event":{
-                    "sender":{"sender_type":"user","sender_id":{"open_id":USER}},
-                    "message":{"message_id":message,"chat_id":CHAT,"chat_type":"p2p",
-                        "message_type":kind,"content":content.to_string()}
+                    "sender":{"sender_type":"user","sender_id":{"open_id":sender}},
+                    "message":{"message_id":message,"chat_id":chat,"chat_type":chat_type,
+                        "message_type":kind,"content":content.to_string(),"mentions":mentions}
                 }
             })).unwrap(),
             ..Frame::default()
@@ -454,6 +494,14 @@ fn configure_bot(server: &HttpHost) -> Value {
 }
 
 fn configure_bot_definition(server: &HttpHost, definition: &Value) -> Value {
+    configure_bot_members(
+        server,
+        definition,
+        &json!({"users":[USER],"send_users":[USER],"private_only":true}),
+    )
+}
+
+fn configure_bot_members(server: &HttpHost, definition: &Value, members: &Value) -> Value {
     let (status, created) = server.request(
         "POST",
         "/graphs",
@@ -465,11 +513,7 @@ fn configure_bot_definition(server: &HttpHost, definition: &Value) -> Value {
     assert_eq!(status, 200, "{current}");
     assert_eq!(current["platform"], "feishu");
     assert_eq!(current["configured"], false);
-    let (status, saved) = server.request(
-        "PUT",
-        &base,
-        Some(&json!({"users":[USER],"send_users":[USER],"private_only":true})),
-    );
+    let (status, saved) = server.request("PUT", &base, Some(members));
     assert_eq!(status, 200, "{saved}");
     let (status, credentials) = server.request("GET", &format!("{base}/credentials"), None);
     assert_eq!(status, 200, "{credentials}");
@@ -526,10 +570,20 @@ fn waiting(host: &Host, store: &SessionStore, session: &str, run: &str, count: u
 #[test]
 #[ignore = "requires pinned Goose, Bubblewrap, relay and sibling Feishu Gateway binary; all endpoints are loopback fixtures"]
 fn private_text_roundtrip_reuses_run_and_native_history_without_duplicate_delivery() {
+    text_roundtrip(false);
+}
+
+#[test]
+#[ignore = "requires pinned Goose, Bubblewrap, relay and sibling Feishu Gateway; platform and provider are loopback fixtures"]
+fn authorized_group_members_share_run_and_native_history_with_original_group_replies() {
+    text_roundtrip(true);
+}
+
+fn text_roundtrip(group: bool) {
     let first_gate = Gate::new();
     let activity_gate = Gate::new();
     let second_gate = Gate::new();
-    let provider = Provider::new("goose-feishu-private-roundtrip", vec![
+    let provider = Provider::new(if group { "goose-feishu-group-roundtrip" } else { "goose-feishu-private-roundtrip" }, vec![
         command("set -eu; test ! -e state.txt; printf first > state.txt; printf feishu-first-tool-success")
             .expect_request_contains(FIRST_INPUT).gated(&first_gate),
         Step::tool("final_result", json!({"summary":FIRST_REPLY,"route":"reply","files":[]}))
@@ -539,12 +593,24 @@ fn private_text_roundtrip_reuses_run_and_native_history_without_duplicate_delive
         Step::tool("final_result", json!({"summary":SECOND_REPLY,"route":"reply","files":[]}))
             .after("feishu-second-tool-success").gated(&second_gate),
     ]);
-    let platform = Platform::new();
+    let mut platform = Platform::new();
+    platform.group = group;
     let host = Host::new(&json!({"entry":"work","ops":{"work":{"run":"true"}},"nodes":[{"id":"work","op":"work"}],"edges":[]}))
         .default_runtime().with_extra_environment([("ANCHOR_FEISHU_API_BASE_URL", platform.api_base_url.as_str())]);
     let (gateway, installed) = install_plugin(&host);
     let server = host.serve(&provider);
-    let binding = configure_bot(&server);
+    let binding = if group {
+        configure_bot_members(
+            &server,
+            &graph(),
+            &json!({
+                "users":[USER,GROUP_USER],"send_users":[USER,GROUP_USER],
+                "private_only":false,"groups":[GROUP_CHAT],
+            }),
+        )
+    } else {
+        configure_bot(&server)
+    };
     assert!(provider.requests().is_empty());
     assert_eq!(platform.snapshot()["connected"], true);
 
@@ -559,8 +625,16 @@ fn private_text_roundtrip_reuses_run_and_native_history_without_duplicate_delive
     let session = &sessions[0];
     assert_eq!(session.graph, GRAPH);
     assert_eq!(session.channel["source"], "feishu");
-    assert_eq!(session.channel["sender_id"], USER);
-    assert_eq!(session.channel["conversation_id"], CHAT);
+    if group {
+        assert!(!session.channel.contains_key("sender_id"));
+        assert_eq!(session.channel["conversation_kind"], "group");
+    } else {
+        assert_eq!(session.channel["sender_id"], USER);
+    }
+    assert_eq!(
+        session.channel["conversation_id"],
+        if group { GROUP_CHAT } else { CHAT }
+    );
     assert_eq!(session.run_ids.len(), 1);
     let run = &session.run_ids[0];
     let first_turn = store.list_turns("local", &session.id).unwrap();
@@ -659,6 +733,21 @@ fn private_text_roundtrip_reuses_run_and_native_history_without_duplicate_delive
     );
     let turns = store.list_turns("local", &session.id).unwrap();
     assert_eq!(turns.len(), 2);
+    if group {
+        for (message, sender) in [(FIRST_MESSAGE, USER), (SECOND_MESSAGE, GROUP_USER)] {
+            let mut digest = Sha256::new();
+            digest.update(b"anchor-feishu-inbound-v1\0feishu\0");
+            digest.update(message.as_bytes());
+            let inbound = store
+                .get_channel_inbound(
+                    "local",
+                    &session.id,
+                    &format!("feishu-{:x}", digest.finalize()),
+                )
+                .unwrap();
+            assert_eq!(inbound.request.identity.sender_id, sender);
+        }
+    }
     assert!(
         turns
             .iter()
@@ -740,6 +829,7 @@ fn private_text_roundtrip_reuses_run_and_native_history_without_duplicate_delive
     );
     host.evidence_report(&provider, "tests/goose_feishu.rs", json!({
         "supervised_real_feishu_gateway":true,"loopback_binary_websocket_and_rest":true,
+        "group_conversation":group,"different_group_members":group,
         "ack_before_model_response":first_ack,"duplicate_message_ack":duplicate_ack,"second_ack":second_ack,
         "same_run":run,"same_session":session.id,"same_native_session":second_native["session_id"],
         "dynamic_native_tool_activity_before_final_reply":true,"markdown_schema_2_reply":true,

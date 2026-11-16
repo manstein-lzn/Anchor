@@ -12,6 +12,7 @@ use std::{
 pub(super) struct WorkspaceFiles {
     directory: File,
     canonical: PathBuf,
+    excluded: Vec<PathBuf>,
 }
 
 impl WorkspaceFiles {
@@ -27,7 +28,13 @@ impl WorkspaceFiles {
         Ok(Self {
             directory,
             canonical,
+            excluded: Vec::new(),
         })
+    }
+
+    pub(super) fn with_excluded_paths(mut self, paths: Vec<PathBuf>) -> Self {
+        self.excluded = paths;
+        self
     }
 
     pub(super) fn read(&self, relative: &Path) -> io::Result<Vec<u8>> {
@@ -61,12 +68,19 @@ impl WorkspaceFiles {
     }
 
     fn relative<'a>(&self, resolved: &'a Path) -> io::Result<&'a Path> {
-        resolved.strip_prefix(&self.canonical).map_err(|_| {
+        let relative = resolved.strip_prefix(&self.canonical).map_err(|_| {
             io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 "path resolves outside /workspace",
             )
-        })
+        })?;
+        if self.excluded.iter().any(|path| relative.starts_with(path)) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "project path is excluded",
+            ));
+        }
+        Ok(relative)
     }
 }
 

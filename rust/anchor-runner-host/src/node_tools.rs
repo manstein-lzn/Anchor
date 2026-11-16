@@ -78,6 +78,7 @@ pub(crate) struct NodeTools {
     preview_bytes: usize,
     development_projects: Option<(PathBuf, PathBuf)>,
     commands_allowed: bool,
+    excluded_paths: Vec<PathBuf>,
 }
 
 impl NodeTools {
@@ -102,6 +103,7 @@ impl NodeTools {
             preview_bytes: DEFAULT_PREVIEW_BYTES,
             development_projects: None,
             commands_allowed: true,
+            excluded_paths: Vec::new(),
         }
     }
 
@@ -125,6 +127,11 @@ impl NodeTools {
 
     pub(crate) fn with_command_authority(mut self, allowed: bool) -> Self {
         self.commands_allowed = allowed;
+        self
+    }
+
+    pub(crate) fn with_excluded_paths(mut self, paths: Vec<PathBuf>) -> Self {
+        self.excluded_paths = paths;
         self
     }
 
@@ -369,9 +376,11 @@ fn prune_spill(directory: &Path, keep: usize) -> std::io::Result<()> {
 
 impl NodeTools {
     fn workspace_files(&self) -> Result<workspace_files::WorkspaceFiles, ToolError> {
-        workspace_files::WorkspaceFiles::open(&self.workspace).map_err(|error| {
-            ToolError::Failed(format!("anchor file access is unavailable: {error}"))
-        })
+        workspace_files::WorkspaceFiles::open(&self.workspace)
+            .map(|files| files.with_excluded_paths(self.excluded_paths.clone()))
+            .map_err(|error| {
+                ToolError::Failed(format!("anchor file access is unavailable: {error}"))
+            })
     }
 
     fn relative_candidate(&self, tool: &str, path: &str) -> Result<PathBuf, ToolError> {
@@ -435,11 +444,25 @@ impl NodeTools {
             let relative = Path::new(&arguments.path)
                 .strip_prefix(&mount.destination)
                 .map_err(|_| self.invalid_path_arguments(READ_TOOL_NAME, "invalid input path"))?;
+            // Task attachments can bind one file, not a directory. Open that
+            // exact authorized source through the same no-symlink reader.
+            let (source, relative) = if relative.as_os_str().is_empty() {
+                (
+                    mount.source.parent().ok_or_else(|| {
+                        self.invalid_path_arguments(READ_TOOL_NAME, "invalid input source")
+                    })?,
+                    Path::new(mount.source.file_name().ok_or_else(|| {
+                        self.invalid_path_arguments(READ_TOOL_NAME, "invalid input source")
+                    })?),
+                )
+            } else {
+                (mount.source.as_path(), relative)
+            };
             let relative = relative
                 .to_str()
                 .ok_or_else(|| self.invalid_path_arguments(READ_TOOL_NAME, "invalid input path"))?;
             let mut file =
-                crate::resource_read::open_resource(&mount.source, relative).map_err(|error| {
+                crate::resource_read::open_resource(source, relative).map_err(|error| {
                     ToolError::Failed(format!("anchor_read input unavailable: {error}"))
                 })?;
             let mut bytes = Vec::new();

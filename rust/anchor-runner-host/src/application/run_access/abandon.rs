@@ -292,6 +292,8 @@ mod tests {
                     attachments: Default::default(),
                     run_id: None,
                     replace_running: true,
+                    bot_origin: None,
+                    platform_message_id: None,
                 },
             )
             .unwrap();

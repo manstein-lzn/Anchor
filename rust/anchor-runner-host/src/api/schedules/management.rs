@@ -647,7 +647,7 @@ fn schedule_store_unavailable() -> ApplicationError {
     ApplicationError::Storage("schedule store unavailable".into())
 }
 
-fn management_error(failure: ApplicationError, missing: &str) -> HttpResponse {
+pub(in crate::api) fn management_error(failure: ApplicationError, missing: &str) -> HttpResponse {
     match failure {
         ApplicationError::Missing => error(StatusCode::NOT_FOUND, missing),
         ApplicationError::Invalid(message) => error(StatusCode::BAD_REQUEST, message),

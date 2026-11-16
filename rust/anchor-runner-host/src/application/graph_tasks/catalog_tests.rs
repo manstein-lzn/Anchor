@@ -67,6 +67,8 @@ impl Task {
                     attachments: Default::default(),
                     run_id: None,
                     replace_running: false,
+                    bot_origin: None,
+                    platform_message_id: None,
                 },
             )
             .unwrap();
@@ -289,6 +291,67 @@ async fn completed_once_requires_admission_success_and_handled_result_without_de
     let reopened =
         RunApplication::new(data_root, catalog_root).with_schedule_management(task.plans.clone());
     assert_eq!(reopened.list_graphs().await.unwrap(), expected);
+}
+
+#[tokio::test]
+async fn direct_tasks_collect_only_after_success_and_handling_and_return_for_reuse() {
+    let mut task = Task::new().await;
+    task.plans.0.lock().unwrap().clear();
+    assert!(!task.collected().await, "an unused task is still a draft");
+    task.admit("task-run", "direct-request");
+    assert!(
+        !task.collected().await,
+        "still executing without a schedule"
+    );
+    fixtures::finish(&task.app, "task-run");
+    assert!(!task.collected().await, "not queued");
+    task.queue("task-run");
+    assert!(!task.collected().await, "not handled");
+    let before = task.app.read_graph(&task.graph).unwrap();
+    task.handle("direct-result");
+    assert!(
+        task.collected().await,
+        "a direct task needs no retained plan"
+    );
+    assert_eq!(task.app.read_graph(&task.graph).unwrap(), before);
+    assert!(task.app.read_run("task-run").unwrap().unwrap().is_settled());
+    let expected = task.app.list_graphs().await.unwrap();
+    let data_root = task.app.data_root.clone();
+    let catalog_root = task.app.catalog_root.clone();
+    drop(task.app);
+    let reopened = RunApplication::new(data_root, catalog_root);
+    assert!(
+        reopened
+            .completed_task_graphs(&[task.graph.clone()])
+            .is_empty(),
+        "missing schedule authority cannot prove absence of plans"
+    );
+    task.app = reopened.with_schedule_management(task.plans.clone());
+    assert_eq!(task.app.list_graphs().await.unwrap(), expected);
+
+    task.plans.0.lock().unwrap().push(GraphScheduleReference {
+        graph: task.graph.clone(),
+        request_id: "new-occurrence".into(),
+        once: false,
+        enabled: true,
+    });
+    assert!(!task.collected().await, "now a recurring task");
+    task.plans.0.lock().unwrap()[0].enabled = false;
+    assert!(
+        !task.collected().await,
+        "paused recurrence remains reusable"
+    );
+    task.plans.0.lock().unwrap().clear();
+    assert!(task.collected().await);
+    task.admit("new-run", "new-direct-request");
+    assert!(!task.collected().await, "another direct execution");
+    fixtures::fail(&task.app, "new-run", "work", "fixture failure");
+    task.queue("new-run");
+    task.handle("failed-result");
+    assert!(
+        !task.collected().await,
+        "a failed direct task stays visible"
+    );
 }
 
 #[tokio::test]

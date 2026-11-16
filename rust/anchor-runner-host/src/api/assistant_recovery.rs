@@ -126,6 +126,13 @@ async fn resume_instance(
     if state.application.run_is_active(&from).await {
         return Ok(());
     }
+    if state
+        .application
+        .assistant_has_pending_handover(&from)
+        .map_err(|error| format!("{error:?}"))?
+    {
+        return Err("assistant belongs to an observed publication handover; its publisher must reconcile it".into());
+    }
     let recovery = match state
         .application
         .metadata(&from)

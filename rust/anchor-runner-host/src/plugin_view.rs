@@ -81,6 +81,17 @@ impl From<crate::tool_host::PreparationError> for Unusable {
     }
 }
 
+impl From<anchor_library::RevisionError> for Unusable {
+    fn from(error: anchor_library::RevisionError) -> Self {
+        match error {
+            anchor_library::RevisionError::DefaultUnavailable => {
+                Self::KnownFailure("plugin_default_publication_pending".into())
+            }
+            error => Self::recorded(error.to_string()),
+        }
+    }
+}
+
 /// The file that makes a directory a Python environment. Without it `sys.prefix`
 /// collapses to the interpreter's own prefix and the view imports nothing.
 pub(crate) const VIEW_CONFIGURATION: &str = "pyvenv.cfg";
@@ -271,7 +282,30 @@ impl PreparedPlugin {
     ) -> Result<Self, Unusable> {
         Ok(Self {
             dependency_view: prepare_definition_view(library_root, definition)?,
-            writable: mutable_grants(definition)?,
+            writable: mutable_grants(definition, &definition.directory)?,
+        })
+    }
+
+    pub(crate) fn from_source(
+        source: &anchor_library::ResolvedPluginSource,
+    ) -> Result<Self, Unusable> {
+        let definition = source.definition();
+        let dependency_view = match source.dependency_identity() {
+            Some(identity) => Some(
+                PreparedView::for_candidate(
+                    source.dependency_view().ok_or_else(|| {
+                        Unusable::recorded("retained Plugin dependency view is missing")
+                    })?,
+                    &store_root(source.library_root()),
+                    &identity.declaration_digest,
+                )
+                .map_err(Unusable::recorded)?,
+            ),
+            None => prepare_definition_view(source.library_root(), definition)?,
+        };
+        Ok(Self {
+            dependency_view,
+            writable: mutable_grants(definition, source.mutable_root())?,
         })
     }
 
@@ -283,7 +317,8 @@ impl PreparedPlugin {
         let definition = catalog.definition(id).map_err(|error| error.to_string())?;
         Ok(Self {
             dependency_view,
-            writable: mutable_grants(&definition).map_err(|error| error.to_string())?,
+            writable: mutable_grants(&definition, &definition.directory)
+                .map_err(|error| error.to_string())?,
         })
     }
 
@@ -323,12 +358,15 @@ impl PreparedPlugin {
     }
 }
 
-fn mutable_grants(definition: &PluginDefinition) -> Result<Vec<WritableInput>, Unusable> {
+fn mutable_grants(
+    definition: &PluginDefinition,
+    mutable_root: &Path,
+) -> Result<Vec<WritableInput>, Unusable> {
     let plugin = &definition.id;
     let mut writable = Vec::with_capacity(definition.mutable.paths().len());
     let resolved = definition
         .mutable
-        .resolve(&definition.directory)
+        .resolve(mutable_root)
         .map_err(Unusable::recorded)?;
     for (declared, path) in definition.mutable.paths().iter().zip(resolved) {
         if !path.exists() {

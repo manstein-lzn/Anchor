@@ -21,6 +21,7 @@ pub(crate) mod plugin_candidates;
 pub(crate) mod plugins;
 pub(crate) mod run_access;
 pub(crate) mod run_projection;
+pub(crate) mod schedule_subscriptions;
 pub(crate) mod scheduling;
 pub(crate) mod session_calls;
 mod task_results;
@@ -111,6 +112,8 @@ pub(crate) struct RunApplication {
     pub(crate) data_root: PathBuf,
     pub(crate) library_root_override: Option<PathBuf>,
     pub(crate) bwrap: PathBuf,
+    pub(crate) codex_bridge: Option<Arc<crate::codex_bridge_tools::BridgeGrant>>,
+    pub(crate) project_workspaces: Arc<crate::project_tools::ProjectGrants>,
     catalog_root: PathBuf,
     configured_graph: Option<(String, PathBuf)>,
     admission: Arc<Mutex<()>>,
@@ -298,6 +301,8 @@ impl RunApplication {
         Self {
             library_root_override: None,
             bwrap: "bwrap".into(),
+            codex_bridge: None,
+            project_workspaces: Arc::default(),
             data_root,
             catalog_root,
             configured_graph: None,
@@ -332,6 +337,8 @@ impl RunApplication {
     ) -> Self {
         self.library_root_override = configuration.library_root.clone();
         self.bwrap = configuration.bwrap.clone();
+        self.codex_bridge = configuration.codex_bridge.clone();
+        self.project_workspaces = configuration.project_workspaces.clone();
         self
     }
 

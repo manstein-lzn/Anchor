@@ -2,6 +2,8 @@ use super::{ApplicationError, RunApplication};
 
 impl RunApplication {
     pub(crate) async fn recover_detached_at_startup(&self) -> Result<(), ApplicationError> {
+        // Finish first creation before HTTP can report healthy or retention can run.
+        self.kernel_runs(true)?;
         self.recover_detached().await?;
         // An abandon request accepted just before a crash must still make its
         // Run terminal: it is the precondition for replacing a Graph's Plugin

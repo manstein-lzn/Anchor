@@ -48,6 +48,10 @@ pub(crate) struct ModelUpdate {
 #[serde(deny_unknown_fields)]
 struct ManagedModel {
     format: u32,
+    // Existing single-installation state starts at zero; the next settings save
+    // persists the revision and removes the need for the default.
+    #[serde(default)]
+    revision: u64,
     current: ModelFields,
     #[serde(default)]
     history: Vec<ModelFields>,
@@ -60,6 +64,7 @@ impl Default for ManagedModel {
     fn default() -> Self {
         Self {
             format: 3,
+            revision: 0,
             current: ModelFields::default(),
             history: vec![],
             credentials: BTreeMap::new(),
@@ -68,6 +73,7 @@ impl Default for ManagedModel {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct ModelConfiguration {
     root: PathBuf,
     external: BTreeMap<String, String>,
@@ -153,6 +159,10 @@ impl ModelConfiguration {
     fn publish(&self, managed: &ManagedModel) -> Result<(), String> {
         let mut managed = managed.clone();
         managed.format = 3;
+        managed.revision = managed
+            .revision
+            .checked_add(1)
+            .ok_or("model configuration revision exhausted")?;
         let mut file = tempfile::NamedTempFile::new_in(&self.root)
             .map_err(|_| "model configuration could not be saved")?;
         file.as_file()

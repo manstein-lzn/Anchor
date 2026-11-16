@@ -364,6 +364,7 @@ impl GoosePilot {
                 custom_notifications: true,
                 form_elicitation: true,
             },
+            None,
         )
         .await?;
         let observation = {

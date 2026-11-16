@@ -6,9 +6,12 @@ mod assistant_plugins;
 mod attachments;
 mod channel_inputs;
 mod channel_notifications;
+mod channel_platform;
 mod channel_replies;
 mod channel_supervisor;
 mod channel_tools;
+mod codex_bridge_service;
+mod codex_bridge_tools;
 mod dependency_provision;
 mod deployment;
 mod durable_write;
@@ -16,9 +19,11 @@ mod execution;
 mod fact_recorder;
 mod goose_acp;
 mod goose_tool_context;
+mod harness_guidance;
 mod host_fs;
 mod local_inputs;
 mod pilot_attachments;
+mod project_tools;
 
 mod conversation_resources;
 mod credential_store;
@@ -40,6 +45,14 @@ mod resource_read;
 mod runtime_configuration;
 mod runtime_management;
 use artifacts::HostArtifacts;
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../tests/support/runtime_fixture.rs"]
+mod fixture;
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../tests/support/goose_fixture.rs"]
+mod goose_fixture;
 mod graph_task_tools;
 mod node_host;
 mod node_tools;
@@ -277,11 +290,11 @@ fn reject_snapshot(snapshot: &GraphSnapshot) -> Result<(), String> {
             continue;
         }
         if let Some(host) = op.get("host") {
-            if !matches!(
+            let session = matches!(
                 host.get("operation").and_then(Value::as_str),
                 Some(crate::assistant::WAIT_INPUT | crate::assistant::REPLY)
-            ) || !node.plugins.is_empty()
-            {
+            );
+            if !session || !node.plugins.is_empty() {
                 return Err("unsupported host operation configuration".into());
             }
             continue;
@@ -329,6 +342,8 @@ pub(crate) struct HostConfiguration {
     pub(crate) catalog_root: Option<PathBuf>,
     pub(crate) library_root: Option<PathBuf>,
     pub(crate) bwrap: PathBuf,
+    pub(crate) codex_bridge: Option<Arc<codex_bridge_tools::BridgeGrant>>,
+    pub(crate) project_workspaces: Arc<project_tools::ProjectGrants>,
 }
 
 impl Default for HostConfiguration {
@@ -338,20 +353,43 @@ impl Default for HostConfiguration {
             catalog_root: None,
             library_root: None,
             bwrap: "bwrap".into(),
+            codex_bridge: None,
+            project_workspaces: Arc::default(),
         }
     }
 }
 
 impl HostConfiguration {
-    fn from_env() -> Self {
-        Self {
+    fn from_env() -> Result<Self, String> {
+        let project_workspaces = env::var("ANCHOR_PROJECT_WORKSPACES")
+            .ok()
+            .map(|value| project_tools::ProjectGrants::parse(&value))
+            .transpose()?
+            .unwrap_or_default();
+        let codex_bridge = env::var("ANCHOR_CODEX_BRIDGE_MANAGER_GRAPHS")
+            .ok()
+            .map(|graphs| {
+                let graphs = serde_json::from_str::<Vec<String>>(&graphs).map_err(|_| {
+                    "ANCHOR_CODEX_BRIDGE_MANAGER_GRAPHS must be a JSON string array".to_owned()
+                })?;
+                let runtime = env::var_os("XDG_RUNTIME_DIR")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| {
+                        PathBuf::from(format!("/run/user/{}", rustix::process::getuid().as_raw()))
+                    });
+                codex_bridge_tools::BridgeGrant::new(graphs, runtime).map(Arc::new)
+            })
+            .transpose()?;
+        Ok(Self {
             state_root: env::var_os("ANCHOR_RUNNER_STATE_ROOT").map(PathBuf::from),
             catalog_root: env::var_os("ANCHOR_RUNNER_CATALOG_ROOT").map(PathBuf::from),
             library_root: env::var_os("ANCHOR_RUNNER_LIBRARY_ROOT").map(PathBuf::from),
             bwrap: env::var_os("ANCHOR_BWRAP")
                 .map(PathBuf::from)
                 .unwrap_or_else(|| "bwrap".into()),
-        }
+            codex_bridge,
+            project_workspaces: Arc::new(project_workspaces),
+        })
     }
 
     fn state_root(&self) -> Result<&std::path::Path, String> {
@@ -386,17 +424,15 @@ fn acquire_deployment_writer(
 }
 fn make_host_with_control(
     application: &application::RunApplication,
-    run_id: &str,
+    _run_id: &str,
     _control: HostControl,
     library_root: Option<PathBuf>,
     runtime_configuration: Option<Arc<runtime_configuration::RuntimeConfiguration>>,
 ) -> Result<(HostArtifacts, HostNodes), String> {
     let state = &application.data_root;
     let work_root = env_path("ANCHOR_RUNNER_WORKSPACE_ROOT")?;
-    let _ = run_id;
     create_durable_directory(&state.join("artifacts")).map_err(|e| e.to_string())?;
-    // Authorized roots are canonicalized when the sandbox is built, so the
-    // retention root must exist before then.
+    // Authorized roots must exist before the sandbox canonicalizes them.
     create_durable_directory(&state.join("spill")).map_err(|e| e.to_string())?;
     create_durable_directory(&work_root).map_err(|e| e.to_string())?;
     let commands = env::var("ANCHOR_RUNNER_ALLOWED_COMMANDS")
@@ -412,18 +448,16 @@ fn make_host_with_control(
     .authorize_readonly_input_root(state.join("artifacts"))
     .authorize_readonly_destination_root("/in")
     .authorize_readonly_destination_root("/plugins")
-    // Node command output beyond the stream previews is retained here and
-    // mounted read-only at /spill.
     .authorize_readonly_destination_root("/spill")
     .authorize_spill_root(state.join("spill"))
     .allow_network();
-    // Each invocation authorizes its current Plugin views and mutable paths;
-    // the deployment policy does not grant the entire Library.
     let tool_environment = tool_environment::ToolEnvironment::for_library(
         application.library_root_override.as_deref(),
     )?;
     let sandbox = Arc::new(
-        BubblewrapSandbox::new(tool_environment.authorize(policy)).map_err(|e| e.to_string())?,
+        BubblewrapSandbox::new(tool_environment.authorize(policy))
+            .map_err(|e| e.to_string())?
+            .with_command_timeout_seconds(node_host::envelope::configured_command_timeout()),
     );
     let fake_plugin_ids = env::var("ANCHOR_RUNNER_FAKE_PLUGINS")
         .unwrap_or_default()
@@ -435,8 +469,6 @@ fn make_host_with_control(
     mcp.environment = tool_environment;
     let artifacts = HostArtifacts::new(state.join("artifacts"), work_root.clone());
     let tools = tool_host::PluginToolHost::new(fake_plugin_ids);
-    // The Session store is the platform's; this host only asks it what the
-    // Session mounted. The resolver never opens that database itself.
     let session_mounts = Arc::new(plugin_mounts::SessionMounts::open(state)?);
     let io_resolver = Arc::new(
         node_host::HostIoResolver::new(
@@ -450,7 +482,8 @@ fn make_host_with_control(
             execution::tool_assembly::new(application.clone()),
         )
         .with_library_root(library_root)
-        .with_runtime_configuration(runtime_configuration),
+        .with_runtime_configuration(runtime_configuration)
+        .with_disclosure_configuration(tool_disclosure::snapshot_configuration()),
     );
     let goose_nodes = goose_acp::GooseNodePort::from_env(
         state,
@@ -994,7 +1027,7 @@ async fn main() -> io::Result<()> {
     if let Some(args) = op::route_cli_args() {
         std::process::exit(op::run_route_cli(&args));
     }
-    let configuration = Arc::new(HostConfiguration::from_env());
+    let configuration = Arc::new(HostConfiguration::from_env().map_err(io::Error::other)?);
     if env::args().nth(1).as_deref() == Some("serve") {
         return api::serve(configuration).await;
     }

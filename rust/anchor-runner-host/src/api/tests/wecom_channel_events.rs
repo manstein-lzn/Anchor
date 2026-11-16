@@ -1,7 +1,7 @@
 use super::*;
 use crate::{
-    api::wecom as intake,
-    application::channel_management::{ChannelPlatform, fake::FakeChannels},
+    api::wecom as intake, application::channel_management::fake::FakeChannels,
+    channel_platform::ChannelPlatform,
 };
 use anchor_platform_session::{ChannelConversationKind, ChannelDeliveryStatus};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -91,11 +91,7 @@ async fn feishu_callback_rejects_foreign_shapes_and_media_without_admission_byte
     install_bot(&mut state, ChannelPlatform::Feishu);
     let app = router_with_web_root(state.clone(), root.path().join("web"));
     let mut invalid = Vec::new();
-    for (field, value) in [
-        ("chat_type", "group"),
-        ("chat_type", "p2p"),
-        ("request_id", "another-message"),
-    ] {
+    for (field, value) in [("chat_type", "p2p"), ("request_id", "another-message")] {
         let mut body = feishu_event("hello");
         body["event"]["metadata"][field] = json!(value);
         invalid.push(body);
@@ -103,6 +99,25 @@ async fn feishu_callback_rejects_foreign_shapes_and_media_without_admission_byte
     for kind in ["voice", "mixed"] {
         let mut body = feishu_event("caption");
         body["event"]["message_type"] = json!(kind);
+        body["event"]["attachments"] =
+            json!([{"name":"note.txt", "data_base64":"aGVsbG8=", "media_type":"text/plain"}]);
+        invalid.push(body);
+    }
+    for kind in ["image", "file"] {
+        let mut body = feishu_event("standalone group media is not admitted");
+        body["event"]["metadata"]["chat_type"] = json!("group");
+        body["event"]["message_type"] = json!(kind);
+        body["event"]["attachments"] =
+            json!([{"name":"note.txt", "data_base64":"aGVsbG8=", "media_type":"text/plain"}]);
+        invalid.push(body);
+    }
+    for text in ["peer posts remain unsupported", ""] {
+        let mut body = feishu_event(text);
+        body["event"]["message_type"] = json!("post");
+        body["event"]["metadata"]["chat_type"] = json!("group");
+        body["event"]["metadata"]["sender_type"] = json!("bot");
+        body["event"]["metadata"]["root_inbound_id"] =
+            json!(intake::inbound_id_for("feishu", "human-root"));
         body["event"]["attachments"] =
             json!([{"name":"note.txt", "data_base64":"aGVsbG8=", "media_type":"text/plain"}]);
         invalid.push(body);
@@ -149,6 +164,20 @@ async fn feishu_callback_rejects_foreign_shapes_and_media_without_admission_byte
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
     }
+    for chat_type in ["single", "group"] {
+        let mut body = feishu_event(" ");
+        body["event"]["message_type"] = json!("post");
+        body["event"]["metadata"]["chat_type"] = json!(chat_type);
+        let (status, refused) = authorized_call(
+            app.clone(),
+            "POST",
+            "/channels/fixture/events",
+            CALLBACK,
+            body,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+    }
     assert!(state.application.records().unwrap().is_empty());
     assert!(!state.data_root.join("channel-inputs").exists());
     assert!(!state.data_root.join("platform/sessions.sqlite").exists());
@@ -158,6 +187,10 @@ async fn feishu_callback_rejects_foreign_shapes_and_media_without_admission_byte
 async fn feishu_admission_requires_both_inbound_and_reply_recipient_authorization() {
     let (root, mut state) = fixture();
     let port = install_bot(&mut state, ChannelPlatform::Feishu);
+    port.update("fixture", |bot| {
+        bot.binding.private_only = false;
+        bot.binding.groups = vec!["oc_chat-1".into()];
+    });
     let app = router_with_web_root(state.clone(), root.path().join("web"));
     for (users, send_users) in [
         (vec!["another-user".into()], vec!["*".into()]),
@@ -167,15 +200,55 @@ async fn feishu_admission_requires_both_inbound_and_reply_recipient_authorizatio
             bot.binding.users = users;
             bot.binding.send_users = send_users;
         });
-        let (status, refused) = authorized_call(
-            app.clone(),
-            "POST",
-            "/channels/fixture/events",
-            CALLBACK,
-            feishu_event("hello"),
-        )
-        .await;
-        assert_eq!(status, StatusCode::FORBIDDEN, "{refused}");
+        for chat_type in ["single", "group"] {
+            for kind in ["text", "post"] {
+                let mut body = feishu_event("hello");
+                body["event"]["message_type"] = json!(kind);
+                body["event"]["metadata"]["chat_type"] = json!(chat_type);
+                let (status, refused) = authorized_call(
+                    app.clone(),
+                    "POST",
+                    "/channels/fixture/events",
+                    CALLBACK,
+                    body,
+                )
+                .await;
+                assert_eq!(status, StatusCode::FORBIDDEN, "{refused}");
+            }
+        }
+    }
+    assert!(state.application.records().unwrap().is_empty());
+    assert!(!state.data_root.join("platform/sessions.sqlite").exists());
+}
+
+#[tokio::test]
+async fn feishu_groups_require_current_explicit_authorization_before_admission() {
+    let (root, mut state) = fixture();
+    let port = install_bot(&mut state, ChannelPlatform::Feishu);
+    let app = router_with_web_root(state.clone(), root.path().join("web"));
+    for (private_only, groups) in [
+        (true, vec!["oc_chat-1".into()]),
+        (false, vec![]),
+        (false, vec!["oc_another-chat".into()]),
+    ] {
+        port.update("fixture", |bot| {
+            bot.binding.private_only = private_only;
+            bot.binding.groups = groups;
+        });
+        for kind in ["text", "post"] {
+            let mut body = feishu_event("not authorized");
+            body["event"]["message_type"] = json!(kind);
+            body["event"]["metadata"]["chat_type"] = json!("group");
+            let (status, refused) = authorized_call(
+                app.clone(),
+                "POST",
+                "/channels/fixture/events",
+                CALLBACK,
+                body,
+            )
+            .await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{refused}");
+        }
     }
     assert!(state.application.records().unwrap().is_empty());
     assert!(!state.data_root.join("platform/sessions.sqlite").exists());
@@ -188,32 +261,72 @@ async fn both_platforms_share_admission_and_keep_distinct_historical_receipts() 
     image::DynamicImage::new_rgb8(2, 2)
         .write_to(&mut png, image::ImageFormat::Png)
         .unwrap();
-    for (platform, kind, attachments) in [
-        (ChannelPlatform::Wecom, "text", json!([])),
-        (ChannelPlatform::Feishu, "text", json!([])),
+    let image = json!({"name":"input.png","data_base64":STANDARD.encode(png.get_ref()),"media_type":"image/png"});
+    let post_attachments = json!([
+        image,
+        {"name":"second.png","data_base64":STANDARD.encode(png.get_ref()),"media_type":"image/png"},
+        {"name":"notes.txt","data_base64":STANDARD.encode(b"post attachment"),"media_type":"text/plain"}
+    ]);
+    for (platform, group, kind, text, attachments) in [
+        (ChannelPlatform::Wecom, false, "text", "hello", json!([])),
+        (ChannelPlatform::Feishu, false, "text", "hello", json!([])),
+        (ChannelPlatform::Feishu, true, "text", "hello", json!([])),
         (
             ChannelPlatform::Feishu,
+            false,
             "file",
+            "hello",
             json!([{"name":"input.txt","data_base64":STANDARD.encode(b"private feishu input"),"media_type":"text/plain"}]),
         ),
         (
             ChannelPlatform::Feishu,
+            false,
             "image",
-            json!([{"name":"input.png","data_base64":STANDARD.encode(png.get_ref()),"media_type":"image/png"}]),
+            "hello",
+            json!([image]),
         ),
+        (
+            ChannelPlatform::Feishu,
+            false,
+            "post",
+            "compare these images and notes",
+            post_attachments.clone(),
+        ),
+        (ChannelPlatform::Feishu, false, "post", "", json!([image])),
+        (
+            ChannelPlatform::Feishu,
+            true,
+            "post",
+            "compare these images and notes",
+            post_attachments,
+        ),
+        (ChannelPlatform::Feishu, true, "post", "", json!([image])),
     ] {
         let (root, mut state) = fixture();
         set_host_env(root.path());
         let port = install_bot(&mut state, platform);
         let mut body = if platform == ChannelPlatform::Wecom {
-            event("hello")
+            event(text)
         } else {
-            feishu_event("hello")
+            feishu_event(text)
         };
         body["event"]["message_type"] = json!(kind);
         body["event"]["attachments"] = attachments;
+        if group {
+            body["event"]["metadata"]["chat_type"] = json!("group");
+            port.update("fixture", |bot| {
+                bot.binding.private_only = false;
+                bot.binding.groups = vec!["oc_chat-1".into()];
+            });
+        }
+        // The fixture bypasses Host normalization; seed the stored attachment
+        // prompt but keep the original empty text for admission and settlement.
+        let mut seeded = body.clone();
+        if text.is_empty() {
+            seeded["event"]["text"] = json!("请查看随附文件并据此回复。");
+        }
         let (session, turn, work, _) =
-            seed_running_assistant_round_for_event(&state, &assistant_definition(), &body, 1);
+            seed_running_assistant_round_for_event(&state, &assistant_definition(), &seeded, 1);
         let sessions =
             SessionStore::open(state.data_root.join("platform/sessions.sqlite")).unwrap();
         let inbound_id = intake::inbound_id_for(
@@ -278,10 +391,18 @@ async fn both_platforms_share_admission_and_keep_distinct_historical_receipts() 
         let admitted = sessions
             .get_channel_inbound("local", &session, &inbound_id)
             .unwrap();
+        assert_eq!(
+            admitted.request.text.as_deref(),
+            seeded["event"]["text"].as_str()
+        );
         assert_eq!(admitted.request.identity.source, platform.as_str());
         assert_eq!(
             admitted.request.identity.conversation_kind,
-            ChannelConversationKind::Single
+            if group {
+                ChannelConversationKind::Group
+            } else {
+                ChannelConversationKind::Single
+            }
         );
         assert_eq!(
             admitted.request.identity.sender_id,
@@ -293,7 +414,7 @@ async fn both_platforms_share_admission_and_keep_distinct_historical_receipts() 
         );
         assert_eq!(
             admitted.request.attachments.files.len(),
-            if kind == "text" { 0 } else { 1 }
+            body["event"]["attachments"].as_array().unwrap().len()
         );
         let selected = crate::assistant::attachment_metadata_for_input(
             &metadata::load(&state.data_root, &work.run_id)
@@ -312,15 +433,18 @@ async fn both_platforms_share_admission_and_keep_distinct_historical_receipts() 
         .unwrap();
         if let Some(mount) = files.mount {
             assert_eq!(mount.destination, std::path::Path::new("/in/channel"));
-            let file = &admitted.request.attachments.files[0];
-            let bytes = STANDARD
-                .decode(
-                    body["event"]["attachments"][0]["data_base64"]
-                        .as_str()
-                        .unwrap(),
-                )
-                .unwrap();
-            assert_eq!(std::fs::read(mount.source.join(&file.name)).unwrap(), bytes);
+            for (file, upload) in admitted
+                .request
+                .attachments
+                .files
+                .iter()
+                .zip(body["event"]["attachments"].as_array().unwrap())
+            {
+                let bytes = STANDARD
+                    .decode(upload["data_base64"].as_str().unwrap())
+                    .unwrap();
+                assert_eq!(std::fs::read(mount.source.join(&file.name)).unwrap(), bytes);
+            }
             assert!(
                 mount.source.starts_with(
                     state
@@ -329,7 +453,10 @@ async fn both_platforms_share_admission_and_keep_distinct_historical_receipts() 
                         .join(format!("turn-{turn}"))
                 )
             );
-            assert_eq!(std::fs::read_dir(mount.source).unwrap().count(), 1);
+            assert_eq!(
+                std::fs::read_dir(mount.source).unwrap().count(),
+                admitted.request.attachments.files.len()
+            );
         } else {
             assert_eq!(kind, "text");
         }

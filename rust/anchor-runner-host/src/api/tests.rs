@@ -272,7 +272,12 @@ fn with_bot_of(
         .with_channel_management(Arc::new(FakeChannels::new().with(bot)));
 }
 
-async fn call(app: Router, method: &str, uri: &str, body: Option<&str>) -> (StatusCode, Value) {
+pub(crate) async fn call(
+    app: Router,
+    method: &str,
+    uri: &str,
+    body: Option<&str>,
+) -> (StatusCode, Value) {
     let request = Request::builder()
         .method(method)
         .uri(uri)

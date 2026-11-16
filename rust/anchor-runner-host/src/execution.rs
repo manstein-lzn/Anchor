@@ -53,6 +53,29 @@ impl PreparedExecution {
         // setup can publish any execution state or invocation inputs.
         crate::application::run_access::load(&state_root, &record.run_id)
             .map_err(|error| error.to_string())?;
+        let metadata = crate::run_metadata::load(&state_root, &record.run_id)
+            .map_err(|error| format!("local input Run identity unavailable: {error:?}"))?;
+        // Keep historical provenance, but never resume retired automation as ordinary work.
+        if metadata
+            .as_ref()
+            .is_some_and(crate::run_metadata::RunMetadata::is_retired_automation)
+        {
+            return Err("automatic Dreaming/experiment execution has been removed".into());
+        }
+        if record
+            .snapshot
+            .ops
+            .values()
+            .any(|operation| operation.get("host").is_some())
+            && (application.is_none()
+                || metadata
+                    .as_ref()
+                    .is_none_or(|metadata| metadata.assistant.is_none()))
+        {
+            return Err(
+                "Session host operations require an explicitly admitted assistant instance".into(),
+            );
+        }
         let (artifacts, nodes) = make_host_with_control(
             &reader,
             &record.run_id,
@@ -89,22 +112,6 @@ impl PreparedExecution {
             nodes,
             application,
         };
-        let metadata = crate::run_metadata::load(&state_root, &record.run_id)
-            .map_err(|error| format!("local input Run identity unavailable: {error:?}"))?;
-        if record
-            .snapshot
-            .ops
-            .values()
-            .any(|operation| operation.get("host").is_some())
-            && (execution.application.is_none()
-                || metadata
-                    .as_ref()
-                    .is_none_or(|metadata| metadata.assistant.is_none()))
-        {
-            return Err(
-                "Session host operations require an explicitly admitted assistant instance".into(),
-            );
-        }
         if let Some(metadata) = metadata {
             execution.bind_local_inputs(record, &metadata.graph)?;
         } else if !execution.nodes.io_resolver.local_inputs_configured() {
@@ -789,6 +796,48 @@ mod legacy_plugin_tests;
 mod graph_call_ancestry_tests {
     use super::*;
     use crate::run_metadata::{self as metadata, GraphCallSource, RunMetadata};
+
+    #[test]
+    fn retired_automation_remains_readable_but_cannot_prepare_execution() {
+        let root = tempfile::tempdir().unwrap();
+        let application = RunApplication::new(root.path().join("state"), root.path().into());
+        let record = crate::application::run_access::fixtures::work_record("retired-cycle");
+        crate::application::run_access::fixtures::create(&application, &record);
+        let mut metadata = RunMetadata::new(
+            record.run_id.clone(),
+            "dreaming".into(),
+            record.graph_digest.clone(),
+            root.path(),
+        )
+        .unwrap();
+        metadata.dreaming = Some(crate::run_metadata::DreamingRunContext {
+            schema_version: 1,
+            kind: crate::run_metadata::DreamingRunKind::Cycle,
+            cycle: "cycle/historical".into(),
+            managed_source: "historical".into(),
+        });
+        metadata::save(&application.data_root, &metadata).unwrap();
+        assert!(
+            application
+                .metadata(&record.run_id)
+                .unwrap()
+                .unwrap()
+                .is_retired_automation()
+        );
+        let prepared = PreparedExecution::prepare_with_catalog(
+            &record,
+            crate::HostControl {
+                cancellation: anchor_runtime::Cancellation::default(),
+            },
+            record.plugin_bindings.clone(),
+            application.clone(),
+        );
+        assert!(
+            matches!(prepared, Err(reason) if reason == "automatic Dreaming/experiment execution has been removed")
+        );
+        assert!(!application.data_root.join("artifacts").exists());
+        assert!(application.read_run(&record.run_id).unwrap().is_some());
+    }
 
     fn catalog(state: &std::path::Path) -> HostGraphCatalog {
         HostGraphCatalog {

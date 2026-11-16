@@ -10,11 +10,11 @@ use std::{collections::BTreeSet, path::Path, sync::Arc, time::Duration};
 /// Historical default for one `anchor_run` command.
 pub(crate) const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
-fn command_timeout_ceiling(wall_time_limit_seconds: Option<f64>) -> Duration {
-    let configured = std::env::var("ANCHOR_NODE_COMMAND_TIMEOUT_SECONDS")
+pub(crate) fn configured_command_timeout() -> Option<u64> {
+    std::env::var("ANCHOR_NODE_COMMAND_TIMEOUT_SECONDS")
         .ok()
-        .and_then(|value| value.trim().parse::<u64>().ok());
-    resolve_command_ceiling(configured, wall_time_limit_seconds)
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|seconds| *seconds > 0)
 }
 
 // Keep the existing deployment/node ceiling semantics, including the historical
@@ -43,6 +43,13 @@ pub(crate) struct InvocationEnvelope {
 }
 
 impl InvocationEnvelope {
+    pub(crate) fn bind_input_guidance(
+        &mut self,
+        guidance: &crate::harness_guidance::InputGuidance,
+    ) {
+        self.description["input_guidance"] = guidance.identity();
+        self.description = anchor_facts::canonical(&self.description);
+    }
     /// Commands on both paths have a private /proc. Do not apply this command
     /// grant to Plugin MCP processes, whose launch policy is unchanged.
     pub(crate) fn command_sandbox(&self) -> BubblewrapSandbox {
@@ -84,7 +91,10 @@ pub(super) fn invocation_envelope(
     } else {
         NetworkPolicy::Disabled
     };
-    let timeout_ceiling = command_timeout_ceiling(wall_time_limit_seconds);
+    let timeout_ceiling = resolve_command_ceiling(
+        floor.frozen_command_timeout_seconds(),
+        wall_time_limit_seconds,
+    );
     let op_timeout = Duration::from_secs_f64(wall_time_limit_seconds.unwrap_or(3600.0));
     // Reuse the actual tool-environment projection, not a second PATH/env rule.
     // This request never executes and contains no invocation identity or paths.

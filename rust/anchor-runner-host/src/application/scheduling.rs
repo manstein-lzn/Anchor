@@ -152,7 +152,9 @@ impl RunApplication {
         }
     }
 
-    fn schedule_management(&self) -> Result<&dyn ScheduleManagementPort, ApplicationError> {
+    pub(in crate::application) fn schedule_management(
+        &self,
+    ) -> Result<&dyn ScheduleManagementPort, ApplicationError> {
         self.schedules.as_deref().ok_or_else(|| {
             ApplicationError::Invalid("this Host does not provide schedule management".into())
         })

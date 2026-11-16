@@ -41,6 +41,8 @@ async fn claimed_input_survives_restart_before_artifact_even_after_new_input_arr
         attachments: Default::default(),
         run_id: None,
         replace_running: true,
+        bot_origin: None,
+        platform_message_id: None,
     };
     let first = sessions
         .admit_channel_inbound("local", inbound("crash-before-artifact"))
@@ -253,6 +255,8 @@ fn saved_assistant_with_kind(
                 attachments: Default::default(),
                 run_id: None,
                 replace_running: true,
+                bot_origin: None,
+                platform_message_id: None,
             },
         )
         .unwrap();
@@ -363,6 +367,8 @@ async fn group_wait_input_preserves_current_and_interrupted_actors_and_turn_atta
                     attachments: anchor_platform_session::AttachmentManifest { format: 1, files },
                     run_id: None,
                     replace_running: true,
+                    bot_origin: None,
+                    platform_message_id: None,
                 },
             )
             .unwrap();
@@ -598,6 +604,8 @@ async fn pending_input_scope_reports_truncation_and_authorizes_only_the_latest_e
         attachments: Default::default(),
         run_id: None,
         replace_running: true,
+        bot_origin: None,
+        platform_message_id: None,
     };
     for index in 0..9 {
         let admission = sessions
@@ -914,6 +922,8 @@ async fn assistant_projection_reports_derived_needs_recovery() {
                 attachments: Default::default(),
                 run_id: None,
                 replace_running: true,
+                bot_origin: None,
+                platform_message_id: None,
             },
         )
         .unwrap();
@@ -968,6 +978,8 @@ fn recovery_inbound(identity: &str) -> ChannelInboundRequest {
         attachments: Default::default(),
         run_id: None,
         replace_running: true,
+        bot_origin: None,
+        platform_message_id: None,
     }
 }
 
@@ -1377,6 +1389,8 @@ async fn timeline_marks_an_idle_resident_run_without_turn_windows() {
                 attachments: Default::default(),
                 run_id: None,
                 replace_running: true,
+                bot_origin: None,
+                platform_message_id: None,
             },
         )
         .unwrap()

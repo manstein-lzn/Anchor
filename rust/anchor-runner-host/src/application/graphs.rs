@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 
 mod deletion;
 mod references;
+mod relations;
 mod updates;
 
 #[cfg(test)]
@@ -102,11 +103,7 @@ impl RunApplication {
         &self,
         definition: &Value,
     ) -> Result<GraphSnapshot, GraphValidationFailure> {
-        let snapshot = GraphSnapshot::from_authoring(GraphSnapshot::normalize_network_authoring(
-            definition.clone(),
-            false,
-        ))
-        .map_err(GraphValidationFailure::Authoring)?;
+        let snapshot = compile_graph_definition(definition)?;
         for (name, agent) in &snapshot.agents {
             let reference = (!agent.model.is_empty()).then_some(agent.model.as_str());
             let result = if let Some(models) = &self.fixture_models {
@@ -122,27 +119,41 @@ impl RunApplication {
                 )))
             })?;
         }
-        crate::reject_snapshot(&snapshot)
+        self.inspect_graph_resources(&snapshot)?;
+        Ok(snapshot)
+    }
+
+    fn inspect_graph_resources(
+        &self,
+        snapshot: &GraphSnapshot,
+    ) -> Result<(), GraphValidationFailure> {
+        crate::reject_snapshot(snapshot)
             .map_err(GraphError::Unsupported)
             .map_err(GraphValidationFailure::Unavailable)?;
         Catalog::new(self.library_root().to_path_buf())
-            .resolve_snapshot(&snapshot)
+            .resolve_snapshot(snapshot)
             .map_err(GraphValidationFailure::Unavailable)?;
         // R2: one channel Plugin per persistent assistant.
-        super::channel_management::channel_plan(&snapshot, self.library_root()).map_err(|_| {
+        super::channel_management::channel_plan(snapshot, self.library_root()).map_err(|_| {
             GraphValidationFailure::Authoring(GraphError::InvalidSnapshot(
                 super::channel_management::TWO_CHANNELS.into(),
             ))
         })?;
-        Ok(snapshot)
+        Ok(())
     }
 
     pub(crate) async fn list_graphs(&self) -> Result<Value, GraphManagementError> {
+        let mut objectives = std::collections::BTreeMap::new();
         let mut names = self
             .configured_graph
             .as_ref()
             .map(|(name, _)| vec![name.clone()])
             .unwrap_or_default();
+        if let Some((name, _)) = &self.configured_graph
+            && let Ok((_, bundle)) = self.load_graph(name)
+        {
+            objectives.insert(name.clone(), bundle.snapshot.objective);
+        }
         if let Ok(entries) = std::fs::read_dir(&self.catalog_root) {
             for entry in entries.flatten() {
                 if entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false) {
@@ -156,17 +167,30 @@ impl RunApplication {
                     let name = entry.file_name().to_string_lossy().into_owned();
                     if anchor_runtime::identifier::is_name(&name)
                         && !names.contains(&name)
-                        && FileGraphBundleLoader::new(entry.path())
+                        && let Ok(bundle) = FileGraphBundleLoader::new(entry.path())
                             .with_library_root(self.library_root().to_path_buf())
                             .load()
-                            .is_ok()
                     {
+                        objectives.insert(name.clone(), bundle.snapshot.objective);
                         names.push(name);
                     }
                 }
             }
         }
         names.sort();
+        let identities = names
+            .iter()
+            .filter(|name| objectives.contains_key(*name))
+            .filter_map(|name| {
+                crate::run_metadata::graph_identity(&self.graph_bundle_path(name))
+                    .ok()
+                    .map(|identity| (identity, name.clone()))
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let schedules = self
+            .schedule_management()
+            .and_then(|port| port.graph_references())
+            .ok();
         let completed_tasks = self.completed_task_graphs(&names);
         let mut graphs = Vec::new();
         for name in names {
@@ -179,6 +203,27 @@ impl RunApplication {
             }
             let missing = !self.graph_bundle_path(&name).join("graph.json").is_file();
             let mut graph = json!({"graph":name,"running":active_runs.first(),"active_runs":active_runs,"active_nodes":active_nodes,"missing":missing});
+            if let Some(objective) = objectives.remove(&name) {
+                graph["objective"] = json!(objective);
+            }
+            if let Ok(Some(source)) = self.task_graph_source(&name)
+                && let Some(source) = identities.get(&source)
+            {
+                graph["task_source"] = json!(source);
+            }
+            if let Some(schedules) = &schedules {
+                let plans = schedules
+                    .iter()
+                    .filter(|plan| plan.graph == name)
+                    .collect::<Vec<_>>();
+                if !plans.is_empty() {
+                    graph["schedule_summary"] = json!({
+                        "total": plans.len(),
+                        "enabled": plans.iter().filter(|plan| plan.enabled).count(),
+                        "recurring": plans.iter().filter(|plan| !plan.once).count(),
+                    });
+                }
+            }
             if active_runs.is_empty() && completed_tasks.contains(&name) {
                 graph["completed_task"] = json!(true);
             }
@@ -211,11 +256,7 @@ impl RunApplication {
         let _catalog_guard = self.graph_catalog_mutation_guard().await;
         let path = self.graph_path_checked(name)?;
         let _graph_lease = self.graph_admission_lease(&path)?;
-        if path.exists() {
-            return Err(GraphManagementError::Conflict(
-                "graph already exists".into(),
-            ));
-        }
+        require_absent_graph(&path)?;
         let definition = definition.unwrap_or_else(|| {
             json!({
                 "objective": name,
@@ -254,8 +295,26 @@ fn invalid(failure: impl std::fmt::Display) -> GraphManagementError {
     GraphManagementError::Invalid(failure.to_string())
 }
 
+fn compile_graph_definition(definition: &Value) -> Result<GraphSnapshot, GraphValidationFailure> {
+    GraphSnapshot::from_authoring(GraphSnapshot::normalize_network_authoring(
+        definition.clone(),
+        false,
+    ))
+    .map_err(GraphValidationFailure::Authoring)
+}
+
 fn storage(failure: impl std::fmt::Display) -> GraphManagementError {
     GraphManagementError::Storage(failure.to_string())
+}
+
+fn require_absent_graph(path: &Path) -> Result<(), GraphManagementError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => Err(GraphManagementError::Conflict(
+            "graph already exists".into(),
+        )),
+        Err(failure) if failure.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(failure) => Err(storage(failure)),
+    }
 }
 
 /// The current bindings of the Plugins one Graph bundle references.
@@ -315,12 +374,12 @@ pub(super) fn create_graph_bundle_from_catalog(
             .load()
             .map_err(invalid)?;
         sync_bundle_directory(&staged).map_err(storage)?;
-        if path.exists() {
-            return Err(GraphManagementError::Conflict(
-                "graph already exists".into(),
-            ));
-        }
-        std::fs::rename(&staged, path).map_err(storage)?;
+        crate::host_fs::rename_noreplace(&staged, path).map_err(|failure| match failure {
+            failure if failure.kind() == std::io::ErrorKind::AlreadyExists => {
+                GraphManagementError::Conflict("graph already exists".into())
+            }
+            failure => storage(failure),
+        })?;
         std::fs::File::open(parent)
             .and_then(|directory| directory.sync_all())
             .map_err(storage)

@@ -1,6 +1,6 @@
 //! Host ownership of Plugin catalogs, Library construction and publication.
-//! Observation adds no lock. Callers retain their existing Graph/catalog lock
-//! order; read guards and publication leases cover only their original scopes.
+//! Live-default observation adds no lock. Exact revisions use a Library read
+//! guard or the caller's existing publication lease to preserve lock order.
 use anchor_graph_host::{
     ChannelDefinition, FilePluginCatalog, McpServerDefinition, PluginCatalog, PluginDefinition,
     PluginMetadata, SystemPlugin,
@@ -16,15 +16,81 @@ pub(crate) mod tools;
 
 pub(crate) struct Catalog {
     inner: FilePluginCatalog,
+    root: PathBuf,
 }
 
 impl Catalog {
     /// An unlocked observation, including private candidate trees. The caller
     /// owns any surrounding read or publication lease; never acquire it twice.
     pub(crate) fn new(root: impl Into<PathBuf>) -> Self {
+        let root = root.into();
         Self {
-            inner: FilePluginCatalog::new(root),
+            inner: FilePluginCatalog::new(&root),
+            root,
         }
+    }
+
+    pub(crate) fn binding_for_revision(
+        &self,
+        id: &str,
+        revision: Option<&str>,
+        lease: Option<&InstallLease>,
+    ) -> Result<PluginBinding, GraphError> {
+        match (revision, lease) {
+            (None, _) => self
+                .inner
+                .resolve(&[id.to_owned()])?
+                .pop()
+                .ok_or_else(|| GraphError::Unsupported(format!("Plugin `{id}` is unavailable"))),
+            (Some(revision), Some(lease)) => Library::new(&self.root)
+                .inspect_binding_locked(id, Some(revision), lease)
+                .map_err(|error| GraphError::Unsupported(error.to_string())),
+            (Some(revision), None) => Library::new(&self.root)
+                .resolve_source(id, Some(revision))
+                .map(|source| source.binding())
+                .map_err(|error| GraphError::Unsupported(error.to_string())),
+        }
+    }
+
+    pub(crate) fn resolve_snapshot_locked(
+        &self,
+        snapshot: &anchor_runtime::graph::GraphSnapshot,
+        lease: &InstallLease,
+    ) -> Result<Vec<PluginBinding>, GraphError> {
+        self.resolve_snapshot_sources(snapshot, Some(lease))
+    }
+
+    fn resolve_snapshot_sources(
+        &self,
+        snapshot: &anchor_runtime::graph::GraphSnapshot,
+        lease: Option<&InstallLease>,
+    ) -> Result<Vec<PluginBinding>, GraphError> {
+        let mut live = snapshot.clone();
+        let mut pinned = std::collections::BTreeMap::new();
+        for reference in live.nodes.iter_mut().flat_map(|node| &mut node.plugins) {
+            if let Some(revision) = reference.revision.take()
+                && !pinned.contains_key(&reference.id)
+            {
+                pinned.insert(
+                    reference.id.clone(),
+                    self.binding_for_revision(&reference.id, Some(&revision), lease)?,
+                );
+            }
+        }
+        // Network derivation is the existing Catalog rule. Every removed pin
+        // above was independently admitted by Library, never resolved by id.
+        let mut bindings = self.inner.resolve_snapshot(&live)?;
+        for binding in &mut bindings {
+            if let Some(exact) = pinned.remove(&binding.id) {
+                *binding = exact;
+            }
+        }
+        if !pinned.is_empty() {
+            return Err(GraphError::Unsupported(
+                "pinned Plugin is not executable under this Graph policy".into(),
+            ));
+        }
+        Ok(bindings)
     }
 
     pub(crate) fn definition(&self, id: &str) -> Result<PluginDefinition, GraphError> {
@@ -110,7 +176,18 @@ impl PluginCatalog for Catalog {
         &self,
         snapshot: &anchor_runtime::graph::GraphSnapshot,
     ) -> Result<Vec<PluginBinding>, GraphError> {
-        self.inner.resolve_snapshot(snapshot)
+        if !snapshot
+            .nodes
+            .iter()
+            .flat_map(|node| &node.plugins)
+            .any(|reference| reference.revision.is_some())
+        {
+            return self.inner.resolve_snapshot(snapshot);
+        }
+        let _guard = Library::new(&self.root)
+            .catalog_read_guard()
+            .map_err(|error| GraphError::Unsupported(error.to_string()))?;
+        self.resolve_snapshot_sources(snapshot, None)
     }
 }
 
@@ -143,6 +220,23 @@ impl PluginLibrary {
         &self,
     ) -> Result<Option<anchor_file_lease::FileLease>, InstallError> {
         self.inner.catalog_read_guard()
+    }
+    pub(crate) fn release_revision_locked(
+        &self,
+        revision: &anchor_library::PluginRevision,
+        live: &std::collections::BTreeSet<anchor_library::PluginRevision>,
+        lease: &InstallLease,
+    ) -> Result<bool, anchor_library::RevisionError> {
+        self.inner.release_revision_locked(revision, live, lease)
+    }
+    pub(crate) fn retained_revisions_locked(
+        &self,
+        lease: &InstallLease,
+    ) -> Result<
+        std::collections::BTreeSet<anchor_library::PluginRevision>,
+        anchor_library::RevisionError,
+    > {
+        self.inner.retained_revisions_locked(lease)
     }
     pub(crate) fn review_directory(
         &self,
@@ -250,17 +344,33 @@ pub(crate) async fn publication_lease(
     access: &crate::dependency_provision::DependencyAccess,
     operation: &str,
 ) -> Result<InstallLease, PublicationError> {
+    library_lease(library_root, access, operation, Library::try_install_lease).await
+}
+
+pub(crate) async fn catalog_read_lease(
+    library_root: &Path,
+    access: &crate::dependency_provision::DependencyAccess,
+    operation: &str,
+) -> Result<Option<anchor_file_lease::FileLease>, PublicationError> {
+    library_lease(library_root, access, operation, Library::catalog_read_guard).await
+}
+
+async fn library_lease<T: Send + 'static>(
+    library_root: &Path,
+    access: &crate::dependency_provision::DependencyAccess,
+    operation: &str,
+    acquire: fn(&Library) -> Result<T, InstallError>,
+) -> Result<T, PublicationError> {
     loop {
         access
             .check()
             .map_err(|error| PublicationError::Invalid(error.to_string()))?;
         let lease_root = library_root.to_path_buf();
-        let result =
-            tokio::task::spawn_blocking(move || Library::new(lease_root).try_install_lease())
-                .await
-                .map_err(|_| {
-                    PublicationError::Storage("Plugin publication lease task failed".into())
-                })?;
+        let result = tokio::task::spawn_blocking(move || acquire(&Library::new(lease_root)))
+            .await
+            .map_err(|_| {
+                PublicationError::Storage("Plugin publication lease task failed".into())
+            })?;
         match result {
             Ok(lease) => return Ok(lease),
             Err(InstallError::CatalogBusy) => tokio::select! {
@@ -281,6 +391,20 @@ pub(crate) struct DeclarationProjection {
 }
 
 pub(crate) type MountDeclaration<'a> = (&'a str, bool, Option<bool>);
+
+pub(crate) fn revision_declarations<'a>(
+    references: impl IntoIterator<Item = &'a anchor_runtime::graph::PluginRef>,
+) -> std::collections::BTreeMap<String, String> {
+    references
+        .into_iter()
+        .filter_map(|reference| {
+            reference
+                .revision
+                .as_ref()
+                .map(|revision| (reference.id.clone(), revision.clone()))
+        })
+        .collect()
+}
 
 pub(crate) fn pilot_authority(declaring_graph: Option<&str>, pilot_graph: Option<&str>) -> bool {
     declaring_graph.is_some() && declaring_graph == pilot_graph

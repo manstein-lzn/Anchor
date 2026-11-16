@@ -23,6 +23,8 @@ fn session(sessions: &SessionStore, owner: &str, conversation: &str) -> String {
                 attachments: Default::default(),
                 run_id: None,
                 replace_running: false,
+                bot_origin: None,
+                platform_message_id: None,
             },
         )
         .unwrap();

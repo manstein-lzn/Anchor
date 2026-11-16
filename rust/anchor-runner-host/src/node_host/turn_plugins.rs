@@ -166,8 +166,12 @@ impl HostIoResolver {
                 ));
             }
         }
-        let mut bindings =
-            self.resolve_plugins(&resolved.mounts.keys().cloned().collect::<Vec<_>>())?;
+        let revisions = crate::plugin_library::revision_declarations(&node.plugins);
+        let mut bindings = self.resolve_selected_plugins(
+            &resolved.mounts.keys().cloned().collect::<Vec<_>>(),
+            &revisions,
+            _library.as_ref(),
+        )?;
         for binding in &bindings {
             if node
                 .plugins
@@ -361,6 +365,7 @@ impl HostIoResolver {
     pub(super) fn assistant_mounted_plugins(
         &self,
         request: &NodeExecutionRequest,
+        lease: Option<&anchor_library::InstallLease>,
     ) -> Result<Option<MountedPlugins>, String> {
         let root = self.local_inputs.state_root();
         let Some(source) = crate::assistant::source(root, &request.key)? else {
@@ -369,6 +374,7 @@ impl HostIoResolver {
         if request.key.node_id != source.work_node {
             return Ok(Some(MountedPlugins {
                 bindings: Vec::new(),
+                revisions: BTreeMap::new(),
                 network: false,
                 reasons: Vec::new(),
                 session: Some(source.session),
@@ -386,11 +392,16 @@ impl HostIoResolver {
         if policy.node != request.key.node_id {
             return Err("assistant Turn Plugin node identity changed".into());
         }
-        let bindings =
-            self.resolve_plugins(&policy.bindings.keys().cloned().collect::<Vec<_>>())?;
+        let revisions = crate::plugin_library::revision_declarations(&policy.declarations);
+        let bindings = self.resolve_selected_plugins(
+            &policy.bindings.keys().cloned().collect::<Vec<_>>(),
+            &revisions,
+            lease,
+        )?;
         Self::validate_frozen_plugins(&policy, &bindings)?;
         Ok(Some(MountedPlugins {
             bindings,
+            revisions,
             network: policy.network,
             reasons: policy.reasons,
             session: Some(source.session),
@@ -405,12 +416,16 @@ impl HostIoResolver {
         policy: &TurnPluginPolicy,
         bindings: &[PluginBinding],
     ) -> Result<(), String> {
+        let revisions = crate::plugin_library::revision_declarations(&policy.declarations);
         if bindings.len() != policy.bindings.len()
             || bindings.iter().any(|binding| {
                 !policy
                     .bindings
                     .get(&binding.id)
                     .is_some_and(|frozen| frozen.same_authorization(binding))
+                    || revisions
+                        .get(&binding.id)
+                        .is_some_and(|revision| revision != &binding.digest)
             })
         {
             return Err("Plugin Host authorization changed since this Turn was frozen".into());

@@ -54,6 +54,16 @@ pub(crate) fn forced() -> bool {
     std::env::var("ANCHOR_NODE_TOOL_DISCLOSURE").as_deref() == Ok("1")
 }
 
+pub(crate) fn snapshot_configuration() -> (Option<String>, Option<Vec<String>>) {
+    let flag = std::env::var("ANCHOR_NODE_TOOL_DISCLOSURE")
+        .ok()
+        .filter(|value| matches!(value.as_str(), "0" | "1"));
+    let visible = std::env::var("ANCHOR_NODE_ALWAYS_VISIBLE")
+        .ok()
+        .and_then(|value| parse_always_visible(&value));
+    (flag, visible)
+}
+
 /// A pure view of the actual inventory, used by both native Pilot and Node.
 pub(crate) struct ToolDisclosure {
     definitions: Vec<ToolDefinition>,
@@ -68,7 +78,23 @@ impl ToolDisclosure {
         definitions: Vec<ToolDefinition>,
         read_only: BTreeMap<String, bool>,
         policy: DisclosurePolicy,
+        catalog: PluginDisclosureCatalog,
+    ) -> Self {
+        Self::with_flag(
+            definitions,
+            read_only,
+            policy,
+            catalog,
+            std::env::var("ANCHOR_NODE_TOOL_DISCLOSURE").ok().as_deref(),
+        )
+    }
+
+    fn with_flag(
+        definitions: Vec<ToolDefinition>,
+        read_only: BTreeMap<String, bool>,
+        policy: DisclosurePolicy,
         mut catalog: PluginDisclosureCatalog,
+        flag: Option<&str>,
     ) -> Self {
         catalog.owners.retain(|name, _| {
             definitions
@@ -79,10 +105,7 @@ impl ToolDisclosure {
             .iter()
             .filter(|definition| !policy.listed(&definition.name))
             .count();
-        let enabled = should_disclose(
-            std::env::var("ANCHOR_NODE_TOOL_DISCLOSURE").ok().as_deref(),
-            hidden,
-        );
+        let enabled = should_disclose(flag, hidden);
         Self {
             definitions,
             read_only,
@@ -232,10 +255,20 @@ pub(crate) fn resolve_call(name: &str, arguments: Value) -> Result<(String, Valu
     Ok((target.into(), inner))
 }
 
+#[cfg(test)]
 pub(crate) fn maybe_wrap(
     inner: Arc<dyn ToolPort>,
     visible: impl IntoIterator<Item = impl Into<String>>,
     catalog: PluginDisclosureCatalog,
+) -> (Arc<dyn ToolPort>, String) {
+    maybe_wrap_frozen(inner, visible, catalog, None)
+}
+
+pub(crate) fn maybe_wrap_frozen(
+    inner: Arc<dyn ToolPort>,
+    visible: impl IntoIterator<Item = impl Into<String>>,
+    catalog: PluginDisclosureCatalog,
+    frozen: Option<&(Option<String>, Option<Vec<String>>)>,
 ) -> (Arc<dyn ToolPort>, String) {
     let definitions = inner.definitions();
     let read_only = definitions
@@ -247,12 +280,23 @@ pub(crate) fn maybe_wrap(
             )
         })
         .collect();
-    let disclosure = ToolDisclosure::new(
-        definitions,
-        read_only,
-        DisclosurePolicy::new(visible),
-        catalog,
-    );
+    let visible = visible.into_iter().map(Into::into).collect::<Vec<String>>();
+    let disclosure = if let Some(frozen) = frozen {
+        ToolDisclosure::with_flag(
+            definitions,
+            read_only,
+            DisclosurePolicy::new(frozen.1.clone().unwrap_or(visible)),
+            catalog,
+            frozen.0.as_deref(),
+        )
+    } else {
+        ToolDisclosure::new(
+            definitions,
+            read_only,
+            DisclosurePolicy::new(visible),
+            catalog,
+        )
+    };
     let instructions = disclosure.instructions();
     (Arc::new(DisclosedTools { inner, disclosure }), instructions)
 }

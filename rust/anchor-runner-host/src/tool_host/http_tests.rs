@@ -145,6 +145,7 @@ fn binding(server: &str) -> PluginBinding {
 
 fn config(endpoint: &str, _names: &[&str]) -> McpToolConfig {
     McpToolConfig {
+        recoverable_servers: Default::default(),
         environment: Default::default(),
         disabled: Default::default(),
         oauth_library_root: None,
@@ -152,6 +153,7 @@ fn config(endpoint: &str, _names: &[&str]) -> McpToolConfig {
         startup_timeout: None,
         configuration_revisions: BTreeMap::new(),
         configuration_bindings: BTreeMap::new(),
+        revision_sources: Vec::new(),
         servers: BTreeMap::from([(
             "fixture-plugin-fixture".into(),
             ResolvedMcpServer {
@@ -181,9 +183,11 @@ async fn authenticated_http_tools_are_exposed_as_server_prefixed_names() {
         .await
         .unwrap();
         let tools = LiveMcpTools {
+            unavailable: Default::default(),
             owners: BTreeMap::new(),
             hosts: BTreeMap::from([("fixture-plugin-fixture".into(), Arc::new(host))]),
             _environment: Default::default(),
+            _revision_sources: Vec::new(),
         };
         let definitions = tools.definitions();
         assert_eq!(
@@ -507,4 +511,43 @@ async fn a_connection_test_never_connects_a_server_that_requires_channel_identit
 
 fn config_plain(endpoint: &str) -> McpToolConfig {
     config(endpoint, &[])
+}
+
+#[tokio::test]
+async fn unavailable_recovery_is_exact_server_scoped_and_never_bypasses_network() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}/mcp", listener.local_addr().unwrap());
+    drop(listener);
+    let mut config = config_plain(&endpoint);
+    config.startup_timeout = Some(std::time::Duration::from_millis(100));
+    let bindings = [binding("fixture")];
+    assert!(config.bind(&bindings, true).await.is_err());
+    config.allow_unavailable_servers(vec!["another-server".into()]);
+    assert!(config.bind(&bindings, true).await.is_err());
+    config.allow_unavailable_servers(vec!["fixture-plugin-fixture".into()]);
+    let live = config.bind(&bindings, true).await.unwrap();
+    assert!(live.definitions().is_empty());
+    assert_eq!(
+        live.unavailable,
+        BTreeSet::from(["fixture-plugin-fixture".into()])
+    );
+    assert!(config.bind(&bindings, false).await.is_err());
+    config.startup_cancellation = Some(Arc::new(std::sync::atomic::AtomicBool::new(true)));
+    assert!(config.bind(&bindings, true).await.is_err());
+}
+
+#[test]
+fn bridge_control_requires_the_exact_enabled_local_endpoint() {
+    let mut config = config_plain("http://127.0.0.1:8091/mcp");
+    let mut server = config.servers.remove("fixture-plugin-fixture").unwrap();
+    server.plugin_id = "codex".into();
+    server.name = "codex".into();
+    config.servers.insert("codex-codex".into(), server);
+    assert!(config.has_local_codex_bridge());
+    config.disabled.insert("codex-codex".into());
+    assert!(!config.has_local_codex_bridge());
+    config.disabled.clear();
+    config.servers.get_mut("codex-codex").unwrap().config["url"] =
+        json!("http://elsewhere:8091/mcp");
+    assert!(!config.has_local_codex_bridge());
 }

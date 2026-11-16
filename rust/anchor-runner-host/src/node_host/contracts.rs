@@ -96,6 +96,7 @@ pub(crate) type ToolResolution<'resolver> =
 /// the already prepared invocation authority. No business service lookup here.
 pub(crate) struct ToolAssembly<'a> {
     pub(crate) plugins: Arc<dyn ToolPort>,
+    pub(crate) mcp: &'a crate::tool_host::McpToolConfig,
     pub(crate) bindings: &'a [PluginBinding],
     pub(crate) request: &'a NodeExecutionRequest,
     pub(crate) workspace: &'a std::path::Path,
@@ -107,10 +108,42 @@ pub(crate) struct ToolAssembly<'a> {
 }
 
 pub(crate) trait NodeToolAssembly: Send + Sync {
+    /// The composing Host prepares only explicitly granted local dependencies.
+    /// Returned exact server keys may stay unavailable without preventing dialogue.
+    fn prepare_services<'a>(
+        &'a self,
+        _request: &'a NodeExecutionRequest,
+        _bindings: &'a [PluginBinding],
+        _mcp: &'a crate::tool_host::McpToolConfig,
+        _network: bool,
+    ) -> Pin<Box<dyn Future<Output = Vec<String>> + Send + 'a>> {
+        Box::pin(async { Vec::new() })
+    }
+    /// The composing Host owns consumption authorization. False means this
+    /// input was withdrawn and must follow the existing suppressed-reply path.
+    fn authorize_assistant_input<'a>(
+        &'a self,
+        _key: &'a anchor_runtime::graph::InvocationKey,
+        _input: &'a anchor_platform_session::AssistantInput,
+    ) -> Pin<Box<dyn Future<Output = Result<bool, String>> + Send + 'a>> {
+        Box::pin(async { Ok(true) })
+    }
     fn assemble(&self, input: ToolAssembly<'_>) -> Result<Arc<dyn ToolPort>, String>;
+    fn input_guidance(
+        &self,
+        _request: &NodeExecutionRequest,
+    ) -> Result<crate::harness_guidance::InputGuidance, String> {
+        Ok(crate::harness_guidance::factory())
+    }
 }
 
 pub(crate) trait NodeHostResolver: Send + Sync {
+    fn input_guidance(
+        &self,
+        _request: &NodeExecutionRequest,
+    ) -> Result<crate::harness_guidance::InputGuidance, String> {
+        Ok(crate::harness_guidance::factory())
+    }
     fn prompt_images(&self, request: &NodeExecutionRequest) -> Result<Vec<NodeImage>, String>;
     fn conversation_hint(
         &self,

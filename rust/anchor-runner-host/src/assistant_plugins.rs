@@ -72,6 +72,20 @@ pub(crate) struct Publication {
     pub(crate) bindings: BTreeMap<String, PluginBinding>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub(crate) task_graphs: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    machine: Option<MachinePublication>,
+}
+
+// Read old approval chains until installed machine publications are explicitly retired.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct MachinePublication {
+    pub(crate) base_graph_digest: String,
+    pub(crate) base_receipt_digest: Option<String>,
+    pub(crate) change: String,
+    pub(crate) execute_place: u64,
+    pub(crate) execute_record_digest: String,
+    pub(crate) policy_ref: anchor_facts::evaluation::PolicyRef,
 }
 
 impl Publication {
@@ -180,8 +194,10 @@ pub(crate) fn publish_with_tasks(
                     .map_err(|error| error.to_string())
             })
             .collect::<Result<_, _>>()?,
+        machine: None,
     };
     if let Some(existing) = self::publication(root, source, &digest)?
+        && existing.machine.is_none()
         && existing.task_graphs == publication.task_graphs
         && existing.bindings.len() == publication.bindings.len()
         && existing.bindings.iter().all(|(id, frozen)| {
@@ -196,7 +212,11 @@ pub(crate) fn publish_with_tasks(
     // An explicit operator save approves the currently installed declarations,
     // including a previously used Graph digest. Active Turns already own their
     // immutable policies; refreshing this approval only affects future Turns.
-    let path = publication_path(root, source, &digest)?;
+    write_publication(root, source, &publication)
+}
+
+fn write_publication(root: &Path, source: &Path, publication: &Publication) -> Result<(), String> {
+    let path = publication_path(root, source, &publication.graph_digest)?;
     let parent = path.parent().ok_or("Graph approval has no parent")?;
     crate::create_durable_directory(parent).map_err(|error| error.to_string())?;
     let mut temporary =
@@ -231,6 +251,38 @@ pub(crate) fn publication(
             || saved.bindings.iter().any(|(id, binding)| id != &binding.id)
         {
             return Err("Graph Plugin authorization receipt is corrupt".into());
+        }
+        if let Some(proof) = &saved.machine {
+            if proof.execute_place == 0
+                || proof.policy_ref.validate().is_err()
+                || !proof
+                    .change
+                    .strip_prefix("change/")
+                    .is_some_and(anchor_facts::window::is_digest)
+                || !anchor_facts::window::is_digest(&proof.execute_record_digest)
+                || !anchor_facts::window::is_digest(&proof.base_graph_digest)
+                || proof
+                    .base_receipt_digest
+                    .as_deref()
+                    .is_some_and(|digest| !anchor_facts::window::is_digest(digest))
+            {
+                return Err("machine Graph authority receipt is corrupt".into());
+            }
+            if let Some(expected) = &proof.base_receipt_digest {
+                let original: Publication = crate::assistant::read_json(&publication_path(
+                    root,
+                    source.as_path(),
+                    &proof.base_graph_digest,
+                )?)?
+                .ok_or("original Graph authority was removed")?;
+                if original.machine.is_some()
+                    || anchor_facts::evaluation::digest(&original)? != *expected
+                {
+                    return Err("original Graph authority was changed".into());
+                }
+            } else if !saved.bindings.is_empty() {
+                return Err("machine Graph authority has no original grant".into());
+            }
         }
     }
     Ok(saved)

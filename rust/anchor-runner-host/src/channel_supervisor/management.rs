@@ -6,11 +6,10 @@ use super::{ChannelSupervisor, ManagedChannelLaunch, random_token};
 use crate::application::{
     ApplicationError,
     channel_management::{
-        ChannelBinding, ChannelCallback, ChannelManagementPort, ChannelPlatform,
-        ChannelRuntimeState, channel_plan,
+        ChannelBinding, ChannelCallback, ChannelManagementPort, ChannelRuntimeState, channel_plan,
     },
 };
-use crate::plugin_library::Catalog;
+use crate::{channel_platform::ChannelPlatform, plugin_library::Catalog};
 use anchor_graph_host::{ChannelDefinition, FileGraphBundleLoader, PluginMetadata};
 use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
@@ -61,9 +60,15 @@ struct ChannelFact {
     plugin: String,
     users: Vec<String>,
     send_users: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    groups: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    peer_bots: Vec<String>,
     // Omitted when false, so bindings without it keep their saved bytes.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     private_only: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    cli_enabled: bool,
     enabled: bool,
     authorization_digest: String,
     callback_key: String,
@@ -77,7 +82,10 @@ impl ChannelFact {
             plugin: self.plugin.clone(),
             users: self.users.clone(),
             send_users: self.send_users.clone(),
+            groups: self.groups.clone(),
+            peer_bots: self.peer_bots.clone(),
             private_only: self.private_only,
+            cli_enabled: self.cli_enabled,
         }
     }
 }
@@ -450,6 +458,13 @@ impl ChannelManagementAdapter {
                 credentials,
                 users: fact.users.clone(),
                 send_users: fact.send_users.clone(),
+                groups: if fact.private_only {
+                    Vec::new()
+                } else {
+                    fact.groups.clone()
+                },
+                cli_enabled: fact.cli_enabled,
+                peer_bots: fact.peer_bots.clone(),
                 callback_key: fact.callback_key.clone(),
             },
         )
@@ -671,6 +686,7 @@ impl ChannelManagementPort for ChannelManagementAdapter {
             let platform =
                 ChannelPlatform::parse(&channel.platform).ok_or(ApplicationError::Missing)?;
             binding.validate_for_platform(platform)?;
+            let binding = binding.normalized();
             if previous
                 .as_ref()
                 .is_some_and(|fact| fact.platform != platform)
@@ -696,7 +712,10 @@ impl ChannelManagementPort for ChannelManagementAdapter {
                     plugin: binding.plugin,
                     users: binding.users,
                     send_users: binding.send_users,
+                    groups: binding.groups,
+                    peer_bots: binding.peer_bots,
                     private_only: binding.private_only,
+                    cli_enabled: binding.cli_enabled,
                     enabled: false,
                     authorization_digest: digest,
                     callback_key: match previous {

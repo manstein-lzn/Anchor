@@ -668,9 +668,6 @@ pub(crate) struct PluginUninstallPrecondition {
     pub(crate) sessions: Vec<String>,
     /// Attached Runs that are not terminal and bind it.
     pub(crate) unfinished_runs: Vec<String>,
-    /// Active Dreaming deployments, open candidate preparations or unreadable
-    /// catalog references that still need this Plugin's retained revisions.
-    pub(crate) dreaming: Vec<String>,
     /// Saved Graphs that reference it. Shown on the form, not a refusal: a Graph
     /// that loses a Plugin fails its own next admission, and Graphs are the
     /// operator's to change.
@@ -697,12 +694,6 @@ impl PluginUninstallPrecondition {
                 "还有 {} 个未结束的 Run 绑定它（{}）：等它们结束或先停止/放弃它们，再卸载插件",
                 self.unfinished_runs.len(),
                 self.unfinished_runs.join("、")
-            ));
-        }
-        if !self.dreaming.is_empty() {
-            return Some(format!(
-                "Dreaming 仍持有它的恢复或观察引用（{}）：先撤回或结束相关 Dreaming 变更，再卸载插件",
-                self.dreaming.join("、")
             ));
         }
         None
@@ -783,13 +774,10 @@ impl RunApplication {
         })?;
         let mut unfinished_runs = self.unfinished_runs_binding(id)?;
         let mut impact = self.plugin_impact(id)?;
-        let mut dreaming = self.dreaming_plugin_references(library_root, id, &impact.coverage)?;
         sessions_mounting.sort();
         sessions_mounting.dedup();
         unfinished_runs.sort();
         unfinished_runs.dedup();
-        dreaming.sort();
-        dreaming.dedup();
         impact.graphs.sort();
         impact.graphs.dedup();
         Ok(PluginUninstallPrecondition {
@@ -800,14 +788,16 @@ impl RunApplication {
             mutable,
             sessions: sessions_mounting,
             unfinished_runs,
-            dreaming,
             graphs: impact.graphs,
             coverage: impact.coverage,
         })
     }
 
     /// Attached Runs that are not terminal and bind this Plugin.
-    pub(in crate::application) fn unfinished_runs_binding(&self, id: &str) -> Result<Vec<String>, ApplicationError> {
+    pub(in crate::application) fn unfinished_runs_binding(
+        &self,
+        id: &str,
+    ) -> Result<Vec<String>, ApplicationError> {
         let mut runs = Vec::new();
         for (run, record) in self.run_views()? {
             if record.is_settled() {

@@ -6,6 +6,7 @@ use crate::{
     plugin_mounts::{self, MountSnapshot, PluginMountSource},
     tool_host,
 };
+#[cfg(test)]
 use anchor_graph_host::PluginCatalog;
 use anchor_runtime::graph::{
     CommitRef, CompletionFact, GraphError, GraphRunRecord, InvocationKey, NodeCompletion,
@@ -79,6 +80,7 @@ pub(crate) struct HostIoResolver {
     /// Operator configuration supplied by the composing Host, not an HTTP entrypoint.
     pilot_graph: Option<String>,
     tool_assembly: std::sync::Arc<dyn NodeToolAssembly>,
+    disclosure_configuration: Option<(Option<String>, Option<Vec<String>>)>,
 }
 
 use facts::fact_stem;
@@ -114,6 +116,7 @@ impl HostIoResolver {
             mounts,
             pilot_graph,
             tool_assembly,
+            disclosure_configuration: None,
         }
     }
 
@@ -135,6 +138,20 @@ impl HostIoResolver {
     ) -> Self {
         self.runtime_configuration = configuration;
         self
+    }
+
+    pub(crate) fn with_disclosure_configuration(
+        mut self,
+        configuration: (Option<String>, Option<Vec<String>>),
+    ) -> Self {
+        self.disclosure_configuration = Some(configuration);
+        self
+    }
+
+    pub(crate) fn disclosure_configuration(
+        &self,
+    ) -> Option<&(Option<String>, Option<Vec<String>>)> {
+        self.disclosure_configuration.as_ref()
     }
 
     /// The Library root Plugins are resolved from, or a reason there is none.

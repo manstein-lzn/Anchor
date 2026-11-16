@@ -1,5 +1,4 @@
 //! Shared preparation steps; callers own grouping, order and error handling.
-use super::Catalog;
 use crate::plugin_view::{PreparedPlugin, Unusable};
 use anchor_runtime::ReadOnlyInput;
 use anchor_runtime::graph::PluginBinding;
@@ -15,9 +14,8 @@ pub(crate) struct PreparedPlugins {
     pub(crate) disclosure: crate::plugin_disclosure::PluginDisclosureCatalog,
 }
 
-/// Prepare current Library code under the selected authorization baseline.
-/// The publication lease covers every filesystem read and is released before
-/// callers perform OAuth authorization or start any MCP connection.
+/// Prepare live-default Library code under the selected authorization baseline.
+/// The read lease ends before OAuth/MCP startup, preserving live-install behavior.
 #[cfg(test)]
 pub(crate) async fn prepare_plugins_async(
     bindings: Vec<PluginBinding>,
@@ -35,6 +33,25 @@ pub(crate) async fn prepare_plugins_for_owner_async(
     cancellation: anchor_runtime::Cancellation,
     credentials: Option<(PathBuf, String)>,
 ) -> Result<PreparedPlugins, Unusable> {
+    prepare_plugins_for_owner_with_revisions_async(
+        bindings,
+        library_root,
+        fixture,
+        cancellation,
+        credentials,
+        BTreeMap::new(),
+    )
+    .await
+}
+
+pub(crate) async fn prepare_plugins_for_owner_with_revisions_async(
+    bindings: Vec<PluginBinding>,
+    library_root: Option<PathBuf>,
+    fixture: crate::tool_host::PluginToolHost,
+    cancellation: anchor_runtime::Cancellation,
+    credentials: Option<(PathBuf, String)>,
+    revisions: BTreeMap<String, String>,
+) -> Result<PreparedPlugins, Unusable> {
     fixture
         .for_bindings(&bindings)
         .map_err(|error| Unusable::recorded(error.to_string()))?;
@@ -49,18 +66,17 @@ pub(crate) async fn prepare_plugins_for_owner_async(
             network: false,
             cancellation: cancellation.clone(),
         };
-        Some(
-            crate::plugin_library::publication_lease(root, &access, "invocation preparation")
-                .await
-                .map_err(|error| Unusable::unconfigured(format!("{error:?}")))?,
-        )
+        crate::plugin_library::catalog_read_lease(root, &access, "invocation preparation")
+            .await
+            .map_err(|error| Unusable::unconfigured(format!("{error:?}")))?
     } else {
         None
     };
     tokio::task::spawn_blocking(move || {
         let _lease = lease;
         let root = library_root.unwrap_or_default();
-        let catalog = Catalog::new(&root);
+        let library = anchor_library::Library::new(&root);
+        let mut sources = Vec::new();
         let mut definitions = BTreeMap::new();
         let mut current = Vec::with_capacity(bindings.len());
         let mut mounts = Vec::new();
@@ -71,6 +87,11 @@ pub(crate) async fn prepare_plugins_for_owner_async(
                 return Err(Unusable::unconfigured("Plugin preparation was cancelled"));
             }
             if crate::tool_host::is_fake_fixture(binding) {
+                if revisions.contains_key(&binding.id) {
+                    return Err(Unusable::recorded(
+                        "fixture Plugin cannot name a Library revision",
+                    ));
+                }
                 current.extend(
                     fixture
                         .resolve_fixture_plugins(std::slice::from_ref(&binding.id))
@@ -78,32 +99,33 @@ pub(crate) async fn prepare_plugins_for_owner_async(
                 );
                 continue;
             }
-            let definition = catalog
-                .checked_definition(
-                    &binding.id,
-                    super::ExpectedDefinition::Authorization(binding),
-                )
-                .map_err(|error| match error {
-                    super::DefinitionError::Read(error) => Unusable::recorded(error.to_string()),
-                    super::DefinitionError::Mismatch => Unusable::recorded(format!(
-                        "Plugin `{}` authorization changed during preparation",
-                        binding.id,
-                    )),
-                })?;
-            let current_binding = definition.binding();
-            views.insert(
-                binding.id.clone(),
-                PreparedPlugin::from_definition(&root, &definition)?,
+            let revision = revisions.get(&binding.id).map(String::as_str);
+            let source = std::sync::Arc::new(
+                library
+                    .resolve_source(&binding.id, revision)
+                    .map_err(Unusable::from)?,
             );
+            let definition = source.definition();
+            if !super::ExpectedDefinition::Authorization(binding).matches(definition)
+                || revision.is_some() && binding.digest != definition.digest
+            {
+                return Err(Unusable::recorded(format!(
+                    "Plugin `{}` authorization or exact revision changed during preparation",
+                    binding.id,
+                )));
+            }
+            let current_binding = definition.binding();
+            views.insert(binding.id.clone(), PreparedPlugin::from_source(&source)?);
             mounts.push(ReadOnlyInput::new(
                 &definition.directory,
                 format!("/plugins/{}", definition.id),
             ));
             current.push(current_binding);
-            disclosure.insert(definition.clone());
-            definitions.insert(binding.id.clone(), definition);
+            definitions.insert(binding.id.clone(), definition.clone());
+            disclosure.insert_source(source.clone());
+            sources.push(source);
         }
-        let mcp = crate::tool_host::McpToolConfig::from_definitions_for_owner_execution(
+        let mut mcp = crate::tool_host::McpToolConfig::from_definitions_for_owner_execution(
             &root,
             &current,
             &definitions,
@@ -112,6 +134,7 @@ pub(crate) async fn prepare_plugins_for_owner_async(
                 .map(|(data, owner)| (data.as_path(), owner.as_str())),
         )
         .map_err(Unusable::from)?;
+        mcp.retain_revision_sources(sources);
         Ok(PreparedPlugins {
             bindings: current,
             mcp,
@@ -141,5 +164,6 @@ pub(crate) async fn connect(
         .assemble_for_execution(mcp, bindings, network, launch)
         .await?;
     disclosure.attach_tools(port.tool_owners());
+    disclosure.unavailable_servers(port.unavailable_servers());
     Ok(port)
 }

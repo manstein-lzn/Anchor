@@ -44,6 +44,8 @@ struct Skill {
 #[derive(Debug, Clone)]
 struct Plugin {
     definition: PluginDefinition,
+    library_root: std::path::PathBuf,
+    source: Option<std::sync::Arc<anchor_library::ResolvedPluginSource>>,
     skills: Vec<Skill>,
     servers: Vec<Value>,
     available: bool,
@@ -317,7 +319,7 @@ impl PluginDisclosureCatalog {
         format!("{header}{body}{}\n", footer)
     }
 
-    pub(crate) fn insert(&mut self, definition: PluginDefinition) {
+    pub(crate) fn insert(&mut self, library_root: &std::path::Path, definition: PluginDefinition) {
         let skills = definition
             .skills
             .iter()
@@ -333,11 +335,26 @@ impl PluginDisclosureCatalog {
             definition.id.clone(),
             Plugin {
                 definition,
+                library_root: library_root.to_path_buf(),
+                source: None,
                 skills,
                 servers,
                 available: true,
             },
         );
+    }
+
+    pub(crate) fn insert_source(
+        &mut self,
+        source: std::sync::Arc<anchor_library::ResolvedPluginSource>,
+    ) {
+        let id = source.definition().id.clone();
+        self.insert(source.library_root(), source.definition().clone());
+        if source.revision().is_some()
+            && let Some(plugin) = self.plugins.get_mut(&id)
+        {
+            plugin.source = Some(source);
+        }
     }
 
     #[cfg(test)]
@@ -353,6 +370,21 @@ impl PluginDisclosureCatalog {
         self.plugins.extend(other.plugins);
         self.owners.extend(other.owners);
         self.unavailable.extend(other.unavailable);
+    }
+
+    pub(crate) fn unavailable_servers(&mut self, keys: &std::collections::BTreeSet<String>) {
+        for (id, plugin) in &mut self.plugins {
+            for server in &mut plugin.servers {
+                let name = server["name"].as_str().unwrap_or_default();
+                if keys.contains(&format!("{id}-{name}")) {
+                    server["tools_available"] = json!(false);
+                    server["connection_status"] = json!("unavailable");
+                    server["guidance"] = json!(
+                        "The local MCP connection was not established; transport, authentication or handshake may have failed. This does not prove the service is stopped. Inspect it with authorized host service tools. Never restart an active service or repeatedly start it to repair credentials. Service activation does not resume coding or replay messages."
+                    );
+                }
+            }
+        }
     }
 
     pub(crate) fn attach_tools(&mut self, owners: BTreeMap<String, ToolOwner>) {
@@ -446,11 +478,7 @@ impl PluginDisclosureCatalog {
             .get(id)
             .ok_or_else(|| rejected("Plugin is not available in this catalog"))?;
         let definition = &plugin.definition;
-        let library_root = definition
-            .directory
-            .parent()
-            .and_then(std::path::Path::parent)
-            .ok_or_else(|| rejected("Plugin Library root unavailable"))?;
+        let library_root = &plugin.library_root;
         // Shared nonblocking Library guard excludes formal publication for the
         // whole classification/open/read. A busy update is retryable, and never
         // blocks an async worker. This is a safety check of one selected asset,
@@ -474,6 +502,13 @@ impl PluginDisclosureCatalog {
                     "Plugin authorization changed; prepare a new invocation before reading",
                 ),
             })?;
+        let current = if plugin.source.is_some() {
+            // Current declarations still gate authorization, but an exact pin
+            // reads only its admitted, lease-protected immutable code assets.
+            definition
+        } else {
+            &current
+        };
         let section = arguments
             .get("section")
             .and_then(Value::as_str)
@@ -500,7 +535,7 @@ impl PluginDisclosureCatalog {
                 plugin
                     .skills
                     .iter()
-                    .filter(|skill| readable(&current, &skill.path))
+                    .filter(|skill| readable(current, &skill.path))
                     .map(|skill| json!(skill))
                     .collect(),
                 "skills",
@@ -510,7 +545,7 @@ impl PluginDisclosureCatalog {
                 definition
                     .resources
                     .iter()
-                    .filter(|path| readable(definition, path) && readable(&current, path))
+                    .filter(|path| readable(definition, path) && readable(current, path))
                     .map(|path| json!({"path":path}))
                     .collect(),
                 "resources",
@@ -538,7 +573,7 @@ impl PluginDisclosureCatalog {
                         "instructions.md was not a public resource prepared for this invocation",
                     ));
                 } else {
-                    text_page(&current, "instructions.md", arguments)?
+                    text_page(current, "instructions.md", arguments)?
                 }
             }
             "skill" | "resource" => {
@@ -554,7 +589,7 @@ impl PluginDisclosureCatalog {
                         "path was not a public resource prepared for this invocation",
                     ));
                 }
-                text_page(&current, path, arguments)?
+                text_page(current, path, arguments)?
             }
             _ => return Err(rejected("unknown Plugin section")),
         };

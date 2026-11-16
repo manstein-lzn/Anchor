@@ -11,6 +11,9 @@ use std::{
 
 const TASK_CASE_SOURCE: &str = "tests/goose_persistent_assistant/task_inputs.rs";
 
+#[path = "task_inputs/subscriptions.rs"]
+mod subscriptions;
+
 fn task(id: &str, source: &str) -> TaskResult {
     TaskResult {
         id: id.into(),
@@ -53,6 +56,14 @@ struct TaskNoticeGateway {
 
 impl TaskNoticeGateway {
     fn bind(host: &mut Host) -> Self {
+        Self::bind_for(host, &[ALICE])
+    }
+
+    fn bind_for(host: &mut Host, users: &[&str]) -> Self {
+        let users = users
+            .iter()
+            .map(|user| (*user).to_owned())
+            .collect::<Vec<_>>();
         let root = tempfile::tempdir().unwrap();
         let socket = root.path().join("control.sock");
         let listener = UnixListener::bind(&socket).unwrap();
@@ -98,7 +109,7 @@ impl TaskNoticeGateway {
                         .collect();
                     json!({"deliveries":deliveries})
                 } else {
-                    assert_eq!(request["userid"], ALICE);
+                    assert!(users.iter().any(|user| request["userid"] == *user));
                     assert!(matches!(
                         request["operation"].as_str(),
                         Some("send" | "send_file")

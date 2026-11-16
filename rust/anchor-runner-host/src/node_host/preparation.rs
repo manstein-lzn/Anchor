@@ -18,6 +18,10 @@ impl HostIoResolver {
         ),
         String,
     > {
+        if self.sandbox.frozen_system() {
+            self.mcp.environment.validate_closed_experiment()?;
+            return Ok((self.mcp.environment.clone(), None));
+        }
         let snapshot = self
             .runtime_configuration
             .as_ref()
@@ -59,6 +63,23 @@ impl HostIoResolver {
 }
 
 impl HostIoResolver {
+    async fn verify_assistant_input(
+        &self,
+        request: &NodeExecutionRequest,
+    ) -> Result<(), ResolutionError> {
+        if let Some(input) = crate::assistant::input(self.local_inputs.state_root(), &request.key)?
+            && !self
+                .tool_assembly
+                .authorize_assistant_input(&request.key, &input)
+                .await?
+        {
+            return Err(ResolutionError::Host(
+                "assistant input authority was withdrawn".into(),
+            ));
+        }
+        Ok(())
+    }
+
     pub(super) fn prepare_tools<'a>(
         &'a self,
         request: &'a NodeExecutionRequest,
@@ -68,6 +89,7 @@ impl HostIoResolver {
             // host-side string into `ResolutionError::Host`, while the environment
             // sites keep their own cause.
             let resolved: Result<ResolvedNodeTools, ResolutionError> = async move {
+                self.verify_assistant_input(request).await?;
                 let (environment, runtime) = self.tool_environment_snapshot()?;
                 // The first fallible step names the error type, so every later `?`
                 // converts a host-side reason into `ResolutionError::Host` while the
@@ -79,13 +101,15 @@ impl HostIoResolver {
                     readonly_inputs,
                     envelope,
                     conversation,
-                } = self.prepare_tool_launch(
-                    request,
-                    environment.clone(),
-                    prepared.mounts,
-                    mounted.network,
-                    prepared.mcp.credential_process_plugins(),
-                )?;
+                } = self
+                    .prepare_tool_launch(
+                        request,
+                        environment.clone(),
+                        prepared.mounts,
+                        mounted.network,
+                        prepared.mcp.credential_process_plugins(),
+                    )
+                    .await?;
                 let mut mcp = prepared.mcp;
                 self.retain_plugin_configuration(&request.key, mcp.configuration_bindings.clone())
                     .await?;
@@ -117,6 +141,12 @@ impl HostIoResolver {
                     &mounted,
                     &mcp.configuration_revisions,
                 );
+                self.verify_assistant_input(request).await?;
+                let recoverable = self
+                    .tool_assembly
+                    .prepare_services(request, &mounted.bindings, &mcp, mounted.network)
+                    .await;
+                mcp.allow_unavailable_servers(recoverable);
                 let plugins = crate::plugin_library::tools::connect(
                     &self.tools,
                     &mcp,
@@ -131,8 +161,10 @@ impl HostIoResolver {
                     &mut disclosure,
                 )
                 .await?;
+                self.verify_assistant_input(request).await?;
                 let tools = self.tool_assembly.assemble(ToolAssembly {
                     plugins,
+                    mcp: &mcp,
                     bindings: &mounted.bindings,
                     request,
                     workspace: &workspace,
@@ -158,11 +190,14 @@ impl HostIoResolver {
                     }
                     _ => tools,
                 };
-                let (tools, plugin_instructions) = crate::tool_disclosure::maybe_wrap(
-                    tools,
-                    crate::tool_disclosure::always_visible(always_visible),
-                    disclosure,
-                );
+                let frozen = self.disclosure_configuration();
+                let visible = if frozen.is_some() {
+                    always_visible
+                } else {
+                    crate::tool_disclosure::always_visible(always_visible)
+                };
+                let (tools, plugin_instructions) =
+                    crate::tool_disclosure::maybe_wrap_frozen(tools, visible, disclosure, frozen);
                 let state_root = self.local_inputs.state_root().to_owned();
                 let key = request.key.clone();
                 Ok::<_, ResolutionError>(ResolvedNodeTools {
@@ -260,27 +295,29 @@ impl HostIoResolver {
             }
             None => None,
         };
-        let mounted = self.mounted_plugins_unlocked(request)?;
+        let mounted = self.mounted_plugins_unlocked(request, mount_lease.as_ref())?;
         drop(mount_lease);
         self.validate_invocation_plugins(&admitted, request, &mounted.bindings)?;
-        let prepared = crate::plugin_library::tools::prepare_plugins_for_owner_async(
-            mounted.bindings.clone(),
-            self.library_root.clone(),
-            self.tools.as_ref().clone(),
-            request.cancellation.clone(),
-            Some((
-                self.local_inputs.state_root().to_path_buf(),
-                self.oauth_owner_for_run(&request.key.run_id)?
-                    .unwrap_or_else(|| "local".into()),
-            )),
-        )
-        .await
-        .map_err(ResolutionError::from)?;
+        let prepared =
+            crate::plugin_library::tools::prepare_plugins_for_owner_with_revisions_async(
+                mounted.bindings.clone(),
+                self.library_root.clone(),
+                self.tools.as_ref().clone(),
+                request.cancellation.clone(),
+                Some((
+                    self.local_inputs.state_root().to_path_buf(),
+                    self.oauth_owner_for_run(&request.key.run_id)?
+                        .unwrap_or_else(|| "local".into()),
+                )),
+                mounted.revisions.clone(),
+            )
+            .await
+            .map_err(ResolutionError::from)?;
         self.validate_invocation_plugins(&admitted, request, &prepared.bindings)?;
         Ok((mounted, prepared))
     }
 
-    fn prepare_tool_launch(
+    async fn prepare_tool_launch(
         &self,
         request: &NodeExecutionRequest,
         environment: crate::tool_environment::ToolEnvironment,
@@ -288,6 +325,7 @@ impl HostIoResolver {
         network: bool,
         credential_plugins: Vec<String>,
     ) -> Result<PreparedNodeLaunch, ResolutionError> {
+        self.verify_assistant_input(request).await?;
         let workspace = self.workspace(request)?;
         let local_inputs = self.local_input_mounts(&request.key)?;
         let conversation = self.conversation(&request.key)?;

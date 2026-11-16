@@ -5,6 +5,7 @@ pub(crate) const EDIT_TOOL_NAME: &str = "anchor_edit";
 pub(crate) const SEND_TOOL: &str = "wecom_send_message";
 pub(crate) const FEISHU_SEND_TOOL: &str = "feishu_send_message";
 pub(crate) const FEISHU_SEND_FILE_TOOL: &str = "feishu_send_file";
+pub(crate) const FEISHU_CLI_TOOL: &str = "feishu_cli";
 pub(crate) const SEND_FILE_TOOL: &str = "wecom_send_file";
 pub(crate) const IMAGE_TOOL: &str = "wecom_attach_image";
 pub(crate) const TASK_RESULT_RESOLVE_TOOL: &str = "task_result_resolve";

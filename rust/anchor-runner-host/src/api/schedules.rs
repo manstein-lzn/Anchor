@@ -21,6 +21,8 @@ pub(super) type ScheduleStoreHandle = Arc<Mutex<ScheduleStore>>;
 
 mod management;
 pub(super) use management::*;
+mod subscriptions;
+pub(super) use subscriptions::*;
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -276,9 +278,24 @@ pub(super) async fn tick_schedules(state: &ApiState, now: NaiveDateTime) -> Resu
             .schedules
             .lock()
             .map_err(|_| "schedule store unavailable")?;
+        // Remove this historical guard after installed Dreaming schedules are removed.
+        // Their old receipts must never fall through to ordinary Graph admission.
+        let retired_plans = store
+            .creation_requests
+            .iter()
+            .filter(|request| {
+                request.content.get("enabled") == Some(&Value::Bool(false))
+                    && (request.key.starts_with("dreaming-install-")
+                        || request.key.starts_with("dreaming-rebind-"))
+            })
+            .map(|request| request.schedule.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
         let mut due = Vec::new();
         for item in &store.items {
-            if !item.enabled || store.in_flight.contains(&item.id) {
+            if !item.enabled
+                || store.in_flight.contains(&item.id)
+                || retired_plans.contains(item.id.as_str())
+            {
                 continue;
             }
             let at = parse_local_datetime(&item.next_at)?;
@@ -366,6 +383,13 @@ pub(super) async fn tick_schedules(state: &ApiState, now: NaiveDateTime) -> Resu
                     "schedule {} occurrence {} remains pending: {error:?}",
                     item.id, item.next_at
                 );
+                if let Err(failure) = state
+                    .application
+                    .record_subscription_schedule_blocked(&item.id, &item.next_at)
+                    .await
+                {
+                    eprintln!("schedule subscription notice: {failure:?}");
+                }
                 if let Some(origin) = &item.delegation {
                     state
                         .application

@@ -47,6 +47,29 @@ impl RunApplication {
             let fact: BindingFact = decode(saved)?;
             require_binding(&fact, key)?;
             self.project_workspace_binding(key, &fact.binding, workspaces)?;
+            // Recovery can accept a yielded completion without re-entering
+            // the executor that normally releases its workspace lease. Repair
+            // that projection only from the exact accepted interruption.
+            if let Some(previous) = workspaces.initialized_owner(key)?
+                && previous.run_id == key.run_id
+                && previous.graph_digest == key.graph_digest
+                && previous.node_id == key.node_id
+                && previous.invocation < key.invocation
+                && record.results.get(&key.node_id).is_some_and(|results| {
+                    results
+                        .iter()
+                        .any(|result| result.key == previous && result.interruption.is_some())
+                })
+            {
+                if !crate::goose_acp::pending_invocation_recovery(&self.data_root, &previous)?
+                    .is_empty()
+                {
+                    return Err(ApplicationError::Conflict(
+                        "workspace predecessor has an unresolved native tool observation".into(),
+                    ));
+                }
+                workspaces.interrupt_stopped_owner(&previous)?;
+            }
             return encode(fact);
         }
         let source = crate::assistant::handover_workspace_source(
@@ -377,6 +400,79 @@ mod tests {
     use crate::application::run_access::fixtures;
     use serde_json::json;
     use std::fs;
+
+    #[test]
+    fn accepted_interruption_releases_only_the_stopped_previous_invocation() {
+        use anchor_runtime::graph::GraphSnapshot;
+
+        let root = tempfile::tempdir().unwrap();
+        let app = RunApplication::new(root.path().join("state"), root.path().join("catalog"));
+        let workspaces = Workspaces::new(root.path().join("work"));
+        let record = GraphRunRecord::create_with_id(
+            GraphSnapshot::from_authoring(json!({
+                "entry":"worker",
+                "agents":{"role":{"model":"fixture","instructions":"work"}},
+                "nodes":[{"id":"worker","agent":"role"}],
+                "edges":[{"from":"worker","to":"worker"}]
+            }))
+            .unwrap(),
+            json!({}),
+            "interrupted-workspace",
+        )
+        .unwrap();
+        fixtures::create(&app, &record);
+        let first = InvocationKey {
+            run_id: record.run_id.clone(),
+            graph_digest: record.graph_digest,
+            node_id: "worker".into(),
+            invocation: 1,
+        };
+        let next = InvocationKey {
+            invocation: 2,
+            ..first.clone()
+        };
+        app.ensure_node_workspace_binding(&first, &workspaces)
+            .unwrap();
+        let path = workspaces.path(&first).unwrap();
+        fs::write(path.join("draft.txt"), "keep this scene").unwrap();
+        let writer = workspaces.acquire(&first).unwrap();
+        app.ensure_node_workspace_binding(&next, &workspaces)
+            .unwrap();
+        assert!(workspaces.acquire(&next).is_err());
+
+        let completion = anchor_runtime::graph::NodeCompletion {
+            submission: "superseded".into(),
+            route: Some("worker".into()),
+            model_requests: 0,
+            output: json!({"interrupted":true,"reason":"superseded"}),
+        };
+        fixtures::interrupted(
+            &app,
+            &first.run_id,
+            "worker",
+            completion,
+            None,
+            "superseded",
+        );
+        assert!(
+            app.ensure_node_workspace_binding(&next, &workspaces)
+                .is_err()
+        );
+        drop(writer); // A crash drops the OS lease, not the durable owner.
+        app.ensure_node_workspace_binding(&next, &workspaces)
+            .unwrap();
+        app.ensure_node_workspace_binding(&next, &workspaces)
+            .unwrap();
+        let next_writer = workspaces.acquire(&next).unwrap();
+        assert_eq!(
+            fs::read(path.join("draft.txt")).unwrap(),
+            b"keep this scene"
+        );
+        app.ensure_node_workspace_binding(&next, &workspaces)
+            .unwrap();
+        assert!(workspaces.acquire(&next).is_err());
+        next_writer.finish_interrupted().unwrap();
+    }
 
     #[test]
     fn kernel_grants_repair_bindings_and_preserve_shared_scenes_on_source_release() {

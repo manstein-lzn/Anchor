@@ -1,9 +1,10 @@
 use super::*;
 use crate::application::{
     WECOM_REPLY_KEY_PREFIX, WECOM_REPLY_KIND,
-    channel_management::{ChannelBinding, ChannelPlatform, ChannelRuntimeState},
+    channel_management::{ChannelBinding, ChannelRuntimeState},
     run_access,
 };
+use crate::channel_platform::ChannelPlatform;
 use anchor_platform_session::{
     AttachmentManifest, AttachmentManifestEntry, ChannelConversationKind, ChannelDeliveryRequest,
     ChannelDeliveryStatus, ChannelIdentity, ChannelInboundRequest, TurnStatus,
@@ -67,16 +68,39 @@ impl ChannelEvent {
     fn validate(&self, config: &BotSettings) -> Result<(), HttpResponse> {
         self.validate_source(config.platform)?;
         self.validate_payload(true)?;
-        if !config.allows(&self.sender_id) {
+        let bot_peer = self.source == ChannelPlatform::Feishu
+            && self.metadata.get("sender_type").and_then(Value::as_str) == Some("bot");
+        if bot_peer {
+            if !config
+                .binding
+                .peer_bots
+                .iter()
+                .any(|id| id == &self.sender_id)
+                || self.conversation_kind() != Some(ChannelConversationKind::Group)
+            {
+                return Err(error(
+                    StatusCode::FORBIDDEN,
+                    "channel peer bot is not allowed",
+                ));
+            }
+        } else if !config.allows(&self.sender_id) {
             return Err(error(StatusCode::FORBIDDEN, "channel user is not allowed"));
         }
         if self.source == ChannelPlatform::Feishu
+            && !bot_peer
             && !config.binding.allows_outbound(&self.sender_id)
         {
             return Err(error(
                 StatusCode::FORBIDDEN,
                 "channel user is not authorized to receive replies",
             ));
+        }
+        if self.source == ChannelPlatform::Feishu
+            && self.conversation_kind() == Some(ChannelConversationKind::Group)
+            && (config.binding.private_only
+                || !config.binding.groups.contains(&self.conversation_id))
+        {
+            return Err(error(StatusCode::FORBIDDEN, "channel group is not allowed"));
         }
         Ok(())
     }
@@ -98,16 +122,35 @@ impl ChannelEvent {
     }
 
     fn validate_payload(&self, require_content: bool) -> Result<(), HttpResponse> {
+        let bot = self.metadata.get("sender_type").and_then(Value::as_str) == Some("bot");
         let supported_shape = match self.source {
             ChannelPlatform::Wecom => matches!(
                 self.message_type.as_str(),
                 "text" | "mixed" | "image" | "file" | "voice"
             ),
             ChannelPlatform::Feishu => {
-                matches!(self.message_type.as_str(), "text" | "image" | "file")
-                    && self.conversation_kind() == Some(ChannelConversationKind::Single)
+                let supported_message = match self.conversation_kind() {
+                    Some(ChannelConversationKind::Single) => matches!(
+                        self.message_type.as_str(),
+                        "text" | "post" | "image" | "file"
+                    ),
+                    Some(ChannelConversationKind::Group) => {
+                        matches!(self.message_type.as_str(), "text" | "post")
+                    }
+                    None => false,
+                };
+                supported_message
                     && self.metadata.get("request_id").and_then(Value::as_str)
                         == Some(self.event_id.as_str())
+                    && (!bot
+                        || (self.message_type == "text"
+                            && self
+                                .metadata
+                                .get("root_inbound_id")
+                                .and_then(Value::as_str)
+                                .is_some_and(|value| {
+                                    value.len() == 71 && value.starts_with("feishu-")
+                                })))
             }
         };
         if !supported_shape
@@ -124,11 +167,21 @@ impl ChannelEvent {
                 && (self.text.trim().is_empty() && self.attachments.is_empty()
                     || (matches!(self.message_type.as_str(), "image" | "file" | "voice")
                         && self.attachments.is_empty())))
-            || self.metadata.len() != 2
-            || self
-                .metadata
-                .keys()
-                .any(|key| !matches!(key.as_str(), "chat_type" | "request_id"))
+            || (bot && self.source != ChannelPlatform::Feishu)
+            || (bot
+                && (self.metadata.len() != 4
+                    || self.metadata.keys().any(|key| {
+                        !matches!(
+                            key.as_str(),
+                            "chat_type" | "request_id" | "sender_type" | "root_inbound_id"
+                        )
+                    })))
+            || (!bot
+                && (self.metadata.len() != 2
+                    || self
+                        .metadata
+                        .keys()
+                        .any(|key| !matches!(key.as_str(), "chat_type" | "request_id"))))
             || self.conversation_kind().is_none()
             || self
                 .metadata
@@ -145,7 +198,7 @@ impl ChannelEvent {
     }
 
     fn inbound_id(&self) -> String {
-        inbound_id_for(self.source.as_str(), &self.event_id)
+        anchor_channel_transport::channel_inbound_id(self.source.as_str(), &self.event_id)
     }
 
     fn reply_kind(&self) -> &'static str {
@@ -175,18 +228,7 @@ impl ChannelEvent {
     }
 }
 
-/// Admission and progress share this identity. Keep the WeCom domain and
-/// prefix byte-for-byte stable so historical inbounds and receipts still match.
-pub(super) fn inbound_id_for(source: &str, event_id: &str) -> String {
-    let mut digest = Sha256::new();
-    digest.update(b"anchor-");
-    digest.update(source.as_bytes());
-    digest.update(b"-inbound-v1\0");
-    digest.update(source.as_bytes());
-    digest.update([0]);
-    digest.update(event_id.as_bytes());
-    format!("{source}-{:x}", digest.finalize())
-}
+pub(super) use anchor_channel_transport::channel_inbound_id as inbound_id_for;
 
 /// The binding a callback addresses. The Graph comes from the route, which
 /// the auth layer already matched against the caller's callback key; the
@@ -369,6 +411,21 @@ pub(super) async fn receive_event(
         attachments: channel_attachments.clone(),
         run_id: None,
         replace_running: true,
+        platform_message_id: (event.source == ChannelPlatform::Feishu)
+            .then(|| event.event_id.clone()),
+        bot_origin: if event.metadata.get("sender_type").and_then(Value::as_str) == Some("bot") {
+            Some(anchor_platform_session::ChannelBotOrigin {
+                root_inbound_id: event
+                    .metadata
+                    .get("root_inbound_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+                sender_bot_id: event.sender_id.clone(),
+            })
+        } else {
+            None
+        },
     };
     let admission = {
         let state_for_admission = state.clone();
@@ -391,6 +448,8 @@ pub(super) async fn receive_event(
     let admitted =
         async {
             let _guard = channel_lock.lock().await;
+            let signal = crate::assistant::signal(&admission.session.id);
+            let _input_boundary = signal.input_claim.lock().await;
             // Authoritative state under the lock: between admission and
             // serialisation another message may have superseded this Turn.
             let current =
@@ -412,9 +471,11 @@ pub(super) async fn receive_event(
                     "channel input was already rejected before execution",
                 ));
             }
-            let run = match saved_assistant {
-                Some(binding) => binding.run_id,
-                None => {
+            // Completed inputs retain their original reply after current moves.
+            let run = match (current.relation.run_id.as_ref(), saved_assistant) {
+                (Some(run), _) => run.clone(),
+                (None, Some(binding)) => binding.run_id,
+                (None, None) => {
                     let previous_run = match current.previous_run.as_deref() {
                         Some(previous) if stop_previous_run(&state, previous).await? => {
                             Some(previous.to_owned())
@@ -549,6 +610,7 @@ pub(super) async fn receive_event(
         return Ok((StatusCode::OK, Json(json!({"text":"","superseded":true}))));
     }
     let ChannelReply {
+        run: reply_run,
         session: reply_session,
         turn: _,
         text,
@@ -557,7 +619,7 @@ pub(super) async fn receive_event(
     let mut response = json!({
         "text":text,
         "session":reply_session,
-        "run":admitted.run_id,
+        "run":reply_run,
         "receipt":{"key":key,"content_sha256":content_sha256},
     });
     if !items.is_empty() {
@@ -567,6 +629,7 @@ pub(super) async fn receive_event(
 }
 
 struct ChannelReply {
+    run: String,
     session: String,
     turn: String,
     text: String,
@@ -620,6 +683,7 @@ async fn wait_for_channel_reply(
     inbound_id: &str,
     run_id: &str,
 ) -> Result<Option<ChannelReply>, HttpResponse> {
+    let mut selected_run = run_id.to_owned();
     loop {
         let inbound = read_channel_inbound(state, owner, session, inbound_id).await?;
         if inbound.relation.superseded_by_turn_id.is_some()
@@ -627,6 +691,7 @@ async fn wait_for_channel_reply(
         {
             return Ok(None);
         }
+        let run_id = selected_run.as_str();
         let record = state
             .application
             .channel_reply_run(run_id)
@@ -703,12 +768,27 @@ async fn wait_for_channel_reply(
                         .map_err(session_error)?;
                 }
                 return Ok(Some(ChannelReply {
+                    run: run_id.to_owned(),
                     session: session.to_owned(),
                     turn: binding.turn,
                     text: result.text.clone(),
                     items,
                 }));
             }
+        }
+        // A completed old reply still belongs to its inbound. Only a waiter
+        // without such a reply follows the certified replacement.
+        let Some(selected) = state
+            .application
+            .assistant_handover_reply_run(owner, session, run_id)
+            .map_err(application_error)?
+        else {
+            tokio::time::sleep(RUN_POLL).await;
+            continue;
+        };
+        if selected != selected_run {
+            selected_run = selected;
+            continue;
         }
         if record.unsuccessful
             || (record.assistant_expects_executor && !state.application.run_is_active(run_id).await)

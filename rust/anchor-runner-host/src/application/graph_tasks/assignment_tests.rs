@@ -40,6 +40,8 @@ fn inbound(sessions: &SessionStore, conversation: &str, kind: ChannelConversatio
                 attachments: Default::default(),
                 run_id: None,
                 replace_running: false,
+                bot_origin: None,
+                platform_message_id: None,
             },
         )
         .unwrap();

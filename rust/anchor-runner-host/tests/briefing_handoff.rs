@@ -23,7 +23,7 @@ fn production() -> Value {
 }
 
 // Only research and publication preparation are deterministic substitutes. The
-// production input, completion, digest and final selection gates run unchanged.
+// production completion, digest and final selection gates run unchanged.
 fn host_for(fault: Option<&str>) -> Host {
     let production = production();
     let publication = json!({
@@ -78,10 +78,8 @@ fn host_for(fault: Option<&str>) -> Host {
         ));
     }
     let graph = json!({
-        "entry":"validate",
-        "input":{"send_not_before":null},
+        "entry":"write",
         "ops":{
-            "validate":production["ops"]["validate"],
             "write":{
                 "run":write_file("report.json", if fault == Some("stale") { "{}" } else { REPORT }),
                 "writes":["report.json"]
@@ -94,20 +92,18 @@ fn host_for(fault: Option<&str>) -> Host {
             "wait_delivery":production["ops"]["wait_delivery"]
         },
         "nodes":[
-            {"id":"validate","op":"validate"},
             {"id":"write","op":"write"},
             {"id":"render_publish","op":"render_publish"},
             {"id":"complete","op":"complete"},
             {"id":"wait_delivery","op":"wait_delivery"}
         ],
         "edges":[
-            {"from":"validate","to":"write"},
             {"from":"write","to":"render_publish"},
             {"from":"render_publish","to":"complete"},
             {"from":"complete","to":"wait_delivery"}
         ]
     });
-    Host::new(&graph).with_allowed_commands("sh,jq,sha256sum,date,sleep")
+    Host::new(&graph).with_allowed_commands("sh,jq,sha256sum")
 }
 
 fn terminal(server: &HttpHost, run: &str, outcome: &str) -> Value {
@@ -127,8 +123,21 @@ fn terminal(server: &HttpHost, run: &str, outcome: &str) -> Value {
 fn production_graph_compiles_as_a_product_without_a_delivery_dependency() {
     let source = production();
     anchor_runtime::graph::GraphSnapshot::from_authoring(source.clone()).unwrap();
-    assert_eq!(source["input"], json!({"send_not_before":"09:05"}));
+    assert_eq!(source["entry"], "prepare");
+    assert!(source.get("input").is_none());
+    assert!(source["ops"].get("validate").is_none());
     assert!(source["ops"].get("deliver").is_none());
+    assert!(
+        source["ops"]["wait_delivery"]
+            .get("wall_time_limit_seconds")
+            .is_none()
+    );
+    assert!(
+        !source["ops"]["wait_delivery"]["run"]
+            .as_str()
+            .unwrap()
+            .contains("sleep")
+    );
     assert!(
         source["ops"]
             .as_object()

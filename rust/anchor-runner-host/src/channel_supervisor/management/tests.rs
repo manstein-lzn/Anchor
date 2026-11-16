@@ -13,6 +13,22 @@ use crate::test_support::Environment;
 
 const PLATFORM: &str = "wecom";
 
+#[test]
+fn empty_groups_preserve_legacy_fact_bytes_for_both_platforms() {
+    for (platform, private_only) in [
+        ("", ""),
+        (r#""platform":"feishu","#, r#""private_only":true,"#),
+    ] {
+        let bytes = format!(
+            r#"{{"format":2,{platform}"owner":"local","plugin":"chat","users":["member"],"send_users":["member"],{private_only}"enabled":false,"authorization_digest":"digest","callback_key":"callback","account":null}}"#
+        );
+        let fact: ChannelFact = serde_json::from_str(&bytes).unwrap();
+        assert!(fact.groups.is_empty());
+        assert!(fact.binding().groups.is_empty());
+        assert_eq!(serde_json::to_string(&fact).unwrap(), bytes);
+    }
+}
+
 /// Two bot Graphs, `alpha` and `beta`, mount the same channel Plugin.
 struct Fixture {
     root: tempfile::TempDir,
@@ -117,7 +133,10 @@ while :; do sleep 0.02; done
             plugin: "wecom".into(),
             users: vec![user.into()],
             send_users: vec![user.into()],
+            groups: vec![],
             private_only: false,
+            cli_enabled: false,
+            peer_bots: Vec::new(),
         }
     }
 
@@ -459,6 +478,7 @@ async fn bindings_reload_per_graph_and_reject_another_owner_or_live_rebinding() 
     // the field existed; true is saved and survives a reload.
     let saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
     assert!(saved.get("private_only").is_none());
+    assert!(saved.get("groups").is_none());
     let mut private = Fixture::binding("alice");
     private.private_only = true;
     reopened.configure("local", "alpha", private).await.unwrap();
@@ -956,6 +976,8 @@ async fn removing_a_graph_deletes_bot_credentials_saved_without_a_binding() {
 #[tokio::test]
 async fn feishu_and_wecom_keep_separate_platforms_credentials_accounts_and_supervisors() {
     let _guard = crate::PROCESS_ENV_LOCK.lock().await;
+    let mut environment = Environment::default();
+    environment.set("ANCHOR_FEISHU_GROUPS", "oc_not_approved");
     let fixture = Fixture::new();
     let plugin = fixture.root.path().join("library/plugins/feishu");
     crate::test_system_plugin(
@@ -972,6 +994,7 @@ printf '%s' "$FEISHU_APP_SECRET" > "$o/secret"
 printf '%s' "$ANCHOR_API_KEY" > "$o/callback"
 printf '%s' "$ANCHOR_FEISHU_USERS" > "$o/users"
 printf '%s' "$ANCHOR_FEISHU_SEND_USERS" > "$o/send-users"
+printf '%s' "${ANCHOR_FEISHU_GROUPS-unset}" > "$o/groups"
 printf 'x' >> "$o/starts"
 exec /bin/sleep 3600
 "#,
@@ -998,19 +1021,14 @@ exec /bin/sleep 3600
         plugin: "feishu".into(),
         users: vec!["ou_alice".into()],
         send_users: vec!["ou_alice".into()],
+        groups: vec![],
         private_only: false,
+        cli_enabled: false,
+        peer_bots: Vec::new(),
     };
-    assert!(matches!(
-        fixture
-            .adapter
-            .configure("local", "feishu", binding.clone())
-            .await,
-        Err(ApplicationError::Invalid(_))
-    ));
-    binding.private_only = true;
     fixture
         .adapter
-        .configure("local", "feishu", binding)
+        .configure("local", "feishu", binding.clone())
         .await
         .unwrap();
     fixture.credential_for(
@@ -1045,6 +1063,7 @@ exec /bin/sleep 3600
     assert_eq!(fixture.read("alpha", "secret"), "same-id-secret");
     assert_eq!(fixture.read("feishu", "users"), "ou_alice");
     assert_eq!(fixture.read("feishu", "send-users"), "ou_alice");
+    assert_eq!(fixture.read("feishu", "groups"), "");
     assert_ne!(
         fixture.read("feishu", "callback"),
         fixture.read("alpha", "callback")
@@ -1053,10 +1072,76 @@ exec /bin/sleep 3600
         serde_json::from_slice::<Value>(&fs::read(fixture.adapter.path(graph)).unwrap()).unwrap()
     };
     assert_eq!(saved("feishu")["platform"], "feishu");
+    assert!(saved("feishu").get("groups").is_none());
     assert!(
         saved("alpha").get("platform").is_none(),
         "WeCom format 2 representation stays unchanged"
     );
+    // The same bot only receives explicitly saved groups, never ambient ones.
+    fixture
+        .adapter
+        .set_enabled("local", "feishu", false)
+        .await
+        .unwrap();
+    binding.groups = vec!["oc_beta".into(), " oc_alpha ".into(), "oc_beta".into()];
+    let configured = fixture
+        .adapter
+        .configure("local", "feishu", binding.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        configured["binding"]["groups"],
+        json!(["oc_alpha", "oc_beta"])
+    );
+    let fact = read_fact(&fixture.adapter.path("feishu")).unwrap();
+    assert_eq!(fact.binding(), binding.clone().normalized());
+    let bytes = fs::read(fixture.adapter.path("feishu")).unwrap();
+    let unchanged = fixture
+        .adapter
+        .configure("local", "feishu", binding.clone())
+        .await
+        .unwrap();
+    assert_eq!(unchanged["changed"], false);
+    assert_eq!(fs::read(fixture.adapter.path("feishu")).unwrap(), bytes);
+    fs::remove_file(fixture.observed("feishu", "starts")).unwrap();
+    fixture
+        .adapter
+        .set_enabled("local", "feishu", true)
+        .await
+        .unwrap();
+    fixture.wait_for("feishu", "starts").await;
+    assert_eq!(fixture.read("feishu", "groups"), "oc_alpha,oc_beta");
+    assert_eq!(fixture.read("feishu", "users"), "ou_alice");
+    assert_eq!(fixture.read("feishu", "send-users"), "ou_alice");
+    fixture
+        .adapter
+        .set_enabled("local", "feishu", false)
+        .await
+        .unwrap();
+    binding.private_only = true;
+    assert!(matches!(
+        fixture
+            .adapter
+            .configure("local", "feishu", binding.clone())
+            .await,
+        Err(ApplicationError::Invalid(_))
+    ));
+    assert_eq!(saved("feishu")["groups"], json!(["oc_alpha", "oc_beta"]));
+    binding.groups.clear();
+    fixture
+        .adapter
+        .configure("local", "feishu", binding)
+        .await
+        .unwrap();
+    fs::remove_file(fixture.observed("feishu", "starts")).unwrap();
+    fixture
+        .adapter
+        .set_enabled("local", "feishu", true)
+        .await
+        .unwrap();
+    fixture.wait_for("feishu", "starts").await;
+    assert_eq!(fixture.read("feishu", "groups"), "");
+    assert!(saved("feishu").get("groups").is_none());
     fixture.adapter.shutdown().await;
     fixture
         .adapter

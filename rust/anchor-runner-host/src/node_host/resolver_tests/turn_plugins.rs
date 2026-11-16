@@ -215,6 +215,8 @@ async fn same_turn_policy_survives_repeated_handover_before_replacement_prepares
                 attachments: Default::default(),
                 run_id: None,
                 replace_running: true,
+                bot_origin: None,
+                platform_message_id: None,
             },
         )
         .unwrap();
@@ -310,6 +312,8 @@ async fn new_turn_after_idle_handover_ignores_earlier_explicit_instance_replacem
         attachments: Default::default(),
         run_id: None,
         replace_running: true,
+        bot_origin: None,
+        platform_message_id: None,
     };
     let history = sessions
         .admit_channel_inbound("alice", inbound("history"))

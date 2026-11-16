@@ -30,6 +30,11 @@ pub(crate) enum TaskOriginSource {
         node_id: String,
         instruction: String,
     },
+    OperatorSubscription {
+        schedule: String,
+        node_id: String,
+        instruction: String,
+    },
 }
 
 fn deserialize_source<'de, D>(deserializer: D) -> Result<TaskOriginSource, D::Error>
@@ -69,14 +74,16 @@ impl TaskOrigin {
     pub(crate) fn node_id(&self) -> &str {
         match &self.source {
             TaskOriginSource::AgentDelegation { key } => &key.node_id,
-            TaskOriginSource::OperatorAssignment { node_id, .. } => node_id,
+            TaskOriginSource::OperatorAssignment { node_id, .. }
+            | TaskOriginSource::OperatorSubscription { node_id, .. } => node_id,
         }
     }
 
     pub(crate) fn agent_key(&self) -> Option<&InvocationKey> {
         match &self.source {
             TaskOriginSource::AgentDelegation { key } => Some(key),
-            TaskOriginSource::OperatorAssignment { .. } => None,
+            TaskOriginSource::OperatorAssignment { .. }
+            | TaskOriginSource::OperatorSubscription { .. } => None,
         }
     }
 
@@ -154,6 +161,22 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<TaskOrigin>(saved).unwrap(),
             assigned
+        );
+        let mut subscribed = assigned.clone();
+        subscribed.source = TaskOriginSource::OperatorSubscription {
+            schedule: "shared-plan".into(),
+            node_id: "work".into(),
+            instruction: "Deliver this shared result".into(),
+        };
+        assert!(subscribed.agent_key().is_none());
+        assert!(subscribed.same_scope(&delegated));
+        assert_eq!(subscribed.scope_key(), delegated.scope_key());
+        let saved = serde_json::to_value(&subscribed).unwrap();
+        assert_eq!(saved["source"]["kind"], "operator_subscription");
+        assert!(saved["source"].get("key").is_none());
+        assert_eq!(
+            serde_json::from_value::<TaskOrigin>(saved).unwrap(),
+            subscribed
         );
         assigned.session = Some("another-session".into());
         assert!(!assigned.same_scope(&delegated));

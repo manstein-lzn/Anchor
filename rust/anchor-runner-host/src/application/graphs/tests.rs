@@ -4,6 +4,7 @@ use crate::run_metadata::{self as metadata, RunMetadata};
 use anchor_runtime::graph::GraphRunRecord;
 use std::{collections::BTreeMap, time::Duration};
 
+mod catalog;
 mod deletion;
 mod publication;
 
@@ -99,12 +100,14 @@ async fn list_and_read_preserve_configured_alias_and_missing_projection() {
     )
     .unwrap();
     std::fs::create_dir(application.catalog_root.join("invalid")).unwrap();
+    let before = files(&application.catalog_root);
     let listed = application.list_graphs().await.unwrap();
+    assert_eq!(files(&application.catalog_root), before);
     assert_eq!(
         listed,
         json!({"graphs": [
-            {"graph":"another","running":null,"active_runs":[],"active_nodes":[],"missing":false},
-            {"graph":"fixture","running":null,"active_runs":[],"active_nodes":[],"missing":false}
+            {"graph":"another","objective":"other","running":null,"active_runs":[],"active_nodes":[],"missing":false},
+            {"graph":"fixture","objective":"fixture","running":null,"active_runs":[],"active_nodes":[],"missing":false}
         ]})
     );
     let configured = application.read_graph("fixture").unwrap();

@@ -28,7 +28,15 @@ pub(crate) fn configuration_arguments(
 ) -> Result<(String, ChannelMembers), ToolError> {
     only(
         arguments,
-        &["graph", "users", "send_users", "private_only"],
+        &[
+            "graph",
+            "users",
+            "send_users",
+            "groups",
+            "peer_bots",
+            "private_only",
+            "cli_enabled",
+        ],
         "provide only the bot's graph and members; credentials and approval are not model arguments",
     )?;
     let graph = parameter(arguments, "graph")?;
@@ -41,7 +49,23 @@ pub(crate) fn configuration_arguments(
     let members = ChannelMembers {
         users: members(arguments, "users")?,
         send_users: members(arguments, "send_users")?,
+        // Like the member lists, group grants are replaced, never inferred.
+        groups: members(arguments, "groups")?,
+        peer_bots: arguments
+            .get("peer_bots")
+            .map(|_| members(arguments, "peer_bots"))
+            .transpose()?
+            .unwrap_or_default(),
         private_only,
+        cli_enabled: arguments
+            .get("cli_enabled")
+            .map(|value| {
+                value
+                    .as_bool()
+                    .ok_or_else(|| rejected("cli_enabled must be a boolean"))
+            })
+            .transpose()?
+            .unwrap_or(false),
     };
     // Validate the member lists before asking the user; the Plugin is the
     // Graph's and is checked again by the application use case.
@@ -49,7 +73,10 @@ pub(crate) fn configuration_arguments(
         plugin: "unchecked".into(),
         users: members.users.clone(),
         send_users: members.send_users.clone(),
+        groups: members.groups.clone(),
+        peer_bots: members.peer_bots.clone(),
         private_only: members.private_only,
+        cli_enabled: members.cli_enabled,
     }
     .validate()
     .map_err(channel_error)?;

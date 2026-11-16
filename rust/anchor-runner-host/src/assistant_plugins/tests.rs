@@ -117,6 +117,46 @@ fn operator_approval_refreshes_authority_and_stays_scoped_to_bundle_and_graph_di
     );
 }
 
+#[test]
+fn historical_machine_receipt_still_requires_unchanged_operator_authority() {
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("graph");
+    let library = root.path().join("library");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::create_dir_all(&library).unwrap();
+    let base = graph();
+    publish(root.path(), &source, &base, &library).unwrap();
+    let base_digest = base.digest().unwrap();
+    let original = publication(root.path(), &source, &base_digest)
+        .unwrap()
+        .unwrap();
+    let mut historical = original.clone();
+    let mut next = base;
+    next.agents.get_mut("worker").unwrap().instructions = "historical guidance".into();
+    historical.graph_digest = next.digest().unwrap();
+    historical.machine = Some(MachinePublication {
+        base_graph_digest: base_digest,
+        base_receipt_digest: Some(anchor_facts::evaluation::digest(&original).unwrap()),
+        change: format!("change/{}", "a".repeat(64)),
+        execute_place: 4,
+        execute_record_digest: "b".repeat(64),
+        policy_ref: anchor_facts::evaluation::PolicyRef {
+            resource: "control/dreaming".into(),
+            version: 2,
+            digest: "c".repeat(64),
+        },
+    });
+    write_publication(root.path(), &source, &historical).unwrap();
+    assert_eq!(
+        publication(root.path(), &source, &historical.graph_digest).unwrap(),
+        Some(historical.clone())
+    );
+    let mut altered = original;
+    altered.task_graphs.insert("changed".into(), "d".repeat(64));
+    write_publication(root.path(), &source, &altered).unwrap();
+    assert!(publication(root.path(), &source, &historical.graph_digest).is_err());
+}
+
 fn owned_policy(root: &Path, run: &str) -> GraphRunRecord {
     let snapshot = graph();
     let record = GraphRunRecord::create_with_id(snapshot, serde_json::Value::Null, run).unwrap();

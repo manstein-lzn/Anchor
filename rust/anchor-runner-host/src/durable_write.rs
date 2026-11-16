@@ -1,5 +1,6 @@
+use crate::host_fs::open_directory;
 use anchor_file_lease::{FileLease, FlockOperation};
-use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags, open, openat, statat, unlinkat};
+use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags, openat, statat, unlinkat};
 use rustix::io::Errno;
 use std::{
     ffi::CStr,
@@ -7,7 +8,7 @@ use std::{
     io::{self, Write},
     os::fd::AsRawFd,
     os::unix::fs::PermissionsExt,
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
 };
 
 const TEMP_PREFIX: &str = ".anchor-write-";
@@ -78,24 +79,6 @@ struct CleanupReport {
     removed: usize,
     busy: usize,
     failed: usize,
-}
-
-fn open_directory(path: &Path) -> io::Result<File> {
-    let mut directory = open("/", DIRECTORY_FLAGS, Mode::empty())?;
-    for component in std::path::absolute(path)?.components() {
-        match component {
-            Component::RootDir => {}
-            Component::Normal(name) => {
-                directory = openat(&directory, name, DIRECTORY_FLAGS, Mode::empty())?;
-            }
-            _ => {
-                return Err(io::Error::other(
-                    "cleanup directory must not contain parent traversal",
-                ));
-            }
-        }
-    }
-    Ok(directory.into())
 }
 
 fn temporary_name(name: &[u8]) -> bool {

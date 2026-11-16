@@ -63,7 +63,8 @@ pub struct Host {
 pub fn host_binary() -> PathBuf {
     std::env::var_os("ANCHOR_TEST_HOST_BINARY")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_anchor-runner-host")))
+        .or_else(|| option_env!("CARGO_BIN_EXE_anchor-runner-host").map(PathBuf::from))
+        .expect("set ANCHOR_TEST_HOST_BINARY when reusing fixtures from a binary unit test")
 }
 
 /// Stage exactly this release's public resources and the selected native build.

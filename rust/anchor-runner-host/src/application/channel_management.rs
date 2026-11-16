@@ -2,7 +2,7 @@
 //! by the Graph name. The existing Session/Turn admission and ChannelSupervisor
 //! retain execution and transport semantics.
 use super::{ApplicationError, RunApplication};
-use crate::plugin_library::Catalog;
+use crate::{channel_platform::ChannelPlatform, plugin_library::Catalog};
 use anchor_runtime::graph::GraphSnapshot;
 use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
@@ -12,47 +12,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum ChannelPlatform {
-    #[default]
-    Wecom,
-    Feishu,
-}
-
-impl ChannelPlatform {
-    pub(crate) const ALL: [Self; 2] = [Self::Wecom, Self::Feishu];
-
-    pub(crate) fn parse(value: &str) -> Option<Self> {
-        Self::ALL
-            .into_iter()
-            .find(|platform| platform.as_str() == value)
-    }
-
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::Wecom => "wecom",
-            Self::Feishu => "feishu",
-        }
-    }
-
-    pub(crate) fn account_field(self) -> &'static str {
-        match self {
-            Self::Wecom => "WECOM_BOT_ID",
-            Self::Feishu => "FEISHU_APP_ID",
-        }
-    }
-
-    pub(crate) fn account_identity(self, identity: &str) -> String {
-        use sha2::{Digest, Sha256};
-        format!(
-            "{}:{:x}",
-            self.as_str(),
-            Sha256::digest(identity.trim().as_bytes())
-        )
-    }
-}
-
 /// The operator-approved settings of one Graph's bot. The Graph is the
 /// binding's key; the reply node is derived from the Graph, never configured.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
@@ -61,10 +20,18 @@ pub(crate) struct ChannelBinding {
     pub(crate) plugin: String,
     pub(crate) users: Vec<String>,
     pub(crate) send_users: Vec<String>,
-    /// Answer only one-to-one conversations. Group messages get a fixed
-    /// notice and never reach the Graph, so no shared group context exists.
+    /// Explicit Feishu chat IDs; an empty list never authorizes any group.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) groups: Vec<String>,
+    /// Explicit peer bot open IDs, independent of human member grants.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) peer_bots: Vec<String>,
+    /// Answer only one-to-one conversations, without shared group context.
     #[serde(default)]
     pub(crate) private_only: bool,
+    /// Explicitly grant this bot the published application API capabilities.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) cli_enabled: bool,
 }
 
 /// The member lists an operator chooses; the Plugin comes from the Graph.
@@ -73,8 +40,15 @@ pub(crate) struct ChannelBinding {
 pub(crate) struct ChannelMembers {
     pub(crate) users: Vec<String>,
     pub(crate) send_users: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) groups: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) peer_bots: Vec<String>,
     #[serde(default)]
     pub(crate) private_only: bool,
+    /// Explicitly grant this bot the published application API capabilities.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) cli_enabled: bool,
 }
 
 impl ChannelBinding {
@@ -83,9 +57,12 @@ impl ChannelBinding {
         platform: ChannelPlatform,
     ) -> Result<(), ApplicationError> {
         self.validate()?;
-        if platform == ChannelPlatform::Feishu && !self.private_only {
+        if platform == ChannelPlatform::Wecom
+            && (!self.groups.is_empty() || !self.peer_bots.is_empty() || self.cli_enabled)
+        {
             return Err(ApplicationError::Invalid(
-                "Feishu supports private chats only; private_only must be true".into(),
+                "group authorization and application CLI tools are supported only for Feishu"
+                    .into(),
             ));
         }
         Ok(())
@@ -129,6 +106,41 @@ impl ChannelBinding {
                 "send_users must explicitly authorize the intended reply users".into(),
             ));
         }
+        if self.groups.len() > 1000
+            || self.groups.iter().any(|group| {
+                let group = group.trim();
+                !group.starts_with("oc_")
+                    || group.len() <= 3
+                    || group.len() > 200
+                    || !group
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+            })
+        {
+            return Err(ApplicationError::Invalid(
+                "groups must contain at most 1000 explicit Feishu oc_ chat IDs".into(),
+            ));
+        }
+        if self.peer_bots.len() > 1000
+            || self.peer_bots.iter().any(|bot| {
+                !bot.starts_with("ou_")
+                    || bot.len() <= 3
+                    || bot.len() > 200
+                    || !bot
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+            })
+            || (!self.peer_bots.is_empty() && self.groups.is_empty())
+        {
+            return Err(ApplicationError::Invalid(
+                "peer_bots requires explicit Feishu ou_ bot IDs and authorized groups".into(),
+            ));
+        }
+        if self.private_only && !self.groups.is_empty() {
+            return Err(ApplicationError::Invalid(
+                "private_only requires an empty groups list".into(),
+            ));
+        }
         Ok(())
     }
 
@@ -145,6 +157,19 @@ impl ChannelBinding {
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect();
+        self.groups = self
+            .groups
+            .into_iter()
+            .map(|group| group.trim().to_owned())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        self.peer_bots = self
+            .peer_bots
+            .into_iter()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
         self
     }
 }
@@ -156,6 +181,12 @@ pub(crate) struct ChannelPlan {
     pub(crate) work_node: String,
     pub(crate) plugin: String,
     pub(crate) platform: ChannelPlatform,
+}
+
+pub(crate) struct ActiveChannelTurn {
+    pub(crate) source: crate::run_metadata::AssistantSource,
+    pub(crate) input: anchor_platform_session::AssistantInput,
+    pub(crate) identity: anchor_platform_session::ChannelIdentity,
 }
 
 /// The single rule for "this Graph is a bot Graph": a persistent assistant
@@ -257,6 +288,63 @@ pub(crate) const TWO_CHANNELS: &str =
 const STOP_FIRST: &str = "此 Graph 的机器人正在运行，请先停用机器人";
 
 impl RunApplication {
+    /// Tool calls use the current claimed Turn, including group sender identity;
+    /// model arguments and a retained Run alone cannot select a conversation.
+    pub(crate) fn active_channel_turn(
+        &self,
+        key: &anchor_runtime::graph::InvocationKey,
+    ) -> Result<ActiveChannelTurn, ApplicationError> {
+        use anchor_platform_session::{AssistantInput, ChannelConversationKind, TurnStatus};
+        let invalid = || {
+            ApplicationError::Invalid(
+                "this input no longer belongs to an active assistant Turn".into(),
+            )
+        };
+        let metadata = self.metadata(&key.run_id)?.ok_or_else(invalid)?;
+        let source = metadata
+            .assistant
+            .as_ref()
+            .filter(|source| source.work_node == key.node_id)
+            .ok_or_else(invalid)?
+            .clone();
+        self.ensure_current_assistant(&metadata)?;
+        let input = crate::assistant::input(&self.data_root, key)
+            .map_err(super::storage)?
+            .ok_or_else(invalid)?;
+        let run = match &input {
+            AssistantInput::User(input) => input.relation.run_id.as_deref(),
+            AssistantInput::Task(input) => Some(input.run_id.as_str()),
+        };
+        if run != Some(key.run_id.as_str()) || input.turn().status != TurnStatus::Running {
+            return Err(invalid());
+        }
+        let sessions = crate::assistant::sessions(&self.data_root).map_err(super::storage)?;
+        let identity = sessions
+            .channel_identity(&source.owner, &source.session)
+            .map_err(super::assistants::assistant_session_error)?;
+        if ChannelPlatform::parse(&identity.source).is_none() || identity.conversation_id.is_empty()
+        {
+            return Err(invalid());
+        }
+        if let AssistantInput::User(user) = &input {
+            let actual = &user.request.identity;
+            if actual.source != identity.source
+                || actual.account != identity.account
+                || actual.conversation_id != identity.conversation_id
+                || actual.conversation_kind != identity.conversation_kind
+                || (identity.conversation_kind == ChannelConversationKind::Single
+                    && actual.sender_id != identity.sender_id)
+            {
+                return Err(invalid());
+            }
+        }
+        Ok(ActiveChannelTurn {
+            source,
+            input,
+            identity,
+        })
+    }
+
     pub(crate) fn ensure_channel_session_eligible(
         &self,
         owner: &str,
@@ -341,7 +429,10 @@ impl RunApplication {
             plugin: plan.plugin,
             users: members.users,
             send_users: members.send_users,
+            groups: members.groups,
+            peer_bots: members.peer_bots,
             private_only: members.private_only,
+            cli_enabled: members.cli_enabled,
         };
         binding.validate_for_platform(plan.platform)?;
         port.configure(owner, graph, binding.normalized()).await

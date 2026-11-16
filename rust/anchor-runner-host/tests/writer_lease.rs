@@ -84,6 +84,8 @@ fn http_host(root: &Path, address: SocketAddr) -> Child {
     host(root)
         .arg("serve")
         .env("ANCHOR_RUNNER_LISTEN", address.to_string())
+        .env("ANCHOR_RETENTION_DAYS", "30")
+        .env("ANCHOR_RETENTION_MAX_GB", "20")
         .spawn()
         .unwrap()
 }
@@ -165,6 +167,8 @@ fn http_writer_blocks_other_writers_but_exit_releases_lease() {
     let first_address = address();
     let mut http = http_host(root.path(), first_address);
     wait_http(&mut http, first_address);
+    let reader = anchor_kernel::HistoryReader::open(root.path().join("state/kernel-runs")).unwrap();
+    assert!(reader.load("validator/effect").unwrap().is_some());
     let rejected = response(framed(root.path(), "start_bundle", "blocked"));
     assert_eq!(rejected["kind"], "rejected");
     assert!(
@@ -184,10 +188,8 @@ fn http_writer_blocks_other_writers_but_exit_releases_lease() {
     assert!(String::from_utf8_lossy(&second.stderr).contains("writing host"));
     http.kill().unwrap();
     http.wait().unwrap();
-    assert_eq!(
-        response(framed(root.path(), "start_bundle", "released"))["projection"]["outcome"],
-        "done"
-    );
+    let released = response(framed(root.path(), "start_bundle", "released"));
+    assert_eq!(released["projection"]["outcome"], "done", "{released}");
 }
 
 #[test]

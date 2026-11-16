@@ -6,7 +6,7 @@ use anchor_runtime::SandboxEnvironment;
 use reqwest::Url;
 use sha2::{Digest, Sha256};
 
-pub(super) fn binary() -> Result<(std::path::PathBuf, String), String> {
+pub(crate) fn binary() -> Result<(std::path::PathBuf, String), String> {
     let binary = std::env::var_os("ANCHOR_GOOSE_BINARY")
         .map(std::path::PathBuf::from)
         .ok_or("ANCHOR_GOOSE_BINARY is required")?
@@ -23,7 +23,7 @@ pub(super) fn binary() -> Result<(std::path::PathBuf, String), String> {
                 .into(),
         );
     }
-    let digest = super::file_sha256(&binary)?;
+    let digest = crate::host_fs::sha256_file(&binary)?;
     let expected = match std::env::var("ANCHOR_GOOSE_BINARY_SHA256") {
         Ok(value) => value,
         Err(std::env::VarError::NotPresent) => {
@@ -45,10 +45,14 @@ pub(super) fn command(
     cancellation: anchor_runtime::Cancellation,
     transport: &BridgeTransport,
 ) -> Result<tokio::process::Command, String> {
-    let mut grants = vec![anchor_runtime::ReadOnlyInput {
-        source: binary.to_path_buf(),
-        destination: "/tools/goose".into(),
-    }];
+    let mut grants = if sandbox.has_frozen_file(std::path::Path::new("/tools/goose")) {
+        vec![]
+    } else {
+        vec![anchor_runtime::ReadOnlyInput {
+            source: binary.to_path_buf(),
+            destination: "/tools/goose".into(),
+        }]
+    };
     // The packaged Goose is the Anchor-built lean ACP server (`goose-acp`). It speaks ACP
     // on stdio directly and takes no subcommand: the upstream `goose acp` subcommand form
     // belongs to the full CLI and is intentionally not used, and the lean binary rejects it
@@ -59,10 +63,12 @@ pub(super) fn command(
             anchor_runtime::NetworkPolicy::Enabled,
         ),
         BridgeTransport::Isolated { relay, socket } => {
-            grants.push(anchor_runtime::ReadOnlyInput {
-                source: relay.clone(),
-                destination: RELAY_MOUNT.into(),
-            });
+            if !sandbox.has_frozen_file(std::path::Path::new(RELAY_MOUNT)) {
+                grants.push(anchor_runtime::ReadOnlyInput {
+                    source: relay.clone(),
+                    destination: RELAY_MOUNT.into(),
+                });
+            }
             grants.push(anchor_runtime::ReadOnlyInput {
                 source: socket.clone(),
                 destination: SOCKET_MOUNT.into(),
@@ -116,7 +122,7 @@ pub(super) const RELAY_LISTEN: &str = "127.0.0.1:9080";
 /// `tom` is required for the per-turn boundary text; other names are opt-in so a
 /// disclosure layer (for example `code_execution`) can be enabled deliberately
 /// instead of by default.
-pub(super) fn enabled_builtins() -> Result<Vec<String>, String> {
+pub(crate) fn enabled_builtins() -> Result<Vec<String>, String> {
     match std::env::var("ANCHOR_GOOSE_ENABLED_EXTENSIONS") {
         Ok(configured) => parse_enabled_builtins(&configured),
         Err(_) => Ok(default_enabled_builtins()),
@@ -197,7 +203,8 @@ pub(super) fn boundary_text(facts: &BoundaryFacts) -> String {
 ///
 /// The opt-in is read once per port; the relay binary defaults to the one shipped
 /// beside the Goose binary.
-pub(super) struct RelaySettings {
+#[derive(Clone)]
+pub(crate) struct RelaySettings {
     relay: Option<PathBuf>,
 }
 
@@ -235,7 +242,7 @@ impl RelaySettings {
         }
     }
 
-    pub(super) fn from_env(binary: &std::path::Path) -> Result<Self, String> {
+    pub(crate) fn from_env(binary: &std::path::Path) -> Result<Self, String> {
         if !Self::isolated(binary) {
             return Ok(Self { relay: None });
         }

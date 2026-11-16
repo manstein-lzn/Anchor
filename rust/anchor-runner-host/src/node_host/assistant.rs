@@ -99,6 +99,20 @@ fn provider_reply(kind: &str) -> String {
 }
 
 impl HostNodes {
+    async fn assistant_input_suppressed(
+        &self,
+        key: &InvocationKey,
+        input: &AssistantInput,
+    ) -> Result<bool, GraphError> {
+        Ok(!self
+            .io_resolver
+            .tool_assembly
+            .authorize_assistant_input(key, input)
+            .await
+            .map_err(graph_error)?
+            || stopped_input(input))
+    }
+
     fn yield_assistant(
         &self,
         key: &InvocationKey,
@@ -129,7 +143,7 @@ impl HostNodes {
         })
     }
 
-    pub(super) fn assistant_completion_fact(
+    pub(super) async fn assistant_completion_fact(
         &self,
         key: &InvocationKey,
     ) -> Result<Option<CompletionFact>, GraphError> {
@@ -156,7 +170,7 @@ impl HostNodes {
         }
         if key.node_id == source.work_node
             && let Some(input) = assistant::input(root, key).map_err(graph_error)?
-            && stopped_input(&input)
+            && self.assistant_input_suppressed(key, &input).await?
         {
             let inputs = self
                 .io_resolver
@@ -195,7 +209,7 @@ impl HostNodes {
         .flatten())
     }
 
-    pub(super) fn settle_assistant_reply(
+    pub(super) async fn settle_assistant_reply(
         &self,
         key: &InvocationKey,
         completion: &NodeCompletion,
@@ -227,7 +241,7 @@ impl HostNodes {
                         "task result reply identity changed".into(),
                     ));
                 }
-                if !stopped_input(&input) {
+                if !self.assistant_input_suppressed(key, &input).await? {
                     let binding = assistant::binding(root, key)
                         .map_err(graph_error)?
                         .ok_or_else(|| graph_error("task result reply has no binding"))?;
@@ -284,6 +298,15 @@ impl HostNodes {
         &self,
         request: NodeExecutionRequest,
     ) -> Result<NodeExecutionOutcome, GraphError> {
+        let operation = request
+            .operation
+            .as_ref()
+            .and_then(|operation| operation.get("operation"))
+            .and_then(Value::as_str)
+            .ok_or_else(|| graph_error("host operation is missing"))?;
+        if !operation.starts_with("session.") {
+            return Err(graph_error("unsupported host operation"));
+        }
         let root = self.io_resolver.local_inputs.state_root();
         let source = assistant::source(root, &request.key)
             .map_err(graph_error)?
@@ -312,6 +335,16 @@ impl HostNodes {
                     let notified = signal.notified();
                     tokio::pin!(notified);
                     notified.as_mut().enable();
+                    if request.cancellation.load(Ordering::Acquire) {
+                        return Ok(NodeExecutionOutcome::Cancelled);
+                    }
+                    let claim = match signal.input_claim.try_lock() {
+                        Ok(claim) => claim,
+                        Err(_) => {
+                            tokio::time::sleep(Duration::from_millis(25)).await;
+                            continue;
+                        }
+                    };
                     if request.cancellation.load(Ordering::Acquire) {
                         return Ok(NodeExecutionOutcome::Cancelled);
                     }
@@ -369,6 +402,18 @@ impl HostNodes {
                             )
                             .map_err(graph_error)?;
                         }
+                        drop(claim);
+                        if !self
+                            .io_resolver
+                            .tool_assembly
+                            .authorize_assistant_input(&request.key, &input)
+                            .await
+                            .map_err(graph_error)?
+                        {
+                            return self
+                                .complete_received_input(&request, &source, &input, json!({}))
+                                .await;
+                        }
                         self.io_resolver
                             .freeze_assistant_plugins(
                                 &request.key,
@@ -407,10 +452,12 @@ impl HostNodes {
                         }).collect::<Vec<_>>();
                         let output = match &input {
                             AssistantInput::User(input) => json!({
-                            "source":"user",
+                            "source":if input.request.bot_origin.is_some() { "bot" } else { "user" },
                             "files":["input.json"],
                             "message":input.request.text,
                             "channel":input.request.identity,
+                            "platform_message_id": input.request.platform_message_id,
+                            "bot_origin": input.request.bot_origin,
                             "attachments":input.request.attachments,
                             "session":source.session,
                             "turn":input.relation.turn_id,
@@ -426,23 +473,11 @@ impl HostNodes {
                                 "task_result": assistant::task_result_projection(&input.result),
                             }),
                         };
-                        let workspace = self
-                            .io_resolver
-                            .prepare_node_workspace(&request.key, &request.input_commits)
-                            .map_err(graph_error)?;
-                        let input_path = workspace.join("input.json");
-                        let bytes = serde_json::to_vec(&output).map_err(graph_error)?;
-                        crate::write_durable(&input_path, &bytes)?;
-                        return self.complete(
-                            &request.key,
-                            NodeCompletion {
-                                submission: "received one Session input".into(),
-                                route: Some(source.work_node),
-                                model_requests: 0,
-                                output,
-                            },
-                        );
+                        return self
+                            .complete_received_input(&request, &source, &input, output)
+                            .await;
                     }
+                    drop(claim);
                     observation.set_waiting(true);
                     tokio::select! {
                         _ = async {
@@ -463,7 +498,10 @@ impl HostNodes {
                 self.io_resolver
                     .prepare_node_workspace(&request.key, &request.input_commits)
                     .map_err(graph_error)?;
-                if stopped_input(&input) {
+                if self
+                    .assistant_input_suppressed(&request.key, &input)
+                    .await?
+                {
                     return self.complete(
                         &request.key,
                         NodeCompletion {
@@ -510,7 +548,7 @@ impl HostNodes {
                             "task_result_resolution":resolution,"source_commit":commit,"items":[]}),
                     };
                     let outcome = self.complete(&request.key, reply.clone())?;
-                    self.settle_assistant_reply(&request.key, &reply)?;
+                    self.settle_assistant_reply(&request.key, &reply).await?;
                     return Ok(outcome);
                 }
                 let user = input
@@ -544,13 +582,53 @@ impl HostNodes {
                     }
                 };
                 let outcome = self.complete(&request.key, reply.clone())?;
-                self.settle_assistant_reply(&request.key, &reply)?;
+                self.settle_assistant_reply(&request.key, &reply).await?;
                 Ok(outcome)
             }
             _ => Err(graph_error(
                 "host operation is not authorized for this node",
             )),
         }
+    }
+
+    async fn complete_received_input(
+        &self,
+        request: &NodeExecutionRequest,
+        source: &crate::run_metadata::AssistantSource,
+        input: &AssistantInput,
+        mut output: Value,
+    ) -> Result<NodeExecutionOutcome, GraphError> {
+        let workspace = self
+            .io_resolver
+            .prepare_node_workspace(&request.key, &request.input_commits)
+            .map_err(graph_error)?;
+        // Freezing plugins can await external preparation. Recheck at the
+        // projection boundary, not only when the Session input was claimed.
+        if !self
+            .io_resolver
+            .tool_assembly
+            .authorize_assistant_input(&request.key, input)
+            .await
+            .map_err(graph_error)?
+        {
+            output = json!({
+                "files":["input.json"],"source":"task_result",
+                "session":source.session,"turn":input.turn().id,"suppressed":true
+            });
+        }
+        crate::write_durable(
+            &workspace.join("input.json"),
+            &serde_json::to_vec(&output).map_err(graph_error)?,
+        )?;
+        self.complete(
+            &request.key,
+            NodeCompletion {
+                submission: "received one Session input".into(),
+                route: Some(source.work_node.clone()),
+                model_requests: 0,
+                output,
+            },
+        )
     }
 
     pub(super) async fn execute_assistant_request(
@@ -570,7 +648,9 @@ impl HostNodes {
         self.io_resolver
             .prepare_node_workspace(&request.key, &request.input_commits)
             .map_err(graph_error)?;
-        if stopped_input(&input)
+        if self
+            .assistant_input_suppressed(&request.key, &input)
+            .await?
             && let CompletionFact::Yielded { reason, route } =
                 self.yield_assistant(&request.key, source.reply_node.clone(), None)?
         {
@@ -589,7 +669,7 @@ impl HostNodes {
                 let current = assistant::input(root, &key)
                     .map_err(graph_error)?
                     .ok_or_else(|| graph_error("assistant input disappeared"))?;
-                if stopped_input(&current) {
+                if self.assistant_input_suppressed(&key, &current).await? {
                     return Ok(true);
                 }
                 tokio::select! {
@@ -601,7 +681,7 @@ impl HostNodes {
         let execution = self.execute_regular(request);
         tokio::pin!(execution);
         let outcome = tokio::select! {
-            outcome = &mut execution => outcome?,
+            outcome = &mut execution => outcome,
             interruption = monitor => {
                 node_cancel.store(true, Ordering::Release);
                 let _ = execution.await;
@@ -616,12 +696,13 @@ impl HostNodes {
         let current = assistant::input(root, &key)
             .map_err(graph_error)?
             .ok_or_else(|| graph_error("assistant input disappeared"))?;
-        if stopped_input(&current)
+        if self.assistant_input_suppressed(&key, &current).await?
             && let CompletionFact::Yielded { reason, route } =
                 self.yield_assistant(&key, source.reply_node.clone(), None)?
         {
             return Ok(NodeExecutionOutcome::Yielded { reason, route });
         }
+        let outcome = outcome?;
         // A provider rejection ends this Turn with a Host reply; the assistant
         // keeps waiting. Unclassified failures still stop it for inspection.
         if matches!(outcome, NodeExecutionOutcome::Interrupted { .. })

@@ -159,6 +159,11 @@ mod tests {
             completion: None,
             reason: None,
             model_binding: None,
+            execution_closure_digest: None,
+            frozen_model_digest: None,
+            input_guidance: None,
+            context_checkpoint_digest: None,
+            context_request_digest: None,
             conversation_scope: None,
             provider_failure: None,
             tool_observation: Some(

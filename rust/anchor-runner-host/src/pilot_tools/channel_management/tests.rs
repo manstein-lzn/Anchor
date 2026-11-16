@@ -3,18 +3,18 @@ use crate::application::channel_management::fake::FakeChannels;
 use anchor_platform_session::{CreateSession, TurnStatus};
 use std::sync::Arc;
 
-fn fixture() -> (tempfile::TempDir, PilotTools, Arc<FakeChannels>) {
+fn fixture(platform: &str) -> (tempfile::TempDir, PilotTools, Arc<FakeChannels>) {
     let root = tempfile::tempdir().unwrap();
     let graph = root.path().join("catalog/task");
     std::fs::create_dir_all(&graph).unwrap();
     crate::application::channel_management::fake::install_channel_plugin(
         &root.path().join("catalog"),
-        "wecom",
+        platform,
     );
-    std::fs::write(graph.join("graph.json"),json!({"entry":"wait","agents":{"reply":{"model":"fixture","instructions":"fixture"}},"ops":{"wait":{"host":{"operation":"session.wait_input"}},"deliver":{"host":{"operation":"session.reply"}}},"nodes":[{"id":"wait","op":"wait"},{"id":"reply","agent":"reply","plugins":["wecom"]},{"id":"deliver","op":"deliver"}],"edges":[{"from":"wait","to":"reply"},{"from":"reply","to":"deliver"},{"from":"deliver","to":"wait"}]}).to_string()).unwrap();
+    std::fs::write(graph.join("graph.json"),json!({"entry":"wait","agents":{"reply":{"model":"fixture","instructions":"fixture"}},"ops":{"wait":{"host":{"operation":"session.wait_input"}},"deliver":{"host":{"operation":"session.reply"}}},"nodes":[{"id":"wait","op":"wait"},{"id":"reply","agent":"reply","plugins":[platform]},{"id":"deliver","op":"deliver"}],"edges":[{"from":"wait","to":"reply"},{"from":"reply","to":"deliver"},{"from":"deliver","to":"wait"}]}).to_string()).unwrap();
     std::fs::write(
         graph.join("manifest.json"),
-        json!({"format":1,"graph":"graph.json","plugins":[{"id":"wecom"}]}).to_string(),
+        json!({"format":1,"graph":"graph.json","plugins":[{"id":platform}]}).to_string(),
     )
     .unwrap();
     std::fs::create_dir_all(root.path().join("state/platform")).unwrap();
@@ -52,7 +52,67 @@ fn fixture() -> (tempfile::TempDir, PilotTools, Arc<FakeChannels>) {
 }
 
 fn arguments() -> Value {
-    json!({"graph":"task","users":["alice"],"send_users":["alice"]})
+    json!({"graph":"task","users":["alice"],"send_users":["alice"],"groups":[]})
+}
+
+#[test]
+fn group_grants_are_explicit_typed_and_preserved_until_application_normalization() {
+    let mut request = arguments();
+    request.as_object_mut().unwrap().remove("groups");
+    assert!(configuration_arguments(&request).is_err());
+    for invalid in [
+        json!(null),
+        json!("oc_team"),
+        json!([1]),
+        json!(["oc_team", false]),
+        json!({}),
+    ] {
+        request["groups"] = invalid;
+        assert!(configuration_arguments(&request).is_err());
+    }
+    request["groups"] = json!([" oc_team ", "oc_other", "oc_team"]);
+    let (graph, members) = configuration_arguments(&request).unwrap();
+    assert_eq!(graph, "task");
+    assert_eq!(members.users, ["alice"]);
+    assert_eq!(members.send_users, ["alice"]);
+    assert_eq!(members.groups, [" oc_team ", "oc_other", "oc_team"]);
+    assert!(!members.private_only);
+    request["private_only"] = json!(true);
+    assert!(configuration_arguments(&request).is_err());
+    request["groups"] = json!([]);
+    let (_, members) = configuration_arguments(&request).unwrap();
+    assert!(members.private_only);
+    assert!(members.groups.is_empty());
+}
+
+#[test]
+fn pilot_group_arguments_reuse_binding_validation_and_advertise_required_groups() {
+    let spec = crate::pilot_tools::PILOT_TOOLS
+        .iter()
+        .find(|spec| spec.name == "channel_configure")
+        .unwrap();
+    let schema = (spec.parameters)();
+    assert!(
+        schema["required"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("groups"))
+    );
+    assert_eq!(schema["properties"]["groups"]["type"], "array");
+    assert_eq!(schema["properties"]["groups"]["items"]["type"], "string");
+    assert_eq!(schema["properties"]["groups"]["maxItems"], 1000);
+    assert_eq!(schema["additionalProperties"], false);
+    let mut request = arguments();
+    for invalid in [
+        json!(["*"]),
+        json!(["ou_alice"]),
+        json!(["oc_"]),
+        json!(["oc_a,b"]),
+        json!(vec!["oc_team"; 1001]),
+    ] {
+        request["groups"] = invalid;
+        assert!(configuration_arguments(&request).is_err());
+    }
 }
 
 #[tokio::test]
@@ -60,7 +120,7 @@ async fn channel_mutations_require_an_owned_active_turn_and_leave_session_execut
  {
     // The bot plan resolves the Library root from the process environment.
     let _guard = crate::PROCESS_ENV_LOCK.lock().await;
-    let (_root, mut tools, port) = fixture();
+    let (_root, mut tools, port) = fixture("wecom");
     let (graph, members) = configuration_arguments(&arguments()).unwrap();
     assert!(
         tools
@@ -114,7 +174,7 @@ async fn channel_mutations_require_an_owned_active_turn_and_leave_session_execut
 async fn malformed_bindings_unknown_graphs_and_model_credentials_or_approval_are_rejected() {
     // The bot plan resolves the Library root from the process environment.
     let _guard = crate::PROCESS_ENV_LOCK.lock().await;
-    let (_root, tools, port) = fixture();
+    let (_root, tools, port) = fixture("wecom");
     for field in [
         "secret",
         "WECOM_BOT_SECRET",
@@ -160,4 +220,50 @@ async fn malformed_bindings_unknown_graphs_and_model_credentials_or_approval_are
             .await
             .is_err()
     );
+}
+
+#[tokio::test]
+async fn approved_member_changes_keep_explicit_groups_until_explicitly_cleared() {
+    let _guard = crate::PROCESS_ENV_LOCK.lock().await;
+    let (_root, tools, port) = fixture("feishu");
+    let (turn, _) = tools
+        .sessions
+        .create_turn("local", "pilot", "initialize", None)
+        .unwrap();
+    let tools = tools.for_turn(&turn.id);
+    let mut request = json!({
+        "graph":"task", "users":["ou_alice"], "send_users":["ou_alice"],
+        "groups":[" oc_team ", "oc_team"], "private_only":false
+    });
+    let (graph, members) = configuration_arguments(&request).unwrap();
+    tools
+        .configure_channel_approved(&graph, members)
+        .await
+        .unwrap();
+    assert_eq!(port.get("task").unwrap().binding.groups, ["oc_team"]);
+    request["users"] = json!(["ou_alice", "ou_bob"]);
+    request["send_users"] = json!(["ou_bob"]);
+    let (graph, members) = configuration_arguments(&request).unwrap();
+    tools
+        .configure_channel_approved(&graph, members)
+        .await
+        .unwrap();
+    let saved = port.get("task").unwrap().binding;
+    assert_eq!(saved.plugin, "feishu");
+    assert_eq!(saved.users, ["ou_alice", "ou_bob"]);
+    assert_eq!(saved.send_users, ["ou_bob"]);
+    assert_eq!(saved.groups, ["oc_team"]);
+    request.as_object_mut().unwrap().remove("groups");
+    assert!(configuration_arguments(&request).is_err());
+    assert_eq!(port.get("task").unwrap().binding, saved);
+    request["groups"] = json!([]);
+    request["private_only"] = json!(true);
+    let (graph, members) = configuration_arguments(&request).unwrap();
+    tools
+        .configure_channel_approved(&graph, members)
+        .await
+        .unwrap();
+    let saved = port.get("task").unwrap().binding;
+    assert!(saved.groups.is_empty());
+    assert!(saved.private_only);
 }
