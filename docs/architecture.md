@@ -74,11 +74,15 @@ Host 托管的模型配置将公开字段、用于恢复的旧绑定和按槽/�
 
 同一事实所有者内部按职责分模块，入口负责组合：
 
+Bridge 服务工具和本地项目工具的准入与逐次调用授权归 `application/assistants`；`execution/tool_assembly` 注入绑定当前 invocation 的授权回调，并装配项目 `NodeTools`。底层工具只依赖回调与 `ToolPort`，不反向持有 `RunApplication` 或装配另一入口适配器；项目目录租约、取消和每次操作前的现场校验保持原语义。渠道平台身份统一归中立的 `channel_platform`，应用、渠道适配和 Goose 确认交互共用同一类型，序列化与账号身份格式不变。
+
 Host 的[依赖方向围栏](../rust/anchor-runner-host/tests/layer_fence.rs)固定组合根（`main.rs`、`bin/`、`execution.rs`、`execution/tool_assembly.rs`）、入口适配（`api`、`pilot_tools`、`node_tools`、`graph_task_tools` 模块及 `channel_tools.rs`）、用例（`application` 模块）与其余 Host 服务的角色。`node_host` 只调用注入的 `NodeToolAssembly` 小接口，由组合根装配渠道、Graph 任务和沙箱工具；它替代了 preparation 直接调用上层用例与适配器的 G5 路径，原围栏例外已删除。服务引用用例或入口、用例引用入口的现有次数由[逐文件上限](../rust/anchor-runner-host/layer-fence.txt)限制，新增引用失败，下降时提示降低上限。它与 Run 围栏共用生产源码扫描器，排除测试、注释和字面量；统计显式 `crate::` 路径（含分组导入、原始标识符与宏输入），不做名称解析、相对路径解析或宏展开。Run 的运行时豁免不改变这里的层次归属。H0–H5 已结束；仍保留的反向依赖以围栏中的命名欠债为准，不把历史计数当作当前值，也不自动授权后续端口改造，见[未关闭事项](pilot-development-plan.md#正在收口)。
 
-Plugin id 与名称的字符规则统一归 [anchor-runtime::identifier](../rust/anchor-runtime/src/identifier.rs)：名称非空、非 `.`/`..`，仅含 ASCII 字母、数字和 `_.-`；Plugin id 另要求首字节为字母或数字。Library 安装/回收、Graph 编译/catalog 与 Host 入口共用此规则，凭据和配置入口同样先校验 Plugin id。Host 的不跟随符号链接的持久建目录与 invocation 文件名哈希归 [host_fs](../rust/anchor-runner-host/src/host_fs.rs)，各存储保留原前缀和路径；组合根的 `create_durable_directory` 仍保留跟随符号链接的原语义。
+Plugin id 与名称的字符规则统一归 [anchor-runtime::identifier](../rust/anchor-runtime/src/identifier.rs)：名称非空、非 `.`/`..`，仅含 ASCII 字母、数字和 `_.-`；Plugin id 另要求首字节为字母或数字。Library 安装/回收、Graph 编译/catalog 与 Host 入口共用此规则，凭据和配置入口同样先校验 Plugin id。Host 的不跟随符号链接的持久建目录/目录打开、invocation 文件名哈希与文件 SHA256 归 [host_fs](../rust/anchor-runner-host/src/host_fs.rs)，各存储保留原前缀和路径；Goose、依赖准备、Host 身份与 Hub 共用文件摘要原语。组合根的 `create_durable_directory` 仍保留跟随符号链接的原语义。
 
 Run 身份元数据存储、触发来源、Session 调用数据结构与 Graph 路径身份归顶层 [run_metadata](../rust/anchor-runner-host/src/run_metadata.rs)，不依赖用例层。它使用独立的 `MetadataError`，由 `application` 中唯一的转换实现映射到 `ApplicationError`；持久字段、序列化、路径与保存/读取语义保持原样。接纳、查询、Session 授权和执行协调仍归各自用例或组合根。
+
+历史 Run 的 `dreaming`/`experiment` 元数据与原身份保留、可读，供查证及来源隔离；不能按普通任务启动、resume 或自动恢复，也不把旧实验重标为普通生产。删除专用接入不改变普通 Run 的恢复、权限与元数据契约，旧执行历史仍不是 Goose 原生恢复游标。
 
 | 实现入口 | 内部边界 |
 | --- | --- |
@@ -203,7 +207,7 @@ Library 审查、候选准备与导入共用代码暂存规则：选中 root 或
 
 Goose 固定为 v1.53.0；Anchor 在上游源码应用[已审查的本地兼容补丁](../scripts/patches/README.md)，再用 lean ACP-only 入口构建静态 x86_64 musl 二进制（recipe 见 [构建脚本](../scripts/build-goose-acp.sh)）。现有固定发行产物的 SHA256 为 `17e065a79cb0508413af714724aed51d6b76972dda9feebdda701330134fb640`；源码启动使用本机编译产物，由启动脚本自动提供实际摘要。它与官方完整 CLI 共用 `goose::acp::server::run`。补丁在 Goose 原生 Thinking 的可选元数据中保存完整 reasoning item，并在后续 Responses 请求按原序单次回传，包括 opaque/encrypted 字段；同时忽略空 text delta 保活，非空畸形帧仍报错。Anchor Bridge 和产品事实不复制或重写 reasoning，旧历史已丢失的数据也不重建。
 
-AgentNode 与 Pilot 共用 ACP/MCP 接入。当前执行及同 invocation 恢复严格绑定二进制、模型/endpoint 和原生 Session，不静默换模型或创建替代历史。新 invocation 可选择最新模型；跨 Goose 二进制版本的 Graph 原生历史接续，仅允许[已审查的旧固定摘要到当前摘要](../rust/anchor-runner-host/src/goose_acp/conversation/revision.rs)单向升级，核对前驱与 scope 事实后仍加载同一 Session，不授权逆向回滚或未审查二进制。Pilot 的新 Turn 通过公开 `session/load` 接续保留的 Session。跨不同 Provider、模型或账号的 opaque reasoning 兼容尚未验收。固定 Goose 将请求、网络、拒答及终止的压缩错误保存为原生结构化 Error，并通过 ACP 错误结束；成功的压缩恢复继续原路径。Host 仅依据经协议校验的错误代码与原因区分模型请求失败和运行中断，Pilot 分别结算为 `failed` 与 `interrupted`，用户取消仍为 `stopped`；原始服务正文不进入 Web 错误信息。普通助手正文不参与分类，Turn `completed` 仍不替代业务成功验收。实际 Host/Goose 错误场景及真实 Provider 验收边界见[验证记录](../.local/closeout-20261018/README.md)。
+AgentNode 与 Pilot 共用 ACP/MCP 接入。当前执行及同 invocation 恢复严格绑定二进制、模型/endpoint 和原生 Session，不静默换模型或创建替代历史。新 invocation 可选择最新模型；跨 Goose 二进制版本的 Graph 原生历史接续，仅允许[已审查的旧固定摘要到当前摘要](../rust/anchor-runner-host/src/goose_acp/conversation/revision.rs)单向升级，核对前驱与 scope 事实后仍加载同一 Session，不授权逆向回滚或未审查二进制。Pilot 的新 Turn 通过公开 `session/load` 接续保留的 Session。跨不同 Provider、模型或账号的 opaque reasoning 兼容尚未验收。固定 Goose 将请求、网络、拒答及终止的压缩错误保存为原生结构化 Error，并通过 ACP 错误结束；成功的压缩恢复继续原路径。Host 仅依据经协议校验的错误代码与原因区分模型请求失败和运行中断，Pilot 分别结算为 `failed` 与 `interrupted`，用户取消仍为 `stopped`；原始服务正文不进入 Web 错误信息。普通助手正文不参与分类，Turn `completed` 仍不替代业务成功验收。实际 Host/Goose 错误场景及真实 Provider 验收边界见验证记录（本机原件，未入库：`.local/closeout-20261018/README.md`）。
 
 固定版 Goose 的 `enabledExtensions` 在新建时追加到默认扩展，加载时保留已存扩展，不能单独用作授权集合。共享 ACP 接入在新建/加载后、首次模型提示前，通过官方 `session/extensions/list`、`remove`、`add` 接口校准为 Anchor MCP 与部署显式允许的原生扩展；默认只保留提供边界指令的 `tom`，不启用 `developer` 的独立文件和 shell 工具。撤销旧扩展保留原生 Session 与历史，不直接修改其数据库；校准失败拒绝本次执行。
 
@@ -305,6 +309,12 @@ Kernel 的 `NodeExecutionPort::invocation_plugin_authority` 默认关闭，普�
 
 ### 按需 Graph 任务与结果输入
 
+既有计划的结果消费通过 Schedule 订阅扩展，不再为每个收件人建立一份生产任务。`graph_tasks.schedules` 是独立于 `graphs` 执行许可的确切计划白名单；操作员还须显式分享给既有私聊 Session。`graph_tasks_schedule_discover` 只投影可订阅计划的描述、规则、下次时刻和状态，不泄露生产输入、委派来源或其他收件人。Agent 用 `graph_tasks_subscribe`、`graph_tasks_subscriptions`、`graph_tasks_unsubscribe` 管理自己的关系；Host 派生身份，工具不接受 owner、Session 或收件人。订阅不创建、启动、取消或重写生产计划。
+
+分享固定生产 Graph、输入、静态调用闭包及 Plugin bindings；生产准入保存可选 `RunMetadata.schedule_publication` 修订，`task` 的原生产来源不改成收件人表。分享与订阅关系经现有 Kernel 提交，Session 仍是排队、领取、处理和取消的唯一事实来源，Gateway 仍拥有外发 ACK。默认只消费订阅生效时间之后的计划时点，不补历史或正在执行的那一期；重订不回放旧结果。每位订阅者的 Host 本地 `not_before`（HH:mm）只延迟结果入队，不让生产 Run 睡眠等待。生产、分享修订或权限不再匹配时停止该关系的新投递，须显式重新授权订阅。
+
+一次生产完成只提取终结节点的文件和 submission，各私聊获得独立稳定结果身份及不可变 Artifact 引用；一人已处理或发送不影响另一人。失败和 blocked 通知只有有限状态，不开放生产内部诊断、输入或 `graph_tasks_status`。撤订取消未来领取，输入准备与新渠道发送均复核权限；授权复核和取消扫描等待现有目录发布锁，不能把保存期间的临时文件当作持久撤权。已完成 Turn 与已进入 Gateway 的确认或未知效果不改写为未处理或未发送。未入队、待发送时窗及正在处理的结果共同保护 Run/Artifact；不增加第二套队列、执行器、订阅专用发送账本或跨计划自动去重。性能规模与真实业务运行须另验，不能从两收件人 fixture 推断任意规模。
+
 官方 `graph-tasks` 是 Skill 加 Host 工具适配，不是新 Runner 或第二个任务平台。AgentNode 的 `PluginRef.graph_tasks` 明确选择可发现的 Graph，并分别授权创建 Graph、候选 Plugin 开发，以及新建 Graph 的 Plugin/网络/命令上限；默认全部关闭。Web 编辑器使用既有插件设置组件保存该节点策略。操作员保存源 Graph 时批准目标及其静态调用闭包的确切摘要和 Plugin 权限；普通 Run 在接纳时、助手在领取 Turn 时冻结这些授权。运行中和恢复中的同一 invocation 不因后来保存而获得新增权限。后续派发取原授权与当前授权的交集，目标改版须重新批准并显式续建任务，不静默执行新版本。
 
 `graph_tasks_run` 接纳普通异步 Run；与静态 `Op.call` 的区别是由模型按需选择任务，不占一个等待子图的源节点，也不将结果伪装成调用栈返回。同一 Graph 的未结束 Run 排斥规则保留，立即调用遇忙返回冲突，不宣称已经排队。计划复用现有 Scheduler，支持一次、多时刻分组、有限次数及重复规则；Host 本地时间和周一至周五不等于任意时区或节假日日历。到期派发以 `(schedule, next_at)` 派生稳定请求，同一已接纳 Run 的重试只读回事实，不再次启动；忙碌或准入失败保留最早未接纳的时刻，接纳后才推进游标与次数。尚未确认游标的接纳记录不能删除；取消计划不停止已接纳 Run。计划字段和计数定义见 [API](rust-frontend-api-contract.md)。
@@ -313,7 +323,9 @@ Agent 委派来源由可信 invocation 派生，模型不能提供 owner、Sessi
 
 `RunMetadata` format 2 的 `request`、`task`、`task_grants` 缺省为空；Run 状态仍仅归 Kernel。Agent 创建的 Graph 是正常 catalog 资产，Host 分配 ID；`state/graph-task-ownership/` 仅保存来源、作用域和创建请求，不复制 Graph 定义，也不在可分发 bundle 内夹带宿主私有记录。创建权限包含本作用域自建资产的读改、执行、计划与删除管理，不逐项申请确认；不能修改或删除共享资产、源助手，也不能为子任务继续授予委派权。作用域仍绑定来源节点与 Session，非会话任务绑定来源 Run。`graph_tasks_delete` 复用既有内容绑定的条件删除和 Run/结果/调用引用保护，在最终 catalog 临界区重查原授权与当前授权交集、创建归属及按 Graph 身份匹配的计划引用；保留计划须先取消，删除只清理目标资产及其已终结运行数据，不级联删除子 Graph 或取消他人计划。全局工作区根由 Host 显式注入，不从模型参数或节点目录推断。候选准备与测试复用已有 `CandidateTestContext`、依赖准备和沙箱，不安装、不挂载，也不提供宿主凭据；正式交付仍走现有操作员流程。
 
-Graph 列表的 `completed_task:true` 是现有事实的只读投影，不是新增归档状态：仅标记有有效任务归属、所有保留计划均为已停用 once、每个计划当前请求均对应真实成功 Run、全部同图 Run 已成功终结且结果及子任务已收束的 Graph；当前定义须与这些 Run 一致。手工 Graph、渠道绑定、明确选为任务目标或仍被定义/未完成 Run 调用的 Graph 不标记；事实不可读或引用扫描不完整时继续显示在主列表。Web 将标记项默认收进可展开的“已完成的一次性任务”，搜索仍覆盖它们；再次安排、执行或编辑后由新事实自动回到主列表。定义、计划、Run、产物和回执不因收纳删除，既有读取、授权、删除及回收保护不变，不以命名前缀推断一次性用途。
+Graph 列表的 `completed_task:true` 是现有事实的只读投影，不是新增归档状态：仅标记有有效任务归属、至少有一个真实 Run、全部同图 Run 已成功终结且结果及子任务已收束的 Graph；当前定义须与这些 Run 一致。无保留计划的直接任务也可收纳；如仍保留计划，须全部为已停用 once，且每个计划当前请求均对应真实成功 Run。周期计划即使暂停或耗尽仍留在主列表；未执行草稿、手工 Graph、渠道绑定、明确选为任务目标或仍被定义/未完成 Run 调用的 Graph 不标记。计划事实不可读或没有计划管理端口、其他事实不可读或引用扫描不完整时继续显示在主列表。Web 将标记项默认收进可展开的“已完成的一次性任务”，搜索仍覆盖它们；再次安排、执行或编辑后由新事实自动回到主列表。定义、计划、Run、产物和回执不因收纳删除，既有读取、授权、删除及回收保护不变，不以命名前缀推断一次性用途。
+
+目录组织复用这些既有事实：用途取定义 `objective`，创建来源取任务归属中的身份并匹配当前有效目录，周期标记取计划管理投影。Web 把创建任务折叠到来源下，未知或循环来源不隐藏；共享生产者保持独立。`application/graphs/relations` 取代 HTTP 内直接装配关系的路径，分别投影创建来源、静态调用和当前 owner 可见的计划结果订阅，复用现有目录发布锁与订阅授权，不新增存储、执行关系或级联操作。前端展示边界与字段见 [Graph API 契约](rust-frontend-api-contract.md#graphrun-与-artifact)。
 
 有 Session 的任务在终态且执行者退出后，由 Host 对账实际 Run/Artifact，将稳定结果 ID 写入原 Session 的 `task.result.queued` 事件。等待人或未知外部效果、成品读取或入队受阻、计划派发失败，也通过同一队列记录 `blocked` 状态；正常等待子图不当作失败。派发尚未返回确认的 Run 时，`source_run` 为空，不伪造身份，也不否认可能已保存的接纳事实；同一待接纳时点只通知一次，原游标继续保留，重试先读已有接纳记录，后续完成另有结果事件。Session 拥有待处理、领取和完成事实，不复制 Run 状态，不另存回调状态。`wait_input` 将用户输入与任务结果区分为两类：待处理用户优先，结果按入队顺序逐项领取；结果不会打断用户，用户可以打断结果处理，未处理结果仍可再领。沿用现有用户输入替换策略，尚无可配置的全序优先级调度器。私聊仍按原 Session 隔离，同一 bot 的不同成员不共享任务队列。
 
@@ -321,7 +333,7 @@ Graph 列表的 `completed_task:true` 是现有事实的只读投影，不是新
 
 成功结果只选已执行终结节点的最新 Artifact 文件；调研、截图和中间检查点保留在 Run，不全部注入助手。失败或受阻只带诊断，不把中间文件当成成品。文件以 `/in/tasks/<result>/<name>` 精确只读挂载，不开放来源工作区或整个 Artifact 目录。内联 submission 每节点最多 32 KiB、合计 96 KiB，超出部分明确提供摘要、字节数及完整状态读取入口；文件选集不静默截断。结果入队事件的 256 KiB 上限仍适用，文件引用过多时保留来源事实并回源受阻通知。发送意图每次最多 1,024 个回执引用，Gateway 状态按每批最多 256 个 ID 查询；累计确认不复用单批上限，也不截断回执。未入队或未处理的结果保护来源 Run 与 Artifact。
 
-任务轮的渠道发送绑定原私聊机器人和收件人，不能借机器人允许名单转发给另一成员。逻辑投递身份由原 Session、结果及选定文件身份决定，不随打断后的新 Turn 或原生 tool call 改变；文件对外使用 Artifact 中的原文件名。实际 ACK 仍由既有网关账本保存，confirmed 重入读取旧事实、unknown 不自动重发、同身份改内容报冲突；没有模型转写回执或第二套投递账本。此约束针对该渠道工具，不扩展成任意外部效果的 exactly-once 承诺。
+任务轮的渠道发送绑定原私聊机器人和收件人，不能借机器人允许名单转发给另一成员。逻辑投递身份由原 Session、结果及选定文件身份决定，不随打断后的新 Turn 或原生 tool call 改变；文件对外使用 Artifact 中的原文件名。Host 在向网关 socket 提交前，将必须核销的请求引用写为原 Session 的 `task.result.delivery_requested`；文件同时列出文件和介绍。它只记录调用意图，不保存外发状态：即使 Host 超时且网关还未 claim，请求引用也阻止把 missing 当作未发送而静默。结果决议与新增调用意图在 Session 事务中互斥，delivered 必须覆盖全部已提交引用，silent 不允许存在已提交引用。实际 ACK 仍只由既有网关账本保存，鉴权私有 `delivery_status` 仅查询 `send` 状态；confirmed 重入读取旧事实、unknown 不自动重发、同身份改内容报冲突。没有模型转写回执或第二套投递账本，不改变网关准入和失败后的 unknown 语义。此约束针对该渠道工具，不扩展成任意外部效果的 exactly-once 承诺。
 
 删除原 Session 或源 Graph 前，须先结清在途任务（含已分离的静态子 Run）和未处理结果，并显式取消仍保留的委派计划；暂停或次数耗尽不等于删除计划引用。Session 删除在自己的事务内再次检查结果队列，防止检查后新增未处理事实。普通停止、退役、重启或获准 Plugin 更新不等于删除，仍可保留这些引用；删除已结清的历史源 Run 不因此被永久阻止。
 
@@ -329,7 +341,9 @@ Graph 列表的 `completed_task:true` 是现有事实的只读投影，不是新
 
 ### 渠道适配与监听
 
-Host 按 Graph 所挂渠道 Plugin 的声明选择 `wecom` 或 `feishu`，共用同一管理、Session/Turn、常驻 Graph、Goose ACP 与 Supervisor，不增加平台专用 Runner。绑定 format 2 对 WeCom 仍省略 `platform`，飞书显式保存 `platform:"feishu"`；凭据、逻辑账户、入站身份和投递 key/kind 按来源隔离。回调不能替 Graph 改选来源。飞书接收获准成员的文本、文件和图片私聊，接收和回复名单都校验，必须设置 `private_only:true`；长连接可靠记录及快速确认与异步下载、模型处理分离。最终回复经 HTTPS API 确认，Markdown 卡片只是原回复的传输展示。任务结果轮可显式调用 `feishu_send_message({content})` 通知原私聊，不改变 `session.reply` 的结果轮抑制规则。`feishu_send_file` 复用文件发送授权与 Gateway 账本，用户轮可发送工作文件或授权输入，任务轮仅发送精确选中的不可变产物；模型不能选择机器人或收件人，文件和介绍分别确认。渠道工具按平台发现与执行隔离，飞书不暴露企微媒体工具。群聊、音视频、内联图片外发和任意收件人发送未开放；真实 Provider/飞书已验范围及未覆盖业务见[验收台账](pilot-development-plan.md)。配置、只读附件、进度卡及额外应用权限见[飞书助手](feishu-assistant.md)。
+Host 按 Graph 所挂渠道 Plugin 的声明选择 `wecom` 或 `feishu`，共用同一管理、Session/Turn、常驻 Graph、Goose ACP 与 Supervisor，不增加平台专用 Runner。绑定 format 2 对 WeCom 仍省略 `platform`，飞书显式保存 `platform:"feishu"`；凭据、逻辑账户、入站身份和投递 key/kind 按来源隔离。回调不能替 Graph 改选来源。飞书默认接收获准成员的文本、文件和图片私聊，接收和回复名单都校验；显式设置 `private_only:false` 且 `groups` 包含目标 `oc_...` 后，才接纳该群中获准用户真实 @ 本 Bot 的文本。群清单不支持通配符，空清单不授权任何群；群媒体不准入；Bot 发言须有独立 peer 授权与同群已接收的人类根。同 Bot 同群共享 Session/Run/原生历史，逐 Turn 保留真实发送者，与其他群及私聊隔离。进度和最终回答回复原群消息，不转发给发言人私聊；持久待执行消息和待回复项重启后仍复核当前授权。长连接可靠记录及快速确认与异步下载、模型处理分离。最终回复经 HTTPS API 确认，Markdown 卡片只是原回复的传输展示。任务结果轮可显式调用 `feishu_send_message({content})` 通知原私聊，不改变 `session.reply` 的结果轮抑制规则。`feishu_send_file` 复用文件发送授权与 Gateway 账本，用户轮可发送工作文件或授权输入，任务轮仅发送精确选中的不可变产物；模型不能选择机器人或收件人，文件和介绍分别确认。这两项工具仍限原私聊，开启群接收不取消其私聊能力。渠道工具按平台发现与执行隔离，飞书不暴露企微媒体工具。群媒体入站及用户身份专属能力仍未开放；真实 Provider/飞书已验范围及未覆盖业务见[验收台账](pilot-development-plan.md)。配置、只读附件、进度卡及额外应用权限见[飞书助手](feishu-assistant.md)。
+
+飞书的通用业务入口为显式 `cli_enabled` 授权的 Host `feishu_cli`，调用系统 Plugin 内固定官方 CLI，通过其 Skills/help/schema 按需发现文档、Wiki、Base、群管理等 API，不维护逐接口工具副本。Graph 绑定选择本 Bot 应用身份，隔离临时文件、网络及进程生命周期，原 Gateway 账本保存 CLI claim/confirmed/unknown；应用已发布 scope 与资源 ACL 决定实际访问，名单不限制通用业务收件人，因此该授权只给可信成员。`context` 只读返回当前可信渠道与平台消息 ID。Bot 协作使用飞书原生 reply/@ 事件，不新增内部通信层：精确 `peer_bots` 和群授权、真实自提及、同 owner 同群人类根，以及每有向 peer 对每根一次的准入事务共同限界。`source:"bot"` 与 `bot_origin` 保存来源，不伪装任务结果；沿用新消息替代 Manager Turn 语义，不终止独立 Codex 会话。发送、对方接收和任务完成分别验收。
 
 `call.session` 继承的是绑定会话与显式输入映射，持有稳定来源身份。未知发送效果由 Agent 核查，ACK 与效果事实分别保存。一张常驻助手 Graph 对应一个机器人（[设计卡 004](design-cards/004-multi-bot-channels.md)）：每个启用的绑定由 Host 监管一个对应平台的原生 Gateway，状态目录 `channels/graphs/<Graph 摘要>/` 与回调路由 `/channels/<graph>/…` 按 Graph 分开，回调密钥只能访问本 Graph 的路由。企微 Gateway 接受私聊与群内 @ 回调，群按 chatid 共用进度与最新输入判断，允许名单和回执仍核对真实 actor；绑定设为 `private_only` 时，名单内成员的群消息只得到固定提示，不准入、不创建 Session/Turn/Run。私聊 image/file/voice 及群 mixed 中的媒体由网关下载短时 URL、做 AES-256-CBC 解密，再交给 Host 冻结 SHA-256/大小/MIME 并只读挂载 `/in/channel`；临时 URL 与 AES key 不进入 Host 或 ledger。出站图片使用 Host 校验的 `channel-replies` 项，由网关三阶段上传换 `media_id` 后按原回调回复，发送前 durable claim、未确认结果不重发。不新增主动群发；任意文件出站、video 与真实公网投递/文档理解仍按具体场景验收。
 
@@ -351,11 +365,23 @@ WebUI 不需要登录；JSON 请求与 Pilot SSE 各自读取本机 Host，取�
 
 旧托管 `current/history` 保留兼容默认和显式别名，已保存槽缺字段或密钥时失败，不退回旧配置。更换服务保留槽的公共历史与独立旧服务凭据，供同 invocation 恢复核对原绑定；历史凭据仍可通过现有接口管理。命名槽绑定包含槽身份，避免与旧执行或另一账户混用。存储读取兼容 format 1/2，写入 format 3（增加 `providers.history`），复用原文件锁与原子发布；读取不迁移，回滚旧版本前需使用兼容备份。管理接口见 [API 契约](rust-frontend-api-contract.md#web-管理入口)。
 
+## 事实分析与独立评分
+
+Host 的 `FactRecorder` 随执行经 `Kernel::submit` 保存结构化观察，独立 Eval 保存 Grade；事实记录不依赖分析进程是否启动。时间、成本、配置和来源由各事实所有者盖章，缺失保持未知，不将运行成功当作业务质量。Run 仍只经 `application/run_access` 访问，Goose 仍拥有原生会话、上下文、compaction 和 Agent loop。
+
+`anchor-hub` 保留独立只读 CLI/MCP、授权冻结窗口、取证、跨周期统计与受控比较。`anchor-facts` 保留安全 Run/Grade 视图格式、共享窗口及 Row 词汇；Hub 校验并投影调用方明确提供的安全视图，不调用 Host/Eval 生成视图，也不回读其所有者根验证旧实验身份。原 Host 安全 Run 导出及共享 `application/safe_views` 已删除，没有替代导出 API。当前 `anchor-eval` 保留 `record`、`grade-run` / `grade_ordinary` 及独立 ordinary/input-discovery 质量工具，不提供 safe-grade 导出。这些能力不构成 Host 自动调度、实验接纳或生产观察服务；分析进程不取得写入或发布权，受保护质量口径不能由被测 Agent 自行修改。具体调用链、来源隔离、未知成本和性能边界见[数据中枢](harness-data-hub.md)。
+
+复杂 Dreaming 专用系统按用户要求从源码删除：不再维护专用应用服务、HTTP/设置页、启动安装与受管计划、周期/实验协调、自动发布/观察/撤回、自身 meta、`execution/frozen` 专用实验执行或局部上下文分支适配，也不建立替代系统。Facts/Eval/Hub 内的专用 meta 与依赖 `kernel-dreaming` 生命周期的实验协议一并删除，不能继续当作当前能力或待办。普通 Graph、Runner、Goose、Artifact、Eval、Hub 与 `Kernel::submit` 保留。源码删除、本地整合验收及获授权的本地服务切换已完成；8077/5173 使用完整 format 5 发行，旧 release 文件和历史保留，退役计划已在 11/16 本地维护（本机原件，未入库：`experiments/local-maintenance-20261116/README.md`）中删除，未恢复调度。源码回归与切换分别见[删除验收](../experiments/dreaming-removal-20261115/README.md)、上线记录（本机原件，未入库：`experiments/dreaming-removal-20261115/rollout-20261115/README.md`）及[台账结论](pilot-development-plan.md#当前验收结论)，历史证据见[退役说明](dreaming.md)。
+
 ## 发行与验收边界
 
 source-free builder 校验固定 Goose、目标 ELF、Graph 闭包、资源摘要与非密钥内容。它支持编译 Web 资产，拒绝脚本/source map、符号/硬链接和未声明资源；打包不会安装依赖或转换用户状态。使用命令见 [发行 builder](../rust/anchor-distribution/README.md)。
 
-完整平台发行使用 format 3、kind `platform`，没有占位业务 Graph，包含 Host、固定 Goose、relay、网络 sidecar、Web、四个系统 Plugin（network、Graph Tasks、Feishu、WeCom）、两个普通 Plugin（Git、Anchor Dev）、uv/rustup-init/pixi 和 launcher；独立 Graph 格式仍为 format 1。首次启动从已验证的发行 inventory 将缺少的官方 Plugin 安装到 Library，系统项使用专用接纳路径，已有内容不覆盖，无效已安装目录报错；安装不自动挂载业务 Plugin、启用渠道或授予 Graph 任务策略。pixi 由经过摘要验证的 release inventory 直接只读挂载并进入 Graph 节点 Agent 命令与 Pilot 的 PATH，不依赖手写工具注册、不需安装或运行时下载；缓存位于可写 Workspace HOME，Plugin MCP 的 PATH 不变。安装器验证摘要和闭包，从私有快照解包，原子发布且拒绝覆盖现有安装。模型输入作为有限字段的数据解析，不执行 shell；launcher 清空继承环境并使用独立 HOME 和数据根，不借开发机解释器或缓存。当前平台要求 Linux x86_64、Bubblewrap、slirp4netns、git/sh/cc、CA 及对应动态库；Python、Rust 和包在安装后按需准备。脚本入口见 [平台交付](../rust/anchor-distribution/README.md#fresh-platform-installation)，验收与部署状态分别以台账为准。
+完整平台发行使用 format 5、kind `platform`，包含 Host、固定 Goose、Hub/Eval、relay、网络 sidecar、Web、四个系统 Plugin（network、Graph Tasks、Feishu、WeCom）、两个普通 Plugin（Git、Anchor Dev）、uv/rustup-init/pixi 和 launcher；独立 Graph 格式仍为 format 1。删除平台 Graph inventory 后，format 4 及更早的平台均不再准入，没有新增旧格式读取器。不再交付 Dreaming 工厂 Graph 或专用 `dreaming` 质量包；保留 `input-discovery` 指导资源及独立质量包，其 inventory 仍绑定同一文件表的准确字节，不意味着已接入自动改进。
+
+安装、预检与 Host 启动共用平台 inventory 校验。把新 Host 单独塞进旧 format 4 release，同样会在监听前的验证阶段失败；后续交付必须使用完整且校验一致的 format 5 release，不能只替换单个二进制。旧 release 配旧二进制不会因源码删除而自动停用。协议版本本身不是验收。已构建并核验完整 format 5 归档、三次 source-free 启动与精确 Host 原生执行/恢复，再切换本地服务；未执行新 DEB/RPM 安装、10k 或真实 Provider 业务重跑，见上线记录（本机原件，未入库：`experiments/dreaming-removal-20261115/rollout-20261115/README.md`）与[台账结论](pilot-development-plan.md#当前验收结论)。
+
+首次启动从已验证的发行 inventory 将缺少的官方 Plugin 安装到 Library，系统项使用专用接纳路径，已有内容不覆盖，无效已安装目录报错；安装不自动挂载业务 Plugin、启用渠道或授予 Graph 任务策略。pixi 由经过摘要验证的 release inventory 直接只读挂载并进入 Graph 节点 Agent 命令与 Pilot 的 PATH，不依赖手写工具注册、不需安装或运行时下载；缓存位于可写 Workspace HOME，Plugin MCP 的 PATH 不变。安装器验证摘要和闭包，从私有快照解包，原子发布且拒绝覆盖现有安装。模型输入作为有限字段的数据解析，不执行 shell；launcher 清空继承环境并使用独立 HOME 和数据根，不借开发机解释器或缓存。当前平台要求 Linux x86_64、Bubblewrap、slirp4netns、git/sh/cc、CA 及对应动态库；Python、Rust 和包在安装后按需准备。脚本入口见 [平台交付](../rust/anchor-distribution/README.md#fresh-platform-installation)，归档/原生 payload 的无源码启动、实际发行版安装事务和生产切换分别验收；当前结论与证据以台账为准。
 
 常规 [小型 Graph 回归](runtime-contract-tests.md) 执行实际 Host、Runner、Goose、授权 MCP 与 Sandbox，只替换模型传输。检查最终结果、逐节点历史、workspace、Artifact、恢复与幂等；[候选回归](runtime-contract-tests.md#release-与-source-free-候选) 使用 release Host/Web/Goose 的隔离发行包。
 

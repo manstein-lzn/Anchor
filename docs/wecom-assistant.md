@@ -2,13 +2,13 @@
 
 当前链路是原生 `anchor-wecom-gateway` → Rust Host 的 Session/Turn → 普通助手 Graph → Goose ACP 与授权 MCP 工具 → 网关投递。业务消息不经过 Pilot；Gateway 负责平台传输与投递账本，Host 负责用户隔离、Run、取消和会话事实。运行环境为 Linux，客户端可在其他电脑或手机上使用。
 
-本文说明当前契约与配置方法。本机已部署群共享会话及可编辑的业务图，网关已认证；隔离真实模型验证了跨成员上下文、联网升级和旧原生历史接续。未代发真实企微测试消息，群聊与媒体的实际客户端收发仍待用户验收；证据见 [本轮验收](../.local/wecom-network-group-20261015/README.md)。
+本文说明当前契约与配置方法。本机已部署群共享会话及可编辑的业务图，网关已认证；隔离真实模型验证了跨成员上下文、联网升级和旧原生历史接续。未代发真实企微测试消息，群聊与媒体的实际客户端收发仍待用户验收；证据见 本轮验收（本机原件，未入库：`.local/wecom-network-group-20261015/README.md`）。
 
-2026-10-20 本机常驻实例因 `database is locked` 退出：等待输入的空闲查询和已领取输入的重读误用 SQLite 写事务，放大跨连接写锁竞争。现改为只读事务；确有待领取输入时先结束读事务，再取得写事务，重新检查 current binding、领取 key 和最新输入。未延长 busy timeout，也未自动重放失败输入；当时实际持锁者未确认。Session 194 项、兼容 Host 常驻助手 23 项及固定 Goose 重启定向 3 项通过；首次恢复保留了旧事实，见 [锁竞争修复](../.local/assistant-lock-20261020/README.md)。
+2026-10-20 本机常驻实例因 `database is locked` 退出：等待输入的空闲查询和已领取输入的重读误用 SQLite 写事务，放大跨连接写锁竞争。现改为只读事务；确有待领取输入时先结束读事务，再取得写事务，重新检查 current binding、领取 key 和最新输入。未延长 busy timeout，也未自动重放失败输入；当时实际持锁者未确认。Session 194 项、兼容 Host 常驻助手 23 项及固定 Goose 重启定向 3 项通过；首次恢复保留了旧事实，见 锁竞争修复（本机原件，未入库：`.local/assistant-lock-20261020/README.md`）。
 
-当前本机部署为 `dd2fda4` 加定时通知与监听生命周期修复的工作区构建：两个机器人均已认证，原配置、current 助手绑定、同一 Run、会话及投递内容保留，8077/5173 页面已更新；本轮未主动发送真实企微测试消息，见[监听修复与部署](../.local/channel-listener-20261028/README.md)。此前 `36a6e96` 更新并行区域的分支状态和各自游标，见[记录](../.local/parallel-branch-deploy-20261025/README.md)。`24c9557` 让重启时空闲的助手在原 Run 上继续，被接替的 Run 显示为已接替（[记录](../.local/inplace-resume-deploy-20261025/README.md)）。此前 `78e8ecc` 在 `e806a22` 的基础上修复了常驻助手在线时其他 Run 不记 Harness 事实的问题（[记录](../.local/recorder-deploy-20261025/README.md)），以及独立审查发现的问题（[记录](../.local/review-fix-deploy-20261025/README.md)），都只换二进制。`e806a22`（[设计卡 004](design-cards/004-multi-bot-channels.md)：一张 Graph 一个机器人），2026-10-25 按用户确认切换。旧的单绑定 `wecom.json`、机器人凭据和网关状态（含投递账本）迁移到 `wecom-persistent-assistant` 这张 Graph 名下：凭据和账本按原字节移动，绑定逐字段核对；账号、成员和启用状态不变，唯一的消息会话保留当前助手并恢复。旧的每条消息一个 Run 的示例 `wecom-assistant` 已删除（D8）。
+当前本机部署为 `dd2fda4` 加定时通知与监听生命周期修复的工作区构建：两个机器人均已认证，原配置、current 助手绑定、同一 Run、会话及投递内容保留，8077/5173 页面已更新；本轮未主动发送真实企微测试消息，见监听修复与部署（本机原件，未入库：`.local/channel-listener-20261028/README.md`）。此前 `36a6e96` 更新并行区域的分支状态和各自游标，见记录（本机原件，未入库：`.local/parallel-branch-deploy-20261025/README.md`）。`24c9557` 让重启时空闲的助手在原 Run 上继续，被接替的 Run 显示为已接替（记录（本机原件，未入库：`.local/inplace-resume-deploy-20261025/README.md`））。此前 `78e8ecc` 在 `e806a22` 的基础上修复了常驻助手在线时其他 Run 不记 Harness 事实的问题（记录（本机原件，未入库：`.local/recorder-deploy-20261025/README.md`）），以及独立审查发现的问题（记录（本机原件，未入库：`.local/review-fix-deploy-20261025/README.md`）），都只换二进制。`e806a22`（[设计卡 004](design-cards/004-multi-bot-channels.md)：一张 Graph 一个机器人），2026-10-25 按用户确认切换。旧的单绑定 `wecom.json`、机器人凭据和网关状态（含投递账本）迁移到 `wecom-persistent-assistant` 这张 Graph 名下：凭据和账本按原字节移动，绑定逐字段核对；账号、成员和启用状态不变，唯一的消息会话保留当前助手并恢复。旧的每条消息一个 Run 的示例 `wecom-assistant` 已删除（D8）。
 
-验证：网关重新认证，模型和运行时设置、其他凭据、Graph 授权和计划的摘要不变，不调模型的冒烟 Run 通过。没有发送真实企微消息，也没有调用真实模型，真实对话由用户验收。部署记录见 [渠道部署 10-25](../.local/channel-deploy-20261024/README.md)，上一次部署见 [10-23](../.local/kernel-deploy-20261023/README.md)。
+验证：网关重新认证，模型和运行时设置、其他凭据、Graph 授权和计划的摘要不变，不调模型的冒烟 Run 通过。没有发送真实企微消息，也没有调用真实模型，真实对话由用户验收。部署记录见 渠道部署 10-25（本机原件，未入库：`.local/channel-deploy-20261024/README.md`），上一次部署见 10-23（本机原件，未入库：`.local/kernel-deploy-20261023/README.md`）。
 
 ## 机器人和成员身份
 
@@ -167,7 +167,7 @@ Host 首次 wait binding 查询最近 9 条来检测截断，只授权最近 8 �
 cargo test --manifest-path rust/Cargo.toml -p anchor-wecom-gateway --all-targets --locked
 ```
 
-慢回调并发回归通过双向通知闸门建立顺序：旧回调进入等待后，控制发送和新回复必须在闸门关闭期间完成；随后释放旧回复，等待 ledger 确认旧事件完成，并核对没有额外投递。不以固定睡眠推断新旧消息顺序，也不放宽已有超时。复现、验证范围及其他用例的并发超时见[本机证据](../.local/wecom-callback-sync-20261019/README.md)；这项修正只涉及测试夹具，不改变网关产品行为。
+慢回调并发回归通过双向通知闸门建立顺序：旧回调进入等待后，控制发送和新回复必须在闸门关闭期间完成；随后释放旧回复，等待 ledger 确认旧事件完成，并核对没有额外投递。不以固定睡眠推断新旧消息顺序，也不放宽已有超时。复现、验证范围及其他用例的并发超时见本机证据（本机原件，未入库：`.local/wecom-callback-sync-20261019/README.md`）；这项修正只涉及测试夹具，不改变网关产品行为。
 
 常驻路径的定向 integration 位于 `rust/anchor-runner-host/tests/goose_persistent_assistant.rs`，需要固定真实 Goose 二进制与本机 Bubblewrap，但模型传输为确定性本地 Provider。按 fixture 文档准备隔离环境后可运行：
 
@@ -175,12 +175,12 @@ cargo test --manifest-path rust/Cargo.toml -p anchor-wecom-gateway --all-targets
 cargo test --manifest-path rust/Cargo.toml -p anchor-runner-host --test goose_persistent_assistant --locked -- --ignored --test-threads=1
 ```
 
-以下为旧 fs2/现场复制实现的历史验收，不代表本轮 Workspace 资源与选择性交付已部署。2026-10-15 固定 Goose 常驻 integration 的完整 10 项已全部通过，含默认自动恢复与关闭 `ANCHOR_ASSISTANT_AUTO_RESUME` 后显式恢复；自动恢复实际核对旧 Run 对账、交接事件、同 Goose Session、新实例继承现场和旧 fs2 不变。另覆盖同 Run 两轮/稳定 workspace、等待零模型调用、打断后的 checkpoint/Yielded/Interruption 与 suppressed 回复、双用户隔离、附件只读和有界、图片按 Turn/回执隔离、退役与一次性 seed。[运行日志](../.local/reasoning-roundtrip-20261015/goose_persistent_assistant.log)列出实际 10 项及[本机场景证据](../.local/reasoning-roundtrip-20261015/native-remaining/2900051/)。领取后、产物前重启、截断提示、未知投递阻断删除与 owned 清理仍由 Session/Host 定向测试另验。
+以下为旧 fs2/现场复制实现的历史验收，不代表本轮 Workspace 资源与选择性交付已部署。2026-10-15 固定 Goose 常驻 integration 的完整 10 项已全部通过，含默认自动恢复与关闭 `ANCHOR_ASSISTANT_AUTO_RESUME` 后显式恢复；自动恢复实际核对旧 Run 对账、交接事件、同 Goose Session、新实例继承现场和旧 fs2 不变。另覆盖同 Run 两轮/稳定 workspace、等待零模型调用、打断后的 checkpoint/Yielded/Interruption 与 suppressed 回复、双用户隔离、附件只读和有界、图片按 Turn/回执隔离、退役与一次性 seed。运行日志（本机原件，未入库：`.local/reasoning-roundtrip-20261015/goose_persistent_assistant.log`）列出实际 10 项及本机场景证据（本机原件，未入库：`.local/reasoning-roundtrip-20261015/native-remaining/2900051`）。领取后、产物前重启、截断提示、未知投递阻断删除与 owned 清理仍由 Session/Host 定向测试另验。
 
-本轮隔离真实 `deepseek-flash`/Responses 两轮通过：同 Run、同产品 Session 和同 Goose Session，每轮读取当轮附件，经 `anchor_read` 的实际回执校验 `final_result`，再由 `session.reply` 生成回复；第二轮也正确回忆第一轮读取的标记。6 次真实模型请求均 HTTP 200，两个 Turn Completed，两份本地投递回执 Confirmed。[真实验收证据](../.local/reasoning-roundtrip-20261015/real-assistant/evidence.json)明确使用合成企微 HTTP 事件和本地结算，零真实企微消息，不覆盖真实公网投递、并发/打断或媒体业务。
+本轮隔离真实 `deepseek-flash`/Responses 两轮通过：同 Run、同产品 Session 和同 Goose Session，每轮读取当轮附件，经 `anchor_read` 的实际回执校验 `final_result`，再由 `session.reply` 生成回复；第二轮也正确回忆第一轮读取的标记。6 次真实模型请求均 HTTP 200，两个 Turn Completed，两份本地投递回执 Confirmed。真实验收证据（本机原件，未入库：`.local/reasoning-roundtrip-20261015/real-assistant/evidence.json`）明确使用合成企微 HTTP 事件和本地结算，零真实企微消息，不覆盖真实公网投递、并发/打断或媒体业务。
 
 Goose 的 Provider 错误仍可能以助手正文结束，不能仅用 Turn `completed` 或回复正文认定模型请求成功。原生 reasoning 回传已验同一服务/模型的续用；跨 Provider、模型或账号的 opaque/encrypted reasoning 兼容尚未验收。
 
-修复已部署至本机 8077/5173，企微网关重新认证，原助手恢复至等待输入；模型配置、凭据和会话记录保留，见[上线核对](../.local/reasoning-roundtrip-20261015/deployment/after.json)与[数据核对](../.local/reasoning-roundtrip-20261015/deployment/preservation.json)。本轮没有发送真实企微测试消息。
+修复已部署至本机 8077/5173，企微网关重新认证，原助手恢复至等待输入；模型配置、凭据和会话记录保留，见上线核对（本机原件，未入库：`.local/reasoning-roundtrip-20261015/deployment/after.json`）与数据核对（本机原件，未入库：`.local/reasoning-roundtrip-20261015/deployment/preservation.json`）。本轮没有发送真实企微测试消息。
 
 真实账号的验收应分别检查基础收发、同群跨成员上下文、私聊/不同群隔离、补充消息取消、进程重启、允许名单和媒体。出站图片以网关 `deliveries` 的 `image:<inbound>:<index> = confirmed` 加上用户实际看到图片为准；入站附件以 Host 附件 manifest 的 name/sha256/size/media_type 与 `/in/channel` 内实际字节为准。本地 fixtures、隔离真实模型与网关认证不代替真实公网投递，未跑通的路径不写成已通过。

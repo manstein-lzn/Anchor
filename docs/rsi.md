@@ -92,18 +92,16 @@ cargo build --manifest-path rust/Cargo.toml -p anchor-rsi --locked
 
 RSI Graph 不自动提交、合并或部署代码，不自动改 Graph/Plugin，不重放历史外部副作用，也不把模型声称完成当成事实。`evolution.json` 的状态为 proposed/continue/hold/resolved；resolved 是有依据的复查判断，不代表本次 RSI 执行过改动。实际修改由维护者在隔离工作区完成，再用保留案例和相关测试验证。
 
-mutable 剪枝已通过本地采集回归及同授权根复核：保留 11 份 Plugin 清单、全部源码路径和 9 张 Graph，Plugin 冻结投影由 480,613 降至 115,720 字节；移除的是 45 个可变归档条目和一项 Library 锁文件。此结果仅验证采集范围与噪音减少，不代表 token、质量或模型成本收益。2026-11-06 生产采集器已更新，RSI 与周报的 local-inputs 仅切换工具路径，原数据授权根及历史冻结输入保持不变，新路径对后续 Run 生效；本轮未重跑大型 RSI。当前状态与证据见[验收台账](pilot-development-plan.md)、[采集对照](../.local/rsi-optimization-20261106-113634/before-after.json)和[上线核验](../.local/rsi-rollout-20261106-140628/evidence/verification.json)。
+mutable 剪枝已通过本地采集回归及同授权根复核：保留 11 份 Plugin 清单、全部源码路径和 9 张 Graph，Plugin 冻结投影由 480,613 降至 115,720 字节；移除的是 45 个可变归档条目和一项 Library 锁文件。此结果仅验证采集范围与噪音减少，不代表 token、质量或模型成本收益。2026-11-06 生产采集器已更新，RSI 与周报的 local-inputs 仅切换工具路径，原数据授权根及历史冻结输入保持不变，新路径对后续 Run 生效；本轮未重跑大型 RSI。当前状态与证据见[验收台账](pilot-development-plan.md)、采集对照（本机原件，未入库：`.local/rsi-optimization-20261106-113634/before-after.json`）和上线核验（本机原件，未入库：`.local/rsi-rollout-20261106-140628/evidence/verification.json`）。
 
-2026-10-31：新数据根的真实 Run `rust-18e35d456fbfe745` 已 done、Gate PASS，8 个发布文件的 HTTP 下载、内容摘要及后续历史读回通过；原生会话 12 次反馈续接已核验。见[执行证据](../.local/rust/clean-20261031-final/evidence/verification.json)和[发布报告](../.local/rust/clean-20261031-final/state/artifacts/fs2-d512ad1cc2be9624ced12b0223a43be5b0cca91e5507ef25386c31722fa365be/view/rsi-report.md)。内容抽查保留一项不采纳决定：`RSI-host-assembly-reuse` 虽为 hold，仍建议用 inode/descriptor 缓存取代内容校验，与挂载时发现篡改的契约不符；不实施该方向，冻结产物不改写。详见[内容抽查](../.local/rust/clean-20261031-final/evidence/content-spot-check.json)。
+2026-10-31：新数据根的真实 Run `rust-18e35d456fbfe745` 已 done、Gate PASS，8 个发布文件的 HTTP 下载、内容摘要及后续历史读回通过；原生会话 12 次反馈续接已核验。见执行证据（本机原件，未入库：`.local/rust/clean-20261031-final/evidence/verification.json`）和发布报告（本机原件，未入库：`.local/rust/clean-20261031-final/state/artifacts/fs2-d512ad1cc2be9624ced12b0223a43be5b0cca91e5507ef25386c31722fa365be/view/rsi-report.md`）。内容抽查保留一项不采纳决定：`RSI-host-assembly-reuse` 虽为 hold，仍建议用 inode/descriptor 缓存取代内容校验，与挂载时发现篡改的契约不符；不实施该方向，冻结产物不改写。详见内容抽查（本机原件，未入库：`.local/rust/clean-20261031-final/evidence/content-spot-check.json`）。
 
 定向验证为 `cargo test --manifest-path rust/Cargo.toml -p anchor-rsi --locked --test business --test weekly --test evidence`；Graph JSON 静态编译由 `anchor-runtime` 的 shipped-example 作者契约测试覆盖，不启动模型。它们验证正确发布、独立评审拒绝、Artifact identity/hash/window mismatch、安全提案门禁、冻结读取和历史 ID 连续性。真实 Goose/provider 的大型业务 Graph、公开业务服务与报告质量需另行验收；历史证据不算本轮新验收，单次报告也不证明长期改进收益。
 
 ## 信号驱动的变体
 
-[rsi-signals.json](../examples/graphs/rsi-signals.json) 是独立的研究变体，保留原 `rsi`。中枢先经只读 stdio MCP 生成有界信号表，triage 选 3–4 条信号并说明未选原因；四个调查槽与一个 explore 在显式 fanout/join 中并行，空槽写跳过标记。调查沿事实键调用 `invocation`、`records`、`configurations`；explore 比较前沿、范例和工具源码。全部分支完成后综合、独立评审，gate 决定发布或带着反馈返回 triage。
+旧 `rsi-signals` 产品示例不恢复，内置 Dreaming 的调查及仅报告模式随专用系统退役，不再提供其策略配置或运行步骤，也不新增替代调查 Graph。本地 Host 已切换，旧 release 文件与 Run 历史保留，不清理或迁移；范围见[Dreaming 退役说明](dreaming.md)。
 
-每条提议包含层级、信号 ID、具体改动和证据、指标/坐标/现值/预期值、质量预期与验证条件。gate 拦截质量下降、缺字段和评审 BLOCK；质量未知仍须受控验证，层级 3 只交给维护者。发布只生成本 Run 的报告和提议 Artifact，没有自动实施或协议改动。
+原 `rsi` 的源码、文档和生态审查是不同业务，继续保留。Hub 的普通只读 MCP [Plugin 示例](../examples/rust-rsi/plugins/harness-hub/README.md)也保留，但不包含另一套调查 Graph、gate 或调度。
 
-Plugin 构建、命令授权和节点只读输入见 [harness-hub 安装说明](../examples/rust-rsi/plugins/harness-hub/README.md)。设计要求从中枢查询运行事实；当前数据目录同时作为节点只读输入，shell 仍能直接读原始数据，P7 explore 实际走过此路径。源码由操作员授予只读副本，包含可选的 `anchor-rsi` 证据实现对照。上游 Artifact 与 MCP 查询没有按信号强制隔离，“一支一条”是注意力约定，不能把 `reads` 当作访问控制。
-
-P7 单次盲测命中 2/3，独立评审 REVISE 后 gate 因解释器启动失败而停止，未发布；解释器选择已修正并经无模型回放验证，未重跑模型。提议质量、成本及未覆盖边界见 [验收报告](../experiments/harness-hub/p7/report.md)。Graph 流程完成与找回缺陷分别判定，不能用静态编译或流程终态替代内容验收。
+旧 P7 的 Graph 构造器和 Op 测试仅作为[历史实验 fixture](../experiments/harness-hub/p7/README.md)保留，不再生成产品示例；原盲测命中 2/3、评审 REVISE、解释器启动失败及后续无模型回放的结论不改写，详见[原验收报告](../experiments/harness-hub/p7/report.md)。原源码收敛的验证和边界见历史收敛记录（本机原件，未入库：`experiments/dreaming-consolidation/README.md`），不补签为本轮删除后的验证，也不继续旧信号 Graph 的活跃计划。

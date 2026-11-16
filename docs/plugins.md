@@ -43,11 +43,13 @@ Graph 的 AgentNode 保存节点自己的 Plugin 引用，`Op.run` 只接受 `ne
 
 ## Graph 任务
 
+收取既有定时产物时先发现并订阅，不为同一份报告重复运行 Graph。节点策略的 `schedules` 选择确切计划 ID，与 `graphs` 执行权限独立；还需操作员对该计划显式列出允许的私聊 Session。`graph_tasks_schedule_discover`、`graph_tasks_subscribe`、`graph_tasks_subscriptions`、`graph_tasks_unsubscribe` 分别负责发现、订阅、查看和撤订；原 `graph_tasks_schedule_list` 仍只列本作用域创建的生产计划。订阅可设 Host 本地 HH:mm 的 `not_before`，只等待投递，不延长生产。默认未来时点生效，不补历史；产物只含已提交终结输出，身份、权限与撤订契约见[结果输入契约](architecture.md#按需-graph-任务与结果输入)。
+
 官方 `graph-tasks` 同样随源码初始列表与完整平台发行包提供，但不自动挂载或授权。它不启动自己的 MCP server；挂到 AgentNode 后，由 Host 将 `graph_tasks_*` 工具关联到该 Plugin 的按需披露目录。仅安装或打开 Session 开关不够：须在 Graph 编辑器给这个节点选择可见 Graph，按需开启构建 Graph、候选 Plugin 开发和新建 Graph 的能力上限，再由操作员保存。新建或 Agent 编写的源 Graph 也须经这一保存步骤；已开始的普通 Run 或已冻结 Turn 不因此扩大权限。字段示例见 [作者契约](rust-graph-authoring-contract.md#按需-graph-任务授权)。
 
 既有目标按批准的确切定义及静态调用闭包执行；新建 Graph 只能用节点授权的已安装 Plugin、网络与沙箱命令。其中 `graph_tasks.network` 只允许新建的子任务联网，不修改当前助手的联网策略。Agent 不能修改源助手或无关资产，不能让子图继续委派任务。后续运行同时检查原授权与当前授权，撤回可见范围立即收窄；资产改版不自动执行未经批准的新内容。身份、请求键和结果路由由 Host 派生，不接受模型传入。普通独立宿主若没有这些 Host 端口，不因携带此 Skill 而获得调度或 Session 能力。
 
-创建权限同时包含对本作用域自建 Graph 的读取、修改、执行、计划管理和删除，不逐图增加人工确认。`graph_tasks_delete` 复用既有条件删除，清理该 Graph 及其已终结的运行数据和私有工作区；有保留计划时须先显式取消，有未结束 Run、未处理结果、未确认发送或调用引用时仍拒绝删除。只读授权不赋予删除权；作用域沿用同一来源节点的 Session，普通非会话任务仍限定来源 Run，不扩到其他会话或所有同名父图的历史任务。目录收纳不代替实际删除。
+创建权限同时包含对本作用域自建 Graph 的读取、修改、执行、计划管理和删除，不逐图增加人工确认。`graph_tasks_delete` 复用既有条件删除，清理该 Graph 及其已终结的运行数据和私有工作区；有保留计划时须先显式取消，有未结束 Run、未处理结果、未确认发送或调用引用时仍拒绝删除。只读授权和订阅不赋予删除权；作用域沿用同一来源节点的 Session，普通非会话任务仍限定来源 Run，不扩到其他会话或所有同名父图的历史任务。目录收纳不代替实际删除。
 
 工具支持立即异步运行、一次/多时刻/有限次数/重复计划，以及原会话的结果处理；即时调用遇到同 Graph 未结束 Run 返回冲突，计划则保留未接纳时刻等待重试。候选 `prepare`/`test` 复用当前沙箱与环境，只验证所测范围，不安装、不挂载、不取得新增凭据；正式安装仍走既有预检和确认。完成结果与用户来信分开，发送消息须核对实际渠道回执。调度、冻结与恢复的事实归属见 [当前架构](architecture.md#按需-graph-任务与结果输入)。
 
@@ -166,7 +168,9 @@ Bot 长连接凭证与应用 API 凭证分开配置；普通助手 Graph 按成�
 
 ## 飞书
 
-`plugins/feishu/channel.json` 声明 `bin/anchor-feishu-gateway`，复用 Host 的渠道管理和常驻助手生命周期；不声明 MCP server，不给模型应用凭据。每张 Graph 独立配置 `FEISHU_APP_ID`、`FEISHU_APP_SECRET`、接收/回复成员 `open_id` 和启用意图，须 `private_only:true`。支持文本、图片和文件接收、Goose 真实活动进度卡及 Markdown 回复。Host 挂载 `feishu_send_message({content})`，仅在可信任务结果轮通知原私聊；`feishu_send_file({path,content,context_files?})` 可在用户轮发送工作文件，任务轮仅发送确切选中的不可变产物，两者都不能指定机器人或收件人。普通来信仍用 `session.reply`，任务结果轮须以通知工具的 confirmed 为外发证据，不把 handled 当成已发送；文件和介绍分别确认。大小、文件保留、格式和额外应用权限归[飞书助手](feishu-assistant.md)。Graph Tasks 的计划与网络权限另行授权；不支持群聊、音视频、内联外发图片、通讯录或任意收件人发送。飞书后台需要先有在线长连接，再保存订阅方式、添加接收消息事件并发布应用。实现与真实业务验收分别记录，不以连接状态代替收发成功。
+`plugins/feishu/channel.json` 声明 `bin/anchor-feishu-gateway`，复用 Host 的渠道管理和常驻助手生命周期；不声明 MCP server，不给模型应用凭据。每张 Graph 独立配置 `FEISHU_APP_ID`、`FEISHU_APP_SECRET`、接收/回复成员 `open_id` 和启用意图；默认只收私聊，明确 `groups` 后可接纳获准群内的人 @。支持文本、图片和文件私聊接收、Goose 真实活动进度卡及 Markdown 回复。Host 挂载 `feishu_send_message({content})`，仅在可信任务结果轮通知原私聊；`feishu_send_file({path,content,context_files?})` 可在私聊用户轮发送工作文件，任务轮仅发送确切选中的不可变产物，两者都不能指定机器人或收件人。普通来信仍用 `session.reply`，任务结果轮须以通知工具的 confirmed 为外发证据，不把 handled 当成已发送；文件和介绍分别确认。
+
+系统 Plugin 同时包含固定官方 `bin/lark-cli` 1.0.100 及 MIT 许可。操作员另开 `cli_enabled:true` 后，Host 才提供 `feishu_cli`，按需发现官方命令、Skills、schema，调用该 Bot 已发布应用权限和资源 ACL 允许的业务 API，不逐接口开发工具。此授权不受私聊收件人名单限制，须只向可信成员开放；不支持个人登录、切换应用、CLI 配置或第二个事件监听。群内 Bot 协作另需精确 `peer_bots`、include_bot 应用权限及同群已接收的人类根消息，每个有向 peer 对每根最多一次，不新增消息队列。普通聊天、受限通知/文件工具及通用 CLI 的权限边界不同，不相互替代。大小、隔离、回执、群协作和具体权限归[飞书助手](feishu-assistant.md)。Graph Tasks 的计划与网络权限另行授权；群媒体入站及用户身份专属接口仍不可用。飞书后台需要先有在线长连接，再保存订阅方式、添加接收消息事件并发布应用。实现与真实业务验收分别记录，不以连接状态或命令发现代替实际业务成功。
 
 ## 界面与交互
 

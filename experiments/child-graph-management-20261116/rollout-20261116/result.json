@@ -1,0 +1,109 @@
+{
+  "date": "2026-11-16",
+  "timezone": "Asia/Shanghai",
+  "status": "deployed-and-verified",
+  "deployed_at": "2026-11-16T11:48:22.811791+08:00",
+  "source_scope": "Frozen deployed source plus creator-owned Graph deletion, c4a440c and b74c3c9 only",
+  "runtime_format": 5,
+  "archive_sha256": "e44e7ed8d9c1eed0d46044fa2db26b18c85726ab22a216fb12f644be6fd6f041",
+  "host_sha256": "6f667049e69a440f562701587fe8a7acf2c0415d34eeb4ee0da47e4d5cb38371",
+  "endpoints": [
+    "127.0.0.1:8077",
+    "127.0.0.1:5173"
+  ],
+  "deployed_changes": [
+    "creator-owned graph_tasks_delete",
+    "c4a440c process-wide shared history watch",
+    "b74c3c9 Run-detail loading"
+  ],
+  "updated_system_plugins": [
+    "graph-tasks"
+  ],
+  "verification": {
+    "host_selected_targets": {
+      "passed": 1209,
+      "failed": 0,
+      "ignored": 3,
+      "measured": 0,
+      "filtered_out": 0,
+      "targets": 9
+    },
+    "native_exact_release_tests_passed": 4,
+    "native_receipts": 5,
+    "source_free_starts_passed": 3,
+    "web_tests_passed": 407,
+    "web_files": 51,
+    "mock_browser_tests_passed": 1,
+    "web_build_passed": true,
+    "strict_host_kernel_all_features_all_targets_clippy_passed": true,
+    "changed_rust_files_format_passed": true,
+    "workspace_format_passed": false,
+    "unchanged_inherited_format_exceptions": [
+      "rust/anchor-facts/src/tests.rs",
+      "rust/anchor-runner-host/src/application/schedule_subscriptions/delivery.rs",
+      "rust/anchor-runner-host/src/node_tools.rs",
+      "rust/anchor-sandbox-bwrap/src/lib.rs"
+    ],
+    "kernel_after_old_host_stopped_passed": 9,
+    "whole_workspace_suite_run": false,
+    "manifest_and_both_web_entry_assets_match": true
+  },
+  "production_checks": {
+    "graphs_readable": 38,
+    "ordinary_graphs_statically_admitted": 37,
+    "retired_graphs_rejected": [
+      "dreaming"
+    ],
+    "plugins_available_and_valid": 13,
+    "plans_preserved": 14,
+    "enabled_plans_preserved": 13,
+    "enabled_plan_targets_statically_admitted": true
+  },
+  "preservation": {
+    "same_runs_resumed": 11,
+    "sessions": 13,
+    "run_ids": 214,
+    "historical_session_events": 2796,
+    "historical_turn_events": 31432,
+    "normal_in_place_resume_events_added": 11,
+    "enabled_channels_authenticated": 6,
+    "existing_send_receipts_confirmed": 113,
+    "credentials_catalog_model_grants_schedules_subscriptions_preserved": true,
+    "library_changed_only_graph_tasks_skill": true,
+    "goose_and_gateway_history_preserved": true,
+    "retired_automation_history_preserved": true,
+    "bridge_and_web_proxy_not_restarted": true,
+    "cold_backup_retained": true,
+    "old_release_retained": true,
+    "state_backup_restored": false
+  },
+  "inotify": {
+    "old_host_descriptors": 116,
+    "new_host_descriptors": 1,
+    "system_limit_before": 128,
+    "system_limit_after": 128,
+    "fresh_allocation_before_succeeded": false,
+    "fresh_allocation_after_succeeded": true,
+    "sysctl_changed": false
+  },
+  "production_actions_not_taken": {
+    "new_runs": 0,
+    "deleted_graphs": 0,
+    "history_deletions": 0,
+    "real_model_requests": 0,
+    "business_messages_sent": 0,
+    "historical_resends": 0,
+    "plan_changes": 0,
+    "permission_changes": 0,
+    "dreaming_or_old_experiments_resumed": 0
+  },
+  "not_accepted": [
+    "Real-model autonomous Graph cleanup",
+    "Real external-channel message delivery",
+    "Future scheduled business result quality",
+    "Fresh DEB/RPM transactions",
+    "Full workspace suite",
+    "Separate Plugin-install/scheduler lock fix"
+  ],
+  "private_evidence_root": ".local/child-graph-management-rollout-20261116/"
+}

@@ -61,7 +61,8 @@ Host 对新建、校验和保存使用统一作者规范化：未给策略的新
 {
   "id": "graph-tasks",
   "graph_tasks": {
-    "graphs": ["ai-morning-briefing"],
+    "graphs": ["document-summary"],
+    "schedules": ["shared-briefing-schedule-id"],
     "create_graphs": true,
     "plugins": [],
     "network": true,
@@ -72,6 +73,8 @@ Host 对新建、校验和保存使用统一作者规范化：未给策略的新
 ```
 
 将它放在所需 AgentNode 的 `plugins` 数组。`graphs` 选择既有资产，其静态调用闭包和原有能力由操作员保存时批准；`plugins`、`network`、`commands` 限制 Agent 新建的 Graph，不重写既有目标。`develop_plugins` 独立授权候选准备/测试，不隐含 `create_graphs`、正式安装或新增宿主权限。校验与执行都由 Host 收窄，不能通过 `Op.run`、Agent 的 `anchor_run`、Plugin 派生网络或静态调用绕过能力上限。受委派 Graph 不允许 `graph-tasks`、Host Op 或 `call.session`。
+
+`schedules` 是现存计划的确切 ID，示例占位值须替换；它独立授权发现和订阅共享结果，不授予生产 Graph 的读取、执行或计划管理权限。计划还须由操作员显式共享给允许的私聊 Session；同一安装 owner 不等于共享授权。订阅只接收生效后的计划时点，不补历史或加入已开始的时点；`not_before` 属于订阅的 Host 本地交付下限，不是生产 Graph 的等待参数。未提供或空 `schedules` 不改变旧 Graph 的序列化摘要。
 
 `graph_tasks.network` 是子任务的联网上界，不是当前助手的联网开关；子任务策略引用不额外占用 `graph_tasks.plugins` 允许列表。上界为 false 时，即使子图写 `enabled` 或业务插件依赖联网也不能执行；显式 `denied` 不因上界为 true 而开启。
 

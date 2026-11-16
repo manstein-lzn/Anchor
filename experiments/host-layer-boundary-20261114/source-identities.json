@@ -1,0 +1,58 @@
+{
+  "rust/anchor-runner-host/src/codex_bridge_tools.rs": {
+    "sha256": "e5fa2c66f1882845f2810d2e3297879eea0a22af89be9399979ead2916166ac8",
+    "before_sha256": "895b6d935e1ee9440eedb3f9ba4bf771bc66fe24f4edc3a994a3041191abe56b"
+  },
+  "rust/anchor-runner-host/src/project_tools.rs": {
+    "sha256": "eec50ac4a96d09b9ccd9386a37e85610f7886893eba4c72d4ecde183332afd69",
+    "before_sha256": "8e081f2d05b4a79fef908489a3c245456fd125fff2b605791da24f5b58a0e96d"
+  },
+  "rust/anchor-runner-host/src/project_tools/tests.rs": {
+    "sha256": "041b8e4bf60f9b32117c88d7f19df2018ebe59ecdd15991e0c251bec8e41baf1",
+    "before_sha256": "05ec264c53388136843779c6c02a600053cd6036661fd3f7b813c8e70d32beeb"
+  },
+  "rust/anchor-runner-host/src/application/assistants.rs": {
+    "sha256": "8bf9898d61ef9f4cde968e1350fdbc12e353f1a49f3065ec45d9b51d15160b8c",
+    "before_sha256": "c0175078ee28b0356a663ee20514efe1c0d2264bacad1ee87d53081df0fe08d2"
+  },
+  "rust/anchor-runner-host/src/execution/tool_assembly.rs": {
+    "sha256": "b7c9a47783b5f2174b01ede71e455e7ac0254a8e812e82293d1ffbc8c289cc65",
+    "before_sha256": "f85fdaee76bfcdcaa16cb92c6ef2f9563f6fb34b0a523d653b89a969050b907c"
+  },
+  "rust/anchor-runner-host/src/application/channel_management.rs": {
+    "sha256": "7634935ecff9e58058d338ff96fe17c92c6f083073d593903d19167f92b4518a",
+    "before_sha256": "72cc62d573fbe7f232d8f173416d71ce27f697307b589656dcce03d852088f5b"
+  },
+  "rust/anchor-runner-host/src/channel_tools.rs": {
+    "sha256": "647180c1df4ddaba74b687c095fc88952d070356088ef82d541bac4b55f60c59",
+    "before_sha256": "ec6fc8a47b67a616766cc7abd0d658c2bff4d71cf2e7f8f6a733cbb1a0c383a9"
+  },
+  "rust/anchor-runner-host/src/channel_supervisor/management.rs": {
+    "sha256": "303dd228cdf4579725c4055a44878d3ff3d3c9e78a5f9a06956b1a49c098f146",
+    "before_sha256": "3a9c1ee8f99537ea62bf44a7b38a6f63dc1c8c99bc708b954eb9746109cb7ed6"
+  },
+  "rust/anchor-runner-host/src/api/wecom.rs": {
+    "sha256": "ee0f7db2edfb75db951937a59f8d274a2687d678c34cd8a104186783661acbb2",
+    "before_sha256": "8421f9b9c8a407eda1a2007154c2db30d5c05b6db350fbdecf33db13803e5660"
+  },
+  "rust/anchor-runner-host/src/api/tests/wecom_channel_events.rs": {
+    "sha256": "dc02a499deb8956c65a669f53f81630b58331143477a15a4a2e3b920268ab5df",
+    "before_sha256": "47fa4b7880fed937b4995d16084b20b9057a0d84bc8b669ab2a8dd2ea6902425"
+  },
+  "rust/anchor-runner-host/src/application/graph_tasks/assignment.rs": {
+    "sha256": "15ec5de61a49fffc94987e99e64422afda9d4b82a424d75d8f8235a48887d669",
+    "before_sha256": "7d880a01f82ca60843da37b623df9815887b8dc81e50ce28b61817c789d4aab7"
+  },
+  "rust/anchor-runner-host/src/goose_acp/pilot_interaction/channel_management.rs": {
+    "sha256": "6139a71b9b28b016adf97180d65d7300a43e00e4ff341b0a4e969ee52c8f0d03",
+    "before_sha256": "8d3a85751bd8ddaea4680a860e588fa2213e920b9fb0fd8469e2252b39c0e5e8"
+  },
+  "rust/anchor-runner-host/src/main.rs": {
+    "sha256": "d8c9df4c01675e394bfba4539db08e82cf4b679f816320ad4bc75e251d0c7915",
+    "before_sha256": "b9e9d7ec4a88b3747fcbfde691bb271732518c2c802d6bec5b79411f211631ce"
+  },
+  "rust/anchor-runner-host/src/channel_platform.rs": {
+    "sha256": "65407428e93e1fb4c4147494934a4bc9c6ed84eb034d8b1bb108a76a88c97fb0",
+    "before_sha256": null
+  }
+}

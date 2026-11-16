@@ -1,10 +1,10 @@
 # RSI 节点会话连续性
 
-2026-10-31：原生会话修复已接通 Host 调用链，固定 Goose 的反馈图验收通过。全新真实 Run `rust-18e35d456fbfe745` 已 settled/done、Gate PASS，8 个发布文件通过 HTTP 下载和摘要核验，成功发布历史可经共享 reader 读回。当前契约见 [架构](architecture.md)，业务流程及内容验收边界见 [RSI](rsi.md)。证据见[本轮验证](../.local/rust/clean-20261031-final/evidence/verification.json)、[发布核验](../.local/rust/clean-20261031-final/evidence/publication-check.json)、[确定性回归](../.local/rust/rsi-session-continuity-20261031-feedback/commands.json)。
+2026-10-31：原生会话修复已接通 Host 调用链，固定 Goose 的反馈图验收通过。全新真实 Run `rust-18e35d456fbfe745` 已 settled/done、Gate PASS，8 个发布文件通过 HTTP 下载和摘要核验，成功发布历史可经共享 reader 读回。当前契约见 [架构](architecture.md)，业务流程及内容验收边界见 [RSI](rsi.md)。证据见本轮验证（本机原件，未入库：`.local/rust/clean-20261031-final/evidence/verification.json`）、发布核验（本机原件，未入库：`.local/rust/clean-20261031-final/evidence/publication-check.json`）、确定性回归（本机原件，未入库：`.local/rust/rsi-session-continuity-20261031-feedback/commands.json`）。
 
-本轮 20 次 Agent invocation 中，12 次后续调用均恢复原生历史；8 个节点 scope 隔离，analyze 和两个评审各执行 5 次，始终复用各自 Session、执行目录和 Workspace。analyze 第二次调用恢复 483 条历史，首个 Provider 请求的 247,633 input tokens 中有 207,488 cache_read_tokens（约 84%）；这是本次观察，不是后续命中保证。详见[原生会话观察](../.local/rust/clean-20261031-final/evidence/agent-observations.json)和 [Workspace 核对](../.local/rust/clean-20261031-final/evidence/workspace-observations.json)。
+本轮 20 次 Agent invocation 中，12 次后续调用均恢复原生历史；8 个节点 scope 隔离，analyze 和两个评审各执行 5 次，始终复用各自 Session、执行目录和 Workspace。analyze 第二次调用恢复 483 条历史，首个 Provider 请求的 247,633 input tokens 中有 207,488 cache_read_tokens（约 84%）；这是本次观察，不是后续命中保证。详见原生会话观察（本机原件，未入库：`.local/rust/clean-20261031-final/evidence/agent-observations.json`）和 Workspace 核对（本机原件，未入库：`.local/rust/clean-20261031-final/evidence/workspace-observations.json`）。
 
-首次真实 Run `rust-18e35b25b759d8bf` 曾因 Gate 错读宿主描述、research 不接受非空输出目录而失败；对应业务适配已修复，失败记录保留，不计为通过。见[首次真实失败](../.local/rust/clean-20261031/evidence/rsi-final-failed.json)与[冻结 Gate 输入回放](../.local/rust/clean-20261031/evidence/rsi-descriptor-gate-z1ixu1i3/verification.json)。
+首次真实 Run `rust-18e35b25b759d8bf` 曾因 Gate 错读宿主描述、research 不接受非空输出目录而失败；对应业务适配已修复，失败记录保留，不计为通过。见首次真实失败（本机原件，未入库：`.local/rust/clean-20261031/evidence/rsi-final-failed.json`）与冻结 Gate 输入回放（本机原件，未入库：`.local/rust/clean-20261031/evidence/rsi-descriptor-gate-z1ixu1i3/verification.json`）。
 
 同一个 Run 内，同一个 AgentNode 的后续 invocation 使用稳定的 Goose 原生会话；作用域包含 Run、Graph 和 node。不同节点、不同 Run 默认隔离。跨 Run 延续继续通过已核验的消息 Session 绑定授权，Workspace 共享本身不授予对话历史。
 
@@ -20,8 +20,8 @@ Run 内 scope 与既有显式跨 Run scope 共用原生执行租约。删除 Run
 
 该 Run 在第十次 Gate 后仍要求修订，最终没有成功发布。文件交付仍在；缺失的是默认原生会话续接。该缺口在 `dd2fda4` 及 Kernel 迁移前已存在，不能归因于本次 Workspace 改造。评审退回也涉及真实稿件问题，尚无证据把全部耗时归因于会话连续性。
 
-- [旧 Run 历史](../.local/rust/rsi-verification-20261030/state/kernel-runs/run%2Frust-18e34d016dbb565b/history.jsonl)
-- [旧 analyze 第二次调用证据](../.local/rust/rsi-verification-20261030/state/goose-acp/508212aca2cc6d95b1afbcc5d76768555ce37611715bc6fbecb831a5ec1f47af.evidence.json)
+- 旧 Run 历史（本机原件，未入库：`.local/rust/rsi-verification-20261030/state/kernel-runs/run%2Frust-18e34d016dbb565b/history.jsonl`）
+- 旧 analyze 第二次调用证据（本机原件，未入库：`.local/rust/rsi-verification-20261030/state/goose-acp/508212aca2cc6d95b1afbcc5d76768555ce37611715bc6fbecb831a5ec1f47af.evidence.json`）
 - [实际反馈图回归](../rust/anchor-runner-host/tests/goose_acp.rs)
 
 ## 验收边界

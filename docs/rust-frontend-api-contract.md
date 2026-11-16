@@ -20,7 +20,8 @@ React/TypeScript WebUI 调用 Rust Host 的资源 API。Host 可直接托管编�
 | `POST /api/artifacts/{id}/retention` | `{retained: boolean}` 显式保留/释放，经 Kernel 记录；已过期内容不能重新保留 |
 | `POST /workspaces/bind` | `{source_run,source_node,target_run,target_node}` 显式复用获授权资源，拒绝活动目标和任意宿主路径 |
 | `GET /runs/{id}/workspaces/{node}`、`DELETE /workspaces/{resource}` | 读取 Kernel 绑定；无引用、无执行者且归属明确后释放资源 |
-| `GET /graph-relations`、`GET /channel-sessions` | 真实定义、调用与可信来源投影 |
+| `GET /graph-relations` | 目录用途、创建来源、静态调用及当前 owner 的结果订阅只读投影 |
+| `GET /channel-sessions` | 真实渠道会话与可信来源投影 |
 | `GET /timeline`、`/schedules` | Run 与计划事实；时间戳未知如实披露，不编造历史 |
 
 `GET/PUT /graphs/{graph}` 的 `plugin_activation: {mode,graph_digest}` 表示配置生效规则：`next_turn` 为常驻助手，`new_run` 为普通 Graph，不表示外部插件已可用。`GET /channel-sessions/{session}/assistant` 另投影 `plugin_update: {state,message?}`，状态为 `current/pending/restart_required/unavailable`；未知或读取失败不能显示为已生效。Web 在保存后提示下一条消息生效，活动 Graph 打开已有运行，渠道 Graph 打开助手管理，避免重复 trigger。
@@ -29,7 +30,11 @@ Graph 联网策略由节点的 `plugins` 引用承载：`{id:"network",network:"
 
 创建、保存和任务 Graph 的作者输入统一归一化为节点策略；新输入无旧联网字段、也无联网引用时按 `auto` 解释，无插件节点不为此增加空引用。单图 GET 只转换返回草稿，将旧角色/命令的联网 true 保留为 `enabled`，false 或缺省保留为 `denied`；无插件旧节点也保留明确的 denied 引用，避免后续选择插件意外开放网络。读取不改磁盘，`plugin_activation.graph_digest` 仍对应原保存定义，既有 Run snapshot/digest 和 Session 的已禁止状态不改写。
 
-`GET /graphs` 保留完整有效目录，已成功收束的一次性任务项可附 `completed_task:true`；省略或 false 均留在主列表。该字段由应用服务按任务归属、现有计划、真实 Run、结果处理及共享引用派生，规则见[Graph 任务](architecture.md#按需-graph-任务与结果输入)，不能由前端按名称或时间自行推断。Web 默认将标记项收进“已完成的一次性任务”，保留展开、搜索、定义和运行历史入口；主列表计数不包含收纳项。再次安排或执行时投影撤销标记，不写归档状态。单图读取和运行历史不因收纳消失，计划及持久文件不因此清理。
+`GET /graphs` 保留完整有效目录，并从已读取定义投影 `objective`；定义不可读时省略，不补造名称。Web 列表、编辑器标题、选择器和关系引用只显示既有 Graph 名称（`graph`），不把 `objective` 用途说明当作名称，也不显示第二层描述。搜索仍同时匹配名称与用途说明；目标正文保留在原编辑字段中。选择、路由、操作、授权和计划仍使用原 ID，不改写 Graph 定义或新增名称事实。已成功收束的一次性任务项可附 `completed_task:true`；省略或 false 均留在主列表。该字段由应用服务按任务归属、现有计划、真实 Run、结果处理及共享引用派生，规则见[Graph 任务](architecture.md#按需-graph-任务与结果输入)，不能由前端按名称或时间自行推断。Web 默认将标记项收进“已完成的一次性任务”，保留展开、搜索、定义和运行历史入口；主列表计数不包含收纳项。再次安排或执行时投影撤销标记，不写归档状态。单图读取和运行历史不因收纳消失，计划及持久文件不因此清理。
+
+目录另可附 `task_source: GraphID` 和 `schedule_summary:{total,enabled,recurring}`。前者由既有有效任务创建记录的来源身份与当前目录匹配，不按 ID 前缀推断，不返回宿主路径、Session 或 scope；未知来源不分组。后者复用计划管理端口，`recurring` 包含停用的周期计划；无计划或计划读取失败时省略摘要，不能因此隐藏 Graph。Web 将未完成任务折叠到可解析的创建来源下；缺失、自引用、循环来源以及已收纳来源的未完成任务保留根入口。搜索命中子项或选中子项时展开该来源，已完成项仍使用独立收纳区。长用途说明仅在展示处截断，工具提示保留全文，编辑标题保留稳定 ID。
+
+`GET /graph-relations` 返回 `graphs:[{graph,objective?,task_source?,schedules}]`、`calls:[{graph,node,op,target,mode}]`、`subscriptions:[{graph,target,schedule,active,authorized,not_before?}]`。调用来自保存定义，订阅左侧 `graph` 为消费者、右侧 `target` 为生产者；只包含当前 HTTP `private_owner` 可见且两端在当前目录中的订阅，不返回 Session、收件人、指令或生产输入。撤订与授权失效分别保留真实状态；事实损坏返回读取错误，不伪装为空关系。投影在现有目录发布锁下读取，HTTP 只派生身份与映射响应。三类关系分别展示，共享生产者不会因被订阅成为消费者的子图；分组不赋予执行权限、不引入级联删除或新所有权事实。
 
 文件列表来自交付清单，返回 `artifact`、`artifact_availability`、`files: [{path,size}]`，不枚举可写工作区。节点详情同时投影 `artifact_error`；available/expired/missing/corrupt 区分字节可用、过期、缺失和损坏，一份历史产物不可用不会使整个 Run 详情失败。Web 用固定 Artifact URL 预览和下载，保留过期版本的清单与明确提示。
 
@@ -51,6 +56,8 @@ Session Call 拒绝通用 pause/resume；未绑定的排队调用不在启动时
 
 旧 `<state>/runs/*.json` 与 format 1–14 GraphRunRecord 不读取、不兼容，返回具名错误；当前为 format 15，不提供旧数据转换工具。相位与未知效果契约以本节和 [Run 门面](run-access-facade.md) 为准；默认预算的用户决定、各真实 Provider 场景与部署验收分别见[统一台账](pilot-development-plan.md)，不以旧迁移阶段的状态概括当前全部能力。
 
+当前可读的历史 Run 保留原 `dreaming`/`experiment` 元数据与身份，可供查询和来源隔离，但不接受普通启动、resume 或调度恢复；不能借普通 Run 接口续跑已退役的专用任务。普通 Run 的恢复、权限及 Goose 会话/上下文/compaction 边界不因这次删除而改变。
+
 Run 详情另返回 `definition: {entry,nodes,edges,ops}`，仅来自该 Run 的冻结 snapshot，包含已展开的 inline 模块。它是只读展示拓扑，不含作者 layout、脚本、指令、输入及 host 参数，不能当作完整可重运行的作者定义；当前 Graph 的修改、损坏、移除或未保存草稿均不改变它。Run 文件与 Pilot 附件统一通过鉴权 Blob 下载并显示失败反馈。
 
 ## Session、Library 与渠道
@@ -63,7 +70,9 @@ Session API 包括创建/重命名/删除、消息、Turn、SSE、停止、问�
 
 Pilot `schedule_create` 接受可选 `request_id`，与 HTTP key 使用同一 owner 范围及创建用例。Scheduler 的创建 key 与原始 graph/rule/input 同原子快照持久化；重试先查已提交事实，不因原 once 时间已过或 Graph 后来移除而重新创建。编辑计划后返回当前计划但不重写原创建内容；计划删除后原 key 返回 409，不复活。旧 `schedules.json` 数组继续可读写；首次有 key 的创建写为 `{version:1,schedules:[...],creation_requests:[...]}`，未知版本不加载，请求记录不进入 API 投影。
 
-计划统一按 Host 本地时间使用 once、interval、daily、weekly、monthly 规则，不引入 cron、独立时区或节假日历。`next_at` 是最早尚未接纳的时点；忙碌、Host 离线或接纳失败不再跳过该时点。每轮 tick 每个计划最多接纳一次，从原计划时点推算下一次，而非从实际启动时间漂移。每个时点使用稳定请求身份接纳普通 Run；Run 已持久化但计划游标保存失败时，重试复用该 Run，不重复执行。有限次数按已接纳 Run 递减，不按 tick、失败尝试或完成结果递减。
+普通计划统一按 Host 本地时间使用 once、interval、daily、weekly、monthly 规则，不引入 cron、独立时区或节假日历。`next_at` 是最早尚未接纳的时点；忙碌、Host 离线或接纳失败不再跳过该时点。每轮 tick 每个计划最多接纳一次，从原计划时点推算下一次，而非从实际启动时间漂移。每个时点使用稳定请求身份接纳普通 Run；Run 已持久化但计划游标保存失败时，重试复用该 Run，不重复执行。有限次数按已接纳 Run 递减，不按 tick、失败尝试或完成结果递减。
+
+旧 Dreaming system schedule 由历史创建回执围栏隔离，不得因删除专用调度而降级为普通 admission，也不借旧回执新建或恢复专用 Run。本地退役发行已生效，该安装的停用计划已在 11/16 维护中经既有 DELETE API 删除；历史回执和 Run 不因此迁移或重标。见[退役说明](dreaming.md)与维护记录（本机原件，未入库：`experiments/local-maintenance-20261116/README.md`）。
 
 计划当前游标仍引用的 Run 回执不能通过 Run 删除、Graph 级联删除或自动回收移除，停用计划不解除保护；游标推进或取消计划后解除。重放已接纳 Run 只返回既有事实，不启动或恢复其 worker，也不因 Graph 后来修改、移除或授权撤回而重跑。仅有元数据而没有 Run 的中断接纳不是成功回执，继续接纳须保持相同快照并通过当前授权；显式移除计划及回执后的再次执行不属于去重保证。
 
@@ -105,11 +114,13 @@ Graph、Pilot、Library、历史 Run 共用插件设置的控件、排序、筛�
 
 可信渠道入口绑定会话、真实发言者、Graph、回复节点与本地冻结附件。`ChannelIdentity.conversation_kind` 可为 `single/group`，缺省 single 且序列化省略；群按 conversation 共享 Session，sender 始终表示本条消息的真实成员。WeCom 对应字段仍为 `metadata.chat_type`。同 Session 串行，私聊/不同群隔离；中断输入保留 actor，回执核对 actor、kind 与 conversation。普通 Graph 和 Pilot 管理入口分别接纳，不把助手业务交给管理 Agent。
 
-同一渠道管理入口支持 `wecom` 和 `feishu`，状态的 `platform` 来自已保存的 Graph/绑定；未配置的有效机器人 Graph 也返回平台。成员配置仍为 `{users,send_users,private_only}`，飞书当前要求 `private_only:true`，两个名单分别授权私聊接收和回复，成员为应用范围内 `open_id`。凭据字段由声明投影，飞书为 `FEISHU_APP_ID` / `FEISHU_APP_SECRET`，不在 Web 硬编码另一套凭据协议。`POST /channels/{graph}/events` 共用入站和结算逻辑，来源必须匹配绑定；飞书接受 single 的 text/image/file，文本禁止附件，媒体准入须有经过现有附件校验的字节，结算不要求再次携带媒体，metadata 的 request_id 须等于 event_id。`GET /channels/{graph}/progress/{event_id}` 复用只读 Goose 工具活动投影，不能成为投递或恢复事实。Graph listener 同样返回实际平台。旧企微回执和身份格式保持不变，飞书独立使用 `feishu_reply` / `channel-feishu-reply:`，Markdown 只改变传输展示，见[渠道契约](feishu-assistant.md)。
+同一渠道管理入口支持 `wecom` 和 `feishu`，状态的 `platform` 来自已保存的 Graph/绑定；未配置的有效机器人 Graph 也返回平台。成员配置为 `{users,send_users,private_only,groups}`，`groups` 缺省为空且空值不序列化，旧绑定摘要不变；最多 1000 个明确 `oc_...`，去重且不允许 `*`。`private_only:true` 或 WeCom 绑定不接受非空 groups。飞书默认只收私聊；关闭该限制仍须显式列出获准群。两个成员名单同时约束私聊与群内真实发言者，成员为应用范围内 `open_id`。Web 显示群共享历史和回复对群可见；Pilot `channel_configure` 要求完整显式 groups，确认页展示群范围。凭据字段由声明投影，飞书为 `FEISHU_APP_ID` / `FEISHU_APP_SECRET`，不在 Web 硬编码另一套凭据协议。`POST /channels/{graph}/events` 共用入站和结算逻辑，来源必须匹配绑定；飞书接受 single 的 text/image/file，以及获准 group 的 text，文本禁止附件，媒体准入须有经过现有附件校验的字节，结算不要求再次携带媒体，metadata 的 request_id 须等于 event_id。Gateway 只传入真实用户 @ 当前 Bot 的群文本，Host 再复核群和成员授权。`GET /channels/{graph}/progress/{event_id}` 复用只读 Goose 工具活动投影，不能成为投递或恢复事实。Graph listener 同样返回实际平台。旧企微回执和身份格式保持不变，飞书独立使用 `feishu_reply` / `channel-feishu-reply:`，Markdown 只改变传输展示，见[渠道契约](feishu-assistant.md)。
 
 Webhook 与 Responses 共用接纳和身份校验。Responses 只实现冻结子集，不能宣称兼容完整 API；SSE 代理需关闭缓冲。`/health` 是 liveness，`/ready` 是配置 Graph readiness，不检查模型网络。
 
 ## Web 管理入口
+
+Dreaming 专用 `/dreaming` API 与设置页按用户要求删除，不再提供周期、策略、自动发布/撤回或专用恢复管理入口；普通 Graph/Run/Artifact 及既有管理 API 保留。本地服务已切换到退役后的发行，`/dreaming` 返回 404；旧 Graph 与 Run 历史保留，见[退役说明](dreaming.md)。
 
 管理操作不要求 Pilot Session 或模型调用。HTTP 与 Pilot 复用 Host 应用用例及配置事实；运行环境、渠道中的部署字段保持只读；模型服务字段与凭据统一由 Host 私有管理存储维护，环境变量不再提供模型配置或回退值，两个模型槽可独立编辑。设置、凭据与插件预检响应使用 `no-store`，密钥只通过专用表单提交，不进入聊天、日志投影或浏览器存储。
 
@@ -131,6 +142,9 @@ Web 异步操作反馈绑定发起时的上下文：删除旧 Run 的迟到响�
 | `GET /channels`、`GET/PUT /graphs/{graph}/channel`、`POST /graphs/{graph}/channel/enabled` | 按 Graph 管理机器人，复用渠道适配器与 Host supervisor；启停携带 `{enabled,expected_binding}`，保存的启用意图与实际连接分别投影；重复启用修复失效监听，实际重启时 `changed=true` |
 | `GET /channel-sessions/{session}`、`.../assistant`、`POST .../assistant/retire`、`DELETE /channel-sessions/{session}` | 校验渠道 owner，复用 current binding、静止与未结算投递限制；退役不会立刻创建新实例 |
 | `POST /schedules`、`PUT/DELETE /schedules/{schedule}` | 操作员新建、编辑、暂停/启用与删除共享计划；更新保留 ID/创建时间，未来输入修改保留下次时点，改规则或重新启用只安排未来执行；已到的时点不接受内容改写 |
+| `PUT /schedules/{schedule}/sharing` | `{description,sessions:[...],enabled}` 显式分享给既有私聊 Session；固定生产闭包/输入/Plugin bindings 与修订，不改变生产。分享或内容修订改变后旧订阅不自动获得新内容 |
+| `POST /schedules/{schedule}/subscriptions` | `{session,instruction,not_before?}` 通过私聊助手当前已批准的 schedules 白名单订阅；Host 派生来源，默认只消费未来计划时点；同一有效契约幂等，变更需先撤订 |
+| `GET /schedule-subscriptions`、`DELETE /schedule-subscriptions/{id}` | 列操作员自己的关系或撤订；返回 active/authorized、effective_at、not_before 与有限待处理状态，不返回生产诊断。撤订不取消生产，不撤销已确认或未知的外部效果 |
 | `POST /schedules/{schedule}/assign` | `{session,instruction,input?}` 把尚未到期、未在准入中的普通计划交给原机器人的既有私聊助手；保留 ID、Graph、规则、创建时间、下一时点、次数及启停状态，只原子更新输入和来源。instruction 非空且至多 8192 字节；核验旧输入的机器人/收件人与 Session 一致、当前发送权限、节点任务授权及目标确切版本。不启动助手、不创建用户 Turn、不迁移已接纳 Run。相同请求幂等，已委派计划不能重绑或借重试更新授权；`assignment` 投影返回来源说明而不返回授权快照 |
 
 渠道 `listener` 在渠道 API、Pilot 和 `GET /graphs` 中使用同一观察：`connecting/authenticating/reconnecting` 表示正在连接，`authenticated` 表示已认证，停用为 `stopped`，失管或已发布的控制接口失联为 `unavailable`。`restart_required` 覆盖启用后守护任务缺失、已结束、资源可用但监听失联及账号变化；前端不能统一解释为账号变化。资源不齐时先检查 `available` 和凭据字段状态。正常、启动或重连中的重复启用返回 `changed=false`，不打断连接；同一绑定的修复不改成员、凭据和 callback key。

@@ -1,0 +1,103 @@
+{
+  "schema_version": 1,
+  "scope": "Owner-labelled deterministic fixtures; no production accuracy estimate; no provider requests; no model quality gains inferred",
+  "before_source": "audit-before.json, captured 2026-11-13 before fixes; not rerun with new source",
+  "after_method": "Concrete named tests run against changed implementation; test fixtures specify answers independently of analyzer output",
+  "scores": [
+    {
+      "id": "stable_configuration_groups",
+      "owner_answer": "Three dynamic inputs with one unchanged static harness must produce one stable group; ten dynamic contexts remain traceable.",
+      "before": 3,
+      "after": 1,
+      "unit": "stable configuration groups for three runs",
+      "test": "stable_v2_accumulates_dynamic_requests_and_v1_is_read_without_merging",
+      "evidence": "scorecard-regressions.log",
+      "boundary": "Fixture constructs v2 observations; Host recording test is separately required to prove actual recorder uses static instructions."
+    },
+    {
+      "id": "independent_installation_mismerge",
+      "owner_answer": "Two installations with the same Run/node/invocation IDs remain two 110-token invocations and two Grades.",
+      "before": 1,
+      "after": 0,
+      "unit": "cross-installation mismerged invocation groups",
+      "test": "colliding_installations_keep_invocations_grades_and_details_independent",
+      "evidence": "scorecard-regressions.log"
+    },
+    {
+      "id": "unrelated_calls_strong_attribution",
+      "owner_answer": "Failed find/git/curl followed by printf establishes neither causal repair nor a command retry loop.",
+      "before": 2,
+      "after": 0,
+      "unit": "unsupported strong finding codes, not failed-call count",
+      "before_failed_calls": 3,
+      "test": "unrelated_tool_failures_are_weak_clues_not_repair_or_command_retries",
+      "evidence": "scorecard-regressions.log"
+    },
+    {
+      "id": "warm_cold_deleted_resource_mismatch",
+      "owner_answer": "After owner deletion of Run, trace and Grade, warm and cold views must both contain zero.",
+      "before": 3,
+      "after": 0,
+      "unit": "mismatched object classes: task/invocation/grade",
+      "test": "warm_refresh_matches_cold_after_resource_root_and_evidence_retirement",
+      "evidence": "scorecard-regressions.log"
+    },
+    {
+      "id": "matched_independent_grades",
+      "owner_answer": "One independently graded Run in each of two installations must preserve two matched Grades.",
+      "before": 1,
+      "after": 2,
+      "unit": "matched Grades in collision fixture",
+      "test": "colliding_installations_keep_invocations_grades_and_details_independent",
+      "evidence": "scorecard-regressions.log"
+    },
+    {
+      "id": "facts_only_quality_disclosure",
+      "owner_answer": "Without authorized Grade/Run sources report missing applicability, not healthy quality or a zero-count quality assertion.",
+      "before": [],
+      "after": [
+        "grades",
+        "runs"
+      ],
+      "unit": "declared unavailable analysis needs",
+      "test": "facts_only_discovery_discloses_missing_quality_without_blocking_efficiency",
+      "evidence": "scorecard-missing-quality.log",
+      "boundary": "Captured log precedes the parent status-enum refinement; status shape is not claimed by this artifact."
+    },
+    {
+      "id": "late_regrade_deduplication",
+      "owner_answer": {
+        "initial_matched_grades": 1,
+        "matched_grades_after_late_and_regrade": 3,
+        "grade_conflicts": 1,
+        "late_grades_joined": 3,
+        "idle_new_samples": 0
+      },
+      "before": null,
+      "after": {
+        "initial_matched_grades": 1,
+        "matched_grades_after_late_and_regrade": 3,
+        "grade_conflicts": 1,
+        "late_grades_joined": 3,
+        "idle_new_samples": 0
+      },
+      "unit": "20-run owner-labelled three-cycle fixture",
+      "test": "labelled_multisource_three_cycle_fixture_has_exact_late_grade_and_conflict_counts",
+      "evidence": "multisource-scale.log",
+      "boundary": "Before capability unavailable, not measured as zero."
+    },
+    {
+      "id": "host_closed_view_sentinel_holdout",
+      "owner_answer": "All listed out-of-scope payload/holdout/expected-answer sentinels absent; exact retained development assignment required.",
+      "before": null,
+      "after": 0,
+      "unit": "leaked named sentinel values, not estimated production leakage",
+      "tests": [
+        "application::dreaming::evidence::tests::safe_owners_export_only_granted_closed_fields_and_replay_original_prefixes",
+        "application::dreaming::evidence::tests::safe_experiment_views_require_exact_retained_development_assignment_and_hide_holdout"
+      ],
+      "evidence": "host-safe-export.log",
+      "boundary": "Small Host fixture, not 10k export; absence before S4 was not measured."
+    }
+  ]
+}

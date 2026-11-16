@@ -34,6 +34,8 @@
 
 没有业务可调用的通用 save、status setter 或可变 record。创建只接受经准入校验的初始值；其后的生命周期与 Graph 事实均经 `Kernel::submit`。测试夹具也通过实际 Kernel 创建和提交推进，不直接改写持久相位。
 
+工作区绑定准备同时核对恢复后的 owner 投影：仅在同 Run / Graph / 节点的严格较早 invocation 已有 Kernel 接受的中断结果、无待核查原生工具观察且旧写入锁已释放时，标记精确旧 owner 为已中断。恢复跳过执行器的完成路径也遵守此交接；没有 accepted 结果、活跃 writer、其他 owner 或未知效果仍阻止接管。不以 Artifact 存在代替 Kernel 接受，不清除工作目录，不改变后续 invocation 的 owner。
+
 | 意图 | 门面内的归属 | 不得破坏的协议 |
 | --- | --- | --- |
 | 准入与启动 | `admission`、`conversations`、`graph_policy` | 校验并冻结 Graph、输入、权限与身份，保留去重、元数据、租约及启动顺序 |
@@ -48,6 +50,10 @@
 唯一 worker 表归 `KernelRuns`：返回触发结果前同步登记，guard 在退出、abort 或未 poll future 被丢弃时释放。登记、控制和删除预留共用互斥边界，删除按 active → deleting 的锁顺序核查，不能在清理期间重新启动 Run。`stop` 先提交再取消；`pause` 以持久意图与事件在结果后的派发边界消费；`abandon` 返回前等待 worker 排空。意图文件是待处理命令，不是另一份 Run 状态。
 
 ## 恢复与 Session
+
+历史 Run 元数据中的 `dreaming`/`experiment` 身份保留、可读，仅用于查证及来源隔离；普通 admission 重放和执行准备不接受这些身份，不能按普通任务启动、resume、调度或自动恢复。旧 Dreaming system schedule 仍受历史创建回执围栏隔离，不得降级到普通 admission；读取旧 Run 或相位允许都不是执行授权。
+
+原 handovers 事实保留只读校验：未完成交接仍约束恢复、删除和会话接续，既有回复等待只跟随已认证的后继，不重接纳入站消息或选择无关实例；不恢复新的替换协调机制。自动 retention 跳过历史 `dreaming`/`experiment` Run，并保护其 Artifact 及 `dreaming-*` 专用节点交付。删除 Host frozen/局部上下文分支/meta 接入不删除普通 Goose 会话、上下文或 compaction，也不改变普通 Run 的恢复与权限边界；本轮仅删除源码，未迁移或清理旧历史、未部署，范围见[退役说明](dreaming.md)。
 
 普通显式 resume 与认证 Session-call 共用 `inspect_interrupted_attempts`：发现原生 pending，复用 Runtime 的 `observation_stop` 登记 Code + Observation stop，逐项持久保存“先核查，不盲目重放”的提示，再由 Human 控制释放；Agent 在同一原生 Session 中核查后继续。pending 不隐藏普通 resume，也不将内部 attempt 包装成逐项用户审批。
 

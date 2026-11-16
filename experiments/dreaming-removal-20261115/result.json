@@ -1,0 +1,244 @@
+{
+  "recorded_at": "2026-11-15T22:50:11+08:00",
+  "scope": "Source retirement only; no replacement automation and no production operation.",
+  "status": "local regression passed with explicit workspace-formatting exception",
+  "deployed": false,
+  "production_data_used": false,
+  "real_model_requests": 0,
+  "host_rust_statistics": {
+    "basis": "Existing Rust files in the task-start working-tree tar snapshot, including tests, not Git HEAD",
+    "baseline_lines": 211229,
+    "remaining_lines_in_same_file_set": 166304,
+    "net_lines_removed": 44925,
+    "deleted_files": 79,
+    "modified_remaining_files": 51,
+    "baseline_archive_sha256": "d272356adcc7f609f3f10539ac92fc53e6fc9409f258e54d277079f81985a468"
+  },
+  "private_evidence_root": ".local/dreaming-removal-20261115",
+  "checks": [
+    {
+      "name": "workspace_all_targets",
+      "command": "cargo +stable check --manifest-path rust/Cargo.toml --locked --offline --workspace --all-targets",
+      "exit_code": 0,
+      "log": "workspace-check.log"
+    },
+    {
+      "name": "host_bins",
+      "command": "XDG_RUNTIME_DIR=/run/user/1001 scripts/test.sh --locked --offline -p anchor-runner-host --bins",
+      "exit_code": 0,
+      "log": "host-unit-final.log",
+      "passed": 1185,
+      "failed": 0,
+      "ignored": 3
+    },
+    {
+      "name": "host_integration",
+      "command": "XDG_RUNTIME_DIR=/tmp TMPDIR=<private-disk-tempdir> scripts/test.sh --locked --offline -p anchor-runner-host --test '*' -- --test-threads=1",
+      "exit_code": 0,
+      "log": "host-integration-final.log",
+      "passed": 277,
+      "failed": 0,
+      "ignored": 127
+    },
+    {
+      "name": "shared_crates",
+      "command": "XDG_RUNTIME_DIR=/run/user/1001 scripts/test.sh --locked --offline -p anchor-facts -p anchor-eval -p anchor-hub -p anchor-distribution -p anchor-graph-host",
+      "exit_code": 0,
+      "log": "shared-tests-final.log",
+      "passed": 277,
+      "failed": 0,
+      "ignored": 8
+    },
+    {
+      "name": "related_clippy",
+      "command": "cargo +stable clippy --manifest-path rust/Cargo.toml --locked --offline -p anchor-runner-host -p anchor-distribution -p anchor-graph-host -p anchor-facts -p anchor-eval -p anchor-hub --all-targets -- -D warnings",
+      "exit_code": 0,
+      "log": "related-clippy-final.log"
+    },
+    {
+      "name": "changed_host_rustfmt",
+      "command": "stable rustfmt --edition 2024 --config skip_children=true --check <51 changed Host Rust files>",
+      "files": 51,
+      "exit_code": 0,
+      "log": "host-own-fmt.log"
+    },
+    {
+      "name": "workspace_rustfmt",
+      "command": "cargo +stable fmt --manifest-path rust/Cargo.toml --all -- --check",
+      "exit_code": 1,
+      "log": "fmt-final.log",
+      "unmodified_or_parallel_files": [
+        "rust/anchor-facts/src/tests.rs",
+        "rust/anchor-runner-host/src/application/schedule_subscriptions/delivery.rs",
+        "rust/anchor-runner-host/src/node_tools.rs",
+        "rust/anchor-sandbox-bwrap/src/lib.rs"
+      ]
+    },
+    {
+      "name": "web_unit",
+      "command": "npm --prefix apps/web test",
+      "exit_code": 0,
+      "files": 50,
+      "passed": 401,
+      "log": "web-tests-final.log"
+    },
+    {
+      "name": "web_build",
+      "command": "npm --prefix apps/web run build",
+      "exit_code": 0,
+      "warning": "Vite large chunks",
+      "log": "web-build-final.log"
+    },
+    {
+      "name": "wording",
+      "command": "scripts/check-sensitive-wording.sh",
+      "exit_code": 0,
+      "scope": "tracked files",
+      "log": "wording-check.log"
+    },
+    {
+      "name": "native_goose_acp",
+      "command": "scripts/test.sh --locked --offline -p anchor-runner-host --test goose_acp native_goose_direct_model_transport_requires_observed_tool_receipt -- --ignored --exact --test-threads=1 --nocapture",
+      "exit_code": 0,
+      "log": "native-goose_acp.log",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "name": "native_goose_kernel_recovery",
+      "command": "scripts/test.sh --locked --offline -p anchor-runner-host --test goose_kernel_recovery kernel_observed_native_effect_accepts_durable_completed_or_abort_without_replay -- --ignored --exact --test-threads=1 --nocapture",
+      "exit_code": 0,
+      "log": "native-goose_kernel_recovery.log",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "name": "native_goose_persistent_assistant",
+      "command": "scripts/test.sh --locked --offline -p anchor-runner-host --test goose_persistent_assistant host_restart_automatically_resumes_the_instance_with_its_workspace_and_session -- --ignored --exact --test-threads=1 --nocapture",
+      "exit_code": 0,
+      "log": "native-goose_persistent_assistant.log",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    }
+  ],
+  "native_environment": {
+    "ANCHOR_GOOSE_BINARY": "/home/mansteinl/Anchor/.local/bin/goose",
+    "ANCHOR_GOOSE_LOCAL_NETWORK": "1",
+    "ANCHOR_GOOSE_RELAY_BINARY": "/tmp/anchor-dreaming-removal.00jEbz/runtime/anchor-net-relay",
+    "ANCHOR_TEST_HOST_BINARY": "/tmp/anchor-dreaming-removal.00jEbz/runtime/anchor-runner-host",
+    "ANCHOR_TEST_EVIDENCE_ROOT": "/tmp/anchor-dreaming-removal.00jEbz/native-evidence",
+    "XDG_RUNTIME_DIR": "/tmp",
+    "TMPDIR": "<private-disk-tempdir>"
+  },
+  "native_binaries": {
+    "anchor-runner-host": "249477a89e4759fb8eca52fcb6c2510591aae0eb7c2166a7a7cf833f140bc76b",
+    "anchor-net-relay": "1fd73aff7e8e9bca9090aac7df2650a93ec57604ef5164528210bd4b2013530d",
+    "anchor-sandbox-network": "b9d0902d3910319288f4412c2e3003ae1cb1ba82610aaeb6f30e94893c7cade6",
+    "anchor-wecom-tools": "cfd9b30db0b27ab519aef10a71dadd0789f083d2ac1b748952e858822d515588",
+    "anchor-wecom-gateway": "36d906ca58c8c145b842a5993a402faddc15d13200ea516faea8fe6436e11be0",
+    "anchor-network-tools": "58eaeb68224bc15b010ad98c510522e87500014ab17109d26ebb3d33a6806fe4"
+  },
+  "native_cases": [
+    {
+      "case": "goose-native-direct-receipt",
+      "status": "passed",
+      "local_provider_requests": 2,
+      "real_model_requests": 0,
+      "production_data_used": false,
+      "host_binary_sha256": "249477a89e4759fb8eca52fcb6c2510591aae0eb7c2166a7a7cf833f140bc76b",
+      "goose_binary_sha256": "17e065a79cb0508413af714724aed51d6b76972dda9feebdda701330134fb640",
+      "raw_receipt": "native-evidence/2940747/goose-native-direct-receipt/evidence.json",
+      "raw_receipt_sha256": "3f9891b8c08b9a6ad54d002aaae8a61fc4f752f9737ae6f2d4d00685914ce27a"
+    },
+    {
+      "case": "kernel-native-effect-abort",
+      "status": "passed",
+      "local_provider_requests": 1,
+      "real_model_requests": 0,
+      "production_data_used": false,
+      "host_binary_sha256": "249477a89e4759fb8eca52fcb6c2510591aae0eb7c2166a7a7cf833f140bc76b",
+      "goose_binary_sha256": "17e065a79cb0508413af714724aed51d6b76972dda9feebdda701330134fb640",
+      "raw_receipt": "native-evidence/2940906/kernel-native-effect-abort/evidence.json",
+      "raw_receipt_sha256": "289924b25ec5fe9d9cfc12e3111e7d08bd1d87dce20b66f2328a3aaa300aeacd"
+    },
+    {
+      "case": "kernel-native-effect-completed",
+      "status": "passed",
+      "local_provider_requests": 3,
+      "real_model_requests": 0,
+      "production_data_used": false,
+      "host_binary_sha256": "249477a89e4759fb8eca52fcb6c2510591aae0eb7c2166a7a7cf833f140bc76b",
+      "goose_binary_sha256": "17e065a79cb0508413af714724aed51d6b76972dda9feebdda701330134fb640",
+      "raw_receipt": "native-evidence/2940906/kernel-native-effect-completed/evidence.json",
+      "raw_receipt_sha256": "2141cda1a16a901102904d249d7e8f0a41f71e9e27fa779b38173a92d38e9ec0"
+    },
+    {
+      "case": "goose-persistent-assistant-auto-resume",
+      "status": "passed",
+      "local_provider_requests": 4,
+      "real_model_requests": 0,
+      "production_data_used": false,
+      "host_binary_sha256": "249477a89e4759fb8eca52fcb6c2510591aae0eb7c2166a7a7cf833f140bc76b",
+      "goose_binary_sha256": "17e065a79cb0508413af714724aed51d6b76972dda9feebdda701330134fb640",
+      "raw_receipt": "native-evidence/2941367/goose-persistent-assistant-auto-resume/evidence.json",
+      "raw_receipt_sha256": "1b1300b6635c939c5153aaacd083ce7343e18e219b549782dc9d52cb448972e5"
+    }
+  ],
+  "earlier_failures": [
+    {
+      "log": "host-tests.log",
+      "reason": "Four briefing fixtures could not copy the Host into the space-limited tmpfs; final integration suite uses disk temporary files."
+    },
+    {
+      "log": "briefing-rerun.log",
+      "reason": "One fixture launch returned ExecutableFileBusy; isolated and final full integration runs passed."
+    },
+    {
+      "logs": [
+        "host-integration.log",
+        "writer-isolated.log"
+      ],
+      "reason": "writer_lease twice observed a null outcome after HTTP exit. An assertion now prints the complete response; subsequent isolated and full runs passed. Product lease behavior was not changed and root cause remains unproven."
+    }
+  ],
+  "delegated_web_browser": {
+    "passed": 5,
+    "kind": "local mocked browser tests, not native Host/provider validation",
+    "command": "CHOKIDAR_USEPOLLING=1 ANCHOR_BROWSER_BINARY=/usr/bin/google-chrome CI=1 ANCHOR_WEB_TEST_PORT=5291 ANCHOR_WEB_API_URL=http://127.0.0.1:1 npm --prefix apps/web run test:e2e -- e2e/graph-catalog-organization.spec.ts e2e/pilot-start.spec.ts --grep 'mocked:|missing default Flash' --workers=1"
+  },
+  "not_covered": [
+    "Production deployment or release removal",
+    "Real Provider or external channel behavior",
+    "Complete native ignored suite",
+    "10k performance benchmarks",
+    "Final source-free platform startup or DEB/RPM installation transactions",
+    "Dreaming A/B or production benefit"
+  ],
+  "log_sha256": {
+    "host-check.log": "215cd5fbc17dd704b0ad404bbb21099bcd2a10d290f20bc168392d6706499a8c",
+    "host-tests.log": "119842c1a085cdb27acbce0e4b32eaea977ba10c6d563d14cc5b73ab4cae71e2",
+    "briefing-rerun.log": "45bf5300d9b36dd29dfcb7cbdabfefa1c6b0ffd601e8dbffdb20ecfe710c154e",
+    "briefing-isolated.log": "359a54cd228c1192b4d7d781b14912663ade46582c4f049075e187278ee6c277",
+    "writer-isolated.log": "0d50b09d1999449a017f735daa57e05560dd3d94b662e38f3686391cf6ffb059",
+    "writer-diagnostic.log": "789883de1fd83825608340b178f05195adf1c19e48cbf5e8a53d068db79ae84c",
+    "host-integration.log": "c4ca97b595f1948b74c00a41dd9295712c45d654b8d5af6251b47a34b5e94b39",
+    "host-unit-final.log": "911291343406eb17a03f456ec5c737682089a4721a24e06306806249249aa0a3",
+    "host-integration-final.log": "89d57a90ed316828c507bcc1ae2541711054f1c59b564ca91298974d941ec16a",
+    "shared-tests-final.log": "57bbf46e23b98d7a4406e99b909152b5bbaef24ec5702f64e9db9edf5c98e1c5",
+    "workspace-check.log": "e8c005f00f88ca596ede97e44195223d8a9d3e1080cf3db40aaaa9fb65d620b2",
+    "related-clippy-final.log": "3819b117b30fd8a97005d9d4f7747206b2132cf0e42eec77cab13e89ee616362",
+    "host-own-fmt.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "fmt-final.log": "6dda44e9bf511f38baebcc117ba2f1d7d8e7ae20e6ef4f67ca4e829d14b9a3e1",
+    "native-build.log": "e349a594bc812c9ca8fca261af6f59c6e691948a9fc42a6ecdf64ec67bec4989",
+    "native-goose_acp.log": "5690ea3dc02e604e34523f3eb8ee84b0217727218cbffa7029a0ee3869ecb1bf",
+    "native-goose_kernel_recovery.log": "ac82cdd0c74dfe2915df1d0382e286884829df34bcf283725d6e9e960bf17fbe",
+    "native-goose_persistent_assistant.log": "9d8aaf6f2ff77ae05e288a0c9050f363d94883c4ec4995aabe62c69ff65310f1",
+    "native-binary-sha256.json": "6442c8b095cf4d65cfd373734862712e676c14bfb3c91d9ccef8eaac55cb2449",
+    "web-tests-final.log": "5956e916cb7a8b3493d47f8ae3694b1f3df3880a62eede3492f505beb33066cb",
+    "web-build-final.log": "893e91598a214f32d243003677e01b8d8997a44d737beb3ea6c6378d08173f0c",
+    "wording-check.log": "78cf26da99b1c5272368f0baa3013d9de0bf2cdf766c0d58feb6b413525dc5d1"
+  }
+}

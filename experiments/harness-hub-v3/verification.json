@@ -1,0 +1,378 @@
+{
+  "schema_version": 1,
+  "recorded_at": "2026-11-13T08:35:17.244806+00:00",
+  "status": "local_implementation_and_deterministic_acceptance_complete",
+  "source_of_truth": "Native/scale artifacts bind results to their own captured sources and binaries; current working HEAD alone is not a release identity.",
+  "checks": [
+    {
+      "scope": "Facts and Hub final default suites; ignored benchmarks recorded separately",
+      "log": "final-facts-hub.log",
+      "result": {
+        "passed": 108,
+        "failed": 0,
+        "ignored": 5
+      },
+      "clippy": "strict all-targets passed in same log"
+    },
+    {
+      "scope": "Host Dreaming filtered unit suite only, not full Host/workspace tests",
+      "log": "host-dreaming-final.log",
+      "result": {
+        "passed": 134,
+        "failed": 0,
+        "ignored": 18
+      }
+    },
+    {
+      "scope": "Workspace all targets compilation, not cargo test --workspace",
+      "log": "workspace-check-final.log",
+      "status": "passed"
+    },
+    {
+      "scope": "Host strict bin/tests Clippy",
+      "log": "host-clippy-final.log",
+      "status": "passed"
+    },
+    {
+      "scope": "Run access and independent Grade writer fences; no new fence exceptions",
+      "log": "owner-fences-final.log",
+      "result": {
+        "passed": 2,
+        "failed": 0,
+        "ignored": 0
+      }
+    },
+    {
+      "scope": "Host owner safe views through compiled Hub; three-cycle late Grade/idle/evidence isolation",
+      "log": "compiled-owner-three-cycle.log",
+      "result": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      }
+    },
+    {
+      "scope": "Actual Host Runner Goose ACP; ten inputs one stable configuration, distinct contexts",
+      "log": "ten-input-stable.log",
+      "evidence": "ten-input-stable.json",
+      "result": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      }
+    },
+    {
+      "scope": "Web unit tests, 51 files",
+      "log": "web-unit.log",
+      "passed": 409
+    },
+    {
+      "scope": "Web production build",
+      "log": "web-build.log",
+      "status": "passed"
+    },
+    {
+      "scope": "Dreaming desktop/mobile Playwright fixtures",
+      "log": "web-browser.log",
+      "passed": 2
+    },
+    {
+      "scope": "Distribution suite subsection in combined initial log",
+      "log": "distribution-eval-initial.log",
+      "passed": 88,
+      "ignored": 2,
+      "note": "Two pinned-input packaging smokes intentionally not run here; later Eval fence failure retained in this same log."
+    },
+    {
+      "scope": "Eval final full suite including writer fence after test fixture repair",
+      "log": "eval-final.log",
+      "result": {
+        "passed": 15,
+        "failed": 0,
+        "ignored": 0
+      }
+    },
+    {
+      "scope": "Distribution and Eval strict Clippy",
+      "log": "distribution-eval-clippy.log",
+      "status": "passed"
+    },
+    {
+      "scope": "Frozen Graph/guidance/Plugin full Apply/regression/Withdraw plus one meta boundary",
+      "evidence": "native.json",
+      "json_pointer": "/aggregate",
+      "result": {
+        "scoped_native_tests_passed": 4,
+        "scoped_native_tests_failed": 0,
+        "loopback_model_requests": 401,
+        "real_external_model_requests": 0,
+        "provider_failures": 0,
+        "independently_graded_graph_guidance_plugin_experiment_assignments": 72,
+        "ordinary_independent_baseline_grades": 3,
+        "ordinary_independent_regression_grades": 3,
+        "successful_graph_guidance_plugin_applies": 3,
+        "successful_graph_guidance_plugin_withdrawals": 3,
+        "meta_boundary_outer_assignments_completed": 1,
+        "meta_boundary_outer_assignments_graded": 1,
+        "meta_boundary_outer_assignments_required": 48,
+        "meta_boundary_outer_assignments_missing": 47,
+        "full_meta_matrix_executed": false,
+        "meta_boundary_actual_improvements": 1,
+        "meta_boundary_false_adoptions": 0,
+        "meta_boundary_forbidden_effects": 0,
+        "no_new_model_requests_after_graph_guidance_gc_restart": true
+      }
+    },
+    {
+      "scope": "Rebuilt current-source ordinary Graph full Apply/regression/Withdraw only",
+      "evidence": "native.json",
+      "json_pointer": "/current_source_followup",
+      "status": "passed",
+      "requests": 80,
+      "source_drift": []
+    },
+    {
+      "scope": "100/1k/10k physical facts and safe-view workload; bounded summaries, separate support IO",
+      "evidence": "multisource-scale.json",
+      "status": "passed"
+    },
+    {
+      "scope": "Original facts-only benchmark after explicit v3 summary contract adjustment",
+      "evidence": "original-contract-adjusted.json",
+      "status": "passed",
+      "original_failure": "original-post-s45-failed.log"
+    },
+    {
+      "scope": "100/1k/10k actual Host owner Run/Grade safe export, fresh child process",
+      "evidence": "host-scale.json",
+      "status": "passed"
+    },
+    {
+      "scope": "Independent projection/query/facts-only refresh resource measurements",
+      "evidence": "isolated-resources.json",
+      "status": "passed"
+    }
+  ],
+  "preserved_failures": [
+    {
+      "evidence": "facts-hub-initial-failure.log",
+      "failure": "Synthetic v1 fixture retained a v3 applicability value; separate strict-JSON child saw BrokenPipe",
+      "resolution": "Downgrade synthetic status with synthetic version; no production change for BrokenPipe; two subsequent full suites pass."
+    },
+    {
+      "evidence": "distribution-eval-initial.log",
+      "failure": "Grade writer ownership fence found test/source patterns",
+      "resolution": "Use owner GradeRecorder in Host fixtures, retain independent writer boundary; final Eval and owner fences pass."
+    },
+    {
+      "evidence": "original-post-s45-failed.log",
+      "failure": "Old whole-summary 8 KiB assertion predates longitudinal fields",
+      "resolution": "Preserved failure, explicit 8 KiB core / 16 KiB longitudinal / 256 KiB total and fixed shape contract; adjusted rerun passes."
+    },
+    {
+      "evidence": "final-validation-initial.log",
+      "failure": "Overbroad link/whitespace scan included missing historical .local links and original captured-log whitespace",
+      "resolution": "Confirmed all 41 missing references predate this task in HEAD; scoped current/new links and authored JSON/Markdown pass; raw evidence unchanged."
+    }
+  ],
+  "boundaries": [
+    "No production state, policy, deployment, schedules or .local mutation in this task; no external Provider requests.",
+    "Current-source Graph followup does not re-sign earlier frozen guidance/Plugin/meta results. Native evidence records the semantic drift and each executable hash.",
+    "Meta this round covers only one of 48 assignments; complete receipt correctly remains inconclusive; no new self-replacement proof.",
+    "Distribution interface tests/private installed fixtures do not establish full current three-format source-free delivery, real install transactions or systemd rollout.",
+    "No full cargo test --workspace claim; unrelated pilot_interaction layer-fence issue was outside assigned ownership and not repaired here.",
+    "10k fixtures are not 10k actual model runs; sparse-grade Hub and full-grade Host export measurements differ and are not additive.",
+    "Total IO is not O(delta); complete historical support still reconstructed. Phase RSS includes resident caches/tables, not net allocation; cold-cache IO not measured.",
+    "Pilot, Op and mid-attempt crash collection remain S7. Production guidance/model/Plugin exposure may be unknown; business grading and sustained benefit not proven."
+  ],
+  "log_sha256": {
+    "host-dreaming-final.log": "d3442bc6f0fe3e2a3fd97436cf993e03a510599f8687ce93bb8a3ff6455e1926",
+    "workspace-check-final.log": "eb2ce5cd594ca2fc52498d438b19dae502b75e79d466fd671d4b777729a485c9",
+    "host-clippy-final.log": "9eeb44bc6d0a947a09013d201a4480fcdf131a7d2e74544c29f4b74a6275ae84",
+    "owner-fences-final.log": "cbff53a42f0ac86850ad6a052c3e4047d6e9d26ffd318ab4f6659fc4154609d0",
+    "ten-input-stable.log": "93d13930c51c2a143f913c8d8bf4c8f5a8b22f8483d67aacf0bdc651c7cfb17e",
+    "compiled-owner-three-cycle.log": "d3698769c06f6b6ce6010306cf820a82a9e6232624248aa02ed4c3de2d223a65",
+    "web-unit.log": "0755ca9527abcde1138ccf2ce9928172ee2d736d8a0d25a5545ce1c96a721ea4",
+    "web-build.log": "322898e5983d981d7a4dd53bc702fd809c0fe33de72d24f2cbf59a1c5b5ee094",
+    "web-browser.log": "8434c041e443f6fc4986d10c062d44e5e6b987d92d5e3c6dda5a433ce33ce602",
+    "distribution-eval-initial.log": "155706a04e670c7878c422b671bf511cb835456be0694f8e83867b0e2503062a",
+    "eval-final.log": "109de127102690b712465fbc8b9f6404a852d489d6abfd22f79e20c3e62a2e96",
+    "distribution-eval-clippy.log": "89fa45fb22eeb91a3ae8043dc4d6383d3ebfddbfdeffb9012fd817995f846f85",
+    "facts-hub-initial-failure.log": "b91632ecb25377675e53b711eba04535ac8e1962517a0f7e12850af41411cc6e",
+    "current-native-automatic.log": "70cc6e3fcdd86b834efd21f80b23cec22de35dc670004a652a31f124abc3d0c1",
+    "final-facts-hub.log": "2f8006cce1b874c55d79733d86f863765860b8599f5cca6cd6819c8f22a6e456"
+  },
+  "document_validation": {
+    "status": "passed_for_changed_contracts_and_new_evidence_links",
+    "existing_missing_local_history_references": [
+      {
+        "file": "docs/architecture.md",
+        "target": "../.local/closeout-20261018/README.md"
+      },
+      {
+        "file": "docs/pilot-development-plan.md",
+        "target": "../.local/pilot-ui-audit-20261019/README.md"
+      },
+      {
+        "file": "docs/pilot-development-plan.md",
+        "target": "../.local/manual-acceptance-20261019-latest/README.md"
+      },
+      {
+        "file": "docs/pilot-development-plan.md",
+        "target": "../.local/durable-write-cleanup-20261019/README.md"
+      },
+      {
+        "file": "docs/pilot-development-plan.md",
+        "target": "../.local/manual-acceptance-20261019-latest/README.md"
+      },
+      {
+        "file": "docs/pilot-development-plan.md",
+        "target": "../.local/trace-evidence-atomic-20261019/README.md"
+      },
+      {
+        "file": "docs/pilot-development-plan.md",
+        "target": "../.local/wecom-callback-sync-20261019/README.md"
+      },
+      {
+        "file": "docs/pilot-development-plan.md",
+        "target": "../.local/run-access-facade-20261019/f1-final/README.md"
+      },
+      {
+        "file": "docs/pilot-development-plan.md",
+        "target": "../.local/run-access-facade-20261019/f2/README.md"
+      },
+      {
+        "file": "docs/pilot-development-plan.md",
+        "target": "../.local/run-access-facade-20261019/g0-fixes/README.md"
+      },
+      {
+        "file": "docs/pilot-development-plan.md",
+        "target": "../.local/closeout-20261018/README.md"
+      },
+      {
+        "file": "docs/pilot-development-plan.md",
+        "target": "../.local/shared-facts-fix-20261016/README.md"
+      },
+      {
+        "file": "docs/pilot-development-plan.md",
+        "target": "../.local/shared-facts-fix-20261016/deployment/README.md"
+      },
+      {
+        "file": "docs/pilot-development-plan.md",
+        "target": "../.local/plugin-approval-fix-20261019/README.md"
+      },
+      {
+        "file": "docs/pilot-development-plan.md",
+        "target": "../.local/plugin-turn-followup-20261016/README.md"
+      },
+      {
+        "file": "docs/pilot-development-plan.md",
+        "target": "../.local/plugin-turn-20261016/README.md"
+      },
+      {
+        "file": "docs/pilot-development-plan.md",
+        "target": "../.local/mcp-https-20261016/README.md"
+      },
+      {
+        "file": "docs/pilot-development-plan.md",
+        "target": "../.local/plugin-configuration-20261016/README.md"
+      },
+      {
+        "file": "docs/pilot-development-plan.md",
+        "target": "../.local/plugin-configuration-20261016/real-provider/takeover/attempt-20261016T035926Z-5aa324/evidence.json"
+      },
+      {
+        "file": "docs/pilot-development-plan.md",
+        "target": "../.local/plugin-configuration-20261016/deployment/takeover/result.json"
+      },
+      {
+        "file": "docs/pilot-development-plan.md",
+        "target": "../.local/completion-fix-20261015/README.md"
+      },
+      {
+        "file": "docs/pilot-development-plan.md",
+        "target": "../.local/completion-fix-20261015/deployment.json"
+      },
+      {
+        "file": "docs/pilot-development-plan.md",
+        "target": "../.local/w1-run-liveness-20261014/README.md"
+      },
+      {
+        "file": "docs/pilot-development-plan.md",
+        "target": "../.local/wecom-network-group-20261015/README.md"
+      },
+      {
+        "file": "docs/pilot-development-plan.md",
+        "target": "../.local/webui-lifecycle-20261014/README.md"
+      },
+      {
+        "file": "docs/pilot-development-plan.md",
+        "target": "../.local/webui-lifecycle-20261014/deployment/README.md"
+      },
+      {
+        "file": "docs/pilot-development-plan.md",
+        "target": "../.local/reasoning-roundtrip-20261015/real-browser/anchor-management-provider-P02PH3/evidence.json"
+      },
+      {
+        "file": "docs/pilot-development-plan.md",
+        "target": "../.local/reasoning-roundtrip-20261015/test-real-browser.log"
+      },
+      {
+        "file": "docs/pilot-development-plan.md",
+        "target": "../.local/starter-content-20261019/README.md"
+      },
+      {
+        "file": "docs/pilot-development-plan.md",
+        "target": "../.local/no-env-20261019/README.md"
+      },
+      {
+        "file": "docs/pilot-development-plan.md",
+        "target": "../.local/model-ui-20261018/README.md"
+      },
+      {
+        "file": "docs/pilot-development-plan.md",
+        "target": "../.local/wecom-network-group-20261015/real-assistant/evidence-upgrade.json"
+      },
+      {
+        "file": "docs/pilot-development-plan.md",
+        "target": "../.local/reasoning-roundtrip-20261015/README.md"
+      },
+      {
+        "file": "docs/pilot-development-plan.md",
+        "target": "../.local/model-settings-deploy-20261015/README.md"
+      },
+      {
+        "file": "docs/pilot-development-plan.md",
+        "target": "../.local/runtime-version-20261015/README.md"
+      },
+      {
+        "file": "docs/pilot-development-plan.md",
+        "target": "../.local/host-restart-20261016/latest-summary.json"
+      },
+      {
+        "file": "docs/pilot-development-plan.md",
+        "target": "../.local/channel-plugin-status-20261016/README.md"
+      },
+      {
+        "file": "docs/pilot-development-plan.md",
+        "target": "../.local/workspace-recovery-20261016/README.md"
+      },
+      {
+        "file": "docs/pilot-development-plan.md",
+        "target": "../.local/no-env-20261019/real-evidence.json"
+      },
+      {
+        "file": "docs/pilot-development-plan.md",
+        "target": "../.local/closeout-20261018/README.md"
+      },
+      {
+        "file": "docs/pilot-development-plan.md",
+        "target": "../.local/closeout-20261018/README.md"
+      }
+    ],
+    "existing_missing_reference_count": 41,
+    "original_log_bytes_preserved": true,
+    "initial_overbroad_scan_failure": "final-validation-initial.log",
+    "note": "All missing local-history references already existed at HEAD; preserved raw failure log has one trailing-space line. Neither is rewritten to manufacture a clean historical archive."
+  }
+}

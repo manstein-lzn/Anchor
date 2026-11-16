@@ -1,0 +1,115 @@
+{
+  "status": "passed",
+  "runtime": "real Goose native loop over ACP",
+  "real_model_requests": 0,
+  "goose_version": "1.53.0",
+  "goose_binary_sha256": "17e065a79cb0508413af714724aed51d6b76972dda9feebdda701330134fb640",
+  "host_binary_sha256": "2b25f97350e3019d5ad0c980172e1d181ea09ad943ccbc0416ebf24656b4e7a4",
+  "test_binary_sha256": "fb9ba7be20c8dfb23ae2fbaa7a722137b805cce11525b1aac72773bb0bdd7747",
+  "test_source_sha256": "b7d43560afdde82a880787bcd3e9c332c1f737e76e4b42bd3b01f1227a62949c",
+  "fixture_source_sha256": "b9527e1d5fd65660ca7ad352051684d2b12a0257b3e93cade993981007ad332d",
+  "checks": {
+    "case_source": "tests/goose_stable_configuration.rs",
+    "runs": [
+      "rust-18e78b6ca0b27c7e",
+      "rust-18e78b6cf4ac5cce",
+      "rust-18e78b6d4679b306",
+      "rust-18e78b6d9cf0bbd8",
+      "rust-18e78b6e02c78165",
+      "rust-18e78b6e5a68f0b7",
+      "rust-18e78b6eb23d784a",
+      "rust-18e78b6f15e3d329",
+      "rust-18e78b6f72a7df24",
+      "rust-18e78b6fc8290428"
+    ],
+    "contexts": [
+      {
+        "run": "rust-18e78b6ca0b27c7e",
+        "task_sha256": "c16d5095204cb4381c70ceba34360d700721fe9d866b909666b3375306d8a41c",
+        "input_sha256": "8c5908980d1b34c4fd07c946fb99211435b48284d4a7a96dde512e3046016b45",
+        "configuration": "9dafc572e037d9ec22411436edbeb80528a4479166039df30c0b096ef9686560"
+      },
+      {
+        "run": "rust-18e78b6cf4ac5cce",
+        "task_sha256": "a6db2362180afe26b2e417e174aea0e4015de3700bfee7c8d3ee0efa4100cc6f",
+        "input_sha256": "e4d4d3f608016d8286f8d6a6a2d1932481908f911b2dd5a7a0031b16b1b54f66",
+        "configuration": "9dafc572e037d9ec22411436edbeb80528a4479166039df30c0b096ef9686560"
+      },
+      {
+        "run": "rust-18e78b6d4679b306",
+        "task_sha256": "957abb20a048e8a5dcfa79de1a81fc224e45478689338f825d79386f9c33142f",
+        "input_sha256": "e147dc4b3779f53bc7b72ce2dce6e518c4ab89ca287aa4dfce67a15a0d864263",
+        "configuration": "9dafc572e037d9ec22411436edbeb80528a4479166039df30c0b096ef9686560"
+      },
+      {
+        "run": "rust-18e78b6d9cf0bbd8",
+        "task_sha256": "03c61d6d8c42c0a7a93bd238b92d0dbf1d824e5e36a3f8dfef7d0ee61f3f54c0",
+        "input_sha256": "c372c7e453fc71baae98724ffcd86efd4ad938f46725b2662f0645c98a70fdcb",
+        "configuration": "9dafc572e037d9ec22411436edbeb80528a4479166039df30c0b096ef9686560"
+      },
+      {
+        "run": "rust-18e78b6e02c78165",
+        "task_sha256": "dd6b02d7a0a10f3d51f55d74a5afb9350a405c603708ab825df22039b2995070",
+        "input_sha256": "e5a476f3507c35a2a77a02f3e1b052730b9b3304981c165f883c03b5df7c5884",
+        "configuration": "9dafc572e037d9ec22411436edbeb80528a4479166039df30c0b096ef9686560"
+      },
+      {
+        "run": "rust-18e78b6e5a68f0b7",
+        "task_sha256": "b23d0ae41b5177f4ea47e396b4ae66ad4902cd1f170f36dfdb037bb979ba775c",
+        "input_sha256": "8e03af8f9a15205c666cbc503ccff863c7687739b468da15b47531fdb50d76ed",
+        "configuration": "9dafc572e037d9ec22411436edbeb80528a4479166039df30c0b096ef9686560"
+      },
+      {
+        "run": "rust-18e78b6eb23d784a",
+        "task_sha256": "84fa2e1ef3842a77072707aaa7b556a23efbf40906cd1111d99cb618c3eb2201",
+        "input_sha256": "7cb4c55f5054f21ac45920ce86cce495c64fe7dd337ea41d5b6fb3f945066ad2",
+        "configuration": "9dafc572e037d9ec22411436edbeb80528a4479166039df30c0b096ef9686560"
+      },
+      {
+        "run": "rust-18e78b6f15e3d329",
+        "task_sha256": "b21f51409941edcd50f8044f97c583ede94ee14a8020577d4586d7c07fe84079",
+        "input_sha256": "90bc645b5ab6867ebed9594a4aa19fe6b5e348888b6f435243329fdefe3eb8e8",
+        "configuration": "9dafc572e037d9ec22411436edbeb80528a4479166039df30c0b096ef9686560"
+      },
+      {
+        "run": "rust-18e78b6f72a7df24",
+        "task_sha256": "96e0eb1e0c5e8a2f8a40a5ff199dc3ea8e017b30ac2ba6c96f340669661d4133",
+        "input_sha256": "5e0eac8a47b6e7a340354848b8c967df29f2778d3c2327906c3e8c6cfb699759",
+        "configuration": "9dafc572e037d9ec22411436edbeb80528a4479166039df30c0b096ef9686560"
+      },
+      {
+        "run": "rust-18e78b6fc8290428",
+        "task_sha256": "a61299df6b481324c1d9fa840e59a72ae694b0461757f3a6645ff43c02e0976c",
+        "input_sha256": "5fa6a357208333a2c69c160a73a1c1cb993660dbfc814b495eb93e1512947b0e",
+        "configuration": "9dafc572e037d9ec22411436edbeb80528a4479166039df30c0b096ef9686560"
+      }
+    ],
+    "stable_configuration": {
+      "version": 2,
+      "graph_digest": "08921bd8a233a82eb2f45ea2069dd355b551214696cfc7e674950527530e3e00",
+      "node_id": "worker",
+      "model": "fixture-goose",
+      "model_binding": "d2e26b81f5977972604f4fea8949dc866d34ae0852e49e5b00197502d11c22f2",
+      "runtime_sha256": "17e065a79cb0508413af714724aed51d6b76972dda9feebdda701330134fb640",
+      "instructions_sha256": "8ed04ebe0fecc19596e0e1833f3929e00dec485062d38b312d6f01cff00afc71",
+      "plugin_instructions_sha256": "3e8c5c9bd4a7a7db155479259dbbd2cc93779a5155a59b76ff0cc7dd35edfd99",
+      "plugins": [],
+      "routes": [
+        "done"
+      ],
+      "host_sha256": "2b25f97350e3019d5ad0c980172e1d181ea09ad943ccbc0416ebf24656b4e7a4",
+      "tools_sha256": "10d9a258944c278f744aa0107f013a4023d8f36d8850175539f633166090404c",
+      "envelope_sha256": "71faa621facd17b55b240c2ef6a922ef0a3cbb5c6d5d80c4018dae274500c804"
+    },
+    "distinct_inputs": 10,
+    "distinct_request_contexts": 10,
+    "stable_configuration_count": 1,
+    "host_runner_goose_acp": true,
+    "external_provider_requests": 0
+  },
+  "elapsed_ms": 15880,
+  "production_data_used": false,
+  "raw_evidence_local_path": "/tmp/anchor-goose-acp-spike/evidence/integration/426803/ten-input-stable-configuration/evidence.json",
+  "raw_evidence_sha256": "b8c344044572a9ecb930425e5a3b7f8c4f0c035206c217ccf3eed5d538b4ba12",
+  "scope": "Compact fields copied from the historical exact test evidence, not a new current-source run."
+}

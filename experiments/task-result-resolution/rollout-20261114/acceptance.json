@@ -1,0 +1,197 @@
+{
+  "status": "passed",
+  "cases": [
+    {
+      "name": "channel-tools",
+      "command": [
+        "/tmp/anchor-task-result-rollout-target-20261114/debug/deps/anchor_runner_host-07a033376b75261b",
+        "channel_tools::tests",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "seconds": 5.022,
+      "counts": [
+        [
+          "ok",
+          "19",
+          "0"
+        ]
+      ],
+      "test_binary_sha256": "c35797c3bb278805acc31323e5927e568fe0658976ca1efeb9b5de9922f5d5c2"
+    },
+    {
+      "name": "completion-guard",
+      "command": [
+        "/tmp/anchor-task-result-rollout-target-20261114/debug/deps/anchor_runner_host-07a033376b75261b",
+        "goose_acp::bridge::tests::refused_completion_keeps_the_native_loop_open_until_host_facts_allow_it",
+        "--exact",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "seconds": 0.064,
+      "counts": [
+        [
+          "ok",
+          "1",
+          "0"
+        ]
+      ],
+      "test_binary_sha256": "c35797c3bb278805acc31323e5927e568fe0658976ca1efeb9b5de9922f5d5c2"
+    },
+    {
+      "name": "layer-fence",
+      "command": [
+        "/tmp/anchor-task-result-rollout-target-20261114/debug/deps/layer_fence-d89c455ecc75f135",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "seconds": 0.064,
+      "counts": [
+        [
+          "ok",
+          "3",
+          "0"
+        ]
+      ],
+      "test_binary_sha256": "75b690e533766c87598cc63f56bc24ea396316145bbb288571cb9b8d2e80e936"
+    },
+    {
+      "name": "run-access-fence",
+      "command": [
+        "/tmp/anchor-task-result-rollout-target-20261114/debug/deps/run_access_fence-ef46e13119b7486d",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "seconds": 0.064,
+      "counts": [
+        [
+          "ok",
+          "1",
+          "0"
+        ]
+      ],
+      "test_binary_sha256": "66feddb9f2532803bafca8f76776092bf38133d4b62866ee4ea0c10aa5cd5260"
+    },
+    {
+      "name": "configuration-fence",
+      "command": [
+        "/tmp/anchor-task-result-rollout-target-20261114/debug/deps/configuration_fence-f966eff841c450d7",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "seconds": 0.064,
+      "counts": [
+        [
+          "ok",
+          "1",
+          "0"
+        ]
+      ],
+      "test_binary_sha256": "8ccf266385f0e5dcd736f973a6376033a299b44be18d1004a0737e126405fa7f"
+    },
+    {
+      "name": "plugin-library-fence",
+      "command": [
+        "/tmp/anchor-task-result-rollout-target-20261114/debug/deps/plugin_library_fence-fd34130e37a46234",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "seconds": 0.064,
+      "counts": [
+        [
+          "ok",
+          "2",
+          "0"
+        ]
+      ],
+      "test_binary_sha256": "0061d1ceea60f693ba91bc5167e0b03eebe3cdcf3995b673592a79d40ac21279"
+    },
+    {
+      "name": "native-task-inputs",
+      "command": [
+        "/tmp/anchor-task-result-rollout-target-20261114/debug/deps/goose_persistent_assistant-866b40fc3be9856b",
+        "task_inputs::",
+        "--ignored",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "seconds": 60.216,
+      "counts": [
+        [
+          "ok",
+          "5",
+          "0"
+        ]
+      ],
+      "test_binary_sha256": "d1355553d1d64f55088a31ffde9c7263a01c2cff313a97c9ba737791a23a39b3"
+    },
+    {
+      "name": "native-feishu-schedule",
+      "command": [
+        "/tmp/anchor-task-result-rollout-target-20261114/debug/deps/goose_feishu-f7b5d2aec7cf76fe",
+        "native_schedule_completion_notifies_the_original_feishu_private_chat_with_a_confirmed_gateway_fact",
+        "--ignored",
+        "--exact",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "seconds": 9.579,
+      "counts": [
+        [
+          "ok",
+          "1",
+          "0"
+        ]
+      ],
+      "test_binary_sha256": "efddf605a92906f12b0d3ba8a73c844beffa3ce638bd8c292b1657f4a3dc7c06"
+    },
+    {
+      "name": "native-feishu-private",
+      "command": [
+        "/tmp/anchor-task-result-rollout-target-20261114/debug/deps/goose_feishu-f7b5d2aec7cf76fe",
+        "private_text_roundtrip_reuses_run_and_native_history_without_duplicate_delivery",
+        "--ignored",
+        "--exact",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "seconds": 6.375,
+      "counts": [
+        [
+          "ok",
+          "1",
+          "0"
+        ]
+      ],
+      "test_binary_sha256": "efddf605a92906f12b0d3ba8a73c844beffa3ce638bd8c292b1657f4a3dc7c06"
+    },
+    {
+      "name": "native-feishu-group",
+      "command": [
+        "/tmp/anchor-task-result-rollout-target-20261114/debug/deps/goose_feishu-f7b5d2aec7cf76fe",
+        "authorized_group_members_share_run_and_native_history_with_original_group_replies",
+        "--ignored",
+        "--exact",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "seconds": 6.426,
+      "counts": [
+        [
+          "ok",
+          "1",
+          "0"
+        ]
+      ],
+      "test_binary_sha256": "efddf605a92906f12b0d3ba8a73c844beffa3ce638bd8c292b1657f4a3dc7c06"
+    }
+  ],
+  "host_sha256": "8e20afe07d80ab35b2e724ee1aeb455c26f7329231fe643f7221755c173be2b0",
+  "goose_sha256": "17e065a79cb0508413af714724aed51d6b76972dda9feebdda701330134fb640",
+  "feishu_gateway_sha256": "c80766ba33945a6a9f4812dacd5867521bf321972d4b3cf5b7071a80700860b0",
+  "wecom_gateway_sha256": "52bd6a476eb71ab7848bed36f985257aad2a999ead8e2d1fe33e6e12db5db520",
+  "real_goose_used": true,
+  "real_model_provider_used": false,
+  "public_channel_used": false,
+  "production_data_used": false
+}

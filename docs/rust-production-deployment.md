@@ -1,9 +1,57 @@
 # Rust platform deployment
 
-The format-3 platform archive contains the Host, fixed Goose, compiled WebUI,
+The format-5 platform archive contains the Host, fixed Goose, Hub/Eval, compiled WebUI,
 four system Plugins (`network`, `graph-tasks`, `feishu`, `wecom`), ordinary Git
 and Anchor Dev Plugins (`git`, `anchor-steward`), network relay and fixed
 uv/Rustup/pixi bootstrap tools.
+The source retirement removes the Dreaming factory Graph and dedicated `dreaming`
+evaluation package. The checked inventory retains the `input-discovery` advisory
+resource and its independent quality package; these resources do not configure
+models, grant targets or enable automatic improvement.
+
+The user requested removal of the complex Dreaming-specific system from source,
+including its Host application/API, startup installation, coordination/observers,
+special frozen experiment execution, local context-branch adapters, self-meta
+mechanisms and Web page. Dreaming-specific Facts/Eval/Hub meta and experiment
+protocols that depend on the `kernel-dreaming` lifecycle are also removed, not
+retained as current capabilities or follow-up work. There is no replacement system.
+`Kernel::submit`, ordinary Graph/Runner/Goose, Artifact, Hub global analysis,
+windows, safe-view formats/read-side processing and standalone ordinary/input-discovery
+quality tools remain. The former Host/Eval safe-view export chain is removed;
+retaining its input formats does not provide an export API.
+Ordinary Goose sessions, context and compaction, Run metadata, recovery and
+permission boundaries are unchanged. Historical `dreaming`/`experiment` metadata
+remains readable, but those Runs cannot start or resume as ordinary tasks.
+Historical handover facts retain read-only fences for unfinished replacements and
+existing reply waiters. Old Dreaming system schedules remain fenced by their
+creation receipts and must never fall through to ordinary admission. Current-source
+automatic retention preserves those Runs and their dedicated Artifacts; none of
+these source changes migrates or clears installed history.
+See the [retirement notice](dreaming.md).
+
+**The local 8077/5173 service now runs the scoped creator-management format-5 release.**
+The authorized [11/16 rollout](../experiments/child-graph-management-20261116/rollout-20261116/README.md)
+adds creator-owned Graph deletion and the upstream shared-watcher/Run-detail fixes
+to the frozen retirement release, not other parallel source work. The matching
+Graph-task Skill is upgraded; Graphs, grants, model, schedules, subscriptions,
+history and six channel bindings are preserved. All 11 waiting assistants resume
+their original Runs. The Host's inotify descriptors fall from 116 to 1 without
+raising kernel quotas; Bridge and Web proxy stay running. No real-model business
+Graph or production deletion test is run. The earlier
+user-authorized 11/15 switch stops the old Host but preserves its release files and all
+retained data. No Graph, Plugin, grant, model, channel, schedule or subscription
+was changed by that switch. The Dreaming API is gone. The subsequent authorized
+11/16 maintenance（本机原件，未入库：`experiments/local-maintenance-20261116/README.md`） removes
+seven disabled historical plans, including Dreaming's, while preserving all 14
+enabled plans, grants and subscriptions. It finishes only the approved local
+publish node of an existing weekly report, clears unused build caches and stops
+orphan fixture processes; the production Host, Bridge and proxy are not restarted.
+Archive/source-free checks, exact-Host native fixtures and local preservation
+checks are recorded in the rollout evidence（本机原件，未入库：`experiments/dreaming-removal-20261115/rollout-20261115/README.md`）.
+Earlier real-provider results remain historical evidence, not proof of gains.
+Native package transactions and new real-provider business execution were not
+run for this rollout; see the [acceptance ledger](pilot-development-plan.md#当前验收结论).
+
 Anchor Dev keeps the stable ID `anchor-steward` and provides six on-demand development
 Skills without an MCP server. Enable it in Pilot separately from the Git tools;
 preinstallation does not grant network access or Graph delegation, activate
@@ -17,9 +65,27 @@ initialization use the existing Host-managed WebUI flows. Once the required
 sandbox baseline is available, missing model settings or an unprepared
 Python/Rust environment do not prevent opening the WebUI for first configuration;
 Pilot directs the user to Settings when needed.
+The source no longer installs a default Dreaming Graph or managed daily plan,
+starts a Dreaming Hub handshake/coordinator/observer, or exposes its dedicated
+cycle/policy/recovery API. Ordinary startup and the standalone analysis/quality
+tools do not imply an automatic improvement loop. A source change alone never
+updates a running installation; the local switch above has separate evidence.
+
 The installer supports fresh roots only. The legacy Python deployment was
 removed; no legacy inventory or migration tool is provided. This guide does not
-establish an in-place upgrade or migration contract.
+establish an in-place upgrade or migration contract. Removing the platform Graph
+inventory changes the platform format: format 4 and earlier inventories are no
+longer admitted; standalone Graph packages still use format 1. Installation,
+operator preflight and Host startup share the platform inventory validator.
+Placing a new Host in an old format-4 release fails validation before HTTP binds.
+Any later rollout requires a complete, consistently validated format-5 release,
+not replacement of a single binary or a manual manifest edit. This compatibility
+requirement does not authorize deployment. The old release with its old binaries
+does not stop merely because the source changes.
+Source-free archive/native-payload validation and actual
+target-distro transactions, real Provider quality and production rollout are
+separate acceptance levels; their current evidence is recorded in the
+[acceptance ledger](pilot-development-plan.md).
 
 Every Host `serve` checks Bubblewrap's isolated namespaces and a fresh `/proc`
 mount in its private PID namespace before the Host creates mutable directories,
@@ -28,13 +94,20 @@ Failure reports the cause and exits nonzero; it does not bind the host's proc,
 share host namespaces or change Docker or host security policies as a fallback.
 Passing this check establishes only the namespace/private-proc baseline, not the
 network helper path or every Sandbox capability.
+Every complete release must carry the reviewed `anchor-sandbox-network`
+executable beside `anchor-runner-host` and bind its digest in the validated inventory.
+Outside that admitted platform closure, HTTP readiness and channel authentication
+alone do not prove network-enabled MCP launches work. Any separately authorized
+rollout must verify isolated egress and installed network MCP initialization from
+the deployed path; the helper is not a workaround for platform-format compatibility.
+Do not work around a missing helper by sharing host networking.
 Source-build regression and ordinary Ubuntu Docker failure-path evidence are in
-the [startup verification record](../.local/sandbox-startup-20261104/verification.md).
+the startup verification record（本机原件，未入库：`.local/sandbox-startup-20261104/verification.md`）.
 
 ## Native packages
 
 The current binary preview is scoped to Ubuntu 22.04/24.04 LTS amd64. The existing
-x86_64 RPM and amd64 DEB builders wrap the same admitted format-3 platform,
+x86_64 RPM and amd64 DEB builders wrap the same admitted format-5 platform,
 not separate Runtimes. Rocky Linux 8 remains a packaging target, outside this
 preview's delivery scope. Build on Rocky 8 to retain the glibc 2.28 compatibility
 baseline:
@@ -100,7 +173,7 @@ here; a source update does not update them, and the fresh-install-only restricti
 still applies. These results are not acceptance of that check on the target
 Docker environment, live systemd, target SELinux/AppArmor, real providers or
 Pilot blind installation;
-see the [verification record](../.local/native-install-20261104/evidence/native-verification.md).
+see the verification record（本机原件，未入库：`.local/native-install-20261104/evidence/native-verification.md`）.
 
 The rebuilt Ubuntu DEB `0.1.0-0.20261104.2` includes the mandatory sandbox startup
 check. Its Rust/WebUI/native build, closed payload review, focused regression
@@ -109,7 +182,7 @@ small-group preview build, not a published GitHub Release. Target Ubuntu
 systemd/AppArmor, reboot/crash recovery, real-provider and Pilot end-to-end
 acceptance were not run for this build; they do not block this preview. The
 fresh-install-only restriction is unchanged; see the
-[preview build record](../.local/ubuntu-preview-20261104/evidence/verification.md).
+preview build record（本机原件，未入库：`.local/ubuntu-preview-20261104/evidence/verification.md`）.
 
 ## Install a reviewed platform
 
@@ -164,7 +237,7 @@ drop-in by replacing `ExecStart` with the same launcher plus `start --listen`.
 This does not change model or Plugin configuration.
 
 An optional operator preflight reuses the launcher's exact command configuration.
-It checks the fixed format-3 runtime inventory, selected executables, private
+It checks the fixed format-5 runtime inventory, selected executables, private
 mutable roots, available system tools and writer lease. It does not start the
 service, call a model or inspect credential values. Run it while the Host is
 stopped; an active writer is a failure:
@@ -200,12 +273,14 @@ Goose build/cache are documented in the [development guide](development.md).
 | `ANCHOR_RUNNER_WEB_ROOT` | Compiled WebUI, such as `apps/web/dist`. |
 | `ANCHOR_RUNNER_LISTEN` | Loopback only, default `127.0.0.1:8077`; remote access is described below. |
 | `ANCHOR_RUNNER_ALLOWED_COMMANDS` | Explicitly authorized commands, such as `sh,git`; a model-supplied path does not grant access. |
+| `ANCHOR_CODEX_BRIDGE_MANAGER_GRAPHS` | Optional JSON array of explicitly granted resident Manager Graph IDs. Allows status/start only for the existing current-user `anchor-codex-bridge.service`, with frozen Codex/network authority and the fixed loopback endpoint; no arbitrary service control or task replay. Unset means no grant. See [Codex Manager](codex-project-manager.md#manager-的受限拉起授权). |
+| `ANCHOR_PROJECT_WORKSPACES` | Optional JSON object keyed by resident Graph ID, with explicit `owner`, canonical absolute `path`, and relative directory `exclude` list. Grants `project_read/edit/run` independently of Codex, retaining the Manager notes workspace and existing sandbox/command/network limits. Host state/Library inside a project must be excluded. Pair with a Bridge build participating in the same project lease before enabling concurrent direct/delegated writes. Unset grants nothing; see [direct project contract](codex-project-manager.md#manager-的本地项目直连). |
 | `ANCHOR_DEPENDENCIES_PYTHON`, `ANCHOR_PILOT_PYTHON_ENABLED` | Existing Python interpreter and optional Pilot authorization for a development deployment; full-platform users initialize through the WebUI. |
 | `ANCHOR_DEPENDENCIES_UV`, `ANCHOR_DEPENDENCIES_UV_SHA256`, `ANCHOR_DEPENDENCIES_SOURCES` | Register a fixed dependency tool, digest and allowed sources together. The full platform supplies these through its release inventory. |
 | `ANCHOR_MODEL_CONTEXT_WINDOW` | Optional positive context limit, passed to Goose as `GOOSE_CONTEXT_LIMIT` instead of model-name inference, which may be unreliable for aliases. |
 | `ANCHOR_NODE_TOOL_DISCLOSURE`, `ANCHOR_NODE_ALWAYS_VISIBLE` | Force disclosure (`1`), disable it (`0`), or retain the automatic default; the second setting is a JSON array narrowing the always-visible set. See [Plugin disclosure](plugins.md#发现与读取). |
 | `ANCHOR_PLUGIN_EXTERNAL_CONFIGURATION` | Explicitly deployment-managed Plugin fields; see [connection configuration](plugins.md#连接配置与凭据). |
-| `ANCHOR_RETENTION_DAYS`, `ANCHOR_RETENTION_MAX_GB` | Defaults 30 days / 20 GB; `0` or `off` disables the respective limit. Startup and hourly reclamation use the existing protected deletion path; see [retention](design-cards/003-data-retention.md#8-批准与实现2026-10-23). |
+| `ANCHOR_RETENTION_DAYS`, `ANCHOR_RETENTION_MAX_GB` | Defaults 30 days / 20 GB; `0` or `off` disables the respective limit. Startup and hourly reclamation use the existing protected deletion path. Retention skips historical `dreaming`/`experiment` Runs and protects their Artifacts plus dedicated `dreaming-*` node deliveries; the local rollout preserves these facts without cleanup or migration. See [retention](design-cards/003-data-retention.md#8-批准与实现2026-10-23). |
 
 Keep mutable roots outside the release and separate by responsibility. Before
 listening, the Host validates resources, writable roots and the deployment-writer

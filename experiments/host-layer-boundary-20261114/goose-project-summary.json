@@ -1,0 +1,17 @@
+{
+  "status": "passed",
+  "runtime": "goose",
+  "goose_version": "1.53.0",
+  "goose_binary_sha256": "17e065a79cb0508413af714724aed51d6b76972dda9feebdda701330134fb640",
+  "real_model_requests": 0,
+  "host_binary_sha256": "18cb136e338940d9d3ab1a98b7e8a5e944443af5c3627e8747982ebfeb40db93",
+  "source_sha256": "4b8570ee2d0c78ce6b77e882069f911846053cb9ed94b75834c4a2433d7c753b",
+  "checks": {
+    "project_read_edit_run_reached_external_directory": true,
+    "excluded_directory_hidden_from_file_and_command_tools": true,
+    "source_channel_session_and_workspace_preserved": true,
+    "codex_plugin_or_mcp_used": false
+  },
+  "original_evidence_sha256": "fdf55065478d899164f2f305930c07c15aec1f32fab74816da679edebf2c57c1",
+  "projection": "Summary of deterministic-provider fixture acceptance; excludes provider message bodies."
+}

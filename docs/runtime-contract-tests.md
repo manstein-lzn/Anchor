@@ -152,6 +152,12 @@ binary、固定 Goose digest、已完成且无错误的确定性 Provider transc
 模型调用、完成声明和业务内容质量
 分别记录。
 
+### 共享计划订阅专项
+
+`goose_persistent_assistant` 的 `task_inputs::subscriptions` 用小型双节点生产图和本地确定性 Provider，经过实际 Host、Scheduler、GraphRunner、Goose ACP 与授权工具。两个私聊助手只获得确切 Schedule 的消费权限，发现并订阅后仍不产生 Run；随后普通计划产生一次 Run，同一终产物进入两条独立 Session 结果队列。用例暂停第二个助手，核对第一个已处理不吞掉第二个结果，再恢复第二个并核对相同文件字节和独立投递身份；重复 tick 不重新生产。内部中间产物不进入订阅输入。
+
+撤订、共享变更、当前收件人授权、交付下限、结果入队失败后恢复、未消费与活跃 claim 的留存保护归应用与 Session 契约测试；运行中撤订不得继续挂载或消费结果，已完成 Turn 的历史完成事实不能被事后撤订改写。固定 Goose 和确定性 Provider 的通过不代表真实模型自主订阅、生产内容质量或公网渠道送达。实际通过范围见[验收台账](pilot-development-plan.md)。
+
 ### 飞书私聊专项
 
 `goose_feishu` 不在标准 `SUITES` 中，按需显式执行。先在同一 target 构建

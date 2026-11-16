@@ -1,0 +1,12 @@
+{
+  "status": "passed",
+  "historical_session_events": 2441,
+  "historical_turn_events": 31356,
+  "all_old_rows_unchanged": true,
+  "new_task_or_message_or_resolution_events": 0,
+  "original_check_failure": "The first post-switch assertion required identical Session event counts; normal in-place startup appends one auto-resume event per resident Run.",
+  "rollback_executed": false,
+  "state_backup_restored": false,
+  "appended_resume_event_count": 11,
+  "raw_integrity_evidence_sha256": "7fbfccd54152360615819da4e3acac8d63cbe24f0b9df86f6be2c96b276d89ca"
+}

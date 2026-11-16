@@ -39,7 +39,9 @@ cd Anchor
 
 开发数据默认独立保存在 `.local/rust/`：`catalog/`、`state/`、`workspaces/` 和 `library/` 分别保存可编辑 Graph、运行与会话事实、工作区和 Plugin，`dev/` 保存脚本 PID 与日志。现有 `.local/demo`、旧环境和运行历史不会被自动迁移或清理。
 
-默认源码启动按 [starter 清单](../examples/starter.json) 一次性准备官方 Plugin、工具和依赖，Plugin 仍经 Library 安装器发布。`setup` 不启动 Host 或导入 Graph；`start`/`restart` 在脚本管理的 Host 就绪后，才经现有 API 导入示例 Graph。不自动运行 Graph、调用模型、连接业务账号或启用渠道。
+默认源码启动按 [starter 清单](../examples/starter.json) 一次性准备官方 Plugin、工具和依赖，Plugin 仍经 Library 安装器发布。飞书 `lark-cli` 是外部固定 ELF；初始化复用 `scripts/prepare-platform-bootstrap.sh` 校验后放入候选，不把它当 Cargo package 构建。`setup` 不启动 Host 或导入 Graph；`start`/`restart` 在脚本管理的 Host 就绪后，才经现有 API 导入示例 Graph。不自动运行 Graph、调用模型、连接业务账号或启用渠道。
+
+仅当飞书 Plugin 尚未安装且初次准备未完成时，源码初始化才调用现有 bootstrap 下载器；版本、下载地址和摘要沿用其固定规则，不另设覆盖或副本。下载器在临时目录准备四项固定输入，只复制 `lark-cli` 到飞书候选，其余输入随临时目录清理；`LICENSE.lark-cli` 随 Plugin 公共资源复制。
 
 `.source-starter.json` 只记录源码启动器的初次准备，不是 Graph/Plugin 的事实来源。导入内容成为用户可编辑副本，已有同名内容、用户后续修改和删除不被覆盖或重新引入；显式指定 entry bundle、自定义 Host 或外部服务时跳过源码导入。示例用途与配置条件见[上手示例](../examples/README.md)，不能据此推断原生运行时包也附带全部业务示例。
 
@@ -79,6 +81,25 @@ anchor-library --root /absolute/path/to/library upgrade-system \
 
 `install-system` 只接纳缺失项，`upgrade-system` 同时核对已安装代码和候选摘要，在原 Library 发布锁内执行；旧版本损坏或并发变化不能静默覆盖。系统升级属于操作员/发行维护，不授权 Agent 自行升级 Host、扩大权限或部署。代码更改、确定性回归、真实 Provider/渠道验收和生产切换是分开的事实。
 
+源码初始化遇到缺少 `plugins/feishu/bin/lark-cli` 或 `LICENSE.lark-cli` 的旧 Library 时会停止并保持原文件不变，提示 `inspect-system` 与显式 `upgrade-system` 命令；不会静默替换已有插件。操作员应先从仓库准备候选并通过 `anchor-library ... install --review` 核对新摘要，再将 `inspect-system` 返回的旧摘要与新摘要分别传给 `upgrade-system --existing-digest` 和 `--digest`。例如：
+
+```sh
+candidate_root=$(mktemp -d)
+candidate="$candidate_root/feishu"
+bootstrap_root=$(mktemp -d)
+cp -a plugins/feishu "$candidate"
+mkdir -p "$candidate/bin"
+cargo build --manifest-path rust/Cargo.toml --locked -p anchor-library -p anchor-feishu-gateway --bins
+library_cli="${CARGO_TARGET_DIR:-rust/target}/debug/anchor-library"
+cp "${CARGO_TARGET_DIR:-rust/target}/debug/anchor-feishu-gateway" "$candidate/bin/"
+scripts/prepare-platform-bootstrap.sh --output "$bootstrap_root/pinned"
+cp "$bootstrap_root/pinned/lark-cli" "$candidate/bin/"
+"$library_cli" --root "$ANCHOR_RUNNER_LIBRARY_ROOT" inspect-system --id feishu
+"$library_cli" --root "$ANCHOR_RUNNER_LIBRARY_ROOT" install --directory "$candidate" --id feishu --review
+```
+
+检查两条命令输出后，再显式运行 `"$library_cli" --root "$ANCHOR_RUNNER_LIBRARY_ROOT" upgrade-system --id feishu --directory "$candidate" --digest <reviewed-candidate-digest> --existing-digest <reviewed-installed-digest>`。候选准备和摘要核对不会替换已安装插件；升级只在操作员执行最后一条命令后发生。
+
 ## 工作节奏
 
 先确定归属层、事实所有者和小契约，交付可运行的垂直切片。Agent loop、模型历史与 compaction 复用 Goose；Graph、Run、Artifact、Sandbox、Library 和 Session/Turn 由 Anchor 保持唯一事实。
@@ -95,7 +116,7 @@ anchor-library --root /absolute/path/to/library upgrade-system \
 git diff 9a5fa57 -- rust/anchor-kernel
 ```
 
-本次长历史与 Run 查询性能修复是经独立审查的冻结外例外，范围仅为存储读取/摘要、无快照观察接口、既有历史条目借用及去除重复读取；2026-11-11 用户进一步授权修复低精度文件时间戳下的同长改写失效检测，采用可丢弃修改监视与不可用时完整重读。不扩展裁决、持久格式、预算或恢复规则。审查与验证边界见[长历史证据](../experiments/kernel-history-performance/README.md)、[查询分配证据](../experiments/run-query-memory-performance/README.md)与[缓存修复本机证据](../.local/github-sync-20261111-174316/kernel-cache-fix/README.md)，修改监视的适用范围见[当前架构](architecture.md#kernel-提交与存储)。本例外不授权其他 Kernel 改动。
+本次长历史与 Run 查询性能修复是经独立审查的冻结外例外，范围仅为存储读取/摘要、无快照观察接口、既有历史条目借用及去除重复读取；2026-11-11 用户进一步授权修复低精度文件时间戳下的同长改写失效检测，采用可丢弃修改监视与不可用时完整重读。不扩展裁决、持久格式、预算或恢复规则。审查与验证边界见[长历史证据](../experiments/kernel-history-performance/README.md)、[查询分配证据](../experiments/run-query-memory-performance/README.md)与缓存修复本机证据（本机原件，未入库：`.local/github-sync-20261111-174316/kernel-cache-fix/README.md`），修改监视的适用范围见[当前架构](architecture.md#kernel-提交与存储)。本例外不授权其他 Kernel 改动。
 
 ## 验证
 
@@ -146,5 +167,7 @@ scripts/check-sensitive-wording.sh --all    # 另含未跟踪的工程文件，�
 同一事实只维护一个权威位置，其他文档链接过去；当前契约、统一验收待办台账和历史归档各司其职，不另开并行状态文档。交付时更新行为、结论和未覆盖边界，移走已完成计划，替换或删除过期描述；不把修正追加在旧结论后面。未通过真实 Provider 的能力不得写成真实端到端完成。
 
 证据需要说明源码/二进制身份、实际命令和结果；`.local/`、`/tmp/` 的原始输出仅本机可用时如实标明，保留可复跑脚本或稳定产物链接，不为此把全部临时文件入库。历史证据不补签新构建或新部署。
+
+本轮未入库的历史/草稿原件归本机私有目录 `.local/master-preparation-20261116/unpublished/`（由主轨原样归档），旧 `experiments/...`、`docs/...` 定位符按归档内相对路径查证，不承诺克隆可得。
 
 文档 review 检查读者能否快速找到当前答案、同一事实是否重复、旧内容是否该替换/移出，以及未完成事项是否仍可定位。按任务控制必读信息量，不用拆文件或追加新规则掩盖重复。

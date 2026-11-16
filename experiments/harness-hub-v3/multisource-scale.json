@@ -1,0 +1,553 @@
+{
+  "schema_version": 1,
+  "measurement_scope": "frozen content-free view DTOs plus physical Kernel facts; no production mutation or provider call",
+  "measurements": [
+    {
+      "actual": "all assertions passed",
+      "fixture": "labelled_multisource_three_cycle",
+      "owner_expected": {
+        "grade_conflicts": 1,
+        "idle_duplicate_samples": 0,
+        "initial_matched_grades": 1,
+        "late_grades_joined": 3,
+        "matched_grades_after_late_and_regrade": 3,
+        "runs": 20
+      }
+    },
+    {
+      "elapsed_ms": 152518,
+      "fixture_peak_rss": "not measured",
+      "phase": "fixture_generation",
+      "physical_records": 322500,
+      "provider_runs": 0
+    },
+    {
+      "capture_load_project_analyze_ms": 198,
+      "graphs": 100,
+      "host_export": "not measured by this DTO fixture",
+      "io": {
+        "anchor_bytes_read": 25600,
+        "history_bytes_read": 3520800,
+        "records_parsed": 3200,
+        "resource_bytes_read": 94000,
+        "snapshot_bytes_read": 0,
+        "snapshot_records_parsed": 0
+      },
+      "manifest_bytes": 288991,
+      "matched_grades": 9,
+      "phase": "cold",
+      "process": {
+        "hub_child_peak_rss_kib": 31508,
+        "request_bytes": 106765,
+        "request_serialize_ms": 0,
+        "response_bytes": 305414,
+        "response_deserialize_ms": 0,
+        "rss_scope": "only anchor-hub child, excludes fixture generation and parent",
+        "subprocess_total_ms": 203
+      },
+      "provider_runs": 0,
+      "query_only": "not separately exposed; included in capture_load_project_analyze_ms",
+      "response_bytes": 305413,
+      "response_serialize_ms": 0,
+      "source_classes": [
+        "facts",
+        "safe_run_view",
+        "safe_grade_view"
+      ],
+      "sources": 4,
+      "summary_bytes": 15838,
+      "support_io": {
+        "anchor_bytes_read": 0,
+        "history_bytes_read": 0,
+        "records_parsed": 0,
+        "resource_bytes_read": 0,
+        "snapshot_bytes_read": 0,
+        "snapshot_records_parsed": 0
+      }
+    },
+    {
+      "capture_load_project_analyze_ms": 215,
+      "graphs": 100,
+      "host_export": "not measured by this DTO fixture",
+      "io": {
+        "anchor_bytes_read": 25600,
+        "history_bytes_read": 0,
+        "records_parsed": 0,
+        "resource_bytes_read": 94000,
+        "snapshot_bytes_read": 110300,
+        "snapshot_records_parsed": 100
+      },
+      "manifest_bytes": 370105,
+      "matched_grades": 9,
+      "phase": "no_new",
+      "process": {
+        "hub_child_peak_rss_kib": 32272,
+        "request_bytes": 395772,
+        "request_serialize_ms": 0,
+        "response_bytes": 381831,
+        "response_deserialize_ms": 0,
+        "rss_scope": "only anchor-hub child, excludes fixture generation and parent",
+        "subprocess_total_ms": 215
+      },
+      "provider_runs": 0,
+      "query_only": "not separately exposed; included in capture_load_project_analyze_ms",
+      "response_bytes": 381830,
+      "response_serialize_ms": 0,
+      "source_classes": [
+        "facts",
+        "safe_run_view",
+        "safe_grade_view"
+      ],
+      "sources": 4,
+      "summary_bytes": 11130,
+      "support_io": {
+        "anchor_bytes_read": 51200,
+        "history_bytes_read": 3520800,
+        "records_parsed": 3200,
+        "resource_bytes_read": 94000,
+        "snapshot_bytes_read": 0,
+        "snapshot_records_parsed": 0
+      }
+    },
+    {
+      "capture_load_project_analyze_ms": 216,
+      "graphs": 100,
+      "host_export": "not measured by this DTO fixture",
+      "io": {
+        "anchor_bytes_read": 25600,
+        "history_bytes_read": 0,
+        "records_parsed": 0,
+        "resource_bytes_read": 94000,
+        "snapshot_bytes_read": 110300,
+        "snapshot_records_parsed": 100
+      },
+      "manifest_bytes": 441095,
+      "matched_grades": 19,
+      "phase": "100_new",
+      "process": {
+        "hub_child_peak_rss_kib": 32484,
+        "request_bytes": 544806,
+        "request_serialize_ms": 0,
+        "response_bytes": 454286,
+        "response_deserialize_ms": 0,
+        "rss_scope": "only anchor-hub child, excludes fixture generation and parent",
+        "subprocess_total_ms": 217
+      },
+      "provider_runs": 0,
+      "query_only": "not separately exposed; included in capture_load_project_analyze_ms",
+      "response_bytes": 454285,
+      "response_serialize_ms": 0,
+      "source_classes": [
+        "facts",
+        "safe_run_view",
+        "safe_grade_view"
+      ],
+      "sources": 4,
+      "summary_bytes": 12593,
+      "support_io": {
+        "anchor_bytes_read": 51200,
+        "history_bytes_read": 3520800,
+        "records_parsed": 3200,
+        "resource_bytes_read": 94000,
+        "snapshot_bytes_read": 0,
+        "snapshot_records_parsed": 0
+      }
+    },
+    {
+      "capture_load_project_analyze_ms": 218,
+      "graphs": 100,
+      "host_export": "not measured by this DTO fixture",
+      "io": {
+        "anchor_bytes_read": 25600,
+        "history_bytes_read": 0,
+        "records_parsed": 0,
+        "resource_bytes_read": 94000,
+        "snapshot_bytes_read": 110300,
+        "snapshot_records_parsed": 100
+      },
+      "manifest_bytes": 441096,
+      "matched_grades": 19,
+      "phase": "long_history_one_new",
+      "process": {
+        "hub_child_peak_rss_kib": 32688,
+        "request_bytes": 615797,
+        "request_serialize_ms": 0,
+        "response_bytes": 452825,
+        "response_deserialize_ms": 0,
+        "rss_scope": "only anchor-hub child, excludes fixture generation and parent",
+        "subprocess_total_ms": 218
+      },
+      "provider_runs": 0,
+      "query_only": "not separately exposed; included in capture_load_project_analyze_ms",
+      "response_bytes": 452824,
+      "response_serialize_ms": 0,
+      "source_classes": [
+        "facts",
+        "safe_run_view",
+        "safe_grade_view"
+      ],
+      "sources": 4,
+      "summary_bytes": 11133,
+      "support_io": {
+        "anchor_bytes_read": 51200,
+        "history_bytes_read": 3520800,
+        "records_parsed": 3200,
+        "resource_bytes_read": 94000,
+        "snapshot_bytes_read": 0,
+        "snapshot_records_parsed": 0
+      }
+    },
+    {
+      "capture_load_project_analyze_ms": 1700,
+      "graphs": 1000,
+      "host_export": "not measured by this DTO fixture",
+      "io": {
+        "anchor_bytes_read": 256000,
+        "history_bytes_read": 35208000,
+        "records_parsed": 32000,
+        "resource_bytes_read": 940000,
+        "snapshot_bytes_read": 0,
+        "snapshot_records_parsed": 0
+      },
+      "manifest_bytes": 2855251,
+      "matched_grades": 99,
+      "phase": "cold",
+      "process": {
+        "hub_child_peak_rss_kib": 260496,
+        "request_bytes": 1036195,
+        "request_serialize_ms": 1,
+        "response_bytes": 2871661,
+        "response_deserialize_ms": 4,
+        "rss_scope": "only anchor-hub child, excludes fixture generation and parent",
+        "subprocess_total_ms": 1634
+      },
+      "provider_runs": 0,
+      "query_only": "not separately exposed; included in capture_load_project_analyze_ms",
+      "response_bytes": 2871660,
+      "response_serialize_ms": 3,
+      "source_classes": [
+        "facts",
+        "safe_run_view",
+        "safe_grade_view"
+      ],
+      "sources": 4,
+      "summary_bytes": 15818,
+      "support_io": {
+        "anchor_bytes_read": 0,
+        "history_bytes_read": 0,
+        "records_parsed": 0,
+        "resource_bytes_read": 0,
+        "snapshot_bytes_read": 0,
+        "snapshot_records_parsed": 0
+      }
+    },
+    {
+      "capture_load_project_analyze_ms": 1881,
+      "graphs": 1000,
+      "host_export": "not measured by this DTO fixture",
+      "io": {
+        "anchor_bytes_read": 256000,
+        "history_bytes_read": 0,
+        "records_parsed": 0,
+        "resource_bytes_read": 940000,
+        "snapshot_bytes_read": 1103000,
+        "snapshot_records_parsed": 1000
+      },
+      "manifest_bytes": 3665365,
+      "matched_grades": 99,
+      "phase": "no_new",
+      "process": {
+        "hub_child_peak_rss_kib": 268276,
+        "request_bytes": 3891462,
+        "request_serialize_ms": 4,
+        "response_bytes": 3677071,
+        "response_deserialize_ms": 5,
+        "rss_scope": "only anchor-hub child, excludes fixture generation and parent",
+        "subprocess_total_ms": 1885
+      },
+      "provider_runs": 0,
+      "query_only": "not separately exposed; included in capture_load_project_analyze_ms",
+      "response_bytes": 3677070,
+      "response_serialize_ms": 4,
+      "source_classes": [
+        "facts",
+        "safe_run_view",
+        "safe_grade_view"
+      ],
+      "sources": 4,
+      "summary_bytes": 11101,
+      "support_io": {
+        "anchor_bytes_read": 512000,
+        "history_bytes_read": 35208000,
+        "records_parsed": 32000,
+        "resource_bytes_read": 940000,
+        "snapshot_bytes_read": 0,
+        "snapshot_records_parsed": 0
+      }
+    },
+    {
+      "capture_load_project_analyze_ms": 1916,
+      "graphs": 1000,
+      "host_export": "not measured by this DTO fixture",
+      "io": {
+        "anchor_bytes_read": 256000,
+        "history_bytes_read": 0,
+        "records_parsed": 0,
+        "resource_bytes_read": 940000,
+        "snapshot_bytes_read": 1103000,
+        "snapshot_records_parsed": 1000
+      },
+      "manifest_bytes": 3869465,
+      "matched_grades": 199,
+      "phase": "100_new",
+      "process": {
+        "hub_child_peak_rss_kib": 272132,
+        "request_bytes": 4874976,
+        "request_serialize_ms": 6,
+        "response_bytes": 3882642,
+        "response_deserialize_ms": 6,
+        "rss_scope": "only anchor-hub child, excludes fixture generation and parent",
+        "subprocess_total_ms": 1869
+      },
+      "provider_runs": 0,
+      "query_only": "not separately exposed; included in capture_load_project_analyze_ms",
+      "response_bytes": 3882641,
+      "response_serialize_ms": 5,
+      "source_classes": [
+        "facts",
+        "safe_run_view",
+        "safe_grade_view"
+      ],
+      "sources": 4,
+      "summary_bytes": 12570,
+      "support_io": {
+        "anchor_bytes_read": 512000,
+        "history_bytes_read": 35208000,
+        "records_parsed": 32000,
+        "resource_bytes_read": 940000,
+        "snapshot_bytes_read": 0,
+        "snapshot_records_parsed": 0
+      }
+    },
+    {
+      "capture_load_project_analyze_ms": 1940,
+      "graphs": 1000,
+      "host_export": "not measured by this DTO fixture",
+      "io": {
+        "anchor_bytes_read": 256000,
+        "history_bytes_read": 0,
+        "records_parsed": 0,
+        "resource_bytes_read": 940000,
+        "snapshot_bytes_read": 1103000,
+        "snapshot_records_parsed": 1000
+      },
+      "manifest_bytes": 3869466,
+      "matched_grades": 199,
+      "phase": "long_history_one_new",
+      "process": {
+        "hub_child_peak_rss_kib": 269840,
+        "request_bytes": 5079077,
+        "request_serialize_ms": 6,
+        "response_bytes": 3881175,
+        "response_deserialize_ms": 7,
+        "rss_scope": "only anchor-hub child, excludes fixture generation and parent",
+        "subprocess_total_ms": 1866
+      },
+      "provider_runs": 0,
+      "query_only": "not separately exposed; included in capture_load_project_analyze_ms",
+      "response_bytes": 3881174,
+      "response_serialize_ms": 5,
+      "source_classes": [
+        "facts",
+        "safe_run_view",
+        "safe_grade_view"
+      ],
+      "sources": 4,
+      "summary_bytes": 11104,
+      "support_io": {
+        "anchor_bytes_read": 512000,
+        "history_bytes_read": 35208000,
+        "records_parsed": 32000,
+        "resource_bytes_read": 940000,
+        "snapshot_bytes_read": 0,
+        "snapshot_records_parsed": 0
+      }
+    },
+    {
+      "capture_load_project_analyze_ms": 19694,
+      "graphs": 10000,
+      "host_export": "not measured by this DTO fixture",
+      "io": {
+        "anchor_bytes_read": 2560256,
+        "history_bytes_read": 354883936,
+        "records_parsed": 322500,
+        "resource_bytes_read": 9400943,
+        "snapshot_bytes_read": 0,
+        "snapshot_records_parsed": 0
+      },
+      "manifest_bytes": 28519450,
+      "matched_grades": 999,
+      "phase": "cold",
+      "process": {
+        "hub_child_peak_rss_kib": 2569584,
+        "request_bytes": 10330599,
+        "request_serialize_ms": 11,
+        "response_bytes": 28535883,
+        "response_deserialize_ms": 47,
+        "rss_scope": "only anchor-hub child, excludes fixture generation and parent",
+        "subprocess_total_ms": 18336
+      },
+      "provider_runs": 0,
+      "query_only": "not separately exposed; included in capture_load_project_analyze_ms",
+      "response_bytes": 28535882,
+      "response_serialize_ms": 44,
+      "source_classes": [
+        "facts",
+        "safe_run_view",
+        "safe_grade_view"
+      ],
+      "sources": 4,
+      "summary_bytes": 15834,
+      "support_io": {
+        "anchor_bytes_read": 0,
+        "history_bytes_read": 0,
+        "records_parsed": 0,
+        "resource_bytes_read": 0,
+        "snapshot_bytes_read": 0,
+        "snapshot_records_parsed": 0
+      }
+    },
+    {
+      "capture_load_project_analyze_ms": 40188,
+      "graphs": 10000,
+      "host_export": "not measured by this DTO fixture",
+      "io": {
+        "anchor_bytes_read": 2560256,
+        "history_bytes_read": 0,
+        "records_parsed": 0,
+        "resource_bytes_read": 9400943,
+        "snapshot_bytes_read": 11031126,
+        "snapshot_records_parsed": 10001
+      },
+      "manifest_bytes": 36620385,
+      "matched_grades": 999,
+      "phase": "no_new",
+      "process": {
+        "hub_child_peak_rss_kib": 2647216,
+        "request_bytes": 38850065,
+        "request_serialize_ms": 48,
+        "response_bytes": 36632107,
+        "response_deserialize_ms": 88,
+        "rss_scope": "only anchor-hub child, excludes fixture generation and parent",
+        "subprocess_total_ms": 51948
+      },
+      "provider_runs": 0,
+      "query_only": "not separately exposed; included in capture_load_project_analyze_ms",
+      "response_bytes": 36632106,
+      "response_serialize_ms": 61,
+      "source_classes": [
+        "facts",
+        "safe_run_view",
+        "safe_grade_view"
+      ],
+      "sources": 4,
+      "summary_bytes": 11108,
+      "support_io": {
+        "anchor_bytes_read": 5120512,
+        "history_bytes_read": 354883936,
+        "records_parsed": 322500,
+        "resource_bytes_read": 9400943,
+        "snapshot_bytes_read": 0,
+        "snapshot_records_parsed": 0
+      }
+    },
+    {
+      "capture_load_project_analyze_ms": 61375,
+      "graphs": 10000,
+      "host_export": "not measured by this DTO fixture",
+      "io": {
+        "anchor_bytes_read": 2585856,
+        "history_bytes_read": 111900,
+        "records_parsed": 100,
+        "resource_bytes_read": 9400943,
+        "snapshot_bytes_read": 10920826,
+        "snapshot_records_parsed": 9901
+      },
+      "manifest_bytes": 38155585,
+      "matched_grades": 1999,
+      "phase": "100_new",
+      "process": {
+        "hub_child_peak_rss_kib": 2660260,
+        "request_bytes": 48179200,
+        "request_serialize_ms": 73,
+        "response_bytes": 38168812,
+        "response_deserialize_ms": 149,
+        "rss_scope": "only anchor-hub child, excludes fixture generation and parent",
+        "subprocess_total_ms": 62302
+      },
+      "provider_runs": 0,
+      "query_only": "not separately exposed; included in capture_load_project_analyze_ms",
+      "response_bytes": 38168811,
+      "response_serialize_ms": 68,
+      "source_classes": [
+        "facts",
+        "safe_run_view",
+        "safe_grade_view"
+      ],
+      "sources": 4,
+      "summary_bytes": 12603,
+      "support_io": {
+        "anchor_bytes_read": 5120512,
+        "history_bytes_read": 354883936,
+        "records_parsed": 322500,
+        "resource_bytes_read": 9400943,
+        "snapshot_bytes_read": 0,
+        "snapshot_records_parsed": 0
+      }
+    },
+    {
+      "capture_load_project_analyze_ms": 46895,
+      "graphs": 10000,
+      "host_export": "not measured by this DTO fixture",
+      "io": {
+        "anchor_bytes_read": 2560512,
+        "history_bytes_read": 1126,
+        "records_parsed": 1,
+        "resource_bytes_read": 9400943,
+        "snapshot_bytes_read": 11031600,
+        "snapshot_records_parsed": 10000
+      },
+      "manifest_bytes": 38155586,
+      "matched_grades": 1999,
+      "phase": "long_history_one_new",
+      "process": {
+        "hub_child_peak_rss_kib": 2666584,
+        "request_bytes": 49714401,
+        "request_serialize_ms": 71,
+        "response_bytes": 38167314,
+        "response_deserialize_ms": 70,
+        "rss_scope": "only anchor-hub child, excludes fixture generation and parent",
+        "subprocess_total_ms": 39729
+      },
+      "provider_runs": 0,
+      "query_only": "not separately exposed; included in capture_load_project_analyze_ms",
+      "response_bytes": 38167313,
+      "response_serialize_ms": 86,
+      "source_classes": [
+        "facts",
+        "safe_run_view",
+        "safe_grade_view"
+      ],
+      "sources": 4,
+      "summary_bytes": 11111,
+      "support_io": {
+        "anchor_bytes_read": 5120512,
+        "history_bytes_read": 354995836,
+        "records_parsed": 322600,
+        "resource_bytes_read": 9400943,
+        "snapshot_bytes_read": 0,
+        "snapshot_records_parsed": 0
+      }
+    }
+  ]
+}

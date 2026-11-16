@@ -66,7 +66,7 @@ mkdir -p "$ANCHOR_RUNNER_LOCAL_INPUTS_ROOT/weekly-work-report"
 
 核心默认 `input` 为 `{"end":null}`。采集冻结本次截止时间，回顾此前七天；当前采集器的窗口时间采用固定 `+08:00` 偏移，不提供按用户选择时区的能力，因此两张示例都不暴露未生效的 `timezone` 字段。手动回看可传绝对 RFC3339 `end`，如 `2026-10-01T09:00:00+08:00`。包装图将 `end` 映射给核心；复审和修改沿用同一冻结窗口，不重新采集。宿主定时器的系统时区是独立设置，不由这个输入控制。
 
-共享示例本身不创建计划。需要每周四北京时间 09:00 运行时，用现有 `/schedules` API 创建 `{"type":"weekly","weekdays":[3],"time":"09:00"}`，并让 Host 使用 `Asia/Shanghai` 时区、在计划时点运行；停机或图正忙时不补跑。纯本地报告只调度核心；需要同步 Docmost 时调度配置好输入的包装图，不要把两张图都调度成同一次周报。
+共享示例本身不创建计划。需要每周四北京时间 09:00 运行时，用现有 `/schedules` API 创建 `{"type":"weekly","weekdays":[3],"time":"09:00"}`，并让 Host 使用 `Asia/Shanghai` 时区。停机或同图未收尾时保留最早未接纳时点，可接纳后沿原时点执行并按稳定请求身份去重；旧历史已越过的时点不自动倒补，详见[计划契约](rust-frontend-api-contract.md#sessionlibrary-与渠道)。纯本地报告只调度核心；需要同步 Docmost 时调度配置好输入的包装图，不要把两张图都调度成同一次周报。
 
 ## 无来源、无活动与证据边界
 
@@ -118,7 +118,7 @@ mkdir -p "$ANCHOR_RUNNER_LOCAL_INPUTS_ROOT/weekly-work-report"
 
 ## 验证边界
 
-当前验证覆盖采集投影与 Graph 契约，尚未完成完整周报的真实模型端到端验收。
+当前验证覆盖采集投影与 Graph 契约。2026-11-16 已将一个既有真实生产 Run 的最后本地发布步骤补完；这不补签共享样例的新建完整真实模型或外部发布验收。
 
 | 范围 | 已验证结论 | 未覆盖边界 |
 | --- | --- | --- |
@@ -126,6 +126,7 @@ mkdir -p "$ANCHOR_RUNNER_LOCAL_INPUTS_ROOT/weekly-work-report"
 | 采集与投影 | `anchor-rsi` 43 项测试、严格 Clippy 和格式检查通过；覆盖三来源正文、工具调用/结果及详细/概览投影的三类措辞改写。已安装工具重放原始失败的两条公开记录通过 | 不代表全部历史格式、凭据脱敏场景或网关词表均已覆盖；既有 Run 的冻结证据与原生历史不改写 |
 | Host 与沙箱 | 本机三来源齐全、仅 Codex、无来源 fixture 完成；验证节点隔离、冻结授权及授权改变后不能沿用旧 Run | 不证明操作员机器的全部历史均可用，也不等于报告内容质量验收 |
 | 真实模型小图 | 2026-10-20 使用与运行中 Host 相同的二进制和保存模型设置，经沙箱采集、Goose ACP、真实 `deepseek-flash` 和授权工具读取六份合成投影，写入并回读验证文件，以 `final_result` 完成，Kernel 为 `settled/done` | 不包含完整理解、写作、独立评审、跨 Graph 返回、Docmost 上传或企业微信投递 |
+| 既有生产周报收尾 | 2026-11-16 核查 11/12 旧 Run 的已审稿件与无外发现场，仅续接本地 `publish#1`，同 Run 变为 `settled/done`；6 文件回读与既有稿件、评审逐字节一致，下次计划的旧 Run 阻塞解除，见维护记录（本机原件，未入库：`experiments/local-maintenance-20261116/README.md`） | 模型阶段本轮未重跑；不是共享样例全新 Run、空来源内容、Docmost 或渠道交付的验收 |
 
 可复跑的 Graph 契约检查：
 
@@ -133,12 +134,12 @@ mkdir -p "$ANCHOR_RUNNER_LOCAL_INPUTS_ROOT/weekly-work-report"
 cargo test --manifest-path rust/Cargo.toml -p anchor-runtime --locked --test weekly_work_report_graphs
 ```
 
-本机原始日志、二进制身份与复现入口见 [2026-10-20 诊断与验证](../.local/weekly-gateway-wording-20261020/README.md)；三种 Host fixture 与发现/压缩/归档验证见 [采集可移植性摘要](../.local/weekly-history-portability-20261016/validation-summary.json)。这些私有验收产物仅保存在验收机器的 `.local/`，不随仓库分发，其他 checkout 中缺失时不能视为可访问证据。原始记录重放与真实模型小图是分开的检查，模型小图只读取合成历史。
+本机原始日志、二进制身份与复现入口见 2026-10-20 诊断与验证（本机原件，未入库：`.local/weekly-gateway-wording-20261020/README.md`）；三种 Host fixture 与发现/压缩/归档验证见 采集可移植性摘要（本机原件，未入库：`.local/weekly-history-portability-20261016/validation-summary.json`）。这些私有验收产物仅保存在验收机器的 `.local/`，不随仓库分发，其他 checkout 中缺失时不能视为可访问证据。原始记录重放与真实模型小图是分开的检查，模型小图只读取合成历史。
 
 ## 失败诊断与重跑
 
 界面的 ACP `session/prompt` 错误码 `-32603` 是脱敏后的协议摘要；stderr 为空不能判断模型服务或采集是否成功，应核对对应 Goose 原生 Session 的公开 Error 记录。
 
-2026-10-20 的 Run `rust-18e0286a83504b82` 完成三来源采集后，在 `understand` 读取历史中的旧网关报错文本时被上游以 HTTP 400 拦截。实际工具目录中的旧采集二进制未覆盖触发规则，源码还遗漏另一类已知连写；当前源码与实际工具均已补齐三类改写。旧 Run 仍保留原始冻结证据和模型上下文，应新建 Run 重新采集，直接恢复不能清除旧文本。该错误与 2026-10-18 隔离验收中的上游 HTTP 502 不同，后者记录见 [当时验收](../.local/closeout-20261018/README.md)。
+2026-10-20 的 Run `rust-18e0286a83504b82` 完成三来源采集后，在 `understand` 读取历史中的旧网关报错文本时被上游以 HTTP 400 拦截。实际工具目录中的旧采集二进制未覆盖触发规则，源码还遗漏另一类已知连写；当前源码与实际工具均已补齐三类改写。旧 Run 仍保留原始冻结证据和模型上下文，应新建 Run 重新采集，直接恢复不能清除旧文本。该错误与 2026-10-18 隔离验收中的上游 HTTP 502 不同，后者记录见 当时验收（本机原件，未入库：`.local/closeout-20261018/README.md`）。
 
-本次未重跑完整周报、重启 Host、替换已安装 Graph/计划或执行外部发布。验收机器上的个人安装图及工具目录 grant 保留；共享部署使用本页的新核心与可选包装图，新授权对 `rsi` 仅指定单个二进制文件。完整周报、空来源报告质量、Docmost 图片更新与未知远端效果核查、企业微信投递仍需独立验收。
+10/20 措辞验收未重跑完整周报、重启 Host、替换已安装 Graph/计划或执行外部发布；11/16 后续仅补完另一条 11/12 已审生产 Run 的本地发布，不恢复含旧措辞的 10/20 Run。验收机器上的个人安装图及工具目录 grant 保留；共享部署使用本页的新核心与可选包装图，新授权对 `rsi` 仅指定单个二进制文件。共享样例新建完整 Run、空来源报告质量、Docmost 图片更新与未知远端效果核查、企业微信投递仍需独立验收。

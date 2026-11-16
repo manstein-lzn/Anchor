@@ -1,0 +1,217 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1420" viewBox="0 0 1600 1420" role="img" aria-labelledby="title desc">
+  <title id="title">在飞书里，管理一整个 Agent 组织</title>
+  <desc id="desc">目标架构：用户通过飞书组织群与总 Manager 沟通，也可通过项目群直接联系项目 Manager，各 Manager 通过 Bot @ Bot 协作。每个项目 Manager 是一个 Anchor 常驻 Graph，通过 Codex Plugin、Bridge 和本机 Codex 管理授权项目目录中的多个执行会话。任务逐级下达，进度、阻塞和结果逐级回流。总 Manager 维护统一文档库与多维表格模板，项目 Agent 更新获准的本项目文档和任务记录。Anchor Schedule 与 Graph Tasks 支持定时巡检和结果回流。当前飞书只支持授权私聊，群聊、云文档、多维表格和完整三级组织联动是规划，图中目录仅为示例。</desc>
+  <defs>
+    <style>
+      text { font-family: 'Noto Sans CJK SC', 'Microsoft YaHei', 'PingFang SC', sans-serif; fill: #17324D; }
+      .display { font-size: 40px; font-weight: 800; letter-spacing: -1px; }
+      .heading { font-size: 25px; font-weight: 700; }
+      .subhead { font-size: 21px; font-weight: 700; }
+      .body { font-size: 19px; }
+      .small { font-size: 17px; }
+      .caption { font-size: 15px; }
+      .muted { fill: #52697D; }
+      .white { fill: #FFFFFF; }
+      .pale { fill: #C9DCEB; }
+      .blue { fill: #285DE5; }
+      .teal { fill: #087F8C; }
+      .amber { fill: #9B6113; }
+      .mono { font-family: 'DejaVu Sans Mono', monospace; font-size: 15px; }
+      .tier { font-family: 'DejaVu Sans Mono', monospace; font-size: 31px; font-weight: 700; fill: #285DE5; }
+      .down { fill: none; stroke: #285DE5; stroke-width: 2.5; marker-end: url(#arrow-blue); }
+      .up { fill: none; stroke: #087F8C; stroke-width: 2.5; marker-end: url(#arrow-teal); }
+      .shared { fill: none; stroke: #7F91A1; stroke-width: 2; stroke-dasharray: 4 4; marker-start: url(#arrow-gray); marker-end: url(#arrow-gray); }
+      .planned { fill: none; stroke: #AD751E; stroke-width: 2; stroke-dasharray: 6 5; marker-end: url(#arrow-amber); }
+      .project { fill: #FFFFFF; stroke: #C8D5E0; stroke-width: 1.5; }
+      .task { fill: #F0F5FA; }
+    </style>
+    <marker id="arrow-blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 Z" fill="#285DE5"/></marker>
+    <marker id="arrow-teal" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 Z" fill="#087F8C"/></marker>
+    <marker id="arrow-gray" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 Z" fill="#7F91A1"/></marker>
+    <marker id="arrow-amber" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 Z" fill="#AD751E"/></marker>
+    <marker id="arrow-light" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0 L10 5 L0 10 Z" fill="#7CD2D0"/></marker>
+  </defs>
+
+  <rect width="1600" height="1420" fill="#F7FAFC"/>
+  <rect x="52" y="40" width="8" height="23" fill="#285DE5"/>
+  <text x="74" y="59" class="small blue" font-weight="700" letter-spacing="2">ANCHOR / 组织蓝图</text>
+  <rect x="1270" y="30" width="278" height="37" rx="18" fill="#FFF2D8"/>
+  <text x="1409" y="55" text-anchor="middle" class="small amber">目标架构 · 非上线清单</text>
+  <text x="52" y="116" class="display">在飞书里，管理一整个 Agent 组织</text>
+  <text x="52" y="154" class="body muted">说目标、看进度、做决策；项目的日常推进交给各级 Manager。</text>
+
+  <!-- Human collaboration entry: either organization-wide or project-specific. -->
+  <rect x="52" y="184" width="1496" height="132" rx="14" fill="#EAF0FC"/>
+  <g transform="translate(82 220)" fill="none" stroke="#285DE5" stroke-width="2.8">
+    <rect x="0" y="0" width="37" height="58" rx="7"/><path d="M12 7 H25 M14 50 H23"/>
+    <path d="M9 24 L16 31 L29 17"/>
+  </g>
+  <text x="138" y="239" class="heading">你 · 随时随地</text>
+  <text x="138" y="274" class="body muted">手机 / 电脑上的飞书</text>
+  <path d="M348 250 H385" class="down"/>
+  <rect x="404" y="205" width="326" height="89" rx="9" fill="#FFFFFF"/>
+  <text x="426" y="240" class="subhead">组织群 · 找总 Manager</text>
+  <text x="426" y="273" class="small muted">目标 / 优先级 / 跨项目协调</text>
+  <rect x="760" y="205" width="398" height="89" rx="9" fill="#FFFFFF"/>
+  <text x="782" y="240" class="subhead">项目群 · 直接找项目 Manager</text>
+  <text x="782" y="273" class="small muted">方案 / 进度 / 阻塞 / 验收</text>
+  <text x="1212" y="237" class="subhead">不必逐个盯住会话</text>
+  <text x="1212" y="273" class="small amber">群聊与按项目路由：待接入</text>
+
+  <!-- Three levels share one orchestration boundary; managers are not sessions. -->
+  <rect x="52" y="344" width="1148" height="700" rx="14" fill="#EDF3F8"/>
+  <text x="76" y="375" class="small" font-weight="700">ANCHOR · 三级协作</text>
+  <text x="1040" y="375" text-anchor="end" class="caption muted">项目常驻 · 会话按需</text>
+  <path d="M568 294 V398" class="planned"/>
+  <path d="M1100 294 V558 H1024" class="planned"/>
+  <text x="1080" y="447" text-anchor="end" class="small amber">也可直接</text>
+  <text x="1080" y="474" text-anchor="end" class="small amber">@ 项目</text>
+
+  <text x="76" y="436" class="tier">L1</text>
+  <text x="76" y="474" class="subhead">总 Manager</text>
+  <text x="76" y="502" class="small muted">看全局、调优先级</text>
+  <rect x="390" y="398" width="560" height="126" rx="12" fill="#17324D"/>
+  <text x="414" y="437" class="heading white">群管理员 / 总 Manager</text>
+  <text x="414" y="472" class="body pale">拆解目标 · 协调项目 · 汇总进展 · 升级决策</text>
+  <text x="414" y="504" class="small white">Anchor 常驻 Graph</text>
+
+  <path d="M658 524 V558" class="down"/>
+  <path d="M682 558 V524" class="up"/>
+  <path d="M352 558 H1024" fill="none" stroke="#285DE5" stroke-width="2"/>
+  <path d="M352 558 V596 M576 558 V596 M800 558 V596 M1024 558 V596" fill="none" stroke="#285DE5" stroke-width="2"/>
+  <text x="76" y="628" class="tier">L2</text>
+  <text x="76" y="664" class="subhead">项目 Manager</text>
+  <text x="76" y="692" class="small muted">管项目，不绑定会话</text>
+
+  <g id="development-manager">
+    <rect x="252" y="596" width="200" height="122" rx="9" class="project"/>
+    <rect x="252" y="596" width="200" height="5" rx="2" fill="#285DE5"/>
+    <text x="272" y="635" class="heading">代码开发</text>
+    <text x="272" y="667" class="body muted">Anchor 项目</text>
+    <text x="272" y="698" class="small blue">一个常驻 Graph</text>
+  </g>
+  <g id="research-manager">
+    <rect x="476" y="596" width="200" height="122" rx="9" class="project"/>
+    <rect x="476" y="596" width="200" height="5" rx="2" fill="#285DE5"/>
+    <text x="496" y="635" class="heading">调研分析</text>
+    <text x="496" y="667" class="body muted">专题与证据</text>
+    <text x="496" y="698" class="small blue">一个常驻 Graph</text>
+  </g>
+  <g id="process-manager">
+    <rect x="700" y="596" width="200" height="122" rx="9" class="project"/>
+    <rect x="700" y="596" width="200" height="5" rx="2" fill="#285DE5"/>
+    <text x="720" y="635" class="heading">流程管理</text>
+    <text x="720" y="667" class="body muted">计划与交付</text>
+    <text x="720" y="698" class="small blue">一个常驻 Graph</text>
+  </g>
+  <g id="support-manager">
+    <rect x="924" y="596" width="200" height="122" rx="9" class="project"/>
+    <rect x="924" y="596" width="200" height="5" rx="2" fill="#285DE5"/>
+    <text x="944" y="635" class="heading">用户支持</text>
+    <text x="944" y="667" class="body muted">问题与反馈</text>
+    <text x="944" y="698" class="small blue">一个常驻 Graph</text>
+  </g>
+
+  <path d="M340 718 V754" class="down"/><path d="M364 754 V718" class="up"/>
+  <path d="M564 718 V754" class="down"/><path d="M588 754 V718" class="up"/>
+  <path d="M788 718 V754" class="down"/><path d="M812 754 V718" class="up"/>
+  <path d="M1012 718 V754" class="down"/><path d="M1036 754 V718" class="up"/>
+  <text x="76" y="804" class="tier">L3</text>
+  <text x="76" y="841" class="subhead">执行 Agent</text>
+  <text x="76" y="869" class="small muted">管具体任务与产物</text>
+  <text x="76" y="899" class="small muted">每个项目多个会话</text>
+  <rect x="252" y="754" width="872" height="63" rx="8" fill="#DFE8FC"/>
+  <text x="272" y="781" class="subhead blue">Codex Plugin → 本地 Bridge → Codex app-server</text>
+  <text x="272" y="806" class="caption muted">已有执行底座 · 只操作授权项目目录 · 本地配置归用户管理</text>
+
+  <path d="M340 817 V847" class="down"/><path d="M364 847 V817" class="up"/>
+  <path d="M564 817 V847" class="down"/><path d="M588 847 V817" class="up"/>
+  <path d="M788 817 V847" class="down"/><path d="M812 847 V817" class="up"/>
+  <path d="M1012 817 V847" class="down"/><path d="M1036 847 V817" class="up"/>
+
+  <g id="development-workspace">
+    <rect x="252" y="847" width="200" height="172" rx="9" class="project"/>
+    <text x="268" y="875" class="mono">/projects/anchor</text>
+    <rect x="264" y="893" width="176" height="35" rx="4" class="task"/>
+    <text x="276" y="917" class="small">会话 A · 功能开发</text>
+    <rect x="264" y="935" width="176" height="35" rx="4" class="task"/>
+    <text x="276" y="959" class="small">会话 B · 测试修复</text>
+    <text x="268" y="999" class="caption teal">独立 worktree 并行写</text>
+  </g>
+  <g id="research-workspace">
+    <rect x="476" y="847" width="200" height="172" rx="9" class="project"/>
+    <text x="490" y="875" class="mono">/projects/research</text>
+    <rect x="488" y="893" width="176" height="35" rx="4" class="task"/>
+    <text x="500" y="917" class="small">会话 A · 资料调研</text>
+    <rect x="488" y="935" width="176" height="35" rx="4" class="task"/>
+    <text x="500" y="959" class="small">会话 B · 证据核对</text>
+    <text x="492" y="999" class="caption teal">研究报告 · 来源索引</text>
+  </g>
+  <g id="process-workspace">
+    <rect x="700" y="847" width="200" height="172" rx="9" class="project"/>
+    <text x="716" y="875" class="mono">/projects/ops</text>
+    <rect x="712" y="893" width="176" height="35" rx="4" class="task"/>
+    <text x="724" y="917" class="small">会话 A · 计划整理</text>
+    <rect x="712" y="935" width="176" height="35" rx="4" class="task"/>
+    <text x="724" y="959" class="small">会话 B · 交付核对</text>
+    <text x="716" y="999" class="caption teal">流程清单 · 进度台账</text>
+  </g>
+  <g id="support-workspace">
+    <rect x="924" y="847" width="200" height="172" rx="9" class="project"/>
+    <text x="940" y="875" class="mono">/projects/support</text>
+    <rect x="936" y="893" width="176" height="35" rx="4" class="task"/>
+    <text x="948" y="917" class="small">会话 A · 问题定位</text>
+    <rect x="936" y="935" width="176" height="35" rx="4" class="task"/>
+    <text x="948" y="959" class="small">会话 B · FAQ 草稿</text>
+    <text x="940" y="999" class="caption teal">反馈记录 · 解决方案</text>
+  </g>
+
+  <!-- Shared documents are a collaboration surface, not execution authority. -->
+  <rect x="1240" y="344" width="308" height="700" rx="14" fill="#FFFFFF" stroke="#C59A51" stroke-width="1.5" stroke-dasharray="7 5"/>
+  <text x="1264" y="384" class="heading">飞书项目工作台</text>
+  <text x="1264" y="416" class="body muted">多维表格 + 云文档 / 知识库</text>
+  <path d="M1202 454 H1238" class="shared"/>
+  <path d="M1202 660 H1238" class="shared"/>
+  <path d="M1202 932 H1238" class="shared"/>
+  <text x="1264" y="484" class="subhead">多维表格 · 项目总览</text>
+  <text x="1264" y="515" class="small muted">总 Manager 维护总览与模板</text>
+  <path d="M1264 539 H1524" stroke="#E0E8EF"/>
+  <text x="1264" y="580" class="subhead">多维表格 · 任务看板</text>
+  <text x="1264" y="611" class="small muted">项目 Agent 更新本项目记录</text>
+  <path d="M1264 635 H1524" stroke="#E0E8EF"/>
+  <text x="1264" y="676" class="subhead">云文档 · 方案与交付</text>
+  <text x="1264" y="707" class="small muted">决策 / 研究报告 / 用户知识</text>
+  <path d="M1264 731 H1524" stroke="#E0E8EF"/>
+  <text x="1264" y="772" class="subhead">知识库 · 统一入口</text>
+  <text x="1264" y="803" class="small muted">总目录 / 项目专区 / 周报</text>
+  <rect x="1264" y="848" width="260" height="85" rx="8" fill="#F2F7FA"/>
+  <text x="1282" y="882" class="subhead">群里 @，协作可见</text>
+  <text x="1282" y="913" class="small muted">项目数据和文档互相链接</text>
+  <text x="1264" y="975" class="small amber">规划：授权读写与分项目管理</text>
+  <text x="1264" y="1006" class="caption muted">执行状态以 Anchor / Codex 为准</text>
+
+  <path d="M252 1070 H287" class="down"/><text x="300" y="1076" class="small blue">目标 / 任务向下</text>
+  <path d="M525 1070 H490" class="up"/><text x="540" y="1076" class="small teal">进度 / 阻塞 / 结果向上</text>
+  <path d="M824 1070 H859" class="shared"/><text x="874" y="1076" class="small muted">文档与表格（规划）</text>
+
+  <!-- Scheduling is a cross-cutting facility, not a fourth management level. -->
+  <rect x="52" y="1100" width="1496" height="140" rx="14" fill="#17324D"/>
+  <text x="78" y="1135" class="caption pale" letter-spacing="1">ANCHOR SCHEDULE + GRAPH TASKS</text>
+  <text x="78" y="1175" class="heading white">让组织持续运转</text>
+  <text x="78" y="1210" class="small pale">按时间唤醒，按结果继续</text>
+  <path d="M393 1126 V1214" stroke="#496174"/>
+  <text x="424" y="1150" class="body white">时间规则：晨报 / 周报 / 定期巡检</text>
+  <text x="424" y="1194" class="body white">进度观察：完成 / 受阻 / 待审批</text>
+  <path d="M817 1143 H850 V1165 H900 M817 1187 H850 V1165" fill="none" stroke="#7CD2D0" stroke-width="2"/>
+  <path d="M850 1165 H919" fill="none" stroke="#7CD2D0" stroke-width="2" marker-end="url(#arrow-light)"/>
+  <text x="944" y="1155" class="subhead white">唤醒 Manager → 续派任务 / 协调 / 汇报</text>
+  <text x="944" y="1193" class="small pale">复用现有编排能力，不另建一套调度器</text>
+
+  <text x="52" y="1286" class="subhead blue">已有基础</text>
+  <text x="52" y="1319" class="small muted">常驻 Graph · Codex 项目执行池 · 定时计划与结果回流</text>
+  <text x="825" y="1286" class="subhead amber">本图规划</text>
+  <text x="825" y="1319" class="small muted">群内 Bot @ Bot · 文档 / 多维表格 · 三级组织闭环</text>
+  <path d="M52 1343 H1548" stroke="#D2DDE7"/>
+  <text x="52" y="1373" class="small muted">当前飞书以获准私聊接入；群聊与文档联动需开发和验收。本地主机与 Bridge 在线，远程工作才能持续。</text>
+  <text x="1548" y="1401" text-anchor="end" class="caption muted">2026-11-12 · 项目与目录为示意</text>
+</svg>
