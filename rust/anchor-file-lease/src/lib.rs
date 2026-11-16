@@ -8,7 +8,7 @@ use std::{
     io::{self, Read},
     ops::Deref,
     os::fd::{AsFd, BorrowedFd},
-    path::{Component, Path},
+    path::{Component, Path, PathBuf},
 };
 
 /// Walk an absolute registered path without following a link in any component.
@@ -116,9 +116,135 @@ impl Drop for FileLease {
     }
 }
 
+/// Cooperative, nonblocking single-writer ownership of an existing directory.
+/// Shared ancestor locks conflict with an exclusive lease on any enclosing
+/// directory, while sibling directories (including worktrees) remain independent.
+/// This is not a filesystem permission boundary and does not fence other tools.
+#[derive(Debug)]
+pub struct ProjectLease {
+    path: PathBuf,
+    _leases: Vec<FileLease>,
+}
+
+impl ProjectLease {
+    /// Resolve aliases once, then lock directory inodes without creating files.
+    /// The caller must authorize the path and retain this guard until every
+    /// process capable of writing through the operation has stopped. Contention
+    /// returns `io::ErrorKind::WouldBlock`; partially acquired locks are released.
+    pub fn acquire(path: &Path) -> io::Result<Self> {
+        if !path.is_absolute() || path.components().any(|c| c == Component::ParentDir) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "directory lease requires an absolute path without `..`",
+            ));
+        }
+        let path = path.canonicalize()?;
+        let mut leases = Vec::new();
+        for ancestor in path.ancestors().collect::<Vec<_>>().into_iter().rev() {
+            let operation = if ancestor == path {
+                FlockOperation::NonBlockingLockExclusive
+            } else {
+                FlockOperation::NonBlockingLockShared
+            };
+            leases.push(FileLease::acquire(open_directory(ancestor)?, operation)?);
+        }
+        Ok(Self {
+            path,
+            _leases: leases,
+        })
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn project_lease_coordinates_independent_processes() {
+        if let Some(path) = std::env::var_os("ANCHOR_LEASE_TEST_PATH") {
+            let result = ProjectLease::acquire(Path::new(&path));
+            if std::env::var_os("ANCHOR_LEASE_TEST_BUSY").is_some() {
+                assert_eq!(result.unwrap_err().kind(), io::ErrorKind::WouldBlock);
+            } else {
+                result.unwrap();
+            }
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let lease = ProjectLease::acquire(root.path()).unwrap();
+        let child = |busy: bool| {
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--exact",
+                    "tests::project_lease_coordinates_independent_processes",
+                ])
+                .env("ANCHOR_LEASE_TEST_PATH", root.path());
+            if busy {
+                command.env("ANCHOR_LEASE_TEST_BUSY", "1");
+            }
+            let output = command.output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        child(true);
+        drop(lease);
+        child(false);
+    }
+    #[test]
+    fn directory_leases_fence_aliases_and_ancestors_but_not_siblings() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        let child = project.join("src");
+        let sibling = root.path().join("worktree");
+        std::fs::create_dir_all(&child).unwrap();
+        std::fs::create_dir(&sibling).unwrap();
+        let alias = root.path().join("alias");
+        std::os::unix::fs::symlink(&project, &alias).unwrap();
+        let guard = ProjectLease::acquire(&alias).unwrap();
+        assert_eq!(guard.path(), project.canonicalize().unwrap());
+        for path in [&project, &alias, &child, root.path()] {
+            assert_eq!(
+                ProjectLease::acquire(path).unwrap_err().kind(),
+                io::ErrorKind::WouldBlock
+            );
+        }
+        let sibling_guard = ProjectLease::acquire(&sibling).unwrap();
+        drop(guard);
+        let child_guard = ProjectLease::acquire(&child).unwrap();
+        assert_eq!(
+            ProjectLease::acquire(&project).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        drop(child_guard);
+        drop(sibling_guard);
+        ProjectLease::acquire(root.path()).unwrap();
+    }
+
+    #[test]
+    fn directory_lease_rejects_invalid_paths_and_releases_on_unwind() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("file");
+        std::fs::write(&file, b"fixture").unwrap();
+        for path in [Path::new("."), &root.path().join("missing"), &file] {
+            assert!(ProjectLease::acquire(path).is_err());
+        }
+        assert!(
+            std::panic::catch_unwind(|| {
+                let _guard = ProjectLease::acquire(root.path()).unwrap();
+                panic!("fixture");
+            })
+            .is_err()
+        );
+        ProjectLease::acquire(root.path()).unwrap();
+    }
     fn open(path: &std::path::Path) -> File {
         File::options()
             .read(true)

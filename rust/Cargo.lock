@@ -106,6 +106,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "anchor-codex-bridge"
+version = "0.1.0"
+dependencies = [
+ "anchor-file-lease",
+ "anchor-mcp-host",
+ "axum",
+ "http",
+ "jsonschema",
+ "rmcp",
+ "rustix",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "walkdir",
+]
+
+[[package]]
 name = "anchor-deepseek-tools"
 version = "0.1.0"
 dependencies = [
