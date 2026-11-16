@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/usr/bin/env bash
 # Fail when project text carries a two-character classification term that the
 # deployment model gateway matches as a sensitive word and rejects the whole
 # request for. All terms are assembled here from octal escapes so this script is
@@ -30,21 +30,13 @@ listing=$(mktemp)
 trap 'rm -f "$listing"' EXIT
 
 if [ "${1:-}" = "--all" ]; then
-    find . -type f \
-        -not -path './.git/*' \
-        -not -path './.local/*' \
-        -not -path './test-results/*' \
-        -not -path '*/node_modules/*' \
-        -not -path '*/target/*' \
-        -not -path '*/.venv/*' \
-        -not -path '*/__pycache__/*' \
-        -print > "$listing"
+    git ls-files -z --cached --others --exclude-standard > "$listing"
 else
-    git ls-files > "$listing"
+    git ls-files -z > "$listing"
 fi
 
 status=0
-while IFS= read -r file; do
+while IFS= read -r -d '' file; do
     [ -f "$file" ] || continue
     for term in "$term_classified" "$term_confidential" "$term_secret"; do
         matches=$(grep -n -F --binary-files=without-match -- "$term" "$file" 2>/dev/null || true)
