@@ -115,6 +115,7 @@ fn store_run(state: &Path, record: &GraphRunRecord, phase: Phase) {
 #[test]
 fn discovers_new_graphs_and_dependencies_and_freezes_source() {
     let (_temp, config) = setup();
+    write(&config.source, "LICENSE.vendor", "fixture license\n");
     write(
         &config.data,
         "catalog/new-graph/graph.json",
@@ -137,6 +138,10 @@ fn discovers_new_graphs_and_dependencies_and_freezes_source() {
     assert!(evidence.dependencies.iter().any(|d| d.name == "httpx"));
     assert!(evidence.dependencies.iter().any(|d| d.name == "serde"));
     assert!(evidence.dependencies.iter().any(|d| d.name == "react"));
+    assert_eq!(
+        evidence.read("code/LICENSE.vendor", 0, 1).unwrap()["lines"],
+        json!([{"line":1,"text":"fixture license"}])
+    );
     let schedules = evidence
         .read("runs/schedules.json", 0, 200)
         .unwrap()
@@ -234,7 +239,13 @@ fn system_capabilities_bind_current_catalog_identity_and_granted_frozen_source_n
         );
         assert_eq!(row["installed"]["native_provenance"], "unknown");
         for resource in row["public_resources"].as_array().unwrap() {
-            assert_eq!(resource["source"]["status"], "collected");
+            assert_eq!(
+                resource["source"]["status"],
+                "collected",
+                "{}: {}",
+                plugin.id(),
+                resource["path"]
+            );
             let differs =
                 *plugin == SystemPlugin::Network && resource["path"] == "skills/network/SKILL.md";
             assert_eq!(resource["source_matches_compiled"], !differs);
