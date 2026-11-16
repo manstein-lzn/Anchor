@@ -43,6 +43,7 @@ struct BridgeSetup {
     observation_path: Option<PathBuf>,
     pilot: Option<Arc<super::pilot::PilotPort>>,
     outputs: Option<DeclaredOutputs>,
+    completion_check: Option<crate::node_host::NodeCompletionCheck>,
 }
 
 pub(super) struct NodeBridgeContext {
@@ -50,6 +51,7 @@ pub(super) struct NodeBridgeContext {
     pub(super) plugin_instructions: String,
     pub(super) observation_path: Option<PathBuf>,
     pub(super) outputs: DeclaredOutputs,
+    pub(super) completion_check: Option<crate::node_host::NodeCompletionCheck>,
 }
 
 /// What a node's definition says it writes, and where: `final_result` is
@@ -104,6 +106,7 @@ pub(super) struct BridgeState {
     pub(super) dropped_calls: AtomicU64,
     observation_path: Option<PathBuf>,
     outputs: Option<DeclaredOutputs>,
+    completion_check: Option<crate::node_host::NodeCompletionCheck>,
     pub(super) completion: Mutex<Option<Value>>,
     pub(super) after_completion: Mutex<bool>,
     response_tools: Mutex<Vec<String>>,
@@ -243,12 +246,16 @@ impl ServerHandler for McpBridge {
                 }
                 // Before the completion is frozen: a refusal here leaves the
                 // model free to write the output and call final_result again.
-                let completion =
-                    validate_completion(&completion, &self.state.routes).and_then(|completion| {
-                        match &self.state.outputs {
-                            Some(outputs) => outputs.validate(&completion).map(|()| completion),
-                            None => Ok(completion),
+                let completion = validate_completion(&completion, &self.state.routes)
+                    .and_then(|completion| match &self.state.outputs {
+                        Some(outputs) => outputs.validate(&completion).map(|()| completion),
+                        None => Ok(completion),
+                    })
+                    .and_then(|completion| {
+                        if let Some(check) = &self.state.completion_check {
+                            check()?;
                         }
+                        Ok(completion)
                     });
                 let completion = match completion {
                     Ok(completion) if native_node => {
@@ -682,6 +689,7 @@ impl Bridge {
                 observation_path: context.observation_path,
                 pilot: None,
                 outputs: Some(context.outputs),
+                completion_check: context.completion_check,
             },
         )
         .await
@@ -706,6 +714,7 @@ impl Bridge {
                 observation_path: None,
                 pilot: Some(tools),
                 outputs: None,
+                completion_check: None,
             },
         )
         .await
@@ -722,6 +731,7 @@ impl Bridge {
             observation_path,
             pilot,
             outputs,
+            completion_check,
         } = setup;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -752,6 +762,7 @@ impl Bridge {
             dropped_calls: AtomicU64::new(0),
             observation_path,
             outputs,
+            completion_check,
             completion: Mutex::new(None),
             after_completion: Mutex::new(false),
             response_tools: Mutex::new(Vec::new()),
@@ -1116,6 +1127,14 @@ mod tests {
         fixture: bool,
         observation_path: Option<PathBuf>,
     ) -> (Bridge, Arc<SlowTools>) {
+        slow_bridge_checked(fixture, observation_path, None).await
+    }
+
+    async fn slow_bridge_checked(
+        fixture: bool,
+        observation_path: Option<PathBuf>,
+        completion_check: Option<crate::node_host::NodeCompletionCheck>,
+    ) -> (Bridge, Arc<SlowTools>) {
         anchor_mcp_host::initialize_crypto_provider();
         let cancellation = Cancellation::default();
         let tools = Arc::new(SlowTools {
@@ -1138,6 +1157,7 @@ mod tests {
                     workspace: std::env::temp_dir(),
                     writes: Vec::new(),
                 },
+                completion_check,
             },
             cancellation,
             Some(super::super::configuration::ModelUpstream {
@@ -1150,6 +1170,61 @@ mod tests {
         .await
         .unwrap();
         (bridge, tools)
+    }
+
+    #[tokio::test]
+    async fn refused_completion_keeps_the_native_loop_open_until_host_facts_allow_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let fact_path = directory.path().join("invocation.json");
+        super::super::store_fact(&fact_path, &native_fact()).unwrap();
+        let resolved = Arc::new(AtomicBool::new(false));
+        let decision = resolved.clone();
+        let (bridge, _) = slow_bridge_checked(
+            false,
+            Some(fact_path),
+            Some(Arc::new(move || {
+                if decision.load(Ordering::SeqCst) {
+                    Ok(())
+                } else {
+                    Err("explicit task result API is required".into())
+                }
+            })),
+        )
+        .await;
+        let config = StreamableHttpClientTransportConfig::with_uri(format!("{}/mcp", bridge.url))
+            .auth_header(bridge.token.clone());
+        let client = ().serve(StreamableHttpClientTransport::from_config(config)).await.unwrap();
+        let mut result = json!({"summary":"I claim everything was sent","files":[]});
+        let refused = client
+            .call_tool(native_request(
+                "final_result",
+                result.clone(),
+                "unsupported-claim",
+                1,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(refused.is_error, Some(true));
+        assert!(bridge.state.completion.lock().await.is_none());
+        // Ordinary tools remain usable: the rejected final did not freeze the
+        // native completion latch or force the resident Graph to fail.
+        let business = client
+            .call_tool(native_request("anchor_plugins", json!({}), "inspect", 1))
+            .await
+            .unwrap();
+        assert_ne!(business.is_error, Some(true));
+        let feedback: Value =
+            serde_json::from_str(business.content[0].as_text().unwrap().text.as_str()).unwrap();
+        result["observed_receipt"] = feedback["anchor_receipt"].clone();
+        resolved.store(true, Ordering::SeqCst);
+        let accepted = client
+            .call_tool(native_request("final_result", result, "verified-final", 1))
+            .await
+            .unwrap();
+        assert_ne!(accepted.is_error, Some(true));
+        assert!(bridge.state.completion.lock().await.is_some());
+        let _ = client.cancel().await;
+        bridge.close().await.unwrap();
     }
 
     #[tokio::test]

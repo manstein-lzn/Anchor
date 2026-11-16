@@ -3,6 +3,16 @@ use crate::api::tests::{finish_with_artifacts, seed_scenario};
 use crate::application::run_access::fixtures;
 use crate::run_metadata::{self as metadata, RunMetadata};
 
+async fn detail_json(state: ApiState, id: &str) -> Value {
+    let response = get_run(State(state), AxumPath(id.into())).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
+    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    serde_json::from_slice(&bytes).unwrap()
+}
+
 fn frozen_record(state: &ApiState) -> GraphRunRecord {
     let snapshot = GraphSnapshot::from_authoring(json!({
         "objective":"frozen graph", "entry":"module",
@@ -34,10 +44,7 @@ async fn frozen_topology_survives_live_graph_changes_and_missing_definition() {
     let (_root, state) = super::super::tests::fixture();
     let record = frozen_record(&state);
     finish_with_artifacts(&state, &record.run_id).await;
-    let initial = get_run(State(state.clone()), AxumPath(record.run_id.clone()))
-        .await
-        .unwrap()
-        .0;
+    let initial = detail_json(state.clone(), &record.run_id).await;
     assert_eq!(initial["definition"]["entry"], "module/first");
     assert_eq!(initial["definition"]["nodes"].as_array().unwrap().len(), 2);
     assert_eq!(
@@ -49,16 +56,10 @@ async fn frozen_topology_survives_live_graph_changes_and_missing_definition() {
         "changed and invalid graph",
     )
     .unwrap();
-    let changed = get_run(State(state.clone()), AxumPath(record.run_id.clone()))
-        .await
-        .unwrap()
-        .0;
+    let changed = detail_json(state.clone(), &record.run_id).await;
     assert_eq!(changed["definition"], initial["definition"]);
     std::fs::remove_file(state.bundle_root.join("graph.json")).unwrap();
-    let removed = get_run(State(state), AxumPath(record.run_id.clone()))
-        .await
-        .unwrap()
-        .0;
+    let removed = detail_json(state, &record.run_id).await;
     assert_eq!(removed["definition"], initial["definition"]);
     assert_eq!(removed["nodes"], json!(["module/first", "module/last"]));
     assert!(!removed["definition"].to_string().contains("private"));
@@ -94,11 +95,7 @@ async fn list_and_detail_share_status_control_and_attention_projection() {
             .unwrap(),
         )
         .unwrap();
-        let detail = get_run(State(state.clone()), AxumPath(id.into()))
-            .await
-            .unwrap()
-            .0["projection"]
-            .clone();
+        let detail = detail_json(state.clone(), id).await["projection"].clone();
         let runs = projected_runs(&state).await.unwrap();
         let listed = runs.iter().find(|run| run["run"] == id).unwrap();
         assert_eq!(detail, listed["projection"]);
@@ -123,10 +120,7 @@ async fn incomplete_run_identity_does_not_offer_inactive_controls() {
     let mut metadata = state.application.metadata(&record.run_id).unwrap().unwrap();
     metadata.graph_digest = "different-frozen-graph".into();
     metadata::save(&state.data_root, &metadata).unwrap();
-    let detail = get_run(State(state.clone()), AxumPath(record.run_id.clone()))
-        .await
-        .unwrap()
-        .0;
+    let detail = detail_json(state.clone(), &record.run_id).await;
     assert_eq!(
         detail["projection"]["actions"],
         json!({"pause":false,"stop":false,"resume":false,"abandon":false})

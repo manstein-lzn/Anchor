@@ -1,4 +1,5 @@
 use std::{
+    collections::{BTreeMap, BTreeSet},
     path::Path,
     sync::{Arc, Mutex, MutexGuard},
     time::{SystemTime, UNIX_EPOCH},
@@ -14,6 +15,16 @@ use crate::{ChannelEvent, GatewayError, event_digest};
 pub enum DeliveryStatus {
     Confirmed,
     Unknown,
+}
+
+impl DeliveryStatus {
+    fn from_stored(status: &str) -> Self {
+        if status == "confirmed" {
+            Self::Confirmed
+        } else {
+            Self::Unknown
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -745,6 +756,36 @@ impl Ledger {
         }
     }
 
+    /// Read existing send claims only; callers retain platform identity checks.
+    pub fn delivery_status(
+        &self,
+        request_ids: &[String],
+    ) -> Result<BTreeMap<String, DeliveryStatus>, GatewayError> {
+        if request_ids.len() > 1024 {
+            return Err(GatewayError::Invalid(
+                "delivery status accepts at most 1024 request_ids",
+            ));
+        }
+        if request_ids.iter().collect::<BTreeSet<_>>().len() != request_ids.len() {
+            return Err(GatewayError::Invalid(
+                "delivery status request_ids must be unique",
+            ));
+        }
+        let connection = self.lock()?;
+        let mut statement = connection
+            .prepare("SELECT status FROM deliveries WHERE kind='send' AND request_id=?1")?;
+        let mut deliveries = BTreeMap::new();
+        for request_id in request_ids {
+            let status = statement
+                .query_row([request_id], |row| row.get::<_, String>(0))
+                .optional()?;
+            if let Some(status) = status {
+                deliveries.insert(request_id.clone(), DeliveryStatus::from_stored(&status));
+            }
+        }
+        Ok(deliveries)
+    }
+
     pub fn confirm(&self, wire_id: &str) -> Result<(), GatewayError> {
         let changed = self.lock()?.execute(
             "UPDATE deliveries SET status='confirmed' WHERE wire_id=?1",
@@ -767,11 +808,7 @@ impl Ledger {
                 request_id: row.get(1)?,
                 content_digest: row.get(2)?,
                 wire_request_id: row.get(3)?,
-                status: if row.get::<_, String>(4)? == "confirmed" {
-                    DeliveryStatus::Confirmed
-                } else {
-                    DeliveryStatus::Unknown
-                },
+                status: DeliveryStatus::from_stored(&row.get::<_, String>(4)?),
             })
         })?;
         rows.map(|row| row.map_err(Into::into)).collect()
@@ -877,4 +914,60 @@ fn unix_millis() -> Result<i64, GatewayError> {
 
 pub fn current_time_millis() -> Result<i64, GatewayError> {
     unix_millis()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn delivery_status_reads_only_requested_send_claims_without_writing() {
+        let ledger = Ledger::open(Path::new(":memory:"), "fixture").unwrap();
+        for (kind, request_id, confirmed) in [
+            ("send", "confirmed", true),
+            ("send", "unknown", false),
+            ("reply", "confirmed", false),
+            ("reply", "reply-only", true),
+            ("send", "not-requested", true),
+        ] {
+            let wire_id = format!("{kind}-{request_id}");
+            ledger.claim(kind, request_id, "digest", &wire_id).unwrap();
+            if confirmed {
+                ledger.confirm(&wire_id).unwrap();
+            }
+        }
+        let before = ledger.facts().unwrap();
+        ledger
+            .lock()
+            .unwrap()
+            .execute_batch("PRAGMA query_only=ON")
+            .unwrap();
+        let ids = ["unknown", "missing", "confirmed", "reply-only"].map(String::from);
+        assert_eq!(
+            ledger.delivery_status(&ids).unwrap(),
+            BTreeMap::from([
+                ("confirmed".into(), DeliveryStatus::Confirmed),
+                ("unknown".into(), DeliveryStatus::Unknown),
+            ])
+        );
+        assert!(ledger.delivery_status(&[]).unwrap().is_empty());
+        assert_eq!(ledger.facts().unwrap(), before);
+    }
+
+    #[test]
+    fn delivery_status_bounds_and_deduplicates_the_batch() {
+        let ledger = Ledger::open(Path::new(":memory:"), "fixture").unwrap();
+        let mut ids = (0..1024).map(|id| id.to_string()).collect::<Vec<_>>();
+        assert!(ledger.delivery_status(&ids).unwrap().is_empty());
+        ids.push("1024".into());
+        assert!(matches!(
+            ledger.delivery_status(&ids),
+            Err(GatewayError::Invalid(_))
+        ));
+        assert!(matches!(
+            ledger.delivery_status(&["same".into(), "same".into()]),
+            Err(GatewayError::Invalid(_))
+        ));
+        assert!(ledger.facts().unwrap().is_empty());
+    }
 }

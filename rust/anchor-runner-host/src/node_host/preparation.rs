@@ -136,6 +136,7 @@ impl HostIoResolver {
                     bindings: &mounted.bindings,
                     request,
                     workspace: &workspace,
+                    workspace_root: self.artifacts.workspaces().root(),
                     readonly_inputs: &readonly_inputs,
                     envelope: &envelope,
                     runtime,
@@ -147,6 +148,7 @@ impl HostIoResolver {
                     crate::tool_names::RUN_TOOL_NAME.to_owned(),
                     crate::tool_names::READ_TOOL_NAME.to_owned(),
                     crate::tool_names::EDIT_TOOL_NAME.to_owned(),
+                    crate::tool_names::TASK_RESULT_RESOLVE_TOOL.to_owned(),
                 ];
                 let tools = match conversation {
                     Some(conversation) if conversation.cross_run => {
@@ -161,12 +163,17 @@ impl HostIoResolver {
                     crate::tool_disclosure::always_visible(always_visible),
                     disclosure,
                 );
+                let state_root = self.local_inputs.state_root().to_owned();
+                let key = request.key.clone();
                 Ok::<_, ResolutionError>(ResolvedNodeTools {
                     tools,
                     plugins: mounted.bindings,
                     plugin_instructions,
                     workspace,
                     envelope,
+                    completion_check: std::sync::Arc::new(move || {
+                        crate::assistant::require_task_result_resolution(&state_root, &key)
+                    }),
                 })
             }
             .await;
@@ -235,10 +242,8 @@ impl HostIoResolver {
         // defaults filtered by the Session's switches and frozen for
         // this Turn. Everything below uses this set, so there is one
         // filter point and not several.
-        let mount_lease = match &self.library_root {
-            Some(root)
-                if !request.plugins.is_empty() || self.session_turn(&request.key)?.is_some() =>
-            {
+        let mount_lease = match self.mount_catalog_root(request)? {
+            Some(root) => {
                 let access = crate::dependency_provision::DependencyAccess {
                     network: false,
                     cancellation: request.cancellation.clone(),
@@ -253,7 +258,7 @@ impl HostIoResolver {
                     .map_err(|error| format!("Plugin mount selection is unavailable: {error:?}"))?,
                 )
             }
-            _ => None,
+            None => None,
         };
         let mounted = self.mounted_plugins_unlocked(request)?;
         drop(mount_lease);

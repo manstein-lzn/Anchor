@@ -75,7 +75,7 @@ Host 对新建、校验和保存使用统一作者规范化：未给策略的新
 
 `graph_tasks.network` 是子任务的联网上界，不是当前助手的联网开关；子任务策略引用不额外占用 `graph_tasks.plugins` 允许列表。上界为 false 时，即使子图写 `enabled` 或业务插件依赖联网也不能执行；显式 `denied` 不因上界为 true 而开启。
 
-源 Graph 在操作员界面保存后才有授权收据；直接写文件、Agent 保存或只新建资产不构成批准。普通 Run 接纳、助手 Turn 领取冻结原授权；同 Turn 恢复保持不变，后续派发还须满足当前授权。工具创建的 Graph 是正常资产，仅允许本作用域更新；调用不自动复制源 workspace、聊天历史或凭据。有 Session 的助手经 `wait_input` 接收任务完成结果，不尝试再次 run 已活动的助手。完整契约见 [Graph 任务](plugins.md#graph-任务)与[结果输入](architecture.md#按需-graph-任务与结果输入)。
+源 Graph 在操作员界面保存后才有授权收据；直接写文件、Agent 保存或只新建资产不构成批准。普通 Run 接纳、助手 Turn 领取冻结原授权；同 Turn 恢复保持不变，后续派发还须满足当前授权。`create_graphs` 同时授权管理本作用域自建的正常 Graph 资产，包括修改、执行、计划与 `graph_tasks_delete`，不逐图增加确认，也不授权管理他人资产或源助手；删除须先取消保留计划，未结束 Run、未处理结果及调用引用等既有保护仍生效。有 Session 时作用域绑定来源节点与 Session，否则绑定来源 Run。调用不自动复制源 workspace、聊天历史或凭据。有 Session 的助手经 `wait_input` 接收任务完成结果，不尝试再次 run 已活动的助手。完整契约见 [Graph 任务](plugins.md#graph-任务)与[结果输入](architecture.md#按需-graph-任务与结果输入)。
 
 ## 组合与调用
 

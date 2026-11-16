@@ -64,7 +64,7 @@ impl TaskNoticeGateway {
         )
         .unwrap();
         host.set_bot_control_descriptor(&descriptor);
-        let requests = Arc::new(Mutex::new(Vec::new()));
+        let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
         let received = requests.clone();
         let stopped = Arc::new(AtomicBool::new(false));
         let stopping = stopped.clone();
@@ -87,6 +87,16 @@ impl TaskNoticeGateway {
                 assert_eq!(request["token"], "private-task-fixture");
                 let ack = if request["operation"] == "status" {
                     json!({"status":"authenticated"})
+                } else if request["operation"] == "delivery_status" {
+                    let confirmed = received.lock().unwrap();
+                    let deliveries: serde_json::Map<String, Value> = request["request_ids"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .filter(|id| confirmed.iter().any(|sent| sent["request_id"] == **id))
+                        .map(|id| (id.as_str().unwrap().into(), json!("confirmed")))
+                        .collect();
+                    json!({"deliveries":deliveries})
                 } else {
                     assert_eq!(request["userid"], ALICE);
                     assert!(matches!(
@@ -247,8 +257,10 @@ fn operator_assigned_schedule_wakes_the_original_assistant_to_deliver_success_an
     assert_eq!(host.record(producer)["input"], json!({}));
     let file = &result.files[0];
     provider.append(vec![
-        Step::tool("anchor_tools", json!({"name":"wecom_send_file"}))
+        finish("Report delivered, without actually calling any send API")
             .after("scheduled-product-read"),
+        Step::tool("anchor_tools", json!({"name":"wecom_send_file"}))
+            .after("no explicit resolution"),
         Step::tool("anchor_tool_detail", json!({"name":"wecom_send_file"}))
             .after("wecom_send_file"),
         Step::tool(
@@ -257,7 +269,8 @@ fn operator_assigned_schedule_wakes_the_original_assistant_to_deliver_success_an
                 "path":format!("/in/tasks/{}/{}",result.id,file.name),"content":INTRODUCTION}}),
         )
         .after("wecom_send_file"),
-        finish("scheduled-product-delivered").after("file_status"),
+        Step::tool("task_result_resolve", json!({"action":"delivered"})).after("file_status"),
+        finish("scheduled-product-delivered").after("resolved"),
     ]);
     success_gate.open();
     let delivered = waiting(&host, run, 2);
@@ -326,7 +339,8 @@ fn operator_assigned_schedule_wakes_the_original_assistant_to_deliver_success_an
             json!({"name":"wecom_send_message","arguments":{"content":FAILURE}}),
         )
         .after("wecom_send_message"),
-        finish("scheduled-failure-reported").after("confirmed"),
+        Step::tool("task_result_resolve", json!({"action":"delivered"})).after("confirmed"),
+        finish("scheduled-failure-reported").after("resolved"),
     ]);
     failure_gate.open();
     let completed = waiting(&host, run, 3);
@@ -348,7 +362,7 @@ fn operator_assigned_schedule_wakes_the_original_assistant_to_deliver_success_an
         native["session_id"]
     );
     provider.assert_consumed();
-    idle(&provider, 12);
+    idle(&provider, provider.requests().len());
     let stopped = stop(&server, &provider, run);
     evidence(
         &host,
@@ -373,7 +387,8 @@ fn agent_delegates_an_authorized_graph_and_its_real_completion_wakes_the_same_se
         finish("authorized-report-started").after("accepted"),
         command("set -eu; test \"$(cat /in/tasks/*/1-report.md)\" = actual-delegated-report; cp /in/tasks/*/1-report.md delegated-report.md; printf delegated-result-observed")
             .expect_request_contains("task_result"),
-        finish("private-result-processed-no-automatic-send").after("delegated-result-observed"),
+        Step::tool("task_result_resolve", json!({"action":"silent","reason":"This fixture consumes the delegated result internally"})).after("delegated-result-observed"),
+        finish("private-result-processed-no-automatic-send").after("resolved"),
     ]);
     let mut definition = graph();
     definition["nodes"][1]["plugins"] = json!([
@@ -461,7 +476,7 @@ fn agent_delegates_an_authorized_graph_and_its_real_completion_wakes_the_same_se
             .as_deref(),
         Some(child)
     );
-    idle(&provider, 8);
+    idle(&provider, provider.requests().len());
     let stopped = stop(&server, &provider, run);
     evidence(
         &host,
@@ -474,16 +489,162 @@ fn agent_delegates_an_authorized_graph_and_its_real_completion_wakes_the_same_se
 
 #[test]
 #[ignore = "requires pinned real Goose binary and local Bubblewrap"]
+fn creator_manages_and_deletes_its_graph_after_handling_the_result() {
+    let child_definition = json!({
+        "objective":"creator-owned temporary task", "entry":"produce",
+        "ops":{"produce":{"run":"sh -c 'printf creator-owned-report > report.txt'","writes":["report.txt"]}},
+        "nodes":[{"id":"produce","op":"produce"}],"edges":[],
+    });
+    let provider = Provider::new(
+        "goose-created-graph-cleanup",
+        vec![
+            Step::tool("anchor_tool_detail", json!({"name":"graph_tasks_create"}))
+                .expect_request_contains("create-a-temporary-task"),
+            Step::tool(
+                "anchor_tools_call",
+                json!({"name":"graph_tasks_create","arguments":{"definition":child_definition}}),
+            )
+            .after("graph_tasks_create"),
+            finish("temporary-task-created").after("created"),
+        ],
+    );
+    let mut definition = graph();
+    definition["nodes"][1]["plugins"] = json!([
+        "wecom",{"id":"graph-tasks","graph_tasks":{"create_graphs":true,"commands":true}},
+        {"id":"network","network":"denied"}
+    ]);
+    let host = task_host(&definition);
+    let server = host.serve(&provider);
+    let (status, saved) = server.request(
+        "PUT",
+        "/graphs/fixture",
+        Some(&json!({"definition":definition})),
+    );
+    assert_eq!(status, 200, "{saved}");
+    let (status, before) = server.request("GET", "/graphs", None);
+    assert_eq!(status, 200, "{before}");
+    let known: std::collections::BTreeSet<_> = before["graphs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["graph"].as_str().unwrap().to_owned())
+        .collect();
+    let first = submit(
+        &server,
+        &event(ALICE, "create-owned", "create-a-temporary-task"),
+        "temporary-task-created",
+    );
+    let run = first["run"].as_str().unwrap();
+    waiting(&host, run, 1);
+    let (status, listing) = server.request("GET", "/graphs", None);
+    assert_eq!(status, 200, "{listing}");
+    let created = listing["graphs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["graph"].as_str().unwrap())
+        .filter(|graph| !known.contains(*graph))
+        .collect::<Vec<_>>();
+    assert_eq!(created.len(), 1, "{listing}");
+    let owned = created[0].to_owned();
+    let mut edited = child_definition.clone();
+    edited["objective"] = json!("edited owned task");
+    provider.append(vec![
+        Step::tool("anchor_tool_detail", json!({"name":"graph_tasks_read"}))
+            .expect_request_contains("execute-the-owned-task"),
+        Step::tool("anchor_tools_call", json!({"name":"graph_tasks_read","arguments":{"graph":owned}}))
+            .after("graph_tasks_read"),
+        Step::tool("anchor_tool_detail", json!({"name":"graph_tasks_update"})).after("creator-owned temporary task"),
+        Step::tool("anchor_tools_call", json!({"name":"graph_tasks_update","arguments":{"graph":owned,"definition":edited}}))
+            .after("graph_tasks_update"),
+        Step::tool("anchor_tool_detail", json!({"name":"graph_tasks_run"})).after("edited owned task"),
+        Step::tool("anchor_tools_call", json!({"name":"graph_tasks_run","arguments":{"graph":owned}}))
+            .after("graph_tasks_run"),
+        finish("owned-task-started").after("accepted"),
+        command("set -eu; test \"$(cat /in/tasks/*/1-report.txt)\" = creator-owned-report; cp /in/tasks/*/1-report.txt retained-report.txt; printf creator-result-retained")
+            .expect_request_contains("task_result"),
+        Step::tool("task_result_resolve", json!({"action":"silent","reason":"The result is consumed and retained by this fixture"}))
+            .after("creator-result-retained"),
+        finish("owned-result-handled").after("resolved"),
+    ]);
+    let second = submit(
+        &server,
+        &event(ALICE, "run-owned", "execute-the-owned-task"),
+        "owned-task-started",
+    );
+    assert_eq!(second["run"], run);
+    let completed = waiting(&host, run, 3);
+    let child_run =
+        completed["results"]["wait_input"][2]["completion"]["output"]["task_result"]["source_run"]
+            .as_str()
+            .unwrap();
+    let child_workspace = host.base.workspace(child_run, "produce");
+    assert_eq!(
+        fs::read(child_workspace.join("report.txt")).unwrap(),
+        b"creator-owned-report"
+    );
+    let child_metadata = host
+        .base
+        .state_root()
+        .join("run-metadata")
+        .join(format!("{child_run}.json"));
+    assert!(child_metadata.is_file());
+    provider.append(vec![
+        Step::tool("anchor_tool_detail", json!({"name":"graph_tasks_delete"}))
+            .expect_request_contains("delete-the-owned-task"),
+        Step::tool(
+            "anchor_tools_call",
+            json!({"name":"graph_tasks_delete","arguments":{"graph":owned}}),
+        )
+        .after("graph_tasks_delete"),
+        finish("owned-task-deleted").after("deleted"),
+    ]);
+    let deleted = submit(
+        &server,
+        &event(ALICE, "delete-owned", "delete-the-owned-task"),
+        "owned-task-deleted",
+    );
+    assert_eq!(deleted["run"], run);
+    waiting(&host, run, 4);
+    assert!(!host.base.root.path().join(&owned).exists());
+    assert!(!child_metadata.exists());
+    assert!(!child_workspace.exists());
+    assert_eq!(
+        fs::read(workspace(&host, run).join("retained-report.txt")).unwrap(),
+        b"creator-owned-report"
+    );
+    assert_eq!(
+        host.native_fact(run, "assistant", 1)["session_id"],
+        host.native_fact(run, "assistant", 4)["session_id"]
+    );
+    provider.assert_consumed();
+    let stopped = stop(&server, &provider, run);
+    evidence(
+        &host,
+        &provider,
+        run,
+        json!({
+            "case_source":TASK_CASE_SOURCE,"creator_graph_management":true,"deleted_graph":owned,
+            "deleted_child_run":child_run,"parent_and_retained_report_preserved":true,
+            "real_model_requests":0,"real_channel_requests":0,"stopped":stopped,
+        }),
+    );
+}
+
+#[test]
+#[ignore = "requires pinned real Goose binary and local Bubblewrap"]
 fn queued_task_results_wake_the_existing_assistant_silently_with_exact_readonly_files() {
     let provider = Provider::new("goose-persistent-task-results", vec![
         command("printf ready > state.txt; printf initial-ready"),
         finish("ready-for-background-tasks").after("initial-ready"),
         command("set -eu; test \"$(cat /in/tasks/morning-one/briefing.md)\" = selected-report; test ! -e /in/tasks/morning-one/unrelated.txt; if printf bad > /in/tasks/morning-one/briefing.md 2>/dev/null; then exit 9; fi; case \"$(cat /in/wait_input/input.json)\" in *'\"channel\"'*) exit 10;; esac; cp /in/tasks/morning-one/briefing.md background.txt; printf first-task-readonly-ok")
             .expect_request_contains("morning-one"),
-        finish("internal-note-must-not-be-delivered").after("first-task-readonly-ok"),
+        Step::tool("task_result_resolve", json!({"action":"silent","reason":"Read-only fixture consumes this first result internally"})).after("first-task-readonly-ok"),
+        finish("internal-note-must-not-be-delivered").after("resolved"),
         command("set -eu; test \"$(cat background.txt)\" = selected-report; test ! -e /in/tasks/morning-one/briefing.md; printf second-task-fifo-ok")
             .expect_request_contains("morning-two"),
-        finish("second-internal-note-must-not-be-delivered").after("second-task-fifo-ok"),
+        Step::tool("task_result_resolve", json!({"action":"silent","reason":"Read-only fixture consumes this second result internally"})).after("second-task-fifo-ok"),
+        finish("second-internal-note-must-not-be-delivered").after("resolved"),
     ]);
     let host = host();
     let source = host.base.root.path().join("task-source");
@@ -566,7 +727,7 @@ fn queued_task_results_wake_the_existing_assistant_silently_with_exact_readonly_
         fs::read(workspace(&host, run).join("background.txt")).unwrap(),
         b"selected-report"
     );
-    idle(&provider, 6);
+    idle(&provider, provider.requests().len());
     let stopped = stop(&server, &provider, run);
     evidence(
         &host,
@@ -593,7 +754,8 @@ fn user_input_interrupts_task_processing_and_the_same_result_is_retried_without_
         finish("urgent-user-answered").after("urgent-user-inspected"),
         command("set -eu; test \"$(cat effect.txt)\" = performed-once; printf task-retry-inspected-existing-effect")
             .expect_request_contains("background-interrupted"),
-        finish("background-finished-silently").after("task-retry-inspected-existing-effect"),
+        Step::tool("task_result_resolve", json!({"action":"silent","reason":"Interrupted fixture has checked its internal workspace effect"})).after("task-retry-inspected-existing-effect"),
+        finish("background-finished-silently").after("resolved"),
     ]);
     let host = host();
     let server = host.serve(&provider);
@@ -671,7 +833,7 @@ fn user_input_interrupts_task_processing_and_the_same_result_is_retried_without_
             .to_string()
             .contains("task-effect-recorded")
     );
-    idle(&provider, 8);
+    idle(&provider, provider.requests().len());
     let stopped = stop(&server, &provider, run);
     evidence(
         &host,

@@ -379,6 +379,7 @@ name = "anchor-runner-host"
 version = "0.1.0"
 dependencies = [
  "agent-client-protocol-schema",
+ "anchor-channel-transport",
  "anchor-distribution",
  "anchor-facts",
  "anchor-feishu-gateway",

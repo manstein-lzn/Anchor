@@ -395,6 +395,16 @@ async fn silent_task_reply_ack_is_recovered_from_durable_completion_and_never_be
         store.pending_task_results("owner", &session).unwrap().len(),
         2
     );
+    // Even a durable reply that claims handling cannot acknowledge a result
+    // without the explicit API decision in Session facts.
+    assert!(nodes.completion_fact(&reply).await.is_err());
+    crate::test_support::resolve_task_result_silently(
+        &store,
+        "owner",
+        &session,
+        &wait.run_id,
+        &wait.durable_key(),
+    );
     for _ in 0..2 {
         assert_eq!(
             nodes.completion_fact(&reply).await.unwrap(),
@@ -438,6 +448,22 @@ async fn silent_task_reply_ack_is_recovered_from_durable_completion_and_never_be
         node_id: "reply".into(),
         ..next
     };
+    assert!(
+        nodes
+            .execute(request(&second_reply, vec![second_commit.clone()]))
+            .await
+            .is_err()
+    );
+    let second_binding = assistant::binding(nodes.io_resolver.state_root(), &second_reply)
+        .unwrap()
+        .unwrap();
+    crate::test_support::resolve_task_result_silently(
+        &store,
+        "owner",
+        &session,
+        &second_reply.run_id,
+        &second_binding.wait_key,
+    );
     let NodeExecutionOutcome::Completed(done) = nodes
         .execute(request(&second_reply, vec![second_commit]))
         .await

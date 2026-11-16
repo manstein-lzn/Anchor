@@ -33,7 +33,8 @@ export function GraphTaskPolicyEditor({ value, onChange, graphs, catalog, catalo
           && <p className="plugin-message">没有匹配的工作流。</p>}
       </div>
       <label className="graph-task-option"><input type="checkbox" checked={value.create_graphs ?? false}
-        onChange={event => onChange({ ...value, create_graphs: event.target.checked })} /><span>允许构建新的工作流</span></label>
+        onChange={event => onChange({ ...value, create_graphs: event.target.checked })} /><span>允许创建并管理自己的工作流</span></label>
+      <p className="plugin-panel-note">包括修改、执行、安排计划与删除本会话或任务创建的工作流；删除前须取消保留计划并收尾，不授权修改或删除其他工作流。</p>
       <label className="graph-task-option"><input type="checkbox" checked={value.develop_plugins ?? false}
         onChange={event => onChange({ ...value, develop_plugins: event.target.checked })} /><span>允许准备和测试候选插件</span></label>
     </fieldset>

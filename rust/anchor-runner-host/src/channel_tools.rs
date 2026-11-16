@@ -9,6 +9,7 @@ use crate::application::channel_management::ChannelPlatform;
 use crate::channel_replies::{MAX_IMAGE_BYTES, MAX_IMAGE_COUNT, MAX_IMAGE_TOTAL_BASE64};
 use crate::tool_names::{
     FEISHU_SEND_FILE_TOOL, FEISHU_SEND_TOOL, IMAGE_TOOL, SEND_FILE_TOOL, SEND_TOOL,
+    TASK_RESULT_RESOLVE_TOOL,
 };
 
 use anchor_runtime::{
@@ -495,6 +496,7 @@ impl ChannelTools {
                 "this Run has been stopped; channel operation cancelled".into(),
             ));
         }
+        self.require_open_task_delivery()?;
         self.bind_task_recipient(&mut args.userid)?;
         if args.userid.trim().is_empty() || args.content.trim().is_empty() {
             return Err(ToolError::Failed("recipient is not allowed".into()));
@@ -648,6 +650,7 @@ impl ChannelTools {
             ChannelConversationKind, ChannelIdentity, ChannelNotification,
         };
         self.check_active()?;
+        self.require_open_task_delivery()?;
         let original = if platform == ChannelPlatform::Feishu {
             let (source, _, identity) = self.feishu_private_context()?;
             args.userid = identity.sender_id.clone();
@@ -831,6 +834,16 @@ impl ChannelTools {
     }
 
     async fn deliver(&self, socket: PathBuf, payload: Value) -> Result<Value, ToolError> {
+        let value = self.control_request(socket, &payload).await?;
+        if value.get("accepted") != Some(&Value::Bool(true))
+            || value.get("request_id") != payload.get("request_id")
+        {
+            return Err(uncertain());
+        }
+        Ok(value)
+    }
+
+    async fn control_request(&self, socket: PathBuf, payload: &Value) -> Result<Value, ToolError> {
         self.check_active()?;
         let is_file = payload.get("operation").and_then(Value::as_str) == Some("send_file");
         let byte_limit = if is_file {
@@ -840,7 +853,7 @@ impl ChannelTools {
         };
         let seconds = if is_file { 180 } else { 20 };
         let mut bytes =
-            serde_json::to_vec(&payload).map_err(|e| ToolError::Failed(e.to_string()))?;
+            serde_json::to_vec(payload).map_err(|e| ToolError::Failed(e.to_string()))?;
         bytes.push(b'\n');
         if bytes.len() > byte_limit {
             return Err(ToolError::Failed(
@@ -850,6 +863,13 @@ impl ChannelTools {
         let value = timeout(Duration::from_secs(seconds), async {
             let mut stream = UnixStream::connect(socket).await.map_err(|_| uncertain())?;
             self.check_active()?;
+            self.task_delivery_context()?;
+            if matches!(payload["operation"].as_str(), Some("send" | "send_file")) {
+                self.require_open_task_delivery()?;
+                // A timeout can leave the Gateway queued before its own claim.
+                // Save intent first so missing receipts cannot mean no send.
+                self.request_task_delivery(payload)?;
+            }
             stream.write_all(&bytes).await.map_err(|_| uncertain())?;
             let mut response = Vec::new();
             use tokio::io::AsyncReadExt;
@@ -864,11 +884,6 @@ impl ChannelTools {
             let value: Value = serde_json::from_slice(&response).map_err(|_| uncertain())?;
             if let Some(error) = value.get("error").and_then(Value::as_str) {
                 return Err(ToolError::Failed(error.to_owned()));
-            }
-            if value.get("accepted") != Some(&Value::Bool(true))
-                || value.get("request_id") != payload.get("request_id")
-            {
-                return Err(uncertain());
             }
             Ok(value)
         })
@@ -890,6 +905,9 @@ impl ToolPort for ChannelTools {
         if self.assistant_graph.is_some() && self.supports_platform(ChannelPlatform::Feishu) {
             definitions.push(feishu::definition());
             definitions.push(feishu::file_definition());
+        }
+        if self.task_delivery_context().ok().flatten().is_some() {
+            definitions.push(task_delivery::resolution_definition());
         }
         if !self.supports_platform(ChannelPlatform::Wecom) {
             return definitions;
@@ -954,6 +972,7 @@ impl ToolPort for ChannelTools {
             || name == IMAGE_TOOL
             || name == FEISHU_SEND_TOOL
             || name == FEISHU_SEND_FILE_TOOL
+            || name == TASK_RESULT_RESOLVE_TOOL
         {
             false
         } else {
@@ -967,6 +986,14 @@ impl ToolPort for ChannelTools {
         arguments: Value,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<ToolResultContent>, ToolError>> + Send + 'a>> {
         Box::pin(async move {
+            if name == TASK_RESULT_RESOLVE_TOOL {
+                let args = serde_json::from_value(arguments).map_err(|error| {
+                    ToolError::Failed(format!("invalid task result resolution: {error}"))
+                })?;
+                return Ok(vec![ToolResultContent::json(
+                    self.resolve_task_delivery(args).await?,
+                )]);
+            }
             if matches!(name, FEISHU_SEND_TOOL | FEISHU_SEND_FILE_TOOL) {
                 if self.assistant_graph.is_none()
                     || !self.supports_platform(ChannelPlatform::Feishu)

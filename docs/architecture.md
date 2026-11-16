@@ -118,7 +118,7 @@ Host 的 [Run 访问边界](run-access-facade.md) 对业务内部类型引用实
 
 FileStore 的当前状态读取、编号及不需要快照的历史投影共用进程内可丢弃摘要：冷读逐条完整校验，保留 stamp/submission/verdict、饱和累计成本与最后 after 的字节位置，不长期保留每个历史快照；本实例成功同步的追加增量更新摘要。恢复仍从同一已打开历史文件取得最后 after，成本仍只来自全部 stamp；原 JSONL、resource.json、完整历史接口和资源租约不变。Run recovery 与启动 Probe 使用无快照历史条目，避免查询重新物化全部状态。长历史读取/内存的隔离对照见[验证](../experiments/kernel-history-performance/README.md)；原始快照的磁盘增长仍未关闭。
 
-摘要复用同时要求文件身份、大小、修改时间不变，以及针对已打开 inode 的 Linux inotify 修改监视未报告事件；不能仅凭低精度时间戳信任同长文件。每份缓存历史持有一个可丢弃监视实例，删除或替换摘要时释放；监视不可用、额度耗尽、队列溢出、撤销或读取错误均退回完整校验，不新增持久文件或后台线程。同步追加只在既有资源租约内消费自身的修改事件，其他事件不能按本次追加抹去。此路径覆盖本地普通写入、截断和替换，不承诺检测租约外并发、mmap 或远端 NFS 改写；后两种写入方式不属于受支持的历史维护路径。
+摘要复用同时要求文件身份、大小、修改时间不变，以及针对已打开 inode 的 Linux inotify 修改监视未报告事件；不能仅凭低精度时间戳信任同长文件。进程内所有 FileStore 共用一个非阻塞 inotify 实例，每个打开的 inode 注册独立 watch；各缓存保留独立修改代数，消费其他历史或同 inode 另一缓存的事件不能抹去自身失效状态。实例数不随历史数量增长，也不按固定槽数淘汰常用历史。最后订阅者释放时删除 watch，全部订阅结束后关闭实例；监视不可用、系统额度耗尽、队列溢出、撤销或读取错误均退回完整校验，不限制历史数量、不新增持久文件或后台线程。同步追加只在既有资源租约内消费自身的修改事件，其他事件不能按本次追加抹去。此路径覆盖本地普通写入、截断和替换，不承诺检测租约外并发、mmap 或远端 NFS 改写；后两种写入方式不属于受支持的历史维护路径。
 
 崩溃后重放同一提交的重复成本不由上述 `StaleVersion` 规则解决；现有未覆盖范围统一见[待办](pilot-development-plan.md#正在收口)。历史决定见[预检审查](archive/design-records-2026-11-04/constitution-preflight-decision.md)。
 
@@ -175,6 +175,8 @@ Artifact 位于 `<state>/artifacts`：format 3 清单保存显式交付路径、
 准入授权与执行观察分开：`plugin_bindings.authorization_digest` 保存无凭据值的 Host 权限投影；节点结果的 `plugin_digests` 和 `plugin_views` 保存本次实际准备的代码与依赖声明摘要。代码、Skill 路径和依赖变化从后续调用读取；联网、可写路径、宿主命令、凭据来源、远程端点或 OAuth 声明变化不能沿用旧 Run 权限。当前 GraphRunRecord 仅接受 format 15，不保留旧 format 12/13 的升级路径。
 
 Host 的 `plugin_library` 统一拥有 Catalog/Library 构造、可取消发布租约、定义与摘要重验和 Graph 挂载声明；列表用例建在其共享读取之上。普通观察不新增锁，共享读取保持非阻塞，发布与开发 scope 保持既有生命周期和锁顺序。`plugin_mounts::resolve` 继续拥有 Session 开关合并规则。
+
+调用没有 Plugin 绑定、不属于 Session，且已准入节点也没有 Plugin 声明或显式联网授权时，挂载解析不读取 Library 目录或取得目录锁，普通 `Op.run` 计划因此不受无关 Plugin 发布阻塞。锁判断同时检查请求和已准入快照，不能仅凭请求绑定为空跳过目录保护。属于 Session 的调用即使声明为空，仍保留目录锁以及本轮挂载开关和联网授权的冻结规则。
 
 `plugin_library::tools` 提供共用准备与连接/披露挂接步骤，OAuth 复用 `McpToolConfig::authorize_oauth`；Pilot 保持逐项软失败，Node 保持批量硬失败、OAuth 前保留配置、连接前记录观察。
 
@@ -309,13 +311,15 @@ Kernel 的 `NodeExecutionPort::invocation_plugin_authority` 默认关闭，普�
 
 Agent 委派来源由可信 invocation 派生，模型不能提供 owner、Session、授权或请求身份。操作员也可通过计划归属接口，将尚未到期的普通计划显式交给已有私聊助手：核对原机器人、收件人、Session、源节点及目标确切版本，保留原计划 ID、规则和游标。来源明确区分 `agent_delegation` 的真实 invocation 与 `operator_assignment` 的计划、节点和授权请求说明，不伪造用户 Turn，也不补签已经运行的历史。两种来源共用原授权与当前授权交集及原 Session 作用域。
 
-`RunMetadata` format 2 的 `request`、`task`、`task_grants` 缺省为空；Run 状态仍仅归 Kernel。Agent 创建的 Graph 是正常 catalog 资产，Host 分配 ID；`state/graph-task-ownership/` 仅保存来源、作用域和创建请求，不复制 Graph 定义，也不在可分发 bundle 内夹带宿主私有记录。Agent 只能更新自己作用域创建的资产，不能修改共享资产、源助手或为子任务继续授予委派权。候选准备与测试复用已有 `CandidateTestContext`、依赖准备和沙箱，不安装、不挂载，也不提供宿主凭据；正式交付仍走现有操作员流程。
+`RunMetadata` format 2 的 `request`、`task`、`task_grants` 缺省为空；Run 状态仍仅归 Kernel。Agent 创建的 Graph 是正常 catalog 资产，Host 分配 ID；`state/graph-task-ownership/` 仅保存来源、作用域和创建请求，不复制 Graph 定义，也不在可分发 bundle 内夹带宿主私有记录。创建权限包含本作用域自建资产的读改、执行、计划与删除管理，不逐项申请确认；不能修改或删除共享资产、源助手，也不能为子任务继续授予委派权。作用域仍绑定来源节点与 Session，非会话任务绑定来源 Run。`graph_tasks_delete` 复用既有内容绑定的条件删除和 Run/结果/调用引用保护，在最终 catalog 临界区重查原授权与当前授权交集、创建归属及按 Graph 身份匹配的计划引用；保留计划须先取消，删除只清理目标资产及其已终结运行数据，不级联删除子 Graph 或取消他人计划。全局工作区根由 Host 显式注入，不从模型参数或节点目录推断。候选准备与测试复用已有 `CandidateTestContext`、依赖准备和沙箱，不安装、不挂载，也不提供宿主凭据；正式交付仍走现有操作员流程。
 
 Graph 列表的 `completed_task:true` 是现有事实的只读投影，不是新增归档状态：仅标记有有效任务归属、所有保留计划均为已停用 once、每个计划当前请求均对应真实成功 Run、全部同图 Run 已成功终结且结果及子任务已收束的 Graph；当前定义须与这些 Run 一致。手工 Graph、渠道绑定、明确选为任务目标或仍被定义/未完成 Run 调用的 Graph 不标记；事实不可读或引用扫描不完整时继续显示在主列表。Web 将标记项默认收进可展开的“已完成的一次性任务”，搜索仍覆盖它们；再次安排、执行或编辑后由新事实自动回到主列表。定义、计划、Run、产物和回执不因收纳删除，既有读取、授权、删除及回收保护不变，不以命名前缀推断一次性用途。
 
 有 Session 的任务在终态且执行者退出后，由 Host 对账实际 Run/Artifact，将稳定结果 ID 写入原 Session 的 `task.result.queued` 事件。等待人或未知外部效果、成品读取或入队受阻、计划派发失败，也通过同一队列记录 `blocked` 状态；正常等待子图不当作失败。派发尚未返回确认的 Run 时，`source_run` 为空，不伪造身份，也不否认可能已保存的接纳事实；同一待接纳时点只通知一次，原游标继续保留，重试先读已有接纳记录，后续完成另有结果事件。Session 拥有待处理、领取和完成事实，不复制 Run 状态，不另存回调状态。`wait_input` 将用户输入与任务结果区分为两类：待处理用户优先，结果按入队顺序逐项领取；结果不会打断用户，用户可以打断结果处理，未处理结果仍可再领。沿用现有用户输入替换策略，尚无可配置的全序优先级调度器。私聊仍按原 Session 隔离，同一 bot 的不同成员不共享任务队列。
 
-结果输入不冒充渠道来信或成员身份，不自动发送普通回复；助手按原授权请求使用显式发送工具，`session.reply` 只确认已处理该输入，不代表外发成功。成功结果只选已执行终结节点的最新 Artifact 文件；调研、截图和中间检查点保留在 Run，不全部注入助手。失败或受阻只带诊断，不把中间文件当成成品。文件以 `/in/tasks/<result>/<name>` 精确只读挂载，不开放来源工作区或整个 Artifact 目录。内联 submission 每节点最多 32 KiB、合计 96 KiB，超出部分明确提供摘要、字节数及完整状态读取入口；文件选集不静默截断。Session 单事件 256 KiB 上限仍适用，引用过多时保留来源事实并回源受阻通知。未入队或未处理的结果保护来源 Run 与 Artifact。
+结果输入不冒充渠道来信或成员身份，不自动发送普通回复。助手先按原授权调用渠道发送工具，再显式调用 `task_result_resolve({action:"delivered"})`；Host 从原 Gateway 查询本结果稳定投递 ID 的真实状态，至少有一次发送，且所有已尝试发送均 confirmed、文件与介绍成对确认，才在 Session 写 `task.result.resolved`。模型不能提供收件人或自填回执。无需通知时必须显式调用 `{action:"silent",reason:"..."}`，只记录有原因的静默，不声称送达；存在发送记录、unknown 或不完整文件投递时不能用静默跳过。静默是否符合业务请求仍由 Graph/Plugin 判断，本接口不从自然语言猜通知策略。决定绑定原结果、幂等且跨打断保留；决定后渠道工具不再接受该结果的新发送。`final_result` 在冻结前校验这项事实，缺失时返回可纠正的工具错误，不让助手以纯 summary 完成任务；`session.reply` 和 Session 的处理事务再次校验后才写 handled。此路径取代结果轮无条件 handled，不新增任务队列、发送账本或 Agent loop；既有 handled 历史不回写成新的送达证据。
+
+成功结果只选已执行终结节点的最新 Artifact 文件；调研、截图和中间检查点保留在 Run，不全部注入助手。失败或受阻只带诊断，不把中间文件当成成品。文件以 `/in/tasks/<result>/<name>` 精确只读挂载，不开放来源工作区或整个 Artifact 目录。内联 submission 每节点最多 32 KiB、合计 96 KiB，超出部分明确提供摘要、字节数及完整状态读取入口；文件选集不静默截断。结果入队事件的 256 KiB 上限仍适用，文件引用过多时保留来源事实并回源受阻通知。发送意图每次最多 1,024 个回执引用，Gateway 状态按每批最多 256 个 ID 查询；累计确认不复用单批上限，也不截断回执。未入队或未处理的结果保护来源 Run 与 Artifact。
 
 任务轮的渠道发送绑定原私聊机器人和收件人，不能借机器人允许名单转发给另一成员。逻辑投递身份由原 Session、结果及选定文件身份决定，不随打断后的新 Turn 或原生 tool call 改变；文件对外使用 Artifact 中的原文件名。实际 ACK 仍由既有网关账本保存，confirmed 重入读取旧事实、unknown 不自动重发、同身份改内容报冲突；没有模型转写回执或第二套投递账本。此约束针对该渠道工具，不扩展成任意外部效果的 exactly-once 承诺。
 

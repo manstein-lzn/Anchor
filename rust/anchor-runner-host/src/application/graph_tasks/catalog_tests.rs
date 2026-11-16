@@ -161,6 +161,13 @@ impl Task {
             .claim_assistant_input("owner", &self.session, "assistant", key)
             .unwrap()
             .unwrap();
+        crate::test_support::resolve_task_result_silently(
+            &self.sessions,
+            "owner",
+            &self.session,
+            "assistant",
+            key,
+        );
         self.sessions
             .finish_task_result("owner", &self.session, "assistant", key)
             .unwrap();
@@ -187,6 +194,59 @@ impl Task {
 }
 
 #[tokio::test]
+async fn creator_deletion_preserves_plans_unfinished_runs_and_unhandled_results() {
+    let task = Task::new().await;
+    let workspace_root = task._root.path().join("workspaces");
+    for enabled in [true, false] {
+        task.plans.0.lock().unwrap()[0].enabled = enabled;
+        assert!(matches!(
+            task.app.delete_task_graph(&task.origin, &task.graph, &workspace_root).await,
+            Err(ApplicationError::Conflict(reason)) if reason.contains("schedules")
+        ));
+    }
+    let alias = task.app.graph_bundle_path("scheduled-alias");
+    std::os::unix::fs::symlink(task.app.graph_bundle_path(&task.graph), &alias).unwrap();
+    task.plans.0.lock().unwrap()[0].graph = "scheduled-alias".into();
+    assert!(matches!(
+        task.app.delete_task_graph(&task.origin, &task.graph, &workspace_root).await,
+        Err(ApplicationError::Conflict(reason)) if reason.contains("schedules")
+    ));
+    std::fs::remove_file(alias).unwrap();
+    task.plans.0.lock().unwrap().clear();
+    task.admit("task-run", "occurrence");
+    assert!(matches!(
+        task.app
+            .delete_task_graph(&task.origin, &task.graph, &workspace_root)
+            .await,
+        Err(ApplicationError::Conflict(_))
+    ));
+    fixtures::finish(&task.app, "task-run");
+    task.queue("task-run");
+    assert!(matches!(
+        task.app
+            .delete_task_graph(&task.origin, &task.graph, &workspace_root)
+            .await,
+        Err(ApplicationError::Conflict(_))
+    ));
+    task.handle("result");
+    let deleted = task
+        .app
+        .delete_task_graph(&task.origin, &task.graph, &workspace_root)
+        .await
+        .unwrap();
+    assert_eq!(deleted["removed_runs"], 1);
+    assert!(!task.app.graph_bundle_path(&task.graph).exists());
+    assert!(
+        !task_graph_ownership_path(&task.app, &task.graph)
+            .unwrap()
+            .exists()
+    );
+    assert!(task.app.read_run("task-run").unwrap().is_none());
+    assert!(task.app.metadata("task-run").unwrap().is_none());
+    assert!(task.app.graph_bundle_path("source").is_dir());
+}
+
+#[tokio::test]
 async fn completed_once_requires_admission_success_and_handled_result_without_deleting_history() {
     let task = Task::new().await;
     assert!(!task.collected().await, "paused before admission");
@@ -202,6 +262,13 @@ async fn completed_once_requires_admission_success_and_handled_result_without_de
         .unwrap();
     assert!(!task.collected().await, "only claimed");
     let before = task.app.read_graph(&task.graph).unwrap();
+    crate::test_support::resolve_task_result_silently(
+        &task.sessions,
+        "owner",
+        &task.session,
+        "assistant",
+        "result",
+    );
     task.sessions
         .finish_task_result("owner", &task.session, "assistant", "result")
         .unwrap();

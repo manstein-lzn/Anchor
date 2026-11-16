@@ -12,11 +12,12 @@ import type { WorkbenchNotice } from './useGraphEditor';
 type Props = {
   name: string; graphs: GraphSummary[]; dirty: boolean; busy: boolean; notice: WorkbenchNotice;
   run: string; node: string; targetPath: string; detail: OurRunDetail | null;
+  detailLoading: boolean; detailError: string | null; retryDetail: () => void;
   onPilot: () => void; selectGraph: (graph: string) => boolean; trigger: () => Promise<void>; onTimeline: () => void;
   navigateRun: (run: string, graph: string, node?: string) => Promise<void>;
   controlRun: (what: RunControl) => Promise<void>; deleteRun: () => Promise<void>; onNode: (node: string) => void;
 };
-export function RunDetailPage({ name, graphs, dirty, busy, notice, run, node, targetPath, detail,
+export function RunDetailPage({ name, graphs, dirty, busy, notice, run, node, targetPath, detail, detailLoading, detailError, retryDetail,
   selectGraph, trigger, onTimeline, navigateRun, controlRun, deleteRun, onNode, onPilot }: Props) {
   const phase = detail ? runPhase(detail) : 'unavailable';
   const cursors = activeNodes(detail?.state);
@@ -40,6 +41,9 @@ export function RunDetailPage({ name, graphs, dirty, busy, notice, run, node, ta
               <button onClick={() => void navigateRun(detail.state.trigger!.run!, detail.state.trigger!.graph!, detail.state.trigger!.node)}>返回来源运行 ←</button>
             </div>}
             {notice && <p className={`notice ${notice.kind}`} role="status">{notice.text}</p>}
+            {detailError && <p className="timeline-error" role="alert">
+              运行详情加载失败：{detailError} <button onClick={retryDetail}>重试</button>
+            </p>}
             <div className="canvas-head">
               {detail ? <>
                 <span className={`pill ${phase}`}>{runPhaseLabel(detail.projection)}</span>
@@ -53,7 +57,7 @@ export function RunDetailPage({ name, graphs, dirty, busy, notice, run, node, ta
                   <button className="danger-link" onClick={() => void deleteRun()} disabled={busy}>
                     <Trash2 size={14} />删除运行记录
                   </button> : null}
-              </> : <span className="hint">选一次运行，或触发一次。</span>}
+              </> : <span className="hint">{run ? (detailLoading ? '正在加载运行详情…' : detailError ? '运行详情暂不可用。' : '运行详情尚未加载。') : '选一次运行，或触发一次。'}</span>}
             </div>
             {detail?.definition && <WorkflowCanvas graph={detail.definition} name={detail.graph} mode="run" state={detail.state} projection={detail.projection}
               onPick={value => { if (value?.kind === 'node') { onNode(value.id); openInspector(); } }} />}

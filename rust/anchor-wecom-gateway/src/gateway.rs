@@ -100,6 +100,7 @@ impl Gateway {
             listener,
             token: config.control_token.clone(),
             users: config.send_users.clone(),
+            ledger: ledger.clone(),
             send: send_tx,
             shutdown: shutdown.clone(),
             status: status.clone(),

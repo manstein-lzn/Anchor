@@ -59,7 +59,8 @@ export function App() {
   useEffect(() => { navigation.current += 1; }, [view, name, run]);
   const editor = useGraphEditor(name, graphs, setNotice);
   const { doc, dirty, selectedNode } = editor;
-  const detail = useRunDetail(run, view === 'runDetail', runs);
+  const detailLoad = useRunDetail(run, view === 'runDetail', runs);
+  const detail = detailLoad.detail;
   const graphColors = useMemo(() => assignGraphColors([
     ...graphs.map(item => item.graph), ...runs.map(item => item.graph),
     ...(timeline?.runs ?? []).map(item => item.graph),
@@ -231,7 +232,8 @@ export function App() {
             onRefresh={() => void refresh()} onSelect={openRun} onSessions={() => setSessions(true)} />}
         </Workspace>
       ) : view === 'runDetail' ? <RunDetailPage name={name} graphs={graphs} dirty={dirty} busy={busy}
-        notice={notice} run={run} node={node} targetPath={targetPath} detail={detail} selectGraph={selectGraph}
+        notice={notice} run={run} node={node} targetPath={targetPath} detail={detail}
+        detailLoading={detailLoad.loading} detailError={detailLoad.error} retryDetail={detailLoad.retry} selectGraph={selectGraph}
         onPilot={() => askPilot('run')} trigger={trigger} onTimeline={() => setView('runs')} navigateRun={navigateRun} controlRun={controlRun}
         deleteRun={deleteRun} onNode={setNode} />
         : null}</Suspense></ChunkBoundary>

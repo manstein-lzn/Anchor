@@ -912,7 +912,8 @@ fn native_schedule_completion_notifies_the_original_feishu_private_chat_with_a_c
         Step::tool("anchor_tools_call", json!({"name":"feishu_send_file","arguments":{
             "path":file_path,"content":FILE_NOTICE
         }})).after("feishu_send_file"),
-        Step::tool("final_result", json!({"summary":"Notification and immutable file confirmed; task processed.","route":"reply","files":[]})).after("file_status"),
+        Step::tool("task_result_resolve", json!({"action":"delivered"})).after("file_status"),
+        Step::tool("final_result", json!({"summary":"Notification and immutable file confirmed; task processed.","route":"reply","files":[]})).after("resolved"),
     ]);
     task_gate.open();
     let mut completed = Value::Null;

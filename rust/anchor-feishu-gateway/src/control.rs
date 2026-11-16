@@ -28,6 +28,10 @@ enum Request {
     Status {
         token: String,
     },
+    DeliveryStatus {
+        token: String,
+        request_ids: Vec<String>,
+    },
     Send {
         token: String,
         request_id: String,
@@ -101,17 +105,31 @@ async fn handle(
         .await?;
         let supplied = match &request {
             Request::Status { token }
+            | Request::DeliveryStatus { token, .. }
             | Request::Send { token, .. }
             | Request::SendFile { token, .. } => token,
         };
         authorize(supplied, &config.control_token)?;
-        if !matches!(&request, Request::SendFile { .. }) && size > MAX_REQUEST_BYTES {
+        if !matches!(
+            &request,
+            Request::SendFile { .. } | Request::DeliveryStatus { .. }
+        ) && size > MAX_REQUEST_BYTES
+        {
             return Err(GatewayError::Invalid(
                 "text control request exceeds size limit",
             ));
         }
         let (request_id, open_id, chat_id, payload) = match request {
             Request::Status { .. } => return Ok(json!({"status":*status.borrow()})),
+            Request::DeliveryStatus { request_ids, .. } => {
+                if request_ids.iter().any(|id| !valid_id(id)) {
+                    return Err(GatewayError::Invalid("invalid Feishu send identity"));
+                }
+                let deliveries = ledger
+                    .blocking(move |ledger| ledger.delivery_status(&request_ids))
+                    .await?;
+                return Ok(json!({"deliveries":deliveries}));
+            }
             Request::Send {
                 request_id,
                 open_id,

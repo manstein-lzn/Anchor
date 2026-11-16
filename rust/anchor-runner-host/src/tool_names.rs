@@ -7,3 +7,4 @@ pub(crate) const FEISHU_SEND_TOOL: &str = "feishu_send_message";
 pub(crate) const FEISHU_SEND_FILE_TOOL: &str = "feishu_send_file";
 pub(crate) const SEND_FILE_TOOL: &str = "wecom_send_file";
 pub(crate) const IMAGE_TOOL: &str = "wecom_attach_image";
+pub(crate) const TASK_RESULT_RESOLVE_TOOL: &str = "task_result_resolve";

@@ -169,6 +169,15 @@ pub struct TaskResultAdmission {
     pub run_id: String,
 }
 
+/// An explicit consumption decision. Delivery references are supplied by the
+/// Host after checking Gateway facts, never by the model's completion text.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+pub enum TaskResultResolution {
+    Delivered { requests: Vec<String> },
+    Silent { reason: String },
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "source", content = "input", rename_all = "snake_case")]
 pub enum AssistantInput {

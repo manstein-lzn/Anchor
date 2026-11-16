@@ -495,12 +495,19 @@ impl HostNodes {
                             "task result processing was interrupted; result remains pending",
                         ));
                     }
+                    assistant::require_task_result_resolution(root, &request.key)
+                        .map_err(graph_error)?;
+                    let resolution = assistant::sessions(root)
+                        .map_err(graph_error)?
+                        .task_result_resolution(&source.owner, &source.session, &task.result.id)
+                        .map_err(graph_error)?;
                     let reply = NodeCompletion {
                         submission: "task result handled without an automatic channel reply".into(),
                         route: Some(source.wait_node),
                         model_requests: 0,
                         output: json!({"files":[],"suppressed":true,"reply_for":task.turn.id,
-                            "task_result":task.result.id,"task_result_handled":true,"source_commit":commit,"items":[]}),
+                            "task_result":task.result.id,"task_result_handled":true,
+                            "task_result_resolution":resolution,"source_commit":commit,"items":[]}),
                     };
                     let outcome = self.complete(&request.key, reply.clone())?;
                     self.settle_assistant_reply(&request.key, &reply)?;

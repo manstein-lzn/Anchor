@@ -47,6 +47,20 @@ pub(crate) enum ApplicationError {
     Storage(String),
 }
 
+impl From<graphs::GraphManagementError> for ApplicationError {
+    fn from(error: graphs::GraphManagementError) -> Self {
+        use graphs::GraphManagementError;
+        match error {
+            GraphManagementError::Missing(_) => Self::Missing,
+            GraphManagementError::BadRequest(reason) | GraphManagementError::Invalid(reason) => {
+                Self::Invalid(reason)
+            }
+            GraphManagementError::Conflict(reason) => Self::Conflict(reason),
+            GraphManagementError::Storage(reason) => Self::Storage(reason),
+        }
+    }
+}
+
 pub(crate) struct AdmissionOptions {
     pub(crate) objective: Option<String>,
     pub(crate) trigger: RunTrigger,

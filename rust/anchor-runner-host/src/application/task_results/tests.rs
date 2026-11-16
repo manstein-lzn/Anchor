@@ -594,6 +594,13 @@ async fn task_delivery_protects_runs_and_exact_outputs_until_durable_handling() 
         artifacts.availability(&commit).unwrap(),
         ArtifactAvailability::Available
     );
+    crate::test_support::resolve_task_result_silently(
+        &sessions,
+        "owner",
+        &session,
+        "assistant-run",
+        "task",
+    );
     sessions
         .finish_task_result("owner", &session, "assistant-run", "task")
         .unwrap();
@@ -672,6 +679,13 @@ async fn outgoing_task_keeps_its_source_graph_and_alias_until_durable_handling()
             assert!(source.join("graph.json").is_file());
         }
     }
+    crate::test_support::resolve_task_result_silently(
+        &sessions,
+        "owner",
+        &session,
+        "assistant-run",
+        "callback",
+    );
     sessions
         .finish_task_result("owner", &session, "assistant-run", "callback")
         .unwrap();
@@ -789,6 +803,13 @@ async fn handled_task_keeps_source_session_and_root_until_detached_descendants_s
             .unwrap(),
         Some(AssistantInput::Task(_))
     ));
+    crate::test_support::resolve_task_result_silently(
+        &sessions,
+        "owner",
+        &session,
+        "assistant-run",
+        "callback",
+    );
     sessions
         .finish_task_result("owner", &session, "assistant-run", "callback")
         .unwrap();

@@ -74,6 +74,9 @@ impl ResolutionError {
     }
 }
 
+/// A fact check supplied with the prepared invocation, before native completion.
+pub(crate) type NodeCompletionCheck = Arc<dyn Fn() -> Result<(), String> + Send + Sync>;
+
 /// The tools and Plugin identities prepared for the same invocation.
 pub(crate) struct ResolvedNodeTools {
     pub(crate) tools: Arc<dyn ToolPort>,
@@ -83,6 +86,7 @@ pub(crate) struct ResolvedNodeTools {
     /// The host path of the workspace the tools write into.
     pub(crate) workspace: std::path::PathBuf,
     pub(crate) envelope: super::envelope::InvocationEnvelope,
+    pub(crate) completion_check: NodeCompletionCheck,
 }
 
 pub(crate) type ToolResolution<'resolver> =
@@ -95,6 +99,7 @@ pub(crate) struct ToolAssembly<'a> {
     pub(crate) bindings: &'a [PluginBinding],
     pub(crate) request: &'a NodeExecutionRequest,
     pub(crate) workspace: &'a std::path::Path,
+    pub(crate) workspace_root: &'a std::path::Path,
     pub(crate) readonly_inputs: &'a [anchor_runtime::ReadOnlyInput],
     pub(crate) envelope: &'a super::envelope::InvocationEnvelope,
     pub(crate) runtime: Option<crate::runtime_configuration::RuntimeSnapshot>,
