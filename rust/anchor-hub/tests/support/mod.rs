@@ -63,13 +63,35 @@ pub struct World {
     pub grades: Kernel<FileStore>,
 }
 
+fn run_owner(root: &Path, clock: &TestClock) -> Kernel<FileStore> {
+    let mut runs = Kernel::with_clock(
+        FileStore::new(root).unwrap(),
+        Box::new(Anyone),
+        Box::new(clock.clone()),
+    )
+    .unwrap();
+    runs.install("validator/step", Arc::new(Step)).unwrap();
+    runs
+}
+
+fn fact_owner(root: &Path, clock: &TestClock) -> Kernel<FileStore> {
+    let mut facts = Kernel::with_clock(
+        FileStore::new(root).unwrap(),
+        Box::new(anchor_facts::RecorderOnly),
+        Box::new(clock.clone()),
+    )
+    .unwrap();
+    anchor_facts::install(&mut facts).unwrap();
+    facts
+}
+
 pub fn executor() -> Principal {
     Principal::new("anchor/executor", PrincipalKind::Agent)
 }
 
 pub fn configuration(node: &str) -> AgentConfiguration {
     AgentConfiguration {
-        version: anchor_facts::VERSION,
+        version: anchor_facts::CONFIGURATION_VERSION,
         graph_digest: "g".into(),
         node_id: node.into(),
         model: "flash".into(),
@@ -145,20 +167,8 @@ impl World {
         std::fs::create_dir_all(state.join("kernel-runs")).unwrap();
         std::fs::create_dir_all(state.join("kernel-facts")).unwrap();
         std::fs::create_dir_all(state.join("kernel-grades")).unwrap();
-        let mut runs = Kernel::with_clock(
-            FileStore::new(state.join("kernel-runs")).unwrap(),
-            Box::new(Anyone),
-            Box::new(clock.clone()),
-        )
-        .unwrap();
-        runs.install("validator/step", Arc::new(Step)).unwrap();
-        let mut facts = Kernel::with_clock(
-            FileStore::new(state.join("kernel-facts")).unwrap(),
-            Box::new(anchor_facts::RecorderOnly),
-            Box::new(clock.clone()),
-        )
-        .unwrap();
-        anchor_facts::install(&mut facts).unwrap();
+        let runs = run_owner(&state.join("kernel-runs"), &clock);
+        let facts = fact_owner(&state.join("kernel-facts"), &clock);
         let mut grades = Kernel::with_clock(
             FileStore::new(state.join("kernel-grades")).unwrap(),
             Box::new(anchor_facts::GraderOnly),
@@ -181,6 +191,16 @@ impl World {
 
     pub fn root(&self, name: &str) -> PathBuf {
         self.state().join(name)
+    }
+
+    #[allow(dead_code)]
+    pub fn reopen_runs(&mut self) {
+        self.runs = run_owner(&self.root("kernel-runs"), &self.clock);
+    }
+
+    #[allow(dead_code)]
+    pub fn reopen_facts(&mut self) {
+        self.facts = fact_owner(&self.root("kernel-facts"), &self.clock);
     }
 
     pub fn path(&self) -> &Path {
@@ -288,7 +308,9 @@ impl World {
         }
         let invocation = Invocation {
             run_id: run.into(),
-            graph_digest: "g".into(),
+            graph_digest: manifest
+                .map_or("g", |config| config.graph_digest.as_str())
+                .into(),
             node_id: node.into(),
             invocation: 1,
         };

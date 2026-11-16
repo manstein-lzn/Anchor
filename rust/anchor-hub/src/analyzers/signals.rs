@@ -19,6 +19,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use anchor_facts::window::MAX_SIGNAL_CITATIONS as CITED;
 use serde::Serialize;
 use serde_json::json;
 
@@ -27,8 +28,6 @@ use crate::query::{Invocation, Key, Outcome, Query, group_by, mann_whitney, summ
 
 /// Signals kept per list unless told otherwise.
 pub const LIMIT: usize = 20;
-/// Evidence cited per signal, at most; the rest is counted.
-const CITED: usize = 5;
 /// Graded Runs a harness needs on a task before it is placed on the front.
 const MIN_RUNS: usize = 3;
 /// Completed peers an invocation needs before it can stand out among them.
@@ -99,6 +98,9 @@ pub struct Harness {
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Table {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub longitudinal: Option<anchor_facts::longitudinal::Longitudinal>,
+    pub applicability: anchor_facts::window::Applicability,
     pub not_applicable: Vec<Need>,
     pub signals: Vec<Signal>,
     pub exemplars: Vec<Signal>,
@@ -113,11 +115,11 @@ impl Analyzer for Signals {
         "signals"
     }
     fn version(&self) -> u32 {
-        2
+        anchor_facts::window::ANALYZER_VERSION
     }
     /// Grades are used when there are any: without them there is no front.
     fn needs(&self) -> &'static [Need] {
-        &[Need::Observations]
+        &[Need::Observations, Need::Grades, Need::Runs]
     }
 
     fn analyze(&self, query: &Query) -> Report {
@@ -129,6 +131,9 @@ impl Analyzer for Signals {
             summary: BTreeMap::new(),
             findings: Vec::new(),
         };
+        report
+            .summary
+            .insert("applicability", json!(table.applicability));
         report.summary.insert("front", json!(table.front));
         report.summary.insert("omitted", json!(table.omitted));
         report.summary.insert(
@@ -158,11 +163,128 @@ impl Analyzer for Signals {
 }
 
 impl Signals {
+    /// Frozen discovery reserves exploration space for unclassified behavior.
+    /// Sampling uses identities, not success, quality, cost or failure labels.
+    pub fn window_table(&self, query: &Query) -> Table {
+        self.window_table_in(query, |_| true)
+    }
+    pub fn window_table_in(&self, query: &Query, allowed: impl Fn(&Key) -> bool) -> Table {
+        self.window_table_version(query, allowed, self.version())
+    }
+
+    pub(crate) fn window_table_version(
+        &self,
+        query: &Query,
+        allowed: impl Fn(&Key) -> bool,
+        version: u32,
+    ) -> Table {
+        // Delete this branch after retained v4 windows and continuations retire.
+        // Their persisted offsets must retain cap-before-filter ordering.
+        let legacy = version < anchor_facts::window::ANALYZER_VERSION;
+        let mut table = if legacy {
+            let mut table = Signals { limit: usize::MAX }.table_in(query, &|_| true, false);
+            retain_citations(&mut table, &allowed);
+            table.bound(self.limit);
+            table
+        } else {
+            self.table_in(query, &allowed, true)
+        };
+        let mut ordinary = query
+            .invocations()
+            .into_iter()
+            .filter(|invocation| {
+                !matches!(
+                    invocation.provenance,
+                    anchor_facts::ProvenanceCategory::Experiment
+                        | anchor_facts::ProvenanceCategory::DreamingMeta
+                ) && invocation.evidence().iter().any(&allowed)
+            })
+            .map(|invocation| {
+                let identity = invocation.qualified_key();
+                (
+                    anchor_facts::text_digest(&format!(
+                        "ordinary_invocation_sample_v1\n{identity}"
+                    )),
+                    invocation,
+                )
+            })
+            .collect::<Vec<_>>();
+        ordinary.sort_by(|(left, _), (right, _)| left.cmp(right));
+        let eligible = ordinary.len();
+        let sample_limit = self.limit.div_ceil(2).min(eligible);
+        let positive_limit = self.limit.saturating_sub(sample_limit);
+        for signal in table.exemplars.iter().skip(positive_limit) {
+            *table.omitted.entry(signal.code).or_default() += 1;
+        }
+        table.exemplars.truncate(positive_limit);
+        if eligible > sample_limit {
+            table
+                .omitted
+                .insert("ordinary_sample", eligible - sample_limit);
+        }
+        table.exemplars.extend(ordinary.into_iter().take(sample_limit).enumerate().map(|(rank, (digest, invocation))| {
+            let evidence = invocation.evidence();
+            Signal {
+                id: id("ordinary_sample", &invocation.qualified_key()), code: "ordinary_sample", source: "stable_sampler_v1",
+                subject: invocation.key(),
+                detail: format!("Neutral ordinary sample; no quality or defect assertion. Rule: sha256(ordinary_invocation_sample_v1 + invocation identity), ascending; rank {} of {eligible}; identity digest {digest}. Frozen window coordinates define the eligible population.", rank + 1),
+                weight: eligible, runs: 1,
+                coordinates: situate(query, invocation.config().map(str::to_owned)).0,
+                coordinates_total: usize::from(invocation.config().is_some()),
+                evidence_total: evidence.len(), evidence: evidence.into_iter().filter(|key| legacy || allowed(key)).take(CITED).collect(),
+            }
+        }));
+        if legacy {
+            retain_citations(&mut table, &allowed);
+        }
+        table
+    }
+
     pub fn table(&self, query: &Query) -> Table {
+        self.table_in(query, &|_| true, true)
+    }
+
+    fn table_in(
+        &self,
+        query: &Query,
+        allowed: &impl Fn(&Key) -> bool,
+        complete_support: bool,
+    ) -> Table {
         let invocations = query.invocations();
-        let mut signals = merged(query);
-        let front = front(query, &invocations, &mut signals);
-        let mut exemplars = exemplars(query, &invocations);
+        let mut signals = merged(query, allowed, complete_support);
+        let observed: BTreeSet<_> = invocations
+            .iter()
+            .filter(|i| i.has_model_observations())
+            .map(|i| i.run_key())
+            .collect();
+        for task in query.tasks() {
+            let Some(run) = task.entry.id.strip_prefix("run/") else {
+                continue;
+            };
+            if matches!(
+                task.provenance,
+                anchor_facts::ProvenanceCategory::Experiment
+                    | anchor_facts::ProvenanceCategory::DreamingMeta
+            ) || observed.contains(&(task.namespace, run))
+            {
+                continue;
+            }
+            let evidence: Vec<_> = task
+                .rows
+                .iter()
+                .filter(|r| r.slot.is_some() || r.status.is_some_and(|s| s.is_settled()))
+                .map(|r| r.key.clone())
+                .collect();
+            if evidence.is_empty() {
+                continue;
+            }
+            signals.push(Signal{id:id("runs_without_observations",&format!("{}::{run}",task.namespace)),code:"runs_without_observations",source:"signals",subject:format!("{}::run/{run}",task.namespace),detail:"Accepted Run outcome or node slots have no model observations; observed work denominator is incomplete".into(),weight:1,runs:1,coordinates:vec![],coordinates_total:0,evidence_total:evidence.len(),evidence:evidence.into_iter().filter(allowed).take(CITED).collect()});
+        }
+        let front = front(query, &invocations, &mut signals, allowed);
+        let mut exemplars = exemplars(query, &invocations, allowed);
+        // Historical rows support statistics, but cannot consume current citation slots.
+        signals.retain(|signal| !signal.evidence.is_empty());
+        exemplars.retain(|signal| !signal.evidence.is_empty());
         signals.sort_by(|a, b| {
             tier(b.code)
                 .cmp(&tier(a.code))
@@ -170,23 +292,41 @@ impl Signals {
                 .then(b.weight.cmp(&a.weight))
                 .then_with(|| a.id.cmp(&b.id))
         });
-        let mut omitted = BTreeMap::new();
-        for signal in signals
-            .iter()
-            .skip(self.limit)
-            .chain(exemplars.iter().skip(self.limit))
-        {
-            *omitted.entry(signal.code).or_insert(0) += 1;
-        }
-        signals.truncate(self.limit);
-        exemplars.truncate(self.limit);
-        Table {
+        let mut table = Table {
+            longitudinal: None,
+            applicability: applicability(query, &invocations),
             not_applicable: unmet(query, self.needs()),
             signals,
             exemplars,
-            omitted,
+            omitted: BTreeMap::new(),
             front,
+        };
+        table.bound(self.limit);
+        table
+    }
+}
+
+impl Table {
+    fn bound(&mut self, limit: usize) {
+        for signal in self
+            .signals
+            .iter()
+            .skip(limit)
+            .chain(self.exemplars.iter().skip(limit))
+        {
+            *self.omitted.entry(signal.code).or_default() += 1;
         }
+        self.signals.truncate(limit);
+        self.exemplars.truncate(limit);
+    }
+}
+
+fn retain_citations(table: &mut Table, allowed: &impl Fn(&Key) -> bool) {
+    for list in [&mut table.signals, &mut table.exemplars] {
+        for signal in list.iter_mut() {
+            signal.evidence.retain(allowed);
+        }
+        list.retain(|signal| !signal.evidence.is_empty());
     }
 }
 
@@ -197,8 +337,8 @@ fn tier(code: &str) -> u8 {
         "dominated_harness" | "check_failing" | "task_not_done" => 3,
         "tool_failures"
         | "command_failures"
-        | "call_corrected"
-        | "repeated_failure"
+        | "same_tool_after_failure"
+        | "consecutive_same_shape_failures"
         | "invocation_not_completed"
         | "startup_heavy"
         | "not_accepted"
@@ -292,26 +432,21 @@ fn shape(detail: &str) -> String {
     shaped
 }
 
-/// The Run a record belongs to, by the resource naming the Runtime, the
-/// recorder and the grader use: `run/{run}`, `trace/{run}/…`, `grade/{run}`.
-fn run_of(key: &Key) -> Option<&str> {
-    let mut parts = key.resource.split('/');
-    match (parts.next(), parts.next()) {
-        (Some("run" | "trace" | "grade"), Some(run)) => Some(run),
-        _ => None,
-    }
-}
-
 /// How many distinct Runs the records belong to.
-fn runs_of<'k>(keys: impl IntoIterator<Item = &'k Key>) -> usize {
+fn runs_of<'k>(query: &Query, keys: impl IntoIterator<Item = &'k Key>) -> usize {
     keys.into_iter()
-        .filter_map(run_of)
+        .filter_map(|key| {
+            Some((
+                query.namespace(&key.root)?,
+                anchor_facts::window::resource_run(&key.resource)?,
+            ))
+        })
         .collect::<BTreeSet<_>>()
         .len()
 }
 
 /// Health and stall findings, merged by kind, place and what they say.
-fn merged(query: &Query) -> Vec<Signal> {
+fn merged(query: &Query, allowed: &impl Fn(&Key) -> bool, complete_support: bool) -> Vec<Signal> {
     struct Merged {
         source: &'static str,
         count: usize,
@@ -323,29 +458,60 @@ fn merged(query: &Query) -> Vec<Signal> {
         .iter()
         .filter_map(|row| Some((&row.key, row.config.as_deref()?)))
         .collect();
-    let mut found: BTreeMap<(&'static str, String, String), Merged> = BTreeMap::new();
-    for report in [Health.analyze(query), Stall::default().analyze(query)] {
-        let source = report.analyzer;
-        for finding in report.findings {
-            let entry = found
-                .entry((
-                    finding.code,
-                    place(&finding.subject),
-                    shape(&finding.detail),
-                ))
-                .or_insert_with(|| Merged {
-                    source,
-                    count: 0,
-                    detail: finding.detail.clone(),
-                    evidence: BTreeSet::new(),
-                });
-            entry.count += 1;
-            entry.evidence.extend(finding.evidence);
+    let mut found: BTreeMap<
+        (
+            anchor_facts::ProvenanceCategory,
+            &'static str,
+            String,
+            String,
+        ),
+        Merged,
+    > = BTreeMap::new();
+    for provenance in [
+        anchor_facts::ProvenanceCategory::Production,
+        anchor_facts::ProvenanceCategory::Unknown,
+    ] {
+        for report in query.with_provenance(provenance, |q| {
+            [
+                if complete_support {
+                    Health.analyze_for_signals(q)
+                } else {
+                    Health.analyze(q)
+                },
+                Stall::default().analyze(q),
+            ]
+        }) {
+            let source = report.analyzer;
+            for finding in report.findings {
+                if finding.evidence.is_empty() {
+                    continue;
+                }
+                let entry = found
+                    .entry((
+                        provenance,
+                        finding.code,
+                        place(&finding.subject),
+                        shape(&finding.detail),
+                    ))
+                    .or_insert_with(|| Merged {
+                        source,
+                        count: 0,
+                        detail: finding.detail.clone(),
+                        evidence: BTreeSet::new(),
+                    });
+                entry.count += 1;
+                entry.evidence.extend(finding.evidence);
+            }
         }
     }
     found
         .into_iter()
-        .map(|((code, subject, shape), merged)| {
+        .map(|((provenance, code, subject, shape), merged)| {
+            let subject = if provenance == anchor_facts::ProvenanceCategory::Unknown {
+                subject
+            } else {
+                format!("production:{subject}")
+            };
             let configs = merged
                 .evidence
                 .iter()
@@ -360,11 +526,16 @@ fn merged(query: &Query) -> Vec<Signal> {
                     n => format!("{n} occurrences, for example: {}", merged.detail),
                 },
                 weight: merged.count.max(merged.evidence.len()),
-                runs: runs_of(&merged.evidence),
+                runs: runs_of(query, &merged.evidence),
                 coordinates,
                 coordinates_total,
                 evidence_total: merged.evidence.len(),
-                evidence: merged.evidence.into_iter().take(CITED).collect(),
+                evidence: merged
+                    .evidence
+                    .into_iter()
+                    .filter(allowed)
+                    .take(CITED)
+                    .collect(),
                 subject,
             }
         })
@@ -425,13 +596,39 @@ fn front(
     query: &Query,
     invocations: &[Invocation],
     signals: &mut Vec<Signal>,
+    allowed: &impl Fn(&Key) -> bool,
 ) -> BTreeMap<String, Vec<Harness>> {
-    let by_run = group_by(invocations.iter(), |i| i.run_id.as_str());
-    let mut tasks: BTreeMap<String, BTreeMap<Vec<String>, Vec<Measured>>> = BTreeMap::new();
+    let by_run = group_by(invocations.iter(), |i| i.run_key());
+    let provenances = query.provenances();
+    type TaskIdentity = (
+        anchor_facts::ProvenanceCategory,
+        String,
+        u32,
+        Option<String>,
+    );
+    let mut tasks: BTreeMap<TaskIdentity, BTreeMap<Vec<String>, Vec<Measured>>> = BTreeMap::new();
     for (run, graded) in query.grades() {
-        let Some(observed) = by_run.get(run) else {
+        let provenance = provenances.get(&run).copied().unwrap_or_default();
+        if matches!(
+            provenance,
+            anchor_facts::ProvenanceCategory::Experiment
+                | anchor_facts::ProvenanceCategory::DreamingMeta
+        ) {
+            continue;
+        }
+        let Some(observed) = by_run.get(&run) else {
             continue;
         };
+        if observed.iter().any(|invocation| {
+            invocation.graph_conflict()
+                || (invocation.has_model_observations()
+                    && invocation
+                        .config()
+                        .and_then(|digest| query.configuration(digest))
+                        .is_none_or(|config| !config.is_stable()))
+        }) {
+            continue;
+        }
         let Some(tokens) = crate::query::usage(observed.iter().copied()).total_tokens() else {
             continue;
         };
@@ -447,9 +644,11 @@ fn front(
             continue;
         }
         tasks
-            .entry(format!(
-                "{} v{}",
-                graded.grade.task, graded.grade.task_version
+            .entry((
+                provenance,
+                graded.grade.task.clone(),
+                graded.grade.task_version,
+                graded.row.config.clone(),
             ))
             .or_default()
             .entry(configs.into_iter().collect())
@@ -461,8 +660,29 @@ fn front(
                 grade: graded.row.key.clone(),
             });
     }
+    let mut semantics: BTreeMap<_, usize> = BTreeMap::new();
+    for (provenance, task, version, _) in tasks.keys() {
+        *semantics
+            .entry((*provenance, task.clone(), *version))
+            .or_default() += 1;
+    }
     let mut front = BTreeMap::new();
-    for (task, harnesses) in tasks {
+    for ((provenance, task, version, grader), harnesses) in tasks {
+        let task = if provenance == anchor_facts::ProvenanceCategory::Unknown
+            && semantics[&(provenance, task.clone(), version)] == 1
+        {
+            format!("{task} v{version}")
+        } else {
+            format!(
+                "{}:{task} v{version} [grader:{}]",
+                if provenance == anchor_facts::ProvenanceCategory::Production {
+                    "production"
+                } else {
+                    "unknown"
+                },
+                grader.as_deref().unwrap_or("unknown")
+            )
+        };
         let placed: Vec<(Vec<String>, Vec<Measured>)> = harnesses
             .into_iter()
             .filter(|(_, runs)| runs.len() >= MIN_RUNS)
@@ -506,7 +726,7 @@ fn front(
                 runs: runs.len(),
                 coordinates,
                 coordinates_total,
-                evidence: runs.iter().map(|r| r.grade.clone()).take(CITED).collect(),
+                evidence: runs.iter().map(|r| r.grade.clone()).filter(allowed).take(CITED).collect(),
                 evidence_total: runs.len(),
                 subject,
             });
@@ -518,15 +738,26 @@ fn front(
 
 /// Completed invocations of one node that stand out among their peers: in
 /// one graded task among Runs that passed, or in one Graph when ungraded.
-fn exemplars(query: &Query, invocations: &[Invocation]) -> Vec<Signal> {
+fn exemplars(
+    query: &Query,
+    invocations: &[Invocation],
+    allowed: &impl Fn(&Key) -> bool,
+) -> Vec<Signal> {
     let grades = query.grades();
     let mut groups: BTreeMap<(String, String), Vec<(&Invocation, u64)>> = BTreeMap::new();
     for invocation in invocations {
+        if matches!(
+            invocation.provenance,
+            anchor_facts::ProvenanceCategory::Experiment
+                | anchor_facts::ProvenanceCategory::DreamingMeta
+        ) {
+            continue;
+        }
         let lives = invocation.lifecycles();
         if lives.is_empty() || lives.iter().any(|l| l.outcome != Outcome::Completed) {
             continue;
         }
-        let scope = match grades.get(invocation.run_id.as_str()) {
+        let scope = match grades.get(&invocation.run_key()) {
             Some(graded) if !graded.grade.passed() => continue,
             Some(graded) => format!("task {} v{}", graded.grade.task, graded.grade.task_version),
             None => format!(
@@ -541,7 +772,17 @@ fn exemplars(query: &Query, invocations: &[Invocation]) -> Vec<Signal> {
             continue;
         };
         groups
-            .entry((scope, invocation.node_id.clone()))
+            .entry((
+                format!(
+                    "{:?}:{scope}:{}",
+                    invocation.provenance,
+                    grades
+                        .get(&invocation.run_key())
+                        .and_then(|g| g.row.config.as_deref())
+                        .unwrap_or("ungraded")
+                ),
+                invocation.node_id.clone(),
+            ))
             .or_default()
             .push((invocation, tokens));
     }
@@ -554,7 +795,11 @@ fn exemplars(query: &Query, invocations: &[Invocation]) -> Vec<Signal> {
             continue;
         };
         let median = stats.median.max(1);
-        let subject = format!("{scope} node {node}");
+        let display_scope = scope
+            .strip_prefix("Unknown:")
+            .and_then(|s| s.strip_suffix(":ungraded"))
+            .unwrap_or(&scope);
+        let subject = format!("{display_scope} node {node}");
         let exemplar = |code: &'static str, invocation: &Invocation, detail: String| Signal {
             id: id(code, &subject),
             code,
@@ -565,7 +810,12 @@ fn exemplars(query: &Query, invocations: &[Invocation]) -> Vec<Signal> {
             runs: 1,
             coordinates: situate(query, invocation.config().map(str::to_owned)).0,
             coordinates_total: usize::from(invocation.config().is_some()),
-            evidence: invocation.evidence().into_iter().take(CITED).collect(),
+            evidence: invocation
+                .evidence()
+                .into_iter()
+                .filter(allowed)
+                .take(CITED)
+                .collect(),
             evidence_total: invocation.evidence().len(),
         };
         let &(cheapest, tokens) = peers
@@ -626,4 +876,138 @@ fn exemplars(query: &Query, invocations: &[Invocation]) -> Vec<Signal> {
     }
     found.sort_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.id.cmp(&b.1.id)));
     found.into_iter().map(|(_, signal)| signal).collect()
+}
+
+/// Capability availability is independent of whether efficiency signals exist.
+pub fn applicability(
+    query: &Query,
+    invocations: &[Invocation],
+) -> anchor_facts::window::Applicability {
+    use anchor_facts::window::{Applicability, CapabilityStatus as Status};
+    let tasks = query.tasks();
+    let runs: BTreeSet<_> = tasks
+        .iter()
+        .filter_map(|task| {
+            task.entry
+                .id
+                .strip_prefix("run/")
+                .map(|run| (task.namespace, run))
+        })
+        .collect();
+    let observed = group_by(
+        invocations
+            .iter()
+            .filter(|invocation| invocation.has_model_observations()),
+        |invocation| invocation.run_key(),
+    );
+    let measured = group_by(
+        invocations
+            .iter()
+            .filter(|invocation| invocation.has_model_work()),
+        |invocation| invocation.run_key(),
+    );
+    let grades = query.grades();
+    let grade_conflicts = query.grade_conflicts().len();
+    let graph_conflicts = invocations
+        .iter()
+        .filter(|invocation| invocation.graph_conflict())
+        .count();
+    let legacy_v1_configurations = query
+        .configurations()
+        .filter(|(_, config)| config.version == anchor_facts::LEGACY_CONFIGURATION_VERSION)
+        .count();
+    let missing_observations = runs
+        .iter()
+        .filter(|run| !observed.contains_key(*run))
+        .count();
+    let missing_runs = observed.keys().filter(|run| !runs.contains(*run)).count();
+    let population: BTreeSet<_> = runs
+        .iter()
+        .copied()
+        .chain(observed.keys().copied())
+        .collect();
+    let graded_runs = population
+        .iter()
+        .filter(|run| grades.contains_key(*run))
+        .count();
+    let ungraded = population.len().saturating_sub(graded_runs);
+    let status = |available: bool, empty: bool, partial: bool| {
+        if !available {
+            Status::NotAuthorizedOrMissingSource
+        } else if empty {
+            Status::EmptyInScope
+        } else if partial {
+            Status::PartialCoverage
+        } else {
+            Status::Analyzable
+        }
+    };
+    Applicability {
+        run_lifecycle: status(
+            query.has_run_source(),
+            runs.is_empty(),
+            missing_observations > 0,
+        ),
+        observations: if graph_conflicts > 0 {
+            Status::Conflict
+        } else {
+            status(
+                query.has_observation_source(),
+                observed.is_empty(),
+                query.has_run_source() && (missing_runs > 0 || missing_observations > 0),
+            )
+        },
+        grades: if grade_conflicts > 0 {
+            Status::Conflict
+        } else if !query.has_grade_source() {
+            Status::NotAuthorizedOrMissingSource
+        } else if grades.is_empty() {
+            Status::EmptyInScope
+        } else if graded_runs == 0 {
+            Status::NoMatchingGrades
+        } else if ungraded > 0 {
+            Status::PartialCoverage
+        } else {
+            Status::Analyzable
+        },
+        stable_configurations: if graph_conflicts > 0 {
+            Status::Conflict
+        } else {
+            status(
+                query.configurations().next().is_some(),
+                observed.is_empty(),
+                legacy_v1_configurations > 0
+                    || invocations.iter().any(|invocation| {
+                        invocation.has_model_observations()
+                            && invocation
+                                .config()
+                                .and_then(|digest| query.configuration(digest))
+                                .is_none_or(|configuration| !configuration.is_stable())
+                    }),
+            )
+        },
+        runs_without_observations: query.has_run_source().then_some(missing_observations),
+        observations_without_runs: query.has_run_source().then_some(missing_runs),
+        ungraded_runs: (query.has_run_source() || !population.is_empty()).then_some(ungraded),
+        graded_runs,
+        complete_token_runs: measured
+            .values()
+            .filter(|invocations| {
+                crate::query::usage(invocations.iter().copied())
+                    .total_tokens()
+                    .is_some()
+            })
+            .count(),
+        complete_cost_runs: measured
+            .values()
+            .filter(|invocations| {
+                crate::query::usage(invocations.iter().copied())
+                    .cost_usd()
+                    .is_some()
+            })
+            .count(),
+        legacy_v1_configurations,
+        grade_conflicts,
+        graph_conflicts,
+    }
 }

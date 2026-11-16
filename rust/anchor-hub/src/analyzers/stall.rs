@@ -1,6 +1,6 @@
 //! Stall candidates: Runs without recent records, and within invocations the
 //! stretches where nothing was observed, tool calls and model turns far
-//! slower than their peers, and the same failing call repeated.
+//! slower than their peers, and same-shape failure stretches across requests.
 
 use std::collections::BTreeMap;
 
@@ -17,8 +17,7 @@ pub struct Stall {
     pub floor_ms: u64,
     /// ... and at least this many times the median of its peers.
     pub factor: u64,
-    /// This many consecutive failed calls of one tool with arguments of one
-    /// shape is a loop.
+    /// The minimum same-shape failure stretch worth reporting as a weak clue.
     pub repeats: usize,
 }
 
@@ -67,7 +66,7 @@ impl Analyzer for Stall {
             self.gaps(&invocations, &mut report);
             self.slow(&invocations, &mut report);
         }
-        self.loops(&invocations, &mut report);
+        self.failure_stretches(&invocations, &mut report);
         report
     }
 }
@@ -91,7 +90,10 @@ impl Stall {
             let run = task.entry.id.strip_prefix("run/");
             let observed: Vec<_> = invocations
                 .iter()
-                .filter(|invocation| run == Some(invocation.run_id.as_str()))
+                .filter(|invocation| {
+                    task.namespace == invocation.namespace
+                        && run == Some(invocation.run_id.as_str())
+                })
                 .collect();
             if status == Status::Executing
                 && observed
@@ -226,7 +228,7 @@ impl Stall {
         }
     }
 
-    fn loops(&self, invocations: &[Invocation], report: &mut Report) {
+    fn failure_stretches(&self, invocations: &[Invocation], report: &mut Report) {
         for invocation in invocations {
             let calls = invocation.calls();
             for stretch in repeats(&calls, self.repeats, |c| (c.tool, c.arguments_shape, c.ok)) {
@@ -234,14 +236,69 @@ impl Stall {
                 if first.ok {
                     continue;
                 }
+                let requests = calls[stretch.clone()]
+                    .iter()
+                    .map(|call| call.model_request)
+                    .collect::<std::collections::BTreeSet<_>>();
+                // Calls in one model response are parallel alternatives, not
+                // sequential retries observed by the model.
+                if requests.len() < 2 {
+                    continue;
+                }
+                let failures = group_by(&calls[stretch.clone()], |call| {
+                    json!(call.failure)
+                        .as_str()
+                        .unwrap_or("unclassified")
+                        .to_owned()
+                });
+                let failure = if failures.len() == 1 {
+                    failures.into_keys().next().expect("nonempty stretch")
+                } else {
+                    failures
+                        .into_iter()
+                        .map(|(class, calls)| format!("{class}: {}", calls.len()))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+                let programs = calls[stretch.clone()]
+                    .iter()
+                    .filter_map(|call| call.program)
+                    .collect::<std::collections::BTreeSet<_>>();
+                let shell_programs = calls[stretch.clone()]
+                    .iter()
+                    .filter_map(|call| call.shell_program)
+                    .collect::<std::collections::BTreeSet<_>>();
+                let hints = if programs.len() > 1 || shell_programs.len() > 1 {
+                    let mut details = Vec::new();
+                    if !programs.is_empty() {
+                        details.push(format!(
+                            "program hints: {}",
+                            programs.into_iter().collect::<Vec<_>>().join(", ")
+                        ));
+                    }
+                    if !shell_programs.is_empty() {
+                        details.push(format!(
+                            "shell-program hints: {}",
+                            shell_programs.into_iter().collect::<Vec<_>>().join(", ")
+                        ));
+                    }
+                    format!(
+                        "; {} (command identity is not established)",
+                        details.join("; ")
+                    )
+                } else {
+                    String::new()
+                };
                 report.findings.push(Finding {
-                    code: "repeated_failure",
+                    code: "consecutive_same_shape_failures",
                     subject: invocation.key(),
                     detail: format!(
-                        "{} consecutive failed {} calls with arguments of one shape ({})",
+                        "{} consecutive failed {} calls shared one argument shape ({}) across {} model requests; operations/targets may differ, retry loop unconfirmed{}",
                         stretch.len(),
                         first.tool,
-                        json!(first.failure).as_str().unwrap_or("unclassified")
+                        failure,
+                        requests.len(),
+                        hints,
                     ),
                     evidence: invocation.evidence(),
                 });

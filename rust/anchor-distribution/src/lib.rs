@@ -12,12 +12,14 @@ mod validation;
 pub use deb::{NativeDebReport, NativeDebRequest, build_native_deb};
 pub use install::{
     PlatformInstallReport, PlatformInstallRequest, install_platform, platform_command,
-    platform_command_with_listen, platform_plugin_inventory, validate_platform_runtime,
+    platform_command_with_listen, platform_evaluation_package, platform_evaluator_inventory,
+    platform_inventory, platform_plugin_inventory, validate_platform_runtime,
 };
 pub use platform::{
-    BootstrapInventory, BootstrapTool, PIXI_SHA256, PIXI_SOURCE, PIXI_VERSION,
-    PlatformPackageInventory, PlatformPackageReport, PlatformPackageRequest, RUSTUP_INIT_SHA256,
-    RUSTUP_INIT_SOURCE, RUSTUP_INIT_VERSION, UV_SHA256, UV_SOURCE, UV_VERSION,
+    BootstrapInventory, BootstrapTool, LARK_CLI_SHA256, LARK_CLI_VERSION, PIXI_SHA256, PIXI_SOURCE,
+    PIXI_VERSION, PlatformEvaluatorInventory, PlatformGuidanceInventory, PlatformPackageInventory,
+    PlatformPackageReport, PlatformPackageRequest, RUSTUP_INIT_SHA256, RUSTUP_INIT_SOURCE,
+    RUSTUP_INIT_VERSION, RegisteredEvaluationPackage, UV_SHA256, UV_SOURCE, UV_VERSION,
     build_platform_package,
 };
 pub use rpm::{NativeRpmReport, NativeRpmRequest, build_native_rpm};

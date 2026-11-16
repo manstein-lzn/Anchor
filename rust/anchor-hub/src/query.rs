@@ -3,7 +3,7 @@
 //! timelines and the gaps in them, grouping, repetition and distributions.
 //! Analyzers see the data only through this module.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 
 pub use anchor_facts::{AgentConfiguration, Failure, Grade, Outcome};
@@ -41,6 +41,46 @@ impl<'a> Query<'a> {
         self.facts.configurations.get(digest)
     }
 
+    /// Peer comparisons must not let experimental or unknown work redefine
+    /// the production population, even when the stable configuration matches.
+    pub fn with_provenance<R>(
+        &self,
+        provenance: anchor_facts::ProvenanceCategory,
+        analyze: impl FnOnce(&Query<'_>) -> R,
+    ) -> R {
+        let provenances = self.provenances();
+        let allowed = |namespace: &str, resource: &str| {
+            anchor_facts::window::resource_run(resource).is_none_or(|run| {
+                provenances
+                    .get(&(namespace, run))
+                    .copied()
+                    .unwrap_or_default()
+                    == provenance
+            })
+        };
+        let rows: Vec<_> = self
+            .rows()
+            .iter()
+            .filter(|row| allowed(&row.namespace, &row.key.resource))
+            .cloned()
+            .collect();
+        let resources: BTreeMap<_, _> = self
+            .facts
+            .resources
+            .iter()
+            .filter(|(_, entry)| allowed(&entry.namespace, &entry.id))
+            .map(|(key, entry)| (key.clone(), entry.clone()))
+            .collect();
+        analyze(&Query::new(
+            Facts {
+                rows: &rows,
+                resources: &resources,
+                ..self.facts
+            },
+            self.now,
+        ))
+    }
+
     /// A content-addressed environment description in the same fact root.
     pub fn manifest(&self, digest: &str) -> Option<&'a serde_json::Value> {
         self.facts.manifests.get(digest)
@@ -56,6 +96,7 @@ impl<'a> Query<'a> {
 
     /// Task resources, each with its records in place order.
     pub fn tasks(&self) -> Vec<Task<'a>> {
+        let provenances = self.provenances();
         let mut rows: BTreeMap<(&str, &str), Vec<&'a Row>> = BTreeMap::new();
         for row in self.facts.rows {
             rows.entry((&row.key.root, &row.key.resource))
@@ -67,6 +108,10 @@ impl<'a> Query<'a> {
             .values()
             .filter(|entry| entry.status.is_some())
             .map(|entry| Task {
+                namespace: &entry.namespace,
+                provenance: anchor_facts::window::resource_run(&entry.id)
+                    .and_then(|run| provenances.get(&(entry.namespace.as_str(), run)).copied())
+                    .unwrap_or(entry.provenance),
                 entry,
                 rows: rows
                     .remove(&(entry.root.as_str(), entry.id.as_str()))
@@ -79,7 +124,19 @@ impl<'a> Query<'a> {
     /// history, observations of it, or both. One side alone is a dangling
     /// edge, kept so that it can be counted.
     pub fn invocations(&self) -> Vec<Invocation<'a>> {
-        let mut found: BTreeMap<(String, String, u64), Invocation<'a>> = BTreeMap::new();
+        let provenances = self.provenances();
+        let mut found: BTreeMap<(String, String, String, u64), Invocation<'a>> = BTreeMap::new();
+        let mut run_graphs: BTreeMap<(&str, &str), BTreeSet<String>> = BTreeMap::new();
+        for entry in self.resources() {
+            if let (Some(run), Some(graph)) =
+                (entry.id.strip_prefix("run/"), entry.graph_digest.as_ref())
+            {
+                run_graphs
+                    .entry((&entry.namespace, run))
+                    .or_default()
+                    .insert(graph.clone());
+            }
+        }
         for row in self.facts.rows {
             let (run, node, invocation) = match &row.body {
                 Body::Observation(observation) if row.verdict.effect == Effect::Accepted => {
@@ -93,8 +150,22 @@ impl<'a> Query<'a> {
                 _ => continue,
             };
             let entry = found
-                .entry((run.to_owned(), node.to_owned(), invocation))
+                .entry((
+                    row.namespace.clone(),
+                    run.to_owned(),
+                    node.to_owned(),
+                    invocation,
+                ))
                 .or_insert_with(|| Invocation {
+                    namespace: row.namespace.clone(),
+                    provenance: provenances
+                        .get(&(row.namespace.as_str(), run))
+                        .copied()
+                        .unwrap_or_default(),
+                    graph_digests: run_graphs
+                        .get(&(row.namespace.as_str(), run))
+                        .cloned()
+                        .unwrap_or_default(),
                     run_id: run.to_owned(),
                     node_id: node.to_owned(),
                     invocation,
@@ -103,12 +174,22 @@ impl<'a> Query<'a> {
                     details: self
                         .facts
                         .details
-                        .get(&(run.to_owned(), node.to_owned(), invocation))
+                        .get(&(
+                            row.namespace.clone(),
+                            run.to_owned(),
+                            node.to_owned(),
+                            invocation,
+                        ))
                         .map(Vec::as_slice)
                         .unwrap_or_default(),
                 });
             match &row.body {
-                Body::Observation(observation) => entry.traces.push(Trace { row, observation }),
+                Body::Observation(observation) => {
+                    entry
+                        .graph_digests
+                        .insert(observation.invocation.graph_digest.clone());
+                    entry.traces.push(Trace { row, observation });
+                }
                 _ => {
                     entry.result.get_or_insert(row);
                 }
@@ -119,24 +200,140 @@ impl<'a> Query<'a> {
 }
 
 impl<'a> Query<'a> {
-    /// The latest accepted grade of each graded Run, by Run id.
-    pub fn grades(&self) -> BTreeMap<&'a str, Graded<'a>> {
-        let mut grades = BTreeMap::new();
+    /// Latest accepted position per authoritative history, never root order.
+    fn grade_histories(&self) -> BTreeMap<(&'a str, &'a str), Vec<Graded<'a>>> {
+        let mut histories: BTreeMap<(&str, &str), Graded<'a>> = BTreeMap::new();
         for row in self.facts.rows {
             if let Body::Grade(grade) = &row.body
                 && row.verdict.effect == Effect::Accepted
             {
-                // Rows of one history come in place order: later wins.
-                grades.insert(grade.run_id.as_str(), Graded { row, grade });
+                let key = (row.key.root.as_str(), row.key.resource.as_str());
+                if histories
+                    .get(&key)
+                    .is_none_or(|previous| previous.row.key.place < row.key.place)
+                {
+                    histories.insert(
+                        key,
+                        Graded {
+                            namespace: &row.namespace,
+                            row,
+                            grade,
+                        },
+                    );
+                }
             }
         }
-        grades
+        let mut runs: BTreeMap<_, Vec<_>> = BTreeMap::new();
+        for graded in histories.into_values() {
+            runs.entry((graded.namespace, graded.grade.run_id.as_str()))
+                .or_default()
+                .push(graded);
+        }
+        runs
+    }
+
+    /// Only runs with one authoritative grade history are usable as quality.
+    pub fn grades(&self) -> BTreeMap<(&'a str, &'a str), Graded<'a>> {
+        self.grade_histories()
+            .into_iter()
+            .filter_map(|(run, histories)| (histories.len() == 1).then(|| (run, histories[0])))
+            .collect()
+    }
+
+    pub fn grade_conflicts(&self) -> BTreeMap<(&'a str, &'a str), Vec<Graded<'a>>> {
+        self.grade_histories()
+            .into_iter()
+            .filter(|(_, histories)| histories.len() > 1)
+            .collect()
+    }
+
+    pub fn namespace(&self, root: &str) -> Option<&'a str> {
+        self.facts
+            .sources
+            .get(root)
+            .map(|(namespace, _)| namespace.as_str())
+    }
+
+    pub fn provenance(&self, namespace: &str, run: &str) -> anchor_facts::ProvenanceCategory {
+        self.provenances()
+            .get(&(namespace, run))
+            .copied()
+            .unwrap_or_default()
+    }
+
+    pub fn provenances(&self) -> BTreeMap<(&'a str, &'a str), anchor_facts::ProvenanceCategory> {
+        use anchor_facts::ProvenanceCategory as P;
+        let mut categories: BTreeMap<_, BTreeSet<_>> = BTreeMap::new();
+        for (namespace, resource, provenance) in self
+            .resources()
+            .map(|e| (e.namespace.as_str(), e.id.as_str(), e.provenance))
+            .chain(
+                self.rows()
+                    .iter()
+                    .map(|r| (r.namespace.as_str(), r.key.resource.as_str(), r.provenance)),
+            )
+        {
+            if let Some(run) = anchor_facts::window::resource_run(resource) {
+                let set = categories.entry((namespace, run)).or_default();
+                if provenance != P::Unknown {
+                    set.insert(provenance);
+                }
+            }
+        }
+        categories
+            .into_iter()
+            .map(|(key, set)| {
+                (
+                    key,
+                    if set.len() == 1 {
+                        *set.first().expect("one")
+                    } else {
+                        P::Unknown
+                    },
+                )
+            })
+            .collect()
+    }
+
+    pub fn has_run_source(&self) -> bool {
+        self.facts
+            .sources
+            .values()
+            .any(|(_, capabilities)| capabilities.runs)
+            || self.resources().any(|entry| {
+                entry.id == "validator/graph"
+                    || entry.id == "validator/run"
+                    || entry.id == "validator/step"
+                    || entry.id.starts_with("run/")
+            })
+    }
+
+    pub fn has_observation_source(&self) -> bool {
+        self.facts
+            .sources
+            .values()
+            .any(|(_, capabilities)| capabilities.observations)
+            || self.resources().any(|entry| {
+                entry.id == anchor_facts::OBSERVATION
+                    || entry.validator == anchor_facts::OBSERVATION
+            })
+    }
+
+    pub fn has_grade_source(&self) -> bool {
+        self.facts
+            .sources
+            .values()
+            .any(|(_, capabilities)| capabilities.grades)
+            || self.resources().any(|entry| {
+                entry.id == anchor_facts::GRADE || entry.validator == anchor_facts::GRADE
+            })
     }
 }
 
 /// A grade and the record it came from.
 #[derive(Clone, Copy)]
 pub struct Graded<'a> {
+    pub namespace: &'a str,
     pub row: &'a Row,
     pub grade: &'a Grade,
 }
@@ -155,6 +352,8 @@ pub fn node_result(row: &Row) -> Option<(&str, &str, u64)> {
 // ---------------------------------------------------------------------------
 
 pub struct Task<'a> {
+    pub provenance: anchor_facts::ProvenanceCategory,
+    pub namespace: &'a str,
     pub entry: &'a Entry,
     pub rows: Vec<&'a Row>,
 }
@@ -202,6 +401,9 @@ pub struct Trace<'a> {
 }
 
 pub struct Invocation<'a> {
+    pub provenance: anchor_facts::ProvenanceCategory,
+    pub namespace: String,
+    graph_digests: BTreeSet<String>,
     pub run_id: String,
     pub node_id: String,
     pub invocation: u64,
@@ -418,6 +620,9 @@ pub struct Call<'a> {
     pub path: Option<anchor_facts::PathClass>,
     /// The program a command tool was asked to run.
     pub program: Option<&'a str>,
+    /// A shell-wrapped command's first program hint, when recorded. This is
+    /// descriptive only; `program` remains the authoritative tool program.
+    pub shell_program: Option<&'a str>,
     /// How that command ended; `None` when unrecorded or not a command.
     pub command: Option<anchor_facts::CommandEnd>,
     pub started_at_ms: Option<u64>,
@@ -519,6 +724,22 @@ pub fn covered(spans: impl IntoIterator<Item = Range<u64>>) -> u64 {
 }
 
 impl<'a> Invocation<'a> {
+    pub fn run_key(&self) -> (&str, &str) {
+        (&self.namespace, &self.run_id)
+    }
+
+    pub fn qualified_key(&self) -> String {
+        format!("{}::{}", self.namespace, self.key())
+    }
+
+    pub fn graph_digest(&self) -> Option<&str> {
+        (self.graph_digests.len() == 1)
+            .then(|| self.graph_digests.first().expect("one graph").as_str())
+    }
+
+    pub fn graph_conflict(&self) -> bool {
+        self.graph_digests.len() > 1
+    }
     pub fn key(&self) -> String {
         format!("{}/{}#{}", self.run_id, self.node_id, self.invocation)
     }
@@ -627,6 +848,9 @@ impl<'a> Invocation<'a> {
 
     /// The configuration the observations were recorded under.
     pub fn config(&self) -> Option<&'a str> {
+        if self.graph_conflict() {
+            return None;
+        }
         self.traces.iter().find_map(|t| t.row.config.as_deref())
     }
 
@@ -706,6 +930,7 @@ impl<'a> Invocation<'a> {
                     arguments_shape,
                     path,
                     program,
+                    shell_program,
                     command,
                     started_at_ms,
                     ended_at_ms,
@@ -719,6 +944,7 @@ impl<'a> Invocation<'a> {
                     arguments_shape,
                     path: *path,
                     program: program.as_deref(),
+                    shell_program: shell_program.as_deref(),
                     command: *command,
                     started_at_ms: *started_at_ms,
                     ended_at_ms: *ended_at_ms,
@@ -873,7 +1099,8 @@ impl<'a> Invocation<'a> {
 fn model_observation(fact: &anchor_facts::Fact) -> bool {
     matches!(
         fact,
-        anchor_facts::Fact::Lifecycle { .. }
+        anchor_facts::Fact::RequestContext { .. }
+            | anchor_facts::Fact::Lifecycle { .. }
             | anchor_facts::Fact::ModelUsage { .. }
             | anchor_facts::Fact::ModelTurn { .. }
             | anchor_facts::Fact::ToolCall { .. }

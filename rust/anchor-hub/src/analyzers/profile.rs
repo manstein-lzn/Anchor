@@ -38,9 +38,13 @@ impl Analyzer for Profile {
             return report;
         }
         let invocations = query.invocations();
+        report.summary.insert(
+            "applicability",
+            json!(super::signals::applicability(query, &invocations)),
+        );
         let grades = query.grades();
         let by_run = group_by(invocations.iter().filter(|i| i.has_model_work()), |i| {
-            i.run_id.as_str()
+            i.run_key()
         });
         // A Run's scope: its graded task, or else the Graph and node of its
         // invocations.
@@ -58,7 +62,7 @@ impl Analyzer for Profile {
                 ),
             };
             scopes.entry(scope).or_default().push(measure(
-                run,
+                &format!("{}::{}", run.0, run.1),
                 observed,
                 grades.get(run).map(|g| g.grade.score()),
             ));

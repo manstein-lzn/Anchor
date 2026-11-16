@@ -12,13 +12,9 @@ use crate::query::{
     node_result, summarize, usage,
 };
 
-/// Evidence cited per finding, at most. Signals count the Runs a finding
-/// reaches from its evidence, so this bounds that count too.
+/// Evidence cited per public Health finding. Internal signal aggregation
+/// selects its own authorized citations after counting the full support.
 const CITED: usize = 2000;
-/// A check failing in any of a task's graded Runs is reported, once the task
-/// has at least this many: a check that fails now and then is still a
-/// quality gap, and the rate says how big.
-const FAILING_RUNS: usize = 3;
 /// A configuration whose invocations spend this share of their time before
 /// the first model request is reported.
 const STARTUP_SHARE: f64 = 0.1;
@@ -39,6 +35,16 @@ impl Analyzer for Health {
     }
 
     fn analyze(&self, query: &Query) -> Report {
+        self.analyze_with_limit(query, CITED)
+    }
+}
+
+impl Health {
+    pub(super) fn analyze_for_signals(&self, query: &Query) -> Report {
+        self.analyze_with_limit(query, usize::MAX)
+    }
+
+    fn analyze_with_limit(&self, query: &Query, citation_limit: usize) -> Report {
         let mut report = Report {
             analyzer: self.id(),
             version: self.version(),
@@ -47,26 +53,51 @@ impl Analyzer for Health {
             findings: Vec::new(),
         };
         let invocations = query.invocations();
-        records(query, &mut report);
-        tasks(query, &mut report);
+        report.summary.insert(
+            "applicability",
+            json!(super::signals::applicability(query, &invocations)),
+        );
+        for invocation in invocations
+            .iter()
+            .filter(|invocation| invocation.graph_conflict())
+        {
+            report.findings.push(Finding {
+                code: "conflicting_invocation_graph",
+                subject: invocation.qualified_key(),
+                detail:
+                    "Accepted invocation traces or Run metadata carry conflicting Graph identities"
+                        .into(),
+                evidence: invocation.evidence(),
+            });
+        }
+        for ((namespace, run), grades) in query.grade_conflicts() {
+            report.findings.push(Finding {
+                code: "conflicting_grades",
+                subject: format!("{namespace}::{run}"),
+                detail: "Multiple authoritative grade histories; no quality grade selected".into(),
+                evidence: grades.iter().map(|grade| grade.row.key.clone()).collect(),
+            });
+        }
+        records(query, &mut report, citation_limit);
+        tasks(query, &mut report, citation_limit);
         if !report.not_applicable.contains(&Need::Observations) {
             coverage(query, &invocations, &mut report);
-            tools(&invocations, &mut report);
+            tools(&invocations, &mut report, citation_limit);
             turns(&invocations, &mut report);
             if !report.not_applicable.contains(&Need::Time) {
                 steps(query, &invocations, &mut report);
             }
-            configurations(query, &invocations, &mut report);
+            configurations(query, &invocations, &mut report, citation_limit);
         }
         if !report.not_applicable.contains(&Need::Grades) {
-            quality(query, &invocations, &mut report);
+            quality(query, &invocations, &mut report, citation_limit);
         }
         report
     }
 }
 
-fn cite(keys: impl IntoIterator<Item = Key>) -> Vec<Key> {
-    keys.into_iter().take(CITED).collect()
+fn cite(keys: impl IntoIterator<Item = Key>, limit: usize) -> Vec<Key> {
+    keys.into_iter().take(limit).collect()
 }
 
 fn share(part: usize, whole: usize) -> Value {
@@ -79,7 +110,7 @@ fn share(part: usize, whole: usize) -> Value {
 
 /// Kernel fields: how many records, how many stamped, and every verdict that
 /// was not an acceptance.
-fn records(query: &Query, report: &mut Report) {
+fn records(query: &Query, report: &mut Report, citation_limit: usize) {
     let rows = query.rows();
     let roots: BTreeSet<&str> = rows.iter().map(|r| r.key.root.as_str()).collect();
     report.summary.insert(
@@ -129,7 +160,7 @@ fn records(query: &Query, report: &mut Report) {
             code: "not_accepted",
             subject: format!("{kind}/*"),
             detail: format!("{} submission(s) {effect}: {reason}", rows.len()),
-            evidence: cite(rows.iter().map(|r| r.key.clone())),
+            evidence: cite(rows.iter().map(|r| r.key.clone()), citation_limit),
         });
     }
 }
@@ -139,7 +170,7 @@ fn kind(id: &str) -> &str {
     id.split('/').next().unwrap_or(id)
 }
 
-fn tasks(query: &Query, report: &mut Report) {
+fn tasks(query: &Query, report: &mut Report, citation_limit: usize) {
     let tasks = query.tasks();
     let statuses = group_by(&tasks, |task| {
         json!(task.entry.status)
@@ -169,7 +200,7 @@ fn tasks(query: &Query, report: &mut Report) {
                 code: "task_not_done",
                 subject: task.entry.id.clone(),
                 detail: format!("settled as {}", json!(status)),
-                evidence: cite(task.rows.last().map(|r| r.key.clone())),
+                evidence: cite(task.rows.last().map(|r| r.key.clone()), citation_limit),
             });
         }
     }
@@ -178,15 +209,20 @@ fn tasks(query: &Query, report: &mut Report) {
 /// Whether both sides of every invocation were recorded, and whether the
 /// observations agree with themselves.
 fn coverage(query: &Query, invocations: &[Invocation], report: &mut Report) {
-    let observed_runs: BTreeSet<&str> = invocations
+    let observed_runs: BTreeSet<(&str, &str)> = invocations
         .iter()
         .filter(|i| i.has_model_observations())
-        .map(|i| i.run_id.as_str())
+        .map(|i| i.run_key())
         .collect();
-    let known_runs: BTreeSet<String> = query
+    let known_runs: BTreeSet<(String, String)> = query
         .tasks()
         .iter()
-        .filter_map(|t| t.entry.id.strip_prefix("run/").map(str::to_owned))
+        .filter_map(|t| {
+            t.entry
+                .id
+                .strip_prefix("run/")
+                .map(|run| (t.namespace.to_owned(), run.to_owned()))
+        })
         .collect();
     let mut unobserved = Vec::new();
     let mut orphans = Vec::new();
@@ -195,12 +231,14 @@ fn coverage(query: &Query, invocations: &[Invocation], report: &mut Report) {
             // A node that spent model requests in a Run whose other
             // invocations were observed: the recorder missed this one.
             (Some(result), true)
-                if result.cost > 0 && observed_runs.contains(invocation.run_id.as_str()) =>
+                if result.cost > 0 && observed_runs.contains(&invocation.run_key()) =>
             {
                 unobserved.push(invocation)
             }
             (None, false)
-                if known_runs.contains(&invocation.run_id) && !invocation.waiting_for_input() =>
+                if known_runs
+                    .contains(&(invocation.namespace.clone(), invocation.run_id.clone()))
+                    && !invocation.waiting_for_input() =>
             {
                 orphans.push(invocation)
             }
@@ -329,8 +367,8 @@ fn coverage(query: &Query, invocations: &[Invocation], report: &mut Report) {
     }
 }
 
-/// Tool efficiency: frequency, success, failure classes, duration, and calls
-/// the model had to correct.
+/// Tool efficiency: frequency, success, failure classes, duration, and
+/// same-tool later-success clues without causal attribution.
 /// How a command ended, as a class name.
 fn command_class(end: anchor_facts::CommandEnd) -> &'static str {
     use anchor_facts::CommandStatus;
@@ -342,7 +380,7 @@ fn command_class(end: anchor_facts::CommandEnd) -> &'static str {
     }
 }
 
-fn tools(invocations: &[Invocation], report: &mut Report) {
+fn tools(invocations: &[Invocation], report: &mut Report, citation_limit: usize) {
     let calls: Vec<(&Invocation, Call)> = invocations
         .iter()
         .flat_map(|i| i.calls().into_iter().map(move |c| (i, c)))
@@ -415,7 +453,7 @@ fn tools(invocations: &[Invocation], report: &mut Report) {
                 .count();
             let mut keys: Vec<Key> = ended.iter().flat_map(|(i, _, _)| i.evidence()).collect();
             keys.dedup();
-            let runs: BTreeSet<&str> = ended.iter().map(|(i, _, _)| i.run_id.as_str()).collect();
+            let runs: BTreeSet<(&str, &str)> = ended.iter().map(|(i, _, _)| i.run_key()).collect();
             report.findings.push(Finding {
                 code: if class == "exit_nonzero" {
                     "command_nonzero"
@@ -433,7 +471,7 @@ fn tools(invocations: &[Invocation], report: &mut Report) {
                     },
                     runs.len(),
                 ),
-                evidence: cite(keys),
+                evidence: cite(keys, citation_limit),
             });
         }
         for (class, failed) in failures {
@@ -465,32 +503,28 @@ fn tools(invocations: &[Invocation], report: &mut Report) {
                         format!(", on {} path(s)", paths.join(", "))
                     }
                 ),
-                evidence: cite(keys),
+                evidence: cite(keys, citation_limit),
             });
         }
     }
     report.summary.insert("tools", json!(summary));
 
-    // A failed call followed, in the same invocation, by a successful call of
-    // the same tool: the model recovered from the refusal. Arguments of another
-    // shape mean it changed how it asked; the same shape means it changed only
-    // the value, which is what a rejected path looks like from here. Both are
-    // recoveries, so both count, and the count is of failed calls rather than
-    // of the invocations they happened in.
-    let mut corrected: BTreeMap<String, (usize, usize, Vec<&Invocation>)> = BTreeMap::new();
+    // A weak clue only: a later model request used the same tool
+    // successfully. Parallel calls in one request do not qualify because the
+    // model could not yet have observed the earlier failure.
+    let mut followed: BTreeMap<String, (usize, usize, Vec<&Invocation>)> = BTreeMap::new();
     for invocation in invocations {
         let calls = invocation.calls();
         for (index, call) in calls.iter().enumerate() {
             if call.ok {
                 continue;
             }
-            let Some(later) = calls[index + 1..]
-                .iter()
-                .find(|later| later.tool == call.tool && later.done())
-            else {
+            let Some(later) = calls[index + 1..].iter().find(|later| {
+                later.tool == call.tool && later.done() && later.model_request > call.model_request
+            }) else {
                 continue;
             };
-            let entry = corrected.entry(call.tool.to_owned()).or_default();
+            let entry = followed.entry(call.tool.to_owned()).or_default();
             entry.2.push(invocation);
             if later.arguments_shape == call.arguments_shape {
                 entry.1 += 1;
@@ -499,18 +533,19 @@ fn tools(invocations: &[Invocation], report: &mut Report) {
             }
         }
     }
-    for (tool, (reshaped, revalued, invocations)) in corrected {
+    for (tool, (reshaped, revalued, invocations)) in followed {
         let mut keys: Vec<Key> = invocations.iter().flat_map(|i| i.evidence()).collect();
         keys.dedup();
         report.findings.push(Finding {
-            code: "call_corrected",
+            code: "same_tool_after_failure",
             subject: format!("tool {tool}"),
             detail: format!(
-                "{} failed call(s) were followed by a successful call of the same tool: \
-                 {reshaped} with arguments of another shape, {revalued} with arguments of the same shape",
-                reshaped + revalued
+                "{} failed call(s) were followed in a later model request by a successful call of the same tool: \
+                 {reshaped} reshaped (different argument shape), {revalued} revalued (same argument shape); \
+                 causal repair or resolution of the original failure is unconfirmed (commands/targets may be unrelated)",
+                reshaped + revalued,
             ),
-            evidence: cite(keys),
+            evidence: cite(keys, citation_limit),
         });
     }
 }
@@ -625,12 +660,20 @@ fn steps(query: &Query, invocations: &[Invocation], report: &mut Report) {
 
 /// Per configuration: the same node under different configurations is what
 /// a later comparison would contrast.
-fn configurations(query: &Query, invocations: &[Invocation], report: &mut Report) {
+fn configurations(
+    query: &Query,
+    invocations: &[Invocation],
+    report: &mut Report,
+    citation_limit: usize,
+) {
     let observed = invocations.iter().filter(|i| i.has_model_observations());
     let by_config = group_by(observed, |i| i.config().unwrap_or("").to_owned());
     let mut summary = BTreeMap::new();
     for (digest, invocations) in &by_config {
         let manifest = query.configuration(digest);
+        if manifest.is_some_and(|configuration| !configuration.is_stable()) {
+            report.findings.push(Finding { code: "legacy_unstable_config", subject: digest.to_owned(), detail: "Legacy v1 configuration binds dynamic request text; retained for observations, excluded from stable harness comparisons".into(), evidence: cite(invocations.iter().flat_map(|invocation| invocation.evidence()), citation_limit) });
+        }
         // Startup: from the invocation's start to its first observed
         // activity, the harness's fixed cost before the model is asked.
         let startup: Vec<(u64, u64)> = invocations
@@ -661,6 +704,7 @@ fn configurations(query: &Query, invocations: &[Invocation], report: &mut Report
                 "plugins": manifest.map(|m| m.plugins.len()),
                 "known": manifest.is_some(),
                 "invocations": invocations.len(),
+                "legacy_unstable_config": manifest.is_some_and(|configuration| !configuration.is_stable()),
                 "turns": summarize(invocations.iter().map(|i| i.usage().totals.messages)),
                 "tool_calls": summarize(invocations.iter().map(|i| i.calls().len() as u64)),
                 "tokens": summarize(invocations.iter().filter_map(|i| i.usage().total_tokens())),
@@ -684,7 +728,7 @@ fn configurations(query: &Query, invocations: &[Invocation], report: &mut Report
                     part * 100.0,
                     summarize(startup.iter().map(|(gap, _)| *gap)).map_or(0, |s| s.median)
                 ),
-                evidence: cite(invocations.iter().flat_map(|i| i.evidence())),
+                evidence: cite(invocations.iter().flat_map(|i| i.evidence()), citation_limit),
             });
         }
         if manifest.is_none() {
@@ -695,7 +739,10 @@ fn configurations(query: &Query, invocations: &[Invocation], report: &mut Report
                     "{} invocation(s) recorded under a configuration with no readable manifest",
                     invocations.len()
                 ),
-                evidence: cite(invocations.iter().flat_map(|i| i.evidence())),
+                evidence: cite(
+                    invocations.iter().flat_map(|i| i.evidence()),
+                    citation_limit,
+                ),
             });
         }
     }
@@ -704,25 +751,46 @@ fn configurations(query: &Query, invocations: &[Invocation], report: &mut Report
 
 /// Task quality from grades, beside what the graded Runs cost: the signal a
 /// comparison of configurations weighs efficiency against.
-fn quality(query: &Query, invocations: &[Invocation], report: &mut Report) {
+fn quality(query: &Query, invocations: &[Invocation], report: &mut Report, citation_limit: usize) {
     let grades = query.grades();
-    let by_run = group_by(invocations, |i| i.run_id.as_str());
+    let by_run = group_by(invocations, |i| i.run_key());
+    let provenances = query.provenances();
     let by_task = group_by(grades.values(), |g| {
-        (g.grade.task.clone(), g.grade.task_version)
-    });
-    let mut summary = BTreeMap::new();
-    for ((task, version), graded) in by_task {
-        let runs: BTreeSet<&str> = graded.iter().map(|g| g.grade.run_id.as_str()).collect();
-        let of_run = |run: &str| {
-            by_run
-                .get(run)
-                .map(Vec::as_slice)
-                .unwrap_or_default()
-                .iter()
+        (
+            provenances
+                .get(&(g.namespace, g.grade.run_id.as_str()))
                 .copied()
+                .unwrap_or_default(),
+            g.grade.task.clone(),
+            g.grade.task_version,
+            g.row.config.clone(),
+        )
+    });
+    let mut semantics: BTreeMap<_, usize> = BTreeMap::new();
+    for (provenance, task, version, _) in by_task.keys() {
+        *semantics
+            .entry((*provenance, task.clone(), *version))
+            .or_default() += 1;
+    }
+    let mut summary = BTreeMap::new();
+    for ((provenance, task, version, grader), graded) in by_task {
+        let label = if provenance == anchor_facts::ProvenanceCategory::Unknown
+            && semantics[&(provenance, task.clone(), version)] == 1
+        {
+            format!("{task} v{version}")
+        } else {
+            format!(
+                "{provenance:?}:{task} v{version} [grader:{}]",
+                grader.as_deref().unwrap_or("unknown")
+            )
         };
-        let run_tokens = |run: &str| usage(of_run(run)).total_tokens();
-        let tokens: Vec<_> = runs.iter().filter_map(|run| run_tokens(run)).collect();
+        let runs: BTreeSet<(&str, &str)> = graded
+            .iter()
+            .map(|g| (g.namespace, g.grade.run_id.as_str()))
+            .collect();
+        let of_run = |run: &(&str, &str)| by_run.get(run).cloned().unwrap_or_default().into_iter();
+        let run_tokens = |run: &(&str, &str)| usage(of_run(run)).total_tokens();
+        let tokens: Vec<_> = runs.iter().filter_map(&run_tokens).collect();
         let agent_ms: Vec<_> = runs
             .iter()
             .filter_map(|run| crate::query::agent_ms(of_run(run)))
@@ -747,7 +815,7 @@ fn quality(query: &Query, invocations: &[Invocation], report: &mut Report) {
         }
         let scores: Vec<f64> = graded.iter().map(|g| g.grade.score()).collect();
         summary.insert(
-            format!("{task} v{version}"),
+            label.clone(),
             json!({
                 "runs": graded.len(),
                 "mean_score": (scores.iter().sum::<f64>() / scores.len() as f64 * 1000.0).round() / 1000.0,
@@ -762,28 +830,28 @@ fn quality(query: &Query, invocations: &[Invocation], report: &mut Report) {
             }),
         );
         for (name, (passed, failed)) in checks {
-            if graded.len() < FAILING_RUNS || passed == graded.len() {
+            if passed == graded.len() {
                 continue;
             }
             // Where the failing Runs sit in cost among the task's Runs: a
             // check failing only in the cheapest Runs reads differently from
             // one failing in the dearest.
-            let failing_runs: BTreeSet<&str> = graded
+            let failing_runs: BTreeSet<(&str, &str)> = graded
                 .iter()
                 .filter(|g| g.grade.checks.iter().any(|c| c.name == name && !c.passed))
-                .map(|g| g.grade.run_id.as_str())
+                .map(|g| (g.namespace, g.grade.run_id.as_str()))
                 .collect();
             let mean_of = |pick: bool| {
                 let picked: Vec<u64> = runs
                     .iter()
                     .filter(|run| failing_runs.contains(*run) == pick)
-                    .filter_map(|run| run_tokens(run))
+                    .filter_map(&run_tokens)
                     .collect();
                 (!picked.is_empty()).then(|| picked.iter().sum::<u64>() / picked.len() as u64)
             };
             report.findings.push(Finding {
                 code: "check_failing",
-                subject: format!("task {task} v{version}"),
+                subject: format!("task {label}"),
                 detail: format!(
                     "check {name} failed in {} of {} graded Run(s); mean tokens {} where it failed, {} where it passed",
                     failed.len(),
@@ -791,7 +859,7 @@ fn quality(query: &Query, invocations: &[Invocation], report: &mut Report) {
                     mean_of(true).map_or("?".into(), |t| t.to_string()),
                     mean_of(false).map_or("?".into(), |t| t.to_string()),
                 ),
-                evidence: cite(failed),
+                evidence: cite(failed, citation_limit),
             });
         }
     }

@@ -50,13 +50,16 @@ systemd acceptance.
 
 ## Complete platform
 
-A platform release has no business Graph. The same Host and Kernel serve Pilot
-against an initially empty business catalog. It includes four system Plugins:
+A platform release contains no Graph bundles or factory Graph registry.
+The same Host and Kernel serve Pilot against the installed catalog. It includes four system Plugins:
 `network`, `graph-tasks`, `feishu` and `wecom`. Their identities and public resources
 come from the shared `anchor-graph-host` system inventory, not an installer's
 self-declared manifest flag. The release includes every native entrypoint,
 including both channel gateways and the WeCom API MCP. They update with Anchor;
 normal Plugin install/update/uninstall paths cannot replace them.
+Feishu also carries official `lark-cli` 1.0.100 and its unmodified MIT notice
+at `plugins/feishu/LICENSE.lark-cli`. The shared system inventory includes both
+`bin/lark-cli` and the notice, so installation cannot omit either artifact.
 
 `git` and `anchor-steward` (displayed as **Anchor Dev**) remain ordinary
 preinstalled Plugins. Host imports missing ordinary entries from the admitted
@@ -77,12 +80,14 @@ state root, one shared installation per version.
 
 ```sh
 anchor-distribution --platform --host /reviewed/anchor-runner-host \
-  --goose /reviewed/goose --net-relay /reviewed/anchor-net-relay \
+  --goose /reviewed/goose --hub /reviewed/anchor-hub --eval /reviewed/anchor-eval \
+  --net-relay /reviewed/anchor-net-relay \
   --sandbox-network /reviewed/anchor-sandbox-network \
   --platform-launcher /reviewed/anchor-platform \
   --network-tools /reviewed/anchor-network-tools --git-tools /reviewed/anchor-git-tools \
   --wecom-tools /reviewed/anchor-wecom-tools \
   --feishu-gateway /reviewed/anchor-feishu-gateway \
+  --lark-cli /reviewed/lark-cli \
   --wecom-gateway /reviewed/anchor-wecom-gateway \
   --web /reviewed/web-dist \
   --uv /reviewed/uv --rustup-init /reviewed/rustup-init --pixi /reviewed/pixi \
@@ -91,11 +96,12 @@ anchor-distribution --platform --host /reviewed/anchor-runner-host \
 
 All platform inputs are required. The public API is
 `build_platform_package(&PlatformPackageRequest) -> Result<PlatformPackageReport>`.
-The archive has `runtime-manifest.json` format 3 with `kind: "platform"`, a
-top-level admitted `plugins` inventory, and
+The archive has `runtime-manifest.json` format 5 with `kind: "platform"`,
+top-level admitted `plugins`, `guidance` and `evaluators` inventories, and
 `bootstrap.uv`/`bootstrap.rustup_init`/`bootstrap.pixi` identities containing package-relative
 `path`, fixed `version`, `source` and executable `sha256`. There is no `bundle`
-field or `bundle/` tree. The original Graph package below keeps format 1 and its
+or `graphs` field, nor a `bundle/` or `graphs/` tree. Earlier platform formats
+are not admitted; there is no legacy-format reader. The standalone Graph package below keeps format 1 and its
 strict admission checks, without importing the full platform set or granting scheduler/channel authority.
 Build and installation share the system inventory and the ordinary preinstalled
 resource inventory; there is no second system-resource list in the builder.
@@ -103,11 +109,31 @@ Arbitrary additional Plugin directories or files are not admitted.
 Official manifests, channel definitions and guidance must match the embedded
 repository bytes, while separately supplied native MCP and gateway ELFs retain
 inventory identities and hashes.
+The lark-cli executable has a fixed binary SHA256 as well as its file,
+executable and full Plugin inventory identities. Build, fresh installation and
+installed-release validation all enforce this pin and require a static ELF
+without an interpreter or shared-library dependencies. The license must match
+the embedded official bytes even if an archive's inventory has been rehashed.
 A source-file-set regression prevents silently omitting future public resources.
+
+`platform_inventory(&Path) -> Result<PlatformPackageInventory>` validates
+the complete read-only release. Unsupported formats, changed official bytes,
+incomplete inventories and omitted Hub/Eval executables fail admission.
+Native RPM/DEB payloads preserve these same admitted resources.
+
+The same inventory delivers the `input-discovery` advisory slot and protected
+evaluation package. Their exact official
+bytes and protocols are checked before the Host/Eval receives registered-package
+capabilities; callers cannot register a different path or suite via protocol JSON.
+Delivery does not grant model or target authorization, schedule work, or provide
+readiness or quality guarantees. Current
+acceptance levels are recorded in the [ledger](../../docs/pilot-development-plan.md).
 
 ```text
 anchor-runtime/
   bin/anchor-runner-host
+  bin/anchor-hub
+  bin/anchor-eval
   bin/goose
   bin/anchor-net-relay
   bin/anchor-sandbox-network
@@ -115,6 +141,8 @@ anchor-runtime/
   bin/uv
   bin/rustup-init
   bin/pixi
+  harness/input-discovery.md
+  evaluators/input-discovery/manifest.json
   plugins/network/plugin.json
   plugins/network/skills/network/SKILL.md
   plugins/network/bin/anchor-network-tools
@@ -124,9 +152,11 @@ anchor-runtime/
   plugins/graph-tasks/plugin.json
   plugins/graph-tasks/skills/graph-tasks/SKILL.md
   plugins/feishu/plugin.json
+  plugins/feishu/LICENSE.lark-cli
   plugins/feishu/channel.json
   plugins/feishu/skills/feishu/SKILL.md
   plugins/feishu/bin/anchor-feishu-gateway
+  plugins/feishu/bin/lark-cli
   plugins/wecom/plugin.json
   plugins/wecom/channel.json
   plugins/wecom/skills/wecom/SKILL.md
@@ -159,10 +189,18 @@ It is a self-contained executable, not a managed language installation; its
 caches remain under the writable workspace HOME. Development deployments without
 a release can authorize an executable with `ANCHOR_PILOT_PIXI=/absolute/path`;
 no version probe is run for that override.
+The additional fixed input is official lark-cli 1.0.100 Linux amd64, binary SHA256
+`d9ac68ef91f81548e37481b42d9703376a7f0c89a50f00ef45f2d4307637db49`, from
+`https://github.com/larksuite/cli/releases/download/v1.0.100/lark-cli-1.0.100-linux-amd64.tar.gz`
+(archive SHA256 `cd7363f731c9e5dd2becd909837922cffea8aad229d581a84eb13c6aa0ce6808`).
+It is a static Go executable, not a musl bootstrap or an npm/Node installation.
 There is no pin bypass. `scripts/prepare-platform-bootstrap.sh --output NEW_DIR`
-fetches and verifies these three native build inputs without installing a language
+fetches and verifies these four native build inputs without installing a language
 environment. `scripts/build-platform-release.sh --goose PINNED_ELF --output NEW.tar.gz`
-builds the required Rust binaries and WebUI and packages them. It never loads the
+builds the required Rust binaries and WebUI and packages them. Its optional
+`--lark-cli /reviewed/lark-cli` replaces the `bootstrap/lark-cli` input path, not
+the fixed pin. An existing three-tool bootstrap directory needs this explicit
+input or a freshly prepared four-tool directory. It never loads the
 developer `.env` or copies platform state into the release.
 
 ## Fresh platform installation
@@ -193,7 +231,7 @@ The script verifies the archive hash before extracting its native installer into
 a private temporary directory; alternatively pass a separately reviewed ELF
 with `--installer`. The native install API verifies its own private archive
 snapshot, rejects links/special files/traversal/duplicates, validates fixed
-Goose/bootstrap pins and the exact admitted inventory, then atomically publishes
+Goose/bootstrap/lark-cli pins and the exact admitted inventory, then atomically publishes
 an entirely new installation. Existing roots are refused. File count is capped
 at 100000, individual files at 1 GiB, and compressed/uncompressed totals at 8 GiB.
 It does not start a service or update an existing installation.
@@ -377,8 +415,11 @@ host-path grants and runtime state must be configured outside the archive.
 Run `cargo +stable test -p anchor-distribution` and
 `cargo +stable clippy -p anchor-distribution --all-targets -- -D warnings` from the
 Rust workspace, then a crate-scoped rustfmt check. Small local ELF fixtures test
-archive construction; only private test helpers substitute the expected Goose
-digest. Public API and CLI tests verify that the fixed pin cannot be bypassed.
+archive construction; only private test helpers substitute expected executable
+digests. Public API and CLI tests verify that the fixed pins cannot be bypassed.
+The Plugin inventory regressions cover the lark-cli executable and MIT notice;
+installer regressions reject rehashed replacement binaries, dynamic linkage and
+omitted or changed license bytes, including read-only installed releases.
 
 The separate ignored local-binary smoke can be selected explicitly:
 
@@ -392,3 +433,19 @@ ANCHOR_DISTRIBUTION_GOOSE=/absolute/pinned/goose cargo +stable test \
 That smoke packages real fixed Goose with a small ELF Host stand-in; it does not
 execute Goose, an actual Anchor Host, or any model. Full extracted-runtime
 acceptance belongs to the Host's distribution integration fixture.
+
+An additional ignored smoke checks all real fixed inputs through the public
+platform builder, fresh installer and installed-release validator:
+
+```sh
+ANCHOR_DISTRIBUTION_GOOSE=/absolute/pinned/goose \
+ANCHOR_DISTRIBUTION_BOOTSTRAP_ROOT=/absolute/pinned/bootstrap \
+ANCHOR_DISTRIBUTION_LARK_CLI=/absolute/pinned/lark-cli \
+cargo +stable test -p anchor-distribution --lib \
+  install::tests::pinned_lark_cli_survives_public_package_and_install_admission \
+  -- --ignored --exact
+```
+
+Only the bootstrap directory's `uv`, `rustup-init` and `pixi` are read. The smoke
+uses native fixture ELFs for Anchor entrypoints and a temporary installation;
+it does not execute the supplied binaries, start services or use credentials.

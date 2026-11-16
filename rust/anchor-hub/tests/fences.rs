@@ -1,4 +1,4 @@
-//! Fences: the hub depends on the kernel and the fact vocabulary only,
+//! Fences: the hub depends only on neutral read/projection primitives,
 //! nothing depends on it, it never writes a data root, and its layers depend
 //! only downwards with all IO at the edges.
 
@@ -47,11 +47,18 @@ fn dependencies(manifest: &str) -> Vec<String> {
 }
 
 #[test]
-fn the_hub_depends_on_the_kernel_and_the_vocabulary_only_and_nothing_depends_on_it() {
+fn the_hub_depends_only_on_neutral_reading_primitives_and_nothing_depends_on_it() {
     let manifest = std::fs::read_to_string(crate_dir().join("Cargo.toml")).unwrap();
     assert_eq!(
         dependencies(&manifest),
-        vec!["anchor-facts", "anchor-kernel", "serde", "serde_json"]
+        vec![
+            "anchor-facts",
+            "anchor-file-lease",
+            "anchor-kernel",
+            "serde",
+            "serde_json",
+            "sha2"
+        ]
     );
     let workspace = crate_dir().parent().unwrap().to_path_buf();
     let mut dependents = Vec::new();

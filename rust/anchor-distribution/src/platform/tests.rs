@@ -3,6 +3,27 @@ use flate2::read::GzDecoder;
 use sha2::{Digest, Sha256};
 use std::{os::unix::fs::PermissionsExt, path::Path};
 
+fn source_files(root: &Path, directory: &Path, found: &mut BTreeSet<String>) {
+    for entry in fs::read_dir(directory).unwrap() {
+        let entry = entry.unwrap();
+        let kind = entry.file_type().unwrap();
+        if kind.is_dir() {
+            source_files(root, &entry.path(), found);
+        } else {
+            assert!(kind.is_file(), "official sources must not contain links");
+            found.insert(
+                entry
+                    .path()
+                    .strip_prefix(root)
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .into(),
+            );
+        }
+    }
+}
+
 pub(crate) struct Fixture {
     pub root: tempfile::TempDir,
     pub request: PlatformPackageRequest,
@@ -37,7 +58,9 @@ impl Fixture {
         fs::write(&executable, &bytes).unwrap();
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
         let digest = format!("{:x}", Sha256::digest(&bytes));
-        let channel_binary = |name: &str| {
+        let lark_cli = root.path().join("lark-cli");
+        fs::copy(&executable, &lark_cli).unwrap();
+        let native_binary = |name: &str| {
             let path = root.path().join(name);
             let mut specific = bytes.clone();
             specific.extend_from_slice(name.as_bytes());
@@ -52,14 +75,17 @@ impl Fixture {
         let request = PlatformPackageRequest {
             host: executable.clone(),
             goose: executable.clone(),
+            hub: native_binary("anchor-hub"),
+            eval: native_binary("anchor-eval"),
             net_relay: executable.clone(),
             sandbox_network: executable.clone(),
             platform_launcher: executable.clone(),
             network_tools: executable.clone(),
             git_tools: executable.clone(),
-            wecom_tools: channel_binary("anchor-wecom-tools"),
-            feishu_gateway: channel_binary("anchor-feishu-gateway"),
-            wecom_gateway: channel_binary("anchor-wecom-gateway"),
+            wecom_tools: native_binary("anchor-wecom-tools"),
+            feishu_gateway: native_binary("anchor-feishu-gateway"),
+            lark_cli,
+            wecom_gateway: native_binary("anchor-wecom-gateway"),
             uv: executable.clone(),
             rustup_init: executable.clone(),
             pixi: executable,
@@ -80,6 +106,7 @@ impl Fixture {
             &self.digest,
             &self.digest,
             &self.digest,
+            &self.digest,
         )?
         .publish()
     }
@@ -92,14 +119,14 @@ impl Fixture {
 }
 
 #[test]
-fn platform_has_no_business_graph_and_exact_bootstrap_and_official_plugin_inventory() {
+fn platform_has_no_graphs_and_exact_bootstrap_and_official_plugin_inventory() {
     let mut fixture = Fixture::new();
     let first = fixture.package().unwrap();
     fixture.request.output = fixture.root.path().join("second.tar.gz");
     let second = fixture.package().unwrap();
     assert_eq!(first.sha256, second.sha256);
     assert_eq!(first.inventory, second.inventory);
-    assert_eq!(first.inventory.format, 3);
+    assert_eq!(first.inventory.format, 5);
     assert_eq!(first.inventory.kind, "platform");
     assert_eq!(first.inventory.bootstrap.uv.version, UV_VERSION);
     assert_eq!(first.inventory.bootstrap.uv.source, UV_SOURCE);
@@ -126,7 +153,39 @@ fn platform_has_no_business_graph_and_exact_bootstrap_and_official_plugin_invent
         PIXI_SHA256,
         "50571451e96f4a82cf675cd83baaf66fff9b718f0aaf153900b9faf4c29bd401"
     );
-    assert_eq!(first.inventory.executables.len(), 13);
+    assert_eq!(LARK_CLI_VERSION, "1.0.100");
+    assert_eq!(
+        LARK_CLI_SHA256,
+        "d9ac68ef91f81548e37481b42d9703376a7f0c89a50f00ef45f2d4307637db49"
+    );
+    assert_eq!(first.inventory.executables.len(), 16);
+    for (path, source) in [
+        ("bin/anchor-hub", &fixture.request.hub),
+        ("bin/anchor-eval", &fixture.request.eval),
+    ] {
+        assert_eq!(
+            first
+                .inventory
+                .executables
+                .iter()
+                .find(|executable| executable.path == path)
+                .unwrap()
+                .sha256,
+            format!("{:x}", Sha256::digest(fs::read(source).unwrap())),
+            "{path}"
+        );
+    }
+    assert_eq!(first.inventory.guidance.len(), 1);
+    assert_eq!(first.inventory.guidance[0].slot, "input-discovery");
+    assert_eq!(
+        first
+            .inventory
+            .evaluators
+            .iter()
+            .map(|package| package.id.as_str())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from(["input-discovery"])
+    );
     assert_eq!(
         first
             .inventory
@@ -191,7 +250,11 @@ fn platform_has_no_business_graph_and_exact_bootstrap_and_official_plugin_invent
     for (id, binaries) in [
         (
             "feishu",
-            [("bin/anchor-feishu-gateway", &fixture.request.feishu_gateway)].as_slice(),
+            [
+                ("bin/anchor-feishu-gateway", &fixture.request.feishu_gateway),
+                ("bin/lark-cli", &fixture.request.lark_cli),
+            ]
+            .as_slice(),
         ),
         (
             "wecom",
@@ -209,6 +272,9 @@ fn platform_has_no_business_graph_and_exact_bootstrap_and_official_plugin_invent
             .find(|plugin| plugin.id == id)
             .unwrap();
         assert!(plugin.resources.contains(&"channel.json".into()));
+        if id == "feishu" {
+            assert!(plugin.resources.contains(&"LICENSE.lark-cli".into()));
+        }
         for (relative, source) in binaries {
             assert!(plugin.resources.contains(&(*relative).to_owned()));
             let path = format!("plugins/{id}/{relative}");
@@ -230,13 +296,45 @@ fn platform_has_no_business_graph_and_exact_bootstrap_and_official_plugin_invent
             .inventory
             .files
             .iter()
-            .all(|file| !file.path.starts_with("bundle/"))
+            .all(|file| !file.path.starts_with("bundle/") && !file.path.starts_with("graphs/"))
     );
     let extracted = tempfile::tempdir().unwrap();
     fixture.extract(extracted.path());
     let runtime = extracted.path().join("anchor-runtime");
     assert!(!runtime.join("bundle").exists());
+    assert!(!runtime.join("graphs").exists());
+    assert!(!runtime.join("evaluators/dreaming").exists());
+    assert!(
+        serde_json::to_value(&first.inventory)
+            .unwrap()
+            .get("graphs")
+            .is_none()
+    );
     assert!(runtime.join("web/index.html").is_file());
+    assert_eq!(
+        release_evaluator_inventory(&runtime).unwrap(),
+        first.inventory.evaluators
+    );
+    for evaluator in &first.inventory.evaluators {
+        let package =
+            registered_evaluation_package(&runtime, &first.inventory.evaluators, &evaluator.id)
+                .unwrap();
+        assert_eq!(package.inventory(), evaluator);
+        assert_eq!(
+            package.suite_path(),
+            runtime.join(&evaluator.package_path).join("manifest.json")
+        );
+        assert_eq!(
+            package.digest(),
+            format!("{:x}", Sha256::digest(package.suite_bytes()))
+        );
+        let suite: anchor_facts::evaluation::ProtectedSuite =
+            serde_json::from_slice(package.suite_bytes()).unwrap();
+        suite.validate().unwrap();
+        assert_eq!(suite.id, evaluator.id);
+        assert_eq!(suite.version.to_string(), evaluator.suite_version);
+        assert_eq!(evaluator.protocol_version, 1);
+    }
     assert_eq!(
         release_plugin_inventory(&runtime).unwrap(),
         first.inventory.plugins
@@ -275,7 +373,21 @@ fn platform_has_no_business_graph_and_exact_bootstrap_and_official_plugin_invent
 }
 
 #[test]
-fn public_platform_api_cannot_override_fixed_goose_or_bootstrap_pins() {
+fn official_evaluator_source_file_set_is_explicit_and_complete() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../resources/evaluations");
+    let mut actual = BTreeSet::new();
+    source_files(&root, &root, &mut actual);
+    let expected = release_evaluator_resources()
+        .map(|(path, mode)| {
+            assert_eq!(mode, 0o644);
+            path.strip_prefix("evaluators/").unwrap().to_owned()
+        })
+        .collect();
+    assert_eq!(actual, expected);
+}
+
+#[test]
+fn public_platform_api_cannot_override_fixed_goose_bootstrap_or_lark_cli_pins() {
     let fixture = Fixture::new();
     assert!(
         build_platform_package(&fixture.request)
@@ -289,7 +401,8 @@ fn public_platform_api_cannot_override_fixed_goose_or_bootstrap_pins() {
             &fixture.digest,
             UV_SHA256,
             &fixture.digest,
-            &fixture.digest
+            &fixture.digest,
+            &fixture.digest,
         )
         .err()
         .unwrap()
@@ -302,7 +415,8 @@ fn public_platform_api_cannot_override_fixed_goose_or_bootstrap_pins() {
             &fixture.digest,
             &fixture.digest,
             RUSTUP_INIT_SHA256,
-            &fixture.digest
+            &fixture.digest,
+            &fixture.digest,
         )
         .err()
         .unwrap()
@@ -315,12 +429,27 @@ fn public_platform_api_cannot_override_fixed_goose_or_bootstrap_pins() {
             &fixture.digest,
             &fixture.digest,
             &fixture.digest,
-            PIXI_SHA256
+            PIXI_SHA256,
+            &fixture.digest,
         )
         .err()
         .unwrap()
         .to_string()
         .contains("pixi 0.83.0")
+    );
+    assert!(
+        prepare(
+            &fixture.request,
+            &fixture.digest,
+            &fixture.digest,
+            &fixture.digest,
+            &fixture.digest,
+            LARK_CLI_SHA256,
+        )
+        .err()
+        .unwrap()
+        .to_string()
+        .contains("lark-cli 1.0.100")
     );
     assert!(!fixture.request.output.exists());
 }
@@ -361,6 +490,7 @@ fn platform_rechecks_sources_and_refuses_archive_overwrite() {
         &fixture.digest,
         &fixture.digest,
         &fixture.digest,
+        &fixture.digest,
     )
     .unwrap();
     fs::write(fixture.request.web.join("added.css"), "body{}\n").unwrap();
@@ -377,20 +507,65 @@ fn platform_rechecks_sources_and_refuses_archive_overwrite() {
 }
 
 #[test]
-fn bootstrap_must_be_static_even_when_private_test_pins_match() {
-    for name in ["uv", "pixi"] {
+fn native_inputs_are_required_and_rechecked_before_publication() {
+    for name in ["hub", "eval", "lark-cli"] {
+        for corrupt in [false, true] {
+            let fixture = Fixture::new();
+            let source = match name {
+                "hub" => &fixture.request.hub,
+                "eval" => &fixture.request.eval,
+                "lark-cli" => &fixture.request.lark_cli,
+                _ => unreachable!(),
+            };
+            if corrupt {
+                fs::write(source, "not an ELF\n").unwrap();
+            } else {
+                fs::remove_file(source).unwrap();
+            }
+            assert!(fixture.package().is_err(), "{name}, corrupt={corrupt}");
+            assert!(!fixture.request.output.exists());
+        }
+        let fixture = Fixture::new();
+        let prepared = prepare(
+            &fixture.request,
+            &fixture.digest,
+            &fixture.digest,
+            &fixture.digest,
+            &fixture.digest,
+            &fixture.digest,
+        )
+        .unwrap();
+        let source = match name {
+            "hub" => &fixture.request.hub,
+            "eval" => &fixture.request.eval,
+            "lark-cli" => &fixture.request.lark_cli,
+            _ => unreachable!(),
+        };
+        fs::write(source, "changed after admission\n").unwrap();
+        assert!(matches!(prepared.publish(), Err(PackageError::Drift(_))));
+        assert!(!fixture.request.output.exists());
+    }
+}
+
+#[test]
+fn bootstrap_and_lark_cli_must_be_static_even_when_private_test_pins_match() {
+    for name in ["uv", "pixi", "lark-cli"] {
         let mut fixture = Fixture::new();
         let dynamic = fixture.root.path().join("dynamic-bootstrap");
         fs::copy("/usr/bin/true", &dynamic).unwrap();
         let digest = format!("{:x}", Sha256::digest(fs::read(&dynamic).unwrap()));
         let mut uv_digest = fixture.digest.as_str();
         let mut pixi_digest = fixture.digest.as_str();
+        let mut lark_cli_digest = fixture.digest.as_str();
         if name == "uv" {
             fixture.request.uv = dynamic;
             uv_digest = &digest;
-        } else {
+        } else if name == "pixi" {
             fixture.request.pixi = dynamic;
             pixi_digest = &digest;
+        } else {
+            fixture.request.lark_cli = dynamic;
+            lark_cli_digest = &digest;
         }
         assert!(
             prepare(
@@ -398,12 +573,13 @@ fn bootstrap_must_be_static_even_when_private_test_pins_match() {
                 &fixture.digest,
                 uv_digest,
                 &fixture.digest,
-                pixi_digest
+                pixi_digest,
+                lark_cli_digest,
             )
             .err()
             .unwrap()
             .to_string()
-            .contains("static musl"),
+            .contains("must be a static executable"),
             "{name}"
         );
         assert!(!fixture.request.output.exists());
@@ -412,30 +588,10 @@ fn bootstrap_must_be_static_even_when_private_test_pins_match() {
 
 #[test]
 fn embedded_official_resources_cover_the_source_public_files_exactly() {
-    fn files(root: &Path, path: &Path, found: &mut BTreeSet<String>) {
-        for entry in fs::read_dir(path).unwrap() {
-            let entry = entry.unwrap();
-            let kind = entry.file_type().unwrap();
-            if kind.is_dir() {
-                files(root, &entry.path(), found);
-            } else {
-                assert!(kind.is_file(), "official sources must not contain links");
-                found.insert(
-                    entry
-                        .path()
-                        .strip_prefix(root)
-                        .unwrap()
-                        .to_str()
-                        .unwrap()
-                        .into(),
-                );
-            }
-        }
-    }
     let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     for plugin in release_plugins() {
         let mut actual = BTreeSet::new();
-        files(&repo, &repo.join("plugins").join(plugin.id), &mut actual);
+        source_files(&repo, &repo.join("plugins").join(plugin.id), &mut actual);
         let expected = plugin
             .files
             .iter()

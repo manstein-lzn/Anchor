@@ -9,6 +9,18 @@
 //! Facts carry no business content. A tool call is recorded by its name, the
 //! shape of its arguments and how it ended, never by argument or result values.
 
+pub mod evaluation;
+pub mod experiment;
+pub mod guidance;
+pub mod longitudinal;
+pub mod projection;
+pub mod usage;
+pub mod view;
+pub mod window;
+pub use view::{
+    ProvenanceCategory, SafeGradeView, SafeNodeSlot, SafeRunStatus, SafeRunView, SafeViewSnapshot,
+};
+
 use anchor_kernel::{
     Action, Authority, JudgeCtx, Judgement, Kernel, KernelError, Principal, PrincipalKind, Reason,
     Store, Submission, Validator, Verification,
@@ -27,6 +39,9 @@ pub const CONFIGURATION: &str = "validator/configuration";
 pub const RECORDER_ID: &str = "anchor/recorder";
 /// The content schema version written by this crate.
 pub const VERSION: u32 = 1;
+/// Stable configuration identity; observation and grade schemas remain v1.
+pub const CONFIGURATION_VERSION: u32 = 2;
+pub const LEGACY_CONFIGURATION_VERSION: u32 = 1;
 
 /// The recorder, as the configuration it observed. Authority is judged by id
 /// and kind only; the digest is recorded identity.
@@ -91,7 +106,7 @@ pub struct AgentConfiguration {
     pub model: String,
     pub model_binding: String,
     pub runtime_sha256: String,
-    /// Digest of the node's instructions and task text.
+    /// Digest of static role instructions (v1 also bound dynamic task text).
     pub instructions_sha256: String,
     /// Digest of the Plugin instructions disclosed to the model.
     pub plugin_instructions_sha256: String,
@@ -120,6 +135,17 @@ pub struct PluginIdentity {
 }
 
 impl AgentConfiguration {
+    pub fn is_supported_version(&self) -> bool {
+        matches!(
+            self.version,
+            LEGACY_CONFIGURATION_VERSION | CONFIGURATION_VERSION
+        )
+    }
+
+    pub fn is_stable(&self) -> bool {
+        self.version == CONFIGURATION_VERSION
+    }
+
     /// Order-insensitive collections are sorted so equal configurations have
     /// equal digests.
     pub fn normalized(mut self) -> Self {
@@ -262,6 +288,13 @@ impl ModelUsage {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Fact {
+    /// Per-attempt request identity, separate from the stable harness identity.
+    RequestContext {
+        task_sha256: String,
+        input_sha256: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input_guidance_digest: Option<String>,
+    },
     /// Entry to or exit from the host's authorized input receiver. The
     /// observation's Kernel stamp supplies the time; no participant data.
     InputWait { waiting: bool },
@@ -631,6 +664,7 @@ pub struct Grade {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Check {
     pub name: String,
     pub passed: bool,

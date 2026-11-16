@@ -8,8 +8,10 @@ description = "The harness data hub: reads recorded kernel histories, projects t
 [dependencies]
 anchor-kernel = { path = "../anchor-kernel" }
 anchor-facts = { path = "../anchor-facts" }
+anchor-file-lease = { path = "../anchor-file-lease" }
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

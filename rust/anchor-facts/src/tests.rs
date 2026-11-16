@@ -538,3 +538,78 @@ fn tool_digests_ignore_order_but_not_content() {
         tools_digest([("read", "Read one file", &a), ("run", "Run", &run)])
     );
 }
+
+#[test]
+fn stable_configurations_version_identity_and_request_context_are_independent() {
+    let legacy = configuration();
+    assert!(legacy.is_supported_version());
+    assert!(!legacy.is_stable());
+    let mut current = legacy.clone();
+    current.version = CONFIGURATION_VERSION;
+    assert!(current.is_supported_version() && current.is_stable());
+    assert_ne!(current.digest(), legacy.digest());
+    for version in [0, 3, u32::MAX] {
+        let mut unsupported = current.clone();
+        unsupported.version = version;
+        assert!(!unsupported.is_supported_version());
+    }
+    let fact = Fact::RequestContext {
+        task_sha256: text_digest("task"),
+        input_sha256: text_digest(&canonical(&json!({"input":1})).to_string()),
+        input_guidance_digest: None,
+    };
+    let value = serde_json::to_value(&fact).unwrap();
+    assert_eq!(value["kind"], "request_context");
+    assert!(value.get("input_guidance_digest").is_none());
+    assert_eq!(serde_json::from_value::<Fact>(value).unwrap(), fact);
+    let kernel = kernel();
+    let mut observation = tool_call(true);
+    observation.facts.push(fact);
+    assert_eq!(
+        record(
+            &kernel,
+            &recorder("cfg"),
+            serde_json::to_value(observation).unwrap()
+        ),
+        Reason::Ok
+    );
+}
+
+#[test]
+fn discovery_view_dtos_are_closed_and_bind_every_exported_field() {
+    use crate::{SafeGradeView, SafeRunView, SafeViewSnapshot};
+    let run = serde_json::json!({"run_id":"r","graph":"graph","graph_digest":"a".repeat(64),"status":"done","created_at_ms":1,"last_at_ms":2,"settled_at_ms":2,"accepted_slots":[],"provenance":"production","fact_ref":{"source_instance":"runs-view-x","resource":"run/r","place":1,"record_digest":"b".repeat(64)}});
+    serde_json::from_value::<SafeRunView>(run.clone()).unwrap();
+    for field in [
+        "input",
+        "output",
+        "prompt",
+        "detail",
+        "bundle_source",
+        "after",
+    ] {
+        let mut value = run.clone();
+        value[field] = serde_json::json!("SECRET-PAYLOAD-7f3a");
+        assert!(serde_json::from_value::<SafeRunView>(value).is_err());
+    }
+    let grade = serde_json::json!({"run_id":"r","task":"t","task_version":1,"grader_config_digest":"c".repeat(64),"checks":[{"name":"correct","passed":true}],"at_ms":3,"provenance":"production","fact_ref":{"source_instance":"grades-view-x","resource":"grade/r","place":1,"record_digest":"b".repeat(64)}});
+    serde_json::from_value::<SafeGradeView>(grade.clone()).unwrap();
+    let mut extra = grade;
+    extra["checks"][0]["expected"] = serde_json::json!("SECRET-PAYLOAD-7f3a");
+    assert!(serde_json::from_value::<SafeGradeView>(extra).is_err());
+    let mut snapshot = SafeViewSnapshot {
+        source_instance: "runs-view-x".into(),
+        join_namespace: "install-x".into(),
+        root_fingerprint: "a".repeat(64),
+        owner_root_fingerprint: None,
+        scope: crate::window::ResourceScope::All {},
+        resources: vec![],
+        runs: vec![],
+        grades: vec![],
+        view_digest: String::new(),
+    };
+    snapshot.seal();
+    snapshot.validate().unwrap();
+    snapshot.join_namespace = "install-y".into();
+    assert!(snapshot.validate().is_err());
+}

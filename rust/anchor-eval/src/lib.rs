@@ -14,7 +14,9 @@ use anchor_kernel::{
 };
 use serde_json::Value;
 
-pub const ROOT: &str = "kernel-grades";
+pub mod evaluation;
+
+pub const ROOT: &str = anchor_facts::evaluation::GRADE_ROOT;
 
 pub struct GradeRecorder {
     kernel: Kernel<FileStore>,

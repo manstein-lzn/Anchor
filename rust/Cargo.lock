@@ -160,6 +160,7 @@ dependencies = [
 name = "anchor-distribution"
 version = "0.1.0"
 dependencies = [
+ "anchor-facts",
  "anchor-graph-host",
  "clap",
  "flate2",
@@ -200,7 +201,10 @@ dependencies = [
  "anchor-facts",
  "anchor-file-lease",
  "anchor-kernel",
+ "anchor-runtime",
+ "serde",
  "serde_json",
+ "sha2",
  "tempfile",
 ]
 
@@ -279,9 +283,11 @@ name = "anchor-hub"
 version = "0.1.0"
 dependencies = [
  "anchor-facts",
+ "anchor-file-lease",
  "anchor-kernel",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
 ]
 

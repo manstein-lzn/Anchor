@@ -3,13 +3,16 @@ name = "anchor-eval"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "The evaluation harness's recorder: deterministic grades of Runs, submitted through the kernel into a grade root of their own."
+description = "Independent deterministic Run evaluation and grades submitted through the kernel."
 
 [dependencies]
 anchor-kernel = { path = "../anchor-kernel" }
 anchor-facts = { path = "../anchor-facts" }
 anchor-file-lease = { path = "../anchor-file-lease" }
+anchor-runtime = { path = "../anchor-runtime" }
+serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

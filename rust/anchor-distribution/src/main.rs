@@ -16,6 +16,10 @@ struct Arguments {
     host: PathBuf,
     #[arg(long)]
     goose: PathBuf,
+    #[arg(long, value_name = "ELF", requires = "platform")]
+    hub: Option<PathBuf>,
+    #[arg(long, value_name = "ELF", requires = "platform")]
+    eval: Option<PathBuf>,
     #[arg(
         long,
         required_unless_present = "platform",
@@ -39,6 +43,8 @@ struct Arguments {
     wecom_gateway: Option<PathBuf>,
     #[arg(long, value_name = "ELF", requires = "platform")]
     feishu_gateway: Option<PathBuf>,
+    #[arg(long, value_name = "ELF", requires = "platform")]
+    lark_cli: Option<PathBuf>,
     #[arg(long, value_name = "ELF", requires = "platform")]
     net_relay: Option<PathBuf>,
     #[arg(long, value_name = "ELF", requires = "platform")]
@@ -94,6 +100,8 @@ fn package(arguments: Arguments) -> anchor_distribution::Result<String> {
         let request = PlatformPackageRequest {
             host: arguments.host,
             goose: arguments.goose,
+            hub: required(arguments.hub, "--hub")?,
+            eval: required(arguments.eval, "--eval")?,
             net_relay: required(arguments.net_relay, "--net-relay")?,
             sandbox_network: required(arguments.sandbox_network, "--sandbox-network")?,
             platform_launcher: required(arguments.platform_launcher, "--platform-launcher")?,
@@ -102,6 +110,7 @@ fn package(arguments: Arguments) -> anchor_distribution::Result<String> {
             git_tools: required(arguments.git_tools, "--git-tools")?,
             wecom_tools: required(arguments.wecom_tools, "--wecom-tools")?,
             feishu_gateway: required(arguments.feishu_gateway, "--feishu-gateway")?,
+            lark_cli: required(arguments.lark_cli, "--lark-cli")?,
             wecom_gateway: required(arguments.wecom_gateway, "--wecom-gateway")?,
             uv: required(arguments.uv, "--uv")?,
             rustup_init: required(arguments.rustup_init, "--rustup-init")?,

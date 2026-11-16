@@ -11,12 +11,15 @@
 //! anchor-hub mcp PATH...
 //! anchor-hub tool NAME [--args JSON] PATH...
 //! anchor-hub rows PATH...
+//! anchor-hub window < request.json
+//! anchor-hub window-evidence < request.json
 //! ```
 //!
 //! A PATH may be a data root, a Host state directory, or any directory above
 //! them; every data root found below it is read.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -26,49 +29,54 @@ use crate::analyzers::{
 };
 use crate::query::Query;
 use crate::source::{DataRoot, HistorySource};
-use crate::table::{FactTable, MemoryTable, Projector};
+use crate::table::{Detail, FactTable, InvocationId, MemoryTable, Projector};
 
 /// How far below a given path to look for data roots.
 const DEPTH: usize = 6;
 
-/// A directory is a kernel data root when it holds validator resources, as
-/// every kernel installs them.
-fn is_root(dir: &Path) -> bool {
-    std::fs::read_dir(dir).is_ok_and(|entries| {
-        entries.flatten().any(|entry| {
-            entry
-                .file_name()
-                .to_string_lossy()
-                .starts_with("validator%2F")
-                && entry.path().join("resource.json").is_file()
-        })
-    })
+fn discover_checked(path: &Path) -> Result<Vec<PathBuf>, String> {
+    let mut found = Vec::new();
+    let mut stack = vec![(path.to_path_buf(), 0)];
+    while let Some((dir, depth)) = stack.pop() {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(format!("{}: {error}", dir.display())),
+        };
+        let mut children = Vec::new();
+        let mut root = false;
+        for entry in entries {
+            let entry = entry.map_err(|error| format!("{}: {error}", dir.display()))?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let kind = entry
+                .file_type()
+                .map_err(|error| format!("{}: {error}", entry.path().display()))?;
+            if name.starts_with("validator%2F") && kind.is_dir() {
+                let resource = entry.path().join("resource.json");
+                match std::fs::metadata(&resource) {
+                    Ok(metadata) => root |= metadata.is_file(),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(format!("{}: {error}", resource.display())),
+                }
+            }
+            if !name.starts_with('.') && kind.is_dir() && depth < DEPTH {
+                children.push((entry.path(), depth + 1));
+            }
+        }
+        if root {
+            found.push(dir);
+        } else {
+            stack.extend(children);
+        }
+    }
+    found.sort();
+    found.dedup();
+    Ok(found)
 }
 
 /// Kernel data roots at or below `path`, without following links.
 pub fn discover(path: &Path) -> Vec<PathBuf> {
-    let mut found = Vec::new();
-    let mut stack = vec![(path.to_path_buf(), 0)];
-    while let Some((dir, depth)) = stack.pop() {
-        if is_root(&dir) {
-            found.push(dir);
-            continue;
-        }
-        if depth == DEPTH {
-            continue;
-        }
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let hidden = entry.file_name().to_string_lossy().starts_with('.');
-            if !hidden && entry.file_type().is_ok_and(|t| t.is_dir()) {
-                stack.push((entry.path(), depth + 1));
-            }
-        }
-    }
-    found.sort();
-    found
+    discover_checked(path).unwrap_or_default()
 }
 
 /// The Goose execution port's evidence files at or below `path`: one
@@ -102,12 +110,11 @@ pub fn evidence_files(path: &Path) -> Vec<PathBuf> {
 #[derive(Default)]
 pub struct Hub {
     paths: Vec<PathBuf>,
-    sources: Vec<DataRoot>,
-    opened: BTreeSet<PathBuf>,
+    sources: BTreeMap<PathBuf, DataRoot>,
     projector: Projector,
     table: MemoryTable,
-    /// Evidence files read, with the size and time they had then.
-    evidence: BTreeMap<PathBuf, (u64, Option<SystemTime>)>,
+    /// Each currently valid optional file and the invocation details it supplies.
+    evidence: BTreeMap<PathBuf, (InvocationId, Vec<Detail>)>,
 }
 
 impl Hub {
@@ -118,53 +125,83 @@ impl Hub {
         }
     }
 
-    /// Open roots that appeared and project what was appended since the
-    /// last refresh. Returns how many rows were added.
+    /// Open roots that appeared and project what was appended since the last
+    /// refresh. A refresh is staged: a discovery/open/read error leaves the
+    /// previous visible table intact and returns an error.
     pub fn refresh(&mut self) -> Result<usize, String> {
+        let mut discovered = Vec::new();
         for path in &self.paths {
-            for root in discover(path) {
-                if self.opened.insert(root.clone()) {
-                    let name = root.display().to_string();
-                    self.sources
-                        .push(DataRoot::open(&root, name).map_err(|e| e.to_string())?);
-                }
+            discovered.extend(discover_checked(path)?);
+        }
+        discovered.sort();
+        discovered.dedup();
+
+        // Stage source caches too: a later root's read failure must not consume
+        // an earlier root's reset marker or cached delta. The sorted map also
+        // replaces the separate opened set and discovery-order source list.
+        let mut candidate_sources = BTreeMap::new();
+        for root in &discovered {
+            let source = match self.sources.get(root) {
+                Some(source) => source.staged(),
+                None => DataRoot::open(root, root.display().to_string()),
+            }
+            .map_err(|error| error.to_string())?;
+            candidate_sources.insert(root.clone(), source);
+        }
+
+        let mut candidate_projector = self.projector.clone();
+        let mut candidate_table = self.table.clone();
+        for (path, source) in &self.sources {
+            if !candidate_sources.contains_key(path) {
+                candidate_projector.retire_root(source.root(), &mut candidate_table);
             }
         }
+
         let mut added = 0;
-        for source in &self.sources {
-            added += self
-                .projector
-                .pull(source as &dyn HistorySource, &mut self.table)
+        for source in candidate_sources.values() {
+            added += candidate_projector
+                .pull(source as &dyn HistorySource, &mut candidate_table)
                 .map_err(|e| e.to_string())?;
         }
-        self.read_evidence();
+
+        let candidate_evidence = Self::read_evidence(&self.paths);
+        candidate_table.clear_details();
+        for (id, details) in candidate_evidence.values() {
+            candidate_table.details(id.clone(), details.clone());
+        }
+
+        // Commit the staged result only once every source has been read.
+        self.sources = candidate_sources;
+        self.projector = candidate_projector;
+        self.table = candidate_table;
+        self.evidence = candidate_evidence;
         Ok(added)
     }
 
-    /// Read the execution port's evidence files that appeared or changed
-    /// since the last refresh. Evidence is optional: a file that cannot be
-    /// read now is tried again next time, and facts never wait for it.
-    fn read_evidence(&mut self) {
-        for path in &self.paths {
+    /// Read the current execution-port evidence set. Rebuilding this optional
+    /// projection on each successful refresh also retires deleted or invalid
+    /// files, while a live second file for the same invocation can still
+    /// supply details.
+    fn read_evidence(paths: &[PathBuf]) -> BTreeMap<PathBuf, (InvocationId, Vec<Detail>)> {
+        let mut evidence = BTreeMap::new();
+        for path in paths {
             for file in evidence_files(path) {
-                let Ok(meta) = std::fs::metadata(&file) else {
-                    continue;
-                };
-                let stamp = (meta.len(), meta.modified().ok());
-                if self.evidence.get(&file) == Some(&stamp) {
-                    continue;
-                }
                 let Some((id, details)) = std::fs::read(&file)
                     .ok()
                     .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-                    .and_then(|value| crate::table::details_of(&value))
+                    .and_then(|value| {
+                        crate::table::details_of(
+                            &crate::source::namespace_for_path(file.parent()?),
+                            &value,
+                        )
+                    })
                 else {
                     continue;
                 };
-                self.table.details(id, details);
-                self.evidence.insert(file, stamp);
+                evidence.insert(file, (id, details));
             }
         }
+        evidence
     }
 
     pub fn roots(&self) -> usize {
@@ -252,9 +289,53 @@ fn fraction(value: Option<&String>, name: &str) -> Result<f64, String> {
         .ok_or(format!("{name} needs a number between 0 and 1"))
 }
 
-const USAGE: &str = "usage: anchor-hub health [--json] PATH...\n       anchor-hub profile [--json] PATH...\n       anchor-hub signals [--json] [--limit N] PATH...\n       anchor-hub mcp PATH...\n       anchor-hub tool NAME [--args JSON] PATH...\n       anchor-hub contrast [--json] [--by FIELD] [--reference PREFIX] PATH...\n       anchor-hub gate [--json] [--by FIELD] [--reference PREFIX] [--alpha A] [--delta D] PATH...\n       anchor-hub stall [--json] [--idle-minutes N] [--follow SECONDS] PATH...\n       anchor-hub rows PATH...";
+const USAGE: &str = "usage: anchor-hub health [--json] PATH...\n       anchor-hub profile [--json] PATH...\n       anchor-hub signals [--json] [--limit N] PATH...\n       anchor-hub mcp PATH...\n       anchor-hub tool NAME [--args JSON] PATH...\n       anchor-hub contrast [--json] [--by FIELD] [--reference PREFIX] PATH...\n       anchor-hub gate [--json] [--by FIELD] [--reference PREFIX] [--alpha A] [--delta D] PATH...\n       anchor-hub stall [--json] [--idle-minutes N] [--follow SECONDS] PATH...\n       anchor-hub rows PATH...\n       anchor-hub window < request.json\n       anchor-hub window-evidence < request.json";
 
 pub fn run(args: &[String]) -> Result<(), String> {
+    if let Some(command @ ("window" | "window-evidence" | "window-signals")) =
+        args.first().map(String::as_str)
+    {
+        if args.len() != 1 {
+            return Err(format!("usage: anchor-hub {command} < request.json"));
+        }
+        let mut input = Vec::new();
+        std::io::stdin()
+            .lock()
+            .take(anchor_facts::window::MAX_TRANSPORT_BYTES as u64 + 1)
+            .read_to_end(&mut input)
+            .map_err(|_| "window request cannot be read")?;
+        if input.len() > anchor_facts::window::MAX_TRANSPORT_BYTES {
+            return Err("window request exceeds 64 MiB transport limit".into());
+        }
+        let encoded = match command {
+            "window" => {
+                let request: anchor_facts::window::WindowRequest =
+                    serde_json::from_slice(&input).map_err(|_| "invalid window request")?;
+                serde_json::to_vec(&crate::window::capture(&request)?)
+            }
+            "window-evidence" => {
+                let request: anchor_facts::window::EvidenceRequest =
+                    serde_json::from_slice(&input).map_err(|_| "invalid evidence request")?;
+                serde_json::to_vec(&crate::window::evidence(&request)?)
+            }
+            "window-signals" => {
+                let request: anchor_facts::window::SignalPageRequest =
+                    serde_json::from_slice(&input).map_err(|_| "invalid signal page request")?;
+                serde_json::to_vec(&crate::window::signal_page(&request)?)
+            }
+            _ => unreachable!(),
+        }
+        .map_err(|_| "window response cannot be encoded")?;
+        if encoded.len() >= anchor_facts::window::MAX_TRANSPORT_BYTES {
+            return Err("window response exceeds 64 MiB transport limit".into());
+        }
+        let mut output = std::io::stdout().lock();
+        output
+            .write_all(&encoded)
+            .and_then(|()| output.write_all(b"\n"))
+            .map_err(|_| "window response cannot be written")?;
+        return Ok(());
+    }
     let options = parse(args)?;
     // `tool` takes the tool's name before the paths.
     let paths = match options.command.as_str() {

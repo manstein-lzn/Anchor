@@ -58,6 +58,14 @@ fn prepare(root: &Path, archive: &Path, sha256: &str, cli: &Path) -> Result<Nati
         install_root: root.join("admitted"),
         model_config: None,
     })?;
+    stage_admitted_release(root, installed, cli)
+}
+
+fn stage_admitted_release(
+    root: &Path,
+    installed: crate::PlatformInstallReport,
+    cli: &Path,
+) -> Result<NativePayload> {
     let payload = root.join("payload");
     create_payload_directories(&payload)?;
     let platform = payload.join("var/lib/anchor/platform");
@@ -145,6 +153,74 @@ fn native_service() -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_native_payload_preserves_admitted_analysis_resources_and_executables() {
+        let fixture = crate::platform::tests::Fixture::new();
+        let package = fixture.package().unwrap();
+        let installed = crate::install::tests::admitted_install(
+            &fixture,
+            &PlatformInstallRequest {
+                archive: package.output,
+                sha256: package.sha256,
+                install_root: fixture.root.path().join("admitted"),
+                model_config: None,
+            },
+        )
+        .unwrap();
+        let original_inventory =
+            fs::read(installed.release_root.join("runtime-manifest.json")).unwrap();
+        let payload =
+            stage_admitted_release(fixture.root.path(), installed, &fixture.request.host).unwrap();
+        payload.verify().unwrap();
+        let runtime = payload
+            .payload
+            .join("var/lib/anchor/platform/release/anchor-runtime");
+        assert_eq!(
+            fs::read(runtime.join("runtime-manifest.json")).unwrap(),
+            original_inventory
+        );
+        for path in [
+            "harness/input-discovery.md",
+            "evaluators/input-discovery/manifest.json",
+            "bin/anchor-hub",
+            "bin/anchor-eval",
+            "plugins/feishu/bin/lark-cli",
+            "plugins/feishu/LICENSE.lark-cli",
+        ] {
+            let file = package
+                .inventory
+                .files
+                .iter()
+                .find(|file| file.path == path)
+                .unwrap();
+            let copied = runtime.join(path);
+            assert_eq!(
+                fs::metadata(&copied).unwrap().permissions().mode() & 0o7777,
+                file.mode & 0o555,
+                "{path}"
+            );
+            assert_eq!(fs::metadata(&copied).unwrap().len(), file.size, "{path}");
+            assert_eq!(
+                crate::archive::sha256(&mut fs::File::open(&copied).unwrap()).unwrap(),
+                file.sha256,
+                "{path}"
+            );
+        }
+        assert!(
+            !payload
+                .payload
+                .join("var/lib/anchor/platform/data")
+                .exists()
+        );
+        assert!(
+            !payload
+                .payload
+                .join("var/lib/anchor/platform/config")
+                .exists()
+        );
+        make_directories_writable(fixture.root.path()).unwrap();
+    }
 
     #[test]
     fn native_payload_integration_directories_have_fixed_modes() {

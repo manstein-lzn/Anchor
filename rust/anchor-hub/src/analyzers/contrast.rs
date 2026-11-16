@@ -68,6 +68,15 @@ impl Analyzer for Contrast {
         if !report.not_applicable.is_empty() {
             return report;
         }
+        report.summary.insert(
+            "legacy_v1_configurations",
+            json!(
+                query
+                    .configurations()
+                    .filter(|(_, configuration)| !configuration.is_stable())
+                    .count()
+            ),
+        );
         report.summary.insert("by", json!(self.by));
         let (tasks, unassigned) = self.runs(query);
         report
@@ -254,12 +263,25 @@ impl Contrast {
         query: &Query,
     ) -> (BTreeMap<String, BTreeMap<String, Vec<Measured>>>, usize) {
         let invocations = query.invocations();
-        let by_run = crate::query::group_by(&invocations, |i| i.run_id.as_str());
+        let by_run = crate::query::group_by(&invocations, |i| i.run_key());
         let mut tasks: BTreeMap<String, BTreeMap<String, Vec<Measured>>> = BTreeMap::new();
         let mut unassigned = 0;
         for (run, graded) in query.grades() {
+            if by_run.get(&run).is_some_and(|observed| {
+                observed.iter().any(|invocation| {
+                    invocation.graph_conflict()
+                        || (invocation.has_model_observations()
+                            && invocation
+                                .config()
+                                .and_then(|digest| query.configuration(digest))
+                                .is_some_and(|config| !config.is_stable()))
+                })
+            }) {
+                unassigned += 1;
+                continue;
+            }
             let observed: Vec<&&Invocation> = by_run
-                .get(run)
+                .get(&run)
                 .map(|v| v.iter().filter(|i| i.has_model_observations()).collect())
                 .unwrap_or_default();
             let arms: BTreeSet<String> = observed
@@ -273,7 +295,7 @@ impl Contrast {
             let lifecycles: Vec<_> = observed.iter().flat_map(|i| i.lifecycles()).collect();
             let calls: Vec<_> = observed.iter().flat_map(|i| i.calls()).collect();
             let usage =
-                crate::query::usage(by_run.get(run).into_iter().flat_map(|v| v.iter().copied()));
+                crate::query::usage(by_run.get(&run).into_iter().flat_map(|v| v.iter().copied()));
             tasks
                 .entry(format!(
                     "{} v{}",
@@ -290,7 +312,7 @@ impl Contrast {
                         .unwrap_or(0),
                     score: graded.grade.score(),
                     agent_ms: crate::query::agent_ms(
-                        by_run.get(run).into_iter().flat_map(|v| v.iter().copied()),
+                        by_run.get(&run).into_iter().flat_map(|v| v.iter().copied()),
                     )
                     .map(|ms| ms as f64),
                     observed_agent_ms: observed.iter().map(|i| i.observed_agent_ms()).sum(),

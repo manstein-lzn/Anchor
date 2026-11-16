@@ -13,10 +13,10 @@ use anchor_hub::query::{
     Activity, GapPlace, Query, Status, Wealth, covered, e_bh, mann_whitney, node_result,
     normal_cdf, repeats, summarize, two_proportions,
 };
-use anchor_hub::source::{DataRoot, Stored};
+use anchor_hub::source::{DataRoot, HistorySource, SourceError, Stored};
 use anchor_hub::table::{Body, FactTable, MemoryTable, Projector};
 use anchor_kernel::{MemoryStore, Record, Resource, Store};
-use serde_json::json;
+use serde_json::{Value, json};
 use support::{SECRET, World};
 
 fn project(world: &World) -> (MemoryTable, Projector) {
@@ -43,6 +43,32 @@ fn finding<'r>(report: &'r Report, code: &str) -> &'r Finding {
         .iter()
         .find(|f| f.code == code)
         .unwrap_or_else(|| panic!("no {code} in {:#?}", report.findings))
+}
+
+fn visible(hub: &Hub) -> Value {
+    let query = hub.query(None);
+    let configurations: Vec<_> = query.configurations().collect();
+    let manifests: Vec<_> = configurations
+        .iter()
+        .map(|(_, config)| {
+            (
+                &config.envelope_sha256,
+                query.manifest(&config.envelope_sha256),
+            )
+        })
+        .collect();
+    let details: Vec<_> = query
+        .invocations()
+        .iter()
+        .map(|invocation| (invocation.key(), invocation.details))
+        .collect();
+    json!({
+        "rows": query.rows(),
+        "resources": query.resources().collect::<Vec<_>>(),
+        "configurations": configurations,
+        "manifests": manifests,
+        "details": details,
+    })
 }
 
 #[test]
@@ -251,14 +277,17 @@ fn health_reports_each_irregularity_with_its_records() {
             ("usage_incomplete", "r1/ghost#1".into()),
             ("tool_failures", "tool anchor_run".into()),
             ("tool_failures", "tool anchor_read".into()),
-            ("call_corrected", "tool anchor_run".into()),
+            ("same_tool_after_failure", "tool anchor_run".into()),
         ])
     );
     let refused = finding(&report, "not_accepted");
     assert!(refused.detail.contains("task_settled"));
     assert_eq!(refused.evidence[0].place, 5);
     assert_eq!(finding(&report, "unobserved_invocation").evidence.len(), 1);
-    assert_eq!(finding(&report, "call_corrected").evidence.len(), 2);
+    assert_eq!(
+        finding(&report, "same_tool_after_failure").evidence.len(),
+        2
+    );
 
     let time = &report.summary["time"];
     assert!(time["model_share"].is_null());
@@ -328,7 +357,7 @@ fn stall_finds_idle_runs_silences_slow_calls_and_loops() {
             ("idle_task", "run/r2".into()),
             ("idle_gap", "r2/worker#1".into()),
             ("slow_tool_call", "tool anchor_run".into()),
-            ("repeated_failure", "r2/worker#1".into()),
+            ("consecutive_same_shape_failures", "r2/worker#1".into()),
         ])
     );
     let gap = finding(&report, "idle_gap");
@@ -339,7 +368,7 @@ fn stall_finds_idle_runs_silences_slow_calls_and_loops() {
         gap.detail
     );
     assert!(
-        finding(&report, "repeated_failure")
+        finding(&report, "consecutive_same_shape_failures")
             .detail
             .contains("3 consecutive failed anchor_read")
     );
@@ -497,6 +526,469 @@ fn the_cli_hub_discovers_roots_and_follows_appends() {
 }
 
 #[test]
+fn warm_refresh_matches_cold_after_resource_root_and_evidence_retirement() {
+    let world = World::new();
+    let config = support::configuration("worker");
+    world.run("deleted", 1_000);
+    world.observe(
+        "deleted",
+        "worker",
+        2_000,
+        &config,
+        vec![
+            support::call(
+                "anchor_run",
+                1,
+                json!({"command": ["printf", "ok"]}),
+                (1_100, 1_110),
+                None,
+            ),
+            support::lifecycle((1_000, 2_000), Outcome::Completed, 0, 1),
+        ],
+    );
+    world.result("deleted", "worker#1", 2_100, 1, true);
+    world.grade("deleted", "task", &[("quality", true)], 2_200);
+
+    // Optional evidence gives the invocation one value-level call detail.
+    let evidence = world.state().join("goose-acp");
+    std::fs::create_dir_all(&evidence).unwrap();
+    let evidence_file = evidence.join("deleted.evidence.json");
+    std::fs::write(
+        &evidence_file,
+        json!({
+            "key": {"run_id": "deleted", "node_id": "worker", "invocation": 1},
+            "tool_calls": [{"tool": "anchor_run", "tool_call_id": "c1",
+                "arguments": {"command": ["printf", "ok"]},
+                "result": {"ok": true, "output": {"output": [{"type": "json", "value":
+                    {"status": "completed", "exit_code": 0, "stdout": "ok", "stderr": ""}}]}}}]
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let mut hub = Hub::new(vec![world.path().to_path_buf()]);
+    hub.refresh().unwrap();
+    assert_eq!(hub.query(None).invocations()[0].details.len(), 1);
+
+    let trace = anchor_facts::Invocation {
+        run_id: "deleted".into(),
+        graph_digest: "g".into(),
+        node_id: "worker".into(),
+        invocation: 1,
+    }
+    .trace();
+    world.runs.store().remove("run/deleted").unwrap();
+    world.facts.store().remove(&trace).unwrap();
+    world
+        .grades
+        .store()
+        .remove(&anchor_facts::grade_id("deleted"))
+        .unwrap();
+    std::fs::remove_file(&evidence_file).unwrap();
+    hub.refresh().unwrap();
+    let mut cold = Hub::new(vec![world.path().to_path_buf()]);
+    cold.refresh().unwrap();
+    assert_eq!(hub.roots(), cold.roots());
+    assert_eq!(visible(&hub), visible(&cold));
+    assert_eq!(hub.query(None).tasks().len(), 0);
+    assert_eq!(hub.query(None).invocations().len(), 0);
+    assert_eq!(hub.query(None).grades().len(), 0);
+    assert!(
+        hub.query(None)
+            .invocations()
+            .iter()
+            .all(|i| i.details.is_empty())
+    );
+
+    // Removing a nonempty whole source root retires its rows and registration.
+    world.grade("root-retired", "task", &[("quality", true)], 3_000);
+    hub.refresh().unwrap();
+    assert_eq!(hub.query(None).grades().len(), 1);
+    std::fs::remove_dir_all(world.root("kernel-grades")).unwrap();
+    hub.refresh().unwrap();
+    assert_eq!(hub.roots(), 2);
+    let mut cold = Hub::new(vec![world.path().to_path_buf()]);
+    cold.refresh().unwrap();
+    assert_eq!(visible(&hub), visible(&cold));
+    assert_eq!(hub.query(None).grades().len(), 0);
+    assert!(
+        hub.query(None)
+            .rows()
+            .iter()
+            .all(|row| row.key.root != world.root("kernel-grades").display().to_string())
+    );
+}
+
+#[test]
+fn shared_configuration_survives_when_one_root_retires_its_owner() {
+    let left = World::new();
+    let right = World::new();
+    let config = support::configuration("worker");
+    left.run("left", 1_000);
+    right.run("right", 1_000);
+    left.observe(
+        "left",
+        "worker",
+        1_100,
+        &config,
+        vec![support::lifecycle((1_000, 1_100), Outcome::Completed, 0, 0)],
+    );
+    right.observe(
+        "right",
+        "worker",
+        1_100,
+        &config,
+        vec![support::lifecycle((1_000, 1_100), Outcome::Completed, 0, 0)],
+    );
+    let mut hub = Hub::new(vec![left.path().to_path_buf(), right.path().to_path_buf()]);
+    hub.refresh().unwrap();
+    let digest = config.digest();
+    assert!(hub.query(None).configuration(&digest).is_some());
+    assert!(hub.query(None).manifest(&config.envelope_sha256).is_some());
+
+    let left_trace = anchor_facts::Invocation {
+        run_id: "left".into(),
+        graph_digest: "g".into(),
+        node_id: "worker".into(),
+        invocation: 1,
+    }
+    .trace();
+    left.facts.store().remove(&left_trace).unwrap();
+    left.facts
+        .store()
+        .remove(&anchor_facts::configuration_id(&digest))
+        .unwrap();
+    left.facts
+        .store()
+        .remove(&anchor_facts::configuration_id(&config.envelope_sha256))
+        .unwrap();
+    hub.refresh().unwrap();
+    assert!(hub.query(None).configuration(&digest).is_some());
+    assert!(hub.query(None).manifest(&config.envelope_sha256).is_some());
+    assert!(
+        hub.query(None)
+            .rows()
+            .iter()
+            .any(|row| { row.key.root == right.root("kernel-facts").display().to_string() })
+    );
+    let mut cold = Hub::new(vec![left.path().to_path_buf(), right.path().to_path_buf()]);
+    cold.refresh().unwrap();
+    assert_eq!(visible(&hub), visible(&cold));
+
+    // The final active provider going away retires both maps, without leaving
+    // a content-addressed entry kept alive just by an old projection.
+    std::fs::remove_dir_all(right.root("kernel-facts")).unwrap();
+    hub.refresh().unwrap();
+    assert!(hub.query(None).configuration(&digest).is_none());
+    assert!(hub.query(None).manifest(&config.envelope_sha256).is_none());
+}
+
+#[test]
+fn replacement_and_corruption_never_leave_a_warm_half_view() {
+    let world = World::new();
+    world.run("replace", 1_000);
+    world.result("replace", "old#1", 1_100, 1, false);
+    world.result("replace", "old#2", 1_150, 1, false);
+    world.result("replace", "old#3", 1_200, 1, true);
+    let mut hub = Hub::new(vec![world.path().to_path_buf()]);
+    hub.refresh().unwrap();
+    let before = hub.query(None).rows().len();
+
+    // Replace the physical resource with the same logical id and a shorter,
+    // different history. DataRoot must discard its old cursor and replay.
+    world.runs.store().remove("run/replace").unwrap();
+    world.clock.set(2_000);
+    world
+        .runs
+        .create(Resource::new("run/replace", "validator/step", Value::Null).task(u64::MAX))
+        .unwrap();
+    world.result("replace", "new#1", 2_100, 2, true);
+    hub.refresh().unwrap();
+    let cold = {
+        let mut cold = Hub::new(vec![world.path().to_path_buf()]);
+        cold.refresh().unwrap();
+        cold
+    };
+    assert!(before > 0);
+    assert_eq!(visible(&hub), visible(&cold));
+    assert!(
+        hub.query(None)
+            .rows()
+            .iter()
+            .any(|row| row.slot.as_deref() == Some("new#1"))
+    );
+    assert!(hub.query(None).rows().iter().all(|row| {
+        !row.slot
+            .as_deref()
+            .is_some_and(|slot| slot.starts_with("old#"))
+    }));
+
+    // A malformed complete history line is an error, not a clean empty root;
+    // the last healthy projection remains visible to callers.
+    let history = world
+        .root("kernel-runs")
+        .join("run%2Freplace")
+        .join("history.jsonl");
+    let healthy_history = std::fs::read(&history).unwrap();
+    // Truncate to zero records with the same creation identity and current
+    // resource directory. It must not keep the formerly projected final row.
+    let state_path = history.with_file_name("resource.json");
+    let healthy_state = std::fs::read(&state_path).unwrap();
+    let mut initial = world.runs.load("run/replace").unwrap().unwrap();
+    initial.version = 0;
+    std::fs::write(&state_path, serde_json::to_vec(&initial).unwrap()).unwrap();
+    std::fs::write(&history, []).unwrap();
+    hub.refresh().unwrap();
+    let mut truncated_cold = Hub::new(vec![world.path().to_owned()]);
+    truncated_cold.refresh().unwrap();
+    assert_eq!(visible(&hub), visible(&truncated_cold));
+    assert!(hub.query(None).rows().is_empty());
+    std::fs::write(&state_path, healthy_state).unwrap();
+    std::fs::write(&history, &healthy_history).unwrap();
+    hub.refresh().unwrap();
+    assert_eq!(visible(&hub), visible(&cold));
+    // Atomic history-file replacement also invalidates the old physical
+    // cursor even though resource creation and all fact values are unchanged.
+    let replacement = history.with_extension("replacement");
+    std::fs::write(&replacement, &healthy_history).unwrap();
+    std::fs::rename(&replacement, &history).unwrap();
+    hub.refresh().unwrap();
+    assert_eq!(visible(&hub), visible(&cold));
+
+    // The facts root sorts before runs. Replace an already projected trace
+    // before the later run fails: neither reset markers nor new rows may
+    // leak out of the staged refresh.
+    let config = support::configuration("worker");
+    world.observe(
+        "replace",
+        "worker",
+        2_200,
+        &config,
+        vec![support::lifecycle((2_000, 2_100), Outcome::Completed, 0, 0)],
+    );
+    hub.refresh().unwrap();
+    world
+        .facts
+        .store()
+        .remove("trace/replace/worker/1")
+        .unwrap();
+    world.observe(
+        "replace",
+        "worker",
+        2_300,
+        &config,
+        vec![support::lifecycle((2_200, 2_300), Outcome::Failed, 0, 0)],
+    );
+    std::fs::write(&history, b"not-json\n").unwrap();
+    let visible_before_error = visible(&hub);
+    let error = hub
+        .refresh()
+        .expect_err("corrupt history must fail refresh");
+    assert!(!error.is_empty(), "{error}");
+    assert_eq!(visible(&hub), visible_before_error);
+    let response = handle(
+        &mut hub,
+        &json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "invocations", "arguments": {}}
+        }),
+    )
+    .unwrap();
+    assert_eq!(response["result"]["isError"], true);
+    assert_eq!(visible(&hub), visible_before_error);
+
+    std::fs::write(&history, healthy_history).unwrap();
+    hub.refresh().unwrap();
+    let mut cold = Hub::new(vec![world.path().to_path_buf()]);
+    cold.refresh().unwrap();
+    assert_eq!(visible(&hub), visible(&cold));
+}
+
+#[test]
+fn stored_sources_reset_on_history_creation_or_version_regression() {
+    fn store(
+        created: Option<anchor_kernel::Creation>,
+        version: u64,
+        count: usize,
+        label: &str,
+    ) -> MemoryStore {
+        let store = MemoryStore::default();
+        for id in ["run/a", "run/z"] {
+            let mut resource = Resource::new(id, "validator/step", Value::Null).task(10);
+            resource.created = created.clone();
+            store.create(&resource).unwrap();
+            resource.version = version;
+            for index in 0..count {
+                let record = serde_json::from_value(json!({
+                    "stamp": {"principal": {"id": "executor", "kind": "agent"}, "cost": 0},
+                    "submission": {"target": id, "seen": 0, "action": "write", "slot": format!("{label}-{index}#1")},
+                    "verdict": {"effect": "accepted", "verification": "evidenced", "reason": "ok"},
+                    "after": resource,
+                })).unwrap();
+                store.commit(id, &record).unwrap();
+            }
+        }
+        store
+    }
+    let creation = Some(anchor_kernel::Creation {
+        at: None,
+        config: None,
+    });
+    for (created, version, count) in [
+        (None, 4, 4), // Includes Some(empty) -> None, not only projected fields.
+        (creation.clone(), 4, 1),
+        (creation.clone(), 1, 4),
+    ] {
+        let old = store(creation.clone(), 4, 4, "old");
+        let replacement = store(created, version, count, "new");
+        let mut table = MemoryTable::default();
+        let mut projector = Projector::default();
+        projector
+            .pull(&Stored::new(&old, "memory"), &mut table)
+            .unwrap();
+        projector
+            .pull(&Stored::new(&replacement, "memory"), &mut table)
+            .unwrap();
+        let mut cold = MemoryTable::default();
+        Projector::default()
+            .pull(&Stored::new(&replacement, "memory"), &mut cold)
+            .unwrap();
+        assert_eq!(table.facts().rows, cold.facts().rows);
+        assert_eq!(table.facts().resources, cold.facts().resources);
+        assert!(
+            table
+                .facts()
+                .rows
+                .windows(2)
+                .all(|rows| rows[0].key < rows[1].key)
+        );
+    }
+}
+
+#[test]
+fn listed_resource_loading_absent_retires_entry_rows_and_read_position() {
+    struct Absent;
+    impl HistorySource for Absent {
+        fn root(&self) -> &str {
+            "memory"
+        }
+        fn list(&self) -> Result<Vec<String>, SourceError> {
+            Ok(vec!["run/a".into()])
+        }
+        fn load(&self, _: &str) -> Result<Option<Resource>, SourceError> {
+            Ok(None)
+        }
+        fn history_after(&self, _: &str, _: usize) -> Result<Vec<Record>, SourceError> {
+            panic!("absent load must not ask for history");
+        }
+    }
+    let world = World::new();
+    world.run("a", 1);
+    world.result("a", "worker#1", 2, 1, true);
+    let root = world.root("kernel-runs");
+    let source = DataRoot::open(&root, "memory").unwrap();
+    let mut table = MemoryTable::default();
+    let mut projector = Projector::default();
+    projector.pull(&source, &mut table).unwrap();
+    projector.pull(&Absent, &mut table).unwrap();
+    assert!(table.facts().rows.is_empty());
+    assert!(table.facts().resources.is_empty());
+    assert_eq!(projector.pull(&source, &mut table).unwrap(), 1);
+    assert_eq!(table.facts().rows[0].key.place, 1);
+}
+
+#[test]
+fn optional_evidence_is_current_per_path_and_shared_invocation() {
+    let world = World::new();
+    let config = support::configuration("worker");
+    for run in ["a", "b"] {
+        world.observe(
+            run,
+            "worker",
+            10,
+            &config,
+            vec![support::call(
+                "anchor_run",
+                1,
+                json!({"command": ["printf", "ok"]}),
+                (1, 2),
+                None,
+            )],
+        );
+    }
+    let directory = world.state().join("goose-acp");
+    std::fs::create_dir_all(&directory).unwrap();
+    let first = directory.join("first.evidence.json");
+    let second = directory.join("second.evidence.json");
+    let evidence = |run: &str, answer: &str| {
+        json!({
+            "key": {"run_id": run, "node_id": "worker", "invocation": 1},
+            "tool_calls": [{"tool": "anchor_run", "arguments": {"command": ["printf", "ok"]},
+                "result": {"ok": true, "output": answer}}],
+        })
+        .to_string()
+    };
+    std::fs::write(&first, evidence("a", "first")).unwrap();
+    std::fs::write(&second, evidence("a", "second")).unwrap();
+    let mut hub = Hub::new(vec![world.path().to_owned()]);
+    hub.refresh().unwrap();
+    assert_eq!(hub.query(None).invocations()[0].details.len(), 1);
+
+    std::fs::remove_file(&second).unwrap();
+    hub.refresh().unwrap();
+    assert!(
+        hub.query(None).invocations()[0].details[0]
+            .answer
+            .contains("first")
+    );
+    std::fs::write(&first, evidence("b", "changed invocation")).unwrap();
+    hub.refresh().unwrap();
+    let invocations = hub.query(None).invocations();
+    assert!(invocations[0].details.is_empty());
+    assert_eq!(invocations[1].details.len(), 1);
+
+    std::fs::write(&first, "invalid JSON").unwrap();
+    hub.refresh().unwrap();
+    assert!(
+        hub.query(None)
+            .invocations()
+            .iter()
+            .all(|i| i.details.is_empty())
+    );
+    let calls =
+        anchor_hub::mcp::tool(&hub.query(None), "calls", &json!({"key": "b/worker#1"})).unwrap();
+    assert!(calls["items"][0]["answer"].is_null());
+    std::fs::write(&first, evidence("b", "restored")).unwrap();
+    hub.refresh().unwrap();
+    std::fs::remove_file(&first).unwrap();
+    hub.refresh().unwrap();
+    let mut cold = Hub::new(vec![world.path().to_owned()]);
+    cold.refresh().unwrap();
+    assert_eq!(visible(&hub), visible(&cold));
+}
+
+#[test]
+fn unreadable_configured_roots_fail_without_retiring_healthy_facts() {
+    let world = World::new();
+    world.run("retained", 1);
+    world.result("retained", "worker#1", 2, 1, true);
+    let root = world.root("kernel-runs");
+    let mut hub = Hub::new(vec![root.clone()]);
+    hub.refresh().unwrap();
+    let before = visible(&hub);
+    let moved = world.state().join("unlisted-runs");
+    std::fs::rename(&root, &moved).unwrap();
+    std::fs::write(&root, b"not a readable directory").unwrap();
+    assert!(hub.refresh().is_err());
+    assert_eq!(visible(&hub), before);
+    assert_eq!(hub.roots(), 1);
+    std::fs::remove_file(&root).unwrap();
+    std::fs::rename(&moved, &root).unwrap();
+    hub.refresh().unwrap();
+    assert_eq!(visible(&hub), before);
+}
+
+#[test]
 fn operators() {
     assert_eq!(
         repeats(&[1, 1, 1, 2, 2, 3, 3, 3, 3], 3, |x| *x),
@@ -550,8 +1042,24 @@ fn grades_join_their_runs_and_failing_checks_are_reported() {
     let query = Query::new(table.facts(), None);
     let grades = query.grades();
     assert_eq!(grades.len(), 3);
-    assert!(grades["r3"].grade.passed());
-    assert_eq!(grades["r3"].row.key.place, 2);
+    assert!(
+        grades
+            .values()
+            .find(|graded| graded.grade.run_id == "r3")
+            .unwrap()
+            .grade
+            .passed()
+    );
+    assert_eq!(
+        grades
+            .values()
+            .find(|graded| graded.grade.run_id == "r3")
+            .unwrap()
+            .row
+            .key
+            .place,
+        2
+    );
 
     let report = Health.analyze(&query);
     assert!(report.not_applicable.is_empty());
@@ -818,6 +1326,160 @@ fn harnesses(world: &World) -> (AgentConfiguration, AgentConfiguration) {
         );
     }
     (fast, slow)
+}
+
+#[test]
+fn signal_citations_survive_bounded_health_report_support() {
+    let world = World::new();
+    for index in 0..2001 {
+        world.grade(
+            &format!("graded-{index:04}"),
+            "ledger",
+            &[("total", false)],
+            100,
+        );
+    }
+    let mut hub = Hub::new(vec![world.path().to_path_buf()]);
+    hub.refresh().unwrap();
+    let query = hub.query(None);
+    let health = Health.analyze(&query);
+    let health_signal = health
+        .findings
+        .iter()
+        .find(|s| s.code == "check_failing")
+        .unwrap();
+    assert_eq!(health_signal.evidence.len(), 2000);
+    let allowed = |key: &anchor_hub::query::Key| key.resource == "grade/graded-2000";
+    assert!(health_signal.evidence.iter().all(|key| !allowed(key)));
+    let table = Signals { limit: 20 }.window_table_in(&query, allowed);
+    let signal = table
+        .signals
+        .iter()
+        .find(|s| s.code == "check_failing")
+        .expect("current evidence must survive upstream Health report bounds");
+    assert_eq!(signal.evidence_total, 2001);
+    assert_eq!(signal.runs, 2001);
+    assert_eq!(signal.evidence.len(), 1);
+    assert!(signal.evidence.iter().all(allowed));
+}
+
+#[test]
+fn window_citation_filter_precedes_bounds_for_all_signal_and_exemplar_sources() {
+    let world = World::new();
+    let (_, slow) = harnesses(&world);
+    let cited = anchor_facts::window::MAX_SIGNAL_CITATIONS;
+    for index in 3..cited + 2 {
+        let run = format!("b{index}");
+        worked(
+            &world,
+            &run,
+            2_000_000 + index as u64 * 100_000,
+            10_000,
+            &slow,
+            2,
+            &["anchor_edit", "final_result"],
+        );
+        world.grade(&run, "ledger", &[("total", false)], 2_900_000);
+    }
+    world.run("unobserved", 4_000_000);
+    for index in 0..cited + 2 {
+        world.result(
+            "unobserved",
+            &format!("op#{}", index + 1),
+            4_000_001 + index as u64,
+            0,
+            false,
+        );
+    }
+    for run in ["u5", "u6"] {
+        for index in 0..cited + 1 {
+            world.observe(
+                run,
+                "worker",
+                5_000_000 + index as u64,
+                &support::configuration("worker"),
+                vec![anchor_facts::Fact::InputWait { waiting: false }],
+            );
+        }
+    }
+    let mut hub = Hub::new(vec![world.path().to_path_buf()]);
+    hub.refresh().unwrap();
+    let query = hub.query(None);
+    let allowed = |key: &anchor_hub::query::Key| match key.resource.as_str() {
+        "run/unobserved" | "trace/u5/worker/1" | "trace/u6/worker/1" => key.place > cited,
+        resource => resource
+            .strip_prefix("grade/b")
+            .and_then(|index| index.parse::<usize>().ok())
+            .is_some_and(|index| index >= cited),
+    };
+    let all = Signals { limit: usize::MAX }.table(&query);
+    let filtered = Signals { limit: usize::MAX }.window_table_in(&query, allowed);
+    assert_eq!(
+        filtered.front, all.front,
+        "historical grading support is unchanged"
+    );
+    for code in [
+        "check_failing",
+        "dominated_harness",
+        "runs_without_observations",
+        "frugal_route",
+        "rare_route",
+    ] {
+        let original = all
+            .signals
+            .iter()
+            .chain(&all.exemplars)
+            .find(|signal| signal.code == code)
+            .unwrap_or_else(|| panic!("missing fixture signal {code}"));
+        let current = filtered
+            .signals
+            .iter()
+            .chain(&filtered.exemplars)
+            .find(|signal| signal.id == original.id)
+            .unwrap_or_else(|| panic!("current {code} citations were truncated behind support"));
+        assert!(original.evidence_total > cited, "{code}");
+        assert!(original.evidence.iter().all(|key| !allowed(key)), "{code}");
+        assert!(!current.evidence.is_empty(), "{code}");
+        let mut expected = original.clone();
+        expected.evidence = current.evidence.clone();
+        assert_eq!(
+            *current, expected,
+            "{code} support statistics or ranking changed"
+        );
+    }
+    for run in ["u5", "u6"] {
+        let sample = filtered
+            .exemplars
+            .iter()
+            .find(|signal| {
+                signal.code == "ordinary_sample" && signal.subject == format!("{run}/worker#1")
+            })
+            .unwrap_or_else(|| panic!("missing ordinary sample for {run}"));
+        assert!(sample.evidence_total > cited);
+        assert_eq!(sample.evidence.len(), 2);
+    }
+    assert!(
+        filtered
+            .signals
+            .iter()
+            .chain(&filtered.exemplars)
+            .all(|signal| {
+                !signal.evidence.is_empty()
+                    && signal.evidence.len() <= cited
+                    && signal.evidence.iter().all(allowed)
+            })
+    );
+    let ranks: Vec<_> = filtered
+        .signals
+        .iter()
+        .map(|signal| {
+            all.signals
+                .iter()
+                .position(|original| original.id == signal.id)
+                .unwrap()
+        })
+        .collect();
+    assert!(ranks.windows(2).all(|pair| pair[0] < pair[1]));
 }
 
 #[test]
@@ -1144,17 +1806,220 @@ fn a_rejected_paths_family_is_recorded_and_a_recovery_needs_no_new_shape() {
     );
     // Recovery does not need a new shape: the same shape with another value
     // counts, and the count is of failed calls.
-    let corrected = finding(&report, "call_corrected");
+    let corrected = finding(&report, "same_tool_after_failure");
     assert!(
         corrected.detail.contains("2 failed call(s)")
             && corrected
                 .detail
-                .contains("0 with arguments of another shape")
+                .contains("0 reshaped (different argument shape)")
             && corrected
                 .detail
-                .contains("2 with arguments of the same shape"),
+                .contains("2 revalued (same argument shape)")
+            && corrected.detail.contains("causal repair or resolution")
+            && corrected
+                .detail
+                .contains("commands/targets may be unrelated"),
         "{}",
         corrected.detail
+    );
+}
+
+#[test]
+fn unrelated_tool_failures_are_weak_clues_not_repair_or_command_retries() {
+    let world = World::new();
+    let commands = [
+        json!({"command": ["find", "/not-granted", "-type", "f"]}),
+        json!({"command": ["git", "status"]}),
+        json!({"command": ["curl", "https://example.invalid"]}),
+        json!({"command": ["printf", "done"]}),
+    ];
+    let calls = commands.iter().enumerate().map(|(index, arguments)| {
+        support::call(
+            "anchor_run",
+            index as u64 + 1,
+            arguments.clone(),
+            (1_100 + index as u64 * 100, 1_150 + index as u64 * 100),
+            (index < 3).then_some(anchor_facts::Failure::NotAuthorized),
+        )
+    });
+    let mut facts: Vec<_> = calls.collect();
+    facts.push(support::lifecycle((1_000, 2_000), Outcome::Completed, 0, 4));
+    world.observe(
+        "unrelated",
+        "worker",
+        2_000,
+        &support::configuration("worker"),
+        facts,
+    );
+    let (table, _) = project(&world);
+    let query = Query::new(table.facts(), Some(3_000));
+    let health = Health.analyze(&query);
+    let stall = Stall::default().analyze(&query);
+    assert!(!health.findings.iter().any(|f| f.code == "call_corrected"));
+    assert!(!stall.findings.iter().any(|f| f.code == "repeated_failure"));
+    assert_eq!(
+        health.summary["tools"]["anchor_run"]["failures"]["not_authorized"],
+        json!(3)
+    );
+    let weak = finding(&health, "same_tool_after_failure");
+    assert!(weak.detail.contains("later model request"));
+    assert!(weak.detail.contains("causal repair or resolution"));
+    assert!(weak.detail.contains("commands/targets may be unrelated"));
+    let shape = finding(&stall, "consecutive_same_shape_failures");
+    assert!(shape.detail.contains("operations/targets may differ"));
+    assert!(shape.detail.contains("retry loop unconfirmed"));
+    assert!(shape.detail.contains("program hints: curl, find, git"));
+}
+
+#[test]
+fn shell_program_is_only_a_hint_and_command_end_counts_stay_authoritative() {
+    use anchor_facts::{CommandEnd, CommandStatus, Fact, Failure};
+    let world = World::new();
+    let mut facts = Vec::new();
+    for (index, hint) in ["find", "git", "curl"].into_iter().enumerate() {
+        let mut call = support::call(
+            "anchor_run",
+            index as u64 + 1,
+            json!({"command": ["sh", "-lc", "redacted"]}),
+            (10 + index as u64, 11 + index as u64),
+            Some(Failure::NotAuthorized),
+        );
+        if let Fact::ToolCall { shell_program, .. } = &mut call {
+            *shell_program = Some(hint.into());
+        }
+        facts.push(call);
+    }
+    for (request, hint, end) in [
+        (
+            4,
+            "python3",
+            CommandEnd {
+                status: CommandStatus::NotStarted,
+                exit_code: Some(1),
+            },
+        ),
+        (
+            5,
+            "grep",
+            CommandEnd {
+                status: CommandStatus::Exited,
+                exit_code: Some(2),
+            },
+        ),
+        (
+            6,
+            "printf",
+            CommandEnd {
+                status: CommandStatus::Exited,
+                exit_code: Some(0),
+            },
+        ),
+    ] {
+        let mut call = command(request, "sh", Some(end));
+        if let Fact::ToolCall { shell_program, .. } = &mut call {
+            *shell_program = Some(hint.into());
+        }
+        facts.push(call);
+    }
+    world.observe(
+        "shell",
+        "worker",
+        100,
+        &support::configuration("worker"),
+        facts,
+    );
+    let (table, _) = project(&world);
+    let query = Query::new(table.facts(), None);
+    let calls = query.invocations()[0].calls();
+    assert!(calls.iter().all(|call| call.program == Some("sh")));
+    assert_eq!(calls[0].shell_program, Some("find"));
+    assert_eq!(calls[3].command.unwrap().status, CommandStatus::NotStarted);
+    assert!(!calls[3].done());
+    assert!(!calls[4].done());
+    assert!(calls[5].done());
+    let health = Health.analyze(&query);
+    let summary = &health.summary["tools"]["anchor_run"];
+    assert_eq!(summary["failures"]["not_authorized"], 3);
+    assert_eq!(summary["commands"]["sh"]["not_started"], 1);
+    assert_eq!(summary["commands"]["sh"]["exit_nonzero"], 1);
+    assert_eq!(summary["commands"]["sh"]["clean"], 1);
+    assert!(
+        finding(&health, "command_failures")
+            .subject
+            .ends_with("program sh")
+    );
+    assert!(
+        finding(&health, "command_nonzero")
+            .subject
+            .ends_with("program sh")
+    );
+    assert!(
+        finding(&health, "same_tool_after_failure")
+            .detail
+            .contains("3 failed call(s)")
+    );
+    let stall = Stall::default().analyze(&query);
+    assert!(
+        finding(&stall, "consecutive_same_shape_failures")
+            .detail
+            .contains("shell-program hints: curl, find, git")
+    );
+    let response =
+        anchor_hub::mcp::tool(&query, "calls", &json!({"key": "shell/worker#1"})).unwrap();
+    assert_eq!(response["items"][0]["program"], "sh");
+    assert_eq!(response["items"][0]["shell_program"], "find");
+}
+
+#[test]
+fn parallel_calls_in_one_model_request_are_not_repair_or_retry_signals() {
+    let world = World::new();
+    let config = support::configuration("worker");
+    let mut parallel = Vec::new();
+    parallel.push(support::call(
+        "anchor_run",
+        1,
+        json!({"command": ["find", "/nope"]}),
+        (1_100, 1_110),
+        Some(anchor_facts::Failure::NotAuthorized),
+    ));
+    parallel.push(support::call(
+        "anchor_run",
+        1,
+        json!({"command": ["printf", "ok"]}),
+        (1_110, 1_120),
+        None,
+    ));
+    parallel.push(support::lifecycle((1_000, 1_200), Outcome::Completed, 0, 2));
+    world.observe("parallel-success", "worker", 1_200, &config, parallel);
+
+    let failed = (0..3).map(|index| {
+        support::call(
+            "anchor_read",
+            1,
+            json!({"path": "/nope", "mode": "read"}),
+            (2_100 + index * 10, 2_105 + index * 10),
+            Some(anchor_facts::Failure::InvalidArguments),
+        )
+    });
+    let mut parallel_failed: Vec<_> = failed.collect();
+    parallel_failed.push(support::lifecycle((2_000, 2_200), Outcome::Completed, 0, 3));
+    world.observe("parallel-failed", "worker", 2_200, &config, parallel_failed);
+
+    let (table, _) = project(&world);
+    let query = Query::new(table.facts(), Some(3_000));
+    let health = Health.analyze(&query);
+    let stall = Stall::default().analyze(&query);
+    assert!(
+        !health
+            .findings
+            .iter()
+            .any(|f| f.code == "same_tool_after_failure")
+    );
+    assert!(
+        !stall
+            .findings
+            .iter()
+            .any(|f| f.code == "consecutive_same_shape_failures")
     );
 }
 
@@ -1573,4 +2438,273 @@ fn the_value_level_of_a_call_comes_from_the_ports_evidence_and_fills_older_facts
     )
     .unwrap();
     assert_eq!(refused["result"]["isError"], json!(true));
+}
+
+#[test]
+fn colliding_installations_keep_invocations_grades_and_details_independent() {
+    let left = World::new();
+    let right = World::new();
+    for (world, graph, task, passed) in [
+        (&left, "graph-a", "task-a", true),
+        (&right, "graph-b", "task-b", false),
+    ] {
+        let mut config = support::configuration("worker");
+        config.graph_digest = graph.into();
+        world.run("same-run", 1);
+        world.observe(
+            "same-run",
+            "worker",
+            1_000,
+            &config,
+            vec![
+                support::turn(1, 900, 100),
+                support::call(
+                    "anchor_run",
+                    1,
+                    json!({"command":["printf",task]}),
+                    (910, 920),
+                    None,
+                ),
+                support::lifecycle((800, 1_000), anchor_facts::Outcome::Completed, 1, 1),
+            ],
+        );
+        world.result("same-run", "worker#1", 1_001, 1, true);
+        world.grade("same-run", task, &[("quality", passed)], 1_002);
+        let directory = world.state().join("goose-acp");
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("same.evidence.json"), json!({
+            "key":{"run_id":"same-run","node_id":"worker","invocation":1},
+            "tool_calls":[{"tool":"anchor_run","arguments":{"command":["printf",task]},"result":{"ok":true,"output":task}}]
+        }).to_string()).unwrap();
+    }
+    let mut hub = anchor_hub::adapters::Hub::new(vec![left.state(), right.state()]);
+    hub.refresh().unwrap();
+    let query = hub.query(None);
+    let invocations = query.invocations();
+    assert_eq!(invocations.len(), 2);
+    assert_eq!(query.grades().len(), 2);
+    assert_eq!(query.tasks().len(), 2);
+    assert_ne!(invocations[0].namespace, invocations[1].namespace);
+    for invocation in &invocations {
+        assert_eq!(invocation.usage().total_tokens(), Some(110));
+        assert!(invocation.result.is_some());
+        assert!(!invocation.graph_conflict());
+        let grade = query.grades()[&invocation.run_key()].grade;
+        assert_eq!(invocation.details.len(), 1);
+        assert!(invocation.details[0].arguments.contains(&grade.task));
+        let item = anchor_hub::mcp::tool(
+            &query,
+            "invocation",
+            &json!({"key":invocation.key(),"namespace":invocation.namespace}),
+        )
+        .unwrap();
+        assert_eq!(item["brief"]["tokens"], 110);
+        let qualified = anchor_hub::mcp::tool(
+            &query,
+            "invocation",
+            &json!({"key":invocation.qualified_key()}),
+        )
+        .unwrap();
+        assert_eq!(qualified["brief"]["namespace"], invocation.namespace);
+    }
+    for tool in ["invocation", "calls"] {
+        assert!(
+            anchor_hub::mcp::tool(&query, tool, &json!({"key":"same-run/worker#1"}))
+                .unwrap_err()
+                .contains("ambiguous")
+        );
+    }
+}
+
+#[test]
+fn grade_authority_and_graph_conflicts_are_explicit_not_projection_order() {
+    use anchor_hub::source::HistorySource;
+    let world = World::new();
+    let mut config = support::configuration("worker");
+    for index in 0..3 {
+        let run = format!("r{index}");
+        world.run(&run, 1);
+        world.observe(
+            &run,
+            "worker",
+            100,
+            &config,
+            vec![
+                support::turn(1, 50, 10),
+                support::lifecycle((1, 100), anchor_facts::Outcome::Completed, 1, 0),
+            ],
+        );
+        world.result(&run, "worker#1", 101, 1, true);
+        world.grade(&run, "task", &[("quality", true)], 102);
+    }
+    world.grade("r1", "task", &[("quality", false)], 103);
+    let (mut table, mut projector) = project(&world);
+    let grade_source = DataRoot::open(&world.root("kernel-grades"), "grades").unwrap();
+    projector.pull(&grade_source, &mut table).unwrap();
+    let query = Query::new(table.facts(), None);
+    assert_eq!(query.grades().len(), 3);
+    let namespace = grade_source.namespace().to_owned();
+    assert_eq!(query.grades()[&(namespace.as_str(), "r1")].row.key.place, 2);
+    assert!(!query.grades()[&(namespace.as_str(), "r1")].grade.passed());
+    let other = World::new();
+    other.grade("r0", "different-task", &[("quality", false)], 1);
+    let source = DataRoot::open(&other.root("kernel-grades"), "other-grades")
+        .unwrap()
+        .with_namespace(&namespace);
+    projector.pull(&source, &mut table).unwrap();
+    config.graph_digest = "changed-graph".into();
+    world.observe(
+        "r2",
+        "worker",
+        104,
+        &config,
+        vec![
+            support::turn(1, 50, 10),
+            support::lifecycle((1, 100), anchor_facts::Outcome::Completed, 1, 0),
+        ],
+    );
+    projector
+        .pull(
+            &DataRoot::open(&world.root("kernel-facts"), "kernel-facts").unwrap(),
+            &mut table,
+        )
+        .unwrap();
+    let query = Query::new(table.facts(), None);
+    assert_eq!(query.grades().len(), 2);
+    assert_eq!(query.grade_conflicts().len(), 1);
+    let invocations = query.invocations();
+    let conflict = invocations
+        .iter()
+        .find(|invocation| invocation.run_id == "r2")
+        .unwrap();
+    assert!(conflict.graph_conflict());
+    assert!(conflict.config().is_none());
+    let health = Health.analyze(&query);
+    assert!(
+        health
+            .findings
+            .iter()
+            .any(|finding| finding.code == "conflicting_grades")
+    );
+    assert!(
+        health
+            .findings
+            .iter()
+            .any(|finding| finding.code == "conflicting_invocation_graph")
+    );
+    let signals = anchor_hub::analyzers::signals::Signals::default().table(&query);
+    assert!(signals.front.is_empty() || signals.front.values().all(Vec::is_empty));
+    let applicability = serde_json::to_value(signals.applicability).unwrap();
+    assert_eq!(applicability["grade_conflicts"], 1);
+    assert_eq!(applicability["graph_conflicts"], 1);
+    assert_eq!(applicability["grades"], "conflict");
+    assert_eq!(applicability["observations"], "conflict");
+}
+
+#[test]
+fn stable_v2_accumulates_dynamic_requests_and_v1_is_read_without_merging() {
+    use anchor_facts::{Fact, Outcome};
+    use anchor_hub::analyzers::signals::Signals;
+    for count in [3, 10] {
+        let world = World::new();
+        let stable = support::configuration("worker");
+        let mut contexts = std::collections::BTreeSet::new();
+        for index in 0..count {
+            let run = format!("dynamic-{index}");
+            let task = anchor_facts::text_digest(&format!("Input: {{\"item\":{index}}}"));
+            contexts.insert(task.clone());
+            world.run(&run, 1);
+            world.observe(
+                &run,
+                "worker",
+                100,
+                &stable,
+                vec![
+                    Fact::RequestContext {
+                        task_sha256: task,
+                        input_sha256: anchor_facts::text_digest(&json!({"item":index}).to_string()),
+                        input_guidance_digest: None,
+                    },
+                    support::turn(1, 50, 10),
+                    support::lifecycle((1, 100), Outcome::Completed, 1, 0),
+                ],
+            );
+            world.result(&run, "worker#1", 101, 1, true);
+            world.grade(&run, "same-task", &[("quality", true)], 102);
+        }
+        let mut hub = anchor_hub::adapters::Hub::new(vec![world.state()]);
+        hub.refresh().unwrap();
+        let query = hub.query(None);
+        assert_eq!(query.configurations().count(), 1);
+        assert_eq!(contexts.len(), count);
+        assert_eq!(
+            Signals::default().table(&query).front["same-task v1"][0].runs,
+            count
+        );
+        let mut legacy = stable.clone();
+        legacy.version = anchor_facts::LEGACY_CONFIGURATION_VERSION;
+        assert_ne!(legacy.digest(), stable.digest());
+        world.observe(
+            "legacy",
+            "worker",
+            103,
+            &legacy,
+            vec![
+                support::turn(1, 50, 10),
+                support::lifecycle((1, 100), Outcome::Completed, 1, 0),
+            ],
+        );
+        hub.refresh().unwrap();
+        let query = hub.query(None);
+        assert_eq!(query.configuration(&legacy.digest()).unwrap(), &legacy);
+        let table = Signals::default().table(&query);
+        assert_eq!(table.applicability.legacy_v1_configurations, 1);
+        assert_eq!(table.front["same-task v1"][0].runs, count);
+        let health = Health.analyze(&query);
+        assert!(
+            health.summary["configurations"]
+                .to_string()
+                .contains("legacy_unstable_config")
+        );
+    }
+}
+
+#[test]
+fn accepted_run_metadata_graph_must_agree_with_its_observation() {
+    let world = World::new();
+    world
+        .runs
+        .create(
+            anchor_kernel::Resource::new(
+                "run/disagrees",
+                "validator/step",
+                json!({"graph_digest":"run-graph"}),
+            )
+            .task(u64::MAX),
+        )
+        .unwrap();
+    world.result("disagrees", "worker#1", 100, 1, true);
+    let mut config = support::configuration("worker");
+    config.graph_digest = "trace-graph".into();
+    world.observe(
+        "disagrees",
+        "worker",
+        99,
+        &config,
+        vec![
+            support::turn(1, 50, 10),
+            support::lifecycle((1, 99), anchor_facts::Outcome::Completed, 1, 0),
+        ],
+    );
+    let mut hub = anchor_hub::adapters::Hub::new(vec![world.state()]);
+    hub.refresh().unwrap();
+    let query = hub.query(None);
+    assert!(query.invocations()[0].graph_conflict());
+    assert!(
+        Health
+            .analyze(&query)
+            .findings
+            .iter()
+            .any(|finding| finding.code == "conflicting_invocation_graph")
+    );
 }

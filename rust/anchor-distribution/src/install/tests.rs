@@ -19,12 +19,13 @@ fn request(fixture: &Fixture) -> PlatformInstallRequest {
     }
 }
 
-fn admitted_install(
+pub(crate) fn admitted_install(
     fixture: &Fixture,
     request: &PlatformInstallRequest,
 ) -> Result<PlatformInstallReport> {
     install(
         request,
+        &fixture.digest,
         &fixture.digest,
         &fixture.digest,
         &fixture.digest,
@@ -230,6 +231,7 @@ fn installer_refuses_links_duplicates_non_platform_payload_and_unlisted_paths() 
             &fixture.digest,
             &fixture.digest,
             &fixture.digest,
+            &fixture.digest,
             false
         )
         .is_err()
@@ -290,12 +292,14 @@ fn installed_runtime_validation_uses_read_only_modes_and_needs_no_config_directo
         &fixture.digest,
         &fixture.digest,
         &fixture.digest,
+        &fixture.digest,
         true,
     )
     .unwrap();
     assert!(
         validate_runtime(
             &report.release_root,
+            &fixture.digest,
             &fixture.digest,
             &fixture.digest,
             &fixture.digest,
@@ -334,18 +338,157 @@ fn installed_runtime_validation_uses_read_only_modes_and_needs_no_config_directo
             "{field}: {error}"
         );
     }
-    let mut obsolete = original;
-    obsolete["format"] = 2.into();
-    obsolete["bootstrap"]
-        .as_object_mut()
-        .unwrap()
-        .remove("pixi");
-    fs::write(&path, serde_json::to_vec(&obsolete).unwrap()).unwrap();
-    let error = validate_platform_runtime(&report.release_root)
-        .unwrap_err()
-        .to_string();
-    assert!(error.contains("format-3"), "{error}");
+    for format in [3, 4] {
+        let mut obsolete = original.clone();
+        obsolete["format"] = format.into();
+        fs::write(&path, serde_json::to_vec(&obsolete).unwrap()).unwrap();
+        let error = validate_platform_runtime(&report.release_root)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("format-5"), "{format}: {error}");
+    }
     make_directories_writable(&request.install_root).unwrap();
+}
+
+#[test]
+fn installer_enforces_lark_cli_pin_instead_of_self_reported_hash() {
+    let fixture = Fixture::new();
+    let request = request(&fixture);
+    let error = install(
+        &request,
+        &fixture.digest,
+        &fixture.digest,
+        &fixture.digest,
+        &fixture.digest,
+        LARK_CLI_SHA256,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        error.contains("required fixed platform executable"),
+        "{error}"
+    );
+    assert!(!request.install_root.exists());
+    assert!(!fs::read_dir(fixture.root.path()).unwrap().any(|entry| {
+        entry
+            .unwrap()
+            .file_name()
+            .to_str()
+            .unwrap()
+            .starts_with(".anchor-install-")
+    }));
+}
+
+#[test]
+fn lark_cli_runtime_cannot_be_replaced_by_rehashing_inventory() {
+    for dynamic in [false, true] {
+        let fixture = Fixture::new();
+        let package = fixture.package().unwrap();
+        let extracted = tempfile::tempdir().unwrap();
+        fixture.extract(extracted.path());
+        let root = extracted.path().join("anchor-runtime");
+        let relative = "plugins/feishu/bin/lark-cli";
+        let binary = root.join(relative);
+        let changed = if dynamic {
+            fs::read("/usr/bin/true").unwrap()
+        } else {
+            let mut bytes = fs::read(&binary).unwrap();
+            bytes.extend_from_slice(b"unreviewed");
+            bytes
+        };
+        fs::write(&binary, &changed).unwrap();
+        let digest = format!("{:x}", Sha256::digest(&changed));
+        let mut inventory = package.inventory;
+        let resource = inventory
+            .files
+            .iter_mut()
+            .find(|file| file.path == relative)
+            .unwrap();
+        resource.sha256 = digest.clone();
+        resource.size = changed.len() as u64;
+        let executable = inventory
+            .executables
+            .iter_mut()
+            .find(|file| file.path == relative)
+            .unwrap();
+        executable.sha256 = digest.clone();
+        executable.runtime = validation::elf_runtime(&binary).unwrap();
+        inventory.plugins = platform::release_plugin_inventory(&root).unwrap();
+        fs::write(
+            root.join("runtime-manifest.json"),
+            serde_json::to_vec(&inventory).unwrap(),
+        )
+        .unwrap();
+        // A matching private test pin isolates static-linkage admission from hash admission.
+        let pin = if dynamic { &digest } else { &fixture.digest };
+        for read_only in [false, true] {
+            if read_only {
+                make_release_readonly(&root).unwrap();
+            }
+            let error = validate_runtime(
+                &root,
+                &fixture.digest,
+                &fixture.digest,
+                &fixture.digest,
+                &fixture.digest,
+                pin,
+                read_only,
+            )
+            .unwrap_err()
+            .to_string();
+            let expected = if dynamic {
+                "plugins/feishu/bin/lark-cli must be a static executable"
+            } else {
+                "required fixed platform executable"
+            };
+            assert!(
+                error.contains(expected),
+                "dynamic={dynamic}, read_only={read_only}: {error}"
+            );
+        }
+        make_directories_writable(&root).unwrap();
+    }
+}
+
+#[test]
+#[ignore = "local pinned-binary smoke; requires ANCHOR_DISTRIBUTION_GOOSE, ANCHOR_DISTRIBUTION_BOOTSTRAP_ROOT and ANCHOR_DISTRIBUTION_LARK_CLI"]
+fn pinned_lark_cli_survives_public_package_and_install_admission() {
+    let mut fixture = Fixture::new();
+    let input = |name| PathBuf::from(std::env::var_os(name).expect("set reviewed binary input"));
+    let bootstrap = input("ANCHOR_DISTRIBUTION_BOOTSTRAP_ROOT");
+    fixture.request.goose = input("ANCHOR_DISTRIBUTION_GOOSE");
+    fixture.request.uv = bootstrap.join("uv");
+    fixture.request.rustup_init = bootstrap.join("rustup-init");
+    fixture.request.pixi = bootstrap.join("pixi");
+    fixture.request.lark_cli = input("ANCHOR_DISTRIBUTION_LARK_CLI");
+    let package = crate::build_platform_package(&fixture.request).unwrap();
+    let installed = install_platform(&PlatformInstallRequest {
+        archive: package.output,
+        sha256: package.sha256,
+        install_root: fixture.root.path().join("installed"),
+        model_config: None,
+    })
+    .unwrap();
+    let inventory = platform_inventory(&installed.release_root).unwrap();
+    assert_eq!(inventory, package.inventory);
+    let executable = inventory
+        .executables
+        .iter()
+        .find(|file| file.path == "plugins/feishu/bin/lark-cli")
+        .unwrap();
+    assert_eq!(executable.sha256, LARK_CLI_SHA256);
+    assert!(executable.runtime.interpreter.is_none());
+    assert!(executable.runtime.needed.is_empty());
+    assert_eq!(
+        fs::read(
+            installed
+                .release_root
+                .join("plugins/feishu/LICENSE.lark-cli")
+        )
+        .unwrap(),
+        include_bytes!("../../../../plugins/feishu/LICENSE.lark-cli")
+    );
+    make_directories_writable(&installed.install_root).unwrap();
 }
 
 #[test]
@@ -361,10 +504,33 @@ fn platform_install_is_repeatable_with_exact_official_plugins_and_no_private_sta
             &fixture.digest,
             &fixture.digest,
             &fixture.digest,
+            &fixture.digest,
             true,
         )
         .unwrap();
         assert_eq!(inventory.plugins.len(), 6);
+        assert_eq!(inventory.format, 5);
+        assert_eq!(inventory.guidance.len(), 1);
+        assert_eq!(inventory.guidance[0].slot, "input-discovery");
+        assert_eq!(inventory.evaluators.len(), 1);
+        assert_eq!(inventory.evaluators[0].id, "input-discovery");
+        for package in &inventory.evaluators {
+            let registered = platform::registered_evaluation_package(
+                &report.release_root,
+                &inventory.evaluators,
+                &package.id,
+            )
+            .unwrap();
+            assert_eq!(registered.inventory(), package);
+            assert_eq!(
+                fs::metadata(registered.suite_path())
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o7777,
+                0o444
+            );
+        }
         for file in &inventory.files {
             let path = report.release_root.join(&file.path);
             assert_eq!(
@@ -390,6 +556,249 @@ fn platform_install_is_repeatable_with_exact_official_plugins_and_no_private_sta
 }
 
 #[test]
+fn installer_enforces_graph_free_schema_and_analysis_executable_closure() {
+    let fixture = Fixture::new();
+    fixture.package().unwrap();
+    let extracted = tempfile::tempdir().unwrap();
+    fixture.extract(extracted.path());
+    let root = extracted.path().join("anchor-runtime");
+    let manifest_path = root.join("runtime-manifest.json");
+    let original: serde_json::Value =
+        serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+    let validate = || {
+        validate_runtime(
+            &root,
+            &fixture.digest,
+            &fixture.digest,
+            &fixture.digest,
+            &fixture.digest,
+            &fixture.digest,
+            false,
+        )
+    };
+    let mut changed = original.clone();
+    changed["graphs"] = serde_json::json!([]);
+    fs::write(&manifest_path, serde_json::to_vec(&changed).unwrap()).unwrap();
+    let error = validate().unwrap_err().to_string();
+    assert!(error.contains("unknown field `graphs`"), "{error}");
+    for path in ["bin/anchor-hub", "bin/anchor-eval"] {
+        fs::write(&manifest_path, serde_json::to_vec(&original).unwrap()).unwrap();
+        let source = root.join(path);
+        let bytes = fs::read(&source).unwrap();
+        let permissions = fs::metadata(&source).unwrap().permissions();
+        fs::remove_file(&source).unwrap();
+        assert!(validate().is_err(), "missing {path}");
+        let mut changed = original.clone();
+        changed["files"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|file| file["path"] != path);
+        changed["executables"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|file| file["path"] != path);
+        fs::write(&manifest_path, serde_json::to_vec(&changed).unwrap()).unwrap();
+        assert!(validate().is_err(), "omitted {path}");
+        fs::write(&source, &bytes).unwrap();
+        fs::set_permissions(&source, permissions).unwrap();
+        assert!(validate().is_err(), "unlisted {path}");
+    }
+    let mut changed = original;
+    changed["files"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
+            "path": "graphs/example/extra.md", "size": 10,
+            "sha256": format!("{:x}", Sha256::digest(b"unreviewed")), "mode": 420
+        }));
+    fs::create_dir_all(root.join("graphs/example")).unwrap();
+    fs::write(root.join("graphs/example/extra.md"), "unreviewed").unwrap();
+    fs::write(&manifest_path, serde_json::to_vec(&changed).unwrap()).unwrap();
+    assert!(validate().is_err());
+}
+
+#[test]
+fn installer_requires_exact_official_guidance_inventory() {
+    let fixture = Fixture::new();
+    fixture.package().unwrap();
+    let extracted = tempfile::tempdir().unwrap();
+    fixture.extract(extracted.path());
+    let root = extracted.path().join("anchor-runtime");
+    let manifest_path = root.join("runtime-manifest.json");
+    let original: serde_json::Value =
+        serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+    let mut changed = original;
+    changed["guidance"] = serde_json::json!([{
+        "slot": "input-discovery", "path": "harness/input-discovery.md",
+        "sha256": "0".repeat(64), "schema_version": 1
+    }]);
+    fs::write(&manifest_path, serde_json::to_vec(&changed).unwrap()).unwrap();
+    let error = validate_runtime(
+        &root,
+        &fixture.digest,
+        &fixture.digest,
+        &fixture.digest,
+        &fixture.digest,
+        &fixture.digest,
+        false,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        error.contains("guidance differs from admitted inventory"),
+        "{error}"
+    );
+}
+
+#[test]
+fn protected_evaluators_require_exact_inventory_and_only_registered_package_ids() {
+    let fixture = Fixture::new();
+    fixture.package().unwrap();
+    let extracted = tempfile::tempdir().unwrap();
+    fixture.extract(extracted.path());
+    let root = extracted.path().join("anchor-runtime");
+    let manifest_path = root.join("runtime-manifest.json");
+    let inventory: PlatformPackageInventory =
+        serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+    let validate = || {
+        validate_runtime(
+            &root,
+            &fixture.digest,
+            &fixture.digest,
+            &fixture.digest,
+            &fixture.digest,
+            &fixture.digest,
+            false,
+        )
+    };
+    validate().unwrap();
+    for id in [
+        "dreaming",
+        "unknown",
+        "../input-discovery",
+        "",
+        "/tmp/suite.json",
+    ] {
+        assert!(
+            platform::registered_evaluation_package(&root, &inventory.evaluators, id).is_err(),
+            "{id}"
+        );
+    }
+    for (field, value) in [
+        ("id", serde_json::json!("unregistered")),
+        ("package_path", serde_json::json!("../input-discovery")),
+        ("manifest_sha256", serde_json::json!("0".repeat(64))),
+        ("protocol_version", serde_json::json!(2)),
+        ("suite_version", serde_json::json!("2")),
+    ] {
+        let mut changed = serde_json::to_value(&inventory).unwrap();
+        changed["evaluators"][0][field] = value;
+        fs::write(&manifest_path, serde_json::to_vec(&changed).unwrap()).unwrap();
+        assert!(validate().is_err(), "{field}");
+    }
+    for evaluators in [
+        serde_json::json!([]),
+        serde_json::json!([inventory.evaluators[0], inventory.evaluators[0]]),
+    ] {
+        let mut changed = serde_json::to_value(&inventory).unwrap();
+        changed["evaluators"] = evaluators;
+        fs::write(&manifest_path, serde_json::to_vec(&changed).unwrap()).unwrap();
+        assert!(validate().is_err());
+    }
+    // The public selector cannot bypass full release validation using intact suites.
+    assert!(platform_evaluation_package(&root, "input-discovery").is_err());
+    assert!(platform_evaluator_inventory(&root).is_err());
+}
+
+#[test]
+fn protected_evaluator_payloads_reject_missing_undeclared_tampered_and_linked_files() {
+    let fixture = Fixture::new();
+    fixture.package().unwrap();
+    let extracted = tempfile::tempdir().unwrap();
+    fixture.extract(extracted.path());
+    let root = extracted.path().join("anchor-runtime");
+    let manifest_path = root.join("runtime-manifest.json");
+    let original = fs::read(&manifest_path).unwrap();
+    let inventory: PlatformPackageInventory = serde_json::from_slice(&original).unwrap();
+    let validate = || {
+        validate_runtime(
+            &root,
+            &fixture.digest,
+            &fixture.digest,
+            &fixture.digest,
+            &fixture.digest,
+            &fixture.digest,
+            false,
+        )
+    };
+    for (relative, _) in platform::release_evaluator_resources() {
+        let path = root.join(&relative);
+        let bytes = fs::read(&path).unwrap();
+        fs::remove_file(&path).unwrap();
+        assert!(validate().is_err(), "missing {relative}");
+        let mut omitted = inventory.clone();
+        omitted.files.retain(|file| file.path != relative);
+        fs::write(&manifest_path, serde_json::to_vec(&omitted).unwrap()).unwrap();
+        assert!(validate().is_err(), "omitted {relative}");
+        fs::write(&path, &bytes).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(validate().is_err(), "unlisted {relative}");
+        fs::write(&manifest_path, &original).unwrap();
+        let mut changed = bytes.clone();
+        changed.push(b'\n');
+        fs::write(&path, &changed).unwrap();
+        let mut rehashed = inventory.clone();
+        let resource = rehashed
+            .files
+            .iter_mut()
+            .find(|file| file.path == relative)
+            .unwrap();
+        resource.size = changed.len() as u64;
+        resource.sha256 = format!("{:x}", Sha256::digest(&changed));
+        let package_path = Path::new(&relative).parent().unwrap().to_str().unwrap();
+        rehashed
+            .evaluators
+            .iter_mut()
+            .find(|evaluator| evaluator.package_path == package_path)
+            .unwrap()
+            .manifest_sha256 = resource.sha256.clone();
+        fs::write(&manifest_path, serde_json::to_vec(&rehashed).unwrap()).unwrap();
+        assert!(validate().is_err(), "rehashed {relative}");
+        fs::write(&manifest_path, &original).unwrap();
+        fs::remove_file(&path).unwrap();
+        let external = fixture.root.path().join("external-suite.json");
+        fs::write(&external, &bytes).unwrap();
+        symlink(&external, &path).unwrap();
+        assert!(validate().is_err(), "linked {relative}");
+        let id = package_path.strip_prefix("evaluators/").unwrap();
+        assert!(
+            platform::registered_evaluation_package(&root, &inventory.evaluators, id).is_err(),
+            "selector follows suite link: {relative}"
+        );
+        fs::remove_file(&path).unwrap();
+        fs::write(&path, &bytes).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        validate().unwrap();
+    }
+    for id in ["input-discovery", "dreaming", "unregistered"] {
+        let relative = format!("evaluators/{id}/extra.json");
+        let path = root.join(&relative);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, b"{}").unwrap();
+        let mut changed = inventory.clone();
+        changed.files.push(crate::ResourceFile {
+            path: relative,
+            sha256: format!("{:x}", Sha256::digest(b"{}")),
+            size: 2,
+            mode: 0o644,
+        });
+        fs::write(&manifest_path, serde_json::to_vec(&changed).unwrap()).unwrap();
+        assert!(validate().is_err(), "extra {id}");
+        fs::remove_file(path).unwrap();
+    }
+}
+
+#[test]
 fn installer_rejects_missing_tampered_and_extra_official_plugin_payloads() {
     let fixture = Fixture::new();
     fixture.package().unwrap();
@@ -402,6 +811,7 @@ fn installer_rejects_missing_tampered_and_extra_official_plugin_payloads() {
     let validate = || {
         validate_runtime(
             &root,
+            &fixture.digest,
             &fixture.digest,
             &fixture.digest,
             &fixture.digest,
@@ -513,6 +923,7 @@ fn official_plugin_bytes_cannot_be_replaced_by_rehashing_the_inventory() {
         fs::write(&manifest_path, serde_json::to_vec(&rehashed).unwrap()).unwrap();
         let error = validate_runtime(
             &root,
+            &fixture.digest,
             &fixture.digest,
             &fixture.digest,
             &fixture.digest,

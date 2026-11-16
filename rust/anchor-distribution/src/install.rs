@@ -1,8 +1,8 @@
 //! A fresh private platform installation. Model settings belong to the Host
 //! management store; release files and mutable platform facts are disjoint.
 use crate::{
-    GOOSE_SHA256, PIXI_SHA256, PackageError, PlatformPackageInventory, RUSTUP_INIT_SHA256, Result,
-    UV_SHA256, archive,
+    GOOSE_SHA256, LARK_CLI_SHA256, PIXI_SHA256, PackageError, PlatformPackageInventory,
+    RUSTUP_INIT_SHA256, Result, UV_SHA256, archive,
     filesystem::{absolute, make_directories_writable, open_path},
     platform, validation,
 };
@@ -49,6 +49,7 @@ pub fn install_platform(request: &PlatformInstallRequest) -> Result<PlatformInst
         UV_SHA256,
         RUSTUP_INIT_SHA256,
         PIXI_SHA256,
+        LARK_CLI_SHA256,
     )
 }
 
@@ -58,6 +59,7 @@ fn install(
     uv_sha256: &str,
     rustup_sha256: &str,
     pixi_sha256: &str,
+    lark_cli_sha256: &str,
 ) -> Result<PlatformInstallReport> {
     if request.sha256.len() != 64 || !request.sha256.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(invalid("archive SHA256 must be a trusted 64-digit digest"));
@@ -117,6 +119,7 @@ fn install(
         uv_sha256,
         rustup_sha256,
         pixi_sha256,
+        lark_cli_sha256,
         false,
     )?;
     let config = staging.path().join("config");
@@ -242,12 +245,34 @@ fn unpack_platform(file: File, release: &Path) -> Result<()> {
 
 /// Check an installed platform against the same fixed runtime contract used at installation.
 pub fn validate_platform_runtime(runtime: &Path) -> Result<()> {
-    platform_plugin_inventory(runtime).map(|_| ())
+    platform_inventory(runtime).map(|_| ())
 }
 
 /// Official Plugins from a release admitted by the installation validator.
 /// Startup imports only these entries, never an arbitrary plugins directory.
 pub fn platform_plugin_inventory(runtime: &Path) -> Result<Vec<crate::PluginInventory>> {
+    platform_inventory(runtime).map(|inventory| inventory.plugins)
+}
+
+/// Official protected packages from a fully validated read-only release.
+pub fn platform_evaluator_inventory(
+    runtime: &Path,
+) -> Result<Vec<crate::PlatformEvaluatorInventory>> {
+    platform_inventory(runtime).map(|inventory| inventory.evaluators)
+}
+
+/// Select a package by registered identity, never by a caller-provided suite path.
+/// The returned answer-bearing bytes are for trusted Host/Eval composition only.
+pub fn platform_evaluation_package(
+    runtime: &Path,
+    id: &str,
+) -> Result<crate::RegisteredEvaluationPackage> {
+    let inventory = platform_inventory(runtime)?;
+    platform::registered_evaluation_package(runtime, &inventory.evaluators, id)
+}
+
+/// The fully validated read-only inventory, shared by all release consumers.
+pub fn platform_inventory(runtime: &Path) -> Result<PlatformPackageInventory> {
     open_path(runtime)?;
     validate_runtime(
         runtime,
@@ -255,9 +280,9 @@ pub fn platform_plugin_inventory(runtime: &Path) -> Result<Vec<crate::PluginInve
         UV_SHA256,
         RUSTUP_INIT_SHA256,
         PIXI_SHA256,
+        LARK_CLI_SHA256,
         true,
     )
-    .map(|inventory| inventory.plugins)
 }
 
 fn validate_runtime(
@@ -266,6 +291,7 @@ fn validate_runtime(
     uv_sha256: &str,
     rustup_sha256: &str,
     pixi_sha256: &str,
+    lark_cli_sha256: &str,
     read_only: bool,
 ) -> Result<PlatformPackageInventory> {
     // Installed releases use this same validator. Reject links and special entries before reading files.
@@ -279,10 +305,11 @@ fn validate_runtime(
         ));
     }
     let manifest: serde_json::Value = serde_json::from_reader(manifest_file)?;
-    // Reject obsolete archives before decoding the required bootstrap inventory.
-    if manifest.get("format").and_then(serde_json::Value::as_u64) != Some(3) {
+    if manifest.get("format").and_then(serde_json::Value::as_u64)
+        != Some(u64::from(platform::PLATFORM_FORMAT))
+    {
         return Err(invalid(
-            "installation requires the pinned format-3 platform archive",
+            "installation requires the pinned format-5 platform archive",
         ));
     }
     let manifest: PlatformPackageInventory = serde_json::from_value(manifest)?;
@@ -291,9 +318,11 @@ fn validate_runtime(
         || manifest.goose_version != crate::GOOSE_VERSION
     {
         return Err(invalid(
-            "installation requires the pinned format-3 platform archive",
+            "installation requires the pinned platform identity",
         ));
     }
+    platform::validate_evaluator_inventory(&manifest.evaluators)?;
+    platform::guidance::validate(&manifest.guidance)?;
     for (tool, path, digest, version, source) in [
         (
             &manifest.bootstrap.uv,
@@ -341,11 +370,15 @@ fn validate_runtime(
                 | "bin/anchor-net-relay"
                 | "bin/anchor-sandbox-network"
                 | "bin/anchor-platform"
+                | "bin/anchor-hub"
+                | "bin/anchor-eval"
                 | "bin/goose"
                 | "bin/uv"
                 | "bin/rustup-init"
                 | "bin/pixi"
         ) && platform::release_plugin_resource_mode(&resource.path).is_none()
+            && platform::release_evaluator_resource_mode(&resource.path).is_none()
+            && platform::guidance::resource_mode(&resource.path).is_none()
             && !resource.path.starts_with("web/")
         {
             return Err(invalid(
@@ -353,9 +386,11 @@ fn validate_runtime(
             ));
         }
         if platform::release_plugin_resource_mode(&resource.path)
+            .or_else(|| platform::release_evaluator_resource_mode(&resource.path))
+            .or_else(|| platform::guidance::resource_mode(&resource.path))
             .is_some_and(|mode| resource.mode != mode)
         {
-            return Err(invalid("platform Plugin resource has an unexpected mode"));
+            return Err(invalid("platform resource has an unexpected mode"));
         }
         if !declared.insert(resource.path.clone()) || !matches!(resource.mode, 0o644 | 0o755) {
             return Err(invalid("invalid or duplicate platform inventory file"));
@@ -384,15 +419,7 @@ fn validate_runtime(
                 return Err(invalid("platform ELF identity differs from inventory"));
             }
             let runtime = validation::elf_runtime(&root.join(&resource.path))?;
-            if matches!(
-                resource.path.as_str(),
-                "bin/goose" | "bin/uv" | "bin/rustup-init" | "bin/pixi"
-            ) && (runtime.interpreter.is_some() || !runtime.needed.is_empty())
-            {
-                return Err(invalid(
-                    "Goose and bootstrap must be static musl executables",
-                ));
-            }
+            platform::validate_static_executable(&resource.path, &runtime)?;
             if !manifest.executables.iter().any(|executable| {
                 executable.path == resource.path
                     && executable.sha256 == resource.sha256
@@ -418,6 +445,7 @@ fn validate_runtime(
         ("bin/uv", uv_sha256),
         ("bin/rustup-init", rustup_sha256),
         ("bin/pixi", pixi_sha256),
+        ("plugins/feishu/bin/lark-cli", lark_cli_sha256),
     ] {
         if !manifest
             .files
@@ -434,6 +462,8 @@ fn validate_runtime(
         "bin/anchor-net-relay",
         "bin/anchor-sandbox-network",
         "bin/anchor-platform",
+        "bin/anchor-hub",
+        "bin/anchor-eval",
     ] {
         if !manifest
             .files
@@ -457,17 +487,28 @@ fn validate_runtime(
             "platform executable inventory has unexpected entries",
         ));
     }
-    for (path, mode) in platform::release_plugin_resources() {
+    for (path, mode) in platform::release_plugin_resources()
+        .chain(platform::release_evaluator_resources())
+        .chain(platform::guidance::resources())
+    {
         if !manifest
             .files
             .iter()
             .any(|file| file.path == path && file.mode == mode)
         {
-            return Err(invalid("required official Plugin resource is absent"));
+            return Err(invalid("required official platform resource is absent"));
         }
     }
     if manifest.plugins != platform::release_plugin_inventory(root)? {
         return Err(invalid("platform Plugins differ from admitted inventory"));
+    }
+    if manifest.guidance != platform::guidance::inventory(root)? {
+        return Err(invalid("platform guidance differs from admitted inventory"));
+    }
+    if manifest.evaluators != platform::release_evaluator_inventory(root)? {
+        return Err(invalid(
+            "platform evaluators differ from admitted inventory",
+        ));
     }
     if actual_files != declared || actual_directories != required_directories {
         return Err(invalid(
@@ -612,4 +653,4 @@ pub fn platform_command_with_listen(launcher: &Path, listen: &str) -> Result<Com
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

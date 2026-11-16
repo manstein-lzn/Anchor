@@ -13,6 +13,17 @@ use std::{
     path::{Path, PathBuf},
 };
 
+mod evaluators;
+pub(crate) mod guidance;
+pub use evaluators::{PlatformEvaluatorInventory, RegisteredEvaluationPackage};
+pub(crate) use evaluators::{
+    registered_evaluation_package, release_evaluator_inventory, release_evaluator_resource_mode,
+    release_evaluator_resources, validate_evaluator_inventory,
+};
+pub use guidance::PlatformGuidanceInventory;
+
+pub(crate) const PLATFORM_FORMAT: u32 = 5;
+
 pub const UV_VERSION: &str = "0.11.6";
 pub const UV_SHA256: &str = "61c5aaf37153f7b2b4c8d11ff5174fa30e930dc3dc2825f54593a2dd319eb8af";
 pub const UV_SOURCE: &str =
@@ -26,6 +37,22 @@ pub const PIXI_VERSION: &str = "0.83.0";
 pub const PIXI_SHA256: &str = "50571451e96f4a82cf675cd83baaf66fff9b718f0aaf153900b9faf4c29bd401";
 pub const PIXI_SOURCE: &str =
     "https://github.com/prefix-dev/pixi/releases/download/v0.83.0/pixi-x86_64-unknown-linux-musl";
+pub const LARK_CLI_VERSION: &str = "1.0.100";
+pub const LARK_CLI_SHA256: &str =
+    "d9ac68ef91f81548e37481b42d9703376a7f0c89a50f00ef45f2d4307637db49";
+
+pub(crate) fn validate_static_executable(path: &str, runtime: &crate::ElfRuntime) -> Result<()> {
+    if matches!(
+        path,
+        "bin/goose" | "bin/uv" | "bin/rustup-init" | "bin/pixi" | "plugins/feishu/bin/lark-cli"
+    ) && (runtime.interpreter.is_some() || !runtime.needed.is_empty())
+    {
+        return Err(PackageError::Invalid(format!(
+            "{path} must be a static executable"
+        )));
+    }
+    Ok(())
+}
 
 // System resources come from the shared Host-owned inventory. Only ordinary
 // preinstalled Plugins live here; bundling does not change their lifecycle.
@@ -173,6 +200,8 @@ pub(crate) fn release_plugin_inventory(root: &Path) -> Result<Vec<PluginInventor
 pub struct PlatformPackageRequest {
     pub host: PathBuf,
     pub goose: PathBuf,
+    pub hub: PathBuf,
+    pub eval: PathBuf,
     pub net_relay: PathBuf,
     pub sandbox_network: PathBuf,
     pub platform_launcher: PathBuf,
@@ -181,6 +210,7 @@ pub struct PlatformPackageRequest {
     pub git_tools: PathBuf,
     pub wecom_tools: PathBuf,
     pub feishu_gateway: PathBuf,
+    pub lark_cli: PathBuf,
     pub wecom_gateway: PathBuf,
     pub uv: PathBuf,
     pub rustup_init: PathBuf,
@@ -216,6 +246,8 @@ pub struct PlatformPackageInventory {
     pub platform: crate::ElfIdentity,
     pub bootstrap: BootstrapInventory,
     pub plugins: Vec<PluginInventory>,
+    pub guidance: Vec<PlatformGuidanceInventory>,
+    pub evaluators: Vec<PlatformEvaluatorInventory>,
     pub executables: Vec<ExecutableIdentity>,
     pub environment_references: Vec<String>,
     pub files: Vec<ResourceFile>,
@@ -235,6 +267,7 @@ pub fn build_platform_package(request: &PlatformPackageRequest) -> Result<Platfo
         UV_SHA256,
         RUSTUP_INIT_SHA256,
         PIXI_SHA256,
+        LARK_CLI_SHA256,
     )?
     .publish()
 }
@@ -268,6 +301,7 @@ fn prepare(
     uv_sha256: &str,
     rustup_sha256: &str,
     pixi_sha256: &str,
+    lark_cli_sha256: &str,
 ) -> Result<PreparedPlatform> {
     validation::version(env!("CARGO_PKG_VERSION"))?;
     let output = Output::new(&request.output)?;
@@ -289,6 +323,8 @@ fn prepare(
     for (source, path) in [
         (&request.host, "bin/anchor-runner-host"),
         (&request.goose, "bin/goose"),
+        (&request.hub, "bin/anchor-hub"),
+        (&request.eval, "bin/anchor-eval"),
         (&request.net_relay, "bin/anchor-net-relay"),
         (&request.sandbox_network, "bin/anchor-sandbox-network"),
         (&request.platform_launcher, "bin/anchor-platform"),
@@ -305,6 +341,7 @@ fn prepare(
             &request.feishu_gateway,
             "plugins/feishu/bin/anchor-feishu-gateway",
         ),
+        (&request.lark_cli, "plugins/feishu/bin/lark-cli"),
         (
             &request.wecom_gateway,
             "plugins/wecom/bin/anchor-wecom-gateway",
@@ -318,10 +355,15 @@ fn prepare(
         ("bin/uv", uv_sha256, "uv 0.11.6"),
         ("bin/rustup-init", rustup_sha256, "rustup-init 1.29.0"),
         ("bin/pixi", pixi_sha256, "pixi 0.83.0"),
+        (
+            "plugins/feishu/bin/lark-cli",
+            lark_cli_sha256,
+            "lark-cli 1.0.100",
+        ),
     ] {
         if resource(&entries, path)?.sha256 != digest {
             return Err(PackageError::Invalid(format!(
-                "{identity} does not match the pinned x86_64 musl executable"
+                "{identity} does not match the pinned x86_64 Linux executable"
             )));
         }
     }
@@ -333,6 +375,8 @@ fn prepare(
         }
     }
     let plugins = release_plugin_inventory(root)?;
+    let guidance = guidance::write(root, &mut entries)?;
+    let evaluators = evaluators::write_release_evaluators(root, &mut entries)?;
     let web = Snapshot::tree(&request.web, root, "web")?;
     add_snapshots(&mut entries, std::slice::from_ref(&web))?;
     snapshots.push(web);
@@ -354,17 +398,7 @@ fn prepare(
                 ));
             }
             let runtime = validation::elf_runtime(&path)?;
-            if matches!(
-                file.path.as_str(),
-                "bin/goose" | "bin/uv" | "bin/rustup-init" | "bin/pixi"
-            ) && (runtime.interpreter.is_some() || !runtime.needed.is_empty())
-            {
-                // The delivery bootstrap must not need an interpreter or the
-                // development toolchain it exists to prepare.
-                return Err(PackageError::Invalid(
-                    "Goose, uv, rustup-init and pixi must be static musl executables".into(),
-                ));
-            }
+            validate_static_executable(&file.path, &runtime)?;
             executables.push(ExecutableIdentity {
                 path: file.path.clone(),
                 sha256: file.sha256.clone(),
@@ -380,7 +414,7 @@ fn prepare(
     }
     generated_file(root, "README.md", PLATFORM_README.as_bytes(), &mut entries)?;
     let inventory = PlatformPackageInventory {
-        format: 3,
+        format: PLATFORM_FORMAT,
         kind: "platform".into(),
         builder_version: env!("CARGO_PKG_VERSION").into(),
         goose_version: GOOSE_VERSION.into(),
@@ -407,6 +441,8 @@ fn prepare(
             },
         },
         plugins,
+        guidance,
+        evaluators,
         executables,
         environment_references: environment_references.into_iter().collect(),
         files: entries.values().flatten().cloned().collect(),
@@ -428,10 +464,14 @@ fn prepare(
 
 const PLATFORM_README: &str = "# Anchor platform\n\n\
 This archive contains the Anchor Host, fixed Goose, sandbox network relay,\n\
-compiled WebUI, system network/Graph Tasks/Feishu/WeCom Plugins, ordinary Git/Anchor Dev Plugins, and pinned uv/Rustup/pixi bootstrap tools.\n\
-It contains no business Graph, Python interpreter, Rust toolchain, user model\n\
+compiled WebUI, Hub/Eval executables, protected input-discovery suite and guidance, system network/Graph Tasks/Feishu/WeCom Plugins, ordinary Git/Anchor Dev Plugins, and pinned uv/Rustup/pixi bootstrap tools.\n\
+Feishu includes official lark-cli 1.0.100 and its MIT notice at plugins/feishu/LICENSE.lark-cli.\n\
+It contains no Graph, Python interpreter, Rust toolchain, user model\n\
 configuration, credentials or mutable runtime state. Platform startup uses the\n\
 same Host and Runtime Kernel as standalone Graph packages.\n\n\
+Protected suites are not mounted into Agent workspaces; only the independent\n\
+evaluator reads expected answers. Delivery identities and protocol versions\n\
+are not evidence of quality.\n\n\
 Verify the archive SHA256 against its trusted build report before extraction.\n\
 runtime-manifest.json records identities and file hashes, not a signature.\n\
 Keep this release read-only and mutable roots outside it. Bootstrap identity\n\

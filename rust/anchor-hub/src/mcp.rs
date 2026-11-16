@@ -236,7 +236,7 @@ fn brief(query: &Query, invocation: &Invocation) -> Value {
     let calls = invocation.calls();
     let usage = invocation.usage();
     let grades = query.grades();
-    let grade = grades.get(invocation.run_id.as_str()).map(|graded| {
+    let grade = grades.get(&invocation.run_key()).map(|graded| {
         json!({
             "task": format!("{} v{}", graded.grade.task, graded.grade.task_version),
             "score": graded.grade.score(),
@@ -245,6 +245,10 @@ fn brief(query: &Query, invocation: &Invocation) -> Value {
     });
     json!({
         "key": invocation.key(),
+        "qualified_key": invocation.qualified_key(),
+        "namespace": invocation.namespace,
+        "graph_conflict": invocation.graph_conflict(),
+        "grade_conflict": query.grade_conflicts().contains_key(&invocation.run_key()),
         "config": invocation.config(),
         "accepted": invocation.result.is_some(),
         "outcome": outcome(invocation),
@@ -272,6 +276,7 @@ fn invocations(query: &Query, args: &Value) -> Result<Value, String> {
     let listed: Vec<Value> = query
         .invocations()
         .iter()
+        .filter(|i| text(args, "namespace").is_none_or(|namespace| i.namespace == namespace))
         .filter(|i| run.is_none_or(|r| i.run_id == r))
         .filter(|i| node.is_none_or(|n| i.node_id == n))
         .filter(|i| config.is_none_or(|c| i.config().is_some_and(|d| d.starts_with(c))))
@@ -279,7 +284,7 @@ fn invocations(query: &Query, args: &Value) -> Result<Value, String> {
         .filter(|i| tool.is_none_or(|t| i.calls().iter().any(|c| c.tool == t)))
         .filter(|i| {
             task.is_none_or(|t| {
-                grades.get(i.run_id.as_str()).is_some_and(|g| {
+                grades.get(&i.run_key()).is_some_and(|g| {
                     g.grade.task == t || format!("{} v{}", g.grade.task, g.grade.task_version) == t
                 })
             })
@@ -292,10 +297,22 @@ fn invocations(query: &Query, args: &Value) -> Result<Value, String> {
 fn invocation(query: &Query, args: &Value) -> Result<Value, String> {
     let key = text(args, "key").ok_or("key is required: run/node#invocation")?;
     let invocations = query.invocations();
-    let found = invocations
+    let matches: Vec<_> = invocations
         .iter()
-        .find(|i| i.key() == key)
-        .ok_or_else(|| format!("no invocation {key}"))?;
+        .filter(|invocation| {
+            (invocation.qualified_key() == key || invocation.key() == key)
+                && text(args, "namespace").is_none_or(|namespace| invocation.namespace == namespace)
+        })
+        .collect();
+    let found = match matches.as_slice() {
+        [found] => *found,
+        [] => return Err(format!("no invocation {key}")),
+        _ => {
+            return Err(format!(
+                "ambiguous invocation {key}; provide namespace or qualified key"
+            ));
+        }
+    };
     let gaps: Vec<Value> = found
         .gaps()
         .iter()
@@ -343,6 +360,7 @@ fn configurations(query: &Query, args: &Value) -> Result<Value, String> {
         .map(|(digest, manifest)| {
             json!({
                 "digest": digest,
+                "legacy_unstable_config": !manifest.is_stable(),
                 "node": manifest.node_id,
                 "model": manifest.model,
                 "graph": manifest.graph_digest.get(..12),
@@ -380,11 +398,25 @@ fn calls(query: &Query, args: &Value) -> Result<Value, String> {
         Some(value) => value.as_bool().ok_or("group must be true or false")?,
     };
     let invocations = query.invocations();
+    let namespace = text(args, "namespace");
+    if key.is_some_and(|key| {
+        invocations
+            .iter()
+            .filter(|invocation| {
+                (invocation.key() == key || invocation.qualified_key() == key)
+                    && namespace.is_none_or(|namespace| invocation.namespace == namespace)
+            })
+            .count()
+            > 1
+    }) {
+        return Err("ambiguous invocation; provide namespace or qualified key".into());
+    }
     let mut listed = Vec::new();
     let mut groups: BTreeMap<Ending, Group> = BTreeMap::new();
     for invocation in invocations
         .iter()
-        .filter(|i| key.is_none_or(|k| i.key() == k))
+        .filter(|i| namespace.is_none_or(|namespace| i.namespace == namespace))
+        .filter(|i| key.is_none_or(|key| i.key() == key || i.qualified_key() == key))
     {
         for (index, call, detail) in invocation.detailed() {
             let class = match (call.ok, call.command) {
@@ -412,9 +444,13 @@ fn calls(query: &Query, args: &Value) -> Result<Value, String> {
             }
             let instance = json!({
                 "invocation": invocation.key(),
+                "qualified_key": invocation.qualified_key(),
+                "namespace": invocation.namespace,
                 "index": index,
                 "model_request": call.model_request,
                 "tool": call.tool,
+                "program": call.program,
+                "shell_program": call.shell_program,
                 "ended": class,
                 "duration_ms": call.duration_ms(),
                 "exit_code": call.command.and_then(|end| end.exit_code),
@@ -439,8 +475,19 @@ fn calls(query: &Query, args: &Value) -> Result<Value, String> {
                 ))
                 .or_default();
             entry.calls += 1;
-            entry.runs.insert(invocation.run_id.clone());
-            let key = invocation.key();
+            entry
+                .runs
+                .insert(format!("{}::{}", invocation.namespace, invocation.run_id));
+            let key = if invocations
+                .iter()
+                .filter(|other| other.key() == invocation.key())
+                .count()
+                > 1
+            {
+                invocation.qualified_key()
+            } else {
+                invocation.key()
+            };
             if entry.invocations.len() < GROUP_INVOCATIONS && !entry.invocations.contains(&key) {
                 entry.invocations.push(key);
             }
@@ -583,9 +630,22 @@ fn records(query: &Query, args: &Value) -> Result<Value, String> {
     let resource = text(args, "resource").ok_or("resource is required")?;
     let root = text(args, "root");
     let place = number(args, "place")?;
+    let namespaces: std::collections::BTreeSet<_> = query
+        .rows()
+        .iter()
+        .filter(|row| {
+            row.key.resource == resource && root.is_none_or(|root| row.key.root.contains(root))
+        })
+        .filter(|row| text(args, "namespace").is_none_or(|namespace| row.namespace == namespace))
+        .map(|row| row.namespace.as_str())
+        .collect();
+    if namespaces.len() > 1 {
+        return Err("ambiguous resource; provide namespace or exact root".into());
+    }
     let rows: Vec<_> = query
         .rows()
         .iter()
+        .filter(|row| text(args, "namespace").is_none_or(|namespace| row.namespace == namespace))
         .filter(|row| row.key.resource == resource)
         .filter(|row| root.is_none_or(|r| row.key.root.contains(r)))
         .filter(|row| place.is_none_or(|p| row.key.place == p))
@@ -615,7 +675,7 @@ fn tools() -> Value {
         },
         {
             "name": "report",
-            "description": "One analyzer's report: health (record integrity, tool and command failures, check failures, startup), profile (per task: cost spread, turns, context growth, model and tool time shares, cheapest and dearest Runs), stall (stalled tasks, gaps, slow calls, loops) or contrast (graded Runs compared by a configuration field). Findings are paged and can be filtered by code and subject.",
+            "description": "One analyzer's report: health (record integrity, tool and command failures, check failures, startup), profile (per task: cost spread, turns, context growth, model and tool time shares, cheapest and dearest Runs), stall (idle tasks, gaps, slow calls, same-shape failure clues) or contrast (graded Runs compared by a configuration field). Same-tool later success and same-shape failures are weak clues, not confirmed repair or retry loops. Findings are paged and can be filtered by code and subject.",
             "inputSchema": {"type": "object", "required": ["analyzer"], "properties": with_paging(json!({
                 "analyzer": {"type": "string", "enum": ["health", "profile", "stall", "contrast", "gate"]},
                 "code": {"type": "string"},
@@ -631,6 +691,7 @@ fn tools() -> Value {
             "description": "AgentNode invocations, one line each: configuration, outcome, agent time, tokens, turns, calls, failures, route and grade. Filters combine.",
             "inputSchema": {"type": "object", "properties": with_paging(json!({
                 "run": {"type": "string"},
+                "namespace": {"type": "string"},
                 "node": {"type": "string"},
                 "config": {"type": "string", "description": "digest prefix"},
                 "outcome": {"type": "string", "enum": ["completed", "failed", "cancelled", "interrupted", "unobserved"]},
@@ -642,7 +703,7 @@ fn tools() -> Value {
         {
             "name": "invocation",
             "description": "One invocation in full: lifecycles, model turns, tool calls (shapes of arguments, never their content), uncovered gaps and the records it rests on.",
-            "inputSchema": {"type": "object", "required": ["key"], "properties": {"key": {"type": "string", "description": "run/node#invocation"}}},
+            "inputSchema": {"type": "object", "required": ["key"], "properties": {"key": {"type": "string", "description": "namespace::run/node#invocation or unambiguous run/node#invocation"}, "namespace": {"type": "string"}}},
             "annotations": read_only,
         },
         {
@@ -655,7 +716,8 @@ fn tools() -> Value {
             "name": "calls",
             "description": "Tool calls at the value level: arguments and the head of the answer (a command's stderr, else stdout, or the refusal), with how each ended: ok, clean, exit_nonzero, not_started, timed_out, or a failure class. Give an invocation key for its calls in order, or filter across invocations by tool, program and ended (`not_done` = anything but a clean or ok end). With `group: true`, calls that ended alike (tool, program, ending, exit code, first line of the answer) are one row each with how many calls and Runs, up to 5 invocation keys and one example, most widespread first; read groups first when looking across Runs. Use it to read a failure from its instances before explaining it.",
             "inputSchema": {"type": "object", "properties": with_paging(json!({
-                "key": {"type": "string", "description": "run/node#invocation"},
+                "key": {"type": "string", "description": "namespace::run/node#invocation or unambiguous run/node#invocation"},
+                "namespace": {"type": "string"},
                 "group": {"type": "boolean", "description": "group calls that ended alike instead of listing each; default false"},
                 "tool": {"type": "string"},
                 "program": {"type": "string", "description": "base name of the command a command tool ran"},
@@ -680,6 +742,7 @@ fn tools() -> Value {
             "description": "Fact rows of one resource, as evidence keys cite them: {root, resource, place}. Rows carry stamps, verdicts and observations, no business content.",
             "inputSchema": {"type": "object", "required": ["resource"], "properties": with_paging(json!({
                 "resource": {"type": "string"},
+                "namespace": {"type": "string"},
                 "root": {"type": "string", "description": "substring of the data root"},
                 "place": {"type": "integer", "minimum": 1},
             }))},

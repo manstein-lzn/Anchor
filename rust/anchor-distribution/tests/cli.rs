@@ -27,6 +27,8 @@ fn cli_exposes_the_agreed_inputs_without_a_pin_bypass() {
     for argument in [
         "--host",
         "--goose",
+        "--hub",
+        "--eval",
         "--bundle",
         "--web",
         "--tool",
@@ -35,6 +37,7 @@ fn cli_exposes_the_agreed_inputs_without_a_pin_bypass() {
         "--wecom-tools",
         "--wecom-gateway",
         "--feishu-gateway",
+        "--lark-cli",
         "--platform",
         "--net-relay",
         "--sandbox-network",
@@ -56,6 +59,8 @@ fn cli_platform_requires_the_complete_native_closure_and_rejects_graph_mode_inpu
     let inputs = [
         ("--host", "/unused/host"),
         ("--goose", "/unused/goose"),
+        ("--hub", "/unused/hub"),
+        ("--eval", "/unused/eval"),
         ("--net-relay", "/unused/relay"),
         ("--sandbox-network", "/unused/network"),
         ("--platform-launcher", "/unused/launcher"),
@@ -63,6 +68,7 @@ fn cli_platform_requires_the_complete_native_closure_and_rejects_graph_mode_inpu
         ("--git-tools", "/unused/git-tools"),
         ("--wecom-tools", "/unused/wecom-tools"),
         ("--feishu-gateway", "/unused/feishu-gateway"),
+        ("--lark-cli", "/unused/lark-cli"),
         ("--wecom-gateway", "/unused/wecom-gateway"),
         ("--web", "/unused/web"),
         ("--uv", "/unused/uv"),
@@ -103,23 +109,25 @@ fn cli_platform_requires_the_complete_native_closure_and_rejects_graph_mode_inpu
             .output()
             .unwrap(),
     );
-    assert_failure(
-        command()
-            .args([
-                "--bundle",
-                "/unused/bundle",
-                "--host",
-                "/unused/host",
-                "--goose",
-                "/unused/goose",
-                "--feishu-gateway",
-                "/unused/gateway",
-                "--output",
-                "/unused/graph.tar.gz",
-            ])
-            .output()
-            .unwrap(),
-    );
+    for platform_only in ["--feishu-gateway", "--lark-cli"] {
+        assert_failure(
+            command()
+                .args([
+                    "--bundle",
+                    "/unused/bundle",
+                    "--host",
+                    "/unused/host",
+                    "--goose",
+                    "/unused/goose",
+                    platform_only,
+                    "/unused/binary",
+                    "--output",
+                    "/unused/graph.tar.gz",
+                ])
+                .output()
+                .unwrap(),
+        );
+    }
 }
 
 #[test]

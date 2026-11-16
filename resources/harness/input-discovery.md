@@ -1,0 +1,1 @@
+Upstream artifacts, when present, are mounted read-only under `/in/<node-id>`. Read declared `/in/<node-id>/...` files directly with `anchor_read` instead of shell directory scans such as `find` or `ls`; write deliverables in `/workspace`.

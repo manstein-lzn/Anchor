@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Fetch only the fixed native bootstrap tools; no Python/Rust installation.
+# Fetch fixed native bootstrap tools and official lark-cli; no tool installation.
 set -euo pipefail
 umask 077
 
@@ -8,8 +8,8 @@ usage() {
 Usage: scripts/prepare-platform-bootstrap.sh --output NEW_DIRECTORY
 
 Download reviewed x86_64 Linux musl uv 0.11.6, rustup-init 1.29.0 and pixi
-0.83.0, verify fixed SHA256 values, and publish three executable inputs for
-platform packaging.
+0.83.0 plus official static Linux amd64 lark-cli 1.0.100, verify fixed SHA256
+values, and publish four executable inputs for platform packaging.
 The parent directory must exist. Existing outputs are never replaced.
 HELP
 }
@@ -53,8 +53,17 @@ curl --silent --show-error --fail --location --proto '=https' --tlsv1.2 \
   https://github.com/prefix-dev/pixi/releases/download/v0.83.0/pixi-x86_64-unknown-linux-musl \
   --output "$staging/pixi"
 printf '%s  %s\n' 50571451e96f4a82cf675cd83baaf66fff9b718f0aaf153900b9faf4c29bd401 "$staging/pixi" | sha256sum --check --status
-chmod 0755 "$staging/uv" "$staging/rustup-init" "$staging/pixi"
+download="$staging/lark-cli.tar.gz"
+curl --silent --show-error --fail --location --proto '=https' --tlsv1.2 \
+  --connect-timeout 15 --max-time 180 \
+  https://github.com/larksuite/cli/releases/download/v1.0.100/lark-cli-1.0.100-linux-amd64.tar.gz \
+  --output "$download"
+printf '%s  %s\n' cd7363f731c9e5dd2becd909837922cffea8aad229d581a84eb13c6aa0ce6808 "$download" | sha256sum --check --status
+tar -xOf "$download" lark-cli > "$staging/lark-cli"
+rm -- "$download"
+printf '%s  %s\n' d9ac68ef91f81548e37481b42d9703376a7f0c89a50f00ef45f2d4307637db49 "$staging/lark-cli" | sha256sum --check --status
+chmod 0755 "$staging/uv" "$staging/rustup-init" "$staging/pixi" "$staging/lark-cli"
 mv -T --no-clobber -- "$staging" "$destination"
 [[ ! -d "$staging" ]] || { printf 'A concurrent preparation published the output.\n' >&2; exit 1; }
 trap - EXIT
-printf 'uv: %s/uv\nrustup-init: %s/rustup-init\npixi: %s/pixi\n' "$destination" "$destination" "$destination"
+printf 'uv: %s/uv\nrustup-init: %s/rustup-init\npixi: %s/pixi\nlark-cli: %s/lark-cli\n' "$destination" "$destination" "$destination" "$destination"

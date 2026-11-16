@@ -10,8 +10,8 @@
 //! - L4 [`adapters`]: the command line, and [`mcp`]: the same reads as a
 //!   read-only MCP server.
 //!
-//! The hub depends on `anchor-kernel` and `anchor-facts` only, writes
-//! nothing to any data root, and nothing depends on it.
+//! The hub reads registered histories and bounded execution evidence, writes
+//! nothing to any data root, and nothing depends on its statistical internals.
 
 pub mod adapters;
 pub mod analyzers;
@@ -19,3 +19,4 @@ pub mod mcp;
 pub mod query;
 pub mod source;
 pub mod table;
+pub mod window;

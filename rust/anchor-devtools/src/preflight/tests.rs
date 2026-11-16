@@ -496,7 +496,7 @@ fn rejects_runtime_platform_executable_inventory_and_mode_drift() {
     let fixture = Fixture::new();
     // Platform admission belongs to the installer validator, including its
     // version gate before the strict bootstrap inventory is decoded.
-    for format in [2, 3] {
+    for format in [3, 4] {
         fixture.edit_manifest(|manifest| {
             manifest["kind"] = json!("platform");
             manifest["format"] = json!(format);
@@ -508,9 +508,7 @@ fn rejects_runtime_platform_executable_inventory_and_mode_drift() {
                 .unwrap_err()
                 .to_string()
         );
-        if format == 2 {
-            assert!(error.contains("format-3"), "{error}");
-        }
+        assert!(error.contains("format-5"), "{error}");
     }
     fixture.write_manifest();
     fixture.edit_manifest(|manifest| manifest["platform"]["bits"] = json!(32));

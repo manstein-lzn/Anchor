@@ -12,6 +12,7 @@ use crate::query::{Key, Query};
 pub mod contrast;
 pub mod gate;
 pub mod health;
+pub mod longitudinal;
 pub mod profile;
 pub mod signals;
 pub mod stall;
@@ -22,6 +23,8 @@ pub mod stall;
 pub enum Need {
     /// Kernel stamps with time.
     Time,
+    /// Run lifecycle source or authorized view.
+    Runs,
     /// Observation records of invocations.
     Observations,
     /// Grades of Runs.
@@ -75,6 +78,7 @@ pub fn unmet(query: &Query, needs: &[Need]) -> Vec<Need> {
         .iter()
         .copied()
         .filter(|need| match need {
+            Need::Runs => !query.has_run_source(),
             Need::Time => !query.rows().iter().any(|row| row.at.is_some()),
             Need::Observations => !query.invocations().iter().any(|i| !i.traces.is_empty()),
             Need::Grades => query.grades().is_empty(),

@@ -155,7 +155,13 @@ pub(crate) fn resource_extension(relative: &str) -> Result<()> {
     ];
     let compiled_web =
         relative.starts_with("web/") && matches!(extension.as_str(), "js" | "mjs" | "cjs" | "wasm");
-    if !common.contains(&extension.as_str()) && !compiled_web && !native_resource(relative) {
+    // This third-party notice is byte-pinned by the shared system Plugin inventory.
+    let official_license = relative == "plugins/feishu/LICENSE.lark-cli";
+    if !common.contains(&extension.as_str())
+        && !compiled_web
+        && !native_resource(relative)
+        && !official_license
+    {
         return Err(invalid(format!(
             "unsupported or source resource: {relative}"
         )));
