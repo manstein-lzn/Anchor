@@ -609,6 +609,7 @@ impl GooseNodePort {
                     workspace: resolved.workspace.clone(),
                     writes: request.writes.clone(),
                 },
+                completion_check: Some(resolved.completion_check),
             },
             tool_request.cancellation.clone(),
             models.model_upstream(),

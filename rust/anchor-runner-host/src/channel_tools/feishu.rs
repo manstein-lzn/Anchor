@@ -72,6 +72,7 @@ impl ChannelTools {
 
     pub(super) async fn send_feishu(&self, args: Arguments) -> Result<Value, ToolError> {
         self.check_active()?;
+        self.require_open_task_delivery()?;
         let task = self.task_delivery_context()?.filter(|task| task.identity.source == "feishu")
             .ok_or_else(|| ToolError::Failed("Feishu notifications require an active task result from the original private conversation; use session.reply for user messages".into()))?;
         if args.content.trim().is_empty() || args.content.len() > 20480 {

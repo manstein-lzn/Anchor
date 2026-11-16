@@ -10,6 +10,81 @@ fn request(id: &str) -> Value {
 }
 
 #[tokio::test]
+async fn delivery_status_is_authenticated_bounded_and_reads_existing_send_facts_without_sending() {
+    let root = tempfile::tempdir().unwrap();
+    let fixture = Fixture::new().await;
+    let socket = fixture.config(root.path()).socket_path();
+    let gateway = Gateway::start(fixture.config(root.path())).await.unwrap();
+    assert_eq!(
+        control_request(&socket, request("confirmed")).await["accepted"],
+        true
+    );
+    fixture.shared.send_mode.store(1, Ordering::SeqCst);
+    assert!(
+        control_request(&socket, request("unknown"))
+            .await
+            .get("error")
+            .is_some()
+    );
+    let before = gateway.delivery_facts().unwrap();
+    let sends = fixture.shared.sends.lock().unwrap().clone();
+    let tokens = fixture.shared.tokens.load(Ordering::SeqCst);
+    fixture.shared.token_failure.store(true, Ordering::SeqCst);
+    let query = json!({"operation":"delivery_status","token":TOKEN,
+        "request_ids":["confirmed","unknown","missing"]});
+    let mut unauthorized = query.clone();
+    unauthorized["token"] = json!("wrong-token");
+    assert_eq!(
+        control_request(&socket, unauthorized).await,
+        json!({"error":"unauthorized channel request"})
+    );
+    assert_eq!(
+        control_request(&socket, query.clone()).await,
+        json!({"deliveries":{"confirmed":"confirmed","unknown":"unknown"}})
+    );
+    for ids in [
+        json!([""]),
+        json!([" "]),
+        json!(["../bad"]),
+        json!(["confirmed", "confirmed"]),
+        json!(["a".repeat(201)]),
+        json!((0..1025).map(|id| id.to_string()).collect::<Vec<_>>()),
+    ] {
+        let mut invalid = query.clone();
+        invalid["request_ids"] = ids;
+        assert!(
+            control_request(&socket, invalid)
+                .await
+                .get("error")
+                .is_some()
+        );
+    }
+    let mut ids = (0..1021)
+        .map(|id| format!("channel-task-{id}-{}", "a".repeat(64)))
+        .collect::<Vec<_>>();
+    ids.extend(["a".repeat(200), "confirmed".into(), "unknown".into()]);
+    let mut maximum = query.clone();
+    maximum["request_ids"] = json!(ids);
+    assert!(maximum.to_string().len() > anchor_feishu_gateway::MAX_REQUEST_BYTES);
+    assert_eq!(
+        control_request(&socket, maximum).await,
+        json!({"deliveries":{"confirmed":"confirmed","unknown":"unknown"}})
+    );
+    let mut empty = query;
+    empty["request_ids"] = json!([]);
+    assert_eq!(
+        control_request(&socket, empty).await,
+        json!({"deliveries":{}})
+    );
+    assert_eq!(gateway.delivery_facts().unwrap(), before);
+    assert_eq!(*fixture.shared.sends.lock().unwrap(), sends);
+    assert_eq!(fixture.shared.tokens.load(Ordering::SeqCst), tokens);
+    assert!(fixture.shared.replies.lock().unwrap().is_empty());
+    assert!(fixture.shared.uploads.lock().unwrap().is_empty());
+    gateway.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn notification_is_authenticated_bounded_and_scoped_before_claim_or_network() {
     let root = tempfile::tempdir().unwrap();
     let fixture = Fixture::new().await;

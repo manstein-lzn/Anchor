@@ -64,7 +64,7 @@ impl TaskNoticeGateway {
         )
         .unwrap();
         host.set_bot_control_descriptor(&descriptor);
-        let requests = Arc::new(Mutex::new(Vec::new()));
+        let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
         let received = requests.clone();
         let stopped = Arc::new(AtomicBool::new(false));
         let stopping = stopped.clone();
@@ -87,6 +87,16 @@ impl TaskNoticeGateway {
                 assert_eq!(request["token"], "private-task-fixture");
                 let ack = if request["operation"] == "status" {
                     json!({"status":"authenticated"})
+                } else if request["operation"] == "delivery_status" {
+                    let confirmed = received.lock().unwrap();
+                    let deliveries: serde_json::Map<String, Value> = request["request_ids"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .filter(|id| confirmed.iter().any(|sent| sent["request_id"] == **id))
+                        .map(|id| (id.as_str().unwrap().into(), json!("confirmed")))
+                        .collect();
+                    json!({"deliveries":deliveries})
                 } else {
                     assert_eq!(request["userid"], ALICE);
                     assert!(matches!(
@@ -247,8 +257,10 @@ fn operator_assigned_schedule_wakes_the_original_assistant_to_deliver_success_an
     assert_eq!(host.record(producer)["input"], json!({}));
     let file = &result.files[0];
     provider.append(vec![
-        Step::tool("anchor_tools", json!({"name":"wecom_send_file"}))
+        finish("Report delivered, without actually calling any send API")
             .after("scheduled-product-read"),
+        Step::tool("anchor_tools", json!({"name":"wecom_send_file"}))
+            .after("no explicit resolution"),
         Step::tool("anchor_tool_detail", json!({"name":"wecom_send_file"}))
             .after("wecom_send_file"),
         Step::tool(
@@ -257,7 +269,8 @@ fn operator_assigned_schedule_wakes_the_original_assistant_to_deliver_success_an
                 "path":format!("/in/tasks/{}/{}",result.id,file.name),"content":INTRODUCTION}}),
         )
         .after("wecom_send_file"),
-        finish("scheduled-product-delivered").after("file_status"),
+        Step::tool("task_result_resolve", json!({"action":"delivered"})).after("file_status"),
+        finish("scheduled-product-delivered").after("resolved"),
     ]);
     success_gate.open();
     let delivered = waiting(&host, run, 2);
@@ -326,7 +339,8 @@ fn operator_assigned_schedule_wakes_the_original_assistant_to_deliver_success_an
             json!({"name":"wecom_send_message","arguments":{"content":FAILURE}}),
         )
         .after("wecom_send_message"),
-        finish("scheduled-failure-reported").after("confirmed"),
+        Step::tool("task_result_resolve", json!({"action":"delivered"})).after("confirmed"),
+        finish("scheduled-failure-reported").after("resolved"),
     ]);
     failure_gate.open();
     let completed = waiting(&host, run, 3);
@@ -348,7 +362,7 @@ fn operator_assigned_schedule_wakes_the_original_assistant_to_deliver_success_an
         native["session_id"]
     );
     provider.assert_consumed();
-    idle(&provider, 12);
+    idle(&provider, provider.requests().len());
     let stopped = stop(&server, &provider, run);
     evidence(
         &host,
@@ -373,7 +387,8 @@ fn agent_delegates_an_authorized_graph_and_its_real_completion_wakes_the_same_se
         finish("authorized-report-started").after("accepted"),
         command("set -eu; test \"$(cat /in/tasks/*/1-report.md)\" = actual-delegated-report; cp /in/tasks/*/1-report.md delegated-report.md; printf delegated-result-observed")
             .expect_request_contains("task_result"),
-        finish("private-result-processed-no-automatic-send").after("delegated-result-observed"),
+        Step::tool("task_result_resolve", json!({"action":"silent","reason":"This fixture consumes the delegated result internally"})).after("delegated-result-observed"),
+        finish("private-result-processed-no-automatic-send").after("resolved"),
     ]);
     let mut definition = graph();
     definition["nodes"][1]["plugins"] = json!([
@@ -461,7 +476,7 @@ fn agent_delegates_an_authorized_graph_and_its_real_completion_wakes_the_same_se
             .as_deref(),
         Some(child)
     );
-    idle(&provider, 8);
+    idle(&provider, provider.requests().len());
     let stopped = stop(&server, &provider, run);
     evidence(
         &host,
@@ -480,10 +495,12 @@ fn queued_task_results_wake_the_existing_assistant_silently_with_exact_readonly_
         finish("ready-for-background-tasks").after("initial-ready"),
         command("set -eu; test \"$(cat /in/tasks/morning-one/briefing.md)\" = selected-report; test ! -e /in/tasks/morning-one/unrelated.txt; if printf bad > /in/tasks/morning-one/briefing.md 2>/dev/null; then exit 9; fi; case \"$(cat /in/wait_input/input.json)\" in *'\"channel\"'*) exit 10;; esac; cp /in/tasks/morning-one/briefing.md background.txt; printf first-task-readonly-ok")
             .expect_request_contains("morning-one"),
-        finish("internal-note-must-not-be-delivered").after("first-task-readonly-ok"),
+        Step::tool("task_result_resolve", json!({"action":"silent","reason":"Read-only fixture consumes this first result internally"})).after("first-task-readonly-ok"),
+        finish("internal-note-must-not-be-delivered").after("resolved"),
         command("set -eu; test \"$(cat background.txt)\" = selected-report; test ! -e /in/tasks/morning-one/briefing.md; printf second-task-fifo-ok")
             .expect_request_contains("morning-two"),
-        finish("second-internal-note-must-not-be-delivered").after("second-task-fifo-ok"),
+        Step::tool("task_result_resolve", json!({"action":"silent","reason":"Read-only fixture consumes this second result internally"})).after("second-task-fifo-ok"),
+        finish("second-internal-note-must-not-be-delivered").after("resolved"),
     ]);
     let host = host();
     let source = host.base.root.path().join("task-source");
@@ -566,7 +583,7 @@ fn queued_task_results_wake_the_existing_assistant_silently_with_exact_readonly_
         fs::read(workspace(&host, run).join("background.txt")).unwrap(),
         b"selected-report"
     );
-    idle(&provider, 6);
+    idle(&provider, provider.requests().len());
     let stopped = stop(&server, &provider, run);
     evidence(
         &host,
@@ -593,7 +610,8 @@ fn user_input_interrupts_task_processing_and_the_same_result_is_retried_without_
         finish("urgent-user-answered").after("urgent-user-inspected"),
         command("set -eu; test \"$(cat effect.txt)\" = performed-once; printf task-retry-inspected-existing-effect")
             .expect_request_contains("background-interrupted"),
-        finish("background-finished-silently").after("task-retry-inspected-existing-effect"),
+        Step::tool("task_result_resolve", json!({"action":"silent","reason":"Interrupted fixture has checked its internal workspace effect"})).after("task-retry-inspected-existing-effect"),
+        finish("background-finished-silently").after("resolved"),
     ]);
     let host = host();
     let server = host.serve(&provider);
@@ -671,7 +689,7 @@ fn user_input_interrupts_task_processing_and_the_same_result_is_retried_without_
             .to_string()
             .contains("task-effect-recorded")
     );
-    idle(&provider, 8);
+    idle(&provider, provider.requests().len());
     let stopped = stop(&server, &provider, run);
     evidence(
         &host,

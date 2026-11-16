@@ -1,11 +1,15 @@
 //! Durable FIFO results share Session events; a claim alone creates a system Turn.
 use super::*;
-use crate::{AssistantInput, TaskResult, TaskResultAdmission, TurnStatus, associations};
+use crate::{
+    AssistantInput, TaskResult, TaskResultAdmission, TaskResultResolution, TurnStatus, associations,
+};
 use serde::{Deserialize, Serialize};
 
 const QUEUED: &str = "task.result.queued";
 const CLAIMED: &str = "task.result.claimed";
 const HANDLED: &str = "task.result.handled";
+const RESOLVED: &str = "task.result.resolved";
+const DELIVERY_REQUESTED: &str = "task.result.delivery_requested";
 
 #[derive(Deserialize, Serialize)]
 struct Claim {
@@ -15,7 +19,165 @@ struct Claim {
     key: String,
 }
 
+#[derive(Deserialize, Serialize)]
+struct Resolution {
+    #[serde(flatten)]
+    claim: Claim,
+    resolution: TaskResultResolution,
+}
+
+#[derive(Serialize)]
+struct DeliveryRequest {
+    #[serde(flatten)]
+    claim: Claim,
+    requests: Vec<String>,
+}
+
 impl SessionStore {
+    /// Host intent, saved before handing a send to the Gateway. These are
+    /// required references for consumption, not external delivery statuses.
+    pub fn request_task_result_delivery(
+        &self,
+        owner: &str,
+        session: &str,
+        run: &str,
+        key: &str,
+        requests: &[String],
+    ) -> Result<(), SessionError> {
+        validate_input_lookup(owner, session, run, key)?;
+        // Bound each send intent, not the result's accumulated confirmed receipts.
+        if requests.len() > 1024 {
+            return Err(SessionError::Invalid(
+                "bounded delivery references are required".into(),
+            ));
+        }
+        validate_delivery_references(requests)?;
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut snapshot =
+            require_assistant(&transaction, owner, session, run, BindingScope::Current)?;
+        let claim = active_task_claim(&transaction, session, run, key)?;
+        if read_resolution(&transaction, session, &claim.id)?.is_some() {
+            return Err(SessionError::Conflict(
+                "this task result is already resolved".into(),
+            ));
+        }
+        let previous = read_requested_deliveries(&transaction, session, &claim.id)?;
+        let requests = requests
+            .iter()
+            .filter(|id| !previous.contains(id))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !requests.is_empty() {
+            touch_channel_session(
+                &transaction,
+                owner,
+                &mut snapshot,
+                DELIVERY_REQUESTED,
+                serde_json::from_value(serde_json::to_value(DeliveryRequest { claim, requests })?)?,
+                Utc::now(),
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn task_result_delivery_requests(
+        &self,
+        owner: &str,
+        session: &str,
+        id: &str,
+    ) -> Result<Vec<String>, SessionError> {
+        store::validate_lookup(owner, session)?;
+        store::validate_identity(id, "task result id")?;
+        let connection = self.lock()?;
+        store::read_session(&connection, owner, session)?;
+        ensure_channel_session(&connection, owner, session)?;
+        read_requested_deliveries(&connection, session, id)
+    }
+
+    /// Record a deliberate result action without finishing its Turn. The Host
+    /// verifies actual delivery before supplying a Delivered decision.
+    pub fn resolve_task_result(
+        &self,
+        owner: &str,
+        session: &str,
+        run: &str,
+        key: &str,
+        resolution: &TaskResultResolution,
+    ) -> Result<(), SessionError> {
+        validate_input_lookup(owner, session, run, key)?;
+        match resolution {
+            TaskResultResolution::Delivered { requests } => {
+                validate_delivery_references(requests)?;
+            }
+            TaskResultResolution::Silent { reason } => {
+                validate_channel_value(reason, "silent result reason", 8192)?;
+                if reason.trim().is_empty() {
+                    return Err(SessionError::Invalid(
+                        "a reason for silence is required".into(),
+                    ));
+                }
+            }
+        }
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut snapshot =
+            require_assistant(&transaction, owner, session, run, BindingScope::Current)?;
+        let claim = active_task_claim(&transaction, session, run, key)?;
+        let requested = read_requested_deliveries(&transaction, session, &claim.id)?;
+        match resolution {
+            TaskResultResolution::Delivered { requests }
+                if requested.iter().any(|id| !requests.contains(id)) =>
+            {
+                return Err(SessionError::Conflict(
+                    "not all submitted sends have confirmed delivery references".into(),
+                ));
+            }
+            TaskResultResolution::Silent { .. } if !requested.is_empty() => {
+                return Err(SessionError::Conflict(
+                    "a submitted send cannot be resolved as silent".into(),
+                ));
+            }
+            _ => {}
+        }
+        if let Some(previous) = read_resolution(&transaction, session, &claim.id)? {
+            if previous != *resolution {
+                return Err(SessionError::Conflict(
+                    "task result was already resolved differently".into(),
+                ));
+            }
+        } else {
+            touch_channel_session(
+                &transaction,
+                owner,
+                &mut snapshot,
+                RESOLVED,
+                serde_json::from_value(serde_json::to_value(Resolution {
+                    claim,
+                    resolution: resolution.clone(),
+                })?)?,
+                Utc::now(),
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn task_result_resolution(
+        &self,
+        owner: &str,
+        session: &str,
+        id: &str,
+    ) -> Result<Option<TaskResultResolution>, SessionError> {
+        store::validate_lookup(owner, session)?;
+        store::validate_identity(id, "task result id")?;
+        let connection = self.lock()?;
+        store::read_session(&connection, owner, session)?;
+        ensure_channel_session(&connection, owner, session)?;
+        read_resolution(&connection, session, id)
+    }
+
     /// Result/status delivery is idempotent and never starts or revives an assistant.
     pub fn record_task_result(
         &self,
@@ -238,6 +400,16 @@ impl SessionStore {
             require_assistant(&transaction, owner, session, run, BindingScope::Retained)?;
         let claim = read_claim(&transaction, session, run, key)?.ok_or(SessionError::Missing)?;
         let mut turn = turns::find_turn(&transaction, session, &claim.turn)?;
+        // An old handled event remains historical truth, but no new result can
+        // be acknowledged merely because an Agent produced a final summary.
+        if !has_result_event(&transaction, session, &claim.id, HANDLED)?
+            && read_resolution(&transaction, session, &claim.id)?.is_none()
+        {
+            return Err(SessionError::Conflict(
+                "task result requires an explicit task_result_resolve API call before completion"
+                    .into(),
+            ));
+        }
         if turn.status == TurnStatus::Running {
             if recoverable_task_run(&transaction, session, &claim.turn)?.as_deref() != Some(run) {
                 return Err(SessionError::Conflict(
@@ -257,13 +429,7 @@ impl SessionStore {
                 "interrupted task result cannot be acknowledged".into(),
             ));
         }
-        let handled: bool = transaction.query_row(
-            "SELECT EXISTS(SELECT 1 FROM session_events WHERE session_id = ?1 AND kind = ?2
-             AND json_extract(data, '$.id') = ?3)",
-            params![session, HANDLED, claim.id],
-            |row| row.get(0),
-        )?;
-        if !handled {
+        if !has_result_event(&transaction, session, &claim.id, HANDLED)? {
             touch_channel_session(
                 &transaction,
                 owner,
@@ -297,6 +463,88 @@ impl SessionStore {
             .map(|raw| serde_json::from_str(&raw).map_err(Into::into))
             .collect()
     }
+}
+
+fn validate_delivery_references(requests: &[String]) -> Result<(), SessionError> {
+    if requests.is_empty() {
+        return Err(SessionError::Invalid(
+            "delivery references are required".into(),
+        ));
+    }
+    let mut unique = std::collections::BTreeSet::new();
+    for id in requests {
+        store::validate_identity(id, "delivery request id")?;
+        if !unique.insert(id) {
+            return Err(SessionError::Invalid("duplicate delivery reference".into()));
+        }
+    }
+    Ok(())
+}
+
+fn active_task_claim(
+    connection: &Connection,
+    session: &str,
+    run: &str,
+    key: &str,
+) -> Result<Claim, SessionError> {
+    let claim = read_claim(connection, session, run, key)?.ok_or(SessionError::Missing)?;
+    if turns::find_turn(connection, session, &claim.turn)?.status != TurnStatus::Running
+        || recoverable_task_run(connection, session, &claim.turn)?.as_deref() != Some(run)
+    {
+        return Err(SessionError::Conflict(
+            "only an active task result can be resolved".into(),
+        ));
+    }
+    Ok(claim)
+}
+
+fn read_requested_deliveries(
+    connection: &Connection,
+    session: &str,
+    id: &str,
+) -> Result<Vec<String>, SessionError> {
+    let mut statement = connection.prepare(
+        "SELECT DISTINCT request.value FROM session_events event, json_each(event.data, '$.requests') request
+         WHERE event.session_id = ?1 AND event.kind = ?2 AND json_extract(event.data, '$.id') = ?3 ORDER BY request.value"
+    )?;
+    Ok(statement
+        .query_map(params![session, DELIVERY_REQUESTED, id], |row| row.get(0))?
+        .collect::<Result<Vec<_>, _>>()?)
+}
+
+fn read_resolution(
+    connection: &Connection,
+    session: &str,
+    id: &str,
+) -> Result<Option<TaskResultResolution>, SessionError> {
+    let raw: Option<String> = connection
+        .query_row(
+            "SELECT data FROM session_events WHERE session_id = ?1 AND kind = ?2
+         AND json_extract(data, '$.id') = ?3 ORDER BY seq LIMIT 1",
+            params![session, RESOLVED, id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    raw.map(|raw| {
+        serde_json::from_str::<Resolution>(&raw)
+            .map(|record| record.resolution)
+            .map_err(Into::into)
+    })
+    .transpose()
+}
+
+fn has_result_event(
+    connection: &Connection,
+    session: &str,
+    id: &str,
+    kind: &str,
+) -> Result<bool, SessionError> {
+    Ok(connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM session_events WHERE session_id = ?1 AND kind = ?2
+         AND json_extract(data, '$.id') = ?3)",
+        params![session, kind, id],
+        |row| row.get(0),
+    )?)
 }
 
 fn read_result(

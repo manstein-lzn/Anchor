@@ -6,6 +6,7 @@ license = "MIT"
 description = "Rust-native Graph host with Sandbox, immutable files and paired parallelism"
 
 [dependencies]
+anchor-channel-transport = { path = "../anchor-channel-transport" }
 anchor-distribution = { path = "../anchor-distribution" }
 anchor-file-lease = { path = "../anchor-file-lease" }
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }

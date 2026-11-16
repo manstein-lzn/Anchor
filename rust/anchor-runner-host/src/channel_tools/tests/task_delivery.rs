@@ -1,5 +1,17 @@
 use super::*;
 
+async fn resolve(host: &ChannelTools, args: Value) -> Result<Vec<ToolResultContent>, ToolError> {
+    crate::goose_tool_context::scope(
+        Some(crate::goose_tool_context::GooseToolIdentity {
+            key: host.key.clone(),
+            session: "result-api-fixture".into(),
+            tool_call: "resolve".into(),
+        }),
+        host.call(TASK_RESULT_RESOLVE_TOOL, args),
+    )
+    .await
+}
+
 #[tokio::test]
 async fn task_result_files_can_be_sent_without_granting_siblings_or_reply_images() {
     use crate::{
@@ -174,13 +186,38 @@ async fn task_result_files_can_be_sent_without_granting_siblings_or_reply_images
         .application
         .with_channel_management(Arc::new(FakeChannels::new().with(bot)));
     let before_send = gateway.frames();
+    assert!(crate::assistant::require_task_result_resolution(root.path(), &host.key).is_err());
+    assert!(
+        resolve(&host, json!({"action":"delivered"}))
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("no confirmed channel send")
+    );
+    assert!(
+        resolve(
+            &host,
+            json!({"action":"delivered","requests":["invented-receipt"]})
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(gateway.frames(), before_send);
     let args = json!({"path":path,"content":"Your background report is ready"});
     assert_eq!(
-        host.definitions()[0].parameters["required"],
+        host.definitions()
+            .iter()
+            .find(|tool| tool.name == SEND_TOOL)
+            .unwrap()
+            .parameters["required"],
         json!(["content"])
     );
     assert_eq!(
-        host.definitions()[1].parameters["required"],
+        host.definitions()
+            .iter()
+            .find(|tool| tool.name == SEND_FILE_TOOL)
+            .unwrap()
+            .parameters["required"],
         json!(["path", "content"])
     );
     for invalid in [
@@ -315,129 +352,36 @@ async fn task_result_files_can_be_sent_without_granting_siblings_or_reply_images
             .contains("notification identity changed")
     );
     assert_eq!(gateway.frames(), frames);
+    let resolved = resolve(&host, json!({"action":"delivered"})).await.unwrap();
+    assert_eq!(
+        resolved[0].as_json().unwrap()["resolution"]["action"],
+        "delivered"
+    );
+    assert!(crate::assistant::require_task_result_resolution(root.path(), &host.key).is_ok());
+    assert_eq!(
+        resolve(&host, json!({"action":"delivered"})).await.unwrap(),
+        resolved
+    );
+    assert!(
+        resolve(&host, json!({"action":"silent","reason":"not needed"}))
+            .await
+            .is_err()
+    );
+    assert!(
+        scope(
+            Some(GooseToolIdentity {
+                key: host.key.clone(),
+                session: "resolved-native".into(),
+                tool_call: "late-send".into(),
+            }),
+            host.call(SEND_FILE_TOOL, args.clone())
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(gateway.frames(), frames);
     sessions
         .finish_task_result("local", &session, &host.key.run_id, "task-retry")
-        .unwrap();
-
-    sessions
-        .record_task_result(
-            "local",
-            &session,
-            &TaskResult {
-                id: "unknown-introduction".into(),
-                source_run: Some("background-run".into()),
-                outcome: "done".into(),
-                content: json!({}),
-                files: vec![selected.clone()],
-            },
-        )
-        .unwrap();
-    host.key.invocation = 4;
-    let input = sessions
-        .claim_assistant_input("local", &session, &host.key.run_id, "unknown-wait")
-        .unwrap()
-        .unwrap();
-    crate::assistant::bind(
-        root.path(),
-        &host.key,
-        "unknown-wait".into(),
-        &input,
-        vec![],
-        false,
-        None,
-    )
-    .unwrap();
-    let unknown_path = "/in/tasks/unknown-introduction/briefing.md";
-    host.readonly_inputs = vec![ReadOnlyInput::new(view.join("report.md"), unknown_path)];
-    let unknown_args = json!({"path":unknown_path,"content":"This introduction's ACK is withheld"});
-    gateway.withhold_introductions(true);
-    let partial = scope(
-        Some(GooseToolIdentity {
-            key: host.key.clone(),
-            session: "native-partial".into(),
-            tool_call: "first-attempt".into(),
-        }),
-        host.call(SEND_FILE_TOOL, unknown_args.clone()),
-    )
-    .await
-    .unwrap_err()
-    .to_string();
-    assert!(
-        partial.contains("confirmed and saved for the next Turn; introduction"),
-        "{partial}"
-    );
-    let partial_frames = gateway.frames();
-    let facts = gateway.gateway.delivery_facts().unwrap();
-    assert_eq!(facts.len(), 4);
-    assert_eq!(
-        facts
-            .iter()
-            .filter(|fact| fact.status == anchor_wecom_gateway::DeliveryStatus::Unknown)
-            .count(),
-        1
-    );
-    let notification = sessions
-        .latest_channel_notification("local", &session)
-        .unwrap()
-        .unwrap();
-    assert_eq!(notification.files, vec![selected.clone()]);
-
-    sessions
-        .admit_channel_inbound(
-            "local",
-            ChannelInboundRequest {
-                inbound_id: "interrupt-partial".into(),
-                ..request.clone()
-            },
-        )
-        .unwrap();
-    let urgent = sessions
-        .claim_assistant_input("local", &session, &host.key.run_id, "partial-user")
-        .unwrap()
-        .unwrap();
-    sessions
-        .finish_turn(
-            "local",
-            &session,
-            &urgent.turn().id,
-            TurnStatus::Completed,
-            None,
-        )
-        .unwrap();
-    host.key.invocation = 5;
-    let input = sessions
-        .claim_assistant_input("local", &session, &host.key.run_id, "partial-retry")
-        .unwrap()
-        .unwrap();
-    crate::assistant::bind(
-        root.path(),
-        &host.key,
-        "partial-retry".into(),
-        &input,
-        vec![],
-        false,
-        None,
-    )
-    .unwrap();
-    let repeated = scope(
-        Some(GooseToolIdentity {
-            key: host.key.clone(),
-            session: "another-native-session".into(),
-            tool_call: "another-attempt".into(),
-        }),
-        host.call(SEND_FILE_TOOL, unknown_args),
-    )
-    .await
-    .unwrap_err()
-    .to_string();
-    assert!(
-        repeated.contains("previous delivery is unconfirmed"),
-        "{repeated}"
-    );
-    assert_eq!(gateway.frames(), partial_frames);
-    assert_eq!(gateway.gateway.delivery_facts().unwrap(), facts);
-    sessions
-        .finish_task_result("local", &session, &host.key.run_id, "partial-retry")
         .unwrap();
 
     // Admission failures have no producing Run or files. They can still notify
@@ -455,7 +399,7 @@ async fn task_result_files_can_be_sent_without_granting_siblings_or_reply_images
             },
         )
         .unwrap();
-    host.key.invocation = 6;
+    host.key.invocation = 4;
     let input = sessions
         .claim_assistant_input("local", &session, &host.key.run_id, "blocked-wait")
         .unwrap()
@@ -525,9 +469,188 @@ async fn task_result_files_can_be_sent_without_granting_siblings_or_reply_images
         "{changed}"
     );
     assert_eq!(gateway.frames(), once);
+    resolve(&host, json!({"action":"delivered"})).await.unwrap();
     sessions
         .finish_task_result("local", &session, &host.key.run_id, "blocked-wait")
         .unwrap();
+    sessions
+        .record_task_result(
+            "local",
+            &session,
+            &TaskResult {
+                id: "quiet-monitor".into(),
+                source_run: Some("background-run".into()),
+                outcome: "done".into(),
+                content: json!({"event":"no_event"}),
+                files: vec![],
+            },
+        )
+        .unwrap();
+    host.key.invocation = 5;
+    let quiet = sessions
+        .claim_assistant_input("local", &session, &host.key.run_id, "quiet-wait")
+        .unwrap()
+        .unwrap();
+    crate::assistant::bind(
+        root.path(),
+        &host.key,
+        "quiet-wait".into(),
+        &quiet,
+        vec![],
+        false,
+        None,
+    )
+    .unwrap();
+    assert!(
+        resolve(&host, json!({"action":"silent","reason":" "}))
+            .await
+            .is_err()
+    );
+    let quiet_action = resolve(&host, json!({"action":"silent","reason":"Monitor found no event; its authorized request calls for silence"})).await.unwrap();
+    assert_eq!(
+        quiet_action[0].as_json().unwrap()["resolution"]["action"],
+        "silent"
+    );
+    assert_eq!(gateway.frames(), once);
+    sessions
+        .finish_task_result("local", &session, &host.key.run_id, "quiet-wait")
+        .unwrap();
+    sessions
+        .record_task_result(
+            "local",
+            &session,
+            &TaskResult {
+                id: "unknown-introduction".into(),
+                source_run: Some("background-run".into()),
+                outcome: "done".into(),
+                content: json!({}),
+                files: vec![selected.clone()],
+            },
+        )
+        .unwrap();
+    host.key.invocation = 6;
+    let input = sessions
+        .claim_assistant_input("local", &session, &host.key.run_id, "unknown-wait")
+        .unwrap()
+        .unwrap();
+    crate::assistant::bind(
+        root.path(),
+        &host.key,
+        "unknown-wait".into(),
+        &input,
+        vec![],
+        false,
+        None,
+    )
+    .unwrap();
+    let unknown_path = "/in/tasks/unknown-introduction/briefing.md";
+    host.readonly_inputs = vec![ReadOnlyInput::new(view.join("report.md"), unknown_path)];
+    let unknown_args = json!({"path":unknown_path,"content":"This introduction's ACK is withheld"});
+    let previous_deliveries = gateway.gateway.delivery_facts().unwrap().len();
+    gateway.withhold_introductions(true);
+    let partial = scope(
+        Some(GooseToolIdentity {
+            key: host.key.clone(),
+            session: "native-partial".into(),
+            tool_call: "first-attempt".into(),
+        }),
+        host.call(SEND_FILE_TOOL, unknown_args.clone()),
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(
+        partial.contains("confirmed and saved for the next Turn; introduction"),
+        "{partial}"
+    );
+    let partial_frames = gateway.frames();
+    let facts = gateway.gateway.delivery_facts().unwrap();
+    assert_eq!(facts.len(), previous_deliveries + 2);
+    assert_eq!(
+        facts
+            .iter()
+            .filter(|fact| fact.status == anchor_wecom_gateway::DeliveryStatus::Unknown)
+            .count(),
+        1
+    );
+    let notification = sessions
+        .latest_channel_notification("local", &session)
+        .unwrap()
+        .unwrap();
+    assert_eq!(notification.files, vec![selected.clone()]);
+
+    sessions
+        .admit_channel_inbound(
+            "local",
+            ChannelInboundRequest {
+                inbound_id: "interrupt-partial".into(),
+                ..request.clone()
+            },
+        )
+        .unwrap();
+    let urgent = sessions
+        .claim_assistant_input("local", &session, &host.key.run_id, "partial-user")
+        .unwrap()
+        .unwrap();
+    sessions
+        .finish_turn(
+            "local",
+            &session,
+            &urgent.turn().id,
+            TurnStatus::Completed,
+            None,
+        )
+        .unwrap();
+    host.key.invocation = 7;
+    let input = sessions
+        .claim_assistant_input("local", &session, &host.key.run_id, "partial-retry")
+        .unwrap()
+        .unwrap();
+    crate::assistant::bind(
+        root.path(),
+        &host.key,
+        "partial-retry".into(),
+        &input,
+        vec![],
+        false,
+        None,
+    )
+    .unwrap();
+    let repeated = scope(
+        Some(GooseToolIdentity {
+            key: host.key.clone(),
+            session: "another-native-session".into(),
+            tool_call: "another-attempt".into(),
+        }),
+        host.call(SEND_FILE_TOOL, unknown_args),
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(
+        repeated.contains("previous delivery is unconfirmed"),
+        "{repeated}"
+    );
+    assert_eq!(gateway.frames(), partial_frames);
+    assert_eq!(gateway.gateway.delivery_facts().unwrap(), facts);
+    for args in [
+        json!({"action":"delivered"}),
+        json!({"action":"silent","reason":"hide unknown outcome"}),
+    ] {
+        assert!(
+            resolve(&host, args)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("unknown outcome")
+        );
+    }
+    assert!(
+        sessions
+            .finish_task_result("local", &session, &host.key.run_id, "partial-retry")
+            .is_err()
+    );
+    assert_eq!(gateway.frames(), partial_frames);
     sessions
         .admit_channel_inbound(
             "local",
@@ -537,7 +660,7 @@ async fn task_result_files_can_be_sent_without_granting_siblings_or_reply_images
             },
         )
         .unwrap();
-    host.key.invocation = 7;
+    host.key.invocation = 8;
     let input = sessions
         .claim_assistant_input("local", &session, &host.key.run_id, "follow-up-wait")
         .unwrap()

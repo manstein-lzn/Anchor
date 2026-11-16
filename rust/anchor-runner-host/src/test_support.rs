@@ -61,3 +61,38 @@ impl EnvVar {
         }
     }
 }
+
+pub(crate) fn resolve_task_result_silently(
+    store: &anchor_platform_session::SessionStore,
+    owner: &str,
+    session: &str,
+    run: &str,
+    key: &str,
+) {
+    use anchor_platform_session::{AssistantInput, TaskResultResolution};
+    let AssistantInput::Task(input) = store
+        .get_assistant_input(owner, session, run, key)
+        .unwrap()
+        .unwrap()
+    else {
+        panic!("expected task input");
+    };
+    if store
+        .task_result_resolution(owner, session, &input.result.id)
+        .unwrap()
+        .is_none()
+    {
+        store
+            .resolve_task_result(
+                owner,
+                session,
+                run,
+                key,
+                &TaskResultResolution::Silent {
+                    reason: "This fixture consumes the result without a channel notification"
+                        .into(),
+                },
+            )
+            .unwrap();
+    }
+}

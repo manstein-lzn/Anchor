@@ -1322,6 +1322,7 @@ impl LiveMcpTools {
                     || exposed == crate::tool_names::FEISHU_SEND_FILE_TOOL
                     || exposed == crate::tool_names::SEND_FILE_TOOL
                     || exposed == crate::tool_names::IMAGE_TOOL
+                    || exposed == crate::tool_names::TASK_RESULT_RESOLVE_TOOL
                 {
                     return Err(format!(
                         "MCP tool `{exposed}` is reserved by the Anchor node host"

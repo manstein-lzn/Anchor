@@ -17,6 +17,110 @@ struct FeishuFixture {
     inbound: ChannelInboundRequest,
 }
 
+#[tokio::test]
+async fn task_resolution_checks_the_complete_large_file_selection_in_bounded_queries() {
+    use anchor_platform_session::{ChannelNotificationFile, TaskResultResolution};
+
+    let root = tempfile::tempdir().unwrap();
+    let FeishuFixture {
+        mut host,
+        listener,
+        sessions,
+        session,
+        ..
+    } = feishu_fixture(root.path());
+    let initial = crate::assistant::input(root.path(), &host.key)
+        .unwrap()
+        .unwrap();
+    sessions
+        .finish_turn(
+            "local",
+            &session,
+            &initial.turn().id,
+            TurnStatus::Completed,
+            None,
+        )
+        .unwrap();
+    sessions
+        .record_task_result(
+            "local",
+            &session,
+            &TaskResult {
+                id: "large-selection".into(),
+                source_run: Some("producer".into()),
+                outcome: "done".into(),
+                content: json!({}),
+                files: (0..512)
+                    .map(|index| ChannelNotificationFile {
+                        artifact_id: "artifact".into(),
+                        path: format!("report-{index}.md"),
+                        name: format!("report-{index}.md"),
+                    })
+                    .collect(),
+            },
+        )
+        .unwrap();
+    host.key.invocation += 1;
+    let input = sessions
+        .claim_assistant_input("local", &session, &host.key.run_id, "large-task")
+        .unwrap()
+        .unwrap();
+    crate::assistant::bind(
+        root.path(),
+        &host.key,
+        "large-task".into(),
+        &input,
+        vec![],
+        false,
+        None,
+    )
+    .unwrap();
+    let resolve = scope(
+        native_file_call(&host, "large-resolution"),
+        host.call(TASK_RESULT_RESOLVE_TOOL, json!({"action":"delivered"})),
+    );
+    let gateway = async {
+        let mut all = std::collections::BTreeSet::new();
+        while all.len() < 1025 {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let request = gateway_request(&mut stream).await;
+            assert_eq!(request["operation"], "delivery_status");
+            let ids: Vec<String> = serde_json::from_value(request["request_ids"].clone()).unwrap();
+            assert_eq!(ids.len(), (1025 - all.len()).min(256));
+            let facts = ids
+                .into_iter()
+                .map(|id| {
+                    assert!(all.insert(id.clone()));
+                    (id, "confirmed")
+                })
+                .collect::<std::collections::BTreeMap<_, _>>();
+            stream
+                .write_all(format!("{}\n", json!({"deliveries":facts})).as_bytes())
+                .await
+                .unwrap();
+        }
+        all.into_iter().collect::<Vec<_>>()
+    };
+    let (resolved, requests) = tokio::join!(resolve, gateway);
+    assert_eq!(requests.len(), 1025);
+    resolved.unwrap();
+    assert_eq!(
+        sessions
+            .task_result_resolution("local", &session, "large-selection")
+            .unwrap(),
+        Some(TaskResultResolution::Delivered { requests })
+    );
+    sessions
+        .finish_task_result("local", &session, &host.key.run_id, "large-task")
+        .unwrap();
+    assert!(
+        sessions
+            .pending_task_results("local", &session)
+            .unwrap()
+            .is_empty()
+    );
+}
+
 fn feishu_fixture(root: &Path) -> FeishuFixture {
     let mut host = tools(root);
     install_channel_plugin(root, "feishu");
@@ -253,6 +357,35 @@ async fn feishu_task_tool_derives_private_destination_and_never_exposes_wecom_or
         assert_eq!(payload["open_id"], "ou_alice");
         assert_eq!(payload["chat_id"], "oc_private");
         assert!(payload.get("userid").is_none());
+        // The Gateway accepted the socket but has not claimed the send yet.
+        // A fresh result handler must not mistake a missing receipt for silence.
+        for action in [
+            json!({"action":"silent","reason":"No receipt visible yet"}),
+            json!({"action":"delivered"}),
+        ] {
+            let resolve = scope(
+                native_file_call(&host, "query-before-claim"),
+                host.call(TASK_RESULT_RESOLVE_TOOL, action),
+            );
+            let query = async {
+                let (mut query_stream, _) = listener.accept().await.unwrap();
+                assert_eq!(
+                    gateway_request(&mut query_stream).await["operation"],
+                    "delivery_status"
+                );
+                query_stream
+                    .write_all(b"{\"deliveries\":{}}\n")
+                    .await
+                    .unwrap();
+            };
+            let (rejected, ()) = tokio::join!(resolve, query);
+            assert!(
+                rejected
+                    .unwrap_err()
+                    .to_string()
+                    .contains("submitted but its Gateway receipt is still missing")
+            );
+        }
         let ack = json!({"accepted":true,"request_id":payload["request_id"]});
         stream
             .write_all(format!("{ack}\n").as_bytes())
@@ -323,6 +456,27 @@ async fn feishu_task_tool_derives_private_destination_and_never_exposes_wecom_or
             .await
             .is_err()
     );
+    let resolve = scope(
+        native_file_call(&host, "resolve-receipt"),
+        host.call(TASK_RESULT_RESOLVE_TOOL, json!({"action":"delivered"})),
+    );
+    let gateway = async {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let request = gateway_request(&mut stream).await;
+        assert_eq!(request["operation"], "delivery_status");
+        assert_eq!(request["request_ids"], json!([first_id]));
+        let receipt = json!({"deliveries":{first_id:"confirmed"}});
+        stream
+            .write_all(format!("{receipt}\n").as_bytes())
+            .await
+            .unwrap();
+    };
+    let (resolved, ()) = tokio::join!(resolve, gateway);
+    assert_eq!(
+        resolved.unwrap()[0].as_json().unwrap()["resolution"]["action"],
+        "delivered"
+    );
+    assert!(crate::assistant::require_task_result_resolution(root.path(), &host.key).is_ok());
     host.assistant_graph = None;
     assert!(host.definitions().is_empty());
     assert!(matches!(
@@ -769,6 +923,38 @@ async fn feishu_task_files_retain_exact_selection_and_record_file_ack_before_int
     .await
     .unwrap();
     assert_eq!(request_id, original_id);
+    for action in [
+        json!({"action":"delivered"}),
+        json!({"action":"silent","reason":"skip incomplete introduction"}),
+    ] {
+        let resolve = scope(
+            native_file_call(&host, "partial-resolution"),
+            host.call(TASK_RESULT_RESOLVE_TOOL, action),
+        );
+        let gateway = async {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let request = gateway_request(&mut stream).await;
+            assert_eq!(request["operation"], "delivery_status");
+            let receipt = json!({"deliveries":{format!("{original_id}-file"):"confirmed"}});
+            stream
+                .write_all(format!("{receipt}\n").as_bytes())
+                .await
+                .unwrap();
+        };
+        let (rejected, ()) = tokio::join!(resolve, gateway);
+        assert!(
+            rejected
+                .unwrap_err()
+                .to_string()
+                .contains("partially confirmed")
+        );
+        assert!(
+            sessions
+                .task_result_resolution("local", &session, "result")
+                .unwrap()
+                .is_none()
+        );
+    }
     assert!(
         timeout(Duration::from_millis(20), listener.accept())
             .await

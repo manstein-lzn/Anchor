@@ -147,6 +147,7 @@ impl HostIoResolver {
                     crate::tool_names::RUN_TOOL_NAME.to_owned(),
                     crate::tool_names::READ_TOOL_NAME.to_owned(),
                     crate::tool_names::EDIT_TOOL_NAME.to_owned(),
+                    crate::tool_names::TASK_RESULT_RESOLVE_TOOL.to_owned(),
                 ];
                 let tools = match conversation {
                     Some(conversation) if conversation.cross_run => {
@@ -161,12 +162,17 @@ impl HostIoResolver {
                     crate::tool_disclosure::always_visible(always_visible),
                     disclosure,
                 );
+                let state_root = self.local_inputs.state_root().to_owned();
+                let key = request.key.clone();
                 Ok::<_, ResolutionError>(ResolvedNodeTools {
                     tools,
                     plugins: mounted.bindings,
                     plugin_instructions,
                     workspace,
                     envelope,
+                    completion_check: std::sync::Arc::new(move || {
+                        crate::assistant::require_task_result_resolution(&state_root, &key)
+                    }),
                 })
             }
             .await;

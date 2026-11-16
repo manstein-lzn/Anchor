@@ -567,8 +567,31 @@ pub(crate) fn task_result_projection(
         "files":result.files.iter().map(|file| serde_json::json!({
             "name":file.name,"path":task_file_path(&result.id, &file.name),"artifact_id":file.artifact_id,
         })).collect::<Vec<_>>(),
-        "reply_policy":"No automatic channel reply. Follow the original authorized task request and current proactive-send tools when notification is appropriate. This is a task completion or blocked status, not a participant message. A blocked status is not completion; schedule admission may have no source Run. If interrupted, inspect native tool observations and actual external receipts before repeating effects. Handling this input does not by itself prove external delivery.",
+        "reply_policy":"No automatic channel reply. Follow the authorized request using the channel send tools, then call task_result_resolve {action:delivered}. The Host checks Gateway ACKs; final_result alone cannot handle this input. If no notification is appropriate, explicitly call task_result_resolve {action:silent,reason:...}; silence is recorded separately from delivery. This is not a participant message. A blocked status is not completion. If interrupted, inspect actual receipts before repeating effects; unknown outcomes cannot be resolved as delivered or silent.",
     })
+}
+
+pub(crate) fn require_task_result_resolution(
+    root: &Path,
+    key: &InvocationKey,
+) -> Result<(), String> {
+    let Some(source) = source(root, key)? else {
+        return Ok(());
+    };
+    let Some(AssistantInput::Task(input)) = input(root, key)? else {
+        return Ok(());
+    };
+    if input.turn.status == anchor_platform_session::TurnStatus::Completed {
+        return Ok(());
+    }
+    if sessions(root)?
+        .task_result_resolution(&source.owner, &source.session, &input.result.id)
+        .map_err(|error| error.to_string())?
+        .is_none()
+    {
+        return Err("final_result refused: this task result has no explicit resolution. Send through the channel API and call task_result_resolve {action:\"delivered\"}, or explicitly record authorized silence with {action:\"silent\",reason:\"...\"}. No completion was recorded.".into());
+    }
+    Ok(())
 }
 
 pub(crate) fn input(root: &Path, key: &InvocationKey) -> Result<Option<AssistantInput>, String> {

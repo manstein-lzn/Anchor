@@ -1,6 +1,139 @@
 use super::*;
 use crate::{ChannelIdentity, ChannelInboundRequest};
 
+fn resolve_task_result_silently(
+    store: &SessionStore,
+    owner: &str,
+    session: &str,
+    run: &str,
+    key: &str,
+) {
+    let AssistantInput::Task(input) = store
+        .get_assistant_input(owner, session, run, key)
+        .unwrap()
+        .unwrap()
+    else {
+        panic!("expected task input");
+    };
+    if store
+        .task_result_resolution(owner, session, &input.result.id)
+        .unwrap()
+        .is_none()
+    {
+        store
+            .resolve_task_result(
+                owner,
+                session,
+                run,
+                key,
+                &TaskResultResolution::Silent {
+                    reason: "This fixture consumes the result without a channel notification"
+                        .into(),
+                },
+            )
+            .unwrap();
+    }
+}
+
+#[test]
+fn explicit_resolution_is_required_durable_and_not_a_delivery_or_turn_completion() {
+    let (root, store, session) = fixture();
+    complete_user(&store, &session, "initial");
+    store
+        .record_task_result("owner", &session, &result("first"))
+        .unwrap();
+    let input = store
+        .claim_assistant_input("owner", &session, "run", "task")
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(store.finish_task_result("owner", &session, "run", "task"), Err(SessionError::Conflict(reason)) if reason.contains("explicit"))
+    );
+    assert_eq!(
+        store.pending_task_results("owner", &session).unwrap().len(),
+        1
+    );
+    assert!(
+        store
+            .resolve_task_result(
+                "owner",
+                &session,
+                "run",
+                "task",
+                &TaskResultResolution::Silent { reason: " ".into() }
+            )
+            .is_err()
+    );
+    resolve_task_result_silently(&store, "owner", &session, "run", "task");
+    let decision = store
+        .task_result_resolution("owner", &session, "first")
+        .unwrap()
+        .unwrap();
+    assert!(matches!(decision, TaskResultResolution::Silent { .. }));
+    assert_eq!(
+        store
+            .get_turn("owner", &session, &input.turn().id)
+            .unwrap()
+            .status,
+        TurnStatus::Running
+    );
+    let events = store.events("owner", &session, 0).unwrap();
+    store
+        .resolve_task_result("owner", &session, "run", "task", &decision)
+        .unwrap();
+    assert_eq!(store.events("owner", &session, 0).unwrap(), events);
+    assert!(
+        store
+            .resolve_task_result(
+                "owner",
+                &session,
+                "run",
+                "task",
+                &TaskResultResolution::Delivered {
+                    requests: vec!["invented-send".into()]
+                }
+            )
+            .is_err()
+    );
+    drop(store);
+    let store = SessionStore::open(root.path().join("session.sqlite")).unwrap();
+    assert_eq!(
+        store
+            .task_result_resolution("owner", &session, "first")
+            .unwrap(),
+        Some(decision.clone())
+    );
+    store
+        .admit_channel_inbound("owner", inbound("urgent-after-resolution"))
+        .unwrap();
+    assert!(
+        store
+            .finish_task_result("owner", &session, "run", "task")
+            .is_err()
+    );
+    complete_user(&store, &session, "urgent");
+    let resumed = store
+        .claim_assistant_input("owner", &session, "run", "resumed-task")
+        .unwrap()
+        .unwrap();
+    assert_ne!(resumed.turn().id, input.turn().id);
+    assert_eq!(
+        store
+            .task_result_resolution("owner", &session, "first")
+            .unwrap(),
+        Some(decision)
+    );
+    store
+        .finish_task_result("owner", &session, "run", "resumed-task")
+        .unwrap();
+    assert!(
+        store
+            .pending_task_results("owner", &session)
+            .unwrap()
+            .is_empty()
+    );
+}
+
 fn inbound(id: &str) -> ChannelInboundRequest {
     ChannelInboundRequest {
         inbound_id: id.into(),
@@ -18,6 +151,90 @@ fn inbound(id: &str) -> ChannelInboundRequest {
         run_id: None,
         replace_running: true,
     }
+}
+
+#[test]
+fn submitted_send_survives_restart_and_cannot_be_acknowledged_as_silence_or_other_receipts() {
+    let (root, store, session) = fixture();
+    complete_user(&store, &session, "initial");
+    store
+        .record_task_result("owner", &session, &result("queued-send"))
+        .unwrap();
+    store
+        .claim_assistant_input("owner", &session, "run", "task")
+        .unwrap()
+        .unwrap();
+    let requested: Vec<String> = (0..1025)
+        .map(|index| format!("submitted-{index:04}"))
+        .collect();
+    assert!(matches!(
+        store.request_task_result_delivery("owner", &session, "run", "task", &requested),
+        Err(SessionError::Invalid(_))
+    ));
+    for batch in requested.chunks(1024) {
+        store
+            .request_task_result_delivery("owner", &session, "run", "task", batch)
+            .unwrap();
+    }
+    let events = store.events("owner", &session, 0).unwrap();
+    for batch in requested.chunks(1024) {
+        store
+            .request_task_result_delivery("owner", &session, "run", "task", batch)
+            .unwrap();
+    }
+    assert_eq!(store.events("owner", &session, 0).unwrap(), events);
+    drop(store);
+    let store = SessionStore::open(root.path().join("session.sqlite")).unwrap();
+    assert_eq!(
+        store
+            .task_result_delivery_requests("owner", &session, "queued-send")
+            .unwrap(),
+        requested
+    );
+    for resolution in [
+        TaskResultResolution::Silent {
+            reason: "No Gateway record visible yet".into(),
+        },
+        TaskResultResolution::Delivered {
+            requests: vec!["another-confirmed-send".into()],
+        },
+        TaskResultResolution::Delivered { requests: vec![] },
+        TaskResultResolution::Delivered {
+            requests: [requested.clone(), vec![requested[0].clone()]].concat(),
+        },
+        TaskResultResolution::Delivered {
+            requests: [requested.clone(), vec!["invalid/reference".into()]].concat(),
+        },
+    ] {
+        assert!(
+            store
+                .resolve_task_result("owner", &session, "run", "task", &resolution)
+                .is_err()
+        );
+    }
+    assert!(
+        store
+            .finish_task_result("owner", &session, "run", "task")
+            .is_err()
+    );
+    // This low-level fixture stands in for the Host's separately tested Gateway
+    // check; the model-facing API never accepts these references as arguments.
+    store
+        .resolve_task_result(
+            "owner",
+            &session,
+            "run",
+            "task",
+            &TaskResultResolution::Delivered {
+                requests: requested,
+            },
+        )
+        .unwrap();
+    assert!(
+        store
+            .request_task_result_delivery("owner", &session, "run", "task", &["late-send".into()])
+            .is_err()
+    );
 }
 
 fn result(id: &str) -> TaskResult {
@@ -114,9 +331,11 @@ fn queued_results_are_fifo_idempotent_and_never_impersonate_users() {
         store.get_channel_inbound("owner", &session, &first.id),
         Err(SessionError::Missing)
     ));
+    resolve_task_result_silently(&store, "owner", &session, "run", "task-1");
     store
         .finish_task_result("owner", &session, "run", "task-1")
         .unwrap();
+    resolve_task_result_silently(&store, "owner", &session, "run", "task-1");
     store
         .finish_task_result("owner", &session, "run", "task-1")
         .unwrap();
@@ -176,6 +395,7 @@ fn user_interrupt_preserves_result_until_a_later_attempt_handles_it() {
         store.pending_task_results("owner", &session).unwrap(),
         vec![result("first")]
     );
+    resolve_task_result_silently(&store, "owner", &session, "run", "task-2");
     store
         .finish_task_result("owner", &session, "run", "task-2")
         .unwrap();
@@ -224,6 +444,7 @@ fn channel_session_deletion_preserves_unclaimed_results_until_handled() {
         .claim_assistant_input("owner", &session, "successor", "task-wait")
         .unwrap()
         .unwrap();
+    resolve_task_result_silently(&store, "owner", &session, "successor", "task-wait");
     store
         .finish_task_result("owner", &session, "successor", "task-wait")
         .unwrap();
@@ -341,6 +562,7 @@ fn restart_and_handover_preserve_task_claim_without_reviving_retired_assistants(
             .unwrap(),
         0
     );
+    resolve_task_result_silently(&store, "owner", &session, "successor", "new-wait");
     store
         .finish_task_result("owner", &session, "successor", "new-wait")
         .unwrap();

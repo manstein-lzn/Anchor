@@ -40,8 +40,8 @@ mod resolution;
 mod turn_plugins;
 
 pub(crate) use contracts::{
-    NodeConversationHint, NodeHostResolver, NodeImage, NodeToolAssembly, ResolutionError,
-    ResolvedNodeTools, ToolAssembly, ToolResolution,
+    NodeCompletionCheck, NodeConversationHint, NodeHostResolver, NodeImage, NodeToolAssembly,
+    ResolutionError, ResolvedNodeTools, ToolAssembly, ToolResolution,
 };
 
 pub(crate) struct HostNodes {

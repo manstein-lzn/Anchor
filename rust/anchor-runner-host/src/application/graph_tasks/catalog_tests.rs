@@ -161,6 +161,13 @@ impl Task {
             .claim_assistant_input("owner", &self.session, "assistant", key)
             .unwrap()
             .unwrap();
+        crate::test_support::resolve_task_result_silently(
+            &self.sessions,
+            "owner",
+            &self.session,
+            "assistant",
+            key,
+        );
         self.sessions
             .finish_task_result("owner", &self.session, "assistant", key)
             .unwrap();
@@ -202,6 +209,13 @@ async fn completed_once_requires_admission_success_and_handled_result_without_de
         .unwrap();
     assert!(!task.collected().await, "only claimed");
     let before = task.app.read_graph(&task.graph).unwrap();
+    crate::test_support::resolve_task_result_silently(
+        &task.sessions,
+        "owner",
+        &task.session,
+        "assistant",
+        "result",
+    );
     task.sessions
         .finish_task_result("owner", &task.session, "assistant", "result")
         .unwrap();
