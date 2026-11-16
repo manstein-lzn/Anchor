@@ -5,7 +5,7 @@ import { listenerLabel, type GraphSummary } from './model';
 import { PluginCredentials } from './PluginCredentials';
 import './Channels.css';
 
-type Binding = { plugin: string; users: string[]; send_users: string[]; private_only?: boolean };
+type Binding = { plugin: string; users: string[]; send_users: string[]; groups?: string[]; peer_bots?: string[]; private_only?: boolean; cli_enabled?: boolean };
 type BotStatus = {
   graph: string; platform: string; configured: boolean; mutable?: boolean; enabled?: boolean; owner_matches?: boolean; available?: boolean;
   binding?: Binding; listener?: NonNullable<GraphSummary['listener']>['status']; account?: string | null; restart_required?: boolean;
@@ -62,7 +62,7 @@ export function GraphBot({ graph, pluginId, saved }: { graph: string; pluginId: 
   const platformName = feishu ? '飞书' : status?.platform === 'wecom' ? '企业微信' : '渠道';
   return <section className="plugin-details-section graph-bot" aria-label="此 Graph 的机器人">{heading}
     <p>{platformName}消息到达时唤醒此工作流，每段对话接续自己的运行实例。对话在运行看板的「消息会话」中管理。</p>
-    {feishu && <p className="channels-field-help">当前仅支持单聊文本，不支持群聊、图片或文件。先保存成员和应用凭据并启用机器人，保持本机 Host 在线；确认长连接已建立后，再到飞书开放平台「事件与回调」保存「使用长连接接收事件」，订阅「接收消息 im.message.receive_v1」，发布应用版本并确认测试成员在应用可用范围内。</p>}
+    {feishu && <p className="channels-field-help">默认只接收私聊；获准群内的获准成员 @ 机器人后可在原群回复，暂不支持机器人 @ 机器人。先保存成员和应用凭据并启用机器人，保持本机 Host 在线；确认长连接已建立后，再到飞书开放平台「事件与回调」保存「使用长连接接收事件」，订阅「接收消息 im.message.receive_v1」，发布应用版本并确认测试成员在应用可用范围内。群聊还需在飞书配置相应的群内 @ 消息接收权限。</p>}
     {(error || readError) && <div className="channels-message bad" role="alert"><strong>读取或操作未完成</strong><p>{[error, readError].filter(Boolean).join('；')}</p><span>检查服务和资源状态后重试。请求超时后请先刷新，核查实际结果。</span></div>}
     {notice && <p className="channels-message good" role="status"><Check size={15} />{notice}</p>}
     <div className={`channels-signal ${listener === 'authenticated' ? 'connected' : ''}`}><Radio size={19} />
@@ -93,26 +93,39 @@ export function GraphBot({ graph, pluginId, saved }: { graph: string; pluginId: 
   </section>;
 }
 
-function Members({ status, busy, save }: { status: BotStatus; busy: boolean; save: (members: { users: string[]; send_users: string[]; private_only: boolean }) => Promise<boolean> }) {
+function Members({ status, busy, save }: { status: BotStatus; busy: boolean; save: (members: { users: string[]; send_users: string[]; groups: string[]; peer_bots?: string[]; private_only: boolean; cli_enabled?: boolean }) => Promise<boolean> }) {
   const feishu = status.platform === 'feishu';
   const savedUsers = (status.binding?.users ?? []).join('\n');
   const savedSend = (status.binding?.send_users ?? []).join('\n');
+  const savedGroups = (status.binding?.groups ?? []).join('\n');
+  const savedPeerBots = (status.binding?.peer_bots ?? []).join('\n');
   const [users, setUsers] = useState(savedUsers);
-  const savedPrivate = feishu || Boolean(status.binding?.private_only);
+  const savedPrivate = status.binding?.private_only ?? feishu;
+  const savedCli = status.binding?.cli_enabled ?? false;
+  const [cliEnabled, setCliEnabled] = useState(savedCli);
   const [sendUsers, setSendUsers] = useState(savedSend);
+  const [groups, setGroups] = useState(savedGroups);
+  const [peerBots, setPeerBots] = useState(savedPeerBots);
   const [privateOnly, setPrivateOnly] = useState(savedPrivate);
   const [dirty, setDirty] = useState(false);
-  useEffect(() => { if (!dirty) { setUsers(savedUsers); setSendUsers(savedSend); setPrivateOnly(savedPrivate); } }, [savedUsers, savedSend, savedPrivate, dirty]);
+  useEffect(() => { if (!dirty) { setUsers(savedUsers); setSendUsers(savedSend); setGroups(savedGroups); setPeerBots(savedPeerBots); setPrivateOnly(savedPrivate); setCliEnabled(savedCli); } }, [savedUsers, savedSend, savedGroups, savedPeerBots, savedPrivate, savedCli, dirty]);
   const disabled = Boolean(status.enabled) || busy;
   return <form className="channels-binding" onSubmit={event => {
     event.preventDefault(); if (disabled) return;
-    void save({ users: recipients(users), send_users: recipients(sendUsers), private_only: feishu || privateOnly }).then(done => { if (done) setDirty(false); });
+    const peers = feishu && !privateOnly ? recipients(peerBots) : [];
+    void save({ users: recipients(users), send_users: recipients(sendUsers), groups: feishu && !privateOnly ? recipients(groups) : [], ...(peers.length ? { peer_bots: peers } : {}), private_only: privateOnly, ...(cliEnabled && feishu ? { cli_enabled: true } : {}) }).then(done => { if (done) setDirty(false); });
   }}>
     <div className="channels-section-title"><h3>成员</h3>{status.enabled && <small>停用机器人后可修改</small>}</div>
     <fieldset disabled={disabled}>
       <label>允许接收的成员<textarea rows={3} value={users} onChange={event => { setUsers(event.target.value); setDirty(true); }} placeholder={feishu ? '每行一个成员 open_id' : '每行一个成员 ID'} /></label>
       <label>{feishu ? '允许回复的成员' : '允许主动发送的成员'}<textarea rows={3} value={sendUsers} onChange={event => { setSendUsers(event.target.value); setDirty(true); }} placeholder={feishu ? '每行一个成员 open_id；需显式填写，包含要回复的成员' : '每行一个成员 ID；需显式填写，包含要回复的成员'} /></label>
-      <label className="channels-checkbox"><input type="checkbox" checked={privateOnly} disabled={feishu} onChange={event => { setPrivateOnly(event.target.checked); setDirty(true); }} />{feishu ? '只接收私聊（当前仅支持单聊文本）' : '只接收私聊（群内 @ 只回复一条提示，不进入对话）'}</label>
+      <label className="channels-checkbox"><input type="checkbox" checked={privateOnly} onChange={event => { setPrivateOnly(event.target.checked); setDirty(true); }} />{feishu ? '只接收私聊（不放行任何群）' : '只接收私聊（群内 @ 只回复一条提示，不进入对话）'}</label>
+      {feishu && <><label className="channels-checkbox"><input type="checkbox" checked={cliEnabled} onChange={event => { setCliEnabled(event.target.checked); setDirty(true); }} />启用通用飞书应用工具</label>
+        <p className="channels-field-help">使用此 Bot 自己的应用身份，按需发现文档、知识库、多维表格、群聊等官方 CLI 能力。业务 API 使用飞书中已发布的权限和资源授权，不受私聊回复名单限制；只向可信成员开放。不会继承个人登录。权限扩展无需逐项开发工具。</p>
+        <label>获准群 chat_id<textarea rows={3} value={groups} disabled={privateOnly} onChange={event => { setGroups(event.target.value); setDirty(true); }} placeholder="每行一个 oc_ 开头的 chat_id，不接受 *" /></label>
+        <label>获准的协作 Bot open_id<textarea rows={3} value={peerBots} disabled={privateOnly} onChange={event => { setPeerBots(event.target.value); setDirty(true); }} placeholder="每行一个 ou_ 开头的应用机器人 ID" /></label>
+        <p className="channels-field-help">填写当前应用范围内核对过的对方 Bot open_id，不要复制对方的自身 ID。协作 Bot 必须显式列出；仅允许在获准群中回复已接收的人类消息并 @ 当前 Bot。同一人类根消息下，每个协作 Bot 对当前 Bot 最多进入一次，Gateway 通过真实 message_id 去重。请发布应用权限 im:message.group_at_msg.include_bot:readonly。普通 CLI 权限仍由单独开关控制。</p>
+        <p className="channels-field-help">最多 1000 个明确的群 chat_id，以换行或逗号分隔。空名单不放行任何群；勾选「只接收私聊」后保存会清空群名单。群授权不替代成员的接收和回复授权。群内对话共享历史和上下文，回复对群成员可见，请只添加获准共享的群。</p></>}
     </fieldset><p className="channels-field-help">{feishu ? '填写此飞书应用下的成员 open_id' : '成员 ID'}，以换行或逗号分隔。空接收名单拒绝所有成员；<code>*</code> 允许所有成员。接收名单不为空时，{feishu ? '回复名单' : '主动发送名单'}也必须填写。</p>
     <div className="channels-form-actions"><button type="submit" disabled={disabled}><Check size={14} />保存成员</button>
       {dirty && <button type="button" disabled={busy} onClick={() => setDirty(false)}>恢复已保存值</button>}</div>

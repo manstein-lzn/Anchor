@@ -20,6 +20,12 @@ describe('Graph task authorization editor', () => {
   }
   const checkbox = (text: string) => [...container.querySelectorAll('label')].find(label => label.textContent?.includes(text))!
     .querySelector('input[type="checkbox"]') as HTMLInputElement;
+  const scheduleInput = () => container.querySelector<HTMLInputElement>('[aria-label="待授权的计划 ID"]')!;
+  const addSchedule = () => [...container.querySelectorAll('button')].find(button => button.textContent === '添加计划授权')!;
+  const fillSchedule = async (value: string) => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(scheduleInput(), value);
+    await act(async () => scheduleInput().dispatchEvent(new Event('input', { bubbles: true })));
+  };
   beforeEach(() => {
     vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
     container = document.createElement('div'); root = createRoot(container);
@@ -51,5 +57,41 @@ describe('Graph task authorization editor', () => {
     await act(async () => root.render(<Harness disabled />));
     expect(container.querySelector('fieldset')?.disabled).toBe(true);
     expect((container.querySelector('[role="switch"]') as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('authorizes exact schedule IDs without granting Graph execution or creation', async () => {
+    await act(async () => root.render(<Harness />));
+    expect(container.textContent).toContain('未授权任何计划订阅');
+    expect(addSchedule().disabled).toBe(true);
+    await fillSchedule('  briefing-schedule  ');
+    await act(async () => addSchedule().click());
+    expect(policy).toEqual({ schedules: ['briefing-schedule'] });
+    expect(scheduleInput().value).toBe('');
+    expect(checkbox('briefing').checked).toBe(false);
+    expect(checkbox('允许创建并管理自己的工作流').checked).toBe(false);
+    expect(container.textContent).toContain('计划还须由操作员开启共享');
+    await fillSchedule('briefing-schedule');
+    expect(addSchedule().disabled).toBe(true);
+    await fillSchedule('second-schedule');
+    await act(async () => addSchedule().click());
+    expect(policy).toEqual({ schedules: ['briefing-schedule', 'second-schedule'] });
+  });
+
+  it('keeps subscription authorization independent and supports explicit revocation', async () => {
+    await act(async () => root.render(<Harness initial={{ graphs: ['research'], schedules: ['saved-schedule'], plugins: ['search'] }} />));
+    expect(checkbox('saved-schedule').checked).toBe(true);
+    await act(async () => checkbox('briefing').click());
+    expect(policy.schedules).toEqual(['saved-schedule']);
+    await act(async () => checkbox('saved-schedule').click());
+    expect(policy).toEqual({ graphs: ['research', 'briefing'], schedules: [], plugins: ['search'] });
+    expect(container.textContent).toContain('未授权任何计划订阅');
+  });
+
+  it('does not edit subscription authorization while the policy is disabled', async () => {
+    await act(async () => root.render(<Harness initial={{ schedules: ['saved-schedule'] }} disabled />));
+    expect(scheduleInput().closest('fieldset')!.disabled).toBe(true);
+    expect(addSchedule().disabled).toBe(true);
+    await act(async () => checkbox('saved-schedule').click());
+    expect(policy).toEqual({ schedules: ['saved-schedule'] });
   });
 });

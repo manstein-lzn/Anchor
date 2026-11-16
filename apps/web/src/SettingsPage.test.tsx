@@ -29,6 +29,15 @@ describe('Host settings', () => {
   const button = (text: string) => [...container.querySelectorAll<HTMLButtonElement>('button')].find(item => item.textContent === text)!;
   const serveRuntime = (status: unknown) => fetchMock.mockImplementation((path: string) => Promise.resolve(response(path === '/settings/model' ? model : status)));
   const authorizeNetwork = async () => { await act(async () => container.querySelector<HTMLInputElement>('input[type="checkbox"]')!.click()); };
+  it('loads and refreshes only model and runtime settings', async () => {
+    await draw();
+    const paths = () => fetchMock.mock.calls.map(([path]) => path).sort();
+    expect(paths()).toEqual(['/settings/model', '/settings/runtime']);
+    expect([...container.querySelectorAll('h2')].map(heading => heading.textContent)).toEqual(['模型服务', '开发环境']);
+    fetchMock.mockClear();
+    await act(async () => button('刷新状态').click());
+    expect(paths()).toEqual(['/settings/model', '/settings/runtime']);
+  });
   it('ignores a delayed refresh from before initialization and keeps polling the accepted operation', async () => {
     vi.useFakeTimers();
     let resolveRefresh!: (value: Response) => void;

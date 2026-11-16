@@ -40,7 +40,8 @@ for (const platform of ['wecom', 'feishu']) for (const width of [1440, 390]) {
       }
       if (path === `/graphs/${graph}/channel/enabled`) {
         const { enabled, expected_binding } = route.request().postDataJSON();
-        expect(expected_binding).toEqual({ ...binding, users: [member], send_users: [member], private_only: true });
+        expect(expected_binding).toEqual({ ...binding, users: [member], send_users: [member],
+          groups: platform === 'feishu' ? ['oc_project'] : [], private_only: platform !== 'feishu' });
         configuration = { ...configuration, enabled, listener: enabled ? 'authenticated' : 'stopped' };
         return route.fulfill({ json: configuration });
       }
@@ -67,7 +68,11 @@ for (const platform of ['wecom', 'feishu']) for (const width of [1440, 390]) {
     if (platform === 'feishu') {
       await expect(bot).toContainText('App ID 和 App Secret');
       await expect(bot).toContainText('im.message.receive_v1');
-      await expect(bot.getByRole('checkbox', { name: /只接收私聊/ })).toBeDisabled();
+      await expect(bot.getByRole('checkbox', { name: /只接收私聊/ })).toBeChecked();
+      await expect(bot.getByLabel('获准群 chat_id')).toBeDisabled();
+      await bot.getByRole('checkbox', { name: /只接收私聊/ }).uncheck();
+      await bot.getByLabel('获准群 chat_id').fill('oc_project');
+      await expect(bot).toContainText('群内对话共享历史和上下文');
     } else await bot.getByRole('checkbox', { name: /只接收私聊/ }).check();
     await bot.getByRole('button', { name: '保存成员', exact: true }).click();
     await expect(bot).toContainText('成员已保存');
@@ -76,7 +81,11 @@ for (const platform of ['wecom', 'feishu']) for (const width of [1440, 390]) {
     await bot.getByRole('button', { name: '启用机器人', exact: true }).click();
     await expect(bot).toContainText('常驻监听');
     await expect(bot.getByLabel('允许接收的成员')).toBeDisabled();
-    await expect(bot.getByRole('checkbox', { name: /只接收私聊/ })).toBeChecked();
+    await expect(bot.getByRole('checkbox', { name: /只接收私聊/ })).toBeChecked({ checked: platform !== 'feishu' });
+    if (platform === 'feishu') {
+      await expect(bot.getByLabel('获准群 chat_id')).toBeDisabled();
+      await expect(bot.getByLabel('获准群 chat_id')).toHaveValue('oc_project');
+    }
     await expect(bot.getByRole('region', { name: '插件凭据', exact: true })).toHaveCount(0);
     expect(await dialog.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
     await page.screenshot({ path: info.outputPath(`graph-bot-${platform}-${width}.png`), fullPage: true });

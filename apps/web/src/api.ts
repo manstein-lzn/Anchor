@@ -5,7 +5,7 @@
  */
 
 export class ApiError extends Error {
-  constructor(message: string, readonly status: number) { super(message); }
+  constructor(message: string, readonly status: number, readonly code?: string, readonly retry?: string) { super(message); }
 }
 
 async function apiResponse(path: string, method = 'GET', body?: unknown, signal?: AbortSignal, accept = 'application/json', extraHeaders?: Record<string, string>): Promise<Response> {
@@ -24,7 +24,7 @@ async function apiResponse(path: string, method = 'GET', body?: unknown, signal?
   const response = await send();
   if (!response.ok) {
     const data = await response.json().catch(() => null);
-    throw new ApiError(data?.error ?? `${method} ${path} → ${response.status}`, response.status);
+    throw new ApiError(data?.error ?? `${method} ${path} → ${response.status}`, response.status, data?.code, data?.retry);
   }
   return response;
 }
@@ -35,6 +35,16 @@ export async function apiBlob(path: string, signal?: AbortSignal): Promise<Blob>
 
 export async function api<T>(path: string, method = 'GET', body?: unknown, signal?: AbortSignal, headers?: Record<string, string>): Promise<T> {
   const response = await apiResponse(path, method, body, signal, 'application/json', headers);
+  return jsonResponse<T>(response, path, method);
+}
+
+/** Keep the Host's concurrency token with the exact representation it describes. */
+export async function apiVersioned<T>(path: string, method = 'GET', body?: unknown, signal?: AbortSignal, headers?: Record<string, string>): Promise<{ data: T; etag: string | null }> {
+  const response = await apiResponse(path, method, body, signal, 'application/json', headers);
+  return { data: await jsonResponse<T>(response, path, method), etag: response.headers.get('ETag') };
+}
+
+async function jsonResponse<T>(response: Response, path: string, method: string): Promise<T> {
   // A successful DELETE answers 204 with no body. Only an OK response may be
   // empty; anything else without a JSON body is a transport problem.
   const empty = response.status === 204 || response.status === 205;

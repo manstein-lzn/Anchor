@@ -8,7 +8,9 @@ export function GraphTaskPolicyEditor({ value, onChange, graphs, catalog, catalo
   catalog: Plugin[]; catalogKnown: boolean; loading?: boolean; disabled?: boolean; onDetails: (plugin: Plugin) => void;
 }) {
   const [query, setQuery] = useState('');
+  const [scheduleDraft, setScheduleDraft] = useState('');
   const selectedGraphs = value.graphs ?? [];
+  const selectedSchedules = value.schedules ?? [];
   const selectedPlugins = value.plugins ?? [];
   const graphNames = [...new Set([...graphs, ...selectedGraphs])].sort((a, b) => a.localeCompare(b, 'zh-CN'));
   const plugins: Plugin[] = [...catalog.filter(plugin => plugin.id !== 'graph-tasks'),
@@ -18,7 +20,7 @@ export function GraphTaskPolicyEditor({ value, onChange, graphs, catalog, catalo
   const toggle = (items: string[], id: string) => items.includes(id) ? items.filter(item => item !== id) : [...items, id];
   return <section className="graph-task-policy" aria-label="Graph 任务授权">
     <h3>Graph 任务授权</h3>
-    <p className="plugin-panel-note">仅能发现和调用勾选的工作流。所有授权默认关闭，保存后由宿主执行最终校验。</p>
+    <p className="plugin-panel-note">工作流执行与计划订阅分别授权。所有授权默认关闭，保存后由宿主执行最终校验。</p>
     <fieldset disabled={disabled}>
       <legend>可见工作流</legend>
       <label className="graph-task-search">搜索工作流<input type="search" value={query}
@@ -37,6 +39,21 @@ export function GraphTaskPolicyEditor({ value, onChange, graphs, catalog, catalo
       <p className="plugin-panel-note">包括修改、执行、安排计划与删除本会话或任务创建的工作流；删除前须取消保留计划并收尾，不授权修改或删除其他工作流。</p>
       <label className="graph-task-option"><input type="checkbox" checked={value.develop_plugins ?? false}
         onChange={event => onChange({ ...value, develop_plugins: event.target.checked })} /><span>允许准备和测试候选插件</span></label>
+    </fieldset>
+    <fieldset disabled={disabled}>
+      <legend>订阅既有计划</legend>
+      <p className="plugin-panel-note">仅能发现并订阅以下计划的授权结果，不授予工作流执行、修改或计划管理权限。计划还须由操作员开启共享。</p>
+      <label className="graph-task-search">计划 ID<input type="text" aria-label="待授权的计划 ID" value={scheduleDraft}
+        onChange={event => setScheduleDraft(event.target.value)} placeholder="输入要授权订阅的完整计划 ID" /></label>
+      <button type="button" disabled={disabled || !scheduleDraft.trim() || selectedSchedules.includes(scheduleDraft.trim())}
+        onClick={() => { onChange({ ...value, schedules: [...selectedSchedules, scheduleDraft.trim()] }); setScheduleDraft(''); }}>添加计划授权</button>
+      <div className="graph-task-targets">
+        {selectedSchedules.map(id => <label key={id} className="graph-task-option">
+          <input type="checkbox" checked onChange={() => onChange({ ...value, schedules: selectedSchedules.filter(item => item !== id) })} />
+          <span>{id}<small>仅授权订阅；取消勾选可撤回授权</small></span>
+        </label>)}
+        {!selectedSchedules.length && <p className="plugin-message">未授权任何计划订阅。</p>}
+      </div>
     </fieldset>
     <fieldset disabled={disabled}>
       <legend>新建 Graph 能力上限</legend>

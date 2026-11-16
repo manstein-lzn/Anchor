@@ -16,6 +16,10 @@ describe('a Graph bot', () => {
   const requests = () => fetchMock.mock.calls.map(([path, init]) => ({ path, method: init?.method ?? 'GET', body: init?.body ? JSON.parse(init.body) : undefined }));
   const button = (name: string) => [...container.querySelectorAll<HTMLButtonElement>('button')].find(item => item.textContent === name)!;
   const render = async (node: React.ReactNode) => { await act(async () => root.render(node)); };
+  const edit = async (textarea: HTMLTextAreaElement, value: string) => { await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(textarea, value);
+    textarea.dispatchEvent(new Event('input', { bubbles: true }));
+  }); };
   beforeEach(() => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     container = document.createElement('div'); document.body.appendChild(container); root = createRoot(container);
@@ -61,8 +65,8 @@ describe('a Graph bot', () => {
     expect(container.textContent).toContain('停用后才能修改凭据');
     const writes = requests().filter(request => request.method !== 'GET');
     expect(writes).toEqual([
-      { path: '/graphs/helper/channel', method: 'PUT', body: { users: ['alice'], send_users: ['alice', 'bob'], private_only: false } },
-      { path: '/graphs/helper/channel/enabled', method: 'POST', body: { enabled: true, expected_binding: { plugin: 'wecom', users: ['alice'], send_users: ['alice', 'bob'], private_only: false } } },
+      { path: '/graphs/helper/channel', method: 'PUT', body: { users: ['alice'], send_users: ['alice', 'bob'], groups: [], private_only: false } },
+      { path: '/graphs/helper/channel/enabled', method: 'POST', body: { enabled: true, expected_binding: { plugin: 'wecom', users: ['alice'], send_users: ['alice', 'bob'], groups: [], private_only: false } } },
     ]);
   });
 
@@ -82,14 +86,14 @@ describe('a Graph bot', () => {
     expect(container.textContent).toContain('im.message.receive_v1');
     expect(container.textContent).toContain('发布应用版本');
     expect(container.textContent).not.toContain('企业微信');
-    expect(container.textContent).not.toContain('群内 @');
     expect(container.textContent).not.toContain('主动发送');
     expect(container.querySelector('[data-testid="credentials"]')?.textContent).toBe('chat-gateway /graphs/helper/channel/credentials');
     const privateOnly = container.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
     expect(privateOnly.checked).toBe(true);
-    expect(privateOnly.disabled).toBe(true);
+    expect(privateOnly.disabled).toBe(false);
+    expect(container.querySelectorAll('textarea')[2].disabled).toBe(true);
     await act(async () => {
-      for (const textarea of container.querySelectorAll('textarea')) {
+      for (const textarea of [...container.querySelectorAll('textarea')].slice(0, 2)) {
         expect(textarea.placeholder).toContain('open_id');
         Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(textarea, 'ou_alice');
         textarea.dispatchEvent(new Event('input', { bubbles: true }));
@@ -98,8 +102,75 @@ describe('a Graph bot', () => {
     await act(async () => button('保存成员').click());
     await act(async () => button('启用机器人').click());
     expect(requests().filter(request => request.method !== 'GET')).toEqual([
-      { path: '/graphs/helper/channel', method: 'PUT', body: { users: ['ou_alice'], send_users: ['ou_alice'], private_only: true } },
-      { path: '/graphs/helper/channel/enabled', method: 'POST', body: { enabled: true, expected_binding: { plugin: channelPlugin, users: ['ou_alice'], send_users: ['ou_alice'], private_only: true } } },
+      { path: '/graphs/helper/channel', method: 'PUT', body: { users: ['ou_alice'], send_users: ['ou_alice'], groups: [], private_only: true } },
+      { path: '/graphs/helper/channel/enabled', method: 'POST', body: { enabled: true, expected_binding: { plugin: channelPlugin, users: ['ou_alice'], send_users: ['ou_alice'], groups: [], private_only: true } } },
+    ]);
+  });
+
+  it('defaults a legacy Feishu binding without private_only or groups to private chats', async () => {
+    channelPlugin = 'feishu';
+    status = { ...status, platform: 'feishu', binding: { plugin: channelPlugin, users: ['ou_alice'], send_users: ['ou_alice'] } };
+    await render(<GraphBot graph="helper" pluginId={channelPlugin} saved />);
+    expect(container.querySelector<HTMLInputElement>('input[type="checkbox"]')!.checked).toBe(true);
+    expect(container.querySelectorAll('textarea')[2].value).toBe('');
+    await act(async () => button('保存成员').click());
+    expect(requests().filter(request => request.method !== 'GET')).toEqual([
+      { path: '/graphs/helper/channel', method: 'PUT', body: { users: ['ou_alice'], send_users: ['ou_alice'], groups: [], private_only: true } },
+    ]);
+  });
+
+  it('saves only explicitly listed Feishu groups without enabling the bot or changing member permissions', async () => {
+    channelPlugin = 'feishu';
+    status = { ...status, platform: 'feishu', binding: { plugin: channelPlugin, users: ['ou_alice'], send_users: ['ou_bob'], private_only: true } };
+    await render(<GraphBot graph="helper" pluginId={channelPlugin} saved />);
+    expect(container.textContent).toContain('共享历史和上下文');
+    expect(container.textContent).toContain('暂不支持机器人 @ 机器人');
+    expect(container.textContent).toContain('空名单不放行任何群');
+    const privateOnly = container.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+    await act(async () => privateOnly.click());
+    const groups = container.querySelectorAll('textarea')[2];
+    expect(groups.disabled).toBe(false);
+    expect(groups.placeholder).toContain('不接受 *');
+    await edit(groups, ' oc_alpha,oc_beta\noc_alpha ');
+    await act(async () => button('保存成员').click());
+    expect(privateOnly.checked).toBe(false);
+    expect(groups.value).toBe('oc_alpha\noc_beta');
+    expect(requests().filter(request => request.method !== 'GET')).toEqual([
+      { path: '/graphs/helper/channel', method: 'PUT', body: { users: ['ou_alice'], send_users: ['ou_bob'], groups: ['oc_alpha', 'oc_beta'], private_only: false } },
+    ]);
+    expect(button('启用机器人').disabled).toBe(false);
+  });
+
+  it('restores saved group settings and clears the group list when private-only is saved', async () => {
+    channelPlugin = 'feishu';
+    status = { ...status, platform: 'feishu', binding: { plugin: channelPlugin, users: ['ou_alice'], send_users: ['ou_alice'], groups: ['oc_saved'], private_only: false } };
+    await render(<GraphBot graph="helper" pluginId={channelPlugin} saved />);
+    const privateOnly = container.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+    const groups = container.querySelectorAll('textarea')[2];
+    expect(privateOnly.checked).toBe(false);
+    expect(groups.value).toBe('oc_saved');
+    await edit(groups, 'oc_draft');
+    await act(async () => privateOnly.click());
+    await act(async () => button('恢复已保存值').click());
+    expect(privateOnly.checked).toBe(false);
+    expect(groups.value).toBe('oc_saved');
+    await act(async () => privateOnly.click());
+    expect(groups.disabled).toBe(true);
+    await act(async () => button('保存成员').click());
+    expect(groups.value).toBe('');
+    expect(requests().filter(request => request.method !== 'GET')).toEqual([
+      { path: '/graphs/helper/channel', method: 'PUT', body: { users: ['ou_alice'], send_users: ['ou_alice'], groups: [], private_only: true } },
+    ]);
+  });
+
+  it('allows an explicitly non-private Feishu binding with no authorized groups', async () => {
+    channelPlugin = 'feishu';
+    status = { ...status, platform: 'feishu', binding: { plugin: channelPlugin, users: ['ou_alice'], send_users: ['ou_alice'], private_only: false } };
+    await render(<GraphBot graph="helper" pluginId={channelPlugin} saved />);
+    expect(container.querySelector<HTMLInputElement>('input[type="checkbox"]')!.checked).toBe(false);
+    await act(async () => button('保存成员').click());
+    expect(requests().filter(request => request.method !== 'GET')).toEqual([
+      { path: '/graphs/helper/channel', method: 'PUT', body: { users: ['ou_alice'], send_users: ['ou_alice'], groups: [], private_only: false } },
     ]);
   });
 

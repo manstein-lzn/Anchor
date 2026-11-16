@@ -1,0 +1,19 @@
+.relationship-section { margin-top: 20px; }
+.relationship-section h3 { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--ink); }
+.relationship-section > .inspector-note { margin: 6px 0 10px; }
+.relationship-section .relation-calls li { grid-template-columns: minmax(0, 1fr) minmax(110px, .65fr) minmax(0, 1fr); gap: 8px; }
+.relation-reference { display: flex; flex-direction: column; gap: 4px; text-align: left; padding: 9px; background: var(--panel); border: 1px solid var(--line); }
+.relation-reference strong { font-size: 12px; font-weight: 500; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.relationship-section .relation-edge { font-size: 12px; text-align: center; }
+.relationship-section .relation-inactive { color: var(--amber); }
+.relations-dialog .relation-graphs { gap: 6px; margin: 14px 0; }
+.relations-dialog .relation-graphs button { max-width: 240px; border-radius: var(--radius); padding: 6px 8px; min-width: 0; align-items: center; }
+.relations-dialog .relation-graphs strong { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 11px; font-weight: 500; }
+.relations-dialog .relation-graphs .pill { flex-shrink: 0; }
+@media (max-width: 600px) {
+  .relations-dialog .relations-filters { flex-direction: column; align-items: stretch; }
+  .relations-dialog .relations-filters label { min-width: 0; }
+  .relations-dialog .relations-filters select { width: 100%; }
+  .relationship-section .relation-calls li { grid-template-columns: minmax(0, 1fr); gap: 6px; }
+  .relationship-section .relation-edge { padding: 5px; justify-self: center; }
+}

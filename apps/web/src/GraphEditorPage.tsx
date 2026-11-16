@@ -86,8 +86,8 @@ export function GraphEditorPage({ name, editor, graphs, runs, graphColors, busy,
 
           <main className="main">
             <div className="document-header graph-document-header">
-              <div className="document-title">
-                <h2>{name || '未选择图'}</h2>
+              <div className="document-title graph-document-title">
+                <h2 title={name || undefined}>{name || '未选择图'}</h2>
                 <span className={`document-state ${dirty ? 'unsaved' : ''}`}>{dirty ? '● 未保存' : doc ? '所有更改已保存' : '选择或创建工作流'}</span>
               </div>
               <div className="document-actions">
@@ -95,8 +95,8 @@ export function GraphEditorPage({ name, editor, graphs, runs, graphColors, busy,
                 <button disabled={!name} onClick={onPilot}>在 Pilot 中协助</button>
                 <button onClick={() => onRelations()}>工作流关系</button>
                 {graphReturn && <button onClick={onReturn}>返回来源工作流 ←</button>}
-                <select aria-label="当前工作流" value={name} onChange={event => selectGraph(event.target.value)}>
-                  {graphs.filter(item => !item.completed_task || item.graph === name).map(item => <option key={item.graph} value={item.graph}>{item.graph}{item.running ? '（执行中）' : ''}</option>)}
+                <select aria-label="当前工作流" title={name || undefined} value={name} onChange={event => selectGraph(event.target.value)}>
+                  {graphs.filter(item => !item.completed_task || item.graph === name).map(item => <option key={item.graph} value={item.graph} title={item.graph}>{item.graph}{item.running ? '（执行中）' : ''}</option>)}
                 </select>
                 <GraphRunButton graph={graphs.find(item => item.graph === name)} name={name} dirty={dirty} busy={busy} onClick={trigger} />
                 <button disabled={!editable} onClick={() => void check()}>

@@ -59,7 +59,6 @@ export type GraphSummary = {
   objective?: string;
   task_source?: string;
   schedule_summary?: { total: number; enabled: number; recurring: number };
-  managed_by?: 'dreaming';
   completed_task?: boolean;
   listener?: { platform: string; status: 'connecting' | 'authenticating' | 'authenticated' | 'reconnecting' | 'stopped' | 'unavailable' };
 };

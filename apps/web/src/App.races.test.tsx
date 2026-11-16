@@ -34,7 +34,10 @@ describe('Run deletion navigation races', () => {
   let fetchMock: ReturnType<typeof vi.fn>;
   let resolveDelete: (value: Response) => void;
   const button = (label: string) => [...container.querySelectorAll<HTMLButtonElement>('button')].find(item => item.textContent === label)!;
-  const openRun = async (run: string) => { await act(async () => button(`打开 ${run}`).click()); };
+  const openRun = async (run: string) => {
+    await act(async () => button(`打开 ${run}`).click());
+    await act(async () => vi.dynamicImportSettled());
+  };
 
   beforeEach(() => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
