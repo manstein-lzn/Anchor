@@ -18,7 +18,7 @@ pub(super) fn store_evidence(path: &Path, evidence: &Value) -> Result<(), GraphE
     Ok(())
 }
 
-fn read_json(root: &Path, name: &str) -> Result<Option<Value>, String> {
+fn read_json<T: serde::de::DeserializeOwned>(root: &Path, name: &str) -> Result<Option<T>, String> {
     let file = match open_resource(root, name) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -61,8 +61,8 @@ pub(crate) fn trace_messages(state: &Path, key: &InvocationKey) -> Result<Vec<Va
         ("goose-acp-spike", 1, "goose-acp-spike"),
     ] {
         let root = state.join(directory);
-        let fact = read_json(&root, &format!("{stem}.json"))?;
-        let evidence = read_json(&root, &format!("{stem}.evidence.json"))?;
+        let fact = read_json::<Value>(&root, &format!("{stem}.json"))?;
+        let evidence = read_json::<Value>(&root, &format!("{stem}.evidence.json"))?;
         if fact.is_none() && evidence.is_none() {
             continue;
         }
@@ -100,22 +100,91 @@ pub(crate) fn trace_messages(state: &Path, key: &InvocationKey) -> Result<Vec<Va
         }
     }
     if let Some(observation) = fact.tool_observation {
-        if observation["result"].is_null() {
-            messages.push(json!({
-                "role":"assistant","text":"",
-                "commands":[format!("{} {}", observation["tool"].as_str().unwrap_or("unknown"), observation["arguments"])],
-                "source":"anchor_tool_observation"
-            }));
-            messages.push(json!({
-                "role":"tool","text":"The tool result was not recorded. External outcome is unknown; inspect actual state before acting.",
-                "tool":observation["tool"],"unrecorded":true,"unknown_external_outcome":true,
-                "source":"anchor_tool_observation"
-            }));
-        } else if messages.is_empty() {
-            messages.push(json!({"role":"tool","text":observation.to_string(),"source":"anchor_tool_observation"}));
-        }
+        project_tool_observation(&mut messages, observation);
     }
     Ok(messages)
+}
+
+/// Run detail entries contain only this invocation's updates. Repeating the
+/// restored Session history for every pass makes long-running details quadratic.
+pub(crate) fn run_trace_messages(state: &Path, key: &InvocationKey) -> Result<Vec<Value>, String> {
+    let stem = crate::host_fs::invocation_stem(key);
+    let mut selected = None;
+    for (directory, version, runtime) in [
+        ("goose-acp", 2, "goose"),
+        ("goose-acp-spike", 1, "goose-acp-spike"),
+    ] {
+        let root = state.join(directory);
+        let fact = read_json::<Fact>(&root, &format!("{stem}.json"))?;
+        let evidence = read_json::<InvocationEvidence>(&root, &format!("{stem}.evidence.json"))?;
+        if fact.is_none() && evidence.is_none() {
+            continue;
+        }
+        if selected.is_some() {
+            return Err("Goose trace has ambiguous invocation facts".into());
+        }
+        let fact = fact.ok_or("Goose trace has no invocation fact")?;
+        if fact.key != *key || fact.version != version {
+            return Err("Goose trace invocation identity changed".into());
+        }
+        if let Some(evidence) = &evidence
+            && (evidence.version != 1 || evidence.runtime != runtime || evidence.key != *key)
+        {
+            return Err("Goose trace evidence identity changed".into());
+        }
+        selected = Some((fact, evidence));
+    }
+    let Some((fact, evidence)) = selected else {
+        return Ok(Vec::new());
+    };
+    if let Some(events) = live_notifications(state, key)? {
+        let mut messages = Vec::new();
+        for event in events {
+            project_update(&mut messages, &event, fact.session_id.as_deref())?;
+        }
+        return Ok(messages);
+    }
+    let mut messages = Vec::new();
+    if let Some(events) = evidence
+        .as_ref()
+        .and_then(|evidence| evidence.notifications.as_array())
+    {
+        for event in events {
+            project_update(&mut messages, event, fact.session_id.as_deref())?;
+        }
+    }
+    if let Some(observation) = fact.tool_observation {
+        project_tool_observation(&mut messages, observation);
+    }
+    Ok(messages)
+}
+
+fn project_tool_observation(messages: &mut Vec<Value>, observation: Value) {
+    if observation["result"].is_null() {
+        messages.push(json!({
+            "role":"assistant","text":"",
+            "commands":[format!("{} {}", observation["tool"].as_str().unwrap_or("unknown"), observation["arguments"])],
+            "source":"anchor_tool_observation"
+        }));
+        messages.push(json!({
+            "role":"tool","text":"The tool result was not recorded. External outcome is unknown; inspect actual state before acting.",
+            "tool":observation["tool"],"unrecorded":true,"unknown_external_outcome":true,
+            "source":"anchor_tool_observation"
+        }));
+    } else if messages.is_empty() {
+        messages.push(json!({"role":"tool","text":observation.to_string(),"source":"anchor_tool_observation"}));
+    }
+}
+
+// Serde skips restored_history without allocating its nested JSON Values. The
+// reader still scans the persisted bytes and validates the evidence identity.
+#[derive(serde::Deserialize)]
+struct InvocationEvidence {
+    version: u64,
+    runtime: String,
+    key: InvocationKey,
+    #[serde(default)]
+    notifications: Value,
 }
 
 fn project_update(
@@ -448,6 +517,130 @@ mod tests {
         assert_eq!(messages[2]["text"], "verified");
         assert_eq!(messages[3]["text"], "Done");
         assert!(!root.join("framework.sqlite3").exists());
+    }
+
+    #[test]
+    fn run_projection_contains_each_turn_once_without_repeating_restored_history() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("goose-acp");
+        let mut history = Vec::new();
+        let mut all = Vec::new();
+        for invocation in 1..=32 {
+            let key = InvocationKey {
+                invocation,
+                ..key()
+            };
+            fact(&root, &key, Value::Null);
+            let event = update(json!({"sessionUpdate":"agent_message_chunk",
+                "content":{"text":format!("turn {invocation}\n")}}));
+            write(
+                &root,
+                &format!("{}.evidence.json", crate::host_fs::invocation_stem(&key)),
+                &json!({"version":1,"runtime":"goose","key":key,
+                    "restored_history":history,"notifications":[event]}),
+            );
+            let current = run_trace_messages(directory.path(), &key).unwrap();
+            assert_eq!(current.len(), 1);
+            assert_eq!(current[0]["text"], format!("turn {invocation}\n"));
+            all.extend(current);
+            history.push(event);
+        }
+        assert_eq!(all.len(), 32);
+        let full = trace_messages(
+            directory.path(),
+            &InvocationKey {
+                invocation: 32,
+                ..key()
+            },
+        )
+        .unwrap();
+        assert!(full[0]["text"].as_str().unwrap().starts_with("turn 1\n"));
+        assert!(full[0]["text"].as_str().unwrap().ends_with("turn 32\n"));
+    }
+
+    #[test]
+    fn run_projection_retains_current_live_tool_updates_and_validates_identity() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("goose-acp");
+        assert!(
+            run_trace_messages(directory.path(), &key())
+                .unwrap()
+                .is_empty()
+        );
+        fact(&root, &key(), Value::Null);
+        let stem = crate::host_fs::invocation_stem(&key());
+        let live = LiveTrace::open(&root.join(format!("{stem}.json"))).unwrap();
+        live.restore(
+            "native-session",
+            &[update(json!({
+                "sessionUpdate":"agent_message_chunk","content":{"text":"old history"}
+            }))],
+        )
+        .unwrap();
+        live.observe(&update(json!({"sessionUpdate":"tool_call_update",
+            "toolCallId":"current","status":"in_progress",
+            "content":[{"content":{"text":"current progress"}}]})))
+            .unwrap();
+        let messages = run_trace_messages(directory.path(), &key()).unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["text"], "current progress");
+        assert_eq!(messages[0]["status"], "in_progress");
+        drop(live);
+        write(
+            &root,
+            &format!("{stem}.evidence.json"),
+            &json!({"version":1,"runtime":"goose","key":{"run_id":"other"},"notifications":[]}),
+        );
+        assert!(
+            run_trace_messages(directory.path(), &key())
+                .unwrap_err()
+                .contains("malformed")
+        );
+        write(
+            &root,
+            &format!("{stem}.evidence.json"),
+            &json!({"version":1,"runtime":"goose","key":InvocationKey { run_id:"other".into(), ..key() },"notifications":[]}),
+        );
+        assert!(
+            run_trace_messages(directory.path(), &key())
+                .unwrap_err()
+                .contains("identity")
+        );
+    }
+
+    #[test]
+    fn run_projection_preserves_tool_observation_fallback_contract() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("goose-acp");
+        let unresolved = json!({
+            "tool":"external_send","arguments":{"message":"once"},"result":null
+        });
+        fact(&root, &key(), unresolved);
+        let messages = run_trace_messages(directory.path(), &key()).unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["role"], "assistant");
+        assert!(
+            messages[0]["commands"][0]
+                .as_str()
+                .unwrap()
+                .contains("external_send")
+        );
+        assert_eq!(messages[1]["tool"], "external_send");
+        assert_eq!(messages[1]["unrecorded"], true);
+        assert_eq!(messages[1]["unknown_external_outcome"], true);
+
+        let completed_key = InvocationKey {
+            invocation: 2,
+            ..key()
+        };
+        let completed = json!({
+            "tool":"lookup","arguments":{"id":7},"result":{"found":true}
+        });
+        fact(&root, &completed_key, completed.clone());
+        let messages = run_trace_messages(directory.path(), &completed_key).unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["role"], "tool");
+        assert_eq!(messages[0]["text"], completed.to_string());
     }
 
     #[test]

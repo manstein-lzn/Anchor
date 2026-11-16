@@ -13,7 +13,7 @@ mod trace;
 /// assert what the channel progress projection reports for it.
 #[cfg(test)]
 pub(crate) use trace::LiveTrace;
-pub(crate) use trace::{live_notifications, trace_messages};
+pub(crate) use trace::{live_notifications, run_trace_messages, trace_messages};
 mod recovery;
 mod session;
 mod transport;

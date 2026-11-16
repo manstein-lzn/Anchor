@@ -95,16 +95,21 @@ pub(super) async fn projected_runs(state: &ApiState) -> Result<Vec<Value>, HttpR
 pub(super) async fn get_run(
     State(state): State<ApiState>,
     AxumPath(id): AxumPath<String>,
-) -> Result<Json<Value>, HttpResponse> {
+) -> Result<HttpResponse, HttpResponse> {
     if id.is_empty() || id.contains('/') || id == "." || id == ".." {
         return Err(error(StatusCode::BAD_REQUEST, "invalid run id"));
     }
-    state
+    let detail = state
         .application
         .http_run_detail(&id, &state.workspace_root)
         .await
-        .map(Json)
-        .map_err(run_http_error)
+        .map_err(run_http_error)?;
+    // Large transcripts must not serialize on the async channel/health workers.
+    let bytes = tokio::task::spawn_blocking(move || serde_json::to_vec(&detail))
+        .await
+        .map_err(|failure| error(StatusCode::INTERNAL_SERVER_ERROR, failure.to_string()))?
+        .map_err(|failure| error(StatusCode::INTERNAL_SERVER_ERROR, failure.to_string()))?;
+    Ok(([(header::CONTENT_TYPE, "application/json")], bytes).into_response())
 }
 
 fn run_http_error(failure: RunHttpError) -> HttpResponse {
