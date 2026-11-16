@@ -489,6 +489,150 @@ fn agent_delegates_an_authorized_graph_and_its_real_completion_wakes_the_same_se
 
 #[test]
 #[ignore = "requires pinned real Goose binary and local Bubblewrap"]
+fn creator_manages_and_deletes_its_graph_after_handling_the_result() {
+    let child_definition = json!({
+        "objective":"creator-owned temporary task", "entry":"produce",
+        "ops":{"produce":{"run":"sh -c 'printf creator-owned-report > report.txt'","writes":["report.txt"]}},
+        "nodes":[{"id":"produce","op":"produce"}],"edges":[],
+    });
+    let provider = Provider::new(
+        "goose-created-graph-cleanup",
+        vec![
+            Step::tool("anchor_tool_detail", json!({"name":"graph_tasks_create"}))
+                .expect_request_contains("create-a-temporary-task"),
+            Step::tool(
+                "anchor_tools_call",
+                json!({"name":"graph_tasks_create","arguments":{"definition":child_definition}}),
+            )
+            .after("graph_tasks_create"),
+            finish("temporary-task-created").after("created"),
+        ],
+    );
+    let mut definition = graph();
+    definition["nodes"][1]["plugins"] = json!([
+        "wecom",{"id":"graph-tasks","graph_tasks":{"create_graphs":true,"commands":true}},
+        {"id":"network","network":"denied"}
+    ]);
+    let host = task_host(&definition);
+    let server = host.serve(&provider);
+    let (status, saved) = server.request(
+        "PUT",
+        "/graphs/fixture",
+        Some(&json!({"definition":definition})),
+    );
+    assert_eq!(status, 200, "{saved}");
+    let (status, before) = server.request("GET", "/graphs", None);
+    assert_eq!(status, 200, "{before}");
+    let known: std::collections::BTreeSet<_> = before["graphs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["graph"].as_str().unwrap().to_owned())
+        .collect();
+    let first = submit(
+        &server,
+        &event(ALICE, "create-owned", "create-a-temporary-task"),
+        "temporary-task-created",
+    );
+    let run = first["run"].as_str().unwrap();
+    waiting(&host, run, 1);
+    let (status, listing) = server.request("GET", "/graphs", None);
+    assert_eq!(status, 200, "{listing}");
+    let created = listing["graphs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["graph"].as_str().unwrap())
+        .filter(|graph| !known.contains(*graph))
+        .collect::<Vec<_>>();
+    assert_eq!(created.len(), 1, "{listing}");
+    let owned = created[0].to_owned();
+    let mut edited = child_definition.clone();
+    edited["objective"] = json!("edited owned task");
+    provider.append(vec![
+        Step::tool("anchor_tool_detail", json!({"name":"graph_tasks_read"}))
+            .expect_request_contains("execute-the-owned-task"),
+        Step::tool("anchor_tools_call", json!({"name":"graph_tasks_read","arguments":{"graph":owned}}))
+            .after("graph_tasks_read"),
+        Step::tool("anchor_tool_detail", json!({"name":"graph_tasks_update"})).after("creator-owned temporary task"),
+        Step::tool("anchor_tools_call", json!({"name":"graph_tasks_update","arguments":{"graph":owned,"definition":edited}}))
+            .after("graph_tasks_update"),
+        Step::tool("anchor_tool_detail", json!({"name":"graph_tasks_run"})).after("edited owned task"),
+        Step::tool("anchor_tools_call", json!({"name":"graph_tasks_run","arguments":{"graph":owned}}))
+            .after("graph_tasks_run"),
+        finish("owned-task-started").after("accepted"),
+        command("set -eu; test \"$(cat /in/tasks/*/1-report.txt)\" = creator-owned-report; cp /in/tasks/*/1-report.txt retained-report.txt; printf creator-result-retained")
+            .expect_request_contains("task_result"),
+        Step::tool("task_result_resolve", json!({"action":"silent","reason":"The result is consumed and retained by this fixture"}))
+            .after("creator-result-retained"),
+        finish("owned-result-handled").after("resolved"),
+    ]);
+    let second = submit(
+        &server,
+        &event(ALICE, "run-owned", "execute-the-owned-task"),
+        "owned-task-started",
+    );
+    assert_eq!(second["run"], run);
+    let completed = waiting(&host, run, 3);
+    let child_run =
+        completed["results"]["wait_input"][2]["completion"]["output"]["task_result"]["source_run"]
+            .as_str()
+            .unwrap();
+    let child_workspace = host.base.workspace(child_run, "produce");
+    assert_eq!(
+        fs::read(child_workspace.join("report.txt")).unwrap(),
+        b"creator-owned-report"
+    );
+    let child_metadata = host
+        .base
+        .state_root()
+        .join("run-metadata")
+        .join(format!("{child_run}.json"));
+    assert!(child_metadata.is_file());
+    provider.append(vec![
+        Step::tool("anchor_tool_detail", json!({"name":"graph_tasks_delete"}))
+            .expect_request_contains("delete-the-owned-task"),
+        Step::tool(
+            "anchor_tools_call",
+            json!({"name":"graph_tasks_delete","arguments":{"graph":owned}}),
+        )
+        .after("graph_tasks_delete"),
+        finish("owned-task-deleted").after("deleted"),
+    ]);
+    let deleted = submit(
+        &server,
+        &event(ALICE, "delete-owned", "delete-the-owned-task"),
+        "owned-task-deleted",
+    );
+    assert_eq!(deleted["run"], run);
+    waiting(&host, run, 4);
+    assert!(!host.base.root.path().join(&owned).exists());
+    assert!(!child_metadata.exists());
+    assert!(!child_workspace.exists());
+    assert_eq!(
+        fs::read(workspace(&host, run).join("retained-report.txt")).unwrap(),
+        b"creator-owned-report"
+    );
+    assert_eq!(
+        host.native_fact(run, "assistant", 1)["session_id"],
+        host.native_fact(run, "assistant", 4)["session_id"]
+    );
+    provider.assert_consumed();
+    let stopped = stop(&server, &provider, run);
+    evidence(
+        &host,
+        &provider,
+        run,
+        json!({
+            "case_source":TASK_CASE_SOURCE,"creator_graph_management":true,"deleted_graph":owned,
+            "deleted_child_run":child_run,"parent_and_retained_report_preserved":true,
+            "real_model_requests":0,"real_channel_requests":0,"stopped":stopped,
+        }),
+    );
+}
+
+#[test]
+#[ignore = "requires pinned real Goose binary and local Bubblewrap"]
 fn queued_task_results_wake_the_existing_assistant_silently_with_exact_readonly_files() {
     let provider = Provider::new("goose-persistent-task-results", vec![
         command("printf ready > state.txt; printf initial-ready"),

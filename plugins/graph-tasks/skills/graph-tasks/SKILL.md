@@ -15,6 +15,10 @@ The Host supplies `graph_tasks_*` tools only when this Plugin is mounted with an
 
 Existing selected Graphs run as the approved version and dependency closure. New Graphs stay within the creation capability limits. If an approved asset changed or an operation is outside scope, report the tool's actual failure and request the necessary operator change; do not route around it with commands, another Plugin, or another Graph.
 
+### Manage Your Created Graphs
+
+The existing creation grant includes reading, editing, running, scheduling, and deleting Graphs created by this task scope; no extra per-Graph approval is needed. Use `graph_tasks_delete` when an owned Graph is no longer needed. It removes the saved Graph and its terminal Run data and private workspaces, not just its list entry. Explicitly cancel retained schedules first, including paused ones, and finish Run/result handling before deletion. Call references and unresolved deliveries remain protected; a conflict is not permission to force deletion or erase another scope's plans. You cannot delete the source agent, selected shared Graphs, or another scope's assets. Scope remains tied to the source node and Session, or the source Run for non-session tasks; later operator revocation still applies. Do not delete a reusable Graph merely because one execution completed.
+
 ### Minimal Authoring Example
 
 Pass this object to `graph_tasks_validate`, correct any actual diagnostics, then use the same object with `graph_tasks_create`. Creation returns the Graph identifier; it does not start execution or schedule it. This example summarizes supplied material, not live research, and requires no Plugin, network, or command capability.

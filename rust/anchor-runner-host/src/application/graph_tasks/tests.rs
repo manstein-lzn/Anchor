@@ -287,28 +287,35 @@ async fn cancelled_task_tools_cannot_publish_after_waiting_for_the_catalog_guard
         key,
         application.clone(),
         context,
+        root.path().join("workspaces"),
         &mut crate::plugin_disclosure::PluginDisclosureCatalog::default(),
     );
     let mut changed = definition.clone();
     changed["objective"] = json!("must not be saved after cancellation");
-    let guard = application.graph_catalog_mutation_guard().await;
-    let mut call = tools.call(
-        "graph_tasks_update",
-        json!({"graph":graph,"definition":changed}),
-    );
-    assert!(
-        std::future::poll_fn(|cx| std::task::Poll::Ready(call.as_mut().poll(cx)))
+    for (tool, arguments) in [
+        (
+            "graph_tasks_update",
+            json!({"graph":graph,"definition":changed}),
+        ),
+        ("graph_tasks_delete", json!({"graph":graph})),
+    ] {
+        cancellation.store(false, Ordering::Release);
+        let guard = application.graph_catalog_mutation_guard().await;
+        let mut call = tools.call(tool, arguments);
+        assert!(
+            std::future::poll_fn(|cx| std::task::Poll::Ready(call.as_mut().poll(cx)))
+                .await
+                .is_pending()
+        );
+        cancellation.store(true, Ordering::Release);
+        drop(guard);
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), call)
             .await
-            .is_pending()
-    );
-    cancellation.store(true, Ordering::Release);
-    drop(guard);
-    let result = tokio::time::timeout(std::time::Duration::from_secs(1), call)
-        .await
-        .unwrap();
-    assert!(
-        matches!(result, Err(anchor_runtime::ToolError::Failed(reason)) if reason.contains("cancelled"))
-    );
+            .unwrap();
+        assert!(
+            matches!(result, Err(anchor_runtime::ToolError::Failed(reason)) if reason.contains("cancelled"))
+        );
+    }
     assert_eq!(
         application.read_task_graph(&origin, graph).unwrap()["definition"],
         GraphSnapshot::normalize_network_authoring(definition, false)
@@ -421,6 +428,16 @@ async fn generated_graph_creation_is_scope_owned_idempotent_and_does_not_install
         .await
         .unwrap();
     let name = created["graph"].as_str().unwrap();
+    let workspace_root = _root.path().join("workspaces");
+    for (origin, target) in [(&bob, name), (&alice, "shared"), (&alice, "source")] {
+        assert!(
+            application
+                .delete_task_graph(origin, target, &workspace_root)
+                .await
+                .is_err(),
+            "only the creator's own Graph can be deleted"
+        );
+    }
     let repeated = application
         .create_task_graph(&alice, definition.clone(), "request".into())
         .await
@@ -485,17 +502,79 @@ async fn generated_graph_creation_is_scope_owned_idempotent_and_does_not_install
     );
     let ownership = task_graph_ownership_path(&application, name).unwrap();
     assert!(ownership.is_file());
-    application
-        .delete_graph(
-            name,
-            &application.graph_bundle_path(name),
-            &_root.path().join("workspaces"),
-        )
+    let deleted = application
+        .delete_task_graph(&alice, name, &workspace_root)
         .await
         .unwrap();
+    assert_eq!(
+        deleted,
+        json!({"graph":name,"deleted":true,"removed_runs":0})
+    );
+    assert!(!application.graph_bundle_path(name).exists());
+    assert!(application.graph_bundle_path("source").is_dir());
+    assert!(application.graph_bundle_path("shared").is_dir());
+    assert!(
+        application
+            .graph_bundle_path(bob_created["graph"].as_str().unwrap())
+            .is_dir()
+    );
     assert!(
         !ownership.exists(),
         "deletion releases the generated asset reservation"
+    );
+}
+
+#[tokio::test]
+async fn creator_deletion_requires_original_and_current_grants_and_rechecks_after_waiting() {
+    let (root, application) = fixture();
+    let original = approved(&application, GraphTaskPolicy::default(), None).await;
+    let policy = GraphTaskPolicy {
+        create_graphs: true,
+        ..Default::default()
+    };
+    application
+        .update_graph("source", source(&policy))
+        .await
+        .unwrap();
+    let origin = fixture_origin(&application, policy, None);
+    let created = application
+        .create_task_graph(&origin, agent(json!([])), "owned-draft".into())
+        .await
+        .unwrap();
+    let graph = created["graph"].as_str().unwrap();
+    let workspace_root = root.path().join("workspaces");
+    let mut other_run = origin.clone();
+    let TaskOriginSource::AgentDelegation { key } = &mut other_run.source else {
+        unreachable!()
+    };
+    key.run_id = "other-source-run".into();
+    for unauthorized in [&original, &other_run] {
+        assert!(
+            application
+                .delete_task_graph(unauthorized, graph, &workspace_root)
+                .await
+                .is_err()
+        );
+    }
+
+    let held = application.graph_catalog_mutation_guard().await;
+    let mut deletion = Box::pin(application.delete_task_graph(&origin, graph, &workspace_root));
+    assert!(futures_util::poll!(&mut deletion).is_pending());
+    write(&application, "source", &source(&GraphTaskPolicy::default()));
+    let (source_path, source_bundle) = application.load_graph("source").unwrap();
+    application
+        .publish_graph_task_permissions(&source_path, &source_bundle.snapshot)
+        .unwrap();
+    drop(held);
+    assert!(matches!(
+        deletion.await,
+        Err(ApplicationError::Invalid(reason)) if reason.contains("not authorized")
+    ));
+    assert!(application.graph_bundle_path(graph).is_dir());
+    assert!(
+        task_graph_ownership_path(&application, graph)
+            .unwrap()
+            .is_file()
     );
 }
 

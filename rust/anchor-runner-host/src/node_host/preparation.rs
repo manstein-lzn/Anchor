@@ -136,6 +136,7 @@ impl HostIoResolver {
                     bindings: &mounted.bindings,
                     request,
                     workspace: &workspace,
+                    workspace_root: self.artifacts.workspaces().root(),
                     readonly_inputs: &readonly_inputs,
                     envelope: &envelope,
                     runtime,

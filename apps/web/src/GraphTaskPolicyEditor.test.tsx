@@ -32,7 +32,7 @@ describe('Graph task authorization editor', () => {
     expect(container.querySelector('[role="switch"][aria-checked="true"]')).toBeNull();
     await act(async () => { checkbox('research').click(); checkbox('允许准备和测试候选插件').click(); });
     expect(policy).toEqual({ graphs: ['research'], develop_plugins: true });
-    expect(checkbox('允许构建新的工作流').checked).toBe(false);
+    expect(checkbox('允许创建并管理自己的工作流').checked).toBe(false);
     expect(container.querySelector('[aria-label="授权新建 Graph 使用 Graph Tasks"]')).toBeNull();
     await act(async () => (container.querySelector('[aria-label="授权新建 Graph 使用 Search"]') as HTMLButtonElement).click());
     expect(policy.plugins).toEqual(['search']);

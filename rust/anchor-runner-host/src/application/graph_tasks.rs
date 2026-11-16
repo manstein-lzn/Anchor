@@ -583,6 +583,54 @@ impl RunApplication {
         Ok(json!({"graph":graph,"definition":definition}))
     }
 
+    pub(crate) async fn delete_task_graph(
+        &self,
+        origin: &TaskOrigin,
+        graph: &str,
+        workspace_root: &Path,
+    ) -> Result<Value, ApplicationError> {
+        self.authorize_task_graph_deletion(origin, graph)?;
+        let expected = self.graph_delete_precondition(graph).await?;
+        let removed_runs = self
+            .remove_graph_if_unchanged_guarded(graph, workspace_root, &expected, || {
+                self.authorize_task_graph_deletion(origin, graph)?;
+                let identity = crate::run_metadata::graph_identity(&self.graph_bundle_path(graph))
+                    .map_err(ApplicationError::from)?;
+                if let Some(port) = &self.schedules {
+                    for plan in port.graph_references()? {
+                        if crate::run_metadata::graph_identity(&self.graph_bundle_path(&plan.graph))
+                            .map_err(ApplicationError::from)?
+                            == identity
+                        {
+                            return Err(ApplicationError::Conflict(
+                                "cancel this Graph's retained schedules before deleting it".into(),
+                            )
+                            .into());
+                        }
+                    }
+                }
+                Ok(())
+            })
+            .await?;
+        Ok(json!({"graph":graph,"deleted":true,"removed_runs":removed_runs}))
+    }
+
+    fn authorize_task_graph_deletion(
+        &self,
+        origin: &TaskOrigin,
+        graph: &str,
+    ) -> Result<(), ApplicationError> {
+        let (current, _) = self.current_task_grant(origin)?;
+        if !origin.policy.create_graphs || !current.create_graphs {
+            return Err(invalid("Graph creation and management are not authorized"));
+        }
+        let owned = self.task_graph_ownership(origin, graph)?;
+        if crate::run_metadata::graph_identity(&self.graph_bundle_path(graph))? == owned.source {
+            return Err(invalid("a task cannot delete its source agent's Graph"));
+        }
+        Ok(())
+    }
+
     pub(crate) fn authorize_task_plugin_development(
         &self,
         origin: &TaskOrigin,

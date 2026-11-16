@@ -16,6 +16,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
     future::Future,
+    path::PathBuf,
     pin::Pin,
     sync::{Arc, atomic::Ordering},
 };
@@ -39,6 +40,7 @@ pub(crate) fn wrap(
     key: InvocationKey,
     application: RunApplication,
     context: CandidateTestContext,
+    workspace_root: PathBuf,
     disclosure: &mut PluginDisclosureCatalog,
 ) -> Arc<dyn ToolPort> {
     if !bindings.iter().any(|plugin| plugin.id == "graph-tasks") {
@@ -60,6 +62,7 @@ pub(crate) fn wrap(
         key,
         application,
         context,
+        workspace_root,
     })
 }
 
@@ -69,6 +72,7 @@ struct GraphTaskTools {
     key: InvocationKey,
     application: RunApplication,
     context: CandidateTestContext,
+    workspace_root: PathBuf,
 }
 
 #[derive(Deserialize)]
@@ -202,6 +206,13 @@ impl GraphTaskTools {
                 let arg: UpdateArg = args(arguments)?;
                 self.application
                     .update_task_graph(&origin, &arg.graph, arg.definition)
+                    .await
+                    .map_err(failure)
+            }
+            "graph_tasks_delete" => {
+                let arg: GraphArg = args(arguments)?;
+                self.application
+                    .delete_task_graph(&origin, &arg.graph, &self.workspace_root)
                     .await
                     .map_err(failure)
             }
@@ -429,6 +440,12 @@ fn definitions() -> Vec<ToolDefinition> {
             vec!["graph", "definition"],
         ),
         (
+            "graph_tasks_delete",
+            "Delete only a Graph created by this scope, including its terminal Run data and workspaces. Cancel retained schedules and finish Runs and result handling first. Referenced Graphs remain protected; never deletes the source agent or unrelated assets. No additional per-Graph approval is required within the existing creation grant.",
+            json!({"graph":graph}),
+            vec!["graph"],
+        ),
+        (
             "graph_tasks_run",
             "Start a visible Graph asynchronously. Returns its real Run, not its result. Same native tool-call retries return the same Run. An unfinished Run for that Graph conflicts; do not clone it to bypass exclusion. Assistant-originated terminal results enter this Session for later processing, not automatic sending.",
             json!({"graph":graph,"input":input}),
@@ -494,7 +511,7 @@ mod tests {
             .map(|definition| definition.name.clone())
             .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(names.len(), definitions.len());
-        assert_eq!(names.len(), 13);
+        assert_eq!(names.len(), 14);
         for definition in definitions {
             let schema = serde_json::to_value(&definition).unwrap();
             let text = schema.to_string();

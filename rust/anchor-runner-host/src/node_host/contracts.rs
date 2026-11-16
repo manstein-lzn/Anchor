@@ -99,6 +99,7 @@ pub(crate) struct ToolAssembly<'a> {
     pub(crate) bindings: &'a [PluginBinding],
     pub(crate) request: &'a NodeExecutionRequest,
     pub(crate) workspace: &'a std::path::Path,
+    pub(crate) workspace_root: &'a std::path::Path,
     pub(crate) readonly_inputs: &'a [anchor_runtime::ReadOnlyInput],
     pub(crate) envelope: &'a super::envelope::InvocationEnvelope,
     pub(crate) runtime: Option<crate::runtime_configuration::RuntimeSnapshot>,

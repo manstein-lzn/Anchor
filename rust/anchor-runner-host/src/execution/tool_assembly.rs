@@ -56,6 +56,7 @@ impl NodeToolAssembly for Assembly {
                     cancellation: input.request.cancellation.clone(),
                 },
             },
+            input.workspace_root.into(),
             input.disclosure,
         );
         Ok(Arc::new(

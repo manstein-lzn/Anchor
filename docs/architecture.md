@@ -311,7 +311,7 @@ Kernel 的 `NodeExecutionPort::invocation_plugin_authority` 默认关闭，普�
 
 Agent 委派来源由可信 invocation 派生，模型不能提供 owner、Session、授权或请求身份。操作员也可通过计划归属接口，将尚未到期的普通计划显式交给已有私聊助手：核对原机器人、收件人、Session、源节点及目标确切版本，保留原计划 ID、规则和游标。来源明确区分 `agent_delegation` 的真实 invocation 与 `operator_assignment` 的计划、节点和授权请求说明，不伪造用户 Turn，也不补签已经运行的历史。两种来源共用原授权与当前授权交集及原 Session 作用域。
 
-`RunMetadata` format 2 的 `request`、`task`、`task_grants` 缺省为空；Run 状态仍仅归 Kernel。Agent 创建的 Graph 是正常 catalog 资产，Host 分配 ID；`state/graph-task-ownership/` 仅保存来源、作用域和创建请求，不复制 Graph 定义，也不在可分发 bundle 内夹带宿主私有记录。Agent 只能更新自己作用域创建的资产，不能修改共享资产、源助手或为子任务继续授予委派权。候选准备与测试复用已有 `CandidateTestContext`、依赖准备和沙箱，不安装、不挂载，也不提供宿主凭据；正式交付仍走现有操作员流程。
+`RunMetadata` format 2 的 `request`、`task`、`task_grants` 缺省为空；Run 状态仍仅归 Kernel。Agent 创建的 Graph 是正常 catalog 资产，Host 分配 ID；`state/graph-task-ownership/` 仅保存来源、作用域和创建请求，不复制 Graph 定义，也不在可分发 bundle 内夹带宿主私有记录。创建权限包含本作用域自建资产的读改、执行、计划与删除管理，不逐项申请确认；不能修改或删除共享资产、源助手，也不能为子任务继续授予委派权。作用域仍绑定来源节点与 Session，非会话任务绑定来源 Run。`graph_tasks_delete` 复用既有内容绑定的条件删除和 Run/结果/调用引用保护，在最终 catalog 临界区重查原授权与当前授权交集、创建归属及按 Graph 身份匹配的计划引用；保留计划须先取消，删除只清理目标资产及其已终结运行数据，不级联删除子 Graph 或取消他人计划。全局工作区根由 Host 显式注入，不从模型参数或节点目录推断。候选准备与测试复用已有 `CandidateTestContext`、依赖准备和沙箱，不安装、不挂载，也不提供宿主凭据；正式交付仍走现有操作员流程。
 
 Graph 列表的 `completed_task:true` 是现有事实的只读投影，不是新增归档状态：仅标记有有效任务归属、所有保留计划均为已停用 once、每个计划当前请求均对应真实成功 Run、全部同图 Run 已成功终结且结果及子任务已收束的 Graph；当前定义须与这些 Run 一致。手工 Graph、渠道绑定、明确选为任务目标或仍被定义/未完成 Run 调用的 Graph 不标记；事实不可读或引用扫描不完整时继续显示在主列表。Web 将标记项默认收进可展开的“已完成的一次性任务”，搜索仍覆盖它们；再次安排、执行或编辑后由新事实自动回到主列表。定义、计划、Run、产物和回执不因收纳删除，既有读取、授权、删除及回收保护不变，不以命名前缀推断一次性用途。
 
