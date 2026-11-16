@@ -545,6 +545,9 @@ impl Evidence {
                             | "ini"
                     )
                     && !matches!(name.to_str(), Some("Dockerfile" | "Makefile" | "LICENSE"))
+                    && !name
+                        .to_str()
+                        .is_some_and(|name| name.starts_with("LICENSE."))
                 {
                     continue;
                 }
