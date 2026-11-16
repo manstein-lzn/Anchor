@@ -17,6 +17,8 @@ target/
 /rust/target
 *.egg-info/
 # Build outputs and frontend dependencies.
+/debug/
+/.rustc_info.json
 node_modules/
 test-results/
 playwright-report/
