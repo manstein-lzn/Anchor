@@ -56,6 +56,8 @@ pub fn channel_request(
 ) -> ChannelInboundRequest {
     ChannelInboundRequest {
         inbound_id: inbound.into(),
+        bot_origin: None,
+        platform_message_id: None,
         identity: ChannelIdentity {
             source: source.into(),
             account: account.map(str::to_owned),

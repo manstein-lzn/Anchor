@@ -32,6 +32,11 @@ enum Request {
         token: String,
         request_ids: Vec<String>,
     },
+    Cli {
+        token: String,
+        request_id: String,
+        invocation: crate::cli::Invocation,
+    },
     Send {
         token: String,
         request_id: String,
@@ -106,13 +111,14 @@ async fn handle(
         let supplied = match &request {
             Request::Status { token }
             | Request::DeliveryStatus { token, .. }
+            | Request::Cli { token, .. }
             | Request::Send { token, .. }
             | Request::SendFile { token, .. } => token,
         };
         authorize(supplied, &config.control_token)?;
         if !matches!(
             &request,
-            Request::SendFile { .. } | Request::DeliveryStatus { .. }
+            Request::SendFile { .. } | Request::Cli { .. } | Request::DeliveryStatus { .. }
         ) && size > MAX_REQUEST_BYTES
         {
             return Err(GatewayError::Invalid(
@@ -129,6 +135,21 @@ async fn handle(
                     .blocking(move |ledger| ledger.delivery_status(&request_ids))
                     .await?;
                 return Ok(json!({"deliveries":deliveries}));
+            }
+            Request::Cli {
+                request_id,
+                invocation,
+                ..
+            } => {
+                return crate::cli::execute(
+                    &config,
+                    &api,
+                    &ledger,
+                    &request_id,
+                    invocation,
+                    &mut shutdown,
+                )
+                .await;
             }
             Request::Send {
                 request_id,

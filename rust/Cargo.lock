@@ -223,6 +223,7 @@ name = "anchor-feishu-gateway"
 version = "0.1.0"
 dependencies = [
  "anchor-channel-transport",
+ "anchor-file-lease",
  "axum",
  "base64 0.22.1",
  "futures",

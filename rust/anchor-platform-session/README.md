@@ -127,6 +127,43 @@ deletion; no Run state is copied into the Session store. These APIs are storage 
 supervisor, send loop, WeCom transport, webhook verification, Graph execution
 or Host wiring is implemented in this crate. Channel tables share the Session transaction boundary.
 
+### Feishu bot-origin inputs
+
+`ChannelInboundRequest` optionally carries `bot_origin: ChannelBotOrigin` with
+`root_inbound_id` and `sender_bot_id`, and `platform_message_id` with the original
+platform message ID for replies. Both default to `None` and are omitted when
+absent. They are saved in the existing immutable request JSON and returned with
+claimed assistant inputs; the schema version, tables and queues do not change.
+
+The Host authenticates bot events, checks peer/group authorization and structured
+mentions, and derives the root inbound key from platform reply ancestry, never
+message text. It must not downgrade a bot event to a human input when that lookup
+fails. Session admission validates a bot input is Feishu/group and its
+`sender_bot_id` equals `identity.sender_id`. In the same immediate transaction it
+requires an already admitted human root (`bot_origin: None`) in the same owner,
+source and group conversation, across Graphs/accounts/Sessions. It then permits
+at most one bot inbound per canonical target account, group, root and sender bot.
+Different peers may each send once for the same root, allowing a manager to receive
+reports from several projects. The current assistant binding does not replenish
+this directed-pair budget. The human input itself does not consume it. The Host
+must exclude self-directed bot events; with N authorized bots that bounds a root
+to N * (N - 1) accepted bot inputs, without a separate chain scheduler.
+
+Existing inbound replay checks run first. An exact retry returns the saved Turn;
+another message for an exhausted pair/root conflicts before any Turn is created or
+replaced. Restart, stopping or retiring an assistant and retaining an equivalent
+historical account Session do not reset the budget. A new admitted root has its
+own budget. Ordinary `replace_running` semantics remain unchanged: bot messages
+are not queued through TaskResult or another FIFO. Complete authorized Session
+deletion still removes its input facts and therefore its budget; this slice does
+not retain tombstones or change deletion semantics.
+
+The original platform ID is immutable for new inputs. During this installation's
+old pending-input drain only, a saved missing platform ID tolerates an enriched
+retry without writing that ID back into history. Other request fields, including
+bot origin, must still match. A stored platform ID cannot be changed or removed
+on replay. Remove the one-sided compatibility comparison after the drain.
+
 ## Persistent channel assistants
 
 `ChannelAssistant` has `session_id`, `run_id`, `wait_node`, `work_node` and
@@ -218,6 +255,26 @@ foreign keys and unique Run, wait-key and claimed-Turn constraints. Assistant
 bindings use Run as their primary key, with a partial unique Session index for
 unretired bindings; the private retirement flag is a binding fact, not Run state.
 Existing databases must match the exact current schema before use.
+
+### Task Result Consumption
+
+Task results share this Session event history rather than channel inbounds.
+`request_task_result_delivery(owner, session, run, key, requests)` records the
+Host's send intent before socket submission as `task.result.delivery_requested`.
+It stores only required request references, never Gateway delivery statuses;
+repeating references is read-only. A file send includes its introduction.
+`task_result_delivery_requests(owner, session, id)` reads the resulting set.
+
+`resolve_task_result(owner, session, run, key, resolution)` records an explicit
+`TaskResultResolution` in `task.result.resolved`. `Delivered { requests }` must
+cover all submitted references; the Host must verify their real Gateway ACKs
+before supplying them. `Silent { reason }` requires a nonblank reason and no
+submitted sends. A missing Gateway claim after a timeout is not proof of silence.
+Resolution and new send intents exclude each other in the same immediate
+transaction. Decisions are immutable and idempotent by result, survive restart
+and user interruption, and do not finish a Turn. `task_result_resolution` reads
+them. `finish_task_result` requires a decision before writing a new handled event;
+existing handled history stays readable without fabricated delivery evidence.
 
 ## Execution associations
 

@@ -139,17 +139,7 @@ impl SessionStore {
             return Ok(());
         }
         turns::ensure_no_running(&transaction, session)?;
-        let unfinished: bool = transaction.query_row(
-            "SELECT EXISTS(SELECT 1 FROM channel_deliveries
-                           WHERE session_id = ?1 AND status IN ('pending', 'sending', 'unknown'))",
-            [session],
-            |row| row.get(0),
-        )?;
-        if unfinished {
-            return Err(SessionError::Conflict(
-                "channel Session has unfinished deliveries".into(),
-            ));
-        }
+        ensure_deliveries_settled(&transaction, session)?;
         transaction.execute(
             "UPDATE channel_assistants SET retired = 1 WHERE session_id = ?1 AND run_id = ?2 AND retired = 0",
             params![session, run],
@@ -185,6 +175,69 @@ impl SessionStore {
         to_run: &str,
         to_wait_key: &str,
     ) -> Result<ChannelAssistant, SessionError> {
+        self.handover_assistant(owner, session, from_run, to_run, to_wait_key, None)
+    }
+
+    /// Inspect the current binding without consuming unclaimed user input.
+    /// The Host separately excludes input claims while observing/stopping its Run.
+    pub fn ensure_idle_channel_assistant(
+        &self,
+        owner: &str,
+        expected: &ChannelAssistant,
+    ) -> Result<(), SessionError> {
+        validate_assistant_lookup(owner, &expected.session_id, &expected.run_id)?;
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        require_assistant(
+            &transaction,
+            owner,
+            &expected.session_id,
+            &expected.run_id,
+            BindingScope::Current,
+        )?;
+        if read_assistant(&transaction, &expected.session_id)?.as_ref() != Some(expected) {
+            return Err(SessionError::Conflict("assistant binding changed".into()));
+        }
+        ensure_idle_turn_boundary(&transaction, &expected.session_id)?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Replace a quiescent instance without carrying an executing Turn. Only
+    /// unclaimed user inputs and queued task results remain in their Session.
+    pub fn handover_idle_channel_assistant(
+        &self,
+        owner: &str,
+        expected: &ChannelAssistant,
+        replacement: &ChannelAssistant,
+        to_wait_key: &str,
+    ) -> Result<ChannelAssistant, SessionError> {
+        if expected.session_id != replacement.session_id
+            || expected.work_node != replacement.work_node
+        {
+            return Err(SessionError::Conflict(
+                "idle assistant handover must preserve its Session and work node".into(),
+            ));
+        }
+        self.handover_assistant(
+            owner,
+            &expected.session_id,
+            &expected.run_id,
+            &replacement.run_id,
+            to_wait_key,
+            Some((expected, replacement)),
+        )
+    }
+
+    fn handover_assistant(
+        &self,
+        owner: &str,
+        session: &str,
+        from_run: &str,
+        to_run: &str,
+        to_wait_key: &str,
+        idle: Option<(&ChannelAssistant, &ChannelAssistant)>,
+    ) -> Result<ChannelAssistant, SessionError> {
         validate_assistant_lookup(owner, session, from_run)?;
         validate_assistant_lookup(owner, session, to_run)?;
         validate_channel_value(to_wait_key, "assistant wait key", MAX_WAIT_KEY_BYTES)?;
@@ -206,6 +259,15 @@ impl SessionStore {
             .ok_or_else(|| {
                 SessionError::Conflict("channel Session has no bound assistant".into())
             })?;
+        if let Some((expected, replacement)) = idle {
+            if &source != expected {
+                return Err(SessionError::Conflict("assistant binding changed".into()));
+            }
+            for node in [&replacement.wait_node, &replacement.reply_node] {
+                validate_channel_value(node, "assistant node", MAX_CHANNEL_VALUE_BYTES)?;
+            }
+            ensure_idle_turn_boundary(&transaction, session)?;
+        }
         if let Some((current, retired)) = read_assistant_for_run(&transaction, session, to_run)? {
             if !retired {
                 let committed: bool = transaction.query_row(
@@ -217,6 +279,9 @@ impl SessionStore {
                     |row| row.get(0),
                 )?;
                 if source_retired && committed {
+                    if idle.is_some_and(|(_, replacement)| replacement != &current) {
+                        return Err(SessionError::Conflict("assistant binding changed".into()));
+                    }
                     transaction.commit()?;
                     return Ok(current);
                 }
@@ -233,6 +298,7 @@ impl SessionStore {
                 "only the current assistant can hand over the instance".into(),
             ));
         }
+        let replacement = idle.map(|(_, replacement)| replacement).unwrap_or(&source);
         ensure_run_session(&transaction, session, to_run)?;
         let retired = transaction.execute(
             "UPDATE channel_assistants SET retired = 1
@@ -250,9 +316,9 @@ impl SessionStore {
             params![
                 session,
                 to_run,
-                source.wait_node,
-                source.work_node,
-                source.reply_node
+                replacement.wait_node,
+                replacement.work_node,
+                replacement.reply_node
             ],
         )?;
         // The in-flight round travels with the instance: its Turn keeps running,
@@ -308,9 +374,9 @@ impl SessionStore {
         Ok(ChannelAssistant {
             session_id: session.into(),
             run_id: to_run.into(),
-            wait_node: source.wait_node,
-            work_node: source.work_node,
-            reply_node: source.reply_node,
+            wait_node: replacement.wait_node.clone(),
+            work_node: replacement.work_node.clone(),
+            reply_node: replacement.reply_node.clone(),
         })
     }
 
@@ -664,6 +730,45 @@ fn validate_input_lookup(
     validate_channel_value(key, "assistant wait key", MAX_WAIT_KEY_BYTES)
 }
 
+fn ensure_deliveries_settled(connection: &Connection, session: &str) -> Result<(), SessionError> {
+    let unfinished: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM channel_deliveries
+                       WHERE session_id = ?1 AND status IN ('pending', 'sending', 'unknown'))",
+        [session],
+        |row| row.get(0),
+    )?;
+    if unfinished {
+        return Err(SessionError::Conflict(
+            "channel Session has unfinished deliveries".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_idle_turn_boundary(connection: &Connection, session: &str) -> Result<(), SessionError> {
+    // Admission creates a Running Turn before its assistant claims it. That
+    // unclaimed input is a queue entry, not permission to replay an old Turn.
+    let executing: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM turns turn
+           WHERE turn.session_id = ?1 AND turn.status = 'running'
+             AND (NOT EXISTS(SELECT 1 FROM channel_inbounds inbound
+                               WHERE inbound.session_id = ?1 AND inbound.turn_id = turn.id
+                                 AND inbound.run_id IS NULL)
+                  OR EXISTS(SELECT 1 FROM channel_assistant_inputs input WHERE input.turn_id = turn.id)
+                  OR EXISTS(SELECT 1 FROM turn_runs WHERE turn_id = turn.id)
+                  OR EXISTS(SELECT 1 FROM turn_goose WHERE turn_id = turn.id)
+                  OR EXISTS(SELECT 1 FROM turn_native WHERE turn_id = turn.id)))",
+        [session],
+        |row| row.get(0),
+    )?;
+    if executing {
+        return Err(SessionError::Conflict(
+            "assistant Turn is still executing".into(),
+        ));
+    }
+    ensure_deliveries_settled(connection, session)
+}
+
 fn read_assistant(
     connection: &Connection,
     session: &str,
@@ -827,6 +932,8 @@ mod tests {
     fn inbound(conversation: &str, id: &str, text: &str) -> ChannelInboundRequest {
         ChannelInboundRequest {
             inbound_id: id.into(),
+            bot_origin: None,
+            platform_message_id: None,
             identity: ChannelIdentity {
                 conversation_kind: Default::default(),
                 source: "wecom".into(),
@@ -841,6 +948,88 @@ mod tests {
             run_id: None,
             replace_running: true,
         }
+    }
+
+    #[test]
+    fn idle_handover_keeps_unclaimed_input_and_never_carries_an_executing_turn() {
+        let root = tempfile::tempdir().unwrap();
+        let store = SessionStore::open(root.path().join("sessions.sqlite")).unwrap();
+        let first = store
+            .admit_channel_inbound("owner", inbound("handover", "one", "first"))
+            .unwrap();
+        let source = store
+            .bind_channel_assistant(
+                "owner",
+                &first.session.id,
+                "old",
+                "wait",
+                "assistant",
+                "reply",
+            )
+            .unwrap();
+        let replacement = ChannelAssistant {
+            run_id: "new".into(),
+            wait_node: "new-wait".into(),
+            reply_node: "new-reply".into(),
+            ..source.clone()
+        };
+        store
+            .ensure_idle_channel_assistant("owner", &source)
+            .unwrap();
+        store
+            .claim_assistant_input("owner", &first.session.id, "old", "old-wait")
+            .unwrap()
+            .unwrap();
+        assert!(
+            store
+                .handover_idle_channel_assistant("owner", &source, &replacement, "new-wait")
+                .is_err()
+        );
+        assert_eq!(
+            store
+                .get_channel_assistant("owner", &first.session.id)
+                .unwrap(),
+            Some(source.clone())
+        );
+        store
+            .finish_turn(
+                "owner",
+                &first.session.id,
+                &first.turn.id,
+                TurnStatus::Completed,
+                None,
+            )
+            .unwrap();
+        let queued = store
+            .admit_channel_inbound("owner", inbound("handover", "two", "next"))
+            .unwrap();
+        store
+            .handover_idle_channel_assistant("owner", &source, &replacement, "new-wait")
+            .unwrap();
+        assert_eq!(
+            store
+                .get_channel_assistant("owner", &first.session.id)
+                .unwrap(),
+            Some(replacement.clone())
+        );
+        store
+            .handover_idle_channel_assistant("owner", &source, &replacement, "new-wait")
+            .unwrap();
+        let claimed = store
+            .claim_assistant_input("owner", &first.session.id, "new", "new-wait")
+            .unwrap()
+            .unwrap();
+        assert_eq!(claimed.turn().id, queued.turn.id);
+        assert_eq!(
+            store
+                .channel_assistant_predecessor("owner", &first.session.id, "new")
+                .unwrap(),
+            Some(source)
+        );
+        assert_eq!(
+            store.list_turns("owner", &first.session.id).unwrap().len(),
+            2
+        );
     }
 
     #[test]

@@ -157,6 +157,24 @@ impl Api {
         Ok(token.into())
     }
 
+    pub async fn bot_open_id(&self) -> Result<String, GatewayError> {
+        let token = self.token().await?;
+        let value = self
+            .json_response(
+                self.client
+                    .get(self.url(&["open-apis", "bot", "v3", "info"], &[])?)
+                    .bearer_auth(token),
+            )
+            .await
+            .map_err(GatewayError::from)?;
+        value
+            .pointer("/bot/open_id")
+            .and_then(Value::as_str)
+            .filter(|id| id.starts_with("ou_") && valid_id(id))
+            .map(str::to_owned)
+            .ok_or(GatewayError::Invalid("Feishu bot identity is unavailable"))
+    }
+
     pub async fn reply(
         &self,
         message_id: &str,

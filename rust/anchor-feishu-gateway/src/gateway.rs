@@ -6,7 +6,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use anchor_channel_transport::{PrivateState, WebhookClient, allowed, digest, settlement_loop};
+use anchor_channel_transport::{PrivateState, WebhookClient, digest, settlement_loop};
 use futures::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use tokio::{
@@ -22,7 +22,7 @@ use tokio_tungstenite::{
 use crate::{
     DeliveryFact, GatewayConfig, GatewayError,
     api::{Api, ClientConfig},
-    protocol::{Frame, MAX_FRAME_BYTES, Reassembler, normalize_message},
+    protocol::{Frame, MAX_FRAME_BYTES, Reassembler, normalize_message_for_bot},
 };
 use anchor_channel_transport::ledger::Ledger;
 
@@ -69,6 +69,7 @@ impl Gateway {
             ack_pending: AtomicBool::new(false),
         });
         let mut driver = Driver {
+            bot_open_id: None,
             config: config.clone(),
             api: api.clone(),
             ledger: ledger.clone(),
@@ -237,6 +238,7 @@ impl Policy {
 }
 
 struct Driver {
+    bot_open_id: Option<String>,
     config: Arc<GatewayConfig>,
     api: Arc<Api>,
     ledger: Arc<Ledger>,
@@ -380,12 +382,38 @@ impl Driver {
     ) -> Result<bool, GatewayError> {
         let value: Value = serde_json::from_slice(bytes)
             .map_err(|_| GatewayError::Invalid("invalid Feishu event JSON"))?;
-        let Some(event) = normalize_message(&value, &self.config.app_id)? else {
+        if self.bot_open_id.is_none()
+            && value.pointer("/header/app_id").and_then(Value::as_str)
+                == Some(self.config.app_id.as_str())
+            && matches!(
+                value
+                    .pointer("/event/sender/sender_type")
+                    .and_then(Value::as_str),
+                Some("user" | "bot")
+            )
+            && value
+                .pointer("/event/message/chat_type")
+                .and_then(Value::as_str)
+                == Some("group")
+            && value
+                .pointer("/event/message/chat_id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| self.config.groups.contains(id))
+        {
+            // A failed read receives a retryable ACK, without stopping private
+            // admission or recording an input whose mention is unverified.
+            self.bot_open_id = Some(
+                tokio::time::timeout_at(deadline, self.api.bot_open_id())
+                    .await
+                    .map_err(|_| GatewayError::Invalid("Feishu bot identity lookup timed out"))??,
+            );
+        }
+        let Some(event) =
+            normalize_message_for_bot(&value, &self.config.app_id, self.bot_open_id.as_deref())?
+        else {
             return Ok(false);
         };
-        if !allowed(&self.config.inbound_users, &event.sender_id)
-            || !allowed(&self.config.send_users, &event.sender_id)
-        {
+        if !self.config.allows_event(&event) {
             return Ok(false);
         }
         while self.admissions.try_join_next().is_some() {}

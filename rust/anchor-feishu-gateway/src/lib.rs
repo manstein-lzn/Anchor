@@ -1,10 +1,12 @@
 #![forbid(unsafe_code)]
 
 mod api;
+mod cli;
 mod config;
 mod control;
 mod gateway;
 mod media;
+mod post;
 mod progress;
 pub mod protocol;
 mod rich;

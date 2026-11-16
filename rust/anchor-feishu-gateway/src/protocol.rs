@@ -190,6 +190,14 @@ pub fn normalize_message(
     value: &Value,
     app_id: &str,
 ) -> Result<Option<ChannelEvent>, GatewayError> {
+    normalize_message_for_bot(value, app_id, None)
+}
+
+pub(crate) fn normalize_message_for_bot(
+    value: &Value,
+    app_id: &str,
+    bot_open_id: Option<&str>,
+) -> Result<Option<ChannelEvent>, GatewayError> {
     if value.get("schema").and_then(Value::as_str) != Some("2.0") {
         return Err(GatewayError::Invalid("unsupported Feishu event schema"));
     }
@@ -202,23 +210,61 @@ pub fn normalize_message(
     {
         return Ok(None);
     }
-    if value
+    let sender_type = value
         .pointer("/event/sender/sender_type")
-        .and_then(Value::as_str)
-        != Some("user")
-        || value
-            .pointer("/event/message/chat_type")
-            .and_then(Value::as_str)
-            != Some("p2p")
-    {
+        .and_then(Value::as_str);
+    if !matches!(sender_type, Some("user" | "bot")) {
         return Ok(None);
     }
-    let Some(message_type @ ("text" | "file" | "image")) = value
+    let chat_type = match value
+        .pointer("/event/message/chat_type")
+        .and_then(Value::as_str)
+    {
+        Some("p2p") => "single",
+        Some("group") => "group",
+        _ => return Ok(None),
+    };
+    if sender_type == Some("bot") && chat_type != "group" {
+        return Ok(None);
+    }
+    let self_mention = if chat_type == "group" {
+        let Some(bot) = bot_open_id else {
+            return Ok(None);
+        };
+        let Some(mention) = value
+            .pointer("/event/message/mentions")
+            .and_then(Value::as_array)
+            .and_then(|mentions| {
+                mentions.iter().find(|mention| {
+                    mention.pointer("/id/open_id").and_then(Value::as_str) == Some(bot)
+                        && mention.get("mentioned_type").and_then(Value::as_str) != Some("user")
+                })
+            })
+        else {
+            return Ok(None);
+        };
+        let Some(key) = mention
+            .get("key")
+            .and_then(Value::as_str)
+            .filter(|key| key.starts_with("@_user_") && key.len() <= 200)
+        else {
+            return Ok(None);
+        };
+        Some(key)
+    } else {
+        None
+    };
+    let Some(message_type @ ("text" | "post" | "file" | "image")) = value
         .pointer("/event/message/message_type")
         .and_then(Value::as_str)
     else {
         return Ok(None);
     };
+    if chat_type == "group" && !matches!(message_type, "text" | "post")
+        || sender_type == Some("bot") && message_type != "text"
+    {
+        return Ok(None);
+    }
     let id = |pointer| -> Result<String, GatewayError> {
         value
             .pointer(pointer)
@@ -229,6 +275,9 @@ pub fn normalize_message(
     };
     let event_id = id("/event/message/message_id")?;
     let sender_id = id("/event/sender/sender_id/open_id")?;
+    if Some(sender_id.as_str()) == bot_open_id {
+        return Ok(None);
+    }
     let conversation_id = id("/event/message/chat_id")?;
     let content = value
         .pointer("/event/message/content")
@@ -247,13 +296,53 @@ pub fn normalize_message(
             .ok_or(GatewayError::Invalid(
                 "invalid or oversized Feishu text message",
             ))?;
-        (text.to_owned(), Vec::new())
+        let text = if let Some(key) = self_mention {
+            let Some(clean) = strip_self_mention(text, key) else {
+                return Ok(None);
+            };
+            clean
+        } else {
+            text.to_owned()
+        };
+        if text.is_empty() {
+            return Ok(None);
+        }
+        (text, Vec::new())
+    } else if message_type == "post" {
+        let Some(post) = crate::post::normalize(&content, self_mention, bot_open_id)? else {
+            return Ok(None);
+        };
+        post
     } else {
         (
             String::new(),
             vec![InboundResource::from_content(message_type, &content)?],
         )
     };
+    let mut metadata = BTreeMap::from([
+        ("chat_type".into(), json!(chat_type)),
+        ("request_id".into(), json!(event_id)),
+    ]);
+    if sender_type == Some("bot") {
+        let root = value
+            .pointer("/event/message/root_id")
+            .and_then(Value::as_str)
+            .filter(|id| valid_id(id) && id.starts_with("om_"))
+            .or_else(|| {
+                value
+                    .pointer("/event/message/parent_id")
+                    .and_then(Value::as_str)
+                    .filter(|id| valid_id(id) && id.starts_with("om_"))
+            });
+        let Some(root) = root else {
+            return Ok(None);
+        };
+        metadata.insert("sender_type".into(), json!("bot"));
+        metadata.insert(
+            "root_inbound_id".into(),
+            json!(anchor_channel_transport::channel_inbound_id("feishu", root)),
+        );
+    }
     Ok(Some(ChannelEvent {
         source: "feishu".into(),
         event_id: event_id.clone(),
@@ -262,12 +351,28 @@ pub fn normalize_message(
         conversation_id,
         text,
         message_type: message_type.into(),
-        metadata: BTreeMap::from([
-            ("chat_type".into(), json!("single")),
-            ("request_id".into(), json!(event_id)),
-        ]),
+        metadata,
         attachments,
     }))
+}
+
+pub(crate) fn strip_self_mention(text: &str, key: &str) -> Option<String> {
+    let mut clean = String::new();
+    let mut cursor = 0;
+    for (start, _) in text.match_indices(key) {
+        let end = start + key.len();
+        // @_user_1 is not the same token as @_user_10.
+        if text[end..].starts_with(|c: char| c.is_ascii_digit()) {
+            continue;
+        }
+        clean.push_str(&text[cursor..start]);
+        cursor = end;
+    }
+    if cursor == 0 {
+        return None;
+    }
+    clean.push_str(&text[cursor..]);
+    Some(clean.trim().to_owned())
 }
 
 pub(crate) fn valid_id(value: &str) -> bool {

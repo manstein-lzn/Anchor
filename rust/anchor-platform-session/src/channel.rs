@@ -17,6 +17,7 @@ use crate::{
 
 mod accounts;
 mod assistant;
+mod bot_origin;
 mod notifications;
 
 pub(crate) use assistant::ensure_assistant_run_scope;
@@ -105,7 +106,13 @@ impl SessionStore {
         if let Some(existing) = read_inbound(&transaction, &session.id, &request.inbound_id)? {
             let mut saved: ChannelInboundRequest = serde_json::from_str(&existing.request)?;
             normalize_account(&transaction, owner, &mut saved)?;
-            if immutable_request(&saved) != immutable_request(&request) {
+            let mut replay = immutable_request(&request);
+            // Remove after this installation's old pending inputs without platform IDs drain.
+            // Accept their enriched replay without backfilling historical facts.
+            if saved.platform_message_id.is_none() {
+                replay.platform_message_id = None;
+            }
+            if immutable_request(&saved) != replay {
                 return Err(SessionError::Conflict(
                     "inbound_id was already used for different channel input".into(),
                 ));
@@ -155,6 +162,8 @@ impl SessionStore {
                 "channel input was already accepted in an equivalent historical Session; inspect its saved outcome".into(),
             ));
         }
+
+        bot_origin::verify_admission(&transaction, owner, &request)?;
 
         let previous = running_channel_turn(&transaction, &session.id)?;
         if previous.is_some() && !request.replace_running {
@@ -815,6 +824,21 @@ impl SessionStore {
 
 fn validate_channel_request(request: &ChannelInboundRequest) -> Result<(), SessionError> {
     validate_channel_value(&request.inbound_id, "inbound id", MAX_INBOUND_ID_BYTES)?;
+    if let Some(message) = &request.platform_message_id {
+        validate_channel_value(message, "platform message id", MAX_INBOUND_ID_BYTES)?;
+    }
+    if let Some(origin) = &request.bot_origin {
+        validate_channel_value(
+            &origin.root_inbound_id,
+            "bot root inbound id",
+            MAX_INBOUND_ID_BYTES,
+        )?;
+        validate_channel_value(
+            &origin.sender_bot_id,
+            "sender bot id",
+            MAX_CHANNEL_VALUE_BYTES,
+        )?;
+    }
     let _ = identity_parts(&request.identity)?;
     validate_channel_value(&request.graph, "channel graph", MAX_CHANNEL_VALUE_BYTES)?;
     validate_channel_value(

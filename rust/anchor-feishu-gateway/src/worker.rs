@@ -6,7 +6,7 @@ use std::{
 };
 
 use anchor_channel_transport::{
-    WebhookClient, allowed, digest,
+    WebhookClient, digest,
     ledger::{Ledger, ReadyReply, SettlementStatus, current_time_millis},
     parse_receipt,
 };
@@ -96,10 +96,16 @@ pub(crate) async fn run(
                 continue;
             }
             active.insert(id.clone());
-            if let Work::Event(event) = &work {
+            if let Work::Event(event) = &work
+                && config.allows_event(event)
+                && event.metadata.get("sender_type").and_then(Value::as_str) != Some("bot")
+            {
                 activities.start(event, webhook.api_key());
             }
-            let card = activities.reply_card(&id);
+            let card = match &work {
+                Work::Event(event) if event.metadata.get("sender_type").and_then(Value::as_str) == Some("bot") => None,
+                _ => activities.reply_card(&id),
+            };
             let config = config.clone();
             let ledger = ledger.clone();
             let api = api.clone();
@@ -149,9 +155,7 @@ async fn process_event(
     card: Option<Arc<ReplyCard>>,
     shutdown: &mut watch::Receiver<bool>,
 ) -> Result<End, GatewayError> {
-    if !allowed(&config.inbound_users, &event.sender_id)
-        || !allowed(&config.send_users, &event.sender_id)
-    {
+    if !config.allows_event(&event) {
         return Err(GatewayError::Rejected);
     }
     let enriched = while_running(shutdown, crate::media::enrich(api, &event)).await?;
@@ -173,7 +177,7 @@ async fn process_event(
     {
         return Err(GatewayError::Webhook);
     }
-    // An inbound callback may only provide a private text reply.
+    // An inbound callback may only provide a text reply to the original message.
     if object.keys().any(|key| {
         matches!(
             key.as_str(),
@@ -244,9 +248,11 @@ async fn send_reply(
     progress: Option<Arc<ReplyCard>>,
     shutdown: &mut watch::Receiver<bool>,
 ) -> Result<End, GatewayError> {
-    if !allowed(&config.inbound_users, &reply.sender_id)
-        || !allowed(&config.send_users, &reply.sender_id)
-    {
+    let event_id = reply.event_id.clone();
+    let event = ledger
+        .blocking(move |ledger| ledger.event(&event_id))
+        .await?;
+    if !config.allows_event(&event) {
         return Err(GatewayError::Rejected);
     }
     let card = crate::rich::markdown_card(&reply.text)?;

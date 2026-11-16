@@ -12,6 +12,13 @@ pub struct GatewayConfig {
     pub api_base_url: String,
     pub inbound_users: BTreeSet<String>,
     pub send_users: BTreeSet<String>,
+    /// Explicit group chat IDs. Empty preserves private-chat-only admission.
+    pub groups: BTreeSet<String>,
+    pub peer_bots: BTreeSet<String>,
+    /// Operator opt-in to the application's full bot API authority.
+    pub cli_enabled: bool,
+    pub cli_binary: Option<PathBuf>,
+    pub cli_network_helper: Option<PathBuf>,
     pub webhook: Option<WebhookConfig>,
     pub progress_url: Option<String>,
     pub timing: Timing,
@@ -64,6 +71,11 @@ impl GatewayConfig {
             api_base_url: "https://open.feishu.cn".into(),
             inbound_users: BTreeSet::new(),
             send_users: BTreeSet::new(),
+            groups: BTreeSet::new(),
+            peer_bots: BTreeSet::new(),
+            cli_enabled: false,
+            cli_binary: None,
+            cli_network_helper: None,
             webhook: None,
             progress_url: None,
             timing: Timing::default(),
@@ -88,6 +100,25 @@ impl GatewayConfig {
         );
         config.inbound_users = users("ANCHOR_FEISHU_USERS")?;
         config.send_users = users("ANCHOR_FEISHU_SEND_USERS")?;
+        config.groups = users("ANCHOR_FEISHU_GROUPS")?;
+        config.peer_bots = users("ANCHOR_FEISHU_PEER_BOTS")?;
+        config.cli_enabled = match std::env::var("ANCHOR_FEISHU_CLI_ENABLED").as_deref() {
+            Ok("true") => true,
+            Ok("false") | Err(_) => false,
+            _ => return Err(GatewayError::Invalid("invalid CLI authorization")),
+        };
+        config.cli_binary = std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(|parent| parent.join("lark-cli")));
+        config.cli_network_helper = std::env::var_os("ANCHOR_FEISHU_CLI_NETWORK_HELPER")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::current_exe().ok().and_then(|exe| {
+                    exe.parent()
+                        .map(|parent| parent.join("anchor-sandbox-network"))
+                })
+            });
         if let Ok(value) = std::env::var("ANCHOR_FEISHU_API_BASE_URL") {
             config.api_base_url = value;
         }
@@ -192,6 +223,25 @@ impl GatewayConfig {
                 return Err(GatewayError::Invalid("invalid Feishu open_id allowlist"));
             }
         }
+        if self.groups.len() > 1000
+            || self
+                .groups
+                .iter()
+                .any(|id| !id.starts_with("oc_") || id.len() <= 3 || !crate::protocol::valid_id(id))
+        {
+            return Err(GatewayError::Invalid("invalid Feishu group chat allowlist"));
+        }
+        if self.peer_bots.len() > 1000
+            || self
+                .peer_bots
+                .iter()
+                .any(|id| !id.starts_with("ou_") || id.len() <= 3 || !crate::protocol::valid_id(id))
+            || (!self.peer_bots.is_empty() && self.groups.is_empty())
+        {
+            return Err(GatewayError::Invalid(
+                "invalid Feishu peer bot authorization",
+            ));
+        }
         for duration in [
             self.timing.connect_timeout,
             self.timing.http_timeout,
@@ -212,6 +262,34 @@ impl GatewayConfig {
             ));
         }
         Ok(())
+    }
+
+    pub(crate) fn allows_event(&self, event: &crate::ChannelEvent) -> bool {
+        if event
+            .metadata
+            .get("sender_type")
+            .and_then(serde_json::Value::as_str)
+            == Some("bot")
+        {
+            return self.peer_bots.contains(&event.sender_id)
+                && event
+                    .metadata
+                    .get("chat_type")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("group")
+                && self.groups.contains(&event.conversation_id);
+        }
+        anchor_channel_transport::allowed(&self.inbound_users, &event.sender_id)
+            && anchor_channel_transport::allowed(&self.send_users, &event.sender_id)
+            && match event
+                .metadata
+                .get("chat_type")
+                .and_then(serde_json::Value::as_str)
+            {
+                Some("single") => true,
+                Some("group") => self.groups.contains(&event.conversation_id),
+                _ => false,
+            }
     }
 }
 

@@ -3,9 +3,14 @@
 Rust transport for enterprise self-built Feishu application bots. The Host
 supervises one process per enabled Graph; the process does not run an Agent.
 The gateway accepts `im.message.receive_v1` schema `2.0` events from users in
-private `p2p` chats, with text, file or image content and the configured
-application ID. It does not accept group messages, address-book access or
-model-selected recipients. The Host can explicitly notify a task result's
+private `p2p` chats, with text, rich-text `post`, file or image content and the configured
+application ID. Explicitly authorized human group text and `post` mentions are also
+supported, including image-only posts with a genuine bot mention. Posts retain
+their title, paragraphs, links and image/file attachments; video and folder
+attachments are marked as not loaded. Resource bytes are fetched after durable
+admission and are not persisted in the Gateway ledger. Standalone group files
+and images remain unsupported. Peer bot text replies require the separate exact
+grant and human-root checks described below; arbitrary group access is not granted. The Host can explicitly notify a task result's
 original private conversation and send an authorized file there.
 
 ## Transport Contract
@@ -25,9 +30,18 @@ Shutdown retains the directory lease until those writers have actually exited.
 Message deduplication uses the incoming Feishu `message_id`, not the envelope
 `event_id`. The Host receives `source:feishu`, `event_id:message_id`,
 `sender_id:open_id`, `conversation_id:chat_id`, `reply_target:chat_id`,
-`message_type:text|file|image`, metadata `chat_type:single` and
-`request_id:message_id`. Both the receive list and the reply list must admit the
+`message_type:text|post|file|image`, metadata `chat_type:single|group` and
+`request_id:message_id`. Authorized group text uses `chat_type:group`. Both the receive list and the reply list must admit the
 sender; empty lists grant no authority.
+
+Group admission is opt-in through `ANCHOR_FEISHU_GROUPS`, an explicit list of
+`oc_` chat IDs with no wildcard. A human must structurally mention this bot's
+own `open_id`, read from `/open-apis/bot/v3/info`. Lookup is bounded by the
+admission deadline and cached per gateway instance; a failed read affects only
+that group event, not private chats. Bot messages and group media are not
+admitted. Pending inputs and prepared replies recheck the current group grant
+after restart using the existing immutable ledger event. Progress and final
+replies use the original message-reply API, never a sender's private chat.
 
 Media admission writes only the platform resource key, kind and safe filename
 into the original event's attachment descriptor. It acknowledges before the

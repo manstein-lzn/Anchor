@@ -95,6 +95,8 @@ mod tests {
                 "owner",
                 ChannelInboundRequest {
                     inbound_id: "first".into(),
+                    bot_origin: None,
+                    platform_message_id: None,
                     identity: identity.clone(),
                     graph: "assistant".into(),
                     reply_node: "reply".into(),

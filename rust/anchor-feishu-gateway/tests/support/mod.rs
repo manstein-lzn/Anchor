@@ -93,6 +93,7 @@ pub struct FixtureState {
     pub reply_release: Notify,
     pub send_mode: AtomicUsize,
     pub token_failure: AtomicBool,
+    pub bot_info_failure: AtomicBool,
     pub token_blocked: AtomicBool,
     pub token_entered: Notify,
     pub token_release: Notify,
@@ -154,6 +155,7 @@ impl Fixture {
             reply_release: Notify::new(),
             send_mode: AtomicUsize::new(0),
             token_failure: AtomicBool::new(false),
+            bot_info_failure: AtomicBool::new(false),
             token_blocked: AtomicBool::new(false),
             token_entered: Notify::new(),
             token_release: Notify::new(),
@@ -169,6 +171,16 @@ impl Fixture {
             base: base.clone(),
         });
         let app = Router::new()
+            .route(
+                "/open-apis/bot/v3/info",
+                get(|State(state): State<Arc<FixtureState>>| async move {
+                    if state.bot_info_failure.load(Ordering::SeqCst) {
+                        Json(json!({"code":999}))
+                    } else {
+                        Json(json!({"code":0,"bot":{"open_id":"ou_fixture_bot"}}))
+                    }
+                }),
+            )
             .route("/callback/ws/endpoint", post(endpoint))
             .route("/ws", get(websocket))
             .route(

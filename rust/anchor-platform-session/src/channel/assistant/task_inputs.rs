@@ -10,6 +10,7 @@ const CLAIMED: &str = "task.result.claimed";
 const HANDLED: &str = "task.result.handled";
 const RESOLVED: &str = "task.result.resolved";
 const DELIVERY_REQUESTED: &str = "task.result.delivery_requested";
+const CANCELLED: &str = "task.result.cancelled";
 
 #[derive(Deserialize, Serialize)]
 struct Claim {
@@ -254,6 +255,23 @@ impl SessionStore {
         Self::pending_results(&connection, session)
     }
 
+    /// Pending results and running claims still require their mounted artifacts.
+    /// Cancellation stops future claims, but does not release a running Turn's bytes.
+    pub fn protected_task_results(
+        &self,
+        owner: &str,
+        session: &str,
+    ) -> Result<Vec<TaskResult>, SessionError> {
+        store::validate_lookup(owner, session)?;
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        store::read_session(&transaction, owner, session)?;
+        ensure_channel_session(&transaction, owner, session)?;
+        let results = unsettled_results(&transaction, session, true)?;
+        transaction.commit()?;
+        Ok(results)
+    }
+
     /// Delivery identity remains queryable after handling; callers do not need
     /// another enqueue marker beside the Session's authoritative result fact.
     pub fn task_result(
@@ -268,6 +286,52 @@ impl SessionStore {
         store::read_session(&connection, owner, session)?;
         ensure_channel_session(&connection, owner, session)?;
         read_result(&connection, session, id)
+    }
+
+    /// Stop future claims without rewriting the result or claiming it was handled.
+    /// A running claim may finish normally; the Host owns permission to send.
+    pub fn cancel_task_result(
+        &self,
+        owner: &str,
+        session: &str,
+        id: &str,
+        reason: &str,
+    ) -> Result<(), SessionError> {
+        store::validate_lookup(owner, session)?;
+        store::validate_identity(id, "task result id")?;
+        validate_channel_value(reason, "task cancellation reason", MAX_CHANNEL_VALUE_BYTES)?;
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut snapshot = store::read_session(&transaction, owner, session)?;
+        ensure_channel_session(&transaction, owner, session)?;
+        read_result(&transaction, session, id)?.ok_or(SessionError::Missing)?;
+        if !has_result_event(&transaction, session, id, CANCELLED)? {
+            touch_channel_session(
+                &transaction,
+                owner,
+                &mut snapshot,
+                CANCELLED,
+                BTreeMap::from([("id".into(), json!(id)), ("reason".into(), json!(reason))]),
+                Utc::now(),
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Cancellation remains visible after handling and across enqueue retries.
+    pub fn task_result_cancelled(
+        &self,
+        owner: &str,
+        session: &str,
+        id: &str,
+    ) -> Result<bool, SessionError> {
+        store::validate_lookup(owner, session)?;
+        store::validate_identity(id, "task result id")?;
+        let connection = self.lock()?;
+        store::read_session(&connection, owner, session)?;
+        ensure_channel_session(&connection, owner, session)?;
+        has_result_event(&connection, session, id, CANCELLED)
     }
 
     pub fn get_assistant_input(
@@ -446,23 +510,126 @@ impl SessionStore {
         connection: &Connection,
         session: &str,
     ) -> Result<Vec<TaskResult>, SessionError> {
-        let mut statement = connection.prepare(
-            "SELECT queued.data FROM session_events queued
-         WHERE queued.session_id = ?1 AND queued.kind = ?2
-           AND NOT EXISTS(SELECT 1 FROM session_events handled
-             WHERE handled.session_id = queued.session_id AND handled.kind = ?3
-               AND json_extract(handled.data, '$.id') = json_extract(queued.data, '$.id'))
-         ORDER BY queued.seq",
-        )?;
-        let raw = statement
-            .query_map(params![session, QUEUED, HANDLED], |row| {
-                row.get::<_, String>(0)
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        raw.into_iter()
-            .map(|raw| serde_json::from_str(&raw).map_err(Into::into))
-            .collect()
+        unsettled_results(connection, session, false)
     }
+}
+
+fn validate_delivery_references(requests: &[String]) -> Result<(), SessionError> {
+    if requests.is_empty() {
+        return Err(SessionError::Invalid(
+            "delivery references are required".into(),
+        ));
+    }
+    let mut unique = std::collections::BTreeSet::new();
+    for id in requests {
+        store::validate_identity(id, "delivery request id")?;
+        if !unique.insert(id) {
+            return Err(SessionError::Invalid("duplicate delivery reference".into()));
+        }
+    }
+    Ok(())
+}
+
+fn active_task_claim(
+    connection: &Connection,
+    session: &str,
+    run: &str,
+    key: &str,
+) -> Result<Claim, SessionError> {
+    let claim = read_claim(connection, session, run, key)?.ok_or(SessionError::Missing)?;
+    if turns::find_turn(connection, session, &claim.turn)?.status != TurnStatus::Running
+        || recoverable_task_run(connection, session, &claim.turn)?.as_deref() != Some(run)
+    {
+        return Err(SessionError::Conflict(
+            "only an active task result can be resolved".into(),
+        ));
+    }
+    Ok(claim)
+}
+
+fn read_requested_deliveries(
+    connection: &Connection,
+    session: &str,
+    id: &str,
+) -> Result<Vec<String>, SessionError> {
+    let mut statement = connection.prepare(
+        "SELECT DISTINCT request.value FROM session_events event, json_each(event.data, '$.requests') request
+         WHERE event.session_id = ?1 AND event.kind = ?2 AND json_extract(event.data, '$.id') = ?3 ORDER BY request.value"
+    )?;
+    Ok(statement
+        .query_map(params![session, DELIVERY_REQUESTED, id], |row| row.get(0))?
+        .collect::<Result<Vec<_>, _>>()?)
+}
+
+fn read_resolution(
+    connection: &Connection,
+    session: &str,
+    id: &str,
+) -> Result<Option<TaskResultResolution>, SessionError> {
+    let raw: Option<String> = connection
+        .query_row(
+            "SELECT data FROM session_events WHERE session_id = ?1 AND kind = ?2
+         AND json_extract(data, '$.id') = ?3 ORDER BY seq LIMIT 1",
+            params![session, RESOLVED, id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    raw.map(|raw| {
+        serde_json::from_str::<Resolution>(&raw)
+            .map(|record| record.resolution)
+            .map_err(Into::into)
+    })
+    .transpose()
+}
+
+fn unsettled_results(
+    connection: &Connection,
+    session: &str,
+    include_running_claims: bool,
+) -> Result<Vec<TaskResult>, SessionError> {
+    let mut statement = connection.prepare(
+        "SELECT queued.data FROM session_events queued
+         WHERE queued.session_id = ?1 AND queued.kind = ?2
+           AND (NOT EXISTS(SELECT 1 FROM session_events settled
+             WHERE settled.session_id = queued.session_id AND settled.kind IN (?3, ?4)
+               AND json_extract(settled.data, '$.id') = json_extract(queued.data, '$.id'))
+           OR (?5 AND EXISTS(SELECT 1 FROM session_events claim JOIN turns turn
+             ON turn.session_id = claim.session_id AND turn.id = json_extract(claim.data, '$.turn')
+             WHERE claim.session_id = queued.session_id AND claim.kind = ?6
+               AND json_extract(claim.data, '$.id') = json_extract(queued.data, '$.id')
+               AND turn.status = 'running')))
+         ORDER BY queued.seq",
+    )?;
+    let raw = statement
+        .query_map(
+            params![
+                session,
+                QUEUED,
+                HANDLED,
+                CANCELLED,
+                include_running_claims,
+                CLAIMED
+            ],
+            |row| row.get::<_, String>(0),
+        )?
+        .collect::<Result<Vec<_>, _>>()?;
+    raw.into_iter()
+        .map(|raw| serde_json::from_str(&raw).map_err(Into::into))
+        .collect()
+}
+
+fn has_result_event(
+    connection: &Connection,
+    session: &str,
+    id: &str,
+    kind: &str,
+) -> Result<bool, SessionError> {
+    Ok(connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM session_events WHERE session_id = ?1 AND kind = ?2
+         AND json_extract(data, '$.id') = ?3)",
+        params![session, kind, id],
+        |row| row.get(0),
+    )?)
 }
 
 fn validate_delivery_references(requests: &[String]) -> Result<(), SessionError> {

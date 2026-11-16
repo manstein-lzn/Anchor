@@ -111,9 +111,21 @@ pub struct ChannelInboundRun {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ChannelBotOrigin {
+    pub root_inbound_id: String,
+    pub sender_bot_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ChannelInboundRequest {
     pub inbound_id: String,
     pub identity: ChannelIdentity,
+    /// Host-verified bot event ancestry; absence denotes a human channel input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bot_origin: Option<ChannelBotOrigin>,
+    /// Original platform identity for replies, distinct from the inbound dedup key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform_message_id: Option<String>,
     pub graph: String,
     pub reply_node: String,
     #[serde(default)]

@@ -676,6 +676,21 @@ impl Ledger {
         self.is_latest_event(&event.event_id)
     }
 
+    /// Read the existing immutable input for current-policy checks on replay.
+    pub fn event(&self, event_id: &str) -> Result<ChannelEvent, GatewayError> {
+        let (saved_digest, event_json): (String, String) = self.lock()?.query_row(
+            "SELECT digest,event_json FROM inbound WHERE event_id=?1",
+            [event_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let event: ChannelEvent =
+            serde_json::from_str(&event_json).map_err(|_| GatewayError::Ledger)?;
+        if event.event_id != event_id || event_digest(&event) != saved_digest {
+            return Err(GatewayError::Ledger);
+        }
+        Ok(event)
+    }
+
     pub fn is_latest_event(&self, event_id: &str) -> Result<bool, GatewayError> {
         // The immutable event already carries its chat type. Reuse that fact
         // instead of migrating delivery identities or replacing the real actor
