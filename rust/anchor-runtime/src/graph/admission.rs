@@ -31,10 +31,20 @@ impl GraphSnapshot {
             return Err(GraphError::InvalidSnapshot("graph has no nodes".into()));
         }
         let mut ids = BTreeSet::new();
+        let mut plugin_revisions = BTreeMap::new();
         for node in &self.nodes {
             validate_node_id(&node.id)?;
             for plugin in &node.plugins {
                 plugin.validate_graph_tasks()?;
+                if let Some(previous) =
+                    plugin_revisions.insert(&plugin.id, plugin.revision.as_deref())
+                    && previous != plugin.revision.as_deref()
+                {
+                    return Err(GraphError::InvalidSnapshot(format!(
+                        "Graph has conflicting revisions for Plugin `{}`",
+                        plugin.id
+                    )));
+                }
                 if node
                     .plugins
                     .iter()

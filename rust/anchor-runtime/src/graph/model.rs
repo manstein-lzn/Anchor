@@ -77,6 +77,8 @@ pub struct PluginRef {
     pub default: Option<bool>,
     pub graph_tasks: Option<GraphTaskPolicy>,
     pub network: Option<NetworkMode>,
+    /// Exact admitted Library code revision; absence keeps live-install semantics.
+    pub revision: Option<String>,
 }
 
 /// Node-owned task networking. A requirement never overrides an explicit denial.
@@ -93,6 +95,9 @@ pub enum NetworkMode {
 #[serde(default, deny_unknown_fields)]
 pub struct GraphTaskPolicy {
     pub graphs: Vec<String>,
+    /// Consume explicitly shared schedules; this grants no execution rights.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub schedules: Vec<String>,
     pub create_graphs: bool,
     pub plugins: Vec<String>,
     pub network: bool,
@@ -118,6 +123,8 @@ enum PluginRefRepr {
         graph_tasks: Option<GraphTaskPolicy>,
         #[serde(default)]
         network: Option<NetworkMode>,
+        #[serde(default)]
+        revision: Option<String>,
     },
 }
 
@@ -137,6 +144,7 @@ impl Serialize for PluginRef {
             && self.default.is_none()
             && self.graph_tasks.is_none()
             && self.network.is_none()
+            && self.revision.is_none()
         {
             return serializer.serialize_str(&self.id);
         }
@@ -144,7 +152,8 @@ impl Serialize for PluginRef {
         let fields = 2
             + usize::from(self.default.is_some())
             + usize::from(self.graph_tasks.is_some())
-            + usize::from(self.network.is_some());
+            + usize::from(self.network.is_some())
+            + usize::from(self.revision.is_some());
         let mut state = serializer.serialize_struct("PluginRef", fields)?;
         state.serialize_field("id", &self.id)?;
         state.serialize_field("required", &self.required)?;
@@ -156,6 +165,9 @@ impl Serialize for PluginRef {
         }
         if let Some(mode) = &self.network {
             state.serialize_field("network", mode)?;
+        }
+        if let Some(revision) = &self.revision {
+            state.serialize_field("revision", revision)?;
         }
         state.end()
     }
@@ -173,12 +185,14 @@ impl TryFrom<PluginRefRepr> for PluginRef {
                 default,
                 graph_tasks,
                 network,
+                revision,
             } => Self {
                 id,
                 required,
                 default,
                 graph_tasks,
                 network,
+                revision,
             },
         };
         reference.validate_graph_tasks()?;
@@ -198,10 +212,20 @@ impl PluginRef {
             default: None,
             graph_tasks: None,
             network: None,
+            revision: None,
         }
     }
 
     pub(crate) fn validate_graph_tasks(&self) -> Result<(), GraphError> {
+        if self
+            .revision
+            .as_deref()
+            .is_some_and(|revision| !crate::artifact::store::valid_sha256(revision))
+        {
+            return Err(GraphError::InvalidSnapshot(
+                "Plugin revision must be an exact lowercase SHA256 digest".into(),
+            ));
+        }
         if self.network.is_some() && self.id != "network" {
             return Err(GraphError::InvalidSnapshot(
                 "network policy is only valid on the network Plugin reference".into(),
@@ -222,6 +246,13 @@ impl PluginRef {
                 )));
             }
         }
+        for schedule in &policy.schedules {
+            if !crate::identifier::is_name(schedule) {
+                return Err(GraphError::InvalidSnapshot(
+                    "graph_tasks contains an invalid schedule identifier".into(),
+                ));
+            }
+        }
         for plugin in &policy.plugins {
             if !crate::identifier::is_plugin_id(plugin) {
                 return Err(GraphError::InvalidSnapshot(format!(
@@ -234,6 +265,28 @@ impl PluginRef {
 }
 
 impl GraphSnapshot {
+    /// Validation ensures every declaration of this id selects the same source.
+    pub fn plugin_revision(&self, id: &str) -> Option<&str> {
+        self.nodes
+            .iter()
+            .flat_map(|node| &node.plugins)
+            .find(|reference| reference.id == id)
+            .and_then(|reference| reference.revision.as_deref())
+    }
+
+    pub(crate) fn pinned_bindings_match(&self, bindings: &BTreeMap<String, PluginBinding>) -> bool {
+        self.nodes
+            .iter()
+            .flat_map(|node| &node.plugins)
+            .all(|reference| {
+                reference.revision.as_ref().is_none_or(|revision| {
+                    bindings
+                        .get(&reference.id)
+                        .is_some_and(|binding| &binding.digest == revision)
+                })
+            })
+    }
+
     /// Old snapshots retain their exact bytes and effective ceiling. Remove the
     /// legacy fallback only after all retained pre-policy Runs have retired.
     pub fn node_network_mode(&self, node: &GraphNode) -> NetworkMode {

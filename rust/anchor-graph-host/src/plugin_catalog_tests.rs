@@ -3,6 +3,67 @@ use crate::plugin_test_support::{catalog_with_dependency_plugin, catalog_with_pl
 use crate::views_root;
 use std::fs;
 
+#[test]
+fn pure_code_digest_preserves_catalog_identity() {
+    let root = tempfile::tempdir().unwrap();
+    let directory = root.path().join("plugins/demo");
+    fs::create_dir_all(&directory).unwrap();
+    let mut files = BTreeMap::new();
+    for (path, bytes) in [("a.txt", "A"), ("plugin.json", r#"{"name":"fixture"}"#)] {
+        fs::write(directory.join(path), bytes).unwrap();
+        files.insert(
+            path.to_owned(),
+            format!("{:x}", Sha256::digest(bytes.as_bytes())),
+        );
+    }
+    let digest = plugin_code_digest(&files).unwrap();
+    assert_eq!(
+        digest,
+        "e1a7092ba143f02997155e967f062f732f2af5a5d8b7a732ec54b75d056ba3d9"
+    );
+    assert_eq!(
+        FilePluginCatalog::new(root.path())
+            .definition("demo")
+            .unwrap()
+            .digest,
+        digest
+    );
+    for invalid in ["a".repeat(63), "F".repeat(64), "g".repeat(64)] {
+        files.insert("a.txt".into(), invalid);
+        assert!(plugin_code_digest(&files).is_err());
+    }
+}
+
+#[test]
+fn plain_catalogs_cannot_ignore_a_revision_even_when_default_code_matches() {
+    let root = tempfile::tempdir().unwrap();
+    let directory = root.path().join("plugins/demo");
+    fs::create_dir_all(&directory).unwrap();
+    fs::write(directory.join("plugin.json"), r#"{"name":"fixture"}"#).unwrap();
+    let catalog = FilePluginCatalog::new(root.path());
+    let digest = catalog.definition("demo").unwrap().digest;
+    let snapshot = GraphSnapshot::from_authoring(serde_json::json!({
+        "objective":"pin fixture", "agents":{"worker":{}},
+        "nodes":[{"id":"work", "agent":"worker", "plugins":[{"id":"demo", "revision":digest}]}],
+        "edges":[]
+    }))
+    .unwrap();
+    assert!(matches!(
+        catalog.resolve_snapshot(&snapshot),
+        Err(GraphError::Unsupported(_))
+    ));
+    struct Plain;
+    impl PluginCatalog for Plain {
+        fn resolve(&self, _: &[String]) -> Result<Vec<PluginBinding>, GraphError> {
+            panic!("revision must not be stripped to an id")
+        }
+    }
+    assert!(matches!(
+        Plain.resolve_snapshot(&snapshot),
+        Err(GraphError::Unsupported(_))
+    ));
+}
+
 fn network_snapshot(mode: &str, plugins: &[&str]) -> GraphSnapshot {
     let mut plugins = plugins
         .iter()

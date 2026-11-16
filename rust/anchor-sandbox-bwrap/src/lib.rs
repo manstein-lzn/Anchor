@@ -11,7 +11,13 @@ use std::{
     fs::{self, File, OpenOptions},
     io,
     os::unix::fs::{FileTypeExt, OpenOptionsExt},
-    os::{fd::AsRawFd, unix::process::CommandExt},
+    os::{
+        fd::{AsRawFd, FromRawFd},
+        unix::{
+            fs::{FileExt, PermissionsExt},
+            process::CommandExt,
+        },
+    },
     path::{Component, Path, PathBuf},
     process::Stdio,
     sync::{
@@ -53,6 +59,81 @@ const SYSTEM_FILES: &[&str] = &[
     "/etc/nsswitch.conf",
     "/etc/localtime",
 ];
+
+/// Host-owned immutable file view. It deliberately contains no path-based
+/// execution fallback: the opened descriptor is what Bubblewrap mounts.
+#[derive(Clone)]
+pub struct FrozenSystemFile {
+    file: Arc<File>,
+    destination: PathBuf,
+    bytes: Arc<Vec<u8>>,
+}
+
+impl FrozenSystemFile {
+    pub fn new(file: File, destination: PathBuf, bytes: Vec<u8>) -> Result<Self, SandboxError> {
+        normalized_destination(&destination)?;
+        if !["/usr", "/bin", "/lib", "/lib64", "/sbin", "/etc", "/tools"]
+            .iter()
+            .any(|root| destination.starts_with(root))
+        {
+            return Err(SandboxError::InvalidRequest(
+                "frozen system destination is outside runtime roots".into(),
+            ));
+        }
+        // Keep runtime descriptors away from the reserved startup-info fd.
+        let fd = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 256) };
+        if fd < 0 {
+            return Err(SandboxError::Failed(io::Error::last_os_error().to_string()));
+        }
+        let file = unsafe { File::from_raw_fd(fd) };
+        let frozen = Self {
+            file: Arc::new(file),
+            destination,
+            bytes: Arc::new(bytes),
+        };
+        frozen.verify()?;
+        Ok(frozen)
+    }
+
+    fn verify(&self) -> Result<(), SandboxError> {
+        let metadata = self
+            .file
+            .metadata()
+            .map_err(|error| SandboxError::Failed(error.to_string()))?;
+        if !metadata.is_file()
+            || metadata.permissions().mode() & 0o222 != 0
+            || metadata.len() != self.bytes.len() as u64
+        {
+            return Err(SandboxError::InvalidRequest(
+                "frozen runtime file changed".into(),
+            ));
+        }
+        let mut offset = 0;
+        let mut buffer = [0u8; 65536];
+        while offset < self.bytes.len() {
+            let read = self
+                .file
+                .read_at(&mut buffer, offset as u64)
+                .map_err(|error| SandboxError::Failed(error.to_string()))?;
+            if read == 0 || self.bytes[offset..offset + read] != buffer[..read] {
+                return Err(SandboxError::InvalidRequest(
+                    "frozen runtime file changed".into(),
+                ));
+            }
+            offset += read;
+        }
+        Ok(())
+    }
+}
+
+impl std::fmt::Debug for FrozenSystemFile {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("FrozenSystemFile")
+            .field("destination", &self.destination)
+            .finish_non_exhaustive()
+    }
+}
 
 /// Explicit host authorization for this adapter. The command allowlist is
 /// mandatory and network access is opt-in at both policy and request levels.
@@ -148,6 +229,7 @@ pub struct BubblewrapSandbox {
     allow_network: bool,
     pid_namespace_proc: bool,
     workspace_roots: Vec<PathBuf>,
+    workspace_masks: Vec<PathBuf>,
     readonly_input_roots: Vec<PathBuf>,
     readonly_destination_roots: Vec<PathBuf>,
     readonly_grants: Vec<(PathBuf, PathBuf)>,
@@ -159,6 +241,8 @@ pub struct BubblewrapSandbox {
     tool_dirs: Vec<PathBuf>,
     device_grants: Vec<PathBuf>,
     spill_roots: Vec<PathBuf>,
+    frozen_system: Option<Vec<FrozenSystemFile>>,
+    command_timeout_seconds: Option<u64>,
 }
 
 impl std::fmt::Debug for BubblewrapSandbox {
@@ -179,6 +263,7 @@ impl std::fmt::Debug for BubblewrapSandbox {
             .field("tool_dirs", &self.tool_dirs)
             .field("device_grants", &self.device_grants)
             .field("spill_roots", &self.spill_roots)
+            .field("frozen_system", &self.frozen_system)
             .finish()
     }
 }
@@ -199,13 +284,17 @@ impl BubblewrapSandbox {
     /// before recording this as an environment identity. This observes authority
     /// only and does not change the mounts or environment of any command.
     pub fn describe_boundary(&self) -> serde_json::Value {
-        let readonly = SYSTEM_DIRS
+        let system = SYSTEM_DIRS
             .iter()
             .chain(SYSTEM_FILES)
             .filter(|path| Path::new(path).exists())
             .map(|path| (PathBuf::from(path), PathBuf::from(path)))
             .chain(self.readonly_grants.iter().cloned())
-            .map(|(source, destination)| {
+            .collect::<Vec<_>>();
+        let readonly = self.frozen_system.as_ref().map(|files| files.iter().map(|file| {
+            (PathBuf::from("host-frozen-runtime"), file.destination.clone())
+        }).chain(self.readonly_grants.iter().cloned()).collect()).unwrap_or(system)
+            .into_iter().map(|(source, destination)| {
                 serde_json::json!({"destination": destination, "source": source})
             })
             .collect::<Vec<_>>();
@@ -296,6 +385,7 @@ impl BubblewrapSandbox {
             allow_network: policy.allow_network,
             pid_namespace_proc: false,
             workspace_roots,
+            workspace_masks: Vec::new(),
             readonly_input_roots,
             readonly_destination_roots,
             readonly_grants: Vec::new(),
@@ -305,7 +395,81 @@ impl BubblewrapSandbox {
             tool_dirs,
             device_grants,
             spill_roots,
+            frozen_system: None,
+            command_timeout_seconds: None,
         })
+    }
+
+    /// Replace every implicit host system mount with this exact file closure.
+    /// Writable workspaces, Artifact inputs and the bridge socket keep their
+    /// ordinary explicit grants; network and device grants cannot widen it.
+    pub fn with_frozen_system(
+        &self,
+        files: Vec<FrozenSystemFile>,
+        command_timeout_seconds: Option<u64>,
+    ) -> Result<Self, SandboxError> {
+        if files.is_empty() || !self.tool_dirs.is_empty() || !self.device_grants.is_empty() {
+            return Err(SandboxError::InvalidRequest(
+                "frozen runtime cannot include live tool directories or devices".into(),
+            ));
+        }
+        let mut destinations = HashSet::new();
+        for file in &files {
+            file.verify()?;
+            if !destinations.insert(file.destination.clone()) {
+                return Err(SandboxError::InvalidRequest(
+                    "duplicate frozen runtime destination".into(),
+                ));
+            }
+        }
+        let mut sandbox = self.clone();
+        sandbox.allow_network = false;
+        sandbox.frozen_system = Some(files);
+        sandbox.command_timeout_seconds = command_timeout_seconds;
+        Ok(sandbox)
+    }
+
+    pub fn frozen_system(&self) -> bool {
+        self.frozen_system.is_some()
+    }
+
+    pub fn frozen_command_timeout_seconds(&self) -> Option<u64> {
+        self.command_timeout_seconds
+    }
+
+    pub fn with_command_timeout_seconds(&self, seconds: Option<u64>) -> Self {
+        let mut sandbox = self.clone();
+        sandbox.command_timeout_seconds = seconds;
+        sandbox
+    }
+
+    pub fn has_frozen_file(&self, destination: &Path) -> bool {
+        self.frozen_system
+            .as_ref()
+            .is_some_and(|files| files.iter().any(|file| file.destination == destination))
+    }
+
+    fn inherit_frozen_descriptors(&self, command: &mut Command) -> Result<(), SandboxError> {
+        let Some(files) = &self.frozen_system else {
+            return Ok(());
+        };
+        for file in files {
+            file.verify()?;
+        }
+        let files = files.clone();
+        unsafe {
+            command.as_std_mut().pre_exec(move || {
+                for file in &files {
+                    let fd = file.file.as_raw_fd();
+                    let flags = libc::fcntl(fd, libc::F_GETFD);
+                    if flags < 0 || libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                }
+                Ok(())
+            });
+        }
+        Ok(())
     }
 
     /// Mount proc for this sandbox's isolated PID namespace. This is a host
@@ -314,6 +478,38 @@ impl BubblewrapSandbox {
         let mut sandbox = self.clone();
         sandbox.pid_namespace_proc = true;
         sandbox
+    }
+
+    /// Bind one operator-selected project instead of the node workspace. The
+    /// caller owns this grant; model arguments must never choose these paths.
+    /// Masks hide private host state living inside an otherwise writable repo.
+    pub fn with_project_workspace(
+        &self,
+        workspace: &Path,
+        masks: &[PathBuf],
+    ) -> Result<Self, SandboxError> {
+        let canonical = fs::canonicalize(workspace)
+            .map_err(|error| SandboxError::InvalidRequest(error.to_string()))?;
+        if canonical != workspace || !canonical.is_dir() {
+            return Err(SandboxError::InvalidRequest(
+                "project workspace must be an exact canonical directory".into(),
+            ));
+        }
+        for path in masks {
+            if path.as_os_str().is_empty()
+                || path
+                    .components()
+                    .any(|part| !matches!(part, Component::Normal(_)))
+            {
+                return Err(SandboxError::InvalidRequest(
+                    "project masks must be plain relative paths".into(),
+                ));
+            }
+        }
+        let mut sandbox = self.clone();
+        sandbox.workspace_roots = vec![canonical];
+        sandbox.workspace_masks = masks.to_vec();
+        Ok(sandbox)
     }
 
     /// Grant exact host device nodes to invocations of the derived sandbox.
@@ -481,6 +677,7 @@ impl BubblewrapSandbox {
                 "command paths must not contain `..`".into(),
             ));
         }
+        let frozen_command = self.has_frozen_file(Path::new(command));
         let mounted_command = Path::new(command).starts_with("/plugins/")
             || Path::new(command).starts_with("/tools/");
         let registered_command = Path::new(command).is_absolute()
@@ -519,6 +716,7 @@ impl BubblewrapSandbox {
             && fs::canonicalize(command)
                 .is_ok_and(|path| SYSTEM_DIRS.iter().any(|root| path.starts_with(root)));
         if command != basename
+            && !frozen_command
             && !mounted_command
             && !registered_command
             && !system_command
@@ -528,7 +726,7 @@ impl BubblewrapSandbox {
                 "command must select an allowlisted basename/system executable or a mounted Plugin/tool path".into(),
             ));
         }
-        let mounted_plugin_executable = if mounted_command {
+        let mounted_plugin_executable = if mounted_command && !frozen_command {
             request.readonly_inputs.iter().any(|input| {
                 let destination = &input.destination;
                 let Some(relative) = Path::new(command).strip_prefix(destination).ok() else {
@@ -559,6 +757,7 @@ impl BubblewrapSandbox {
             false
         };
         if !self.allowed_commands.contains(basename)
+            && !frozen_command
             && !mounted_plugin_executable
             && !registered_command
             && !writable_environment_command
@@ -743,11 +942,22 @@ impl BubblewrapSandbox {
             args.extend(["--proc".into(), "/proc".into()]);
         }
         let mut made_dirs = HashSet::new();
-        for path in SYSTEM_DIRS.iter().filter(|p| Path::new(p).exists()) {
-            args.extend(["--ro-bind".into(), (*path).into(), (*path).into()]);
-        }
-        for path in SYSTEM_FILES.iter().filter(|p| Path::new(p).exists()) {
-            args.extend(["--ro-bind-try".into(), (*path).into(), (*path).into()]);
+        if let Some(files) = &self.frozen_system {
+            for file in files {
+                add_mount_parent_dirs(&mut args, &file.destination, &mut made_dirs);
+                args.extend([
+                    "--ro-bind-fd".into(),
+                    file.file.as_raw_fd().to_string(),
+                    path_string(&file.destination),
+                ]);
+            }
+        } else {
+            for path in SYSTEM_DIRS.iter().filter(|p| Path::new(p).exists()) {
+                args.extend(["--ro-bind".into(), (*path).into(), (*path).into()]);
+            }
+            for path in SYSTEM_FILES.iter().filter(|p| Path::new(p).exists()) {
+                args.extend(["--ro-bind-try".into(), (*path).into(), (*path).into()]);
+            }
         }
         args.extend(["--tmpfs".into(), "/tmp".into()]);
         args.extend(["--dir".into(), WORKSPACE_MOUNT.into()]);
@@ -778,6 +988,11 @@ impl BubblewrapSandbox {
                 path_string(source),
                 path_string(destination),
             ]);
+        }
+        for relative in &self.workspace_masks {
+            let destination = Path::new(WORKSPACE_MOUNT).join(relative);
+            args.extend(["--tmpfs".into(), path_string(&destination)]);
+            args.extend(["--remount-ro".into(), path_string(&destination)]);
         }
         if let Some(spill) = &resolved.spill
             && let Some(mount) = &spill.sandbox_mount
@@ -833,6 +1048,7 @@ impl BubblewrapSandbox {
         }
         let argv = self.argv(&request, &resolved, false);
         let mut command = self.execution_command(&request)?;
+        self.inherit_frozen_descriptors(&mut command)?;
         command
             .args(argv)
             .env_clear()
@@ -898,6 +1114,7 @@ impl SandboxPort for BubblewrapSandbox {
             }
             let argv = self.argv(&request, &resolved, true);
             let mut command = self.execution_command(&request)?;
+            self.inherit_frozen_descriptors(&mut command)?;
             command
                 .args(argv)
                 .env_clear()
@@ -1678,6 +1895,7 @@ mod tests {
             allow_network: false,
             pid_namespace_proc: false,
             workspace_roots: vec![root.clone()],
+            workspace_masks: Vec::new(),
             readonly_input_roots: vec![root.clone()],
             readonly_destination_roots: vec![PathBuf::from("/in"), PathBuf::from("/spill")],
             readonly_grants: Vec::new(),
@@ -1687,6 +1905,8 @@ mod tests {
             tool_dirs: Vec::new(),
             device_grants: Vec::new(),
             spill_roots: vec![root],
+            frozen_system: None,
+            command_timeout_seconds: None,
         }
     }
 

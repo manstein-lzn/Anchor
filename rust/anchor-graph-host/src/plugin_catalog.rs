@@ -13,7 +13,7 @@ use crate::{SystemPlugin, dependencies, invalid, mcp};
 use anchor_runtime::graph::{GraphError, GraphSnapshot, NetworkMode, PluginBinding};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 /// Resolves installed filesystem Plugins to secret-free immutable identities.
@@ -23,6 +23,7 @@ pub trait PluginCatalog: Send + Sync {
     /// Bind executable resources, not a node's offline/automatic policy reference.
     /// Catalogs with declaration metadata also derive Auto's provider dependency.
     fn resolve_snapshot(&self, snapshot: &GraphSnapshot) -> Result<Vec<PluginBinding>, GraphError> {
+        reject_revision_refs(snapshot)?;
         self.resolve(&snapshot_plugin_ids(
             snapshot,
             snapshot
@@ -31,6 +32,20 @@ pub trait PluginCatalog: Send + Sync {
                 .any(|node| snapshot.node_network_mode(node) == NetworkMode::Enabled),
         ))
     }
+}
+
+fn reject_revision_refs(snapshot: &GraphSnapshot) -> Result<(), GraphError> {
+    if snapshot
+        .nodes
+        .iter()
+        .flat_map(|node| &node.plugins)
+        .any(|reference| reference.revision.is_some())
+    {
+        return Err(GraphError::Unsupported(
+            "exact Plugin revisions require a Library revision-aware catalog".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn snapshot_plugin_ids(snapshot: &GraphSnapshot, network: bool) -> Vec<String> {
@@ -537,14 +552,33 @@ fn resource_digest(
     resources: &[String],
     manifest_bytes: &[u8],
 ) -> Result<String, GraphError> {
-    let mut hash = Sha256::new();
+    let mut files = BTreeMap::new();
     for relative in resources {
-        hash.update(relative.as_bytes());
-        if relative == "plugin.json" {
-            hash.update(Sha256::digest(manifest_bytes));
+        let digest = if relative == "plugin.json" {
+            Sha256::digest(manifest_bytes)
         } else {
-            hash.update(Sha256::digest(std::fs::read(directory.join(relative))?));
+            Sha256::digest(std::fs::read(directory.join(relative))?)
+        };
+        files.insert(relative.clone(), format!("{digest:x}"));
+    }
+    plugin_code_digest(&files)
+}
+
+/// Combines a sorted relative-path/file-SHA256 inventory into the Catalog's
+/// existing code identity. File modes and source validation remain with callers.
+pub fn plugin_code_digest(files: &BTreeMap<String, String>) -> Result<String, GraphError> {
+    let mut hash = Sha256::new();
+    for (relative, digest) in files {
+        if !anchor_runtime::artifact::store::valid_sha256(digest) {
+            return Err(invalid(format!("invalid Plugin file digest: {relative}")));
         }
+        let mut bytes = [0u8; 32];
+        for (index, byte) in bytes.iter_mut().enumerate() {
+            *byte = u8::from_str_radix(&digest[index * 2..index * 2 + 2], 16)
+                .map_err(|_| invalid(format!("invalid Plugin file digest: {relative}")))?;
+        }
+        hash.update(relative.as_bytes());
+        hash.update(bytes);
     }
     Ok(format!("{:x}", hash.finalize()))
 }
@@ -555,6 +589,7 @@ impl PluginCatalog for FilePluginCatalog {
     }
 
     fn resolve_snapshot(&self, snapshot: &GraphSnapshot) -> Result<Vec<PluginBinding>, GraphError> {
+        reject_revision_refs(snapshot)?;
         self.resolve(&snapshot_plugin_ids(
             snapshot,
             self.snapshot_requires_network(snapshot)?,

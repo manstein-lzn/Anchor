@@ -14,6 +14,11 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
+mod links;
+pub use links::expanded_snapshots;
+#[cfg(test)]
+mod tests;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
@@ -108,23 +113,10 @@ impl Manifest {
                     ArtifactKind::Fanout | ArtifactKind::Join | ArtifactKind::Interruption => {
                         let filename = control_filename(context.kind).unwrap();
                         if self.files.len() != 1
-                            || !self.files.contains_key(filename)
+                            || self.files.get(filename).is_none_or(|file| file.executable)
                             || !self.directories.is_empty()
                         {
                             return Err(corrupt("control artifact contains unexpected files"));
-                        }
-                        let bytes =
-                            serde_json::to_vec(&control_output(&self.completion, context.kind))
-                                .map_err(|error| corrupt(error.to_string()))?;
-                        let expected = FileHash {
-                            sha256: format!("{:x}", Sha256::digest(&bytes)),
-                            bytes: bytes.len() as u64,
-                            executable: false,
-                        };
-                        if self.files[filename] != expected {
-                            return Err(corrupt(
-                                "control file does not match Coordinator completion",
-                            ));
                         }
                         Ok(())
                     }
@@ -132,6 +124,29 @@ impl Manifest {
             }
             _ => Err(corrupt("artifact context, checksum or format mismatch")),
         }
+    }
+
+    /// Metadata remains readable after collection. Content readers instead
+    /// check the original frozen bytes, never a build-dependent reserialization.
+    pub fn verify_control_content(&self, snapshot: &Path) -> Result<(), GraphError> {
+        let Some(context) = self.context.as_ref() else {
+            return Err(corrupt("artifact context missing"));
+        };
+        let Some(filename) = control_filename(context.kind) else {
+            return Ok(());
+        };
+        let bytes = self
+            .descriptor(snapshot)?
+            .read_file(&snapshot.join("view"), filename)
+            .map_err(corrupt)?;
+        let output: Value =
+            serde_json::from_slice(&bytes).map_err(|error| corrupt(error.to_string()))?;
+        if output != control_output(&self.completion, context.kind) {
+            return Err(corrupt(
+                "control file does not match Coordinator completion",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -310,6 +325,7 @@ impl<'a> ArtifactStoreReader<'a> {
         if ArtifactDescriptor::read(&root).map_err(corrupt)? != descriptor {
             return Err(corrupt("artifact view descriptor changed"));
         }
+        manifest.verify_control_content(&snapshot)?;
         Ok(ArtifactView {
             root,
             descriptor,

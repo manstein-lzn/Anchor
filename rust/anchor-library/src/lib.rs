@@ -5,7 +5,9 @@ mod filesystem;
 mod oauth;
 mod reclaim;
 mod review;
+mod revisions;
 mod source;
+mod source_fence;
 
 use std::path::{Path, PathBuf};
 
@@ -21,7 +23,9 @@ pub use oauth::{
 };
 pub use reclaim::{ReclaimError, ReclaimReport, reclaim, reclaim_after_install, summarize};
 pub use review::{ChannelReview, PluginReview, ServerReview};
+pub use revisions::{DependencyViewIdentity, PluginRevision, ResolvedPluginSource, RevisionError};
 pub use source::{Checkout, GitCheckout, GithubSource};
+pub use source_fence::PluginPublicationFence;
 
 /// Proof that this process holds the Library's Plugin installation lock.
 ///
@@ -30,6 +34,7 @@ pub use source::{Checkout, GitCheckout, GithubSource};
 /// it does not hold. Dropping it releases the lock.
 #[derive(Debug)]
 pub struct InstallLease {
+    root: PathBuf,
     _lease: anchor_file_lease::FileLease,
 }
 
@@ -126,7 +131,14 @@ impl Library {
     }
 
     pub fn catalog_read_guard(&self) -> Result<Option<anchor_file_lease::FileLease>, InstallError> {
-        match filesystem::directory(&self.root.join("plugins"), false) {
+        // Catalog reads have always accepted an Operator-selected symlink root.
+        // Canonicalizing this read path does not relax installation leases.
+        let plugins = match self.root.join("plugins").canonicalize() {
+            Ok(path) => path,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        match filesystem::directory(&plugins, false) {
             Ok((_, directory)) => filesystem::lease(
                 &directory,
                 rustix::fs::FlockOperation::NonBlockingLockShared,
@@ -242,7 +254,18 @@ impl Library {
         let (plugins, plugins_file) = filesystem::directory(&root.join("plugins"), true)?;
         let _ = plugins;
         let lease = filesystem::lease(&plugins_file, operation)?;
-        Ok(InstallLease { _lease: lease })
+        Ok(InstallLease {
+            root,
+            _lease: lease,
+        })
+    }
+
+    pub(crate) fn leased_root(&self, lease: &InstallLease) -> Result<PathBuf, InstallError> {
+        let (root, _) = filesystem::directory(&self.root, false)?;
+        if root != lease.root {
+            return Err(InstallError::UnsafePath);
+        }
+        Ok(root)
     }
 
     /// Install while the caller holds [`Library::install_lease`].
@@ -350,7 +373,10 @@ impl Library {
         // land-then-publish window). Taking it twice would deadlock against itself.
         let _acquired;
         let _lease = match held {
-            Some(lease) => &lease._lease,
+            Some(lease) => {
+                self.leased_root(lease)?;
+                &lease._lease
+            }
             None => {
                 _acquired =
                     filesystem::lease(&plugins_file, rustix::fs::FlockOperation::LockExclusive)?;
@@ -496,7 +522,7 @@ enum Publication<'a> {
 /// The platform never reads, copies or rewrites a mutable path; it does have to
 /// make sure the location exists, because that is what the Plugin's process is
 /// granted write access to. An existing path is left exactly as it is.
-fn provide_mutable_paths(
+pub fn provide_mutable_paths(
     plugin_directory: &Path,
     mutable: &anchor_graph_host::MutablePaths,
 ) -> Result<(), InstallError> {

@@ -92,34 +92,13 @@ fn lock(
     operation: FlockOperation,
     create: bool,
 ) -> Result<anchor_file_lease::FileLease, DevelopmentError> {
-    let file = File::from(
-        rustix::fs::openat(
-            directory,
-            name,
-            OFlags::RDWR
-                | if create {
-                    OFlags::CREATE
-                } else {
-                    OFlags::empty()
-                }
-                | OFlags::CLOEXEC
-                | OFlags::NOFOLLOW
-                | OFlags::NONBLOCK,
-            Mode::from_bits_truncate(0o600),
-        )
-        .map_err(io::Error::from)?,
-    );
-    if !file.metadata()?.is_file() || file.metadata()?.len() != 0 {
-        return Err(invalid("lease is not an empty regular file"));
-    }
-    let file = anchor_file_lease::FileLease::acquire(file, operation).map_err(|error| {
-        if error == rustix::io::Errno::WOULDBLOCK {
-            DevelopmentError::Busy
-        } else {
-            DevelopmentError::Io(io::Error::from(error))
-        }
-    })?;
-    Ok(file)
+    crate::filesystem::lease_named(directory, name, operation, create).map_err(
+        |error| match error {
+            crate::InstallError::CatalogBusy => DevelopmentError::Busy,
+            crate::InstallError::Io(error) => DevelopmentError::Io(error),
+            error => invalid(error),
+        },
+    )
 }
 
 fn read_binding(path: &Path) -> Result<Option<ScopeBinding>, DevelopmentError> {

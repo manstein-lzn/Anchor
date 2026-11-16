@@ -2,7 +2,10 @@ use std::{
     ffi::OsStr,
     fs::{self, File},
     io::{self, Read},
-    os::unix::{ffi::OsStrExt, fs::PermissionsExt},
+    os::unix::{
+        ffi::OsStrExt,
+        fs::{MetadataExt, PermissionsExt},
+    },
     path::{Component, Path, PathBuf},
 };
 
@@ -58,16 +61,34 @@ pub(crate) fn lease(
     plugins: &File,
     operation: FlockOperation,
 ) -> Result<anchor_file_lease::FileLease, InstallError> {
+    lease_named(plugins, ".install.lock", operation, true)
+}
+
+pub(crate) fn lease_named(
+    directory: &File,
+    name: &str,
+    operation: FlockOperation,
+    create: bool,
+) -> Result<anchor_file_lease::FileLease, InstallError> {
     let lock = File::from(
         openat(
-            plugins,
-            ".install.lock",
-            OFlags::RDWR | OFlags::CREATE | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
+            directory,
+            name,
+            OFlags::RDWR
+                | if create {
+                    OFlags::CREATE
+                } else {
+                    OFlags::empty()
+                }
+                | OFlags::CLOEXEC
+                | OFlags::NOFOLLOW
+                | OFlags::NONBLOCK,
             Mode::from_bits_truncate(0o600),
         )
         .map_err(path_error)?,
     );
-    if !lock.metadata()?.is_file() {
+    let metadata = lock.metadata()?;
+    if !metadata.is_file() || metadata.len() != 0 || metadata.nlink() != 1 {
         return Err(InstallError::UnsafePath);
     }
     let lock = anchor_file_lease::FileLease::acquire(lock, operation).map_err(|failure| {

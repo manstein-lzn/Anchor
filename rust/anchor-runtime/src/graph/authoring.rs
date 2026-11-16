@@ -65,12 +65,159 @@ struct Expansion {
 }
 
 impl GraphSnapshot {
+    pub fn context_branch_pair(
+        base: &Value,
+        candidate: &Value,
+        node: &str,
+    ) -> Result<[Value; 2], GraphError> {
+        let baseline = Self::from_authoring(base.clone())?;
+        let mut selected = Self::from_authoring(candidate.clone())?;
+        let role = baseline
+            .nodes
+            .iter()
+            .find(|item| item.id == node)
+            .and_then(|item| item.agent.as_ref())
+            .ok_or_else(|| invalid("context branches require an Agent node"))?;
+        let instructions = baseline.agents[role].instructions.clone();
+        selected
+            .agents
+            .get_mut(role)
+            .ok_or_else(|| invalid("context branch role changed"))?
+            .instructions = instructions;
+        if baseline != selected {
+            return Err(invalid(
+                "context branches support only the selected role instructions or static guidance",
+            ));
+        }
+        Ok([
+            Self::context_branch_definition(base, node)?,
+            Self::context_branch_definition(candidate, node)?,
+        ])
+    }
+
+    /// An internal Run carrier, not a replay of the source Graph. Historical
+    /// tool results remain evidence; no source Plugin or predecessor is run.
+    pub fn context_branch_definition(definition: &Value, node: &str) -> Result<Value, GraphError> {
+        let snapshot = Self::from_authoring(definition.clone())?;
+        let selected = snapshot
+            .nodes
+            .iter()
+            .find(|item| item.id == node)
+            .ok_or_else(|| invalid("context branch source node is missing"))?;
+        let role = selected
+            .agent
+            .as_ref()
+            .ok_or_else(|| invalid("context branches require an Agent node"))?;
+        let mut agent = snapshot.agents[role].clone();
+        agent.network = false;
+        // Upstream artifacts are retained conversation evidence, not new
+        // handoffs from predecessors in this single-node carrier.
+        agent.reads.clear();
+        let default_model = agent.model.is_empty();
+        let mut agent = json!(agent);
+        if default_model {
+            agent.as_object_mut().unwrap().remove("model");
+        }
+        let carrier = json!({
+            "objective":"Continue one retained Agent decision in an isolated workspace.",
+            "entry":node,
+            "agents":{role:agent},
+            "nodes":[{"id":node,"agent":role,"plugins":[
+                {"id":"network","required":false,"network":"denied"}
+            ]}],
+            "edges":[]
+        });
+        Self::from_authoring(carrier.clone())?;
+        Ok(carrier)
+    }
+
     /// Compile an editable graph definition to the flat
     /// Runtime snapshot. `layout` is editor state and is intentionally ignored.
     /// Unknown execution fields are errors instead of being silently dropped.
     pub fn from_authoring(value: Value) -> Result<Self, GraphError> {
         compile_authoring(value)
     }
+
+    /// Pin one existing Plugin throughout an authoring document without
+    /// rewriting unrelated fields or losing the original bare-id shape.
+    pub fn pin_plugin_revision(
+        definition: &Value,
+        id: &str,
+        expected: Option<&str>,
+        desired: Option<&str>,
+    ) -> Result<Value, GraphError> {
+        Self::from_authoring(definition.clone())?;
+        if expected
+            .into_iter()
+            .chain(desired)
+            .any(|revision| !crate::artifact::store::valid_sha256(revision))
+        {
+            return Err(invalid("invalid Plugin revision"));
+        }
+        let mut selected = definition.clone();
+        if pin_plugin_body(&mut selected, id, expected, desired)? == 0 {
+            return Err(invalid("Plugin reference is not present"));
+        }
+        Self::from_authoring(selected.clone())?;
+        Ok(selected)
+    }
+}
+
+fn pin_plugin_body(
+    body: &mut Value,
+    id: &str,
+    expected: Option<&str>,
+    desired: Option<&str>,
+) -> Result<usize, GraphError> {
+    let mut changed = 0;
+    let nodes = body
+        .get_mut("nodes")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| invalid("Graph nodes are unavailable"))?;
+    for node in nodes {
+        for reference in node
+            .get_mut("plugins")
+            .and_then(Value::as_array_mut)
+            .into_iter()
+            .flatten()
+        {
+            if reference.as_str() != Some(id)
+                && reference.get("id").and_then(Value::as_str) != Some(id)
+            {
+                continue;
+            }
+            if reference.get("revision").and_then(Value::as_str) != expected {
+                return Err(invalid("Plugin revision changed"));
+            }
+            if reference.is_string() {
+                if let Some(revision) = desired {
+                    *reference = json!({"id":id,"revision":revision});
+                }
+            } else {
+                let object = reference
+                    .as_object_mut()
+                    .ok_or_else(|| invalid("invalid Plugin reference"))?;
+                match desired {
+                    Some(revision) => {
+                        object.insert("revision".into(), json!(revision));
+                    }
+                    None => {
+                        object.remove("revision");
+                    }
+                }
+            }
+            changed += 1;
+        }
+    }
+    for module in body
+        .get_mut("graphs")
+        .and_then(Value::as_object_mut)
+        .into_iter()
+        .flat_map(|graphs| graphs.values_mut())
+    {
+        changed += pin_plugin_body(module, id, expected, desired)?;
+    }
+    Ok(changed)
 }
 
 fn invalid(message: impl Into<String>) -> GraphError {
@@ -173,7 +320,7 @@ fn plugin_refs(value: Option<&Value>, where_: &str) -> Result<Vec<PluginRef>, Gr
                 let unknown = object.keys().find(|key| {
                     !matches!(
                         key.as_str(),
-                        "id" | "required" | "default" | "graph_tasks" | "network"
+                        "id" | "required" | "default" | "graph_tasks" | "network" | "revision"
                     )
                 });
                 if let Some(key) = unknown {
@@ -211,6 +358,12 @@ fn plugin_refs(value: Option<&Value>, where_: &str) -> Result<Vec<PluginRef>, Gr
                     id,
                     required,
                     default,
+                    revision: object
+                        .get("revision")
+                        .map(|revision| serde_json::from_value::<Option<String>>(revision.clone()))
+                        .transpose()
+                        .map_err(|error| invalid(format!("{where_}: invalid revision: {error}")))?
+                        .flatten(),
                     network: object
                         .get("network")
                         .map(|mode| serde_json::from_value::<NetworkMode>(mode.clone()))
@@ -1134,6 +1287,47 @@ mod tests {
     use super::*;
 
     #[test]
+    fn context_branch_keeps_one_role_and_no_source_operations_or_plugins() {
+        let source = json!({"objective":"Source task", "entry":"seed",
+            "agents":{"worker":{"instructions":"baseline","model":"models.default.flash","reads":["original.txt"],"writes":["result.json"]}},
+            "ops":{"seed":{"run":"touch original.txt","writes":["original.txt"]}},
+            "nodes":[{"id":"seed","op":"seed"},{"id":"work","agent":"worker","plugins":["business"]}],
+            "edges":[{"from":"seed","to":"work"}]});
+        let mut candidate = source.clone();
+        candidate["agents"]["worker"]["instructions"] = json!("candidate");
+        let arms = GraphSnapshot::context_branch_pair(&source, &candidate, "work").unwrap();
+        for definition in arms {
+            let carrier = GraphSnapshot::from_authoring(definition).unwrap();
+            assert_eq!(carrier.entry, "work");
+            assert_eq!(carrier.nodes.len(), 1);
+            assert!(carrier.ops.is_empty() && carrier.edges.is_empty());
+            assert!(carrier.agents["worker"].reads.is_empty());
+            assert_eq!(carrier.agents["worker"].writes, ["result.json"]);
+            assert_eq!(
+                carrier.node_network_mode(&carrier.nodes[0]),
+                NetworkMode::Denied
+            );
+            assert_eq!(carrier.nodes[0].plugins.len(), 1);
+            assert_eq!(carrier.nodes[0].plugins[0].id, "network");
+        }
+        candidate["agents"]["worker"]["model"] = json!("models.default.pro");
+        assert!(GraphSnapshot::context_branch_pair(&source, &candidate, "work").is_err());
+        assert!(GraphSnapshot::context_branch_pair(&source, &source, "seed").is_err());
+        assert!(GraphSnapshot::context_branch_pair(&source, &source, "missing").is_err());
+        let mut default_model = source;
+        default_model["agents"]["worker"]
+            .as_object_mut()
+            .unwrap()
+            .remove("model");
+        let carrier = GraphSnapshot::context_branch_definition(&default_model, "work").unwrap();
+        assert!(
+            GraphSnapshot::from_authoring(carrier).unwrap().agents["worker"]
+                .model
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn graph_conformance_fixtures_compile_to_their_expanded_snapshots() {
         let fixture: Value = serde_json::from_str(include_str!(
             "../../tests/fixtures/authoring-conformance.json"
@@ -1196,10 +1390,6 @@ mod tests {
                 include_str!("../../../../examples/graphs/revise-loop.json"),
             ),
             ("rsi", include_str!("../../../../examples/graphs/rsi.json")),
-            (
-                "rsi-signals",
-                include_str!("../../../../examples/graphs/rsi-signals.json"),
-            ),
             (
                 "rust-rsi",
                 include_str!("../../../../examples/rust-rsi/graph.json"),

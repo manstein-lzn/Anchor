@@ -484,15 +484,13 @@ pub(crate) fn merge_values(default: &Value, override_value: &Value, node_value: 
     merge(&merge(default, override_value), node_value)
 }
 pub(crate) fn node_task(objective: &str, local_instruction: &str, input: &Value) -> String {
-    let input_guidance = "\n\nUpstream artifacts, when present, are mounted read-only under `/in/<node-id>`. Use `find /in` to inspect the files available to this node; write deliverables in `/workspace`.";
     format!(
-        "Objective:\n{objective}{}{}\n\nInput:\n{}",
+        "Objective:\n{objective}{}\n\nInput:\n{}",
         if local_instruction.is_empty() {
             String::new()
         } else {
             format!("\n\nNode instructions:\n{local_instruction}")
         },
-        input_guidance,
         input
     )
 }
@@ -705,6 +703,12 @@ pub(crate) fn authorized_execution_request<N: NodeExecutionPort + ?Sized>(
         .collect::<Vec<_>>();
     let current = nodes.resolve_plugins(&ids)?;
     if current.len() != request.plugins.len()
+        || current.iter().any(|binding| {
+            record
+                .snapshot
+                .plugin_revision(&binding.id)
+                .is_some_and(|revision| revision != binding.digest)
+        })
         || request
             .plugins
             .iter()

@@ -5,6 +5,7 @@
 //! Lifecycle and progress belong to the shared Kernel; this crate owns Call
 //! admission identity, input staging, Session handoff and result export.
 
+mod assistant;
 mod bundle;
 mod dependencies;
 mod graph_call;
@@ -16,6 +17,10 @@ mod plugin_configuration;
 mod resources;
 mod system_plugins;
 
+pub use assistant::{
+    AssistantPlan, REPLY as ASSISTANT_REPLY, WAIT_INPUT as ASSISTANT_WAIT_INPUT,
+    assistant_probe_definition,
+};
 pub use bundle::{
     BundlePluginReference, FileGraphBundleLoader, GraphBundleManifest, LoadedGraphBundle,
 };
@@ -31,7 +36,7 @@ pub use graph_catalog::{ChildRunControl, GraphCatalog, PluginReferenceLeaseFutur
 pub use mcp::{McpServerDefinition, channel_identity_headers, host_environment_references};
 pub use plugin_catalog::{
     ChannelDefinition, FilePluginCatalog, PluginCatalog, PluginDefinition, PluginMetadata,
-    SystemPluginInspection,
+    SystemPluginInspection, plugin_code_digest,
 };
 pub use plugin_configuration::{
     PluginConfiguration, PluginConfigurationField, PluginConfigurationFieldType,

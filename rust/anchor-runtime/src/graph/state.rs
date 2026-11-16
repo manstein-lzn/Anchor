@@ -430,6 +430,14 @@ impl GraphRunRecord {
                 "Plugin admission must bind the Graph's executable Plugins and only its authorized network provider".into(),
             ));
         }
+        if !record
+            .snapshot
+            .pinned_bindings_match(&record.plugin_bindings)
+        {
+            return Err(GraphError::InvalidSnapshot(
+                "Plugin admission does not match the Graph's exact revision".into(),
+            ));
+        }
         record.plugin_bindings_initialized = true;
         Ok(record)
     }
@@ -453,6 +461,13 @@ impl GraphRunRecord {
         self.snapshot.validate()?;
         if self.snapshot.digest()? != self.graph_digest {
             return Err(GraphError::CorruptRun("snapshot digest mismatch".into()));
+        }
+        if self.plugin_bindings_initialized
+            && !self.snapshot.pinned_bindings_match(&self.plugin_bindings)
+        {
+            return Err(GraphError::CorruptRun(
+                "Plugin binding does not match the Graph's exact revision".into(),
+            ));
         }
         for (key, call) in &self.graph_calls {
             let spec_exists = self.snapshot.nodes.iter().any(|node| {

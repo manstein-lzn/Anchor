@@ -37,12 +37,7 @@ async fn serial_routing_skips_unselected_and_passes_fixed_commit_input() {
     assert_eq!(next.input["input"]["defaults"]["b"], 2);
     assert_eq!(next.input["input"]["request"], "x");
     assert!(next.task.contains("review left"));
-    assert!(
-        next.task
-            .contains("mounted read-only under `/in/<node-id>`")
-    );
-    assert!(next.task.contains("find /in"));
-    assert!(next.task.contains("/workspace"));
+    assert!(!next.task.contains("Upstream artifacts"));
     assert_eq!(next.model.as_deref(), Some("m"));
     assert!(next.network);
     assert_eq!(next.wall_time_limit_seconds, Some(45.0));

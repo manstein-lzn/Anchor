@@ -195,39 +195,20 @@ fn lock_nonblocking(
     }
     let (_, handle) = crate::filesystem::directory(directory, false)
         .map_err(|error| LockError::Io(io::Error::other(error.to_string())))?;
-    // `O_NONBLOCK` turns a busy `flock` into `EWOULDBLOCK` instead of a wait, so a
-    // reclamation never holds a CLI (or a host startup) behind a multi-minute
-    // dependency install.
-    let file = std::fs::File::from(
-        rustix::fs::openat(
-            &handle,
-            name,
-            rustix::fs::OFlags::RDWR
-                | if create {
-                    rustix::fs::OFlags::CREATE
-                } else {
-                    rustix::fs::OFlags::empty()
-                }
-                | rustix::fs::OFlags::CLOEXEC
-                | rustix::fs::OFlags::NOFOLLOW
-                | rustix::fs::OFlags::NONBLOCK,
-            rustix::fs::Mode::from_bits_truncate(0o600),
-        )
-        .map_err(|error| match error {
-            rustix::io::Errno::NOENT if !create => LockError::Absent,
-            error => LockError::Io(io::Error::from(error)),
-        })?,
-    );
-    // `NonBlockingLockExclusive` is the non-waiting exclusive lock (rustix's
-    // `LOCK_EX | LOCK_NB`); `O_NONBLOCK` alone is not a promise across backends.
-    match anchor_file_lease::FileLease::acquire(
-        file,
+    crate::filesystem::lease_named(
+        &handle,
+        name,
         rustix::fs::FlockOperation::NonBlockingLockExclusive,
-    ) {
-        Ok(lease) => Ok(lease),
-        Err(rustix::io::Errno::WOULDBLOCK) => Err(LockError::Busy),
-        Err(error) => Err(LockError::Io(io::Error::from(error))),
-    }
+        create,
+    )
+    .map_err(|error| match error {
+        crate::InstallError::CatalogBusy => LockError::Busy,
+        crate::InstallError::Io(error) if !create && error.kind() == io::ErrorKind::NotFound => {
+            LockError::Absent
+        }
+        crate::InstallError::Io(error) => LockError::Io(error),
+        error => LockError::Io(io::Error::other(error.to_string())),
+    })
 }
 
 /// The two passes, with the caller's locks already held.
@@ -251,8 +232,18 @@ fn reclaim_locked(root: &Path, apply: bool) -> Result<ReclaimReport, ReclaimErro
             return Ok(report);
         }
     };
+    let revisions = match crate::revisions::revision_views(root) {
+        Ok(views) => views,
+        Err(error) => {
+            let mut report = ReclaimReport::refused(
+                "retained Plugin revision references could not be verified; nothing was deleted",
+            );
+            report.kept_reasons.push(error.to_string());
+            return Ok(report);
+        }
+    };
     let canonical_store = store.canonicalize().unwrap_or_else(|_| store.clone());
-    for view in &development {
+    for view in development.iter().chain(&revisions) {
         if let Err(error) = store_references(view, &canonical_store).and_then(|found| {
             if found.is_empty() {
                 Err(io::Error::new(
@@ -276,7 +267,7 @@ fn reclaim_locked(root: &Path, apply: bool) -> Result<ReclaimReport, ReclaimErro
     // Pass one: which views are alive, and which Plugin ids we can speak about.
     // A declaration we cannot read might point anywhere, so it stops the whole
     // run before anything is deleted.
-    let mut live: BTreeSet<PathBuf> = BTreeSet::new();
+    let mut live: BTreeSet<PathBuf> = revisions.iter().cloned().collect();
     let mut uncertain: Vec<String> = Vec::new();
     let mut known_ids = BTreeSet::new();
     let catalog = FilePluginCatalog::new(root);
@@ -325,6 +316,7 @@ fn reclaim_locked(root: &Path, apply: bool) -> Result<ReclaimReport, ReclaimErro
     // restored backup) is the one mistake that cannot be undone from here.
     if known_ids.is_empty()
         && development.is_empty()
+        && revisions.is_empty()
         && !match crate::development::has_released_development(root) {
             Ok(released) => released,
             Err(error) => {
@@ -542,7 +534,7 @@ fn surviving_views(
 }
 
 /// The `store/<package>/<version>` directories one view's links point at.
-fn store_references(view: &Path, store: &Path) -> Result<BTreeSet<PathBuf>, io::Error> {
+pub(crate) fn store_references(view: &Path, store: &Path) -> Result<BTreeSet<PathBuf>, io::Error> {
     let mut references = BTreeSet::new();
     let mut pending = vec![view.to_owned()];
     while let Some(directory) = pending.pop() {

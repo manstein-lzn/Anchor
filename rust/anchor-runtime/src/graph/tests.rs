@@ -11,6 +11,7 @@ include!("tests/fixtures.rs");
 include!("tests/harness.rs");
 mod host_operations;
 mod invocation_authority;
+mod plugin_revisions;
 include!("tests/migrated_behavior.rs");
 include!("tests/migrated_lifecycle.rs");
 include!("tests/migrated_crash.rs");
@@ -557,6 +558,10 @@ fn an_old_shape_snapshot_reproduces_its_stored_digest() {
         sha2::Sha256::digest(serde_json::to_vec(&snapshot).unwrap())
     );
     assert_eq!(snapshot.digest().unwrap(), expected);
+    assert_eq!(
+        expected,
+        "ff1b970d8f670fabec8431d9eb40a65c4e82b8c37b9b17f12491262d1fcaa66d"
+    );
     // ...and a record carrying it validates, which is what `records()` needs.
     let mut record = GraphRunRecord::create_with_id(snapshot, Value::Null, "legacy-shape").unwrap();
     record.graph_digest = expected;

@@ -1,0 +1,41 @@
+{
+  "name": "Codex 项目执行池",
+  "description": "Manage authorized local projects through the independent Codex Bridge: parallel worktrees, live session status, steering and explicit approval handling.",
+  "skills": "skills/",
+  "configuration": {
+    "fields": {
+      "bridge_url": {
+        "type": "url",
+        "label": "Codex Bridge URL",
+        "default": "http://127.0.0.1:8091"
+      },
+      "api_key": {
+        "type": "secret",
+        "label": "Codex Bridge bearer token",
+        "required": true
+      },
+      "project_scope": {
+        "type": "string",
+        "label": "Optional project subdirectory",
+        "required": false
+      }
+    },
+    "environment": {
+      "codex": {
+        "ANCHOR_CODEX_BRIDGE_URL": "bridge_url",
+        "ANCHOR_CODEX_BRIDGE_TOKEN": "api_key",
+        "ANCHOR_CODEX_PROJECT_SCOPE": "project_scope"
+      }
+    }
+  },
+  "mcpServers": {
+    "codex": {
+      "type": "http",
+      "url": "${ANCHOR_CODEX_BRIDGE_URL}/mcp",
+      "bearer_token_env_var": "ANCHOR_CODEX_BRIDGE_TOKEN",
+      "headers": {
+        "X-Codex-Project-Scope": "${ANCHOR_CODEX_PROJECT_SCOPE:-}"
+      }
+    }
+  }
+}

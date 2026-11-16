@@ -66,6 +66,10 @@ impl SystemPlugin {
             ],
             Self::Feishu => &[
                 (
+                    "LICENSE.lark-cli",
+                    include_bytes!("../../../plugins/feishu/LICENSE.lark-cli"),
+                ),
+                (
                     "plugin.json",
                     include_bytes!("../../../plugins/feishu/plugin.json"),
                 ),
@@ -100,7 +104,7 @@ impl SystemPlugin {
         match self {
             Self::Network => &["bin/anchor-network-tools"],
             Self::GraphTasks => &[],
-            Self::Feishu => &["bin/anchor-feishu-gateway"],
+            Self::Feishu => &["bin/anchor-feishu-gateway", "bin/lark-cli"],
             Self::Wecom => &["bin/anchor-wecom-tools", "bin/anchor-wecom-gateway"],
         }
     }
