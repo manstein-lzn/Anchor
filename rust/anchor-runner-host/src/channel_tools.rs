@@ -876,9 +876,6 @@ impl ToolPort for ChannelTools {
         if self.task_delivery_context().ok().flatten().is_some() {
             definitions.push(task_delivery::resolution_definition());
         }
-        if self.task_delivery_context().ok().flatten().is_some() {
-            definitions.push(task_delivery::resolution_definition());
-        }
         if !self.supports_platform(ChannelPlatform::Wecom) {
             return definitions;
         }

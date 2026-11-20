@@ -206,8 +206,17 @@ async fn task_result_files_can_be_sent_without_granting_siblings_or_reply_images
     );
     assert_eq!(gateway.frames(), before_send);
     let args = json!({"path":path,"content":"Your background report is ready"});
+    let definitions = host.definitions();
     assert_eq!(
-        host.definitions()
+        definitions
+            .iter()
+            .filter(|tool| tool.name == TASK_RESULT_RESOLVE_TOOL)
+            .count(),
+        1,
+        "a task result turn exposes exactly one resolution tool"
+    );
+    assert_eq!(
+        definitions
             .iter()
             .find(|tool| tool.name == SEND_TOOL)
             .unwrap()
@@ -215,7 +224,7 @@ async fn task_result_files_can_be_sent_without_granting_siblings_or_reply_images
         json!(["content"])
     );
     assert_eq!(
-        host.definitions()
+        definitions
             .iter()
             .find(|tool| tool.name == SEND_FILE_TOOL)
             .unwrap()
