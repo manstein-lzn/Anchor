@@ -190,6 +190,8 @@ fn cargo_command(manifest: &Path, test: bool) -> Vec<String> {
                 "anchor-scholarly",
                 "-p",
                 "anchor-wecom-gateway",
+                "-p",
+                "anchor-sandbox-bwrap",
                 "--bins",
             ]
             .map(str::to_owned),
@@ -239,7 +241,7 @@ fn run_inner(options: &CandidateOptions) -> io::Result<Value> {
         "scenario_evidence":[], "scenario_evidence_count":0, "hashes":{},
         "local_model_requests":0, "real_model_requests":0,
         "production_data_used":false, "dotenv_loaded":false,
-        "scope":"release Web/source-free Goose distribution with five local requests, stop/resume and completed-run restart; official binaries packaged without business calls",
+        "scope":"release Web/source-free Goose distribution with stop/resume and completed-run restart; official binaries packaged without business calls",
         "failure":"candidate has not completed",
     });
     save_report(&report, &report_path)?;
@@ -267,11 +269,17 @@ fn run_inner(options: &CandidateOptions) -> io::Result<Value> {
             )?,
             &report_path,
         )?;
+        // Cargo may rebuild the Host with dev-dependency features for the test.
+        // Package and verify the release build, not that replacement binary.
+        let binaries = root.join("release-binaries");
+        fs::create_dir(&binaries)?;
         for name in [
             "anchor-runner-host",
             "anchor-distribution",
             "anchor-scholarly",
             "anchor-wecom-gateway",
+            "anchor-net-relay",
+            "anchor-sandbox-network",
         ] {
             let binary = target.join("release").join(name);
             if !binary.is_file() || binary.metadata()?.permissions().mode() & 0o111 == 0 {
@@ -279,7 +287,9 @@ fn run_inner(options: &CandidateOptions) -> io::Result<Value> {
                     "missing release executable: {name}"
                 )));
             }
-            report["hashes"][name] = json!({"path":binary,"sha256":digest(&binary)?});
+            let frozen = binaries.join(name);
+            fs::copy(&binary, &frozen)?;
+            report["hashes"][name] = json!({"path":frozen,"sha256":digest(&frozen)?});
         }
         report["hashes"]["web_index"] = json!({"path":web_dist.join("index.html"),"sha256":digest(&web_dist.join("index.html"))?});
         let fixture = root.join("fixture");
@@ -287,6 +297,14 @@ fn run_inner(options: &CandidateOptions) -> io::Result<Value> {
         for (name, value) in [
             ("ANCHOR_TEST_EVIDENCE_ROOT", fixture.as_path()),
             ("ANCHOR_GOOSE_BINARY", goose.as_path()),
+            (
+                "ANCHOR_TEST_HOST_BINARY",
+                binaries.join("anchor-runner-host").as_path(),
+            ),
+            (
+                "ANCHOR_GOOSE_RELAY_BINARY",
+                binaries.join("anchor-net-relay").as_path(),
+            ),
             ("ANCHOR_TEST_WEB_DIST", web_dist.as_path()),
             (
                 "ANCHOR_TEST_ACADEMIC_PLUGIN",
@@ -294,11 +312,11 @@ fn run_inner(options: &CandidateOptions) -> io::Result<Value> {
             ),
             (
                 "ANCHOR_TEST_SCHOLARLY_BINARY",
-                target.join("release/anchor-scholarly").as_path(),
+                binaries.join("anchor-scholarly").as_path(),
             ),
             (
                 "ANCHOR_TEST_WECOM_GATEWAY_BINARY",
-                target.join("release/anchor-wecom-gateway").as_path(),
+                binaries.join("anchor-wecom-gateway").as_path(),
             ),
         ] {
             environment.insert(name.into(), value.as_os_str().to_owned());
@@ -317,10 +335,9 @@ fn run_inner(options: &CandidateOptions) -> io::Result<Value> {
         }
         checked_command(&mut report, test, &report_path)?;
         evidence::validate_counts(&counts?)?;
-        let scenarios = evidence::scenario_reports(&fixture, &target, &workspace, &web_dist)?;
+        let scenarios = evidence::scenario_reports(&fixture, &binaries, &workspace, &web_dist)?;
         report["scenario_evidence_count"] = json!(scenarios.len());
         report["scenario_evidence"] = json!(scenarios);
-        report["local_model_requests"] = json!(5);
         Ok(())
     })();
     let mut failure = executed.err().map(|error| error.to_string());

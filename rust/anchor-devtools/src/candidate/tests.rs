@@ -163,6 +163,7 @@ fn candidate_selects_only_the_release_distribution_recovery_test() {
         "anchor-distribution",
         "anchor-scholarly",
         "anchor-wecom-gateway",
+        "anchor-sandbox-bwrap",
     ] {
         assert!(
             build

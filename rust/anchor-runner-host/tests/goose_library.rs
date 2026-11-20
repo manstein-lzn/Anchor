@@ -87,7 +87,9 @@ fn a_library_update_during_a_run_reaches_native_execution_with_current_skills() 
         .with_library_root(&library_root)
         .load()
         .unwrap();
-    assert_eq!(frozen.plugins, ["demo"]);
+    // The normalized bundle includes the automatic network policy reference,
+    // but this Skill-only Plugin does not authorize task networking.
+    assert_eq!(frozen.plugins, ["demo", "network"]);
     assert!(!bundle_root.join("plugins").exists());
     let (status, accepted) =
         server.request("POST", "/trigger", Some(&json!({"graph":"installed"})));
@@ -97,6 +99,7 @@ fn a_library_update_during_a_run_reaches_native_execution_with_current_skills() 
         host.base.workspace_files(run, "gate-entered").len() == 1
     });
     let admitted = host.record(run);
+    assert_eq!(admitted["plugin_bindings"].as_object().unwrap().len(), 1);
     assert_eq!(
         admitted["plugin_bindings"]["demo"]["digest"],
         installed.digest
@@ -152,8 +155,8 @@ fn a_library_update_during_a_run_reaches_native_execution_with_current_skills() 
     assert!(!selected_skill.to_string().contains(ORIGINAL));
     assert_eq!(record["plugin_bindings"], admitted["plugin_bindings"]);
     assert_eq!(
-        record["results"]["worker"][0]["plugin_digests"]["demo"],
-        replaced.digest
+        record["results"]["worker"][0]["plugin_digests"],
+        json!({"demo":replaced.digest})
     );
     host.evidence(&provider, run, json!({
         "case_source":CASE_SOURCE,"library_install":installed,"library_replacement":replaced,

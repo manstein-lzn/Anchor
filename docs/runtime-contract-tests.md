@@ -182,7 +182,7 @@ loopback HTTP fixture、Host 与 Goose，核对两轮私聊、消息去重、ACK
 
 ## Release 与 Source-Free 候选
 
-`anchor-devtools regression candidate` 构建 WebUI，对 Rust Host、发行 builder、
+`anchor-devtools regression candidate` 构建 WebUI，对 Rust Host、发行 builder、沙箱网络 helper、
 官方学术工具和 WeCom Gateway 做一次 locked/offline release 构建，再只选择
 `goose_distribution` 中已有的解包恢复测试。它不运行 workspace 全量或标准 Goose 套件。
 
@@ -214,14 +214,15 @@ CLI 在上述隔离环境执行以下固定序列，而不是要求操作员以�
 npm --prefix apps/web run build
 cargo +stable build --release --locked --offline --manifest-path rust/Cargo.toml \
   -p anchor-runner-host -p anchor-distribution -p anchor-scholarly \
-  -p anchor-wecom-gateway --bins
+  -p anchor-wecom-gateway -p anchor-sandbox-bwrap --bins
 cargo +stable test --release --locked --offline --manifest-path rust/Cargo.toml \
   -p anchor-runner-host --test goose_distribution -- \
   --ignored --exact extracted_goose_runtime_resumes_without_sources_or_replaying_workspace_effects \
   --test-threads=1 --nocapture
 ```
 
-最后一条可编译测试 harness，沿用同一 target。候选明确传入 `ANCHOR_TEST_WEB_DIST`、
+最后一条可编译测试 harness，沿用同一 target。打包与核对使用测试编译前留存的 release 二进制，
+不使用可能被 Cargo 用测试依赖重新构建的 Host 字节。候选明确传入 `ANCHOR_TEST_WEB_DIST`、
 `ANCHOR_TEST_ACADEMIC_PLUGIN`、`ANCHOR_TEST_SCHOLARLY_BINARY` 和
 `ANCHOR_TEST_WECOM_GATEWAY_BINARY`；直接调用该 fixture 时省略这些输入得到的较小包，
 不能满足候选验收。
@@ -229,18 +230,15 @@ cargo +stable test --release --locked --offline --manifest-path rust/Cargo.toml 
 ### 解包恢复与证据
 
 包内包含本次 WebUI、Host、小型 Graph/bundle、官方 academic-research Plugin 及其 Rust
-scholarly binary、Gateway 和调用者提供的固定 Goose。场景实际运行解包后的 Host/Goose，
-使用解包后的 bundle/Web root，核查 readiness、HTTP 页面及 JS/CSS 字节、源码缺席、
-manifest 摘要、Run/节点与原生 Goose 历史、workspace/Artifact 字节和只读输入。
+scholarly binary、Gateway、沙箱网络 helper 和调用者提供的固定 Goose。Graph 只按 ID
+引用 Plugin，Plugin 字节存放在包内与 `bundle/` 并列的 `plugins/`。场景实际运行解包后的
+Host/Goose 和 relay，使用解包后的 bundle/Web root，核查 readiness、HTTP 页面及 JS/CSS 字节、源码缺席、
+manifest 摘要、Run/节点与原生 Goose 历史、workspace 字节、Artifact HTTP 回读和只读输入。
 官方集成二进制只打包并校验摘要，不调用其业务工具。
 
-候选入口与校验器的目标契约要求 **5 次本地模型请求**：stop 前 2 次、resume 后 3 次，恢复保持同一原生
-Session，workspace 写入恰好一次；完成后的第二次重启不新增请求、不重放效果。
-旧的 3 请求、仅完成后重启场景不能替代这条恢复验收。
-
-当前保留的实现差异：[`goose_distribution` fixture](../rust/anchor-runner-host/tests/goose_distribution.rs)
-断言 4 次请求，而[候选证据校验器](../rust/anchor-devtools/src/candidate/evidence.rs)仍要求 5 次。
-两者尚未对齐且未复验，不能声称当前候选入口通过。
+候选校验要求 **4 次本地模型请求**：stop 前 2 次、resume 后 2 次。HTTP 投影须证明同一个 Run
+先停止、再完成，保持同一原生 Session，workspace 写入恰好一次；完成后的第二次重启不新增请求、
+不重放效果。仅验证完成后重启的旧场景不能替代这条恢复验收。
 
 stdout 输出 JSON，并在私有证据目录保留 `report.json`：实际 argv、cwd、退出码、每条命令
 日志与 SHA256、测试计数、已验证场景数、archive/manifest/Provider 摘要；进程未启动或被信号

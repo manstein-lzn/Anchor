@@ -1,19 +1,21 @@
 use super::*;
 
 fn scenario() -> (Value, Value) {
-    let requests = json!([{"model":"fixture"},{"model":"fixture"},{"model":"fixture"},{"model":"fixture"},{"model":"fixture"}]);
+    let requests = json!(vec![json!({"model":"fixture"}); 4]);
     let hash = format!("{:x}", Sha256::digest(b"once"));
     let mut report = json!({
         "status":"passed","runtime":"real Goose native loop over ACP","real_model_requests":0,
         "production_data_used":false,"dotenv_loaded":false,"goose_version":GOOSE_VERSION,
         "goose_binary_sha256":GOOSE_SHA256,"host_binary_sha256":"current-host",
-        "provider_requests":requests,"run":{"results":{"worker":[{}],"verify":[{}]}},
+        "provider_requests":requests,"run":{"run_id":"fixture-run","results":{"worker":[{}],"verify":[{}]}},
         "native_goose_conversation":[{"content":[{"type":"toolRequest","toolCall":{"name":"anchor_run","arguments":"printf once > effect.txt"}},{"type":"toolRequest","toolCall":{"name":"final_result"}}]}],
         "workspace_files":[{"path":"worker/effect.txt","bytes":4,"sha256":hash,"text":"once"},{"path":"verify/verified.txt","bytes":4,"sha256":hash,"text":"once"}],
-        "state_files":[{"path":"artifacts/worker/files/effect.txt","bytes":4,"sha256":hash,"text":"once"},{"path":"artifacts/verify/files/verified.txt","bytes":4,"sha256":hash,"text":"once"}],
         "checks":{"session_before":"same-session","session_after":"same-session","session_after_completed_restart":"same-session",
-            "workspace_write_count":1,"requests_before_completed_restart":5,"requests_after_completed_restart":5,
-            "run_http":{"state":{"status":"completed","nodes":{"worker":{"submitted":true},"verify":{"submitted":true}}}},
+            "workspace_write_count":1,"requests_before_stop":2,"requests_before_completed_restart":4,"requests_after_completed_restart":4,
+            "stopped_run_http":{"run":"fixture-run","projection":{"phase":"waiting","waiting_for":"human","reason":"stopped"}},
+            "run_http":{"run":"fixture-run","projection":{"phase":"settled","outcome":"done"},"state":{"nodes":{"worker":{"submitted":true},"verify":{"submitted":true}}}},
+            "artifact_files":{"worker":{"path":"effect.txt","size":4,"text":"once","binary":false,"truncated":false},
+                "verify":{"path":"verified.txt","size":4,"text":"once","binary":false,"truncated":false}},
             "packaged_paths":["anchor-runtime/bin/goose"]}
     });
     for field in REQUIRED_CHECKS {
@@ -47,7 +49,10 @@ fn only_one_executed_distribution_test_can_pass() {
 #[test]
 fn missing_checks_changed_sessions_or_extra_effects_fail_closed() {
     let (report, provider) = scenario();
-    assert!(validate_report(&report, &provider, "current-host").is_ok());
+    assert_eq!(
+        validate_report(&report, &provider, "current-host").unwrap(),
+        4
+    );
     for field in REQUIRED_CHECKS {
         let mut changed = report.clone();
         changed["checks"].as_object_mut().unwrap().remove(*field);
@@ -60,7 +65,11 @@ fn missing_checks_changed_sessions_or_extra_effects_fail_closed() {
         ("session_after", json!("different-session")),
         ("session_after_completed_restart", Value::Null),
         ("workspace_write_count", json!(2)),
-        ("requests_after_completed_restart", json!(6)),
+        ("stopped_run_http", Value::Null),
+        ("requests_before_stop", Value::Null),
+        ("requests_before_stop", json!(1)),
+        ("requests_after_completed_restart", json!(5)),
+        ("artifact_files", Value::Null),
         ("packaged_paths", json!(["anchor-runtime/src/main.rs"])),
     ] {
         let mut changed = report.clone();
@@ -70,11 +79,7 @@ fn missing_checks_changed_sessions_or_extra_effects_fail_closed() {
             "{field}"
         );
     }
-    for field in [
-        "native_goose_conversation",
-        "workspace_files",
-        "state_files",
-    ] {
+    for field in ["native_goose_conversation", "workspace_files"] {
         let mut changed = report.clone();
         changed[field] = json!([]);
         assert!(
@@ -86,10 +91,19 @@ fn missing_checks_changed_sessions_or_extra_effects_fail_closed() {
 }
 
 #[test]
-fn old_three_request_scenario_and_incomplete_provider_script_are_rejected() {
+fn old_or_extra_request_counts_and_incomplete_provider_scripts_are_rejected() {
     let (report, provider) = scenario();
+    for count in [3, 5] {
+        let mut changed_report = report.clone();
+        let mut changed_provider = provider.clone();
+        let requests = json!(vec![json!({"model":"fixture"}); count]);
+        changed_report["provider_requests"] = requests.clone();
+        changed_provider["requests"] = requests;
+        changed_report["checks"]["requests_before_completed_restart"] = json!(count);
+        changed_report["checks"]["requests_after_completed_restart"] = json!(count);
+        assert!(validate_report(&changed_report, &changed_provider, "current-host").is_err());
+    }
     for (field, value) in [
-        ("requests", json!([{}, {}, {}])),
         ("remaining_replies", json!(1)),
         ("failures", json!(["fixture mismatch"])),
         ("real_model_requests", json!(1)),
@@ -168,9 +182,9 @@ fn partial_fixture_evidence_counts_actual_requests_without_approving_the_scenari
 #[test]
 fn missing_or_changed_official_binary_and_web_hashes_are_rejected() {
     let root = tempfile::tempdir().unwrap();
-    let target = root.path().join("target");
+    let binaries = root.path().join("release-binaries");
     let web = root.path().join("web");
-    fs::create_dir_all(target.join("release")).unwrap();
+    fs::create_dir(&binaries).unwrap();
     fs::create_dir(&web).unwrap();
     fs::write(web.join("index.html"), b"built Web").unwrap();
     fs::create_dir(web.join("assets")).unwrap();
@@ -178,13 +192,15 @@ fn missing_or_changed_official_binary_and_web_hashes_are_rejected() {
     let mut executables = Vec::new();
     for (name, path) in [
         ("anchor-runner-host", "bin/anchor-runner-host"),
+        ("anchor-net-relay", "bin/anchor-net-relay"),
+        ("anchor-sandbox-network", "bin/anchor-sandbox-network"),
         (
             "anchor-scholarly",
-            "bundle/plugins/academic-research/bin/anchor-scholarly",
+            "plugins/academic-research/bin/anchor-scholarly",
         ),
         ("anchor-wecom-gateway", "bin/anchor-wecom-gateway"),
     ] {
-        let binary = target.join("release").join(name);
+        let binary = binaries.join(name);
         fs::write(&binary, name.as_bytes()).unwrap();
         let hash = digest(&binary).unwrap();
         files.push(json!({"path":path,"sha256":hash,"size":name.len()}));
@@ -214,8 +230,8 @@ fn missing_or_changed_official_binary_and_web_hashes_are_rejected() {
             .collect::<Vec<_>>()
     );
     assert_eq!(
-        validate_manifest(&manifest, &report, &target, &web).unwrap(),
-        7
+        validate_manifest(&manifest, &report, &binaries, &web).unwrap(),
+        files.len()
     );
     let evidence_root = root.path().join("fixture");
     let workspace = root.path().join("workspace");
@@ -236,7 +252,7 @@ fn missing_or_changed_official_binary_and_web_hashes_are_rejected() {
     fs::write(&archive, b"archive evidence").unwrap();
     report["checks"]["runtime_manifest"] = manifest.clone();
     report["checks"]["archive_sha256"] = json!(digest(&archive).unwrap());
-    let binary = target.join("release/anchor-runner-host");
+    let binary = binaries.join("anchor-runner-host");
     report["checks"]["test_binary"] = json!(binary);
     report["test_binary_sha256"] = json!(digest(&binary).unwrap());
     report["host_binary_sha256"] = json!(digest(&binary).unwrap());
@@ -259,24 +275,30 @@ fn missing_or_changed_official_binary_and_web_hashes_are_rejected() {
         serde_json::to_vec(&report).unwrap(),
     )
     .unwrap();
-    let accepted = scenario_reports(&evidence_root, &target, &workspace, &web).unwrap();
+    let accepted = scenario_reports(&evidence_root, &binaries, &workspace, &web).unwrap();
     assert_eq!(accepted.len(), 1);
+    assert_eq!(accepted[0]["local_model_requests"], 4);
     assert_eq!(accepted[0]["archive_sha256"], digest(&archive).unwrap());
     let mut missing_http = report.clone();
     missing_http["checks"]
         .as_object_mut()
         .unwrap()
         .remove("web_http");
-    assert!(validate_manifest(&manifest, &missing_http, &target, &web).is_err());
+    assert!(validate_manifest(&manifest, &missing_http, &binaries, &web).is_err());
     fs::write(&archive, b"changed archive").unwrap();
-    assert!(scenario_reports(&evidence_root, &target, &workspace, &web).is_err());
+    assert!(scenario_reports(&evidence_root, &binaries, &workspace, &web).is_err());
     fs::remove_file(&archive).unwrap();
-    assert!(scenario_reports(&evidence_root, &target, &workspace, &web).is_err());
+    assert!(scenario_reports(&evidence_root, &binaries, &workspace, &web).is_err());
     let mut changed = manifest.clone();
-    changed["files"][4]["sha256"] = json!(GOOSE_SHA256);
-    assert!(validate_manifest(&changed, &report, &target, &web).is_err());
+    changed["files"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|file| file["path"] == "web/index.html")
+        .unwrap()["sha256"] = json!(GOOSE_SHA256);
+    assert!(validate_manifest(&changed, &report, &binaries, &web).is_err());
     fs::write(web.join("index.html"), b"different Web").unwrap();
-    assert!(validate_manifest(&manifest, &report, &target, &web).is_err());
-    fs::remove_file(target.join("release/anchor-scholarly")).unwrap();
-    assert!(validate_manifest(&manifest, &report, &target, &web).is_err());
+    assert!(validate_manifest(&manifest, &report, &binaries, &web).is_err());
+    fs::remove_file(binaries.join("anchor-scholarly")).unwrap();
+    assert!(validate_manifest(&manifest, &report, &binaries, &web).is_err());
 }

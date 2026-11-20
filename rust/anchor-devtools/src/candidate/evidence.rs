@@ -80,7 +80,7 @@ fn source_free_path(path: &str) -> bool {
         })
 }
 
-fn validate_report(report: &Value, provider: &Value, host_hash: &str) -> io::Result<()> {
+fn validate_report(report: &Value, provider: &Value, host_hash: &str) -> io::Result<usize> {
     let requests = array(
         &provider["requests"],
         "missing deterministic Provider requests",
@@ -99,8 +99,7 @@ fn validate_report(report: &Value, provider: &Value, host_hash: &str) -> io::Res
             && provider["real_model_requests"].as_u64() == Some(0)
             && provider["remaining_replies"].as_u64() == Some(0)
             && provider["failures"] == json!([])
-            && provider["external_fake_effects"] == json!([])
-            && requests.len() == 5,
+            && provider["external_fake_effects"] == json!([]),
         "invalid candidate runtime or deterministic Provider evidence",
     )?;
     let checks = &report["checks"];
@@ -110,6 +109,20 @@ fn validate_report(report: &Value, provider: &Value, host_hash: &str) -> io::Res
             &format!("missing candidate check: {field}"),
         )?;
     }
+    let run = &report["run"]["run_id"];
+    let stopped = &checks["stopped_run_http"];
+    let completed = &checks["run_http"];
+    require(
+        run.as_str().is_some_and(|id| !id.is_empty())
+            && stopped["run"] == *run
+            && completed["run"] == *run
+            && stopped["projection"]["phase"] == "waiting"
+            && stopped["projection"]["waiting_for"] == "human"
+            && stopped["projection"]["reason"] == "stopped"
+            && completed["projection"]["phase"] == "settled"
+            && completed["projection"]["outcome"] == "done",
+        "candidate must observe the same Run stopped and then completed",
+    )?;
     require(
         checks["session_before"]
             .as_str()
@@ -117,12 +130,16 @@ fn validate_report(report: &Value, provider: &Value, host_hash: &str) -> io::Res
             && checks["session_before"] == checks["session_after"]
             && checks["session_after"] == checks["session_after_completed_restart"]
             && checks["workspace_write_count"].as_u64() == Some(1)
-            && checks["requests_before_completed_restart"].as_u64() == Some(5)
-            && checks["requests_after_completed_restart"].as_u64() == Some(5)
-            && checks["run_http"]["state"]["status"] == "completed",
+            && checks["requests_before_stop"].as_u64() == Some(2)
+            && requests.len() == 4
+            && checks["requests_before_completed_restart"].as_u64() == Some(requests.len() as u64)
+            && checks["requests_after_completed_restart"]
+                == checks["requests_before_completed_restart"],
         "candidate session, side effect or restart evidence is incomplete",
     )?;
-    for node in ["worker", "verify"] {
+    let workspaces = array(&report["workspace_files"], "missing workspace inventory")?;
+    let once_hash = format!("{:x}", Sha256::digest(b"once"));
+    for (node, filename) in [("worker", "effect.txt"), ("verify", "verified.txt")] {
         require(
             array(
                 &report["run"]["results"][node],
@@ -130,8 +147,29 @@ fn validate_report(report: &Value, provider: &Value, host_hash: &str) -> io::Res
             )?
             .len()
                 == 1
-                && checks["run_http"]["state"]["nodes"][node]["submitted"] == true,
+                && completed["state"]["nodes"][node]["submitted"] == true,
             "candidate node history must contain one completed invocation per node",
+        )?;
+        let artifact = &checks["artifact_files"][node];
+        require(
+            artifact["path"] == filename
+                && artifact["size"].as_u64() == Some(4)
+                && artifact["text"] == "once"
+                && artifact["binary"] == false
+                && artifact["truncated"] == false,
+            "candidate Artifact bytes did not read back through HTTP",
+        )?;
+        require(
+            workspaces.iter().any(|file| {
+                file["path"].as_str().is_some_and(|path| {
+                    Path::new(path)
+                        .file_name()
+                        .is_some_and(|name| name == filename)
+                }) && file["bytes"].as_u64() == Some(4)
+                    && file["sha256"] == once_hash
+                    && file["text"] == "once"
+            }),
+            "candidate workspace bytes or hashes are missing",
         )?;
     }
     let history = array(
@@ -155,29 +193,6 @@ fn validate_report(report: &Value, provider: &Value, host_hash: &str) -> io::Res
                 .contains("final_result"),
         "native history lacks the single side effect and completion",
     )?;
-    let once_hash = format!("{:x}", Sha256::digest(b"once"));
-    for (inventory, filenames) in [
-        ("workspace_files", vec!["effect.txt", "verified.txt"]),
-        (
-            "state_files",
-            vec!["files/effect.txt", "files/verified.txt"],
-        ),
-    ] {
-        let files = array(&report[inventory], "missing workspace/Artifact inventory")?;
-        for filename in filenames {
-            require(
-                files.iter().any(|file| {
-                    file["path"]
-                        .as_str()
-                        .is_some_and(|path| path.ends_with(filename))
-                        && file["bytes"].as_u64() == Some(4)
-                        && file["sha256"] == once_hash
-                        && file["text"] == "once"
-                }),
-                "workspace/Artifact bytes or hashes are missing",
-            )?;
-        }
-    }
     let paths = array(
         &checks["packaged_paths"],
         "missing archive member inventory",
@@ -190,7 +205,8 @@ fn validate_report(report: &Value, provider: &Value, host_hash: &str) -> io::Res
                 })
             }),
         "candidate archive contains sources or unsafe paths",
-    )
+    )?;
+    Ok(requests.len())
 }
 
 fn collect_files(root: &Path, files: &mut Vec<PathBuf>) -> io::Result<()> {
@@ -253,7 +269,7 @@ pub(super) fn observed_evidence(root: &Path) -> io::Result<Value> {
 fn validate_manifest(
     manifest: &Value,
     report: &Value,
-    target: &Path,
+    binaries: &Path,
     web_dist: &Path,
 ) -> io::Result<usize> {
     require(
@@ -284,16 +300,24 @@ fn validate_manifest(
     for (path, expected) in [
         (
             "bin/anchor-runner-host",
-            digest(&target.join("release/anchor-runner-host"))?,
+            digest(&binaries.join("anchor-runner-host"))?,
         ),
         ("bin/goose", GOOSE_SHA256.into()),
         (
-            "bundle/plugins/academic-research/bin/anchor-scholarly",
-            digest(&target.join("release/anchor-scholarly"))?,
+            "bin/anchor-net-relay",
+            digest(&binaries.join("anchor-net-relay"))?,
+        ),
+        (
+            "bin/anchor-sandbox-network",
+            digest(&binaries.join("anchor-sandbox-network"))?,
+        ),
+        (
+            "plugins/academic-research/bin/anchor-scholarly",
+            digest(&binaries.join("anchor-scholarly"))?,
         ),
         (
             "bin/anchor-wecom-gateway",
-            digest(&target.join("release/anchor-wecom-gateway"))?,
+            digest(&binaries.join("anchor-wecom-gateway"))?,
         ),
     ] {
         let executable = array(
@@ -371,7 +395,7 @@ fn validate_manifest(
 
 pub(super) fn scenario_reports(
     root: &Path,
-    target: &Path,
+    binaries: &Path,
     workspace: &Path,
     web_dist: &Path,
 ) -> io::Result<Vec<Value>> {
@@ -391,10 +415,10 @@ pub(super) fn scenario_reports(
     let archive_path = parent.join("anchor-runtime.tar.gz");
     let manifest_path = parent.join("runtime-manifest.json");
     let report = read_json(path)?;
-    validate_report(
+    let local_requests = validate_report(
         &report,
         &read_json(&provider_path)?,
-        &digest(&target.join("release/anchor-runner-host"))?,
+        &digest(&binaries.join("anchor-runner-host"))?,
     )?;
     require(
         report["test_source_sha256"]
@@ -418,12 +442,12 @@ pub(super) fn scenario_reports(
             && report["checks"]["archive_sha256"] == digest(&archive_path)?,
         "candidate archive/manifest hashes are missing or mismatched",
     )?;
-    let file_count = validate_manifest(&manifest, &report, target, web_dist)?;
+    let file_count = validate_manifest(&manifest, &report, binaries, web_dist)?;
     Ok(vec![json!({
         "path":path,"sha256":digest(path)?, "provider_path":provider_path,"provider_sha256":digest(&provider_path)?,
         "archive_path":archive_path,"archive_sha256":digest(&archive_path)?,
         "manifest_path":manifest_path,"manifest_sha256":digest(&manifest_path)?,
-        "package_file_count":file_count,"status":"passed","local_model_requests":5,"real_model_requests":0,
+        "package_file_count":file_count,"status":"passed","local_model_requests":local_requests,"real_model_requests":0,
     })])
 }
 

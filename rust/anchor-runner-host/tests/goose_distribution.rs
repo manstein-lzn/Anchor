@@ -6,7 +6,6 @@ mod fixture;
 mod goose;
 
 use anchor_distribution::{PackageRequest, ToolBinary, build_package};
-use anchor_graph_host::{FilePluginCatalog, PluginCatalog};
 use flate2::read::GzDecoder;
 use goose::{Gate, Host, Provider, command, complete, digest};
 use serde_json::{Value, json};
@@ -54,15 +53,11 @@ fn official_inputs(root: &Path) -> (Option<PathBuf>, Vec<ToolBinary>) {
     let mut graph = fixture::read_json(root.join("bundle/graph.json"));
     graph["nodes"][0]["plugins"] = json!(["academic-research"]);
     fs::write(root.join("bundle/graph.json"), graph.to_string()).unwrap();
-    let binding = FilePluginCatalog::new(root.join("bundle"))
-        .resolve(&["academic-research".into()])
-        .unwrap()
-        .remove(0);
-    fs::write(root.join("bundle/manifest.json"), json!({
-        "format":1,"graph":"graph.json","plugins":[{
-            "id":binding.id,"digest":binding.digest,"resources":binding.resources,"mcp_servers":binding.mcp_servers
-        }]
-    }).to_string()).unwrap();
+    fs::write(
+        root.join("bundle/manifest.json"),
+        r#"{"format":1,"graph":"graph.json","plugins":[{"id":"academic-research"}]}"#,
+    )
+    .unwrap();
     let input_scholarly = root.join("package-input-scholarly");
     let input_gateway = root.join("package-input-gateway");
     fs::copy(scholarly, &input_scholarly).unwrap();
@@ -208,7 +203,7 @@ fn extracted_goose_runtime_resumes_without_sources_or_replaying_workspace_effect
         for (input, packaged) in [
             (
                 "package-input-scholarly",
-                "bundle/plugins/academic-research/bin/anchor-scholarly",
+                "plugins/academic-research/bin/anchor-scholarly",
             ),
             ("package-input-gateway", "bin/anchor-wecom-gateway"),
         ] {
@@ -222,6 +217,10 @@ fn extracted_goose_runtime_resumes_without_sources_or_replaying_workspace_effect
             &runtime.join("bin/goose"),
         )
         .with_extra_environment([
+            (
+                "ANCHOR_GOOSE_RELAY_BINARY",
+                runtime.join("bin/anchor-net-relay"),
+            ),
             ("ANCHOR_RUNNER_BUNDLE_ROOT", runtime.join("bundle")),
             ("ANCHOR_RUNNER_CATALOG_ROOT", runtime.clone()),
         ]);
@@ -235,10 +234,12 @@ fn extracted_goose_runtime_resumes_without_sources_or_replaying_workspace_effect
     let web_http = check_web(&server, &runtime, web.is_some());
     let run = server.trigger();
     gate.wait_entered();
+    let requests_before_stop = provider.requests().len();
+    assert_eq!(requests_before_stop, 2);
     let session = host.native_fact(&run, "worker", 1)["session_id"].clone();
     let (status, stopping) = server.request("POST", &format!("/runs/{run}/stop"), None);
     assert_eq!(status, 202, "{stopping}");
-    server.wait_status(&run, "stopped");
+    let stopped_run_http = server.wait_status(&run, "stopped");
     gate.open();
     server.kill();
     drop(server);
@@ -268,19 +269,16 @@ fn extracted_goose_runtime_resumes_without_sources_or_replaying_workspace_effect
         host.base.workspace_files(&run, "verified.txt"),
         vec![b"once".to_vec()]
     );
+    let mut artifact_files = json!({});
     for (node, filename) in [("worker", "effect.txt"), ("verify", "verified.txt")] {
         assert_eq!(record["results"][node].as_array().unwrap().len(), 1);
         assert_eq!(run_http["state"]["nodes"][node]["pass_number"], 1);
         assert_eq!(run_http["state"]["nodes"][node]["submitted"], true);
-        let (status, files) = restarted.request("GET", &format!("/runs/{run}/files/{node}"), None);
-        assert_eq!(status, 200, "{files}");
-        assert!(
-            files["files"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|file| file["path"] == filename && file["size"] == 4)
-        );
+        let (status, file) =
+            restarted.request("GET", &format!("/runs/{run}/files/{node}/{filename}"), None);
+        assert_eq!(status, 200, "{file}");
+        assert_eq!(file["text"], "once");
+        artifact_files[node] = file;
     }
     let metadata = fixture::read_json(root.join("state/run-metadata").join(format!("{run}.json")));
     assert_eq!(
@@ -302,8 +300,8 @@ fn extracted_goose_runtime_resumes_without_sources_or_replaying_workspace_effect
         .count();
     assert_eq!(writes, 1);
     assert!(history.to_string().contains("final_result"));
-    assert_eq!(provider.requests().len(), 4);
     let requests_before_restart = provider.requests().len();
+    assert_eq!(requests_before_restart - requests_before_stop, 2);
     restarted.kill();
     drop(restarted);
     fs::copy(
@@ -345,10 +343,11 @@ fn extracted_goose_runtime_resumes_without_sources_or_replaying_workspace_effect
         "source_free":true,"package_files_verified":true,"readiness_checked":true,
         "web_served":web.is_some(),"web_index_sha256":web_http["index_sha256"],"web_http":web_http,
         "official_binaries_packaged":official,"node_history_checked":true,"native_history_checked":true,
-        "artifact_exact_bytes":true,"workspace_exact_bytes":true,"run_http":run_http,
+        "artifact_exact_bytes":true,"artifact_files":artifact_files,"workspace_exact_bytes":true,
+        "run_http":run_http,"stopped_run_http":stopped_run_http,
         "session_before":session,"session_after":session_after,"session_after_completed_restart":session_after_restart,
         "workspace_write_count":writes,"completed_restart_unchanged":true,
-        "requests_before_completed_restart":requests_before_restart,"requests_after_completed_restart":provider.requests().len(),
+        "requests_before_stop":requests_before_stop,"requests_before_completed_restart":requests_before_restart,"requests_after_completed_restart":provider.requests().len(),
         "boundary":"source-free extracted binaries, four deterministic local requests and stop/resume/completed restart; no real model, business service or production cutover"
     }));
 }
