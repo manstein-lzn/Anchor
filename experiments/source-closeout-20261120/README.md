@@ -1,5 +1,8 @@
 # Integrated source closeout - 2026-11-20
 
+Follow-up: [Library and release verification](release-verification.md) closes the
+two acceptance gaps noted in this baseline record. It does not establish a rollout.
+
 Tested source: `75cdba6`, the merge of local `631ed7f` and remote `1abf7dc`,
 plus removal of the duplicate task-result resolution tool registration. The
 existing authorized delivery test saw two definitions before the deletion and
@@ -21,14 +24,14 @@ separate rerun staged the digest-verified official 1.0.100 binary and passed all
 six Feishu cases, including the CLI case. The deterministic runs used no
 production data or external model or channel requests.
 
-The existing `goose_library` ignored case still fails before model execution:
-the frozen list contains `demo` and `network`, while the assertion expects only
+On this baseline, the existing `goose_library` ignored case failed before model execution:
+the frozen list contained `demo` and `network`, while the assertion expected only
 `demo`. The same failure was observed on the earlier local and remote baselines.
 This run did not turn that assertion into a pass or run the full native suite.
 The standalone Graph with Web assets recovered from an extracted package with
 four deterministic model requests and one workspace effect. This is not a full
-format 5 platform install; the separate release candidate verifier still expects
-five requests, as documented in the [regression guide](../../docs/runtime-contract-tests.md).
+format 5 platform install; the separate release candidate verifier still expected
+five requests at this baseline.
 
 Separately, read-only production task events and gateway ledgers confirm the
 November 20 morning cycle used one producing Run and the same PDF for distinct
