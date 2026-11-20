@@ -35,6 +35,8 @@ cargo clippy -p goose-provider-types --all-targets --locked -- -D warnings
 
 唯一完成工具成功后，Goose 先保存原生请求/结果，再结束本轮，不追加模型请求、不用取消冒充完成；原生保存错误继续通过 ACP 报错，用户取消仍返回取消。Host 仍独立校验结果和取消，并等待清理成功才持久化完成。未启用时保留原执行方式；实验性 state machine 与此选项组合明确拒绝。
 
+模型仅以普通正文收尾时，沿用原生 `final_output` 的接续方式：保存草稿并追加仅模型可见的提醒，同一个 prompt 最多两次。不会重启工具执行、换 Session 或将提醒计入新的用户请求；调用仍受原有轮数及取消边界约束。Provider 错误、模型输出截断和缺失工具响应不走该分支。提醒耗尽后，原生历史保存成功才由 ACP 响应的 `_meta.anchorExternalCompletion=not_submitted` 报告；Host 另核查持久工具观察和清理结果后结算，不匹配助手正文。
+
 该补丁不改变原生会话 schema。新 invocation 可沿明确审查的单向 digest 对加载旧历史；已有 invocation 的执行器绑定仍严格保持。更新上游时应核查其外部完成工具、批次上下文与历史保存边界，避免重复维护同一机制。
 
 ## Provider 错误

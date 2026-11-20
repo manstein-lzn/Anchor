@@ -22,11 +22,10 @@
                      )
                      .await;
  
-@@ -1070,6 +1072,18 @@
-         request_id: String,
+@@ -1071,6 +1073,18 @@
          cancellation_token: Option<CancellationToken>,
          session: &Session,
-+    ) -> (String, Result<ToolCallResult, ErrorData>) {
+     ) -> (String, Result<ToolCallResult, ErrorData>) {
 +        self.dispatch_tool_call_in_batch(tool_call, request_id, cancellation_token, session, None)
 +            .await
 +    }
@@ -38,9 +37,10 @@
 +        cancellation_token: Option<CancellationToken>,
 +        session: &Session,
 +        batch: Option<super::external_completion::ToolCallBatch>,
-     ) -> (String, Result<ToolCallResult, ErrorData>) {
++    ) -> (String, Result<ToolCallResult, ErrorData>) {
          if gen_ai_telemetry::capture_message_content() {
              let input_summary = serde_json::json!({
+                 "tool": tool_call.name,
 @@ -1163,7 +1177,8 @@
              session.id.clone(),
              Some(session.working_dir.clone()),
@@ -71,7 +71,17 @@
          let context = self
              .prepare_reply_context(&session.id, conversation, session.working_dir.as_path())
              .await?;
-@@ -2750,6 +2771,7 @@
+@@ -2579,6 +2600,9 @@
+         }
+         let inner = Box::pin(async_stream::try_stream! {
+             let mut turns_taken = 0u32;
++            let mut external_completion_reminders = 0;
++            let mut external_completion_not_submitted = false;
++            let mut tool_response_missing = false;
+             let max_turns = session_config.max_turns.unwrap_or_else(|| {
+                 Config::global()
+                     .get_param::<u32>("GOOSE_MAX_TURNS")
+@@ -2750,6 +2774,7 @@
                  let mut tools_updated = false;
                  let mut did_recovery_compact_this_iteration = false;
                  let mut exit_chat = false;
@@ -79,7 +89,7 @@
                  let mut provider_errored = false;
                  let mut provider_produced_content = false;
                  let mut provider_reached_output_token_limit = false;
-@@ -2874,6 +2896,9 @@
+@@ -2874,6 +2899,9 @@
                                      continue;
                                  }
  
@@ -89,7 +99,7 @@
                                  let mut request_to_response_map = HashMap::new();
                                  let mut request_metadata: HashMap<String, Option<ProviderMetadata>> = HashMap::new();
                                  for request in &tool_requests {
-@@ -2909,7 +2934,7 @@
+@@ -2909,7 +2937,7 @@
                                          )
                                          .await?;
  
@@ -98,7 +108,7 @@
                                          .process_inspection_results_with_permission_inspector(
                                              &tool_requests,
                                              &inspection_results,
-@@ -2924,6 +2949,27 @@
+@@ -2924,6 +2952,27 @@
                                              result
                                          });
  
@@ -126,7 +136,7 @@
                                      // Track extension requests
                                      let mut enable_extension_request_ids = vec![];
                                      for request in &tool_requests {
-@@ -2939,6 +2985,7 @@
+@@ -2939,6 +2988,7 @@
                                          &mut request_to_response_map,
                                          cancel_token.clone(),
                                          &session,
@@ -134,7 +144,7 @@
                                      ).await?;
  
                                      {
-@@ -2949,6 +2996,7 @@
+@@ -2949,6 +2999,7 @@
                                              cancel_token.clone(),
                                              &session,
                                              &inspection_results,
@@ -142,10 +152,11 @@
                                          );
  
                                          while let Some(msg) = tool_approval_stream.try_next().await? {
-@@ -2986,6 +3034,12 @@
+@@ -2986,6 +3037,13 @@
                                                                  yield AgentEvent::Message(msg);
                                                              }
                                                              ToolStreamItem::Result(output) => {
++                                                                tool_response_missing |= output.is_err();
 +                                                                if let Some(request) = tool_requests.iter().find(|request| request.id == request_id) {
 +                                                                    if let Ok(call) = &request.tool_call {
 +                                                                        external_completion_succeeded |= super::external_completion::succeeds(
@@ -155,7 +166,30 @@
                                                                  if let Ok(ref call_result) = output {
                                                                      if let Some(ref meta) = call_result.meta {
                                                                          if let Some(notification_data) = meta.0.get("platform_notification") {
-@@ -3542,6 +3596,13 @@
+@@ -3366,6 +3424,22 @@
+                             // continue from last user message after recovery compact
+                         }
+                         None if self.has_pending_steers(&session_config.id).await => {}
++                        None if let Some(tool) = external_completion_tool.as_deref()
++                            && !provider_errored
++                            && !provider_reached_output_token_limit
++                            && !tool_response_missing
++                            && !last_assistant_text.trim().is_empty()
++                            && !is_token_cancelled(&cancel_token) => {
++                            if external_completion_reminders == super::external_completion::MAX_REMINDERS {
++                                external_completion_not_submitted = true;
++                            } else if turns_taken < max_turns {
++                                external_completion_reminders += 1;
++                                push_message_with_id(
++                                    &mut messages_to_add,
++                                    super::external_completion::reminder(tool),
++                                );
++                            }
++                        }
+                         None if self.goal.lock().await.is_some() && !goal_check_pending => {
+                             goal_check_pending = true;
+                             let goal = self.goal.lock().await.clone().unwrap();
+@@ -3542,6 +3616,17 @@
                  }
                  conversation.extend(messages_to_add);
  
@@ -165,17 +199,31 @@
 +                if external_completion_succeeded {
 +                    break;
 +                }
++                // Preserve the last draft before reporting an exhausted completion.
++                if external_completion_not_submitted {
++                    break;
++                }
 +
                  if exit_chat && self.has_pending_steers(&session_config.id).await {
                      exit_chat = false;
                  }
+@@ -3598,6 +3683,9 @@
+             if !stop_hook_handled_for_exit {
+                 self.emit_stop_hook(&session_config.id, &last_assistant_text, &session.working_dir.to_string_lossy()).await;
+             }
++            if external_completion_not_submitted {
++                Err(super::external_completion::NotSubmitted)?;
++            }
+         }.instrument(reply_stream_span));
+         Ok(inner)
+     }
 --- a/crates/goose/src/agents/mod.rs
 +++ b/crates/goose/src/agents/mod.rs
 @@ -4,6 +4,7 @@
  pub mod extension;
  pub mod extension_malware_check;
  pub mod extension_manager;
-+mod external_completion;
++pub(crate) mod external_completion;
  pub mod final_output_tool;
  pub(crate) mod gen_ai_telemetry;
  mod large_response_handler;
@@ -291,7 +339,7 @@
                  (
 --- /dev/null
 +++ b/crates/goose/src/agents/external_completion.rs
-@@ -0,0 +1,187 @@
+@@ -0,0 +1,205 @@
 +//! An opt-in boundary for a host-validated external completion tool.
 +//!
 +//! The host still owns validation and authorization. Goose owns the tool batch,
@@ -301,6 +349,24 @@
 +use crate::mcp_utils::ToolResult;
 +use rmcp::model::CallToolResult;
 +use serde_json::{Map, Value};
++
++pub(super) const MAX_REMINDERS: u32 = 2;
++
++/// A clean prompt exhausted the reminders without a host completion.
++/// ACP reports this as prompt metadata, never as an assistant message.
++#[derive(Debug, thiserror::Error)]
++#[error("External completion was not submitted")]
++pub(crate) struct NotSubmitted;
++
++pub(super) fn reminder(tool: &str) -> Message {
++    Message::user()
++        .with_text(format!(
++            "Your last answer is a draft, not a completion. Use the work already done and call \
++             {tool} alone now. Include the required fields and copy the latest tool receipt if \
++             required. Do not repeat completed operations."
++        ))
++        .with_visibility(false, true)
++}
 +
 +pub(super) fn tool_name() -> Option<String> {
 +    std::env::var("GOOSE_EXTERNAL_COMPLETION_TOOL")
@@ -479,3 +545,54 @@
 +        ));
 +    }
 +}
+--- a/crates/goose/src/acp/server.rs
++++ b/crates/goose/src/acp/server.rs
+@@ -244,6 +244,7 @@
+ struct AgentStreamOutcome {
+     was_cancelled: bool,
+     output_token_limit_reached: bool,
++    external_completion_not_submitted: bool,
+ }
+ 
+ /// Releases a registry entry if the task consuming an agent stream is dropped
+@@ -2127,6 +2128,7 @@
+     ) -> Result<AgentStreamOutcome, agent_client_protocol::Error> {
+         let mut was_cancelled = false;
+         let mut output_token_limit_reached = false;
++        let mut external_completion_not_submitted = false;
+         let mut tool_requests = HashMap::new();
+         let mut chain_tracker = ToolChainTracker::default();
+         let mut context_limit = None;
+@@ -2228,6 +2230,10 @@
+                     }
+                 }
+                 Ok(_) => {}
++                Err(error) if error.is::<crate::agents::external_completion::NotSubmitted>() => {
++                    external_completion_not_submitted = true;
++                    break;
++                }
+                 Err(error) => {
+                     return Err(agent_client_protocol::Error::internal_error()
+                         .data(format!("Error in agent response stream: {error}")));
+@@ -2248,6 +2254,7 @@
+         Ok(AgentStreamOutcome {
+             was_cancelled,
+             output_token_limit_reached,
++            external_completion_not_submitted,
+         })
+     }
+ 
+@@ -2363,6 +2370,13 @@
+         if let Some(usage) = build_prompt_usage(&session) {
+             response = response.usage(usage);
+         }
++        if response.stop_reason == StopReason::EndTurn && outcome.external_completion_not_submitted {
++            let meta = serde_json::Map::from_iter([(
++                "anchorExternalCompletion".to_string(),
++                serde_json::Value::from("not_submitted"),
++            )]);
++            response = response.meta(meta);
++        }
+         Ok(response)
+     }
+ 

@@ -9,6 +9,7 @@ use std::{
     time::Instant,
 };
 
+use anchor_distribution::{GOOSE_SHA256, GOOSE_VERSION};
 use serde_json::{Value, json};
 
 use crate::{TestCounts, digest, test_counts};
@@ -16,8 +17,6 @@ use crate::{TestCounts, digest, test_counts};
 #[path = "candidate/evidence.rs"]
 mod evidence;
 
-const GOOSE_VERSION: &str = "1.53.0";
-const GOOSE_SHA256: &str = "17e065a79cb0508413af714724aed51d6b76972dda9feebdda701330134fb640";
 const DISTRIBUTION_TEST: &str =
     "extracted_goose_runtime_resumes_without_sources_or_replaying_workspace_effects";
 

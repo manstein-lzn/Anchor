@@ -9,6 +9,8 @@ mod goose;
 use goose::{Host, HttpHost, Provider, Step, command};
 use serde_json::{Value, json};
 
+const REMINDER: &str = "Use the work already done and call anchor__final_result alone now";
+
 fn graph() -> Value {
     json!({"objective":"checked completion boundary", "entry":"worker",
         "agents":{"worker":{"model":"fixture-goose","instructions":"Inspect the tools then submit a checked result.","wall_time_limit_seconds":40}},
@@ -106,6 +108,158 @@ fn no_followup(rejected: bool) {
         &run,
         "accepted canonical answer",
         if rejected { 3 } else { 1 },
+    );
+}
+
+#[test]
+#[ignore = "requires pinned Goose binary"]
+fn draft_is_followed_by_completion_in_the_same_invocation() {
+    let draft = "## Inspected\nThe workspace check is ready.";
+    let provider = Provider::new(
+        "completion-after-draft",
+        vec![
+            command("printf inspected >> inspection.txt; cat inspection.txt"),
+            Step::text(draft).after("inspected"),
+            finish("submitted existing work")
+                .expect_request_contains(REMINDER)
+                .after("inspected"),
+        ],
+    );
+    let host = Host::new(&graph()).native();
+    let server = host.serve(&provider);
+    let run = server.trigger();
+    server.wait_status(&run, "completed");
+    let evidence = checked(&host, &provider, &run, "submitted existing work", 3);
+    let calls = evidence["tool_calls"].as_array().unwrap();
+    assert_eq!(
+        calls.len(),
+        2,
+        "the business operation must not be replayed"
+    );
+    assert_eq!(calls[0]["tool"], "anchor_run");
+    assert_eq!(calls[0]["result"]["ok"], true);
+    let receipt = &calls[0]["result"]["output"]["anchor_receipt"];
+    assert_eq!(receipt.as_str().unwrap().len(), 64);
+    assert_eq!(calls[1]["tool"], "final_result");
+    assert_eq!(calls[1]["arguments"]["observed_receipt"], *receipt);
+    assert_eq!(
+        host.base.workspace_files(&run, "inspection.txt"),
+        vec![b"inspected".to_vec()]
+    );
+    let history = host.native_conversation(&run, "worker", 1);
+    assert!(
+        history.as_array().unwrap().iter().any(|message| {
+            message["role"] == "assistant"
+                && message["content"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|block| block["type"] == "text" && block["text"] == draft)
+        }),
+        "the draft belongs to the same saved session: {history}"
+    );
+    assert_eq!(host.record(&run)["invocations"]["worker"], 1);
+}
+
+#[test]
+#[ignore = "requires pinned Goose binary"]
+fn repeated_drafts_fail_without_blocking_the_next_occurrence() {
+    let last_draft = "Another draft without submission.";
+    let provider = Provider::new(
+        "completion-drafts-exhausted",
+        vec![
+            Step::text("The first draft is ready."),
+            Step::text("The second draft is ready.").expect_request_contains(REMINDER),
+            Step::text(last_draft).expect_request_contains(REMINDER),
+            finish("next occurrence completed"),
+        ],
+    );
+    let host = Host::new(&graph()).native();
+    let now = chrono::Utc::now();
+    let at = |seconds| {
+        (now - chrono::Duration::seconds(seconds))
+            .format("%Y-%m-%dT%H:%M:%S")
+            .to_string()
+    };
+    let first_at = at(60);
+    let second_at = at(30);
+    // A finite recurring plan is already due twice at startup, without sleeps
+    // to cross a real schedule boundary or manipulating an active plan.
+    std::fs::write(
+        host.base.root.path().join("schedules.json"),
+        json!([{"id":"drafts","graph":"fixture","rule":{"type":"interval","seconds":30},
+            "next_at":first_at,"created_at":at(90),"enabled":true,"remaining":2}])
+        .to_string(),
+    )
+    .unwrap();
+    let server = host.serve(&provider);
+    let occurrence = |at: &str| {
+        let mut id = None;
+        fixture::wait_until(&format!("Run for scheduled occurrence {at}"), || {
+            let (status, listed) = server.request("GET", "/runs", None);
+            assert_eq!(status, 200, "{listed}");
+            let matches: Vec<_> = listed["runs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|run| {
+                    run["trigger"]["schedule"] == "drafts" && run["trigger"]["scheduled_at"] == at
+                })
+                .collect();
+            assert!(
+                matches.len() <= 1,
+                "duplicate admission for {at}: {matches:?}"
+            );
+            id = matches
+                .first()
+                .map(|row| row["run"].as_str().unwrap().to_owned());
+            id.is_some()
+        });
+        id.unwrap()
+    };
+    let failed_run = occurrence(&first_at);
+    server.wait_status(&failed_run, "failed");
+    let failed = host.record(&failed_run);
+    assert!(failed["results"].get("worker").is_none(), "{failed}");
+    assert!(failed["results"].get("done").is_none(), "{failed}");
+    let (fact, evidence, _) = host.native_record(&failed_run, "worker", 1);
+    assert!(fact["completion"].is_null(), "{fact}");
+    assert!(
+        fact["reason"]
+            .as_str()
+            .unwrap()
+            .contains("final_result not submitted"),
+        "{fact}"
+    );
+    assert_eq!(evidence["prompt_result"]["stopReason"], "end_turn");
+    assert_eq!(
+        evidence["prompt_result"]["_meta"]["anchorExternalCompletion"],
+        "not_submitted"
+    );
+    assert!(
+        host.native_conversation(&failed_run, "worker", 1)
+            .to_string()
+            .contains(last_draft)
+    );
+    let next_run = occurrence(&second_at);
+    assert_ne!(failed_run, next_run);
+    server.wait_status(&next_run, "completed");
+    assert_eq!(
+        host.record(&next_run)["results"]["done"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    provider.assert_consumed();
+    assert_eq!(provider.requests().len(), 4);
+    host.evidence(
+        &provider,
+        &failed_run,
+        json!({
+            "case_source":"tests/goose_completion.rs", "failed_without_downstream":true,
+            "two_reminders":true,"reason":fact["reason"],"next_occurrence":host.record(&next_run)
+        }),
     );
 }
 

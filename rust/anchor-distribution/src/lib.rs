@@ -37,7 +37,7 @@ use std::{
 };
 
 pub const GOOSE_VERSION: &str = "1.53.0";
-pub const GOOSE_SHA256: &str = "17e065a79cb0508413af714724aed51d6b76972dda9feebdda701330134fb640";
+pub const GOOSE_SHA256: &str = "4f9baa8a42be4d05bb0056f8e7e6e0a4daa8a6fc1aeb38a578a3310461abaee3";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolBinary {

@@ -6,6 +6,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use anchor_distribution::{GOOSE_SHA256, GOOSE_VERSION};
 use rustix::fs::{Access, AtFlags, FlockOperation, Mode, OFlags};
 use serde_json::{Value, json};
 
@@ -13,9 +14,6 @@ use serde_json::{Value, json};
 mod elf;
 #[path = "preflight/runtime.rs"]
 mod runtime;
-
-const GOOSE_VERSION: &str = "1.53.0";
-const GOOSE_SHA256: &str = "17e065a79cb0508413af714724aed51d6b76972dda9feebdda701330134fb640";
 
 pub fn run() -> Result<Value, String> {
     let mut environment = BTreeMap::new();
