@@ -1,3 +1,4 @@
+pub use anchor_distribution::GOOSE_SHA256;
 use anchor_runtime::artifact::store::invocation_stem;
 use axum::{
     Json, Router,
@@ -33,7 +34,6 @@ mod effects;
 mod responses;
 
 pub const MODEL: &str = "fixture-goose";
-pub const GOOSE_SHA256: &str = "17e065a79cb0508413af714724aed51d6b76972dda9feebdda701330134fb640";
 pub const SUMMARY_REQUEST: &str =
     "Please summarize the conversation history provided in the system prompt.";
 

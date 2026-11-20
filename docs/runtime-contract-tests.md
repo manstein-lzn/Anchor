@@ -39,8 +39,7 @@ cargo +stable run --manifest-path rust/Cargo.toml -p anchor-devtools --locked --
 
 需要固定依赖支持的 stable Rust、Linux、Git、Bubblewrap、slirp4netns 和可用的
 user/mount/network namespace，包括私有 PID namespace 的新 `/proc` 挂载。
-入口在测试前校验 Goose 可执行权限和 SHA256
-`17e065a79cb0508413af714724aed51d6b76972dda9feebdda701330134fb640`，
+入口在测试前校验 Goose 可执行权限和[当前发行固定摘要 `GOOSE_SHA256`](../rust/anchor-distribution/src/lib.rs)，
 不下载 binary、不加载 `.env`。缺 binary、digest 不符、构建失败、必要测试
 未执行或证据缺失均不能算通过。
 
@@ -116,7 +115,7 @@ helper build 即使没有源码变化也可能切换特性集合；测试命令�
 | 套件 | 核查边界 |
 | --- | --- |
 | `goose_acp` | 实际 Agent loop、结构化完成与回执、工具权限、取消、未知效果核查后继续、角色系统提示与原生历史隔离及保留的 spike 反例 |
-| `goose_completion` | 成功提交后直接结束、原生工具记录完整、Chat/Responses 同批任意回执、旧回执拒绝与纠正、混批/重复完成拒绝 |
+| `goose_completion` | 草稿后同 Session 补交、耗尽提醒不阻塞同计划的下一时点、成功提交后直接结束、原生工具记录完整、Chat/Responses 同批任意回执、旧回执拒绝与纠正、混批/重复完成拒绝 |
 | `goose_pilot` | 原有授权工具、同原生 Session 续聊/重启、幂等、SSE 重放、变更后的现场核查与取消 |
 | `goose_provider_errors` | 结构化 Provider 错误、认证/额度失败、摘要失败、原始信息不外显、失败请求幂等和同 Session 重启续聊 |
 | `goose_model_settings` | 设置变更后的下一轮/节点选择、当前执行冻结、同原生历史续聊、四种显式模型引用及无自动降级 |

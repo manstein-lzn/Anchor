@@ -317,8 +317,8 @@ optional `scholarly`, `docmost_tools`, `wecom_tools`, `wecom_gateway`, and
 `PackageReport { output, sha256, inventory }` and the inventory are serializable.
 
 Goose is fixed to the Anchor-built lean ACP binary from pinned upstream v1.53.0
-sources (`../scripts/build-goose-acp.sh`) SHA256
-`17e065a79cb0508413af714724aed51d6b76972dda9feebdda701330134fb640`.
+sources ([build script](../../scripts/build-goose-acp.sh)), with SHA256 fixed by
+[`GOOSE_SHA256`](src/lib.rs).
 The builder does not build Goose itself; supply the binary produced by that
 script. There is no environment or CLI option to bypass this check. Host and tools must
 be executable ELF files with an executable entry point and matching platform.

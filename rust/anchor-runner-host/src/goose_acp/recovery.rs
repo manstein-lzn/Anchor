@@ -77,7 +77,7 @@ fn recovery_fact(facts: &Path, key: &InvocationKey) -> Result<Option<Fact>, Grap
     Ok(fact)
 }
 
-fn pending_attempt(fact: &Fact) -> Option<RecoveryAttempt> {
+pub(super) fn pending_attempt(fact: &Fact) -> Option<RecoveryAttempt> {
     if fact
         .tool_observation
         .as_ref()

@@ -651,23 +651,19 @@ fn rejected_media(scenario: &str, mode: &str) {
             Step::tool(EXPOSED_TOOL, json!({"mode":mode})),
             Step::text("media rejected; no successful completion is claimed")
                 .after("anchor_receipt"),
+            Step::text("no valid media to deliver").after("anchor_receipt"),
+            Step::text("no valid media to deliver").after("anchor_receipt"),
         ],
         VISION_MODEL,
     );
     let host = Host::new(&graph()).native();
     let binding = install_plugin(&host, &media);
     let response = host.run(&provider);
-    assert_eq!(response["projection"]["phase"], "waiting", "{response}");
-    assert_eq!(response["projection"]["waiting_for"], "human", "{response}");
-    assert!(
-        response["projection"]["reason"]
-            .as_str()
-            .is_some_and(|reason| !reason.is_empty()),
-        "{response}"
-    );
+    assert_eq!(response["projection"]["phase"], "settled", "{response}");
+    assert_eq!(response["projection"]["outcome"], "failed", "{response}");
     provider.assert_consumed();
     let requests = provider.requests();
-    assert_eq!(requests.len(), 2);
+    assert_eq!(requests.len(), 4);
     for request in &requests {
         assert_eq!(request["model"], VISION_MODEL);
         assert!(image_urls(&request["messages"]).is_empty());

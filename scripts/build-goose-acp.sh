@@ -30,7 +30,7 @@
 #   patch        : patches/goose-1.53.0-responses-reasoning.patch
 #                  Retains Responses reasoning in Goose native history and requests.
 #   patch        : patches/goose-1.53.0-external-completion.patch
-#                  Ends an opted-in host completion after native tool history is saved.
+#                  Requires opted-in host completion, with bounded draft reminders.
 #   patch        : patches/goose-1.53.0-provider-errors.patch
 #                  Persists structured provider failures and returns ACP prompt errors.
 #

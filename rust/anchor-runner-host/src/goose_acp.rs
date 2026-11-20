@@ -882,11 +882,13 @@ impl GooseNodePort {
                     _ => None,
                 };
                 fact.reason = Some(format!(
-                    "{reason}; native Goose history retained; {}",
+                    "{reason}; native Goose history retained{}",
                     if self.fixture {
-                        "automatic replay is refused"
+                        "; automatic replay is refused"
+                    } else if matches!(failure, InvocationFailure::Contract(_)) {
+                        ""
                     } else {
-                        "resume must inspect existing facts before continuing"
+                        "; resume must inspect existing facts before continuing"
                     }
                 ));
                 store_fact(&fact_path, &fact)?;
@@ -1088,21 +1090,25 @@ impl GooseNodePort {
                 "Goose attempted tools after final_result".into(),
             ));
         }
-        let output = bridge
-            .state
-            .completion
-            .lock()
-            .await
-            .clone()
-            .ok_or_else(|| {
-                // The agent ended its turn without the completion tool. That is
-                // recoverable and deliberately stays resumable: the retained
-                // native session can be asked to inspect the scene and finish
-                // (the media fail-closed scenarios depend on this). Only
-                // protocol-level violations that no resume can repair are
-                // classified as `Contract`.
-                InvocationFailure::Uncertain("Goose ended without a validated final_result".into())
-            })?;
+        let Some(output) = bridge.state.completion.lock().await.clone() else {
+            // Only the fixed executor can attest that the native loop exhausted
+            // its reminders. An ordinary ACP end_turn or assistant text cannot.
+            if !self.fixture && response["_meta"]["anchorExternalCompletion"] == "not_submitted" {
+                // Tools write observations while the prompt is active: read
+                // the saved fact, not the pre-prompt copy held by the caller.
+                let saved = read_fact(fact_path)
+                    .map_err(|error| error.to_string())?
+                    .ok_or("missing durable Goose invocation fact")?;
+                if recovery::pending_attempt(&saved).is_none() {
+                    return Err(InvocationFailure::Contract(
+                        "final_result not submitted successfully after two reminders".into(),
+                    ));
+                }
+            }
+            return Err(InvocationFailure::Uncertain(
+                "Goose ended without a validated final_result".into(),
+            ));
+        };
         Ok(NodeCompletion {
             submission: output["summary"].as_str().unwrap().to_owned(),
             route: output["route"].as_str().map(str::to_owned),

@@ -5,8 +5,8 @@
 // optional provider metadata to Thinking blocks and groups tool calls only in
 // Responses request projection. The completion patch changes executor boundaries
 // and transient tool context without changing the native history schema. No
-// history is rewritten. Structured provider errors reuse existing Error blocks
-// and do not change native history schema.
+// history is rewritten. Provider errors reuse existing Error blocks and
+// completion reminders reuse ordinary model-visible messages.
 pub(super) const BEFORE_REASONING_FIX: &str =
     "71e76c412597b2ecd96ed20d0706e7666f31c018216e7cb5d65c5ca5c44824a7";
 pub(super) const WITH_REASONING_FIX: &str =
@@ -21,6 +21,9 @@ pub(super) const WITH_COMPLETION_FIX: &str =
 pub(super) const WITH_PROVIDER_ERROR_FIX: &str =
     "17e065a79cb0508413af714724aed51d6b76972dda9feebdda701330134fb640";
 
+pub(super) const WITH_COMPLETION_REMINDERS: &str =
+    "4f9baa8a42be4d05bb0056f8e7e6e0a4daa8a6fc1aeb38a578a3310461abaee3";
+
 pub(super) fn can_load_history(previous: &str, current: &str) -> bool {
     previous == current
         || (previous == BEFORE_REASONING_FIX && current == WITH_REASONING_FIX)
@@ -34,4 +37,12 @@ pub(super) fn can_load_history(previous: &str, current: &str) -> bool {
             previous,
             BEFORE_REASONING_FIX | WITH_REASONING_FIX | WITH_MULTICALL_FIX | WITH_COMPLETION_FIX
         ) && current == WITH_PROVIDER_ERROR_FIX)
+        || (matches!(
+            previous,
+            BEFORE_REASONING_FIX
+                | WITH_REASONING_FIX
+                | WITH_MULTICALL_FIX
+                | WITH_COMPLETION_FIX
+                | WITH_PROVIDER_ERROR_FIX
+        ) && current == WITH_COMPLETION_REMINDERS)
 }

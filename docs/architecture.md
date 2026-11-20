@@ -205,7 +205,7 @@ Library 审查、候选准备与导入共用代码暂存规则：选中 root 或
 
 复用 Goose 已有的 loop、Provider、原生会话与 compaction，而不是维护第二套 Agent 框架或永久多后端选择器。ACP 是执行交互边界，MCP 是授权工具边界，只经固定版本的公开接口接入；Goose session/recipe 不替代 Anchor 的 Graph、Run、Artifact、Session/Turn 或 Library 事实。
 
-Goose 固定为 v1.53.0；Anchor 在上游源码应用[已审查的本地兼容补丁](../scripts/patches/README.md)，再用 lean ACP-only 入口构建静态 x86_64 musl 二进制（recipe 见 [构建脚本](../scripts/build-goose-acp.sh)）。现有固定发行产物的 SHA256 为 `17e065a79cb0508413af714724aed51d6b76972dda9feebdda701330134fb640`；源码启动使用本机编译产物，由启动脚本自动提供实际摘要。它与官方完整 CLI 共用 `goose::acp::server::run`。补丁在 Goose 原生 Thinking 的可选元数据中保存完整 reasoning item，并在后续 Responses 请求按原序单次回传，包括 opaque/encrypted 字段；同时忽略空 text delta 保活，非空畸形帧仍报错。Anchor Bridge 和产品事实不复制或重写 reasoning，旧历史已丢失的数据也不重建。
+Goose 固定为 v1.53.0；Anchor 在上游源码应用[已审查的本地兼容补丁](../scripts/patches/README.md)，再用 lean ACP-only 入口构建静态 x86_64 musl 二进制（recipe 见 [构建脚本](../scripts/build-goose-acp.sh)）。候选与发行校验共用 [`GOOSE_SHA256`](../rust/anchor-distribution/src/lib.rs)；源码启动使用本机编译产物，由启动脚本自动提供实际摘要。它与官方完整 CLI 共用 `goose::acp::server::run`。补丁在 Goose 原生 Thinking 的可选元数据中保存完整 reasoning item，并在后续 Responses 请求按原序单次回传，包括 opaque/encrypted 字段；同时忽略空 text delta 保活，非空畸形帧仍报错。Anchor Bridge 和产品事实不复制或重写 reasoning，旧历史已丢失的数据也不重建。
 
 AgentNode 与 Pilot 共用 ACP/MCP 接入。当前执行及同 invocation 恢复严格绑定二进制、模型/endpoint 和原生 Session，不静默换模型或创建替代历史。新 invocation 可选择最新模型；跨 Goose 二进制版本的 Graph 原生历史接续，仅允许[已审查的旧固定摘要到当前摘要](../rust/anchor-runner-host/src/goose_acp/conversation/revision.rs)单向升级，核对前驱与 scope 事实后仍加载同一 Session，不授权逆向回滚或未审查二进制。Pilot 的新 Turn 通过公开 `session/load` 接续保留的 Session。跨不同 Provider、模型或账号的 opaque reasoning 兼容尚未验收。固定 Goose 将请求、网络、拒答及终止的压缩错误保存为原生结构化 Error，并通过 ACP 错误结束；成功的压缩恢复继续原路径。Host 仅依据经协议校验的错误代码与原因区分模型请求失败和运行中断，Pilot 分别结算为 `failed` 与 `interrupted`，用户取消仍为 `stopped`；原始服务正文不进入 Web 错误信息。普通助手正文不参与分类，Turn `completed` 仍不替代业务成功验收。实际 Host/Goose 错误场景及真实 Provider 验收边界见验证记录（本机原件，未入库：`.local/closeout-20261018/README.md`）。
 
@@ -216,6 +216,8 @@ AgentNode 的系统角色来自 Graph 的 `instructions`，Pilot 使用自己的
 Pilot 与 AgentNode 共用从当前授权和 Library 派生的 Plugin/工具目录，通过有界摘要和固定发现入口按需读取。完整分页、读取、调用和兼容开关见 [Plugin 披露契约](plugins.md#发现与读取)。目录是可重建投影，Goose 原生系统提示和 compaction 承载上下文；MCP 仍按准备流程连接，按需连接尚未实施。
 
 AgentNode 通过授权完成工具提交 `summary` 和可选 `route`；普通回答不能完成节点。Goose 为同一次模型响应的全部工具生成可信批次身份，Host 接受最近授权非完成批次中任一实际返回的回执，不依赖工具完成顺序；发现与只读工具也产生回执。完成工具必须独立调用，旧批次、其他 invocation 与猜测回执均不接受。恢复后需重新核查现场，不能拿旧回执直接完成；诊断要求复制实际返回值，可通过授权只读工具核查，不应重复业务操作。
+
+ACP `end_turn` 只说明 Goose 本轮停止，不推进 Graph。AgentNode 若正常输出正文却未提交，Goose 保存为草稿并在同一原生 Session 和 invocation 内最多提醒两次，要求复用已完成工作和现有回执补交 `final_result`。提醒耗尽且没有待核查工具观察时，Host 按 ACP 的结构化标记将本次 Run 结算为失败，保留现场、不执行下游；同一计划的下一时点仍可接纳。Provider、传输、截断、取消及待核查效果沿原路径处理，不从助手正文推断成功或失败。
 
 完成校验通过后冻结候选：相同提交幂等，冲突提交和后续业务调用被拒绝，不撤销候选。仅 AgentNode 启用固定 Goose 的外部完成工具边界：成功后先保存完整原生请求/结果，再结束本轮，不再请求模型。Host 仍须取得正常结束、完成清理并核验取消，之后才保存完成事实并交给 Runner 提交产物；内存候选不等于持久完成。用户取消、断连或原生历史保存失败不转成成功。该边界由 [固定补丁](../scripts/patches/README.md) 实现，Pilot 保持原生文本结束行为。工具效果发生但结果缺失时保存观察，由 Agent 在原生会话中核查 workspace、Artifact 和业务状态；工具不会自动重放，外部副作用不承诺 exactly-once。
 

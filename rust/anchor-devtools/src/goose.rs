@@ -1,7 +1,6 @@
 use super::*;
+use anchor_distribution::{GOOSE_SHA256, GOOSE_VERSION};
 
-const GOOSE_VERSION: &str = "1.53.0";
-const GOOSE_SHA256: &str = "17e065a79cb0508413af714724aed51d6b76972dda9feebdda701330134fb640";
 const SUITES: &[&str] = &[
     "goose_acp",
     "goose_completion",
